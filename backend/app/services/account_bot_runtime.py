@@ -2084,6 +2084,107 @@ async def _save_interaction_session(
         log.debug("save interaction session failed aid=%s rule=%s", incoming.account_id, rule.get("id"), exc_info=True)
 
 
+def _interaction_action_participant_ids(action: dict[str, Any]) -> set[int]:
+    ids: set[int] = set()
+    for key in ("participant_user_ids", "paid_user_ids", "player_user_ids"):
+        raw = action.get(key)
+        if not isinstance(raw, list):
+            continue
+        for item in raw:
+            user_id = _int_or_none(item)
+            if user_id is not None:
+                ids.add(user_id)
+    return ids
+
+
+async def _apply_interaction_start_session_action(
+    incoming: Incoming,
+    rule: dict[str, Any],
+    action: dict[str, Any],
+) -> None:
+    module_key = str(rule.get("module_key") or "").strip()
+    entry_key = str(action.get("entry_key") or rule.get("module_action") or "").strip()
+    target_chat_id = _int_or_none(action.get("chat_id")) or incoming.chat_id
+    if not module_key or not entry_key or target_chat_id is None:
+        await record_action(
+            action.get("context"),
+            action,
+            TRACE_STATUS_FAILED,
+            error_code="entry_key_missing" if not entry_key else "scope_not_matched",
+            error="interaction start_session action missing module, entry_key or chat_id",
+        )
+        return
+
+    redis = get_redis()
+    started_by_user_id = _int_or_none(action.get("started_by_user_id"))
+    session_key = _interaction_session_key(incoming.account_id, rule, target_chat_id, started_by_user_id)
+    existing: dict[str, Any] = {}
+    try:
+        raw = await redis.get(session_key)
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8", errors="ignore")
+        if raw:
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict):
+                existing = parsed
+    except Exception:  # noqa: BLE001
+        existing = {}
+
+    if started_by_user_id is None:
+        started_by_user_id = _int_or_none(existing.get("started_by_user_id")) or incoming.user_id
+    participant_ids = _interaction_session_list_participant_ids(existing)
+    participant_ids.update(_interaction_action_participant_ids(action))
+    if started_by_user_id is not None and action.get("include_started_by", False):
+        participant_ids.add(int(started_by_user_id))
+
+    payload = {
+        "account_id": incoming.account_id,
+        "chat_id": target_chat_id,
+        "rule_id": str(rule.get("id") or "legacy"),
+        "rule_name": str(rule.get("name") or ""),
+        "module_key": module_key,
+        "entry_key": entry_key,
+        "started_by_user_id": started_by_user_id,
+        "started_by_message_id": _int_or_none(action.get("started_by_message_id")) or existing.get("started_by_message_id") or incoming.message_id,
+        "source_user_id": incoming.user_id,
+        "event_type": str(action.get("event_type") or existing.get("event_type") or "message"),
+        "created_at": existing.get("created_at") or time.time(),
+        "updated_at": time.time(),
+    }
+    if _interaction_participant_policy(rule) == "paid_pool":
+        payload["paid_user_ids"] = sorted(participant_ids)
+        payload["participant_user_ids"] = sorted(participant_ids)
+    ttl = _int_or_none(action.get("ttl_seconds")) or _interaction_session_ttl(rule)
+    try:
+        await redis.set(session_key, json.dumps(payload, ensure_ascii=False), ex=ttl)
+        await record_action(
+            action.get("context"),
+            action,
+            TRACE_STATUS_OK,
+            actual_send_via="interaction_session",
+            result={"chat_id": target_chat_id, "participant_user_ids": sorted(participant_ids)},
+        )
+    except Exception as exc:  # noqa: BLE001
+        await record_action(
+            action.get("context"),
+            action,
+            TRACE_STATUS_FAILED,
+            error_code="redis_error",
+            error=str(exc),
+        )
+        log.debug("apply interaction start_session failed aid=%s rule=%s", incoming.account_id, rule.get("id"), exc_info=True)
+
+
+async def _apply_interaction_start_session_actions(
+    incoming: Incoming,
+    rule: dict[str, Any],
+    actions: list[dict[str, Any]],
+) -> None:
+    for action in actions:
+        if isinstance(action, dict) and str(action.get("type") or "").strip() == "start_session":
+            await _apply_interaction_start_session_action(incoming, rule, action)
+
+
 async def _load_interaction_session(incoming: Incoming, rule: dict[str, Any]) -> dict[str, Any] | None:
     keys = [_interaction_session_key(incoming.account_id, rule, incoming.chat_id, incoming.user_id)]
     if str(rule.get("module_session_scope") or rule.get("concurrency") or "chat") == "user":
@@ -2293,6 +2394,17 @@ async def _load_account_holder_label(account_id: int) -> str:
     except Exception:  # noqa: BLE001
         log.debug("load account holder label failed aid=%s", account_id, exc_info=True)
         return f"账号 #{int(account_id)}"
+
+
+async def _load_account_owner_user_ids(account_id: int) -> list[int]:
+    try:
+        async with AsyncSessionLocal() as db:
+            account = await db.get(Account, account_id)
+        tg_user_id = _int_or_none(getattr(account, "tg_user_id", None))
+        return [tg_user_id] if tg_user_id is not None else []
+    except Exception:  # noqa: BLE001
+        log.debug("load account owner user id failed aid=%s", account_id, exc_info=True)
+        return []
 
 
 async def _resolve_payout_mode(account_id: int, chat_id: int | None) -> str:
@@ -3623,6 +3735,7 @@ async def _try_handle_interaction_module_message(db: Any, incoming: Incoming) ->
             raw_actions=raw_actions,
             guarded_actions=actions,
         )
+        await _apply_interaction_start_session_actions(incoming, rule, actions)
         await _apply_interaction_actions(
             incoming,
             actions,
@@ -4134,8 +4247,12 @@ async def _interaction_module_payload_async(
 ) -> dict[str, Any]:
     data = _interaction_module_payload(incoming, rule, parsed, event_type=event_type)
     payout_account_label = await _load_account_holder_label(incoming.account_id)
+    owner_user_ids = await _load_account_owner_user_ids(incoming.account_id)
     payout_mode = await _resolve_payout_mode(incoming.account_id, incoming.chat_id)
     data["payout_account_label"] = payout_account_label
+    data["owner_user_ids"] = owner_user_ids
+    data["admin_user_ids"] = list(owner_user_ids)
+    data["userbot_user_id"] = owner_user_ids[0] if owner_user_ids else None
     data["payout_mode"] = payout_mode
     settlement_prize = _int_or_none(data.get("prize")) or 0
     data["settlement"] = _interaction_settlement_envelope(
@@ -4906,6 +5023,7 @@ async def _run_interaction_module(
         guarded_actions=actions,
     )
     keep_session = not _interaction_actions_request_no_session(actions)
+    await _apply_interaction_start_session_actions(incoming, rule, actions)
     await _apply_interaction_actions(
         incoming,
         actions,

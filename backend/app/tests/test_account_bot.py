@@ -1977,7 +1977,7 @@ async def test_interaction_payload_sets_auto_payout_mode_for_math10_module(monke
 
         async def get(self, model, key):  # noqa: ANN001
             if model is account_bot_runtime.Account and key == 1:
-                return SimpleNamespace(tg_username="owner")
+                return SimpleNamespace(tg_username="owner", tg_user_id=999)
             return None
 
     incoming = account_bot_runtime.Incoming(
@@ -2017,10 +2017,56 @@ async def test_interaction_payload_sets_auto_payout_mode_for_math10_module(monke
     )
 
     assert payload["payout_account_label"] == "@owner"
+    assert payload["owner_user_ids"] == [999]
+    assert payload["admin_user_ids"] == [999]
+    assert payload["userbot_user_id"] == 999
     assert payload["payout_mode"] == "auto"
     assert payload["settlement"]["mode"] == "auto"
     assert payload["settlement"]["amount"] == 0
     assert payload["settlement"]["payout_account_label"] == "@owner"
+
+
+@pytest.mark.asyncio
+async def test_interaction_start_session_action_merges_paid_participants(monkeypatch) -> None:
+    redis = _MemoryRedis()
+    incoming = account_bot_runtime.Incoming(
+        account_id=1,
+        token="bbot-token",
+        update_id=10,
+        user_id=999,
+        chat_id=-100123,
+        message_id=801,
+        text="加入",
+    )
+    rule = {
+        "id": "ten-half",
+        "action": "module",
+        "module_key": "ten_half",
+        "module_action": "start_ten_half",
+        "participant_policy": "paid_pool",
+    }
+    action = {
+        "type": "start_session",
+        "chat_id": -100123,
+        "entry_key": "start_ten_half",
+        "event_type": "message",
+        "started_by_user_id": 999,
+        "paid_user_ids": [111, 999],
+        "participant_user_ids": [111, 999],
+    }
+    record_action = AsyncMock()
+    monkeypatch.setattr(account_bot_runtime, "get_redis", lambda: redis)
+    monkeypatch.setattr(account_bot_runtime, "record_action", record_action)
+    monkeypatch.setattr(account_bot_service, "declared_module_entry_manifest", lambda *_args, **_kwargs: None)
+
+    await account_bot_runtime._apply_interaction_start_session_action(incoming, rule, action)
+
+    key = account_bot_runtime._interaction_session_key(1, rule, -100123, 999)
+    saved = json.loads(redis.data[key])
+    assert saved["started_by_user_id"] == 999
+    assert saved["paid_user_ids"] == [111, 999]
+    assert saved["participant_user_ids"] == [111, 999]
+    record_action.assert_awaited_once()
 
 
 def test_interaction_entry_manifest_normalizes_command_fallback() -> None:

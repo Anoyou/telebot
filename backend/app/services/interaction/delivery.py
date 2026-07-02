@@ -52,6 +52,8 @@ class InteractionDeliveryExecutor:
                 action["context"] = dict(context)
             action_type = str(action.get("type") or "").strip()
             await self._record_settlement(action)
+            if action_type == "start_session":
+                continue
             if action_type in INTERACTION_SESSION_CONTROL_ACTIONS or action_type == "result":
                 await record_action(
                     action.get("context"),
