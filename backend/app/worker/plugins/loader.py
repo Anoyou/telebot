@@ -86,7 +86,10 @@ from ...services.interaction.delivery import action_save_message_id_key, deliver
 from ...services.rate_limit_service import get_effective
 from ...settings import settings as app_settings
 from ...util.sudo_permissions import sudo_chat_allowed
-from ..command import register_plugin_command, unregister_plugin_command
+from ..command import (
+    register_plugin_command,
+    unregister_all_plugin_commands,
+)
 from ..ipc import RUNTIME_LOG_STREAM, RuntimeLogPayload
 from ..ratelimit.engine import RateLimitEngine
 from ..ratelimit.humanize import HumanizeOpts
@@ -1619,25 +1622,78 @@ def _installed_module_name(plugin_key: str) -> str:
     return f"_telepilot_installed_plugin_{plugin_key}"
 
 
+def _module_file_path(mod: Any) -> Path | None:
+    """Best-effort origin for a loaded module; returns None for namespace/builtins."""
+
+    raw = getattr(mod, "__file__", None)
+    spec = getattr(mod, "__spec__", None)
+    if not raw and spec is not None:
+        raw = getattr(spec, "origin", None)
+    if not raw or raw in {"built-in", "frozen"}:
+        return None
+    try:
+        return Path(str(raw)).resolve()
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _is_path_inside(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+def _installed_plugin_module_names(plugin_key: str) -> set[str]:
+    """Find all currently loaded modules that belong to one installed plugin.
+
+    The prefix check covers normal relative imports.  The file-origin check is a
+    safety net for lazy imports and legacy plugin code that imports helper files
+    as top-level modules after putting the plugin directory on sys.path.
+    """
+
+    import sys as _sys
+
+    mod_name = _installed_module_name(plugin_key)
+    names: set[str] = {
+        name
+        for name in _sys.modules
+        if name == mod_name or name.startswith(f"{mod_name}.")
+    }
+    try:
+        root = _installed_dir().resolve()
+        path = (root / plugin_key).resolve()
+        path.relative_to(root)
+    except Exception:  # noqa: BLE001
+        return names
+    if not path.is_dir():
+        return names
+    for name, mod in list(_sys.modules.items()):
+        if name in names or mod is None:
+            continue
+        origin = _module_file_path(mod)
+        if origin is not None and _is_path_inside(origin, path):
+            names.add(name)
+    return names
+
+
 def _clear_installed_module_cache(plugin_key: str) -> None:
     """清掉第三方插件包、子模块和注册表旧类，保证热加载读到磁盘最新代码。"""
     import importlib as _importlib
     import sys as _sys
 
     mod_name = _installed_module_name(plugin_key)
+    names = _installed_plugin_module_names(plugin_key)
     if _INSTALLED_MODULE_NAMES:
-        tracked_names = [
+        names.update(
             name
             for name in _INSTALLED_MODULE_NAMES
             if name == mod_name or name.startswith(f"{mod_name}.")
-        ]
-        for name in tracked_names:
-            _sys.modules.pop(name, None)
-            _INSTALLED_MODULE_NAMES.discard(name)
-    else:
-        for name in list(_sys.modules):
-            if name == mod_name or name.startswith(f"{mod_name}."):
-                _sys.modules.pop(name, None)
+        )
+    for name in names:
+        _sys.modules.pop(name, None)
+        _INSTALLED_MODULE_NAMES.discard(name)
     _importlib.invalidate_caches()
     try:
         from .base import _REGISTRY
@@ -1807,11 +1863,7 @@ def _load_dir(path: Path, source: str) -> dict[str, type[Plugin]]:
             _sys.modules[mod_name] = mod
             try:
                 spec.loader.exec_module(mod)
-                _INSTALLED_MODULE_NAMES.update(
-                    name
-                    for name in _sys.modules
-                    if name == mod_name or name.startswith(f"{mod_name}.")
-                )
+                _INSTALLED_MODULE_NAMES.update(_installed_plugin_module_names(path.name))
             except Exception:
                 _sys.modules.pop(mod_name, None)
                 raise
@@ -3087,10 +3139,7 @@ async def reload_account_config(account_id: int, payload: dict | None = None) ->
 
                 # ── 安全：先注销该插件的所有命令 ──
                 if inst is not None:
-                    if cls is not None:
-                        cmds = getattr(inst, "commands", None) or cls.commands or {}
-                        for cname in cmds.keys():
-                            unregister_plugin_command(cname, owner_plugin_key=fkey)
+                    unregister_all_plugin_commands(owner_plugin_key=fkey)
                     if state.scheduler is not None:
                         state.scheduler.unregister_owner(fkey)
 
@@ -3143,9 +3192,7 @@ async def reload_account_config(account_id: int, payload: dict | None = None) ->
                 old_config.get(k) != new_config.get(k) for k in command_config_keys
             )
             if command_config_changed:
-                cmds = getattr(inst, "commands", None) or cls.commands or {}
-                for cname in cmds.keys():
-                    unregister_plugin_command(cname, owner_plugin_key=fkey)
+                unregister_all_plugin_commands(owner_plugin_key=fkey)
                 if state.scheduler is not None:
                     state.scheduler.unregister_owner(fkey)
                 try:
@@ -3209,12 +3256,7 @@ async def reload_plugin(account_id: int, plugin_key: str | None) -> None:
 
     # 1) 先注销旧插件命令（如果有）
     if plugin_key in state.instances:
-        inst = state.instances[plugin_key]
-        cls = get_plugin(plugin_key)
-        if cls is not None:
-            cmds = getattr(inst, "commands", None) or cls.commands or {}
-            for cname in cmds.keys():
-                unregister_plugin_command(cname, owner_plugin_key=plugin_key)
+        unregister_all_plugin_commands(owner_plugin_key=plugin_key)
         if state.scheduler is not None:
             state.scheduler.unregister_owner(plugin_key)
 

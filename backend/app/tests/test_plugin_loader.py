@@ -365,6 +365,72 @@ def test_load_dir_tracks_installed_child_modules(tmp_path, monkeypatch) -> None:
         _REGISTRY.pop(plugin_key, None)
 
 
+def test_clear_installed_module_cache_prunes_lazy_and_origin_modules(tmp_path, monkeypatch) -> None:
+    """运行期懒加载的子模块和插件目录来源模块也不能残留旧代码。"""
+    import importlib
+    import sys
+    from types import ModuleType
+
+    from app.worker.plugins.base import _REGISTRY
+
+    plugin_key = "_test_installed_lazy_tracking"
+    plugin_dir = tmp_path / plugin_key
+    plugin_dir.mkdir()
+    (plugin_dir / "__init__.py").write_text(
+        "from .plugin import PLUGIN_CLASS, MANIFEST\n",
+        encoding="utf-8",
+    )
+    (plugin_dir / "plugin.py").write_text(
+        "\n".join(
+            [
+                "from app.worker.plugins.base import Plugin, register",
+                "from app.worker.plugins.manifest import Manifest",
+                "",
+                "@register",
+                "class LazyTrackingPlugin(Plugin):",
+                f"    key = {plugin_key!r}",
+                "    display_name = 'lazy tracking'",
+                "",
+                "PLUGIN_CLASS = LazyTrackingPlugin",
+                f"MANIFEST = Manifest(key={plugin_key!r}, display_name='lazy tracking')",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (plugin_dir / "late.py").write_text("VALUE = 'new runtime module'\n", encoding="utf-8")
+    (plugin_dir / "legacy_helper.py").write_text("VALUE = 'legacy helper'\n", encoding="utf-8")
+
+    monkeypatch.setattr(loader_mod, "_INSTALLED_MODULE_NAMES", set())
+    monkeypatch.setattr(loader_mod, "_installed_dir", lambda: tmp_path)
+    mod_name = loader_mod._installed_module_name(plugin_key)
+    late_mod_name = f"{mod_name}.late"
+    legacy_mod_name = "_test_installed_lazy_legacy_helper"
+
+    try:
+        loaded = _load_dir(plugin_dir, source="installed")
+        assert plugin_key in loaded
+
+        importlib.invalidate_caches()
+        importlib.import_module(late_mod_name)
+        assert late_mod_name in sys.modules
+        assert late_mod_name not in loader_mod._INSTALLED_MODULE_NAMES
+
+        legacy_mod = ModuleType(legacy_mod_name)
+        legacy_mod.__file__ = str(plugin_dir / "legacy_helper.py")
+        sys.modules[legacy_mod_name] = legacy_mod
+
+        _clear_installed_module_cache(plugin_key)
+
+        assert mod_name not in sys.modules
+        assert late_mod_name not in sys.modules
+        assert legacy_mod_name not in sys.modules
+        assert mod_name not in loader_mod._INSTALLED_MODULE_NAMES
+    finally:
+        for name in (mod_name, f"{mod_name}.plugin", late_mod_name, legacy_mod_name):
+            sys.modules.pop(name, None)
+        _REGISTRY.pop(plugin_key, None)
+
+
 def test_installed_plugin_identity_mismatch_does_not_pollute_registry(tmp_path) -> None:
     """已授权目录不能通过 MANIFEST.key/Plugin.key 冒充其它插件。"""
     from app.worker.plugins.base import _REGISTRY
@@ -859,6 +925,66 @@ async def test_reload_account_config_force_reload_clears_installed_module_cache(
     shutdown_spy.assert_awaited_once_with(ctx)
     assert cleared == [plugin_key]
     assert plugin_key in state.instances
+
+
+@pytest.mark.asyncio
+async def test_reload_account_config_force_reload_unregisters_stale_commands(monkeypatch) -> None:
+    """reload_config(plugin_key) 清 registry 后也必须注销该插件遗留命令。"""
+
+    from app.worker.command import (
+        _PLUGIN_COMMANDS,
+        register_plugin_command,
+        unregister_all_plugin_commands,
+    )
+    from app.worker.plugins.base import _REGISTRY, register
+
+    shutdown_spy = AsyncMock()
+
+    @register
+    class _TempInstalledCommandCleanupPlugin(Plugin):
+        key = "_test_force_reload_command_cleanup"
+        display_name = "命令清理测试"
+
+        async def on_shutdown(self, ctx: PluginContext) -> None:  # noqa: D401
+            await shutdown_spy(ctx)
+
+    _TempInstalledCommandCleanupPlugin._source = "installed"
+    plugin_key = _TempInstalledCommandCleanupPlugin.key
+
+    async def _old_handler(*_a, **_kw):
+        return None
+
+    register_plugin_command("old_hot_reload_cmd", _old_handler, owner_plugin_key=plugin_key)
+    assert _PLUGIN_COMMANDS["old_hot_reload_cmd"].owner_plugin_key == plugin_key
+
+    af = _FakeAF(account_id=1, feature_key=plugin_key, enabled=False, config={})
+    db = _FakeDB(
+        accounts={1: _FakeAcc(id=1)},
+        humanize={1: None},
+        afs=[af],
+        rules=[],
+    )
+    monkeypatch.setattr(loader_mod, "AsyncSessionLocal", lambda: _fake_session_factory(db))
+
+    state = loader_mod._AccountState(account_id=1)
+    state.redis = _FakeRedis()
+    state.client = MagicMock()
+    inst = _TempInstalledCommandCleanupPlugin()
+    ctx = PluginContext(account_id=1, feature_key=plugin_key, client=MagicMock())
+    state.instances[plugin_key] = inst
+    state.contexts[plugin_key] = ctx
+    loader_mod._STATES[1] = state
+
+    try:
+        await reload_account_config(account_id=1, payload={"plugin_key": plugin_key})
+    finally:
+        loader_mod._STATES.pop(1, None)
+        _REGISTRY.pop(plugin_key, None)
+        unregister_all_plugin_commands(owner_plugin_key=plugin_key)
+
+    shutdown_spy.assert_awaited_once_with(ctx)
+    assert plugin_key not in state.instances
+    assert "old_hot_reload_cmd" not in _PLUGIN_COMMANDS
 
 
 def test_missing_plugin_error_uses_codex_image_repo_plugin_hint() -> None:
