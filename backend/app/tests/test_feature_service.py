@@ -13,6 +13,7 @@ from app.db.models.plugin_global_config import PluginGlobalConfig
 from app.schemas.feature import FeatureInfo
 from app.services.feature_service import (
     _seed_local_installed_features,
+    apply_required_config_defaults,
     config_schema_for_scope,
     feature_matrix,
     get_effective_plugin_config,
@@ -132,6 +133,45 @@ class TestValidateConfigAgainstSchema:
             {"command": "pt", "torrent_cooldown_seconds": "12h"},
             account_schema,
         ).valid is True
+
+    def test_required_defaults_are_applied_before_validation(self) -> None:
+        """交互页局部保存插件参数时，带默认值的必填字段应由服务端补齐。"""
+        schema = {
+            "type": "object",
+            "properties": {
+                "command": {"type": "string", "default": "redpack"},
+                "delete_delay_seconds": {"type": "integer", "default": 60},
+                "cookie": {"type": "string"},
+            },
+            "required": ["command", "delete_delay_seconds", "cookie"],
+        }
+
+        config = apply_required_config_defaults({"cookie": "sid=ok"}, schema)
+
+        assert config == {
+            "command": "redpack",
+            "delete_delay_seconds": 60,
+            "cookie": "sid=ok",
+        }
+        assert validate_config_against_schema(config, schema).valid is True
+
+    def test_required_defaults_do_not_hide_missing_user_values(self) -> None:
+        """没有 default 的必填字段仍然必须由用户配置。"""
+        schema = {
+            "type": "object",
+            "properties": {
+                "command": {"type": "string", "default": "pt"},
+                "cookie": {"type": "string"},
+            },
+            "required": ["command", "cookie"],
+        }
+
+        config = apply_required_config_defaults({}, schema)
+        result = validate_config_against_schema(config, schema)
+
+        assert config == {"command": "pt"}
+        assert result.valid is False
+        assert result.errors[0].field == "cookie"
 
 
 # ─────────────────────────────────────────────────────

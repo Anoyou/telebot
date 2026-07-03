@@ -255,9 +255,14 @@ async def patch_account_feature(
         payload.config = _normalize_feature_config(key, payload.config)
         config_schema = (feature.manifest or {}).get("config_schema")
         if config_schema:
+            scoped_schema = feature_service.config_schema_for_scope(config_schema, "account")
+            payload.config = feature_service.apply_required_config_defaults(
+                payload.config,
+                scoped_schema,
+            )
             validation = feature_service.validate_config_against_schema(
                 payload.config,
-                feature_service.config_schema_for_scope(config_schema, "account"),
+                scoped_schema,
             )
             if not validation.valid:
                 raise _bad(
@@ -320,9 +325,14 @@ async def update_account_feature_config(
     payload.config = _normalize_feature_config(key, payload.config)
     config_schema = (feature.manifest or {}).get("config_schema")
     if config_schema:
+        scoped_schema = feature_service.config_schema_for_scope(config_schema, "account")
+        payload.config = feature_service.apply_required_config_defaults(
+            payload.config,
+            scoped_schema,
+        )
         validation = feature_service.validate_config_against_schema(
             payload.config,
-            feature_service.config_schema_for_scope(config_schema, "account"),
+            scoped_schema,
         )
         if not validation.valid:
             raise _bad(

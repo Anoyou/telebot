@@ -960,6 +960,35 @@ def validate_config_against_schema(
         )
 
 
+def apply_required_config_defaults(
+    config: dict[str, Any],
+    config_schema: dict[str, Any],
+) -> dict[str, Any]:
+    """补齐当前配置 scope 内带默认值的必填字段。
+
+    插件配置页会用 schema defaults 初始化表单；交互规则页只同步入口额外参数时，
+    可能会提交一个局部 config。这里在服务端补齐 ``command`` 这类有默认值的
+    required 字段，避免把局部保存误判成配置缺失；真正没有 default 的必填项
+    仍然交给 JSON Schema 正常报错。
+    """
+
+    if not isinstance(config_schema, dict):
+        return dict(config)
+    properties = config_schema.get("properties")
+    required = config_schema.get("required")
+    if not isinstance(properties, dict) or not isinstance(required, list):
+        return dict(config)
+
+    out = dict(config)
+    for key in required:
+        if not isinstance(key, str) or key in out:
+            continue
+        field = properties.get(key)
+        if isinstance(field, dict) and "default" in field:
+            out[key] = deepcopy(field["default"])
+    return out
+
+
 def config_schema_for_scope(
     config_schema: dict[str, Any],
     scope: str,
@@ -1004,6 +1033,7 @@ def config_schema_for_scope(
 
 
 __all__ = [
+    "apply_required_config_defaults",
     "bulk_set_enabled",
     "config_schema_for_scope",
     "feature_matrix",
