@@ -9,7 +9,7 @@ import logging
 import re
 import secrets
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from typing import Any
 
 from sqlalchemy import desc, select
@@ -129,6 +129,14 @@ _EVENT_BUS_KNOWN_USERS_CACHE_TTL_SECONDS = 30.0
 _EVENT_BUS_KNOWN_USERS_CACHE: dict[int, tuple[float, list[int], set[int]]] = {}
 _INTERACTION_PAYMENT_CONFIRM_CALLBACK_PREFIX = "ip"
 _EVENT_FRAMEWORK_FLAGS_CACHE: tuple[float, dict[str, bool]] = (0.0, {})
+_ROUTE_PAYMENT_CONFIRM = "payment_confirm"
+_ROUTE_SELF = "self"
+_ROUTE_USERBOT_COMMAND = "userbot_command"
+_ROUTE_TRANSFER_COMMAND = "transfer_command"
+_ROUTE_PAYMENT_NOTICE = "payment_notice"
+_ROUTE_EVENT_BUS = "event_bus"
+_ROUTE_KEYWORD = "keyword"
+_ROUTE_SESSION_MESSAGE = "message"
 _PLAYER_IDENTITY_CONFIDENCE_VERIFIED = "verified_user_id"
 _PLAYER_IDENTITY_CONFIDENCE_REPLY = "reply_context"
 _PLAYER_IDENTITY_CONFIDENCE_CALLBACK = "callback_confirmed"
@@ -178,6 +186,289 @@ async def _incoming_is_userbot_command_text(db: Any, incoming: Incoming) -> bool
         return False
     token = rest.split(None, 1)[0].strip()
     return _looks_like_command_name(token, prefix=prefix)
+
+
+def _unique_text_tuple(values: Any) -> tuple[str, ...]:
+    out: list[str] = []
+    raw_values = values if isinstance(values, (list, tuple, set, frozenset)) else [values]
+    for raw in raw_values:
+        text = str(raw or "").strip()
+        if text and text not in out:
+            out.append(text)
+    return tuple(out)
+
+
+def _routing_index_text_is_userbot_command_candidate(incoming: Incoming) -> bool:
+    text = str(incoming.text or "").strip()
+    if incoming.callback_id or not text:
+        return False
+    candidate_prefixes = {settings.command_prefix or "", *_COMMON_COMMAND_PREFIXES}
+    matched_prefix = next((prefix for prefix in candidate_prefixes if prefix and text.startswith(prefix)), None)
+    if not matched_prefix:
+        return False
+    rest = text[len(matched_prefix):].lstrip()
+    if not rest:
+        return False
+    return _looks_like_command_name(rest.split(None, 1)[0], prefix=matched_prefix)
+
+
+def _subscription_event_types(subscription: Any) -> set[str]:
+    return {str(item or "").strip() for item in getattr(subscription, "events", []) if str(item or "").strip()}
+
+
+def _subscription_accepts_event(subscription: Any, event_type: str) -> bool:
+    events = _subscription_event_types(subscription)
+    if event_type in events:
+        return True
+    if "all_messages" in events and event_type in {"message", "command"}:
+        return True
+    return "all_events" in events and event_type in {
+        "message",
+        "command",
+        "callback_query",
+        "keyword",
+        "payment_confirmed",
+        "session_close",
+        "session_expired",
+        "message_edited",
+    }
+
+
+def _subscription_sources_include_interaction_bot(subscription: Any) -> bool:
+    sources = {str(item or "").strip() for item in getattr(subscription, "sources", []) if str(item or "").strip()}
+    return not sources or "interaction_bot" in sources
+
+
+def _subscription_event_type_filter_allows_message(filters: dict[str, Any]) -> bool:
+    event_types = _unique_text_tuple(filters.get("event_type"))
+    return not event_types or "message" in event_types
+
+
+def _build_interaction_routing_index(
+    cfg: dict[str, Any],
+    *,
+    subscriptions: list[Any] | None = None,
+    active_session_chat_ids: set[int] | frozenset[int] | None = None,
+) -> InteractionRoutingIndex:
+    keyword_candidates: list[str] = []
+    payment_trigger_candidates: list[str] = []
+    module_chat_ids: set[int] = set()
+    has_global_module_rule = False
+    for command in _interaction_query_commands(cfg):
+        keyword_candidates.append(command)
+    for rule in _interaction_rules(cfg):
+        keyword_candidates.extend(_rule_keyword_list(rule, "open_commands"))
+        keyword_candidates.extend(_rule_keyword_list(rule, "close_commands"))
+        keyword_candidates.extend(_rule_keyword_list(rule, "status_commands"))
+        keyword_candidates.extend(_rule_keyword_list(rule, "module_start_keywords"))
+        payment_trigger_candidates.extend(_rule_triggers(rule))
+    for rule in _interaction_rules(cfg, include_disabled=True):
+        if str(rule.get("action") or "") != "module":
+            continue
+        raw_chat_ids = rule.get("chat_ids")
+        if not isinstance(raw_chat_ids, list) or not raw_chat_ids:
+            has_global_module_rule = True
+            continue
+        for raw_chat_id in raw_chat_ids:
+            chat_id = _int_or_none(raw_chat_id)
+            if chat_id is not None:
+                module_chat_ids.add(chat_id)
+
+    event_bus_unknown = subscriptions is None
+    event_bus_message_exact_texts: list[str] = []
+    event_bus_message_contains: list[str] = []
+    event_bus_message_commands: list[str] = []
+    event_bus_has_wide_message_subscription = False
+    event_bus_event_types: set[str] = set()
+    for subscription in subscriptions or []:
+        if not _subscription_sources_include_interaction_bot(subscription):
+            continue
+        events = _subscription_event_types(subscription)
+        event_bus_event_types.update(events)
+        if not _subscription_accepts_event(subscription, "message"):
+            continue
+        filters = getattr(subscription, "filters", None)
+        filters = filters if isinstance(filters, dict) else {}
+        if not _subscription_event_type_filter_allows_message(filters):
+            continue
+        event_bus_message_exact_texts.extend(_unique_text_tuple(filters.get("keywords") or filters.get("keyword")))
+        event_bus_message_contains.extend(_unique_text_tuple(filters.get("contains")))
+        event_bus_message_commands.extend(_unique_text_tuple(filters.get("commands") or filters.get("command")))
+        has_text_filter = any(
+            _unique_text_tuple(filters.get(key))
+            for key in ("keywords", "keyword", "contains", "commands", "command", "callback_data")
+        )
+        if not has_text_filter and str(getattr(subscription, "scope", "") or "") != "rule_bound":
+            event_bus_has_wide_message_subscription = True
+
+    active_chats = frozenset(int(chat_id) for chat_id in active_session_chat_ids or set())
+    return InteractionRoutingIndex(
+        enabled=bool(cfg.get("enabled")),
+        interaction_bot_id=_int_or_none(cfg.get("interaction_bot_id")),
+        trusted_sender_ids=frozenset(_trusted_transfer_notice_sender_ids(cfg)),
+        query_commands=_unique_text_tuple(_interaction_query_commands(cfg)),
+        keyword_candidates=_unique_text_tuple(keyword_candidates),
+        payment_trigger_candidates=_unique_text_tuple(payment_trigger_candidates),
+        module_chat_ids=frozenset(module_chat_ids),
+        has_global_module_rule=has_global_module_rule,
+        active_session_chat_ids=active_chats,
+        active_sessions_unknown=active_session_chat_ids is None,
+        allowed_chat_ids=frozenset(_interaction_allowed_chat_ids(cfg)),
+        event_bus_unknown=event_bus_unknown,
+        event_bus_message_exact_texts=_unique_text_tuple(event_bus_message_exact_texts),
+        event_bus_message_contains=_unique_text_tuple(event_bus_message_contains),
+        event_bus_message_commands=_unique_text_tuple(event_bus_message_commands),
+        event_bus_has_wide_message_subscription=event_bus_has_wide_message_subscription,
+        event_bus_event_types=frozenset(event_bus_event_types),
+    )
+
+
+def _set_interaction_routing_index_cache(
+    aid: int,
+    cfg: dict[str, Any],
+    *,
+    subscriptions: list[Any] | None,
+    active_session_chat_ids: set[int] | frozenset[int] | None,
+) -> None:
+    index = _build_interaction_routing_index(
+        cfg,
+        subscriptions=subscriptions,
+        active_session_chat_ids=active_session_chat_ids,
+    )
+    _INTERACTION_ROUTING_INDEX_CACHE[int(aid)] = (time.monotonic(), dict(cfg), index)
+
+
+def _cached_interaction_routing_state(aid: int) -> tuple[dict[str, Any], InteractionRoutingIndex] | None:
+    cached = _INTERACTION_ROUTING_INDEX_CACHE.get(int(aid))
+    if cached is None:
+        return None
+    cached_at, cfg, index = cached
+    if time.monotonic() - cached_at > _INTERACTION_ROUTING_INDEX_CACHE_TTL_SECONDS:
+        _INTERACTION_ROUTING_INDEX_CACHE.pop(int(aid), None)
+        return None
+    return dict(cfg), index
+
+
+def _remember_interaction_active_session_chat(aid: int, chat_id: int | None) -> None:
+    if chat_id is None:
+        return
+    cached = _INTERACTION_ROUTING_INDEX_CACHE.get(int(aid))
+    if cached is None:
+        return
+    cached_at, cfg, index = cached
+    active_chat_ids = set(index.active_session_chat_ids)
+    active_chat_ids.add(int(chat_id))
+    _INTERACTION_ROUTING_INDEX_CACHE[int(aid)] = (
+        cached_at,
+        cfg,
+        replace(
+            index,
+            active_session_chat_ids=frozenset(active_chat_ids),
+            active_sessions_unknown=False,
+        ),
+    )
+
+
+async def _active_interaction_session_chat_ids(aid: int) -> set[int]:
+    chat_ids: set[int] = set()
+    try:
+        redis = get_redis()
+        for key in await _iter_interaction_session_keys_for_account(aid):
+            raw = await redis.get(key)
+            if isinstance(raw, bytes):
+                raw = raw.decode("utf-8", errors="ignore")
+            if not raw:
+                continue
+            try:
+                session = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(session, dict):
+                continue
+            if str(session.get("channel") or "interaction_bot") != "interaction_bot":
+                continue
+            chat_id = _int_or_none(session.get("chat_id"))
+            if chat_id is not None:
+                chat_ids.add(chat_id)
+    except Exception:  # noqa: BLE001
+        log.debug("load active interaction session chats failed aid=%s", aid, exc_info=True)
+    return chat_ids
+
+
+def _routing_index_chat_matches(chat_id: int | None, chat_ids: frozenset[int]) -> bool:
+    return chat_id is not None and int(chat_id) in chat_ids
+
+
+def _routing_index_message_matches_keywords(text: str, candidates: tuple[str, ...]) -> bool:
+    if not str(text or "").strip() or not candidates:
+        return False
+    return _message_equals_any(text, list(candidates)) or _message_match_keyword_pattern(text, list(candidates)) is not None
+
+
+def _routing_index_message_matches_event_bus(incoming: Incoming, index: InteractionRoutingIndex) -> bool:
+    if index.event_bus_unknown:
+        return True
+    event_type = _incoming_event_type(incoming)
+    if event_type != "message":
+        return event_type in index.event_bus_event_types or "all_events" in index.event_bus_event_types
+    text = str(incoming.text or "").strip()
+    if index.event_bus_has_wide_message_subscription:
+        return True
+    if _message_equals_any(text, list(index.event_bus_message_exact_texts)):
+        return True
+    if any(item and item in text for item in index.event_bus_message_contains):
+        return True
+    if index.event_bus_message_commands:
+        command = text.lstrip("/,").split(maxsplit=1)[0] if text else ""
+        normalized = {item.lstrip("/,") for item in index.event_bus_message_commands}
+        return bool(command and command in normalized)
+    return False
+
+
+def _classify_interaction_routes(
+    incoming: Incoming,
+    index: InteractionRoutingIndex,
+    *,
+    event_bus_enabled: bool,
+) -> list[str]:
+    routes: list[str] = []
+    if incoming.callback_id and _parse_interaction_payment_confirm_callback(incoming.callback_data) is not None:
+        routes.append(_ROUTE_PAYMENT_CONFIRM)
+    if incoming.user_id is not None and index.interaction_bot_id == incoming.user_id:
+        routes.append(_ROUTE_SELF)
+        return routes
+    if _routing_index_text_is_userbot_command_candidate(incoming):
+        routes.append(_ROUTE_USERBOT_COMMAND)
+    if incoming.chat_id is not None and incoming.user_id is not None and _parse_transfer_command(incoming.text) is not None:
+        routes.append(_ROUTE_TRANSFER_COMMAND)
+    if (
+        incoming.chat_id is not None
+        and incoming.user_id is not None
+        and incoming.user_id in index.trusted_sender_ids
+        and (
+            _parse_incoming_transfer_notice(incoming) is not None
+            or _message_line_equals_any(str(incoming.text or ""), list(index.payment_trigger_candidates))
+        )
+    ):
+        routes.append(_ROUTE_PAYMENT_NOTICE)
+    if event_bus_enabled and _routing_index_message_matches_event_bus(incoming, index):
+        routes.append(_ROUTE_EVENT_BUS)
+    event_type = _incoming_event_type(incoming)
+    text = str(incoming.text or "").strip()
+    if event_type == "message" and _routing_index_message_matches_keywords(text, index.keyword_candidates):
+        routes.append(_ROUTE_KEYWORD)
+    if incoming.chat_id is not None and index.enabled:
+        if incoming.callback_id:
+            if index.has_global_module_rule or _routing_index_chat_matches(incoming.chat_id, index.module_chat_ids):
+                routes.append(_ROUTE_SESSION_MESSAGE)
+        elif event_type in {"message", "message_edited"}:
+            if text or _incoming_has_media_or_service(incoming):
+                if index.active_sessions_unknown:
+                    if index.has_global_module_rule or _routing_index_chat_matches(incoming.chat_id, index.module_chat_ids):
+                        routes.append(_ROUTE_SESSION_MESSAGE)
+                elif _routing_index_chat_matches(incoming.chat_id, index.active_session_chat_ids):
+                    routes.append(_ROUTE_SESSION_MESSAGE)
+    return routes
 
 
 async def _event_framework_flags() -> dict[str, bool]:
@@ -261,6 +552,33 @@ class Incoming:
     trace_id: str | None = None
     native_raw: dict[str, Any] | None = None
     callback_already_acked: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class InteractionRoutingIndex:
+    """Pure in-memory hints used to avoid walking the full interaction chain."""
+
+    enabled: bool
+    interaction_bot_id: int | None
+    trusted_sender_ids: frozenset[int]
+    query_commands: tuple[str, ...]
+    keyword_candidates: tuple[str, ...]
+    payment_trigger_candidates: tuple[str, ...]
+    module_chat_ids: frozenset[int]
+    has_global_module_rule: bool
+    active_session_chat_ids: frozenset[int]
+    active_sessions_unknown: bool
+    allowed_chat_ids: frozenset[int]
+    event_bus_unknown: bool
+    event_bus_message_exact_texts: tuple[str, ...]
+    event_bus_message_contains: tuple[str, ...]
+    event_bus_message_commands: tuple[str, ...]
+    event_bus_has_wide_message_subscription: bool
+    event_bus_event_types: frozenset[str]
+
+
+_INTERACTION_ROUTING_INDEX_CACHE: dict[int, tuple[float, dict[str, Any], InteractionRoutingIndex]] = {}
+_INTERACTION_ROUTING_INDEX_CACHE_TTL_SECONDS = 30.0
 
 
 @dataclass
@@ -962,6 +1280,18 @@ async def _load_interaction_runtime_config(aid: int) -> tuple[str | None, dict[s
         cfg["interaction_last_update_id"] = state.get("interaction_last_update_id")
         cfg["interaction_last_error"] = state.get("interaction_last_error")
         token = await account_bot_service.get_interaction_bot_token(db, aid)
+        try:
+            subscriptions = await _load_enabled_event_bus_subscriptions(db, aid)
+        except Exception:  # noqa: BLE001
+            subscriptions = None
+            log.debug("load interaction routing subscriptions failed aid=%s", aid, exc_info=True)
+    active_session_chat_ids = await _active_interaction_session_chat_ids(aid)
+    _set_interaction_routing_index_cache(
+        aid,
+        cfg,
+        subscriptions=subscriptions,
+        active_session_chat_ids=active_session_chat_ids,
+    )
     return token, cfg
 
 
@@ -1263,16 +1593,55 @@ async def _handle_interaction_update(aid: int, token: str, update: dict[str, Any
         await record_span(trace, "receive", TRACE_STATUS_OK, component="interaction_bot", **_interaction_log_context(incoming))
     final_status = TRACE_STATUS_SKIPPED
     try:
+        cached_state = _cached_interaction_routing_state(incoming.account_id)
+        cached_index: InteractionRoutingIndex | None = None
+        routes: list[str] | None = None
+        event_bus_delivery_enabled = flags.get("event_bus_delivery_enabled", True)
+        if cached_state is not None:
+            _, cached_index = cached_state
+            routes = _classify_interaction_routes(
+                incoming,
+                cached_index,
+                event_bus_enabled=event_bus_delivery_enabled,
+            )
+            if not routes:
+                await record_span(
+                    trace,
+                    "route",
+                    TRACE_STATUS_SKIPPED,
+                    component="interaction_bot",
+                    reason_code="subscription_not_matched",
+                )
+                return
         async with AsyncSessionLocal() as db:
             cfg = await account_bot_service.get_transfer_notice_config(db, incoming.account_id)
-            if await _try_handle_interaction_payment_confirm(db, incoming, cfg):
+            index = _build_interaction_routing_index(
+                cfg,
+                subscriptions=None,
+                active_session_chat_ids=None,
+            )
+            routes = _classify_interaction_routes(
+                incoming,
+                index,
+                event_bus_enabled=event_bus_delivery_enabled,
+            )
+            if not routes:
+                await record_span(
+                    trace,
+                    "route",
+                    TRACE_STATUS_SKIPPED,
+                    component="interaction_bot",
+                    reason_code="subscription_not_matched",
+                )
+                return
+            if _ROUTE_PAYMENT_CONFIRM in routes and await _try_handle_interaction_payment_confirm(db, incoming, cfg):
                 final_status = TRACE_STATUS_OK
                 await record_span(trace, "route", TRACE_STATUS_OK, component="interaction_payment_confirm")
                 return
-            if incoming.user_id is not None and _int_or_none(cfg.get("interaction_bot_id")) == incoming.user_id:
+            if _ROUTE_SELF in routes:
                 await record_span(trace, "route", TRACE_STATUS_SKIPPED, component="interaction_bot", reason_code="bot_self_message")
                 return
-            if await _incoming_is_userbot_command_text(db, incoming):
+            if _ROUTE_USERBOT_COMMAND in routes and await _incoming_is_userbot_command_text(db, incoming):
                 await record_span(
                     trace,
                     "route",
@@ -1282,12 +1651,11 @@ async def _handle_interaction_update(aid: int, token: str, update: dict[str, Any
                     message="系统前缀命令由 userbot 命令链路处理，交互 Bot 不投递规则或会话。",
                 )
                 return
-            if await _try_handle_transfer_command(db, incoming, cfg):
+            if _ROUTE_TRANSFER_COMMAND in routes and await _try_handle_transfer_command(db, incoming, cfg):
                 final_status = TRACE_STATUS_OK
                 await record_span(trace, "route", TRACE_STATUS_OK, component="transfer_command")
                 return
-            event_bus_delivery_enabled = flags.get("event_bus_delivery_enabled", True)
-            if await _try_handle_transfer_notice(
+            if _ROUTE_PAYMENT_NOTICE in routes and await _try_handle_transfer_notice(
                 db,
                 incoming,
                 cfg,
@@ -1296,22 +1664,20 @@ async def _handle_interaction_update(aid: int, token: str, update: dict[str, Any
                 final_status = TRACE_STATUS_OK
                 await record_span(trace, "route", TRACE_STATUS_OK, component="transfer_notice")
                 return
-            event_bus_handled, event_bus_ok = (
-                await _try_handle_event_bus_subscriptions(db, incoming, cfg)
-                if event_bus_delivery_enabled
-                else (False, True)
-            )
-            if event_bus_handled:
-                final_status = TRACE_STATUS_OK if event_bus_ok else TRACE_STATUS_FAILED
-                await record_span(
-                    trace,
-                    "route",
-                    final_status,
-                    component="event_bus",
-                    reason_code=None if event_bus_ok else "plugin_runtime_error",
-                )
-                return
-            if not event_bus_delivery_enabled:
+            event_bus_candidate = _ROUTE_EVENT_BUS in routes or _routing_index_message_matches_event_bus(incoming, index)
+            if event_bus_delivery_enabled and _ROUTE_EVENT_BUS in routes:
+                event_bus_handled, event_bus_ok = await _try_handle_event_bus_subscriptions(db, incoming, cfg)
+                if event_bus_handled:
+                    final_status = TRACE_STATUS_OK if event_bus_ok else TRACE_STATUS_FAILED
+                    await record_span(
+                        trace,
+                        "route",
+                        final_status,
+                        component="event_bus",
+                        reason_code=None if event_bus_ok else "plugin_runtime_error",
+                    )
+                    return
+            if not event_bus_delivery_enabled and event_bus_candidate:
                 await record_span(
                     trace,
                     "subscription_match",
@@ -1320,11 +1686,11 @@ async def _handle_interaction_update(aid: int, token: str, update: dict[str, Any
                     reason_code="event_bus_delivery_disabled",
                     message="Event Bus 新投递路径已通过运行设置关闭，回退旧规则链路。",
                 )
-            if await _try_handle_interaction_rule_command_or_keyword(db, incoming, cfg):
+            if _ROUTE_KEYWORD in routes and await _try_handle_interaction_rule_command_or_keyword(db, incoming, cfg):
                 final_status = TRACE_STATUS_OK
                 await record_span(trace, "route", TRACE_STATUS_OK, component="interaction_rule")
                 return
-            if await _try_handle_interaction_module_message(db, incoming, cfg):
+            if _ROUTE_SESSION_MESSAGE in routes and await _try_handle_interaction_module_message(db, incoming, cfg):
                 final_status = TRACE_STATUS_OK
                 await record_span(trace, "route", TRACE_STATUS_OK, component="interaction_session")
                 return
@@ -2358,6 +2724,7 @@ async def _save_interaction_session(
             json.dumps(payload, ensure_ascii=False),
             ex=ttl + _INTERACTION_SESSION_TTL_GRACE_SECONDS,
         )
+        _remember_interaction_active_session_chat(incoming.account_id, incoming.chat_id)
     except Exception as exc:  # noqa: BLE001
         log.debug("save interaction session failed aid=%s rule=%s", incoming.account_id, rule.get("id"), exc_info=True)
         await _write_interaction_runtime_log(
@@ -2450,6 +2817,7 @@ async def _apply_interaction_start_session_action(
             json.dumps(payload, ensure_ascii=False),
             ex=ttl + _INTERACTION_SESSION_TTL_GRACE_SECONDS,
         )
+        _remember_interaction_active_session_chat(incoming.account_id, target_chat_id)
         await record_action(
             action.get("context"),
             action,

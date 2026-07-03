@@ -174,22 +174,25 @@ def _validate_plugin(plugin_key: str) -> None:
     if list(metadata.get("interaction_entries") or []) != list(manifest.interaction_entries):
         raise AssertionError(f"{plugin_key}: plugin.json.interaction_entries 与 MANIFEST.interaction_entries 不一致")
 
+    has_metadata_subscriptions = "event_subscriptions" in metadata
     metadata_subscriptions = metadata.get("event_subscriptions")
-    if metadata_subscriptions is None:
+    if not has_metadata_subscriptions:
         metadata_subscriptions = []
     if not isinstance(metadata_subscriptions, list):
         raise AssertionError(f"{plugin_key}: plugin.json.event_subscriptions 必须是数组")
     metadata_subscriptions = [item for item in metadata_subscriptions if isinstance(item, dict)]
     manifest_subscriptions = list(manifest.event_subscriptions or [])
-    if metadata_subscriptions and metadata_subscriptions != manifest_subscriptions:
+    if (has_metadata_subscriptions or manifest_subscriptions) and metadata_subscriptions != manifest_subscriptions:
         raise AssertionError(f"{plugin_key}: plugin.json.event_subscriptions 与 MANIFEST.event_subscriptions 不一致")
 
+    has_metadata_capabilities = "capabilities" in metadata
     metadata_capabilities = metadata.get("capabilities")
-    if metadata_capabilities is None:
+    if not has_metadata_capabilities:
         metadata_capabilities = {}
     if not isinstance(metadata_capabilities, dict):
         raise AssertionError(f"{plugin_key}: plugin.json.capabilities 必须是对象")
-    if metadata_capabilities and dict(metadata_capabilities) != _manifest_capabilities(manifest):
+    manifest_capabilities = _manifest_capabilities(manifest)
+    if (has_metadata_capabilities or manifest_capabilities) and dict(metadata_capabilities) != manifest_capabilities:
         raise AssertionError(f"{plugin_key}: plugin.json.capabilities 与 MANIFEST.capabilities 不一致")
     _validate_high_risk_capabilities(plugin_key, metadata_capabilities)
 
@@ -200,7 +203,7 @@ def _validate_plugin(plugin_key: str) -> None:
         warnings.append("缺少 usage 或 config_schema 使用说明")
     if list(metadata.get("interaction_entries") or []) and not metadata_subscriptions:
         warnings.append("仍是旧 interaction_entries 主声明，建议补 event_subscriptions")
-    if metadata_capabilities == {} and _has_event_subscription(metadata, manifest):
+    if not has_metadata_capabilities and _has_event_subscription(metadata, manifest):
         warnings.append("缺少 capabilities；如不需要高风险能力也建议显式写 {}")
     for warning in warnings:
         print(f"warn: {plugin_key} - {warning}")

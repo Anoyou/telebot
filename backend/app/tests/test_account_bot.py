@@ -66,9 +66,11 @@ class _MemoryRedis:
 def _clear_transfer_command_dedupe():
     account_bot_runtime._TRANSFER_COMMAND_DEDUPE.clear()
     account_bot_runtime._EVENT_BUS_KNOWN_USERS_CACHE.clear()
+    account_bot_runtime._INTERACTION_ROUTING_INDEX_CACHE.clear()
     yield
     account_bot_runtime._TRANSFER_COMMAND_DEDUPE.clear()
     account_bot_runtime._EVENT_BUS_KNOWN_USERS_CACHE.clear()
+    account_bot_runtime._INTERACTION_ROUTING_INDEX_CACHE.clear()
 
 
 def _patch_math10_worker_entry(monkeypatch) -> AsyncMock:
@@ -3432,7 +3434,7 @@ async def test_interaction_polling_respects_inline_updates_switch(monkeypatch) -
 
 
 @pytest.mark.asyncio
-async def test_handle_interaction_update_reads_transfer_config_once_and_passes_cfg(monkeypatch) -> None:
+async def test_handle_interaction_update_reads_transfer_config_once_for_matching_route(monkeypatch) -> None:
     class _DB:
         async def __aenter__(self):
             return self
@@ -3443,7 +3445,7 @@ async def test_handle_interaction_update_reads_transfer_config_once_and_passes_c
     cfg = {"enabled": True, "rules": [], "interaction_bot_id": 999}
     get_config = AsyncMock(return_value=cfg)
     payment_confirm = AsyncMock(return_value=False)
-    transfer_command = AsyncMock(return_value=False)
+    transfer_command = AsyncMock(return_value=True)
     transfer_notice = AsyncMock(return_value=False)
     rule_command = AsyncMock(return_value=False)
     module_message = AsyncMock(return_value=False)
@@ -3464,7 +3466,7 @@ async def test_handle_interaction_update_reads_transfer_config_once_and_passes_c
             "update_id": 7001,
             "message": {
                 "message_id": 701,
-                "text": "普通消息",
+                "text": "+5",
                 "from": {"id": 111, "first_name": "AAA"},
                 "chat": {"id": -100777, "type": "supergroup"},
             },
@@ -3472,8 +3474,68 @@ async def test_handle_interaction_update_reads_transfer_config_once_and_passes_c
     )
 
     get_config.assert_awaited_once()
-    for handler in (payment_confirm, transfer_command, transfer_notice, rule_command, module_message):
-        assert handler.await_args.args[-1] is cfg
+    transfer_command.assert_awaited_once()
+    assert transfer_command.await_args.args[-1] is cfg
+    payment_confirm.assert_not_awaited()
+    transfer_notice.assert_not_awaited()
+    rule_command.assert_not_awaited()
+    module_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_handle_interaction_update_skips_unmatched_cached_message_without_db(monkeypatch) -> None:
+    class _DB:
+        async def __aenter__(self):
+            raise AssertionError("unmatched cached interaction message should not open a DB session")
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+    get_config = AsyncMock()
+    transfer_command = AsyncMock(return_value=False)
+    transfer_notice = AsyncMock(return_value=False)
+    event_bus = AsyncMock(return_value=(False, True))
+    rule_command = AsyncMock(return_value=False)
+    module_message = AsyncMock(return_value=False)
+    account_bot_runtime._set_interaction_routing_index_cache(
+        1,
+        {"enabled": True, "rules": [], "chat_ids": [-100777], "interaction_bot_id": 999},
+        subscriptions=[],
+        active_session_chat_ids=set(),
+    )
+    monkeypatch.setattr(account_bot_runtime, "AsyncSessionLocal", lambda: _DB())
+    monkeypatch.setattr(
+        account_bot_runtime,
+        "_event_framework_flags",
+        AsyncMock(return_value={"trace_enabled": False, "event_bus_delivery_enabled": True, "inline_updates_enabled": True}),
+    )
+    monkeypatch.setattr(account_bot_service, "get_transfer_notice_config", get_config)
+    monkeypatch.setattr(account_bot_runtime, "_try_handle_transfer_command", transfer_command)
+    monkeypatch.setattr(account_bot_runtime, "_try_handle_transfer_notice", transfer_notice)
+    monkeypatch.setattr(account_bot_runtime, "_try_handle_event_bus_subscriptions", event_bus)
+    monkeypatch.setattr(account_bot_runtime, "_try_handle_interaction_rule_command_or_keyword", rule_command)
+    monkeypatch.setattr(account_bot_runtime, "_try_handle_interaction_module_message", module_message)
+
+    await account_bot_runtime._handle_interaction_update(
+        1,
+        "bbot-token",
+        {
+            "update_id": 7002,
+            "message": {
+                "message_id": 702,
+                "text": "普通消息",
+                "from": {"id": 111, "first_name": "AAA"},
+                "chat": {"id": -100777, "type": "supergroup"},
+            },
+        },
+    )
+
+    get_config.assert_not_awaited()
+    transfer_command.assert_not_awaited()
+    transfer_notice.assert_not_awaited()
+    event_bus.assert_not_awaited()
+    rule_command.assert_not_awaited()
+    module_message.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -4334,7 +4396,17 @@ async def test_interaction_update_respects_event_bus_delivery_switch(monkeypatch
     monkeypatch.setattr(account_bot_runtime, "record_span", record_span)
     monkeypatch.setattr(account_bot_runtime, "finish_trace", AsyncMock())
     monkeypatch.setattr(account_bot_runtime, "_try_handle_interaction_payment_confirm", AsyncMock(return_value=False))
-    monkeypatch.setattr(account_bot_service, "get_transfer_notice_config", AsyncMock(return_value={"enabled": True, "chat_ids": [-100]}))
+    monkeypatch.setattr(
+        account_bot_service,
+        "get_transfer_notice_config",
+        AsyncMock(
+            return_value={
+                "enabled": True,
+                "chat_ids": [-100],
+                "module_start_keywords": ["开始"],
+            }
+        ),
+    )
     monkeypatch.setattr(account_bot_runtime, "_try_handle_transfer_notice", AsyncMock(return_value=False))
     monkeypatch.setattr(account_bot_runtime, "_try_handle_event_bus_subscriptions", event_bus)
     monkeypatch.setattr(account_bot_runtime, "_try_handle_interaction_rule_command_or_keyword", legacy_rule)
