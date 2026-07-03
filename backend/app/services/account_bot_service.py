@@ -181,6 +181,7 @@ def default_transfer_notice_config() -> dict[str, Any]:
         "interaction_last_update_id": None,
         "interaction_last_error": None,
         "trusted_bot_id": None,
+        "trusted_bot_ids": [],
         "transfer_bot_id": None,
         "transfer_bot_token_enc": None,
         "has_transfer_bot_token": False,
@@ -253,6 +254,11 @@ def normalize_transfer_notice_config(raw: Any) -> dict[str, Any]:
             base[key] = int(base[key]) if base[key] not in (None, "") else None
         except (TypeError, ValueError):
             base[key] = None
+    trusted_bot_ids = _normalize_positive_int_list(base.get("trusted_bot_ids"), max_items=50)
+    if base.get("trusted_bot_id") is not None and int(base["trusted_bot_id"]) not in trusted_bot_ids:
+        trusted_bot_ids.insert(0, int(base["trusted_bot_id"]))
+    base["trusted_bot_ids"] = trusted_bot_ids
+    base["trusted_bot_id"] = trusted_bot_ids[0] if trusted_bot_ids else None
     chat_ids: list[int] = []
     raw_chat_ids = base.get("chat_ids")
     if isinstance(raw_chat_ids, list):
@@ -428,6 +434,29 @@ def _normalize_string_list(raw: Any, *, default: list[str] | None = None) -> lis
             if item and "\n" not in item and item not in out:
                 out.append(item)
     return out or list(default or [])
+
+
+def _normalize_positive_int_list(raw: Any, *, max_items: int) -> list[int]:
+    if raw in (None, ""):
+        return []
+    if isinstance(raw, str):
+        items: list[Any] = re.split(r"[\n,，\s]+", raw)
+    elif isinstance(raw, (list, tuple, set)):
+        items = list(raw)
+    else:
+        items = [raw]
+    out: list[int] = []
+    for raw_item in items:
+        if len(out) >= max_items:
+            break
+        try:
+            item = int(str(raw_item).strip())
+        except (TypeError, ValueError):
+            continue
+        if item <= 0 or item in out:
+            continue
+        out.append(item)
+    return out
 
 
 def normalize_interaction_entry_manifest(raw: Any) -> dict[str, Any] | None:
@@ -1011,7 +1040,11 @@ def _requires_trusted_transfer_notice_sender(data: dict[str, Any]) -> bool:
 
 
 def _has_trusted_transfer_notice_sender(data: dict[str, Any]) -> bool:
-    return any(data.get(key) not in (None, "") for key in ("trusted_bot_id", "transfer_bot_id"))
+    trusted_ids = data.get("trusted_bot_ids")
+    return (
+        isinstance(trusted_ids, list)
+        and len(trusted_ids) > 0
+    ) or any(data.get(key) not in (None, "") for key in ("trusted_bot_id", "transfer_bot_id"))
 
 
 def _enabled_interaction_module_keys(data: dict[str, Any]) -> list[str]:

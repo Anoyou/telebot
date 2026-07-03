@@ -228,6 +228,7 @@ export interface AccountBotInteractionConfig {
   interaction_last_error?: string | null;
   interaction_debug?: AccountBotInteractionDebugSnapshot;
   trusted_bot_id?: number | null;
+  trusted_bot_ids?: number[];
   transfer_bot_id?: number | null;
   transfer_bot_token?: string | null;
   clear_transfer_bot_token?: boolean;
@@ -298,6 +299,7 @@ export type AccountBotInteractionConfigUpdate = Pick<
   | "interaction_bot_token"
   | "clear_interaction_bot_token"
   | "trusted_bot_id"
+  | "trusted_bot_ids"
   | "transfer_bot_token"
   | "clear_transfer_bot_token"
   | "trigger_mode"

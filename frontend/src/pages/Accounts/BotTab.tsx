@@ -177,6 +177,7 @@ const DEFAULT_INTERACTION_BOT: AccountBotInteractionConfig = {
     warnings: [],
   },
   trusted_bot_id: null,
+  trusted_bot_ids: [],
   transfer_bot_id: null,
   transfer_bot_token: null,
   clear_transfer_bot_token: false,
@@ -563,6 +564,20 @@ function parseOptionalPositiveInt(value: string, label: string): number | null {
 
 function parseOptionalUserId(value: string, label: string): number | null {
   return parseOptionalPositiveInt(value, label);
+}
+
+function parseOptionalUserIds(value: string, label: string): number[] {
+  const ids = value
+    .split(/[\n,，\s]+/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+  const out: number[] = [];
+  for (const id of ids) {
+    const parsed = parseOptionalUserId(id, label);
+    if (parsed == null) continue;
+    if (!out.includes(parsed)) out.push(parsed);
+  }
+  return out;
 }
 
 function parseIntLines(value: string, label: string): number[] {
@@ -1841,7 +1856,7 @@ export function BotTab({
   const [transferEnabled, setTransferEnabled] = useState(false);
   const [interactionBotToken, setInteractionBotToken] = useState("");
   const [clearInteractionBotToken, setClearInteractionBotToken] = useState(false);
-  const [transferBotId, setTransferBotId] = useState("");
+  const [trustedBotIdsText, setTrustedBotIdsText] = useState("");
   const [transferBotToken, setTransferBotToken] = useState("");
   const [clearTransferBotToken, setClearTransferBotToken] = useState(false);
   const [transferNoticeTemplate, setTransferNoticeTemplate] = useState(DEFAULT_TRANSFER_NOTICE_TEMPLATE);
@@ -1934,7 +1949,12 @@ export function BotTab({
       setTransferEnabled(interactionQ.data.enabled);
       setInteractionBotToken("");
       setClearInteractionBotToken(false);
-      setTransferBotId(interactionQ.data.trusted_bot_id == null ? "" : String(interactionQ.data.trusted_bot_id));
+      const trustedBotIds = interactionQ.data.trusted_bot_ids?.length
+        ? interactionQ.data.trusted_bot_ids
+        : interactionQ.data.trusted_bot_id == null
+          ? []
+          : [interactionQ.data.trusted_bot_id];
+      setTrustedBotIdsText(trustedBotIds.map((id) => String(id)).join("\n"));
       setTransferBotToken("");
       setClearTransferBotToken(false);
       setTransferNoticeTemplate(interactionQ.data.transfer_notice_template || DEFAULT_TRANSFER_NOTICE_TEMPLATE);
@@ -2019,6 +2039,7 @@ export function BotTab({
     const existingInteractionBotToken = Boolean(interactionQ.data?.has_interaction_bot_token) && !clearInteractionBotToken;
     const nextInteractionBotToken = interactionBotToken.trim();
     const nextTransferBotToken = transferBotToken.trim();
+    const trustedBotIds = parseOptionalUserIds(trustedBotIdsText, "转账结果通知 Bot ID");
     const rules = interactionRules.map((rule, index) => ruleFromForm(rule, index, interactionEntries));
     const chatIds = uniqueIntValues(rules.flatMap((rule) => rule.chat_ids ?? []));
     if (rules.length <= 0) {
@@ -2037,7 +2058,8 @@ export function BotTab({
       chat_ids: chatIds,
       interaction_bot_token: nextInteractionBotToken || null,
       clear_interaction_bot_token: clearInteractionBotToken,
-      trusted_bot_id: parseOptionalUserId(transferBotId, "转账结果通知 Bot ID"),
+      trusted_bot_id: trustedBotIds[0] ?? null,
+      trusted_bot_ids: trustedBotIds,
       transfer_bot_token: nextTransferBotToken || null,
       clear_transfer_bot_token: clearTransferBotToken,
       trigger_mode: firstRule.trigger_mode,
@@ -2152,12 +2174,13 @@ export function BotTab({
   const clearTransferResultBotMut = useMutation({
     mutationFn: () => updateInteractionBotConfig(aid, buildInteractionPayload({
       trusted_bot_id: null,
+      trusted_bot_ids: [],
       transfer_bot_token: null,
       clear_transfer_bot_token: true,
     })),
     onSuccess: () => {
       toast.success("转账结果通知 Bot 配置已清空");
-      setTransferBotId("");
+      setTrustedBotIdsText("");
       setTransferBotToken("");
       setClearTransferBotToken(false);
       invalidate();
@@ -2643,7 +2666,7 @@ export function BotTab({
                 关键词触发 <span className="font-medium text-foreground">{keywordRuleCount}</span> 条
               </div>
               <div className="rounded-md border bg-background px-3 py-2 text-sm text-muted-foreground">
-                通知 Bot {hasTransferToken || transferBotToken.trim() || transferBotId.trim() ? "已配置" : "可选"}
+                通知 Bot {hasTransferToken || transferBotToken.trim() || trustedBotIdsText.trim() ? "已配置" : "可选"}
               </div>
               <div className="rounded-md border bg-background px-3 py-2 text-sm text-muted-foreground">
                 保存方式 <span className="font-medium text-foreground">沿用现有接口</span>
@@ -2779,22 +2802,26 @@ export function BotTab({
                   <div>
                     <div className="text-sm font-medium">真实转账结果通知 Bot</div>
                     <div className="text-xs text-muted-foreground">
-                      这里填写群里实际发送到账结果的 Bot ID；测试模拟 Token 会自动识别自己的 Bot ID，不要把两者混填。
+                      这里填写群里实际发送到账结果的 Bot ID；多个群使用不同通知 Bot 时可以全部加入信任列表。
                     </div>
                   </div>
-                  <Badge variant={hasTransferToken || transferBotToken.trim() || transferBotId.trim() ? "secondary" : "outline"}>
+                  <Badge variant={hasTransferToken || transferBotToken.trim() || trustedBotIdsText.trim() ? "secondary" : "outline"}>
                     可选
                   </Badge>
                 </div>
                 <div className="grid gap-3">
                   <div className="space-y-1.5">
-                    <Label>真实通知 Bot ID（一串数字，不是@开头的）</Label>
-                    <Input
+                    <Label>真实通知 Bot ID 列表（一行一个，不是@开头的）</Label>
+                    <Textarea
+                      rows={3}
                       inputMode="numeric"
-                      placeholder="例如群里转账结果消息的发送者 ID"
-                      value={transferBotId}
-                      onChange={(e) => setTransferBotId(e.target.value)}
+                      placeholder={"例如：\n6920251805\n6929566752"}
+                      value={trustedBotIdsText}
+                      onChange={(e) => setTrustedBotIdsText(e.target.value)}
                     />
+                    <div className="text-xs text-muted-foreground">
+                      参考群内转账结果消息的发送者 ID；保存时会自动去重，测试模拟 Token 识别出的 Bot 会额外加入信任。
+                    </div>
                   </div>
                   <div className="space-y-1.5">
                     <Label>测试模拟通知 Bot Token</Label>

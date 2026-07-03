@@ -1115,6 +1115,7 @@ def test_account_bot_transfer_notice_config_normalizes_values() -> None:
     assert cfg["chat_id"] == -100123
     assert cfg["chat_ids"] == [-100123, -100999]
     assert cfg["trusted_bot_id"] == 456
+    assert cfg["trusted_bot_ids"] == [456]
     assert cfg["trigger_text"] == "转账成功"
     assert cfg["trigger_texts"] == ["转账成功", "交易成功"]
     assert cfg["query_commands"] == ["。玩法", "玩法菜单"]
@@ -1134,6 +1135,18 @@ def test_account_bot_transfer_notice_config_upgrades_legacy_default_template() -
 
     assert cfg["transfer_notice_template"] == DEFAULT_TRANSFER_NOTICE_TEMPLATE
     assert "language-转账成功" in cfg["transfer_notice_template"]
+
+
+def test_account_bot_transfer_notice_config_accepts_multiple_trusted_bots() -> None:
+    cfg = account_bot_service.normalize_transfer_notice_config(
+        {
+            "trusted_bot_ids": ["111", "222", "111", "", "bad"],
+            "trusted_bot_id": "333",
+        }
+    )
+
+    assert cfg["trusted_bot_id"] == 333
+    assert cfg["trusted_bot_ids"] == [333, 111, 222]
 
 
 @pytest.mark.asyncio
@@ -1641,7 +1654,11 @@ def test_trusted_transfer_notice_sender_requires_configured_sender() -> None:
     assert account_bot_runtime._trusted_transfer_notice_sender_matches({}, 12345) is False
     assert account_bot_runtime._trusted_transfer_notice_sender_matches({"trusted_bot_id": 12345}, 12345) is True
     assert account_bot_runtime._trusted_transfer_notice_sender_matches({"trusted_bot_id": 12345}, 12346) is False
+    assert account_bot_runtime._trusted_transfer_notice_sender_matches({"trusted_bot_ids": [12345, 54321]}, 54321) is True
+    assert account_bot_runtime._trusted_transfer_notice_sender_matches({"trusted_bot_ids": [12345, 54321]}, 11111) is False
     assert account_bot_runtime._trusted_transfer_notice_sender_matches({"transfer_bot_id": 12345}, 12345) is True
+    assert account_bot_runtime._is_configured_bot_user_id({"trusted_bot_ids": [12345], "interaction_bot_id": 54321}, 12345) is True
+    assert account_bot_runtime._is_configured_bot_user_id({"trusted_bot_ids": [12345], "interaction_bot_id": 54321}, 54321) is True
 
 
 @pytest.mark.asyncio

@@ -218,6 +218,7 @@ async def update_account_bot_interaction(
             "interaction_bot_id": data.get("interaction_bot_id"),
             "interaction_bot_username": data.get("interaction_bot_username"),
             "trusted_bot_id": data.get("trusted_bot_id"),
+            "trusted_bot_ids": data.get("trusted_bot_ids"),
             "amount": data.get("amount"),
         },
     )

@@ -2867,14 +2867,25 @@ def _transfer_command_receiver_from_filter(receiver_filter: dict[str, Any]) -> d
 def _trusted_transfer_notice_sender_matches(cfg: dict[str, Any], sender_id: int | None) -> bool:
     if sender_id is None:
         return False
-    trusted_ids = {
-        int(value)
-        for value in (cfg.get("trusted_bot_id"), cfg.get("transfer_bot_id"))
-        if value not in (None, "")
-    }
+    trusted_ids = _trusted_transfer_notice_sender_ids(cfg)
     if not trusted_ids:
         return False
     return int(sender_id) in trusted_ids
+
+
+def _trusted_transfer_notice_sender_ids(cfg: dict[str, Any]) -> set[int]:
+    trusted_ids: set[int] = set()
+    raw_ids = cfg.get("trusted_bot_ids")
+    if isinstance(raw_ids, list):
+        for value in raw_ids:
+            parsed = _int_or_none(value)
+            if parsed is not None:
+                trusted_ids.add(parsed)
+    for value in (cfg.get("trusted_bot_id"), cfg.get("transfer_bot_id")):
+        parsed = _int_or_none(value)
+        if parsed is not None:
+            trusted_ids.add(parsed)
+    return trusted_ids
 
 
 async def _is_account_user_sender(db: Any, account_id: int, user_id: int) -> bool:
@@ -2927,11 +2938,10 @@ def _transfer_command_chat_is_monitored(incoming: Incoming, cfg: dict[str, Any])
 def _is_configured_bot_user_id(cfg: dict[str, Any], user_id: int | None) -> bool:
     if user_id is None:
         return False
-    bot_ids = {
-        int(value)
-        for value in (cfg.get("interaction_bot_id"), cfg.get("transfer_bot_id"), cfg.get("trusted_bot_id"))
-        if value not in (None, "")
-    }
+    bot_ids = _trusted_transfer_notice_sender_ids(cfg)
+    interaction_bot_id = _int_or_none(cfg.get("interaction_bot_id"))
+    if interaction_bot_id is not None:
+        bot_ids.add(interaction_bot_id)
     return int(user_id) in bot_ids
 
 
@@ -5376,15 +5386,15 @@ async def _try_handle_transfer_command(db: Any, incoming: Incoming) -> bool:
         else None
     )
     if sender_id is not None:
-        cfg_bot_id = cfg.get("trusted_bot_id")
-        if cfg_bot_id is None:
+        trusted_ids = _trusted_transfer_notice_sender_ids(cfg)
+        if not trusted_ids:
             log.info("transfer bot user id detected aid=%s bot_id=%s", incoming.account_id, sender_id)
-        elif int(cfg_bot_id) != int(sender_id):
+        elif int(sender_id) not in trusted_ids:
             log.info(
-                "transfer bot sent notice but trusted_bot_id differs aid=%s sent_by=%s expected=%s",
+                "transfer bot sent notice but trusted bot ids differ aid=%s sent_by=%s expected=%s",
                 incoming.account_id,
                 sender_id,
-                cfg_bot_id,
+                sorted(trusted_ids),
             )
         await _remember_transfer_bot_id(db, incoming.account_id, sender_id)
 
@@ -5421,10 +5431,10 @@ async def _try_handle_transfer_notice(
     if not _trusted_transfer_notice_sender_matches(cfg, incoming.user_id):
         if _incoming_matches_interaction_trigger(cfg, incoming):
             log.info(
-                "transfer notice skipped: sender mismatch aid=%s incoming_user=%s trusted_bot_id=%s transfer_bot_id=%s",
+                "transfer notice skipped: sender mismatch aid=%s incoming_user=%s trusted_bot_ids=%s transfer_bot_id=%s",
                 incoming.account_id,
                 incoming.user_id,
-                cfg.get("trusted_bot_id"),
+                cfg.get("trusted_bot_ids") or ([cfg.get("trusted_bot_id")] if cfg.get("trusted_bot_id") else []),
                 cfg.get("transfer_bot_id"),
             )
         return False
