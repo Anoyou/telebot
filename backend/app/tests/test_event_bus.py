@@ -152,6 +152,109 @@ def test_normalize_bot_update_projects_inline_query() -> None:
     assert event["native_raw_meta"]["enabled"] is False
 
 
+def test_normalize_bot_update_projects_developer_message_summary() -> None:
+    event = normalize_bot_update(
+        1,
+        {
+            "update_id": 43,
+            "message": {
+                "message_id": 9,
+                "message_thread_id": 77,
+                "text": "打开 文档",
+                "chat": {"id": -100, "type": "supergroup", "title": "Demo"},
+                "from": {"id": 1001, "first_name": "Alice"},
+                "entities": [{"type": "bot_command", "offset": 0, "length": 2}],
+                "document": {
+                    "file_id": "file-1",
+                    "file_unique_id": "uniq-1",
+                    "file_name": "demo.txt",
+                    "mime_type": "text/plain",
+                    "file_size": 10,
+                },
+                "reply_markup": {
+                    "inline_keyboard": [[{"text": "开始", "callback_data": "demo:start"}]]
+                },
+                "reply_to_message": {
+                    "message_id": 8,
+                    "text": "上一条",
+                    "from": {"id": 1002, "first_name": "Bob"},
+                },
+            },
+        },
+    )
+
+    assert event["message"]["thread_id"] == 77
+    assert event["message"]["reply_to_message_id"] == 8
+    assert event["message"]["entities"][0]["type"] == "bot_command"
+    assert event["message"]["media"]["type"] == "document"
+    assert event["message"]["reply_markup"]["button_count"] == 1
+    assert event["reply_to"]["sender"]["user_id"] == 1002
+    assert event["raw"]["media"]["file_name"] == "demo.txt"
+    assert event["raw"]["reply_markup"]["buttons"][0]["callback_data"] == "demo:start"
+
+
+def test_normalize_bot_update_projects_anonymous_admin_sender_chat() -> None:
+    event = normalize_bot_update(
+        1,
+        {
+            "update_id": 44,
+            "message": {
+                "message_id": 10,
+                "text": "开24点",
+                "chat": {"id": -100123, "type": "supergroup", "title": "Demo Group"},
+                "from": {
+                    "id": 1087968824,
+                    "is_bot": True,
+                    "first_name": "GroupAnonymousBot",
+                    "username": "GroupAnonymousBot",
+                },
+                "sender_chat": {
+                    "id": -100123,
+                    "type": "supergroup",
+                    "title": "Demo Group",
+                    "username": "demo_group",
+                },
+            },
+        },
+    )
+    subscription = normalize_event_subscription(
+        {
+            "source": ["interaction_bot"],
+            "events": ["message"],
+            "scope": "all_allowed_chats",
+            "filters": {"keywords": ["开24点"]},
+            "entry_key": "start_paid_game",
+        },
+        plugin_key="game24",
+    )
+    owner_subscription = normalize_event_subscription(
+        {
+            "source": ["interaction_bot"],
+            "events": ["message"],
+            "scope": "owner_only",
+            "filters": {"keywords": ["开24点"]},
+            "entry_key": "admin_start",
+        },
+        plugin_key="admin_game",
+    )
+
+    decisions = dispatch_event(
+        event,
+        [subscription, owner_subscription],
+        {"allowed_chat_ids": [-100123], "owner_user_ids": [1087968824]},
+    ).decisions
+
+    assert event["sender"]["user_id"] is None
+    assert event["sender"]["sender_type"] == "chat"
+    assert event["sender"]["sender_chat"]["id"] == -100123
+    assert event["sender"]["display_name"] == "Demo Group"
+    assert event["message"]["sender_chat"]["id"] == -100123
+    assert decisions[0].matched is True
+    assert decisions[0].reason_code == "matched"
+    assert decisions[1].matched is False
+    assert decisions[1].reason_code == "scope_not_matched"
+
+
 def test_match_subscription_accepts_inline_all_scope() -> None:
     event = normalize_bot_update(
         1,

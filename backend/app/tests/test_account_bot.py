@@ -54,6 +54,13 @@ class _MemoryRedis:
         return 1
 
 
+@pytest.fixture(autouse=True)
+def _clear_transfer_command_dedupe():
+    account_bot_runtime._TRANSFER_COMMAND_DEDUPE.clear()
+    yield
+    account_bot_runtime._TRANSFER_COMMAND_DEDUPE.clear()
+
+
 @pytest.mark.asyncio
 async def test_worker_pubsub_idle_timeout_is_treated_as_no_message() -> None:
     class _PubSub:
@@ -1209,6 +1216,92 @@ async def test_update_transfer_notice_requires_trusted_bot_for_payment_rules(mon
 
     assert exc_info.value.status_code == 422
     assert exc_info.value.detail["code"] == "TRUSTED_BOT_ID_REQUIRED"
+
+
+@pytest.mark.asyncio
+async def test_update_transfer_notice_syncs_enabled_module_rules_to_account_features(monkeypatch) -> None:
+    existing = account_bot_service.AccountFeature(
+        account_id=1,
+        feature_key="dice_grid_hunt",
+        enabled=False,
+        config={"kept": True},
+        state="disabled",
+        last_error="old error",
+    )
+
+    class _DB:
+        def __init__(self) -> None:
+            self.added: list[object] = []
+
+        async def get(self, model, key):  # noqa: ANN001
+            if model is Account:
+                return SimpleNamespace(id=1)
+            if model is account_bot_service.SystemSetting:
+                return None
+            if model is account_bot_service.Feature:
+                return SimpleNamespace(key=key) if key in {"game24", "dice_grid_hunt", "math10"} else None
+            if model is account_bot_service.AccountFeature:
+                if key == {"account_id": 1, "feature_key": "dice_grid_hunt"}:
+                    return existing
+                return None
+            return None
+
+        def add(self, row):  # noqa: ANN001
+            self.added.append(row)
+
+        async def flush(self):
+            return None
+
+    db = _DB()
+    monkeypatch.setattr(account_bot_service, "ensure_account", AsyncMock())
+
+    await account_bot_service.update_transfer_notice_config(
+        db,
+        1,
+        {
+            "enabled": True,
+            "rules": [
+                {
+                    "id": "game24",
+                    "enabled": True,
+                    "trigger_mode": "keyword",
+                    "module_start_keywords": ["我要24点"],
+                    "action": "module",
+                    "module_key": "game24",
+                    "module_action": "start_paid_game",
+                },
+                {
+                    "id": "dice",
+                    "enabled": True,
+                    "trigger_mode": "keyword",
+                    "module_start_keywords": ["我要猜骰"],
+                    "action": "module",
+                    "module_key": "dice_grid_hunt",
+                    "module_action": "start_dice_grid_hunt",
+                },
+                {
+                    "id": "disabled-math",
+                    "enabled": False,
+                    "trigger_mode": "keyword",
+                    "module_start_keywords": ["算数题"],
+                    "action": "module",
+                    "module_key": "math10",
+                    "module_action": "start_math_game",
+                },
+            ],
+        },
+    )
+
+    added_features = [
+        row for row in db.added
+        if isinstance(row, account_bot_service.AccountFeature)
+    ]
+    assert [(row.account_id, row.feature_key, row.enabled) for row in added_features] == [(1, "game24", True)]
+    assert existing.enabled is True
+    assert existing.config == {"kept": True}
+    assert existing.state == "disabled"
+    assert existing.last_error is None
+    assert all(getattr(row, "feature_key", None) != "math10" for row in db.added)
 
 
 @pytest.mark.asyncio
@@ -3874,6 +3967,108 @@ async def test_plus_amount_notice_ignores_rule_amount_threshold(monkeypatch) -> 
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "reply_to_message",
+    [
+        None,
+        {
+            "message_id": 49,
+            "from": {"id": 8875144459, "is_bot": True, "first_name": "玩法Bot"},
+            "text": "该傻瓜玩法是付费娱乐模块，请对收款人：@uhaveanswer的任意消息回复+234即可参与。",
+        },
+    ],
+    ids=["plain_plus_amount", "reply_to_interaction_bot_prompt"],
+)
+async def test_interaction_bot_plus_amount_emits_transfer_notice_for_paid_default_receiver(
+    monkeypatch,
+    reply_to_message,
+) -> None:
+    class _DB:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def commit(self):
+            return None
+
+        async def get(self, model, *_args):  # noqa: ANN002
+            if model is Account:
+                return SimpleNamespace(tg_user_id=1682400007, tg_username="uhaveanswer", display_name="你心里已经有答案了")
+            return None
+
+    account_bot_runtime._TRANSFER_COMMAND_DEDUPE.clear()
+    send = AsyncMock(return_value={"from": {"id": 456}, "message_id": 50})
+    monkeypatch.setattr(account_bot_runtime, "AsyncSessionLocal", lambda: _DB())
+    monkeypatch.setattr(
+        account_bot_runtime,
+        "_event_framework_flags",
+        AsyncMock(return_value={"trace_enabled": False, "event_bus_delivery_enabled": True, "inline_updates_enabled": True}),
+    )
+    monkeypatch.setattr(account_bot_service, "send_message", send)
+    monkeypatch.setattr(account_bot_service, "find_bot_user", AsyncMock())
+    monkeypatch.setattr(account_bot_service, "get_transfer_bot_token", AsyncMock(return_value="abot-token"))
+    monkeypatch.setattr(
+        account_bot_service,
+        "get_transfer_notice_config",
+        AsyncMock(
+            return_value={
+                "enabled": True,
+                "interaction_bot_id": 8875144459,
+                "trusted_bot_id": 456,
+                "transfer_bot_id": 456,
+                "transfer_notice_template": "转账成功\n{payer_name} 射出 {amount}\n{receiver_name} 接收 {amount}\n{receiver_user_id_line}",
+                "rules": [
+                    {
+                        "id": "silly-math",
+                        "name": "傻瓜玩法",
+                        "enabled": True,
+                        "chat_ids": [-100123],
+                        "trigger_mode": "both",
+                        "trigger_texts": ["转账成功"],
+                        "module_start_keywords": ["我是傻瓜！"],
+                        "amount": 234,
+                        "amount_match_mode": "eq",
+                        "action": "module",
+                        "module_key": "math10",
+                        "module_action": "start_math_game",
+                    },
+                ],
+            }
+        ),
+    )
+
+    message = {
+        "message_id": 50,
+        "text": "+234",
+        "from": {"id": 5843467471, "first_name": "玩家A"},
+        "chat": {"id": -100123, "type": "supergroup"},
+    }
+    if reply_to_message is not None:
+        message["reply_to_message"] = reply_to_message
+
+    await account_bot_runtime._handle_interaction_update(
+        1,
+        "bbot-token",
+        {
+            "update_id": 50,
+            "message": message,
+        },
+    )
+
+    assert send.await_count == 1
+    assert send.await_args.args[:2] == ("abot-token", -100123)
+    notice = send.await_args.args[2]
+    assert "玩家A 射出 234" in notice
+    assert "uhaveanswer 接收 234" in notice
+    assert "收款人ID：1682400007" in notice
+    assert "玩法Bot 接收" not in notice
+    assert send.await_args.kwargs["reply_to_message_id"] == 50
+    account_bot_runtime._TRANSFER_COMMAND_DEDUPE.clear()
+
+
+@pytest.mark.asyncio
 async def test_reply_plus_amount_without_transfer_bot_token_waits_for_real_notice(monkeypatch) -> None:
     class _DB:
         async def __aenter__(self):
@@ -5590,6 +5785,94 @@ async def test_interaction_keyword_invokes_module_interaction_entry_and_payment_
     assert payload["event_type"] == "keyword"
     assert payload["prize"] == 321
     assert send.await_args.args[:3] == ("bbot-token", -100123, "24 点开始\n奖金：321")
+
+
+@pytest.mark.asyncio
+async def test_interaction_keyword_accepts_anonymous_admin_sender_chat_without_owner_identity(monkeypatch) -> None:
+    class _DB:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def get(self, *_args):  # noqa: ANN002
+            return None
+
+    run_entry = AsyncMock(return_value=(True, None, [{"type": "send_message", "text": "已启动"}]))
+    send = AsyncMock()
+    monkeypatch.setattr(account_bot_runtime, "AsyncSessionLocal", lambda: _DB())
+    monkeypatch.setattr(
+        account_bot_runtime,
+        "_event_framework_flags",
+        AsyncMock(return_value={"trace_enabled": False, "event_bus_delivery_enabled": False, "inline_updates_enabled": True}),
+    )
+    monkeypatch.setattr(account_bot_runtime, "_run_worker_interaction_entry", run_entry)
+    monkeypatch.setattr(account_bot_runtime, "get_redis", lambda: _MemoryRedis())
+    monkeypatch.setattr(account_bot_service, "send_message", send)
+    monkeypatch.setattr(
+        account_bot_service,
+        "get_transfer_notice_config",
+        AsyncMock(
+            return_value={
+                "enabled": True,
+                "rules": [
+                    {
+                        "id": "keyword-game24",
+                        "enabled": True,
+                        "chat_ids": [-100123],
+                        "trigger_mode": "keyword",
+                        "module_start_keywords": ["开24点"],
+                        "action": "module",
+                        "module_key": "game24",
+                        "module_action": "start_paid_game",
+                        "module_prize": 321,
+                    },
+                ],
+            }
+        ),
+    )
+
+    await account_bot_runtime._handle_interaction_update(
+        1,
+        "bbot-token",
+        {
+            "update_id": 994,
+            "message": {
+                "message_id": 9940,
+                "text": "开24点",
+                "from": {
+                    "id": 1087968824,
+                    "is_bot": True,
+                    "first_name": "GroupAnonymousBot",
+                    "username": "GroupAnonymousBot",
+                },
+                "sender_chat": {
+                    "id": -100123,
+                    "type": "supergroup",
+                    "title": "Demo Group",
+                    "username": "demo_group",
+                },
+                "chat": {"id": -100123, "type": "supergroup", "title": "Demo Group"},
+            },
+        },
+    )
+
+    assert run_entry.await_count == 1
+    payload = run_entry.await_args.kwargs["payload"]
+    assert payload["sender_user_id"] is None
+    assert payload["sender_chat_id"] == -100123
+    assert payload["sender_name"] == "Demo Group"
+    assert payload["event"]["user_id"] is None
+    assert payload["event"]["sender_chat_id"] == -100123
+    assert payload["actor"]["sender_type"] == "chat"
+    assert payload["actor"]["sender_chat"]["id"] == -100123
+    assert payload["source_actor"]["sender_type"] == "chat"
+    assert payload["message"]["sender_chat"]["id"] == -100123
+    assert payload["player"]["user_id"] is None
+    assert payload["player"]["sender_type"] == "chat"
+    assert payload["player"]["identity_key"] == "sender_chat:-100123"
+    assert send.await_args.args[:3] == ("bbot-token", -100123, "已启动")
 
 
 @pytest.mark.asyncio
@@ -7600,7 +7883,7 @@ async def test_transfer_notice_module_rule_starts_game24_with_interaction_bot(mo
 
 
 @pytest.mark.asyncio
-async def test_disabled_active_paid_pool_session_payment_bypasses_static_rule_amount(monkeypatch) -> None:
+async def test_disabled_active_paid_pool_session_payment_bypasses_rule_state(monkeypatch) -> None:
     class _DB:
         async def __aenter__(self):
             return self
@@ -7682,7 +7965,7 @@ async def test_disabled_active_paid_pool_session_payment_bypasses_static_rule_am
             "update_id": 8,
             "message": {
                 "message_id": 80,
-                "text": "转账成功\n你心里没点数？ 射出 100\n你心里已经有答案了 接收 100",
+                "text": "转账成功\n你心里没点数？ 射出 1000\n你心里已经有答案了 接收 1000",
                 "from": {"id": 456, "is_bot": True, "first_name": "Abot"},
                 "chat": {"id": -100123, "type": "supergroup"},
             },
@@ -7694,9 +7977,102 @@ async def test_disabled_active_paid_pool_session_payment_bypasses_static_rule_am
     assert run_entry.await_args.kwargs["entry_key"] == "start_ten_half"
     payload = run_entry.await_args.kwargs["payload"]
     assert payload["event_type"] == "payment_confirmed"
-    assert payload["payment"]["amount"] == 100
+    assert payload["payment"]["amount"] == 1000
     assert payload["module_config"]["bet"] == 1000
     assert send.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_active_paid_pool_session_skips_mismatched_payment_amount(monkeypatch) -> None:
+    class _DB:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def commit(self):
+            return None
+
+        async def get(self, model, *_args):  # noqa: ANN002
+            if model is Account:
+                return SimpleNamespace(tg_username="owner", display_name="你心里已经有答案了", tg_user_id=999)
+            return None
+
+    redis = _MemoryRedis()
+    rule = {
+        "id": "ten-half-paid",
+        "enabled": True,
+        "chat_ids": [-100123],
+        "trigger_mode": "both",
+        "trigger_texts": ["转账成功"],
+        "module_start_keywords": ["10d"],
+        "receiver_text": "你心里已经有答案了",
+        "amount": 1000,
+        "amount_match_mode": "eq",
+        "action": "module",
+        "module_key": "ten_half",
+        "module_action": "start_ten_half",
+        "module_session_scope": "chat",
+        "module_config": {"bet": 1000, "max_players": 5},
+    }
+    await redis.set(
+        account_bot_runtime._interaction_session_key(1, rule, -100123, None),
+        json.dumps(
+            {
+                "account_id": 1,
+                "chat_id": -100123,
+                "rule_id": "ten-half-paid",
+                "module_key": "ten_half",
+                "entry_key": "start_ten_half",
+                "started_by_user_id": 111,
+                "event_type": "keyword",
+            },
+            ensure_ascii=False,
+        ),
+    )
+    run_entry = AsyncMock(return_value=(True, None, [{"type": "send_message", "text": "不应该加入"}]))
+    send = AsyncMock()
+    monkeypatch.setattr(account_bot_runtime, "AsyncSessionLocal", lambda: _DB())
+    monkeypatch.setattr(account_bot_runtime, "get_redis", lambda: redis)
+    monkeypatch.setattr(account_bot_runtime.audit, "write", AsyncMock())
+    monkeypatch.setattr(account_bot_runtime, "_run_worker_interaction_entry", run_entry)
+    monkeypatch.setattr(account_bot_service, "send_message", send)
+    monkeypatch.setattr(
+        account_bot_service,
+        "declared_module_entry_events",
+        lambda module_key, entry_key: ["payment_confirmed", "keyword", "message", "callback_query"]
+        if (module_key, entry_key) == ("ten_half", "start_ten_half")
+        else [],
+    )
+    monkeypatch.setattr(
+        account_bot_service,
+        "get_transfer_notice_config",
+        AsyncMock(
+            return_value={
+                "enabled": True,
+                "trusted_bot_id": 456,
+                "rules": [rule],
+            }
+        ),
+    )
+
+    await account_bot_runtime._handle_interaction_update(
+        1,
+        "bbot-token",
+        {
+            "update_id": 81,
+            "message": {
+                "message_id": 810,
+                "text": "转账成功\n你心里没点数？ 射出 100\n你心里已经有答案了 接收 100",
+                "from": {"id": 456, "is_bot": True, "first_name": "Abot"},
+                "chat": {"id": -100123, "type": "supergroup"},
+            },
+        },
+    )
+
+    run_entry.assert_not_awaited()
+    send.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -7782,7 +8158,7 @@ async def test_parsed_transfer_notice_without_trigger_text_matches_active_paid_p
             "update_id": 9,
             "message": {
                 "message_id": 90,
-                "text": "你心里没点数？ 射出 6666 蝌蚪\n你心里已经有答案了 接收 6666 蝌蚪",
+                "text": "你心里没点数？ 射出 1000 蝌蚪\n你心里已经有答案了 接收 1000 蝌蚪",
                 "from": {"id": 456, "is_bot": True, "first_name": "Abot"},
                 "chat": {"id": -100123, "type": "supergroup"},
             },
@@ -7794,7 +8170,7 @@ async def test_parsed_transfer_notice_without_trigger_text_matches_active_paid_p
     assert run_entry.await_args.kwargs["entry_key"] == "start_ten_half"
     payload = run_entry.await_args.kwargs["payload"]
     assert payload["event_type"] == "payment_confirmed"
-    assert payload["payment"]["amount"] == 6666
+    assert payload["payment"]["amount"] == 1000
     assert payload["module_config"]["bet"] == 1000
     assert send.await_count == 1
 
@@ -7863,8 +8239,8 @@ async def test_transfer_notice_prefers_event_bus_payment_subscription(monkeypatc
                         "receiver_text": "BBB",
                         "amount": 100,
                         "action": "module",
-                        "module_key": "legacy_game",
-                        "module_action": "start_paid_game",
+                        "module_key": "payment_plugin",
+                        "module_action": "on_payment",
                     },
                 ],
             }
@@ -7894,6 +8270,115 @@ async def test_transfer_notice_prefers_event_bus_payment_subscription(monkeypatc
     assert payload["payment"]["amount"] == 100
     assert payload["source_actor"]["type"] == "external_bot"
     legacy_execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_transfer_notice_event_bus_payment_uses_matching_rule_only(monkeypatch) -> None:
+    class _Result:
+        def scalars(self):
+            return self
+
+        def all(self):
+            return [SimpleNamespace(feature_key="math10"), SimpleNamespace(feature_key="ten_half")]
+
+    class _DB:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def execute(self, _stmt):  # noqa: ANN001
+            return _Result()
+
+        async def get(self, model, *_args):  # noqa: ANN002
+            if model is Account:
+                return SimpleNamespace(tg_username="owner", display_name="Owner", tg_user_id=999)
+            return None
+
+        async def commit(self):
+            return None
+
+    run_entry = AsyncMock(return_value=(True, None, [{"type": "send_message", "text": "math ok"}]))
+    monkeypatch.setattr(account_bot_runtime, "AsyncSessionLocal", lambda: _DB())
+    monkeypatch.setattr(account_bot_runtime.audit, "write", AsyncMock())
+    monkeypatch.setattr(account_bot_runtime, "_run_worker_interaction_entry", run_entry)
+    monkeypatch.setattr(account_bot_runtime, "_guard_interaction_actions", AsyncMock(side_effect=lambda _incoming, _rule, actions: actions))
+    monkeypatch.setattr(account_bot_runtime, "_apply_interaction_actions", AsyncMock())
+    monkeypatch.setattr(account_bot_service, "plugin_declares_telegram_native_raw", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(
+        account_bot_service,
+        "declared_module_event_subscriptions",
+        lambda key: [
+            {
+                "source": ["external_payment_notice"],
+                "events": ["payment_confirmed"],
+                "scope": "all_allowed_chats",
+                "entry_key": "start_math_game" if key == "math10" else "start_ten_half",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        account_bot_service,
+        "get_transfer_notice_config",
+        AsyncMock(
+            return_value={
+                "enabled": True,
+                "trusted_bot_id": 456,
+                "rules": [
+                    {
+                        "id": "silly-math",
+                        "name": "傻瓜玩法",
+                        "enabled": True,
+                        "chat_ids": [-100123],
+                        "trigger_mode": "both",
+                        "trigger_texts": ["转账成功"],
+                        "receiver_text": "Owner",
+                        "amount": 234,
+                        "amount_match_mode": "eq",
+                        "action": "module",
+                        "module_key": "math10",
+                        "module_action": "start_math_game",
+                    },
+                    {
+                        "id": "ten-half",
+                        "name": "十点半",
+                        "enabled": True,
+                        "chat_ids": [-100123],
+                        "trigger_mode": "both",
+                        "trigger_texts": ["转账成功"],
+                        "receiver_text": "Owner",
+                        "amount": 1000,
+                        "amount_match_mode": "eq",
+                        "action": "module",
+                        "module_key": "ten_half",
+                        "module_action": "start_ten_half",
+                    },
+                ],
+            }
+        ),
+    )
+
+    await account_bot_runtime._handle_interaction_update(
+        1,
+        "bbot-token",
+        {
+            "update_id": 7,
+            "message": {
+                "message_id": 70,
+                "text": "转账成功\nAAA 射出 234\nOwner 接收 234",
+                "from": {"id": 456, "is_bot": True, "first_name": "Abot"},
+                "chat": {"id": -100123, "type": "supergroup"},
+            },
+        },
+    )
+
+    run_entry.assert_awaited_once()
+    assert run_entry.await_args.kwargs["plugin_key"] == "math10"
+    assert run_entry.await_args.kwargs["entry_key"] == "start_math_game"
+    payload = run_entry.await_args.kwargs["payload"]
+    assert payload["payment"]["amount"] == 234
+    assert payload["rule_id"] == "silly-math"
 
 
 @pytest.mark.asyncio
@@ -8002,7 +8487,7 @@ async def test_transfer_notice_respects_event_bus_delivery_switch(monkeypatch) -
 
 
 @pytest.mark.asyncio
-async def test_transfer_notice_event_bus_payment_subscription_without_legacy_rule(monkeypatch) -> None:
+async def test_transfer_notice_event_bus_payment_subscription_without_matching_rule_is_consumed(monkeypatch) -> None:
     class _Result:
         def scalars(self):
             return self
@@ -8076,12 +8561,7 @@ async def test_transfer_notice_event_bus_payment_subscription_without_legacy_rul
         },
     )
 
-    run_entry.assert_awaited_once()
-    assert run_entry.await_args.kwargs["plugin_key"] == "payment_plugin"
-    assert run_entry.await_args.kwargs["entry_key"] == "on_payment"
-    payload = run_entry.await_args.kwargs["payload"]
-    assert payload["event_type"] == "payment_confirmed"
-    assert payload["payment"]["amount"] == 100
+    run_entry.assert_not_awaited()
     legacy_execute.assert_not_awaited()
 
 

@@ -179,6 +179,7 @@ def normalize_bot_update(account_id: int, update: dict[str, Any], *, channel: st
         chat = msg.get("chat") if isinstance(msg.get("chat"), dict) else {}
         sender = _user_ref(callback.get("from"))
         text = str(msg.get("text") or msg.get("caption") or "")
+        message_payload = _bot_message_payload(msg, chat=chat)
         return _event(
             account_id=account_id,
             channel=channel,
@@ -187,23 +188,27 @@ def normalize_bot_update(account_id: int, update: dict[str, Any], *, channel: st
             update_id=update_id,
             chat={"id": _int_or_none(chat.get("id")), "type": str(chat.get("type") or "") or None},
             sender=sender,
-            message={
-                "chat_id": _int_or_none(chat.get("id")),
-                "message_id": _int_or_none(msg.get("message_id")),
-                "text": text,
-            },
+            message=message_payload,
             callback={
                 "id": str(callback.get("id") or ""),
                 "data": str(callback.get("data") or ""),
             },
-            raw_summary={"update_id": update_id, "event_type": "callback_query", "callback_data": callback.get("data")},
+            reply_to=_bot_reply_to(msg),
+            raw_summary=_bot_raw_summary(
+                update_id=update_id,
+                event_type="callback_query",
+                msg=msg,
+                callback_data=callback.get("data"),
+                callback_query_id=callback.get("id"),
+                text=text,
+            ),
             native_raw=update,
         )
     msg = update.get("message") if isinstance(update.get("message"), dict) else {}
     chat = msg.get("chat") if isinstance(msg.get("chat"), dict) else {}
-    sender = _user_ref(msg.get("from"))
+    sender = _bot_sender_ref(msg)
     text = str(msg.get("text") or msg.get("caption") or "")
-    reply = msg.get("reply_to_message") if isinstance(msg.get("reply_to_message"), dict) else {}
+    message_payload = _bot_message_payload(msg, chat=chat)
     return _event(
         account_id=account_id,
         channel=channel,
@@ -212,16 +217,9 @@ def normalize_bot_update(account_id: int, update: dict[str, Any], *, channel: st
         update_id=update_id,
         chat={"id": _int_or_none(chat.get("id")), "type": str(chat.get("type") or "") or None},
         sender=sender,
-        message={
-            "chat_id": _int_or_none(chat.get("id")),
-            "message_id": _int_or_none(msg.get("message_id")),
-            "text": text,
-            "reply_to_message_id": _int_or_none(reply.get("message_id")),
-        },
-        reply_to={"message_id": _int_or_none(reply.get("message_id")), "text": str(reply.get("text") or "") or None}
-        if reply
-        else None,
-        raw_summary={"update_id": update_id, "event_type": "message", "text": text},
+        message=message_payload,
+        reply_to=_bot_reply_to(msg),
+        raw_summary=_bot_raw_summary(update_id=update_id, event_type="message", msg=msg, text=text),
         native_raw=update,
     )
 
@@ -235,6 +233,13 @@ def normalize_userbot_event(account_id: int, event: Any, *, command_meta: dict[s
     sender_id = _int_or_none(getattr(message, "sender_id", None) or getattr(event, "sender_id", None))
     message_id = _int_or_none(getattr(message, "id", None) or getattr(event, "id", None))
     event_type = "command" if command_meta else "message"
+    native_raw = _safe_to_dict(message)
+    message_payload = _telethon_message_payload(
+        raw=native_raw,
+        chat_id=chat_id,
+        message_id=message_id,
+        text=text,
+    )
     return _event(
         account_id=account_id,
         channel="userbot",
@@ -242,10 +247,11 @@ def normalize_userbot_event(account_id: int, event: Any, *, command_meta: dict[s
         event_type=event_type,
         chat={"id": chat_id},
         sender={"user_id": sender_id},
-        message={"chat_id": chat_id, "message_id": message_id, "text": text},
+        message=message_payload,
+        reply_to=_telethon_reply_to(native_raw),
         trigger=dict(command_meta or {}),
-        raw_summary={"event_type": event_type, "text": text},
-        native_raw=_safe_to_dict(message),
+        raw_summary=_telethon_raw_summary(native_raw, event_type=event_type, text=text),
+        native_raw=native_raw,
     )
 
 
@@ -454,6 +460,133 @@ def _event(
     return payload
 
 
+def _bot_message_payload(msg: dict[str, Any], *, chat: dict[str, Any]) -> dict[str, Any]:
+    reply = msg.get("reply_to_message") if isinstance(msg.get("reply_to_message"), dict) else {}
+    text = str(msg.get("text") or msg.get("caption") or "")
+    payload: dict[str, Any] = {
+        "chat_id": _int_or_none(chat.get("id")),
+        "message_id": _int_or_none(msg.get("message_id")),
+        "text": text,
+        "reply_to_message_id": _int_or_none(reply.get("message_id")),
+    }
+    optional = {
+        "caption": str(msg.get("caption") or "") or None,
+        "thread_id": _int_or_none(msg.get("message_thread_id")),
+        "entities": _entity_summary(msg.get("entities")),
+        "caption_entities": _entity_summary(msg.get("caption_entities")),
+        "media": _bot_media_summary(msg),
+        "reply_markup": _reply_markup_summary(msg.get("reply_markup")),
+        "forward": _forward_summary(msg),
+        "sender_chat": _chat_ref(msg.get("sender_chat")),
+        "via_bot": _user_ref_or_none(msg.get("via_bot")),
+    }
+    for key, value in optional.items():
+        if value not in (None, "", [], {}):
+            payload[key] = value
+    return payload
+
+
+def _bot_reply_to(msg: dict[str, Any]) -> dict[str, Any] | None:
+    reply = msg.get("reply_to_message") if isinstance(msg.get("reply_to_message"), dict) else {}
+    if not reply:
+        return None
+    sender = _bot_sender_ref_or_none(reply)
+    out = {
+        "message_id": _int_or_none(reply.get("message_id")),
+        "text": str(reply.get("text") or reply.get("caption") or "") or None,
+        "sender": sender if sender else None,
+    }
+    return {key: value for key, value in out.items() if value not in (None, "", [], {})}
+
+
+def _bot_raw_summary(
+    *,
+    update_id: int | None,
+    event_type: str,
+    msg: dict[str, Any],
+    text: str | None = None,
+    **extra: Any,
+) -> dict[str, Any]:
+    summary: dict[str, Any] = {
+        "update_id": update_id,
+        "event_type": event_type,
+        "text": text if text is not None else str(msg.get("text") or msg.get("caption") or ""),
+        "entities": _entity_summary(msg.get("entities")),
+        "caption_entities": _entity_summary(msg.get("caption_entities")),
+        "media": _bot_media_summary(msg),
+        "reply_markup": _reply_markup_summary(msg.get("reply_markup")),
+        "forward": _forward_summary(msg),
+        "sender_chat": _chat_ref(msg.get("sender_chat")),
+        "via_bot": _user_ref_or_none(msg.get("via_bot")),
+        "thread_id": _int_or_none(msg.get("message_thread_id")),
+        "edit_date": msg.get("edit_date"),
+        "service": _service_summary(msg),
+    }
+    summary.update({key: value for key, value in extra.items() if value not in (None, "", [], {})})
+    return {key: value for key, value in summary.items() if value not in (None, "", [], {})}
+
+
+def _telethon_message_payload(
+    *,
+    raw: dict[str, Any] | None,
+    chat_id: int | None,
+    message_id: int | None,
+    text: str,
+) -> dict[str, Any]:
+    data = raw if isinstance(raw, dict) else {}
+    reply_to = data.get("reply_to") if isinstance(data.get("reply_to"), dict) else {}
+    payload: dict[str, Any] = {
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "text": text,
+        "reply_to_message_id": _int_or_none(
+            reply_to.get("reply_to_msg_id")
+            or reply_to.get("reply_to_top_id")
+            or data.get("reply_to_msg_id")
+        ),
+    }
+    optional = {
+        "thread_id": _int_or_none(reply_to.get("reply_to_top_id") or data.get("message_thread_id")),
+        "entities": _entity_summary(data.get("entities")),
+        "media": _native_media_summary(data.get("media")),
+        "reply_markup": _reply_markup_summary(data.get("reply_markup")),
+        "forward": _telethon_forward_summary(data),
+        "sender_chat": _chat_ref(data.get("sender_chat")),
+        "via_bot": _user_ref_or_none(data.get("via_bot")),
+    }
+    for key, value in optional.items():
+        if value not in (None, "", [], {}):
+            payload[key] = value
+    return payload
+
+
+def _telethon_reply_to(raw: dict[str, Any] | None) -> dict[str, Any] | None:
+    data = raw if isinstance(raw, dict) else {}
+    reply_to = data.get("reply_to") if isinstance(data.get("reply_to"), dict) else {}
+    message_id = _int_or_none(reply_to.get("reply_to_msg_id") or reply_to.get("reply_to_top_id"))
+    if message_id is None:
+        return None
+    return {"message_id": message_id}
+
+
+def _telethon_raw_summary(raw: dict[str, Any] | None, *, event_type: str, text: str) -> dict[str, Any]:
+    data = raw if isinstance(raw, dict) else {}
+    summary = {
+        "event_type": event_type,
+        "text": text,
+        "entities": _entity_summary(data.get("entities")),
+        "media": _native_media_summary(data.get("media")),
+        "reply_markup": _reply_markup_summary(data.get("reply_markup")),
+        "forward": _telethon_forward_summary(data),
+        "sender_chat": _chat_ref(data.get("sender_chat")),
+        "via_bot": _user_ref_or_none(data.get("via_bot")),
+        "thread_id": _int_or_none(_nested(data, "reply_to", "reply_to_top_id")),
+        "edit_date": data.get("edit_date"),
+        "service": str(data.get("_") or "") or None,
+    }
+    return {key: value for key, value in summary.items() if value not in (None, "", [], {})}
+
+
 def _user_ref(raw: Any) -> dict[str, Any]:
     data = raw if isinstance(raw, dict) else {}
     first = str(data.get("first_name") or "").strip()
@@ -464,6 +597,237 @@ def _user_ref(raw: Any) -> dict[str, Any]:
         "display_name": display or str(data.get("username") or "").strip() or None,
         "username": str(data.get("username") or "").strip() or None,
     }
+
+
+def _bot_sender_ref(msg: dict[str, Any]) -> dict[str, Any]:
+    sender_chat = _chat_ref(msg.get("sender_chat"))
+    from_ref = _user_ref_or_none(msg.get("from"))
+    if sender_chat and _sender_chat_is_message_author(msg):
+        return {
+            "user_id": None,
+            "display_name": sender_chat.get("title") or sender_chat.get("username") or str(sender_chat.get("id") or ""),
+            "username": sender_chat.get("username"),
+            "sender_type": "chat",
+            "sender_chat": sender_chat,
+        }
+    sender = from_ref or _user_ref(msg.get("from"))
+    if sender_chat:
+        sender["sender_type"] = "user_via_chat"
+        sender["sender_chat"] = sender_chat
+    return sender
+
+
+def _bot_sender_ref_or_none(msg: dict[str, Any]) -> dict[str, Any] | None:
+    sender = _bot_sender_ref(msg)
+    clean = {key: value for key, value in sender.items() if value not in (None, "", [], {})}
+    return clean or None
+
+
+def _sender_chat_is_message_author(msg: dict[str, Any]) -> bool:
+    sender_chat = msg.get("sender_chat") if isinstance(msg.get("sender_chat"), dict) else {}
+    if not sender_chat:
+        return False
+    from_user = msg.get("from") if isinstance(msg.get("from"), dict) else {}
+    if not from_user:
+        return True
+    return bool(from_user.get("is_bot")) and (
+        _int_or_none(from_user.get("id")) == 1087968824
+        or str(from_user.get("username") or "").casefold() == "groupanonymousbot"
+        or str(from_user.get("first_name") or "").casefold() == "groupanonymousbot"
+    )
+
+
+def _user_ref_or_none(raw: Any) -> dict[str, Any] | None:
+    ref = _user_ref(raw)
+    clean = {key: value for key, value in ref.items() if value not in (None, "", [], {})}
+    return clean or None
+
+
+def _chat_ref(raw: Any) -> dict[str, Any] | None:
+    data = raw if isinstance(raw, dict) else {}
+    if not data:
+        return None
+    out = {
+        "id": _int_or_none(data.get("id") or data.get("channel_id") or data.get("chat_id")),
+        "type": str(data.get("type") or data.get("_") or "") or None,
+        "title": str(data.get("title") or "") or None,
+        "username": str(data.get("username") or "") or None,
+    }
+    return {key: value for key, value in out.items() if value not in (None, "", [], {})} or None
+
+
+def _entity_summary(raw: Any) -> list[dict[str, Any]]:
+    if not isinstance(raw, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for item in raw[:20]:
+        data = item if isinstance(item, dict) else {}
+        entity_type = str(data.get("type") or data.get("_") or "").replace("MessageEntity", "").lower()
+        row = {
+            "type": entity_type or None,
+            "offset": _int_or_none(data.get("offset")),
+            "length": _int_or_none(data.get("length")),
+            "url": str(data.get("url") or "") or None,
+            "language": str(data.get("language") or "") or None,
+            "custom_emoji_id": str(data.get("custom_emoji_id") or "") or None,
+            "user_id": _int_or_none(_nested(data, "user", "id") or data.get("user_id")),
+        }
+        clean = {key: value for key, value in row.items() if value not in (None, "", [], {})}
+        if clean:
+            out.append(clean)
+    return out
+
+
+def _bot_media_summary(msg: dict[str, Any]) -> dict[str, Any] | None:
+    for key in (
+        "photo",
+        "document",
+        "video",
+        "audio",
+        "voice",
+        "sticker",
+        "animation",
+        "video_note",
+        "contact",
+        "location",
+        "venue",
+        "poll",
+        "dice",
+        "game",
+        "web_page",
+        "story",
+    ):
+        value = msg.get(key)
+        if value:
+            return _media_value_summary(key, value)
+    return None
+
+
+def _native_media_summary(raw: Any) -> dict[str, Any] | None:
+    data = raw if isinstance(raw, dict) else {}
+    if not data:
+        return None
+    media_type = str(data.get("_") or data.get("type") or "media")
+    return _media_value_summary(media_type, data)
+
+
+def _media_value_summary(media_type: str, raw: Any) -> dict[str, Any]:
+    if isinstance(raw, list):
+        data = raw[-1] if raw and isinstance(raw[-1], dict) else {}
+    elif isinstance(raw, dict):
+        data = raw
+    else:
+        data = {}
+    fields = {
+        "type": media_type,
+        "file_id": data.get("file_id"),
+        "file_unique_id": data.get("file_unique_id"),
+        "file_name": data.get("file_name"),
+        "mime_type": data.get("mime_type"),
+        "file_size": _int_or_none(data.get("file_size") or data.get("size")),
+        "width": _int_or_none(data.get("width") or data.get("w")),
+        "height": _int_or_none(data.get("height") or data.get("h")),
+        "duration": _int_or_none(data.get("duration")),
+        "emoji": data.get("emoji"),
+        "question": data.get("question"),
+    }
+    return {key: value for key, value in fields.items() if value not in (None, "", [], {})}
+
+
+def _reply_markup_summary(raw: Any) -> dict[str, Any] | None:
+    data = raw if isinstance(raw, dict) else {}
+    if not data:
+        return None
+    rows = data.get("inline_keyboard") or data.get("rows") or data.get("keyboard")
+    if not isinstance(rows, list):
+        return {"type": str(data.get("_") or data.get("type") or "reply_markup")}
+    buttons: list[dict[str, Any]] = []
+    for row_index, row in enumerate(rows[:12]):
+        cells = row if isinstance(row, list) else row.get("buttons") if isinstance(row, dict) else []
+        if not isinstance(cells, list):
+            continue
+        for col_index, button in enumerate(cells[:8]):
+            btn = button if isinstance(button, dict) else {}
+            text = str(btn.get("text") or "") or None
+            callback_data = btn.get("callback_data") or btn.get("data")
+            if isinstance(callback_data, bytes):
+                callback_data = callback_data.decode("utf-8", "replace")
+            item = {
+                "row": row_index,
+                "col": col_index,
+                "text": text,
+                "callback_data": str(callback_data or "") or None,
+                "url": str(btn.get("url") or "") or None,
+            }
+            clean = {key: value for key, value in item.items() if value not in (None, "", [], {})}
+            if clean:
+                buttons.append(clean)
+    return {"type": "inline_keyboard", "button_count": len(buttons), "buttons": buttons} if buttons else None
+
+
+def _forward_summary(msg: dict[str, Any]) -> dict[str, Any] | None:
+    origin = msg.get("forward_origin") if isinstance(msg.get("forward_origin"), dict) else {}
+    if origin:
+        sender_user = _user_ref_or_none(origin.get("sender_user"))
+        sender_chat = _chat_ref(origin.get("chat") or origin.get("sender_chat"))
+        out = {
+            "type": str(origin.get("type") or "") or None,
+            "sender_user": sender_user if sender_user else None,
+            "sender_chat": sender_chat,
+            "sender_name": str(origin.get("sender_user_name") or "") or None,
+            "date": origin.get("date"),
+        }
+        return {key: value for key, value in out.items() if value not in (None, "", [], {})} or None
+    if msg.get("forward_from") or msg.get("forward_from_chat") or msg.get("forward_sender_name"):
+        out = {
+            "sender_user": _user_ref_or_none(msg.get("forward_from")),
+            "sender_chat": _chat_ref(msg.get("forward_from_chat")),
+            "sender_name": str(msg.get("forward_sender_name") or "") or None,
+            "date": msg.get("forward_date"),
+        }
+        return {key: value for key, value in out.items() if value not in (None, "", [], {})} or None
+    return None
+
+
+def _telethon_forward_summary(raw: dict[str, Any]) -> dict[str, Any] | None:
+    fwd = raw.get("fwd_from") if isinstance(raw.get("fwd_from"), dict) else {}
+    if not fwd:
+        return None
+    out = {
+        "from_id": fwd.get("from_id"),
+        "from_name": fwd.get("from_name"),
+        "channel_post": fwd.get("channel_post"),
+        "date": fwd.get("date"),
+    }
+    return {key: value for key, value in out.items() if value not in (None, "", [], {})} or None
+
+
+def _service_summary(msg: dict[str, Any]) -> dict[str, Any] | None:
+    service_keys = [
+        "new_chat_members",
+        "left_chat_member",
+        "pinned_message",
+        "new_chat_title",
+        "new_chat_photo",
+        "delete_chat_photo",
+        "group_chat_created",
+        "supergroup_chat_created",
+        "channel_chat_created",
+        "forum_topic_created",
+        "forum_topic_closed",
+        "forum_topic_reopened",
+    ]
+    present = [key for key in service_keys if msg.get(key) not in (None, "", [], {})]
+    return {"types": present} if present else None
+
+
+def _nested(source: dict[str, Any], *path: str) -> Any:
+    current: Any = source
+    for key in path:
+        if not isinstance(current, dict):
+            return None
+        current = current.get(key)
+    return current
 
 
 def _string_list(value: Any) -> list[str]:

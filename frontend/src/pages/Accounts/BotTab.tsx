@@ -61,6 +61,10 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import {
+  listAccountFeatures,
+  updateAccountFeatureConfig,
+} from "@/api/accounts";
+import {
   createAccountBotUser,
   deleteAccountBotUser,
   getAccountBot,
@@ -243,6 +247,7 @@ type InteractionRuleForm = {
 type InteractionEntryOption = {
   featureKey: string;
   featureName: string;
+  featureConfig: Record<string, unknown>;
   featureUsage?: string | null;
   eventSubscriptions?: PluginEventSubscription[];
   capabilities?: PluginCapabilities;
@@ -658,6 +663,10 @@ function extraEntryConfigFields(entry?: FeatureInteractionEntry): Array<[string,
   return Object.entries(interactionSchemaProperties(entry)).filter(([key]) => !controlledKeys.has(key));
 }
 
+function hasOwnConfigValue(config: Record<string, unknown> | undefined, key: string): boolean {
+  return Boolean(config && Object.prototype.hasOwnProperty.call(config, key));
+}
+
 function interactionSchemaDefaults(entry?: FeatureInteractionEntry): Record<string, unknown> {
   const properties = interactionSchemaProperties(entry);
   const config: Record<string, unknown> = {};
@@ -707,12 +716,18 @@ function normalizeEntryConfigValue(field: ConfigField, value: unknown): unknown 
 function buildEntryConfigValues(
   entry: FeatureInteractionEntry | undefined,
   rawConfig: Record<string, unknown>,
+  preferredConfig?: Record<string, unknown>,
 ): Record<string, unknown> {
   const properties = interactionSchemaProperties(entry);
   const values: Record<string, unknown> = {};
   for (const [key, field] of Object.entries(properties)) {
     if (controlledEntryFieldKeys(entry).has(key)) continue;
-    values[key] = normalizeEntryConfigValue(field, rawConfig[key] ?? field.default ?? null);
+    const value = hasOwnConfigValue(preferredConfig, key)
+      ? preferredConfig?.[key]
+      : hasOwnConfigValue(rawConfig, key)
+        ? rawConfig[key]
+        : field.default ?? null;
+    values[key] = normalizeEntryConfigValue(field, value);
   }
   return values;
 }
@@ -733,8 +748,46 @@ function mergeEntryConfigValues(
   return next;
 }
 
-function defaultModuleConfigFromEntry(entry?: FeatureInteractionEntry): Record<string, unknown> {
-  return interactionSchemaDefaults(entry);
+function defaultModuleConfigFromEntry(
+  entry?: FeatureInteractionEntry,
+  featureConfig?: Record<string, unknown>,
+): Record<string, unknown> {
+  return buildEntryConfigValues(entry, interactionSchemaDefaults(entry), featureConfig);
+}
+
+function sameConfigValue(a: unknown, b: unknown): boolean {
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
+function buildFeatureConfigUpdateForRule(
+  rule: InteractionRuleForm,
+  interactionEntries: InteractionEntryOption[],
+  baseConfig: Record<string, unknown>,
+): { pluginKey: string; config: Record<string, unknown> } | null {
+  if (rule.action !== "module") return null;
+  const selection = resolveRuleModuleSelection(rule, interactionEntries);
+  if (!selection) return null;
+  const fields = extraEntryConfigFields(selection.entry);
+  if (fields.length <= 0) return null;
+
+  const nextConfig = { ...baseConfig };
+  let changed = false;
+  for (const [key, field] of fields) {
+    const normalized = normalizeEntryConfigValue(field, rule.moduleConfig[key]);
+    if (normalized === null || normalized === undefined || normalized === "") {
+      if (hasOwnConfigValue(nextConfig, key)) {
+        delete nextConfig[key];
+        changed = true;
+      }
+      continue;
+    }
+    if (!sameConfigValue(nextConfig[key], normalized)) {
+      nextConfig[key] = normalized;
+      changed = true;
+    }
+  }
+
+  return changed ? { pluginKey: selection.featureKey, config: nextConfig } : null;
 }
 
 function interactionEntryHasField(entry: FeatureInteractionEntry | undefined, key: string): boolean {
@@ -891,7 +944,16 @@ function ruleFormFromRule(
     moduleAction,
     moduleSessionScope,
     participantPolicy: rule.participant_policy || inferParticipantPolicy(selectedEntry?.entry, moduleSessionScope),
-    moduleConfig: stripControlledEntryConfig(rule.module_config ?? {}),
+    moduleConfig: selectedEntry
+      ? mergeEntryConfigValues(
+          selectedEntry.entry,
+          buildEntryConfigValues(
+            selectedEntry.entry,
+            stripControlledEntryConfig(rule.module_config ?? {}),
+            selectedEntry.featureConfig,
+          ),
+        )
+      : stripControlledEntryConfig(rule.module_config ?? {}),
     moduleStartText: rule.module_start_text ?? DEFAULT_INTERACTION_MODULE_START_TEXT,
     userCooldownSeconds: rule.user_cooldown_seconds ?? "",
     dailyLimitPerUser: rule.daily_limit_per_user == null ? "" : String(rule.daily_limit_per_user),
@@ -1104,7 +1166,7 @@ function InteractionRuleEditor({
           ? entryOption.entry.session_scope
           : "chat") as InteractionRuleForm["moduleSessionScope"];
         patch.participantPolicy = inferParticipantPolicy(entryOption.entry, entryOption.entry.session_scope);
-        patch.moduleConfig = defaultModuleConfigFromEntry(entryOption.entry);
+        patch.moduleConfig = defaultModuleConfigFromEntry(entryOption.entry, entryOption.featureConfig);
       }
     }
     onPatch(patch);
@@ -1118,7 +1180,7 @@ function InteractionRuleEditor({
         ? item.entry.session_scope
         : "chat") as InteractionRuleForm["moduleSessionScope"],
       participantPolicy: inferParticipantPolicy(item.entry, item.entry.session_scope),
-      moduleConfig: defaultModuleConfigFromEntry(item.entry),
+      moduleConfig: defaultModuleConfigFromEntry(item.entry, item.featureConfig),
     });
   };
 
@@ -1825,10 +1887,19 @@ export function BotTab({
     queryKey: ["feature-matrix"],
     queryFn: getFeatureMatrix,
   });
+  const featuresQ = useQuery({
+    queryKey: ["account", aid, "features"],
+    queryFn: () => listAccountFeatures(aid),
+    enabled: !!aid,
+  });
+  const accountFeatureConfigByKey = new Map(
+    (featuresQ.data ?? []).map((feature) => [feature.feature_key, feature.config ?? {}]),
+  );
   const interactionEntries: InteractionEntryOption[] = (matrixQ.data?.features ?? []).flatMap((feature) =>
     (feature.interaction_entries ?? []).map((entry: FeatureInteractionEntry) => ({
       featureKey: feature.key,
       featureName: feature.display_name,
+      featureConfig: accountFeatureConfigByKey.get(feature.key) ?? {},
       featureUsage: feature.usage,
       eventSubscriptions: feature.event_subscriptions,
       capabilities: feature.capabilities,
@@ -1897,7 +1968,7 @@ export function BotTab({
           : nextRules[0]?.id ?? null,
       );
     }
-  }, [interactionQ.data, matrixQ.data]);
+  }, [interactionQ.data, matrixQ.data, featuresQ.data]);
 
   useEffect(() => {
     setSelectedInteractionRuleId((current) =>
@@ -1911,6 +1982,7 @@ export function BotTab({
     qc.invalidateQueries({ queryKey: ["account", aid, "bot"] });
     qc.invalidateQueries({ queryKey: ["account", aid, "bot", "users"] });
     qc.invalidateQueries({ queryKey: ["account", aid, "interaction-bot"] });
+    qc.invalidateQueries({ queryKey: ["account", aid, "features"] });
   };
 
   const saveMut = useMutation({
@@ -2003,8 +2075,41 @@ export function BotTab({
     };
   };
 
+  const buildPluginConfigUpdates = () => {
+    const updates = new Map<string, Record<string, unknown>>();
+    const currentConfigs = new Map(accountFeatureConfigByKey);
+    const orderedRules = [
+      ...interactionRules.filter((rule) => rule.id !== selectedInteractionRuleId),
+      ...interactionRules.filter((rule) => rule.id === selectedInteractionRuleId),
+    ];
+
+    for (const rule of orderedRules) {
+      const selection = resolveRuleModuleSelection(rule, interactionEntries);
+      if (!selection) continue;
+      const baseConfig = updates.get(selection.featureKey)
+        ?? currentConfigs.get(selection.featureKey)
+        ?? selection.featureConfig
+        ?? {};
+      const update = buildFeatureConfigUpdateForRule(rule, interactionEntries, baseConfig);
+      if (update) {
+        updates.set(update.pluginKey, update.config);
+      }
+    }
+
+    return Array.from(updates.entries()).map(([pluginKey, config]) => ({ pluginKey, config }));
+  };
+
+  const saveInteractionConfig = async () => {
+    const payload = buildInteractionPayload();
+    const pluginConfigUpdates = buildPluginConfigUpdates();
+    for (const update of pluginConfigUpdates) {
+      await updateAccountFeatureConfig(aid, update.pluginKey, update.config);
+    }
+    await updateInteractionBotConfig(aid, payload);
+  };
+
   const saveTransferMut = useMutation({
-    mutationFn: () => updateInteractionBotConfig(aid, buildInteractionPayload()),
+    mutationFn: saveInteractionConfig,
     onSuccess: () => {
       toast.success("交互 Bot 配置已保存");
       invalidate();
@@ -2013,7 +2118,7 @@ export function BotTab({
   });
 
   const saveInteractionBotMut = useMutation({
-    mutationFn: () => updateInteractionBotConfig(aid, buildInteractionPayload()),
+    mutationFn: saveInteractionConfig,
     onSuccess: () => {
       toast.success("交互 Bot 身份配置已保存");
       invalidate();
@@ -2036,7 +2141,7 @@ export function BotTab({
   });
 
   const saveTransferResultBotMut = useMutation({
-    mutationFn: () => updateInteractionBotConfig(aid, buildInteractionPayload()),
+    mutationFn: saveInteractionConfig,
     onSuccess: () => {
       toast.success("转账结果通知 Bot 配置已保存");
       invalidate();
@@ -2065,7 +2170,24 @@ export function BotTab({
     patch: Partial<InteractionRuleForm>,
   ) => {
     setInteractionRules((rules) =>
-      rules.map((rule, i) => (i === index ? { ...rule, ...patch } : rule)),
+      rules.map((rule, i) => {
+        const target = rules[index];
+        const nextTarget = target ? { ...target, ...patch } : null;
+        if (i === index) return nextTarget ?? { ...rule, ...patch };
+        if (
+          target
+          && patch.moduleConfig !== undefined
+          && patch.moduleKey === undefined
+          && patch.moduleAction === undefined
+          && rule.action === "module"
+          && target.action === "module"
+          && rule.moduleKey === target.moduleKey
+          && rule.moduleAction === target.moduleAction
+        ) {
+          return { ...rule, moduleConfig: { ...patch.moduleConfig } };
+        }
+        return rule;
+      }),
     );
   };
 
@@ -2156,7 +2278,7 @@ export function BotTab({
     onError: (err) => toast.error(getErrMsg(err)),
   });
 
-  if (botQ.isLoading || usersQ.isLoading || interactionQ.isLoading) {
+  if (botQ.isLoading || usersQ.isLoading || interactionQ.isLoading || featuresQ.isLoading) {
     return (
       <div className="flex h-28 items-center justify-center">
         <Spinner className="text-primary" />

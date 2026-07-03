@@ -24,6 +24,7 @@ from ..services import (
     account_bot_runtime,
     account_bot_service,
     audit,
+    feature_service,
     interaction_bot_runtime,
     interaction_bot_service,
 )
@@ -221,6 +222,7 @@ async def update_account_bot_interaction(
         },
     )
     await db.commit()
+    await feature_service._notify_reload(aid)  # noqa: SLF001 - 交互规则可能同步启用插件，需要 worker 即时加载。
     await interaction_bot_runtime.restart_interaction_bot(aid)
     data = _with_interaction_runtime_state(aid, data)
     return AccountBotInteractionConfig(**data)

@@ -10,7 +10,7 @@ WORKDIR /app
 RUN corepack enable && corepack prepare pnpm@10.23.0 --activate
 
 # 仅拷贝清单先装依赖，命中构建缓存
-COPY frontend/package.json frontend/pnpm-lock.yaml frontend/.npmrc ./
+COPY frontend/package.json frontend/pnpm-lock.yaml frontend/.npmrc frontend/pnpm-workspace.yaml ./
 RUN pnpm install --frozen-lockfile
 
 # 拷贝其余源码、docs 与根更新日志（Sidebar 会通过 ?raw 读取 CHANGELOG.md）

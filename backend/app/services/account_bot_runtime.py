@@ -113,6 +113,7 @@ _INTERACTION_USER_DAILY_PREFIX = "account_bot:interaction_user_daily:"
 _INTERACTION_USER_PENDING_PREFIX = "account_bot:interaction_user_pending:"
 _INTERACTION_PAYMENT_CONFIRM_PREFIX = "account_bot:interaction_payment_confirm:"
 _INTERACTION_PAYMENT_CONFIRM_TTL_SECONDS = 300
+_TRANSFER_COMMAND_DEDUPE_TTL_SECONDS = 30.0
 _INTERACTION_ENTRY_TIMEOUT_SECONDS = 60.0
 _INTERACTION_DEBUG_STATE_PREFIX = "account_bot:interaction_debug:"
 _INTERACTION_DEBUG_WARNINGS_PREFIX = "account_bot:interaction_debug_warnings:"
@@ -128,6 +129,7 @@ _PLAYER_IDENTITY_CONFIDENCE_NAME_ONLY = "name_only"
 _PLAYER_IDENTITY_CONFIDENCE_UNKNOWN = "unknown"
 _MODULE_PAYMENT_AMOUNT_KEYS = ("amount", "bet", "entry_amount", "entry_fee", "stake")
 _COMMON_COMMAND_PREFIXES = (",", "。", ".", "/", "!", "！", "-", "、")
+_TRANSFER_COMMAND_DEDUPE: dict[str, float] = {}
 
 
 async def _load_command_prefix(db) -> str:
@@ -233,10 +235,18 @@ class Incoming:
     chosen_inline_result_id: str | None = None
     display_name: str | None = None
     username: str | None = None
+    sender_chat_id: int | None = None
+    sender_chat_type: str | None = None
+    sender_chat_title: str | None = None
+    sender_chat_username: str | None = None
     reply_to_user_id: int | None = None
     reply_to_message_id: int | None = None
     reply_to_display_name: str | None = None
     reply_to_username: str | None = None
+    reply_to_sender_chat_id: int | None = None
+    reply_to_sender_chat_type: str | None = None
+    reply_to_sender_chat_title: str | None = None
+    reply_to_sender_chat_username: str | None = None
     reply_to_text: str | None = None
     entity_languages: tuple[str, ...] = ()
     trace_id: str | None = None
@@ -280,12 +290,20 @@ class InteractionEvent:
     display_name: str | None
     username: str | None
     text: str
+    sender_chat_id: int | None = None
+    sender_chat_type: str | None = None
+    sender_chat_title: str | None = None
+    sender_chat_username: str | None = None
     callback_query_id: str | None = None
     callback_data: str | None = None
     reply_to_user_id: int | None = None
     reply_to_message_id: int | None = None
     reply_to_display_name: str | None = None
     reply_to_username: str | None = None
+    reply_to_sender_chat_id: int | None = None
+    reply_to_sender_chat_type: str | None = None
+    reply_to_sender_chat_title: str | None = None
+    reply_to_sender_chat_username: str | None = None
     reply_to_text: str | None = None
     entity_languages: tuple[str, ...] = ()
     data: dict[str, Any] | None = None
@@ -1029,6 +1047,10 @@ async def _handle_interaction_update(aid: int, token: str, update: dict[str, Any
                     reason_code="userbot_command_message",
                     message="系统前缀命令由 userbot 命令链路处理，交互 Bot 不投递规则或会话。",
                 )
+                return
+            if await _try_handle_transfer_command(db, incoming):
+                final_status = TRACE_STATUS_OK
+                await record_span(trace, "route", TRACE_STATUS_OK, component="transfer_command")
                 return
             event_bus_delivery_enabled = flags.get("event_bus_delivery_enabled", True)
             if await _try_handle_transfer_notice(
@@ -1907,13 +1929,19 @@ def _interaction_player_envelope(
         display_name = str(payload.get("sender_name") or incoming.display_name or "").strip()
         username = str(payload.get("sender_username") or incoming.username or "").strip() or None
         confidence = _PLAYER_IDENTITY_CONFIDENCE_VERIFIED if user_id is not None else _PLAYER_IDENTITY_CONFIDENCE_UNKNOWN
-    return {
+    player = {
         "user_id": user_id,
         "display_name": display_name or None,
         "username": username,
         "identity_key": _interaction_player_identity_key(user_id, display_name, confidence),
         "identity_confidence": confidence,
     }
+    sender_chat = _incoming_sender_chat_envelope(incoming)
+    if sender_chat and user_id is None:
+        player["sender_type"] = "chat"
+        player["sender_chat"] = sender_chat
+        player["identity_key"] = f"sender_chat:{incoming.sender_chat_id}"
+    return player
 
 
 def _interaction_payment_needs_player_confirm(
@@ -2590,6 +2618,9 @@ def _interaction_user_usage_identity(incoming: Incoming, data: dict[str, Any] | 
     payer_name = str(payload.get("payer_name") or "").strip()
     if payer_name:
         return f"name:{payer_name.casefold()}", account_bot_service.html_text(payer_name)
+    if incoming.sender_chat_id is not None:
+        label = incoming.sender_chat_title or incoming.display_name or str(incoming.sender_chat_id)
+        return f"sender_chat:{incoming.sender_chat_id}", account_bot_service.html_text(label)
     if incoming.user_id is None:
         return None
     return f"id:{incoming.user_id}", _interaction_user_label(incoming)
@@ -2817,6 +2848,22 @@ def _receiver_matches_filter(receiver_filter: dict[str, Any], *, user_id: int | 
     return any(_receiver_name_matches(expected, actual) for expected in texts for actual in actuals)
 
 
+def _transfer_command_receiver_from_filter(receiver_filter: dict[str, Any]) -> dict[str, Any] | None:
+    texts = receiver_filter.get("texts") if isinstance(receiver_filter.get("texts"), list) else []
+    receiver_user_id = _int_or_none(receiver_filter.get("user_id"))
+    receiver_name = next((str(item).strip() for item in texts if str(item or "").strip()), "")
+    if not receiver_name and receiver_user_id is not None:
+        receiver_name = str(receiver_user_id)
+    if not receiver_name:
+        return None
+    receiver_username = receiver_name.removeprefix("@") if receiver_name.startswith("@") else None
+    return {
+        "receiver_name": receiver_name,
+        "receiver_user_id": receiver_user_id,
+        "receiver_username": receiver_username,
+    }
+
+
 def _trusted_transfer_notice_sender_matches(cfg: dict[str, Any], sender_id: int | None) -> bool:
     if sender_id is None:
         return False
@@ -2845,7 +2892,7 @@ async def _select_transfer_command_receiver(
     cfg: dict[str, Any],
     amount: int,
 ) -> dict[str, Any] | None:
-    if incoming.reply_to_display_name:
+    if incoming.reply_to_display_name and not _is_configured_bot_user_id(cfg, incoming.reply_to_user_id):
         return {
             "receiver_name": incoming.reply_to_display_name,
             "receiver_user_id": incoming.reply_to_user_id,
@@ -2856,21 +2903,12 @@ async def _select_transfer_command_receiver(
             continue
         if not _rule_trigger_mode_allows(rule, "payment"):
             continue
-        receiver_filter = await _rule_receiver_filter(db, incoming.account_id, rule)
-        if not receiver_filter.get("explicit"):
+        if not _rule_amount_matches(rule, amount):
             continue
-        receiver_name = (receiver_filter.get("texts") or [None])[0]
-        receiver_user_id = _int_or_none(receiver_filter.get("user_id"))
-        receiver_username = None
-        if not receiver_name:
-            if receiver_user_id is None:
-                continue
-            receiver_name = str(receiver_user_id)
-        return {
-            "receiver_name": receiver_name,
-            "receiver_user_id": receiver_user_id,
-            "receiver_username": receiver_username,
-        }
+        receiver_filter = await _rule_receiver_filter(db, incoming.account_id, rule)
+        receiver_info = _transfer_command_receiver_from_filter(receiver_filter)
+        if receiver_info is not None:
+            return receiver_info
     return None
 
 
@@ -2914,6 +2952,8 @@ async def _select_transfer_notice_rule(
         )
         if has_active_session:
             if not _rule_entry_allows_event(rule, "payment_confirmed"):
+                continue
+            if not _rule_amount_matches(rule, parsed_amount):
                 continue
         else:
             if not rule.get("enabled", True):
@@ -3231,13 +3271,9 @@ async def _try_handle_event_bus_payment_notice(
     incoming: Incoming,
     cfg: dict[str, Any],
     parsed: dict[str, Any],
+    rule: dict[str, Any],
 ) -> tuple[bool, bool]:
-    """Deliver external transfer notices to Event Bus payment subscribers.
-
-    Legacy payment rules remain the fallback when no plugin subscribes to the
-    payment event, but new plugins can now consume the same notice without
-    depending on interaction rules.
-    """
+    """Deliver an external transfer notice to the rule-bound payment subscriber."""
 
     try:
         subscriptions = await _load_enabled_event_bus_subscriptions(db, incoming.account_id)
@@ -3252,6 +3288,7 @@ async def _try_handle_event_bus_payment_notice(
             error=f"{type(exc).__name__}: {exc}",
         )
         return False, True
+    subscriptions = _event_bus_subscriptions_for_rule(subscriptions, rule)
     if not subscriptions:
         return False, True
     raw_update = incoming.native_raw if isinstance(incoming.native_raw, dict) else {
@@ -3288,6 +3325,12 @@ async def _try_handle_event_bus_payment_notice(
         "text": incoming.reply_to_text,
     } if incoming.reply_to_message_id or incoming.reply_to_text else event.get("reply_to")
     account_state = await _event_bus_account_state(db, incoming, cfg)
+    account_state["trigger"] = {
+        "rule_id": rule.get("id"),
+        "rule_name": rule.get("name"),
+        "module_key": rule.get("module_key"),
+        "entry_key": rule.get("module_action"),
+    }
     result = dispatch_event(event, subscriptions, account_state)
     handled = False
     all_ok = True
@@ -3322,6 +3365,25 @@ async def _try_handle_event_bus_payment_notice(
             )
             continue
         payload = _event_bus_payment_plugin_payload(incoming, event, decision, parsed)
+        payload.update(
+            {
+                "rule_id": str(rule.get("id") or ""),
+                "rule_name": str(rule.get("name") or ""),
+                "entry_key": str(rule.get("module_action") or ""),
+                "module_config": dict(rule.get("module_config") or {}) if isinstance(rule.get("module_config"), dict) else {},
+                "valid_seconds": _interaction_session_ttl(rule),
+            }
+        )
+        trigger = payload.get("trigger") if isinstance(payload.get("trigger"), dict) else {}
+        trigger.update(_interaction_trigger_envelope(rule, "payment_confirmed", parsed))
+        trigger.update(
+            {
+                "dispatch_mode": decision.dispatch_mode,
+                "scope": decision.scope,
+                "filters": dict(decision.filters or {}),
+            }
+        )
+        payload["trigger"] = trigger
         ok, error, actions = await _run_worker_interaction_entry(
             incoming,
             plugin_key=decision.plugin_key,
@@ -3340,6 +3402,19 @@ async def _try_handle_event_bus_payment_notice(
             context=_interaction_trace_context(payload),
         )
     return handled, all_ok
+
+
+def _event_bus_subscriptions_for_rule(subscriptions: list[Any], rule: dict[str, Any]) -> list[Any]:
+    module_key = str(rule.get("module_key") or "").strip()
+    entry_key = str(rule.get("module_action") or "").strip()
+    if not module_key or not entry_key:
+        return []
+    return [
+        subscription
+        for subscription in subscriptions
+        if getattr(subscription, "plugin_key", None) == module_key
+        and getattr(subscription, "entry_key", None) == entry_key
+    ]
 
 
 async def _load_enabled_event_bus_subscriptions(db: Any, account_id: int) -> list[Any]:
@@ -3937,12 +4012,20 @@ def _interaction_event_payload(
         display_name=incoming.display_name,
         username=incoming.username,
         text=incoming.text,
+        sender_chat_id=incoming.sender_chat_id,
+        sender_chat_type=incoming.sender_chat_type,
+        sender_chat_title=incoming.sender_chat_title,
+        sender_chat_username=incoming.sender_chat_username,
         callback_query_id=incoming.callback_id,
         callback_data=incoming.callback_data,
         reply_to_user_id=incoming.reply_to_user_id,
         reply_to_message_id=incoming.reply_to_message_id,
         reply_to_display_name=incoming.reply_to_display_name,
         reply_to_username=incoming.reply_to_username,
+        reply_to_sender_chat_id=incoming.reply_to_sender_chat_id,
+        reply_to_sender_chat_type=incoming.reply_to_sender_chat_type,
+        reply_to_sender_chat_title=incoming.reply_to_sender_chat_title,
+        reply_to_sender_chat_username=incoming.reply_to_sender_chat_username,
         reply_to_text=incoming.reply_to_text,
         entity_languages=incoming.entity_languages,
         data=dict(data or {}),
@@ -3951,7 +4034,7 @@ def _interaction_event_payload(
 
 
 def _interaction_source_envelope(incoming: Incoming, event_type: str) -> dict[str, Any]:
-    return {
+    source = {
         "type": event_type,
         "channel": "interaction_bot",
         "driver": "telegram_bot_api",
@@ -3965,10 +4048,14 @@ def _interaction_source_envelope(incoming: Incoming, event_type: str) -> dict[st
         "callback_data": incoming.callback_data,
         "entity_languages": list(incoming.entity_languages),
     }
+    sender_chat = _incoming_sender_chat_envelope(incoming)
+    if sender_chat:
+        source["sender_chat"] = sender_chat
+    return source
 
 
 def _interaction_message_envelope(incoming: Incoming) -> dict[str, Any]:
-    return {
+    message = {
         "chat_id": incoming.chat_id,
         "message_id": incoming.message_id,
         "text": incoming.text,
@@ -3977,6 +4064,10 @@ def _interaction_message_envelope(incoming: Incoming) -> dict[str, Any]:
         "date": None,
         "reply_to_message_id": incoming.reply_to_message_id,
     }
+    sender_chat = _incoming_sender_chat_envelope(incoming)
+    if sender_chat:
+        message["sender_chat"] = sender_chat
+    return message
 
 
 def _interaction_chat_envelope(incoming: Incoming) -> dict[str, Any]:
@@ -4004,6 +4095,15 @@ def _interaction_actor_envelope(incoming: Incoming, data: dict[str, Any] | None 
             "display_name": payer_name,
             "username": None,
         }
+    sender_chat = _incoming_sender_chat_envelope(incoming)
+    if incoming.user_id is None and sender_chat:
+        return {
+            "user_id": None,
+            "display_name": incoming.display_name or sender_chat.get("title"),
+            "username": incoming.username,
+            "sender_type": "chat",
+            "sender_chat": sender_chat,
+        }
     return {
         "user_id": _int_or_none(payload.get("sender_user_id")) or incoming.user_id,
         "display_name": str(payload.get("sender_name") or incoming.display_name or "").strip() or None,
@@ -4013,11 +4113,16 @@ def _interaction_actor_envelope(incoming: Incoming, data: dict[str, Any] | None 
 
 def _interaction_source_actor_envelope(incoming: Incoming, data: dict[str, Any] | None = None) -> dict[str, Any]:
     payload = data if isinstance(data, dict) else {}
-    return {
+    actor = {
         "user_id": _int_or_none(payload.get("sender_user_id")) or incoming.user_id,
         "display_name": str(payload.get("sender_name") or incoming.display_name or "").strip() or None,
         "username": str(payload.get("sender_username") or incoming.username or "").strip() or None,
     }
+    sender_chat = _incoming_sender_chat_envelope(incoming)
+    if sender_chat:
+        actor["sender_type"] = "chat" if actor["user_id"] is None else "user_via_chat"
+        actor["sender_chat"] = sender_chat
+    return actor
 
 
 def _interaction_reply_to_envelope(incoming: Incoming) -> dict[str, Any] | None:
@@ -4028,12 +4133,43 @@ def _interaction_reply_to_envelope(incoming: Incoming) -> dict[str, Any] | None:
         and not incoming.reply_to_text
     ):
         return None
-    return {
+    reply = {
         "user_id": incoming.reply_to_user_id,
         "display_name": incoming.reply_to_display_name,
         "username": incoming.reply_to_username,
         "message_id": incoming.reply_to_message_id,
         "text": incoming.reply_to_text,
+    }
+    sender_chat = _incoming_reply_sender_chat_envelope(incoming)
+    if sender_chat:
+        reply["sender_type"] = "chat" if incoming.reply_to_user_id is None else "user_via_chat"
+        reply["sender_chat"] = sender_chat
+    return reply
+
+
+def _incoming_sender_chat_envelope(incoming: Incoming) -> dict[str, Any] | None:
+    if incoming.sender_chat_id is None and not incoming.sender_chat_title and not incoming.sender_chat_username:
+        return None
+    return {
+        "id": incoming.sender_chat_id,
+        "type": incoming.sender_chat_type,
+        "title": incoming.sender_chat_title,
+        "username": incoming.sender_chat_username,
+    }
+
+
+def _incoming_reply_sender_chat_envelope(incoming: Incoming) -> dict[str, Any] | None:
+    if (
+        incoming.reply_to_sender_chat_id is None
+        and not incoming.reply_to_sender_chat_title
+        and not incoming.reply_to_sender_chat_username
+    ):
+        return None
+    return {
+        "id": incoming.reply_to_sender_chat_id,
+        "type": incoming.reply_to_sender_chat_type,
+        "title": incoming.reply_to_sender_chat_title,
+        "username": incoming.reply_to_sender_chat_username,
     }
 
 
@@ -4229,8 +4365,16 @@ def _interaction_module_payload(
             "sender_user_id": incoming.user_id,
             "sender_name": incoming.display_name,
             "sender_username": incoming.username,
+            "sender_chat_id": incoming.sender_chat_id,
+            "sender_chat_type": incoming.sender_chat_type,
+            "sender_chat_title": incoming.sender_chat_title,
+            "sender_chat_username": incoming.sender_chat_username,
             "message_id": incoming.message_id,
             "reply_to_text": incoming.reply_to_text,
+            "reply_to_sender_chat_id": incoming.reply_to_sender_chat_id,
+            "reply_to_sender_chat_type": incoming.reply_to_sender_chat_type,
+            "reply_to_sender_chat_title": incoming.reply_to_sender_chat_title,
+            "reply_to_sender_chat_username": incoming.reply_to_sender_chat_username,
             "entity_languages": list(incoming.entity_languages),
             "prize": prize,
         }
@@ -5061,6 +5205,23 @@ def _should_route_text_to_account_commands(incoming: Incoming) -> bool:
     return incoming.text.startswith("/")
 
 
+def _claim_transfer_command_message(incoming: Incoming, amount: int) -> bool:
+    identity = incoming.message_id if incoming.message_id is not None else f"u:{incoming.user_id}:upd:{incoming.update_id}"
+    raw = f"{incoming.account_id}:{incoming.chat_id}:{incoming.user_id}:{identity}:{amount}:{incoming.text.strip()}"
+    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+    key = f"{incoming.account_id}:{digest}"
+    now = time.monotonic()
+    if len(_TRANSFER_COMMAND_DEDUPE) > 2048:
+        expired = [item for item, expires_at in _TRANSFER_COMMAND_DEDUPE.items() if expires_at <= now]
+        for item in expired:
+            _TRANSFER_COMMAND_DEDUPE.pop(item, None)
+    expires_at = _TRANSFER_COMMAND_DEDUPE.get(key)
+    if expires_at is not None and expires_at > now:
+        return False
+    _TRANSFER_COMMAND_DEDUPE[key] = now + _TRANSFER_COMMAND_DEDUPE_TTL_SECONDS
+    return True
+
+
 async def _try_handle_transfer_command(db: Any, incoming: Incoming) -> bool:
     if incoming.callback_id or incoming.chat_id is None or incoming.user_id is None:
         return False
@@ -5082,9 +5243,9 @@ async def _try_handle_transfer_command(db: Any, incoming: Incoming) -> bool:
     if not cfg.get("enabled"):
         log.info("transfer command skipped: disabled aid=%s", incoming.account_id)
         return False
-    if _is_configured_bot_user_id(cfg, incoming.user_id) or _is_configured_bot_user_id(cfg, incoming.reply_to_user_id):
+    if _is_configured_bot_user_id(cfg, incoming.user_id):
         log.info(
-            "transfer command skipped: bot sender/receiver aid=%s incoming_user=%s reply_to=%s",
+            "transfer command skipped: bot sender aid=%s incoming_user=%s reply_to=%s",
             incoming.account_id,
             incoming.user_id,
             incoming.reply_to_user_id,
@@ -5112,6 +5273,15 @@ async def _try_handle_transfer_command(db: Any, incoming: Incoming) -> bool:
     if not transfer_token:
         log.info("transfer command skipped: missing transfer bot token aid=%s", incoming.account_id)
         return False
+    if not _claim_transfer_command_message(incoming, amount):
+        log.info(
+            "transfer command skipped: duplicate aid=%s incoming_chat=%s message_id=%s amount=%s",
+            incoming.account_id,
+            incoming.chat_id,
+            incoming.message_id,
+            amount,
+        )
+        return True
 
     payer = incoming.display_name or str(incoming.user_id)
     receiver = str(receiver_info["receiver_name"])
@@ -5250,8 +5420,17 @@ async def _try_handle_transfer_notice(
             incoming.user_id,
         )
         return False
+    rule = await _select_transfer_notice_rule(db, incoming, cfg, parsed)
+    if rule is None:
+        log.info(
+            "transfer notice skipped: no matching rule aid=%s parsed_receiver=%r parsed_amount=%s",
+            incoming.account_id,
+            parsed.get("receiver_name"),
+            parsed.get("amount"),
+        )
+        return True
     if event_bus_enabled:
-        event_bus_handled, event_bus_ok = await _try_handle_event_bus_payment_notice(db, incoming, cfg, parsed)
+        event_bus_handled, event_bus_ok = await _try_handle_event_bus_payment_notice(db, incoming, cfg, parsed, rule)
     else:
         event_bus_handled, event_bus_ok = False, True
         await record_span(
@@ -5272,17 +5451,8 @@ async def _try_handle_transfer_notice(
                 component="event_bus_payment_notice",
                 reason_code="plugin_runtime_error",
                 message="外部转账通知已进入 Event Bus，但插件执行失败。",
-        )
+            )
         return True
-    rule = await _select_transfer_notice_rule(db, incoming, cfg, parsed)
-    if rule is None:
-        log.info(
-            "transfer notice skipped: no matching rule aid=%s parsed_receiver=%r parsed_amount=%s",
-            incoming.account_id,
-            parsed.get("receiver_name"),
-            parsed.get("amount"),
-        )
-        return False
     if not await _claim_interaction_trigger(incoming, rule, "transfer_notice", parsed):
         log.info("transfer notice skipped: duplicate aid=%s rule=%s", incoming.account_id, rule.get("id"))
         return True
@@ -5413,26 +5583,34 @@ def _extract_incoming(aid: int, token: str, update: dict[str, Any]) -> Incoming 
     msg = update.get("message")
     if not isinstance(msg, dict):
         return None
-    from_user = msg.get("from") or {}
+    sender = _message_sender_fields(msg)
     chat = msg.get("chat") or {}
     reply = msg.get("reply_to_message") if isinstance(msg.get("reply_to_message"), dict) else {}
-    reply_from = reply.get("from") if isinstance(reply.get("from"), dict) else {}
+    reply_sender = _message_sender_fields(reply) if reply else {}
     reply_text = str(reply.get("text") or reply.get("caption") or "").strip()
     return Incoming(
         account_id=aid,
         token=token,
         update_id=int(update.get("update_id", 0)),
-        user_id=_int_or_none(from_user.get("id")),
+        user_id=_int_or_none(sender.get("user_id")),
         chat_id=_int_or_none(chat.get("id")),
         chat_type=str(chat.get("type") or "") or None,
         message_id=_int_or_none(msg.get("message_id")),
         text=str(msg.get("text") or msg.get("caption") or "").strip(),
-        display_name=_format_user_name(from_user),
-        username=str(from_user.get("username") or "").strip() or None,
-        reply_to_user_id=_int_or_none(reply_from.get("id")),
+        display_name=str(sender.get("display_name") or "").strip() or None,
+        username=str(sender.get("username") or "").strip() or None,
+        sender_chat_id=_int_or_none(sender.get("sender_chat_id")),
+        sender_chat_type=str(sender.get("sender_chat_type") or "").strip() or None,
+        sender_chat_title=str(sender.get("sender_chat_title") or "").strip() or None,
+        sender_chat_username=str(sender.get("sender_chat_username") or "").strip() or None,
+        reply_to_user_id=_int_or_none(reply_sender.get("user_id")),
         reply_to_message_id=_int_or_none(reply.get("message_id")),
-        reply_to_display_name=_format_user_name(reply_from) if reply_from else None,
-        reply_to_username=str(reply_from.get("username") or "").strip() or None,
+        reply_to_display_name=str(reply_sender.get("display_name") or "").strip() or None,
+        reply_to_username=str(reply_sender.get("username") or "").strip() or None,
+        reply_to_sender_chat_id=_int_or_none(reply_sender.get("sender_chat_id")),
+        reply_to_sender_chat_type=str(reply_sender.get("sender_chat_type") or "").strip() or None,
+        reply_to_sender_chat_title=str(reply_sender.get("sender_chat_title") or "").strip() or None,
+        reply_to_sender_chat_username=str(reply_sender.get("sender_chat_username") or "").strip() or None,
         reply_to_text=reply_text or None,
         entity_languages=_entity_languages(
             msg.get("entities"),
@@ -5456,6 +5634,73 @@ def _format_user_name(raw: dict[str, Any]) -> str | None:
     last = str(raw.get("last_name") or "").strip()
     name = " ".join(x for x in [first, last] if x)
     return name or None
+
+
+def _format_chat_name(raw: dict[str, Any]) -> str | None:
+    title = str(raw.get("title") or "").strip()
+    username = str(raw.get("username") or "").strip().lstrip("@")
+    if title:
+        return title
+    if username:
+        return f"@{username}"
+    chat_id = _int_or_none(raw.get("id"))
+    return str(chat_id) if chat_id is not None else None
+
+
+def _sender_chat_ref(raw: Any) -> dict[str, Any] | None:
+    data = raw if isinstance(raw, dict) else {}
+    chat_id = _int_or_none(data.get("id"))
+    title = _format_chat_name(data)
+    username = str(data.get("username") or "").strip() or None
+    chat_type = str(data.get("type") or "").strip() or None
+    if chat_id is None and not title and not username:
+        return None
+    return {
+        "id": chat_id,
+        "type": chat_type,
+        "title": title,
+        "username": username,
+    }
+
+
+def _sender_chat_is_message_author(msg: dict[str, Any]) -> bool:
+    sender_chat = msg.get("sender_chat") if isinstance(msg.get("sender_chat"), dict) else {}
+    if not sender_chat:
+        return False
+    from_user = msg.get("from") if isinstance(msg.get("from"), dict) else {}
+    if not from_user:
+        return True
+    # Telegram may expose anonymous group admins as GroupAnonymousBot; the
+    # actual actor is intentionally hidden, so preserve only sender_chat.
+    return bool(from_user.get("is_bot")) and (
+        _int_or_none(from_user.get("id")) == 1087968824
+        or str(from_user.get("username") or "").casefold() == "groupanonymousbot"
+        or str(from_user.get("first_name") or "").casefold() == "groupanonymousbot"
+    )
+
+
+def _message_sender_fields(msg: dict[str, Any]) -> dict[str, Any]:
+    sender_chat = _sender_chat_ref(msg.get("sender_chat"))
+    from_user = msg.get("from") if isinstance(msg.get("from"), dict) else {}
+    if sender_chat and _sender_chat_is_message_author(msg):
+        return {
+            "user_id": None,
+            "display_name": sender_chat.get("title"),
+            "username": sender_chat.get("username"),
+            "sender_chat_id": sender_chat.get("id"),
+            "sender_chat_type": sender_chat.get("type"),
+            "sender_chat_title": sender_chat.get("title"),
+            "sender_chat_username": sender_chat.get("username"),
+        }
+    return {
+        "user_id": _int_or_none(from_user.get("id")),
+        "display_name": _format_user_name(from_user),
+        "username": str(from_user.get("username") or "").strip() or None,
+        "sender_chat_id": sender_chat.get("id") if sender_chat else None,
+        "sender_chat_type": sender_chat.get("type") if sender_chat else None,
+        "sender_chat_title": sender_chat.get("title") if sender_chat else None,
+        "sender_chat_username": sender_chat.get("username") if sender_chat else None,
+    }
 
 
 def _command_tail(text: str) -> str:

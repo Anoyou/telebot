@@ -37,6 +37,9 @@ import {
 import type {
   AuditLogItem,
   EventActionItem,
+  EventProbeReport,
+  EventProbeRoutingItem,
+  EventProbeSuggestion,
   EventTraceDetail,
   EventSpanItem,
   EventTraceSummary,
@@ -865,6 +868,7 @@ function TraceDetailCard({
         {detail.text_preview ? <p className="rounded-md bg-muted p-3 text-sm whitespace-pre-wrap">{detail.text_preview}</p> : null}
         <InlineTraceSummary trace={detail} actions={detail.actions} />
         <NativeRawSummary meta={detail.native_raw_meta} />
+        <ProbeReportPanel report={detail.probe_report} />
         <Timeline spans={detail.spans} actions={detail.actions} timezone={timezone} />
         <details className="rounded-md border p-3">
           <summary className="cursor-pointer text-sm font-medium">高级数据</summary>
@@ -879,6 +883,152 @@ function TraceDetailCard({
         </details>
       </CardContent>
     </Card>
+  );
+}
+
+function ProbeReportPanel({ report }: { report?: EventProbeReport | null }) {
+  if (!report) return null;
+  const fieldPaths = report.field_paths ?? [];
+  const messageFacts = report.message_facts ?? [];
+  const subscriptions = report.subscription_suggestions ?? [];
+  const actions = report.action_suggestions ?? [];
+  const capabilities = report.capability_hints ?? [];
+  const routing = report.routing ?? [];
+  const warnings = report.warnings ?? [];
+  return (
+    <section className="rounded-md border bg-muted/20 p-3">
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <div>
+          <div className="flex flex-wrap items-center gap-2">
+            <Workflow className="h-4 w-4 text-primary" />
+            <span className="font-medium">开发探针</span>
+            <Badge variant="secondary">{report.headline}</Badge>
+          </div>
+          <p className="mt-1 text-sm text-muted-foreground">
+            把当前 trace 翻译成标准字段路径、订阅建议、动作建议和能力边界。
+          </p>
+        </div>
+        {warnings.length ? <SignalPill tone="warn" label="提示" value={`${warnings.length} 条`} /> : null}
+      </div>
+
+      {fieldPaths.length ? (
+        <div className="mt-3">
+          <div className="mb-2 text-xs font-medium text-muted-foreground">标准信封路径</div>
+          <ProbeItemGrid items={fieldPaths} />
+        </div>
+      ) : null}
+
+      {messageFacts.length ? (
+        <div className="mt-3">
+          <div className="mb-2 text-xs font-medium text-muted-foreground">消息补充摘要</div>
+          <ProbeItemGrid items={messageFacts} />
+        </div>
+      ) : null}
+
+      <div className="mt-3 grid gap-3 xl:grid-cols-2">
+        <ProbeSuggestionList title="订阅建议" items={subscriptions} jsonKey="manifest" />
+        <ProbeSuggestionList title="动作建议" items={actions} jsonKey="action" />
+      </div>
+
+      {capabilities.length ? (
+        <div className="mt-3 grid gap-2 md:grid-cols-2">
+          {capabilities.map((item, index) => (
+            <div key={`${item.title}-${index}`} className="rounded-md border bg-background/70 p-2">
+              <div className="flex flex-wrap items-center gap-1.5">
+                <StatusBadge status={item.level || "info"} />
+                <span className="text-sm font-medium">{item.title}</span>
+                {item.capability ? <Badge variant="secondary">{item.capability}</Badge> : null}
+              </div>
+              {item.reason ? <p className="mt-1 text-xs text-muted-foreground">{item.reason}</p> : null}
+              {item.reason_code ? <p className="mt-1 text-xs text-muted-foreground">{reasonDisplay(item.reason_code)}</p> : null}
+            </div>
+          ))}
+        </div>
+      ) : null}
+
+      {routing.length ? (
+        <div className="mt-3">
+          <div className="mb-2 text-xs font-medium text-muted-foreground">路由解释</div>
+          <div className="space-y-2">
+            {routing.slice(0, 8).map((item, index) => (
+              <ProbeRoutingRow key={`${item.phase}-${item.plugin_key}-${index}`} item={item} />
+            ))}
+          </div>
+        </div>
+      ) : null}
+
+      {warnings.length ? (
+        <div className="mt-3 rounded-md border border-amber-300/70 bg-amber-50/70 p-2 text-sm text-amber-950">
+          {warnings.map((item, index) => (
+            <div key={`${item}-${index}`}>{item}</div>
+          ))}
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+function ProbeItemGrid({ items }: { items: EventProbeReport["field_paths"] }) {
+  return (
+    <div className="grid gap-2 md:grid-cols-2">
+      {items.slice(0, 12).map((item, index) => (
+        <div key={`${item.path || item.label}-${index}`} className="rounded-md bg-background px-2 py-1.5">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <span className="text-[11px] text-muted-foreground">{item.label}</span>
+            {item.path ? <span className="break-all font-mono text-[11px] text-muted-foreground">{item.path}</span> : null}
+          </div>
+          <div className="mt-1 break-all font-mono text-xs">{stringifyShort(item.value)}</div>
+          {item.note ? <div className="mt-1 text-xs text-muted-foreground">{item.note}</div> : null}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function ProbeSuggestionList({
+  title,
+  items,
+  jsonKey,
+}: {
+  title: string;
+  items: EventProbeSuggestion[];
+  jsonKey: "manifest" | "action";
+}) {
+  return (
+    <div className="rounded-md border bg-background/70 p-2">
+      <div className="mb-2 text-xs font-medium text-muted-foreground">{title}</div>
+      {items.length ? items.map((item, index) => {
+        const jsonValue = item[jsonKey];
+        return (
+          <div key={`${item.title}-${index}`} className={index ? "mt-3 border-t pt-3" : ""}>
+            <div className="text-sm font-medium">{item.title}</div>
+            {item.reason ? <p className="mt-1 text-xs text-muted-foreground">{item.reason}</p> : null}
+            {jsonValue ? (
+              <pre className="mt-2 max-h-52 overflow-auto rounded-md bg-muted p-2 text-xs leading-relaxed whitespace-pre-wrap break-all">
+                {safeJsonStringify(jsonValue, 2)}
+              </pre>
+            ) : null}
+          </div>
+        );
+      }) : <div className="text-sm text-muted-foreground">暂无建议</div>}
+    </div>
+  );
+}
+
+function ProbeRoutingRow({ item }: { item: EventProbeRoutingItem }) {
+  return (
+    <div className={`rounded-md border p-2 ${item.matched ? "border-emerald-200 bg-emerald-50/50" : "bg-background/70"}`}>
+      <div className="flex flex-wrap items-center gap-1.5">
+        <StatusBadge status={item.matched ? "ok" : item.status || "skipped"} />
+        {item.phase ? <Badge variant="secondary">{item.phase}</Badge> : null}
+        {item.plugin_key ? <Badge variant="secondary">{item.plugin_key}</Badge> : null}
+        {item.entry_key ? <Badge variant="secondary">{item.entry_key}</Badge> : null}
+      </div>
+      <div className="mt-1 text-xs text-muted-foreground">
+        {item.reason_code ? reasonDisplay(item.reason_code) : item.message || "路由阶段已记录"}
+      </div>
+      {item.filters ? <div className="mt-1 break-all font-mono text-xs text-muted-foreground">filters={stringifyShort(item.filters)}</div> : null}
+    </div>
   );
 }
 

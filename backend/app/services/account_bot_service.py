@@ -37,6 +37,7 @@ from ..db.models.account_bot import (
     AccountBot,
     AccountBotUser,
 )
+from ..db.models.feature import FEATURE_STATE_DISABLED, AccountFeature, Feature
 from ..db.models.system import SystemSetting
 from ..feature_registry import BUILTIN_FEATURES
 from ..schemas.account_bot import (
@@ -1013,6 +1014,58 @@ def _has_trusted_transfer_notice_sender(data: dict[str, Any]) -> bool:
     return any(data.get(key) not in (None, "") for key in ("trusted_bot_id", "transfer_bot_id"))
 
 
+def _enabled_interaction_module_keys(data: dict[str, Any]) -> list[str]:
+    keys: list[str] = []
+    for rule in data.get("rules") or []:
+        if not isinstance(rule, dict) or not bool(rule.get("enabled", True)):
+            continue
+        if str(rule.get("action") or "").strip() != "module":
+            continue
+        module_key = str(rule.get("module_key") or "").strip()
+        if module_key and module_key not in keys:
+            keys.append(module_key)
+    return keys
+
+
+async def _ensure_interaction_module_account_features(
+    db: AsyncSession,
+    aid: int,
+    data: dict[str, Any],
+) -> list[str]:
+    synced: list[str] = []
+    for module_key in _enabled_interaction_module_keys(data):
+        feature = await db.get(Feature, module_key)
+        if feature is None:
+            log.warning(
+                "interaction rule references module without feature row aid=%s module=%s",
+                aid,
+                module_key,
+            )
+            continue
+        af = await db.get(
+            AccountFeature,
+            {"account_id": aid, "feature_key": module_key},
+        )
+        if af is None:
+            db.add(
+                AccountFeature(
+                    account_id=aid,
+                    feature_key=module_key,
+                    enabled=True,
+                    config={},
+                    state=FEATURE_STATE_DISABLED,
+                )
+            )
+            synced.append(module_key)
+            continue
+        if not bool(af.enabled):
+            af.enabled = True
+            af.state = FEATURE_STATE_DISABLED
+            af.last_error = None
+            synced.append(module_key)
+    return synced
+
+
 async def get_transfer_notice_config(db: AsyncSession, aid: int) -> dict[str, Any]:
     await ensure_account(db, aid)
     row = await db.get(SystemSetting, transfer_notice_setting_key(aid))
@@ -1098,6 +1151,13 @@ async def update_transfer_notice_config(
             "TRUSTED_BOT_ID_REQUIRED",
             "启用转账触发的规则前，必须配置可信通知 Bot ID（测试 Abot 或官方通知 Bot）",
             422,
+        )
+    synced_module_keys = await _ensure_interaction_module_account_features(db, aid, data)
+    if synced_module_keys:
+        log.info(
+            "interaction rule synced account features aid=%s modules=%s",
+            aid,
+            ",".join(synced_module_keys),
         )
     if row is None:
         row = SystemSetting(key=setting_key, value=data)

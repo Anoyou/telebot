@@ -865,9 +865,52 @@ export interface EventTraceSummary {
   error_count: number;
 }
 
+export interface EventProbeItem {
+  label: string;
+  path?: string;
+  value?: unknown;
+  note?: string;
+}
+
+export interface EventProbeSuggestion {
+  title: string;
+  reason?: string;
+  manifest?: Record<string, unknown>;
+  action?: Record<string, unknown>;
+  level?: string;
+  capability?: string;
+  stored_in_trace?: boolean;
+  reason_code?: string | null;
+}
+
+export interface EventProbeRoutingItem {
+  phase?: string;
+  plugin_key?: string | null;
+  entry_key?: string | null;
+  matched?: boolean;
+  status?: string;
+  reason_code?: string | null;
+  message?: string | null;
+  filters?: unknown;
+}
+
+export interface EventProbeReport {
+  version: number;
+  headline: string;
+  summary: Record<string, unknown>;
+  field_paths: EventProbeItem[];
+  message_facts: EventProbeItem[];
+  subscription_suggestions: EventProbeSuggestion[];
+  action_suggestions: EventProbeSuggestion[];
+  capability_hints: EventProbeSuggestion[];
+  routing: EventProbeRoutingItem[];
+  warnings: string[];
+}
+
 export interface EventTraceDetail extends EventTraceSummary {
   raw_summary?: Record<string, unknown> | null;
   payload_snapshot?: Record<string, unknown> | null;
+  probe_report?: EventProbeReport | null;
   spans: EventSpanItem[];
   actions: EventActionItem[];
   related_runtime_logs: RuntimeLogItem[];

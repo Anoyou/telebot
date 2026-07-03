@@ -19,6 +19,7 @@ from sqlalchemy import String, cast, desc, func, or_, select
 
 from ..db.models.log import AuditLog, EventAction, EventSpan, EventTrace, PluginRuntimeStatus, RuntimeLog
 from ..deps import CurrentUser, DBSession
+from ..services.event_probe import build_event_probe_report
 from ..services.redactor import redact_text, redact_value
 
 router = APIRouter(tags=["logs"])
@@ -247,6 +248,7 @@ def _inline_trace_summary(row: EventTrace) -> tuple[str | None, str | None, str 
 class EventTraceDetail(EventTraceSummary):
     raw_summary: dict[str, Any] | None = None
     payload_snapshot: dict[str, Any] | None = None
+    probe_report: dict[str, Any] | None = None
     spans: list[EventSpanItem] = []
     actions: list[EventActionItem] = []
     related_runtime_logs: list[RuntimeLogItem] = []
@@ -578,12 +580,25 @@ async def get_event_trace(
     summary.action_count = len(actions)
     summary.error_count = sum(1 for item in spans if item.status in {"failed", "error", "warning", "warn"})
     summary.error_count += sum(1 for item in actions if item.status in {"failed", "error"})
+    raw_summary = redact_value(row.raw_summary) if row.raw_summary is not None else None
+    payload_snapshot = redact_value(row.payload_snapshot) if row.payload_snapshot is not None else None
+    native_raw_meta = redact_value(row.native_raw_meta) if row.native_raw_meta is not None else None
+    span_items = [EventSpanItem.from_row(item) for item in spans]
+    action_items = [EventActionItem.from_row(item) for item in actions]
     return EventTraceDetail(
         **summary.model_dump(),
-        raw_summary=redact_value(row.raw_summary) if row.raw_summary is not None else None,
-        payload_snapshot=redact_value(row.payload_snapshot) if row.payload_snapshot is not None else None,
-        spans=[EventSpanItem.from_row(item) for item in spans],
-        actions=[EventActionItem.from_row(item) for item in actions],
+        raw_summary=raw_summary,
+        payload_snapshot=payload_snapshot,
+        probe_report=build_event_probe_report(
+            trace=summary.model_dump(),
+            raw_summary=raw_summary,
+            payload_snapshot=payload_snapshot,
+            native_raw_meta=native_raw_meta,
+            spans=span_items,
+            actions=action_items,
+        ),
+        spans=span_items,
+        actions=action_items,
         related_runtime_logs=[RuntimeLogItem.from_row(item) for item in logs],
     )
 
