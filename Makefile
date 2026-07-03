@@ -9,7 +9,7 @@
 #   make nuke        彻底清理（删数据 + venv + node_modules + .env）
 #   make help        全部命令清单
 
-.PHONY: help up down restart logs status nuke bootstrap init-prod-env \
+.PHONY: help up down restart logs status nuke bootstrap init-prod-env auth-recovery \
         dev-up dev-down dev-logs install migrate makemigration backend frontend \
         test lint codegen build prod-build prod-up prod-update prod-down backup clean
 
@@ -30,6 +30,7 @@ help:
 	@echo "  make init-prod-env 生成生产 .env（随机密钥 + 数据库密码）"
 	@echo "  make prod-update   增量更新生产栈（按变更重建必要服务）"
 	@echo "  make prod-down     停止生产栈"
+	@echo "  make auth-recovery 生成 Web 登录一次性恢复码（需本机/服务器执行）"
 	@echo "  make nuke          ⚠ 彻底清理（含数据库）"
 	@echo ""
 	@echo "════════════ 细粒度命令 ════════════"
@@ -84,6 +85,9 @@ prod-update:
 
 prod-down:
 	docker compose down
+
+auth-recovery:
+	cd backend && $(ACTIVATE) && python -m app.scripts.auth_recovery
 
 nuke:
 	@./scripts/nuke.sh

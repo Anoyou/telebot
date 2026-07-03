@@ -22,6 +22,12 @@ class Settings(BaseSettings):
     # 登录限速（针对 /api/auth/login 与 /api/auth/register）
     # 0 表示不限速；默认 30 次/分钟，按 IP+用户名两个维度同时计数
     login_rate_limit_per_min: int = 30
+    # 登录密码连续失败达到阈值后，下一次正确密码需要通知 Bot OTP。
+    # 默认关闭；生产建议在 Web 设置页确认恢复码路径和通知 Bot 后再开启。
+    login_otp_failed_attempt_threshold: int = 0
+    login_otp_fail_window_seconds: int = 15 * 60
+    login_otp_ttl_seconds: int = 5 * 60
+    login_otp_max_attempts: int = 3
     # 登录向导挂起会话上限（防止批量 start_login 造成进程内存占用过高）
     max_pending_logins: int = 100
     # 是否信任 X-Forwarded-For 取客户端 IP；

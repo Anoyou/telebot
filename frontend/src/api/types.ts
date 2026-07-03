@@ -7,10 +7,19 @@ export interface LoginRequest {
   username: string;
   password: string;
   totp_code?: string | null;
+  otp_token?: string | null;
+  otp_code?: string | null;
+  recovery_code?: string | null;
 }
 export interface LoginResponse {
   ok: boolean;
   require_totp: boolean;
+  require_otp?: boolean;
+  otp_token?: string | null;
+  otp_delivery?: string | null;
+  otp_message?: string | null;
+  otp_ttl_seconds?: number | null;
+  recovery_available?: boolean;
 }
 export interface CurrentUser {
   id: number;
@@ -911,6 +920,15 @@ export interface SystemSettings {
   remote_plugin_update_check?: {
     enabled: boolean;
     interval_minutes: number;
+  };
+  login_security?: {
+    notify_otp_enabled: boolean;
+    notify_otp_failed_attempt_threshold: number;
+    notify_otp_fail_window_seconds: number;
+    notify_otp_ttl_seconds: number;
+    notify_otp_max_attempts: number;
+    totp_enabled: boolean;
+    recovery_code_ttl_seconds: number;
   };
   llm_limits?: {
     per_minute: number;

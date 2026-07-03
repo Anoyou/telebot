@@ -109,3 +109,37 @@ async def test_system_settings_command_prefix_required_roundtrip(monkeypatch) ->
     assert db.rows["command_prefix_required"].value == {"enabled": False}
     assert result["command_prefix_required"] is False
     broadcast.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_system_settings_login_security_defaults_off_and_roundtrip(monkeypatch) -> None:
+    db = _FakeSettingsDB()
+    monkeypatch.setattr(rate_limit, "_audit", AsyncMock())
+    monkeypatch.setattr(rate_limit, "_broadcast_reload", AsyncMock())
+
+    initial = await rate_limit.get_system_settings(db, SimpleNamespace(id=1))  # type: ignore[arg-type]
+    assert initial["login_security"]["notify_otp_enabled"] is False
+    assert initial["login_security"]["totp_enabled"] is False
+
+    result = await rate_limit.patch_system_settings(
+        rate_limit._SettingsPatch(
+            login_security=rate_limit._LoginSecurityPatch(
+                notify_otp_enabled=True,
+                notify_otp_failed_attempt_threshold=5,
+                notify_otp_fail_window_seconds=900,
+                notify_otp_ttl_seconds=300,
+                notify_otp_max_attempts=3,
+                totp_enabled=True,
+                recovery_code_ttl_seconds=1200,
+            )
+        ),
+        db,  # type: ignore[arg-type]
+        SimpleNamespace(id=1),
+    )
+
+    stored = db.rows["login_security"].value
+    assert stored["notify_otp_enabled"] is True
+    assert stored["notify_otp_failed_attempt_threshold"] == 5
+    assert stored["totp_enabled"] is True
+    assert stored["recovery_code_ttl_seconds"] == 1200
+    assert result["login_security"]["totp_enabled"] is True

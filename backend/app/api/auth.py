@@ -24,7 +24,7 @@ from ..schemas.auth import (
 from ..schemas.auth import (
     CurrentUser as CurrentUserSchema,
 )
-from ..services import audit, auth_service
+from ..services import audit, auth_login_security, auth_service
 
 log = logging.getLogger(__name__)
 
@@ -197,6 +197,8 @@ async def login(req: LoginRequest, request: Request, response: Response, db: DBS
     """
     # 登录限速（IP + 用户名 双维度，任一超限即拒）
     await _enforce_login_rate_limit(request, req.username.strip())
+    ip = _client_ip(request)
+    username_norm = _normalize_rl_username(req.username)
 
     # 系统尚未创建任何用户：直接返回 NO_USER，前端会引导到注册流程
     user_count = (await db.execute(select(func.count(WebUser.id)))).scalar_one()
@@ -206,22 +208,76 @@ async def login(req: LoginRequest, request: Request, response: Response, db: DBS
     user = (
         await db.execute(select(WebUser).where(WebUser.username == req.username.strip()))
     ).scalar_one_or_none()
+    login_security = await auth_login_security.get_login_security_config(db)
     # 用户不存在或密码错都返回相同错误；不存在用户时也做一次等价密码校验，
     # 降低用户名枚举的时序侧信道风险。
     if not auth_service.verify_password_with_sentinel(
         req.password, user.password_hash if user else None
     ):
+        await auth_login_security.record_login_failure(ip, username_norm, config=login_security)
+        raise _err("AUTH_INVALID", "用户名或密码错误", 401)
+    if user is None:
+        await auth_login_security.record_login_failure(ip, username_norm, config=login_security)
         raise _err("AUTH_INVALID", "用户名或密码错误", 401)
 
+    used_recovery = False
+    used_otp = False
+
+    # 服务器一次性恢复码是防锁死兜底：只能在密码正确后使用，可绕过 OTP/TOTP。
+    if req.recovery_code:
+        recovery_ok = await auth_login_security.verify_recovery_code(
+            db,
+            user=user,
+            code=req.recovery_code,
+        )
+        if not recovery_ok:
+            raise _err("RECOVERY_CODE_INVALID", "一次性恢复码无效或已过期", 401)
+        used_recovery = True
+
     # 已启用 TOTP 必须校验
-    if user.totp_secret_enc:
+    if user.totp_secret_enc and login_security.totp_enabled and not used_recovery:
         if not req.totp_code:
             return LoginResponse(ok=False, require_totp=True)
         secret = decrypt_str(user.totp_secret_enc)
         if not auth_service.verify_totp(secret, req.totp_code):
             raise _err("TOTP_INVALID", "动态验证码错误", 401)
 
-    await audit.write(db, user.id, "auth.login", target=f"user:{user.id}")
+    # 密码失败次数过多后，正确密码还需要通知 Bot OTP；通知 Bot 不可用时提示使用恢复码。
+    if not used_recovery and await auth_login_security.should_require_login_otp(
+        ip,
+        username_norm,
+        config=login_security,
+    ):
+        if req.otp_token or req.otp_code:
+            otp_ok = await auth_login_security.verify_login_otp(
+                token=req.otp_token,
+                code=req.otp_code,
+                user=user,
+                config=login_security,
+            )
+            if not otp_ok:
+                raise _err("OTP_INVALID", "登录验证码错误或已过期", 401)
+            used_otp = True
+        else:
+            challenge = await auth_login_security.issue_login_otp_challenge(
+                user=user,
+                ip=ip,
+                user_agent=request.headers.get("user-agent"),
+                config=login_security,
+            )
+            return LoginResponse(
+                ok=False,
+                require_otp=True,
+                otp_token=challenge.token,
+                otp_delivery=challenge.delivery,
+                otp_message=challenge.message,
+                otp_ttl_seconds=challenge.ttl_seconds,
+                recovery_available=True,
+            )
+
+    await auth_login_security.clear_login_failures(ip, username_norm)
+    action = "auth.login.recovery" if used_recovery else "auth.login.otp" if used_otp else "auth.login"
+    await audit.write(db, user.id, action, target=f"user:{user.id}")
     await db.commit()
 
     from ..settings import settings as _s

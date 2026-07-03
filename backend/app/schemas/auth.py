@@ -9,11 +9,20 @@ class LoginRequest(BaseModel):
     username: str
     password: str
     totp_code: str | None = Field(None, description="启用 TOTP 后必填")
+    otp_token: str | None = Field(None, description="通知 Bot 登录 OTP 挑战 token")
+    otp_code: str | None = Field(None, description="通知 Bot 登录 OTP 验证码")
+    recovery_code: str | None = Field(None, description="服务器一次性登录恢复码")
 
 
 class LoginResponse(BaseModel):
     ok: bool
     require_totp: bool = False
+    require_otp: bool = False
+    otp_token: str | None = None
+    otp_delivery: str | None = None
+    otp_message: str | None = None
+    otp_ttl_seconds: int | None = None
+    recovery_available: bool = False
 
 
 class RegisterRequest(BaseModel):

@@ -52,7 +52,7 @@ from ..schemas.rate_limit import (
     UsageResponse,
 )
 from ..services import audit as audit_svc
-from ..services import event_trace
+from ..services import auth_login_security, event_trace
 from ..services import rate_limit_service as svc
 from ..services.ai_feature import AI_ENABLED_SETTING_KEY, normalize_ai_enabled
 from ..worker.ipc import GCMD_KILL_SWITCH, GCMD_RELOAD_GLOBAL, GLOBAL_CHANNEL, make_cmd
@@ -621,6 +621,7 @@ async def get_system_settings(db: DBSession, _user: CurrentUser) -> dict[str, An
     ai_enabled_val = await _get_setting(db, AI_ENABLED_SETTING_KEY, {"enabled": True})
     llm_val = await _get_setting(db, "llm_limits", {})
     log_val = await _get_setting(db, "log_retention", {})
+    login_security_val = await _get_setting(db, "login_security", {})
     sudo_val = await _get_setting(db, "sudo_enabled", {"enabled": False})
     prefix_required_val = await _get_setting(db, "command_prefix_required", {"enabled": True})
     echo_guard_val = await _get_setting(db, "command_echo_guard_previous_messages", None)
@@ -635,6 +636,9 @@ async def get_system_settings(db: DBSession, _user: CurrentUser) -> dict[str, An
     tz = str(tz_val.get("value", "")) if isinstance(tz_val, dict) else str(tz_val)
     llm_limits = llm_val if isinstance(llm_val, dict) else {}
     log_retention = log_val if isinstance(log_val, dict) else {}
+    login_security = auth_login_security.normalize_login_security_config(
+        login_security_val if isinstance(login_security_val, dict) else {}
+    )
     remote_update = remote_update_val if isinstance(remote_update_val, dict) else {}
     try:
         remote_update_interval = int(remote_update.get("interval_minutes", 360) or 360)
@@ -657,6 +661,7 @@ async def get_system_settings(db: DBSession, _user: CurrentUser) -> dict[str, An
         ),
         "ai_enabled": normalize_ai_enabled(ai_enabled_val),
         "command_echo_guard_previous_messages": _normalize_command_echo_guard_limit(echo_guard_source),
+        "login_security": auth_login_security.login_security_config_to_dict(login_security),
         "llm_limits": {
             "per_minute": max(0, int(llm_limits.get("per_minute", 0) or 0)),
             "daily_requests": max(0, int(llm_limits.get("daily_requests", 0) or 0)),
@@ -722,6 +727,16 @@ class _RemotePluginUpdateCheckPatch(BaseModel):
     interval_minutes: int | None = None
 
 
+class _LoginSecurityPatch(BaseModel):
+    notify_otp_enabled: bool | None = None
+    notify_otp_failed_attempt_threshold: int | None = None
+    notify_otp_fail_window_seconds: int | None = None
+    notify_otp_ttl_seconds: int | None = None
+    notify_otp_max_attempts: int | None = None
+    totp_enabled: bool | None = None
+    recovery_code_ttl_seconds: int | None = None
+
+
 class _SettingsPatch(BaseModel):
     """前端只会传子集；未传字段保持不变。"""
 
@@ -731,6 +746,7 @@ class _SettingsPatch(BaseModel):
     sudo_enabled: bool | None = None
     command_prefix_required: bool | None = None
     command_echo_guard_previous_messages: int | None = None
+    login_security: _LoginSecurityPatch | None = None
     remote_plugin_update_check: _RemotePluginUpdateCheckPatch | None = None
     llm_limits: _LLMLimitsPatch | None = None
     log_retention: _LogRetentionPatch | None = None
@@ -777,6 +793,37 @@ async def patch_system_settings(
             detail={"enabled": enabled},
         )
         await _broadcast_reload()
+    if payload.login_security is not None:
+        current = await _get_setting(db, "login_security", {})
+        current_config = auth_login_security.normalize_login_security_config(
+            current if isinstance(current, dict) else {}
+        )
+        next_config = auth_login_security.login_security_config_to_dict(current_config)
+        data = payload.login_security.model_dump(exclude_unset=True)
+        bool_keys = {"notify_otp_enabled", "totp_enabled"}
+        bounds = {
+            "notify_otp_failed_attempt_threshold": (0, 50),
+            "notify_otp_fail_window_seconds": (60, 86400),
+            "notify_otp_ttl_seconds": (60, 1800),
+            "notify_otp_max_attempts": (1, 10),
+            "recovery_code_ttl_seconds": (60, 86400),
+        }
+        for key, value in data.items():
+            if value is None:
+                continue
+            if key in bool_keys:
+                next_config[key] = bool(value)
+                continue
+            lo, hi = bounds[key]
+            ivalue = int(value)
+            if ivalue < lo or ivalue > hi:
+                raise _bad("invalid_login_security", f"{key} 必须在 {lo}~{hi} 之间")
+            next_config[key] = ivalue
+        # 通知 OTP 没有阈值等于无效开启，直接收敛成关闭，避免误以为已保护。
+        if int(next_config.get("notify_otp_failed_attempt_threshold", 0) or 0) <= 0:
+            next_config["notify_otp_enabled"] = False
+        await _set_setting(db, "login_security", next_config)
+        await _audit(db, user.id, "set_login_security", target="system", detail=next_config)
     if payload.remote_plugin_update_check is not None:
         raw = payload.remote_plugin_update_check
         current = await _get_setting(

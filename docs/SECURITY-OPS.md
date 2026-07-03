@@ -20,6 +20,10 @@
 | `TRUST_FORWARDED_FOR` | `true` 仅当部署在 nginx/traefik 后；否则 `false` | 错配会让攻击者通过伪造头绕过登录限速 |
 | `POSTGRES_PASSWORD` | 32 字符强随机；**不要用 `telebot`/`changeme`** | `prod-up` 已硬校验，弱口令直接拒启 |
 | `LOGIN_RATE_LIMIT_PER_MIN` | 默认 30 即可；高并发可调大；0 = 关闭（不推荐） | 双维度（IP + username） |
+| `LOGIN_OTP_FAILED_ATTEMPT_THRESHOLD` | 默认 0；生产建议在 Web 设置页开启 | 密码失败达到阈值后，下一次正确密码需要通知 Bot OTP |
+| `LOGIN_OTP_FAIL_WINDOW_SECONDS` | 默认 900 | 登录失败计数窗口 |
+| `LOGIN_OTP_TTL_SECONDS` | 默认 300 | 通知 Bot 登录验证码有效期 |
+| `LOGIN_OTP_MAX_ATTEMPTS` | 默认 3 | 同一个通知验证码最多尝试次数 |
 
 ### 1.2 文件权限
 
@@ -99,6 +103,31 @@ token，但服务端 TTL 和 Redis 删除让窗口更短，也便于主动作废
 - SameSite=Lax：阻断 CSRF。
 - 5 分钟 TTL：远小于一次正常登录耗时。
 - Redis 端保存状态：cookie 不再承载用户名和已通过密码标志。
+
+### 2.4 登录安全套件：通知 Bot OTP、TOTP 与服务器恢复码
+
+**现状**：登录安全套件默认关闭。管理员可在「系统设置 → 用户与管理 → 登录安全套件」里开启通知 Bot OTP 防爆破或 TOTP 登录验证。TOTP 分成两步：先绑定验证器密钥，再打开“登录验证”开关；关闭开关不会删除密钥，只是不再要求登录时输入 TOTP。
+
+Web 登录密码失败达到阈值后，下一次正确密码不会直接签发 cookie，而是先通过已启用的通知 Bot 发送 6 位登录验证码。通知 Bot 不可用、Telegram 不通或 TOTP 无法使用时，管理员可以 SSH 到服务器生成一次性恢复码。
+
+```bash
+# 本地/开发环境
+make auth-recovery
+
+# 生产容器内，按实际 compose 服务名执行
+docker compose exec web python -m app.scripts.auth_recovery
+
+# 指定用户和有效期
+docker compose exec web python -m app.scripts.auth_recovery --username admin --ttl 900
+```
+
+恢复码只打印一次，数据库只保存哈希；登录时仍必须输入正确密码。恢复码成功使用一次后立即失效，过期后也会被拒绝。
+
+**推荐顺序**：
+1. 先确认服务器 SSH / 容器执行权限可用，必要时能运行 `make auth-recovery`。
+2. 再确保至少有一个通知 Bot 已启用并能收到测试消息。
+3. 绑定 TOTP 密钥后，先用当前浏览器确认验证码可验证，再打开 TOTP 登录验证开关。
+4. 不要在没有恢复码路径的情况下把所有登录都强制绑定二次验证。
 
 ---
 
