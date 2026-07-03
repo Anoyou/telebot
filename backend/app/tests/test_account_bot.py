@@ -4069,6 +4069,95 @@ async def test_interaction_bot_plus_amount_emits_transfer_notice_for_paid_defaul
 
 
 @pytest.mark.asyncio
+async def test_interaction_bot_plus_amount_logs_test_notice_send_failure_without_crashing(monkeypatch) -> None:
+    class _DB:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def commit(self):
+            return None
+
+        async def get(self, model, *_args):  # noqa: ANN002
+            if model is Account:
+                return SimpleNamespace(tg_user_id=1682400007, tg_username="uhaveanswer", display_name="你心里已经有答案了")
+            return None
+
+    send = AsyncMock(side_effect=RuntimeError("Bad Request: chat not found"))
+    runtime_log = AsyncMock()
+    record_action = AsyncMock()
+    monkeypatch.setattr(account_bot_runtime, "AsyncSessionLocal", lambda: _DB())
+    monkeypatch.setattr(
+        account_bot_runtime,
+        "_event_framework_flags",
+        AsyncMock(return_value={"trace_enabled": False, "event_bus_delivery_enabled": True, "inline_updates_enabled": True}),
+    )
+    monkeypatch.setattr(account_bot_service, "send_message", send)
+    monkeypatch.setattr(account_bot_service, "find_bot_user", AsyncMock())
+    monkeypatch.setattr(account_bot_service, "get_transfer_bot_token", AsyncMock(return_value="abot-token"))
+    monkeypatch.setattr(account_bot_runtime, "_write_interaction_runtime_log", runtime_log)
+    monkeypatch.setattr(account_bot_runtime, "record_action", record_action)
+    monkeypatch.setattr(
+        account_bot_service,
+        "get_transfer_notice_config",
+        AsyncMock(
+            return_value={
+                "enabled": True,
+                "interaction_bot_id": 8875144459,
+                "trusted_bot_id": 6920251805,
+                "transfer_bot_id": 8980553289,
+                "transfer_notice_template": "转账成功\n{payer_name} 射出 {amount}\n{receiver_name} 接收 {amount}",
+                "rules": [
+                    {
+                        "id": "silly-math",
+                        "name": "傻瓜玩法",
+                        "enabled": True,
+                        "chat_ids": [-100123],
+                        "trigger_mode": "both",
+                        "trigger_texts": ["转账成功"],
+                        "module_start_keywords": ["我是傻瓜！"],
+                        "receiver_text": "你心里已经有答案了",
+                        "amount": 234,
+                        "amount_match_mode": "eq",
+                        "action": "module",
+                        "module_key": "math10",
+                        "module_action": "start_math_game",
+                    },
+                ],
+            }
+        ),
+    )
+
+    await account_bot_runtime._handle_interaction_update(
+        1,
+        "bbot-token",
+        {
+            "update_id": 51,
+            "message": {
+                "message_id": 510,
+                "text": "+234",
+                "from": {"id": 5843467471, "first_name": "玩家A"},
+                "chat": {"id": -100123, "type": "supergroup"},
+                "reply_to_message": {
+                    "message_id": 49,
+                    "from": {"id": 8875144459, "is_bot": True, "first_name": "玩法Bot"},
+                    "text": "该傻瓜玩法是付费娱乐模块，请对收款人：@uhaveanswer的任意消息回复+234即可参与。",
+                },
+            },
+        },
+    )
+
+    send.assert_awaited_once()
+    runtime_log.assert_awaited_once()
+    assert runtime_log.await_args.args[1] == account_bot_runtime.LEVEL_WARN
+    assert "等待真实转账结果通知" in runtime_log.await_args.args[2]
+    record_action.assert_awaited_once()
+    assert record_action.await_args.args[2] == account_bot_runtime.TRACE_STATUS_FAILED
+
+
+@pytest.mark.asyncio
 async def test_reply_plus_amount_without_transfer_bot_token_waits_for_real_notice(monkeypatch) -> None:
     class _DB:
         async def __aenter__(self):

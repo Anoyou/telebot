@@ -393,6 +393,83 @@ def test_match_subscription_all_messages_covers_message_and_command() -> None:
     assert command_decision.matched is True
 
 
+def test_normalize_userbot_event_projects_anonymous_admin_sender_chat() -> None:
+    sender = SimpleNamespace(id=-100123, title="Demo Group", username="demo_group", megagroup=True, photo=SimpleNamespace(dc_id=5))
+    message = SimpleNamespace(
+        id=10,
+        chat_id=-100123,
+        sender_id=-100123,
+        text="开24点",
+        post_author="匿名管理员",
+        sender=sender,
+    )
+    event = normalize_userbot_event(1, SimpleNamespace(message=message))
+    subscription = normalize_event_subscription(
+        {
+            "source": ["userbot"],
+            "events": ["message"],
+            "scope": "all_allowed_chats",
+            "filters": {"keywords": ["开24点"]},
+            "entry_key": "start_paid_game",
+        },
+        plugin_key="game24",
+    )
+    owner_subscription = normalize_event_subscription(
+        {
+            "source": ["userbot"],
+            "events": ["message"],
+            "scope": "owner_only",
+            "filters": {"keywords": ["开24点"]},
+            "entry_key": "admin_start",
+        },
+        plugin_key="admin_game",
+    )
+
+    decisions = dispatch_event(
+        event,
+        [subscription, owner_subscription],
+        {"allowed_chat_ids": [-100123], "owner_user_ids": [-100123]},
+    ).decisions
+
+    assert event["sender"]["user_id"] is None
+    assert event["sender"]["sender_type"] == "chat"
+    assert event["sender"]["display_name"] == "匿名管理员"
+    assert event["sender"]["sender_chat"]["id"] == -100123
+    assert event["sender"]["sender_chat"]["title"] == "Demo Group"
+    assert event["sender"]["sender_chat"]["signature"] == "匿名管理员"
+    assert event["message"]["sender_chat"]["id"] == -100123
+    assert decisions[0].matched is True
+    assert decisions[0].reason_code == "matched"
+    assert decisions[1].matched is False
+    assert decisions[1].reason_code == "scope_not_matched"
+
+
+def test_normalize_userbot_event_detects_raw_peer_channel_sender() -> None:
+    class _Message:
+        id = 11
+        chat_id = -100456
+        sender_id = -100777
+        text = "hello"
+
+        def to_dict(self):
+            return {
+                "id": self.id,
+                "message": self.text,
+                "peer_id": {"_": "PeerChannel", "channel_id": 456},
+                "from_id": {"_": "PeerChannel", "channel_id": 777},
+                "post_author": "频道身份",
+            }
+
+    event = normalize_userbot_event(1, SimpleNamespace(message=_Message()))
+
+    assert event["sender"]["user_id"] is None
+    assert event["sender"]["sender_type"] == "chat"
+    assert event["sender"]["display_name"] == "频道身份"
+    assert event["sender"]["sender_chat"]["id"] == -100777
+    assert event["sender"]["sender_chat"]["type"] == "channel"
+    assert event["raw"]["signature"] == "频道身份"
+
+
 def test_match_subscription_owner_only_uses_account_owner() -> None:
     event = normalize_userbot_event(
         1,

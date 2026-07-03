@@ -5342,7 +5342,25 @@ async def _try_handle_transfer_command(db: Any, incoming: Incoming) -> bool:
             error=f"{type(exc).__name__}: {exc}",
             transfer_test_notice=True,
         )
-        raise
+        log.warning(
+            "transfer command test notice send failed aid=%s chat_id=%s message_id=%s amount=%s error=%s: %s",
+            incoming.account_id,
+            incoming.chat_id,
+            incoming.message_id,
+            amount,
+            type(exc).__name__,
+            exc,
+        )
+        await _write_interaction_runtime_log(
+            incoming,
+            LEVEL_WARN,
+            "转账测试通知 Bot 无法向当前群发送模拟通知，已等待真实转账结果通知。",
+            chat_id=incoming.chat_id,
+            message_id=incoming.message_id,
+            amount=amount,
+            error=f"{type(exc).__name__}: {exc}",
+        )
+        return True
     log.info(
         "transfer command emitted notice aid=%s chat_id=%s payer=%r receiver=%r amount=%s",
         incoming.account_id,

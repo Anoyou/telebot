@@ -2777,9 +2777,9 @@ export function BotTab({
               <div className="space-y-3 rounded-md border bg-muted/20 p-3">
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <div>
-                    <div className="text-sm font-medium">转账结果通知 Bot</div>
+                    <div className="text-sm font-medium">真实转账结果通知 Bot</div>
                     <div className="text-xs text-muted-foreground">
-                      正式群里已有官方转账通知 Bot 时，只填写 Bot ID 作为信任来源；测试环境才需要额外 Token。
+                      这里填写群里实际发送到账结果的 Bot ID；测试模拟 Token 会自动识别自己的 Bot ID，不要把两者混填。
                     </div>
                   </div>
                   <Badge variant={hasTransferToken || transferBotToken.trim() || transferBotId.trim() ? "secondary" : "outline"}>
@@ -2788,16 +2788,16 @@ export function BotTab({
                 </div>
                 <div className="grid gap-3">
                   <div className="space-y-1.5">
-                    <Label>Bot ID（一串数字，不是@开头的）</Label>
+                    <Label>真实通知 Bot ID（一串数字，不是@开头的）</Label>
                     <Input
                       inputMode="numeric"
-                      placeholder="可选；填写后只信任该通知 Bot"
+                      placeholder="例如群里转账结果消息的发送者 ID"
                       value={transferBotId}
                       onChange={(e) => setTransferBotId(e.target.value)}
                     />
                   </div>
                   <div className="space-y-1.5">
-                    <Label>Token</Label>
+                    <Label>测试模拟通知 Bot Token</Label>
                     <Input
                       type="password"
                       autoComplete="off"
@@ -2805,6 +2805,11 @@ export function BotTab({
                       value={transferBotToken}
                       onChange={(e) => setTransferBotToken(e.target.value)}
                     />
+                    <div className="text-xs text-muted-foreground">
+                      {interactionQ.data?.transfer_bot_id
+                        ? `当前测试模拟 Bot ID：${interactionQ.data.transfer_bot_id}。系统会同时信任真实通知 Bot ID 和这个测试 Bot ID。`
+                        : "没有测试模拟 Token 时，系统只监听群里真实出现的转账结果通知。"}
+                    </div>
                   </div>
                 </div>
                 <div className="flex flex-col gap-2 sm:flex-row sm:justify-end">

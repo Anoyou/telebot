@@ -234,11 +234,19 @@ def normalize_userbot_event(account_id: int, event: Any, *, command_meta: dict[s
     message_id = _int_or_none(getattr(message, "id", None) or getattr(event, "id", None))
     event_type = "command" if command_meta else "message"
     native_raw = _safe_to_dict(message)
+    sender = _telethon_sender_ref(
+        raw=native_raw,
+        message=message,
+        event=event,
+        chat_id=chat_id,
+        sender_id=sender_id,
+    )
     message_payload = _telethon_message_payload(
         raw=native_raw,
         chat_id=chat_id,
         message_id=message_id,
         text=text,
+        sender_chat=sender.get("sender_chat") if isinstance(sender.get("sender_chat"), dict) else None,
     )
     return _event(
         account_id=account_id,
@@ -246,11 +254,16 @@ def normalize_userbot_event(account_id: int, event: Any, *, command_meta: dict[s
         driver="telethon",
         event_type=event_type,
         chat={"id": chat_id},
-        sender={"user_id": sender_id},
+        sender=sender,
         message=message_payload,
         reply_to=_telethon_reply_to(native_raw),
         trigger=dict(command_meta or {}),
-        raw_summary=_telethon_raw_summary(native_raw, event_type=event_type, text=text),
+        raw_summary=_telethon_raw_summary(
+            native_raw,
+            event_type=event_type,
+            text=text,
+            sender_chat=sender.get("sender_chat") if isinstance(sender.get("sender_chat"), dict) else None,
+        ),
         native_raw=native_raw,
     )
 
@@ -532,6 +545,7 @@ def _telethon_message_payload(
     chat_id: int | None,
     message_id: int | None,
     text: str,
+    sender_chat: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     data = raw if isinstance(raw, dict) else {}
     reply_to = data.get("reply_to") if isinstance(data.get("reply_to"), dict) else {}
@@ -551,7 +565,7 @@ def _telethon_message_payload(
         "media": _native_media_summary(data.get("media")),
         "reply_markup": _reply_markup_summary(data.get("reply_markup")),
         "forward": _telethon_forward_summary(data),
-        "sender_chat": _chat_ref(data.get("sender_chat")),
+        "sender_chat": _chat_ref(data.get("sender_chat")) or sender_chat,
         "via_bot": _user_ref_or_none(data.get("via_bot")),
     }
     for key, value in optional.items():
@@ -569,7 +583,13 @@ def _telethon_reply_to(raw: dict[str, Any] | None) -> dict[str, Any] | None:
     return {"message_id": message_id}
 
 
-def _telethon_raw_summary(raw: dict[str, Any] | None, *, event_type: str, text: str) -> dict[str, Any]:
+def _telethon_raw_summary(
+    raw: dict[str, Any] | None,
+    *,
+    event_type: str,
+    text: str,
+    sender_chat: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     data = raw if isinstance(raw, dict) else {}
     summary = {
         "event_type": event_type,
@@ -578,13 +598,151 @@ def _telethon_raw_summary(raw: dict[str, Any] | None, *, event_type: str, text: 
         "media": _native_media_summary(data.get("media")),
         "reply_markup": _reply_markup_summary(data.get("reply_markup")),
         "forward": _telethon_forward_summary(data),
-        "sender_chat": _chat_ref(data.get("sender_chat")),
+        "sender_chat": _chat_ref(data.get("sender_chat")) or sender_chat,
+        "signature": str(data.get("post_author") or data.get("signature") or "") or None,
         "via_bot": _user_ref_or_none(data.get("via_bot")),
         "thread_id": _int_or_none(_nested(data, "reply_to", "reply_to_top_id")),
         "edit_date": data.get("edit_date"),
         "service": str(data.get("_") or "") or None,
     }
     return {key: value for key, value in summary.items() if value not in (None, "", [], {})}
+
+
+def _telethon_sender_ref(
+    *,
+    raw: dict[str, Any] | None,
+    message: Any,
+    event: Any,
+    chat_id: int | None,
+    sender_id: int | None,
+) -> dict[str, Any]:
+    data = raw if isinstance(raw, dict) else {}
+    sender_obj = getattr(message, "sender", None) or getattr(event, "sender", None)
+    signature = _first_text(
+        getattr(message, "post_author", None),
+        getattr(message, "signature", None),
+        data.get("post_author"),
+        data.get("signature"),
+    )
+    sender_chat = _telethon_sender_chat_ref(
+        raw=data,
+        sender=sender_obj,
+        chat_id=chat_id,
+        sender_id=sender_id,
+        signature=signature,
+    )
+    if sender_chat and (signature or _telethon_raw_sender_is_chat(data) or _object_is_chat_sender(sender_obj)):
+        return {
+            "user_id": None,
+            "display_name": signature or sender_chat.get("title") or sender_chat.get("username") or str(sender_chat.get("id") or ""),
+            "username": sender_chat.get("username"),
+            "sender_type": "chat",
+            "sender_chat": sender_chat,
+        }
+    sender = {"user_id": sender_id}
+    display_name = _first_text(
+        getattr(sender_obj, "first_name", None),
+        getattr(sender_obj, "title", None),
+        getattr(sender_obj, "username", None),
+    )
+    username = _first_text(getattr(sender_obj, "username", None))
+    if display_name:
+        sender["display_name"] = display_name
+    if username:
+        sender["username"] = username
+    if sender_chat:
+        sender["sender_type"] = "user_via_chat"
+        sender["sender_chat"] = sender_chat
+    return sender
+
+
+def _telethon_sender_chat_ref(
+    *,
+    raw: dict[str, Any],
+    sender: Any,
+    chat_id: int | None,
+    sender_id: int | None,
+    signature: str | None,
+) -> dict[str, Any] | None:
+    raw_sender_chat = _chat_ref(raw.get("sender_chat"))
+    if raw_sender_chat:
+        if signature:
+            raw_sender_chat["signature"] = signature
+        return raw_sender_chat
+    if not (signature or _telethon_raw_sender_is_chat(raw) or _object_is_chat_sender(sender)):
+        return None
+    sender_title = _first_text(getattr(sender, "title", None))
+    username = _first_text(getattr(sender, "username", None))
+    sender_chat_id = sender_id or _telethon_raw_peer_id(raw.get("from_id")) or _int_or_none(getattr(sender, "id", None)) or chat_id
+    chat_type = _telethon_raw_peer_type(raw.get("from_id")) or _object_chat_type(sender) or "channel"
+    out = {
+        "id": sender_chat_id,
+        "type": chat_type,
+        "title": sender_title or signature,
+        "username": username,
+    }
+    if signature:
+        out["signature"] = signature
+    return {key: value for key, value in out.items() if value not in (None, "", [], {})} or None
+
+
+def _telethon_raw_sender_is_chat(raw: dict[str, Any]) -> bool:
+    from_id = raw.get("from_id")
+    return _telethon_raw_peer_type(from_id) in {"channel", "chat"}
+
+
+def _telethon_raw_peer_type(peer: Any) -> str | None:
+    if isinstance(peer, dict):
+        raw_type = str(peer.get("_") or peer.get("type") or "").lower()
+        if "channel" in raw_type:
+            return "channel"
+        if "chat" in raw_type:
+            return "chat"
+    class_name = peer.__class__.__name__.lower() if peer is not None else ""
+    if "channel" in class_name:
+        return "channel"
+    if "chat" in class_name:
+        return "chat"
+    return None
+
+
+def _telethon_raw_peer_id(peer: Any) -> int | None:
+    if isinstance(peer, dict):
+        return _int_or_none(peer.get("channel_id") or peer.get("chat_id") or peer.get("id"))
+    return _int_or_none(getattr(peer, "channel_id", None) or getattr(peer, "chat_id", None) or getattr(peer, "id", None))
+
+
+def _object_is_chat_sender(sender: Any) -> bool:
+    if sender is None:
+        return False
+    class_name = sender.__class__.__name__.lower()
+    if class_name in {"channel", "chat"} or "channel" in class_name:
+        return True
+    return bool(_first_text(getattr(sender, "title", None))) and not bool(
+        _first_text(getattr(sender, "first_name", None), getattr(sender, "last_name", None))
+    )
+
+
+def _object_chat_type(sender: Any) -> str | None:
+    if sender is None:
+        return None
+    if bool(getattr(sender, "broadcast", False)):
+        return "channel"
+    if bool(getattr(sender, "megagroup", False)) or bool(getattr(sender, "gigagroup", False)):
+        return "supergroup"
+    if _object_is_chat_sender(sender):
+        return "chat"
+    return None
+
+
+def _first_text(*values: Any) -> str | None:
+    for value in values:
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    return None
 
 
 def _user_ref(raw: Any) -> dict[str, Any]:
