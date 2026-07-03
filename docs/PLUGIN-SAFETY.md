@@ -31,6 +31,14 @@ Manifest 中的 `permissions` 字段声明插件需要的能力：
 
 TelePilot 按个人可信插件模式运行：管理员安装并启用插件后，远程插件的业务风险由管理员自行承担；平台不做公共插件市场式强沙箱，但仍保留频控、审计、急停、Trace 和 token/session 隔离。新 Telegram 插件必须走 Event Bus + MessageOps：在 `plugin.json` 声明 `usage`、`event_subscriptions`、`capabilities`，运行时只读取标准事件信封，所有发送、编辑、删除、置顶、按钮 ACK、Inline answer 和结算都返回标准 action 或通过 `ctx.messages` 生成。`ctx.client` 保留给管理员命令和高级兼容场景，不作为普通 Bot 按钮回调的主入口。群里已有的转账结果通知 Bot 只作为外部付款证据来源，不是插件主动发送通道。
 
+### 会话通道边界
+
+消息链路统一后，插件要额外记住三个安全边界：
+
+- 会话通道由触发方式决定。命令开局默认走 userbot，关键词/付款/按钮开局默认走 interaction bot；普通发送动作应继承 `session.channel`，不要每条消息手动改通道。
+- `payout` 永远经 userbot 执行，并进入 `RateLimitEngine`、trace 和失败回写。插件不要把 Bot 公告伪装成转账，也不要把发奖逻辑拆成“先发普通消息，再等旧文案协议补发”。
+- userbot 会话没有原生 inline 按钮能力。平台会把按钮降级成文本编号，并把玩家回复合成为 callback 事件；这意味着强按钮玩法最好默认 `keyword_only`，避免命令开局落到不适合的通道。
+
 ### 配置页动作边界
 
 通用配置页支持 `config_actions` / `x-config-actions`，但它不是任意 HTML、CSS 或 JavaScript 注入能力。插件只能声明按钮、输入 schema 和放置位置；点击按钮后，平台在后端调用插件的 `on_config_action(ctx, action_key, payload)`。
@@ -197,7 +205,7 @@ TelePilot 按个人可信插件模式运行：管理员安装并启用插件后�
 
 ### 消息发送能力边界
 
-新 Telegram 插件的默认路径是 Event Bus + MessageOps + Trace：插件读取标准事件信封，返回标准 action，或通过 `ctx.messages` 生成同等 action；平台再选择实际发送通道并记录 trace/action/reason_code。旧 hook 仍可作为内置插件和迁移桥兼容，但不能作为远程插件的新模板。
+新 Telegram 插件的默认路径是 Event Bus + MessageOps + Trace：插件读取标准事件信封，返回标准 action，或通过 `ctx.messages` 生成同等 action；平台再选择实际发送通道并记录 trace/action/reason_code。默认消息格式按 `parse_mode="plain"` 发送，只有显式声明 `parse_mode="html"` 时才会启用 HTML；HTML 文案先转义再拼标签。旧 hook 仍可作为内置插件和迁移桥兼容，但不能作为远程插件的新模板。
 
 | 场景 | 最终版主路径 | 旧 hook 兼容边界 |
 |------|--------------|------------------|
@@ -237,6 +245,7 @@ async def safe_reply_action(ctx, text: str, *, chat_id: int, reply_to_id: int | 
 - `event.edit(...)` 只适合编辑当前账号自己发出的指令/状态消息；不要用它编辑别人发来的 incoming 消息。
 - 远程插件安装阶段只读 `plugin.json`；运行时由 TelePilot facade 代发、记录和限流，插件不直接接触 Bot Token 或 userbot session。
 - 第三方插件不要把 `event.reply/respond/edit` 当作绕过审计的路径；新插件发送、编辑、删除、置顶、按钮 ACK、Inline answer 都应通过 `ctx.messages` 或标准 action 交给平台，方便 Trace、限流和问题追踪。
+- 若启用 `callback_fast_ack`，按钮会先被平台立即 ACK；插件后续返回的 `answer_callback` 只会记 trace，不会再真正调用 Telegram。需要 `show_alert` 的入口不要开启它。
 - 需要发送图片、文件时，为 `BytesIO` 设置 `name`，例如 `image_file.name = "result.png"`，否则 Telegram 客户端可能显示无后缀文件。
 - 长消息要按 Telegram 4096 字符限制分段；HTML 模式下切分前要保证标签闭合，失败时应降级为纯文本。
 
@@ -556,6 +565,7 @@ await ctx.log(
 - [ ] 模板类配置包含占位符说明和示例预览。
 - [ ] 高频交互插件有冷却/限流/超时策略，并在用户文案里说明关键规则。
 - [ ] 取消、完成、超时、禁用、热重载路径都会清理状态和后台任务。
+- [ ] 动作数量超出平台限制时会触发 `action_limit_exceeded`，并在日志里可见截断结果。
 - [ ] 所有外部 HTTP 请求有 timeout，错误提示不泄露 token、路径、session。
 - [ ] 插件日志能说明“收到什么、判断了什么、为什么跳过/为什么执行、失败在哪一步”。
 

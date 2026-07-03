@@ -72,6 +72,7 @@ def build_event_probe_report(
         source_channel=source_channel,
         chat_id=chat_id,
         message_id=message_id,
+        sender_user_id=_first_value(sender.get("user_id"), trace.get("sender_user_id")),
         callback_id=callback_id,
         callback_data=callback_data,
         inline_query_id=inline_query_id,
@@ -148,6 +149,7 @@ def _action_suggestions(
     source_channel: str,
     chat_id: Any,
     message_id: Any,
+    sender_user_id: Any,
     callback_id: str | None,
     callback_data: str | None,
     inline_query_id: str | None,
@@ -220,6 +222,21 @@ def _action_suggestions(
                     "chat_id": chat_id,
                     "reply_to_message_id": message_id,
                     "text": "<回复文本>",
+                },
+            }
+        )
+    if event_type == "callback_query" and chat_id is not None:
+        suggestions.append(
+            {
+                "title": "按钮参与者发奖锚点",
+                "reason": "按钮点击者来自 payload.sender.user_id；需要 userbot 发奖时，可让平台按该 user_id 搜索群内最近发言并自动 reply。",
+                "action": {
+                    "type": "send_message",
+                    "send_via": "userbot_reply",
+                    "chat_id": chat_id,
+                    "reply_to_user_id": sender_user_id or "<payload.sender.user_id>",
+                    "reply_to_search_limit": 200,
+                    "text": "+<奖励金额>",
                 },
             }
         )

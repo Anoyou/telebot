@@ -23,6 +23,15 @@ my_plugin/
 
 `plugin.json` 是静态安装元数据，不执行 Python；安装后运行时仍会读取 `manifest.py` 的 `MANIFEST`。两边的 `name/key`、`version`、`category`、`event_subscriptions`、`capabilities` 必须保持一致。
 
+消息链路统一阶段的互动入口，还要额外关注 4 个字段：
+
+- `triggers.command`：把某个入口声明成可由 UserBot 前缀命令开局。
+- `default_trigger_modes`：给平台注入的 `interaction_trigger_modes` 提供默认值，常见值是 `all` / `keyword_only`。
+- `callback_fast_ack`：按钮入口是否在分类完成后立即空 ACK。
+- `include_outgoing`：userbot 会话是否继续吃本账号自己发出的消息。
+
+如果当前实例还没合入对应 runtime/worker 分支，上述字段只作为仓库契约说明，不保证旧环境自动生效。
+
 ## plugin.json 最小模板
 
 ```json
@@ -36,6 +45,11 @@ my_plugin/
   "min_telepilot_version": "0.33.0",
   "category": "interactive",
   "permissions": ["send_message", "read_chat"],
+  "triggers": {
+    "command": "demo"
+  },
+  "default_trigger_modes": "all",
+  "callback_fast_ack": false,
   "usage": "启用后按 Event Bus 订阅接收 message/command/callback/inline/payment 事件，所有输出都返回标准 action。",
   "event_subscriptions": [
     {
@@ -79,6 +93,10 @@ my_plugin/
 | `event_subscriptions` | 事件插件必填 | Event Bus 投递声明；纯 HTTP/AI 工具可写 `[]` |
 | `capabilities` | 是 | 高风险能力声明；没有高风险能力也建议写 `{}` |
 | `permissions` | 按需 | 安装提示和 facade 注入依据，如 `external_http`、`ai_text`、`send_message` |
+| `triggers.command` | 互动入口按需 | 声明 UserBot 命令开局名，不带前缀 |
+| `default_trigger_modes` | 互动入口按需 | `all` / `keyword_only`，决定命令与关键词是否同时开放 |
+| `callback_fast_ack` | callback 入口按需 | 点击按钮后先立即 ACK，再慢慢处理插件逻辑 |
+| `include_outgoing` | 互动入口按需 | userbot 会话内是否继续投递本账号自己发出的消息 |
 | `allowed_hosts` | HTTP 插件必填 | `ctx.http` 允许访问的域名 |
 | `config_schema` | 按需 | 账号级配置；有配置时也要提供 `usage` 或 `x-usage-guide` |
 
@@ -104,11 +122,17 @@ my_plugin/
 
 | 字段 | 常用值 | 说明 |
 | --- | --- | --- |
-| `events` | `message`、`command`、`callback_query`、`inline_query`、`chosen_inline_result`、`payment_confirmed`、`session_close` | 订阅事件类型 |
+| `events` | `message`、`command`、`callback_query`、`inline_query`、`chosen_inline_result`、`payment_confirmed`、`session_close`、`message_edited`、`session_expired`、`all_events` | 订阅事件类型 |
 | `source` | `userbot`、`interaction_bot`、`external_payment_notice` | 事件来源 |
 | `scope` | `all_allowed_chats`、`owner_only`、`known_users`、`rule_bound`、`inline_all` | 投递范围 |
 
-Inline 插件必须声明 `inline_all`；付款插件必须能处理 `payment_confirmed`，不要把外部转账通知文本当业务主路径。
+`all_messages` 目前仍只表示 `message` / `command`；需要覆盖平台已登记的常见事件时，用 `all_events`。Inline 插件必须声明 `inline_all`；付款插件必须能处理 `payment_confirmed`，不要把外部转账通知文本当业务主路径。
+
+`known_users` 只认平台 state 提供的真实集合，不会自动包含当前 sender。
+
+`filters` 已支持常用键校验，未知 filter key 会保留并告 warning。`rule_bound` 如果带 `filters.rule_id`，必须与 `trigger.rule_id` 完全一致。
+
+互动入口如果既声明了 `triggers.command`，又是强按钮玩法，建议让配置页暴露 `interaction_trigger_modes`，并把默认值设成 `keyword_only`。这样 userbot 命令开局会被关闭，避免按钮在 userbot 会话里只能降级成文本编号时破坏体验。
 
 ## capabilities.telegram_native_raw
 
@@ -255,6 +279,12 @@ return [
 ```
 
 `send_via` 只使用 `interaction_bot`、`userbot_reply` 或 `auto`。`notice` / `bbot_notice` / `notice_bot` 已移除，插件请求这些通道应得到明确迁移错误。
+
+默认 `send_message` / `send_photo` / `send_file` 等动作按 `parse_mode="plain"` 发送；只有显式声明 `parse_mode="html"` 时才启用 HTML。HTML 内容要先转义，再构造标签。
+
+在统一会话通道模型下，普通发送类动作通常可以省略 `send_via`，平台会继承当前 `session.channel`。只有跨通道公告、管理提示或迁移桥兼容才需要显式覆盖。`payout` 不受会话通道影响，始终经 userbot 执行。
+
+userbot 会话里的 `reply_markup` 会被平台降级成文本编号面板，而不是静默丢弃。玩家回复序号或按钮文案后，平台会合成 `callback_query` 回投插件；合成事件会在 `source.synthetic="text_button"` 标记，并跳过真正的 `answer_callback` Bot API 调用。
 
 ## manifest.py
 

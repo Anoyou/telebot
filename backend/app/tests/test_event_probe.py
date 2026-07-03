@@ -54,7 +54,12 @@ def test_event_probe_report_explains_callback_subscription_and_actions() -> None
     assert report["headline"] == "callback_query / interaction_bot"
     assert report["subscription_suggestions"][0]["manifest"]["events"] == ["callback_query"]
     assert report["subscription_suggestions"][0]["manifest"]["filters"]["callback_data"] == ["game:start:42"]
-    assert [item["action"]["type"] for item in report["action_suggestions"]] == ["answer_callback", "edit_message"]
+    assert [item["action"]["type"] for item in report["action_suggestions"]] == [
+        "answer_callback",
+        "edit_message",
+        "send_message",
+    ]
+    assert report["action_suggestions"][2]["action"]["reply_to_user_id"] == 1001
     assert report["routing"][0]["matched"] is True
     assert any(item["path"] == "payload.callback.data" for item in report["field_paths"])
     assert any(item["path"] == "payload.raw.reply_markup" for item in report["message_facts"])

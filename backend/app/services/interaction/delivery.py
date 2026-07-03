@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import base64
 import binascii
+import json
 import logging
+import math
 import re
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
@@ -25,6 +28,8 @@ log = logging.getLogger(__name__)
 
 INTERACTION_SESSION_CONTROL_ACTIONS = {"end_session", "close_session", "no_session"}
 INTERACTION_ACTION_SAVE_KEY_MAX_LENGTH = 200
+INTERACTION_ACTION_LIMIT = 10
+MESSAGE_ID_NAMESPACE_PREFIX = "tp:msgid"
 
 WriteLog = Callable[..., Awaitable[None]]
 RunWorkerAction = Callable[..., Awaitable[tuple[bool, str | None, dict[str, Any]]]]
@@ -46,13 +51,51 @@ class InteractionDeliveryExecutor:
         context: dict[str, Any] | None = None,
         replace_message_id: int | None = None,
     ) -> None:
-        for raw_action in actions[:10]:
+        if len(actions) > INTERACTION_ACTION_LIMIT:
+            dropped_actions = actions[INTERACTION_ACTION_LIMIT:]
+            await self.write_log(
+                self.incoming,
+                "warn",
+                "interaction actions truncated by delivery limit",
+                reason_code="action_limit_exceeded",
+                kept_count=INTERACTION_ACTION_LIMIT,
+                dropped_count=len(dropped_actions),
+                dropped_action_types=[str((item or {}).get("type") or "") for item in dropped_actions if isinstance(item, dict)],
+                **self.log_context(self.incoming),
+            )
+            for raw_action in dropped_actions:
+                action = dict(raw_action) if isinstance(raw_action, dict) else {"type": "unknown"}
+                if context and isinstance(action.get("context"), dict):
+                    merged_context = dict(action["context"])
+                    merged_context.update(context)
+                    action["context"] = merged_context
+                elif context:
+                    action["context"] = dict(context)
+                await record_action(
+                    action.get("context"),
+                    action,
+                    TRACE_STATUS_FAILED,
+                    error_code="action_limit_exceeded",
+                    error="interaction delivery only executes the first 10 actions",
+                )
+        for raw_action in actions[:INTERACTION_ACTION_LIMIT]:
             action = dict(raw_action)
             if context:
                 action["context"] = dict(context)
             action_type = str(action.get("type") or "").strip()
             await self._record_settlement(action)
             if action_type == "start_session":
+                await record_action(
+                    action.get("context"),
+                    action,
+                    TRACE_STATUS_SKIPPED,
+                    actual_send_via="interaction_session",
+                    error_code="session_control_action",
+                    error="session control action: start_session",
+                )
+                continue
+            if action_type == "update_session":
+                await self._apply_update_session(action)
                 continue
             if action_type in INTERACTION_SESSION_CONTROL_ACTIONS or action_type == "result":
                 await record_action(
@@ -93,8 +136,20 @@ class InteractionDeliveryExecutor:
                 )
                 continue
             reply_to_message_id = _int_or_none(action.get("reply_to_message_id"))
+            reply_to_user_id = _reply_to_user_id_from_action(action)
+            reply_to_search_limit = _int_or_none(action.get("reply_to_search_limit"))
+            parse_mode = _action_parse_mode(action)
             raw_reply_markup = action.get("reply_markup")
             reply_markup = raw_reply_markup if isinstance(raw_reply_markup, dict) else None
+            if action_type == "payout":
+                await self._apply_payout(
+                    action,
+                    reply_to_message_id=reply_to_message_id,
+                    reply_to_user_id=reply_to_user_id,
+                    reply_to_search_limit=reply_to_search_limit,
+                    parse_mode=parse_mode,
+                )
+                continue
             if action_type == "answer_callback":
                 await self._answer_callback(action)
                 continue
@@ -108,12 +163,15 @@ class InteractionDeliveryExecutor:
                 await self._apply_pin_message(action)
                 continue
             if action_type == "edit_message":
-                await self._apply_edit_message(action, reply_markup=reply_markup)
+                await self._apply_edit_message(action, parse_mode=parse_mode, reply_markup=reply_markup)
                 continue
             if action_type == "send_message":
                 replace_message_id = await self._apply_send_message(
                     action,
                     reply_to_message_id=reply_to_message_id,
+                    reply_to_user_id=reply_to_user_id,
+                    reply_to_search_limit=reply_to_search_limit,
+                    parse_mode=parse_mode,
                     reply_markup=reply_markup,
                     replace_message_id=replace_message_id,
                 )
@@ -122,6 +180,9 @@ class InteractionDeliveryExecutor:
                 replace_message_id = await self._apply_send_media(
                     action,
                     reply_to_message_id=reply_to_message_id,
+                    reply_to_user_id=reply_to_user_id,
+                    reply_to_search_limit=reply_to_search_limit,
+                    parse_mode=parse_mode,
                     replace_message_id=replace_message_id,
                 )
                 continue
@@ -225,25 +286,37 @@ class InteractionDeliveryExecutor:
         *,
         chat_id: int | None = None,
         reply_to_message_id: int | None,
+        reply_to_user_id: int | None = None,
+        reply_to_search_limit: int | None = None,
+        parse_mode: str = "plain",
         send_via: str,
         edit_message_id: int | None = None,
         reply_markup: dict[str, Any] | None = None,
         context: dict[str, Any] | None = None,
     ) -> tuple[bool, dict[str, Any]]:
         target_chat_id = self._target_chat_id(chat_id)
+        service_parse_mode = None if parse_mode == "plain" else parse_mode
         if target_chat_id is None:
             return False, {}
         if not self._is_supported_send_via(send_via):
             return False, {"error": f"unsupported send_via: {send_via}", "error_code": "unsupported_send_via"}
         if send_via == "userbot_reply":
+            payload = {
+                "action_type": "send_message",
+                "chat_id": target_chat_id,
+                "text": text,
+                "reply_to_message_id": reply_to_message_id,
+                "parse_mode": parse_mode,
+            }
+            if reply_markup is not None:
+                payload["reply_markup"] = reply_markup
+            if reply_to_user_id is not None:
+                payload["reply_to_user_id"] = reply_to_user_id
+            if reply_to_search_limit is not None:
+                payload["reply_to_search_limit"] = reply_to_search_limit
             ok, error, result = await self.run_worker_action(
                 self.incoming,
-                payload={
-                    "action_type": "send_message",
-                    "chat_id": target_chat_id,
-                    "text": text,
-                    "reply_to_message_id": reply_to_message_id,
-                },
+                payload=payload,
             )
             if not ok:
                 return False, {"error": error, "error_code": _worker_action_error_code(error)}
@@ -269,12 +342,15 @@ class InteractionDeliveryExecutor:
             if context:
                 edit_action["context"] = dict(context)
             try:
+                edit_kwargs: dict[str, Any] = {"reply_markup": reply_markup}
+                if service_parse_mode is not None:
+                    edit_kwargs["parse_mode"] = service_parse_mode
                 result = await account_bot_service.edit_message(
                     token,
                     target_chat_id,
                     edit_message_id,
                     text,
-                    reply_markup=reply_markup,
+                    **edit_kwargs,
                 )
                 await record_action(
                     context,
@@ -303,12 +379,17 @@ class InteractionDeliveryExecutor:
                     **self.log_context(self.incoming),
                 )
         try:
+            send_kwargs: dict[str, Any] = {
+                "reply_to_message_id": reply_to_message_id,
+                "reply_markup": reply_markup,
+            }
+            if service_parse_mode is not None:
+                send_kwargs["parse_mode"] = service_parse_mode
             result = await account_bot_service.send_message(
                 token,
                 target_chat_id,
                 text,
-                reply_to_message_id=reply_to_message_id,
-                reply_markup=reply_markup,
+                **send_kwargs,
             )
         except Exception as exc:  # noqa: BLE001
             await self.write_log(
@@ -337,9 +418,11 @@ class InteractionDeliveryExecutor:
         chat_id: int | None = None,
         message_id: int | None,
         send_via: str,
+        parse_mode: str = "plain",
         reply_markup: dict[str, Any] | None = None,
     ) -> tuple[bool, dict[str, Any]]:
         target_chat_id = self._target_chat_id(chat_id)
+        service_parse_mode = None if parse_mode == "plain" else parse_mode
         if target_chat_id is None:
             return False, {}
         if message_id is None:
@@ -347,15 +430,16 @@ class InteractionDeliveryExecutor:
         if not self._is_supported_send_via(send_via):
             return False, {"error": f"unsupported send_via: {send_via}", "error_code": "unsupported_send_via"}
         if send_via == "userbot_reply":
-            ok, error, result = await self.run_worker_action(
-                self.incoming,
-                payload={
-                    "action_type": "edit_message",
-                    "chat_id": target_chat_id,
-                    "message_id": message_id,
-                    "text": text,
-                },
-            )
+            payload = {
+                "action_type": "edit_message",
+                "chat_id": target_chat_id,
+                "message_id": message_id,
+                "text": text,
+                "parse_mode": parse_mode,
+            }
+            if reply_markup is not None:
+                payload["reply_markup"] = reply_markup
+            ok, error, result = await self.run_worker_action(self.incoming, payload=payload)
             if not ok:
                 return False, {"error": error, "error_code": _worker_action_error_code(error)}
             return True, result
@@ -370,12 +454,15 @@ class InteractionDeliveryExecutor:
             )
             return False, {"error": "bot token unavailable", "error_code": "bot_token_missing"}
         try:
+            edit_kwargs: dict[str, Any] = {"reply_markup": reply_markup if send_via == "interaction_bot" else None}
+            if service_parse_mode is not None:
+                edit_kwargs["parse_mode"] = service_parse_mode
             result = await account_bot_service.edit_message(
                 token,
                 target_chat_id,
                 message_id,
                 text,
-                reply_markup=reply_markup if send_via == "interaction_bot" else None,
+                **edit_kwargs,
             )
             return True, result
         except Exception as exc:  # noqa: BLE001
@@ -397,24 +484,34 @@ class InteractionDeliveryExecutor:
         filename: str,
         caption: str | None,
         reply_to_message_id: int | None,
+        reply_to_user_id: int | None = None,
+        reply_to_search_limit: int | None = None,
+        parse_mode: str = "plain",
         send_via: str,
     ) -> tuple[bool, dict[str, Any]]:
         target_chat_id = self._target_chat_id(chat_id)
+        service_parse_mode = None if parse_mode == "plain" else parse_mode
         if target_chat_id is None:
             return False, {}
         if not self._is_supported_send_via(send_via):
             return False, {"error": f"unsupported send_via: {send_via}", "error_code": "unsupported_send_via"}
         if send_via == "userbot_reply":
+            payload = {
+                "action_type": "send_photo",
+                "chat_id": target_chat_id,
+                "photo_base64": base64.b64encode(photo).decode("ascii"),
+                "filename": filename,
+                "caption": caption,
+                "reply_to_message_id": reply_to_message_id,
+                "parse_mode": parse_mode,
+            }
+            if reply_to_user_id is not None:
+                payload["reply_to_user_id"] = reply_to_user_id
+            if reply_to_search_limit is not None:
+                payload["reply_to_search_limit"] = reply_to_search_limit
             ok, error, result = await self.run_worker_action(
                 self.incoming,
-                payload={
-                    "action_type": "send_photo",
-                    "chat_id": target_chat_id,
-                    "photo_base64": base64.b64encode(photo).decode("ascii"),
-                    "filename": filename,
-                    "caption": caption,
-                    "reply_to_message_id": reply_to_message_id,
-                },
+                payload=payload,
             )
             if not ok:
                 return False, {"error": error, "error_code": _worker_action_error_code(error)}
@@ -430,13 +527,18 @@ class InteractionDeliveryExecutor:
             )
             return False, {"error": "bot token unavailable", "error_code": "bot_token_missing"}
         try:
+            send_kwargs: dict[str, Any] = {
+                "filename": filename,
+                "caption": caption,
+                "reply_to_message_id": reply_to_message_id,
+            }
+            if service_parse_mode is not None:
+                send_kwargs["parse_mode"] = service_parse_mode
             result = await account_bot_service.send_photo_bytes(
                 token,
                 target_chat_id,
                 photo,
-                filename=filename,
-                caption=caption,
-                reply_to_message_id=reply_to_message_id,
+                **send_kwargs,
             )
         except Exception as exc:  # noqa: BLE001
             await self.write_log(
@@ -450,11 +552,82 @@ class InteractionDeliveryExecutor:
             return False, {"error": str(exc), "error_code": "telegram_api_error"}
         return True, result
 
+    async def _apply_payout(
+        self,
+        action: dict[str, Any],
+        *,
+        reply_to_message_id: int | None,
+        reply_to_user_id: int | None,
+        reply_to_search_limit: int | None,
+        parse_mode: str,
+    ) -> None:
+        amount = _int_or_none(action.get("amount"))
+        if amount is None or amount <= 0:
+            await record_action(
+                action.get("context"),
+                action,
+                TRACE_STATUS_FAILED,
+                actual_send_via="userbot_reply",
+                error_code="action_failed",
+                error="payout amount must be > 0",
+            )
+            return
+        chat_id = _int_or_none(action.get("chat_id"))
+        target_chat_id = self._target_chat_id(chat_id)
+        if target_chat_id is None:
+            await record_action(
+                action.get("context"),
+                action,
+                TRACE_STATUS_FAILED,
+                actual_send_via="userbot_reply",
+                error_code="scope_not_matched",
+                error="payout target chat_id missing",
+            )
+            return
+        text = str(action.get("text") or f"+{amount}").strip()
+        if not text:
+            text = f"+{amount}"
+        payload: dict[str, Any] = {
+            "action_type": "payout",
+            "chat_id": target_chat_id,
+            "amount": amount,
+            "text": text,
+            "reply_to_message_id": reply_to_message_id,
+            "parse_mode": parse_mode,
+        }
+        if reply_to_user_id is not None:
+            payload["reply_to_user_id"] = reply_to_user_id
+        if reply_to_search_limit is not None:
+            payload["reply_to_search_limit"] = reply_to_search_limit
+        ok, error, result = await self.run_worker_action(self.incoming, payload=payload)
+        detail = result if isinstance(result, dict) else {}
+        await record_action(
+            action.get("context"),
+            action,
+            TRACE_STATUS_OK if ok else TRACE_STATUS_FAILED,
+            actual_send_via="userbot_reply",
+            result=detail,
+            error_code=None if ok else _worker_action_error_code(error),
+            error=None if ok else error,
+        )
+        if not ok:
+            await self.write_log(
+                self.incoming,
+                "warn",
+                "interaction payout failed",
+                action_type="payout",
+                error=error,
+                **self.log_context(self.incoming),
+            )
+
     async def _apply_send_message(
         self,
         action: dict[str, Any],
         *,
         reply_to_message_id: int | None,
+        reply_to_user_id: int | None,
+        reply_to_search_limit: int | None,
+        parse_mode: str,
         reply_markup: dict[str, Any] | None,
         replace_message_id: int | None,
     ) -> int | None:
@@ -473,7 +646,7 @@ class InteractionDeliveryExecutor:
         placeholder_chat_id = self.incoming.chat_id
         send_via_options = action_send_via_options(action)
         original_replace_message_id = replace_message_id
-        replace_saved_key = action_save_message_id_key(action.get("replace_saved_message_id_key"))
+        replace_saved_key = namespaced_action_save_message_id_key(self.incoming.account_id, action.get("replace_saved_message_id_key"))
         replace_saved_message_id = await self._read_saved_message_id(replace_saved_key)
         edit_message_id = _int_or_none(action.get("edit_message_id"))
         delete_message_id = None
@@ -492,6 +665,9 @@ class InteractionDeliveryExecutor:
             text,
             chat_id=chat_id,
             reply_to_message_id=reply_to_message_id,
+            reply_to_user_id=reply_to_user_id,
+            reply_to_search_limit=reply_to_search_limit,
+            parse_mode=parse_mode,
             send_via_options=send_via_options,
             edit_message_id=edit_message_id,
             reply_markup=reply_markup,
@@ -511,7 +687,7 @@ class InteractionDeliveryExecutor:
                 context=action.get("context") if isinstance(action.get("context"), dict) else None,
                 record=True,
             )
-        save_key = action_save_message_id_key(action.get("save_message_id_key"))
+        save_key = namespaced_action_save_message_id_key(self.incoming.account_id, action.get("save_message_id_key"))
         if ok and save_key:
             msg_id = delivery_message_id(result)
             if msg_id is not None:
@@ -549,6 +725,122 @@ class InteractionDeliveryExecutor:
             )
         return replace_message_id
 
+    async def _apply_update_session(self, action: dict[str, Any]) -> None:
+        raw_data = action.get("data")
+        if raw_data is None:
+            session_data_update: dict[str, Any] = {}
+        elif isinstance(raw_data, dict):
+            session_data_update = dict(raw_data)
+        else:
+            await record_action(
+                action.get("context"),
+                action,
+                TRACE_STATUS_FAILED,
+                actual_send_via="interaction_session",
+                error_code="interaction_session_error",
+                error="update_session data must be an object",
+            )
+            return
+
+        raw_extend_seconds = action.get("extend_seconds")
+        extend_seconds = _int_or_none(raw_extend_seconds)
+        if raw_extend_seconds not in (None, "") and extend_seconds is None:
+            await record_action(
+                action.get("context"),
+                action,
+                TRACE_STATUS_FAILED,
+                actual_send_via="interaction_session",
+                error_code="interaction_session_error",
+                error="update_session extend_seconds must be an integer",
+            )
+            return
+        if extend_seconds is not None and extend_seconds < 0:
+            await record_action(
+                action.get("context"),
+                action,
+                TRACE_STATUS_FAILED,
+                actual_send_via="interaction_session",
+                error_code="interaction_session_error",
+                error="update_session extend_seconds must be >= 0",
+            )
+            return
+
+        session_key = _session_key_from_action(action)
+        if not session_key:
+            await record_action(
+                action.get("context"),
+                action,
+                TRACE_STATUS_FAILED,
+                actual_send_via="interaction_session",
+                error_code="interaction_session_error",
+                error="update_session session_key missing",
+            )
+            return
+
+        try:
+            from .. import account_bot_runtime as account_bot_runtime_service
+
+            redis = self.get_redis_client()
+            existing = _json_dict(await redis.get(session_key))
+            if not existing:
+                raise KeyError("session not found")
+
+            expires_at = _float_or_none(existing.get("expires_at"))
+            if expires_at is None:
+                raise ValueError("session expires_at missing")
+
+            now = time.time()
+            if extend_seconds:
+                expires_at = max(expires_at, now) + extend_seconds
+
+            merged_session_data = dict(existing.get("data") if isinstance(existing.get("data"), dict) else {})
+            merged_session_data.update(session_data_update)
+
+            payload = dict(existing)
+            payload["data"] = merged_session_data
+            payload["updated_at"] = now
+            payload["expires_at"] = expires_at
+
+            grace_seconds = int(account_bot_runtime_service._INTERACTION_SESSION_TTL_GRACE_SECONDS)  # noqa: SLF001
+            ttl_seconds = max(1, int(math.ceil(max(0.0, expires_at - now)))) + grace_seconds
+            await redis.set(
+                session_key,
+                json.dumps(payload, ensure_ascii=False),
+                ex=ttl_seconds,
+            )
+        except Exception as exc:  # noqa: BLE001
+            await record_action(
+                action.get("context"),
+                action,
+                TRACE_STATUS_FAILED,
+                actual_send_via="interaction_session",
+                error_code="interaction_session_error",
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            await self.write_log(
+                self.incoming,
+                "warn",
+                "interaction session update failed",
+                action_type="update_session",
+                session_key=session_key,
+                error=f"{type(exc).__name__}: {exc}",
+                **self.log_context(self.incoming),
+            )
+            return
+
+        await record_action(
+            action.get("context"),
+            action,
+            TRACE_STATUS_OK,
+            actual_send_via="interaction_session",
+            result={
+                "session_key": session_key,
+                "expires_at": expires_at,
+                "extend_seconds": extend_seconds,
+                "data_keys": sorted(merged_session_data),
+            },
+        )
+
     async def _read_saved_message_id(self, key: str | None) -> int | None:
         if not key:
             return None
@@ -564,6 +856,7 @@ class InteractionDeliveryExecutor:
         self,
         action: dict[str, Any],
         *,
+        parse_mode: str,
         reply_markup: dict[str, Any] | None,
     ) -> None:
         text = str(action.get("text") or "").strip()
@@ -592,6 +885,7 @@ class InteractionDeliveryExecutor:
             chat_id=chat_id,
             message_id=message_id,
             send_via_options=action_send_via_options(action),
+            parse_mode=parse_mode,
             reply_markup=reply_markup,
         )
         await record_action(
@@ -609,6 +903,9 @@ class InteractionDeliveryExecutor:
         action: dict[str, Any],
         *,
         reply_to_message_id: int | None,
+        reply_to_user_id: int | None,
+        reply_to_search_limit: int | None,
+        parse_mode: str,
         replace_message_id: int | None,
     ) -> int | None:
         raw_photo = str(action.get("photo_base64") or action.get("file_base64") or "").strip()
@@ -652,6 +949,9 @@ class InteractionDeliveryExecutor:
             filename=filename,
             caption=caption,
             reply_to_message_id=reply_to_message_id,
+            reply_to_user_id=reply_to_user_id,
+            reply_to_search_limit=reply_to_search_limit,
+            parse_mode=parse_mode,
             send_via_options=action_send_via_options(action),
         )
         if ok and replace_message_id is not None:
@@ -831,6 +1131,9 @@ class InteractionDeliveryExecutor:
         *,
         chat_id: int | None,
         reply_to_message_id: int | None,
+        reply_to_user_id: int | None,
+        reply_to_search_limit: int | None,
+        parse_mode: str,
         send_via_options: list[str],
         edit_message_id: int | None,
         reply_markup: dict[str, Any] | None,
@@ -842,9 +1145,12 @@ class InteractionDeliveryExecutor:
                 text,
                 chat_id=chat_id,
                 reply_to_message_id=reply_to_message_id,
+                reply_to_user_id=reply_to_user_id,
+                reply_to_search_limit=reply_to_search_limit,
+                parse_mode=parse_mode,
                 send_via=send_via,
                 edit_message_id=edit_message_id if send_via == "interaction_bot" else None,
-                reply_markup=reply_markup if send_via == "interaction_bot" else None,
+                reply_markup=reply_markup,
                 context=context,
             )
             if ok:
@@ -860,6 +1166,7 @@ class InteractionDeliveryExecutor:
         chat_id: int | None,
         message_id: int,
         send_via_options: list[str],
+        parse_mode: str,
         reply_markup: dict[str, Any] | None,
     ) -> tuple[bool, dict[str, Any], str]:
         last_result: dict[str, Any] = {}
@@ -869,7 +1176,8 @@ class InteractionDeliveryExecutor:
                 chat_id=chat_id,
                 message_id=message_id,
                 send_via=send_via,
-                reply_markup=reply_markup if send_via == "interaction_bot" else None,
+                parse_mode=parse_mode,
+                reply_markup=reply_markup,
             )
             if ok:
                 return True, result, send_via
@@ -885,6 +1193,9 @@ class InteractionDeliveryExecutor:
         filename: str,
         caption: str | None,
         reply_to_message_id: int | None,
+        reply_to_user_id: int | None,
+        reply_to_search_limit: int | None,
+        parse_mode: str,
         send_via_options: list[str],
     ) -> tuple[bool, dict[str, Any], str]:
         last_result: dict[str, Any] = {}
@@ -895,6 +1206,9 @@ class InteractionDeliveryExecutor:
                 filename=filename,
                 caption=caption,
                 reply_to_message_id=reply_to_message_id,
+                reply_to_user_id=reply_to_user_id,
+                reply_to_search_limit=reply_to_search_limit,
+                parse_mode=parse_mode,
                 send_via=send_via,
             )
             if ok:
@@ -958,6 +1272,14 @@ def action_save_message_id_key(raw: Any) -> str | None:
     return key
 
 
+def namespaced_action_save_message_id_key(account_id: Any, raw: Any) -> str | None:
+    key = action_save_message_id_key(raw)
+    account = _int_or_none(account_id)
+    if not key or account is None:
+        return None
+    return f"{MESSAGE_ID_NAMESPACE_PREFIX}:{account}:{key}"
+
+
 def _int_or_none(value: Any) -> int | None:
     try:
         if value in (None, ""):
@@ -965,6 +1287,56 @@ def _int_or_none(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _float_or_none(value: Any) -> float | None:
+    try:
+        if value in (None, ""):
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _json_dict(raw: Any) -> dict[str, Any]:
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8", errors="ignore")
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw) if isinstance(raw, str) else raw
+    except (TypeError, ValueError):
+        return {}
+    return dict(parsed) if isinstance(parsed, dict) else {}
+
+
+def _session_key_from_action(action: dict[str, Any]) -> str:
+    if isinstance(action.get("session"), dict):
+        session_key = str(action["session"].get("key") or "").strip()
+        if session_key:
+            return session_key
+    session_key = str(action.get("session_key") or "").strip()
+    if session_key:
+        return session_key
+    context = action.get("context")
+    if isinstance(context, dict):
+        return str(context.get("session_key") or "").strip()
+    return ""
+
+
+def _reply_to_user_id_from_action(action: dict[str, Any]) -> int | None:
+    explicit = _int_or_none(action.get("reply_to_user_id"))
+    if explicit is not None:
+        return explicit
+    settlement = action.get("settlement")
+    if isinstance(settlement, dict):
+        return _int_or_none(settlement.get("winner_user_id") or settlement.get("player_user_id"))
+    return _int_or_none(action.get("winner_user_id") or action.get("player_user_id"))
+
+
+def _action_parse_mode(action: dict[str, Any]) -> str:
+    value = str(action.get("parse_mode") or "plain").strip().lower()
+    return "html" if value == "html" else "plain"
 
 
 def _result_error_code(result: Any, fallback: str) -> str:
@@ -982,6 +1354,8 @@ def _worker_action_error_code(error: Any) -> str:
     text = str(error or "").strip().lower()
     if not text:
         return "action_failed"
+    if "worker 不在线" in text or "userbot" in text:
+        return "userbot_offline"
     if "message_id" in text or "消息" in text and "id" in text:
         return "target_message_id_missing"
     if "chat_id" in text:
@@ -1002,4 +1376,5 @@ __all__ = [
     "InteractionDeliveryExecutor",
     "action_save_message_id_key",
     "delivery_message_id",
+    "namespaced_action_save_message_id_key",
 ]

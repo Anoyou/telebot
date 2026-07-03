@@ -20,6 +20,32 @@
 
 ## [Unreleased]
 
+## [0.48.0] — 2026-07-04 · minor（次版本） · 消息链路统一与会话通道
+
+### Added
+- 新增“触发方式决定会话通道”模型：UserBot 命令开局后的会话统一由 userbot 收发，关键词 / 付款 / callback 开局后的会话统一由交互 Bot 收发，发奖 `payout` 始终通过 userbot 执行。
+- 新增 `session.channel`、`session.expires_at`、`update_session` 与双通道 `session_expired` 投递，插件可把单局状态稳定写入 `session.data`，不再依赖进程内字典和自建超时任务。
+- 新增 manifest `triggers.command`、`default_trigger_modes`、运行时 `interaction_trigger_modes`、`callback_fast_ack`，并支持 userbot 会话中按钮文本降级和合成 callback。
+- 标准事件信封统一以 Event Bus 归一化结果为基底，补齐 `message.entities`、媒体摘要、消息时间、群标题 / username、`tp_event` 投影、`all_events`、`message_edited` 与稳定 reason code。
+
+### Changed
+- 已安装互动插件迁移到新模型：`guess_number` 改为单一 `on_interaction` 参考实现，使用 `session.data + update_session + payout`；`poetry_blank`、`dice_grid_hunt` 同步迁移核心交互入口，`lottery_plus`、`pt_promote` 补齐触发契约。
+- 主进程交互 loop 改为按 chat 保序、跨 chat 并发处理，并把运行时游标搬出配置行；worker RPC 支持后台并发，worker 离线时入口 / 动作调用快速失败。
+- 发送层默认 `parse_mode="plain"`，显式支持 HTML 模式和 `html_escape()`；Bot API HTTP client 复用连接池，userbot 发送与 payout 接入限速引擎。
+
+### Fixed
+- 修复交互 update 处理失败会静默推进 offset、callback 异常后按钮长时间转圈、`known_users` scope 恒真、关键词规则缺交互 Bot 时仍能保存等消息链路缺陷。
+- 修复转账通知无规则、会话读写失败、动作截断、守卫丢弃等路径缺少 trace / runtime log 的问题，失败原因现在能在链路日志里定位。
+- 修复 userbot 会话内消息无法喂入标准 `on_interaction`、按钮在 userbot 通道被静默剥除、同群双 bot 容易跨通道误投递的问题。
+
+### Removed
+- 删除旧的 worker auto-award 文案协议、交互 Bot 中奖公告解析和主进程 math10 本地答题 fallback；互动玩法发奖统一使用 `payout` 动作。
+
+### Docs
+- 补充消息链路统一阶段的插件开发文档，明确“触发方式 -> 会话通道”、单一 `on_interaction` 生命周期、`session.data` / `update_session`、`payout`、`tp_event`、`parse_mode="plain"` 与 `html_escape()` 的最终约定。
+- 同步补充 userbot 按钮文本降级、`all_events` / `message_edited` / `session_expired`、`known_users`、filter / `rule_id`、`reason_code` 排障口径，减少把旧平铺 payload、旧通道选择和旧 notice 文案协议继续当主路径的误解。
+- 远程插件与安全文档补充 `keyword_only`、`default_trigger_modes`、`callback_fast_ack`、关键词规则依赖交互 Bot 等收口说明，并注明旧环境未合入对应 runtime/worker 时以实例实际行为为准。
+
 ## [0.47.4] — 2026-07-03 · patch（补丁版本） · 插件额外参数保存补丁
 
 ### Fixed

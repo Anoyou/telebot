@@ -23,6 +23,7 @@ for import_root in (ROOT, BACKEND_ROOT):
 
 from app.worker.plugins.base import Plugin  # noqa: E402
 from app.worker.plugins.manifest import Manifest  # noqa: E402
+from app.services.event_bus import SUPPORTED_FILTER_KEYS  # noqa: E402
 
 INCLUDED_EXAMPLES = {"event_bus_demo", "hello_ping", "with_http", "with_ai", "with_interaction"}
 SKIPPED_EXAMPLES = {
@@ -122,6 +123,7 @@ def _validate_event_contract(name: str, metadata: dict[str, Any], manifest: Mani
         raise AssertionError(f"{name}: plugin.json.capabilities 必须是对象")
     if dict(metadata_capabilities) != _manifest_capabilities(manifest):
         raise AssertionError(f"{name}: plugin.json.capabilities 与 MANIFEST.capabilities 不一致")
+    _warn_unknown_filter_keys(name, metadata_subscriptions)
 
     if name in EVENT_EXAMPLES:
         if not metadata_subscriptions:
@@ -140,6 +142,22 @@ def _validate_event_contract(name: str, metadata: dict[str, Any], manifest: Mani
         if isinstance(direct_capability, dict) and direct_capability.get("enabled") is True:
             if not str(direct_capability.get("reason") or "").strip():
                 raise AssertionError(f"{name}: telegram_direct_passthrough.enabled=true 时必须说明 reason")
+
+
+def _warn_unknown_filter_keys(name: str, subscriptions: list[dict[str, Any]]) -> None:
+    for index, subscription in enumerate(subscriptions, start=1):
+        filters = subscription.get("filters")
+        if not isinstance(filters, dict):
+            continue
+        unknown = sorted(
+            {
+                str(key).strip()
+                for key in filters
+                if str(key).strip() and str(key).strip() not in SUPPORTED_FILTER_KEYS
+            }
+        )
+        if unknown:
+            print(f"warn: {name} - event_subscriptions[{index}] filters 含未知 key: {', '.join(unknown)}")
 
 
 def _validate_deprecated_risks(name: str, plugin_dir: Path, metadata: dict[str, Any]) -> None:
@@ -213,6 +231,8 @@ def _validate_event_demo_runtime(name: str, plugin_dir: Path, plugin: Plugin) ->
     for fixture_name, expected_actions in EXPECTED_EVENT_ACTIONS.items():
         payload = json.loads((fixtures_dir / fixture_name).read_text(encoding="utf-8"))
         actions = asyncio.run(_run_on_event(plugin, payload))
+        source = payload.get("source") if isinstance(payload.get("source"), dict) else {}
+        synthetic_source = str(source.get("synthetic") or "").strip()
         action_types = {str(action.get("type") or "").strip() for action in actions}
         if not expected_actions <= action_types:
             raise AssertionError(
@@ -228,6 +248,8 @@ def _validate_event_demo_runtime(name: str, plugin_dir: Path, plugin: Plugin) ->
             if action_type == "answer_inline_query" and not str(action.get("inline_query_id") or "").strip():
                 raise AssertionError(f"{name}: {fixture_name} 缺少 inline_query_id")
             if action_type == "answer_callback" and not str(action.get("callback_query_id") or "").strip():
+                if synthetic_source:
+                    continue
                 raise AssertionError(f"{name}: {fixture_name} 缺少 callback_query_id")
 
     deprecated_payload = json.loads((fixtures_dir / "deprecated_notice_action.json").read_text(encoding="utf-8"))

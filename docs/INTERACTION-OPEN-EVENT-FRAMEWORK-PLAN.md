@@ -1,5 +1,7 @@
 # TelePilot 插件开放事件框架优化计划
 
+> 0.48 消息链路统一补充：涉及“触发方式 -> 会话通道”、“单入口生命周期”、“`session.data` / `update_session`”、“`payout`”、“按钮文本降级”、“`all_events` / `session_expired` / `message_edited`”、“`tp_event` 投影对象”等内容时，当前执行与开发文档以 [docs/INTERACTION-PIPELINE-UNIFICATION-PLAN.md](./INTERACTION-PIPELINE-UNIFICATION-PLAN.md) 为准。本文保留开放事件框架的阶段性背景和早期约束。
+
 本文整理当前讨论后的下一阶段改造计划。目标不是新增一套新概念，而是在现有 `PluginEvent` / `on_interaction(ctx, entry_key, payload)` 基础上直接改造，把传给插件的 `payload` 明确定义为“当前标准事件信封字段”，并把框架从“替插件做过多判断”调整为“完整下发消息、提供双通道操作能力、记录告警与审计”。
 
 > 后续执行入口：本文件记录 0.37.0 阶段的开放事件框架决策和落地记录。当前 `0.40.x` 最终版封口已经并入 `docs/TELEGRAM-FULL-EVENT-BUS-TRACE-PLAN.md`，执行时以该文档第 24 节《最终版执行版协议》、第 25 节《最终版落地总则》、第 26 节《最终版执行锁定补丁》、第 27 节《最终版可实现性锁定》和第 28 节《最终版执行冻结清单》为准。若本文件的阶段性版本建议、验收状态或旧入口描述与最终版总控冲突，以最终版总控为准。

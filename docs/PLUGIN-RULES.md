@@ -5,17 +5,19 @@
 ## 必须
 
 1. 新 Telegram 插件必须走 Event Bus + MessageOps：读取标准事件信封，输出 `ctx.messages` 操作或标准 action。
-2. 插件必须声明 `usage`、`event_subscriptions`、`capabilities`；没有高风险能力也要写 `capabilities={}`。
-3. `plugin.json.name`、`MANIFEST.key`、插件类 `key` 必须一致。
-4. 发送、编辑、删除、置顶、按钮 ACK、Inline answer、settlement 必须通过 `ctx.messages` 或标准 action 交给平台执行。
-5. 远程插件安装后默认不运行，必须在插件中心按账号启用后才会收到事件。
-6. 钱相关能力必须走 UserBot 或平台受控结算链路；普通 Bot 只能做交互和公告，不能执行转账。
-7. 群里已有的外部转账结果通知 Bot 只作为付款证据来源，不是 TelePilot 主动发送通道。
-8. 需要原生 Telegram 字段时，必须声明 `capabilities.telegram_native_raw`，写清 reason、sources 和降级路径。
-9. 外部 HTTP 必须声明 `permissions=["external_http"]` 和 `allowed_hosts`，请求必须有 timeout。
-10. AI 能力必须声明 `permissions=["ai_text"]`，并通过 `ctx.ai` 使用平台 Provider、fallback 和预算。
-11. 插件启停、禁用、热重载、超时和卸载时，必须清理 handler、session、scheduler job、asyncio task、临时消息、临时文件和游戏状态。
-12. 日志必须脱敏，不得写入 token、session、完整原生 payload、隐私消息或完整敏感文件路径。
+2. 新互动玩法优先实现一个 `on_interaction(ctx, entry_key, payload)`，在同一个入口里处理 `command`、`keyword`、`payment_confirmed`、`message`、`callback_query`、`session_expired`。
+3. 会话状态优先写进 `session.data`，并通过 `update_session` 持久化；不要再把单局状态只放在进程内 dict/lock 里。
+4. 插件必须声明 `usage`、`event_subscriptions`、`capabilities`；没有高风险能力也要写 `capabilities={}`。
+5. `plugin.json.name`、`MANIFEST.key`、插件类 `key` 必须一致。
+6. 发送、编辑、删除、置顶、按钮 ACK、Inline answer、`payout`、`update_session`、`settlement` 必须通过 `ctx.messages` 或标准 action 交给平台执行。
+7. 远程插件安装后默认不运行，必须在插件中心按账号启用后才会收到事件。
+8. 钱相关能力必须走 UserBot 或平台受控结算链路；普通 Bot 只能做交互和公告，不能执行转账。
+9. 群里已有的外部转账结果通知 Bot 只作为付款证据来源，不是 TelePilot 主动发送通道。
+10. 需要原生 Telegram 字段时，必须声明 `capabilities.telegram_native_raw`，写清 reason、sources 和降级路径。
+11. 外部 HTTP 必须声明 `permissions=["external_http"]` 和 `allowed_hosts`，请求必须有 timeout。
+12. AI 能力必须声明 `permissions=["ai_text"]`，并通过 `ctx.ai` 使用平台 Provider、fallback 和预算。
+13. 插件启停、禁用、热重载、超时和卸载时，必须清理 handler、session、scheduler job、asyncio task、临时消息、临时文件和游戏状态。
+14. 日志必须脱敏，不得写入 token、session、完整原生 payload、隐私消息或完整敏感文件路径。
 
 ## 禁止
 
@@ -27,6 +29,8 @@
 6. 禁止在 `on_startup` / `on_shutdown` 无条件群发消息；确需通知必须有显式配置开关。
 7. 禁止让抢答、抽奖、付款确认在无锁状态下结算；必须有原子判定和二次检查。
 8. 禁止用空 `usage`、空权限或模糊能力声明绕过规范警告。
+9. 禁止在普通会话消息里把 `send_via` 当必填样板；大多数动作应该继承 `session.channel`。
+10. 禁止在需要 `show_alert` 晚提示的按钮入口上开启 `callback_fast_ack`。
 
 ## 推荐
 
@@ -34,6 +38,8 @@
 2. 把单局金额、题目范围、奖励等动态参数放在触发参数或会话里，不要写死到全局配置。
 3. 帮助、开局、成功、失败、超时、取消和冷却文案做成模板，并支持 `{prefix}`。
 4. 游戏和高频交互按 chat/user 设计锁、冷却、超时和取消入口。
-5. 返回 action 时给出候选 `send_via`，例如 `["interaction_bot", "userbot_reply"]`，让平台选择真实通道并记录 Trace。
-6. 更新版本时同步 `plugin.json.version`、`MANIFEST.version` 和插件仓库索引里的版本。
-7. 发布前运行 `backend/.venv/bin/python scripts/validate-plugin-examples.py`，并在真实账号上至少验证一次启用、触发、禁用和更新。
+5. 默认让平台继承 `session.channel`；只有跨通道公告、迁移桥兼容或高级兜底时才显式给候选 `send_via`。
+6. 强按钮玩法把 `default_trigger_modes` 设为 `keyword_only`，避免 userbot 会话里的文本按钮降级影响体验。
+7. 文本输出默认走 `parse_mode="plain"`；需要 HTML 时先做 `html_escape()` 再拼标签。
+8. 更新版本时同步 `plugin.json.version`、`MANIFEST.version` 和插件仓库索引里的版本。
+9. 发布前运行 `backend/.venv/bin/python scripts/validate-plugin-examples.py`，并在真实账号上至少验证一次启用、触发、禁用和更新。

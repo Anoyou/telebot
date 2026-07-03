@@ -11,9 +11,6 @@ from typing import Any
 
 from . import account_bot_runtime
 
-MathGameState = account_bot_runtime.MathGameState
-_MATH_GAMES = account_bot_runtime._MATH_GAMES
-
 
 async def start_interaction_bot_manager() -> int:
     return await account_bot_runtime.start_interaction_bot_manager()
@@ -33,14 +30,6 @@ async def restart_interaction_bot(aid: int) -> None:
 
 async def _handle_interaction_update(aid: int, token: str, update: dict[str, Any]) -> None:
     await account_bot_runtime._handle_interaction_update(aid, token, update)
-
-
-async def _start_math_game(incoming: Any, *, prize: int = 123) -> None:
-    await account_bot_runtime._start_math_game(incoming, prize=prize)
-
-
-async def _try_handle_math_answer(incoming: Any) -> bool:
-    return await account_bot_runtime._try_handle_math_answer(incoming)
 
 
 def _parse_transfer_notice(text: str) -> dict[str, Any] | None:

@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
 from hmac import compare_digest
-from html import escape
+from html import escape, unescape
+from html.parser import HTMLParser
 from typing import Any
 
 import httpx
@@ -55,6 +57,8 @@ log = logging.getLogger(__name__)
 
 BOT_API_BASE = "https://api.telegram.org"
 BOT_API_TIMEOUT = httpx.Timeout(connect=5.0, read=35.0, write=10.0, pool=5.0)
+BOT_MESSAGE_TEXT_LIMIT = 4000
+BOT_MESSAGE_CAPTION_LIMIT = 1024
 TRANSFER_NOTICE_SETTING_PREFIX = "account_bot_transfer_notice:"
 VALID_TRIGGER_MODES = {"payment", "keyword", "both"}
 VALID_AMOUNT_MATCH_MODES = {"eq", "gte"}
@@ -87,6 +91,9 @@ ROLE_RANK = {
     ACCOUNT_BOT_ROLE_OPERATOR: 1,
     ACCOUNT_BOT_ROLE_ADMIN: 2,
 }
+
+_BOT_API_CLIENT: httpx.AsyncClient | None = None
+_BOT_API_CLIENT_LOCK = asyncio.Lock()
 
 
 def role_allows(role: str, required: str) -> bool:
@@ -1432,8 +1439,8 @@ async def call_bot_api(
     """调用 Bot API；只在这里拼接 token URL。"""
 
     url = f"{BOT_API_BASE}/bot{token}/{method}"
-    async with httpx.AsyncClient(timeout=timeout or BOT_API_TIMEOUT) as client:
-        resp = await client.post(url, json=payload or {})
+    client = await get_bot_api_client()
+    resp = await client.post(url, json=payload or {}, timeout=timeout or BOT_API_TIMEOUT)
     data = resp.json() if resp.content else {}
     if resp.status_code >= 400 or not data.get("ok", False):
         desc = data.get("description") or f"HTTP {resp.status_code}"
@@ -1455,13 +1462,14 @@ async def send_message(
     reply_to_message_id: int | None = None,
     parse_mode: str | None = "HTML",
 ) -> dict[str, Any]:
+    normalized_parse_mode = normalize_bot_parse_mode(parse_mode)
     payload: dict[str, Any] = {
         "chat_id": chat_id,
-        "text": text[:4000],
+        "text": _truncate_bot_text(text, parse_mode=normalized_parse_mode, limit=BOT_MESSAGE_TEXT_LIMIT),
         "disable_web_page_preview": True,
     }
-    if parse_mode:
-        payload["parse_mode"] = parse_mode
+    if normalized_parse_mode:
+        payload["parse_mode"] = normalized_parse_mode
     if reply_markup is not None:
         payload["reply_markup"] = reply_markup
     if reply_to_message_id is not None:
@@ -1481,17 +1489,18 @@ async def send_photo_bytes(
     parse_mode: str | None = "HTML",
 ) -> dict[str, Any]:
     url = f"{BOT_API_BASE}/bot{token}/sendPhoto"
+    normalized_parse_mode = normalize_bot_parse_mode(parse_mode)
     data: dict[str, Any] = {"chat_id": chat_id}
     if caption:
-        data["caption"] = caption[:1024]
-    if parse_mode:
-        data["parse_mode"] = parse_mode
+        data["caption"] = _truncate_bot_text(caption, parse_mode=normalized_parse_mode, limit=BOT_MESSAGE_CAPTION_LIMIT)
+    if normalized_parse_mode:
+        data["parse_mode"] = normalized_parse_mode
     if reply_to_message_id is not None:
         data["reply_to_message_id"] = reply_to_message_id
         data["allow_sending_without_reply"] = True
     files = {"photo": (filename or "photo.png", photo)}
-    async with httpx.AsyncClient(timeout=BOT_API_TIMEOUT) as client:
-        resp = await client.post(url, data=data, files=files)
+    client = await get_bot_api_client()
+    resp = await client.post(url, data=data, files=files, timeout=BOT_API_TIMEOUT)
     payload = resp.json() if resp.content else {}
     if resp.status_code >= 400 or not payload.get("ok", False):
         desc = payload.get("description") or f"HTTP {resp.status_code}"
@@ -1509,14 +1518,15 @@ async def edit_message(
     reply_markup: dict[str, Any] | None = None,
     parse_mode: str | None = "HTML",
 ) -> dict[str, Any]:
+    normalized_parse_mode = normalize_bot_parse_mode(parse_mode)
     payload: dict[str, Any] = {
         "chat_id": chat_id,
         "message_id": message_id,
-        "text": text[:4000],
+        "text": _truncate_bot_text(text, parse_mode=normalized_parse_mode, limit=BOT_MESSAGE_TEXT_LIMIT),
         "disable_web_page_preview": True,
     }
-    if parse_mode:
-        payload["parse_mode"] = parse_mode
+    if normalized_parse_mode:
+        payload["parse_mode"] = normalized_parse_mode
     if reply_markup is not None:
         payload["reply_markup"] = reply_markup
     return await call_bot_api(token, "editMessageText", payload)
@@ -1574,3 +1584,124 @@ def html_text(value: Any) -> str:
     """Bot HTML 消息统一转义。"""
 
     return escape("" if value is None else str(value), quote=False)
+
+
+async def get_bot_api_client() -> httpx.AsyncClient:
+    global _BOT_API_CLIENT
+    client = _BOT_API_CLIENT
+    if client is not None and not getattr(client, "is_closed", False):
+        return client
+    async with _BOT_API_CLIENT_LOCK:
+        client = _BOT_API_CLIENT
+        if client is None or getattr(client, "is_closed", False):
+            client = httpx.AsyncClient(
+                timeout=BOT_API_TIMEOUT,
+                limits=httpx.Limits(max_connections=20, max_keepalive_connections=20),
+            )
+            _BOT_API_CLIENT = client
+    return client
+
+
+async def close_bot_api_client() -> None:
+    global _BOT_API_CLIENT
+    async with _BOT_API_CLIENT_LOCK:
+        client = _BOT_API_CLIENT
+        _BOT_API_CLIENT = None
+    if client is not None and not getattr(client, "is_closed", False):
+        await client.aclose()
+
+
+def normalize_bot_parse_mode(parse_mode: str | None) -> str | None:
+    value = str(parse_mode or "").strip().lower()
+    if value in {"", "plain", "none"}:
+        return None
+    if value == "html":
+        return "HTML"
+    return str(parse_mode).strip() or None
+
+
+def _truncate_bot_text(text: Any, *, parse_mode: str | None, limit: int) -> str:
+    raw = "" if text is None else str(text)
+    if limit <= 0 or len(raw) <= limit:
+        return raw
+    if parse_mode == "HTML":
+        return _safe_truncate_html(raw, limit=limit)
+    return raw[:limit]
+
+
+class _HTMLTruncator(HTMLParser):
+    _VOID_TAGS = {"br"}
+
+    def __init__(self, limit: int) -> None:
+        super().__init__(convert_charrefs=False)
+        self.limit = max(0, int(limit))
+        self.visible_length = 0
+        self.parts: list[str] = []
+        self.open_tags: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if self._done():
+            return
+        raw = self.get_starttag_text()
+        if raw:
+            self.parts.append(raw)
+        if tag not in self._VOID_TAGS:
+            self.open_tags.append(tag)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag not in self.open_tags:
+            return
+        while self.open_tags:
+            current = self.open_tags.pop()
+            self.parts.append(f"</{current}>")
+            if current == tag:
+                break
+
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if self._done():
+            return
+        raw = self.get_starttag_text()
+        if raw:
+            self.parts.append(raw)
+
+    def handle_data(self, data: str) -> None:
+        if self._done() or not data:
+            return
+        remaining = self.limit - self.visible_length
+        if len(data) <= remaining:
+            self.parts.append(data)
+            self.visible_length += len(data)
+            return
+        self.parts.append(data[:remaining])
+        self.visible_length += remaining
+
+    def handle_entityref(self, name: str) -> None:
+        self._append_entity(f"&{name};")
+
+    def handle_charref(self, name: str) -> None:
+        prefix = "&#x" if str(name).lower().startswith("x") else "&#"
+        self._append_entity(f"{prefix}{name};")
+
+    def finish(self) -> str:
+        while self.open_tags:
+            self.parts.append(f"</{self.open_tags.pop()}>")
+        return "".join(self.parts)
+
+    def _append_entity(self, raw: str) -> None:
+        if self._done():
+            return
+        remaining = self.limit - self.visible_length
+        if remaining <= 0:
+            return
+        self.parts.append(raw)
+        self.visible_length += len(unescape(raw))
+
+    def _done(self) -> bool:
+        return self.visible_length >= self.limit
+
+
+def _safe_truncate_html(text: str, *, limit: int) -> str:
+    parser = _HTMLTruncator(limit)
+    parser.feed(text)
+    parser.close()
+    return parser.finish()

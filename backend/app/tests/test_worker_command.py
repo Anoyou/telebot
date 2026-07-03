@@ -4,6 +4,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import re
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -19,6 +20,67 @@ from app.worker.command import (
     should_allow_auto_command_text,
     should_skip_outgoing_command_echo,
 )
+from app.worker.ipc import (
+    CMD_PING,
+    CMD_RUN_INTERACTION_ENTRY,
+    CMD_STOP,
+    EVT_ACK,
+    EVT_PONG,
+    IPCMessage,
+    event_channel,
+    make_cmd,
+)
+
+
+class _FakeCmdPubSub:
+    def __init__(self, queue: asyncio.Queue[dict]) -> None:
+        self._queue = queue
+        self.closed = False
+
+    async def subscribe(self, *_args, **_kwargs) -> None:
+        return None
+
+    async def unsubscribe(self, *_args, **_kwargs) -> None:
+        return None
+
+    async def close(self) -> None:
+        self.closed = True
+
+    async def get_message(self, *_args, **_kwargs) -> dict:
+        return await self._queue.get()
+
+
+class _FakeCmdRedis:
+    def __init__(self) -> None:
+        self.messages: asyncio.Queue[dict] = asyncio.Queue()
+        self.published: list[tuple[str, str]] = []
+        self.logs: list[tuple[str, str]] = []
+
+    def pubsub(self) -> _FakeCmdPubSub:
+        return _FakeCmdPubSub(self.messages)
+
+    async def publish(self, channel: str, payload: str) -> int:
+        self.published.append((channel, payload))
+        return 1
+
+    async def rpush(self, key: str, payload: str) -> int:
+        self.logs.append((key, payload))
+        return len(self.logs)
+
+    async def send_cmd(self, payload: str) -> None:
+        await self.messages.put({"type": "message", "data": payload})
+
+
+async def _wait_for_publish(redis: _FakeCmdRedis, predicate, *, timeout: float = 1.0) -> tuple[str, IPCMessage]:
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while loop.time() < deadline:
+        for channel, payload in redis.published:
+            msg = IPCMessage.decode(payload)
+            if predicate(channel, msg):
+                return channel, msg
+        await asyncio.sleep(0.01)
+    raise AssertionError("timed out waiting for redis publish")
 
 
 @pytest.mark.asyncio
@@ -54,6 +116,180 @@ async def test_ping():
     event = AsyncMock()
     await _BUILTIN["ping"].handler(client, event, [], 1)
     event.edit.assert_called_once_with("pong")
+
+
+@pytest.mark.asyncio
+async def test_worker_rpc_does_not_block_ping(monkeypatch):
+    """慢交互入口 RPC 后台执行时，ping 仍应立即得到 pong。"""
+    from app.worker import runtime as runtime_mod
+    from app.worker.plugins import loader as loader_mod
+
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def _slow_entry(*_args, **_kwargs):
+        started.set()
+        await release.wait()
+        return [{"type": "send_message", "text": "done"}]
+
+    monkeypatch.setattr(loader_mod, "invoke_interaction_entry", _slow_entry)
+
+    redis = _FakeCmdRedis()
+    client = AsyncMock()
+    paused = asyncio.Event()
+    paused.set()
+    listener = asyncio.create_task(runtime_mod._listen_cmd(redis, client, 101, paused))
+    try:
+        await redis.send_cmd(
+            make_cmd(
+                CMD_RUN_INTERACTION_ENTRY,
+                reply_to="rpc-reply",
+                cmd_id="rpc-1",
+                plugin_key="demo",
+                entry_key="main",
+                payload={},
+            )
+        )
+        await asyncio.wait_for(started.wait(), timeout=1)
+
+        await redis.send_cmd(make_cmd(CMD_PING))
+        channel, msg = await _wait_for_publish(
+            redis,
+            lambda ch, item: ch == event_channel(101) and item.type == EVT_PONG,
+        )
+        assert channel == event_channel(101)
+        assert msg.type == EVT_PONG
+
+        assert release.is_set() is False
+        release.set()
+        _, rpc_msg = await _wait_for_publish(
+            redis,
+            lambda ch, item: ch == "rpc-reply" and item.type == CMD_RUN_INTERACTION_ENTRY,
+        )
+        assert rpc_msg.payload["ok"] is True
+        assert rpc_msg.payload["actions"][0]["text"] == "done"
+
+        _, ack_msg = await _wait_for_publish(
+            redis,
+            lambda ch, item: ch == "rpc-reply" and item.type == EVT_ACK and item.payload.get("cmd_id") == "rpc-1",
+        )
+        assert ack_msg.payload["ok"] is True
+    finally:
+        await redis.send_cmd(make_cmd(CMD_STOP))
+        await asyncio.wait_for(listener, timeout=1)
+
+
+@pytest.mark.asyncio
+async def test_worker_stop_cancels_inflight_rpc(monkeypatch):
+    """stop 控制命令要取消尚未完成的后台 RPC 任务。"""
+    from app.worker import runtime as runtime_mod
+    from app.worker.plugins import loader as loader_mod
+
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def _never_finish(*_args, **_kwargs):
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    monkeypatch.setattr(loader_mod, "invoke_interaction_entry", _never_finish)
+
+    redis = _FakeCmdRedis()
+    client = AsyncMock()
+    paused = asyncio.Event()
+    paused.set()
+    listener = asyncio.create_task(runtime_mod._listen_cmd(redis, client, 102, paused))
+    try:
+        await redis.send_cmd(
+            make_cmd(
+                CMD_RUN_INTERACTION_ENTRY,
+                reply_to="rpc-cancel",
+                cmd_id="rpc-cancel-1",
+                plugin_key="demo",
+                entry_key="main",
+                payload={},
+            )
+        )
+        await asyncio.wait_for(started.wait(), timeout=1)
+        await redis.send_cmd(make_cmd(CMD_STOP))
+        await asyncio.wait_for(listener, timeout=1)
+
+        assert cancelled.is_set() is True
+        assert not any(
+            channel == "rpc-cancel" and IPCMessage.decode(payload).type == CMD_RUN_INTERACTION_ENTRY
+            for channel, payload in redis.published
+        )
+    finally:
+        if not listener.done():
+            listener.cancel()
+            await asyncio.gather(listener, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_periodic_userbot_session_expire_scan_calls_loader(monkeypatch):
+    """worker 后台扫描器应周期性调用 loader 的 userbot 会话过期扫描入口。"""
+    from app.worker import runtime as runtime_mod
+    from app.worker.plugins import loader as loader_mod
+
+    scan = AsyncMock()
+    monkeypatch.setattr(loader_mod, "scan_userbot_expired_sessions_once", scan)
+    sleep_calls = 0
+
+    async def fake_sleep(seconds):
+        nonlocal sleep_calls
+        assert seconds == runtime_mod._USERBOT_SESSION_EXPIRE_SCAN_SECONDS
+        sleep_calls += 1
+        if sleep_calls > 1:
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr(runtime_mod.asyncio, "sleep", fake_sleep)
+
+    with pytest.raises(asyncio.CancelledError):
+        await runtime_mod._periodic_userbot_session_expire_scan(_FakeCmdRedis(), 103)
+
+    scan.assert_awaited_once_with(103)
+
+
+@pytest.mark.asyncio
+async def test_run_interaction_userbot_action_payout_uses_rate_limit_and_parse_mode():
+    from app.worker import runtime as runtime_mod
+
+    client = AsyncMock()
+    client.send_message = AsyncMock(return_value=SimpleNamespace(id=808))
+    engine = SimpleNamespace(
+        acquire=AsyncMock(return_value=SimpleNamespace(allowed=True, wait_seconds=0, outcome="ok"))
+    )
+
+    result = await runtime_mod._run_interaction_userbot_action(
+        client,
+        {
+            "action_type": "payout",
+            "chat_id": -100333,
+            "amount": 25,
+            "reply_to_message_id": 44,
+            "parse_mode": "html",
+        },
+        account_id=55,
+        engine=engine,
+    )
+
+    engine.acquire.assert_awaited_once_with(55, "send_message_group", peer_id=-100333)
+    client.send_message.assert_awaited_once_with(
+        -100333,
+        "+25",
+        reply_to=44,
+        parse_mode="html",
+    )
+    assert result == {
+        "message_id": 808,
+        "chat_id": -100333,
+        "reply_to_message_id": 44,
+        "reply_to_user_id": None,
+    }
 
 
 @pytest.mark.asyncio

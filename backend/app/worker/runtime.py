@@ -11,12 +11,10 @@ from __future__ import annotations
 import asyncio
 import gc
 import logging
-import re
 from io import BytesIO
 from typing import Any
 
 from sqlalchemy import select
-from telethon import events
 from telethon.errors import (
     AuthKeyUnregisteredError,
     SessionRevokedError,
@@ -30,20 +28,10 @@ from ..db.models.command import AccountCommandLink, CommandAlias, CommandTemplat
 from ..db.models.feature import FEATURE_SCHEDULER, AccountFeature
 from ..db.models.system import SystemSetting
 from ..redis_client import get_redis
-from ..services import interaction_bot_service
 from ..services.ai_feature import is_ai_enabled
-from ..services.event_bus import dispatch_event, normalize_event_subscription, normalize_userbot_event
 from ..services.event_trace import (
-    TRACE_STATUS_FAILED,
-    TRACE_STATUS_OK,
-    TRACE_STATUS_SKIPPED,
-    finish_trace,
-    record_action,
-    record_span,
     refresh_trace_settings,
-    start_trace,
     stop_trace_writer,
-    trace_log_context,
 )
 from ..settings import settings as app_settings
 from .command import (
@@ -88,111 +76,72 @@ from .tg_client import build_client
 log = logging.getLogger(__name__)
 
 _CONFIG_RECONCILE_SECONDS = max(30, int(app_settings.worker_reconcile_seconds or 180))
-_ACCOUNT_BOT_AUTO_AWARD_DEDUPE_PREFIX = "account_bot:auto_award:"
-_ACCOUNT_BOT_AUTO_AWARD_DEDUPE_TTL_SECONDS = 86400
-_ACCOUNT_BOT_AUTO_AWARD_MODULE_KEYS = {"game24", "math10", "dice_grid_hunt", "guess_number", "poetry_blank"}
-_ACCOUNT_BOT_AUTO_AWARD_TRACE_FLAGS_CACHE: tuple[float, bool] = (0.0, True)
+_USERBOT_SESSION_EXPIRE_SCAN_SECONDS = 15
+_RECENT_USER_MESSAGE_SEARCH_LIMIT = 200
+_RECENT_USER_MESSAGE_SEARCH_LIMIT_MAX = 500
+_BACKGROUND_RPC_COMMAND_TYPES = {
+    CMD_FETCH_AVATAR,
+    CMD_GET_RECENT_PEERS,
+    CMD_EXECUTE_RULE,
+    CMD_RUN_INTERACTION_ENTRY,
+    CMD_RUN_INTERACTION_ACTION,
+}
 
 
-async def _account_bot_auto_award_trace_enabled() -> bool:
-    """Read the Trace switch without importing account_bot_runtime into worker."""
-
-    global _ACCOUNT_BOT_AUTO_AWARD_TRACE_FLAGS_CACHE
-    cached_at, cached = _ACCOUNT_BOT_AUTO_AWARD_TRACE_FLAGS_CACHE
-    now = asyncio.get_running_loop().time()
-    if now - cached_at < 30:
-        return cached
-    try:
-        async with AsyncSessionLocal() as db:
-            row = await db.get(SystemSetting, "log_retention")
-        raw = row.value if row is not None and isinstance(row.value, dict) else {}
-        enabled = bool(raw.get("trace_enabled", True))
-    except Exception:  # noqa: BLE001
-        log.debug("load auto award trace flag failed, using default", exc_info=True)
-        enabled = True
-    _ACCOUNT_BOT_AUTO_AWARD_TRACE_FLAGS_CACHE = (now, enabled)
-    return enabled
+def _interaction_userbot_rate_limit_action(action_type: str, chat_id: int | None) -> str:
+    if action_type in {"send_message", "payout"}:
+        return "send_message_private" if chat_id is not None and chat_id > 0 else "send_message_group"
+    if action_type == "edit_message":
+        return "edit_message"
+    if action_type in {"send_photo", "send_file"}:
+        return "upload_file"
+    return action_type
 
 
-def _account_bot_auto_award_event_payload(
-    account_id: int,
-    event: Any,
+async def _acquire_interaction_userbot_rate_limit(
     *,
+    redis: Any | None,
+    account_id: int | None,
+    engine: Any | None,
+    action_type: str,
     chat_id: int | None,
-    message_id: int | None,
-    reply_to_msg_id: int,
-    prize: int,
-    sender_id: int | None,
-    sender_username: str | None,
-) -> dict[str, Any]:
-    payload = normalize_userbot_event(account_id, event)
-    source = payload.get("source") if isinstance(payload.get("source"), dict) else {}
-    source.update(
-        {
-            "type": "payment_confirmed",
-            "channel": "userbot",
-            "account_id": account_id,
-            "chat_id": chat_id,
-            "message_id": message_id,
-        }
-    )
-    payload["source"] = source
-    payload["event_type"] = "payment_confirmed"
-    message = payload.get("message") if isinstance(payload.get("message"), dict) else {}
-    message.update({"chat_id": chat_id, "message_id": message_id, "reply_to_message_id": reply_to_msg_id})
-    payload["message"] = message
-    sender = payload.get("sender") if isinstance(payload.get("sender"), dict) else {}
-    sender.update({"user_id": sender_id, "username": sender_username})
-    payload["sender"] = sender
-    payload["source_actor"] = dict(sender)
-    payload["actor"] = {"user_id": None, "display_name": None}
-    payload["player"] = dict(payload["actor"])
-    payload["payment"] = {
-        "amount": prize,
-        "source": "account_bot_auto_award",
-        "source_message_id": message_id,
-        "reply_to_message_id": reply_to_msg_id,
-        "notice_sender_user_id": sender_id,
-    }
-    payload["reply_to"] = {"message_id": reply_to_msg_id}
-    payload["trigger"] = {
-        "source": "account_bot_auto_award",
-        "rule_id": "account_bot_auto_award",
-        "notice_message_id": message_id,
-        "winner_message_id": reply_to_msg_id,
-        "prize": prize,
-    }
-    return payload
-
-
-def _account_bot_auto_award_event_bus_decision(
-    event_payload: dict[str, Any],
-    *,
-    chat_ids: list[int],
-    sender_id: int | None,
-) -> Any | None:
-    subscription = normalize_event_subscription(
-        {
-            "source": ["userbot"],
-            "events": ["payment_confirmed"],
-            "scope": "all_allowed_chats",
-            "entry_key": "auto_award",
-            "dispatch_mode": "account_bot_auto_award",
-            "filters": {"source": "account_bot_auto_award"},
-        },
-        plugin_key="account_bot_auto_award",
-        entry_key="auto_award",
-    )
-    result = dispatch_event(
-        event_payload,
-        [subscription],
-        {
-            "allowed_chat_ids": chat_ids,
-            "known_user_ids": [sender_id] if sender_id is not None else [],
-            "trigger": {"rule_id": "account_bot_auto_award"},
-        },
-    )
-    return result.decisions[0] if result.decisions else None
+) -> None:
+    if account_id is None:
+        return
+    limit_action = _interaction_userbot_rate_limit_action(action_type, chat_id)
+    if engine is None:
+        if redis is not None:
+            await _log(
+                redis,
+                account_id,
+                "warn",
+                "UserBot 交互动作未接入限速引擎，已降级直发。",
+                action_type=action_type,
+                rate_limit_action=limit_action,
+                chat_id=chat_id,
+            )
+        return
+    try:
+        decision = await engine.acquire(account_id, limit_action, peer_id=chat_id)
+    except Exception as exc:  # noqa: BLE001
+        if redis is not None:
+            await _log(
+                redis,
+                account_id,
+                "warn",
+                f"UserBot 交互动作限速检查失败，已降级直发：{type(exc).__name__}: {exc}",
+                action_type=action_type,
+                rate_limit_action=limit_action,
+                chat_id=chat_id,
+            )
+        return
+    if not bool(getattr(decision, "allowed", False)):
+        outcome = str(getattr(decision, "outcome", "") or "rate_limited")
+        reason = str(getattr(decision, "reason", "") or outcome)
+        raise RuntimeError(f"rate_limited: {reason}")
+    wait_seconds = float(getattr(decision, "wait_seconds", 0.0) or 0.0)
+    if wait_seconds > 0:
+        await asyncio.sleep(wait_seconds)
 
 
 def _should_defer_interaction_entry_error_log(plugin_key: str, error: str | None) -> bool:
@@ -237,19 +186,86 @@ def _normalize_tg_username(value: str | None) -> str | None:
     return username or None
 
 
-def _parse_account_bot_winner_notice(text: str) -> int | None:
-    """解析 Bbot 的算数题中奖公告，返回应回复发放的奖金金额。"""
-
-    if "答对了" not in text or "题目" not in text or "奖金" not in text:
+def _int_or_none(value: Any) -> int | None:
+    try:
+        if value in (None, ""):
+            return None
+        return int(value)
+    except (TypeError, ValueError):
         return None
-    match = re.search(r"奖金\s*[:：]\s*\+?(\d{1,9})\b", text)
-    if not match:
-        return None
-    prize = int(match.group(1))
-    return prize if prize > 0 else None
 
 
-async def _run_interaction_userbot_action(client: Any, payload: dict[str, Any]) -> dict[str, Any]:
+def _recent_user_message_search_limit(raw: Any) -> int:
+    value = _int_or_none(raw)
+    if value is None:
+        value = _RECENT_USER_MESSAGE_SEARCH_LIMIT
+    return max(1, min(_RECENT_USER_MESSAGE_SEARCH_LIMIT_MAX, value))
+
+
+def _telegram_message_id(msg: Any) -> int | None:
+    return _int_or_none(getattr(msg, "id", None) or getattr(msg, "message_id", None))
+
+
+def _telegram_message_sender_id(msg: Any) -> int | None:
+    sender_id = _int_or_none(getattr(msg, "sender_id", None))
+    if sender_id is not None:
+        return sender_id
+    from_id = getattr(msg, "from_id", None)
+    return _int_or_none(getattr(from_id, "user_id", None) or getattr(from_id, "channel_id", None))
+
+
+async def _find_recent_message_id_for_user(
+    client: Any,
+    chat_id: int,
+    user_id: int,
+    *,
+    limit: int,
+) -> int | None:
+    """查找参与者近期消息，让 userbot 发奖时能回复到真实玩家消息。
+
+    主路径沿用参考搜索插件的思路，但搜索条件从关键词改成 Telegram
+    sender。部分 peer/驱动可能解析不了 ``from_user``，因此保留扫描近期消息
+    并本地比对 sender_id 的兜底路径。
+    """
+
+    try:
+        async for msg in client.iter_messages(chat_id, from_user=user_id, limit=limit):
+            msg_id = _telegram_message_id(msg)
+            if msg_id is not None:
+                return msg_id
+    except Exception:  # noqa: BLE001
+        log.debug(
+            "recent participant message search via from_user failed chat=%s user=%s",
+            chat_id,
+            user_id,
+            exc_info=True,
+        )
+
+    try:
+        async for msg in client.iter_messages(chat_id, limit=limit):
+            if _telegram_message_sender_id(msg) != user_id:
+                continue
+            msg_id = _telegram_message_id(msg)
+            if msg_id is not None:
+                return msg_id
+    except Exception:  # noqa: BLE001
+        log.debug(
+            "recent participant message fallback search failed chat=%s user=%s",
+            chat_id,
+            user_id,
+            exc_info=True,
+        )
+    return None
+
+
+async def _run_interaction_userbot_action(
+    client: Any,
+    payload: dict[str, Any],
+    *,
+    account_id: int | None = None,
+    engine: Any | None = None,
+    redis: Any | None = None,
+) -> dict[str, Any]:
     """用账号自身的 userbot 身份执行平台交互动作。"""
 
     action_type = str(payload.get("action_type") or "").strip()
@@ -263,15 +279,43 @@ async def _run_interaction_userbot_action(client: Any, payload: dict[str, Any]) 
         reply_to = int(reply_to_message_id) if reply_to_message_id is not None else None
     except (TypeError, ValueError) as exc:
         raise ValueError("reply_to_message_id 非法") from exc
+    reply_to_user_id = _int_or_none(payload.get("reply_to_user_id"))
+    if reply_to is None and payload.get("reply_to_user_id") not in (None, "") and reply_to_user_id is None:
+        raise ValueError("reply_to_user_id 非法") from None
+    if reply_to is None and reply_to_user_id is not None:
+        reply_to = await _find_recent_message_id_for_user(
+            client,
+            chat_id,
+            reply_to_user_id,
+            limit=_recent_user_message_search_limit(payload.get("reply_to_search_limit")),
+        )
+        if reply_to is None:
+            raise ValueError(f"找不到用户 {reply_to_user_id} 在当前群的近期消息，无法定位发奖回复目标")
 
-    if action_type == "send_message":
+    if action_type in {"send_message", "payout"}:
         text = str(payload.get("text") or "").strip()
+        if action_type == "payout":
+            amount = _int_or_none(payload.get("amount"))
+            if amount is None or amount <= 0:
+                raise ValueError("payout amount 必须为正整数")
+            if not text:
+                text = f"+{amount}"
         if not text:
             raise ValueError("缺少 text")
-        msg = await client.send_message(chat_id, text, reply_to=reply_to, parse_mode="html")
+        parse_mode = _interaction_action_parse_mode(payload)
+        await _acquire_interaction_userbot_rate_limit(
+            redis=redis,
+            account_id=account_id,
+            engine=engine,
+            action_type=action_type,
+            chat_id=chat_id,
+        )
+        msg = await client.send_message(chat_id, text, reply_to=reply_to, parse_mode=_telethon_parse_mode(parse_mode))
         return {
             "message_id": int(getattr(msg, "id", 0) or 0) or None,
             "chat_id": chat_id,
+            "reply_to_message_id": reply_to,
+            "reply_to_user_id": reply_to_user_id,
         }
 
     if action_type == "edit_message":
@@ -282,7 +326,15 @@ async def _run_interaction_userbot_action(client: Any, payload: dict[str, Any]) 
             message_id = int(payload["message_id"])
         except (KeyError, TypeError, ValueError) as exc:
             raise ValueError("缺少 message_id") from exc
-        msg = await client.edit_message(chat_id, message_id, text, parse_mode="html")
+        parse_mode = _interaction_action_parse_mode(payload)
+        await _acquire_interaction_userbot_rate_limit(
+            redis=redis,
+            account_id=account_id,
+            engine=engine,
+            action_type="edit_message",
+            chat_id=chat_id,
+        )
+        msg = await client.edit_message(chat_id, message_id, text, parse_mode=_telethon_parse_mode(parse_mode))
         return {
             "message_id": int(getattr(msg, "id", 0) or message_id) or None,
             "chat_id": chat_id,
@@ -310,281 +362,34 @@ async def _run_interaction_userbot_action(client: Any, payload: dict[str, Any]) 
         }
         if caption:
             kwargs["caption"] = caption[:1024]
-            kwargs["parse_mode"] = "html"
+            kwargs["parse_mode"] = _telethon_parse_mode(_interaction_action_parse_mode(payload))
         if action_type == "send_photo":
             kwargs["force_document"] = False
+        await _acquire_interaction_userbot_rate_limit(
+            redis=redis,
+            account_id=account_id,
+            engine=engine,
+            action_type=action_type,
+            chat_id=chat_id,
+        )
         msg = await client.send_file(chat_id, file_obj, **kwargs)
         return {
             "message_id": int(getattr(msg, "id", 0) or 0) or None,
             "chat_id": chat_id,
+            "reply_to_message_id": reply_to,
+            "reply_to_user_id": reply_to_user_id,
         }
 
     raise ValueError(f"不支持的交互动作: {action_type}")
 
 
-async def _load_account_bot_auto_award_config(account_id: int) -> dict[str, Any] | None:
-    """读取临时交互 Bot 算数题自动发奖配置。"""
-
-    async with AsyncSessionLocal() as db:
-        row = await db.get(SystemSetting, interaction_bot_service.transfer_notice_setting_key(account_id))
-        cfg = interaction_bot_service.normalize_transfer_notice_config(
-            row.value if row is not None and isinstance(row.value, dict) else {}
-        )
-    if not bool(cfg.get("enabled")):
-        return None
-    try:
-        bot_id = int(cfg.get("interaction_bot_id"))
-    except (TypeError, ValueError):
-        bot_id = None
-    bot_username = _normalize_tg_username(str(cfg.get("interaction_bot_username") or ""))
-    if bot_id is None and not bot_username:
-        return None
-    math_chat_ids: list[int] = []
-    raw_rules = cfg.get("rules")
-    if isinstance(raw_rules, list):
-        for rule in raw_rules:
-            if not isinstance(rule, dict) or not bool(rule.get("enabled", True)):
-                continue
-            action = str(rule.get("action") or "")
-            module_key = str(rule.get("module_key") or "")
-            if action == "math10" or (action == "module" and module_key in _ACCOUNT_BOT_AUTO_AWARD_MODULE_KEYS):
-                raw_rule_chat_ids = rule.get("chat_ids") or cfg.get("chat_ids")
-                if isinstance(raw_rule_chat_ids, list):
-                    for item in raw_rule_chat_ids:
-                        try:
-                            chat_id = int(item)
-                        except (TypeError, ValueError):
-                            continue
-                        if chat_id not in math_chat_ids:
-                            math_chat_ids.append(chat_id)
-    if math_chat_ids:
-        return {
-            "bot_id": bot_id,
-            "bot_username": bot_username,
-            "chat_ids": math_chat_ids,
-        }
-    if not math_chat_ids:
-        if str(cfg.get("action") or "") != "math10":
-            return None
-    try:
-        raw_chat_ids = cfg.get("chat_ids")
-        if isinstance(raw_chat_ids, list) and raw_chat_ids:
-            chat_ids = [int(item) for item in raw_chat_ids]
-        elif cfg.get("chat_id") not in (None, ""):
-            chat_ids = [int(cfg["chat_id"])]
-        else:
-            chat_ids = []
-    except (TypeError, ValueError):
-        chat_ids = []
-    if not chat_ids:
-        return None
-    return {
-        "bot_id": bot_id,
-        "bot_username": bot_username,
-        "chat_ids": chat_ids,
-    }
+def _interaction_action_parse_mode(payload: dict[str, Any]) -> str:
+    value = str(payload.get("parse_mode") or "plain").strip().lower()
+    return "html" if value == "html" else "plain"
 
 
-async def _try_account_bot_auto_award(client: Any, redis: Any, account_id: int, event: Any) -> bool:
-    """userbot 监听 Bbot 中奖公告，并回复被引用答案消息发奖。"""
-
-    text = str(getattr(event, "raw_text", "") or "")
-    prize = _parse_account_bot_winner_notice(text)
-    if prize is None:
-        return False
-    reply_to_msg_id = getattr(event, "reply_to_msg_id", None)
-    if reply_to_msg_id is None:
-        return False
-
-    cfg = await _load_account_bot_auto_award_config(account_id)
-    if cfg is None:
-        return False
-    chat_id = getattr(event, "chat_id", None)
-    cfg_chat_ids = cfg.get("chat_ids")
-    if not isinstance(cfg_chat_ids, list):
-        cfg_chat_ids = [cfg["chat_id"]] if cfg.get("chat_id") is not None else []
-    configured_chat_ids = [int(item) for item in cfg_chat_ids]
-    if int(chat_id or 0) not in set(configured_chat_ids):
-        return False
-
-    sender = getattr(event, "sender", None)
-    if sender is None:
-        try:
-            sender = await event.get_sender()
-        except Exception:  # noqa: BLE001
-            sender = None
-    message_id = getattr(event, "id", None) or getattr(getattr(event, "message", None), "id", None)
-    try:
-        sender_id = int(getattr(sender, "id", None))
-    except (TypeError, ValueError):
-        sender_id = None
-    try:
-        cfg_bot_id = int(cfg.get("bot_id"))
-    except (TypeError, ValueError):
-        cfg_bot_id = None
-    sender_username = _normalize_tg_username(getattr(sender, "username", None))
-    cfg_username = cfg.get("bot_username")
-    if cfg_bot_id is not None:
-        if sender_id != cfg_bot_id:
-            return False
-    elif cfg_username is not None:
-        if sender_username != cfg_username:
-            return False
-    else:
-        return False
-
-    dedupe_key = (
-        f"{_ACCOUNT_BOT_AUTO_AWARD_DEDUPE_PREFIX}"
-        f"{account_id}:{chat_id}:{message_id}:{reply_to_msg_id}:{prize}"
-    )
-    try:
-        acquired = await redis.set(
-            dedupe_key,
-            "1",
-            ex=_ACCOUNT_BOT_AUTO_AWARD_DEDUPE_TTL_SECONDS,
-            nx=True,
-        )
-        if not acquired:
-            return True
-    except Exception:  # noqa: BLE001
-        log.debug("account bot auto award dedupe failed account=%s", account_id, exc_info=True)
-        await _log(
-            redis,
-            account_id,
-            "warn",
-            "临时算数题自动发奖：幂等检查失败，已跳过本次自动发奖。",
-            source="event",
-            chat_id=chat_id,
-            winner_msg_id=reply_to_msg_id,
-            notice_msg_id=message_id,
-            prize=prize,
-        )
-        return True
-
-    event_payload = _account_bot_auto_award_event_payload(
-        account_id,
-        event,
-        chat_id=chat_id,
-        message_id=message_id,
-        reply_to_msg_id=reply_to_msg_id,
-        prize=prize,
-        sender_id=sender_id,
-        sender_username=sender_username,
-    )
-    decision = _account_bot_auto_award_event_bus_decision(
-        event_payload,
-        chat_ids=configured_chat_ids,
-        sender_id=sender_id,
-    )
-    trace = None
-    trace_enabled = await _account_bot_auto_award_trace_enabled()
-    if trace_enabled:
-        trace = await start_trace(event_payload)
-        await record_span(
-            trace,
-            "receive",
-            TRACE_STATUS_OK,
-            component="account_bot_auto_award",
-            chat_id=chat_id,
-            notice_message_id=message_id,
-            winner_message_id=reply_to_msg_id,
-            prize=prize,
-        )
-        await record_span(
-            trace,
-            "subscription_match",
-            TRACE_STATUS_OK if decision is not None and decision.matched else TRACE_STATUS_SKIPPED,
-            component="account_bot_auto_award",
-            plugin_key="account_bot_auto_award",
-            entry_key="auto_award",
-            reason_code=getattr(decision, "reason_code", None) or "subscription_not_matched",
-            message=getattr(decision, "reason_message", None) or "自动发奖事件未命中 Event Bus decision。",
-            dispatch_mode=getattr(decision, "dispatch_mode", None) or "account_bot_auto_award",
-            scope=getattr(decision, "scope", None) or "all_allowed_chats",
-            filters=dict(getattr(decision, "filters", None) or {}),
-        )
-    if decision is None or not decision.matched:
-        await finish_trace(trace, TRACE_STATUS_SKIPPED)
-        return True
-    action = {
-        "type": "send_message",
-        "send_via": "userbot_reply",
-        "chat_id": chat_id,
-        "reply_to_message_id": reply_to_msg_id,
-        "text": f"+{prize}",
-    }
-    try:
-        sent = await client.send_message(
-            entity=chat_id,
-            message=f"+{prize}",
-            reply_to=reply_to_msg_id,
-        )
-        await record_action(
-            trace_log_context(trace, plugin_key="account_bot_auto_award"),
-            action,
-            TRACE_STATUS_OK,
-            actual_send_via="userbot_reply",
-            result={"message_id": getattr(sent, "id", None) or getattr(sent, "message_id", None)},
-        )
-        await record_span(
-            trace,
-            "delivery",
-            TRACE_STATUS_OK,
-            component="account_bot_auto_award",
-            actual_send_via="userbot_reply",
-        )
-        await finish_trace(trace, TRACE_STATUS_OK)
-    except Exception as exc:  # noqa: BLE001
-        await record_action(
-            trace_log_context(trace, plugin_key="account_bot_auto_award"),
-            action,
-            TRACE_STATUS_FAILED,
-            actual_send_via="userbot_reply",
-            error_code="telegram_api_error",
-            error=f"{type(exc).__name__}: {exc}",
-        )
-        await record_span(
-            trace,
-            "delivery",
-            TRACE_STATUS_FAILED,
-            component="account_bot_auto_award",
-            reason_code="telegram_api_error",
-            error=f"{type(exc).__name__}: {exc}",
-        )
-        await finish_trace(trace, TRACE_STATUS_FAILED)
-        raise
-    await _log(
-        redis,
-        account_id,
-        "info",
-        f"临时算数题自动发奖：已回复中奖答案消息 {reply_to_msg_id}，内容 +{prize}。",
-        source="event",
-        chat_id=chat_id,
-        winner_msg_id=reply_to_msg_id,
-        notice_msg_id=message_id,
-        prize=prize,
-        **trace_log_context(trace, plugin_key="account_bot_auto_award"),
-    )
-    return True
-
-
-def _register_account_bot_auto_award(client: Any, account_id: int, redis: Any) -> None:
-    """注册临时联动发奖监听器；Bbot 负责判题，userbot 负责回复发奖。"""
-
-    @client.on(events.NewMessage(incoming=True))
-    async def _account_bot_auto_award(event):  # noqa: ANN001
-        try:
-            await _try_account_bot_auto_award(client, redis, account_id, event)
-        except Exception as exc:  # noqa: BLE001
-            await _log(
-                redis,
-                account_id,
-                "warn",
-                f"临时算数题自动发奖失败：{type(exc).__name__}: {exc}",
-                source="event",
-                chat_id=getattr(event, "chat_id", None),
-                message_preview=(getattr(event, "raw_text", "") or "")[:200],
-            )
+def _telethon_parse_mode(parse_mode: str) -> str | None:
+    return "html" if parse_mode == "html" else None
 
 
 async def run_worker(account_id: int) -> None:
@@ -675,8 +480,6 @@ async def run_worker(account_id: int) -> None:
         except Exception as e:
             await _log(redis, account_id, "error", f"加载插件失败: {e}")
 
-        _register_account_bot_auto_award(client, account_id, redis)
-
         me = await client.get_me()
         # 顺便回填 tg_user_id / tg_username（旧账号迁移 + 用户在 TG 改用户名时同步）
         try:
@@ -711,6 +514,7 @@ async def run_worker(account_id: int) -> None:
         )
         global_task = asyncio.create_task(_listen_global(redis, account_id, paused))
         reconcile_task = asyncio.create_task(_periodic_config_reconcile(redis, account_id))
+        session_expire_task = asyncio.create_task(_periodic_userbot_session_expire_scan(redis, account_id))
         scheduler_task = asyncio.create_task(platform_scheduler.run())
 
         # 启动期临时对象（迁移、insp、Telethon TLS handshake buffer 等）此时已不再需要；
@@ -724,7 +528,7 @@ async def run_worker(account_id: int) -> None:
             # 阻塞直到 client.disconnect() 被调用
             await client.run_until_disconnected()
         finally:
-            for t in (ipc_task, global_task, reconcile_task, scheduler_task):
+            for t in (ipc_task, global_task, reconcile_task, session_expire_task, scheduler_task):
                 t.cancel()
                 try:
                     await t
@@ -796,6 +600,7 @@ async def _listen_cmd(
     等待 3s 后重新 subscribe，不会让 IPC 命令通道永久失效。
     仅在收到 CMD_STOP（主动退出）时才真正退出循环。
     """
+    inflight_rpc_tasks: set[asyncio.Task[None]] = set()
     while True:
         try:
             pubsub = redis.pubsub()
@@ -811,6 +616,16 @@ async def _listen_cmd(
                         continue
                     ack_ok = True
                     ack_error: str | None = None
+                    if _should_schedule_background_rpc(cmd):
+                        _schedule_background_rpc(
+                            inflight_rpc_tasks,
+                            redis=redis,
+                            client=client,
+                            account_id=account_id,
+                            platform_scheduler=platform_scheduler,
+                            cmd=cmd,
+                        )
+                        continue
                     if cmd.type == CMD_PAUSE:
                         paused.clear()
                         await _publish(redis, account_id, EVT_STATUS, status="paused")
@@ -821,6 +636,7 @@ async def _listen_cmd(
                         await _log(redis, account_id, "info", "已恢复")
                     elif cmd.type == CMD_STOP:
                         await _log(redis, account_id, "info", "收到 stop 指令")
+                        await _cancel_inflight_rpc_tasks(inflight_rpc_tasks)
                         # ── 安全：先调用插件 on_shutdown，再断开 client ──
                         try:
                             from .plugins.loader import _STATES  # 延迟 import 避免循环
@@ -870,29 +686,6 @@ async def _listen_cmd(
                             ack_ok = False
                             ack_error = f"{type(e).__name__}: {e}"
                             await _log(redis, account_id, "error", f"reload_plugin 失败: {e}")
-                    elif cmd.type == CMD_FETCH_AVATAR:
-                        # 主进程懒加载头像：worker 端调用 download_profile_photo 写盘
-                        # path 由主进程指定（绝对路径）；失败静默，前端会走首字母 fallback
-                        target_path = cmd.payload.get("path")
-                        if not target_path:
-                            continue
-                        try:
-                            import os
-                            from pathlib import Path
-
-                            out = Path(str(target_path))
-                            out.parent.mkdir(parents=True, exist_ok=True)
-                            # download_profile_photo 默认拉大图；账号没头像时返回 None
-                            result = await client.download_profile_photo("me", file=str(out))
-                            if result is None and out.exists():
-                                # Telethon 在没头像时不会写文件，但保险起见若空文件则删
-                                try:
-                                    if os.path.getsize(str(out)) == 0:
-                                        out.unlink()
-                                except Exception:  # noqa: BLE001
-                                    pass
-                        except Exception as e:  # noqa: BLE001
-                            await _log(redis, account_id, "warn", f"fetch_avatar 失败: {type(e).__name__}: {e}")
                     elif cmd.type == CMD_RELOAD_COMMANDS:
                         # Sprint2 #2：账号启用/禁用模板、LLM provider 增删后通知 worker 热加载
                         try:
@@ -918,115 +711,16 @@ async def _listen_cmd(
                             await _log(
                                 redis, account_id, "warn", f"reload_ignored 失败: {type(e).__name__}: {e}"
                             )
-                    elif cmd.type == CMD_GET_RECENT_PEERS:
-                        # Sprint2 #3 RPC：把内存里的最近活跃 peer 列表回发到 reply_to 频道
-                        reply_to = cmd.payload.get("reply_to")
-                        if not isinstance(reply_to, str) or not reply_to:
+                    elif cmd.type in _BACKGROUND_RPC_COMMAND_TYPES:
+                        handled, ack_ok, ack_error = await _handle_rpc_command(
+                            redis,
+                            client,
+                            account_id,
+                            platform_scheduler,
+                            cmd,
+                        )
+                        if not handled:
                             continue
-                        items: list[dict] = []
-                        try:
-                            from .plugins.loader import get_recent_peers  # type: ignore
-
-                            items = get_recent_peers(account_id)
-                        except Exception as e:  # noqa: BLE001
-                            await _log(
-                                redis, account_id, "warn",
-                                f"get_recent_peers 失败: {type(e).__name__}: {e}",
-                            )
-                        try:
-                            await redis.publish(reply_to, make_cmd(CMD_GET_RECENT_PEERS, items=items))
-                        except Exception:  # noqa: BLE001
-                            # 主进程超时后会自己关订阅；这里 publish 失败无所谓
-                            pass
-                    elif cmd.type == CMD_EXECUTE_RULE:
-                        # RPC：手动执行一条 scheduler 规则
-                        reply_to = cmd.payload.get("reply_to")
-                        rule_id = cmd.payload.get("rule_id")
-                        if not isinstance(reply_to, str) or not reply_to or not isinstance(rule_id, int):
-                            continue
-                        result_ok = False
-                        result_error: str | None = None
-                        try:
-                            if platform_scheduler is None:
-                                result_error = "定时任务调度器尚未初始化"
-                            else:
-                                result = await platform_scheduler.execute_rule(rule_id)
-                                result_ok = result.ok
-                                result_error = result.error
-                        except Exception as e:  # noqa: BLE001
-                            result_error = f"{type(e).__name__}: {e}"
-                            await _log(redis, account_id, "warn", f"execute_rule 失败: {result_error}")
-                        try:
-                            await redis.publish(
-                                reply_to,
-                                make_cmd(CMD_EXECUTE_RULE, ok=result_ok, error=result_error),
-                            )
-                        except Exception:  # noqa: BLE001
-                            pass
-                    elif cmd.type == CMD_RUN_INTERACTION_ENTRY:
-                        # RPC：交互 Bot 调用插件声明的交互入口，返回平台标准动作。
-                        reply_to = cmd.payload.get("reply_to")
-                        if not isinstance(reply_to, str) or not reply_to:
-                            continue
-                        result_ok = False
-                        result_error: str | None = None
-                        actions: list[dict[str, Any]] = []
-                        try:
-                            from .plugins.loader import invoke_interaction_entry  # type: ignore
-
-                            actions = await invoke_interaction_entry(
-                                account_id,
-                                plugin_key=str(cmd.payload.get("plugin_key") or ""),
-                                entry_key=str(cmd.payload.get("entry_key") or ""),
-                                payload=dict(cmd.payload.get("payload") or {}),
-                            )
-                            result_ok = True
-                        except Exception as e:  # noqa: BLE001
-                            result_error = f"{type(e).__name__}: {e}"
-                            plugin_key = str(cmd.payload.get("plugin_key") or "")
-                            if not _should_defer_interaction_entry_error_log(plugin_key, result_error):
-                                await _log(redis, account_id, "warn", f"run_interaction_entry 失败: {result_error}")
-                        try:
-                            await redis.publish(
-                                reply_to,
-                                make_cmd(CMD_RUN_INTERACTION_ENTRY, ok=result_ok, error=result_error, actions=actions),
-                            )
-                        except Exception:  # noqa: BLE001
-                            pass
-                    elif cmd.type == CMD_RUN_INTERACTION_ACTION:
-                        # RPC：主进程请求当前账号以 userbot 身份执行交互动作。
-                        reply_to = cmd.payload.get("reply_to")
-                        if not isinstance(reply_to, str) or not reply_to:
-                            continue
-                        result_ok = False
-                        result_error: str | None = None
-                        result_payload: dict[str, Any] = {}
-                        try:
-                            result_payload = await _run_interaction_userbot_action(
-                                client,
-                                dict(cmd.payload.get("payload") or {}),
-                            )
-                            result_ok = True
-                        except Exception as e:  # noqa: BLE001
-                            result_error = f"{type(e).__name__}: {e}"
-                            await _log(
-                                redis,
-                                account_id,
-                                "warn",
-                                f"run_interaction_action 失败: {result_error}",
-                            )
-                        try:
-                            await redis.publish(
-                                reply_to,
-                                make_cmd(
-                                    CMD_RUN_INTERACTION_ACTION,
-                                    ok=result_ok,
-                                    error=result_error,
-                                    result=result_payload,
-                                ),
-                            )
-                        except Exception:  # noqa: BLE001
-                            pass
                     await _ack_cmd(redis, cmd, ok=ack_ok, error=ack_error)
             finally:
                 try:
@@ -1038,6 +732,283 @@ async def _listen_cmd(
             # Redis 断连等异常 → 等 3s 后重新 subscribe
             log.warning("worker_cmd listener 异常，3s 后重连: %s: %s", type(exc).__name__, exc)
             await asyncio.sleep(3)
+
+
+def _valid_reply_to(cmd: IPCMessage) -> str | None:
+    reply_to = cmd.payload.get("reply_to")
+    return reply_to if isinstance(reply_to, str) and reply_to else None
+
+
+def _should_schedule_background_rpc(cmd: IPCMessage) -> bool:
+    if cmd.type == CMD_FETCH_AVATAR:
+        return True
+    return cmd.type in _BACKGROUND_RPC_COMMAND_TYPES and _valid_reply_to(cmd) is not None
+
+
+def _schedule_background_rpc(
+    tasks: set[asyncio.Task[None]],
+    *,
+    redis: Any,
+    client: Any,
+    account_id: int,
+    platform_scheduler: PlatformScheduler | None,
+    cmd: IPCMessage,
+) -> None:
+    task = asyncio.create_task(
+        _run_background_rpc_command(
+            redis,
+            client,
+            account_id,
+            platform_scheduler,
+            cmd,
+        )
+    )
+    tasks.add(task)
+
+    def _forget(done: asyncio.Task[None]) -> None:
+        tasks.discard(done)
+        if done.cancelled():
+            return
+        try:
+            exc = done.exception()
+        except Exception as err:  # noqa: BLE001
+            log.warning("worker RPC task state check failed: %s: %s", type(err).__name__, err)
+            return
+        if exc is not None:
+            log.error(
+                "worker RPC task failed: %s: %s",
+                type(exc).__name__,
+                exc,
+                exc_info=(type(exc), exc, exc.__traceback__),
+            )
+
+    task.add_done_callback(_forget)
+
+
+async def _run_background_rpc_command(
+    redis: Any,
+    client: Any,
+    account_id: int,
+    platform_scheduler: PlatformScheduler | None,
+    cmd: IPCMessage,
+) -> None:
+    try:
+        handled, ack_ok, ack_error = await _handle_rpc_command(
+            redis,
+            client,
+            account_id,
+            platform_scheduler,
+            cmd,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        handled = True
+        ack_ok = False
+        ack_error = f"{type(exc).__name__}: {exc}"
+        await _log(redis, account_id, "warn", f"{cmd.type} 后台 RPC 失败: {ack_error}")
+    if handled:
+        await _ack_cmd(redis, cmd, ok=ack_ok, error=ack_error)
+
+
+async def _cancel_inflight_rpc_tasks(tasks: set[asyncio.Task[None]]) -> None:
+    pending = [task for task in list(tasks) if not task.done()]
+    if not pending:
+        tasks.clear()
+        return
+    for task in pending:
+        task.cancel()
+    await asyncio.gather(*pending, return_exceptions=True)
+    tasks.difference_update(pending)
+
+
+async def _handle_rpc_command(
+    redis: Any,
+    client: Any,
+    account_id: int,
+    platform_scheduler: PlatformScheduler | None,
+    cmd: IPCMessage,
+) -> tuple[bool, bool, str | None]:
+    if cmd.type == CMD_FETCH_AVATAR:
+        return True, await _handle_fetch_avatar_command(redis, client, account_id, cmd), None
+    if cmd.type == CMD_GET_RECENT_PEERS:
+        reply_to = _valid_reply_to(cmd)
+        if reply_to is None:
+            return False, True, None
+        await _handle_get_recent_peers_command(redis, account_id, reply_to)
+        return True, True, None
+    if cmd.type == CMD_EXECUTE_RULE:
+        reply_to = _valid_reply_to(cmd)
+        rule_id = cmd.payload.get("rule_id")
+        if reply_to is None or not isinstance(rule_id, int):
+            return False, True, None
+        await _handle_execute_rule_command(redis, account_id, platform_scheduler, reply_to, rule_id)
+        return True, True, None
+    if cmd.type == CMD_RUN_INTERACTION_ENTRY:
+        reply_to = _valid_reply_to(cmd)
+        if reply_to is None:
+            return False, True, None
+        await _handle_run_interaction_entry_command(redis, account_id, cmd, reply_to)
+        return True, True, None
+    if cmd.type == CMD_RUN_INTERACTION_ACTION:
+        reply_to = _valid_reply_to(cmd)
+        if reply_to is None:
+            return False, True, None
+        await _handle_run_interaction_action_command(redis, client, account_id, cmd, reply_to)
+        return True, True, None
+    return False, True, None
+
+
+async def _handle_fetch_avatar_command(redis: Any, client: Any, account_id: int, cmd: IPCMessage) -> bool:
+    # 主进程懒加载头像：worker 端调用 download_profile_photo 写盘。
+    target_path = cmd.payload.get("path")
+    if not target_path:
+        return True
+    try:
+        import os
+        from pathlib import Path
+
+        out = Path(str(target_path))
+        out.parent.mkdir(parents=True, exist_ok=True)
+        result = await client.download_profile_photo("me", file=str(out))
+        if result is None and out.exists():
+            try:
+                if os.path.getsize(str(out)) == 0:
+                    out.unlink()
+            except Exception:  # noqa: BLE001
+                pass
+        return True
+    except Exception as e:  # noqa: BLE001
+        await _log(redis, account_id, "warn", f"fetch_avatar 失败: {type(e).__name__}: {e}")
+        return False
+
+
+async def _handle_get_recent_peers_command(redis: Any, account_id: int, reply_to: str) -> None:
+    # Sprint2 #3 RPC：把内存里的最近活跃 peer 列表回发到 reply_to 频道。
+    items: list[dict] = []
+    try:
+        from .plugins.loader import get_recent_peers  # type: ignore
+
+        items = get_recent_peers(account_id)
+    except Exception as e:  # noqa: BLE001
+        await _log(
+            redis, account_id, "warn",
+            f"get_recent_peers 失败: {type(e).__name__}: {e}",
+        )
+    try:
+        await redis.publish(reply_to, make_cmd(CMD_GET_RECENT_PEERS, items=items))
+    except Exception:  # noqa: BLE001
+        pass
+
+
+async def _handle_execute_rule_command(
+    redis: Any,
+    account_id: int,
+    platform_scheduler: PlatformScheduler | None,
+    reply_to: str,
+    rule_id: int,
+) -> None:
+    result_ok = False
+    result_error: str | None = None
+    try:
+        if platform_scheduler is None:
+            result_error = "定时任务调度器尚未初始化"
+        else:
+            result = await platform_scheduler.execute_rule(rule_id)
+            result_ok = result.ok
+            result_error = result.error
+    except Exception as e:  # noqa: BLE001
+        result_error = f"{type(e).__name__}: {e}"
+        await _log(redis, account_id, "warn", f"execute_rule 失败: {result_error}")
+    try:
+        await redis.publish(
+            reply_to,
+            make_cmd(CMD_EXECUTE_RULE, ok=result_ok, error=result_error),
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+
+async def _handle_run_interaction_entry_command(
+    redis: Any,
+    account_id: int,
+    cmd: IPCMessage,
+    reply_to: str,
+) -> None:
+    result_ok = False
+    result_error: str | None = None
+    actions: list[dict[str, Any]] = []
+    try:
+        from .plugins.loader import invoke_interaction_entry  # type: ignore
+
+        actions = await invoke_interaction_entry(
+            account_id,
+            plugin_key=str(cmd.payload.get("plugin_key") or ""),
+            entry_key=str(cmd.payload.get("entry_key") or ""),
+            payload=dict(cmd.payload.get("payload") or {}),
+        )
+        result_ok = True
+    except Exception as e:  # noqa: BLE001
+        result_error = f"{type(e).__name__}: {e}"
+        plugin_key = str(cmd.payload.get("plugin_key") or "")
+        if not _should_defer_interaction_entry_error_log(plugin_key, result_error):
+            await _log(redis, account_id, "warn", f"run_interaction_entry 失败: {result_error}")
+    try:
+        await redis.publish(
+            reply_to,
+            make_cmd(CMD_RUN_INTERACTION_ENTRY, ok=result_ok, error=result_error, actions=actions),
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+
+async def _handle_run_interaction_action_command(
+    redis: Any,
+    client: Any,
+    account_id: int,
+    cmd: IPCMessage,
+    reply_to: str,
+) -> None:
+    result_ok = False
+    result_error: str | None = None
+    result_payload: dict[str, Any] = {}
+    try:
+        engine = None
+        try:
+            from .plugins.loader import _STATES  # type: ignore
+
+            state = _STATES.get(account_id)
+            engine = getattr(state, "engine", None) if state is not None else None
+        except Exception:  # noqa: BLE001
+            engine = None
+        result_payload = await _run_interaction_userbot_action(
+            client,
+            dict(cmd.payload.get("payload") or {}),
+            account_id=account_id,
+            engine=engine,
+            redis=redis,
+        )
+        result_ok = True
+    except Exception as e:  # noqa: BLE001
+        result_error = f"{type(e).__name__}: {e}"
+        await _log(
+            redis,
+            account_id,
+            "warn",
+            f"run_interaction_action 失败: {result_error}",
+        )
+    try:
+        await redis.publish(
+            reply_to,
+            make_cmd(
+                CMD_RUN_INTERACTION_ACTION,
+                ok=result_ok,
+                error=result_error,
+                result=result_payload,
+            ),
+        )
+    except Exception:  # noqa: BLE001
+        pass
 
 
 async def _ack_cmd(redis, cmd: IPCMessage, *, ok: bool, error: str | None = None) -> None:
@@ -1074,6 +1045,17 @@ async def _periodic_config_reconcile(redis, account_id: int) -> None:
             await reload_ignored_peers(account_id)
         except Exception as e:  # noqa: BLE001
             await _log(redis, account_id, "warn", f"periodic plugin reload 失败: {type(e).__name__}: {e}")
+
+
+async def _periodic_userbot_session_expire_scan(redis, account_id: int) -> None:
+    while True:
+        await asyncio.sleep(_USERBOT_SESSION_EXPIRE_SCAN_SECONDS)
+        try:
+            from .plugins.loader import scan_userbot_expired_sessions_once  # type: ignore
+
+            await scan_userbot_expired_sessions_once(account_id)
+        except Exception as e:  # noqa: BLE001
+            await _log(redis, account_id, "warn", f"userbot session_expired 扫描失败: {type(e).__name__}: {e}")
 
 
 async def _listen_global(redis, account_id: int, paused: asyncio.Event) -> None:

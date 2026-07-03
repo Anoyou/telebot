@@ -26,7 +26,10 @@ class BufferedMessageOps:
         channel: MessageChannelSelector = "interaction_bot",
         chat_id: int | None = None,
         text: str,
+        parse_mode: Literal["html", "plain"] = "plain",
         reply_to_message_id: int | None = None,
+        reply_to_user_id: int | None = None,
+        reply_to_search_limit: int | None = None,
         reply_markup: dict[str, Any] | None = None,
         save_message_id_key: str | None = None,
         replace_saved_message_id_key: str | None = None,
@@ -36,8 +39,13 @@ class BufferedMessageOps:
             "type": "send_message",
             "chat_id": chat_id,
             "text": text,
+            "parse_mode": parse_mode,
             "reply_to_message_id": reply_to_message_id,
         }
+        if reply_to_user_id is not None:
+            action["reply_to_user_id"] = reply_to_user_id
+        if reply_to_search_limit is not None:
+            action["reply_to_search_limit"] = reply_to_search_limit
         _apply_channel(action, channel)
         if reply_markup is not None:
             action["reply_markup"] = dict(reply_markup)
@@ -57,6 +65,7 @@ class BufferedMessageOps:
         chat_id: int | None = None,
         message_id: int,
         text: str,
+        parse_mode: Literal["html", "plain"] = "plain",
         reply_markup: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         action: dict[str, Any] = {
@@ -64,6 +73,7 @@ class BufferedMessageOps:
             "chat_id": chat_id,
             "message_id": message_id,
             "text": text,
+            "parse_mode": parse_mode,
         }
         _apply_channel(action, channel)
         if reply_markup is not None:
@@ -139,6 +149,48 @@ class BufferedMessageOps:
         }
         if button is not None:
             action["button"] = dict(button)
+        self.actions.append(action)
+        return action
+
+    async def payout(
+        self,
+        *,
+        chat_id: int | None = None,
+        amount: int,
+        text: str | None = None,
+        parse_mode: Literal["html", "plain"] = "plain",
+        reply_to_message_id: int | None = None,
+        reply_to_user_id: int | None = None,
+        reply_to_search_limit: int | None = None,
+    ) -> dict[str, Any]:
+        action: dict[str, Any] = {
+            "type": "payout",
+            "chat_id": chat_id,
+            "amount": amount,
+            "parse_mode": parse_mode,
+            "reply_to_message_id": reply_to_message_id,
+        }
+        if text is not None:
+            action["text"] = text
+        if reply_to_user_id is not None:
+            action["reply_to_user_id"] = reply_to_user_id
+        if reply_to_search_limit is not None:
+            action["reply_to_search_limit"] = reply_to_search_limit
+        self.actions.append(action)
+        return action
+
+    async def update_session(
+        self,
+        *,
+        data: dict[str, Any] | None = None,
+        extend_seconds: int | None = None,
+    ) -> dict[str, Any]:
+        action: dict[str, Any] = {
+            "type": "update_session",
+            "data": dict(data or {}),
+        }
+        if extend_seconds is not None:
+            action["extend_seconds"] = extend_seconds
         self.actions.append(action)
         return action
 

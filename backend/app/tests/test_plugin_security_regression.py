@@ -444,7 +444,10 @@ class TestSandboxClientSecurity:
         assert seen["client"] is sandbox
         assert seen["client"] is not raw_client
         assert seen["account_id"] == 7
-        assert seen["ctx"] is ctx
+        assert seen["ctx"] is not ctx
+        assert seen["ctx"].client is sandbox
+        assert seen["ctx"].account_id == ctx.account_id
+        assert seen["ctx"].feature_key == ctx.feature_key
 
     def test_sandbox_blocks_private_attrs(self):
         """禁止访问私有属性。"""

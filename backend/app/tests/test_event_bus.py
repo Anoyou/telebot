@@ -9,6 +9,7 @@ import pytest
 from app.services.event_bus import (
     EVENT_REASON_CODES,
     EVENT_TRACE_STATUSES,
+    SUPPORTED_FILTER_KEYS,
     VALID_EVENT_TYPES,
     dispatch_event,
     normalize_bot_update,
@@ -33,8 +34,10 @@ def test_event_bus_exports_stable_status_and_reason_code_dictionary() -> None:
     } <= EVENT_TRACE_STATUSES
     assert {
         "account_not_matched",
+        "already_acked",
         "account_bot_user_unauthorized",
         "action_failed",
+        "action_limit_exceeded",
         "plugin_not_installed",
         "plugin_disabled",
         "manifest_invalid",
@@ -60,12 +63,14 @@ def test_event_bus_exports_stable_status_and_reason_code_dictionary() -> None:
         "inline_disabled",
         "inline_query_answer_failed",
         "inline_query_id_missing",
+        "interaction_rule_owned",
         "media_payload_empty",
         "media_payload_invalid",
         "media_payload_missing",
         "native_raw_not_allowed",
         "native_raw_skipped",
         "permission_denied",
+        "payout_failed",
         "send_channel_deprecated",
         "session_control_action",
         "bot_not_configured",
@@ -75,19 +80,24 @@ def test_event_bus_exports_stable_status_and_reason_code_dictionary() -> None:
         "settlement_requires_userbot",
         "subscription_load_failed",
         "subscription_not_matched",
+        "synthetic_callback",
         "telegram_api_error",
         "plugin_runtime_error",
         "trace_write_failed",
         "unsupported_send_via",
     } <= EVENT_REASON_CODES
     assert {
+        "all_events",
         "all_messages",
         "inline_query",
         "chosen_inline_result",
         "payment_confirmed",
         "command",
         "callback_query",
+        "message_edited",
+        "session_expired",
     } <= VALID_EVENT_TYPES
+    assert {"keywords", "contains", "callback_data", "commands", "rule_id"} <= SUPPORTED_FILTER_KEYS
 
 
 def test_runtime_reason_code_literals_are_registered() -> None:
@@ -191,6 +201,27 @@ def test_normalize_bot_update_projects_developer_message_summary() -> None:
     assert event["reply_to"]["sender"]["user_id"] == 1002
     assert event["raw"]["media"]["file_name"] == "demo.txt"
     assert event["raw"]["reply_markup"]["buttons"][0]["callback_data"] == "demo:start"
+
+
+def test_normalize_bot_update_projects_edited_message_event() -> None:
+    event = normalize_bot_update(
+        1,
+        {
+            "update_id": 45,
+            "edited_message": {
+                "message_id": 12,
+                "text": "已编辑",
+                "date": 1710000000,
+                "edit_date": 1710000015,
+                "chat": {"id": -100, "type": "supergroup"},
+                "from": {"id": 1001, "first_name": "Alice"},
+            },
+        },
+    )
+
+    assert event["source"]["type"] == "message_edited"
+    assert event["message"]["date"] == 1710000000
+    assert event["message"]["edited"] is True
 
 
 def test_normalize_bot_update_projects_anonymous_admin_sender_chat() -> None:
@@ -393,6 +424,34 @@ def test_match_subscription_all_messages_covers_message_and_command() -> None:
     assert command_decision.matched is True
 
 
+def test_all_events_matches_callback_and_session_events_but_not_inline() -> None:
+    subscription = normalize_event_subscription(
+        {"source": ["interaction_bot"], "events": ["all_events"], "scope": "all_allowed_chats"},
+        plugin_key="audit",
+        entry_key="main",
+    )
+
+    callback_event = _event_for_type("callback_query")
+    callback_decision = dispatch_event(callback_event, [subscription], {"allowed_chat_ids": [-100]}).decisions[0]
+
+    session_event = {
+        "source": {"type": "session_expired", "channel": "interaction_bot", "chat_id": -100},
+        "event_type": "session_expired",
+        "message": {"chat_id": -100},
+        "chat": {"id": -100, "type": "supergroup"},
+        "sender": {"user_id": 2001},
+    }
+    session_decision = dispatch_event(session_event, [subscription], {"allowed_chat_ids": [-100]}).decisions[0]
+
+    inline_event = _event_for_type("inline_query")
+    inline_decision = dispatch_event(inline_event, [subscription], {"allowed_chat_ids": [-100]}).decisions[0]
+
+    assert callback_decision.matched is True
+    assert session_decision.matched is True
+    assert inline_decision.matched is False
+    assert inline_decision.reason_code == "event_type_not_subscribed"
+
+
 def test_normalize_userbot_event_projects_anonymous_admin_sender_chat() -> None:
     sender = SimpleNamespace(id=-100123, title="Demo Group", username="demo_group", megagroup=True, photo=SimpleNamespace(dc_id=5))
     message = SimpleNamespace(
@@ -487,6 +546,107 @@ def test_match_subscription_owner_only_uses_account_owner() -> None:
 
     assert decision.matched is True
     assert event["source"]["type"] == "command"
+
+
+def test_normalize_event_subscription_marks_unknown_filter_keys() -> None:
+    subscription = normalize_event_subscription(
+        {
+            "source": ["interaction_bot"],
+            "events": ["message"],
+            "filters": {"keywords": ["开始"], "mystery": True},
+        },
+        plugin_key="game",
+    )
+    event = normalize_bot_update(
+        1,
+        {
+            "update_id": 16,
+            "message": {
+                "message_id": 8,
+                "text": "开始",
+                "chat": {"id": -100, "type": "supergroup"},
+                "from": {"id": 2001},
+            },
+        },
+    )
+
+    decision = dispatch_event(event, [subscription], {"allowed_chat_ids": [-100]}).decisions[0]
+
+    assert subscription.unknown_filter_keys == ["mystery"]
+    assert decision.unknown_filter_keys == ["mystery"]
+    assert decision.warnings == ["filters 含未知 key: mystery"]
+    assert "未知 key: mystery" in decision.reason_message
+
+
+def test_rule_bound_scope_requires_matching_rule_id_filter() -> None:
+    event = normalize_payment_notice(
+        1,
+        {
+            "update_id": 17,
+            "message": {
+                "message_id": 7,
+                "text": "付款人：Bob\n金额：100",
+                "chat": {"id": -100, "type": "supergroup"},
+                "from": {"id": 2001},
+            },
+        },
+        {"payer_name": "Bob", "amount": 100},
+    )
+    event["trigger"] = {"rule_id": "rule-1"}
+    matched = normalize_event_subscription(
+        {
+            "source": ["external_payment_notice"],
+            "events": ["payment_confirmed"],
+            "scope": "rule_bound",
+            "filters": {"rule_id": "rule-1"},
+        },
+        plugin_key="paid_game",
+    )
+    skipped = normalize_event_subscription(
+        {
+            "source": ["external_payment_notice"],
+            "events": ["payment_confirmed"],
+            "scope": "rule_bound",
+            "filters": {"rule_id": "rule-2"},
+        },
+        plugin_key="paid_game_wrong",
+    )
+
+    matched_decision, skipped_decision = dispatch_event(
+        event,
+        [matched, skipped],
+        {"allowed_chat_ids": "*", "trigger": {"rule_id": "rule-1"}},
+    ).decisions
+
+    assert matched_decision.matched is True
+    assert skipped_decision.matched is False
+    assert skipped_decision.reason_code == "scope_not_matched"
+
+
+def test_known_users_scope_only_uses_state_provided_set() -> None:
+    event = normalize_bot_update(
+        1,
+        {
+            "update_id": 18,
+            "message": {
+                "message_id": 9,
+                "text": "hi",
+                "chat": {"id": -100, "type": "supergroup"},
+                "from": {"id": 3001, "first_name": "Guest"},
+            },
+        },
+    )
+    subscription = normalize_event_subscription(
+        {"source": ["interaction_bot"], "events": ["message"], "scope": "known_users"},
+        plugin_key="known_only",
+    )
+
+    unknown_decision = dispatch_event(event, [subscription], {"allowed_chat_ids": [-100], "known_user_ids": []}).decisions[0]
+    known_decision = dispatch_event(event, [subscription], {"allowed_chat_ids": [-100], "known_user_ids": [3001]}).decisions[0]
+
+    assert unknown_decision.matched is False
+    assert unknown_decision.reason_code == "scope_not_matched"
+    assert known_decision.matched is True
 
 
 def _event_for_type(event_type: str) -> dict:

@@ -14,6 +14,7 @@ from typing import Any
 
 VALID_EVENT_SOURCES = {"userbot", "interaction_bot", "external_payment_notice"}
 VALID_EVENT_TYPES = {
+    "all_events",
     "all_messages",
     "message",
     "command",
@@ -23,8 +24,31 @@ VALID_EVENT_TYPES = {
     "payment_confirmed",
     "keyword",
     "session_close",
+    "session_expired",
+    "message_edited",
 }
 VALID_EVENT_SCOPES = {"all_allowed_chats", "owner_only", "known_users", "inline_all", "rule_bound"}
+SUPPORTED_FILTER_KEYS = {
+    "callback_data",
+    "chat_id",
+    "command",
+    "commands",
+    "contains",
+    "event_type",
+    "keyword",
+    "keywords",
+    "rule_id",
+}
+_ALL_EVENTS_IMPLICIT_TYPES = {
+    "message",
+    "command",
+    "callback_query",
+    "keyword",
+    "payment_confirmed",
+    "session_close",
+    "session_expired",
+    "message_edited",
+}
 EVENT_TRACE_STATUSES = {
     "received",
     "normalized",
@@ -39,8 +63,10 @@ EVENT_TRACE_STATUSES = {
 }
 EVENT_REASON_CODES = {
     "account_not_matched",
+    "already_acked",
     "account_bot_user_unauthorized",
     "action_failed",
+    "action_limit_exceeded",
     "plugin_not_installed",
     "plugin_disabled",
     "manifest_invalid",
@@ -67,12 +93,14 @@ EVENT_REASON_CODES = {
     "inline_disabled",
     "inline_query_id_missing",
     "inline_query_answer_failed",
+    "interaction_rule_owned",
     "media_payload_empty",
     "media_payload_invalid",
     "media_payload_missing",
     "native_raw_not_allowed",
     "native_raw_skipped",
     "permission_denied",
+    "payout_failed",
     "send_channel_deprecated",
     "session_control_action",
     "bot_not_configured",
@@ -82,6 +110,7 @@ EVENT_REASON_CODES = {
     "settlement_requires_userbot",
     "subscription_load_failed",
     "subscription_not_matched",
+    "synthetic_callback",
     "target_message_id_missing",
     "telegram_api_error",
     "plugin_runtime_error",
@@ -100,6 +129,7 @@ class EventSubscription:
     events: list[str] = field(default_factory=list)
     scope: str = "all_allowed_chats"
     filters: dict[str, Any] = field(default_factory=dict)
+    unknown_filter_keys: list[str] = field(default_factory=list)
     dispatch_mode: str = "event_subscription"
     raw: dict[str, Any] = field(default_factory=dict)
 
@@ -114,6 +144,8 @@ class SubscriptionDecision:
     dispatch_mode: str
     scope: str
     filters: dict[str, Any] = field(default_factory=dict)
+    unknown_filter_keys: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
     subscription: EventSubscription | None = None
 
 
@@ -202,6 +234,25 @@ def normalize_bot_update(account_id: int, update: dict[str, Any], *, channel: st
                 callback_query_id=callback.get("id"),
                 text=text,
             ),
+            native_raw=update,
+        )
+    if isinstance(update.get("edited_message"), dict):
+        msg = update["edited_message"]
+        chat = msg.get("chat") if isinstance(msg.get("chat"), dict) else {}
+        sender = _bot_sender_ref(msg)
+        text = str(msg.get("text") or msg.get("caption") or "")
+        message_payload = _bot_message_payload(msg, chat=chat)
+        return _event(
+            account_id=account_id,
+            channel=channel,
+            driver="telegram_bot_api",
+            event_type="message_edited",
+            update_id=update_id,
+            chat={"id": _int_or_none(chat.get("id")), "type": str(chat.get("type") or "") or None},
+            sender=sender,
+            message=message_payload,
+            reply_to=_bot_reply_to(msg),
+            raw_summary=_bot_raw_summary(update_id=update_id, event_type="message_edited", msg=msg, text=text),
             native_raw=update,
         )
     msg = update.get("message") if isinstance(update.get("message"), dict) else {}
@@ -294,6 +345,13 @@ def normalize_event_subscription(
     if scope not in VALID_EVENT_SCOPES:
         scope = "all_allowed_chats"
     filters = data.get("filters") if isinstance(data.get("filters"), dict) else {}
+    unknown_filter_keys = sorted(
+        {
+            str(key).strip()
+            for key in filters
+            if str(key).strip() and str(key).strip() not in SUPPORTED_FILTER_KEYS
+        }
+    )
     return EventSubscription(
         plugin_key=str(plugin_key or "").strip(),
         entry_key=str(data.get("entry_key") or entry_key or "").strip() or None,
@@ -301,6 +359,7 @@ def normalize_event_subscription(
         events=[item for item in events if item],
         scope=scope,
         filters=dict(filters),
+        unknown_filter_keys=unknown_filter_keys,
         dispatch_mode=str(data.get("dispatch_mode") or "event_subscription").strip() or "event_subscription",
         raw=dict(data),
     )
@@ -354,24 +413,54 @@ def _match_one(
         "dispatch_mode": subscription.dispatch_mode,
         "scope": subscription.scope,
         "filters": dict(subscription.filters),
+        "unknown_filter_keys": list(subscription.unknown_filter_keys),
+        "warnings": _subscription_warnings(subscription),
         "subscription": subscription,
     }
     if not subscription.plugin_key:
-        return SubscriptionDecision(matched=False, reason_code="plugin_not_installed", reason_message="插件 key 为空", **base)
+        return SubscriptionDecision(
+            matched=False,
+            reason_code="plugin_not_installed",
+            reason_message=_with_warnings("插件 key 为空", base["warnings"]),
+            **base,
+        )
     if event_source not in subscription.sources:
-        return SubscriptionDecision(matched=False, reason_code="source_not_subscribed", reason_message="事件来源未订阅", **base)
+        return SubscriptionDecision(
+            matched=False,
+            reason_code="source_not_subscribed",
+            reason_message=_with_warnings("事件来源未订阅", base["warnings"]),
+            **base,
+        )
     subscribed_events = set(subscription.events)
-    if event_type not in subscribed_events and not (
-        "all_messages" in subscribed_events and event_type in {"message", "command"}
-    ):
-        return SubscriptionDecision(matched=False, reason_code="event_type_not_subscribed", reason_message="事件类型未订阅", **base)
-    scope_ok, scope_reason = _scope_matches(subscription.scope, event_type, chat_id, sender_user_id, state)
+    if not _event_type_matches(subscribed_events, event_type):
+        return SubscriptionDecision(
+            matched=False,
+            reason_code="event_type_not_subscribed",
+            reason_message=_with_warnings("事件类型未订阅", base["warnings"]),
+            **base,
+        )
+    scope_ok, scope_reason = _scope_matches(subscription.scope, event_type, chat_id, sender_user_id, state, subscription.filters)
     if not scope_ok:
-        return SubscriptionDecision(matched=False, reason_code=scope_reason, reason_message="事件范围不匹配", **base)
+        return SubscriptionDecision(
+            matched=False,
+            reason_code=scope_reason,
+            reason_message=_with_warnings("事件范围不匹配", base["warnings"]),
+            **base,
+        )
     filter_ok, filter_reason = _filters_match(event, subscription.filters)
     if not filter_ok:
-        return SubscriptionDecision(matched=False, reason_code=filter_reason, reason_message="事件过滤条件不匹配", **base)
-    return SubscriptionDecision(matched=True, reason_code=EVENT_MATCHED_REASON_CODE, reason_message="订阅匹配", **base)
+        return SubscriptionDecision(
+            matched=False,
+            reason_code=filter_reason,
+            reason_message=_with_warnings("事件过滤条件不匹配", base["warnings"]),
+            **base,
+        )
+    return SubscriptionDecision(
+        matched=True,
+        reason_code=EVENT_MATCHED_REASON_CODE,
+        reason_message=_with_warnings("订阅匹配", base["warnings"]),
+        **base,
+    )
 
 
 def _scope_matches(
@@ -380,6 +469,7 @@ def _scope_matches(
     chat_id: int | None,
     sender_user_id: int | None,
     state: dict[str, Any],
+    filters: dict[str, Any],
 ) -> tuple[bool, str]:
     if scope == "inline_all":
         return (event_type in {"inline_query", "chosen_inline_result"}, "scope_not_matched")
@@ -391,7 +481,13 @@ def _scope_matches(
         return (sender_user_id is not None and sender_user_id in known_ids, "scope_not_matched")
     if scope == "rule_bound":
         trigger = state.get("trigger") if isinstance(state.get("trigger"), dict) else {}
-        return (bool(trigger.get("rule_id")), "scope_not_matched")
+        trigger_rule_id = trigger.get("rule_id")
+        if not trigger_rule_id:
+            return False, "scope_not_matched"
+        filter_rule_id = filters.get("rule_id")
+        if filter_rule_id not in (None, "") and str(filter_rule_id) != str(trigger_rule_id):
+            return False, "scope_not_matched"
+        return True, "scope_not_matched"
     allowed = state.get("allowed_chat_ids")
     if allowed == "*" or allowed == ["*"]:
         return (chat_id is not None, "scope_not_matched")
@@ -404,6 +500,8 @@ def _filters_match(event: dict[str, Any], filters: dict[str, Any]) -> tuple[bool
         return True, "matched"
     message = event.get("message") if isinstance(event.get("message"), dict) else {}
     source = event.get("source") if isinstance(event.get("source"), dict) else {}
+    trigger = event.get("trigger") if isinstance(event.get("trigger"), dict) else {}
+    chat = event.get("chat") if isinstance(event.get("chat"), dict) else {}
     text = str(message.get("text") or "").strip()
     keywords = _string_list(filters.get("keywords") or filters.get("keyword"))
     if keywords and text not in keywords:
@@ -417,7 +515,41 @@ def _filters_match(event: dict[str, Any], filters: dict[str, Any]) -> tuple[bool
     commands = _string_list(filters.get("commands") or filters.get("command"))
     if commands and text.lstrip("/,").split(maxsplit=1)[0] not in [item.lstrip("/,") for item in commands]:
         return False, "filter_not_matched"
+    rule_ids = _string_list(filters.get("rule_id"))
+    if rule_ids and str(trigger.get("rule_id") or "") not in rule_ids:
+        return False, "filter_not_matched"
+    event_types = _string_list(filters.get("event_type"))
+    current_event_type = str(source.get("type") or event.get("event_type") or "")
+    if event_types and current_event_type not in event_types:
+        return False, "filter_not_matched"
+    expected_chat_ids = {_int_or_none(item) for item in _string_list(filters.get("chat_id"))}
+    expected_chat_ids.discard(None)
+    current_chat_id = _int_or_none(message.get("chat_id") or chat.get("id") or source.get("chat_id"))
+    if expected_chat_ids and current_chat_id not in expected_chat_ids:
+        return False, "filter_not_matched"
     return True, "matched"
+
+
+def _event_type_matches(subscribed_events: set[str], event_type: str) -> bool:
+    if event_type in subscribed_events:
+        return True
+    if "all_messages" in subscribed_events and event_type in {"message", "command"}:
+        return True
+    if "all_events" in subscribed_events and event_type in _ALL_EVENTS_IMPLICIT_TYPES:
+        return True
+    return False
+
+
+def _subscription_warnings(subscription: EventSubscription) -> list[str]:
+    if not subscription.unknown_filter_keys:
+        return []
+    return [f"filters 含未知 key: {', '.join(subscription.unknown_filter_keys)}"]
+
+
+def _with_warnings(message: str, warnings: list[str]) -> str:
+    if not warnings:
+        return message
+    return f"{message}（警告：{'；'.join(warnings)}）"
 
 
 def _event(
@@ -484,6 +616,8 @@ def _bot_message_payload(msg: dict[str, Any], *, chat: dict[str, Any]) -> dict[s
     }
     optional = {
         "caption": str(msg.get("caption") or "") or None,
+        "date": msg.get("date"),
+        "edited": bool(msg.get("edit_date")),
         "thread_id": _int_or_none(msg.get("message_thread_id")),
         "entities": _entity_summary(msg.get("entities")),
         "caption_entities": _entity_summary(msg.get("caption_entities")),
@@ -524,6 +658,7 @@ def _bot_raw_summary(
         "update_id": update_id,
         "event_type": event_type,
         "text": text if text is not None else str(msg.get("text") or msg.get("caption") or ""),
+        "date": msg.get("date"),
         "entities": _entity_summary(msg.get("entities")),
         "caption_entities": _entity_summary(msg.get("caption_entities")),
         "media": _bot_media_summary(msg),
@@ -560,6 +695,9 @@ def _telethon_message_payload(
         ),
     }
     optional = {
+        "caption": str(data.get("caption") or "") or None,
+        "date": data.get("date"),
+        "edited": bool(data.get("edit_date")),
         "thread_id": _int_or_none(reply_to.get("reply_to_top_id") or data.get("message_thread_id")),
         "entities": _entity_summary(data.get("entities")),
         "media": _native_media_summary(data.get("media")),
@@ -594,6 +732,7 @@ def _telethon_raw_summary(
     summary = {
         "event_type": event_type,
         "text": text,
+        "date": data.get("date"),
         "entities": _entity_summary(data.get("entities")),
         "media": _native_media_summary(data.get("media")),
         "reply_markup": _reply_markup_summary(data.get("reply_markup")),
@@ -1045,6 +1184,7 @@ __all__ = [
     "EVENT_REASON_CODES",
     "EVENT_TRACE_STATUSES",
     "EventSubscription",
+    "SUPPORTED_FILTER_KEYS",
     "SubscriptionDecision",
     "VALID_EVENT_SCOPES",
     "VALID_EVENT_SOURCES",

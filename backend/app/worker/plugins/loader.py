@@ -37,7 +37,7 @@ import re
 import shutil
 import time
 import traceback
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
@@ -82,11 +82,12 @@ from ...services.interaction.contracts import (
     apply_action_send_via_options,
     deprecated_send_via_values,
 )
-from ...services.interaction.delivery import action_save_message_id_key, delivery_message_id
+from ...services.interaction.delivery import delivery_message_id, namespaced_action_save_message_id_key
 from ...services.rate_limit_service import get_effective
 from ...settings import settings as app_settings
 from ...util.sudo_permissions import sudo_chat_allowed
 from ..command import (
+    current_command_prefix,
     register_plugin_command,
     unregister_all_plugin_commands,
 )
@@ -94,9 +95,12 @@ from ..ipc import RUNTIME_LOG_STREAM, RuntimeLogPayload
 from ..ratelimit.engine import RateLimitEngine
 from ..ratelimit.humanize import HumanizeOpts
 from .base import Plugin, PluginContext, all_plugins, get_plugin, public_entity_display_name
+from .events import attach_tp_event
 from .manifest import Manifest
 
 log = logging.getLogger(__name__)
+
+_INTERACTION_RULE_OWNED_REASON_CODE = "interaction_rule_owned"
 
 
 @dataclass(frozen=True)
@@ -119,6 +123,17 @@ class _UserbotEventBusDispatch:
     event_bus_enabled: bool = False
     matched_decisions: tuple[Any, ...] = ()
     subscribed_plugin_keys: frozenset[str] = frozenset()
+
+
+@dataclass(frozen=True)
+class _InteractionTextGuardRule:
+    chat_ids: frozenset[int]
+    texts: frozenset[str]
+
+
+_USERBOT_SESSION_KEY_PREFIX = "account_bot:interaction_session:"
+_USERBOT_SESSION_TTL_GRACE_SECONDS = 90
+_USERBOT_BUTTON_MAP_KEY = "_tp_button_map"
 
 
 class _TracePluginClient:
@@ -685,39 +700,35 @@ async def _invoke_userbot_event_bus_entry(
 ) -> list[dict[str, Any]]:
     from .message_ops import BufferedMessageOps
 
-    previous_messages = ctx.messages
-    previous_log = ctx.log
-    previous_client = ctx.client
+    base_log = ctx.log
+    base_client = ctx.client
     buffered_messages = BufferedMessageOps()
-    ctx.messages = buffered_messages
-    ctx.client = _trace_plugin_client(
-        previous_client,
+    call_client = _trace_plugin_client(
+        base_client,
         payload.get("trace_id"),
         plugin_key=plugin_key,
         entry_key=entry_key,
         component="userbot_event_bus_dispatcher",
     )
     trace_id = str(payload.get("trace_id") or "").strip()
-    if previous_log is not None and trace_id:
+    call_log = base_log
+    if base_log is not None and trace_id:
         async def _trace_log(level: str, message: str, **detail: Any) -> None:
             detail.setdefault("trace_id", trace_id)
             detail.setdefault("plugin_key", plugin_key)
             if entry_key:
                 detail.setdefault("entry_key", entry_key)
-            await previous_log(level, message, **detail)
+            await base_log(level, message, **detail)
 
-        ctx.log = _trace_log
-    try:
-        if _plugin_overrides(inst, "on_event"):
-            actions = await inst.on_event(ctx, dict(payload))
-        elif _plugin_overrides(inst, "on_interaction"):
-            actions = await inst.on_interaction(ctx, entry_key, dict(payload))
-        else:
-            raise RuntimeError("插件未实现 on_event 或 on_interaction 入口")
-    finally:
-        ctx.messages = previous_messages
-        ctx.log = previous_log
-        ctx.client = previous_client
+        call_log = _trace_log
+    call_ctx = replace(ctx, messages=buffered_messages, client=call_client, log=call_log)
+    plugin_payload = attach_tp_event(dict(payload))
+    if _plugin_overrides(inst, "on_event"):
+        actions = await inst.on_event(call_ctx, plugin_payload)
+    elif _plugin_overrides(inst, "on_interaction"):
+        actions = await inst.on_interaction(call_ctx, entry_key, plugin_payload)
+    else:
+        raise RuntimeError("插件未实现 on_event 或 on_interaction 入口")
     if actions is None:
         actions = []
     if not isinstance(actions, list) or not all(isinstance(item, dict) for item in actions):
@@ -903,8 +914,40 @@ async def _apply_userbot_event_bus_actions(
     entry_key: str,
     actions: list[dict[str, Any]],
     redis: Any,
+    session_key: str | None = None,
+    session: dict[str, Any] | None = None,
+    synthetic_callback: bool = False,
 ) -> bool:
     failed = False
+    if len(actions) > 10:
+        dropped_actions = actions[10:]
+        await _log(
+            redis,
+            state.account_id,
+            "warn",
+            "Event Bus actions truncated by worker limit",
+            source="plugin",
+            plugin_key=plugin_key,
+            entry_key=entry_key,
+            reason_code="action_limit_exceeded",
+            kept_count=10,
+            dropped_count=len(dropped_actions),
+            dropped_action_types=[str((item or {}).get("type") or "") for item in dropped_actions if isinstance(item, dict)],
+            **trace_log_context(trace),
+        )
+        for raw_action in dropped_actions:
+            action = dict(raw_action) if isinstance(raw_action, dict) else {"type": "unknown"}
+            action.setdefault(
+                "context",
+                trace_log_context(trace, plugin_key=plugin_key, entry_key=entry_key),
+            )
+            await record_action(
+                action.get("context"),
+                action,
+                TRACE_STATUS_FAILED,
+                error_code="action_limit_exceeded",
+                error="worker event bus only executes the first 10 actions",
+            )
     for raw_action in actions[:10]:
         action = dict(raw_action)
         action.setdefault(
@@ -933,6 +976,18 @@ async def _apply_userbot_event_bus_actions(
         if action_type == "settlement":
             await record_action(action.get("context"), action, TRACE_STATUS_OK, actual_send_via="settlement")
             continue
+        if action_type == "update_session":
+            failed = not await _apply_userbot_update_session_action(
+                state,
+                action,
+                redis=redis,
+                session_key=session_key,
+                session=session,
+            ) or failed
+            continue
+        if action_type == "payout":
+            failed = not await _apply_userbot_payout_action(state, event, action) or failed
+            continue
         if action_type in {"send_message", "send_photo", "send_file", "edit_message", "delete_message", "pin_message"}:
             deprecated_channels = deprecated_send_via_values(action_send_via_raw_selector(action))
             if deprecated_channels:
@@ -960,7 +1015,14 @@ async def _apply_userbot_event_bus_actions(
                 )
                 continue
         if action_type == "send_message":
-            failed = not await _apply_userbot_send_message_action(state, event, action) or failed
+            failed = not await _apply_userbot_send_message_action(
+                state,
+                event,
+                action,
+                redis=redis,
+                session_key=session_key,
+                session=session,
+            ) or failed
             continue
         if action_type == "edit_message":
             failed = not await _apply_userbot_edit_message_action(state, event, action) or failed
@@ -975,6 +1037,8 @@ async def _apply_userbot_event_bus_actions(
             failed = not await _apply_userbot_pin_message_action(state, event, action) or failed
             continue
         if action_type == "answer_callback":
+            if synthetic_callback:
+                action["_tp_synthetic_callback"] = True
             failed = not await _apply_userbot_answer_callback_action(state, action) or failed
             continue
         if action_type == "answer_inline_query":
@@ -1044,6 +1108,8 @@ async def _apply_userbot_start_session_action(
         paid_ids.update(_int_list(action.get("paid_user_ids") or action.get("participant_user_ids")))
         if started_by_user_id is None:
             started_by_user_id = _int_or_none(existing.get("started_by_user_id"))
+        ttl = _int_or_none(action.get("ttl_seconds")) or account_bot_runtime_service._interaction_session_ttl(rule)  # noqa: SLF001
+        expires_at = time.time() + ttl
         payload = {
             "account_id": state.account_id,
             "chat_id": target_chat_id,
@@ -1051,25 +1117,31 @@ async def _apply_userbot_start_session_action(
             "rule_name": str(rule.get("name") or ""),
             "module_key": plugin_key,
             "entry_key": target_entry_key,
+            "channel": "userbot",
             "started_by_user_id": started_by_user_id,
             "started_by_message_id": _int_or_none(action.get("started_by_message_id")),
             "source_user_id": started_by_user_id,
             "event_type": str(action.get("event_type") or "command"),
             "created_at": existing.get("created_at") or time.time(),
             "updated_at": time.time(),
+            "expires_at": expires_at,
+            "data": {
+                **dict(existing.get("data") if isinstance(existing.get("data"), dict) else {}),
+                **dict(action.get("data") if isinstance(action.get("data"), dict) else {}),
+            },
         }
         policy = account_bot_runtime_service._interaction_participant_policy(rule)  # noqa: SLF001
         if policy == "paid_pool":
             payload["paid_user_ids"] = sorted(paid_ids)
             payload["participant_user_ids"] = sorted(paid_ids)
-        ttl = _int_or_none(action.get("ttl_seconds")) or account_bot_runtime_service._interaction_session_ttl(rule)  # noqa: SLF001
-        await redis.set(session_key, json.dumps(payload, ensure_ascii=False), ex=ttl)
+        await redis.set(session_key, json.dumps(payload, ensure_ascii=False), ex=ttl + 90)
+        state.userbot_session_chats.add(target_chat_id)
         await record_action(
             action.get("context"),
             action,
             TRACE_STATUS_OK,
             actual_send_via="interaction_session",
-            result={"session_key": session_key, "ttl_seconds": ttl},
+            result={"session_key": session_key, "ttl_seconds": ttl, "channel": "userbot", "expires_at": expires_at},
         )
         return True
     except Exception as exc:  # noqa: BLE001
@@ -1080,6 +1152,78 @@ async def _apply_userbot_start_session_action(
             error_code="interaction_session_error",
             error=f"{type(exc).__name__}: {exc}",
         )
+        return False
+
+
+def _userbot_session_redis_ttl(session: dict[str, Any], *, now: float | None = None) -> int:
+    now = time.time() if now is None else now
+    expires_at = session.get("expires_at")
+    try:
+        remaining = float(expires_at) - now if expires_at is not None else 600
+    except (TypeError, ValueError):
+        remaining = 600
+    return max(1, int(remaining) + _USERBOT_SESSION_TTL_GRACE_SECONDS)
+
+
+async def _write_userbot_session(redis: Any, key: str, session: dict[str, Any]) -> None:
+    await redis.set(
+        key,
+        json.dumps(session, ensure_ascii=False),
+        ex=_userbot_session_redis_ttl(session),
+    )
+
+
+async def _apply_userbot_update_session_action(
+    state: _AccountState,
+    action: dict[str, Any],
+    *,
+    redis: Any,
+    session_key: str | None = None,
+    session: dict[str, Any] | None = None,
+) -> bool:
+    key = str(action.get("session_key") or session_key or "").strip()
+    if not key:
+        await record_action(action.get("context"), action, TRACE_STATUS_FAILED, error_code="session_not_found", error="update_session missing session_key")
+        return False
+    current = dict(session or {})
+    if not current:
+        raw = await redis.get(key)
+        current = _json_dict(raw)
+    if str(current.get("channel") or "").strip() != "userbot":
+        await record_action(action.get("context"), action, TRACE_STATUS_FAILED, error_code="session_not_found", error="userbot session not found")
+        return False
+    patch_data = action.get("data")
+    if not isinstance(patch_data, dict):
+        patch_data = {}
+    existing_data = current.get("data") if isinstance(current.get("data"), dict) else {}
+    current["data"] = {**dict(existing_data), **dict(patch_data)}
+    current["updated_at"] = time.time()
+    extend_seconds = _int_or_none(action.get("extend_seconds"))
+    if extend_seconds is not None and extend_seconds > 0:
+        base = time.time()
+        try:
+            base = max(base, float(current.get("expires_at") or 0))
+        except (TypeError, ValueError):
+            pass
+        current["expires_at"] = base + extend_seconds
+    try:
+        await _write_userbot_session(redis, key, current)
+        chat_id = _int_or_none(current.get("chat_id"))
+        if chat_id is not None:
+            state.userbot_session_chats.add(chat_id)
+        if session is not None:
+            session.clear()
+            session.update(current)
+        await record_action(
+            action.get("context"),
+            action,
+            TRACE_STATUS_OK,
+            actual_send_via="interaction_session",
+            result={"session_key": key, "data_keys": sorted(current["data"].keys()), "expires_at": current.get("expires_at")},
+        )
+        return True
+    except Exception as exc:  # noqa: BLE001
+        await record_action(action.get("context"), action, TRACE_STATUS_FAILED, error_code="redis_error", error=f"{type(exc).__name__}: {exc}")
         return False
 
 
@@ -1128,7 +1272,205 @@ async def _find_interaction_rule_for_plugin_session(
     return None
 
 
-async def _apply_userbot_send_message_action(state: _AccountState, event: Any, action: dict[str, Any]) -> bool:
+def _userbot_rate_limit_action(action_type: str, chat_id: int | None) -> str:
+    if action_type in {"send_message", "payout"}:
+        return "send_message_private" if chat_id is not None and chat_id > 0 else "send_message_group"
+    if action_type == "edit_message":
+        return "edit_message"
+    if action_type in {"send_photo", "send_file"}:
+        return "upload_file"
+    return action_type
+
+
+async def _acquire_userbot_action_rate_limit(
+    state: _AccountState,
+    action: dict[str, Any],
+    *,
+    action_type: str,
+    target_chat_id: int | None,
+) -> bool:
+    limit_action = _userbot_rate_limit_action(action_type, target_chat_id)
+    engine = getattr(state, "engine", None)
+    redis = state.redis or get_redis()
+    if engine is None:
+        await _log(
+            redis,
+            state.account_id,
+            "warn",
+            "UserBot 交互动作未接入限速引擎，已降级直发。",
+            source="plugin",
+            action_type=action_type,
+            rate_limit_action=limit_action,
+            chat_id=target_chat_id,
+        )
+        return True
+    try:
+        decision = await engine.acquire(state.account_id, limit_action, peer_id=target_chat_id)
+    except Exception as exc:  # noqa: BLE001
+        await _log(
+            redis,
+            state.account_id,
+            "warn",
+            f"UserBot 交互动作限速检查失败，已降级直发：{type(exc).__name__}: {exc}",
+            source="plugin",
+            action_type=action_type,
+            rate_limit_action=limit_action,
+            chat_id=target_chat_id,
+        )
+        return True
+    if not bool(getattr(decision, "allowed", False)):
+        await record_action(
+            action.get("context"),
+            action,
+            TRACE_STATUS_SKIPPED,
+            actual_send_via="userbot_reply",
+            error_code="rate_limited",
+            error=str(getattr(decision, "reason", None) or getattr(decision, "outcome", "") or "rate limited"),
+            result={
+                "outcome": getattr(decision, "outcome", None),
+                "wait_seconds": getattr(decision, "wait_seconds", None),
+                "rate_limit_action": limit_action,
+            },
+        )
+        return False
+    wait_seconds = float(getattr(decision, "wait_seconds", 0.0) or 0.0)
+    if wait_seconds > 0:
+        await asyncio.sleep(wait_seconds)
+    return True
+
+
+def _payout_amount(action: dict[str, Any]) -> int | None:
+    amount = _int_or_none(action.get("amount"))
+    if amount is None or amount <= 0:
+        return None
+    return amount
+
+
+def _render_userbot_button_fallback(text: str, reply_markup: dict[str, Any] | None) -> tuple[str, dict[str, str]]:
+    if not isinstance(reply_markup, dict):
+        return text, {}
+    rows = reply_markup.get("inline_keyboard")
+    if not isinstance(rows, list):
+        return text, {}
+    lines: list[str] = []
+    mapping: dict[str, str] = {}
+    index = 1
+    for row in rows:
+        if not isinstance(row, list):
+            continue
+        for raw_button in row:
+            if not isinstance(raw_button, dict):
+                continue
+            label = str(raw_button.get("text") or "").strip()
+            if not label:
+                continue
+            callback_data = raw_button.get("callback_data")
+            url = str(raw_button.get("url") or "").strip()
+            display = f"{label}: {url}" if url else label
+            lines.append(f"{index}. {display}")
+            if callback_data not in (None, ""):
+                data = str(callback_data)
+                mapping[str(index)] = data
+                mapping[label] = data
+            index += 1
+    if not lines:
+        return text, {}
+    return f"{text}\n\n请回复序号选择：\n" + "\n".join(lines), mapping
+
+
+async def _save_userbot_button_map(
+    *,
+    redis: Any,
+    session_key: str | None,
+    session: dict[str, Any] | None,
+    message_id: int | None,
+    mapping: dict[str, str],
+) -> None:
+    if not session_key or session is None or not mapping:
+        return
+    data = dict(session.get("data") if isinstance(session.get("data"), dict) else {})
+    data[_USERBOT_BUTTON_MAP_KEY] = {
+        "message_id": message_id,
+        "map": dict(mapping),
+        "updated_at": time.time(),
+    }
+    session["data"] = data
+    session["updated_at"] = time.time()
+    await _write_userbot_session(redis, session_key, session)
+
+
+async def _apply_userbot_payout_action(state: _AccountState, event: Any, action: dict[str, Any]) -> bool:
+    amount = _payout_amount(action)
+    if amount is None:
+        await record_action(
+            action.get("context"),
+            action,
+            TRACE_STATUS_FAILED,
+            error_code="invalid_payout_amount",
+            error="payout amount must be a positive integer",
+        )
+        return False
+    target_chat_id = _action_chat_id(action, event)
+    if target_chat_id is None:
+        await record_action(action.get("context"), action, TRACE_STATUS_FAILED, error_code="scope_not_matched", error="target chat_id missing")
+        return False
+    if state.client is None:
+        await record_action(action.get("context"), action, TRACE_STATUS_FAILED, error_code="userbot_offline", error="userbot client unavailable")
+        return False
+    text = str(action.get("text") or f"+{amount}").strip()
+    if not text:
+        await record_action(action.get("context"), action, TRACE_STATUS_FAILED, error_code="empty_message_text", error="payout text is empty")
+        return False
+    reply_to = _int_or_none(action.get("reply_to_message_id"))
+    parse_mode = _action_parse_mode(action)
+    if not await _acquire_userbot_action_rate_limit(
+        state,
+        action,
+        action_type="payout",
+        target_chat_id=target_chat_id,
+    ):
+        return False
+    try:
+        sent = await state.client.send_message(
+            target_chat_id,
+            text,
+            reply_to=reply_to,
+            parse_mode=_telethon_parse_mode(parse_mode),
+        )
+        result = {
+            "message_id": getattr(sent, "id", None),
+            "chat_id": target_chat_id,
+            "reply_to_message_id": reply_to,
+        }
+        await _save_action_message_id(state, action, result)
+        await record_action(
+            action.get("context"),
+            action,
+            TRACE_STATUS_OK,
+            actual_send_via="userbot_reply",
+            result=result,
+        )
+        return True
+    except Exception as exc:  # noqa: BLE001
+        await record_action(
+            action.get("context"),
+            action,
+            TRACE_STATUS_FAILED,
+            error_code="telegram_api_error",
+            error=f"{type(exc).__name__}: {exc}",
+        )
+        return False
+
+
+async def _apply_userbot_send_message_action(
+    state: _AccountState,
+    event: Any,
+    action: dict[str, Any],
+    *,
+    redis: Any | None = None,
+    session_key: str | None = None,
+    session: dict[str, Any] | None = None,
+) -> bool:
     text = str(action.get("text") or "").strip()
     if not text:
         await record_action(action.get("context"), action, TRACE_STATUS_FAILED, error_code="empty_message_text", error="send_message text is empty")
@@ -1139,6 +1481,7 @@ async def _apply_userbot_send_message_action(state: _AccountState, event: Any, a
         return False
     reply_to = _int_or_none(action.get("reply_to_message_id"))
     reply_markup = action.get("reply_markup") if isinstance(action.get("reply_markup"), dict) else None
+    parse_mode = _action_parse_mode(action)
     last_code = "unsupported_send_via"
     last_error = "no supported send_via"
     for send_via in action_send_via_options(action):
@@ -1155,6 +1498,7 @@ async def _apply_userbot_send_message_action(state: _AccountState, event: Any, a
                     text,
                     reply_to_message_id=reply_to,
                     reply_markup=reply_markup,
+                    parse_mode=parse_mode,
                 )
                 await _save_action_message_id(state, action, result)
                 await record_action(action.get("context"), action, TRACE_STATUS_OK, actual_send_via="interaction_bot", result=result)
@@ -1168,9 +1512,29 @@ async def _apply_userbot_send_message_action(state: _AccountState, event: Any, a
                 last_code = "userbot_offline"
                 last_error = "userbot client unavailable"
                 continue
+            send_text, button_map = _render_userbot_button_fallback(text, reply_markup)
+            if not await _acquire_userbot_action_rate_limit(
+                state,
+                action,
+                action_type="send_message",
+                target_chat_id=target_chat_id,
+            ):
+                return False
             try:
-                sent = await state.client.send_message(target_chat_id, text, reply_to=reply_to, parse_mode="html")
+                sent = await state.client.send_message(
+                    target_chat_id,
+                    send_text,
+                    reply_to=reply_to,
+                    parse_mode=_telethon_parse_mode(parse_mode),
+                )
                 result = {"message_id": getattr(sent, "id", None), "chat_id": target_chat_id}
+                await _save_userbot_button_map(
+                    redis=redis or state.redis or get_redis(),
+                    session_key=session_key,
+                    session=session,
+                    message_id=_int_or_none(result.get("message_id")),
+                    mapping=button_map,
+                )
                 await _save_action_message_id(state, action, result)
                 await record_action(
                     action.get("context"),
@@ -1205,6 +1569,7 @@ async def _apply_userbot_edit_message_action(state: _AccountState, event: Any, a
         )
         return False
     reply_markup = action.get("reply_markup") if isinstance(action.get("reply_markup"), dict) else None
+    parse_mode = _action_parse_mode(action)
     last_code = "unsupported_send_via"
     last_error = "no supported send_via"
     for send_via in action_send_via_options(action):
@@ -1221,6 +1586,7 @@ async def _apply_userbot_edit_message_action(state: _AccountState, event: Any, a
                     message_id,
                     text,
                     reply_markup=reply_markup,
+                    parse_mode=parse_mode,
                 )
                 await record_action(action.get("context"), action, TRACE_STATUS_OK, actual_send_via="interaction_bot", result=result)
                 return True
@@ -1233,8 +1599,20 @@ async def _apply_userbot_edit_message_action(state: _AccountState, event: Any, a
                 last_code = "userbot_offline"
                 last_error = "userbot client unavailable"
                 continue
+            if not await _acquire_userbot_action_rate_limit(
+                state,
+                action,
+                action_type="edit_message",
+                target_chat_id=target_chat_id,
+            ):
+                return False
             try:
-                result = await state.client.edit_message(target_chat_id, message_id, text, parse_mode="html")
+                result = await state.client.edit_message(
+                    target_chat_id,
+                    message_id,
+                    text,
+                    parse_mode=_telethon_parse_mode(parse_mode),
+                )
                 await record_action(
                     action.get("context"),
                     action,
@@ -1271,6 +1649,7 @@ async def _apply_userbot_send_media_action(state: _AccountState, event: Any, act
     reply_to = _int_or_none(action.get("reply_to_message_id"))
     filename = str(action.get("filename") or ("interaction.png" if action.get("type") == "send_photo" else "interaction.bin")).strip()
     caption = str(action.get("caption") or action.get("text") or "").strip() or None
+    parse_mode = _action_parse_mode(action)
     last_code = "unsupported_send_via"
     last_error = "no supported send_via"
     for send_via in action_send_via_options(action):
@@ -1288,6 +1667,7 @@ async def _apply_userbot_send_media_action(state: _AccountState, event: Any, act
                     filename=filename or "photo.png",
                     caption=caption,
                     reply_to_message_id=reply_to,
+                    parse_mode=parse_mode,
                 )
                 await record_action(action.get("context"), action, TRACE_STATUS_OK, actual_send_via="interaction_bot", result=result)
                 return True
@@ -1300,13 +1680,20 @@ async def _apply_userbot_send_media_action(state: _AccountState, event: Any, act
                 last_code = "userbot_offline"
                 last_error = "userbot client unavailable"
                 continue
+            if not await _acquire_userbot_action_rate_limit(
+                state,
+                action,
+                action_type=str(action.get("type") or ""),
+                target_chat_id=target_chat_id,
+            ):
+                return False
             try:
                 file_obj = BytesIO(media_bytes)
                 file_obj.name = filename or "interaction.bin"
                 kwargs: dict[str, Any] = {"reply_to": reply_to}
                 if caption:
                     kwargs["caption"] = caption[:1024]
-                    kwargs["parse_mode"] = "html"
+                    kwargs["parse_mode"] = _telethon_parse_mode(parse_mode)
                 if action.get("type") == "send_photo":
                     kwargs["force_document"] = False
                 sent = await state.client.send_file(target_chat_id, file_obj, **kwargs)
@@ -1413,6 +1800,15 @@ async def _apply_userbot_pin_message_action(state: _AccountState, event: Any, ac
 async def _apply_userbot_answer_callback_action(state: _AccountState, action: dict[str, Any]) -> bool:
     callback_query_id = str(action.get("callback_query_id") or "").strip()
     if not callback_query_id:
+        if bool(action.get("_tp_synthetic_callback")):
+            await record_action(
+                action.get("context"),
+                action,
+                TRACE_STATUS_SKIPPED,
+                error_code="synthetic_callback",
+                error="synthetic text_button callback has no callback_query_id",
+            )
+            return True
         await record_action(action.get("context"), action, TRACE_STATUS_FAILED, error_code="callback_query_id_missing", error="callback_query_id missing")
         return False
     token = await _interaction_bot_token_for_account(state.account_id)
@@ -1484,8 +1880,17 @@ def _int_or_none(value: Any) -> int | None:
         return None
 
 
+def _action_parse_mode(action: dict[str, Any]) -> str:
+    value = str(action.get("parse_mode") or "plain").strip().lower()
+    return "html" if value == "html" else "plain"
+
+
+def _telethon_parse_mode(parse_mode: str) -> str | None:
+    return "html" if parse_mode == "html" else None
+
+
 async def _save_action_message_id(state: _AccountState, action: dict[str, Any], result: Any) -> None:
-    save_key = action_save_message_id_key(action.get("save_message_id_key"))
+    save_key = namespaced_action_save_message_id_key(state.account_id, action.get("save_message_id_key"))
     if not save_key:
         return
     msg_id = delivery_message_id(result)
@@ -2186,6 +2591,8 @@ class _AccountState:
         # 启动 / reload_config 时同步。命令派发、插件错误、业务事件不受影响。
         self.log_incoming_messages: bool = False
         self.account_proxy_url: str | None = None
+        self.interaction_text_guard_rules: tuple[_InteractionTextGuardRule, ...] = ()
+        self.userbot_session_chats: set[int] = set()
 
 
 # 进程级状态字典（一个 worker 进程通常只服务一个账号；用 dict 是为了灵活）
@@ -2347,32 +2754,625 @@ def _text_equals_any(text: str, values: Any) -> bool:
     return bool(clean and any(clean == str(item or "").strip() for item in values if str(item or "").strip()))
 
 
+def _normalize_guard_texts(*values: Any) -> frozenset[str]:
+    out: set[str] = set()
+    for value in values:
+        if not isinstance(value, list):
+            continue
+        for item in value:
+            text = str(item or "").strip()
+            if text:
+                out.add(text)
+    return frozenset(out)
+
+
+def _normalize_guard_chat_ids(raw: Any) -> frozenset[int]:
+    if not isinstance(raw, list):
+        return frozenset()
+    out: set[int] = set()
+    for item in raw:
+        try:
+            out.add(int(item))
+        except (TypeError, ValueError):
+            continue
+    return frozenset(out)
+
+
+async def _refresh_interaction_text_guard_cache(state: Any) -> None:
+    """Refresh interaction Bot owned text rules once per startup/reload."""
+
+    account_id = getattr(state, "account_id", None)
+    rules: list[_InteractionTextGuardRule] = []
+    try:
+        async with AsyncSessionLocal() as db:
+            row = await db.get(SystemSetting, interaction_bot_service.transfer_notice_setting_key(int(account_id)))
+        cfg = interaction_bot_service.normalize_transfer_notice_config(row.value if row is not None else None)
+        if cfg.get("enabled"):
+            for rule in cfg.get("rules") or []:
+                if not isinstance(rule, dict) or not bool(rule.get("enabled", True)):
+                    continue
+                texts = _normalize_guard_texts(
+                    rule.get("open_commands"),
+                    rule.get("close_commands"),
+                    rule.get("module_start_keywords"),
+                )
+                if not texts:
+                    continue
+                rules.append(
+                    _InteractionTextGuardRule(
+                        chat_ids=_normalize_guard_chat_ids(rule.get("chat_ids")),
+                        texts=texts,
+                    )
+                )
+    except Exception:  # noqa: BLE001
+        log.debug("刷新交互 Bot 文本守卫缓存失败 account=%s", account_id, exc_info=True)
+    try:
+        state.interaction_text_guard_rules = tuple(rules)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _interaction_text_guard_rule_matches(rule: _InteractionTextGuardRule, chat_id: int | None) -> bool:
+    if not rule.chat_ids:
+        return True
+    if chat_id is None:
+        return False
+    try:
+        return int(chat_id) in rule.chat_ids
+    except (TypeError, ValueError):
+        return False
+
+
 async def _interaction_bot_owns_incoming_text(state: _AccountState, event: Any) -> bool:
     """交互 Bot 规则接管的关键词不再交给普通插件 on_message 自行开局。"""
 
     text = str(getattr(event, "raw_text", "") or "").strip()
     if not text:
         return False
-    try:
-        async with AsyncSessionLocal() as db:
-            row = await db.get(SystemSetting, interaction_bot_service.transfer_notice_setting_key(state.account_id))
-        cfg = interaction_bot_service.normalize_transfer_notice_config(row.value if row is not None else None)
-    except Exception:  # noqa: BLE001
-        log.debug("读取交互 Bot 规则失败 account=%s", state.account_id, exc_info=True)
-        return False
-    if not cfg.get("enabled"):
-        return False
     chat_id = getattr(event, "chat_id", None)
-    for rule in cfg.get("rules") or []:
-        if not isinstance(rule, dict) or not bool(rule.get("enabled", True)):
-            continue
-        if not _rule_chat_matches_for_interaction_guard(rule, chat_id):
-            continue
-        if _text_equals_any(text, rule.get("open_commands")) or _text_equals_any(text, rule.get("close_commands")):
-            return True
-        if _text_equals_any(text, rule.get("module_start_keywords")):
+    rules = getattr(state, "interaction_text_guard_rules", None)
+    if rules is None:
+        await _refresh_interaction_text_guard_cache(state)
+        rules = getattr(state, "interaction_text_guard_rules", ())
+    for rule in rules or ():
+        if text in rule.texts and _interaction_text_guard_rule_matches(rule, chat_id):
             return True
     return False
+
+
+async def _record_interaction_text_guard_skip(
+    state: _AccountState,
+    event: Any,
+    *,
+    event_label: str,
+) -> None:
+    event_payload = normalize_userbot_event(state.account_id, event)
+    flags = await _load_event_framework_flags()
+    trace = None
+    if flags.get("trace_enabled", True):
+        trace = await start_trace(event_payload)
+        event_payload["trace_id"] = trace.trace_id
+        await record_span(
+            trace,
+            "receive",
+            TRACE_STATUS_OK,
+            component="userbot_message",
+            direction=event_label,
+        )
+    await record_span(
+        trace,
+        "route",
+        TRACE_STATUS_SKIPPED,
+        component="interaction_bot_text_guard",
+        reason_code=_INTERACTION_RULE_OWNED_REASON_CODE,
+        message="交互 Bot 关键词/开关命令已接管该消息，UserBot legacy 分发跳过。",
+        direction=event_label,
+        chat_id=getattr(event, "chat_id", None),
+        sender_id=getattr(event, "sender_id", None),
+        message_preview=(getattr(event, "raw_text", "") or "")[:200],
+    )
+    await finish_trace(
+        trace,
+        TRACE_STATUS_SKIPPED,
+        invoked_count=0,
+        failed_count=0,
+        direction=event_label,
+        reason_code=_INTERACTION_RULE_OWNED_REASON_CODE,
+    )
+
+
+def _decode_redis_key(raw: Any) -> str:
+    return raw.decode("utf-8", errors="ignore") if isinstance(raw, bytes) else str(raw)
+
+
+async def _redis_keys(redis: Any, match: str) -> list[str]:
+    scan_iter = getattr(redis, "scan_iter", None)
+    if callable(scan_iter):
+        keys: list[str] = []
+        async for key in scan_iter(match=match):
+            keys.append(_decode_redis_key(key))
+        return keys
+    keys_fn = getattr(redis, "keys", None)
+    if callable(keys_fn):
+        return [_decode_redis_key(key) for key in await keys_fn(match)]
+    return []
+
+
+def _json_dict(raw: Any) -> dict[str, Any]:
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8", errors="ignore")
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw) if isinstance(raw, str) else raw
+    except (TypeError, ValueError):
+        return {}
+    return dict(parsed) if isinstance(parsed, dict) else {}
+
+
+def _userbot_session_is_active(session: dict[str, Any], chat_id: int | None = None) -> bool:
+    if str(session.get("channel") or "").strip() != "userbot":
+        return False
+    if chat_id is not None and _int_or_none(session.get("chat_id")) != chat_id:
+        return False
+    expires_at = session.get("expires_at")
+    try:
+        if expires_at is not None and float(expires_at) <= time.time():
+            return False
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
+async def _refresh_userbot_session_chat_cache(state: Any) -> None:
+    account_id = _int_or_none(getattr(state, "account_id", None))
+    if account_id is None:
+        return
+    redis = getattr(state, "redis", None) or get_redis()
+    chats: set[int] = set()
+    try:
+        for key in await _redis_keys(redis, f"{_USERBOT_SESSION_KEY_PREFIX}{account_id}:*"):
+            raw = await redis.get(key)
+            session = _json_dict(raw)
+            if not _userbot_session_is_active(session):
+                continue
+            chat_id = _int_or_none(session.get("chat_id"))
+            if chat_id is not None:
+                chats.add(chat_id)
+    except Exception:  # noqa: BLE001
+        log.debug("刷新 userbot 会话 chat 缓存失败 account=%s", account_id, exc_info=True)
+        return
+    try:
+        state.userbot_session_chats = chats
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _userbot_session_key_user_id(key: str) -> int | None:
+    parts = str(key or "").split(":")
+    if len(parts) >= 2 and parts[-2] == "user":
+        return _int_or_none(parts[-1])
+    return None
+
+
+async def _load_userbot_sessions_for_chat(
+    state: _AccountState,
+    redis: Any,
+    *,
+    chat_id: int,
+    sender_id: int | None,
+) -> list[tuple[str, dict[str, Any]]]:
+    prefix = f"{_USERBOT_SESSION_KEY_PREFIX}{state.account_id}:"
+    patterns = [
+        f"{prefix}*:{chat_id}",
+        f"{prefix}*:{chat_id}:user:*",
+    ]
+    sessions: list[tuple[str, dict[str, Any]]] = []
+    seen: set[str] = set()
+    try:
+        for pattern in patterns:
+            for key in await _redis_keys(redis, pattern):
+                if key in seen:
+                    continue
+                seen.add(key)
+                keyed_user_id = _userbot_session_key_user_id(key)
+                if keyed_user_id is not None and keyed_user_id != sender_id:
+                    continue
+                raw = await redis.get(key)
+                session = _json_dict(raw)
+                if not _userbot_session_is_active(session, chat_id):
+                    continue
+                sessions.append((key, session))
+    except Exception:  # noqa: BLE001
+        log.debug("读取 userbot 会话失败 account=%s chat=%s", state.account_id, chat_id, exc_info=True)
+        return []
+    if not sessions:
+        state.userbot_session_chats.discard(chat_id)
+    return sessions
+
+
+def _looks_like_worker_command_text(text: str) -> bool:
+    value = str(text or "").strip()
+    if not value:
+        return False
+    prefix = current_command_prefix(fallback=app_settings.command_prefix or ",")
+    return bool(prefix and value.startswith(prefix))
+
+
+def _entry_includes_outgoing(plugin_key: str, entry_key: str) -> bool:
+    manifest = account_bot_service.declared_module_entry_manifest(plugin_key, entry_key)
+    return bool(manifest and manifest.get("include_outgoing"))
+
+
+def _userbot_text_button_callback_data(session: dict[str, Any], text: str) -> str | None:
+    data = session.get("data") if isinstance(session.get("data"), dict) else {}
+    button_map = data.get(_USERBOT_BUTTON_MAP_KEY) if isinstance(data.get(_USERBOT_BUTTON_MAP_KEY), dict) else {}
+    mapping = button_map.get("map") if isinstance(button_map.get("map"), dict) else {}
+    clean = str(text or "").strip()
+    if not clean:
+        return None
+    value = mapping.get(clean)
+    return str(value) if value not in (None, "") else None
+
+
+def _userbot_session_event_payload(
+    base_payload: dict[str, Any],
+    *,
+    session_key: str,
+    session: dict[str, Any],
+    event_label: str,
+    callback_data: str | None = None,
+) -> dict[str, Any]:
+    payload = dict(base_payload)
+    source = dict(payload.get("source") if isinstance(payload.get("source"), dict) else {})
+    source["type"] = "callback_query" if callback_data is not None else "message"
+    source["channel"] = "userbot"
+    if callback_data is not None:
+        source["callback_data"] = callback_data
+        source["callback_query_id"] = None
+        source["synthetic"] = "text_button"
+    payload["source"] = source
+    payload["event_type"] = "callback_query" if callback_data is not None else "message"
+    session_data = session.get("data") if isinstance(session.get("data"), dict) else {}
+    payload["session"] = {
+        "key": session_key,
+        "active": True,
+        "channel": "userbot",
+        "data": dict(session_data),
+        "rule_id": session.get("rule_id"),
+        "rule_name": session.get("rule_name"),
+        "module_key": session.get("module_key"),
+        "entry_key": session.get("entry_key"),
+        "chat_id": _int_or_none(session.get("chat_id")),
+        "started_by_user_id": _int_or_none(session.get("started_by_user_id")),
+        "started_by_message_id": _int_or_none(session.get("started_by_message_id")),
+        "source_user_id": _int_or_none(session.get("source_user_id")),
+        "event_type": session.get("event_type"),
+        "created_at": session.get("created_at"),
+        "updated_at": session.get("updated_at"),
+        "expires_at": session.get("expires_at"),
+    }
+    trigger = dict(payload.get("trigger") if isinstance(payload.get("trigger"), dict) else {})
+    trigger.update(
+        {
+            "type": "session_callback" if callback_data is not None else "session_message",
+            "channel": "userbot",
+            "rule_id": session.get("rule_id"),
+            "module_key": session.get("module_key"),
+            "entry_key": session.get("entry_key"),
+            "session_key": session_key,
+            "event_label": event_label,
+        }
+    )
+    if callback_data is not None:
+        payload["callback_data"] = callback_data
+        payload["callback_query_id"] = None
+        trigger["callback_data"] = callback_data
+        trigger["synthetic"] = "text_button"
+    payload["trigger"] = trigger
+    return payload
+
+
+async def _start_userbot_session_trace(
+    state: _AccountState,
+    payload: dict[str, Any],
+    *,
+    event_label: str,
+) -> Any | None:
+    flags = await _load_event_framework_flags()
+    if not flags.get("trace_enabled", True):
+        return None
+    trace = await start_trace(payload)
+    payload["trace_id"] = trace.trace_id
+    await record_span(
+        trace,
+        "receive",
+        TRACE_STATUS_OK,
+        component="userbot_session_message",
+        direction=event_label,
+    )
+    return trace
+
+
+async def _dispatch_userbot_session_message(
+    state: _AccountState,
+    event: Any,
+    *,
+    direction: str,
+    edited: bool,
+    event_label: str,
+    redis: Any,
+) -> bool:
+    if edited:
+        return False
+    chat_id = _int_or_none(getattr(event, "chat_id", None))
+    if chat_id is None or chat_id not in state.userbot_session_chats:
+        return False
+    text = str(getattr(event, "raw_text", "") or getattr(event, "text", "") or "")
+    if _looks_like_worker_command_text(text):
+        return False
+    sender_id = _int_or_none(getattr(event, "sender_id", None))
+    sessions = await _load_userbot_sessions_for_chat(state, redis, chat_id=chat_id, sender_id=sender_id)
+    candidates: list[tuple[str, dict[str, Any], str, str, str | None]] = []
+    for session_key, session in sessions:
+        plugin_key = str(session.get("module_key") or "").strip()
+        entry_key = str(session.get("entry_key") or "").strip()
+        if not plugin_key or not entry_key:
+            continue
+        if direction == "outgoing" and not _entry_includes_outgoing(plugin_key, entry_key):
+            continue
+        candidates.append((session_key, session, plugin_key, entry_key, _userbot_text_button_callback_data(session, text)))
+    if not candidates:
+        return False
+
+    base_payload = normalize_userbot_event(state.account_id, event)
+    trace = await _start_userbot_session_trace(state, base_payload, event_label=event_label)
+    invoked_count = 0
+    failed_count = 0
+    consumed = False
+    for session_key, session, plugin_key, entry_key, callback_data in candidates:
+        payload = _userbot_session_event_payload(
+            base_payload,
+            session_key=session_key,
+            session=session,
+            event_label=event_label,
+            callback_data=callback_data,
+        )
+        if trace is not None:
+            payload["trace_id"] = trace.trace_id
+        await record_span(
+            trace,
+            "route",
+            TRACE_STATUS_OK,
+            component="userbot_session",
+            plugin_key=plugin_key,
+            entry_key=entry_key,
+            reason_code="matched",
+            message="命中 UserBot 通道活跃会话，消息将进程内投递给交互入口。",
+            direction=event_label,
+            session_key=session_key,
+        )
+        started = time.monotonic()
+        try:
+            actions = await invoke_interaction_entry(
+                state.account_id,
+                plugin_key=plugin_key,
+                entry_key=entry_key,
+                payload=payload,
+                default_send_via=["userbot_reply"],
+            )
+            invoked_count += 1
+            await record_span(
+                trace,
+                "plugin_invoke",
+                TRACE_STATUS_OK,
+                component="userbot_session_dispatcher",
+                plugin_key=plugin_key,
+                entry_key=entry_key,
+                direction=event_label,
+                duration_ms=int((time.monotonic() - started) * 1000),
+            )
+            await record_span(
+                trace,
+                "plugin_return",
+                TRACE_STATUS_OK,
+                component="userbot_session_dispatcher",
+                plugin_key=plugin_key,
+                entry_key=entry_key,
+                action_count=len(actions),
+            )
+            if actions:
+                consumed = True
+            action_failed = await _apply_userbot_event_bus_actions(
+                state,
+                trace,
+                event,
+                plugin_key=plugin_key,
+                entry_key=entry_key,
+                actions=actions,
+                redis=redis,
+                session_key=session_key,
+                session=session,
+                synthetic_callback=callback_data is not None,
+            )
+            if action_failed:
+                failed_count += 1
+            await update_plugin_runtime_status(
+                account_id=state.account_id,
+                plugin_key=plugin_key,
+                last_invocation_status=TRACE_STATUS_FAILED if action_failed else TRACE_STATUS_OK,
+                last_trace_id=getattr(trace, "trace_id", None),
+            )
+        except Exception as exc:  # noqa: BLE001
+            failed_count += 1
+            await record_span(
+                trace,
+                "plugin_invoke",
+                TRACE_STATUS_FAILED,
+                component="userbot_session_dispatcher",
+                plugin_key=plugin_key,
+                entry_key=entry_key,
+                direction=event_label,
+                reason_code="plugin_runtime_error",
+                error=f"{type(exc).__name__}: {exc}",
+                duration_ms=int((time.monotonic() - started) * 1000),
+            )
+            await update_plugin_runtime_status(
+                account_id=state.account_id,
+                plugin_key=plugin_key,
+                last_invocation_status=TRACE_STATUS_FAILED,
+                last_trace_id=getattr(trace, "trace_id", None),
+            )
+            await _log(
+                redis,
+                state.account_id,
+                "error",
+                f"插件 {plugin_key} 处理 UserBot 会话消息时出错：{type(exc).__name__}: {exc}。",
+                source="plugin",
+                plugin_key=plugin_key,
+                entry_key=entry_key,
+                direction=event_label,
+                chat_id=chat_id,
+                sender_id=sender_id,
+                message_preview=text[:200],
+                traceback=traceback.format_exc(limit=8),
+                **trace_log_context(trace),
+            )
+    final_status = TRACE_STATUS_FAILED if failed_count else TRACE_STATUS_OK if invoked_count else TRACE_STATUS_SKIPPED
+    await finish_trace(
+        trace,
+        final_status,
+        invoked_count=invoked_count,
+        failed_count=failed_count,
+        direction=event_label,
+        consumed=consumed,
+    )
+    return consumed
+
+
+def _userbot_session_expired_payload(
+    state: _AccountState,
+    *,
+    session_key: str,
+    session: dict[str, Any],
+) -> dict[str, Any]:
+    event = SimpleNamespace(
+        chat_id=_int_or_none(session.get("chat_id")),
+        sender_id=_int_or_none(session.get("started_by_user_id") or session.get("source_user_id")),
+        id=_int_or_none(session.get("started_by_message_id")),
+        raw_text="",
+        text="",
+        message=SimpleNamespace(
+            chat_id=_int_or_none(session.get("chat_id")),
+            sender_id=_int_or_none(session.get("started_by_user_id") or session.get("source_user_id")),
+            id=_int_or_none(session.get("started_by_message_id")),
+            text="",
+        ),
+    )
+    payload = normalize_userbot_event(state.account_id, event)
+    source = dict(payload.get("source") if isinstance(payload.get("source"), dict) else {})
+    source.update({"type": "session_expired", "channel": "userbot"})
+    payload["source"] = source
+    payload["event_type"] = "session_expired"
+    payload["session"] = _userbot_session_envelope_from_session(session_key, session)
+    payload["trigger"] = {
+        "type": "session_expired",
+        "channel": "userbot",
+        "rule_id": session.get("rule_id"),
+        "module_key": session.get("module_key"),
+        "entry_key": session.get("entry_key"),
+        "session_key": session_key,
+    }
+    return payload
+
+
+async def scan_userbot_expired_sessions_once(account_id: int) -> int:
+    state = _STATES.get(account_id)
+    if state is None:
+        return 0
+    redis = state.redis or get_redis()
+    processed = 0
+    for key in await _redis_keys(redis, f"{_USERBOT_SESSION_KEY_PREFIX}{account_id}:*"):
+        session = _json_dict(await redis.get(key))
+        if str(session.get("channel") or "").strip() != "userbot":
+            continue
+        try:
+            expired = float(session.get("expires_at") or 0) <= time.time()
+        except (TypeError, ValueError):
+            expired = True
+        if not expired:
+            continue
+        plugin_key = str(session.get("module_key") or "").strip()
+        entry_key = str(session.get("entry_key") or "").strip()
+        if not plugin_key or not entry_key:
+            delete = getattr(redis, "delete", None)
+            if callable(delete):
+                await delete(key)
+            continue
+        payload = _userbot_session_expired_payload(state, session_key=key, session=session)
+        trace = await _start_userbot_session_trace(state, payload, event_label="session_expired")
+        if trace is not None:
+            payload["trace_id"] = trace.trace_id
+        failed = False
+        try:
+            actions = await invoke_interaction_entry(
+                state.account_id,
+                plugin_key=plugin_key,
+                entry_key=entry_key,
+                payload=payload,
+                default_send_via=["userbot_reply"],
+            )
+            failed = await _apply_userbot_event_bus_actions(
+                state,
+                trace,
+                SimpleNamespace(chat_id=_int_or_none(session.get("chat_id"))),
+                plugin_key=plugin_key,
+                entry_key=entry_key,
+                actions=actions,
+                redis=redis,
+                session_key=key,
+                session=session,
+            )
+            await update_plugin_runtime_status(
+                account_id=state.account_id,
+                plugin_key=plugin_key,
+                last_invocation_status=TRACE_STATUS_FAILED if failed else TRACE_STATUS_OK,
+                last_trace_id=getattr(trace, "trace_id", None),
+            )
+        except Exception as exc:  # noqa: BLE001
+            failed = True
+            await record_span(
+                trace,
+                "plugin_invoke",
+                TRACE_STATUS_FAILED,
+                component="userbot_session_expired",
+                plugin_key=plugin_key,
+                entry_key=entry_key,
+                reason_code="plugin_runtime_error",
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            await _log(
+                redis,
+                state.account_id,
+                "error",
+                f"插件 {plugin_key} 处理 UserBot 会话超时时出错：{type(exc).__name__}: {exc}。",
+                source="plugin",
+                plugin_key=plugin_key,
+                entry_key=entry_key,
+                session_key=key,
+                traceback=traceback.format_exc(limit=8),
+                **trace_log_context(trace),
+            )
+        finally:
+            delete = getattr(redis, "delete", None)
+            if callable(delete):
+                await delete(key)
+            chat_id = _int_or_none(session.get("chat_id"))
+            if chat_id is not None:
+                await _refresh_userbot_session_chat_cache(state)
+            await finish_trace(trace, TRACE_STATUS_FAILED if failed else TRACE_STATUS_OK)
+            processed += 1
+    return processed
 
 
 # ─────────────────────────────────────────────────────
@@ -2446,6 +3446,8 @@ async def load_plugins_for_account(
 
     # ── 1.5) 拉取允许 peer 名单（沿用 ignored_peer 表存储） ──
     await _load_ignored_peers(state)
+    await _refresh_interaction_text_guard_cache(state)
+    await _refresh_userbot_session_chat_cache(state)
 
     # ── 2) 全局事件派发 ──
     def _make_dispatcher(direction: str, *, edited: bool = False):  # "incoming" or "outgoing"
@@ -2500,6 +3502,7 @@ async def load_plugins_for_account(
                     except Exception:  # noqa: BLE001
                         pass
                 if not edited and await _interaction_bot_owns_incoming_text(state, event):
+                    await _record_interaction_text_guard_skip(state, event, event_label=event_label)
                     return
 
             direct_consumed = await _dispatch_userbot_direct_passthrough(
@@ -2511,6 +3514,17 @@ async def load_plugins_for_account(
                 redis=redis,
             )
             if direct_consumed:
+                return
+
+            session_consumed = await _dispatch_userbot_session_message(
+                state,
+                event,
+                direction=direction,
+                edited=edited,
+                event_label=event_label,
+                redis=redis,
+            )
+            if session_consumed:
                 return
 
             dispatch_state = await _start_userbot_message_trace(state, event, event_label=event_label)
@@ -2563,17 +3577,42 @@ async def load_plugins_for_account(
                         "message_channels": sorted(str(item) for item in getattr(inst, "message_channels", set())),
                     },
                 )
-                previous_client = ctx.client
-                ctx.client = _trace_plugin_client(
-                    previous_client,
+                base_client = ctx.client
+                base_log = ctx.log
+                base_messages = ctx.messages
+                call_client = _trace_plugin_client(
+                    base_client,
                     trace,
                     plugin_key=fkey,
                     component="legacy_userbot_dispatcher",
                 )
-                plugin_event = _wrap_event_for_context(event, ctx)
+                call_log = base_log
+                if base_log is not None and trace is not None:
+                    async def _trace_log(
+                        level: str,
+                        message: str,
+                        *,
+                        _plugin_key: str = fkey,
+                        _base_log: Any = base_log,
+                        **detail: Any,
+                    ) -> None:
+                        detail.setdefault("trace_id", getattr(trace, "trace_id", None))
+                        detail.setdefault("plugin_key", _plugin_key)
+                        await _base_log(level, message, **detail)
+
+                    call_log = _trace_log
+                call_messages = base_messages
+                if isinstance(base_messages, _LiveMessageOps):
+                    call_messages = _LiveMessageOps(
+                        base_messages._state,  # noqa: SLF001
+                        plugin_key=fkey,
+                        trace=trace,
+                    )
+                call_ctx = replace(ctx, client=call_client, log=call_log, messages=call_messages)
+                plugin_event = _wrap_event_for_context(event, call_ctx)
                 started = time.monotonic()
                 try:
-                    await handler(ctx, plugin_event)
+                    await handler(call_ctx, plugin_event)
                     invoked_count += 1
                     await record_span(
                         trace,
@@ -2627,8 +3666,6 @@ async def load_plugins_for_account(
                         traceback=traceback.format_exc(limit=8),
                         **trace_log_context(trace),
                     )
-                finally:
-                    ctx.client = previous_client
             final_status = (
                 TRACE_STATUS_FAILED if failed_count
                 else TRACE_STATUS_OK if invoked_count
@@ -2902,6 +3939,12 @@ async def _activate(db, state: _AccountState, af: AccountFeature, redis: Any) ->
             owner_plugin_key=af.feature_key,
             generation=state.generation,
         )
+    _register_manifest_interaction_commands(
+        state,
+        ctx,
+        plugin_manifest,
+        effective_config,
+    )
 
     await db.execute(
         update(AccountFeature)
@@ -2922,40 +3965,285 @@ async def _activate(db, state: _AccountState, af: AccountFeature, redis: Any) ->
     )
 
 
+def _entry_command_trigger(entry: dict[str, Any]) -> str | None:
+    triggers = entry.get("triggers")
+    command = None
+    if isinstance(triggers, dict):
+        command = triggers.get("command")
+    value = str(command or "").strip().lstrip("/")
+    return value or None
+
+
+def _entry_trigger_mode(config: dict[str, Any], entry: dict[str, Any], command: str) -> str:
+    raw = config.get("interaction_trigger_modes")
+    entry_key = str(entry.get("key") or "").strip()
+    if isinstance(raw, dict):
+        raw = raw.get(entry_key, raw.get(command, raw.get("default")))
+    if raw in (None, ""):
+        raw = entry.get("default_trigger_modes")
+    mode = str(raw or "all").strip().lower()
+    return "keyword_only" if mode == "keyword_only" or bool(entry.get("keyword_only")) else "all"
+
+
+def _entry_session_ttl(entry: dict[str, Any]) -> int:
+    ttl = _int_or_none(entry.get("ttl_seconds") or entry.get("valid_seconds") or entry.get("session_ttl_seconds"))
+    if ttl is None:
+        ttl = 600
+    return min(max(ttl, 30), 86400)
+
+
+def _manifest_command_session_key(
+    account_id: int,
+    *,
+    plugin_key: str,
+    entry_key: str,
+    entry: dict[str, Any],
+    chat_id: int | None,
+    user_id: int | None,
+) -> str:
+    scope = str(entry.get("session_scope") or "chat").strip()
+    if scope == "none":
+        scoped = "global"
+    elif scope == "user":
+        scoped = f"{chat_id or 0}:user:{user_id or 0}"
+    else:
+        scoped = str(chat_id or 0)
+    return f"{_USERBOT_SESSION_KEY_PREFIX}{int(account_id)}:manifest_command:{plugin_key}:{entry_key}:{scoped}"
+
+
+def _userbot_session_envelope_from_session(session_key: str, session: dict[str, Any]) -> dict[str, Any]:
+    data = session.get("data") if isinstance(session.get("data"), dict) else {}
+    return {
+        "key": session_key,
+        "active": True,
+        "channel": "userbot",
+        "data": dict(data),
+        "rule_id": session.get("rule_id"),
+        "rule_name": session.get("rule_name"),
+        "module_key": session.get("module_key"),
+        "entry_key": session.get("entry_key"),
+        "chat_id": _int_or_none(session.get("chat_id")),
+        "started_by_user_id": _int_or_none(session.get("started_by_user_id")),
+        "started_by_message_id": _int_or_none(session.get("started_by_message_id")),
+        "source_user_id": _int_or_none(session.get("source_user_id")),
+        "event_type": session.get("event_type"),
+        "created_at": session.get("created_at"),
+        "updated_at": session.get("updated_at"),
+        "expires_at": session.get("expires_at"),
+    }
+
+
+async def _create_manifest_command_userbot_session(
+    state: _AccountState,
+    *,
+    plugin_key: str,
+    entry: dict[str, Any],
+    command: str,
+    args: list[str],
+    event: Any,
+    redis: Any,
+) -> tuple[str, dict[str, Any]]:
+    entry_key = str(entry.get("key") or "").strip()
+    chat_id = _int_or_none(getattr(event, "chat_id", None))
+    sender_id = _int_or_none(getattr(event, "sender_id", None))
+    message_id = _int_or_none(getattr(getattr(event, "message", None), "id", None) or getattr(event, "id", None))
+    session_key = _manifest_command_session_key(
+        state.account_id,
+        plugin_key=plugin_key,
+        entry_key=entry_key,
+        entry=entry,
+        chat_id=chat_id,
+        user_id=sender_id,
+    )
+    existing = _json_dict(await redis.get(session_key))
+    ttl = _entry_session_ttl(entry)
+    now = time.time()
+    session = {
+        "account_id": state.account_id,
+        "chat_id": chat_id,
+        "rule_id": f"manifest_command:{plugin_key}:{entry_key}",
+        "rule_name": str(entry.get("name") or entry.get("title") or ""),
+        "module_key": plugin_key,
+        "entry_key": entry_key,
+        "channel": "userbot",
+        "started_by_user_id": sender_id,
+        "started_by_message_id": message_id,
+        "source_user_id": sender_id,
+        "event_type": "command",
+        "created_at": existing.get("created_at") or now,
+        "updated_at": now,
+        "expires_at": now + ttl,
+        "data": {
+            **dict(existing.get("data") if isinstance(existing.get("data"), dict) else {}),
+            "command": command,
+            "args": list(args),
+            "args_raw": " ".join(args),
+        },
+    }
+    await redis.set(session_key, json.dumps(session, ensure_ascii=False), ex=ttl + _USERBOT_SESSION_TTL_GRACE_SECONDS)
+    if chat_id is not None:
+        state.userbot_session_chats.add(chat_id)
+    return session_key, session
+
+
+def _manifest_command_payload(
+    state: _AccountState,
+    event: Any,
+    *,
+    plugin_key: str,
+    entry_key: str,
+    command: str,
+    args: list[str],
+    session_key: str,
+    session: dict[str, Any],
+) -> dict[str, Any]:
+    payload = normalize_userbot_event(
+        state.account_id,
+        event,
+        command_meta={
+            "type": "command",
+            "channel": "userbot",
+            "command": command,
+            "args": list(args),
+            "args_raw": " ".join(args),
+            "plugin_key": plugin_key,
+            "entry_key": entry_key,
+            "session_key": session_key,
+        },
+    )
+    trace_id = str(getattr(event, "trace_id", "") or "").strip()
+    if trace_id:
+        payload["trace_id"] = trace_id
+    source = dict(payload.get("source") if isinstance(payload.get("source"), dict) else {})
+    source.update({"type": "command", "channel": "userbot"})
+    payload["source"] = source
+    payload["event_type"] = "command"
+    trigger = dict(payload.get("trigger") if isinstance(payload.get("trigger"), dict) else {})
+    trigger.update({"args": list(args), "args_raw": " ".join(args)})
+    payload["trigger"] = trigger
+    payload["session"] = _userbot_session_envelope_from_session(session_key, session)
+    return payload
+
+
+def _wrap_manifest_interaction_command(
+    state: _AccountState,
+    *,
+    plugin_key: str,
+    entry: dict[str, Any],
+    command: str,
+):
+    async def w(client, event, args, account_id):  # noqa: ANN001
+        redis = state.redis or get_redis()
+        entry_key = str(entry.get("key") or "").strip()
+        session_key, session = await _create_manifest_command_userbot_session(
+            state,
+            plugin_key=plugin_key,
+            entry=entry,
+            command=command,
+            args=list(args or []),
+            event=event,
+            redis=redis,
+        )
+        payload = _manifest_command_payload(
+            state,
+            event,
+            plugin_key=plugin_key,
+            entry_key=entry_key,
+            command=command,
+            args=list(args or []),
+            session_key=session_key,
+            session=session,
+        )
+        try:
+            actions = await invoke_interaction_entry(
+                state.account_id,
+                plugin_key=plugin_key,
+                entry_key=entry_key,
+                payload=payload,
+                default_send_via=["userbot_reply"],
+            )
+        except Exception:
+            delete = getattr(redis, "delete", None)
+            if callable(delete):
+                await delete(session_key)
+            raise
+        await _apply_userbot_event_bus_actions(
+            state,
+            str(payload.get("trace_id") or "") or None,
+            event,
+            plugin_key=plugin_key,
+            entry_key=entry_key,
+            actions=actions,
+            redis=redis,
+            session_key=session_key,
+            session=session,
+        )
+
+    return w
+
+
+def _register_manifest_interaction_commands(
+    state: _AccountState,
+    ctx: PluginContext,
+    manifest: Manifest | None,
+    config: dict[str, Any],
+) -> None:
+    if manifest is None:
+        return
+    for raw_entry in getattr(manifest, "interaction_entries", None) or []:
+        entry = account_bot_service.normalize_interaction_entry_manifest(raw_entry)
+        if not entry:
+            continue
+        command = _entry_command_trigger(entry)
+        if not command:
+            continue
+        if _entry_trigger_mode(config, entry, command) == "keyword_only":
+            continue
+        register_plugin_command(
+            command,
+            _wrap_manifest_interaction_command(
+                state,
+                plugin_key=ctx.feature_key,
+                entry=entry,
+                command=command,
+            ),
+            owner_plugin_key=ctx.feature_key,
+            generation=state.generation,
+        )
+
+
 def _wrap_cmd(fn, ctx: PluginContext):
     """把插件 ``commands`` 里登记的 5 参数 handler 包成命令分发期望的 4 参数签名。"""
 
     async def w(client, event, args, account_id):  # noqa: ANN001
         trace_id = str(getattr(event, "trace_id", "") or "").strip() or None
-        previous_client = ctx.client
-        previous_log = ctx.log
-        previous_messages = ctx.messages
-        if isinstance(previous_messages, _LiveMessageOps):
-            ctx.messages = _LiveMessageOps(
-                previous_messages._state,  # noqa: SLF001
+        base_client = ctx.client
+        base_log = ctx.log
+        base_messages = ctx.messages
+        call_messages = base_messages
+        if isinstance(base_messages, _LiveMessageOps):
+            call_messages = _LiveMessageOps(
+                base_messages._state,  # noqa: SLF001
                 plugin_key=ctx.feature_key,
                 trace=trace_id,
             )
-        if previous_log is not None and trace_id:
+        call_log = base_log
+        if base_log is not None and trace_id:
             async def _trace_log(level: str, message: str, **detail: Any) -> None:
                 detail.setdefault("trace_id", trace_id)
                 detail.setdefault("plugin_key", ctx.feature_key)
-                await previous_log(level, message, **detail)
+                await base_log(level, message, **detail)
 
-            ctx.log = _trace_log
-        ctx.client = _trace_plugin_client(
-            previous_client if previous_client is not None else client,
+            call_log = _trace_log
+        call_client = _trace_plugin_client(
+            base_client if base_client is not None else client,
             trace_id,
             plugin_key=ctx.feature_key,
             component="plugin_command",
         )
-        try:
-            plugin_event = _wrap_event_for_context(event, ctx)
-            await fn(ctx.client if ctx.client is not None else client, plugin_event, args, account_id, ctx)
-        finally:
-            ctx.client = previous_client
-            ctx.log = previous_log
-            ctx.messages = previous_messages
+        call_ctx = replace(ctx, client=call_client, log=call_log, messages=call_messages)
+        plugin_event = _wrap_event_for_context(event, call_ctx)
+        await fn(call_ctx.client if call_ctx.client is not None else client, plugin_event, args, account_id, call_ctx)
 
     return w
 
@@ -3079,6 +4367,8 @@ async def reload_account_config(account_id: int, payload: dict | None = None) ->
 
     # 同步全局开关：让 reload_config 也能让 incoming-message 可见性日志即时生效
     state.log_incoming_messages = await _load_log_incoming_messages_setting()
+    await _refresh_interaction_text_guard_cache(state)
+    await _refresh_userbot_session_chat_cache(state)
 
     # 刷新动态发现的 BUILTIN_FEATURES，让新增 builtin 插件目录立即可见
     try:
@@ -3253,6 +4543,8 @@ async def reload_plugin(account_id: int, plugin_key: str | None) -> None:
         return
     state.generation += 1
     redis = state.redis or get_redis()
+    await _refresh_interaction_text_guard_cache(state)
+    await _refresh_userbot_session_chat_cache(state)
 
     # 1) 先注销旧插件命令（如果有）
     if plugin_key in state.instances:
@@ -3455,15 +4747,23 @@ _INTERACTION_SEND_ACTIONS = {"send_message", "send_photo", "send_file", "edit_me
 _INTERACTION_CONTROL_ACTIONS = {"delete_message", "pin_message", "answer_callback", "answer_inline_query"}
 
 
-def _normalize_interaction_action(raw: dict[str, Any]) -> dict[str, Any]:
+def _normalize_interaction_action(
+    raw: dict[str, Any],
+    *,
+    default_send_via: list[str] | None = None,
+) -> dict[str, Any]:
     """保持旧动作兼容，同时给新版发送动作补齐默认发送通道。"""
 
     action = dict(raw)
     raw_channel_selector = _raw_interaction_channel_selector(action)
+    has_explicit_send_via = action_send_via_raw_selector(action) not in (None, "")
     action_type = str(action.get("type") or "").strip()
     action["type"] = action_type
     if action_type in _INTERACTION_SEND_ACTIONS or action_type in _INTERACTION_CONTROL_ACTIONS:
-        apply_action_send_via_options(action, action_send_via_options(action))
+        send_via_options = action_send_via_options(action)
+        if not has_explicit_send_via and default_send_via:
+            send_via_options = list(default_send_via)
+        apply_action_send_via_options(action, send_via_options)
         if raw_channel_selector is not None and _channel_selector_needs_guard_trace(raw_channel_selector):
             action["channel_selector"] = raw_channel_selector
     if isinstance(action.get("settlement"), dict):
@@ -3485,8 +4785,16 @@ def _channel_selector_needs_guard_trace(selector: Any) -> bool:
     return isinstance(selector, (dict, list, tuple, set))
 
 
-def _normalize_interaction_actions(actions: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return [_normalize_interaction_action(item) for item in actions if isinstance(item, dict)]
+def _normalize_interaction_actions(
+    actions: list[dict[str, Any]],
+    *,
+    default_send_via: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    return [
+        _normalize_interaction_action(item, default_send_via=default_send_via)
+        for item in actions
+        if isinstance(item, dict)
+    ]
 
 
 async def invoke_interaction_entry(
@@ -3495,6 +4803,7 @@ async def invoke_interaction_entry(
     plugin_key: str,
     entry_key: str,
     payload: dict[str, Any],
+    default_send_via: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """调用已加载插件的交互 Bot 入口，返回平台标准动作。"""
 
@@ -3511,41 +4820,37 @@ async def invoke_interaction_entry(
         raise RuntimeError(f"模块未加载或未启用：{plugin_key}")
     from .message_ops import BufferedMessageOps
 
-    previous_messages = ctx.messages
-    previous_log = ctx.log
-    previous_client = ctx.client
+    base_log = ctx.log
+    base_client = ctx.client
     buffered_messages = BufferedMessageOps()
-    ctx.messages = buffered_messages
     trace_id = str((payload or {}).get("trace_id") or "").strip()
-    ctx.client = _trace_plugin_client(
-        previous_client,
+    call_client = _trace_plugin_client(
+        base_client,
         trace_id,
         plugin_key=plugin_key,
         entry_key=entry_key,
         component="interaction_entry",
     )
 
-    if previous_log is not None and trace_id:
+    call_log = base_log
+    if base_log is not None and trace_id:
         async def _trace_log(level: str, message: str, **detail: Any) -> None:
             detail.setdefault("trace_id", trace_id)
             detail.setdefault("plugin_key", plugin_key)
             detail.setdefault("entry_key", entry_key)
-            await previous_log(level, message, **detail)
+            await base_log(level, message, **detail)
 
-        ctx.log = _trace_log
-    try:
-        actions = await inst.on_interaction(ctx, entry_key, dict(payload or {}))
-    finally:
-        ctx.messages = previous_messages
-        ctx.log = previous_log
-        ctx.client = previous_client
+        call_log = _trace_log
+    call_ctx = replace(ctx, messages=buffered_messages, client=call_client, log=call_log)
+    plugin_payload = attach_tp_event(dict(payload or {}))
+    actions = await inst.on_interaction(call_ctx, entry_key, plugin_payload)
     if actions is None and not buffered_messages.actions:
         raise RuntimeError(f"模块尚未实现交互入口：{plugin_key}.{entry_key}")
     if actions is None:
         actions = []
     if not isinstance(actions, list) or not all(isinstance(item, dict) for item in actions):
         raise TypeError("交互入口必须返回 list[dict] 标准动作")
-    return _normalize_interaction_actions([*buffered_messages.actions, *actions])
+    return _normalize_interaction_actions([*buffered_messages.actions, *actions], default_send_via=default_send_via)
 
 
 __all__ = [
@@ -3558,4 +4863,5 @@ __all__ = [
     "reload_account_config",
     "reload_ignored_peers",
     "reload_plugin",
+    "scan_userbot_expired_sessions_once",
 ]

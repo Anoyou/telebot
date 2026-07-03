@@ -7,22 +7,43 @@
 新插件优先使用 Event Bus + 标准事件信封 + `ctx.messages` / 标准 action：
 
 ```python
-async def on_event(self, ctx, payload):
-    message = payload["message"]
-    chat = payload["chat"]
-    text = message.get("text") or ""
+from app.worker.plugins.events import event_from_interaction_payload
+
+
+async def on_interaction(self, ctx, entry_key, payload):
+    event = payload["tp_event"] if "tp_event" in payload else event_from_interaction_payload(payload)
+    text = event.message.text or ""
     if "ping" not in text:
         return []
     return [{
         "type": "send_message",
-        "send_via": ["interaction_bot", "userbot_reply"],
-        "chat_id": message.get("chat_id") or chat["id"],
-        "reply_to_message_id": message.get("message_id"),
+        "chat_id": event.message.chat_id,
+        "reply_to_message_id": event.message.message_id,
         "text": "pong",
     }]
 ```
 
 旧 `on_message`、`on_command`、`interaction_entries`、旧平铺 payload 只作为迁移兼容说明出现，不再是公共群玩法或新插件的推荐主路径。
+
+## 2. 会话通道与单入口模型
+
+消息链路统一后，互动插件按“触发方式决定整段会话通道”理解：
+
+| 开局方式 | 默认会话通道 | 说明 |
+| --- | --- | --- |
+| UserBot 前缀命令 | `userbot` | 后续消息、继续追问、普通回复默认都走 userbot |
+| 关键词 / 付款确认 / 按钮回调 | `interaction_bot` | 题面、按钮、编辑消息默认都走 interaction bot |
+| `payout` | 固定 `userbot` | 不受会话通道影响，始终经 userbot 执行 |
+
+推荐写法：
+
+1. 用一个 `on_interaction(ctx, entry_key, payload)` 覆盖 `command`、`keyword`、`payment_confirmed`、`message`、`callback_query`、`session_expired`。
+2. 读取 `payload["tp_event"]` 或 `event_from_interaction_payload(payload)`，不要再围绕旧平铺字段写分支。
+3. 单局状态保存在 `session.data`，变更后返回 `update_session`；不要再依赖进程内全局状态才能继续游戏。
+4. 普通发送类动作可以不写 `send_via`，平台会优先继承 `session.channel`；只有跨通道兜底、特殊管理消息等高级场景才显式覆盖。
+5. userbot 会话里的按钮会降级为文本编号面板；玩家回复编号后，平台会把它合成为 `callback_query`，并在 `source.synthetic="text_button"` 标记来源。
+
+如果当前运行环境尚未合入对应 runtime/worker 分支，`interaction_trigger_modes`、`default_trigger_modes`、`callback_fast_ack` 这类入口控制字段只作为文档约定，不会自动改变旧实例行为。
 
 ## 3. Plugin 基类（兼容层）
 
@@ -430,9 +451,37 @@ Telegram 来源
 | `inline_query` | Inline 查询，用 `answer_inline_query` 返回结果 |
 | `chosen_inline_result` | 用户选择了 Inline 结果，用于记录选择或后续结算 |
 | `payment_confirmed` | 可信外部通知或平台解析确认到账后生成 |
+| `message_edited` | 平台已登记的编辑后消息事件，需显式订阅 |
+| `session_expired` | 会话 TTL 到期后由平台投递，供插件清理状态 |
+| `all_messages` | 兼容聚合订阅，当前仍只覆盖 `message` / `command` |
+| `all_events` | 平台聚合订阅，覆盖当前已登记的常见事件类型 |
 | `session_close` | 会话关闭或规则关闭，插件可清理状态 |
 
+`all_messages` 目前仍只等于 `message` / `command`；需要覆盖更多已登记事件时，使用 `all_events`。Inline 相关事件、付款确认、`message_edited` 与 `session_expired` 仍可按需显式订阅。
+
+`known_users` 只认平台 state 提供的真实集合，不会自动把当前 sender 算进去。
+
 标准事件信封优先读这些字段：`source`、`message`、`chat`、`sender`、`actor`、`source_actor`、`player`、`payment`、`reply_to`、`trigger`、`session`、`native_raw_meta`。新插件不要依赖 `payload["text"]`、`payload["chat_id"]`、`payload.get("message")` 这类旧平铺字段；`payload["message"]` 是消息对象，不是配置字符串。
+
+重点补充字段：
+
+- `payload["tp_event"]`：进程内调用时已挂好的 `TelePilotEvent` 投影对象；跨 IPC 路径平台会重建同形对象。
+- `message.entities` / `message.media` / `message.date`：统一消息摘要，编辑消息和媒体消息也走同一套字段。
+- `chat.title` / `chat.username`：群标题、username 等可直接读取，不必回头翻 `native_raw`。
+- `session.channel` / `session.expires_at` / `session.data`：当前会话通道、超时点和持久化状态。
+- `source.synthetic`：平台合成事件来源，例如 userbot 文本按钮降级后的 `text_button`。
+
+`tp_event` 对象字段主看：
+
+| 字段 | 说明 |
+| --- | --- |
+| `tp_event.type` | 事件类型，等价于 `payload["source"]["type"]` |
+| `tp_event.source_channel` | 当前事件来源通道 |
+| `tp_event.message` | `MessageRef`，含 `text/caption/date/entities/media/forward/sender_chat/edited` |
+| `tp_event.callback` | `CallbackRef`，按钮事件时可读 `id/data` |
+| `tp_event.payment` | `PaymentRef`，付款确认场景可读金额、币种、payer/receiver |
+| `tp_event.session` | `SessionRef`，可读 `key/scope/channel/data` |
+| `tp_event.trigger` | 命中的规则、入口和触发参数 |
 
 `capabilities.telegram_native_raw` 只用于排障。声明 `enabled=true` 时必须写 `reason` 和 `sources`，插件仍要先检查：
 
@@ -459,6 +508,63 @@ return [
     }
 ]
 ```
+
+默认 `send_message` 类动作按 `parse_mode="plain"` 发送；只有显式写 `parse_mode="html"` 时才启用 HTML。HTML 内容应先用 `app.worker.plugins.textutil.html_escape()` 或等价工具转义，再把标签手动拼好。
+
+会话内状态更新示例：
+
+```python
+return [{
+    "type": "update_session",
+    "data": {
+        "answer": "42",
+        "attempts": 3,
+    },
+}]
+```
+
+`update_session` 会回写当前 `session.data`，并按平台规则续租 Redis TTL；除非额外声明 `extend_seconds`，它不会偷偷改掉原来的 `expires_at`。
+
+免费答题、抽奖、按钮加入这类“不想让玩家额外发言”的玩法，可以让玩家点击 inline 按钮加入。按钮回调里的点击者在 `payload["sender"]["user_id"]`，发奖时不要要求玩家再发一条消息，只要让 `userbot_reply` 动作携带 `reply_to_user_id`：
+
+```python
+event = event_from_interaction_payload(payload)
+winner_user_id = event.sender.user_id
+
+return [
+    {
+        "type": "send_message",
+        "send_via": "userbot_reply",
+        "chat_id": event.message.chat_id,
+        "reply_to_user_id": winner_user_id,
+        "reply_to_search_limit": 200,
+        "text": "+88",
+        "settlement": {
+            "mode": "auto",
+            "amount": 88,
+            "winner_user_id": winner_user_id,
+            "winner_name": event.sender.display_name,
+            "status": "announced",
+        },
+    }
+]
+```
+
+平台会用账号的 userbot 在当前群搜索该用户最近一条消息，找到后把 `+88` 回复到那条消息。若插件已经有明确的 `reply_to_message_id`，平台优先使用它；若只给了 `settlement.winner_user_id` 而没写 `reply_to_user_id`，平台也会尝试用赢家 user_id 作为回复锚点。找不到近期消息时，本次 `userbot_reply` 会失败并记录 action 错误，避免把发奖消息误发成普通群消息。
+
+更推荐的新写法是直接返回 `payout`：
+
+```python
+return [{
+    "type": "payout",
+    "chat_id": event.message.chat_id,
+    "amount": 88,
+    "reply_to_user_id": winner_user_id,
+    "reply_to_search_limit": 200,
+}]
+```
+
+`payout` 永远经 userbot 执行，并进入限速与 trace。它适合“发奖文案本身就是协议”的玩法，普通 Bot 不会代替它执行转账样动作。
 
 按钮回调：
 
@@ -503,6 +609,23 @@ return [{
 
 `notice` / `bbot_notice` / `notice_bot` 不再是可执行发送通道，只能出现在迁移说明或故意回归测试里。普通 Bot 不执行转账、催付或发奖；钱相关动作应交给 `settlement`、`userbot_reply` 或平台受控结算链路。
 
+userbot 会话里的 `reply_markup` 不会直接丢掉：
+
+- 平台会把按钮渲染成文本编号列表。
+- 玩家回复序号或按钮文案后，平台会合成 `callback_query` 回投插件。
+- 这类事件的 `callback_query_id` 可能为空，同时 `source.synthetic="text_button"`。
+- 对合成 callback 返回 `answer_callback` 时，平台会按“已合成事件”跳过真正的 Bot API ACK。
+
+入口控制字段：
+
+| 字段 | 位置 | 作用 |
+| --- | --- | --- |
+| `interaction_trigger_modes` | 平台注入的配置字段 | `all` / `keyword_only`，控制声明了 command trigger 的入口是否仍注册命令 |
+| `default_trigger_modes` | manifest entry | 为 `interaction_trigger_modes` 提供默认值，强按钮玩法建议设为 `keyword_only` |
+| `callback_fast_ack` | manifest entry | callback 分类后立即空 ACK，插件晚到的 `answer_callback` 会记为 `already_acked` |
+
+`callback_fast_ack` 只适合“先消除按钮转圈，再慢慢算结果”的入口；启用后不要再依赖 `show_alert=True` 的晚返回提示。
+
 常见 `reason_code` 排障表：
 
 | reason_code | 说明 |
@@ -516,6 +639,7 @@ return [{
 | `event_bus_delivery_disabled` / `inline_disabled` | 运维回滚开关关闭 Event Bus 新投递路径或 Inline updates |
 | `native_raw_not_allowed` / `native_raw_skipped` | 插件未声明 `telegram_native_raw` 或本次因来源、大小、设置未下发 |
 | `contract_warning` / `contract_failed` | 插件越声明调用被告警放行，或请求客观不可执行能力 |
+| `action_limit_exceeded` | 插件返回的动作超出平台允许数量，后续动作被截断并写入可见告警 |
 | `send_channel_deprecated` / `unsupported_send_via` | 请求旧 `notice` 通道或未知通道 |
 | `bot_not_configured` / `bot_token_missing` / `userbot_offline` | 交互 Bot 未配置、Bot token 缺失或 UserBot 离线 |
 | `settlement_requires_userbot` / `telegram_api_error` | 普通 Bot 请求钱相关能力，或 Telegram API 返回失败 |
@@ -990,6 +1114,12 @@ Contract Guard 不是公共插件市场式硬沙箱，而是个人可信插件�
 后端保存规则时会优先读取 `plugin.json` / `manifest.py` 中声明的 `session_scope`，并写入规则的 `module_session_scope`。这样即使规则为了“每个群友 6 小时 CD、每日 2 次”设置了 `concurrency=user`，九宫格这类 `session_scope=chat` 的群局也仍然会按群保存会话，其他群友回复 `1-9` 才能进入同一局。
 
 如果插件没有声明 `session_scope`，平台只能回退到规则 `concurrency`，这很容易让群局被误判成用户私有会话。所有声明了 `interaction_entries` 的插件都必须显式填写 `session_scope`。
+
+### 事件过滤与 rule_bound
+
+当前事件订阅支持 `filters` 过滤。已知过滤键按平台约定校验，常见值包括 `keywords`、`contains`、`callback_data`、`commands` 和 `rule_id`；未知 filter key 会被保留用于兼容，但会触发 warning，便于插件作者尽快修正。
+
+`rule_bound` 订阅如果声明了 `filters.rule_id`，它必须与当前触发上下文里的 `trigger.rule_id` 完全相等，否则本次订阅会被判定为 `filter_not_matched`。这条规则用于把“规则绑定”从松散匹配收紧到明确的一对一绑定，避免跨规则误投递。
 
 #### 入口参数来源
 

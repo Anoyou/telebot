@@ -1,5 +1,7 @@
 # TelePilot 双 Bot / 交互插件联动优化方案
 
+> 说明：本文保留 0.47 之前的双 Bot 设计背景。涉及 0.48 消息链路统一、会话通道、`session.data`、`payout`、文本按钮降级、`all_events` / `session_expired` 等最终收口时，以 [docs/INTERACTION-PIPELINE-UNIFICATION-PLAN.md](./INTERACTION-PIPELINE-UNIFICATION-PLAN.md) 为准。
+
 本文用于统一 TelePilot 当前“UserBot / 交互 Bot / 外部转账通知来源 / 插件”之间的职责边界、插件接入规范、前端展示结构与迁移步骤。TelePilot 的标准模式是个人可信插件模式：插件由管理员安装和启用后即视为可信，平台负责频控、审计、急停和通道代发，而不是按公共插件市场做强沙箱。目标不是推翻现有插件，而是在**不影响插件原有命令触发能力**的前提下，把管理员命令和群内高频玩法纳入同一套调度模型。
 
 适用范围：
@@ -7,6 +9,15 @@
 - 内置互动插件，如 24 点、十以内算数、九宫格猜骰、猜数字、诗词填空。
 - 后续需要由交互 Bot 承接高频消息的远程/第三方互动插件。
 - 账号 Bot 页面中的交互规则编辑器、运行时路由与中奖/发奖链路。
+
+## 当前收口补充
+
+按当前统一计划，互动插件的推荐心智已经收紧为：
+
+- 触发方式决定整段会话通道。命令开局默认全程 userbot，关键词/付款/按钮开局默认全程 interaction bot，只有 `payout` 固定走 userbot。
+- 新玩法优先写一个 `on_interaction` 入口，状态放进 `session.data`，通过 `update_session` 持久化，超时靠 `session_expired` 收尾。
+- 关键词规则依赖交互 Bot 存在。没有交互 Bot token 时，不应再把“关键词触发”描述成可正常工作的入口。
+- userbot 会话里的按钮是“文本降级 + 合成 callback”，不是原生 inline keyboard；强按钮玩法应考虑 `keyword_only` / `default_trigger_modes`。
 
 ## 1. 目标与硬约束
 

@@ -169,6 +169,7 @@ async def guard_interaction_actions(
     actions: list[dict[str, Any]],
     resolve_entry_manifest: EntryManifestResolver,
     write_log: Callable[..., Awaitable[None]],
+    session_channel: str | None = None,
     log_context: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Normalize actions and emit contract warnings before delivery.
@@ -197,6 +198,7 @@ async def guard_interaction_actions(
         }
     else:
         allowed_send_via = set(TRUSTED_DEFAULT_SEND_VIA)
+    normalized_session_channel = session_channel if session_channel in INTERACTION_SEND_VIA else "interaction_bot"
     context = dict(log_context or {})
     guarded: list[dict[str, Any]] = []
     for raw_action in actions:
@@ -204,6 +206,7 @@ async def guard_interaction_actions(
             continue
         action = dict(raw_action)
         action_type = str(action.get("type") or "").strip()
+        explicit_selector = _has_explicit_send_via_selector(action)
         if allowed_actions and action_type not in allowed_actions:
             await write_log(
                 "warn",
@@ -215,7 +218,7 @@ async def guard_interaction_actions(
             )
         if action_type in {"send_message", "send_photo", "send_file", "edit_message", "delete_message", "pin_message"}:
             requested_raw = action_send_via_raw_selector(action)
-            requested_send_via = action_send_via_options(action)
+            requested_send_via = action_send_via_options(action) if explicit_selector else [normalized_session_channel]
             unsupported_send_via = unsupported_send_via_values(requested_raw)
             deprecated_send_via = [item for item in unsupported_send_via if item in DEPRECATED_SEND_VIA]
             if deprecated_send_via:
@@ -277,21 +280,12 @@ async def guard_interaction_actions(
                     allowed_send_via=sorted(allowed_send_via),
                     **context,
                 )
-            if not send_via_options:
-                await write_log(
-                    "warn",
-                    f"interaction action failed by send_via: {requested_send_via}",
-                    guard_level="failed",
-                    action_type=action_type,
-                    send_via=requested_send_via,
-                    requested_send_via_raw=requested_raw,
-                    allowed_send_via=sorted(allowed_send_via),
-                    **context,
-                )
-                continue
             if "reply_markup" in action:
+                preserve_userbot_markup = normalized_session_channel == "userbot_reply" and "userbot_reply" in send_via_options
                 button_channels = [item for item in send_via_options if item in INTERACTION_BUTTON_CHANNELS]
-                if button_channels:
+                if preserve_userbot_markup:
+                    pass
+                elif button_channels:
                     if button_channels != send_via_options:
                         await write_log(
                             "info",
@@ -313,16 +307,6 @@ async def guard_interaction_actions(
                         **context,
                     )
             apply_action_send_via_options(action, send_via_options)
-            send_via = action["send_via"]
-            if send_via not in INTERACTION_BUTTON_CHANNELS and "reply_markup" in action:
-                action.pop("reply_markup", None)
-                await write_log(
-                    "info",
-                    "interaction action reply_markup stripped for non-bot channel",
-                    action_type=action_type,
-                    send_via=send_via,
-                    **context,
-                )
         guarded.append(action)
     return guarded
 

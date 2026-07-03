@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from fastapi import APIRouter, HTTPException
 from sqlalchemy import select
 
@@ -31,6 +33,10 @@ from ..services import (
 
 router = APIRouter(prefix="/api/accounts", tags=["account-bots"])
 
+_KEYWORD_RULE_REQUIRES_INTERACTION_BOT_MESSAGE = (
+    "关键词触发依赖交互 Bot，请先配置交互 Bot Token 或改用命令触发"
+)
+
 
 def _with_interaction_runtime_state(aid: int, data: dict) -> dict:
     running = interaction_bot_runtime.is_interaction_bot_running(aid)
@@ -42,6 +48,43 @@ def _with_interaction_runtime_state(aid: int, data: dict) -> dict:
         "interaction_running": running,
         "interaction_runtime_status": "running" if running else "stopped",
     }
+
+
+def _enabled_keyword_rules_require_interaction_bot(data: dict[str, Any]) -> bool:
+    if not data.get("enabled"):
+        return False
+    for rule in data.get("rules") or []:
+        if not isinstance(rule, dict) or not bool(rule.get("enabled", True)):
+            continue
+        trigger_mode = str(rule.get("trigger_mode") or "payment").strip()
+        if trigger_mode in {"keyword", "both"}:
+            return True
+        if rule.get("module_start_keywords"):
+            return True
+    return False
+
+
+async def _ensure_keyword_rules_have_interaction_bot_token(
+    db: DBSession,
+    aid: int,
+    payload_data: dict[str, Any],
+) -> None:
+    current = await interaction_bot_service.get_interaction_bot_config(db, aid)
+    incoming = dict(payload_data or {})
+    candidate = interaction_bot_service.normalize_transfer_notice_config({**current, **incoming})
+    current_has_token = bool(current.get("has_interaction_bot_token"))
+    incoming_token = str(incoming.get("interaction_bot_token") or "").strip()
+    has_token_after_save = bool(incoming_token) or (
+        current_has_token and not bool(incoming.get("clear_interaction_bot_token"))
+    )
+    if _enabled_keyword_rules_require_interaction_bot(candidate) and not has_token_after_save:
+        raise HTTPException(
+            400,
+            detail={
+                "code": "INTERACTION_BOT_TOKEN_REQUIRED_FOR_KEYWORD_RULES",
+                "message": _KEYWORD_RULE_REQUIRES_INTERACTION_BOT_MESSAGE,
+            },
+        )
 
 
 @router.get("/{aid}/bot", response_model=AccountBotConfigResponse)
@@ -202,10 +245,12 @@ async def update_account_bot_interaction(
 ) -> AccountBotInteractionConfig:
     """保存交互 Bot / 转账联动测试配置。"""
 
+    payload_data = payload.model_dump()
+    await _ensure_keyword_rules_have_interaction_bot_token(db, aid, payload_data)
     data = await interaction_bot_service.update_interaction_bot_config(
         db,
         aid,
-        payload.model_dump(),
+        payload_data,
     )
     await audit.write(
         db,

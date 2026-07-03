@@ -57,6 +57,7 @@ from ..worker.ipc import CMD_RELOAD_CONFIG, publish_cmd_with_ack
 
 # 直接复用现有 loader 的配置热更新路径；installed 插件在 loader 里按 DB 双开关按需加载
 from ..worker.plugins.loader import reload_account_config
+from .event_bus import SUPPORTED_FILTER_KEYS, VALID_EVENT_SCOPES, VALID_EVENT_SOURCES, VALID_EVENT_TYPES
 from .interaction.contracts import send_via_selector_options, unsupported_send_via_values
 from .redactor import redact_text
 
@@ -940,33 +941,34 @@ def lint_plugin_metadata_files(plugin_dir: Path) -> list[str]:
                         warnings.append(f"plugin.json interaction_entries[{idx}] 建议声明 interaction_profile")
             subscriptions = data.get("event_subscriptions")
             if isinstance(subscriptions, list) and subscriptions:
-                valid_events = {
-                    "message",
-                    "command",
-                    "callback_query",
-                    "inline_query",
-                    "chosen_inline_result",
-                    "payment_confirmed",
-                    "session_close",
-                    "all_messages",
-                }
-                valid_sources = {"userbot", "interaction_bot", "external_payment_notice"}
-                valid_scopes = {"all_allowed_chats", "owner_only", "known_users", "inline_all", "rule_bound"}
                 for idx, raw_subscription in enumerate(subscriptions, start=1):
                     if not isinstance(raw_subscription, dict):
                         warnings.append(f"plugin.json event_subscriptions[{idx}] 必须是对象")
                         continue
                     raw_events = raw_subscription.get("events")
-                    if not isinstance(raw_events, list) or not any(str(item or "").strip() in valid_events for item in raw_events):
+                    if not isinstance(raw_events, list) or not any(str(item or "").strip() in VALID_EVENT_TYPES for item in raw_events):
                         warnings.append(f"plugin.json event_subscriptions[{idx}] events 必须声明有效事件")
                     raw_sources = raw_subscription.get("source")
                     if raw_sources is not None:
                         source_items = raw_sources if isinstance(raw_sources, list) else [raw_sources]
-                        if any(str(item or "").strip() not in valid_sources for item in source_items):
+                        if any(str(item or "").strip() not in VALID_EVENT_SOURCES for item in source_items):
                             warnings.append(f"plugin.json event_subscriptions[{idx}] source 含有未支持值")
                     scope = str(raw_subscription.get("scope") or "all_allowed_chats").strip()
-                    if scope not in valid_scopes:
+                    if scope not in VALID_EVENT_SCOPES:
                         warnings.append(f"plugin.json event_subscriptions[{idx}] scope 必须是 all_allowed_chats / owner_only / known_users / inline_all / rule_bound")
+                    filters = raw_subscription.get("filters")
+                    if isinstance(filters, dict):
+                        unknown = sorted(
+                            {
+                                str(key).strip()
+                                for key in filters
+                                if str(key).strip() and str(key).strip() not in SUPPORTED_FILTER_KEYS
+                            }
+                        )
+                        if unknown:
+                            warnings.append(
+                                f"plugin.json event_subscriptions[{idx}] filters 含未知 key: {', '.join(unknown)}"
+                            )
             capabilities = data.get("capabilities")
             if isinstance(capabilities, dict):
                 native_raw = capabilities.get("telegram_native_raw")

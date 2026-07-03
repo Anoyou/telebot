@@ -26,6 +26,7 @@ for import_root in (ROOT, BACKEND_ROOT):
         sys.path.insert(0, path)
 
 from app.worker.plugins.manifest import Manifest  # noqa: E402
+from app.services.event_bus import SUPPORTED_FILTER_KEYS  # noqa: E402
 
 REQUIRED_FILES = {"plugin.json", "manifest.py", "plugin.py", "__init__.py"}
 DEPRECATED_RISK_TOKENS = ("bbot_notice", "notice_bot", "raw_event")
@@ -194,6 +195,7 @@ def _validate_plugin(plugin_key: str) -> None:
 
     _validate_deprecated_risks(plugin_key, plugin_dir, metadata)
     warnings: list[str] = []
+    warnings.extend(_unknown_filter_key_warnings(metadata_subscriptions))
     if not _has_usage(metadata, manifest):
         warnings.append("缺少 usage 或 config_schema 使用说明")
     if list(metadata.get("interaction_entries") or []) and not metadata_subscriptions:
@@ -203,6 +205,24 @@ def _validate_plugin(plugin_key: str) -> None:
     for warning in warnings:
         print(f"warn: {plugin_key} - {warning}")
     print(f"ok: {plugin_key}")
+
+
+def _unknown_filter_key_warnings(subscriptions: list[dict[str, Any]]) -> list[str]:
+    warnings: list[str] = []
+    for index, subscription in enumerate(subscriptions, start=1):
+        filters = subscription.get("filters")
+        if not isinstance(filters, dict):
+            continue
+        unknown = sorted(
+            {
+                str(key).strip()
+                for key in filters
+                if str(key).strip() and str(key).strip() not in SUPPORTED_FILTER_KEYS
+            }
+        )
+        if unknown:
+            warnings.append(f"event_subscriptions[{index}] filters 含未知 key: {', '.join(unknown)}")
+    return warnings
 
 
 def main() -> int:

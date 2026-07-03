@@ -8,19 +8,29 @@
 - 必须保留最小目录：`plugin.json`、`manifest.py`、`plugin.py`、`__init__.py`。`plugin.json.name`、`MANIFEST.key`、插件类 `key` 必须一致。
 - 必须把 `usage` 写成插件中心可展示的使用说明；有 `config_schema` 时也可以补 `x-usage-guide` / `x-usage-steps`，但不要只靠口头说明。
 - 禁止用空 `usage` 绕过检查；缺失会触发高级规范警告，官方可选、官方远程和示例插件都必须完整声明。
-- `event_subscriptions[].events` 常用值：`message`、`command`、`callback_query`、`inline_query`、`chosen_inline_result`、`payment_confirmed`、`session_close`。
+- `event_subscriptions[].events` 常用值：`message`、`command`、`callback_query`、`inline_query`、`chosen_inline_result`、`payment_confirmed`、`session_close`、`message_edited`、`session_expired`、`all_events`；`all_messages` 仍只等于 `message` / `command`。
 - `event_subscriptions[].source` 常用值：`userbot`、`interaction_bot`、`external_payment_notice`。
 - `event_subscriptions[].scope` 常用值：`all_allowed_chats`、`owner_only`、`known_users`、`rule_bound`、`inline_all`；Inline 插件必须显式用 `inline_all`。
+- `known_users` 只认平台 state 提供的真实集合，不会自动把当前 sender 算进去。
+- `filters` 常见键：`keywords`、`contains`、`callback_data`、`commands`、`rule_id`；未知 key 会保留但会告 warning。
 - `capabilities.telegram_native_raw` 是高风险能力声明；需要原生 Telegram 字段时写 `enabled=true`、`reason`、`sources`，并处理 `native_raw_meta.enabled=false` 的降级。
 - 标准事件信封优先读：`source`、`message`、`chat`、`sender`、`actor`、`source_actor`、`player`、`payment`、`reply_to`、`trigger`、`session`、`native_raw_meta`。
-- 新插件读取文本用 `payload["message"]["text"]` 或 `event_from_interaction_payload(payload).message.text`；不要用 `payload["text"]` / `payload["chat_id"]` / `payload.get("message")` 当主路径。
+- 新插件读取文本优先用 `payload["tp_event"]` 或 `event_from_interaction_payload(payload)`；不要用 `payload["text"]` / `payload["chat_id"]` / `payload.get("message")` 当主路径。
+- 互动玩法优先写成一个 `on_interaction(ctx, entry_key, payload)`，在同一个入口里处理 `command`、`keyword`、`payment_confirmed`、`message`、`callback_query`、`session_expired`。
+- 会话状态放进 `session.data`，状态变更返回 `update_session`；不要再靠进程内 dict/lock 才能续局。
 - `source` 描述事件类型和来源通道；`actor` 是当前行为主体；`sender` 是发出消息的人或 Bot；`source_actor` 可表示可信外部通知 Bot；`player` 是付款绑定玩家；`payment.status=confirmed` 才能作为到账依据。
-- 普通消息回复使用 `ctx.messages.send(...)` 或返回 `{"type": "send_message", ...}`；插件选择候选通道，平台执行真实通道并记录 action。
+- `session.channel` 表示当前整段会话默认收发通道；普通发送动作通常不用再手写 `send_via`，平台会继承会话通道。
+- 普通消息回复使用 `ctx.messages.send(...)` 或返回 `{"type": "send_message", ...}`；只有跨通道覆盖时再显式写 `send_via`。
 - 按钮必须经 `send_message.reply_markup` 发出；按钮回调用 `answer_callback`，不要在插件里直接拼 Bot API。
+- userbot 会话没有原生按钮，平台会把按钮降级成文本编号，并把玩家回复合成为 callback；此时 `source.synthetic="text_button"`。
+- 免费参与玩法可用按钮点击确认参与；发奖动作优先用 `payout`，也可走 `userbot_reply` 并携带 `reply_to_user_id`，平台会搜索该玩家近期发言作为回复锚点。已有 `reply_to_message_id` 时优先用消息 id；找不到锚点时动作失败并写入日志，避免误发普通消息。
 - Inline 插件返回 `answer_inline_query`；选择结果进入 `chosen_inline_result`，用于记录选择、结算或后续状态。
 - 付款/发奖插件返回 `settlement` 或 userbot 受控动作；普通 Bot 只公告结果，不直接执行转账、催付或发奖。
-- 常见 action：`send_message`、`send_photo`、`send_file`、`edit_message`、`delete_message`、`pin_message`、`answer_callback`、`answer_inline_query`、`settlement`、`result`、`end_session`。
-- `send_via` 只使用 `interaction_bot`、`userbot_reply` 或 `auto`；旧 `notice` 值应返回迁移错误，不能静默执行。
+- 常见 action：`send_message`、`send_photo`、`send_file`、`edit_message`、`delete_message`、`pin_message`、`answer_callback`、`answer_inline_query`、`payout`、`update_session`、`settlement`、`result`、`end_session`。
+- `send_via` 只在高级覆盖时使用 `interaction_bot`、`userbot_reply` 或 `auto`；旧 `notice` 值应返回迁移错误，不能静默执行。
+- 默认 `send_message` / `send_photo` / `send_file` 等动作按 `parse_mode="plain"` 发送；只有显式声明 `parse_mode="html"` 时才启用 HTML，HTML 文案先转义再拼标签。
+- 强按钮玩法可通过 `interaction_trigger_modes=keyword_only` 关闭命令触发；manifest 可用 `default_trigger_modes` 提供默认值。
+- `callback_fast_ack=true` 适合耗时按钮入口；启用后晚到的 `answer_callback` 不再真正调用 Telegram ACK。
 - `ctx.http` 需要 `permissions=["external_http"]` 和 `allowed_hosts`。
 - `ctx.ai` 需要 `permissions=["ai_text"]`，复用平台 LLM Provider、fallback、预算和 usage 记录。
 - `ctx.client` 只保留给管理员命令和高级兼容场景；远程插件仍不能直接拿 token、session、Bot API client 或 live event。
@@ -47,5 +57,28 @@
 | `event_bus_delivery_disabled` / `inline_disabled` | 运维开关关闭 Event Bus 投递 / Inline |
 | `native_raw_not_allowed` / `native_raw_skipped` | 未声明原生数据能力 / 本次未下发 |
 | `send_channel_deprecated` / `unsupported_send_via` | 使用旧 notice 通道 / 未支持通道 |
+| `already_acked` / `synthetic_callback` | fast-ack 已提前确认 / 文本按钮降级合成的 callback |
+| `action_limit_exceeded` | 动作数量超出平台限制，后续动作会被截断并写入可见告警 |
 | `bot_not_configured` / `bot_token_missing` / `userbot_offline` | Bot 未配置 / token 缺失 / UserBot 离线 |
-| `telegram_api_error` / `trace_write_failed` | Telegram API 失败 / Trace 写入降级 |
+| `payout_failed` / `telegram_api_error` / `trace_write_failed` | 发奖动作失败 / Telegram API 失败 / Trace 写入降级 |
+
+最小单入口模板：
+
+```python
+async def on_interaction(self, ctx, entry_key, payload):
+    event = payload["tp_event"]
+
+    if event.type == "command":
+        return [{"type": "update_session", "data": {"answer": "42"}}]
+
+    if event.type == "message" and event.message.text == "42":
+        return [
+            {"type": "payout", "amount": 88, "reply_to_user_id": event.sender.user_id},
+            {"type": "end_session"},
+        ]
+
+    if event.type == "session_expired":
+        return [{"type": "send_message", "chat_id": event.message.chat_id, "text": "本局已超时"}]
+
+    return []
+```

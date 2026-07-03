@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from types import SimpleNamespace
@@ -25,6 +26,7 @@ from app.db.models.feature import (
 )
 from app.worker.plugins import loader as loader_mod
 from app.worker.plugins.base import Plugin, PluginContext
+from app.worker.plugins.events import TelePilotEvent
 from app.worker.plugins.loader import (
     _BUILTIN_MODULES,
     _clear_installed_module_cache,
@@ -44,6 +46,8 @@ from app.worker.plugins.manifest import Manifest
 class _FakeRedis:
     def __init__(self) -> None:
         self.list_pushes: list[tuple[str, str]] = []
+        self.sets: list[tuple[str, str, dict[str, Any]]] = []
+        self.values: dict[str, str] = {}
 
     async def rpush(self, key: str, val: str) -> int:
         self.list_pushes.append((key, val))
@@ -52,11 +56,33 @@ class _FakeRedis:
     async def publish(self, *_a, **_kw) -> int:
         return 0
 
-    async def get(self, *_a, **_kw):
-        return None
+    async def get(self, key, *_a, **_kw):
+        return self.values.get(str(key))
 
-    async def set(self, *_a, **_kw):
+    async def set(self, key: str, value: str, **kwargs):
+        self.sets.append((key, value, dict(kwargs)))
+        self.values[str(key)] = value
         return True
+
+    async def delete(self, *keys: str):
+        removed = 0
+        for key in keys:
+            if str(key) in self.values:
+                removed += 1
+                self.values.pop(str(key), None)
+        return removed
+
+    async def keys(self, pattern: str):
+        import fnmatch
+
+        return [key for key in self.values if fnmatch.fnmatch(key, pattern)]
+
+    async def scan_iter(self, match: str):
+        import fnmatch
+
+        for key in list(self.values):
+            if fnmatch.fnmatch(key, match):
+                yield key
 
     async def script_load(self, *_a, **_kw):
         return "fake-sha"
@@ -1621,6 +1647,126 @@ async def test_userbot_event_bus_deprecated_send_via_log_context_does_not_duplic
 
 
 @pytest.mark.asyncio
+async def test_userbot_event_bus_action_limit_records_dropped_actions(monkeypatch) -> None:
+    state = loader_mod._AccountState(account_id=16)
+    redis = _FakeRedis()
+    trace = "evt_action_limit"
+    event = SimpleNamespace(chat_id=-1001, sender_id=42, raw_text="hello")
+    record_action = AsyncMock()
+    monkeypatch.setattr(loader_mod, "record_action", record_action)
+
+    actions = [{"type": "result"} for _ in range(10)] + [{"type": "send_message", "text": "too much"}]
+    failed = await loader_mod._apply_userbot_event_bus_actions(
+        state,
+        trace,
+        event,
+        plugin_key="dice_grid_hunt",
+        entry_key="start_dice_grid_hunt",
+        actions=actions,
+        redis=redis,
+    )
+
+    assert failed is False
+    payload = json.loads(redis.list_pushes[-1][1])
+    assert payload["detail"]["reason_code"] == "action_limit_exceeded"
+    assert payload["detail"]["dropped_count"] == 1
+    assert any(call.kwargs.get("error_code") == "action_limit_exceeded" for call in record_action.await_args_list)
+
+
+@pytest.mark.asyncio
+async def test_save_action_message_id_uses_account_namespace() -> None:
+    redis = _FakeRedis()
+    state = loader_mod._AccountState(account_id=42)
+    state.redis = redis
+
+    await loader_mod._save_action_message_id(
+        state,
+        {"save_message_id_key": "game:notice:-100"},
+        {"message_id": 99},
+    )
+
+    assert redis.sets == [("tp:msgid:42:game:notice:-100", "99", {"ex": 7200})]
+
+
+@pytest.mark.asyncio
+async def test_userbot_send_message_action_uses_rate_limit_and_preserves_parse_mode(monkeypatch) -> None:
+    state = loader_mod._AccountState(account_id=43)
+    state.redis = _FakeRedis()
+    state.client = MagicMock()
+    state.client.send_message = AsyncMock(return_value=SimpleNamespace(id=501))
+    state.engine = SimpleNamespace(
+        acquire=AsyncMock(return_value=SimpleNamespace(allowed=True, wait_seconds=0, outcome="ok"))
+    )
+    record_action = AsyncMock()
+    monkeypatch.setattr(loader_mod, "record_action", record_action)
+
+    ok = await loader_mod._apply_userbot_send_message_action(
+        state,
+        SimpleNamespace(chat_id=-100123),
+        {
+            "type": "send_message",
+            "send_via": "userbot_reply",
+            "text": "<b>ok</b>",
+            "parse_mode": "html",
+            "context": {"trace_id": "evt_rate_send"},
+        },
+    )
+
+    assert ok is True
+    state.engine.acquire.assert_awaited_once_with(43, "send_message_group", peer_id=-100123)
+    state.client.send_message.assert_awaited_once_with(
+        -100123,
+        "<b>ok</b>",
+        reply_to=None,
+        parse_mode="html",
+    )
+    assert record_action.await_args.args[2] == loader_mod.TRACE_STATUS_OK
+    assert record_action.await_args.kwargs["actual_send_via"] == "userbot_reply"
+
+
+@pytest.mark.asyncio
+async def test_userbot_payout_action_uses_userbot_rate_limit_and_default_text(monkeypatch) -> None:
+    state = loader_mod._AccountState(account_id=44)
+    state.redis = _FakeRedis()
+    state.client = MagicMock()
+    state.client.send_message = AsyncMock(return_value=SimpleNamespace(id=777))
+    state.engine = SimpleNamespace(
+        acquire=AsyncMock(return_value=SimpleNamespace(allowed=True, wait_seconds=0, outcome="ok"))
+    )
+    record_action = AsyncMock()
+    monkeypatch.setattr(loader_mod, "record_action", record_action)
+
+    failed = await loader_mod._apply_userbot_event_bus_actions(
+        state,
+        "evt_payout_loader",
+        SimpleNamespace(chat_id=-100456),
+        plugin_key="game",
+        entry_key="main",
+        actions=[
+            {
+                "type": "payout",
+                "amount": 12,
+                "reply_to_message_id": 34,
+                "parse_mode": "plain",
+            }
+        ],
+        redis=state.redis,
+    )
+
+    assert failed is False
+    state.engine.acquire.assert_awaited_once_with(44, "send_message_group", peer_id=-100456)
+    state.client.send_message.assert_awaited_once_with(
+        -100456,
+        "+12",
+        reply_to=34,
+        parse_mode=None,
+    )
+    assert record_action.await_args.args[1]["type"] == "payout"
+    assert record_action.await_args.kwargs["actual_send_via"] == "userbot_reply"
+    assert record_action.await_args.kwargs["result"]["message_id"] == 777
+
+
+@pytest.mark.asyncio
 async def test_invoke_interaction_entry_ctx_log_does_not_duplicate_plugin_key() -> None:
     class _InteractionLogPlugin(Plugin):
         key = "_test_interaction_log"
@@ -1629,6 +1775,8 @@ async def test_invoke_interaction_entry_ctx_log_does_not_duplicate_plugin_key() 
         async def on_interaction(self, ctx: PluginContext, entry_key: str, payload: dict[str, Any]) -> list[dict[str, Any]]:
             assert entry_key == "start"
             assert payload["trace_id"] == "evt_interaction_log"
+            assert isinstance(payload["tp_event"], TelePilotEvent)
+            assert "tp_event" not in payload["tp_event"].raw
             if ctx.log is not None:
                 await ctx.log("info", "interaction log ok")
             return [{"type": "send_message", "text": "ok"}]
@@ -1659,6 +1807,199 @@ async def test_invoke_interaction_entry_ctx_log_does_not_duplicate_plugin_key() 
         assert payload["detail"]["entry_key"] == "start"
     finally:
         loader_mod._STATES.pop(15, None)
+
+
+@pytest.mark.asyncio
+async def test_invoke_interaction_entry_uses_call_scoped_contexts() -> None:
+    seen: list[tuple[str, bool, bool]] = []
+    ready: asyncio.Queue[None] = asyncio.Queue()
+    release = asyncio.Event()
+
+    class _ScopedInteractionPlugin(Plugin):
+        key = "_test_interaction_scoped_ctx"
+        display_name = "交互入口上下文隔离测试"
+
+        async def on_interaction(self, ctx: PluginContext, entry_key: str, payload: dict[str, Any]) -> list[dict[str, Any]]:
+            seen.append((entry_key, ctx is base_ctx, ctx.messages is base_ctx.messages))
+            await ready.put(None)
+            await release.wait()
+            await ctx.messages.send(text=f"buffered {entry_key}")
+            return [{"type": "send_message", "text": f"returned {entry_key}"}]
+
+    state = loader_mod._AccountState(account_id=16)
+    base_ctx = PluginContext(
+        account_id=16,
+        feature_key="_test_interaction_scoped_ctx",
+        client=MagicMock(),
+        messages=SimpleNamespace(kind="base_messages"),
+    )
+    state.instances["_test_interaction_scoped_ctx"] = _ScopedInteractionPlugin()
+    state.contexts["_test_interaction_scoped_ctx"] = base_ctx
+    loader_mod._STATES[16] = state
+
+    try:
+        first = asyncio.create_task(
+            loader_mod.invoke_interaction_entry(
+                16,
+                plugin_key="_test_interaction_scoped_ctx",
+                entry_key="first",
+                payload={"trace_id": "evt_first"},
+            )
+        )
+        second = asyncio.create_task(
+            loader_mod.invoke_interaction_entry(
+                16,
+                plugin_key="_test_interaction_scoped_ctx",
+                entry_key="second",
+                payload={"trace_id": "evt_second"},
+            )
+        )
+        await ready.get()
+        await ready.get()
+        release.set()
+
+        first_actions, second_actions = await asyncio.gather(first, second)
+
+        assert seen == [("first", False, False), ("second", False, False)]
+        assert [item["text"] for item in first_actions] == ["buffered first", "returned first"]
+        assert [item["text"] for item in second_actions] == ["buffered second", "returned second"]
+        assert state.contexts["_test_interaction_scoped_ctx"] is base_ctx
+        assert base_ctx.messages == SimpleNamespace(kind="base_messages")
+    finally:
+        loader_mod._STATES.pop(16, None)
+
+
+@pytest.mark.asyncio
+async def test_userbot_event_bus_entry_uses_call_scoped_contexts() -> None:
+    seen: list[tuple[str, bool, bool]] = []
+    ready: asyncio.Queue[None] = asyncio.Queue()
+    release = asyncio.Event()
+
+    class _ScopedEventBusPlugin(Plugin):
+        key = "_test_event_bus_scoped_ctx"
+        display_name = "Event Bus 上下文隔离测试"
+
+        async def on_event(self, ctx: PluginContext, payload: dict[str, Any]) -> list[dict[str, Any]]:
+            label = str(payload["label"])
+            assert isinstance(payload["tp_event"], TelePilotEvent)
+            assert "tp_event" not in payload["tp_event"].raw
+            seen.append((label, ctx is base_ctx, ctx.messages is base_ctx.messages))
+            await ready.put(None)
+            await release.wait()
+            await ctx.messages.send(text=f"buffered {label}")
+            return [{"type": "send_message", "text": f"returned {label}"}]
+
+    inst = _ScopedEventBusPlugin()
+    base_ctx = PluginContext(
+        account_id=17,
+        feature_key="_test_event_bus_scoped_ctx",
+        client=MagicMock(),
+        messages=SimpleNamespace(kind="base_messages"),
+    )
+
+    first = asyncio.create_task(
+        loader_mod._invoke_userbot_event_bus_entry(
+            inst,
+            base_ctx,
+            plugin_key="_test_event_bus_scoped_ctx",
+            entry_key="main",
+            payload={"trace_id": "evt_bus_first", "label": "first"},
+        )
+    )
+    second = asyncio.create_task(
+        loader_mod._invoke_userbot_event_bus_entry(
+            inst,
+            base_ctx,
+            plugin_key="_test_event_bus_scoped_ctx",
+            entry_key="main",
+            payload={"trace_id": "evt_bus_second", "label": "second"},
+        )
+    )
+    await ready.get()
+    await ready.get()
+    release.set()
+
+    first_actions, second_actions = await asyncio.gather(first, second)
+
+    assert seen == [("first", False, False), ("second", False, False)]
+    assert [item["text"] for item in first_actions] == ["buffered first", "returned first"]
+    assert [item["text"] for item in second_actions] == ["buffered second", "returned second"]
+    assert base_ctx.messages == SimpleNamespace(kind="base_messages")
+
+
+@pytest.mark.asyncio
+async def test_legacy_dispatcher_uses_call_scoped_context(monkeypatch) -> None:
+    from app.worker.plugins.base import _REGISTRY, register
+
+    seen: list[tuple[bool, bool, bool]] = []
+
+    @register
+    class _LegacyScopedPlugin(Plugin):
+        key = "_test_legacy_scoped_ctx"
+        display_name = "legacy 上下文隔离测试"
+        message_channels = {"incoming"}
+        owner_only = False
+
+        async def on_message(self, ctx: PluginContext, event: Any) -> None:
+            base = loader_mod._STATES[18].contexts[self.key]
+            seen.append((ctx is base, ctx.client is base.client, ctx.messages is base.messages))
+
+    class _Event:
+        raw_text = "hello scoped legacy"
+        text = "hello scoped legacy"
+        chat_id = -1001
+        sender_id = 42
+        id = 93
+        is_private = False
+        is_group = True
+        is_channel = False
+
+        async def get_chat(self):
+            return None
+
+    fake_db = _FakeDB(
+        accounts={18: _FakeAcc(id=18)},
+        humanize={18: None},
+        afs=[_FakeAF(account_id=18, feature_key="_test_legacy_scoped_ctx", enabled=True, config={})],
+        rules=[],
+    )
+    trace = SimpleNamespace(trace_id="evt_legacy_scoped")
+    monkeypatch.setattr(loader_mod, "AsyncSessionLocal", lambda: _fake_session_factory(fake_db))
+    monkeypatch.setattr(loader_mod, "_load_log_incoming_messages_setting", AsyncMock(return_value=False))
+    monkeypatch.setattr(loader_mod, "_load_event_framework_flags", AsyncMock(return_value={
+        "trace_enabled": True,
+        "event_bus_delivery_enabled": True,
+    }))
+    monkeypatch.setattr(loader_mod, "start_trace", AsyncMock(return_value=trace))
+    monkeypatch.setattr(loader_mod, "record_span", AsyncMock())
+    monkeypatch.setattr(loader_mod, "finish_trace", AsyncMock())
+    monkeypatch.setattr(loader_mod, "update_plugin_runtime_status", AsyncMock())
+
+    captured: list[Any] = []
+
+    def _on(_filter):
+        def _wrap(fn):
+            captured.append(fn)
+            return fn
+
+        return _wrap
+
+    client = MagicMock()
+    client._is_sandboxed = False
+    client.is_sandbox_client = False
+    client.on = _on
+    paused = asyncio.Event()
+    paused.set()
+
+    try:
+        await load_plugins_for_account(client, account_id=18, paused=paused, redis=_FakeRedis())
+        await captured[-1](_Event())
+
+        assert seen == [(False, False, False)]
+        assert loader_mod._STATES[18].contexts["_test_legacy_scoped_ctx"].client is client
+    finally:
+        loader_mod._STATES.pop(18, None)
+        _REGISTRY.pop("_test_legacy_scoped_ctx", None)
 
 
 @pytest.mark.asyncio
@@ -2185,6 +2526,342 @@ async def test_plugin_command_ctx_messages_apply_records_trace(monkeypatch) -> N
     assert record_action.await_args.args[1]["type"] == "start_session"
     assert record_action.await_args.args[1]["context"]["entry_key"] == "start_ten_half"
     assert record_action.await_args.kwargs["actual_send_via"] == "interaction_session"
+    session_payload = json.loads(state.redis.sets[-1][1])
+    assert session_payload["channel"] == "userbot"
+    assert session_payload["expires_at"] > session_payload["created_at"]
+    assert state.redis.sets[-1][2]["ex"] == 690
+    assert -100123 in state.userbot_session_chats
+
+
+@pytest.mark.asyncio
+async def test_plugin_command_uses_call_scoped_context() -> None:
+    state = loader_mod._AccountState(19)
+    state.redis = _FakeRedis()
+    base_client = MagicMock()
+    base_client._is_sandboxed = False
+    base_client.is_sandbox_client = False
+    base_ctx = PluginContext(
+        account_id=19,
+        feature_key="_test_command_scoped_ctx",
+        client=base_client,
+        messages=loader_mod._LiveMessageOps(state, plugin_key="_test_command_scoped_ctx"),
+    )
+    seen: list[tuple[bool, bool, bool]] = []
+    ready: asyncio.Queue[None] = asyncio.Queue()
+    release = asyncio.Event()
+
+    async def _handler(client, event, args, account_id, ctx):  # noqa: ANN001
+        seen.append((ctx is base_ctx, ctx.client is base_ctx.client, ctx.messages is base_ctx.messages))
+        await ready.put(None)
+        await release.wait()
+
+    wrapped = loader_mod._wrap_cmd(_handler, base_ctx)
+    first = asyncio.create_task(
+        wrapped(base_client, SimpleNamespace(trace_id="evt_cmd_first", chat_id=1), [], 19)
+    )
+    second = asyncio.create_task(
+        wrapped(base_client, SimpleNamespace(trace_id="evt_cmd_second", chat_id=1), [], 19)
+    )
+    await ready.get()
+    await ready.get()
+    release.set()
+    await asyncio.gather(first, second)
+
+    assert seen == [(False, False, False), (False, False, False)]
+    assert base_ctx.client is base_client
+    assert isinstance(base_ctx.messages, loader_mod._LiveMessageOps)
+
+
+@pytest.mark.asyncio
+async def test_interaction_text_guard_uses_cached_rules_without_db(monkeypatch) -> None:
+    state = loader_mod._AccountState(20)
+    state.interaction_text_guard_rules = (
+        loader_mod._InteractionTextGuardRule(
+            chat_ids=frozenset({-100123}),
+            texts=frozenset({"我要猜骰", "开启游戏", "关闭游戏"}),
+        ),
+    )
+
+    def _forbidden_session():
+        raise AssertionError("ordinary guard lookup should use _AccountState cache, not DB")
+
+    monkeypatch.setattr(loader_mod, "AsyncSessionLocal", _forbidden_session)
+
+    assert await loader_mod._interaction_bot_owns_incoming_text(
+        state,
+        SimpleNamespace(chat_id=-100123, raw_text="我要猜骰"),
+    ) is True
+    assert await loader_mod._interaction_bot_owns_incoming_text(
+        state,
+        SimpleNamespace(chat_id=-100999, raw_text="我要猜骰"),
+    ) is False
+
+
+@pytest.mark.asyncio
+async def test_interaction_text_guard_skip_records_trace(monkeypatch) -> None:
+    fake_db = _FakeDB(
+        accounts={21: _FakeAcc(id=21)},
+        humanize={21: None},
+        afs=[],
+        rules=[],
+    )
+    trace = SimpleNamespace(trace_id="evt_interaction_guard")
+    monkeypatch.setattr(loader_mod, "AsyncSessionLocal", lambda: _fake_session_factory(fake_db))
+    monkeypatch.setattr(loader_mod, "_load_log_incoming_messages_setting", AsyncMock(return_value=False))
+    monkeypatch.setattr(loader_mod, "_load_event_framework_flags", AsyncMock(return_value={
+        "trace_enabled": True,
+        "event_bus_delivery_enabled": True,
+    }))
+    monkeypatch.setattr(loader_mod, "start_trace", AsyncMock(return_value=trace))
+    record_span = AsyncMock()
+    finish_trace = AsyncMock()
+    monkeypatch.setattr(loader_mod, "record_span", record_span)
+    monkeypatch.setattr(loader_mod, "finish_trace", finish_trace)
+
+    captured: list[Any] = []
+
+    def _on(_filter):
+        def _wrap(fn):
+            captured.append(fn)
+            return fn
+
+        return _wrap
+
+    client = MagicMock()
+    client.on = _on
+    paused = asyncio.Event()
+    paused.set()
+
+    try:
+        await load_plugins_for_account(client, account_id=21, paused=paused, redis=_FakeRedis())
+        state = loader_mod._STATES[21]
+        state.interaction_text_guard_rules = (
+            loader_mod._InteractionTextGuardRule(
+                chat_ids=frozenset({-100123}),
+                texts=frozenset({"我要猜骰"}),
+            ),
+        )
+        await captured[-1](SimpleNamespace(
+            chat_id=-100123,
+            sender_id=42,
+            raw_text="我要猜骰",
+            text="我要猜骰",
+            id=101,
+            is_private=False,
+            is_group=True,
+            is_channel=False,
+            get_chat=AsyncMock(return_value=None),
+        ))
+
+        assert any(
+            call.args[1] == "route"
+            and call.args[2] == loader_mod.TRACE_STATUS_SKIPPED
+            and call.kwargs.get("reason_code") == loader_mod._INTERACTION_RULE_OWNED_REASON_CODE
+            for call in record_span.await_args_list
+        )
+        finish_trace.assert_awaited_once()
+        assert finish_trace.await_args.args[:2] == (trace, loader_mod.TRACE_STATUS_SKIPPED)
+    finally:
+        loader_mod._STATES.pop(21, None)
+
+
+@pytest.mark.asyncio
+async def test_userbot_session_dispatch_invokes_interaction_entry_and_skips_legacy(monkeypatch) -> None:
+    from app.worker.plugins.base import _REGISTRY, register
+
+    interaction_payloads: list[dict[str, Any]] = []
+    legacy_calls: list[str] = []
+
+    @register
+    class _SessionPlugin(Plugin):
+        key = "_test_userbot_session"
+        display_name = "UserBot 会话测试"
+        message_channels = {"incoming"}
+        owner_only = False
+
+        async def on_message(self, ctx: PluginContext, event: Any) -> None:
+            legacy_calls.append(str(getattr(event, "raw_text", "")))
+
+        async def on_interaction(self, ctx: PluginContext, entry_key: str, payload: dict[str, Any]) -> list[dict[str, Any]]:
+            interaction_payloads.append(payload)
+            return [{"type": "send_message", "text": "session ok"}]
+
+    redis = _FakeRedis()
+    redis.values["account_bot:interaction_session:45:rule-session:-100789"] = json.dumps(
+        {
+            "account_id": 45,
+            "chat_id": -100789,
+            "rule_id": "rule-session",
+            "module_key": "_test_userbot_session",
+            "entry_key": "main",
+            "channel": "userbot",
+            "data": {"round": 1},
+            "created_at": 1,
+            "updated_at": 2,
+            "expires_at": 4_000_000_000,
+        }
+    )
+    fake_db = _FakeDB(
+        accounts={45: _FakeAcc(id=45)},
+        humanize={45: None},
+        afs=[_FakeAF(account_id=45, feature_key="_test_userbot_session", enabled=True, config={})],
+        rules=[],
+    )
+    trace = SimpleNamespace(trace_id="evt_userbot_session")
+    monkeypatch.setattr(loader_mod, "AsyncSessionLocal", lambda: _fake_session_factory(fake_db))
+    monkeypatch.setattr(loader_mod, "_load_log_incoming_messages_setting", AsyncMock(return_value=False))
+    monkeypatch.setattr(loader_mod, "_load_event_framework_flags", AsyncMock(return_value={
+        "trace_enabled": True,
+        "event_bus_delivery_enabled": True,
+    }))
+    monkeypatch.setattr(loader_mod, "start_trace", AsyncMock(return_value=trace))
+    monkeypatch.setattr(loader_mod, "record_span", AsyncMock())
+    record_action = AsyncMock()
+    monkeypatch.setattr(loader_mod, "record_action", record_action)
+    finish_trace = AsyncMock()
+    monkeypatch.setattr(loader_mod, "finish_trace", finish_trace)
+    monkeypatch.setattr(loader_mod, "update_plugin_runtime_status", AsyncMock())
+    monkeypatch.setattr(loader_mod, "current_command_prefix", lambda *, fallback=None: ",")
+
+    captured: list[Any] = []
+
+    def _on(_filter):
+        def _wrap(fn):
+            captured.append(fn)
+            return fn
+
+        return _wrap
+
+    client = MagicMock()
+    client.on = _on
+    client.send_message = AsyncMock(return_value=SimpleNamespace(id=778))
+    paused = asyncio.Event()
+    paused.set()
+
+    try:
+        await load_plugins_for_account(client, account_id=45, paused=paused, redis=redis)
+        state = loader_mod._STATES[45]
+        state.engine = SimpleNamespace(
+            acquire=AsyncMock(return_value=SimpleNamespace(allowed=True, wait_seconds=0, outcome="ok"))
+        )
+        incoming_dispatch = captured[-1]
+        await incoming_dispatch(SimpleNamespace(
+            chat_id=-100789,
+            sender_id=99,
+            raw_text="answer",
+            text="answer",
+            id=600,
+            is_private=False,
+            is_group=True,
+            is_channel=False,
+            get_chat=AsyncMock(return_value=None),
+        ))
+
+        assert legacy_calls == []
+        assert len(interaction_payloads) == 1
+        payload = interaction_payloads[0]
+        assert payload["source"]["channel"] == "userbot"
+        assert payload["session"]["channel"] == "userbot"
+        assert payload["session"]["data"] == {"round": 1}
+        assert payload["trigger"]["type"] == "session_message"
+        assert payload["trigger"]["channel"] == "userbot"
+        state.engine.acquire.assert_awaited_once_with(45, "send_message_group", peer_id=-100789)
+        client.send_message.assert_awaited_once_with(-100789, "session ok", reply_to=None, parse_mode=None)
+        assert record_action.await_args.args[1]["send_via"] == "userbot_reply"
+        finish_trace.assert_awaited_once()
+        assert finish_trace.await_args.args[:2] == (trace, loader_mod.TRACE_STATUS_OK)
+        assert finish_trace.await_args.kwargs["consumed"] is True
+    finally:
+        loader_mod._STATES.pop(45, None)
+        _REGISTRY.pop("_test_userbot_session", None)
+
+
+@pytest.mark.asyncio
+async def test_userbot_session_command_prefix_message_skips_session_feed(monkeypatch) -> None:
+    state = loader_mod._AccountState(46)
+    state.redis = _FakeRedis()
+    state.userbot_session_chats.add(-100111)
+    state.redis.values["account_bot:interaction_session:46:rule:-100111"] = json.dumps(
+        {
+            "account_id": 46,
+            "chat_id": -100111,
+            "rule_id": "rule",
+            "module_key": "demo",
+            "entry_key": "main",
+            "channel": "userbot",
+            "expires_at": 4_000_000_000,
+        }
+    )
+    invoke = AsyncMock(return_value=[{"type": "send_message", "text": "nope"}])
+    monkeypatch.setattr(loader_mod, "invoke_interaction_entry", invoke)
+    monkeypatch.setattr(loader_mod, "current_command_prefix", lambda *, fallback=None: ",")
+
+    consumed = await loader_mod._dispatch_userbot_session_message(
+        state,
+        SimpleNamespace(chat_id=-100111, sender_id=9, raw_text=",guess 100", text=",guess 100"),
+        direction="incoming",
+        edited=False,
+        event_label="incoming",
+        redis=state.redis,
+    )
+
+    assert consumed is False
+    invoke.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_userbot_session_outgoing_requires_entry_include_outgoing(monkeypatch) -> None:
+    state = loader_mod._AccountState(47)
+    state.redis = _FakeRedis()
+    state.userbot_session_chats.add(-100222)
+    state.redis.values["account_bot:interaction_session:47:rule:-100222"] = json.dumps(
+        {
+            "account_id": 47,
+            "chat_id": -100222,
+            "rule_id": "rule",
+            "module_key": "demo",
+            "entry_key": "main",
+            "channel": "userbot",
+            "expires_at": 4_000_000_000,
+        }
+    )
+    invoke = AsyncMock(return_value=[{"type": "end_session"}])
+    monkeypatch.setattr(loader_mod, "invoke_interaction_entry", invoke)
+    monkeypatch.setattr(loader_mod, "current_command_prefix", lambda *, fallback=None: ",")
+    monkeypatch.setattr(loader_mod, "_load_event_framework_flags", AsyncMock(return_value={
+        "trace_enabled": False,
+        "event_bus_delivery_enabled": True,
+    }))
+    monkeypatch.setattr(loader_mod, "record_action", AsyncMock())
+    monkeypatch.setattr(loader_mod, "update_plugin_runtime_status", AsyncMock())
+    monkeypatch.setattr(loader_mod.account_bot_service, "declared_module_entry_manifest", lambda *_args: {"include_outgoing": False})
+
+    event = SimpleNamespace(chat_id=-100222, sender_id=9, raw_text="host reply", text="host reply")
+    consumed = await loader_mod._dispatch_userbot_session_message(
+        state,
+        event,
+        direction="outgoing",
+        edited=False,
+        event_label="outgoing",
+        redis=state.redis,
+    )
+
+    assert consumed is False
+    invoke.assert_not_awaited()
+
+    monkeypatch.setattr(loader_mod.account_bot_service, "declared_module_entry_manifest", lambda *_args: {"include_outgoing": True})
+    consumed = await loader_mod._dispatch_userbot_session_message(
+        state,
+        event,
+        direction="outgoing",
+        edited=False,
+        event_label="outgoing",
+        redis=state.redis,
+    )
+
+    assert consumed is True
+    invoke.assert_awaited_once()
+    assert invoke.await_args.kwargs["default_send_via"] == ["userbot_reply"]
 
 
 @pytest.mark.asyncio
@@ -2614,3 +3291,272 @@ async def test_merge_plugin_config_prefers_saved_global_over_legacy_account_glob
 
     assert merged["cookie"] == "sid=global"
     assert merged["command"] == "pt"
+
+
+@pytest.mark.asyncio
+async def test_manifest_command_trigger_registers_and_invokes_interaction_entry(monkeypatch) -> None:
+    """声明 triggers.command 的入口应自动注册为 userbot 命令并创建标准会话 payload。"""
+    state = loader_mod._AccountState(account_id=77)
+    redis = _FakeRedis()
+    state.redis = redis
+    captured: dict[str, Any] = {}
+
+    def fake_register(name, fn, **kwargs):
+        captured[name] = {"fn": fn, "kwargs": kwargs}
+
+    invoked: dict[str, Any] = {}
+
+    async def fake_invoke(account_id, *, plugin_key, entry_key, payload, default_send_via=None):
+        invoked.update(
+            {
+                "account_id": account_id,
+                "plugin_key": plugin_key,
+                "entry_key": entry_key,
+                "payload": payload,
+                "default_send_via": default_send_via,
+            }
+        )
+        return []
+
+    monkeypatch.setattr(loader_mod, "register_plugin_command", fake_register)
+    monkeypatch.setattr(loader_mod, "invoke_interaction_entry", fake_invoke)
+
+    ctx = PluginContext(account_id=77, feature_key="demo_game")
+    manifest = Manifest(
+        key="demo_game",
+        display_name="demo",
+        interaction_entries=[
+            {
+                "key": "start",
+                "triggers": {"command": "guess"},
+                "session_scope": "chat",
+                "ttl_seconds": 120,
+            }
+        ],
+    )
+
+    loader_mod._register_manifest_interaction_commands(state, ctx, manifest, {})
+
+    assert "guess" in captured
+    assert captured["guess"]["kwargs"] == {"owner_plugin_key": "demo_game", "generation": 1}
+
+    event = SimpleNamespace(
+        chat_id=-100123,
+        sender_id=456,
+        id=88,
+        raw_text=",guess 100",
+        trace_id="trace-command",
+        message=SimpleNamespace(chat_id=-100123, sender_id=456, id=88, text=",guess 100"),
+    )
+    await captured["guess"]["fn"](AsyncMock(), event, ["100"], 77)
+
+    assert invoked["account_id"] == 77
+    assert invoked["plugin_key"] == "demo_game"
+    assert invoked["entry_key"] == "start"
+    assert invoked["default_send_via"] == ["userbot_reply"]
+    assert invoked["payload"]["source"]["type"] == "command"
+    assert invoked["payload"]["trigger"]["args"] == ["100"]
+    assert invoked["payload"]["session"]["channel"] == "userbot"
+    assert state.userbot_session_chats == {-100123}
+    stored = next(json.loads(raw) for raw in redis.values.values())
+    assert stored["channel"] == "userbot"
+    assert stored["data"]["args"] == ["100"]
+
+
+def test_manifest_command_trigger_honors_keyword_only(monkeypatch) -> None:
+    state = loader_mod._AccountState(account_id=78)
+    calls: list[str] = []
+    monkeypatch.setattr(loader_mod, "register_plugin_command", lambda name, *_a, **_kw: calls.append(name))
+    ctx = PluginContext(account_id=78, feature_key="demo_game")
+
+    loader_mod._register_manifest_interaction_commands(
+        state,
+        ctx,
+        Manifest(
+            key="demo_game",
+            display_name="demo",
+            interaction_entries=[{"key": "start", "triggers": {"command": "guess"}}],
+        ),
+        {"interaction_trigger_modes": "keyword_only"},
+    )
+    loader_mod._register_manifest_interaction_commands(
+        state,
+        ctx,
+        Manifest(
+            key="demo_game",
+            display_name="demo",
+            interaction_entries=[
+                {
+                    "key": "start_buttons",
+                    "triggers": {"command": "buttons"},
+                    "default_trigger_modes": "keyword_only",
+                }
+            ],
+        ),
+        {},
+    )
+
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_userbot_update_session_merges_data_without_resetting_expiry(monkeypatch) -> None:
+    redis = _FakeRedis()
+    state = loader_mod._AccountState(account_id=79)
+    key = "account_bot:interaction_session:79:manifest_command:demo:start:-100"
+    expires_at = time.time() + 120
+    session = {
+        "account_id": 79,
+        "chat_id": -100,
+        "channel": "userbot",
+        "module_key": "demo",
+        "entry_key": "start",
+        "expires_at": expires_at,
+        "data": {"round": 1},
+    }
+    redis.values[key] = json.dumps(session)
+    record_action = AsyncMock()
+    monkeypatch.setattr(loader_mod, "record_action", record_action)
+
+    ok = await loader_mod._apply_userbot_update_session_action(
+        state,
+        {"type": "update_session", "data": {"score": 3}},
+        redis=redis,
+        session_key=key,
+        session=session,
+    )
+
+    assert ok is True
+    stored = json.loads(redis.values[key])
+    assert stored["data"] == {"round": 1, "score": 3}
+    assert stored["expires_at"] == expires_at
+    assert redis.sets[-1][2]["ex"] >= 1
+    record_action.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_userbot_send_message_degrades_buttons_and_synthetic_callback_is_skipped(monkeypatch) -> None:
+    redis = _FakeRedis()
+    state = loader_mod._AccountState(account_id=80)
+    state.redis = redis
+    state.client = AsyncMock()
+    state.client.send_message = AsyncMock(return_value=SimpleNamespace(id=9001))
+    session_key = "account_bot:interaction_session:80:manifest_command:quiz:start:-100"
+    session = {
+        "account_id": 80,
+        "chat_id": -100,
+        "channel": "userbot",
+        "module_key": "quiz",
+        "entry_key": "start",
+        "expires_at": time.time() + 600,
+        "data": {},
+    }
+    redis.values[session_key] = json.dumps(session)
+    record_action = AsyncMock()
+    monkeypatch.setattr(loader_mod, "record_action", record_action)
+
+    ok = await loader_mod._apply_userbot_send_message_action(
+        state,
+        SimpleNamespace(chat_id=-100),
+        {
+            "type": "send_message",
+            "send_via": "userbot_reply",
+            "chat_id": -100,
+            "text": "请选择",
+            "reply_markup": {
+                "inline_keyboard": [
+                    [{"text": "A", "callback_data": "pick:a"}],
+                    [{"text": "B", "callback_data": "pick:b"}],
+                    [{"text": "说明", "url": "https://example.test/help"}],
+                ]
+            },
+        },
+        redis=redis,
+        session_key=session_key,
+        session=session,
+    )
+
+    assert ok is True
+    sent_text = state.client.send_message.await_args.args[1]
+    assert "请回复序号选择" in sent_text
+    assert "1. A" in sent_text
+    assert "3. 说明: https://example.test/help" in sent_text
+    stored = json.loads(redis.values[session_key])
+    button_map = stored["data"]["_tp_button_map"]["map"]
+    assert button_map["1"] == "pick:a"
+    assert button_map["B"] == "pick:b"
+    assert "说明" not in button_map
+
+    assert loader_mod._userbot_text_button_callback_data(stored, "2") == "pick:b"
+    payload = loader_mod._userbot_session_event_payload(
+        {"source": {"channel": "userbot"}, "trigger": {}, "message": {"text": "2"}},
+        session_key=session_key,
+        session=stored,
+        event_label="incoming",
+        callback_data="pick:b",
+    )
+    assert payload["source"]["type"] == "callback_query"
+    assert payload["source"]["synthetic"] == "text_button"
+    assert payload["callback_data"] == "pick:b"
+
+    answer_ok = await loader_mod._apply_userbot_answer_callback_action(
+        state,
+        {"type": "answer_callback", "_tp_synthetic_callback": True},
+    )
+    assert answer_ok is True
+    assert record_action.await_args_list[-1].args[2] == loader_mod.TRACE_STATUS_SKIPPED
+    assert record_action.await_args_list[-1].kwargs["error_code"] == "synthetic_callback"
+
+
+@pytest.mark.asyncio
+async def test_scan_userbot_expired_sessions_invokes_entry_and_deletes(monkeypatch) -> None:
+    redis = _FakeRedis()
+    state = loader_mod._AccountState(account_id=81)
+    state.redis = redis
+    state.userbot_session_chats = {-10081}
+    key = "account_bot:interaction_session:81:manifest_command:quiz:start:-10081"
+    redis.values[key] = json.dumps(
+        {
+            "account_id": 81,
+            "chat_id": -10081,
+            "channel": "userbot",
+            "module_key": "quiz",
+            "entry_key": "start",
+            "started_by_user_id": 42,
+            "expires_at": time.time() - 1,
+            "data": {"round": 2},
+        }
+    )
+    invoked: dict[str, Any] = {}
+
+    async def fake_invoke(account_id, *, plugin_key, entry_key, payload, default_send_via=None):
+        invoked.update(
+            {
+                "account_id": account_id,
+                "plugin_key": plugin_key,
+                "entry_key": entry_key,
+                "payload": payload,
+                "default_send_via": default_send_via,
+            }
+        )
+        return [{"type": "send_message", "text": "timeout"}]
+
+    monkeypatch.setitem(loader_mod._STATES, 81, state)
+    monkeypatch.setattr(loader_mod, "_start_userbot_session_trace", AsyncMock(return_value=None))
+    monkeypatch.setattr(loader_mod, "invoke_interaction_entry", fake_invoke)
+    monkeypatch.setattr(loader_mod, "_apply_userbot_event_bus_actions", AsyncMock(return_value=False))
+    monkeypatch.setattr(loader_mod, "update_plugin_runtime_status", AsyncMock())
+    monkeypatch.setattr(loader_mod, "finish_trace", AsyncMock())
+    try:
+        processed = await loader_mod.scan_userbot_expired_sessions_once(81)
+    finally:
+        loader_mod._STATES.pop(81, None)
+
+    assert processed == 1
+    assert key not in redis.values
+    assert invoked["account_id"] == 81
+    assert invoked["plugin_key"] == "quiz"
+    assert invoked["entry_key"] == "start"
+    assert invoked["payload"]["event_type"] == "session_expired"
+    assert invoked["payload"]["session"]["data"] == {"round": 2}
+    assert invoked["default_send_via"] == ["userbot_reply"]

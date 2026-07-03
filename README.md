@@ -130,6 +130,7 @@ flowchart LR
 - 插件最低版本字段推荐使用 `min_telepilot_version`；旧插件里的 `min_telebot_version` 仍作为 legacy alias 解析。
 - 0.18 线主要入口已收敛为“概览 / 插件 / AI / 日志 / 系统”，账号操作集中到概览和账号详情抽屉入口，独立账号页已退出主导航。
 - 插件框架采用个人可信插件标准：管理员安装并启用插件后，业务风险由安装者自行承担；平台负责 Event Bus 标准事件信封、Trace、MessageOps 受控代发、风险提示、审计、调试告警和客观失败返回。新插件应声明 `usage`、`event_subscriptions`、`capabilities`；旧 `interaction_entries`、平铺 payload、`notice` / `bbot_notice` 只作为迁移说明，群里的转账结果通知 Bot 只作为外部到账证据来源。
+- 互动插件的统一主路径是“触发方式决定会话通道 + 单一 `on_interaction` 入口”：命令开局默认走 userbot，关键词/付款/按钮开局默认走 interaction bot，状态优先保存在 `session.data`，发奖优先用 `payout`，普通发送默认 `parse_mode="plain"`。
 - 插件生态按身份分层迁移：平台功能不伪装成插件；官方可选插件和官方远程插件必须完整声明使用说明、订阅事件和能力；示例插件只用于开发学习和 CI；用户安装插件不强制改代码，但安装/启用/更新时要显示规范警告和废弃通道错误。
 
 ## 内置功能
@@ -429,6 +430,7 @@ TelePilot 默认做了多层防护，但它仍然是一个能操控 Telegram 用
 - 不要把 `.env`、数据库备份、session、Bot Token、LLM API Key 发到聊天或截图里。
 - 远程插件只安装可信来源；第三方插件启用前先读代码。
 - 插件开发请按最终版 Event Bus + Trace + MessageOps 口径编写：`plugin.json` 声明 `usage`、`event_subscriptions`、`capabilities`，运行时读取标准事件信封，主动消息、按钮 ACK、Inline answer 和 `settlement` 都通过 `ctx.messages` 或标准 action 交给平台执行；旧 `interaction_entries` / 平铺 payload / `notice` 只用于迁移说明。
+- 消息链路统一后，强按钮玩法还要关注 userbot 文本按钮降级、`keyword_only` / `default_trigger_modes`、`callback_fast_ack` 这些入口控制字段；详细契约见 `docs/PLUGIN-API-REFERENCE.md` 与 `docs/PLUGIN-REMOTE.md`。
 - UserBot 行为可能触发 Telegram 风控，请谨慎设置自动回复、群发、定时任务和 AI 指令。
 
 ## 开发与验证
