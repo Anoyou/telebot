@@ -120,6 +120,7 @@ async def test_system_settings_login_security_defaults_off_and_roundtrip(monkeyp
     initial = await rate_limit.get_system_settings(db, SimpleNamespace(id=1))  # type: ignore[arg-type]
     assert initial["login_security"]["notify_otp_enabled"] is False
     assert initial["login_security"]["totp_enabled"] is False
+    assert initial["login_security"]["totp_mode"] == "after_failures"
 
     result = await rate_limit.patch_system_settings(
         rate_limit._SettingsPatch(
@@ -130,6 +131,8 @@ async def test_system_settings_login_security_defaults_off_and_roundtrip(monkeyp
                 notify_otp_ttl_seconds=300,
                 notify_otp_max_attempts=3,
                 totp_enabled=True,
+                totp_mode="after_failures",
+                totp_failed_attempt_threshold=4,
                 recovery_code_ttl_seconds=1200,
             )
         ),
@@ -141,5 +144,8 @@ async def test_system_settings_login_security_defaults_off_and_roundtrip(monkeyp
     assert stored["notify_otp_enabled"] is True
     assert stored["notify_otp_failed_attempt_threshold"] == 5
     assert stored["totp_enabled"] is True
+    assert stored["totp_mode"] == "after_failures"
+    assert stored["totp_failed_attempt_threshold"] == 4
     assert stored["recovery_code_ttl_seconds"] == 1200
     assert result["login_security"]["totp_enabled"] is True
+    assert result["login_security"]["totp_failed_attempt_threshold"] == 4

@@ -734,6 +734,8 @@ class _LoginSecurityPatch(BaseModel):
     notify_otp_ttl_seconds: int | None = None
     notify_otp_max_attempts: int | None = None
     totp_enabled: bool | None = None
+    totp_mode: str | None = None
+    totp_failed_attempt_threshold: int | None = None
     recovery_code_ttl_seconds: int | None = None
 
 
@@ -806,6 +808,7 @@ async def patch_system_settings(
             "notify_otp_fail_window_seconds": (60, 86400),
             "notify_otp_ttl_seconds": (60, 1800),
             "notify_otp_max_attempts": (1, 10),
+            "totp_failed_attempt_threshold": (1, 50),
             "recovery_code_ttl_seconds": (60, 86400),
         }
         for key, value in data.items():
@@ -813,6 +816,12 @@ async def patch_system_settings(
                 continue
             if key in bool_keys:
                 next_config[key] = bool(value)
+                continue
+            if key == "totp_mode":
+                mode = str(value).strip().lower()
+                if mode not in auth_login_security.TOTP_MODES:
+                    raise _bad("invalid_login_security", "totp_mode 必须是 always 或 after_failures")
+                next_config[key] = mode
                 continue
             lo, hi = bounds[key]
             ivalue = int(value)

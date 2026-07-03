@@ -223,7 +223,7 @@ async def test_totp_secret_requires_code_when_login_security_totp_on(monkeypatch
     db = _FakeDB([_ScalarResult(1), _ScalarResult(user)])
     db.settings["login_security"] = SystemSetting(
         key="login_security",
-        value={"totp_enabled": True},
+        value={"totp_enabled": True, "totp_mode": "always"},
     )
 
     monkeypatch.setattr(auth_api, "_enforce_login_rate_limit", AsyncMock(return_value=None))
@@ -238,3 +238,70 @@ async def test_totp_secret_requires_code_when_login_security_totp_on(monkeypatch
 
     assert out.ok is False
     assert out.require_totp is True
+
+
+@pytest.mark.asyncio
+async def test_totp_after_failures_does_not_require_code_before_threshold(monkeypatch):
+    user = SimpleNamespace(id=1, username="admin", password_hash="hash", totp_secret_enc="enc:totp")
+    db = _FakeDB([_ScalarResult(1), _ScalarResult(user)])
+    db.settings["login_security"] = SystemSetting(
+        key="login_security",
+        value={
+            "totp_enabled": True,
+            "totp_mode": "after_failures",
+            "totp_failed_attempt_threshold": 2,
+        },
+    )
+    response = Response()
+
+    monkeypatch.setattr(auth_api, "_enforce_login_rate_limit", AsyncMock(return_value=None))
+    monkeypatch.setattr(auth_api.auth_service, "verify_password_with_sentinel", lambda *_args: True)
+    monkeypatch.setattr(auth_api.auth_login_security, "clear_login_failures", AsyncMock(return_value=None))
+    monkeypatch.setattr(auth_api.audit, "write", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        auth_api.auth_login_security,
+        "_get_redis",
+        lambda: (_ for _ in ()).throw(RuntimeError("no redis")),
+    )
+
+    out = await auth_api.login(
+        LoginRequest(username="admin", password="ok"),
+        _request(),
+        response,
+        db,
+    )
+
+    assert out.ok is True
+    assert out.require_totp is False
+    assert "auth_token=" in response.headers.get("set-cookie", "")
+
+
+@pytest.mark.asyncio
+async def test_totp_after_failures_tracks_failures_without_notify_otp(monkeypatch):
+    monkeypatch.setattr(
+        auth_login_security,
+        "_get_redis",
+        lambda: (_ for _ in ()).throw(RuntimeError("no redis")),
+    )
+    config = auth_login_security.normalize_login_security_config(
+        {
+            "notify_otp_enabled": False,
+            "totp_enabled": True,
+            "totp_mode": "after_failures",
+            "totp_failed_attempt_threshold": 2,
+            "notify_otp_fail_window_seconds": 900,
+        }
+    )
+
+    await auth_login_security.record_login_failure("127.0.0.1", "admin", config=config)
+    assert await auth_login_security.should_require_totp("127.0.0.1", "admin", config=config) is False
+
+    await auth_login_security.record_login_failure("127.0.0.1", "admin", config=config)
+    assert await auth_login_security.should_require_totp("127.0.0.1", "admin", config=config) is True
+
+
+def test_legacy_totp_enabled_defaults_to_always_mode():
+    config = auth_login_security.normalize_login_security_config({"totp_enabled": True})
+
+    assert config.totp_enabled is True
+    assert config.totp_mode == auth_login_security.TOTP_MODE_ALWAYS

@@ -973,6 +973,8 @@ export interface SystemSettings {
     notify_otp_ttl_seconds: number;
     notify_otp_max_attempts: number;
     totp_enabled: boolean;
+    totp_mode: "always" | "after_failures";
+    totp_failed_attempt_threshold: number;
     recovery_code_ttl_seconds: number;
   };
   llm_limits?: {

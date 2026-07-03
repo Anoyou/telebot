@@ -32,6 +32,9 @@ from . import notify_service
 log = logging.getLogger(__name__)
 
 RECOVERY_SETTING_KEY = "auth_login_recovery_code"
+TOTP_MODE_ALWAYS = "always"
+TOTP_MODE_AFTER_FAILURES = "after_failures"
+TOTP_MODES = {TOTP_MODE_ALWAYS, TOTP_MODE_AFTER_FAILURES}
 
 _LOCAL_FAILS: dict[str, tuple[int, float]] = {}
 _LOCAL_CHALLENGES: dict[str, dict[str, Any]] = {}
@@ -45,6 +48,8 @@ class LoginSecurityConfig:
     notify_otp_ttl_seconds: int
     notify_otp_max_attempts: int
     totp_enabled: bool
+    totp_mode: str
+    totp_failed_attempt_threshold: int
     recovery_code_ttl_seconds: int
 
 
@@ -69,6 +74,12 @@ def normalize_login_security_config(raw: Any | None = None) -> LoginSecurityConf
     data = raw if isinstance(raw, dict) else {}
     notify_enabled = bool(data.get("notify_otp_enabled", False))
     threshold_default = int(getattr(settings, "login_otp_failed_attempt_threshold", 0) or 0)
+    # Legacy configs only had totp_enabled=true, which meant "always require TOTP".
+    legacy_totp_enabled = bool(data.get("totp_enabled", False))
+    default_totp_mode = TOTP_MODE_ALWAYS if legacy_totp_enabled else TOTP_MODE_AFTER_FAILURES
+    totp_mode = str(data.get("totp_mode") or default_totp_mode).strip().lower()
+    if totp_mode not in TOTP_MODES:
+        totp_mode = TOTP_MODE_AFTER_FAILURES
     return LoginSecurityConfig(
         notify_otp_enabled=notify_enabled,
         notify_otp_failed_attempt_threshold=_clamp_int(
@@ -99,6 +110,16 @@ def normalize_login_security_config(raw: Any | None = None) -> LoginSecurityConf
             maximum=10,
         ),
         totp_enabled=bool(data.get("totp_enabled", False)),
+        totp_mode=totp_mode,
+        totp_failed_attempt_threshold=_clamp_int(
+            data.get(
+                "totp_failed_attempt_threshold",
+                data.get("notify_otp_failed_attempt_threshold", threshold_default or 5),
+            ),
+            default=threshold_default or 5,
+            minimum=1,
+            maximum=50,
+        ),
         recovery_code_ttl_seconds=_clamp_int(
             data.get("recovery_code_ttl_seconds", 900),
             default=900,
@@ -116,6 +137,8 @@ def login_security_config_to_dict(config: LoginSecurityConfig) -> dict[str, Any]
         "notify_otp_ttl_seconds": config.notify_otp_ttl_seconds,
         "notify_otp_max_attempts": config.notify_otp_max_attempts,
         "totp_enabled": config.totp_enabled,
+        "totp_mode": config.totp_mode,
+        "totp_failed_attempt_threshold": config.totp_failed_attempt_threshold,
         "recovery_code_ttl_seconds": config.recovery_code_ttl_seconds,
     }
 
@@ -199,6 +222,29 @@ def _local_get_count(key: str) -> int:
     return int(count)
 
 
+def _should_track_failures(config: LoginSecurityConfig) -> bool:
+    return bool(config.notify_otp_enabled) or bool(
+        config.totp_enabled and config.totp_mode == TOTP_MODE_AFTER_FAILURES
+    )
+
+
+async def _max_login_failure_count(ip: str, username_norm: str) -> int:
+    keys = _fail_keys(ip, username_norm)
+    try:
+        redis = _get_redis()
+        counts: list[int] = []
+        for key in keys:
+            raw = await redis.get(key)
+            try:
+                counts.append(int(raw or 0))
+            except Exception:  # noqa: BLE001
+                counts.append(0)
+        return max(counts or [0])
+    except Exception as exc:  # noqa: BLE001
+        log.warning("auth login failure counter read failed: %s", exc)
+        return max((_local_get_count(key) for key in keys), default=0)
+
+
 async def record_login_failure(
     ip: str,
     username_norm: str,
@@ -208,7 +254,7 @@ async def record_login_failure(
     """记录一次登录密码失败。Redis 故障时降级到进程内计数。"""
 
     config = config or normalize_login_security_config()
-    if not config.notify_otp_enabled:
+    if not _should_track_failures(config):
         return
 
     ttl = config.notify_otp_fail_window_seconds
@@ -248,20 +294,24 @@ async def should_require_login_otp(
     threshold = int(config.notify_otp_failed_attempt_threshold or 0)
     if threshold <= 0:
         return False
-    keys = _fail_keys(ip, username_norm)
-    try:
-        redis = _get_redis()
-        counts: list[int] = []
-        for key in keys:
-            raw = await redis.get(key)
-            try:
-                counts.append(int(raw or 0))
-            except Exception:  # noqa: BLE001
-                counts.append(0)
-        return max(counts or [0]) >= threshold
-    except Exception as exc:  # noqa: BLE001
-        log.warning("auth login failure counter read failed: %s", exc)
-        return max((_local_get_count(key) for key in keys), default=0) >= threshold
+    return await _max_login_failure_count(ip, username_norm) >= threshold
+
+
+async def should_require_totp(
+    ip: str,
+    username_norm: str,
+    *,
+    config: LoginSecurityConfig | None = None,
+) -> bool:
+    config = config or normalize_login_security_config()
+    if not config.totp_enabled:
+        return False
+    if config.totp_mode == TOTP_MODE_ALWAYS:
+        return True
+    threshold = int(config.totp_failed_attempt_threshold or 0)
+    if threshold <= 0:
+        return False
+    return await _max_login_failure_count(ip, username_norm) >= threshold
 
 
 def _make_otp_code() -> str:

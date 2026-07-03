@@ -234,8 +234,16 @@ async def login(req: LoginRequest, request: Request, response: Response, db: DBS
             raise _err("RECOVERY_CODE_INVALID", "一次性恢复码无效或已过期", 401)
         used_recovery = True
 
-    # 已启用 TOTP 必须校验
-    if user.totp_secret_enc and login_security.totp_enabled and not used_recovery:
+    # TOTP 支持"每次登录"与"连续失败后"两种策略。
+    if (
+        user.totp_secret_enc
+        and not used_recovery
+        and await auth_login_security.should_require_totp(
+            ip,
+            username_norm,
+            config=login_security,
+        )
+    ):
         if not req.totp_code:
             return LoginResponse(ok=False, require_totp=True)
         secret = decrypt_str(user.totp_secret_enc)

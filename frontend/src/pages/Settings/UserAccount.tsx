@@ -10,6 +10,7 @@ import { Copy, KeyRound, Send, ShieldAlert, ShieldCheck, ShieldOff } from "lucid
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Select } from "@/components/ui/select";
 import {
   Card,
   CardContent,
@@ -24,6 +25,8 @@ interface TotpSetup {
   secret: string;
   otpauth_url: string;
 }
+
+type TotpMode = "always" | "after_failures";
 
 export function UserAccount() {
   const qc = useQueryClient();
@@ -82,6 +85,10 @@ export function UserAccount() {
   const [totpCode, setTotpCode] = useState("");
   const [totpSetup, setTotpSetup] = useState<TotpSetup | null>(null);
   const [totpVerifyCode, setTotpVerifyCode] = useState("");
+  const [totpPolicy, setTotpPolicy] = useState<{ mode: TotpMode; threshold: string }>({
+    mode: "after_failures",
+    threshold: "5",
+  });
   const disableTotpMut = useMutation({
     mutationFn: async () => {
       await api.post("/api/auth/totp/disable", { code: totpCode });
@@ -112,7 +119,13 @@ export function UserAccount() {
   const verifyTotpMut = useMutation({
     mutationFn: async () => {
       await api.post("/api/auth/totp/verify", { code: totpVerifyCode });
-      await patchSystemSettings({ login_security: { totp_enabled: true } });
+      await patchSystemSettings({
+        login_security: {
+          totp_enabled: true,
+          totp_mode: totpPolicy.mode,
+          totp_failed_attempt_threshold: Number(totpPolicy.threshold) || 5,
+        },
+      });
     },
     onSuccess: () => {
       toast.success("TOTP 已启用，登录验证开关已打开");
@@ -145,6 +158,10 @@ export function UserAccount() {
   useEffect(() => {
     if (!settingsQ.data?.login_security) return;
     const next = settingsQ.data.login_security;
+    setTotpPolicy({
+      mode: next.totp_mode === "always" ? "always" : "after_failures",
+      threshold: String(next.totp_failed_attempt_threshold ?? 5),
+    });
     setNotifyOtp({
       threshold: String(next.notify_otp_failed_attempt_threshold ?? 5),
       windowSeconds: String(next.notify_otp_fail_window_seconds ?? 900),
@@ -162,6 +179,14 @@ export function UserAccount() {
       notify_otp_ttl_seconds: Number(notifyOtp.ttlSeconds) || 300,
       notify_otp_max_attempts: Number(notifyOtp.attempts) || 3,
       recovery_code_ttl_seconds: Number(notifyOtp.recoveryTtl) || 900,
+    });
+  };
+
+  const saveTotpPolicy = () => {
+    patchLoginSecurityMut.mutate({
+      totp_enabled: Boolean(loginSecurity?.totp_enabled),
+      totp_mode: totpPolicy.mode,
+      totp_failed_attempt_threshold: Number(totpPolicy.threshold) || 5,
     });
   };
 
@@ -257,7 +282,13 @@ export function UserAccount() {
               <SignalPill
                 tone={loginSecurity?.totp_enabled ? "success" : "neutral"}
                 label="TOTP 登录"
-                value={loginSecurity?.totp_enabled ? "已开启" : "关闭"}
+                value={
+                  loginSecurity?.totp_enabled
+                    ? loginSecurity.totp_mode === "always"
+                      ? "每次验证"
+                      : "失败后验证"
+                    : "关闭"
+                }
               />
             </div>
           </div>
@@ -281,7 +312,11 @@ export function UserAccount() {
                     startTotpMut.mutate();
                     return;
                   }
-                  patchLoginSecurityMut.mutate({ totp_enabled: !loginSecurity?.totp_enabled });
+                  patchLoginSecurityMut.mutate({
+                    totp_enabled: !loginSecurity?.totp_enabled,
+                    totp_mode: totpPolicy.mode,
+                    totp_failed_attempt_threshold: Number(totpPolicy.threshold) || 5,
+                  });
                 }}
               >
                 {meQ.data?.has_totp
@@ -344,6 +379,52 @@ export function UserAccount() {
                     确认启用
                   </Button>
                 </div>
+              </div>
+            ) : null}
+
+            {meQ.data?.has_totp ? (
+              <div className="mt-4 grid gap-3 rounded-md border bg-background p-3 md:grid-cols-[minmax(0,1.2fr)_minmax(140px,0.5fr)_auto] md:items-end">
+                <div className="space-y-1.5">
+                  <Label htmlFor="totp-mode">登录验证策略</Label>
+                  <Select
+                    id="totp-mode"
+                    value={totpPolicy.mode}
+                    onChange={(e) =>
+                      setTotpPolicy((v) => ({
+                        ...v,
+                        mode: e.target.value === "always" ? "always" : "after_failures",
+                      }))
+                    }
+                  >
+                    <option value="after_failures">连续输错后验证</option>
+                    <option value="always">每次登录都验证</option>
+                  </Select>
+                  <p className="text-xs leading-5 text-muted-foreground">
+                    失败后验证只在密码连续输错达到阈值后要求 TOTP，日常登录不打扰。
+                  </p>
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor="totp-threshold">失败阈值</Label>
+                  <Input
+                    id="totp-threshold"
+                    inputMode="numeric"
+                    disabled={totpPolicy.mode === "always"}
+                    value={totpPolicy.threshold}
+                    onChange={(e) =>
+                      setTotpPolicy((v) => ({
+                        ...v,
+                        threshold: e.target.value.replace(/\D/g, ""),
+                      }))
+                    }
+                  />
+                </div>
+                <Button
+                  variant="outline"
+                  disabled={patchLoginSecurityMut.isPending}
+                  onClick={saveTotpPolicy}
+                >
+                  保存策略
+                </Button>
               </div>
             ) : null}
 
