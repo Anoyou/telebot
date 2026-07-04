@@ -20,6 +20,13 @@
 
 ## [Unreleased]
 
+## [0.49.3] — 2026-07-04 · patch（补丁版本） · 推荐插件本体剥离补丁
+
+### Changed
+- 删除本体中残留的 `builtin/auto_reply` 与 `builtin/autorepeat` 插件实现，明确自动回复、自动复读只作为插件库推荐插件分发。
+- 规则 dry-run 改为从已安装插件动态调用 `_dry_run_match`，未安装、禁用、签名不通过或插件未导出时返回明确提示，不再从 Core builtin 路径兜底。
+- 同步修正测试、前端类型注释和消息链路文档中的旧 builtin/official 插件口径。
+
 ## [0.49.2] — 2026-07-04 · patch（补丁版本） · 插件库来源语义补丁
 
 ### Changed

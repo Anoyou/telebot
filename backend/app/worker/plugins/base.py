@@ -281,8 +281,8 @@ def register(plugin_cls: type[Plugin]) -> type[Plugin]:
 
     用法：
         @register
-        class AutoReplyPlugin(Plugin):
-            key = "auto_reply"
+        class DemoPlugin(Plugin):
+            key = "demo"
             ...
     """
     if not getattr(plugin_cls, "key", ""):

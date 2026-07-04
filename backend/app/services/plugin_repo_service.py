@@ -1220,9 +1220,9 @@ def _manifest_json_from_manifest_object(
     manifest: object | None,
     fallback: PluginMetadata,
 ) -> dict[str, Any]:
-    """用官方 ``manifest.py`` 补齐插件运行元数据。
+    """用历史本地源的 ``manifest.py`` 补齐插件运行元数据。
 
-    官方插件随 TelePilot 代码发布，允许安装阶段读取本地 manifest 对象；
+    当前推荐入口只读取插件库远程源；本函数仅服务旧测试与历史本地源兼容。
     远程插件仍只依赖静态 ``plugin.json``，不执行 Python。
     """
 

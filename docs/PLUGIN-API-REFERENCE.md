@@ -1874,8 +1874,8 @@ from .plugin import _dry_run_match  # noqa: F401 — 供 API dry-run 导入
 
 # ① import
 from ..db.models.feature import FEATURE_XXX
-# 主仓库内置/官方插件可直接 import；普通远程插件建议先使用插件自身测试覆盖 dry-run，
-# 如确实要接入平台 rules.py，再通过稳定的服务函数按已安装插件目录加载。
+# 普通插件不从 TelePilot 本体 import。需要接入平台 rules.py 时，应通过
+# 已安装插件目录动态加载其 `_dry_run_match`，并在插件自身测试中覆盖该纯函数。
 
 # ② 在 dry_run_rule() 函数中，在 fallback return 之前添加分支
 #    ⚠️ 必须放在最后的 `return RuleDryRunResponse(matched=False, ...)` 之前！
@@ -2094,8 +2094,8 @@ class DemoPlugin(Plugin):
 - [ ] 如会发送消息，建议提供 `template_preview` 或 `*_preview`；没有预览不会阻断运行，但会降低配置体验
 - [ ] 配置主体宽度自适应屏幕宽度，字段用响应式 grid 或分组，不使用窄 `max-w-*` 限制
 - [ ] 用户可见文案使用“插件”，不展示内部分类名或“Schema 弹窗”
-- [ ] 如需 dry-run：`plugin.py` 导出 `_dry_run_match`，`__init__.py` re-export，`rules.py` 在 fallback 之前添加分支
-- [ ] 如需接入平台 `rules.py` 专属 dry-run：`feature.py` 中有 `FEATURE_XXX` 常量；普通远程/本地插件可先用插件自身测试覆盖 dry-run 纯函数
+- [ ] 如需 dry-run：`plugin.py` 导出 `_dry_run_match`，`__init__.py` re-export；平台专属配置页再按需接入 `rules.py`
+- [ ] 如需接入平台 `rules.py` 专属 dry-run：`feature.py` 中有 `FEATURE_XXX` 常量，后端通过已安装插件目录动态调用 `_dry_run_match`；普通远程/本地插件可先用插件自身测试覆盖 dry-run 纯函数
 - [ ] 前端 `pnpm -C frontend exec tsc -b --noEmit` 和 `pnpm -C frontend build` 通过
 
 ---

@@ -1,7 +1,7 @@
 """plugin loader 测试：mock DB（AsyncSessionLocal）+ Redis + Telethon client。
 
 覆盖：
-  - 注册表：内置 5 个 plugin 全部能被找到
+  - 注册表：核心平台 plugin 能被找到
   - 加载流程：enabled feature 会调到对应 plugin 的 on_startup（用 spy）
   - 配置热重载：reload_account_config 能刷新 ctx.rules / ctx.config，已禁用的会 shutdown
 """
@@ -20,7 +20,6 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from app.db.models.feature import (
-    FEATURE_AUTO_REPLY,
     FEATURE_FORWARD,
     FEATURE_SCHEDULER,
 )
@@ -249,7 +248,7 @@ async def _fake_session_factory(db: _FakeDB):
 
 
 # ─────────────────────────────────────────────────────
-# 用例 1：内置 5 个 plugin 都能被注册
+# 用例 1：核心内置 plugin 都能被注册
 # ─────────────────────────────────────────────────────
 def test_import_builtins_registers_all_three() -> None:
     _import_builtins()
@@ -274,16 +273,13 @@ def test_builtin_modules_constant_is_complete() -> None:
 
 def test_builtin_rule_and_platform_manifests_are_explicit() -> None:
     """规则/平台类内置 manifest 应声明封闭 schema，避免配置页和校验语义漂移。"""
-    from app.worker.plugins.builtin.autorepeat.manifest import MANIFEST as AUTOREPEAT_MANIFEST
     from app.worker.plugins.builtin.forward.manifest import MANIFEST as FORWARD_MANIFEST
     from app.worker.plugins.builtin.scheduler.manifest import MANIFEST as SCHEDULER_MANIFEST
 
-    for manifest in (AUTOREPEAT_MANIFEST, FORWARD_MANIFEST, SCHEDULER_MANIFEST):
+    for manifest in (FORWARD_MANIFEST, SCHEDULER_MANIFEST):
         schema = manifest.config_schema or {}
         assert schema.get("type") == "object"
         assert schema.get("additionalProperties") is False
-
-    assert "resolve_entity" in AUTOREPEAT_MANIFEST.permissions
 
 
 def test_clear_installed_module_cache_drops_registered_class() -> None:
@@ -2938,22 +2934,22 @@ async def test_message_edited_dispatches_dedicated_hook(monkeypatch) -> None:
 # ─────────────────────────────────────────────────────
 @pytest.mark.asyncio
 async def test_load_calls_on_startup(monkeypatch) -> None:
-    """模拟一个 account_feature 行（auto_reply enabled），验证 plugin 实例的 on_startup 被调一次。"""
+    """模拟一个 account_feature 行（核心平台插件 enabled），验证 on_startup 被调一次。"""
     # 1) mock db 数据
     fake_db = _FakeDB(
         accounts={1: _FakeAcc(id=1)},
         humanize={1: None},
-        afs=[_FakeAF(account_id=1, feature_key=FEATURE_AUTO_REPLY, enabled=True, config={})],
+        afs=[_FakeAF(account_id=1, feature_key=FEATURE_FORWARD, enabled=True, config={})],
         rules=[],
     )
     monkeypatch.setattr(
         loader_mod, "AsyncSessionLocal", lambda: _fake_session_factory(fake_db)
     )
 
-    # 2) 替换 AutoReplyPlugin.on_startup 为 spy
+    # 2) 替换 ForwardPlugin.on_startup 为 spy
     on_startup_spy = AsyncMock()
     monkeypatch.setattr(
-        "app.worker.plugins.builtin.auto_reply.AutoReplyPlugin.on_startup",
+        "app.worker.plugins.builtin.forward.ForwardPlugin.on_startup",
         on_startup_spy,
     )
 

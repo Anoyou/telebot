@@ -753,7 +753,7 @@ export interface ForwardRuleConfig {
 }
 
 // ===== 自动复读 =====
-// 与后端 ``builtin/autorepeat/manifest.py:config_schema`` 对齐的 rule.config 结构
+// 与插件库 ``autorepeat`` 插件 manifest 的 config_schema 对齐的 rule.config 结构
 export interface AutorepeatRuleConfig {
   /** 必填：监控的群组 chat_id（Telethon marked ID 格式） */
   target_chat_id: number;

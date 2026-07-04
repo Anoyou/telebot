@@ -319,7 +319,7 @@
 
 ### P2 · 其余玩法插件迁移
 
-- 按 P1 模式迁移：`dice_grid_hunt`（依赖 R7 的骰子媒体下放）、`poetry_blank`、`lottery_plus`、`redpack-byRBQ`、`sum`、`pt_promote`、`bot_mute_guard`（按需）；builtin/official 的 `auto_reply/autorepeat/forward/scheduler` 属流式插件**不迁移**（继续 on_message/on_event）。每个插件补触发/会话/超时三类测试；文本输出改用 `parse_mode="plain"` 或显式转义。
+- 按 P1 模式迁移：`dice_grid_hunt`（依赖 R7 的骰子媒体下放）、`poetry_blank`、`lottery_plus`、`redpack-byRBQ`、`sum`、`pt_promote`、`bot_mute_guard`（按需）。`forward/scheduler` 属平台流式能力不迁移；插件库里的 `auto_reply/autorepeat` 继续走 `on_message/on_event` 流式插件形态，但不再作为 TelePilot 本体 builtin/official 插件发布。每个插件补触发/会话/超时三类测试；文本输出改用 `parse_mode="plain"` 或显式转义。
 - **验收**：`scripts/validate-installed-interaction-plugins.py` 全绿；每插件端到端用例至少 2 条。
 
 ### P3 · 清理旧机制

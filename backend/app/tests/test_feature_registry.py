@@ -75,6 +75,13 @@ def test_builtin_registry_excludes_optional_official_plugins() -> None:
     assert "autorepeat" not in keys
 
 
+def test_recommended_plugins_are_not_bundled_in_core() -> None:
+    builtin_root = Path(__file__).resolve().parents[1] / "worker" / "plugins" / "builtin"
+    for key in ("auto_reply", "autorepeat", "game24", "math10"):
+        assert not (builtin_root / key / "plugin.py").exists()
+        assert not (builtin_root / key / "manifest.py").exists()
+
+
 def test_builtin_registry_excludes_legacy_feature_keys() -> None:
     BUILTIN_FEATURES.refresh()
     keys = set(BUILTIN_FEATURES.keys())
