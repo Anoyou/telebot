@@ -20,6 +20,13 @@
 
 ## [Unreleased]
 
+## [0.49.9] — 2026-07-05 · patch（补丁版本） · 交互会话发奖补丁
+
+### Fixed
+- 修复交互 Bot 付款/关键词触发的插件会话由 UserBot 观察到答题消息时没有投递回插件的问题；math10、24 点、10 点半等互动插件现在能按会话逻辑通道处理玩家回复，并继续通过 UserBot 执行 `payout` 发奖。
+- 修复 UserBot 观察到的交互 Bot 会话执行 `end_session` 后未删除 Redis 会话的问题，避免答对后同一会话继续吞后续消息。
+- 修复 UserBot 观察到的交互 Bot 会话返回 `update_session` 时被误判为 `session_not_found` 的问题，多阶段玩法可以正常写回 `session.data`。
+
 ## [0.49.8] — 2026-07-05 · patch（补丁版本） · 发奖锚点提示与规则参数补丁
 
 ### Added

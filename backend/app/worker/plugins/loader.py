@@ -137,6 +137,11 @@ class _InteractionTextGuardRule:
 _USERBOT_SESSION_KEY_PREFIX = "account_bot:interaction_session:"
 _USERBOT_SESSION_TTL_GRACE_SECONDS = 90
 _USERBOT_BUTTON_MAP_KEY = "_tp_button_map"
+_SESSION_CHANNEL_USERBOT = "userbot"
+_SESSION_CHANNEL_INTERACTION_BOT = "interaction_bot"
+_SESSION_CHANNELS_OBSERVED_BY_USERBOT = frozenset(
+    {_SESSION_CHANNEL_USERBOT, _SESSION_CHANNEL_INTERACTION_BOT}
+)
 
 
 class _TracePluginClient:
@@ -349,6 +354,21 @@ def _trace_plugin_client(
     except Exception:  # noqa: BLE001
         pass
     return _TracePluginClient(client, trace, plugin_key=plugin_key, entry_key=entry_key, component=component)
+
+
+def _configured_interaction_bot_sender_ids(cfg: dict[str, Any]) -> frozenset[int]:
+    ids: set[int] = set()
+    for key in ("interaction_bot_id", "trusted_bot_id", "transfer_bot_id"):
+        value = _int_or_none(cfg.get(key))
+        if value is not None:
+            ids.add(value)
+    trusted = cfg.get("trusted_bot_ids")
+    if isinstance(trusted, list):
+        for item in trusted:
+            value = _int_or_none(item)
+            if value is not None:
+                ids.add(value)
+    return frozenset(ids)
 
 
 # 不在每次消息都查 DB；启动 + reload 时刷新一次，足够快
@@ -958,13 +978,31 @@ async def _apply_userbot_event_bus_actions(
             trace_log_context(trace, plugin_key=plugin_key, entry_key=entry_key),
         )
         action_type = str(action.get("type") or "").strip()
-        if action_type in {"end_session", "close_session", "no_session", "result"}:
+        if action_type == "result":
             await record_action(
                 action.get("context"),
                 action,
                 TRACE_STATUS_SKIPPED,
                 error_code="session_control_action",
                 error=f"session control action: {action_type}",
+            )
+            continue
+        if action_type in {"end_session", "close_session", "no_session"}:
+            deleted = False
+            if session_key:
+                delete = getattr(redis, "delete", None)
+                if callable(delete):
+                    deleted = bool(await delete(session_key))
+                chat_id = _int_or_none((session or {}).get("chat_id"))
+                if chat_id is not None:
+                    await _refresh_userbot_session_chat_cache(state)
+            await record_action(
+                action.get("context"),
+                action,
+                TRACE_STATUS_SKIPPED,
+                error_code="session_control_action",
+                error=f"session control action: {action_type}",
+                result={"session_key": session_key, "deleted": deleted} if session_key else None,
             )
             continue
         if action_type == "start_session":
@@ -1192,8 +1230,9 @@ async def _apply_userbot_update_session_action(
     if not current:
         raw = await redis.get(key)
         current = _json_dict(raw)
-    if str(current.get("channel") or "").strip() != "userbot":
-        await record_action(action.get("context"), action, TRACE_STATUS_FAILED, error_code="session_not_found", error="userbot session not found")
+    session_channel = _session_channel(current)
+    if session_channel not in _SESSION_CHANNELS_OBSERVED_BY_USERBOT:
+        await record_action(action.get("context"), action, TRACE_STATUS_FAILED, error_code="session_not_found", error="userbot-observed session not found")
         return False
     patch_data = action.get("data")
     if not isinstance(patch_data, dict):
@@ -1222,7 +1261,12 @@ async def _apply_userbot_update_session_action(
             action,
             TRACE_STATUS_OK,
             actual_send_via="interaction_session",
-            result={"session_key": key, "data_keys": sorted(current["data"].keys()), "expires_at": current.get("expires_at")},
+            result={
+                "session_key": key,
+                "channel": session_channel,
+                "data_keys": sorted(current["data"].keys()),
+                "expires_at": current.get("expires_at"),
+            },
         )
         return True
     except Exception as exc:  # noqa: BLE001
@@ -2753,6 +2797,7 @@ class _AccountState:
         self.log_incoming_messages: bool = False
         self.account_proxy_url: str | None = None
         self.interaction_text_guard_rules: tuple[_InteractionTextGuardRule, ...] = ()
+        self.interaction_bot_sender_ids: frozenset[int] = frozenset()
         self.userbot_session_chats: set[int] = set()
 
 
@@ -2952,10 +2997,12 @@ async def _refresh_interaction_text_guard_cache(state: Any) -> None:
 
     account_id = getattr(state, "account_id", None)
     rules: list[_InteractionTextGuardRule] = []
+    bot_sender_ids: frozenset[int] = frozenset()
     try:
         async with AsyncSessionLocal() as db:
             row = await db.get(SystemSetting, interaction_bot_service.transfer_notice_setting_key(int(account_id)))
         cfg = interaction_bot_service.normalize_transfer_notice_config(row.value if row is not None else None)
+        bot_sender_ids = _configured_interaction_bot_sender_ids(cfg)
         if cfg.get("enabled"):
             for rule in cfg.get("rules") or []:
                 if not isinstance(rule, dict) or not bool(rule.get("enabled", True)):
@@ -2977,6 +3024,7 @@ async def _refresh_interaction_text_guard_cache(state: Any) -> None:
         log.debug("刷新交互 Bot 文本守卫缓存失败 account=%s", account_id, exc_info=True)
     try:
         state.interaction_text_guard_rules = tuple(rules)
+        state.interaction_bot_sender_ids = bot_sender_ids
     except Exception:  # noqa: BLE001
         pass
 
@@ -3079,8 +3127,13 @@ def _json_dict(raw: Any) -> dict[str, Any]:
     return dict(parsed) if isinstance(parsed, dict) else {}
 
 
-def _userbot_session_is_active(session: dict[str, Any], chat_id: int | None = None) -> bool:
-    if str(session.get("channel") or "").strip() != "userbot":
+def _session_channel(session: dict[str, Any]) -> str:
+    channel = str(session.get("channel") or "").strip()
+    return channel if channel in _SESSION_CHANNELS_OBSERVED_BY_USERBOT else ""
+
+
+def _userbot_observed_session_is_active(session: dict[str, Any], chat_id: int | None = None) -> bool:
+    if _session_channel(session) not in _SESSION_CHANNELS_OBSERVED_BY_USERBOT:
         return False
     if chat_id is not None and _int_or_none(session.get("chat_id")) != chat_id:
         return False
@@ -3103,7 +3156,7 @@ async def _refresh_userbot_session_chat_cache(state: Any) -> None:
         for key in await _redis_keys(redis, f"{_USERBOT_SESSION_KEY_PREFIX}{account_id}:*"):
             raw = await redis.get(key)
             session = _json_dict(raw)
-            if not _userbot_session_is_active(session):
+            if not _userbot_observed_session_is_active(session):
                 continue
             chat_id = _int_or_none(session.get("chat_id"))
             if chat_id is not None:
@@ -3149,7 +3202,7 @@ async def _load_userbot_sessions_for_chat(
                     continue
                 raw = await redis.get(key)
                 session = _json_dict(raw)
-                if not _userbot_session_is_active(session, chat_id):
+                if not _userbot_observed_session_is_active(session, chat_id):
                     continue
                 sessions.append((key, session))
     except Exception:  # noqa: BLE001
@@ -3193,9 +3246,12 @@ def _userbot_session_event_payload(
     callback_data: str | None = None,
 ) -> dict[str, Any]:
     payload = dict(base_payload)
+    session_channel = _session_channel(session)
     source = dict(payload.get("source") if isinstance(payload.get("source"), dict) else {})
     source["type"] = "callback_query" if callback_data is not None else "message"
-    source["channel"] = "userbot"
+    source["channel"] = session_channel
+    if session_channel != _SESSION_CHANNEL_USERBOT:
+        source["observed_channel"] = _SESSION_CHANNEL_USERBOT
     if callback_data is not None:
         source["callback_data"] = callback_data
         source["callback_query_id"] = None
@@ -3206,7 +3262,7 @@ def _userbot_session_event_payload(
     payload["session"] = {
         "key": session_key,
         "active": True,
-        "channel": "userbot",
+        "channel": session_channel,
         "data": dict(session_data),
         "rule_id": session.get("rule_id"),
         "rule_name": session.get("rule_name"),
@@ -3225,7 +3281,7 @@ def _userbot_session_event_payload(
     trigger.update(
         {
             "type": "session_callback" if callback_data is not None else "session_message",
-            "channel": "userbot",
+            "channel": session_channel,
             "rule_id": session.get("rule_id"),
             "module_key": session.get("module_key"),
             "entry_key": session.get("entry_key"),
@@ -3233,6 +3289,8 @@ def _userbot_session_event_payload(
             "event_label": event_label,
         }
     )
+    if session_channel != _SESSION_CHANNEL_USERBOT:
+        trigger["observed_channel"] = _SESSION_CHANNEL_USERBOT
     if callback_data is not None:
         payload["callback_data"] = callback_data
         payload["callback_query_id"] = None
@@ -3275,22 +3333,40 @@ async def _dispatch_userbot_session_message(
     if edited:
         return False
     chat_id = _int_or_none(getattr(event, "chat_id", None))
-    if chat_id is None or chat_id not in state.userbot_session_chats:
+    if chat_id is None:
         return False
     text = str(getattr(event, "raw_text", "") or getattr(event, "text", "") or "")
     if _looks_like_worker_command_text(text):
         return False
     sender_id = _int_or_none(getattr(event, "sender_id", None))
+    if direction == "incoming" and sender_id is not None and sender_id in state.interaction_bot_sender_ids:
+        return False
     sessions = await _load_userbot_sessions_for_chat(state, redis, chat_id=chat_id, sender_id=sender_id)
-    candidates: list[tuple[str, dict[str, Any], str, str, str | None]] = []
+    if sessions:
+        state.userbot_session_chats.add(chat_id)
+    candidates: list[tuple[str, dict[str, Any], str, str, str, str | None]] = []
     for session_key, session in sessions:
         plugin_key = str(session.get("module_key") or "").strip()
         entry_key = str(session.get("entry_key") or "").strip()
         if not plugin_key or not entry_key:
             continue
-        if direction == "outgoing" and not _entry_includes_outgoing(plugin_key, entry_key):
+        session_channel = _session_channel(session)
+        if (
+            session_channel == _SESSION_CHANNEL_USERBOT
+            and direction == "outgoing"
+            and not _entry_includes_outgoing(plugin_key, entry_key)
+        ):
             continue
-        candidates.append((session_key, session, plugin_key, entry_key, _userbot_text_button_callback_data(session, text)))
+        candidates.append(
+            (
+                session_key,
+                session,
+                session_channel,
+                plugin_key,
+                entry_key,
+                _userbot_text_button_callback_data(session, text),
+            )
+        )
     if not candidates:
         return False
 
@@ -3299,7 +3375,7 @@ async def _dispatch_userbot_session_message(
     invoked_count = 0
     failed_count = 0
     consumed = False
-    for session_key, session, plugin_key, entry_key, callback_data in candidates:
+    for session_key, session, session_channel, plugin_key, entry_key, callback_data in candidates:
         payload = _userbot_session_event_payload(
             base_payload,
             session_key=session_key,
@@ -3317,18 +3393,24 @@ async def _dispatch_userbot_session_message(
             plugin_key=plugin_key,
             entry_key=entry_key,
             reason_code="matched",
-            message="命中 UserBot 通道活跃会话，消息将进程内投递给交互入口。",
+            message="UserBot 观察到活跃会话消息，按会话逻辑通道投递给交互入口。",
             direction=event_label,
             session_key=session_key,
+            session_channel=session_channel,
         )
         started = time.monotonic()
         try:
+            default_send_via = (
+                ["userbot_reply"]
+                if session_channel == _SESSION_CHANNEL_USERBOT
+                else ["interaction_bot"]
+            )
             actions = await invoke_interaction_entry(
                 state.account_id,
                 plugin_key=plugin_key,
                 entry_key=entry_key,
                 payload=payload,
-                default_send_via=["userbot_reply"],
+                default_send_via=default_send_via,
             )
             invoked_count += 1
             await record_span(

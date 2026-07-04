@@ -3125,6 +3125,128 @@ async def test_userbot_session_dispatch_invokes_interaction_entry_and_skips_lega
 
 
 @pytest.mark.asyncio
+async def test_userbot_observed_interaction_session_keeps_logical_interaction_channel(monkeypatch) -> None:
+    redis = _FakeRedis()
+    state = loader_mod._AccountState(82)
+    state.redis = redis
+    state.interaction_bot_sender_ids = frozenset({9000, 9001})
+    state.client = SimpleNamespace(send_message=AsyncMock(return_value=SimpleNamespace(id=702)))
+    state.engine = SimpleNamespace(
+        acquire=AsyncMock(return_value=SimpleNamespace(allowed=True, wait_seconds=0, outcome="ok"))
+    )
+    session_key = "account_bot:interaction_session:82:rule-math:-10082"
+    redis.values[session_key] = json.dumps(
+        {
+            "account_id": 82,
+            "chat_id": -10082,
+            "rule_id": "rule-math",
+            "module_key": "math10",
+            "entry_key": "start_math_game",
+            "channel": "interaction_bot",
+            "data": {"answer": 10},
+            "expires_at": 4_000_000_000,
+        }
+    )
+    captured: dict[str, Any] = {}
+
+    async def fake_invoke(account_id, *, plugin_key, entry_key, payload, default_send_via=None):
+        captured.update(
+            {
+                "account_id": account_id,
+                "plugin_key": plugin_key,
+                "entry_key": entry_key,
+                "payload": payload,
+                "default_send_via": default_send_via,
+            }
+        )
+        return loader_mod._normalize_interaction_actions(
+            [
+                {"type": "send_message", "text": "答对"},
+                {"type": "payout", "amount": 666},
+                {"type": "end_session"},
+            ],
+            default_send_via=default_send_via,
+        )
+
+    interaction_send = AsyncMock(return_value={"message_id": 701})
+    monkeypatch.setattr(loader_mod, "invoke_interaction_entry", fake_invoke)
+    monkeypatch.setattr(loader_mod, "_interaction_bot_token_for_account", AsyncMock(return_value="interaction-token"))
+    monkeypatch.setattr(loader_mod.account_bot_service, "send_message", interaction_send)
+    monkeypatch.setattr(loader_mod, "_load_event_framework_flags", AsyncMock(return_value={
+        "trace_enabled": False,
+        "event_bus_delivery_enabled": True,
+    }))
+    monkeypatch.setattr(loader_mod, "record_action", AsyncMock())
+    monkeypatch.setattr(loader_mod, "record_span", AsyncMock())
+    monkeypatch.setattr(loader_mod, "update_plugin_runtime_status", AsyncMock())
+    monkeypatch.setattr(loader_mod, "finish_trace", AsyncMock())
+
+    consumed = await loader_mod._dispatch_userbot_session_message(
+        state,
+        SimpleNamespace(chat_id=-10082, sender_id=111, raw_text="10", text="10"),
+        direction="incoming",
+        edited=False,
+        event_label="incoming",
+        redis=redis,
+    )
+
+    assert consumed is True
+    assert captured["account_id"] == 82
+    assert captured["plugin_key"] == "math10"
+    assert captured["entry_key"] == "start_math_game"
+    assert captured["default_send_via"] == ["interaction_bot"]
+    payload = captured["payload"]
+    assert payload["source"]["channel"] == "interaction_bot"
+    assert payload["source"]["observed_channel"] == "userbot"
+    assert payload["session"]["channel"] == "interaction_bot"
+    assert payload["trigger"]["channel"] == "interaction_bot"
+    interaction_send.assert_awaited_once_with(
+        "interaction-token",
+        -10082,
+        "答对",
+        reply_to_message_id=None,
+        reply_markup=None,
+        parse_mode="plain",
+    )
+    state.client.send_message.assert_awaited_once_with(-10082, "+666", reply_to=None, parse_mode=None)
+    assert session_key not in redis.values
+
+
+@pytest.mark.asyncio
+async def test_userbot_observed_interaction_session_skips_platform_bot_sender(monkeypatch) -> None:
+    redis = _FakeRedis()
+    state = loader_mod._AccountState(83)
+    state.redis = redis
+    state.userbot_session_chats.add(-10083)
+    state.interaction_bot_sender_ids = frozenset({9000})
+    redis.values["account_bot:interaction_session:83:rule-math:-10083"] = json.dumps(
+        {
+            "account_id": 83,
+            "chat_id": -10083,
+            "rule_id": "rule-math",
+            "module_key": "math10",
+            "entry_key": "start_math_game",
+            "channel": "interaction_bot",
+            "expires_at": 4_000_000_000,
+        }
+    )
+    invoke = AsyncMock(return_value=[{"type": "send_message", "text": "nope"}])
+    monkeypatch.setattr(loader_mod, "invoke_interaction_entry", invoke)
+
+    consumed = await loader_mod._dispatch_userbot_session_message(
+        state,
+        SimpleNamespace(chat_id=-10083, sender_id=9000, raw_text="算数题测试开始", text="算数题测试开始"),
+        direction="incoming",
+        edited=False,
+        event_label="incoming",
+        redis=redis,
+    )
+
+    assert consumed is False
+    invoke.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_userbot_session_command_prefix_message_skips_session_feed(monkeypatch) -> None:
     state = loader_mod._AccountState(46)
     state.redis = _FakeRedis()
@@ -3780,6 +3902,44 @@ async def test_userbot_update_session_merges_data_without_resetting_expiry(monke
     assert stored["expires_at"] == expires_at
     assert redis.sets[-1][2]["ex"] >= 1
     record_action.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_userbot_update_session_accepts_observed_interaction_session(monkeypatch) -> None:
+    redis = _FakeRedis()
+    state = loader_mod._AccountState(account_id=84)
+    key = "account_bot:interaction_session:84:rule-game:-10084"
+    expires_at = time.time() + 120
+    session = {
+        "account_id": 84,
+        "chat_id": -10084,
+        "channel": "interaction_bot",
+        "module_key": "ten_half",
+        "entry_key": "start_ten_half",
+        "expires_at": expires_at,
+        "data": {"players": [10]},
+    }
+    redis.values[key] = json.dumps(session)
+    record_action = AsyncMock()
+    monkeypatch.setattr(loader_mod, "record_action", record_action)
+
+    ok = await loader_mod._apply_userbot_update_session_action(
+        state,
+        {"type": "update_session", "data": {"phase": "betting"}, "extend_seconds": 30},
+        redis=redis,
+        session_key=key,
+        session=session,
+    )
+
+    assert ok is True
+    stored = json.loads(redis.values[key])
+    assert stored["channel"] == "interaction_bot"
+    assert stored["data"] == {"players": [10], "phase": "betting"}
+    assert stored["expires_at"] > expires_at
+    assert session["data"] == stored["data"]
+    assert -10084 in state.userbot_session_chats
+    record_action.assert_awaited()
+    assert record_action.await_args.kwargs["result"]["channel"] == "interaction_bot"
 
 
 @pytest.mark.asyncio
