@@ -10557,8 +10557,10 @@ async def test_transfer_notice_event_bus_payment_uses_matching_rule_only(monkeyp
         async def commit(self):
             return None
 
+    redis = _MemoryRedis()
     run_entry = AsyncMock(return_value=(True, None, [{"type": "send_message", "text": "math ok"}]))
     monkeypatch.setattr(account_bot_runtime, "AsyncSessionLocal", lambda: _DB())
+    monkeypatch.setattr(account_bot_runtime, "get_redis", lambda: redis)
     monkeypatch.setattr(account_bot_runtime.audit, "write", AsyncMock())
     monkeypatch.setattr(account_bot_runtime, "_run_worker_interaction_entry", run_entry)
     monkeypatch.setattr(account_bot_runtime, "_guard_interaction_actions", AsyncMock(side_effect=lambda _incoming, _rule, actions: actions))
@@ -10597,6 +10599,8 @@ async def test_transfer_notice_event_bus_payment_uses_matching_rule_only(monkeyp
                         "action": "module",
                         "module_key": "math10",
                         "module_action": "start_math_game",
+                        "module_session_scope": "chat",
+                        "module_prize": 666,
                     },
                     {
                         "id": "ten-half",
@@ -10636,7 +10640,15 @@ async def test_transfer_notice_event_bus_payment_uses_matching_rule_only(monkeyp
     assert run_entry.await_args.kwargs["entry_key"] == "start_math_game"
     payload = run_entry.await_args.kwargs["payload"]
     assert payload["payment"]["amount"] == 234
+    assert payload["prize"] == 666
+    assert payload["session"]["key"] == "account_bot:interaction_session:1:silly-math:-100123"
+    assert payload["session"]["scope"] == "chat"
     assert payload["rule_id"] == "silly-math"
+    saved = await redis.get("account_bot:interaction_session:1:silly-math:-100123")
+    assert saved is not None
+    session = json.loads(saved)
+    assert session["module_key"] == "math10"
+    assert session["entry_key"] == "start_math_game"
 
 
 @pytest.mark.asyncio

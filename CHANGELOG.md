@@ -20,6 +20,12 @@
 
 ## [Unreleased]
 
+## [0.49.11] — 2026-07-05 · patch（补丁版本） · Event Bus 付款会话补丁
+
+### Fixed
+- 修复 Event Bus 付款订阅直接投递插件入口时没有保存交互会话的问题；math10、24 点等只返回普通开局消息的插件，现在付款开局后会正确接续玩家答题消息并生成后续 `payout`。
+- 修复 Event Bus 付款 payload 没有带入规则奖金和会话 envelope 的问题；交互规则里配置的 `module_prize` / `prize` 会覆盖默认奖金，Trace 中也能看到明确的 `session_key` 与 `session_scope`。
+
 ## [0.49.10] — 2026-07-05 · patch（补丁版本） · 后台交互动作补丁
 
 ### Fixed

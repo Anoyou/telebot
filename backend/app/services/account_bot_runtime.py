@@ -4236,6 +4236,10 @@ async def _try_handle_event_bus_payment_notice(
                 "valid_seconds": _interaction_session_ttl(rule),
             }
         )
+        prize = _interaction_module_prize(rule, payload)
+        if prize is not None:
+            payload["prize"] = prize
+        payload["session"] = _interaction_session_envelope(incoming, rule, payload)
         trigger = payload.get("trigger") if isinstance(payload.get("trigger"), dict) else {}
         trigger.update(_interaction_trigger_envelope(rule, "payment_confirmed", parsed))
         trigger.update(
@@ -4256,14 +4260,16 @@ async def _try_handle_event_bus_payment_notice(
             all_ok = False
             _schedule_interaction_debug_state(incoming, stage="plugin_error", payload=payload, error=error)
             continue
-        rule = _event_bus_virtual_rule(decision)
         guarded = await _guard_interaction_actions(incoming, rule, actions)
+        keep_session = _interaction_actions_mark_success(guarded) and not _interaction_actions_request_no_session(guarded)
         await _apply_interaction_start_session_actions(incoming, rule, guarded)
         await _apply_interaction_actions(
             incoming,
             guarded,
             context=_interaction_trace_context(payload),
         )
+        if keep_session:
+            await _save_interaction_session(incoming, rule, "payment_confirmed", parsed)
     return handled, all_ok
 
 
