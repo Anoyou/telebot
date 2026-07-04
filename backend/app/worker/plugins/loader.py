@@ -97,6 +97,7 @@ from ..ratelimit.humanize import HumanizeOpts
 from .base import Plugin, PluginContext, all_plugins, get_plugin, public_entity_display_name
 from .events import attach_tp_event
 from .manifest import Manifest
+from .message_ops import BufferedMessageOps
 
 log = logging.getLogger(__name__)
 
@@ -721,11 +722,19 @@ async def _invoke_userbot_event_bus_entry(
     entry_key: str,
     payload: dict[str, Any],
 ) -> list[dict[str, Any]]:
-    from .message_ops import BufferedMessageOps
-
     base_log = ctx.log
     base_client = ctx.client
-    buffered_messages = BufferedMessageOps()
+    state = _STATES.get(ctx.account_id)
+    if state is not None:
+        buffered_messages = _InteractionEntryMessageOps(
+            state,
+            plugin_key=plugin_key,
+            entry_key=entry_key,
+            trace=payload.get("trace_id"),
+            default_send_via=["userbot_reply"],
+        )
+    else:
+        buffered_messages = BufferedMessageOps()
     call_client = _trace_plugin_client(
         base_client,
         payload.get("trace_id"),
@@ -2819,15 +2828,17 @@ class _LiveMessageOps:
         plugin_key: str,
         entry_key: str = "",
         trace: Any | None = None,
+        default_send_via: list[str] | None = None,
     ) -> None:
         self._state = state
         self._plugin_key = plugin_key
         self._entry_key = entry_key
         self._trace = trace
+        self._default_send_via = list(default_send_via or ["userbot_reply"])
         self.actions: list[dict[str, Any]] = []
 
     async def apply(self, actions: list[dict[str, Any]], *, entry_key: str | None = None) -> None:
-        normalized = _normalize_interaction_actions(actions, default_send_via=["userbot_reply"])
+        normalized = _normalize_interaction_actions(actions, default_send_via=self._default_send_via)
         if not normalized:
             return
         effective_entry_key = entry_key if entry_key is not None else self._entry_key
@@ -2916,6 +2927,31 @@ class _LiveMessageOps:
         action = await buffered.payout(**kwargs)
         await self.apply([action])
         return action
+
+
+class _InteractionEntryMessageOps(BufferedMessageOps):
+    """Buffer current interaction actions while keeping live apply for delayed work."""
+
+    def __init__(
+        self,
+        state: _AccountState,
+        *,
+        plugin_key: str,
+        entry_key: str,
+        trace: Any | None = None,
+        default_send_via: list[str] | None = None,
+    ) -> None:
+        super().__init__()
+        self._live = _LiveMessageOps(
+            state,
+            plugin_key=plugin_key,
+            entry_key=entry_key,
+            trace=trace,
+            default_send_via=default_send_via,
+        )
+
+    async def apply(self, actions: list[dict[str, Any]], *, entry_key: str | None = None) -> None:
+        await self._live.apply(actions, entry_key=entry_key)
 
 
 async def _event_sender_id(event: Any) -> int | None:
@@ -5069,12 +5105,17 @@ async def invoke_interaction_entry(
     ctx = state.contexts.get(plugin_key)
     if inst is None or ctx is None:
         raise RuntimeError(f"模块未加载或未启用：{plugin_key}")
-    from .message_ops import BufferedMessageOps
 
     base_log = ctx.log
     base_client = ctx.client
-    buffered_messages = BufferedMessageOps()
     trace_id = str((payload or {}).get("trace_id") or "").strip()
+    buffered_messages = _InteractionEntryMessageOps(
+        state,
+        plugin_key=plugin_key,
+        entry_key=entry_key,
+        trace=trace_id,
+        default_send_via=default_send_via,
+    )
     call_client = _trace_plugin_client(
         base_client,
         trace_id,

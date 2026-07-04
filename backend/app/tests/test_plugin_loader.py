@@ -2000,6 +2000,63 @@ async def test_invoke_interaction_entry_inherits_default_send_via_for_plain_mess
 
 
 @pytest.mark.asyncio
+async def test_interaction_entry_messages_apply_executes_with_logical_default_channel(monkeypatch) -> None:
+    class _InteractionBackgroundActionsPlugin(Plugin):
+        key = "_test_interaction_background_actions"
+        display_name = "交互入口后台动作测试"
+
+        async def on_interaction(self, ctx: PluginContext, entry_key: str, payload: dict[str, Any]) -> list[dict[str, Any]]:
+            await ctx.messages.apply(
+                [{"type": "send_message", "chat_id": -100123, "text": "后台刷新"}],
+                entry_key=entry_key,
+            )
+            await ctx.messages.send(chat_id=-100123, text="当前回复")
+            return []
+
+    state = loader_mod._AccountState(account_id=152)
+    state.redis = _FakeRedis()
+    state.instances["_test_interaction_background_actions"] = _InteractionBackgroundActionsPlugin()
+    state.contexts["_test_interaction_background_actions"] = PluginContext(
+        account_id=152,
+        feature_key="_test_interaction_background_actions",
+        client=MagicMock(),
+    )
+    apply_actions = AsyncMock(return_value=False)
+    monkeypatch.setattr(loader_mod, "_apply_userbot_event_bus_actions", apply_actions)
+    loader_mod._STATES[152] = state
+    try:
+        actions = await loader_mod.invoke_interaction_entry(
+            152,
+            plugin_key="_test_interaction_background_actions",
+            entry_key="start",
+            payload={"trace_id": "evt_background_actions"},
+            default_send_via=["interaction_bot"],
+        )
+
+        assert actions == [
+            {
+                "type": "send_message",
+                "chat_id": -100123,
+                "text": "当前回复",
+                "parse_mode": "plain",
+                "reply_to_message_id": None,
+                "send_via": "interaction_bot",
+            }
+        ]
+        apply_actions.assert_awaited_once()
+        applied = apply_actions.await_args.kwargs["actions"]
+        assert applied[0]["text"] == "后台刷新"
+        assert applied[0]["send_via"] == "interaction_bot"
+        assert applied[0]["context"] == {
+            "trace_id": "evt_background_actions",
+            "plugin_key": "_test_interaction_background_actions",
+            "entry_key": "start",
+        }
+    finally:
+        loader_mod._STATES.pop(152, None)
+
+
+@pytest.mark.asyncio
 async def test_invoke_interaction_entry_uses_call_scoped_contexts() -> None:
     seen: list[tuple[str, bool, bool]] = []
     ready: asyncio.Queue[None] = asyncio.Queue()
