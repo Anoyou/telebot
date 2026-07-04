@@ -8,7 +8,7 @@ TelePilot 0.x 阶段只保留一个默认插件模式：**个人可信插件标�
 
 - 管理员安装并启用插件后，即视为信任该插件的业务逻辑；远程插件风险由管理员自行承担。
 - 平台不做公共插件市场式强沙箱，但会通过 `Manifest.permissions`、`ctx.client`、`ctx.http`、`ctx.ai`、`ctx.messages` 等 facade 收口常用能力，并保留频控、审计、急停、日志脱敏和 token/session 隔离。
-- 插件可以通过两类调度方式接入：管理员带前缀命令、群友关键词/付款开局。入口只描述触发来源和默认通道偏好，不绑死后续回复账号；插件可通过 `ctx.messages` 选择交互 Bot / UserBot 的单通道或候选顺序。涉及收款确认、发奖、补发等钱相关动作仍由 UserBot 或平台受控结算链路处理。群里已有的转账结果通知 Bot 只作为外部付款证据来源，不是插件主动发送通道。
+- 插件可以通过两类调度方式接入：管理员带前缀命令、群友关键词/付款开局。触发方式决定整段会话通道：命令会话默认走 UserBot，关键词/付款/按钮会话默认走交互 Bot；插件普通回复不要手写通道，平台会按 `session.channel` 路由。涉及收款确认、发奖、补发等钱相关动作仍由 UserBot 或平台受控结算链路处理。群里已有的转账结果通知 Bot 只作为外部付款证据来源，不是插件主动发送通道。
 
 如果未来要开放“任意第三方上传、未经人工审核”的公共市场，需要另行设计 subprocess/容器隔离、资源配额、文件系统/网络沙箱和供应链扫描。它不属于当前 0.x 默认方案；本文当前所有示例、CI 和安全边界都按个人可信插件标准模式编写。
 
@@ -48,7 +48,6 @@ class EventPingPlugin(Plugin):
         return [
             {
                 "type": "send_message",
-                "send_via": ["interaction_bot", "userbot_reply"],
                 "chat_id": event.message.chat_id,
                 "reply_to_message_id": event.message.message_id,
                 "text": "pong",
@@ -66,7 +65,7 @@ MANIFEST = Manifest(
     version="0.1.0",
     author="example",
     description="演示 Event Bus + MessageOps 的最小插件",
-    usage="在允许会话内发送 ping，插件会通过交互 Bot 或 UserBot 回复 pong。",
+    usage="在允许会话内发送 ping，插件会按当前会话通道回复 pong。",
     permissions=["send_message"],
     event_subscriptions=[
         {

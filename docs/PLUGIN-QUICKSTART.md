@@ -106,7 +106,6 @@ class HelloPingPlugin(Plugin):
         return [
             {
                 "type": "send_message",
-                "send_via": ["interaction_bot", "userbot_reply"],
                 "chat_id": event.message.chat_id,
                 "reply_to_message_id": event.message.message_id,
                 "text": "pong",
@@ -114,7 +113,7 @@ class HelloPingPlugin(Plugin):
         ]
 ```
 
-你也可以用 `ctx.messages` 生成等价消息操作；两种方式都会走平台 MessageOps。最小示例直接返回 action，方便复制和测试。
+普通回复不要写 `send_via`；平台会按当前 `session.channel` 选择 UserBot 或交互 Bot。你也可以用 `ctx.messages` 生成等价消息操作；两种方式都会走平台 MessageOps。最小示例直接返回 action，方便复制和测试。
 
 ## 5. __init__.py
 

@@ -22,7 +22,6 @@ class HelloPingPlugin(Plugin):
         return [
             {
                 "type": "send_message",
-                "send_via": ["interaction_bot", "userbot_reply"],
                 "chat_id": event.message.chat_id,
                 "reply_to_message_id": event.message.message_id,
                 "text": "pong",

@@ -680,7 +680,6 @@ class GuessNumberPlugin(Plugin):
                 self._rounds.pop(chat_id, None)
             if ctx.messages is not None:
                 await ctx.messages.send(
-                    channel="interaction_bot",
                     chat_id=chat_id,
                     text=f"本轮超时，答案是 {state.answer}。",
                 )

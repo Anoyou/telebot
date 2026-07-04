@@ -14,7 +14,6 @@ async def on_event(self, ctx, payload):
     if ctx.ai is None:
         return [{
             "type": "send_message",
-            "send_via": ["interaction_bot", "userbot_reply"],
             "chat_id": chat_id,
             "reply_to_message_id": reply_to,
             "text": "本插件需要 ai_text 权限",
@@ -30,7 +29,6 @@ async def on_event(self, ctx, payload):
     )
     return [{
         "type": "send_message",
-        "send_via": ["interaction_bot", "userbot_reply"],
         "chat_id": chat_id,
         "reply_to_message_id": reply_to,
         "text": result.text,

@@ -42,8 +42,7 @@
         "required_event_fields": ["type", "chat_id"]
       },
       "result_contract": {
-        "actions": ["send_message", "result", "end_session"],
-        "send_via": ["interaction_bot", "userbot_reply"]
+        "actions": ["send_message", "result", "end_session"]
       },
       "settlement": {
         "mode": "announce_only",

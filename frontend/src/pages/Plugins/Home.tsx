@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { type ComponentType, useEffect, useMemo, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { toast } from "sonner";
@@ -15,6 +15,7 @@ import {
   PackagePlus,
   Settings2,
   Sparkles,
+  Zap,
 } from "lucide-react";
 
 import { listAccountFeatures } from "@/api/accounts";
@@ -51,28 +52,34 @@ import {
   pluginEventSubscriptionLabels,
   pluginHasHighRiskContract,
   pluginOperationalCapabilityLabels,
+  pluginSupportsDirectPassthrough,
   pluginUsesAI,
 } from "@/types/pluginContract";
 
 import { featureConfigPath } from "./_shared/featureConfig";
 import { PluginWorkspaceNav } from "./WorkspaceNav";
 
-type ModuleCategory = "interactive" | "automation" | "utility";
-const CATEGORY_META: Record<ModuleCategory, { title: string; hint: string; icon: React.ReactNode }> = {
+type ModuleCategory = "direct_passthrough" | "interactive" | "automation" | "utility";
+const CATEGORY_META: Record<ModuleCategory, { title: string; hint: string; icon: ComponentType<{ className?: string }> }> = {
+  direct_passthrough: {
+    title: "裸直通",
+    hint: "声明 telegram_direct_passthrough 的低延时插件；启用仍需账号配置二次开关。",
+    icon: Zap,
+  },
   interactive: {
     title: "互动娱乐",
     hint: "可交互的游戏、娱乐和群内互动插件。",
-    icon: <Sparkles className="h-4 w-4" />,
+    icon: Sparkles,
   },
   automation: {
     title: "自动化",
     hint: "自动回复、转发、定时等账号自动化能力。",
-    icon: <Settings2 className="h-4 w-4" />,
+    icon: Settings2,
   },
   utility: {
     title: "工具能力",
     hint: "AI、媒体生成和其他辅助工具插件。",
-    icon: <Package2 className="h-4 w-4" />,
+    icon: Package2,
   },
 };
 const DANGEROUS_CMD_BANNER_KEY = "telebot.plugins_home.banner.v0_13_dangerous_cmds_closed";
@@ -283,12 +290,17 @@ export function PluginsHome() {
 
   const grouped = useMemo(() => {
     const zones: Record<ModuleCategory, typeof features> = {
+      direct_passthrough: [],
       interactive: [],
       automation: [],
       utility: [],
     };
 
     for (const feature of pluginFeatures) {
+      if (pluginSupportsDirectPassthrough(feature.capabilities)) {
+        zones.direct_passthrough.push(feature);
+        continue;
+      }
       const category = feature.category === "interactive" || feature.category === "automation"
         ? feature.category
         : "utility";
@@ -549,6 +561,7 @@ export function PluginsHome() {
             {(Object.keys(CATEGORY_META) as ModuleCategory[]).map((category) => (
               <FeatureZone
                 key={category}
+                icon={CATEGORY_META[category].icon}
                 title={CATEGORY_META[category].title}
                 hint={CATEGORY_META[category].hint}
                 features={grouped[category]}
@@ -737,6 +750,7 @@ function GuideContextCard({
 }
 
 function FeatureZone({
+  icon,
   title,
   hint,
   features,
@@ -747,6 +761,7 @@ function FeatureZone({
   installByKey,
   pluginUsageByKey,
 }: {
+  icon: ComponentType<{ className?: string }>;
   title: string;
   hint: string;
   features: FeatureInfo[];
@@ -763,6 +778,7 @@ function FeatureZone({
     <Card>
       <CardHeader className="pb-3">
         <SectionHeader
+          icon={icon}
           title={title}
           description={hint}
           meta={(
@@ -829,6 +845,13 @@ function FeatureZone({
                       <div className="flex shrink-0 flex-wrap gap-1.5 sm:justify-end">
                         <FeatureCapabilityBadge show={Boolean(f.interaction_entries?.length)} tone="success">
                           可交互
+                        </FeatureCapabilityBadge>
+                        <FeatureCapabilityBadge
+                          show={pluginSupportsDirectPassthrough(f.capabilities)}
+                          tone="warn"
+                          title="插件声明 telegram_direct_passthrough，账号内还需要二次开启直通开关才会生效"
+                        >
+                          裸直通
                         </FeatureCapabilityBadge>
                         <FeatureCapabilityBadge show={usesAI} tone="warn" title="插件会调用 TelePilot 的 AI 能力">
                           AI 调用

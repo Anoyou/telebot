@@ -1,7 +1,13 @@
 export type PluginEventSubscription = Record<string, unknown>;
 export type PluginCapabilities = Record<string, unknown>;
 
-const HIGH_RISK_TERMS = ["telegram_native_raw", "native_raw", "inline_all", "bbot_notice", "notice_bot"];
+const HIGH_RISK_TERMS = [
+  "telegram_native_raw",
+  "native_raw",
+  "inline_all",
+  "bbot_notice",
+  "notice_bot",
+];
 const DEPRECATED_SEND_CHANNELS = ["notice", "bbot_notice", "notice_bot"];
 const AI_PERMISSION_TERMS = ["ai", "ai_text", "llm", "llm_text", "openai", "anthropic"];
 
@@ -27,6 +33,7 @@ const CAPABILITY_LABELS: Record<string, string> = {
   llm_text: "AI 文本",
   inline_all: "Inline 全量",
   settlement: "结算动作",
+  telegram_direct_passthrough: "裸直通",
   telegram_native_raw: "native_raw",
   native_raw: "native_raw",
   userbot_reply: "人形回复",
@@ -69,6 +76,7 @@ export function pluginEventSubscriptionLabels(
 export function pluginCapabilityLabels(capabilities?: PluginCapabilities | null): string[] {
   const labels = new Set<string>();
   for (const [key, value] of Object.entries(capabilities ?? {})) {
+    if (key === "telegram_direct_passthrough" && !pluginSupportsDirectPassthrough(capabilities)) continue;
     if (!isCapabilityEnabled(value)) continue;
     labels.add(CAPABILITY_LABELS[key] || key);
   }
@@ -117,6 +125,13 @@ export function pluginUsesAI(input: {
   return prose.includes("ctx.ai") || prose.includes("llm") || prose.includes("ai provider") || prose.includes("ai 调用");
 }
 
+export function pluginSupportsDirectPassthrough(capabilities?: PluginCapabilities | null): boolean {
+  const value = capabilities?.telegram_direct_passthrough;
+  if (value === true) return true;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  return (value as Record<string, unknown>).enabled === true;
+}
+
 export function pluginContractRiskWarnings(input: {
   capabilities?: PluginCapabilities | null;
   event_subscriptions?: PluginEventSubscription[] | null;
@@ -128,6 +143,9 @@ export function pluginContractRiskWarnings(input: {
     lint_warnings: input.lint_warnings ?? [],
   }).toLowerCase();
   const warnings: string[] = [];
+  if (pluginSupportsDirectPassthrough(input.capabilities)) {
+    warnings.push("高风险：插件声明裸直通，会在标准 Event Bus / Trace / MessageOps 链路前收到原始消息。");
+  }
   if (haystack.includes("telegram_native_raw") || haystack.includes("native_raw")) {
     warnings.push("高风险：插件声明 native_raw，可读取 Telegram 原生事件摘要；仅安装可信来源。");
   }
@@ -152,7 +170,8 @@ export function pluginHasHighRiskContract(input: {
   lint_warnings?: string[] | null;
 }): boolean {
   const haystack = JSON.stringify(input).toLowerCase();
-  return HIGH_RISK_TERMS.some((term) => haystack.includes(term)) ||
+  return pluginSupportsDirectPassthrough(input.capabilities) ||
+    HIGH_RISK_TERMS.some((term) => haystack.includes(term)) ||
     DEPRECATED_SEND_CHANNELS.some((channel) => containsDeprecatedSendChannel(input, channel));
 }
 

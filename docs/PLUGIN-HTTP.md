@@ -49,7 +49,6 @@ async def on_event(self, ctx, payload):
     if ctx.http is None:
         return [{
             "type": "send_message",
-            "send_via": ["interaction_bot", "userbot_reply"],
             "chat_id": chat_id,
             "reply_to_message_id": reply_to,
             "text": "本插件需要 external_http 权限和 allowed_hosts",
@@ -59,7 +58,6 @@ async def on_event(self, ctx, payload):
     preview = response.text.strip().replace("\n", " ")[:120]
     return [{
         "type": "send_message",
-        "send_via": ["interaction_bot", "userbot_reply"],
         "chat_id": chat_id,
         "reply_to_message_id": reply_to,
         "text": f"HTTP {response.status_code}: {preview}",

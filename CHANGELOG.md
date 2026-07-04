@@ -20,6 +20,12 @@
 
 ## [Unreleased]
 
+## [0.49.5] — 2026-07-04 · patch（补丁版本） · 插件文档与裸直通分类补丁
+
+### Changed
+- 插件中心新增“裸直通”分类，将声明 `telegram_direct_passthrough.enabled=true` 的插件从普通互动/工具分类中单独归组，并在卡片中显示裸直通能力与高风险提示。
+- 插件开发文档、Quickstart、HTTP / AI facade 示例和示例插件移除普通回复里的候选 `send_via` 模板，明确普通动作默认继承 `session.channel`，只有跨通道覆盖、迁移兼容或钱相关动作才显式指定通道。
+
 ## [0.49.4] — 2026-07-04 · patch（补丁版本） · 裸直通与会话通道补丁
 
 ### Fixed
