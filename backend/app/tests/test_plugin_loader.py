@@ -1763,6 +1763,102 @@ async def test_userbot_payout_action_uses_userbot_rate_limit_and_default_text(mo
 
 
 @pytest.mark.asyncio
+async def test_userbot_payout_action_resolves_reply_to_user_recent_message(monkeypatch) -> None:
+    class _Client:
+        def __init__(self) -> None:
+            self.send_message = AsyncMock(return_value=SimpleNamespace(id=778))
+
+        def iter_messages(self, chat_id, **kwargs):  # noqa: ANN001, ANN003
+            async def _gen():
+                if chat_id == -100456 and kwargs.get("from_user") == 12345:
+                    yield SimpleNamespace(id=66, sender_id=12345)
+
+            return _gen()
+
+    state = loader_mod._AccountState(account_id=44)
+    state.redis = _FakeRedis()
+    state.client = _Client()
+    state.engine = SimpleNamespace(
+        acquire=AsyncMock(return_value=SimpleNamespace(allowed=True, wait_seconds=0, outcome="ok"))
+    )
+    record_action = AsyncMock()
+    monkeypatch.setattr(loader_mod, "record_action", record_action)
+
+    failed = await loader_mod._apply_userbot_event_bus_actions(
+        state,
+        "evt_payout_loader_reply_to_user",
+        SimpleNamespace(chat_id=-100456),
+        plugin_key="game",
+        entry_key="main",
+        actions=[
+            {
+                "type": "payout",
+                "amount": 12,
+                "reply_to_user_id": 12345,
+                "reply_to_search_limit": 20,
+            }
+        ],
+        redis=state.redis,
+    )
+
+    assert failed is False
+    state.client.send_message.assert_awaited_once_with(
+        -100456,
+        "+12",
+        reply_to=66,
+        parse_mode=None,
+    )
+    assert record_action.await_args.kwargs["result"]["reply_to_message_id"] == 66
+    assert record_action.await_args.kwargs["result"]["reply_to_user_id"] == 12345
+
+
+@pytest.mark.asyncio
+async def test_userbot_send_message_action_resolves_reply_to_user_recent_message(monkeypatch) -> None:
+    class _Client:
+        def __init__(self) -> None:
+            self.send_message = AsyncMock(return_value=SimpleNamespace(id=779))
+
+        def iter_messages(self, chat_id, **kwargs):  # noqa: ANN001, ANN003
+            async def _gen():
+                if chat_id == -100789 and kwargs.get("from_user") == 222:
+                    yield SimpleNamespace(id=70, sender_id=222)
+
+            return _gen()
+
+    state = loader_mod._AccountState(account_id=45)
+    state.redis = _FakeRedis()
+    state.client = _Client()
+    state.engine = SimpleNamespace(
+        acquire=AsyncMock(return_value=SimpleNamespace(allowed=True, wait_seconds=0, outcome="ok"))
+    )
+    record_action = AsyncMock()
+    monkeypatch.setattr(loader_mod, "record_action", record_action)
+
+    ok = await loader_mod._apply_userbot_send_message_action(
+        state,
+        SimpleNamespace(chat_id=-100789),
+        {
+            "type": "send_message",
+            "send_via": "userbot_reply",
+            "text": "+88",
+            "reply_to_user_id": 222,
+            "reply_to_search_limit": 20,
+            "context": {"trace_id": "evt_send_reply_to_user"},
+        },
+    )
+
+    assert ok is True
+    state.client.send_message.assert_awaited_once_with(
+        -100789,
+        "+88",
+        reply_to=70,
+        parse_mode=None,
+    )
+    assert record_action.await_args.kwargs["result"]["reply_to_message_id"] == 70
+    assert record_action.await_args.kwargs["result"]["reply_to_user_id"] == 222
+
+
+@pytest.mark.asyncio
 async def test_invoke_interaction_entry_ctx_log_does_not_duplicate_plugin_key() -> None:
     class _InteractionLogPlugin(Plugin):
         key = "_test_interaction_log"
@@ -2704,6 +2800,7 @@ async def test_live_message_ops_defaults_to_userbot_reply(monkeypatch) -> None:
     messages = loader_mod._LiveMessageOps(state, plugin_key="_test_live_messages")
 
     await messages.send(chat_id=-100123, text="命令回复")
+    await messages.payout(chat_id=-100123, amount=88, reply_to_user_id=12345)
 
     assert messages.actions == [
         {
@@ -2716,10 +2813,22 @@ async def test_live_message_ops_defaults_to_userbot_reply(monkeypatch) -> None:
             "context": {
                 "plugin_key": "_test_live_messages",
             },
-        }
+        },
+        {
+            "type": "payout",
+            "chat_id": -100123,
+            "amount": 88,
+            "parse_mode": "plain",
+            "reply_to_message_id": None,
+            "reply_to_user_id": 12345,
+            "context": {
+                "plugin_key": "_test_live_messages",
+            },
+        },
     ]
-    apply_actions.assert_awaited_once()
-    assert apply_actions.await_args.kwargs["actions"][0]["send_via"] == "userbot_reply"
+    assert apply_actions.await_count == 2
+    assert apply_actions.await_args_list[0].kwargs["actions"][0]["send_via"] == "userbot_reply"
+    assert apply_actions.await_args_list[1].kwargs["actions"][0]["type"] == "payout"
 
 
 @pytest.mark.asyncio

@@ -20,6 +20,13 @@
 
 ## [Unreleased]
 
+## [0.49.7] — 2026-07-04 · patch（补丁版本） · UserBot 发奖锚点执行补丁
+
+### Fixed
+- 修复 UserBot Event Bus 直执行路径里的 `payout` / `userbot_reply` 动作忽略 `reply_to_user_id` 的问题；现在插件返回目标用户 ID 时，会先搜索该用户在当前群的近期发言，再回复 `+金额`。
+- 修复常驻插件命令上下文 `ctx.messages` 缺少 `payout()` 方法的问题，配置成自定义命令词的测试/发奖插件也能走平台统一 MessageOps、Trace 与限流链路。
+- 为 loader 直执行路径补齐回归测试，覆盖 `payout`、`send_message(userbot_reply)` 和 live `ctx.messages.payout()`。
+
 ## [0.49.6] — 2026-07-04 · patch（补丁版本） · TOTP 策略与按钮参与发奖补丁
 
 ### Added

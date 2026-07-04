@@ -101,6 +101,8 @@ from .manifest import Manifest
 log = logging.getLogger(__name__)
 
 _INTERACTION_RULE_OWNED_REASON_CODE = "interaction_rule_owned"
+_RECENT_USER_MESSAGE_SEARCH_LIMIT = 200
+_RECENT_USER_MESSAGE_SEARCH_LIMIT_MAX = 500
 
 
 @dataclass(frozen=True)
@@ -1421,7 +1423,17 @@ async def _apply_userbot_payout_action(state: _AccountState, event: Any, action:
     if not text:
         await record_action(action.get("context"), action, TRACE_STATUS_FAILED, error_code="empty_message_text", error="payout text is empty")
         return False
-    reply_to = _int_or_none(action.get("reply_to_message_id"))
+    try:
+        reply_to, reply_to_user_id = await _resolve_userbot_reply_to_message_id(state, action, target_chat_id)
+    except ValueError as exc:
+        await record_action(
+            action.get("context"),
+            action,
+            TRACE_STATUS_FAILED,
+            error_code="reply_anchor_missing",
+            error=str(exc),
+        )
+        return False
     parse_mode = _action_parse_mode(action)
     if not await _acquire_userbot_action_rate_limit(
         state,
@@ -1441,6 +1453,7 @@ async def _apply_userbot_payout_action(state: _AccountState, event: Any, action:
             "message_id": getattr(sent, "id", None),
             "chat_id": target_chat_id,
             "reply_to_message_id": reply_to,
+            "reply_to_user_id": reply_to_user_id,
         }
         await _save_action_message_id(state, action, result)
         await record_action(
@@ -1512,6 +1525,12 @@ async def _apply_userbot_send_message_action(
                 last_code = "userbot_offline"
                 last_error = "userbot client unavailable"
                 continue
+            try:
+                reply_to, reply_to_user_id = await _resolve_userbot_reply_to_message_id(state, action, target_chat_id)
+            except ValueError as exc:
+                last_code = "reply_anchor_missing"
+                last_error = str(exc)
+                continue
             send_text, button_map = _render_userbot_button_fallback(text, reply_markup)
             if not await _acquire_userbot_action_rate_limit(
                 state,
@@ -1527,7 +1546,12 @@ async def _apply_userbot_send_message_action(
                     reply_to=reply_to,
                     parse_mode=_telethon_parse_mode(parse_mode),
                 )
-                result = {"message_id": getattr(sent, "id", None), "chat_id": target_chat_id}
+                result = {
+                    "message_id": getattr(sent, "id", None),
+                    "chat_id": target_chat_id,
+                    "reply_to_message_id": reply_to,
+                    "reply_to_user_id": reply_to_user_id,
+                }
                 await _save_userbot_button_map(
                     redis=redis or state.redis or get_redis(),
                     session_key=session_key,
@@ -1878,6 +1902,85 @@ def _int_or_none(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _recent_user_message_search_limit(raw: Any) -> int:
+    value = _int_or_none(raw)
+    if value is None:
+        value = _RECENT_USER_MESSAGE_SEARCH_LIMIT
+    return max(1, min(_RECENT_USER_MESSAGE_SEARCH_LIMIT_MAX, value))
+
+
+def _telegram_message_id(msg: Any) -> int | None:
+    return _int_or_none(getattr(msg, "id", None) or getattr(msg, "message_id", None))
+
+
+def _telegram_message_sender_id(msg: Any) -> int | None:
+    sender_id = _int_or_none(getattr(msg, "sender_id", None))
+    if sender_id is not None:
+        return sender_id
+    from_id = getattr(msg, "from_id", None)
+    return _int_or_none(getattr(from_id, "user_id", None) or getattr(from_id, "channel_id", None))
+
+
+async def _find_recent_message_id_for_user(
+    client: Any,
+    chat_id: int,
+    user_id: int,
+    *,
+    limit: int,
+) -> int | None:
+    try:
+        async for msg in client.iter_messages(chat_id, from_user=user_id, limit=limit):
+            msg_id = _telegram_message_id(msg)
+            if msg_id is not None:
+                return msg_id
+    except Exception:  # noqa: BLE001
+        log.debug(
+            "recent participant message search via from_user failed chat=%s user=%s",
+            chat_id,
+            user_id,
+            exc_info=True,
+        )
+
+    try:
+        async for msg in client.iter_messages(chat_id, limit=limit):
+            if _telegram_message_sender_id(msg) != user_id:
+                continue
+            msg_id = _telegram_message_id(msg)
+            if msg_id is not None:
+                return msg_id
+    except Exception:  # noqa: BLE001
+        log.debug(
+            "recent participant message fallback search failed chat=%s user=%s",
+            chat_id,
+            user_id,
+            exc_info=True,
+        )
+    return None
+
+
+async def _resolve_userbot_reply_to_message_id(
+    state: _AccountState,
+    action: dict[str, Any],
+    target_chat_id: int,
+) -> tuple[int | None, int | None]:
+    reply_to = _int_or_none(action.get("reply_to_message_id"))
+    reply_to_user_id = _int_or_none(action.get("reply_to_user_id"))
+    if reply_to is None and action.get("reply_to_user_id") not in (None, "") and reply_to_user_id is None:
+        raise ValueError("reply_to_user_id 非法")
+    if reply_to is None and reply_to_user_id is not None:
+        if state.client is None:
+            raise ValueError("userbot client unavailable")
+        reply_to = await _find_recent_message_id_for_user(
+            state.client,
+            target_chat_id,
+            reply_to_user_id,
+            limit=_recent_user_message_search_limit(action.get("reply_to_search_limit")),
+        )
+        if reply_to is None:
+            raise ValueError(f"找不到用户 {reply_to_user_id} 在当前群的近期消息，无法定位发奖回复目标")
+    return reply_to, reply_to_user_id
 
 
 def _action_parse_mode(action: dict[str, Any]) -> str:
@@ -2700,6 +2803,14 @@ class _LiveMessageOps:
 
         buffered = BufferedMessageOps()
         action = await buffered.answer_inline_query(**kwargs)
+        await self.apply([action])
+        return action
+
+    async def payout(self, **kwargs: Any) -> dict[str, Any]:
+        from .message_ops import BufferedMessageOps
+
+        buffered = BufferedMessageOps()
+        action = await buffered.payout(**kwargs)
         await self.apply([action])
         return action
 
