@@ -20,6 +20,13 @@
 
 ## [Unreleased]
 
+## [0.49.2] — 2026-07-04 · patch（补丁版本） · 插件库来源语义补丁
+
+### Changed
+- 推荐插件入口改为只从插件库读取并按普通 `repo` 安装记录落库，不再把 `auto_reply`、`autorepeat`、`math10` 等普通插件标记为 TelePilot 本体随包或内置插件。
+- 删除仍被 Git 跟踪的随包 `official` 插件源码目录，明确 TelePilot 本体只保留平台能力与兼容壳，普通插件统一通过插件库安装到 `plugins/installed/{key}`。
+- 前端和插件开发文档同步“插件库推荐/维护插件”口径，旧 `source=official` 仅作为历史安装记录兼容展示。
+
 ## [0.49.1] — 2026-07-04 · patch（补丁版本） · 交互插件加载与发奖补丁
 
 ### Fixed

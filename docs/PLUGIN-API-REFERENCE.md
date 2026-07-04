@@ -115,7 +115,7 @@ class PluginContext:
         """创建与 bot 的对话会话。"""
 ```
 
-注意：核心 builtin 兼容代码可能拿到完整运行时能力；远程/本地/官方可选安装型插件拿到的是受控上下文：`ctx.client` 是平台提供的客户端 facade，指令 handler 中传入的 `client` 参数与 `ctx.client` 同源，`ctx.engine` 和 `ctx.redis` 通常为 `None`，只能通过声明过的权限以及 `ctx.scheduler`、`ctx.http`、`ctx.ai`、`ctx.messages` 等 facade 使用平台能力。它用于收口常用操作和审计，不是公共插件市场式强沙箱。
+注意：核心平台兼容代码可能拿到完整运行时能力；远程/本地/插件库安装型插件拿到的是受控上下文：`ctx.client` 是平台提供的客户端 facade，指令 handler 中传入的 `client` 参数与 `ctx.client` 同源，`ctx.engine` 和 `ctx.redis` 通常为 `None`，只能通过声明过的权限以及 `ctx.scheduler`、`ctx.http`、`ctx.ai`、`ctx.messages` 等 facade 使用平台能力。它用于收口常用操作和审计，不是公共插件市场式强沙箱。
 
 ### 4.0 受控 facade：ctx.http 与 ctx.ai
 
@@ -376,16 +376,16 @@ return {
 POST /api/accounts/{aid}/features/{key}/config/actions/{action_key}
 ```
 
-**字段验证清单（核心能力与官方可选插件）：**
+**字段验证清单（平台能力与插件库插件）：**
 
 | 插件 | config_schema | UI 模式 | 状态 |
 |------|--------------|---------|------|
 | forward | ✅ target_chat_id, mode | `rules` | 核心兼容插件 |
-| auto_reply | 规则通过 Rules API 管理 | `rules` | 官方推荐插件，按需安装 |
-| autorepeat | ✅ trigger / repeat / chat 配置 | `rules` | 官方推荐插件，按需安装 |
-| game24 | ✅ command, timeout | `single` | 官方可选插件，按需安装 |
-| math10 | ✅ Event Bus / prize；历史 `interaction_entries.start_math_game` 兼容 | `single` | 官方可选插件，交互 Bot 可启动 |
-| codex_image | ✅ command, access_token, model, message_template, image_size/aspect_ratio/image_format, timeout/status/output/instructions | `single` | 官方可选图片插件，按需安装 |
+| auto_reply | 规则通过 Rules API 管理 | `rules` | 插件库推荐插件，按需安装 |
+| autorepeat | ✅ trigger / repeat / chat 配置 | `rules` | 插件库推荐插件，按需安装 |
+| game24 | ✅ command, timeout | `single` | 插件库插件，按需安装 |
+| math10 | ✅ Event Bus / prize；历史 `interaction_entries.start_math_game` 兼容 | `single` | 插件库插件，交互 Bot 可启动 |
+| codex_image | ✅ command, access_token, model, message_template, image_size/aspect_ratio/image_format, timeout/status/output/instructions | `single` | 插件库图片插件，按需安装 |
 | scheduler | ✅ default_notify, max_tasks | `platform` | 平台基础能力 |
 
 `examples/plugins/translate` 是历史示例目录，不属于当前内置插件清单；其中直接复用后端私有 LLM 链路的写法也不是第三方插件推荐模板。新增第三方 Telegram 事件插件优先参考 `examples/plugins/event_bus_demo`；需要 HTTP 时参考 `examples/plugins/with_http`，需要 AI 文本能力时参考 `examples/plugins/with_ai`，需要把旧交互入口迁移到标准信封时参考 `examples/plugins/with_interaction`。
@@ -1601,8 +1601,8 @@ class MyPlugin(Plugin):
 
 | 分类 | 适用场景 | 大白话 | 典型功能 | 配置入口 |
 |------|---------|--------|---------|---------|
-| **规则配置页** | 多条规则独立配置，需 CRUD + 试运行 | 像自动化流水线：先建规则，规则只保存配置和 dry-run 输入 | forward、官方可选 auto_reply / autorepeat、远程规则插件 | 专属配置页 |
-| **单配置对象 / 通用独立配置页** | 每个账号只保存一份插件配置，或轻量插件只需要字段表单 | 像一个工具面板：配置好触发指令和参数，直接运行；普通字段由 schema 驱动渲染 | 官方可选 game24 / math10 / codex_image / chatgpt_image、简单远程插件 / 小工具插件 | 专属或通用独立配置页 |
+| **规则配置页** | 多条规则独立配置，需 CRUD + 试运行 | 像自动化流水线：先建规则，规则只保存配置和 dry-run 输入 | forward、插件库 auto_reply / autorepeat、远程规则插件 | 专属配置页 |
+| **单配置对象 / 通用独立配置页** | 每个账号只保存一份插件配置，或轻量插件只需要字段表单 | 像一个工具面板：配置好触发指令和参数，直接运行；普通字段由 schema 驱动渲染 | 插件库 game24 / math10 / codex_image / chatgpt_image、简单远程插件 / 小工具插件 | 专属或通用独立配置页 |
 | **基础能力 — 平台内置** | 系统运行时常驻能力，不作为普通插件展示 | 像底座服务：给插件或平台调用，不强调启停 | scheduler | 平台功能页 |
 
 **关键判断**：需要维护多条规则 → `rules`；只有一份账号配置或普通字段表单足够 → `single`；旧插件已经写了 `schema` → 按 `single` 通用独立页兼容；像调度器这种系统服务 → `platform`。这里的 `rules` 只表示配置页/CRUD/dry-run 形态，不是旧运行时规则驱动主路径；Telegram 事件投递仍以 Event Bus + `event_subscriptions` + 标准 action 为主。
@@ -1962,7 +1962,7 @@ config_schema={
 
 专属页面字段应与运行时实际读取的配置保持一致；`manifest.config_schema` 也要同步，避免通用配置页、接口校验和文档出现三套口径。
 
-`codex_image` 现在是官方可选图片插件，源码由官方远程插件仓库分发，用户需在“安装插件”页安装后才会复制到 `plugins/installed/codex_image/` 并加载。旧数据库中已经启用或保存配置的 `codex_image` 会在 seed 阶段尝试从官方插件仓库登记为 official installed 插件，保留账号配置和规则引用；未使用过的旧 builtin feature 行会被清理，避免误展示。
+`codex_image` 现在是插件库图片插件，源码由插件库分发，用户需在“安装插件”页安装后才会复制到 `plugins/installed/codex_image/` 并加载。旧数据库中已经启用或保存配置的 `codex_image` 会在 seed 阶段尝试从插件库登记为 repo installed 插件，保留账号配置和规则引用；未使用过的旧 builtin feature 行会被清理，避免误展示。
 
 ---
 

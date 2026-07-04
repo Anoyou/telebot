@@ -96,7 +96,7 @@ function compareFeatureKey(a: FeatureInfo, b: FeatureInfo) {
 
 function featureSourceLabel(feature: Pick<FeatureInfo, "is_builtin" | "source_label">) {
   if (feature.is_builtin) return "平台内置";
-  if (feature.source_label === "Official") return "推荐源";
+  if (feature.source_label === "Official") return "历史推荐源";
   return "第三方";
 }
 

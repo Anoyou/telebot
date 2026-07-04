@@ -305,7 +305,7 @@ function shortSourceUrl(value?: string | null): string {
   const raw = (value || "").trim();
   if (!raw) return "-";
   if (raw.startsWith("local://")) return "本地导入";
-  if (raw.startsWith("official://")) return "推荐源";
+  if (raw.startsWith("official://")) return "历史推荐源";
   const urlText = raw.startsWith("git+ssh://") ? raw.replace(/^git\+/, "") : raw;
   try {
     const url = new URL(urlText);
@@ -331,7 +331,7 @@ function installSourceLibraryLabel(
 ): string {
   const sourceValue = (source || "").toLowerCase();
   if (sourceValue === "builtin") return "系统核心";
-  if (sourceValue === "official" || sourceUrl?.startsWith("official://")) return "推荐源";
+  if (sourceValue === "official" || sourceUrl?.startsWith("official://")) return "历史推荐源";
   if (sourceValue === "local" || sourceUrl?.startsWith("local://")) return "本地导入";
   const repoName = repoNameForSourceUrl(sourceUrl, repos);
   if (repoName) return repoName;
@@ -527,7 +527,7 @@ function PluginInstallGuide({
 
 
 // ═══════════════════════════════════════════════════════════════════
-// Tab 2：插件管理 — 推荐源 + 远程插件统一展示
+// Tab 2：插件管理 — 插件库 + 远程插件统一展示
 // ═══════════════════════════════════════════════════════════════════
 function PluginsManagementTab() {
   return (
@@ -657,7 +657,7 @@ function OfficialPluginsCard() {
         <SectionHeader
           icon={Sparkles}
           title="推荐插件"
-          description="这些条目来自 TelePilot 预置推荐源，只保留首次部署建议安装的自动回复和自动复读；更多插件请添加自己的 Git 插件仓库。"
+          description="这些条目来自你的插件库快捷入口，只保留首次部署建议安装的自动回复和自动复读；更多插件请添加自己的 Git 插件仓库。"
           meta={<SignalPill tone="neutral" label="推荐项" value={items.length} className="h-8" />}
           actions={(
             <Button
@@ -684,7 +684,7 @@ function OfficialPluginsCard() {
         ) : officialQ.isError ? (
           <p className="py-3 text-sm text-destructive">推荐插件源加载失败：{getErrMsg(officialQ.error)}</p>
         ) : items.length === 0 ? (
-          <p className="py-3 text-sm text-muted-foreground">当前推荐源没有发现自动回复或自动复读。</p>
+          <p className="py-3 text-sm text-muted-foreground">当前插件库没有发现自动回复或自动复读。</p>
         ) : (
           <div className="grid gap-2 lg:grid-cols-2">
             {items.map((plugin) => {
@@ -1334,7 +1334,7 @@ function RemoteInstallCard() {
   );
 }
 
-// ── 已安装插件列表（推荐源 + 远程） ────────────────────────────────
+// ── 已安装插件列表（插件库 + 远程） ────────────────────────────────
 function InstalledPluginsSection() {
   const nav = useNavigate();
   const qc = useQueryClient();
@@ -1475,14 +1475,14 @@ function InstalledPluginsSection() {
               </TableRow>
             </TableHeader>
             <TableBody>
-              {/* 核心内置插件 */}
+              {/* 平台基础能力 */}
               {builtin.map((f) => (
                 <TableRow key={f.key}>
                   <TableCell>
                     <div className="font-medium">{f.display_name}</div>
                     <div className="font-mono text-xs text-muted-foreground">{f.key}</div>
                   </TableCell>
-                  <TableCell><MetaBadge>核心内置</MetaBadge></TableCell>
+                  <TableCell><MetaBadge>平台能力</MetaBadge></TableCell>
                   <TableCell>
                     <div className="max-w-[180px] truncate text-sm" title="系统核心">系统核心</div>
                   </TableCell>
@@ -1503,7 +1503,7 @@ function InstalledPluginsSection() {
                   </TableCell>
                   <TableCell>
                     <MetaBadge tone={row.source === "official" ? "success" : "neutral"}>
-                      {row.source === "official" ? "推荐源" : "第三方"}
+                      {row.source === "official" ? "历史推荐源" : "第三方"}
                     </MetaBadge>
                   </TableCell>
                   <TableCell>

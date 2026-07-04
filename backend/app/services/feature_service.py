@@ -268,10 +268,10 @@ async def _migrate_optional_builtin_features(
     db: AsyncSession,
     existing: dict[str, Feature],
 ) -> tuple[int, bool]:
-    """把历史 builtin 可选插件收敛成 official installed 插件。
+    """把历史 builtin 可选插件收敛成插件库 installed 插件。
 
     0.35 起这些插件不再作为 builtin 自动出现。若旧数据库里已经有账号开关、
-    规则引用、全局配置或交互规则引用，则自动登记为官方已安装包，保证旧配置
+    规则引用、全局配置或交互规则引用，则自动登记为插件库已安装包，保证旧配置
     继续可用；若从未使用，则删除旧 feature 行，避免插件中心继续展示。
     """
 
@@ -281,8 +281,8 @@ async def _migrate_optional_builtin_features(
 
     try:
         from ..db.models.plugin import (
-            PLUGIN_SOURCE_OFFICIAL,
-            PLUGIN_TRUST_OFFICIAL,
+            PLUGIN_SOURCE_REPO,
+            PLUGIN_TRUST_COMMUNITY,
         )
         from . import plugin_repo_service
         from .remote_plugin_service import upsert_installed_plugin
@@ -376,7 +376,7 @@ async def _migrate_optional_builtin_features(
                 )
                 staging.rename(target)
             except Exception:  # noqa: BLE001
-                log.warning("复制推荐源插件 %s 到 installed 失败", key, exc_info=True)
+                log.warning("复制插件库插件 %s 到 installed 失败", key, exc_info=True)
                 continue
 
         if feature.is_builtin:
@@ -401,15 +401,15 @@ async def _migrate_optional_builtin_features(
         await upsert_installed_plugin(
             db,
             key=key,
-            source=PLUGIN_SOURCE_OFFICIAL,
+            source=PLUGIN_SOURCE_REPO,
             source_url=official_source.source_url,
             installed_path=str(plugin_repo_service._plugin_dir(key)),
             version=version,
             manifest_json=manifest_json,
             enabled=was_enabled,
-            signature_ok=True,
-            trust_tier=PLUGIN_TRUST_OFFICIAL,
-            source_label="Official",
+            signature_ok=None,
+            trust_tier=PLUGIN_TRUST_COMMUNITY,
+            source_label="Plugin Repo",
             last_install_error=None,
             lint_warnings=lint_warnings,
         )

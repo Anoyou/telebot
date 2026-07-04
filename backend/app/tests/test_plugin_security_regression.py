@@ -1387,28 +1387,18 @@ class TestPluginRepoInstallFlow:
         assert not (tmp_path / "installed" / "local_demo.installing").exists()
 
     @pytest.mark.asyncio
-    async def test_install_official_plugin_writes_official_install_record(self, monkeypatch, tmp_path):
+    async def test_install_official_plugin_ignores_local_bundled_source(self, monkeypatch, tmp_path):
         monkeypatch.setattr(repo_svc.settings, "plugins_installed_dir", str(tmp_path / "installed"))
         official_root = tmp_path / "official"
         _write_runtime_plugin(official_root / "official_demo", key="official_demo", version="4.0.0")
         monkeypatch.setattr(repo_svc, "_official_plugin_root", lambda: official_root)
         db = _FakePluginRepoDB()
 
-        row = await repo_svc.install_official_plugin(db, "official_demo", default_enabled=False)
+        with pytest.raises(repo_svc.PluginNotInRepo):
+            await repo_svc.install_official_plugin(db, "official_demo", default_enabled=False)
 
-        installed = db.installed_rows["official_demo"]
-        feature = db.features["official_demo"]
-        assert row.name == "official_demo"
-        assert installed.source == "official"
-        assert installed.source_url == "official://official_demo"
-        assert installed.version == "4.0.0"
-        assert installed.enabled is False
-        assert installed.signature_ok is True
-        assert installed.trust_tier == "official"
-        assert installed.source_label == "Official"
-        assert feature.is_builtin is False
-        assert (tmp_path / "installed" / "official_demo").is_dir()
-        assert not (tmp_path / "installed" / "official_demo.installing").exists()
+        assert "official_demo" not in db.installed_rows
+        assert not (tmp_path / "installed" / "official_demo").exists()
 
     @pytest.mark.asyncio
     async def test_remote_official_repo_lists_only_official_tagged_plugins(self, monkeypatch, tmp_path):
@@ -1431,7 +1421,7 @@ class TestPluginRepoInstallFlow:
         assert [row.name for row in rows] == ["official_remote"]
 
     @pytest.mark.asyncio
-    async def test_install_remote_official_plugin_writes_official_record(self, monkeypatch, tmp_path):
+    async def test_install_remote_official_plugin_writes_repo_record(self, monkeypatch, tmp_path):
         monkeypatch.setattr(repo_svc.settings, "plugins_installed_dir", str(tmp_path / "installed"))
         monkeypatch.setattr(repo_svc.settings, "official_plugin_repo_url", "https://github.com/Anoyou/telebot-plugins")
         monkeypatch.setattr(repo_svc, "_official_plugin_root", lambda: tmp_path / "empty-official")
@@ -1452,11 +1442,12 @@ class TestPluginRepoInstallFlow:
 
         installed = db.installed_rows["official_remote"]
         assert row.name == "official_remote"
-        assert installed.source == "official"
+        assert installed.source == "repo"
         assert installed.source_url == "https://github.com/Anoyou/telebot-plugins"
         assert installed.version == "4.1.0"
-        assert installed.trust_tier == "official"
-        assert installed.source_label == "Official"
+        assert installed.signature_ok is None
+        assert installed.trust_tier == "community"
+        assert installed.source_label == "Plugin Repo"
         assert (tmp_path / "installed" / "official_remote").is_dir()
 
     @pytest.mark.asyncio
@@ -1491,6 +1482,7 @@ class TestPluginRepoInstallFlow:
 
         installed = db.installed_rows["official_remote"]
         assert row.version == "4.1.0"
+        assert installed.source == "repo"
         assert installed.version == "4.1.0"
         assert installed.enabled is True
         assert (install_dir / "plugin.json").read_text(encoding="utf-8").count("4.1.0") == 1

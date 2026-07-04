@@ -105,17 +105,16 @@ backend/app/worker/plugins/
 ├── base.py              # Plugin 基类 + register 装饰器
 ├── manifest.py          # Manifest 数据类
 ├── loader.py            # 插件加载器 + 热重载 + generation guard
-├── builtin/             # 核心平台/兼容代码，普通插件不要放这里
+├── builtin/             # 平台能力/兼容壳，普通插件不要放这里
 │   ├── scheduler/        # 平台调度兼容壳，实际由 PlatformScheduler 执行
 │   └── forward/
-└── official/            # TelePilot 随包轻量兼容插件源；游戏/图片类官方插件来自远程官方仓库
 
-plugins/installed/       # 远程/本地/官方可选安装后的运行目录
+plugins/installed/       # 远程/本地/插件库安装后的运行目录
 ├── guess_number/
 └── (更多插件...)
 ```
 
-`backend/app/worker/plugins/builtin/` 只保留核心平台能力和轻量兼容插件，扫描器只把核心平台能力纳入 builtin registry。`chatgpt_image`、`codex_image`、`game24`、`math10` 已物理迁出 Core，由官方远程插件仓库分发；Web 安装后复制到 `plugins/installed/{key}/`，再按安装型插件加载。`auto_reply`、`autorepeat` 仍按官方可选插件处理，不作为默认内置插件自动启用。
+`backend/app/worker/plugins/builtin/` 只保留平台能力和兼容壳，扫描器只把平台能力纳入 builtin registry。`auto_reply`、`autorepeat`、`chatgpt_image`、`codex_image`、`game24`、`math10` 都不再由 TelePilot 本体分发；Web 推荐入口只从 `OFFICIAL_PLUGIN_REPO_URL` 指向的插件库读取，安装后复制到 `plugins/installed/{key}/`，再按安装型插件加载。
 
 ### 生命周期
 

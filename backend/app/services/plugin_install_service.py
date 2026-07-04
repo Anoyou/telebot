@@ -45,6 +45,7 @@ from .remote_plugin_service import (
 )
 
 log = logging.getLogger(__name__)
+# ``official`` 仅保留给旧安装记录的启停/卸载兼容；新推荐入口写入 repo。
 _PACKAGE_MANAGED_SOURCES = (PLUGIN_SOURCE_ZIP, PLUGIN_SOURCE_OFFICIAL)
 
 
@@ -409,7 +410,7 @@ async def set_enabled(db: AsyncSession, key: str, enabled: bool) -> InstalledPlu
 
 
 async def list_installed(db: AsyncSession) -> list[InstalledPlugin]:
-    """列出 zip 与官方可选安装包，按 key 字典序。"""
+    """列出 zip 与旧 official 安装包，按 key 字典序。"""
     rows = (
         await db.execute(
             select(InstalledPlugin)

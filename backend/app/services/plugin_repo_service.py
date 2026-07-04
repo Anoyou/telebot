@@ -39,11 +39,9 @@ from ..db.models.account import Account
 from ..db.models.feature import FEATURE_STATE_DISABLED, AccountFeature, Feature
 from ..db.models.plugin import (
     PLUGIN_SOURCE_LOCAL,
-    PLUGIN_SOURCE_OFFICIAL,
     PLUGIN_SOURCE_REPO,
     PLUGIN_TRUST_COMMUNITY,
     PLUGIN_TRUST_LOCAL,
-    PLUGIN_TRUST_OFFICIAL,
     InstalledPlugin,
 )
 from ..db.models.plugin_repo import PluginRepo
@@ -149,10 +147,11 @@ def _local_import_root() -> Path:
 
 
 def _official_plugin_root() -> Path:
-    """TelePilot 随包官方兼容插件目录。
+    """历史随包推荐插件目录。
 
-    游戏和图片类官方插件已经迁出到远程官方插件仓库；这里仅保留仍随包的
-    轻量兼容插件。
+    当前 TelePilot 本体不再从这里分发普通插件；推荐入口只读取
+    ``settings.official_plugin_repo_url`` 指向的插件库。保留函数名是为了兼容
+    旧测试和迁移代码里对该路径的 monkeypatch。
     """
 
     return Path(__file__).resolve().parents[1] / "worker" / "plugins" / "official"
@@ -994,25 +993,9 @@ def _plugin_meta_has_official_tag(meta: PluginMetadata) -> bool:
 
 
 def _iter_local_official_sources() -> list[_OfficialPluginSource]:
-    root = _official_plugin_root()
-    if not root.exists():
-        return []
-    out: list[_OfficialPluginSource] = []
-    for default_name, plugin_dir in _scan_plugins(root):
-        try:
-            meta = _read_plugin_metadata(plugin_dir, fallback_name=default_name)
-        except InvalidPluginMetadata:
-            log.warning("跳过官方非法插件目录: %s", plugin_dir)
-            continue
-        out.append(
-            _OfficialPluginSource(
-                plugin_dir=plugin_dir,
-                meta=meta,
-                source_url=f"official://{meta.name}",
-                remote=False,
-            )
-        )
-    return out
+    """不再从 TelePilot 随包目录提供推荐插件。"""
+
+    return []
 
 
 async def _iter_remote_official_sources(*, force_refresh: bool = False) -> list[_OfficialPluginSource]:
@@ -1063,11 +1046,7 @@ def _manifest_json_for_official_source(source: _OfficialPluginSource) -> dict[st
 
 
 async def list_official_plugins(db: AsyncSession) -> list[PluginRepoPlugin]:
-    """列出 TelePilot 官方可选插件，并标记安装状态。
-
-    本地随包 official 目录只保留轻量兼容插件；游戏/图片类官方插件来自
-    ``settings.official_plugin_repo_url`` 指向的远程插件仓库。
-    """
+    """列出推荐插件库中带 official/recommended 标签的插件，并标记安装状态."""
 
     installed_rows = (
         await db.execute(select(InstalledPlugin.key, InstalledPlugin.version))
@@ -1307,10 +1286,10 @@ async def install_official_plugin(
     *,
     default_enabled: bool = False,
 ) -> RemotePluginView:
-    """从 TelePilot 官方插件入口导入指定插件。
+    """从推荐插件库导入指定插件。
 
-    官方插件可以来自本地兼容目录，也可以来自远程官方插件仓库。远程官方插件
-    安装阶段仍只解析 ``plugin.json``，不执行插件 Python 代码。
+    推荐入口只是插件库的快捷安装入口；安装记录仍按普通 repo 插件落库，
+    不把插件标记为 TelePilot 本体内置或随包插件。
     """
 
     source = await _find_official_plugin_source(plugin_name)
@@ -1364,7 +1343,7 @@ async def install_official_plugin(
             shutil.rmtree(staging, ignore_errors=True)
         if backed_up and backup.exists() and not install_path.exists():
             backup.rename(install_path)
-        raise PluginRepoError("COPY_FAILED", f"复制推荐源插件目录失败: {exc}") from exc
+        raise PluginRepoError("COPY_FAILED", f"复制插件库插件目录失败: {exc}") from exc
     finally:
         if staging.exists():
             shutil.rmtree(staging, ignore_errors=True)
@@ -1395,15 +1374,15 @@ async def install_official_plugin(
         installed_row = await upsert_installed_plugin(
             db,
             key=final_name,
-            source=PLUGIN_SOURCE_OFFICIAL,
+            source=PLUGIN_SOURCE_REPO,
             source_url=source.source_url,
             installed_path=str(install_path),
             version=str(manifest_json.get("version") or staged_meta.version),
             manifest_json=manifest_json,
             enabled=final_enabled,
-            signature_ok=True,
-            trust_tier=PLUGIN_TRUST_OFFICIAL,
-            source_label="Official",
+            signature_ok=None,
+            trust_tier=PLUGIN_TRUST_COMMUNITY,
+            source_label="Plugin Repo",
             last_install_error=None,
             lint_warnings=lint_warnings,
         )

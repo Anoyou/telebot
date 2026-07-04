@@ -87,7 +87,7 @@ function moduleRuntimeLabel(status: string, enabled: boolean) {
 }
 
 function moduleSourceLabel(feature: FeatureInfo) {
-  if (feature.source_label === "Official") return "推荐源";
+  if (feature.source_label === "Official") return "历史推荐源";
   if (feature.source_label === "core") return "平台";
   return feature.source_type === "remote" ? "远程" : "本地";
 }
@@ -120,9 +120,9 @@ function moduleTrustBadge(
   }
   if (feature.source_label === "Official" || install?.source === "official") {
     return {
-      label: "推荐源",
+      label: "历史推荐源",
       tone: "success",
-      title: "来自 TelePilot 预置推荐来源，可手动卸载。",
+      title: "由旧推荐源安装记录保留；新安装会按普通插件库插件记录。",
     };
   }
   if (signatureOk === true) {

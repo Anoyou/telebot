@@ -372,7 +372,7 @@ def _source_label_for_installed(row: InstalledPlugin) -> str:
     if row.source_label:
         return row.source_label
     if row.source == PLUGIN_SOURCE_OFFICIAL:
-        return "Official"
+        return "Plugin Repo"
     if row.source == PLUGIN_SOURCE_REPO:
         return "Plugin Repo"
     if row.source == PLUGIN_SOURCE_LOCAL:

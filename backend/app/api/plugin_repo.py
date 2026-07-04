@@ -143,7 +143,7 @@ async def install_local_plugin(
 
 @router.get("/official/plugins", response_model=list[PluginRepoPlugin])
 async def list_official_plugins(db: DBSession, _user: CurrentUser):
-    """列出 TelePilot 官方可选插件。"""
+    """列出推荐插件库中的插件。"""
     try:
         return await svc.list_official_plugins(db)
     except (GitOperationFailed, InvalidPluginMetadata) as e:
@@ -163,7 +163,7 @@ async def install_official_plugin(
     _user: CurrentUser,
     body: InstallFromRepoBody | None = None,
 ):
-    """从 TelePilot 官方插件入口导入插件。"""
+    """从推荐插件库快捷安装插件。"""
     default_enabled = bool(body.default_enabled) if body else False
     try:
         row = await svc.install_official_plugin(

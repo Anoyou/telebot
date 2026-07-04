@@ -396,7 +396,7 @@ export function GenericPluginConfigPage() {
             <span>账号：{accountLabel}</span>
             {feature ? (
               <Badge variant={feature.is_builtin ? "secondary" : "outline"}>
-                {feature.is_builtin ? "内置" : "第三方"}
+                {feature.is_builtin ? "平台能力" : "第三方"}
               </Badge>
             ) : null}
           </div>

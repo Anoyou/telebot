@@ -80,8 +80,8 @@ class Settings(BaseSettings):
     plugins_installed_dir: str = "./plugins/installed"
     # 插件仓库（plugin_repo）本地克隆缓存目录；用于浏览仓库内可装插件而不重复克隆。
     plugin_repos_cache_dir: str = "./data/plugin_repos"
-    # 官方可选插件远程仓库。Core 不再随包携带游戏/图片类官方插件源码；
-    # 安装页通过这个仓库读取带 official 标签的插件。
+    # 推荐插件库。Core 不再随包携带普通插件源码；安装页通过这个仓库
+    # 读取带 official/recommended 标签的插件。
     official_plugin_repo_url: str = "https://github.com/Anoyou/telebot-plugins"
     # 上传 zip 时验签使用的 Ed25519 公钥（PEM）；为空表示不验签，前端给出"未签名"警告。
     # 公钥示例：-----BEGIN PUBLIC KEY-----\nMC...\n-----END PUBLIC KEY-----

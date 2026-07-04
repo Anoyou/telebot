@@ -27,7 +27,7 @@ Manifest 中的 `permissions` 字段声明插件需要的能力：
 | `external_http_bypass_proxy` | direct 网络出口 | 预留高危权限；当前直连还必须通过 Manifest `http.allow_direct` 和账号配置共同开启 |
 | `ai_text` | `ctx.ai.complete` / `ctx.ai.list_providers` | 平台文本 LLM facade；返回脱敏 provider 元数据 |
 
-`permissions` 默认是空列表。远程/本地/官方可选安装型插件漏写权限时不会注入对应 facade，也不能调用未声明的 `ctx.client` / `event` helper 能力；核心 builtin 兼容代码也建议显式写全，方便审计和后续迁移。
+`permissions` 默认是空列表。远程/本地/插件库安装型插件漏写权限时不会注入对应 facade，也不能调用未声明的 `ctx.client` / `event` helper 能力；核心平台兼容代码也建议显式写全，方便审计和后续迁移。
 
 TelePilot 按个人可信插件模式运行：管理员安装并启用插件后，远程插件的业务风险由管理员自行承担；平台不做公共插件市场式强沙箱，但仍保留频控、审计、急停、Trace 和 token/session 隔离。新 Telegram 插件必须走 Event Bus + MessageOps：在 `plugin.json` 声明 `usage`、`event_subscriptions`、`capabilities`，运行时只读取标准事件信封，所有发送、编辑、删除、置顶、按钮 ACK、Inline answer 和结算都返回标准 action 或通过 `ctx.messages` 生成。`ctx.client` 保留给管理员命令和高级兼容场景，不作为普通 Bot 按钮回调的主入口。群里已有的转账结果通知 Bot 只作为外部付款证据来源，不是插件主动发送通道。
 
