@@ -1338,6 +1338,31 @@ async def test_message_ops_buffers_standard_actions() -> None:
 
 
 @pytest.mark.asyncio
+async def test_message_ops_omits_channel_selector_by_default() -> None:
+    ops = BufferedMessageOps()
+
+    await ops.send(text="普通会话消息")
+    await ops.edit(message_id=41, text="普通会话编辑")
+
+    assert ops.actions == [
+        {
+            "type": "send_message",
+            "chat_id": None,
+            "text": "普通会话消息",
+            "parse_mode": "plain",
+            "reply_to_message_id": None,
+        },
+        {
+            "type": "edit_message",
+            "chat_id": None,
+            "message_id": 41,
+            "text": "普通会话编辑",
+            "parse_mode": "plain",
+        },
+    ]
+
+
+@pytest.mark.asyncio
 async def test_message_ops_buffers_channel_selector_with_fallback() -> None:
     ops = BufferedMessageOps()
 
@@ -1420,6 +1445,21 @@ def test_interaction_action_normalize_preserves_raw_selector_for_guard_trace() -
         "channel_selector": {"prefer": ["bot", "notice"], "fallback": True},
         "text": "题面",
     }
+
+
+def test_interaction_action_normalize_does_not_inject_send_via_for_ack_actions() -> None:
+    actions = plugin_loader._normalize_interaction_actions(  # noqa: SLF001
+        [
+            {"type": "answer_callback", "callback_query_id": "cb-1", "text": "收到"},
+            {"type": "answer_inline_query", "inline_query_id": "iq-1", "results": []},
+        ],
+        default_send_via=["userbot_reply"],
+    )
+
+    assert actions == [
+        {"type": "answer_callback", "callback_query_id": "cb-1", "text": "收到"},
+        {"type": "answer_inline_query", "inline_query_id": "iq-1", "results": []},
+    ]
 
 
 @pytest.mark.asyncio

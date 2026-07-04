@@ -1806,6 +1806,54 @@ async def test_invoke_interaction_entry_ctx_log_does_not_duplicate_plugin_key() 
 
 
 @pytest.mark.asyncio
+async def test_invoke_interaction_entry_inherits_default_send_via_for_plain_message_ops() -> None:
+    class _InteractionDefaultChannelPlugin(Plugin):
+        key = "_test_interaction_default_channel"
+        display_name = "交互入口默认通道测试"
+
+        async def on_interaction(self, ctx: PluginContext, entry_key: str, payload: dict[str, Any]) -> list[dict[str, Any]]:
+            assert entry_key == "start"
+            assert payload["session"]["channel"] == "userbot"
+            await ctx.messages.send(text="buffered")
+            return [
+                {"type": "send_message", "text": "returned"},
+                {"type": "send_message", "text": "explicit", "send_via": "interaction_bot"},
+            ]
+
+    state = loader_mod._AccountState(account_id=151)
+    state.instances["_test_interaction_default_channel"] = _InteractionDefaultChannelPlugin()
+    state.contexts["_test_interaction_default_channel"] = PluginContext(
+        account_id=151,
+        feature_key="_test_interaction_default_channel",
+        client=MagicMock(),
+    )
+    loader_mod._STATES[151] = state
+    try:
+        actions = await loader_mod.invoke_interaction_entry(
+            151,
+            plugin_key="_test_interaction_default_channel",
+            entry_key="start",
+            payload={"session": {"channel": "userbot"}},
+            default_send_via=["userbot_reply"],
+        )
+
+        assert actions == [
+            {
+                "type": "send_message",
+                "chat_id": None,
+                "text": "buffered",
+                "parse_mode": "plain",
+                "reply_to_message_id": None,
+                "send_via": "userbot_reply",
+            },
+            {"type": "send_message", "text": "returned", "send_via": "userbot_reply"},
+            {"type": "send_message", "text": "explicit", "send_via": "interaction_bot"},
+        ]
+    finally:
+        loader_mod._STATES.pop(151, None)
+
+
+@pytest.mark.asyncio
 async def test_invoke_interaction_entry_uses_call_scoped_contexts() -> None:
     seen: list[tuple[str, bool, bool]] = []
     ready: asyncio.Queue[None] = asyncio.Queue()
@@ -1920,6 +1968,8 @@ async def test_userbot_event_bus_entry_uses_call_scoped_contexts() -> None:
     assert seen == [("first", False, False), ("second", False, False)]
     assert [item["text"] for item in first_actions] == ["buffered first", "returned first"]
     assert [item["text"] for item in second_actions] == ["buffered second", "returned second"]
+    assert [item["send_via"] for item in first_actions] == ["userbot_reply", "userbot_reply"]
+    assert [item["send_via"] for item in second_actions] == ["userbot_reply", "userbot_reply"]
     assert base_ctx.messages == SimpleNamespace(kind="base_messages")
 
 
@@ -2413,6 +2463,121 @@ async def test_direct_passthrough_consumes_raw_event_before_event_bus(monkeypatc
         _REGISTRY.pop("_test_direct_enabled", None)
 
 
+@pytest.mark.asyncio
+async def test_direct_passthrough_broadcasts_before_incoming_guards(monkeypatch) -> None:
+    from app.worker.plugins.base import _REGISTRY, register
+
+    calls: list[tuple[str, str]] = []
+
+    @register
+    class _DirectBroadcastA(Plugin):
+        key = "_test_direct_broadcast_a"
+        display_name = "直通广播 A"
+        owner_only = False
+
+        async def on_direct_message(self, ctx: PluginContext, event: Any) -> None:
+            calls.append((self.key, str(getattr(event, "raw_text", ""))))
+
+    @register
+    class _DirectBroadcastB(Plugin):
+        key = "_test_direct_broadcast_b"
+        display_name = "直通广播 B"
+        owner_only = False
+
+        async def on_direct_message(self, ctx: PluginContext, event: Any) -> None:
+            calls.append((self.key, str(getattr(event, "raw_text", ""))))
+
+    for cls in (_DirectBroadcastA, _DirectBroadcastB):
+        cls._manifest = Manifest(
+            key=cls.key,
+            display_name=cls.display_name,
+            capabilities={
+                "telegram_direct_passthrough": {
+                    "enabled": True,
+                    "reason": "测试直通广播顺序",
+                    "sources": ["userbot"],
+                    "directions": ["incoming"],
+                }
+            },
+        )
+
+    class _Event:
+        raw_text = "keyword owned by interaction bot"
+        text = "keyword owned by interaction bot"
+        chat_id = -2002
+        sender_id = 42
+        id = 190
+        is_private = False
+        is_group = True
+        is_channel = False
+
+        async def get_chat(self):
+            return None
+
+    fake_db = _FakeDB(
+        accounts={15: _FakeAcc(id=15)},
+        humanize={15: None},
+        afs=[
+            _FakeAF(
+                account_id=15,
+                feature_key="_test_direct_broadcast_a",
+                enabled=True,
+                config={"direct_passthrough": {"enabled": True}},
+            ),
+            _FakeAF(
+                account_id=15,
+                feature_key="_test_direct_broadcast_b",
+                enabled=True,
+                config={"direct_passthrough": {"enabled": True}},
+            ),
+        ],
+        rules=[],
+    )
+    monkeypatch.setattr(loader_mod, "AsyncSessionLocal", lambda: _fake_session_factory(fake_db))
+    monkeypatch.setattr(loader_mod, "_load_log_incoming_messages_setting", AsyncMock(return_value=False))
+    monkeypatch.setattr(loader_mod, "_record_recent_peer", AsyncMock())
+    interaction_owned = AsyncMock(return_value=True)
+    monkeypatch.setattr(loader_mod, "_interaction_bot_owns_incoming_text", interaction_owned)
+    monkeypatch.setattr(loader_mod, "_record_interaction_text_guard_skip", AsyncMock())
+    monkeypatch.setattr(loader_mod, "start_trace", AsyncMock())
+    monkeypatch.setattr(loader_mod, "finish_trace", AsyncMock())
+    monkeypatch.setattr(loader_mod, "update_plugin_runtime_status", AsyncMock())
+
+    captured: list[Any] = []
+
+    def _on(_filter):
+        def _wrap(fn):
+            captured.append(fn)
+            return fn
+
+        return _wrap
+
+    client = MagicMock()
+    client.on = _on
+    paused = asyncio.Event()
+    paused.set()
+
+    try:
+        await load_plugins_for_account(client, account_id=15, paused=paused, redis=_FakeRedis())
+        state = loader_mod._STATES[15]
+        state.ignored_peers = {-1001}
+        incoming_dispatch = captured[-1]
+        await incoming_dispatch(_Event())
+
+        assert calls == [
+            ("_test_direct_broadcast_a", "keyword owned by interaction bot"),
+            ("_test_direct_broadcast_b", "keyword owned by interaction bot"),
+        ]
+        loader_mod._record_recent_peer.assert_not_awaited()
+        interaction_owned.assert_not_awaited()
+        loader_mod.start_trace.assert_not_awaited()
+        loader_mod.finish_trace.assert_not_awaited()
+    finally:
+        loader_mod._STATES.pop(15, None)
+        _REGISTRY.pop("_test_direct_broadcast_a", None)
+        _REGISTRY.pop("_test_direct_broadcast_b", None)
+
+
 def test_userbot_native_raw_boolean_true_is_not_explicit_capability() -> None:
     class _Plugin(Plugin):
         key = "_test_native_raw_bool"
@@ -2527,6 +2692,34 @@ async def test_plugin_command_ctx_messages_apply_records_trace(monkeypatch) -> N
     assert session_payload["expires_at"] > session_payload["created_at"]
     assert state.redis.sets[-1][2]["ex"] == 690
     assert -100123 in state.userbot_session_chats
+
+
+@pytest.mark.asyncio
+async def test_live_message_ops_defaults_to_userbot_reply(monkeypatch) -> None:
+    state = loader_mod._AccountState(18)
+    state.redis = _FakeRedis()
+    apply_actions = AsyncMock(return_value=False)
+    monkeypatch.setattr(loader_mod, "_apply_userbot_event_bus_actions", apply_actions)
+
+    messages = loader_mod._LiveMessageOps(state, plugin_key="_test_live_messages")
+
+    await messages.send(chat_id=-100123, text="命令回复")
+
+    assert messages.actions == [
+        {
+            "type": "send_message",
+            "chat_id": -100123,
+            "text": "命令回复",
+            "parse_mode": "plain",
+            "reply_to_message_id": None,
+            "send_via": "userbot_reply",
+            "context": {
+                "plugin_key": "_test_live_messages",
+            },
+        }
+    ]
+    apply_actions.assert_awaited_once()
+    assert apply_actions.await_args.kwargs["actions"][0]["send_via"] == "userbot_reply"
 
 
 @pytest.mark.asyncio

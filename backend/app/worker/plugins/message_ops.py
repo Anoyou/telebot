@@ -23,7 +23,7 @@ class BufferedMessageOps:
     async def send(
         self,
         *,
-        channel: MessageChannelSelector = "interaction_bot",
+        channel: MessageChannelSelector | None = None,
         chat_id: int | None = None,
         text: str,
         parse_mode: Literal["html", "plain"] = "plain",
@@ -46,7 +46,8 @@ class BufferedMessageOps:
             action["reply_to_user_id"] = reply_to_user_id
         if reply_to_search_limit is not None:
             action["reply_to_search_limit"] = reply_to_search_limit
-        _apply_channel(action, channel)
+        if channel is not None:
+            _apply_channel(action, channel)
         if reply_markup is not None:
             action["reply_markup"] = dict(reply_markup)
         if save_message_id_key:
@@ -61,7 +62,7 @@ class BufferedMessageOps:
     async def edit(
         self,
         *,
-        channel: MessageChannelSelector = "interaction_bot",
+        channel: MessageChannelSelector | None = None,
         chat_id: int | None = None,
         message_id: int,
         text: str,
@@ -75,7 +76,8 @@ class BufferedMessageOps:
             "text": text,
             "parse_mode": parse_mode,
         }
-        _apply_channel(action, channel)
+        if channel is not None:
+            _apply_channel(action, channel)
         if reply_markup is not None:
             action["reply_markup"] = dict(reply_markup)
         self.actions.append(action)
@@ -84,7 +86,7 @@ class BufferedMessageOps:
     async def delete(
         self,
         *,
-        channel: MessageChannelSelector = "interaction_bot",
+        channel: MessageChannelSelector | None = None,
         chat_id: int | None = None,
         message_id: int,
     ) -> dict[str, Any]:
@@ -93,14 +95,15 @@ class BufferedMessageOps:
             "chat_id": chat_id,
             "message_id": message_id,
         }
-        _apply_channel(action, channel)
+        if channel is not None:
+            _apply_channel(action, channel)
         self.actions.append(action)
         return action
 
     async def pin(
         self,
         *,
-        channel: MessageChannelSelector = "interaction_bot",
+        channel: MessageChannelSelector | None = None,
         chat_id: int | None = None,
         message_id: int,
     ) -> dict[str, Any]:
@@ -109,7 +112,8 @@ class BufferedMessageOps:
             "chat_id": chat_id,
             "message_id": message_id,
         }
-        _apply_channel(action, channel)
+        if channel is not None:
+            _apply_channel(action, channel)
         self.actions.append(action)
         return action
 

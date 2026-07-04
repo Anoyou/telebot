@@ -20,6 +20,18 @@
 
 ## [Unreleased]
 
+## [0.49.4] — 2026-07-04 · patch（补丁版本） · 裸直通与会话通道补丁
+
+### Fixed
+- 修复 UserBot 裸直通仍会先经过 incoming 白名单、交互 Bot 关键词接管等普通链路 guard 的问题；开启 `telegram_direct_passthrough` 的插件现在会在普通消息分发前收到原始事件广播。
+- 修复 `ctx.messages.send/edit/delete/pin` 默认写死 `interaction_bot` 的问题；普通动作默认不再携带通道选择，由平台按 `session.channel` 或 UserBot 来源链路补齐。
+- 修复 UserBot Event Bus 与命令侧 live MessageOps 默认输出可能落到交互 Bot 的问题；无显式通道的 UserBot 侧普通消息动作默认归一为 `userbot_reply`。
+- 修复默认通道补齐会污染 `answer_callback` / `answer_inline_query` 动作记录的问题，ACK 类动作不再携带误导性的 `send_via`。
+
+### Docs
+- 统一插件开发文档中的术语：严格意义上只有 `telegram_direct_passthrough` 是裸直通，Event Bus、会话入口和 legacy hook 都属于消息分发或会话路由。
+- 明确“触发方式决定会话通道，插件默认不感知通道；`payout`、收款确认和发奖永远路由 userbot”的插件开发口径。
+
 ## [0.49.3] — 2026-07-04 · patch（补丁版本） · 推荐插件本体剥离补丁
 
 ### Changed

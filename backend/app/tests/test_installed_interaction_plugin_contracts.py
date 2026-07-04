@@ -129,7 +129,6 @@ async def test_example_with_interaction_uses_message_ops_for_visible_reply() -> 
     assert messages.actions == [
         {
                 "type": "send_message",
-                "send_via": "interaction_bot",
                 "chat_id": -100123,
                 "text": "你好，交互 Bot\n收到：框架消息\n触发人：AAA",
                 "parse_mode": "plain",

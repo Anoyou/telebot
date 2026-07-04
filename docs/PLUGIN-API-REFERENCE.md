@@ -27,9 +27,9 @@ async def on_interaction(self, ctx, entry_key, payload):
 
 ## 2. 会话通道与单入口模型
 
-消息链路统一后，互动插件按“触发方式决定整段会话通道”理解：
+消息链路统一后，互动插件按“触发方式决定整段会话通道”理解；插件全程不需要感知或选择收发通道：
 
-| 开局方式 | 默认会话通道 | 说明 |
+| 开局方式 | 会话通道（收 + 发） | 说明 |
 | --- | --- | --- |
 | UserBot 前缀命令 | `userbot` | 后续消息、继续追问、普通回复默认都走 userbot |
 | 关键词 / 付款确认 / 按钮回调 | `interaction_bot` | 题面、按钮、编辑消息默认都走 interaction bot |
@@ -40,7 +40,7 @@ async def on_interaction(self, ctx, entry_key, payload):
 1. 用一个 `on_interaction(ctx, entry_key, payload)` 覆盖 `command`、`keyword`、`payment_confirmed`、`message`、`callback_query`、`session_expired`。
 2. 读取 `payload["tp_event"]` 或 `event_from_interaction_payload(payload)`，不要再围绕旧平铺字段写分支。
 3. 单局状态保存在 `session.data`，变更后返回 `update_session`；不要再依赖进程内全局状态才能继续游戏。
-4. 普通发送类动作可以不写 `send_via`，平台会优先继承 `session.channel`；只有跨通道兜底、特殊管理消息等高级场景才显式覆盖。
+4. 普通发送类动作不要写 `send_via`，平台会继承 `session.channel`；只有跨通道公告、特殊管理消息或迁移桥兼容这类高级场景才显式覆盖。
 5. userbot 会话里的按钮会降级为文本编号面板；玩家回复编号后，平台会把它合成为 `callback_query`，并在 `source.synthetic="text_button"` 标记来源。
 
 如果当前运行环境尚未合入对应 runtime/worker 分支，`interaction_trigger_modes`、`default_trigger_modes`、`callback_fast_ack` 这类入口控制字段只作为文档约定，不会自动改变旧实例行为。
@@ -137,7 +137,6 @@ async def on_event(self, ctx, payload):
     if ctx.http is None:
         return [{
             "type": "send_message",
-            "send_via": ["interaction_bot", "userbot_reply"],
             "chat_id": chat_id,
             "reply_to_message_id": reply_to,
             "text": "本插件需要 external_http 权限和 allowed_hosts",
@@ -147,7 +146,6 @@ async def on_event(self, ctx, payload):
     preview = response.text.strip().replace("\n", " ")[:120]
     return [{
         "type": "send_message",
-        "send_via": ["interaction_bot", "userbot_reply"],
         "chat_id": chat_id,
         "reply_to_message_id": reply_to,
         "text": f"HTTP {response.status_code}: {preview}",
@@ -501,7 +499,6 @@ event = event_from_interaction_payload(payload)
 return [
     {
         "type": "send_message",
-        "send_via": ["interaction_bot", "userbot_reply"],
         "chat_id": event.message.chat_id,
         "reply_to_message_id": event.message.message_id,
         "text": f"收到：{event.message.text}",
@@ -726,8 +723,8 @@ userbot 会话里的 `reply_markup` 不会直接丢掉：
 | `title` / `description` | 推荐 | 前端选择器、实验室和日志里展示给人的说明 |
 | `launch_mode` | 兼容 | `bridge` / `direct` / `hybrid`，旧字段；新插件建议同时声明 `dispatch_modes` |
 | `dispatch_modes` | 推荐 | `admin_command` / `public_keyword`，分别表示管理员带前缀命令触发、群友关键词/转账规则触发 |
-| `message_channels` | 推荐 | 不同调度方式的通道偏好，例如管理员命令偏好 `userbot_reply`，群内玩法偏好 `interaction_bot`；这只是默认偏好，不会绑死插件后续动作 |
-| `money_channel` | 推荐 | 钱相关动作通道提示，当前应写 `userbot_reply`；普通 Bot 没有转账能力 |
+| `message_channels` | 兼容 | 旧 `Plugin` hook 的 incoming/outgoing 监听方向；不要把它当发送通道偏好 |
+| `money_channel` | 兼容 | 旧文档提示字段；钱相关动作现在由 `payout` / 结算链路固定路由 userbot |
 | `events` | 是 | 入口接受的事件白名单，例如 `keyword`、`payment_confirmed`、`message`、`callback_query`、`session_close` |
 | `session_scope` | 是 | `chat` / `user` / `none`，决定平台如何保存会话和路由后续消息 |
 | `session_policy` | 推荐 | 会话 TTL、重复触发、关闭策略、并发策略的声明 |
@@ -771,11 +768,6 @@ MANIFEST = Manifest(
             "description": "转账命中或插件关键词命中后，由交互 Bot 开启一局游戏。",
             "launch_mode": "hybrid",
             "dispatch_modes": ["admin_command", "public_keyword"],
-            "message_channels": {
-                "admin_command": "userbot_reply",
-                "public_keyword": "interaction_bot",
-            },
-            "money_channel": "userbot_reply",
             "session_scope": "chat",
             "events": ["payment_confirmed", "keyword", "message", "callback_query", "session_close"],
             "preserve_command_trigger": True,
@@ -815,7 +807,6 @@ MANIFEST = Manifest(
             },
             "result_contract": {
                 "actions": ["send_message", "send_photo", "end_session"],
-                "send_via": ["interaction_bot", "userbot_reply"],
             },
             "settlement": {
                 "mode": "announce_only",
@@ -910,7 +901,7 @@ class GuessNumberPlugin(Plugin):
 | `send_message` | `text` | 在命中的群或动作指定的 `chat_id` 发送消息 |
 | `send_message` | `reply_to_message_id` | 可选，指定回复哪条消息 |
 | `send_message` | `chat_id` | 可选；不填时发送到触发会话，填写时由平台按通道能力发送到指定会话 |
-| `send_message` | `send_via` / `channel` / `channel_selector` / `send_via_options` | 可选；可以是单通道，也可以是候选通道和回退顺序 |
+| `send_message` | `send_via` / `channel` / `channel_selector` / `send_via_options` | 高级可选；普通互动省略，平台继承 `session.channel`，只在跨通道公告、管理提示或迁移桥兼容时显式覆盖 |
 | `send_message` | `reply_markup` | 可选，Bot API inline keyboard；只会透传给 `interaction_bot`，`userbot_reply` 不承接按钮 |
 | `send_message` | `save_message_id_key` | 可选；发送成功后把本次 Telegram `message_id` 按 key 保存 2 小时，供后续编辑、删除或替换使用 |
 | `send_message` | `replace_saved_message_id_key` | 可选；发送新消息并保存新 `message_id` 后，读取该 key 原来的消息 ID 并删除旧消息，适合“只保留最新一条”的滚动通知 |
@@ -921,29 +912,27 @@ class GuessNumberPlugin(Plugin):
 | `answer_callback` | `callback_query_id`、`text`、`show_alert` | 回应 inline keyboard 按钮回调 |
 | `end_session` | 无 | 本次入口处理完成后不保留交互会话，适合彩票、红包等长期轮回插件 |
 
-通道原则是：**插件拥有通道选择权，框架拥有通道执行权**。插件可以选择单一通道，也可以声明候选通道；平台负责执行可用通道、记录 Contract Guard 告警、处理按钮限制、频控、审计和实际发送。推荐只使用这些通道值：
+通道原则是：**触发方式决定会话通道，插件默认不感知通道，框架负责路由和执行**。命令触发的会话收发全走 userbot，关键词/付款/按钮触发的会话收发全走交互 Bot；唯一例外是 `payout`、收款确认和发奖等钱相关动作，物理上只有 userbot 能做，永远路由给 userbot。插件只有在跨通道公告、特殊管理提示或迁移桥兼容时才显式写 `send_via`：
 
 | send_via | 含义 | 约束 |
 | --- | --- | --- |
-| `interaction_bot` | 由交互 Bot 发送群内题面、答复、图片、会话提示 | 默认值，适合高频互动；别名 `bot` |
-| `userbot_reply` | 由当前账号 worker 的 userbot 代发指定消息 | 适合低频、可审计、确有账号身份需要的动作，平台会通过账号 worker 的账号客户端执行 |
-| `auto` | 按平台默认候选顺序尝试 | 当前等价于 `interaction_bot -> userbot_reply`；插件可用 `result_contract.send_via` 文档化自己预期的通道范围 |
+| `interaction_bot` | 由交互 Bot 发送群内题面、答复、图片、会话提示 | 高级覆盖值；别名 `bot` |
+| `userbot_reply` | 由当前账号 worker 的 userbot 代发指定消息 | 高级覆盖值；适合确有账号身份需要的动作 |
+| `auto` | 按平台默认候选顺序尝试 | 迁移兼容值；新互动插件通常不需要使用 |
 
-入口未声明 `result_contract.send_via` 时，平台按可信插件标准允许 `interaction_bot`、`userbot_reply` 两个受控通道。入口声明了 `result_contract.actions` 或 `result_contract.send_via` 时，运行时把它作为可见契约和调试依据：插件调用未声明动作或未声明通道会写入 runtime log、交互中心调试面板和插件 lint 告警，但不会因为“未声明”本身静默丢弃动作。`reply_markup` 只会透传给 `interaction_bot`，若候选通道包含 `userbot_reply`，平台会自动收窄到可承接按钮的交互 Bot 通道；只有 userbot 候选时会移除按钮。`bbot_notice` / `notice` / `notice_bot` 已移除且不兼容，不再作为插件主动发送通道；插件显式请求这些旧通道会返回明确失败并提示迁移到 `interaction_bot` 或 `userbot_reply`。群里已有的转账结果通知 Bot 只作为外部到账证据来源，TelePilot 监听它来确认付款，不用它发送插件结果。涉及奖金、补发、转账、催付的插件必须在 `settlement` 中写清职责：普通 Bot 只能公告和给出可对账结果，真正收款确认和发奖仍由账号 worker 的 userbot 代发或由平台受控结算流程处理。
+入口未声明 `result_contract.send_via` 时，平台按会话通道和动作类型决定实际发送方。入口声明了 `result_contract.actions` 或 `result_contract.send_via` 时，运行时把它作为可见契约和调试依据：插件调用未声明动作或未声明通道会写入 runtime log、交互中心调试面板和插件 lint 告警，但不会因为“未声明”本身静默丢弃动作。`reply_markup` 在 interaction bot 会话中由 Bot API 承接；在 userbot 会话中由平台降级成文本编号并把玩家回复合成为 callback 事件。`bbot_notice` / `notice` / `notice_bot` 已移除且不兼容，不再作为插件主动发送通道；插件显式请求这些旧通道会返回明确失败并提示迁移到会话通道模型。群里已有的转账结果通知 Bot 只作为外部到账证据来源，TelePilot 监听它来确认付款，不用它发送插件结果。涉及奖金、补发、转账、催付的插件必须在 `settlement` 或 `payout` 中写清职责：普通 Bot 只能公告和给出可对账结果，真正收款确认和发奖仍由账号 worker 的 userbot 代发或由平台受控结算流程处理。
 
-推荐通过 `ctx.messages` 写候选通道：
+普通互动推荐不写通道：
 
 ```python
 await ctx.messages.send(
-    channel=["interaction_bot", "userbot_reply"],
-    text="优先交互 Bot，失败时由人形代发",
+    text="题面或回复内容",
     reply_to_message_id=event_from_interaction_payload(payload).message.message_id,
 )
 
 await ctx.messages.send(
-    channel={"prefer": ["bot", "userbot"], "fallback": True},
     chat_id=-1001234567890,
-    text="指定会话发送，仍由平台检查通道能力",
+    text="指定会话发送，仍由平台按会话通道执行",
 )
 ```
 
@@ -958,7 +947,7 @@ Contract Guard 不是公共插件市场式硬沙箱，而是个人可信插件�
 | 场景 | 运行时行为 |
 | --- | --- |
 | 调用未声明 `result_contract.actions` 的动作 | 记录 `guard_level=warning`，动作继续进入执行链路 |
-| 调用未声明 `result_contract.send_via` 的受控通道 | 记录 `guard_level=warning`，按插件请求尝试可用通道 |
+| 显式请求未声明 `result_contract.send_via` 的高级覆盖通道 | 记录 `guard_level=warning`，按可执行能力尝试并保留审计 |
 | `send_via` 同时包含受控通道和旧 `notice` / `bbot_notice` / `notice_bot` | 整个动作记录 `guard_level=failed`，返回 `send_channel_deprecated`，不做自动改写 |
 | `send_via` 只包含未知值 | 记录 `guard_level=failed`，返回不可执行失败和迁移提示 |
 | `send_via` 同时包含受控通道和非旧未知值 | 记录 `guard_level=warning`，保留可执行受控通道并继续执行 |
@@ -1143,7 +1132,7 @@ Contract Guard 不是公共插件市场式硬沙箱，而是个人可信插件�
 }
 ```
 
-`payload_contract` 描述输入，`result_contract` 描述输出。它们是文档化契约，也会成为 Contract Guard 告警依据。`result_contract.actions` 只能列标准动作；`result_contract.send_via` 是插件声明的预期发送通道，不是硬沙箱白名单；`settlement` 只说明结算/公告语义，不能让普通 Bot 直接拥有发奖权限。
+`payload_contract` 描述输入，`result_contract` 描述输出。它们是文档化契约，也会成为 Contract Guard 告警依据。`result_contract.actions` 只能列标准动作；`result_contract.send_via` 只用于高级覆盖或迁移兼容的可见契约，不是普通互动必填项，也不是硬沙箱白名单；`settlement` 只说明结算/公告语义，不能让普通 Bot 直接拥有发奖权限。
 
 #### 标准事件输入
 
@@ -1214,12 +1203,10 @@ Contract Guard 不是公共插件市场式硬沙箱，而是个人可信插件�
 [
   {
     "type": "send_message",
-    "send_via": "interaction_bot",
     "text": "24 点开始..."
   },
   {
     "type": "send_message",
-    "send_via": "interaction_bot",
     "text": "答对了：AAA\n题目：24 点 [1 5 5 5]\n奖金：123",
     "reply_to_message_id": 99,
     "settlement": {
@@ -1231,7 +1218,6 @@ Contract Guard 不是公共插件市场式硬沙箱，而是个人可信插件�
   },
   {
     "type": "send_photo",
-    "send_via": "interaction_bot",
     "photo_base64": "...",
     "filename": "puzzle.png",
     "caption": "题面"
@@ -1336,7 +1322,7 @@ class Game24Plugin(Plugin):
 6. `interaction_entries[].session_scope` 必须和插件内部状态 key 一致：群局状态 key 应包含 `chat_id`，用户私有流程状态 key 应同时包含 `chat_id` 和 `user_id`。
 7. 返回 `end_session` / `close_session` / `no_session` 时，平台会清理规则会话；插件自己的 Redis 状态仍由插件负责清理。
 8. `preserve_command_trigger` 必须保持为 `true`。交互入口新增后，原本能用的 UserBot 指令仍要按原指令名、原参数和原权限工作。
-9. 新插件建议声明 `dispatch_modes`、`message_channels`、`money_channel`，让前端明确入口来源和通道偏好；插件实际动作仍可在运行时通过 `ctx.messages` 选择单通道或候选通道。
+9. 新插件建议声明 `dispatch_modes`，让前端明确入口来源；不要用 `message_channels` / `money_channel` 表达发送通道，普通动作继承 `session.channel`，`payout` 永远 userbot。
 10. 使用 inline keyboard 时，入口必须声明 `callback_query` 事件；按钮动作只通过 `send_message.reply_markup` 交给交互 Bot 发送，`userbot_reply` 不承接按钮。
 11. `settlement` / `result_contract` 只描述可对账结果和平台动作，不得把发奖、转账、催付等钱相关动作塞进交互 Bot 高频入口。
 

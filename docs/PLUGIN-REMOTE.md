@@ -114,7 +114,7 @@ my_plugin/
 | 示例插件 | 用于开发者学习和验证，例如 `examples/plugins/event_bus_demo` | 不默认启用；必须能通过 `scripts/validate-plugin-examples.py` |
 | 用户安装插件 | 用户从私有库或第三方库安装的插件 | 不强制自动迁移代码；安装、启用、更新时显示规范警告、风险提示和废弃通道错误 |
 
-插件库维护插件不允许为了通过 lint 写空声明。至少要写清：谁能触发、订阅哪些事件、使用哪些能力、普通互动由哪个通道发送、付款/发奖是否需要 userbot、如何在日志页按 trace 或 action 排查。
+插件库维护插件不允许为了通过 lint 写空声明。至少要写清：谁能触发、订阅哪些事件、使用哪些能力、触发方式如何决定会话通道、付款/发奖是否使用 `payout`、如何在日志页按 trace 或 action 排查。
 
 ## event_subscriptions
 
@@ -179,14 +179,14 @@ if not native_raw_meta.get("enabled"):
 }
 ```
 
-仅声明能力不会启用直通；账号只启用插件本身也不会启用直通。运行时仍保留账号启用、installed 插件授权、worker 暂停状态和 incoming 白名单检查；通过这些外层检查后，worker 会在 Trace、Event Bus 订阅匹配、legacy `on_message` 包装之前调用：
+仅声明能力不会启用直通；账号只启用插件本身也不会启用直通。运行时仍保留账号启用、installed 插件授权和 worker 暂停急停；通过这些外层检查后，worker 会在 incoming 白名单、交互 Bot 关键词接管、Trace、Event Bus 订阅匹配、legacy `on_message` 包装之前广播调用：
 
 ```python
 async def on_direct_message(self, ctx, event):
     ...
 ```
 
-`event` 是 live Telethon event，不是标准事件信封。命中任一直通插件后，本条消息会被直通链路消费，不再进入 Event Bus 或 legacy `on_message`，避免低延时插件和普通链路重复处理同一条消息。直通 hook 的发送、编辑、点击等行为不会自动生成标准 action/Trace；插件作者必须自行承担幂等、异常、限流和审计缺失的风险。
+`event` 是 live Telethon event，不是标准事件信封。所有开启直通模式且匹配 source/direction 的插件都会收到同一条原始事件；只要至少一个直通插件被调用，本条消息就会被直通链路消费，不再进入 incoming 白名单、交互 Bot guard、Event Bus 或 legacy `on_message`，避免低延时插件和普通链路重复处理同一条消息。直通 hook 的发送、编辑、点击等行为不会自动生成标准 action/Trace；插件作者必须自行承担幂等、异常、限流和审计缺失的风险。
 
 ## 标准事件信封
 
@@ -215,7 +215,6 @@ async def on_direct_message(self, ctx, event):
 return [
     {
         "type": "send_message",
-        "send_via": ["interaction_bot", "userbot_reply"],
         "chat_id": payload["message"]["chat_id"],
         "reply_to_message_id": payload["message"]["message_id"],
         "text": "已收到"
@@ -271,18 +270,17 @@ return [
     },
     {
         "type": "send_message",
-        "send_via": ["userbot_reply"],
         "chat_id": payload["message"]["chat_id"],
         "text": "到账已确认，等待平台结算。"
     }
 ]
 ```
 
-`send_via` 只使用 `interaction_bot`、`userbot_reply` 或 `auto`。`notice` / `bbot_notice` / `notice_bot` 已移除，插件请求这些通道应得到明确迁移错误。
+普通发送类动作通常不写 `send_via`，平台会按当前 `session.channel` 路由；只有跨通道公告、管理提示或迁移桥兼容才显式使用 `interaction_bot`、`userbot_reply` 或 `auto`。`notice` / `bbot_notice` / `notice_bot` 已移除，插件请求这些通道应得到明确迁移错误。
 
 默认 `send_message` / `send_photo` / `send_file` 等动作按 `parse_mode="plain"` 发送；只有显式声明 `parse_mode="html"` 时才启用 HTML。HTML 内容要先转义，再构造标签。
 
-在统一会话通道模型下，普通发送类动作通常可以省略 `send_via`，平台会继承当前 `session.channel`。只有跨通道公告、管理提示或迁移桥兼容才需要显式覆盖。`payout` 不受会话通道影响，始终经 userbot 执行。
+在统一会话通道模型下，命令触发的会话收发全走 userbot，关键词/付款/按钮触发的会话收发全走交互 Bot；插件默认不需要感知通道。`payout` 不受会话通道影响，始终经 userbot 执行。
 
 userbot 会话里的 `reply_markup` 会被平台降级成文本编号面板，而不是静默丢弃。玩家回复序号或按钮文案后，平台会合成 `callback_query` 回投插件；合成事件会在 `source.synthetic="text_button"` 标记，并跳过真正的 `answer_callback` Bot API 调用。
 
@@ -346,7 +344,6 @@ class EventBusDemoPlugin(Plugin):
             }]
         return [{
             "type": "send_message",
-            "send_via": ["interaction_bot", "userbot_reply"],
             "chat_id": event.message.chat_id,
             "text": f"收到 {event.type}: {event.message.text}",
         }]
@@ -364,7 +361,7 @@ class EventBusDemoPlugin(Plugin):
 | `interaction_entries[].session_scope` | 标准信封 `session.scope` |
 | `payload_contract` | 标准事件信封字段要求 |
 | `result_contract.actions` | 标准 MessageOps/action |
-| `result_contract.send_via` | `send_via` 候选通道，仅限 `interaction_bot` / `userbot_reply` / `auto` |
+| `result_contract.send_via` | 高级覆盖或迁移兼容的可见契约；普通互动可省略 |
 | `settlement` | `settlement` action 或可审计结算元数据 |
 
 迁移桥示例见 `examples/plugins/with_interaction`。该示例保留旧入口声明，但已经补齐 `usage`、`event_subscriptions`、`capabilities`，并修正了历史配置字段 `message` 与标准信封 `payload["message"]` 的冲突。

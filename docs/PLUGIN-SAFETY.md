@@ -205,11 +205,11 @@ TelePilot 按个人可信插件模式运行：管理员安装并启用插件后�
 
 ### 消息发送能力边界
 
-新 Telegram 插件的默认路径是 Event Bus + MessageOps + Trace：插件读取标准事件信封，返回标准 action，或通过 `ctx.messages` 生成同等 action；平台再选择实际发送通道并记录 trace/action/reason_code。默认消息格式按 `parse_mode="plain"` 发送，只有显式声明 `parse_mode="html"` 时才会启用 HTML；HTML 文案先转义再拼标签。旧 hook 仍可作为内置插件和迁移桥兼容，但不能作为远程插件的新模板。
+新 Telegram 插件的默认路径是 Event Bus + MessageOps + Trace：插件读取标准事件信封，返回标准 action，或通过 `ctx.messages` 生成同等 action；平台按当前会话通道和动作类型路由并记录 trace/action/reason_code。默认消息格式按 `parse_mode="plain"` 发送，只有显式声明 `parse_mode="html"` 时才会启用 HTML；HTML 文案先转义再拼标签。旧 hook 仍可作为内置插件和迁移桥兼容，但不能作为远程插件的新模板。
 
 | 场景 | 最终版主路径 | 旧 hook 兼容边界 |
 |------|--------------|------------------|
-| 普通消息/关键词 | 返回 `send_message`，`send_via` 只用 `interaction_bot` / `userbot_reply` / `auto` | `on_message` 的 `event.reply(...)` / `event.respond(...)` 仅用于历史内置或迁移桥 |
+| 普通消息/关键词 | 返回 `send_message`，默认省略 `send_via` 并继承会话通道 | `on_message` 的 `event.reply(...)` / `event.respond(...)` 仅用于历史内置或迁移桥 |
 | 管理员命令 | `command` 事件进入 Event Bus 后返回 action；需要编辑原指令时声明 `edit_message` | `on_command` 的 `event.edit(...)` 可保留；另发消息时不要绕过 MessageOps 记录 |
 | 按钮回调 | 返回 `answer_callback`，再按需返回 `send_message` / `edit_message` | 不直接拼 Bot API，不假设 incoming message 可编辑 |
 | Inline Query | 返回 `answer_inline_query`；选择结果用 `chosen_inline_result` 记录 | 旧 hook 没有统一 trace，不作为新插件入口 |
@@ -666,9 +666,9 @@ class GuessNumberPlugin(Plugin):
             await ctx.log("info", "猜数字答对，准备发送奖励文案。", chat_id=chat_id, reward=state.reward)
         prize_text = f"+{state.reward}"
         if ctx.messages is not None:
-            await ctx.messages.send(channel="interaction_bot", chat_id=chat_id, text=prize_text)
+            await ctx.messages.payout(chat_id=chat_id, amount=state.reward, text=prize_text)
         else:
-            return [{"type": "send_message", "send_via": "interaction_bot", "chat_id": chat_id, "text": prize_text}]
+            return [{"type": "payout", "chat_id": chat_id, "amount": state.reward, "text": prize_text}]
 
     async def _timeout_round(self, ctx: PluginContext, chat_id: int, timeout: int) -> None:
         try:

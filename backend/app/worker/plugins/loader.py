@@ -733,7 +733,7 @@ async def _invoke_userbot_event_bus_entry(
         actions = []
     if not isinstance(actions, list) or not all(isinstance(item, dict) for item in actions):
         raise TypeError("Event Bus 入口必须返回 list[dict] 标准动作")
-    return _normalize_interaction_actions([*buffered_messages.actions, *actions])
+    return _normalize_interaction_actions([*buffered_messages.actions, *actions], default_send_via=["userbot_reply"])
 
 
 def _userbot_event_payload_for_plugin(
@@ -2621,7 +2621,7 @@ class _LiveMessageOps:
         self.actions: list[dict[str, Any]] = []
 
     async def apply(self, actions: list[dict[str, Any]], *, entry_key: str | None = None) -> None:
-        normalized = _normalize_interaction_actions(actions)
+        normalized = _normalize_interaction_actions(actions, default_send_via=["userbot_reply"])
         if not normalized:
             return
         effective_entry_key = entry_key if entry_key is not None else self._entry_key
@@ -3463,7 +3463,18 @@ async def load_plugins_for_account(
                 return
             trace = None
 
-            # incoming 消息需要允许名单检查和 LRU 维护
+            direct_consumed = await _dispatch_userbot_direct_passthrough(
+                state,
+                event,
+                direction=direction,
+                edited=edited,
+                event_label=event_label,
+                redis=redis,
+            )
+            if direct_consumed:
+                return
+
+            # incoming 普通链路需要允许名单检查和 LRU 维护；低延迟直通已在上方广播。
             if direction == "incoming":
                 pid = event.chat_id
                 if pid is not None:
@@ -3504,17 +3515,6 @@ async def load_plugins_for_account(
                 if not edited and await _interaction_bot_owns_incoming_text(state, event):
                     await _record_interaction_text_guard_skip(state, event, event_label=event_label)
                     return
-
-            direct_consumed = await _dispatch_userbot_direct_passthrough(
-                state,
-                event,
-                direction=direction,
-                edited=edited,
-                event_label=event_label,
-                redis=redis,
-            )
-            if direct_consumed:
-                return
 
             session_consumed = await _dispatch_userbot_session_message(
                 state,
@@ -4744,7 +4744,7 @@ def get_recent_peers(account_id: int) -> list[dict[str, Any]]:
 
 
 _INTERACTION_SEND_ACTIONS = {"send_message", "send_photo", "send_file", "edit_message"}
-_INTERACTION_CONTROL_ACTIONS = {"delete_message", "pin_message", "answer_callback", "answer_inline_query"}
+_INTERACTION_CONTROL_ACTIONS = {"delete_message", "pin_message"}
 
 
 def _normalize_interaction_action(

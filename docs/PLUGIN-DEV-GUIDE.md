@@ -22,7 +22,7 @@
 
 消息链路统一后，互动插件默认按这一套模型理解：
 
-- 先看触发方式，再看发送通道。带前缀命令开局，整段会话默认走 `userbot`；关键词、付款确认、按钮回调开局，整段会话默认走 `interaction_bot`，只有 `payout` 仍固定走 `userbot`。
+- 触发方式决定会话通道。带前缀命令开局，整段会话收发走 `userbot`；关键词、付款确认、按钮回调开局，整段会话收发走 `interaction_bot`；插件默认不感知通道，只有 `payout` 固定走 `userbot`。
 - 新玩法优先写成一个 `on_interaction(ctx, entry_key, payload)` 入口，在同一个入口里按 `tp_event.type` 或 `payload["source"]["type"]` 处理 `command`、`keyword`、`payment_confirmed`、`message`、`callback_query`、`session_expired`。
 - 单局状态优先写进 `session.data`，通过 `update_session` 持久化；不要再把游戏状态放进进程内全局字典、锁和自建超时任务。
 - `ctx.messages.send/edit/payout(...)` 和标准 action 默认按 `parse_mode="plain"` 发送；只有显式写 `html` 时才启用 HTML，并先做 `html_escape()`。
