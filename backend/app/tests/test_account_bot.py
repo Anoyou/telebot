@@ -726,6 +726,34 @@ async def test_interaction_delivery_routes_payout_via_worker(monkeypatch) -> Non
 
 
 @pytest.mark.asyncio
+async def test_interaction_delivery_payout_saves_message_id(monkeypatch) -> None:
+    incoming = account_bot_runtime.Incoming(
+        account_id=7,
+        token="123:token",
+        update_id=10,
+        user_id=20,
+        chat_id=-100,
+        message_id=30,
+        text="",
+        trace_id="evt_payout_save",
+    )
+    redis = _MemoryRedis()
+    monkeypatch.setattr("app.services.interaction.delivery.record_action", AsyncMock())
+    executor = InteractionDeliveryExecutor(
+        incoming=incoming,
+        write_log=AsyncMock(),
+        run_worker_action=AsyncMock(return_value=(True, None, {"message_id": 77})),
+        log_context=account_bot_runtime._interaction_log_context,
+        trace_context=account_bot_runtime._interaction_trace_context,
+        get_redis_client=lambda: redis,
+    )
+
+    await executor.apply([{"type": "payout", "amount": 88, "save_message_id_key": "ten_half:reward:1"}])
+
+    assert redis.data["tp:msgid:7:ten_half:reward:1"] == "77"
+
+
+@pytest.mark.asyncio
 async def test_interaction_delivery_records_failed_payout(monkeypatch) -> None:
     incoming = account_bot_runtime.Incoming(
         account_id=1,
@@ -2415,6 +2443,29 @@ def test_account_bot_math10_rule_gets_default_start_keywords() -> None:
     rule = cfg["rules"][0]
     assert rule["trigger_mode"] == "both"
     assert rule["module_start_keywords"] == ["发十以内算数", "十以内算数", "开算数题"]
+
+
+def test_legacy_math10_rule_syncs_account_feature_key() -> None:
+    cfg = account_bot_service.normalize_transfer_notice_config(
+        {
+            "enabled": True,
+            "rules": [
+                {
+                    "id": "math10",
+                    "enabled": True,
+                    "action": "math10",
+                },
+                {
+                    "id": "dice",
+                    "enabled": True,
+                    "action": "module",
+                    "module_key": "dice_grid_hunt",
+                },
+            ],
+        }
+    )
+
+    assert account_bot_service._enabled_interaction_module_keys(cfg) == ["math10", "dice_grid_hunt"]
 
 
 def test_disabled_or_cleared_interaction_bot_hides_stale_conflict_error() -> None:

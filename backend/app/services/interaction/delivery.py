@@ -601,6 +601,11 @@ class InteractionDeliveryExecutor:
             payload["reply_to_search_limit"] = reply_to_search_limit
         ok, error, result = await self.run_worker_action(self.incoming, payload=payload)
         detail = result if isinstance(result, dict) else {}
+        save_key = namespaced_action_save_message_id_key(self.incoming.account_id, action.get("save_message_id_key"))
+        if ok and save_key:
+            msg_id = delivery_message_id(detail)
+            if msg_id is not None:
+                await self.get_redis_client().set(save_key, str(msg_id), ex=7200)
         await record_action(
             action.get("context"),
             action,

@@ -1059,9 +1059,13 @@ def _enabled_interaction_module_keys(data: dict[str, Any]) -> list[str]:
     for rule in data.get("rules") or []:
         if not isinstance(rule, dict) or not bool(rule.get("enabled", True)):
             continue
-        if str(rule.get("action") or "").strip() != "module":
+        action = str(rule.get("action") or "").strip()
+        if action == "math10":
+            module_key = "math10"
+        elif action == "module":
+            module_key = str(rule.get("module_key") or "").strip()
+        else:
             continue
-        module_key = str(rule.get("module_key") or "").strip()
         if module_key and module_key not in keys:
             keys.append(module_key)
     return keys
