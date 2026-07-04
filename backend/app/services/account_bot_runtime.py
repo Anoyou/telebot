@@ -4062,6 +4062,7 @@ async def _try_handle_event_bus_subscriptions(
             continue
         rule = _event_bus_virtual_rule(decision)
         guarded = await _guard_interaction_actions(incoming, rule, actions)
+        await _apply_interaction_start_session_actions(incoming, rule, guarded)
         await _apply_interaction_actions(
             incoming,
             guarded,
@@ -4257,6 +4258,7 @@ async def _try_handle_event_bus_payment_notice(
             continue
         rule = _event_bus_virtual_rule(decision)
         guarded = await _guard_interaction_actions(incoming, rule, actions)
+        await _apply_interaction_start_session_actions(incoming, rule, guarded)
         await _apply_interaction_actions(
             incoming,
             guarded,

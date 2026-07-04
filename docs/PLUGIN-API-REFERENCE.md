@@ -522,7 +522,9 @@ return [{
 
 `update_session` 会回写当前 `session.data`，并按平台规则续租 Redis TTL；除非额外声明 `extend_seconds`，它不会偷偷改掉原来的 `expires_at`。
 
-免费答题、抽奖、按钮加入这类“不想让玩家额外发言”的玩法，可以让玩家点击 inline 按钮加入。按钮回调里的点击者在 `payload["sender"]["user_id"]`，发奖时不要要求玩家再发一条消息，只要让 `userbot_reply` 动作携带 `reply_to_user_id`：
+免费答题、抽奖、按钮加入、互动游戏这类“不想让玩家为了发奖额外刷消息”的玩法，推荐让玩家点击 inline 按钮加入或确认参与。按钮回调里的点击者在 `payload["sender"]["user_id"]`；插件仍可按自身玩法保存完整业务状态，仅从后续发奖锚点角度，至少保留这个 `tgid` 即可。发奖时交给平台用 `reply_to_user_id` 在当前群查找该玩家最近一次发言作为回复锚点，不需要插件自己遍历群消息。
+
+如果还在用显式 `userbot_reply` 发奖消息，可以这样写：
 
 ```python
 event = event_from_interaction_payload(payload)
@@ -535,6 +537,7 @@ return [
         "chat_id": event.message.chat_id,
         "reply_to_user_id": winner_user_id,
         "reply_to_search_limit": 200,
+        "reply_anchor_missing_text": "未找到对应用户（{user_id}）的近期消息，本次发奖需要人工补发。",
         "text": "+88",
         "settlement": {
             "mode": "auto",
@@ -547,7 +550,7 @@ return [
 ]
 ```
 
-平台会用账号的 userbot 在当前群搜索该用户最近一条消息，找到后把 `+88` 回复到那条消息。若插件已经有明确的 `reply_to_message_id`，平台优先使用它；若只给了 `settlement.winner_user_id` 而没写 `reply_to_user_id`，平台也会尝试用赢家 user_id 作为回复锚点。找不到近期消息时，本次 `userbot_reply` 会失败并记录 action 错误，避免把发奖消息误发成普通群消息。
+平台会用账号的 userbot 在当前群搜索该用户最近一条消息，找到后把 `+88` 回复到那条消息。若插件已经有明确的 `reply_to_message_id`，平台优先使用它；若只给了 `settlement.winner_user_id` 而没写 `reply_to_user_id`，平台也会尝试用赢家 user_id 作为回复锚点。找不到近期消息时，本次 `userbot_reply` 会失败并记录 action 错误，避免把发奖消息误发成普通群消息；平台默认会在群里提示 `未找到对应用户（用户 ID）的近期消息。`，插件可通过 `reply_anchor_missing_text` 自定义失败提示，提示文案支持 `{user_id}` 占位符。
 
 更推荐的新写法是直接返回 `payout`：
 
@@ -558,10 +561,11 @@ return [{
     "amount": 88,
     "reply_to_user_id": winner_user_id,
     "reply_to_search_limit": 200,
+    "reply_anchor_missing_text": "未找到对应用户（{user_id}）的近期消息，本次发奖需要人工补发。",
 }]
 ```
 
-`payout` 永远经 userbot 执行，并进入限速与 trace。它适合“发奖文案本身就是协议”的玩法，普通 Bot 不会代替它执行转账样动作。
+`payout` 永远经 userbot 执行，并进入限速与 trace。它适合“发奖文案本身就是协议”的玩法，普通 Bot 不会代替它执行转账样动作。找不到 `reply_to_user_id` 对应的近期发言时，`payout` 同样会失败、写入日志，并发送默认或自定义的 `reply_anchor_missing_text` 提示。
 
 按钮回调：
 
@@ -900,6 +904,8 @@ class GuessNumberPlugin(Plugin):
 | --- | --- | --- |
 | `send_message` | `text` | 在命中的群或动作指定的 `chat_id` 发送消息 |
 | `send_message` | `reply_to_message_id` | 可选，指定回复哪条消息 |
+| `send_message` | `reply_to_user_id` / `reply_to_search_limit` | 可选；`send_via=userbot_reply` 时，平台按用户 ID 搜索近期发言作为回复锚点 |
+| `send_message` | `reply_anchor_missing_text` | 可选；找不到 `reply_to_user_id` 的近期发言时发送的提示，支持 `{user_id}` |
 | `send_message` | `chat_id` | 可选；不填时发送到触发会话，填写时由平台按通道能力发送到指定会话 |
 | `send_message` | `send_via` / `channel` / `channel_selector` / `send_via_options` | 高级可选；普通互动省略，平台继承 `session.channel`，只在跨通道公告、管理提示或迁移桥兼容时显式覆盖 |
 | `send_message` | `reply_markup` | 可选，Bot API inline keyboard；只会透传给 `interaction_bot`，`userbot_reply` 不承接按钮 |
@@ -910,6 +916,7 @@ class GuessNumberPlugin(Plugin):
 | `delete_message` | `message_id` | 删除对应 Bot 通道可操作的消息 |
 | `pin_message` | `message_id` | 置顶对应 Bot 通道可操作的消息 |
 | `answer_callback` | `callback_query_id`、`text`、`show_alert` | 回应 inline keyboard 按钮回调 |
+| `payout` | `amount`、`text`、`reply_to_message_id`、`reply_to_user_id`、`reply_to_search_limit`、`reply_anchor_missing_text` | UserBot 发奖动作；有消息 ID 时直接回复，否则可按用户 ID 查找近期发言作为锚点 |
 | `end_session` | 无 | 本次入口处理完成后不保留交互会话，适合彩票、红包等长期轮回插件 |
 
 通道原则是：**触发方式决定会话通道，插件默认不感知通道，框架负责路由和执行**。命令触发的会话收发全走 userbot，关键词/付款/按钮触发的会话收发全走交互 Bot；唯一例外是 `payout`、收款确认和发奖等钱相关动作，物理上只有 userbot 能做，永远路由给 userbot。插件只有在跨通道公告、特殊管理提示或迁移桥兼容时才显式写 `send_via`：

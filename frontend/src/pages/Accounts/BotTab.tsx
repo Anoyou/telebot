@@ -249,6 +249,7 @@ type InteractionEntryOption = {
   featureKey: string;
   featureName: string;
   featureConfig: Record<string, unknown>;
+  featureConfigSchema?: Record<string, unknown> | null;
   featureUsage?: string | null;
   eventSubscriptions?: PluginEventSubscription[];
   capabilities?: PluginCapabilities;
@@ -678,6 +679,27 @@ function extraEntryConfigFields(entry?: FeatureInteractionEntry): Array<[string,
   return Object.entries(interactionSchemaProperties(entry)).filter(([key]) => !controlledKeys.has(key));
 }
 
+function configSchemaProperties(schema?: Record<string, unknown> | null): Record<string, ConfigField> {
+  const candidate = schema as unknown as ConfigSchema | null | undefined;
+  if (!candidate || candidate.type !== "object" || !candidate.properties || Array.isArray(candidate.properties)) {
+    return {};
+  }
+  return candidate.properties;
+}
+
+function sanitizeFeatureConfigForSchema(
+  config: Record<string, unknown>,
+  schema?: Record<string, unknown> | null,
+): { config: Record<string, unknown>; changed: boolean } {
+  const candidate = schema as Record<string, unknown> | null | undefined;
+  if (!candidate || candidate.type !== "object" || candidate.additionalProperties !== false) {
+    return { config: { ...config }, changed: false };
+  }
+  const allowed = new Set(Object.keys(configSchemaProperties(schema)));
+  const next = Object.fromEntries(Object.entries(config).filter(([key]) => allowed.has(key)));
+  return { config: next, changed: Object.keys(next).length !== Object.keys(config).length };
+}
+
 function hasOwnConfigValue(config: Record<string, unknown> | undefined, key: string): boolean {
   return Boolean(config && Object.prototype.hasOwnProperty.call(config, key));
 }
@@ -782,11 +804,15 @@ function buildFeatureConfigUpdateForRule(
   if (rule.action !== "module") return null;
   const selection = resolveRuleModuleSelection(rule, interactionEntries);
   if (!selection) return null;
-  const fields = extraEntryConfigFields(selection.entry);
-  if (fields.length <= 0) return null;
+  const globalFields = configSchemaProperties(selection.featureConfigSchema);
+  const fields = extraEntryConfigFields(selection.entry).filter(([key]) => key in globalFields);
 
-  const nextConfig = { ...baseConfig };
-  let changed = false;
+  const sanitized = sanitizeFeatureConfigForSchema(baseConfig, selection.featureConfigSchema);
+  const nextConfig = { ...sanitized.config };
+  let changed = sanitized.changed;
+  if (fields.length <= 0) {
+    return changed ? { pluginKey: selection.featureKey, config: nextConfig } : null;
+  }
   for (const [key, field] of fields) {
     const normalized = normalizeEntryConfigValue(field, rule.moduleConfig[key]);
     if (normalized === null || normalized === undefined || normalized === "") {
@@ -1915,6 +1941,7 @@ export function BotTab({
       featureKey: feature.key,
       featureName: feature.display_name,
       featureConfig: accountFeatureConfigByKey.get(feature.key) ?? {},
+      featureConfigSchema: feature.config_schema ?? null,
       featureUsage: feature.usage,
       eventSubscriptions: feature.event_subscriptions,
       capabilities: feature.capabilities,

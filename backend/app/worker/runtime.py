@@ -79,6 +79,7 @@ _CONFIG_RECONCILE_SECONDS = max(30, int(app_settings.worker_reconcile_seconds or
 _USERBOT_SESSION_EXPIRE_SCAN_SECONDS = 15
 _RECENT_USER_MESSAGE_SEARCH_LIMIT = 200
 _RECENT_USER_MESSAGE_SEARCH_LIMIT_MAX = 500
+_DEFAULT_REPLY_ANCHOR_MISSING_TEXT = "未找到对应用户（{user_id}）的近期消息。"
 _BACKGROUND_RPC_COMMAND_TYPES = {
     CMD_FETCH_AVATAR,
     CMD_GET_RECENT_PEERS,
@@ -258,6 +259,17 @@ async def _find_recent_message_id_for_user(
     return None
 
 
+def _reply_anchor_missing_text(payload: dict[str, Any], reply_to_user_id: int | None) -> str:
+    template = str(payload.get("reply_anchor_missing_text") or _DEFAULT_REPLY_ANCHOR_MISSING_TEXT).strip()
+    if not template:
+        template = _DEFAULT_REPLY_ANCHOR_MISSING_TEXT
+    user_id_text = str(reply_to_user_id or payload.get("reply_to_user_id") or "")
+    try:
+        return template.format(user_id=user_id_text)
+    except Exception:  # noqa: BLE001
+        return template
+
+
 async def _run_interaction_userbot_action(
     client: Any,
     payload: dict[str, Any],
@@ -290,6 +302,9 @@ async def _run_interaction_userbot_action(
             limit=_recent_user_message_search_limit(payload.get("reply_to_search_limit")),
         )
         if reply_to is None:
+            text = _reply_anchor_missing_text(payload, reply_to_user_id)
+            if text:
+                await client.send_message(chat_id, text, reply_to=None, parse_mode=None)
             raise ValueError(f"找不到用户 {reply_to_user_id} 在当前群的近期消息，无法定位发奖回复目标")
 
     if action_type in {"send_message", "payout"}:

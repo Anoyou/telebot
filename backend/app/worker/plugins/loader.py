@@ -103,6 +103,7 @@ log = logging.getLogger(__name__)
 _INTERACTION_RULE_OWNED_REASON_CODE = "interaction_rule_owned"
 _RECENT_USER_MESSAGE_SEARCH_LIMIT = 200
 _RECENT_USER_MESSAGE_SEARCH_LIMIT_MAX = 500
+_DEFAULT_REPLY_ANCHOR_MISSING_TEXT = "未找到对应用户（{user_id}）的近期消息。"
 
 
 @dataclass(frozen=True)
@@ -1426,12 +1427,19 @@ async def _apply_userbot_payout_action(state: _AccountState, event: Any, action:
     try:
         reply_to, reply_to_user_id = await _resolve_userbot_reply_to_message_id(state, action, target_chat_id)
     except ValueError as exc:
+        reply_to_user_id = _int_or_none(action.get("reply_to_user_id"))
         await record_action(
             action.get("context"),
             action,
             TRACE_STATUS_FAILED,
             error_code="reply_anchor_missing",
             error=str(exc),
+        )
+        await _send_reply_anchor_missing_notice(
+            state,
+            action,
+            target_chat_id,
+            reply_to_user_id=reply_to_user_id,
         )
         return False
     parse_mode = _action_parse_mode(action)
@@ -1528,6 +1536,7 @@ async def _apply_userbot_send_message_action(
             try:
                 reply_to, reply_to_user_id = await _resolve_userbot_reply_to_message_id(state, action, target_chat_id)
             except ValueError as exc:
+                reply_to_user_id = _int_or_none(action.get("reply_to_user_id"))
                 last_code = "reply_anchor_missing"
                 last_error = str(exc)
                 continue
@@ -1573,6 +1582,13 @@ async def _apply_userbot_send_message_action(
                 last_error = f"{type(exc).__name__}: {exc}"
                 continue
     await record_action(action.get("context"), action, TRACE_STATUS_FAILED, error_code=last_code, error=last_error)
+    if last_code == "reply_anchor_missing":
+        await _send_reply_anchor_missing_notice(
+            state,
+            action,
+            target_chat_id,
+            reply_to_user_id=_int_or_none(action.get("reply_to_user_id")),
+        )
     return False
 
 
@@ -1958,6 +1974,48 @@ async def _find_recent_message_id_for_user(
             exc_info=True,
         )
     return None
+
+
+def _reply_anchor_missing_text(action: dict[str, Any], reply_to_user_id: int | None) -> str:
+    template = str(action.get("reply_anchor_missing_text") or _DEFAULT_REPLY_ANCHOR_MISSING_TEXT).strip()
+    if not template:
+        template = _DEFAULT_REPLY_ANCHOR_MISSING_TEXT
+    user_id_text = str(reply_to_user_id or action.get("reply_to_user_id") or "")
+    try:
+        return template.format(user_id=user_id_text)
+    except Exception:  # noqa: BLE001
+        return template
+
+
+async def _send_reply_anchor_missing_notice(
+    state: _AccountState,
+    action: dict[str, Any],
+    target_chat_id: int,
+    *,
+    reply_to_user_id: int | None,
+) -> None:
+    if state.client is None:
+        return
+    text = _reply_anchor_missing_text(action, reply_to_user_id)
+    if not text:
+        return
+    if not await _acquire_userbot_action_rate_limit(
+        state,
+        action,
+        action_type="send_message",
+        target_chat_id=target_chat_id,
+    ):
+        return
+    try:
+        await state.client.send_message(target_chat_id, text, reply_to=None, parse_mode=None)
+    except Exception:  # noqa: BLE001
+        log.debug(
+            "reply anchor missing notice send failed account=%s chat=%s user=%s",
+            state.account_id,
+            target_chat_id,
+            reply_to_user_id,
+            exc_info=True,
+        )
 
 
 async def _resolve_userbot_reply_to_message_id(

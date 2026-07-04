@@ -30,6 +30,7 @@ class BufferedMessageOps:
         reply_to_message_id: int | None = None,
         reply_to_user_id: int | None = None,
         reply_to_search_limit: int | None = None,
+        reply_anchor_missing_text: str | None = None,
         reply_markup: dict[str, Any] | None = None,
         save_message_id_key: str | None = None,
         replace_saved_message_id_key: str | None = None,
@@ -46,6 +47,8 @@ class BufferedMessageOps:
             action["reply_to_user_id"] = reply_to_user_id
         if reply_to_search_limit is not None:
             action["reply_to_search_limit"] = reply_to_search_limit
+        if reply_anchor_missing_text:
+            action["reply_anchor_missing_text"] = reply_anchor_missing_text
         if channel is not None:
             _apply_channel(action, channel)
         if reply_markup is not None:
@@ -166,6 +169,7 @@ class BufferedMessageOps:
         reply_to_message_id: int | None = None,
         reply_to_user_id: int | None = None,
         reply_to_search_limit: int | None = None,
+        reply_anchor_missing_text: str | None = None,
     ) -> dict[str, Any]:
         action: dict[str, Any] = {
             "type": "payout",
@@ -180,6 +184,8 @@ class BufferedMessageOps:
             action["reply_to_user_id"] = reply_to_user_id
         if reply_to_search_limit is not None:
             action["reply_to_search_limit"] = reply_to_search_limit
+        if reply_anchor_missing_text:
+            action["reply_anchor_missing_text"] = reply_anchor_missing_text
         self.actions.append(action)
         return action
 

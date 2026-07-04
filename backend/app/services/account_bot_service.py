@@ -172,6 +172,27 @@ def _strip_rule_controlled_module_config(raw: Any) -> dict[str, Any]:
     }
 
 
+def _sanitize_module_config_for_entry(
+    raw: Any,
+    module_key: str | None,
+    module_action: str | None,
+) -> dict[str, Any]:
+    config = _strip_rule_controlled_module_config(raw)
+    if not config or not module_key or not module_action:
+        return config
+    entry = declared_module_entry_manifest(module_key, module_action)
+    schema = entry.get("input_schema") if isinstance(entry, dict) else None
+    if not isinstance(schema, dict) or schema.get("additionalProperties", True) is not False:
+        return config
+    properties = schema.get("properties")
+    if not isinstance(properties, dict):
+        return {}
+    allowed = {str(key) for key in properties if str(key) not in RULE_CONTROLLED_MODULE_CONFIG_KEYS}
+    if not allowed:
+        return {}
+    return config
+
+
 def transfer_notice_setting_key(aid: int) -> str:
     return f"{TRANSFER_NOTICE_SETTING_PREFIX}{int(aid)}"
 
@@ -978,7 +999,7 @@ def normalize_interaction_rules(raw: Any) -> list[dict[str, Any]]:
         participant_policy = str(item.get("participant_policy") or "").strip() or None
         if participant_policy not in VALID_INTERACTION_PARTICIPANT_POLICIES:
             participant_policy = _declared_module_entry_participant_policy(module_key, module_action)
-        module_config = _strip_rule_controlled_module_config(item.get("module_config"))
+        module_config = _sanitize_module_config_for_entry(item.get("module_config"), module_key, module_action)
         module_start_text = str(item.get("module_start_text") or "").strip() or None
         user_cooldown_seconds = str(item.get("user_cooldown_seconds") or "").strip() or None
         try:

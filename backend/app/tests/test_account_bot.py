@@ -198,10 +198,18 @@ async def test_userbot_interaction_action_fails_when_reply_anchor_missing() -> N
                 "chat_id": -100,
                 "text": "+66",
                 "reply_to_user_id": 111,
+                "reply_anchor_missing_text": "没有找到 {user_id} 的近期发言，无法发奖。",
             },
         )
 
-    assert client.sent == []
+    assert client.sent == [
+        {
+            "chat_id": -100,
+            "text": "没有找到 111 的近期发言，无法发奖。",
+            "reply_to": None,
+            "parse_mode": None,
+        }
+    ]
 
 
 def test_account_bot_config_response_hides_plain_token() -> None:
@@ -2651,6 +2659,61 @@ def test_account_bot_interaction_rule_preserves_plugin_timeout_config() -> None:
 
     assert cfg["module_config"] == {"timeout": 500, "theme": "classic"}
     assert cfg["rules"][0]["module_config"] == {"timeout": 500, "theme": "classic"}
+
+
+def test_interaction_rule_drops_stale_module_config_for_strict_entry(monkeypatch, tmp_path) -> None:
+    plugin_dir = tmp_path / "math10"
+    plugin_dir.mkdir()
+    (plugin_dir / "plugin.json").write_text(
+        json.dumps(
+            {
+                "name": "math10",
+                "interaction_entries": [
+                    {
+                        "key": "start_math_game",
+                        "input_schema": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "properties": {
+                                "prize": {"type": "integer", "default": 123},
+                                "valid_seconds": {"type": "integer", "default": 900},
+                            },
+                        },
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(account_bot_service, "settings", SimpleNamespace(plugins_installed_path=tmp_path))
+
+    cfg = account_bot_service.normalize_transfer_notice_config(
+        {
+            "enabled": True,
+            "rules": [
+                {
+                    "id": "silly-math",
+                    "enabled": True,
+                    "action": "module",
+                    "module_key": "math10",
+                    "module_action": "start_math_game",
+                    "module_prize": "666",
+                    "module_config": {
+                        "bet": 100,
+                        "prize": 123,
+                        "valid_seconds": 900,
+                    },
+                }
+            ],
+        }
+    )
+
+    rule = cfg["rules"][0]
+    assert rule["module_prize"] == 666
+    assert rule["module_config"] == {}
+    assert cfg["module_prize"] == 666
+    assert cfg["module_config"] == {}
 
 
 def test_account_bot_transfer_notice_parser() -> None:
@@ -10384,13 +10447,24 @@ async def test_transfer_notice_prefers_event_bus_payment_subscription(monkeypatc
         async def commit(self):
             return None
 
-    run_entry = AsyncMock(return_value=(True, None, [{"type": "send_message", "text": "payment ok"}]))
+    run_entry = AsyncMock(
+        return_value=(
+            True,
+            None,
+            [
+                {"type": "start_session", "chat_id": -100123, "entry_key": "on_payment"},
+                {"type": "send_message", "text": "payment ok"},
+            ],
+        )
+    )
     legacy_execute = AsyncMock(return_value=True)
+    apply_start_session = AsyncMock()
     monkeypatch.setattr(account_bot_runtime, "AsyncSessionLocal", lambda: _DB())
     monkeypatch.setattr(account_bot_runtime.audit, "write", AsyncMock())
     monkeypatch.setattr(account_bot_runtime, "_run_worker_interaction_entry", run_entry)
     monkeypatch.setattr(account_bot_runtime, "_execute_interaction_rule", legacy_execute)
     monkeypatch.setattr(account_bot_runtime, "_guard_interaction_actions", AsyncMock(side_effect=lambda _incoming, _rule, actions: actions))
+    monkeypatch.setattr(account_bot_runtime, "_apply_interaction_start_session_actions", apply_start_session)
     monkeypatch.setattr(account_bot_runtime, "_apply_interaction_actions", AsyncMock())
     monkeypatch.setattr(account_bot_service, "plugin_declares_telegram_native_raw", lambda *_args, **_kwargs: False)
     monkeypatch.setattr(
@@ -10451,6 +10525,8 @@ async def test_transfer_notice_prefers_event_bus_payment_subscription(monkeypatc
     assert payload["event_type"] == "payment_confirmed"
     assert payload["payment"]["amount"] == 100
     assert payload["source_actor"]["type"] == "external_bot"
+    apply_start_session.assert_awaited_once()
+    assert apply_start_session.await_args.args[2][0]["type"] == "start_session"
     legacy_execute.assert_not_awaited()
 
 

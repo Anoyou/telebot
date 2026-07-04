@@ -292,6 +292,7 @@ class InteractionDeliveryExecutor:
         send_via: str,
         edit_message_id: int | None = None,
         reply_markup: dict[str, Any] | None = None,
+        reply_anchor_missing_text: str | None = None,
         context: dict[str, Any] | None = None,
     ) -> tuple[bool, dict[str, Any]]:
         target_chat_id = self._target_chat_id(chat_id)
@@ -314,6 +315,8 @@ class InteractionDeliveryExecutor:
                 payload["reply_to_user_id"] = reply_to_user_id
             if reply_to_search_limit is not None:
                 payload["reply_to_search_limit"] = reply_to_search_limit
+            if reply_anchor_missing_text:
+                payload["reply_anchor_missing_text"] = reply_anchor_missing_text
             ok, error, result = await self.run_worker_action(
                 self.incoming,
                 payload=payload,
@@ -599,6 +602,8 @@ class InteractionDeliveryExecutor:
             payload["reply_to_user_id"] = reply_to_user_id
         if reply_to_search_limit is not None:
             payload["reply_to_search_limit"] = reply_to_search_limit
+        if action.get("reply_anchor_missing_text") not in (None, ""):
+            payload["reply_anchor_missing_text"] = str(action.get("reply_anchor_missing_text"))
         ok, error, result = await self.run_worker_action(self.incoming, payload=payload)
         detail = result if isinstance(result, dict) else {}
         save_key = namespaced_action_save_message_id_key(self.incoming.account_id, action.get("save_message_id_key"))
@@ -676,6 +681,7 @@ class InteractionDeliveryExecutor:
             send_via_options=send_via_options,
             edit_message_id=edit_message_id,
             reply_markup=reply_markup,
+            reply_anchor_missing_text=str(action.get("reply_anchor_missing_text") or "") or None,
             context=action.get("context") if isinstance(action.get("context"), dict) else None,
         )
         if ok and delete_message_id is not None:
@@ -1142,6 +1148,7 @@ class InteractionDeliveryExecutor:
         send_via_options: list[str],
         edit_message_id: int | None,
         reply_markup: dict[str, Any] | None,
+        reply_anchor_missing_text: str | None = None,
         context: dict[str, Any] | None = None,
     ) -> tuple[bool, dict[str, Any], str]:
         last_result: dict[str, Any] = {}
@@ -1156,6 +1163,7 @@ class InteractionDeliveryExecutor:
                 send_via=send_via,
                 edit_message_id=edit_message_id if send_via == "interaction_bot" else None,
                 reply_markup=reply_markup,
+                reply_anchor_missing_text=reply_anchor_missing_text,
                 context=context,
             )
             if ok:

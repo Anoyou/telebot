@@ -40,6 +40,7 @@
 4. 游戏和高频交互按 chat/user 设计锁、冷却、超时和取消入口。
 5. 默认让平台继承 `session.channel`；只有跨通道公告、迁移桥兼容或高级兜底时才显式给候选 `send_via`。
 6. 强按钮玩法把 `default_trigger_modes` 设为 `keyword_only`，避免 userbot 会话里的文本按钮降级影响体验。
-7. 文本输出默认走 `parse_mode="plain"`；需要 HTML 时先做 `html_escape()` 再拼标签。
-8. 更新版本时同步 `plugin.json.version`、`MANIFEST.version` 和插件仓库索引里的版本。
-9. 发布前运行 `backend/.venv/bin/python scripts/validate-plugin-examples.py`，并在真实账号上至少验证一次启用、触发、禁用和更新。
+7. 免费参与、按钮加入和互动游戏可按玩法需要保存完整业务状态；仅从发奖锚点角度，保留玩家 `tgid` 并用 `payout.reply_to_user_id` 交给平台查找近期发言即可。不要要求玩家为了领奖再刷一条消息，也不要在插件里自行遍历群消息。
+8. 文本输出默认走 `parse_mode="plain"`；需要 HTML 时先做 `html_escape()` 再拼标签。
+9. 更新版本时同步 `plugin.json.version`、`MANIFEST.version` 和插件仓库索引里的版本。
+10. 发布前运行 `backend/.venv/bin/python scripts/validate-plugin-examples.py`，并在真实账号上至少验证一次启用、触发、禁用和更新。

@@ -282,6 +282,8 @@ return [
 
 在统一会话通道模型下，命令触发的会话收发全走 userbot，关键词/付款/按钮触发的会话收发全走交互 Bot；插件默认不需要感知通道。`payout` 不受会话通道影响，始终经 userbot 执行。
 
+免费参与、按钮加入和互动游戏不要为了发奖要求玩家额外发言。插件仍然可以按自身玩法保存完整业务状态；仅从后续发奖锚点角度，在按钮回调或参与事件里保留玩家 `tgid`，结算时返回 `payout` 并携带 `reply_to_user_id` / `reply_to_search_limit` 即可。平台会用 userbot 在当前群搜索该用户近期发言作为 `+金额` 的回复锚点，插件不需要自己遍历 Telegram 消息。若找不到近期发言，动作会失败并写入日志，平台默认提示 `未找到对应用户（用户 ID）的近期消息。`；需要更贴近玩法语气时，在动作里写 `reply_anchor_missing_text`，文案可使用 `{user_id}` 占位符。
+
 userbot 会话里的 `reply_markup` 会被平台降级成文本编号面板，而不是静默丢弃。玩家回复序号或按钮文案后，平台会合成 `callback_query` 回投插件；合成事件会在 `source.synthetic="text_button"` 标记，并跳过真正的 `answer_callback` Bot API 调用。
 
 ## manifest.py

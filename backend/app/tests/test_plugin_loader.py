@@ -1813,6 +1813,56 @@ async def test_userbot_payout_action_resolves_reply_to_user_recent_message(monke
 
 
 @pytest.mark.asyncio
+async def test_userbot_payout_action_sends_notice_when_reply_anchor_missing(monkeypatch) -> None:
+    class _Client:
+        def __init__(self) -> None:
+            self.send_message = AsyncMock(return_value=SimpleNamespace(id=780))
+
+        def iter_messages(self, _chat_id, **_kwargs):  # noqa: ANN001, ANN003
+            async def _gen():
+                if False:
+                    yield None
+
+            return _gen()
+
+    state = loader_mod._AccountState(account_id=44)
+    state.redis = _FakeRedis()
+    state.client = _Client()
+    state.engine = SimpleNamespace(
+        acquire=AsyncMock(return_value=SimpleNamespace(allowed=True, wait_seconds=0, outcome="ok"))
+    )
+    record_action = AsyncMock()
+    monkeypatch.setattr(loader_mod, "record_action", record_action)
+
+    failed = await loader_mod._apply_userbot_event_bus_actions(
+        state,
+        "evt_payout_loader_reply_anchor_missing",
+        SimpleNamespace(chat_id=-100456),
+        plugin_key="game",
+        entry_key="main",
+        actions=[
+            {
+                "type": "payout",
+                "amount": 12,
+                "reply_to_user_id": 12345,
+                "reply_anchor_missing_text": "没有找到 {user_id} 的近期发言，无法发奖。",
+            }
+        ],
+        redis=state.redis,
+    )
+
+    assert failed is True
+    state.client.send_message.assert_awaited_once_with(
+        -100456,
+        "没有找到 12345 的近期发言，无法发奖。",
+        reply_to=None,
+        parse_mode=None,
+    )
+    assert record_action.await_args.args[2] == loader_mod.TRACE_STATUS_FAILED
+    assert record_action.await_args.kwargs["error_code"] == "reply_anchor_missing"
+
+
+@pytest.mark.asyncio
 async def test_userbot_send_message_action_resolves_reply_to_user_recent_message(monkeypatch) -> None:
     class _Client:
         def __init__(self) -> None:
