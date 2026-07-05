@@ -3830,8 +3830,6 @@ async def _select_transfer_notice_rule(
         if has_active_session:
             if not _rule_entry_allows_event(rule, "payment_confirmed"):
                 continue
-            if not _rule_amount_matches(rule, parsed_amount):
-                continue
         else:
             if not rule.get("enabled", True):
                 continue

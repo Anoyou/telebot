@@ -10869,7 +10869,7 @@ async def test_disabled_active_paid_pool_session_payment_bypasses_rule_state(mon
 
 
 @pytest.mark.asyncio
-async def test_active_paid_pool_session_skips_mismatched_payment_amount(monkeypatch) -> None:
+async def test_active_paid_pool_session_delivers_payment_for_plugin_amount_filter(monkeypatch) -> None:
     class _DB:
         async def __aenter__(self):
             return self
@@ -10917,7 +10917,7 @@ async def test_active_paid_pool_session_skips_mismatched_payment_amount(monkeypa
             ensure_ascii=False,
         ),
     )
-    run_entry = AsyncMock(return_value=(True, None, [{"type": "send_message", "text": "不应该加入"}]))
+    run_entry = AsyncMock(return_value=(True, None, [{"type": "no_session"}]))
     send = AsyncMock()
     monkeypatch.setattr(account_bot_runtime, "AsyncSessionLocal", lambda: _DB())
     monkeypatch.setattr(account_bot_runtime, "get_redis", lambda: redis)
@@ -10957,7 +10957,13 @@ async def test_active_paid_pool_session_skips_mismatched_payment_amount(monkeypa
         },
     )
 
-    run_entry.assert_not_awaited()
+    run_entry.assert_awaited_once()
+    assert run_entry.await_args.kwargs["plugin_key"] == "ten_half"
+    assert run_entry.await_args.kwargs["entry_key"] == "start_ten_half"
+    payload = run_entry.await_args.kwargs["payload"]
+    assert payload["event_type"] == "payment_confirmed"
+    assert payload["payment"]["amount"] == 100
+    assert payload["module_config"]["bet"] == 1000
     send.assert_not_awaited()
 
 
