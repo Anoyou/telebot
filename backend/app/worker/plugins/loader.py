@@ -3785,7 +3785,11 @@ async def _dispatch_userbot_session_message(
     trace = await _start_userbot_session_trace(state, base_payload, event_label=event_label)
     invoked_count = 0
     failed_count = 0
-    consumed = False
+    consumes_userbot_observer_event = any(
+        session_channel != _SESSION_CHANNEL_USERBOT
+        for _session_key, _session, session_channel, _plugin_key, _entry_key, _callback_data in candidates
+    )
+    consumed = consumes_userbot_observer_event
     for session_key, session, session_channel, plugin_key, entry_key, callback_data in candidates:
         payload = _userbot_session_event_payload(
             base_payload,

@@ -3552,6 +3552,48 @@ async def test_userbot_observed_interaction_session_keeps_logical_interaction_ch
 
 
 @pytest.mark.asyncio
+async def test_userbot_observed_interaction_session_consumes_even_without_actions(monkeypatch) -> None:
+    redis = _FakeRedis()
+    state = loader_mod._AccountState(85)
+    state.redis = redis
+    session_key = "account_bot:interaction_session:85:rule-dice:-10085"
+    redis.values[session_key] = json.dumps(
+        {
+            "account_id": 85,
+            "chat_id": -10085,
+            "rule_id": "rule-dice",
+            "module_key": "dice_grid_hunt",
+            "entry_key": "start_dice_grid_hunt",
+            "channel": "interaction_bot",
+            "expires_at": 4_000_000_000,
+        }
+    )
+    invoke = AsyncMock(return_value=[])
+    monkeypatch.setattr(loader_mod, "invoke_interaction_entry", invoke)
+    monkeypatch.setattr(loader_mod, "_load_event_framework_flags", AsyncMock(return_value={
+        "trace_enabled": False,
+        "event_bus_delivery_enabled": True,
+    }))
+    monkeypatch.setattr(loader_mod, "record_action", AsyncMock())
+    monkeypatch.setattr(loader_mod, "record_span", AsyncMock())
+    monkeypatch.setattr(loader_mod, "update_plugin_runtime_status", AsyncMock())
+    monkeypatch.setattr(loader_mod, "finish_trace", AsyncMock())
+
+    consumed = await loader_mod._dispatch_userbot_session_message(
+        state,
+        SimpleNamespace(chat_id=-10085, sender_id=111, raw_text="2", text="2"),
+        direction="outgoing",
+        edited=False,
+        event_label="outgoing",
+        redis=redis,
+    )
+
+    assert consumed is True
+    invoke.assert_awaited_once()
+    assert invoke.await_args.kwargs["default_send_via"] == ["interaction_bot"]
+
+
+@pytest.mark.asyncio
 async def test_userbot_observed_interaction_session_skips_platform_bot_sender(monkeypatch) -> None:
     redis = _FakeRedis()
     state = loader_mod._AccountState(83)
