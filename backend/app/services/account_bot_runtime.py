@@ -1664,6 +1664,13 @@ async def _handle_interaction_update(aid: int, token: str, update: dict[str, Any
                 final_status = TRACE_STATUS_OK
                 await record_span(trace, "route", TRACE_STATUS_OK, component="transfer_notice")
                 return
+            session_route_attempted = False
+            if _ROUTE_SESSION_MESSAGE in routes and _incoming_event_type(incoming) in {"message", "message_edited", "callback_query"}:
+                session_route_attempted = True
+                if await _try_handle_interaction_module_message(db, incoming, cfg):
+                    final_status = TRACE_STATUS_OK
+                    await record_span(trace, "route", TRACE_STATUS_OK, component="interaction_session")
+                    return
             event_bus_candidate = _ROUTE_EVENT_BUS in routes or _routing_index_message_matches_event_bus(incoming, index)
             if event_bus_delivery_enabled and _ROUTE_EVENT_BUS in routes:
                 event_bus_handled, event_bus_ok = await _try_handle_event_bus_subscriptions(db, incoming, cfg)
@@ -1690,7 +1697,11 @@ async def _handle_interaction_update(aid: int, token: str, update: dict[str, Any
                 final_status = TRACE_STATUS_OK
                 await record_span(trace, "route", TRACE_STATUS_OK, component="interaction_rule")
                 return
-            if _ROUTE_SESSION_MESSAGE in routes and await _try_handle_interaction_module_message(db, incoming, cfg):
+            if (
+                _ROUTE_SESSION_MESSAGE in routes
+                and not session_route_attempted
+                and await _try_handle_interaction_module_message(db, incoming, cfg)
+            ):
                 final_status = TRACE_STATUS_OK
                 await record_span(trace, "route", TRACE_STATUS_OK, component="interaction_session")
                 return

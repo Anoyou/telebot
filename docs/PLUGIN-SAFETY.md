@@ -4,6 +4,18 @@
 
 ## 12. 安全边界
 
+### 三模式安全模型
+
+插件安全边界先按三种运行模式判断：
+
+| 模式 | 输入对象 | 默认收发 | 安全边界 |
+| --- | --- | --- | --- |
+| 裸直通 | userbot 原始 Telethon event | 插件自行处理 userbot 能力 | 只给 userbot，不覆盖 interaction bot；不自动生成标准 action、Trace 或 MessageOps 记录 |
+| userbot 命令会话 | UserBot 前缀命令进入标准事件信封 | 普通收发默认 userbot | 适合管理员命令和账号身份动作；按钮会降级成文本编号 |
+| interaction bot 规则会话 | 关键词、付款确认、按钮回调进入标准事件信封 | 普通收发默认 interaction bot | 适合高频群内互动、按钮、题面和会话提示 |
+
+唯一例外：`payout`、收付款、发奖永远由 userbot 执行。Event Bus、Trace、MessageOps 只是标准会话链路的内部契约，不是第四种模式。
+
 ### 指令前缀（command_prefix）
 
 - 所有 Telegram 指令必须有明确前缀（如 `,` 或自定义）
@@ -29,14 +41,14 @@ Manifest 中的 `permissions` 字段声明插件需要的能力：
 
 `permissions` 默认是空列表。远程/本地/插件库安装型插件漏写权限时不会注入对应 facade，也不能调用未声明的 `ctx.client` / `event` helper 能力；核心平台兼容代码也建议显式写全，方便审计和后续迁移。
 
-TelePilot 按个人可信插件模式运行：管理员安装并启用插件后，远程插件的业务风险由管理员自行承担；平台不做公共插件市场式强沙箱，但仍保留频控、审计、急停、Trace 和 token/session 隔离。新 Telegram 插件必须走 Event Bus + MessageOps：在 `plugin.json` 声明 `usage`、`event_subscriptions`、`capabilities`，运行时只读取标准事件信封，所有发送、编辑、删除、置顶、按钮 ACK、Inline answer 和结算都返回标准 action 或通过 `ctx.messages` 生成。`ctx.client` 保留给管理员命令和高级兼容场景，不作为普通 Bot 按钮回调的主入口。群里已有的转账结果通知 Bot 只作为外部付款证据来源，不是插件主动发送通道。
+TelePilot 按个人可信插件模式运行：管理员安装并启用插件后，远程插件的业务风险由管理员自行承担；平台不做公共插件市场式强沙箱，但仍保留频控、审计、急停、Trace 和 token/session 隔离。标准 Telegram 会话插件必须走 Event Bus + MessageOps：在 `plugin.json` 声明 `usage`、`event_subscriptions`、`capabilities`，运行时只读取标准事件信封，所有发送、编辑、删除、置顶、按钮 ACK、Inline answer 和结算都返回标准 action 或通过 `ctx.messages` 生成。裸直通插件只接 userbot 原始 Telethon event，不接 interaction bot，也不会自动获得标准 action/Trace。`ctx.client` 保留给管理员命令和高级兼容场景，不作为普通 Bot 按钮回调的主入口。群里已有的转账结果通知 Bot 只作为外部付款证据来源，不是插件主动发送通道。
 
 ### 会话通道边界
 
 消息链路统一后，插件要额外记住三个安全边界：
 
 - 会话通道由触发方式决定。命令开局默认走 userbot，关键词/付款/按钮开局默认走 interaction bot；普通发送动作应继承 `session.channel`，不要每条消息手动改通道。
-- `payout` 永远经 userbot 执行，并进入 `RateLimitEngine`、trace 和失败回写。插件不要把 Bot 公告伪装成转账，也不要把发奖逻辑拆成“先发普通消息，再等旧文案协议补发”。
+- `payout`、收付款、发奖永远经 userbot 执行，并进入 `RateLimitEngine`、trace 和失败回写。插件不要把 Bot 公告伪装成转账，也不要把发奖逻辑拆成“先发普通消息，再等旧文案协议补发”。
 - userbot 会话没有原生 inline 按钮能力。平台会把按钮降级成文本编号，并把玩家回复合成为 callback 事件；这意味着强按钮玩法最好默认 `keyword_only`，避免命令开局落到不适合的通道。
 
 ### 配置页动作边界
@@ -62,9 +74,9 @@ TelePilot 按个人可信插件模式运行：管理员安装并启用插件后�
 - 不允许把旧 `notice` / `bbot_notice` / `notice_bot` 当主动发送通道
 - 不允许依赖旧 `raw_event` 或旧平铺 payload；需要原生字段必须声明 `capabilities.telegram_native_raw`
 
-### Event Bus 能力声明
+### 标准链路能力声明
 
-最终版插件安全检查先看三个字段：
+标准会话插件安全检查先看三个字段：
 
 | 字段 | 必要性 | 安全意义 |
 | --- | --- | --- |
@@ -72,7 +84,7 @@ TelePilot 按个人可信插件模式运行：管理员安装并启用插件后�
 | `event_subscriptions` | Telegram 事件插件必填 | 明确 message/command/callback/inline/payment 的来源和范围 |
 | `capabilities` | 必填，空能力写 `{}` | 暴露高风险能力，例如 `telegram_native_raw` |
 
-`capabilities.telegram_native_raw.enabled=true` 时必须写 `reason` 和 `sources`。插件只能把 `native_raw` 当排障补充，业务判断仍以标准事件信封为准；当 `native_raw_meta.enabled=false` 时必须降级运行。
+`capabilities.telegram_native_raw.enabled=true` 时必须写 `reason` 和 `sources`。插件只能把 `native_raw` 当排障补充，业务判断仍以标准事件信封为准；当 `native_raw_meta.enabled=false` 时必须降级运行。需要完全跳过标准信封的低延时场景，必须显式声明裸直通能力，并且只允许走 userbot 原始 Telethon event。
 
 ---
 
@@ -93,7 +105,7 @@ TelePilot 按个人可信插件模式运行：管理员安装并启用插件后�
 
 #### 消息与交互
 
-- Event Bus 新插件优先通过 `ctx.messages` 或标准 action 复用/编辑已有业务消息；只有管理员命令兼容 hook 才直接用 `event.edit(...)` 表示指令状态。题面进度、答对奖励和按钮反馈都应让平台记录 trace/action。
+- 标准链路新插件优先通过 `ctx.messages` 或标准 action 复用/编辑已有业务消息；只有管理员命令兼容 hook 才直接用 `event.edit(...)` 表示指令状态。题面进度、答对奖励和按钮反馈都应让平台记录 trace/action。
 - 插件进行中时，重复触发指令必须给出明确提示，并说明下一步：继续当前流程、等待超时、或使用 `stop` / `cancel` / `结束`。
 - 指令型插件必须提供帮助入口或帮助子命令，例如 `help` / `status` / 空参数展示帮助；帮助内容要显示当前配置的指令名和当前系统指令前缀。
 - 视觉题、图片题、文件题不要在文本说明、alt 文案、日志或 preview 中泄露答案；文本只说明规则和限时。
@@ -205,9 +217,9 @@ TelePilot 按个人可信插件模式运行：管理员安装并启用插件后�
 
 ### 消息发送能力边界
 
-新 Telegram 插件的默认路径是 Event Bus + MessageOps + Trace：插件读取标准事件信封，返回标准 action，或通过 `ctx.messages` 生成同等 action；平台按当前会话通道和动作类型路由并记录 trace/action/reason_code。默认消息格式按 `parse_mode="plain"` 发送，只有显式声明 `parse_mode="html"` 时才会启用 HTML；HTML 文案先转义再拼标签。旧 hook 仍可作为内置插件和迁移桥兼容，但不能作为远程插件的新模板。
+标准 Telegram 会话插件的默认路径是 Event Bus + MessageOps + Trace：插件读取标准事件信封，返回标准 action，或通过 `ctx.messages` 生成同等 action；平台按当前会话通道和动作类型路由并记录 trace/action/reason_code。裸直通不走这条链路，只能接 userbot 原始 Telethon event。默认消息格式按 `parse_mode="plain"` 发送，只有显式声明 `parse_mode="html"` 时才会启用 HTML；HTML 文案先转义再拼标签。旧 hook 仍可作为内置插件和迁移桥兼容，但不能作为远程插件的新模板。
 
-| 场景 | 最终版主路径 | 旧 hook 兼容边界 |
+| 场景 | 标准会话主路径 | 旧 hook 兼容边界 |
 |------|--------------|------------------|
 | 普通消息/关键词 | 返回 `send_message`，默认省略 `send_via` 并继承会话通道 | `on_message` 的 `event.reply(...)` / `event.respond(...)` 仅用于历史内置或迁移桥 |
 | 管理员命令 | `command` 事件进入 Event Bus 后返回 action；需要编辑原指令时声明 `edit_message` | `on_command` 的 `event.edit(...)` 可保留；另发消息时不要绕过 MessageOps 记录 |

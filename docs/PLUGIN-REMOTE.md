@@ -1,6 +1,16 @@
 # TelePilot 远程插件
 
-远程插件最终版契约是 **Event Bus + Trace + MessageOps**。新插件不再以 `interaction_entries`、旧交互规则、旧平铺 payload 或 `notice` 通道作为主路径；这些内容只用于迁移旧插件。
+远程插件的第一抽象是三种运行模式，而不是把 Event Bus 当成一种独立模式：
+
+| 模式 | 触发与输入 | 默认收发通道 | 适用边界 |
+| --- | --- | --- | --- |
+| 裸直通 | 只接收 userbot 原始 Telethon event | 插件自行处理 userbot 能力 | 低延时、愿意跳过标准事件信封和平台动作审计的少数场景；不覆盖 interaction bot |
+| userbot 命令会话 | UserBot 前缀命令触发，进入标准事件信封 | 后续收发默认都走 userbot | 管理员命令、账号身份动作、需要沿用当前账号上下文的流程 |
+| interaction bot 规则会话 | 关键词、付款确认、按钮回调触发，进入标准事件信封 | 后续收发默认都走 interaction bot | 高频群内互动、按钮、题面、普通会话提示 |
+
+唯一例外：`payout`、收付款、发奖永远由 userbot 执行，不随会话通道切到 interaction bot。
+
+Event Bus、Trace、MessageOps 是标准链路的内部契约：Event Bus 负责把标准事件投递给插件，Trace 负责记录匹配、执行和失败原因，MessageOps/action 负责把插件输出交给平台路由和审计。它们服务于 userbot 命令会话和 interaction bot 规则会话，不是第四种运行模式。新插件不再以 `interaction_entries`、旧交互规则、旧平铺 payload 或 `notice` 通道作为主路径；这些内容只用于迁移旧插件。
 
 ## 适用场景
 
@@ -8,8 +18,9 @@
 - 插件需要接收 Telegram 标准事件：消息、管理员命令、按钮回调、Inline、付款确认。
 - 插件需要通过 TelePilot 代发消息、ACK 按钮、回答 Inline Query 或记录结算动作。
 - 插件需要声明 HTTP、AI、原生 Telegram raw 等风险能力，供安装前提示和 Trace 排障。
+- 插件确有低延时 userbot 直通需求，并愿意承担无标准 action/Trace 的审计缺口。
 
-远程插件仍按个人可信插件模式运行：安装者自行信任插件业务逻辑；平台负责能力声明、事件信封、MessageOps 执行、Trace、审计、限流和客观失败提示。
+远程插件仍按个人可信插件模式运行：安装者自行信任插件业务逻辑。标准会话里，平台负责能力声明、事件信封、MessageOps 执行、Trace、审计、限流和客观失败提示；裸直通里，平台只保留账号启用、插件授权、二次开关和急停边界，不承诺标准事件信封或 action 审计。
 
 ## 目录结构
 
@@ -23,7 +34,7 @@ my_plugin/
 
 `plugin.json` 是静态安装元数据，不执行 Python；安装后运行时仍会读取 `manifest.py` 的 `MANIFEST`。两边的 `name/key`、`version`、`category`、`event_subscriptions`、`capabilities` 必须保持一致。
 
-消息链路统一阶段的互动入口，还要额外关注 4 个字段：
+标准会话链路里的互动入口，还要额外关注 4 个字段：
 
 - `triggers.command`：把某个入口声明成可由 UserBot 前缀命令开局。
 - `default_trigger_modes`：给平台注入的 `interaction_trigger_modes` 提供默认值，常见值是 `all` / `keyword_only`。
@@ -38,7 +49,7 @@ my_plugin/
 {
   "name": "event_bus_demo",
   "display_name": "Event Bus 示例",
-  "description": "演示最终版事件订阅、Trace 与 MessageOps。",
+  "description": "演示标准链路事件订阅、Trace 与 MessageOps。",
   "author": "examples",
   "version": "0.1.0",
   "entry": "plugin.py",
@@ -50,7 +61,7 @@ my_plugin/
   },
   "default_trigger_modes": "all",
   "callback_fast_ack": false,
-  "usage": "启用后按 Event Bus 订阅接收 message/command/callback/inline/payment 事件，所有输出都返回标准 action。",
+  "usage": "启用后按标准链路订阅接收 message/command/callback/inline/payment 事件，所有输出都返回标准 action。",
   "event_subscriptions": [
     {
       "events": ["message", "command"],
@@ -100,13 +111,13 @@ my_plugin/
 | `allowed_hosts` | HTTP 插件必填 | `ctx.http` 允许访问的域名 |
 | `config_schema` | 按需 | 账号级配置；有配置时也要提供 `usage` 或 `x-usage-guide` |
 
-`usage` 缺失不是普通文案缺口，而是最终版规范警告：插件中心无法告诉安装者“谁能触发、监听什么事件、会发什么消息、如何排障”。远程插件、插件库维护插件和示例插件都必须写 `usage`；有配置页时还应在 `config_schema` 顶层补 `x-usage-guide`、`x-usage-instructions` 或 `x-usage-steps`，但这些只能增强说明，不能替代 `plugin.json.usage`。
+`usage` 缺失不是普通文案缺口，而是规范警告：插件中心无法告诉安装者“谁能触发、监听什么事件、会发什么消息、如何排障”。远程插件、插件库维护插件和示例插件都必须写 `usage`；有配置页时还应在 `config_schema` 顶层补 `x-usage-guide`、`x-usage-instructions` 或 `x-usage-steps`，但这些只能增强说明，不能替代 `plugin.json.usage`。
 
 ## 插件生态迁移边界
 
-最终版按身份处理插件，不再把系统能力和可安装插件混成一类：
+当前框架按身份处理插件，不再把系统能力和可安装插件混成一类：
 
-| 类型 | 边界 | 最终版处理 |
+| 类型 | 边界 | 当前处理 |
 | --- | --- | --- |
 | 平台功能 | 系统运行必需或明显不是插件的能力，例如日志、账号管理、插件仓库管理、调度框架 | 不伪装成普通插件；在系统设置或平台页面展示 |
 | 插件库推荐插件 | 插件库维护但不是系统必需，例如自动回复、游戏、互动玩法 | 可提示安装，可手动移除；必须完整声明 `usage`、`event_subscriptions`、`capabilities` |
@@ -162,13 +173,15 @@ if not native_raw_meta.get("enabled"):
 
 不要使用旧 `raw_event` 字段。它代表旧运行时泄露原生对象的风险，只能出现在迁移说明或回归测试里。
 
-## capabilities.telegram_direct_passthrough
+## 模式 1：裸直通（userbot only）
 
-`telegram_direct_passthrough` 是更高风险的低延时直通能力，只适合抢红包、秒杀、抢答首响等对毫秒级延迟敏感、且愿意跳过 TelePilot 标准 Event Bus / Trace / MessageOps 链路的插件。普通互动、付款确认、按钮、Inline 和需要审计回放的业务不要使用它。
+`telegram_direct_passthrough` 对应裸直通模式，是更高风险的低延时能力。它只给 userbot 使用，插件收到的是 live Telethon event，不是标准事件信封；它不覆盖 interaction bot、Bot API callback、Inline、付款确认或规则会话。
+
+裸直通只适合抢红包、秒杀、抢答首响等对毫秒级延迟敏感，且愿意跳过 TelePilot 标准 Event Bus / Trace / MessageOps 链路的插件。普通互动、付款确认、按钮、Inline 和需要审计回放的业务不要使用它。
 
 插件必须同时满足两层开关才会收到直通消息：
 
-1. `plugin.json` 与 `MANIFEST.capabilities` 显式声明 `telegram_direct_passthrough.enabled=true`，并写清 `reason`、`sources`、`directions`。
+1. `plugin.json` 与 `MANIFEST.capabilities` 显式声明 `telegram_direct_passthrough.enabled=true`，并写清 `reason`、`sources`、`directions`；`sources` 只能写 `userbot`。
 2. 安装后在对应账号的插件配置里二次手动开启：
 
 ```json
@@ -179,14 +192,14 @@ if not native_raw_meta.get("enabled"):
 }
 ```
 
-仅声明能力不会启用直通；账号只启用插件本身也不会启用直通。运行时仍保留账号启用、installed 插件授权和 worker 暂停急停；通过这些外层检查后，worker 会在 incoming 白名单、交互 Bot 关键词接管、Trace、Event Bus 订阅匹配、legacy `on_message` 包装之前广播调用：
+仅声明能力不会启用直通；账号只启用插件本身也不会启用直通。运行时仍保留账号启用、installed 插件授权和 worker 暂停急停；通过这些外层检查后，worker 会在 userbot 标准链路、incoming 白名单、Trace、Event Bus 订阅匹配、legacy `on_message` 包装之前广播调用：
 
 ```python
 async def on_direct_message(self, ctx, event):
     ...
 ```
 
-`event` 是 live Telethon event，不是标准事件信封。所有开启直通模式且匹配 source/direction 的插件都会收到同一条原始事件；只要至少一个直通插件被调用，本条消息就会被直通链路消费，不再进入 incoming 白名单、交互 Bot guard、Event Bus 或 legacy `on_message`，避免低延时插件和普通链路重复处理同一条消息。直通 hook 的发送、编辑、点击等行为不会自动生成标准 action/Trace；插件作者必须自行承担幂等、异常、限流和审计缺失的风险。
+`event` 是 live Telethon event，不是标准事件信封。所有开启直通模式且匹配 source/direction 的插件都会收到同一条原始 userbot 事件；只要至少一个直通插件被调用，本条消息就会被直通链路消费，不再进入 incoming 白名单、Event Bus 或 legacy `on_message`，避免低延时插件和普通链路重复处理同一条消息。直通 hook 的发送、编辑、点击等行为不会自动生成标准 action、Trace 或 MessageOps 记录；插件作者必须自行承担幂等、异常、限流和审计缺失的风险。
 
 ## 标准事件信封
 

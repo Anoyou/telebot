@@ -422,7 +422,7 @@ async def test_guess_number_on_interaction_uses_session_data_and_payout() -> Non
         {
             "type": "send_message",
             "chat_id": -100123,
-            "text": "答对了：AAA\n题目：猜数字 1 ~ 100\n答案：42\n奖金：321\n已请求 userbot 自动发奖。",
+            "text": "答对了：AAA\n题目：猜数字 1 ~ 100\n答案：42\n奖金：321",
             "parse_mode": "plain",
             "reply_to_message_id": 99,
         },
@@ -592,7 +592,7 @@ async def test_poetry_blank_on_interaction_returns_result_from_standard_envelope
         {
             "type": "send_message",
             "chat_id": -100123,
-            "text": "答对了：AAA\n题目：床前__光\n原句：床前明月光\n出处：李白 · 《静夜思》\n奖金：456\n已请求 userbot 自动发奖。",
+            "text": "答对了：AAA\n题目：床前__光\n原句：床前明月光\n出处：李白 · 《静夜思》\n奖金：456",
             "parse_mode": "plain",
             "reply_to_message_id": 99,
         },

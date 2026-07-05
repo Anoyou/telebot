@@ -987,6 +987,7 @@ async def _handle_run_interaction_action_command(
     result_ok = False
     result_error: str | None = None
     result_payload: dict[str, Any] = {}
+    payload = dict(cmd.payload.get("payload") or {})
     try:
         engine = None
         try:
@@ -998,7 +999,7 @@ async def _handle_run_interaction_action_command(
             engine = None
         result_payload = await _run_interaction_userbot_action(
             client,
-            dict(cmd.payload.get("payload") or {}),
+            payload,
             account_id=account_id,
             engine=engine,
             redis=redis,
@@ -1006,11 +1007,16 @@ async def _handle_run_interaction_action_command(
         result_ok = True
     except Exception as e:  # noqa: BLE001
         result_error = f"{type(e).__name__}: {e}"
+        error_code = _interaction_action_error_code(result_error)
+        result_payload = _interaction_action_failure_result(payload, error=result_error, error_code=error_code)
         await _log(
             redis,
             account_id,
             "warn",
             f"run_interaction_action 失败: {result_error}",
+            source="event",
+            action_type=payload.get("action_type"),
+            **_interaction_action_log_detail(result_payload),
         )
     try:
         await redis.publish(
@@ -1024,6 +1030,71 @@ async def _handle_run_interaction_action_command(
         )
     except Exception:  # noqa: BLE001
         pass
+
+
+def _interaction_action_failure_result(
+    payload: dict[str, Any],
+    *,
+    error: Any,
+    error_code: str,
+) -> dict[str, Any]:
+    detail = _interaction_action_context(payload)
+    detail["error"] = str(error or "")
+    detail["error_code"] = error_code
+    detail["worker_offline"] = error_code == "userbot_offline"
+    detail["reply_anchor_missing"] = error_code == "reply_anchor_missing"
+    return detail
+
+
+def _interaction_action_context(payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "chat_id": _int_or_none(payload.get("chat_id")),
+        "amount": _int_or_none(payload.get("amount")),
+        "reply_to_message_id": _int_or_none(payload.get("reply_to_message_id")),
+        "reply_to_user_id": _int_or_none(payload.get("reply_to_user_id")),
+        "reply_to_search_limit": _recent_user_message_search_limit(payload.get("reply_to_search_limit")),
+    }
+
+
+def _interaction_action_log_detail(result: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: result.get(key)
+        for key in (
+            "chat_id",
+            "amount",
+            "reply_to_message_id",
+            "reply_to_user_id",
+            "reply_to_search_limit",
+            "error",
+            "error_code",
+            "worker_offline",
+            "reply_anchor_missing",
+        )
+        if key in result
+    }
+
+
+def _interaction_action_error_code(error: Any) -> str:
+    text = str(error or "").strip().lower()
+    if not text:
+        return "action_failed"
+    if "reply_anchor_missing" in text or "近期消息" in text or "定位发奖回复目标" in text:
+        return "reply_anchor_missing"
+    if "worker 不在线" in text or "userbot client unavailable" in text:
+        return "userbot_offline"
+    if "amount" in text or "金额" in text:
+        return "invalid_payout_amount"
+    if "chat_id" in text:
+        return "scope_not_matched"
+    if "text" in text or "文本" in text:
+        return "empty_message_text"
+    if "message_id" in text or ("消息" in text and "id" in text):
+        return "target_message_id_missing"
+    if "base64" in text or "媒体" in text:
+        return "media_payload_invalid"
+    if "unsupported" in text or "不支持" in text:
+        return "unsupported_send_via"
+    return "telegram_api_error"
 
 
 async def _ack_cmd(redis, cmd: IPCMessage, *, ok: bool, error: str | None = None) -> None:

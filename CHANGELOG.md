@@ -20,6 +20,16 @@
 
 ## [Unreleased]
 
+## [0.49.12] — 2026-07-05 · patch（补丁版本） · 交互路由与发奖排障补丁
+
+### Fixed
+- 修复交互 Bot 活跃会话的普通消息和 callback 仍可能先被宽泛 Event Bus 订阅消费的问题；10 点半这类有按钮和多阶段选择的玩法会先回到当前插件会话，未命中会话时仍回退 Event Bus。
+- 修复严格 `input_schema.additionalProperties=false` 的插件规则保存时，平台会把历史额外字段继续写入 `module_config` 的问题；现在只保留插件 schema 明确声明且非平台控制的字段。
+- 修复 worker 内 userbot 发奖 / 回复失败日志 helper 缺失的问题，并补齐 `chat_id`、`amount`、`reply_to_message_id`、`reply_to_user_id`、`reply_to_search_limit`、`error_code`、`worker_offline`、`reply_anchor_missing` 等结构化排障字段。
+
+### Docs
+- 插件开发文档按真实三模式更新：裸直通只覆盖 userbot 原始 Telethon event，userbot 命令会话与 interaction bot 规则会话走标准链路，`payout`、收付款和发奖始终由 userbot 执行。
+
 ## [0.49.11] — 2026-07-05 · patch（补丁版本） · Event Bus 付款会话补丁
 
 ### Fixed

@@ -625,6 +625,70 @@ async def test_interaction_delivery_passes_reply_to_user_id_to_worker() -> None:
 
 
 @pytest.mark.asyncio
+async def test_interaction_delivery_records_userbot_reply_anchor_failure_details(monkeypatch) -> None:
+    incoming = account_bot_runtime.Incoming(
+        account_id=1,
+        token="123:token",
+        update_id=10,
+        user_id=20,
+        chat_id=-100,
+        message_id=30,
+        text="",
+        trace_id="evt_userbot_reply_fail",
+    )
+    worker_result = {
+        "chat_id": -100,
+        "amount": None,
+        "reply_to_message_id": None,
+        "reply_to_user_id": 12345,
+        "reply_to_search_limit": 20,
+        "error": "ValueError: 找不到用户 12345 在当前群的近期消息，无法定位发奖回复目标",
+        "error_code": "reply_anchor_missing",
+        "worker_offline": False,
+        "reply_anchor_missing": True,
+    }
+    run_worker_action = AsyncMock(return_value=(False, worker_result["error"], worker_result))
+    write_log = AsyncMock()
+    record_action = AsyncMock()
+    monkeypatch.setattr("app.services.interaction.delivery.record_action", record_action)
+    executor = InteractionDeliveryExecutor(
+        incoming=incoming,
+        write_log=write_log,
+        run_worker_action=run_worker_action,
+        log_context=account_bot_runtime._interaction_log_context,
+        trace_context=account_bot_runtime._interaction_trace_context,
+    )
+
+    await executor.apply([
+        {
+            "type": "send_message",
+            "send_via": "userbot_reply",
+            "text": "+88",
+            "reply_to_user_id": 12345,
+            "reply_to_search_limit": 20,
+            "reply_anchor_missing_text": "没有找到 {user_id} 的近期发言，无法发奖。",
+        }
+    ])
+
+    assert record_action.await_args.args[2] == "failed"
+    assert record_action.await_args.kwargs["error_code"] == "reply_anchor_missing"
+    result = record_action.await_args.kwargs["result"]
+    assert result["chat_id"] == -100
+    assert result["amount"] is None
+    assert result["reply_to_message_id"] is None
+    assert result["reply_to_user_id"] == 12345
+    assert result["reply_to_search_limit"] == 20
+    assert result["worker_offline"] is False
+    assert result["reply_anchor_missing"] is True
+    assert write_log.await_args.args[2] == "interaction action send_via fallback"
+    assert write_log.await_args.kwargs["chat_id"] == -100
+    assert write_log.await_args.kwargs["reply_to_user_id"] == 12345
+    assert write_log.await_args.kwargs["reply_to_search_limit"] == 20
+    assert write_log.await_args.kwargs["error_code"] == "reply_anchor_missing"
+    assert write_log.await_args.kwargs["reply_anchor_missing"] is True
+
+
+@pytest.mark.asyncio
 async def test_interaction_delivery_uses_settlement_winner_as_reply_to_user_id() -> None:
     incoming = account_bot_runtime.Incoming(
         account_id=1,
@@ -785,10 +849,34 @@ async def test_interaction_delivery_records_failed_payout(monkeypatch) -> None:
         trace_context=account_bot_runtime._interaction_trace_context,
     )
 
-    await executor.apply([{"type": "payout", "amount": 66}])
+    await executor.apply([
+        {
+            "type": "payout",
+            "amount": 66,
+            "reply_to_message_id": 31,
+            "reply_to_user_id": 12345,
+            "reply_to_search_limit": 20,
+        }
+    ])
 
     assert record_action.await_args.kwargs["error_code"] == "userbot_offline"
+    result = record_action.await_args.kwargs["result"]
+    assert result["chat_id"] == -100
+    assert result["amount"] == 66
+    assert result["reply_to_message_id"] == 31
+    assert result["reply_to_user_id"] == 12345
+    assert result["reply_to_search_limit"] == 20
+    assert result["error_code"] == "userbot_offline"
+    assert result["worker_offline"] is True
+    assert result["reply_anchor_missing"] is False
     assert write_log.await_args.args[2] == "interaction payout failed"
+    assert write_log.await_args.kwargs["chat_id"] == -100
+    assert write_log.await_args.kwargs["amount"] == 66
+    assert write_log.await_args.kwargs["reply_to_message_id"] == 31
+    assert write_log.await_args.kwargs["reply_to_user_id"] == 12345
+    assert write_log.await_args.kwargs["reply_to_search_limit"] == 20
+    assert write_log.await_args.kwargs["error_code"] == "userbot_offline"
+    assert write_log.await_args.kwargs["worker_offline"] is True
 
 
 @pytest.mark.asyncio
@@ -2635,7 +2723,7 @@ def test_interaction_rule_uses_declared_installed_entry_session_scope(monkeypatc
     assert rule["daily_limit_per_user"] == 2
 
 
-def test_account_bot_interaction_rule_preserves_plugin_timeout_config() -> None:
+def test_account_bot_interaction_rule_filters_strict_plugin_module_config() -> None:
     cfg = account_bot_service.normalize_transfer_notice_config(
         {
             "enabled": True,
@@ -2657,8 +2745,8 @@ def test_account_bot_interaction_rule_preserves_plugin_timeout_config() -> None:
         }
     )
 
-    assert cfg["module_config"] == {"timeout": 500, "theme": "classic"}
-    assert cfg["rules"][0]["module_config"] == {"timeout": 500, "theme": "classic"}
+    assert cfg["module_config"] == {"timeout": 500}
+    assert cfg["rules"][0]["module_config"] == {"timeout": 500}
 
 
 def test_interaction_rule_drops_stale_module_config_for_strict_entry(monkeypatch, tmp_path) -> None:
@@ -2714,6 +2802,62 @@ def test_interaction_rule_drops_stale_module_config_for_strict_entry(monkeypatch
     assert rule["module_config"] == {}
     assert cfg["module_prize"] == 666
     assert cfg["module_config"] == {}
+
+
+def test_interaction_rule_keeps_allowed_module_config_for_strict_entry(monkeypatch, tmp_path) -> None:
+    plugin_dir = tmp_path / "strict_game"
+    plugin_dir.mkdir()
+    (plugin_dir / "plugin.json").write_text(
+        json.dumps(
+            {
+                "name": "strict_game",
+                "interaction_entries": [
+                    {
+                        "key": "start_strict_game",
+                        "input_schema": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "properties": {
+                                "timeout": {"type": "integer", "default": 45},
+                                "theme": {"type": "string", "default": "classic"},
+                                "prize": {"type": "integer", "default": 123},
+                                "valid_seconds": {"type": "integer", "default": 900},
+                            },
+                        },
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(account_bot_service, "settings", SimpleNamespace(plugins_installed_path=tmp_path))
+
+    cfg = account_bot_service.normalize_transfer_notice_config(
+        {
+            "enabled": True,
+            "rules": [
+                {
+                    "id": "strict-game",
+                    "enabled": True,
+                    "action": "module",
+                    "module_key": "strict_game",
+                    "module_action": "start_strict_game",
+                    "module_config": {
+                        "timeout": 60,
+                        "theme": "dark",
+                        "bet": 100,
+                        "legacy": True,
+                        "prize": 123,
+                        "valid_seconds": 900,
+                    },
+                }
+            ],
+        }
+    )
+
+    assert cfg["rules"][0]["module_config"] == {"timeout": 60, "theme": "dark"}
+    assert cfg["module_config"] == {"timeout": 60, "theme": "dark"}
 
 
 def test_account_bot_transfer_notice_parser() -> None:
@@ -3690,6 +3834,202 @@ async def test_handle_interaction_update_skips_unmatched_cached_message_without_
     event_bus.assert_not_awaited()
     rule_command.assert_not_awaited()
     module_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_handle_interaction_update_routes_active_session_before_wide_event_bus_on_cold_cache(monkeypatch) -> None:
+    class _DB:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+    account_bot_runtime._INTERACTION_ROUTING_INDEX_CACHE.pop(1, None)
+    event_bus = AsyncMock(return_value=(True, True))
+    rule_command = AsyncMock(return_value=False)
+    module_message = AsyncMock(return_value=True)
+    monkeypatch.setattr(account_bot_runtime, "AsyncSessionLocal", lambda: _DB())
+    monkeypatch.setattr(
+        account_bot_runtime,
+        "_event_framework_flags",
+        AsyncMock(return_value={"trace_enabled": False, "event_bus_delivery_enabled": True, "inline_updates_enabled": True}),
+    )
+    monkeypatch.setattr(account_bot_runtime, "_try_handle_transfer_command", AsyncMock(return_value=False))
+    monkeypatch.setattr(account_bot_runtime, "_try_handle_transfer_notice", AsyncMock(return_value=False))
+    monkeypatch.setattr(account_bot_runtime, "_try_handle_event_bus_subscriptions", event_bus)
+    monkeypatch.setattr(account_bot_runtime, "_try_handle_interaction_rule_command_or_keyword", rule_command)
+    monkeypatch.setattr(account_bot_runtime, "_try_handle_interaction_module_message", module_message)
+    monkeypatch.setattr(
+        account_bot_service,
+        "get_transfer_notice_config",
+        AsyncMock(
+            return_value={
+                "enabled": True,
+                "interaction_bot_id": 999,
+                "rules": [
+                    {
+                        "id": "active-game",
+                        "enabled": True,
+                        "chat_ids": [-100777],
+                        "action": "module",
+                        "module_key": "game24",
+                        "module_action": "start_game24",
+                    }
+                ],
+            }
+        ),
+    )
+
+    await account_bot_runtime._handle_interaction_update(
+        1,
+        "bbot-token",
+        {
+            "update_id": 7003,
+            "message": {
+                "message_id": 703,
+                "text": "24",
+                "from": {"id": 111, "first_name": "AAA"},
+                "chat": {"id": -100777, "type": "supergroup"},
+            },
+        },
+    )
+
+    module_message.assert_awaited_once()
+    event_bus.assert_not_awaited()
+    rule_command.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_handle_interaction_update_routes_active_callback_session_before_wide_event_bus_on_cold_cache(monkeypatch) -> None:
+    class _DB:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+    account_bot_runtime._INTERACTION_ROUTING_INDEX_CACHE.pop(1, None)
+    event_bus = AsyncMock(return_value=(True, True))
+    module_message = AsyncMock(return_value=True)
+    monkeypatch.setattr(account_bot_runtime, "AsyncSessionLocal", lambda: _DB())
+    monkeypatch.setattr(
+        account_bot_runtime,
+        "_event_framework_flags",
+        AsyncMock(return_value={"trace_enabled": False, "event_bus_delivery_enabled": True, "inline_updates_enabled": True}),
+    )
+    monkeypatch.setattr(account_bot_runtime, "_try_handle_transfer_command", AsyncMock(return_value=False))
+    monkeypatch.setattr(account_bot_runtime, "_try_handle_transfer_notice", AsyncMock(return_value=False))
+    monkeypatch.setattr(account_bot_runtime, "_try_handle_event_bus_subscriptions", event_bus)
+    monkeypatch.setattr(account_bot_runtime, "_try_handle_interaction_rule_command_or_keyword", AsyncMock(return_value=False))
+    monkeypatch.setattr(account_bot_runtime, "_try_handle_interaction_module_message", module_message)
+    monkeypatch.setattr(
+        account_bot_service,
+        "get_transfer_notice_config",
+        AsyncMock(
+            return_value={
+                "enabled": True,
+                "interaction_bot_id": 999,
+                "rules": [
+                    {
+                        "id": "active-game",
+                        "enabled": True,
+                        "chat_ids": [-100777],
+                        "action": "module",
+                        "module_key": "game24",
+                        "module_action": "start_game24",
+                    }
+                ],
+            }
+        ),
+    )
+
+    await account_bot_runtime._handle_interaction_update(
+        1,
+        "bbot-token",
+        {
+            "update_id": 7004,
+            "callback_query": {
+                "id": "cb-global",
+                "data": "th:dealer_yes:2001",
+                "from": {"id": 111, "first_name": "AAA"},
+                "message": {
+                    "message_id": 704,
+                    "text": "十点半选庄",
+                    "chat": {"id": -100777, "type": "supergroup"},
+                },
+            },
+        },
+    )
+
+    module_message.assert_awaited_once()
+    event_bus.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_handle_interaction_update_falls_back_to_callback_event_bus_when_session_misses(monkeypatch) -> None:
+    class _DB:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+    account_bot_runtime._INTERACTION_ROUTING_INDEX_CACHE.pop(1, None)
+    event_bus = AsyncMock(return_value=(True, True))
+    module_message = AsyncMock(return_value=False)
+    monkeypatch.setattr(account_bot_runtime, "AsyncSessionLocal", lambda: _DB())
+    monkeypatch.setattr(
+        account_bot_runtime,
+        "_event_framework_flags",
+        AsyncMock(return_value={"trace_enabled": False, "event_bus_delivery_enabled": True, "inline_updates_enabled": True}),
+    )
+    monkeypatch.setattr(account_bot_runtime, "_try_handle_transfer_command", AsyncMock(return_value=False))
+    monkeypatch.setattr(account_bot_runtime, "_try_handle_transfer_notice", AsyncMock(return_value=False))
+    monkeypatch.setattr(account_bot_runtime, "_try_handle_event_bus_subscriptions", event_bus)
+    monkeypatch.setattr(account_bot_runtime, "_try_handle_interaction_rule_command_or_keyword", AsyncMock(return_value=False))
+    monkeypatch.setattr(account_bot_runtime, "_try_handle_interaction_module_message", module_message)
+    monkeypatch.setattr(
+        account_bot_service,
+        "get_transfer_notice_config",
+        AsyncMock(
+            return_value={
+                "enabled": True,
+                "interaction_bot_id": 999,
+                "rules": [
+                    {
+                        "id": "active-game",
+                        "enabled": True,
+                        "chat_ids": [-100777],
+                        "action": "module",
+                        "module_key": "game24",
+                        "module_action": "start_game24",
+                    }
+                ],
+            }
+        ),
+    )
+
+    await account_bot_runtime._handle_interaction_update(
+        1,
+        "bbot-token",
+        {
+            "update_id": 7005,
+            "callback_query": {
+                "id": "cb-global",
+                "data": "global:claim",
+                "from": {"id": 111, "first_name": "AAA"},
+                "message": {
+                    "message_id": 705,
+                    "text": "全局按钮",
+                    "chat": {"id": -100777, "type": "supergroup"},
+                },
+            },
+        },
+    )
+
+    module_message.assert_awaited_once()
+    event_bus.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -11609,7 +11949,7 @@ async def test_game24_winner_notice_replies_to_winning_answer(monkeypatch) -> No
             [
                 {
                     "type": "send_message",
-                    "text": "答对了：AAA\n题目：24 点 [1 5 5 5]\n答案：5*(5-1/5) = 24\n奖金：888\n奖金将由 @owner 账号自动发放。",
+                    "text": "答对了：AAA\n题目：24 点 [1 5 5 5]\n答案：5*(5-1/5) = 24\n奖金：888",
                     "reply_to_message_id": 99,
                 }
             ],
@@ -11668,7 +12008,7 @@ async def test_game24_winner_notice_replies_to_winning_answer(monkeypatch) -> No
     assert send.await_args.args[:3] == (
         "bbot-token",
         -100123,
-        "答对了：AAA\n题目：24 点 [1 5 5 5]\n答案：5*(5-1/5) = 24\n奖金：888\n奖金将由 @owner 账号自动发放。",
+        "答对了：AAA\n题目：24 点 [1 5 5 5]\n答案：5*(5-1/5) = 24\n奖金：888",
     )
     assert send.await_args.kwargs["reply_to_message_id"] == 99
 

@@ -1402,6 +1402,118 @@ def _payout_amount(action: dict[str, Any]) -> int | None:
     return amount
 
 
+async def _record_userbot_action_failure(
+    state: _AccountState,
+    action: dict[str, Any],
+    *,
+    error_code: str,
+    error: str,
+    target_chat_id: int | None,
+    reply_to_message_id: int | None = None,
+    reply_to_user_id: int | None = None,
+) -> dict[str, Any]:
+    result = _userbot_action_failure_result(
+        action,
+        target_chat_id=target_chat_id,
+        error_code=error_code,
+        error=error,
+        reply_to_message_id=reply_to_message_id,
+        reply_to_user_id=reply_to_user_id,
+    )
+    await record_action(
+        action.get("context"),
+        action,
+        TRACE_STATUS_FAILED,
+        actual_send_via="userbot_reply",
+        error_code=error_code,
+        error=error,
+        result=result,
+    )
+    await _log_userbot_action_failure(
+        state,
+        action,
+        result=result,
+        message=f"userbot {str(action.get('type') or '').strip() or 'action'} action failed",
+    )
+    return result
+
+
+def _userbot_action_failure_result(
+    action: dict[str, Any],
+    *,
+    target_chat_id: int | None,
+    error_code: str,
+    error: str,
+    reply_to_message_id: int | None = None,
+    reply_to_user_id: int | None = None,
+) -> dict[str, Any]:
+    result = _userbot_action_context(
+        action,
+        target_chat_id=target_chat_id,
+        reply_to_message_id=reply_to_message_id,
+        reply_to_user_id=reply_to_user_id,
+    )
+    result["error"] = error
+    result["error_code"] = error_code
+    result["worker_offline"] = error_code == "userbot_offline"
+    result["reply_anchor_missing"] = error_code == "reply_anchor_missing"
+    return result
+
+
+def _userbot_action_context(
+    action: dict[str, Any],
+    *,
+    target_chat_id: int | None,
+    reply_to_message_id: int | None = None,
+    reply_to_user_id: int | None = None,
+) -> dict[str, Any]:
+    return {
+        "chat_id": target_chat_id,
+        "amount": _int_or_none(action.get("amount")),
+        "reply_to_message_id": reply_to_message_id
+        if reply_to_message_id is not None
+        else _int_or_none(action.get("reply_to_message_id")),
+        "reply_to_user_id": reply_to_user_id if reply_to_user_id is not None else _int_or_none(action.get("reply_to_user_id")),
+        "reply_to_search_limit": _recent_user_message_search_limit(action.get("reply_to_search_limit")),
+    }
+
+
+async def _log_userbot_action_failure(
+    state: _AccountState,
+    action: dict[str, Any],
+    *,
+    result: dict[str, Any],
+    message: str,
+) -> None:
+    await _log(
+        state.redis or get_redis(),
+        state.account_id,
+        "warn",
+        message,
+        source="event",
+        action_type=str(action.get("type") or ""),
+        **_userbot_action_log_detail(result),
+    )
+
+
+def _userbot_action_log_detail(result: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: result.get(key)
+        for key in (
+            "chat_id",
+            "amount",
+            "reply_to_message_id",
+            "reply_to_user_id",
+            "reply_to_search_limit",
+            "error",
+            "error_code",
+            "worker_offline",
+            "reply_anchor_missing",
+        )
+        if key in result
+    }
+
+
 def _render_userbot_button_fallback(text: str, reply_markup: dict[str, Any] | None) -> tuple[str, dict[str, str]]:
     if not isinstance(reply_markup, dict):
         return text, {}
@@ -1456,37 +1568,59 @@ async def _save_userbot_button_map(
 
 
 async def _apply_userbot_payout_action(state: _AccountState, event: Any, action: dict[str, Any]) -> bool:
+    target_chat_id = _action_chat_id(action, event)
     amount = _payout_amount(action)
     if amount is None:
-        await record_action(
-            action.get("context"),
+        await _record_userbot_action_failure(
+            state,
             action,
-            TRACE_STATUS_FAILED,
             error_code="invalid_payout_amount",
             error="payout amount must be a positive integer",
+            target_chat_id=target_chat_id,
         )
         return False
-    target_chat_id = _action_chat_id(action, event)
     if target_chat_id is None:
-        await record_action(action.get("context"), action, TRACE_STATUS_FAILED, error_code="scope_not_matched", error="target chat_id missing")
+        await _record_userbot_action_failure(
+            state,
+            action,
+            error_code="scope_not_matched",
+            error="target chat_id missing",
+            target_chat_id=target_chat_id,
+        )
         return False
     if state.client is None:
-        await record_action(action.get("context"), action, TRACE_STATUS_FAILED, error_code="userbot_offline", error="userbot client unavailable")
+        await _record_userbot_action_failure(
+            state,
+            action,
+            error_code="userbot_offline",
+            error="userbot client unavailable",
+            target_chat_id=target_chat_id,
+        )
         return False
     text = str(action.get("text") or f"+{amount}").strip()
     if not text:
-        await record_action(action.get("context"), action, TRACE_STATUS_FAILED, error_code="empty_message_text", error="payout text is empty")
+        await _record_userbot_action_failure(
+            state,
+            action,
+            error_code="empty_message_text",
+            error="payout text is empty",
+            target_chat_id=target_chat_id,
+        )
         return False
+    reply_to = _int_or_none(action.get("reply_to_message_id"))
+    reply_to_user_id = _int_or_none(action.get("reply_to_user_id"))
     try:
         reply_to, reply_to_user_id = await _resolve_userbot_reply_to_message_id(state, action, target_chat_id)
     except ValueError as exc:
         reply_to_user_id = _int_or_none(action.get("reply_to_user_id"))
-        await record_action(
-            action.get("context"),
+        await _record_userbot_action_failure(
+            state,
             action,
-            TRACE_STATUS_FAILED,
             error_code="reply_anchor_missing",
             error=str(exc),
+            target_chat_id=target_chat_id,
+            reply_to_message_id=reply_to,
+            reply_to_user_id=reply_to_user_id,
         )
         await _send_reply_anchor_missing_notice(
             state,
@@ -1526,12 +1660,14 @@ async def _apply_userbot_payout_action(state: _AccountState, event: Any, action:
         )
         return True
     except Exception as exc:  # noqa: BLE001
-        await record_action(
-            action.get("context"),
+        await _record_userbot_action_failure(
+            state,
             action,
-            TRACE_STATUS_FAILED,
             error_code="telegram_api_error",
             error=f"{type(exc).__name__}: {exc}",
+            target_chat_id=target_chat_id,
+            reply_to_message_id=reply_to,
+            reply_to_user_id=reply_to_user_id,
         )
         return False
 
@@ -1558,12 +1694,20 @@ async def _apply_userbot_send_message_action(
     parse_mode = _action_parse_mode(action)
     last_code = "unsupported_send_via"
     last_error = "no supported send_via"
+    last_result = _userbot_action_failure_result(action, target_chat_id=target_chat_id, error_code=last_code, error=last_error)
     for send_via in action_send_via_options(action):
         if send_via == "interaction_bot":
             token = await _interaction_bot_token_for_account(state.account_id)
             if not token:
                 last_code = "bot_token_missing"
                 last_error = "interaction bot token unavailable"
+                last_result = _userbot_action_failure_result(
+                    action,
+                    target_chat_id=target_chat_id,
+                    error_code=last_code,
+                    error=last_error,
+                    reply_to_message_id=reply_to,
+                )
                 continue
             try:
                 result = await account_bot_service.send_message(
@@ -1580,11 +1724,25 @@ async def _apply_userbot_send_message_action(
             except Exception as exc:  # noqa: BLE001
                 last_code = "telegram_api_error"
                 last_error = f"{type(exc).__name__}: {exc}"
+                last_result = _userbot_action_failure_result(
+                    action,
+                    target_chat_id=target_chat_id,
+                    error_code=last_code,
+                    error=last_error,
+                    reply_to_message_id=reply_to,
+                )
                 continue
         if send_via == "userbot_reply":
             if state.client is None:
                 last_code = "userbot_offline"
                 last_error = "userbot client unavailable"
+                last_result = _userbot_action_failure_result(
+                    action,
+                    target_chat_id=target_chat_id,
+                    error_code=last_code,
+                    error=last_error,
+                    reply_to_message_id=reply_to,
+                )
                 continue
             try:
                 reply_to, reply_to_user_id = await _resolve_userbot_reply_to_message_id(state, action, target_chat_id)
@@ -1592,6 +1750,14 @@ async def _apply_userbot_send_message_action(
                 reply_to_user_id = _int_or_none(action.get("reply_to_user_id"))
                 last_code = "reply_anchor_missing"
                 last_error = str(exc)
+                last_result = _userbot_action_failure_result(
+                    action,
+                    target_chat_id=target_chat_id,
+                    error_code=last_code,
+                    error=last_error,
+                    reply_to_message_id=reply_to,
+                    reply_to_user_id=reply_to_user_id,
+                )
                 continue
             send_text, button_map = _render_userbot_button_fallback(text, reply_markup)
             if not await _acquire_userbot_action_rate_limit(
@@ -1633,8 +1799,17 @@ async def _apply_userbot_send_message_action(
             except Exception as exc:  # noqa: BLE001
                 last_code = "telegram_api_error"
                 last_error = f"{type(exc).__name__}: {exc}"
+                last_result = _userbot_action_failure_result(
+                    action,
+                    target_chat_id=target_chat_id,
+                    error_code=last_code,
+                    error=last_error,
+                    reply_to_message_id=reply_to,
+                    reply_to_user_id=reply_to_user_id,
+                )
                 continue
-    await record_action(action.get("context"), action, TRACE_STATUS_FAILED, error_code=last_code, error=last_error)
+    await record_action(action.get("context"), action, TRACE_STATUS_FAILED, error_code=last_code, error=last_error, result=last_result)
+    await _log_userbot_action_failure(state, action, result=last_result, message="userbot send_message action failed")
     if last_code == "reply_anchor_missing":
         await _send_reply_anchor_missing_notice(
             state,

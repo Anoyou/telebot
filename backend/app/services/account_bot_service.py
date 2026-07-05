@@ -190,7 +190,7 @@ def _sanitize_module_config_for_entry(
     allowed = {str(key) for key in properties if str(key) not in RULE_CONTROLLED_MODULE_CONFIG_KEYS}
     if not allowed:
         return {}
-    return config
+    return {key: value for key, value in config.items() if key in allowed}
 
 
 def transfer_notice_setting_key(aid: int) -> str:

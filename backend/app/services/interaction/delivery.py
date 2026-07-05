@@ -322,7 +322,9 @@ class InteractionDeliveryExecutor:
                 payload=payload,
             )
             if not ok:
-                return False, {"error": error, "error_code": _worker_action_error_code(error)}
+                error_code = _result_error_code(result, _worker_action_error_code(error))
+                detail = _userbot_action_failure_result(payload, error=error, error_code=error_code, result=result)
+                return False, detail
             return True, result
         token = await self._resolve_token(send_via)
         if not token:
@@ -606,6 +608,9 @@ class InteractionDeliveryExecutor:
             payload["reply_anchor_missing_text"] = str(action.get("reply_anchor_missing_text"))
         ok, error, result = await self.run_worker_action(self.incoming, payload=payload)
         detail = result if isinstance(result, dict) else {}
+        if not ok:
+            error_code = _result_error_code(detail, _worker_action_error_code(error))
+            detail = _userbot_action_failure_result(payload, error=error, error_code=error_code, result=detail)
         save_key = namespaced_action_save_message_id_key(self.incoming.account_id, action.get("save_message_id_key"))
         if ok and save_key:
             msg_id = delivery_message_id(detail)
@@ -617,17 +622,19 @@ class InteractionDeliveryExecutor:
             TRACE_STATUS_OK if ok else TRACE_STATUS_FAILED,
             actual_send_via="userbot_reply",
             result=detail,
-            error_code=None if ok else _worker_action_error_code(error),
+            error_code=None if ok else detail.get("error_code") or _worker_action_error_code(error),
             error=None if ok else error,
         )
         if not ok:
+            log_detail = self.log_context(self.incoming)
+            log_detail.update(_userbot_action_log_detail(detail))
             await self.write_log(
                 self.incoming,
                 "warn",
                 "interaction payout failed",
                 action_type="payout",
                 error=error,
-                **self.log_context(self.incoming),
+                **log_detail,
             )
 
     async def _apply_send_message(
@@ -1231,13 +1238,16 @@ class InteractionDeliveryExecutor:
         return False, last_result, send_via_options[0] if send_via_options else "interaction_bot"
 
     async def _log_send_via_fallback(self, send_via: str, result: dict[str, Any]) -> None:
+        detail = _userbot_action_log_detail(result) if isinstance(result, dict) else {}
+        log_detail = self.log_context(self.incoming)
+        log_detail.update(detail)
         await self.write_log(
             self.incoming,
             "warn",
             "interaction action send_via fallback",
             send_via=send_via,
             error=result.get("error") if isinstance(result, dict) else None,
-            **self.log_context(self.incoming),
+            **log_detail,
         )
 
     def _target_chat_id(self, chat_id: int | None = None) -> int | None:
@@ -1363,12 +1373,60 @@ def _result_error_code(result: Any, fallback: str) -> str:
     return fallback
 
 
+def _userbot_action_failure_result(
+    payload: dict[str, Any],
+    *,
+    error: Any,
+    error_code: str,
+    result: Any = None,
+) -> dict[str, Any]:
+    detail = _userbot_action_context(payload)
+    if isinstance(result, dict):
+        detail.update(result)
+    detail["error"] = str(error or "")
+    detail["error_code"] = error_code
+    detail["worker_offline"] = error_code == "userbot_offline"
+    detail["reply_anchor_missing"] = error_code == "reply_anchor_missing"
+    return detail
+
+
+def _userbot_action_context(payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "chat_id": _int_or_none(payload.get("chat_id")),
+        "amount": _int_or_none(payload.get("amount")),
+        "reply_to_message_id": _int_or_none(payload.get("reply_to_message_id")),
+        "reply_to_user_id": _int_or_none(payload.get("reply_to_user_id")),
+        "reply_to_search_limit": _int_or_none(payload.get("reply_to_search_limit")),
+    }
+
+
+def _userbot_action_log_detail(result: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: result.get(key)
+        for key in (
+            "chat_id",
+            "amount",
+            "reply_to_message_id",
+            "reply_to_user_id",
+            "reply_to_search_limit",
+            "error_code",
+            "worker_offline",
+            "reply_anchor_missing",
+        )
+        if key in result
+    }
+
+
 def _worker_action_error_code(error: Any) -> str:
     text = str(error or "").strip().lower()
     if not text:
         return "action_failed"
+    if "reply_anchor_missing" in text or "近期消息" in text or "定位发奖回复目标" in text:
+        return "reply_anchor_missing"
     if "worker 不在线" in text or "userbot" in text:
         return "userbot_offline"
+    if "amount" in text or "金额" in text:
+        return "invalid_payout_amount"
     if "message_id" in text or "消息" in text and "id" in text:
         return "target_message_id_missing"
     if "chat_id" in text:

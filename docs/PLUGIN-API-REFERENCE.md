@@ -2,9 +2,19 @@
 
 本文是当前维护的插件 API 参考，覆盖配置、派发、日志、前端集成、调试和示例。用户界面与开发文档统一使用“插件”指代可安装、可启停、可配置的扩展能力；历史代码字段名仍按兼容要求保留。
 
-## 1. 最终版主路径
+## 1. 三模式心智模型
 
-新插件优先使用 Event Bus + 标准事件信封 + `ctx.messages` / 标准 action：
+新插件先判断自己属于哪种模式，再看 Event Bus、Trace、MessageOps 这些内部契约：
+
+| 模式 | 触发与输入 | 默认收发通道 | 典型用法 |
+| --- | --- | --- | --- |
+| 裸直通 | userbot 原始 Telethon event | 插件自行处理 userbot 能力 | 抢首响、极低延时 userbot 监听；不覆盖 interaction bot |
+| userbot 命令会话 | UserBot 前缀命令触发，进入标准事件信封 | 后续收发默认都走 userbot | 管理员命令、账号身份动作、需要沿用当前账号上下文的流程 |
+| interaction bot 规则会话 | 关键词、付款确认、按钮回调触发，进入标准事件信封 | 后续收发默认都走 interaction bot | 高频群内互动、按钮、题面、普通会话提示 |
+
+唯一例外：`payout`、收付款、发奖永远由 userbot 执行，不随会话通道切到 interaction bot。
+
+Event Bus、Trace、MessageOps 是标准链路内部契约，不是第四种模式。userbot 命令会话和 interaction bot 规则会话都使用标准事件信封，并通过 `ctx.messages` / 标准 action 输出：
 
 ```python
 from app.worker.plugins.events import event_from_interaction_payload
@@ -25,13 +35,22 @@ async def on_interaction(self, ctx, entry_key, payload):
 
 旧 `on_message`、`on_command`、`interaction_entries`、旧平铺 payload 只作为迁移兼容说明出现，不再是公共群玩法或新插件的推荐主路径。
 
-## 2. 会话通道与单入口模型
+裸直通入口只给 userbot 使用：
 
-消息链路统一后，互动插件按“触发方式决定整段会话通道”理解；插件全程不需要感知或选择收发通道：
+```python
+async def on_direct_message(self, ctx, event):
+    ...
+```
+
+这里的 `event` 是 live Telethon event，不是 `payload`，也不会自动生成 `ctx.messages` action、Trace 或 MessageOps 记录。它不接 interaction bot 事件；需要按钮、Inline、付款确认、规则会话或审计回放时，改用标准会话链路。
+
+## 2. 标准会话链路与单入口模型
+
+进入标准链路后，互动插件按“触发方式决定整段会话通道”理解；插件全程不需要感知或选择收发通道：
 
 | 开局方式 | 会话通道（收 + 发） | 说明 |
 | --- | --- | --- |
-| UserBot 前缀命令 | `userbot` | 后续消息、继续追问、普通回复默认都走 userbot |
+| UserBot 前缀命令 | `userbot` | 后续消息、继续追问、普通回复默认都走 userbot，不覆盖 interaction bot |
 | 关键词 / 付款确认 / 按钮回调 | `interaction_bot` | 题面、按钮、编辑消息默认都走 interaction bot |
 | `payout` | 固定 `userbot` | 不受会话通道影响，始终经 userbot 执行 |
 
@@ -126,7 +145,7 @@ class PluginContext:
 - `ctx.ai.complete()` 推荐用 `provider_tag` 按用途选择 provider；`tag` / `tags` 是兼容别名且已 deprecated，新插件不要依赖它们作为主要入口。
 - `ctx.ai.list_providers()` 可用于展示当前账号可见的脱敏 provider 摘要；更完整的 AI facade 说明见 `docs/PLUGIN-AI.md`。
 
-Event Bus 主路径示例：
+标准链路示例：
 
 ```python
 async def on_event(self, ctx, payload):
@@ -152,7 +171,7 @@ async def on_event(self, ctx, payload):
     }]
 ```
 
-管理员命令兼容示例可以继续用 `event.edit(...)` 更新命令消息；最终版公共互动插件应优先返回标准 action 或通过 `ctx.messages` 缓存标准 action。
+管理员命令兼容示例可以继续用 `event.edit(...)` 更新命令消息；标准公共互动插件应优先返回标准 action 或通过 `ctx.messages` 缓存标准 action。
 
 ### 4.1 可用上下文与访问方式（PluginContext Contract）
 
@@ -217,7 +236,7 @@ async def on_event(self, ctx, payload):
 | `min_telepilot_version` | str | 最低 TelePilot 版本要求，远程插件建议填写 |
 | `min_telebot_version` | str | 旧字段名，0.15 起仅作为兼容别名保留，新插件不要再新增 |
 | `category` | str | `interactive` / `automation` / `utility`，只决定展示分组 |
-| `event_subscriptions` | list | Event Bus 订阅声明，新插件 Telegram 事件主路径 |
+| `event_subscriptions` | list | 标准链路订阅声明，描述插件想从 Event Bus 接收哪些事件 |
 | `capabilities` | dict | 高风险能力声明，例如 `telegram_native_raw` |
 
 ### 完整示例
@@ -398,9 +417,9 @@ name_pattern = r"^[A-Za-z0-9_][A-Za-z0-9_-]*$"
 version_pattern = r"^\d+\.\d+\.\d+"
 ```
 
-### Event Bus + Trace + MessageOps 主路径
+### 标准链路内部契约：Event Bus + Trace + MessageOps
 
-新 Telegram 插件的主路径是：
+userbot 命令会话和 interaction bot 规则会话的内部链路是：
 
 ```text
 Telegram 来源
@@ -437,7 +456,7 @@ Telegram 来源
 }
 ```
 
-`usage` 必须让开发者和安装者不用理解旧规则也能知道插件怎么启用。`event_subscriptions` 描述 Event Bus 投递范围；`capabilities` 描述高风险能力，没有高风险能力也建议显式写 `{}`。
+`usage` 必须让开发者和安装者不用理解旧规则也能知道插件怎么启用。`event_subscriptions` 描述 Event Bus 投递范围；`capabilities` 描述高风险能力，没有高风险能力也建议显式写 `{}`。这组契约服务于标准会话链路，不是裸直通，也不是独立于三模式之外的第四种模式。
 
 当前标准事件：
 
@@ -674,7 +693,7 @@ userbot 会话里的 `reply_markup` 不会直接丢掉：
 | `automation` | 自动化 | 自动回复、转发、定时任务等账号自动化能力 |
 | `utility` | 工具能力 | AI、媒体生成、查询、辅助工具等能力 |
 
-`category` 只决定展示分组；最终版事件投递看 `event_subscriptions`。`interaction_entries` 只用于旧交互中心规则迁移和入口参数兼容。
+`category` 只决定展示分组；标准会话事件投递看 `event_subscriptions`。`interaction_entries` 只用于旧交互中心规则迁移和入口参数兼容。
 
 注意：`interaction_entries` 只负责“让前端知道这个插件有哪些交互入口可选”。真正运行时，worker 会调用插件实例的 `on_interaction(ctx, entry_key, payload)`。如果插件只声明入口但没有实现这个 hook，交互 Bot 会提示“插件尚未实现交互入口”。
 
@@ -1360,7 +1379,7 @@ class Game24Plugin(Plugin):
 "help_message_template": {"type": "string", "default": ",game 100 - 开始一局"}
 ```
 
-红包、抢答、24 点、猜数字这类“公共参与 + 私有管理”的新插件，主路径应先声明 `event_subscriptions`，由 Event Bus 接收玩家关键词、答案、callback、inline 和付款确认，再通过 `ctx.messages` 或标准 action 输出结果。下面的 `commands` / `on_message` 模型仅用于管理员命令兼容和仍未迁移的旧 hook 插件，不应作为公开玩法的新模板：
+红包、抢答、24 点、猜数字这类“公共参与 + 私有管理”的新插件，标准会话链路应先声明 `event_subscriptions`，由 Event Bus 接收玩家关键词、答案、callback、inline 和付款确认，再通过 `ctx.messages` 或标准 action 输出结果。下面的 `commands` / `on_message` 模型仅用于管理员命令兼容和仍未迁移的旧 hook 插件，不应作为公开玩法的新模板：
 
 - 开局、发红包、撤销、强制结束、查看管理状态等管理动作优先声明为 `command` 事件；保留旧 hook 时才写成 `commands`，且只能由本账号 outgoing 指令触发。
 - 领取口令、答题、参与投票等普通成员行为优先订阅 `message` / `callback_query` / `inline_query`；保留旧 hook 时才写在 `on_message`，通过普通文本判断，不要求用户发送系统指令前缀。
@@ -1598,7 +1617,7 @@ class MyPlugin(Plugin):
 | **单配置对象 / 通用独立配置页** | 每个账号只保存一份插件配置，或轻量插件只需要字段表单 | 像一个工具面板：配置好触发指令和参数，直接运行；普通字段由 schema 驱动渲染 | 插件库 game24 / math10 / codex_image / chatgpt_image、简单远程插件 / 小工具插件 | 专属或通用独立配置页 |
 | **基础能力 — 平台内置** | 系统运行时常驻能力，不作为普通插件展示 | 像底座服务：给插件或平台调用，不强调启停 | scheduler | 平台功能页 |
 
-**关键判断**：需要维护多条规则 → `rules`；只有一份账号配置或普通字段表单足够 → `single`；旧插件已经写了 `schema` → 按 `single` 通用独立页兼容；像调度器这种系统服务 → `platform`。这里的 `rules` 只表示配置页/CRUD/dry-run 形态，不是旧运行时规则驱动主路径；Telegram 事件投递仍以 Event Bus + `event_subscriptions` + 标准 action 为主。
+**关键判断**：需要维护多条规则 → `rules`；只有一份账号配置或普通字段表单足够 → `single`；旧插件已经写了 `schema` → 按 `single` 通用独立页兼容；像调度器这种系统服务 → `platform`。这里的 `rules` 只表示配置页/CRUD/dry-run 形态，不是旧运行时规则驱动主路径；标准会话事件投递仍以 Event Bus + `event_subscriptions` + 标准 action 为主。
 
 #### 自动分类规则
 
@@ -1616,7 +1635,7 @@ config_schema={
 
 | `x-ui-mode` | 展示位置 | 说明 |
 |-------------|----------|------|
-| `rules` | 规则配置页 | 多条规则配置插件，通常有规则列表、创建/编辑、dry-run；不改变 Event Bus 投递主路径 |
+| `rules` | 规则配置页 | 多条规则配置插件，通常有规则列表、创建/编辑、dry-run；不改变标准会话链路的投递方式 |
 | `single` | 单配置对象 / 通用独立配置页 | 单配置对象或通用独立配置页，字段可由 `config_schema` 驱动 |
 | `schema` | legacy alias | 旧别名；不要在新插件中使用，不再表示弹窗类 |
 | `platform` | 基础能力 | 平台内置能力，不混在普通插件列表里 |
@@ -2140,7 +2159,7 @@ class DemoPlugin(Plugin):
 
 ## 17. 完整示例
 
-最终版 Telegram 交互插件请优先参考 `examples/plugins/event_bus_demo`，它覆盖 message、command、callback、inline、payment、`native_raw` 和旧 `notice` 迁移错误。下面的天气查询插件是 **管理员命令型兼容示例**，用于说明旧 `on_command` API 和前缀处理；它不应作为公共群玩法或高频交互插件的新模板。
+标准 Telegram 交互插件请优先参考 `examples/plugins/event_bus_demo`，它覆盖 message、command、callback、inline、payment、`native_raw` 和旧 `notice` 迁移错误。下面的天气查询插件是 **管理员命令型兼容示例**，用于说明旧 `on_command` API 和前缀处理；它不应作为公共群玩法或高频交互插件的新模板。
 
 ### 天气查询插件（管理员命令兼容）
 
