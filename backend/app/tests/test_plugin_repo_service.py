@@ -167,6 +167,7 @@ async def test_ensure_repo_cached_refreshes_github_tree_branch_cache(tmp_path, m
         ),
         ("rev-parse", "--verify", "refs/remotes/origin/codex-image-test"),
         ("reset", "--hard", "refs/remotes/origin/codex-image-test"),
+        ("clean", "-fd"),
     ]
 
 

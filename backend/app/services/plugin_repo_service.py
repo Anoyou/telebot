@@ -291,6 +291,7 @@ async def _ensure_repo_cached(
             remote_ref = f"refs/remotes/origin/{source.ref}"
             await _run_git("rev-parse", "--verify", remote_ref, cwd=target, timeout=10.0)
             await _run_git("reset", "--hard", remote_ref, cwd=target, timeout=30.0)
+            await _run_git("clean", "-fd", cwd=target, timeout=30.0)
         else:
             await _run_git(
                 "fetch",
@@ -308,6 +309,7 @@ async def _ensure_repo_cached(
             )).strip() or "refs/remotes/origin/HEAD"
             # symbolic-ref 输出形如 "refs/remotes/origin/main"
             await _run_git("reset", "--hard", head, cwd=target, timeout=30.0)
+            await _run_git("clean", "-fd", cwd=target, timeout=30.0)
     except Exception:  # noqa: BLE001
         if force_refresh:
             raise
