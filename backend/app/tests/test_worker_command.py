@@ -295,6 +295,45 @@ async def test_run_interaction_userbot_action_payout_uses_rate_limit_and_parse_m
 
 
 @pytest.mark.asyncio
+async def test_run_interaction_userbot_action_edit_caption_uses_saved_key_and_rate_limit():
+    from app.worker import runtime as runtime_mod
+
+    client = AsyncMock()
+    client.edit_message = AsyncMock(return_value=SimpleNamespace(id=909))
+    engine = SimpleNamespace(
+        acquire=AsyncMock(return_value=SimpleNamespace(allowed=True, wait_seconds=0, outcome="ok"))
+    )
+
+    class _Redis:
+        async def get(self, key):
+            assert key == "tp:msgid:55:dice_grid:round:1"
+            return "707"
+
+    result = await runtime_mod._run_interaction_userbot_action(
+        client,
+        {
+            "action_type": "edit_caption",
+            "chat_id": -100333,
+            "message_id_key": "dice_grid:round:1",
+            "caption": "<b>答对</b>",
+            "parse_mode": "html",
+        },
+        account_id=55,
+        engine=engine,
+        redis=_Redis(),
+    )
+
+    engine.acquire.assert_awaited_once_with(55, "edit_message", peer_id=-100333)
+    client.edit_message.assert_awaited_once_with(
+        -100333,
+        707,
+        "<b>答对</b>",
+        parse_mode="html",
+    )
+    assert result == {"message_id": 909, "chat_id": -100333}
+
+
+@pytest.mark.asyncio
 async def test_run_interaction_action_command_reports_reply_anchor_diagnostics():
     from app.worker import runtime as runtime_mod
 

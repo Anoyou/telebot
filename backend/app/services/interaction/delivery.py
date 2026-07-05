@@ -106,7 +106,7 @@ class InteractionDeliveryExecutor:
                     error=f"session control action: {action_type}",
                 )
                 continue
-            if action_type in {"send_message", "send_photo", "send_file", "edit_message", "delete_message", "pin_message"}:
+            if action_type in {"send_message", "send_photo", "send_file", "edit_message", "edit_caption", "delete_message", "pin_message"}:
                 deprecated_channels = deprecated_send_via_values(action_send_via_raw_selector(action))
                 if deprecated_channels:
                     await record_action(
@@ -165,6 +165,9 @@ class InteractionDeliveryExecutor:
             if action_type == "edit_message":
                 await self._apply_edit_message(action, parse_mode=parse_mode, reply_markup=reply_markup)
                 continue
+            if action_type == "edit_caption":
+                await self._apply_edit_caption(action, parse_mode=parse_mode, reply_markup=reply_markup)
+                continue
             if action_type == "send_message":
                 replace_message_id = await self._apply_send_message(
                     action,
@@ -183,6 +186,7 @@ class InteractionDeliveryExecutor:
                     reply_to_user_id=reply_to_user_id,
                     reply_to_search_limit=reply_to_search_limit,
                     parse_mode=parse_mode,
+                    reply_markup=reply_markup,
                     replace_message_id=replace_message_id,
                 )
                 continue
@@ -481,10 +485,76 @@ class InteractionDeliveryExecutor:
             )
             return False, {"error": str(exc), "error_code": "telegram_api_error"}
 
+    async def edit_caption(
+        self,
+        caption: str,
+        *,
+        chat_id: int | None = None,
+        message_id: int | None,
+        send_via: str,
+        parse_mode: str = "plain",
+        reply_markup: dict[str, Any] | None = None,
+    ) -> tuple[bool, dict[str, Any]]:
+        target_chat_id = self._target_chat_id(chat_id)
+        service_parse_mode = None if parse_mode == "plain" else parse_mode
+        if target_chat_id is None:
+            return False, {}
+        if message_id is None:
+            return False, {"error": "message_id missing", "error_code": "target_message_id_missing"}
+        if not self._is_supported_send_via(send_via):
+            return False, {"error": f"unsupported send_via: {send_via}", "error_code": "unsupported_send_via"}
+        if send_via == "userbot_reply":
+            payload = {
+                "action_type": "edit_caption",
+                "chat_id": target_chat_id,
+                "message_id": message_id,
+                "caption": caption,
+                "parse_mode": parse_mode,
+            }
+            ok, error, result = await self.run_worker_action(self.incoming, payload=payload)
+            if not ok:
+                return False, {"error": error, "error_code": _worker_action_error_code(error)}
+            return True, result
+        token = await self._resolve_token(send_via)
+        if not token:
+            await self.write_log(
+                self.incoming,
+                "warn",
+                f"interaction action edit_caption send_via={send_via} ignored: bot token unavailable",
+                send_via=send_via,
+                **self.log_context(self.incoming),
+            )
+            return False, {"error": "bot token unavailable", "error_code": "bot_token_missing"}
+        try:
+            edit_kwargs: dict[str, Any] = {"reply_markup": reply_markup if send_via == "interaction_bot" else None}
+            if service_parse_mode is not None:
+                edit_kwargs["parse_mode"] = service_parse_mode
+            result = await account_bot_service.edit_message_caption(
+                token,
+                target_chat_id,
+                message_id,
+                caption,
+                **edit_kwargs,
+            )
+            return True, result
+        except Exception as exc:  # noqa: BLE001
+            if _is_message_not_modified_error(exc):
+                return True, {"message_id": message_id, "chat_id": target_chat_id, "not_modified": True}
+            await self.write_log(
+                self.incoming,
+                "warn",
+                f"interaction action edit_caption send_via={send_via} failed",
+                send_via=send_via,
+                error=str(exc),
+                **self.log_context(self.incoming),
+            )
+            return False, {"error": str(exc), "error_code": "telegram_api_error"}
+
     async def send_photo(
         self,
         photo: bytes,
         *,
+        action_type: str = "send_photo",
         chat_id: int | None = None,
         filename: str,
         caption: str | None,
@@ -492,6 +562,7 @@ class InteractionDeliveryExecutor:
         reply_to_user_id: int | None = None,
         reply_to_search_limit: int | None = None,
         parse_mode: str = "plain",
+        reply_markup: dict[str, Any] | None = None,
         send_via: str,
     ) -> tuple[bool, dict[str, Any]]:
         target_chat_id = self._target_chat_id(chat_id)
@@ -501,10 +572,11 @@ class InteractionDeliveryExecutor:
         if not self._is_supported_send_via(send_via):
             return False, {"error": f"unsupported send_via: {send_via}", "error_code": "unsupported_send_via"}
         if send_via == "userbot_reply":
+            payload_field = "photo_base64" if action_type == "send_photo" else "file_base64"
             payload = {
-                "action_type": "send_photo",
+                "action_type": action_type,
                 "chat_id": target_chat_id,
-                "photo_base64": base64.b64encode(photo).decode("ascii"),
+                payload_field: base64.b64encode(photo).decode("ascii"),
                 "filename": filename,
                 "caption": caption,
                 "reply_to_message_id": reply_to_message_id,
@@ -536,15 +608,24 @@ class InteractionDeliveryExecutor:
                 "filename": filename,
                 "caption": caption,
                 "reply_to_message_id": reply_to_message_id,
+                "reply_markup": reply_markup if send_via == "interaction_bot" else None,
             }
             if service_parse_mode is not None:
                 send_kwargs["parse_mode"] = service_parse_mode
-            result = await account_bot_service.send_photo_bytes(
-                token,
-                target_chat_id,
-                photo,
-                **send_kwargs,
-            )
+            if action_type == "send_file":
+                result = await account_bot_service.send_document_bytes(
+                    token,
+                    target_chat_id,
+                    photo,
+                    **send_kwargs,
+                )
+            else:
+                result = await account_bot_service.send_photo_bytes(
+                    token,
+                    target_chat_id,
+                    photo,
+                    **send_kwargs,
+                )
         except Exception as exc:  # noqa: BLE001
             await self.write_log(
                 self.incoming,
@@ -916,6 +997,60 @@ class InteractionDeliveryExecutor:
             error=result.get("error") if isinstance(result, dict) else None,
         )
 
+    async def _apply_edit_caption(
+        self,
+        action: dict[str, Any],
+        *,
+        parse_mode: str,
+        reply_markup: dict[str, Any] | None,
+    ) -> None:
+        if "caption" in action:
+            caption = str(action.get("caption") or "")
+        elif "text" in action:
+            caption = str(action.get("text") or "")
+        else:
+            await record_action(
+                action.get("context"),
+                action,
+                TRACE_STATUS_FAILED,
+                error_code="caption_missing",
+                error="edit_caption caption is missing",
+            )
+            return
+        message_id = _int_or_none(action.get("message_id") or action.get("edit_message_id"))
+        message_id_key = None
+        if message_id is None:
+            message_id_key = namespaced_action_save_message_id_key(self.incoming.account_id, action.get("message_id_key"))
+            message_id = await self._read_saved_message_id(message_id_key)
+        if message_id is None:
+            await record_action(
+                action.get("context"),
+                action,
+                TRACE_STATUS_FAILED,
+                error_code="target_message_id_missing",
+                error="edit_caption message_id or message_id_key is missing",
+                result={"message_id_key": message_id_key} if message_id_key else None,
+            )
+            return
+        chat_id = _int_or_none(action.get("chat_id"))
+        ok, result, used_send_via = await self._try_edit_caption_options(
+            caption,
+            chat_id=chat_id,
+            message_id=message_id,
+            send_via_options=action_send_via_options(action),
+            parse_mode=parse_mode,
+            reply_markup=reply_markup,
+        )
+        await record_action(
+            action.get("context"),
+            action,
+            TRACE_STATUS_OK if ok else TRACE_STATUS_FAILED,
+            actual_send_via=used_send_via,
+            result=result,
+            error_code=None if ok else _result_error_code(result, "action_failed"),
+            error=result.get("error") if isinstance(result, dict) else None,
+        )
+
     async def _apply_send_media(
         self,
         action: dict[str, Any],
@@ -924,6 +1059,7 @@ class InteractionDeliveryExecutor:
         reply_to_user_id: int | None,
         reply_to_search_limit: int | None,
         parse_mode: str,
+        reply_markup: dict[str, Any] | None,
         replace_message_id: int | None,
     ) -> int | None:
         raw_photo = str(action.get("photo_base64") or action.get("file_base64") or "").strip()
@@ -957,12 +1093,15 @@ class InteractionDeliveryExecutor:
                 error="decoded media payload is empty",
             )
             return replace_message_id
-        filename = str(action.get("filename") or "interaction.png").strip() or "interaction.png"
+        action_type = str(action.get("type") or "send_photo").strip()
+        filename_default = "interaction.png" if action_type == "send_photo" else "interaction.bin"
+        filename = str(action.get("filename") or filename_default).strip() or filename_default
         caption = str(action.get("caption") or action.get("text") or "").strip() or None
         chat_id = _int_or_none(action.get("chat_id"))
         placeholder_chat_id = self.incoming.chat_id
         ok, _result, _used_send_via = await self._try_send_photo_options(
             photo,
+            action_type=action_type,
             chat_id=chat_id,
             filename=filename,
             caption=caption,
@@ -970,6 +1109,7 @@ class InteractionDeliveryExecutor:
             reply_to_user_id=reply_to_user_id,
             reply_to_search_limit=reply_to_search_limit,
             parse_mode=parse_mode,
+            reply_markup=reply_markup,
             send_via_options=action_send_via_options(action),
         )
         if ok and replace_message_id is not None:
@@ -980,6 +1120,11 @@ class InteractionDeliveryExecutor:
                 record=True,
             )
             replace_message_id = None
+        save_key = namespaced_action_save_message_id_key(self.incoming.account_id, action.get("save_message_id_key"))
+        if ok and save_key:
+            msg_id = delivery_message_id(_result)
+            if msg_id is not None:
+                await self.get_redis_client().set(save_key, str(msg_id), ex=7200)
         await record_action(
             action.get("context"),
             action,
@@ -1205,10 +1350,37 @@ class InteractionDeliveryExecutor:
             await self._log_send_via_fallback(send_via, result)
         return False, last_result, send_via_options[0] if send_via_options else "interaction_bot"
 
+    async def _try_edit_caption_options(
+        self,
+        caption: str,
+        *,
+        chat_id: int | None,
+        message_id: int,
+        send_via_options: list[str],
+        parse_mode: str,
+        reply_markup: dict[str, Any] | None,
+    ) -> tuple[bool, dict[str, Any], str]:
+        last_result: dict[str, Any] = {}
+        for send_via in send_via_options:
+            ok, result = await self.edit_caption(
+                caption,
+                chat_id=chat_id,
+                message_id=message_id,
+                send_via=send_via,
+                parse_mode=parse_mode,
+                reply_markup=reply_markup,
+            )
+            if ok:
+                return True, result, send_via
+            last_result = result
+            await self._log_send_via_fallback(send_via, result)
+        return False, last_result, send_via_options[0] if send_via_options else "interaction_bot"
+
     async def _try_send_photo_options(
         self,
         photo: bytes,
         *,
+        action_type: str,
         chat_id: int | None,
         filename: str,
         caption: str | None,
@@ -1216,12 +1388,14 @@ class InteractionDeliveryExecutor:
         reply_to_user_id: int | None,
         reply_to_search_limit: int | None,
         parse_mode: str,
+        reply_markup: dict[str, Any] | None,
         send_via_options: list[str],
     ) -> tuple[bool, dict[str, Any], str]:
         last_result: dict[str, Any] = {}
         for send_via in send_via_options:
             ok, result = await self.send_photo(
                 photo,
+                action_type=action_type,
                 chat_id=chat_id,
                 filename=filename,
                 caption=caption,
@@ -1229,6 +1403,7 @@ class InteractionDeliveryExecutor:
                 reply_to_user_id=reply_to_user_id,
                 reply_to_search_limit=reply_to_search_limit,
                 parse_mode=parse_mode,
+                reply_markup=reply_markup,
                 send_via=send_via,
             )
             if ok:
@@ -1301,6 +1476,10 @@ def namespaced_action_save_message_id_key(account_id: Any, raw: Any) -> str | No
     if not key or account is None:
         return None
     return f"{MESSAGE_ID_NAMESPACE_PREFIX}:{account}:{key}"
+
+
+def _is_message_not_modified_error(exc: BaseException) -> bool:
+    return "message is not modified" in str(exc).lower()
 
 
 def _int_or_none(value: Any) -> int | None:

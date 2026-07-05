@@ -374,6 +374,78 @@ async def test_account_bot_bot_api_client_is_reused_and_closable(monkeypatch) ->
 
 
 @pytest.mark.asyncio
+async def test_account_bot_service_sends_document_with_reply_markup(monkeypatch) -> None:
+    class _Response:
+        status_code = 200
+        content = b'{"ok": true, "result": {"message_id": 88}}'
+
+        def json(self):  # noqa: ANN201
+            return {"ok": True, "result": {"message_id": 88}}
+
+    class _Client:
+        def __init__(self) -> None:
+            self.posts: list[dict[str, object]] = []
+
+        async def post(self, url, **kwargs):  # noqa: ANN001, ANN003
+            self.posts.append({"url": url, **kwargs})
+            return _Response()
+
+    client = _Client()
+    monkeypatch.setattr(account_bot_service, "get_bot_api_client", AsyncMock(return_value=client))
+
+    result = await account_bot_service.send_document_bytes(
+        "123:token",
+        -100,
+        b"file-bytes",
+        filename="round.txt",
+        caption="<b>结果</b>",
+        reply_to_message_id=7,
+        reply_markup={"inline_keyboard": []},
+        parse_mode="html",
+    )
+
+    assert result == {"message_id": 88}
+    assert client.posts[0]["url"].endswith("/bot123:token/sendDocument")
+    assert client.posts[0]["files"] == {"document": ("round.txt", b"file-bytes")}
+    assert client.posts[0]["data"] == {
+        "chat_id": -100,
+        "caption": "<b>结果</b>",
+        "parse_mode": "HTML",
+        "reply_to_message_id": 7,
+        "allow_sending_without_reply": True,
+        "reply_markup": json.dumps({"inline_keyboard": []}, ensure_ascii=False),
+    }
+
+
+@pytest.mark.asyncio
+async def test_account_bot_service_edits_media_caption(monkeypatch) -> None:
+    call_bot_api = AsyncMock(return_value={"message_id": 77})
+    monkeypatch.setattr(account_bot_service, "call_bot_api", call_bot_api)
+
+    result = await account_bot_service.edit_message_caption(
+        "123:token",
+        -100,
+        77,
+        "<b>新 caption</b>",
+        parse_mode="html",
+        reply_markup={"inline_keyboard": []},
+    )
+
+    assert result == {"message_id": 77}
+    call_bot_api.assert_awaited_once_with(
+        "123:token",
+        "editMessageCaption",
+        {
+            "chat_id": -100,
+            "message_id": 77,
+            "caption": "<b>新 caption</b>",
+            "parse_mode": "HTML",
+            "reply_markup": {"inline_keyboard": []},
+        },
+    )
+
+
+@pytest.mark.asyncio
 async def test_interaction_delivery_executor_sends_bot_message(monkeypatch) -> None:
     incoming = account_bot_runtime.Incoming(
         account_id=1,
@@ -451,6 +523,111 @@ async def test_interaction_delivery_send_replaces_saved_message_after_new_send(m
     send_message.assert_awaited_once()
     delete_message.assert_awaited_once_with("123:token", -100, 44)
     assert redis.data["tp:msgid:1:ten_half:join_notice:1:-100"] == "55"
+
+
+@pytest.mark.asyncio
+async def test_interaction_delivery_media_save_key_and_edit_caption_by_key(monkeypatch) -> None:
+    redis = _MemoryRedis()
+    incoming = account_bot_runtime.Incoming(
+        account_id=1,
+        token="123:token",
+        update_id=10,
+        user_id=20,
+        chat_id=-100,
+        message_id=30,
+        text="",
+    )
+    send_photo = AsyncMock(return_value={"message_id": 66})
+    edit_caption = AsyncMock(return_value={"message_id": 66})
+    monkeypatch.setattr(account_bot_service, "send_photo_bytes", send_photo)
+    monkeypatch.setattr(account_bot_service, "edit_message_caption", edit_caption)
+    executor = InteractionDeliveryExecutor(
+        incoming=incoming,
+        write_log=AsyncMock(),
+        run_worker_action=AsyncMock(),
+        log_context=account_bot_runtime._interaction_log_context,
+        trace_context=account_bot_runtime._interaction_trace_context,
+        get_redis_client=lambda: redis,
+    )
+
+    await executor.apply(
+        [
+            {
+                "type": "send_photo",
+                "send_via": "interaction_bot",
+                "photo_base64": base64.b64encode(b"png-bytes").decode("ascii"),
+                "filename": "grid.png",
+                "caption": "题面",
+                "save_message_id_key": "dice_grid:round:1",
+            },
+            {
+                "type": "edit_caption",
+                "send_via": "interaction_bot",
+                "message_id_key": "dice_grid:round:1",
+                "caption": "<b>答对</b>",
+                "parse_mode": "html",
+                "reply_markup": {"inline_keyboard": []},
+            },
+        ]
+    )
+
+    assert redis.data["tp:msgid:1:dice_grid:round:1"] == "66"
+    edit_caption.assert_awaited_once_with(
+        "123:token",
+        -100,
+        66,
+        "<b>答对</b>",
+        reply_markup={"inline_keyboard": []},
+        parse_mode="html",
+    )
+
+
+@pytest.mark.asyncio
+async def test_interaction_delivery_send_file_uses_document_api_and_saves_key(monkeypatch) -> None:
+    redis = _MemoryRedis()
+    incoming = account_bot_runtime.Incoming(
+        account_id=1,
+        token="123:token",
+        update_id=10,
+        user_id=20,
+        chat_id=-100,
+        message_id=30,
+        text="",
+    )
+    send_document = AsyncMock(return_value={"message_id": 67})
+    monkeypatch.setattr(account_bot_service, "send_document_bytes", send_document)
+    executor = InteractionDeliveryExecutor(
+        incoming=incoming,
+        write_log=AsyncMock(),
+        run_worker_action=AsyncMock(),
+        log_context=account_bot_runtime._interaction_log_context,
+        trace_context=account_bot_runtime._interaction_trace_context,
+        get_redis_client=lambda: redis,
+    )
+    reply_markup = {"inline_keyboard": [[{"text": "打开", "url": "https://example.com"}]]}
+
+    await executor.apply([
+        {
+            "type": "send_file",
+            "send_via": "interaction_bot",
+            "file_base64": base64.b64encode(b"doc-bytes").decode("ascii"),
+            "filename": "round.txt",
+            "caption": "文件题面",
+            "reply_markup": reply_markup,
+            "save_message_id_key": "file:round:1",
+        }
+    ])
+
+    send_document.assert_awaited_once_with(
+        "123:token",
+        -100,
+        b"doc-bytes",
+        filename="round.txt",
+        caption="文件题面",
+        reply_to_message_id=None,
+        reply_markup=reply_markup,
+    )
+    assert redis.data["tp:msgid:1:file:round:1"] == "67"
 
 
 @pytest.mark.asyncio
@@ -541,6 +718,50 @@ async def test_interaction_delivery_executor_routes_userbot_reply() -> None:
             "chat_id": -100,
             "text": "低频代发",
             "reply_to_message_id": 30,
+            "parse_mode": "plain",
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_interaction_delivery_edit_caption_routes_userbot_reply_from_saved_key() -> None:
+    redis = _MemoryRedis()
+    redis.data["tp:msgid:1:dice_grid:round:1"] = "66"
+    incoming = account_bot_runtime.Incoming(
+        account_id=1,
+        token="123:token",
+        update_id=10,
+        user_id=20,
+        chat_id=-100,
+        message_id=30,
+        text="",
+    )
+    run_worker_action = AsyncMock(return_value=(True, None, {"message_id": 66}))
+    executor = InteractionDeliveryExecutor(
+        incoming=incoming,
+        write_log=AsyncMock(),
+        run_worker_action=run_worker_action,
+        log_context=account_bot_runtime._interaction_log_context,
+        trace_context=account_bot_runtime._interaction_trace_context,
+        get_redis_client=lambda: redis,
+    )
+
+    await executor.apply([
+        {
+            "type": "edit_caption",
+            "send_via": "userbot_reply",
+            "message_id_key": "dice_grid:round:1",
+            "caption": "答对",
+        }
+    ])
+
+    run_worker_action.assert_awaited_once_with(
+        incoming,
+        payload={
+            "action_type": "edit_caption",
+            "chat_id": -100,
+            "message_id": 66,
+            "caption": "答对",
             "parse_mode": "plain",
         },
     )
@@ -1418,19 +1639,43 @@ async def test_message_ops_buffers_standard_actions() -> None:
         save_message_id_key="demo:notice:1",
         replace_saved_message_id_key="demo:notice:1",
     )
+    await ops.send_photo(
+        channel="interaction_bot",
+        chat_id=-100,
+        photo=b"img",
+        filename="grid.png",
+        caption="图题",
+        save_message_id_key="demo:photo:1",
+    )
+    await ops.edit_caption(
+        channel="interaction_bot",
+        chat_id=-100,
+        message_id_key="demo:photo:1",
+        caption="新图题",
+    )
     await ops.edit(channel="interaction_bot", chat_id=-100, message_id=41, text="新题面")
     await ops.answer_callback(callback_query_id="cb-1", text="收到")
     await ops.delete(message_id=42)
 
-    assert [item["type"] for item in ops.actions] == ["send_message", "edit_message", "answer_callback", "delete_message"]
+    assert [item["type"] for item in ops.actions] == [
+        "send_message",
+        "send_photo",
+        "edit_caption",
+        "edit_message",
+        "answer_callback",
+        "delete_message",
+    ]
     assert ops.actions[0]["send_via"] == "interaction_bot"
     assert ops.actions[0]["parse_mode"] == "plain"
     assert ops.actions[0]["reply_markup"] == {"inline_keyboard": []}
     assert ops.actions[0]["save_message_id_key"] == "demo:notice:1"
     assert ops.actions[0]["replace_saved_message_id_key"] == "demo:notice:1"
-    assert ops.actions[1]["message_id"] == 41
-    assert ops.actions[1]["parse_mode"] == "plain"
-    assert ops.actions[2]["callback_query_id"] == "cb-1"
+    assert ops.actions[1]["photo_base64"] == "aW1n"
+    assert ops.actions[1]["save_message_id_key"] == "demo:photo:1"
+    assert ops.actions[2]["message_id_key"] == "demo:photo:1"
+    assert ops.actions[3]["message_id"] == 41
+    assert ops.actions[3]["parse_mode"] == "plain"
+    assert ops.actions[4]["callback_query_id"] == "cb-1"
 
 
 @pytest.mark.asyncio
@@ -11441,6 +11686,7 @@ async def test_interaction_action_can_send_photo(monkeypatch) -> None:
         "filename": "grid.png",
         "caption": "九宫格",
         "reply_to_message_id": 9,
+        "reply_markup": None,
     }
     delete.assert_awaited_once_with("bbot-token", -100123, 77)
 

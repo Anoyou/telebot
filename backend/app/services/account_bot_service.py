@@ -1511,6 +1511,7 @@ async def send_photo_bytes(
     filename: str = "photo.png",
     caption: str | None = None,
     reply_to_message_id: int | None = None,
+    reply_markup: dict[str, Any] | None = None,
     parse_mode: str | None = "HTML",
 ) -> dict[str, Any]:
     url = f"{BOT_API_BASE}/bot{token}/sendPhoto"
@@ -1523,7 +1524,43 @@ async def send_photo_bytes(
     if reply_to_message_id is not None:
         data["reply_to_message_id"] = reply_to_message_id
         data["allow_sending_without_reply"] = True
+    if reply_markup is not None:
+        data["reply_markup"] = json.dumps(reply_markup, ensure_ascii=False)
     files = {"photo": (filename or "photo.png", photo)}
+    client = await get_bot_api_client()
+    resp = await client.post(url, data=data, files=files, timeout=BOT_API_TIMEOUT)
+    payload = resp.json() if resp.content else {}
+    if resp.status_code >= 400 or not payload.get("ok", False):
+        desc = payload.get("description") or f"HTTP {resp.status_code}"
+        raise RuntimeError(desc)
+    result = payload.get("result")
+    return result if isinstance(result, dict) else {"result": result}
+
+
+async def send_document_bytes(
+    token: str,
+    chat_id: int,
+    document: bytes,
+    *,
+    filename: str = "file.bin",
+    caption: str | None = None,
+    reply_to_message_id: int | None = None,
+    reply_markup: dict[str, Any] | None = None,
+    parse_mode: str | None = "HTML",
+) -> dict[str, Any]:
+    url = f"{BOT_API_BASE}/bot{token}/sendDocument"
+    normalized_parse_mode = normalize_bot_parse_mode(parse_mode)
+    data: dict[str, Any] = {"chat_id": chat_id}
+    if caption:
+        data["caption"] = _truncate_bot_text(caption, parse_mode=normalized_parse_mode, limit=BOT_MESSAGE_CAPTION_LIMIT)
+    if normalized_parse_mode:
+        data["parse_mode"] = normalized_parse_mode
+    if reply_to_message_id is not None:
+        data["reply_to_message_id"] = reply_to_message_id
+        data["allow_sending_without_reply"] = True
+    if reply_markup is not None:
+        data["reply_markup"] = json.dumps(reply_markup, ensure_ascii=False)
+    files = {"document": (filename or "file.bin", document)}
     client = await get_bot_api_client()
     resp = await client.post(url, data=data, files=files, timeout=BOT_API_TIMEOUT)
     payload = resp.json() if resp.content else {}
@@ -1555,6 +1592,32 @@ async def edit_message(
     if reply_markup is not None:
         payload["reply_markup"] = reply_markup
     return await call_bot_api(token, "editMessageText", payload)
+
+
+async def edit_message_caption(
+    token: str,
+    chat_id: int,
+    message_id: int,
+    caption: str,
+    *,
+    reply_markup: dict[str, Any] | None = None,
+    parse_mode: str | None = "HTML",
+) -> dict[str, Any]:
+    normalized_parse_mode = normalize_bot_parse_mode(parse_mode)
+    payload: dict[str, Any] = {
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "caption": _truncate_bot_text(
+            caption,
+            parse_mode=normalized_parse_mode,
+            limit=BOT_MESSAGE_CAPTION_LIMIT,
+        ),
+    }
+    if normalized_parse_mode:
+        payload["parse_mode"] = normalized_parse_mode
+    if reply_markup is not None:
+        payload["reply_markup"] = reply_markup
+    return await call_bot_api(token, "editMessageCaption", payload)
 
 
 async def delete_message(

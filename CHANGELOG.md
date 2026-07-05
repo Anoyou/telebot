@@ -20,6 +20,17 @@
 
 ## [Unreleased]
 
+## [0.49.13] — 2026-07-05 · patch（补丁版本） · 媒体动作与插件热更新补丁
+
+### Added
+- 标准交互动作新增 `edit_caption`，支持按 `message_id` 或 `message_id_key` 编辑 `send_photo` / `send_file` 产生的媒体 caption；交互 Bot 走 Bot API `editMessageCaption`，UserBot 通道走账号 worker 编辑同一条媒体消息。
+- `send_photo` / `send_file` 现在支持 `save_message_id_key`，媒体题面发送成功后可保存 Telegram `message_id`，供后续 `edit_caption`、删除或替换动作复用。
+- 交互 Bot 通道的 `send_file` 现在走 Bot API `sendDocument`，不再把文件动作误当图片发送；`send_photo` / `send_file` 的消息 ID 保存和后续 caption 编辑行为保持一致。
+- `ctx.messages` 新增 `send_photo()`、`send_file()` 与 `edit_caption()` facade，插件可继续只生成标准 action，不接触 Bot Token、UserBot session 或 live client。
+
+### Fixed
+- 修复插件更新 IPC 偶发未执行时，周期配置同步只刷新配置、不强制重载已加载插件，导致页面版本已更新但 worker 内存仍运行旧插件逻辑的问题；现在会按安装记录版本与更新时间检测内存漂移并自动清缓存重载。
+
 ## [0.49.12] — 2026-07-05 · patch（补丁版本） · 交互路由与发奖排障补丁
 
 ### Fixed

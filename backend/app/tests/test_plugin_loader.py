@@ -13,6 +13,7 @@ import json
 import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -129,6 +130,7 @@ class _FakeFeature:
 class _FakeInstalledPlugin:
     key: str
     enabled: bool = True
+    version: str = "0.0.0"
     signature_ok: bool | None = True
     trust_tier: str = "community"
     last_install_error: str | None = None
@@ -950,6 +952,75 @@ async def test_reload_account_config_force_reload_clears_installed_module_cache(
 
 
 @pytest.mark.asyncio
+async def test_reload_account_config_reconciles_installed_version_drift(monkeypatch) -> None:
+    """周期 reconcile 兜底时，DB 已更新但内存插件版本旧，也必须强制重载。"""
+
+    from app.worker.plugins.base import _REGISTRY, register
+
+    shutdown_spy = AsyncMock()
+    cleared: list[str] = []
+    activated: list[str] = []
+
+    @register
+    class _TempInstalledVersionDriftPlugin(Plugin):
+        key = "_test_version_drift_installed"
+        display_name = "版本漂移重载测试"
+
+        async def on_shutdown(self, ctx: PluginContext) -> None:  # noqa: D401
+            await shutdown_spy(ctx)
+
+    _TempInstalledVersionDriftPlugin._source = "installed"
+    _TempInstalledVersionDriftPlugin._manifest = Manifest(
+        key=_TempInstalledVersionDriftPlugin.key,
+        display_name="版本漂移重载测试",
+        version="1.0.0",
+    )
+    plugin_key = _TempInstalledVersionDriftPlugin.key
+    af = _FakeAF(account_id=1, feature_key=plugin_key, enabled=True, config={})
+    db = _FakeDB(
+        accounts={1: _FakeAcc(id=1)},
+        humanize={1: None},
+        afs=[af],
+        rules=[],
+        installed_plugins={
+            plugin_key: _FakeInstalledPlugin(
+                key=plugin_key,
+                enabled=True,
+                version="1.1.0",
+                signature_ok=True,
+                trust_tier="community",
+            )
+        },
+    )
+    monkeypatch.setattr(loader_mod, "AsyncSessionLocal", lambda: _fake_session_factory(db))
+    monkeypatch.setattr(loader_mod, "_clear_installed_module_cache", lambda key: cleared.append(key))
+
+    async def _activate_spy(_db, _state, _af, _redis):  # noqa: ANN001
+        activated.append(_af.feature_key)
+
+    monkeypatch.setattr(loader_mod, "_activate", _activate_spy)
+
+    state = loader_mod._AccountState(account_id=1)
+    state.redis = _FakeRedis()
+    state.client = MagicMock()
+    inst = _TempInstalledVersionDriftPlugin()
+    ctx = PluginContext(account_id=1, feature_key=plugin_key, client=MagicMock())
+    state.instances[plugin_key] = inst
+    state.contexts[plugin_key] = ctx
+    loader_mod._STATES[1] = state
+
+    try:
+        await reload_account_config(account_id=1, payload={"source": "periodic_reconcile"})
+    finally:
+        loader_mod._STATES.pop(1, None)
+        _REGISTRY.pop(plugin_key, None)
+
+    shutdown_spy.assert_awaited_once_with(ctx)
+    assert cleared == [plugin_key]
+    assert activated == [plugin_key]
+
+
+@pytest.mark.asyncio
 async def test_reload_account_config_force_reload_unregisters_stale_commands(monkeypatch) -> None:
     """reload_config(plugin_key) 清 registry 后也必须注销该插件遗留命令。"""
 
@@ -1014,6 +1085,28 @@ def test_missing_plugin_error_uses_codex_image_repo_plugin_hint() -> None:
     assert "codex_image" in err
     assert "插件库插件" in message
     assert "plugins/installed/codex_image" in message
+
+
+def test_installed_plugin_runtime_drift_detects_same_version_disk_update() -> None:
+    class _LoadedPlugin(Plugin):
+        key = "_test_same_version_drift"
+        display_name = "同版本覆盖测试"
+
+    _LoadedPlugin._manifest = Manifest(
+        key=_LoadedPlugin.key,
+        display_name="同版本覆盖测试",
+        version="1.0.0",
+    )
+    _LoadedPlugin._loaded_at = 1000.0
+
+    drift, reason = loader_mod._installed_plugin_runtime_drift(
+        _LoadedPlugin,
+        None,
+        SimpleNamespace(version="1.0.0", updated_at=datetime.fromtimestamp(1005.0, UTC)),
+    )
+
+    assert drift is True
+    assert reason and "updated_at" in reason
 
 
 def test_manifest_min_telepilot_version_is_preferred() -> None:
@@ -1685,6 +1778,16 @@ async def test_save_action_message_id_uses_account_namespace() -> None:
 
 
 @pytest.mark.asyncio
+async def test_read_action_message_id_uses_account_namespace() -> None:
+    redis = _FakeRedis()
+    redis.values["tp:msgid:42:game:notice:-100"] = "99"
+    state = loader_mod._AccountState(account_id=42)
+    state.redis = redis
+
+    assert await loader_mod._read_action_message_id(state, "game:notice:-100") == 99
+
+
+@pytest.mark.asyncio
 async def test_userbot_send_message_action_uses_rate_limit_and_preserves_parse_mode(monkeypatch) -> None:
     state = loader_mod._AccountState(account_id=43)
     state.redis = _FakeRedis()
@@ -1718,6 +1821,110 @@ async def test_userbot_send_message_action_uses_rate_limit_and_preserves_parse_m
     )
     assert record_action.await_args.args[2] == loader_mod.TRACE_STATUS_OK
     assert record_action.await_args.kwargs["actual_send_via"] == "userbot_reply"
+
+
+@pytest.mark.asyncio
+async def test_userbot_edit_caption_action_uses_saved_key_and_rate_limit(monkeypatch) -> None:
+    redis = _FakeRedis()
+    redis.values["tp:msgid:43:dice_grid:round:1"] = "66"
+    state = loader_mod._AccountState(account_id=43)
+    state.redis = redis
+    state.client = MagicMock()
+    state.client.edit_message = AsyncMock(return_value=SimpleNamespace(id=66))
+    state.engine = SimpleNamespace(
+        acquire=AsyncMock(return_value=SimpleNamespace(allowed=True, wait_seconds=0, outcome="ok"))
+    )
+    record_action = AsyncMock()
+    monkeypatch.setattr(loader_mod, "record_action", record_action)
+
+    ok = await loader_mod._apply_userbot_edit_caption_action(
+        state,
+        SimpleNamespace(chat_id=-100123),
+        {
+            "type": "edit_caption",
+            "send_via": "userbot_reply",
+            "message_id_key": "dice_grid:round:1",
+            "caption": "<b>答对</b>",
+            "parse_mode": "html",
+            "context": {"trace_id": "evt_caption"},
+        },
+    )
+
+    assert ok is True
+    state.engine.acquire.assert_awaited_once_with(43, "edit_message", peer_id=-100123)
+    state.client.edit_message.assert_awaited_once_with(
+        -100123,
+        66,
+        "<b>答对</b>",
+        parse_mode="html",
+    )
+    assert record_action.await_args.args[2] == loader_mod.TRACE_STATUS_OK
+    assert record_action.await_args.kwargs["actual_send_via"] == "userbot_reply"
+
+
+@pytest.mark.asyncio
+async def test_userbot_send_media_action_saves_message_id(monkeypatch) -> None:
+    state = loader_mod._AccountState(account_id=43)
+    state.redis = _FakeRedis()
+    state.client = MagicMock()
+    state.client.send_file = AsyncMock(return_value=SimpleNamespace(id=701))
+    state.engine = SimpleNamespace(
+        acquire=AsyncMock(return_value=SimpleNamespace(allowed=True, wait_seconds=0, outcome="ok"))
+    )
+    monkeypatch.setattr(loader_mod, "record_action", AsyncMock())
+
+    ok = await loader_mod._apply_userbot_send_media_action(
+        state,
+        SimpleNamespace(chat_id=-100123),
+        {
+            "type": "send_photo",
+            "send_via": "userbot_reply",
+            "photo_base64": "aW1n",
+            "filename": "grid.png",
+            "save_message_id_key": "dice_grid:round:1",
+        },
+    )
+
+    assert ok is True
+    assert state.redis.sets == [("tp:msgid:43:dice_grid:round:1", "701", {"ex": 7200})]
+
+
+@pytest.mark.asyncio
+async def test_userbot_send_file_action_uses_interaction_bot_document_api(monkeypatch) -> None:
+    state = loader_mod._AccountState(account_id=43)
+    state.redis = _FakeRedis()
+    send_document = AsyncMock(return_value={"message_id": 702})
+    monkeypatch.setattr(loader_mod.account_bot_service, "send_document_bytes", send_document)
+    monkeypatch.setattr(loader_mod, "_interaction_bot_token_for_account", AsyncMock(return_value="123:bot"))
+    monkeypatch.setattr(loader_mod, "record_action", AsyncMock())
+    reply_markup = {"inline_keyboard": [[{"text": "打开", "url": "https://example.com"}]]}
+
+    ok = await loader_mod._apply_userbot_send_media_action(
+        state,
+        SimpleNamespace(chat_id=-100123),
+        {
+            "type": "send_file",
+            "send_via": "interaction_bot",
+            "file_base64": "ZG9j",
+            "filename": "round.txt",
+            "caption": "文件题面",
+            "reply_markup": reply_markup,
+            "save_message_id_key": "file:round:1",
+        },
+    )
+
+    assert ok is True
+    send_document.assert_awaited_once_with(
+        "123:bot",
+        -100123,
+        b"doc",
+        filename="round.txt",
+        caption="文件题面",
+        reply_to_message_id=None,
+        reply_markup=reply_markup,
+        parse_mode="plain",
+    )
+    assert state.redis.sets == [("tp:msgid:43:file:round:1", "702", {"ex": 7200})]
 
 
 @pytest.mark.asyncio

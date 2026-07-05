@@ -9,7 +9,7 @@
 3. 会话状态优先写进 `session.data`，并通过 `update_session` 持久化；不要再把单局状态只放在进程内 dict/lock 里。
 4. 插件必须声明 `usage`、`event_subscriptions`、`capabilities`；没有高风险能力也要写 `capabilities={}`。
 5. `plugin.json.name`、`MANIFEST.key`、插件类 `key` 必须一致。
-6. 发送、编辑、删除、置顶、按钮 ACK、Inline answer、`payout`、`update_session`、`settlement` 必须通过 `ctx.messages` 或标准 action 交给平台执行。
+6. 发送、编辑、媒体 caption 编辑、删除、置顶、按钮 ACK、Inline answer、`payout`、`update_session`、`settlement` 必须通过 `ctx.messages` 或标准 action 交给平台执行。
 7. 远程插件安装后默认不运行，必须在插件中心按账号启用后才会收到事件。
 8. 钱相关能力必须走 UserBot 或平台受控结算链路；普通 Bot 只能做交互和公告，不能执行转账。
 9. 群里已有的外部转账结果通知 Bot 只作为付款证据来源，不是 TelePilot 主动发送通道。

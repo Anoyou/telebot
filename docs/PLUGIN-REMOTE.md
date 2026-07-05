@@ -291,7 +291,7 @@ return [
 
 普通发送类动作通常不写 `send_via`，平台会按当前 `session.channel` 路由；只有跨通道公告、管理提示或迁移桥兼容才显式使用 `interaction_bot`、`userbot_reply` 或 `auto`。`notice` / `bbot_notice` / `notice_bot` 已移除，插件请求这些通道应得到明确迁移错误。
 
-默认 `send_message` / `send_photo` / `send_file` 等动作按 `parse_mode="plain"` 发送；只有显式声明 `parse_mode="html"` 时才启用 HTML。HTML 内容要先转义，再构造标签。
+默认 `send_message` / `send_photo` / `send_file` / `edit_caption` 等动作按 `parse_mode="plain"` 发送；只有显式声明 `parse_mode="html"` 时才启用 HTML。图片或文件题面需要原地更新时，在发送媒体动作里保存 `save_message_id_key`，后续返回 `edit_caption` 并携带 `message_id_key`；`edit_message` 只用于纯文本消息。HTML 内容要先转义，再构造标签。
 
 在统一会话通道模型下，命令触发的会话收发全走 userbot，关键词/付款/按钮触发的会话收发全走交互 Bot；插件默认不需要感知通道。`payout` 不受会话通道影响，始终经 userbot 执行。
 

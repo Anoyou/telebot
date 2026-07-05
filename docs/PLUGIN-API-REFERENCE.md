@@ -190,7 +190,7 @@ async def on_event(self, ctx, payload):
 | `ctx.scheduler` | `ctx.scheduler.register(job_id, schedule, callback, *, replace=True)` / `ctx.scheduler.unregister(job_id)` | 调度 facade（按权限/能力边界开放） |
 | `ctx.http` | `await ctx.http.get(url, params={...})` / `await ctx.http.post(url, json={...})` | 安全 HTTP facade；第三方插件需声明 `external_http` + `allowed_hosts` |
 | `ctx.ai` | `await ctx.ai.complete(system="...", user="...")` | 文本 LLM facade；第三方插件需声明 `ai_text` |
-| `ctx.messages` | `await ctx.messages.send(...)` / `await ctx.messages.answer_callback(...)` | 交互入口消息操作 facade；只生成平台标准动作，由 TelePilot 统一代发、审计和执行 |
+| `ctx.messages` | `await ctx.messages.send(...)` / `send_photo(...)` / `edit_caption(...)` / `answer_callback(...)` | 交互入口消息操作 facade；只生成平台标准动作，由 TelePilot 统一代发、审计和执行 |
 | `ctx.conversation(...)` | `async with ctx.conversation(peer)` | 与目标 peer 建立会话 |
 
 ### 4.2 权限边界与禁止事项
@@ -930,8 +930,12 @@ class GuessNumberPlugin(Plugin):
 | `send_message` | `reply_markup` | 可选，Bot API inline keyboard；只会透传给 `interaction_bot`，`userbot_reply` 不承接按钮 |
 | `send_message` | `save_message_id_key` | 可选；发送成功后把本次 Telegram `message_id` 按 key 保存 2 小时，供后续编辑、删除或替换使用 |
 | `send_message` | `replace_saved_message_id_key` | 可选；发送新消息并保存新 `message_id` 后，读取该 key 原来的消息 ID 并删除旧消息，适合“只保留最新一条”的滚动通知 |
-| `send_photo` / `send_file` | `photo_base64` / `file_base64` | 按动作通道发送图片/文件字节，适合题图 |
+| `send_photo` / `send_file` | `photo_base64` / `file_base64` | 按动作通道发送图片/文件字节；交互 Bot 下 `send_photo` 走 `sendPhoto`，`send_file` 走 `sendDocument` |
 | `send_photo` / `send_file` | `filename`、`caption`、`reply_to_message_id` | 可选，文件名、说明文字、回复目标 |
+| `send_photo` / `send_file` | `save_message_id_key` | 可选；媒体发送成功后把 Telegram `message_id` 按 key 保存 2 小时，供后续 `edit_caption`、删除或替换使用 |
+| `edit_message` | `message_id`、`text` | 编辑纯文本消息；不用于编辑媒体 caption |
+| `edit_caption` | `message_id` / `message_id_key`、`caption` | 编辑图片或文件消息的 caption；`message_id_key` 会读取同账号命名空间下由 `save_message_id_key` 保存的消息 ID |
+| `edit_caption` | `parse_mode`、`reply_markup` | 可选；`parse_mode="html"` 时按 HTML 发送，`reply_markup` 只由 `interaction_bot` 原生承接 |
 | `delete_message` | `message_id` | 删除对应 Bot 通道可操作的消息 |
 | `pin_message` | `message_id` | 置顶对应 Bot 通道可操作的消息 |
 | `answer_callback` | `callback_query_id`、`text`、`show_alert` | 回应 inline keyboard 按钮回调 |
@@ -960,9 +964,21 @@ await ctx.messages.send(
     chat_id=-1001234567890,
     text="指定会话发送，仍由平台按会话通道执行",
 )
+
+await ctx.messages.send_photo(
+    photo=image_bytes,
+    filename="round.png",
+    caption="题面",
+    save_message_id_key="round",
+)
+
+await ctx.messages.edit_caption(
+    message_id_key="round",
+    caption="题面\n\n答对结果",
+)
 ```
 
-推荐迁移路径：旧插件继续返回 `list[dict]` 标准动作可以兼容；新插件或重构插件优先调用 `ctx.messages.send/edit/delete/pin/answer_callback`。`ctx.messages` 只缓存动作，不会暴露 Bot Token，也不会直接调用 Telegram API。
+推荐迁移路径：旧插件继续返回 `list[dict]` 标准动作可以兼容；新插件或重构插件优先调用 `ctx.messages.send/send_photo/send_file/edit/edit_caption/delete/pin/answer_callback`。`ctx.messages` 只缓存动作，不会暴露 Bot Token，也不会直接调用 Telegram API。
 
 框架层源码位于 `backend/app/services/interaction/`：`contracts.py` 负责记录 `result_contract` 告警与旧通道失败，`delivery.py` 负责受控发送、编辑、删除、置顶、按钮 ACK、媒体发送和 message_id 保存。
 

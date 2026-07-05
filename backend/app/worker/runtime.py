@@ -33,6 +33,7 @@ from ..services.event_trace import (
     refresh_trace_settings,
     stop_trace_writer,
 )
+from ..services.interaction.delivery import namespaced_action_save_message_id_key
 from ..settings import settings as app_settings
 from .command import (
     CommandContext,
@@ -92,7 +93,7 @@ _BACKGROUND_RPC_COMMAND_TYPES = {
 def _interaction_userbot_rate_limit_action(action_type: str, chat_id: int | None) -> str:
     if action_type in {"send_message", "payout"}:
         return "send_message_private" if chat_id is not None and chat_id > 0 else "send_message_group"
-    if action_type == "edit_message":
+    if action_type in {"edit_message", "edit_caption"}:
         return "edit_message"
     if action_type in {"send_photo", "send_file"}:
         return "upload_file"
@@ -270,6 +271,25 @@ def _reply_anchor_missing_text(payload: dict[str, Any], reply_to_user_id: int | 
         return template
 
 
+async def _read_saved_interaction_message_id(
+    redis: Any | None,
+    account_id: int | None,
+    raw_key: Any,
+) -> int | None:
+    if redis is None:
+        return None
+    key = namespaced_action_save_message_id_key(account_id, raw_key)
+    if not key:
+        return None
+    try:
+        raw = await redis.get(key)
+    except Exception:  # noqa: BLE001
+        return None
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8", errors="ignore")
+    return _int_or_none(raw)
+
+
 async def _run_interaction_userbot_action(
     client: Any,
     payload: dict[str, Any],
@@ -355,6 +375,37 @@ async def _run_interaction_userbot_action(
             "chat_id": chat_id,
         }
 
+    if action_type == "edit_caption":
+        if "caption" in payload:
+            caption = str(payload.get("caption") or "")
+        elif "text" in payload:
+            caption = str(payload.get("text") or "")
+        else:
+            raise ValueError("缺少 caption")
+        message_id = _int_or_none(payload.get("message_id") or payload.get("edit_message_id"))
+        if message_id is None:
+            message_id = await _read_saved_interaction_message_id(redis, account_id, payload.get("message_id_key"))
+        if message_id is None:
+            raise ValueError("缺少 message_id")
+        parse_mode = _interaction_action_parse_mode(payload)
+        await _acquire_interaction_userbot_rate_limit(
+            redis=redis,
+            account_id=account_id,
+            engine=engine,
+            action_type="edit_caption",
+            chat_id=chat_id,
+        )
+        try:
+            msg = await client.edit_message(chat_id, message_id, caption, parse_mode=_telethon_parse_mode(parse_mode))
+        except Exception as exc:  # noqa: BLE001
+            if _is_message_not_modified_error(exc):
+                return {"message_id": message_id, "chat_id": chat_id, "not_modified": True}
+            raise
+        return {
+            "message_id": int(getattr(msg, "id", 0) or message_id) or None,
+            "chat_id": chat_id,
+        }
+
     if action_type in {"send_photo", "send_file"}:
         raw_base64 = str(payload.get("file_base64") or payload.get("photo_base64") or "").strip()
         if not raw_base64:
@@ -405,6 +456,10 @@ def _interaction_action_parse_mode(payload: dict[str, Any]) -> str:
 
 def _telethon_parse_mode(parse_mode: str) -> str | None:
     return "html" if parse_mode == "html" else None
+
+
+def _is_message_not_modified_error(exc: BaseException) -> bool:
+    return "message is not modified" in str(exc).lower()
 
 
 async def run_worker(account_id: int) -> None:

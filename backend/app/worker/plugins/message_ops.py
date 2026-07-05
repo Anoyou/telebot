@@ -7,6 +7,7 @@ executes those actions through the existing controlled delivery path.
 
 from __future__ import annotations
 
+import base64
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -62,6 +63,72 @@ class BufferedMessageOps:
         self.actions.append(action)
         return action
 
+    async def send_photo(
+        self,
+        *,
+        channel: MessageChannelSelector | None = None,
+        chat_id: int | None = None,
+        photo: bytes | bytearray | memoryview | None = None,
+        photo_base64: str | None = None,
+        filename: str = "photo.png",
+        caption: str | None = None,
+        parse_mode: Literal["html", "plain"] = "plain",
+        reply_to_message_id: int | None = None,
+        reply_to_user_id: int | None = None,
+        reply_to_search_limit: int | None = None,
+        save_message_id_key: str | None = None,
+    ) -> dict[str, Any]:
+        action = _media_action(
+            "send_photo",
+            channel=channel,
+            chat_id=chat_id,
+            payload=photo,
+            payload_base64=photo_base64,
+            payload_field="photo_base64",
+            filename=filename,
+            caption=caption,
+            parse_mode=parse_mode,
+            reply_to_message_id=reply_to_message_id,
+            reply_to_user_id=reply_to_user_id,
+            reply_to_search_limit=reply_to_search_limit,
+            save_message_id_key=save_message_id_key,
+        )
+        self.actions.append(action)
+        return action
+
+    async def send_file(
+        self,
+        *,
+        channel: MessageChannelSelector | None = None,
+        chat_id: int | None = None,
+        file: bytes | bytearray | memoryview | None = None,
+        file_base64: str | None = None,
+        filename: str = "file.bin",
+        caption: str | None = None,
+        parse_mode: Literal["html", "plain"] = "plain",
+        reply_to_message_id: int | None = None,
+        reply_to_user_id: int | None = None,
+        reply_to_search_limit: int | None = None,
+        save_message_id_key: str | None = None,
+    ) -> dict[str, Any]:
+        action = _media_action(
+            "send_file",
+            channel=channel,
+            chat_id=chat_id,
+            payload=file,
+            payload_base64=file_base64,
+            payload_field="file_base64",
+            filename=filename,
+            caption=caption,
+            parse_mode=parse_mode,
+            reply_to_message_id=reply_to_message_id,
+            reply_to_user_id=reply_to_user_id,
+            reply_to_search_limit=reply_to_search_limit,
+            save_message_id_key=save_message_id_key,
+        )
+        self.actions.append(action)
+        return action
+
     async def edit(
         self,
         *,
@@ -79,6 +146,34 @@ class BufferedMessageOps:
             "text": text,
             "parse_mode": parse_mode,
         }
+        if channel is not None:
+            _apply_channel(action, channel)
+        if reply_markup is not None:
+            action["reply_markup"] = dict(reply_markup)
+        self.actions.append(action)
+        return action
+
+    async def edit_caption(
+        self,
+        *,
+        channel: MessageChannelSelector | None = None,
+        chat_id: int | None = None,
+        message_id: int | None = None,
+        message_id_key: str | None = None,
+        caption: str = "",
+        parse_mode: Literal["html", "plain"] = "plain",
+        reply_markup: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        action: dict[str, Any] = {
+            "type": "edit_caption",
+            "chat_id": chat_id,
+            "caption": caption,
+            "parse_mode": parse_mode,
+        }
+        if message_id is not None:
+            action["message_id"] = message_id
+        if message_id_key:
+            action["message_id_key"] = message_id_key
         if channel is not None:
             _apply_channel(action, channel)
         if reply_markup is not None:
@@ -210,6 +305,45 @@ def _apply_channel(action: dict[str, Any], channel: MessageChannelSelector) -> N
     apply_action_send_via_options(action, action_send_via_options(action))
     if isinstance(channel, (dict, list, tuple)) or str(channel or "").strip() == "auto":
         action["channel_selector"] = channel
+
+
+def _media_action(
+    action_type: str,
+    *,
+    channel: MessageChannelSelector | None,
+    chat_id: int | None,
+    payload: bytes | bytearray | memoryview | None,
+    payload_base64: str | None,
+    payload_field: str,
+    filename: str,
+    caption: str | None,
+    parse_mode: Literal["html", "plain"],
+    reply_to_message_id: int | None,
+    reply_to_user_id: int | None,
+    reply_to_search_limit: int | None,
+    save_message_id_key: str | None,
+) -> dict[str, Any]:
+    encoded = str(payload_base64 or "").strip()
+    if not encoded and payload is not None:
+        encoded = base64.b64encode(bytes(payload)).decode("ascii")
+    action: dict[str, Any] = {
+        "type": action_type,
+        "chat_id": chat_id,
+        payload_field: encoded,
+        "filename": filename,
+        "caption": caption,
+        "parse_mode": parse_mode,
+        "reply_to_message_id": reply_to_message_id,
+    }
+    if channel is not None:
+        _apply_channel(action, channel)
+    if reply_to_user_id is not None:
+        action["reply_to_user_id"] = reply_to_user_id
+    if reply_to_search_limit is not None:
+        action["reply_to_search_limit"] = reply_to_search_limit
+    if save_message_id_key:
+        action["save_message_id_key"] = save_message_id_key
+    return action
 
 
 __all__ = ["BufferedMessageOps", "MessageChannel", "MessageChannelSelector"]

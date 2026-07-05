@@ -113,7 +113,7 @@ class HelloPingPlugin(Plugin):
         ]
 ```
 
-普通回复不要写 `send_via`；平台会按当前 `session.channel` 选择 UserBot 或交互 Bot。你也可以用 `ctx.messages` 生成等价消息操作；两种方式都会走平台 MessageOps。最小示例直接返回 action，方便复制和测试。
+普通回复不要写 `send_via`；平台会按当前 `session.channel` 选择 UserBot 或交互 Bot。你也可以用 `ctx.messages` 生成等价消息操作；两种方式都会走平台 MessageOps。图片题面先 `send_photo(save_message_id_key=...)`，后续用 `edit_caption(message_id_key=...)` 原地更新 caption，不要用 `edit_message` 编辑媒体消息。最小示例直接返回 action，方便复制和测试。
 
 ## 5. __init__.py
 

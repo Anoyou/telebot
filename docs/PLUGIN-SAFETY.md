@@ -28,7 +28,7 @@ Manifest 中的 `permissions` 字段声明插件需要的能力：
 | 权限 | 典型方法 | 说明 |
 |------|----------|------|
 | `send_message` | `send_message` / `respond` / `reply` | 发送文本消息 |
-| `edit_message` | `edit` / `edit_message` | 编辑消息 |
+| `edit_message` | `edit` / `edit_message` / `edit_caption` | 编辑文本消息或媒体 caption |
 | `read_chat` | `get_messages` / `get_chat` / `iter_messages` | 读取聊天历史 |
 | `resolve_entity` | `get_entity` | 解析用户名、频道、群等实体 |
 | `send_file` | `send_file` | 发送图片或文件 |
@@ -221,9 +221,9 @@ TelePilot 按个人可信插件模式运行：管理员安装并启用插件后�
 
 | 场景 | 标准会话主路径 | 旧 hook 兼容边界 |
 |------|--------------|------------------|
-| 普通消息/关键词 | 返回 `send_message`，默认省略 `send_via` 并继承会话通道 | `on_message` 的 `event.reply(...)` / `event.respond(...)` 仅用于历史内置或迁移桥 |
+| 普通消息/关键词 | 返回 `send_message` / `send_photo` / `send_file`，默认省略 `send_via` 并继承会话通道；媒体题面可保存 `save_message_id_key` 后用 `edit_caption` 原地更新 caption | `on_message` 的 `event.reply(...)` / `event.respond(...)` 仅用于历史内置或迁移桥 |
 | 管理员命令 | `command` 事件进入 Event Bus 后返回 action；需要编辑原指令时声明 `edit_message` | `on_command` 的 `event.edit(...)` 可保留；另发消息时不要绕过 MessageOps 记录 |
-| 按钮回调 | 返回 `answer_callback`，再按需返回 `send_message` / `edit_message` | 不直接拼 Bot API，不假设 incoming message 可编辑 |
+| 按钮回调 | 返回 `answer_callback`，再按需返回 `send_message` / `edit_message` / `edit_caption` | 不直接拼 Bot API，不假设 incoming message 可编辑 |
 | Inline Query | 返回 `answer_inline_query`；选择结果用 `chosen_inline_result` 记录 | 旧 hook 没有统一 trace，不作为新插件入口 |
 | 付款/发奖 | 返回 `settlement` 或 `userbot_reply` 受控动作；普通 Bot 只公告结果 | 不把外部转账通知 Bot 当主动发送通道 |
 | 定时任务/后台任务 | 保存目标 chat/session 后通过 `ctx.messages` 或标准 action 输出 | 直接使用受控 client 发消息只作为旧调度代码兼容，不作为新模板 |

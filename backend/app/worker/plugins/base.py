@@ -224,6 +224,7 @@ class Plugin:
 
         标准动作约定：
         - ``send_message`` / ``send_photo`` / ``send_file``
+        - ``edit_message`` 编辑纯文本消息；``edit_caption`` 编辑图片/文件 caption
         - 普通发送动作默认继承会话通道；``send_via`` / ``channel`` /
           ``channel_selector`` 只用于跨通道公告、管理提示和迁移兼容等高级覆盖
         - ``end_session`` / ``close_session`` / ``no_session`` / ``result``

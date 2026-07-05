@@ -216,7 +216,7 @@ async def guard_interaction_actions(
                 allowed_actions=sorted(allowed_actions),
                 **context,
             )
-        if action_type in {"send_message", "send_photo", "send_file", "edit_message", "delete_message", "pin_message"}:
+        if action_type in {"send_message", "send_photo", "send_file", "edit_message", "edit_caption", "delete_message", "pin_message"}:
             requested_raw = action_send_via_raw_selector(action)
             requested_send_via = action_send_via_options(action) if explicit_selector else [normalized_session_channel]
             unsupported_send_via = unsupported_send_via_values(requested_raw)

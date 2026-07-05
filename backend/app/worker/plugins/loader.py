@@ -1038,7 +1038,7 @@ async def _apply_userbot_event_bus_actions(
         if action_type == "payout":
             failed = not await _apply_userbot_payout_action(state, event, action) or failed
             continue
-        if action_type in {"send_message", "send_photo", "send_file", "edit_message", "delete_message", "pin_message"}:
+        if action_type in {"send_message", "send_photo", "send_file", "edit_message", "edit_caption", "delete_message", "pin_message"}:
             deprecated_channels = deprecated_send_via_values(action_send_via_raw_selector(action))
             if deprecated_channels:
                 failed = True
@@ -1076,6 +1076,9 @@ async def _apply_userbot_event_bus_actions(
             continue
         if action_type == "edit_message":
             failed = not await _apply_userbot_edit_message_action(state, event, action) or failed
+            continue
+        if action_type == "edit_caption":
+            failed = not await _apply_userbot_edit_caption_action(state, event, action) or failed
             continue
         if action_type in {"send_photo", "send_file"}:
             failed = not await _apply_userbot_send_media_action(state, event, action) or failed
@@ -1331,7 +1334,7 @@ async def _find_interaction_rule_for_plugin_session(
 def _userbot_rate_limit_action(action_type: str, chat_id: int | None) -> str:
     if action_type in {"send_message", "payout"}:
         return "send_message_private" if chat_id is not None and chat_id > 0 else "send_message_group"
-    if action_type == "edit_message":
+    if action_type in {"edit_message", "edit_caption"}:
         return "edit_message"
     if action_type in {"send_photo", "send_file"}:
         return "upload_file"
@@ -1897,6 +1900,112 @@ async def _apply_userbot_edit_message_action(state: _AccountState, event: Any, a
     return False
 
 
+async def _apply_userbot_edit_caption_action(state: _AccountState, event: Any, action: dict[str, Any]) -> bool:
+    if "caption" in action:
+        caption = str(action.get("caption") or "")
+    elif "text" in action:
+        caption = str(action.get("text") or "")
+    else:
+        await record_action(
+            action.get("context"),
+            action,
+            TRACE_STATUS_FAILED,
+            error_code="caption_missing",
+            error="edit_caption caption is missing",
+        )
+        return False
+    target_chat_id = _action_chat_id(action, event)
+    message_id = _int_or_none(action.get("message_id") or action.get("edit_message_id"))
+    if message_id is None:
+        message_id = await _read_action_message_id(state, action.get("message_id_key"))
+    if target_chat_id is None or message_id is None:
+        await record_action(
+            action.get("context"),
+            action,
+            TRACE_STATUS_FAILED,
+            error_code="target_message_id_missing",
+            error="target chat_id or message_id missing",
+        )
+        return False
+    reply_markup = action.get("reply_markup") if isinstance(action.get("reply_markup"), dict) else None
+    parse_mode = _action_parse_mode(action)
+    last_code = "unsupported_send_via"
+    last_error = "no supported send_via"
+    for send_via in action_send_via_options(action):
+        if send_via == "interaction_bot":
+            token = await _interaction_bot_token_for_account(state.account_id)
+            if not token:
+                last_code = "bot_token_missing"
+                last_error = "interaction bot token unavailable"
+                continue
+            try:
+                result = await account_bot_service.edit_message_caption(
+                    token,
+                    target_chat_id,
+                    message_id,
+                    caption,
+                    reply_markup=reply_markup,
+                    parse_mode=parse_mode,
+                )
+                await record_action(action.get("context"), action, TRACE_STATUS_OK, actual_send_via="interaction_bot", result=result)
+                return True
+            except Exception as exc:  # noqa: BLE001
+                if _is_message_not_modified_error(exc):
+                    await record_action(
+                        action.get("context"),
+                        action,
+                        TRACE_STATUS_OK,
+                        actual_send_via="interaction_bot",
+                        result={"message_id": message_id, "chat_id": target_chat_id, "not_modified": True},
+                    )
+                    return True
+                last_code = "telegram_api_error"
+                last_error = f"{type(exc).__name__}: {exc}"
+                continue
+        if send_via == "userbot_reply":
+            if state.client is None:
+                last_code = "userbot_offline"
+                last_error = "userbot client unavailable"
+                continue
+            if not await _acquire_userbot_action_rate_limit(
+                state,
+                action,
+                action_type="edit_caption",
+                target_chat_id=target_chat_id,
+            ):
+                return False
+            try:
+                result = await state.client.edit_message(
+                    target_chat_id,
+                    message_id,
+                    caption,
+                    parse_mode=_telethon_parse_mode(parse_mode),
+                )
+                await record_action(
+                    action.get("context"),
+                    action,
+                    TRACE_STATUS_OK,
+                    actual_send_via="userbot_reply",
+                    result={"message_id": getattr(result, "id", None) or message_id, "chat_id": target_chat_id},
+                )
+                return True
+            except Exception as exc:  # noqa: BLE001
+                if _is_message_not_modified_error(exc):
+                    await record_action(
+                        action.get("context"),
+                        action,
+                        TRACE_STATUS_OK,
+                        actual_send_via="userbot_reply",
+                        result={"message_id": message_id, "chat_id": target_chat_id, "not_modified": True},
+                    )
+                    return True
+                last_code = "telegram_api_error"
+                last_error = f"{type(exc).__name__}: {exc}"
+                continue
+    await record_action(action.get("context"), action, TRACE_STATUS_FAILED, error_code=last_code, error=last_error)
+    return False
+
+
 async def _apply_userbot_send_media_action(state: _AccountState, event: Any, action: dict[str, Any]) -> bool:
     raw_payload = str(action.get("photo_base64") or action.get("file_base64") or "").strip()
     if not raw_payload:
@@ -1921,22 +2030,37 @@ async def _apply_userbot_send_media_action(state: _AccountState, event: Any, act
     last_code = "unsupported_send_via"
     last_error = "no supported send_via"
     for send_via in action_send_via_options(action):
-        if send_via == "interaction_bot" and action.get("type") == "send_photo":
+        if send_via == "interaction_bot":
             token = await _interaction_bot_token_for_account(state.account_id)
             if not token:
                 last_code = "bot_token_missing"
                 last_error = "interaction bot token unavailable"
                 continue
             try:
-                result = await account_bot_service.send_photo_bytes(
-                    token,
-                    target_chat_id,
-                    media_bytes,
-                    filename=filename or "photo.png",
-                    caption=caption,
-                    reply_to_message_id=reply_to,
-                    parse_mode=parse_mode,
-                )
+                reply_markup = action.get("reply_markup") if isinstance(action.get("reply_markup"), dict) else None
+                if action.get("type") == "send_file":
+                    result = await account_bot_service.send_document_bytes(
+                        token,
+                        target_chat_id,
+                        media_bytes,
+                        filename=filename or "file.bin",
+                        caption=caption,
+                        reply_to_message_id=reply_to,
+                        reply_markup=reply_markup,
+                        parse_mode=parse_mode,
+                    )
+                else:
+                    result = await account_bot_service.send_photo_bytes(
+                        token,
+                        target_chat_id,
+                        media_bytes,
+                        filename=filename or "photo.png",
+                        caption=caption,
+                        reply_to_message_id=reply_to,
+                        reply_markup=reply_markup,
+                        parse_mode=parse_mode,
+                    )
+                await _save_action_message_id(state, action, result)
                 await record_action(action.get("context"), action, TRACE_STATUS_OK, actual_send_via="interaction_bot", result=result)
                 return True
             except Exception as exc:  # noqa: BLE001
@@ -1965,12 +2089,14 @@ async def _apply_userbot_send_media_action(state: _AccountState, event: Any, act
                 if action.get("type") == "send_photo":
                     kwargs["force_document"] = False
                 sent = await state.client.send_file(target_chat_id, file_obj, **kwargs)
+                result = {"message_id": getattr(sent, "id", None), "chat_id": target_chat_id}
+                await _save_action_message_id(state, action, result)
                 await record_action(
                     action.get("context"),
                     action,
                     TRACE_STATUS_OK,
                     actual_send_via="userbot_reply",
-                    result={"message_id": getattr(sent, "id", None), "chat_id": target_chat_id},
+                    result=result,
                 )
                 return True
             except Exception as exc:  # noqa: BLE001
@@ -2292,6 +2418,25 @@ async def _save_action_message_id(state: _AccountState, action: dict[str, Any], 
         log.debug("save plugin action message id failed account=%s key=%s", state.account_id, save_key, exc_info=True)
 
 
+async def _read_action_message_id(state: _AccountState, raw_key: Any) -> int | None:
+    read_key = namespaced_action_save_message_id_key(state.account_id, raw_key)
+    if not read_key:
+        return None
+    try:
+        redis = state.redis or get_redis()
+        raw = await redis.get(read_key)
+    except Exception:  # noqa: BLE001
+        log.debug("read plugin action message id failed account=%s key=%s", state.account_id, read_key, exc_info=True)
+        return None
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8", errors="ignore")
+    return _int_or_none(raw)
+
+
+def _is_message_not_modified_error(exc: BaseException) -> bool:
+    return "message is not modified" in str(exc).lower()
+
+
 # worker 内存里维护的最近活跃 peer 数量上限（超过则按 LRU 丢弃最旧）
 RECENT_PEERS_LIMIT = 50
 
@@ -2565,6 +2710,60 @@ def _manifest_compatible(manifest: Manifest) -> tuple[bool, str | None]:
     return True, None
 
 
+def _loaded_plugin_manifest(cls: type[Plugin] | None, inst: Plugin | None = None) -> Manifest | None:
+    manifest = getattr(cls, "_manifest", None) if cls is not None else None
+    if isinstance(manifest, Manifest):
+        return manifest
+    if inst is not None:
+        manifest = getattr(type(inst), "_manifest", None)
+        if isinstance(manifest, Manifest):
+            return manifest
+    return None
+
+
+def _timestamp_or_none(value: Any) -> float | None:
+    if value in (None, ""):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    timestamp = getattr(value, "timestamp", None)
+    if callable(timestamp):
+        try:
+            return float(timestamp())
+        except Exception:  # noqa: BLE001
+            return None
+    return None
+
+
+def _installed_plugin_runtime_drift(
+    cls: type[Plugin] | None,
+    inst: Plugin | None,
+    installed_plugin: Any,
+) -> tuple[bool, str | None]:
+    """Return whether a loaded installed plugin is older than installed_plugin.
+
+    This is the periodic-reconcile safety net for missed reload IPC messages:
+    the DB row and disk may already be updated while the worker still holds the
+    old in-memory plugin instance.
+    """
+
+    if installed_plugin is None:
+        return False, None
+    manifest = _loaded_plugin_manifest(cls, inst)
+    loaded_version = str(getattr(manifest, "version", "") or "").strip() if manifest is not None else ""
+    installed_version = str(getattr(installed_plugin, "version", "") or "").strip()
+    if installed_version and loaded_version != installed_version:
+        return True, f"version {loaded_version or '<missing>'} -> {installed_version}"
+
+    loaded_at = _timestamp_or_none(getattr(cls, "_loaded_at", None) if cls is not None else None)
+    if loaded_at is None and inst is not None:
+        loaded_at = _timestamp_or_none(getattr(type(inst), "_loaded_at", None))
+    updated_at = _timestamp_or_none(getattr(installed_plugin, "updated_at", None))
+    if loaded_at is not None and updated_at is not None and updated_at > loaded_at + 1.0:
+        return True, f"updated_at {updated_at:.3f} > loaded_at {loaded_at:.3f}"
+    return False, None
+
+
 def _restore_registry_after_failed_load(
     snapshot: dict[str, type[Plugin]],
     *,
@@ -2715,6 +2914,7 @@ def _load_dir(path: Path, source: str) -> dict[str, type[Plugin]]:
     # 把 manifest / source 挂到 plugin 类上，方便 API 层暴露给前端
     cls._manifest = manifest
     cls._source = source
+    cls._loaded_at = time.time()
 
     # 防御性写入注册表：plugin.py 里若有 @register 已经写过；此处再写一次幂等
     # （主要是为了第三方插件——它们的 plugin.py 也应当 @register，但兜底一下）
@@ -4871,10 +5071,13 @@ async def reload_account_config(account_id: int, payload: dict | None = None) ->
                     )
                 )
             ).scalar_one_or_none()
-            cls = get_plugin(fkey)
-            plugin_source = getattr(cls, "_source", "builtin") if cls is not None else "builtin"
+            cls = get_plugin(fkey) or type(inst)
+            plugin_source = getattr(cls, "_source", getattr(type(inst), "_source", "builtin"))
             auth_denied: _InstalledPluginAuthorization | None = None
+            runtime_drift = False
+            runtime_drift_reason: str | None = None
             if plugin_source == "installed":
+                installed_plugin = await db.get(InstalledPlugin, fkey)
                 auth = await _authorize_installed_plugin(
                     db,
                     fkey,
@@ -4883,11 +5086,29 @@ async def reload_account_config(account_id: int, payload: dict | None = None) ->
                 )
                 if not auth.allowed:
                     auth_denied = auth
+                elif reload_plugin_key != fkey:
+                    runtime_drift, runtime_drift_reason = _installed_plugin_runtime_drift(
+                        cls,
+                        inst,
+                        installed_plugin,
+                    )
 
-            force_reload = reload_plugin_key == fkey
+            force_reload = reload_plugin_key == fkey or runtime_drift
             if af is None or not af.enabled or auth_denied is not None or force_reload:
                 ctx = state.contexts.get(fkey)
                 inst = state.instances.get(fkey)
+
+                if runtime_drift:
+                    _clear_installed_module_cache(fkey)
+                    await _log(
+                        redis,
+                        account_id,
+                        "info",
+                        f"检测到插件 {fkey} 已更新但内存实例仍是旧版本，正在重载。",
+                        source="system",
+                        plugin_key=fkey,
+                        reason=runtime_drift_reason,
+                    )
 
                 # ── 安全：先注销该插件的所有命令 ──
                 if inst is not None:
@@ -5205,7 +5426,7 @@ def get_recent_peers(account_id: int) -> list[dict[str, Any]]:
     return out
 
 
-_INTERACTION_SEND_ACTIONS = {"send_message", "send_photo", "send_file", "edit_message"}
+_INTERACTION_SEND_ACTIONS = {"send_message", "send_photo", "send_file", "edit_message", "edit_caption"}
 _INTERACTION_CONTROL_ACTIONS = {"delete_message", "pin_message"}
 
 
