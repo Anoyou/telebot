@@ -113,6 +113,7 @@ _INTERACTION_PAYMENT_CONFIRM_PREFIX = "account_bot:interaction_payment_confirm:"
 _INTERACTION_PAYMENT_CONFIRM_TTL_SECONDS = 300
 _TRANSFER_COMMAND_DEDUPE_TTL_SECONDS = 30.0
 _INTERACTION_ENTRY_TIMEOUT_SECONDS = 15.0
+_INTERACTION_WORKER_ONLINE_WAIT_SECONDS = 5.0
 _INTERACTION_DEBUG_STATE_PREFIX = "account_bot:interaction_debug:"
 _INTERACTION_DEBUG_WARNINGS_PREFIX = "account_bot:interaction_debug_warnings:"
 _INTERACTION_DEBUG_TTL_SECONDS = 86400
@@ -5276,16 +5277,29 @@ async def _run_worker_interaction_entry(
     )
     try:
         await pubsub.subscribe(reply_channel)
-        subscriber_count = await redis.publish(
-            cmd_channel(incoming.account_id),
-            make_cmd(
-                CMD_RUN_INTERACTION_ENTRY,
-                plugin_key=plugin_key,
-                entry_key=entry_key,
-                payload=payload,
-                reply_to=reply_channel,
-            ),
+        command = make_cmd(
+            CMD_RUN_INTERACTION_ENTRY,
+            plugin_key=plugin_key,
+            entry_key=entry_key,
+            payload=payload,
+            reply_to=reply_channel,
         )
+        deadline = time.time() + _INTERACTION_ENTRY_TIMEOUT_SECONDS
+        online_deadline = time.time() + min(
+            _INTERACTION_ENTRY_TIMEOUT_SECONDS,
+            _INTERACTION_WORKER_ONLINE_WAIT_SECONDS,
+        )
+        publish_attempts = 0
+        while True:
+            publish_attempts += 1
+            subscriber_count = await redis.publish(cmd_channel(incoming.account_id), command)
+            if int(subscriber_count or 0) > 0:
+                break
+            now = time.time()
+            if now >= online_deadline:
+                break
+            await asyncio.sleep(min(0.25, max(0.01, online_deadline - now)))
+
         if int(subscriber_count or 0) <= 0:
             error = "账号 worker 不在线"
             await record_span(
@@ -5297,6 +5311,7 @@ async def _run_worker_interaction_entry(
                 entry_key=entry_key,
                 reason_code="userbot_offline",
                 error=error,
+                publish_attempts=publish_attempts,
                 duration_ms=int((time.time() - started) * 1000),
             )
             await update_plugin_runtime_status(
@@ -5306,7 +5321,6 @@ async def _run_worker_interaction_entry(
                 last_trace_id=str(trace_id or ""),
             )
             return False, error, []
-        deadline = time.time() + _INTERACTION_ENTRY_TIMEOUT_SECONDS
         while time.time() < deadline:
             msg = await pubsub.get_message(ignore_subscribe_messages=True, timeout=0.5)
             if not msg:

@@ -12125,7 +12125,76 @@ async def test_run_worker_interaction_entry_returns_timeout(monkeypatch) -> None
 
 
 @pytest.mark.asyncio
-async def test_run_worker_interaction_entry_fails_fast_when_worker_offline(monkeypatch) -> None:
+async def test_run_worker_interaction_entry_retries_until_worker_subscribes(monkeypatch) -> None:
+    class _PubSub:
+        def __init__(self) -> None:
+            self.closed = False
+
+        async def subscribe(self, _channel: str) -> None:
+            return None
+
+        async def get_message(self, **_kwargs):  # noqa: ANN003
+            return {
+                "data": account_bot_runtime.make_cmd(
+                    account_bot_runtime.CMD_RUN_INTERACTION_ENTRY,
+                    ok=True,
+                    error=None,
+                    actions=[{"type": "result", "success": True}],
+                )
+            }
+
+        async def unsubscribe(self, _channel: str) -> None:
+            return None
+
+        async def close(self) -> None:
+            self.closed = True
+
+    class _Redis:
+        def __init__(self) -> None:
+            self.pubsub_obj = _PubSub()
+            self.publish_calls = 0
+
+        def pubsub(self):
+            return self.pubsub_obj
+
+        async def publish(self, _channel: str, _payload: str) -> int:
+            self.publish_calls += 1
+            return 0 if self.publish_calls == 1 else 1
+
+    async def fast_sleep(_seconds: float) -> None:
+        return None
+
+    redis = _Redis()
+    monkeypatch.setattr(account_bot_runtime, "get_redis", lambda: redis)
+    monkeypatch.setattr(account_bot_runtime.asyncio, "sleep", fast_sleep)
+    monkeypatch.setattr(account_bot_runtime, "update_plugin_runtime_status", AsyncMock())
+    incoming = account_bot_runtime.Incoming(
+        account_id=1,
+        token="bbot-token",
+        update_id=1,
+        user_id=456,
+        chat_id=-100123,
+        message_id=10,
+        text="",
+        trace_id="evt_worker_recovered",
+    )
+
+    ok, error, actions = await account_bot_runtime._run_worker_interaction_entry(
+        incoming,
+        plugin_key="game24",
+        entry_key="start_paid_game",
+        payload={"trace_id": "evt_worker_recovered", "chat_id": -100123},
+    )
+
+    assert ok is True
+    assert error is None
+    assert actions == [{"type": "result", "success": True}]
+    assert redis.publish_calls == 2
+    assert redis.pubsub_obj.closed is True
+
+
+@pytest.mark.asyncio
+async def test_run_worker_interaction_entry_retries_then_fails_when_worker_offline(monkeypatch) -> None:
     class _PubSub:
         def __init__(self) -> None:
             self.unsubscribed: list[str] = []
@@ -12148,16 +12217,20 @@ async def test_run_worker_interaction_entry_fails_fast_when_worker_offline(monke
     class _Redis:
         def __init__(self) -> None:
             self.pubsub_obj = _PubSub()
+            self.publish_calls = 0
 
         def pubsub(self):
             return self.pubsub_obj
 
         async def publish(self, _channel: str, _payload: str) -> int:
+            self.publish_calls += 1
             return 0
 
     redis = _Redis()
     record_span = AsyncMock()
     monkeypatch.setattr(account_bot_runtime, "get_redis", lambda: redis)
+    monkeypatch.setattr(account_bot_runtime, "_INTERACTION_ENTRY_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(account_bot_runtime, "_INTERACTION_WORKER_ONLINE_WAIT_SECONDS", 0.01)
     monkeypatch.setattr(account_bot_runtime, "record_span", record_span)
     monkeypatch.setattr(account_bot_runtime, "update_plugin_runtime_status", AsyncMock())
     incoming = account_bot_runtime.Incoming(
@@ -12181,6 +12254,7 @@ async def test_run_worker_interaction_entry_fails_fast_when_worker_offline(monke
     assert ok is False
     assert error == "账号 worker 不在线"
     assert actions == []
+    assert redis.publish_calls >= 2
     assert redis.pubsub_obj.get_message_called is False
     assert redis.pubsub_obj.closed is True
     assert any(call.kwargs.get("reason_code") == "userbot_offline" for call in record_span.await_args_list)
