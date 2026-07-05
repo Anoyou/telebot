@@ -3138,6 +3138,52 @@ def test_trusted_transfer_notice_sender_requires_configured_sender() -> None:
 
 
 @pytest.mark.asyncio
+async def test_transfer_notice_configured_bot_receiver_id_does_not_match_rule(monkeypatch) -> None:
+    incoming = account_bot_runtime.Incoming(
+        account_id=1,
+        token="bbot-token",
+        update_id=10,
+        user_id=456,
+        chat_id=-100123,
+        message_id=70,
+        text="转账成功\nAAA 射出 100\nOwner 接收 100\n收款人ID：8875144459",
+        display_name="TransferBot",
+    )
+    parsed = account_bot_runtime._parse_transfer_notice(incoming.text)
+    assert parsed is not None
+    monkeypatch.setattr(account_bot_runtime, "_list_interaction_sessions_for_rule", AsyncMock(return_value=[]))
+    monkeypatch.setattr(account_bot_runtime, "_is_interaction_rule_open", AsyncMock(return_value=True))
+
+    rule = await account_bot_runtime._select_transfer_notice_rule(
+        object(),
+        incoming,
+        {
+            "enabled": True,
+            "trusted_bot_id": 456,
+            "interaction_bot_id": 8875144459,
+            "rules": [
+                {
+                    "id": "paid-game",
+                    "enabled": True,
+                    "chat_ids": [-100123],
+                    "trigger_mode": "payment",
+                    "trigger_texts": ["转账成功"],
+                    "receiver_text": "Owner",
+                    "amount": 100,
+                    "amount_match_mode": "eq",
+                    "action": "module",
+                    "module_key": "math10",
+                    "module_action": "start_math_game",
+                },
+            ],
+        },
+        parsed,
+    )
+
+    assert rule is None
+
+
+@pytest.mark.asyncio
 async def test_transfer_notice_without_matching_rule_records_skipped_route_span(monkeypatch) -> None:
     incoming = account_bot_runtime.Incoming(
         account_id=1,
@@ -6423,20 +6469,24 @@ async def test_plus_amount_notice_ignores_rule_amount_threshold(monkeypatch) -> 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "reply_to_message",
+    ("reply_to_message", "expected_send_count"),
     [
-        None,
-        {
-            "message_id": 49,
-            "from": {"id": 8875144459, "is_bot": True, "first_name": "玩法Bot"},
-            "text": "该傻瓜玩法是付费娱乐模块，请对收款人：@uhaveanswer的任意消息回复+234即可参与。",
-        },
+        (None, 1),
+        (
+            {
+                "message_id": 49,
+                "from": {"id": 8875144459, "is_bot": True, "first_name": "玩法Bot"},
+                "text": "该傻瓜玩法是付费娱乐模块，请对收款人：@uhaveanswer的任意消息回复+234即可参与。",
+            },
+            0,
+        ),
     ],
     ids=["plain_plus_amount", "reply_to_interaction_bot_prompt"],
 )
-async def test_interaction_bot_plus_amount_emits_transfer_notice_for_paid_default_receiver(
+async def test_interaction_bot_plus_amount_uses_default_receiver_only_without_configured_bot_reply(
     monkeypatch,
     reply_to_message,
+    expected_send_count,
 ) -> None:
     class _DB:
         async def __aenter__(self):
@@ -6455,6 +6505,7 @@ async def test_interaction_bot_plus_amount_emits_transfer_notice_for_paid_defaul
 
     account_bot_runtime._TRANSFER_COMMAND_DEDUPE.clear()
     send = AsyncMock(return_value={"from": {"id": 456}, "message_id": 50})
+    get_transfer_bot_token = AsyncMock(return_value="abot-token")
     monkeypatch.setattr(account_bot_runtime, "AsyncSessionLocal", lambda: _DB())
     monkeypatch.setattr(
         account_bot_runtime,
@@ -6463,7 +6514,7 @@ async def test_interaction_bot_plus_amount_emits_transfer_notice_for_paid_defaul
     )
     monkeypatch.setattr(account_bot_service, "send_message", send)
     monkeypatch.setattr(account_bot_service, "find_bot_user", AsyncMock())
-    monkeypatch.setattr(account_bot_service, "get_transfer_bot_token", AsyncMock(return_value="abot-token"))
+    monkeypatch.setattr(account_bot_service, "get_transfer_bot_token", get_transfer_bot_token)
     monkeypatch.setattr(
         account_bot_service,
         "get_transfer_notice_config",
@@ -6512,6 +6563,11 @@ async def test_interaction_bot_plus_amount_emits_transfer_notice_for_paid_defaul
         },
     )
 
+    assert send.await_count == expected_send_count
+    if expected_send_count == 0:
+        get_transfer_bot_token.assert_not_awaited()
+        account_bot_runtime._TRANSFER_COMMAND_DEDUPE.clear()
+        return
     assert send.await_count == 1
     assert send.await_args.args[:2] == ("abot-token", -100123)
     notice = send.await_args.args[2]

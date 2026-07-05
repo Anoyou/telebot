@@ -3731,7 +3731,21 @@ async def _select_transfer_command_receiver(
     cfg: dict[str, Any],
     amount: int,
 ) -> dict[str, Any] | None:
-    if incoming.reply_to_display_name and not _is_configured_bot_user_id(cfg, incoming.reply_to_user_id):
+    if incoming.reply_to_display_name:
+        if _is_configured_bot_receiver_identity(
+            cfg,
+            user_id=incoming.reply_to_user_id,
+            name=incoming.reply_to_display_name,
+            username=incoming.reply_to_username,
+        ):
+            log.info(
+                "transfer command skipped: configured bot receiver aid=%s chat_id=%s reply_to_user=%s reply_to_name=%r",
+                incoming.account_id,
+                incoming.chat_id,
+                incoming.reply_to_user_id,
+                incoming.reply_to_display_name,
+            )
+            return None
         return {
             "receiver_name": incoming.reply_to_display_name,
             "receiver_user_id": incoming.reply_to_user_id,
@@ -3773,6 +3787,22 @@ def _is_configured_bot_user_id(cfg: dict[str, Any], user_id: int | None) -> bool
     return int(user_id) in bot_ids
 
 
+def _is_configured_bot_receiver_identity(
+    cfg: dict[str, Any],
+    *,
+    user_id: int | None,
+    name: str | None = None,
+    username: str | None = None,
+) -> bool:
+    if _is_configured_bot_user_id(cfg, user_id):
+        return True
+    interaction_username = str(cfg.get("interaction_bot_username") or "").strip().lstrip("@").casefold()
+    if not interaction_username:
+        return False
+    actuals = _user_identity_texts(name, username, f"@{username}" if username else "")
+    return any(str(item).strip().lstrip("@").casefold() == interaction_username for item in actuals)
+
+
 async def _select_transfer_notice_rule(
     db: Any,
     incoming: Incoming,
@@ -3782,6 +3812,15 @@ async def _select_transfer_notice_rule(
     parsed_amount = int(parsed.get("amount") or 0)
     parsed_receiver = str(parsed.get("receiver_name") or "")
     parsed_receiver_id = _int_or_none(parsed.get("receiver_user_id"))
+    if _is_configured_bot_receiver_identity(cfg, user_id=parsed_receiver_id, name=parsed_receiver):
+        log.info(
+            "transfer notice skipped: configured bot receiver aid=%s chat_id=%s receiver_id=%s receiver_name=%r",
+            incoming.account_id,
+            incoming.chat_id,
+            parsed_receiver_id,
+            parsed_receiver,
+        )
+        return None
     for rule in _interaction_rules(cfg, include_disabled=True):
         if not _rule_chat_matches(rule, incoming.chat_id or 0):
             continue
