@@ -24,6 +24,7 @@ from ..account_bot_defaults import (
     DEFAULT_INTERACTION_QUERY_ITEM_TEMPLATE,
     DEFAULT_INTERACTION_QUERY_RESPONSE_TEMPLATE,
     DEFAULT_INTERACTION_RESPONSE_TEMPLATE,
+    DEFAULT_DEBIT_NOTICE_TEMPLATE,
     DEFAULT_TRANSFER_NOTICE_TEMPLATE,
     LEGACY_TRANSFER_NOTICE_TEMPLATE,
 )
@@ -246,6 +247,7 @@ def default_transfer_notice_config() -> dict[str, Any]:
         "concurrency": "chat",
         "response_template": DEFAULT_INTERACTION_RESPONSE_TEMPLATE,
         "transfer_notice_template": DEFAULT_TRANSFER_NOTICE_TEMPLATE,
+        "debit_notice_template": DEFAULT_DEBIT_NOTICE_TEMPLATE,
         "rules": [],
     }
 
@@ -255,6 +257,11 @@ def normalize_transfer_notice_template(value: Any) -> str:
     if not template or template == LEGACY_TRANSFER_NOTICE_TEMPLATE:
         return DEFAULT_TRANSFER_NOTICE_TEMPLATE
     return template[:1000]
+
+
+def normalize_debit_notice_template(value: Any) -> str:
+    template = str(value or "").strip()
+    return (template or DEFAULT_DEBIT_NOTICE_TEMPLATE)[:1000]
 
 
 def normalize_transfer_notice_config(raw: Any) -> dict[str, Any]:
@@ -385,6 +392,7 @@ def normalize_transfer_notice_config(raw: Any) -> dict[str, Any]:
     template = str(base.get("response_template") or "").strip()
     base["response_template"] = template or default_transfer_notice_config()["response_template"]
     base["transfer_notice_template"] = normalize_transfer_notice_template(base.get("transfer_notice_template"))
+    base["debit_notice_template"] = normalize_debit_notice_template(base.get("debit_notice_template"))
     rules = normalize_interaction_rules(base.get("rules"))
     if not rules:
         rules = [

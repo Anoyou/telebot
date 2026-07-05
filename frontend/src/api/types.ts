@@ -264,6 +264,7 @@ export interface AccountBotInteractionConfig {
   concurrency?: "chat" | "user" | "none";
   response_template: string;
   transfer_notice_template: string;
+  debit_notice_template: string;
   rules?: AccountBotInteractionRule[];
 }
 
@@ -333,6 +334,7 @@ export type AccountBotInteractionConfigUpdate = Pick<
   | "concurrency"
   | "response_template"
   | "transfer_notice_template"
+  | "debit_notice_template"
   | "rules"
 >;
 

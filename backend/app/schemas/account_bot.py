@@ -14,6 +14,7 @@ from ..account_bot_defaults import (
     DEFAULT_INTERACTION_QUERY_ITEM_TEMPLATE,
     DEFAULT_INTERACTION_QUERY_RESPONSE_TEMPLATE,
     DEFAULT_INTERACTION_RESPONSE_TEMPLATE,
+    DEFAULT_DEBIT_NOTICE_TEMPLATE,
     DEFAULT_TRANSFER_NOTICE_TEMPLATE,
 )
 from ..db.models.account_bot import ACCOUNT_BOT_ROLES
@@ -354,6 +355,10 @@ class AccountBotInteractionConfig(BaseModel):
         default=DEFAULT_TRANSFER_NOTICE_TEMPLATE,
         max_length=1000,
     )
+    debit_notice_template: str = Field(
+        default=DEFAULT_DEBIT_NOTICE_TEMPLATE,
+        max_length=1000,
+    )
     rules: list[AccountBotInteractionRule] = Field(default_factory=list, max_length=20)
 
     @field_validator(
@@ -377,7 +382,7 @@ class AccountBotInteractionConfig(BaseModel):
             raise ValueError("不能包含换行")
         return value or None
 
-    @field_validator("trigger_text", "query_response_template", "query_item_template", "query_empty_message", "response_template", "transfer_notice_template")
+    @field_validator("trigger_text", "query_response_template", "query_item_template", "query_empty_message", "response_template", "transfer_notice_template", "debit_notice_template")
     @classmethod
     def _trim_required_text(cls, v: str) -> str:
         value = str(v or "").strip()

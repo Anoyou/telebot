@@ -26,3 +26,9 @@ DEFAULT_TRANSFER_NOTICE_TEMPLATE = "\n".join(
         "{receiver_user_id_line}</code></pre>",
     )
 )
+DEFAULT_DEBIT_NOTICE_TEMPLATE = "\n".join(
+    (
+        '<pre><code class="language-扣减成功">{payer_name} 扣减 {amount} 蝌蚪',
+        "{receiver_name} 接收 {amount} 蝌蚪</code></pre>",
+    )
+)

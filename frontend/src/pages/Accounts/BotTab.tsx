@@ -147,6 +147,10 @@ const DEFAULT_TRANSFER_NOTICE_TEMPLATE = [
   "金额：{amount}",
   "{receiver_user_id_line}</code></pre>",
 ].join("\n");
+const DEFAULT_DEBIT_NOTICE_TEMPLATE = [
+  '<pre><code class="language-扣减成功">{payer_name} 扣减 {amount} 蝌蚪',
+  "{receiver_name} 接收 {amount} 蝌蚪</code></pre>",
+].join("\n");
 const TRANSFER_NOTICE_TEMPLATE_SAMPLE_VALUES: Record<string, string> = {
   payer_name: "Alice",
   payer_user_id: "10001",
@@ -211,6 +215,7 @@ const DEFAULT_INTERACTION_BOT: AccountBotInteractionConfig = {
   concurrency: "chat",
   response_template: DEFAULT_INTERACTION_RESPONSE_TEMPLATE,
   transfer_notice_template: DEFAULT_TRANSFER_NOTICE_TEMPLATE,
+  debit_notice_template: DEFAULT_DEBIT_NOTICE_TEMPLATE,
   rules: [],
 };
 
@@ -1886,6 +1891,7 @@ export function BotTab({
   const [transferBotToken, setTransferBotToken] = useState("");
   const [clearTransferBotToken, setClearTransferBotToken] = useState(false);
   const [transferNoticeTemplate, setTransferNoticeTemplate] = useState(DEFAULT_TRANSFER_NOTICE_TEMPLATE);
+  const [debitNoticeTemplate, setDebitNoticeTemplate] = useState(DEFAULT_DEBIT_NOTICE_TEMPLATE);
   const [interactionQueryCommands, setInteractionQueryCommands] = useState(DEFAULT_INTERACTION_QUERY_COMMANDS);
   const [interactionQueryResponseTemplate, setInteractionQueryResponseTemplate] = useState(DEFAULT_INTERACTION_QUERY_RESPONSE_TEMPLATE);
   const [interactionQueryItemTemplate, setInteractionQueryItemTemplate] = useState(DEFAULT_INTERACTION_QUERY_ITEM_TEMPLATE);
@@ -1985,6 +1991,7 @@ export function BotTab({
       setTransferBotToken("");
       setClearTransferBotToken(false);
       setTransferNoticeTemplate(interactionQ.data.transfer_notice_template || DEFAULT_TRANSFER_NOTICE_TEMPLATE);
+      setDebitNoticeTemplate(interactionQ.data.debit_notice_template || DEFAULT_DEBIT_NOTICE_TEMPLATE);
       setInteractionQueryCommands(
         interactionQ.data.query_commands?.length
           ? interactionQ.data.query_commands.join("\n")
@@ -2119,6 +2126,7 @@ export function BotTab({
       concurrency: firstRule.concurrency ?? "chat",
       response_template: firstRule.response_template || DEFAULT_INTERACTION_BOT.response_template,
       transfer_notice_template: transferNoticeTemplate.trim() || DEFAULT_TRANSFER_NOTICE_TEMPLATE,
+      debit_notice_template: debitNoticeTemplate.trim() || DEFAULT_DEBIT_NOTICE_TEMPLATE,
       rules,
       ...overrides,
     };
@@ -3282,7 +3290,7 @@ export function BotTab({
             {(!isInteractionCenter || interactionAdvancedExpanded) ? (
               <>
                 <div id="interaction-advanced-config" className="space-y-1.5">
-                  <Label>测试通知模板</Label>
+                  <Label>转账测试通知模板</Label>
                   <Textarea
                     rows={5}
                     placeholder={DEFAULT_TRANSFER_NOTICE_TEMPLATE}
@@ -3316,9 +3324,35 @@ export function BotTab({
                     />
                   </div>
                 </div>
+                <div className="space-y-1.5">
+                  <Label>扣款测试通知模板</Label>
+                  <Textarea
+                    rows={4}
+                    placeholder={DEFAULT_DEBIT_NOTICE_TEMPLATE}
+                    value={debitNoticeTemplate}
+                    onChange={(e) => setDebitNoticeTemplate(e.target.value)}
+                  />
+                  <div className="rounded-md border bg-background p-3 text-xs">
+                    <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                      <div className="font-medium">消息预览</div>
+                      <span className="text-[11px] text-muted-foreground">使用示例变量渲染</span>
+                    </div>
+                    <TelegramHtmlPreview
+                      value={renderTransferNoticeTemplatePreview(debitNoticeTemplate.trim() ? debitNoticeTemplate : DEFAULT_DEBIT_NOTICE_TEMPLATE)}
+                      mode="html"
+                      title="转账通知 Bot"
+                      caption="debit notice"
+                      hints={[
+                        { label: "payer", value: TRANSFER_NOTICE_TEMPLATE_SAMPLE_VALUES.payer_name },
+                        { label: "receiver", value: TRANSFER_NOTICE_TEMPLATE_SAMPLE_VALUES.receiver_name },
+                        { label: "amount", value: TRANSFER_NOTICE_TEMPLATE_SAMPLE_VALUES.amount },
+                      ]}
+                    />
+                  </div>
+                </div>
 
                 <div className="rounded-md bg-muted px-3 py-2 text-xs leading-5 text-muted-foreground">
-                  群里回复任意消息发送 <code>+123</code> 后，若已填写转账结果通知 Bot Token，会生成带 <code>language-转账成功</code> 标识的 HTML 代码块。
+                  群里回复任意消息发送 <code>+123</code> 会生成带 <code>language-转账成功</code> 标识的 HTML 代码块；发送 <code>-123</code> 会生成带 <code>language-扣减成功</code> 标识的扣款通知。
                   没有测试用的转账通知结果 Bot 的 Token 时，交互 Bot 只监听群里真实出现的转账结果通知。
                 </div>
                 {isInteractionCenter ? null : (

@@ -19,6 +19,7 @@ from ..account_bot_defaults import (
     DEFAULT_INTERACTION_QUERY_ITEM_TEMPLATE,
     DEFAULT_INTERACTION_QUERY_RESPONSE_TEMPLATE,
     DEFAULT_INTERACTION_RESPONSE_TEMPLATE,
+    DEFAULT_DEBIT_NOTICE_TEMPLATE,
     DEFAULT_TRANSFER_NOTICE_TEMPLATE,
 )
 from ..db.base import AsyncSessionLocal
@@ -1742,6 +1743,7 @@ def _parse_transfer_notice(text: str) -> dict[str, Any] | None:
 
     if not text.strip():
         return None
+    text = re.sub(r"<[^>]+>", "", text)
     labeled = {
         "payer_name": r"付款人\s*[:：]\s*(.+)",
         "receiver_name": r"收款人\s*[:：]\s*(.+)",
@@ -1763,7 +1765,7 @@ def _parse_transfer_notice(text: str) -> dict[str, Any] | None:
             out["receiver_user_id"] = int(receiver_id_match.group(1))
         return out
 
-    payer_match = re.search(r"^\s*(.+?)\s*(?:转出|射出|转账)\s*(\d+)\b", text, re.M)
+    payer_match = re.search(r"^\s*(.+?)\s*(?:转出|射出|转账|扣减)\s*(\d+)\b", text, re.M)
     receiver_match = re.search(r"^\s*(.+?)\s*(?:收到|接收|收款)\s*(\d+)\b", text, re.M)
     if payer_match and receiver_match:
         payer_amount = int(payer_match.group(2))
@@ -1800,12 +1802,20 @@ def _render_transfer_notice_response(template: str, data: dict[str, Any]) -> str
         return DEFAULT_INTERACTION_RESPONSE_TEMPLATE.format_map(_TemplateValues(values))
 
 
-def _parse_transfer_command(text: str) -> int | None:
-    match = re.fullmatch(r"\+(\d{1,9})", text.strip())
+def _parse_transfer_command_mode(text: str) -> tuple[str, int] | None:
+    match = re.fullmatch(r"([+-])(\d{1,9})", text.strip())
     if not match:
         return None
-    amount = int(match.group(1))
-    return amount if amount > 0 else None
+    amount = int(match.group(2))
+    if amount <= 0:
+        return None
+    mode = "debit" if match.group(1) == "-" else "transfer"
+    return mode, amount
+
+
+def _parse_transfer_command(text: str) -> int | None:
+    parsed = _parse_transfer_command_mode(text)
+    return parsed[1] if parsed else None
 
 
 class _TemplateValues(dict[str, Any]):
@@ -3731,6 +3741,7 @@ async def _select_transfer_command_receiver(
     cfg: dict[str, Any],
     amount: int,
 ) -> dict[str, Any] | None:
+    reply_target_is_configured_bot = False
     if incoming.reply_to_display_name:
         if _is_configured_bot_receiver_identity(
             cfg,
@@ -3739,18 +3750,19 @@ async def _select_transfer_command_receiver(
             username=incoming.reply_to_username,
         ):
             log.info(
-                "transfer command skipped: configured bot receiver aid=%s chat_id=%s reply_to_user=%s reply_to_name=%r",
+                "transfer command receiver uses rule because reply target is configured bot aid=%s chat_id=%s reply_to_user=%s reply_to_name=%r",
                 incoming.account_id,
                 incoming.chat_id,
                 incoming.reply_to_user_id,
                 incoming.reply_to_display_name,
             )
-            return None
-        return {
-            "receiver_name": incoming.reply_to_display_name,
-            "receiver_user_id": incoming.reply_to_user_id,
-            "receiver_username": incoming.reply_to_username,
-        }
+            reply_target_is_configured_bot = True
+        else:
+            return {
+                "receiver_name": incoming.reply_to_display_name,
+                "receiver_user_id": incoming.reply_to_user_id,
+                "receiver_username": incoming.reply_to_username,
+            }
     for rule in _interaction_rules(cfg):
         if not _rule_chat_matches(rule, incoming.chat_id or 0):
             continue
@@ -3759,6 +3771,8 @@ async def _select_transfer_command_receiver(
         if not _rule_amount_matches(rule, amount):
             continue
         receiver_filter = await _rule_receiver_filter(db, incoming.account_id, rule)
+        if reply_target_is_configured_bot and not receiver_filter.get("explicit"):
+            continue
         receiver_info = _transfer_command_receiver_from_filter(receiver_filter)
         if receiver_info is not None:
             return receiver_info
@@ -6204,15 +6218,17 @@ async def _try_handle_transfer_command(
     if incoming.callback_id or incoming.chat_id is None or incoming.user_id is None:
         return False
 
-    amount = _parse_transfer_command(incoming.text)
-    if amount is None:
+    parsed_command = _parse_transfer_command_mode(incoming.text)
+    if parsed_command is None:
         return False
+    command_mode, amount = parsed_command
 
     log.info(
-        "transfer command candidate aid=%s chat_id=%s sender_id=%s amount=%s reply_to=%s",
+        "transfer command candidate aid=%s chat_id=%s sender_id=%s mode=%s amount=%s reply_to=%s",
         incoming.account_id,
         incoming.chat_id,
         incoming.user_id,
+        command_mode,
         amount,
         incoming.reply_to_display_name,
     )
@@ -6239,6 +6255,33 @@ async def _try_handle_transfer_command(
         )
         return False
     receiver_info = await _select_transfer_command_receiver(db, incoming, cfg, amount)
+    if command_mode == "debit":
+        if not incoming.reply_to_display_name:
+            log.info(
+                "transfer command skipped: debit target missing aid=%s incoming_chat=%s amount=%s",
+                incoming.account_id,
+                incoming.chat_id,
+                amount,
+            )
+            return False
+        if _is_configured_bot_receiver_identity(
+            cfg,
+            user_id=incoming.reply_to_user_id,
+            name=incoming.reply_to_display_name,
+            username=incoming.reply_to_username,
+        ):
+            log.info(
+                "transfer command skipped: debit target is configured bot aid=%s incoming_chat=%s target_user=%s",
+                incoming.account_id,
+                incoming.chat_id,
+                incoming.reply_to_user_id,
+            )
+            return False
+        receiver_info = {
+            "receiver_name": incoming.display_name or str(incoming.user_id),
+            "receiver_user_id": incoming.user_id,
+            "receiver_username": None,
+        }
     if receiver_info is None:
         log.info(
             "transfer command skipped: receiver unknown aid=%s incoming_chat=%s amount=%s",
@@ -6262,16 +6305,25 @@ async def _try_handle_transfer_command(
         )
         return True
 
-    payer = incoming.display_name or str(incoming.user_id)
-    receiver = str(receiver_info["receiver_name"])
-    raw_notice_template = str(cfg.get("transfer_notice_template") or DEFAULT_TRANSFER_NOTICE_TEMPLATE)
+    if command_mode == "debit":
+        payer = incoming.reply_to_display_name or str(incoming.reply_to_user_id or "")
+        payer_user_id = incoming.reply_to_user_id
+        receiver = str(receiver_info["receiver_name"])
+        receiver_user_id = _int_or_none(receiver_info.get("receiver_user_id"))
+        raw_notice_template = str(cfg.get("debit_notice_template") or DEFAULT_DEBIT_NOTICE_TEMPLATE)
+    else:
+        payer = incoming.display_name or str(incoming.user_id)
+        payer_user_id = incoming.user_id
+        receiver = str(receiver_info["receiver_name"])
+        receiver_user_id = _int_or_none(receiver_info.get("receiver_user_id"))
+        raw_notice_template = str(cfg.get("transfer_notice_template") or DEFAULT_TRANSFER_NOTICE_TEMPLATE)
     notice, render_error = _render_transfer_bot_notice_with_error(
         raw_notice_template,
         payer,
         receiver,
         amount,
-        payer_user_id=incoming.user_id,
-        receiver_user_id=_int_or_none(receiver_info.get("receiver_user_id")),
+        payer_user_id=payer_user_id,
+        receiver_user_id=receiver_user_id,
     )
     if render_error is not None:
         error_text = f"{type(render_error).__name__}: {render_error}"
@@ -6341,9 +6393,10 @@ async def _try_handle_transfer_command(
         )
         return True
     log.info(
-        "transfer command emitted notice aid=%s chat_id=%s payer=%r receiver=%r amount=%s",
+        "transfer command emitted notice aid=%s chat_id=%s mode=%s payer=%r receiver=%r amount=%s",
         incoming.account_id,
         incoming.chat_id,
+        command_mode,
         payer,
         receiver,
         amount,

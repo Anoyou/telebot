@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..account_bot_defaults import (
     DEFAULT_INTERACTION_RESPONSE_TEMPLATE,
+    DEFAULT_DEBIT_NOTICE_TEMPLATE,
     DEFAULT_TRANSFER_NOTICE_TEMPLATE,
 )
 from ..db.models.system import SystemSetting
@@ -287,6 +288,7 @@ def _parse_mode_for_field(field_schema: dict[str, Any], effective_config: dict[s
 
 def _system_catalog_items(config: dict[str, Any]) -> list[MessageTemplateCatalogItem]:
     transfer_template = str(config.get("transfer_notice_template") or DEFAULT_TRANSFER_NOTICE_TEMPLATE)
+    debit_template = str(config.get("debit_notice_template") or DEFAULT_DEBIT_NOTICE_TEMPLATE)
     response_template = str(config.get("response_template") or DEFAULT_INTERACTION_RESPONSE_TEMPLATE)
     transfer_sample = {
         "payer_name": _DEFAULT_SAMPLE_VALUES["payer_name"],
@@ -314,6 +316,17 @@ def _system_catalog_items(config: dict[str, Any]) -> list[MessageTemplateCatalog
             description="转账结果通知 Bot 发出的到账消息模板，默认带 language-转账成功 代码块标识。",
             template=transfer_template,
             sample_data=_sample_data_for_template(transfer_template, explicit=transfer_sample),
+            parse_mode=_DEFAULT_PARSE_MODE,
+        ),
+        MessageTemplateCatalogItem(
+            id="system.debit_notice_template",
+            group=_SYSTEM_GROUP,
+            feature_key=None,
+            field_key="debit_notice_template",
+            title="扣款测试通知模板",
+            description="测试通知 Bot 处理 -数字 扣款命令时发出的扣减消息模板，默认带 language-扣减成功 代码块标识。",
+            template=debit_template,
+            sample_data=_sample_data_for_template(debit_template, explicit=transfer_sample),
             parse_mode=_DEFAULT_PARSE_MODE,
         ),
         MessageTemplateCatalogItem(

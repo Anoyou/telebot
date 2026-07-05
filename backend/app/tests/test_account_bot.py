@@ -3327,6 +3327,30 @@ def test_account_bot_transfer_notice_template_renders_parseable_notice() -> None
     }
 
 
+def test_account_bot_debit_notice_template_renders_parseable_notice() -> None:
+    template = account_bot_service.default_transfer_notice_config()["debit_notice_template"]
+
+    notice = account_bot_runtime._render_transfer_bot_notice(
+        template,
+        "玩家A",
+        "Owner",
+        100,
+        payer_user_id=111,
+        receiver_user_id=999,
+    )
+
+    assert notice == (
+        '<pre><code class="language-扣减成功">玩家A 扣减 100 蝌蚪\n'
+        "Owner 接收 100 蝌蚪</code></pre>"
+    )
+    assert "language-扣减成功" in notice
+    assert account_bot_runtime._parse_transfer_notice(notice) == {
+        "payer_name": "玩家A",
+        "receiver_name": "Owner",
+        "amount": 100,
+    }
+
+
 def test_format_user_name_uses_public_name_without_username() -> None:
     assert (
         account_bot_runtime._format_user_name(  # noqa: SLF001
@@ -12382,6 +12406,73 @@ async def test_transfer_test_bot_accepts_plus_amount_from_account_user(monkeypat
         "abot-token",
         -100123,
         "转账成功\nPayoutUser 射出 123\nWinner 接收 123",
+    )
+    assert send.await_args_list[0].kwargs["reply_to_message_id"] == 50
+
+
+@pytest.mark.asyncio
+async def test_transfer_test_bot_accepts_minus_amount_as_debit_notice(monkeypatch) -> None:
+    class _DB:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def commit(self):
+            return None
+
+        async def get(self, model, key):  # noqa: ANN001
+            if model is account_bot_runtime.Account and key == 1:
+                return SimpleNamespace(tg_user_id=999)
+            return None
+
+    send = AsyncMock(side_effect=[{"from": {"id": 456}, "message_id": 55}, {}])
+    monkeypatch.setattr(account_bot_runtime, "AsyncSessionLocal", lambda: _DB())
+    monkeypatch.setattr(account_bot_service, "send_message", send)
+    monkeypatch.setattr(account_bot_service, "find_bot_user", AsyncMock())
+    monkeypatch.setattr(
+        account_bot_service,
+        "get_transfer_notice_config",
+        AsyncMock(
+            return_value={
+                "enabled": True,
+                "chat_ids": [-100123],
+                "trusted_bot_id": 456,
+                "trigger_texts": ["转账成功", "扣减成功"],
+                "receiver_text": None,
+                "transfer_notice_template": "转账成功\n{payer_name} 射出 {amount}\n{receiver_name} 接收 {amount}",
+                "debit_notice_template": '<pre><code class="language-扣减成功">{payer_name} 扣减 {amount} 蝌蚪\n{receiver_name} 接收 {amount} 蝌蚪</code></pre>',
+            }
+        ),
+    )
+    monkeypatch.setattr(account_bot_service, "get_transfer_bot_token", AsyncMock(return_value="abot-token"))
+
+    await account_bot_runtime._handle_transfer_test_update(
+        1,
+        "bbot-token",
+        {
+            "update_id": 5,
+            "message": {
+                "message_id": 50,
+                "text": "-123",
+                "from": {"id": 999, "first_name": "PayoutUser"},
+                "chat": {"id": -100123, "type": "supergroup"},
+                "reply_to_message": {
+                    "message_id": 49,
+                    "from": {"id": 111, "first_name": "Winner"},
+                    "text": "6",
+                },
+            },
+        },
+    )
+
+    assert account_bot_service.get_transfer_bot_token.await_count == 1
+    assert send.await_args_list[0].args[:3] == (
+        "abot-token",
+        -100123,
+        '<pre><code class="language-扣减成功">Winner 扣减 123 蝌蚪\n'
+        "PayoutUser 接收 123 蝌蚪</code></pre>",
     )
     assert send.await_args_list[0].kwargs["reply_to_message_id"] == 50
 
