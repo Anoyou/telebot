@@ -50,6 +50,17 @@ def _with_interaction_runtime_state(aid: int, data: dict) -> dict:
     }
 
 
+async def _with_polling_dlq_count(aid: int, data: dict) -> dict:
+    try:
+        count = await account_bot_runtime._count_polling_dead_letters(aid)  # noqa: SLF001
+    except Exception:  # noqa: BLE001
+        count = 0
+    return {
+        **data,
+        "polling_dlq_count": count,
+    }
+
+
 def _enabled_keyword_rules_require_interaction_bot(data: dict[str, Any]) -> bool:
     if not data.get("enabled"):
         return False
@@ -231,6 +242,7 @@ async def get_account_bot_interaction(
 
     data = await interaction_bot_service.get_interaction_bot_config(db, aid)
     data = _with_interaction_runtime_state(aid, data)
+    data = await _with_polling_dlq_count(aid, data)
     data["interaction_debug"] = await account_bot_runtime.get_interaction_debug_snapshot(aid)
     return AccountBotInteractionConfig(**data)
 
@@ -271,7 +283,96 @@ async def update_account_bot_interaction(
     await feature_service._notify_reload(aid)  # noqa: SLF001 - 交互规则可能同步启用插件，需要 worker 即时加载。
     await interaction_bot_runtime.restart_interaction_bot(aid)
     data = _with_interaction_runtime_state(aid, data)
+    data = await _with_polling_dlq_count(aid, data)
     return AccountBotInteractionConfig(**data)
+
+
+def _polling_dlq_id_or_400(loop: str, update_id: int) -> str:
+    try:
+        return account_bot_runtime._polling_dlq_id(loop, update_id)  # noqa: SLF001
+    except ValueError as exc:
+        raise HTTPException(
+            400,
+            detail={
+                "code": "INVALID_POLLING_DLQ_LOOP",
+                "message": "未知 polling DLQ 类型",
+            },
+        ) from exc
+
+
+@router.get("/{aid}/bot/polling-dlq", response_model=dict)
+async def list_account_bot_polling_dlq(
+    aid: int,
+    db: DBSession,
+    _user: CurrentUser,
+    limit: int = 100,
+) -> dict[str, Any]:
+    await account_bot_service.ensure_account(db, aid)
+    items = await account_bot_runtime._list_polling_dead_letters(aid, limit=limit)  # noqa: SLF001
+    return {
+        "ok": True,
+        "count": await account_bot_runtime._count_polling_dead_letters(aid),  # noqa: SLF001
+        "items": items,
+    }
+
+
+@router.post("/{aid}/bot/polling-dlq/{loop}/{update_id}/replay", response_model=dict)
+async def replay_account_bot_polling_dlq(
+    aid: int,
+    loop: str,
+    update_id: int,
+    db: DBSession,
+    user: CurrentUser,
+) -> dict[str, Any]:
+    await account_bot_service.ensure_account(db, aid)
+    dlq_id = _polling_dlq_id_or_400(loop, update_id)
+    result = await account_bot_runtime._replay_polling_dead_letter(aid, dlq_id)  # noqa: SLF001
+    if not result.get("ok") and str(result.get("error") or "") == "DLQ 条目不存在":
+        raise HTTPException(
+            404,
+            detail={
+                "code": "POLLING_DLQ_NOT_FOUND",
+                "message": "DLQ 条目不存在",
+            },
+        )
+    await audit.write(
+        db,
+        user.id,
+        "account_bot.polling_dlq_replay",
+        target=f"account:{aid}/bot/polling_dlq:{dlq_id}",
+        detail={"ok": bool(result.get("ok")), "error": result.get("error")},
+    )
+    await db.commit()
+    return {"dlq_id": dlq_id, **result}
+
+
+@router.delete("/{aid}/bot/polling-dlq/{loop}/{update_id}", response_model=dict)
+async def discard_account_bot_polling_dlq(
+    aid: int,
+    loop: str,
+    update_id: int,
+    db: DBSession,
+    user: CurrentUser,
+) -> dict[str, Any]:
+    await account_bot_service.ensure_account(db, aid)
+    dlq_id = _polling_dlq_id_or_400(loop, update_id)
+    deleted = await account_bot_runtime._discard_polling_dead_letter(aid, dlq_id)  # noqa: SLF001
+    if not deleted:
+        raise HTTPException(
+            404,
+            detail={
+                "code": "POLLING_DLQ_NOT_FOUND",
+                "message": "DLQ 条目不存在",
+            },
+        )
+    await audit.write(
+        db,
+        user.id,
+        "account_bot.polling_dlq_discard",
+        target=f"account:{aid}/bot/polling_dlq:{dlq_id}",
+    )
+    await db.commit()
+    return {"ok": True, "dlq_id": dlq_id, "deleted": True}
 
 
 @router.get("/{aid}/bot/transfer-notice", response_model=AccountBotTransferNoticeConfig)

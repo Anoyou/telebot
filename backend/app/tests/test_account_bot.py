@@ -34,6 +34,8 @@ from app.worker.plugins.textutil import html_escape
 class _MemoryRedis:
     def __init__(self) -> None:
         self.data: dict[str, str] = {}
+        self.hashes: dict[str, dict[str, str]] = {}
+        self.zsets: dict[str, dict[str, float]] = {}
         self.set_calls: list[tuple[str, str, dict[str, object]]] = []
 
     async def get(self, key: str):
@@ -61,6 +63,56 @@ class _MemoryRedis:
     async def rpush(self, key: str, value: str | bytes):
         self.data.setdefault(key, "")
         return 1
+
+    async def hset(self, key: str, field: str, value: str):
+        self.hashes.setdefault(key, {})[field] = value
+        return 1
+
+    async def hget(self, key: str, field: str):
+        return self.hashes.get(key, {}).get(field)
+
+    async def hdel(self, key: str, *fields: str):
+        bucket = self.hashes.setdefault(key, {})
+        deleted = 0
+        for field in fields:
+            deleted += 1 if bucket.pop(field, None) is not None else 0
+        return deleted
+
+    async def zadd(self, key: str, mapping: dict[str, float]):
+        bucket = self.zsets.setdefault(key, {})
+        added = 0
+        for member, score in mapping.items():
+            added += 0 if member in bucket else 1
+            bucket[member] = float(score)
+        return added
+
+    async def zcard(self, key: str):
+        return len(self.zsets.get(key, {}))
+
+    async def zrange(self, key: str, start: int, end: int):
+        members = [
+            member
+            for member, _score in sorted(self.zsets.get(key, {}).items(), key=lambda item: (item[1], item[0]))
+        ]
+        return members[start:end + 1 if end >= 0 else None]
+
+    async def zrevrange(self, key: str, start: int, end: int):
+        members = [
+            member
+            for member, _score in sorted(
+                self.zsets.get(key, {}).items(),
+                key=lambda item: (item[1], item[0]),
+                reverse=True,
+            )
+        ]
+        return members[start:end + 1 if end >= 0 else None]
+
+    async def zrem(self, key: str, *members: str):
+        bucket = self.zsets.setdefault(key, {})
+        deleted = 0
+        for member in members:
+            deleted += 1 if bucket.pop(member, None) is not None else 0
+        return deleted
 
 
 @pytest.fixture(autouse=True)
@@ -4586,6 +4638,7 @@ async def test_interaction_polling_retries_failed_update_then_advances_offset_wi
     state = AsyncMock()
     handle = AsyncMock(side_effect=RuntimeError("boom"))
     runtime_log = AsyncMock()
+    record_dlq = AsyncMock()
 
     monkeypatch.setattr(account_bot_runtime, "AsyncSessionLocal", lambda: _DB())
     monkeypatch.setattr(
@@ -4598,6 +4651,7 @@ async def test_interaction_polling_retries_failed_update_then_advances_offset_wi
     monkeypatch.setattr(account_bot_runtime, "_handle_interaction_update", handle)
     monkeypatch.setattr(account_bot_runtime, "_set_interaction_runtime_state", state)
     monkeypatch.setattr(account_bot_runtime, "_write_interaction_runtime_log", runtime_log)
+    monkeypatch.setattr(account_bot_runtime, "_record_polling_dead_letter", record_dlq)
 
     async def _sleep(_seconds: float):
         return None
@@ -4613,6 +4667,287 @@ async def test_interaction_polling_retries_failed_update_then_advances_offset_wi
         for call in state.await_args_list
     )
     runtime_log.assert_awaited_once()
+    record_dlq.assert_awaited_once()
+    assert record_dlq.await_args.kwargs["loop"] == "interaction"
+    assert record_dlq.await_args.kwargs["token_role"] == "interaction"
+    assert record_dlq.await_args.kwargs["attempts"] == 3
+    assert record_dlq.await_args.kwargs["update"]["update_id"] == 42
+    assert record_dlq.await_args.kwargs["update"]["message"]["text"] == "hello"
+
+
+@pytest.mark.asyncio
+async def test_polling_dead_letter_recorded_and_capped(monkeypatch) -> None:
+    redis = _MemoryRedis()
+    monkeypatch.setattr(account_bot_runtime, "get_redis", lambda: redis)
+    monkeypatch.setattr(account_bot_runtime, "_POLLING_DLQ_MAX", 3)
+
+    for update_id in range(1, 6):
+        await account_bot_runtime._record_polling_dead_letter(
+            aid=1,
+            loop="interaction",
+            token_role="interaction",
+            update={"update_id": update_id, "message": {"text": f"m{update_id}"}},
+            error=f"boom {update_id}",
+            attempts=3,
+        )
+
+    items = await account_bot_runtime._list_polling_dead_letters(1, limit=10)
+
+    assert [item["update_id"] for item in items] == [5, 4, 3]
+    assert await account_bot_runtime._count_polling_dead_letters(1) == 3
+    assert await account_bot_runtime._get_polling_dead_letter(1, "interaction:1") is None
+    assert await account_bot_runtime._get_polling_dead_letter(1, "interaction:2") is None
+
+
+@pytest.mark.asyncio
+async def test_polling_dead_letter_replay_success_removes_entry(monkeypatch) -> None:
+    redis = _MemoryRedis()
+    monkeypatch.setattr(account_bot_runtime, "get_redis", lambda: redis)
+    handler = AsyncMock()
+    monkeypatch.setattr(
+        account_bot_runtime,
+        "_load_interaction_runtime_config",
+        AsyncMock(return_value=("bbot-token", {"enabled": True})),
+    )
+    monkeypatch.setattr(account_bot_runtime, "_handle_interaction_update", handler)
+    await account_bot_runtime._record_polling_dead_letter(
+        aid=1,
+        loop="interaction",
+        token_role="interaction",
+        update={"update_id": 42, "message": {"text": "hello"}},
+        error="boom",
+        attempts=3,
+    )
+
+    result = await account_bot_runtime._replay_polling_dead_letter(1, "interaction:42")
+
+    assert result == {"ok": True, "deleted": True, "error": None}
+    handler.assert_awaited_once_with(1, "bbot-token", {"update_id": 42, "message": {"text": "hello"}})
+    assert await account_bot_runtime._get_polling_dead_letter(1, "interaction:42") is None
+    assert await account_bot_runtime._count_polling_dead_letters(1) == 0
+
+
+@pytest.mark.asyncio
+async def test_polling_dead_letter_replay_failure_keeps_entry(monkeypatch) -> None:
+    redis = _MemoryRedis()
+    monkeypatch.setattr(account_bot_runtime, "get_redis", lambda: redis)
+    monkeypatch.setattr(
+        account_bot_runtime,
+        "_load_interaction_runtime_config",
+        AsyncMock(return_value=("bbot-token", {"enabled": True})),
+    )
+    monkeypatch.setattr(account_bot_runtime, "_handle_interaction_update", AsyncMock(side_effect=RuntimeError("boom again")))
+    await account_bot_runtime._record_polling_dead_letter(
+        aid=1,
+        loop="interaction",
+        token_role="interaction",
+        update={"update_id": 42},
+        error="boom",
+        attempts=3,
+    )
+
+    result = await account_bot_runtime._replay_polling_dead_letter(1, "interaction:42")
+    item = await account_bot_runtime._get_polling_dead_letter(1, "interaction:42")
+
+    assert result["ok"] is False
+    assert result["deleted"] is False
+    assert "boom again" in result["error"]
+    assert item is not None
+    assert "boom again" in item["error"]
+    assert item["replay_attempts"] == 1
+    assert item["last_replayed_at"] is not None
+    assert item["failed_at"] == redis.zsets[account_bot_runtime._polling_dlq_idx_key(1)]["interaction:42"]
+
+
+@pytest.mark.asyncio
+async def test_dlq_write_failure_does_not_break_offset_advance(monkeypatch) -> None:
+    class _DB:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+    call_count = 0
+
+    async def _call_bot_api(_token: str, _method: str, _payload: dict[str, object]):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return {"result": [{"update_id": 42, "message": {"message_id": 10, "text": "hello", "chat": {"id": -100}}}]}
+        raise asyncio.CancelledError()
+
+    state = AsyncMock()
+    monkeypatch.setattr(account_bot_runtime, "AsyncSessionLocal", lambda: _DB())
+    monkeypatch.setattr(
+        account_bot_runtime,
+        "_load_interaction_runtime_config",
+        AsyncMock(return_value=("bbot-token", {"enabled": True, "interaction_last_update_id": None})),
+    )
+    monkeypatch.setattr(account_bot_runtime, "_event_framework_flags", AsyncMock(return_value={"inline_updates_enabled": False}))
+    monkeypatch.setattr(account_bot_service, "call_bot_api", _call_bot_api)
+    monkeypatch.setattr(account_bot_runtime, "_handle_interaction_update", AsyncMock(side_effect=RuntimeError("boom")))
+    monkeypatch.setattr(account_bot_runtime, "_set_interaction_runtime_state", state)
+    monkeypatch.setattr(account_bot_runtime, "_write_interaction_runtime_log", AsyncMock())
+    monkeypatch.setattr(account_bot_runtime, "_record_polling_dead_letter", AsyncMock(side_effect=RuntimeError("redis down")))
+
+    async def _sleep(_seconds: float):
+        return None
+
+    monkeypatch.setattr(account_bot_runtime.asyncio, "sleep", _sleep)
+
+    with pytest.raises(asyncio.CancelledError):
+        await account_bot_runtime._interaction_polling_loop(1)
+
+    assert any(
+        call.kwargs.get("last_update_id") == 42 and "boom" in str(call.kwargs.get("error"))
+        for call in state.await_args_list
+    )
+
+
+@pytest.mark.asyncio
+async def test_management_polling_failure_records_dlq_with_management_loop(monkeypatch) -> None:
+    class _Result:
+        def __init__(self, row):
+            self.row = row
+
+        def scalar_one_or_none(self):
+            return self.row
+
+    class _DB:
+        def __init__(self, row):
+            self.row = row
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def execute(self, _stmt):
+            return _Result(self.row)
+
+        async def commit(self):
+            return None
+
+    row = AccountBot(account_id=1, enabled=True, bot_token_enc="enc")
+    call_count = 0
+
+    async def _call_bot_api(_token: str, _method: str, _payload: dict[str, object]):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return {"result": [{"update_id": 7, "message": {"message_id": 1, "text": "/x", "chat": {"id": 1}}}]}
+        raise asyncio.CancelledError()
+
+    record_dlq = AsyncMock()
+    monkeypatch.setattr(account_bot_runtime, "AsyncSessionLocal", lambda: _DB(row))
+    monkeypatch.setattr(account_bot_service, "decrypt_bot_token", lambda _row: "management-token")
+    monkeypatch.setattr(account_bot_runtime, "_event_framework_flags", AsyncMock(return_value={"inline_updates_enabled": False}))
+    monkeypatch.setattr(account_bot_service, "call_bot_api", _call_bot_api)
+    monkeypatch.setattr(account_bot_runtime, "_handle_update", AsyncMock(side_effect=RuntimeError("boom")))
+    monkeypatch.setattr(account_bot_runtime, "_write_interaction_runtime_log", AsyncMock())
+    monkeypatch.setattr(account_bot_runtime, "_record_polling_dead_letter", record_dlq)
+
+    async def _sleep(_seconds: float):
+        return None
+
+    monkeypatch.setattr(account_bot_runtime.asyncio, "sleep", _sleep)
+
+    with pytest.raises(asyncio.CancelledError):
+        await account_bot_runtime._polling_loop(1)
+
+    record_dlq.assert_awaited_once()
+    assert record_dlq.await_args.kwargs["loop"] == "management"
+    assert record_dlq.await_args.kwargs["token_role"] == "management"
+    assert record_dlq.await_args.kwargs["update"]["update_id"] == 7
+
+
+@pytest.mark.asyncio
+async def test_transfer_test_polling_failure_records_dlq_with_transfer_loop(monkeypatch) -> None:
+    class _DB:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+    call_count = 0
+
+    async def _call_bot_api(_token: str, _method: str, _payload: dict[str, object]):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return {"result": [{"update_id": 8, "message": {"message_id": 1, "text": "+1", "chat": {"id": -100}}}]}
+        raise asyncio.CancelledError()
+
+    record_dlq = AsyncMock()
+    monkeypatch.setattr(account_bot_runtime, "AsyncSessionLocal", lambda: _DB())
+    monkeypatch.setattr(
+        account_bot_runtime,
+        "_load_transfer_test_runtime_config",
+        AsyncMock(return_value=("transfer-token", {"enabled": True, "transfer_last_update_id": None})),
+    )
+    monkeypatch.setattr(account_bot_service, "call_bot_api", _call_bot_api)
+    monkeypatch.setattr(account_bot_runtime, "_handle_transfer_test_update", AsyncMock(side_effect=RuntimeError("boom")))
+    monkeypatch.setattr(account_bot_runtime, "_set_transfer_test_runtime_state", AsyncMock())
+    monkeypatch.setattr(account_bot_runtime, "_write_interaction_runtime_log", AsyncMock())
+    monkeypatch.setattr(account_bot_runtime, "_record_polling_dead_letter", record_dlq)
+
+    async def _sleep(_seconds: float):
+        return None
+
+    monkeypatch.setattr(account_bot_runtime.asyncio, "sleep", _sleep)
+
+    with pytest.raises(asyncio.CancelledError):
+        await account_bot_runtime._transfer_test_polling_loop(1)
+
+    record_dlq.assert_awaited_once()
+    assert record_dlq.await_args.kwargs["loop"] == "transfer_test"
+    assert record_dlq.await_args.kwargs["token_role"] == "transfer_test"
+    assert record_dlq.await_args.kwargs["update"]["update_id"] == 8
+
+
+@pytest.mark.asyncio
+async def test_polling_dead_letter_ids_do_not_collide_across_loops(monkeypatch) -> None:
+    redis = _MemoryRedis()
+    monkeypatch.setattr(account_bot_runtime, "get_redis", lambda: redis)
+    await account_bot_runtime._record_polling_dead_letter(
+        aid=1,
+        loop="interaction",
+        token_role="interaction",
+        update={"update_id": 42, "message": {"text": "interaction"}},
+        error="boom",
+        attempts=3,
+    )
+    await account_bot_runtime._record_polling_dead_letter(
+        aid=1,
+        loop="transfer_test",
+        token_role="transfer_test",
+        update={"update_id": 42, "message": {"text": "transfer"}},
+        error="boom",
+        attempts=3,
+    )
+
+    assert {item["dlq_id"] for item in await account_bot_runtime._list_polling_dead_letters(1)} == {
+        "interaction:42",
+        "transfer_test:42",
+    }
+
+    assert await account_bot_runtime._discard_polling_dead_letter(1, "interaction:42") is True
+    assert await account_bot_runtime._get_polling_dead_letter(1, "interaction:42") is None
+    assert await account_bot_runtime._get_polling_dead_letter(1, "transfer_test:42") is not None
+
+    monkeypatch.setattr(
+        account_bot_runtime,
+        "_load_transfer_test_runtime_config",
+        AsyncMock(return_value=("transfer-token", {"enabled": True})),
+    )
+    monkeypatch.setattr(account_bot_runtime, "_handle_transfer_test_update", AsyncMock())
+    result = await account_bot_runtime._replay_polling_dead_letter(1, "transfer_test:42")
+
+    assert result["ok"] is True
+    assert await account_bot_runtime._count_polling_dead_letters(1) == 0
 
 
 @pytest.mark.asyncio

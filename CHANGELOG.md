@@ -20,6 +20,16 @@
 
 ## [Unreleased]
 
+## [0.49.25] — 2026-07-07 · patch（补丁版本） · 交互轮询死信补丁
+
+### Added
+- 新增交互 / 管理 / 转账测试三条 Bot polling loop 共用的失败 update 死信队列（DLQ）：单条 update 重试耗尽后仍保持现有 offset 推进行为，但会把原始 update、失败原因、loop 来源与重试次数写入 Redis HASH + ZSET，避免 `payment_confirmed` 等关键事件无痕丢失。
+- 新增 `GET /api/accounts/{aid}/bot/polling-dlq`、`POST /api/accounts/{aid}/bot/polling-dlq/{loop}/{update_id}/replay`、`DELETE /api/accounts/{aid}/bot/polling-dlq/{loop}/{update_id}` 死信管理端点，支持列出、重放与丢弃失败 update；重放成功会删除死信，重放失败会保留并更新错误与重放次数。
+- 交互 Bot 配置响应新增 `polling_dlq_count`，用于提示当前账号是否存在待处理 polling 死信。
+
+### Fixed
+- 修复 Bot polling 中某条永久失败 update 在重试耗尽后仅推进 Telegram offset、没有持久化原文，导致后续无法追查和补偿的问题；DLQ 写入失败会被隔离记录，不会反向阻塞主链路 offset 推进。
+
 ## [0.49.24] — 2026-07-07 · patch（补丁版本） · 交互链路缺陷修复补丁
 
 ### Fixed

@@ -15,11 +15,11 @@ from typing import Any
 from sqlalchemy import desc, select
 
 from ..account_bot_defaults import (
+    DEFAULT_DEBIT_NOTICE_TEMPLATE,
     DEFAULT_INTERACTION_QUERY_EMPTY_MESSAGE,
     DEFAULT_INTERACTION_QUERY_ITEM_TEMPLATE,
     DEFAULT_INTERACTION_QUERY_RESPONSE_TEMPLATE,
     DEFAULT_INTERACTION_RESPONSE_TEMPLATE,
-    DEFAULT_DEBIT_NOTICE_TEMPLATE,
     DEFAULT_TRANSFER_NOTICE_TEMPLATE,
 )
 from ..db.base import AsyncSessionLocal
@@ -120,6 +120,8 @@ _INTERACTION_DEBUG_WARNINGS_PREFIX = "account_bot:interaction_debug_warnings:"
 _INTERACTION_DEBUG_TTL_SECONDS = 86400
 _INTERACTION_DEBUG_WARNING_LIMIT = 20
 _POLLING_UPDATE_RETRY_DELAYS_SECONDS = (1.0, 3.0)
+_POLLING_DLQ_MAX = 500
+_POLLING_DLQ_LOOPS = {"interaction", "management", "transfer_test"}
 _INTERACTION_UPDATE_CONCURRENCY = 8
 _INTERACTION_DEBUG_PAYLOAD_SAMPLE_MODULO = 5
 _INTERACTION_DEBUG_FULL_STAGES = {"plugin_error", "actions_guarded"}
@@ -1072,12 +1074,190 @@ async def _write_polling_update_failure_log(
     )
 
 
+def _polling_dlq_idx_key(aid: int) -> str:
+    return f"account_bot:polling_dlq:{aid}:idx"
+
+
+def _polling_dlq_items_key(aid: int) -> str:
+    return f"account_bot:polling_dlq:{aid}:items"
+
+
+def _polling_dlq_id(loop: str, update_id: int) -> str:
+    loop_name = str(loop or "").strip()
+    if loop_name not in _POLLING_DLQ_LOOPS:
+        raise ValueError(f"unknown polling dlq loop: {loop_name}")
+    return f"{loop_name}:{int(update_id)}"
+
+
+def _decode_redis_text(value: Any) -> str:
+    if isinstance(value, bytes):
+        return value.decode("utf-8")
+    return str(value)
+
+
+async def _get_polling_dead_letter(aid: int, dlq_id: str) -> dict[str, Any] | None:
+    raw = await get_redis().hget(_polling_dlq_items_key(aid), dlq_id)
+    if raw is None:
+        return None
+    try:
+        data = json.loads(_decode_redis_text(raw))
+    except Exception:  # noqa: BLE001
+        log.warning("polling dlq item decode failed aid=%s dlq_id=%s", aid, dlq_id, exc_info=True)
+        return None
+    return data if isinstance(data, dict) else None
+
+
+async def _trim_polling_dead_letters(redis: Any, aid: int) -> None:
+    idx_key = _polling_dlq_idx_key(aid)
+    items_key = _polling_dlq_items_key(aid)
+    total = int(await redis.zcard(idx_key))
+    overflow = total - _POLLING_DLQ_MAX
+    if overflow <= 0:
+        return
+    stale = await redis.zrange(idx_key, 0, overflow - 1)
+    stale_ids = [_decode_redis_text(item) for item in stale]
+    if not stale_ids:
+        return
+    await redis.zrem(idx_key, *stale_ids)
+    await redis.hdel(items_key, *stale_ids)
+
+
+async def _record_polling_dead_letter(
+    *,
+    aid: int,
+    loop: str,
+    token_role: str,
+    update: dict[str, Any],
+    error: str,
+    attempts: int,
+) -> dict[str, Any]:
+    redis = get_redis()
+    update_id = _int_or_none(update.get("update_id")) or 0
+    dlq_id = _polling_dlq_id(loop, update_id)
+    failed_at = time.time()
+    item = {
+        "dlq_id": dlq_id,
+        "aid": aid,
+        "loop": loop,
+        "update_id": update_id,
+        "update": update,
+        "error": error,
+        "failed_at": failed_at,
+        "attempts": attempts,
+        "token_role": token_role,
+        "replay_attempts": 0,
+        "last_replayed_at": None,
+    }
+    await redis.hset(_polling_dlq_items_key(aid), dlq_id, json.dumps(item, ensure_ascii=False, default=str))
+    await redis.zadd(_polling_dlq_idx_key(aid), {dlq_id: failed_at})
+    await _trim_polling_dead_letters(redis, aid)
+    return item
+
+
+async def _list_polling_dead_letters(aid: int, limit: int = 100) -> list[dict[str, Any]]:
+    limit = max(1, min(int(limit or 100), _POLLING_DLQ_MAX))
+    redis = get_redis()
+    ids = await redis.zrevrange(_polling_dlq_idx_key(aid), 0, limit - 1)
+    out: list[dict[str, Any]] = []
+    for raw_id in ids:
+        dlq_id = _decode_redis_text(raw_id)
+        item = await _get_polling_dead_letter(aid, dlq_id)
+        if item is not None:
+            out.append(item)
+    return out
+
+
+async def _count_polling_dead_letters(aid: int) -> int:
+    return int(await get_redis().zcard(_polling_dlq_idx_key(aid)))
+
+
+async def _discard_polling_dead_letter(aid: int, dlq_id: str) -> bool:
+    redis = get_redis()
+    removed_items = int(await redis.hdel(_polling_dlq_items_key(aid), dlq_id))
+    removed_idx = int(await redis.zrem(_polling_dlq_idx_key(aid), dlq_id))
+    return bool(removed_items or removed_idx)
+
+
+async def _mark_polling_dead_letter_replay_failure(
+    aid: int,
+    dlq_id: str,
+    error: str,
+    *,
+    count_attempt: bool = True,
+) -> dict[str, Any] | None:
+    item = await _get_polling_dead_letter(aid, dlq_id)
+    if item is None:
+        return None
+    item["error"] = error
+    if count_attempt:
+        item["replay_attempts"] = int(item.get("replay_attempts") or 0) + 1
+        item["last_replayed_at"] = time.time()
+    await get_redis().hset(_polling_dlq_items_key(aid), dlq_id, json.dumps(item, ensure_ascii=False, default=str))
+    return item
+
+
+async def _load_management_polling_token(aid: int) -> str | None:
+    async with AsyncSessionLocal() as db:
+        row = (
+            await db.execute(select(AccountBot).where(AccountBot.account_id == aid))
+        ).scalar_one_or_none()
+        if row is None or not row.enabled or not row.bot_token_enc:
+            return None
+        return account_bot_service.decrypt_bot_token(row)
+
+
+async def _replay_polling_dead_letter(aid: int, dlq_id: str) -> dict[str, Any]:
+    item = await _get_polling_dead_letter(aid, dlq_id)
+    if item is None:
+        return {"ok": False, "deleted": False, "error": "DLQ 条目不存在"}
+    loop = str(item.get("loop") or "").strip()
+    update = item.get("update")
+    if loop not in _POLLING_DLQ_LOOPS or not isinstance(update, dict):
+        error = "DLQ 条目格式无效"
+        await _mark_polling_dead_letter_replay_failure(aid, dlq_id, error)
+        return {"ok": False, "deleted": False, "error": error}
+
+    token: str | None
+    handler: Any
+    if loop == "management":
+        token = await _load_management_polling_token(aid)
+        handler = _handle_update
+    elif loop == "interaction":
+        token, cfg = await _load_interaction_runtime_config(aid)
+        token = token if cfg.get("enabled") else None
+        handler = _handle_interaction_update
+    else:
+        token, cfg = await _load_transfer_test_runtime_config(aid)
+        token = token if cfg.get("enabled") else None
+        handler = _handle_transfer_test_update
+
+    if not token:
+        error = f"{loop} bot token 缺失或功能未启用，无法重放"
+        await _mark_polling_dead_letter_replay_failure(aid, dlq_id, error, count_attempt=False)
+        return {"ok": False, "deleted": False, "error": error}
+
+    try:
+        await handler(aid, token, update)
+    except asyncio.CancelledError:
+        await _mark_polling_dead_letter_replay_failure(aid, dlq_id, "DLQ 重放已取消", count_attempt=False)
+        raise
+    except Exception as exc:  # noqa: BLE001
+        error = account_bot_service.sanitize_bot_error(exc, token=token)
+        await _mark_polling_dead_letter_replay_failure(aid, dlq_id, error)
+        return {"ok": False, "deleted": False, "error": error}
+
+    await _discard_polling_dead_letter(aid, dlq_id)
+    return {"ok": True, "deleted": True, "error": None}
+
+
 async def _handle_polling_update_with_retries(
     *,
     aid: int,
     token: str,
     update: dict[str, Any],
     loop_name: str,
+    loop: str,
+    token_role: str,
     handler: Any,
 ) -> str | None:
     for attempt_index in range(len(_POLLING_UPDATE_RETRY_DELAYS_SECONDS) + 1):
@@ -1111,6 +1291,23 @@ async def _handle_polling_update_with_retries(
                 loop_name=loop_name,
                 error=clean,
             )
+            try:
+                await _record_polling_dead_letter(
+                    aid=aid,
+                    loop=loop,
+                    token_role=token_role,
+                    update=update,
+                    error=clean,
+                    attempts=len(_POLLING_UPDATE_RETRY_DELAYS_SECONDS) + 1,
+                )
+            except Exception:  # noqa: BLE001
+                log.warning(
+                    "%s update dlq record failed aid=%s update_id=%s",
+                    loop_name,
+                    aid,
+                    update_id,
+                    exc_info=True,
+                )
             return clean
 
 
@@ -1150,6 +1347,8 @@ async def _handle_interaction_polling_updates_batch(
                     token=token,
                     update=update,
                     loop_name="interaction bot",
+                    loop="interaction",
+                    token_role="interaction",
                     handler=handler,
                 )
                 if update_error is not None:
@@ -1216,6 +1415,8 @@ async def _polling_loop(aid: int) -> None:
                         token=token,
                         update=update,
                         loop_name="account bot",
+                        loop="management",
+                        token_role="management",
                         handler=_handle_update,
                     )
                     if update_error is not None:
@@ -1448,6 +1649,8 @@ async def _transfer_test_polling_loop(aid: int) -> None:
                         token=token,
                         update=update,
                         loop_name="transfer test bot",
+                        loop="transfer_test",
+                        token_role="transfer_test",
                         handler=_handle_transfer_test_update,
                     )
                     if update_error is not None:

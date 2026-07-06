@@ -8,13 +8,13 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from ..account_bot_defaults import (
+    DEFAULT_DEBIT_NOTICE_TEMPLATE,
     DEFAULT_INTERACTION_DISABLED_MESSAGE,
     DEFAULT_INTERACTION_QUERY_COMMANDS,
     DEFAULT_INTERACTION_QUERY_EMPTY_MESSAGE,
     DEFAULT_INTERACTION_QUERY_ITEM_TEMPLATE,
     DEFAULT_INTERACTION_QUERY_RESPONSE_TEMPLATE,
     DEFAULT_INTERACTION_RESPONSE_TEMPLATE,
-    DEFAULT_DEBIT_NOTICE_TEMPLATE,
     DEFAULT_TRANSFER_NOTICE_TEMPLATE,
 )
 from ..db.models.account_bot import ACCOUNT_BOT_ROLES
@@ -302,6 +302,7 @@ class AccountBotInteractionConfig(BaseModel):
     interaction_runtime_status: Literal["running", "stopped"] = "stopped"
     interaction_last_update_id: int | None = None
     interaction_last_error: str | None = None
+    polling_dlq_count: int = 0
     interaction_debug: AccountBotInteractionDebugSnapshot = Field(default_factory=AccountBotInteractionDebugSnapshot)
     trusted_bot_id: int | None = None
     trusted_bot_ids: list[int] = Field(default_factory=list, max_length=50)
