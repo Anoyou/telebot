@@ -1770,6 +1770,7 @@ function InteractionRuleEditor({
                   description="这里只显示该玩法入口额外声明的参数。"
                   fields={extraEntryConfigFields(selectedInteractionEntry)}
                   values={buildEntryConfigValues(selectedInteractionEntry, rule.moduleConfig)}
+                  accountId={aid}
                   commandPrefix="."
                   onChange={(key, value) => {
                     const properties = interactionSchemaProperties(selectedInteractionEntry);

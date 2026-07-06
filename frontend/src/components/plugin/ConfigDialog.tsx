@@ -11,6 +11,7 @@
  */
 import { useState, useEffect, useCallback, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
+import { Link } from "react-router-dom";
 import {
   ArrowDown,
   ArrowUp,
@@ -28,9 +29,11 @@ import {
 import { toast } from "sonner";
 import { TelegramHtmlPreview, TelegramHtmlPreviewThread } from "@/components/TelegramHtmlPreview";
 import { listLLMProviders } from "@/api/commands";
+import { listIgnoredPeers } from "@/api/ignored_peers";
 import { getSystemSettings } from "@/api/system";
-import type { LLMProviderOut } from "@/api/types";
+import type { IgnoredPeer, LLMProviderOut } from "@/api/types";
 import { getErrMsg } from "@/lib/api";
+import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -202,6 +205,7 @@ export function ConfigDialog({
               description="所有账号共享"
               fields={globalFields}
               values={globalVals}
+              accountId={accountId}
               commandPrefix={commandPrefix}
               llmProviders={llmProvidersQ.data}
               llmProvidersLoading={llmProvidersQ.isLoading}
@@ -214,6 +218,7 @@ export function ConfigDialog({
               description={accountName ? accountName + " 专属" : "按账号隔离"}
               fields={accountFields}
               values={accountVals}
+              accountId={accountId}
               commandPrefix={commandPrefix}
               llmProviders={llmProvidersQ.data}
               llmProvidersLoading={llmProvidersQ.isLoading}
@@ -240,6 +245,7 @@ interface ConfigScopeSectionProps {
   description: string;
   fields: FieldEntry[];
   values: Record<string, unknown>;
+  accountId?: number;
   commandPrefix: string;
   llmProviders?: LLMProviderOut[];
   llmProvidersLoading?: boolean;
@@ -254,6 +260,7 @@ export function ConfigScopeSection({
   description,
   fields,
   values,
+  accountId,
   commandPrefix,
   llmProviders,
   llmProvidersLoading = false,
@@ -285,6 +292,7 @@ export function ConfigScopeSection({
                     field={field}
                     value={values[key]}
                     values={values}
+                    accountId={accountId}
                     llmProviders={llmProviders}
                     llmProvidersLoading={llmProvidersLoading}
                     fieldActions={actionsForField(configActions, key)}
@@ -307,6 +315,7 @@ export function ConfigScopeSection({
               field={field}
               value={values[key]}
               values={values}
+              accountId={accountId}
               llmProviders={llmProviders}
               llmProvidersLoading={llmProvidersLoading}
               fieldActions={actionsForField(configActions, key)}
@@ -362,6 +371,7 @@ export function ConfigScopeSection({
                         field={field}
                         value={values[key]}
                         values={values}
+                        accountId={accountId}
                         llmProviders={llmProviders}
                         llmProvidersLoading={llmProvidersLoading}
                         fieldActions={actionsForField(configActions, key)}
@@ -401,6 +411,7 @@ function ConfigFieldWithActions({
   field,
   value,
   values,
+  accountId,
   llmProviders,
   llmProvidersLoading,
   fieldActions,
@@ -411,6 +422,7 @@ function ConfigFieldWithActions({
   field: ConfigField;
   value: unknown;
   values: Record<string, unknown>;
+  accountId?: number;
   llmProviders?: LLMProviderOut[];
   llmProvidersLoading?: boolean;
   fieldActions: ConfigAction[];
@@ -425,6 +437,7 @@ function ConfigFieldWithActions({
         field={field}
         value={value}
         values={values}
+        accountId={accountId}
         llmProviders={llmProviders}
         llmProvidersLoading={llmProvidersLoading}
         configActions={fieldActions}
@@ -538,6 +551,7 @@ interface FieldInputProps {
   field: ConfigField;
   value: unknown;
   values?: Record<string, unknown>;
+  accountId?: number;
   llmProviders?: LLMProviderOut[];
   llmProvidersLoading?: boolean;
   configActions?: ConfigAction[];
@@ -551,6 +565,7 @@ function FieldInput({
   field,
   value,
   values = EMPTY_CONFIG,
+  accountId,
   llmProviders,
   llmProvidersLoading = false,
   configActions = [],
@@ -643,6 +658,18 @@ function FieldInput({
         onConfigAction={onConfigAction}
         llmProviders={llmProviders}
         llmProvidersLoading={llmProvidersLoading}
+        onChange={onChange}
+      />
+    );
+  }
+
+  if (field.type === "array" && field["x-ui-widget"] === "allowed-peer-multi-select") {
+    return (
+      <AllowedPeerMultiSelectField
+        accountId={accountId}
+        label={label}
+        description={description}
+        value={value}
         onChange={onChange}
       />
     );
@@ -761,6 +788,7 @@ function FieldInput({
               prefix={fk}
               properties={properties}
               values={objectValue}
+              accountId={accountId}
               llmProviders={llmProviders}
               llmProvidersLoading={llmProvidersLoading}
               onChange={(key, nextValue) => onChange({ ...objectValue, [key]: nextValue })}
@@ -1088,6 +1116,7 @@ function ConfigObjectEditor({
   prefix,
   properties,
   values,
+  accountId,
   llmProviders,
   llmProvidersLoading = false,
   onChange,
@@ -1095,6 +1124,7 @@ function ConfigObjectEditor({
   prefix: string;
   properties: Record<string, ConfigField>;
   values: Record<string, unknown>;
+  accountId?: number;
   llmProviders?: LLMProviderOut[];
   llmProvidersLoading?: boolean;
   onChange: (key: string, value: unknown) => void;
@@ -1116,11 +1146,174 @@ function ConfigObjectEditor({
           field={{ ...field, key }}
           value={values[key]}
           values={values}
+          accountId={accountId}
           llmProviders={llmProviders}
           llmProvidersLoading={llmProvidersLoading}
           onChange={(value) => onChange(key, value)}
         />
       ))}
+    </div>
+  );
+}
+
+const PEER_KIND_LABEL: Record<string, string> = {
+  private: "私聊",
+  group: "普通群",
+  supergroup: "超级群",
+  channel: "频道",
+};
+
+function peerKindLabel(kind: string): string {
+  return PEER_KIND_LABEL[kind] || kind || "会话";
+}
+
+function allowedPeerDisplayName(peer: IgnoredPeer): string {
+  return peer.peer_label?.trim() || `${peerKindLabel(String(peer.peer_kind))} ${peer.peer_id}`;
+}
+
+function normalizeAllowedPeerIds(value: unknown): number[] {
+  const rawItems = Array.isArray(value)
+    ? value
+    : String(value ?? "")
+      .split(/[\n,，\s]+/)
+      .filter(Boolean);
+  const seen = new Set<number>();
+  const ids: number[] = [];
+  for (const item of rawItems) {
+    const parsed = Number(item);
+    if (!Number.isFinite(parsed)) continue;
+    const id = Math.trunc(parsed);
+    if (seen.has(id)) continue;
+    seen.add(id);
+    ids.push(id);
+  }
+  return ids;
+}
+
+function AllowedPeerMultiSelectField({
+  accountId,
+  label,
+  description,
+  value,
+  onChange,
+}: {
+  accountId?: number;
+  label: string;
+  description?: string;
+  value: unknown;
+  onChange: (v: unknown) => void;
+}) {
+  const selectedIds = normalizeAllowedPeerIds(value);
+  const selected = new Set(selectedIds.map(String));
+  const peersQ = useQuery({
+    queryKey: ["ignored-peers", accountId],
+    queryFn: () => listIgnoredPeers(Number(accountId)),
+    enabled: Number.isFinite(Number(accountId)) && Number(accountId) > 0,
+  });
+  const peers = peersQ.data ?? [];
+  const knownPeerIds = new Set(peers.map((peer) => String(peer.peer_id)));
+  const unknownSelected = selectedIds.filter((id) => !knownPeerIds.has(String(id)));
+
+  const updateIds = (ids: number[]) => onChange(ids);
+  const removeSelectedId = (id: number) => {
+    updateIds(selectedIds.filter((item) => item !== id));
+  };
+  const togglePeer = (peer: IgnoredPeer) => {
+    const id = Number(peer.peer_id);
+    if (!Number.isFinite(id)) return;
+    if (selected.has(String(id))) {
+      updateIds(selectedIds.filter((item) => item !== id));
+    } else {
+      updateIds([...selectedIds, id]);
+    }
+  };
+
+  if (!accountId) {
+    return (
+      <div className="space-y-1.5">
+        <Label>{label}</Label>
+        {description && <p className="text-xs text-muted-foreground">{description}</p>}
+        <div className="rounded-md border border-dashed bg-background px-3 py-2 text-xs text-muted-foreground">
+          该字段需要在账号配置页中选择允许会话。
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-1.5">
+      <Label>{label}</Label>
+      {description && <p className="text-xs text-muted-foreground">{description}</p>}
+      {peersQ.isLoading || peersQ.isFetching ? (
+        <div className="flex h-10 items-center rounded-md border bg-background px-2 text-xs text-muted-foreground">
+          <Spinner className="mr-2 h-3.5 w-3.5 text-primary" />
+          正在读取已允许会话
+        </div>
+      ) : peers.length === 0 ? (
+        <div className="rounded-md border border-dashed bg-background px-3 py-2 text-xs leading-5 text-muted-foreground">
+          暂无已允许会话。没有找到想选择的会话时，请先去{" "}
+          <Link to={`/accounts/${accountId}?tab=ignored`} className="font-medium text-primary hover:underline">
+            账号详情页的允许会话
+          </Link>{" "}
+          添加。
+        </div>
+      ) : (
+        <>
+          <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
+            <span>从已允许会话选择</span>
+            <span>{selected.size} 个已选</span>
+          </div>
+          <div className="flex max-h-28 flex-wrap gap-1.5 overflow-y-auto rounded-md border bg-background p-1.5">
+            {peers.map((peer) => {
+              const id = String(peer.peer_id);
+              const active = selected.has(id);
+              return (
+                <button
+                  key={peer.id}
+                  type="button"
+                  className={cn(
+                    "min-w-0 max-w-full rounded-md border px-2 py-1.5 text-left text-xs transition-colors",
+                    active
+                      ? "border-primary bg-primary/10 text-primary"
+                      : "border-border bg-muted/30 text-muted-foreground [@media(hover:hover)]:hover:border-primary/40 [@media(hover:hover)]:hover:text-foreground",
+                  )}
+                  title={`${allowedPeerDisplayName(peer)} · ${id}`}
+                  onClick={() => togglePeer(peer)}
+                >
+                  <span className="block max-w-[210px] truncate font-medium">
+                    {allowedPeerDisplayName(peer)}
+                  </span>
+                  <span className="mt-0.5 block font-mono text-[11px] opacity-75">
+                    {peerKindLabel(String(peer.peer_kind))} · {id}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        </>
+      )}
+      {unknownSelected.length > 0 ? (
+        <div className="flex flex-wrap gap-1.5 rounded-md border border-amber-200 bg-amber-50 px-2 py-1.5 text-xs text-amber-800 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-200">
+          {unknownSelected.map((id) => (
+            <button
+              key={id}
+              type="button"
+              className="rounded border border-amber-300/70 px-1.5 py-0.5 font-mono hover:bg-amber-100 dark:border-amber-800 dark:hover:bg-amber-900/40"
+              title="从本插件配置移除这个未在允许会话中的 Chat ID"
+              onClick={() => removeSelectedId(id)}
+            >
+              {id} x
+            </button>
+          ))}
+        </div>
+      ) : null}
+      <div className="text-xs leading-5 text-muted-foreground">
+        没有找到想选择的会话？去{" "}
+        <Link to={`/accounts/${accountId}?tab=ignored`} className="font-medium text-primary hover:underline">
+          账号详情页的允许会话
+        </Link>{" "}
+        添加后再回来选择。留空表示不限制插件监听群聊。
+      </div>
     </div>
   );
 }

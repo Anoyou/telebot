@@ -539,6 +539,7 @@ export function GenericPluginConfigPage() {
                 description="所有账号共享，适合 Token、Provider、公共模板等跨账号配置。"
                 fields={globalFields}
                 values={globalVals}
+                accountId={aid}
                 commandPrefix={commandPrefix}
                 llmProviders={llmProvidersQ.data}
                 llmProvidersLoading={llmProvidersQ.isLoading || llmProvidersQ.isFetching}
@@ -557,6 +558,7 @@ export function GenericPluginConfigPage() {
                 description={`${accountLabel} 专属`}
                 fields={accountFields}
                 values={accountVals}
+                accountId={aid}
                 commandPrefix={commandPrefix}
                 llmProviders={llmProvidersQ.data}
                 llmProvidersLoading={llmProvidersQ.isLoading || llmProvidersQ.isFetching}

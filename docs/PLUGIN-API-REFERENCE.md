@@ -317,6 +317,7 @@ MANIFEST = Manifest(
 | `x-ui-widget: "multi-select"` | `array` + `items.enum` | 多选列表 |
 | `x-ui-widget: "list-select"` | `string` + `enum` | 列表式单选 |
 | `x-ui-widget: "config-list"` | `array` + `items.type="object"` | 多组配置行，支持添加、编辑、复制、删除、启停、排序 |
+| `x-ui-widget: "allowed-peer-multi-select"` | `array` + `items.type="integer"` | 从当前账号“允许会话”中选择群聊/频道，保存为 Chat ID 数组；适合插件群聊白名单 |
 | `x-ui-hidden: true` | 任意字段 | 不在 UI 渲染，但仍保留在表单值和保存链路中 |
 
 `config-list` 适合“多组配置，每组一行”的常见体验。支持这些元数据：
@@ -1731,6 +1732,7 @@ config_schema={
 - `x-ui-widget: "config-list"`：把 `array<object>` 渲染为多组配置列表，内置添加、编辑、复制、删除、启停和排序。
 - `x-ui-widget: "multi-select"`：把枚举数组渲染为多选列表。
 - `x-ui-widget: "list-select"`：把枚举字符串渲染为列表式单选。
+- `x-ui-widget: "allowed-peer-multi-select"`：把 `array<integer>` 渲染为当前账号“允许会话”选择器，保存 Chat ID 数组；留空语义由插件自行定义，常用于群聊白名单。
 - `x-ui-hidden: true`：隐藏兼容字段或内部字段，但仍保留保存链路。
 - `config_actions` / `x-config-actions`：把插件后端动作渲染为字段旁按钮，动作只能调用插件的 `on_config_action`，不能执行任意前端脚本。
 
