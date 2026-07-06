@@ -3861,11 +3861,7 @@ async def _dispatch_userbot_session_message(
     trace = await _start_userbot_session_trace(state, base_payload, event_label=event_label)
     invoked_count = 0
     failed_count = 0
-    consumes_userbot_observer_event = any(
-        session_channel != _SESSION_CHANNEL_USERBOT
-        for _session_key, _session, session_channel, _plugin_key, _entry_key, _callback_data in candidates
-    )
-    consumed = consumes_userbot_observer_event
+    consumed = False
     for session_key, session, session_channel, plugin_key, entry_key, callback_data in candidates:
         payload = _userbot_session_event_payload(
             base_payload,
@@ -3923,7 +3919,7 @@ async def _dispatch_userbot_session_message(
                 entry_key=entry_key,
                 action_count=len(actions),
             )
-            if actions:
+            if session_channel == _SESSION_CHANNEL_USERBOT or actions:
                 consumed = True
             action_failed = await _apply_userbot_event_bus_actions(
                 state,
@@ -3947,6 +3943,7 @@ async def _dispatch_userbot_session_message(
             )
         except Exception as exc:  # noqa: BLE001
             failed_count += 1
+            consumed = True
             await record_span(
                 trace,
                 "plugin_invoke",
