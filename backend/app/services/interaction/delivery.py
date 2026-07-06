@@ -30,6 +30,7 @@ INTERACTION_SESSION_CONTROL_ACTIONS = {"end_session", "close_session", "no_sessi
 INTERACTION_ACTION_SAVE_KEY_MAX_LENGTH = 200
 INTERACTION_ACTION_LIMIT = 10
 MESSAGE_ID_NAMESPACE_PREFIX = "tp:msgid"
+REPLY_TARGET_NAMESPACE_PREFIX = "tp:replytarget"
 
 WriteLog = Callable[..., Awaitable[None]]
 RunWorkerAction = Callable[..., Awaitable[tuple[bool, str | None, dict[str, Any]]]]
@@ -1515,6 +1516,68 @@ def namespaced_action_save_message_id_key(account_id: Any, raw: Any) -> str | No
     if not key or account is None:
         return None
     return f"{MESSAGE_ID_NAMESPACE_PREFIX}:{account}:{key}"
+
+
+def action_reply_target_key(account_id: Any, chat_id: Any, message_id: Any) -> str | None:
+    account = _int_or_none(account_id)
+    chat = _int_or_none(chat_id)
+    message = _int_or_none(message_id)
+    if account is None or chat is None or message is None or message <= 0:
+        return None
+    return f"{REPLY_TARGET_NAMESPACE_PREFIX}:{account}:{chat}:{message}"
+
+
+async def save_action_reply_target(
+    redis: Any,
+    *,
+    account_id: Any,
+    chat_id: Any,
+    message_id: Any,
+    reply_to_user_id: Any,
+    reply_to_display_name: str | None = None,
+    reply_to_username: str | None = None,
+    ttl: int = 7200,
+) -> None:
+    key = action_reply_target_key(account_id, chat_id, message_id)
+    user_id = _int_or_none(reply_to_user_id)
+    if not key or user_id is None:
+        return
+    data = {
+        "reply_to_user_id": user_id,
+        "reply_to_display_name": str(reply_to_display_name or "").strip() or None,
+        "reply_to_username": str(reply_to_username or "").strip() or None,
+        "saved_at": time.time(),
+    }
+    try:
+        await redis.set(key, json.dumps(data, ensure_ascii=False), ex=ttl)
+    except Exception:  # noqa: BLE001
+        log.debug("save plugin action reply target failed account=%s key=%s", account_id, key, exc_info=True)
+
+
+async def read_action_reply_target(
+    redis: Any,
+    *,
+    account_id: Any,
+    chat_id: Any,
+    message_id: Any,
+) -> dict[str, Any] | None:
+    key = action_reply_target_key(account_id, chat_id, message_id)
+    if not key:
+        return None
+    try:
+        raw = await redis.get(key)
+    except Exception:  # noqa: BLE001
+        log.debug("read plugin action reply target failed account=%s key=%s", account_id, key, exc_info=True)
+        return None
+    if raw is None:
+        return None
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8", errors="ignore")
+    try:
+        data = json.loads(str(raw))
+    except json.JSONDecodeError:
+        return None
+    return data if isinstance(data, dict) else None
 
 
 def _is_message_not_modified_error(exc: BaseException) -> bool:

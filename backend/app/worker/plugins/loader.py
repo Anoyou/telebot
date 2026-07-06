@@ -82,7 +82,11 @@ from ...services.interaction.contracts import (
     apply_action_send_via_options,
     deprecated_send_via_values,
 )
-from ...services.interaction.delivery import delivery_message_id, namespaced_action_save_message_id_key
+from ...services.interaction.delivery import (
+    delivery_message_id,
+    namespaced_action_save_message_id_key,
+    save_action_reply_target,
+)
 from ...services.rate_limit_service import get_effective
 from ...settings import settings as app_settings
 from ...util.sudo_permissions import sudo_chat_allowed
@@ -1654,6 +1658,12 @@ async def _apply_userbot_payout_action(state: _AccountState, event: Any, action:
             "reply_to_user_id": reply_to_user_id,
         }
         await _save_action_message_id(state, action, result)
+        await _save_userbot_reply_target(
+            state,
+            target_chat_id=target_chat_id,
+            result=result,
+            reply_to_user_id=reply_to_user_id,
+        )
         await record_action(
             action.get("context"),
             action,
@@ -1791,6 +1801,12 @@ async def _apply_userbot_send_message_action(
                     mapping=button_map,
                 )
                 await _save_action_message_id(state, action, result)
+                await _save_userbot_reply_target(
+                    state,
+                    target_chat_id=target_chat_id,
+                    result=result,
+                    reply_to_user_id=reply_to_user_id,
+                )
                 await record_action(
                     action.get("context"),
                     action,
@@ -2416,6 +2432,28 @@ async def _save_action_message_id(state: _AccountState, action: dict[str, Any], 
         await redis.set(save_key, str(msg_id), ex=7200)
     except Exception:  # noqa: BLE001
         log.debug("save plugin action message id failed account=%s key=%s", state.account_id, save_key, exc_info=True)
+
+
+async def _save_userbot_reply_target(
+    state: _AccountState,
+    *,
+    target_chat_id: int | None,
+    result: Any,
+    reply_to_user_id: int | None,
+) -> None:
+    if reply_to_user_id is None:
+        return
+    msg_id = delivery_message_id(result)
+    if msg_id is None:
+        return
+    redis = state.redis or get_redis()
+    await save_action_reply_target(
+        redis,
+        account_id=state.account_id,
+        chat_id=target_chat_id,
+        message_id=msg_id,
+        reply_to_user_id=reply_to_user_id,
+    )
 
 
 async def _read_action_message_id(state: _AccountState, raw_key: Any) -> int | None:

@@ -23,6 +23,7 @@ from app.services.interaction.delivery import (
     InteractionDeliveryExecutor,
     action_save_message_id_key,
     namespaced_action_save_message_id_key,
+    save_action_reply_target,
 )
 from app.worker import runtime as worker_runtime
 from app.worker.plugins import loader as plugin_loader
@@ -3424,6 +3425,41 @@ def test_account_bot_debit_notice_template_renders_parseable_notice() -> None:
     }
 
 
+@pytest.mark.asyncio
+async def test_transfer_notice_enriches_anonymous_debit_payer_from_reply_target(monkeypatch) -> None:
+    redis = _MemoryRedis()
+    monkeypatch.setattr(account_bot_runtime, "get_redis", lambda: redis)
+    await save_action_reply_target(
+        redis,
+        account_id=1,
+        chat_id=-100123,
+        message_id=700,
+        reply_to_user_id=5843467471,
+        reply_to_display_name="ㅤㅤ",
+    )
+    incoming = account_bot_runtime.Incoming(
+        account_id=1,
+        token="bbot-token",
+        update_id=1,
+        user_id=456,
+        chat_id=-100123,
+        message_id=701,
+        text="匿名用户 扣减 1000 蝌蚪\n管理员 接收 1000 蝌蚪",
+        display_name="扣款通知Bot",
+        reply_to_message_id=700,
+        reply_to_user_id=1682400007,
+        reply_to_display_name="管理员",
+    )
+
+    parsed = account_bot_runtime._parse_incoming_transfer_notice(incoming)
+    assert parsed == {"payer_name": "匿名用户", "receiver_name": "管理员", "amount": 1000}
+    enriched = await account_bot_runtime._enrich_transfer_notice_payer_from_reply_target(incoming, parsed)
+
+    assert enriched["payer_user_id"] == 5843467471
+    assert enriched["payer_name"] == "ㅤㅤ"
+    assert enriched["payer_identity_confidence"] == "reply_target"
+
+
 def test_format_user_name_uses_public_name_without_username() -> None:
     assert (
         account_bot_runtime._format_user_name(  # noqa: SLF001
@@ -6129,9 +6165,35 @@ def test_paid_pool_callback_allows_session_starter_as_controller(monkeypatch) ->
         callback_data="th:stand:999",
         display_name="Stranger",
     )
+    join_callback = account_bot_runtime.Incoming(
+        account_id=1,
+        token="bbot-token",
+        update_id=3,
+        user_id=333,
+        chat_id=-100123,
+        message_id=92,
+        text="",
+        callback_id="cb-join",
+        callback_data="th:join:0",
+        display_name="Stranger",
+    )
+    rules_callback = account_bot_runtime.Incoming(
+        account_id=1,
+        token="bbot-token",
+        update_id=4,
+        user_id=333,
+        chat_id=-100123,
+        message_id=93,
+        text="",
+        callback_id="cb-rules",
+        callback_data="th:rules:0",
+        display_name="Stranger",
+    )
 
     assert account_bot_runtime._interaction_participant_block_message(starter_callback, rule, session) is None
-    assert account_bot_runtime._interaction_participant_block_message(stranger_callback, rule, session) == "点点点！啥你都点！"
+    assert account_bot_runtime._interaction_participant_block_message(join_callback, rule, session) is None
+    assert account_bot_runtime._interaction_participant_block_message(rules_callback, rule, session) is None
+    assert account_bot_runtime._interaction_participant_block_message(stranger_callback, rule, session) == "请先加入本局，再操作牌桌按钮。"
 
 
 @pytest.mark.asyncio

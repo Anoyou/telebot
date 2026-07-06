@@ -33,7 +33,7 @@ from ..services.event_trace import (
     refresh_trace_settings,
     stop_trace_writer,
 )
-from ..services.interaction.delivery import namespaced_action_save_message_id_key
+from ..services.interaction.delivery import namespaced_action_save_message_id_key, save_action_reply_target
 from ..settings import settings as app_settings
 from .command import (
     CommandContext,
@@ -346,12 +346,20 @@ async def _run_interaction_userbot_action(
             chat_id=chat_id,
         )
         msg = await client.send_message(chat_id, text, reply_to=reply_to, parse_mode=_telethon_parse_mode(parse_mode))
-        return {
+        result = {
             "message_id": int(getattr(msg, "id", 0) or 0) or None,
             "chat_id": chat_id,
             "reply_to_message_id": reply_to,
             "reply_to_user_id": reply_to_user_id,
         }
+        await save_action_reply_target(
+            redis or get_redis(),
+            account_id=account_id,
+            chat_id=chat_id,
+            message_id=result.get("message_id"),
+            reply_to_user_id=reply_to_user_id,
+        )
+        return result
 
     if action_type == "edit_message":
         text = str(payload.get("text") or "").strip()
@@ -439,12 +447,20 @@ async def _run_interaction_userbot_action(
             chat_id=chat_id,
         )
         msg = await client.send_file(chat_id, file_obj, **kwargs)
-        return {
+        result = {
             "message_id": int(getattr(msg, "id", 0) or 0) or None,
             "chat_id": chat_id,
             "reply_to_message_id": reply_to,
             "reply_to_user_id": reply_to_user_id,
         }
+        await save_action_reply_target(
+            redis or get_redis(),
+            account_id=account_id,
+            chat_id=chat_id,
+            message_id=result.get("message_id"),
+            reply_to_user_id=reply_to_user_id,
+        )
+        return result
 
     raise ValueError(f"不支持的交互动作: {action_type}")
 

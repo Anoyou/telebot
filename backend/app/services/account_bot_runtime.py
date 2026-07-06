@@ -88,6 +88,7 @@ from .interaction.delivery import (
     InteractionDeliveryExecutor,
     action_save_message_id_key,
     delivery_message_id,
+    read_action_reply_target,
 )
 
 log = logging.getLogger(__name__)
@@ -2012,6 +2013,40 @@ def _parse_incoming_transfer_notice(incoming: Incoming) -> dict[str, Any] | None
     return None
 
 
+def _is_anonymous_transfer_payer_name(name: Any) -> bool:
+    return str(name or "").strip() in {"匿名用户", "未知用户", "用户"}
+
+
+async def _enrich_transfer_notice_payer_from_reply_target(
+    incoming: Incoming,
+    parsed: dict[str, Any],
+) -> dict[str, Any]:
+    if _int_or_none(parsed.get("payer_user_id")) is not None:
+        return parsed
+    if incoming.chat_id is None or incoming.reply_to_message_id is None:
+        return parsed
+    redis = get_redis()
+    target = await read_action_reply_target(
+        redis,
+        account_id=incoming.account_id,
+        chat_id=incoming.chat_id,
+        message_id=incoming.reply_to_message_id,
+    )
+    if not isinstance(target, dict):
+        return parsed
+    payer_user_id = _int_or_none(target.get("reply_to_user_id"))
+    if payer_user_id is None:
+        return parsed
+    enriched = dict(parsed)
+    enriched["payer_user_id"] = payer_user_id
+    display_name = str(target.get("reply_to_display_name") or "").strip()
+    username = str(target.get("reply_to_username") or "").strip()
+    if _is_anonymous_transfer_payer_name(enriched.get("payer_name")) and (display_name or username):
+        enriched["payer_name"] = display_name or username
+    enriched["payer_identity_confidence"] = "reply_target"
+    return enriched
+
+
 def _entity_languages(*entity_lists: Any) -> tuple[str, ...]:
     languages: list[str] = []
     for entity_list in entity_lists:
@@ -2938,6 +2973,20 @@ def _interaction_session_participant_ids(session: dict[str, Any] | None, *, poli
     return ids
 
 
+def _callback_action_name(callback_data: Any) -> str:
+    text = str(callback_data or "").strip()
+    if not text:
+        return ""
+    parts = text.split(":")
+    if len(parts) >= 2 and parts[0]:
+        return parts[1].strip().lower()
+    return parts[0].strip().lower()
+
+
+def _paid_pool_callback_allows_unjoined_user(incoming: Incoming) -> bool:
+    return _callback_action_name(incoming.callback_data) in {"join", "rules"}
+
+
 def _interaction_participant_block_message(
     incoming: Incoming,
     rule: dict[str, Any],
@@ -2948,6 +2997,8 @@ def _interaction_participant_block_message(
         return None
     if incoming.user_id is None:
         return "请用真实 Telegram 用户身份操作该玩法。"
+    if policy == "paid_pool" and incoming.callback_id and _paid_pool_callback_allows_unjoined_user(incoming):
+        return None
     participant_ids = _interaction_session_participant_ids(session, policy=policy)
     if not participant_ids:
         return None
@@ -2958,7 +3009,7 @@ def _interaction_participant_block_message(
         if started_by_user_id is not None and int(incoming.user_id) == started_by_user_id:
             return None
     if policy == "paid_pool":
-        return "点点点！啥你都点！"
+        return "请先加入本局，再操作牌桌按钮。"
     return "这不是你的玩法，请由付款或开局本人操作。"
 
 
@@ -6486,6 +6537,7 @@ async def _try_handle_transfer_notice(
             incoming.user_id,
         )
         return False
+    parsed = await _enrich_transfer_notice_payer_from_reply_target(incoming, parsed)
     rule = await _select_transfer_notice_rule(db, incoming, cfg, parsed)
     if rule is None:
         log.info(
