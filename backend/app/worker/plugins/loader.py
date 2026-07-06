@@ -889,8 +889,22 @@ async def _dispatch_userbot_direct_passthrough(
                 continue
         invoked = True
         started = time.monotonic()
+        # 直通也做调用级 ctx 隔离：复制一个独立 messages facade，避免并发直通事件
+        # 共享常驻 ctx.messages（其 actions 列表会交叉累积/泄漏）。成本仅一次对象构造。
+        base_messages = ctx.messages
+        if isinstance(base_messages, _LiveMessageOps):
+            call_messages = _LiveMessageOps(
+                base_messages._state,  # noqa: SLF001
+                plugin_key=base_messages._plugin_key,  # noqa: SLF001
+                entry_key=base_messages._entry_key,  # noqa: SLF001
+                trace=base_messages._trace,  # noqa: SLF001
+                default_send_via=list(base_messages._default_send_via),  # noqa: SLF001
+            )
+            call_ctx = replace(ctx, messages=call_messages)
+        else:
+            call_ctx = ctx
         try:
-            await handler(ctx, event)
+            await handler(call_ctx, event)
             await update_plugin_runtime_status(
                 account_id=state.account_id,
                 plugin_key=plugin_key,
@@ -3223,6 +3237,10 @@ class _AccountState:
         self.interaction_text_guard_rules: tuple[_InteractionTextGuardRule, ...] = ()
         self.interaction_bot_sender_ids: frozenset[int] = frozenset()
         self.userbot_session_chats: set[int] = set()
+        # 仅当全量刷新 _refresh_userbot_session_chat_cache 成功后置 True。
+        # 未就绪时不启用“空集合=无会话”短路，避免进程刚起 / reload 后 / Redis 抖动
+        # 导致历史会话不在集合里而产生全量假阴性（漏会话）。
+        self.userbot_session_chats_ready: bool = False
 
 
 # 进程级状态字典（一个 worker 进程通常只服务一个账号；用 dict 是为了灵活）
@@ -3264,28 +3282,33 @@ class _LiveMessageOps:
         )
         for action in normalized:
             action.setdefault("context", dict(context))
+        # actions 字段保留（对外 facade），但不再累积：进入前先清老残留，退出时再清本次。
+        self.actions.clear()
         self.actions.extend(normalized)
         redis = self._state.redis or get_redis()
         event = SimpleNamespace(chat_id=None)
-        failed = await _apply_userbot_event_bus_actions(
-            self._state,
-            self._trace,
-            event,
-            plugin_key=self._plugin_key,
-            entry_key=effective_entry_key,
-            actions=normalized,
-            redis=redis,
-        )
-        if failed:
-            await _log(
-                redis,
-                self._state.account_id,
-                "warn",
-                "插件消息动作部分执行失败，请在消息链路动作记录中查看具体原因。",
-                source="plugin",
-                action_count=len(normalized),
-                **context,
+        try:
+            failed = await _apply_userbot_event_bus_actions(
+                self._state,
+                self._trace,
+                event,
+                plugin_key=self._plugin_key,
+                entry_key=effective_entry_key,
+                actions=normalized,
+                redis=redis,
             )
+            if failed:
+                await _log(
+                    redis,
+                    self._state.account_id,
+                    "warn",
+                    "插件消息动作部分执行失败，请在消息链路动作记录中查看具体原因。",
+                    source="plugin",
+                    action_count=len(normalized),
+                    **context,
+                )
+        finally:
+            self.actions.clear()
 
     async def send(self, **kwargs: Any) -> dict[str, Any]:
         from .message_ops import BufferedMessageOps
@@ -3617,6 +3640,10 @@ async def _refresh_userbot_session_chat_cache(state: Any) -> None:
         return
     try:
         state.userbot_session_chats = chats
+        # 全量重建成功后才点亮 ready：此后"空集合"可被信任为"真的无会话"，
+        # 短路 guard 方可启用。Redis 抖动导致上面 except→return 时不会执行到这里，
+        # ready 保持原值，短路不启用、照常 SCAN，避免长期假阴性。
+        state.userbot_session_chats_ready = True
     except Exception:  # noqa: BLE001
         pass
 
@@ -3791,6 +3818,15 @@ async def _dispatch_userbot_session_message(
         return False
     sender_id = _int_or_none(getattr(event, "sender_id", None))
     if direction == "incoming" and sender_id is not None and sender_id in state.interaction_bot_sender_ids:
+        return False
+    # 预筛短路：缓存已成功建过全量（ready）且该 chat 不在活跃会话集合里，
+    # 说明该 chat 无 userbot 会话，直接跳过每消息一次的 Redis SCAN。
+    # ready=False（进程刚起 / reload 后 / 刷新曾失败）时不短路，照常 SCAN，
+    # 避免"缓存尚未初始化"导致的全量假阴性漏会话。
+    if (
+        getattr(state, "userbot_session_chats_ready", False)
+        and chat_id not in state.userbot_session_chats
+    ):
         return False
     sessions = await _load_userbot_sessions_for_chat(state, redis, chat_id=chat_id, sender_id=sender_id)
     if sessions:

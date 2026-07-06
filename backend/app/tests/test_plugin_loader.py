@@ -3237,7 +3237,10 @@ async def test_live_message_ops_defaults_to_userbot_reply(monkeypatch) -> None:
     await messages.send(chat_id=-100123, text="命令回复")
     await messages.payout(chat_id=-100123, amount=88, reply_to_user_id=12345)
 
-    assert messages.actions == [
+    # 归一化结果通过下游 _apply_userbot_event_bus_actions 收到的 actions 断言，
+    # 而不是读 messages.actions —— 后者是 facade 字段，不再跨 apply 累积。
+    assert apply_actions.await_count == 2
+    assert apply_actions.await_args_list[0].kwargs["actions"] == [
         {
             "type": "send_message",
             "chat_id": -100123,
@@ -3249,6 +3252,8 @@ async def test_live_message_ops_defaults_to_userbot_reply(monkeypatch) -> None:
                 "plugin_key": "_test_live_messages",
             },
         },
+    ]
+    assert apply_actions.await_args_list[1].kwargs["actions"] == [
         {
             "type": "payout",
             "chat_id": -100123,
@@ -3261,9 +3266,8 @@ async def test_live_message_ops_defaults_to_userbot_reply(monkeypatch) -> None:
             },
         },
     ]
-    assert apply_actions.await_count == 2
-    assert apply_actions.await_args_list[0].kwargs["actions"][0]["send_via"] == "userbot_reply"
-    assert apply_actions.await_args_list[1].kwargs["actions"][0]["type"] == "payout"
+    # 泄漏回归锁：apply 执行后 actions 不累积，恒为空。
+    assert messages.actions == []
 
 
 @pytest.mark.asyncio
@@ -3704,6 +3708,119 @@ async def test_userbot_session_command_prefix_message_skips_session_feed(monkeyp
 
     assert consumed is False
     invoke.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_userbot_session_shortcircuits_scan_when_cache_ready_and_chat_absent(monkeypatch) -> None:
+    """F3：缓存已就绪（ready）且 chat 不在集合时，直接短路、不触发 Redis SCAN。"""
+    redis = _FakeRedis()
+    scan_calls: list[str] = []
+    original_scan = redis.scan_iter
+
+    def _spy_scan(match: str):
+        scan_calls.append(match)
+        return original_scan(match=match)
+
+    monkeypatch.setattr(redis, "scan_iter", _spy_scan)
+
+    state = loader_mod._AccountState(84)
+    state.redis = redis
+    state.userbot_session_chats_ready = True
+    # chat -10084 不在集合里
+    invoke = AsyncMock(return_value=[{"type": "send_message", "text": "nope"}])
+    monkeypatch.setattr(loader_mod, "invoke_interaction_entry", invoke)
+
+    consumed = await loader_mod._dispatch_userbot_session_message(
+        state,
+        SimpleNamespace(chat_id=-10084, sender_id=5, raw_text="随便说点什么", text="随便说点什么"),
+        direction="incoming",
+        edited=False,
+        event_label="incoming",
+        redis=redis,
+    )
+
+    assert consumed is False
+    invoke.assert_not_awaited()
+    # 关键：短路后完全没有触发 SCAN。
+    assert scan_calls == []
+
+
+@pytest.mark.asyncio
+async def test_userbot_session_does_not_shortcircuit_when_cache_not_ready(monkeypatch) -> None:
+    """F3 防呆：缓存未就绪（ready=False）时不得短路，照常 SCAN，避免全量假阴性漏会话。"""
+    redis = _FakeRedis()
+    scan_calls: list[str] = []
+    original_scan = redis.scan_iter
+
+    def _spy_scan(match: str):
+        scan_calls.append(match)
+        return original_scan(match=match)
+
+    monkeypatch.setattr(redis, "scan_iter", _spy_scan)
+
+    state = loader_mod._AccountState(85)
+    state.redis = redis
+    # ready 保持默认 False，chat 不在集合里
+    assert state.userbot_session_chats_ready is False
+    invoke = AsyncMock(return_value=[{"type": "send_message", "text": "nope"}])
+    monkeypatch.setattr(loader_mod, "invoke_interaction_entry", invoke)
+
+    consumed = await loader_mod._dispatch_userbot_session_message(
+        state,
+        SimpleNamespace(chat_id=-10085, sender_id=5, raw_text="随便说点什么", text="随便说点什么"),
+        direction="incoming",
+        edited=False,
+        event_label="incoming",
+        redis=redis,
+    )
+
+    # 无会话所以最终仍不消费，但必须是走完 SCAN 后得出的结论，而不是被短路挡掉。
+    assert consumed is False
+    assert scan_calls, "ready=False 时必须照常 SCAN，不能短路"
+
+
+@pytest.mark.asyncio
+async def test_userbot_session_feeds_when_cache_ready_and_chat_present(monkeypatch) -> None:
+    """F3 假阴性防护：ready + chat 在集合 + 存在真实会话时，正常派发（短路不误伤）。"""
+    redis = _FakeRedis()
+    state = loader_mod._AccountState(86)
+    state.redis = redis
+    state.userbot_session_chats_ready = True
+    state.userbot_session_chats.add(-10086)
+    redis.values["account_bot:interaction_session:86:rule:-10086"] = json.dumps(
+        {
+            "account_id": 86,
+            "chat_id": -10086,
+            "rule_id": "rule",
+            "module_key": "demo",
+            "entry_key": "main",
+            "channel": "userbot",
+            "expires_at": 4_000_000_000,
+        }
+    )
+    invoke = AsyncMock(return_value=[{"type": "end_session"}])
+    monkeypatch.setattr(loader_mod, "invoke_interaction_entry", invoke)
+    monkeypatch.setattr(loader_mod, "current_command_prefix", lambda *, fallback=None: ",")
+    monkeypatch.setattr(loader_mod, "_load_event_framework_flags", AsyncMock(return_value={
+        "trace_enabled": False,
+        "event_bus_delivery_enabled": True,
+    }))
+    monkeypatch.setattr(loader_mod, "record_action", AsyncMock())
+    monkeypatch.setattr(loader_mod, "record_span", AsyncMock())
+    monkeypatch.setattr(loader_mod, "update_plugin_runtime_status", AsyncMock())
+    monkeypatch.setattr(loader_mod, "finish_trace", AsyncMock())
+
+    consumed = await loader_mod._dispatch_userbot_session_message(
+        state,
+        SimpleNamespace(chat_id=-10086, sender_id=9, raw_text="继续", text="继续"),
+        direction="incoming",
+        edited=False,
+        event_label="incoming",
+        redis=redis,
+    )
+
+    assert consumed is True
+    invoke.assert_awaited_once()
 
 
 @pytest.mark.asyncio

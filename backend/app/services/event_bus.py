@@ -513,8 +513,12 @@ def _filters_match(event: dict[str, Any], filters: dict[str, Any]) -> tuple[bool
     if callback_data and str(source.get("callback_data") or "") not in callback_data:
         return False, "filter_not_matched"
     commands = _string_list(filters.get("commands") or filters.get("command"))
-    if commands and text.lstrip("/,").split(maxsplit=1)[0] not in [item.lstrip("/,") for item in commands]:
-        return False, "filter_not_matched"
+    if commands:
+        if not text:
+            return False, "filter_not_matched"
+        head = text.lstrip("/,").split(maxsplit=1)
+        if not head or head[0] not in [item.lstrip("/,") for item in commands]:
+            return False, "filter_not_matched"
     rule_ids = _string_list(filters.get("rule_id"))
     if rule_ids and str(trigger.get("rule_id") or "") not in rule_ids:
         return False, "filter_not_matched"

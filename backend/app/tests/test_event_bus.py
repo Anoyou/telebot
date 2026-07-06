@@ -363,6 +363,118 @@ def test_match_subscription_explains_source_event_scope_and_filter_skips() -> No
     ]
 
 
+def test_commands_filter_does_not_crash_on_empty_text_events() -> None:
+    """带 commands filter 的订阅遇到无文本事件（空串 / 纯媒体 / callback）不得抛异常。
+
+    回归：此前 ``text.lstrip('/,').split(maxsplit=1)[0]`` 在空文本时 IndexError，
+    会冒泡出 match_subscriptions 崩溃整条匹配流程。
+    """
+    subscription = normalize_event_subscription(
+        {
+            "source": ["interaction_bot"],
+            "events": ["all_events"],
+            "scope": "all_allowed_chats",
+            "filters": {"commands": ["start"]},
+        },
+        plugin_key="cmd_plugin",
+        entry_key="main",
+    )
+
+    # 1) message.text 为空串
+    empty_text_event = normalize_bot_update(
+        1,
+        {
+            "update_id": 20,
+            "message": {
+                "message_id": 8,
+                "text": "",
+                "chat": {"id": -100, "type": "supergroup"},
+                "from": {"id": 2001, "first_name": "Bob"},
+            },
+        },
+    )
+    # 2) 纯媒体消息（无 text 字段，仅 photo）
+    media_event = normalize_bot_update(
+        1,
+        {
+            "update_id": 21,
+            "message": {
+                "message_id": 9,
+                "chat": {"id": -100, "type": "supergroup"},
+                "from": {"id": 2001, "first_name": "Bob"},
+                "photo": [{"file_id": "photo-1", "width": 90, "height": 90}],
+            },
+        },
+    )
+    # 3) callback_query（message.text 为空的场景）
+    callback_event = normalize_bot_update(
+        1,
+        {
+            "update_id": 22,
+            "callback_query": {
+                "id": "cb-2",
+                "data": "start",
+                "from": {"id": 2001},
+                "message": {
+                    "message_id": 10,
+                    "chat": {"id": -100, "type": "supergroup"},
+                },
+            },
+        },
+    )
+
+    for event in (empty_text_event, media_event, callback_event):
+        # 不抛异常，且命令过滤器对无文本事件必然不匹配。
+        decision = dispatch_event(event, [subscription], {"allowed_chat_ids": [-100]}).decisions[0]
+        assert decision.matched is False
+        assert decision.reason_code == "filter_not_matched"
+
+
+def test_commands_filter_still_matches_real_command_text() -> None:
+    """确保空文本防护没有回归正常命令匹配。"""
+    subscription = normalize_event_subscription(
+        {
+            "source": ["interaction_bot"],
+            "events": ["message"],
+            "scope": "all_allowed_chats",
+            "filters": {"commands": ["start"]},
+        },
+        plugin_key="cmd_plugin",
+        entry_key="main",
+    )
+    match_event = normalize_bot_update(
+        1,
+        {
+            "update_id": 23,
+            "message": {
+                "message_id": 11,
+                "text": "/start now",
+                "chat": {"id": -100, "type": "supergroup"},
+                "from": {"id": 2001, "first_name": "Bob"},
+            },
+        },
+    )
+    miss_event = normalize_bot_update(
+        1,
+        {
+            "update_id": 24,
+            "message": {
+                "message_id": 12,
+                "text": "/other",
+                "chat": {"id": -100, "type": "supergroup"},
+                "from": {"id": 2001, "first_name": "Bob"},
+            },
+        },
+    )
+
+    match_decision = dispatch_event(match_event, [subscription], {"allowed_chat_ids": [-100]}).decisions[0]
+    miss_decision = dispatch_event(miss_event, [subscription], {"allowed_chat_ids": [-100]}).decisions[0]
+
+    assert match_decision.matched is True
+    assert miss_decision.matched is False
+    assert miss_decision.reason_code == "filter_not_matched"
+
+
 def test_match_subscription_accepts_allowed_chat_keyword() -> None:
     event = normalize_bot_update(
         1,

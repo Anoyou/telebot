@@ -20,6 +20,13 @@
 
 ## [Unreleased]
 
+### Fixed
+- 修复事件总线 `commands`/`command` 过滤器遇到无文本事件（纯媒体、贴纸、语音、callback_query 等 `message.text` 为空的更新）时 `"".split()[0]` 抛 `IndexError`、导致整轮订阅匹配崩溃的问题；空文本对命令过滤器直接判定不匹配，不再中断匹配流程。
+- 修复 userbot 直通链路（`on_direct_message`）复用常驻 `ctx` 的问题：直通此前是唯一未做调用级隔离的分发路径，并发直通事件会共享同一个 `ctx.messages`，其 `actions` 列表跨 `apply()` 只增不清、长期泄漏。直通现在与其他链路一致，为每次调用复制独立的 `_LiveMessageOps`，`apply()` 也在进入前和结束后清空动作缓存，字段保留但不再累积。
+
+### Changed
+- 优化 userbot 会话消息派发：`_dispatch_userbot_session_message` 此前对每条 incoming/outgoing 消息都执行一次 Redis `SCAN` 查活跃会话，即使该群无任何会话。现在改为先查内存索引 `userbot_session_chats` 短路——仅当全量缓存刷新成功（新增 `userbot_session_chats_ready` 闸）且该群不在集合中时才跳过 SCAN；缓存未就绪（进程刚起、reload 后或 Redis 抖动刷新失败）时保持原有全量扫描，避免"空集合被误判为无会话"而漏投真实会话。
+
 ## [0.49.23] — 2026-07-07 · patch（补丁版本） · 插件发奖锚点提示补丁
 
 ### Fixed
