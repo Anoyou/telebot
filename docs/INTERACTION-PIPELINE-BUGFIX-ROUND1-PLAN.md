@@ -1,7 +1,7 @@
 # 交互链路修复 · 第一轮（纯 Bug 修复）
 
-> 状态：待执行 ｜ 版本：不 bump（改动记入 CHANGELOG 的 Unreleased；发版时再统一 patch）｜ 类型：bugfix，不改任何对外契约
-> 前置基线：工作区当前 `__version__ = 0.49.19`，`git status` 干净（仅本计划文档 untracked）
+> 状态：已完成并发布为 `0.49.24` ｜ 类型：bugfix，不改任何对外契约
+> 执行结果：F1/F2/F3 均已落地；`backend/app/tests/test_event_bus.py` 与 `backend/app/tests/test_plugin_loader.py` 已通过回归。
 
 ---
 

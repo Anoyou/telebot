@@ -20,6 +20,8 @@
 
 ## [Unreleased]
 
+## [0.49.24] — 2026-07-07 · patch（补丁版本） · 交互链路缺陷修复补丁
+
 ### Fixed
 - 修复事件总线 `commands`/`command` 过滤器遇到无文本事件（纯媒体、贴纸、语音、callback_query 等 `message.text` 为空的更新）时 `"".split()[0]` 抛 `IndexError`、导致整轮订阅匹配崩溃的问题；空文本对命令过滤器直接判定不匹配，不再中断匹配流程。
 - 修复 userbot 直通链路（`on_direct_message`）复用常驻 `ctx` 的问题：直通此前是唯一未做调用级隔离的分发路径，并发直通事件会共享同一个 `ctx.messages`，其 `actions` 列表跨 `apply()` 只增不清、长期泄漏。直通现在与其他链路一致，为每次调用复制独立的 `_LiveMessageOps`，`apply()` 也在进入前和结束后清空动作缓存，字段保留但不再累积。
