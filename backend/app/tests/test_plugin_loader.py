@@ -2191,6 +2191,52 @@ async def test_userbot_send_message_action_records_reply_anchor_failure_details(
 
 
 @pytest.mark.asyncio
+async def test_userbot_send_message_action_suppresses_reply_anchor_missing_notice(monkeypatch) -> None:
+    class _Client:
+        def __init__(self) -> None:
+            self.send_message = AsyncMock(return_value=SimpleNamespace(id=782))
+
+        def iter_messages(self, _chat_id, **_kwargs):  # noqa: ANN001, ANN003
+            async def _gen():
+                if False:
+                    yield None
+
+            return _gen()
+
+    state = loader_mod._AccountState(account_id=47)
+    state.redis = _FakeRedis()
+    state.client = _Client()
+    state.engine = SimpleNamespace(
+        acquire=AsyncMock(return_value=SimpleNamespace(allowed=True, wait_seconds=0, outcome="ok"))
+    )
+    record_action = AsyncMock()
+    monkeypatch.setattr(loader_mod, "record_action", record_action)
+
+    ok = await loader_mod._apply_userbot_send_message_action(
+        state,
+        SimpleNamespace(chat_id=-100789),
+        {
+            "type": "send_message",
+            "send_via": "userbot_reply",
+            "text": "-100",
+            "reply_to_user_id": 222,
+            "reply_to_search_limit": 20,
+            "reply_anchor_missing_text": "无法扣款，加入失败。",
+            "suppress_reply_anchor_missing_notice": True,
+            "context": {"trace_id": "evt_send_reply_anchor_missing_suppressed"},
+        },
+    )
+
+    assert ok is False
+    state.client.send_message.assert_not_awaited()
+    assert record_action.await_args.args[2] == loader_mod.TRACE_STATUS_FAILED
+    assert record_action.await_args.kwargs["error_code"] == "reply_anchor_missing"
+    result = record_action.await_args.kwargs["result"]
+    assert result["reply_to_user_id"] == 222
+    assert result["reply_anchor_missing"] is True
+
+
+@pytest.mark.asyncio
 async def test_invoke_interaction_entry_ctx_log_does_not_duplicate_plugin_key() -> None:
     class _InteractionLogPlugin(Plugin):
         key = "_test_interaction_log"

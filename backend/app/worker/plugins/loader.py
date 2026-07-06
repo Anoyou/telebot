@@ -2364,6 +2364,8 @@ async def _send_reply_anchor_missing_notice(
     *,
     reply_to_user_id: int | None,
 ) -> None:
+    if bool(action.get("suppress_reply_anchor_missing_notice")):
+        return
     if state.client is None:
         return
     text = _reply_anchor_missing_text(action, reply_to_user_id)
