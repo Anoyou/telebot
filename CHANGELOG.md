@@ -20,6 +20,11 @@
 
 ## [Unreleased]
 
+## [0.49.27] — 2026-07-07 · patch（补丁版本） · 订阅校验可见化补丁
+
+### Added
+- 插件 `event_subscriptions` 声明现在会在加载期暴露未知 filter key 与未知事件类型：远程 `plugin.json` lint 会说明未知字段的实际后果，Python `Manifest` 路径也会在插件加载时记录一次 warning，帮助尽早发现订阅拼写或事件类型错误。
+
 ## [0.49.26] — 2026-07-07 · patch（补丁版本） · 交互会话消费语义补丁
 
 ### Fixed

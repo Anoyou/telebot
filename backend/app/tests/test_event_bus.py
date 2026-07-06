@@ -686,8 +686,51 @@ def test_normalize_event_subscription_marks_unknown_filter_keys() -> None:
 
     assert subscription.unknown_filter_keys == ["mystery"]
     assert decision.unknown_filter_keys == ["mystery"]
-    assert decision.warnings == ["filters 含未知 key: mystery"]
-    assert "未知 key: mystery" in decision.reason_message
+    assert decision.warnings == [
+        "filters 含未知 key: mystery，该过滤条件不会生效，订阅可能匹配到预期外的事件。"
+    ]
+    assert "不会生效" in decision.reason_message
+
+
+def test_normalize_event_subscription_marks_unknown_events_without_breaking_valid_matches() -> None:
+    subscription = normalize_event_subscription(
+        {
+            "source": ["interaction_bot"],
+            "events": ["message", "ghost_event"],
+            "filters": {"keywords": ["开始"]},
+        },
+        plugin_key="game",
+    )
+    event = normalize_bot_update(
+        1,
+        {
+            "update_id": 160,
+            "message": {
+                "message_id": 80,
+                "text": "开始",
+                "chat": {"id": -100, "type": "supergroup"},
+                "from": {"id": 2001},
+            },
+        },
+    )
+
+    decision = dispatch_event(event, [subscription], {"allowed_chat_ids": [-100]}).decisions[0]
+
+    assert subscription.unknown_events == ["ghost_event"]
+    assert decision.unknown_events == ["ghost_event"]
+    assert decision.matched is True
+    assert decision.warnings == [
+        "events 含未知类型: ghost_event，这些事件类型不会匹配任何当前支持的事件。"
+    ]
+
+
+def test_normalize_event_subscription_accepts_all_event_umbrella_values() -> None:
+    subscription = normalize_event_subscription(
+        {"source": ["interaction_bot"], "events": ["all_events", "all_messages"]},
+        plugin_key="game",
+    )
+
+    assert subscription.unknown_events == []
 
 
 def test_rule_bound_scope_requires_matching_rule_id_filter() -> None:

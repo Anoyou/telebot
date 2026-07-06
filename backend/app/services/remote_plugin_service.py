@@ -948,6 +948,18 @@ def lint_plugin_metadata_files(plugin_dir: Path) -> list[str]:
                     raw_events = raw_subscription.get("events")
                     if not isinstance(raw_events, list) or not any(str(item or "").strip() in VALID_EVENT_TYPES for item in raw_events):
                         warnings.append(f"plugin.json event_subscriptions[{idx}] events 必须声明有效事件")
+                    if isinstance(raw_events, list):
+                        unknown_events = sorted(
+                            {
+                                str(item or "").strip()
+                                for item in raw_events
+                                if str(item or "").strip() and str(item or "").strip() not in VALID_EVENT_TYPES
+                            }
+                        )
+                        if unknown_events:
+                            warnings.append(
+                                f"plugin.json event_subscriptions[{idx}] events 含未知类型: {', '.join(unknown_events)}，这些事件类型不会匹配任何当前支持的事件"
+                            )
                     raw_sources = raw_subscription.get("source")
                     if raw_sources is not None:
                         source_items = raw_sources if isinstance(raw_sources, list) else [raw_sources]
@@ -967,7 +979,7 @@ def lint_plugin_metadata_files(plugin_dir: Path) -> list[str]:
                         )
                         if unknown:
                             warnings.append(
-                                f"plugin.json event_subscriptions[{idx}] filters 含未知 key: {', '.join(unknown)}"
+                                f"plugin.json event_subscriptions[{idx}] filters 含未知 key: {', '.join(unknown)}，该过滤条件不会生效，订阅可能匹配到预期外的事件"
                             )
             capabilities = data.get("capabilities")
             if isinstance(capabilities, dict):

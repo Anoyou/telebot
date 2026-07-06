@@ -63,7 +63,12 @@ from ...db.models.rule import Rule
 from ...db.models.system import SystemSetting
 from ...redis_client import get_redis
 from ...services import account_bot_service, interaction_bot_service
-from ...services.event_bus import dispatch_event, normalize_event_subscription, normalize_userbot_event
+from ...services.event_bus import (
+    dispatch_event,
+    event_subscription_warnings,
+    normalize_event_subscription,
+    normalize_userbot_event,
+)
 from ...services.event_trace import (
     TRACE_STATUS_FAILED,
     TRACE_STATUS_OK,
@@ -2764,6 +2769,26 @@ def _manifest_compatible(manifest: Manifest) -> tuple[bool, str | None]:
     return True, None
 
 
+def _warn_manifest_event_subscription_lint(manifest: Manifest) -> None:
+    raw_subscriptions = getattr(manifest, "event_subscriptions", None)
+    if not isinstance(raw_subscriptions, list):
+        return
+    plugin_key = str(getattr(manifest, "key", "") or "").strip()
+    for idx, raw in enumerate(raw_subscriptions, start=1):
+        if not isinstance(raw, dict):
+            continue
+        subscription = normalize_event_subscription(raw, plugin_key=plugin_key)
+        warnings = event_subscription_warnings(subscription)
+        if not warnings:
+            continue
+        log.warning(
+            "插件 %s event_subscriptions[%s] 声明存在风险: %s",
+            plugin_key or "<unknown>",
+            idx,
+            "；".join(warnings),
+        )
+
+
 def _loaded_plugin_manifest(cls: type[Plugin] | None, inst: Plugin | None = None) -> Manifest | None:
     manifest = getattr(cls, "_manifest", None) if cls is not None else None
     if isinstance(manifest, Manifest):
@@ -2969,6 +2994,7 @@ def _load_dir(path: Path, source: str) -> dict[str, type[Plugin]]:
     cls._manifest = manifest
     cls._source = source
     cls._loaded_at = time.time()
+    _warn_manifest_event_subscription_lint(manifest)
 
     # 防御性写入注册表：plugin.py 里若有 @register 已经写过；此处再写一次幂等
     # （主要是为了第三方插件——它们的 plugin.py 也应当 @register，但兜底一下）

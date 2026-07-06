@@ -130,6 +130,7 @@ class EventSubscription:
     scope: str = "all_allowed_chats"
     filters: dict[str, Any] = field(default_factory=dict)
     unknown_filter_keys: list[str] = field(default_factory=list)
+    unknown_events: list[str] = field(default_factory=list)
     dispatch_mode: str = "event_subscription"
     raw: dict[str, Any] = field(default_factory=dict)
 
@@ -145,6 +146,7 @@ class SubscriptionDecision:
     scope: str
     filters: dict[str, Any] = field(default_factory=dict)
     unknown_filter_keys: list[str] = field(default_factory=list)
+    unknown_events: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     subscription: EventSubscription | None = None
 
@@ -345,6 +347,13 @@ def normalize_event_subscription(
     if scope not in VALID_EVENT_SCOPES:
         scope = "all_allowed_chats"
     filters = data.get("filters") if isinstance(data.get("filters"), dict) else {}
+    unknown_events = sorted(
+        {
+            event
+            for event in events
+            if event and event not in VALID_EVENT_TYPES
+        }
+    )
     unknown_filter_keys = sorted(
         {
             str(key).strip()
@@ -360,6 +369,7 @@ def normalize_event_subscription(
         scope=scope,
         filters=dict(filters),
         unknown_filter_keys=unknown_filter_keys,
+        unknown_events=unknown_events,
         dispatch_mode=str(data.get("dispatch_mode") or "event_subscription").strip() or "event_subscription",
         raw=dict(data),
     )
@@ -414,6 +424,7 @@ def _match_one(
         "scope": subscription.scope,
         "filters": dict(subscription.filters),
         "unknown_filter_keys": list(subscription.unknown_filter_keys),
+        "unknown_events": list(subscription.unknown_events),
         "warnings": _subscription_warnings(subscription),
         "subscription": subscription,
     }
@@ -544,10 +555,23 @@ def _event_type_matches(subscribed_events: set[str], event_type: str) -> bool:
     return False
 
 
+def event_subscription_warnings(subscription: EventSubscription) -> list[str]:
+    warnings: list[str] = []
+    if subscription.unknown_filter_keys:
+        warnings.append(
+            "filters 含未知 key: "
+            f"{', '.join(subscription.unknown_filter_keys)}，该过滤条件不会生效，订阅可能匹配到预期外的事件。"
+        )
+    if subscription.unknown_events:
+        warnings.append(
+            "events 含未知类型: "
+            f"{', '.join(subscription.unknown_events)}，这些事件类型不会匹配任何当前支持的事件。"
+        )
+    return warnings
+
+
 def _subscription_warnings(subscription: EventSubscription) -> list[str]:
-    if not subscription.unknown_filter_keys:
-        return []
-    return [f"filters 含未知 key: {', '.join(subscription.unknown_filter_keys)}"]
+    return event_subscription_warnings(subscription)
 
 
 def _with_warnings(message: str, warnings: list[str]) -> str:
@@ -1194,6 +1218,7 @@ __all__ = [
     "VALID_EVENT_SOURCES",
     "VALID_EVENT_TYPES",
     "dispatch_event",
+    "event_subscription_warnings",
     "match_subscriptions",
     "normalize_bot_update",
     "normalize_event_subscription",

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -383,6 +384,61 @@ def test_load_dir_tracks_installed_child_modules(tmp_path, monkeypatch) -> None:
         assert child_mod not in sys.modules
         assert mod_name not in loader_mod._INSTALLED_MODULE_NAMES
         assert child_mod not in loader_mod._INSTALLED_MODULE_NAMES
+    finally:
+        sys.modules.pop(mod_name, None)
+        sys.modules.pop(child_mod, None)
+        _REGISTRY.pop(plugin_key, None)
+
+
+def test_load_dir_warns_manifest_event_subscription_lint_once(tmp_path, monkeypatch, caplog) -> None:
+    """Python Manifest 的 event_subscriptions 也要在加载期暴露订阅风险。"""
+    import sys
+
+    from app.worker.plugins.base import _REGISTRY
+
+    plugin_key = "_test_installed_subscription_lint"
+    plugin_dir = tmp_path / plugin_key
+    plugin_dir.mkdir()
+    (plugin_dir / "__init__.py").write_text(
+        "from .plugin import PLUGIN_CLASS, MANIFEST\n",
+        encoding="utf-8",
+    )
+    (plugin_dir / "plugin.py").write_text(
+        "\n".join(
+            [
+                "from app.worker.plugins.base import Plugin, register",
+                "from app.worker.plugins.manifest import Manifest",
+                "",
+                "@register",
+                "class SubscriptionLintPlugin(Plugin):",
+                f"    key = {plugin_key!r}",
+                "    display_name = 'subscription lint'",
+                "",
+                "PLUGIN_CLASS = SubscriptionLintPlugin",
+                "MANIFEST = Manifest(",
+                f"    key={plugin_key!r},",
+                "    display_name='subscription lint',",
+                "    event_subscriptions=[{",
+                "        'events': ['message', 'ghost_event'],",
+                "        'filters': {'mystery': True},",
+                "    }],",
+                ")",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(loader_mod, "_INSTALLED_MODULE_NAMES", set())
+    caplog.set_level(logging.WARNING, logger=loader_mod.log.name)
+    mod_name = loader_mod._installed_module_name(plugin_key)
+    child_mod = f"{mod_name}.plugin"
+
+    try:
+        loaded = _load_dir(plugin_dir, source="installed")
+
+        assert plugin_key in loaded
+        messages = [record.getMessage() for record in caplog.records]
+        assert any(plugin_key in item and "不会生效" in item for item in messages)
+        assert any("ghost_event" in item and "不会匹配任何当前支持的事件" in item for item in messages)
     finally:
         sys.modules.pop(mod_name, None)
         sys.modules.pop(child_mod, None)
@@ -3627,7 +3683,8 @@ async def test_userbot_observed_interaction_session_does_not_consume_without_act
     monkeypatch.setattr(loader_mod, "record_action", AsyncMock())
     monkeypatch.setattr(loader_mod, "record_span", AsyncMock())
     monkeypatch.setattr(loader_mod, "update_plugin_runtime_status", AsyncMock())
-    monkeypatch.setattr(loader_mod, "finish_trace", AsyncMock())
+    finish_trace = AsyncMock()
+    monkeypatch.setattr(loader_mod, "finish_trace", finish_trace)
 
     consumed = await loader_mod._dispatch_userbot_session_message(
         state,
@@ -3641,6 +3698,8 @@ async def test_userbot_observed_interaction_session_does_not_consume_without_act
     assert consumed is False
     invoke.assert_awaited_once()
     assert invoke.await_args.kwargs["default_send_via"] == ["interaction_bot"]
+    finish_trace.assert_awaited_once()
+    assert finish_trace.await_args.kwargs["consumed"] is False
 
 
 @pytest.mark.asyncio
@@ -3670,7 +3729,8 @@ async def test_userbot_observed_interaction_session_consumes_when_actions_return
     monkeypatch.setattr(loader_mod, "record_action", AsyncMock())
     monkeypatch.setattr(loader_mod, "record_span", AsyncMock())
     monkeypatch.setattr(loader_mod, "update_plugin_runtime_status", AsyncMock())
-    monkeypatch.setattr(loader_mod, "finish_trace", AsyncMock())
+    finish_trace = AsyncMock()
+    monkeypatch.setattr(loader_mod, "finish_trace", finish_trace)
 
     consumed = await loader_mod._dispatch_userbot_session_message(
         state,
@@ -3684,6 +3744,8 @@ async def test_userbot_observed_interaction_session_consumes_when_actions_return
     assert consumed is True
     invoke.assert_awaited_once()
     assert invoke.await_args.kwargs["default_send_via"] == ["interaction_bot"]
+    finish_trace.assert_awaited_once()
+    assert finish_trace.await_args.kwargs["consumed"] is True
 
 
 @pytest.mark.asyncio
@@ -3723,7 +3785,8 @@ async def test_unrelated_interaction_session_does_not_mute_other_userbot_plugins
     monkeypatch.setattr(loader_mod, "record_action", AsyncMock())
     monkeypatch.setattr(loader_mod, "record_span", AsyncMock())
     monkeypatch.setattr(loader_mod, "update_plugin_runtime_status", AsyncMock())
-    monkeypatch.setattr(loader_mod, "finish_trace", AsyncMock())
+    finish_trace = AsyncMock()
+    monkeypatch.setattr(loader_mod, "finish_trace", finish_trace)
 
     captured: list[Any] = []
 
@@ -3755,6 +3818,7 @@ async def test_unrelated_interaction_session_does_not_mute_other_userbot_plugins
         ))
 
         loader_mod.invoke_interaction_entry.assert_awaited_once()
+        assert finish_trace.await_args_list[0].kwargs["consumed"] is False
         dispatch_event_bus.assert_awaited_once()
     finally:
         loader_mod._STATES.pop(88, None)
@@ -3966,7 +4030,8 @@ async def test_userbot_channel_session_still_consumes_without_actions(monkeypatc
     monkeypatch.setattr(loader_mod, "record_action", AsyncMock())
     monkeypatch.setattr(loader_mod, "record_span", AsyncMock())
     monkeypatch.setattr(loader_mod, "update_plugin_runtime_status", AsyncMock())
-    monkeypatch.setattr(loader_mod, "finish_trace", AsyncMock())
+    finish_trace = AsyncMock()
+    monkeypatch.setattr(loader_mod, "finish_trace", finish_trace)
 
     consumed = await loader_mod._dispatch_userbot_session_message(
         state,
@@ -3980,6 +4045,8 @@ async def test_userbot_channel_session_still_consumes_without_actions(monkeypatc
     assert consumed is True
     invoke.assert_awaited_once()
     assert invoke.await_args.kwargs["default_send_via"] == ["userbot_reply"]
+    finish_trace.assert_awaited_once()
+    assert finish_trace.await_args.kwargs["consumed"] is True
 
 
 @pytest.mark.asyncio

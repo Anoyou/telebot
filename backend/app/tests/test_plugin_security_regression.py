@@ -1690,6 +1690,34 @@ def test_lint_plugin_metadata_files_warns_on_bad_interaction_contract(tmp_path) 
     assert any("interaction_profile" in item for item in warnings)
 
 
+def test_lint_plugin_metadata_files_warns_event_subscription_consequences(tmp_path) -> None:
+    plugin_dir = tmp_path / "plugin"
+    plugin_dir.mkdir()
+    (plugin_dir / "plugin.json").write_text(
+        """
+        {
+          "name": "bad_subscription",
+          "version": "1.0.0",
+          "event_subscriptions": [
+            {
+              "events": ["message", "ghost_event"],
+              "filters": {
+                "keywords": ["开始"],
+                "mystery": true
+              }
+            }
+          ]
+        }
+        """,
+        encoding="utf-8",
+    )
+
+    warnings = svc.lint_plugin_metadata_files(plugin_dir)
+
+    assert any("filters 含未知 key: mystery" in item and "不会生效" in item for item in warnings)
+    assert any("events 含未知类型: ghost_event" in item and "不会匹配任何当前支持的事件" in item for item in warnings)
+
+
 def test_lint_plugin_metadata_files_rejects_removed_notice_channel(tmp_path) -> None:
     plugin_dir = tmp_path / "plugin"
     plugin_dir.mkdir()
