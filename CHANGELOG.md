@@ -20,6 +20,13 @@
 
 ## [Unreleased]
 
+## [0.49.20] — 2026-07-06 · patch（补丁版本） · 按钮扣款失败反馈补丁
+
+### Fixed
+- 修复按钮触发 userbot 发奖或扣款时，找不到玩家近期消息只能在群内发送默认提示、点击者收不到即时失败反馈的问题；动作现在可通过 `failure_callback` 回答 callback。
+- 失败回调成功回答 callback 后会标记为已处理，后续 `answer_callback` 动作不再重复 ack 同一个点击事件。
+- 支持 `suppress_reply_anchor_missing_notice` 抑制群内默认锚点缺失提示，避免静默扣款入局失败时额外刷群。
+
 ## [0.49.19] — 2026-07-06 · patch（补丁版本） · 插件仓库缓存清理补丁
 
 ### Fixed

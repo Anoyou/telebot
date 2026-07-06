@@ -362,9 +362,11 @@ async def test_run_interaction_action_command_reports_reply_anchor_diagnostics()
         "reply_anchor_missing_text": "没有找到 {user_id} 的近期发言，无法发奖。",
     }
 
+    client = _Client()
+
     await runtime_mod._handle_run_interaction_action_command(
         redis,
-        _Client(),
+        client,
         55,
         IPCMessage(CMD_RUN_INTERACTION_ACTION, {"payload": payload}),
         "rpc-action",
@@ -385,12 +387,80 @@ async def test_run_interaction_action_command_reports_reply_anchor_diagnostics()
     assert result["error_code"] == "reply_anchor_missing"
     assert result["worker_offline"] is False
     assert result["reply_anchor_missing"] is True
+    assert client.sent == [
+        {
+            "chat_id": -100333,
+            "text": "没有找到 111 的近期发言，无法发奖。",
+            "reply_to": None,
+            "parse_mode": None,
+        }
+    ]
 
     log_payload = json.loads(redis.logs[-1][1])
     assert log_payload["detail"]["chat_id"] == -100333
     assert log_payload["detail"]["amount"] == 25
     assert log_payload["detail"]["reply_to_user_id"] == 111
     assert log_payload["detail"]["reply_to_search_limit"] == 20
+    assert log_payload["detail"]["error_code"] == "reply_anchor_missing"
+    assert log_payload["detail"]["reply_anchor_missing"] is True
+
+
+@pytest.mark.asyncio
+async def test_run_interaction_action_command_can_suppress_reply_anchor_notice():
+    from app.worker import runtime as runtime_mod
+
+    class _Client:
+        def __init__(self) -> None:
+            self.sent: list[dict[str, object]] = []
+
+        def iter_messages(self, _chat_id, **_kwargs):  # noqa: ANN001, ANN003
+            async def _gen():
+                if False:
+                    yield None
+
+            return _gen()
+
+        async def send_message(self, chat_id, text, **kwargs):  # noqa: ANN001, ANN003
+            self.sent.append({"chat_id": chat_id, "text": text, **kwargs})
+            return SimpleNamespace(id=900)
+
+    redis = _FakeCmdRedis()
+    client = _Client()
+
+    await runtime_mod._handle_run_interaction_action_command(
+        redis,
+        client,
+        55,
+        IPCMessage(
+            CMD_RUN_INTERACTION_ACTION,
+            {
+                "payload": {
+                    "action_type": "payout",
+                    "chat_id": -100333,
+                    "amount": 25,
+                    "reply_to_user_id": 111,
+                    "reply_to_search_limit": 20,
+                    "reply_anchor_missing_text": "没有找到 {user_id} 的近期发言，无法发奖。",
+                    "suppress_reply_anchor_missing_notice": True,
+                }
+            },
+        ),
+        "rpc-action",
+    )
+
+    channel, msg = await _wait_for_publish(
+        redis,
+        lambda channel, msg: channel == "rpc-action" and msg.type == CMD_RUN_INTERACTION_ACTION,
+    )
+    assert channel == "rpc-action"
+    assert msg.payload["ok"] is False
+    assert client.sent == []
+    result = msg.payload["result"]
+    assert result["error_code"] == "reply_anchor_missing"
+    assert result["worker_offline"] is False
+    assert result["reply_anchor_missing"] is True
+
+    log_payload = json.loads(redis.logs[-1][1])
     assert log_payload["detail"]["error_code"] == "reply_anchor_missing"
     assert log_payload["detail"]["reply_anchor_missing"] is True
 

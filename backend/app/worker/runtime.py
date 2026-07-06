@@ -323,7 +323,7 @@ async def _run_interaction_userbot_action(
         )
         if reply_to is None:
             text = _reply_anchor_missing_text(payload, reply_to_user_id)
-            if text:
+            if text and not bool(payload.get("suppress_reply_anchor_missing_notice")):
                 await client.send_message(chat_id, text, reply_to=None, parse_mode=None)
             raise ValueError(f"找不到用户 {reply_to_user_id} 在当前群的近期消息，无法定位发奖回复目标")
 

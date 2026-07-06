@@ -910,6 +910,79 @@ async def test_interaction_delivery_records_userbot_reply_anchor_failure_details
 
 
 @pytest.mark.asyncio
+async def test_interaction_delivery_answers_failure_callback_when_userbot_reply_anchor_missing(monkeypatch) -> None:
+    incoming = account_bot_runtime.Incoming(
+        account_id=1,
+        token="123:token",
+        update_id=10,
+        user_id=20,
+        chat_id=-100,
+        message_id=30,
+        text="",
+        callback_id="cb-join",
+        trace_id="evt_userbot_reply_fail_callback",
+    )
+    worker_result = {
+        "chat_id": -100,
+        "amount": None,
+        "reply_to_message_id": None,
+        "reply_to_user_id": 12345,
+        "reply_to_search_limit": 20,
+        "error": "ValueError: 找不到用户 12345 在当前群的近期消息，无法定位发奖回复目标",
+        "error_code": "reply_anchor_missing",
+        "worker_offline": False,
+        "reply_anchor_missing": True,
+    }
+    run_worker_action = AsyncMock(return_value=(False, worker_result["error"], worker_result))
+    write_log = AsyncMock()
+    answer_callback = AsyncMock()
+    record_action = AsyncMock()
+    monkeypatch.setattr(account_bot_service, "answer_callback", answer_callback)
+    monkeypatch.setattr("app.services.interaction.delivery.record_action", record_action)
+    executor = InteractionDeliveryExecutor(
+        incoming=incoming,
+        write_log=write_log,
+        run_worker_action=run_worker_action,
+        log_context=account_bot_runtime._interaction_log_context,
+        trace_context=account_bot_runtime._interaction_trace_context,
+    )
+
+    await executor.apply([
+        {
+            "type": "send_message",
+            "send_via": "userbot_reply",
+            "text": "+88",
+            "reply_to_user_id": 12345,
+            "reply_to_search_limit": 20,
+            "reply_anchor_missing_text": "没有找到 {user_id} 的近期发言，无法发奖。",
+            "suppress_reply_anchor_missing_notice": True,
+            "failure_callback": {
+                "error_code": "reply_anchor_missing",
+                "text": "无法扣款，加入失败。",
+                "show_alert": True,
+            },
+        }
+    ])
+
+    payload = run_worker_action.await_args.kwargs["payload"]
+    assert payload["suppress_reply_anchor_missing_notice"] is True
+    answer_callback.assert_awaited_once_with(
+        "123:token",
+        "cb-join",
+        text="无法扣款，加入失败。",
+        show_alert=True,
+    )
+    assert incoming.callback_already_acked is True
+    answer_trace_calls = [
+        call for call in record_action.await_args_list if call.args[1].get("type") == "answer_callback"
+    ]
+    assert answer_trace_calls
+    assert answer_trace_calls[0].args[2] == "ok"
+    assert record_action.await_args.args[2] == "failed"
+    assert record_action.await_args.kwargs["error_code"] == "reply_anchor_missing"
+
+
+@pytest.mark.asyncio
 async def test_interaction_delivery_uses_settlement_winner_as_reply_to_user_id() -> None:
     incoming = account_bot_runtime.Incoming(
         account_id=1,

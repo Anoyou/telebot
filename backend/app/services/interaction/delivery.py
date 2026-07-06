@@ -298,7 +298,9 @@ class InteractionDeliveryExecutor:
         reply_markup: dict[str, Any] | None = None,
         reply_anchor_missing_text: str | None = None,
         context: dict[str, Any] | None = None,
+        action: dict[str, Any] | None = None,
     ) -> tuple[bool, dict[str, Any]]:
+        action = action or {}
         target_chat_id = self._target_chat_id(chat_id)
         service_parse_mode = None if parse_mode == "plain" else parse_mode
         if target_chat_id is None:
@@ -321,6 +323,8 @@ class InteractionDeliveryExecutor:
                 payload["reply_to_search_limit"] = reply_to_search_limit
             if reply_anchor_missing_text:
                 payload["reply_anchor_missing_text"] = reply_anchor_missing_text
+            if bool(action.get("suppress_reply_anchor_missing_notice")):
+                payload["suppress_reply_anchor_missing_notice"] = True
             ok, error, result = await self.run_worker_action(
                 self.incoming,
                 payload=payload,
@@ -328,6 +332,7 @@ class InteractionDeliveryExecutor:
             if not ok:
                 error_code = _result_error_code(result, _worker_action_error_code(error))
                 detail = _userbot_action_failure_result(payload, error=error, error_code=error_code, result=result)
+                await self._maybe_answer_failure_callback(action, detail)
                 return False, detail
             return True, result
         token = await self._resolve_token(send_via)
@@ -771,6 +776,7 @@ class InteractionDeliveryExecutor:
             reply_markup=reply_markup,
             reply_anchor_missing_text=str(action.get("reply_anchor_missing_text") or "") or None,
             context=action.get("context") if isinstance(action.get("context"), dict) else None,
+            action=action,
         )
         if ok and delete_message_id is not None:
             await self.delete_message(
@@ -1147,6 +1153,17 @@ class InteractionDeliveryExecutor:
                 error="callback_query_id missing",
             )
             return
+        if self.incoming.callback_already_acked:
+            await record_action(
+                action.get("context"),
+                action,
+                TRACE_STATUS_SKIPPED,
+                actual_send_via="interaction_bot",
+                error_code="already_acked",
+                reason_code="already_acked",
+                error="callback query already acknowledged",
+            )
+            return
         try:
             await account_bot_service.answer_callback(
                 self.incoming.token,
@@ -1154,6 +1171,7 @@ class InteractionDeliveryExecutor:
                 text=str(action.get("text") or ""),
                 show_alert=bool(action.get("show_alert")),
             )
+            self.incoming.callback_already_acked = True
         except Exception as exc:  # noqa: BLE001
             await record_action(
                 action.get("context"),
@@ -1171,6 +1189,25 @@ class InteractionDeliveryExecutor:
             )
             return
         await record_action(action.get("context"), action, TRACE_STATUS_OK, actual_send_via="interaction_bot")
+
+    async def _maybe_answer_failure_callback(self, action: dict[str, Any], result: dict[str, Any]) -> None:
+        failure = action.get("failure_callback")
+        if not isinstance(failure, dict):
+            return
+        error_code = str(result.get("error_code") or "").strip()
+        expected = str(failure.get("error_code") or failure.get("on_error_code") or error_code).strip()
+        if expected and expected != "*" and error_code != expected:
+            return
+        text = str(failure.get("text") or "").strip()
+        if not text:
+            return
+        await self._answer_callback({
+            "type": "answer_callback",
+            "callback_query_id": failure.get("callback_query_id") or action.get("callback_query_id") or self.incoming.callback_id,
+            "text": text,
+            "show_alert": bool(failure.get("show_alert", True)),
+            "context": action.get("context"),
+        })
 
     async def _answer_inline_query(self, action: dict[str, Any]) -> None:
         inline_query_id = str(action.get("inline_query_id") or getattr(self.incoming, "inline_query_id", "") or "").strip()
@@ -1302,6 +1339,7 @@ class InteractionDeliveryExecutor:
         reply_markup: dict[str, Any] | None,
         reply_anchor_missing_text: str | None = None,
         context: dict[str, Any] | None = None,
+        action: dict[str, Any] | None = None,
     ) -> tuple[bool, dict[str, Any], str]:
         last_result: dict[str, Any] = {}
         for send_via in send_via_options:
@@ -1317,6 +1355,7 @@ class InteractionDeliveryExecutor:
                 reply_markup=reply_markup,
                 reply_anchor_missing_text=reply_anchor_missing_text,
                 context=context,
+                action=action or {},
             )
             if ok:
                 return True, result, send_via
