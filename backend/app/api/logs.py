@@ -10,16 +10,17 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import datetime
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict
 from sqlalchemy import String, cast, desc, func, or_, select
 
-from ..db.models.log import AuditLog, EventAction, EventSpan, EventTrace, PluginRuntimeStatus, RuntimeLog
+from ..db.models.log import AuditLog, EventAction, EventSpan, EventTrace, RuntimeLog
 from ..deps import CurrentUser, DBSession
 from ..services.event_probe import build_event_probe_report
+from ..services.log_funel import MessageFunel, build_message_funel
 from ..services.redactor import redact_text, redact_value
 
 router = APIRouter(tags=["logs"])
@@ -254,44 +255,29 @@ class EventTraceDetail(EventTraceSummary):
     related_runtime_logs: list[RuntimeLogItem] = []
 
 
-class PluginRuntimeStatusItem(BaseModel):
-    id: int
-    plugin_key: str
-    account_id: int | None = None
-    enabled: bool
-    installed_version: str | None = None
-    load_status: str
-    last_load_error: str | None = None
-    last_invoked_at: datetime | None = None
-    last_invocation_status: str | None = None
-    last_trace_id: str | None = None
-    updated_at: datetime
+class MessageFunelOut(BaseModel):
+    received: str
+    routed: str
+    ran: str
+    sent: str
+    verdict: str
+    stuck_at: str | None = None
+    reason_code: str | None = None
+    reason_text: str
+    next_step: str
 
     @classmethod
-    def from_row(cls, row: PluginRuntimeStatus) -> PluginRuntimeStatusItem:
-        return cls(
-            id=row.id,
-            plugin_key=row.plugin_key,
-            account_id=row.account_id,
-            enabled=row.enabled,
-            installed_version=row.installed_version,
-            load_status=row.load_status,
-            last_load_error=redact_text(row.last_load_error or "") or None,
-            last_invoked_at=row.last_invoked_at,
-            last_invocation_status=row.last_invocation_status,
-            last_trace_id=row.last_trace_id,
-            updated_at=row.updated_at,
-        )
+    def from_funel(cls, funel: MessageFunel) -> MessageFunelOut:
+        return cls(**funel.model_dump())
 
 
-class TraceOverview(BaseModel):
-    last_5m_total: int = 0
-    last_5m_failed: int = 0
-    last_5m_warning: int = 0
-    source_channel_counts: dict[str, int] = Field(default_factory=dict)
-    recent_errors: list[EventTraceSummary] = []
-    recent_failed_actions: list[EventActionItem] = []
-    recent_plugin_errors: list[PluginRuntimeStatusItem] = []
+class MessageFunelItem(EventTraceSummary):
+    funel: MessageFunelOut
+    verdict: str
+    stuck_at: str | None = None
+    reason_code: str | None = None
+    reason_text: str
+    next_step: str
 
 
 async def _trace_summaries_with_counts(db: DBSession, rows: list[EventTrace]) -> list[EventTraceSummary]:
@@ -347,6 +333,129 @@ async def _trace_summaries_with_counts(db: DBSession, rows: list[EventTrace]) ->
         summary.action_count = action_counts.get(summary.trace_id, 0)
         summary.error_count = span_error_counts.get(summary.trace_id, 0) + action_error_counts.get(summary.trace_id, 0)
     return summaries
+
+
+def _event_trace_stmt(
+    *,
+    account_id: int | None = None,
+    source_channel: str | None = None,
+    event_type: str | None = None,
+    chat_id: int | None = None,
+    message_id: int | None = None,
+    update_id: int | None = None,
+    sender_user_id: int | None = None,
+    plugin_key: str | None = None,
+    status: str | None = None,
+    trace_id: str | None = None,
+    reason_code: str | None = None,
+    keyword: str | None = None,
+    since: datetime | None = None,
+    until: datetime | None = None,
+    limit: int = 100,
+):
+    stmt = select(EventTrace).order_by(desc(EventTrace.started_at)).limit(limit)
+    if account_id is not None:
+        stmt = stmt.where(EventTrace.account_id == account_id)
+    if source_channel:
+        stmt = stmt.where(EventTrace.source_channel == source_channel)
+    if event_type:
+        stmt = stmt.where(EventTrace.event_type == event_type)
+    if chat_id is not None:
+        stmt = stmt.where(EventTrace.chat_id == chat_id)
+    if message_id is not None:
+        stmt = stmt.where(EventTrace.message_id == message_id)
+    if update_id is not None:
+        stmt = stmt.where(EventTrace.update_id == update_id)
+    if sender_user_id is not None:
+        stmt = stmt.where(EventTrace.sender_user_id == sender_user_id)
+    if status:
+        stmt = stmt.where(EventTrace.status == status)
+    if trace_id:
+        stmt = stmt.where(EventTrace.trace_id == trace_id)
+    if reason_code:
+        stmt = stmt.where(
+            or_(
+                EventTrace.trace_id.in_(
+                    select(EventSpan.trace_id).where(EventSpan.reason_code == reason_code)
+                ),
+                EventTrace.trace_id.in_(
+                    select(EventAction.trace_id).where(EventAction.error_code == reason_code)
+                ),
+            )
+        )
+    if since is not None:
+        stmt = stmt.where(EventTrace.started_at >= since)
+    if until is not None:
+        stmt = stmt.where(EventTrace.started_at <= until)
+    if keyword:
+        like = f"%{keyword}%"
+        stmt = stmt.where(
+            or_(
+                EventTrace.trace_id.ilike(like),
+                EventTrace.sender_name.ilike(like),
+                EventTrace.text_preview.ilike(like),
+                cast(EventTrace.raw_summary, String).ilike(like),
+            )
+        )
+    if plugin_key:
+        stmt = stmt.where(
+            EventTrace.trace_id.in_(
+                select(EventSpan.trace_id).where(EventSpan.plugin_key == plugin_key)
+            )
+        )
+    return stmt
+
+
+async def _span_action_groups(
+    db: DBSession,
+    trace_ids: list[str],
+) -> tuple[dict[str, list[EventSpan]], dict[str, list[EventAction]]]:
+    if not trace_ids:
+        return {}, {}
+    span_rows = (
+        await db.execute(
+            select(EventSpan)
+            .where(EventSpan.trace_id.in_(trace_ids))
+            .order_by(EventSpan.trace_id, EventSpan.started_at, EventSpan.id)
+        )
+    ).scalars().all()
+    action_rows = (
+        await db.execute(
+            select(EventAction)
+            .where(EventAction.trace_id.in_(trace_ids))
+            .order_by(EventAction.trace_id, EventAction.created_at, EventAction.id)
+        )
+    ).scalars().all()
+    spans_by_trace: dict[str, list[EventSpan]] = {trace_id: [] for trace_id in trace_ids}
+    actions_by_trace: dict[str, list[EventAction]] = {trace_id: [] for trace_id in trace_ids}
+    for span in span_rows:
+        spans_by_trace.setdefault(span.trace_id, []).append(span)
+    for action in action_rows:
+        actions_by_trace.setdefault(action.trace_id, []).append(action)
+    return spans_by_trace, actions_by_trace
+
+
+def _message_funel_item(
+    row: EventTrace,
+    spans: list[EventSpan],
+    actions: list[EventAction],
+) -> MessageFunelItem:
+    summary = EventTraceSummary.from_row(row)
+    summary.plugin_count = len({item.plugin_key for item in spans if item.plugin_key})
+    summary.action_count = len(actions)
+    summary.error_count = sum(1 for item in spans if item.status in {"failed", "error", "warning", "warn"})
+    summary.error_count += sum(1 for item in actions if item.status in {"failed", "error"})
+    funel = build_message_funel(row, spans, actions)
+    funel_out = MessageFunelOut.from_funel(funel)
+    return MessageFunelItem(
+        **summary.model_dump(),
+        funel=funel_out,
+        verdict=funel.verdict,
+        stuck_at=funel.stuck_at,
+        reason_code=funel.reason_code,
+        reason_text=funel.reason_text,
+        next_step=funel.next_step,
+    )
 
 
 # ── /api/logs/audit ──────────────────────────────────────────────
@@ -408,72 +517,6 @@ _SOURCE_ALIAS: dict[str, tuple[str, ...]] = {
 }
 
 
-@router.get("/api/logs/trace/overview", response_model=TraceOverview)
-async def trace_overview(
-    db: DBSession,
-    _user: CurrentUser,
-    account_id: int | None = Query(None),
-) -> TraceOverview:
-    since = datetime.now(UTC) - timedelta(minutes=5)
-    base = [EventTrace.started_at >= since]
-    if account_id is not None:
-        base.append(EventTrace.account_id == account_id)
-    total = int((await db.execute(select(func.count(EventTrace.id)).where(*base))).scalar_one() or 0)
-    failed = int(
-        (
-            await db.execute(
-                select(func.count(EventTrace.id)).where(*base, EventTrace.status.in_(("failed", "error")))
-            )
-        ).scalar_one()
-        or 0
-    )
-    warning = int(
-        (
-            await db.execute(
-                select(func.count(EventTrace.id)).where(*base, EventTrace.status.in_(("warning", "warn")))
-            )
-        ).scalar_one()
-        or 0
-    )
-    source_channel_counts = {
-        str(channel or "unknown"): int(count or 0)
-        for channel, count in (
-            await db.execute(
-                select(EventTrace.source_channel, func.count(EventTrace.id))
-                .where(*base)
-                .group_by(EventTrace.source_channel)
-            )
-        ).all()
-    }
-    error_stmt = select(EventTrace).where(EventTrace.status.in_(("failed", "error", "warning", "warn")))
-    if account_id is not None:
-        error_stmt = error_stmt.where(EventTrace.account_id == account_id)
-    error_rows = (await db.execute(error_stmt.order_by(desc(EventTrace.started_at)).limit(8))).scalars().all()
-
-    action_stmt = select(EventAction).where(EventAction.status.in_(("failed", "error")))
-    if account_id is not None:
-        action_stmt = action_stmt.where(
-            EventAction.trace_id.in_(select(EventTrace.trace_id).where(EventTrace.account_id == account_id))
-        )
-    action_rows = (await db.execute(action_stmt.order_by(desc(EventAction.created_at)).limit(8))).scalars().all()
-
-    plugin_stmt = select(PluginRuntimeStatus).where(
-        PluginRuntimeStatus.load_status.in_(("failed", "error")),
-    )
-    if account_id is not None:
-        plugin_stmt = plugin_stmt.where(PluginRuntimeStatus.account_id == account_id)
-    plugin_rows = (await db.execute(plugin_stmt.order_by(desc(PluginRuntimeStatus.updated_at)).limit(8))).scalars().all()
-    return TraceOverview(
-        last_5m_total=total,
-        last_5m_failed=failed,
-        last_5m_warning=warning,
-        source_channel_counts=source_channel_counts,
-        recent_errors=await _trace_summaries_with_counts(db, error_rows),
-        recent_failed_actions=[EventActionItem.from_row(row) for row in action_rows],
-        recent_plugin_errors=[PluginRuntimeStatusItem.from_row(row) for row in plugin_rows],
-    )
-
-
 @router.get("/api/logs/trace/events", response_model=list[EventTraceSummary])
 async def list_event_traces(
     db: DBSession,
@@ -494,58 +537,85 @@ async def list_event_traces(
     until: datetime | None = Query(None),
     limit: int = Query(100, ge=1, le=500),
 ) -> list[EventTraceSummary]:
-    stmt = select(EventTrace).order_by(desc(EventTrace.started_at)).limit(limit)
-    if account_id is not None:
-        stmt = stmt.where(EventTrace.account_id == account_id)
-    if source_channel:
-        stmt = stmt.where(EventTrace.source_channel == source_channel)
-    if event_type:
-        stmt = stmt.where(EventTrace.event_type == event_type)
-    if chat_id is not None:
-        stmt = stmt.where(EventTrace.chat_id == chat_id)
-    if message_id is not None:
-        stmt = stmt.where(EventTrace.message_id == message_id)
-    if update_id is not None:
-        stmt = stmt.where(EventTrace.update_id == update_id)
-    if sender_user_id is not None:
-        stmt = stmt.where(EventTrace.sender_user_id == sender_user_id)
-    if status:
-        stmt = stmt.where(EventTrace.status == status)
-    if trace_id:
-        stmt = stmt.where(EventTrace.trace_id == trace_id)
-    if reason_code:
-        stmt = stmt.where(
-            or_(
-                EventTrace.trace_id.in_(
-                    select(EventSpan.trace_id).where(EventSpan.reason_code == reason_code)
-                ),
-                EventTrace.trace_id.in_(
-                    select(EventAction.trace_id).where(EventAction.error_code == reason_code)
-                ),
-            )
-        )
-    if since is not None:
-        stmt = stmt.where(EventTrace.started_at >= since)
-    if until is not None:
-        stmt = stmt.where(EventTrace.started_at <= until)
-    if keyword:
-        like = f"%{keyword}%"
-        stmt = stmt.where(
-            or_(
-                EventTrace.trace_id.ilike(like),
-                EventTrace.sender_name.ilike(like),
-                EventTrace.text_preview.ilike(like),
-                cast(EventTrace.raw_summary, String).ilike(like),
-            )
-        )
-    if plugin_key:
-        stmt = stmt.where(
-            EventTrace.trace_id.in_(
-                select(EventSpan.trace_id).where(EventSpan.plugin_key == plugin_key)
-            )
-        )
+    stmt = _event_trace_stmt(
+        account_id=account_id,
+        source_channel=source_channel,
+        event_type=event_type,
+        chat_id=chat_id,
+        message_id=message_id,
+        update_id=update_id,
+        sender_user_id=sender_user_id,
+        plugin_key=plugin_key,
+        status=status,
+        trace_id=trace_id,
+        reason_code=reason_code,
+        keyword=keyword,
+        since=since,
+        until=until,
+        limit=limit,
+    )
     rows = (await db.execute(stmt)).scalars().all()
     return await _trace_summaries_with_counts(db, rows)
+
+
+@router.get("/api/logs/messages", response_model=list[MessageFunelItem])
+async def list_log_messages(
+    db: DBSession,
+    _user: CurrentUser,
+    account_id: int | None = Query(None),
+    source_channel: str | None = Query(None),
+    event_type: str | None = Query(None),
+    chat_id: int | None = Query(None),
+    message_id: int | None = Query(None),
+    update_id: int | None = Query(None),
+    sender_user_id: int | None = Query(None),
+    plugin_key: str | None = Query(None),
+    status: str | None = Query(None),
+    trace_id: str | None = Query(None),
+    reason_code: str | None = Query(None),
+    verdict: str | None = Query(None),
+    keyword: str | None = Query(None),
+    since: datetime | None = Query(None),
+    until: datetime | None = Query(None),
+    limit: int = Query(100, ge=1, le=500),
+) -> list[MessageFunelItem]:
+    """返回一页式消息流。
+
+    复用 trace 列表过滤条件，然后批量读取 span/action 计算四段漏斗。
+    verdict 是派生字段，先取一小段窗口后在 Python 侧过滤。
+    """
+    fetch_limit = min(500, limit * 3) if verdict else limit
+    stmt = _event_trace_stmt(
+        account_id=account_id,
+        source_channel=source_channel,
+        event_type=event_type,
+        chat_id=chat_id,
+        message_id=message_id,
+        update_id=update_id,
+        sender_user_id=sender_user_id,
+        plugin_key=plugin_key,
+        status=status,
+        trace_id=trace_id,
+        reason_code=reason_code,
+        keyword=keyword,
+        since=since,
+        until=until,
+        limit=fetch_limit,
+    )
+    rows = (await db.execute(stmt)).scalars().all()
+    trace_ids = [row.trace_id for row in rows]
+    spans_by_trace, actions_by_trace = await _span_action_groups(db, trace_ids)
+    items = [
+        _message_funel_item(
+            row,
+            spans_by_trace.get(row.trace_id, []),
+            actions_by_trace.get(row.trace_id, []),
+        )
+        for row in rows
+    ]
+    if verdict:
+        items = [item for item in items if item.verdict == verdict]
+    return items[:limit]
 
 
 @router.get("/api/logs/trace/events/{trace_id}", response_model=EventTraceDetail)
@@ -601,137 +671,6 @@ async def get_event_trace(
         actions=action_items,
         related_runtime_logs=[RuntimeLogItem.from_row(item) for item in logs],
     )
-
-
-@router.get("/api/logs/trace/plugins", response_model=list[PluginRuntimeStatusItem])
-async def list_plugin_runtime_status(
-    db: DBSession,
-    _user: CurrentUser,
-    account_id: int | None = Query(None),
-    plugin_key: str | None = Query(None),
-    status: str | None = Query(None),
-    limit: int = Query(100, ge=1, le=500),
-) -> list[PluginRuntimeStatusItem]:
-    stmt = select(PluginRuntimeStatus).order_by(desc(PluginRuntimeStatus.updated_at)).limit(limit)
-    if account_id is not None:
-        stmt = stmt.where(PluginRuntimeStatus.account_id == account_id)
-    if plugin_key:
-        stmt = stmt.where(PluginRuntimeStatus.plugin_key == plugin_key)
-    if status:
-        stmt = stmt.where(PluginRuntimeStatus.load_status == status)
-    rows = (await db.execute(stmt)).scalars().all()
-    return [PluginRuntimeStatusItem.from_row(row) for row in rows]
-
-
-@router.get("/api/logs/trace/plugins/{plugin_key}")
-async def get_plugin_runtime_detail(
-    plugin_key: str,
-    db: DBSession,
-    _user: CurrentUser,
-    account_id: int | None = Query(None),
-) -> dict[str, Any]:
-    status_stmt = select(PluginRuntimeStatus).where(PluginRuntimeStatus.plugin_key == plugin_key)
-    if account_id is not None:
-        status_stmt = status_stmt.where(PluginRuntimeStatus.account_id == account_id)
-    statuses = (await db.execute(status_stmt.order_by(desc(PluginRuntimeStatus.updated_at)))).scalars().all()
-    spans_stmt = select(EventSpan).where(EventSpan.plugin_key == plugin_key).order_by(desc(EventSpan.started_at)).limit(20)
-    if account_id is not None:
-        spans_stmt = spans_stmt.where(
-            EventSpan.trace_id.in_(select(EventTrace.trace_id).where(EventTrace.account_id == account_id))
-        )
-    spans = (await db.execute(spans_stmt)).scalars().all()
-    trace_ids = [item.trace_id for item in spans]
-    traces = []
-    if trace_ids:
-        trace_rows = (
-            await db.execute(select(EventTrace).where(EventTrace.trace_id.in_(trace_ids)).order_by(desc(EventTrace.started_at)))
-        ).scalars().all()
-        traces = await _trace_summaries_with_counts(db, trace_rows)
-    return {
-        "statuses": [PluginRuntimeStatusItem.from_row(row).model_dump(mode="json") for row in statuses],
-        "recent_spans": [EventSpanItem.from_row(row).model_dump(mode="json") for row in spans],
-        "recent_traces": [item.model_dump(mode="json") for item in traces],
-    }
-
-
-@router.get("/api/logs/trace/actions", response_model=list[EventActionItem])
-async def list_event_actions(
-    db: DBSession,
-    _user: CurrentUser,
-    account_id: int | None = Query(None),
-    trace_id: str | None = Query(None),
-    plugin_key: str | None = Query(None),
-    action_type: str | None = Query(None),
-    status: str | None = Query(None),
-    reason_code: str | None = Query(None),
-    error_code: str | None = Query(None),
-    since: datetime | None = Query(None),
-    until: datetime | None = Query(None),
-    limit: int = Query(100, ge=1, le=500),
-) -> list[EventActionItem]:
-    stmt = select(EventAction).order_by(desc(EventAction.created_at)).limit(limit)
-    if trace_id:
-        stmt = stmt.where(EventAction.trace_id == trace_id)
-    if plugin_key:
-        stmt = stmt.where(EventAction.plugin_key == plugin_key)
-    if action_type:
-        stmt = stmt.where(EventAction.action_type == action_type)
-    if status:
-        stmt = stmt.where(EventAction.status == status)
-    action_reason = reason_code or error_code
-    if action_reason:
-        stmt = stmt.where(EventAction.error_code == action_reason)
-    if since is not None:
-        stmt = stmt.where(EventAction.created_at >= since)
-    if until is not None:
-        stmt = stmt.where(EventAction.created_at <= until)
-    if account_id is not None:
-        stmt = stmt.where(
-            EventAction.trace_id.in_(select(EventTrace.trace_id).where(EventTrace.account_id == account_id))
-        )
-    rows = (await db.execute(stmt)).scalars().all()
-    return [EventActionItem.from_row(row) for row in rows]
-
-
-@router.get("/api/logs/trace/commands", response_model=list[EventTraceSummary])
-async def list_command_traces(
-    db: DBSession,
-    _user: CurrentUser,
-    account_id: int | None = Query(None),
-    keyword: str | None = Query(None),
-    since: datetime | None = Query(None),
-    until: datetime | None = Query(None),
-    reason_code: str | None = Query(None),
-    limit: int = Query(100, ge=1, le=500),
-) -> list[EventTraceSummary]:
-    stmt = (
-        select(EventTrace)
-        .where(EventTrace.event_type.in_(("command", "admin_command", "sudo_command")))
-        .order_by(desc(EventTrace.started_at))
-        .limit(limit)
-    )
-    if account_id is not None:
-        stmt = stmt.where(EventTrace.account_id == account_id)
-    if keyword:
-        like = f"%{keyword}%"
-        stmt = stmt.where(or_(EventTrace.text_preview.ilike(like), EventTrace.trace_id.ilike(like)))
-    if since is not None:
-        stmt = stmt.where(EventTrace.started_at >= since)
-    if until is not None:
-        stmt = stmt.where(EventTrace.started_at <= until)
-    if reason_code:
-        stmt = stmt.where(
-            or_(
-                EventTrace.trace_id.in_(
-                    select(EventSpan.trace_id).where(EventSpan.reason_code == reason_code)
-                ),
-                EventTrace.trace_id.in_(
-                    select(EventAction.trace_id).where(EventAction.error_code == reason_code)
-                ),
-            )
-        )
-    rows = (await db.execute(stmt)).scalars().all()
-    return await _trace_summaries_with_counts(db, rows)
 
 
 @router.get("/api/logs/runtime", response_model=list[RuntimeLogItem])

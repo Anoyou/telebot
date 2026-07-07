@@ -920,34 +920,28 @@ export interface EventTraceDetail extends EventTraceSummary {
   related_runtime_logs: RuntimeLogItem[];
 }
 
-export interface PluginRuntimeStatusItem {
-  id: number;
-  plugin_key: string;
-  account_id?: number | null;
-  enabled: boolean;
-  installed_version?: string | null;
-  load_status: string;
-  last_load_error?: string | null;
-  last_invoked_at?: string | null;
-  last_invocation_status?: string | null;
-  last_trace_id?: string | null;
-  updated_at: string;
+export type MessageFunelStage = "pass" | "skip" | "stuck" | "fail" | "none";
+export type MessageVerdict = "responded" | "no_response_normal" | "stuck" | "failed";
+
+export interface MessageFunel {
+  received: MessageFunelStage;
+  routed: MessageFunelStage;
+  ran: MessageFunelStage;
+  sent: MessageFunelStage;
+  verdict: MessageVerdict;
+  stuck_at?: "routed" | "ran" | "sent" | null;
+  reason_code?: string | null;
+  reason_text: string;
+  next_step: string;
 }
 
-export interface PluginRuntimeDetail {
-  statuses: PluginRuntimeStatusItem[];
-  recent_spans: EventSpanItem[];
-  recent_traces: EventTraceSummary[];
-}
-
-export interface TraceOverview {
-  last_5m_total: number;
-  last_5m_failed: number;
-  last_5m_warning: number;
-  source_channel_counts: Record<string, number>;
-  recent_errors: EventTraceSummary[];
-  recent_failed_actions: EventActionItem[];
-  recent_plugin_errors: PluginRuntimeStatusItem[];
+export interface MessageFunelItem extends EventTraceSummary {
+  funel: MessageFunel;
+  verdict: MessageVerdict;
+  stuck_at?: "routed" | "ran" | "sent" | null;
+  reason_code?: string | null;
+  reason_text: string;
+  next_step: string;
 }
 
 // ===================== 系统设置 =====================

@@ -7,10 +7,8 @@ import pytest
 
 from app.api.logs import (
     EventTraceSummary,
-    list_command_traces,
-    list_event_actions,
     list_event_traces,
-    trace_overview,
+    list_log_messages,
 )
 
 
@@ -90,6 +88,34 @@ class _CaptureDB:
         return _EmptyScalarResult()
 
 
+class _ListScalarResult:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def scalars(self):
+        return self
+
+    def all(self):
+        return self._rows
+
+
+class _MessageDB:
+    def __init__(self, *, traces, spans, actions) -> None:
+        self.traces = traces
+        self.spans = spans
+        self.actions = actions
+        self.statements: list[str] = []
+
+    async def execute(self, stmt):
+        sql = str(stmt)
+        self.statements.append(sql)
+        if "FROM event_span" in sql:
+            return _ListScalarResult(self.spans)
+        if "FROM event_action" in sql:
+            return _ListScalarResult(self.actions)
+        return _ListScalarResult(self.traces)
+
+
 @pytest.mark.asyncio
 async def test_list_event_traces_filters_by_trace_and_reason_code() -> None:
     db = _CaptureDB()
@@ -110,57 +136,105 @@ async def test_list_event_traces_filters_by_trace_and_reason_code() -> None:
 
 
 @pytest.mark.asyncio
-async def test_list_event_actions_filters_by_reason_or_error_code() -> None:
-    db = _CaptureDB()
+async def test_list_log_messages_batches_spans_actions_and_filters_verdict() -> None:
+    traces = [
+        _trace_row(
+            id=1,
+            trace_id="evt_ok",
+            text_preview="hello",
+            status="ok",
+            ended_at=datetime(2026, 6, 29, tzinfo=UTC),
+        ),
+        _trace_row(
+            id=2,
+            trace_id="evt_failed",
+            text_preview="pay",
+            status="ok",
+            ended_at=datetime(2026, 6, 29, tzinfo=UTC),
+        ),
+    ]
+    spans = [
+        SimpleNamespace(
+            id=1,
+            span_id="sp_1",
+            trace_id="evt_ok",
+            phase="route",
+            component="interaction_rule",
+            plugin_key=None,
+            entry_key=None,
+            status="ok",
+            reason_code="matched",
+            message=None,
+            detail=None,
+            started_at=datetime(2026, 6, 29, tzinfo=UTC),
+            ended_at=datetime(2026, 6, 29, tzinfo=UTC),
+            duration_ms=1,
+        ),
+        SimpleNamespace(
+            id=2,
+            span_id="sp_2",
+            trace_id="evt_failed",
+            phase="plugin_invoke",
+            component="interaction_module",
+            plugin_key="math10",
+            entry_key=None,
+            status="ok",
+            reason_code=None,
+            message=None,
+            detail=None,
+            started_at=datetime(2026, 6, 29, tzinfo=UTC),
+            ended_at=datetime(2026, 6, 29, tzinfo=UTC),
+            duration_ms=1,
+        ),
+    ]
+    actions = [
+        SimpleNamespace(
+            id=1,
+            action_id="act_1",
+            trace_id="evt_ok",
+            plugin_key="math10",
+            action_type="send_message",
+            status="ok",
+            error_code=None,
+            error_message=None,
+        ),
+        SimpleNamespace(
+            id=2,
+            action_id="act_2",
+            trace_id="evt_failed",
+            plugin_key="math10",
+            action_type="send_message",
+            status="failed",
+            error_code="telegram_api_error",
+            error_message="bad request",
+        ),
+    ]
+    db = _MessageDB(traces=traces, spans=spans, actions=actions)
 
-    rows = await list_event_actions(
+    rows = await list_log_messages(
         db=db,
         _user=object(),
-        account_id=1,
-        trace_id="evt_test",
-        reason_code="telegram_api_error",
-        since=datetime(2026, 6, 29, tzinfo=UTC),
-        until=datetime(2026, 6, 30, tzinfo=UTC),
+        account_id=None,
+        source_channel=None,
+        event_type=None,
+        chat_id=None,
+        message_id=None,
+        update_id=None,
+        sender_user_id=None,
+        plugin_key=None,
+        status=None,
+        trace_id=None,
+        reason_code=None,
+        verdict="failed",
+        keyword=None,
+        since=None,
+        until=None,
         limit=100,
     )
 
-    assert rows == []
+    assert [row.trace_id for row in rows] == ["evt_failed"]
+    assert rows[0].verdict == "failed"
+    assert rows[0].funel.sent == "fail"
     sql = "\n".join(db.statements)
-    assert "event_action.trace_id" in sql
-    assert "event_action.error_code" in sql
-    assert "event_action.created_at >=" in sql
-    assert "event_action.created_at <=" in sql
-    assert "event_trace.account_id" in sql
-
-
-@pytest.mark.asyncio
-async def test_trace_overview_filters_failed_actions_by_account_id() -> None:
-    db = _CaptureDB()
-
-    overview = await trace_overview(db=db, _user=object(), account_id=1)
-
-    assert overview.recent_failed_actions == []
-    action_sql = "\n".join(stmt for stmt in db.statements if "event_action" in stmt)
-    assert "event_action.status" in action_sql
-    assert "event_trace.account_id" in action_sql
-
-
-@pytest.mark.asyncio
-async def test_list_command_traces_filters_by_time_and_reason_code() -> None:
-    db = _CaptureDB()
-
-    rows = await list_command_traces(
-        db=db,
-        _user=object(),
-        since=datetime(2026, 6, 29, tzinfo=UTC),
-        until=datetime(2026, 6, 30, tzinfo=UTC),
-        reason_code="command_matched",
-        limit=100,
-    )
-
-    assert rows == []
-    sql = "\n".join(db.statements)
-    assert "event_trace.started_at >=" in sql
-    assert "event_trace.started_at <=" in sql
-    assert "event_span.reason_code" in sql
-    assert "event_action.error_code" in sql
+    assert sql.count("FROM event_span") == 1
+    assert sql.count("FROM event_action") == 1

@@ -40,12 +40,16 @@ function resolveTheme(theme: Theme): ResolvedTheme {
 
 function applyResolvedTheme(resolvedTheme: ResolvedTheme) {
   const root = document.documentElement;
+  const chromeColor = resolvedTheme === "dark" ? DARK_THEME_COLOR : LIGHT_THEME_COLOR;
+
   root.classList.toggle("dark", resolvedTheme === "dark");
   root.style.colorScheme = resolvedTheme;
+  root.style.backgroundColor = chromeColor;
+  document.body.style.backgroundColor = chromeColor;
 
   const meta = document.querySelector<HTMLMetaElement>('meta[name="theme-color"]');
   if (meta) {
-    meta.content = resolvedTheme === "dark" ? DARK_THEME_COLOR : LIGHT_THEME_COLOR;
+    meta.content = chromeColor;
   }
 
   const statusBarMeta = document.querySelector<HTMLMetaElement>(

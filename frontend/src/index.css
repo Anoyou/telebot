@@ -79,6 +79,7 @@
     width: 100%;
     min-height: 100%;
     overflow-x: hidden;
+    background-color: hsl(var(--app-chrome));
     -webkit-text-size-adjust: 100%;
     text-size-adjust: 100%;
     touch-action: manipulation;
@@ -89,6 +90,7 @@
     width: 100%;
     min-height: 100dvh;
     overflow-x: hidden;
+    background-color: hsl(var(--app-chrome));
   }
 
   * {

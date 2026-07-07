@@ -6,14 +6,12 @@ import type {
   BackendVersionInfo,
   CheckUpdateResult,
   UpdateJobStatus,
-  EventActionItem,
   EventTraceDetail,
   EventTraceSummary,
   HealthOverview,
   HumanizeConfig,
   HumanizeUpdate,
-  PluginRuntimeDetail,
-  PluginRuntimeStatusItem,
+  MessageFunelItem,
   PullUpdateResult,
   ResourceDashboard,
   RateLimitRuleConfig,
@@ -22,7 +20,6 @@ import type {
   RuntimeLogItem,
   SystemSettings,
   TemplateOut,
-  TraceOverview,
 } from "@/api/types";
 
 // ===================== 版本号（0.4.2 加） =====================
@@ -114,13 +111,8 @@ export interface TraceQuery {
   limit?: number;
 }
 
-export async function getTraceOverview(
-  q: Pick<TraceQuery, "account_id"> = {},
-): Promise<TraceOverview> {
-  const { data } = await api.get<TraceOverview>("/api/logs/trace/overview", {
-    params: q,
-  });
-  return data;
+export interface MessageFunelQuery extends TraceQuery {
+  verdict?: "responded" | "no_response_normal" | "stuck" | "failed" | "";
 }
 
 export async function listEventTraces(
@@ -132,59 +124,19 @@ export async function listEventTraces(
   return data;
 }
 
+export async function getMessageFunel(
+  q: MessageFunelQuery = {},
+): Promise<MessageFunelItem[]> {
+  const { data } = await api.get<MessageFunelItem[]>("/api/logs/messages", {
+    params: q,
+  });
+  return data;
+}
+
 export async function getEventTrace(traceId: string): Promise<EventTraceDetail> {
   const { data } = await api.get<EventTraceDetail>(
     `/api/logs/trace/events/${encodeURIComponent(traceId)}`,
   );
-  return data;
-}
-
-export async function listPluginRuntimeStatus(
-  q: Pick<TraceQuery, "account_id" | "plugin_key" | "status" | "limit"> = {},
-): Promise<PluginRuntimeStatusItem[]> {
-  const { data } = await api.get<PluginRuntimeStatusItem[]>("/api/logs/trace/plugins", {
-    params: q,
-  });
-  return data;
-}
-
-export async function getPluginRuntimeDetail(
-  pluginKey: string,
-  q: Pick<TraceQuery, "account_id"> = {},
-): Promise<PluginRuntimeDetail> {
-  const { data } = await api.get<PluginRuntimeDetail>(
-    `/api/logs/trace/plugins/${encodeURIComponent(pluginKey)}`,
-    { params: q },
-  );
-  return data;
-}
-
-export interface ActionTraceQuery {
-  account_id?: number | string;
-  trace_id?: string;
-  plugin_key?: string;
-  action_type?: string;
-  status?: string;
-  reason_code?: string;
-  error_code?: string;
-  limit?: number;
-}
-
-export async function listEventActions(
-  q: ActionTraceQuery = {},
-): Promise<EventActionItem[]> {
-  const { data } = await api.get<EventActionItem[]>("/api/logs/trace/actions", {
-    params: q,
-  });
-  return data;
-}
-
-export async function listCommandTraces(
-  q: Pick<TraceQuery, "account_id" | "keyword" | "since" | "until" | "reason_code" | "limit"> = {},
-): Promise<EventTraceSummary[]> {
-  const { data } = await api.get<EventTraceSummary[]>("/api/logs/trace/commands", {
-    params: q,
-  });
   return data;
 }
 

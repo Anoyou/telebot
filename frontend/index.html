@@ -8,7 +8,7 @@
 
     <!-- PWA 主题色（Android Chrome 顶栏 + iOS Safari 状态栏底色） -->
     <meta name="theme-color" content="#ffffff" />
-    <meta name="color-scheme" content="dark light" />
+    <meta name="color-scheme" content="light dark" />
 
     <!-- iOS 全屏 PWA：从主屏幕启动时隐藏 Safari UI -->
     <meta name="apple-mobile-web-app-capable" content="yes" />
@@ -24,10 +24,12 @@
           var theme = localStorage.getItem("telepilot-theme") || localStorage.getItem("telebot-theme") || "system";
           var prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
           var dark = theme === "dark" || (theme === "system" && prefersDark);
+          var chrome = dark ? "#0b1120" : "#ffffff";
           document.documentElement.classList.toggle("dark", dark);
           document.documentElement.style.colorScheme = dark ? "dark" : "light";
+          document.documentElement.style.backgroundColor = chrome;
           var meta = document.querySelector('meta[name="theme-color"]');
-          if (meta) meta.setAttribute("content", dark ? "#0b1120" : "#ffffff");
+          if (meta) meta.setAttribute("content", chrome);
           var statusBar = document.querySelector('meta[name="apple-mobile-web-app-status-bar-style"]');
           if (statusBar) statusBar.setAttribute("content", dark ? "black-translucent" : "default");
         } catch (e) {}

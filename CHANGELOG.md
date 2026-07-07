@@ -20,6 +20,21 @@
 
 ## [Unreleased]
 
+## [0.52.0] — 2026-07-08 · minor（次版本） · 日志中心重构版本
+
+### Added
+- 日志中心新增后端消息漏斗判定与 `GET /api/logs/messages` 聚合端点，每条消息直接返回收到、匹配、执行、发送四段状态、最终结论、卡点、中文原因和下一步建议。
+
+### Changed
+- 日志中心页面从多 tab 专家视图收敛为一页式消息流，顶部统一筛选账号、时间、结果和关键词，消息行直接展示四段漏斗并支持展开 trace 详情。
+- 漏斗结论和 reason code 中文文案统一由后端计算，前端不再维护独立判定逻辑，避免排障口径漂移。
+
+### Fixed
+- 再次修复 iOS PWA 浅色主题顶部安全区残留灰色的问题：启动脚本、主题切换逻辑和根层 `html/body/#root` 背景现在会同步使用同一个应用 chrome 色。
+
+### Removed
+- 移除日志中心旧的只读 tab API：`/api/logs/trace/overview`、`/api/logs/trace/plugins`、`/api/logs/trace/plugins/{plugin_key}`、`/api/logs/trace/actions`、`/api/logs/trace/commands`。
+
 ## [0.51.2] — 2026-07-08 · patch（补丁版本） · PWA 顶部与资源面板补丁
 
 ### Changed
