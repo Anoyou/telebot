@@ -19,6 +19,7 @@ import base64
 import json
 import re
 from abc import ABC, abstractmethod
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -86,6 +87,17 @@ class LLMResult:
     image_urls: list = field(default_factory=list)  # LLM 生成的图片 URL（如 Grok 文生图）
     image_data: list = field(default_factory=list)  # LLM 生成的图片 base64 data URI（如 Grok 文生图）
     sources: list = field(default_factory=list)  # 联网搜索来源：[{url,title?}, ...]
+
+
+@dataclass(frozen=True)
+class LLMStreamChunk:
+    """Incremental text chunk from a provider streaming response."""
+
+    delta: str = ""
+    model: str | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    done: bool = False
 
 
 def _sniff_image_mime(data: bytes) -> str:
@@ -457,6 +469,28 @@ class LLMClient(ABC):
         非空时各实现按自己的 vision 协议把图片塞进 user message 的 content 块里。
         """
         raise NotImplementedError
+
+    async def stream_complete(
+        self,
+        system: str,
+        user: str,
+        max_tokens: int = 512,
+        images: list[bytes] | None = None,
+        web_search: bool = False,
+        web_search_context_size: str | None = None,
+        temperature: float | None = None,
+        reasoning_effort: str | None = None,
+        timeout_seconds: int | None = None,
+    ) -> AsyncIterator[LLMStreamChunk]:
+        """Yield provider-native text deltas.
+
+        Providers that have not wired a real streaming protocol must leave this
+        explicit instead of emulating streaming from a completed response.
+        """
+
+        if False:
+            yield LLMStreamChunk()
+        raise NotImplementedError("当前 provider 协议尚未接入原生 streaming")
 
     async def transcribe(self, audio: bytes, model: str) -> str:
         """语音转写：把音频字节喂给 ``/audio/transcriptions`` 之类的 STT 端点。
@@ -930,6 +964,150 @@ class AnthropicClient(LLMClient):
             output_tokens=output_tokens,
         )
 
+    async def stream_complete(
+        self,
+        system: str,
+        user: str,
+        max_tokens: int = 512,
+        images: list[bytes] | None = None,
+        web_search: bool = False,
+        web_search_context_size: str | None = None,
+        temperature: float | None = None,
+        reasoning_effort: str | None = None,
+        timeout_seconds: int | None = None,
+    ) -> AsyncIterator[LLMStreamChunk]:
+        if web_search:
+            raise LLMError("当前 Anthropic streaming 尚未接入联网搜索；请使用 OpenAI Responses provider")
+        url = f"{self._base_url}/messages"
+        headers = {
+            "x-api-key": self._api_key,
+            "anthropic-version": self._ANTHROPIC_VERSION,
+            "Content-Type": "application/json",
+            "anthropic-beta": "claude-code-20250219,context-1m-2025-08-07,interleaved-thinking-2025-05-14,effort-2025-11-24",
+            "anthropic-dangerous-direct-browser-access": "true",
+            "x-app": "cli",
+        }
+        if images:
+            user_content: object = [
+                *[
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": _sniff_image_mime(img),
+                            "data": base64.b64encode(img).decode("ascii"),
+                        },
+                    }
+                    for img in images
+                ],
+                {"type": "text", "text": user},
+            ]
+        else:
+            user_content = user
+        body = {
+            "model": self._model,
+            "max_tokens": max_tokens,
+            "system": system,
+            "messages": [{"role": "user", "content": user_content}],
+            "stream": True,
+        }
+        normalized_temperature = _normalize_temperature(temperature)
+        if normalized_temperature is not None:
+            body["temperature"] = normalized_temperature
+
+        client_kwargs: dict[str, object] = {"timeout": _timeout_for_call(self._base_url, timeout_seconds)}
+        if self._proxy_url:
+            client_kwargs["proxy"] = self._proxy_url
+        else:
+            client_kwargs["trust_env"] = False
+
+        model_name = self._model
+        input_tokens = 0
+        output_tokens = 0
+        final_sent = False
+
+        try:
+            async with httpx.AsyncClient(**client_kwargs) as cli:
+                async with cli.stream("POST", url, headers=headers, json=body) as resp:
+                    if resp.status_code >= 400:
+                        error_body = ""
+                        async for chunk in resp.aiter_text():
+                            error_body += chunk
+                            if len(error_body) > 500:
+                                break
+                        raise LLMError(
+                            _safe_error_message(
+                                f"Anthropic streaming 接口返回 {resp.status_code}: {error_body[:200]}{_hint_for_status(resp.status_code)}",
+                                self._api_key,
+                            )
+                        )
+
+                    current_event = ""
+                    async for line in resp.aiter_lines():
+                        line = line.rstrip("\r\n")
+                        if line.startswith("event: "):
+                            current_event = line[7:].strip()
+                            continue
+                        if line.startswith("data: "):
+                            raw = line[6:]
+                            if raw == "[DONE]":
+                                continue
+                            try:
+                                payload = json.loads(raw)
+                            except json.JSONDecodeError:
+                                continue
+                            if current_event == "message_start":
+                                msg = payload.get("message") or {}
+                                model_name = str(msg.get("model", self._model))
+                                usage = msg.get("usage") or {}
+                                input_tokens = int(usage.get("input_tokens") or 0)
+                            elif current_event == "content_block_delta":
+                                delta = payload.get("delta") or {}
+                                if delta.get("type") == "text_delta":
+                                    text = delta.get("text")
+                                    if isinstance(text, str) and text:
+                                        yield LLMStreamChunk(delta=text, model=model_name)
+                            elif current_event == "message_delta":
+                                usage = payload.get("usage") or {}
+                                output_tokens = int(usage.get("output_tokens") or 0)
+                            elif current_event == "error":
+                                error = payload.get("error") or payload
+                                raise LLMError(
+                                    _safe_error_message(
+                                        f"Anthropic streaming 返回错误事件: {str(error)[:200]}",
+                                        self._api_key,
+                                    )
+                                )
+                            elif current_event == "message_stop":
+                                final_sent = True
+                                yield LLMStreamChunk(
+                                    model=model_name,
+                                    input_tokens=input_tokens,
+                                    output_tokens=output_tokens,
+                                    done=True,
+                                )
+                                return
+                            continue
+                        if not line:
+                            current_event = ""
+        except LLMError:
+            raise
+        except httpx.HTTPError as exc:
+            raise LLMError(
+                _safe_error_message(
+                    _describe_http_error(exc, self._base_url),
+                    self._api_key,
+                )
+            ) from None
+
+        if not final_sent:
+            yield LLMStreamChunk(
+                model=model_name,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                done=True,
+            )
+
 
 # ────────────────────────────────────────────────────────────
 # OpenAI Responses API（POST /responses，2024 出的新协议）
@@ -1072,6 +1250,159 @@ class ResponsesClient(LLMClient):
             output_tokens=int(usage.get("output_tokens") or 0),
             sources=_extract_response_sources(data),
         )
+
+    async def stream_complete(
+        self,
+        system: str,
+        user: str,
+        max_tokens: int = 512,
+        images: list[bytes] | None = None,
+        web_search: bool = False,
+        web_search_context_size: str | None = None,
+        temperature: float | None = None,
+        reasoning_effort: str | None = None,
+        timeout_seconds: int | None = None,
+    ) -> AsyncIterator[LLMStreamChunk]:
+        url = f"{self._base_url}/responses"
+        headers = {"Content-Type": "application/json", "Accept": "text/event-stream"}
+        if self._api_key:
+            headers["Authorization"] = f"Bearer {self._api_key}"
+        if images:
+            input_content: object = [
+                {"type": "input_text", "text": user},
+                *[
+                    {"type": "input_image", "image_url": _to_data_url(img)}
+                    for img in images
+                ],
+            ]
+        else:
+            input_content = user
+        body = {
+            "model": self._model,
+            "instructions": system,
+            "input": [
+                {"role": "user", "content": input_content},
+            ],
+            "max_output_tokens": max_tokens,
+            "stream": True,
+        }
+        normalized_temperature = _normalize_temperature(temperature)
+        if normalized_temperature is not None:
+            body["temperature"] = normalized_temperature
+        normalized_effort = _normalize_reasoning_effort(reasoning_effort)
+        if normalized_effort is not None:
+            body["reasoning"] = {"effort": normalized_effort}
+        if web_search:
+            size = (web_search_context_size or "medium").lower()
+            if size not in {"low", "medium", "high"}:
+                size = "medium"
+            body["tools"] = [{"type": "web_search", "search_context_size": size}]
+            body["include"] = ["web_search_call.action.sources"]
+
+        client_kwargs: dict[str, object] = {"timeout": _timeout_for_call(self._base_url, timeout_seconds)}
+        if self._proxy_url:
+            client_kwargs["proxy"] = self._proxy_url
+        else:
+            client_kwargs["trust_env"] = False
+
+        model_name = self._model
+        input_tokens = 0
+        output_tokens = 0
+        final_sent = False
+
+        try:
+            async with httpx.AsyncClient(**client_kwargs) as cli:
+                async with cli.stream("POST", url, headers=headers, json=body) as resp:
+                    if resp.status_code >= 400:
+                        error_body = ""
+                        async for chunk in resp.aiter_text():
+                            error_body += chunk
+                            if len(error_body) > 500:
+                                break
+                        raise LLMError(
+                            _safe_error_message(
+                                f"Responses streaming 接口返回 {resp.status_code}: {error_body[:200]}{_hint_for_status(resp.status_code)}",
+                                self._api_key,
+                            )
+                        )
+
+                    current_event = ""
+                    async for line in resp.aiter_lines():
+                        line = line.rstrip("\r\n")
+                        if line.startswith("event:"):
+                            current_event = line.removeprefix("event:").strip()
+                            continue
+                        if line.startswith("data:"):
+                            raw = line.removeprefix("data:").strip()
+                            if not raw or raw == "[DONE]":
+                                continue
+                            try:
+                                payload = json.loads(raw)
+                            except json.JSONDecodeError:
+                                continue
+                            if not isinstance(payload, dict):
+                                continue
+                            payload_type = str(payload.get("type") or current_event or "")
+                            if payload_type in {"error", "response.error"}:
+                                error = payload.get("error") or payload
+                                raise LLMError(
+                                    _safe_error_message(
+                                        f"Responses streaming 返回错误事件: {str(error)[:200]}",
+                                        self._api_key,
+                                    )
+                                )
+                            response = payload.get("response")
+                            if isinstance(response, dict):
+                                model_name = str(response.get("model") or model_name)
+                                usage = response.get("usage") or {}
+                                input_tokens = int(usage.get("input_tokens") or input_tokens or 0)
+                                output_tokens = int(usage.get("output_tokens") or output_tokens or 0)
+                                status = str(response.get("status") or "")
+                                if payload_type == "response.completed" or status == "completed":
+                                    final_sent = True
+                                    yield LLMStreamChunk(
+                                        model=model_name,
+                                        input_tokens=input_tokens,
+                                        output_tokens=output_tokens,
+                                        done=True,
+                                    )
+                                    return
+                                if status in {"failed", "cancelled"}:
+                                    raise LLMError(
+                                        _safe_error_message(
+                                            f"Responses streaming 结束状态异常: {status}",
+                                            self._api_key,
+                                        )
+                                    )
+                            if payload_type == "response.output_text.delta":
+                                delta = payload.get("delta")
+                                if isinstance(delta, str) and delta:
+                                    yield LLMStreamChunk(delta=delta, model=model_name)
+                            elif payload_type == "response.output_text.done":
+                                text = payload.get("text")
+                                if isinstance(text, str) and text and not final_sent:
+                                    # done 事件只用于兼容不发送 completed 的反代；不重复输出文本。
+                                    continue
+                            continue
+                        if not line:
+                            current_event = ""
+        except LLMError:
+            raise
+        except httpx.HTTPError as exc:
+            raise LLMError(
+                _safe_error_message(
+                    _describe_http_error(exc, self._base_url),
+                    self._api_key,
+                )
+            ) from None
+
+        if not final_sent:
+            yield LLMStreamChunk(
+                model=model_name,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                done=True,
+            )
 
     async def transcribe(self, audio: bytes, model: str) -> str:
         """OpenAI Responses 协议厂商一般也在同一个 base_url 下挂 ``/audio/transcriptions``——
@@ -1476,6 +1807,7 @@ __all__ = [
     "LLMClient",
     "LLMError",
     "LLMResult",
+    "LLMStreamChunk",
     "OpenAIClient",
     "ResponsesClient",
     "build_client",

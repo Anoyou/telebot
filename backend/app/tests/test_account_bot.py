@@ -3733,6 +3733,116 @@ def test_interaction_module_payload_preserves_normalized_message_and_chat_qualit
     assert payload["raw"]["event_type"] == "message"
 
 
+def test_interaction_module_payload_normalized_envelope_snapshot(monkeypatch) -> None:
+    monkeypatch.setattr(account_bot_service, "plugin_declares_telegram_native_raw", lambda *_args, **_kwargs: False)
+    incoming = account_bot_runtime.Incoming(
+        account_id=1,
+        token="bbot-token",
+        update_id=77,
+        user_id=111,
+        chat_id=-100777,
+        chat_type="supergroup",
+        message_id=700,
+        text="看图猜词",
+        display_name="AAA",
+        username="aaa",
+        reply_to_message_id=699,
+        reply_to_text="上一条",
+        entity_languages=("zh",),
+        native_raw={
+            "update_id": 77,
+            "message": {
+                "message_id": 700,
+                "date": 1710000000,
+                "caption": "看图猜词",
+                "caption_entities": [{"type": "bold", "offset": 0, "length": 2}],
+                "photo": [
+                    {"file_id": "small", "file_unique_id": "u1", "width": 90, "height": 90},
+                    {"file_id": "large", "file_unique_id": "u2", "width": 320, "height": 240},
+                ],
+                "from": {"id": 111, "first_name": "AAA", "username": "aaa"},
+                "chat": {"id": -100777, "type": "supergroup", "title": "玩法群", "username": "game_room"},
+            },
+        },
+    )
+    payload = account_bot_runtime._interaction_module_payload(
+        incoming,
+        {
+            "id": "photo-game",
+            "name": "看图",
+            "action": "module",
+            "module_key": "photo_game",
+            "module_action": "answer",
+            "module_config": {"timeout": 45},
+        },
+        {"keyword": "看图"},
+        event_type="message",
+    )
+
+    assert sorted(payload.keys()) == [
+        "account_id",
+        "actor",
+        "callback_data",
+        "callback_query_id",
+        "chat",
+        "chat_id",
+        "chosen_inline_result",
+        "entity_languages",
+        "entry_key",
+        "event",
+        "event_type",
+        "inline_query",
+        "keyword",
+        "message",
+        "message_id",
+        "message_text",
+        "module_config",
+        "native_raw",
+        "native_raw_meta",
+        "payer_name",
+        "payer_user_id",
+        "payment",
+        "player",
+        "prize",
+        "raw",
+        "reply_to",
+        "reply_to_sender_chat_id",
+        "reply_to_sender_chat_title",
+        "reply_to_sender_chat_type",
+        "reply_to_sender_chat_username",
+        "reply_to_text",
+        "rule_id",
+        "rule_name",
+        "sender",
+        "sender_chat_id",
+        "sender_chat_title",
+        "sender_chat_type",
+        "sender_chat_username",
+        "sender_name",
+        "sender_user_id",
+        "sender_username",
+        "session",
+        "source",
+        "source_actor",
+        "source_message_id",
+        "source_update_id",
+        "timeout",
+        "trace_id",
+        "trigger",
+        "valid_seconds",
+    ]
+    assert payload["message"]["date"] == 1710000000
+    assert payload["message"]["media"]["file_id"] == "large"
+    assert payload["message"]["reply_to_message_id"] == 699
+    assert payload["chat"]["title"] == "玩法群"
+    assert payload["chat"]["username"] == "game_room"
+    assert payload["raw"]["media"]["file_id"] == "large"
+    assert payload["raw"]["parsed"] == {"keyword": "看图"}
+    assert payload["source"]["channel"] == "interaction_bot"
+    assert payload["inline_query"] is None
+    assert payload["chosen_inline_result"] is None
+
+
 def test_event_bus_payment_payload_uses_replied_user_as_player() -> None:
     incoming = account_bot_runtime.Incoming(
         account_id=1,

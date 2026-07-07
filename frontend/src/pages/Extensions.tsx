@@ -5,7 +5,7 @@
 //
 // 账号级启停与配置统一回 /plugins 首页，避免“安装页”和“插件中心”双入口重复。
 // 远程插件原为独立 /remote-plugins 页面，现在统一收口到 /plugins/manage。
-import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -23,7 +23,6 @@ import {
   KeyRound,
   ListChecks,
   Network,
-  Power,
   Plus,
   Puzzle,
   RefreshCw,
@@ -80,7 +79,7 @@ import {
 import { MetaBadge } from "@/components/ui/meta-badge";
 import { Spinner } from "@/components/ui/misc";
 import { SectionHeader, SignalPill } from "@/components/ui/status";
-import { cn } from "@/lib/utils";
+import { cn, formatDateTime } from "@/lib/utils";
 import { goBackOr } from "@/lib/navigation";
 import { getErrMsg } from "@/lib/api";
 import { splitPluginWarnings } from "@/lib/plugin-config-contract";
@@ -89,15 +88,16 @@ import { PluginWorkspaceNav } from "@/pages/Plugins/WorkspaceNav";
 
 import { getFeatureMatrix } from "@/api/features";
 import {
-  listInstalledPackages,
+  listInstalledOverview,
   enableInstall,
   disableInstall,
   uninstallPlugin,
   uploadPluginZip,
+  type InstalledPluginOverviewAccountItem,
+  type InstalledPluginOverviewItem,
 } from "@/api/plugins";
 import { toggleAccountFeature } from "@/api/accounts";
 import {
-  fetchRemotePlugins,
   enableRemotePlugin,
   disableRemotePlugin,
   updateRemotePlugin,
@@ -162,6 +162,7 @@ type PluginAccountRow = {
 };
 
 const PLUGINS_QK = ["installed-packages"] as const;
+const INSTALLED_OVERVIEW_QK = ["installed-overview"] as const;
 const REMOTE_QK = ["remote-plugins"] as const;
 const PLUGIN_REPOS_QK = ["plugin-repos"] as const;
 const OFFICIAL_PLUGINS_QK = ["official-plugins"] as const;
@@ -286,20 +287,197 @@ function toastPluginLintWarnings(row: RemotePlugin) {
   });
 }
 
-function remoteVersionLabel(plugin: RemotePlugin) {
-  if (plugin.update_available) return "不是最新版";
-  if (plugin.last_update_check_error) return "检查失败";
-  if (plugin.source_url?.startsWith("local://")) return "本地导入";
-  if (plugin.last_update_check_at) return "已是最新版";
-  return "未检查";
+function isRemoteManagedInstalledPlugin(row: InstalledPluginOverviewItem) {
+  return row.source === "repo" || row.source === "git" || row.source === "local";
 }
 
-function remoteVersionTone(plugin: RemotePlugin): "neutral" | "success" | "warn" | "outline" {
-  if (plugin.update_available) return "warn";
-  if (plugin.last_update_check_error) return "warn";
-  if (plugin.source_url?.startsWith("local://")) return "outline";
-  if (plugin.last_update_check_at) return "success";
-  return "neutral";
+function isLocalImportedInstalledPlugin(row: InstalledPluginOverviewItem) {
+  return row.source === "local" || row.source_url?.startsWith("local://");
+}
+
+function installedOverviewTypeLabel(row: InstalledPluginOverviewItem) {
+  switch (row.source) {
+    case "official":
+      return "历史推荐源";
+    case "repo":
+      return "仓库插件";
+    case "git":
+      return "Git";
+    case "local":
+      return "本地导入";
+    case "zip":
+      return "ZIP";
+    default:
+      return "第三方";
+  }
+}
+
+function installedOverviewTypeTone(row: InstalledPluginOverviewItem): "neutral" | "success" | "warn" | "outline" {
+  switch (row.source) {
+    case "official":
+      return "success";
+    case "local":
+      return "outline";
+    case "zip":
+      return "neutral";
+    case "repo":
+    case "git":
+      return "warn";
+    default:
+      return "neutral";
+  }
+}
+
+function installedOverviewVersionLabel(row: InstalledPluginOverviewItem) {
+  if (row.update.update_available) return "可更新";
+  if (row.update.last_update_check_error) return "检查失败";
+  if (isLocalImportedInstalledPlugin(row)) return "本地导入";
+  if (isRemoteManagedInstalledPlugin(row) && row.update.last_update_check_at) return "已是最新版";
+  if (isRemoteManagedInstalledPlugin(row)) return "未检查";
+  return "本地安装";
+}
+
+function installedOverviewVersionTone(row: InstalledPluginOverviewItem): "neutral" | "success" | "warn" | "danger" | "outline" {
+  if (row.update.update_available) return "warn";
+  if (row.update.last_update_check_error) return "danger";
+  if (isLocalImportedInstalledPlugin(row)) return "outline";
+  if (isRemoteManagedInstalledPlugin(row) && row.update.last_update_check_at) return "success";
+  if (isRemoteManagedInstalledPlugin(row)) return "neutral";
+  return "outline";
+}
+
+function accountStateLabel(state?: string | null) {
+  switch ((state || "").toLowerCase()) {
+    case "active":
+      return "运行中";
+    case "enabled":
+      return "已启用";
+    case "disabled":
+      return "未启用";
+    case "error":
+    case "failed":
+      return "异常";
+    default:
+      return state || "未知";
+  }
+}
+
+function accountStateTone(state?: string | null): "neutral" | "success" | "warn" | "danger" | "outline" {
+  switch ((state || "").toLowerCase()) {
+    case "active":
+    case "enabled":
+      return "success";
+    case "disabled":
+      return "outline";
+    case "error":
+    case "failed":
+      return "danger";
+    default:
+      return "neutral";
+  }
+}
+
+function loadStatusLabel(status?: string | null) {
+  switch ((status || "").toLowerCase()) {
+    case "loaded":
+      return "已加载";
+    case "loading":
+      return "加载中";
+    case "failed":
+      return "加载失败";
+    default:
+      return status || "未上报";
+  }
+}
+
+function loadStatusTone(status?: string | null): "neutral" | "success" | "warn" | "danger" | "outline" {
+  switch ((status || "").toLowerCase()) {
+    case "loaded":
+      return "success";
+    case "loading":
+      return "warn";
+    case "failed":
+      return "danger";
+    case "":
+      return "outline";
+    default:
+      return "neutral";
+  }
+}
+
+function trustTierLabel(tier?: string | null) {
+  switch ((tier || "").toLowerCase()) {
+    case "official":
+      return "官方";
+    case "trusted":
+      return "可信";
+    case "community":
+      return "社区";
+    case "untrusted":
+      return "未验证";
+    default:
+      return tier || "未标注";
+  }
+}
+
+function trustTierTone(tier?: string | null): "neutral" | "success" | "warn" | "danger" | "outline" {
+  switch ((tier || "").toLowerCase()) {
+    case "official":
+    case "trusted":
+      return "success";
+    case "community":
+      return "warn";
+    case "untrusted":
+      return "danger";
+    case "":
+      return "outline";
+    default:
+      return "neutral";
+  }
+}
+
+function signatureLabel(value?: boolean | null) {
+  if (value === true) return "签名通过";
+  if (value === false) return "签名异常";
+  return "未提供签名";
+}
+
+function signatureTone(value?: boolean | null): "neutral" | "success" | "warn" | "danger" | "outline" {
+  if (value === true) return "success";
+  if (value === false) return "danger";
+  return "outline";
+}
+
+function summarizeOverviewAccounts(accounts: InstalledPluginOverviewAccountItem[]) {
+  const enabled = accounts.filter((account) => account.enabled).length;
+  const errors = accounts.filter(
+    (account) =>
+      Boolean(account.last_error)
+      || Boolean(account.last_load_error)
+      || ["error", "failed"].includes((account.state || "").toLowerCase())
+      || (account.load_status || "").toLowerCase() === "failed",
+  ).length;
+  return { enabled, errors, total: accounts.length };
+}
+
+function describeInstalledOverviewUpdate(row: InstalledPluginOverviewItem) {
+  if (row.update.last_update_check_error) {
+    return `最近检查失败：${row.update.last_update_check_error}`;
+  }
+  if (row.update.update_available) {
+    const target = row.update.latest_version ? `，可升级到 ${formatPluginVersion(row.update.latest_version)}` : "";
+    return `发现新版本${target}。更新前建议回插件仓库核对能力变化。`;
+  }
+  if (isLocalImportedInstalledPlugin(row)) {
+    return "本地导入插件不支持远程更新，需要重新导入新目录。";
+  }
+  if (isRemoteManagedInstalledPlugin(row) && row.update.last_update_check_at) {
+    return `最近检查：${formatDateTime(row.update.last_update_check_at)}`;
+  }
+  if (isRemoteManagedInstalledPlugin(row)) {
+    return "还没有做过更新检查。";
+  }
+  return "当前来源只提供本地安装能力，不走远程更新。";
 }
 
 function normalizeSourceUrlForCompare(value?: string | null): string {
@@ -565,6 +743,7 @@ function ZipUploadCard() {
       setZipFile(null);
       setSignatureFile(null);
       qc.invalidateQueries({ queryKey: PLUGINS_QK });
+      qc.invalidateQueries({ queryKey: INSTALLED_OVERVIEW_QK });
       qc.invalidateQueries({ queryKey: OFFICIAL_PLUGINS_QK });
       qc.invalidateQueries({ queryKey: REMOTE_QK });
       qc.invalidateQueries({ queryKey: ["matrix"] });
@@ -650,6 +829,7 @@ function RemoteUpdateSettingsCard() {
     mutationFn: checkRemotePluginUpdates,
     onSuccess: (res) => {
       toast.success(`检查完成：${res.update_available} 个插件有更新`);
+      qc.invalidateQueries({ queryKey: INSTALLED_OVERVIEW_QK });
       qc.invalidateQueries({ queryKey: REMOTE_QK });
       qc.invalidateQueries({ queryKey: ["matrix"] });
     },
@@ -709,6 +889,7 @@ function OfficialPluginsCard() {
       toastPluginLintWarnings(row);
       qc.invalidateQueries({ queryKey: OFFICIAL_PLUGINS_QK });
       qc.invalidateQueries({ queryKey: PLUGINS_QK });
+      qc.invalidateQueries({ queryKey: INSTALLED_OVERVIEW_QK });
       qc.invalidateQueries({ queryKey: REMOTE_QK });
       qc.invalidateQueries({ queryKey: ["matrix"] });
     },
@@ -720,6 +901,7 @@ function OfficialPluginsCard() {
       toast.success(`已卸载 ${key}`);
       qc.invalidateQueries({ queryKey: OFFICIAL_PLUGINS_QK });
       qc.invalidateQueries({ queryKey: PLUGINS_QK });
+      qc.invalidateQueries({ queryKey: INSTALLED_OVERVIEW_QK });
       qc.invalidateQueries({ queryKey: REMOTE_QK });
       qc.invalidateQueries({ queryKey: ["matrix"] });
     },
@@ -834,6 +1016,7 @@ function LocalImportCard() {
       toastPluginLintWarnings(row);
       qc.invalidateQueries({ queryKey: REMOTE_QK });
       qc.invalidateQueries({ queryKey: PLUGINS_QK });
+      qc.invalidateQueries({ queryKey: INSTALLED_OVERVIEW_QK });
       qc.invalidateQueries({ queryKey: ["matrix"] });
       qc.invalidateQueries({ queryKey: ["local-plugins"] });
     },
@@ -944,6 +1127,7 @@ function RemoteInstallCard() {
       qc.setQueryData(["repo-plugins", repoId], plugins);
       qc.invalidateQueries({ queryKey: REMOTE_QK });
       qc.invalidateQueries({ queryKey: PLUGINS_QK });
+      qc.invalidateQueries({ queryKey: INSTALLED_OVERVIEW_QK });
     },
     onError: (err) => toast.error(getErrMsg(err)),
     onSettled: () => setRefreshingRepoId(null),
@@ -1007,6 +1191,7 @@ function RemoteInstallCard() {
       toastPluginLintWarnings(row);
       qc.invalidateQueries({ queryKey: REMOTE_QK });
       qc.invalidateQueries({ queryKey: PLUGINS_QK });
+      qc.invalidateQueries({ queryKey: INSTALLED_OVERVIEW_QK });
       qc.invalidateQueries({ queryKey: ["matrix"] });
       qc.invalidateQueries({ queryKey: ["repo-plugins", expandedRepoId] });
     },
@@ -1018,6 +1203,7 @@ function RemoteInstallCard() {
     onSuccess: (row) => {
       toast.success(`已更新 ${row.name} → v${row.version}`);
       toastPluginLintWarnings(row);
+      qc.invalidateQueries({ queryKey: INSTALLED_OVERVIEW_QK });
       qc.invalidateQueries({ queryKey: REMOTE_QK });
       qc.invalidateQueries({ queryKey: ["matrix"] });
       qc.invalidateQueries({ queryKey: ["repo-plugins", expandedRepoId] });
@@ -1040,6 +1226,7 @@ function RemoteInstallCard() {
       } else {
         toast.success(`${res.repo_name} 没有需要更新的已安装插件`);
       }
+      qc.invalidateQueries({ queryKey: INSTALLED_OVERVIEW_QK });
       qc.invalidateQueries({ queryKey: REMOTE_QK });
       qc.invalidateQueries({ queryKey: PLUGINS_QK });
       qc.invalidateQueries({ queryKey: ["matrix"] });
@@ -1417,43 +1604,55 @@ function InstalledPluginsSection() {
   const nav = useNavigate();
   const qc = useQueryClient();
   const [expandedAccountPlugin, setExpandedAccountPlugin] = useState<string | null>(null);
-
-  const builtinQ = useQuery({
-    queryKey: ["matrix"],
-    queryFn: getFeatureMatrix,
-    select: (data) =>
-      data.features.filter((f) => f.is_builtin && f.key !== "forward" && !isPlatformFeature(f)),
-  });
-
-  const thirdPartyQ = useQuery({ queryKey: PLUGINS_QK, queryFn: listInstalledPackages });
-  const remoteQ = useQuery({ queryKey: REMOTE_QK, queryFn: fetchRemotePlugins });
+  const [selectedDetailKey, setSelectedDetailKey] = useState<string | null>(null);
+  const matrixQ = useQuery({ queryKey: ["matrix"], queryFn: getFeatureMatrix });
+  const overviewQ = useQuery({ queryKey: INSTALLED_OVERVIEW_QK, queryFn: listInstalledOverview });
   const reposQ = useQuery({ queryKey: PLUGIN_REPOS_QK, queryFn: fetchPluginRepos });
+  const builtin = useMemo(
+    () =>
+      (matrixQ.data?.features ?? []).filter(
+        (feature) => feature.is_builtin && feature.key !== "forward" && !isPlatformFeature(feature),
+      ),
+    [matrixQ.data],
+  );
+  const accounts = matrixQ.data?.accounts ?? [];
+  const installedOverview = overviewQ.data ?? [];
+  const repos = reposQ.data ?? [];
+  const selectedDetail = installedOverview.find((row) => row.key === selectedDetailKey) ?? null;
 
-  const enableTPMut = useMutation({
+  useEffect(() => {
+    if (!selectedDetailKey || overviewQ.isLoading) return;
+    if (!selectedDetail) setSelectedDetailKey(null);
+  }, [overviewQ.isLoading, selectedDetail, selectedDetailKey]);
+
+  const enableInstalledMut = useMutation({
     mutationFn: (key: string) => enableInstall(key),
     onSuccess: () => {
       toast.success("已启用");
       qc.invalidateQueries({ queryKey: PLUGINS_QK });
+      qc.invalidateQueries({ queryKey: INSTALLED_OVERVIEW_QK });
       qc.invalidateQueries({ queryKey: OFFICIAL_PLUGINS_QK });
       qc.invalidateQueries({ queryKey: ["matrix"] });
     },
     onError: (err) => toast.error(getErrMsg(err)),
   });
-  const disableTPMut = useMutation({
+  const disableInstalledMut = useMutation({
     mutationFn: (key: string) => disableInstall(key),
     onSuccess: () => {
       toast.success("已禁用");
       qc.invalidateQueries({ queryKey: PLUGINS_QK });
+      qc.invalidateQueries({ queryKey: INSTALLED_OVERVIEW_QK });
       qc.invalidateQueries({ queryKey: OFFICIAL_PLUGINS_QK });
       qc.invalidateQueries({ queryKey: ["matrix"] });
     },
     onError: (err) => toast.error(getErrMsg(err)),
   });
-  const uninstallTPMut = useMutation({
+  const uninstallInstalledMut = useMutation({
     mutationFn: (key: string) => uninstallPlugin(key),
     onSuccess: (_r, key) => {
       toast.success(`已卸载 ${key}`);
       qc.invalidateQueries({ queryKey: PLUGINS_QK });
+      qc.invalidateQueries({ queryKey: INSTALLED_OVERVIEW_QK });
       qc.invalidateQueries({ queryKey: OFFICIAL_PLUGINS_QK });
       qc.invalidateQueries({ queryKey: ["matrix"] });
     },
@@ -1465,6 +1664,8 @@ function InstalledPluginsSection() {
     onSuccess: (res) => {
       const suffix = typeof res.applied === "number" ? `，已同步 ${res.applied} 个账号` : "";
       toast.success(`已启用远程插件${suffix}`);
+      qc.invalidateQueries({ queryKey: INSTALLED_OVERVIEW_QK });
+      qc.invalidateQueries({ queryKey: PLUGINS_QK });
       qc.invalidateQueries({ queryKey: REMOTE_QK });
       qc.invalidateQueries({ queryKey: ["matrix"] });
     },
@@ -1474,6 +1675,8 @@ function InstalledPluginsSection() {
     mutationFn: (name: string) => disableRemotePlugin(name),
     onSuccess: () => {
       toast.success("已禁用全局开关");
+      qc.invalidateQueries({ queryKey: INSTALLED_OVERVIEW_QK });
+      qc.invalidateQueries({ queryKey: PLUGINS_QK });
       qc.invalidateQueries({ queryKey: REMOTE_QK });
       qc.invalidateQueries({ queryKey: ["matrix"] });
     },
@@ -1484,6 +1687,8 @@ function InstalledPluginsSection() {
     onSuccess: (row) => {
       toast.success(`已更新 ${row.name} → v${row.version}`);
       toastPluginLintWarnings(row);
+      qc.invalidateQueries({ queryKey: INSTALLED_OVERVIEW_QK });
+      qc.invalidateQueries({ queryKey: PLUGINS_QK });
       qc.invalidateQueries({ queryKey: REMOTE_QK });
       qc.invalidateQueries({ queryKey: ["matrix"] });
     },
@@ -1493,6 +1698,8 @@ function InstalledPluginsSection() {
     mutationFn: (name: string) => uninstallRemotePlugin(name),
     onSuccess: (_r, name) => {
       toast.success(`已卸载 ${name}`);
+      qc.invalidateQueries({ queryKey: INSTALLED_OVERVIEW_QK });
+      qc.invalidateQueries({ queryKey: PLUGINS_QK });
       qc.invalidateQueries({ queryKey: REMOTE_QK });
       qc.invalidateQueries({ queryKey: ["matrix"] });
     },
@@ -1504,30 +1711,21 @@ function InstalledPluginsSection() {
     onSuccess: (_row, vars) => {
       toast.success(`${vars.enabled ? "已启用" : "已禁用"}账号插件`);
       qc.invalidateQueries({ queryKey: ["matrix"] });
+      qc.invalidateQueries({ queryKey: INSTALLED_OVERVIEW_QK });
       qc.invalidateQueries({ queryKey: PLUGINS_QK });
       qc.invalidateQueries({ queryKey: REMOTE_QK });
     },
     onError: (err) => toast.error(getErrMsg(err)),
   });
 
-  const isLoading = builtinQ.isLoading || thirdPartyQ.isLoading || remoteQ.isLoading;
-  const [expandedWarnings, setExpandedWarnings] = useState<Set<string>>(() => new Set());
-  const builtin = builtinQ.data ?? [];
-  const thirdParty = thirdPartyQ.data ?? [];
-  const remote = remoteQ.data ?? [];
-  const repos = reposQ.data ?? [];
-  const matrixQ = useQuery({ queryKey: ["matrix"], queryFn: getFeatureMatrix });
-  const accounts = matrixQ.data?.accounts ?? [];
+  const isLoading = matrixQ.isLoading || overviewQ.isLoading;
+  const errorMessages = [
+    matrixQ.isError ? `平台能力加载失败：${getErrMsg(matrixQ.error)}` : null,
+    overviewQ.isError ? `已安装插件概览加载失败：${getErrMsg(overviewQ.error)}` : null,
+  ].filter(Boolean) as string[];
+
   const toggleAccountPanel = (key: string) => {
     setExpandedAccountPlugin((current) => (current === key ? null : key));
-  };
-  const toggleWarnings = (name: string) => {
-    setExpandedWarnings((prev) => {
-      const next = new Set(prev);
-      if (next.has(name)) next.delete(name);
-      else next.add(name);
-      return next;
-    });
   };
 
   return (
@@ -1541,16 +1739,28 @@ function InstalledPluginsSection() {
             <SignalPill
               tone="neutral"
               label="总计"
-              value={builtin.length + thirdParty.length + remote.length}
+              value={builtin.length + installedOverview.length}
               className="h-8"
             />
           )}
         />
       </CardHeader>
-      <CardContent>
+      <CardContent className="space-y-3">
+        {errorMessages.length > 0 ? (
+          <div className="space-y-2">
+            {errorMessages.map((message) => (
+              <div
+                key={message}
+                className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+              >
+                <div className="line-clamp-3 break-all">{message}</div>
+              </div>
+            ))}
+          </div>
+        ) : null}
         {isLoading ? (
           <div className="flex h-24 items-center justify-center"><Spinner className="text-primary" /></div>
-        ) : builtin.length === 0 && thirdParty.length === 0 && remote.length === 0 ? (
+        ) : builtin.length === 0 && installedOverview.length === 0 ? (
           <p className="py-8 text-center text-sm text-muted-foreground">暂无已安装插件</p>
         ) : (
           <Table>
@@ -1611,16 +1821,37 @@ function InstalledPluginsSection() {
                   ) : null}
                 </Fragment>
               ))}
-              {/* 第三方插件 */}
-              {thirdParty.map((row) => (
+              {/* 已安装的第三方 / 远程插件 */}
+              {installedOverview.map((row) => {
+                const summary = summarizeOverviewAccounts(row.accounts);
+                const hasWarnings = row.lint_warnings.length > 0;
+                const canUpdate = isRemoteManagedInstalledPlugin(row);
+                const canUseRemoteActions = isRemoteManagedInstalledPlugin(row);
+                return (
                 <Fragment key={row.key}>
                   <TableRow>
                     <TableCell>
-                      <div className="font-medium">{row.key}</div>
+                      <div className="min-w-0">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <div className="max-w-[20rem] break-words font-medium leading-5">
+                            {row.display_name || row.key}
+                          </div>
+                          <MetaBadge tone={row.global_enabled ? "success" : "outline"}>
+                            {row.global_enabled ? "全局已启用" : "全局未启用"}
+                          </MetaBadge>
+                          {row.update.update_available ? <MetaBadge tone="warn">有新版本</MetaBadge> : null}
+                          {hasWarnings ? (
+                            <MetaBadge tone={splitPluginWarnings(row.lint_warnings).high.length > 0 ? "danger" : "warn"}>
+                              Lint {row.lint_warnings.length}
+                            </MetaBadge>
+                          ) : null}
+                        </div>
+                        <div className="mt-1 break-all font-mono text-xs text-muted-foreground">{row.key}</div>
+                      </div>
                     </TableCell>
                     <TableCell>
-                      <MetaBadge tone={row.source === "official" ? "success" : "neutral"}>
-                        {row.source === "official" ? "历史推荐源" : "第三方"}
+                      <MetaBadge tone={installedOverviewTypeTone(row)}>
+                        {installedOverviewTypeLabel(row)}
                       </MetaBadge>
                     </TableCell>
                     <TableCell>
@@ -1633,35 +1864,68 @@ function InstalledPluginsSection() {
                     </TableCell>
                     <TableCell>{formatPluginVersion(row.version)}</TableCell>
                     <TableCell>
-                      <MetaBadge tone="outline">本地安装</MetaBadge>
-                      <div className="mt-1 text-xs text-muted-foreground">
-                        状态 {row.enabled ? "已启用" : "未启用"}
-                      </div>
+                      <MetaBadge tone={installedOverviewVersionTone(row)}>
+                        {installedOverviewVersionLabel(row)}
+                      </MetaBadge>
+                      {row.update.update_available && row.update.latest_version ? (
+                        <div className="mt-1 text-xs text-muted-foreground">
+                          最新 {formatPluginVersion(row.update.latest_version)}
+                        </div>
+                      ) : null}
+                      {row.update.last_update_check_error ? (
+                        <div className="mt-1 line-clamp-2 break-all text-xs text-destructive">
+                          {row.update.last_update_check_error}
+                        </div>
+                      ) : null}
                     </TableCell>
                     <TableCell>
-                      <PluginAccountSummary
-                        pluginKey={row.key}
-                        accounts={accounts}
+                      <InstalledOverviewAccountSummary
+                        plugin={row}
                         expanded={expandedAccountPlugin === row.key}
                         onTogglePanel={toggleAccountPanel}
                       />
                     </TableCell>
                     <TableCell className="text-right">
-                      <div className="flex justify-end gap-2">
-                        {row.enabled ? (
+                      <div className="flex flex-wrap justify-end gap-2">
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() => setSelectedDetailKey(row.key)}
+                        >
+                          详情
+                        </Button>
+                        {canUpdate ? (
+                          <Button
+                            size="sm"
+                            variant={row.update.update_available ? "default" : "outline"}
+                            onClick={() => updateRMMut.mutate(row.key)}
+                            disabled={updateRMMut.isPending || isLocalImportedInstalledPlugin(row)}
+                            title={isLocalImportedInstalledPlugin(row) ? "本地导入插件不支持远程更新" : "从远程更新"}
+                          >
+                            <RefreshCw className="mr-1 h-3 w-3" />
+                            {row.update.update_available ? "更新到新版" : "更新"}
+                          </Button>
+                        ) : null}
+                        {row.global_enabled ? (
                           <Button
                             size="sm"
                             variant="outline"
-                            onClick={() => disableTPMut.mutate(row.key)}
-                            disabled={disableTPMut.isPending}
+                            onClick={() => {
+                              if (canUseRemoteActions) disableRMMut.mutate(row.key);
+                              else disableInstalledMut.mutate(row.key);
+                            }}
+                            disabled={disableInstalledMut.isPending || disableRMMut.isPending}
                           >
                             禁用
                           </Button>
                         ) : (
                           <Button
                             size="sm"
-                            onClick={() => enableTPMut.mutate(row.key)}
-                            disabled={enableTPMut.isPending}
+                            onClick={() => {
+                              if (canUseRemoteActions) enableRMMut.mutate(row.key);
+                              else enableInstalledMut.mutate(row.key);
+                            }}
+                            disabled={enableInstalledMut.isPending || enableRMMut.isPending}
                           >
                             启用
                           </Button>
@@ -1671,197 +1935,379 @@ function InstalledPluginsSection() {
                           variant="outline"
                           className={DANGER_OUTLINE_BUTTON_CLASS}
                           onClick={() => {
-                            if (confirm(`确认卸载「${row.key}」？`)) uninstallTPMut.mutate(row.key);
+                            if (!confirm(`确认卸载「${row.key}」？`)) return;
+                            if (canUseRemoteActions) uninstallRMMut.mutate(row.key);
+                            else uninstallInstalledMut.mutate(row.key);
                           }}
-                          disabled={uninstallTPMut.isPending}
+                          disabled={uninstallInstalledMut.isPending || uninstallRMMut.isPending}
                         >
                           <Trash2 className="mr-1 h-3 w-3" />
                           卸载
                         </Button>
+                        {summary.errors > 0 ? (
+                          <div className="ml-1 flex items-center text-xs text-destructive">
+                            {summary.errors} 个账号异常
+                          </div>
+                        ) : null}
                       </div>
                     </TableCell>
                   </TableRow>
                   {expandedAccountPlugin === row.key ? (
-                    <PluginAccountToggleRow
-                      pluginKey={row.key}
-                      accounts={accounts}
+                    <InstalledOverviewAccountToggleRow
+                      plugin={row}
                       pending={accountToggleMut.isPending}
                       onToggle={(accountId, enabled) =>
                         accountToggleMut.mutate({ accountId, key: row.key, enabled })}
                     />
                   ) : null}
                 </Fragment>
-              ))}
-              {/* 远程插件 */}
-              {remote.map((p) => {
-                const warningGroups = splitPluginWarnings(p.lint_warnings);
-                const hasWarnings = warningGroups.all.length > 0;
-                const hasHighWarnings = warningGroups.high.length > 0;
-                return (
-                  <Fragment key={`rm-${p.name}`}>
-                    <TableRow>
-                      <TableCell>
-                        <div className="flex flex-wrap items-center gap-2">
-                          <div className="font-medium">{p.display_name || p.name}</div>
-                          {p.update_available ? <MetaBadge tone="warn">有新版本</MetaBadge> : null}
-                          {hasWarnings ? (
-                            <button
-                              type="button"
-                              className="inline-flex"
-                              onClick={() => toggleWarnings(p.name)}
-                              aria-expanded={expandedWarnings.has(p.name)}
-                            >
-                              <MetaBadge tone={hasHighWarnings ? "danger" : "warn"}>
-                                {hasHighWarnings ? <AlertTriangle className="h-3 w-3" /> : null}
-                                {hasHighWarnings ? "高级规范警告" : "规范警告"}
-                                <ChevronDown
-                                  className={cn(
-                                    "h-3 w-3 transition-transform",
-                                    expandedWarnings.has(p.name) && "rotate-180",
-                                  )}
-                                />
-                              </MetaBadge>
-                            </button>
-                          ) : null}
-                        </div>
-                        <div className="font-mono text-xs text-muted-foreground">{p.name}</div>
-                        {p.update_available && p.latest_version ? (
-                          <div className="mt-1 text-xs text-muted-foreground">
-                            当前 {formatPluginVersion(p.version)}，远程 {formatPluginVersion(p.latest_version)}
-                          </div>
-                        ) : null}
-                        {p.last_update_check_error ? (
-                          <div className="mt-1 text-xs text-destructive">
-                            更新检查失败：{p.last_update_check_error}
-                          </div>
-                        ) : null}
-                        {hasWarnings && expandedWarnings.has(p.name) ? (
-                          <div
-                            className={cn(
-                              "mt-2 space-y-1 rounded-md border px-3 py-2 text-xs",
-                              hasHighWarnings
-                                ? "border-destructive/30 bg-destructive/10 text-destructive"
-                                : "border-amber-500/30 bg-amber-50/70 text-amber-900 dark:bg-amber-950/20 dark:text-amber-200",
-                            )}
-                          >
-                            {warningGroups.all.map((warning, index) => (
-                              <div key={`${p.name}-warning-${index}`} className="leading-5">
-                                {warning}
-                              </div>
-                            ))}
-                          </div>
-                        ) : null}
-                      </TableCell>
-                      <TableCell>
-                        {p.source_url?.startsWith("local://") ? (
-                          <MetaBadge>本地导入</MetaBadge>
-                        ) : (
-                          <MetaBadge>
-                            <GitFork className="h-3 w-3" />
-                            远程
-                          </MetaBadge>
-                        )}
-                      </TableCell>
-                      <TableCell>
-                        <div className="max-w-[200px] truncate text-sm" title={p.source_url}>
-                          {installSourceLibraryLabel(
-                            p.source_url?.startsWith("local://") ? "local" : "repo",
-                            p.source_url,
-                            null,
-                            repos,
-                          )}
-                        </div>
-                      </TableCell>
-                      <TableCell>{formatPluginVersion(p.version)}</TableCell>
-                      <TableCell>
-                        <MetaBadge tone={remoteVersionTone(p)}>
-                          {remoteVersionLabel(p)}
-                        </MetaBadge>
-                        {p.update_available && p.latest_version ? (
-                          <div className="mt-1 text-xs text-muted-foreground">
-                            远程 {formatPluginVersion(p.latest_version)}
-                          </div>
-                        ) : null}
-                      </TableCell>
-                      <TableCell>
-                        <PluginAccountSummary
-                          pluginKey={p.name}
-                          accounts={accounts}
-                          expanded={expandedAccountPlugin === p.name}
-                          onTogglePanel={toggleAccountPanel}
-                        />
-                      </TableCell>
-                      <TableCell className="text-right">
-                        <div className="flex flex-wrap justify-end gap-2">
-                          <Button
-                            size="sm"
-                            variant={p.update_available ? "default" : "outline"}
-                            onClick={() => updateRMMut.mutate(p.name)}
-                            disabled={updateRMMut.isPending || p.source_url?.startsWith("local://")}
-                            title={
-                              p.source_url?.startsWith("local://")
-                                ? "本地导入插件不支持远程更新"
-                                : "从远程更新"
-                            }
-                          >
-                            <RefreshCw className="mr-1 h-3 w-3" />
-                            {p.update_available ? "更新到新版" : "更新"}
-                          </Button>
-                          {p.enabled ? (
-                            <Button
-                              size="sm"
-                              variant="outline"
-                              onClick={() => disableRMMut.mutate(p.name)}
-                              disabled={disableRMMut.isPending}
-                            >
-                              <X className="mr-1 h-3 w-3" />
-                              禁用
-                            </Button>
-                          ) : (
-                            <Button
-                              size="sm"
-                              onClick={() => enableRMMut.mutate(p.name)}
-                              disabled={enableRMMut.isPending}
-                            >
-                              <Power className="mr-1 h-3 w-3" />
-                              启用
-                            </Button>
-                          )}
-                          <Button
-                            size="sm"
-                            variant="outline"
-                            className={DANGER_OUTLINE_BUTTON_CLASS}
-                            onClick={() => {
-                              if (confirm(`确认卸载「${p.name}」？`)) uninstallRMMut.mutate(p.name);
-                            }}
-                            disabled={uninstallRMMut.isPending}
-                          >
-                            <Trash2 className="mr-1 h-3 w-3" />
-                            卸载
-                          </Button>
-                          <Button size="sm" variant="outline" onClick={() => nav("/plugins")}>
-                            去插件中心
-                          </Button>
-                        </div>
-                      </TableCell>
-                    </TableRow>
-                    {expandedAccountPlugin === p.name ? (
-                      <PluginAccountToggleRow
-                        pluginKey={p.name}
-                        accounts={accounts}
-                        pending={accountToggleMut.isPending}
-                        onToggle={(accountId, enabled) =>
-                          accountToggleMut.mutate({ accountId, key: p.name, enabled })}
-                      />
-                    ) : null}
-                  </Fragment>
                 );
               })}
             </TableBody>
           </Table>
         )}
+        <PluginOverviewDetailDialog
+          plugin={selectedDetail}
+          repos={repos}
+          open={selectedDetail !== null}
+          onOpenChange={(open) => {
+            if (!open) setSelectedDetailKey(null);
+          }}
+          onOpenTrace={(traceId) => {
+            setSelectedDetailKey(null);
+            nav(`/logs?tab=events&trace_id=${encodeURIComponent(traceId)}`);
+          }}
+          onOpenPluginCenter={() => {
+            setSelectedDetailKey(null);
+            nav("/plugins");
+          }}
+        />
       </CardContent>
     </Card>
+  );
+}
+
+function InstalledOverviewAccountSummary({
+  plugin,
+  expanded,
+  onTogglePanel,
+}: {
+  plugin: InstalledPluginOverviewItem;
+  expanded: boolean;
+  onTogglePanel: (key: string) => void;
+}) {
+  const summary = summarizeOverviewAccounts(plugin.accounts);
+  return (
+    <div className="flex flex-col items-start gap-1.5">
+      <div className="flex flex-wrap items-center gap-1.5">
+        <MetaBadge tone={summary.enabled > 0 ? "success" : "outline"}>
+          {summary.total ? `${summary.enabled}/${summary.total}` : "无账号"}
+        </MetaBadge>
+        {summary.errors > 0 ? <MetaBadge tone="danger">{summary.errors} 异常</MetaBadge> : null}
+      </div>
+      {summary.total > 0 ? (
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          className="h-7 px-0 text-xs text-muted-foreground hover:text-foreground"
+          onClick={() => onTogglePanel(plugin.key)}
+        >
+          <ChevronDown className={cn("mr-1 h-3.5 w-3.5 transition-transform", expanded && "rotate-180")} />
+          账号开关
+        </Button>
+      ) : null}
+    </div>
+  );
+}
+
+function InstalledOverviewAccountToggleRow({
+  plugin,
+  pending,
+  onToggle,
+}: {
+  plugin: InstalledPluginOverviewItem;
+  pending: boolean;
+  onToggle: (accountId: number, enabled: boolean) => void;
+}) {
+  return (
+    <TableRow className="bg-muted/25">
+      <TableCell colSpan={7}>
+        <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
+          {plugin.accounts.map((account) => (
+            <div
+              key={`${plugin.key}-${account.account_id}`}
+              className="flex items-center justify-between gap-3 rounded-md border bg-background px-3 py-2"
+            >
+              <div className="min-w-0">
+                <div className="truncate text-sm font-medium">{account.account_name || `账号 ${account.account_id}`}</div>
+                <div className="text-xs text-muted-foreground">
+                  <span className="font-mono">#{account.account_id}</span>
+                  <span> · {accountStateLabel(account.state)}</span>
+                  {account.last_error ? (
+                    <span className="line-clamp-1 break-all text-destructive"> · {account.last_error}</span>
+                  ) : null}
+                </div>
+              </div>
+              <Switch
+                checked={account.enabled}
+                disabled={pending}
+                onCheckedChange={(checked) => onToggle(account.account_id, checked)}
+              />
+            </div>
+          ))}
+        </div>
+      </TableCell>
+    </TableRow>
+  );
+}
+
+function PluginOverviewDetailDialog({
+  plugin,
+  repos,
+  open,
+  onOpenChange,
+  onOpenTrace,
+  onOpenPluginCenter,
+}: {
+  plugin: InstalledPluginOverviewItem | null;
+  repos: PluginRepo[];
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  onOpenTrace: (traceId: string) => void;
+  onOpenPluginCenter: () => void;
+}) {
+  if (!plugin) return null;
+
+  const summary = summarizeOverviewAccounts(plugin.accounts);
+  const warningGroups = splitPluginWarnings(plugin.lint_warnings);
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="bottom-0 top-auto max-h-[86dvh] w-full translate-y-0 gap-0 overflow-hidden rounded-b-none border-border/80 p-0 shadow-2xl sm:top-[50%] sm:max-w-4xl sm:translate-y-[-50%] sm:rounded-lg">
+        <DialogHeader className="border-b border-border/70 px-5 py-4 sm:px-6">
+          <div className="pr-8">
+            <div className="flex flex-wrap items-center gap-2">
+              <DialogTitle className="text-base sm:text-lg">{plugin.display_name || plugin.key}</DialogTitle>
+              <MetaBadge tone={installedOverviewTypeTone(plugin)}>{installedOverviewTypeLabel(plugin)}</MetaBadge>
+              <MetaBadge tone={plugin.global_enabled ? "success" : "outline"}>
+                {plugin.global_enabled ? "全局已启用" : "全局未启用"}
+              </MetaBadge>
+            </div>
+            <DialogDescription className="mt-2 break-all font-mono text-xs">
+              {plugin.key}
+            </DialogDescription>
+          </div>
+        </DialogHeader>
+
+        <div className="space-y-5 overflow-y-auto px-5 py-4 sm:px-6">
+          <section className="grid gap-3 lg:grid-cols-[minmax(0,1.2fr)_minmax(0,0.8fr)]">
+            <div className="rounded-md border border-border/70 bg-background/80 p-4">
+              <div className="mb-3 text-sm font-medium">来源与版本</div>
+              <dl className="grid gap-x-4 gap-y-3 sm:grid-cols-2">
+                <PluginOverviewField label="来源库" value={installSourceLibraryLabel(plugin.source, plugin.source_url, plugin.source_label, repos)} />
+                <PluginOverviewField
+                  label="来源地址"
+                  value={
+                    plugin.source_url ? (
+                      <span className="break-all font-mono text-xs text-muted-foreground">{plugin.source_url}</span>
+                    ) : (
+                      plugin.source_label || "-"
+                    )
+                  }
+                />
+                <PluginOverviewField label="当前版本" value={formatPluginVersion(plugin.version)} />
+                <PluginOverviewField
+                  label="更新状态"
+                  value={
+                    <div className="space-y-1">
+                      <MetaBadge tone={installedOverviewVersionTone(plugin)}>
+                        {installedOverviewVersionLabel(plugin)}
+                      </MetaBadge>
+                      <div className="line-clamp-3 break-all text-xs text-muted-foreground">
+                        {describeInstalledOverviewUpdate(plugin)}
+                      </div>
+                    </div>
+                  }
+                />
+                <PluginOverviewField
+                  label="最近 trace"
+                  value={
+                    plugin.recent_trace ? (
+                      <button
+                        type="button"
+                        className="break-all font-mono text-xs text-primary underline decoration-primary/30 underline-offset-4 hover:text-primary/80"
+                        onClick={() => onOpenTrace(plugin.recent_trace!.trace_id)}
+                      >
+                        {plugin.recent_trace.trace_id}
+                      </button>
+                    ) : (
+                      "-"
+                    )
+                  }
+                />
+              </dl>
+            </div>
+
+            <div className="rounded-md border border-border/70 bg-muted/20 p-4">
+              <div className="mb-3 text-sm font-medium">运行摘要</div>
+              <div className="flex flex-wrap gap-2">
+                <SignalPill tone={plugin.global_enabled ? "success" : "neutral"} label="全局" value={plugin.global_enabled ? "启用" : "关闭"} />
+                <SignalPill tone={summary.enabled > 0 ? "success" : "neutral"} label="账号启用" value={`${summary.enabled}/${summary.total}`} />
+                <SignalPill tone={summary.errors > 0 ? "danger" : "neutral"} label="异常账号" value={summary.errors} />
+              </div>
+              {plugin.recent_load_error ? (
+                <div className="mt-3 rounded-md border border-destructive/25 bg-destructive/10 px-3 py-2">
+                  <div className="text-xs font-medium text-destructive">最近 load error</div>
+                  <div className="mt-1 line-clamp-3 break-all text-xs text-destructive">
+                    {plugin.recent_load_error.message}
+                  </div>
+                  <div className="mt-1 text-[11px] text-muted-foreground">
+                    {plugin.recent_load_error.account_id ? `账号 #${plugin.recent_load_error.account_id} · ` : ""}
+                    {plugin.recent_load_error.load_status || plugin.recent_load_error.source}
+                    {plugin.recent_load_error.updated_at ? ` · ${formatDateTime(plugin.recent_load_error.updated_at)}` : ""}
+                  </div>
+                </div>
+              ) : (
+                <div className="mt-3 text-xs text-muted-foreground">最近没有上报 load error。</div>
+              )}
+            </div>
+          </section>
+
+          <section className="rounded-md border border-border/70 bg-background/80 p-4">
+            <div className="flex flex-wrap items-center gap-2">
+              <div className="text-sm font-medium">签名与信任</div>
+              <MetaBadge tone={signatureTone(plugin.signature_ok)}>{signatureLabel(plugin.signature_ok)}</MetaBadge>
+              <MetaBadge tone={trustTierTone(plugin.trust_tier)}>{trustTierLabel(plugin.trust_tier)}</MetaBadge>
+            </div>
+            {warningGroups.all.length > 0 ? (
+              <div className="mt-3 rounded-md border border-amber-500/25 bg-amber-50/70 px-3 py-2 dark:bg-amber-950/20">
+                <div className="flex flex-wrap items-center gap-2 text-xs font-medium text-amber-900 dark:text-amber-200">
+                  {warningGroups.high.length > 0 ? <AlertTriangle className="h-3.5 w-3.5" /> : null}
+                  Lint warnings {warningGroups.all.length}
+                </div>
+                <div className="mt-2 space-y-1.5 text-xs text-amber-900 dark:text-amber-200">
+                  {warningGroups.all.map((warning, index) => (
+                    <div key={`${plugin.key}-detail-warning-${index}`} className="break-all leading-5">
+                      {warning}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : (
+              <div className="mt-3 text-xs text-muted-foreground">当前没有 lint warnings。</div>
+            )}
+          </section>
+
+          <section className="rounded-md border border-border/70 bg-background/80 p-4">
+            <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+              <div className="text-sm font-medium">账号启停矩阵</div>
+              <div className="text-xs text-muted-foreground">
+                {summary.enabled}/{summary.total} 个账号启用
+              </div>
+            </div>
+            {plugin.accounts.length === 0 ? (
+              <div className="text-sm text-muted-foreground">当前还没有账号记录。</div>
+            ) : (
+              <div className="grid gap-2 lg:grid-cols-2">
+                {plugin.accounts.map((account) => (
+                  <InstalledOverviewAccountCard
+                    key={`${plugin.key}-detail-${account.account_id}`}
+                    account={account}
+                    onOpenTrace={onOpenTrace}
+                  />
+                ))}
+              </div>
+            )}
+          </section>
+        </div>
+
+        <DialogFooter className="border-t border-border/70 px-5 py-4 sm:px-6">
+          {plugin.recent_trace ? (
+            <Button variant="outline" onClick={() => onOpenTrace(plugin.recent_trace!.trace_id)}>
+              查看最近 trace
+            </Button>
+          ) : null}
+          <Button variant="outline" onClick={onOpenPluginCenter}>
+            去插件中心
+          </Button>
+          <Button onClick={() => onOpenChange(false)}>关闭</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function InstalledOverviewAccountCard({
+  account,
+  onOpenTrace,
+}: {
+  account: InstalledPluginOverviewAccountItem;
+  onOpenTrace: (traceId: string) => void;
+}) {
+  return (
+    <div className="rounded-md border border-border/70 bg-muted/10 px-3 py-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <div className="min-w-0 flex-1">
+          <div className="truncate text-sm font-medium">{account.account_name || `账号 ${account.account_id}`}</div>
+          <div className="mt-1 font-mono text-xs text-muted-foreground">#{account.account_id}</div>
+        </div>
+        <MetaBadge tone={account.enabled ? "success" : "outline"}>
+          {account.enabled ? "已启用" : "未启用"}
+        </MetaBadge>
+        <MetaBadge tone={accountStateTone(account.state)}>{accountStateLabel(account.state)}</MetaBadge>
+        <MetaBadge tone={loadStatusTone(account.load_status)}>{loadStatusLabel(account.load_status)}</MetaBadge>
+      </div>
+
+      {account.last_error ? (
+        <div className="mt-3">
+          <div className="text-[11px] font-medium text-destructive">账号错误</div>
+          <div className="mt-1 line-clamp-3 break-all text-xs text-destructive">{account.last_error}</div>
+        </div>
+      ) : null}
+
+      {account.last_load_error ? (
+        <div className="mt-3">
+          <div className="text-[11px] font-medium text-muted-foreground">最近 load error</div>
+          <div className="mt-1 line-clamp-3 break-all text-xs text-muted-foreground">{account.last_load_error}</div>
+        </div>
+      ) : null}
+
+      <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+        {account.last_trace ? (
+          <>
+            <span>{account.last_trace.status ? `最近 trace · ${account.last_trace.status}` : "最近 trace"}</span>
+            <button
+              type="button"
+              className="break-all font-mono text-primary underline decoration-primary/30 underline-offset-4 hover:text-primary/80"
+              onClick={() => onOpenTrace(account.last_trace!.trace_id)}
+            >
+              {account.last_trace.trace_id}
+            </button>
+            {account.last_trace.started_at ? (
+              <span>{formatDateTime(account.last_trace.started_at)}</span>
+            ) : null}
+          </>
+        ) : (
+          <span>最近 trace：-</span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function PluginOverviewField({
+  label,
+  value,
+}: {
+  label: string;
+  value: ReactNode;
+}) {
+  return (
+    <div className="space-y-1">
+      <dt className="text-xs text-muted-foreground">{label}</dt>
+      <dd className="min-w-0 text-sm">{value}</dd>
+    </div>
   );
 }
 

@@ -20,6 +20,21 @@
 
 ## [Unreleased]
 
+## [0.51.0] — 2026-07-08 · minor（次版本） · 交互框架第二轮结构收敛版本
+
+### Added
+- 新增只读聚合接口 `GET /api/plugins/installed-overview`，一次返回已安装插件的来源、版本、更新状态、全局启停、账号启停矩阵、最近加载错误与最近 trace 引用，供后续插件中心详情页复用。
+- 插件管理页的“已安装插件”接入聚合视图，新增插件详情弹窗，可一页查看来源版本、更新状态、签名与信任等级、Lint 告警、账号启停矩阵、最近加载错误和 trace 跳转。
+- `ctx.ai.stream_complete()` 新增真实 streaming 能力，支持 Responses 与 Anthropic Messages 协议按增量文本输出，并纳入账号级 LLM 预算与 usage 记账；旧 `ctx.ai.complete()` 继续保持整段返回行为不变。
+
+### Changed
+- 将 worker 侧 `ai_runtime.invoke` 拆分为请求构建、provider 调用、图片递送与文本渲染等内部 helper，保持现有 AI 命令行为不变，为后续流式发送和更细排障留出结构。
+- 收敛交互模块 payload 的信封归一化逻辑，集中处理 `source`、`message`、`chat`、`raw`、`reply_to` 与 native raw 字段，保留现有扁平兼容字段和收付款通道约束。
+- 账号级 LLM 预算失败对账会释放请求、token 与高价 provider 预扣，失败调用不再占用每分钟请求数或每日请求数名额。
+
+### Fixed
+- 将账号级 LLM 预算从基于历史用量查询的检查改为 Redis 原子预扣，覆盖每分钟请求、每日请求、每日 token 与高价 provider 每日调用次数；Redis/DB 异常继续 fail-open，并在调用失败或 fallback 成功时释放或修正预扣。
+
 ## [0.50.0] — 2026-07-07 · minor（次版本） · 消息排障与插件管理中心版本
 
 ### Added

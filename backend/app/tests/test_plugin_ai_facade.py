@@ -5,7 +5,7 @@ from typing import Any
 
 import pytest
 
-from app.services.llm_client import LLMCallFailed, LLMResult
+from app.services.llm_client import LLMCallFailed, LLMResult, LLMStreamChunk
 from app.services.llm_dto import LLMProviderDTO
 from app.worker.plugins import ai_facade
 from app.worker.plugins.ai_facade import AIQuotaError, AIUnavailableError, PluginAI
@@ -18,12 +18,13 @@ def _provider(
     api_key_enc: str | None = "encrypted-secret",
     tags: list[str] | None = None,
     cost_tier: int = 2,
+    api_format: str = "chat_completions",
 ) -> LLMProviderDTO:
     return LLMProviderDTO(
         id=provider_id,
         name=name,
         provider="openai",
-        api_format="chat_completions",
+        api_format=api_format,
         base_url="https://secret-base.example/v1",
         default_model="gpt-test",
         api_key_enc=api_key_enc,
@@ -236,6 +237,215 @@ async def test_quota_failures_are_mapped_to_plugin_error(monkeypatch, error_type
 
     with pytest.raises(AIQuotaError):
         await facade.complete("sys", "hello")
+
+
+@pytest.mark.asyncio
+async def test_stream_complete_yields_text_deltas_and_settles_quota(monkeypatch) -> None:
+    captured: dict[str, Any] = {}
+    quota_calls: dict[str, Any] = {}
+    budget_calls: dict[str, Any] = {}
+    usage_records: list[Any] = []
+
+    async def _loader():
+        return {1: _provider(1, api_format="responses")}
+
+    class _Client:
+        async def stream_complete(self, system, user, **kwargs):
+            captured["system"] = system
+            captured["user"] = user
+            captured.update(kwargs)
+            yield LLMStreamChunk(delta="hel", model="gpt-stream")
+            yield LLMStreamChunk(delta="lo", model="gpt-stream")
+            yield LLMStreamChunk(
+                done=True,
+                model="gpt-stream",
+                input_tokens=3,
+                output_tokens=2,
+            )
+
+    def _build_client(provider, **kwargs):
+        captured["provider"] = provider
+        captured["build_kwargs"] = kwargs
+        return _Client()
+
+    async def _acquire(plugin_key, account_id, estimated_tokens):
+        quota_calls["acquire"] = (plugin_key, account_id, estimated_tokens)
+        return object()
+
+    async def _release(ticket, actual_tokens):
+        quota_calls["release"] = (ticket, actual_tokens)
+
+    async def _budget_acquire(account_id, provider, estimated_tokens):
+        budget_calls["acquire"] = (account_id, provider.id, estimated_tokens)
+        return ai_facade.llm_account_budget.LLMAccountBudgetTicket(
+            account_id,
+            provider.id,
+            estimated_tokens,
+            backend="test",
+        )
+
+    async def _budget_settle(ticket, *, actual_tokens, actual_provider, success):
+        budget_calls["settle"] = (ticket, actual_tokens, actual_provider.id if actual_provider else None, success)
+
+    async def _emit_usage(record):
+        usage_records.append(record)
+
+    monkeypatch.setattr(ai_facade, "build_llm_client", _build_client)
+    monkeypatch.setattr(ai_facade.plugin_ai_quota, "acquire", _acquire)
+    monkeypatch.setattr(ai_facade.plugin_ai_quota, "release", _release)
+    monkeypatch.setattr(ai_facade.llm_account_budget, "acquire", _budget_acquire)
+    monkeypatch.setattr(ai_facade.llm_account_budget, "settle", _budget_settle)
+    monkeypatch.setattr(ai_facade.llm_runtime, "_emit_usage", _emit_usage)
+    facade = PluginAI(
+        account_id=7,
+        plugin_key="demo",
+        provider_loader=_loader,
+        max_tokens_limit=64,
+        timeout_limit_seconds=9,
+    )
+
+    deltas = [
+        delta
+        async for delta in facade.stream_complete("sys", "hello", max_tokens=9999, timeout=99)
+    ]
+
+    assert deltas == ["hel", "lo"]
+    assert captured["system"] == "sys"
+    assert captured["user"] == "hello"
+    assert captured["max_tokens"] == 64
+    assert captured["timeout_seconds"] == 9
+    assert captured["build_kwargs"]["api_format_override"] is None
+    assert quota_calls["acquire"] == ("demo", 7, 66)
+    assert quota_calls["release"][1] == 5
+    assert budget_calls["acquire"] == (7, 1, 66)
+    assert budget_calls["settle"][1:] == (5, 1, True)
+    assert len(usage_records) == 1
+    usage = usage_records[0]
+    assert usage.source == "plugin:demo"
+    assert usage.account_id == 7
+    assert usage.provider_id == 1
+    assert usage.provider_name == "primary"
+    assert usage.model == "gpt-stream"
+    assert usage.input_tokens == 3
+    assert usage.output_tokens == 2
+    assert usage.success is True
+    assert usage.fallback_chain == ["primary"]
+
+
+@pytest.mark.asyncio
+async def test_stream_complete_account_budget_precheck_is_mapped_to_quota_error(monkeypatch) -> None:
+    async def _loader():
+        return {1: _provider(1, api_format="responses")}
+
+    async def _quota_acquire(*_args, **_kwargs):
+        return object()
+
+    quota_release = AsyncNoop()
+    usage_records: list[Any] = []
+    budget_settle = AsyncNoop()
+    invoked = False
+
+    async def _budget_acquire(*_args, **_kwargs):
+        raise ai_facade.llm_account_budget.LLMAccountBudgetExceeded("account budget exceeded")
+
+    def _build_client(*_args, **_kwargs):
+        nonlocal invoked
+        invoked = True
+        raise AssertionError("provider should not be built when account budget fails")
+
+    async def _emit_usage(record):
+        usage_records.append(record)
+
+    monkeypatch.setattr(ai_facade.plugin_ai_quota, "acquire", _quota_acquire)
+    monkeypatch.setattr(ai_facade.plugin_ai_quota, "release", quota_release)
+    monkeypatch.setattr(ai_facade.llm_account_budget, "acquire", _budget_acquire)
+    monkeypatch.setattr(ai_facade.llm_account_budget, "settle", budget_settle)
+    monkeypatch.setattr(ai_facade.llm_runtime, "_emit_usage", _emit_usage)
+    monkeypatch.setattr(ai_facade, "build_llm_client", _build_client)
+    facade = PluginAI(account_id=7, plugin_key="demo", provider_loader=_loader)
+
+    with pytest.raises(AIQuotaError, match="account budget exceeded"):
+        async for _delta in facade.stream_complete("sys", "hello"):
+            pass
+
+    assert invoked is False
+    assert quota_release.calls[0][0][1] == 0
+    assert budget_settle.calls == []
+    assert len(usage_records) == 1
+    assert usage_records[0].source == "plugin:demo"
+    assert usage_records[0].success is False
+    assert usage_records[0].error_type == "budget_exceeded"
+
+
+@pytest.mark.asyncio
+async def test_stream_complete_rejects_non_streaming_provider(monkeypatch) -> None:
+    async def _loader():
+        return {1: _provider(1, api_format="chat_completions")}
+
+    invoked = False
+
+    def _build_client(*_args, **_kwargs):
+        nonlocal invoked
+        invoked = True
+        raise AssertionError("chat_completions provider should not be built for streaming")
+
+    monkeypatch.setattr(ai_facade, "build_llm_client", _build_client)
+    facade = PluginAI(account_id=7, plugin_key="demo", provider_loader=_loader)
+
+    with pytest.raises(AIUnavailableError, match="暂不支持 streaming"):
+        async for _delta in facade.stream_complete("sys", "hello"):
+            pass
+
+    assert invoked is False
+
+
+@pytest.mark.asyncio
+async def test_stream_complete_ai_disabled_short_circuits_provider_loader(monkeypatch) -> None:
+    invoked = False
+
+    async def _disabled(*_args: Any, **_kwargs: Any) -> bool:
+        return False
+
+    async def _loader():
+        nonlocal invoked
+        invoked = True
+        return {1: _provider(1, api_format="responses")}
+
+    monkeypatch.setattr(ai_facade, "is_ai_enabled", _disabled)
+    facade = PluginAI(account_id=7, plugin_key="demo", provider_loader=_loader)
+
+    with pytest.raises(AIUnavailableError, match="AI 能力已在系统设置中关闭"):
+        async for _delta in facade.stream_complete("sys", "hello"):
+            pass
+
+    assert invoked is False
+
+
+@pytest.mark.asyncio
+async def test_stream_complete_plugin_quota_precheck_is_mapped_to_quota_error(monkeypatch) -> None:
+    async def _loader():
+        return {1: _provider(1, api_format="responses")}
+
+    async def _acquire(*_args, **_kwargs):
+        raise ai_facade.plugin_ai_quota.PluginAIQuotaExceeded("quota exceeded")
+
+    invoked = False
+
+    def _build_client(*_args, **_kwargs):
+        nonlocal invoked
+        invoked = True
+        raise AssertionError("provider should not be built when precheck fails")
+
+    monkeypatch.setattr(ai_facade.plugin_ai_quota, "acquire", _acquire)
+    monkeypatch.setattr(ai_facade.plugin_ai_quota, "release", AsyncNoop())
+    monkeypatch.setattr(ai_facade, "build_llm_client", _build_client)
+    facade = PluginAI(account_id=7, plugin_key="demo", provider_loader=_loader)
+
+    with pytest.raises(AIQuotaError):
+        async for _delta in facade.stream_complete("sys", "hello"):
+            pass
+
+    assert invoked is False
 
 
 class AsyncNoop:

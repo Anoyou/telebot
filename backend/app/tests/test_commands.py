@@ -587,6 +587,68 @@ async def test_anthropic_client_vision_body_shape() -> None:
 
 
 @pytest.mark.asyncio
+async def test_anthropic_client_stream_complete_yields_text_deltas() -> None:
+    """stream_complete 应直接产出 Anthropic SSE 的 text_delta 增量。"""
+    from app.services.llm_client import AnthropicClient
+
+    sse_lines = [
+        "event: message_start",
+        'data: {"type":"message_start","message":{"model":"claude-x","usage":{"input_tokens":4}}}',
+        "",
+        "event: content_block_delta",
+        'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"你"}}',
+        "",
+        "event: content_block_delta",
+        'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"好"}}',
+        "",
+        "event: message_delta",
+        'data: {"type":"message_delta","usage":{"output_tokens":2}}',
+        "",
+        "event: message_stop",
+        'data: {"type":"message_stop"}',
+        "",
+    ]
+
+    class _FakeStreamResp:
+        status_code = 200
+
+        async def aiter_lines(self):
+            for line in sse_lines:
+                yield line
+
+        async def aiter_text(self):
+            yield ""
+
+    class _FakeStreamCM:
+        async def __aenter__(self):
+            return _FakeStreamResp()
+
+        async def __aexit__(self, *exc):
+            return False
+
+    captured_kwargs: dict = {}
+
+    def _make_stream(*_args, **kwargs):
+        captured_kwargs.update(kwargs)
+        return _FakeStreamCM()
+
+    fake = AsyncMock()
+    fake.__aenter__.return_value = fake
+    fake.stream = _make_stream
+
+    with patch("app.services.llm_client.httpx.AsyncClient", return_value=fake):
+        cli = AnthropicClient(api_key="sk", base_url=None, model="claude-x")
+        chunks = [chunk async for chunk in cli.stream_complete("sys", "user")]
+
+    assert captured_kwargs["json"]["stream"] is True
+    assert [chunk.delta for chunk in chunks if chunk.delta] == ["你", "好"]
+    assert chunks[-1].done is True
+    assert chunks[-1].model == "claude-x"
+    assert chunks[-1].input_tokens == 4
+    assert chunks[-1].output_tokens == 2
+
+
+@pytest.mark.asyncio
 async def test_responses_client_vision_body_shape() -> None:
     """ResponsesClient 拿到 images 时用 [{type:input_text}, {type:input_image, image_url:...}]——
     OpenAI Responses 协议字段名跟 chat/completions 不同，独立测。"""
@@ -613,6 +675,64 @@ async def test_responses_client_vision_body_shape() -> None:
     assert content[0] == {"type": "input_text", "text": "describe"}
     assert content[1]["type"] == "input_image"
     assert content[1]["image_url"].startswith("data:image/png;base64,")
+
+
+@pytest.mark.asyncio
+async def test_responses_client_stream_complete_yields_text_deltas() -> None:
+    """Responses streaming 应设置 stream=true，并 yield output_text.delta。"""
+    from app.services.llm_client import ResponsesClient
+
+    sse_lines = [
+        "event: response.output_text.delta",
+        'data: {"type":"response.output_text.delta","delta":"hello"}',
+        "",
+        "event: response.output_text.delta",
+        'data: {"type":"response.output_text.delta","delta":" world"}',
+        "",
+        "event: response.completed",
+        'data: {"type":"response.completed","response":{"model":"gpt-stream","status":"completed",'
+        '"usage":{"input_tokens":3,"output_tokens":2}}}',
+        "",
+    ]
+
+    class _FakeStreamResp:
+        status_code = 200
+
+        async def aiter_lines(self):
+            for line in sse_lines:
+                yield line
+
+        async def aiter_text(self):
+            yield ""
+
+    class _FakeStreamCM:
+        async def __aenter__(self):
+            return _FakeStreamResp()
+
+        async def __aexit__(self, *exc):
+            return False
+
+    captured_kwargs: dict = {}
+
+    def _make_stream(*_args, **kwargs):
+        captured_kwargs.update(kwargs)
+        return _FakeStreamCM()
+
+    fake = AsyncMock()
+    fake.__aenter__.return_value = fake
+    fake.stream = _make_stream
+
+    with patch("app.services.llm_client.httpx.AsyncClient", return_value=fake):
+        cli = ResponsesClient(api_key="sk", base_url=None, model="gpt-x")
+        chunks = [chunk async for chunk in cli.stream_complete("sys", "user")]
+
+    body = captured_kwargs["json"]
+    assert body["stream"] is True
+    assert [chunk.delta for chunk in chunks if chunk.delta] == ["hello", " world"]
+    assert chunks[-1].done is True
+    assert chunks[-1].model == "gpt-stream"
+    assert chunks[-1].input_tokens == 3
+    assert chunks[-1].output_tokens == 2
 
 
 def test_build_client_passes_proxy_to_openai() -> None:

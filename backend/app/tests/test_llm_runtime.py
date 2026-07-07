@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -28,6 +29,126 @@ from app.worker.command import (
     _safe_log_text,
     _split_long_message,
 )
+
+
+class _BudgetRedis:
+    def __init__(self) -> None:
+        self.lock = asyncio.Lock()
+        self.strings: dict[str, int] = {}
+        self.hashes: dict[str, dict[str, int]] = {}
+        self.zsets: dict[str, dict[str, int]] = {}
+
+    async def ping(self) -> bool:
+        return True
+
+    async def eval(self, script, numkeys, *values):
+        keys = list(values[:numkeys])
+        args = list(values[numkeys:])
+        async with self.lock:
+            if "ZREMRANGEBYSCORE" in script:
+                return self._acquire(keys, args)
+            return self._settle(keys, args)
+
+    def _acquire(self, keys, args):
+        minute_key, daily_requests_key, daily_tokens_key, daily_premium_key, reservation_key = keys
+        per_minute = int(args[0])
+        daily_requests = int(args[1])
+        daily_tokens = int(args[2])
+        premium_daily = int(args[3])
+        estimate = int(args[4])
+        reserve_premium = int(args[5])
+        now_ms = int(args[6])
+        window_ms = int(args[7])
+        reservation_id = str(args[10])
+
+        zset = self.zsets.setdefault(minute_key, {})
+        for member, score in list(zset.items()):
+            if score <= now_ms - window_ms:
+                zset.pop(member, None)
+
+        minute_used = len(zset)
+        request_used = self.strings.get(daily_requests_key, 0)
+        token_used = self.strings.get(daily_tokens_key, 0)
+        premium_used = self.strings.get(daily_premium_key, 0)
+
+        if per_minute > 0 and minute_used + 1 > per_minute:
+            return [0, "per_minute", minute_used, per_minute]
+        if daily_requests > 0 and request_used + 1 > daily_requests:
+            return [0, "daily_requests", request_used, daily_requests]
+        if daily_tokens > 0 and token_used + estimate > daily_tokens:
+            return [0, "daily_tokens", token_used, daily_tokens]
+        if premium_daily > 0 and premium_used + reserve_premium > premium_daily:
+            return [0, "premium_daily", premium_used, premium_daily]
+
+        if per_minute > 0:
+            zset[reservation_id] = now_ms
+        self.hashes[reservation_key] = {
+            "minute_active": 1 if per_minute > 0 else 0,
+            "daily_request_units": 1 if daily_requests > 0 else 0,
+            "token_limited": 1 if daily_tokens > 0 else 0,
+            "token_units": estimate if daily_tokens > 0 else 0,
+            "premium_limited": 1 if premium_daily > 0 else 0,
+            "premium_units": reserve_premium if premium_daily > 0 else 0,
+        }
+        if daily_requests > 0:
+            self.strings[daily_requests_key] = request_used + 1
+        if daily_tokens > 0:
+            self.strings[daily_tokens_key] = token_used + estimate
+        if premium_daily > 0 and reserve_premium > 0:
+            self.strings[daily_premium_key] = premium_used + reserve_premium
+        return [1, "ok", minute_used + 1, token_used + estimate]
+
+    def _settle(self, keys, args):
+        (
+            minute_key,
+            daily_requests_key,
+            daily_tokens_key,
+            daily_premium_key,
+            reservation_key,
+            actual_premium_key,
+        ) = keys
+        actual_tokens = int(args[0])
+        actual_premium = int(args[1])
+        keep_request = int(args[2])
+        reservation_id = str(args[3])
+        reservation = self.hashes.pop(reservation_key, None)
+        if reservation is None:
+            return [0, "missing"]
+
+        if keep_request <= 0:
+            if reservation["minute_active"]:
+                self.zsets.setdefault(minute_key, {}).pop(reservation_id, None)
+            if reservation["daily_request_units"]:
+                self.strings[daily_requests_key] = max(
+                    0,
+                    self.strings.get(daily_requests_key, 0) - reservation["daily_request_units"],
+                )
+
+        if reservation["token_limited"]:
+            self.strings[daily_tokens_key] = max(
+                0,
+                self.strings.get(daily_tokens_key, 0) + actual_tokens - reservation["token_units"],
+            )
+        if reservation["premium_limited"]:
+            if actual_premium_key == daily_premium_key:
+                self.strings[daily_premium_key] = max(
+                    0,
+                    self.strings.get(daily_premium_key, 0) + actual_premium - reservation["premium_units"],
+                )
+            else:
+                if reservation["premium_units"]:
+                    self.strings[daily_premium_key] = max(
+                        0,
+                        self.strings.get(daily_premium_key, 0) - reservation["premium_units"],
+                    )
+                if actual_premium:
+                    self.strings[actual_premium_key] = self.strings.get(actual_premium_key, 0) + actual_premium
+        return [1, "ok"]
+
+
+class _BrokenBudgetRedis:
+    async def ping(self) -> bool:
+        raise RuntimeError("redis down")
 
 # ════════════════════════════════════════════════════════════
 # 1) LLMProviderDTO 测试
@@ -276,7 +397,306 @@ async def test_llm_usage_persist_writes_triggered_by_account_id(monkeypatch) -> 
 
 
 # ════════════════════════════════════════════════════════════
-# 5) 隐私日志脱敏测试
+# 5) 账号级 LLM 预算 reservation 测试
+# ════════════════════════════════════════════════════════════
+
+
+@pytest.mark.asyncio
+async def test_llm_budget_reservation_rejects_concurrent_over_minute_limit(monkeypatch) -> None:
+    """并发请求同一账号时，Redis reservation 原子拒绝超出每分钟请求上限的请求。"""
+    from app.services import llm_account_budget
+    from app.services import llm_runtime as _rt
+
+    redis = _BudgetRedis()
+    provider = LLMProviderDTO(id=1, name="primary", provider="openai", cost_tier=2)
+
+    monkeypatch.setattr(llm_account_budget, "get_redis", lambda: redis)
+    monkeypatch.setattr(
+        llm_account_budget,
+        "_load_budget_limits",
+        AsyncMock(
+            return_value={
+                "per_minute": 2,
+                "daily_requests": 0,
+                "daily_tokens": 0,
+                "premium_daily": 0,
+            }
+        ),
+    )
+
+    checks = await asyncio.gather(*[_rt._check_budget(7, provider, 10) for _ in range(5)])
+
+    allowed = [check for check in checks if check.error is None]
+    blocked = [check for check in checks if check.error is not None]
+    assert len(allowed) == 2
+    assert len(blocked) == 3
+    assert all("每分钟调用次数已达上限" in str(check.error) for check in blocked)
+
+
+@pytest.mark.asyncio
+async def test_llm_budget_reservation_rejects_over_daily_request_limit(monkeypatch) -> None:
+    """每日请求数到达上限后，同账号后续请求会被 Redis reservation 拒绝。"""
+    from app.services import llm_account_budget
+    from app.services import llm_runtime as _rt
+
+    redis = _BudgetRedis()
+    provider = LLMProviderDTO(id=1, name="primary", provider="openai", cost_tier=2)
+
+    monkeypatch.setattr(llm_account_budget, "get_redis", lambda: redis)
+    monkeypatch.setattr(
+        llm_account_budget,
+        "_load_budget_limits",
+        AsyncMock(
+            return_value={
+                "per_minute": 0,
+                "daily_requests": 1,
+                "daily_tokens": 0,
+                "premium_daily": 0,
+            }
+        ),
+    )
+
+    first = await _rt._check_budget(7, provider, 10)
+    second = await _rt._check_budget(7, provider, 10)
+
+    assert first.error is None
+    assert second.error is not None
+    assert "今日调用次数已达上限" in second.error
+
+
+@pytest.mark.asyncio
+async def test_llm_budget_reservation_rejects_over_daily_token_limit(monkeypatch) -> None:
+    """预估 token 会参与每日 token reservation，超额请求不会进入 provider 调用。"""
+    from app.services import llm_account_budget
+    from app.services import llm_runtime as _rt
+
+    redis = _BudgetRedis()
+    provider = LLMProviderDTO(id=1, name="primary", provider="openai", cost_tier=2)
+
+    monkeypatch.setattr(llm_account_budget, "get_redis", lambda: redis)
+    monkeypatch.setattr(
+        llm_account_budget,
+        "_load_budget_limits",
+        AsyncMock(
+            return_value={
+                "per_minute": 0,
+                "daily_requests": 0,
+                "daily_tokens": 15,
+                "premium_daily": 0,
+            }
+        ),
+    )
+
+    first = await _rt._check_budget(7, provider, 10)
+    second = await _rt._check_budget(7, provider, 10)
+
+    assert first.error is None
+    assert second.error is not None
+    assert "今日 token 用量已达上限" in second.error
+
+
+@pytest.mark.asyncio
+async def test_llm_budget_redis_failure_is_fail_open(monkeypatch) -> None:
+    """Redis 异常时预算检查 fail-open，不阻断 LLM 调用。"""
+    from app.services import llm_account_budget
+    from app.services import llm_runtime as _rt
+
+    provider = LLMProviderDTO(id=1, name="primary", provider="openai", cost_tier=3)
+
+    monkeypatch.setattr(llm_account_budget, "get_redis", lambda: _BrokenBudgetRedis())
+    monkeypatch.setattr(
+        llm_account_budget,
+        "_load_budget_limits",
+        AsyncMock(
+            return_value={
+                "per_minute": 1,
+                "daily_requests": 1,
+                "daily_tokens": 1,
+                "premium_daily": 1,
+            }
+        ),
+    )
+
+    check = await _rt._check_budget(7, provider, 10)
+
+    assert check.error is None
+    assert check.ticket is not None
+    assert check.ticket.backend == "fail-open"
+
+
+@pytest.mark.asyncio
+async def test_llm_budget_failed_call_releases_reservation(monkeypatch) -> None:
+    """LLM 调用最终失败时，预扣的请求、token 和高价 provider 计数会释放。"""
+    from app.services import llm_account_budget
+    from app.services import llm_runtime as _rt
+
+    redis = _BudgetRedis()
+    provider = LLMProviderDTO(id=1, name="primary", provider="openai", cost_tier=3)
+
+    monkeypatch.setattr(llm_account_budget, "get_redis", lambda: redis)
+    monkeypatch.setattr(
+        llm_account_budget,
+        "_load_budget_limits",
+        AsyncMock(
+            return_value={
+                "per_minute": 10,
+                "daily_requests": 10,
+                "daily_tokens": 100,
+                "premium_daily": 10,
+            }
+        ),
+    )
+
+    check = await _rt._check_budget(7, provider, 30)
+    assert check.error is None
+    assert check.ticket is not None
+    assert any(value == 1 for key, value in redis.strings.items() if ":daily_requests:" in key)
+    assert any(value == 30 for key, value in redis.strings.items() if ":daily_tokens:" in key)
+    assert any(value == 1 for key, value in redis.strings.items() if ":daily_premium:" in key)
+
+    await llm_account_budget.settle(
+        check.ticket,
+        actual_tokens=0,
+        actual_provider=None,
+        success=False,
+    )
+
+    assert all(value == 0 for key, value in redis.strings.items() if ":daily_requests:" in key)
+    assert all(value == 0 for key, value in redis.strings.items() if ":daily_tokens:" in key)
+    assert all(value == 0 for key, value in redis.strings.items() if ":daily_premium:" in key)
+    assert all(len(zset) == 0 for zset in redis.zsets.values())
+
+
+@pytest.mark.asyncio
+async def test_llm_budget_premium_limit_is_per_provider(monkeypatch) -> None:
+    """高价 provider 每日次数沿用旧语义：同账号下按 provider_id 分桶。"""
+    from app.services import llm_account_budget
+    from app.services import llm_runtime as _rt
+
+    redis = _BudgetRedis()
+    premium_a = LLMProviderDTO(id=1, name="premium-a", provider="openai", cost_tier=3)
+    premium_b = LLMProviderDTO(id=2, name="premium-b", provider="openai", cost_tier=3)
+
+    monkeypatch.setattr(llm_account_budget, "get_redis", lambda: redis)
+    monkeypatch.setattr(
+        llm_account_budget,
+        "_load_budget_limits",
+        AsyncMock(
+            return_value={
+                "per_minute": 0,
+                "daily_requests": 0,
+                "daily_tokens": 0,
+                "premium_daily": 1,
+            }
+        ),
+    )
+
+    first_a = await _rt._check_budget(7, premium_a, 10)
+    first_b = await _rt._check_budget(7, premium_b, 10)
+    second_a = await _rt._check_budget(7, premium_a, 10)
+
+    assert first_a.error is None
+    assert first_b.error is None
+    assert second_a.error is not None
+    assert "高价 LLM 今日调用次数已达上限" in second_a.error
+
+
+@pytest.mark.asyncio
+async def test_llm_budget_fallback_settlement_corrects_tokens_and_premium(monkeypatch) -> None:
+    """预算仍只在首 provider 前检查，但 fallback 成功时按实际 provider 修正预扣。"""
+    from app.services import llm_account_budget
+    from app.services import llm_runtime as _rt
+    from app.services.llm_client import LLMResult
+
+    redis = _BudgetRedis()
+    primary = LLMProviderDTO(id=1, name="primary", provider="openai", cost_tier=3)
+    fallback = LLMProviderDTO(id=2, name="fallback", provider="openai", cost_tier=1)
+    chain = FallbackChain(primary=primary, fallbacks=[fallback])
+
+    monkeypatch.setattr(llm_account_budget, "get_redis", lambda: redis)
+    monkeypatch.setattr(
+        llm_account_budget,
+        "_load_budget_limits",
+        AsyncMock(
+            return_value={
+                "per_minute": 10,
+                "daily_requests": 10,
+                "daily_tokens": 100,
+                "premium_daily": 10,
+            }
+        ),
+    )
+
+    async def fake_call(provider_dto, *args, **kwargs):
+        if provider_dto.id == 1:
+            raise LLMError("primary failed", retryable=True)
+        return LLMResult(text="ok", model="fallback-model", input_tokens=3, output_tokens=4)
+
+    monkeypatch.setattr(_rt, "_call_with_retry", fake_call)
+
+    result, provider, used_fallback = await _rt.call_with_fallback(
+        chain,
+        "sys",
+        "user",
+        max_tokens=30,
+        account_id=7,
+    )
+
+    assert result.text == "ok"
+    assert provider.id == 2
+    assert used_fallback is True
+    assert any(value == 1 for key, value in redis.strings.items() if ":daily_requests:" in key)
+    assert any(value == 7 for key, value in redis.strings.items() if ":daily_tokens:" in key)
+    assert all(value == 0 for key, value in redis.strings.items() if ":daily_premium:" in key)
+
+
+@pytest.mark.asyncio
+async def test_llm_budget_fallback_settlement_moves_premium_bucket_to_actual_provider(monkeypatch) -> None:
+    """fallback 到另一个高价 provider 时，premium 计数按实际 provider_id 结算。"""
+    from app.services import llm_account_budget
+    from app.services import llm_runtime as _rt
+    from app.services.llm_client import LLMResult
+
+    redis = _BudgetRedis()
+    primary = LLMProviderDTO(id=1, name="primary", provider="openai", cost_tier=3)
+    fallback = LLMProviderDTO(id=2, name="fallback", provider="openai", cost_tier=3)
+    chain = FallbackChain(primary=primary, fallbacks=[fallback])
+
+    monkeypatch.setattr(llm_account_budget, "get_redis", lambda: redis)
+    monkeypatch.setattr(
+        llm_account_budget,
+        "_load_budget_limits",
+        AsyncMock(
+            return_value={
+                "per_minute": 10,
+                "daily_requests": 10,
+                "daily_tokens": 100,
+                "premium_daily": 10,
+            }
+        ),
+    )
+
+    async def fake_call(provider_dto, *args, **kwargs):
+        if provider_dto.id == 1:
+            raise LLMError("primary failed", retryable=True)
+        return LLMResult(text="ok", model="fallback-model", input_tokens=3, output_tokens=4)
+
+    monkeypatch.setattr(_rt, "_call_with_retry", fake_call)
+
+    await _rt.call_with_fallback(chain, "sys", "user", max_tokens=30, account_id=7)
+
+    primary_premium = [
+        value for key, value in redis.strings.items() if ":daily_premium:1:" in key
+    ]
+    fallback_premium = [
+        value for key, value in redis.strings.items() if ":daily_premium:2:" in key
+    ]
+    assert primary_premium == [0]
+    assert fallback_premium == [1]
+
+
+# ════════════════════════════════════════════════════════════
+# 6) 隐私日志脱敏测试
 # ════════════════════════════════════════════════════════════
 
 

@@ -5382,6 +5382,91 @@ def _interaction_module_prize(rule: dict[str, Any], data: dict[str, Any]) -> int
     return None
 
 
+def _interaction_payload_envelope(
+    base: dict[str, Any],
+    key: str,
+    normalized: dict[str, Any],
+    *,
+    defaults: dict[str, Any] | None = None,
+    override_base: bool = True,
+) -> dict[str, Any]:
+    value = dict(base.get(key) or {}) if isinstance(base.get(key), dict) else dict(normalized)
+    if override_base:
+        value.update(normalized)
+    for name, fallback in dict(defaults or {}).items():
+        value.setdefault(name, fallback)
+    return value
+
+
+def _interaction_module_payload_parts(
+    incoming: Incoming,
+    rule: dict[str, Any],
+    parsed: dict[str, Any] | None,
+    *,
+    event_type: str,
+    data: dict[str, Any],
+) -> dict[str, Any]:
+    base = _incoming_trace_payload(incoming, event_type=event_type)
+    actor = _interaction_actor_envelope(incoming, data)
+    source_actor = _interaction_source_actor_envelope(incoming, data)
+    player = _interaction_player_envelope(incoming, data, event_type=event_type)
+    payer_name = _interaction_payment_payer_name(incoming, data) or (
+        incoming.display_name or "" if event_type != "payment_confirmed" else ""
+    )
+    payment = (
+        _interaction_payment_envelope(
+            incoming,
+            data,
+            payer_user_id=_int_or_none(player.get("user_id")),
+            payer_name=str(player.get("display_name") or payer_name or "").strip() or None,
+        )
+        if event_type == "payment_confirmed"
+        else None
+    )
+    reply_to = _interaction_reply_to_envelope(incoming)
+    if reply_to is None and isinstance(base.get("reply_to"), dict):
+        reply_to = dict(base["reply_to"])
+    raw = dict(base.get("raw") or {}) if isinstance(base.get("raw"), dict) else {}
+    raw.update(_interaction_raw_envelope(incoming, rule, parsed, event_type))
+    module_key = str(rule.get("module_key") or "").strip()
+    native_raw_allowed = account_bot_service.plugin_declares_telegram_native_raw(module_key, source="interaction_bot")
+    return {
+        "base": base,
+        "event": _interaction_event_payload(incoming, rule, event_type, parsed),
+        "source": _interaction_payload_envelope(
+            base,
+            "source",
+            _interaction_source_envelope(incoming, event_type),
+        ),
+        "message": _interaction_payload_envelope(
+            base,
+            "message",
+            _interaction_message_envelope(incoming),
+            defaults={"entities": [], "media": None, "date": None},
+            override_base=False,
+        ),
+        "chat": _interaction_payload_envelope(
+            base,
+            "chat",
+            _interaction_chat_envelope(incoming),
+            defaults={"title": None, "username": None},
+            override_base=False,
+        ),
+        "actor": actor,
+        "source_actor": source_actor,
+        "player": player,
+        "payment": payment,
+        "reply_to": reply_to,
+        "trigger": _interaction_trigger_envelope(rule, event_type, parsed),
+        "session": _interaction_session_envelope(incoming, rule, data),
+        "raw": raw,
+        "native_raw_meta": _native_raw_meta(incoming, object_name="update", enabled=native_raw_allowed),
+        "native_raw": incoming.native_raw if native_raw_allowed else None,
+        "inline_query": None,
+        "chosen_inline_result": None,
+    }
+
+
 def _interaction_module_payload(
     incoming: Incoming,
     rule: dict[str, Any],
@@ -5396,56 +5481,29 @@ def _interaction_module_payload(
     resolved_payer_user_id = _interaction_payment_payer_user_id(incoming, data)
     payer_user_id = resolved_payer_user_id if event_type == "payment_confirmed" else resolved_payer_user_id or incoming.user_id
     payer_name = _interaction_payment_payer_name(incoming, data) or (incoming.display_name or "" if event_type != "payment_confirmed" else "")
-    base = _incoming_trace_payload(incoming, event_type=event_type)
-    event = _interaction_event_payload(incoming, rule, event_type, parsed)
-    source = dict(base.get("source") or {}) if isinstance(base.get("source"), dict) else _interaction_source_envelope(incoming, event_type)
-    source.update(_interaction_source_envelope(incoming, event_type))
-    message = dict(base.get("message") or {}) if isinstance(base.get("message"), dict) else _interaction_message_envelope(incoming)
-    message.setdefault("entities", [])
-    message.setdefault("media", None)
-    message.setdefault("date", None)
-    chat = dict(base.get("chat") or {}) if isinstance(base.get("chat"), dict) else _interaction_chat_envelope(incoming)
-    chat.setdefault("title", None)
-    chat.setdefault("username", None)
-    actor = _interaction_actor_envelope(incoming, data)
-    source_actor = _interaction_source_actor_envelope(incoming, data)
-    player = _interaction_player_envelope(incoming, data, event_type=event_type)
-    payment = _interaction_payment_envelope(
-        incoming,
-        data,
-        payer_user_id=_int_or_none(player.get("user_id")),
-        payer_name=str(player.get("display_name") or payer_name or "").strip() or None,
-    ) if event_type == "payment_confirmed" else None
-    reply_to = _interaction_reply_to_envelope(incoming)
-    if reply_to is None and isinstance(base.get("reply_to"), dict):
-        reply_to = dict(base["reply_to"])
-    trigger = _interaction_trigger_envelope(rule, event_type, parsed)
-    session = _interaction_session_envelope(incoming, rule, data)
-    raw = dict(base.get("raw") or {}) if isinstance(base.get("raw"), dict) else {}
-    raw.update(_interaction_raw_envelope(incoming, rule, parsed, event_type))
-    module_key = str(rule.get("module_key") or "").strip()
-    native_raw_allowed = account_bot_service.plugin_declares_telegram_native_raw(module_key, source="interaction_bot")
+    parts = _interaction_module_payload_parts(incoming, rule, parsed, event_type=event_type, data=data)
+    base = parts["base"]
     data.update(base)
     data.update(
         {
             "trace_id": incoming.trace_id,
-            "event": event,
-            "source": source,
-            "message": message,
-            "chat": chat,
-            "sender": source_actor,
-            "actor": actor,
-            "source_actor": source_actor,
-            "player": player,
-            "payment": payment,
-            "reply_to": reply_to,
-            "trigger": trigger,
-            "session": session,
-            "raw": raw,
-            "native_raw_meta": _native_raw_meta(incoming, object_name="update", enabled=native_raw_allowed),
-            "native_raw": incoming.native_raw if native_raw_allowed else None,
-            "inline_query": None,
-            "chosen_inline_result": None,
+            "event": parts["event"],
+            "source": parts["source"],
+            "message": parts["message"],
+            "chat": parts["chat"],
+            "sender": parts["source_actor"],
+            "actor": parts["actor"],
+            "source_actor": parts["source_actor"],
+            "player": parts["player"],
+            "payment": parts["payment"],
+            "reply_to": parts["reply_to"],
+            "trigger": parts["trigger"],
+            "session": parts["session"],
+            "raw": parts["raw"],
+            "native_raw_meta": parts["native_raw_meta"],
+            "native_raw": parts["native_raw"],
+            "inline_query": parts["inline_query"],
+            "chosen_inline_result": parts["chosen_inline_result"],
             "event_type": event_type,
             "account_id": incoming.account_id,
             "chat_id": incoming.chat_id,

@@ -308,6 +308,179 @@ def test_ai_runtime_api_format_context_tracks_effective_protocol() -> None:
     assert search["web_search"] == "true"
 
 
+def _provider_dict(
+    provider_id: int,
+    name: str,
+    *,
+    default_model: str = "gpt-4o",
+    modality: str = "text",
+    models: list[dict[str, str]] | None = None,
+) -> dict[str, object]:
+    return {
+        "id": provider_id,
+        "name": name,
+        "provider": "openai",
+        "default_model": default_model,
+        "api_format": "chat_completions",
+        "web_search_api_format": "auto",
+        "api_key_enc": None,
+        "modality": modality,
+        "tags": [],
+        "cost_tier": 2,
+        "models": models or [],
+    }
+
+
+def _plain_event() -> AsyncMock:
+    event = AsyncMock()
+    event.chat_id = 123
+    event.get_reply_message = AsyncMock(return_value=None)
+    event.message = SimpleNamespace(
+        photo=None,
+        document=None,
+        sticker=None,
+        voice=None,
+        audio=None,
+        video=None,
+        video_note=None,
+        media=None,
+        file=None,
+    )
+    return event
+
+
+@pytest.mark.asyncio
+async def test_worker_ai_runtime_search_enables_web_search_and_renders_sources(monkeypatch) -> None:
+    fake_result = LLMResult(
+        text="找到资料",
+        model="gpt-4o-search",
+        input_tokens=5,
+        output_tokens=6,
+        sources=[{"title": "资料 A", "url": "https://example.test/a"}],
+    )
+    invoke_mock = AsyncMock(
+        return_value=(
+            fake_result,
+            LLMProviderDTO(id=1, name="primary", provider="openai", default_model="gpt-4o-search"),
+            False,
+        )
+    )
+    monkeypatch.setattr(service_ai_runtime, "invoke", invoke_mock)
+    monkeypatch.setattr("app.worker.runtime._refresh_command_context", AsyncMock(return_value=None))
+    wcmd.set_command_context(
+        CommandContext(
+            account_id=1,
+            templates={},
+            providers={1: _provider_dict(1, "primary", default_model="gpt-4o-search")},
+        )
+    )
+
+    event = _plain_event()
+    tpl = {
+        "name": "ai",
+        "type": "ai",
+        "config": {
+            "mode": "search",
+            "provider_id": 1,
+            "output_template": "{answer}|{sources}|{api_format}|{endpoint}|{web_search}",
+        },
+    }
+
+    await ai_runtime.invoke(AsyncMock(), event, ["今天", "新闻"], tpl, 1)
+
+    invoke_mock.assert_awaited_once()
+    assert invoke_mock.await_args.kwargs["web_search"] is True
+    assert invoke_mock.await_args.kwargs["web_search_context_size"] == "medium"
+    final_text = event.edit.await_args_list[-1].args[0]
+    assert "找到资料" in final_text
+    assert "资料 A\nhttps://example.test/a" in final_text
+    assert "|responses|/responses|true" in final_text
+
+
+@pytest.mark.asyncio
+async def test_worker_ai_runtime_fallback_renders_actual_provider_footer(monkeypatch) -> None:
+    fake_result = LLMResult(text="fallback answer", model="gpt-4o-mini", input_tokens=3, output_tokens=4)
+    fallback_dto = LLMProviderDTO(id=2, name="fallback", provider="openai", default_model="gpt-4o-mini")
+    invoke_mock = AsyncMock(return_value=(fake_result, fallback_dto, True))
+    monkeypatch.setattr(service_ai_runtime, "invoke", invoke_mock)
+    monkeypatch.setattr("app.worker.runtime._refresh_command_context", AsyncMock(return_value=None))
+    wcmd.set_command_context(
+        CommandContext(
+            account_id=1,
+            templates={},
+            providers={
+                1: _provider_dict(1, "primary", default_model="gpt-4o"),
+                2: _provider_dict(
+                    2,
+                    "fallback",
+                    default_model="gpt-4o-mini",
+                    models=[{"id": "gpt-4o-mini", "label": "GPT-4o Mini"}],
+                ),
+            },
+        )
+    )
+
+    event = _plain_event()
+    tpl = {
+        "name": "ai",
+        "type": "ai",
+        "config": {
+            "provider_id": 1,
+            "routing_fallback_provider_id": 2,
+            "output_template": "{answer}|{provider}|{model}|{routing_note}",
+        },
+    }
+
+    await ai_runtime.invoke(AsyncMock(), event, ["hello"], tpl, 1)
+
+    assert invoke_mock.await_args.kwargs["fallback_provider_id"] == 2
+    final_text = event.edit.await_args_list[-1].args[0]
+    assert final_text == "fallback answer|fallback|GPT-4o Mini|fallback → @fallback"
+
+
+@pytest.mark.asyncio
+async def test_worker_ai_runtime_inline_provider_override_renders_footer(monkeypatch) -> None:
+    fake_result = LLMResult(text="inline answer", model="gpt-4o-mini", input_tokens=1, output_tokens=2)
+    invoke_mock = AsyncMock(
+        return_value=(
+            fake_result,
+            LLMProviderDTO(id=2, name="secondary", provider="openai", default_model="gpt-4o-mini"),
+            False,
+        )
+    )
+    monkeypatch.setattr(service_ai_runtime, "invoke", invoke_mock)
+    monkeypatch.setattr("app.worker.runtime._refresh_command_context", AsyncMock(return_value=None))
+    wcmd.set_command_context(
+        CommandContext(
+            account_id=1,
+            templates={},
+            providers={
+                1: _provider_dict(1, "primary", default_model="gpt-4o"),
+                2: _provider_dict(2, "secondary", default_model="gpt-4o-mini"),
+            },
+        )
+    )
+
+    event = _plain_event()
+    tpl = {
+        "name": "ai",
+        "type": "ai",
+        "config": {
+            "provider_id": 1,
+            "model": "primary-template-model",
+            "output_template": "{answer}|{provider}|{model_id}|{routing_note}",
+        },
+    }
+
+    await ai_runtime.invoke(AsyncMock(), event, ["@secondary", "hello"], tpl, 1)
+
+    provider_dto = invoke_mock.await_args.args[0]
+    assert provider_dto.id == 2
+    assert invoke_mock.await_args.kwargs["override_model"] is None
+    final_text = event.edit.await_args_list[-1].args[0]
+    assert final_text == "inline answer|secondary|gpt-4o-mini|inline → @secondary"
+
+
 @pytest.mark.asyncio
 async def test_ai_runtime_rejects_non_vision_provider_before_download(monkeypatch) -> None:
     from app.worker import runtime as worker_runtime

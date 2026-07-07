@@ -16,7 +16,9 @@ from ..db.models.account import Account
 from ..db.models.plugin import InstalledPlugin
 from ..deps import CurrentUser, DBSession
 from ..redis_client import get_redis
+from ..schemas.plugin_center import PluginCenterItem
 from ..services import audit
+from ..services import plugin_center_service as pcs
 from ..services import plugin_install_service as pis
 from ..worker.ipc import CMD_RELOAD_CONFIG, cmd_channel, make_cmd
 
@@ -111,6 +113,13 @@ async def list_installed_packages(
 ) -> list[PluginInstallOut]:
     rows = await pis.list_installed(db)
     return [_to_out(r) for r in rows]
+
+
+@router.get("/api/plugins/installed-overview", response_model=list[PluginCenterItem])
+async def list_installed_overview(
+    db: DBSession, _user: CurrentUser
+) -> list[PluginCenterItem]:
+    return await pcs.list_installed_plugins_overview(db)
 
 
 @router.post("/api/plugins/install/upload", response_model=PluginInstallOut)

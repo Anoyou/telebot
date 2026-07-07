@@ -8,7 +8,9 @@ consistent with first-party AI commands.
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Mapping
+import inspect
+import time
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -17,10 +19,22 @@ from sqlalchemy import select
 from ...crypto import decrypt_str
 from ...db.base import AsyncSessionLocal
 from ...db.models.account import Proxy
-from ...db.models.command import LLMProvider
-from ...services import plugin_ai_quota
+from ...db.models.command import (
+    LLM_API_FORMAT_ANTHROPIC_MESSAGES,
+    LLM_API_FORMAT_RESPONSES,
+    LLMProvider,
+    default_api_format_for,
+)
+from ...services import llm_account_budget, llm_runtime, plugin_ai_quota
 from ...services.ai_feature import is_ai_enabled
-from ...services.llm_client import LLMCallFailed, LLMError, LLMResult
+from ...services.llm_client import (
+    LLMCallFailed,
+    LLMError,
+    LLMResult,
+)
+from ...services.llm_client import (
+    build_client_from_dto as build_llm_client,
+)
 from ...services.llm_dto import LLMProviderDTO
 from ...services.llm_invoke import invoke as invoke_ai_runtime
 from ...settings import settings
@@ -217,10 +231,197 @@ class PluginAI:
 
         return _result_from_llm(result, used_provider, used_fallback)
 
-    async def stream_complete(self, *_args: Any, **_kwargs: Any) -> None:
-        """Streaming is intentionally not part of the MVP facade."""
+    async def stream_complete(
+        self,
+        system: str,
+        user: str,
+        *,
+        provider: int | str | None = None,
+        provider_tag: str | None = None,
+        tag: str | None = None,
+        tags: list[str] | tuple[str, ...] | None = None,
+        model: str | None = None,
+        override_model: str | None = None,
+        max_tokens: int = 512,
+        timeout: int = DEFAULT_PLUGIN_AI_TIMEOUT_SECONDS,
+        timeout_seconds: int | None = None,
+        temperature: float | None = None,
+        reasoning_effort: str | None = None,
+        **_ignored: Any,
+    ) -> AsyncIterator[str]:
+        """Yield text deltas from providers with native streaming support.
 
-        raise NotImplementedError("ctx.ai.stream_complete 尚未开放；请使用 complete()")
+        The plugin-facing contract is intentionally narrow: each yielded item
+        is a text delta string. Provider fallback is not attempted mid-stream,
+        because partial text may already have been delivered to the plugin.
+        """
+
+        if tag is not None or tags:
+            import warnings
+
+            warnings.warn(
+                "ctx.ai.stream_complete tag/tags 是兼容别名，新模块请使用 provider_tag",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+        system_prompt = str(system or "")
+        user_prompt = str(user or "")
+        if not system_prompt.strip() and not user_prompt.strip():
+            raise AIUnavailableError("ctx.ai.stream_complete 需要 system 或 user 内容")
+
+        providers = await self._load_providers()
+        selected_tag = provider_tag or tag
+        if selected_tag is None and tags:
+            selected_tag = str(tags[0]) if tags[0] else None
+        primary, _matched_tag = _select_provider(
+            providers,
+            provider=provider,
+            provider_tag=selected_tag,
+        )
+        api_format = _effective_api_format(primary)
+        if api_format not in {LLM_API_FORMAT_RESPONSES, LLM_API_FORMAT_ANTHROPIC_MESSAGES}:
+            raise AIUnavailableError(
+                f"provider {primary.name} 暂不支持 streaming；请使用 responses 或 anthropic_messages provider"
+            )
+
+        clamped_tokens = self._clamp_max_tokens(max_tokens)
+        clamped_timeout = self._clamp_timeout(timeout_seconds if timeout_seconds is not None else timeout)
+        selected_model = str(model or override_model or "").strip() or None
+        quota_ticket: plugin_ai_quota.PluginAIQuotaTicket | None = None
+        budget_ticket: llm_account_budget.LLMAccountBudgetTicket | None = None
+        quota_settled = False
+        budget_settled = False
+        actual_tokens = 0
+        final_input_tokens = 0
+        final_output_tokens = 0
+        final_model = selected_model or primary.default_model
+        started_at = time.monotonic()
+        try:
+            estimated_tokens = _estimate_total_tokens(system_prompt, user_prompt, clamped_tokens)
+            quota_ticket = await plugin_ai_quota.acquire(
+                self.plugin_key,
+                self.account_id,
+                estimated_tokens=estimated_tokens,
+            )
+            budget_ticket = await llm_account_budget.acquire(
+                self.account_id,
+                primary,
+                estimated_tokens,
+            )
+            client = build_llm_client(
+                primary,
+                override_model=selected_model,
+                proxy_url=primary.proxy_url,
+                api_format_override=None,
+            )
+            if inspect.isawaitable(client):
+                client = await client
+            async for chunk in client.stream_complete(
+                system_prompt,
+                user_prompt,
+                max_tokens=clamped_tokens,
+                temperature=temperature,
+                reasoning_effort=reasoning_effort,
+                timeout_seconds=clamped_timeout,
+            ):
+                if getattr(chunk, "done", False):
+                    final_input_tokens = int(getattr(chunk, "input_tokens", None) or 0)
+                    final_output_tokens = int(getattr(chunk, "output_tokens", None) or 0)
+                    final_model = str(getattr(chunk, "model", None) or final_model or "")
+                    continue
+                final_model = str(getattr(chunk, "model", None) or final_model or "")
+                delta = str(getattr(chunk, "delta", "") or "")
+                if delta:
+                    yield delta
+            actual_tokens = final_input_tokens + final_output_tokens
+            if actual_tokens <= 0 and quota_ticket is not None:
+                actual_tokens = int(quota_ticket.estimated_tokens or 0)
+                final_input_tokens = actual_tokens
+                final_output_tokens = 0
+            await llm_account_budget.settle(
+                budget_ticket,
+                actual_tokens=actual_tokens,
+                actual_provider=primary,
+                success=True,
+            )
+            budget_settled = True
+            await plugin_ai_quota.release(quota_ticket, actual_tokens)
+            quota_settled = True
+            await _emit_stream_usage(
+                account_id=self.account_id,
+                plugin_key=self.plugin_key,
+                provider=primary,
+                model=final_model,
+                input_tokens=final_input_tokens,
+                output_tokens=final_output_tokens,
+                success=True,
+                started_at=started_at,
+            )
+        except plugin_ai_quota.PluginAIQuotaExceeded as exc:
+            raise AIQuotaError(str(exc)) from exc
+        except llm_account_budget.LLMAccountBudgetExceeded as exc:
+            await plugin_ai_quota.release(quota_ticket, 0)
+            quota_settled = True
+            await _emit_stream_usage(
+                account_id=self.account_id,
+                plugin_key=self.plugin_key,
+                provider=primary,
+                model=final_model,
+                success=False,
+                error_type="budget_exceeded",
+                started_at=started_at,
+            )
+            raise AIQuotaError(str(exc)) from exc
+        except (LLMError, ValueError, NotImplementedError) as exc:
+            await llm_account_budget.settle(
+                budget_ticket,
+                actual_tokens=0,
+                actual_provider=None,
+                success=False,
+            )
+            budget_settled = True
+            await plugin_ai_quota.release(quota_ticket, 0)
+            quota_settled = True
+            await _emit_stream_usage(
+                account_id=self.account_id,
+                plugin_key=self.plugin_key,
+                provider=primary,
+                model=final_model,
+                success=False,
+                error_type=type(exc).__name__,
+                started_at=started_at,
+            )
+            raise AIUnavailableError(str(exc)) from exc
+        except Exception:
+            await llm_account_budget.settle(
+                budget_ticket,
+                actual_tokens=0,
+                actual_provider=None,
+                success=False,
+            )
+            budget_settled = True
+            await plugin_ai_quota.release(quota_ticket, 0)
+            quota_settled = True
+            await _emit_stream_usage(
+                account_id=self.account_id,
+                plugin_key=self.plugin_key,
+                provider=primary,
+                model=final_model,
+                success=False,
+                error_type="unexpected_error",
+                started_at=started_at,
+            )
+            raise
+        finally:
+            if budget_ticket is not None and not budget_settled:
+                await llm_account_budget.settle(
+                    budget_ticket,
+                    actual_tokens=0,
+                    actual_provider=None,
+                    success=False,
+                )
+            if quota_ticket is not None and not quota_settled:
+                await plugin_ai_quota.release(quota_ticket, 0)
 
     async def _load_providers(self) -> dict[int, LLMProviderDTO]:
         if not await is_ai_enabled():
@@ -337,6 +538,43 @@ def _result_from_llm(result: LLMResult, provider: LLMProviderDTO, used_fallback:
         output_tokens=int(result.output_tokens or 0),
         sources=sources,
     )
+
+
+async def _emit_stream_usage(
+    *,
+    account_id: int | None,
+    plugin_key: str,
+    provider: LLMProviderDTO,
+    model: str | None,
+    success: bool,
+    started_at: float,
+    input_tokens: int = 0,
+    output_tokens: int = 0,
+    error_type: str | None = None,
+) -> None:
+    await llm_runtime._emit_usage(
+        llm_runtime.UsageRecord(
+            provider_id=int(provider.id),
+            account_id=account_id,
+            provider_name=provider.name,
+            model=model or provider.default_model,
+            input_tokens=max(0, int(input_tokens or 0)),
+            output_tokens=max(0, int(output_tokens or 0)),
+            latency_ms=max(0, int((time.monotonic() - started_at) * 1000)),
+            success=success,
+            error_type=error_type,
+            source=f"plugin:{plugin_key}",
+            used_fallback=False,
+            fallback_chain=[provider.name],
+        )
+    )
+
+
+def _effective_api_format(provider: LLMProviderDTO) -> str:
+    configured = str(provider.api_format or "").strip().lower()
+    if configured:
+        return configured
+    return default_api_format_for(provider.provider)
 
 
 def _facade_error_from_llm_call(exc: LLMCallFailed) -> PluginAIError:

@@ -20,19 +20,14 @@ import inspect
 import logging
 from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
-
-from sqlalchemy import func, select
 
 if TYPE_CHECKING:
     from .llm_client import LLMResult
     from .llm_dto import LLMProviderDTO
 
-from ..db.base import AsyncSessionLocal
-from ..db.models.llm_usage import LLMUsage
-from ..db.models.system import SystemSetting
 from ..settings import settings
+from . import llm_account_budget
 from .llm_client import build_client_from_dto
 
 log = logging.getLogger(__name__)
@@ -63,6 +58,14 @@ class UsageRecord:
     source: str | None = None
     used_fallback: bool = False
     fallback_chain: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class BudgetCheck:
+    """Result of the account-level LLM budget gate."""
+
+    error: str | None = None
+    ticket: llm_account_budget.LLMAccountBudgetTicket | None = None
 
 
 # 全局 usage 回调（可注入到 DB / Redis / 日志）
@@ -228,8 +231,8 @@ async def call_with_fallback(
 
     all_providers = chain.all_providers
     max_tokens = _apply_output_token_cap(max_tokens)
-    budget_error = await _check_budget(account_id, all_providers[0])
-    if budget_error:
+    budget_check = await _check_budget(account_id, all_providers[0], max_tokens)
+    if budget_check.error:
         usage_record = UsageRecord(
             provider_id=all_providers[0].id if all_providers else None,
             account_id=account_id,
@@ -244,7 +247,7 @@ async def call_with_fallback(
         )
         await _emit_usage(usage_record)
         raise LLMCallFailed(
-            budget_error,
+            budget_check.error,
             provider_id=all_providers[0].id if all_providers else None,
             provider_name=all_providers[0].name if all_providers else None,
             error_type="budget_exceeded",
@@ -301,6 +304,12 @@ async def call_with_fallback(
                 fallback_chain=chain.get_provider_names(),
             )
             await _emit_usage(usage_record)
+            await llm_account_budget.settle(
+                budget_check.ticket,
+                actual_tokens=result.input_tokens + result.output_tokens,
+                actual_provider=provider_dto,
+                success=True,
+            )
 
             if _debug:
                 log.debug(
@@ -340,6 +349,12 @@ async def call_with_fallback(
                     fallback_chain=chain.get_provider_names(),
                 )
                 await _emit_usage(usage_record)
+                await llm_account_budget.settle(
+                    budget_check.ticket,
+                    actual_tokens=0,
+                    actual_provider=None,
+                    success=False,
+                )
 
                 raise LLMCallFailed(
                     f"所有 provider 都失败。最后错误: {type(last_error).__name__}: {last_error}",
@@ -350,6 +365,12 @@ async def call_with_fallback(
                 ) from last_error
 
     # 理论上不会走到这里
+    await llm_account_budget.settle(
+        budget_check.ticket,
+        actual_tokens=0,
+        actual_provider=None,
+        success=False,
+    )
     raise LLMCallFailed(
         f"未预期的错误链 exhausted: {last_error}",
         provider_id=all_providers[-1].id if all_providers else None,
@@ -368,100 +389,23 @@ def _apply_output_token_cap(max_tokens: int) -> int:
     return min(max_tokens, cap)
 
 
-async def _check_budget(account_id: int | None, provider_dto: LLMProviderDTO) -> str | None:
-    """检查账号级 LLM 预算。
+async def _check_budget(
+    account_id: int | None,
+    provider_dto: LLMProviderDTO,
+    estimated_tokens: int,
+) -> BudgetCheck:
+    """Reserve account-level LLM budget before the first provider call.
 
-    这是成本控制的硬门禁：限制命中时不再调用任何 provider。DB 查询失败时
-    不阻断业务，只打 debug，让生产在迁移窗口内仍可降级运行。
+    The pre-call budget gate keeps the existing runtime contract: it only checks
+    the primary provider before entering the fallback chain. Settlement later
+    releases failed calls and corrects token/premium counters for successful
+    fallback calls without adding a second fallback-provider gate.
     """
-    if account_id is None:
-        return None
-
-    now = datetime.now(UTC)
-    minute_start = now - timedelta(minutes=1)
-    day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-
     try:
-        async with AsyncSessionLocal() as db:
-            limits = await _load_budget_limits(db)
-            per_minute = int(limits["per_minute"])
-            daily_requests = int(limits["daily_requests"])
-            daily_tokens = int(limits["daily_tokens"])
-            premium_daily = int(limits["premium_daily"])
-            if per_minute <= 0 and daily_requests <= 0 and daily_tokens <= 0 and premium_daily <= 0:
-                return None
-
-            if per_minute > 0:
-                minute_count = await db.scalar(
-                    select(func.count(LLMUsage.id)).where(
-                        LLMUsage.account_id == account_id,
-                        LLMUsage.created_at >= minute_start,
-                    )
-                )
-                if int(minute_count or 0) >= per_minute:
-                    return f"LLM 每分钟调用次数已达上限（{per_minute}/min），请稍后再试。"
-
-            if daily_requests > 0:
-                day_count = await db.scalar(
-                    select(func.count(LLMUsage.id)).where(
-                        LLMUsage.account_id == account_id,
-                        LLMUsage.created_at >= day_start,
-                    )
-                )
-                if int(day_count or 0) >= daily_requests:
-                    return f"LLM 今日调用次数已达上限（{daily_requests}/day）。"
-
-            if daily_tokens > 0:
-                used_tokens = await db.scalar(
-                    select(func.coalesce(func.sum(LLMUsage.input_tokens + LLMUsage.output_tokens), 0)).where(
-                        LLMUsage.account_id == account_id,
-                        LLMUsage.created_at >= day_start,
-                        LLMUsage.success.is_(True),
-                    )
-                )
-                if int(used_tokens or 0) >= daily_tokens:
-                    return f"LLM 今日 token 用量已达上限（{daily_tokens}/day）。"
-
-            if premium_daily > 0 and int(getattr(provider_dto, "cost_tier", 2) or 2) >= 3:
-                premium_count = await db.scalar(
-                    select(func.count(LLMUsage.id)).where(
-                        LLMUsage.account_id == account_id,
-                        LLMUsage.created_at >= day_start,
-                        LLMUsage.success.is_(True),
-                        LLMUsage.provider_id == provider_dto.id,
-                    )
-                )
-                if int(premium_count or 0) >= premium_daily:
-                    return f"高价 LLM 今日调用次数已达上限（{premium_daily}/day）。"
-    except Exception:  # noqa: BLE001
-        log.debug("LLM budget 检查失败，降级为不阻断 account=%s", account_id, exc_info=True)
-        return None
-    return None
-
-
-async def _load_budget_limits(db) -> dict[str, int]:
-    """读取 DB 覆盖的 LLM 限额；没有配置时回落到环境变量。"""
-    limits = {
-        "per_minute": int(getattr(settings, "llm_per_minute_request_limit_per_account", 0) or 0),
-        "daily_requests": int(getattr(settings, "llm_daily_request_limit_per_account", 0) or 0),
-        "daily_tokens": int(getattr(settings, "llm_daily_token_limit_per_account", 0) or 0),
-        "premium_daily": int(getattr(settings, "llm_premium_daily_request_limit_per_account", 0) or 0),
-    }
-    row = await db.get(SystemSetting, "llm_limits")
-    value = row.value if row is not None else None
-    if isinstance(value, dict):
-        limits["per_minute"] = _non_negative_int(value.get("per_minute"), limits["per_minute"])
-        limits["daily_requests"] = _non_negative_int(value.get("daily_requests"), limits["daily_requests"])
-        limits["daily_tokens"] = _non_negative_int(value.get("daily_tokens"), limits["daily_tokens"])
-        limits["premium_daily"] = _non_negative_int(value.get("premium_daily"), limits["premium_daily"])
-    return limits
-
-
-def _non_negative_int(value: Any, default: int) -> int:
-    try:
-        return max(0, int(value))
-    except (TypeError, ValueError):
-        return default
+        ticket = await llm_account_budget.acquire(account_id, provider_dto, estimated_tokens)
+    except llm_account_budget.LLMAccountBudgetExceeded as exc:
+        return BudgetCheck(error=str(exc))
+    return BudgetCheck(ticket=ticket)
 
 
 async def _call_with_retry(
