@@ -3009,8 +3009,15 @@ async def test_direct_passthrough_consumes_raw_event_before_event_bus(monkeypatc
     )
     monkeypatch.setattr(loader_mod, "AsyncSessionLocal", lambda: _fake_session_factory(fake_db))
     monkeypatch.setattr(loader_mod, "_load_log_incoming_messages_setting", AsyncMock(return_value=False))
-    start_trace = AsyncMock()
+    trace = SimpleNamespace(trace_id="evt_direct_enabled_trace")
+    monkeypatch.setattr(loader_mod, "_load_event_framework_flags", AsyncMock(return_value={
+        "trace_enabled": True,
+        "event_bus_delivery_enabled": True,
+    }))
+    start_trace = AsyncMock(return_value=trace)
     monkeypatch.setattr(loader_mod, "start_trace", start_trace)
+    record_span = AsyncMock()
+    monkeypatch.setattr(loader_mod, "record_span", record_span)
     finish_trace = AsyncMock()
     monkeypatch.setattr(loader_mod, "finish_trace", finish_trace)
     runtime_status = AsyncMock()
@@ -3038,11 +3045,18 @@ async def test_direct_passthrough_consumes_raw_event_before_event_bus(monkeypatc
 
         assert direct_events == [event]
         assert legacy_calls == []
-        start_trace.assert_not_awaited()
-        finish_trace.assert_not_awaited()
+        start_trace.assert_awaited_once()
+        phases = [call.args[1] for call in record_span.await_args_list]
+        assert "receive" in phases
+        assert "route" in phases
+        assert "plugin_invoke" in phases
+        finish_trace.assert_awaited_once()
+        assert finish_trace.await_args.args[:2] == (trace, loader_mod.TRACE_STATUS_OK)
+        assert finish_trace.await_args.kwargs["consumed"] is True
         assert any(
             call.kwargs.get("plugin_key") == "_test_direct_enabled"
             and call.kwargs.get("last_invocation_status") == loader_mod.TRACE_STATUS_OK
+            and call.kwargs.get("last_trace_id") == "evt_direct_enabled_trace"
             for call in runtime_status.await_args_list
         )
     finally:
@@ -3126,7 +3140,14 @@ async def test_direct_passthrough_broadcasts_before_incoming_guards(monkeypatch)
     interaction_owned = AsyncMock(return_value=True)
     monkeypatch.setattr(loader_mod, "_interaction_bot_owns_incoming_text", interaction_owned)
     monkeypatch.setattr(loader_mod, "_record_interaction_text_guard_skip", AsyncMock())
-    monkeypatch.setattr(loader_mod, "start_trace", AsyncMock())
+    trace = SimpleNamespace(trace_id="evt_direct_broadcast_trace")
+    monkeypatch.setattr(loader_mod, "_load_event_framework_flags", AsyncMock(return_value={
+        "trace_enabled": True,
+        "event_bus_delivery_enabled": True,
+    }))
+    monkeypatch.setattr(loader_mod, "start_trace", AsyncMock(return_value=trace))
+    record_span = AsyncMock()
+    monkeypatch.setattr(loader_mod, "record_span", record_span)
     monkeypatch.setattr(loader_mod, "finish_trace", AsyncMock())
     monkeypatch.setattr(loader_mod, "update_plugin_runtime_status", AsyncMock())
 
@@ -3157,12 +3178,122 @@ async def test_direct_passthrough_broadcasts_before_incoming_guards(monkeypatch)
         ]
         loader_mod._record_recent_peer.assert_not_awaited()
         interaction_owned.assert_not_awaited()
-        loader_mod.start_trace.assert_not_awaited()
-        loader_mod.finish_trace.assert_not_awaited()
+        loader_mod.start_trace.assert_awaited_once()
+        assert sum(1 for call in record_span.await_args_list if call.args[1] == "route") == 2
+        assert sum(1 for call in record_span.await_args_list if call.args[1] == "plugin_invoke") == 2
+        loader_mod.finish_trace.assert_awaited_once()
+        assert loader_mod.finish_trace.await_args.args[:2] == (trace, loader_mod.TRACE_STATUS_OK)
+        assert loader_mod.finish_trace.await_args.kwargs["invoked_count"] == 2
     finally:
         loader_mod._STATES.pop(15, None)
         _REGISTRY.pop("_test_direct_broadcast_a", None)
         _REGISTRY.pop("_test_direct_broadcast_b", None)
+
+
+@pytest.mark.asyncio
+async def test_direct_passthrough_records_failed_trace(monkeypatch) -> None:
+    from app.worker.plugins.base import _REGISTRY, register
+
+    @register
+    class _DirectFailingPlugin(Plugin):
+        key = "_test_direct_failing"
+        display_name = "直通失败 trace 测试"
+        owner_only = False
+
+        async def on_direct_message(self, ctx: PluginContext, event: Any) -> None:
+            raise RuntimeError("boom")
+
+    _DirectFailingPlugin._manifest = Manifest(
+        key="_test_direct_failing",
+        display_name="直通失败 trace 测试",
+        capabilities={
+            "telegram_direct_passthrough": {
+                "enabled": True,
+                "reason": "测试直通异常 trace",
+                "sources": ["userbot"],
+                "directions": ["incoming"],
+            }
+        },
+    )
+
+    class _Event:
+        raw_text = "hello direct failure"
+        text = "hello direct failure"
+        chat_id = -3003
+        sender_id = 42
+        id = 191
+        is_private = False
+        is_group = True
+        is_channel = False
+
+        async def get_chat(self):
+            return None
+
+    fake_db = _FakeDB(
+        accounts={16: _FakeAcc(id=16)},
+        humanize={16: None},
+        afs=[
+            _FakeAF(
+                account_id=16,
+                feature_key="_test_direct_failing",
+                enabled=True,
+                config={"direct_passthrough": {"enabled": True}},
+            )
+        ],
+        rules=[],
+    )
+    trace = SimpleNamespace(trace_id="evt_direct_failed_trace")
+    monkeypatch.setattr(loader_mod, "AsyncSessionLocal", lambda: _fake_session_factory(fake_db))
+    monkeypatch.setattr(loader_mod, "_load_log_incoming_messages_setting", AsyncMock(return_value=False))
+    monkeypatch.setattr(loader_mod, "_load_event_framework_flags", AsyncMock(return_value={
+        "trace_enabled": True,
+        "event_bus_delivery_enabled": True,
+    }))
+    monkeypatch.setattr(loader_mod, "start_trace", AsyncMock(return_value=trace))
+    record_span = AsyncMock()
+    monkeypatch.setattr(loader_mod, "record_span", record_span)
+    finish_trace = AsyncMock()
+    monkeypatch.setattr(loader_mod, "finish_trace", finish_trace)
+    runtime_status = AsyncMock()
+    monkeypatch.setattr(loader_mod, "update_plugin_runtime_status", runtime_status)
+
+    captured: list[Any] = []
+
+    def _on(_filter):
+        def _wrap(fn):
+            captured.append(fn)
+            return fn
+
+        return _wrap
+
+    client = MagicMock()
+    client.on = _on
+    paused = asyncio.Event()
+    paused.set()
+
+    try:
+        await load_plugins_for_account(client, account_id=16, paused=paused, redis=_FakeRedis())
+        incoming_dispatch = captured[-1]
+        await incoming_dispatch(_Event())
+
+        assert any(
+            call.args[1] == "plugin_invoke"
+            and call.args[2] == loader_mod.TRACE_STATUS_FAILED
+            and call.kwargs.get("reason_code") == "plugin_runtime_error"
+            for call in record_span.await_args_list
+        )
+        finish_trace.assert_awaited_once()
+        assert finish_trace.await_args.args[:2] == (trace, loader_mod.TRACE_STATUS_FAILED)
+        assert finish_trace.await_args.kwargs["consumed"] is True
+        assert any(
+            call.kwargs.get("plugin_key") == "_test_direct_failing"
+            and call.kwargs.get("last_invocation_status") == loader_mod.TRACE_STATUS_FAILED
+            and call.kwargs.get("last_trace_id") == "evt_direct_failed_trace"
+            for call in runtime_status.await_args_list
+        )
+    finally:
+        loader_mod._STATES.pop(16, None)
+        _REGISTRY.pop("_test_direct_failing", None)
 
 
 def test_userbot_native_raw_boolean_true_is_not_explicit_capability() -> None:

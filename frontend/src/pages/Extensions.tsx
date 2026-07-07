@@ -5,7 +5,7 @@
 //
 // 账号级启停与配置统一回 /plugins 首页，避免“安装页”和“插件中心”双入口重复。
 // 远程插件原为独立 /remote-plugins 页面，现在统一收口到 /plugins/manage。
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -31,6 +31,7 @@ import {
   ShieldCheck,
   Sparkles,
   Trash2,
+  Upload,
   X,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
@@ -92,7 +93,9 @@ import {
   enableInstall,
   disableInstall,
   uninstallPlugin,
+  uploadPluginZip,
 } from "@/api/plugins";
+import { toggleAccountFeature } from "@/api/accounts";
 import {
   fetchRemotePlugins,
   enableRemotePlugin,
@@ -150,6 +153,12 @@ type DevDoc = {
   path: string;
   markdown: string;
   icon: LucideIcon;
+};
+type PluginAccountRow = {
+  id: number;
+  name: string;
+  features: Record<string, string>;
+  feature_enabled?: Record<string, boolean>;
 };
 
 const PLUGINS_QK = ["installed-packages"] as const;
@@ -533,11 +542,80 @@ function PluginsManagementTab() {
   return (
     <div className="space-y-6">
       <RemoteUpdateSettingsCard />
+      <ZipUploadCard />
       <OfficialPluginsCard />
       <LocalImportCard />
       <RemoteInstallCard />
       <InstalledPluginsSection />
     </div>
+  );
+}
+
+function ZipUploadCard() {
+  const qc = useQueryClient();
+  const [zipFile, setZipFile] = useState<File | null>(null);
+  const [signatureFile, setSignatureFile] = useState<File | null>(null);
+  const uploadMut = useMutation({
+    mutationFn: () => {
+      if (!zipFile) throw new Error("请选择插件 zip 文件");
+      return uploadPluginZip(zipFile, signatureFile);
+    },
+    onSuccess: (row) => {
+      toast.success(`已安装 ${row.key} v${row.version}`);
+      setZipFile(null);
+      setSignatureFile(null);
+      qc.invalidateQueries({ queryKey: PLUGINS_QK });
+      qc.invalidateQueries({ queryKey: OFFICIAL_PLUGINS_QK });
+      qc.invalidateQueries({ queryKey: REMOTE_QK });
+      qc.invalidateQueries({ queryKey: ["matrix"] });
+    },
+    onError: (err) => toast.error(getErrMsg(err)),
+  });
+
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <SectionHeader
+          icon={Upload}
+          title="ZIP 上传安装"
+          description="上传已签名的插件 zip 包；安装成功后会进入下方已安装插件列表。"
+        />
+      </CardHeader>
+      <CardContent className="grid gap-3 lg:grid-cols-[minmax(220px,1fr)_minmax(220px,1fr)_auto] lg:items-end">
+        <div className="space-y-1.5">
+          <Label>插件包</Label>
+          <Input
+            type="file"
+            accept=".zip,application/zip,application/x-zip-compressed"
+            onChange={(event) => setZipFile(event.target.files?.[0] ?? null)}
+            disabled={uploadMut.isPending}
+          />
+          <div className="min-h-5 truncate text-xs text-muted-foreground">
+            {zipFile ? zipFile.name : "请选择包含 manifest.py / plugin.py 的 zip"}
+          </div>
+        </div>
+        <div className="space-y-1.5">
+          <Label>签名文件</Label>
+          <Input
+            type="file"
+            onChange={(event) => setSignatureFile(event.target.files?.[0] ?? null)}
+            disabled={uploadMut.isPending}
+          />
+          <div className="min-h-5 truncate text-xs text-muted-foreground">
+            {signatureFile ? signatureFile.name : "当前后端要求签名校验通过才会安装"}
+          </div>
+        </div>
+        <Button
+          type="button"
+          className="shrink-0"
+          disabled={!zipFile || uploadMut.isPending}
+          onClick={() => uploadMut.mutate()}
+        >
+          {uploadMut.isPending ? <Spinner className="mr-2 h-4 w-4" /> : <Upload className="mr-2 h-4 w-4" />}
+          上传安装
+        </Button>
+      </CardContent>
+    </Card>
   );
 }
 
@@ -1338,6 +1416,7 @@ function RemoteInstallCard() {
 function InstalledPluginsSection() {
   const nav = useNavigate();
   const qc = useQueryClient();
+  const [expandedAccountPlugin, setExpandedAccountPlugin] = useState<string | null>(null);
 
   const builtinQ = useQuery({
     queryKey: ["matrix"],
@@ -1419,6 +1498,17 @@ function InstalledPluginsSection() {
     },
     onError: (err) => toast.error(getErrMsg(err)),
   });
+  const accountToggleMut = useMutation({
+    mutationFn: ({ accountId, key, enabled }: { accountId: number; key: string; enabled: boolean }) =>
+      toggleAccountFeature(accountId, key, enabled),
+    onSuccess: (_row, vars) => {
+      toast.success(`${vars.enabled ? "已启用" : "已禁用"}账号插件`);
+      qc.invalidateQueries({ queryKey: ["matrix"] });
+      qc.invalidateQueries({ queryKey: PLUGINS_QK });
+      qc.invalidateQueries({ queryKey: REMOTE_QK });
+    },
+    onError: (err) => toast.error(getErrMsg(err)),
+  });
 
   const isLoading = builtinQ.isLoading || thirdPartyQ.isLoading || remoteQ.isLoading;
   const [expandedWarnings, setExpandedWarnings] = useState<Set<string>>(() => new Set());
@@ -1428,9 +1518,9 @@ function InstalledPluginsSection() {
   const repos = reposQ.data ?? [];
   const matrixQ = useQuery({ queryKey: ["matrix"], queryFn: getFeatureMatrix });
   const accounts = matrixQ.data?.accounts ?? [];
-  const accountCount = accounts.length;
-  const remoteEnabledCount = (name: string) =>
-    accounts.filter((account) => account.feature_enabled?.[name] ?? account.features[name] !== "disabled").length;
+  const toggleAccountPanel = (key: string) => {
+    setExpandedAccountPlugin((current) => (current === key ? null : key));
+  };
   const toggleWarnings = (name: string) => {
     setExpandedWarnings((prev) => {
       const next = new Set(prev);
@@ -1446,7 +1536,7 @@ function InstalledPluginsSection() {
         <SectionHeader
           icon={Puzzle}
           title="已安装插件"
-          description="这里管理插件包本身；账号级启停和配置统一回插件中心处理。"
+          description="管理插件包本身，也可以展开查看每个账号是否启用该插件。"
           meta={(
             <SignalPill
               tone="neutral"
@@ -1471,76 +1561,136 @@ function InstalledPluginsSection() {
                 <TableHead>来自库</TableHead>
                 <TableHead>版本</TableHead>
                 <TableHead>版本状态</TableHead>
+                <TableHead>账号启停</TableHead>
                 <TableHead className="text-right">操作</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
               {/* 平台基础能力 */}
               {builtin.map((f) => (
-                <TableRow key={f.key}>
-                  <TableCell>
-                    <div className="font-medium">{f.display_name}</div>
-                    <div className="font-mono text-xs text-muted-foreground">{f.key}</div>
-                  </TableCell>
-                  <TableCell><MetaBadge>平台能力</MetaBadge></TableCell>
-                  <TableCell>
-                    <div className="max-w-[180px] truncate text-sm" title="系统核心">系统核心</div>
-                  </TableCell>
-                  <TableCell>{formatPluginVersion(f.version)}</TableCell>
-                  <TableCell><MetaBadge tone="success">随系统更新</MetaBadge></TableCell>
-                  <TableCell className="text-right">
-                    <Button size="sm" variant="outline" onClick={() => nav("/plugins")}>
-                      去插件中心
-                    </Button>
-                  </TableCell>
-                </TableRow>
+                <Fragment key={f.key}>
+                  <TableRow>
+                    <TableCell>
+                      <div className="font-medium">{f.display_name}</div>
+                      <div className="font-mono text-xs text-muted-foreground">{f.key}</div>
+                    </TableCell>
+                    <TableCell>
+                      <MetaBadge>平台能力</MetaBadge>
+                    </TableCell>
+                    <TableCell>
+                      <div className="max-w-[180px] truncate text-sm" title="系统核心">
+                        系统核心
+                      </div>
+                    </TableCell>
+                    <TableCell>{formatPluginVersion(f.version)}</TableCell>
+                    <TableCell>
+                      <MetaBadge tone="success">随系统更新</MetaBadge>
+                    </TableCell>
+                    <TableCell>
+                      <PluginAccountSummary
+                        pluginKey={f.key}
+                        accounts={accounts}
+                        expanded={expandedAccountPlugin === f.key}
+                        onTogglePanel={toggleAccountPanel}
+                      />
+                    </TableCell>
+                    <TableCell className="text-right">
+                      <Button size="sm" variant="outline" onClick={() => nav("/plugins")}>
+                        去插件中心
+                      </Button>
+                    </TableCell>
+                  </TableRow>
+                  {expandedAccountPlugin === f.key ? (
+                    <PluginAccountToggleRow
+                      pluginKey={f.key}
+                      accounts={accounts}
+                      pending={accountToggleMut.isPending}
+                      onToggle={(accountId, enabled) =>
+                        accountToggleMut.mutate({ accountId, key: f.key, enabled })}
+                    />
+                  ) : null}
+                </Fragment>
               ))}
               {/* 第三方插件 */}
               {thirdParty.map((row) => (
-                <TableRow key={row.key}>
-                  <TableCell>
-                    <div className="font-medium">{row.key}</div>
-                  </TableCell>
-                  <TableCell>
-                    <MetaBadge tone={row.source === "official" ? "success" : "neutral"}>
-                      {row.source === "official" ? "历史推荐源" : "第三方"}
-                    </MetaBadge>
-                  </TableCell>
-                  <TableCell>
-                    <div
-                      className="max-w-[200px] truncate text-sm"
-                      title={row.source_url || row.source_label || row.source}
-                    >
-                      {installSourceLibraryLabel(row.source, row.source_url, row.source_label, repos)}
-                    </div>
-                  </TableCell>
-                  <TableCell>{formatPluginVersion(row.version)}</TableCell>
-                  <TableCell>
-                    <MetaBadge tone="outline">本地安装</MetaBadge>
-                    <div className="mt-1 text-xs text-muted-foreground">
-                      状态 {row.enabled ? "已启用" : "未启用"}
-                    </div>
-                  </TableCell>
-                  <TableCell className="text-right">
-                    <div className="flex justify-end gap-2">
-                      {row.enabled ? (
-                        <Button size="sm" variant="outline" onClick={() => disableTPMut.mutate(row.key)} disabled={disableTPMut.isPending}>禁用</Button>
-                      ) : (
-                        <Button size="sm" onClick={() => enableTPMut.mutate(row.key)} disabled={enableTPMut.isPending}>启用</Button>
-                      )}
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        className={DANGER_OUTLINE_BUTTON_CLASS}
-                        onClick={() => { if (confirm(`确认卸载「${row.key}」？`)) uninstallTPMut.mutate(row.key); }}
-                        disabled={uninstallTPMut.isPending}
+                <Fragment key={row.key}>
+                  <TableRow>
+                    <TableCell>
+                      <div className="font-medium">{row.key}</div>
+                    </TableCell>
+                    <TableCell>
+                      <MetaBadge tone={row.source === "official" ? "success" : "neutral"}>
+                        {row.source === "official" ? "历史推荐源" : "第三方"}
+                      </MetaBadge>
+                    </TableCell>
+                    <TableCell>
+                      <div
+                        className="max-w-[200px] truncate text-sm"
+                        title={row.source_url || row.source_label || row.source}
                       >
-                        <Trash2 className="mr-1 h-3 w-3" />
-                        卸载
-                      </Button>
-                    </div>
-                  </TableCell>
-                </TableRow>
+                        {installSourceLibraryLabel(row.source, row.source_url, row.source_label, repos)}
+                      </div>
+                    </TableCell>
+                    <TableCell>{formatPluginVersion(row.version)}</TableCell>
+                    <TableCell>
+                      <MetaBadge tone="outline">本地安装</MetaBadge>
+                      <div className="mt-1 text-xs text-muted-foreground">
+                        状态 {row.enabled ? "已启用" : "未启用"}
+                      </div>
+                    </TableCell>
+                    <TableCell>
+                      <PluginAccountSummary
+                        pluginKey={row.key}
+                        accounts={accounts}
+                        expanded={expandedAccountPlugin === row.key}
+                        onTogglePanel={toggleAccountPanel}
+                      />
+                    </TableCell>
+                    <TableCell className="text-right">
+                      <div className="flex justify-end gap-2">
+                        {row.enabled ? (
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            onClick={() => disableTPMut.mutate(row.key)}
+                            disabled={disableTPMut.isPending}
+                          >
+                            禁用
+                          </Button>
+                        ) : (
+                          <Button
+                            size="sm"
+                            onClick={() => enableTPMut.mutate(row.key)}
+                            disabled={enableTPMut.isPending}
+                          >
+                            启用
+                          </Button>
+                        )}
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className={DANGER_OUTLINE_BUTTON_CLASS}
+                          onClick={() => {
+                            if (confirm(`确认卸载「${row.key}」？`)) uninstallTPMut.mutate(row.key);
+                          }}
+                          disabled={uninstallTPMut.isPending}
+                        >
+                          <Trash2 className="mr-1 h-3 w-3" />
+                          卸载
+                        </Button>
+                      </div>
+                    </TableCell>
+                  </TableRow>
+                  {expandedAccountPlugin === row.key ? (
+                    <PluginAccountToggleRow
+                      pluginKey={row.key}
+                      accounts={accounts}
+                      pending={accountToggleMut.isPending}
+                      onToggle={(accountId, enabled) =>
+                        accountToggleMut.mutate({ accountId, key: row.key, enabled })}
+                    />
+                  ) : null}
+                </Fragment>
               ))}
               {/* 远程插件 */}
               {remote.map((p) => {
@@ -1548,136 +1698,163 @@ function InstalledPluginsSection() {
                 const hasWarnings = warningGroups.all.length > 0;
                 const hasHighWarnings = warningGroups.high.length > 0;
                 return (
-                <TableRow key={`rm-${p.name}`}>
-                  <TableCell>
-                    <div className="flex flex-wrap items-center gap-2">
-                      <div className="font-medium">{p.display_name || p.name}</div>
-                      {p.update_available ? <MetaBadge tone="warn">有新版本</MetaBadge> : null}
-                      {hasWarnings ? (
-                        <button
-                          type="button"
-                          className="inline-flex"
-                          onClick={() => toggleWarnings(p.name)}
-                          aria-expanded={expandedWarnings.has(p.name)}
-                        >
-                          <MetaBadge tone={hasHighWarnings ? "danger" : "warn"}>
-                            {hasHighWarnings ? (
-                              <AlertTriangle className="h-3 w-3" />
-                            ) : null}
-                            {hasHighWarnings ? "高级规范警告" : "规范警告"}
-                            <ChevronDown
-                              className={cn(
-                                "h-3 w-3 transition-transform",
-                                expandedWarnings.has(p.name) && "rotate-180",
-                              )}
-                            />
-                          </MetaBadge>
-                        </button>
-                      ) : null}
-                    </div>
-                    <div className="font-mono text-xs text-muted-foreground">{p.name}</div>
-                    {p.update_available && p.latest_version ? (
-                      <div className="mt-1 text-xs text-muted-foreground">
-                        当前 {formatPluginVersion(p.version)}，远程 {formatPluginVersion(p.latest_version)}
-                      </div>
-                    ) : null}
-                    {p.last_update_check_error ? (
-                      <div className="mt-1 text-xs text-destructive">
-                        更新检查失败：{p.last_update_check_error}
-                      </div>
-                    ) : null}
-                    {hasWarnings && expandedWarnings.has(p.name) ? (
-                      <div
-                        className={cn(
-                          "mt-2 space-y-1 rounded-md border px-3 py-2 text-xs",
-                          hasHighWarnings
-                            ? "border-destructive/30 bg-destructive/10 text-destructive"
-                            : "border-amber-500/30 bg-amber-50/70 text-amber-900 dark:bg-amber-950/20 dark:text-amber-200",
-                        )}
-                      >
-                        {warningGroups.all.map((warning, index) => (
-                          <div key={`${p.name}-warning-${index}`} className="leading-5">
-                            {warning}
+                  <Fragment key={`rm-${p.name}`}>
+                    <TableRow>
+                      <TableCell>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <div className="font-medium">{p.display_name || p.name}</div>
+                          {p.update_available ? <MetaBadge tone="warn">有新版本</MetaBadge> : null}
+                          {hasWarnings ? (
+                            <button
+                              type="button"
+                              className="inline-flex"
+                              onClick={() => toggleWarnings(p.name)}
+                              aria-expanded={expandedWarnings.has(p.name)}
+                            >
+                              <MetaBadge tone={hasHighWarnings ? "danger" : "warn"}>
+                                {hasHighWarnings ? <AlertTriangle className="h-3 w-3" /> : null}
+                                {hasHighWarnings ? "高级规范警告" : "规范警告"}
+                                <ChevronDown
+                                  className={cn(
+                                    "h-3 w-3 transition-transform",
+                                    expandedWarnings.has(p.name) && "rotate-180",
+                                  )}
+                                />
+                              </MetaBadge>
+                            </button>
+                          ) : null}
+                        </div>
+                        <div className="font-mono text-xs text-muted-foreground">{p.name}</div>
+                        {p.update_available && p.latest_version ? (
+                          <div className="mt-1 text-xs text-muted-foreground">
+                            当前 {formatPluginVersion(p.version)}，远程 {formatPluginVersion(p.latest_version)}
                           </div>
-                        ))}
-                      </div>
+                        ) : null}
+                        {p.last_update_check_error ? (
+                          <div className="mt-1 text-xs text-destructive">
+                            更新检查失败：{p.last_update_check_error}
+                          </div>
+                        ) : null}
+                        {hasWarnings && expandedWarnings.has(p.name) ? (
+                          <div
+                            className={cn(
+                              "mt-2 space-y-1 rounded-md border px-3 py-2 text-xs",
+                              hasHighWarnings
+                                ? "border-destructive/30 bg-destructive/10 text-destructive"
+                                : "border-amber-500/30 bg-amber-50/70 text-amber-900 dark:bg-amber-950/20 dark:text-amber-200",
+                            )}
+                          >
+                            {warningGroups.all.map((warning, index) => (
+                              <div key={`${p.name}-warning-${index}`} className="leading-5">
+                                {warning}
+                              </div>
+                            ))}
+                          </div>
+                        ) : null}
+                      </TableCell>
+                      <TableCell>
+                        {p.source_url?.startsWith("local://") ? (
+                          <MetaBadge>本地导入</MetaBadge>
+                        ) : (
+                          <MetaBadge>
+                            <GitFork className="h-3 w-3" />
+                            远程
+                          </MetaBadge>
+                        )}
+                      </TableCell>
+                      <TableCell>
+                        <div className="max-w-[200px] truncate text-sm" title={p.source_url}>
+                          {installSourceLibraryLabel(
+                            p.source_url?.startsWith("local://") ? "local" : "repo",
+                            p.source_url,
+                            null,
+                            repos,
+                          )}
+                        </div>
+                      </TableCell>
+                      <TableCell>{formatPluginVersion(p.version)}</TableCell>
+                      <TableCell>
+                        <MetaBadge tone={remoteVersionTone(p)}>
+                          {remoteVersionLabel(p)}
+                        </MetaBadge>
+                        {p.update_available && p.latest_version ? (
+                          <div className="mt-1 text-xs text-muted-foreground">
+                            远程 {formatPluginVersion(p.latest_version)}
+                          </div>
+                        ) : null}
+                      </TableCell>
+                      <TableCell>
+                        <PluginAccountSummary
+                          pluginKey={p.name}
+                          accounts={accounts}
+                          expanded={expandedAccountPlugin === p.name}
+                          onTogglePanel={toggleAccountPanel}
+                        />
+                      </TableCell>
+                      <TableCell className="text-right">
+                        <div className="flex flex-wrap justify-end gap-2">
+                          <Button
+                            size="sm"
+                            variant={p.update_available ? "default" : "outline"}
+                            onClick={() => updateRMMut.mutate(p.name)}
+                            disabled={updateRMMut.isPending || p.source_url?.startsWith("local://")}
+                            title={
+                              p.source_url?.startsWith("local://")
+                                ? "本地导入插件不支持远程更新"
+                                : "从远程更新"
+                            }
+                          >
+                            <RefreshCw className="mr-1 h-3 w-3" />
+                            {p.update_available ? "更新到新版" : "更新"}
+                          </Button>
+                          {p.enabled ? (
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              onClick={() => disableRMMut.mutate(p.name)}
+                              disabled={disableRMMut.isPending}
+                            >
+                              <X className="mr-1 h-3 w-3" />
+                              禁用
+                            </Button>
+                          ) : (
+                            <Button
+                              size="sm"
+                              onClick={() => enableRMMut.mutate(p.name)}
+                              disabled={enableRMMut.isPending}
+                            >
+                              <Power className="mr-1 h-3 w-3" />
+                              启用
+                            </Button>
+                          )}
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            className={DANGER_OUTLINE_BUTTON_CLASS}
+                            onClick={() => {
+                              if (confirm(`确认卸载「${p.name}」？`)) uninstallRMMut.mutate(p.name);
+                            }}
+                            disabled={uninstallRMMut.isPending}
+                          >
+                            <Trash2 className="mr-1 h-3 w-3" />
+                            卸载
+                          </Button>
+                          <Button size="sm" variant="outline" onClick={() => nav("/plugins")}>
+                            去插件中心
+                          </Button>
+                        </div>
+                      </TableCell>
+                    </TableRow>
+                    {expandedAccountPlugin === p.name ? (
+                      <PluginAccountToggleRow
+                        pluginKey={p.name}
+                        accounts={accounts}
+                        pending={accountToggleMut.isPending}
+                        onToggle={(accountId, enabled) =>
+                          accountToggleMut.mutate({ accountId, key: p.name, enabled })}
+                      />
                     ) : null}
-                  </TableCell>
-                  <TableCell>
-                    {p.source_url?.startsWith("local://") ? (
-                      <MetaBadge>本地导入</MetaBadge>
-                    ) : (
-                      <MetaBadge><GitFork className="h-3 w-3" />远程</MetaBadge>
-                    )}
-                  </TableCell>
-                  <TableCell>
-                    <div
-                      className="max-w-[200px] truncate text-sm"
-                      title={p.source_url}
-                    >
-                      {installSourceLibraryLabel(
-                        p.source_url?.startsWith("local://") ? "local" : "repo",
-                        p.source_url,
-                        null,
-                        repos,
-                      )}
-                    </div>
-                  </TableCell>
-                  <TableCell>{formatPluginVersion(p.version)}</TableCell>
-                  <TableCell>
-                    <MetaBadge tone={remoteVersionTone(p)}>
-                      {remoteVersionLabel(p)}
-                    </MetaBadge>
-                    {p.update_available && p.latest_version ? (
-                      <div className="mt-1 text-xs text-muted-foreground">
-                        远程 {formatPluginVersion(p.latest_version)}
-                      </div>
-                    ) : null}
-                    {accountCount > 0 ? (
-                      <div className="mt-1 text-xs text-muted-foreground">
-                        账号启用 {remoteEnabledCount(p.name)}/{accountCount}
-                      </div>
-                    ) : null}
-                  </TableCell>
-                  <TableCell className="text-right">
-                    <div className="flex flex-wrap justify-end gap-2">
-                      <Button
-                        size="sm"
-                        variant={p.update_available ? "default" : "outline"}
-                        onClick={() => updateRMMut.mutate(p.name)}
-                        disabled={updateRMMut.isPending || p.source_url?.startsWith("local://")}
-                        title={p.source_url?.startsWith("local://") ? "本地导入插件不支持远程更新" : "从远程更新"}
-                      >
-                        <RefreshCw className="mr-1 h-3 w-3" />
-                        {p.update_available ? "更新到新版" : "更新"}
-                      </Button>
-                      {p.enabled ? (
-                        <Button size="sm" variant="outline" onClick={() => disableRMMut.mutate(p.name)} disabled={disableRMMut.isPending}>
-                          <X className="mr-1 h-3 w-3" />
-                          禁用
-                        </Button>
-                      ) : (
-                        <Button size="sm" onClick={() => enableRMMut.mutate(p.name)} disabled={enableRMMut.isPending}>
-                          <Power className="mr-1 h-3 w-3" />
-                          启用
-                        </Button>
-                      )}
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        className={DANGER_OUTLINE_BUTTON_CLASS}
-                        onClick={() => { if (confirm(`确认卸载「${p.name}」？`)) uninstallRMMut.mutate(p.name); }}
-                        disabled={uninstallRMMut.isPending}
-                      >
-                        <Trash2 className="mr-1 h-3 w-3" />
-                        卸载
-                      </Button>
-                      <Button size="sm" variant="outline" onClick={() => nav("/plugins")}>
-                        去插件中心
-                      </Button>
-                    </div>
-                  </TableCell>
-                </TableRow>
+                  </Fragment>
                 );
               })}
             </TableBody>
@@ -1686,6 +1863,84 @@ function InstalledPluginsSection() {
       </CardContent>
     </Card>
   );
+}
+
+function PluginAccountSummary({
+  pluginKey,
+  accounts,
+  expanded,
+  onTogglePanel,
+}: {
+  pluginKey: string;
+  accounts: PluginAccountRow[];
+  expanded: boolean;
+  onTogglePanel: (key: string) => void;
+}) {
+  const enabled = accounts.filter((account) => isAccountPluginEnabled(account, pluginKey)).length;
+  return (
+    <div className="flex flex-col items-start gap-1.5">
+      <MetaBadge tone={enabled > 0 ? "success" : "outline"}>
+        {accounts.length ? `${enabled}/${accounts.length}` : "无账号"}
+      </MetaBadge>
+      {accounts.length ? (
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          className="h-7 px-0 text-xs text-muted-foreground hover:text-foreground"
+          onClick={() => onTogglePanel(pluginKey)}
+        >
+          <ChevronDown className={cn("mr-1 h-3.5 w-3.5 transition-transform", expanded && "rotate-180")} />
+          账号开关
+        </Button>
+      ) : null}
+    </div>
+  );
+}
+
+function PluginAccountToggleRow({
+  pluginKey,
+  accounts,
+  pending,
+  onToggle,
+}: {
+  pluginKey: string;
+  accounts: PluginAccountRow[];
+  pending: boolean;
+  onToggle: (accountId: number, enabled: boolean) => void;
+}) {
+  return (
+    <TableRow className="bg-muted/25">
+      <TableCell colSpan={7}>
+        <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
+          {accounts.map((account) => {
+            const enabled = isAccountPluginEnabled(account, pluginKey);
+            const state = account.features[pluginKey] ?? "missing";
+            return (
+              <div key={`${pluginKey}-${account.id}`} className="flex items-center justify-between gap-3 rounded-md border bg-background px-3 py-2">
+                <div className="min-w-0">
+                  <div className="truncate text-sm font-medium">{account.name || `账号 ${account.id}`}</div>
+                  <div className="font-mono text-xs text-muted-foreground">#{account.id} · {state}</div>
+                </div>
+                <Switch
+                  checked={enabled}
+                  disabled={pending}
+                  onCheckedChange={(checked) => onToggle(account.id, checked)}
+                />
+              </div>
+            );
+          })}
+        </div>
+      </TableCell>
+    </TableRow>
+  );
+}
+
+function isAccountPluginEnabled(account: PluginAccountRow, pluginKey: string): boolean {
+  const explicit = account.feature_enabled?.[pluginKey];
+  if (typeof explicit === "boolean") return explicit;
+  if (!Object.prototype.hasOwnProperty.call(account.features, pluginKey)) return false;
+  return account.features[pluginKey] !== "disabled";
 }
 
 // ═══════════════════════════════════════════════════════════════════

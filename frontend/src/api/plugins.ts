@@ -21,6 +21,23 @@ export async function listInstalledPackages(): Promise<PluginInstallOut[]> {
   return data;
 }
 
+export async function uploadPluginZip(
+  file: File,
+  signature?: File | null,
+): Promise<PluginInstallOut> {
+  const form = new FormData();
+  form.append("file", file);
+  if (signature) form.append("signature_file", signature);
+  const { data } = await api.post<PluginInstallOut>(
+    "/api/plugins/install/upload",
+    form,
+    {
+      headers: { "Content-Type": "multipart/form-data" },
+    },
+  );
+  return data;
+}
+
 export async function enableInstall(key: string): Promise<PluginInstallOut> {
   const { data } = await api.post<PluginInstallOut>(
     `/api/plugins/install/${encodeURIComponent(key)}/enable`,

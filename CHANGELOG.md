@@ -20,6 +20,20 @@
 
 ## [Unreleased]
 
+## [0.50.0] — 2026-07-07 · minor（次版本） · 消息排障与插件管理中心版本
+
+### Added
+- 日志中心新增“消息四段检查”，按当前账号、关键词、Chat ID、Message ID 或 trace 条件，把一次消息链路拆成收到、路由、插件、发送四段，便于直接判断消息卡在哪一步。
+- 插件管理页新增 ZIP 上传安装入口，复用后端签名校验与安装服务；已安装插件列表新增账号级启停展开面板，可直接查看并切换不同账号的插件启用状态。
+
+### Changed
+- 清理历史交互框架与插件体验 `PLAN` 快照文档，避免计划稿继续和当前源码事实混在一起。
+
+### Fixed
+- 修复 UserBot 直通模式成功消费消息时没有 trace 的排障黑洞：直通链路现在记录 receive、route、plugin_invoke，并把插件最近 trace_id 写入运行状态。
+- 修复 ZIP/package 插件卸载后残留账号启停、Feature 与全局配置的问题，卸载时会清理对应 `AccountFeature`、非内置 `Feature` 和 `PluginGlobalConfig`。
+- 修复两个服务模块 import 排序不符合 Ruff 规则的问题，使全仓 `ruff check app` 可通过。
+
 ## [0.49.27] — 2026-07-07 · patch（补丁版本） · 订阅校验可见化补丁
 
 ### Added

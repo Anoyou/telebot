@@ -89,6 +89,13 @@ interface DiagnosisResult {
 type TimelineItem =
   | { kind: "span"; ts: string; span: EventSpanItem }
   | { kind: "action"; ts: string; action: EventActionItem };
+type QuickCheckStage = {
+  key: "receive" | "route" | "plugin" | "send";
+  title: string;
+  tone: DiagnosisTone;
+  status: string;
+  detail: string;
+};
 
 const RUNTIME_LEVEL_RANK: Record<string, number> = {
   debug: 0,
@@ -374,6 +381,22 @@ export function Logs() {
         </CardContent>
       </Card>
 
+      <TraceQuickCheck
+        traces={eventsQ.data ?? []}
+        loading={eventsQ.isLoading}
+        error={eventsQ.error}
+        detail={traceDetailQ.data}
+        detailLoading={traceDetailQ.isLoading}
+        detailError={traceDetailQ.error}
+        selectedTraceId={selectedTraceId}
+        onSelectTrace={(nextTraceId) => {
+          setSelectedTraceId(nextTraceId);
+          setTraceId(nextTraceId);
+          setMainTab("events");
+        }}
+        timezone={timezone}
+      />
+
       <Tabs value={mainTab} onValueChange={(v) => setMainTab(v as MainTab)}>
         <TabsList className="flex h-auto flex-wrap justify-start gap-1">
           <TabsTrigger value="raw" className="gap-1.5">
@@ -489,6 +512,106 @@ export function Logs() {
       </Tabs>
     </PageShell>
   );
+}
+
+function TraceQuickCheck({
+  traces,
+  loading,
+  error,
+  detail,
+  detailLoading,
+  detailError,
+  selectedTraceId,
+  onSelectTrace,
+  timezone,
+}: {
+  traces: EventTraceSummary[];
+  loading: boolean;
+  error?: unknown;
+  detail?: EventTraceDetail;
+  detailLoading: boolean;
+  detailError?: unknown;
+  selectedTraceId: string;
+  onSelectTrace: (traceId: string) => void;
+  timezone?: string;
+}) {
+  const stages = buildQuickCheckStages(detail, {
+    loading: detailLoading,
+    hasCandidates: traces.length > 0,
+    hasSelectedTrace: Boolean(selectedTraceId),
+  });
+  const candidates = traces.slice(0, 4);
+  return (
+    <Card>
+      <CardHeader>
+        <SectionHeader
+          icon={Search}
+          title="消息四段检查"
+          description={selectedTraceId || "按当前过滤条件匹配最近消息"}
+          meta={(
+            <SignalPill
+              tone={detail ? stageOverallTone(stages) : traces.length ? "warn" : "neutral"}
+              label="候选"
+              value={loading ? "加载中" : `${traces.length} 条`}
+            />
+          )}
+        />
+      </CardHeader>
+      <CardContent className="space-y-3">
+        {error ? <ErrorHint text="消息链路加载失败" error={error} /> : null}
+        {detailError ? <ErrorHint text="链路详情加载失败" error={detailError} /> : null}
+        <div className="grid gap-2 md:grid-cols-4">
+          {stages.map((stage) => (
+            <div key={stage.key} className={`rounded-md border p-3 ${diagnosisToneClass(stage.tone)}`}>
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex min-w-0 items-center gap-2">
+                  <QuickStageIcon stage={stage.key} />
+                  <span className="truncate text-sm font-medium">{stage.title}</span>
+                </div>
+                <StatusBadge status={stage.status} />
+              </div>
+              <p className="mt-2 line-clamp-3 text-xs leading-5">{stage.detail}</p>
+            </div>
+          ))}
+        </div>
+        {detail ? (
+          <div className="grid gap-2 text-xs text-muted-foreground md:grid-cols-5">
+            <InfoCell label="Trace" value={detail.trace_id} />
+            <InfoCell label="来源" value={`${detail.source_channel || "-"} / ${detail.event_type}`} />
+            <InfoCell label="会话" value={detail.chat_id ?? "-"} />
+            <InfoCell label="消息" value={detail.message_id ?? "-"} />
+            <InfoCell label="时间" value={formatDateTime(detail.started_at, timezone)} />
+          </div>
+        ) : loading || detailLoading ? (
+          <InlineLoading />
+        ) : candidates.length ? (
+          <div className="flex flex-wrap gap-2">
+            {candidates.map((trace) => (
+              <Button
+                key={trace.trace_id}
+                type="button"
+                variant={trace.trace_id === selectedTraceId ? "default" : "outline"}
+                size="sm"
+                className="max-w-full justify-start"
+                onClick={() => onSelectTrace(trace.trace_id)}
+              >
+                <span className="truncate font-mono text-xs">{trace.trace_id}</span>
+              </Button>
+            ))}
+          </div>
+        ) : (
+          <EmptyHint text="当前过滤条件下没有消息链路" />
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function QuickStageIcon({ stage }: { stage: QuickCheckStage["key"] }) {
+  if (stage === "receive") return <MessageSquareText className="h-4 w-4 shrink-0" />;
+  if (stage === "route") return <Workflow className="h-4 w-4 shrink-0" />;
+  if (stage === "plugin") return <Puzzle className="h-4 w-4 shrink-0" />;
+  return <MousePointerClick className="h-4 w-4 shrink-0" />;
 }
 
 function OverviewPanel({
@@ -1829,6 +1952,127 @@ function ConsoleEmpty({ text }: { text: string }) {
       {text}
     </div>
   );
+}
+
+function buildQuickCheckStages(
+  detail: EventTraceDetail | undefined,
+  state: { loading: boolean; hasCandidates: boolean; hasSelectedTrace: boolean },
+): QuickCheckStage[] {
+  if (!detail) {
+    const receiveTone: DiagnosisTone = state.loading ? "neutral" : state.hasCandidates ? "warn" : "danger";
+    const receiveStatus = state.loading ? "running" : state.hasCandidates ? "warning" : "failed";
+    return [
+      {
+        key: "receive",
+        title: "收到",
+        tone: receiveTone,
+        status: receiveStatus,
+        detail: state.loading
+          ? "正在读取链路"
+          : state.hasCandidates
+            ? "已找到候选消息，选择一条 trace"
+            : "当前条件下没有 trace",
+      },
+      {
+        key: "route",
+        title: "路由",
+        tone: "neutral",
+        status: state.hasSelectedTrace ? "running" : "skipped",
+        detail: state.hasSelectedTrace ? "正在读取详情" : "等待 trace",
+      },
+      {
+        key: "plugin",
+        title: "插件",
+        tone: "neutral",
+        status: "skipped",
+        detail: "等待 trace",
+      },
+      {
+        key: "send",
+        title: "发送",
+        tone: "neutral",
+        status: "skipped",
+        detail: "等待 trace",
+      },
+    ];
+  }
+
+  const routeSpans = detail.spans.filter((span) => isRouteSpan(span));
+  const pluginSpans = detail.spans.filter((span) => isPluginSpan(span));
+  const failedRoute = routeSpans.find((span) => isFailedStatus(span.status));
+  const warningRoute = routeSpans.find((span) => isWarnStatus(span.status) || isProblemReasonCode(span.reason_code));
+  const failedPlugin = pluginSpans.find((span) => isFailedStatus(span.status));
+  const warningPlugin = pluginSpans.find((span) => isWarnStatus(span.status) || isProblemReasonCode(span.reason_code));
+  const failedAction = detail.actions.find((action) => isFailedStatus(action.status) || action.error_code || action.error_message);
+  const plugins = Array.from(new Set(pluginSpans.map((span) => span.plugin_key).filter(Boolean)));
+  return [
+    {
+      key: "receive",
+      title: "收到",
+      tone: isFailedStatus(detail.status) ? "warn" : "success",
+      status: detail.status || "ok",
+      detail: detail.text_preview || detail.sender_name || `${detail.source_channel || "-"} / ${detail.event_type}`,
+    },
+    {
+      key: "route",
+      title: "路由",
+      tone: failedRoute ? "danger" : warningRoute ? "warn" : routeSpans.length ? "success" : "warn",
+      status: failedRoute?.status || warningRoute?.status || (routeSpans.length ? "ok" : "skipped"),
+      detail: failedRoute
+        ? spanIssueText(failedRoute)
+        : warningRoute
+          ? spanIssueText(warningRoute)
+          : routeSpans.length
+            ? `${routeSpans.length} 个路由阶段`
+            : "没有路由阶段记录",
+    },
+    {
+      key: "plugin",
+      title: "插件",
+      tone: failedPlugin ? "danger" : warningPlugin ? "warn" : pluginSpans.length ? "success" : "warn",
+      status: failedPlugin?.status || warningPlugin?.status || (pluginSpans.length ? "ok" : "skipped"),
+      detail: failedPlugin
+        ? spanIssueText(failedPlugin)
+        : warningPlugin
+          ? spanIssueText(warningPlugin)
+          : plugins.length
+            ? `命中 ${plugins.slice(0, 3).join(", ")}${plugins.length > 3 ? ` 等 ${plugins.length} 个` : ""}`
+            : "没有插件执行阶段",
+    },
+    {
+      key: "send",
+      title: "发送",
+      tone: failedAction ? "danger" : detail.actions.length ? "success" : "neutral",
+      status: failedAction?.status || (detail.actions.length ? "ok" : "skipped"),
+      detail: failedAction
+        ? actionErrorLabel(failedAction)
+        : detail.actions.length
+          ? `${detail.actions.length} 个动作，${detail.actions.filter((action) => action.actual_send_via).length} 个已落地通道`
+          : "没有发送动作",
+    },
+  ];
+}
+
+function isRouteSpan(span: EventSpanItem): boolean {
+  const phase = span.phase.toLowerCase();
+  const component = (span.component || "").toLowerCase();
+  return phase.includes("route") ||
+    phase.includes("subscription") ||
+    component.includes("guard") ||
+    component.includes("dispatcher") ||
+    component.includes("event_bus");
+}
+
+function isPluginSpan(span: EventSpanItem): boolean {
+  const phase = span.phase.toLowerCase();
+  return Boolean(span.plugin_key) || phase.includes("plugin");
+}
+
+function stageOverallTone(stages: QuickCheckStage[]): DiagnosisTone {
+  if (stages.some((stage) => stage.tone === "danger")) return "danger";
+  if (stages.some((stage) => stage.tone === "warn")) return "warn";
+  if (stages.some((stage) => stage.tone === "success")) return "success";
+  return "neutral";
 }
 
 function buildTraceDiagnosis(detail: EventTraceDetail): DiagnosisResult {

@@ -37,6 +37,7 @@ from ..db.models.plugin import (
     PLUGIN_TRUST_VERIFIED,
     InstalledPlugin,
 )
+from ..db.models.plugin_global_config import PluginGlobalConfig
 from ..settings import settings
 from ..worker.plugins.manifest import Manifest
 from .remote_plugin_service import (
@@ -364,24 +365,28 @@ async def install_zip(
 
 
 async def uninstall(db: AsyncSession, key: str) -> bool:
-    """卸载指定 key：删表行 + 删目录。返回 True 表示真删了一行。"""
+    """卸载指定 key：删表行 + 删目录 + 清理功能矩阵残留。"""
     row = await db.get(InstalledPlugin, key)
     if row is None or row.source not in _PACKAGE_MANAGED_SOURCES:
         return False
     target = Path(row.installed_path or settings.plugins_installed_path / key)
-    if row.source == PLUGIN_SOURCE_OFFICIAL:
-        afs = (
-            await db.execute(
-                select(AccountFeature).where(AccountFeature.feature_key == key)
-            )
-        ).scalars().all()
-        for af in afs:
-            await db.delete(af)
-        feat = (
-            await db.execute(select(Feature).where(Feature.key == key))
-        ).scalar_one_or_none()
-        if feat is not None and not bool(feat.is_builtin):
-            await db.delete(feat)
+
+    afs = (
+        await db.execute(
+            select(AccountFeature).where(AccountFeature.feature_key == key)
+        )
+    ).scalars().all()
+    for af in afs:
+        await db.delete(af)
+
+    global_config = await db.get(PluginGlobalConfig, key)
+    if global_config is not None:
+        await db.delete(global_config)
+
+    feat = await db.get(Feature, key)
+    if feat is not None and not bool(feat.is_builtin):
+        await db.delete(feat)
+
     await db.delete(row)
     await db.flush()
     # 删目录失败不阻塞 DB 提交（但写日志方便排查）

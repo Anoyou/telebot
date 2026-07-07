@@ -859,6 +859,41 @@ def _plugin_direct_passthrough_enabled(ctx: PluginContext | None) -> bool:
     return False
 
 
+async def _start_userbot_direct_passthrough_trace(
+    state: _AccountState,
+    event: Any,
+    *,
+    event_label: str,
+) -> Any | None:
+    flags = await _load_event_framework_flags()
+    if not flags.get("trace_enabled", True):
+        return None
+    payload = normalize_userbot_event(state.account_id, event)
+    trigger = dict(payload.get("trigger") if isinstance(payload.get("trigger"), dict) else {})
+    trigger.update(
+        {
+            "type": "direct_passthrough",
+            "channel": "userbot",
+            "event_label": event_label,
+        }
+    )
+    payload["trigger"] = trigger
+    trace = await start_trace(payload)
+    payload["trace_id"] = trace.trace_id
+    try:
+        event.trace_id = trace.trace_id
+    except Exception:  # noqa: BLE001
+        pass
+    await record_span(
+        trace,
+        "receive",
+        TRACE_STATUS_OK,
+        component="userbot_direct_passthrough",
+        direction=event_label,
+    )
+    return trace
+
+
 async def _dispatch_userbot_direct_passthrough(
     state: _AccountState,
     event: Any,
@@ -871,6 +906,10 @@ async def _dispatch_userbot_direct_passthrough(
     """Dispatch raw Telethon events to explicitly opted-in low-latency plugins."""
 
     invoked = False
+    invoked_count = 0
+    failed_count = 0
+    trace = None
+    trace_started = False
     handler_name = "on_direct_message"
     for plugin_key, inst in list(state.instances.items()):
         ctx = state.contexts.get(plugin_key)
@@ -893,35 +932,98 @@ async def _dispatch_userbot_direct_passthrough(
             if not allowed:
                 continue
         invoked = True
+        invoked_count += 1
+        if not trace_started:
+            trace = await _start_userbot_direct_passthrough_trace(
+                state,
+                event,
+                event_label=event_label,
+            )
+            trace_started = True
+        await record_span(
+            trace,
+            "route",
+            TRACE_STATUS_OK,
+            component="userbot_direct_passthrough",
+            plugin_key=plugin_key,
+            reason_code="matched",
+            message="插件启用直通模式，原始 Telethon event 将直接下放给 on_direct_message。",
+            direction=event_label,
+        )
         started = time.monotonic()
         # 直通也做调用级 ctx 隔离：复制一个独立 messages facade，避免并发直通事件
         # 共享常驻 ctx.messages（其 actions 列表会交叉累积/泄漏）。成本仅一次对象构造。
+        call_client = ctx.client
+        if trace is not None:
+            call_client = _trace_plugin_client(
+                ctx.client,
+                trace,
+                plugin_key=plugin_key,
+                component="userbot_direct_passthrough",
+            )
+        call_log = ctx.log
+        if ctx.log is not None and trace is not None:
+            async def _trace_log(
+                level: str,
+                message: str,
+                *,
+                _plugin_key: str = plugin_key,
+                _trace: Any = trace,
+                _base_log: Any = ctx.log,
+                **detail: Any,
+            ) -> None:
+                detail.setdefault("trace_id", getattr(_trace, "trace_id", None))
+                detail.setdefault("plugin_key", _plugin_key)
+                await _base_log(level, message, **detail)
+
+            call_log = _trace_log
         base_messages = ctx.messages
         if isinstance(base_messages, _LiveMessageOps):
             call_messages = _LiveMessageOps(
                 base_messages._state,  # noqa: SLF001
                 plugin_key=base_messages._plugin_key,  # noqa: SLF001
                 entry_key=base_messages._entry_key,  # noqa: SLF001
-                trace=base_messages._trace,  # noqa: SLF001
+                trace=trace,  # noqa: SLF001
                 default_send_via=list(base_messages._default_send_via),  # noqa: SLF001
             )
-            call_ctx = replace(ctx, messages=call_messages)
+            call_ctx = replace(ctx, client=call_client, log=call_log, messages=call_messages)
         else:
-            call_ctx = ctx
+            call_ctx = replace(ctx, client=call_client, log=call_log)
         try:
             await handler(call_ctx, event)
+            await record_span(
+                trace,
+                "plugin_invoke",
+                TRACE_STATUS_OK,
+                component="userbot_direct_passthrough",
+                plugin_key=plugin_key,
+                direction=event_label,
+                duration_ms=int((time.monotonic() - started) * 1000),
+            )
             await update_plugin_runtime_status(
                 account_id=state.account_id,
                 plugin_key=plugin_key,
                 last_invocation_status=TRACE_STATUS_OK,
-                last_trace_id=None,
+                last_trace_id=getattr(trace, "trace_id", None),
             )
         except Exception as exc:  # noqa: BLE001
+            failed_count += 1
+            await record_span(
+                trace,
+                "plugin_invoke",
+                TRACE_STATUS_FAILED,
+                component="userbot_direct_passthrough",
+                plugin_key=plugin_key,
+                direction=event_label,
+                reason_code="plugin_runtime_error",
+                error=f"{type(exc).__name__}: {exc}",
+                duration_ms=int((time.monotonic() - started) * 1000),
+            )
             await update_plugin_runtime_status(
                 account_id=state.account_id,
                 plugin_key=plugin_key,
                 last_invocation_status=TRACE_STATUS_FAILED,
-                last_trace_id=None,
+                last_trace_id=getattr(trace, "trace_id", None),
             )
             await _log(
                 redis,
@@ -939,7 +1041,17 @@ async def _dispatch_userbot_direct_passthrough(
                 message_preview=(getattr(event, "raw_text", "") or "")[:200],
                 duration_ms=int((time.monotonic() - started) * 1000),
                 traceback=traceback.format_exc(limit=8),
+                **trace_log_context(trace),
             )
+    if invoked:
+        await finish_trace(
+            trace,
+            TRACE_STATUS_FAILED if failed_count else TRACE_STATUS_OK,
+            invoked_count=invoked_count,
+            failed_count=failed_count,
+            direction=event_label,
+            consumed=True,
+        )
     return invoked
 
 

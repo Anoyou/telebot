@@ -17,15 +17,22 @@
 
 from __future__ import annotations
 
+import base64
 import io
 import shutil
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+from httpx import ASGITransport, AsyncClient
 
-from app.db.models.feature import FEATURE_FORWARD
+from app.api import plugins_install as plugins_install_api
+from app.db.models.feature import FEATURE_FORWARD, AccountFeature, Feature
 from app.db.models.plugin import InstalledPlugin
+from app.db.models.plugin_global_config import PluginGlobalConfig
+from app.deps import get_current_user, get_db
+from app.main import app
 from app.services import plugin_install_service as pis
 
 
@@ -33,24 +40,43 @@ from app.services import plugin_install_service as pis
 # Fake DB：超薄实现，仅支持 InstalledPlugin 的 get/add/delete/flush/execute(select)
 # ─────────────────────────────────────────────────────
 class _FakeDB:
-    """用 dict 模拟 installed_plugin 表的 PK=key 行为；其它表不实现。"""
+    """用 dict/list 模拟本测试覆盖到的最小表行为。"""
 
     def __init__(self) -> None:
         self.installed_rows: dict[str, InstalledPlugin] = {}
+        self.features: dict[str, Feature] = {}
+        self.account_features: list[AccountFeature] = []
+        self.global_configs: dict[str, PluginGlobalConfig] = {}
         self.committed = False
 
     async def get(self, model, pk):  # noqa: ANN001
         if model is InstalledPlugin:
             return self.installed_rows.get(pk)
+        if model is Feature:
+            return self.features.get(pk)
+        if model is PluginGlobalConfig:
+            return self.global_configs.get(pk)
         return None
 
     def add(self, obj) -> None:  # noqa: ANN001
         if isinstance(obj, InstalledPlugin):
             self.installed_rows[obj.key] = obj
+        elif isinstance(obj, Feature):
+            self.features[obj.key] = obj
+        elif isinstance(obj, AccountFeature):
+            self.account_features.append(obj)
+        elif isinstance(obj, PluginGlobalConfig):
+            self.global_configs[obj.plugin_key] = obj
 
     async def delete(self, obj) -> None:  # noqa: ANN001
         if isinstance(obj, InstalledPlugin):
             self.installed_rows.pop(obj.key, None)
+        elif isinstance(obj, Feature):
+            self.features.pop(obj.key, None)
+        elif isinstance(obj, AccountFeature):
+            self.account_features = [row for row in self.account_features if row is not obj]
+        elif isinstance(obj, PluginGlobalConfig):
+            self.global_configs.pop(obj.plugin_key, None)
 
     async def flush(self) -> None:
         return None
@@ -62,8 +88,23 @@ class _FakeDB:
         return None
 
     async def execute(self, stmt):  # noqa: ANN001
-        # 只为 list_installed 服务（select InstalledPlugin order by key）
-        return _FakeResult(list(self.installed_rows.values()))
+        model = stmt.column_descriptions[0].get("entity")
+        if model is InstalledPlugin:
+            return _FakeResult(list(self.installed_rows.values()))
+        if model is AccountFeature:
+            key = _where_value(stmt)
+            return _FakeResult(
+                [row for row in self.account_features if row.feature_key == key]
+            )
+        return _FakeResult([])
+
+
+def _where_value(stmt) -> object | None:  # noqa: ANN001
+    for criterion in getattr(stmt, "_where_criteria", ()):
+        value = getattr(getattr(criterion, "right", None), "value", None)
+        if value is not None:
+            return value
+    return None
 
 
 class _FakeResult:
@@ -230,6 +271,44 @@ def _sign_payload(payload: bytes) -> tuple[bytes, str]:
     return priv.sign(payload), pub_pem
 
 
+def _csrf_headers() -> dict[str, str]:
+    return {
+        "X-Requested-With": "telepilot-ui",
+        "X-CSRF-Token": "test-token",
+        "Cookie": "csrf_token=test-token",
+    }
+
+
+def _install_api_overrides(
+    db: _FakeDB, monkeypatch
+) -> tuple[list[tuple[str, str]], dict]:  # noqa: ANN001
+    audit_events: list[tuple[str, str]] = []
+    previous_overrides = dict(app.dependency_overrides)
+
+    async def _override_db():
+        yield db
+
+    async def _override_user():
+        return SimpleNamespace(id=42)
+
+    async def _fake_audit_write(_db, user_id, action, target=None, detail=None):  # noqa: ANN001, ARG001
+        audit_events.append((action, target))
+
+    async def _fake_broadcast(_db) -> int:  # noqa: ANN001
+        return 0
+
+    app.dependency_overrides[get_db] = _override_db
+    app.dependency_overrides[get_current_user] = _override_user
+    monkeypatch.setattr(plugins_install_api.audit, "write", _fake_audit_write)
+    monkeypatch.setattr(plugins_install_api, "_broadcast_reload_config", _fake_broadcast)
+    return audit_events, previous_overrides
+
+
+def _restore_api_overrides(previous_overrides: dict) -> None:
+    app.dependency_overrides.clear()
+    app.dependency_overrides.update(previous_overrides)
+
+
 def test_verify_signature_none_when_missing() -> None:
     assert pis.verify_signature(b"x", None, "PEM...") is None
     assert pis.verify_signature(b"x", b"sig", None) is None
@@ -242,6 +321,69 @@ def test_verify_signature_valid_and_invalid() -> None:
     assert pis.verify_signature(payload, sig, pub_pem) is True
     # 篡改 payload 后必失败
     assert pis.verify_signature(payload + b"x", sig, pub_pem) is False
+
+
+# ─────────────────────────────────────────────────────
+# upload API
+# ─────────────────────────────────────────────────────
+@pytest.mark.asyncio
+async def test_upload_plugin_package_api_installs_zip_with_signature_file(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(pis.settings, "plugins_installed_dir", str(tmp_path / "installed"))
+    db = _FakeDB()
+    audit_events, previous_overrides = _install_api_overrides(db, monkeypatch)
+    z = _make_zip(key="api_upload", version="1.0.0")
+    sig, pub = _sign_payload(z)
+    monkeypatch.setattr(pis.settings, "plugin_pubkey", pub)
+
+    try:
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as c:
+            r = await c.post(
+                "/api/plugins/install/upload",
+                headers=_csrf_headers(),
+                files={
+                    "file": ("api_upload.zip", z, "application/zip"),
+                    "signature_file": ("api_upload.sig", sig, "application/octet-stream"),
+                },
+            )
+    finally:
+        _restore_api_overrides(previous_overrides)
+
+    assert r.status_code == 200
+    body = r.json()
+    assert body["key"] == "api_upload"
+    assert body["version"] == "1.0.0"
+    assert body["signature_ok"] is True
+    assert db.committed is True
+    assert "api_upload" in db.installed_rows
+    assert audit_events == [("plugin.install_upload", "plugin:api_upload")]
+
+
+@pytest.mark.asyncio
+async def test_upload_plugin_package_api_returns_signature_failed_for_bad_signature_field(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(pis.settings, "plugins_installed_dir", str(tmp_path / "installed"))
+    db = _FakeDB()
+    _, previous_overrides = _install_api_overrides(db, monkeypatch)
+    z = _make_zip(key="api_bad_sig", version="1.0.0")
+    _, pub = _ed25519_keypair()
+    monkeypatch.setattr(pis.settings, "plugin_pubkey", pub)
+
+    try:
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as c:
+            r = await c.post(
+                "/api/plugins/install/upload",
+                headers=_csrf_headers(),
+                files={"file": ("api_bad_sig.zip", z, "application/zip")},
+                data={"signature": base64.b64encode(b"\x00" * 64).decode("ascii")},
+            )
+    finally:
+        _restore_api_overrides(previous_overrides)
+
+    assert r.status_code == 400
+    assert r.json()["error"]["code"] == "SIGNATURE_FAILED"
+    assert db.committed is False
+    assert db.installed_rows == {}
 
 
 # ─────────────────────────────────────────────────────
@@ -393,10 +535,21 @@ async def test_uninstall_removes_row_and_dir(tmp_path, monkeypatch) -> None:
     row = await pis.install_zip(db, zip_bytes=z, signature=sig)
     target = Path(row.installed_path)
     assert target.exists()
+    db.features["bye"] = Feature(key="bye", display_name="Bye", is_builtin=False)
+    db.features["other"] = Feature(key="other", display_name="Other", is_builtin=False)
+    db.account_features.append(AccountFeature(account_id=1, feature_key="bye", enabled=True))
+    db.account_features.append(AccountFeature(account_id=2, feature_key="other", enabled=True))
+    db.global_configs["bye"] = PluginGlobalConfig(plugin_key="bye", config={"token": "secret"})
+    db.global_configs["other"] = PluginGlobalConfig(plugin_key="other", config={"keep": True})
 
     deleted = await pis.uninstall(db, "bye")
     assert deleted is True
     assert "bye" not in db.installed_rows
+    assert "bye" not in db.features
+    assert [row.feature_key for row in db.account_features] == ["other"]
+    assert "bye" not in db.global_configs
+    assert "other" in db.features
+    assert "other" in db.global_configs
     assert not target.exists()
 
 

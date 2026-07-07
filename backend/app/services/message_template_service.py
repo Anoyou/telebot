@@ -11,8 +11,8 @@ from fastapi import HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..account_bot_defaults import (
-    DEFAULT_INTERACTION_RESPONSE_TEMPLATE,
     DEFAULT_DEBIT_NOTICE_TEMPLATE,
+    DEFAULT_INTERACTION_RESPONSE_TEMPLATE,
     DEFAULT_TRANSFER_NOTICE_TEMPLATE,
 )
 from ..db.models.system import SystemSetting
