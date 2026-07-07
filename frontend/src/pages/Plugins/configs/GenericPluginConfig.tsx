@@ -57,7 +57,7 @@ import {
   pluginEventSubscriptionLabels,
   pluginOperationalCapabilityLabels,
 } from "@/types/pluginContract";
-import { featureConfigBackTarget } from "@/pages/Plugins/_shared/featureConfig";
+import { featureConfigBackTarget, formatFeatureVersion } from "@/pages/Plugins/_shared/featureConfig";
 import { featureRuntimeText, featureSwitchText } from "./_shared/featureStatus";
 
 function isConfigSchema(schema: unknown): schema is ConfigSchema {
@@ -398,6 +398,11 @@ export function GenericPluginConfigPage() {
               <Badge variant={feature.is_builtin ? "secondary" : "outline"}>
                 {feature.is_builtin ? "平台能力" : "第三方"}
               </Badge>
+            ) : null}
+            {feature ? (
+              <span className="rounded-full border border-primary/20 bg-primary/10 px-2 py-0.5 font-medium text-primary">
+                当前版本 {formatFeatureVersion(feature.version)}
+              </span>
             ) : null}
           </div>
         </div>

@@ -42,3 +42,9 @@ export function featureConfigBackTarget(
     backHref: `/accounts/${aid}?tab=features`,
   };
 }
+
+export function formatFeatureVersion(version?: string | null): string {
+  const value = (version || "").trim();
+  if (!value) return "版本未知";
+  return value.startsWith("v") ? value : `v${value}`;
+}

@@ -127,6 +127,18 @@
       "Hiragino Sans GB", "Microsoft YaHei", "Helvetica Neue", Arial, sans-serif;
   }
 
+  [data-sonner-toaster][data-y-position="top"] {
+    top: max(1rem, calc(env(safe-area-inset-top) + 1rem)) !important;
+  }
+
+  [data-sonner-toaster][data-x-position="right"] {
+    right: max(1rem, calc(env(safe-area-inset-right) + 1rem)) !important;
+  }
+
+  [data-sonner-toaster][data-x-position="left"] {
+    left: max(1rem, calc(env(safe-area-inset-left) + 1rem)) !important;
+  }
+
   @media (max-width: 640px) {
     input,
     select,
@@ -506,6 +518,7 @@
   }
 
   .liquid-sidebar-drawer {
+    position: fixed;
     border-radius: 0 1rem 1rem 0;
     transform: translate3d(-100%, 0, 0) translateZ(0);
     transition: transform 200ms ease-out;

@@ -370,16 +370,17 @@ export function SettingsIndex() {
             }
           />
         </CardHeader>
-        <CardContent className="flex flex-col gap-3 lg:flex-row lg:items-center">
-          <Button asChild variant="outline" size="sm">
+        <CardContent className="grid grid-cols-3 gap-2 lg:flex lg:items-center">
+          <Button asChild variant="outline" size="sm" className="min-w-0 px-2">
             <Link to="/ai?tab=providers">添加模型</Link>
           </Button>
-          <Button asChild variant="outline" size="sm">
+          <Button asChild variant="outline" size="sm" className="min-w-0 px-2">
             <Link to="/plugins/templates">添加指令</Link>
           </Button>
           <Button
             variant="outline"
             size="sm"
+            className="min-w-0 px-2"
             disabled={(accountsQ.data ?? []).length === 0}
             onClick={() => {
               const accounts = accountsQ.data ?? [];

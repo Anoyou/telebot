@@ -5,6 +5,7 @@ import { ArrowLeft, Loader2, Save } from "lucide-react";
 import { toast } from "sonner";
 
 import { listAccountFeatures, toggleAccountFeature } from "@/api/accounts";
+import { getFeatureMatrix } from "@/api/features";
 import { getSystemSettings } from "@/api/system";
 import { CommandBadge } from "@/components/CommandBadge";
 import { Button } from "@/components/ui/button";
@@ -20,7 +21,7 @@ import { Label } from "@/components/ui/label";
 import { Spinner } from "@/components/ui/misc";
 import { Switch } from "@/components/ui/switch";
 import { getErrMsg } from "@/lib/api";
-import { featureConfigBackTarget } from "@/pages/Plugins/_shared/featureConfig";
+import { featureConfigBackTarget, formatFeatureVersion } from "@/pages/Plugins/_shared/featureConfig";
 import { featureRuntimeText } from "./_shared/featureStatus";
 
 interface Game24Config {
@@ -57,6 +58,10 @@ export function Game24ConfigPage() {
     queryFn: () => listAccountFeatures(aid),
     enabled: !!aid,
   });
+  const matrixQ = useQuery({
+    queryKey: ["matrix"],
+    queryFn: getFeatureMatrix,
+  });
 
   const settingsQ = useQuery({
     queryKey: ["system", "settings"],
@@ -65,6 +70,7 @@ export function Game24ConfigPage() {
   const cmdPrefix = settingsQ.data?.command_prefix || ",";
 
   const game24Feature = featuresQ.data?.find((f) => f.feature_key === "game24");
+  const game24Info = matrixQ.data?.features.find((feature) => feature.key === "game24");
   const currentConfig = (game24Feature?.config ?? {}) as Partial<Game24Config>;
 
   const [command, setCommand] = useState(DEFAULT_CONFIG.command);
@@ -141,7 +147,16 @@ export function Game24ConfigPage() {
         <Button variant="ghost" size="sm" onClick={() => nav(backTarget.backHref)}>
           <ArrowLeft className="mr-1 h-4 w-4" /> {backTarget.backLabel}
         </Button>
-        <h1 className="text-2xl font-semibold tracking-tight">24 点游戏</h1>
+        <div className="min-w-0">
+          <h1 className="text-2xl font-semibold tracking-tight">24 点游戏</h1>
+          <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+            <code>game24</code>
+            <span>账号 #{aid}</span>
+            <span className="rounded-full border border-primary/20 bg-primary/10 px-2 py-0.5 font-medium text-primary">
+              当前版本 {formatFeatureVersion(game24Info?.version)}
+            </span>
+          </div>
+        </div>
       </div>
 
       <Card>

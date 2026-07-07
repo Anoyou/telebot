@@ -24,7 +24,9 @@ export function registerPWA() {
         },
         // 首次缓存完成（可离线使用）
         onOfflineReady() {
-          toast.success("已可离线使用");
+          toast.success("前端资源已缓存", {
+            description: "断网时仍可打开控制台页面，不代表 Bot 离线运行。",
+          });
         },
         immediate: true,
       });

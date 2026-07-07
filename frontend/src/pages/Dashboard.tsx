@@ -123,7 +123,7 @@ export function Dashboard() {
         />
       ) : null}
 
-      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+      <div className="grid grid-cols-2 gap-3 md:gap-4 xl:grid-cols-4">
         <AccountWorkerTile
           value={workerValue}
           tone={overviewTone(activeAccounts, accounts.length, accountsQ.isLoading)}

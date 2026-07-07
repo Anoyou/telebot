@@ -256,7 +256,7 @@ export function MobileSidebar({ open, onOpenChange }: MobileSidebarProps) {
         />
         <DialogPrimitive.Content
           className={cn(
-            "liquid-glass liquid-sidebar liquid-sidebar-drawer fixed inset-y-0 left-0 z-[60] flex w-64 max-w-[80vw] flex-col md:hidden",
+            "liquid-glass liquid-sidebar liquid-sidebar-drawer inset-y-0 left-0 z-[60] flex w-64 max-w-[80vw] flex-col md:hidden",
             // 安全区适配：iPhone 横屏时左侧刘海，全屏 PWA 顶/底状态栏区
             "pl-[env(safe-area-inset-left)] pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]",
             "data-[state=closed]:pointer-events-none",

@@ -70,30 +70,27 @@ export function TopBar({
       "
     >
       <div className="flex min-w-0 items-center gap-2">
-        {isStandalone ? (
-          <div className="flex min-w-0 items-center gap-2 md:hidden">
-            <BrandLogo className="h-9 w-9 rounded-xl" />
-            <div className="min-w-0">
-              <div className="truncate text-base font-semibold leading-none">TelePilot</div>
-              <div className="mt-0.5 truncate text-[11px] leading-none text-muted-foreground">
-                管理控制台
-              </div>
+        <div className="flex min-w-0 items-center gap-2 md:hidden">
+          <BrandLogo className="h-9 w-9 shrink-0 rounded-xl" />
+          <div className="min-w-0">
+            <div className="truncate text-base font-semibold leading-none">TelePilot</div>
+            <div className="mt-0.5 truncate text-[11px] leading-none text-muted-foreground">
+              管理控制台
             </div>
           </div>
-        ) : (
-          /* 移动端汉堡按钮，桌面隐藏；PWA 下由底栏承担导航 */
-          <Button
-            variant="outline"
-            size="sm"
-            className={cn(topbarActionClass(false), "md:hidden")}
-            onClick={onMenuClick}
-            aria-label="打开导航菜单"
-            title="打开导航菜单"
-          >
-            <Menu className="h-4 w-4" />
-            <span className="hidden text-xs sm:inline">菜单</span>
-          </Button>
-        )}
+          {!isStandalone ? (
+            <Button
+              variant="outline"
+              size="sm"
+              className={cn(topbarActionClass(false), "h-9 w-9 shrink-0 px-0")}
+              onClick={onMenuClick}
+              aria-label="打开导航菜单"
+              title="打开导航菜单"
+            >
+              <Menu className="h-4 w-4" />
+            </Button>
+          ) : null}
+        </div>
         <Button
           variant="outline"
           size="sm"

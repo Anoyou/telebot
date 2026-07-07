@@ -253,6 +253,7 @@ type InteractionRuleForm = {
 type InteractionEntryOption = {
   featureKey: string;
   featureName: string;
+  featureVersion?: string | null;
   featureConfig: Record<string, unknown>;
   featureConfigSchema?: Record<string, unknown> | null;
   featureUsage?: string | null;
@@ -940,14 +941,24 @@ function resolveRuleModuleSelection(
 function describeRuleModuleSelection(
   rule: InteractionRuleForm,
   selection?: ResolvedInteractionEntry,
+  options?: { withVersion?: boolean },
 ): string {
   if (!selection) {
     return rule.moduleKey.trim() ? `插件 ${rule.moduleKey} / 入口未选` : "插件入口未选";
   }
   const entryLabel = selection.entry.title || selection.entry.label || selection.entry.key;
+  const featureLabel = options?.withVersion
+    ? `${selection.featureName} · ${formatInteractionFeatureVersion(selection.featureVersion)}`
+    : selection.featureName;
   return selection.inferred || !rule.moduleAction.trim()
-    ? `${selection.featureName} / 自动推断 ${selection.entry.key}`
-    : `${selection.featureName} / ${entryLabel}`;
+    ? `${featureLabel} / 自动推断 ${selection.entry.key}`
+    : `${featureLabel} / ${entryLabel}`;
+}
+
+function formatInteractionFeatureVersion(version?: string | null): string {
+  const value = (version || "").trim();
+  if (!value) return "版本未知";
+  return value.startsWith("v") ? value : `v${value}`;
 }
 
 function ruleFormFromRule(
@@ -1910,6 +1921,7 @@ export function BotTab({
   });
   const [interactionIdentityExpanded, setInteractionIdentityExpanded] = useState(() => !isInteractionCenter);
   const [interactionAdvancedExpanded, setInteractionAdvancedExpanded] = useState(() => !isInteractionCenter);
+  const [mobileRuleEditorOpen, setMobileRuleEditorOpen] = useState(false);
 
   const botQ = useQuery({
     queryKey: ["account", aid, "bot"],
@@ -1947,6 +1959,7 @@ export function BotTab({
     (feature.interaction_entries ?? []).map((entry: FeatureInteractionEntry) => ({
       featureKey: feature.key,
       featureName: feature.display_name,
+      featureVersion: feature.version,
       featureConfig: accountFeatureConfigByKey.get(feature.key) ?? {},
       featureConfigSchema: feature.config_schema ?? null,
       featureUsage: feature.usage,
@@ -2297,6 +2310,13 @@ export function BotTab({
       [next[index], next[nextIndex]] = [next[nextIndex], next[index]];
       return next;
     });
+  };
+
+  const selectInteractionRule = (ruleId: string) => {
+    setSelectedInteractionRuleId(ruleId);
+    if (isInteractionCenter) {
+      setMobileRuleEditorOpen(false);
+    }
   };
 
   const addUserMut = useMutation({
@@ -3097,7 +3117,7 @@ export function BotTab({
                   const keywordCount = countDelimitedTextItems(rule.moduleStartKeywords);
                   const actionTone = rule.action === "module" ? "default" : rule.action === "math10" ? "secondary" : "outline";
                   const moduleSummary = rule.action === "module"
-                    ? describeRuleModuleSelection(rule, resolvedModule)
+                    ? describeRuleModuleSelection(rule, resolvedModule, { withVersion: true })
                     : rule.action === "notice"
                       ? "命中后只发送通知消息"
                       : keywordCount > 0
@@ -3118,11 +3138,11 @@ export function BotTab({
                         <button
                           type="button"
                           className="min-w-0 flex-1 text-left"
-                          onClick={() => setSelectedInteractionRuleId(rule.id)}
+                          onClick={() => selectInteractionRule(rule.id)}
                         >
                           <div className="flex items-start gap-2.5">
                             <div className={cn(
-                              "hidden h-8 w-8 shrink-0 place-items-center rounded-md border text-xs font-semibold sm:grid",
+                              "grid h-8 w-8 shrink-0 place-items-center rounded-md border text-xs font-semibold",
                               isSelected ? "border-primary/40 bg-primary/10 text-primary" : "border-border bg-muted/40 text-muted-foreground",
                             )}>
                               {index + 1}
@@ -3138,8 +3158,13 @@ export function BotTab({
                                 >
                                   {rule.enabled ? "启用" : "暂停"}
                                 </Badge>
+                                {isSelected ? (
+                                  <Badge variant="outline" className="h-5 shrink-0 px-1.5 text-[11px]">
+                                    当前
+                                  </Badge>
+                                ) : null}
                               </div>
-                              <div className="mt-1 hidden min-w-0 flex-wrap gap-1.5 sm:flex">
+                              <div className="mt-1 flex min-w-0 flex-wrap gap-1.5">
                                 <Badge variant={actionTone} className="h-5 px-1.5 text-[11px]">
                                   {getRuleActionLabel(rule.action)}
                                 </Badge>
@@ -3150,12 +3175,12 @@ export function BotTab({
                                   {getRuleTriggerModeLabel(effectiveTriggerMode)}
                                 </Badge>
                               </div>
-                              <div className="mt-1 hidden min-w-0 flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground sm:flex">
+                              <div className="mt-1 flex min-w-0 flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground">
                                 <span className="whitespace-nowrap">群 {chatCount > 0 ? chatCount : "未填"}</span>
                                 <span className="whitespace-nowrap">关键词 {keywordCount}</span>
                                 <span className="min-w-0 truncate">{sessionSummary}</span>
                               </div>
-                              <div className="mt-1 hidden truncate text-xs text-muted-foreground sm:block">
+                              <div className="mt-1 line-clamp-2 break-words text-xs text-muted-foreground">
                                 {moduleSummary}
                               </div>
                             </div>
@@ -3236,7 +3261,41 @@ export function BotTab({
                 })}
               </div>
 
-              <div className="min-w-0 xl:h-full xl:overflow-y-auto">
+              {isInteractionCenter && selectedInteractionRule ? (
+                <div className="rounded-md border border-primary/25 bg-primary/5 p-3 xl:hidden">
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="text-xs font-medium text-primary">当前规则</div>
+                      <div className="mt-1 line-clamp-2 break-words text-sm font-semibold">
+                        {selectedInteractionRule.name || `规则 ${selectedInteractionRuleIndexSafe + 1}`}
+                      </div>
+                      <div className="mt-1 line-clamp-2 break-words text-xs text-muted-foreground">
+                        {selectedInteractionRule.action === "module"
+                          ? describeRuleModuleSelection(
+                              selectedInteractionRule,
+                              resolveRuleModuleSelection(selectedInteractionRule, interactionEntries),
+                              { withVersion: true },
+                            )
+                          : getRuleActionLabel(selectedInteractionRule.action)}
+                      </div>
+                    </div>
+                    <Button
+                      type="button"
+                      variant={mobileRuleEditorOpen ? "secondary" : "outline"}
+                      size="sm"
+                      className="shrink-0"
+                      onClick={() => setMobileRuleEditorOpen((open) => !open)}
+                    >
+                      {mobileRuleEditorOpen ? "收起配置" : "编辑当前规则"}
+                    </Button>
+                  </div>
+                </div>
+              ) : null}
+
+              <div className={cn(
+                "min-w-0 xl:h-full xl:overflow-y-auto",
+                isInteractionCenter && !mobileRuleEditorOpen && "hidden xl:block",
+              )}>
                 {selectedInteractionRule ? (
                   <InteractionRuleEditor
                     aid={aid}

@@ -226,13 +226,14 @@ export function AIIndex() {
         onHelpOpenChange={setHelpMenuOpen}
         cmdPrefix={cmdPrefix}
       />
-      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+      <div className="grid grid-cols-2 gap-3 xl:grid-cols-4">
         <ToneRailCard
           icon={Package}
           title="Provider 就绪"
           value={`${readyCount}/${providerCount}`}
           description={providerCount > 0 ? "已可调用 / 总数" : "先添加一个模型提供商"}
           tone={readyCount > 0 ? "success" : "warn"}
+          valueClassName="truncate text-xl font-bold tracking-tight sm:text-2xl"
         />
         <ToneRailCard
           icon={Bot}
@@ -240,6 +241,7 @@ export function AIIndex() {
           value={aiTemplates.length}
           description={aiTemplates.length > 0 ? "type=ai 模板" : "创建第一条 AI 指令模板"}
           tone={aiTemplates.length > 0 ? "primary" : "warn"}
+          valueClassName="truncate text-xl font-bold tracking-tight sm:text-2xl"
         />
         <ToneRailCard
           icon={History}
@@ -247,11 +249,12 @@ export function AIIndex() {
           value={usageSummary ? `${usageSummary.request_count} 次 / 失败 ${usageSummary.failed_count}` : "暂无"}
           description={usageSummary ? `Fallback ${usageSummary.fallback_count} 次` : "触发调用后展示摘要"}
           tone={(usageSummary?.failed_count ?? 0) > 0 ? "warn" : "neutral"}
+          valueClassName="break-words text-xl font-bold tracking-tight sm:text-2xl"
         />
         <Card className="border-t-4 border-t-emerald-500/90">
           <CardContent className="space-y-2 p-4">
             <div className="text-sm font-medium">调用成功率</div>
-            <div className="text-2xl font-semibold">
+            <div className="text-xl font-semibold sm:text-2xl">
               {usageSummary && usageSummary.request_count > 0
                 ? `${Math.round((usageSummary.success_count / usageSummary.request_count) * 100)}%`
                 : "暂无"}
