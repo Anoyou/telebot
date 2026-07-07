@@ -39,6 +39,7 @@ from ..deps import CurrentUser
 from ..redis_client import get_redis
 
 router = APIRouter(prefix="/api/system", tags=["system"])
+_APP_STARTED_AT = time.time()
 
 
 # ════════════════════════════════════════════════════════════
@@ -194,6 +195,7 @@ class ResourceDashboard(BaseModel):
     host: HostResource
     main_process: ProcessResource
     project_total: ProcessResource
+    app_uptime_seconds: int | None = None
     other_processes: list[ProcessResource] = Field(default_factory=list)
     containers: list[ContainerResource] = Field(default_factory=list)
     container_total: ProcessResource = Field(default_factory=ProcessResource)
@@ -616,6 +618,16 @@ def _read_host_uptime_seconds() -> int | None:
         return max(0, int(float(first)))
     except Exception:
         return None
+
+
+def _read_app_uptime_seconds() -> int | None:
+    try:
+        import psutil  # type: ignore[import-not-found]
+
+        proc = psutil.Process(os.getpid())
+        return max(0, int(time.time() - float(proc.create_time())))
+    except Exception:
+        return max(0, int(time.time() - _APP_STARTED_AT))
 
 
 def _read_host_cpu_percent() -> float | None:
@@ -1072,6 +1084,7 @@ async def get_resource_dashboard(_user: CurrentUser) -> ResourceDashboard:
         host=host,
         main_process=main,
         project_total=project_total,
+        app_uptime_seconds=_read_app_uptime_seconds(),
         other_processes=other_processes[:8],
         containers=containers[:8],
         container_total=container_total,

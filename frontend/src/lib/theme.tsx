@@ -12,8 +12,10 @@ export type ResolvedTheme = "light" | "dark";
 
 const THEME_STORAGE_KEY = "telepilot-theme";
 const LEGACY_THEME_STORAGE_KEY = "telebot-theme";
-const LIGHT_THEME_COLOR = "#2563eb";
+const LIGHT_THEME_COLOR = "#ffffff";
 const DARK_THEME_COLOR = "#0b1120";
+const LIGHT_STATUS_BAR_STYLE = "default";
+const DARK_STATUS_BAR_STYLE = "black-translucent";
 
 interface ThemeContextValue {
   theme: Theme;
@@ -44,6 +46,14 @@ function applyResolvedTheme(resolvedTheme: ResolvedTheme) {
   const meta = document.querySelector<HTMLMetaElement>('meta[name="theme-color"]');
   if (meta) {
     meta.content = resolvedTheme === "dark" ? DARK_THEME_COLOR : LIGHT_THEME_COLOR;
+  }
+
+  const statusBarMeta = document.querySelector<HTMLMetaElement>(
+    'meta[name="apple-mobile-web-app-status-bar-style"]',
+  );
+  if (statusBarMeta) {
+    statusBarMeta.content =
+      resolvedTheme === "dark" ? DARK_STATUS_BAR_STYLE : LIGHT_STATUS_BAR_STYLE;
   }
 }
 

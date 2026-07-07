@@ -518,6 +518,20 @@ def test_read_process_stats_falls_back_to_ps(monkeypatch) -> None:
     assert out == {456: (1.25, 64.0, None)}
 
 
+def test_read_app_uptime_seconds_uses_process_start(monkeypatch) -> None:
+    """项目运行时间应按当前 TelePilot 后端进程启动时间计算，而不是宿主机启动时间。"""
+
+    class _FakeProcess:
+        def create_time(self):
+            return 100.0
+
+    fake_psutil = SimpleNamespace(Process=lambda _pid: _FakeProcess())
+    monkeypatch.setitem(sys.modules, "psutil", fake_psutil)
+    monkeypatch.setattr(sh.time, "time", lambda: 166.8)
+
+    assert sh._read_app_uptime_seconds() == 66
+
+
 def test_sum_project_resource_includes_main_workers_and_children() -> None:
     """资源面板的应用占用应是主进程 + worker + 派生子进程的合计。"""
 

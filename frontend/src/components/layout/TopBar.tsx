@@ -1,5 +1,5 @@
 // 顶栏：移动端汉堡按钮 + 副标题（仅 sm+ 显示）+ 系统健康灯 + 更新检查 + 紧急停用 + 登出
-// iOS PWA：背景色延伸到 safe-area-inset-top（与 black-translucent 状态栏配合），
+// iOS PWA：背景色延伸到 safe-area-inset-top，并随主题同步系统状态栏底色，
 // 内容区高度仍维持 56px。
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";

@@ -7,15 +7,15 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
 
     <!-- PWA 主题色（Android Chrome 顶栏 + iOS Safari 状态栏底色） -->
-    <meta name="theme-color" content="#2563eb" />
+    <meta name="theme-color" content="#ffffff" />
     <meta name="color-scheme" content="dark light" />
 
     <!-- iOS 全屏 PWA：从主屏幕启动时隐藏 Safari UI -->
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-title" content="TelePilot" />
-    <!-- iOS 状态栏：black-translucent 让内容延伸到刘海/灵动岛区域，配合 viewport-fit=cover 使用 -->
-    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <!-- iOS 状态栏：浅色用 default 避免顶部被半透明黑罩灰；深色启动脚本会切到 black-translucent。 -->
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
     <meta name="format-detection" content="telephone=no" />
 
     <script>
@@ -27,7 +27,9 @@
           document.documentElement.classList.toggle("dark", dark);
           document.documentElement.style.colorScheme = dark ? "dark" : "light";
           var meta = document.querySelector('meta[name="theme-color"]');
-          if (meta) meta.setAttribute("content", dark ? "#0b1120" : "#2563eb");
+          if (meta) meta.setAttribute("content", dark ? "#0b1120" : "#ffffff");
+          var statusBar = document.querySelector('meta[name="apple-mobile-web-app-status-bar-style"]');
+          if (statusBar) statusBar.setAttribute("content", dark ? "black-translucent" : "default");
         } catch (e) {}
       })();
     </script>

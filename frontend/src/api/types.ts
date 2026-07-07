@@ -1109,6 +1109,7 @@ export interface ResourceDashboard {
   host: HostResourceStatus;
   main_process: ProcessResourceStatus;
   project_total: ProcessResourceStatus;
+  app_uptime_seconds?: number | null;
   other_processes: ProcessResourceStatus[];
   containers: ContainerResourceStatus[];
   container_total: ProcessResourceStatus;

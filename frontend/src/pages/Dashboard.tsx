@@ -108,8 +108,6 @@ export function Dashboard() {
         logErrorCount={resourceQ.data?.logs.last_5m_error ?? 0}
         logWarnCount={resourceQ.data?.logs.last_5m_warn ?? 0}
         logsLoading={resourceQ.isLoading}
-        sampledAt={resourceQ.data?.host.sampled_at}
-        uptimeSeconds={resourceQ.data?.host.uptime_seconds}
         guideActive={guideActive}
         onGuideToggle={() => setGuideActive(!guideActive)}
       />
@@ -186,8 +184,6 @@ function DashboardHero({
   logErrorCount,
   logWarnCount,
   logsLoading,
-  sampledAt,
-  uptimeSeconds,
   guideActive,
   onGuideToggle,
 }: {
@@ -202,15 +198,9 @@ function DashboardHero({
   logErrorCount: number;
   logWarnCount: number;
   logsLoading: boolean;
-  sampledAt?: number | null;
-  uptimeSeconds?: number | null;
   guideActive: boolean;
   onGuideToggle: () => void;
 }) {
-  const sampledLabel = sampledAt
-    ? new Date(sampledAt * 1000).toLocaleTimeString()
-    : "等待采样";
-  const uptimeLabel = formatUptime(uptimeSeconds);
   const accountTone = overviewTone(activeAccounts, totalAccounts, accountsLoading);
   const providerTone = overviewTone(readyProviders, totalProviders, providersLoading);
   const logStatusTone: VisualTone = logsLoading
@@ -236,18 +226,6 @@ function DashboardHero({
             value={logsLoading ? "采样中" : `${logErrorCount} 错误 / ${logWarnCount} 警告`}
           />
         </>
-      }
-      aside={
-        sampledLabel ? (
-          <div className="rounded-lg border border-border/70 bg-background/80 p-3 shadow-sm">
-            <div className="text-xs font-medium text-muted-foreground">资源采样</div>
-            <div className="mt-1 text-lg font-semibold tracking-tight">{sampledLabel}</div>
-            <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-muted-foreground">
-              <span>自动每 15 秒刷新</span>
-              {uptimeLabel ? <span>已正常运行 {uptimeLabel}</span> : null}
-            </div>
-          </div>
-        ) : null
       }
       actions={
         <>
@@ -602,7 +580,7 @@ function ResourceUsageCard({
           description="上方是 TelePilot 应用占用；下方是宿主机/服务器整体资源。"
           meta={data?.host.sampled_at ? (
             <span className="shrink-0 text-xs text-muted-foreground">
-              {new Date(data.host.sampled_at * 1000).toLocaleTimeString()}
+              自动每 15 秒刷新
             </span>
           ) : null}
         />
@@ -618,6 +596,7 @@ function ResourceUsageCard({
           </div>
         ) : (
           <>
+            <ResourceSamplingPanel data={data} />
             <div className="grid gap-3 sm:grid-cols-2">
               <MetricCard
                 icon={Cpu}
@@ -660,6 +639,40 @@ function ResourceUsageCard({
         )}
       </CardContent>
     </Card>
+  );
+}
+
+function ResourceSamplingPanel({ data }: { data: ResourceDashboard }) {
+  const sampledLabel = data.host.sampled_at
+    ? new Date(data.host.sampled_at * 1000).toLocaleTimeString()
+    : "等待采样";
+  const hostUptimeLabel = formatUptime(data.host.uptime_seconds) ?? "-";
+  const appUptimeLabel = formatUptime(data.app_uptime_seconds) ?? "-";
+
+  return (
+    <div className="grid gap-3 md:grid-cols-3">
+      <ResourceMeta label="资源采样" value={sampledLabel} hint="自动每 15 秒刷新" />
+      <ResourceMeta label="宿主机运行时间" value={hostUptimeLabel} hint="服务器开机后累计" />
+      <ResourceMeta label="项目运行时间" value={appUptimeLabel} hint="当前 TelePilot 后端进程" />
+    </div>
+  );
+}
+
+function ResourceMeta({
+  label,
+  value,
+  hint,
+}: {
+  label: string;
+  value: string;
+  hint: string;
+}) {
+  return (
+    <div className="rounded-xl border border-border/70 bg-muted/35 p-3">
+      <div className="text-xs font-medium text-muted-foreground">{label}</div>
+      <div className="mt-1 text-lg font-semibold tracking-tight">{value}</div>
+      <div className="mt-1 text-[11px] leading-4 text-muted-foreground">{hint}</div>
+    </div>
   );
 }
 
