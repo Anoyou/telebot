@@ -20,6 +20,11 @@
 
 ## [Unreleased]
 
+## [0.52.1] — 2026-07-08 · patch（补丁版本） · PWA 启动脚本 CSP 补丁
+
+### Fixed
+- 修复 `0.52.0` 更新 iOS PWA 主题启动脚本后，生产 Nginx CSP 仍保留旧 inline script hash，导致首屏主题脚本可能被浏览器拦截的问题。
+
 ## [0.52.0] — 2026-07-08 · minor（次版本） · 日志中心重构版本
 
 ### Added
