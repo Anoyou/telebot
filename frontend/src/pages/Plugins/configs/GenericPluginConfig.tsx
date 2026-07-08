@@ -387,8 +387,8 @@ export function GenericPluginConfigPage() {
   return (
     <div className="space-y-6 pb-24">
       <div className="flex flex-wrap items-center gap-3">
-        <Button variant="ghost" size="sm" onClick={() => nav(backTarget.backHref)}>
-          <ArrowLeft className="mr-1 h-4 w-4" /> {backTarget.backLabel}
+        <Button variant="default" size="sm" className="gap-1.5 shadow-sm" onClick={() => nav(backTarget.backHref)}>
+          <ArrowLeft className="h-4 w-4" /> {backTarget.backLabel}
         </Button>
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">

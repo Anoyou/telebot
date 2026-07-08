@@ -144,8 +144,8 @@ export function Game24ConfigPage() {
   return (
     <div className="space-y-6 pb-24">
       <div className="flex flex-wrap items-center gap-3">
-        <Button variant="ghost" size="sm" onClick={() => nav(backTarget.backHref)}>
-          <ArrowLeft className="mr-1 h-4 w-4" /> {backTarget.backLabel}
+        <Button variant="default" size="sm" className="gap-1.5 shadow-sm" onClick={() => nav(backTarget.backHref)}>
+          <ArrowLeft className="h-4 w-4" /> {backTarget.backLabel}
         </Button>
         <div className="min-w-0">
           <h1 className="text-2xl font-semibold tracking-tight">24 点游戏</h1>

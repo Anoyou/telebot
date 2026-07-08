@@ -9,7 +9,6 @@ import {
   RefreshCw,
   Route,
   ScrollText,
-  ShieldCheck,
 } from "lucide-react";
 
 import { getInteractionBotConfig } from "@/api/accountBots";
@@ -54,11 +53,6 @@ function runtimeTone(config?: AccountBotInteractionConfig): "success" | "warn" |
   if (config?.interaction_running) return "success";
   if (config?.enabled) return "warn";
   return "neutral";
-}
-
-function lastUpdateLabel(config?: AccountBotInteractionConfig): string {
-  if (!config?.interaction_last_update_id) return "暂无触发";
-  return `update #${config.interaction_last_update_id}`;
 }
 
 export function InteractionIndex() {
@@ -127,7 +121,7 @@ export function InteractionIndex() {
       <PageHeader
         icon={Bot}
         title="交互中心"
-        description="按账号管理交互 Bot、Event Bus 订阅条件、插件入口和会话运行状态。"
+        description="按账号管理交互 Bot、关键词规则、玩法入口和会话运行状态。"
         actions={
           <>
             <Button
@@ -169,7 +163,7 @@ export function InteractionIndex() {
             </CardTitle>
           </CardHeader>
           <CardContent className="flex flex-col gap-3 text-sm text-muted-foreground sm:flex-row sm:items-center sm:justify-between">
-            <span>交互中心需要先绑定一个 Telegram 账号，再配置对应的交互 Bot 和 Event Bus 订阅条件。</span>
+            <span>交互中心需要先绑定一个 Telegram 账号，再配置对应的交互 Bot 和互动规则。</span>
             <Button asChild size="sm">
               <Link to="/accounts/new">添加账号</Link>
             </Button>
@@ -227,16 +221,6 @@ export function InteractionIndex() {
                 label="启用订阅"
                 value={`${activeRules}/${rules.length} · ${chatCoverage} 群`}
               />
-              <SignalPill
-                tone={config?.interaction_last_update_id ? "success" : "neutral"}
-                label="最近触发"
-                value={lastUpdateLabel(config)}
-              />
-              <SignalPill
-                tone={lastError ? "danger" : "success"}
-                label="最近错误"
-                value={lastError ? "有错误" : "无错误"}
-              />
             </div>
           </section>
 
@@ -246,10 +230,10 @@ export function InteractionIndex() {
                 <div>
                   <CardTitle className="flex items-center gap-2 text-base">
                     <Route className="h-4 w-4 text-primary" />
-                    Event Bus 订阅与插件入口
+                    互动规则与玩法入口
                   </CardTitle>
                   <p className="mt-1 text-sm text-muted-foreground">
-                    在这里新增订阅条件、选择插件入口、配置触发词和参数；保存后会映射到当前账号的 Event Bus 投递链路。
+                    设置别人发什么关键词、在哪些群生效、启动哪个玩法；保存后交互 Bot 会自动监听并交给对应插件处理。
                   </p>
                 </div>
                 <div className="flex flex-wrap gap-2">
@@ -260,8 +244,7 @@ export function InteractionIndex() {
                     </Badge>
                   ) : null}
                   <Badge variant={lastError ? "destructive" : "secondary"} className="h-7">
-                    <ShieldCheck className="mr-1 h-3.5 w-3.5" />
-                    可信插件模式
+                    {lastError ? "最近运行有错误" : "规则监听正常"}
                   </Badge>
                 </div>
               </div>

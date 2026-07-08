@@ -282,7 +282,7 @@ function AccountWorkerTile({
     return (
       <Dialog open={open} onOpenChange={onOpenChange}>
         <DialogTrigger asChild>{trigger}</DialogTrigger>
-        <DialogContent className="bottom-0 top-auto max-h-[86dvh] w-full translate-y-0 gap-0 overflow-hidden rounded-b-none border-border/80 p-0 shadow-2xl sm:bottom-auto sm:top-[50%] sm:max-w-lg sm:translate-y-[-50%] sm:rounded-lg">
+        <DialogContent className="siri-glow-soft bottom-0 top-auto max-h-[86dvh] w-full translate-y-0 gap-0 overflow-hidden rounded-b-none border-primary/45 p-0 shadow-2xl shadow-primary/10 ring-1 ring-primary/35 sm:bottom-auto sm:top-[50%] sm:max-w-lg sm:translate-y-[-50%] sm:rounded-lg">
           <AccountWorkerPanel
             accounts={accounts}
             isLoading={isLoading}
@@ -305,12 +305,16 @@ function AccountWorkerTile({
         sideOffset={8}
         className={
           singleAccount
-            ? "max-h-[min(72vh,42rem)] w-[min(30rem,calc(100vw-1rem))] border-primary/45 bg-card p-0 shadow-2xl shadow-primary/10 ring-1 ring-primary/35 data-[state=open]:animate-none sm:w-[min(30rem,calc(100vw-2rem))]"
-            : "max-h-[min(72vh,42rem)] w-[min(54rem,calc(100vw-1rem))] border-primary/45 bg-card p-0 shadow-2xl shadow-primary/10 ring-1 ring-primary/35 data-[state=open]:animate-none sm:w-[min(54rem,calc(100vw-2rem))]"
+            ? "siri-glow-soft max-h-[min(72vh,42rem)] w-[min(30rem,calc(100vw-1rem))] border-primary/45 bg-card p-0 shadow-2xl shadow-primary/10 ring-1 ring-primary/35 data-[state=open]:animate-none sm:w-[min(30rem,calc(100vw-2rem))]"
+            : "siri-glow-soft max-h-[min(72vh,42rem)] w-[min(54rem,calc(100vw-1rem))] border-primary/45 bg-card p-0 shadow-2xl shadow-primary/10 ring-1 ring-primary/35 data-[state=open]:animate-none sm:w-[min(54rem,calc(100vw-2rem))]"
         }
-        style={{ overflowY: "auto" }}
       >
-        <AccountWorkerPanel accounts={accounts} isLoading={isLoading} compact={false} />
+        <AccountWorkerPanel
+          accounts={accounts}
+          isLoading={isLoading}
+          compact={false}
+          className="max-h-[calc(min(72vh,42rem)-4.5rem)] overflow-y-auto"
+        />
       </DropdownMenuContent>
     </DropdownMenu>
   );

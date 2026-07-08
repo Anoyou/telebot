@@ -16,6 +16,7 @@ import type {
   PullUpdateResult,
   UpdateJobStatus,
 } from "@/api/types";
+import { APP_VERSION_LABEL } from "@/lib/version";
 
 type UpdateActionRequired =
   | "none"
@@ -307,7 +308,7 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-md">
+      <DialogContent className="siri-glow-soft max-w-md border-primary/45 shadow-2xl shadow-primary/10 ring-1 ring-primary/35">
         <DialogHeader>
           <DialogTitle>检查更新</DialogTitle>
           <DialogDescription>
@@ -326,6 +327,11 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
 
         {/* 内容区 */}
         <div className="min-h-[80px]">
+          <div className="mb-3 flex items-center justify-between gap-3 rounded-md border border-primary/20 bg-primary/5 px-3 py-2 text-xs">
+            <span className="text-muted-foreground">当前应用版本</span>
+            <code className="rounded bg-background px-2 py-1 font-mono text-foreground">{APP_VERSION_LABEL}</code>
+          </div>
+
           {step?.kind === "checking" && (
             <div className="flex items-center gap-3 text-muted-foreground">
               <Loader2 className="h-5 w-5 animate-spin" />

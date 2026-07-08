@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 
 import pytest
 
-from app.api.llm_usage import list_plugin_llm_usage_summary
+from app.api.llm_usage import list_plugin_llm_usage_summary, reset_recent_llm_usage
 
 
 @dataclass
@@ -44,6 +44,20 @@ class _DB:
         )
 
 
+class _DeleteResult:
+    rowcount = 7
+
+
+class _DeleteDB:
+    committed = False
+
+    async def execute(self, _stmt):
+        return _DeleteResult()
+
+    async def commit(self) -> None:
+        self.committed = True
+
+
 @pytest.mark.asyncio
 async def test_list_plugin_llm_usage_summary_shapes_rows() -> None:
     resp = await list_plugin_llm_usage_summary(_DB(), object(), plugin_key=None, limit=50)
@@ -57,3 +71,13 @@ async def test_list_plugin_llm_usage_summary_shapes_rows() -> None:
     assert item.failed_count == 1
     assert item.total_tokens == 15
     assert item.avg_latency_ms == 12
+
+
+@pytest.mark.asyncio
+async def test_reset_recent_llm_usage_deletes_rows_and_commits() -> None:
+    db = _DeleteDB()
+
+    resp = await reset_recent_llm_usage(db, object())
+
+    assert resp.deleted == 7
+    assert db.committed is True

@@ -448,15 +448,19 @@ function signatureTone(value?: boolean | null): "neutral" | "success" | "warn" |
   return "outline";
 }
 
+function hasActiveOverviewAccountError(account: InstalledPluginOverviewAccountItem) {
+  if (!account.enabled) return false;
+  return (
+    Boolean(account.last_error)
+    || Boolean(account.last_load_error)
+    || ["error", "failed"].includes((account.state || "").toLowerCase())
+    || (account.load_status || "").toLowerCase() === "failed"
+  );
+}
+
 function summarizeOverviewAccounts(accounts: InstalledPluginOverviewAccountItem[]) {
   const enabled = accounts.filter((account) => account.enabled).length;
-  const errors = accounts.filter(
-    (account) =>
-      Boolean(account.last_error)
-      || Boolean(account.last_load_error)
-      || ["error", "failed"].includes((account.state || "").toLowerCase())
-      || (account.load_status || "").toLowerCase() === "failed",
-  ).length;
+  const errors = accounts.filter(hasActiveOverviewAccountError).length;
   return { enabled, errors, total: accounts.length };
 }
 
@@ -608,8 +612,8 @@ export function Extensions() {
   return (
     <div className="space-y-6">
       <div className="space-y-3">
-        <Button variant="ghost" size="sm" onClick={() => goBackOr(nav, "/plugins")}>
-          <ArrowLeft className="mr-1 h-4 w-4" /> 返回上一页
+        <Button variant="default" size="sm" className="gap-1.5 shadow-sm" onClick={() => goBackOr(nav, "/plugins")}>
+          <ArrowLeft className="h-4 w-4" /> 返回上一页
         </Button>
         <Card>
           <CardHeader>
@@ -720,19 +724,35 @@ function PluginsManagementTab() {
   return (
     <div className="space-y-6">
       <RemoteUpdateSettingsCard />
-      <ZipUploadCard />
+      <LocalPluginImportCard />
       <OfficialPluginsCard />
-      <LocalImportCard />
       <RemoteInstallCard />
       <InstalledPluginsSection />
     </div>
   );
 }
 
-function ZipUploadCard() {
+function LocalPluginImportCard() {
   const qc = useQueryClient();
+  const localQ = useQuery({ queryKey: ["local-plugins"], queryFn: fetchLocalPlugins });
   const [zipFile, setZipFile] = useState<File | null>(null);
   const [signatureFile, setSignatureFile] = useState<File | null>(null);
+  const localPlugins = localQ.data ?? [];
+
+  const installLocalMut = useMutation({
+    mutationFn: (name: string) => installLocalPlugin(name),
+    onSuccess: (row) => {
+      toast.success(`已导入本地插件 ${row.name} v${row.version}`);
+      toastPluginLintWarnings(row);
+      qc.invalidateQueries({ queryKey: REMOTE_QK });
+      qc.invalidateQueries({ queryKey: PLUGINS_QK });
+      qc.invalidateQueries({ queryKey: INSTALLED_OVERVIEW_QK });
+      qc.invalidateQueries({ queryKey: ["matrix"] });
+      qc.invalidateQueries({ queryKey: ["local-plugins"] });
+    },
+    onError: (err) => toast.error(getErrMsg(err)),
+  });
+
   const uploadMut = useMutation({
     mutationFn: () => {
       if (!zipFile) throw new Error("请选择插件 zip 文件");
@@ -756,43 +776,100 @@ function ZipUploadCard() {
       <CardHeader className="pb-3">
         <SectionHeader
           icon={Upload}
-          title="ZIP 上传安装"
-          description="上传已签名的插件 zip 包；安装成功后会进入下方已安装插件列表。"
+          title="本地导入与 ZIP 上传"
+          description="目录导入用于本地调试，ZIP 上传用于安装已打包签名的插件；两种方式安装后都会进入下方已安装列表。"
         />
       </CardHeader>
-      <CardContent className="grid gap-3 lg:grid-cols-[minmax(220px,1fr)_minmax(220px,1fr)_auto] lg:items-end">
-        <div className="space-y-1.5">
-          <Label>插件包</Label>
-          <Input
-            type="file"
-            accept=".zip,application/zip,application/x-zip-compressed"
-            onChange={(event) => setZipFile(event.target.files?.[0] ?? null)}
-            disabled={uploadMut.isPending}
-          />
-          <div className="min-h-5 truncate text-xs text-muted-foreground">
-            {zipFile ? zipFile.name : "请选择包含 manifest.py / plugin.py 的 zip"}
+      <CardContent className="grid gap-4 xl:grid-cols-2">
+        <section className="rounded-lg border border-border/70 bg-background/70 p-4">
+          <div className="mb-3 flex items-center gap-2">
+            <GitFork className="h-4 w-4 text-primary" />
+            <div>
+              <div className="text-sm font-semibold">本地目录导入</div>
+              <div className="text-xs text-muted-foreground">
+                把插件目录放到 <code>plugins/local_imports/</code> 后在这里导入。
+              </div>
+            </div>
           </div>
-        </div>
-        <div className="space-y-1.5">
-          <Label>签名文件</Label>
-          <Input
-            type="file"
-            onChange={(event) => setSignatureFile(event.target.files?.[0] ?? null)}
-            disabled={uploadMut.isPending}
-          />
-          <div className="min-h-5 truncate text-xs text-muted-foreground">
-            {signatureFile ? signatureFile.name : "当前后端要求签名校验通过才会安装"}
+          {localQ.isLoading ? (
+            <div className="flex h-16 items-center justify-center">
+              <Spinner className="text-primary" />
+            </div>
+          ) : localPlugins.length === 0 ? (
+            <p className="rounded-md border border-dashed px-3 py-4 text-sm text-muted-foreground">
+              还没发现可导入插件。目录内需包含 <code>plugin.json</code>。
+            </p>
+          ) : (
+            <div className="space-y-2">
+              {localPlugins.map((p) => (
+                <div key={p.name} className="flex items-center justify-between gap-3 rounded-md border px-3 py-2">
+                  <div className="min-w-0">
+                    <div className="truncate text-sm font-medium">{p.display_name || p.name}</div>
+                    <div className="truncate text-xs text-muted-foreground">{p.subdir || p.name} · v{p.version}</div>
+                  </div>
+                  <Button
+                    size="sm"
+                    disabled={installLocalMut.isPending || p.installed}
+                    onClick={() => installLocalMut.mutate(p.name)}
+                  >
+                    {installLocalMut.isPending ? (
+                      <Spinner className="mr-2 h-4 w-4" />
+                    ) : (
+                      <Download className="mr-2 h-4 w-4" />
+                    )}
+                    {p.installed ? "已导入" : "导入"}
+                  </Button>
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
+
+        <section className="rounded-lg border border-border/70 bg-background/70 p-4">
+          <div className="mb-3 flex items-center gap-2">
+            <Upload className="h-4 w-4 text-primary" />
+            <div>
+              <div className="text-sm font-semibold">ZIP 上传</div>
+              <div className="text-xs text-muted-foreground">适合从外部拿到的签名插件包。</div>
+            </div>
           </div>
-        </div>
-        <Button
-          type="button"
-          className="shrink-0"
-          disabled={!zipFile || uploadMut.isPending}
-          onClick={() => uploadMut.mutate()}
-        >
-          {uploadMut.isPending ? <Spinner className="mr-2 h-4 w-4" /> : <Upload className="mr-2 h-4 w-4" />}
-          上传安装
-        </Button>
+          <div className="grid gap-3 md:grid-cols-2">
+            <div className="space-y-1.5">
+              <Label>插件包</Label>
+              <Input
+                type="file"
+                accept=".zip,application/zip,application/x-zip-compressed"
+                onChange={(event) => setZipFile(event.target.files?.[0] ?? null)}
+                disabled={uploadMut.isPending}
+              />
+              <div className="min-h-5 truncate text-xs text-muted-foreground">
+                {zipFile ? zipFile.name : "请选择包含 manifest.py / plugin.py 的 zip"}
+              </div>
+            </div>
+            <div className="space-y-1.5">
+              <Label>签名文件</Label>
+              <Input
+                type="file"
+                onChange={(event) => setSignatureFile(event.target.files?.[0] ?? null)}
+                disabled={uploadMut.isPending}
+              />
+              <div className="min-h-5 truncate text-xs text-muted-foreground">
+                {signatureFile ? signatureFile.name : "当前后端要求签名校验通过才会安装"}
+              </div>
+            </div>
+          </div>
+          <div className="mt-3 flex justify-end">
+            <Button
+              type="button"
+              className="shrink-0"
+              disabled={!zipFile || uploadMut.isPending}
+              onClick={() => uploadMut.mutate()}
+            >
+              {uploadMut.isPending ? <Spinner className="mr-2 h-4 w-4" /> : <Upload className="mr-2 h-4 w-4" />}
+              上传安装
+            </Button>
+          </div>
+        </section>
       </CardContent>
     </Card>
   );
@@ -1002,70 +1079,6 @@ function OfficialPluginsCard() {
         )}
       </CardContent>
       ) : null}
-    </Card>
-  );
-}
-
-function LocalImportCard() {
-  const qc = useQueryClient();
-  const localQ = useQuery({ queryKey: ["local-plugins"], queryFn: fetchLocalPlugins });
-  const installLocalMut = useMutation({
-    mutationFn: (name: string) => installLocalPlugin(name),
-    onSuccess: (row) => {
-      toast.success(`已导入本地插件 ${row.name} v${row.version}`);
-      toastPluginLintWarnings(row);
-      qc.invalidateQueries({ queryKey: REMOTE_QK });
-      qc.invalidateQueries({ queryKey: PLUGINS_QK });
-      qc.invalidateQueries({ queryKey: INSTALLED_OVERVIEW_QK });
-      qc.invalidateQueries({ queryKey: ["matrix"] });
-      qc.invalidateQueries({ queryKey: ["local-plugins"] });
-    },
-    onError: (err) => toast.error(getErrMsg(err)),
-  });
-
-  return (
-    <Card>
-      <CardHeader className="pb-3">
-        <SectionHeader
-          icon={GitFork}
-          title="本地导入"
-          description={<>把按开发文档编写好的插件目录放到 <code>plugins/local_imports/</code>，然后在这里一键导入用于本地调试。</>}
-        />
-      </CardHeader>
-      <CardContent>
-        {localQ.isLoading ? (
-          <div className="flex h-16 items-center justify-center">
-            <Spinner className="text-primary" />
-          </div>
-        ) : (localQ.data ?? []).length === 0 ? (
-          <p className="text-sm text-muted-foreground">
-            还没发现可导入插件。请先把插件目录放入 <code>plugins/local_imports/</code>（目录内需包含 <code>plugin.json</code>）。
-          </p>
-        ) : (
-          <div className="space-y-2">
-            {(localQ.data ?? []).map((p) => (
-              <div key={p.name} className="flex items-center justify-between gap-3 rounded-md border px-3 py-2">
-                <div className="min-w-0">
-                  <div className="truncate text-sm font-medium">{p.display_name || p.name}</div>
-                  <div className="truncate text-xs text-muted-foreground">{p.subdir || p.name} · v{p.version}</div>
-                </div>
-                <Button
-                  size="sm"
-                  disabled={installLocalMut.isPending || p.installed}
-                  onClick={() => installLocalMut.mutate(p.name)}
-                >
-                  {installLocalMut.isPending ? (
-                    <Spinner className="mr-2 h-4 w-4" />
-                  ) : (
-                    <Download className="mr-2 h-4 w-4" />
-                  )}
-                  {p.installed ? "已导入" : "导入"}
-                </Button>
-              </div>
-            ))}
-          </div>
-        )}
-      </CardContent>
     </Card>
   );
 }
@@ -2043,8 +2056,8 @@ function InstalledOverviewAccountToggleRow({
                 <div className="truncate text-sm font-medium">{account.account_name || `账号 ${account.account_id}`}</div>
                 <div className="text-xs text-muted-foreground">
                   <span className="font-mono">#{account.account_id}</span>
-                  <span> · {accountStateLabel(account.state)}</span>
-                  {account.last_error ? (
+                  <span> · {account.enabled ? accountStateLabel(account.state) : "已关闭"}</span>
+                  {account.enabled && account.last_error ? (
                     <span className="line-clamp-1 break-all text-destructive"> · {account.last_error}</span>
                   ) : null}
                 </div>
@@ -2245,6 +2258,8 @@ function InstalledOverviewAccountCard({
   account: InstalledPluginOverviewAccountItem;
   onOpenTrace: (traceId: string) => void;
 }) {
+  const hasCurrentError = hasActiveOverviewAccountError(account);
+
   return (
     <div className="rounded-md border border-border/70 bg-muted/10 px-3 py-3">
       <div className="flex flex-wrap items-center gap-2">
@@ -2255,21 +2270,31 @@ function InstalledOverviewAccountCard({
         <MetaBadge tone={account.enabled ? "success" : "outline"}>
           {account.enabled ? "已启用" : "未启用"}
         </MetaBadge>
-        <MetaBadge tone={accountStateTone(account.state)}>{accountStateLabel(account.state)}</MetaBadge>
-        <MetaBadge tone={loadStatusTone(account.load_status)}>{loadStatusLabel(account.load_status)}</MetaBadge>
+        {account.enabled ? (
+          <>
+            <MetaBadge tone={accountStateTone(account.state)}>{accountStateLabel(account.state)}</MetaBadge>
+            <MetaBadge tone={loadStatusTone(account.load_status)}>{loadStatusLabel(account.load_status)}</MetaBadge>
+          </>
+        ) : null}
       </div>
 
-      {account.last_error ? (
+      {account.enabled && account.last_error ? (
         <div className="mt-3">
           <div className="text-[11px] font-medium text-destructive">账号错误</div>
           <div className="mt-1 line-clamp-3 break-all text-xs text-destructive">{account.last_error}</div>
         </div>
       ) : null}
 
-      {account.last_load_error ? (
+      {account.enabled && account.last_load_error ? (
         <div className="mt-3">
           <div className="text-[11px] font-medium text-muted-foreground">最近 load error</div>
           <div className="mt-1 line-clamp-3 break-all text-xs text-muted-foreground">{account.last_load_error}</div>
+        </div>
+      ) : null}
+
+      {!account.enabled && (account.last_error || account.last_load_error || hasCurrentError) ? (
+        <div className="mt-3 rounded-md border border-border/70 bg-background px-3 py-2 text-xs text-muted-foreground">
+          该账号已关闭此插件，历史错误不计入当前异常。
         </div>
       ) : null}
 

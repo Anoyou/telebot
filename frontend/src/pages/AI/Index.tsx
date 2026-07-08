@@ -1,5 +1,5 @@
 import { type ReactNode, useEffect, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import {
   ArrowRight,
@@ -15,13 +15,16 @@ import {
   Power,
   PlusCircle,
   Sparkles,
+  Trash2,
 } from "lucide-react";
+import { toast } from "sonner";
 
 import { getAICommandEnablementSummary, listCommandTemplates, listLLMProviders } from "@/api/commands";
 import { listAccounts } from "@/api/accounts";
-import { listRecentLLMUsage } from "@/api/llmUsage";
+import { listRecentLLMUsage, resetRecentLLMUsage } from "@/api/llmUsage";
 import { getSystemSettings } from "@/api/system";
 import type { AccountSummary, CommandTemplateOut, LLMProviderOut } from "@/api/types";
+import { getErrMsg } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -70,6 +73,7 @@ function commandModeLabel(template: CommandTemplateOut) {
 export function AIIndex() {
   const [searchParams, setSearchParams] = useSearchParams();
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const [accountPickerOpen, setAccountPickerOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(searchParams.get("help") === "1");
   const [quickStartOpen, setQuickStartOpen] = useState(false);
@@ -107,6 +111,20 @@ export function AIIndex() {
     enabled: false,
     retry: false,
   });
+  const resetUsageMut = useMutation({
+    mutationFn: resetRecentLLMUsage,
+    onSuccess: (res) => {
+      toast.success(res.deleted > 0 ? `已清空 ${res.deleted} 条 AI 调用记录` : "AI 调用记录已是空的");
+      void queryClient.invalidateQueries({ queryKey: ["llm-usage"] });
+      void queryClient.invalidateQueries({ queryKey: ["llm", "plugin-usage-summary"] });
+    },
+    onError: (err) => toast.error(getErrMsg(err)),
+  });
+
+  const handleResetUsage = () => {
+    if (!window.confirm("确认清空 AI 调用记录？近期调用情况、成功率和插件 AI 用量统计都会从零开始。")) return;
+    resetUsageMut.mutate();
+  };
 
   useEffect(() => {
     setHelpOpen(searchParams.get("help") === "1");
@@ -226,6 +244,19 @@ export function AIIndex() {
         onHelpOpenChange={setHelpMenuOpen}
         cmdPrefix={cmdPrefix}
       />
+      <div className="flex justify-end">
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          className="border-destructive/40 text-destructive hover:bg-destructive/10 hover:text-destructive"
+          disabled={resetUsageMut.isPending || !usageSummary || usageSummary.request_count === 0}
+          onClick={handleResetUsage}
+        >
+          <Trash2 className="mr-1 h-4 w-4" />
+          清空调用统计
+        </Button>
+      </div>
       <div className="grid grid-cols-2 gap-3 xl:grid-cols-4">
         <ToneRailCard
           icon={Package}

@@ -1,10 +1,10 @@
 import { Fragment, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
-import { ArrowRight, ChevronDown, Copy, History } from "lucide-react";
+import { ArrowRight, ChevronDown, Copy, History, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
-import { listRecentLLMUsage } from "@/api/llmUsage";
+import { listRecentLLMUsage, resetRecentLLMUsage } from "@/api/llmUsage";
 import type { LLMUsageRecord } from "@/api/llmUsage";
 import { listLLMProviders } from "@/api/commands";
 import { getErrMsg } from "@/lib/api";
@@ -17,6 +17,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 
 export function RecentUsageContent() {
+  const queryClient = useQueryClient();
   const [expandedId, setExpandedId] = useState<number | null>(null);
   const providersQ = useQuery({
     queryKey: ["llm-providers"],
@@ -31,6 +32,21 @@ export function RecentUsageContent() {
     retry: false,
     enabled: hasProviders,
   });
+  const resetUsageMut = useMutation({
+    mutationFn: resetRecentLLMUsage,
+    onSuccess: (res) => {
+      setExpandedId(null);
+      toast.success(res.deleted > 0 ? `已清空 ${res.deleted} 条 AI 调用记录` : "AI 调用记录已是空的");
+      void queryClient.invalidateQueries({ queryKey: ["llm-usage"] });
+      void queryClient.invalidateQueries({ queryKey: ["llm", "plugin-usage-summary"] });
+    },
+    onError: (err) => toast.error(getErrMsg(err)),
+  });
+
+  const handleResetUsage = () => {
+    if (!window.confirm("确认清空 AI 调用记录？近期调用列表、成功率和插件 AI 用量统计都会从零开始。")) return;
+    resetUsageMut.mutate();
+  };
 
   if (providersQ.isLoading || (hasProviders && usageQ.isLoading)) {
     return (
@@ -98,6 +114,19 @@ export function RecentUsageContent() {
           icon={History}
           title="近期调用"
           description="展示最近 100 条 LLM 调用记录与核心摘要。"
+          actions={(
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              className="border-destructive/40 text-destructive hover:bg-destructive/10 hover:text-destructive"
+              disabled={resetUsageMut.isPending || rows.length === 0}
+              onClick={handleResetUsage}
+            >
+              <Trash2 className="mr-1 h-4 w-4" />
+              清空记录
+            </Button>
+          )}
         />
       </CardHeader>
       <CardContent className="space-y-4">

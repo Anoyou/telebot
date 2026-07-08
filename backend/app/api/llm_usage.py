@@ -6,7 +6,7 @@ from datetime import datetime
 
 from fastapi import APIRouter, Query
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import case, func, select
+from sqlalchemy import case, delete, func, select
 
 from ..db.models.llm_usage import LLMUsage
 from ..deps import CurrentUser, DBSession
@@ -96,6 +96,12 @@ class PluginLLMUsageSummaryResponse(BaseModel):
     items: list[PluginLLMUsageSummaryItem]
 
 
+class LLMUsageResetResponse(BaseModel):
+    """清空 LLM 调用记录后的结果。"""
+
+    deleted: int
+
+
 @router.get("/recent", response_model=LLMUsageRecentResponse)
 async def list_recent_llm_usage(
     db: DBSession,
@@ -130,6 +136,18 @@ async def list_recent_llm_usage(
             avg_latency_ms=avg_latency_ms,
         ),
     )
+
+
+@router.delete("/recent", response_model=LLMUsageResetResponse)
+async def reset_recent_llm_usage(
+    db: DBSession,
+    _user: CurrentUser,
+) -> LLMUsageResetResponse:
+    """清空 LLM 调用记录，让 AI 中心的近期统计从零开始。"""
+
+    result = await db.execute(delete(LLMUsage))
+    await db.commit()
+    return LLMUsageResetResponse(deleted=max(0, int(result.rowcount or 0)))
 
 
 @router.get("/plugins/summary", response_model=PluginLLMUsageSummaryResponse)

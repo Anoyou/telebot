@@ -49,6 +49,10 @@ export interface PluginLLMUsageSummaryResponse {
   items: PluginLLMUsageSummaryItem[];
 }
 
+export interface LLMUsageResetResponse {
+  deleted: number;
+}
+
 function buildSummaryFromItems(items: LLMUsageRecord[]): LLMUsageSummary {
   const requestCount = items.length;
   const successCount = items.filter((r) => r.success).length;
@@ -94,5 +98,10 @@ export async function listPluginLLMUsageSummary(params?: {
   const { data } = await api.get<PluginLLMUsageSummaryResponse>("/api/llm/usage/plugins/summary", {
     params,
   });
+  return data;
+}
+
+export async function resetRecentLLMUsage(): Promise<LLMUsageResetResponse> {
+  const { data } = await api.delete<LLMUsageResetResponse>("/api/llm/usage/recent");
   return data;
 }

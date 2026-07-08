@@ -515,11 +515,12 @@ export function ChatGPTImageConfigPage() {
       <div className="flex flex-wrap items-center gap-3">
         <div className="flex items-center gap-3">
           <Button
-            variant="ghost"
+            variant="default"
             size="sm"
+            className="gap-1.5 shadow-sm"
             onClick={() => nav(backTarget.backHref)}
           >
-            <ArrowLeft className="mr-1 h-4 w-4" /> {backTarget.backLabel}
+            <ArrowLeft className="h-4 w-4" /> {backTarget.backLabel}
           </Button>
           <div>
             <h1 className="text-2xl font-semibold tracking-tight">ChatGPT2API</h1>

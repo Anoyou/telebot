@@ -316,11 +316,12 @@ export function CodexImageConfigPage() {
     <div className="space-y-6 pb-24">
       <div className="flex flex-wrap items-center gap-3">
         <Button
-          variant="ghost"
+          variant="default"
           size="sm"
+          className="gap-1.5 shadow-sm"
           onClick={() => nav(backTarget.backHref)}
         >
-          <ArrowLeft className="mr-1 h-4 w-4" /> {backTarget.backLabel}
+          <ArrowLeft className="h-4 w-4" /> {backTarget.backLabel}
         </Button>
         <h1 className="text-2xl font-semibold tracking-tight">
           Codex 图片生成
