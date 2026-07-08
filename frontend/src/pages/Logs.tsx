@@ -80,6 +80,47 @@ const STAGE_LABELS: Record<"received" | "routed" | "ran" | "sent", string> = {
   sent: "发送",
 };
 
+const MESSAGE_SOURCE_OPTIONS = [
+  { value: "userbot", label: "UserBot 账号" },
+  { value: "interaction_bot", label: "交互 Bot" },
+  { value: "account_bot", label: "管理 Bot" },
+  { value: "external_payment_notice", label: "收款通知" },
+];
+
+const EVENT_TYPE_OPTIONS = [
+  { value: "message", label: "普通消息" },
+  { value: "command", label: "命令消息" },
+  { value: "callback_query", label: "按钮点击" },
+  { value: "inline_query", label: "Inline 查询" },
+  { value: "chosen_inline_result", label: "Inline 选择结果" },
+  { value: "payment_confirmed", label: "收款确认" },
+  { value: "session_close", label: "会话关闭" },
+  { value: "session_expired", label: "会话过期" },
+  { value: "message_edited", label: "编辑消息" },
+  { value: "keyword", label: "关键词触发" },
+];
+
+const TRACE_STATUS_OPTIONS = [
+  { value: "ok", label: "完成" },
+  { value: "running", label: "处理中" },
+  { value: "skipped", label: "已跳过" },
+  { value: "warning", label: "告警" },
+  { value: "failed", label: "失败" },
+];
+
+const RUNTIME_LEVEL_OPTIONS = [
+  { value: "debug", label: "调试" },
+  { value: "info", label: "信息" },
+  { value: "warn", label: "告警" },
+  { value: "error", label: "错误" },
+];
+
+const RUNTIME_SOURCE_OPTIONS = [
+  { value: "system", label: "系统/Worker" },
+  { value: "event", label: "事件链路" },
+  { value: "plugin", label: "插件" },
+];
+
 export function Logs() {
   const [searchParams] = useSearchParams();
   const initialTraceId = searchParams.get("trace_id") || "";
@@ -164,7 +205,7 @@ export function Logs() {
   const activeTitle = view === "messages" ? "日志 · 消息流" : "日志 · 控制台日志";
   const activeDescription = view === "messages"
     ? "按消息追踪收到、路由、执行、发送四段状态，直接定位卡点、失败和正常跳过。"
-    : "查看更原始的系统、事件和插件运行日志，包含 debug、detail JSON 与后台上下文。";
+    : "查看更原始的系统、事件和插件运行日志，包含调试等级、完整详情 JSON 与后台上下文。";
 
   return (
     <PageShell>
@@ -254,35 +295,28 @@ export function Logs() {
               <Field label="来源">
                 <Select value={sourceChannel} onChange={(event) => setSourceChannel(event.target.value)}>
                   <option value="">全部来源</option>
-                  <option value="userbot">userbot</option>
-                  <option value="interaction_bot">interaction_bot</option>
-                  <option value="account_bot">account_bot</option>
-                  <option value="external_payment_notice">external_payment_notice</option>
+                  {MESSAGE_SOURCE_OPTIONS.map((item) => (
+                    <option key={item.value} value={item.value}>{item.label}</option>
+                  ))}
                 </Select>
               </Field>
               <Field label="事件类型">
                 <Select value={eventType} onChange={(event) => setEventType(event.target.value)}>
                   <option value="">全部事件</option>
-                  <option value="message">message</option>
-                  <option value="command">command</option>
-                  <option value="callback_query">callback_query</option>
-                  <option value="inline_query">inline_query</option>
-                  <option value="chosen_inline_result">chosen_inline_result</option>
-                  <option value="payment_confirmed">payment_confirmed</option>
-                  <option value="session_close">session_close</option>
+                  {EVENT_TYPE_OPTIONS.map((item) => (
+                    <option key={item.value} value={item.value}>{item.label}</option>
+                  ))}
                 </Select>
               </Field>
-              <Field label="Trace 状态">
+              <Field label="链路状态">
                 <Select value={status} onChange={(event) => setStatus(event.target.value)}>
                   <option value="">全部状态</option>
-                  <option value="ok">ok</option>
-                  <option value="running">running</option>
-                  <option value="skipped">skipped</option>
-                  <option value="warning">warning</option>
-                  <option value="failed">failed</option>
+                  {TRACE_STATUS_OPTIONS.map((item) => (
+                    <option key={item.value} value={item.value}>{item.label}</option>
+                  ))}
                 </Select>
               </Field>
-              <Field label="Trace ID">
+              <Field label="链路 ID">
                 <Input
                   value={traceId}
                   onChange={(event) => {
@@ -294,16 +328,16 @@ export function Logs() {
                 />
               </Field>
               <Field label="原因代码">
-                <Input value={reasonCode} onChange={(event) => setReasonCode(event.target.value.trim())} placeholder="subscription_not_matched" />
+                <Input value={reasonCode} onChange={(event) => setReasonCode(event.target.value.trim())} placeholder="例如 subscription_not_matched" />
               </Field>
-              <Field label="Chat ID">
+              <Field label="会话 ID">
                 <Input value={chatId} onChange={(event) => setChatId(event.target.value)} placeholder="-100..." />
               </Field>
-              <Field label="Message ID">
+              <Field label="消息 ID">
                 <Input value={messageId} onChange={(event) => setMessageId(event.target.value)} placeholder="消息 ID" />
               </Field>
               <Field label="用户 ID">
-                <Input value={senderUserId} onChange={(event) => setSenderUserId(event.target.value)} placeholder="sender user id" />
+                <Input value={senderUserId} onChange={(event) => setSenderUserId(event.target.value)} placeholder="发送者用户 ID" />
               </Field>
               <Field label="自动刷新">
                 <div className="flex h-10 items-center gap-2">
@@ -345,18 +379,17 @@ export function Logs() {
               <Field label="等级">
                 <Select value={runtimeLevel} onChange={(event) => setRuntimeLevel(parseRuntimeLevel(event.target.value))}>
                   <option value="">全部等级</option>
-                  <option value="debug">debug</option>
-                  <option value="info">info</option>
-                  <option value="warn">warn</option>
-                  <option value="error">error</option>
+                  {RUNTIME_LEVEL_OPTIONS.map((item) => (
+                    <option key={item.value} value={item.value}>{item.label}</option>
+                  ))}
                 </Select>
               </Field>
               <Field label="来源">
                 <Select value={runtimeSource} onChange={(event) => setRuntimeSource(parseRuntimeSource(event.target.value))}>
                   <option value="">全部来源</option>
-                  <option value="system">系统/Worker</option>
-                  <option value="event">事件链路</option>
-                  <option value="plugin">插件</option>
+                  {RUNTIME_SOURCE_OPTIONS.map((item) => (
+                    <option key={item.value} value={item.value}>{item.label}</option>
+                  ))}
                 </Select>
               </Field>
               <Field label="搜索">
@@ -599,12 +632,12 @@ function ConsoleLogStream({
         <SectionHeader
           icon={Terminal}
           title="控制台日志"
-          description="更接近后台控制台的原始运行记录，点开单行可查看完整 detail。"
+          description="更接近后台控制台的原始运行记录，点开单行可查看完整详情 JSON。"
           meta={(
             <div className="flex flex-wrap gap-1.5">
-              <SignalPill tone="neutral" label="debug" value={String(stats.debug)} />
-              <SignalPill tone={stats.warn ? "warn" : "neutral"} label="warn" value={String(stats.warn)} />
-              <SignalPill tone={stats.error ? "warn" : "neutral"} label="error" value={String(stats.error)} />
+              <SignalPill tone="neutral" label="调试" value={String(stats.debug)} />
+              <SignalPill tone={stats.warn ? "warn" : "neutral"} label="告警" value={String(stats.warn)} />
+              <SignalPill tone={stats.error ? "warn" : "neutral"} label="错误" value={String(stats.error)} />
             </div>
           )}
         />
@@ -616,13 +649,13 @@ function ConsoleLogStream({
           <ErrorHint text="控制台日志加载失败" error={error} />
         ) : logs.length ? (
           <div className="overflow-hidden rounded-lg border border-zinc-800 bg-zinc-950 text-zinc-100 shadow-inner">
-            <div className="hidden grid-cols-[170px_74px_96px_120px_minmax(0,1fr)_92px] gap-3 border-b border-white/10 px-3 py-2 font-mono text-[11px] uppercase tracking-wide text-zinc-400 xl:grid">
-              <span>time</span>
-              <span>level</span>
-              <span>source</span>
-              <span>account</span>
-              <span>message</span>
-              <span className="text-right">detail</span>
+            <div className="hidden grid-cols-[170px_74px_96px_120px_minmax(0,1fr)_92px] gap-3 border-b border-white/10 px-3 py-2 text-[11px] font-medium tracking-wide text-zinc-400 xl:grid">
+              <span>时间</span>
+              <span>等级</span>
+              <span>来源</span>
+              <span>账号</span>
+              <span>内容</span>
+              <span className="text-right">详情</span>
             </div>
             <div className="divide-y divide-white/10">
               {logs.map((log) => (
@@ -660,20 +693,20 @@ function ConsoleLogRow({ log, timezone, keyword }: { log: RuntimeLogItem; timezo
           <div className="hidden xl:block">
             <RuntimeLevelBadge level={log.level} />
           </div>
-          <div className="min-w-0 font-mono text-xs text-zinc-300">{log.source || "runtime"}</div>
+          <div className="min-w-0 text-xs text-zinc-300">{runtimeSourceLabel(log.source)}</div>
           <div className="min-w-0 font-mono text-xs text-zinc-400">{log.account_id == null ? "-" : `#${log.account_id}`}</div>
           <div className="min-w-0">
             <p className="break-words font-mono text-xs leading-5 text-zinc-100">
               <HighlightedMessage text={log.message || "-"} keyword={keyword} />
             </p>
             <div className="mt-1 flex flex-wrap gap-1.5">
-              {pluginKey ? <span className="rounded border border-white/10 px-1.5 py-0.5 font-mono text-[11px] text-zinc-400">plugin {pluginKey}</span> : null}
+              {pluginKey ? <span className="rounded border border-white/10 px-1.5 py-0.5 font-mono text-[11px] text-zinc-400">插件 {pluginKey}</span> : null}
               {traceId ? <span className="rounded border border-white/10 px-1.5 py-0.5 font-mono text-[11px] text-zinc-400">{traceId}</span> : null}
               {errorCode ? <span className="rounded border border-amber-400/30 px-1.5 py-0.5 font-mono text-[11px] text-amber-200">{errorCode}</span> : null}
             </div>
           </div>
           <div className="flex items-center justify-between gap-2 xl:justify-end">
-            <span className="text-[11px] text-zinc-500 xl:hidden">{detailText ? "detail 可展开" : "无 detail"}</span>
+            <span className="text-[11px] text-zinc-500 xl:hidden">{detailText ? "详情可展开" : "无详情"}</span>
             <div className="flex items-center gap-1.5">
               <Button
                 type="button"
@@ -689,7 +722,7 @@ function ConsoleLogRow({ log, timezone, keyword }: { log: RuntimeLogItem; timezo
                 <Copy className="h-4 w-4" />
               </Button>
               <Badge variant="outline" className="border-white/15 text-zinc-200">
-                {detailText ? (expanded ? "收起" : "展开") : "plain"}
+                {detailText ? (expanded ? "收起" : "展开") : "纯文本"}
               </Badge>
             </div>
           </div>
@@ -711,7 +744,7 @@ function RuntimeLevelBadge({ level, className }: { level?: string | null; classN
   const variant = normalized === "error" ? "destructive" : normalized === "warn" ? "warn" : normalized === "debug" ? "secondary" : "success";
   return (
     <Badge variant={variant} className={cn("font-mono", className)}>
-      {level || "info"}
+      {runtimeLevelLabel(level)}
     </Badge>
   );
 }
@@ -738,7 +771,7 @@ function MessageRow({
   onSelect: () => void;
 }) {
   const meta = verdictMeta(message.verdict);
-  const messageText = message.text_preview || message.inline_query || message.chosen_inline_query || message.event_type;
+  const messageText = message.text_preview || message.inline_query || message.chosen_inline_query || eventTypeLabel(message.event_type);
   const pluginText = pluginKeysLabel(message.plugin_keys, message.plugin_count);
   const detailLabel = selected ? "收起详情" : "查看详情";
   return (
@@ -753,7 +786,7 @@ function MessageRow({
           <div className="min-w-0">
             <div className="flex min-w-0 flex-wrap items-center gap-1.5">
               <Badge variant="secondary">{channelLabel(message.source_channel)}</Badge>
-              <Badge variant="outline">{message.event_type}</Badge>
+              <Badge variant="outline">{eventTypeLabel(message.event_type)}</Badge>
               {message.account_id ? <span className="text-xs text-muted-foreground">账号 #{message.account_id}</span> : null}
             </div>
             <div className="mt-1 truncate text-sm font-medium">{conversationLabel(message)}</div>
@@ -765,8 +798,8 @@ function MessageRow({
             </p>
             <div className="mt-1 flex flex-wrap gap-2 text-xs text-muted-foreground">
               {message.sender_name ? <span>{message.sender_name}</span> : null}
-              {message.sender_user_id ? <span>user {message.sender_user_id}</span> : null}
-              {message.message_id ? <span>msg {message.message_id}</span> : null}
+              {message.sender_user_id ? <span>用户 {message.sender_user_id}</span> : null}
+              {message.message_id ? <span>消息 {message.message_id}</span> : null}
               {pluginText ? <span>插件 {pluginText}</span> : null}
               {message.action_count ? <span>动作 {message.action_count}</span> : null}
             </div>
@@ -867,7 +900,7 @@ function TraceDetailPanel({
               <span className="break-all font-mono text-xs text-muted-foreground">{detail.trace_id}</span>
             </div>
             <p className="mt-2 text-sm font-medium">{message?.reason_text || "后端消息流未返回本条判定"}</p>
-            <p className="mt-1 text-xs leading-5 text-muted-foreground">{message?.next_step || "请从消息流列表进入详情，或用 Trace ID 重新筛选。"}</p>
+            <p className="mt-1 text-xs leading-5 text-muted-foreground">{message?.next_step || "请从消息流列表进入详情，或用链路 ID 重新筛选。"}</p>
           </div>
           <div className="shrink-0 text-xs text-muted-foreground">{formatDateTime(detail.started_at, timezone)}</div>
         </div>
@@ -880,15 +913,15 @@ function TraceDetailPanel({
         <summary className="cursor-pointer text-sm font-medium">插件开发详情</summary>
         <div className="mt-3 space-y-3">
           <p className="rounded-md bg-muted px-3 py-2 text-xs leading-5 text-muted-foreground">
-            这里是给插件开发和深度排障看的原始材料：触发入口建议、动作建议、标准信封路径和 payload。日常排障优先看上面的摘要与关键时间线。
+            这里是给插件开发和深度排障看的原始材料：触发入口建议、动作建议、标准信封路径和原始 payload。日常排障优先看上面的摘要与关键时间线。
           </p>
           <InlineTraceSummary trace={detail} actions={detail.actions} />
           <NativeRawSummary meta={detail.native_raw_meta} />
           <ProbeReportPanel report={detail.probe_report} />
-          <JsonBlock title="native_raw_meta" value={detail.native_raw_meta} />
-          <JsonBlock title="raw_summary" value={detail.raw_summary} />
-          <JsonBlock title="payload_snapshot" value={detail.payload_snapshot} />
-          {detail.related_runtime_logs.length ? <JsonBlock title="related_runtime_logs" value={detail.related_runtime_logs} /> : null}
+          <JsonBlock title="原生数据设置 native_raw_meta" value={detail.native_raw_meta} />
+          <JsonBlock title="原始摘要 raw_summary" value={detail.raw_summary} />
+          <JsonBlock title="消息快照 payload_snapshot" value={detail.payload_snapshot} />
+          {detail.related_runtime_logs.length ? <JsonBlock title="关联控制台日志 related_runtime_logs" value={detail.related_runtime_logs} /> : null}
         </div>
       </details>
     </div>
@@ -912,10 +945,10 @@ function OperationalTraceSummary({ detail, message }: { detail: EventTraceDetail
         <InfoCell label="发送结果" value={sentText} />
       </div>
       <div className="mt-3 grid gap-2 text-xs sm:grid-cols-2 lg:grid-cols-4">
-        <InfoCell label="入口" value={`${channelLabel(detail.source_channel)} / ${detail.event_type}`} />
+        <InfoCell label="入口" value={`${channelLabel(detail.source_channel)} / ${eventTypeLabel(detail.event_type)}`} />
         <InfoCell label="消息 ID" value={detail.message_id ?? "-"} />
         <InfoCell label="耗时" value={detail.duration_ms == null ? "-" : `${detail.duration_ms}ms`} />
-        <InfoCell label="Trace" value={detail.trace_id} />
+        <InfoCell label="链路 ID" value={detail.trace_id} />
       </div>
     </section>
   );
@@ -1094,12 +1127,12 @@ function ProbeRoutingRow({ item }: { item: EventProbeRoutingItem }) {
     <div className={cn("rounded-lg border p-2", item.matched ? "border-emerald-200 bg-emerald-50/50 dark:bg-emerald-500/10" : "bg-muted/20")}>
       <div className="flex flex-wrap items-center gap-1.5">
         <StatusBadge status={item.matched ? "ok" : item.status || "skipped"} />
-        {item.phase ? <Badge variant="secondary">{item.phase}</Badge> : null}
+        {item.phase ? <Badge variant="secondary">{phaseLabel(item.phase)}</Badge> : null}
         {item.plugin_key ? <Badge variant="secondary">{item.plugin_key}</Badge> : null}
         {item.entry_key ? <Badge variant="secondary">{item.entry_key}</Badge> : null}
       </div>
       <div className="mt-1 text-xs text-muted-foreground">{item.reason_code || item.message || "路由阶段已记录"}</div>
-      {item.filters ? <div className="mt-1 break-all font-mono text-xs text-muted-foreground">filters={stringifyShort(item.filters)}</div> : null}
+      {item.filters ? <div className="mt-1 break-all font-mono text-xs text-muted-foreground">过滤条件={stringifyShort(item.filters)}</div> : null}
     </div>
   );
 }
@@ -1116,12 +1149,12 @@ function InlineTraceSummary({ trace, actions }: { trace: EventTraceSummary | Eve
   }
   return (
     <section className="rounded-lg border border-primary/20 bg-primary/5 p-3 text-xs">
-      <div className="mb-2 font-medium text-foreground">Inline 摘要</div>
+      <div className="mb-2 font-medium text-foreground">Inline 查询摘要</div>
       <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
-        <InfoCell label="inline_query" value={query || "-"} />
-        <InfoCell label="chosen_result" value={chosen || "-"} />
-        <InfoCell label="chosen_query" value={choiceQuery || "-"} />
-        <InfoCell label="answer 结果数" value={resultCount == null ? "-" : resultCount} />
+        <InfoCell label="查询内容" value={query || "-"} />
+        <InfoCell label="选择结果 ID" value={chosen || "-"} />
+        <InfoCell label="选择时查询" value={choiceQuery || "-"} />
+        <InfoCell label="回答结果数" value={resultCount == null ? "-" : resultCount} />
       </div>
       {failedAction ? (
         <div className="mt-2 rounded-md border border-destructive/30 bg-destructive/10 px-2 py-1.5 text-destructive">
@@ -1136,7 +1169,7 @@ function NativeRawSummary({ meta }: { meta?: EventTraceSummary["native_raw_meta"
   if (!meta) return null;
   return (
     <section className="rounded-lg border bg-background p-3 text-xs">
-      <div className="mb-2 font-medium text-foreground">native_raw_meta 摘要</div>
+      <div className="mb-2 font-medium text-foreground">原生数据摘要</div>
       <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
         <InfoCell label="声明状态" value={meta.enabled ? "已允许" : "未允许"} />
         <InfoCell label="驱动" value={meta.driver || meta.source || "-"} />
@@ -1167,7 +1200,7 @@ function PluginSelect({ value, onChange, options }: { value: string; onChange: (
           <option key={key} value={key}>{key}</option>
         ))}
       </Select>
-      <Input value={value} onChange={(event) => onChange(event.target.value.trim())} placeholder="远程插件 key" />
+      <Input value={value} onChange={(event) => onChange(event.target.value.trim())} placeholder="插件标识" />
     </div>
   );
 }
@@ -1176,7 +1209,7 @@ function SearchBox({ value, onChange }: { value: string; onChange: (value: strin
   return (
     <div className="relative">
       <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-      <Input className="pl-9" value={value} onChange={(event) => onChange(event.target.value)} placeholder="chat / 消息 / 发送者 / trace_id" />
+      <Input className="pl-9" value={value} onChange={(event) => onChange(event.target.value)} placeholder="会话 / 消息 / 发送者 / 链路 ID" />
     </div>
   );
 }
@@ -1190,7 +1223,7 @@ function StatusBadge({ status }: { status?: string | null }) {
       : value === "failed" || value === "error"
         ? "destructive"
         : "secondary";
-  return <Badge variant={variant}>{status || "unknown"}</Badge>;
+  return <Badge variant={variant}>{traceStatusLabel(status)}</Badge>;
 }
 
 function VerdictBadge({ verdict, className }: { verdict: MessageVerdict; className?: string }) {
@@ -1226,7 +1259,7 @@ function InfoCell({ label, value }: { label: string; value: unknown }) {
   return (
     <div className="rounded-md bg-muted px-2 py-1.5">
       <div className="text-[11px] text-muted-foreground">{label}</div>
-      <div className="break-all font-mono text-xs text-foreground">{String(value ?? "-")}</div>
+      <div className="break-all text-xs text-foreground">{String(value ?? "-")}</div>
     </div>
   );
 }
@@ -1461,12 +1494,12 @@ async function copyText(text: string, message: string) {
 function formatRuntimeLog(log: RuntimeLogItem, timezone?: string): string {
   const parts = [
     `[${formatRuntimeTime(log.created_at, timezone)}]`,
-    normalizeRuntimeLevel(log.level).toUpperCase(),
-    log.source || "runtime",
-    log.account_id == null ? "" : `account=#${log.account_id}`,
+    runtimeLevelLabel(log.level),
+    runtimeSourceLabel(log.source),
+    log.account_id == null ? "" : `账号=#${log.account_id}`,
     log.message || "",
   ].filter(Boolean);
-  const detail = log.detail ? ` detail=${safeJsonStringify(log.detail)}` : "";
+  const detail = log.detail ? ` 详情=${safeJsonStringify(log.detail)}` : "";
   return `${parts.join(" ")}${detail}`;
 }
 
@@ -1526,6 +1559,42 @@ function channelLabel(channel?: string | null): string {
   return channel || "未知来源";
 }
 
+function eventTypeLabel(eventType?: string | null): string {
+  const value = (eventType || "").toLowerCase();
+  const known = EVENT_TYPE_OPTIONS.find((item) => item.value === value);
+  if (known) return known.label;
+  if (value === "all_messages") return "全部消息";
+  if (value === "all_events") return "全部事件";
+  return eventType || "未知事件";
+}
+
+function traceStatusLabel(status?: string | null): string {
+  const value = (status || "unknown").toLowerCase();
+  if (value === "ok" || value === "success") return "完成";
+  if (value === "running" || value === "received" || value === "normalized" || value === "matched" || value === "delivered") return "处理中";
+  if (value === "skipped") return "已跳过";
+  if (value === "warning" || value === "warn") return "告警";
+  if (value === "failed" || value === "error") return "失败";
+  if (value === "active") return "可用";
+  return status || "未知";
+}
+
+function runtimeLevelLabel(level?: string | null): string {
+  const value = normalizeRuntimeLevel(level);
+  if (value === "debug") return "调试";
+  if (value === "warn") return "告警";
+  if (value === "error") return "错误";
+  return "信息";
+}
+
+function runtimeSourceLabel(source?: string | null): string {
+  const value = (source || "").toLowerCase();
+  if (value === "system" || value === "worker" || value === "runtime") return "系统";
+  if (value === "event") return "事件链路";
+  if (value === "plugin") return "插件";
+  return source || "运行时";
+}
+
 function phaseLabel(phase?: string | null): string {
   const value = (phase || "").toLowerCase();
   if (value.includes("receive")) return "收到消息";
@@ -1557,14 +1626,14 @@ function conversationLabel(trace: EventTraceSummary): string {
     return trace.chat_title ? `${kind} ${trace.chat_title} / ${trace.chat_id}` : `${kind} ${trace.chat_id}`;
   }
   if (trace.sender_name) return trace.sender_name;
-  if (trace.sender_user_id != null) return `user ${trace.sender_user_id}`;
+  if (trace.sender_user_id != null) return `用户 ${trace.sender_user_id}`;
   return "未知会话";
 }
 
 function actorLabel(trace: EventTraceSummary): string {
   const parts = [
     trace.sender_name || "",
-    trace.sender_user_id != null ? `user ${trace.sender_user_id}` : "",
+    trace.sender_user_id != null ? `用户 ${trace.sender_user_id}` : "",
   ].filter(Boolean);
   return parts.length ? parts.join(" / ") : "未知发送者";
 }

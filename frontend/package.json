@@ -1,7 +1,7 @@
 {
   "name": "telepilot-frontend",
   "private": true,
-  "version": "0.52.3",
+  "version": "0.52.4",
   "packageManager": "pnpm@10.23.0",
   "type": "module",
   "license": "MIT",
