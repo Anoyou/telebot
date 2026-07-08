@@ -5422,7 +5422,14 @@ async def reload_account_config(account_id: int, payload: dict | None = None) ->
             if state.scheduler is not None else None
         )
 
-    await _log(redis, account_id, "info", "插件配置已热更新")
+    reload_source = str(payload.get("source") or "") if isinstance(payload, dict) else ""
+    await _log(
+        redis,
+        account_id,
+        "debug" if reload_source == "periodic_reconcile" else "info",
+        "插件配置已热更新",
+        reload_source=reload_source or None,
+    )
 
 
 # ─────────────────────────────────────────────────────
@@ -5601,7 +5608,7 @@ async def _record_recent_peer(state: _AccountState, event: Any) -> None:
         log.exception("维护 recent_peers 失败 account=%s pid=%s", state.account_id, pid)
 
 
-async def reload_ignored_peers(account_id: int) -> None:
+async def reload_ignored_peers(account_id: int, *, log_level: str = "info") -> None:
     """IPC ``reload_ignored`` 入口：从 DB 重新拉一遍名单。
 
     若该账号在本进程没有运行态（worker 未起 / 已退出），静默忽略。
@@ -5614,7 +5621,7 @@ async def reload_ignored_peers(account_id: int) -> None:
     await _log(
         redis,
         account_id,
-        "info",
+        log_level,
         f"允许群组名单已热更新（共 {len(state.ignored_peers)} 个 peer）",
     )
 

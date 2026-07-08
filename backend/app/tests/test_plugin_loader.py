@@ -4588,6 +4588,46 @@ async def test_reload_account_config_keeps_merged_defaults_stable(monkeypatch) -
 
 
 @pytest.mark.asyncio
+async def test_periodic_reload_account_config_success_logs_debug(monkeypatch) -> None:
+    """周期性配置收敛成功只写 debug，避免默认运行事件被心跳刷屏。"""
+    from app.worker.plugins.base import _REGISTRY, register
+
+    @register
+    class _TempPeriodicPlugin(Plugin):
+        key = "_test_periodic_reload"
+        display_name = "周期热更新测试"
+
+    fake_db = _FakeDB(
+        accounts={1: _FakeAcc(id=1)},
+        humanize={1: None},
+        afs=[_FakeAF(account_id=1, feature_key="_test_periodic_reload", enabled=True, config={})],
+        rules=[],
+    )
+    monkeypatch.setattr(loader_mod, "AsyncSessionLocal", lambda: _fake_session_factory(fake_db))
+
+    client = MagicMock()
+    client.on = lambda f: (lambda fn: fn)
+    paused = asyncio.Event()
+    paused.set()
+    redis = _FakeRedis()
+
+    try:
+        await load_plugins_for_account(client, account_id=1, paused=paused, redis=redis)
+        redis.list_pushes.clear()
+
+        await reload_account_config(account_id=1, payload={"source": "periodic_reconcile"})
+
+        payloads = [json.loads(value) for _key, value in redis.list_pushes]
+        hot_reload_logs = [item for item in payloads if item["message"] == "插件配置已热更新"]
+        assert hot_reload_logs
+        assert hot_reload_logs[-1]["level"] == "debug"
+        assert hot_reload_logs[-1]["detail"] == {"reload_source": "periodic_reconcile"}
+    finally:
+        loader_mod._STATES.pop(1, None)
+        _REGISTRY.pop("_test_periodic_reload", None)
+
+
+@pytest.mark.asyncio
 async def test_merge_plugin_config_uses_legacy_account_global_field_when_global_empty() -> None:
     """字段迁移到 global 后，旧账号级值应继续作为运行时兼容回退。"""
     fake_db = _FakeDB(

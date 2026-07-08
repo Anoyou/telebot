@@ -20,6 +20,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 WORKSPACE = Path(os.getenv("TELEPILOT_WORKSPACE", "/workspace")).resolve()
+HOST_PROJECT_DIR = Path(os.getenv("TELEPILOT_HOST_PROJECT_DIR", "")).expanduser()
 DEFAULT_REMOTE = os.getenv("TELEPILOT_UPDATE_REMOTE", "origin")
 DEFAULT_BRANCH = os.getenv("TELEPILOT_UPDATE_BRANCH", "").strip() or "main"
 TOKEN = os.getenv("UPDATER_TOKEN", "").strip()
@@ -97,13 +98,37 @@ def _console_services(raw: str | None) -> list[str]:
     return services
 
 
+def _compose_project_name() -> str | None:
+    """Return the Docker Compose project name used by the host deployment.
+
+    The updater runs inside a container with the host project mounted at
+    ``/workspace``.  If we let Compose infer the project from that path it looks
+    for a project named ``workspace`` and returns an empty log stream.  The host
+    deployment, however, is usually started from ``/TelePilot`` and is therefore
+    named ``telepilot``.  Derive the same name from the host path unless an
+    explicit Compose project name is supplied.
+    """
+    raw = (
+        os.getenv("TELEPILOT_COMPOSE_PROJECT_NAME")
+        or os.getenv("COMPOSE_PROJECT_NAME")
+        or (HOST_PROJECT_DIR.name if str(HOST_PROJECT_DIR) and HOST_PROJECT_DIR.name not in {"", "."} else "")
+        or WORKSPACE.name
+    )
+    normalized = re.sub(r"[^a-z0-9_-]", "", raw.lower())
+    return normalized or None
+
+
 def _tail_console_logs(service: str | None, tail: int, keyword: str | None) -> dict[str, Any]:
     try:
         services = _console_services(service)
     except ValueError as exc:
         return {"ok": False, "error": str(exc), "services": list(CONSOLE_LOG_SERVICES), "lines": []}
 
-    cmd = ["docker", "compose", "logs", "--no-color", "--timestamps", f"--tail={tail}", *services]
+    project = _compose_project_name()
+    cmd = ["docker", "compose"]
+    if project:
+        cmd.extend(["-p", project])
+    cmd.extend(["logs", "--no-color", "--timestamps", f"--tail={tail}", *services])
     out, err, rc = _run(cmd, timeout=12)
     if rc != 0:
         return {
@@ -120,6 +145,7 @@ def _tail_console_logs(service: str | None, tail: int, keyword: str | None) -> d
         "ok": True,
         "source": "docker_compose",
         "services": services or list(CONSOLE_LOG_SERVICES),
+        "project": project,
         "tail": tail,
         "lines": lines[-MAX_CONSOLE_LOG_LINES:],
     }
