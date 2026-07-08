@@ -67,7 +67,12 @@ async def run_plugin_config_action(
     """Run a declared plugin config action and normalize its result."""
 
     action = _find_action(feature, action_key, installed_plugin=installed_plugin)
-    plugin_cls = await _load_plugin_class(db, feature.key, account.id)
+    plugin_cls = await _load_plugin_class(
+        db,
+        feature.key,
+        account.id,
+        installed_plugin=installed_plugin,
+    )
     if not _plugin_overrides_config_action(plugin_cls):
         raise PluginConfigActionUnavailable(f"插件 {feature.key} 未实现配置动作处理器")
 
@@ -129,10 +134,28 @@ def _find_action(
     raise PluginConfigActionNotFound(f"插件 {feature.key} 未声明配置动作 {key}")
 
 
-async def _load_plugin_class(db: AsyncSession, plugin_key: str, account_id: int) -> type[Plugin]:
+async def _load_plugin_class(
+    db: AsyncSession,
+    plugin_key: str,
+    account_id: int,
+    *,
+    installed_plugin: InstalledPlugin | Mapping[str, Any] | None = None,
+) -> type[Plugin]:
     cls = get_plugin(plugin_key)
     if cls is not None:
-        return cls
+        if getattr(cls, "_source", None) != "installed":
+            return cls
+
+        from ..worker.plugins import loader as plugin_loader
+
+        stale, _reason = plugin_loader._installed_plugin_runtime_drift(  # noqa: SLF001
+            cls,
+            None,
+            installed_plugin,
+        )
+        if not stale:
+            return cls
+        plugin_loader._clear_installed_module_cache(plugin_key)  # noqa: SLF001
 
     from ..worker.plugins import loader as plugin_loader
 

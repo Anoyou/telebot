@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
@@ -53,6 +54,35 @@ class LoggingConfigActionPlugin(Plugin):
         if ctx.log:
             await ctx.log("info", "动作进度", step="demo")
         return {"message": "已完成", "config_patch": {"done": True}}
+
+
+class OldInstalledConfigActionPlugin(Plugin):
+    key = "stale_action"
+    display_name = "Stale Action"
+    _source = "installed"
+    _loaded_at = 1.0
+
+    async def on_config_action(
+        self,
+        ctx: PluginContext,
+        action_key: str,
+        payload: dict,
+    ) -> dict:
+        return {"message": "旧代码"}
+
+
+class FreshInstalledConfigActionPlugin(Plugin):
+    key = "stale_action"
+    display_name = "Stale Action"
+    _source = "installed"
+
+    async def on_config_action(
+        self,
+        ctx: PluginContext,
+        action_key: str,
+        payload: dict,
+    ) -> dict:
+        return {"message": f"新代码：{payload['input']['name']}"}
 
 
 class FakeDB:
@@ -248,6 +278,64 @@ async def test_run_plugin_config_action_injects_progress_log(monkeypatch) -> Non
 
     assert result["config_patch"] == {"done": True}
     assert logs == [("info", "动作进度", {"step": "demo"})]
+
+
+@pytest.mark.asyncio
+async def test_run_plugin_config_action_reloads_stale_installed_plugin(monkeypatch) -> None:
+    feature = SimpleNamespace(
+        key="stale_action",
+        manifest={
+            "permissions": [],
+            "config_actions": [{"key": "make_item", "title": "生成"}],
+        },
+    )
+    account = SimpleNamespace(id=7, proxy_id=None)
+    installed = SimpleNamespace(
+        manifest_json={},
+        version="0.1.5",
+        updated_at=datetime.fromtimestamp(100, UTC),
+    )
+    cleared: list[str] = []
+    loaded: list[str] = []
+
+    def _get_plugin(key: str):
+        assert key == "stale_action"
+        return FreshInstalledConfigActionPlugin if cleared else OldInstalledConfigActionPlugin
+
+    async def _authorize(*_args, **_kwargs):
+        return SimpleNamespace(allowed=True)
+
+    monkeypatch.setattr(plugin_config_actions, "get_plugin", _get_plugin)
+    from app.worker.plugins import loader as plugin_loader
+
+    monkeypatch.setattr(plugin_loader, "_builtin_plugin_path", lambda key: None)
+    monkeypatch.setattr(plugin_loader, "_installed_plugin_exists", lambda key: True)
+    monkeypatch.setattr(plugin_loader, "_authorize_installed_plugin", _authorize)
+    monkeypatch.setattr(
+        plugin_loader,
+        "_clear_installed_module_cache",
+        lambda key: cleared.append(key),
+    )
+    monkeypatch.setattr(
+        plugin_loader,
+        "_load_installed_plugin",
+        lambda key: loaded.append(key) or {key: FreshInstalledConfigActionPlugin},
+    )
+
+    result = await run_plugin_config_action(
+        FakeDB(),
+        account=account,
+        feature=feature,
+        action_key="make_item",
+        effective_config={},
+        current_config={},
+        action_input={"name": "第三组"},
+        installed_plugin=installed,
+    )
+
+    assert result["message"] == "新代码：第三组"
+    assert cleared == ["stale_action"]
+    assert loaded == ["stale_action"]
 
 
 @pytest.mark.asyncio
