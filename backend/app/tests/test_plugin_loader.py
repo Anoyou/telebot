@@ -4588,8 +4588,8 @@ async def test_reload_account_config_keeps_merged_defaults_stable(monkeypatch) -
 
 
 @pytest.mark.asyncio
-async def test_periodic_reload_account_config_success_logs_debug(monkeypatch) -> None:
-    """周期性配置收敛成功只写 debug，避免默认运行事件被心跳刷屏。"""
+async def test_periodic_reload_account_config_success_is_silent(monkeypatch) -> None:
+    """周期性配置收敛成功不写热更新日志，避免默认运行事件被心跳刷屏。"""
     from app.worker.plugins.base import _REGISTRY, register
 
     @register
@@ -4619,9 +4619,7 @@ async def test_periodic_reload_account_config_success_logs_debug(monkeypatch) ->
 
         payloads = [json.loads(value) for _key, value in redis.list_pushes]
         hot_reload_logs = [item for item in payloads if item["message"] == "插件配置已热更新"]
-        assert hot_reload_logs
-        assert hot_reload_logs[-1]["level"] == "debug"
-        assert hot_reload_logs[-1]["detail"] == {"reload_source": "periodic_reconcile"}
+        assert hot_reload_logs == []
     finally:
         loader_mod._STATES.pop(1, None)
         _REGISTRY.pop("_test_periodic_reload", None)

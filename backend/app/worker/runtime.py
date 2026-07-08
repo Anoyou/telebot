@@ -1199,7 +1199,7 @@ async def _periodic_config_reconcile(redis, account_id: int) -> None:
             from .plugins.loader import reload_account_config, reload_ignored_peers  # type: ignore
 
             await reload_account_config(account_id, {"source": "periodic_reconcile"})
-            await reload_ignored_peers(account_id, log_level="debug")
+            await reload_ignored_peers(account_id, log_level=None)
         except Exception as e:  # noqa: BLE001
             await _log(redis, account_id, "warn", f"periodic plugin reload 失败: {type(e).__name__}: {e}")
 

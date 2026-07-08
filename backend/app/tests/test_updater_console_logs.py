@@ -76,3 +76,29 @@ def test_console_logs_returns_partial_lines_when_compose_times_out(monkeypatch) 
         "telepilot-web-1 | ready",
     ]
     assert "超时" in result["error"]
+
+
+def test_console_logs_filters_internal_health_checks(monkeypatch) -> None:
+    updater = _load_updater_module()
+
+    monkeypatch.setattr(updater, "HOST_PROJECT_DIR", Path("/TelePilot"))
+    monkeypatch.setattr(
+        updater,
+        "_run",
+        lambda _args, **_kw: (
+            "\n".join(
+                [
+                    'updater-1  | 2026-07-08T13:57:45.254520371Z [updater] 127.0.0.1 "GET /health HTTP/1.1" 200 -',
+                    'frontend-1 | 127.0.0.1 - - [08/Jul/2026:13:57:45 +0000] "GET / HTTP/1.1" 200 2662 "-" "Wget" "-"',
+                    "web-1      | INFO:app.worker:真实业务日志",
+                ]
+            ),
+            "",
+            0,
+        ),
+    )
+
+    result = updater._tail_console_logs("all", 20, None)
+
+    assert result["ok"] is True
+    assert result["lines"] == ["web-1      | INFO:app.worker:真实业务日志"]

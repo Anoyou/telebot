@@ -298,6 +298,22 @@ async def test_reload_ignored_peers_can_log_debug_for_periodic_reconcile(monkeyp
 
 
 @pytest.mark.asyncio
+async def test_reload_ignored_peers_can_stay_silent_for_periodic_reconcile(monkeypatch) -> None:
+    """周期性名单兜底成功时可静默，避免运行事件页重复刷成功日志。"""
+    state = _AccountState(account_id=7)
+    state.redis = _FakeRedis()
+    monkeypatch.setitem(loader_mod._STATES, 7, state)
+
+    fake_db = _FakeDB(ignored_rows=[_FakeIgnored(10), _FakeIgnored(20)])
+    monkeypatch.setattr(loader_mod, "AsyncSessionLocal", lambda: _fake_session_factory(fake_db))
+
+    await reload_ignored_peers(7, log_level=None)
+
+    assert state.ignored_peers == {10, 20}
+    assert state.redis.list_pushes == []
+
+
+@pytest.mark.asyncio
 async def test_reload_ignored_peers_silent_when_no_state(monkeypatch) -> None:
     """worker 没起来时调 reload_ignored_peers 应静默——绝不能抛。"""
     monkeypatch.setattr(loader_mod, "_STATES", {})

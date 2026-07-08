@@ -129,6 +129,26 @@ def _compose_project_name() -> str | None:
     return normalized or None
 
 
+def _is_console_noise_line(line: str) -> bool:
+    lowered = line.lower()
+    if "127.0.0.1" not in lowered:
+        return False
+    if "[updater]" in lowered and '"get /health http/1.1" 200' in lowered:
+        return True
+    if '"get /healthz http/1.1" 200' in lowered:
+        return True
+    return "wget" in lowered and '"get / http/1.1" 200' in lowered
+
+
+def _console_lines(out: str, keyword: str | None) -> list[str]:
+    lines = [_ANSI_RE.sub("", line.rstrip()) for line in out.splitlines()]
+    lines = [line for line in lines if not _is_console_noise_line(line)]
+    q = (keyword or "").strip().lower()
+    if q:
+        lines = [line for line in lines if q in line.lower()]
+    return lines
+
+
 def _tail_console_logs(service: str | None, tail: int, keyword: str | None) -> dict[str, Any]:
     try:
         services = _console_services(service)
@@ -143,10 +163,7 @@ def _tail_console_logs(service: str | None, tail: int, keyword: str | None) -> d
     out, err, rc = _run(cmd, timeout=CONSOLE_LOG_COMMAND_TIMEOUT_SECONDS)
     if rc != 0:
         if rc == 124 and out:
-            lines = [_ANSI_RE.sub("", line.rstrip()) for line in out.splitlines()]
-            q = (keyword or "").strip().lower()
-            if q:
-                lines = [line for line in lines if q in line.lower()]
+            lines = _console_lines(out, keyword)
             return {
                 "ok": True,
                 "source": "docker_compose",
@@ -162,10 +179,7 @@ def _tail_console_logs(service: str | None, tail: int, keyword: str | None) -> d
             "services": services or list(CONSOLE_LOG_SERVICES),
             "lines": [],
         }
-    lines = [_ANSI_RE.sub("", line.rstrip()) for line in out.splitlines()]
-    q = (keyword or "").strip().lower()
-    if q:
-        lines = [line for line in lines if q in line.lower()]
+    lines = _console_lines(out, keyword)
     return {
         "ok": True,
         "source": "docker_compose",
