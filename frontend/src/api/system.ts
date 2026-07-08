@@ -62,6 +62,7 @@ export interface RuntimeLogQuery {
   /** event = 消息事件；plugin = 插件内部日志；system = worker 启停 / 错误 */
   source?: "system" | "event" | "plugin" | string;
   plugin_key?: string;
+  keyword?: string;
   since?: string;
   limit?: number;
 }

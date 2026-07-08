@@ -9,6 +9,7 @@ from app.api.logs import (
     EventTraceSummary,
     list_event_traces,
     list_log_messages,
+    list_runtime_logs,
 )
 
 
@@ -133,6 +134,30 @@ async def test_list_event_traces_filters_by_trace_and_reason_code() -> None:
     assert "event_trace.trace_id" in sql
     assert "event_span.reason_code" in sql
     assert "event_action.error_code" in sql
+
+
+@pytest.mark.asyncio
+async def test_list_runtime_logs_filters_by_keyword() -> None:
+    db = _CaptureDB()
+
+    rows = await list_runtime_logs(
+        db=db,
+        _user=object(),
+        account_id=None,
+        level=None,
+        plugin_key=None,
+        keyword="telegram_api_error",
+        source=None,
+        since=None,
+        limit=100,
+    )
+
+    assert rows == []
+    sql = "\n".join(db.statements)
+    assert "runtime_log.message" in sql
+    assert "runtime_log.level" in sql
+    assert "runtime_log.source" in sql
+    assert "runtime_log.detail" in sql
 
 
 @pytest.mark.asyncio

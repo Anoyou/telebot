@@ -680,6 +680,7 @@ async def list_runtime_logs(
     account_id: int | None = Query(None, description="按账号过滤"),
     level: str | None = Query(None, description="debug | info | warn | warning | error"),
     plugin_key: str | None = Query(None, description="按插件 key 过滤，仅 source=plugin 时常用"),
+    keyword: str | None = Query(None, description="message/source/detail 模糊匹配"),
     source: str | None = Query(
         None,
         description='日志类别："event"（消息事件）/"plugin"（插件内部日志）/"system"（worker 启停/错误）',
@@ -711,5 +712,15 @@ async def list_runtime_logs(
             stmt = stmt.where(RuntimeLog.source == source)
     if plugin_key:
         stmt = stmt.where(RuntimeLog.detail["plugin_key"].as_string() == plugin_key)
+    if keyword and keyword.strip():
+        like = f"%{keyword.strip()}%"
+        stmt = stmt.where(
+            or_(
+                RuntimeLog.message.ilike(like),
+                RuntimeLog.level.ilike(like),
+                RuntimeLog.source.ilike(like),
+                cast(RuntimeLog.detail, String).ilike(like),
+            )
+        )
     rows = (await db.execute(stmt)).scalars().all()
     return [RuntimeLogItem.from_row(r) for r in rows]
