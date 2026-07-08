@@ -51,3 +51,28 @@ def test_console_logs_respects_explicit_compose_project_name(monkeypatch) -> Non
     assert result["ok"] is True
     assert result["project"] == "custom_stack"
     assert commands[0][:4] == ["docker", "compose", "-p", "custom_stack"]
+
+
+def test_console_logs_returns_partial_lines_when_compose_times_out(monkeypatch) -> None:
+    updater = _load_updater_module()
+
+    monkeypatch.setattr(updater, "HOST_PROJECT_DIR", Path("/TelePilot"))
+    monkeypatch.setattr(
+        updater,
+        "_run",
+        lambda _args, **_kw: (
+            "telepilot-web-1 | booting\ntelepilot-web-1 | ready",
+            "command timed out",
+            124,
+        ),
+    )
+
+    result = updater._tail_console_logs("web", 20, None)
+
+    assert result["ok"] is True
+    assert result["project"] == "telepilot"
+    assert result["lines"] == [
+        "telepilot-web-1 | booting",
+        "telepilot-web-1 | ready",
+    ]
+    assert "超时" in result["error"]

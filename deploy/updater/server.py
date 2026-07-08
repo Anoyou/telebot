@@ -26,6 +26,7 @@ DEFAULT_BRANCH = os.getenv("TELEPILOT_UPDATE_BRANCH", "").strip() or "main"
 TOKEN = os.getenv("UPDATER_TOKEN", "").strip()
 MAX_LOG_LINES = 240
 MAX_CONSOLE_LOG_LINES = 1000
+CONSOLE_LOG_COMMAND_TIMEOUT_SECONDS = 5
 CONSOLE_LOG_SERVICES = ("web", "frontend", "postgres", "redis", "updater")
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 
@@ -63,6 +64,14 @@ def _json_response(handler: BaseHTTPRequestHandler, status: int, payload: dict[s
     handler.wfile.write(body)
 
 
+def _timeout_text(value: str | bytes | None) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return value
+
+
 def _run(args: list[str], *, timeout: int = 60, env: dict[str, str] | None = None) -> tuple[str, str, int]:
     try:
         result = subprocess.run(
@@ -74,8 +83,10 @@ def _run(args: list[str], *, timeout: int = 60, env: dict[str, str] | None = Non
             env={**os.environ, **(env or {})},
         )
         return result.stdout.strip(), result.stderr.strip(), int(result.returncode)
-    except subprocess.TimeoutExpired:
-        return "", "command timed out", 124
+    except subprocess.TimeoutExpired as exc:
+        stdout = _timeout_text(exc.stdout)
+        stderr = _timeout_text(exc.stderr)
+        return stdout.strip(), (stderr.strip() or "command timed out"), 124
     except Exception as exc:  # noqa: BLE001
         return "", f"{type(exc).__name__}: {exc}", 1
 
@@ -129,8 +140,22 @@ def _tail_console_logs(service: str | None, tail: int, keyword: str | None) -> d
     if project:
         cmd.extend(["-p", project])
     cmd.extend(["logs", "--no-color", "--timestamps", f"--tail={tail}", *services])
-    out, err, rc = _run(cmd, timeout=12)
+    out, err, rc = _run(cmd, timeout=CONSOLE_LOG_COMMAND_TIMEOUT_SECONDS)
     if rc != 0:
+        if rc == 124 and out:
+            lines = [_ANSI_RE.sub("", line.rstrip()) for line in out.splitlines()]
+            q = (keyword or "").strip().lower()
+            if q:
+                lines = [line for line in lines if q in line.lower()]
+            return {
+                "ok": True,
+                "source": "docker_compose",
+                "services": services or list(CONSOLE_LOG_SERVICES),
+                "project": project,
+                "tail": tail,
+                "lines": lines[-MAX_CONSOLE_LOG_LINES:],
+                "error": "Docker 日志命令超时，仅展示已取得的部分内容。",
+            }
         return {
             "ok": False,
             "error": err or out or f"docker compose logs 退出码 {rc}",
