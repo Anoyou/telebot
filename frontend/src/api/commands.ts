@@ -4,6 +4,8 @@ import type {
   AccountCommandItem,
   AICommandEnablementSummary,
   BuiltinCommandItem,
+  ChatTestModelsRequest,
+  ChatTestModelsResponse,
   CommandTemplateCreate,
   CommandTemplateOut,
   CommandTemplateUpdate,
@@ -137,6 +139,19 @@ export async function testProviderModel(
 ): Promise<TestModelResponse> {
   const { data } = await api.post<TestModelResponse>(
     `/api/commands/llm-providers/${id}/test-model`,
+    payload,
+    { timeout: LLM_PROVIDER_OPERATION_TIMEOUT_MS },
+  );
+  return data;
+}
+
+/** 用真实聊天路径批量测试一个 provider 下的多个模型；可带临时历史上下文。 */
+export async function chatTestProviderModels(
+  id: number,
+  payload: ChatTestModelsRequest,
+): Promise<ChatTestModelsResponse> {
+  const { data } = await api.post<ChatTestModelsResponse>(
+    `/api/commands/llm-providers/${id}/chat-test-models`,
     payload,
     { timeout: LLM_PROVIDER_OPERATION_TIMEOUT_MS },
   );

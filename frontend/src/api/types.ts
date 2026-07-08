@@ -1537,6 +1537,39 @@ export interface TestModelResponse {
   error?: string | null;
 }
 
+export interface ChatTestTurn {
+  role: "user" | "assistant";
+  content: string;
+}
+
+export interface ChatTestModelsRequest {
+  models: string[];
+  message: string;
+  history?: ChatTestTurn[];
+  system_prompt?: string;
+  max_tokens?: number;
+  timeout_seconds?: number;
+}
+
+export interface ChatTestModelResult {
+  ok: boolean;
+  requested_model: string;
+  model?: string | null;
+  latency_ms: number;
+  response?: string | null;
+  preview?: string | null;
+  input_tokens: number;
+  output_tokens: number;
+  empty_response: boolean;
+  error?: string | null;
+}
+
+export interface ChatTestModelsResponse {
+  provider_id: number;
+  provider_name: string;
+  results: ChatTestModelResult[];
+}
+
 // ===== Sprint4 #2C =====
 export type SchedulerKind = "cron" | "once" | "interval";
 export type SchedulerActionType = "send_message" | "run_command" | "call_llm";

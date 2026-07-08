@@ -330,7 +330,7 @@ export function GenericPluginConfigPage() {
         setDirty(false);
       }
       setFinalizedActionJobs((prev) => ({ ...prev, [job.job_id]: true }));
-      toast.success(job.message || "配置动作已完成，配置已自动保存");
+      toast.success("配置动作已完成，配置已自动保存");
       qc.invalidateQueries({ queryKey: ["account", aid, "features"] });
       qc.invalidateQueries({ queryKey: ["plugin", "global", featureKey] });
       qc.invalidateQueries({ queryKey: ["plugin-config-action-jobs", aid, featureKey] });
@@ -670,7 +670,7 @@ function RecentConfigActionJobCard({
               <span className="truncate">最近配置动作：{title}</span>
             </CardTitle>
             <CardDescription className="mt-1">
-              {job.message || configActionJobStatusText(job.status)}
+              {configActionJobSummaryMessage(job)}
             </CardDescription>
           </div>
           <div className="flex shrink-0 flex-wrap items-center gap-2">
@@ -741,6 +741,7 @@ function ConfigActionJobWindow({
   const statusText = configActionJobStatusText(status);
   const terminal = CONFIG_ACTION_TERMINAL_STATUSES.has(status);
   const logs = job?.logs ?? [];
+  const summaryMessage = job ? configActionJobSummaryMessage(job) : "后台任务已创建，正在等待状态更新";
   if (typeof document === "undefined") return null;
   if (minimized) {
     return createPortal(
@@ -762,57 +763,59 @@ function ConfigActionJobWindow({
   }
 
   return createPortal(
-    <div className="fixed bottom-4 right-4 z-50 flex h-[min(72vh,620px)] w-[min(94vw,440px)] flex-col overflow-hidden rounded-md border bg-background shadow-xl">
-      <div className="flex items-start justify-between gap-3 border-b px-3 py-3">
-        <div className="min-w-0">
-          <div className="flex min-w-0 items-center gap-2">
-            <Bot className="h-4 w-4 shrink-0 text-primary" />
-            <div className="min-w-0 truncate text-sm font-semibold">{title}</div>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 px-4 py-6">
+      <div className="flex h-[min(84vh,720px)] w-[min(94vw,760px)] flex-col overflow-hidden rounded-md border bg-background shadow-xl">
+        <div className="flex items-start justify-between gap-3 border-b px-4 py-3">
+          <div className="min-w-0">
+            <div className="flex min-w-0 items-center gap-2">
+              <Bot className="h-4 w-4 shrink-0 text-primary" />
+              <div className="min-w-0 truncate text-sm font-semibold">{title}</div>
+            </div>
+            <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+              <Badge variant={jobStatusBadgeVariant(status)}>{statusText}</Badge>
+              {job?.job_id ? <code className="max-w-full truncate">{job.job_id}</code> : null}
+            </div>
           </div>
-          <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-            <Badge variant={jobStatusBadgeVariant(status)}>{statusText}</Badge>
-            {job?.job_id ? <code className="max-w-full truncate">{job.job_id}</code> : null}
+          <div className="flex shrink-0 items-center gap-1">
+            <Button type="button" variant="ghost" size="icon" className="h-8 w-8" onClick={onMinimize} aria-label="最小化">
+              <Minus className="h-4 w-4" />
+            </Button>
+            <Button type="button" variant="ghost" size="icon" className="h-8 w-8" onClick={onClose} aria-label="关闭">
+              <X className="h-4 w-4" />
+            </Button>
           </div>
         </div>
-        <div className="flex shrink-0 items-center gap-1">
-          <Button type="button" variant="ghost" size="icon" className="h-8 w-8" onClick={onMinimize} aria-label="最小化">
-            <Minus className="h-4 w-4" />
-          </Button>
-          <Button type="button" variant="ghost" size="icon" className="h-8 w-8" onClick={onClose} aria-label="关闭">
-            <X className="h-4 w-4" />
-          </Button>
-        </div>
-      </div>
-      <div className="min-h-0 flex-1 space-y-3 overflow-y-auto bg-muted/20 px-3 py-3">
-        <ConfigActionChatLine
-          level="info"
-          message={job?.message || "后台任务已创建，正在等待状态更新"}
-          ts={job?.updated_at || job?.created_at}
-          active={!terminal}
-        />
-        {logs.map((item) => (
+        <div className="min-h-0 flex-1 space-y-3 overflow-y-auto bg-muted/20 px-4 py-4">
           <ConfigActionChatLine
-            key={item.id}
-            level={item.level}
-            message={item.message}
-            ts={item.ts}
-            detail={item.detail}
+            level="info"
+            message={summaryMessage}
+            ts={job?.updated_at || job?.created_at}
+            active={!terminal}
           />
-        ))}
-        {loading && !terminal ? (
-          <div className="flex items-center gap-2 px-1 text-xs text-muted-foreground">
-            <Loader2 className="h-3.5 w-3.5 animate-spin" />
-            正在刷新进度
-          </div>
-        ) : null}
-      </div>
-      <div className="flex flex-wrap items-center justify-between gap-2 border-t bg-background px-3 py-2">
-        <div className="text-xs text-muted-foreground">
-          关闭窗口不会停止后台执行。
+          {logs.map((item) => (
+            <ConfigActionChatLine
+              key={item.id}
+              level={item.level}
+              message={item.message}
+              ts={item.ts}
+              detail={item.detail}
+            />
+          ))}
+          {loading && !terminal ? (
+            <div className="flex items-center gap-2 px-1 text-xs text-muted-foreground">
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              正在刷新进度
+            </div>
+          ) : null}
         </div>
-        <Button type="button" variant="outline" size="sm" className="border-primary/35 bg-primary/5 text-primary hover:bg-primary/10" onClick={onOpenLogs}>
-          查看日志
-        </Button>
+        <div className="flex flex-wrap items-center justify-between gap-2 border-t bg-background px-4 py-3">
+          <div className="text-xs text-muted-foreground">
+            关闭窗口不会停止后台执行。
+          </div>
+          <Button type="button" variant="outline" size="sm" className="border-primary/35 bg-primary/5 text-primary hover:bg-primary/10" onClick={onOpenLogs}>
+            查看日志
+          </Button>
+        </div>
       </div>
     </div>,
     document.body,
@@ -857,6 +860,12 @@ function configActionJobStatusText(status: string): string {
   if (status === "succeeded") return "已完成";
   if (status === "failed") return "失败";
   return status || "未知";
+}
+
+function configActionJobSummaryMessage(job: PluginConfigActionJobStatus): string {
+  if (job.status === "succeeded") return "配置动作已完成，结果已写入配置。";
+  if (job.status === "failed") return job.error_message || job.message || "配置动作失败";
+  return job.message || configActionJobStatusText(job.status);
 }
 
 function jobStatusBadgeVariant(status: string): "default" | "secondary" | "destructive" | "outline" | "success" {

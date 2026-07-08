@@ -557,3 +557,71 @@ class TestModelResponse(BaseModel):
     """返回 text 前 80 字符；用于让用户在 UI 一眼看出"这个模型确实回话了"。"""
     error: str | None = None
     """失败时的错误消息（已脱敏，不含 api_key）。"""
+
+
+class ChatTestTurn(BaseModel):
+    """模型真实聊天测活的临时上下文，不落库。"""
+
+    role: Literal["user", "assistant"]
+    content: str = Field(min_length=1, max_length=4000)
+
+
+class ChatTestModelsRequest(BaseModel):
+    """``POST /api/commands/llm-providers/{pid}/chat-test-models`` 入参。"""
+
+    models: list[str] = Field(min_length=1, max_length=20)
+    """要并发测试的模型 ID 列表。"""
+    message: str = Field(min_length=1, max_length=2000)
+    """本轮模拟用户消息。"""
+    history: list[ChatTestTurn] = Field(default_factory=list, max_length=20)
+    """同一测试窗口里的临时历史，用于模拟连续对话。"""
+    system_prompt: str = Field(
+        default="你是一个自然、简洁的中文聊天助手。请像真实聊天一样直接回复用户，不要只返回 ping/pong。",
+        min_length=1,
+        max_length=2000,
+    )
+    """测试用 system prompt。"""
+    max_tokens: int = Field(default=1200, ge=64, le=8000)
+    timeout_seconds: int = Field(default=90, ge=10, le=600)
+
+    @field_validator("models")
+    @classmethod
+    def _strip_models(cls, values: list[str]) -> list[str]:
+        out: list[str] = []
+        seen: set[str] = set()
+        for value in values:
+            model = str(value or "").strip()
+            if not model:
+                continue
+            if len(model) > 128:
+                raise ValueError("模型 ID 不能超过 128 字符")
+            if model in seen:
+                continue
+            seen.add(model)
+            out.append(model)
+        if not out:
+            raise ValueError("至少选择一个模型")
+        return out
+
+
+class ChatTestModelResult(BaseModel):
+    """单个模型真实聊天测活结果。"""
+
+    ok: bool
+    requested_model: str
+    model: str | None = None
+    latency_ms: int
+    response: str | None = None
+    preview: str | None = None
+    input_tokens: int = 0
+    output_tokens: int = 0
+    empty_response: bool = False
+    error: str | None = None
+
+
+class ChatTestModelsResponse(BaseModel):
+    """真实聊天测活批量结果。"""
+
+    provider_id: int
+    provider_name: str
+    results: list[ChatTestModelResult]

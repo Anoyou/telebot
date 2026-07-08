@@ -21,6 +21,7 @@ from fastapi import HTTPException
 from app.crypto import decrypt_str, encrypt_str
 from app.db.models.command import LLMProvider
 from app.schemas.command import (
+    ChatTestModelsRequest,
     CommandTemplateBase,
     CommandTemplateCreate,
     LLMProviderCreate,
@@ -505,7 +506,10 @@ async def test_openai_client_text_only_keeps_string_content() -> None:
         await cli.complete("sys", "纯文本", images=None)
 
     body = fake.post.call_args.kwargs["json"]
+    headers = fake.post.call_args.kwargs["headers"]
     assert body["messages"][1]["content"] == "纯文本"
+    assert headers["User-Agent"].startswith("TelePilot/")
+    assert headers["User-Agent"].endswith(" LLM Client")
 
 
 @pytest.mark.asyncio
@@ -1642,6 +1646,181 @@ async def test_test_model_endpoint_llm_error(monkeypatch) -> None:
     assert out.ok is False
     assert out.error and "404" in out.error
     assert out.latency_ms >= 0
+
+
+@pytest.mark.asyncio
+async def test_chat_test_models_endpoint_success(monkeypatch) -> None:
+    """chat-test-models 走真实聊天入参：自定义测试语 + 历史 + token/timeout。"""
+    from app.api import commands as cmds_api
+    from app.services import llm_client
+    from app.services.llm_client import LLMResult
+
+    row = LLMProvider(
+        id=1,
+        name="AnyGPT",
+        provider="openai",
+        api_key_enc=None,
+        base_url="https://api.example.com/v1",
+        default_model="gpt-4o",
+        created_at=datetime.now(UTC),
+    )
+
+    async def _get_provider_row(_db, _pid):
+        return row
+
+    captured: dict[str, object] = {}
+
+    class _FakeClient:
+        async def complete(self, system, user, **kwargs):
+            captured["system"] = system
+            captured["user"] = user
+            captured["kwargs"] = kwargs
+            return LLMResult(
+                text="我在想晚饭吃什么。",
+                model="model-a-real",
+                input_tokens=11,
+                output_tokens=7,
+            )
+
+    def _build_client(provider, **kwargs):
+        captured["provider"] = provider
+        captured["build_kwargs"] = kwargs
+        return _FakeClient()
+
+    monkeypatch.setattr(cmds_api.command_service, "get_provider_row", _get_provider_row)
+    monkeypatch.setattr(cmds_api, "_resolve_proxy_url", AsyncMock(return_value="socks5://127.0.0.1:1080"))
+    monkeypatch.setattr(llm_client, "build_client", _build_client)
+
+    payload = ChatTestModelsRequest(
+        models=["model-a"],
+        message="我好无聊，你在想啥？",
+        history=[
+            {"role": "user", "content": "上一句"},
+            {"role": "assistant", "content": "上一答"},
+        ],
+        system_prompt="你叫阿光。",
+        max_tokens=1234,
+        timeout_seconds=77,
+    )
+    out = await cmds_api.chat_test_models(
+        pid=1,
+        payload=payload,
+        db=AsyncMock(),
+        _user=AsyncMock(),
+    )
+
+    assert out.provider_id == 1
+    assert out.provider_name == "AnyGPT"
+    assert len(out.results) == 1
+    result = out.results[0]
+    assert result.ok is True
+    assert result.requested_model == "model-a"
+    assert result.model == "model-a-real"
+    assert result.response == "我在想晚饭吃什么。"
+    assert result.preview == "我在想晚饭吃什么。"
+    assert result.input_tokens == 11
+    assert result.output_tokens == 7
+    assert captured["system"] == "你叫阿光。"
+    assert "上一句" in str(captured["user"])
+    assert "上一答" in str(captured["user"])
+    assert "用户刚刚说：" in str(captured["user"])
+    assert "我好无聊，你在想啥？" in str(captured["user"])
+    assert captured["build_kwargs"] == {
+        "override_model": "model-a",
+        "proxy_url": "socks5://127.0.0.1:1080",
+    }
+    assert captured["kwargs"] == {"max_tokens": 1234, "timeout_seconds": 77}
+
+
+@pytest.mark.asyncio
+async def test_chat_test_models_endpoint_empty_response(monkeypatch) -> None:
+    """上游完成但空文本时，前端需要拿到明确的空返回状态。"""
+    from app.api import commands as cmds_api
+    from app.services import llm_client
+    from app.services.llm_client import LLMResult
+
+    row = LLMProvider(
+        id=1,
+        name="AnyGPT",
+        provider="openai",
+        api_key_enc=None,
+        base_url="https://api.example.com/v1",
+        default_model="gpt-4o",
+        created_at=datetime.now(UTC),
+    )
+
+    async def _get_provider_row(_db, _pid):
+        return row
+
+    class _FakeClient:
+        async def complete(self, *_args, **_kwargs):
+            return LLMResult(text="  ", model="model-empty", input_tokens=3, output_tokens=0)
+
+    monkeypatch.setattr(cmds_api.command_service, "get_provider_row", _get_provider_row)
+    monkeypatch.setattr(cmds_api, "_resolve_proxy_url", AsyncMock(return_value=None))
+    monkeypatch.setattr(llm_client, "build_client", lambda *a, **k: _FakeClient())
+
+    out = await cmds_api.chat_test_models(
+        pid=1,
+        payload=ChatTestModelsRequest(models=["model-empty"], message="说句话"),
+        db=AsyncMock(),
+        _user=AsyncMock(),
+    )
+
+    result = out.results[0]
+    assert result.ok is False
+    assert result.empty_response is True
+    assert result.response is None
+    assert result.error == "上游请求已完成，但返回文本为空。"
+
+
+@pytest.mark.asyncio
+async def test_chat_test_models_endpoint_llm_error(monkeypatch) -> None:
+    """LLMError 按单模型失败返回，不应拖垮同批其它模型。"""
+    from app.api import commands as cmds_api
+    from app.services import llm_client
+    from app.services.llm_client import LLMError, LLMResult
+
+    row = LLMProvider(
+        id=1,
+        name="AnyGPT",
+        provider="openai",
+        api_key_enc=None,
+        base_url="https://api.example.com/v1",
+        default_model="gpt-4o",
+        created_at=datetime.now(UTC),
+    )
+
+    async def _get_provider_row(_db, _pid):
+        return row
+
+    class _FakeClient:
+        def __init__(self, model: str):
+            self.model = model
+
+        async def complete(self, *_args, **_kwargs):
+            if self.model == "bad-model":
+                raise LLMError("OpenAI 接口返回 404: Model not found")
+            return LLMResult(text="好的", model=self.model, input_tokens=1, output_tokens=1)
+
+    def _build_client(_provider, **kwargs):
+        return _FakeClient(str(kwargs.get("override_model")))
+
+    monkeypatch.setattr(cmds_api.command_service, "get_provider_row", _get_provider_row)
+    monkeypatch.setattr(cmds_api, "_resolve_proxy_url", AsyncMock(return_value=None))
+    monkeypatch.setattr(llm_client, "build_client", _build_client)
+
+    out = await cmds_api.chat_test_models(
+        pid=1,
+        payload=ChatTestModelsRequest(models=["ok-model", "bad-model"], message="测一下"),
+        db=AsyncMock(),
+        _user=AsyncMock(),
+    )
+
+    by_model = {item.requested_model: item for item in out.results}
+    assert by_model["ok-model"].ok is True
+    assert by_model["bad-model"].ok is False
+    assert "404" in (by_model["bad-model"].error or "")
 
 
 # ════════════════════════════════════════════════════════════

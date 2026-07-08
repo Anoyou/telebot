@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time as _time
 
 import httpx
@@ -22,6 +23,9 @@ from ..schemas.command import (
     AccountCommandItem,
     AICommandEnablementSummary,
     BuiltinCommandItem,
+    ChatTestModelResult,
+    ChatTestModelsRequest,
+    ChatTestModelsResponse,
     CommandTemplateCreate,
     CommandTemplateOut,
     CommandTemplateUpdate,
@@ -914,6 +918,92 @@ async def test_model(
         latency_ms=elapsed_ms,
         model=result.model,
         preview=(result.text or "").strip()[:80] or None,
+    )
+
+
+def _build_chat_test_prompt(payload: ChatTestModelsRequest) -> str:
+    lines: list[str] = []
+    if payload.history:
+        lines.append("以下是同一个测试窗口里的最近对话，请只当作上下文：")
+        for turn in payload.history[-12:]:
+            name = "用户" if turn.role == "user" else "助手"
+            lines.append(f"{name}: {turn.content}")
+        lines.append("")
+    lines.append("用户刚刚说：")
+    lines.append(payload.message)
+    return "\n".join(lines).strip()
+
+
+@router.post(
+    "/api/commands/llm-providers/{pid}/chat-test-models",
+    response_model=ChatTestModelsResponse,
+)
+async def chat_test_models(
+    pid: int,
+    payload: ChatTestModelsRequest,
+    db: DBSession,
+    _user: CurrentUser,
+) -> ChatTestModelsResponse:
+    """按真实聊天路径并发测试一个 Provider 下的多个模型。
+
+    与 ``test-model`` 的 ping 轻量探测不同，这里使用用户自定义测试语、
+    可选历史上下文、完整 max_tokens 和 provider 当前 API 协议，便于模拟
+    Telegram / 插件里的真实 LLM 调用表现。
+    """
+    await _require_ai_enabled(db)
+
+    from ..services.llm_client import LLMError, build_client
+
+    row = await command_service.get_provider_row(db, pid)
+    proxy_url = await _resolve_proxy_url(db, row.proxy_id)
+    user_prompt = _build_chat_test_prompt(payload)
+
+    async def run_one(model_id: str) -> ChatTestModelResult:
+        started = _time.monotonic()
+        try:
+            cli = build_client(row, override_model=model_id, proxy_url=proxy_url)
+            result = await cli.complete(
+                payload.system_prompt,
+                user_prompt,
+                max_tokens=payload.max_tokens,
+                timeout_seconds=payload.timeout_seconds,
+            )
+            elapsed_ms = int((_time.monotonic() - started) * 1000)
+            text = (result.text or "").strip()
+            return ChatTestModelResult(
+                ok=bool(text),
+                requested_model=model_id,
+                model=result.model,
+                latency_ms=elapsed_ms,
+                response=text or None,
+                preview=text[:240] if text else None,
+                input_tokens=int(result.input_tokens or 0),
+                output_tokens=int(result.output_tokens or 0),
+                empty_response=not bool(text),
+                error=None if text else "上游请求已完成，但返回文本为空。",
+            )
+        except LLMError as exc:
+            elapsed_ms = int((_time.monotonic() - started) * 1000)
+            return ChatTestModelResult(
+                ok=False,
+                requested_model=model_id,
+                latency_ms=elapsed_ms,
+                error=str(exc),
+            )
+        except Exception as exc:  # noqa: BLE001
+            elapsed_ms = int((_time.monotonic() - started) * 1000)
+            return ChatTestModelResult(
+                ok=False,
+                requested_model=model_id,
+                latency_ms=elapsed_ms,
+                error=f"{type(exc).__name__}: {str(exc)[:200]}",
+            )
+
+    results = await asyncio.gather(*(run_one(model_id) for model_id in payload.models))
+    return ChatTestModelsResponse(
+        provider_id=pid,
+        provider_name=row.name,
+        results=list(results),
     )
 
 

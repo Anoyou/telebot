@@ -8,7 +8,7 @@ import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useSearchParams } from "react-router-dom";
 import { toast } from "sonner";
-import { Plus, Trash2, KeyRound, Edit3, Download, Loader2, CheckCircle2, XCircle, Star, ChevronDown, ChevronRight, Filter, X, Package, Save } from "lucide-react";
+import { Plus, Trash2, KeyRound, Edit3, Download, Loader2, CheckCircle2, XCircle, Star, ChevronDown, ChevronRight, Filter, X, Package, Save, MessageSquare, Send, RotateCcw } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { CommandBadge } from "@/components/CommandBadge";
@@ -43,6 +43,7 @@ import {
 } from "@/components/ui/table";
 
 import {
+  chatTestProviderModels,
   createLLMProvider,
   deleteLLMProvider,
   detectProviderProtocols,
@@ -53,7 +54,7 @@ import {
 } from "@/api/commands";
 import { listProxies } from "@/api/proxies";
 import { getSystemSettings } from "@/api/system";
-import type { DetectProviderProtocolsResponse, LLMApiFormat, LLMModality, LLMProviderKind, LLMProviderOut, LLMTag, LLMWebSearchApiFormat, ProviderModel, ProtocolProbeResult, ProxyOut } from "@/api/types";
+import type { ChatTestModelResult, ChatTestTurn, DetectProviderProtocolsResponse, LLMApiFormat, LLMModality, LLMProviderKind, LLMProviderOut, LLMTag, LLMWebSearchApiFormat, ProviderModel, ProtocolProbeResult, ProxyOut } from "@/api/types";
 import { getErrMsg } from "@/lib/api";
 
 // 各 provider 的默认 base_url 提示，仅作 placeholder
@@ -224,6 +225,7 @@ export function LLMProviders({
   );
 
   const [editing, setEditing] = useState<FormState | null>(null);
+  const [chatTestOpen, setChatTestOpen] = useState(false);
 
   const visibleProviders = (listQ.data || []).filter((p) => {
     if (!isVisionFilter) return true;
@@ -373,9 +375,20 @@ export function LLMProviders({
               }
               className="flex-1"
             />
-            <Button size="sm" onClick={() => setEditing({ ...EMPTY_FORM })}>
-              <Plus className="mr-1 h-4 w-4" /> 新建
-            </Button>
+            <div className="flex shrink-0 items-center gap-2">
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                disabled={visibleProviders.length === 0}
+                onClick={() => setChatTestOpen(true)}
+              >
+                <MessageSquare className="mr-1 h-4 w-4" /> 模型测活
+              </Button>
+              <Button size="sm" onClick={() => setEditing({ ...EMPTY_FORM })}>
+                <Plus className="mr-1 h-4 w-4" /> 新建
+              </Button>
+            </div>
           </div>
         </CardHeader>
         <CardContent>
@@ -539,6 +552,424 @@ export function LLMProviders({
           }}
           saving={createMut.isPending || updateMut.isPending}
         />
+      )}
+      <ProviderChatTestDialog
+        open={chatTestOpen}
+        onOpenChange={setChatTestOpen}
+        providers={visibleProviders}
+      />
+    </div>
+  );
+}
+
+interface ChatTestDisplayResult extends ChatTestModelResult {
+  pending?: boolean;
+}
+
+interface ChatTestRound {
+  id: string;
+  providerId: number;
+  providerName: string;
+  message: string;
+  createdAt: number;
+  results: ChatTestDisplayResult[];
+}
+
+const DEFAULT_CHAT_TEST_MESSAGE = "我想知道你现在在想啥呢？我好无聊";
+const DEFAULT_CHAT_TEST_SYSTEM_PROMPT =
+  "你是一个自然、简洁的中文聊天助手。请像真实聊天一样直接回复用户，不要只返回 ping/pong。";
+
+function providerModelChoices(provider: LLMProviderOut | null | undefined): ProviderModel[] {
+  if (!provider) return [];
+  const seen = new Set<string>();
+  const out: ProviderModel[] = [];
+  const add = (id: string, enabled = true, custom = false, label: string | null = null) => {
+    const modelId = String(id || "").trim();
+    if (!modelId || seen.has(modelId)) return;
+    seen.add(modelId);
+    out.push({ id: modelId, enabled, custom, label });
+  };
+  for (const item of provider.models || []) {
+    add(item.id, !!item.enabled, !!item.custom, item.label ?? null);
+  }
+  add(provider.default_model, true, false, "默认模型");
+  return out.sort((a, b) => Number(b.enabled) - Number(a.enabled) || a.id.localeCompare(b.id));
+}
+
+function ProviderChatTestDialog({
+  open,
+  onOpenChange,
+  providers,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  providers: LLMProviderOut[];
+}) {
+  const [providerId, setProviderId] = useState<number | null>(providers[0]?.id ?? null);
+  const selectedProvider = providers.find((item) => item.id === providerId) || providers[0] || null;
+  const modelChoices = providerModelChoices(selectedProvider);
+  const [selectedModels, setSelectedModels] = useState<string[]>([]);
+  const [message, setMessage] = useState(DEFAULT_CHAT_TEST_MESSAGE);
+  const [systemPrompt, setSystemPrompt] = useState(DEFAULT_CHAT_TEST_SYSTEM_PROMPT);
+  const [maxTokens, setMaxTokens] = useState(1200);
+  const [timeoutSeconds, setTimeoutSeconds] = useState(90);
+  const [rounds, setRounds] = useState<ChatTestRound[]>([]);
+  const [histories, setHistories] = useState<Record<string, ChatTestTurn[]>>({});
+  const [running, setRunning] = useState(false);
+
+  useEffect(() => {
+    if (!open) return;
+    if (!selectedProvider && providers[0]) {
+      setProviderId(providers[0].id);
+    }
+  }, [open, selectedProvider, providers]);
+
+  useEffect(() => {
+    if (!open || !selectedProvider) return;
+    const enabled = providerModelChoices(selectedProvider).filter((item) => item.enabled).map((item) => item.id);
+    setSelectedModels((prev) => {
+      const valid = prev.filter((id) => modelChoices.some((item) => item.id === id));
+      if (valid.length > 0) return valid;
+      return enabled.length > 0 ? enabled.slice(0, 8) : modelChoices.slice(0, 8).map((item) => item.id);
+    });
+  }, [open, selectedProvider?.id]);
+
+  const toggleModel = (modelId: string) => {
+    setSelectedModels((prev) =>
+      prev.includes(modelId) ? prev.filter((item) => item !== modelId) : [...prev, modelId],
+    );
+  };
+
+  const setEnabledModels = () => {
+    const enabled = modelChoices.filter((item) => item.enabled).map((item) => item.id);
+    setSelectedModels(enabled.length > 0 ? enabled : modelChoices.map((item) => item.id));
+  };
+
+  const resetConversation = () => {
+    setRounds([]);
+    setHistories({});
+  };
+
+  const updateRoundResult = (roundId: string, modelId: string, result: ChatTestDisplayResult) => {
+    setRounds((prev) =>
+      prev.map((round) =>
+        round.id === roundId
+          ? {
+              ...round,
+              results: round.results.map((item) =>
+                item.requested_model === modelId ? result : item,
+              ),
+            }
+          : round,
+      ),
+    );
+  };
+
+  const sendTest = async () => {
+    const provider = selectedProvider;
+    const text = message.trim();
+    if (!provider) {
+      toast.error("请先选择模型提供商");
+      return;
+    }
+    if (selectedModels.length === 0) {
+      toast.error("请至少选择一个模型");
+      return;
+    }
+    if (!text) {
+      toast.error("测试语不能为空");
+      return;
+    }
+    setRunning(true);
+    const createdAt = Date.now();
+    const roundId = `${createdAt}`;
+    const modelsToTest = [...selectedModels];
+    const historiesForRequest = modelsToTest.reduce<Record<string, ChatTestTurn[]>>((acc, modelId) => {
+      const key = `${provider.id}:${modelId}`;
+      acc[modelId] = histories[key] || [];
+      return acc;
+    }, {});
+    setRounds((prev) => [
+      ...prev,
+      {
+        id: roundId,
+        providerId: provider.id,
+        providerName: provider.name,
+        message: text,
+        createdAt,
+        results: modelsToTest.map((modelId) => ({
+          ok: false,
+          requested_model: modelId,
+          latency_ms: 0,
+          input_tokens: 0,
+          output_tokens: 0,
+          empty_response: false,
+          pending: true,
+        })),
+      },
+    ]);
+    setHistories((prev) => {
+      const next = { ...prev };
+      const userTurn: ChatTestTurn = { role: "user", content: text };
+      for (const modelId of modelsToTest) {
+        const key = `${provider.id}:${modelId}`;
+        next[key] = [...(next[key] || []), userTurn].slice(-16);
+      }
+      return next;
+    });
+    try {
+      await Promise.all(
+        modelsToTest.map(async (modelId) => {
+          try {
+            const response = await chatTestProviderModels(provider.id, {
+              models: [modelId],
+              message: text,
+              history: historiesForRequest[modelId] || [],
+              system_prompt: systemPrompt.trim() || DEFAULT_CHAT_TEST_SYSTEM_PROMPT,
+              max_tokens: maxTokens,
+              timeout_seconds: timeoutSeconds,
+            });
+            const result = response.results[0] || {
+              ok: false,
+              requested_model: modelId,
+              latency_ms: 0,
+              input_tokens: 0,
+              output_tokens: 0,
+              empty_response: true,
+              error: "后端没有返回该模型的测活结果。",
+            };
+            updateRoundResult(roundId, modelId, result);
+            if (result.ok && result.response) {
+              setHistories((prev) => {
+                const key = `${provider.id}:${modelId}`;
+                const next = { ...prev };
+                const assistantTurn: ChatTestTurn = { role: "assistant", content: result.response };
+                next[key] = [...(next[key] || []), assistantTurn].slice(-16);
+                return next;
+              });
+            }
+          } catch (err) {
+            updateRoundResult(roundId, modelId, {
+              ok: false,
+              requested_model: modelId,
+              latency_ms: 0,
+              input_tokens: 0,
+              output_tokens: 0,
+              empty_response: false,
+              error: getErrMsg(err),
+            });
+          }
+        }),
+      );
+    } finally {
+      setRunning(false);
+    }
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="flex max-h-[88vh] max-w-5xl flex-col overflow-hidden">
+        <DialogHeader>
+          <DialogTitle>模型测活</DialogTitle>
+          <DialogDescription>
+            选择一个 Provider 和多个模型，用真实聊天请求并发获取回复；本窗口内会临时保留上下文，关闭后不落库。
+          </DialogDescription>
+        </DialogHeader>
+        <div className="grid min-h-0 flex-1 gap-4 lg:grid-cols-[320px_minmax(0,1fr)]">
+          <div className="min-h-0 space-y-4 overflow-y-auto rounded-md border bg-muted/20 p-3">
+            <div className="space-y-1.5">
+              <Label>模型提供商</Label>
+              <Select
+                value={selectedProvider ? String(selectedProvider.id) : ""}
+                onChange={(event) => {
+                  const nextId = Number(event.target.value);
+                  setProviderId(Number.isFinite(nextId) ? nextId : null);
+                  setSelectedModels([]);
+                }}
+              >
+                {providers.map((provider) => (
+                  <option key={provider.id} value={String(provider.id)}>
+                    {provider.name} · {provider.provider}
+                  </option>
+                ))}
+              </Select>
+            </div>
+
+            <div className="space-y-2">
+              <div className="flex items-center justify-between gap-2">
+                <Label>选择模型</Label>
+                <div className="flex items-center gap-1">
+                  <Button type="button" variant="ghost" size="sm" className="h-7 px-2 text-xs" onClick={setEnabledModels}>
+                    已启用
+                  </Button>
+                  <Button type="button" variant="ghost" size="sm" className="h-7 px-2 text-xs" onClick={() => setSelectedModels(modelChoices.map((item) => item.id))}>
+                    全选
+                  </Button>
+                  <Button type="button" variant="ghost" size="sm" className="h-7 px-2 text-xs" onClick={() => setSelectedModels([])}>
+                    清空
+                  </Button>
+                </div>
+              </div>
+              <div className="max-h-48 space-y-1 overflow-y-auto rounded-md border bg-background p-1">
+                {modelChoices.length > 0 ? (
+                  modelChoices.map((model) => (
+                    <label
+                      key={model.id}
+                      className="flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-xs hover:bg-muted/60"
+                    >
+                      <input
+                        type="checkbox"
+                        checked={selectedModels.includes(model.id)}
+                        onChange={() => toggleModel(model.id)}
+                      />
+                      <span className="min-w-0 flex-1 truncate font-mono" title={model.id}>
+                        {model.id}
+                      </span>
+                      {model.id === selectedProvider?.default_model ? <MetaBadge tone="success">默认</MetaBadge> : null}
+                      {model.enabled ? <MetaBadge>启用</MetaBadge> : null}
+                    </label>
+                  ))
+                ) : (
+                  <div className="px-2 py-4 text-center text-xs text-muted-foreground">
+                    当前 Provider 没有模型清单，请先 Fetch 或手动添加。
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-2">
+              <div className="space-y-1.5">
+                <Label>最大输出 Token</Label>
+                <Input
+                  type="number"
+                  min={64}
+                  max={8000}
+                  value={maxTokens}
+                  onChange={(event) => setMaxTokens(Number(event.target.value) || 1200)}
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label>超时秒数</Label>
+                <Input
+                  type="number"
+                  min={10}
+                  max={600}
+                  value={timeoutSeconds}
+                  onChange={(event) => setTimeoutSeconds(Number(event.target.value) || 90)}
+                />
+              </div>
+            </div>
+
+            <div className="space-y-1.5">
+              <Label>系统提示词</Label>
+              <Textarea
+                value={systemPrompt}
+                rows={4}
+                maxLength={2000}
+                onChange={(event) => setSystemPrompt(event.target.value)}
+              />
+            </div>
+          </div>
+
+          <div className="flex min-h-0 flex-col overflow-hidden rounded-md border bg-background">
+            <div className="flex flex-wrap items-center justify-between gap-2 border-b px-3 py-2">
+              <div className="text-sm font-medium">测试对话</div>
+              <Button type="button" variant="ghost" size="sm" onClick={resetConversation} disabled={running || rounds.length === 0}>
+                <RotateCcw className="mr-1 h-4 w-4" />
+                清空上下文
+              </Button>
+            </div>
+            <div className="min-h-0 flex-1 space-y-4 overflow-y-auto bg-muted/20 p-3">
+              {rounds.length === 0 ? (
+                <div className="flex h-full min-h-64 items-center justify-center rounded-md border border-dashed bg-background px-4 text-center text-sm text-muted-foreground">
+                  输入一句自然测试语并发送后，这里会显示每个模型的实时回复、耗时和 token 统计。
+                </div>
+              ) : (
+                rounds.map((round) => (
+                  <div key={round.id} className="space-y-3">
+                    <div className="flex justify-end">
+                      <div className="max-w-[82%] rounded-md bg-primary px-3 py-2 text-sm leading-6 text-primary-foreground">
+                        <div className="mb-1 text-[11px] opacity-80">
+                          {round.providerName} · {new Date(round.createdAt).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" })}
+                        </div>
+                        {round.message}
+                      </div>
+                    </div>
+                    <div className="grid gap-2 xl:grid-cols-2">
+                      {round.results.map((result) => (
+                        <ChatTestResultCard key={`${round.id}:${result.requested_model}`} result={result} />
+                      ))}
+                    </div>
+                  </div>
+                ))
+              )}
+              {running ? (
+                <div className="flex items-center gap-2 rounded-md border bg-background px-3 py-2 text-sm text-muted-foreground">
+                  <Loader2 className="h-4 w-4 animate-spin text-primary" />
+                  正在并发请求 {selectedModels.length} 个模型，结果会逐个更新
+                </div>
+              ) : null}
+            </div>
+            <div className="border-t bg-background p-3">
+              <div className="flex gap-2">
+                <Textarea
+                  value={message}
+                  rows={2}
+                  maxLength={2000}
+                  onChange={(event) => setMessage(event.target.value)}
+                  onKeyDown={(event) => {
+                    if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+                      event.preventDefault();
+                      if (!running) void sendTest();
+                    }
+                  }}
+                  placeholder="输入一条真实聊天测试语"
+                  className="min-h-12"
+                />
+                <Button type="button" className="h-auto self-stretch" disabled={running} onClick={() => void sendTest()}>
+                  {running ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
+                  <span className="sr-only">发送</span>
+                </Button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function ChatTestResultCard({ result }: { result: ChatTestDisplayResult }) {
+  return (
+    <div className="rounded-md border bg-background px-3 py-2">
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <div className="truncate font-mono text-xs font-semibold" title={result.requested_model}>
+            {result.requested_model}
+          </div>
+          <div className="mt-1 text-[11px] text-muted-foreground">
+            {result.pending ? "等待响应" : `${result.latency_ms} ms`}
+            {result.model ? ` · ${result.model}` : ""}
+            {result.input_tokens || result.output_tokens ? ` · ${result.input_tokens}/${result.output_tokens} tokens` : ""}
+          </div>
+        </div>
+        <MetaBadge tone={result.pending ? undefined : result.ok ? "success" : "danger"}>
+          {result.pending ? "请求中" : result.ok ? "可用" : result.empty_response ? "空返回" : "失败"}
+        </MetaBadge>
+      </div>
+      {result.pending ? (
+        <div className="mt-2 flex items-center gap-2 rounded-md bg-muted/40 px-3 py-2 text-sm leading-6 text-muted-foreground">
+          <Loader2 className="h-4 w-4 animate-spin text-primary" />
+          正在等待模型返回
+        </div>
+      ) : result.ok && result.response ? (
+        <div className="mt-2 whitespace-pre-wrap break-words rounded-md bg-muted/40 px-3 py-2 text-sm leading-6">
+          {result.response}
+        </div>
+      ) : (
+        <div className="mt-2 break-words rounded-md bg-destructive/10 px-3 py-2 text-sm leading-6 text-destructive">
+          {result.error || "没有拿到可展示文本。"}
+        </div>
       )}
     </div>
   );

@@ -25,6 +25,7 @@ from typing import Any
 
 import httpx
 
+from .. import __version__
 from ..crypto import decrypt_str
 from ..db.models.command import (
     LLM_API_FORMAT_ANTHROPIC_MESSAGES,
@@ -48,6 +49,20 @@ _MAX_RETRIES = 3
 _RETRY_BASE_DELAY = 1.0
 # 最大退避时间（秒）
 _RETRY_MAX_DELAY = 30.0
+_LLM_USER_AGENT = f"TelePilot/{__version__} LLM Client"
+
+
+def _llm_headers(
+    *,
+    content_type: str | None = "application/json",
+    accept: str | None = None,
+) -> dict[str, str]:
+    headers = {"User-Agent": _LLM_USER_AGENT}
+    if content_type:
+        headers["Content-Type"] = content_type
+    if accept:
+        headers["Accept"] = accept
+    return headers
 
 
 def _timeout_for_call(base_url: str, timeout_seconds: int | None) -> httpx.Timeout:
@@ -564,7 +579,7 @@ class OpenAIClient(LLMClient):
             raise LLMError("联网搜索需要使用 OpenAI Responses API（api_format=responses）")
         url = f"{self._base_url}/chat/completions"
         # Ollama 部署可能不需要 api_key；为空时不下发 Authorization 头
-        headers = {"Content-Type": "application/json"}
+        headers = _llm_headers()
         if self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"
         # 视觉路径：content 改成数组，先 text 再 image_url（OpenAI / mimo / GLM-4V 均如此）
@@ -670,7 +685,7 @@ class OpenAIClient(LLMClient):
         if not model:
             raise LLMError("transcribe() 必须指定 model（如 'whisper-1'）")
         url = f"{self._base_url}/audio/transcriptions"
-        headers = {}
+        headers = _llm_headers(content_type=None)
         if self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"
         # 文件名给个通用后缀，让上游按二进制 audio 流处理
@@ -734,7 +749,7 @@ class OpenAIClient(LLMClient):
             raise LLMError("当前 /images/generations 路径暂不支持参考图；请改用 api_format=responses 的 Provider")
 
         url = f"{self._base_url}/images/generations"
-        headers = {"Content-Type": "application/json"}
+        headers = _llm_headers()
         if self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"
 
@@ -838,6 +853,7 @@ class AnthropicClient(LLMClient):
             raise LLMError("当前 Anthropic 调用路径尚未接入联网搜索；请使用 OpenAI Responses provider")
         url = f"{self._base_url}/messages"
         headers = {
+            "User-Agent": _LLM_USER_AGENT,
             "x-api-key": self._api_key,
             "anthropic-version": self._ANTHROPIC_VERSION,
             "Content-Type": "application/json",
@@ -980,6 +996,7 @@ class AnthropicClient(LLMClient):
             raise LLMError("当前 Anthropic streaming 尚未接入联网搜索；请使用 OpenAI Responses provider")
         url = f"{self._base_url}/messages"
         headers = {
+            "User-Agent": _LLM_USER_AGENT,
             "x-api-key": self._api_key,
             "anthropic-version": self._ANTHROPIC_VERSION,
             "Content-Type": "application/json",
@@ -1152,7 +1169,7 @@ class ResponsesClient(LLMClient):
         timeout_seconds: int | None = None,
     ) -> LLMResult:
         url = f"{self._base_url}/responses"
-        headers = {"Content-Type": "application/json", "Accept": "application/json"}
+        headers = _llm_headers(accept="application/json")
         if self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"
         # 视觉路径：Responses API 的 content 是 [{"type":"input_text"}, {"type":"input_image"}]
@@ -1264,7 +1281,7 @@ class ResponsesClient(LLMClient):
         timeout_seconds: int | None = None,
     ) -> AsyncIterator[LLMStreamChunk]:
         url = f"{self._base_url}/responses"
-        headers = {"Content-Type": "application/json", "Accept": "text/event-stream"}
+        headers = _llm_headers(accept="text/event-stream")
         if self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"
         if images:
@@ -1430,7 +1447,7 @@ class ResponsesClient(LLMClient):
         if web_search:
             raise LLMError("图片生成不支持联网搜索，请关闭 web_search")
         url = f"{self._base_url}/responses"
-        headers = {"Content-Type": "application/json", "Accept": "application/json"}
+        headers = _llm_headers(accept="application/json")
         if self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"
 
