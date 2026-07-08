@@ -75,7 +75,7 @@ const TIME_RANGE_LABELS: Record<TimeRange, string> = {
 
 const STAGE_LABELS: Record<"received" | "routed" | "ran" | "sent", string> = {
   received: "收到",
-  routed: "匹配",
+  routed: "路由",
   ran: "执行",
   sent: "发送",
 };
@@ -163,7 +163,7 @@ export function Logs() {
   const pluginOptions = matrixQ.data?.features.map((item) => item.key) ?? [];
   const activeTitle = view === "messages" ? "日志 · 消息流" : "日志 · 控制台日志";
   const activeDescription = view === "messages"
-    ? "按消息追踪收到、匹配、执行、发送四段状态，直接定位卡点、失败和正常跳过。"
+    ? "按消息追踪收到、路由、执行、发送四段状态，直接定位卡点、失败和正常跳过。"
     : "查看更原始的系统、事件和插件运行日志，包含 debug、detail JSON 与后台上下文。";
 
   return (
@@ -537,7 +537,7 @@ function MessageStream({
         <SectionHeader
           icon={MessageSquareText}
           title="消息流"
-          description="每行直接显示收到、匹配、执行、发送四段状态。"
+          description="每行直接显示收到、路由、执行、发送四段状态。"
           meta={<SignalPill tone="neutral" label="返回" value={`${messages.length} 条`} />}
         />
       </CardHeader>
@@ -739,9 +739,11 @@ function MessageRow({
 }) {
   const meta = verdictMeta(message.verdict);
   const messageText = message.text_preview || message.inline_query || message.chosen_inline_query || message.event_type;
+  const pluginText = pluginKeysLabel(message.plugin_keys, message.plugin_count);
+  const detailLabel = selected ? "收起详情" : "查看详情";
   return (
-    <div className={cn("overflow-hidden rounded-lg border bg-background transition", selected ? "border-primary/60 shadow-sm" : "border-border hover:border-primary/40")}>
-      <button type="button" className="w-full min-w-0 p-3 text-left" onClick={onSelect}>
+    <div className={cn("group overflow-hidden rounded-lg border bg-background transition", selected ? "border-primary/60 shadow-sm" : "border-border hover:border-primary/40 hover:shadow-sm")}>
+      <button type="button" className="w-full min-w-0 cursor-pointer p-3 text-left" onClick={onSelect} aria-expanded={selected}>
         <div className="grid min-w-0 grid-cols-1 gap-3 2xl:grid-cols-[150px_minmax(180px,1.1fr)_minmax(260px,1.8fr)_300px_112px] 2xl:items-center">
           <div className="flex min-w-0 items-center justify-between gap-2 2xl:block">
             <span className="text-xs text-muted-foreground 2xl:hidden">{formatDateTime(message.started_at, timezone)}</span>
@@ -765,21 +767,29 @@ function MessageRow({
               {message.sender_name ? <span>{message.sender_name}</span> : null}
               {message.sender_user_id ? <span>user {message.sender_user_id}</span> : null}
               {message.message_id ? <span>msg {message.message_id}</span> : null}
-              {message.plugin_count ? <span>插件 {message.plugin_count}</span> : null}
+              {pluginText ? <span>插件 {pluginText}</span> : null}
               {message.action_count ? <span>动作 {message.action_count}</span> : null}
             </div>
           </div>
           <FunelStrip message={message} />
-          <div className="hidden justify-end 2xl:flex">
+          <div className="hidden flex-col items-end gap-2 2xl:flex">
             <VerdictBadge verdict={message.verdict} />
+            <span className="inline-flex items-center gap-1 rounded-full border bg-background/70 px-2 py-1 text-[11px] font-medium text-muted-foreground transition group-hover:border-primary/40 group-hover:text-foreground">
+              <MousePointerClick className="h-3 w-3" />
+              {detailLabel}
+            </span>
           </div>
         </div>
-        <div className={cn("mt-3 rounded-md px-3 py-2 text-sm", meta.panelClass)}>
+        <div className={cn("mt-3 rounded-md border px-3 py-2 text-sm transition group-hover:ring-1 group-hover:ring-primary/25", meta.panelClass)}>
           <div className="flex flex-wrap items-start justify-between gap-2">
             <span className="font-medium">{message.reason_text}</span>
-            {message.reason_code ? <span className="font-mono text-xs opacity-80">{message.reason_code}</span> : null}
+            <span className="inline-flex items-center gap-1 rounded-full bg-background/60 px-2 py-0.5 text-[11px] font-medium opacity-90 2xl:hidden">
+              <MousePointerClick className="h-3 w-3" />
+              {detailLabel}
+            </span>
           </div>
           <p className="mt-1 text-xs leading-5 opacity-90">{message.next_step}</p>
+          {message.reason_code ? <p className="mt-1 font-mono text-[11px] opacity-70">{message.reason_code}</p> : null}
         </div>
       </button>
       {selected ? (
@@ -861,22 +871,20 @@ function TraceDetailPanel({
           </div>
           <div className="shrink-0 text-xs text-muted-foreground">{formatDateTime(detail.started_at, timezone)}</div>
         </div>
-        <div className="mt-3 grid gap-2 text-xs sm:grid-cols-2 lg:grid-cols-4">
-          <InfoCell label="来源" value={`${detail.source_channel || "-"} / ${detail.event_type}`} />
-          <InfoCell label="会话" value={detail.chat_id ?? "-"} />
-          <InfoCell label="消息" value={detail.message_id ?? "-"} />
-          <InfoCell label="耗时" value={detail.duration_ms == null ? "-" : `${detail.duration_ms}ms`} />
-        </div>
       </section>
 
+      <OperationalTraceSummary detail={detail} message={message} />
       {detail.text_preview ? <p className="rounded-lg border bg-background p-3 text-sm whitespace-pre-wrap">{detail.text_preview}</p> : null}
-      <InlineTraceSummary trace={detail} actions={detail.actions} />
-      <NativeRawSummary meta={detail.native_raw_meta} />
-      <ProbeReportPanel report={detail.probe_report} />
       <Timeline spans={detail.spans} actions={detail.actions} timezone={timezone} />
       <details className="rounded-lg border bg-background p-3">
-        <summary className="cursor-pointer text-sm font-medium">高级数据</summary>
+        <summary className="cursor-pointer text-sm font-medium">插件开发详情</summary>
         <div className="mt-3 space-y-3">
+          <p className="rounded-md bg-muted px-3 py-2 text-xs leading-5 text-muted-foreground">
+            这里是给插件开发和深度排障看的原始材料：触发入口建议、动作建议、标准信封路径和 payload。日常排障优先看上面的摘要与关键时间线。
+          </p>
+          <InlineTraceSummary trace={detail} actions={detail.actions} />
+          <NativeRawSummary meta={detail.native_raw_meta} />
+          <ProbeReportPanel report={detail.probe_report} />
           <JsonBlock title="native_raw_meta" value={detail.native_raw_meta} />
           <JsonBlock title="raw_summary" value={detail.raw_summary} />
           <JsonBlock title="payload_snapshot" value={detail.payload_snapshot} />
@@ -884,6 +892,32 @@ function TraceDetailPanel({
         </div>
       </details>
     </div>
+  );
+}
+
+function OperationalTraceSummary({ detail, message }: { detail: EventTraceDetail; message?: MessageFunelItem }) {
+  const pluginText = pluginKeysLabel(detail.plugin_keys, detail.plugin_count);
+  const sentText = sendSummary(detail.actions, message);
+  return (
+    <section className="rounded-lg border bg-background p-3">
+      <div className="mb-3 flex flex-wrap items-center gap-2">
+        <MessageSquareText className="h-4 w-4 text-primary" />
+        <span className="text-sm font-medium">排障摘要</span>
+        <Badge variant="secondary">默认只看人话版</Badge>
+      </div>
+      <div className="grid gap-2 text-xs sm:grid-cols-2 lg:grid-cols-4">
+        <InfoCell label="会话" value={conversationLabel(detail)} />
+        <InfoCell label="发送者" value={actorLabel(detail)} />
+        <InfoCell label="处理插件" value={pluginText || "未进入插件"} />
+        <InfoCell label="发送结果" value={sentText} />
+      </div>
+      <div className="mt-3 grid gap-2 text-xs sm:grid-cols-2 lg:grid-cols-4">
+        <InfoCell label="入口" value={`${channelLabel(detail.source_channel)} / ${detail.event_type}`} />
+        <InfoCell label="消息 ID" value={detail.message_id ?? "-"} />
+        <InfoCell label="耗时" value={detail.duration_ms == null ? "-" : `${detail.duration_ms}ms`} />
+        <InfoCell label="Trace" value={detail.trace_id} />
+      </div>
+    </section>
   );
 }
 
@@ -915,8 +949,8 @@ function Timeline({ spans, actions, timezone }: { spans: EventSpanItem[]; action
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <div className="flex flex-wrap items-center gap-1.5">
                     <StatusBadge status={item.span.status} />
-                    <Badge variant="secondary">{item.span.phase}</Badge>
-                    {item.span.component ? <Badge variant="secondary">{item.span.component}</Badge> : null}
+                    <Badge variant="secondary">{phaseLabel(item.span.phase)}</Badge>
+                    {item.span.plugin_key ? <Badge variant="secondary">{item.span.plugin_key}</Badge> : null}
                   </div>
                   <span className="text-xs text-muted-foreground">{formatDateTime(item.span.started_at, timezone)}</span>
                 </div>
@@ -928,8 +962,8 @@ function Timeline({ spans, actions, timezone }: { spans: EventSpanItem[]; action
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <div className="flex flex-wrap items-center gap-1.5">
                     <StatusBadge status={item.action.status} />
-                    <Badge variant="secondary">{item.action.action_type}</Badge>
-                    {item.action.actual_send_via ? <Badge variant="secondary">{item.action.actual_send_via}</Badge> : null}
+                    <Badge variant="secondary">{actionTypeLabel(item.action.action_type)}</Badge>
+                    {item.action.actual_send_via ? <Badge variant="secondary">{channelLabel(item.action.actual_send_via)}</Badge> : null}
                   </div>
                   <span className="text-xs text-muted-foreground">{formatDateTime(item.action.created_at, timezone)}</span>
                 </div>
@@ -1484,20 +1518,75 @@ function stageLabel(status: MessageFunelStage): string {
 
 function channelLabel(channel?: string | null): string {
   if (channel === "interaction_bot") return "交互 Bot";
+  if (channel === "interaction_bot_reply") return "交互 Bot 回复";
   if (channel === "userbot") return "UserBot";
+  if (channel === "userbot_reply") return "UserBot 回复";
   if (channel === "account_bot") return "管理 Bot";
   if (channel === "external_payment_notice") return "转账通知";
   return channel || "未知来源";
 }
 
+function phaseLabel(phase?: string | null): string {
+  const value = (phase || "").toLowerCase();
+  if (value.includes("receive")) return "收到消息";
+  if (value.includes("subscription") || value.includes("route")) return "路由判断";
+  if (value.includes("plugin_invoke")) return "插件执行";
+  if (value.includes("plugin_return")) return "插件返回";
+  if (value.includes("contract")) return "契约检查";
+  if (value.includes("delivery") || value.includes("send")) return "发送处理";
+  if (value.includes("settlement")) return "收付款处理";
+  if (value.includes("session")) return "会话处理";
+  return phase || "阶段记录";
+}
+
+function actionTypeLabel(actionType?: string | null): string {
+  const value = (actionType || "").toLowerCase();
+  if (value === "send_message") return "发送消息";
+  if (value === "edit_message") return "编辑消息";
+  if (value === "delete_message") return "删除消息";
+  if (value === "answer_inline_query") return "Inline 回答";
+  if (value === "payout") return "结算付款";
+  if (value === "start_session") return "开启会话";
+  if (value === "close_session") return "关闭会话";
+  return actionType || "动作记录";
+}
+
 function conversationLabel(trace: EventTraceSummary): string {
   if (trace.chat_id != null) {
     const kind = trace.chat_id < 0 ? "群" : "私";
-    return `${kind} ${trace.chat_id}`;
+    return trace.chat_title ? `${kind} ${trace.chat_title} / ${trace.chat_id}` : `${kind} ${trace.chat_id}`;
   }
   if (trace.sender_name) return trace.sender_name;
   if (trace.sender_user_id != null) return `user ${trace.sender_user_id}`;
   return "未知会话";
+}
+
+function actorLabel(trace: EventTraceSummary): string {
+  const parts = [
+    trace.sender_name || "",
+    trace.sender_user_id != null ? `user ${trace.sender_user_id}` : "",
+  ].filter(Boolean);
+  return parts.length ? parts.join(" / ") : "未知发送者";
+}
+
+function pluginKeysLabel(keys?: string[] | null, count?: number): string {
+  const clean = Array.from(new Set((keys ?? []).map((item) => String(item).trim()).filter(Boolean)));
+  if (clean.length) {
+    const visible = clean.slice(0, 3).join("、");
+    return clean.length > 3 ? `${visible} 等 ${clean.length} 个` : visible;
+  }
+  return count ? `${count} 个` : "";
+}
+
+function sendSummary(actions: EventActionItem[], message?: MessageFunelItem): string {
+  if (!actions.length) {
+    return message?.funel.sent === "none" ? "未产生发送动作" : stageLabel(message?.funel.sent || "none");
+  }
+  const failed = actions.filter((item) => isFailedStatus(item.status) || item.error_code || item.error_message);
+  if (failed.length) return `${failed.length} 个发送动作失败`;
+  const sent = actions.filter((item) => item.action_type === "send_message" || item.telegram_message_id != null);
+  if (sent.length) return `已发送 ${sent.length} 条`;
+  return `已记录 ${actions.length} 个动作`;
 }
 
 function errorMessage(error: unknown): string {

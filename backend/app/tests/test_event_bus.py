@@ -199,6 +199,10 @@ def test_normalize_bot_update_projects_developer_message_summary() -> None:
     assert event["message"]["media"]["type"] == "document"
     assert event["message"]["reply_markup"]["button_count"] == 1
     assert event["reply_to"]["sender"]["user_id"] == 1002
+    assert event["chat"]["title"] == "Demo"
+    assert event["message"]["chat_title"] == "Demo"
+    assert event["message"]["chat"]["title"] == "Demo"
+    assert event["raw"]["chat"]["title"] == "Demo"
     assert event["raw"]["media"]["file_name"] == "demo.txt"
     assert event["raw"]["reply_markup"]["buttons"][0]["callback_data"] == "demo:start"
 
@@ -613,6 +617,25 @@ def test_normalize_userbot_event_projects_anonymous_admin_sender_chat() -> None:
     assert decisions[0].reason_code == "matched"
     assert decisions[1].matched is False
     assert decisions[1].reason_code == "scope_not_matched"
+
+
+def test_normalize_userbot_event_projects_chat_title() -> None:
+    chat = SimpleNamespace(id=-100456, title="UserBot 群", username="userbot_room", megagroup=True)
+    message = SimpleNamespace(
+        id=12,
+        chat_id=-100456,
+        sender_id=1001,
+        text="hello",
+        chat=chat,
+        sender=SimpleNamespace(id=1001, first_name="Alice", username="alice"),
+    )
+
+    event = normalize_userbot_event(1, SimpleNamespace(message=message, chat=chat))
+
+    assert event["chat"]["title"] == "UserBot 群"
+    assert event["chat"]["username"] == "userbot_room"
+    assert event["message"]["chat_title"] == "UserBot 群"
+    assert event["message"]["chat"]["title"] == "UserBot 群"
 
 
 def test_normalize_userbot_event_detects_raw_peer_channel_sender() -> None:

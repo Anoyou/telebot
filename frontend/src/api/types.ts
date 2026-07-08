@@ -855,6 +855,7 @@ export interface EventTraceSummary {
   callback_query_id?: string | null;
   sender_user_id?: number | null;
   sender_name?: string | null;
+  chat_title?: string | null;
   text_preview?: string | null;
   inline_query?: string | null;
   chosen_inline_result_id?: string | null;
@@ -865,6 +866,7 @@ export interface EventTraceSummary {
   duration_ms?: number | null;
   native_raw_meta?: NativeRawMeta | null;
   plugin_count: number;
+  plugin_keys: string[];
   action_count: number;
   error_count: number;
 }

@@ -14,7 +14,7 @@ from datetime import datetime
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import String, cast, desc, func, or_, select
 
 from ..db.models.log import AuditLog, EventAction, EventSpan, EventTrace, RuntimeLog
@@ -159,6 +159,7 @@ class EventTraceSummary(BaseModel):
     callback_query_id: str | None = None
     sender_user_id: int | None = None
     sender_name: str | None = None
+    chat_title: str | None = None
     text_preview: str | None = None
     inline_query: str | None = None
     chosen_inline_result_id: str | None = None
@@ -169,12 +170,14 @@ class EventTraceSummary(BaseModel):
     duration_ms: int | None = None
     native_raw_meta: dict[str, Any] | None = None
     plugin_count: int = 0
+    plugin_keys: list[str] = Field(default_factory=list)
     action_count: int = 0
     error_count: int = 0
 
     @classmethod
     def from_row(cls, row: EventTrace) -> EventTraceSummary:
         inline_query, chosen_inline_result_id, chosen_inline_query = _inline_trace_summary(row)
+        chat_title = _chat_title_summary(row)
         return cls(
             id=row.id,
             trace_id=row.trace_id,
@@ -187,6 +190,7 @@ class EventTraceSummary(BaseModel):
             callback_query_id=row.callback_query_id,
             sender_user_id=row.sender_user_id,
             sender_name=row.sender_name,
+            chat_title=chat_title,
             text_preview=redact_text(row.text_preview or "") or None,
             inline_query=inline_query,
             chosen_inline_result_id=chosen_inline_result_id,
@@ -219,6 +223,19 @@ def _first_text(*values: Any) -> str | None:
         if text:
             return redact_text(text) or None
     return None
+
+
+def _chat_title_summary(row: EventTrace) -> str | None:
+    payload = row.payload_snapshot if isinstance(row.payload_snapshot, dict) else {}
+    raw = row.raw_summary if isinstance(row.raw_summary, dict) else {}
+    return _first_text(
+        _nested_text(payload, "chat", "title"),
+        _nested_text(payload, "source", "chat_title"),
+        _nested_text(payload, "message", "chat_title"),
+        _nested_text(raw, "chat", "title"),
+        _nested_text(raw, "message", "chat", "title"),
+        _nested_text(raw, "callback_query", "message", "chat", "title"),
+    )
 
 
 def _inline_trace_summary(row: EventTrace) -> tuple[str | None, str | None, str | None]:
@@ -285,6 +302,17 @@ async def _trace_summaries_with_counts(db: DBSession, rows: list[EventTrace]) ->
     trace_ids = [item.trace_id for item in summaries]
     if not trace_ids:
         return summaries
+    plugin_rows = (
+        await db.execute(
+            select(EventSpan.trace_id, EventSpan.plugin_key)
+            .where(EventSpan.trace_id.in_(trace_ids), EventSpan.plugin_key.is_not(None))
+            .group_by(EventSpan.trace_id, EventSpan.plugin_key)
+        )
+    ).all()
+    plugin_keys: dict[str, list[str]] = {trace_id: [] for trace_id in trace_ids}
+    for trace_id, key in plugin_rows:
+        if key:
+            plugin_keys.setdefault(trace_id, []).append(str(key))
     plugin_counts = {
         trace_id: int(count or 0)
         for trace_id, count in (
@@ -329,6 +357,7 @@ async def _trace_summaries_with_counts(db: DBSession, rows: list[EventTrace]) ->
         ).all()
     }
     for summary in summaries:
+        summary.plugin_keys = sorted(plugin_keys.get(summary.trace_id, []))
         summary.plugin_count = plugin_counts.get(summary.trace_id, 0)
         summary.action_count = action_counts.get(summary.trace_id, 0)
         summary.error_count = span_error_counts.get(summary.trace_id, 0) + action_error_counts.get(summary.trace_id, 0)
@@ -441,7 +470,9 @@ def _message_funel_item(
     actions: list[EventAction],
 ) -> MessageFunelItem:
     summary = EventTraceSummary.from_row(row)
-    summary.plugin_count = len({item.plugin_key for item in spans if item.plugin_key})
+    plugin_keys = sorted({item.plugin_key for item in spans if item.plugin_key})
+    summary.plugin_keys = plugin_keys
+    summary.plugin_count = len(plugin_keys)
     summary.action_count = len(actions)
     summary.error_count = sum(1 for item in spans if item.status in {"failed", "error", "warning", "warn"})
     summary.error_count += sum(1 for item in actions if item.status in {"failed", "error"})
@@ -646,7 +677,9 @@ async def get_event_trace(
         )
     ).scalars().all()
     summary = EventTraceSummary.from_row(row)
-    summary.plugin_count = len({item.plugin_key for item in spans if item.plugin_key})
+    plugin_keys = sorted({item.plugin_key for item in spans if item.plugin_key})
+    summary.plugin_keys = plugin_keys
+    summary.plugin_count = len(plugin_keys)
     summary.action_count = len(actions)
     summary.error_count = sum(1 for item in spans if item.status in {"failed", "error", "warning", "warn"})
     summary.error_count += sum(1 for item in actions if item.status in {"failed", "error"})

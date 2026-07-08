@@ -220,7 +220,7 @@ def normalize_bot_update(account_id: int, update: dict[str, Any], *, channel: st
             driver="telegram_bot_api",
             event_type="callback_query",
             update_id=update_id,
-            chat={"id": _int_or_none(chat.get("id")), "type": str(chat.get("type") or "") or None},
+            chat=_chat_ref(chat),
             sender=sender,
             message=message_payload,
             callback={
@@ -250,7 +250,7 @@ def normalize_bot_update(account_id: int, update: dict[str, Any], *, channel: st
             driver="telegram_bot_api",
             event_type="message_edited",
             update_id=update_id,
-            chat={"id": _int_or_none(chat.get("id")), "type": str(chat.get("type") or "") or None},
+            chat=_chat_ref(chat),
             sender=sender,
             message=message_payload,
             reply_to=_bot_reply_to(msg),
@@ -268,7 +268,7 @@ def normalize_bot_update(account_id: int, update: dict[str, Any], *, channel: st
         driver="telegram_bot_api",
         event_type="message",
         update_id=update_id,
-        chat={"id": _int_or_none(chat.get("id")), "type": str(chat.get("type") or "") or None},
+        chat=_chat_ref(chat),
         sender=sender,
         message=message_payload,
         reply_to=_bot_reply_to(msg),
@@ -287,6 +287,7 @@ def normalize_userbot_event(account_id: int, event: Any, *, command_meta: dict[s
     message_id = _int_or_none(getattr(message, "id", None) or getattr(event, "id", None))
     event_type = "command" if command_meta else "message"
     native_raw = _safe_to_dict(message)
+    chat = _telethon_chat_ref(native_raw, message=message, event=event, chat_id=chat_id)
     sender = _telethon_sender_ref(
         raw=native_raw,
         message=message,
@@ -299,6 +300,7 @@ def normalize_userbot_event(account_id: int, event: Any, *, command_meta: dict[s
         chat_id=chat_id,
         message_id=message_id,
         text=text,
+        chat=chat,
         sender_chat=sender.get("sender_chat") if isinstance(sender.get("sender_chat"), dict) else None,
     )
     return _event(
@@ -306,7 +308,7 @@ def normalize_userbot_event(account_id: int, event: Any, *, command_meta: dict[s
         channel="userbot",
         driver="telethon",
         event_type=event_type,
-        chat={"id": chat_id},
+        chat=chat or {"id": chat_id},
         sender=sender,
         message=message_payload,
         reply_to=_telethon_reply_to(native_raw),
@@ -643,6 +645,9 @@ def _bot_message_payload(msg: dict[str, Any], *, chat: dict[str, Any]) -> dict[s
         "reply_to_message_id": _int_or_none(reply.get("message_id")),
     }
     optional = {
+        "chat_type": str(chat.get("type") or "") or None,
+        "chat_title": str(chat.get("title") or "") or None,
+        "chat_username": str(chat.get("username") or "") or None,
         "caption": str(msg.get("caption") or "") or None,
         "date": msg.get("date"),
         "edited": bool(msg.get("edit_date")),
@@ -652,6 +657,7 @@ def _bot_message_payload(msg: dict[str, Any], *, chat: dict[str, Any]) -> dict[s
         "media": _bot_media_summary(msg),
         "reply_markup": _reply_markup_summary(msg.get("reply_markup")),
         "forward": _forward_summary(msg),
+        "chat": _chat_ref(chat),
         "sender_chat": _chat_ref(msg.get("sender_chat")),
         "via_bot": _user_ref_or_none(msg.get("via_bot")),
     }
@@ -692,6 +698,7 @@ def _bot_raw_summary(
         "media": _bot_media_summary(msg),
         "reply_markup": _reply_markup_summary(msg.get("reply_markup")),
         "forward": _forward_summary(msg),
+        "chat": _chat_ref(msg.get("chat")),
         "sender_chat": _chat_ref(msg.get("sender_chat")),
         "via_bot": _user_ref_or_none(msg.get("via_bot")),
         "thread_id": _int_or_none(msg.get("message_thread_id")),
@@ -708,6 +715,7 @@ def _telethon_message_payload(
     chat_id: int | None,
     message_id: int | None,
     text: str,
+    chat: dict[str, Any] | None = None,
     sender_chat: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     data = raw if isinstance(raw, dict) else {}
@@ -723,6 +731,9 @@ def _telethon_message_payload(
         ),
     }
     optional = {
+        "chat_type": str(chat.get("type") or "") if chat else None,
+        "chat_title": str(chat.get("title") or "") if chat else None,
+        "chat_username": str(chat.get("username") or "") if chat else None,
         "caption": str(data.get("caption") or "") or None,
         "date": data.get("date"),
         "edited": bool(data.get("edit_date")),
@@ -731,6 +742,7 @@ def _telethon_message_payload(
         "media": _native_media_summary(data.get("media")),
         "reply_markup": _reply_markup_summary(data.get("reply_markup")),
         "forward": _telethon_forward_summary(data),
+        "chat": chat,
         "sender_chat": _chat_ref(data.get("sender_chat")) or sender_chat,
         "via_bot": _user_ref_or_none(data.get("via_bot")),
     }
@@ -765,6 +777,7 @@ def _telethon_raw_summary(
         "media": _native_media_summary(data.get("media")),
         "reply_markup": _reply_markup_summary(data.get("reply_markup")),
         "forward": _telethon_forward_summary(data),
+        "chat": _chat_ref(data.get("chat")),
         "sender_chat": _chat_ref(data.get("sender_chat")) or sender_chat,
         "signature": str(data.get("post_author") or data.get("signature") or "") or None,
         "via_bot": _user_ref_or_none(data.get("via_bot")),
@@ -821,6 +834,34 @@ def _telethon_sender_ref(
         sender["sender_type"] = "user_via_chat"
         sender["sender_chat"] = sender_chat
     return sender
+
+
+def _telethon_chat_ref(
+    raw: dict[str, Any] | None,
+    *,
+    message: Any,
+    event: Any,
+    chat_id: int | None,
+) -> dict[str, Any] | None:
+    data = raw if isinstance(raw, dict) else {}
+    raw_chat = _chat_ref(data.get("chat"))
+    if raw_chat:
+        return raw_chat
+    chat_obj = getattr(message, "chat", None) or getattr(event, "chat", None)
+    title = _first_text(
+        getattr(chat_obj, "title", None),
+        getattr(chat_obj, "first_name", None),
+        getattr(chat_obj, "username", None),
+    )
+    username = _first_text(getattr(chat_obj, "username", None))
+    chat_type = _object_chat_type(chat_obj) or _telethon_raw_peer_type(data.get("peer_id"))
+    out = {
+        "id": chat_id,
+        "type": chat_type,
+        "title": title,
+        "username": username,
+    }
+    return {key: value for key, value in out.items() if value not in (None, "", [], {})} or None
 
 
 def _telethon_sender_chat_ref(

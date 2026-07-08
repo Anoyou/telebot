@@ -217,6 +217,7 @@ def build_message_funel(
         )
 
     if actions:
+        plugin_label = _plugin_label(plugin_spans)
         return MessageFunel(
             received="pass",
             routed="pass" if route_spans or plugin_spans else "skip",
@@ -225,11 +226,12 @@ def build_message_funel(
             verdict="responded",
             stuck_at=None,
             reason_code=None,
-            reason_text="消息已进入动作发送链路并完成记录。",
+            reason_text=f"{plugin_label} 已产生发送动作并完成记录。" if plugin_label else "消息已进入动作发送链路并完成记录。",
             next_step="如果群里仍看不到响应，展开详情确认实际发送通道、目标会话和 Telegram message id。",
         )
 
     if plugin_spans and _is_completed_trace(trace_status, trace):
+        plugin_label = _plugin_label(plugin_spans)
         return MessageFunel(
             received="pass",
             routed="pass" if route_spans else "skip",
@@ -238,8 +240,8 @@ def build_message_funel(
             verdict="responded",
             stuck_at=None,
             reason_code=None,
-            reason_text="消息已被插件处理完成，但插件没有产生发送动作。",
-            next_step="如果本来应该回复，检查插件是否返回 send_message 等动作，或是否被配置成只处理不回复。",
+            reason_text=f"{plugin_label} 已处理完成，但没有产生发送动作。",
+            next_step="如果本来应该回复，检查该插件是否返回 send_message 等动作，或是否被配置成只处理不回复。",
         )
 
     if _is_warn_status(trace_status):
@@ -361,6 +363,20 @@ def _first_error_code(actions: list[Any] | tuple[Any, ...]) -> str | None:
         if code:
             return code
     return None
+
+
+def _plugin_label(spans: list[Any] | tuple[Any, ...]) -> str:
+    keys: list[str] = []
+    for span in spans:
+        key = _text(_get(span, "plugin_key"))
+        if key and key not in keys:
+            keys.append(key)
+    if not keys:
+        return ""
+    if len(keys) == 1:
+        return f"插件 {keys[0]}"
+    visible = "、".join(keys[:3])
+    return f"插件 {visible} 等 {len(keys)} 个" if len(keys) > 3 else f"插件 {visible}"
 
 
 def _action_reason_text(action: Any, reason_code: str) -> str:

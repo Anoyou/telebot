@@ -68,6 +68,7 @@ def test_message_funel_responded_with_successful_action() -> None:
     assert funel.ran == "pass"
     assert funel.sent == "pass"
     assert funel.stuck_at is None
+    assert "插件 math10" in funel.reason_text
 
 
 def test_message_funel_no_response_normal_for_subscription_skip() -> None:
@@ -163,3 +164,4 @@ def test_message_funel_direct_passthrough_trace_is_responded() -> None:
     assert funel.routed == "pass"
     assert funel.ran == "pass"
     assert funel.sent == "none"
+    assert "插件 low_latency" in funel.reason_text

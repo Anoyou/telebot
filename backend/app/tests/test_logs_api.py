@@ -69,6 +69,14 @@ def test_trace_summary_projects_chosen_inline_result_fields() -> None:
     assert summary.chosen_inline_query == "payload chosen query"
 
 
+def test_trace_summary_projects_chat_title() -> None:
+    row = _trace_row(payload_snapshot={"chat": {"id": -1001, "title": "测试群"}})
+
+    summary = EventTraceSummary.from_row(row)
+
+    assert summary.chat_title == "测试群"
+
+
 class _EmptyScalarResult:
     def scalar_one(self):
         return 0
@@ -259,6 +267,7 @@ async def test_list_log_messages_batches_spans_actions_and_filters_verdict() -> 
 
     assert [row.trace_id for row in rows] == ["evt_failed"]
     assert rows[0].verdict == "failed"
+    assert rows[0].plugin_keys == ["math10"]
     assert rows[0].funel.sent == "fail"
     sql = "\n".join(db.statements)
     assert sql.count("FROM event_span") == 1
