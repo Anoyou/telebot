@@ -6,11 +6,14 @@ import {
   AlertTriangle,
   ArrowLeft,
   Bot,
+  ChevronRight,
   CheckCircle2,
   Clock3,
   Loader2,
+  MessageSquare,
   Minus,
   Save,
+  UserRound,
   X,
   XCircle,
 } from "lucide-react";
@@ -741,7 +744,7 @@ function ConfigActionJobWindow({
   const statusText = configActionJobStatusText(status);
   const terminal = CONFIG_ACTION_TERMINAL_STATUSES.has(status);
   const logs = job?.logs ?? [];
-  const summaryMessage = job ? configActionJobSummaryMessage(job) : "后台任务已创建，正在等待状态更新";
+  const resultView = buildConfigActionResultView(job);
   if (typeof document === "undefined") return null;
   if (minimized) {
     return createPortal(
@@ -773,7 +776,6 @@ function ConfigActionJobWindow({
             </div>
             <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
               <Badge variant={jobStatusBadgeVariant(status)}>{statusText}</Badge>
-              {job?.job_id ? <code className="max-w-full truncate">{job.job_id}</code> : null}
             </div>
           </div>
           <div className="flex shrink-0 items-center gap-1">
@@ -786,21 +788,8 @@ function ConfigActionJobWindow({
           </div>
         </div>
         <div className="min-h-0 flex-1 space-y-3 overflow-y-auto bg-muted/20 px-4 py-4">
-          <ConfigActionChatLine
-            level="info"
-            message={summaryMessage}
-            ts={job?.updated_at || job?.created_at}
-            active={!terminal}
-          />
-          {logs.map((item) => (
-            <ConfigActionChatLine
-              key={item.id}
-              level={item.level}
-              message={item.message}
-              ts={item.ts}
-              detail={item.detail}
-            />
-          ))}
+          <ConfigActionResultPanel view={resultView} terminal={terminal} />
+          <ConfigActionExecutionDetails job={job} logs={logs} />
           {loading && !terminal ? (
             <div className="flex items-center gap-2 px-1 text-xs text-muted-foreground">
               <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -819,6 +808,159 @@ function ConfigActionJobWindow({
       </div>
     </div>,
     document.body,
+  );
+}
+
+type ConfigActionResultTone = "running" | "success" | "warning" | "error";
+
+interface ConfigActionResultView {
+  kind: "model-test" | "generic";
+  title: string;
+  statusLabel: string;
+  tone: ConfigActionResultTone;
+  summary: string;
+  testMessage: string;
+  assistantMessage: string;
+  interpretation: string;
+  provider: string;
+  model: string;
+  latencyMs: number | null;
+  clientIdentity: string;
+  finishedAt?: string | null;
+}
+
+function ConfigActionResultPanel({
+  view,
+  terminal,
+}: {
+  view: ConfigActionResultView;
+  terminal: boolean;
+}) {
+  const metaItems = [
+    view.provider ? `Provider：${view.provider}` : "",
+    view.model ? `Model：${view.model}` : "",
+    typeof view.latencyMs === "number" ? `${view.latencyMs} ms` : "",
+    view.clientIdentity ? `客户端：${view.clientIdentity}` : "",
+    view.finishedAt ? formatActionJobTime(view.finishedAt) : "",
+  ].filter(Boolean);
+
+  return (
+    <div className="rounded-md border bg-background p-3">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="flex min-w-0 items-start gap-2">
+          <div className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-md border bg-muted/30">
+            {resultToneIcon(view.tone)}
+          </div>
+          <div className="min-w-0">
+            <div className="text-sm font-semibold">{view.title}</div>
+            <div className="mt-1 flex flex-wrap gap-x-2 gap-y-1 text-xs text-muted-foreground">
+              {metaItems.length > 0 ? (
+                metaItems.map((item) => (
+                  <span key={item} className="max-w-full break-all">
+                    {item}
+                  </span>
+                ))
+              ) : (
+                <span>{view.summary}</span>
+              )}
+            </div>
+          </div>
+        </div>
+        <Badge variant={resultToneBadgeVariant(view.tone)}>{view.statusLabel}</Badge>
+      </div>
+
+      {view.kind === "model-test" ? (
+        <div className="mt-4 space-y-3">
+          <div className="flex justify-end">
+            <div className="max-w-[82%] rounded-md bg-primary px-3 py-2 text-sm leading-6 text-primary-foreground">
+              <div className="mb-1 inline-flex items-center gap-1 text-[11px] opacity-80">
+                <UserRound className="h-3 w-3" />
+                模拟用户消息
+              </div>
+              <div className="whitespace-pre-wrap break-words">{view.testMessage || "测试当前模型"}</div>
+            </div>
+          </div>
+          <div className="flex justify-start">
+            <div
+              className={
+                "max-w-[86%] rounded-md border px-3 py-2 text-sm leading-6 " +
+                (view.tone === "error"
+                  ? "border-destructive/30 bg-destructive/10 text-destructive"
+                  : "bg-muted/40")
+              }
+            >
+              <div className="mb-1 inline-flex items-center gap-1 text-[11px] text-muted-foreground">
+                <Bot className="h-3 w-3" />
+                模型返回
+              </div>
+              {view.tone === "running" && !view.assistantMessage ? (
+                <div className="flex items-center gap-2 text-muted-foreground">
+                  <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />
+                  正在等待模型返回
+                </div>
+              ) : (
+                <div className="whitespace-pre-wrap break-words">
+                  {view.assistantMessage || "没有拿到可展示文本。"}
+                </div>
+              )}
+            </div>
+          </div>
+          {terminal || view.interpretation ? (
+            <div className="rounded-md border bg-muted/20 px-3 py-2">
+              <div className="mb-1 inline-flex items-center gap-1 text-xs font-medium text-muted-foreground">
+                <MessageSquare className="h-3.5 w-3.5" />
+                结果解读
+              </div>
+              <div className="whitespace-pre-wrap break-words text-sm leading-6">
+                {view.interpretation || view.summary}
+              </div>
+            </div>
+          ) : null}
+        </div>
+      ) : (
+        <div className="mt-3 rounded-md border bg-muted/20 px-3 py-2 text-sm leading-6">
+          {view.summary}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ConfigActionExecutionDetails({
+  job,
+  logs,
+}: {
+  job?: PluginConfigActionJobStatus;
+  logs: PluginConfigActionJobStatus["logs"];
+}) {
+  return (
+    <details className="rounded-md border bg-background [&[open]_.detail-chevron]:rotate-90">
+      <summary className="cursor-pointer list-none px-3 py-2 text-sm font-medium">
+        <span className="inline-flex flex-wrap items-center gap-2">
+          <ChevronRight className="detail-chevron h-3.5 w-3.5 shrink-0 transition-transform" />
+          执行细节
+          <Badge variant="outline">{logs.length} 条日志</Badge>
+          {job?.job_id ? <code className="text-[11px] text-muted-foreground">{job.job_id}</code> : null}
+        </span>
+      </summary>
+      <div className="space-y-2 border-t bg-muted/20 p-3">
+        {logs.length > 0 ? (
+          logs.map((item) => (
+            <ConfigActionChatLine
+              key={item.id}
+              level={item.level}
+              message={item.message}
+              ts={item.ts}
+              detail={item.detail}
+            />
+          ))
+        ) : (
+          <div className="rounded-md border border-dashed bg-background px-3 py-4 text-center text-xs text-muted-foreground">
+            暂无执行日志。
+          </div>
+        )}
+      </div>
+    </details>
   );
 }
 
@@ -863,6 +1005,15 @@ function configActionJobStatusText(status: string): string {
 }
 
 function configActionJobSummaryMessage(job: PluginConfigActionJobStatus): string {
+  const view = buildConfigActionResultView(job);
+  if (view.kind === "model-test") {
+    const parts = [
+      view.statusLabel,
+      view.model,
+      typeof view.latencyMs === "number" ? `${view.latencyMs} ms` : "",
+    ].filter(Boolean);
+    return parts.join(" · ") || view.summary;
+  }
   if (job.status === "succeeded") return "配置动作已完成，结果已写入配置。";
   if (job.status === "failed") return job.error_message || job.message || "配置动作失败";
   return job.message || configActionJobStatusText(job.status);
@@ -886,6 +1037,243 @@ function logLevelIcon(level: string) {
   if (normalized === "error") return <XCircle className="h-3.5 w-3.5 text-destructive" />;
   if (normalized === "warn" || normalized === "warning") return <AlertTriangle className="h-3.5 w-3.5 text-amber-600" />;
   return <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600" />;
+}
+
+function resultToneIcon(tone: ConfigActionResultTone) {
+  if (tone === "running") return <Loader2 className="h-4 w-4 animate-spin text-primary" />;
+  if (tone === "success") return <CheckCircle2 className="h-4 w-4 text-emerald-600" />;
+  if (tone === "warning") return <AlertTriangle className="h-4 w-4 text-amber-600" />;
+  return <XCircle className="h-4 w-4 text-destructive" />;
+}
+
+function resultToneBadgeVariant(tone: ConfigActionResultTone): "default" | "secondary" | "destructive" | "outline" | "success" {
+  if (tone === "success") return "success";
+  if (tone === "error") return "destructive";
+  if (tone === "running") return "default";
+  return "secondary";
+}
+
+function buildConfigActionResultView(job?: PluginConfigActionJobStatus): ConfigActionResultView {
+  if (!job) {
+    return {
+      kind: "generic",
+      title: "配置动作",
+      statusLabel: "排队中",
+      tone: "running",
+      summary: "后台任务已创建，正在等待状态更新。",
+      testMessage: "",
+      assistantMessage: "",
+      interpretation: "",
+      provider: "",
+      model: "",
+      latencyMs: null,
+      clientIdentity: "",
+    };
+  }
+
+  const result = recordValue(job.result);
+  const configPatch = recordValue(job.config_patch);
+  const modelTestText = firstText(
+    textValue(result?.model_test_result),
+    textValue(configPatch?.model_test_result),
+  );
+  const hasModelTestShape = Boolean(
+    job.action_key === "test_model_availability" ||
+      modelTestText ||
+      result?.response_preview ||
+      result?.empty_response,
+  );
+  if (!hasModelTestShape) {
+    const failed = job.status === "failed";
+    return {
+      kind: "generic",
+      title: "配置动作结果",
+      statusLabel: configActionJobStatusText(job.status),
+      tone: !CONFIG_ACTION_TERMINAL_STATUSES.has(job.status) ? "running" : failed ? "error" : "success",
+      summary: configActionJobSummaryMessageWithoutResultView(job),
+      testMessage: "",
+      assistantMessage: "",
+      interpretation: "",
+      provider: "",
+      model: "",
+      latencyMs: null,
+      clientIdentity: "",
+      finishedAt: job.ended_at || job.updated_at,
+    };
+  }
+
+  const parsedStatus = labeledLineValue(modelTestText, ["状态"]);
+  const parsedOk = parsedStatus.includes("可用") && !parsedStatus.includes("不可用");
+  const parsedEmptyResponse = parsedStatus.includes("返回为空");
+  const ok = boolValue(result?.ok) || parsedOk;
+  const emptyResponse = boolValue(result?.empty_response) || parsedEmptyResponse;
+  const terminal = CONFIG_ACTION_TERMINAL_STATUSES.has(job.status);
+  const tone: ConfigActionResultTone = !terminal
+    ? "running"
+    : ok
+      ? "success"
+      : emptyResponse
+        ? "warning"
+        : "error";
+  const statusLabel = !terminal
+    ? "请求中"
+    : ok
+      ? "模型可用"
+      : emptyResponse
+        ? "返回为空"
+        : "模型不可用";
+  const provider = firstText(
+    textValue(result?.provider),
+    labeledLineValue(modelTestText, ["Provider"]),
+  );
+  const model = firstText(
+    textValue(result?.model),
+    labeledLineValue(modelTestText, ["Model"]),
+  );
+  const latencyMs = firstNumber(
+    numberValue(result?.latency_ms),
+    numberFromText(labeledLineValue(modelTestText, ["耗时"])),
+  );
+  const testMessage = firstText(
+    textValue(result?.test_message),
+    textValue(result?.test_prompt),
+    labeledLineValue(modelTestText, ["测试语"]),
+  );
+  const clientIdentity = firstText(
+    textValue(result?.client_identity),
+    labeledLineValue(modelTestText, ["客户端标识"]),
+  );
+  const response = firstText(
+    textValue(result?.response),
+    textValue(result?.model_response),
+    blockAfterLabel(modelTestText, ["模型实时返回", "模型返回"], ["结果解读", "错误"]),
+    textValue(result?.response_preview),
+  );
+  const error = firstText(
+    textValue(result?.error),
+    labeledLineValue(modelTestText, ["错误"]),
+    job.status === "failed" ? textValue(job.error_message) : "",
+    job.status === "failed" ? textValue(job.message) : "",
+  );
+  const interpretation = firstText(
+    blockAfterLabel(modelTestText, ["结果解读"], []),
+    ok
+      ? "模型返回了非空文本，说明 Provider 鉴权、模型路由、请求体和返回解析这条链路本次可用。"
+      : emptyResponse
+        ? "上游请求已完成，但没有拿到可展示文本；这不等同于 Provider 不可用。请换一句自然测试语，或检查上游是否只返回了被隐藏的思考内容。"
+        : error
+          ? "本次没有拿到可用模型文本。请优先检查 Provider 鉴权、额度/限流、模型名、base_url 与上游服务状态。"
+          : "",
+  );
+  const summary = !terminal
+    ? "已按真实聊天路径提交测试请求，正在等待模型返回。"
+    : statusLabel;
+
+  return {
+    kind: "model-test",
+    title: "测试对话",
+    statusLabel,
+    tone,
+    summary,
+    testMessage,
+    assistantMessage: response || error,
+    interpretation,
+    provider,
+    model,
+    latencyMs,
+    clientIdentity,
+    finishedAt: job.ended_at || job.updated_at,
+  };
+}
+
+function configActionJobSummaryMessageWithoutResultView(job: PluginConfigActionJobStatus): string {
+  if (job.status === "succeeded") return "配置动作已完成，结果已写入配置。";
+  if (job.status === "failed") return job.error_message || job.message || "配置动作失败";
+  return job.message || configActionJobStatusText(job.status);
+}
+
+function recordValue(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
+}
+
+function textValue(value: unknown): string {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function boolValue(value: unknown): boolean {
+  return value === true;
+}
+
+function numberValue(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function firstText(...values: string[]): string {
+  for (const value of values) {
+    const text = value.trim();
+    if (text) return text;
+  }
+  return "";
+}
+
+function firstNumber(...values: Array<number | null>): number | null {
+  for (const value of values) {
+    if (typeof value === "number" && Number.isFinite(value)) return value;
+  }
+  return null;
+}
+
+function numberFromText(value: string): number | null {
+  const match = value.match(/\d+/);
+  return match ? Number(match[0]) : null;
+}
+
+function labeledLineValue(text: string, labels: string[]): string {
+  if (!text) return "";
+  for (const line of text.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    for (const label of labels) {
+      const fullWidth = `${label}：`;
+      const halfWidth = `${label}:`;
+      if (trimmed.startsWith(fullWidth)) return trimmed.slice(fullWidth.length).trim();
+      if (trimmed.startsWith(halfWidth)) return trimmed.slice(halfWidth.length).trim();
+    }
+  }
+  return "";
+}
+
+function blockAfterLabel(text: string, labels: string[], stopLabels: string[]): string {
+  if (!text) return "";
+  const lines = text.split(/\r?\n/);
+  const out: string[] = [];
+  let collecting = false;
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!collecting) {
+      for (const label of labels) {
+        const fullWidth = `${label}：`;
+        const halfWidth = `${label}:`;
+        if (trimmed.startsWith(fullWidth)) {
+          const rest = trimmed.slice(fullWidth.length).trim();
+          if (rest) out.push(rest);
+          collecting = true;
+          break;
+        }
+        if (trimmed.startsWith(halfWidth)) {
+          const rest = trimmed.slice(halfWidth.length).trim();
+          if (rest) out.push(rest);
+          collecting = true;
+          break;
+        }
+      }
+      continue;
+    }
+    if (stopLabels.some((label) => trimmed.startsWith(`${label}：`) || trimmed.startsWith(`${label}:`))) {
+      break;
+    }
+    out.push(line);
+  }
+  return out.join("\n").trim();
 }
 
 function configActionLogDetailText(detail?: Record<string, unknown> | null): string {
