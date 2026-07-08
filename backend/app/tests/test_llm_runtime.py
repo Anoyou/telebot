@@ -22,6 +22,8 @@ from app.services.llm_runtime import (
     FallbackChain,
     UsageRecord,
     build_fallback_chain,
+    preview_text_for_usage,
+    request_preview_for_usage,
 )
 from app.worker.command import (
     _ensure_html_safe,
@@ -354,6 +356,21 @@ def test_usage_record_fields() -> None:
     assert record.used_fallback is False
 
 
+def test_usage_preview_redacts_and_limits_text() -> None:
+    """Usage 预览只保存脱敏后的截断文本。"""
+    request_preview = request_preview_for_usage(
+        "system token=abc12345",
+        "user " + ("hello " * 500),
+    )
+    response_preview = preview_text_for_usage("response sk-testsecret1234567890")
+
+    assert request_preview is not None
+    assert "token=***" in request_preview
+    assert "abc12345" not in request_preview
+    assert len(request_preview) <= 2014
+    assert response_preview == "response ***"
+
+
 @pytest.mark.asyncio
 async def test_llm_usage_persist_writes_triggered_by_account_id(monkeypatch) -> None:
     """UsageRecord 持久化时写入 triggered_by_account_id。"""
@@ -369,6 +386,8 @@ async def test_llm_usage_persist_writes_triggered_by_account_id(monkeypatch) -> 
         output_tokens=5,
         success=True,
         fallback_chain=["test-provider"],
+        request_preview="system: hello",
+        response_preview="world",
     )
     captured_rows = []
 
@@ -394,6 +413,8 @@ async def test_llm_usage_persist_writes_triggered_by_account_id(monkeypatch) -> 
 
     assert len(captured_rows) == 1
     assert captured_rows[0].triggered_by_account_id == 123
+    assert captured_rows[0].request_preview == "system: hello"
+    assert captured_rows[0].response_preview == "world"
 
 
 # ════════════════════════════════════════════════════════════

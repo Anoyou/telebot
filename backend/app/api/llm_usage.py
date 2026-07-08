@@ -10,6 +10,7 @@ from sqlalchemy import case, func, select
 
 from ..db.models.llm_usage import LLMUsage
 from ..deps import CurrentUser, DBSession
+from ..services.redactor import redact_text
 
 router = APIRouter(prefix="/api/llm/usage", tags=["llm-usage"])
 
@@ -29,7 +30,29 @@ class LLMUsageItem(BaseModel):
     success: bool
     error_type: str | None
     used_fallback: bool
+    request_preview: str | None = None
+    response_preview: str | None = None
     created_at: datetime
+
+    @classmethod
+    def from_row(cls, row: LLMUsage) -> LLMUsageItem:
+        return cls(
+            id=row.id,
+            account_id=row.account_id,
+            provider_id=row.provider_id,
+            provider_name=row.provider_name,
+            model=row.model,
+            source=row.source,
+            input_tokens=int(row.input_tokens or 0),
+            output_tokens=int(row.output_tokens or 0),
+            latency_ms=int(row.latency_ms or 0),
+            success=bool(row.success),
+            error_type=row.error_type,
+            used_fallback=bool(row.used_fallback),
+            request_preview=redact_text(row.request_preview or "") or None,
+            response_preview=redact_text(row.response_preview or "") or None,
+            created_at=row.created_at,
+        )
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -88,7 +111,7 @@ async def list_recent_llm_usage(
         )
     ).scalars().all()
 
-    items = [LLMUsageItem.model_validate(row) for row in rows]
+    items = [LLMUsageItem.from_row(row) for row in rows]
     request_count = len(items)
     success_count = sum(1 for item in items if item.success)
     failed_count = request_count - success_count

@@ -24,7 +24,7 @@ import {
 
 import { listAccounts } from "@/api/accounts";
 import { getFeatureMatrix } from "@/api/features";
-import { getEventTrace, getMessageFunel, getSystemSettings, listRuntimeLogs } from "@/api/system";
+import { getEventTrace, getMessageFunel, getSystemSettings, listRuntimeLogs, listSystemConsoleLogs } from "@/api/system";
 import type {
   EventActionItem,
   EventProbeReport,
@@ -37,6 +37,7 @@ import type {
   MessageFunelStage,
   MessageVerdict,
   RuntimeLogItem,
+  SystemConsoleLogsResponse,
 } from "@/api/types";
 import { PageHeader, PageShell } from "@/components/layout/PageScaffold";
 import { Badge } from "@/components/ui/badge";
@@ -56,7 +57,7 @@ import { SectionHeader, SignalPill } from "@/components/ui/status";
 import { Switch } from "@/components/ui/switch";
 import { cn, formatDateTime } from "@/lib/utils";
 
-type LogView = "messages" | "console";
+type LogView = "messages" | "console" | "runtime";
 type TimeRange = "15m" | "1h" | "6h" | "24h" | "custom";
 type VerdictFilter = "" | MessageVerdict;
 type RuntimeLevelFilter = "" | "debug" | "info" | "warn" | "warning" | "error";
@@ -121,6 +122,15 @@ const RUNTIME_SOURCE_OPTIONS = [
   { value: "plugin", label: "插件" },
 ];
 
+const SYSTEM_CONSOLE_SERVICE_OPTIONS = [
+  { value: "all", label: "全部服务" },
+  { value: "web", label: "后端 Web/Worker" },
+  { value: "frontend", label: "前端 Nginx" },
+  { value: "postgres", label: "PostgreSQL" },
+  { value: "redis", label: "Redis" },
+  { value: "updater", label: "更新器" },
+];
+
 export function Logs() {
   const [searchParams] = useSearchParams();
   const initialTraceId = searchParams.get("trace_id") || "";
@@ -146,6 +156,7 @@ export function Logs() {
   const [runtimeLevel, setRuntimeLevel] = useState<RuntimeLevelFilter>(() => parseRuntimeLevel(searchParams.get("level")));
   const [runtimeSource, setRuntimeSource] = useState<RuntimeSourceFilter>(() => parseRuntimeSource(searchParams.get("source")));
   const [runtimeLimit, setRuntimeLimit] = useState(() => parseRuntimeLimit(searchParams.get("limit")));
+  const [consoleService, setConsoleService] = useState(() => parseConsoleService(searchParams.get("service")));
 
   const settingsQ = useQuery({ queryKey: ["system", "settings"], queryFn: getSystemSettings });
   const accountsQ = useQuery({ queryKey: ["accounts"], queryFn: listAccounts });
@@ -180,6 +191,11 @@ export function Logs() {
     since: range.since,
     limit: runtimeLimit,
   };
+  const consoleQuery = {
+    service: consoleService,
+    keyword: keyword.trim() || undefined,
+    tail: runtimeLimit,
+  };
 
   const messagesQ = useQuery({
     queryKey: ["logs", "messages", commonQuery],
@@ -190,6 +206,12 @@ export function Logs() {
   const runtimeLogsQ = useQuery({
     queryKey: ["logs", "runtime", runtimeQuery],
     queryFn: () => listRuntimeLogs(runtimeQuery),
+    refetchInterval: autoRefresh ? 5_000 : false,
+    enabled: view === "runtime",
+  });
+  const systemConsoleQ = useQuery({
+    queryKey: ["logs", "system-console", consoleQuery],
+    queryFn: () => listSystemConsoleLogs(consoleQuery),
     refetchInterval: autoRefresh ? 5_000 : false,
     enabled: view === "console",
   });
@@ -202,10 +224,12 @@ export function Logs() {
   const counts = countVerdicts(messagesQ.data ?? []);
   const runtimeStats = countRuntimeLogs(runtimeLogsQ.data ?? []);
   const pluginOptions = matrixQ.data?.features.map((item) => item.key) ?? [];
-  const activeTitle = view === "messages" ? "日志 · 消息流" : "日志 · 控制台日志";
+  const activeTitle = view === "messages" ? "日志 · 消息流" : view === "console" ? "日志 · 系统控制台" : "日志 · 运行事件";
   const activeDescription = view === "messages"
     ? "按消息追踪收到、路由、执行、发送四段状态，直接定位卡点、失败和正常跳过。"
-    : "查看更原始的系统、事件和插件运行日志，包含调试等级、完整详情 JSON 与后台上下文。";
+    : view === "console"
+      ? "查看 Docker / stdout / stderr 级别的原始系统日志，适合排查服务启动、异常堆栈和部署输出。"
+      : "查看 TelePilot 写入数据库的结构化运行事件，适合按插件、账号、等级和 JSON 详情排查。";
 
   return (
     <PageShell>
@@ -215,17 +239,28 @@ export function Logs() {
         icon={view === "messages" ? ScrollText : Terminal}
         signals={(
           <>
-            <SignalPill tone="neutral" label="窗口" value={TIME_RANGE_LABELS[timeRange]} />
+            <SignalPill tone="neutral" label={view === "console" ? "行数" : "窗口"} value={view === "console" ? `${runtimeLimit} 行` : TIME_RANGE_LABELS[timeRange]} />
             <SignalPill tone={autoRefresh ? "success" : "neutral"} label="刷新" value={autoRefresh ? "5 秒" : "暂停"} />
             {view === "messages" ? (
               <SignalPill tone={counts.failed || counts.stuck ? "warn" : "success"} label="消息" value={`${messagesQ.data?.length ?? 0} 条`} />
+            ) : view === "console" ? (
+              <SignalPill tone={systemConsoleQ.data?.ok === false ? "warn" : "success"} label="控制台" value={`${systemConsoleQ.data?.lines.length ?? 0} 行`} />
             ) : (
-              <SignalPill tone={runtimeStats.error || runtimeStats.warn ? "warn" : "success"} label="日志" value={`${runtimeLogsQ.data?.length ?? 0} 条`} />
+              <SignalPill tone={runtimeStats.error || runtimeStats.warn ? "warn" : "success"} label="事件" value={`${runtimeLogsQ.data?.length ?? 0} 条`} />
             )}
           </>
         )}
         actions={(
-          <Button type="button" variant="outline" size="sm" onClick={() => (view === "messages" ? messagesQ.refetch() : runtimeLogsQ.refetch())}>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => {
+              if (view === "messages") messagesQ.refetch();
+              else if (view === "console") systemConsoleQ.refetch();
+              else runtimeLogsQ.refetch();
+            }}
+          >
             <RefreshCw className="mr-1.5 h-4 w-4" />
             刷新
           </Button>
@@ -348,13 +383,64 @@ export function Logs() {
             </div>
           ) : null}
         </CardContent>
-      </Card> : (
+      </Card> : view === "console" ? (
+        <Card>
+          <CardHeader>
+            <SectionHeader
+              icon={Terminal}
+              title="系统控制台筛选"
+              description="读取生产容器 stdout/stderr，类似在服务器执行 docker compose logs。"
+            />
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="grid grid-cols-1 gap-3 md:grid-cols-[220px_160px_minmax(240px,1fr)_160px_180px]">
+              <Field label="服务">
+                <Select value={consoleService} onChange={(event) => setConsoleService(parseConsoleService(event.target.value))}>
+                  {SYSTEM_CONSOLE_SERVICE_OPTIONS.map((item) => (
+                    <option key={item.value} value={item.value}>{item.label}</option>
+                  ))}
+                </Select>
+              </Field>
+              <Field label="行数">
+                <Select value={String(runtimeLimit)} onChange={(event) => setRuntimeLimit(parseRuntimeLimit(event.target.value))}>
+                  <option value="100">最近 100 行</option>
+                  <option value="300">最近 300 行</option>
+                  <option value="500">最近 500 行</option>
+                </Select>
+              </Field>
+              <Field label="搜索">
+                <SearchBox value={keyword} onChange={setKeyword} placeholder="搜索原始日志行" />
+              </Field>
+              <Field label="自动刷新">
+                <div className="flex h-10 items-center gap-2">
+                  <Switch checked={autoRefresh} onCheckedChange={setAutoRefresh} />
+                  <span className="text-sm text-muted-foreground">{autoRefresh ? "开启" : "关闭"}</span>
+                </div>
+              </Field>
+              <Field label="复制">
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="w-full justify-start"
+                  onClick={() => copySystemConsoleLogs(systemConsoleQ.data)}
+                >
+                  <Copy className="mr-1.5 h-4 w-4" />
+                  复制当前结果
+                </Button>
+              </Field>
+            </div>
+            <p className="rounded-md border bg-muted/30 px-3 py-2 text-xs leading-5 text-muted-foreground">
+              这里展示的是容器控制台输出；如果要按账号、插件或 JSON 字段查结构化事件，请切到“运行事件”。
+            </p>
+          </CardContent>
+        </Card>
+      ) : (
         <Card>
           <CardHeader>
             <SectionHeader
               icon={Search}
-              title="控制台筛选"
-              description="用于排查后台细节，支持按等级、来源、账号、插件和关键词过滤。"
+              title="运行事件筛选"
+              description="用于排查后台结构化事件，支持按等级、来源、账号、插件和关键词过滤。"
               meta={(
                 <Button type="button" variant="outline" size="sm" onClick={() => setShowFilters((value) => !value)}>
                   <SlidersHorizontal className="mr-1.5 h-4 w-4" />
@@ -470,8 +556,16 @@ export function Logs() {
             setTraceId("");
           }}
         />
+      ) : view === "console" ? (
+        <SystemConsoleStream
+          data={systemConsoleQ.data}
+          loading={systemConsoleQ.isLoading}
+          error={systemConsoleQ.error}
+          service={consoleService}
+          keyword={keyword}
+        />
       ) : (
-        <ConsoleLogStream
+        <RuntimeEventStream
           logs={runtimeLogsQ.data ?? []}
           loading={runtimeLogsQ.isLoading}
           error={runtimeLogsQ.error}
@@ -487,10 +581,11 @@ export function Logs() {
 function LogViewSegment({ value, onChange }: { value: LogView; onChange: (value: LogView) => void }) {
   const items: { value: LogView; label: string; icon: typeof ScrollText }[] = [
     { value: "messages", label: "消息流", icon: ScrollText },
-    { value: "console", label: "控制台日志", icon: Terminal },
+    { value: "console", label: "系统控制台", icon: Terminal },
+    { value: "runtime", label: "运行事件", icon: Workflow },
   ];
   return (
-    <div className="grid grid-cols-2 gap-1 rounded-lg border bg-muted/30 p-1 sm:w-fit">
+    <div className="grid grid-cols-3 gap-1 rounded-lg border bg-muted/30 p-1 sm:w-fit">
       {items.map((item) => {
         const Icon = item.icon;
         return (
@@ -611,7 +706,73 @@ function MessageStream({
   );
 }
 
-function ConsoleLogStream({
+function SystemConsoleStream({
+  data,
+  loading,
+  error,
+  service,
+  keyword,
+}: {
+  data?: SystemConsoleLogsResponse;
+  loading: boolean;
+  error?: unknown;
+  service: string;
+  keyword: string;
+}) {
+  const lines = data?.lines ?? [];
+  const services = data?.services?.length ? data.services.map(systemConsoleServiceLabel).join(" / ") : systemConsoleServiceLabel(service);
+  return (
+    <Card>
+      <CardHeader>
+        <SectionHeader
+          icon={Terminal}
+          title="系统控制台"
+          description="原样展示服务 stdout/stderr，排查启动失败、异常堆栈和部署输出时看这里。"
+          meta={(
+            <div className="flex flex-wrap gap-1.5">
+              <SignalPill tone={data?.ok === false ? "warn" : "success"} label="来源" value={systemConsoleSourceLabel(data?.source)} />
+              <SignalPill tone="neutral" label="服务" value={services} />
+            </div>
+          )}
+        />
+      </CardHeader>
+      <CardContent>
+        {loading ? (
+          <InlineLoading />
+        ) : error ? (
+          <ErrorHint text="系统控制台加载失败" error={error} />
+        ) : data?.ok === false ? (
+          <ErrorHint text="系统控制台暂不可用" error={data.error || "当前环境没有暴露系统级日志源"} />
+        ) : lines.length ? (
+          <div className="overflow-hidden rounded-lg border border-zinc-800 bg-zinc-950 text-zinc-100 shadow-inner">
+            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-white/10 px-3 py-2 text-xs text-zinc-400">
+              <span className="font-mono">$ docker compose logs --tail={data?.tail ?? 300} {service === "all" ? "" : service}</span>
+              <span>{lines.length} 行</span>
+            </div>
+            <pre className="max-h-[640px] overflow-auto p-3 font-mono text-[11px] leading-5 whitespace-pre-wrap break-words">
+              {lines.map((line, index) => (
+                <SystemConsoleLine key={`${index}-${line.slice(0, 32)}`} line={line} keyword={keyword} />
+              ))}
+            </pre>
+          </div>
+        ) : (
+          <EmptyHint text="当前条件下没有系统控制台日志" />
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function SystemConsoleLine({ line, keyword }: { line: string; keyword: string }) {
+  const tone = consoleLineTone(line);
+  return (
+    <span className={cn("block min-h-5", tone)}>
+      <HighlightedMessage text={line || " "} keyword={keyword} />
+    </span>
+  );
+}
+
+function RuntimeEventStream({
   logs,
   loading,
   error,
@@ -631,8 +792,8 @@ function ConsoleLogStream({
       <CardHeader>
         <SectionHeader
           icon={Terminal}
-          title="控制台日志"
-          description="更接近后台控制台的原始运行记录，点开单行可查看完整详情 JSON。"
+          title="运行事件"
+          description="TelePilot 写入数据库的结构化运行事件，点开单行可查看完整详情 JSON。"
           meta={(
             <div className="flex flex-wrap gap-1.5">
               <SignalPill tone="neutral" label="调试" value={String(stats.debug)} />
@@ -646,7 +807,7 @@ function ConsoleLogStream({
         {loading ? (
           <InlineLoading />
         ) : error ? (
-          <ErrorHint text="控制台日志加载失败" error={error} />
+          <ErrorHint text="运行事件加载失败" error={error} />
         ) : logs.length ? (
           <div className="overflow-hidden rounded-lg border border-zinc-800 bg-zinc-950 text-zinc-100 shadow-inner">
             <div className="hidden grid-cols-[170px_74px_96px_120px_minmax(0,1fr)_92px] gap-3 border-b border-white/10 px-3 py-2 text-[11px] font-medium tracking-wide text-zinc-400 xl:grid">
@@ -659,19 +820,19 @@ function ConsoleLogStream({
             </div>
             <div className="divide-y divide-white/10">
               {logs.map((log) => (
-                <ConsoleLogRow key={log.id} log={log} timezone={timezone} keyword={keyword} />
+                <RuntimeEventRow key={log.id} log={log} timezone={timezone} keyword={keyword} />
               ))}
             </div>
           </div>
         ) : (
-          <EmptyHint text="当前条件下没有控制台日志" />
+          <EmptyHint text="当前条件下没有运行事件" />
         )}
       </CardContent>
     </Card>
   );
 }
 
-function ConsoleLogRow({ log, timezone, keyword }: { log: RuntimeLogItem; timezone?: string; keyword: string }) {
+function RuntimeEventRow({ log, timezone, keyword }: { log: RuntimeLogItem; timezone?: string; keyword: string }) {
   const [expanded, setExpanded] = useState(false);
   const detailText = log.detail ? safeJsonStringify(log.detail, 2) : "";
   const pluginKey = pickString(log.detail, ["plugin_key", "plugin.key"]);
@@ -680,10 +841,16 @@ function ConsoleLogRow({ log, timezone, keyword }: { log: RuntimeLogItem; timezo
   const level = normalizeRuntimeLevel(log.level);
   return (
     <div className={cn("transition", runtimeRowClass(level))}>
-      <button
-        type="button"
-        className="w-full min-w-0 px-3 py-2 text-left hover:bg-white/5"
-        onClick={() => setExpanded((value) => !value)}
+      <div
+        role="button"
+        tabIndex={0}
+        className="w-full min-w-0 px-3 py-2 text-left hover:bg-white/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/35"
+        onClick={() => detailText && setExpanded((value) => !value)}
+        onKeyDown={(event) => {
+          if (!detailText || (event.key !== "Enter" && event.key !== " ")) return;
+          event.preventDefault();
+          setExpanded((value) => !value);
+        }}
       >
         <div className="grid min-w-0 grid-cols-1 gap-1.5 xl:grid-cols-[170px_74px_96px_120px_minmax(0,1fr)_92px] xl:items-start xl:gap-3">
           <div className="flex min-w-0 flex-wrap items-center gap-2 xl:block">
@@ -706,13 +873,12 @@ function ConsoleLogRow({ log, timezone, keyword }: { log: RuntimeLogItem; timezo
             </div>
           </div>
           <div className="flex items-center justify-between gap-2 xl:justify-end">
-            <span className="text-[11px] text-zinc-500 xl:hidden">{detailText ? "详情可展开" : "无详情"}</span>
             <div className="flex items-center gap-1.5">
               <Button
                 type="button"
                 variant="ghost"
                 size="icon"
-                className="h-8 w-8 text-zinc-300 hover:bg-white/10 hover:text-white"
+                className="h-8 w-8 border border-white/20 bg-white/10 text-zinc-100 hover:bg-white hover:text-zinc-950"
                 onClick={(event) => {
                   event.stopPropagation();
                   copyRuntimeLog(log, timezone);
@@ -721,13 +887,29 @@ function ConsoleLogRow({ log, timezone, keyword }: { log: RuntimeLogItem; timezo
               >
                 <Copy className="h-4 w-4" />
               </Button>
-              <Badge variant="outline" className="border-white/15 text-zinc-200">
-                {detailText ? (expanded ? "收起" : "展开") : "纯文本"}
-              </Badge>
+              <Button
+                type="button"
+                variant="secondary"
+                size="sm"
+                disabled={!detailText}
+                className={cn(
+                  "h-8 min-w-[88px] border text-xs font-semibold",
+                  detailText
+                    ? "border-white/30 bg-white text-zinc-950 shadow-sm hover:bg-zinc-200 dark:bg-zinc-100 dark:text-zinc-950 dark:hover:bg-white"
+                    : "border-white/10 bg-transparent text-zinc-500 opacity-70",
+                )}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  if (detailText) setExpanded((value) => !value);
+                }}
+              >
+                {detailText ? (expanded ? "收起详情" : "查看详情") : "无详情"}
+                {detailText ? <ChevronDown className={cn("ml-1 h-4 w-4 transition-transform", expanded ? "rotate-180" : "")} /> : null}
+              </Button>
             </div>
           </div>
         </div>
-      </button>
+      </div>
       {expanded && detailText ? (
         <div className="border-t border-white/10 bg-black/30 p-3">
           <pre className="max-h-96 overflow-auto rounded-md border border-white/10 bg-black/40 p-3 font-mono text-[11px] leading-relaxed whitespace-pre-wrap break-all text-zinc-200">
@@ -807,7 +989,7 @@ function MessageRow({
           <FunelStrip message={message} />
           <div className="hidden flex-col items-end gap-2 2xl:flex">
             <VerdictBadge verdict={message.verdict} />
-            <span className="inline-flex items-center gap-1 rounded-full border bg-background/70 px-2 py-1 text-[11px] font-medium text-muted-foreground transition group-hover:border-primary/40 group-hover:text-foreground">
+            <span className="inline-flex items-center gap-1 rounded-full border border-primary bg-primary px-2.5 py-1 text-[11px] font-semibold text-primary-foreground shadow-sm transition group-hover:bg-primary/90">
               <MousePointerClick className="h-3 w-3" />
               {detailLabel}
             </span>
@@ -816,7 +998,7 @@ function MessageRow({
         <div className={cn("mt-3 rounded-md border px-3 py-2 text-sm transition group-hover:ring-1 group-hover:ring-primary/25", meta.panelClass)}>
           <div className="flex flex-wrap items-start justify-between gap-2">
             <span className="font-medium">{message.reason_text}</span>
-            <span className="inline-flex items-center gap-1 rounded-full bg-background/60 px-2 py-0.5 text-[11px] font-medium opacity-90 2xl:hidden">
+            <span className="inline-flex items-center gap-1 rounded-full border border-primary bg-primary px-2.5 py-1 text-[11px] font-semibold text-primary-foreground shadow-sm 2xl:hidden">
               <MousePointerClick className="h-3 w-3" />
               {detailLabel}
             </span>
@@ -921,7 +1103,7 @@ function TraceDetailPanel({
           <JsonBlock title="原生数据设置 native_raw_meta" value={detail.native_raw_meta} />
           <JsonBlock title="原始摘要 raw_summary" value={detail.raw_summary} />
           <JsonBlock title="消息快照 payload_snapshot" value={detail.payload_snapshot} />
-          {detail.related_runtime_logs.length ? <JsonBlock title="关联控制台日志 related_runtime_logs" value={detail.related_runtime_logs} /> : null}
+          {detail.related_runtime_logs.length ? <JsonBlock title="关联运行事件 related_runtime_logs" value={detail.related_runtime_logs} /> : null}
         </div>
       </details>
     </div>
@@ -969,7 +1151,13 @@ function Timeline({ spans, actions, timezone }: { spans: EventSpanItem[]; action
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="text-sm font-medium">关键时间线</div>
         {hiddenCount || showAll ? (
-          <Button type="button" variant="ghost" size="sm" onClick={() => setShowAll((value) => !value)}>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="border-primary/30 bg-primary/5 text-primary hover:bg-primary/10"
+            onClick={() => setShowAll((value) => !value)}
+          >
             {showAll ? "只看关键" : `显示全部 ${items.length} 项`}
           </Button>
         ) : null}
@@ -1205,11 +1393,11 @@ function PluginSelect({ value, onChange, options }: { value: string; onChange: (
   );
 }
 
-function SearchBox({ value, onChange }: { value: string; onChange: (value: string) => void }) {
+function SearchBox({ value, onChange, placeholder = "会话 / 消息 / 发送者 / 链路 ID" }: { value: string; onChange: (value: string) => void; placeholder?: string }) {
   return (
     <div className="relative">
       <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-      <Input className="pl-9" value={value} onChange={(event) => onChange(event.target.value)} placeholder="会话 / 消息 / 发送者 / 链路 ID" />
+      <Input className="pl-9" value={value} onChange={(event) => onChange(event.target.value)} placeholder={placeholder} />
     </div>
   );
 }
@@ -1372,7 +1560,8 @@ function parseVerdict(value: string | null): VerdictFilter {
 }
 
 function parseLogView(value: string | null): LogView {
-  return value === "console" ? "console" : "messages";
+  if (value === "console" || value === "runtime") return value;
+  return "messages";
 }
 
 function parseRuntimeLevel(value: string | null): RuntimeLevelFilter {
@@ -1391,6 +1580,11 @@ function parseRuntimeLimit(value: string | null): number {
   const parsed = Number(value);
   if (parsed === 100 || parsed === 300 || parsed === 500) return parsed;
   return 300;
+}
+
+function parseConsoleService(value: string | null): string {
+  const normalized = (value || "all").toLowerCase();
+  return SYSTEM_CONSOLE_SERVICE_OPTIONS.some((item) => item.value === normalized) ? normalized : "all";
 }
 
 function buildTimeRange(range: TimeRange, customSince: string, customUntil: string): { since?: string; until?: string } {
@@ -1472,14 +1666,23 @@ function formatRuntimeTime(iso?: string | null, tz?: string | null): string {
 
 async function copyRuntimeLogs(logs: RuntimeLogItem[], timezone?: string) {
   if (!logs.length) {
-    toast.info("当前没有可复制的控制台日志");
+    toast.info("当前没有可复制的运行事件");
     return;
   }
-  await copyText(logs.map((log) => formatRuntimeLog(log, timezone)).join("\n"), `已复制 ${logs.length} 条控制台日志`);
+  await copyText(logs.map((log) => formatRuntimeLog(log, timezone)).join("\n"), `已复制 ${logs.length} 条运行事件`);
 }
 
 async function copyRuntimeLog(log: RuntimeLogItem, timezone?: string) {
   await copyText(formatRuntimeLog(log, timezone), "已复制该条日志");
+}
+
+async function copySystemConsoleLogs(data?: SystemConsoleLogsResponse) {
+  const lines = data?.lines ?? [];
+  if (!lines.length) {
+    toast.info("当前没有可复制的系统控制台日志");
+    return;
+  }
+  await copyText(lines.join("\n"), `已复制 ${lines.length} 行系统控制台日志`);
 }
 
 async function copyText(text: string, message: string) {
@@ -1501,6 +1704,27 @@ function formatRuntimeLog(log: RuntimeLogItem, timezone?: string): string {
   ].filter(Boolean);
   const detail = log.detail ? ` 详情=${safeJsonStringify(log.detail)}` : "";
   return `${parts.join(" ")}${detail}`;
+}
+
+function systemConsoleServiceLabel(service?: string | null): string {
+  const value = (service || "all").toLowerCase();
+  return SYSTEM_CONSOLE_SERVICE_OPTIONS.find((item) => item.value === value)?.label || value;
+}
+
+function systemConsoleSourceLabel(source?: string | null): string {
+  const value = (source || "").toLowerCase();
+  if (value === "docker_compose") return "Docker";
+  if (value === "local_files") return "本地日志";
+  if (value === "unavailable") return "不可用";
+  return source || "系统";
+}
+
+function consoleLineTone(line: string): string {
+  const lowered = line.toLowerCase();
+  if (/(error|exception|traceback|failed|fatal|\bpanic\b)/i.test(lowered)) return "text-red-300";
+  if (/(warn|warning|retry|timeout)/i.test(lowered)) return "text-amber-200";
+  if (/(debug|verbose)/i.test(lowered)) return "text-sky-200";
+  return "text-zinc-100";
 }
 
 function verdictMeta(verdict: MessageVerdict) {

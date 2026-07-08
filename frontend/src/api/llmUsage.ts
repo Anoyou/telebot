@@ -13,6 +13,8 @@ export interface LLMUsageRecord {
   success: boolean;
   error_type?: string | null;
   used_fallback?: boolean;
+  request_preview?: string | null;
+  response_preview?: string | null;
   created_at: string;
 }
 

@@ -785,6 +785,15 @@ export interface RuntimeLogItem {
   detail?: Record<string, unknown> | null;
 }
 
+export interface SystemConsoleLogsResponse {
+  ok: boolean;
+  source: string;
+  services: string[];
+  tail: number;
+  lines: string[];
+  error?: string | null;
+}
+
 // 操作日志（Web 端写操作）
 export interface AuditLogItem {
   id: number;

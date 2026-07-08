@@ -18,6 +18,7 @@ import type {
   RestartResult,
   StrictRequest,
   RuntimeLogItem,
+  SystemConsoleLogsResponse,
   SystemSettings,
   TemplateOut,
 } from "@/api/types";
@@ -70,6 +71,21 @@ export async function listRuntimeLogs(
   q: RuntimeLogQuery = {},
 ): Promise<RuntimeLogItem[]> {
   const { data } = await api.get<RuntimeLogItem[]>("/api/logs/runtime", {
+    params: q,
+  });
+  return data;
+}
+
+export interface SystemConsoleLogQuery {
+  service?: "all" | "web" | "frontend" | "postgres" | "redis" | "updater" | string;
+  keyword?: string;
+  tail?: number;
+}
+
+export async function listSystemConsoleLogs(
+  q: SystemConsoleLogQuery = {},
+): Promise<SystemConsoleLogsResponse> {
+  const { data } = await api.get<SystemConsoleLogsResponse>("/api/logs/system-console", {
     params: q,
   });
   return data;

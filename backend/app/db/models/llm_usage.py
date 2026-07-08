@@ -33,4 +33,6 @@ class LLMUsage(Base):
     error_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
     used_fallback: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     fallback_chain: Mapped[str | None] = mapped_column(Text, nullable=True)
+    request_preview: Mapped[str | None] = mapped_column(Text, nullable=True)
+    response_preview: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)

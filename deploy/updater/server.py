@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import threading
 import time
@@ -16,12 +17,16 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, urlparse
 
 WORKSPACE = Path(os.getenv("TELEPILOT_WORKSPACE", "/workspace")).resolve()
 DEFAULT_REMOTE = os.getenv("TELEPILOT_UPDATE_REMOTE", "origin")
 DEFAULT_BRANCH = os.getenv("TELEPILOT_UPDATE_BRANCH", "").strip() or "main"
 TOKEN = os.getenv("UPDATER_TOKEN", "").strip()
 MAX_LOG_LINES = 240
+MAX_CONSOLE_LOG_LINES = 1000
+CONSOLE_LOG_SERVICES = ("web", "frontend", "postgres", "redis", "updater")
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 
 _DOC_SUFFIXES = (".md", ".rst", ".txt")
 _FULL_UPDATE_BASENAMES = {
@@ -72,6 +77,52 @@ def _run(args: list[str], *, timeout: int = 60, env: dict[str, str] | None = Non
         return "", "command timed out", 124
     except Exception as exc:  # noqa: BLE001
         return "", f"{type(exc).__name__}: {exc}", 1
+
+
+def _int_query(value: str | None, default: int, minimum: int, maximum: int) -> int:
+    try:
+        parsed = int(str(value or "").strip())
+    except (TypeError, ValueError):
+        return default
+    return max(minimum, min(maximum, parsed))
+
+
+def _console_services(raw: str | None) -> list[str]:
+    if not raw or raw == "all":
+        return []
+    services = [part.strip() for part in raw.split(",") if part.strip()]
+    unknown = [item for item in services if item not in CONSOLE_LOG_SERVICES]
+    if unknown:
+        raise ValueError(f"不支持的服务: {', '.join(unknown)}")
+    return services
+
+
+def _tail_console_logs(service: str | None, tail: int, keyword: str | None) -> dict[str, Any]:
+    try:
+        services = _console_services(service)
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc), "services": list(CONSOLE_LOG_SERVICES), "lines": []}
+
+    cmd = ["docker", "compose", "logs", "--no-color", "--timestamps", f"--tail={tail}", *services]
+    out, err, rc = _run(cmd, timeout=12)
+    if rc != 0:
+        return {
+            "ok": False,
+            "error": err or out or f"docker compose logs 退出码 {rc}",
+            "services": services or list(CONSOLE_LOG_SERVICES),
+            "lines": [],
+        }
+    lines = [_ANSI_RE.sub("", line.rstrip()) for line in out.splitlines()]
+    q = (keyword or "").strip().lower()
+    if q:
+        lines = [line for line in lines if q in line.lower()]
+    return {
+        "ok": True,
+        "source": "docker_compose",
+        "services": services or list(CONSOLE_LOG_SERVICES),
+        "tail": tail,
+        "lines": lines[-MAX_CONSOLE_LOG_LINES:],
+    }
 
 
 def _normalize_changed_file(path: str) -> str:
@@ -247,14 +298,27 @@ class Handler(BaseHTTPRequestHandler):
             return {}
 
     def do_GET(self) -> None:  # noqa: N802
-        if self.path == "/health":
+        parsed = urlparse(self.path)
+        path = parsed.path
+        if path == "/health":
             _json_response(self, 200, {"ok": True})
             return
-        if self.path.startswith("/jobs/"):
+        if path == "/console-logs":
             if not self._authorized():
                 _json_response(self, 403, {"ok": False, "error": "forbidden"})
                 return
-            job_id = self.path.rsplit("/", 1)[-1]
+            qs = parse_qs(parsed.query)
+            tail = _int_query((qs.get("tail") or [None])[0], 300, 20, MAX_CONSOLE_LOG_LINES)
+            service = (qs.get("service") or [None])[0]
+            keyword = (qs.get("keyword") or [None])[0]
+            result = _tail_console_logs(service, tail, keyword)
+            _json_response(self, 200 if result.get("ok") else 400, result)
+            return
+        if path.startswith("/jobs/"):
+            if not self._authorized():
+                _json_response(self, 403, {"ok": False, "error": "forbidden"})
+                return
+            job_id = path.rsplit("/", 1)[-1]
             job = _job_snapshot(job_id)
             if job is None:
                 _json_response(self, 404, {"ok": False, "error": "job not found"})

@@ -295,6 +295,8 @@ class PluginAI:
         final_input_tokens = 0
         final_output_tokens = 0
         final_model = selected_model or primary.default_model
+        response_preview_parts: list[str] = []
+        response_preview_chars = 0
         started_at = time.monotonic()
         try:
             estimated_tokens = _estimate_total_tokens(system_prompt, user_prompt, clamped_tokens)
@@ -332,6 +334,9 @@ class PluginAI:
                 final_model = str(getattr(chunk, "model", None) or final_model or "")
                 delta = str(getattr(chunk, "delta", "") or "")
                 if delta:
+                    if response_preview_chars < 2000:
+                        response_preview_parts.append(delta[: max(0, 2000 - response_preview_chars)])
+                        response_preview_chars += len(delta)
                     yield delta
             actual_tokens = final_input_tokens + final_output_tokens
             if actual_tokens <= 0 and quota_ticket is not None:
@@ -356,6 +361,8 @@ class PluginAI:
                 output_tokens=final_output_tokens,
                 success=True,
                 started_at=started_at,
+                request_preview=llm_runtime.request_preview_for_usage(system_prompt, user_prompt),
+                response_preview=llm_runtime.preview_text_for_usage("".join(response_preview_parts)),
             )
         except plugin_ai_quota.PluginAIQuotaExceeded as exc:
             raise AIQuotaError(str(exc)) from exc
@@ -370,6 +377,7 @@ class PluginAI:
                 success=False,
                 error_type="budget_exceeded",
                 started_at=started_at,
+                request_preview=llm_runtime.request_preview_for_usage(system_prompt, user_prompt),
             )
             raise AIQuotaError(str(exc)) from exc
         except (LLMError, ValueError, NotImplementedError) as exc:
@@ -390,6 +398,8 @@ class PluginAI:
                 success=False,
                 error_type=type(exc).__name__,
                 started_at=started_at,
+                request_preview=llm_runtime.request_preview_for_usage(system_prompt, user_prompt),
+                response_preview=llm_runtime.preview_text_for_usage("".join(response_preview_parts)),
             )
             raise AIUnavailableError(str(exc)) from exc
         except Exception:
@@ -410,6 +420,8 @@ class PluginAI:
                 success=False,
                 error_type="unexpected_error",
                 started_at=started_at,
+                request_preview=llm_runtime.request_preview_for_usage(system_prompt, user_prompt),
+                response_preview=llm_runtime.preview_text_for_usage("".join(response_preview_parts)),
             )
             raise
         finally:
@@ -551,6 +563,8 @@ async def _emit_stream_usage(
     input_tokens: int = 0,
     output_tokens: int = 0,
     error_type: str | None = None,
+    request_preview: str | None = None,
+    response_preview: str | None = None,
 ) -> None:
     await llm_runtime._emit_usage(
         llm_runtime.UsageRecord(
@@ -566,6 +580,8 @@ async def _emit_stream_usage(
             source=f"plugin:{plugin_key}",
             used_fallback=False,
             fallback_chain=[provider.name],
+            request_preview=request_preview,
+            response_preview=response_preview,
         )
     )
 

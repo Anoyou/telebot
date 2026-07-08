@@ -424,7 +424,7 @@ export function PluginsHome() {
                   <ToneRailCard
                     icon={Sparkles}
                     title="AI 工作台"
-                    value={<Button size="sm" variant="outline" onClick={() => nav("/ai")}>打开</Button>}
+                    value={<Button size="sm" variant="outline" className="border-primary/35 bg-primary/5 text-primary hover:bg-primary/10" onClick={() => nav("/ai")}>打开</Button>}
                     valueClassName="flex flex-wrap gap-2"
                     description="总览模型、指令模板和启用状态"
                     tone="primary"
@@ -432,7 +432,7 @@ export function PluginsHome() {
                   <ToneRailCard
                     icon={Package}
                     title="模型提供商"
-                    value={<Button size="sm" variant="outline" onClick={() => nav("/ai?tab=providers")}>配置</Button>}
+                    value={<Button size="sm" variant="outline" className="border-primary/35 bg-primary/5 text-primary hover:bg-primary/10" onClick={() => nav("/ai?tab=providers")}>配置</Button>}
                     valueClassName="flex flex-wrap gap-2"
                     description="配置 OpenAI、Anthropic、Ollama 等"
                     tone="neutral"
@@ -440,7 +440,7 @@ export function PluginsHome() {
                   <ToneRailCard
                     icon={History}
                     title="近期调用"
-                    value={<Button size="sm" variant="outline" onClick={() => nav("/ai?tab=usage")}>查看</Button>}
+                    value={<Button size="sm" variant="outline" className="border-primary/35 bg-primary/5 text-primary hover:bg-primary/10" onClick={() => nav("/ai?tab=usage")}>查看详情</Button>}
                     valueClassName="flex flex-wrap gap-2"
                     description="查看成功率、耗时和错误原因"
                     tone="success"
@@ -448,7 +448,7 @@ export function PluginsHome() {
                   <ToneRailCard
                     icon={BookOpen}
                     title="帮助与示例"
-                    value={<Button size="sm" variant="outline" onClick={() => nav("/ai?help=1")}>前往</Button>}
+                    value={<Button size="sm" variant="outline" className="border-primary/35 bg-primary/5 text-primary hover:bg-primary/10" onClick={() => nav("/ai?help=1")}>前往</Button>}
                     valueClassName="flex flex-wrap gap-2"
                     description="浮层查看原理、示例和术语"
                     tone="warn"
@@ -868,9 +868,9 @@ function FeatureZone({
                         <div>加载异常{lastError ? `：${lastError}` : "：后端未返回错误详情"}</div>
                         <Button
                           type="button"
-                          variant="ghost"
+                          variant="outline"
                           size="sm"
-                          className="mt-1 h-7 px-0 text-destructive hover:text-destructive"
+                          className="mt-1 h-7 border-destructive/40 bg-destructive/10 px-2 text-destructive hover:bg-destructive/15 hover:text-destructive"
                           onClick={() => {
                             const params = new URLSearchParams({ tab: "plugins", plugin_key: f.key, status: "failed" });
                             if (selectedAccountId) params.set("account_id", String(selectedAccountId));

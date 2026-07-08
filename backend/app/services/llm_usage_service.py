@@ -32,6 +32,8 @@ async def _persist_usage(record: UsageRecord) -> None:
                     error_type=record.error_type,
                     used_fallback=bool(record.used_fallback),
                     fallback_chain=json.dumps(record.fallback_chain or [], ensure_ascii=False),
+                    request_preview=record.request_preview,
+                    response_preview=record.response_preview,
                 )
             )
             await db.commit()

@@ -29,6 +29,7 @@ if TYPE_CHECKING:
 from ..settings import settings
 from . import llm_account_budget
 from .llm_client import build_client_from_dto
+from .redactor import redact_text
 
 log = logging.getLogger(__name__)
 
@@ -38,6 +39,7 @@ _MAX_RETRIES = 3
 _RETRY_BASE_DELAY = 1.0
 # 最大退避时间（秒）
 _RETRY_MAX_DELAY = 30.0
+_USAGE_PREVIEW_CHARS = 2000
 
 
 # ── Usage Record ────────────────────────────────────────────
@@ -58,6 +60,8 @@ class UsageRecord:
     source: str | None = None
     used_fallback: bool = False
     fallback_chain: list[str] = field(default_factory=list)
+    request_preview: str | None = None
+    response_preview: str | None = None
 
 
 @dataclass(frozen=True)
@@ -93,6 +97,28 @@ async def _emit_usage(record: UsageRecord) -> None:
         except Exception:
             # 不应因 usage 记录失败影响主流程
             log.exception("usage callback 失败")
+
+
+def preview_text_for_usage(value: Any, *, limit: int = _USAGE_PREVIEW_CHARS) -> str | None:
+    """Return a redacted, bounded preview suitable for the usage table."""
+    text = str(value or "").strip()
+    if not text:
+        return None
+    redacted = redact_text(text)
+    if len(redacted) <= limit:
+        return redacted
+    return f"{redacted[:limit]}...[truncated]"
+
+
+def request_preview_for_usage(system: str, user: str) -> str | None:
+    parts: list[str] = []
+    system_preview = preview_text_for_usage(system, limit=900)
+    user_preview = preview_text_for_usage(user, limit=1400)
+    if system_preview:
+        parts.append(f"system:\n{system_preview}")
+    if user_preview:
+        parts.append(f"user:\n{user_preview}")
+    return preview_text_for_usage("\n\n".join(parts))
 
 
 # ── Retry 计算 ──────────────────────────────────────────────
@@ -244,6 +270,7 @@ async def call_with_fallback(
             source=source,
             used_fallback=False,
             fallback_chain=chain.get_provider_names(),
+            request_preview=request_preview_for_usage(system, user),
         )
         await _emit_usage(usage_record)
         raise LLMCallFailed(
@@ -302,6 +329,8 @@ async def call_with_fallback(
                 source=source,
                 used_fallback=used_fallback,
                 fallback_chain=chain.get_provider_names(),
+                request_preview=request_preview_for_usage(system, user),
+                response_preview=preview_text_for_usage(result.text),
             )
             await _emit_usage(usage_record)
             await llm_account_budget.settle(
@@ -347,6 +376,7 @@ async def call_with_fallback(
                     source=source,
                     used_fallback=is_fallback,
                     fallback_chain=chain.get_provider_names(),
+                    request_preview=request_preview_for_usage(system, user),
                 )
                 await _emit_usage(usage_record)
                 await llm_account_budget.settle(

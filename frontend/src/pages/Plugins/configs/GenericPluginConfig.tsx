@@ -489,9 +489,9 @@ export function GenericPluginConfigPage() {
                 {accountFeature?.last_error ? (
                   <Button
                     type="button"
-                    variant="ghost"
+                    variant="outline"
                     size="sm"
-                    className="h-7 px-2 text-destructive hover:text-destructive"
+                    className="h-7 border-destructive/40 bg-destructive/10 px-2 text-destructive hover:bg-destructive/15 hover:text-destructive"
                     onClick={() => nav(`/logs?tab=plugins&account_id=${aid}&plugin_key=${encodeURIComponent(featureKey)}&status=failed`)}
                   >
                     查看日志
@@ -675,11 +675,11 @@ function RecentConfigActionJobCard({
           </div>
           <div className="flex shrink-0 flex-wrap items-center gap-2">
             <Badge variant={jobStatusBadgeVariant(job.status)}>{configActionJobStatusText(job.status)}</Badge>
-            <Button type="button" variant="outline" size="sm" onClick={onRestore}>
+            <Button type="button" variant="outline" size="sm" className="border-primary/35 bg-primary/5 text-primary hover:bg-primary/10" onClick={onRestore}>
               查看过程
             </Button>
-            <Button type="button" variant="ghost" size="sm" onClick={onOpenLogs}>
-              日志
+            <Button type="button" variant="outline" size="sm" className="border-primary/35 bg-primary/5 text-primary hover:bg-primary/10" onClick={onOpenLogs}>
+              查看日志
             </Button>
           </div>
         </div>
@@ -810,7 +810,7 @@ function ConfigActionJobWindow({
         <div className="text-xs text-muted-foreground">
           关闭窗口不会停止后台执行。
         </div>
-        <Button type="button" variant="outline" size="sm" onClick={onOpenLogs}>
+        <Button type="button" variant="outline" size="sm" className="border-primary/35 bg-primary/5 text-primary hover:bg-primary/10" onClick={onOpenLogs}>
           查看日志
         </Button>
       </div>

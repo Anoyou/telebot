@@ -243,14 +243,21 @@ export function AIIndex() {
           tone={aiTemplates.length > 0 ? "primary" : "warn"}
           valueClassName="truncate text-xl font-bold tracking-tight sm:text-2xl"
         />
-        <ToneRailCard
-          icon={History}
-          title="近期调用情况"
-          value={usageSummary ? `${usageSummary.request_count} 次 / 失败 ${usageSummary.failed_count}` : "暂无"}
-          description={usageSummary ? `Fallback ${usageSummary.fallback_count} 次` : "触发调用后展示摘要"}
-          tone={(usageSummary?.failed_count ?? 0) > 0 ? "warn" : "neutral"}
-          valueClassName="break-words text-xl font-bold tracking-tight sm:text-2xl"
-        />
+        <button
+          type="button"
+          className="block h-full min-w-0 appearance-none rounded-lg border-0 bg-transparent p-0 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+          onClick={() => navigate("/ai?tab=usage")}
+        >
+          <ToneRailCard
+            icon={History}
+            title="近期调用情况"
+            value={usageSummary ? `${usageSummary.request_count} 次 / 失败 ${usageSummary.failed_count}` : "暂无"}
+            description={usageSummary ? `Fallback ${usageSummary.fallback_count} 次 · 点开查看详情` : "触发调用后展示摘要"}
+            tone={(usageSummary?.failed_count ?? 0) > 0 ? "warn" : "neutral"}
+            className="h-full border-primary/50 bg-primary/5 shadow-sm transition-colors hover:border-primary hover:bg-primary/10"
+            valueClassName="break-words text-xl font-bold tracking-tight sm:text-2xl"
+          />
+        </button>
         <Card className="border-t-4 border-t-emerald-500/90">
           <CardContent className="space-y-2 p-4">
             <div className="text-sm font-medium">调用成功率</div>

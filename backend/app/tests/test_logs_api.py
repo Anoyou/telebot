@@ -5,11 +5,13 @@ from types import SimpleNamespace
 
 import pytest
 
+from app.api import logs as logs_api
 from app.api.logs import (
     EventTraceSummary,
     list_event_traces,
     list_log_messages,
     list_runtime_logs,
+    list_system_console_logs,
 )
 
 
@@ -166,6 +168,55 @@ async def test_list_runtime_logs_filters_by_keyword() -> None:
     assert "runtime_log.level" in sql
     assert "runtime_log.source" in sql
     assert "runtime_log.detail" in sql
+
+
+@pytest.mark.asyncio
+async def test_system_console_logs_uses_updater_and_redacts(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_fetch(service: str, tail: int, keyword: str | None):
+        return {
+            "ok": True,
+            "source": "docker_compose",
+            "services": [service],
+            "tail": tail,
+            "lines": ["web | token=abc12345 ready", "web | normal line"],
+        }
+
+    monkeypatch.setattr("app.api.logs._fetch_updater_console_logs", fake_fetch)
+
+    result = await list_system_console_logs(
+        _user=object(),
+        service="web",
+        keyword=None,
+        tail=100,
+    )
+
+    assert result.ok is True
+    assert result.source == "docker_compose"
+    assert result.services == ["web"]
+    assert result.lines[0] == "web | token=*** ready"
+
+
+@pytest.mark.asyncio
+async def test_system_console_logs_falls_back_to_local_files(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    backend_log = tmp_path / "backend.log"
+    backend_log.write_text("line one\nline two\n", encoding="utf-8")
+
+    def fake_fetch(*_args, **_kwargs):
+        raise RuntimeError("updater down")
+
+    monkeypatch.setattr("app.api.logs._fetch_updater_console_logs", fake_fetch)
+    monkeypatch.setitem(logs_api._LOCAL_CONSOLE_FILES, "web", backend_log)
+
+    result = await list_system_console_logs(
+        _user=object(),
+        service="web",
+        keyword="two",
+        tail=100,
+    )
+
+    assert result.ok is True
+    assert result.source == "local_files"
+    assert result.lines == ["web  | line two"]
 
 
 @pytest.mark.asyncio
