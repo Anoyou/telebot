@@ -57,6 +57,7 @@ from .command import (
     set_command_context,
 )
 from .ipc import (
+    CMD_DISPATCH_SIMULATE,
     CMD_EXECUTE_RULE,
     CMD_FETCH_AVATAR,
     CMD_GET_RECENT_PEERS,
@@ -962,6 +963,43 @@ async def _listen_cmd(
                             await _log(
                                 redis, account_id, "warn", f"reload_ignored 失败: {type(e).__name__}: {e}"
                             )
+                    elif cmd.type == CMD_DISPATCH_SIMULATE:
+                        try:
+                            from .plugins.loader import _STATES, evaluate_dispatch  # type: ignore
+
+                            chat = {
+                                "chat_id": cmd.payload.get("chat_id"),
+                                "id": cmd.payload.get("chat_id"),
+                                "chat_type": cmd.payload.get("chat_type"),
+                                "type": cmd.payload.get("chat_type"),
+                                "sender_id": cmd.payload.get("sender_id"),
+                                "user_id": cmd.payload.get("sender_id"),
+                            }
+                            trace = evaluate_dispatch(
+                                account=account_id,
+                                state=_STATES.get(account_id),
+                                chat=chat,
+                                text=str(cmd.payload.get("text") or ""),
+                                via=str(cmd.payload.get("via") or "userbot"),
+                            )
+                            reply_to = cmd.payload.get("reply_to")
+                            cmd_id = cmd.payload.get("cmd_id")
+                            if isinstance(reply_to, str) and reply_to and isinstance(cmd_id, str) and cmd_id:
+                                await redis.publish(
+                                    reply_to,
+                                    make_event(
+                                        EVT_ACK,
+                                        cmd_id=cmd_id,
+                                        cmd_type=cmd.type,
+                                        ok=True,
+                                        error=None,
+                                        trace=trace,
+                                    ),
+                                )
+                            continue
+                        except Exception as e:  # noqa: BLE001
+                            ack_ok = False
+                            ack_error = f"{type(e).__name__}: {e}"
                     elif cmd.type in _BACKGROUND_RPC_COMMAND_TYPES:
                         handled, ack_ok, ack_error = await _handle_rpc_command(
                             redis,
