@@ -446,6 +446,139 @@ def test_load_dir_warns_manifest_event_subscription_lint_once(tmp_path, monkeypa
         _REGISTRY.pop(plugin_key, None)
 
 
+@pytest.mark.asyncio
+async def test_load_dir_builds_simple_mode_command_plugin_and_dispatches(tmp_path, monkeypatch) -> None:
+    """无显式 manifest 的 @plugin.command 单函数插件应能加载并走现有命令分发。"""
+    import sys
+
+    from app.worker.command import dispatch_plugin_command, unregister_all_plugin_commands
+    from app.worker.plugins.base import _REGISTRY
+
+    plugin_key = "_test_simple_ping"
+    plugin_dir = tmp_path / plugin_key
+    plugin_dir.mkdir()
+    (plugin_dir / "__init__.py").write_text(
+        "\n".join(
+            [
+                "from telepilot import plugin",
+                "",
+                "@plugin.command('sdkping')",
+                "async def sdkping(ctx):",
+                "    await ctx.reply('pong')",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(loader_mod, "_INSTALLED_MODULE_NAMES", set())
+    mod_name = loader_mod._installed_module_name(plugin_key)
+
+    try:
+        loaded = _load_dir(plugin_dir, source="installed")
+
+        assert plugin_key in loaded
+        cls = loaded[plugin_key]
+        manifest = cls._manifest
+        assert manifest.key == plugin_key
+        assert manifest.permissions == ["read_event", "send_message"]
+        assert sorted(cls.commands) == ["sdkping"]
+
+        ctx = PluginContext(account_id=1, feature_key=plugin_key)
+        for command, handler in cls.commands.items():
+            loader_mod.register_plugin_command(
+                command,
+                loader_mod._wrap_cmd(handler, ctx),
+                owner_plugin_key=plugin_key,
+                generation=1,
+            )
+
+        event = SimpleNamespace(
+            chat_id=-100123,
+            raw_text=",sdkping",
+            trace_id="trace-simple-ping",
+            reply=AsyncMock(),
+        )
+        dispatched = await dispatch_plugin_command(
+            None,
+            event,
+            [],
+            1,
+            plugin_key=plugin_key,
+            method="sdkping",
+        )
+
+        assert dispatched is True
+        event.reply.assert_awaited_once_with("pong")
+    finally:
+        unregister_all_plugin_commands(owner_plugin_key=plugin_key)
+        sys.modules.pop(mod_name, None)
+        _REGISTRY.pop(plugin_key, None)
+        _clear_installed_module_cache(plugin_key)
+
+
+def test_simple_mode_plugin_coexists_with_explicit_manifest_plugin(tmp_path, monkeypatch) -> None:
+    """隐式 manifest 与显式 manifest 插件应能同时由 loader 加载。"""
+    import sys
+
+    from app.worker.plugins.base import _REGISTRY
+
+    simple_key = "_test_simple_coexist"
+    explicit_key = "_test_explicit_coexist"
+    simple_dir = tmp_path / simple_key
+    explicit_dir = tmp_path / explicit_key
+    simple_dir.mkdir()
+    explicit_dir.mkdir()
+    (simple_dir / "__init__.py").write_text(
+        "\n".join(
+            [
+                "from telepilot import plugin",
+                "",
+                "@plugin.command('hello')",
+                "async def hello(ctx):",
+                "    await ctx.reply('hi')",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (explicit_dir / "__init__.py").write_text(
+        "\n".join(
+            [
+                "from app.worker.plugins.base import Plugin, register",
+                "from app.worker.plugins.manifest import Manifest",
+                "",
+                "@register",
+                "class ExplicitPlugin(Plugin):",
+                f"    key = {explicit_key!r}",
+                "    display_name = 'explicit coexist'",
+                "",
+                "PLUGIN_CLASS = ExplicitPlugin",
+                f"MANIFEST = Manifest(key={explicit_key!r}, display_name='explicit coexist')",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(loader_mod, "_INSTALLED_MODULE_NAMES", set())
+    simple_mod = loader_mod._installed_module_name(simple_key)
+    explicit_mod = loader_mod._installed_module_name(explicit_key)
+
+    try:
+        simple_loaded = _load_dir(simple_dir, source="installed")
+        explicit_loaded = _load_dir(explicit_dir, source="installed")
+
+        assert simple_key in simple_loaded
+        assert explicit_key in explicit_loaded
+        assert _REGISTRY[simple_key] is simple_loaded[simple_key]
+        assert _REGISTRY[explicit_key] is explicit_loaded[explicit_key]
+        assert simple_loaded[simple_key]._manifest.permissions == ["read_event", "send_message"]
+        assert explicit_loaded[explicit_key]._manifest.display_name == "explicit coexist"
+    finally:
+        for name in (simple_mod, explicit_mod):
+            sys.modules.pop(name, None)
+        _REGISTRY.pop(simple_key, None)
+        _REGISTRY.pop(explicit_key, None)
+        _clear_installed_module_cache(simple_key)
+        _clear_installed_module_cache(explicit_key)
+
+
 def test_clear_installed_module_cache_prunes_lazy_and_origin_modules(tmp_path, monkeypatch) -> None:
     """运行期懒加载的子模块和插件目录来源模块也不能残留旧代码。"""
     import importlib

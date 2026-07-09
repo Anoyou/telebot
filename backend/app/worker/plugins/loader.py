@@ -116,7 +116,15 @@ from ..command import (
 from ..ipc import RUNTIME_LOG_STREAM, RuntimeLogPayload
 from ..ratelimit.engine import RateLimitEngine
 from ..ratelimit.humanize import HumanizeOpts, simulate_read, simulate_typing
-from .base import Plugin, PluginContext, all_plugins, get_plugin, public_entity_display_name
+from .base import (
+    Plugin,
+    PluginContext,
+    all_plugins,
+    build_implicit_plugin,
+    clear_simple_commands_for_module,
+    get_plugin,
+    public_entity_display_name,
+)
 from .events import attach_tp_event
 from .manifest import Manifest
 from .message_ops import BufferedMessageOps
@@ -4167,6 +4175,7 @@ def _load_dir(path: Path, source: str) -> dict[str, type[Plugin]]:
 
     try:
         if source == "builtin":
+            clear_simple_commands_for_module(f"{__package__}.builtin.{path.name}")
             mod = importlib.import_module(
                 f".builtin.{path.name}", package=__package__
             )
@@ -4178,6 +4187,7 @@ def _load_dir(path: Path, source: str) -> dict[str, type[Plugin]]:
 
             mod_name = _installed_module_name(path.name)
             _clear_installed_module_cache(path.name)
+            clear_simple_commands_for_module(mod_name)
             spec = importlib.util.spec_from_file_location(
                 mod_name,
                 init_file,
@@ -4204,6 +4214,10 @@ def _load_dir(path: Path, source: str) -> dict[str, type[Plugin]]:
 
     cls = getattr(mod, "PLUGIN_CLASS", None)
     manifest = getattr(mod, "MANIFEST", None)
+    if cls is None and manifest is None:
+        implicit = build_implicit_plugin(module_name=mod.__name__, plugin_key=path.name)
+        if implicit is not None:
+            cls, manifest = implicit
     if cls is None or manifest is None:
         log.warning("插件 %s 缺少 PLUGIN_CLASS 或 MANIFEST，跳过", path)
         if source == "installed":

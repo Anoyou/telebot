@@ -13,10 +13,12 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from telethon import TelegramClient, events
+
+from .manifest import Manifest
 
 
 def _clean_text(value: Any) -> str:
@@ -109,6 +111,9 @@ class PluginContext:
     messages: Any = None
     generation: int = 0
     account_proxy_url: str | None = None
+    event: Any | None = None
+    args: list[str] = field(default_factory=list)
+    command: str = ""
 
     @asynccontextmanager
     async def conversation(self, peer: Any, timeout: float = 30.0) -> AsyncIterator[Any]:
@@ -126,6 +131,26 @@ class PluginContext:
             raise RuntimeError("PluginContext.client 未初始化")
         async with _conv(self.client, peer, timeout) as conv:
             yield conv
+
+    async def reply(self, text: Any, *args: Any, **kwargs: Any) -> Any:
+        """Reply to the current command event from simple-mode plugins."""
+
+        if self.event is not None:
+            reply = getattr(self.event, "reply", None)
+            if callable(reply):
+                return await reply(text, *args, **kwargs)
+            respond = getattr(self.event, "respond", None)
+            if callable(respond):
+                return await respond(text, *args, **kwargs)
+        if self.messages is not None:
+            chat_id = getattr(self.event, "chat_id", None) if self.event is not None else None
+            if chat_id is not None:
+                return await self.messages.send(chat_id=chat_id, text=text, **kwargs)
+        if self.client is not None and self.event is not None:
+            chat_id = getattr(self.event, "chat_id", None)
+            if chat_id is not None:
+                return await self.client.send_message(chat_id, text, *args, **kwargs)
+        raise RuntimeError("ctx.reply 需要命令事件或可发送消息的上下文")
 
 
 # ─────────────────────────────────────────────────────
@@ -279,6 +304,117 @@ class Plugin:
 _REGISTRY: dict[str, type[Plugin]] = {}
 
 
+@dataclass(frozen=True)
+class SimpleCommandSpec:
+    """A command declared through the simple-mode SDK."""
+
+    name: str
+    handler: Callable[[PluginContext], Awaitable[Any]]
+    module_name: str
+
+
+_SIMPLE_COMMANDS: dict[str, list[SimpleCommandSpec]] = {}
+
+
+def _normalize_command_name(name: str) -> str:
+    command = str(name or "").strip().lstrip("/")
+    if not command:
+        raise ValueError("@plugin.command 需要非空命令名")
+    return command
+
+
+def register_simple_command(name: str, fn: Callable[[PluginContext], Awaitable[Any]]) -> Callable:
+    """Register a simple-mode command function for loader-time manifest inference."""
+
+    command = _normalize_command_name(name)
+    module_name = str(getattr(fn, "__module__", "") or "").strip()
+    if not module_name:
+        raise ValueError("@plugin.command 只能用于可导入模块中的函数")
+    specs = _SIMPLE_COMMANDS.setdefault(module_name, [])
+    specs[:] = [item for item in specs if item.name != command]
+    specs.append(SimpleCommandSpec(name=command, handler=fn, module_name=module_name))
+    return fn
+
+
+class PluginSDK:
+    """Public decorator namespace exposed as ``from telepilot import plugin``."""
+
+    def command(self, name: str) -> Callable[[Callable[[PluginContext], Awaitable[Any]]], Callable]:
+        """Declare a single-function userbot command plugin."""
+
+        def decorator(fn: Callable[[PluginContext], Awaitable[Any]]) -> Callable:
+            return register_simple_command(name, fn)
+
+        return decorator
+
+
+plugin = PluginSDK()
+
+
+def _simple_specs_for_module(module_name: str) -> list[SimpleCommandSpec]:
+    prefix = f"{module_name}."
+    specs: list[SimpleCommandSpec] = []
+    for spec_module, module_specs in _SIMPLE_COMMANDS.items():
+        if spec_module == module_name or spec_module.startswith(prefix):
+            specs.extend(module_specs)
+    return specs
+
+
+def clear_simple_commands_for_module(module_name: str) -> None:
+    """Drop simple-mode declarations owned by a plugin module before reload."""
+
+    prefix = f"{module_name}."
+    for spec_module in list(_SIMPLE_COMMANDS):
+        if spec_module == module_name or spec_module.startswith(prefix):
+            _SIMPLE_COMMANDS.pop(spec_module, None)
+
+
+def build_implicit_plugin(
+    *,
+    module_name: str,
+    plugin_key: str,
+    display_name: str | None = None,
+) -> tuple[type[Plugin], Manifest] | None:
+    """Build ``PLUGIN_CLASS`` and ``MANIFEST`` from simple-mode decorators."""
+
+    specs = _simple_specs_for_module(module_name)
+    if not specs:
+        return None
+    commands: dict[str, Callable[..., Awaitable[None]]] = {}
+
+    for spec in specs:
+        async def _run(_client, event, args, _account_id, ctx, *, _spec=spec):  # noqa: ANN001
+            call_ctx = replace(
+                ctx,
+                event=event,
+                args=list(args or []),
+                command=_spec.name,
+            )
+            await _spec.handler(call_ctx)
+
+        commands[spec.name] = _run
+
+    display = display_name or plugin_key.replace("_", " ").replace("-", " ").title()
+    cls = type(
+        f"{plugin_key.title().replace('_', '').replace('-', '')}SimplePlugin",
+        (Plugin,),
+        {
+            "key": plugin_key,
+            "display_name": display,
+            "commands": commands,
+            "owner_only": True,
+        },
+    )
+    manifest = Manifest(
+        key=plugin_key,
+        display_name=display,
+        description=f"{display} simple command plugin",
+        category="utility",
+        permissions=["read_event", "send_message"],
+    )
+    return cls, manifest
+
+
 def register(plugin_cls: type[Plugin]) -> type[Plugin]:
     """装饰器：把一个 ``Plugin`` 子类注册到全局表。
 
@@ -308,7 +444,11 @@ __all__ = [
     "Plugin",
     "PluginContext",
     "all_plugins",
+    "build_implicit_plugin",
+    "clear_simple_commands_for_module",
     "get_plugin",
+    "plugin",
     "public_entity_display_name",
     "register",
+    "register_simple_command",
 ]
