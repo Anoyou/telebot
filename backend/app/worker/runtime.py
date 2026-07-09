@@ -11,10 +11,11 @@ from __future__ import annotations
 import asyncio
 import gc
 import logging
+from datetime import UTC, datetime, timedelta
 from io import BytesIO
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from telethon.errors import (
     AuthKeyUnregisteredError,
     FloodWaitError,
@@ -28,10 +29,19 @@ from ..db.base import AsyncSessionLocal
 from ..db.models.account import Account, Proxy, SudoUser
 from ..db.models.command import AccountCommandLink, CommandAlias, CommandTemplate, LLMProvider
 from ..db.models.feature import FEATURE_SCHEDULER, AccountFeature
+from ..db.models.payout_compensation import (
+    PAYOUT_COMPENSATION_STATUS_ABANDONED,
+    PAYOUT_COMPENSATION_STATUS_PENDING,
+    PAYOUT_COMPENSATION_STATUS_SENT,
+    PayoutCompensation,
+)
 from ..db.models.system import SystemSetting
 from ..redis_client import get_redis
+from ..services import payout_compensation
 from ..services.ai_feature import is_ai_enabled
 from ..services.event_trace import (
+    TRACE_STATUS_OK,
+    record_action,
     refresh_trace_settings,
     stop_trace_writer,
 )
@@ -85,6 +95,9 @@ _USERBOT_SESSION_EXPIRE_SCAN_SECONDS = 15
 _RECENT_USER_MESSAGE_SEARCH_LIMIT = 200
 _RECENT_USER_MESSAGE_SEARCH_LIMIT_MAX = 500
 _DEFAULT_REPLY_ANCHOR_MISSING_TEXT = "未找到对应用户（{user_id}）的近期消息。"
+_PAYOUT_SENT_TTL_SECONDS = 604_800
+_PAYOUT_COMPENSATION_LEASE_SECONDS = 120
+_PAYOUT_COMPENSATION_AMBIGUOUS_PROBE_LIMIT = 30
 _BACKGROUND_RPC_COMMAND_TYPES = {
     CMD_FETCH_AVATAR,
     CMD_GET_RECENT_PEERS,
@@ -201,6 +214,11 @@ def _int_or_none(value: Any) -> int | None:
         return None
 
 
+def _str_or_none(value: Any) -> str | None:
+    text = str(value or "").strip()
+    return text or None
+
+
 def _recent_user_message_search_limit(raw: Any) -> int:
     value = _int_or_none(raw)
     if value is None:
@@ -294,6 +312,53 @@ async def _read_saved_interaction_message_id(
     return _int_or_none(raw)
 
 
+def _payout_sent_key(account_id: int | None, payout_key: Any) -> str | None:
+    key = _str_or_none(payout_key)
+    if account_id is None or not key:
+        return None
+    return f"payout:sent:{int(account_id)}:{key}"
+
+
+async def _read_payout_sent_marker(
+    redis: Any | None,
+    account_id: int | None,
+    payout_key: Any,
+) -> int | None:
+    key = _payout_sent_key(account_id, payout_key)
+    if redis is None or key is None:
+        return None
+    try:
+        raw = await redis.get(key)
+    except Exception:  # noqa: BLE001
+        log.debug("read payout sent marker failed account=%s key=%s", account_id, key, exc_info=True)
+        return None
+    if raw is None:
+        return None
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8", errors="ignore")
+    return _int_or_none(raw) or 0
+
+
+async def _mark_payout_sent_marker(
+    redis: Any | None,
+    account_id: int | None,
+    payout_key: Any,
+    message_id: Any,
+) -> None:
+    key = _payout_sent_key(account_id, payout_key)
+    if redis is None or key is None:
+        return
+    try:
+        await redis.set(
+            key,
+            str(_int_or_none(message_id) or 0),
+            ex=_PAYOUT_SENT_TTL_SECONDS,
+            nx=True,
+        )
+    except Exception:  # noqa: BLE001
+        log.debug("write payout sent marker failed account=%s key=%s", account_id, key, exc_info=True)
+
+
 async def _run_interaction_userbot_action(
     client: Any,
     payload: dict[str, Any],
@@ -350,7 +415,15 @@ async def _run_interaction_userbot_action(
             chat_id=chat_id,
         )
         if action_type == "payout":
-            payout_ok, payout_reason = await _check_payout_limit(account_id, amount)
+            payout_key = _str_or_none(payload.get("payout_key"))
+            if payout_key:
+                payout_ok, payout_reason = await _check_payout_limit(
+                    account_id,
+                    amount,
+                    idempotency_key=payout_key,
+                )
+            else:
+                payout_ok, payout_reason = await _check_payout_limit(account_id, amount)
             if not payout_ok:
                 raise PayoutLimitExceeded(payout_reason or "payout 超过限额")
         msg = await client.send_message(chat_id, text, reply_to=reply_to, parse_mode=_telethon_parse_mode(parse_mode))
@@ -360,6 +433,8 @@ async def _run_interaction_userbot_action(
             "reply_to_message_id": reply_to,
             "reply_to_user_id": reply_to_user_id,
         }
+        if action_type == "payout":
+            await _mark_payout_sent_marker(redis, account_id, payload.get("payout_key"), result.get("message_id"))
         await save_action_reply_target(
             redis or get_redis(),
             account_id=account_id,
@@ -609,6 +684,9 @@ async def run_worker(account_id: int) -> None:
         global_task = asyncio.create_task(_listen_global(redis, account_id, paused))
         reconcile_task = asyncio.create_task(_periodic_config_reconcile(redis, account_id))
         session_expire_task = asyncio.create_task(_periodic_userbot_session_expire_scan(redis, account_id))
+        payout_compensation_task = asyncio.create_task(
+            _periodic_payout_compensation_scan(redis, client, account_id)
+        )
         scheduler_task = asyncio.create_task(platform_scheduler.run())
 
         # 启动期临时对象（迁移、insp、Telethon TLS handshake buffer 等）此时已不再需要；
@@ -622,7 +700,14 @@ async def run_worker(account_id: int) -> None:
             # 阻塞直到 client.disconnect() 被调用
             await client.run_until_disconnected()
         finally:
-            for t in (ipc_task, global_task, reconcile_task, session_expire_task, scheduler_task):
+            for t in (
+                ipc_task,
+                global_task,
+                reconcile_task,
+                session_expire_task,
+                payout_compensation_task,
+                scheduler_task,
+            ):
                 t.cancel()
                 try:
                     await t
@@ -1201,6 +1286,507 @@ def _interaction_action_error_code(error: Any) -> str:
     if "unsupported" in text or "不支持" in text:
         return "unsupported_send_via"
     return "telegram_api_error"
+
+
+async def _load_payout_compensation_config() -> dict[str, Any]:
+    try:
+        async with AsyncSessionLocal() as db:
+            row = await db.get(SystemSetting, payout_compensation.SETTING_KEY)
+        value = row.value if row is not None else None
+    except Exception:  # noqa: BLE001
+        log.debug("load payout compensation config failed; use defaults", exc_info=True)
+        value = None
+    return payout_compensation.normalize_config(value)
+
+
+async def _periodic_payout_compensation_scan(redis: Any, client: Any, account_id: int) -> None:
+    while True:
+        config = await _load_payout_compensation_config()
+        try:
+            if bool(config.get("enabled", True)):
+                await _scan_payout_compensations_once(
+                    redis,
+                    client,
+                    account_id,
+                    config=config,
+                )
+        except Exception as exc:  # noqa: BLE001
+            await _log(redis, account_id, "warn", f"payout 补偿扫描失败: {type(exc).__name__}: {exc}")
+        scan_interval = int(
+            config.get("scan_interval_seconds")
+            or payout_compensation.DEFAULT_CONFIG["scan_interval_seconds"]
+        )
+        await asyncio.sleep(scan_interval)
+
+
+async def _scan_payout_compensations_once(
+    redis: Any,
+    client: Any,
+    account_id: int,
+    *,
+    config: dict[str, Any] | None = None,
+) -> int:
+    config = payout_compensation.normalize_config(config or payout_compensation.DEFAULT_CONFIG)
+    if not bool(config.get("enabled", True)):
+        return 0
+    now = _utc_now()
+    ids = await _due_payout_compensation_ids(account_id, now, int(config["batch_size"]))
+    processed = 0
+    for row_id in ids:
+        row = await _lease_payout_compensation(row_id, now)
+        if row is None:
+            continue
+        try:
+            await _replay_payout_compensation_row(redis, client, row, config=config)
+        except Exception as exc:  # noqa: BLE001
+            await _log(
+                redis,
+                account_id,
+                "warn",
+                f"payout 补偿单处理失败: {type(exc).__name__}: {exc}",
+                payout_compensation_id=row_id,
+                payout_key=getattr(row, "payout_key", None),
+            )
+        processed += 1
+    return processed
+
+
+async def _due_payout_compensation_ids(account_id: int, now: datetime, batch_size: int) -> list[int]:
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            select(PayoutCompensation.id)
+            .where(
+                PayoutCompensation.account_id == int(account_id),
+                PayoutCompensation.status == PAYOUT_COMPENSATION_STATUS_PENDING,
+                PayoutCompensation.next_attempt_at <= now,
+            )
+            .order_by(PayoutCompensation.id.asc())
+            .limit(max(1, int(batch_size)))
+        )
+        return [int(item) for item in result.scalars().all()]
+
+
+async def _lease_payout_compensation(row_id: int, now: datetime) -> PayoutCompensation | None:
+    lease_until = now + timedelta(seconds=_PAYOUT_COMPENSATION_LEASE_SECONDS)
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            update(PayoutCompensation)
+            .where(
+                PayoutCompensation.id == int(row_id),
+                PayoutCompensation.status == PAYOUT_COMPENSATION_STATUS_PENDING,
+                PayoutCompensation.next_attempt_at <= now,
+            )
+            .values(next_attempt_at=lease_until, updated_at=now)
+        )
+        if int(result.rowcount or 0) <= 0:
+            await db.rollback()
+            return None
+        row = await db.get(PayoutCompensation, int(row_id))
+        await db.commit()
+        return row
+
+
+async def _replay_payout_compensation_row(
+    redis: Any,
+    client: Any,
+    row: PayoutCompensation,
+    *,
+    config: dict[str, Any],
+) -> None:
+    now = _utc_now()
+    sent_message_id = await _read_payout_sent_marker(redis, row.account_id, row.payout_key)
+    if sent_message_id is not None:
+        if await _mark_payout_compensation_sent(row.id, sent_message_id, now):
+            await _record_payout_replay_action(
+                row,
+                {"message_id": sent_message_id or None, "chat_id": row.chat_id, "replay_recovered": True},
+                replay_recovered=True,
+            )
+        return
+
+    if bool(row.ambiguous) and bool(config.get("ambiguous_probe", True)):
+        probe_message_id = await _probe_ambiguous_payout_message(client, row)
+        if probe_message_id is not None:
+            await _mark_payout_sent_marker(redis, row.account_id, row.payout_key, probe_message_id)
+            if await _mark_payout_compensation_sent(row.id, probe_message_id, now):
+                await _record_payout_replay_action(
+                    row,
+                    {
+                        "message_id": probe_message_id,
+                        "chat_id": row.chat_id,
+                        "replay_recovered": True,
+                        "ambiguous_probe": True,
+                    },
+                    replay_recovered=True,
+                    ambiguous_probe=True,
+                )
+            return
+
+    payload = _payout_replay_payload(row)
+    try:
+        result = await _run_interaction_userbot_action(
+            client,
+            payload,
+            account_id=row.account_id,
+            engine=_interaction_userbot_engine(row.account_id),
+            redis=redis,
+        )
+        if await _mark_payout_compensation_sent(row.id, result.get("message_id"), now):
+            await _record_payout_replay_action(row, result, replay=True)
+        return
+    except Exception as exc:  # noqa: BLE001
+        error_code = _payout_replay_error_code(exc)
+        error_text = f"{type(exc).__name__}: {exc}"
+
+    if error_code == payout_compensation.ERROR_REPLY_ANCHOR_MISSING and bool(
+        config.get("replay_drop_reply_anchor", True)
+    ):
+        retry_payload = _drop_payout_reply_anchor(payload)
+        try:
+            result = await _run_interaction_userbot_action(
+                client,
+                retry_payload,
+                account_id=row.account_id,
+                engine=_interaction_userbot_engine(row.account_id),
+                redis=redis,
+            )
+            if await _mark_payout_compensation_sent(row.id, result.get("message_id"), now):
+                await _record_payout_replay_action(
+                    row,
+                    result,
+                    replay=True,
+                    replay_drop_reply_anchor=True,
+                )
+            return
+        except Exception as retry_exc:  # noqa: BLE001
+            error_code = _payout_replay_error_code(retry_exc)
+            error_text = f"{type(retry_exc).__name__}: {retry_exc}"
+
+    await _apply_payout_replay_failure(
+        redis,
+        row,
+        error_code=error_code,
+        error_text=error_text,
+        config=config,
+        now=now,
+    )
+
+
+async def _probe_ambiguous_payout_message(client: Any, row: PayoutCompensation) -> int | None:
+    target_text = _payout_replay_text(row)
+    created_at = _as_utc(row.created_at)
+    try:
+        async for msg in client.iter_messages(
+            row.chat_id,
+            from_user="me",
+            limit=_PAYOUT_COMPENSATION_AMBIGUOUS_PROBE_LIMIT,
+        ):
+            msg_id = _telegram_message_id(msg)
+            if msg_id is None:
+                continue
+            msg_date = _as_utc(getattr(msg, "date", None))
+            if created_at is not None and msg_date is not None and msg_date < created_at:
+                continue
+            if _telegram_message_text(msg).strip() == target_text:
+                return msg_id
+    except Exception:  # noqa: BLE001
+        log.debug("ambiguous payout probe failed row=%s", row.id, exc_info=True)
+    return None
+
+
+def _payout_replay_payload(row: PayoutCompensation) -> dict[str, Any]:
+    payload = dict(row.payload or {})
+    payload["action_type"] = "payout"
+    payload["chat_id"] = int(row.chat_id)
+    payload["amount"] = int(row.amount)
+    payload["payout_key"] = row.payout_key
+    payload["text"] = _payout_replay_text(row)
+    if row.trace_id:
+        context = dict(payload.get("context") or {})
+        context.setdefault("trace_id", row.trace_id)
+        if row.plugin_key:
+            context.setdefault("plugin_key", row.plugin_key)
+        if row.entry_key:
+            context.setdefault("entry_key", row.entry_key)
+        payload["context"] = context
+    payload.setdefault("suppress_reply_anchor_missing_notice", True)
+    return payload
+
+
+def _payout_replay_text(row: PayoutCompensation) -> str:
+    text = str((row.payload or {}).get("text") or "").strip()
+    if text:
+        return text
+    return f"+{int(row.amount)}"
+
+
+def _drop_payout_reply_anchor(payload: dict[str, Any]) -> dict[str, Any]:
+    retry_payload = dict(payload)
+    for key in (
+        "reply_to_message_id",
+        "reply_to_user_id",
+        "reply_to_search_limit",
+        "reply_anchor_missing_text",
+    ):
+        retry_payload.pop(key, None)
+    retry_payload["suppress_reply_anchor_missing_notice"] = True
+    return retry_payload
+
+
+def _payout_replay_action(row: PayoutCompensation) -> dict[str, Any]:
+    action = dict(row.payload or {})
+    action["type"] = "payout"
+    action["chat_id"] = int(row.chat_id)
+    action["amount"] = int(row.amount)
+    action["payout_key"] = row.payout_key
+    action["text"] = _payout_replay_text(row)
+    context = dict(action.get("context") or {})
+    if row.trace_id:
+        context.setdefault("trace_id", row.trace_id)
+    if row.plugin_key:
+        context.setdefault("plugin_key", row.plugin_key)
+    if row.entry_key:
+        context.setdefault("entry_key", row.entry_key)
+    if context:
+        action["context"] = context
+    return action
+
+
+async def _record_payout_replay_action(
+    row: PayoutCompensation,
+    result: dict[str, Any],
+    **detail: Any,
+) -> None:
+    action = _payout_replay_action(row)
+    result_detail = dict(result or {})
+    result_detail.setdefault("payout_key", row.payout_key)
+    await record_action(
+        action.get("context"),
+        action,
+        TRACE_STATUS_OK,
+        actual_send_via="userbot_reply",
+        result=result_detail,
+        payout_key=row.payout_key,
+        retry_count=row.retry_count,
+        **detail,
+    )
+
+
+async def _mark_payout_compensation_sent(row_id: int, message_id: Any, now: datetime) -> bool:
+    async with AsyncSessionLocal() as db:
+        row = await db.get(PayoutCompensation, int(row_id))
+        if row is None or row.status != PAYOUT_COMPENSATION_STATUS_PENDING:
+            return False
+        row.status = PAYOUT_COMPENSATION_STATUS_SENT
+        row.sent_message_id = _int_or_none(message_id)
+        row.sent_at = now
+        row.updated_at = now
+        await db.commit()
+        return True
+
+
+async def _apply_payout_replay_failure(
+    redis: Any,
+    row: PayoutCompensation,
+    *,
+    error_code: str,
+    error_text: str,
+    config: dict[str, Any],
+    now: datetime,
+) -> None:
+    if error_code == payout_compensation.ERROR_PAYOUT_LIMIT_EXCEEDED and _is_daily_payout_limit_error(error_text):
+        should_notify = await _defer_payout_compensation_to_next_day(row.id, error_code, error_text, now)
+        if should_notify:
+            await _log_payout_compensation_error(
+                redis,
+                row,
+                "payout 补偿因日累计上限阻塞，已延后到次日重试。",
+                error_code=error_code,
+                error=error_text,
+            )
+        return
+
+    if error_code == payout_compensation.ERROR_PAYOUT_LIMIT_EXCEEDED or not _is_retryable_payout_error(
+        error_code,
+        error_text,
+    ):
+        should_notify = await _abandon_payout_compensation(row.id, error_code, error_text, now)
+        if should_notify:
+            await _log_payout_compensation_error(
+                redis,
+                row,
+                "payout 补偿已放弃。",
+                error_code=error_code,
+                error=error_text,
+            )
+        return
+
+    retry_count = int(row.retry_count or 0) + 1
+    max_retries = int(config.get("max_retries") or payout_compensation.DEFAULT_CONFIG["max_retries"])
+    if retry_count >= max_retries:
+        should_notify = await _abandon_payout_compensation(
+            row.id,
+            error_code,
+            error_text,
+            now,
+            retry_count=retry_count,
+        )
+        if should_notify:
+            await _log_payout_compensation_error(
+                redis,
+                row,
+                "payout 补偿重试耗尽，已放弃。",
+                error_code=error_code,
+                error=error_text,
+                retry_count=retry_count,
+            )
+        return
+
+    next_attempt_at = now + timedelta(
+        seconds=_payout_replay_backoff_seconds(
+            retry_count,
+            base_seconds=int(config["backoff_base_seconds"]),
+            max_seconds=int(config["backoff_max_seconds"]),
+        )
+    )
+    async with AsyncSessionLocal() as db:
+        current = await db.get(PayoutCompensation, row.id)
+        if current is None or current.status != PAYOUT_COMPENSATION_STATUS_PENDING:
+            return
+        current.retry_count = retry_count
+        current.next_attempt_at = next_attempt_at
+        current.error_code_last = error_code
+        current.error_last = error_text
+        current.updated_at = now
+        await db.commit()
+
+
+async def _defer_payout_compensation_to_next_day(
+    row_id: int,
+    error_code: str,
+    error_text: str,
+    now: datetime,
+) -> bool:
+    next_attempt_at = _next_utc_day_retry_at(now, row_id)
+    async with AsyncSessionLocal() as db:
+        row = await db.get(PayoutCompensation, int(row_id))
+        if row is None or row.status != PAYOUT_COMPENSATION_STATUS_PENDING:
+            return False
+        should_notify = row.notified_at is None
+        row.next_attempt_at = next_attempt_at
+        row.error_code_last = error_code
+        row.error_last = error_text
+        if should_notify:
+            row.notified_at = now
+        row.updated_at = now
+        await db.commit()
+        return should_notify
+
+
+async def _abandon_payout_compensation(
+    row_id: int,
+    error_code: str,
+    error_text: str,
+    now: datetime,
+    *,
+    retry_count: int | None = None,
+) -> bool:
+    async with AsyncSessionLocal() as db:
+        row = await db.get(PayoutCompensation, int(row_id))
+        if row is None or row.status != PAYOUT_COMPENSATION_STATUS_PENDING:
+            return False
+        should_notify = row.notified_at is None
+        row.status = PAYOUT_COMPENSATION_STATUS_ABANDONED
+        if retry_count is not None:
+            row.retry_count = int(retry_count)
+        row.error_code_last = error_code
+        row.error_last = error_text
+        if should_notify:
+            row.notified_at = now
+        row.updated_at = now
+        await db.commit()
+        return should_notify
+
+
+async def _log_payout_compensation_error(
+    redis: Any,
+    row: PayoutCompensation,
+    message: str,
+    **detail: Any,
+) -> None:
+    await _log(
+        redis,
+        row.account_id,
+        "error",
+        message,
+        source="event",
+        payout_compensation_id=row.id,
+        payout_key=row.payout_key,
+        chat_id=row.chat_id,
+        amount=row.amount,
+        trace_id=row.trace_id,
+        **detail,
+    )
+
+
+def _payout_replay_error_code(exc: BaseException) -> str:
+    if isinstance(exc, PayoutLimitExceeded):
+        return payout_compensation.ERROR_PAYOUT_LIMIT_EXCEEDED
+    return payout_compensation.normalize_payout_error_code(
+        _interaction_action_error_code(f"{type(exc).__name__}: {exc}"),
+        exc,
+    )
+
+
+def _is_retryable_payout_error(error_code: str, error_text: str) -> bool:
+    classification = payout_compensation.classify_payout_error(error_code, error_text)
+    return bool(classification.retryable)
+
+
+def _is_daily_payout_limit_error(error_text: str) -> bool:
+    return "日累计" in str(error_text or "")
+
+
+def _payout_replay_backoff_seconds(retry_count: int, *, base_seconds: int, max_seconds: int) -> int:
+    return min(max_seconds, base_seconds * (2 ** max(0, int(retry_count) - 1)))
+
+
+def _next_utc_day_retry_at(now: datetime, row_id: int) -> datetime:
+    now_utc = _as_utc(now) or _utc_now()
+    next_day = (now_utc + timedelta(days=1)).date()
+    jitter_seconds = int(row_id) % 300
+    return datetime(next_day.year, next_day.month, next_day.day, tzinfo=UTC) + timedelta(seconds=jitter_seconds)
+
+
+def _telegram_message_text(msg: Any) -> str:
+    return str(
+        getattr(msg, "raw_text", None)
+        or getattr(msg, "message", None)
+        or getattr(msg, "text", None)
+        or ""
+    )
+
+
+def _as_utc(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
+
+
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
+
+
+def _interaction_userbot_engine(account_id: int) -> Any | None:
+    try:
+        from .plugins.loader import _STATES  # type: ignore
+
+        state = _STATES.get(account_id)
+        return getattr(state, "engine", None) if state is not None else None
+    except Exception:  # noqa: BLE001
+        return None
 
 
 async def _ack_cmd(redis, cmd: IPCMessage, *, ok: bool, error: str | None = None) -> None:

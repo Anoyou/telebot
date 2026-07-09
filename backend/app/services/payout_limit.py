@@ -67,7 +67,11 @@ class PayoutLimitExceeded(RuntimeError):
     """payout 超限。调用方可选择据此走各自的失败路径。"""
 
 
-async def check_and_consume(account_id: int | None, amount: int) -> tuple[bool, str | None]:
+async def check_and_consume(
+    account_id: int | None,
+    amount: int,
+    idempotency_key: str | None = None,
+) -> tuple[bool, str | None]:
     """校验并消费一次 payout 额度。
 
     返回 ``(allowed, reason)``：allowed=False 时 reason 为中文超限说明（含当前值与
@@ -98,7 +102,12 @@ async def check_and_consume(account_id: int | None, amount: int) -> tuple[bool, 
         return True, None
 
     try:
-        allowed, used, limit = await _try_consume_daily(account_id, amount_int, daily_max)
+        allowed, used, limit = await _try_consume_daily(
+            account_id,
+            amount_int,
+            daily_max,
+            idempotency_key=idempotency_key,
+        )
     except Exception:  # noqa: BLE001
         log.debug("payout 日累计 Redis 校验失败，fail-open 放行 account=%s", account_id, exc_info=True)
         return True, None
@@ -107,16 +116,26 @@ async def check_and_consume(account_id: int | None, amount: int) -> tuple[bool, 
     return False, f"payout 日累计上限超限：今日已用 {used}，本笔 {amount_int}，日累计上限 {limit}。"
 
 
-async def _try_consume_daily(account_id: int, amount: int, daily_max: int) -> tuple[bool, int, int]:
+async def _try_consume_daily(
+    account_id: int,
+    amount: int,
+    daily_max: int,
+    *,
+    idempotency_key: str | None = None,
+) -> tuple[bool, int, int]:
     redis = get_redis()
     await redis.ping()
+    counted_key = _counted_key(idempotency_key)
+    use_counted = 1 if counted_key != _COUNTED_KEY_UNUSED else 0
     result = await redis.eval(
         _CONSUME_SCRIPT,
-        1,
+        2,
         _daily_key(account_id),
+        counted_key,
         daily_max,
         amount,
         _DAILY_TTL_SECONDS,
+        use_counted,
     )
     ok = int(result[0] if result else 0)
     used = int(result[1] if result and len(result) > 1 else 0)
@@ -140,6 +159,13 @@ async def _load_payout_limits() -> dict[str, int]:
 def _daily_key(account_id: int) -> str:
     today = datetime.now(UTC).strftime("%Y%m%d")
     return f"payout_limit:{int(account_id)}:daily:{today}"
+
+
+def _counted_key(idempotency_key: str | None) -> str:
+    key = str(idempotency_key or "").strip()
+    if not key:
+        return _COUNTED_KEY_UNUSED
+    return f"{_COUNTED_KEY_PREFIX}{key[:160]}"
 
 
 def _non_negative_int(value: Any, default: int) -> int:

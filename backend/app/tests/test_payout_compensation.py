@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -10,10 +12,16 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.db.models.account import Account  # noqa: F401 - registers FK target table metadata
-from app.db.models.payout_compensation import PayoutCompensation
+from app.db.models.payout_compensation import (
+    PAYOUT_COMPENSATION_STATUS_ABANDONED,
+    PAYOUT_COMPENSATION_STATUS_PENDING,
+    PAYOUT_COMPENSATION_STATUS_SENT,
+    PayoutCompensation,
+)
 from app.services import account_bot_runtime
 from app.services import payout_compensation as payout_compensation_service
 from app.services.interaction.delivery import InteractionDeliveryExecutor
+from app.worker import runtime as worker_runtime
 from app.worker.plugins import loader as loader_mod
 
 
@@ -30,6 +38,8 @@ class _FakeRedis:
         return self.values.get(str(key))
 
     async def set(self, key: str, value: str, **_kwargs):
+        if _kwargs.get("nx") and str(key) in self.values:
+            return False
         self.values[str(key)] = value
         return True
 
@@ -73,10 +83,109 @@ async def payout_session_factory(monkeypatch):
         await conn.run_sync(PayoutCompensation.__table__.create)
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     monkeypatch.setattr(payout_compensation_service, "AsyncSessionLocal", session_factory)
+    monkeypatch.setattr(worker_runtime, "AsyncSessionLocal", session_factory)
     try:
         yield session_factory
     finally:
         await engine.dispose()
+
+
+async def _insert_compensation_row(session_factory, **overrides) -> PayoutCompensation:
+    now = overrides.pop("now", datetime.now(UTC))
+    payout_key = overrides.pop("payout_key", "pay_row")
+    chat_id = overrides.pop("chat_id", -100123)
+    amount = overrides.pop("amount", 10)
+    text = overrides.pop("text", "+10")
+    trace_id = overrides.pop("trace_id", "evt_row")
+    payload = {
+        "action_type": "payout",
+        "payout_key": payout_key,
+        "chat_id": chat_id,
+        "amount": amount,
+        "text": text,
+        "context": {"trace_id": trace_id, "plugin_key": "game", "entry_key": "main"},
+    }
+    payload.update(overrides.pop("payload", {}))
+    row = PayoutCompensation(
+        payout_key=payload["payout_key"],
+        account_id=overrides.pop("account_id", 7),
+        trace_id=trace_id,
+        plugin_key=overrides.pop("plugin_key", "game"),
+        entry_key=overrides.pop("entry_key", "main"),
+        origin=overrides.pop("origin", "delivery"),
+        chat_id=payload["chat_id"],
+        amount=payload["amount"],
+        payload=payload,
+        status=overrides.pop("status", PAYOUT_COMPENSATION_STATUS_PENDING),
+        error_code_first=overrides.pop("error_code_first", "telegram_api_error"),
+        error_code_last=overrides.pop("error_code_last", "telegram_api_error"),
+        error_last=overrides.pop("error_last", "ConnectionError: network down"),
+        ambiguous=overrides.pop("ambiguous", False),
+        retry_count=overrides.pop("retry_count", 0),
+        next_attempt_at=overrides.pop("next_attempt_at", now - timedelta(seconds=1)),
+        created_at=overrides.pop("created_at", now - timedelta(seconds=30)),
+        updated_at=overrides.pop("updated_at", now - timedelta(seconds=30)),
+        **overrides,
+    )
+    async with session_factory() as db:
+        db.add(row)
+        await db.commit()
+        await db.refresh(row)
+    return row
+
+
+async def _get_compensation_row(session_factory, row_id: int) -> PayoutCompensation:
+    async with session_factory() as db:
+        row = await db.get(PayoutCompensation, row_id)
+        assert row is not None
+        return row
+
+
+def _scan_config(**overrides) -> dict:
+    config = dict(payout_compensation_service.DEFAULT_CONFIG)
+    config.update(overrides)
+    return config
+
+
+class _ReplayClient:
+    def __init__(
+        self,
+        *,
+        send_ids: list[int] | None = None,
+        send_error: Exception | None = None,
+        messages: list[SimpleNamespace] | None = None,
+        iter_error: Exception | None = None,
+    ) -> None:
+        self.send_ids = list(send_ids or [900])
+        self.send_error = send_error
+        self.messages = list(messages or [])
+        self.iter_error = iter_error
+        self.sent: list[dict[str, object]] = []
+
+    def iter_messages(self, _chat_id, **_kwargs):  # noqa: ANN001, ANN003
+        async def _gen():
+            if self.iter_error is not None:
+                raise self.iter_error
+            for msg in self.messages:
+                yield msg
+
+        return _gen()
+
+    async def send_message(self, chat_id, text, **kwargs):  # noqa: ANN001, ANN003
+        if self.send_error is not None:
+            raise self.send_error
+        self.sent.append({"chat_id": chat_id, "text": text, **kwargs})
+        message_id = self.send_ids.pop(0) if self.send_ids else 900
+        return SimpleNamespace(id=message_id)
+
+
+@pytest.fixture(autouse=True)
+def _runtime_rate_limit_engine(monkeypatch):
+    engine = SimpleNamespace(
+        acquire=AsyncMock(return_value=SimpleNamespace(allowed=True, wait_seconds=0, outcome="ok"))
+    )
+    monkeypatch.setattr(worker_runtime, "_interaction_userbot_engine", lambda _account_id: engine)
+    return engine
 
 
 @pytest.mark.asyncio
@@ -270,3 +379,250 @@ async def test_loader_payout_contract_and_payout_limit_failures_do_not_enqueue(m
     )
 
     enqueue.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_payout_replay_backoff_then_abandons_and_notifies_once(
+    payout_session_factory,
+    monkeypatch,
+) -> None:
+    row = await _insert_compensation_row(
+        payout_session_factory,
+        payout_key="pay_retry",
+        trace_id="evt_retry",
+    )
+    redis = _FakeRedis()
+    client = _ReplayClient(send_error=ConnectionError("network down"))
+    monkeypatch.setattr(worker_runtime, "_check_payout_limit", AsyncMock(return_value=(True, None)))
+    monkeypatch.setattr(worker_runtime, "record_action", AsyncMock())
+
+    config = _scan_config(max_retries=2, backoff_base_seconds=10, backoff_max_seconds=60)
+    assert await worker_runtime._scan_payout_compensations_once(redis, client, 7, config=config) == 1
+
+    first = await _get_compensation_row(payout_session_factory, row.id)
+    assert first.status == PAYOUT_COMPENSATION_STATUS_PENDING
+    assert first.retry_count == 1
+    assert worker_runtime._as_utc(first.next_attempt_at) > worker_runtime._as_utc(row.next_attempt_at)
+    assert redis.list_pushes == []
+
+    async with payout_session_factory() as db:
+        current = await db.get(PayoutCompensation, row.id)
+        assert current is not None
+        current.next_attempt_at = datetime.now(UTC) - timedelta(seconds=1)
+        await db.commit()
+
+    assert await worker_runtime._scan_payout_compensations_once(redis, client, 7, config=config) == 1
+    abandoned = await _get_compensation_row(payout_session_factory, row.id)
+    assert abandoned.status == PAYOUT_COMPENSATION_STATUS_ABANDONED
+    assert abandoned.retry_count == 2
+    assert abandoned.notified_at is not None
+    assert len(redis.list_pushes) == 1
+
+    assert await worker_runtime._scan_payout_compensations_once(redis, client, 7, config=config) == 0
+    assert len(redis.list_pushes) == 1
+
+
+@pytest.mark.asyncio
+async def test_payout_replay_recovers_from_sent_marker_without_sending(
+    payout_session_factory,
+    monkeypatch,
+) -> None:
+    row = await _insert_compensation_row(
+        payout_session_factory,
+        payout_key="pay_sent_marker",
+        trace_id="evt_sent_marker",
+    )
+    redis = _FakeRedis()
+    redis.values["payout:sent:7:pay_sent_marker"] = "321"
+    client = _ReplayClient()
+    record_action = AsyncMock()
+    monkeypatch.setattr(worker_runtime, "record_action", record_action)
+
+    assert await worker_runtime._scan_payout_compensations_once(redis, client, 7, config=_scan_config()) == 1
+
+    saved = await _get_compensation_row(payout_session_factory, row.id)
+    assert saved.status == PAYOUT_COMPENSATION_STATUS_SENT
+    assert saved.sent_message_id == 321
+    assert client.sent == []
+    assert record_action.await_args.kwargs["replay_recovered"] is True
+    assert record_action.await_args.args[0]["trace_id"] == "evt_sent_marker"
+
+
+@pytest.mark.asyncio
+async def test_payout_replay_ambiguous_probe_recovers_and_probe_error_falls_back_to_send(
+    payout_session_factory,
+    monkeypatch,
+) -> None:
+    now = datetime.now(UTC)
+    recovered = await _insert_compensation_row(
+        payout_session_factory,
+        payout_key="pay_ambiguous_hit",
+        trace_id="evt_ambiguous_hit",
+        ambiguous=True,
+        created_at=now - timedelta(seconds=10),
+    )
+    redis = _FakeRedis()
+    client = _ReplayClient(
+        messages=[SimpleNamespace(id=555, raw_text="+10", date=now - timedelta(seconds=5))]
+    )
+    record_action = AsyncMock()
+    monkeypatch.setattr(worker_runtime, "record_action", record_action)
+
+    await worker_runtime._scan_payout_compensations_once(redis, client, 7, config=_scan_config())
+
+    saved = await _get_compensation_row(payout_session_factory, recovered.id)
+    assert saved.status == PAYOUT_COMPENSATION_STATUS_SENT
+    assert saved.sent_message_id == 555
+    assert client.sent == []
+    assert record_action.await_args.kwargs["ambiguous_probe"] is True
+
+    fallback = await _insert_compensation_row(
+        payout_session_factory,
+        payout_key="pay_ambiguous_error",
+        trace_id="evt_ambiguous_error",
+        ambiguous=True,
+    )
+    fallback_client = _ReplayClient(send_ids=[556], iter_error=RuntimeError("probe failed"))
+    monkeypatch.setattr(worker_runtime, "_check_payout_limit", AsyncMock(return_value=(True, None)))
+
+    await worker_runtime._scan_payout_compensations_once(redis, fallback_client, 7, config=_scan_config())
+
+    saved_fallback = await _get_compensation_row(payout_session_factory, fallback.id)
+    assert saved_fallback.status == PAYOUT_COMPENSATION_STATUS_SENT
+    assert saved_fallback.sent_message_id == 556
+    assert fallback_client.sent == [{"chat_id": -100123, "text": "+10", "reply_to": None, "parse_mode": None}]
+
+
+@pytest.mark.asyncio
+async def test_payout_replay_limit_state_machine_single_abandon_daily_defer(
+    payout_session_factory,
+    monkeypatch,
+) -> None:
+    single = await _insert_compensation_row(
+        payout_session_factory,
+        payout_key="pay_single_limit",
+        trace_id="evt_single_limit",
+        amount=500,
+        text="+500",
+    )
+    redis = _FakeRedis()
+    monkeypatch.setattr(
+        worker_runtime,
+        "_check_payout_limit",
+        AsyncMock(return_value=(False, "payout 单笔上限超限：本笔 500，单笔上限 100。")),
+    )
+    monkeypatch.setattr(worker_runtime, "record_action", AsyncMock())
+
+    await worker_runtime._scan_payout_compensations_once(redis, _ReplayClient(), 7, config=_scan_config())
+
+    single_saved = await _get_compensation_row(payout_session_factory, single.id)
+    assert single_saved.status == PAYOUT_COMPENSATION_STATUS_ABANDONED
+    assert single_saved.notified_at is not None
+
+    daily = await _insert_compensation_row(
+        payout_session_factory,
+        payout_key="pay_daily_limit",
+        trace_id="evt_daily_limit",
+        amount=50,
+        text="+50",
+        retry_count=3,
+    )
+    monkeypatch.setattr(
+        worker_runtime,
+        "_check_payout_limit",
+        AsyncMock(return_value=(False, "payout 日累计上限超限：今日已用 100，本笔 50，日累计上限 100。")),
+    )
+    before = datetime.now(UTC)
+    await worker_runtime._scan_payout_compensations_once(redis, _ReplayClient(), 7, config=_scan_config())
+
+    daily_saved = await _get_compensation_row(payout_session_factory, daily.id)
+    assert daily_saved.status == PAYOUT_COMPENSATION_STATUS_PENDING
+    assert daily_saved.retry_count == 3
+    assert daily_saved.notified_at is not None
+    assert worker_runtime._as_utc(daily_saved.next_attempt_at) >= datetime(
+        (before + timedelta(days=1)).year,
+        (before + timedelta(days=1)).month,
+        (before + timedelta(days=1)).day,
+        tzinfo=UTC,
+    )
+
+
+@pytest.mark.asyncio
+async def test_payout_replay_success_records_ok_action_with_original_trace(
+    payout_session_factory,
+    monkeypatch,
+) -> None:
+    row = await _insert_compensation_row(
+        payout_session_factory,
+        payout_key="pay_replay_success",
+        trace_id="evt_replay_success",
+    )
+    record_action = AsyncMock()
+    monkeypatch.setattr(worker_runtime, "record_action", record_action)
+    monkeypatch.setattr(worker_runtime, "_check_payout_limit", AsyncMock(return_value=(True, None)))
+
+    await worker_runtime._scan_payout_compensations_once(
+        _FakeRedis(),
+        _ReplayClient(send_ids=[777]),
+        7,
+        config=_scan_config(),
+    )
+
+    saved = await _get_compensation_row(payout_session_factory, row.id)
+    assert saved.status == PAYOUT_COMPENSATION_STATUS_SENT
+    assert saved.sent_message_id == 777
+    assert record_action.await_args.args[0]["trace_id"] == "evt_replay_success"
+    assert record_action.await_args.args[2] == "ok"
+    assert record_action.await_args.kwargs["replay"] is True
+    assert record_action.await_args.kwargs["result"]["message_id"] == 777
+
+
+@pytest.mark.asyncio
+async def test_payout_replay_drops_reply_anchor_and_retries_once(
+    payout_session_factory,
+    monkeypatch,
+) -> None:
+    row = await _insert_compensation_row(
+        payout_session_factory,
+        payout_key="pay_drop_anchor",
+        trace_id="evt_drop_anchor",
+        payload={"reply_to_user_id": 111, "reply_anchor_missing_text": "没有找到 {user_id} 的近期发言。"},
+    )
+    client = _ReplayClient(send_ids=[778])
+    record_action = AsyncMock()
+    monkeypatch.setattr(worker_runtime, "record_action", record_action)
+    monkeypatch.setattr(worker_runtime, "_check_payout_limit", AsyncMock(return_value=(True, None)))
+
+    await worker_runtime._scan_payout_compensations_once(_FakeRedis(), client, 7, config=_scan_config())
+
+    saved = await _get_compensation_row(payout_session_factory, row.id)
+    assert saved.status == PAYOUT_COMPENSATION_STATUS_SENT
+    assert saved.sent_message_id == 778
+    assert client.sent == [{"chat_id": -100123, "text": "+10", "reply_to": None, "parse_mode": None}]
+    assert record_action.await_args.kwargs["replay_drop_reply_anchor"] is True
+
+
+@pytest.mark.asyncio
+async def test_payout_replay_concurrent_scan_lease_sends_once(
+    payout_session_factory,
+    monkeypatch,
+) -> None:
+    row = await _insert_compensation_row(
+        payout_session_factory,
+        payout_key="pay_concurrent",
+        trace_id="evt_concurrent",
+    )
+    redis = _FakeRedis()
+    client = _ReplayClient(send_ids=[779])
+    monkeypatch.setattr(worker_runtime, "record_action", AsyncMock())
+    monkeypatch.setattr(worker_runtime, "_check_payout_limit", AsyncMock(return_value=(True, None)))
+
+    await asyncio.gather(
+        worker_runtime._scan_payout_compensations_once(redis, client, 7, config=_scan_config()),
+        worker_runtime._scan_payout_compensations_once(redis, client, 7, config=_scan_config()),
+    )
+
+    saved = await _get_compensation_row(payout_session_factory, row.id)
+    assert saved.status == PAYOUT_COMPENSATION_STATUS_SENT
+    assert saved.sent_message_id == 779
+    assert len(client.sent) == 1

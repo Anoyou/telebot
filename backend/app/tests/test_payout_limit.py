@@ -33,12 +33,18 @@ class _FakeRedis:
     async def eval(self, _script: str, _numkeys: int, *args: Any):
         self.eval_calls += 1
         key = str(args[0])
-        daily_max = int(args[1])
-        amount = int(args[2])
+        counted_key = str(args[1])
+        daily_max = int(args[2])
+        amount = int(args[3])
+        use_counted = int(args[5])
         used = int(self.store.get(key, 0))
+        if use_counted == 1 and counted_key in self.store:
+            return [1, used, daily_max]
         if daily_max > 0 and (used + amount) > daily_max:
             return [0, used, daily_max]
         self.store[key] = used + amount
+        if use_counted == 1:
+            self.store[counted_key] = 1
         return [1, used + amount, daily_max]
 
 
@@ -74,7 +80,7 @@ async def test_single_max_allows_within_limit_and_consumes_daily(monkeypatch) ->
     assert ok is True
     assert reason is None
     assert redis.eval_calls == 1
-    assert list(redis.store.values()) == [50]
+    assert [value for key, value in redis.store.items() if ":daily:" in key] == [50]
 
 
 @pytest.mark.asyncio
@@ -89,7 +95,7 @@ async def test_daily_max_rejects_when_exceeded_and_keeps_prior_usage(monkeypatch
     assert reason is not None and "日累计" in reason
     assert "60" in reason and "100" in reason
     # 被拒的那笔不计入，日累计停在首笔 60
-    assert list(redis.store.values()) == [60]
+    assert [value for key, value in redis.store.items() if ":daily:" in key] == [60]
 
 
 @pytest.mark.asyncio
@@ -136,3 +142,19 @@ async def test_non_positive_amount_or_missing_account_passes_through(monkeypatch
     assert await payout_limit.check_and_consume(6, -5) == (True, None)
     assert await payout_limit.check_and_consume(None, 5) == (True, None)
     assert redis.eval_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_idempotency_key_counts_daily_usage_once(monkeypatch) -> None:
+    redis = _patch(monkeypatch, limits={"single_max": 0, "daily_max": 100})
+
+    first_ok, first_reason = await payout_limit.check_and_consume(8, 60, idempotency_key="pay_same")
+    replay_ok, replay_reason = await payout_limit.check_and_consume(8, 60, idempotency_key="pay_same")
+    next_ok, next_reason = await payout_limit.check_and_consume(8, 60, idempotency_key="pay_other")
+
+    assert (first_ok, first_reason) == (True, None)
+    assert (replay_ok, replay_reason) == (True, None)
+    assert next_ok is False
+    assert next_reason is not None and "日累计" in next_reason
+    daily_values = [value for key, value in redis.store.items() if ":daily:" in key]
+    assert daily_values == [60]

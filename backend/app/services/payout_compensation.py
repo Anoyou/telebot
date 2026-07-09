@@ -28,6 +28,18 @@ log = logging.getLogger(__name__)
 PAYOUT_KEY_PREFIX = "pay_"
 PAYOUT_KEY_MAX_LENGTH = 80
 DEFAULT_RETRY_BACKOFF_SECONDS = 60
+SETTING_KEY = "payout_compensation"
+DEFAULT_CONFIG: dict[str, Any] = {
+    "enabled": True,
+    "max_retries": 5,
+    "backoff_base_seconds": 60,
+    "backoff_max_seconds": 3600,
+    "scan_interval_seconds": 60,
+    "batch_size": 20,
+    "ambiguous_probe": True,
+    "replay_drop_reply_anchor": True,
+    "notify_channel": None,
+}
 
 ERROR_USERBOT_OFFLINE = "userbot_offline"
 ERROR_TELEGRAM_API = "telegram_api_error"
@@ -263,6 +275,50 @@ def _int_or_none(value: Any) -> int | None:
         return None
 
 
+def normalize_config(value: Any) -> dict[str, Any]:
+    """Normalize ``system_setting.payout_compensation`` with safe defaults."""
+
+    config = dict(DEFAULT_CONFIG)
+    if not isinstance(value, dict):
+        return config
+    config["enabled"] = bool(value.get("enabled", config["enabled"]))
+    config["max_retries"] = _non_negative_int(value.get("max_retries"), config["max_retries"])
+    config["backoff_base_seconds"] = _positive_int(
+        value.get("backoff_base_seconds"),
+        config["backoff_base_seconds"],
+    )
+    config["backoff_max_seconds"] = _positive_int(
+        value.get("backoff_max_seconds"),
+        config["backoff_max_seconds"],
+    )
+    config["scan_interval_seconds"] = _positive_int(
+        value.get("scan_interval_seconds"),
+        config["scan_interval_seconds"],
+    )
+    config["batch_size"] = _positive_int(value.get("batch_size"), config["batch_size"])
+    config["ambiguous_probe"] = bool(value.get("ambiguous_probe", config["ambiguous_probe"]))
+    config["replay_drop_reply_anchor"] = bool(
+        value.get("replay_drop_reply_anchor", config["replay_drop_reply_anchor"])
+    )
+    notify_channel = _str_or_none(value.get("notify_channel"))
+    config["notify_channel"] = notify_channel
+    return config
+
+
+def _positive_int(value: Any, default: int) -> int:
+    try:
+        return max(1, int(value))
+    except (TypeError, ValueError):
+        return int(default)
+
+
+def _non_negative_int(value: Any, default: int) -> int:
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return int(default)
+
+
 __all__ = [
     "ERROR_ACTION_LIMIT_EXCEEDED",
     "ERROR_EMPTY_MESSAGE_TEXT",
@@ -274,11 +330,14 @@ __all__ = [
     "ERROR_TELEGRAM_API",
     "ERROR_USERBOT_OFFLINE",
     "NON_COMPENSABLE_ERROR_CODES",
+    "DEFAULT_CONFIG",
     "PAYOUT_KEY_PREFIX",
     "PayoutErrorClassification",
     "RETRYABLE_ERROR_CODES",
+    "SETTING_KEY",
     "classify_payout_error",
     "enqueue_payout_compensation",
     "ensure_payout_key",
+    "normalize_config",
     "normalize_payout_error_code",
 ]
