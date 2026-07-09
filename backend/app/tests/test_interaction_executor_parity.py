@@ -232,24 +232,22 @@ PARITY_MATRIX: list[ParityCase] = [
         (TRACE_STATUS_OK, None, "userbot_reply"),
         covers="edit_caption",
     ),
-    # delete/pin 走 userbot_reply：E1 支持（client 直删/置顶），E2 仅 interaction_bot → 漂移③
+    # delete/pin 走 userbot_reply：E2 通过 run_worker_action 落到 E3，与 E1 行为一致。
     _row(
-        "delete_message_userbot_drift",
+        "delete_message_userbot_ok",
         [{"type": "delete_message", "send_via": "userbot_reply", "message_id": 7, "chat_id": CHAT}],
         "delete_message",
         (TRACE_STATUS_OK, None, "userbot_reply"),
-        (TRACE_STATUS_FAILED, "unsupported_send_via", None),
+        (TRACE_STATUS_OK, None, "userbot_reply"),
         covers="delete_message",
-        drift="③ delete 的 E3/bot 路能力缺失（userbot 消息删不掉）",
     ),
     _row(
-        "pin_message_userbot_drift",
+        "pin_message_userbot_ok",
         [{"type": "pin_message", "send_via": "userbot_reply", "message_id": 7, "chat_id": CHAT}],
         "pin_message",
         (TRACE_STATUS_OK, None, "userbot_reply"),
-        (TRACE_STATUS_FAILED, "unsupported_send_via", None),
+        (TRACE_STATUS_OK, None, "userbot_reply"),
         covers="pin_message",
-        drift="③ pin 的 E3/bot 路能力缺失",
     ),
     _row(
         "answer_callback_ok",

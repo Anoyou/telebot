@@ -697,6 +697,8 @@ class InteractionDeliveryExecutor:
             payload["reply_to_search_limit"] = reply_to_search_limit
         if action.get("reply_anchor_missing_text") not in (None, ""):
             payload["reply_anchor_missing_text"] = str(action.get("reply_anchor_missing_text"))
+        if bool(action.get("suppress_reply_anchor_missing_notice")):
+            payload["suppress_reply_anchor_missing_notice"] = True
         ok, error, result = await self.run_worker_action(self.incoming, payload=payload)
         detail = result if isinstance(result, dict) else {}
         if not ok:
@@ -1302,6 +1304,29 @@ class InteractionDeliveryExecutor:
         last_code = "unsupported_send_via"
         last_error = "no supported send_via"
         for send_via in action_send_via_options(action):
+            if send_via == "userbot_reply":
+                payload = {
+                    "action_type": "delete_message",
+                    "chat_id": target_chat_id,
+                    "message_id": message_id,
+                }
+                ok, error, result = await self.run_worker_action(self.incoming, payload=payload)
+                if ok:
+                    await record_action(
+                        action.get("context"),
+                        action,
+                        TRACE_STATUS_OK,
+                        actual_send_via=send_via,
+                        result=result,
+                    )
+                    return
+                last_code = _result_error_code(result, _worker_action_error_code(error))
+                last_error = str(
+                    error
+                    or (result.get("error") if isinstance(result, dict) else "")
+                    or "userbot action failed"
+                )
+                continue
             if send_via != "interaction_bot":
                 last_code = "unsupported_send_via"
                 last_error = f"delete_message does not support send_via={send_via}"
@@ -1337,6 +1362,29 @@ class InteractionDeliveryExecutor:
         last_code = "unsupported_send_via"
         last_error = "no supported send_via"
         for send_via in action_send_via_options(action):
+            if send_via == "userbot_reply":
+                payload = {
+                    "action_type": "pin_message",
+                    "chat_id": target_chat_id,
+                    "message_id": message_id,
+                }
+                ok, error, result = await self.run_worker_action(self.incoming, payload=payload)
+                if ok:
+                    await record_action(
+                        action.get("context"),
+                        action,
+                        TRACE_STATUS_OK,
+                        actual_send_via=send_via,
+                        result=result,
+                    )
+                    return
+                last_code = _result_error_code(result, _worker_action_error_code(error))
+                last_error = str(
+                    error
+                    or (result.get("error") if isinstance(result, dict) else "")
+                    or "userbot action failed"
+                )
+                continue
             if send_via != "interaction_bot":
                 last_code = "unsupported_send_via"
                 last_error = f"pin_message does not support send_via={send_via}"

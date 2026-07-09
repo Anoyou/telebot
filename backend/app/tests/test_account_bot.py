@@ -29,6 +29,7 @@ from app.worker import runtime as worker_runtime
 from app.worker.plugins import loader as plugin_loader
 from app.worker.plugins.message_ops import BufferedMessageOps
 from app.worker.plugins.textutil import html_escape
+from app.worker.ratelimit.humanize import HumanizeOpts
 
 
 class _MemoryRedis:
@@ -259,6 +260,144 @@ async def test_userbot_interaction_action_resolves_reply_to_user_recent_message(
     assert result["message_id"] == 88
     assert result["reply_to_message_id"] == 77
     assert result["reply_to_user_id"] == 111
+
+
+@pytest.mark.asyncio
+async def test_userbot_interaction_action_humanize_runs_before_send_when_enabled(monkeypatch) -> None:
+    order: list[str] = []
+
+    async def fake_send_message(chat_id, text, **kwargs):  # noqa: ANN001, ANN003
+        order.append("send")
+        return SimpleNamespace(id=89)
+
+    async def fake_read(client, peer, opts):  # noqa: ANN001, ANN003
+        order.append("read")
+        assert peer == -100
+        assert opts.typing_simulate is True
+        assert client is client_obj
+
+    async def fake_typing(client, peer, opts):  # noqa: ANN001, ANN003
+        order.append("typing")
+        assert peer == -100
+        assert opts.read_before_reply is True
+        assert client is client_obj
+
+    client_obj = SimpleNamespace(send_message=AsyncMock(side_effect=fake_send_message))
+    engine = SimpleNamespace(
+        humanize=HumanizeOpts(read_before_reply=True, typing_simulate=True),
+        acquire=AsyncMock(return_value=SimpleNamespace(allowed=True, wait_seconds=0, outcome="ok")),
+    )
+    simulate_read = AsyncMock(side_effect=fake_read)
+    simulate_typing = AsyncMock(side_effect=fake_typing)
+    monkeypatch.setattr(worker_runtime, "simulate_read", simulate_read)
+    monkeypatch.setattr(worker_runtime, "simulate_typing", simulate_typing)
+
+    result = await worker_runtime._run_interaction_userbot_action(
+        client_obj,
+        {
+            "action_type": "send_message",
+            "chat_id": -100,
+            "text": "humanized",
+        },
+        account_id=78,
+        engine=engine,
+        redis=_MemoryRedis(),
+    )
+
+    assert result["message_id"] == 89
+    assert order == ["read", "typing", "send"]
+    simulate_read.assert_awaited_once()
+    simulate_typing.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_userbot_interaction_action_humanize_skips_when_switches_disabled(monkeypatch) -> None:
+    client = SimpleNamespace(send_message=AsyncMock(return_value=SimpleNamespace(id=90)))
+    engine = SimpleNamespace(
+        humanize=HumanizeOpts(read_before_reply=False, typing_simulate=False),
+        acquire=AsyncMock(return_value=SimpleNamespace(allowed=True, wait_seconds=0, outcome="ok")),
+    )
+    simulate_read = AsyncMock()
+    simulate_typing = AsyncMock()
+    monkeypatch.setattr(worker_runtime, "simulate_read", simulate_read)
+    monkeypatch.setattr(worker_runtime, "simulate_typing", simulate_typing)
+
+    await worker_runtime._run_interaction_userbot_action(
+        client,
+        {
+            "action_type": "send_message",
+            "chat_id": -100,
+            "text": "no humanize",
+        },
+        account_id=78,
+        engine=engine,
+        redis=_MemoryRedis(),
+    )
+
+    simulate_read.assert_not_awaited()
+    simulate_typing.assert_not_awaited()
+    client.send_message.assert_awaited_once_with(-100, "no humanize", reply_to=None, parse_mode=None)
+
+
+@pytest.mark.asyncio
+async def test_userbot_interaction_action_payout_skips_humanize(monkeypatch) -> None:
+    client = SimpleNamespace(send_message=AsyncMock(return_value=SimpleNamespace(id=91)))
+    engine = SimpleNamespace(
+        humanize=HumanizeOpts(read_before_reply=True, typing_simulate=True),
+        acquire=AsyncMock(return_value=SimpleNamespace(allowed=True, wait_seconds=0, outcome="ok")),
+    )
+    simulate_read = AsyncMock()
+    simulate_typing = AsyncMock()
+    monkeypatch.setattr(worker_runtime, "simulate_read", simulate_read)
+    monkeypatch.setattr(worker_runtime, "simulate_typing", simulate_typing)
+    monkeypatch.setattr(worker_runtime, "_check_payout_limit", AsyncMock(return_value=(True, None)))
+
+    await worker_runtime._run_interaction_userbot_action(
+        client,
+        {
+            "action_type": "payout",
+            "chat_id": -100,
+            "amount": 7,
+            "text": "+7",
+        },
+        account_id=78,
+        engine=engine,
+        redis=_MemoryRedis(),
+    )
+
+    simulate_read.assert_not_awaited()
+    simulate_typing.assert_not_awaited()
+    client.send_message.assert_awaited_once_with(-100, "+7", reply_to=None, parse_mode=None)
+
+
+@pytest.mark.asyncio
+async def test_userbot_interaction_action_settlement_send_skips_humanize(monkeypatch) -> None:
+    client = SimpleNamespace(send_message=AsyncMock(return_value=SimpleNamespace(id=92)))
+    engine = SimpleNamespace(
+        humanize=HumanizeOpts(read_before_reply=True, typing_simulate=True),
+        acquire=AsyncMock(return_value=SimpleNamespace(allowed=True, wait_seconds=0, outcome="ok")),
+    )
+    simulate_read = AsyncMock()
+    simulate_typing = AsyncMock()
+    monkeypatch.setattr(worker_runtime, "simulate_read", simulate_read)
+    monkeypatch.setattr(worker_runtime, "simulate_typing", simulate_typing)
+
+    await worker_runtime._run_interaction_userbot_action(
+        client,
+        {
+            "action_type": "send_message",
+            "chat_id": -100,
+            "text": "结算公告",
+            "settlement": {"amount": 8, "winner_user_id": 111},
+        },
+        account_id=78,
+        engine=engine,
+        redis=_MemoryRedis(),
+    )
+
+    simulate_read.assert_not_awaited()
+    simulate_typing.assert_not_awaited()
+    client.send_message.assert_awaited_once_with(-100, "结算公告", reply_to=None, parse_mode=None)
 
 
 @pytest.mark.asyncio
@@ -1287,7 +1426,13 @@ async def test_interaction_delivery_routes_payout_via_worker(monkeypatch) -> Non
     )
 
     await executor.apply([
-        {"type": "payout", "amount": 88, "reply_to_user_id": 12345, "reply_to_search_limit": 20}
+        {
+            "type": "payout",
+            "amount": 88,
+            "reply_to_user_id": 12345,
+            "reply_to_search_limit": 20,
+            "suppress_reply_anchor_missing_notice": True,
+        }
     ])
 
     run_worker_action.assert_awaited_once()
@@ -1303,9 +1448,62 @@ async def test_interaction_delivery_routes_payout_via_worker(monkeypatch) -> Non
         "payout_key": payload["payout_key"],
         "reply_to_user_id": 12345,
         "reply_to_search_limit": 20,
+        "suppress_reply_anchor_missing_notice": True,
     }
     assert payload["payout_key"].startswith("pay_")
     assert record_action.await_args.args[1]["type"] == "payout"
+    assert record_action.await_args.kwargs["actual_send_via"] == "userbot_reply"
+
+
+@pytest.mark.parametrize(
+    ("action_type", "message_id"),
+    [
+        ("delete_message", 77),
+        ("pin_message", 88),
+    ],
+)
+@pytest.mark.asyncio
+async def test_interaction_delivery_routes_userbot_message_ops_via_worker(
+    monkeypatch,
+    action_type: str,
+    message_id: int,
+) -> None:
+    incoming = account_bot_runtime.Incoming(
+        account_id=1,
+        token="123:token",
+        update_id=10,
+        user_id=20,
+        chat_id=-100,
+        message_id=30,
+        text="",
+    )
+    run_worker_action = AsyncMock(
+        return_value=(True, None, {"message_id": message_id, "chat_id": -100})
+    )
+    record_action = AsyncMock()
+    monkeypatch.setattr("app.services.interaction.delivery.record_action", record_action)
+    executor = InteractionDeliveryExecutor(
+        incoming=incoming,
+        write_log=AsyncMock(),
+        run_worker_action=run_worker_action,
+        log_context=account_bot_runtime._interaction_log_context,
+        trace_context=account_bot_runtime._interaction_trace_context,
+    )
+
+    await executor.apply(
+        [{"type": action_type, "send_via": "userbot_reply", "message_id": message_id, "chat_id": -100}]
+    )
+
+    run_worker_action.assert_awaited_once()
+    assert run_worker_action.await_args.args == (incoming,)
+    assert run_worker_action.await_args.kwargs["payload"] == {
+        "action_type": action_type,
+        "chat_id": -100,
+        "message_id": message_id,
+    }
+    record_action.assert_awaited_once()
+    assert record_action.await_args.args[1]["type"] == action_type
+    assert record_action.await_args.args[2] == "ok"
     assert record_action.await_args.kwargs["actual_send_via"] == "userbot_reply"
 
 

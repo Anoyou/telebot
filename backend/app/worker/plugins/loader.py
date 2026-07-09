@@ -104,7 +104,7 @@ from ..command import (
 )
 from ..ipc import RUNTIME_LOG_STREAM, RuntimeLogPayload
 from ..ratelimit.engine import RateLimitEngine
-from ..ratelimit.humanize import HumanizeOpts
+from ..ratelimit.humanize import HumanizeOpts, simulate_read, simulate_typing
 from .base import Plugin, PluginContext, all_plugins, get_plugin, public_entity_display_name
 from .events import attach_tp_event
 from .manifest import Manifest
@@ -1564,6 +1564,29 @@ async def _acquire_userbot_action_rate_limit(
     return True
 
 
+def _has_userbot_session_context(session_key: str | None, session: dict[str, Any] | None) -> bool:
+    return bool(session_key) or isinstance(session, dict)
+
+
+def _is_settlement_send_action(action: dict[str, Any]) -> bool:
+    return isinstance(action.get("settlement"), dict)
+
+
+async def _simulate_userbot_session_reply_humanize(state: _AccountState, peer: Any) -> None:
+    engine = getattr(state, "engine", None)
+    opts = getattr(engine, "humanize", None) if engine is not None else None
+    client = getattr(state, "client", None)
+    if opts is None or client is None:
+        return
+    try:
+        if bool(getattr(opts, "read_before_reply", False)):
+            await simulate_read(client, peer, opts)
+        if bool(getattr(opts, "typing_simulate", False)):
+            await simulate_typing(client, peer, opts)
+    except Exception:  # noqa: BLE001
+        log.debug("userbot session humanize simulation failed; continue sending", exc_info=True)
+
+
 def _payout_amount(action: dict[str, Any]) -> int | None:
     amount = _int_or_none(action.get("amount"))
     if amount is None or amount <= 0:
@@ -2083,6 +2106,8 @@ async def _apply_userbot_send_message_action(
             ):
                 return False
             try:
+                if _has_userbot_session_context(session_key, session) and not _is_settlement_send_action(action):
+                    await _simulate_userbot_session_reply_humanize(state, target_chat_id)
                 sent = await state.client.send_message(
                     target_chat_id,
                     send_text,

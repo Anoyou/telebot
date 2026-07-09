@@ -39,6 +39,7 @@ from app.worker.plugins.loader import (
     reload_account_config,
 )
 from app.worker.plugins.manifest import Manifest
+from app.worker.ratelimit.humanize import HumanizeOpts
 
 
 # ─────────────────────────────────────────────────────
@@ -1880,6 +1881,188 @@ async def test_userbot_send_message_action_uses_rate_limit_and_preserves_parse_m
 
 
 @pytest.mark.asyncio
+async def test_userbot_session_send_message_humanize_runs_before_send_when_enabled(monkeypatch) -> None:
+    order: list[str] = []
+
+    async def fake_send_message(chat_id, text, **kwargs):  # noqa: ANN001, ANN003
+        order.append("send")
+        return SimpleNamespace(id=502)
+
+    async def fake_read(client, peer, opts):  # noqa: ANN001, ANN003
+        order.append("read")
+        assert peer == -100123
+        assert opts.read_before_reply is True
+        assert client is state.client
+
+    async def fake_typing(client, peer, opts):  # noqa: ANN001, ANN003
+        order.append("typing")
+        assert peer == -100123
+        assert opts.typing_simulate is True
+        assert client is state.client
+
+    state = loader_mod._AccountState(account_id=44)
+    state.redis = _FakeRedis()
+    state.client = SimpleNamespace(send_message=AsyncMock(side_effect=fake_send_message))
+    state.engine = SimpleNamespace(
+        humanize=HumanizeOpts(read_before_reply=True, typing_simulate=True),
+        acquire=AsyncMock(return_value=SimpleNamespace(allowed=True, wait_seconds=0, outcome="ok")),
+    )
+    session = {
+        "account_id": 44,
+        "chat_id": -100123,
+        "channel": "userbot",
+        "module_key": "demo",
+        "entry_key": "main",
+        "data": {},
+    }
+    simulate_read = AsyncMock(side_effect=fake_read)
+    simulate_typing = AsyncMock(side_effect=fake_typing)
+    monkeypatch.setattr(loader_mod, "simulate_read", simulate_read)
+    monkeypatch.setattr(loader_mod, "simulate_typing", simulate_typing)
+    monkeypatch.setattr(loader_mod, "record_action", AsyncMock())
+
+    ok = await loader_mod._apply_userbot_send_message_action(
+        state,
+        SimpleNamespace(chat_id=-100123),
+        {
+            "type": "send_message",
+            "send_via": "userbot_reply",
+            "text": "session humanized",
+        },
+        redis=state.redis,
+        session_key="account_bot:interaction_session:44:demo:-100123",
+        session=session,
+    )
+
+    assert ok is True
+    assert order == ["read", "typing", "send"]
+    simulate_read.assert_awaited_once()
+    simulate_typing.assert_awaited_once()
+    state.client.send_message.assert_awaited_once_with(
+        -100123,
+        "session humanized",
+        reply_to=None,
+        parse_mode=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_userbot_session_send_message_humanize_skips_when_switches_disabled(monkeypatch) -> None:
+    state = loader_mod._AccountState(account_id=44)
+    state.redis = _FakeRedis()
+    state.client = SimpleNamespace(send_message=AsyncMock(return_value=SimpleNamespace(id=503)))
+    state.engine = SimpleNamespace(
+        humanize=HumanizeOpts(read_before_reply=False, typing_simulate=False),
+        acquire=AsyncMock(return_value=SimpleNamespace(allowed=True, wait_seconds=0, outcome="ok")),
+    )
+    simulate_read = AsyncMock()
+    simulate_typing = AsyncMock()
+    monkeypatch.setattr(loader_mod, "simulate_read", simulate_read)
+    monkeypatch.setattr(loader_mod, "simulate_typing", simulate_typing)
+    monkeypatch.setattr(loader_mod, "record_action", AsyncMock())
+
+    ok = await loader_mod._apply_userbot_send_message_action(
+        state,
+        SimpleNamespace(chat_id=-100123),
+        {
+            "type": "send_message",
+            "send_via": "userbot_reply",
+            "text": "session no humanize",
+        },
+        redis=state.redis,
+        session_key="account_bot:interaction_session:44:demo:-100123",
+        session={"channel": "userbot", "data": {}},
+    )
+
+    assert ok is True
+    simulate_read.assert_not_awaited()
+    simulate_typing.assert_not_awaited()
+    state.client.send_message.assert_awaited_once_with(
+        -100123,
+        "session no humanize",
+        reply_to=None,
+        parse_mode=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_userbot_non_session_send_message_humanize_skips(monkeypatch) -> None:
+    state = loader_mod._AccountState(account_id=44)
+    state.redis = _FakeRedis()
+    state.client = SimpleNamespace(send_message=AsyncMock(return_value=SimpleNamespace(id=504)))
+    state.engine = SimpleNamespace(
+        humanize=HumanizeOpts(read_before_reply=True, typing_simulate=True),
+        acquire=AsyncMock(return_value=SimpleNamespace(allowed=True, wait_seconds=0, outcome="ok")),
+    )
+    simulate_read = AsyncMock()
+    simulate_typing = AsyncMock()
+    monkeypatch.setattr(loader_mod, "simulate_read", simulate_read)
+    monkeypatch.setattr(loader_mod, "simulate_typing", simulate_typing)
+    monkeypatch.setattr(loader_mod, "record_action", AsyncMock())
+
+    ok = await loader_mod._apply_userbot_send_message_action(
+        state,
+        SimpleNamespace(chat_id=-100123),
+        {
+            "type": "send_message",
+            "send_via": "userbot_reply",
+            "text": "event bus direct action",
+        },
+        redis=state.redis,
+    )
+
+    assert ok is True
+    simulate_read.assert_not_awaited()
+    simulate_typing.assert_not_awaited()
+    state.client.send_message.assert_awaited_once_with(
+        -100123,
+        "event bus direct action",
+        reply_to=None,
+        parse_mode=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_userbot_session_settlement_send_message_humanize_skips(monkeypatch) -> None:
+    state = loader_mod._AccountState(account_id=44)
+    state.redis = _FakeRedis()
+    state.client = SimpleNamespace(send_message=AsyncMock(return_value=SimpleNamespace(id=505)))
+    state.engine = SimpleNamespace(
+        humanize=HumanizeOpts(read_before_reply=True, typing_simulate=True),
+        acquire=AsyncMock(return_value=SimpleNamespace(allowed=True, wait_seconds=0, outcome="ok")),
+    )
+    simulate_read = AsyncMock()
+    simulate_typing = AsyncMock()
+    monkeypatch.setattr(loader_mod, "simulate_read", simulate_read)
+    monkeypatch.setattr(loader_mod, "simulate_typing", simulate_typing)
+    monkeypatch.setattr(loader_mod, "record_action", AsyncMock())
+
+    ok = await loader_mod._apply_userbot_send_message_action(
+        state,
+        SimpleNamespace(chat_id=-100123),
+        {
+            "type": "send_message",
+            "send_via": "userbot_reply",
+            "text": "结算公告",
+            "settlement": {"amount": 8, "winner_user_id": 111},
+        },
+        redis=state.redis,
+        session_key="account_bot:interaction_session:44:demo:-100123",
+        session={"channel": "userbot", "data": {}},
+    )
+
+    assert ok is True
+    simulate_read.assert_not_awaited()
+    simulate_typing.assert_not_awaited()
+    state.client.send_message.assert_awaited_once_with(
+        -100123,
+        "结算公告",
+        reply_to=None,
+        parse_mode=None,
+    )
+
+
+@pytest.mark.asyncio
 async def test_userbot_payout_action_rejected_when_over_limit(monkeypatch) -> None:
     state = loader_mod._AccountState(account_id=71)
     state.redis = _FakeRedis()
@@ -1908,6 +2091,34 @@ async def test_userbot_payout_action_rejected_when_over_limit(monkeypatch) -> No
     assert record_action.await_args.args[2] == loader_mod.TRACE_STATUS_FAILED
     assert record_action.await_args.kwargs["error_code"] == "payout_limit_exceeded"
     assert "单笔" in record_action.await_args.kwargs["error"]
+
+
+@pytest.mark.asyncio
+async def test_userbot_payout_action_skips_humanize_when_sent(monkeypatch) -> None:
+    state = loader_mod._AccountState(account_id=71)
+    state.redis = _FakeRedis()
+    state.client = SimpleNamespace(send_message=AsyncMock(return_value=SimpleNamespace(id=510)))
+    state.engine = SimpleNamespace(
+        humanize=HumanizeOpts(read_before_reply=True, typing_simulate=True),
+        acquire=AsyncMock(return_value=SimpleNamespace(allowed=True, wait_seconds=0, outcome="ok")),
+    )
+    simulate_read = AsyncMock()
+    simulate_typing = AsyncMock()
+    monkeypatch.setattr(loader_mod, "simulate_read", simulate_read)
+    monkeypatch.setattr(loader_mod, "simulate_typing", simulate_typing)
+    monkeypatch.setattr(loader_mod, "record_action", AsyncMock())
+    monkeypatch.setattr(loader_mod.payout_limit, "check_and_consume", AsyncMock(return_value=(True, None)))
+
+    ok = await loader_mod._apply_userbot_payout_action(
+        state,
+        SimpleNamespace(chat_id=-100777),
+        {"type": "payout", "amount": 8, "chat_id": -100777, "context": {"trace_id": "evt_payout_humanize_skip"}},
+    )
+
+    assert ok is True
+    simulate_read.assert_not_awaited()
+    simulate_typing.assert_not_awaited()
+    state.client.send_message.assert_awaited_once_with(-100777, "+8", reply_to=None, parse_mode=None)
 
 
 @pytest.mark.asyncio
@@ -3073,6 +3284,7 @@ async def test_direct_passthrough_consumes_raw_event_before_event_bus(monkeypatc
 
         async def on_direct_message(self, ctx: PluginContext, event: Any) -> None:
             direct_events.append(event)
+            await ctx.client.send_message(event.chat_id, "direct reply")
 
         async def on_message(self, ctx: PluginContext, event: Any) -> None:
             legacy_calls.append(str(getattr(event, "raw_text", "")))
@@ -3138,10 +3350,15 @@ async def test_direct_passthrough_consumes_raw_event_before_event_bus(monkeypatc
     monkeypatch.setattr(loader_mod, "start_trace", start_trace)
     record_span = AsyncMock()
     monkeypatch.setattr(loader_mod, "record_span", record_span)
+    monkeypatch.setattr(loader_mod, "record_action", AsyncMock())
     finish_trace = AsyncMock()
     monkeypatch.setattr(loader_mod, "finish_trace", finish_trace)
     runtime_status = AsyncMock()
     monkeypatch.setattr(loader_mod, "update_plugin_runtime_status", runtime_status)
+    simulate_read = AsyncMock()
+    simulate_typing = AsyncMock()
+    monkeypatch.setattr(loader_mod, "simulate_read", simulate_read)
+    monkeypatch.setattr(loader_mod, "simulate_typing", simulate_typing)
 
     captured: list[Any] = []
 
@@ -3154,6 +3371,7 @@ async def test_direct_passthrough_consumes_raw_event_before_event_bus(monkeypatc
 
     client = MagicMock()
     client.on = _on
+    client.send_message = AsyncMock(return_value=SimpleNamespace(id=991))
     paused = asyncio.Event()
     paused.set()
     event = _Event()
@@ -3165,6 +3383,9 @@ async def test_direct_passthrough_consumes_raw_event_before_event_bus(monkeypatc
 
         assert direct_events == [event]
         assert legacy_calls == []
+        client.send_message.assert_awaited_once_with(-1001, "direct reply")
+        simulate_read.assert_not_awaited()
+        simulate_typing.assert_not_awaited()
         start_trace.assert_awaited_once()
         phases = [call.args[1] for call in record_span.await_args_list]
         assert "receive" in phases

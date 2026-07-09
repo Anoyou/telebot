@@ -85,6 +85,7 @@ from .ipc import (
     make_cmd,
     make_event,
 )
+from .ratelimit.humanize import simulate_read, simulate_typing
 from .scheduler_runtime import PlatformScheduler
 from .tg_client import build_client
 
@@ -161,6 +162,23 @@ async def _acquire_interaction_userbot_rate_limit(
     wait_seconds = float(getattr(decision, "wait_seconds", 0.0) or 0.0)
     if wait_seconds > 0:
         await asyncio.sleep(wait_seconds)
+
+
+async def _simulate_interaction_userbot_reply_humanize(client: Any, peer: Any, engine: Any | None) -> None:
+    opts = getattr(engine, "humanize", None) if engine is not None else None
+    if opts is None:
+        return
+    try:
+        if bool(getattr(opts, "read_before_reply", False)):
+            await simulate_read(client, peer, opts)
+        if bool(getattr(opts, "typing_simulate", False)):
+            await simulate_typing(client, peer, opts)
+    except Exception:  # noqa: BLE001
+        log.debug("interaction userbot humanize simulation failed; continue sending", exc_info=True)
+
+
+def _is_settlement_send_payload(payload: dict[str, Any]) -> bool:
+    return isinstance(payload.get("settlement"), dict)
 
 
 def _should_defer_interaction_entry_error_log(plugin_key: str, error: str | None) -> bool:
@@ -458,6 +476,8 @@ async def _run_interaction_userbot_action(
                 payout_ok, payout_reason = await _check_payout_limit(account_id, amount)
             if not payout_ok:
                 raise PayoutLimitExceeded(payout_reason or "payout 超过限额")
+        if action_type == "send_message" and not _is_settlement_send_payload(payload):
+            await _simulate_interaction_userbot_reply_humanize(client, chat_id, engine)
         msg = await client.send_message(chat_id, text, reply_to=reply_to, parse_mode=_telethon_parse_mode(parse_mode))
         result = {
             "message_id": int(getattr(msg, "id", 0) or 0) or None,
