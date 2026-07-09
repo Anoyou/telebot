@@ -22,6 +22,11 @@ import type {
 } from "@/api/types";
 
 const LLM_PROVIDER_OPERATION_TIMEOUT_MS = 120000;
+// 测活类请求（test-model / chat-test）的前端超时 = 该请求实际 timeout_seconds + 余量，
+// 保证前端不会比后端更早超时、把还在途的请求硬打断（后端 chat-test 上限 600s）。
+const TEST_REQUEST_TIMEOUT_MARGIN_MS = 15000;
+// test-model 后端固定用 timeout_seconds=90（见 backend/app/api/commands.py::test_model）。
+const TEST_MODEL_BACKEND_TIMEOUT_SECONDS = 90;
 
 // ===================== 内置命令（只读，0.4.1 加） =====================
 export async function listBuiltinCommands(): Promise<BuiltinCommandItem[]> {
@@ -136,11 +141,15 @@ export async function detectProviderProtocols(
 export async function testProviderModel(
   id: number,
   payload: TestModelRequest,
+  opts?: { signal?: AbortSignal },
 ): Promise<TestModelResponse> {
   const { data } = await api.post<TestModelResponse>(
     `/api/commands/llm-providers/${id}/test-model`,
     payload,
-    { timeout: LLM_PROVIDER_OPERATION_TIMEOUT_MS },
+    {
+      timeout: TEST_MODEL_BACKEND_TIMEOUT_SECONDS * 1000 + TEST_REQUEST_TIMEOUT_MARGIN_MS,
+      signal: opts?.signal,
+    },
   );
   return data;
 }
@@ -149,11 +158,15 @@ export async function testProviderModel(
 export async function chatTestProviderModels(
   id: number,
   payload: ChatTestModelsRequest,
+  opts?: { signal?: AbortSignal },
 ): Promise<ChatTestModelsResponse> {
   const { data } = await api.post<ChatTestModelsResponse>(
     `/api/commands/llm-providers/${id}/chat-test-models`,
     payload,
-    { timeout: LLM_PROVIDER_OPERATION_TIMEOUT_MS },
+    {
+      timeout: (payload.timeout_seconds ?? 90) * 1000 + TEST_REQUEST_TIMEOUT_MARGIN_MS,
+      signal: opts?.signal,
+    },
   );
   return data;
 }
