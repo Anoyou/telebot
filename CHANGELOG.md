@@ -33,6 +33,7 @@
 - 跨管道消息去重：同一群消息同时被 userbot 与交互 bot 收到时不再双分发/双结算（共享 claim 键含 rule_id，保证一条消息仍可合法喂多条规则）；交互 Bot 绑定后按 privacy 状态提示是否需要开启隐私模式。
 - 双通道抢会话收敛：活跃会话被另一通道消息触发时沿用原通道、保留局内状态，`start_session` 合并已有数据而非覆盖。
 - 发送路径限流补口：命令回复、AI 回复、插件 `SandboxClient` 发送统一接入 userbot 动作限速引擎，收敛此前绕过限流的发送路径。
+- 拟人化打字/已读模拟接线生效：会话类 userbot 自动回复在真实发送前按账号开关 `typing_simulate`/`read_before_reply` 模拟已读与打字，直通模式、payout 与结算路径均不受影响、不加延迟。
 - 定时任务运行历史入口深链到消息流的定时触发筛选，规则操作文案改为"立即运行一次"，并补充 IPC 执行链路的保护测试。
 - 交互动作执行遇到 FloodWait/PeerFlood 时自动回馈限速引擎降级（userbot 两套动作执行器一致接入），Telethon `flood_sleep_threshold` 显式固化为 60 秒。
 - zip 插件安装的验签策略与本地导入通道对齐：配置公钥则强制验签；未配置公钥时按"允许未签名插件"开关放行为 community 信任级，不再无条件必败。
@@ -40,11 +41,14 @@
 
 ### Fixed
 - payout 幂等一键贯穿：付款失败进入补偿队列后，首攻与重放共用 `payout_key`，日累计只扣一次、发送成功写标记防双发，杜绝补偿重放导致的重复扣额度或重复付款。
-- 交互 bot 经 IPC 的动作执行（E3）对齐 userbot 直执行：`reply_markup` 按钮降级为文本、补齐 delete/pin 能力，userbot 会话按钮不再经交互 bot 路静默丢失。
+- 交互 bot 经 IPC 的动作执行（E3）对齐 userbot 直执行：`reply_markup` 按钮降级为文本、delete/pin 经 delivery 端到端打通、payout 复制 `suppress_reply_anchor_missing_notice`，userbot 会话按钮不再经交互 bot 路静默丢失。
 - 修复关键词/付款/事件订阅通道开局 `update_session` 悬空：三条 bot 侧路径统一"先落会话、再应用动作"，开局存状态的插件经任意通道行为一致；交互 bot 信封只暴露 `session.data`（修复续会话/过期路径插件读到记录外壳的问题）；二次付款重触发不再抹掉已攒局内状态。
 - 修复 LLM 错误一律标记为不可重试、导致退避重试与 fallback 链从不生效的问题：网络错误与 5xx/限流类状态码正确标记可重试，认证类 4xx 不再触发无意义重试。
 - 修复 LLM 调用统计 `latency_ms` 恒为 0 的问题，现按每次 provider 尝试实测耗时记录。
 - 修复"检查更新"在容器手动模式下无条件报告"有更新"的误报；无法探测时明确返回"无法自动检查"。`git fetch` 改为强制更新远端引用，避免非快进历史导致检查失败。
+
+### Removed
+- 删除 `global_api_qps` 全局每秒 API 上限旋钮、`/api/system/global-limits` 端点与 settings 字段：该配置从不被限速引擎读取、语义与每账号 `api_total` 桶错位，属无效防护；每账号 `api_total` 限流保持不变。
 
 ## [0.53.6] — 2026-07-09 · patch（补丁版本） · 插件中心与 AI 调用统计体验补丁
 
