@@ -31,6 +31,7 @@
 - payout 补偿重放的资金正确性：探测已发消息需 reply 锚点强关联，无法唯一确认则走可观测重发（不再静默标记成功导致少付）；探测窗口按时间下界翻页（不再固定 30 条漏判导致重复付款）；探测异常时延后重试而非直接重发。
 - 资金台账口径：净盈亏/流水金额强制只计 `OK/COMPENSATED`，排除干跑（DRY_RUN）与失败（FAILED）payout，消除干跑污染生产账与"同面板成功率口径矛盾"；避免 FAILED 与补偿重放双重计数；无时间窗查询默认最近 30 天防全表物化。
 - CSRF 豁免收窄：只豁免公开投递端点 `POST /api/webhooks/{account}/{hook_key}`，webhook 管理端点（token 重置等）恢复 CSRF 保护（修复上一版自引入的过宽豁免）；未知账号投递统一返回 401 消除账号枚举；`webhook_deliver` 纳入限流配置体系。
+- 分级 trace 的路由投递统计加容量上限（LRU 淘汰）防内存无界增长，并新增只读查询出口；`payment_confirm` 资金确认路由纳入强制全链路 trace；修复插件 `register` 因 `.gitignore` 摘要不一致每次误报"陈旧副本"的问题。
 
 ### Changed
 - AI 死代码与过期注释清理：`ai_components` docstring 不再声称"fallback 是死代码"（同版本已修活），改为"降级是刻意的第二道保险"；删除 `llm_runtime` 无效的 status_code 死变量与字符串解析、`command.py` 遗漏的死函数。
