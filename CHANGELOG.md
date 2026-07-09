@@ -21,13 +21,17 @@
 ## [Unreleased]
 
 ### Added
-- payout 失败补偿台账（阶段一）：新增待发单据表与错误分类入队，payout 失败（userbot 离线/瞬态错误/限流拒绝）自动登记待补偿单据；灰度语义为只记账不重放，重放与通知在阶段二。
+- payout 失败补偿台账：payout 失败（userbot 离线/瞬态错误/限流拒绝）自动登记待补偿单据，worker 启动即扫描并周期重放，幂等靠 `payout_key` 一键贯穿（日累计只计一次、发送成功写 Redis 标记防双发）；重放耗尽或单笔超限标记放弃并经通知管道提醒，日累计阻塞次日重试。
+- AI 调用全量计量：模型测活、路由分类器、语音转写三处此前绕过统计的直连调用统一记入 usage（分别标记 diagnostic/router/stt 来源），路由分类器接入业务预算预扣，测活豁免预扣但必记用量。
+- 风控与预算设置界面：系统设置新增卡片，可视化配置 payout 单笔/日累计上限与 AI 预算（每分钟/每日请求/每日 token/高级模型每日），0 值显示"未限制"并给出建议文案。
 - 收付款风控：新增 payout 限额（单笔上限 / 日累计上限，系统设置 `payout_limits` 可经 API 配置并落审计），userbot 两个最终付款出口在发送前强制校验，超限拒绝并记 `payout_limit_exceeded`。
 - 插件脚手架 CLI：`make plugin-new / plugin-check / plugin-register`（`backend/scripts/tp_plugin.py`），一键生成插件骨架、本地校验 manifest 与事件订阅、把本地目录登记进插件台账（解决手拷目录被拒载的开发痛点）。
 - AI 玩法组件库 `ai_components`：QuizMaker 出题（无 AI 时内置题库降级）、AnswerJudge 判定（规则先行、AI 兜底、失败走保守分支）、PersonaChat 人格陪聊，统一走插件 AI 计量；附 `with_ai_components` 示例与 PLUGIN-AI 文档章节。
 - 定时任务：规则页新增运行历史入口，日志中心新增"定时任务"来源与"定时触发"事件筛选。
 
 ### Changed
+- 跨管道消息去重：同一群消息同时被 userbot 与交互 bot 收到时不再双分发/双结算（共享 claim 键含 rule_id，保证一条消息仍可合法喂多条规则）；交互 Bot 绑定后按 privacy 状态提示是否需要开启隐私模式。
+- 双通道抢会话收敛：活跃会话被另一通道消息触发时沿用原通道、保留局内状态，`start_session` 合并已有数据而非覆盖。
 - 定时任务运行历史入口深链到消息流的定时触发筛选，规则操作文案改为"立即运行一次"，并补充 IPC 执行链路的保护测试。
 - 交互动作执行遇到 FloodWait/PeerFlood 时自动回馈限速引擎降级（userbot 两套动作执行器一致接入），Telethon `flood_sleep_threshold` 显式固化为 60 秒。
 - zip 插件安装的验签策略与本地导入通道对齐：配置公钥则强制验签；未配置公钥时按"允许未签名插件"开关放行为 community 信任级，不再无条件必败。
