@@ -176,16 +176,6 @@ export async function patchSystemSettings(
   return data;
 }
 
-export async function getGlobalLimits(): Promise<{ api_qps_total: number }> {
-  const { data } = await api.get<{ api_qps_total: number }>(
-    "/api/system/global-limits",
-  );
-  return data;
-}
-export async function putGlobalLimits(api_qps_total: number): Promise<void> {
-  await api.put("/api/system/global-limits", { api_qps_total });
-}
-
 // ===================== 风控模板 =====================
 export async function listRateTemplates(): Promise<TemplateOut[]> {
   const { data } = await api.get<TemplateOut[]>("/api/rate-templates");

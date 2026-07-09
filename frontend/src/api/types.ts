@@ -966,7 +966,6 @@ export interface SystemSettings {
   sudo_enabled?: boolean;
   /** 群聊纯命令回声防误触检查前 N 条消息；0 = 关闭 */
   command_echo_guard_previous_messages?: number;
-  api_qps_total?: number;
   /** IANA 时区标识，如 "Asia/Shanghai"；默认 Asia/Shanghai */
   timezone?: string;
   remote_plugin_update_check?: {

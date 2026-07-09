@@ -8,7 +8,7 @@
   - 一键调严 / override 列表
   - 拟人化配置 GET/PUT
   - 模拟测算（MVP 简化）
-  - 全局总闸 + 全局每秒上限
+  - 全局总闸
 
 写操作通过 ``_audit`` 写一条 ``AuditLog``；A Agent 的 audit 服务到位时可改为调用它。
 """
@@ -40,7 +40,6 @@ from ..schemas.rate_limit import (
     AccountRateLimitOut,
     EstimateRequest,
     EstimateResponse,
-    GlobalLimitsRequest,
     HumanizeOut,
     HumanizeUpdate,
     KillSwitchRequest,
@@ -571,29 +570,6 @@ async def post_kill_switch(payload: KillSwitchRequest, db: DBSession, user: Curr
     return {"enabled": enabled}
 
 
-@router.get("/api/system/global-limits")
-async def get_global_limits(db: DBSession, _user: CurrentUser) -> dict[str, int]:
-    val = await _get_setting(db, "global_api_qps", {"api_qps_total": 0})
-    qps = val.get("api_qps_total", 0) if isinstance(val, dict) else int(val)
-    return {"api_qps_total": int(qps)}
-
-
-@router.put("/api/system/global-limits")
-async def put_global_limits(
-    payload: GlobalLimitsRequest, db: DBSession, user: CurrentUser
-) -> dict[str, int]:
-    await _set_setting(db, "global_api_qps", {"api_qps_total": int(payload.api_qps_total)})
-    await _audit(
-        db,
-        user.id,
-        "set_global_limits",
-        target="system",
-        detail={"api_qps_total": payload.api_qps_total},
-    )
-    await _broadcast_reload()
-    return {"api_qps_total": payload.api_qps_total}
-
-
 # ─────────────────────────────────────────────────────
 # /api/system/settings —— 通用系统设置（命令前缀等）
 # 前端 Settings 页用：读 command_prefix；写后通过 IPC 让所有 worker 热加载
@@ -611,7 +587,6 @@ async def get_system_settings(db: DBSession, _user: CurrentUser) -> dict[str, An
     else:
         prefix = str(prefix_val)
     kill_val = await _get_setting(db, "kill_switch", {"enabled": False})
-    qps_val = await _get_setting(db, "global_api_qps", {"api_qps_total": 0})
     tz_val = await _get_setting(db, "timezone", {"value": "Asia/Shanghai"})
     remote_update_val = await _get_setting(
         db,
@@ -649,7 +624,6 @@ async def get_system_settings(db: DBSession, _user: CurrentUser) -> dict[str, An
     return {
         "command_prefix": prefix,
         "kill_switch": bool(kill_val.get("enabled", False)) if isinstance(kill_val, dict) else bool(kill_val),
-        "api_qps_total": int(qps_val.get("api_qps_total", 0)) if isinstance(qps_val, dict) else int(qps_val),
         "timezone": tz or "Asia/Shanghai",
         "remote_plugin_update_check": {
             "enabled": bool(remote_update.get("enabled", True)),

@@ -43,10 +43,8 @@ import { PageHeader, PageShell } from "@/components/layout/PageScaffold";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { SectionHeader, SignalPill } from "@/components/ui/status";
 import {
-  getGlobalLimits,
   getSystemSettings,
   patchSystemSettings,
-  putGlobalLimits,
 } from "@/api/system";
 import { listAccounts } from "@/api/accounts";
 import { getErrMsg, api } from "@/lib/api";
@@ -116,10 +114,6 @@ export function SettingsIndex() {
   const settingsQ = useQuery({
     queryKey: ["system", "settings"],
     queryFn: getSystemSettings,
-  });
-  const limitsQ = useQuery({
-    queryKey: ["system", "global-limits"],
-    queryFn: getGlobalLimits,
   });
   const killQ = useQuery<KillSwitchState>({
     queryKey: ["system", "kill-switch"],
@@ -199,11 +193,6 @@ export function SettingsIndex() {
       setQuickAid(String(accounts[0].id));
     }
   }, [accountsQ.data, quickAid]);
-
-  const [qps, setQps] = useState("0");
-  useEffect(() => {
-    if (limitsQ.data) setQps(String(limitsQ.data.api_qps_total ?? 0));
-  }, [limitsQ.data]);
 
   useEffect(() => {
     const tabParam = searchParams.get("tab");
@@ -322,15 +311,6 @@ export function SettingsIndex() {
     onError: (err) => toast.error(getErrMsg(err)),
   });
 
-  const saveQps = useMutation({
-    mutationFn: () => putGlobalLimits(Number(qps) || 0),
-    onSuccess: () => {
-      toast.success("已保存");
-      qc.invalidateQueries({ queryKey: ["system", "global-limits"] });
-    },
-    onError: (err) => toast.error(getErrMsg(err)),
-  });
-
   const killMut = useMutation({
     mutationFn: async (next: boolean) => {
       await api.post("/api/system/kill-switch", { enabled: next });
@@ -342,7 +322,7 @@ export function SettingsIndex() {
     onError: (err) => toast.error(getErrMsg(err)),
   });
 
-  const loading = settingsQ.isLoading || limitsQ.isLoading || killQ.isLoading;
+  const loading = settingsQ.isLoading || killQ.isLoading;
   if (loading) {
     return (
       <div className="flex h-40 items-center justify-center">
@@ -638,29 +618,6 @@ export function SettingsIndex() {
               <span className="text-sm text-muted-foreground">
                 当前：{killQ.data?.enabled ? "已暂停" : "正常运行"}
               </span>
-            </CardContent>
-          </Card>
-
-          <Card>
-            <CardHeader>
-              <CardTitle className="text-base">全局每秒 API 上限</CardTitle>
-              <CardDescription>0 = 不限制</CardDescription>
-            </CardHeader>
-            <CardContent>
-              <div className="flex max-w-xs items-end gap-2">
-                <div className="flex-1 space-y-1.5">
-                  <Label>API 查询总数</Label>
-                  <Input
-                    inputMode="numeric"
-                    value={qps}
-                    onChange={(e) => setQps(e.target.value.replace(/[^0-9]/g, ""))}
-                  />
-                </div>
-                <Button onClick={() => saveQps.mutate()} disabled={saveQps.isPending}>
-                  {saveQps.isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Save className="mr-2 h-4 w-4" />}
-                  保存
-                </Button>
-              </div>
             </CardContent>
           </Card>
 

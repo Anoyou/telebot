@@ -117,16 +117,11 @@ class KillSwitchRequest(BaseModel):
     enabled: bool
 
 
-class GlobalLimitsRequest(BaseModel):
-    api_qps_total: int = 0
-
-
 __all__ = [
     "ACTION_KEYS",
     "AccountRateLimitOut",
     "EstimateRequest",
     "EstimateResponse",
-    "GlobalLimitsRequest",
     "HumanizeOut",
     "HumanizeUpdate",
     "KillSwitchRequest",

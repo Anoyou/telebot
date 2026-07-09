@@ -12,7 +12,7 @@ from ..base import Base
 
 
 class SystemSetting(Base):
-    """key-value 系统配置（command_prefix、kill_switch、global_api_qps 等）。"""
+    """key-value 系统配置（command_prefix、kill_switch、timezone 等）。"""
 
     __tablename__ = "system_setting"
 
