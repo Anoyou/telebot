@@ -149,6 +149,7 @@ class _InteractionTextGuardRule:
 _USERBOT_SESSION_KEY_PREFIX = "account_bot:interaction_session:"
 _USERBOT_SESSION_TTL_GRACE_SECONDS = 90
 _USERBOT_BUTTON_MAP_KEY = "_tp_button_map"
+_PAYOUT_SENT_TTL_SECONDS = 7 * 24 * 60 * 60
 _SESSION_CHANNEL_USERBOT = "userbot"
 _SESSION_CHANNEL_INTERACTION_BOT = "interaction_bot"
 _SESSION_CHANNELS_OBSERVED_BY_USERBOT = frozenset(
@@ -190,6 +191,14 @@ class _TracePluginClient:
     def __getattr__(self, name: str) -> Any:
         return getattr(self._client, name)
 
+    def _consume_rate_limit_detail(self) -> dict[str, Any] | None:
+        try:
+            detail = object.__getattribute__(self._client, "_last_rate_limit_detail")
+            object.__setattr__(self._client, "_last_rate_limit_detail", None)
+        except Exception:  # noqa: BLE001
+            return None
+        return detail if isinstance(detail, dict) else None
+
     async def send_message(self, chat_id: Any = None, message: Any = None, *args: Any, **kwargs: Any) -> Any:
         if chat_id is None and "entity" in kwargs:
             chat_id = kwargs.pop("entity")
@@ -202,6 +211,16 @@ class _TracePluginClient:
         )
         try:
             result = await self._client.send_message(chat_id, text, *args, **kwargs)
+            rate_limit_detail = self._consume_rate_limit_detail()
+            if rate_limit_detail is not None:
+                await self._record(
+                    action,
+                    TRACE_STATUS_SKIPPED,
+                    actual_send_via="userbot_reply",
+                    error_code="rate_limited",
+                    result=rate_limit_detail,
+                )
+                return result
             await self._record(action, TRACE_STATUS_OK, actual_send_via="userbot_reply", result=_trace_client_result(result))
             return result
         except Exception as exc:  # noqa: BLE001
@@ -226,6 +245,16 @@ class _TracePluginClient:
         action["filename"] = str(getattr(file, "name", "") or "") or None
         try:
             result = await self._client.send_file(chat_id, file, *args, **kwargs)
+            rate_limit_detail = self._consume_rate_limit_detail()
+            if rate_limit_detail is not None:
+                await self._record(
+                    action,
+                    TRACE_STATUS_SKIPPED,
+                    actual_send_via="userbot_reply",
+                    error_code="rate_limited",
+                    result=rate_limit_detail,
+                )
+                return result
             await self._record(action, TRACE_STATUS_OK, actual_send_via="userbot_reply", result=_trace_client_result(result))
             return result
         except Exception as exc:  # noqa: BLE001
@@ -1542,6 +1571,33 @@ def _payout_amount(action: dict[str, Any]) -> int | None:
     return amount
 
 
+def _payout_sent_key(account_id: int | None, payout_key: Any) -> str | None:
+    key = str(payout_key or "").strip()
+    if account_id is None or not key:
+        return None
+    return f"payout:sent:{int(account_id)}:{key}"
+
+
+async def _mark_payout_sent_marker(
+    redis: Any | None,
+    account_id: int | None,
+    payout_key: Any,
+    message_id: Any,
+) -> None:
+    key = _payout_sent_key(account_id, payout_key)
+    if redis is None or key is None:
+        return
+    try:
+        await redis.set(
+            key,
+            str(_int_or_none(message_id) or 0),
+            ex=_PAYOUT_SENT_TTL_SECONDS,
+            nx=True,
+        )
+    except Exception:  # noqa: BLE001
+        log.debug("write payout sent marker failed account=%s key=%s", account_id, key, exc_info=True)
+
+
 async def _record_userbot_action_failure(
     state: _AccountState,
     action: dict[str, Any],
@@ -1855,7 +1911,11 @@ async def _apply_userbot_payout_action(state: _AccountState, event: Any, action:
             reply_to_user_id=reply_to_user_id,
         )
         return False
-    payout_ok, payout_reason = await payout_limit.check_and_consume(state.account_id, amount)
+    payout_ok, payout_reason = await payout_limit.check_and_consume(
+        state.account_id,
+        amount,
+        idempotency_key=payout_key,
+    )
     if not payout_ok:
         await _record_userbot_action_failure(
             state,
@@ -1880,6 +1940,12 @@ async def _apply_userbot_payout_action(state: _AccountState, event: Any, action:
             "reply_to_message_id": reply_to,
             "reply_to_user_id": reply_to_user_id,
         }
+        await _mark_payout_sent_marker(
+            state.redis or get_redis(),
+            state.account_id,
+            payout_key,
+            result.get("message_id"),
+        )
         await _save_action_message_id(state, action, result)
         await _save_userbot_reply_target(
             state,
@@ -4862,7 +4928,10 @@ async def _activate(db, state: _AccountState, af: AccountFeature, redis: Any) ->
 
         perms = list(plugin_manifest.permissions) if plugin_manifest else []
         plugin_client = SandboxClient(
-            state.client, perms, plugin_key=af.feature_key
+            state.client,
+            perms,
+            plugin_key=af.feature_key,
+            account_id=state.account_id,
         )
 
     effective_config = await _merge_plugin_config(

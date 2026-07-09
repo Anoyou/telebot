@@ -11,7 +11,10 @@ Sprint2 #2 起新增 4 类"模板命令"：reply_text / forward_to / run_plugin 
 """
 from __future__ import annotations
 
+import asyncio
 import logging
+import math
+import os
 import re
 import time
 from collections.abc import Awaitable, Callable
@@ -40,6 +43,7 @@ from ..services.event_trace import (
     start_trace,
     trace_log_context,
 )
+from ..services.rate_limit_service import get_effective_factory, get_humanize_opts
 from ..settings import settings
 from ..util.sudo_permissions import (
     normalize_sudo_chat_ids,
@@ -64,6 +68,7 @@ from .commands.sudo_guard import (
 )
 from .ipc import CMD_PAUSE, CMD_RESUME, cmd_channel, make_cmd
 from .plugins.base import public_entity_display_name
+from .ratelimit.engine import RateLimitDecision, RateLimitEngine
 
 log = logging.getLogger(__name__)
 
@@ -99,6 +104,7 @@ _BUILTIN_ALIAS_TO_PRIMARY: dict[str, str] = {}
 # 用于插件 reload/disable 时注销旧命令
 _PLUGIN_COMMANDS: dict[str, PluginCmd] = {}
 _TRACE_FLAG_CACHE: tuple[float, bool] = (0.0, True)
+_COMMAND_RATE_LIMIT_ENGINES: dict[int, RateLimitEngine] = {}
 
 
 def normalize_command_echo_guard_limit(value: Any) -> int:
@@ -170,6 +176,130 @@ def get_command_context() -> CommandContext | None:
     return _ctx
 
 
+def userbot_rate_limit_action(action_type: str, chat_id: Any) -> str:
+    """Map Telethon-ish userbot calls to the platform action bucket names."""
+
+    try:
+        chat = int(chat_id) if chat_id not in (None, "") else None
+    except (TypeError, ValueError):
+        chat = None
+    if action_type in {"send_message", "respond", "reply"}:
+        return "send_message_private" if chat is not None and chat > 0 else "send_message_group"
+    if action_type in {"edit", "edit_message", "edit_caption"}:
+        return "edit_message"
+    if action_type in {"send_file", "send_photo"}:
+        return "upload_file"
+    if action_type in {"delete", "delete_message", "delete_messages"}:
+        return "delete_message"
+    if action_type in {"forward_message", "forward_messages", "forward_to"}:
+        return "forward_message"
+    return action_type
+
+
+def _rate_limit_peer_id(chat_id: Any) -> int | None:
+    try:
+        return int(chat_id) if chat_id not in (None, "") else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _command_account_id(account_id: int | None = None, trace: Any | None = None) -> int | None:
+    if account_id is not None:
+        return account_id
+    trace_account_id = getattr(trace, "account_id", None)
+    if trace_account_id is not None:
+        try:
+            return int(trace_account_id)
+        except (TypeError, ValueError):
+            pass
+    if _ctx is not None:
+        return _ctx.account_id
+    return None
+
+
+async def _command_rate_limit_engine(account_id: int) -> RateLimitEngine | None:
+    cached = _COMMAND_RATE_LIMIT_ENGINES.get(account_id)
+    if cached is not None:
+        return cached
+    if os.environ.get("TELEBOT_WORKER_PROC") != "1":
+        return None
+    try:
+        async with AsyncSessionLocal() as db:
+            opts = await get_humanize_opts(db, account_id)
+        engine = RateLimitEngine(
+            account_id,
+            opts,
+            get_effective_factory(AsyncSessionLocal),
+            redis=get_redis(),
+        )
+    except Exception:  # noqa: BLE001
+        log.debug("init command userbot rate limit engine failed account=%s", account_id, exc_info=True)
+        return None
+    _COMMAND_RATE_LIMIT_ENGINES[account_id] = engine
+    return engine
+
+
+async def acquire_userbot_action_rate_limit(
+    account_id: int | None,
+    action_type: str,
+    chat_id: Any,
+) -> tuple[bool, dict[str, Any]]:
+    """Best-effort UserBot action rate-limit check for direct Telethon send paths."""
+
+    if account_id is None:
+        return True, {}
+    limit_action = userbot_rate_limit_action(action_type, chat_id)
+    peer_id = _rate_limit_peer_id(chat_id)
+    try:
+        engine = await _command_rate_limit_engine(int(account_id))
+    except Exception:  # noqa: BLE001
+        log.debug("load command rate limit engine failed account=%s", account_id, exc_info=True)
+        return True, {"rate_limit_action": limit_action}
+    if engine is None:
+        return True, {"rate_limit_action": limit_action}
+    try:
+        decision: RateLimitDecision = await engine.acquire(int(account_id), limit_action, peer_id=peer_id)
+    except Exception:  # noqa: BLE001
+        log.debug(
+            "command userbot rate limit check failed account=%s action=%s chat=%s",
+            account_id,
+            limit_action,
+            chat_id,
+            exc_info=True,
+        )
+        return True, {"rate_limit_action": limit_action}
+    detail = {
+        "outcome": getattr(decision, "outcome", None),
+        "wait_seconds": getattr(decision, "wait_seconds", None),
+        "rate_limit_action": limit_action,
+    }
+    if not bool(getattr(decision, "allowed", False)):
+        reason = getattr(decision, "reason", None)
+        if reason:
+            detail["reason"] = reason
+        return False, detail
+    wait_seconds = float(getattr(decision, "wait_seconds", 0.0) or 0.0)
+    if math.isfinite(wait_seconds) and wait_seconds > 0:
+        await asyncio.sleep(wait_seconds)
+    return True, detail
+
+
+async def acquire_direct_userbot_action_rate_limit(
+    client: Any,
+    account_id: int | None,
+    action_type: str,
+    chat_id: Any,
+) -> tuple[bool, dict[str, Any]]:
+    """Rate-limit raw Telethon clients; traced clients already check internally."""
+
+    try:
+        if getattr(client, "_telepilot_trace_client", False) is True:
+            return True, {}
+    except Exception:  # noqa: BLE001
+        pass
+    return await acquire_userbot_action_rate_limit(account_id, action_type, chat_id)
+
+
 def current_command_prefix(*, fallback: str | None = None) -> str:
     """Return the worker's live command prefix for user-facing examples."""
     return ((_ctx.command_prefix if _ctx is not None else "") or fallback or settings.command_prefix or ",")
@@ -196,13 +326,35 @@ async def _command_trace_enabled() -> bool:
 class _TraceCommandEvent:
     """Proxy command event methods that produce user-visible Telegram actions."""
 
-    def __init__(self, event: Any, trace: Any, *, command: str, plugin_key: str | None = None) -> None:
+    def __init__(
+        self,
+        event: Any,
+        trace: Any,
+        *,
+        command: str,
+        plugin_key: str | None = None,
+        account_id: int | None = None,
+        record_actions: bool = True,
+    ) -> None:
         self._event = event
         self._trace = trace
         self._command = command
         self._plugin_key = plugin_key
+        self._account_id = _command_account_id(account_id, trace)
+        self._record_actions = record_actions
         raw_client = getattr(event, "client", None)
-        self.client = _TraceCommandClient(raw_client, trace, command=command, plugin_key=plugin_key) if raw_client is not None else raw_client
+        self.client = (
+            _TraceCommandClient(
+                raw_client,
+                trace,
+                command=command,
+                plugin_key=plugin_key,
+                account_id=self._account_id,
+                record_actions=record_actions,
+            )
+            if raw_client is not None
+            else raw_client
+        )
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._event, name)
@@ -223,7 +375,14 @@ class _TraceCommandEvent:
         result = await self._event.get_reply_message(*args, **kwargs)
         if result is None:
             return None
-        return _TraceForwardMessage(result, self._trace, command=self._command, plugin_key=self._plugin_key)
+        return _TraceForwardMessage(
+            result,
+            self._trace,
+            command=self._command,
+            plugin_key=self._plugin_key,
+            account_id=self._account_id,
+            record_actions=self._record_actions,
+        )
 
     async def _call_event_action(self, action_type: str, method: str, text: Any, *args: Any, **kwargs: Any) -> Any:
         action = _command_trace_action(
@@ -234,44 +393,102 @@ class _TraceCommandEvent:
             chat_id=getattr(self._event, "chat_id", None),
             message_id=getattr(getattr(self._event, "message", None), "id", None) or getattr(self._event, "id", None),
         )
+        allowed, limit_detail = await acquire_userbot_action_rate_limit(
+            self._account_id,
+            action_type,
+            action.get("chat_id"),
+        )
+        if not allowed:
+            if self._record_actions:
+                await record_action(
+                    trace_log_context(self._trace, plugin_key=self._plugin_key),
+                    action,
+                    TRACE_STATUS_SKIPPED,
+                    actual_send_via="userbot_reply",
+                    error_code="rate_limited",
+                    result=limit_detail,
+                )
+            return None
         try:
             fn = getattr(self._event, method)
             if text is None and action_type == "delete_message":
                 result = await fn(*args, **kwargs)
             else:
                 result = await fn(text, *args, **kwargs)
-            await record_action(
-                trace_log_context(self._trace, plugin_key=self._plugin_key),
-                action,
-                TRACE_STATUS_OK,
-                actual_send_via="userbot_reply",
-                result=_command_result_payload(result),
-            )
+            if self._record_actions:
+                await record_action(
+                    trace_log_context(self._trace, plugin_key=self._plugin_key),
+                    action,
+                    TRACE_STATUS_OK,
+                    actual_send_via="userbot_reply",
+                    result=_command_result_payload(result),
+                )
             return result
         except Exception as exc:  # noqa: BLE001
-            await record_action(
-                trace_log_context(self._trace, plugin_key=self._plugin_key),
-                action,
-                TRACE_STATUS_FAILED,
-                actual_send_via="userbot_reply",
-                error_code="telegram_api_error",
-                error=f"{type(exc).__name__}: {exc}",
-            )
+            if self._record_actions:
+                await record_action(
+                    trace_log_context(self._trace, plugin_key=self._plugin_key),
+                    action,
+                    TRACE_STATUS_FAILED,
+                    actual_send_via="userbot_reply",
+                    error_code="telegram_api_error",
+                    error=f"{type(exc).__name__}: {exc}",
+                )
             raise
 
 
 class _TraceCommandClient:
     """Proxy client send methods used by command handlers."""
 
-    def __init__(self, client: Any, trace: Any, *, command: str, plugin_key: str | None = None) -> None:
+    def __init__(
+        self,
+        client: Any,
+        trace: Any,
+        *,
+        command: str,
+        plugin_key: str | None = None,
+        account_id: int | None = None,
+        record_actions: bool = True,
+    ) -> None:
         self._client = client
         self._trace = trace
         self._command = command
         self._plugin_key = plugin_key
+        self._account_id = _command_account_id(account_id, trace)
+        self._record_actions = record_actions
         self._telepilot_trace_client = True
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._client, name)
+
+    async def _check_rate_limit(self, action: dict[str, Any], action_type: str, chat_id: Any) -> bool:
+        allowed, limit_detail = await acquire_userbot_action_rate_limit(
+            self._account_id,
+            action_type,
+            chat_id,
+        )
+        if allowed:
+            return True
+        if self._record_actions:
+            await record_action(
+                trace_log_context(self._trace, plugin_key=self._plugin_key),
+                action,
+                TRACE_STATUS_SKIPPED,
+                actual_send_via="userbot_reply",
+                error_code="rate_limited",
+                result=limit_detail,
+            )
+        return False
+
+    async def _record(self, action: dict[str, Any], status: str, **detail: Any) -> None:
+        if not self._record_actions:
+            return
+        await record_action(
+            trace_log_context(self._trace, plugin_key=self._plugin_key),
+            action,
+            status,
+            **detail,
+        )
 
     async def send_message(self, chat_id: Any, text: Any = None, *args: Any, **kwargs: Any) -> Any:
         action = _command_trace_action(
@@ -282,10 +499,11 @@ class _TraceCommandClient:
             chat_id=chat_id,
             reply_to_message_id=kwargs.get("reply_to") or kwargs.get("reply_to_message_id"),
         )
+        if not await self._check_rate_limit(action, "send_message", chat_id):
+            return None
         try:
             result = await self._client.send_message(chat_id, text, *args, **kwargs)
-            await record_action(
-                trace_log_context(self._trace, plugin_key=self._plugin_key),
+            await self._record(
                 action,
                 TRACE_STATUS_OK,
                 actual_send_via="userbot_reply",
@@ -293,8 +511,7 @@ class _TraceCommandClient:
             )
             return result
         except Exception as exc:  # noqa: BLE001
-            await record_action(
-                trace_log_context(self._trace, plugin_key=self._plugin_key),
+            await self._record(
                 action,
                 TRACE_STATUS_FAILED,
                 actual_send_via="userbot_reply",
@@ -312,10 +529,11 @@ class _TraceCommandClient:
             chat_id=chat_id,
             reply_to_message_id=kwargs.get("reply_to") or kwargs.get("reply_to_message_id"),
         )
+        if not await self._check_rate_limit(action, "send_file", chat_id):
+            return None
         try:
             result = await self._client.send_file(chat_id, file, *args, **kwargs)
-            await record_action(
-                trace_log_context(self._trace, plugin_key=self._plugin_key),
+            await self._record(
                 action,
                 TRACE_STATUS_OK,
                 actual_send_via="userbot_reply",
@@ -323,8 +541,7 @@ class _TraceCommandClient:
             )
             return result
         except Exception as exc:  # noqa: BLE001
-            await record_action(
-                trace_log_context(self._trace, plugin_key=self._plugin_key),
+            await self._record(
                 action,
                 TRACE_STATUS_FAILED,
                 actual_send_via="userbot_reply",
@@ -342,10 +559,11 @@ class _TraceCommandClient:
             chat_id=chat_id,
             message_id=message_id,
         )
+        if not await self._check_rate_limit(action, "edit_message", chat_id):
+            return None
         try:
             result = await self._client.edit_message(chat_id, message_id, text, *args, **kwargs)
-            await record_action(
-                trace_log_context(self._trace, plugin_key=self._plugin_key),
+            await self._record(
                 action,
                 TRACE_STATUS_OK,
                 actual_send_via="userbot_reply",
@@ -353,8 +571,7 @@ class _TraceCommandClient:
             )
             return result
         except Exception as exc:  # noqa: BLE001
-            await record_action(
-                trace_log_context(self._trace, plugin_key=self._plugin_key),
+            await self._record(
                 action,
                 TRACE_STATUS_FAILED,
                 actual_send_via="userbot_reply",
@@ -372,10 +589,11 @@ class _TraceCommandClient:
             chat_id=entity,
             message_id=message_id if not isinstance(message_id, (list, tuple, set)) else None,
         )
+        if not await self._check_rate_limit(action, "delete_message", entity):
+            return None
         try:
             result = await self._client.delete_messages(entity, message_ids, *args, **kwargs)
-            await record_action(
-                trace_log_context(self._trace, plugin_key=self._plugin_key),
+            await self._record(
                 action,
                 TRACE_STATUS_OK,
                 actual_send_via="userbot_reply",
@@ -384,8 +602,7 @@ class _TraceCommandClient:
             )
             return result
         except Exception as exc:  # noqa: BLE001
-            await record_action(
-                trace_log_context(self._trace, plugin_key=self._plugin_key),
+            await self._record(
                 action,
                 TRACE_STATUS_FAILED,
                 actual_send_via="userbot_reply",
@@ -403,10 +620,11 @@ class _TraceCommandClient:
             chat_id=entity,
             message_id=getattr(message, "id", None) or message,
         )
+        if not await self._check_rate_limit(action, "pin_message", entity):
+            return None
         try:
             result = await self._client.pin_message(entity, message, *args, **kwargs)
-            await record_action(
-                trace_log_context(self._trace, plugin_key=self._plugin_key),
+            await self._record(
                 action,
                 TRACE_STATUS_OK,
                 actual_send_via="userbot_reply",
@@ -414,8 +632,7 @@ class _TraceCommandClient:
             )
             return result
         except Exception as exc:  # noqa: BLE001
-            await record_action(
-                trace_log_context(self._trace, plugin_key=self._plugin_key),
+            await self._record(
                 action,
                 TRACE_STATUS_FAILED,
                 actual_send_via="userbot_reply",
@@ -428,11 +645,22 @@ class _TraceCommandClient:
 class _TraceForwardMessage:
     """Proxy replied message native forwarding so command templates remain traceable."""
 
-    def __init__(self, message: Any, trace: Any, *, command: str, plugin_key: str | None = None) -> None:
+    def __init__(
+        self,
+        message: Any,
+        trace: Any,
+        *,
+        command: str,
+        plugin_key: str | None = None,
+        account_id: int | None = None,
+        record_actions: bool = True,
+    ) -> None:
         self._message = message
         self._trace = trace
         self._command = command
         self._plugin_key = plugin_key
+        self._account_id = _command_account_id(account_id, trace)
+        self._record_actions = record_actions
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._message, name)
@@ -451,34 +679,73 @@ class _TraceForwardMessage:
             action["source_chat_id"] = source_chat_id
         if source_message_id is not None:
             action["source_message_id"] = source_message_id
+        allowed, limit_detail = await acquire_userbot_action_rate_limit(
+            self._account_id,
+            "forward_message",
+            target,
+        )
+        if not allowed:
+            if self._record_actions:
+                await record_action(
+                    trace_log_context(self._trace, plugin_key=self._plugin_key),
+                    action,
+                    TRACE_STATUS_SKIPPED,
+                    actual_send_via="userbot_reply",
+                    error_code="rate_limited",
+                    result=limit_detail,
+                )
+            return None
         try:
             result = await self._message.forward_to(target, *args, **kwargs)
-            await record_action(
-                trace_log_context(self._trace, plugin_key=self._plugin_key),
-                action,
-                TRACE_STATUS_OK,
-                actual_send_via="userbot_reply",
-                result=_command_result_payload(result),
-            )
+            if self._record_actions:
+                await record_action(
+                    trace_log_context(self._trace, plugin_key=self._plugin_key),
+                    action,
+                    TRACE_STATUS_OK,
+                    actual_send_via="userbot_reply",
+                    result=_command_result_payload(result),
+                )
             return result
         except Exception as exc:  # noqa: BLE001
-            await record_action(
-                trace_log_context(self._trace, plugin_key=self._plugin_key),
-                action,
-                TRACE_STATUS_FAILED,
-                actual_send_via="userbot_reply",
-                error_code="telegram_api_error",
-                error=f"{type(exc).__name__}: {exc}",
-            )
+            if self._record_actions:
+                await record_action(
+                    trace_log_context(self._trace, plugin_key=self._plugin_key),
+                    action,
+                    TRACE_STATUS_FAILED,
+                    actual_send_via="userbot_reply",
+                    error_code="telegram_api_error",
+                    error=f"{type(exc).__name__}: {exc}",
+                )
             raise
 
 
-def _trace_command_io(client: TelegramClient, event: Any, trace: Any, *, command: str, plugin_key: str | None) -> tuple[Any, Any]:
-    if trace is None:
-        return client, event
+def _trace_command_io(
+    client: TelegramClient,
+    event: Any,
+    trace: Any,
+    *,
+    command: str,
+    plugin_key: str | None,
+    account_id: int | None = None,
+) -> tuple[Any, Any]:
+    record_actions = trace is not None
     return (
-        _TraceCommandClient(client, trace, command=command, plugin_key=plugin_key),
-        _TraceCommandEvent(event, trace, command=command, plugin_key=plugin_key),
+        _TraceCommandClient(
+            client,
+            trace,
+            command=command,
+            plugin_key=plugin_key,
+            account_id=account_id,
+            record_actions=record_actions,
+        ),
+        _TraceCommandEvent(
+            event,
+            trace,
+            command=command,
+            plugin_key=plugin_key,
+            account_id=account_id,
+            record_actions=record_actions,
+        ),
     )
 
 
@@ -871,6 +1138,7 @@ async def _send_long_message(
     first_msg_id: int | None,
     parse_mode: str | None = None,
     *,
+    account_id: int | None = None,
     _max_chunk: int = _LONG_MESSAGE_THRESHOLD,
 ) -> None:
     """发送长消息，自动分段。
@@ -898,15 +1166,47 @@ async def _send_long_message(
     # 第一段：优先用 edit
     if first_msg_id:
         try:
+            allowed, _ = await acquire_direct_userbot_action_rate_limit(
+                client,
+                _command_account_id(account_id),
+                "edit_message",
+                chat_id,
+            )
+            if not allowed:
+                return
             await client.edit_message(chat_id, first_msg_id, first, parse_mode=parse_mode)
         except Exception:
             # edit 失败时降级为纯文本
             try:
+                allowed, _ = await acquire_direct_userbot_action_rate_limit(
+                    client,
+                    _command_account_id(account_id),
+                    "edit_message",
+                    chat_id,
+                )
+                if not allowed:
+                    return
                 await client.edit_message(chat_id, first_msg_id, first)
             except Exception:
                 # 再失败就发送新消息
+                allowed, _ = await acquire_direct_userbot_action_rate_limit(
+                    client,
+                    _command_account_id(account_id),
+                    "send_message",
+                    chat_id,
+                )
+                if not allowed:
+                    return
                 await client.send_message(chat_id, first)
     else:
+        allowed, _ = await acquire_direct_userbot_action_rate_limit(
+            client,
+            _command_account_id(account_id),
+            "send_message",
+            chat_id,
+        )
+        if not allowed:
+            return
         await client.send_message(chat_id, first, parse_mode=parse_mode)
 
     # 后续段落：send_message
@@ -915,10 +1215,26 @@ async def _send_long_message(
         if parse_mode == "html":
             chunk = _ensure_html_safe(chunk)
         try:
+            allowed, _ = await acquire_direct_userbot_action_rate_limit(
+                client,
+                _command_account_id(account_id),
+                "send_message",
+                chat_id,
+            )
+            if not allowed:
+                return
             await client.send_message(chat_id, chunk, parse_mode=parse_mode)
         except Exception:
             # 发送失败时降级为纯文本
             try:
+                allowed, _ = await acquire_direct_userbot_action_rate_limit(
+                    client,
+                    _command_account_id(account_id),
+                    "send_message",
+                    chat_id,
+                )
+                if not allowed:
+                    return
                 await client.send_message(chat_id, chunk)
             except Exception:
                 # 最坏情况：丢弃该段落
@@ -1798,6 +2114,7 @@ async def _dispatch_command(
             trace,
             command=cmd,
             plugin_key=plugin_key,
+            account_id=account_id,
         )
         await _dispatch_command_inner(
             traced_client,
@@ -1900,6 +2217,7 @@ async def _dispatch_sudo_denial(
             trace,
             command=cmd,
             plugin_key=plugin_key,
+            account_id=account_id,
         )
         text = f"✗ Sudo 权限拒绝：{error_msg}"
         if respond:

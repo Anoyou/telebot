@@ -688,6 +688,9 @@ class InteractionDeliveryExecutor:
             "reply_to_message_id": reply_to_message_id,
             "parse_mode": parse_mode,
         }
+        if action.get("payout_key") not in (None, ""):
+            payload["payout_key"] = str(action.get("payout_key"))
+        payout_key = payout_compensation_service.ensure_payout_key(payload)
         if reply_to_user_id is not None:
             payload["reply_to_user_id"] = reply_to_user_id
         if reply_to_search_limit is not None:
@@ -704,7 +707,6 @@ class InteractionDeliveryExecutor:
             context = action.get("context")
             if isinstance(context, dict):
                 payout_payload["context"] = dict(context)
-            payout_key = payout_compensation_service.ensure_payout_key(payout_payload)
             compensation_queued = False
             try:
                 queued = await payout_compensation_service.enqueue_payout_compensation(

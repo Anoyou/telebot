@@ -357,6 +357,7 @@ async def _deliver_generated_images_or_fallback_text(
     *,
     client: Any,
     event: Any,
+    account_id: int,
     cfg: dict[str, Any],
     tpl: dict[str, Any],
     provider_dict: dict[str, Any],
@@ -466,6 +467,7 @@ async def _deliver_generated_images_or_fallback_text(
     if gen_image_bytes:
         # 渲染文字 caption（复用现有模板系统）
         from ..services.llm_format import DEFAULT_TEMPLATE, render_output
+        from .command import acquire_direct_userbot_action_rate_limit
         template = cfg.get("output_template") or DEFAULT_TEMPLATE
         raw_format = (cfg.get("output_format") or "html").lower()
         output_format = "html" if raw_format == "markdownv2" else raw_format
@@ -510,12 +512,28 @@ async def _deliver_generated_images_or_fallback_text(
         _buf0 = _io.BytesIO(gen_image_bytes[0])
         _buf0.name = f"ai_image{gen_image_exts[0]}" if gen_image_exts else "ai_image.jpg"
         try:
+            allowed, _ = await acquire_direct_userbot_action_rate_limit(
+                client,
+                account_id,
+                "send_file",
+                event.chat_id,
+            )
+            if not allowed:
+                return None
             await client.send_file(
                 event.chat_id, _buf0,
                 caption=caption, parse_mode=parse_mode_arg,
             )
         except Exception:
             try:
+                allowed, _ = await acquire_direct_userbot_action_rate_limit(
+                    client,
+                    account_id,
+                    "send_file",
+                    event.chat_id,
+                )
+                if not allowed:
+                    return None
                 await client.send_file(
                     event.chat_id, _buf0,
                     caption=caption[:1024],
@@ -531,6 +549,14 @@ async def _deliver_generated_images_or_fallback_text(
                 _buf = _io.BytesIO(extra_bytes)
                 _ext = gen_image_exts[idx] if idx < len(gen_image_exts) else ".jpg"
                 _buf.name = f"ai_image{_ext}"
+                allowed, _ = await acquire_direct_userbot_action_rate_limit(
+                    client,
+                    account_id,
+                    "send_file",
+                    event.chat_id,
+                )
+                if not allowed:
+                    continue
                 await client.send_file(event.chat_id, _buf)
             except Exception:
                 pass
@@ -577,6 +603,7 @@ async def _render_and_deliver_text_result(
     *,
     client: Any,
     event: Any,
+    account_id: int,
     cfg: dict[str, Any],
     tpl: dict[str, Any],
     provider_dict: dict[str, Any],
@@ -587,7 +614,7 @@ async def _render_and_deliver_text_result(
     self_msg: Any,
 ) -> None:
     from ..services.llm_format import DEFAULT_TEMPLATE, render_output
-    from .command import _send_long_message
+    from .command import _send_long_message, acquire_direct_userbot_action_rate_limit
     from .media import message_has_image
 
     template = cfg.get("output_template") or DEFAULT_TEMPLATE
@@ -656,6 +683,7 @@ async def _render_and_deliver_text_result(
             body,
             event.id if send_mode == "edit" else None,
             parse_mode_arg,
+            account_id=account_id,
         )
         # send_new 模式下也需要删除原命令消息
         if send_mode == "send_new":
@@ -669,12 +697,28 @@ async def _render_and_deliver_text_result(
         # 删命令 + 发新消息（不附 reply_to）
         # 顺序：先发新消息，确保用户看到回答；再删命令——倒过来万一发失败，命令也没了，体验差
         try:
+            allowed, _ = await acquire_direct_userbot_action_rate_limit(
+                client,
+                account_id,
+                "send_message",
+                event.chat_id,
+            )
+            if not allowed:
+                return
             await client.send_message(
                 event.chat_id, body, parse_mode=parse_mode_arg
             )
         except Exception as e:  # noqa: BLE001
             # 发送失败时退化为纯文本再试；都失败就把错误编辑回原命令消息（不删）
             try:
+                allowed, _ = await acquire_direct_userbot_action_rate_limit(
+                    client,
+                    account_id,
+                    "send_message",
+                    event.chat_id,
+                )
+                if not allowed:
+                    return
                 await client.send_message(event.chat_id, body)
             except Exception:
                 try:
@@ -1139,6 +1183,7 @@ async def invoke(
     result = await _deliver_generated_images_or_fallback_text(
         client=client,
         event=event,
+        account_id=account_id,
         cfg=cfg,
         tpl=tpl,
         provider_dict=provider_dict,
@@ -1159,6 +1204,7 @@ async def invoke(
     await _render_and_deliver_text_result(
         client=client,
         event=event,
+        account_id=account_id,
         cfg=cfg,
         tpl=tpl,
         provider_dict=provider_dict,

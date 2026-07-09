@@ -1290,19 +1290,21 @@ async def test_interaction_delivery_routes_payout_via_worker(monkeypatch) -> Non
         {"type": "payout", "amount": 88, "reply_to_user_id": 12345, "reply_to_search_limit": 20}
     ])
 
-    run_worker_action.assert_awaited_once_with(
-        incoming,
-        payload={
-            "action_type": "payout",
-            "chat_id": -100,
-            "amount": 88,
-            "text": "+88",
-            "reply_to_message_id": None,
-            "parse_mode": "plain",
-            "reply_to_user_id": 12345,
-            "reply_to_search_limit": 20,
-        },
-    )
+    run_worker_action.assert_awaited_once()
+    assert run_worker_action.await_args.args == (incoming,)
+    payload = run_worker_action.await_args.kwargs["payload"]
+    assert payload == {
+        "action_type": "payout",
+        "chat_id": -100,
+        "amount": 88,
+        "text": "+88",
+        "reply_to_message_id": None,
+        "parse_mode": "plain",
+        "payout_key": payload["payout_key"],
+        "reply_to_user_id": 12345,
+        "reply_to_search_limit": 20,
+    }
+    assert payload["payout_key"].startswith("pay_")
     assert record_action.await_args.args[1]["type"] == "payout"
     assert record_action.await_args.kwargs["actual_send_via"] == "userbot_reply"
 

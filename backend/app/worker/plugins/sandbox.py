@@ -41,6 +41,8 @@ import logging
 from datetime import timedelta
 from typing import Any
 
+from ..command import acquire_userbot_action_rate_limit
+
 log = logging.getLogger(__name__)
 
 
@@ -255,7 +257,7 @@ class SandboxClient:
 
     is_sandbox_client = True
     _is_sandboxed = True
-    __slots__ = ("_real", "_allowed", "_plugin_key", "_perms")
+    __slots__ = ("_real", "_allowed", "_plugin_key", "_perms", "_account_id", "_last_rate_limit_detail")
 
     def __init__(
         self,
@@ -263,12 +265,15 @@ class SandboxClient:
         perms: list[str] | None,
         *,
         plugin_key: str = "?",
+        account_id: int | None = None,
     ) -> None:
         self._real = real
         # frozenset 避免被插件 mutate
         self._allowed = resolve_permissions(perms)
         self._plugin_key = plugin_key
         self._perms = list(perms or [])
+        self._account_id = account_id
+        self._last_rate_limit_detail: dict[str, Any] | None = None
 
     @property
     def __class__(self):  # type: ignore[override]
@@ -334,6 +339,41 @@ class SandboxClient:
             f"插件 {plugin_key!r} 缺少权限调用 client.{name}; "
             f"请在 manifest.permissions 中声明对应能力（持有: {perms}）"
         )
+
+    async def send_message(self, chat_id: Any = None, message: Any = None, *args: Any, **kwargs: Any) -> Any:
+        """受控发送消息：权限校验后接入 UserBot 动作限速。"""
+
+        real = _require_allowed_method(self, "send_message")
+        if chat_id is None and "entity" in kwargs:
+            chat_id = kwargs.pop("entity")
+        text = message if message is not None else kwargs.pop("message", None)
+        object.__setattr__(self, "_last_rate_limit_detail", None)
+        allowed, detail = await acquire_userbot_action_rate_limit(
+            object.__getattribute__(self, "_account_id"),
+            "send_message",
+            chat_id,
+        )
+        if not allowed:
+            object.__setattr__(self, "_last_rate_limit_detail", detail)
+            return None
+        return await _maybe_await(real.send_message(chat_id, text, *args, **kwargs))
+
+    async def send_file(self, chat_id: Any = None, file: Any = None, *args: Any, **kwargs: Any) -> Any:
+        """受控发送文件：权限校验后接入 UserBot 动作限速。"""
+
+        real = _require_allowed_method(self, "send_file")
+        if chat_id is None and "entity" in kwargs:
+            chat_id = kwargs.pop("entity")
+        object.__setattr__(self, "_last_rate_limit_detail", None)
+        allowed, detail = await acquire_userbot_action_rate_limit(
+            object.__getattribute__(self, "_account_id"),
+            "send_file",
+            chat_id,
+        )
+        if not allowed:
+            object.__setattr__(self, "_last_rate_limit_detail", detail)
+            return None
+        return await _maybe_await(real.send_file(chat_id, file, *args, **kwargs))
 
     async def ban_user(
         self,

@@ -2107,7 +2107,9 @@ async def test_userbot_payout_action_uses_userbot_rate_limit_and_default_text(mo
         acquire=AsyncMock(return_value=SimpleNamespace(allowed=True, wait_seconds=0, outcome="ok"))
     )
     record_action = AsyncMock()
+    check_and_consume = AsyncMock(return_value=(True, None))
     monkeypatch.setattr(loader_mod, "record_action", record_action)
+    monkeypatch.setattr(loader_mod.payout_limit, "check_and_consume", check_and_consume)
 
     failed = await loader_mod._apply_userbot_event_bus_actions(
         state,
@@ -2128,12 +2130,16 @@ async def test_userbot_payout_action_uses_userbot_rate_limit_and_default_text(mo
 
     assert failed is False
     state.engine.acquire.assert_awaited_once_with(44, "send_message_group", peer_id=-100456)
+    check_and_consume.assert_awaited_once()
+    payout_key = check_and_consume.await_args.kwargs["idempotency_key"]
+    assert payout_key.startswith("pay_")
     state.client.send_message.assert_awaited_once_with(
         -100456,
         "+12",
         reply_to=34,
         parse_mode=None,
     )
+    assert state.redis.sets == [(f"payout:sent:44:{payout_key}", "777", {"ex": 604800, "nx": True})]
     assert record_action.await_args.args[1]["type"] == "payout"
     assert record_action.await_args.kwargs["actual_send_via"] == "userbot_reply"
     assert record_action.await_args.kwargs["result"]["message_id"] == 777

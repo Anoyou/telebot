@@ -275,7 +275,7 @@ async def test_delivery_failed_payout_enqueues_and_records_detail(monkeypatch) -
     assert enqueue_kwargs["plugin_key"] == "game"
     assert enqueue_kwargs["entry_key"] == "main"
     assert enqueue_kwargs["payload"]["payout_key"].startswith("pay_")
-    assert "payout_key" not in run_worker_action.await_args.kwargs["payload"]
+    assert run_worker_action.await_args.kwargs["payload"]["payout_key"] == enqueue_kwargs["payload"]["payout_key"]
     assert record_action.await_args.kwargs["compensation_queued"] is True
     assert record_action.await_args.kwargs["payout_key"] == enqueue_kwargs["payload"]["payout_key"]
     assert record_action.await_args.kwargs["result"]["compensation_queued"] is True
