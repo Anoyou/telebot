@@ -21,6 +21,12 @@
 ## [Unreleased]
 
 ### Added
+- 插件持久化 facade `ctx.storage`：给插件一个命名空间隔离（按账号+插件）的键值存储（get/set/delete/incr/TTL），修插件状态存 worker 内存、重启即丢的问题（如 lottery_plus 游戏局面）；仅插件主动调用时读写 redis，直通模式与不调用者零开销。
+- 框架收口层：新增 `action_event` 结构化动作账（所有发送/付款出口旁路记账，best-effort 不阻断）、账号级 `dev_mode.dry_run` 干跑开关（发送/payout 出口短路只记不发）、只读分发决策纯函数（供命中调试器复用）。
+- 资金台账：新增流水（收付款动作记录）、按日/按群净盈亏汇总、payout 挂账（失败/待补偿单据）与挂账人工核销，金额全程 Decimal 精确计算。
+- 事件录制与回放：账号开启 `dev_mode.recording` 后入站消息落地为 JSONL，可用 `tp_replay` CLI 与 pytest fixture 离线回放（进程内、干跑、mock），给玩法插件做回归测试。
+- 全链路命中调试器：新增命中调试页，贴一条消息+选账号即展示它会命中哪条规则/插件/入口及各阶段未命中原因（直通/命令/关键词/事件订阅）。
+- 入站 Webhook：新增 `POST /api/webhooks/{账号}/{hook_key}`，外部系统凭账号级 token 触发插件（token 前端可重置、独立限流），插件通过订阅 `webhook` 事件接收 `hook_key`/body/白名单 headers。
 - payout 失败补偿台账：payout 失败（userbot 离线/瞬态错误/限流拒绝）自动登记待补偿单据，worker 启动即扫描并周期重放，幂等靠 `payout_key` 一键贯穿（日累计只计一次、发送成功写 Redis 标记防双发）；重放耗尽或单笔超限标记放弃并经通知管道提醒，日累计阻塞次日重试。
 - AI 调用全量计量：模型测活、路由分类器、语音转写三处此前绕过统计的直连调用统一记入 usage（分别标记 diagnostic/router/stt 来源），路由分类器接入业务预算预扣，测活豁免预扣但必记用量。
 - 风控与预算设置界面：系统设置新增卡片，可视化配置 payout 单笔/日累计上限与 AI 预算（每分钟/每日请求/每日 token/高级模型每日），0 值显示"未限制"并给出建议文案。
