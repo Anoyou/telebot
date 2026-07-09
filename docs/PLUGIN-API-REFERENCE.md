@@ -587,6 +587,13 @@ return [{
 
 `payout` 永远经 userbot 执行，并进入限速与 trace。它适合“发奖文案本身就是协议”的玩法，普通 Bot 不会代替它执行转账样动作。找不到 `reply_to_user_id` 对应的近期发言时，`payout` 同样会失败、写入日志，并发送默认或自定义的 `reply_anchor_missing_text` 提示。
 
+`payout` 的额度校验与失败补偿由平台负责，插件不用自己实现，但要理解它对 trace 的影响：
+
+- **超限直接拒**：账号可在「系统设置 → 风控与预算」配置 `payout` 的单笔上限与日累计上限（默认 `0` = 不限，按业务币种 / 积分的整数口径填写）。本笔金额超单笔上限、或“今日已累计 + 本笔”超日累计上限时，`payout` 被拒绝执行，action 记 `FAILED`、`error_code=payout_limit_exceeded`。超限属配置拒绝，**不进补偿队列、也不自动重试**；需要人工调额度，日累计上限跨 UTC 零点自动重置。
+- **瞬时失败自动补偿**：userbot 离线（`userbot_offline`）、Telegram API 报错（`telegram_api_error`）、命中限速（`rate_limited`）这类可恢复失败，平台会把这一笔 `payout` 写进补偿队列并按退避自动重放。插件侧看到的仍是本次的 `FAILED` action（detail 带 `compensation_queued=true` 和 `payout_key`）；补发成功后会**以一条新的 `OK` action 出现**（同 `payout_key`、带 `replay` 标记）。**插件不要自己重试 `payout`**——补发交给平台，重复返回只会靠幂等去重。
+- **补发幂等**：平台用 `payout_key`（不显式给会自动生成）+ 已发标记 +（对超时 / 网络类暧昧失败）回查自己最近发言，保证同一笔 `payout` 最多真正发一次、日累计最多计一次。插件若要把多次调用视为“同一笔”，可自带稳定的 `payout_key`。
+- **彻底放弃会告警**：重放次数耗尽或遇到不可补偿错误时，补偿单置为 `abandoned` 并写一条 error 级运维日志，供“收款成功但发奖失败”场景人工介入。运维侧配置与巡检见 [SECURITY-OPS](./SECURITY-OPS.md) §7。
+
 按钮回调：
 
 ```python
@@ -940,7 +947,7 @@ class GuessNumberPlugin(Plugin):
 | `delete_message` | `message_id` | 删除对应 Bot 通道可操作的消息 |
 | `pin_message` | `message_id` | 置顶对应 Bot 通道可操作的消息 |
 | `answer_callback` | `callback_query_id`、`text`、`show_alert` | 回应 inline keyboard 按钮回调 |
-| `payout` | `amount`、`text`、`reply_to_message_id`、`reply_to_user_id`、`reply_to_search_limit`、`reply_anchor_missing_text` | UserBot 发奖动作；有消息 ID 时直接回复，否则可按用户 ID 查找近期发言作为锚点 |
+| `payout` | `amount`、`text`、`reply_to_message_id`、`reply_to_user_id`、`reply_to_search_limit`、`reply_anchor_missing_text` | UserBot 发奖动作；有消息 ID 时直接回复，否则可按用户 ID 查找近期发言作为锚点。超限拒（`error_code=payout_limit_exceeded`），瞬时失败自动进补偿队列重发，插件无需自己重试（见上文 payout 语义） |
 | `end_session` | 无 | 本次入口处理完成后不保留交互会话，适合彩票、红包等长期轮回插件 |
 
 通道原则是：**触发方式决定会话通道，插件默认不感知通道，框架负责路由和执行**。命令触发的会话收发全走 userbot，关键词/付款/按钮触发的会话收发全走交互 Bot；唯一例外是 `payout`、收款确认和发奖等钱相关动作，物理上只有 userbot 能做，永远路由给 userbot。插件只有在跨通道公告、特殊管理提示或迁移桥兼容时才显式写 `send_via`：

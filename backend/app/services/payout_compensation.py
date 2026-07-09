@@ -1,8 +1,9 @@
 """Payout compensation enqueue service.
 
-Stage 1 only persists retryable payout failures. Stage 2 will pass the same
-``payout_key`` into payout limit consumption and replay workers so one logical
-payout is counted and sent at most once.
+Retryable payout failures are persisted here as pending tickets; the worker
+scan loop replays them using the same ``payout_key`` that is threaded into
+payout-limit consumption and the sent-marker, so one logical payout is counted
+and sent at most once.
 """
 
 from __future__ import annotations

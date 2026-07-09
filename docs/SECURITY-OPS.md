@@ -256,6 +256,7 @@ docker compose restart web
 | 每天 | `audit_log` 是否有异常 action（login fail 集中、`account.delete`、`humanize.update` 异常） | `psql -c "SELECT ... FROM audit_log WHERE ts > now()-interval '1 day' AND action LIKE '%fail%';"` |
 | 每周 | 备份还原演练（在隔离机器） | `bash deploy/backup.sh && bash deploy/restore.sh` |
 | 按需 | 插件 lint 规则升级后或完成批量插件迁移后，跑一次存量回填 | `python -m app.scripts.lint_existing_plugins --dry-run`（确认 diff）→ `python -m app.scripts.lint_existing_plugins` |
+| 每天 | 有 `payout` 玩法时，看是否出现放弃（abandoned）的补偿单：收款成功但发奖失败，需人工补发（见 §7.2） | `psql -c "SELECT id, account_id, chat_id, amount, error_code_last, updated_at FROM payout_compensation WHERE status='abandoned' ORDER BY updated_at DESC LIMIT 50;"` |
 | 每月 | 跑一次 `bash deploy/backup-keys.sh`，更新异地 .gpg | 把旧 .gpg 销毁前确认新 .gpg 能成功解密 |
 | 每季 | 复盘是否仍接受 §2 中三项风险；V1.5 来了就按计划修 | 在本文件末尾加 changelog |
 
@@ -309,7 +310,57 @@ YYYY-MM-DD HH:MM UTC
 
 ---
 
+## 7. 收付款风控与补偿（payout）
+
+`payout`（userbot 给群内记账 Bot 发 `+{amount}` 的发奖 / 出款动作）在“真正发送前”有一道额度风控，发送失败后有一套自动补偿闭环。两者都在后端强制，插件不感知。
+
+### 7.1 payout 限额（系统设置 → 风控与预算）
+
+**在哪配**：Web「系统设置 → 风控与预算」卡片，两项：**单笔上限**、**日累计上限**。默认 `0 = 不限`（卡片右上角标注“默认 未限制”）。金额按你自己的业务币种 / 积分口径填整数，平台只做整数比较与累计、不解释单位。
+
+**存哪**：`system_setting` 表 key `payout_limits`，值形如 `{"single_max": N, "daily_max": N}`。写入走 `PATCH /api/system/settings`（字段 `payout_limits`）；负数会被拒（`invalid_payout_limit`），成功写入记审计 `set_payout_limits`。
+
+**怎么生效**：userbot 的两个发送点（平台结算动作路径、userbot 直发插件动作路径）在 `client.send_message` 之前各校验一次：
+
+- **单笔上限**：纯整数比较，`本笔 > single_max` 直接拒，不触碰 Redis、不消费日累计。
+- **日累计上限**：Redis 原子 check-and-consume，按 **UTC 日期**分桶（key `payout_limit:{account_id}:daily:{YYYYMMDD}`，48h TTL），跨 UTC 零点自动重置。额度在**发送前**扣减；若随后发送失败该笔仍已计入（偏保守，不做释放补偿）。
+
+**超限行为**：拒绝执行，action 记 `FAILED`、`error_code=payout_limit_exceeded`。超限**不进补偿队列、不自动重试**，需要人工调额度或等次日重置。
+
+**容错取舍**：Redis 或配置读取失败时 **fail-open（放行）**——风控不该在 Redis 抖动 / 配置迁移窗口把正常收付款卡死，宁可漏计不误杀。
+
+### 7.2 payout 失败补偿（自动重放 + 放弃通知）
+
+发送**瞬时失败**（可恢复）时，平台把这笔 `payout` 落进补偿队列自动重放，避免“收款成功、发奖失败”只能人工翻日志。
+
+**表 / 配置**：账本表 `payout_compensation`（alembic `0034`）。行为由 `system_setting` key `payout_compensation` 控制，默认：`enabled=true`、`max_retries=5`、`backoff_base_seconds=60`、`backoff_max_seconds=3600`、`scan_interval_seconds=60`、`batch_size=20`、`ambiguous_probe=true`、`replay_drop_reply_anchor=true`。目前无独立 UI 开关，需要调整时改这条 system_setting。
+
+**哪些错会自动补偿**：`userbot_offline`、`telegram_api_error`、`rate_limited`。
+
+**哪些不补偿（直接终态 FAILED，不入队）**：`payout_limit_exceeded`、`invalid_payout_amount`、`empty_message_text`、`scope_not_matched`、`action_limit_exceeded`、`reply_anchor_missing`。
+
+**重放**：每个账号 worker 内周期扫描（`scan_interval_seconds`），到期先领租（防多进程 / 多次重复处理）再经 userbot 重发；退避为 `backoff_base * 2^(n-1)` 封顶 `backoff_max`。补发成功→补偿单置 `sent`，并落一条**新的 OK trace**（同 `payout_key`、带 `replay` 标记）。原始那次仍是 `FAILED`（带 `compensation_queued=true`）。
+
+**幂等**：`payout_key`（未显式给会自动生成）+ Redis 已发标记 +（对超时 / 网络类“暧昧”失败）回查账号最近自己发言，保证同一笔最多真正发一次、日累计最多计一次。
+
+**放弃 = 会告警**：重试耗尽或遇到不可补偿错误→补偿单置 `abandoned`，首次置 `notified_at` 并写一条 **error 级运维日志**（“payout 补偿已放弃 / 重试耗尽”）。日累计上限阻塞的重放会**延后到次日**而不是放弃。
+
+**巡检**：定期查放弃的补偿单，这些是“对方钱已到 / 群里已确认，但发奖没发出去”需人工补发的场景：
+
+```bash
+psql "$DATABASE_URL" -c "
+  SELECT id, account_id, chat_id, amount, error_code_last, retry_count, updated_at
+  FROM payout_compensation
+  WHERE status='abandoned'
+  ORDER BY updated_at DESC LIMIT 50;"
+```
+
+插件作者视角的对应约定见 [PLUGIN-API-REFERENCE](./PLUGIN-API-REFERENCE.md) 的 `payout` 语义段。
+
+---
+
 ## Changelog
 
+- **2026-07-09** —— 新增 §7 收付款风控与补偿：payout 限额（风控与预算卡片 `payout_limits`，默认 0 不限）与失败自动补偿（`payout_compensation` 重放 + abandoned 放弃告警）运维说明，§4 巡检加放弃补偿单查询。
 - **2026-05-06** —— Sprint 4 Wave 3：开源向润色，新增应急响应工单模板。
 - **2026-05-03** —— Sprint 2 #1：初稿，覆盖一次性配置、三项已知接受风险、五条应急 SOP。

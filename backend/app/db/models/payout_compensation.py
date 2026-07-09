@@ -19,8 +19,9 @@ PAYOUT_COMPENSATION_STATUS_ABANDONED = "abandoned"
 class PayoutCompensation(Base):
     """Pending payout compensation ticket.
 
-    Stage 1 only enqueues records. Replay, sent markers and notifications are
-    intentionally left for the next rollout stage.
+    Rows are enqueued on payout failure and driven to a terminal state
+    (``sent`` / ``abandoned``) by the worker replay scan; replay, sent markers
+    and notifications are all live.
     """
 
     __tablename__ = "payout_compensation"
