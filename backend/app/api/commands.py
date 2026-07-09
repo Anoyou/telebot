@@ -58,6 +58,72 @@ async def _require_ai_enabled(db: DBSession) -> None:
         )
 
 
+async def _emit_llm_diagnostic_usage(
+    *,
+    provider_row,
+    source: str,
+    started: float,
+    system: str,
+    user_prompt: str,
+    model: str | None,
+    result=None,
+    error: Exception | None = None,
+) -> None:
+    """Record diagnostic LLM probes without reserving account budget.
+
+    Provider test calls are admin diagnostics rather than account business
+    traffic, so they intentionally skip budget pre-reservation. They still must
+    be visible in usage with a diagnostic source for cost/risk review.
+    """
+
+    from ..services import llm_runtime
+    from ..services.llm_runtime import (
+        UsageRecord,
+        preview_text_for_usage,
+        request_preview_for_usage,
+    )
+    from ..services.llm_usage_service import ensure_llm_usage_callback_registered
+
+    try:
+        ensure_llm_usage_callback_registered()
+    except Exception:  # noqa: BLE001
+        pass
+
+    success = error is None
+    await llm_runtime._emit_usage(
+        UsageRecord(
+            provider_id=getattr(provider_row, "id", None),
+            provider_name=getattr(provider_row, "name", None),
+            model=model or getattr(provider_row, "default_model", None),
+            input_tokens=int(getattr(result, "input_tokens", 0) or 0),
+            output_tokens=int(getattr(result, "output_tokens", 0) or 0),
+            latency_ms=max(0, int((_time.monotonic() - started) * 1000)),
+            success=success,
+            error_type=None if success else _diagnostic_error_type(error),
+            source=source,
+            used_fallback=False,
+            fallback_chain=[str(getattr(provider_row, "name", "") or getattr(provider_row, "id", ""))],
+            request_preview=request_preview_for_usage(system, user_prompt),
+            response_preview=preview_text_for_usage(getattr(result, "text", None)),
+        )
+    )
+
+
+def _diagnostic_error_type(error: Exception | None) -> str | None:
+    if error is None:
+        return None
+    msg = str(error).lower()
+    if "timeout" in msg:
+        return "timeout"
+    if "429" in msg or "限流" in msg:
+        return "rate_limit"
+    if "401" in msg or "403" in msg or "auth" in msg or "unauthorized" in msg:
+        return "auth"
+    if "connect" in msg or "network" in msg or "proxy" in msg:
+        return "network"
+    return type(error).__name__.lower()
+
+
 # ════════════════════════════════════════════════════════════
 # 0.4.1 内置命令只读接口
 # ════════════════════════════════════════════════════════════
@@ -901,10 +967,28 @@ async def test_model(
         result = await cli.complete("ping", "ping", max_tokens=4, timeout_seconds=90)
     except LLMError as e:
         elapsed_ms = int((_time.monotonic() - started) * 1000)
+        await _emit_llm_diagnostic_usage(
+            provider_row=row,
+            source="diagnostic:test-model",
+            started=started,
+            system="ping",
+            user_prompt="ping",
+            model=payload.model.strip(),
+            error=e,
+        )
         # LLMError 已脱敏
         return TestModelResponse(ok=False, latency_ms=elapsed_ms, error=str(e))
     except Exception as e:  # noqa: BLE001
         elapsed_ms = int((_time.monotonic() - started) * 1000)
+        await _emit_llm_diagnostic_usage(
+            provider_row=row,
+            source="diagnostic:test-model",
+            started=started,
+            system="ping",
+            user_prompt="ping",
+            model=payload.model.strip(),
+            error=e,
+        )
         return TestModelResponse(
             ok=False,
             latency_ms=elapsed_ms,
@@ -912,6 +996,15 @@ async def test_model(
         )
 
     elapsed_ms = int((_time.monotonic() - started) * 1000)
+    await _emit_llm_diagnostic_usage(
+        provider_row=row,
+        source="diagnostic:test-model",
+        started=started,
+        system="ping",
+        user_prompt="ping",
+        model=result.model or payload.model.strip(),
+        result=result,
+    )
     # 不写 audit（测试调用频繁，写多了刷屏）
     return TestModelResponse(
         ok=True,
@@ -969,6 +1062,15 @@ async def chat_test_models(
                 timeout_seconds=payload.timeout_seconds,
             )
             elapsed_ms = int((_time.monotonic() - started) * 1000)
+            await _emit_llm_diagnostic_usage(
+                provider_row=row,
+                source="diagnostic:chat-test",
+                started=started,
+                system=payload.system_prompt,
+                user_prompt=user_prompt,
+                model=result.model or model_id,
+                result=result,
+            )
             text = (result.text or "").strip()
             return ChatTestModelResult(
                 ok=bool(text),
@@ -984,6 +1086,15 @@ async def chat_test_models(
             )
         except LLMError as exc:
             elapsed_ms = int((_time.monotonic() - started) * 1000)
+            await _emit_llm_diagnostic_usage(
+                provider_row=row,
+                source="diagnostic:chat-test",
+                started=started,
+                system=payload.system_prompt,
+                user_prompt=user_prompt,
+                model=model_id,
+                error=exc,
+            )
             return ChatTestModelResult(
                 ok=False,
                 requested_model=model_id,
@@ -992,6 +1103,15 @@ async def chat_test_models(
             )
         except Exception as exc:  # noqa: BLE001
             elapsed_ms = int((_time.monotonic() - started) * 1000)
+            await _emit_llm_diagnostic_usage(
+                provider_row=row,
+                source="diagnostic:chat-test",
+                started=started,
+                system=payload.system_prompt,
+                user_prompt=user_prompt,
+                model=model_id,
+                error=exc,
+            )
             return ChatTestModelResult(
                 ok=False,
                 requested_model=model_id,

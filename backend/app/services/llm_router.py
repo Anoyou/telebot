@@ -283,12 +283,15 @@ async def _ask_classifier(
     classifier_provider: dict[str, Any],
     user_q: str,
     replied_text: str | None,
+    *,
+    account_id: int | None = None,
+    triggered_by_account_id: int | None = None,
+    source: str = "router",
 ) -> str | None:
     """调 classifier provider 返回一个 label；任何错误返回 None。"""
-    from .llm_client import LLMError, build_client
-
-    # 使用 LLMProviderDTO 替代手搓 fake ORM row
+    from .llm_client import LLMCallFailed, LLMError
     from .llm_dto import LLMProviderDTO
+    from .llm_invoke import invoke as invoke_llm
 
     dto = LLMProviderDTO(
         id=int(classifier_provider.get("id") or 0),
@@ -304,12 +307,18 @@ async def _ask_classifier(
     # 把"原文 + 问题"压成短摘要送进去；max_tokens=8 防滥调
     blob = (replied_text or "")[:300] + "\n---\n" + (user_q or "")[:200]
     try:
-        cli = build_client(
-            _dto_to_fake_row(dto),
-            proxy_url=dto.proxy_url,
+        result, _, _ = await invoke_llm(
+            dto,
+            {dto.id: dto},
+            _CLASSIFIER_SYSTEM,
+            blob,
+            max_tokens=8,
+            account_id=account_id,
+            triggered_by_account_id=triggered_by_account_id,
+            source=source,
+            matched_tag="router",
         )
-        result = await cli.complete(_CLASSIFIER_SYSTEM, blob, max_tokens=8)
-    except (LLMError, ValueError, Exception) as e:  # noqa: BLE001
+    except (LLMCallFailed, LLMError, ValueError, Exception) as e:  # noqa: BLE001
         log.debug("classifier call failed: %s", type(e).__name__)
         return None
 
@@ -318,23 +327,6 @@ async def _ask_classifier(
     if label in _CLASSIFIER_LABELS:
         return label
     return None
-
-
-def _dto_to_fake_row(dto) -> Any:
-    """将 LLMProviderDTO 转为临时 ORM 行（向后兼容）。"""
-    from ..db.models.command import LLMProvider as LLMProviderModel
-
-    return LLMProviderModel(
-        id=dto.id,
-        name=dto.name,
-        provider=dto.provider,
-        api_key_enc=dto.api_key_enc,
-        base_url=dto.base_url,
-        default_model=dto.default_model,
-        api_format=dto.api_format,
-        web_search_api_format=dto.web_search_api_format,
-    )
-
 
 # ════════════════════════════════════════════════════════════
 # 公共入口
@@ -349,6 +341,8 @@ async def pick_provider(
     *,
     classifier_provider_id: int | None = None,
     fallback_provider_id: int | None = None,
+    account_id: int | None = None,
+    triggered_by_account_id: int | None = None,
 ) -> RoutingDecision:
     """根据消息内容挑一个 provider。
 
@@ -381,7 +375,14 @@ async def pick_provider(
     if classifier_provider_id is not None:
         cls_p = providers.get(int(classifier_provider_id))
         if cls_p is not None and _has_api_key(cls_p):
-            label = await _ask_classifier(cls_p, user_q, replied_text)
+            label = await _ask_classifier(
+                cls_p,
+                user_q,
+                replied_text,
+                account_id=account_id,
+                triggered_by_account_id=triggered_by_account_id,
+                source="router",
+            )
             if label:
                 p = _select_by_tag(candidates, label, prefer_cheap=(label != "reason"),
                                    prefer_premium=(label == "reason"))

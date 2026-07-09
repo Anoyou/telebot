@@ -1565,6 +1565,19 @@ def test_ai_command_search_forces_web_search() -> None:
 # ════════════════════════════════════════════════════════════
 
 
+def _capture_llm_usage(monkeypatch):
+    from app.services import llm_runtime, llm_usage_service
+
+    emitted = []
+
+    async def _emit(record):
+        emitted.append(record)
+
+    monkeypatch.setattr(llm_usage_service, "ensure_llm_usage_callback_registered", lambda: None)
+    monkeypatch.setattr(llm_runtime, "_emit_usage", _emit)
+    return emitted
+
+
 @pytest.mark.asyncio
 async def test_test_model_endpoint_success(monkeypatch) -> None:
     """test-model 成功路径：返 ok=True + 延时 + preview。"""
@@ -1599,6 +1612,7 @@ async def test_test_model_endpoint_success(monkeypatch) -> None:
     from app.services import llm_client
 
     monkeypatch.setattr(llm_client, "build_client", lambda *a, **k: fake_client)
+    emitted = _capture_llm_usage(monkeypatch)
 
     out = await cmds_api.test_model(
         pid=1, payload=TestModelRequest(model="gpt-4o"), db=fake_db, user=AsyncMock()
@@ -1607,6 +1621,11 @@ async def test_test_model_endpoint_success(monkeypatch) -> None:
     assert out.model == "gpt-4o-2025"
     assert out.preview == "pong"
     assert out.latency_ms >= 0
+    assert len(emitted) == 1
+    assert emitted[0].source == "diagnostic:test-model"
+    assert emitted[0].success is True
+    assert emitted[0].input_tokens == 1
+    assert emitted[0].output_tokens == 1
 
 
 @pytest.mark.asyncio
@@ -1636,6 +1655,7 @@ async def test_test_model_endpoint_llm_error(monkeypatch) -> None:
     fake_cli = AsyncMock()
     fake_cli.complete = AsyncMock(side_effect=LLMError("OpenAI 接口返回 404: Model not found"))
     monkeypatch.setattr(llm_client, "build_client", lambda *a, **k: fake_cli)
+    emitted = _capture_llm_usage(monkeypatch)
 
     out = await cmds_api.test_model(
         pid=1,
@@ -1646,6 +1666,10 @@ async def test_test_model_endpoint_llm_error(monkeypatch) -> None:
     assert out.ok is False
     assert out.error and "404" in out.error
     assert out.latency_ms >= 0
+    assert len(emitted) == 1
+    assert emitted[0].source == "diagnostic:test-model"
+    assert emitted[0].success is False
+    assert emitted[0].error_type == "llmerror"
 
 
 @pytest.mark.asyncio
@@ -1690,6 +1714,7 @@ async def test_chat_test_models_endpoint_success(monkeypatch) -> None:
     monkeypatch.setattr(cmds_api.command_service, "get_provider_row", _get_provider_row)
     monkeypatch.setattr(cmds_api, "_resolve_proxy_url", AsyncMock(return_value="socks5://127.0.0.1:1080"))
     monkeypatch.setattr(llm_client, "build_client", _build_client)
+    emitted = _capture_llm_usage(monkeypatch)
 
     payload = ChatTestModelsRequest(
         models=["model-a"],
@@ -1730,6 +1755,11 @@ async def test_chat_test_models_endpoint_success(monkeypatch) -> None:
         "proxy_url": "socks5://127.0.0.1:1080",
     }
     assert captured["kwargs"] == {"max_tokens": 1234, "timeout_seconds": 77}
+    assert len(emitted) == 1
+    assert emitted[0].source == "diagnostic:chat-test"
+    assert emitted[0].success is True
+    assert emitted[0].input_tokens == 11
+    assert emitted[0].output_tokens == 7
 
 
 @pytest.mark.asyncio

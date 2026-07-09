@@ -927,6 +927,8 @@ async def invoke(
                 ctx.providers,
                 classifier_provider_id=int(cls_id) if cls_id else None,
                 fallback_provider_id=int(fb_id),
+                account_id=account_id,
+                triggered_by_account_id=triggered_by_account_id,
             )
         except ValueError as e:
             # 路由器找不到任何可用 provider
@@ -1064,24 +1066,28 @@ async def invoke(
     # ``transcribe_model`` 由模板配（缺省 ``whisper-1``）——必须与 chat 模型分开，因为
     # 在 OpenAI / 兼容反代上 STT 是独立 model（``whisper-1`` / ``whisper-large`` 等）。
     if has_any_audio and not has_any_image:
-        # build_client 在内部解密 api_key；导入时点放函数内，避免循环依赖。
-        # 标准 LLM 调用统一走 services.llm_invoke.invoke()，STT 仍直接使用选中的 provider。
-        from ..services.llm_client import LLMError, build_client
+        # STT 走 services.llm_invoke.transcribe()，和标准 LLM 调用一样写 usage；
+        # 由于这是业务链路，会按账号预算做预扣。不同于诊断测活，不做预算豁免。
+        from ..services.llm_client import LLMCallFailed, LLMError
+        from ..services.llm_invoke import transcribe as transcribe_ai_runtime
 
         stt_model = str(cfg.get("transcribe_model") or "whisper-1").strip()
         try:
-            llm = build_client(
+            transcribed_text = await transcribe_ai_runtime(
                 provider_dto,
+                audio_data,
+                model=stt_model,
                 override_model=request_settings.override_model,
-                proxy_url=provider_dto.proxy_url,
+                account_id=account_id,
+                triggered_by_account_id=triggered_by_account_id,
+                source="stt",
             )
-            transcribed_text = await llm.transcribe(audio_data, model=stt_model)
         except NotImplementedError:
             await event.edit(
                 "✗ 当前 provider 暂不支持语音转写（仅 OpenAI 兼容 /audio/transcriptions）"
             )
             return
-        except LLMError as e:
+        except (LLMCallFailed, LLMError) as e:
             await event.edit(f"✗ STT 调用失败：{e}")
             return
         except Exception as e:  # noqa: BLE001

@@ -990,6 +990,10 @@ export interface SystemSettings {
     daily_tokens: number;
     premium_daily: number;
   };
+  payout_limits?: {
+    single_max: number;
+    daily_max: number;
+  };
   log_retention?: {
     trace_enabled: boolean;
     event_bus_delivery_enabled: boolean;

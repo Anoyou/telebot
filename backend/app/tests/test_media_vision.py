@@ -566,6 +566,79 @@ async def test_run_ai_audio_uses_custom_transcribe_model(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_transcribe_helper_records_usage_and_budget(monkeypatch) -> None:
+    """STT helper 必须先预扣账号预算，再写 source=stt 的 usage。"""
+    from app.services import llm_account_budget, llm_invoke, llm_runtime
+    from app.services.llm_dto import LLMProviderDTO
+
+    provider = LLMProviderDTO(
+        id=9,
+        name="stt",
+        provider="openai",
+        default_model="gpt",
+        cost_tier=3,
+    )
+    captured: dict[str, object] = {}
+    emitted = []
+    ticket = llm_account_budget.LLMAccountBudgetTicket(
+        account_id=1,
+        provider_id=9,
+        estimated_tokens=64,
+        backend="test",
+        limited=True,
+    )
+
+    async def _acquire(account_id, provider_dto, estimated_tokens):
+        captured["account_id"] = account_id
+        captured["provider_id"] = provider_dto.id
+        captured["estimated_tokens"] = estimated_tokens
+        return ticket
+
+    async def _settle(settle_ticket, *, actual_tokens, actual_provider, success):
+        captured["settle_ticket"] = settle_ticket
+        captured["actual_tokens"] = actual_tokens
+        captured["actual_provider"] = actual_provider
+        captured["success"] = success
+
+    async def _emit(record):
+        emitted.append(record)
+
+    class _FakeClient:
+        async def transcribe(self, audio, model):
+            captured["audio"] = audio
+            captured["model"] = model
+            return "你好世界"
+
+    monkeypatch.setattr(llm_account_budget, "acquire", _acquire)
+    monkeypatch.setattr(llm_account_budget, "settle", _settle)
+    monkeypatch.setattr(llm_runtime, "_emit_usage", _emit)
+
+    text = await llm_invoke.transcribe(
+        provider,
+        b"OggS" + b"\x00" * 20,
+        model="whisper-1",
+        account_id=1,
+        triggered_by_account_id=22,
+        source="stt",
+        client_factory=lambda *_args, **_kwargs: _FakeClient(),
+    )
+
+    assert text == "你好世界"
+    assert captured["account_id"] == 1
+    assert captured["provider_id"] == 9
+    assert captured["estimated_tokens"] == 64
+    assert captured["success"] is True
+    assert captured["actual_provider"] is provider
+    assert int(captured["actual_tokens"]) >= 65
+    assert len(emitted) == 1
+    assert emitted[0].source == "stt"
+    assert emitted[0].account_id == 1
+    assert emitted[0].triggered_by_account_id == 22
+    assert emitted[0].provider_id == 9
+    assert emitted[0].success is True
+
+
+@pytest.mark.asyncio
 async def test_openai_client_transcribe_posts_multipart() -> None:
     """OpenAIClient.transcribe 必须发到 ``/audio/transcriptions``，
     用 multipart 上传 ``file=<bytes>`` + ``model=<id>``。"""

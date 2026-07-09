@@ -241,6 +241,40 @@ async def test_classifier_redirects_to_matching_tag(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_classifier_call_uses_shared_invoke_with_budget_context(monkeypatch) -> None:
+    """分类器兜底本身也是 LLM 调用，必须带账号预算上下文并写 router usage。"""
+    from app.services import llm_invoke
+    from app.services.llm_client import LLMResult
+
+    captured: dict[str, Any] = {}
+
+    async def fake_invoke(primary, providers, system, user, **kwargs):
+        captured["primary"] = primary
+        captured["providers"] = providers
+        captured["system"] = system
+        captured["user"] = user
+        captured["kwargs"] = kwargs
+        return LLMResult(text="code", model="router-small", input_tokens=3, output_tokens=1), primary, False
+
+    monkeypatch.setattr(llm_invoke, "invoke", fake_invoke)
+
+    label = await llm_router._ask_classifier(
+        _p(99, tags=[], cost_tier=1),
+        "随便聊聊",
+        None,
+        account_id=7,
+        triggered_by_account_id=12,
+    )
+
+    assert label == "code"
+    assert captured["kwargs"]["account_id"] == 7
+    assert captured["kwargs"]["triggered_by_account_id"] == 12
+    assert captured["kwargs"]["source"] == "router"
+    assert captured["kwargs"]["max_tokens"] == 8
+    assert captured["kwargs"]["matched_tag"] == "router"
+
+
+@pytest.mark.asyncio
 async def test_classifier_unknown_label_then_fallback(monkeypatch) -> None:
     """classifier 返回奇怪 label → 不命中；走 fallback_provider_id。"""
     pool = {

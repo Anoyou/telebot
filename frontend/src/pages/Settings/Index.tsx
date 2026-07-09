@@ -140,6 +140,10 @@ export function SettingsIndex() {
     daily_tokens: "0",
     premium_daily: "0",
   });
+  const [payoutLimits, setPayoutLimits] = useState({
+    single_max: "0",
+    daily_max: "0",
+  });
   const [logRetention, setLogRetention] = useState({
     trace_enabled: true,
     event_bus_delivery_enabled: true,
@@ -164,6 +168,10 @@ export function SettingsIndex() {
         daily_requests: String(settingsQ.data.llm_limits?.daily_requests ?? 0),
         daily_tokens: String(settingsQ.data.llm_limits?.daily_tokens ?? 0),
         premium_daily: String(settingsQ.data.llm_limits?.premium_daily ?? 0),
+      });
+      setPayoutLimits({
+        single_max: String(settingsQ.data.payout_limits?.single_max ?? 0),
+        daily_max: String(settingsQ.data.payout_limits?.daily_max ?? 0),
       });
       setLogRetention({
         trace_enabled: Boolean(settingsQ.data.log_retention?.trace_enabled ?? true),
@@ -271,8 +279,12 @@ export function SettingsIndex() {
     onError: (err) => toast.error(getErrMsg(err)),
   });
 
-  const saveLlmLimits = useMutation({
+  const saveRiskBudget = useMutation({
     mutationFn: () => patchSystemSettings({
+      payout_limits: {
+        single_max: Number(payoutLimits.single_max) || 0,
+        daily_max: Number(payoutLimits.daily_max) || 0,
+      },
       llm_limits: {
         per_minute: Number(llmLimits.per_minute) || 0,
         daily_requests: Number(llmLimits.daily_requests) || 0,
@@ -281,7 +293,7 @@ export function SettingsIndex() {
       },
     }),
     onSuccess: () => {
-      toast.success("LLM 限额已保存");
+      toast.success("风控与预算已保存");
       qc.invalidateQueries({ queryKey: ["system", "settings"] });
     },
     onError: (err) => toast.error(getErrMsg(err)),
@@ -880,50 +892,82 @@ export function SettingsIndex() {
 
           <Card>
             <CardHeader>
-              <CardTitle className="text-base">LLM 成本限额</CardTitle>
-              <CardDescription>0 = 不限制；按账号统计，worker 调用前生效</CardDescription>
+              <SectionHeader
+                icon={ShieldCheck}
+                title="风控与预算"
+                description="统一设置出款上限与 AI 账号预算。0 会按未限制处理，保存后新请求立即按后端风控读取。"
+                meta={<SignalPill tone="warn" label="默认" value="未限制" />}
+              />
             </CardHeader>
-            <CardContent>
-              <div className="grid gap-3 md:grid-cols-4">
-                <div className="space-y-1.5">
-                  <Label>每分钟调用</Label>
-                  <Input
-                    inputMode="numeric"
+            <CardContent className="space-y-5">
+              <div className="space-y-3 rounded-md border border-border/70 bg-muted/20 p-3">
+                <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+                  <div>
+                    <div className="text-sm font-medium">Payout 出款限制</div>
+                    <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                      按你的业务币种或积分口径填写；先给单笔和日累计设上限，再根据真实流水放宽。
+                    </p>
+                  </div>
+                  <SignalPill tone="primary" label="建议" value="先小额启用" />
+                </div>
+                <div className="grid gap-3 md:grid-cols-2">
+                  <RiskLimitField
+                    label="单笔上限"
+                    value={payoutLimits.single_max}
+                    suggestion="建议从 100-500 起步，确认结算稳定后再调高。"
+                    onChange={(next) => setPayoutLimits((v) => ({ ...v, single_max: next }))}
+                  />
+                  <RiskLimitField
+                    label="日累计上限"
+                    value={payoutLimits.daily_max}
+                    suggestion="建议不超过单笔上限的 5-10 倍，用于挡异常刷量。"
+                    onChange={(next) => setPayoutLimits((v) => ({ ...v, daily_max: next }))}
+                  />
+                </div>
+              </div>
+
+              <div className="space-y-3 rounded-md border border-border/70 bg-muted/20 p-3">
+                <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+                  <div>
+                    <div className="text-sm font-medium">AI 预算限制</div>
+                    <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                      按账号统计，业务调用前预扣；诊断测活只记录 usage，不占用账号预算。
+                    </p>
+                  </div>
+                  <SignalPill tone="primary" label="范围" value="每账号" />
+                </div>
+                <div className="grid gap-3 md:grid-cols-4">
+                  <RiskLimitField
+                    label="每分钟调用"
                     value={llmLimits.per_minute}
-                    onChange={(e) => setLlmLimits((v) => ({ ...v, per_minute: e.target.value.replace(/[^0-9]/g, "") }))}
+                    suggestion="建议 20-60，防止循环触发或插件异常重试。"
+                    onChange={(next) => setLlmLimits((v) => ({ ...v, per_minute: next }))}
                   />
-                </div>
-                <div className="space-y-1.5">
-                  <Label>每日调用</Label>
-                  <Input
-                    inputMode="numeric"
+                  <RiskLimitField
+                    label="每日调用"
                     value={llmLimits.daily_requests}
-                    onChange={(e) => setLlmLimits((v) => ({ ...v, daily_requests: e.target.value.replace(/[^0-9]/g, "") }))}
+                    suggestion="建议 500-2000，按账号活跃度调整。"
+                    onChange={(next) => setLlmLimits((v) => ({ ...v, daily_requests: next }))}
                   />
-                </div>
-                <div className="space-y-1.5">
-                  <Label>每日 Token</Label>
-                  <Input
-                    inputMode="numeric"
+                  <RiskLimitField
+                    label="每日 Token"
                     value={llmLimits.daily_tokens}
-                    onChange={(e) => setLlmLimits((v) => ({ ...v, daily_tokens: e.target.value.replace(/[^0-9]/g, "") }))}
+                    suggestion="建议 200000-1000000；STT token 为估算值。"
+                    onChange={(next) => setLlmLimits((v) => ({ ...v, daily_tokens: next }))}
                   />
-                </div>
-                <div className="space-y-1.5">
-                  <Label>高价每日调用</Label>
-                  <Input
-                    inputMode="numeric"
+                  <RiskLimitField
+                    label="高价每日调用"
                     value={llmLimits.premium_daily}
-                    onChange={(e) => setLlmLimits((v) => ({ ...v, premium_daily: e.target.value.replace(/[^0-9]/g, "") }))}
+                    suggestion="建议 20-100，只统计 cost_tier ≥ 3 的模型。"
+                    onChange={(next) => setLlmLimits((v) => ({ ...v, premium_daily: next }))}
                   />
                 </div>
               </div>
-              <div className="mt-3">
-                <Button onClick={() => saveLlmLimits.mutate()} disabled={saveLlmLimits.isPending}>
-                  {saveLlmLimits.isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Save className="mr-2 h-4 w-4" />}
-                  保存
-                </Button>
-              </div>
+
+              <Button onClick={() => saveRiskBudget.mutate()} disabled={saveRiskBudget.isPending}>
+                {saveRiskBudget.isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Save className="mr-2 h-4 w-4" />}
+                保存风控与预算
+              </Button>
             </CardContent>
           </Card>
         </TabsContent>
@@ -933,6 +977,50 @@ export function SettingsIndex() {
         </TabsContent>
       </Tabs>
     </PageShell>
+  );
+}
+
+function normalizeLimitInput(value: string): string {
+  return value.replace(/[^0-9]/g, "");
+}
+
+function limitStatus(value: string): string {
+  return Number(value) > 0 ? value : "未限制";
+}
+
+function RiskLimitField({
+  label,
+  value,
+  suggestion,
+  onChange,
+}: {
+  label: string;
+  value: string;
+  suggestion: string;
+  onChange: (value: string) => void;
+}) {
+  const unrestricted = Number(value) <= 0;
+  return (
+    <div className="space-y-1.5">
+      <div className="flex items-center justify-between gap-2">
+        <Label>{label}</Label>
+        <span
+          className={`rounded-full border px-2 py-0.5 text-[11px] ${
+            unrestricted
+              ? "border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-900/60 dark:bg-amber-950/30 dark:text-amber-300"
+              : "border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-900/60 dark:bg-emerald-950/30 dark:text-emerald-300"
+          }`}
+        >
+          {limitStatus(value)}
+        </span>
+      </div>
+      <Input
+        inputMode="numeric"
+        value={value}
+        onChange={(e) => onChange(normalizeLimitInput(e.target.value))}
+      />
+      <p className="text-xs leading-5 text-muted-foreground">{suggestion}</p>
+    </div>
   );
 }
 
