@@ -1014,22 +1014,6 @@ def _safe_log_text(text: str, max_len: int = 200) -> str:
     return f'<len={length}> "{preview}"'
 
 
-def _dto_to_fake_row(dto) -> Any:
-    """将 LLMProviderDTO 转为临时 ORM 行（向后兼容 build_client）。"""
-    from ..db.models.command import LLMProvider as LLMProviderModel
-
-    return LLMProviderModel(
-        id=dto.id,
-        name=dto.name,
-        provider=dto.provider,
-        api_key_enc=dto.api_key_enc,
-        base_url=dto.base_url,
-        default_model=dto.default_model,
-        api_format=dto.api_format,
-        web_search_api_format=dto.web_search_api_format,
-    )
-
-
 def _split_long_message(
     text: str,
     threshold: int = _LONG_MESSAGE_THRESHOLD,

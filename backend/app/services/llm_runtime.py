@@ -284,7 +284,6 @@ async def call_with_fallback(
 
     tried_providers: list[str] = []
     last_error: Exception | None = None
-    last_status_code: int | None = None
 
     for idx, provider_dto in enumerate(all_providers):
         is_fallback = idx > 0
@@ -359,7 +358,7 @@ async def call_with_fallback(
             last_error = exc
             latency_ms = int((time.monotonic() - attempt_start) * 1000)
             error_type = _classify_error(exc)
-            retryable = _is_retryable_error(exc, last_status_code)
+            retryable = _is_retryable_error(exc)
 
             log.warning(
                 "[llm-runtime] provider=%s 调用失败 error=%s retryable=%s",
@@ -509,15 +508,8 @@ async def _call_with_retry(
 
         except LLMError as exc:
             last_error = exc
-            # 从错误消息中提取 status_code
-            msg = str(exc)
-            status_code = None
-            for part in msg.split():
-                if part.isdigit() and 100 <= int(part) < 600:
-                    status_code = int(part)
-                    break
 
-            if not _is_retryable_error(exc, status_code):
+            if not _is_retryable_error(exc):
                 # 不可重试的错误（如 401/403）直接抛出
                 raise
 
