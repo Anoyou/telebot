@@ -16,6 +16,7 @@
 - [AI facade](./PLUGIN-AI.md)
 - [远程插件](./PLUGIN-REMOTE.md)
 - [安全边界](./PLUGIN-SAFETY.md)
+- [开发者工具链](./PLUGIN-DEVTOOLS.md)
 - [速查表](./PLUGIN-CHEATSHEET.md)
 
 ## 0.48 收口速览
@@ -38,7 +39,21 @@
 5. 需要外部网络能力时看 [HTTP facade](./PLUGIN-HTTP.md)，需要 AI 能力时看 [AI facade](./PLUGIN-AI.md)。
 6. 需要 Git 安装、`plugin.json`、Registry、发布检查时看 [远程插件](./PLUGIN-REMOTE.md)。
 7. 需要权限、前缀、消息发送、并发和清理约束时看 [安全边界](./PLUGIN-SAFETY.md)。
-8. 需要快速回忆字段名和常用模式时看 [速查表](./PLUGIN-CHEATSHEET.md)。
+8. 从零开发、校验、登记、命中调试、dry-run 安全测试、录制回放回归时看 [开发者工具链](./PLUGIN-DEVTOOLS.md)。
+9. 需要快速回忆字段名和常用模式时看 [速查表](./PLUGIN-CHEATSHEET.md)。
+
+## 开发者工具链速览
+
+本轮新增工具链统一收口到 [开发者工具链](./PLUGIN-DEVTOOLS.md)。推荐顺序是：
+
+1. 用 `tp_plugin new <name> --profile session_game|command|passthrough` 生成骨架。
+2. 写 `plugin.py`、`plugin.json` / `manifest.py` 的入口、权限、事件订阅和配置。
+3. 用 `tp_plugin check <dir>` 做 manifest、事件订阅和权限推导审计；它只报告问题，不自动改文件。
+4. 用 `tp_plugin register <dir>` 登记本地插件目录；外部目录与 `plugins/local_imports` 旧副本冲突时，确认后再加 `--force`。
+5. 在账号配置里打开 `{"dev_mode": {"dry_run": true}}`，先让发送和 payout 出口只记录、不真实投递。
+6. 用 `POST /api/dispatch/simulate` 贴账号和消息文本，看命中哪条规则、插件、入口及未命中原因。
+7. 需要完整链路 trace 时，优先用 manifest 的 `strict_trace` 常驻追踪资金/高风险插件；临时排查用 `POST /api/dispatch/router-debug-trace` 打开短 TTL router trace。
+8. 需要回归样本时，打开 `{"dev_mode": {"recording": true}}` 录入站信封 JSONL，再用 `tp_replay run <recording.jsonl>` 离线 dry-run 回放。
 
 ## 兼容说明
 

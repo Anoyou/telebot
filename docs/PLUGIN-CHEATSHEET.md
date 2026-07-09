@@ -3,9 +3,13 @@
 先读 [插件开发铁律](./PLUGIN-RULES.md)，再用本页回忆字段名和常用模式。
 
 - 必须理解 TelePilot 插件按个人可信插件模式运行：管理员安装并启用后，视为信任插件业务逻辑；平台负责事件信封、MessageOps 代发、Trace、风险提示、急停和审计。
+- 最快命令插件可用简单模式 SDK：`from telepilot import plugin`，再写 `@plugin.command("ping")` 的单函数 `async def ping(ctx): await ctx.reply("pong")`；插件目录只需要 `__init__.py`，目录名就是插件 key。
+- 简单模式不写 `PLUGIN_CLASS` / `MANIFEST` 时，loader 会从装饰器合成隐式插件类和 Manifest；当前隐式权限是 `read_event` + `send_message`，命令默认是 owner-only 的账号命令。
+- 简单模式适合快速账号命令、小工具和内部玩法；需要 `plugin.json` 展示字段、`event_subscriptions`、`interaction_entries`、配置 schema、HTTP/AI 权限、按钮、Inline、付款或会话时，用显式 Manifest 模式。
+- 当前 `tp_plugin new` 没有 `--profile simple`；可选 profile 只有 `session_game`、`command`、`passthrough`。
 - 必须把新 Telegram 插件写成 Event Bus + Trace + MessageOps：`plugin.json` 写 `usage`、`event_subscriptions`、`capabilities`，插件只读标准事件信封，动作只通过 `ctx.messages` 或标准 action 返回。
 - 禁止把 `interaction_entries`、旧交互规则、旧平铺 payload、`notice` / `bbot_notice` / `notice_bot` 作为新插件模板；这些只用于迁移说明。
-- 必须保留最小目录：`plugin.json`、`manifest.py`、`plugin.py`、`__init__.py`。`plugin.json.name`、`MANIFEST.key`、插件类 `key` 必须一致。
+- 显式 Manifest 模式必须保留最小目录：`plugin.json`、`manifest.py`、`plugin.py`、`__init__.py`。`plugin.json.name`、`MANIFEST.key`、插件类 `key` 必须一致。
 - 必须把 `usage` 写成插件中心可展示的使用说明；有 `config_schema` 时也可以补 `x-usage-guide` / `x-usage-steps`，但不要只靠口头说明。
 - 禁止用空 `usage` 绕过检查；缺失会触发高级规范警告，插件库维护插件和示例插件都必须完整声明。
 - `event_subscriptions[].events` 常用值：`message`、`command`、`callback_query`、`inline_query`、`chosen_inline_result`、`payment_confirmed`、`session_close`、`message_edited`、`session_expired`、`all_events`；`all_messages` 仍只等于 `message` / `command`。
@@ -64,6 +68,17 @@
 | `payout_failed` / `telegram_api_error` / `trace_write_failed` | 发奖动作失败 / Telegram API 失败 / Trace 写入降级 |
 
 最小单入口模板：
+
+```python
+from telepilot import plugin
+
+
+@plugin.command("ping")
+async def ping(ctx):
+    await ctx.reply("pong")
+```
+
+显式 Event Bus 单入口模板：
 
 ```python
 async def on_interaction(self, ctx, entry_key, payload):

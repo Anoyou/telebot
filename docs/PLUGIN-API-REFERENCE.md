@@ -118,13 +118,15 @@ class PluginContext:
     account_id: int
     feature_key: str
     config: dict           # 当前账号的插件配置
+    account_config: dict   # 原始账号级配置（不含 schema/global 合并值）
     rules: list            # 规则列表
     client: Any | None     # 受控客户端 facade；新插件不要作为主动发送主路径
     messages: Any | None   # MessageOps facade；发送/编辑/删除/按钮/Inline 主路径
     http: Any | None       # HTTP facade；需要 external_http + allowed_hosts
     ai: Any | None         # AI facade；需要 ai_text
     engine: Any | None     # RateLimitEngine；安装型插件通常为 None
-    redis: Any | None      # redis.asyncio.Redis；安装型插件通常为 None
+    redis: Any | None      # redis.asyncio.Redis；低层兼容入口
+    storage: Any | None    # PluginStorage；按账号和插件隔离的持久化 KV facade
     log: Callable          # 日志函数
     scheduler: Any         # 平台调度器 facade
     generation: int        # generation guard 计数
@@ -134,7 +136,7 @@ class PluginContext:
         """创建与 bot 的对话会话。"""
 ```
 
-注意：核心平台兼容代码可能拿到完整运行时能力；远程/本地/插件库安装型插件拿到的是受控上下文：`ctx.client` 是平台提供的客户端 facade，指令 handler 中传入的 `client` 参数与 `ctx.client` 同源，`ctx.engine` 和 `ctx.redis` 通常为 `None`，只能通过声明过的权限以及 `ctx.scheduler`、`ctx.http`、`ctx.ai`、`ctx.messages` 等 facade 使用平台能力。它用于收口常用操作和审计，不是公共插件市场式强沙箱。
+注意：核心平台兼容代码可能拿到完整运行时能力；远程/本地/插件库安装型插件拿到的是受控上下文：`ctx.client` 是平台提供的客户端 facade，指令 handler 中传入的 `client` 参数与 `ctx.client` 同源。当前 worker 加载路径会向插件上下文注入低层 `ctx.redis`，并基于同一个 Redis 后端构造 `ctx.storage`；新插件需要持久化状态时应优先使用 `ctx.storage`，不要自行拼 Redis key。`ctx.engine` 仍只供核心 builtin 兼容代码直接依赖，安装型插件通常为 `None`。受控上下文用于收口常用操作和审计，不是公共插件市场式强沙箱。
 
 ### 4.0 受控 facade：ctx.http 与 ctx.ai
 
@@ -173,7 +175,44 @@ async def on_event(self, ctx, payload):
 
 管理员命令兼容示例可以继续用 `event.edit(...)` 更新命令消息；标准公共互动插件应优先返回标准 action 或通过 `ctx.messages` 缓存标准 action。
 
-### 4.1 可用上下文与访问方式（PluginContext Contract）
+### 4.1 持久化 facade：ctx.storage
+
+`ctx.storage` 是 `PluginStorage` facade，用于插件自己的持久化 key-value 状态。运行时从 `PluginContext.account_id`、`PluginContext.feature_key` 和 `ctx.redis` 构造它，Redis key 前缀为 `plugin_store:{account_id}:{plugin_key}:`，因此同一插件在不同账号之间、同一账号的不同插件之间不会串数据。
+
+API 签名：
+
+| 方法 | 签名 | 返回 | 说明 |
+|------|------|------|------|
+| `available` | `ctx.storage.available` | `bool` | 是否挂载了 Redis 后端 |
+| `get` | `await ctx.storage.get(key, default=None)` | `Any` | 读取 JSON 值；缺失、Redis 不可用或 JSON 不可读时返回 `default` |
+| `set` | `await ctx.storage.set(key, value, *, ttl=None)` | `bool` | 写入 JSON 值；`ttl` 为可选秒数，必须大于 0；Redis 不可用时返回 `False` |
+| `delete` | `await ctx.storage.delete(*keys)` | `int` | 删除一个或多个用户 key，返回删除数量 |
+| `incr` | `await ctx.storage.incr(key, amount=1, *, ttl=None)` | `int | None` | 整数递增；Redis 不可用时返回 `None` |
+| `get_all` | `await ctx.storage.get_all()` | `dict[str, Any]` | 返回当前账号和插件命名空间下全部可解析 JSON 值 |
+| `items` | `await ctx.storage.items()` | `dict[str, Any]` | `get_all()` 别名 |
+
+`key` 会先转成去首尾空白的字符串，空 key 会抛 `ValueError`。`value` 通过 `json.dumps(..., ensure_ascii=False, separators=(",", ":"))` 序列化，不能 JSON 序列化的值会在 `set` 时抛出原始序列化错误。
+
+`ttl` 只支持 `set` 和 `incr`，单位为秒，可传 `int` / `float` / 可转整数的值；`None` 表示不设置过期，`<= 0` 或不可转整数会抛 `ValueError`。`get_all()` / `items()` 只扫描当前命名空间，过期或不可解析 JSON 的值会被跳过。
+
+`incr(ttl=...)` 的窗口语义要特别注意：Redis 后端优先使用 `INCRBY` / `INCR` 做递增，然后单独调用 `EXPIRE` 刷新 TTL，所以 TTL 是“每次递增都续期”的滑动窗口，不是固定窗口。递增和设置过期不是一个事务；如果进程在两条命令之间崩溃，可能留下已递增但未设置过期的 key。若 Redis facade 没有 `incrby` / `incr`，实现会退回 `get` + `set`，该退回路径本身也不是原子递增。需要 NX、CAS、锁或严格原子计数时，不要把 `ctx.storage` 当分布式锁使用，应交给平台会话/结算链路或官方受控低层实现。
+
+不使用时没有额外开销：运行时只是在上下文里挂载 facade；插件不调用 `ctx.storage`，就不会触发 Redis 读写或扫描。
+
+推荐写法：
+
+```python
+round_key = f"round:{chat_id}"
+
+state = await ctx.storage.get(round_key, default={})
+await ctx.storage.set(round_key, {"answer": 24, "active": True}, ttl=3600)
+
+attempts = await ctx.storage.incr(f"attempts:{chat_id}:{user_id}", ttl=60)
+if attempts is not None and attempts > 5:
+    return [{"type": "send_message", "text": "尝试太频繁，请稍后再试。"}]
+```
+
+### 4.2 可用上下文与访问方式（PluginContext Contract）
 
 插件请只从 `PluginContext` 读取运行时信息，不要跨层 import worker 私有实现。
 
@@ -182,10 +221,12 @@ async def on_event(self, ctx, payload):
 | `ctx.account_id` | `ctx.account_id` | 当前账号 ID（账号级隔离边界） |
 | `ctx.feature_key` | `ctx.feature_key` | 当前插件 feature key |
 | `ctx.config` | `ctx.config.get("k")` | 插件配置（账号/全局已合并后的可见配置） |
+| `ctx.account_config` | `ctx.account_config.get("k")` | 原始账号级配置；通常优先读已合并的 `ctx.config` |
 | `ctx.rules` | 遍历 `ctx.rules` | 当前账号 + 当前插件已启用规则 |
 | `ctx.client` | 高级兼容场景只读或受控调用 | UserBot 客户端 facade；新插件不要用它作为主动发送主路径，消息输出优先使用 `ctx.messages` 或标准 action |
 | `ctx.engine` | `await ctx.engine.acquire(...)` | 仅核心 builtin 兼容代码可直接依赖；安装型插件通常为 `None` |
-| `ctx.redis` | `await ctx.redis.get(...)` | 仅核心 builtin 兼容代码可直接依赖；安装型插件通常为 `None` |
+| `ctx.redis` | `await ctx.redis.get(...)` | 低层 Redis 客户端；当前运行时会注入，但新插件不应自行拼 key，持久化优先用 `ctx.storage` |
+| `ctx.storage` | `await ctx.storage.get("k")` / `await ctx.storage.set("k", value, ttl=3600)` | 推荐的插件持久化 facade；按账号 + 插件自动命名空间隔离 |
 | `ctx.log` | `await ctx.log("info", "...", **detail)` | 运行日志写入器 |
 | `ctx.scheduler` | `ctx.scheduler.register(job_id, schedule, callback, *, replace=True)` / `ctx.scheduler.unregister(job_id)` | 调度 facade（按权限/能力边界开放） |
 | `ctx.http` | `await ctx.http.get(url, params={...})` / `await ctx.http.post(url, json={...})` | 安全 HTTP facade；第三方插件需声明 `external_http` + `allowed_hosts` |
@@ -193,22 +234,22 @@ async def on_event(self, ctx, payload):
 | `ctx.messages` | `await ctx.messages.send(...)` / `send_photo(...)` / `edit_caption(...)` / `answer_callback(...)` | 交互入口消息操作 facade；只生成平台标准动作，由 TelePilot 统一代发、审计和执行 |
 | `ctx.conversation(...)` | `async with ctx.conversation(peer)` | 与目标 peer 建立会话 |
 
-### 4.2 权限边界与禁止事项
+### 4.3 权限边界与禁止事项
 
 1. 第三方插件必须遵循 `manifest.permissions` 最小授权，未声明的客户端能力不可调用。
-2. 第三方插件不得假设 `ctx.engine`、`ctx.redis` 恒可用；访问前必须判空。
+2. 第三方插件不得假设 `ctx.engine` 恒可用；需要状态持久化时优先使用 `ctx.storage`，只有确需低层 Redis 语义且已处理命名空间、原子性和降级时才访问 `ctx.redis`。
 3. 禁止通过插件绕过账号边界：不要读写其他账号配置、规则、会话状态。
 4. 禁止在插件中执行系统级/运维级动作（如重启进程、安装/卸载插件、修改权限模型）。
 5. 禁止依赖 worker 私有实现或 monkey patch 运行时对象来“扩权”。
 6. 禁止把敏感凭据直接打到日志；`ctx.log` 只记录最小必要信息。
 
-### 4.3 配置/账号/运行时数据访问建议
+### 4.4 配置/账号/运行时数据访问建议
 
 1. 配置：通过 `ctx.config` 读取；按 `config_schema` 的 `level` 设计字段，不自行拼接跨账号配置。
-2. 账号：通过 `ctx.account_id` 做所有业务隔离键，不缓存到跨账号全局变量。
+2. 账号：通过 `ctx.account_id` 做所有业务隔离键；插件持久化状态优先放进 `ctx.storage`，由平台按账号 + 插件隔离。
 3. 运行时：管理员命令兼容场景可使用 `ctx.client` / `ctx.scheduler` / `ctx.conversation` 提供的公开入口；公共群互动、按钮、Inline、付款确认和后台通知优先使用 `ctx.messages` 或标准 action。
 4. 日志：统一用 `ctx.log`，并在 `detail` 里带结构化字段（如 `chat_id`、`action`）。
-5. 兜底：对可选能力（`engine`/`redis`）做 feature-detection，保证第三方插件在受限上下文也能安全降级。
+5. 兜底：对可选能力（`engine`/`storage`/`redis`）做 feature-detection，保证第三方插件在受限上下文也能安全降级。
 
 最小示例见：[docs/examples/plugin_context_minimal.py](./examples/plugin_context_minimal.py)。
 
@@ -238,6 +279,7 @@ async def on_event(self, ctx, payload):
 | `category` | str | `interactive` / `automation` / `utility`，只决定展示分组 |
 | `event_subscriptions` | list | 标准链路订阅声明，描述插件想从 Event Bus 接收哪些事件 |
 | `capabilities` | dict | 高风险能力声明，例如 `telegram_native_raw` |
+| `strict_trace` | bool | 是否要求路由投递层常驻全链路 trace；默认 `false`，资金类 / `payout` 插件建议开启 |
 
 ### 完整示例
 
@@ -265,6 +307,7 @@ MANIFEST = Manifest(
             "reason": "默认只读取标准事件信封。",
         }
     },
+    strict_trace=False,
     config_schema={
         "type": "object",
         "properties": {
@@ -459,6 +502,8 @@ Telegram 来源
 
 `usage` 必须让开发者和安装者不用理解旧规则也能知道插件怎么启用。`event_subscriptions` 描述 Event Bus 投递范围；`capabilities` 描述高风险能力，没有高风险能力也建议显式写 `{}`。这组契约服务于标准会话链路，不是裸直通，也不是独立于三模式之外的第四种模式。
 
+`strict_trace` 是布尔字段，默认 `false`。开启后，插件声明的路由投递层会更积极保留全链路 trace，便于复盘订阅匹配、插件执行、动作投递和失败原因；动作层 `record_action` 不受这个开关影响。涉及资金、发奖、`payout`、补偿重放或对账的插件建议设为 `true`，普通查询/娱乐插件可保持默认。
+
 当前标准事件：
 
 | event.type | 说明 |
@@ -471,6 +516,7 @@ Telegram 来源
 | `payment_confirmed` | 可信外部通知或平台解析确认到账后生成 |
 | `message_edited` | 平台已登记的编辑后消息事件，需显式订阅 |
 | `session_expired` | 会话 TTL 到期后由平台投递，供插件清理状态 |
+| `webhook` | 外部 HTTP 入站 webhook，经账号 token 鉴权后投递 |
 | `all_messages` | 兼容聚合订阅，当前仍只覆盖 `message` / `command` |
 | `all_events` | 平台聚合订阅，覆盖当前已登记的常见事件类型 |
 | `session_close` | 会话关闭或规则关闭，插件可清理状态 |
@@ -478,6 +524,80 @@ Telegram 来源
 `all_messages` 目前仍只等于 `message` / `command`；需要覆盖更多已登记事件时，使用 `all_events`。Inline 相关事件、付款确认、`message_edited` 与 `session_expired` 仍可按需显式订阅。
 
 `known_users` 只认平台 state 提供的真实集合，不会自动把当前 sender 算进去。
+
+### 入站 webhook 事件
+
+插件可以通过 Event Bus 订阅外部 HTTP webhook。Manifest / `plugin.json` 写法如下：
+
+```json
+{
+  "event_subscriptions": [
+    {
+      "source": ["webhook"],
+      "events": ["webhook"],
+      "scope": "all_allowed_chats",
+      "filters": {"hook_key": "orders"}
+    }
+  ]
+}
+```
+
+`filters.hook_key` 可写单个字符串，`filters.hook_keys` 可写多个 key。也可以使用 trigger 简写：
+
+```json
+{
+  "event_subscriptions": [
+    {
+      "source": ["webhook"],
+      "events": ["webhook"],
+      "scope": "all_allowed_chats",
+      "triggers": {"webhook": "orders"}
+    }
+  ]
+}
+```
+
+`triggers.webhook` 会被归一化为 `filters.hook_key`；对象形式也支持 `{"hook_key": "orders"}`、`{"hook_keys": ["orders", "billing"]}`、`{"key": "orders"}` 或 `{"keys": [...]}`。Webhook 事件的 `scope="all_allowed_chats"` 会直接通过 scope 检查，因为外部 HTTP 请求没有 Telegram `chat_id`。
+
+插件收到的标准 payload 包含：
+
+```json
+{
+  "event_type": "webhook",
+  "source": {
+    "type": "webhook",
+    "channel": "webhook",
+    "driver": "http_webhook",
+    "hook_key": "orders"
+  },
+  "trigger": {"hook_key": "orders"},
+  "message": {"text": "{\"order_id\":\"A-1\"}"},
+  "webhook": {
+    "hook_key": "orders",
+    "body": {"order_id": "A-1"},
+    "headers": {"content-type": "application/json"},
+    "body_size": 19,
+    "content_type": "application/json",
+    "received_at": "2026-07-10T00:00:00+00:00"
+  },
+  "hook_key": "orders",
+  "body": {"order_id": "A-1"},
+  "headers": {"content-type": "application/json"}
+}
+```
+
+`body` 会按 `Content-Type` 尝试解析 JSON；JSON 解析失败或非 JSON 请求会保留为文本。`message.text` 是 body 的文本摘要，最长 2000 字符。headers 只保留白名单字段，并统一小写，单个值最多 512 字符；当前白名单为 `content-type`、`user-agent`、`x-request-id`、`x-correlation-id`、`x-github-event`、`x-gitlab-event`、`x-hub-signature`、`x-hub-signature-256`、`x-signature`、`x-telegram-bot-api-secret-token`。账号 token 头不会进入插件 payload。
+
+外部触发方式：
+
+```bash
+curl -X POST "https://<telepilot-host>/api/webhooks/{account_id}/{hook_key}" \
+  -H "X-TelePilot-Webhook-Token: <account_webhook_token>" \
+  -H "Content-Type: application/json" \
+  --data '{"order_id":"A-1","status":"paid"}'
+```
+
+也支持 `?token=<account_webhook_token>` 查询参数。`hook_key` 必须是 1-64 位的字母、数字、下划线、点或短横线组合，且必须存在于账号 webhook 配置并处于启用状态。请求体上限为 64 KiB；投递接口返回 `202` 只表示 worker 已确认接收，插件是否命中和执行结果请在日志/trace 中查看。Webhook 投递受 `webhook_deliver` 风控动作限流。
 
 标准事件信封优先读这些字段：`source`、`message`、`chat`、`sender`、`actor`、`source_actor`、`player`、`payment`、`reply_to`、`trigger`、`session`、`native_raw_meta`。新插件不要依赖 `payload["text"]`、`payload["chat_id"]`、`payload.get("message")` 这类旧平铺字段；`payload["message"]` 是消息对象，不是配置字符串。
 
@@ -1247,7 +1367,7 @@ Contract Guard 不是公共插件市场式硬沙箱，而是个人可信插件�
 
 #### 标准动作输出
 
-交互入口或适配器应返回平台可执行的标准动作，或通过 `ctx.messages` 缓存这些动作，而不是直接调用 Telegram API。交互 Bot runtime 统一负责发送、回复、删除、置顶、按钮 ACK 与基础动作执行。需要跨消息保存业务状态或做抢答幂等时，插件必须使用平台已开放的状态能力；当前只有核心/官方运行态可以直接依赖 `ctx.redis`，第三方安装型插件要先判空并给出清晰错误，不能假设它恒可用。
+交互入口或适配器应返回平台可执行的标准动作，或通过 `ctx.messages` 缓存这些动作，而不是直接调用 Telegram API。交互 Bot runtime 统一负责发送、回复、删除、置顶、按钮 ACK 与基础动作执行。需要跨消息保存业务状态时，插件应优先使用 `ctx.storage`；它会按账号和插件自动隔离命名空间。`ctx.redis` 当前会被注入，但属于低层兼容入口，新插件不要自行拼接 Redis key。需要 NX、CAS、锁或严格原子抢占时，`ctx.storage` 不提供这些语义，应交给平台会话/结算链路或官方受控低层实现。
 
 ```json
 [
@@ -1277,10 +1397,9 @@ Contract Guard 不是公共插件市场式硬沙箱，而是个人可信插件�
 
 #### 端到端示例：24 点交互入口
 
-下面是 `payment_confirmed` / `keyword` 开局、`message` 答题、`session_close` 清理的最小形态。真实插件可以把 `generate_24_puzzle()`、`check_answer()`、`render_start()` 拆成纯函数复用。
+下面是 `payment_confirmed` / `keyword` 开局、`message` 答题、`session_close` 清理的最小形态。真实插件可以把 `generate_24_puzzle()`、`check_answer()`、`render_start()` 拆成纯函数复用。示例用 `ctx.storage` 做持久化状态；它适合普通会话状态，不适合充当原子抢答锁。
 
 ```python
-import json
 import secrets
 import time
 from typing import Any
@@ -1308,8 +1427,8 @@ class Game24Plugin(Plugin):
         if not chat_id:
             return []
 
-        state_key = f"userbot_reply:game24:{ctx.account_id}:{chat_id}"
-        if ctx.redis is None:
+        state_key = f"game24:{chat_id}"
+        if ctx.storage is None or not ctx.storage.available:
             if event_type in ("payment_confirmed", "keyword"):
                 return [
                     {
@@ -1332,19 +1451,19 @@ class Game24Plugin(Plugin):
                 "game_id": secrets.token_hex(8),
                 "created_at": time.time(),
             }
-            await ctx.redis.set(state_key, json.dumps(state, ensure_ascii=False), ex=3600)
+            await ctx.storage.set(state_key, state, ttl=3600)
             return [{"type": "send_message", "text": render_start(numbers, prize)}]
 
-        raw = await ctx.redis.get(state_key)
-        state = json.loads(raw.decode() if isinstance(raw, bytes) else raw or "{}")
+        state = await ctx.storage.get(state_key, default={})
         if event_type == "message":
             if not state.get("active") or not check_answer(event.message.text, state["numbers"]):
                 return []
-            claim_key = f"userbot_reply:game24_claim:{ctx.account_id}:{chat_id}:{state['game_id']}"
-            if not await ctx.redis.set(claim_key, str(event.message.message_id or ""), nx=True, ex=3600):
+            claim_key = f"game24_claim:{chat_id}:{state['game_id']}"
+            if await ctx.storage.get(claim_key):
                 return []
+            await ctx.storage.set(claim_key, event.message.message_id or "", ttl=3600)
             state["active"] = False
-            await ctx.redis.set(state_key, json.dumps(state, ensure_ascii=False), ex=3600)
+            await ctx.storage.set(state_key, state, ttl=3600)
             return [
                 {
                     "type": "send_message",
@@ -1356,7 +1475,7 @@ class Game24Plugin(Plugin):
         if event_type == "session_close":
             if state.get("active"):
                 state["active"] = False
-                await ctx.redis.set(state_key, json.dumps(state, ensure_ascii=False), ex=3600)
+                await ctx.storage.set(state_key, state, ttl=3600)
             return []
 
         return []
