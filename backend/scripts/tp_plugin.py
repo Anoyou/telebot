@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import ast
 import asyncio
+import hashlib
 import json
 import pprint
 import re
@@ -34,6 +35,7 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 # ── 让脚本在 backend/scripts 下直接运行也能 import app.* ──
 _BACKEND_ROOT = Path(__file__).resolve().parents[1]
@@ -45,6 +47,36 @@ _NAME_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_-]*$")
 
 # 插件包必备的运行期文件（与 remote_plugin_service._validate_runtime_plugin_shape 一致）。
 _REQUIRED_FILES = ("plugin.json", "manifest.py", "plugin.py", "__init__.py")
+_COPY_IGNORE_DIRS = {".git", "__pycache__"}
+
+_PERMISSION_RISK: dict[str, tuple[str, str]] = {
+    "read_chat": ("低风险", "读取聊天上下文"),
+    "send_message": ("低风险", "发送消息"),
+    "external_http": ("中风险", "访问外部 HTTP"),
+    "edit_message": ("中风险", "编辑消息"),
+    "delete_message": ("中风险", "删除消息"),
+    "payout": ("高风险", "发起派奖/付款，必须显式声明并强确认用途"),
+    "modify_identity": ("高风险", "修改身份信息，必须显式声明并强确认用途"),
+}
+_CTX_MESSAGE_METHOD_PERMISSIONS = {
+    "send": "send_message",
+    "reply": "send_message",
+    "read": "read_chat",
+    "get": "read_chat",
+    "history": "read_chat",
+    "edit": "edit_message",
+    "delete": "delete_message",
+    "payout": "payout",
+}
+_ACTION_TYPE_PERMISSIONS = {
+    "send_message": "send_message",
+    "send_photo": "send_message",
+    "send_file": "send_message",
+    "edit_message": "edit_message",
+    "edit_caption": "edit_message",
+    "delete_message": "delete_message",
+    "payout": "payout",
+}
 
 
 # ─────────────────────────────────────────────────────
@@ -862,10 +894,132 @@ class CheckReport:
     warnings: list[str] = field(default_factory=list)
     unknown_events: list[str] = field(default_factory=list)
     unknown_filter_keys: list[str] = field(default_factory=list)
+    inferred_permissions: list[str] = field(default_factory=list)
+    missing_permissions: list[str] = field(default_factory=list)
+    extra_permissions: list[str] = field(default_factory=list)
+    inferred_http_domains: list[str] = field(default_factory=list)
+    dynamic_http_calls: int = 0
 
     @property
     def ok(self) -> bool:
         return not self.errors
+
+
+def _risk_text(permission: str) -> str:
+    level, detail = _PERMISSION_RISK.get(permission, ("中风险", "需人工确认用途"))
+    return f"{permission}（{level}：{detail}）"
+
+
+def _string_literal(node: ast.AST | None) -> str | None:
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.JoinedStr):
+        literal_parts: list[str] = []
+        for part in node.values:
+            if not isinstance(part, ast.Constant) or not isinstance(part.value, str):
+                return None
+            literal_parts.append(part.value)
+        return "".join(literal_parts)
+    return None
+
+
+def _domain_from_url(text: str | None) -> str | None:
+    if not text:
+        return None
+    parsed = urlparse(text)
+    if parsed.scheme in {"http", "https"} and parsed.hostname:
+        return parsed.hostname.lower()
+    return None
+
+
+def _attr_chain(node: ast.AST) -> list[str]:
+    parts: list[str] = []
+    cur = node
+    while isinstance(cur, ast.Attribute):
+        parts.append(cur.attr)
+        cur = cur.value
+    if isinstance(cur, ast.Name):
+        parts.append(cur.id)
+    parts.reverse()
+    return parts
+
+
+def _literal_action_type(node: ast.AST) -> str | None:
+    if not isinstance(node, ast.Dict):
+        return None
+    for key, value in zip(node.keys, node.values, strict=False):
+        if _string_literal(key) == "type":
+            return _string_literal(value)
+    return None
+
+
+def _infer_permissions_from_plugin_py(plugin_py: Path) -> tuple[set[str], set[str], int]:
+    """静态扫描 plugin.py 中可识别的 SDK 调用和 action type，返回权限草案。"""
+    inferred: set[str] = set()
+    http_domains: set[str] = set()
+    dynamic_http_calls = 0
+    tree = ast.parse(plugin_py.read_text(encoding="utf-8"))
+
+    for node in ast.walk(tree):
+        action_type = _literal_action_type(node)
+        if action_type:
+            permission = _ACTION_TYPE_PERMISSIONS.get(action_type)
+            if permission:
+                inferred.add(permission)
+
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+            continue
+        chain = _attr_chain(node.func)
+        if len(chain) >= 3 and chain[0] == "ctx" and chain[1] == "messages":
+            permission = _CTX_MESSAGE_METHOD_PERMISSIONS.get(chain[2])
+            if permission:
+                inferred.add(permission)
+        if len(chain) >= 3 and chain[0] == "ctx" and chain[1] == "http":
+            inferred.add("external_http")
+            url_node = node.args[0] if node.args else None
+            domain = _domain_from_url(_string_literal(url_node))
+            if domain:
+                http_domains.add(domain)
+            else:
+                dynamic_http_calls += 1
+
+    return inferred, http_domains, dynamic_http_calls
+
+
+def _collect_permission_issues(report: CheckReport, data: dict[str, Any]) -> None:
+    plugin_py = report.plugin_dir / "plugin.py"
+    if not plugin_py.is_file():
+        return
+    try:
+        inferred, domains, dynamic_http_calls = _infer_permissions_from_plugin_py(plugin_py)
+    except SyntaxError as exc:
+        report.warnings.append(f"权限推导跳过：plugin.py 语法错误：{exc}")
+        return
+
+    declared_raw = data.get("permissions") if isinstance(data, dict) else []
+    declared = {str(item) for item in declared_raw or [] if isinstance(item, str) and item.strip()}
+    missing = sorted(inferred - declared)
+    extra = sorted(declared - inferred)
+
+    report.inferred_permissions = sorted(inferred)
+    report.missing_permissions = missing
+    report.extra_permissions = extra
+    report.inferred_http_domains = sorted(domains)
+    report.dynamic_http_calls = dynamic_http_calls
+
+    if inferred:
+        report.warnings.append(f"permissions 草案：{', '.join(report.inferred_permissions)}")
+    if missing:
+        report.warnings.append(f"permissions 声明漏了：{', '.join(_risk_text(item) for item in missing)}")
+    if extra:
+        report.warnings.append(f"permissions 声明多了：{', '.join(extra)}")
+    declared_high = sorted(item for item in inferred & declared if _PERMISSION_RISK.get(item, ("", ""))[0] == "高风险")
+    for item in declared_high:
+        report.warnings.append(f"permissions 高风险已显式声明：{_risk_text(item)}")
+    if domains:
+        report.warnings.append(f"external_http 域名草案：{', '.join(report.inferred_http_domains)}")
+    if dynamic_http_calls:
+        report.warnings.append(f"external_http 有 {dynamic_http_calls} 处动态 URL，需人工确认域名白名单")
 
 
 def _collect_event_issues(report: CheckReport, data: dict[str, Any], plugin_key: str) -> None:
@@ -952,7 +1106,11 @@ def check_plugin(plugin_dir: str | Path) -> CheckReport:
     if isinstance(data, dict):
         _collect_event_issues(report, data, plugin_key)
 
-    # 5) 平台元数据 lint（usage / 硬编码前缀 / 内部 import 等），并入 warnings
+    # 5) 权限推导审计：只报 diff，不改写 manifest / plugin.json。
+    if isinstance(data, dict):
+        _collect_permission_issues(report, data)
+
+    # 6) 平台元数据 lint（usage / 硬编码前缀 / 内部 import 等），并入 warnings
     try:
         from app.services.remote_plugin_service import lint_plugin_metadata_files
 
@@ -966,7 +1124,45 @@ def check_plugin(plugin_dir: str | Path) -> CheckReport:
 # ─────────────────────────────────────────────────────
 # register：登记进本地台账
 # ─────────────────────────────────────────────────────
-async def register_plugin(db: Any, source_dir: str | Path, *, default_enabled: bool = False) -> Any:
+def _iter_copyable_files(root: Path) -> list[Path]:
+    files: list[Path] = []
+    for path in root.rglob("*"):
+        rel_parts = path.relative_to(root).parts
+        if any(part in _COPY_IGNORE_DIRS for part in rel_parts):
+            continue
+        if path.is_file():
+            files.append(path)
+    return sorted(files)
+
+
+def _directory_digest(root: Path) -> tuple[dict[str, str], int]:
+    digest: dict[str, str] = {}
+    newest_mtime_ns = 0
+    for path in _iter_copyable_files(root):
+        rel = path.relative_to(root).as_posix()
+        stat = path.stat()
+        newest_mtime_ns = max(newest_mtime_ns, stat.st_mtime_ns)
+        h = hashlib.sha256()
+        with path.open("rb") as fh:
+            for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+                h.update(chunk)
+        digest[rel] = h.hexdigest()
+    return digest, newest_mtime_ns
+
+
+def _is_same_plugin_copy(source_dir: Path, target: Path) -> tuple[bool, bool]:
+    source_digest, source_mtime = _directory_digest(source_dir)
+    target_digest, target_mtime = _directory_digest(target)
+    return source_digest == target_digest, source_mtime > target_mtime
+
+
+async def register_plugin(
+    db: Any,
+    source_dir: str | Path,
+    *,
+    default_enabled: bool = False,
+    force: bool = False,
+) -> Any:
     """把 ``source_dir`` 登记进 installed_plugin 台账。
 
     目录不在 ``plugins/local_imports`` 时先拷进去，再复用
@@ -988,8 +1184,21 @@ async def register_plugin(db: Any, source_dir: str | Path, *, default_enabled: b
     target = (local_root / name).resolve()
     if source_dir != target:
         if target.exists():
-            # 已在 local_imports：直接用现有副本登记（不覆盖，避免误删）。
-            pass
+            same_content, source_newer = _is_same_plugin_copy(source_dir, target)
+            if not same_content and not force:
+                mtime_hint = "；外部目录更新时间更新" if source_newer else ""
+                raise repo.PluginRepoError(
+                    "STALE_LOCAL_IMPORT_COPY",
+                    "已存在旧副本，未更新；请直接在 local_imports 内开发或手动删除后重登"
+                    f"{mtime_hint}：{target}",
+                )
+            if not same_content and force:
+                shutil.rmtree(target)
+                shutil.copytree(
+                    source_dir,
+                    target,
+                    ignore=shutil.ignore_patterns(".git", ".gitignore", "__pycache__"),
+                )
         else:
             shutil.copytree(
                 source_dir,
@@ -1000,14 +1209,19 @@ async def register_plugin(db: Any, source_dir: str | Path, *, default_enabled: b
     return await repo.install_local_plugin(db, name, default_enabled=default_enabled)
 
 
-async def _register_via_session(source_dir: str | Path, *, default_enabled: bool) -> tuple[int, str]:
+async def _register_via_session(
+    source_dir: str | Path,
+    *,
+    default_enabled: bool,
+    force: bool = False,
+) -> tuple[int, str]:
     """打开真实会话执行 register，返回 ``(exit_code, message)``。"""
     from app.db.base import AsyncSessionLocal
     from app.services import plugin_repo_service as repo
 
     async with AsyncSessionLocal() as db:
         try:
-            view = await register_plugin(db, source_dir, default_enabled=default_enabled)
+            view = await register_plugin(db, source_dir, default_enabled=default_enabled, force=force)
         except repo.DuplicatePluginName as exc:
             await db.rollback()
             return 1, f"该插件已登记，无需重复：{exc.message}"
@@ -1063,7 +1277,7 @@ def _cmd_check(args: argparse.Namespace) -> int:
 
 def _cmd_register(args: argparse.Namespace) -> int:
     code, message = asyncio.run(
-        _register_via_session(args.dir, default_enabled=args.enable)
+        _register_via_session(args.dir, default_enabled=args.enable, force=args.force)
     )
     print(message)
     return code
@@ -1084,6 +1298,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_reg = sub.add_parser("register", help="把本地目录登记进 installed_plugin 台账")
     p_reg.add_argument("dir", help="插件目录路径")
     p_reg.add_argument("--enable", action="store_true", help="登记后默认对所有账号启用（默认关）")
+    p_reg.add_argument("--force", action="store_true", help="外部目录与 local_imports 旧副本不一致时覆盖旧副本")
     p_reg.set_defaults(func=_cmd_register)
 
     p_chk = sub.add_parser("check", help="本地校验插件目录（manifest + 事件白名单）")

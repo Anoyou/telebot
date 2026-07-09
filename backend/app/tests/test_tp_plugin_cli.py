@@ -15,7 +15,7 @@ import importlib.util
 import json
 import sys
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
@@ -135,6 +135,75 @@ def test_check_flags_unknown_events(tmp_path: Path) -> None:
     assert "weird_key" in report.unknown_filter_keys
 
 
+def test_check_reports_missing_delete_permission(tmp_path: Path, capsys) -> None:
+    name = "demo_missing_delete"
+    plugin_dir = tmp_path / name
+    tp.scaffold_plugin(name, "command", plugin_dir)
+
+    plugin_py = plugin_dir / "plugin.py"
+    plugin_py.write_text(
+        """
+from __future__ import annotations
+
+class DemoPlugin:
+    async def run(self, ctx):
+        await ctx.messages.delete(chat_id=-100123, message_id=7)
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    report = tp.check_plugin(plugin_dir)
+    assert "delete_message" in report.inferred_permissions
+    assert "delete_message" in report.missing_permissions
+
+    code = tp._cmd_check(SimpleNamespace(dir=plugin_dir))
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "permissions 声明漏了" in out
+    assert "delete_message" in out
+    assert "中风险" in out
+
+
+def test_check_reports_extra_permission(tmp_path: Path, capsys) -> None:
+    name = "demo_extra_permission"
+    plugin_dir = tmp_path / name
+    tp.scaffold_plugin(name, "command", plugin_dir)
+
+    report = tp.check_plugin(plugin_dir)
+    assert "read_chat" in report.extra_permissions
+
+    code = tp._cmd_check(SimpleNamespace(dir=plugin_dir))
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "permissions 声明多了" in out
+    assert "read_chat" in out
+
+
+def test_check_infers_external_http_domain(tmp_path: Path) -> None:
+    name = "demo_http"
+    plugin_dir = tmp_path / name
+    tp.scaffold_plugin(name, "command", plugin_dir)
+
+    plugin_py = plugin_dir / "plugin.py"
+    plugin_py.write_text(
+        """
+from __future__ import annotations
+
+class DemoPlugin:
+    async def run(self, ctx):
+        await ctx.http.get("https://api.example.com/v1/items")
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    report = tp.check_plugin(plugin_dir)
+    assert "external_http" in report.inferred_permissions
+    assert "external_http" in report.missing_permissions
+    assert report.inferred_http_domains == ["api.example.com"]
+
+
 # ─────────────────────────────────────────────────────
 # register（内存 FakeDB）
 # ─────────────────────────────────────────────────────
@@ -243,3 +312,56 @@ async def test_register_via_session_reports_duplicate_friendly(tmp_path: Path, _
     code2, message2 = await tp._register_via_session(source_dir, default_enabled=False)
     assert code2 == 1
     assert "已登记" in message2 or "重复" in message2
+
+
+async def test_register_external_dir_reports_stale_local_import_copy(
+    tmp_path: Path,
+    _redirect_plugin_paths,
+    monkeypatch,
+) -> None:
+    name = "demo_stale_copy"
+    source_dir = tmp_path / "src" / name
+    tp.scaffold_plugin(name, "command", source_dir)
+
+    db = _FakeDB()
+
+    class _Factory:
+        async def __aenter__(self):
+            return db
+
+        async def __aexit__(self, *exc):
+            return False
+
+    monkeypatch.setattr("app.db.base.AsyncSessionLocal", lambda: _Factory())
+
+    code, message = await tp._register_via_session(source_dir, default_enabled=False)
+    assert code == 0 and name in message
+
+    plugin_py = source_dir / "plugin.py"
+    plugin_py.write_text(plugin_py.read_text(encoding="utf-8") + "\n# edited externally\n", encoding="utf-8")
+
+    code2, message2 = await tp._register_via_session(source_dir, default_enabled=False)
+    assert code2 == 1
+    assert "已存在旧副本，未更新" in message2
+    assert "local_imports" in message2
+
+
+async def test_register_force_overwrites_stale_local_import_copy(tmp_path: Path, _redirect_plugin_paths) -> None:
+    name = "demo_force_copy"
+    source_dir = tmp_path / "src" / name
+    tp.scaffold_plugin(name, "command", source_dir)
+
+    db = _FakeDB()
+    await tp.register_plugin(db, source_dir)
+
+    marker = "\nFORCE_MARKER = True\n"
+    plugin_py = source_dir / "plugin.py"
+    plugin_py.write_text(plugin_py.read_text(encoding="utf-8") + marker, encoding="utf-8")
+
+    local_root, _installed_root = _redirect_plugin_paths
+    db2 = _FakeDB()
+    with pytest.raises(repo.DuplicatePluginName):
+        await tp.register_plugin(db2, source_dir, force=True)
+
+    copied = (local_root / name / "plugin.py").read_text(encoding="utf-8")
+    assert "FORCE_MARKER = True" in copied
