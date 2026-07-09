@@ -16,6 +16,14 @@ export interface LedgerQueryParams {
   limit?: number;
 }
 
+export interface LedgerStatsQueryParams {
+  since?: string;
+  until?: string;
+  account_id?: string;
+  chat_id?: string;
+  plugin_key?: string;
+}
+
 export interface LedgerEntry {
   id: number;
   source: string;
@@ -57,6 +65,50 @@ export interface LedgerSummary {
   count: number;
   by_day: LedgerSummaryBucket[];
   by_chat: LedgerSummaryBucket[];
+}
+
+export type MetricAvailabilityStatus = "available" | "needs_instrumentation";
+
+export interface MetricAvailability {
+  key: string;
+  label: string;
+  status: MetricAvailabilityStatus;
+  source: string;
+  note: string;
+}
+
+export interface OperationalStatsTotal {
+  started_sessions: number;
+  participant_count: number | null;
+  payout_success_count: number;
+  payout_failure_count: number;
+  payout_attempt_count: number;
+  payout_success_rate: string | null;
+  ledger_income: string;
+  ledger_payout: string;
+  ledger_net: string;
+  ledger_count: number;
+}
+
+export interface OperationalStatsBucket {
+  key: string;
+  label: string;
+  started_sessions: number;
+  payout_success_count: number;
+  payout_failure_count: number;
+  payout_attempt_count: number;
+  payout_success_rate: string | null;
+  ledger_income: string;
+  ledger_payout: string;
+  ledger_net: string;
+  ledger_count: number;
+}
+
+export interface OperationalStats {
+  total: OperationalStatsTotal;
+  by_day: OperationalStatsBucket[];
+  by_chat: OperationalStatsBucket[];
+  source_matrix: MetricAvailability[];
 }
 
 export interface LedgerCompensation {
@@ -105,6 +157,13 @@ export async function listLedgerEntries(params?: LedgerQueryParams): Promise<Led
 
 export async function getLedgerSummary(params?: Omit<LedgerQueryParams, "limit">): Promise<LedgerSummary> {
   const { data } = await api.get<LedgerSummary>("/api/ledger/summary", {
+    params: cleanParams(params),
+  });
+  return data;
+}
+
+export async function getLedgerStats(params?: LedgerStatsQueryParams): Promise<OperationalStats> {
+  const { data } = await api.get<OperationalStats>("/api/ledger/stats", {
     params: cleanParams(params),
   });
   return data;

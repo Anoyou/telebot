@@ -6,14 +6,18 @@ import {
   ArrowUpRight,
   CheckCircle2,
   Filter,
+  Gamepad2,
   HandCoins,
+  Percent,
   RefreshCw,
+  Users,
   WalletCards,
 } from "lucide-react";
 import { toast } from "sonner";
 
 import { listAccounts } from "@/api/accounts";
 import {
+  getLedgerStats,
   getLedgerSummary,
   listLedgerCompensations,
   listLedgerEntries,
@@ -22,7 +26,9 @@ import {
   type LedgerDirection,
   type LedgerEntry,
   type LedgerQueryParams,
+  type LedgerStatsQueryParams,
   type LedgerSummary,
+  type OperationalStats,
 } from "@/api/ledger";
 import { LineTrend } from "@/components/LineTrend";
 import { PageHeader, PageShell } from "@/components/layout/PageScaffold";
@@ -33,6 +39,7 @@ import { MetaBadge } from "@/components/ui/meta-badge";
 import { Spinner } from "@/components/ui/misc";
 import { Select } from "@/components/ui/select";
 import { SectionHeader, SignalPill, ToneRailCard } from "@/components/ui/status";
+import type { VisualTone } from "@/components/ui/status";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { getErrMsg } from "@/lib/api";
 import { cn } from "@/lib/utils";
@@ -67,6 +74,7 @@ export function LedgerPage() {
   const queryClient = useQueryClient();
   const [filters, setFilters] = useState<FilterState>(DEFAULT_FILTERS);
   const queryParams = useMemo(() => buildQueryParams(filters), [filters]);
+  const statsParams = useMemo(() => buildStatsQueryParams(filters), [filters]);
 
   const accountsQ = useQuery({
     queryKey: ["accounts"],
@@ -79,6 +87,10 @@ export function LedgerPage() {
   const summaryQ = useQuery({
     queryKey: ["ledger", "summary", queryParams],
     queryFn: () => getLedgerSummary(queryParams),
+  });
+  const statsQ = useQuery({
+    queryKey: ["ledger", "stats", statsParams],
+    queryFn: () => getLedgerStats(statsParams),
   });
   const compensationsQ = useQuery({
     queryKey: ["ledger", "compensations", queryParams.account_id, queryParams.chat_id, queryParams.plugin_key],
@@ -107,10 +119,11 @@ export function LedgerPage() {
   };
 
   const summary = summaryQ.data;
+  const stats = statsQ.data;
   const entries = entriesQ.data?.items || [];
   const compensations = compensationsQ.data?.items || [];
   const isLoading = entriesQ.isLoading || summaryQ.isLoading || compensationsQ.isLoading;
-  const error = entriesQ.error || summaryQ.error || compensationsQ.error || accountsQ.error;
+  const error = entriesQ.error || summaryQ.error || statsQ.error || compensationsQ.error || accountsQ.error;
 
   const refreshAll = () => {
     void queryClient.invalidateQueries({ queryKey: ["ledger"] });
@@ -144,6 +157,8 @@ export function LedgerPage() {
           </>
         ) : null}
       />
+
+      <OperationalOverview stats={stats} loading={statsQ.isLoading} />
 
       {summary ? <SummaryTiles summary={summary} /> : null}
 
@@ -186,6 +201,124 @@ export function LedgerPage() {
         onManualPaid={handleManualPaid}
       />
     </PageShell>
+  );
+}
+
+function OperationalOverview({ stats, loading }: { stats?: OperationalStats; loading: boolean }) {
+  if (loading) {
+    return (
+      <Card>
+        <CardHeader>
+          <SectionHeader icon={Gamepad2} title="运营概览" />
+        </CardHeader>
+        <CardContent>
+          <LoadingState />
+        </CardContent>
+      </Card>
+    );
+  }
+  if (!stats) return null;
+  const total = stats.total;
+  return (
+    <div className="space-y-4">
+      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+        <ToneRailCard
+          icon={Gamepad2}
+          title="开局数"
+          value={formatInteger(total.started_sessions)}
+          description="OK start_session 按 session_key 去重"
+          tone="primary"
+          valueClassName="truncate font-mono text-2xl font-bold tabular-nums"
+        />
+        <ToneRailCard
+          icon={Percent}
+          title="派奖成功率"
+          value={formatPercent(total.payout_success_rate)}
+          description={`${formatInteger(total.payout_success_count)} 成功 / ${formatInteger(total.payout_attempt_count)} 次尝试`}
+          tone={payoutRateTone(total.payout_success_rate, total.payout_attempt_count)}
+          valueClassName="truncate font-mono text-2xl font-bold tabular-nums"
+        />
+        <ToneRailCard
+          icon={WalletCards}
+          title="运营净盈亏"
+          value={formatAmount(total.ledger_net)}
+          description={`${formatInteger(total.ledger_count)} 条资金流水，同台账汇总`}
+          tone={isNegative(total.ledger_net) ? "danger" : "success"}
+          valueClassName="truncate font-mono text-2xl font-bold tabular-nums"
+        />
+        <ToneRailCard
+          icon={Users}
+          title="参与人数"
+          value="需埋点"
+          description="需 WP0-tap 补参与者字段后统计"
+          tone="neutral"
+          valueClassName="truncate text-xl font-semibold"
+        />
+      </div>
+
+      <div className="grid gap-6 xl:grid-cols-[minmax(0,1.45fr)_minmax(320px,0.8fr)]">
+        <OperationalTrend stats={stats} />
+        <SourceMatrixPanel stats={stats} />
+      </div>
+    </div>
+  );
+}
+
+function OperationalTrend({ stats }: { stats: OperationalStats }) {
+  const xAxis = stats.by_day.map((item) => item.key);
+  const series = [
+    { name: "开局", data: stats.by_day.map((item) => item.started_sessions), color: "#2563eb" },
+    { name: "派奖成功", data: stats.by_day.map((item) => item.payout_success_count), color: "#10b981" },
+    { name: "派奖失败", data: stats.by_day.map((item) => item.payout_failure_count), color: "#e11d48" },
+  ];
+  return (
+    <Card>
+      <CardHeader>
+        <SectionHeader
+          icon={Gamepad2}
+          title="运营日趋势"
+          meta={<MetaBadge tone="outline">{stats.by_day.length} 天</MetaBadge>}
+        />
+      </CardHeader>
+      <CardContent>
+        {xAxis.length === 0 ? (
+          <EmptyState text="暂无运营动作" />
+        ) : (
+          <LineTrend xAxis={xAxis} series={series} height={260} />
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function SourceMatrixPanel({ stats }: { stats: OperationalStats }) {
+  return (
+    <Card>
+      <CardHeader>
+        <SectionHeader icon={AlertTriangle} title="数据源口径" />
+      </CardHeader>
+      <CardContent>
+        <div className="space-y-2">
+          {stats.source_matrix.map((item) => (
+            <div
+              key={item.key}
+              className="rounded-lg border border-border/70 bg-muted/30 px-3 py-2"
+            >
+              <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
+                <div className="min-w-0 truncate text-sm font-medium">{item.label}</div>
+                <MetaBadge tone={item.status === "available" ? "success" : "warn"}>
+                  {item.status === "available" ? "可算" : "需埋点"}
+                </MetaBadge>
+              </div>
+              <div className="mt-1 break-words font-mono text-[11px] leading-4 text-muted-foreground">
+                {item.source}
+              </div>
+              <div className="mt-1 text-xs leading-5 text-muted-foreground">{item.note}</div>
+            </div>
+          ))}
+        </div>
+      </CardContent>
+    </Card>
   );
 }
 
@@ -635,8 +768,38 @@ function buildQueryParams(filters: FilterState): Omit<LedgerQueryParams, "limit"
   };
 }
 
+function buildStatsQueryParams(filters: FilterState): LedgerStatsQueryParams {
+  return {
+    since: filters.since || undefined,
+    until: filters.until || undefined,
+    account_id: filters.account_id || undefined,
+    chat_id: filters.chat_id || undefined,
+    plugin_key: filters.plugin_key.trim() || undefined,
+  };
+}
+
 function formatAmount(value: string) {
   return value || "0";
+}
+
+function formatInteger(value: number) {
+  return new Intl.NumberFormat().format(value || 0);
+}
+
+function formatPercent(value: string | null) {
+  if (value == null) return "-";
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return `${value}%`;
+  return `${parsed.toFixed(2)}%`;
+}
+
+function payoutRateTone(value: string | null, attempts: number): VisualTone {
+  if (attempts <= 0 || value == null) return "neutral";
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return "neutral";
+  if (parsed >= 90) return "success";
+  if (parsed >= 70) return "warn";
+  return "danger";
 }
 
 function formatSignedAmount(entry: LedgerEntry) {

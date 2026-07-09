@@ -11,7 +11,7 @@ from fastapi import APIRouter, Query
 from pydantic import BaseModel, Field
 
 from ..deps import CurrentUser, DBSession
-from ..services import ledger_service
+from ..services import ledger_service, stats_service
 
 router = APIRouter(prefix="/api/ledger", tags=["ledger"])
 
@@ -91,6 +91,48 @@ class LedgerManualPaidRequest(BaseModel):
     note: str | None = Field(default=None, max_length=500)
 
 
+class MetricAvailabilityOut(BaseModel):
+    key: str
+    label: str
+    status: str
+    source: str
+    note: str
+
+
+class OperationalStatsTotalOut(BaseModel):
+    started_sessions: int
+    participant_count: int | None
+    payout_success_count: int
+    payout_failure_count: int
+    payout_attempt_count: int
+    payout_success_rate: str | None
+    ledger_income: str
+    ledger_payout: str
+    ledger_net: str
+    ledger_count: int
+
+
+class OperationalStatsBucketOut(BaseModel):
+    key: str
+    label: str
+    started_sessions: int
+    payout_success_count: int
+    payout_failure_count: int
+    payout_attempt_count: int
+    payout_success_rate: str | None
+    ledger_income: str
+    ledger_payout: str
+    ledger_net: str
+    ledger_count: int
+
+
+class OperationalStatsOut(BaseModel):
+    total: OperationalStatsTotalOut
+    by_day: list[OperationalStatsBucketOut]
+    by_chat: list[OperationalStatsBucketOut]
+    source_matrix: list[MetricAvailabilityOut]
+
+
 def _filters(
     *,
     since: datetime | None,
@@ -117,6 +159,23 @@ def _filters(
         amount_max=amount_max,
         status=status,
         limit=limit,
+    )
+
+
+def _stats_filters(
+    *,
+    since: datetime | None,
+    until: datetime | None,
+    account_id: int | None,
+    chat_id: int | None,
+    plugin_key: str | None,
+) -> stats_service.StatsFilters:
+    return stats_service.StatsFilters(
+        since=since,
+        until=until,
+        account_id=account_id,
+        chat_id=chat_id,
+        plugin_key=plugin_key,
     )
 
 
@@ -187,6 +246,29 @@ async def get_ledger_summary(
         ),
     )
     return LedgerSummaryOut(**asdict(summary))
+
+
+@router.get("/stats", response_model=OperationalStatsOut)
+async def get_operational_stats(
+    db: DBSession,
+    _user: CurrentUser,
+    since: datetime | None = Query(default=None),
+    until: datetime | None = Query(default=None),
+    account_id: int | None = Query(default=None),
+    chat_id: int | None = Query(default=None),
+    plugin_key: str | None = Query(default=None),
+) -> OperationalStatsOut:
+    stats = await stats_service.summarize_operational_stats(
+        db,
+        _stats_filters(
+            since=since,
+            until=until,
+            account_id=account_id,
+            chat_id=chat_id,
+            plugin_key=plugin_key,
+        ),
+    )
+    return OperationalStatsOut(**asdict(stats))
 
 
 @router.get("/compensations", response_model=LedgerCompensationsResponse)
