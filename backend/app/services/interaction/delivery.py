@@ -15,6 +15,7 @@ from typing import Any
 
 from ...redis_client import get_redis
 from .. import account_bot_service
+from .. import payout_compensation as payout_compensation_service
 from ..event_trace import TRACE_STATUS_FAILED, TRACE_STATUS_OK, TRACE_STATUS_SKIPPED, record_action
 from .contracts import (
     INTERACTION_SEND_VIA,
@@ -697,20 +698,51 @@ class InteractionDeliveryExecutor:
         detail = result if isinstance(result, dict) else {}
         if not ok:
             error_code = _result_error_code(detail, _worker_action_error_code(error))
+            error_code = payout_compensation_service.normalize_payout_error_code(error_code, error)
             detail = _userbot_action_failure_result(payload, error=error, error_code=error_code, result=detail)
+            payout_payload = dict(payload)
+            context = action.get("context")
+            if isinstance(context, dict):
+                payout_payload["context"] = dict(context)
+            payout_key = payout_compensation_service.ensure_payout_key(payout_payload)
+            compensation_queued = False
+            try:
+                queued = await payout_compensation_service.enqueue_payout_compensation(
+                    account_id=self.incoming.account_id,
+                    origin="delivery",
+                    payload=payout_payload,
+                    error_code=error_code,
+                    error=error,
+                    trace_id=getattr(self.incoming, "trace_id", None),
+                    plugin_key=context.get("plugin_key") if isinstance(context, dict) else None,
+                    entry_key=context.get("entry_key") if isinstance(context, dict) else None,
+                    chat_id=target_chat_id,
+                    amount=amount,
+                )
+                compensation_queued = queued is not None
+            except Exception:  # noqa: BLE001
+                log.debug("payout compensation enqueue failed in delivery", exc_info=True)
+            detail["compensation_queued"] = compensation_queued
+            detail["payout_key"] = payout_key
         save_key = namespaced_action_save_message_id_key(self.incoming.account_id, action.get("save_message_id_key"))
         if ok and save_key:
             msg_id = delivery_message_id(detail)
             if msg_id is not None:
                 await self.get_redis_client().set(save_key, str(msg_id), ex=7200)
+        record_detail: dict[str, Any] = {
+            "actual_send_via": "userbot_reply",
+            "result": detail,
+            "error_code": None if ok else detail.get("error_code") or _worker_action_error_code(error),
+            "error": None if ok else error,
+        }
+        if not ok:
+            record_detail["compensation_queued"] = detail.get("compensation_queued")
+            record_detail["payout_key"] = detail.get("payout_key")
         await record_action(
             action.get("context"),
             action,
             TRACE_STATUS_OK if ok else TRACE_STATUS_FAILED,
-            actual_send_via="userbot_reply",
-            result=detail,
-            error_code=None if ok else detail.get("error_code") or _worker_action_error_code(error),
-            error=None if ok else error,
+            **record_detail,
         )
         if not ok:
             log_detail = self.log_context(self.incoming)

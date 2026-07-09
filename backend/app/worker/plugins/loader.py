@@ -63,7 +63,7 @@ from ...db.models.plugin_global_config import PluginGlobalConfig
 from ...db.models.rule import Rule
 from ...db.models.system import SystemSetting
 from ...redis_client import get_redis
-from ...services import account_bot_service, interaction_bot_service, payout_limit
+from ...services import account_bot_service, interaction_bot_service, payout_compensation, payout_limit
 from ...services.event_bus import (
     dispatch_event,
     event_subscription_warnings,
@@ -1767,15 +1767,7 @@ async def _apply_userbot_payout_action(state: _AccountState, event: Any, action:
             target_chat_id=target_chat_id,
         )
         return False
-    if state.client is None:
-        await _record_userbot_action_failure(
-            state,
-            action,
-            error_code="userbot_offline",
-            error="userbot client unavailable",
-            target_chat_id=target_chat_id,
-        )
-        return False
+    payout_key = payout_compensation.ensure_payout_key(action)
     text = str(action.get("text") or f"+{amount}").strip()
     if not text:
         await _record_userbot_action_failure(
@@ -1785,6 +1777,46 @@ async def _apply_userbot_payout_action(state: _AccountState, event: Any, action:
             error="payout text is empty",
             target_chat_id=target_chat_id,
         )
+        return False
+
+    async def _enqueue_compensation(
+        error_code: str,
+        error: Any,
+        *,
+        reply_to_message_id: int | None = None,
+        reply_to_user_id: int | None = None,
+    ) -> None:
+        payload = dict(action)
+        payload["payout_key"] = payout_key
+        payload["chat_id"] = target_chat_id
+        payload["amount"] = amount
+        payload["text"] = text
+        if reply_to_message_id is not None:
+            payload["reply_to_message_id"] = reply_to_message_id
+        if reply_to_user_id is not None:
+            payload["reply_to_user_id"] = reply_to_user_id
+        try:
+            await payout_compensation.enqueue_payout_compensation(
+                account_id=state.account_id,
+                origin="worker",
+                payload=payload,
+                error_code=error_code,
+                error=error,
+                chat_id=target_chat_id,
+                amount=amount,
+            )
+        except Exception:  # noqa: BLE001
+            log.debug("payout compensation enqueue failed in worker plugin", exc_info=True)
+
+    if state.client is None:
+        await _record_userbot_action_failure(
+            state,
+            action,
+            error_code="userbot_offline",
+            error="userbot client unavailable",
+            target_chat_id=target_chat_id,
+        )
+        await _enqueue_compensation("userbot_offline", "userbot client unavailable")
         return False
     reply_to = _int_or_none(action.get("reply_to_message_id"))
     reply_to_user_id = _int_or_none(action.get("reply_to_user_id"))
@@ -1815,6 +1847,12 @@ async def _apply_userbot_payout_action(state: _AccountState, event: Any, action:
         action_type="payout",
         target_chat_id=target_chat_id,
     ):
+        await _enqueue_compensation(
+            "rate_limited",
+            "rate_limited",
+            reply_to_message_id=reply_to,
+            reply_to_user_id=reply_to_user_id,
+        )
         return False
     payout_ok, payout_reason = await payout_limit.check_and_consume(state.account_id, amount)
     if not payout_ok:
@@ -1872,6 +1910,12 @@ async def _apply_userbot_payout_action(state: _AccountState, event: Any, action:
             reply_to_message_id=reply_to,
             reply_to_user_id=reply_to_user_id,
             extra=flood_detail,
+        )
+        await _enqueue_compensation(
+            "telegram_api_error",
+            exc,
+            reply_to_message_id=reply_to,
+            reply_to_user_id=reply_to_user_id,
         )
         return False
 

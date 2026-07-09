@@ -16,6 +16,7 @@ from .log import (
     RuntimeLog,
 )
 from .notify import NotifyBot
+from .payout_compensation import PayoutCompensation
 from .plugin import InstalledPlugin, PluginInstall
 from .plugin_global_config import PluginGlobalConfig
 from .plugin_repo import PluginRepo
@@ -44,6 +45,7 @@ __all__ = [
     "LLMUsage",
     "NotificationChannel",
     "NotifyBot",
+    "PayoutCompensation",
     "PluginInstall",
     "PluginGlobalConfig",
     "PluginConfigActionJob",
