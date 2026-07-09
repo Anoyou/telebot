@@ -1,4 +1,4 @@
-"""payout 限额服务测试：mock DB 限额读取 + 假 Redis（复刻 Lua check-and-consume 语义）。
+"""payout 限额服务测试：mock DB 限额读取 + 假 Redis，另含可选真 Redis Lua 回归。
 
 覆盖：
   - 单笔上限：超限直接拒，且不触碰 Redis（不消费日累计）
@@ -10,9 +10,13 @@
 
 from __future__ import annotations
 
+import asyncio
+import os
 from typing import Any
+from uuid import uuid4
 
 import pytest
+import redis.asyncio as redis_async
 
 from app.services import payout_limit
 
@@ -158,3 +162,71 @@ async def test_idempotency_key_counts_daily_usage_once(monkeypatch) -> None:
     assert next_reason is not None and "日累计" in next_reason
     daily_values = [value for key, value in redis.store.items() if ":daily:" in key]
     assert daily_values == [60]
+
+
+@pytest.mark.asyncio
+async def test_consume_script_real_redis_accumulates_atomically_and_short_circuits_counted() -> None:
+    redis_url = os.environ.get("TELEPILOT_TEST_REDIS_URL")
+    if not redis_url:
+        pytest.skip("set TELEPILOT_TEST_REDIS_URL to run the real Redis Lua eval regression")
+    client = redis_async.Redis.from_url(redis_url, decode_responses=True)
+    try:
+        try:
+            await client.ping()
+        except Exception as exc:  # noqa: BLE001
+            pytest.skip(f"test Redis unavailable: {exc}")
+
+        token = uuid4().hex
+        daily_key = f"test:payout_limit:{token}:daily"
+        counted_daily_key = f"test:payout_limit:{token}:counted_daily"
+        counted_same_key = f"test:payout_limit:{token}:counted:same"
+        counted_other_key = f"test:payout_limit:{token}:counted:other"
+        unused_key = f"test:payout_limit:{token}:unused"
+        try:
+            concurrent_results = await asyncio.gather(
+                client.eval(payout_limit._CONSUME_SCRIPT, 2, daily_key, unused_key, 100, 60, 60, 0),
+                client.eval(payout_limit._CONSUME_SCRIPT, 2, daily_key, unused_key, 100, 60, 60, 0),
+            )
+
+            assert sorted(int(item[0]) for item in concurrent_results) == [0, 1]
+            assert await client.get(daily_key) == "60"
+
+            first = await client.eval(
+                payout_limit._CONSUME_SCRIPT,
+                2,
+                counted_daily_key,
+                counted_same_key,
+                100,
+                60,
+                60,
+                1,
+            )
+            replay = await client.eval(
+                payout_limit._CONSUME_SCRIPT,
+                2,
+                counted_daily_key,
+                counted_same_key,
+                100,
+                60,
+                60,
+                1,
+            )
+            other = await client.eval(
+                payout_limit._CONSUME_SCRIPT,
+                2,
+                counted_daily_key,
+                counted_other_key,
+                100,
+                60,
+                60,
+                1,
+            )
+
+            assert [int(value) for value in first] == [1, 60, 100]
+            assert [int(value) for value in replay] == [1, 60, 100]
+            assert [int(value) for value in other] == [0, 60, 100]
+            assert await client.get(counted_daily_key) == "60"
+        finally:
+            await client.delete(daily_key, counted_daily_key, counted_same_key, counted_other_key, unused_key)
+    finally:
+        await client.aclose()

@@ -161,7 +161,6 @@ class _InteractionTextGuardRule:
 _USERBOT_SESSION_KEY_PREFIX = "account_bot:interaction_session:"
 _USERBOT_SESSION_TTL_GRACE_SECONDS = 90
 _USERBOT_BUTTON_MAP_KEY = "_tp_button_map"
-_PAYOUT_SENT_TTL_SECONDS = 7 * 24 * 60 * 60
 _SESSION_CHANNEL_USERBOT = "userbot"
 _SESSION_CHANNEL_INTERACTION_BOT = "interaction_bot"
 _SESSION_CHANNELS_OBSERVED_BY_USERBOT = frozenset(
@@ -2281,33 +2280,6 @@ def _payout_amount(action: dict[str, Any]) -> int | None:
     return amount
 
 
-def _payout_sent_key(account_id: int | None, payout_key: Any) -> str | None:
-    key = str(payout_key or "").strip()
-    if account_id is None or not key:
-        return None
-    return f"payout:sent:{int(account_id)}:{key}"
-
-
-async def _mark_payout_sent_marker(
-    redis: Any | None,
-    account_id: int | None,
-    payout_key: Any,
-    message_id: Any,
-) -> None:
-    key = _payout_sent_key(account_id, payout_key)
-    if redis is None or key is None:
-        return
-    try:
-        await redis.set(
-            key,
-            str(_int_or_none(message_id) or 0),
-            ex=_PAYOUT_SENT_TTL_SECONDS,
-            nx=True,
-        )
-    except Exception:  # noqa: BLE001
-        log.debug("write payout sent marker failed account=%s key=%s", account_id, key, exc_info=True)
-
-
 async def _record_userbot_action_failure(
     state: _AccountState,
     action: dict[str, Any],
@@ -2673,7 +2645,7 @@ async def _apply_userbot_payout_action(state: _AccountState, event: Any, action:
             "reply_to_message_id": reply_to,
             "reply_to_user_id": reply_to_user_id,
         }
-        await _mark_payout_sent_marker(
+        await payout_compensation.mark_payout_sent_marker(
             state.redis or get_redis(),
             state.account_id,
             payout_key,

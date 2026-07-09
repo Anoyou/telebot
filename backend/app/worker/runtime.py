@@ -98,9 +98,8 @@ _USERBOT_SESSION_EXPIRE_SCAN_SECONDS = 15
 _RECENT_USER_MESSAGE_SEARCH_LIMIT = 200
 _RECENT_USER_MESSAGE_SEARCH_LIMIT_MAX = 500
 _DEFAULT_REPLY_ANCHOR_MISSING_TEXT = "未找到对应用户（{user_id}）的近期消息。"
-_PAYOUT_SENT_TTL_SECONDS = 604_800
 _PAYOUT_COMPENSATION_LEASE_SECONDS = 120
-_PAYOUT_COMPENSATION_AMBIGUOUS_PROBE_LIMIT = 30
+_PAYOUT_COMPENSATION_AMBIGUOUS_PROBE_PAGE_SIZE = 100
 _BACKGROUND_RPC_COMMAND_TYPES = {
     CMD_FETCH_AVATAR,
     CMD_GET_RECENT_PEERS,
@@ -108,6 +107,10 @@ _BACKGROUND_RPC_COMMAND_TYPES = {
     CMD_RUN_INTERACTION_ENTRY,
     CMD_RUN_INTERACTION_ACTION,
 }
+
+
+class _AmbiguousPayoutProbeError(RuntimeError):
+    """Raised when Telegram history cannot be inspected safely."""
 
 
 def _interaction_userbot_rate_limit_action(action_type: str, chat_id: int | None) -> str:
@@ -361,19 +364,12 @@ async def _read_saved_interaction_message_id(
     return _int_or_none(raw)
 
 
-def _payout_sent_key(account_id: int | None, payout_key: Any) -> str | None:
-    key = _str_or_none(payout_key)
-    if account_id is None or not key:
-        return None
-    return f"payout:sent:{int(account_id)}:{key}"
-
-
 async def _read_payout_sent_marker(
     redis: Any | None,
     account_id: int | None,
     payout_key: Any,
 ) -> int | None:
-    key = _payout_sent_key(account_id, payout_key)
+    key = payout_compensation.payout_sent_key(account_id, payout_key)
     if redis is None or key is None:
         return None
     try:
@@ -386,26 +382,6 @@ async def _read_payout_sent_marker(
     if isinstance(raw, bytes):
         raw = raw.decode("utf-8", errors="ignore")
     return _int_or_none(raw) or 0
-
-
-async def _mark_payout_sent_marker(
-    redis: Any | None,
-    account_id: int | None,
-    payout_key: Any,
-    message_id: Any,
-) -> None:
-    key = _payout_sent_key(account_id, payout_key)
-    if redis is None or key is None:
-        return
-    try:
-        await redis.set(
-            key,
-            str(_int_or_none(message_id) or 0),
-            ex=_PAYOUT_SENT_TTL_SECONDS,
-            nx=True,
-        )
-    except Exception:  # noqa: BLE001
-        log.debug("write payout sent marker failed account=%s key=%s", account_id, key, exc_info=True)
 
 
 async def _run_interaction_userbot_action(
@@ -488,7 +464,12 @@ async def _run_interaction_userbot_action(
             "reply_to_user_id": reply_to_user_id,
         }
         if action_type == "payout":
-            await _mark_payout_sent_marker(redis, account_id, payload.get("payout_key"), result.get("message_id"))
+            await payout_compensation.mark_payout_sent_marker(
+                redis,
+                account_id,
+                payload.get("payout_key"),
+                result.get("message_id"),
+            )
         await save_action_reply_target(
             redis or get_redis(),
             account_id=account_id,
@@ -1524,9 +1505,20 @@ async def _replay_payout_compensation_row(
         return
 
     if bool(row.ambiguous) and bool(config.get("ambiguous_probe", True)):
-        probe_message_id = await _probe_ambiguous_payout_message(client, row)
+        try:
+            probe_message_id = await _probe_ambiguous_payout_message(client, row)
+        except _AmbiguousPayoutProbeError as exc:
+            await _apply_payout_replay_failure(
+                redis,
+                row,
+                error_code=payout_compensation.ERROR_TELEGRAM_API,
+                error_text=f"{type(exc).__name__}: {exc}",
+                config=config,
+                now=now,
+            )
+            return
         if probe_message_id is not None:
-            await _mark_payout_sent_marker(redis, row.account_id, row.payout_key, probe_message_id)
+            await payout_compensation.mark_payout_sent_marker(redis, row.account_id, row.payout_key, probe_message_id)
             if await _mark_payout_compensation_sent(row.id, probe_message_id, now):
                 await _record_payout_replay_action(
                     row,
@@ -1594,23 +1586,59 @@ async def _replay_payout_compensation_row(
 async def _probe_ambiguous_payout_message(client: Any, row: PayoutCompensation) -> int | None:
     target_text = _payout_replay_text(row)
     created_at = _as_utc(row.created_at)
+    expected_reply_to = _payout_probe_expected_reply_to(row)
+    if expected_reply_to is None:
+        return None
+    offset_date: datetime | None = None
     try:
-        async for msg in client.iter_messages(
-            row.chat_id,
-            from_user="me",
-            limit=_PAYOUT_COMPENSATION_AMBIGUOUS_PROBE_LIMIT,
-        ):
-            msg_id = _telegram_message_id(msg)
-            if msg_id is None:
-                continue
-            msg_date = _as_utc(getattr(msg, "date", None))
-            if created_at is not None and msg_date is not None and msg_date < created_at:
-                continue
-            if _telegram_message_text(msg).strip() == target_text:
-                return msg_id
+        while True:
+            seen = False
+            reached_lower_bound = False
+            oldest_date: datetime | None = None
+            kwargs: dict[str, Any] = {
+                "from_user": "me",
+                "limit": _PAYOUT_COMPENSATION_AMBIGUOUS_PROBE_PAGE_SIZE,
+            }
+            if offset_date is not None:
+                kwargs["offset_date"] = offset_date
+            async for msg in client.iter_messages(row.chat_id, **kwargs):
+                seen = True
+                msg_id = _telegram_message_id(msg)
+                msg_date = _as_utc(getattr(msg, "date", None))
+                if msg_date is not None:
+                    oldest_date = msg_date
+                if created_at is not None and msg_date is not None and msg_date < created_at:
+                    reached_lower_bound = True
+                    break
+                if msg_id is None:
+                    continue
+                if _telegram_message_text(msg).strip() != target_text:
+                    continue
+                if _telegram_message_reply_to_id(msg) == expected_reply_to:
+                    return msg_id
+            if reached_lower_bound or not seen or oldest_date is None:
+                return None
+            offset_date = oldest_date
     except Exception:  # noqa: BLE001
         log.debug("ambiguous payout probe failed row=%s", row.id, exc_info=True)
+        raise _AmbiguousPayoutProbeError(f"ambiguous payout probe failed row={row.id}") from None
     return None
+
+
+def _payout_probe_expected_reply_to(row: PayoutCompensation) -> int | None:
+    return _int_or_none((row.payload or {}).get("reply_to_message_id"))
+
+
+def _telegram_message_reply_to_id(msg: Any) -> int | None:
+    direct = _int_or_none(getattr(msg, "reply_to_msg_id", None))
+    if direct is not None:
+        return direct
+    reply_to = getattr(msg, "reply_to", None)
+    return _int_or_none(
+        getattr(reply_to, "reply_to_msg_id", None)
+        or getattr(reply_to, "reply_to_message_id", None)
+        or getattr(reply_to, "msg_id", None)
+    )
 
 
 def _payout_replay_payload(row: PayoutCompensation) -> dict[str, Any]:

@@ -161,12 +161,23 @@ class _ReplayClient:
         self.messages = list(messages or [])
         self.iter_error = iter_error
         self.sent: list[dict[str, object]] = []
+        self.iter_calls: list[dict[str, object]] = []
 
     def iter_messages(self, _chat_id, **_kwargs):  # noqa: ANN001, ANN003
         async def _gen():
+            self.iter_calls.append(dict(_kwargs))
             if self.iter_error is not None:
                 raise self.iter_error
+            limit = int(_kwargs.get("limit") or len(self.messages) or 0)
+            offset_date = _kwargs.get("offset_date")
+            yielded = 0
             for msg in self.messages:
+                msg_date = getattr(msg, "date", None)
+                if offset_date is not None and msg_date is not None and msg_date >= offset_date:
+                    continue
+                if limit > 0 and yielded >= limit:
+                    break
+                yielded += 1
                 yield msg
 
         return _gen()
@@ -449,7 +460,7 @@ async def test_payout_replay_recovers_from_sent_marker_without_sending(
 
 
 @pytest.mark.asyncio
-async def test_payout_replay_ambiguous_probe_recovers_and_probe_error_falls_back_to_send(
+async def test_payout_replay_ambiguous_probe_requires_reply_anchor_and_paginates(
     payout_session_factory,
     monkeypatch,
 ) -> None:
@@ -459,11 +470,19 @@ async def test_payout_replay_ambiguous_probe_recovers_and_probe_error_falls_back
         payout_key="pay_ambiguous_hit",
         trace_id="evt_ambiguous_hit",
         ambiguous=True,
-        created_at=now - timedelta(seconds=10),
+        created_at=now - timedelta(seconds=200),
+        payload={"reply_to_message_id": 31},
     )
     redis = _FakeRedis()
+    noisy_messages = [
+        SimpleNamespace(id=10_000 + index, raw_text="+10", date=now - timedelta(seconds=index))
+        for index in range(100)
+    ]
     client = _ReplayClient(
-        messages=[SimpleNamespace(id=555, raw_text="+10", date=now - timedelta(seconds=5))]
+        messages=[
+            *noisy_messages,
+            SimpleNamespace(id=555, raw_text="+10", date=now - timedelta(seconds=101), reply_to_msg_id=31),
+        ]
     )
     record_action = AsyncMock()
     monkeypatch.setattr(worker_runtime, "record_action", record_action)
@@ -474,23 +493,67 @@ async def test_payout_replay_ambiguous_probe_recovers_and_probe_error_falls_back
     assert saved.status == PAYOUT_COMPENSATION_STATUS_SENT
     assert saved.sent_message_id == 555
     assert client.sent == []
+    assert len(client.iter_calls) > 1
     assert record_action.await_args.kwargs["ambiguous_probe"] is True
 
-    fallback = await _insert_compensation_row(
+
+@pytest.mark.asyncio
+async def test_payout_replay_ambiguous_probe_without_strong_match_sends_observably(
+    payout_session_factory,
+    monkeypatch,
+) -> None:
+    now = datetime.now(UTC)
+    row = await _insert_compensation_row(
+        payout_session_factory,
+        payout_key="pay_ambiguous_same_amount",
+        trace_id="evt_ambiguous_same_amount",
+        ambiguous=True,
+        created_at=now - timedelta(seconds=10),
+        payload={"reply_to_message_id": 31},
+    )
+    redis = _FakeRedis()
+    client = _ReplayClient(
+        send_ids=[556],
+        messages=[
+            SimpleNamespace(id=555, raw_text="+10", date=now - timedelta(seconds=5), reply_to_msg_id=99),
+        ],
+    )
+    monkeypatch.setattr(worker_runtime, "_check_payout_limit", AsyncMock(return_value=(True, None)))
+    monkeypatch.setattr(worker_runtime, "record_action", AsyncMock())
+
+    await worker_runtime._scan_payout_compensations_once(redis, client, 7, config=_scan_config())
+
+    saved = await _get_compensation_row(payout_session_factory, row.id)
+    assert saved.status == PAYOUT_COMPENSATION_STATUS_SENT
+    assert saved.sent_message_id == 556
+    assert client.sent == [{"chat_id": -100123, "text": "+10", "reply_to": 31, "parse_mode": None}]
+
+
+@pytest.mark.asyncio
+async def test_payout_replay_ambiguous_probe_error_defers_without_sending(
+    payout_session_factory,
+    monkeypatch,
+) -> None:
+    row = await _insert_compensation_row(
         payout_session_factory,
         payout_key="pay_ambiguous_error",
         trace_id="evt_ambiguous_error",
         ambiguous=True,
+        payload={"reply_to_message_id": 31},
     )
-    fallback_client = _ReplayClient(send_ids=[556], iter_error=RuntimeError("probe failed"))
+    redis = _FakeRedis()
+    client = _ReplayClient(send_ids=[556], iter_error=RuntimeError("probe failed"))
     monkeypatch.setattr(worker_runtime, "_check_payout_limit", AsyncMock(return_value=(True, None)))
+    monkeypatch.setattr(worker_runtime, "record_action", AsyncMock())
 
-    await worker_runtime._scan_payout_compensations_once(redis, fallback_client, 7, config=_scan_config())
+    await worker_runtime._scan_payout_compensations_once(redis, client, 7, config=_scan_config())
 
-    saved_fallback = await _get_compensation_row(payout_session_factory, fallback.id)
-    assert saved_fallback.status == PAYOUT_COMPENSATION_STATUS_SENT
-    assert saved_fallback.sent_message_id == 556
-    assert fallback_client.sent == [{"chat_id": -100123, "text": "+10", "reply_to": None, "parse_mode": None}]
+    saved = await _get_compensation_row(payout_session_factory, row.id)
+    assert saved.status == PAYOUT_COMPENSATION_STATUS_PENDING
+    assert saved.sent_message_id is None
+    assert saved.retry_count == 1
+    assert worker_runtime._as_utc(saved.next_attempt_at) > worker_runtime._as_utc(row.next_attempt_at)
+    assert client.sent == []
 
 
 @pytest.mark.asyncio

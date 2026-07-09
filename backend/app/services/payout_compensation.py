@@ -28,6 +28,7 @@ log = logging.getLogger(__name__)
 
 PAYOUT_KEY_PREFIX = "pay_"
 PAYOUT_KEY_MAX_LENGTH = 80
+PAYOUT_SENT_TTL_SECONDS = 604_800
 DEFAULT_RETRY_BACKOFF_SECONDS = 60
 SETTING_KEY = "payout_compensation"
 DEFAULT_CONFIG: dict[str, Any] = {
@@ -109,6 +110,33 @@ def ensure_payout_key(carrier: dict[str, Any]) -> str:
     payout_key = f"{PAYOUT_KEY_PREFIX}{token_hex(8)}"
     carrier["payout_key"] = payout_key
     return payout_key
+
+
+def payout_sent_key(account_id: int | None, payout_key: Any) -> str | None:
+    key = _str_or_none(payout_key)
+    if account_id is None or not key:
+        return None
+    return f"payout:sent:{int(account_id)}:{key}"
+
+
+async def mark_payout_sent_marker(
+    redis: Any | None,
+    account_id: int | None,
+    payout_key: Any,
+    message_id: Any,
+) -> None:
+    key = payout_sent_key(account_id, payout_key)
+    if redis is None or key is None:
+        return
+    try:
+        await redis.set(
+            key,
+            str(_int_or_none(message_id) or 0),
+            ex=PAYOUT_SENT_TTL_SECONDS,
+            nx=True,
+        )
+    except Exception:  # noqa: BLE001
+        log.debug("write payout sent marker failed account=%s key=%s", account_id, key, exc_info=True)
 
 
 def normalize_payout_error_code(error_code: Any, error: Any = None) -> str:
@@ -333,12 +361,15 @@ __all__ = [
     "NON_COMPENSABLE_ERROR_CODES",
     "DEFAULT_CONFIG",
     "PAYOUT_KEY_PREFIX",
+    "PAYOUT_SENT_TTL_SECONDS",
     "PayoutErrorClassification",
     "RETRYABLE_ERROR_CODES",
     "SETTING_KEY",
     "classify_payout_error",
     "enqueue_payout_compensation",
     "ensure_payout_key",
+    "mark_payout_sent_marker",
     "normalize_config",
     "normalize_payout_error_code",
+    "payout_sent_key",
 ]
