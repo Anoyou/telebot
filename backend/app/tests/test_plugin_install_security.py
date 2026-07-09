@@ -129,6 +129,32 @@ async def test_install_zip_rejects_forged_signature_before_parse(monkeypatch, tm
     assert not (tmp_path / "installed").exists()
 
 
+@pytest.mark.asyncio
+async def test_install_zip_unsigned_rejected_before_parse_when_switch_off(monkeypatch, tmp_path) -> None:
+    """未配置公钥但关闭未签名兼容开关时，未签名包也必须在 parse_zip 之前被拒。"""
+    monkeypatch.setattr(pis.settings, "plugins_installed_dir", str(tmp_path / "installed"))
+    monkeypatch.setattr(pis.settings, "plugin_pubkey", "")
+    monkeypatch.setattr(pis.settings, "plugin_allow_legacy_unsigned_plugins", False)
+
+    called = False
+
+    def _parse_zip_should_not_run(_zip_bytes: bytes):  # noqa: ANN001
+        nonlocal called
+        called = True
+        raise AssertionError("parse_zip 不应被调用")
+
+    monkeypatch.setattr(pis, "parse_zip", _parse_zip_should_not_run)
+
+    db = _FakeDB()
+    payload = _make_zip(key="unsigned_switch_off")
+    with pytest.raises(pis.SignatureFailed) as ex:
+        await pis.install_zip(db, zip_bytes=payload, signature=None)
+
+    assert ex.value.code == "SIGNATURE_FAILED"
+    assert called is False
+    assert not (tmp_path / "installed").exists()
+
+
 def test_parse_zip_rejects_path_traversal() -> None:
     payload = _make_zip(extra_members=[("../escape.txt", b"x")])
     with pytest.raises(pis.InvalidZipStructure) as ex:

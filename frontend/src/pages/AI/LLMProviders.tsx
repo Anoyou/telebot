@@ -617,6 +617,45 @@ function ProviderChatTestDialog({
   const [histories, setHistories] = useState<Record<string, ChatTestTurn[]>>({});
   const [running, setRunning] = useState(false);
 
+  // 在途测活请求的 AbortController：关弹窗 / 组件卸载 / 切 provider 时统一中断；
+  // 中断后其回调不再回写 state（见 sendTest 里的 signal.aborted 判定）。
+  const abortRef = useRef<AbortController | null>(null);
+  const mountedRef = useRef(true);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      abortRef.current?.abort();
+      abortRef.current = null;
+    };
+  }, []);
+
+  // 关弹窗 / 切 provider：中断在途请求，复位 running 并把仍 pending 的结果收尾为"已取消"，
+  // 保持 loading 状态机自洽（不让 running=false 时卡片还在转圈）。无在途请求时是空操作。
+  const abortInFlight = () => {
+    const controller = abortRef.current;
+    if (!controller) return;
+    controller.abort();
+    abortRef.current = null;
+    if (!mountedRef.current) return;
+    setRunning(false);
+    setRounds((prev) =>
+      prev.map((round) => ({
+        ...round,
+        results: round.results.map((item) =>
+          item.pending
+            ? { ...item, pending: false, ok: false, empty_response: false, error: "已取消" }
+            : item,
+        ),
+      })),
+    );
+  };
+
+  useEffect(() => {
+    if (!open) abortInFlight();
+  }, [open]);
+
   useEffect(() => {
     if (!open) return;
     if (!selectedProvider && providers[0]) {
@@ -680,6 +719,8 @@ function ProviderChatTestDialog({
       toast.error("测试语不能为空");
       return;
     }
+    const controller = new AbortController();
+    abortRef.current = controller;
     setRunning(true);
     const createdAt = Date.now();
     const roundId = `${createdAt}`;
@@ -721,14 +762,19 @@ function ProviderChatTestDialog({
       await Promise.all(
         modelsToTest.map(async (modelId) => {
           try {
-            const response = await chatTestProviderModels(provider.id, {
-              models: [modelId],
-              message: text,
-              history: historiesForRequest[modelId] || [],
-              system_prompt: systemPrompt.trim() || DEFAULT_CHAT_TEST_SYSTEM_PROMPT,
-              max_tokens: maxTokens,
-              timeout_seconds: timeoutSeconds,
-            });
+            const response = await chatTestProviderModels(
+              provider.id,
+              {
+                models: [modelId],
+                message: text,
+                history: historiesForRequest[modelId] || [],
+                system_prompt: systemPrompt.trim() || DEFAULT_CHAT_TEST_SYSTEM_PROMPT,
+                max_tokens: maxTokens,
+                timeout_seconds: timeoutSeconds,
+              },
+              { signal: controller.signal },
+            );
+            if (controller.signal.aborted) return;
             const result = response.results[0] || {
               ok: false,
               requested_model: modelId,
@@ -749,6 +795,7 @@ function ProviderChatTestDialog({
               });
             }
           } catch (err) {
+            if (controller.signal.aborted) return; // 被中断：静默，不当作失败回写
             updateRoundResult(roundId, modelId, {
               ok: false,
               requested_model: modelId,
@@ -762,7 +809,11 @@ function ProviderChatTestDialog({
         }),
       );
     } finally {
-      setRunning(false);
+      // 仅当这批仍是"当前批"时收尾；被 abort / 切换后 abortRef 已换人，避免误改 running
+      if (abortRef.current === controller) {
+        abortRef.current = null;
+        if (mountedRef.current) setRunning(false);
+      }
     }
   };
 
@@ -782,6 +833,7 @@ function ProviderChatTestDialog({
               <Select
                 value={selectedProvider ? String(selectedProvider.id) : ""}
                 onChange={(event) => {
+                  abortInFlight();
                   const nextId = Number(event.target.value);
                   setProviderId(Number.isFinite(nextId) ? nextId : null);
                   setSelectedModels([]);
@@ -1446,6 +1498,17 @@ function ProviderModelsSection({
   const [testResults, setTestResults] = useState<
     Record<string, { ok: boolean; latency_ms: number; error?: string | null; preview?: string | null; model?: string | null }>
   >({});
+  // 在途 test-model 请求的 AbortController：组件卸载 / 关编辑弹窗时中断，中断后不再回写状态。
+  const abortRef = useRef<AbortController | null>(null);
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      abortRef.current?.abort();
+      abortRef.current = null;
+    };
+  }, []);
   // 未启用模型组：默认折叠（仅当存在已启用模型时；如果一条都没启用，
   // 用户一进来就需要看到全部，强制展开避免"看着是空的"）
   const enabledCount = models.filter((m) => m.enabled).length;
@@ -1507,14 +1570,17 @@ function ProviderModelsSection({
     onError: (err) => toast.error(getErrMsg(err)),
   });
 
-  const testMut = useMutation({
-    mutationFn: (modelId: string) => testProviderModel(providerId!, { model: modelId }),
-  });
-
   const onTest = async (modelId: string) => {
+    const controller = new AbortController();
+    abortRef.current = controller;
     setTestingId(modelId);
     try {
-      const r = await testMut.mutateAsync(modelId);
+      const r = await testProviderModel(
+        providerId!,
+        { model: modelId },
+        { signal: controller.signal },
+      );
+      if (controller.signal.aborted) return;
       setTestResults((prev) => ({
         ...prev,
         [modelId]: {
@@ -1531,9 +1597,13 @@ function ProviderModelsSection({
         toast.error(`${modelId} 失败（${r.latency_ms} ms）：${r.error || "未知"}`);
       }
     } catch (e) {
+      if (controller.signal.aborted) return; // 被中断：静默
       toast.error(getErrMsg(e));
     } finally {
-      setTestingId(null);
+      if (abortRef.current === controller) {
+        abortRef.current = null;
+        if (mountedRef.current) setTestingId(null);
+      }
     }
   };
 

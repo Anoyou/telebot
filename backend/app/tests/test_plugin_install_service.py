@@ -498,6 +498,44 @@ async def test_install_zip_rejects_unsigned_before_parse(monkeypatch, tmp_path) 
 
 
 @pytest.mark.asyncio
+async def test_install_zip_unsigned_allowed_when_no_pubkey(tmp_path, monkeypatch) -> None:
+    """未配置公钥 + 允许未签名开关开 → 安装成功且 signature_ok=None（对齐 local_imports）。"""
+    monkeypatch.setattr(pis.settings, "plugins_installed_dir", str(tmp_path / "installed"))
+    monkeypatch.setattr(pis.settings, "plugin_pubkey", "")
+    monkeypatch.setattr(pis.settings, "plugin_allow_legacy_unsigned_plugins", True)
+    db = _FakeDB()
+    z = _make_zip(key="unsigned_ok", version="1.0.0")
+
+    row = await pis.install_zip(db, zip_bytes=z, signature=None)
+
+    assert row.key == "unsigned_ok"
+    assert row.version == "1.0.0"
+    assert row.signature_ok is None
+    assert row.trust_tier == "community"
+    assert row.enabled is False
+    target = Path(row.installed_path)
+    assert (target / "manifest.py").is_file()
+    installed = db.installed_rows["unsigned_ok"]
+    assert installed.signature_ok is None
+    assert installed.trust_tier == "community"
+
+
+@pytest.mark.asyncio
+async def test_install_zip_unsigned_rejected_when_switch_off(tmp_path, monkeypatch) -> None:
+    """未配置公钥但关闭未签名兼容开关 → 仍拒绝安装。"""
+    monkeypatch.setattr(pis.settings, "plugins_installed_dir", str(tmp_path / "installed"))
+    monkeypatch.setattr(pis.settings, "plugin_pubkey", "")
+    monkeypatch.setattr(pis.settings, "plugin_allow_legacy_unsigned_plugins", False)
+    db = _FakeDB()
+    z = _make_zip(key="unsigned_blocked", version="1.0.0")
+
+    with pytest.raises(pis.SignatureFailed) as ex:
+        await pis.install_zip(db, zip_bytes=z, signature=None)
+    assert ex.value.code == "SIGNATURE_FAILED"
+    assert db.installed_rows == {}
+
+
+@pytest.mark.asyncio
 async def test_set_enabled_blocks_when_signature_failed(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(pis.settings, "plugins_installed_dir", str(tmp_path / "installed"))
     z = _make_zip(key="locked", version="1.0.0")

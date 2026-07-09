@@ -301,16 +301,30 @@ async def install_zip(
 ) -> InstalledPlugin:
     """完整的 zip 安装流程：解析 → 验签 → 落盘 → 写表。
 
-    存在同名 ``key`` 时视作"升级"：写库 UPDATE 同时覆盖目录；
-    保留旧的 ``enabled`` 状态，但若新签名失败强制 enabled=False（管理员需手动启用）。
+    验签策略随 ``settings.plugin_pubkey`` 分两路（与本地导入通道 ``install_local_plugin`` 对齐）：
+    - 配了公钥：强制验签，签名缺失或校验失败一律拒绝；通过则 ``signature_ok=True``（trust=verified）。
+    - 没配公钥：仅当 ``settings.plugin_allow_legacy_unsigned_plugins`` 为 True 才放行未签名包，
+      记 ``signature_ok=None``（trust=community，语义同 local_imports）；开关关掉则拒绝。
+
+    存在同名 ``key`` 时视作"升级"：写库 UPDATE 同时覆盖目录，保留旧的 ``enabled`` 状态。
     """
-    sig_ok = verify_signature(zip_bytes, signature, settings.plugin_pubkey or None)
-    # 安全要求：任何未签名/验签失败的包都不进入解压与 manifest 执行阶段。
-    if sig_ok is not True:
+    # 安全要求：任何被判为不可信的包都必须在解压 / 执行 manifest 之前拒绝。
+    pubkey = settings.plugin_pubkey or None
+    sig_ok = verify_signature(zip_bytes, signature, pubkey)
+    if pubkey is not None:
+        # 配了公钥 → 强制验签：缺签名(None) / 验签失败(False) 都拒。
+        if sig_ok is not True:
+            raise SignatureFailed(
+                "SIGNATURE_FAILED",
+                "插件签名缺失或校验失败，已拒绝安装",
+            )
+    elif not settings.plugin_allow_legacy_unsigned_plugins:
+        # 没配公钥且关闭了未签名兼容开关 → 拒（与 worker 的加载策略保持一致）。
         raise SignatureFailed(
             "SIGNATURE_FAILED",
-            "插件签名缺失或校验失败，已拒绝安装",
+            "未配置插件公钥且未允许未签名插件安装，已拒绝安装",
         )
+    # 走到这里：sig_ok 为 True（验签通过）或 None（免签放行）。
 
     parsed = parse_zip(zip_bytes)
     try:
@@ -335,8 +349,8 @@ async def install_zip(
         shutil.move(str(parsed.extract_dir), str(final_dir))
         # parsed.extract_dir 已被 move 走，不必再 rmtree
 
-        # 计算最终 enabled：sig_ok=False 时强制 false
-        final_enabled = was_enabled and (sig_ok is not False)
+        # 升级保留旧 enabled；验签失败的包已在上面拒绝，走到这里只有验签通过或免签放行
+        final_enabled = was_enabled
 
         manifest_json = parsed.manifest.to_dict()
         lint_warnings = lint_plugin_metadata_files(final_dir)
