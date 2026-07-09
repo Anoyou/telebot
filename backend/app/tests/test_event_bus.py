@@ -157,6 +157,7 @@ def test_normalize_bot_update_projects_inline_query() -> None:
 
     assert event["source"]["type"] == "inline_query"
     assert event["source"]["channel"] == "interaction_bot"
+    assert event["source"]["display_name"] == "交互 Bot"
     assert event["inline_query"]["id"] == "iq-1"
     assert event["inline_query"]["from"]["user_id"] == 1001
     assert event["message"]["text"] == "玩法"
@@ -635,6 +636,7 @@ def test_normalize_userbot_event_projects_chat_title() -> None:
     event = normalize_userbot_event(1, SimpleNamespace(message=message, chat=chat))
 
     assert event["chat"]["title"] == "UserBot 群"
+    assert event["source"]["display_name"] == "主号"
     assert event["chat"]["username"] == "userbot_room"
     assert event["message"]["chat_title"] == "UserBot 群"
     assert event["message"]["chat"]["title"] == "UserBot 群"
@@ -873,6 +875,7 @@ def test_normalize_webhook_event_matches_hook_key_filter_and_trigger_shorthand()
     decisions = dispatch_event(event, [filtered, shorthand, skipped], {}).decisions
 
     assert event["source"]["channel"] == "webhook"
+    assert event["source"]["display_name"] == "Webhook"
     assert event["source"]["hook_key"] == "orders"
     assert event["webhook"]["body"]["order_id"] == "A-1"
     assert event["webhook"]["headers"]["content-type"] == "application/json"

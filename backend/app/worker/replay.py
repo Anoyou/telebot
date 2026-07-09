@@ -1,5 +1,8 @@
 """Recording replay helpers for plugin/event pipelines.
 
+WARNING: default replay dispatch loads account plugins through the normal
+``AsyncSessionLocal`` path. Run it only against a development database.
+
 Replay is intentionally isolated from Telegram and durable ledgers:
 - inbound recording is disabled while replaying;
 - Telegram Bot API and Telethon clients are mocked;
@@ -231,24 +234,24 @@ class _ReplayTelegramClient:
         if chat_id is None and "entity" in kwargs:
             chat_id = kwargs.pop("entity")
         text = message if message is not None else kwargs.pop("message", None)
-        item = {"type": "send_message", "chat_id": _int_or_none(chat_id), "text": text}
+        item = {"type": "send_message", "chat_id": _int_or_none(chat_id), "text": text, "dry_run": True}
         self.sent.append(item)
         return SimpleNamespace(id=len(self.sent), message_id=len(self.sent), chat_id=item["chat_id"], dry_run=True)
 
     async def edit_message(self, *args: Any, **kwargs: Any) -> Any:
-        self.sent.append({"type": "edit_message", "args": args, "kwargs": kwargs})
+        self.sent.append({"type": "edit_message", "args": args, "kwargs": kwargs, "dry_run": True})
         return SimpleNamespace(id=len(self.sent), message_id=len(self.sent), dry_run=True)
 
     async def delete_messages(self, *args: Any, **kwargs: Any) -> list[Any]:
-        self.sent.append({"type": "delete_messages", "args": args, "kwargs": kwargs})
+        self.sent.append({"type": "delete_messages", "args": args, "kwargs": kwargs, "dry_run": True})
         return []
 
     async def pin_message(self, *args: Any, **kwargs: Any) -> Any:
-        self.sent.append({"type": "pin_message", "args": args, "kwargs": kwargs})
+        self.sent.append({"type": "pin_message", "args": args, "kwargs": kwargs, "dry_run": True})
         return SimpleNamespace(dry_run=True)
 
     async def send_file(self, *args: Any, **kwargs: Any) -> Any:
-        self.sent.append({"type": "send_file", "args": args, "kwargs": kwargs})
+        self.sent.append({"type": "send_file", "args": args, "kwargs": kwargs, "dry_run": True})
         return SimpleNamespace(id=len(self.sent), message_id=len(self.sent), dry_run=True)
 
 

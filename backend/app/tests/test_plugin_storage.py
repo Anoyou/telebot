@@ -116,6 +116,19 @@ async def test_incr_returns_integer_and_remains_json_readable() -> None:
 
 
 @pytest.mark.asyncio
+async def test_incr_ttl_is_sliding_window_semantics() -> None:
+    redis = _FakeRedis()
+    storage = PluginStorage(account_id=7, plugin_key="lottery_plus", redis=redis)
+
+    assert await storage.incr("counter", ttl=30) == 1
+    redis.advance(10)
+    assert await storage.incr("counter", ttl=30) == 2
+
+    raw_key = "plugin_store:7:lottery_plus:counter"
+    assert redis.expires_at[raw_key] == 40
+
+
+@pytest.mark.asyncio
 async def test_ttl_expiration_removes_value_from_get_and_get_all() -> None:
     redis = _FakeRedis()
     storage = PluginStorage(account_id=7, plugin_key="lottery_plus", redis=redis)

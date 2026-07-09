@@ -698,6 +698,7 @@ def _event(
         "driver": driver,
         "account_id": account_id,
         "update_id": update_id,
+        "display_name": _source_display_name(channel),
     }
     if callback:
         source["callback_query_id"] = callback.get("id")
@@ -724,6 +725,16 @@ def _event(
         "native_raw": native_raw,
     }
     return payload
+
+
+def _source_display_name(channel: str) -> str:
+    labels = {
+        "userbot": "主号",
+        "interaction_bot": "交互 Bot",
+        "external_payment_notice": "记账 Bot",
+        "webhook": "Webhook",
+    }
+    return labels.get(str(channel or "").strip(), str(channel or "").strip() or "未知来源")
 
 
 def _bot_message_payload(msg: dict[str, Any], *, chat: dict[str, Any]) -> dict[str, Any]:

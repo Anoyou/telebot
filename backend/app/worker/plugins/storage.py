@@ -49,7 +49,12 @@ def _json_loads(value: Any) -> Any:
 
 
 class PluginStorage:
-    """Small Redis-backed storage facade scoped to one account and one plugin."""
+    """Small Redis-backed storage facade scoped to one account and one plugin.
+
+    Error semantics are intentionally conservative and backward compatible:
+    ``get`` returns ``default`` for missing/unavailable/unreadable JSON values,
+    while ``set`` surfaces JSON serialization errors from ``json.dumps``.
+    """
 
     __slots__ = ("account_id", "plugin_key", "_redis", "_prefix")
 
@@ -135,7 +140,14 @@ class PluginStorage:
         *,
         ttl: int | float | None = None,
     ) -> int | None:
-        """Atomically increment an integer value and return the new value."""
+        """Increment an integer value and return the new value.
+
+        Redis ``INCRBY`` is atomic, but when ``ttl`` is provided the following
+        ``EXPIRE`` is a separate operation. The ttl is refreshed on every
+        increment, so callers should treat it as sliding-window storage rather
+        than a fixed-window counter. A process crash between the two commands
+        can leave a newly incremented key without expiry.
+        """
 
         if self._redis is None:
             return None

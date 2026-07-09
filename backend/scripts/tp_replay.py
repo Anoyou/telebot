@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""TelePilot recording replay CLI."""
+"""TelePilot recording replay CLI.
+
+WARNING: default replay loads account plugins from AsyncSessionLocal. Run it
+only against a development database.
+"""
 
 from __future__ import annotations
 
@@ -33,6 +37,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 async def _run(args: argparse.Namespace) -> int:
+    print(
+        "警告：tp_replay 默认分发器会通过 AsyncSessionLocal 读取真实数据库；仅对 dev DB 运行。",
+        file=sys.stderr,
+    )
     result = await replay_recording(
         args.recording,
         account_id=args.account_id,
