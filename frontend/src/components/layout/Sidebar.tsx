@@ -11,11 +11,14 @@ import remarkGfm from "remark-gfm";
 import {
   Boxes,
   Bot,
+  Bug,
   Cog,
   Github,
   Home,
   ScrollText,
   Sparkles,
+  WalletCards,
+  Webhook,
   X,
 } from "lucide-react";
 import { BrandLogo } from "@/components/BrandLogo";
@@ -42,6 +45,9 @@ const NAV: NavItem[] = [
   { to: "/", label: "概览", icon: Home, end: true },
   { to: "/plugins", label: "插件", icon: Boxes },
   { to: "/interaction", label: "交互", icon: Bot },
+  { to: "/ledger", label: "资金台账", icon: WalletCards },
+  { to: "/dispatch-debug", label: "命中调试", icon: Bug },
+  { to: "/webhooks", label: "入站 Webhook", icon: Webhook },
   { to: "/ai", label: "AI", icon: Sparkles },
   { to: "/logs", label: "日志", icon: ScrollText },
   { to: "/settings", label: "系统", icon: Cog },
@@ -52,8 +58,16 @@ function navForAIState(aiEnabled: boolean): NavItem[] {
 }
 
 export function mobilePrimaryNavForAIState(aiEnabled: boolean): NavItem[] {
-  return navForAIState(aiEnabled).filter(
-  (item) => item.to === "/" || item.to === "/plugins" || item.to === "/interaction" || item.to === "/ai" || item.to === "/logs" || item.to === "/settings",
+  return navForAIState(aiEnabled).filter((item) =>
+    item.to === "/" ||
+    item.to === "/plugins" ||
+    item.to === "/interaction" ||
+    item.to === "/ledger" ||
+    item.to === "/dispatch-debug" ||
+    item.to === "/webhooks" ||
+    item.to === "/ai" ||
+    item.to === "/logs" ||
+    item.to === "/settings",
   );
 }
 

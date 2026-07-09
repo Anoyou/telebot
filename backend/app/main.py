@@ -19,6 +19,8 @@ from .api import alias as alias_api
 from .api import auth as auth_api
 from .api import config_bundle as config_bundle_api
 from .api import device_profiles as device_profiles_api
+from .api import dispatch_debug as dispatch_debug_api
+from .api import ledger as ledger_api
 from .api import llm_usage as llm_usage_api
 from .api import logs as logs_api
 from .api import message_templates as message_templates_api
@@ -27,6 +29,7 @@ from .api import notify_bots as notify_bots_api
 from .api import proxies as proxies_api
 from .api import rate_limit as rate_limit_api
 from .api import sudo as sudo_api
+from .api import webhooks as webhooks_api
 from .logging_redaction import install_sensitive_log_filter
 from .services import (
     account_bot_runtime,
@@ -330,6 +333,9 @@ app.include_router(alias_api.router)      # Sprint5：命令别名管理
 app.include_router(config_bundle_api.router)  # B1：Config Bundle export / dry-run
 app.include_router(llm_usage_api.router)  # AI 中心：最近 LLM 调用记录
 app.include_router(message_templates_api.router)  # 消息模板实验室
+app.include_router(dispatch_debug_api.router)  # WP4：命中调试器接口空桩
+app.include_router(ledger_api.router)  # WP5：资金台账接口空桩
+app.include_router(webhooks_api.router)  # WP7：入站 Webhook 接口空桩
 
 
 # ── 健康检查 ─────────────────────────────────────────────────────

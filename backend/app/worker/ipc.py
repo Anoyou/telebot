@@ -56,6 +56,8 @@ CMD_EXECUTE_RULE = "execute_rule"
 CMD_RUN_INTERACTION_ENTRY = "run_interaction_entry"
 # RPC：主进程请求账号 worker 用 userbot 身份执行交互动作（reply / file）
 CMD_RUN_INTERACTION_ACTION = "run_interaction_action"
+CMD_DISPATCH_SIMULATE = "dispatch_simulate"  # WP4：命中调试模拟预埋
+CMD_WEBHOOK_DELIVER = "webhook_deliver"      # WP7：入站 Webhook 投递预埋
 
 # ── 事件类型（worker→主） ──────────────────────────────────────
 EVT_STATUS = "status"                      # payload: {status: active|paused|...}
