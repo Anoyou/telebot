@@ -146,8 +146,207 @@ _INTERACTION_ENTRY_TIMEOUT_SECONDS = 15.0
 _INTERACTION_WORKER_ONLINE_WAIT_SECONDS = 5.0
 _INTERACTION_DEBUG_STATE_PREFIX = "account_bot:interaction_debug:"
 _INTERACTION_DEBUG_WARNINGS_PREFIX = "account_bot:interaction_debug_warnings:"
+_ROUTER_DEBUG_TRACE_PREFIX = "account_bot:router_debug_trace:"
 _INTERACTION_DEBUG_TTL_SECONDS = 86400
 _INTERACTION_DEBUG_WARNING_LIMIT = 20
+_ROUTER_DEBUG_TRACE_DEFAULT_TTL_SECONDS = 300
+_ROUTER_DEBUG_TRACE_MAX_TTL_SECONDS = 3600
+_ROUTER_DELIVERY_STATS: dict[tuple[int, str, str | None, int | None], dict[str, Any]] = {}
+
+
+def _router_delivery_stats_key(
+    account_id: int,
+    channel: str,
+    plugin_key: str | None = None,
+    chat_id: int | None = None,
+) -> tuple[int, str, str | None, int | None]:
+    return (int(account_id), str(channel or "unknown"), str(plugin_key or "").strip() or None, _int_or_none(chat_id))
+
+
+def _record_router_delivery_light(
+    incoming_or_account_id: Any,
+    channel: str,
+    status: str,
+    *,
+    plugin_key: str | None = None,
+    error: Any = None,
+) -> None:
+    account_id = _int_or_none(getattr(incoming_or_account_id, "account_id", incoming_or_account_id))
+    if account_id is None:
+        return
+    chat_id = _int_or_none(getattr(incoming_or_account_id, "chat_id", None))
+    key = _router_delivery_stats_key(account_id, channel, plugin_key, chat_id)
+    bucket = _ROUTER_DELIVERY_STATS.setdefault(
+        key,
+        {
+            "account_id": account_id,
+            "channel": str(channel or "unknown"),
+            "plugin_key": str(plugin_key or "").strip() or None,
+            "chat_id": chat_id,
+            "delivery_count": 0,
+            "last_delivery_at": None,
+            "last_error": None,
+        },
+    )
+    bucket["delivery_count"] = int(bucket.get("delivery_count") or 0) + 1
+    bucket["last_delivery_at"] = time.time()
+    bucket["last_error"] = str(error)[:500] if error else None
+    bucket["last_status"] = str(status or TRACE_STATUS_SKIPPED)
+
+
+def _router_debug_trace_keys(account_id: int, *, plugin_key: str | None = None, chat_id: int | None = None) -> list[str]:
+    aid = int(account_id)
+    keys = [f"{_ROUTER_DEBUG_TRACE_PREFIX}{aid}:account"]
+    plugin = str(plugin_key or "").strip()
+    if plugin:
+        keys.append(f"{_ROUTER_DEBUG_TRACE_PREFIX}{aid}:plugin:{plugin}")
+    normalized_chat_id = _int_or_none(chat_id)
+    if normalized_chat_id is not None:
+        keys.append(f"{_ROUTER_DEBUG_TRACE_PREFIX}{aid}:chat:{normalized_chat_id}")
+    return keys
+
+
+async def set_router_debug_trace(
+    account_id: int,
+    *,
+    plugin_key: str | None = None,
+    chat_id: int | None = None,
+    ttl_seconds: int | None = None,
+) -> dict[str, Any]:
+    """Temporarily enable full router trace for an account/plugin/chat scope."""
+
+    ttl = int(ttl_seconds or _ROUTER_DEBUG_TRACE_DEFAULT_TTL_SECONDS)
+    ttl = max(1, min(ttl, _ROUTER_DEBUG_TRACE_MAX_TTL_SECONDS))
+    plugin = str(plugin_key or "").strip() or None
+    normalized_chat_id = _int_or_none(chat_id)
+    if plugin:
+        key = f"{_ROUTER_DEBUG_TRACE_PREFIX}{int(account_id)}:plugin:{plugin}"
+        scope = "plugin"
+    elif normalized_chat_id is not None:
+        key = f"{_ROUTER_DEBUG_TRACE_PREFIX}{int(account_id)}:chat:{normalized_chat_id}"
+        scope = "chat"
+    else:
+        key = f"{_ROUTER_DEBUG_TRACE_PREFIX}{int(account_id)}:account"
+        scope = "account"
+    expires_at = time.time() + ttl
+    payload = json.dumps(
+        {
+            "account_id": int(account_id),
+            "plugin_key": plugin,
+            "chat_id": normalized_chat_id,
+            "scope": scope,
+            "expires_at": expires_at,
+        },
+        ensure_ascii=False,
+    )
+    await get_redis().set(key, payload, ex=ttl)
+    return {
+        "enabled": True,
+        "account_id": int(account_id),
+        "plugin_key": plugin,
+        "chat_id": normalized_chat_id,
+        "scope": scope,
+        "ttl_seconds": ttl,
+        "expires_at": expires_at,
+    }
+
+
+async def _router_debug_trace_enabled(
+    account_id: int,
+    *,
+    plugin_key: str | None = None,
+    chat_id: int | None = None,
+) -> bool:
+    try:
+        redis = get_redis()
+        for key in _router_debug_trace_keys(account_id, plugin_key=plugin_key, chat_id=chat_id):
+            if await redis.get(key):
+                return True
+    except Exception:  # noqa: BLE001
+        log.debug("read router debug trace flag failed aid=%s", account_id, exc_info=True)
+    return False
+
+
+def _plugin_declares_strict_trace(plugin_key: str | None) -> bool:
+    plugin = str(plugin_key or "").strip()
+    if not plugin:
+        return False
+    try:
+        manifest = account_bot_service.BUILTIN_FEATURES.manifest_for(plugin)
+        if manifest is not None and bool(getattr(manifest, "strict_trace", False)):
+            return True
+    except Exception:  # noqa: BLE001
+        log.debug("读取 builtin 模块 strict_trace 失败: %s", plugin, exc_info=True)
+    try:
+        plugin_json = settings.plugins_installed_path / plugin / "plugin.json"
+        if plugin_json.exists():
+            meta = json.loads(plugin_json.read_text(encoding="utf-8"))
+            if isinstance(meta, dict) and bool(meta.get("strict_trace")):
+                return True
+    except Exception:  # noqa: BLE001
+        log.debug("读取 installed 模块 strict_trace 失败: %s", plugin, exc_info=True)
+    return False
+
+
+def _interaction_rule_chat_matches(rule: dict[str, Any], incoming: Incoming) -> bool:
+    chat_ids = rule.get("chat_ids")
+    if not isinstance(chat_ids, list) or not chat_ids:
+        return True
+    if incoming.chat_id is None:
+        return False
+    try:
+        return int(incoming.chat_id) in {int(item) for item in chat_ids}
+    except (TypeError, ValueError):
+        return False
+
+
+async def _interaction_strict_trace_requested(
+    db: Any,
+    incoming: Incoming,
+    cfg: dict[str, Any],
+    routes: list[str],
+    *,
+    event_bus_delivery_enabled: bool,
+) -> bool:
+    if _ROUTE_PAYMENT_NOTICE in routes or _ROUTE_TRANSFER_COMMAND in routes:
+        return True
+    for rule in cfg.get("rules") or []:
+        if not isinstance(rule, dict) or not bool(rule.get("enabled", True)):
+            continue
+        if not _interaction_rule_chat_matches(rule, incoming):
+            continue
+        module_key = str(rule.get("module_key") or "").strip()
+        if module_key and _plugin_declares_strict_trace(module_key):
+            return True
+    if event_bus_delivery_enabled and _ROUTE_EVENT_BUS in routes:
+        try:
+            rows = (
+                await db.execute(
+                    select(AccountFeature).where(
+                        AccountFeature.account_id == incoming.account_id,
+                        AccountFeature.enabled.is_(True),
+                    )
+                )
+            ).scalars().all()
+            return any(_plugin_declares_strict_trace(getattr(row, "feature_key", None)) for row in rows)
+        except Exception:  # noqa: BLE001
+            log.debug("读取 Event Bus strict_trace 候选失败 aid=%s", incoming.account_id, exc_info=True)
+    return False
+
+
+async def _start_router_trace(incoming: Incoming, *, channel: str, reason: str, plugin_key: str | None = None) -> Any:
+    trace = await start_trace(_incoming_trace_payload(incoming, channel=channel))
+    incoming.trace_id = trace.trace_id
+    await record_span(
+        trace,
+        "receive",
+        TRACE_STATUS_OK,
+        component=channel,
+        plugin_key=plugin_key,
+        router_trace_reason=reason,
+        **_interaction_log_context(incoming),
+    )
+    return trace
 _POLLING_UPDATE_RETRY_DELAYS_SECONDS = (1.0, 3.0)
 _POLLING_DLQ_MAX = 500
 _POLLING_DLQ_LOOPS = {"interaction", "management", "transfer_test"}
@@ -942,8 +1141,7 @@ async def notify_account(account_id: int, text: str) -> int:
     failed = 0
     trace = None
     final_status = TRACE_STATUS_SKIPPED
-    flags = await _event_framework_flags()
-    if targets and flags.get("trace_enabled", True):
+    if targets and await _router_debug_trace_enabled(account_id):
         trace = await start_trace(
             {
                 "source": {
@@ -998,6 +1196,13 @@ async def notify_account(account_id: int, text: str) -> int:
             )
             log.debug("account bot notify failed aid=%s tg_user=%s", account_id, user.tg_user_id, exc_info=True)
     final_status = TRACE_STATUS_FAILED if failed else TRACE_STATUS_OK if sent else final_status
+    _record_router_delivery_light(
+        account_id,
+        "account_bot",
+        final_status,
+        plugin_key="system_notify",
+        error="account bot notify failed" if failed else None,
+    )
     await finish_trace(trace, final_status, sent_count=sent, failed_count=failed, target_count=len(targets))
     return sent
 
@@ -1736,10 +1941,8 @@ async def _handle_update(aid: int, token: str, update: dict[str, Any]) -> None:
     if (incoming.inline_query_id or incoming.chosen_inline_result_id) and not flags.get("inline_updates_enabled", True):
         return
     trace = None
-    if flags.get("trace_enabled", True):
-        trace = await start_trace(_incoming_trace_payload(incoming, channel="account_bot"))
-        incoming.trace_id = trace.trace_id
-        await record_span(trace, "receive", TRACE_STATUS_OK, component="account_bot", **_interaction_log_context(incoming))
+    if await _router_debug_trace_enabled(incoming.account_id, chat_id=incoming.chat_id):
+        trace = await _start_router_trace(incoming, channel="account_bot", reason="debug")
     final_status = TRACE_STATUS_SKIPPED
     try:
         async with AsyncSessionLocal() as db:
@@ -1826,6 +2029,7 @@ async def _handle_update(aid: int, token: str, update: dict[str, Any]) -> None:
         )
         raise
     finally:
+        _record_router_delivery_light(incoming, "account_bot", final_status)
         await finish_trace(trace, final_status)
 
 
@@ -1837,10 +2041,8 @@ async def _handle_interaction_update(aid: int, token: str, update: dict[str, Any
     if (incoming.inline_query_id or incoming.chosen_inline_result_id) and not flags.get("inline_updates_enabled", True):
         return
     trace = None
-    if flags.get("trace_enabled", True):
-        trace = await start_trace(_incoming_trace_payload(incoming))
-        incoming.trace_id = trace.trace_id
-        await record_span(trace, "receive", TRACE_STATUS_OK, component="interaction_bot", **_interaction_log_context(incoming))
+    if await _router_debug_trace_enabled(incoming.account_id, chat_id=incoming.chat_id):
+        trace = await _start_router_trace(incoming, channel="interaction_bot", reason="debug")
     final_status = TRACE_STATUS_SKIPPED
     try:
         cached_state = _cached_interaction_routing_state(incoming.account_id)
@@ -1884,6 +2086,14 @@ async def _handle_interaction_update(aid: int, token: str, update: dict[str, Any
                     reason_code="subscription_not_matched",
                 )
                 return
+            if trace is None and await _interaction_strict_trace_requested(
+                db,
+                incoming,
+                cfg,
+                routes,
+                event_bus_delivery_enabled=event_bus_delivery_enabled,
+            ):
+                trace = await _start_router_trace(incoming, channel="interaction_bot", reason="strict")
             if _ROUTE_PAYMENT_CONFIRM in routes and await _try_handle_interaction_payment_confirm(db, incoming, cfg):
                 final_status = TRACE_STATUS_OK
                 await record_span(trace, "route", TRACE_STATUS_OK, component="interaction_payment_confirm")
@@ -1968,6 +2178,7 @@ async def _handle_interaction_update(aid: int, token: str, update: dict[str, Any
         )
         raise
     finally:
+        _record_router_delivery_light(incoming, "interaction_bot", final_status)
         await finish_trace(trace, final_status)
 
 

@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 
 from ..deps import CurrentUser
 from ..redis_client import get_redis
+from ..services import account_bot_runtime
 from ..worker.ipc import (
     CMD_DISPATCH_SIMULATE,
     EVT_ACK,
@@ -31,6 +32,13 @@ class DispatchSimulateRequest(BaseModel):
     sender_id: int | None = None
     text: str = Field(default="", max_length=20000)
     via: str = Field(default="userbot", min_length=1, max_length=64)
+
+
+class RouterDebugTraceRequest(BaseModel):
+    account_id: int = Field(gt=0)
+    plugin_key: str | None = Field(default=None, min_length=1, max_length=128)
+    chat_id: int | None = None
+    ttl_seconds: int = Field(default=300, ge=1, le=3600)
 
 
 async def _publish_dispatch_simulation(redis: Any, payload: DispatchSimulateRequest) -> dict[str, Any] | None:
@@ -104,3 +112,13 @@ async def simulate_dispatch(payload: DispatchSimulateRequest, _user: CurrentUser
             },
         )
     return trace
+
+
+@router.post("/router-debug-trace")
+async def enable_router_debug_trace(payload: RouterDebugTraceRequest, _user: CurrentUser) -> dict[str, Any]:
+    return await account_bot_runtime.set_router_debug_trace(
+        payload.account_id,
+        plugin_key=payload.plugin_key,
+        chat_id=payload.chat_id,
+        ttl_seconds=payload.ttl_seconds,
+    )

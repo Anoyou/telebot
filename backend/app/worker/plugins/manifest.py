@@ -21,6 +21,7 @@ loader 在扫描目录阶段读取这个常量来决定加载方式、显示名�
 - ``command_fallback``：交互入口无法直接接入时的受控回退声明
 - ``preserve_command_trigger``：是否保留原有 UserBot 命令触发
 - ``capabilities``：可信插件高风险能力声明，例如 ``telegram_native_raw``
+- ``strict_trace``：插件是否要求路由投递层常驻全链路 trace（资金类 / payout 插件建议开启）
 - ``experimental``：是否为实验性插件；前端可据此提示风险
 - ``permissions``：可信插件的能力说明（如 ``send_message`` / ``edit_message``），用于安装提示、审计和 UI 展示
 - ``allowed_hosts``：声明 ``external_http`` 能访问的外部域名白名单
@@ -67,6 +68,8 @@ class Manifest:
     preserve_command_trigger: bool = True
     # 可信插件高风险能力声明，例如 {"telegram_native_raw": {"enabled": true, ...}}。
     capabilities: dict[str, Any] | None = None
+    # 是否要求路由投递层常驻全链路 trace；动作层 record_action 不受此开关影响。
+    strict_trace: bool = False
     # 是否为实验性插件；前端可据此展示 warning badge
     experimental: bool = False
     # ===== 阶段 C 引入：能力清单 =====
@@ -103,6 +106,7 @@ class Manifest:
             "command_fallback": self.command_fallback,
             "preserve_command_trigger": self.preserve_command_trigger,
             "capabilities": self.capabilities,
+            "strict_trace": self.strict_trace,
             "x-experimental": self.experimental,
             "permissions": list(self.permissions),
             "allowed_hosts": list(self.allowed_hosts),

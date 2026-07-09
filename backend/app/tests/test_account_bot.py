@@ -28,6 +28,7 @@ from app.services.interaction.delivery import (
 )
 from app.worker import runtime as worker_runtime
 from app.worker.plugins import loader as plugin_loader
+from app.worker.plugins.manifest import Manifest
 from app.worker.plugins.message_ops import BufferedMessageOps
 from app.worker.plugins.textutil import html_escape
 from app.worker.ratelimit.humanize import HumanizeOpts
@@ -6421,6 +6422,7 @@ async def test_interaction_update_respects_event_bus_delivery_switch(monkeypatch
     monkeypatch.setattr(account_bot_runtime, "start_trace", AsyncMock(return_value=trace))
     monkeypatch.setattr(account_bot_runtime, "record_span", record_span)
     monkeypatch.setattr(account_bot_runtime, "finish_trace", AsyncMock())
+    monkeypatch.setattr(account_bot_runtime, "_router_debug_trace_enabled", AsyncMock(return_value=True))
     monkeypatch.setattr(account_bot_runtime, "_try_handle_interaction_payment_confirm", AsyncMock(return_value=False))
     monkeypatch.setattr(
         account_bot_service,
@@ -6487,6 +6489,7 @@ async def test_management_update_respects_trace_enabled_switch(monkeypatch) -> N
     monkeypatch.setattr(account_bot_service, "find_bot_user", AsyncMock(return_value=user))
     monkeypatch.setattr(account_bot_runtime, "start_trace", AsyncMock())
     monkeypatch.setattr(account_bot_runtime, "finish_trace", AsyncMock())
+    monkeypatch.setattr(account_bot_runtime, "_router_debug_trace_enabled", AsyncMock(return_value=False))
     monkeypatch.setattr(account_bot_runtime, "_should_route_text_to_account_commands", lambda _incoming: True)
     monkeypatch.setattr(account_bot_runtime, "_handle_command", _handle_command)
 
@@ -6506,6 +6509,171 @@ async def test_management_update_respects_trace_enabled_switch(monkeypatch) -> N
 
     account_bot_runtime.start_trace.assert_not_awaited()
     assert handled and handled[0].trace_id is None
+    key = account_bot_runtime._router_delivery_stats_key(1, "account_bot", None, 111)
+    assert account_bot_runtime._ROUTER_DELIVERY_STATS[key]["delivery_count"] >= 1
+
+
+def test_plugin_manifest_serializes_strict_trace() -> None:
+    manifest = Manifest(key="payout_demo", display_name="Payout Demo", strict_trace=True)
+
+    assert manifest.strict_trace is True
+    assert manifest.to_dict()["strict_trace"] is True
+
+
+@pytest.mark.asyncio
+async def test_router_debug_trace_flag_is_temporary_and_scoped(monkeypatch) -> None:
+    redis = _MemoryRedis()
+    monkeypatch.setattr(account_bot_runtime, "get_redis", lambda: redis)
+
+    result = await account_bot_runtime.set_router_debug_trace(
+        1,
+        plugin_key="payout_demo",
+        ttl_seconds=60,
+    )
+
+    assert result["scope"] == "plugin"
+    assert result["ttl_seconds"] == 60
+    assert redis.set_calls[-1][2]["ex"] == 60
+    assert await account_bot_runtime._router_debug_trace_enabled(1, plugin_key="payout_demo") is True
+    assert await account_bot_runtime._router_debug_trace_enabled(1, plugin_key="other") is False
+
+
+@pytest.mark.asyncio
+async def test_interaction_update_default_uses_light_router_delivery(monkeypatch) -> None:
+    class _DB:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+    start_trace = AsyncMock()
+    rule_command = AsyncMock(return_value=True)
+    account_bot_runtime._ROUTER_DELIVERY_STATS.clear()
+    monkeypatch.setattr(
+        account_bot_runtime,
+        "_event_framework_flags",
+        AsyncMock(return_value={"trace_enabled": True, "event_bus_delivery_enabled": False, "inline_updates_enabled": True}),
+    )
+    monkeypatch.setattr(account_bot_runtime, "AsyncSessionLocal", lambda: _DB())
+    monkeypatch.setattr(account_bot_runtime, "start_trace", start_trace)
+    monkeypatch.setattr(account_bot_runtime, "_router_debug_trace_enabled", AsyncMock(return_value=False))
+    monkeypatch.setattr(account_bot_runtime, "_plugin_declares_strict_trace", lambda _key: False)
+    monkeypatch.setattr(account_bot_runtime, "_try_handle_interaction_payment_confirm", AsyncMock(return_value=False))
+    monkeypatch.setattr(account_bot_runtime, "_try_handle_transfer_notice", AsyncMock(return_value=False))
+    monkeypatch.setattr(account_bot_runtime, "_try_handle_interaction_rule_command_or_keyword", rule_command)
+    monkeypatch.setattr(account_bot_runtime, "_try_handle_interaction_module_message", AsyncMock(return_value=False))
+    monkeypatch.setattr(
+        account_bot_service,
+        "get_transfer_notice_config",
+        AsyncMock(
+            return_value={
+                "enabled": True,
+                "interaction_bot_id": 999,
+                "chat_ids": [-100],
+                "module_start_keywords": ["开始"],
+                "rules": [
+                    {
+                        "id": "demo",
+                        "enabled": True,
+                        "chat_ids": [-100],
+                        "module_start_keywords": ["开始"],
+                    }
+                ],
+            }
+        ),
+    )
+
+    await account_bot_runtime._handle_interaction_update(
+        1,
+        "bbot-token",
+        {
+            "update_id": 41,
+            "message": {
+                "message_id": 401,
+                "text": "开始",
+                "from": {"id": 111, "first_name": "AAA"},
+                "chat": {"id": -100, "type": "supergroup"},
+            },
+        },
+    )
+
+    start_trace.assert_not_awaited()
+    rule_command.assert_awaited_once()
+    key = account_bot_runtime._router_delivery_stats_key(1, "interaction_bot", None, -100)
+    assert account_bot_runtime._ROUTER_DELIVERY_STATS[key]["delivery_count"] == 1
+    assert account_bot_runtime._ROUTER_DELIVERY_STATS[key]["last_status"] == account_bot_runtime.TRACE_STATUS_OK
+
+
+@pytest.mark.asyncio
+async def test_interaction_update_strict_trace_plugin_keeps_full_router_trace(monkeypatch) -> None:
+    class _DB:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+    trace = SimpleNamespace(trace_id="evt_strict")
+    record_span = AsyncMock()
+    finish_trace = AsyncMock()
+    monkeypatch.setattr(
+        account_bot_runtime,
+        "_event_framework_flags",
+        AsyncMock(return_value={"trace_enabled": True, "event_bus_delivery_enabled": False, "inline_updates_enabled": True}),
+    )
+    monkeypatch.setattr(account_bot_runtime, "AsyncSessionLocal", lambda: _DB())
+    monkeypatch.setattr(account_bot_runtime, "start_trace", AsyncMock(return_value=trace))
+    monkeypatch.setattr(account_bot_runtime, "record_span", record_span)
+    monkeypatch.setattr(account_bot_runtime, "finish_trace", finish_trace)
+    monkeypatch.setattr(account_bot_runtime, "_router_debug_trace_enabled", AsyncMock(return_value=False))
+    monkeypatch.setattr(account_bot_runtime, "_plugin_declares_strict_trace", lambda key: key == "payout_demo")
+    monkeypatch.setattr(account_bot_runtime, "_try_handle_interaction_payment_confirm", AsyncMock(return_value=False))
+    monkeypatch.setattr(account_bot_runtime, "_try_handle_transfer_notice", AsyncMock(return_value=False))
+    monkeypatch.setattr(account_bot_runtime, "_try_handle_interaction_rule_command_or_keyword", AsyncMock(return_value=True))
+    monkeypatch.setattr(account_bot_runtime, "_try_handle_interaction_module_message", AsyncMock(return_value=False))
+    monkeypatch.setattr(
+        account_bot_service,
+        "get_transfer_notice_config",
+        AsyncMock(
+            return_value={
+                "enabled": True,
+                "interaction_bot_id": 999,
+                "chat_ids": [-100],
+                "module_start_keywords": ["开始"],
+                "rules": [
+                    {
+                        "id": "strict",
+                        "enabled": True,
+                        "chat_ids": [-100],
+                        "module_start_keywords": ["开始"],
+                        "action": "module",
+                        "module_key": "payout_demo",
+                        "module_action": "start",
+                    }
+                ],
+            }
+        ),
+    )
+
+    await account_bot_runtime._handle_interaction_update(
+        1,
+        "bbot-token",
+        {
+            "update_id": 42,
+            "message": {
+                "message_id": 402,
+                "text": "开始",
+                "from": {"id": 111, "first_name": "AAA"},
+                "chat": {"id": -100, "type": "supergroup"},
+            },
+        },
+    )
+
+    account_bot_runtime.start_trace.assert_awaited_once()
+    assert any(call.args[1] == "receive" and call.kwargs.get("router_trace_reason") == "strict" for call in record_span.await_args_list)
+    assert any(call.kwargs.get("component") == "interaction_rule" for call in record_span.await_args_list)
+    finish_trace.assert_awaited_once_with(trace, account_bot_runtime.TRACE_STATUS_OK)
 
 
 @pytest.mark.asyncio
@@ -6577,6 +6745,7 @@ async def test_interaction_inline_query_routes_through_event_bus_and_records_tra
     monkeypatch.setattr(account_bot_runtime, "start_trace", AsyncMock(return_value=trace))
     monkeypatch.setattr(account_bot_runtime, "record_span", record_span)
     monkeypatch.setattr(account_bot_runtime, "finish_trace", AsyncMock())
+    monkeypatch.setattr(account_bot_runtime, "_plugin_declares_strict_trace", lambda key: key == "inline_demo")
     monkeypatch.setattr(account_bot_runtime, "_try_handle_interaction_payment_confirm", AsyncMock(return_value=False))
     monkeypatch.setattr(account_bot_service, "get_transfer_notice_config", AsyncMock(return_value={"enabled": True, "chat_ids": []}))
     monkeypatch.setattr(account_bot_runtime, "_try_handle_transfer_notice", AsyncMock(return_value=False))
@@ -6662,6 +6831,7 @@ async def test_interaction_chosen_inline_result_routes_through_event_bus(monkeyp
     monkeypatch.setattr(account_bot_runtime, "start_trace", AsyncMock(return_value=trace))
     monkeypatch.setattr(account_bot_runtime, "record_span", AsyncMock())
     monkeypatch.setattr(account_bot_runtime, "finish_trace", AsyncMock())
+    monkeypatch.setattr(account_bot_runtime, "_plugin_declares_strict_trace", lambda key: key == "inline_demo")
     monkeypatch.setattr(account_bot_runtime, "_try_handle_interaction_payment_confirm", AsyncMock(return_value=False))
     monkeypatch.setattr(account_bot_service, "get_transfer_notice_config", AsyncMock(return_value={"enabled": True, "chat_ids": []}))
     monkeypatch.setattr(account_bot_runtime, "_try_handle_transfer_notice", AsyncMock(return_value=False))
@@ -12098,6 +12268,7 @@ async def test_interaction_close_command_clears_user_scoped_sessions(monkeypatch
     monkeypatch.setattr(account_bot_runtime, "record_span", record_span)
     monkeypatch.setattr(account_bot_runtime, "record_action", record_action)
     monkeypatch.setattr(account_bot_runtime, "finish_trace", finish_trace)
+    monkeypatch.setattr(account_bot_runtime, "_router_debug_trace_enabled", AsyncMock(return_value=True))
     monkeypatch.setattr(account_bot_service, "send_message", send)
     monkeypatch.setattr(
         account_bot_service,
@@ -14363,7 +14534,7 @@ async def test_authorized_group_plain_text_does_not_fall_through_to_account_comm
 
 
 @pytest.mark.asyncio
-async def test_management_bot_command_creates_trace(monkeypatch) -> None:
+async def test_management_bot_command_creates_trace_when_router_debug_enabled(monkeypatch) -> None:
     class _DB:
         async def __aenter__(self):
             return self
@@ -14385,6 +14556,7 @@ async def test_management_bot_command_creates_trace(monkeypatch) -> None:
     monkeypatch.setattr(account_bot_runtime, "start_trace", AsyncMock(return_value=trace))
     monkeypatch.setattr(account_bot_runtime, "record_span", record_span)
     monkeypatch.setattr(account_bot_runtime, "finish_trace", finish_trace)
+    monkeypatch.setattr(account_bot_runtime, "_router_debug_trace_enabled", AsyncMock(return_value=True))
     monkeypatch.setattr(account_bot_runtime, "_should_route_text_to_account_commands", lambda _incoming: True)
     monkeypatch.setattr(account_bot_runtime, "_handle_command", handle_command)
 
@@ -14718,6 +14890,7 @@ async def test_notify_account_records_trace_action(monkeypatch) -> None:
     monkeypatch.setattr(account_bot_runtime, "start_trace", AsyncMock(return_value=trace))
     monkeypatch.setattr(account_bot_runtime, "record_action", record_action)
     monkeypatch.setattr(account_bot_runtime, "finish_trace", finish_trace)
+    monkeypatch.setattr(account_bot_runtime, "_router_debug_trace_enabled", AsyncMock(return_value=True))
     monkeypatch.setattr(account_bot_service, "decrypt_bot_token", lambda _row: "bot-token")
     monkeypatch.setattr(
         account_bot_service,
