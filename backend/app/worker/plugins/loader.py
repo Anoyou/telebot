@@ -64,6 +64,14 @@ from ...db.models.rule import Rule
 from ...db.models.system import SystemSetting
 from ...redis_client import get_redis
 from ...services import account_bot_service, interaction_bot_service, payout_compensation, payout_limit
+from ...services.action_tap import (
+    ACTION_EVENT_STATUS_DRY_RUN,
+    ACTION_EVENT_STATUS_FAILED,
+    ACTION_EVENT_STATUS_OK,
+    action_context_dry_run_enabled,
+    dev_mode_dry_run_enabled,
+    emit_action_event,
+)
 from ...services.event_bus import (
     dispatch_event,
     event_subscription_warnings,
@@ -175,12 +183,14 @@ class _TracePluginClient:
         plugin_key: str,
         entry_key: str | None = None,
         component: str = "plugin_client",
+        account_id: int | None = None,
     ) -> None:
         self._client = client
         self._trace = trace
         self._plugin_key = plugin_key
         self._entry_key = entry_key
         self._component = component
+        self._account_id = _int_or_none(account_id if account_id is not None else getattr(trace, "account_id", None))
         self._telepilot_trace_client = True
         try:
             self._allowed = object.__getattribute__(client, "_allowed")
@@ -200,6 +210,22 @@ class _TracePluginClient:
             return None
         return detail if isinstance(detail, dict) else None
 
+    def _dry_run_enabled(self) -> bool:
+        if self._account_id is None:
+            return False
+        state = _STATES.get(self._account_id)
+        if state is None:
+            return False
+        return _plugin_dev_mode_dry_run_enabled(state.contexts.get(self._plugin_key))
+
+    def _dry_run_object(self, action: dict[str, Any]) -> Any:
+        return SimpleNamespace(
+            id=None,
+            message_id=None,
+            chat_id=_int_or_none(action.get("chat_id")),
+            dry_run=True,
+        )
+
     async def send_message(self, chat_id: Any = None, message: Any = None, *args: Any, **kwargs: Any) -> Any:
         if chat_id is None and "entity" in kwargs:
             chat_id = kwargs.pop("entity")
@@ -210,6 +236,16 @@ class _TracePluginClient:
             chat_id=chat_id,
             reply_to_message_id=kwargs.get("reply_to") or kwargs.get("reply_to_message_id"),
         )
+        if self._dry_run_enabled():
+            result = {"dry_run": True, "chat_id": _int_or_none(chat_id), "text": str(text or "")[:4000]}
+            await self._record(
+                action,
+                TRACE_STATUS_OK,
+                actual_send_via="userbot_reply",
+                result=result,
+                _tap_status=ACTION_EVENT_STATUS_DRY_RUN,
+            )
+            return self._dry_run_object(action)
         try:
             result = await self._client.send_message(chat_id, text, *args, **kwargs)
             rate_limit_detail = self._consume_rate_limit_detail()
@@ -244,6 +280,21 @@ class _TracePluginClient:
             reply_to_message_id=kwargs.get("reply_to") or kwargs.get("reply_to_message_id"),
         )
         action["filename"] = str(getattr(file, "name", "") or "") or None
+        if self._dry_run_enabled():
+            result = {
+                "dry_run": True,
+                "chat_id": _int_or_none(chat_id),
+                "filename": action.get("filename"),
+                "caption": kwargs.get("caption"),
+            }
+            await self._record(
+                action,
+                TRACE_STATUS_OK,
+                actual_send_via="userbot_reply",
+                result=result,
+                _tap_status=ACTION_EVENT_STATUS_DRY_RUN,
+            )
+            return self._dry_run_object(action)
         try:
             result = await self._client.send_file(chat_id, file, *args, **kwargs)
             rate_limit_detail = self._consume_rate_limit_detail()
@@ -275,6 +326,21 @@ class _TracePluginClient:
             chat_id=entity,
             message_id=message,
         )
+        if self._dry_run_enabled():
+            result = {
+                "dry_run": True,
+                "chat_id": _int_or_none(entity),
+                "message_id": _int_or_none(message),
+                "text": str((text if text is not None else kwargs.get("text")) or "")[:4000],
+            }
+            await self._record(
+                action,
+                TRACE_STATUS_OK,
+                actual_send_via="userbot_reply",
+                result=result,
+                _tap_status=ACTION_EVENT_STATUS_DRY_RUN,
+            )
+            return self._dry_run_object(action)
         try:
             result = await self._client.edit_message(entity, message, text, *args, **kwargs)
             await self._record(action, TRACE_STATUS_OK, actual_send_via="userbot_reply", result=_trace_client_result(result))
@@ -296,6 +362,20 @@ class _TracePluginClient:
             chat_id=entity,
             message_id=message_id if not isinstance(message_id, (list, tuple, set)) else None,
         )
+        if self._dry_run_enabled():
+            result = {
+                "dry_run": True,
+                "chat_id": _int_or_none(entity),
+                "message_id": _int_or_none(action.get("message_id")),
+            }
+            await self._record(
+                action,
+                TRACE_STATUS_OK,
+                actual_send_via="userbot_reply",
+                result=result,
+                _tap_status=ACTION_EVENT_STATUS_DRY_RUN,
+            )
+            return []
         try:
             result = await self._client.delete_messages(entity, message_ids, *args, **kwargs)
             await self._record(
@@ -319,6 +399,20 @@ class _TracePluginClient:
 
     async def pin_message(self, entity: Any, message: Any, *args: Any, **kwargs: Any) -> Any:
         action = self._action("pin_message", chat_id=entity, message_id=message)
+        if self._dry_run_enabled():
+            result = {
+                "dry_run": True,
+                "chat_id": _int_or_none(entity),
+                "message_id": _int_or_none(message),
+            }
+            await self._record(
+                action,
+                TRACE_STATUS_OK,
+                actual_send_via="userbot_reply",
+                result=result,
+                _tap_status=ACTION_EVENT_STATUS_DRY_RUN,
+            )
+            return self._dry_run_object(action)
         try:
             result = await self._client.pin_message(entity, message, *args, **kwargs)
             await self._record(action, TRACE_STATUS_OK, actual_send_via="userbot_reply", result=_trace_client_result(result))
@@ -359,11 +453,27 @@ class _TracePluginClient:
         return action
 
     async def _record(self, action: dict[str, Any], status: str, **detail: Any) -> None:
+        tap_status_override = detail.pop("_tap_status", None)
         detail.setdefault("plugin_key", self._plugin_key)
         if self._entry_key:
             detail.setdefault("entry_key", self._entry_key)
         detail.setdefault("component", self._component)
         await record_action(action.get("context"), action, status, **detail)
+        tap_status = tap_status_override or (
+            ACTION_EVENT_STATUS_OK if status == TRACE_STATUS_OK
+            else ACTION_EVENT_STATUS_FAILED if status == TRACE_STATUS_FAILED
+            else None
+        )
+        if tap_status is not None:
+            await emit_action_event(
+                account_id=self._account_id,
+                action=action,
+                status=tap_status,
+                channel=detail.get("actual_send_via"),
+                error_code=detail.get("error_code"),
+                error=detail.get("error"),
+                result=detail.get("result"),
+            )
 
 
 def _trace_client_result(result: Any) -> dict[str, Any]:
@@ -387,6 +497,7 @@ def _trace_plugin_client(
     plugin_key: str,
     entry_key: str | None = None,
     component: str = "plugin_client",
+    account_id: int | None = None,
 ) -> Any:
     if client is None or trace is None:
         return client
@@ -395,7 +506,14 @@ def _trace_plugin_client(
             return client
     except Exception:  # noqa: BLE001
         pass
-    return _TracePluginClient(client, trace, plugin_key=plugin_key, entry_key=entry_key, component=component)
+    return _TracePluginClient(
+        client,
+        trace,
+        plugin_key=plugin_key,
+        entry_key=entry_key,
+        component=component,
+        account_id=account_id,
+    )
 
 
 def _configured_interaction_bot_sender_ids(cfg: dict[str, Any]) -> frozenset[int]:
@@ -749,6 +867,378 @@ async def _dispatch_userbot_event_bus_matches(
     return invoked_count, failed_count, frozenset(consumed_plugin_keys)
 
 
+def evaluate_dispatch(
+    account: _AccountState | int | None = None,
+    chat: dict[str, Any] | None = None,
+    text: str = "",
+    via: str = "userbot",
+    *,
+    state: _AccountState | None = None,
+    direction: str | None = None,
+    edited: bool = False,
+) -> dict[str, Any]:
+    """Evaluate userbot dispatch decisions without side effects.
+
+    The function reads in-memory worker state only. It does not start traces,
+    call plugin handlers, touch Redis, or mutate dispatch caches.
+    """
+
+    resolved_state = state or (account if isinstance(account, _AccountState) else None)
+    account_id = (
+        resolved_state.account_id
+        if resolved_state is not None
+        else _int_or_none(account)
+    )
+    chat_ctx = dict(chat or {})
+    chat_id = _int_or_none(chat_ctx.get("chat_id") or chat_ctx.get("id"))
+    sender_id = _int_or_none(chat_ctx.get("sender_id") or chat_ctx.get("user_id"))
+    direction_value = str(direction or chat_ctx.get("direction") or "incoming").strip() or "incoming"
+    via_value = str(via or chat_ctx.get("via") or "userbot").strip() or "userbot"
+    clean_text = str(text or chat_ctx.get("text") or "").strip()
+    trace = {
+        "account_id": account_id,
+        "via": via_value,
+        "chat": {
+            "chat_id": chat_id,
+            "sender_id": sender_id,
+            "direction": direction_value,
+            "edited": bool(edited),
+        },
+        "text": clean_text,
+        "stages": [],
+    }
+    if resolved_state is None:
+        trace["stages"] = [
+            _dispatch_stage("direct_passthrough", False, "plugin_load_failed", "账号 worker state 不存在。"),
+            _dispatch_stage("prefix_command", False, "command_not_matched", "账号 worker state 不存在。"),
+            _dispatch_stage("keyword", False, "filter_not_matched", "账号 worker state 不存在。"),
+            _dispatch_stage("event_subscription", False, "subscription_not_matched", "账号 worker state 不存在。"),
+        ]
+        return trace
+
+    trace["stages"].append(
+        _evaluate_direct_passthrough_stage(
+            resolved_state,
+            via=via_value,
+            direction=direction_value,
+            edited=bool(edited),
+            sender_id=sender_id,
+        )
+    )
+    trace["stages"].append(
+        _evaluate_prefix_command_stage(
+            resolved_state,
+            text=clean_text,
+            direction=direction_value,
+            sender_id=sender_id,
+        )
+    )
+    trace["stages"].append(
+        _evaluate_keyword_stage(
+            resolved_state,
+            text=clean_text,
+            chat_id=chat_id,
+        )
+    )
+    trace["stages"].append(
+        _evaluate_event_subscription_stage(
+            resolved_state,
+            text=clean_text,
+            via=via_value,
+            chat_id=chat_id,
+            sender_id=sender_id,
+            edited=bool(edited),
+        )
+    )
+    return trace
+
+
+def _dispatch_stage(
+    stage: str,
+    matched: bool,
+    reason_code: str,
+    message: str,
+    **detail: Any,
+) -> dict[str, Any]:
+    out = {
+        "stage": stage,
+        "matched": bool(matched),
+        "reason_code": reason_code,
+        "message": message,
+    }
+    out.update(detail)
+    return out
+
+
+def _evaluate_direct_passthrough_stage(
+    state: _AccountState,
+    *,
+    via: str,
+    direction: str,
+    edited: bool,
+    sender_id: int | None,
+) -> dict[str, Any]:
+    candidates: list[dict[str, Any]] = []
+    if via != "userbot":
+        return _dispatch_stage(
+            "direct_passthrough",
+            False,
+            "source_not_subscribed",
+            "直通只适用于 userbot 来源。",
+            matches=candidates,
+        )
+    for plugin_key, inst in list(state.instances.items()):
+        ctx = state.contexts.get(plugin_key)
+        detail = {"plugin_key": plugin_key}
+        if ctx is None or ctx.generation != state.generation:
+            detail.update({"matched": False, "reason_code": "plugin_load_failed"})
+        elif not _plugin_direct_passthrough_enabled(ctx):
+            detail.update({"matched": False, "reason_code": "plugin_disabled"})
+        elif not _plugin_declares_direct_passthrough(inst, source="userbot", direction=direction, edited=edited):
+            detail.update({"matched": False, "reason_code": "source_not_subscribed"})
+        elif getattr(inst, "on_direct_message", None) is None or getattr(type(inst), "on_direct_message", None) is getattr(Plugin, "on_direct_message", None):
+            detail.update({"matched": False, "reason_code": "handler_error"})
+        elif getattr(inst, "owner_only", True) and not _owner_gate_allows(state, direction=direction, sender_id=sender_id):
+            detail.update({"matched": False, "reason_code": "permission_denied"})
+        else:
+            detail.update({"matched": True, "reason_code": "matched"})
+        candidates.append(detail)
+    matches = [item for item in candidates if item.get("matched")]
+    return _dispatch_stage(
+        "direct_passthrough",
+        bool(matches),
+        "matched" if matches else "filter_not_matched",
+        "直通插件命中。" if matches else "没有插件通过直通声明、账号配置和权限检查。",
+        matches=matches,
+        candidates=candidates,
+    )
+
+
+def _evaluate_prefix_command_stage(
+    state: _AccountState,
+    *,
+    text: str,
+    direction: str,
+    sender_id: int | None,
+) -> dict[str, Any]:
+    prefix = current_command_prefix(fallback=app_settings.command_prefix or ",")
+    if not prefix or not text.startswith(prefix):
+        return _dispatch_stage("prefix_command", False, "command_not_matched", "文本不是当前 userbot 前缀命令。")
+    command_text = text[len(prefix):].strip()
+    command = command_text.split(maxsplit=1)[0].lstrip("/") if command_text else ""
+    if not command:
+        return _dispatch_stage("prefix_command", False, "command_not_matched", "前缀后缺少命令名。")
+    if direction != "outgoing":
+        return _dispatch_stage(
+            "prefix_command",
+            False,
+            "command_not_matched",
+            "userbot 前缀命令只在账号 outgoing 消息中触发。",
+            command=command,
+            prefix=prefix,
+        )
+    matches: list[dict[str, Any]] = []
+    candidates: list[dict[str, Any]] = []
+    for plugin_key, inst in list(state.instances.items()):
+        ctx = state.contexts.get(plugin_key)
+        if ctx is None or ctx.generation != state.generation:
+            continue
+        for item in _plugin_command_candidates(plugin_key, inst, ctx):
+            if item["command"] != command:
+                candidates.append({**item, "matched": False, "reason_code": "command_not_matched"})
+                continue
+            if getattr(inst, "owner_only", True) and not _owner_gate_allows(state, direction=direction, sender_id=sender_id):
+                candidates.append({**item, "matched": False, "reason_code": "permission_denied"})
+                continue
+            matched = {**item, "matched": True, "reason_code": "command_matched"}
+            candidates.append(matched)
+            matches.append(matched)
+    return _dispatch_stage(
+        "prefix_command",
+        bool(matches),
+        "command_matched" if matches else "command_not_matched",
+        "前缀命令命中。" if matches else "没有已加载插件声明该命令。",
+        command=command,
+        prefix=prefix,
+        matches=matches,
+        candidates=candidates,
+    )
+
+
+def _plugin_command_candidates(plugin_key: str, inst: Plugin, ctx: PluginContext) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    commands = getattr(inst, "commands", None) or getattr(type(inst), "commands", None) or {}
+    if isinstance(commands, dict):
+        for command in sorted(str(key or "").strip().lstrip("/") for key in commands):
+            if command:
+                candidates.append({"plugin_key": plugin_key, "command": command, "source": "plugin_commands"})
+    manifest = getattr(type(inst), "_manifest", None)
+    for raw_entry in getattr(manifest, "interaction_entries", None) or []:
+        entry = account_bot_service.normalize_interaction_entry_manifest(raw_entry)
+        if not entry:
+            continue
+        command = _entry_command_trigger(entry)
+        if not command:
+            continue
+        if _entry_trigger_mode(ctx.config if isinstance(ctx.config, dict) else {}, entry, command) == "keyword_only":
+            continue
+        candidates.append(
+            {
+                "plugin_key": plugin_key,
+                "entry_key": str(entry.get("key") or "").strip() or None,
+                "command": command,
+                "source": "manifest_interaction_entry",
+            }
+        )
+    return candidates
+
+
+def _evaluate_keyword_stage(
+    state: _AccountState,
+    *,
+    text: str,
+    chat_id: int | None,
+) -> dict[str, Any]:
+    matches: list[dict[str, Any]] = []
+    candidates: list[dict[str, Any]] = []
+    for rule in getattr(state, "interaction_text_guard_rules", ()) or ():
+        rule_match = bool(text and text in rule.texts and _interaction_text_guard_rule_matches(rule, chat_id))
+        detail = {
+            "source": "interaction_text_guard",
+            "keywords": sorted(rule.texts),
+            "matched": rule_match,
+            "reason_code": "interaction_rule_owned" if rule_match else "filter_not_matched",
+        }
+        candidates.append(detail)
+        if rule_match:
+            matches.append(detail)
+    for plugin_key, inst in list(state.instances.items()):
+        ctx = state.contexts.get(plugin_key)
+        if ctx is None or ctx.generation != state.generation:
+            continue
+        manifest = getattr(type(inst), "_manifest", None)
+        for raw_entry in getattr(manifest, "interaction_entries", None) or []:
+            entry = account_bot_service.normalize_interaction_entry_manifest(raw_entry)
+            if not entry:
+                continue
+            keywords = _entry_keyword_triggers(entry)
+            if not keywords:
+                continue
+            matched = text in keywords
+            detail = {
+                "source": "manifest_interaction_entry",
+                "plugin_key": plugin_key,
+                "entry_key": str(entry.get("key") or "").strip() or None,
+                "keywords": sorted(keywords),
+                "matched": matched,
+                "reason_code": "matched" if matched else "filter_not_matched",
+            }
+            candidates.append(detail)
+            if matched:
+                matches.append(detail)
+    return _dispatch_stage(
+        "keyword",
+        bool(matches),
+        "matched" if matches else "filter_not_matched",
+        "关键词命中。" if matches else "没有关键词规则命中。",
+        matches=matches,
+        candidates=candidates,
+    )
+
+
+def _entry_keyword_triggers(entry: dict[str, Any]) -> set[str]:
+    triggers = entry.get("triggers") if isinstance(entry.get("triggers"), dict) else {}
+    raw_values = [
+        entry.get("keyword"),
+        entry.get("keywords"),
+        entry.get("trigger_text"),
+        entry.get("trigger_texts"),
+        entry.get("module_start_keywords"),
+        triggers.get("keyword"),
+        triggers.get("keywords"),
+        triggers.get("text"),
+        triggers.get("texts"),
+    ]
+    out: set[str] = set()
+    for raw in raw_values:
+        if isinstance(raw, list):
+            values = raw
+        else:
+            values = [raw]
+        for item in values:
+            value = str(item or "").strip()
+            if value:
+                out.add(value)
+    return out
+
+
+def _evaluate_event_subscription_stage(
+    state: _AccountState,
+    *,
+    text: str,
+    via: str,
+    chat_id: int | None,
+    sender_id: int | None,
+    edited: bool,
+) -> dict[str, Any]:
+    subscriptions = _event_bus_subscriptions_from_state(state)
+    if not subscriptions:
+        return _dispatch_stage(
+            "event_subscription",
+            False,
+            "subscription_not_matched",
+            "没有已启用插件声明 Event Bus 订阅。",
+            decisions=[],
+        )
+    event = SimpleNamespace(
+        chat_id=chat_id,
+        sender_id=sender_id,
+        id=None,
+        raw_text=text,
+        text=text,
+        message=SimpleNamespace(chat_id=chat_id, sender_id=sender_id, id=None, text=text),
+    )
+    payload = normalize_userbot_event(state.account_id, event)
+    source = dict(payload.get("source") if isinstance(payload.get("source"), dict) else {})
+    source["channel"] = via
+    source["type"] = "message_edited" if edited else "message"
+    payload["source"] = source
+    payload["event_type"] = source["type"]
+    result = dispatch_event(payload, subscriptions, _event_bus_state_for_userbot_dispatch(state))
+    decisions = [
+        {
+            "plugin_key": decision.plugin_key,
+            "entry_key": decision.entry_key,
+            "matched": bool(decision.matched),
+            "reason_code": decision.reason_code,
+            "message": decision.reason_message,
+            "dispatch_mode": decision.dispatch_mode,
+            "scope": decision.scope,
+            "filters": decision.filters,
+        }
+        for decision in result.decisions
+    ]
+    matches = [item for item in decisions if item.get("matched")]
+    return _dispatch_stage(
+        "event_subscription",
+        bool(matches),
+        "matched" if matches else "subscription_not_matched",
+        "Event Bus 订阅命中。" if matches else "Event Bus 订阅未命中。",
+        decisions=decisions,
+        matches=matches,
+    )
+
+
+def _owner_gate_allows(state: _AccountState, *, direction: str, sender_id: int | None) -> bool:
+    if direction == "outgoing":
+        return True
+    if sender_id is None:
+        return False
+    if state.owner_tg_user_id is not None and sender_id == state.owner_tg_user_id:
+        return True
+    return sender_id in state.sudo_users
+
+
 def _plugin_overrides(inst: Plugin, method_name: str) -> bool:
     handler = getattr(inst, method_name, None)
     base_handler = getattr(Plugin, method_name, None)
@@ -782,6 +1272,7 @@ async def _invoke_userbot_event_bus_entry(
         plugin_key=plugin_key,
         entry_key=entry_key,
         component="userbot_event_bus_dispatcher",
+        account_id=ctx.account_id,
     )
     trace_id = str(payload.get("trace_id") or "").strip()
     call_log = base_log
@@ -891,6 +1382,68 @@ def _plugin_direct_passthrough_enabled(ctx: PluginContext | None) -> bool:
     return False
 
 
+def _plugin_dev_mode_dry_run_enabled(ctx: PluginContext | None) -> bool:
+    if ctx is None or ctx.generation <= 0:
+        return False
+    cfg = ctx.account_config if isinstance(ctx.account_config, dict) else {}
+    return dev_mode_dry_run_enabled(cfg)
+
+
+def _action_dev_mode_dry_run_enabled(state: _AccountState, action: dict[str, Any]) -> bool:
+    if action_context_dry_run_enabled(action):
+        return True
+    context = action.get("context")
+    plugin_key = str((context or {}).get("plugin_key") or "").strip() if isinstance(context, dict) else ""
+    if not plugin_key:
+        return False
+    return _plugin_dev_mode_dry_run_enabled(state.contexts.get(plugin_key))
+
+
+async def _emit_userbot_action_tap(
+    state: _AccountState,
+    action: dict[str, Any],
+    status: str,
+    *,
+    channel: str | None = None,
+    error_code: str | None = None,
+    error: Any = None,
+    result: Any = None,
+) -> None:
+    await emit_action_event(
+        account_id=state.account_id,
+        action=action,
+        status=status,
+        channel=channel,
+        error_code=error_code,
+        error=error,
+        result=result,
+        redis=state.redis,
+    )
+
+
+async def _record_userbot_dry_run(
+    state: _AccountState,
+    action: dict[str, Any],
+    *,
+    channel: str,
+    result: dict[str, Any],
+) -> None:
+    await record_action(
+        action.get("context"),
+        action,
+        TRACE_STATUS_OK,
+        actual_send_via=channel,
+        result=result,
+    )
+    await _emit_userbot_action_tap(
+        state,
+        action,
+        ACTION_EVENT_STATUS_DRY_RUN,
+        channel=channel,
+        result=result,
+    )
+
+
 async def _start_userbot_direct_passthrough_trace(
     state: _AccountState,
     event: Any,
@@ -992,6 +1545,7 @@ async def _dispatch_userbot_direct_passthrough(
                 trace,
                 plugin_key=plugin_key,
                 component="userbot_direct_passthrough",
+                account_id=ctx.account_id,
             )
         call_log = ctx.log
         if ctx.log is not None and trace is not None:
@@ -1651,6 +2205,15 @@ async def _record_userbot_action_failure(
         error=error,
         result=result,
     )
+    await _emit_userbot_action_tap(
+        state,
+        action,
+        ACTION_EVENT_STATUS_FAILED,
+        channel="userbot_reply",
+        error_code=error_code,
+        error=error,
+        result=result,
+    )
     await _log_userbot_action_failure(
         state,
         action,
@@ -1859,6 +2422,20 @@ async def _apply_userbot_payout_action(state: _AccountState, event: Any, action:
             target_chat_id=target_chat_id,
         )
         return False
+    if _action_dev_mode_dry_run_enabled(state, action):
+        await _record_userbot_dry_run(
+            state,
+            action,
+            channel="userbot_reply",
+            result={
+                "dry_run": True,
+                "chat_id": target_chat_id,
+                "amount": str(amount),
+                "text": text,
+                "payout_key": payout_key,
+            },
+        )
+        return True
 
     async def _enqueue_compensation(
         error_code: str,
@@ -1984,6 +2561,13 @@ async def _apply_userbot_payout_action(state: _AccountState, event: Any, action:
             actual_send_via="userbot_reply",
             result=result,
         )
+        await _emit_userbot_action_tap(
+            state,
+            action,
+            ACTION_EVENT_STATUS_OK,
+            channel="userbot_reply",
+            result=result,
+        )
         return True
     except Exception as exc:  # noqa: BLE001
         flood_detail = await _feed_engine_flood_wait(
@@ -2028,6 +2612,20 @@ async def _apply_userbot_send_message_action(
     if target_chat_id is None:
         await record_action(action.get("context"), action, TRACE_STATUS_FAILED, error_code="scope_not_matched", error="target chat_id missing")
         return False
+    if _action_dev_mode_dry_run_enabled(state, action):
+        options = action_send_via_options(action)
+        await _record_userbot_dry_run(
+            state,
+            action,
+            channel=options[0] if options else "userbot_reply",
+            result={
+                "dry_run": True,
+                "chat_id": target_chat_id,
+                "text": text,
+                "send_via_options": options,
+            },
+        )
+        return True
     reply_to = _int_or_none(action.get("reply_to_message_id"))
     reply_markup = action.get("reply_markup") if isinstance(action.get("reply_markup"), dict) else None
     parse_mode = _action_parse_mode(action)
@@ -2059,6 +2657,13 @@ async def _apply_userbot_send_message_action(
                 )
                 await _save_action_message_id(state, action, result)
                 await record_action(action.get("context"), action, TRACE_STATUS_OK, actual_send_via="interaction_bot", result=result)
+                await _emit_userbot_action_tap(
+                    state,
+                    action,
+                    ACTION_EVENT_STATUS_OK,
+                    channel="interaction_bot",
+                    result=result,
+                )
                 return True
             except Exception as exc:  # noqa: BLE001
                 last_code = "telegram_api_error"
@@ -2142,6 +2747,13 @@ async def _apply_userbot_send_message_action(
                     actual_send_via="userbot_reply",
                     result=result,
                 )
+                await _emit_userbot_action_tap(
+                    state,
+                    action,
+                    ACTION_EVENT_STATUS_OK,
+                    channel="userbot_reply",
+                    result=result,
+                )
                 return True
             except Exception as exc:  # noqa: BLE001
                 last_code = "telegram_api_error"
@@ -2156,6 +2768,15 @@ async def _apply_userbot_send_message_action(
                 )
                 continue
     await record_action(action.get("context"), action, TRACE_STATUS_FAILED, error_code=last_code, error=last_error, result=last_result)
+    await _emit_userbot_action_tap(
+        state,
+        action,
+        ACTION_EVENT_STATUS_FAILED,
+        channel=action_send_via_options(action)[0] if action_send_via_options(action) else None,
+        error_code=last_code,
+        error=last_error,
+        result=last_result,
+    )
     await _log_userbot_action_failure(state, action, result=last_result, message="userbot send_message action failed")
     if last_code == "reply_anchor_missing":
         await _send_reply_anchor_missing_notice(
@@ -2183,6 +2804,21 @@ async def _apply_userbot_edit_message_action(state: _AccountState, event: Any, a
             error="target chat_id or message_id missing",
         )
         return False
+    if _action_dev_mode_dry_run_enabled(state, action):
+        options = action_send_via_options(action)
+        await _record_userbot_dry_run(
+            state,
+            action,
+            channel=options[0] if options else "userbot_reply",
+            result={
+                "dry_run": True,
+                "chat_id": target_chat_id,
+                "message_id": message_id,
+                "text": text,
+                "send_via_options": options,
+            },
+        )
+        return True
     reply_markup = action.get("reply_markup") if isinstance(action.get("reply_markup"), dict) else None
     parse_mode = _action_parse_mode(action)
     last_code = "unsupported_send_via"
@@ -2204,6 +2840,13 @@ async def _apply_userbot_edit_message_action(state: _AccountState, event: Any, a
                     parse_mode=parse_mode,
                 )
                 await record_action(action.get("context"), action, TRACE_STATUS_OK, actual_send_via="interaction_bot", result=result)
+                await _emit_userbot_action_tap(
+                    state,
+                    action,
+                    ACTION_EVENT_STATUS_OK,
+                    channel="interaction_bot",
+                    result=result,
+                )
                 return True
             except Exception as exc:  # noqa: BLE001
                 last_code = "telegram_api_error"
@@ -2235,12 +2878,27 @@ async def _apply_userbot_edit_message_action(state: _AccountState, event: Any, a
                     actual_send_via="userbot_reply",
                     result={"message_id": getattr(result, "id", None) or message_id, "chat_id": target_chat_id},
                 )
+                await _emit_userbot_action_tap(
+                    state,
+                    action,
+                    ACTION_EVENT_STATUS_OK,
+                    channel="userbot_reply",
+                    result={"message_id": getattr(result, "id", None) or message_id, "chat_id": target_chat_id},
+                )
                 return True
             except Exception as exc:  # noqa: BLE001
                 last_code = "telegram_api_error"
                 last_error = f"{type(exc).__name__}: {exc}"
                 continue
     await record_action(action.get("context"), action, TRACE_STATUS_FAILED, error_code=last_code, error=last_error)
+    await _emit_userbot_action_tap(
+        state,
+        action,
+        ACTION_EVENT_STATUS_FAILED,
+        channel=action_send_via_options(action)[0] if action_send_via_options(action) else None,
+        error_code=last_code,
+        error=last_error,
+    )
     return False
 
 
@@ -2271,6 +2929,21 @@ async def _apply_userbot_edit_caption_action(state: _AccountState, event: Any, a
             error="target chat_id or message_id missing",
         )
         return False
+    if _action_dev_mode_dry_run_enabled(state, action):
+        options = action_send_via_options(action)
+        await _record_userbot_dry_run(
+            state,
+            action,
+            channel=options[0] if options else "userbot_reply",
+            result={
+                "dry_run": True,
+                "chat_id": target_chat_id,
+                "message_id": message_id,
+                "caption": caption,
+                "send_via_options": options,
+            },
+        )
+        return True
     reply_markup = action.get("reply_markup") if isinstance(action.get("reply_markup"), dict) else None
     parse_mode = _action_parse_mode(action)
     last_code = "unsupported_send_via"
@@ -2292,15 +2965,30 @@ async def _apply_userbot_edit_caption_action(state: _AccountState, event: Any, a
                     parse_mode=parse_mode,
                 )
                 await record_action(action.get("context"), action, TRACE_STATUS_OK, actual_send_via="interaction_bot", result=result)
+                await _emit_userbot_action_tap(
+                    state,
+                    action,
+                    ACTION_EVENT_STATUS_OK,
+                    channel="interaction_bot",
+                    result=result,
+                )
                 return True
             except Exception as exc:  # noqa: BLE001
                 if _is_message_not_modified_error(exc):
+                    result = {"message_id": message_id, "chat_id": target_chat_id, "not_modified": True}
                     await record_action(
                         action.get("context"),
                         action,
                         TRACE_STATUS_OK,
                         actual_send_via="interaction_bot",
-                        result={"message_id": message_id, "chat_id": target_chat_id, "not_modified": True},
+                        result=result,
+                    )
+                    await _emit_userbot_action_tap(
+                        state,
+                        action,
+                        ACTION_EVENT_STATUS_OK,
+                        channel="interaction_bot",
+                        result=result,
                     )
                     return True
                 last_code = "telegram_api_error"
@@ -2332,21 +3020,44 @@ async def _apply_userbot_edit_caption_action(state: _AccountState, event: Any, a
                     actual_send_via="userbot_reply",
                     result={"message_id": getattr(result, "id", None) or message_id, "chat_id": target_chat_id},
                 )
+                await _emit_userbot_action_tap(
+                    state,
+                    action,
+                    ACTION_EVENT_STATUS_OK,
+                    channel="userbot_reply",
+                    result={"message_id": getattr(result, "id", None) or message_id, "chat_id": target_chat_id},
+                )
                 return True
             except Exception as exc:  # noqa: BLE001
                 if _is_message_not_modified_error(exc):
+                    result = {"message_id": message_id, "chat_id": target_chat_id, "not_modified": True}
                     await record_action(
                         action.get("context"),
                         action,
                         TRACE_STATUS_OK,
                         actual_send_via="userbot_reply",
-                        result={"message_id": message_id, "chat_id": target_chat_id, "not_modified": True},
+                        result=result,
+                    )
+                    await _emit_userbot_action_tap(
+                        state,
+                        action,
+                        ACTION_EVENT_STATUS_OK,
+                        channel="userbot_reply",
+                        result=result,
                     )
                     return True
                 last_code = "telegram_api_error"
                 last_error = f"{type(exc).__name__}: {exc}"
                 continue
     await record_action(action.get("context"), action, TRACE_STATUS_FAILED, error_code=last_code, error=last_error)
+    await _emit_userbot_action_tap(
+        state,
+        action,
+        ACTION_EVENT_STATUS_FAILED,
+        channel=action_send_via_options(action)[0] if action_send_via_options(action) else None,
+        error_code=last_code,
+        error=last_error,
+    )
     return False
 
 
@@ -2367,6 +3078,21 @@ async def _apply_userbot_send_media_action(state: _AccountState, event: Any, act
     if target_chat_id is None:
         await record_action(action.get("context"), action, TRACE_STATUS_FAILED, error_code="scope_not_matched", error="target chat_id missing")
         return False
+    if _action_dev_mode_dry_run_enabled(state, action):
+        options = action_send_via_options(action)
+        await _record_userbot_dry_run(
+            state,
+            action,
+            channel=options[0] if options else "userbot_reply",
+            result={
+                "dry_run": True,
+                "chat_id": target_chat_id,
+                "filename": filename,
+                "caption": caption,
+                "send_via_options": options,
+            },
+        )
+        return True
     reply_to = _int_or_none(action.get("reply_to_message_id"))
     filename = str(action.get("filename") or ("interaction.png" if action.get("type") == "send_photo" else "interaction.bin")).strip()
     caption = str(action.get("caption") or action.get("text") or "").strip() or None
@@ -2406,6 +3132,13 @@ async def _apply_userbot_send_media_action(state: _AccountState, event: Any, act
                     )
                 await _save_action_message_id(state, action, result)
                 await record_action(action.get("context"), action, TRACE_STATUS_OK, actual_send_via="interaction_bot", result=result)
+                await _emit_userbot_action_tap(
+                    state,
+                    action,
+                    ACTION_EVENT_STATUS_OK,
+                    channel="interaction_bot",
+                    result=result,
+                )
                 return True
             except Exception as exc:  # noqa: BLE001
                 last_code = "telegram_api_error"
@@ -2442,12 +3175,27 @@ async def _apply_userbot_send_media_action(state: _AccountState, event: Any, act
                     actual_send_via="userbot_reply",
                     result=result,
                 )
+                await _emit_userbot_action_tap(
+                    state,
+                    action,
+                    ACTION_EVENT_STATUS_OK,
+                    channel="userbot_reply",
+                    result=result,
+                )
                 return True
             except Exception as exc:  # noqa: BLE001
                 last_code = "telegram_api_error"
                 last_error = f"{type(exc).__name__}: {exc}"
                 continue
     await record_action(action.get("context"), action, TRACE_STATUS_FAILED, error_code=last_code, error=last_error)
+    await _emit_userbot_action_tap(
+        state,
+        action,
+        ACTION_EVENT_STATUS_FAILED,
+        channel=action_send_via_options(action)[0] if action_send_via_options(action) else None,
+        error_code=last_code,
+        error=last_error,
+    )
     return False
 
 
@@ -2457,6 +3205,15 @@ async def _apply_userbot_delete_message_action(state: _AccountState, event: Any,
     if target_chat_id is None or message_id is None:
         await record_action(action.get("context"), action, TRACE_STATUS_FAILED, error_code="scope_not_matched", error="target chat_id or message_id missing")
         return False
+    if _action_dev_mode_dry_run_enabled(state, action):
+        options = action_send_via_options(action)
+        await _record_userbot_dry_run(
+            state,
+            action,
+            channel=options[0] if options else "userbot_reply",
+            result={"dry_run": True, "chat_id": target_chat_id, "message_id": message_id},
+        )
+        return True
     last_code = "unsupported_send_via"
     last_error = "no supported send_via"
     for send_via in action_send_via_options(action):
@@ -2469,6 +3226,13 @@ async def _apply_userbot_delete_message_action(state: _AccountState, event: Any,
             try:
                 result = await account_bot_service.delete_message(token, target_chat_id, message_id)
                 await record_action(action.get("context"), action, TRACE_STATUS_OK, actual_send_via="interaction_bot", result=result)
+                await _emit_userbot_action_tap(
+                    state,
+                    action,
+                    ACTION_EVENT_STATUS_OK,
+                    channel="interaction_bot",
+                    result=result,
+                )
                 return True
             except Exception as exc:  # noqa: BLE001
                 last_code = "telegram_api_error"
@@ -2482,12 +3246,26 @@ async def _apply_userbot_delete_message_action(state: _AccountState, event: Any,
             try:
                 await state.client.delete_messages(target_chat_id, [message_id])
                 await record_action(action.get("context"), action, TRACE_STATUS_OK, actual_send_via="userbot_reply")
+                await _emit_userbot_action_tap(
+                    state,
+                    action,
+                    ACTION_EVENT_STATUS_OK,
+                    channel="userbot_reply",
+                )
                 return True
             except Exception as exc:  # noqa: BLE001
                 last_code = "telegram_api_error"
                 last_error = f"{type(exc).__name__}: {exc}"
                 continue
     await record_action(action.get("context"), action, TRACE_STATUS_FAILED, error_code=last_code, error=last_error)
+    await _emit_userbot_action_tap(
+        state,
+        action,
+        ACTION_EVENT_STATUS_FAILED,
+        channel=action_send_via_options(action)[0] if action_send_via_options(action) else None,
+        error_code=last_code,
+        error=last_error,
+    )
     return False
 
 
@@ -2497,6 +3275,15 @@ async def _apply_userbot_pin_message_action(state: _AccountState, event: Any, ac
     if target_chat_id is None or message_id is None:
         await record_action(action.get("context"), action, TRACE_STATUS_FAILED, error_code="scope_not_matched", error="target chat_id or message_id missing")
         return False
+    if _action_dev_mode_dry_run_enabled(state, action):
+        options = action_send_via_options(action)
+        await _record_userbot_dry_run(
+            state,
+            action,
+            channel=options[0] if options else "userbot_reply",
+            result={"dry_run": True, "chat_id": target_chat_id, "message_id": message_id},
+        )
+        return True
     last_code = "unsupported_send_via"
     last_error = "no supported send_via"
     for send_via in action_send_via_options(action):
@@ -2513,6 +3300,13 @@ async def _apply_userbot_pin_message_action(state: _AccountState, event: Any, ac
                     {"chat_id": target_chat_id, "message_id": message_id},
                 )
                 await record_action(action.get("context"), action, TRACE_STATUS_OK, actual_send_via="interaction_bot", result=result)
+                await _emit_userbot_action_tap(
+                    state,
+                    action,
+                    ACTION_EVENT_STATUS_OK,
+                    channel="interaction_bot",
+                    result=result,
+                )
                 return True
             except Exception as exc:  # noqa: BLE001
                 last_code = "telegram_api_error"
@@ -2526,12 +3320,26 @@ async def _apply_userbot_pin_message_action(state: _AccountState, event: Any, ac
             try:
                 await state.client.pin_message(target_chat_id, message_id, notify=False)
                 await record_action(action.get("context"), action, TRACE_STATUS_OK, actual_send_via="userbot_reply")
+                await _emit_userbot_action_tap(
+                    state,
+                    action,
+                    ACTION_EVENT_STATUS_OK,
+                    channel="userbot_reply",
+                )
                 return True
             except Exception as exc:  # noqa: BLE001
                 last_code = "telegram_api_error"
                 last_error = f"{type(exc).__name__}: {exc}"
                 continue
     await record_action(action.get("context"), action, TRACE_STATUS_FAILED, error_code=last_code, error=last_error)
+    await _emit_userbot_action_tap(
+        state,
+        action,
+        ACTION_EVENT_STATUS_FAILED,
+        channel=action_send_via_options(action)[0] if action_send_via_options(action) else None,
+        error_code=last_code,
+        error=last_error,
+    )
     return False
 
 
@@ -2553,6 +3361,14 @@ async def _apply_userbot_answer_callback_action(state: _AccountState, action: di
     if not token:
         await record_action(action.get("context"), action, TRACE_STATUS_FAILED, error_code="bot_token_missing", error="interaction bot token unavailable")
         return False
+    if _action_dev_mode_dry_run_enabled(state, action):
+        await _record_userbot_dry_run(
+            state,
+            action,
+            channel="interaction_bot",
+            result={"dry_run": True, "callback_query_id": callback_query_id},
+        )
+        return True
     try:
         await account_bot_service.answer_callback(
             token,
@@ -2562,8 +3378,17 @@ async def _apply_userbot_answer_callback_action(state: _AccountState, action: di
         )
     except Exception as exc:  # noqa: BLE001
         await record_action(action.get("context"), action, TRACE_STATUS_FAILED, error_code="telegram_api_error", error=f"{type(exc).__name__}: {exc}")
+        await _emit_userbot_action_tap(
+            state,
+            action,
+            ACTION_EVENT_STATUS_FAILED,
+            channel="interaction_bot",
+            error_code="telegram_api_error",
+            error=f"{type(exc).__name__}: {exc}",
+        )
         return False
     await record_action(action.get("context"), action, TRACE_STATUS_OK, actual_send_via="interaction_bot")
+    await _emit_userbot_action_tap(state, action, ACTION_EVENT_STATUS_OK, channel="interaction_bot")
     return True
 
 
@@ -2579,6 +3404,14 @@ async def _apply_userbot_answer_inline_query_action(state: _AccountState, action
     results = action.get("results")
     if not isinstance(results, list):
         results = []
+    if _action_dev_mode_dry_run_enabled(state, action):
+        await _record_userbot_dry_run(
+            state,
+            action,
+            channel="interaction_bot",
+            result={"dry_run": True, "inline_query_id": inline_query_id, "result_count": len(results)},
+        )
+        return True
     try:
         await account_bot_service.answer_inline_query(
             token,
@@ -2591,8 +3424,17 @@ async def _apply_userbot_answer_inline_query_action(state: _AccountState, action
         )
     except Exception as exc:  # noqa: BLE001
         await record_action(action.get("context"), action, TRACE_STATUS_FAILED, error_code="telegram_api_error", error=f"{type(exc).__name__}: {exc}")
+        await _emit_userbot_action_tap(
+            state,
+            action,
+            ACTION_EVENT_STATUS_FAILED,
+            channel="interaction_bot",
+            error_code="telegram_api_error",
+            error=f"{type(exc).__name__}: {exc}",
+        )
         return False
     await record_action(action.get("context"), action, TRACE_STATUS_OK, actual_send_via="interaction_bot")
+    await _emit_userbot_action_tap(state, action, ACTION_EVENT_STATUS_OK, channel="interaction_bot")
     return True
 
 
@@ -4717,6 +5559,7 @@ async def load_plugins_for_account(
                     trace,
                     plugin_key=fkey,
                     component="legacy_userbot_dispatcher",
+                    account_id=state.account_id,
                 )
                 call_log = base_log
                 if base_log is not None and trace is not None:
@@ -5377,6 +6220,7 @@ def _wrap_cmd(fn, ctx: PluginContext):
             trace_id,
             plugin_key=ctx.feature_key,
             component="plugin_command",
+            account_id=ctx.account_id,
         )
         call_ctx = replace(ctx, client=call_client, log=call_log, messages=call_messages)
         plugin_event = _wrap_event_for_context(event, call_ctx)
@@ -6003,6 +6847,7 @@ async def invoke_interaction_entry(
         plugin_key=plugin_key,
         entry_key=entry_key,
         component="interaction_entry",
+        account_id=ctx.account_id,
     )
 
     call_log = base_log
@@ -6029,6 +6874,7 @@ async def invoke_interaction_entry(
 __all__ = [
     "RECENT_PEERS_LIMIT",
     "discover_plugins",
+    "evaluate_dispatch",
     "get_recent_peers",
     "invoke_interaction_entry",
     "load_plugins_for_account",

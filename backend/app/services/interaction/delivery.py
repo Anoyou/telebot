@@ -16,6 +16,13 @@ from typing import Any
 from ...redis_client import get_redis
 from .. import account_bot_service
 from .. import payout_compensation as payout_compensation_service
+from ..action_tap import (
+    ACTION_EVENT_STATUS_DRY_RUN,
+    ACTION_EVENT_STATUS_FAILED,
+    ACTION_EVENT_STATUS_OK,
+    action_context_dry_run_enabled,
+    emit_action_event,
+)
 from ..event_trace import TRACE_STATUS_FAILED, TRACE_STATUS_OK, TRACE_STATUS_SKIPPED, record_action
 from .contracts import (
     INTERACTION_SEND_VIA,
@@ -45,6 +52,50 @@ class InteractionDeliveryExecutor:
     log_context: Callable[[Any], dict[str, Any]]
     trace_context: Callable[[dict[str, Any] | None], dict[str, Any]]
     get_redis_client: Callable[[], Any] = get_redis
+
+    async def _emit_action_tap(
+        self,
+        action: dict[str, Any],
+        status: str,
+        *,
+        channel: str | None = None,
+        error_code: str | None = None,
+        error: Any = None,
+        result: Any = None,
+    ) -> None:
+        await emit_action_event(
+            account_id=self.incoming.account_id,
+            action=action,
+            status=status,
+            channel=channel,
+            error_code=error_code,
+            error=error,
+            result=result,
+        )
+
+    def _dry_run_enabled(self, action: dict[str, Any]) -> bool:
+        return action_context_dry_run_enabled(action)
+
+    async def _record_dry_run(
+        self,
+        action: dict[str, Any],
+        *,
+        channel: str,
+        result: dict[str, Any],
+    ) -> None:
+        await record_action(
+            action.get("context"),
+            action,
+            TRACE_STATUS_OK,
+            actual_send_via=channel,
+            result=result,
+        )
+        await self._emit_action_tap(
+            action,
+            ACTION_EVENT_STATUS_DRY_RUN,
+            channel=channel,
+            result=result,
+        )
 
     async def apply(
         self,
@@ -691,6 +742,16 @@ class InteractionDeliveryExecutor:
         if action.get("payout_key") not in (None, ""):
             payload["payout_key"] = str(action.get("payout_key"))
         payout_key = payout_compensation_service.ensure_payout_key(payload)
+        if self._dry_run_enabled(action):
+            dry_result = {
+                "dry_run": True,
+                "chat_id": target_chat_id,
+                "amount": str(amount),
+                "text": text,
+                "payout_key": payout_key,
+            }
+            await self._record_dry_run(action, channel="userbot_reply", result=dry_result)
+            return
         if reply_to_user_id is not None:
             payload["reply_to_user_id"] = reply_to_user_id
         if reply_to_search_limit is not None:
@@ -748,6 +809,14 @@ class InteractionDeliveryExecutor:
             TRACE_STATUS_OK if ok else TRACE_STATUS_FAILED,
             **record_detail,
         )
+        await self._emit_action_tap(
+            action,
+            ACTION_EVENT_STATUS_OK if ok else ACTION_EVENT_STATUS_FAILED,
+            channel="userbot_reply",
+            error_code=record_detail.get("error_code"),
+            error=record_detail.get("error"),
+            result=detail,
+        )
         if not ok:
             log_detail = self.log_context(self.incoming)
             log_detail.update(_userbot_action_log_detail(detail))
@@ -801,6 +870,20 @@ class InteractionDeliveryExecutor:
         elif edit_message_id is None and replace_message_id is not None:
             delete_message_id = replace_message_id
             replace_message_id = None
+        if self._dry_run_enabled(action):
+            dry_result = {
+                "dry_run": True,
+                "chat_id": target_chat_id,
+                "text": text,
+                "reply_to_message_id": reply_to_message_id,
+                "send_via_options": send_via_options,
+            }
+            await self._record_dry_run(
+                action,
+                channel=send_via_options[0] if send_via_options else "interaction_bot",
+                result=dry_result,
+            )
+            return replace_message_id
         ok, result, used_send_via = await self._try_send_message_options(
             text,
             chat_id=chat_id,
@@ -854,6 +937,14 @@ class InteractionDeliveryExecutor:
             result=result,
             error_code=None if ok else _result_error_code(result, "action_failed"),
             error=result.get("error") if isinstance(result, dict) else None,
+        )
+        await self._emit_action_tap(
+            action,
+            ACTION_EVENT_STATUS_OK if ok else ACTION_EVENT_STATUS_FAILED,
+            channel=used_send_via,
+            error_code=None if ok else _result_error_code(result, "action_failed"),
+            error=result.get("error") if isinstance(result, dict) else None,
+            result=result,
         )
         if ok and used_send_via == "interaction_bot" and action.get("pin"):
             await self._apply_pin_message(
@@ -1022,6 +1113,20 @@ class InteractionDeliveryExecutor:
             )
             return
         chat_id = _int_or_none(action.get("chat_id"))
+        if self._dry_run_enabled(action):
+            dry_result = {
+                "dry_run": True,
+                "chat_id": self._target_chat_id(chat_id),
+                "message_id": message_id,
+                "text": text,
+                "send_via_options": action_send_via_options(action),
+            }
+            await self._record_dry_run(
+                action,
+                channel=(action_send_via_options(action)[0] if action_send_via_options(action) else "interaction_bot"),
+                result=dry_result,
+            )
+            return
         ok, result, used_send_via = await self._try_edit_message_options(
             text,
             chat_id=chat_id,
@@ -1038,6 +1143,14 @@ class InteractionDeliveryExecutor:
             result=result,
             error_code=None if ok else _result_error_code(result, "action_failed"),
             error=result.get("error") if isinstance(result, dict) else None,
+        )
+        await self._emit_action_tap(
+            action,
+            ACTION_EVENT_STATUS_OK if ok else ACTION_EVENT_STATUS_FAILED,
+            channel=used_send_via,
+            error_code=None if ok else _result_error_code(result, "action_failed"),
+            error=result.get("error") if isinstance(result, dict) else None,
+            result=result,
         )
 
     async def _apply_edit_caption(
@@ -1076,6 +1189,21 @@ class InteractionDeliveryExecutor:
             )
             return
         chat_id = _int_or_none(action.get("chat_id"))
+        if self._dry_run_enabled(action):
+            options = action_send_via_options(action)
+            dry_result = {
+                "dry_run": True,
+                "chat_id": self._target_chat_id(chat_id),
+                "message_id": message_id,
+                "caption": caption,
+                "send_via_options": options,
+            }
+            await self._record_dry_run(
+                action,
+                channel=options[0] if options else "interaction_bot",
+                result=dry_result,
+            )
+            return
         ok, result, used_send_via = await self._try_edit_caption_options(
             caption,
             chat_id=chat_id,
@@ -1092,6 +1220,14 @@ class InteractionDeliveryExecutor:
             result=result,
             error_code=None if ok else _result_error_code(result, "action_failed"),
             error=result.get("error") if isinstance(result, dict) else None,
+        )
+        await self._emit_action_tap(
+            action,
+            ACTION_EVENT_STATUS_OK if ok else ACTION_EVENT_STATUS_FAILED,
+            channel=used_send_via,
+            error_code=None if ok else _result_error_code(result, "action_failed"),
+            error=result.get("error") if isinstance(result, dict) else None,
+            result=result,
         )
 
     async def _apply_send_media(
@@ -1142,6 +1278,22 @@ class InteractionDeliveryExecutor:
         caption = str(action.get("caption") or action.get("text") or "").strip() or None
         chat_id = _int_or_none(action.get("chat_id"))
         placeholder_chat_id = self.incoming.chat_id
+        if self._dry_run_enabled(action):
+            options = action_send_via_options(action)
+            dry_result = {
+                "dry_run": True,
+                "chat_id": self._target_chat_id(chat_id),
+                "filename": filename,
+                "caption": caption,
+                "reply_to_message_id": reply_to_message_id,
+                "send_via_options": options,
+            }
+            await self._record_dry_run(
+                action,
+                channel=options[0] if options else "interaction_bot",
+                result=dry_result,
+            )
+            return replace_message_id
         ok, _result, _used_send_via = await self._try_send_photo_options(
             photo,
             action_type=action_type,
@@ -1177,6 +1329,14 @@ class InteractionDeliveryExecutor:
             error_code=None if ok else _result_error_code(_result, "action_failed"),
             error=_result.get("error") if isinstance(_result, dict) else None,
         )
+        await self._emit_action_tap(
+            action,
+            ACTION_EVENT_STATUS_OK if ok else ACTION_EVENT_STATUS_FAILED,
+            channel=_used_send_via,
+            error_code=None if ok else _result_error_code(_result, "action_failed"),
+            error=_result.get("error") if isinstance(_result, dict) else None,
+            result=_result,
+        )
         return replace_message_id
 
     async def _answer_callback(self, action: dict[str, Any]) -> None:
@@ -1199,6 +1359,13 @@ class InteractionDeliveryExecutor:
                 error_code="already_acked",
                 reason_code="already_acked",
                 error="callback query already acknowledged",
+            )
+            return
+        if self._dry_run_enabled(action):
+            await self._record_dry_run(
+                action,
+                channel="interaction_bot",
+                result={"dry_run": True, "callback_query_id": callback_query_id},
             )
             return
         try:
@@ -1226,6 +1393,7 @@ class InteractionDeliveryExecutor:
             )
             return
         await record_action(action.get("context"), action, TRACE_STATUS_OK, actual_send_via="interaction_bot")
+        await self._emit_action_tap(action, ACTION_EVENT_STATUS_OK, channel="interaction_bot")
 
     async def _maybe_answer_failure_callback(self, action: dict[str, Any], result: dict[str, Any]) -> None:
         failure = action.get("failure_callback")
@@ -1260,6 +1428,13 @@ class InteractionDeliveryExecutor:
         results = action.get("results")
         if not isinstance(results, list):
             results = []
+        if self._dry_run_enabled(action):
+            await self._record_dry_run(
+                action,
+                channel="interaction_bot",
+                result={"dry_run": True, "inline_query_id": inline_query_id, "result_count": len(results)},
+            )
+            return
         try:
             await account_bot_service.answer_inline_query(
                 self.incoming.token,
@@ -1287,6 +1462,7 @@ class InteractionDeliveryExecutor:
             )
             return
         await record_action(action.get("context"), action, TRACE_STATUS_OK, actual_send_via="interaction_bot")
+        await self._emit_action_tap(action, ACTION_EVENT_STATUS_OK, channel="interaction_bot")
 
     async def _apply_delete_message(self, action: dict[str, Any]) -> None:
         message_id = _int_or_none(action.get("message_id"))
@@ -1299,6 +1475,13 @@ class InteractionDeliveryExecutor:
                 TRACE_STATUS_FAILED,
                 error_code="target_message_id_missing",
                 error="delete_message target chat_id or message_id missing",
+            )
+            return
+        if self._dry_run_enabled(action):
+            await self._record_dry_run(
+                action,
+                channel=action_send_via_options(action)[0] if action_send_via_options(action) else "interaction_bot",
+                result={"dry_run": True, "chat_id": target_chat_id, "message_id": message_id},
             )
             return
         last_code = "unsupported_send_via"
@@ -1317,6 +1500,12 @@ class InteractionDeliveryExecutor:
                         action,
                         TRACE_STATUS_OK,
                         actual_send_via=send_via,
+                        result=result,
+                    )
+                    await self._emit_action_tap(
+                        action,
+                        ACTION_EVENT_STATUS_OK,
+                        channel=send_via,
                         result=result,
                     )
                     return
@@ -1339,12 +1528,20 @@ class InteractionDeliveryExecutor:
             try:
                 await account_bot_service.delete_message(token, target_chat_id, message_id)
                 await record_action(action.get("context"), action, TRACE_STATUS_OK, actual_send_via=send_via)
+                await self._emit_action_tap(action, ACTION_EVENT_STATUS_OK, channel=send_via)
                 return
             except Exception as exc:  # noqa: BLE001
                 last_code = "telegram_api_error"
                 last_error = f"{type(exc).__name__}: {exc}"
                 continue
         await record_action(action.get("context"), action, TRACE_STATUS_FAILED, error_code=last_code, error=last_error)
+        await self._emit_action_tap(
+            action,
+            ACTION_EVENT_STATUS_FAILED,
+            channel=action_send_via_options(action)[0] if action_send_via_options(action) else None,
+            error_code=last_code,
+            error=last_error,
+        )
 
     async def _apply_pin_message(self, action: dict[str, Any]) -> None:
         message_id = _int_or_none(action.get("message_id"))
@@ -1357,6 +1554,13 @@ class InteractionDeliveryExecutor:
                 TRACE_STATUS_FAILED,
                 error_code="target_message_id_missing",
                 error="pin_message target chat_id or message_id missing",
+            )
+            return
+        if self._dry_run_enabled(action):
+            await self._record_dry_run(
+                action,
+                channel=action_send_via_options(action)[0] if action_send_via_options(action) else "interaction_bot",
+                result={"dry_run": True, "chat_id": target_chat_id, "message_id": message_id},
             )
             return
         last_code = "unsupported_send_via"
@@ -1377,6 +1581,7 @@ class InteractionDeliveryExecutor:
                         actual_send_via=send_via,
                         result=result,
                     )
+                    await self._emit_action_tap(action, ACTION_EVENT_STATUS_OK, channel=send_via, result=result)
                     return
                 last_code = _result_error_code(result, _worker_action_error_code(error))
                 last_error = str(
@@ -1401,12 +1606,20 @@ class InteractionDeliveryExecutor:
                     {"chat_id": target_chat_id, "message_id": message_id},
                 )
                 await record_action(action.get("context"), action, TRACE_STATUS_OK, actual_send_via=send_via)
+                await self._emit_action_tap(action, ACTION_EVENT_STATUS_OK, channel=send_via)
                 return
             except Exception as exc:  # noqa: BLE001
                 last_code = "telegram_api_error"
                 last_error = f"{type(exc).__name__}: {exc}"
                 continue
         await record_action(action.get("context"), action, TRACE_STATUS_FAILED, error_code=last_code, error=last_error)
+        await self._emit_action_tap(
+            action,
+            ACTION_EVENT_STATUS_FAILED,
+            channel=action_send_via_options(action)[0] if action_send_via_options(action) else None,
+            error_code=last_code,
+            error=last_error,
+        )
 
     async def _try_send_message_options(
         self,

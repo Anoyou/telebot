@@ -2,6 +2,7 @@
 
 from .account import Account, HumanizeConfig, Proxy
 from .account_bot import AccountBot, AccountBotUser
+from .action_event import ActionEvent
 from .command import AccountCommandLink, CommandTemplate, LLMProvider
 from .feature import AccountFeature, Feature
 from .ignored_peer import IgnoredPeer
@@ -31,6 +32,7 @@ __all__ = [
     "AccountBot",
     "AccountBotUser",
     "AccountCommandLink",
+    "ActionEvent",
     "AccountFeature",
     "AuditLog",
     "CommandTemplate",

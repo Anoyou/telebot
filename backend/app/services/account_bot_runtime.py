@@ -61,6 +61,11 @@ from . import (
     feature_service,
     remote_plugin_service,
 )
+from .action_tap import (
+    ACTION_EVENT_STATUS_FAILED,
+    ACTION_EVENT_STATUS_OK,
+    emit_action_event,
+)
 from .event_bus import (
     EVENT_REASON_CODES,
     dispatch_event,
@@ -108,6 +113,28 @@ _RUNTIME_NOTIFY_DEDUPE_PREFIX = "account_bot:runtime_notify:"
 _INTERACTION_RULE_STATE_PREFIX = "account_bot:interaction_rule_state:"
 _INTERACTION_TRIGGER_DEDUPE_PREFIX = "account_bot:interaction_trigger:"
 _INTERACTION_SESSION_PREFIX = "account_bot:interaction_session:"
+
+
+async def _emit_account_bot_action_tap(
+    incoming_or_account_id: Any,
+    action: dict[str, Any],
+    status: str,
+    *,
+    channel: str | None = None,
+    error_code: str | None = None,
+    error: Any = None,
+    result: Any = None,
+) -> None:
+    account_id = getattr(incoming_or_account_id, "account_id", incoming_or_account_id)
+    await emit_action_event(
+        account_id=_int_or_none(account_id),
+        action=action,
+        status=status,
+        channel=channel,
+        error_code=error_code,
+        error=error,
+        result=result,
+    )
 _INTERACTION_USER_COOLDOWN_PREFIX = "account_bot:interaction_user_cooldown:"
 _INTERACTION_USER_DAILY_PREFIX = "account_bot:interaction_user_daily:"
 _INTERACTION_USER_PENDING_PREFIX = "account_bot:interaction_user_pending:"
@@ -942,6 +969,13 @@ async def notify_account(account_id: int, text: str) -> int:
                 parse_mode="HTML",
             )
             await record_action(trace, action, TRACE_STATUS_OK, actual_send_via="account_bot", result=result)
+            await _emit_account_bot_action_tap(
+                account_id,
+                action,
+                ACTION_EVENT_STATUS_OK,
+                channel="account_bot",
+                result=result,
+            )
             sent += 1
         except Exception:  # noqa: BLE001
             failed += 1
@@ -950,6 +984,14 @@ async def notify_account(account_id: int, text: str) -> int:
                 action,
                 TRACE_STATUS_FAILED,
                 actual_send_via="account_bot",
+                error_code="telegram_api_error",
+                error="account bot notify failed",
+            )
+            await _emit_account_bot_action_tap(
+                account_id,
+                action,
+                ACTION_EVENT_STATUS_FAILED,
+                channel="account_bot",
                 error_code="telegram_api_error",
                 error="account bot notify failed",
             )
@@ -6746,6 +6788,13 @@ async def _try_handle_transfer_command(
             result=result,
             transfer_test_notice=True,
         )
+        await _emit_account_bot_action_tap(
+            incoming,
+            action,
+            ACTION_EVENT_STATUS_OK,
+            channel="transfer_test_notice",
+            result=result,
+        )
     except Exception as exc:
         await record_action(
             trace_log_context(incoming.trace_id),
@@ -6755,6 +6804,14 @@ async def _try_handle_transfer_command(
             error_code="telegram_api_error",
             error=f"{type(exc).__name__}: {exc}",
             transfer_test_notice=True,
+        )
+        await _emit_account_bot_action_tap(
+            incoming,
+            action,
+            ACTION_EVENT_STATUS_FAILED,
+            channel="transfer_test_notice",
+            error_code="telegram_api_error",
+            error=f"{type(exc).__name__}: {exc}",
         )
         log.warning(
             "transfer command test notice send failed aid=%s chat_id=%s message_id=%s amount=%s error=%s: %s",
@@ -8029,6 +8086,13 @@ async def _send(
                 actual_send_via="interaction_bot",
                 result=result,
             )
+            await _emit_account_bot_action_tap(
+                incoming,
+                action,
+                ACTION_EVENT_STATUS_OK,
+                channel="interaction_bot",
+                result=result,
+            )
             return result
         except Exception:
             log.debug("edit account bot message failed, fallback send", exc_info=True)
@@ -8037,6 +8101,14 @@ async def _send(
                 action,
                 TRACE_STATUS_FAILED,
                 actual_send_via="interaction_bot",
+                error_code="telegram_api_error",
+                error="edit account bot message failed, fallback send",
+            )
+            await _emit_account_bot_action_tap(
+                incoming,
+                action,
+                ACTION_EVENT_STATUS_FAILED,
+                channel="interaction_bot",
                 error_code="telegram_api_error",
                 error="edit account bot message failed, fallback send",
             )
@@ -8062,6 +8134,13 @@ async def _send(
             actual_send_via="interaction_bot",
             result=result,
         )
+        await _emit_account_bot_action_tap(
+            incoming,
+            send_action,
+            ACTION_EVENT_STATUS_OK,
+            channel="interaction_bot",
+            result=result,
+        )
         return result
     except Exception as exc:
         await record_action(
@@ -8069,6 +8148,14 @@ async def _send(
             send_action,
             TRACE_STATUS_FAILED,
             actual_send_via="interaction_bot",
+            error_code="telegram_api_error",
+            error=f"{type(exc).__name__}: {exc}",
+        )
+        await _emit_account_bot_action_tap(
+            incoming,
+            send_action,
+            ACTION_EVENT_STATUS_FAILED,
+            channel="interaction_bot",
             error_code="telegram_api_error",
             error=f"{type(exc).__name__}: {exc}",
         )
@@ -8118,12 +8205,26 @@ async def _answer_callback(
             TRACE_STATUS_OK,
             actual_send_via="interaction_bot",
         )
+        await _emit_account_bot_action_tap(
+            incoming,
+            action,
+            ACTION_EVENT_STATUS_OK,
+            channel="interaction_bot",
+        )
     except Exception as exc:
         await record_action(
             trace_log_context(incoming.trace_id),
             action,
             TRACE_STATUS_FAILED,
             actual_send_via="interaction_bot",
+            error_code="telegram_api_error",
+            error=f"{type(exc).__name__}: {exc}",
+        )
+        await _emit_account_bot_action_tap(
+            incoming,
+            action,
+            ACTION_EVENT_STATUS_FAILED,
+            channel="interaction_bot",
             error_code="telegram_api_error",
             error=f"{type(exc).__name__}: {exc}",
         )
