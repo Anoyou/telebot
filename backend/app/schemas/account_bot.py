@@ -307,6 +307,7 @@ class AccountBotInteractionConfig(BaseModel):
     trusted_bot_id: int | None = None
     trusted_bot_ids: list[int] = Field(default_factory=list, max_length=50)
     transfer_bot_id: int | None = None
+    reply_chain_verification_enabled: bool = True
     transfer_bot_token: str | None = Field(default=None, min_length=10, max_length=256)
     clear_transfer_bot_token: bool = False
     has_transfer_bot_token: bool = False

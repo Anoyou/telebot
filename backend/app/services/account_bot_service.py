@@ -218,6 +218,7 @@ def default_transfer_notice_config() -> dict[str, Any]:
         "trusted_bot_id": None,
         "trusted_bot_ids": [],
         "transfer_bot_id": None,
+        "reply_chain_verification_enabled": True,
         "transfer_bot_token_enc": None,
         "has_transfer_bot_token": False,
         "transfer_last_update_id": None,
@@ -277,6 +278,7 @@ def normalize_transfer_notice_config(raw: Any) -> dict[str, Any]:
             if key in raw:
                 base[key] = raw[key]
     base["enabled"] = bool(base.get("enabled", False))
+    base["reply_chain_verification_enabled"] = bool(base.get("reply_chain_verification_enabled", True))
     for key in (
         "chat_id",
         "interaction_bot_id",

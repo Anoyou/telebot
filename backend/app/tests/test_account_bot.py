@@ -2788,6 +2788,7 @@ def test_account_bot_transfer_notice_config_normalizes_values() -> None:
             "trigger_text": " 转账成功 ",
             "trigger_texts": [" 转账成功 ", "交易成功", "转账成功"],
             "query_commands": [" 。玩法 ", "。玩法", "玩法菜单"],
+            "reply_chain_verification_enabled": False,
             "receiver_text": " 我 ",
             "amount": "100",
             "response_template": " 检测到 {amount} ",
@@ -2800,6 +2801,7 @@ def test_account_bot_transfer_notice_config_normalizes_values() -> None:
     assert cfg["chat_ids"] == [-100123, -100999]
     assert cfg["trusted_bot_id"] == 456
     assert cfg["trusted_bot_ids"] == [456]
+    assert cfg["reply_chain_verification_enabled"] is False
     assert cfg["trigger_text"] == "转账成功"
     assert cfg["trigger_texts"] == ["转账成功", "交易成功"]
     assert cfg["query_commands"] == ["。玩法", "玩法菜单"]
@@ -2810,6 +2812,12 @@ def test_account_bot_transfer_notice_config_normalizes_values() -> None:
     assert cfg["rules"][0]["id"] == "legacy-default"
     assert cfg["rules"][0]["chat_ids"] == [-100123, -100999]
     assert cfg["rules"][0]["trigger_texts"] == ["转账成功", "交易成功"]
+
+
+def test_account_bot_transfer_notice_reply_chain_verification_defaults_on() -> None:
+    cfg = account_bot_service.normalize_transfer_notice_config({})
+
+    assert cfg["reply_chain_verification_enabled"] is True
 
 
 def test_account_bot_transfer_notice_config_upgrades_legacy_default_template() -> None:
@@ -3916,6 +3924,255 @@ async def test_transfer_notice_enriches_anonymous_debit_payer_from_reply_target(
     assert enriched["payer_user_id"] == 5843467471
     assert enriched["payer_name"] == "ㅤㅤ"
     assert enriched["payer_identity_confidence"] == "reply_target"
+
+
+def _transfer_reply_chain_db(*, account_user_id: int = 222, display_name: str = "Owner"):
+    class _DB:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def commit(self):
+            return None
+
+        async def get(self, model, *_args):  # noqa: ANN002
+            if model is Account:
+                return SimpleNamespace(tg_user_id=account_user_id, tg_username="owner", display_name=display_name)
+            return None
+
+    return _DB()
+
+
+def _reply_chain_math_rule(*, trigger_texts: list[str] | None = None) -> dict[str, Any]:
+    return {
+        "id": "paid-chain",
+        "name": "链路玩法",
+        "enabled": True,
+        "chat_ids": [-100123],
+        "trigger_mode": "payment",
+        "trigger_texts": trigger_texts or ["转账成功"],
+        "receiver_text": None,
+        "amount": 100,
+        "amount_match_mode": "eq",
+        "action": "math10",
+        "math_prize": 456,
+    }
+
+
+@pytest.mark.asyncio
+async def test_transfer_notice_reply_chain_blocks_forged_same_name_receiver(monkeypatch) -> None:
+    redis = _MemoryRedis()
+    await save_action_reply_target(
+        redis,
+        account_id=1,
+        chat_id=-100123,
+        message_id=619,
+        reply_to_user_id=333,
+        reply_to_display_name="Owner",
+    )
+    run_entry = _patch_math10_worker_entry(monkeypatch)
+    record_span = AsyncMock()
+    monkeypatch.setattr(account_bot_runtime, "AsyncSessionLocal", lambda: _transfer_reply_chain_db())
+    monkeypatch.setattr(account_bot_runtime, "get_redis", lambda: redis)
+    monkeypatch.setattr(account_bot_runtime, "record_span", record_span)
+    monkeypatch.setattr(account_bot_runtime.audit, "write", AsyncMock())
+    monkeypatch.setattr(account_bot_service, "send_message", AsyncMock())
+    monkeypatch.setattr(
+        account_bot_service,
+        "get_transfer_notice_config",
+        AsyncMock(
+            return_value={
+                "enabled": True,
+                "trusted_bot_id": 456,
+                "reply_chain_verification_enabled": True,
+                "rules": [_reply_chain_math_rule()],
+            }
+        ),
+    )
+
+    await account_bot_runtime._handle_interaction_update(
+        1,
+        "bbot-token",
+        {
+            "update_id": 63,
+            "message": {
+                "message_id": 620,
+                "text": "转账成功\n付款人：玩家A\n收款人：Owner\n金额：100",
+                "from": {"id": 456, "is_bot": True, "first_name": "Abot"},
+                "chat": {"id": -100123, "type": "supergroup"},
+                "reply_to_message": {
+                    "message_id": 619,
+                    "text": "+100",
+                    "from": {"id": 111, "first_name": "玩家A", "username": "aaa"},
+                },
+            },
+        },
+    )
+
+    assert run_entry.await_count == 0
+    assert any(call.kwargs.get("reason_code") == "filter_not_matched" for call in record_span.await_args_list)
+
+
+@pytest.mark.asyncio
+async def test_transfer_notice_reply_chain_uses_receiver_id_and_face_amount(monkeypatch) -> None:
+    redis = _MemoryRedis()
+    await save_action_reply_target(
+        redis,
+        account_id=1,
+        chat_id=-100123,
+        message_id=619,
+        reply_to_user_id=222,
+        reply_to_display_name="Owner",
+    )
+    run_entry = _patch_math10_worker_entry(monkeypatch)
+    monkeypatch.setattr(account_bot_runtime, "AsyncSessionLocal", lambda: _transfer_reply_chain_db())
+    monkeypatch.setattr(account_bot_runtime, "get_redis", lambda: redis)
+    monkeypatch.setattr(account_bot_runtime.audit, "write", AsyncMock())
+    monkeypatch.setattr(account_bot_service, "send_message", AsyncMock())
+    monkeypatch.setattr(
+        account_bot_service,
+        "get_transfer_notice_config",
+        AsyncMock(
+            return_value={
+                "enabled": True,
+                "trusted_bot_id": 456,
+                "reply_chain_verification_enabled": True,
+                "rules": [_reply_chain_math_rule()],
+            }
+        ),
+    )
+
+    await account_bot_runtime._handle_interaction_update(
+        1,
+        "bbot-token",
+        {
+            "update_id": 64,
+            "message": {
+                "message_id": 620,
+                "text": "转账成功\n付款人：玩家A\n收款人：Owner\n金额：95",
+                "from": {"id": 456, "is_bot": True, "first_name": "Abot"},
+                "chat": {"id": -100123, "type": "supergroup"},
+                "reply_to_message": {
+                    "message_id": 619,
+                    "text": "+100",
+                    "from": {"id": 111, "first_name": "玩家A", "username": "aaa"},
+                },
+            },
+        },
+    )
+
+    _assert_math10_worker_entry(run_entry)
+    payload = run_entry.await_args.kwargs["payload"]
+    assert payload["payment"]["amount"] == 100
+    assert payload["payment"]["payer_user_id"] == 111
+    assert payload["payment"]["receiver_user_id"] == 222
+    assert payload["raw"]["parsed"]["notice_amount"] == 95
+    assert payload["raw"]["parsed"]["reply_chain_verified"] is True
+
+
+@pytest.mark.asyncio
+async def test_transfer_notice_reply_chain_break_falls_back_to_text_receiver(monkeypatch) -> None:
+    redis = _MemoryRedis()
+    run_entry = _patch_math10_worker_entry(monkeypatch)
+    monkeypatch.setattr(account_bot_runtime, "AsyncSessionLocal", lambda: _transfer_reply_chain_db())
+    monkeypatch.setattr(account_bot_runtime, "get_redis", lambda: redis)
+    monkeypatch.setattr(account_bot_runtime.audit, "write", AsyncMock())
+    monkeypatch.setattr(account_bot_service, "send_message", AsyncMock())
+    monkeypatch.setattr(
+        account_bot_service,
+        "get_transfer_notice_config",
+        AsyncMock(
+            return_value={
+                "enabled": True,
+                "trusted_bot_id": 456,
+                "reply_chain_verification_enabled": True,
+                "rules": [_reply_chain_math_rule()],
+            }
+        ),
+    )
+
+    await account_bot_runtime._handle_interaction_update(
+        1,
+        "bbot-token",
+        {
+            "update_id": 65,
+            "message": {
+                "message_id": 620,
+                "text": "转账成功\n付款人：玩家A\n收款人：Owner\n金额：100",
+                "from": {"id": 456, "is_bot": True, "first_name": "Abot"},
+                "chat": {"id": -100123, "type": "supergroup"},
+                "reply_to_message": {
+                    "message_id": 619,
+                    "text": "+100",
+                    "from": {"id": 111, "first_name": "玩家A", "username": "aaa"},
+                },
+            },
+        },
+    )
+
+    _assert_math10_worker_entry(run_entry)
+    payload = run_entry.await_args.kwargs["payload"]
+    assert payload["payment"]["amount"] == 100
+    assert payload["payment"]["receiver_display_name"] == "Owner"
+    assert "reply_chain_verified" not in payload["raw"]["parsed"]
+
+
+@pytest.mark.asyncio
+async def test_debit_transfer_notice_reply_chain_uses_command_sender_as_receiver(monkeypatch) -> None:
+    redis = _MemoryRedis()
+    await save_action_reply_target(
+        redis,
+        account_id=1,
+        chat_id=-100123,
+        message_id=619,
+        reply_to_user_id=333,
+        reply_to_display_name="玩家C",
+    )
+    run_entry = _patch_math10_worker_entry(monkeypatch)
+    monkeypatch.setattr(account_bot_runtime, "AsyncSessionLocal", lambda: _transfer_reply_chain_db())
+    monkeypatch.setattr(account_bot_runtime, "get_redis", lambda: redis)
+    monkeypatch.setattr(account_bot_runtime.audit, "write", AsyncMock())
+    monkeypatch.setattr(account_bot_service, "send_message", AsyncMock())
+    monkeypatch.setattr(
+        account_bot_service,
+        "get_transfer_notice_config",
+        AsyncMock(
+            return_value={
+                "enabled": True,
+                "trusted_bot_id": 456,
+                "reply_chain_verification_enabled": True,
+                "rules": [_reply_chain_math_rule(trigger_texts=["扣减成功"])],
+            }
+        ),
+    )
+
+    await account_bot_runtime._handle_interaction_update(
+        1,
+        "bbot-token",
+        {
+            "update_id": 66,
+            "message": {
+                "message_id": 620,
+                "text": "扣减成功",
+                "from": {"id": 456, "is_bot": True, "first_name": "Abot"},
+                "chat": {"id": -100123, "type": "supergroup"},
+                "reply_to_message": {
+                    "message_id": 619,
+                    "text": "-100",
+                    "from": {"id": 222, "first_name": "Owner", "username": "owner"},
+                },
+            },
+        },
+    )
+
+    _assert_math10_worker_entry(run_entry)
+    payload = run_entry.await_args.kwargs["payload"]
+    assert payload["payment"]["amount"] == 100
+    assert payload["payment"]["payer_user_id"] == 333
+    assert payload["payment"]["receiver_user_id"] == 222
+    assert payload["raw"]["parsed"]["reply_chain_mode"] == "debit"
 
 
 def test_format_user_name_uses_public_name_without_username() -> None:

@@ -2294,6 +2294,152 @@ async def _enrich_transfer_notice_payer_from_reply_target(
     return enriched
 
 
+def _transfer_reply_chain_verification_enabled(cfg: dict[str, Any]) -> bool:
+    return bool(cfg.get("reply_chain_verification_enabled", True))
+
+
+def _reply_chain_user_label(
+    *,
+    user_id: int | None,
+    display_name: Any = None,
+    username: Any = None,
+) -> str:
+    display = str(display_name or "").strip()
+    if display:
+        return display
+    user = str(username or "").strip()
+    if user:
+        return user
+    return "" if user_id is None else str(user_id)
+
+
+def _native_raw_message(incoming: Incoming) -> dict[str, Any] | None:
+    raw = incoming.native_raw if isinstance(incoming.native_raw, dict) else {}
+    for key in ("message", "edited_message"):
+        msg = raw.get(key)
+        if isinstance(msg, dict):
+            return msg
+    return None
+
+
+def _native_raw_transfer_command_reply_target(incoming: Incoming) -> dict[str, Any] | None:
+    msg = _native_raw_message(incoming)
+    if not isinstance(msg, dict):
+        return None
+    command_msg = msg.get("reply_to_message")
+    if not isinstance(command_msg, dict):
+        return None
+    target_msg = command_msg.get("reply_to_message")
+    if not isinstance(target_msg, dict):
+        return None
+    target_sender = _message_sender_fields(target_msg)
+    target_user_id = _int_or_none(target_sender.get("user_id"))
+    if target_user_id is None:
+        return None
+    return {
+        "reply_to_user_id": target_user_id,
+        "reply_to_display_name": str(target_sender.get("display_name") or "").strip() or None,
+        "reply_to_username": str(target_sender.get("username") or "").strip() or None,
+    }
+
+
+async def _read_transfer_command_reply_target(incoming: Incoming) -> dict[str, Any] | None:
+    if incoming.chat_id is None or incoming.reply_to_message_id is None:
+        return None
+    redis = get_redis()
+    target = await read_action_reply_target(
+        redis,
+        account_id=incoming.account_id,
+        chat_id=incoming.chat_id,
+        message_id=incoming.reply_to_message_id,
+    )
+    if isinstance(target, dict) and _int_or_none(target.get("reply_to_user_id")) is not None:
+        return target
+    return _native_raw_transfer_command_reply_target(incoming)
+
+
+async def _resolve_transfer_notice_reply_chain(incoming: Incoming) -> dict[str, Any] | None:
+    command = _parse_transfer_command_mode(incoming.reply_to_text or "")
+    if command is None:
+        return None
+    mode, amount = command
+    target = await _read_transfer_command_reply_target(incoming)
+    target_user_id = _int_or_none(target.get("reply_to_user_id")) if isinstance(target, dict) else None
+    if target_user_id is None:
+        return None
+
+    command_sender_user_id = incoming.reply_to_user_id
+    target_username = str(target.get("reply_to_username") or "").strip() if isinstance(target, dict) else ""
+    target_display_name = str(target.get("reply_to_display_name") or "").strip() if isinstance(target, dict) else ""
+    command_sender_name = _reply_chain_user_label(
+        user_id=command_sender_user_id,
+        display_name=incoming.reply_to_display_name,
+        username=incoming.reply_to_username,
+    )
+    target_name = _reply_chain_user_label(
+        user_id=target_user_id,
+        display_name=target_display_name,
+        username=target_username,
+    )
+
+    if mode == "debit":
+        if command_sender_user_id is None:
+            return None
+        receiver_user_id = command_sender_user_id
+        receiver_name = command_sender_name
+        receiver_username = incoming.reply_to_username
+        payer_user_id = target_user_id
+        payer_name = target_name
+        payer_username = target_username or None
+    else:
+        receiver_user_id = target_user_id
+        receiver_name = target_name
+        receiver_username = target_username or None
+        payer_user_id = command_sender_user_id
+        payer_name = command_sender_name
+        payer_username = incoming.reply_to_username
+
+    return {
+        "mode": mode,
+        "amount": amount,
+        "payer_user_id": payer_user_id,
+        "payer_name": payer_name,
+        "payer_username": payer_username,
+        "receiver_user_id": receiver_user_id,
+        "receiver_name": receiver_name,
+        "receiver_username": receiver_username,
+        "command_message_id": incoming.reply_to_message_id,
+        "command_text": incoming.reply_to_text,
+        "target_user_id": target_user_id,
+    }
+
+
+def _apply_transfer_notice_reply_chain(
+    parsed: dict[str, Any] | None,
+    reply_chain: dict[str, Any],
+) -> dict[str, Any]:
+    out = dict(parsed or {})
+    text_amount = _int_or_none(out.get("amount"))
+    if text_amount is not None and text_amount != _int_or_none(reply_chain.get("amount")):
+        out["notice_amount"] = text_amount
+    out["amount"] = int(reply_chain["amount"])
+    for key in (
+        "payer_user_id",
+        "payer_name",
+        "payer_username",
+        "receiver_user_id",
+        "receiver_name",
+        "receiver_username",
+    ):
+        value = reply_chain.get(key)
+        if value not in (None, ""):
+            out[key] = value
+    out["reply_chain_verified"] = True
+    out["reply_chain_mode"] = reply_chain.get("mode")
+    out["reply_chain_command_message_id"] = reply_chain.get("command_message_id")
+    return out
+
+
 def _entity_languages(*entity_lists: Any) -> tuple[str, ...]:
     languages: list[str] = []
     for entity_list in entity_lists:
@@ -4157,7 +4303,13 @@ async def _select_transfer_notice_rule(
     parsed_amount = int(parsed.get("amount") or 0)
     parsed_receiver = str(parsed.get("receiver_name") or "")
     parsed_receiver_id = _int_or_none(parsed.get("receiver_user_id"))
-    if _is_configured_bot_receiver_identity(cfg, user_id=parsed_receiver_id, name=parsed_receiver):
+    parsed_receiver_username = str(parsed.get("receiver_username") or "").strip() or None
+    if _is_configured_bot_receiver_identity(
+        cfg,
+        user_id=parsed_receiver_id,
+        name=parsed_receiver,
+        username=parsed_receiver_username,
+    ):
         log.info(
             "transfer notice skipped: configured bot receiver aid=%s chat_id=%s receiver_id=%s receiver_name=%r",
             incoming.account_id,
@@ -4187,7 +4339,12 @@ async def _select_transfer_notice_rule(
             if not await _is_interaction_rule_open(incoming.account_id, rule, incoming.chat_id):
                 continue
         receiver_filter = await _rule_receiver_filter(db, incoming.account_id, rule)
-        if not _receiver_matches_filter(receiver_filter, user_id=parsed_receiver_id, name=parsed_receiver):
+        if not _receiver_matches_filter(
+            receiver_filter,
+            user_id=parsed_receiver_id,
+            name=parsed_receiver,
+            username=parsed_receiver_username,
+        ):
             continue
         return rule
     return None
@@ -6910,7 +7067,12 @@ async def _try_handle_transfer_notice(
         return False
 
     parsed = _parse_incoming_transfer_notice(incoming)
-    if parsed is None:
+    reply_chain = (
+        await _resolve_transfer_notice_reply_chain(incoming)
+        if _transfer_reply_chain_verification_enabled(cfg)
+        else None
+    )
+    if parsed is None and reply_chain is None:
         log.info(
             "transfer notice skipped: parse failed aid=%s chat_id=%s sender_id=%s",
             incoming.account_id,
@@ -6918,7 +7080,10 @@ async def _try_handle_transfer_notice(
             incoming.user_id,
         )
         return False
-    parsed = await _enrich_transfer_notice_payer_from_reply_target(incoming, parsed)
+    if reply_chain is not None:
+        parsed = _apply_transfer_notice_reply_chain(parsed, reply_chain)
+    else:
+        parsed = await _enrich_transfer_notice_payer_from_reply_target(incoming, parsed)
     rule = await _select_transfer_notice_rule(db, incoming, cfg, parsed)
     if rule is None:
         log.info(
