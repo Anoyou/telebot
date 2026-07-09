@@ -1656,6 +1656,9 @@ export interface BackendVersionInfo {
 // ===================== 检查更新 =====================
 export interface CheckUpdateResult {
   has_update: boolean;
+  /** false = 当前环境无法在进程内自动检查（容器内无 updater / 无工作树）；
+   *  此时 has_update 不代表真实结论，应展示"无法自动检查"。 */
+  can_check?: boolean | null;
   current_commit: string | null;
   remote_commit: string | null;
   ahead: number;

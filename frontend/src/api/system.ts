@@ -236,12 +236,22 @@ export async function getResourceDashboard(): Promise<ResourceDashboard> {
 }
 
 // ===================== 检查更新 / 拉取 / 重启 =====================
+// 全局 axios timeout 是 15s；检查/拉取会触发后端同步 git 操作，需 per-request 放宽。
+// 这里只覆盖这几个慢调用，不动 lib/api.ts 的全局默认。update-jobs 轮询保持默认 15s。
 export async function checkUpdate(): Promise<CheckUpdateResult> {
-  const { data } = await api.post<CheckUpdateResult>("/api/system/check-update");
+  const { data } = await api.post<CheckUpdateResult>(
+    "/api/system/check-update",
+    undefined,
+    { timeout: 150_000 },
+  );
   return data;
 }
 export async function pullUpdate(): Promise<PullUpdateResult> {
-  const { data } = await api.post<PullUpdateResult>("/api/system/pull-update");
+  const { data } = await api.post<PullUpdateResult>(
+    "/api/system/pull-update",
+    undefined,
+    { timeout: 60_000 },
+  );
   return data;
 }
 export async function getUpdateJob(jobId: string): Promise<UpdateJobStatus> {

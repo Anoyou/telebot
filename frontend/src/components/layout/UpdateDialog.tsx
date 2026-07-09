@@ -16,7 +16,8 @@ import type {
   PullUpdateResult,
   UpdateJobStatus,
 } from "@/api/types";
-import { APP_VERSION_LABEL } from "@/lib/version";
+import { APP_VERSION, APP_VERSION_LABEL } from "@/lib/version";
+import { checkFrontendUpdate } from "@/pwa";
 
 type UpdateActionRequired =
   | "none"
@@ -47,6 +48,7 @@ interface UpdatePlanMeta {
 type Step =
   | { kind: "checking" }
   | { kind: "up_to_date"; commit: string }
+  | { kind: "cannot_check"; plan: UpdatePlanMeta }
   | { kind: "has_update"; current: string; remote: string; ahead: number; changedFiles: string[]; plan: UpdatePlanMeta }
   | { kind: "pulling" }
   | { kind: "job_running"; jobId: string; status: string; logs: string[]; plan: UpdatePlanMeta }
@@ -55,6 +57,14 @@ type Step =
   | { kind: "check_failed"; error: string }
   | { kind: "restarting"; countdown: number };
 
+type FrontendUpdateState =
+  | "idle"
+  | "checking"
+  | "updating"
+  | "up_to_date"
+  | "unsupported"
+  | "error";
+
 interface UpdateDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -62,6 +72,7 @@ interface UpdateDialogProps {
 
 export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
   const [step, setStep] = useState<Step | null>(null);
+  const [frontendUpdateState, setFrontendUpdateState] = useState<FrontendUpdateState>("idle");
   const timerRef = useRef<ReturnType<typeof setInterval>>();
   const jobPollTokenRef = useRef(0);
 
@@ -129,6 +140,45 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
     return "发现新版本可用";
   };
 
+  const getFrontendUpdateMessage = () => {
+    switch (frontendUpdateState) {
+      case "up_to_date":
+        return "已是最新版本";
+      case "updating":
+        return "发现新版本，页面即将自动刷新";
+      case "unsupported":
+        return "当前环境不支持（开发模式或浏览器不支持）";
+      case "error":
+        return "检查失败，请稍后重试";
+      default:
+        return null;
+    }
+  };
+
+  const getFrontendUpdateMessageClassName = () => {
+    switch (frontendUpdateState) {
+      case "up_to_date":
+        return "text-emerald-600 dark:text-emerald-300";
+      case "updating":
+      case "unsupported":
+        return "text-amber-600 dark:text-amber-300";
+      case "error":
+        return "text-destructive";
+      default:
+        return "text-muted-foreground";
+    }
+  };
+
+  const doCheckFrontendUpdate = async () => {
+    setFrontendUpdateState("checking");
+    try {
+      const result = await checkFrontendUpdate();
+      setFrontendUpdateState(result);
+    } catch {
+      setFrontendUpdateState("error");
+    }
+  };
+
   // 打开时自动检查更新
   const doCheck = useCallback(async () => {
     setStep({ kind: "checking" });
@@ -136,6 +186,8 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
       const res: CheckUpdateResult = await checkUpdate();
       if (res.error) {
         setStep({ kind: "check_failed", error: res.error });
+      } else if (res.can_check === false) {
+        setStep({ kind: "cannot_check", plan: parsePlanMeta(res) });
       } else if (!res.has_update) {
         setStep({ kind: "up_to_date", commit: res.current_commit || "?" });
       } else {
@@ -158,9 +210,11 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
 
   useEffect(() => {
     if (open) {
+      setFrontendUpdateState("idle");
       doCheck();
     } else {
       setStep(null);
+      setFrontendUpdateState("idle");
       jobPollTokenRef.current += 1;
       if (timerRef.current) {
         clearInterval(timerRef.current);
@@ -302,9 +356,12 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
 
   const isActionable =
     step?.kind === "has_update" ||
+    step?.kind === "cannot_check" ||
     step?.kind === "pulled" ||
     step?.kind === "pull_failed" ||
     step?.kind === "check_failed";
+  const frontendUpdateMessage = getFrontendUpdateMessage();
+  const isCheckingFrontendUpdate = frontendUpdateState === "checking";
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -314,6 +371,7 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
           <DialogDescription>
             {step?.kind === "checking" && "正在检查远程仓库..."}
             {step?.kind === "up_to_date" && "当前已是最新版本"}
+            {step?.kind === "cannot_check" && "无法自动检查更新"}
             {step?.kind === "has_update" && describeUpdateState(step.plan, step.ahead)}
             {step?.kind === "pulling" && "正在应用更新计划..."}
             {step?.kind === "job_running" && "更新任务正在执行"}
@@ -346,6 +404,24 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
                 <p>当前版本 <code className="bg-muted px-1 rounded">{step.commit}</code></p>
                 <p className="text-muted-foreground">无需更新</p>
               </div>
+            </div>
+          )}
+
+          {step?.kind === "cannot_check" && (
+            <div className="space-y-2 text-sm">
+              <div className="flex items-center gap-2 text-amber-600 dark:text-amber-300">
+                <AlertCircle className="h-5 w-5" />
+                <span>容器内无法自动检查更新</span>
+              </div>
+              <p className="text-muted-foreground">
+                {step.plan.planDetail || "当前运行环境无法在容器内比对 Git 远程差异。"}
+              </p>
+              {step.plan.manualCommand && (
+                <div className="rounded-md border bg-background px-3 py-2">
+                  <p className="mb-1 text-xs text-muted-foreground">请在服务器执行</p>
+                  <pre className="text-xs overflow-x-auto font-mono">{step.plan.manualCommand}</pre>
+                </div>
+              )}
             </div>
           )}
 
@@ -497,6 +573,35 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
               </span>
             </div>
           )}
+
+          <div className="mt-4 rounded-md border bg-background px-3 py-3 text-sm">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+              <div className="min-w-0">
+                <p className="font-medium">前端资源</p>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  当前前端版本 <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-foreground">v{APP_VERSION}</code>
+                </p>
+              </div>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => void doCheckFrontendUpdate()}
+                disabled={isCheckingFrontendUpdate || frontendUpdateState === "updating"}
+              >
+                {isCheckingFrontendUpdate ? (
+                  <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <RefreshCw className="mr-1 h-3.5 w-3.5" />
+                )}
+                {isCheckingFrontendUpdate ? "检查中..." : "检查前端更新"}
+              </Button>
+            </div>
+            {frontendUpdateMessage && (
+              <p className={`mt-3 text-xs ${getFrontendUpdateMessageClassName()}`}>
+                {frontendUpdateMessage}
+              </p>
+            )}
+          </div>
         </div>
 
         {/* 按钮区 */}
@@ -507,6 +612,19 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
                 <RefreshCw className="mr-1 h-3.5 w-3.5" />
                 重新检查
               </Button>
+            )}
+            {step?.kind === "cannot_check" && (
+              <>
+                <Button variant="outline" size="sm" onClick={doCheck}>
+                  <RefreshCw className="mr-1 h-3.5 w-3.5" />
+                  重新检查
+                </Button>
+                {step.plan.manualCommand && (
+                  <Button size="sm" onClick={() => void doPrimaryAction(step.plan)}>
+                    复制服务器命令
+                  </Button>
+                )}
+              </>
             )}
             {step?.kind === "has_update" && (
               <Button
