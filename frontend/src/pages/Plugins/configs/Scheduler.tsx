@@ -359,7 +359,7 @@ export function SchedulerConfig() {
             <div className="flex shrink-0 items-center gap-2">
               <Button
                 variant="outline"
-                onClick={() => nav(`/logs?source_channel=scheduler&account_id=${aid}`)}
+                onClick={() => nav(`/logs?view=messages&source_channel=scheduler&event_type=scheduler_fire&account_id=${aid}`)}
               >
                 <History className="mr-1 h-4 w-4" /> 运行历史
               </Button>
@@ -451,7 +451,7 @@ export function SchedulerConfig() {
                             <Play className="mr-1 h-3.5 w-3.5" /> 试运行
                           </Button>
                           <Button size="sm" variant="ghost" onClick={() => openExec(r)}>
-                            <Zap className="mr-1 h-3.5 w-3.5" /> 执行
+                            <Zap className="mr-1 h-3.5 w-3.5" /> 立即运行一次
                           </Button>
                           <Button
                             size="sm"

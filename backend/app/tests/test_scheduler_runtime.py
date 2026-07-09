@@ -10,8 +10,10 @@ import pytest
 
 from app.services.llm_client import LLMResult
 from app.services.llm_dto import LLMProviderDTO
+from app.worker import runtime as worker_runtime
 from app.worker import scheduler_runtime
 from app.worker.command import CommandContext, set_command_context
+from app.worker.ipc import CMD_EXECUTE_RULE, IPCMessage
 from app.worker.scheduler_runtime import PlatformScheduler, SchedulerRuleExecutor, _croniter_next
 
 
@@ -428,3 +430,29 @@ async def test_scheduler_send出口_blocks_non_whitelisted_command_text() -> Non
     assert ok is False
     assert "blocked by whitelist" in cfg["last_error"]
     ctx.client.send_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_scheduler_execute_rule_ipc_handler_replies_with_result() -> None:
+    redis = SimpleNamespace(publish=AsyncMock())
+    platform_scheduler = SimpleNamespace(
+        execute_rule=AsyncMock(
+            return_value=scheduler_runtime.SchedulerExecutionResult(True)
+        )
+    )
+
+    await worker_runtime._handle_execute_rule_command(
+        redis,
+        42,
+        platform_scheduler,
+        "worker_reply:42:exec_rule:test",
+        9,
+    )
+
+    platform_scheduler.execute_rule.assert_awaited_once_with(9)
+    redis.publish.assert_awaited_once()
+    reply_channel, raw_message = redis.publish.await_args.args
+    assert reply_channel == "worker_reply:42:exec_rule:test"
+    message = IPCMessage.decode(raw_message)
+    assert message.type == CMD_EXECUTE_RULE
+    assert message.payload == {"ok": True, "error": None}
