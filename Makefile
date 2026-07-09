@@ -147,3 +147,21 @@ clean:
 	find . -name "__pycache__" -type d -prune -exec rm -rf {} +
 	rm -rf frontend/node_modules frontend/dist frontend/.vite
 	rm -rf .run logs
+
+# ════════════════════════════════════════════
+# 插件脚手架（tp_plugin CLI）
+#   make plugin-new name=my_game profile=session_game       生成骨架（profile 默认 session_game）
+#   make plugin-new name=my_game dry_run=1                   只打印将生成的文件，不落盘
+#   make plugin-check dir=plugins/local_imports/my_game      本地校验（manifest + 事件白名单）
+#   make plugin-register dir=plugins/local_imports/my_game   登记进 installed_plugin 台账
+# ════════════════════════════════════════════
+.PHONY: plugin-new plugin-register plugin-check
+
+plugin-new:
+	@backend/.venv/bin/python backend/scripts/tp_plugin.py new $(name) --profile $(or $(profile),session_game) $(if $(dir),--dir $(dir),) $(if $(dry_run),--dry-run,)
+
+plugin-check:
+	@backend/.venv/bin/python backend/scripts/tp_plugin.py check $(dir)
+
+plugin-register:
+	@backend/.venv/bin/python backend/scripts/tp_plugin.py register $(dir) $(if $(enable),--enable,)
