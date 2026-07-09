@@ -11,9 +11,11 @@ from httpx import ASGITransport, AsyncClient
 
 from app.api import webhooks as webhooks_api
 from app.db.models.account import Account
+from app.db.models.rate_limit import ACTION_KEYS
 from app.db.models.system import SystemSetting
 from app.deps import get_current_user, get_db
 from app.main import app
+from app.services import rate_limit_service
 from app.worker.ipc import CMD_WEBHOOK_DELIVER
 from app.worker.plugins import loader as loader_mod
 from app.worker.plugins.base import Plugin, PluginContext
@@ -132,6 +134,50 @@ async def test_deliver_webhook_exempt_from_csrf_header(monkeypatch: pytest.Monke
     # 关键断言：没有被 CSRF 中间件 403 拦截，而是到达端点返回 token 校验结果
     assert response.status_code == 401
     assert response.json()["error"]["code"] == "WEBHOOK_TOKEN_INVALID"
+
+
+@pytest.mark.asyncio
+async def test_reset_webhook_token_requires_csrf_header() -> None:
+    db = _FakeDB(token="good-token")
+
+    async with _client(db) as client:
+        response = await client.post("/api/webhooks/1/token/reset")
+
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "CSRF_HEADER_REQUIRED"
+    assert db.settings[webhooks_api._setting_key(1)].value["token"] == "good-token"
+
+
+@pytest.mark.asyncio
+async def test_deliver_webhook_unknown_account_does_not_oracle_account_existence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db = _FakeDB(token="good-token")
+    monkeypatch.setattr(webhooks_api, "publish_cmd_with_ack", AsyncMock())
+
+    async with _client(db) as client:
+        response = await client.post(
+            "/api/webhooks/999/default",
+            headers={
+                webhooks_api.TOKEN_HEADER: "bad-token",
+                "Content-Type": "application/json",
+            },
+            json={"event": "demo"},
+        )
+
+    assert response.status_code == 401
+    assert response.json()["error"]["code"] == "WEBHOOK_TOKEN_INVALID"
+    webhooks_api.publish_cmd_with_ack.assert_not_awaited()
+
+
+def test_webhook_deliver_is_configurable_rate_limit_action() -> None:
+    assert webhooks_api.WEBHOOK_RATE_LIMIT_ACTION in ACTION_KEYS
+    assert rate_limit_service.default_for(webhooks_api.WEBHOOK_RATE_LIMIT_ACTION) == {
+        "per_second": 2,
+        "per_minute": 60,
+        "per_hour": 1000,
+        "per_day": 5000,
+    }
 
 
 @pytest.mark.asyncio

@@ -236,6 +236,20 @@ def _csrf_required(method: str) -> bool:
     return method.upper() not in {"GET", "HEAD", "OPTIONS"}
 
 
+def _is_public_webhook_delivery(request: Request) -> bool:
+    """Only external webhook deliveries are token-authenticated and CSRF-exempt."""
+    if request.method.upper() != "POST":
+        return False
+    parts = request.url.path.strip("/").split("/")
+    return (
+        len(parts) == 4
+        and parts[0] == "api"
+        and parts[1] == "webhooks"
+        and parts[2].isdigit()
+        and bool(parts[3])
+    )
+
+
 def _set_csrf_cookie(response: JSONResponse) -> JSONResponse:
     """下发 double-submit CSRF token：JS 可读 cookie + 写请求 header 回传。"""
     response.set_cookie(
@@ -270,9 +284,9 @@ async def security_headers_middleware(request: Request, call_next):
 
 @app.middleware("http")
 async def csrf_header_middleware(request: Request, call_next):
-    # /api/webhooks/* 由账号级 webhook token 鉴权（无浏览器 cookie，非 cookie-based），
-    # 天然不受 CSRF 威胁，且供外部系统调用无法携带自定义头，故豁免 CSRF 头检查。
-    if request.url.path.startswith("/api/webhooks/"):
+    # 公开 webhook 投递端点由账号级 token 鉴权，外部系统无法携带 UI CSRF 头。
+    # 同 router 下的 cookie 鉴权管理端点仍必须走 CSRF 检查。
+    if _is_public_webhook_delivery(request):
         return await call_next(request)
     if _csrf_required(request.method):
         header_val = request.headers.get(_CSRF_HEADER_NAME, "")

@@ -346,7 +346,12 @@ async def deliver_webhook(
     x_telepilot_webhook_token: str | None = Header(default=None, alias=TOKEN_HEADER),
     token: str | None = Query(default=None),
 ) -> WebhookDeliverOut:
-    await _ensure_account(db, account_id)
+    account = await db.get(Account, account_id)
+    if account is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={"code": "WEBHOOK_TOKEN_INVALID", "message": "Webhook token 无效"},
+        )
     config = await _get_or_create_config(db, account_id)
     _require_valid_token(config, _provided_token(x_telepilot_webhook_token, token))
     hook = _hook_for(config, hook_key)

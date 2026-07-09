@@ -67,6 +67,7 @@ ACTION_KEYS: tuple[str, ...] = (
     "upload_file",
     "download_file",
     "search",
+    "webhook_deliver",
     "api_total",
 )
 

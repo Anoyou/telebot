@@ -46,6 +46,7 @@ _DEFAULTS: dict[str, dict] = {
     "upload_file": {"per_minute": 5},
     "download_file": {"per_minute": 10},
     "search": {"per_minute": 10},
+    "webhook_deliver": {"per_second": 2, "per_minute": 60, "per_hour": 1000, "per_day": 5000},
     "api_total": {"per_second": 30, "per_minute": 1000},
 }
 
