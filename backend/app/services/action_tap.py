@@ -9,7 +9,9 @@ from __future__ import annotations
 import json
 import logging
 import time
+from datetime import datetime
 from decimal import Decimal
+from pathlib import Path
 from typing import Any
 
 from ..db.base import AsyncSessionLocal
@@ -36,6 +38,7 @@ ACTION_TAP_DICT_LIMIT = 40
 _ACTION_TAP_CIRCUIT_SECONDS = 30.0
 _DB_DISABLED_UNTIL = 0.0
 _REDIS_DISABLED_UNTIL = 0.0
+RECORDINGS_DIR = Path(__file__).resolve().parents[3] / "data" / "recordings"
 
 _SUMMARY_KEYS = {
     "amount",
@@ -67,6 +70,17 @@ def dev_mode_dry_run_enabled(config: Any) -> bool:
     raw = config.get("dev_mode")
     if isinstance(raw, dict):
         return bool(raw.get("dry_run", False))
+    return False
+
+
+def dev_mode_recording_enabled(config: Any) -> bool:
+    """Return true only for ``{"dev_mode": {"recording": true}}`` style config."""
+
+    if not isinstance(config, dict):
+        return False
+    raw = config.get("dev_mode")
+    if isinstance(raw, dict):
+        return bool(raw.get("recording", False))
     return False
 
 
@@ -145,6 +159,34 @@ async def emit_action_event(
         redis=redis,
     )
     return persisted
+
+
+async def emit_inbound_event(
+    *,
+    account_id: int | None,
+    envelope: dict[str, Any] | None,
+    account_config: dict[str, Any] | None = None,
+    recordings_dir: Path | str | None = None,
+) -> Path | None:
+    """Append one normalized inbound envelope to the account recording JSONL."""
+
+    account = _int_or_none(account_id)
+    if account is None or not dev_mode_recording_enabled(account_config):
+        return None
+    if not isinstance(envelope, dict):
+        return None
+    try:
+        root = Path(recordings_dir) if recordings_dir is not None else RECORDINGS_DIR
+        account_dir = root / str(account)
+        account_dir.mkdir(parents=True, exist_ok=True)
+        path = account_dir / f"{datetime.now().strftime('%Y-%m-%d')}.jsonl"
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(envelope, ensure_ascii=False, sort_keys=True, default=str))
+            fh.write("\n")
+        return path
+    except Exception:  # noqa: BLE001
+        log.debug("inbound recording write failed account=%s", account, exc_info=True)
+        return None
 
 
 def summarize_action_params(action: dict[str, Any] | None, *, result: Any = None) -> dict[str, Any]:
@@ -300,6 +342,8 @@ __all__ = [
     "action_context",
     "action_context_dry_run_enabled",
     "dev_mode_dry_run_enabled",
+    "dev_mode_recording_enabled",
     "emit_action_event",
+    "emit_inbound_event",
     "summarize_action_params",
 ]

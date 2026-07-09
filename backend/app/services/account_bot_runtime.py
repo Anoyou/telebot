@@ -65,6 +65,7 @@ from .action_tap import (
     ACTION_EVENT_STATUS_FAILED,
     ACTION_EVENT_STATUS_OK,
     emit_action_event,
+    emit_inbound_event,
 )
 from .event_bus import (
     EVENT_REASON_CODES,
@@ -86,6 +87,7 @@ from .event_trace import (
     update_plugin_runtime_status,
 )
 from .interaction.contracts import guard_interaction_actions
+from .interaction.dedupe import claim_interaction_message
 from .interaction.delivery import (
     INTERACTION_SESSION_CONTROL_ACTIONS as _INTERACTION_SESSION_CONTROL_ACTIONS,
 )
@@ -95,7 +97,6 @@ from .interaction.delivery import (
     delivery_message_id,
     read_action_reply_target,
 )
-from .interaction.dedupe import claim_interaction_message
 
 log = logging.getLogger(__name__)
 
@@ -6500,6 +6501,11 @@ async def _run_interaction_module(
         )
         start_message_id = _interaction_delivery_message_id(start_result)
     payload = await _interaction_module_payload_async(incoming, rule, parsed, event_type=event_type, cfg=cfg)
+    await emit_inbound_event(
+        account_id=incoming.account_id,
+        envelope=payload,
+        account_config=cfg if isinstance(cfg, dict) else None,
+    )
     _schedule_interaction_debug_state(incoming, stage="payload_built", payload=payload)
     trace_context = _interaction_trace_context(payload)
     native_raw_meta = payload.get("native_raw_meta") if isinstance(payload.get("native_raw_meta"), dict) else {}

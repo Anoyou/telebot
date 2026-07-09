@@ -70,7 +70,9 @@ from ...services.action_tap import (
     ACTION_EVENT_STATUS_OK,
     action_context_dry_run_enabled,
     dev_mode_dry_run_enabled,
+    dev_mode_recording_enabled,
     emit_action_event,
+    emit_inbound_event,
 )
 from ...services.event_bus import (
     dispatch_event,
@@ -1387,6 +1389,14 @@ def _plugin_dev_mode_dry_run_enabled(ctx: PluginContext | None) -> bool:
         return False
     cfg = ctx.account_config if isinstance(ctx.account_config, dict) else {}
     return dev_mode_dry_run_enabled(cfg)
+
+
+def _recording_account_config(state: _AccountState) -> dict[str, Any] | None:
+    for ctx in state.contexts.values():
+        cfg = ctx.account_config if isinstance(ctx.account_config, dict) else {}
+        if dev_mode_recording_enabled(cfg):
+            return cfg
+    return None
 
 
 def _action_dev_mode_dry_run_enabled(state: _AccountState, action: dict[str, Any]) -> bool:
@@ -3078,6 +3088,8 @@ async def _apply_userbot_send_media_action(state: _AccountState, event: Any, act
     if target_chat_id is None:
         await record_action(action.get("context"), action, TRACE_STATUS_FAILED, error_code="scope_not_matched", error="target chat_id missing")
         return False
+    filename = str(action.get("filename") or ("interaction.png" if action.get("type") == "send_photo" else "interaction.bin")).strip()
+    caption = str(action.get("caption") or action.get("text") or "").strip() or None
     if _action_dev_mode_dry_run_enabled(state, action):
         options = action_send_via_options(action)
         await _record_userbot_dry_run(
@@ -3094,8 +3106,6 @@ async def _apply_userbot_send_media_action(state: _AccountState, event: Any, act
         )
         return True
     reply_to = _int_or_none(action.get("reply_to_message_id"))
-    filename = str(action.get("filename") or ("interaction.png" if action.get("type") == "send_photo" else "interaction.bin")).strip()
-    caption = str(action.get("caption") or action.get("text") or "").strip() or None
     parse_mode = _action_parse_mode(action)
     last_code = "unsupported_send_via"
     last_error = "no supported send_via"
@@ -5489,6 +5499,13 @@ async def load_plugins_for_account(
                 if not edited and await _interaction_bot_owns_incoming_text(state, event):
                     await _record_interaction_text_guard_skip(state, event, event_label=event_label)
                     return
+
+            if direction == "incoming":
+                await emit_inbound_event(
+                    account_id=state.account_id,
+                    envelope=normalize_userbot_event(state.account_id, event),
+                    account_config=_recording_account_config(state),
+                )
 
             session_consumed = await _dispatch_userbot_session_message(
                 state,
