@@ -21,8 +21,8 @@ import random
 import re
 import unicodedata
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
-from enum import Enum
+from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
@@ -226,7 +226,7 @@ class QuizMaker:
 # ─────────────────────────────────────────────────────
 # AnswerJudge：判题（规则先行，AI 兜底，失败 unsure）
 # ─────────────────────────────────────────────────────
-class JudgeOutcome(str, Enum):
+class JudgeOutcome(StrEnum):
     CORRECT = "correct"
     INCORRECT = "incorrect"
     UNSURE = "unsure"

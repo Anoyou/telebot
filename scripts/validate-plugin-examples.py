@@ -21,17 +21,25 @@ for import_root in (ROOT, BACKEND_ROOT):
     if path not in sys.path:
         sys.path.insert(0, path)
 
+from app.services.event_bus import SUPPORTED_FILTER_KEYS  # noqa: E402
 from app.worker.plugins.base import Plugin  # noqa: E402
 from app.worker.plugins.manifest import Manifest  # noqa: E402
-from app.services.event_bus import SUPPORTED_FILTER_KEYS  # noqa: E402
 
-INCLUDED_EXAMPLES = {"event_bus_demo", "hello_ping", "with_http", "with_ai", "with_interaction"}
+INCLUDED_EXAMPLES = {
+    "event_bus_demo",
+    "hello_ping",
+    "with_ai",
+    "with_ai_components",
+    "with_http",
+    "with_interaction",
+}
 SKIPPED_EXAMPLES = {
     "translate": "历史示例仍依赖后端私有 LLM 链路，迁移到 ctx.ai 前不纳入稳定 API gate。",
 }
 REQUIRED_FILES = {"plugin.json", "manifest.py", "plugin.py", "__init__.py"}
 REQUIRED_PERMISSIONS = {
     "with_ai": {"ai_text"},
+    "with_ai_components": {"ai_text"},
     "with_http": {"external_http"},
 }
 EVENT_EXAMPLES = {"event_bus_demo", "hello_ping", "with_interaction"}

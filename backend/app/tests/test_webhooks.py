@@ -19,7 +19,6 @@ from app.worker.plugins import loader as loader_mod
 from app.worker.plugins.base import Plugin, PluginContext
 from app.worker.plugins.manifest import Manifest
 
-
 CSRF_HEADERS = {
     "X-Requested-With": "telepilot-ui",
     "X-CSRF-Token": "test-token",

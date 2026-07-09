@@ -15,8 +15,8 @@ from app.services.event_bus import (
     normalize_bot_update,
     normalize_event_subscription,
     normalize_payment_notice,
-    normalize_webhook_event,
     normalize_userbot_event,
+    normalize_webhook_event,
 )
 
 
