@@ -241,7 +241,7 @@ def _check_plan(remote: str, branch: str) -> dict[str, Any]:
             "runtime_mode": "prod_container_with_updater",
         }
     remote_ref = f"refs/remotes/{remote}/{branch}"
-    out, err, rc = _run(["git", "fetch", remote, f"{branch}:{remote_ref}"], timeout=120)
+    out, err, rc = _run(["git", "fetch", remote, f"+{branch}:{remote_ref}"], timeout=120)
     if rc != 0:
         return {"ok": False, "error": f"git fetch 失败: {err or out}"}
     current_out, err, rc = _run(["git", "rev-parse", "HEAD"], timeout=10)

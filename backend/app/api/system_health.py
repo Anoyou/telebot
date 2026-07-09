@@ -1481,6 +1481,9 @@ def _check_response_from_plan(
 
 class CheckUpdateResponse(BaseModel):
     has_update: bool = False
+    can_check: bool = True
+    """False 表示当前环境无法在进程内自动比对远程差异（如容器内无 updater / 无工作树），
+    此时 ``has_update`` 不代表真实结论，前端应展示"无法自动检查"而不是"有更新/已最新"。"""
     current_commit: str | None = None
     remote_commit: str | None = None
     ahead: int = 0
@@ -1573,7 +1576,9 @@ async def check_update(
     payload: UpdateRequest | None = Body(default=None),
 ) -> CheckUpdateResponse:
     """仅检查远程更新，不拉取代码。"""
-    runtime_mode, updater, root = _detect_runtime_mode()
+    # _detect_runtime_mode 内含对 updater 的同步探活（urlopen 0.8s）与文件系统探测，
+    # 放到线程池执行，避免阻塞事件循环（尤其 update-jobs 每 2s 轮询时）。
+    runtime_mode, updater, root = await asyncio.to_thread(_detect_runtime_mode)
     can_apply = runtime_mode in {RUNTIME_LOCAL_SOURCE, RUNTIME_PROD_CONTAINER_WITH_UPDATER}
     manual_command = _manual_command_for_runtime(runtime_mode, updater)
     remote, branch, _force_full = _normalize_update_request(payload)
@@ -1612,7 +1617,7 @@ async def check_update(
         if root:
             remote_ref = f"refs/remotes/{remote}/{branch}"
             fetch_out, fetch_err, fetch_rc = await asyncio.to_thread(
-                _run_git, "fetch", remote, f"{branch}:{remote_ref}", timeout=30
+                _run_git, "fetch", remote, f"+{branch}:{remote_ref}", timeout=30
             )
             if fetch_rc != 0:
                 return CheckUpdateResponse(
@@ -1705,33 +1710,42 @@ async def check_update(
                 manual_command=manual_command,
             )
 
-        components = ["full_update"]
-        requires_full_update = runtime_mode in {RUNTIME_PROD_CONTAINER_MANUAL, RUNTIME_PROD_CONTAINER_WITH_UPDATER}
-        has_update = runtime_mode in {RUNTIME_PROD_CONTAINER_MANUAL, RUNTIME_PROD_CONTAINER_WITH_UPDATER}
-        action_required = _action_required_for_plan(runtime_mode, has_update, components, requires_full_update)
-        plan_label, plan_detail = _plan_text(
-            runtime_mode=runtime_mode,
-            has_update=has_update,
-            components=components,
-            requires_full_update=requires_full_update,
-            requires_backup=False,
-            can_apply=can_apply,
-        )
+        # 走到这里说明：应用容器内没有 .git 工作树，也没有可查询的 http updater，
+        # 无法在本进程内真正比对远程差异。诚实返回"无法自动检查"，不再无条件谎报有更新。
+        if runtime_mode == RUNTIME_UNSUPPORTED:
+            return CheckUpdateResponse(
+                has_update=False,
+                can_check=False,
+                remote=remote,
+                branch=branch,
+                runtime_mode=runtime_mode,
+                update_executor=updater,
+                action_required="unsupported",
+                plan_label="环境不支持自动更新检查",
+                plan_detail="当前运行环境不支持自动更新检查，请人工执行部署流程。",
+                components=["none"],
+                requires_full_update=False,
+                requires_backup=False,
+                can_apply=can_apply,
+                manual_command=manual_command,
+                error="当前环境不支持自动更新检查，请人工执行部署流程。",
+            )
         return CheckUpdateResponse(
-            has_update=has_update,
+            has_update=False,
+            can_check=False,
             remote=remote,
             branch=branch,
             runtime_mode=runtime_mode,
             update_executor=updater,
-            action_required=action_required,
-            plan_label=plan_label,
-            plan_detail=plan_detail,
-            components=components,
-            requires_full_update=requires_full_update,
+            action_required="manual",
+            plan_label="容器内无法自动检查更新",
+            plan_detail="当前运行于容器且无法在容器内比对 Git 远程差异；请在服务器部署目录执行下方更新命令。",
+            components=["none"],
+            requires_full_update=False,
             requires_backup=False,
             can_apply=can_apply,
             manual_command=manual_command,
-            error=None if runtime_mode != RUNTIME_UNSUPPORTED else "当前环境不支持自动更新检查，请人工执行部署流程。",
+            error=None,
         )
     except Exception as e:  # noqa: BLE001
         return CheckUpdateResponse(
@@ -1751,7 +1765,7 @@ async def pull_update(
     payload: UpdateRequest | None = Body(default=None),
 ) -> PullUpdateResponse:
     """执行应用更新（保留历史路由名 /pull-update）。"""
-    runtime_mode, updater, _root = _detect_runtime_mode()
+    runtime_mode, updater, _root = await asyncio.to_thread(_detect_runtime_mode)
     manual_command = _manual_command_for_runtime(runtime_mode, updater)
     can_apply = runtime_mode in {RUNTIME_LOCAL_SOURCE, RUNTIME_PROD_CONTAINER_WITH_UPDATER}
     remote, branch, force_full = _normalize_update_request(payload)
@@ -1935,7 +1949,7 @@ async def pull_update(
 @router.get("/update-jobs/{job_id}", response_model=UpdateJobStatusResponse)
 async def get_update_job(job_id: str, _user: CurrentUser) -> UpdateJobStatusResponse:
     """读取内部 updater 任务状态。"""
-    runtime_mode, updater, _root = _detect_runtime_mode()
+    runtime_mode, updater, _root = await asyncio.to_thread(_detect_runtime_mode)
     if runtime_mode != RUNTIME_PROD_CONTAINER_WITH_UPDATER or not updater or not updater.startswith(("http://", "https://")):
         return UpdateJobStatusResponse(ok=False, job_id=job_id, status="unsupported", error="内部 updater 不可用")
     try:
@@ -1971,7 +1985,7 @@ async def get_update_job(job_id: str, _user: CurrentUser) -> UpdateJobStatusResp
 async def restart_app(_user: CurrentUser) -> RestartResponse:
     """触发应用重启。使用 subprocess detach 避免阻塞当前进程。"""
     try:
-        runtime_mode, updater, root = _detect_runtime_mode()
+        runtime_mode, updater, root = await asyncio.to_thread(_detect_runtime_mode)
         if runtime_mode == RUNTIME_LOCAL_SOURCE and root and (root / "Makefile").exists():
             subprocess.Popen(
                 ["make", "restart"],

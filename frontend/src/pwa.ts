@@ -3,6 +3,28 @@
 // 类型声明在 src/vite-env.d.ts 里通过 `vite-plugin-pwa/client` 引入。
 import { toast } from "sonner";
 
+let pwaRegistration: ServiceWorkerRegistration | undefined;
+
+export async function checkFrontendUpdate(): Promise<"updating" | "up_to_date" | "unsupported" | "error"> {
+  if (
+    typeof window === "undefined" ||
+    !("serviceWorker" in navigator) ||
+    !pwaRegistration
+  ) {
+    return "unsupported";
+  }
+
+  try {
+    await pwaRegistration.update();
+    if (pwaRegistration.installing || pwaRegistration.waiting) {
+      return "updating";
+    }
+    return "up_to_date";
+  } catch {
+    return "error";
+  }
+}
+
 export function registerPWA() {
   // 服务端渲染 / 测试环境跳过
   if (typeof window === "undefined") return;
@@ -10,17 +32,10 @@ export function registerPWA() {
   // 动态 import 避免在没有插件的构建里直接报错
   import("virtual:pwa-register")
     .then(({ registerSW }) => {
-      const updateSW = registerSW({
-        // 检测到新版本：sonner 弹一个带"刷新"按钮的提示
-        onNeedRefresh() {
-          toast("发现新版本", {
-            description: "点击刷新加载最新内容",
-            duration: Infinity,
-            action: {
-              label: "刷新",
-              onClick: () => updateSW(true),
-            },
-          });
+      registerSW({
+        // autoUpdate 模式不会调用 onNeedRefresh，新 SW 激活后会自动刷新页面。
+        onRegisteredSW(_swUrl, registration) {
+          pwaRegistration = registration;
         },
         // 首次缓存完成（可离线使用）
         onOfflineReady() {

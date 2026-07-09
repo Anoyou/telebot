@@ -423,6 +423,28 @@ async def test_check_update_uses_internal_updater(monkeypatch) -> None:
     assert out.runtime_mode == sh.RUNTIME_PROD_CONTAINER_WITH_UPDATER
     assert out.action_required == "backend"
     assert out.can_apply is True
+    assert out.can_check is True
+
+
+@pytest.mark.asyncio
+async def test_check_update_manual_container_reports_cannot_check(monkeypatch) -> None:
+    """容器内无 updater / 无工作树时应诚实返回"无法自动检查"，不再无条件谎报有更新。"""
+
+    monkeypatch.setenv("TELEPILOT_UPDATE_BRANCH", "main")
+    monkeypatch.setattr(
+        sh,
+        "_detect_runtime_mode",
+        lambda: (sh.RUNTIME_PROD_CONTAINER_MANUAL, None, None),
+    )
+
+    out = await sh.check_update(_user=None)  # type: ignore[arg-type]
+
+    assert out.runtime_mode == sh.RUNTIME_PROD_CONTAINER_MANUAL
+    assert out.has_update is False
+    assert out.can_check is False
+    assert out.action_required == "manual"
+    assert out.manual_command  # 保留"在宿主机执行"的命令提示
+    assert out.error is None
 
 
 @pytest.mark.asyncio
