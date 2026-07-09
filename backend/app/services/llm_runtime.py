@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import time
 from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -297,6 +298,8 @@ async def call_with_fallback(
             override_model or provider_dto.default_model,
         )
 
+        # 记录本次 provider 尝试的墙钟耗时（含重试退避），成功/失败都写入 usage.latency_ms
+        attempt_start = time.monotonic()
         try:
             result = await _call_with_retry(
                 provider_dto,
@@ -314,6 +317,7 @@ async def call_with_fallback(
                 log_prompt_preview=log_prompt_preview,
                 client_factory=client_factory,
             )
+            latency_ms = int((time.monotonic() - attempt_start) * 1000)
             # 成功
             used_fallback = is_fallback
             # 记录 usage
@@ -325,6 +329,7 @@ async def call_with_fallback(
                 model=result.model,
                 input_tokens=result.input_tokens,
                 output_tokens=result.output_tokens,
+                latency_ms=latency_ms,
                 success=True,
                 source=source,
                 used_fallback=used_fallback,
@@ -352,6 +357,7 @@ async def call_with_fallback(
 
         except Exception as exc:
             last_error = exc
+            latency_ms = int((time.monotonic() - attempt_start) * 1000)
             error_type = _classify_error(exc)
             retryable = _is_retryable_error(exc, last_status_code)
 
@@ -371,6 +377,7 @@ async def call_with_fallback(
                     triggered_by_account_id=triggered_by_account_id,
                     provider_name=provider_dto.name,
                     model=override_model or provider_dto.default_model,
+                    latency_ms=latency_ms,
                     success=False,
                     error_type=error_type,
                     source=source,
@@ -456,8 +463,6 @@ async def _call_with_retry(
     max_retries: int = _MAX_RETRIES,
 ) -> LLMResult:
     """使用指数退避重试调用单个 provider。"""
-    import time
-
     from .llm_client import (
         LLMError,
     )

@@ -973,4 +973,227 @@ async def test_scheduler_floodwait_calls_engine_correctly(monkeypatch) -> None:
     assert isinstance(args[0][1], FakeFloodWaitError)
 
 
+# ════════════════════════════════════════════════════════════
+# 9) 真实错误包装 → retry / fallback 集成测试
+# ════════════════════════════════════════════════════════════
+#
+# 这些用例走真实的 llm_client 包装路径（httpx 异常 / HTTP 状态码），
+# 断言 LLMError.retryable 被正确设置，并驱动 runtime 的重试与 fallback。
+# 回归的 bug：生产代码从不设置 retryable=True，导致 fallback 链永不推进、
+# _call_with_retry 永不重试。
+
+
+class _FakeHTTPResponse:
+    """最小 httpx.Response 替身：只提供 llm_client 错误/成功路径用到的字段。"""
+
+    def __init__(self, status_code: int, *, text: str = "", payload: dict | None = None) -> None:
+        self.status_code = status_code
+        self.text = text
+        self._payload = payload or {}
+
+    def json(self) -> dict:
+        return self._payload
+
+
+def _make_fake_async_client(primary_outcome, call_log: list[str]):
+    """构造假的 httpx.AsyncClient：
+
+    - base_url 含 "fail" 的 primary 按 primary_outcome 出错（httpx 异常实例或 4xx/5xx 响应）
+    - 其它 provider（fallback）返回 200 成功 JSON
+    每次 post 都记入 call_log，用于断言重试次数。
+    """
+
+    class _FakeAsyncClient:
+        def __init__(self, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc) -> bool:
+            return False
+
+        async def post(self, url, **kwargs):
+            call_log.append(url)
+            if "fail" in url:
+                if isinstance(primary_outcome, BaseException):
+                    raise primary_outcome
+                return primary_outcome
+            return _FakeHTTPResponse(
+                200,
+                payload={
+                    "choices": [{"message": {"content": "fallback-ok"}}],
+                    "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+                    "model": "gpt-4o",
+                },
+            )
+
+    return _FakeAsyncClient
+
+
+def _openai_client_factory(dto, override_model=None, proxy_url=None):
+    """按 DTO base_url 直接构造真实 OpenAIClient（跳过 DTO 密钥解密）。"""
+    from app.services.llm_client import OpenAIClient
+
+    return OpenAIClient(api_key="sk-test", base_url=dto.base_url, model=dto.default_model or "gpt-4o")
+
+
+def _fail_ok_chain() -> FallbackChain:
+    primary = LLMProviderDTO(
+        id=1, name="primary", provider="openai",
+        base_url="https://fail.example/v1", default_model="gpt-4o", api_key_enc="sk-test",
+    )
+    fallback = LLMProviderDTO(
+        id=2, name="fallback", provider="openai",
+        base_url="https://ok.example/v1", default_model="gpt-4o", api_key_enc="sk-test",
+    )
+    return FallbackChain(primary=primary, fallbacks=[fallback])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "outcome,expected_retryable",
+    [
+        ("network", True),
+        (429, True),
+        (500, True),
+        (503, True),
+        (400, False),
+        (401, False),
+        (403, False),
+        (404, False),
+    ],
+)
+async def test_openai_client_wraps_error_with_correct_retryable(monkeypatch, outcome, expected_retryable) -> None:
+    """真实 OpenAIClient 包装路径按错误类型正确设置 LLMError.retryable。"""
+    import httpx
+
+    from app.services import llm_client
+    from app.services.llm_client import OpenAIClient
+
+    if outcome == "network":
+        primary_outcome: object = httpx.ConnectError("connection refused")
+    else:
+        primary_outcome = _FakeHTTPResponse(outcome, text="upstream error")
+
+    monkeypatch.setattr(
+        llm_client.httpx, "AsyncClient", _make_fake_async_client(primary_outcome, [])
+    )
+
+    client = OpenAIClient(api_key="sk-test", base_url="https://fail.example/v1", model="gpt-4o")
+    with pytest.raises(LLMError) as exc_info:
+        await client.complete("sys", "user", max_tokens=10)
+
+    assert exc_info.value.retryable is expected_retryable
+
+
+@pytest.mark.asyncio
+async def test_call_with_fallback_network_error_retries_and_falls_back(monkeypatch) -> None:
+    """真实网络异常经包装成可重试 LLMError → 先重试 primary，再推进到 fallback。"""
+    import httpx
+
+    from app.services import llm_client
+    from app.services import llm_runtime as _rt
+
+    call_log: list[str] = []
+    monkeypatch.setattr(
+        llm_client.httpx, "AsyncClient",
+        _make_fake_async_client(httpx.ConnectError("connection refused"), call_log),
+    )
+    # 去掉退避真实 sleep，让重试瞬间完成
+    monkeypatch.setattr(_rt, "_compute_retry_delay", lambda attempt: 0.0)
+
+    result, provider, used_fb = await _rt.call_with_fallback(
+        _fail_ok_chain(), "sys", "user", max_tokens=50, client_factory=_openai_client_factory
+    )
+
+    assert result.text == "fallback-ok"
+    assert provider.id == 2
+    assert used_fb is True
+    # primary 被真实重试满 _MAX_RETRIES+1 次后才 fallback
+    assert len([u for u in call_log if "fail" in u]) == _rt._MAX_RETRIES + 1
+    assert any("ok.example" in u for u in call_log)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [429, 500])
+async def test_call_with_fallback_retryable_status_falls_back(monkeypatch, status) -> None:
+    """429 / 5xx 经包装成可重试 LLMError → 重试并 fallback。"""
+    from app.services import llm_client
+    from app.services import llm_runtime as _rt
+
+    call_log: list[str] = []
+    monkeypatch.setattr(
+        llm_client.httpx, "AsyncClient",
+        _make_fake_async_client(_FakeHTTPResponse(status, text="upstream error"), call_log),
+    )
+    monkeypatch.setattr(_rt, "_compute_retry_delay", lambda attempt: 0.0)
+
+    result, provider, used_fb = await _rt.call_with_fallback(
+        _fail_ok_chain(), "sys", "user", max_tokens=50, client_factory=_openai_client_factory
+    )
+
+    assert result.text == "fallback-ok"
+    assert provider.id == 2
+    assert used_fb is True
+    assert len([u for u in call_log if "fail" in u]) == _rt._MAX_RETRIES + 1
+
+
+@pytest.mark.asyncio
+async def test_call_with_fallback_auth_error_no_retry_no_fallback(monkeypatch) -> None:
+    """401 经包装成不可重试 LLMError → 不重试、不 fallback，立即抛 LLMCallFailed。"""
+    from app.services import llm_client
+    from app.services import llm_runtime as _rt
+
+    call_log: list[str] = []
+    monkeypatch.setattr(
+        llm_client.httpx, "AsyncClient",
+        _make_fake_async_client(_FakeHTTPResponse(401, text="unauthorized"), call_log),
+    )
+    # 即便退避可用，认证错误也不该产生任何重试
+    monkeypatch.setattr(_rt, "_compute_retry_delay", lambda attempt: 0.0)
+
+    with pytest.raises(LLMCallFailed) as exc_info:
+        await _rt.call_with_fallback(
+            _fail_ok_chain(), "sys", "user", max_tokens=50, client_factory=_openai_client_factory
+        )
+
+    # primary 只调用一次（无重试），且从不尝试 fallback
+    assert [u for u in call_log if "fail" in u] == ["https://fail.example/v1/chat/completions"]
+    assert not any("ok.example" in u for u in call_log)
+    assert exc_info.value.error_type == "auth"
+
+
+@pytest.mark.asyncio
+async def test_call_with_fallback_records_latency(monkeypatch) -> None:
+    """成功路径把测得的 latency_ms 写入 usage（回归 latency_ms 恒 0 的 bug）。"""
+    from app.services import llm_runtime as _rt
+    from app.services.llm_client import LLMResult
+
+    captured: list[UsageRecord] = []
+
+    async def _capture(record: UsageRecord) -> None:
+        captured.append(record)
+
+    monkeypatch.setattr(_rt, "_emit_usage", _capture)
+
+    async def _slow_call(*args, **kwargs):
+        await asyncio.sleep(0.02)
+        return LLMResult(text="ok", model="gpt-4o", input_tokens=1, output_tokens=1)
+
+    monkeypatch.setattr(_rt, "_call_with_retry", _slow_call)
+
+    primary = LLMProviderDTO(
+        id=1, name="primary", provider="openai", default_model="gpt-4o", api_key_enc="sk-test"
+    )
+    result, _provider, _used_fb = await _rt.call_with_fallback(
+        FallbackChain(primary=primary), "sys", "user", max_tokens=50
+    )
+
+    assert result.text == "ok"
+    assert len(captured) == 1
+    assert captured[0].success is True
+    assert captured[0].latency_ms >= 10
+
+
 __all__ = []

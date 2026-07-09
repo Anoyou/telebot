@@ -42,13 +42,6 @@ _HTTP_TIMEOUT = httpx.Timeout(30.0, connect=10.0)
 # 本地桥接（如 grok-bridge）需要等待浏览器 JS 执行 + LLM 生成，超时更长
 _LOCAL_TIMEOUT = httpx.Timeout(180.0, connect=10.0)
 
-# ── Retry 策略常量 ──────────────────────────────────────────
-# 最大重试次数（不含首次调用）
-_MAX_RETRIES = 3
-# 重试睡票基数（秒），指数退避
-_RETRY_BASE_DELAY = 1.0
-# 最大退避时间（秒）
-_RETRY_MAX_DELAY = 30.0
 _LLM_USER_AGENT = f"TelePilot/{__version__} LLM Client"
 
 
@@ -627,7 +620,8 @@ class OpenAIClient(LLMClient):
                 _safe_error_message(
                     _describe_http_error(exc, self._base_url),
                     self._api_key,
-                )
+                ),
+                retryable=True,
             ) from None
         if resp.status_code >= 400:
             # 不要把 api_key 回显到错误里；构造前先剥离
@@ -635,7 +629,8 @@ class OpenAIClient(LLMClient):
                 _safe_error_message(
                     f"OpenAI 接口返回 {resp.status_code}: {resp.text[:200]}{_hint_for_status(resp.status_code)}",
                     self._api_key,
-                )
+                ),
+                retryable=_is_retryable_status(resp.status_code),
             )
         try:
             data = resp.json()
@@ -707,14 +702,16 @@ class OpenAIClient(LLMClient):
                 _safe_error_message(
                     _describe_http_error(exc, self._base_url),
                     self._api_key,
-                )
+                ),
+                retryable=True,
             ) from None
         if resp.status_code >= 400:
             raise LLMError(
                 _safe_error_message(
                     f"STT 接口返回 {resp.status_code}: {resp.text[:200]}{_hint_for_status(resp.status_code)}",
                     self._api_key,
-                )
+                ),
+                retryable=_is_retryable_status(resp.status_code),
             )
         try:
             payload = resp.json()
@@ -775,14 +772,16 @@ class OpenAIClient(LLMClient):
                 _safe_error_message(
                     _describe_http_error(exc, self._base_url),
                     self._api_key,
-                )
+                ),
+                retryable=True,
             ) from None
         if resp.status_code >= 400:
             raise LLMError(
                 _safe_error_message(
                     f"Images 接口返回 {resp.status_code}: {resp.text[:200]}{_hint_for_status(resp.status_code)}",
                     self._api_key,
-                )
+                ),
+                retryable=_is_retryable_status(resp.status_code),
             )
         try:
             data = resp.json()
@@ -927,7 +926,8 @@ class AnthropicClient(LLMClient):
                             _safe_error_message(
                                 f"Anthropic 接口返回 {resp.status_code}: {error_body[:200]}{_hint_for_status(resp.status_code)}",
                                 self._api_key,
-                            )
+                            ),
+                            retryable=_is_retryable_status(resp.status_code),
                         )
                     # 逐行解析 SSE 事件
                     current_event = ""
@@ -966,7 +966,8 @@ class AnthropicClient(LLMClient):
                 _safe_error_message(
                     _describe_http_error(exc, self._base_url),
                     self._api_key,
-                )
+                ),
+                retryable=True,
             ) from None
 
         text = "".join(text_parts).strip()
@@ -1056,7 +1057,8 @@ class AnthropicClient(LLMClient):
                             _safe_error_message(
                                 f"Anthropic streaming 接口返回 {resp.status_code}: {error_body[:200]}{_hint_for_status(resp.status_code)}",
                                 self._api_key,
-                            )
+                            ),
+                            retryable=_is_retryable_status(resp.status_code),
                         )
 
                     current_event = ""
@@ -1114,7 +1116,8 @@ class AnthropicClient(LLMClient):
                 _safe_error_message(
                     _describe_http_error(exc, self._base_url),
                     self._api_key,
-                )
+                ),
+                retryable=True,
             ) from None
 
         if not final_sent:
@@ -1221,7 +1224,8 @@ class ResponsesClient(LLMClient):
                 _safe_error_message(
                     _describe_http_error(exc, self._base_url),
                     self._api_key,
-                )
+                ),
+                retryable=True,
             ) from None
 
         if resp.status_code >= 400:
@@ -1229,7 +1233,8 @@ class ResponsesClient(LLMClient):
                 _safe_error_message(
                     f"Responses 接口返回 {resp.status_code}: {_response_text(resp)[:200]}{_hint_for_status(resp.status_code)}",
                     self._api_key,
-                )
+                ),
+                retryable=_is_retryable_status(resp.status_code),
             )
 
         data = _decode_responses_payload("Responses", resp, self._api_key)
@@ -1340,7 +1345,8 @@ class ResponsesClient(LLMClient):
                             _safe_error_message(
                                 f"Responses streaming 接口返回 {resp.status_code}: {error_body[:200]}{_hint_for_status(resp.status_code)}",
                                 self._api_key,
-                            )
+                            ),
+                            retryable=_is_retryable_status(resp.status_code),
                         )
 
                     current_event = ""
@@ -1410,7 +1416,8 @@ class ResponsesClient(LLMClient):
                 _safe_error_message(
                     _describe_http_error(exc, self._base_url),
                     self._api_key,
-                )
+                ),
+                retryable=True,
             ) from None
 
         if not final_sent:
@@ -1499,7 +1506,8 @@ class ResponsesClient(LLMClient):
                 _safe_error_message(
                     _describe_http_error(exc, self._base_url),
                     self._api_key,
-                )
+                ),
+                retryable=True,
             ) from None
 
         if resp.status_code >= 400:
@@ -1507,7 +1515,8 @@ class ResponsesClient(LLMClient):
                 _safe_error_message(
                     f"Responses 生图接口返回 {resp.status_code}: {_response_text(resp)[:200]}{_hint_for_status(resp.status_code)}",
                     self._api_key,
-                )
+                ),
+                retryable=_is_retryable_status(resp.status_code),
             )
         data = _decode_responses_payload("Responses 生图", resp, self._api_key)
 
@@ -1535,10 +1544,9 @@ class ResponsesClient(LLMClient):
 class LLMError(Exception):
     """LLM 调用层统一异常；message 已脱敏。"""
 
-    def __init__(self, message: str, *, retryable: bool = False, fallback: bool = False):
+    def __init__(self, message: str, *, retryable: bool = False):
         super().__init__(message)
         self.retryable = retryable  # 是否可重试（timeout/429/5xx/网络错误）
-        self.fallback = fallback     # 是否可 fallback（网络错误/非认证错误）
 
 
 class LLMCallFailed(Exception):
@@ -1561,73 +1569,9 @@ class LLMCallFailed(Exception):
         self.retryable = retryable
 
 
-def _is_retryable_error(exc: Exception, status_code: int | None = None) -> bool:
-    """判断错误是否可重试。
-
-    可重试：timeout / ConnectError / 网络错误 / 429 / 5xx
-    不可重试：400 / 401 / 403 / 404（认证/配置错误，重试无意义）
-    """
-    if status_code is not None:
-        # 4xx 客户端错误中，只有 429 限流可重试
-        if status_code == 429:
-            return True
-        # 5xx 服务端错误可重试
-        if 500 <= status_code < 600:
-            return True
-        # 400/401/403/404 等不可重试
-        return False
-
-    # 无 status_code 时，判断异常类型
-    exc_name = type(exc).__name__
-    retryable_types = {
-        "TimeoutException",
-        "ConnectTimeout",
-        "ReadTimeout",
-        "WriteTimeout",
-        "PoolTimeout",
-        "ConnectError",
-        "ReadError",
-        "WriteError",
-        "ProxyError",
-        "SSLError",
-        "ProtocolError",
-        "HTTPError",  # httpx 基础异常，包含各种网络问题
-    }
-    return exc_name in retryable_types
-
-
-def _classify_error(exc: Exception, status_code: int | None = None) -> str:
-    """分类错误类型（用于日志和用户提示）。"""
-    if status_code is not None:
-        if status_code == 429:
-            return "rate_limit"
-        if status_code == 401 or status_code == 403:
-            return "auth"
-        if status_code == 404:
-            return "not_found"
-        if 500 <= status_code < 600:
-            return "server_error"
-        if 400 <= status_code < 500:
-            return "client_error"
-        return "unknown"
-
-    exc_name = type(exc).__name__
-    if "Timeout" in exc_name:
-        return "timeout"
-    if "Connect" in exc_name or "Proxy" in exc_name or "SSL" in exc_name:
-        return "network"
-    if "HTTP" in exc_name:
-        return "network"
-    return "unknown"
-
-
-def _compute_retry_delay(attempt: int, base: float = _RETRY_BASE_DELAY, max_delay: float = _RETRY_MAX_DELAY) -> float:
-    """计算指数退避延迟：base * 2^(attempt-1)，加抖动后限制在 max_delay 内。"""
-    import random
-    delay = base * (2 ** (attempt - 1))
-    # 加 ±25% 抖动
-    jitter = delay * 0.25 * (2 * random.random() - 1)
-    return min(delay + jitter, max_delay)
+def _is_retryable_status(status_code: int) -> bool:
+    """HTTP 状态码是否值得重试：429 限流与 5xx 服务端错误可重试，4xx 认证/配置类不可重试。"""
+    return status_code == 429 or 500 <= status_code < 600
 
 
 def _safe_error_message(msg: str, api_key: str | None) -> str:
