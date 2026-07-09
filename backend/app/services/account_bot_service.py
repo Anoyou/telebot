@@ -134,6 +134,12 @@ def label_bot_polling_error(clean: str, *, role: str) -> str:
     return "管理 Bot polling 冲突：同一个管理 Bot token 正在被另一个实例监听。请确认它没有被交互 Bot、其他账号、本地/Docker/VPS 中的另一套 TelePilot，或其他程序同时使用。"
 
 
+def _interaction_bot_privacy_hint(me: dict[str, Any]) -> str | None:
+    if me.get("can_read_all_group_messages") is not True:
+        return None
+    return "交互 Bot 当前可读取群内所有消息。建议在 BotFather 开启 Privacy Mode，减少和 UserBot 管道重复收到普通群消息。"
+
+
 def _encrypted_token_matches_plain(token_enc: str | None, token: str) -> bool:
     if not token_enc or not token:
         return False
@@ -1190,6 +1196,7 @@ async def update_transfer_notice_config(
             bot_id = me.get("id")
             current["interaction_bot_username"] = username if isinstance(username, str) else None
             current["interaction_bot_id"] = int(bot_id) if bot_id is not None else None
+            current["interaction_last_error"] = _interaction_bot_privacy_hint(me)
         except Exception as exc:  # noqa: BLE001
             current["interaction_last_error"] = sanitize_bot_error(exc, token=interaction_token)
     if incoming.get("clear_transfer_bot_token"):

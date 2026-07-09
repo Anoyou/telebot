@@ -90,6 +90,7 @@ from .interaction.delivery import (
     delivery_message_id,
     read_action_reply_target,
 )
+from .interaction.dedupe import claim_interaction_message
 
 log = logging.getLogger(__name__)
 
@@ -2918,6 +2919,14 @@ def _interaction_session_user_id(incoming: Incoming, data: dict[str, Any] | None
     )
 
 
+def _interaction_session_payload_active(session: dict[str, Any], *, now: float | None = None) -> bool:
+    try:
+        expires_at = float(session.get("expires_at") or 0)
+    except (TypeError, ValueError):
+        return False
+    return expires_at > (time.time() if now is None else now)
+
+
 async def _save_interaction_session(
     incoming: Incoming,
     rule: dict[str, Any],
@@ -2954,6 +2963,12 @@ async def _save_interaction_session(
     ttl = _interaction_session_ttl(rule)
     expires_at = now + ttl
     existing_data = existing.get("data")
+    existing_channel = str(existing.get("channel") or "").strip()
+    channel = (
+        existing_channel
+        if existing_channel and _interaction_session_payload_active(existing, now=now)
+        else "interaction_bot"
+    )
     payload = {
         "account_id": incoming.account_id,
         "chat_id": incoming.chat_id,
@@ -2965,7 +2980,7 @@ async def _save_interaction_session(
         "source_user_id": incoming.user_id,
         "started_by_message_id": incoming.message_id,
         "event_type": event_type,
-        "channel": "interaction_bot",
+        "channel": channel,
         "created_at": existing.get("created_at") or now,
         "updated_at": now,
         "expires_at": expires_at,
@@ -3054,6 +3069,14 @@ async def _apply_interaction_start_session_action(
 
     now = time.time()
     ttl = _int_or_none(action.get("ttl_seconds")) or _interaction_session_ttl(rule)
+    existing_data = existing.get("data")
+    action_data = action.get("data")
+    existing_channel = str(existing.get("channel") or "").strip()
+    channel = (
+        existing_channel
+        if existing_channel and _interaction_session_payload_active(existing, now=now)
+        else "interaction_bot"
+    )
     payload = {
         "account_id": incoming.account_id,
         "chat_id": target_chat_id,
@@ -3062,13 +3085,21 @@ async def _apply_interaction_start_session_action(
         "module_key": module_key,
         "entry_key": entry_key,
         "started_by_user_id": started_by_user_id,
-        "started_by_message_id": _int_or_none(action.get("started_by_message_id")) or existing.get("started_by_message_id") or incoming.message_id,
+        "started_by_message_id": (
+            _int_or_none(action.get("started_by_message_id"))
+            or existing.get("started_by_message_id")
+            or incoming.message_id
+        ),
         "source_user_id": incoming.user_id,
         "event_type": str(action.get("event_type") or existing.get("event_type") or "message"),
-        "channel": "interaction_bot",
+        "channel": channel,
         "created_at": existing.get("created_at") or now,
         "updated_at": now,
         "expires_at": now + ttl,
+        "data": {
+            **dict(existing_data if isinstance(existing_data, dict) else {}),
+            **dict(action_data if isinstance(action_data, dict) else {}),
+        },
     }
     if _interaction_participant_policy(rule) == "paid_pool":
         payload["paid_user_ids"] = sorted(participant_ids)
@@ -4993,6 +5024,25 @@ async def _try_handle_interaction_module_message(
         )
         if decision is None or not decision.matched:
             continue
+        if event_type == "message" and not await claim_interaction_message(
+            account_id=incoming.account_id,
+            chat_id=incoming.chat_id,
+            message_id=incoming.message_id,
+            rule_id=rule.get("id"),
+        ):
+            await record_span(
+                trace_log_context(incoming.trace_id, plugin_key=module_key, entry_key=entry_key),
+                "route",
+                TRACE_STATUS_SKIPPED,
+                component="interaction_session",
+                plugin_key=module_key,
+                entry_key=entry_key,
+                reason_code="cross_channel_duplicate",
+                message="交互 Bot 会话消息已由另一条交互管道处理，跳过重复投递。",
+                rule_id=rule.get("id"),
+                message_id=incoming.message_id,
+            )
+            return True
         await _maybe_fast_ack_callback(incoming, module_key, entry_key)
         payload = await _interaction_module_payload_async(
             incoming,

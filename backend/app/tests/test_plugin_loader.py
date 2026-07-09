@@ -1972,6 +1972,8 @@ async def test_scan_expired_session_skips_plugin_when_event_not_declared(monkeyp
     monkeypatch.setattr(loader_mod, "invoke_interaction_entry", invoke)
     start_trace = AsyncMock()
     monkeypatch.setattr(loader_mod, "_start_userbot_session_trace", start_trace)
+    record_span = AsyncMock()
+    monkeypatch.setattr(loader_mod, "record_span", record_span)
 
     loader_mod._STATES[account_id] = state
     try:
@@ -1982,6 +1984,11 @@ async def test_scan_expired_session_skips_plugin_when_event_not_declared(monkeyp
     # 插件不被调用、也不开 trace，但会话 key 仍被清理
     invoke.assert_not_awaited()
     start_trace.assert_not_awaited()
+    assert any(
+        call.args[1:3] == ("subscription_match", loader_mod.TRACE_STATUS_SKIPPED)
+        and call.kwargs.get("reason_code") == "event_type_not_subscribed"
+        for call in record_span.await_args_list
+    )
     assert key not in redis.values
     assert processed == 0
 
@@ -4285,6 +4292,59 @@ async def test_userbot_channel_session_still_consumes_without_actions(monkeypatc
     assert invoke.await_args.kwargs["default_send_via"] == ["userbot_reply"]
     finish_trace.assert_awaited_once()
     assert finish_trace.await_args.kwargs["consumed"] is True
+
+
+@pytest.mark.asyncio
+async def test_userbot_session_message_skips_cross_channel_duplicate(monkeypatch) -> None:
+    redis = _FakeRedis()
+    state = loader_mod._AccountState(89)
+    state.redis = redis
+    redis.values["account_bot:interaction_session:89:rule-dupe:-10089"] = json.dumps(
+        {
+            "account_id": 89,
+            "chat_id": -10089,
+            "rule_id": "rule-dupe",
+            "module_key": "demo",
+            "entry_key": "main",
+            "channel": "userbot",
+            "expires_at": 4_000_000_000,
+        }
+    )
+    invoke = AsyncMock(return_value=[{"type": "send_message", "text": "nope"}])
+    claim = AsyncMock(return_value=False)
+    record_span = AsyncMock()
+    finish_trace = AsyncMock()
+    monkeypatch.setattr(loader_mod, "invoke_interaction_entry", invoke)
+    monkeypatch.setattr(loader_mod, "claim_interaction_message", claim)
+    monkeypatch.setattr(loader_mod, "_start_userbot_session_trace", AsyncMock(return_value=None))
+    monkeypatch.setattr(loader_mod, "record_span", record_span)
+    monkeypatch.setattr(loader_mod, "finish_trace", finish_trace)
+
+    consumed = await loader_mod._dispatch_userbot_session_message(
+        state,
+        SimpleNamespace(chat_id=-10089, sender_id=9, id=8901, raw_text="继续", text="继续"),
+        direction="incoming",
+        edited=False,
+        event_label="incoming",
+        redis=redis,
+    )
+
+    assert consumed is False
+    claim.assert_awaited_once_with(
+        account_id=89,
+        chat_id=-10089,
+        message_id=8901,
+        rule_id="rule-dupe",
+        redis=redis,
+    )
+    invoke.assert_not_awaited()
+    assert any(
+        call.args[1:3] == ("route", loader_mod.TRACE_STATUS_SKIPPED)
+        and call.kwargs.get("reason_code") == "cross_channel_duplicate"
+        for call in record_span.await_args_list
+    )
+    finish_trace.assert_awaited_once()
+    assert finish_trace.await_args.args[1] == loader_mod.TRACE_STATUS_SKIPPED
 
 
 @pytest.mark.asyncio

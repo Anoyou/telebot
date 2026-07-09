@@ -93,6 +93,7 @@ from ...services.interaction.delivery import (
     namespaced_action_save_message_id_key,
     save_action_reply_target,
 )
+from ...services.interaction.dedupe import claim_interaction_message
 from ...services.rate_limit_service import get_effective
 from ...settings import settings as app_settings
 from ...util.sudo_permissions import sudo_chat_allowed
@@ -4113,7 +4114,33 @@ async def _dispatch_userbot_session_message(
     invoked_count = 0
     failed_count = 0
     consumed = False
+    message_id = _int_or_none(
+        getattr(getattr(event, "message", None), "id", None)
+        or getattr(event, "id", None)
+        or getattr(event, "message_id", None)
+    )
     for session_key, session, session_channel, plugin_key, entry_key, callback_data in candidates:
+        if not await claim_interaction_message(
+            account_id=state.account_id,
+            chat_id=chat_id,
+            message_id=message_id,
+            rule_id=session.get("rule_id"),
+            redis=redis,
+        ):
+            await record_span(
+                trace,
+                "route",
+                TRACE_STATUS_SKIPPED,
+                component="userbot_session",
+                plugin_key=plugin_key,
+                entry_key=entry_key,
+                reason_code="cross_channel_duplicate",
+                message="UserBot 会话消息已由另一条交互管道处理，跳过重复投递。",
+                direction=event_label,
+                session_key=session_key,
+                session_channel=session_channel,
+            )
+            continue
         payload = _userbot_session_event_payload(
             base_payload,
             session_key=session_key,
@@ -4306,6 +4333,17 @@ async def scan_userbot_expired_sessions_once(account_id: int) -> int:
                 plugin_key,
                 entry_key,
                 key,
+            )
+            await record_span(
+                None,
+                "subscription_match",
+                TRACE_STATUS_SKIPPED,
+                component="userbot_session_expired",
+                plugin_key=plugin_key,
+                entry_key=entry_key,
+                reason_code="event_type_not_subscribed",
+                message="插件入口未声明 session_expired 事件。",
+                session_key=key,
             )
             delete = getattr(redis, "delete", None)
             if callable(delete):

@@ -2680,6 +2680,48 @@ async def test_clear_transfer_bot_token_also_clears_detected_bot_id() -> None:
 
 
 @pytest.mark.asyncio
+async def test_update_interaction_bot_config_warns_when_privacy_disabled(monkeypatch) -> None:
+    class _DB:
+        def __init__(self) -> None:
+            self.added: list[object] = []
+
+        async def get(self, model, _key):  # noqa: ANN001
+            if model is Account:
+                return SimpleNamespace(id=1)
+            return None
+
+        def add(self, row):  # noqa: ANN001
+            self.added.append(row)
+
+        async def flush(self):
+            return None
+
+    db = _DB()
+    monkeypatch.setattr(
+        account_bot_service,
+        "get_me",
+        AsyncMock(
+            return_value={
+                "id": 12345,
+                "username": "TelePilotTestBot",
+                "can_read_all_group_messages": True,
+            }
+        ),
+    )
+
+    out = await account_bot_service.update_interaction_bot_config(
+        db,
+        1,
+        {"enabled": True, "trusted_bot_id": 456, "interaction_bot_token": "123:token"},
+    )
+
+    assert out["interaction_bot_id"] == 12345
+    assert out["interaction_bot_username"] == "TelePilotTestBot"
+    assert "开启 Privacy Mode" in out["interaction_last_error"]
+    assert db.added
+
+
+@pytest.mark.asyncio
 async def test_update_transfer_notice_requires_trusted_bot_for_payment_rules(monkeypatch) -> None:
     class _DB:
         async def get(self, *_args):  # noqa: ANN002
@@ -6527,6 +6569,52 @@ async def test_payment_interaction_session_uses_payer_user_scope(monkeypatch) ->
 
 
 @pytest.mark.asyncio
+async def test_interaction_session_save_preserves_active_existing_channel(monkeypatch) -> None:
+    redis = _MemoryRedis()
+    now = 1_720_100_000.0
+    monkeypatch.setattr(account_bot_runtime, "get_redis", lambda: redis)
+    monkeypatch.setattr(account_bot_runtime.time, "time", lambda: now)
+    incoming = account_bot_runtime.Incoming(
+        account_id=1,
+        token="bbot-token",
+        update_id=10,
+        user_id=111,
+        chat_id=-100123,
+        message_id=70,
+        text="开始",
+    )
+    rule = {
+        "id": "grab-session",
+        "module_key": "game",
+        "module_action": "start",
+        "module_session_scope": "chat",
+        "valid_seconds": 60,
+    }
+    session_key = account_bot_runtime._interaction_session_key(1, rule, -100123, None)
+    redis.data[session_key] = json.dumps(
+        {
+            "account_id": 1,
+            "chat_id": -100123,
+            "rule_id": "grab-session",
+            "module_key": "game",
+            "entry_key": "start",
+            "channel": "userbot",
+            "created_at": now - 30,
+            "expires_at": now + 30,
+            "data": {"round": 2},
+        }
+    )
+
+    await account_bot_runtime._save_interaction_session(incoming, rule, "keyword")
+
+    saved = json.loads(redis.data[session_key])
+    assert saved["channel"] == "userbot"
+    assert saved["data"] == {"round": 2}
+    assert saved["created_at"] == now - 30
+    assert saved["updated_at"] == now
+
+
+@pytest.mark.asyncio
 async def test_interaction_session_load_failure_writes_runtime_warn(monkeypatch) -> None:
     class _BrokenRedis:
         async def get(self, _key: str):
@@ -6969,6 +7057,72 @@ async def test_opening_start_session_then_update_session_keeps_explicit_fields(m
         and call.args[2] == account_bot_runtime.TRACE_STATUS_OK
         for call in record_action.await_args_list
     )
+
+
+@pytest.mark.asyncio
+async def test_runtime_start_session_action_merges_existing_and_action_data(monkeypatch) -> None:
+    redis = _MemoryRedis()
+    now = 1_720_200_000.0
+    rule = {
+        "id": "explicit-merge",
+        "enabled": True,
+        "chat_ids": [-100123],
+        "action": "module",
+        "module_key": "explicit_game",
+        "module_action": "start",
+        "module_session_scope": "chat",
+        "valid_seconds": 120,
+    }
+    session_key = account_bot_runtime._interaction_session_key(1, rule, -100123, None)
+    redis.data[session_key] = json.dumps(
+        {
+            "account_id": 1,
+            "chat_id": -100123,
+            "rule_id": "explicit-merge",
+            "module_key": "explicit_game",
+            "entry_key": "start",
+            "channel": "userbot",
+            "created_at": now - 20,
+            "started_by_user_id": 111,
+            "started_by_message_id": 40,
+            "expires_at": now + 80,
+            "data": {"round": 1, "phase": "old"},
+        }
+    )
+    incoming = account_bot_runtime.Incoming(
+        account_id=1,
+        token="bbot-token",
+        update_id=10,
+        user_id=222,
+        chat_id=-100123,
+        chat_type="supergroup",
+        message_id=50,
+        text="显式开局",
+    )
+    record_action = AsyncMock()
+    monkeypatch.setattr(account_bot_runtime, "get_redis", lambda: redis)
+    monkeypatch.setattr(account_bot_runtime.time, "time", lambda: now)
+    monkeypatch.setattr(account_bot_runtime, "record_action", record_action)
+
+    await account_bot_runtime._apply_interaction_start_session_action(
+        incoming,
+        rule,
+        {
+            "type": "start_session",
+            "data": {"phase": "new", "answer": 24},
+            "ttl_seconds": 60,
+        },
+    )
+
+    saved = json.loads(redis.data[session_key])
+    assert saved["channel"] == "userbot"
+    assert saved["data"] == {"round": 1, "phase": "new", "answer": 24}
+    assert saved["created_at"] == now - 20
+    assert saved["started_by_user_id"] == 111
+    assert saved["started_by_message_id"] == 40
+    assert saved["updated_at"] == now
+    assert saved["expires_at"] == now + 60
+    assert record_action.await_args.args[2] == account_bot_runtime.TRACE_STATUS_OK
 
 
 @pytest.mark.asyncio
@@ -10644,6 +10798,61 @@ async def test_interaction_plain_message_routes_to_worker_entry_as_message(monke
     assert payload["sender_username"] == "aaa"
     assert payload["message_id"] == 13660
     assert send.await_args.args[:3] == ("bbot-token", -100777, "收到答案")
+
+
+@pytest.mark.asyncio
+async def test_interaction_plain_message_skips_cross_channel_duplicate(monkeypatch) -> None:
+    class _DB:
+        async def get(self, *_args):  # noqa: ANN002
+            return None
+
+    incoming = account_bot_runtime.Incoming(
+        account_id=1,
+        token="bbot-token",
+        update_id=13661,
+        user_id=111,
+        chat_id=-100777,
+        chat_type="supergroup",
+        message_id=13661,
+        text="我选第 4 格",
+        display_name="AAA",
+        trace_id="evt_dupe",
+    )
+    rule = {
+        "id": "dice-active",
+        "enabled": True,
+        "chat_ids": [-100777],
+        "action": "module",
+        "module_key": "dice_grid_hunt",
+        "module_action": "answer_dice_grid_hunt",
+    }
+    run_entry = AsyncMock(return_value=(True, None, [{"type": "send_message", "text": "nope"}]))
+    record_span = AsyncMock()
+    claim = AsyncMock(return_value=False)
+    monkeypatch.setattr(account_bot_runtime, "_run_worker_interaction_entry", run_entry)
+    monkeypatch.setattr(account_bot_runtime, "_load_interaction_session", AsyncMock(return_value={"rule_id": "dice-active"}))
+    monkeypatch.setattr(account_bot_runtime, "claim_interaction_message", claim)
+    monkeypatch.setattr(account_bot_runtime, "record_span", record_span)
+
+    handled = await account_bot_runtime._try_handle_interaction_module_message(
+        _DB(),
+        incoming,
+        {"enabled": True, "rules": [rule]},
+    )
+
+    assert handled is True
+    claim.assert_awaited_once_with(
+        account_id=1,
+        chat_id=-100777,
+        message_id=13661,
+        rule_id="dice-active",
+    )
+    run_entry.assert_not_awaited()
+    assert any(
+        call.args[1:3] == ("route", account_bot_runtime.TRACE_STATUS_SKIPPED)
+        and call.kwargs.get("reason_code") == "cross_channel_duplicate"
+        for call in record_span.await_args_list
+    )
 
 
 @pytest.mark.asyncio
