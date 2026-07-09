@@ -23,7 +23,7 @@ from __future__ import annotations
 import base64
 import copy
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
@@ -684,12 +684,11 @@ async def test_start_session_data_merge_parity(monkeypatch: pytest.MonkeyPatch) 
 
 
 # ---------------------------------------------------------------------------
-# drift ②（reply_markup）：userbot_reply 下 E1 文本按钮降级 vs E3 静默丢 markup
+# drift ②（reply_markup）：userbot_reply 下 E1/E3 都做文本按钮降级
 # ---------------------------------------------------------------------------
-async def test_userbot_reply_markup_button_drift(monkeypatch: pytest.MonkeyPatch) -> None:
-    """漂移②快照（内容级，归一三元组看不到，单列锁定）：同一带 inline 按钮的
-    send_message，走 userbot_reply 时——E1 把按钮渲染成“回复序号选择”文本降级，
-    E3（bot 路真正落点）完全不读 reply_markup，静默只发原文。
+async def test_userbot_reply_markup_button_parity(monkeypatch: pytest.MonkeyPatch) -> None:
+    """漂移②回归：同一带 inline 按钮的 send_message 走 userbot_reply 时，
+    E1/E3 都应把按钮渲染成“回复序号选择”文本降级。
     """
     markup = {"inline_keyboard": [[{"text": "选项A", "callback_data": "a"}]]}
 
@@ -721,5 +720,5 @@ async def test_userbot_reply_markup_button_drift(monkeypatch: pytest.MonkeyPatch
         redis=_MemRedis(),
     )
     e3_text = e3_client.calls[-1][2]
-    assert e3_text == "Q", f"E3 期望静默丢 markup 只发原文，实得 {e3_text!r}"
-    assert "选项A" not in e3_text
+    assert e3_text == worker_text
+    assert "选项A" in e3_text and "请回复序号选择" in e3_text, f"E3 未做文本按钮降级: {e3_text!r}"

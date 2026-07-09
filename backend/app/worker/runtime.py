@@ -219,6 +219,35 @@ def _str_or_none(value: Any) -> str | None:
     return text or None
 
 
+def _render_interaction_userbot_button_fallback(
+    text: str,
+    reply_markup: dict[str, Any] | None,
+) -> str:
+    if not isinstance(reply_markup, dict):
+        return text
+    rows = reply_markup.get("inline_keyboard")
+    if not isinstance(rows, list):
+        return text
+    lines: list[str] = []
+    index = 1
+    for row in rows:
+        if not isinstance(row, list):
+            continue
+        for raw_button in row:
+            if not isinstance(raw_button, dict):
+                continue
+            label = str(raw_button.get("text") or "").strip()
+            if not label:
+                continue
+            url = str(raw_button.get("url") or "").strip()
+            display = f"{label}: {url}" if url else label
+            lines.append(f"{index}. {display}")
+            index += 1
+    if not lines:
+        return text
+    return f"{text}\n\n请回复序号选择：\n" + "\n".join(lines)
+
+
 def _recent_user_message_search_limit(raw: Any) -> int:
     value = _int_or_none(raw)
     if value is None:
@@ -406,6 +435,9 @@ async def _run_interaction_userbot_action(
                 text = f"+{amount}"
         if not text:
             raise ValueError("缺少 text")
+        if action_type == "send_message":
+            reply_markup = payload.get("reply_markup") if isinstance(payload.get("reply_markup"), dict) else None
+            text = _render_interaction_userbot_button_fallback(text, reply_markup)
         parse_mode = _interaction_action_parse_mode(payload)
         await _acquire_interaction_userbot_rate_limit(
             redis=redis,
@@ -494,6 +526,26 @@ async def _run_interaction_userbot_action(
             raise
         return {
             "message_id": int(getattr(msg, "id", 0) or message_id) or None,
+            "chat_id": chat_id,
+        }
+
+    if action_type == "delete_message":
+        message_id = _int_or_none(payload.get("message_id"))
+        if message_id is None:
+            raise ValueError("缺少 message_id")
+        await client.delete_messages(chat_id, [message_id])
+        return {
+            "message_id": message_id,
+            "chat_id": chat_id,
+        }
+
+    if action_type == "pin_message":
+        message_id = _int_or_none(payload.get("message_id"))
+        if message_id is None:
+            raise ValueError("缺少 message_id")
+        await client.pin_message(chat_id, message_id, notify=False)
+        return {
+            "message_id": message_id,
             "chat_id": chat_id,
         }
 

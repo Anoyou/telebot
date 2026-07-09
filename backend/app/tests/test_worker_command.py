@@ -334,6 +334,39 @@ async def test_run_interaction_userbot_action_edit_caption_uses_saved_key_and_ra
 
 
 @pytest.mark.asyncio
+async def test_run_interaction_userbot_action_delete_and_pin_message():
+    from app.worker import runtime as runtime_mod
+
+    client = AsyncMock()
+    client.delete_messages = AsyncMock(return_value=True)
+    client.pin_message = AsyncMock(return_value=True)
+
+    delete_result = await runtime_mod._run_interaction_userbot_action(
+        client,
+        {
+            "action_type": "delete_message",
+            "chat_id": -100333,
+            "message_id": 44,
+        },
+        account_id=55,
+    )
+    pin_result = await runtime_mod._run_interaction_userbot_action(
+        client,
+        {
+            "action_type": "pin_message",
+            "chat_id": -100333,
+            "message_id": 45,
+        },
+        account_id=55,
+    )
+
+    client.delete_messages.assert_awaited_once_with(-100333, [44])
+    client.pin_message.assert_awaited_once_with(-100333, 45, notify=False)
+    assert delete_result == {"message_id": 44, "chat_id": -100333}
+    assert pin_result == {"message_id": 45, "chat_id": -100333}
+
+
+@pytest.mark.asyncio
 async def test_run_interaction_action_command_reports_reply_anchor_diagnostics():
     from app.worker import runtime as runtime_mod
 
