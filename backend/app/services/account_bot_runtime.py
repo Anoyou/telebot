@@ -2953,6 +2953,7 @@ async def _save_interaction_session(
     now = time.time()
     ttl = _interaction_session_ttl(rule)
     expires_at = now + ttl
+    existing_data = existing.get("data")
     payload = {
         "account_id": incoming.account_id,
         "chat_id": incoming.chat_id,
@@ -2968,6 +2969,7 @@ async def _save_interaction_session(
         "created_at": existing.get("created_at") or now,
         "updated_at": now,
         "expires_at": expires_at,
+        "data": dict(existing_data) if isinstance(existing_data, dict) else {},
     }
     if policy == "paid_pool":
         paid_ids = _interaction_session_list_participant_ids(existing)
@@ -4142,26 +4144,22 @@ async def _execute_interaction_rule(
             rule.get("id"),
         )
         compat_rule = _math10_compat_module_rule(rule)
-        ok, keep_session = await _run_interaction_module(
+        ok, _keep_session = await _run_interaction_module(
             incoming,
             compat_rule,
             parsed=parsed,
             event_type=event_type,
             cfg=cfg,
         )
-        if ok and keep_session:
-            await _save_interaction_session(incoming, compat_rule, event_type, parsed)
         return ok
     if rule.get("action") == "module":
-        ok, keep_session = await _run_interaction_module(
+        ok, _keep_session = await _run_interaction_module(
             incoming,
             rule,
             parsed=parsed,
             event_type=event_type,
             cfg=cfg,
         )
-        if ok and keep_session:
-            await _save_interaction_session(incoming, rule, event_type, parsed)
         return ok
     text = _render_transfer_notice_response(str(rule.get("response_template") or ""), parsed or {})
     await _send(incoming, text)
@@ -4579,14 +4577,14 @@ async def _try_handle_event_bus_payment_notice(
             continue
         guarded = await _guard_interaction_actions(incoming, rule, actions)
         keep_session = _interaction_actions_mark_success(guarded) and not _interaction_actions_request_no_session(guarded)
+        if keep_session:
+            await _save_interaction_session(incoming, rule, "payment_confirmed", parsed)
         await _apply_interaction_start_session_actions(incoming, rule, guarded)
         await _apply_interaction_actions(
             incoming,
             guarded,
             context=_interaction_trace_context(payload),
         )
-        if keep_session:
-            await _save_interaction_session(incoming, rule, "payment_confirmed", parsed)
     return handled, all_ok
 
 
@@ -5314,7 +5312,13 @@ def _interaction_session_envelope(
 ) -> dict[str, Any]:
     payload = data if isinstance(data, dict) else {}
     session = payload.get("session")
-    session_data = session if isinstance(session, dict) else {}
+    if isinstance(session, dict):
+        session_data = session
+    elif any(key in payload for key in ("rule_id", "module_key", "entry_key", "expires_at")):
+        session_data = payload
+    else:
+        session_data = {}
+    state_data = session_data.get("data")
     session_user_id = _interaction_session_user_id(incoming, payload)
     return {
         "key": _interaction_session_key(incoming.account_id, rule, incoming.chat_id, session_user_id),
@@ -5324,7 +5328,7 @@ def _interaction_session_envelope(
         "channel": str(session_data.get("channel") or "interaction_bot"),
         "expires_at": _int_or_none(session_data.get("expires_at")),
         "active": True,
-        "data": dict(session_data),
+        "data": dict(state_data) if isinstance(state_data, dict) else {},
     }
 
 
@@ -6478,7 +6482,10 @@ async def _run_interaction_module(
         raw_actions=raw_actions,
         guarded_actions=actions,
     )
+    success = _interaction_actions_mark_success(actions)
     keep_session = not _interaction_actions_request_no_session(actions)
+    if success and keep_session:
+        await _save_interaction_session(incoming, rule, event_type, parsed)
     await _apply_interaction_start_session_actions(incoming, rule, actions)
     await _apply_interaction_actions(
         incoming,
@@ -6486,7 +6493,7 @@ async def _run_interaction_module(
         context=trace_context,
         replace_message_id=start_message_id,
     )
-    return _interaction_actions_mark_success(actions), keep_session
+    return success, keep_session
 
 
 async def _start_interaction_module(

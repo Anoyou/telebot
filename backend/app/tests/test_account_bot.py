@@ -115,6 +115,80 @@ class _MemoryRedis:
         return deleted
 
 
+class _InteractionRuntimeTestResult:
+    def __init__(self, feature_keys: list[str] | None = None) -> None:
+        self.feature_keys = list(feature_keys or [])
+
+    def scalars(self):
+        return self
+
+    def all(self):
+        return [SimpleNamespace(feature_key=feature_key) for feature_key in self.feature_keys]
+
+    def scalar_one_or_none(self):
+        return None
+
+
+class _InteractionRuntimeTestDB:
+    def __init__(self, *, feature_keys: list[str] | None = None) -> None:
+        self.feature_keys = list(feature_keys or [])
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return None
+
+    async def execute(self, _stmt):  # noqa: ANN001
+        return _InteractionRuntimeTestResult(self.feature_keys)
+
+    async def get(self, model, *_args):  # noqa: ANN002
+        if model is Account:
+            return SimpleNamespace(tg_username="owner", display_name="Owner", tg_user_id=999)
+        return None
+
+    async def commit(self):
+        return None
+
+
+def _interaction_test_message(
+    update_id: int,
+    text: str,
+    *,
+    user_id: int = 111,
+    first_name: str = "Alice",
+    chat_id: int = -100123,
+    message_id: int | None = None,
+) -> dict[str, object]:
+    return {
+        "update_id": update_id,
+        "message": {
+            "message_id": message_id or update_id * 10,
+            "text": text,
+            "from": {"id": user_id, "first_name": first_name},
+            "chat": {"id": chat_id, "type": "supergroup"},
+        },
+    }
+
+
+def _interaction_payment_message(
+    update_id: int,
+    *,
+    payer_id: int,
+    payer_name: str,
+    amount: int = 100,
+    receiver: str = "BBB",
+    chat_id: int = -100123,
+) -> dict[str, object]:
+    return _interaction_test_message(
+        update_id,
+        f"转账成功\n付款人：{payer_name}\n付款人ID：{payer_id}\n收款人：{receiver}\n金额：{amount}",
+        user_id=456,
+        first_name="TransferBot",
+        chat_id=chat_id,
+    )
+
+
 @pytest.fixture(autouse=True)
 def _clear_transfer_command_dedupe():
     account_bot_runtime._TRANSFER_COMMAND_DEDUPE.clear()
@@ -6586,9 +6660,368 @@ async def test_interaction_session_expired_scan_dispatches_interaction_bot_sessi
     assert payload["source"]["type"] == "session_expired"
     assert payload["session"]["channel"] == "interaction_bot"
     assert payload["session"]["expires_at"] == int(now - 1)
+    assert payload["session"]["data"] == {"round": 3}
     assert payload["trigger"]["session_key"] == expired_key
     assert expired_key not in redis.data
     assert userbot_key in redis.data
+
+
+@pytest.mark.asyncio
+async def test_keyword_start_saves_session_before_update_and_routes_answer_payload(monkeypatch) -> None:
+    redis = _MemoryRedis()
+    state = {"active": True, "target": 7}
+    payloads: list[dict[str, Any]] = []
+    rule = {
+        "id": "guess-ticket",
+        "enabled": True,
+        "chat_ids": [-100123],
+        "trigger_mode": "keyword",
+        "module_start_keywords": ["猜数字"],
+        "action": "module",
+        "module_key": "guess_number",
+        "module_action": "start_game",
+        "valid_seconds": 90,
+    }
+
+    async def run_entry(_incoming, *, plugin_key, entry_key, payload):  # noqa: ANN001
+        payloads.append(payload)
+        assert (plugin_key, entry_key) == ("guess_number", "start_game")
+        if payload["event_type"] == "keyword":
+            return True, None, [
+                {"type": "send_message", "text": "猜数字开始"},
+                {"type": "update_session", "data": state},
+                {"type": "result", "success": True},
+            ]
+        return True, None, [
+            {"type": "send_message", "text": "答对"},
+            {"type": "payout", "amount": 6, "reply_to_user_id": 222},
+            {"type": "result", "success": True},
+            {"type": "end_session"},
+        ]
+
+    record_action = AsyncMock()
+    run_worker_action = AsyncMock(return_value=(True, None, {"message_id": 9001}))
+    monkeypatch.setattr(account_bot_runtime, "AsyncSessionLocal", lambda: _InteractionRuntimeTestDB())
+    monkeypatch.setattr(account_bot_runtime, "get_redis", lambda: redis)
+    monkeypatch.setattr(
+        account_bot_runtime,
+        "_event_framework_flags",
+        AsyncMock(return_value={"trace_enabled": False, "event_bus_delivery_enabled": False, "inline_updates_enabled": True}),
+    )
+    monkeypatch.setattr(account_bot_runtime, "_run_worker_interaction_entry", run_entry)
+    monkeypatch.setattr(account_bot_runtime, "_run_worker_interaction_action", run_worker_action)
+    monkeypatch.setattr(account_bot_runtime, "_load_account_holder_label", AsyncMock(return_value="@owner"))
+    monkeypatch.setattr(account_bot_runtime, "_load_account_owner_user_ids", AsyncMock(return_value=[999]))
+    monkeypatch.setattr(account_bot_runtime, "_resolve_payout_mode", AsyncMock(return_value="manual"))
+    monkeypatch.setattr(account_bot_service, "send_message", AsyncMock(return_value={"message_id": 7001}))
+    monkeypatch.setattr(account_bot_service, "plugin_declares_telegram_native_raw", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr("app.services.interaction.delivery.record_action", record_action)
+    monkeypatch.setattr(
+        account_bot_service,
+        "get_transfer_notice_config",
+        AsyncMock(return_value={"enabled": True, "rules": [rule]}),
+    )
+
+    await account_bot_runtime._handle_interaction_update(
+        1,
+        "bbot-token",
+        _interaction_test_message(2001, "猜数字", user_id=111),
+    )
+
+    session_key = account_bot_runtime._interaction_session_key(1, rule, -100123)
+    assert session_key in redis.data
+    saved = json.loads(redis.data[session_key])
+    assert saved["data"] == state
+    assert any(
+        call.args[1]["type"] == "update_session"
+        and call.args[2] == account_bot_runtime.TRACE_STATUS_OK
+        for call in record_action.await_args_list
+    )
+
+    await account_bot_runtime._handle_interaction_update(
+        1,
+        "bbot-token",
+        _interaction_test_message(2002, "7", user_id=222, first_name="Bob"),
+    )
+
+    assert len(payloads) == 2
+    assert payloads[1]["event_type"] == "message"
+    assert payloads[1]["session"]["data"] == state
+    assert run_worker_action.await_args.kwargs["payload"]["amount"] == 6
+    assert session_key not in redis.data
+
+    await account_bot_runtime._handle_interaction_update(
+        1,
+        "bbot-token",
+        _interaction_test_message(2003, "8", user_id=333, first_name="Carol"),
+    )
+
+    assert len(payloads) == 2
+
+
+@pytest.mark.asyncio
+async def test_payment_start_preserves_paid_pool_data_on_second_payment(monkeypatch) -> None:
+    redis = _MemoryRedis()
+    state = {"round": 1, "active": True}
+    rule = {
+        "id": "paid-pool-ticket",
+        "name": "付费池",
+        "enabled": True,
+        "chat_ids": [-100123],
+        "trigger_mode": "payment",
+        "trigger_texts": ["转账成功"],
+        "receiver_text": "BBB",
+        "amount": 100,
+        "amount_match_mode": "eq",
+        "action": "module",
+        "module_key": "ten_half",
+        "module_action": "start_ten_half",
+        "module_session_scope": "chat",
+        "participant_policy": "paid_pool",
+        "valid_seconds": 300,
+    }
+
+    async def run_entry(_incoming, *, payload, **_kwargs):  # noqa: ANN001, ANN003
+        payer_id = payload["payment"]["payer_user_id"]
+        if payer_id == 111:
+            return True, None, [
+                {"type": "send_message", "text": "第一笔"},
+                {"type": "update_session", "data": state},
+                {"type": "result", "success": True},
+            ]
+        return True, None, [
+            {"type": "send_message", "text": "第二笔"},
+            {"type": "result", "success": True},
+        ]
+
+    record_action = AsyncMock()
+    monkeypatch.setattr(account_bot_runtime, "AsyncSessionLocal", lambda: _InteractionRuntimeTestDB())
+    monkeypatch.setattr(account_bot_runtime, "get_redis", lambda: redis)
+    monkeypatch.setattr(
+        account_bot_runtime,
+        "_event_framework_flags",
+        AsyncMock(return_value={"trace_enabled": False, "event_bus_delivery_enabled": False, "inline_updates_enabled": True}),
+    )
+    monkeypatch.setattr(account_bot_runtime, "_run_worker_interaction_entry", run_entry)
+    monkeypatch.setattr(account_bot_runtime, "_load_account_holder_label", AsyncMock(return_value="@owner"))
+    monkeypatch.setattr(account_bot_runtime, "_load_account_owner_user_ids", AsyncMock(return_value=[999]))
+    monkeypatch.setattr(account_bot_runtime, "_resolve_payout_mode", AsyncMock(return_value="manual"))
+    monkeypatch.setattr(account_bot_runtime.audit, "write", AsyncMock())
+    monkeypatch.setattr(account_bot_service, "send_message", AsyncMock(return_value={"message_id": 7101}))
+    monkeypatch.setattr(account_bot_service, "plugin_declares_telegram_native_raw", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr("app.services.interaction.delivery.record_action", record_action)
+    monkeypatch.setattr(
+        account_bot_service,
+        "get_transfer_notice_config",
+        AsyncMock(return_value={"enabled": True, "trusted_bot_id": 456, "rules": [rule]}),
+    )
+
+    await account_bot_runtime._handle_interaction_update(
+        1,
+        "bbot-token",
+        _interaction_payment_message(2011, payer_id=111, payer_name="Alice"),
+    )
+    await account_bot_runtime._handle_interaction_update(
+        1,
+        "bbot-token",
+        _interaction_payment_message(2012, payer_id=222, payer_name="Bob"),
+    )
+
+    session_key = account_bot_runtime._interaction_session_key(1, rule, -100123)
+    saved = json.loads(redis.data[session_key])
+    assert saved["data"] == state
+    assert saved["paid_user_ids"] == [111, 222]
+    assert saved["participant_user_ids"] == [111, 222]
+    assert any(
+        call.args[1]["type"] == "update_session"
+        and call.args[2] == account_bot_runtime.TRACE_STATUS_OK
+        for call in record_action.await_args_list
+    )
+
+
+@pytest.mark.asyncio
+async def test_opening_update_session_with_end_session_leaves_no_session(monkeypatch) -> None:
+    redis = _MemoryRedis()
+    rule = {
+        "id": "one-shot",
+        "enabled": True,
+        "chat_ids": [-100123],
+        "trigger_mode": "keyword",
+        "module_start_keywords": ["一次性"],
+        "action": "module",
+        "module_key": "one_shot",
+        "module_action": "start",
+        "valid_seconds": 90,
+    }
+    record_action = AsyncMock()
+    monkeypatch.setattr(account_bot_runtime, "AsyncSessionLocal", lambda: _InteractionRuntimeTestDB())
+    monkeypatch.setattr(account_bot_runtime, "get_redis", lambda: redis)
+    monkeypatch.setattr(
+        account_bot_runtime,
+        "_event_framework_flags",
+        AsyncMock(return_value={"trace_enabled": False, "event_bus_delivery_enabled": False, "inline_updates_enabled": True}),
+    )
+    monkeypatch.setattr(
+        account_bot_runtime,
+        "_run_worker_interaction_entry",
+        AsyncMock(
+            return_value=(
+                True,
+                None,
+                [
+                    {"type": "update_session", "data": {"active": False}},
+                    {"type": "end_session"},
+                ],
+            )
+        ),
+    )
+    monkeypatch.setattr(account_bot_runtime, "_load_account_holder_label", AsyncMock(return_value="@owner"))
+    monkeypatch.setattr(account_bot_runtime, "_load_account_owner_user_ids", AsyncMock(return_value=[999]))
+    monkeypatch.setattr(account_bot_runtime, "_resolve_payout_mode", AsyncMock(return_value="manual"))
+    monkeypatch.setattr(account_bot_service, "plugin_declares_telegram_native_raw", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr("app.services.interaction.delivery.record_action", record_action)
+    monkeypatch.setattr(
+        account_bot_service,
+        "get_transfer_notice_config",
+        AsyncMock(return_value={"enabled": True, "rules": [rule]}),
+    )
+
+    await account_bot_runtime._handle_interaction_update(
+        1,
+        "bbot-token",
+        _interaction_test_message(2021, "一次性"),
+    )
+
+    session_key = account_bot_runtime._interaction_session_key(1, rule, -100123)
+    assert session_key not in redis.data
+    update_call = next(call for call in record_action.await_args_list if call.args[1]["type"] == "update_session")
+    assert update_call.args[2] == account_bot_runtime.TRACE_STATUS_FAILED
+    assert update_call.kwargs["error_code"] == "interaction_session_error"
+
+
+@pytest.mark.asyncio
+async def test_opening_start_session_then_update_session_keeps_explicit_fields(monkeypatch) -> None:
+    redis = _MemoryRedis()
+    rule = {
+        "id": "explicit-start",
+        "enabled": True,
+        "chat_ids": [-100123],
+        "trigger_mode": "keyword",
+        "module_start_keywords": ["显式开局"],
+        "action": "module",
+        "module_key": "explicit_game",
+        "module_action": "start",
+        "module_session_scope": "chat",
+        "valid_seconds": 120,
+    }
+    record_action = AsyncMock()
+    monkeypatch.setattr(account_bot_runtime, "AsyncSessionLocal", lambda: _InteractionRuntimeTestDB())
+    monkeypatch.setattr(account_bot_runtime, "get_redis", lambda: redis)
+    monkeypatch.setattr(
+        account_bot_runtime,
+        "_event_framework_flags",
+        AsyncMock(return_value={"trace_enabled": False, "event_bus_delivery_enabled": False, "inline_updates_enabled": True}),
+    )
+    monkeypatch.setattr(
+        account_bot_runtime,
+        "_run_worker_interaction_entry",
+        AsyncMock(
+            return_value=(
+                True,
+                None,
+                [
+                    {
+                        "type": "start_session",
+                        "started_by_user_id": 222,
+                        "ttl_seconds": 30,
+                        "event_type": "keyword",
+                    },
+                    {"type": "update_session", "data": {"phase": "started"}},
+                    {"type": "result", "success": True},
+                ],
+            )
+        ),
+    )
+    monkeypatch.setattr(account_bot_runtime, "_load_account_holder_label", AsyncMock(return_value="@owner"))
+    monkeypatch.setattr(account_bot_runtime, "_load_account_owner_user_ids", AsyncMock(return_value=[999]))
+    monkeypatch.setattr(account_bot_runtime, "_resolve_payout_mode", AsyncMock(return_value="manual"))
+    monkeypatch.setattr(account_bot_service, "plugin_declares_telegram_native_raw", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr("app.services.interaction.delivery.record_action", record_action)
+    monkeypatch.setattr(
+        account_bot_service,
+        "get_transfer_notice_config",
+        AsyncMock(return_value={"enabled": True, "rules": [rule]}),
+    )
+
+    await account_bot_runtime._handle_interaction_update(
+        1,
+        "bbot-token",
+        _interaction_test_message(2031, "显式开局", user_id=111),
+    )
+
+    session_key = account_bot_runtime._interaction_session_key(1, rule, -100123)
+    saved = json.loads(redis.data[session_key])
+    assert saved["started_by_user_id"] == 222
+    assert saved["event_type"] == "keyword"
+    assert saved["data"] == {"phase": "started"}
+    assert any(
+        call.args[1]["type"] == "update_session"
+        and call.args[2] == account_bot_runtime.TRACE_STATUS_OK
+        for call in record_action.await_args_list
+    )
+
+
+@pytest.mark.asyncio
+async def test_event_bus_wide_update_session_without_session_still_fails(monkeypatch) -> None:
+    redis = _MemoryRedis()
+    incoming = account_bot_runtime.Incoming(
+        account_id=1,
+        token="bbot-token",
+        update_id=2041,
+        user_id=111,
+        chat_id=-100123,
+        chat_type="supergroup",
+        message_id=20410,
+        text="裸更新",
+        display_name="Alice",
+        native_raw={"update_id": 2041},
+    )
+    record_action = AsyncMock()
+    monkeypatch.setattr(account_bot_runtime, "get_redis", lambda: redis)
+    monkeypatch.setattr(account_bot_runtime, "_write_interaction_runtime_log", AsyncMock())
+    monkeypatch.setattr(account_bot_service, "plugin_declares_telegram_native_raw", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(
+        account_bot_service,
+        "declared_module_event_subscriptions",
+        lambda _key: [
+            {
+                "source": ["interaction_bot"],
+                "events": ["message"],
+                "scope": "all_allowed_chats",
+                "entry_key": "on_message",
+                "filters": {"keywords": ["裸更新"]},
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        account_bot_runtime,
+        "_run_worker_interaction_entry",
+        AsyncMock(return_value=(True, None, [{"type": "update_session", "data": {"active": True}}])),
+    )
+    monkeypatch.setattr("app.services.interaction.delivery.record_action", record_action)
+
+    handled, ok = await account_bot_runtime._try_handle_event_bus_subscriptions(
+        _InteractionRuntimeTestDB(feature_keys=["wide_session"]),
+        incoming,
+        {"enabled": True, "chat_ids": [-100123], "rules": []},
+    )
+
+    assert handled is True
+    assert ok is True
+    assert not any(key.startswith("account_bot:interaction_session:") for key in redis.data)
+    update_call = next(call for call in record_action.await_args_list if call.args[1]["type"] == "update_session")
+    assert update_call.args[2] == account_bot_runtime.TRACE_STATUS_FAILED
+    assert update_call.kwargs["error_code"] == "interaction_session_error"
 
 
 @pytest.mark.asyncio
