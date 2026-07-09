@@ -17,6 +17,8 @@ from typing import Any
 from sqlalchemy import select
 from telethon.errors import (
     AuthKeyUnregisteredError,
+    FloodWaitError,
+    PeerFloodError,
     SessionRevokedError,
     UserDeactivatedError,
 )
@@ -34,6 +36,8 @@ from ..services.event_trace import (
     stop_trace_writer,
 )
 from ..services.interaction.delivery import namespaced_action_save_message_id_key, save_action_reply_target
+from ..services.payout_limit import PayoutLimitExceeded
+from ..services.payout_limit import check_and_consume as _check_payout_limit
 from ..settings import settings as app_settings
 from .command import (
     CommandContext,
@@ -345,6 +349,10 @@ async def _run_interaction_userbot_action(
             action_type=action_type,
             chat_id=chat_id,
         )
+        if action_type == "payout":
+            payout_ok, payout_reason = await _check_payout_limit(account_id, amount)
+            if not payout_ok:
+                raise PayoutLimitExceeded(payout_reason or "payout 超过限额")
         msg = await client.send_message(chat_id, text, reply_to=reply_to, parse_mode=_telethon_parse_mode(parse_mode))
         result = {
             "message_id": int(getattr(msg, "id", 0) or 0) or None,
@@ -1078,8 +1086,33 @@ async def _handle_run_interaction_action_command(
         result_ok = True
     except Exception as e:  # noqa: BLE001
         result_error = f"{type(e).__name__}: {e}"
-        error_code = _interaction_action_error_code(result_error)
+        if isinstance(e, PayoutLimitExceeded):
+            error_code = "payout_limit_exceeded"
+        else:
+            error_code = _interaction_action_error_code(result_error)
         result_payload = _interaction_action_failure_result(payload, error=result_error, error_code=error_code)
+        # FloodWait/PeerFlood：喂给限速引擎自动降级（engine 可能为 None），detail 带上 wait 秒数。
+        # 引擎钩子内部虽有 try/except，这里再兜一层以免打断下方 IPC 回包。
+        if isinstance(e, FloodWaitError):
+            result_payload["flood_wait_seconds"] = int(getattr(e, "seconds", 0) or 0)
+            if engine is not None:
+                try:
+                    await engine.on_flood_wait(
+                        _interaction_userbot_rate_limit_action(
+                            str(payload.get("action_type") or ""),
+                            _int_or_none(payload.get("chat_id")),
+                        ),
+                        e,
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+        elif isinstance(e, PeerFloodError):
+            result_payload["peer_flood"] = True
+            if engine is not None:
+                try:
+                    await engine.on_peer_flood("dm_stranger")
+                except Exception:  # noqa: BLE001
+                    pass
         await _log(
             redis,
             account_id,
@@ -1140,6 +1173,8 @@ def _interaction_action_log_detail(result: dict[str, Any]) -> dict[str, Any]:
             "error_code",
             "worker_offline",
             "reply_anchor_missing",
+            "flood_wait_seconds",
+            "peer_flood",
         )
         if key in result
     }

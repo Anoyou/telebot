@@ -68,6 +68,9 @@ def build_client(
         request_retries=3,
         connection_retries=5,
         retry_delay=2,
+        # 显式固化 Telethon 默认行为：FloodWait ≤ 60s 由 Telethon 内部自动 sleep 重试，
+        # 超过 60s 才抛 FloodWaitError 交给上层（交互动作 except 会喂限速引擎降级）。
+        flood_sleep_threshold=60,
         **p.telethon_kwargs(),
         # 关键：Telethon 默认 sequential_updates=False。我们的事件 handler 写在 plugin 里，
         # 互相不应该并发触发同一规则，但跨规则可以；保持默认即可。

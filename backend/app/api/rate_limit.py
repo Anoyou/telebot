@@ -620,6 +620,7 @@ async def get_system_settings(db: DBSession, _user: CurrentUser) -> dict[str, An
     )
     ai_enabled_val = await _get_setting(db, AI_ENABLED_SETTING_KEY, {"enabled": True})
     llm_val = await _get_setting(db, "llm_limits", {})
+    payout_val = await _get_setting(db, "payout_limits", {})
     log_val = await _get_setting(db, "log_retention", {})
     login_security_val = await _get_setting(db, "login_security", {})
     sudo_val = await _get_setting(db, "sudo_enabled", {"enabled": False})
@@ -635,6 +636,7 @@ async def get_system_settings(db: DBSession, _user: CurrentUser) -> dict[str, An
         echo_guard_source = echo_guard_val
     tz = str(tz_val.get("value", "")) if isinstance(tz_val, dict) else str(tz_val)
     llm_limits = llm_val if isinstance(llm_val, dict) else {}
+    payout_limits = payout_val if isinstance(payout_val, dict) else {}
     log_retention = log_val if isinstance(log_val, dict) else {}
     login_security = auth_login_security.normalize_login_security_config(
         login_security_val if isinstance(login_security_val, dict) else {}
@@ -667,6 +669,10 @@ async def get_system_settings(db: DBSession, _user: CurrentUser) -> dict[str, An
             "daily_requests": max(0, int(llm_limits.get("daily_requests", 0) or 0)),
             "daily_tokens": max(0, int(llm_limits.get("daily_tokens", 0) or 0)),
             "premium_daily": max(0, int(llm_limits.get("premium_daily", 0) or 0)),
+        },
+        "payout_limits": {
+            "single_max": max(0, int(payout_limits.get("single_max", 0) or 0)),
+            "daily_max": max(0, int(payout_limits.get("daily_max", 0) or 0)),
         },
         "log_retention": {
             "trace_enabled": bool(log_retention.get("trace_enabled", True)),
@@ -706,6 +712,11 @@ class _LLMLimitsPatch(BaseModel):
     daily_requests: int | None = None
     daily_tokens: int | None = None
     premium_daily: int | None = None
+
+
+class _PayoutLimitsPatch(BaseModel):
+    single_max: int | None = None
+    daily_max: int | None = None
 
 
 class _LogRetentionPatch(BaseModel):
@@ -751,6 +762,7 @@ class _SettingsPatch(BaseModel):
     login_security: _LoginSecurityPatch | None = None
     remote_plugin_update_check: _RemotePluginUpdateCheckPatch | None = None
     llm_limits: _LLMLimitsPatch | None = None
+    payout_limits: _PayoutLimitsPatch | None = None
     log_retention: _LogRetentionPatch | None = None
 
 
@@ -892,6 +904,23 @@ async def patch_system_settings(
             next_limits[key] = int(value)
         await _set_setting(db, "llm_limits", next_limits)
         await _audit(db, user.id, "set_llm_limits", target="system", detail=next_limits)
+    if payload.payout_limits is not None:
+        current = await _get_setting(db, "payout_limits", {})
+        if not isinstance(current, dict):
+            current = {}
+        data = payload.payout_limits.model_dump(exclude_unset=True)
+        next_payout = {
+            "single_max": max(0, int(current.get("single_max", 0) or 0)),
+            "daily_max": max(0, int(current.get("daily_max", 0) or 0)),
+        }
+        for key, value in data.items():
+            if value is None:
+                continue
+            if value < 0:
+                raise _bad("invalid_payout_limit", "payout 限额不能为负数")
+            next_payout[key] = int(value)
+        await _set_setting(db, "payout_limits", next_payout)
+        await _audit(db, user.id, "set_payout_limits", target="system", detail=next_payout)
     if payload.log_retention is not None:
         current = await _get_setting(db, "log_retention", {})
         if not isinstance(current, dict):

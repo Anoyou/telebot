@@ -45,6 +45,7 @@ from typing import Any
 
 from sqlalchemy import select, update
 from telethon import TelegramClient, events
+from telethon.errors import FloodWaitError, PeerFloodError
 
 from ... import __version__ as TELEPILOT_VERSION
 from ...db.base import AsyncSessionLocal
@@ -62,7 +63,7 @@ from ...db.models.plugin_global_config import PluginGlobalConfig
 from ...db.models.rule import Rule
 from ...db.models.system import SystemSetting
 from ...redis_client import get_redis
-from ...services import account_bot_service, interaction_bot_service
+from ...services import account_bot_service, interaction_bot_service, payout_limit
 from ...services.event_bus import (
     dispatch_event,
     event_subscription_warnings,
@@ -1549,6 +1550,7 @@ async def _record_userbot_action_failure(
     target_chat_id: int | None,
     reply_to_message_id: int | None = None,
     reply_to_user_id: int | None = None,
+    extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     result = _userbot_action_failure_result(
         action,
@@ -1557,6 +1559,7 @@ async def _record_userbot_action_failure(
         error=error,
         reply_to_message_id=reply_to_message_id,
         reply_to_user_id=reply_to_user_id,
+        extra=extra,
     )
     await record_action(
         action.get("context"),
@@ -1584,6 +1587,7 @@ def _userbot_action_failure_result(
     error: str,
     reply_to_message_id: int | None = None,
     reply_to_user_id: int | None = None,
+    extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     result = _userbot_action_context(
         action,
@@ -1595,6 +1599,8 @@ def _userbot_action_failure_result(
     result["error_code"] = error_code
     result["worker_offline"] = error_code == "userbot_offline"
     result["reply_anchor_missing"] = error_code == "reply_anchor_missing"
+    if extra:
+        result.update(extra)
     return result
 
 
@@ -1647,9 +1653,44 @@ def _userbot_action_log_detail(result: dict[str, Any]) -> dict[str, Any]:
             "error_code",
             "worker_offline",
             "reply_anchor_missing",
+            "flood_wait_seconds",
+            "peer_flood",
         )
         if key in result
     }
+
+
+async def _feed_engine_flood_wait(
+    state: _AccountState,
+    exc: Exception,
+    *,
+    action_type: str,
+    target_chat_id: int | None,
+) -> dict[str, Any]:
+    """把 FloodWait/PeerFlood 异常喂给限速引擎自动降级，返回可并入失败 detail 的补充字段。
+
+    - ``engine`` 可能为 None（未接入限速引擎），此时只回补 detail、不调钩子。
+    - 引擎钩子内部虽有 try/except，但为避免其偶发异常打断失败上报路径，这里再兜一层。
+    - PeerFloodError 按引擎既有约定统一停用陌生人私聊（``dm_stranger``），与
+      ``ratelimit/engine.py`` 自动装饰器一致，不按本次动作粒度停用。
+    """
+    engine = getattr(state, "engine", None)
+    if isinstance(exc, FloodWaitError):
+        wait_seconds = int(getattr(exc, "seconds", 0) or 0)
+        if engine is not None:
+            try:
+                await engine.on_flood_wait(_userbot_rate_limit_action(action_type, target_chat_id), exc)
+            except Exception:  # noqa: BLE001
+                log.debug("on_flood_wait 调用失败 account=%s", state.account_id, exc_info=True)
+        return {"flood_wait_seconds": wait_seconds}
+    if isinstance(exc, PeerFloodError):
+        if engine is not None:
+            try:
+                await engine.on_peer_flood("dm_stranger")
+            except Exception:  # noqa: BLE001
+                log.debug("on_peer_flood 调用失败 account=%s", state.account_id, exc_info=True)
+        return {"peer_flood": True}
+    return {}
 
 
 def _render_userbot_button_fallback(text: str, reply_markup: dict[str, Any] | None) -> tuple[str, dict[str, str]]:
@@ -1775,6 +1816,18 @@ async def _apply_userbot_payout_action(state: _AccountState, event: Any, action:
         target_chat_id=target_chat_id,
     ):
         return False
+    payout_ok, payout_reason = await payout_limit.check_and_consume(state.account_id, amount)
+    if not payout_ok:
+        await _record_userbot_action_failure(
+            state,
+            action,
+            error_code="payout_limit_exceeded",
+            error=payout_reason or "payout 超过限额",
+            target_chat_id=target_chat_id,
+            reply_to_message_id=reply_to,
+            reply_to_user_id=reply_to_user_id,
+        )
+        return False
     try:
         sent = await state.client.send_message(
             target_chat_id,
@@ -1804,6 +1857,12 @@ async def _apply_userbot_payout_action(state: _AccountState, event: Any, action:
         )
         return True
     except Exception as exc:  # noqa: BLE001
+        flood_detail = await _feed_engine_flood_wait(
+            state,
+            exc,
+            action_type="payout",
+            target_chat_id=target_chat_id,
+        )
         await _record_userbot_action_failure(
             state,
             action,
@@ -1812,6 +1871,7 @@ async def _apply_userbot_payout_action(state: _AccountState, event: Any, action:
             target_chat_id=target_chat_id,
             reply_to_message_id=reply_to,
             reply_to_user_id=reply_to_user_id,
+            extra=flood_detail,
         )
         return False
 
@@ -3842,6 +3902,15 @@ def _entry_includes_outgoing(plugin_key: str, entry_key: str) -> bool:
     return bool(manifest and manifest.get("include_outgoing"))
 
 
+def _entry_declares_session_expired(plugin_key: str, entry_key: str) -> bool:
+    """对齐 bot 侧 ``_rule_entry_allows_event`` 语义：入口未声明任何事件视为放行全部；
+    一旦有显式声明，则必须含 ``session_expired`` 或 ``all_events`` 才允许过期派发。"""
+    declared = account_bot_service.declared_module_entry_events(plugin_key, entry_key)
+    if not declared:
+        return True
+    return "session_expired" in declared or "all_events" in declared
+
+
 def _userbot_text_button_callback_data(session: dict[str, Any], text: str) -> str | None:
     data = session.get("data") if isinstance(session.get("data"), dict) else {}
     button_map = data.get(_USERBOT_BUTTON_MAP_KEY) if isinstance(data.get(_USERBOT_BUTTON_MAP_KEY), dict) else {}
@@ -4182,6 +4251,18 @@ async def scan_userbot_expired_sessions_once(account_id: int) -> int:
         plugin_key = str(session.get("module_key") or "").strip()
         entry_key = str(session.get("entry_key") or "").strip()
         if not plugin_key or not entry_key:
+            delete = getattr(redis, "delete", None)
+            if callable(delete):
+                await delete(key)
+            continue
+        if not _entry_declares_session_expired(plugin_key, entry_key):
+            # 对齐 bot 侧：入口未声明 session_expired 事件则不派发插件，仅按原逻辑清理会话 key。
+            log.debug(
+                "UserBot 会话过期跳过派发：入口未声明 session_expired plugin=%s entry=%s key=%s",
+                plugin_key,
+                entry_key,
+                key,
+            )
             delete = getattr(redis, "delete", None)
             if callable(delete):
                 await delete(key)

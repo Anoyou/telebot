@@ -1880,6 +1880,113 @@ async def test_userbot_send_message_action_uses_rate_limit_and_preserves_parse_m
 
 
 @pytest.mark.asyncio
+async def test_userbot_payout_action_rejected_when_over_limit(monkeypatch) -> None:
+    state = loader_mod._AccountState(account_id=71)
+    state.redis = _FakeRedis()
+    state.client = MagicMock()
+    state.client.send_message = AsyncMock(return_value=SimpleNamespace(id=1))
+    state.engine = SimpleNamespace(
+        acquire=AsyncMock(return_value=SimpleNamespace(allowed=True, wait_seconds=0, outcome="ok"))
+    )
+    record_action = AsyncMock()
+    monkeypatch.setattr(loader_mod, "record_action", record_action)
+    monkeypatch.setattr(
+        loader_mod.payout_limit,
+        "check_and_consume",
+        AsyncMock(return_value=(False, "payout 单笔上限超限：本笔 500，单笔上限 100。")),
+    )
+
+    ok = await loader_mod._apply_userbot_payout_action(
+        state,
+        SimpleNamespace(chat_id=-100777),
+        {"type": "payout", "amount": 500, "chat_id": -100777, "context": {"trace_id": "evt_payout_limit"}},
+    )
+
+    assert ok is False
+    # 超限必须在发送前拦截：userbot 不应真的发出 "+金额"
+    state.client.send_message.assert_not_awaited()
+    assert record_action.await_args.args[2] == loader_mod.TRACE_STATUS_FAILED
+    assert record_action.await_args.kwargs["error_code"] == "payout_limit_exceeded"
+    assert "单笔" in record_action.await_args.kwargs["error"]
+
+
+@pytest.mark.asyncio
+async def test_userbot_payout_action_floodwait_feeds_engine(monkeypatch) -> None:
+    from telethon.errors import FloodWaitError
+
+    flood = FloodWaitError(42)
+    flood.seconds = 42  # telethon 构造不吃秒数，显式赋值
+
+    state = loader_mod._AccountState(account_id=72)
+    state.redis = _FakeRedis()
+    state.client = MagicMock()
+    state.client.send_message = AsyncMock(side_effect=flood)
+    state.engine = SimpleNamespace(
+        acquire=AsyncMock(return_value=SimpleNamespace(allowed=True, wait_seconds=0, outcome="ok")),
+        on_flood_wait=AsyncMock(),
+        on_peer_flood=AsyncMock(),
+    )
+    record_action = AsyncMock()
+    monkeypatch.setattr(loader_mod, "record_action", record_action)
+    # 放行 payout 限额，隔离 FloodWait 行为
+    monkeypatch.setattr(loader_mod.payout_limit, "check_and_consume", AsyncMock(return_value=(True, None)))
+
+    ok = await loader_mod._apply_userbot_payout_action(
+        state,
+        SimpleNamespace(chat_id=-100888),
+        {"type": "payout", "amount": 5, "chat_id": -100888, "context": {"trace_id": "evt_payout_flood"}},
+    )
+
+    assert ok is False
+    state.engine.on_flood_wait.assert_awaited_once()
+    assert state.engine.on_flood_wait.await_args.args[0] == "send_message_group"
+    state.engine.on_peer_flood.assert_not_awaited()
+    # 失败 detail 带上 wait 秒数
+    assert record_action.await_args.kwargs["result"].get("flood_wait_seconds") == 42
+
+
+@pytest.mark.asyncio
+async def test_scan_expired_session_skips_plugin_when_event_not_declared(monkeypatch) -> None:
+    account_id = 73
+    redis = _FakeRedis()
+    key = f"{loader_mod._USERBOT_SESSION_KEY_PREFIX}{account_id}:sess-1"
+    redis.values[key] = json.dumps(
+        {
+            "channel": "userbot",
+            "expires_at": time.time() - 10,  # 已过期
+            "module_key": "guess_number",
+            "entry_key": "main",
+            "chat_id": -100999,
+        }
+    )
+    state = loader_mod._AccountState(account_id=account_id)
+    state.redis = redis
+
+    # 入口只声明 message，未声明 session_expired → 应跳过派发
+    monkeypatch.setattr(
+        loader_mod.account_bot_service,
+        "declared_module_entry_events",
+        lambda *_a: ["message"],
+    )
+    invoke = AsyncMock()
+    monkeypatch.setattr(loader_mod, "invoke_interaction_entry", invoke)
+    start_trace = AsyncMock()
+    monkeypatch.setattr(loader_mod, "_start_userbot_session_trace", start_trace)
+
+    loader_mod._STATES[account_id] = state
+    try:
+        processed = await loader_mod.scan_userbot_expired_sessions_once(account_id)
+    finally:
+        loader_mod._STATES.pop(account_id, None)
+
+    # 插件不被调用、也不开 trace，但会话 key 仍被清理
+    invoke.assert_not_awaited()
+    start_trace.assert_not_awaited()
+    assert key not in redis.values
+    assert processed == 0
+
+
+@pytest.mark.asyncio
 async def test_userbot_edit_caption_action_uses_saved_key_and_rate_limit(monkeypatch) -> None:
     redis = _FakeRedis()
     redis.values["tp:msgid:43:dice_grid:round:1"] = "66"

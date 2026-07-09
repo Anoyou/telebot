@@ -265,6 +265,95 @@ async def test_userbot_interaction_action_fails_when_reply_anchor_missing() -> N
     ]
 
 
+class _IPCRecordingRedis:
+    """记录 rpush（运行日志）与 publish（IPC 回包）的极简假 Redis。"""
+
+    def __init__(self) -> None:
+        self.logs: list[str | bytes] = []
+        self.published: list[tuple[str, str]] = []
+
+    async def rpush(self, _key: str, value: str | bytes):
+        self.logs.append(value)
+        return len(self.logs)
+
+    async def publish(self, channel: str, payload: str) -> int:
+        self.published.append((channel, payload))
+        return 1
+
+
+def _decode_action_reply(redis: _IPCRecordingRedis) -> dict[str, object]:
+    _channel, raw = redis.published[-1]
+    return worker_runtime.IPCMessage.decode(raw).payload
+
+
+@pytest.mark.asyncio
+async def test_run_interaction_action_command_payout_over_limit_reports_error_code(monkeypatch) -> None:
+    redis = _IPCRecordingRedis()
+
+    class _Client:
+        def __init__(self) -> None:
+            self.sent: list[tuple[int, str]] = []
+
+        async def send_message(self, chat_id, text, **_kwargs):  # noqa: ANN001, ANN003
+            self.sent.append((chat_id, text))
+            return SimpleNamespace(id=1)
+
+    client = _Client()
+    monkeypatch.setattr(
+        worker_runtime,
+        "_check_payout_limit",
+        AsyncMock(return_value=(False, "payout 日累计上限超限：今日已用 900，本笔 500，日累计上限 1000。")),
+    )
+
+    cmd = worker_runtime.IPCMessage(
+        type=worker_runtime.CMD_RUN_INTERACTION_ACTION,
+        payload={"payload": {"action_type": "payout", "chat_id": -100, "amount": 500, "text": "+500"}},
+    )
+    await worker_runtime._handle_run_interaction_action_command(redis, client, 91, cmd, "reply-ch")
+
+    # 超限拦在发送前，userbot 不应发出 "+金额"
+    assert client.sent == []
+    reply = _decode_action_reply(redis)
+    assert reply["ok"] is False
+    assert reply["result"]["error_code"] == "payout_limit_exceeded"
+
+
+@pytest.mark.asyncio
+async def test_run_interaction_action_command_floodwait_feeds_engine(monkeypatch) -> None:
+    from telethon.errors import FloodWaitError
+
+    flood = FloodWaitError(30)
+    flood.seconds = 30  # telethon 构造不吃秒数，显式赋值
+
+    redis = _IPCRecordingRedis()
+
+    class _Client:
+        async def send_message(self, *_a, **_k):  # noqa: ANN002, ANN003
+            raise flood
+
+    engine = SimpleNamespace(
+        acquire=AsyncMock(return_value=SimpleNamespace(allowed=True, wait_seconds=0, outcome="ok")),
+        on_flood_wait=AsyncMock(),
+        on_peer_flood=AsyncMock(),
+    )
+    plugin_loader._STATES[91] = SimpleNamespace(engine=engine)
+    try:
+        cmd = worker_runtime.IPCMessage(
+            type=worker_runtime.CMD_RUN_INTERACTION_ACTION,
+            payload={"payload": {"action_type": "send_message", "chat_id": -100, "text": "hi"}},
+        )
+        await worker_runtime._handle_run_interaction_action_command(redis, _Client(), 91, cmd, "reply-ch")
+    finally:
+        plugin_loader._STATES.pop(91, None)
+
+    engine.on_flood_wait.assert_awaited_once()
+    assert engine.on_flood_wait.await_args.args[0] == "send_message_group"
+    engine.on_peer_flood.assert_not_awaited()
+    reply = _decode_action_reply(redis)
+    assert reply["result"]["flood_wait_seconds"] == 30
+    assert reply["result"]["error_code"] == "telegram_api_error"
+
+
 def test_account_bot_config_response_hides_plain_token() -> None:
     """配置出参只暴露 has_token，不返回明文 token 或加密串。"""
 
