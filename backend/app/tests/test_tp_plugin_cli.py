@@ -346,6 +346,24 @@ async def test_register_external_dir_reports_stale_local_import_copy(
     assert "local_imports" in message2
 
 
+async def test_register_ignores_gitignore_in_digest_and_copy(tmp_path: Path, _redirect_plugin_paths) -> None:
+    name = "demo_gitignore_digest"
+    source_dir = tmp_path / "src" / name
+    tp.scaffold_plugin(name, "command", source_dir)
+
+    db = _FakeDB()
+    await tp.register_plugin(db, source_dir)
+
+    local_root, _installed_root = _redirect_plugin_paths
+    target = local_root / name
+    assert not (target / ".gitignore").exists()
+
+    (source_dir / ".gitignore").write_text("*.tmp\n", encoding="utf-8")
+    same_content, _source_newer = tp._is_same_plugin_copy(source_dir, target)
+
+    assert same_content is True
+
+
 async def test_register_force_overwrites_stale_local_import_copy(tmp_path: Path, _redirect_plugin_paths) -> None:
     name = "demo_force_copy"
     source_dir = tmp_path / "src" / name

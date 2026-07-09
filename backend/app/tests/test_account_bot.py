@@ -6605,6 +6605,48 @@ async def test_interaction_update_default_uses_light_router_delivery(monkeypatch
     assert account_bot_runtime._ROUTER_DELIVERY_STATS[key]["last_status"] == account_bot_runtime.TRACE_STATUS_OK
 
 
+def test_router_delivery_stats_are_bounded_and_readable(monkeypatch) -> None:
+    account_bot_runtime._ROUTER_DELIVERY_STATS.clear()
+    monkeypatch.setattr(account_bot_runtime, "_ROUTER_DELIVERY_STATS_MAX_SIZE", 3)
+    try:
+        for chat_id in (101, 102, 103):
+            account_bot_runtime._record_router_delivery_light(
+                SimpleNamespace(account_id=1, chat_id=chat_id),
+                "interaction_bot",
+                account_bot_runtime.TRACE_STATUS_OK,
+            )
+        account_bot_runtime._record_router_delivery_light(
+            SimpleNamespace(account_id=1, chat_id=102),
+            "interaction_bot",
+            account_bot_runtime.TRACE_STATUS_OK,
+        )
+        account_bot_runtime._record_router_delivery_light(
+            SimpleNamespace(account_id=1, chat_id=104),
+            "interaction_bot",
+            account_bot_runtime.TRACE_STATUS_SKIPPED,
+            error="missed",
+        )
+
+        assert len(account_bot_runtime._ROUTER_DELIVERY_STATS) == 3
+        evicted_key = account_bot_runtime._router_delivery_stats_key(1, "interaction_bot", None, 101)
+        retained_key = account_bot_runtime._router_delivery_stats_key(1, "interaction_bot", None, 102)
+        assert evicted_key not in account_bot_runtime._ROUTER_DELIVERY_STATS
+        assert retained_key in account_bot_runtime._ROUTER_DELIVERY_STATS
+
+        summary = account_bot_runtime.get_router_delivery_stats_summary(
+            account_id=1,
+            channel="interaction_bot",
+            limit=10,
+        )
+        assert summary["count"] == 3
+        assert summary["total_count"] == 3
+        assert summary["max_size"] == 3
+        assert [item["chat_id"] for item in summary["entries"]] == [104, 102, 103]
+        assert summary["entries"][0]["last_error"] == "missed"
+    finally:
+        account_bot_runtime._ROUTER_DELIVERY_STATS.clear()
+
+
 @pytest.mark.asyncio
 async def test_interaction_update_strict_trace_plugin_keeps_full_router_trace(monkeypatch) -> None:
     class _DB:
@@ -6674,6 +6716,19 @@ async def test_interaction_update_strict_trace_plugin_keeps_full_router_trace(mo
     assert any(call.args[1] == "receive" and call.kwargs.get("router_trace_reason") == "strict" for call in record_span.await_args_list)
     assert any(call.kwargs.get("component") == "interaction_rule" for call in record_span.await_args_list)
     finish_trace.assert_awaited_once_with(trace, account_bot_runtime.TRACE_STATUS_OK)
+
+
+@pytest.mark.asyncio
+async def test_interaction_payment_confirm_route_keeps_full_router_trace() -> None:
+    requested = await account_bot_runtime._interaction_strict_trace_requested(
+        object(),
+        SimpleNamespace(chat_id=-100),
+        {"rules": []},
+        [account_bot_runtime._ROUTE_PAYMENT_CONFIRM],
+        event_bus_delivery_enabled=False,
+    )
+
+    assert requested is True
 
 
 @pytest.mark.asyncio

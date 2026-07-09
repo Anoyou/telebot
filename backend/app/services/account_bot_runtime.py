@@ -151,6 +151,7 @@ _INTERACTION_DEBUG_TTL_SECONDS = 86400
 _INTERACTION_DEBUG_WARNING_LIMIT = 20
 _ROUTER_DEBUG_TRACE_DEFAULT_TTL_SECONDS = 300
 _ROUTER_DEBUG_TRACE_MAX_TTL_SECONDS = 3600
+_ROUTER_DELIVERY_STATS_MAX_SIZE = 1024
 _ROUTER_DELIVERY_STATS: dict[tuple[int, str, str | None, int | None], dict[str, Any]] = {}
 
 
@@ -176,9 +177,13 @@ def _record_router_delivery_light(
         return
     chat_id = _int_or_none(getattr(incoming_or_account_id, "chat_id", None))
     key = _router_delivery_stats_key(account_id, channel, plugin_key, chat_id)
-    bucket = _ROUTER_DELIVERY_STATS.setdefault(
-        key,
-        {
+    bucket = _ROUTER_DELIVERY_STATS.pop(key, None)
+    if bucket is None:
+        max_size = max(1, int(_ROUTER_DELIVERY_STATS_MAX_SIZE))
+        while len(_ROUTER_DELIVERY_STATS) >= max_size:
+            oldest_key = next(iter(_ROUTER_DELIVERY_STATS))
+            _ROUTER_DELIVERY_STATS.pop(oldest_key, None)
+        bucket = {
             "account_id": account_id,
             "channel": str(channel or "unknown"),
             "plugin_key": str(plugin_key or "").strip() or None,
@@ -186,12 +191,50 @@ def _record_router_delivery_light(
             "delivery_count": 0,
             "last_delivery_at": None,
             "last_error": None,
-        },
-    )
+        }
     bucket["delivery_count"] = int(bucket.get("delivery_count") or 0) + 1
     bucket["last_delivery_at"] = time.time()
     bucket["last_error"] = str(error)[:500] if error else None
     bucket["last_status"] = str(status or TRACE_STATUS_SKIPPED)
+    _ROUTER_DELIVERY_STATS[key] = bucket
+
+
+def get_router_delivery_stats_summary(
+    *,
+    account_id: int | None = None,
+    channel: str | None = None,
+    plugin_key: str | None = None,
+    chat_id: int | None = None,
+    limit: int = 50,
+) -> dict[str, Any]:
+    normalized_account_id = _int_or_none(account_id)
+    normalized_channel = str(channel or "").strip() or None
+    normalized_plugin_key = str(plugin_key or "").strip() or None
+    normalized_chat_id = _int_or_none(chat_id)
+    capped_limit = max(1, min(int(limit or 50), 200))
+    entries: list[dict[str, Any]] = []
+    for item in reversed(_ROUTER_DELIVERY_STATS.values()):
+        if (
+            normalized_account_id is not None
+            and int(item.get("account_id") or 0) != normalized_account_id
+        ):
+            continue
+        if normalized_channel is not None and item.get("channel") != normalized_channel:
+            continue
+        if normalized_plugin_key is not None and item.get("plugin_key") != normalized_plugin_key:
+            continue
+        if (
+            normalized_chat_id is not None
+            and _int_or_none(item.get("chat_id")) != normalized_chat_id
+        ):
+            continue
+        entries.append(dict(item))
+    return {
+        "count": len(entries),
+        "total_count": len(_ROUTER_DELIVERY_STATS),
+        "max_size": _ROUTER_DELIVERY_STATS_MAX_SIZE,
+        "entries": entries[:capped_limit],
+    }
 
 
 def _router_debug_trace_keys(account_id: int, *, plugin_key: str | None = None, chat_id: int | None = None) -> list[str]:
@@ -308,7 +351,7 @@ async def _interaction_strict_trace_requested(
     *,
     event_bus_delivery_enabled: bool,
 ) -> bool:
-    if _ROUTE_PAYMENT_NOTICE in routes or _ROUTE_TRANSFER_COMMAND in routes:
+    if _ROUTE_PAYMENT_NOTICE in routes or _ROUTE_TRANSFER_COMMAND in routes or _ROUTE_PAYMENT_CONFIRM in routes:
         return True
     for rule in cfg.get("rules") or []:
         if not isinstance(rule, dict) or not bool(rule.get("enabled", True)):

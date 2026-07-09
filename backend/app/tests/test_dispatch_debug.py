@@ -5,6 +5,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from app.api import dispatch_debug
+from app.services import account_bot_runtime
 from app.worker import runtime as runtime_mod
 from app.worker.ipc import CMD_DISPATCH_SIMULATE, CMD_STOP, EVT_ACK, IPCMessage, make_cmd
 from app.worker.plugins import loader as loader_mod
@@ -141,3 +143,27 @@ async def test_dispatch_debug_simulate_returns_no_match_trace(monkeypatch) -> No
     assert _stage(trace, "prefix_command")["matched"] is False
     assert _stage(trace, "keyword")["matched"] is False
     assert _stage(trace, "event_subscription")["matched"] is False
+
+
+@pytest.mark.asyncio
+async def test_dispatch_debug_router_delivery_stats_reads_light_summary() -> None:
+    account_bot_runtime._ROUTER_DELIVERY_STATS.clear()
+    try:
+        account_bot_runtime._record_router_delivery_light(
+            909,
+            "account_bot",
+            account_bot_runtime.TRACE_STATUS_OK,
+        )
+
+        summary = await dispatch_debug.get_router_delivery_stats(
+            object(),
+            account_id=909,
+            channel="account_bot",
+        )
+
+        assert summary["count"] == 1
+        assert summary["entries"][0]["account_id"] == 909
+        assert summary["entries"][0]["channel"] == "account_bot"
+        assert summary["entries"][0]["last_status"] == account_bot_runtime.TRACE_STATUS_OK
+    finally:
+        account_bot_runtime._ROUTER_DELIVERY_STATS.clear()

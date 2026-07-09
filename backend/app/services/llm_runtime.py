@@ -134,7 +134,7 @@ def _compute_retry_delay(attempt: int) -> float:
 
 # ── Error 分类 ───────────────────────────────────────────────
 
-def _is_retryable_error(exc: Exception, status_code: int | None = None) -> bool:
+def _is_retryable_error(exc: Exception) -> bool:
     """判断错误是否可重试。
 
     可重试：timeout / ConnectError / 网络错误 / 429 / 5xx
@@ -146,13 +146,6 @@ def _is_retryable_error(exc: Exception, status_code: int | None = None) -> bool:
         return exc.retryable
     if isinstance(exc, LLMError):
         return exc.retryable
-
-    if status_code is not None:
-        if status_code == 429:
-            return True
-        if 500 <= status_code < 600:
-            return True
-        return False
 
     exc_name = type(exc).__name__
     retryable_types = {

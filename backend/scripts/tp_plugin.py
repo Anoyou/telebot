@@ -47,7 +47,7 @@ _NAME_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_-]*$")
 
 # 插件包必备的运行期文件（与 remote_plugin_service._validate_runtime_plugin_shape 一致）。
 _REQUIRED_FILES = ("plugin.json", "manifest.py", "plugin.py", "__init__.py")
-_COPY_IGNORE_DIRS = {".git", "__pycache__"}
+_COPY_IGNORE_DIRS = {".git", ".gitignore", "__pycache__"}
 
 _PERMISSION_RISK: dict[str, tuple[str, str]] = {
     "read_chat": ("低风险", "读取聊天上下文"),
@@ -1197,13 +1197,13 @@ async def register_plugin(
                 shutil.copytree(
                     source_dir,
                     target,
-                    ignore=shutil.ignore_patterns(".git", ".gitignore", "__pycache__"),
+                    ignore=shutil.ignore_patterns(*_COPY_IGNORE_DIRS),
                 )
         else:
             shutil.copytree(
                 source_dir,
                 target,
-                ignore=shutil.ignore_patterns(".git", ".gitignore", "__pycache__"),
+                ignore=shutil.ignore_patterns(*_COPY_IGNORE_DIRS),
             )
 
     return await repo.install_local_plugin(db, name, default_enabled=default_enabled)

@@ -122,3 +122,21 @@ async def enable_router_debug_trace(payload: RouterDebugTraceRequest, _user: Cur
         chat_id=payload.chat_id,
         ttl_seconds=payload.ttl_seconds,
     )
+
+
+@router.get("/router-delivery-stats")
+async def get_router_delivery_stats(
+    _user: CurrentUser,
+    account_id: int | None = None,
+    channel: str | None = None,
+    plugin_key: str | None = None,
+    chat_id: int | None = None,
+    limit: int = 50,
+) -> dict[str, Any]:
+    return account_bot_runtime.get_router_delivery_stats_summary(
+        account_id=account_id,
+        channel=channel,
+        plugin_key=plugin_key,
+        chat_id=chat_id,
+        limit=limit,
+    )
