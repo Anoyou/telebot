@@ -115,9 +115,9 @@ async def test_operational_stats_net_matches_ledger_summary(stats_session_factor
     assert stats.total.payout_attempt_count == 2
     assert Decimal(stats.total.payout_success_rate or "0") == Decimal("50.00")
     assert Decimal(stats.total.ledger_income) == Decimal(ledger.income) == Decimal("100")
-    assert Decimal(stats.total.ledger_payout) == Decimal(ledger.payout) == Decimal("40")
-    assert Decimal(stats.total.ledger_net) == Decimal(ledger.net) == Decimal("60")
-    assert stats.total.ledger_count == ledger.count == 3
+    assert Decimal(stats.total.ledger_payout) == Decimal(ledger.payout) == Decimal("30")
+    assert Decimal(stats.total.ledger_net) == Decimal(ledger.net) == Decimal("70")
+    assert stats.total.ledger_count == ledger.count == 2
 
     by_day = {item.key: item for item in stats.by_day}
     assert by_day["2026-07-09"].started_sessions == 1
@@ -125,7 +125,7 @@ async def test_operational_stats_net_matches_ledger_summary(stats_session_factor
     assert Decimal(by_day["2026-07-09"].ledger_net) == Decimal("70")
     assert by_day["2026-07-10"].started_sessions == 0
     assert by_day["2026-07-10"].payout_failure_count == 1
-    assert Decimal(by_day["2026-07-10"].ledger_net) == Decimal("-10")
+    assert Decimal(by_day["2026-07-10"].ledger_net) == Decimal("0")
 
     by_chat = {item.key: item for item in stats.by_chat}
     assert by_chat["-100123"].started_sessions == 1
@@ -133,7 +133,7 @@ async def test_operational_stats_net_matches_ledger_summary(stats_session_factor
     assert Decimal(by_chat["-100123"].ledger_net) == Decimal("70")
     assert by_chat["-100456"].started_sessions == 0
     assert by_chat["-100456"].payout_failure_count == 1
-    assert Decimal(by_chat["-100456"].ledger_net) == Decimal("-10")
+    assert Decimal(by_chat["-100456"].ledger_net) == Decimal("0")
 
 
 @pytest.mark.asyncio

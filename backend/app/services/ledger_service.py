@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -16,7 +16,7 @@ from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..db.models.action_event import ActionEvent
+from ..db.models.action_event import ACTION_EVENT_STATUS_COMPENSATED, ACTION_EVENT_STATUS_OK, ActionEvent
 from ..db.models.payout_compensation import (
     PAYOUT_COMPENSATION_STATUS_ABANDONED,
     PAYOUT_COMPENSATION_STATUS_COMPENSATED,
@@ -30,6 +30,8 @@ LEDGER_DIRECTION_OUT = "out"
 LEDGER_DIRECTIONS = {LEDGER_DIRECTION_IN, LEDGER_DIRECTION_OUT}
 
 LEDGER_SOURCE_ACTION_EVENT = "action_event"
+LEDGER_SUMMARY_STATUSES = frozenset({ACTION_EVENT_STATUS_OK, ACTION_EVENT_STATUS_COMPENSATED})
+DEFAULT_LEDGER_SUMMARY_WINDOW_DAYS = 30
 
 COMPENSATION_OPEN_STATUSES = {
     PAYOUT_COMPENSATION_STATUS_PENDING,
@@ -49,6 +51,7 @@ class LedgerFilters:
     amount_min: Decimal | None = None
     amount_max: Decimal | None = None
     status: str | None = None
+    statuses: frozenset[str] | None = None
     limit: int | None = 100
 
 
@@ -140,9 +143,14 @@ async def list_ledger_entries(db: AsyncSession, filters: LedgerFilters | None = 
 
 
 async def summarize_ledger(db: AsyncSession, filters: LedgerFilters | None = None) -> LedgerSummary:
-    """按日和按群汇总净盈亏，口径与 ``list_ledger_entries`` 保持一致。"""
+    """按日和按群汇总真实资金净盈亏。"""
 
     active = _normalize_filters(filters)
+    if active.status is not None and active.status not in LEDGER_SUMMARY_STATUSES:
+        return _empty_summary()
+    if active.status is None:
+        active.statuses = LEDGER_SUMMARY_STATUSES
+    _apply_default_summary_window(active)
     active.limit = None
     entries = await list_ledger_entries(db, active)
 
@@ -269,9 +277,22 @@ def _normalize_filters(filters: LedgerFilters | None) -> LedgerFilters:
         active.plugin_key = str(active.plugin_key).strip() or None
     if active.status:
         active.status = str(active.status).strip().upper() or None
+    if active.statuses:
+        active.statuses = frozenset(str(status).strip().upper() for status in active.statuses if str(status).strip())
     if active.limit is not None:
         active.limit = max(1, min(int(active.limit), 500))
     return active
+
+
+def _apply_default_summary_window(filters: LedgerFilters) -> None:
+    if filters.since is not None:
+        return
+    window_end = filters.until or datetime.now(UTC)
+    filters.since = window_end - timedelta(days=DEFAULT_LEDGER_SUMMARY_WINDOW_DAYS)
+
+
+def _empty_summary() -> LedgerSummary:
+    return LedgerSummary(income="0", payout="0", net="0", count=0, by_day=[], by_chat=[])
 
 
 async def _load_action_rows(db: AsyncSession, filters: LedgerFilters) -> list[ActionEvent]:
@@ -286,6 +307,8 @@ async def _load_action_rows(db: AsyncSession, filters: LedgerFilters) -> list[Ac
         stmt = stmt.where(ActionEvent.plugin_key == filters.plugin_key)
     if filters.status:
         stmt = stmt.where(ActionEvent.status == filters.status)
+    elif filters.statuses:
+        stmt = stmt.where(ActionEvent.status.in_(filters.statuses))
     stmt = stmt.order_by(ActionEvent.created_at.desc(), ActionEvent.id.desc())
     if filters.limit is not None:
         stmt = stmt.limit(max(filters.limit * 20, 1000))

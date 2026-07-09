@@ -9,7 +9,13 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.db.models.account import Account  # noqa: F401 - registers FK target table metadata
-from app.db.models.action_event import ACTION_EVENT_STATUS_FAILED, ACTION_EVENT_STATUS_OK, ActionEvent
+from app.db.models.action_event import (
+    ACTION_EVENT_STATUS_COMPENSATED,
+    ACTION_EVENT_STATUS_DRY_RUN,
+    ACTION_EVENT_STATUS_FAILED,
+    ACTION_EVENT_STATUS_OK,
+    ActionEvent,
+)
 from app.db.models.payout_compensation import (
     PAYOUT_COMPENSATION_STATUS_COMPENSATED,
     PAYOUT_COMPENSATION_STATUS_PENDING,
@@ -89,7 +95,7 @@ async def _insert_compensation(session_factory, **overrides) -> PayoutCompensati
 
 @pytest.mark.asyncio
 async def test_ledger_summary_matches_filtered_entries_sum(ledger_session_factory) -> None:
-    base = datetime(2026, 7, 9, 8, 0, tzinfo=UTC)
+    base = datetime.now(UTC) - timedelta(days=1)
     await _insert_action_event(
         ledger_session_factory,
         action_type="payment_confirmed",
@@ -112,6 +118,13 @@ async def test_ledger_summary_matches_filtered_entries_sum(ledger_session_factor
     )
     await _insert_action_event(
         ledger_session_factory,
+        action_type="payout",
+        params_summary={"type": "payout", "amount": "99", "chat_id": -100456, "payout_key": "pay_dry"},
+        status=ACTION_EVENT_STATUS_DRY_RUN,
+        created_at=base + timedelta(days=1, minutes=1),
+    )
+    await _insert_action_event(
+        ledger_session_factory,
         account_id=8,
         action_type="payment_confirmed",
         params_summary={"event_type": "payment_confirmed", "amount": "999", "chat_id": -100123},
@@ -129,16 +142,106 @@ async def test_ledger_summary_matches_filtered_entries_sum(ledger_session_factor
         entries = await ledger_service.list_ledger_entries(db, filters)
         summary = await ledger_service.summarize_ledger(db, filters)
 
-    income = sum((Decimal(item.amount) for item in entries if item.direction == "in"), Decimal("0"))
-    payout = sum((Decimal(item.amount) for item in entries if item.direction == "out"), Decimal("0"))
+    real_entries = {
+        item.id: item
+        for item in entries
+        if item.status in {ACTION_EVENT_STATUS_OK, ACTION_EVENT_STATUS_COMPENSATED}
+    }
+    income = sum((Decimal(item.amount) for item in real_entries.values() if item.direction == "in"), Decimal("0"))
+    payout = sum((Decimal(item.amount) for item in real_entries.values() if item.direction == "out"), Decimal("0"))
 
-    assert len(entries) == 3
-    assert summary.count == len(entries)
+    assert len(entries) == 4
+    assert summary.count == len(real_entries) == 2
     assert Decimal(summary.income) == income == Decimal("100.50")
-    assert Decimal(summary.payout) == payout == Decimal("40.25")
-    assert Decimal(summary.net) == income - payout == Decimal("60.25")
-    assert {item.key for item in summary.by_day} == {"2026-07-09", "2026-07-10"}
-    assert {item.key for item in summary.by_chat} == {"-100123", "-100456"}
+    assert Decimal(summary.payout) == payout == Decimal("30.25")
+    assert Decimal(summary.net) == income - payout == Decimal("70.25")
+    assert {item.key for item in summary.by_day} == {base.date().isoformat()}
+    assert {item.key for item in summary.by_chat} == {"-100123"}
+
+
+@pytest.mark.asyncio
+async def test_ledger_summary_excludes_failed_replay_when_compensation_ok_exists(ledger_session_factory) -> None:
+    base = datetime.now(UTC) - timedelta(days=1)
+    await _insert_action_event(
+        ledger_session_factory,
+        action_type="payout",
+        params_summary={"type": "payout", "amount": "10", "chat_id": -100456, "payout_key": "pay_retry"},
+        status=ACTION_EVENT_STATUS_FAILED,
+        error_code="telegram_api_error",
+        created_at=base,
+    )
+    await _insert_action_event(
+        ledger_session_factory,
+        action_type="payout",
+        params_summary={"type": "payout", "amount": "10", "chat_id": -100456, "payout_key": "pay_retry"},
+        status=ACTION_EVENT_STATUS_OK,
+        created_at=base + timedelta(minutes=1),
+    )
+
+    async with ledger_session_factory() as db:
+        summary = await ledger_service.summarize_ledger(
+            db,
+            ledger_service.LedgerFilters(account_id=7, plugin_key="game", limit=None),
+        )
+
+    assert summary.count == 1
+    assert Decimal(summary.payout) == Decimal("10")
+    assert Decimal(summary.net) == Decimal("-10")
+
+
+@pytest.mark.asyncio
+async def test_ledger_summary_includes_compensated_but_rejects_failed_status_filter(ledger_session_factory) -> None:
+    base = datetime.now(UTC) - timedelta(days=1)
+    await _insert_action_event(
+        ledger_session_factory,
+        action_type="payout",
+        params_summary={"type": "payout", "amount": "12", "chat_id": -100456, "payout_key": "pay_manual"},
+        status=ACTION_EVENT_STATUS_COMPENSATED,
+        created_at=base,
+    )
+    await _insert_action_event(
+        ledger_session_factory,
+        action_type="payout",
+        params_summary={"type": "payout", "amount": "7", "chat_id": -100456, "payout_key": "pay_failed"},
+        status=ACTION_EVENT_STATUS_FAILED,
+        created_at=base + timedelta(minutes=1),
+    )
+
+    async with ledger_session_factory() as db:
+        summary = await ledger_service.summarize_ledger(db, ledger_service.LedgerFilters(account_id=7, limit=None))
+        failed_summary = await ledger_service.summarize_ledger(
+            db,
+            ledger_service.LedgerFilters(account_id=7, status=ACTION_EVENT_STATUS_FAILED, limit=None),
+        )
+
+    assert summary.count == 1
+    assert Decimal(summary.payout) == Decimal("12")
+    assert Decimal(summary.net) == Decimal("-12")
+    assert failed_summary.count == 0
+    assert Decimal(failed_summary.payout) == Decimal("0")
+
+
+@pytest.mark.asyncio
+async def test_ledger_summary_applies_default_time_window(ledger_session_factory) -> None:
+    now = datetime.now(UTC)
+    await _insert_action_event(
+        ledger_session_factory,
+        action_type="payment_confirmed",
+        params_summary={"event_type": "payment_confirmed", "amount": "100", "chat_id": -100123},
+        created_at=now - timedelta(days=ledger_service.DEFAULT_LEDGER_SUMMARY_WINDOW_DAYS + 1),
+    )
+    await _insert_action_event(
+        ledger_session_factory,
+        action_type="payment_confirmed",
+        params_summary={"event_type": "payment_confirmed", "amount": "9", "chat_id": -100123},
+        created_at=now - timedelta(days=1),
+    )
+
+    async with ledger_session_factory() as db:
+        summary = await ledger_service.summarize_ledger(db, ledger_service.LedgerFilters(account_id=7, limit=None))
+
+    assert summary.count == 1
+    assert Decimal(summary.income) == Decimal("9")
 
 
 @pytest.mark.asyncio
