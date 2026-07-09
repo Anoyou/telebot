@@ -12,7 +12,7 @@ import inspect
 from dataclasses import dataclass, field
 from typing import Any
 
-VALID_EVENT_SOURCES = {"userbot", "interaction_bot", "external_payment_notice"}
+VALID_EVENT_SOURCES = {"userbot", "interaction_bot", "external_payment_notice", "webhook"}
 VALID_EVENT_TYPES = {
     "all_events",
     "all_messages",
@@ -26,6 +26,7 @@ VALID_EVENT_TYPES = {
     "session_close",
     "session_expired",
     "message_edited",
+    "webhook",
 }
 VALID_EVENT_SCOPES = {"all_allowed_chats", "owner_only", "known_users", "inline_all", "rule_bound"}
 SUPPORTED_FILTER_KEYS = {
@@ -37,6 +38,8 @@ SUPPORTED_FILTER_KEYS = {
     "event_type",
     "keyword",
     "keywords",
+    "hook_key",
+    "hook_keys",
     "rule_id",
 }
 _ALL_EVENTS_IMPLICIT_TYPES = {
@@ -48,6 +51,7 @@ _ALL_EVENTS_IMPLICIT_TYPES = {
     "session_close",
     "session_expired",
     "message_edited",
+    "webhook",
 }
 EVENT_TRACE_STATUSES = {
     "received",
@@ -335,6 +339,57 @@ def normalize_payment_notice(account_id: int, event: dict[str, Any], parsed: dic
     return payload
 
 
+def normalize_webhook_event(
+    account_id: int,
+    *,
+    hook_key: str,
+    body: Any,
+    headers: dict[str, str] | None = None,
+    body_size: int | None = None,
+    content_type: str | None = None,
+    received_at: str | None = None,
+) -> dict[str, Any]:
+    """Normalize an inbound HTTP webhook into the TelePilot Event Bus envelope."""
+
+    normalized_hook_key = str(hook_key or "").strip()
+    safe_headers = {
+        str(key).lower(): str(value)
+        for key, value in (headers or {}).items()
+        if str(key).strip()
+    }
+    webhook = {
+        "hook_key": normalized_hook_key,
+        "body": body,
+        "headers": safe_headers,
+        "body_size": body_size,
+        "content_type": content_type,
+        "received_at": received_at,
+    }
+    webhook = {key: value for key, value in webhook.items() if value not in (None, "", [], {})}
+    payload = _event(
+        account_id=account_id,
+        channel="webhook",
+        driver="http_webhook",
+        event_type="webhook",
+        message={"text": _webhook_body_text(body)},
+        trigger={"hook_key": normalized_hook_key},
+        raw_summary={
+            "event_type": "webhook",
+            "hook_key": normalized_hook_key,
+            "headers": safe_headers,
+            "body_size": body_size,
+            "content_type": content_type,
+        },
+        native_raw=None,
+    )
+    payload["source"]["hook_key"] = normalized_hook_key
+    payload["webhook"] = webhook
+    payload["hook_key"] = normalized_hook_key
+    payload["body"] = body
+    payload["headers"] = safe_headers
+    return payload
+
+
 def normalize_event_subscription(
     raw: dict[str, Any] | Any,
     *,
@@ -349,7 +404,10 @@ def normalize_event_subscription(
     scope = str(data.get("scope") or "all_allowed_chats").strip() or "all_allowed_chats"
     if scope not in VALID_EVENT_SCOPES:
         scope = "all_allowed_chats"
-    filters = data.get("filters") if isinstance(data.get("filters"), dict) else {}
+    filters = dict(data.get("filters")) if isinstance(data.get("filters"), dict) else {}
+    webhook_trigger = _webhook_trigger_filter(data.get("triggers"))
+    if webhook_trigger not in (None, "", [], {}):
+        filters.setdefault("hook_key", webhook_trigger)
     unknown_events = sorted(
         {
             event
@@ -487,6 +545,8 @@ def _scope_matches(
 ) -> tuple[bool, str]:
     if scope == "inline_all":
         return (event_type in {"inline_query", "chosen_inline_result"}, "scope_not_matched")
+    if event_type == "webhook" and scope == "all_allowed_chats":
+        return True, "scope_not_matched"
     owner_ids = _int_set(state.get("owner_user_ids") or state.get("admin_user_ids"))
     if scope == "owner_only":
         return (sender_user_id is not None and sender_user_id in owner_ids, "scope_not_matched")
@@ -540,6 +600,17 @@ def _filters_match(event: dict[str, Any], filters: dict[str, Any]) -> tuple[bool
     current_event_type = str(source.get("type") or event.get("event_type") or "")
     if event_types and current_event_type not in event_types:
         return False, "filter_not_matched"
+    hook_keys = _string_list(filters.get("hook_keys") or filters.get("hook_key"))
+    webhook = event.get("webhook") if isinstance(event.get("webhook"), dict) else {}
+    current_hook_key = str(
+        trigger.get("hook_key")
+        or source.get("hook_key")
+        or webhook.get("hook_key")
+        or event.get("hook_key")
+        or ""
+    ).strip()
+    if hook_keys and current_hook_key not in hook_keys:
+        return False, "filter_not_matched"
     expected_chat_ids = {_int_or_none(item) for item in _string_list(filters.get("chat_id"))}
     expected_chat_ids.discard(None)
     current_chat_id = _int_or_none(message.get("chat_id") or chat.get("id") or source.get("chat_id"))
@@ -581,6 +652,25 @@ def _with_warnings(message: str, warnings: list[str]) -> str:
     if not warnings:
         return message
     return f"{message}（警告：{'；'.join(warnings)}）"
+
+
+def _webhook_trigger_filter(triggers: Any) -> Any:
+    if not isinstance(triggers, dict):
+        return None
+    raw = triggers.get("webhook")
+    if isinstance(raw, dict):
+        return raw.get("hook_key") or raw.get("hook_keys") or raw.get("key") or raw.get("keys")
+    return raw
+
+
+def _webhook_body_text(body: Any) -> str:
+    if body in (None, ""):
+        return ""
+    if isinstance(body, str):
+        return body[:2000]
+    if isinstance(body, bytes):
+        return body[:2000].decode("utf-8", errors="replace")
+    return str(body)[:2000]
 
 
 def _event(
@@ -1265,5 +1355,6 @@ __all__ = [
     "normalize_bot_update",
     "normalize_event_subscription",
     "normalize_payment_notice",
+    "normalize_webhook_event",
     "normalize_userbot_event",
 ]

@@ -79,6 +79,7 @@ from ...services.event_bus import (
     event_subscription_warnings,
     normalize_event_subscription,
     normalize_userbot_event,
+    normalize_webhook_event,
 )
 from ...services.event_trace import (
     TRACE_STATUS_FAILED,
@@ -867,6 +868,127 @@ async def _dispatch_userbot_event_bus_matches(
                 **trace_log_context(trace),
             )
     return invoked_count, failed_count, frozenset(consumed_plugin_keys)
+
+
+async def dispatch_webhook_event(
+    account_id: int,
+    payload: dict[str, Any] | None,
+    *,
+    redis: Any | None = None,
+) -> dict[str, Any]:
+    """Deliver a normalized inbound webhook to plugins that subscribe to webhook events."""
+
+    state = _STATES.get(account_id)
+    if state is None:
+        raise RuntimeError("账号 worker state 不存在")
+    redis = redis or state.redis or get_redis()
+    data = payload if isinstance(payload, dict) else {}
+    hook_key = str(data.get("hook_key") or "").strip()
+    event_payload = normalize_webhook_event(
+        account_id,
+        hook_key=hook_key,
+        body=data.get("body"),
+        headers=data.get("headers") if isinstance(data.get("headers"), dict) else {},
+        body_size=_int_or_none(data.get("body_size")),
+        content_type=str(data.get("content_type") or "") or None,
+        received_at=str(data.get("received_at") or "") or None,
+    )
+    flags = await _load_event_framework_flags()
+    trace = None
+    if flags.get("trace_enabled", True):
+        trace = await start_trace(event_payload)
+        event_payload["trace_id"] = trace.trace_id
+        await record_span(
+            trace,
+            "receive",
+            TRACE_STATUS_OK,
+            component="webhook",
+            direction="webhook",
+        )
+    if not flags.get("event_bus_delivery_enabled", True):
+        await record_span(
+            trace,
+            "subscription_match",
+            TRACE_STATUS_SKIPPED,
+            component="event_bus",
+            reason_code="event_bus_delivery_disabled",
+            message="Event Bus 新投递路径已通过运行设置关闭，webhook 事件未投递。",
+        )
+        await finish_trace(trace, TRACE_STATUS_SKIPPED, invoked_count=0, failed_count=0, direction="webhook")
+        return {"ok": True, "matched": 0, "invoked": 0, "failed": 0, "trace_id": getattr(trace, "trace_id", None)}
+
+    subscriptions = _event_bus_subscriptions_from_state(state)
+    matched_decisions: list[Any] = []
+    if not subscriptions:
+        await record_span(
+            trace,
+            "subscription_match",
+            TRACE_STATUS_SKIPPED,
+            component="event_bus",
+            reason_code="subscription_not_matched",
+            message="没有已启用插件声明 webhook Event Bus 订阅。",
+        )
+    else:
+        result = dispatch_event(event_payload, subscriptions, _event_bus_state_for_userbot_dispatch(state))
+        for decision in result.decisions:
+            if decision.matched:
+                matched_decisions.append(decision)
+            await record_span(
+                trace,
+                "subscription_match",
+                TRACE_STATUS_OK if decision.matched else TRACE_STATUS_SKIPPED,
+                component="event_bus",
+                plugin_key=decision.plugin_key,
+                entry_key=decision.entry_key,
+                reason_code=decision.reason_code,
+                message=decision.reason_message,
+                dispatch_mode=decision.dispatch_mode,
+                scope=decision.scope,
+                filters=decision.filters,
+            )
+    if not matched_decisions:
+        await record_span(
+            trace,
+            "route",
+            TRACE_STATUS_SKIPPED,
+            component="event_bus",
+            reason_code="subscription_not_matched",
+            message="webhook 事件未命中任何插件订阅。",
+        )
+
+    synthetic_event = SimpleNamespace(chat_id=None, sender_id=None, raw_text="")
+    dispatch_state = _UserbotEventBusDispatch(
+        trace=trace,
+        event_payload=event_payload,
+        event_bus_enabled=True,
+        matched_decisions=tuple(matched_decisions),
+    )
+    invoked_count, failed_count, _consumed = await _dispatch_userbot_event_bus_matches(
+        state,
+        dispatch_state,
+        synthetic_event,
+        event_label="webhook",
+        redis=redis,
+    )
+    final_status = (
+        TRACE_STATUS_FAILED if failed_count
+        else TRACE_STATUS_OK if invoked_count
+        else TRACE_STATUS_SKIPPED
+    )
+    await finish_trace(
+        trace,
+        final_status,
+        invoked_count=invoked_count,
+        failed_count=failed_count,
+        direction="webhook",
+    )
+    return {
+        "ok": failed_count == 0,
+        "matched": len(matched_decisions),
+        "invoked": invoked_count,
+        "failed": failed_count,
+        "trace_id": getattr(trace, "trace_id", None),
+    }
 
 
 def evaluate_dispatch(
@@ -6891,6 +7013,7 @@ async def invoke_interaction_entry(
 __all__ = [
     "RECENT_PEERS_LIMIT",
     "discover_plugins",
+    "dispatch_webhook_event",
     "evaluate_dispatch",
     "get_recent_peers",
     "invoke_interaction_entry",

@@ -71,6 +71,7 @@ from .ipc import (
     CMD_RUN_INTERACTION_ACTION,
     CMD_RUN_INTERACTION_ENTRY,
     CMD_STOP,
+    CMD_WEBHOOK_DELIVER,
     EVT_ACK,
     EVT_LOGIN_REQUIRED,
     EVT_PONG,
@@ -997,6 +998,14 @@ async def _listen_cmd(
                                     ),
                                 )
                             continue
+                        except Exception as e:  # noqa: BLE001
+                            ack_ok = False
+                            ack_error = f"{type(e).__name__}: {e}"
+                    elif cmd.type == CMD_WEBHOOK_DELIVER:
+                        try:
+                            from .plugins.loader import dispatch_webhook_event  # type: ignore
+
+                            await dispatch_webhook_event(account_id, cmd.payload, redis=redis)
                         except Exception as e:  # noqa: BLE001
                             ack_ok = False
                             ack_error = f"{type(e).__name__}: {e}"

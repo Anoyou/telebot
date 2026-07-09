@@ -15,6 +15,7 @@ from app.services.event_bus import (
     normalize_bot_update,
     normalize_event_subscription,
     normalize_payment_notice,
+    normalize_webhook_event,
     normalize_userbot_event,
 )
 
@@ -96,8 +97,9 @@ def test_event_bus_exports_stable_status_and_reason_code_dictionary() -> None:
         "callback_query",
         "message_edited",
         "session_expired",
+        "webhook",
     } <= VALID_EVENT_TYPES
-    assert {"keywords", "contains", "callback_data", "commands", "rule_id"} <= SUPPORTED_FILTER_KEYS
+    assert {"keywords", "contains", "callback_data", "commands", "rule_id", "hook_key"} <= SUPPORTED_FILTER_KEYS
 
 
 def test_runtime_reason_code_literals_are_registered() -> None:
@@ -827,7 +829,68 @@ def test_known_users_scope_only_uses_state_provided_set() -> None:
     assert known_decision.matched is True
 
 
+def test_normalize_webhook_event_matches_hook_key_filter_and_trigger_shorthand() -> None:
+    event = normalize_webhook_event(
+        9,
+        hook_key="orders",
+        body={"order_id": "A-1", "status": "paid"},
+        headers={"content-type": "application/json", "user-agent": "pytest"},
+        body_size=39,
+        content_type="application/json",
+        received_at="2026-07-10T00:00:00+00:00",
+    )
+    filtered = normalize_event_subscription(
+        {
+            "source": ["webhook"],
+            "events": ["webhook"],
+            "scope": "all_allowed_chats",
+            "filters": {"hook_key": "orders"},
+            "entry_key": "main",
+        },
+        plugin_key="orders_plugin",
+    )
+    shorthand = normalize_event_subscription(
+        {
+            "source": ["webhook"],
+            "events": ["webhook"],
+            "scope": "all_allowed_chats",
+            "triggers": {"webhook": "orders"},
+            "entry_key": "main",
+        },
+        plugin_key="orders_shorthand",
+    )
+    skipped = normalize_event_subscription(
+        {
+            "source": ["webhook"],
+            "events": ["webhook"],
+            "scope": "all_allowed_chats",
+            "filters": {"hook_key": "billing"},
+            "entry_key": "main",
+        },
+        plugin_key="billing_plugin",
+    )
+
+    decisions = dispatch_event(event, [filtered, shorthand, skipped], {}).decisions
+
+    assert event["source"]["channel"] == "webhook"
+    assert event["source"]["hook_key"] == "orders"
+    assert event["webhook"]["body"]["order_id"] == "A-1"
+    assert event["webhook"]["headers"]["content-type"] == "application/json"
+    assert decisions[0].matched is True
+    assert decisions[1].matched is True
+    assert decisions[2].matched is False
+    assert decisions[2].reason_code == "filter_not_matched"
+
+
 def _event_for_type(event_type: str) -> dict:
+    if event_type == "webhook":
+        return normalize_webhook_event(
+            1,
+            hook_key="default",
+            body={"hello": "world"},
+            headers={"content-type": "application/json"},
+            body_size=17,
+        )
     if event_type == "callback_query":
         return normalize_bot_update(
             1,
@@ -905,6 +968,7 @@ def _event_for_type(event_type: str) -> dict:
         ("payment_confirmed", "all_allowed_chats"),
         ("command", "all_allowed_chats"),
         ("callback_query", "all_allowed_chats"),
+        ("webhook", "all_allowed_chats"),
     ],
 )
 def test_required_event_types_match_and_explain_event_skip(event_type: str, scope: str) -> None:

@@ -270,6 +270,10 @@ async def security_headers_middleware(request: Request, call_next):
 
 @app.middleware("http")
 async def csrf_header_middleware(request: Request, call_next):
+    # /api/webhooks/* 由账号级 webhook token 鉴权（无浏览器 cookie，非 cookie-based），
+    # 天然不受 CSRF 威胁，且供外部系统调用无法携带自定义头，故豁免 CSRF 头检查。
+    if request.url.path.startswith("/api/webhooks/"):
+        return await call_next(request)
     if _csrf_required(request.method):
         header_val = request.headers.get(_CSRF_HEADER_NAME, "")
         if header_val not in _CSRF_HEADER_VALUES:
