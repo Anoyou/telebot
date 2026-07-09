@@ -21,17 +21,20 @@
 ## [Unreleased]
 
 ### Added
+- payout 失败补偿台账（阶段一）：新增待发单据表与错误分类入队，payout 失败（userbot 离线/瞬态错误/限流拒绝）自动登记待补偿单据；灰度语义为只记账不重放，重放与通知在阶段二。
 - 收付款风控：新增 payout 限额（单笔上限 / 日累计上限，系统设置 `payout_limits` 可经 API 配置并落审计），userbot 两个最终付款出口在发送前强制校验，超限拒绝并记 `payout_limit_exceeded`。
 - 插件脚手架 CLI：`make plugin-new / plugin-check / plugin-register`（`backend/scripts/tp_plugin.py`），一键生成插件骨架、本地校验 manifest 与事件订阅、把本地目录登记进插件台账（解决手拷目录被拒载的开发痛点）。
 - AI 玩法组件库 `ai_components`：QuizMaker 出题（无 AI 时内置题库降级）、AnswerJudge 判定（规则先行、AI 兜底、失败走保守分支）、PersonaChat 人格陪聊，统一走插件 AI 计量；附 `with_ai_components` 示例与 PLUGIN-AI 文档章节。
 - 定时任务：规则页新增运行历史入口，日志中心新增"定时任务"来源与"定时触发"事件筛选。
 
 ### Changed
+- 定时任务运行历史入口深链到消息流的定时触发筛选，规则操作文案改为"立即运行一次"，并补充 IPC 执行链路的保护测试。
 - 交互动作执行遇到 FloodWait/PeerFlood 时自动回馈限速引擎降级（userbot 两套动作执行器一致接入），Telethon `flood_sleep_threshold` 显式固化为 60 秒。
 - zip 插件安装的验签策略与本地导入通道对齐：配置公钥则强制验签；未配置公钥时按"允许未签名插件"开关放行为 community 信任级，不再无条件必败。
 - AI 模型测活弹窗关闭或切换 Provider 时中断在途请求，避免界面卡在加载状态。
 
 ### Fixed
+- 修复关键词/付款/事件订阅通道开局 `update_session` 悬空：三条 bot 侧路径统一"先落会话、再应用动作"，开局存状态的插件经任意通道行为一致；交互 bot 信封只暴露 `session.data`（修复续会话/过期路径插件读到记录外壳的问题）；二次付款重触发不再抹掉已攒局内状态。
 - 修复 LLM 错误一律标记为不可重试、导致退避重试与 fallback 链从不生效的问题：网络错误与 5xx/限流类状态码正确标记可重试，认证类 4xx 不再触发无意义重试。
 - 修复 LLM 调用统计 `latency_ms` 恒为 0 的问题，现按每次 provider 尝试实测耗时记录。
 - 修复"检查更新"在容器手动模式下无条件报告"有更新"的误报；无法探测时明确返回"无法自动检查"。`git fetch` 改为强制更新远端引用，避免非快进历史导致检查失败。
