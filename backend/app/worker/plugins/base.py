@@ -4,7 +4,7 @@
 - ``Plugin`` 是基类，所有内置 / 第三方插件继承它并通过 ``@register`` 注册到全局表。
 - 注册表存放的是 **类对象**（不是实例），每账号在 loader 里各自实例化一次，避免共享状态。
 - ``PluginContext`` 是给插件运行期使用的"上下文容器"：账号 id、配置、规则、Telethon
-      client、风控引擎、redis、日志写入器、平台调度器、安全 HTTP facade；
+      client、风控引擎、redis、持久化 storage、日志写入器、平台调度器、安全 HTTP facade；
       插件实现各 hook 时只需读它就够了。
 - 严格遵循 ``CONTRACTS.md`` 的"插件 Hook"段；所有 hook 默认实现为 no-op，子类按需重写。
 """
@@ -83,6 +83,7 @@ class PluginContext:
       - ``client``：Telethon 客户端（loader 注入）
       - ``engine``：风控引擎（C Agent 提供，支持 ``acquire`` 与各 ``on_*`` 回调）
       - ``redis``：异步 Redis 客户端
+      - ``storage``：按 [账号 × 插件] 隔离的持久化 key-value facade
       - ``log``：写运行日志的协程；签名 ``async (level, message, **detail)``
       - ``scheduler``：平台调度器 facade，可在插件内注册 cron / interval / once 任务
       - ``http``：声明 ``external_http`` 和 ``allowed_hosts`` 后注入的安全 HTTP facade
@@ -100,6 +101,7 @@ class PluginContext:
     client: TelegramClient | None = None
     engine: Any = None  # RateLimitEngine
     redis: Any = None  # redis.asyncio.Redis
+    storage: Any = None  # PluginStorage
     log: Callable[..., Awaitable[None]] | None = None
     scheduler: Any = None  # SchedulerFacade
     http: Any = None  # PluginHTTP

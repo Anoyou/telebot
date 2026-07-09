@@ -88,12 +88,12 @@ from ...services.interaction.contracts import (
     apply_action_send_via_options,
     deprecated_send_via_values,
 )
+from ...services.interaction.dedupe import claim_interaction_message
 from ...services.interaction.delivery import (
     delivery_message_id,
     namespaced_action_save_message_id_key,
     save_action_reply_target,
 )
-from ...services.interaction.dedupe import claim_interaction_message
 from ...services.rate_limit_service import get_effective
 from ...settings import settings as app_settings
 from ...util.sudo_permissions import sudo_chat_allowed
@@ -109,6 +109,7 @@ from .base import Plugin, PluginContext, all_plugins, get_plugin, public_entity_
 from .events import attach_tp_event
 from .manifest import Manifest
 from .message_ops import BufferedMessageOps
+from .storage import PluginStorage
 
 log = logging.getLogger(__name__)
 
@@ -5009,6 +5010,7 @@ async def _activate(db, state: _AccountState, af: AccountFeature, redis: Any) ->
             plugin_key=af.feature_key,
         )
 
+    plugin_redis = state.redis or redis
     ctx = PluginContext(
         account_id=state.account_id,
         feature_key=af.feature_key,
@@ -5017,7 +5019,7 @@ async def _activate(db, state: _AccountState, af: AccountFeature, redis: Any) ->
         rules=list(rules),
         client=plugin_client,
         engine=state.engine if plugin_source != "installed" else None,
-        redis=state.redis or redis,
+        redis=plugin_redis,
         log=_make_logger(redis, state.account_id, af.feature_key),
         scheduler=(
             state.scheduler.for_plugin(af.feature_key, state.generation)
@@ -5029,6 +5031,7 @@ async def _activate(db, state: _AccountState, af: AccountFeature, redis: Any) ->
         generation=state.generation,
         account_proxy_url=state.account_proxy_url,
     )
+    ctx.storage = PluginStorage.from_context(ctx)
 
     try:
         await inst.on_startup(ctx)

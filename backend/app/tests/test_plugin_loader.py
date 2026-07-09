@@ -4743,6 +4743,52 @@ async def test_load_calls_on_startup(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_loader_injects_namespaced_plugin_storage(monkeypatch) -> None:
+    """loader 应把同一个 Redis 后端包装为 ctx.storage，供插件按需持久化状态。"""
+    from app.worker.plugins.base import _REGISTRY, register
+    from app.worker.plugins.storage import PluginStorage
+
+    captured: dict[str, PluginContext] = {}
+
+    @register
+    class _TempStoragePlugin(Plugin):
+        key = "_test_storage_injected"
+        display_name = "storage 注入测试"
+
+        async def on_startup(self, ctx: PluginContext) -> None:  # noqa: D401
+            captured["ctx"] = ctx
+
+    fake_db = _FakeDB(
+        accounts={31: _FakeAcc(id=31)},
+        humanize={31: None},
+        afs=[_FakeAF(account_id=31, feature_key=_TempStoragePlugin.key, enabled=True, config={})],
+        rules=[],
+    )
+    monkeypatch.setattr(
+        loader_mod, "AsyncSessionLocal", lambda: _fake_session_factory(fake_db)
+    )
+
+    client = MagicMock()
+    client.on = lambda f: (lambda fn: fn)
+    redis = _FakeRedis()
+    paused = asyncio.Event()
+    paused.set()
+
+    try:
+        await load_plugins_for_account(client, account_id=31, paused=paused, redis=redis)
+
+        ctx = captured["ctx"]
+        assert ctx.redis is redis
+        assert isinstance(ctx.storage, PluginStorage)
+        await ctx.storage.set("round", {"status": "open"})
+        assert await ctx.storage.get("round") == {"status": "open"}
+        assert redis.values["plugin_store:31:_test_storage_injected:round"] == '{"status":"open"}'
+    finally:
+        loader_mod._STATES.pop(31, None)
+        _REGISTRY.pop(_TempStoragePlugin.key, None)
+
+
+@pytest.mark.asyncio
 async def test_ai_facade_injected_only_with_ai_text_permission(monkeypatch) -> None:
     """ctx.ai 只应给声明 ai_text 权限的插件，避免无权限插件直接调 LLM。"""
     from app.worker.plugins.ai_facade import PluginAI
