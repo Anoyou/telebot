@@ -85,6 +85,7 @@ const MESSAGE_SOURCE_OPTIONS = [
   { value: "userbot", label: "UserBot 账号" },
   { value: "interaction_bot", label: "交互 Bot" },
   { value: "account_bot", label: "管理 Bot" },
+  { value: "scheduler", label: "定时任务" },
   { value: "external_payment_notice", label: "收款通知" },
 ];
 
@@ -99,6 +100,7 @@ const EVENT_TYPE_OPTIONS = [
   { value: "session_expired", label: "会话过期" },
   { value: "message_edited", label: "编辑消息" },
   { value: "keyword", label: "关键词触发" },
+  { value: "scheduler_fire", label: "定时触发" },
 ];
 
 const TRACE_STATUS_OPTIONS = [
@@ -1779,6 +1781,7 @@ function channelLabel(channel?: string | null): string {
   if (channel === "userbot") return "UserBot";
   if (channel === "userbot_reply") return "UserBot 回复";
   if (channel === "account_bot") return "管理 Bot";
+  if (channel === "scheduler") return "定时任务";
   if (channel === "external_payment_notice") return "转账通知";
   return channel || "未知来源";
 }

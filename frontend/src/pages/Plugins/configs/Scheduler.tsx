@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { useLocation, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { Pencil, Play, Plus, Trash2, Zap } from "lucide-react";
+import { History, Pencil, Play, Plus, Trash2, Zap } from "lucide-react";
 import { toast } from "sonner";
 
 import { getSystemSettings } from "@/api/system";
@@ -349,16 +349,24 @@ export function SchedulerConfig() {
 
       <Card>
         <CardHeader>
-          <div className="flex items-center justify-between">
+          <div className="flex items-center justify-between gap-3">
             <div>
               <CardTitle className="text-base">规则</CardTitle>
               <CardDescription>
                 支持 cron 定时 / once 单次 / interval 间隔，触发动作：发送消息 / 执行指令 / 调用 LLM
               </CardDescription>
             </div>
-            <Button onClick={openCreate}>
-              <Plus className="mr-1 h-4 w-4" /> 新建规则
-            </Button>
+            <div className="flex shrink-0 items-center gap-2">
+              <Button
+                variant="outline"
+                onClick={() => nav(`/logs?source_channel=scheduler&account_id=${aid}`)}
+              >
+                <History className="mr-1 h-4 w-4" /> 运行历史
+              </Button>
+              <Button onClick={openCreate}>
+                <Plus className="mr-1 h-4 w-4" /> 新建规则
+              </Button>
+            </div>
           </div>
         </CardHeader>
         <CardContent>
