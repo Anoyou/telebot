@@ -57,13 +57,27 @@ export default defineConfig({
         ],
       },
       workbox: {
-        // 不缓存后端 API：始终走网络
-        navigateFallback: "/index.html",
-        navigateFallbackDenylist: [/^\/api\//, /^\/openapi\.json$/],
-        globPatterns: ["**/*.{js,css,html,ico,png,svg,webp,woff,woff2}"],
+        // index.html 不进 precache（globPatterns 去掉 html），也不用 precache 做
+        // navigateFallback。原因：iOS PWA「添加到主屏」时会从当时加载到的 HTML 里
+        // 烘焙并永久锁定 apple-mobile-web-app-status-bar-style 等 meta；一旦 SW 用
+        // 预缓存的旧 index.html 接管导航，就绕过了 nginx 的 no-cache，装机永远读到旧
+        // meta（删图标重加也没用）。改成导航请求 NetworkFirst：在线时一定先取 VPS 最新
+        // index.html，离线才回退缓存。这样 meta 改动一次部署即生效，无需反复重装。
+        navigateFallback: null,
+        globPatterns: ["**/*.{js,css,ico,png,svg,webp,woff,woff2}"],
         runtimeCaching: [
           {
-            // 静态资源：StaleWhileRevalidate
+            // HTML 导航：NetworkFirst，拿最新 index.html；断网回退最近一次缓存。
+            urlPattern: ({ request }) => request.mode === "navigate",
+            handler: "NetworkFirst",
+            options: {
+              cacheName: "html",
+              networkTimeoutSeconds: 3,
+              expiration: { maxEntries: 8 },
+            },
+          },
+          {
+            // 静态资源：StaleWhileRevalidate（带内容 hash，可长期缓存）
             urlPattern: ({ request }) =>
               ["style", "script", "worker", "image", "font"].includes(request.destination),
             handler: "StaleWhileRevalidate",

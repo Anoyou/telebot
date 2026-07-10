@@ -20,6 +20,12 @@
 
 ## [Unreleased]
 
+## [0.55.10] — 2026-07-11 · patch（补丁版本） · PWA HTML 缓存补丁
+
+### Fixed
+- 修复 iOS PWA 仍可能读到旧 `index.html` 的问题：Service Worker 不再预缓存 HTML，导航请求改为 `NetworkFirst`，确保在线打开时优先拿到服务器最新 meta 与状态栏配置。
+- 同步前端 Nginx CSP 内联脚本 hash，避免主题/状态栏初始化脚本被安全策略拦截。
+
 ## [0.55.9] — 2026-07-10 · patch（补丁版本） · iOS PWA 状态栏补丁
 
 ### Fixed
