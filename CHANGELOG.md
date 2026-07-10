@@ -20,6 +20,8 @@
 
 ## [Unreleased]
 
+## [0.55.0] — 2026-07-10 · minor（次版本） · 简单模式 SDK · 开发者工具链 · 资金正确性加固
+
 ### Added
 - 简单模式插件 SDK：`@plugin.command` 装饰器让单个函数即成插件，最小插件从"双文件 + 完整 manifest 声明"降到"一个函数"；与现有显式 manifest 插件同账号共存，不影响已有插件。
 - 插件权限自动推导（审计模式）：`tp_plugin check` 静态扫描插件对 `ctx.*` 的调用，推导所需权限草案并与声明对比、报告多余/遗漏，payout 等高风险能力必须显式声明。
@@ -35,6 +37,7 @@
 
 ### Changed
 - AI 死代码与过期注释清理：`ai_components` docstring 不再声称"fallback 是死代码"（同版本已修活），改为"降级是刻意的第二道保险"；删除 `llm_runtime` 无效的 status_code 死变量与字符串解析、`command.py` 遗漏的死函数。
+- 开发指南对齐最新代码：新增 `docs/PLUGIN-DEVTOOLS.md`（脚手架/权限推导/录制回放/命中调试/dry_run/分级 trace 全链路），API 参考补 `ctx.storage`、`ctx.account_config`、webhook 事件契约、`strict_trace` 字段，快速上手补简单模式 SDK 路径；修 `PLUGIN-HTTP.md` 旧表述（`ctx.redis` 通常为 None → 低层恒注入）。全部断言逐条对码验证。
 
 ## [0.54.0] — 2026-07-10 · minor（次版本） · 交互框架加固 · 开发者套件 · 资金与运营 · 平台能力
 
