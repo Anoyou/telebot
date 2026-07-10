@@ -67,9 +67,37 @@ async def claim_interaction_message(
         return True
 
 
+async def release_interaction_message(
+    *,
+    account_id: int,
+    chat_id: int,
+    message_id: int | None,
+    rule_id: Any,
+    redis: Any | None = None,
+) -> None:
+    """仅用于"成功调用但零动作"场景，把消息让还给另一条管道。"""
+
+    key = interaction_message_claim_key(account_id, chat_id, message_id, rule_id)
+    if key is None:
+        return
+    try:
+        client = redis or get_redis()
+        await client.delete(key)
+    except Exception:  # noqa: BLE001
+        log.debug(
+            "release interaction message failed aid=%s chat=%s message=%s rule=%s",
+            account_id,
+            chat_id,
+            message_id,
+            rule_id,
+            exc_info=True,
+        )
+
+
 __all__ = [
     "INTERACTION_MESSAGE_CLAIM_PREFIX",
     "INTERACTION_MESSAGE_CLAIM_TTL_SECONDS",
     "claim_interaction_message",
     "interaction_message_claim_key",
+    "release_interaction_message",
 ]

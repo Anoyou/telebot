@@ -296,6 +296,15 @@
     background: hsl(var(--background));
   }
 
+  /* 上移 1px 塞进顶栏底下（顶栏 z-index:2 会盖住这条会发缝的顶边），
+     padding-top 补回 1px 保证内容不被顶栏遮住。 */
+  .app-main {
+    position: relative;
+    z-index: 1;
+    margin-top: -1px;
+    padding-top: 1px;
+  }
+
   .app-frame {
     position: relative;
   }
@@ -312,6 +321,11 @@
      pt-[safe-area-inset-top] 内边距铺满整个顶部 chrome，无需额外覆盖层。 */
   .app-topbar {
     position: relative;
+    /* 盖在 .app-main 之上：.app-main 是 overflow:auto 独立合成层，其顶边压在顶栏
+       底边上，3x 屏 + 含小数安全区高度下 WebKit 会在层边缘渲染 0.33px 发丝缝。
+       顶栏抬到上层 + .app-main 上移 1px 塞进顶栏底下，让顶栏实色背景盖住那条边，
+       顶部 chrome 与主体连成一块连续面，缝隙消失。 */
+    z-index: 2;
     border-bottom: 0;
     background: hsl(var(--app-chrome));
     box-shadow: none;
@@ -337,13 +351,10 @@
     pointer-events: none;
   }
 
-  /* 深色主题下 chrome 本就是暗色，无需再压暗，避免顶部出现一坨更黑的渐变 */
+  /* 深色主题下 chrome 本就够暗，白色状态栏文字直接可读，无需任何遮罩——
+     去掉渐变，避免顶部出现一坨明显更黑的色块。 */
   .dark .app-topbar::before {
-    background: linear-gradient(
-      to bottom,
-      hsl(0 0% 0% / 0.14) 0%,
-      hsl(0 0% 0% / 0) 100%
-    );
+    background: none;
   }
 
   .app-topbar > * {

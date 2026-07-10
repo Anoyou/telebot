@@ -99,7 +99,7 @@ from ...services.interaction.contracts import (
     apply_action_send_via_options,
     deprecated_send_via_values,
 )
-from ...services.interaction.dedupe import claim_interaction_message
+from ...services.interaction.dedupe import claim_interaction_message, release_interaction_message
 from ...services.interaction.delivery import (
     delivery_message_id,
     namespaced_action_save_message_id_key,
@@ -5078,6 +5078,9 @@ def _userbot_session_event_payload(
         payload["callback_query_id"] = None
         trigger["callback_data"] = callback_data
         trigger["synthetic"] = "text_button"
+    if session_channel == _SESSION_CHANNEL_INTERACTION_BOT:
+        message = payload.get("message") if isinstance(payload.get("message"), dict) else {}
+        payload["message_text"] = str(message.get("text") or "")
     payload["trigger"] = trigger
     return payload
 
@@ -5249,6 +5252,28 @@ async def _dispatch_userbot_session_message(
                 entry_key=entry_key,
                 action_count=len(actions),
             )
+            if not actions and session_channel != _SESSION_CHANNEL_USERBOT:
+                await release_interaction_message(
+                    account_id=state.account_id,
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    rule_id=session.get("rule_id"),
+                    redis=redis,
+                )
+                await record_span(
+                    trace,
+                    "route",
+                    TRACE_STATUS_SKIPPED,
+                    component="userbot_session_dispatcher",
+                    plugin_key=plugin_key,
+                    entry_key=entry_key,
+                    reason_code="claim_released_no_actions",
+                    message="插件零动作，释放跨管道去重占用，允许交互 Bot 原路径处理。",
+                    direction=event_label,
+                    session_key=session_key,
+                    session_channel=session_channel,
+                    message_id=message_id,
+                )
             if session_channel == _SESSION_CHANNEL_USERBOT or actions:
                 consumed = True
             action_failed = await _apply_userbot_event_bus_actions(

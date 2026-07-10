@@ -11539,6 +11539,60 @@ async def test_interaction_plain_message_skips_cross_channel_duplicate(monkeypat
 
 
 @pytest.mark.asyncio
+async def test_interaction_plain_message_claim_miss_continues_to_other_rules(monkeypatch) -> None:
+    class _DB:
+        async def get(self, *_args):  # noqa: ANN002
+            return None
+
+    incoming = account_bot_runtime.Incoming(
+        account_id=1,
+        token="bbot-token",
+        update_id=13662,
+        user_id=111,
+        chat_id=-100777,
+        chat_type="supergroup",
+        message_id=13662,
+        text="我选第 5 格",
+        display_name="AAA",
+        trace_id="evt_dupe_continue",
+    )
+    rule_a = {
+        "id": "dice-a",
+        "enabled": True,
+        "chat_ids": [-100777],
+        "action": "module",
+        "module_key": "dice_grid_hunt",
+        "module_action": "answer_a",
+    }
+    rule_b = {
+        "id": "dice-b",
+        "enabled": True,
+        "chat_ids": [-100777],
+        "action": "module",
+        "module_key": "dice_grid_hunt",
+        "module_action": "answer_b",
+    }
+    run_entry = AsyncMock(return_value=(True, None, []))
+    claim = AsyncMock(side_effect=[False, True])
+    monkeypatch.setattr(account_bot_runtime, "_run_worker_interaction_entry", run_entry)
+    monkeypatch.setattr(account_bot_runtime, "_load_interaction_session", AsyncMock(return_value={"rule_id": "active"}))
+    monkeypatch.setattr(account_bot_runtime, "claim_interaction_message", claim)
+    monkeypatch.setattr(account_bot_runtime, "record_span", AsyncMock())
+
+    handled = await account_bot_runtime._try_handle_interaction_module_message(
+        _DB(),
+        incoming,
+        {"enabled": True, "rules": [rule_a, rule_b]},
+    )
+
+    assert handled is True
+    assert claim.await_count == 2
+    assert [call.kwargs["rule_id"] for call in claim.await_args_list] == ["dice-a", "dice-b"]
+    run_entry.assert_awaited_once()
+    assert run_entry.await_args.kwargs["entry_key"] == "answer_b"
+
+
+@pytest.mark.asyncio
 async def test_interaction_media_message_without_text_routes_to_active_session(monkeypatch) -> None:
     class _DB:
         async def __aenter__(self):

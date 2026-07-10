@@ -90,6 +90,7 @@ EVENT_REASON_CODES = {
     "contract_failed",
     "contract_warning",
     "cross_channel_duplicate",
+    "claim_released_no_actions",
     "callback_query_id_missing",
     "entry_key_missing",
     "empty_message_text",

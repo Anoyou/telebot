@@ -5423,6 +5423,7 @@ async def _try_handle_interaction_module_message(
         cfg = await account_bot_service.get_transfer_notice_config(db, incoming.account_id)
     if not cfg.get("enabled"):
         return False
+    claim_blocked = False
     for rule in _interaction_rules(cfg, include_disabled=True):
         if not _rule_chat_matches(rule, incoming.chat_id):
             continue
@@ -5496,7 +5497,8 @@ async def _try_handle_interaction_module_message(
                 rule_id=rule.get("id"),
                 message_id=incoming.message_id,
             )
-            return True
+            claim_blocked = True
+            continue
         await _maybe_fast_ack_callback(incoming, module_key, entry_key)
         payload = await _interaction_module_payload_async(
             incoming,
@@ -5575,6 +5577,8 @@ async def _try_handle_interaction_module_message(
                 session,
                 incoming_user_id=incoming.user_id,
             )
+        return True
+    if claim_blocked:
         return True
     return False
 

@@ -25,6 +25,7 @@ from app.db.models.feature import (
     FEATURE_FORWARD,
     FEATURE_SCHEDULER,
 )
+from app.services.interaction.dedupe import interaction_message_claim_key
 from app.worker.plugins import loader as loader_mod
 from app.worker.plugins.base import Plugin, PluginContext
 from app.worker.plugins.events import TelePilotEvent
@@ -62,6 +63,8 @@ class _FakeRedis:
         return self.values.get(str(key))
 
     async def set(self, key: str, value: str, **kwargs):
+        if kwargs.get("nx") and str(key) in self.values:
+            return False
         self.sets.append((key, value, dict(kwargs)))
         self.values[str(key)] = value
         return True
@@ -4250,6 +4253,7 @@ async def test_userbot_observed_interaction_session_keeps_logical_interaction_ch
     assert payload["source"]["observed_channel"] == "userbot"
     assert payload["session"]["channel"] == "interaction_bot"
     assert payload["trigger"]["channel"] == "interaction_bot"
+    assert payload["message_text"] == "10"
     interaction_send.assert_awaited_once_with(
         "interaction-token",
         -10082,
@@ -4290,10 +4294,12 @@ async def test_userbot_observed_interaction_session_does_not_consume_without_act
     monkeypatch.setattr(loader_mod, "update_plugin_runtime_status", AsyncMock())
     finish_trace = AsyncMock()
     monkeypatch.setattr(loader_mod, "finish_trace", finish_trace)
+    message_id = 8501
+    claim_key = interaction_message_claim_key(85, -10085, message_id, "rule-dice")
 
     consumed = await loader_mod._dispatch_userbot_session_message(
         state,
-        SimpleNamespace(chat_id=-10085, sender_id=111, raw_text="2", text="2"),
+        SimpleNamespace(chat_id=-10085, sender_id=111, id=message_id, raw_text="2", text="2"),
         direction="outgoing",
         edited=False,
         event_label="outgoing",
@@ -4303,6 +4309,22 @@ async def test_userbot_observed_interaction_session_does_not_consume_without_act
     assert consumed is False
     invoke.assert_awaited_once()
     assert invoke.await_args.kwargs["default_send_via"] == ["interaction_bot"]
+    assert claim_key not in redis.values
+    assert await loader_mod.claim_interaction_message(
+        account_id=85,
+        chat_id=-10085,
+        message_id=message_id,
+        rule_id="rule-dice",
+        redis=redis,
+    ) is True
+    synthetic_payload = loader_mod._userbot_session_event_payload(
+        {"source": {"channel": "userbot"}, "trigger": {}, "message": {"text": "2"}},
+        session_key=session_key,
+        session=json.loads(redis.values[session_key]),
+        event_label="incoming",
+        callback_data="pick:2",
+    )
+    assert synthetic_payload["message_text"] == "2"
     finish_trace.assert_awaited_once()
     assert finish_trace.await_args.kwargs["consumed"] is False
 
@@ -4336,10 +4358,12 @@ async def test_userbot_observed_interaction_session_consumes_when_actions_return
     monkeypatch.setattr(loader_mod, "update_plugin_runtime_status", AsyncMock())
     finish_trace = AsyncMock()
     monkeypatch.setattr(loader_mod, "finish_trace", finish_trace)
+    message_id = 8502
+    claim_key = interaction_message_claim_key(85, -10085, message_id, "rule-dice")
 
     consumed = await loader_mod._dispatch_userbot_session_message(
         state,
-        SimpleNamespace(chat_id=-10085, sender_id=111, raw_text="2", text="2"),
+        SimpleNamespace(chat_id=-10085, sender_id=111, id=message_id, raw_text="2", text="2"),
         direction="outgoing",
         edited=False,
         event_label="outgoing",
@@ -4349,6 +4373,7 @@ async def test_userbot_observed_interaction_session_consumes_when_actions_return
     assert consumed is True
     invoke.assert_awaited_once()
     assert invoke.await_args.kwargs["default_send_via"] == ["interaction_bot"]
+    assert claim_key in redis.values
     finish_trace.assert_awaited_once()
     assert finish_trace.await_args.kwargs["consumed"] is True
 
