@@ -14,17 +14,23 @@
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-title" content="TelePilot" />
-    <!-- iOS 状态栏：用 default，而非 black-translucent。
-         black-translucent 下 iOS 会强制状态栏文字恒为白，并在其后自绘一层深色半透明
-         scrim 保证白字可读——那层 scrim 是系统画的、CSS 删不掉，就是浅色主题顶部那条
-         灰带的真身。default 模式下 iOS 改用 theme-color 填状态栏底色、按亮度自动选深/浅
-         文字色，无 scrim；顶栏 ::before 渐变与边框都已移除，也不会再有 default 旧版那条
-         分割线。注意：iOS 在「添加到主屏」时锁定此值，改这里后 iPhone 需删除并重新添加
-         到主屏才生效。 -->
+    <!-- iOS 状态栏保持 default，让系统按当前页面明暗选择图标颜色。
+         Safari 26 不再可靠使用 theme-color 填充主屏 Web App 的状态栏，而是在首帧取样
+         页面 canvas/body；因此下面的 head 内联样式必须在 body 创建前先铺好主题底色。 -->
     <meta name="apple-mobile-web-app-status-bar-style" content="default" />
     <meta name="format-detection" content="telephone=no" />
 
-    <script>
+    <style id="telepilot-chrome-bootstrap">
+      html,
+      body,
+      #root {
+        margin: 0;
+        min-height: 100%;
+        background-color: var(--telepilot-app-chrome, #F2F0EC);
+      }
+    </style>
+
+    <script data-telepilot-chrome-bootstrap>
       (function () {
         try {
           var theme = localStorage.getItem("telepilot-theme") || localStorage.getItem("telebot-theme") || "system";
@@ -33,11 +39,14 @@
           var chrome = dark ? "#1C1C1E" : "#F2F0EC";
           document.documentElement.classList.toggle("dark", dark);
           document.documentElement.style.colorScheme = dark ? "dark" : "light";
+          document.documentElement.style.setProperty("--telepilot-app-chrome", chrome);
           document.documentElement.style.backgroundColor = chrome;
           var meta = document.querySelector('meta[name="theme-color"]');
           if (meta) meta.setAttribute("content", chrome);
-          // theme-color 已随主题同步为 chrome 色，default 模式下 iOS 用它填状态栏底色、
-          // 按亮度自动选文字色，无需再改 status-bar-style（且该值装机后锁定，运行时改不动）。
+          var colorScheme = document.querySelector('meta[name="color-scheme"]');
+          if (colorScheme) colorScheme.setAttribute("content", dark ? "dark" : "light");
+          // iOS 26 的主屏 Web App 会在 React 启动前取样 body/canvas；CSS 变量由 html
+          // 继承到稍后创建的 body，使状态栏和应用顶栏从第一帧就是同一块实色背景。
         } catch (e) {}
       })();
     </script>

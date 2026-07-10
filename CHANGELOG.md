@@ -20,6 +20,13 @@
 
 ## [Unreleased]
 
+## [0.55.11] — 2026-07-11 · patch（补丁版本） · iOS PWA 首帧状态栏补丁
+
+### Fixed
+- 修复 iOS 26 主屏 Web App 在 `default` 状态栏模式下首帧取样不到应用主题底色的问题：在 `<head>` 中提前为 `html`、`body` 与 `#root` 铺设同一主题背景，并同步当前 `color-scheme`，避免浅色模式出现系统灰色材质覆盖及安全区交界细线。
+- 同步前端 Nginx CSP 内联脚本 hash，并新增 PWA 首帧背景、状态栏模式与 CSP 一致性回归测试，防止后续再次只更新启动脚本而漏改安全策略。
+- 更正 Service Worker 导航缓存注释，明确 `NetworkFirst` 只保证读取最新页面配置，不会改写 iOS 已固化的安装元数据。
+
 ## [0.55.10] — 2026-07-11 · patch（补丁版本） · PWA HTML 缓存补丁
 
 ### Fixed
