@@ -52,14 +52,14 @@ export function NetworkBadge() {
           {q.isLoading ? (
             <Loader2 className="h-3.5 w-3.5 animate-spin" />
           ) : hasError ? (
-            <AlertTriangle className="h-3.5 w-3.5 text-amber-600 dark:text-amber-300" />
+            <AlertTriangle className="h-3.5 w-3.5 text-warning" />
           ) : (
             <span className="text-base leading-none">{flag}</span>
           )}
           <span
             className={cn(
               "font-mono",
-              hasError && "text-amber-700 dark:text-amber-300",
+              hasError && "text-warning",
             )}
           >
             {q.isLoading

@@ -1293,12 +1293,12 @@ function AllowedPeerMultiSelectField({
         </>
       )}
       {unknownSelected.length > 0 ? (
-        <div className="flex flex-wrap gap-1.5 rounded-md border border-amber-200 bg-amber-50 px-2 py-1.5 text-xs text-amber-800 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-200">
+        <div className="flex flex-wrap gap-1.5 rounded-md border border-warning/30 bg-warning/10 px-2 py-1.5 text-xs text-warning">
           {unknownSelected.map((id) => (
             <button
               key={id}
               type="button"
-              className="rounded border border-amber-300/70 px-1.5 py-0.5 font-mono hover:bg-amber-100 dark:border-amber-800 dark:hover:bg-amber-900/40"
+              className="rounded border border-warning/40 px-1.5 py-0.5 font-mono hover:bg-warning/15"
               title="从本插件配置移除这个未在允许会话中的 Chat ID"
               onClick={() => removeSelectedId(id)}
             >

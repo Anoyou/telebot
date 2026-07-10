@@ -33,9 +33,9 @@ type Tone = "ok" | "warn" | "err";
 
 function Dot({ tone }: { tone: Tone }) {
   const cls = {
-    ok: "bg-emerald-500",
-    warn: "bg-amber-500",
-    err: "bg-rose-500",
+    ok: "bg-success",
+    warn: "bg-warning",
+    err: "bg-destructive",
   }[tone];
   return <span className={`inline-block h-2 w-2 rounded-full ${cls}`} />;
 }
@@ -43,9 +43,9 @@ function Dot({ tone }: { tone: Tone }) {
 // 大白话状态文案——首屏只看这一句就够了
 function ToneText({ tone, text }: { tone: Tone; text: string }) {
   const cls = {
-    ok: "text-emerald-700 dark:text-emerald-300",
-    warn: "text-amber-700 dark:text-amber-300",
-    err: "text-rose-700 dark:text-rose-300",
+    ok: "text-success",
+    warn: "text-warning",
+    err: "text-destructive",
   }[tone];
   return <span className={`text-sm font-medium ${cls}`}>{text}</span>;
 }
@@ -176,7 +176,7 @@ function HealthGrid({ data }: { data: HealthOverview }) {
             一切正常；这里存了你的全部账号配置和历史。
           </div>
         ) : (
-          <div className="mt-1 text-xs text-rose-700 dark:text-rose-300">
+          <div className="mt-1 text-xs text-destructive">
             {data.db.error || "连接失败"}
             <br />
             <span className="text-muted-foreground">
@@ -218,7 +218,7 @@ function HealthGrid({ data }: { data: HealthOverview }) {
         ) : data.alembic.error ? (
           <>
             <ToneText tone="err" text="✗ 探测失败" />
-            <div className="mt-1 text-xs text-rose-700 dark:text-rose-300">{data.alembic.error}</div>
+            <div className="mt-1 text-xs text-destructive">{data.alembic.error}</div>
           </>
         ) : (
           <>
@@ -274,7 +274,7 @@ function HealthGrid({ data }: { data: HealthOverview }) {
             启停账号、热加载模板、风控告警都通这里——通畅就一切如常。
           </div>
         ) : (
-          <div className="mt-1 text-xs text-rose-700 dark:text-rose-300">
+          <div className="mt-1 text-xs text-destructive">
             {data.redis.error || "PING 失败"}
             <br />
             <span className="text-muted-foreground">

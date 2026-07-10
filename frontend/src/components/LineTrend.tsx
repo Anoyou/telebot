@@ -10,6 +10,16 @@ import {
 } from "echarts/components";
 import { CanvasRenderer } from "echarts/renderers";
 
+import { useTheme } from "@/lib/theme";
+
+// echarts 走 canvas 渲染，CSS 变量字符串不会被解析，需运行时取当前主题的实际色值。
+export function cssVarHsl(name: string, alpha?: number): string {
+  if (typeof document === "undefined") return "#888";
+  const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  if (!v) return "#888";
+  return alpha != null ? `hsl(${v} / ${alpha})` : `hsl(${v})`;
+}
+
 echarts.use([
   LineChart,
   GridComponent,
@@ -34,6 +44,7 @@ interface LineTrendProps {
 export function LineTrend({ xAxis, series, height = 240 }: LineTrendProps) {
   const ref = useRef<HTMLDivElement>(null);
   const inst = useRef<echarts.ECharts | null>(null);
+  const { resolvedTheme } = useTheme();
 
   useEffect(() => {
     if (!ref.current) return;
@@ -51,17 +62,17 @@ export function LineTrend({ xAxis, series, height = 240 }: LineTrendProps) {
     if (!inst.current) return;
     inst.current.setOption({
       tooltip: { trigger: "axis" },
-      legend: { top: 0, textStyle: { color: "#888" } },
+      legend: { top: 0, textStyle: { color: cssVarHsl("--muted-foreground") } },
       grid: { left: 30, right: 16, top: 36, bottom: 24 },
       xAxis: {
         type: "category",
         boundaryGap: false,
         data: xAxis,
-        axisLine: { lineStyle: { color: "#888" } },
+        axisLine: { lineStyle: { color: cssVarHsl("--border-strong") } },
       },
       yAxis: {
         type: "value",
-        splitLine: { lineStyle: { type: "dashed", color: "#e5e7eb" } },
+        splitLine: { lineStyle: { type: "dashed", color: cssVarHsl("--border") } },
       },
       series: series.map((s) => ({
         name: s.name,
@@ -73,7 +84,7 @@ export function LineTrend({ xAxis, series, height = 240 }: LineTrendProps) {
         itemStyle: s.color ? { color: s.color } : undefined,
       })),
     });
-  }, [xAxis, series]);
+  }, [xAxis, series, resolvedTheme]);
 
   return <div ref={ref} style={{ width: "100%", height }} />;
 }

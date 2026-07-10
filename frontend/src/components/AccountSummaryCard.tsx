@@ -202,7 +202,7 @@ function ProxyRow({ proxy }: { proxy?: ProxySummary | null }) {
       <div className="flex min-w-0 items-center gap-1.5">
         <span className="ml-5 inline-flex shrink-0 items-center gap-1">
           {hasProbe && proxy.probe_ok === false ? (
-            <span className="text-rose-700 dark:text-rose-300" title="上次探测失败">
+            <span className="text-destructive" title="上次探测失败">
               ⚠ 探测失败
             </span>
           ) : hasProbe ? (
