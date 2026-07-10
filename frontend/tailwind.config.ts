@@ -13,21 +13,30 @@ export default {
     extend: {
       colors: {
         border: "hsl(var(--border))",
+        "border-strong": "hsl(var(--border-strong))",
         input: "hsl(var(--input))",
+        "input-bg": "hsl(var(--input-bg))",
         ring: "hsl(var(--ring))",
         background: "hsl(var(--background))",
         foreground: "hsl(var(--foreground))",
+        faint: "hsl(var(--faint-foreground))",
+        success: "hsl(var(--success))",
+        warning: "hsl(var(--warning))",
+        info: "hsl(var(--info))",
         primary: {
           DEFAULT: "hsl(var(--primary))",
           foreground: "hsl(var(--primary-foreground))",
+          hover: "hsl(var(--primary-hover))",
         },
         secondary: {
           DEFAULT: "hsl(var(--secondary))",
           foreground: "hsl(var(--secondary-foreground))",
+          hover: "hsl(var(--secondary-hover))",
         },
         destructive: {
           DEFAULT: "hsl(var(--destructive))",
           foreground: "hsl(var(--destructive-foreground))",
+          hover: "hsl(var(--destructive-hover))",
         },
         muted: {
           DEFAULT: "hsl(var(--muted))",
@@ -45,11 +54,20 @@ export default {
           DEFAULT: "hsl(var(--card))",
           foreground: "hsl(var(--card-foreground))",
         },
+        "card-2": "hsl(var(--card-2))",
       },
       borderRadius: {
+        sm: "calc(var(--radius) - 6px)",
+        md: "calc(var(--radius) - 4px)",
         lg: "var(--radius)",
-        md: "calc(var(--radius) - 2px)",
-        sm: "calc(var(--radius) - 4px)",
+        xl: "calc(var(--radius) + 2px)",
+        "2xl": "calc(var(--radius) + 4px)",
+      },
+      boxShadow: {
+        sm: "var(--shadow-sm)",
+        DEFAULT: "var(--shadow-sm)",
+        md: "var(--shadow-md)",
+        lg: "var(--shadow-lg)",
       },
       keyframes: {
         "page-enter": {
