@@ -30,7 +30,8 @@ import {
   type LedgerSummary,
   type OperationalStats,
 } from "@/api/ledger";
-import { LineTrend } from "@/components/LineTrend";
+import { LineTrend, cssVarHsl } from "@/components/LineTrend";
+import { useTheme } from "@/lib/theme";
 import { PageHeader, PageShell } from "@/components/layout/PageScaffold";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
@@ -265,11 +266,12 @@ function OperationalOverview({ stats, loading }: { stats?: OperationalStats; loa
 }
 
 function OperationalTrend({ stats }: { stats: OperationalStats }) {
+  useTheme(); // 订阅主题，切换时重取图表色值
   const xAxis = stats.by_day.map((item) => item.key);
   const series = [
-    { name: "开局", data: stats.by_day.map((item) => item.started_sessions), color: "#2563eb" },
-    { name: "派奖成功", data: stats.by_day.map((item) => item.payout_success_count), color: "#10b981" },
-    { name: "派奖失败", data: stats.by_day.map((item) => item.payout_failure_count), color: "#e11d48" },
+    { name: "开局", data: stats.by_day.map((item) => item.started_sessions), color: cssVarHsl("--primary") },
+    { name: "派奖成功", data: stats.by_day.map((item) => item.payout_success_count), color: cssVarHsl("--success") },
+    { name: "派奖失败", data: stats.by_day.map((item) => item.payout_failure_count), color: cssVarHsl("--destructive") },
   ];
   return (
     <Card>
@@ -462,11 +464,12 @@ function FilterPanel({
 }
 
 function TrendPanel({ summary, loading }: { summary?: LedgerSummary; loading: boolean }) {
+  useTheme(); // 订阅主题，切换时重取图表色值
   const xAxis = summary?.by_day.map((item) => item.key) || [];
   const series = [
-    { name: "入账", data: summary?.by_day.map((item) => chartNumber(item.income)) || [], color: "#10b981" },
-    { name: "出账", data: summary?.by_day.map((item) => chartNumber(item.payout)) || [], color: "#f59e0b" },
-    { name: "净额", data: summary?.by_day.map((item) => chartNumber(item.net)) || [], color: "#2563eb" },
+    { name: "入账", data: summary?.by_day.map((item) => chartNumber(item.income)) || [], color: cssVarHsl("--success") },
+    { name: "出账", data: summary?.by_day.map((item) => chartNumber(item.payout)) || [], color: cssVarHsl("--warning") },
+    { name: "净额", data: summary?.by_day.map((item) => chartNumber(item.net)) || [], color: cssVarHsl("--primary") },
   ];
   return (
     <Card>
@@ -657,7 +660,7 @@ function CompensationTable({
                       <div className="font-mono text-[11px] text-muted-foreground">#{item.account_id}</div>
                     </TableCell>
                     <TableCell className="font-mono text-xs">{item.chat_id}</TableCell>
-                    <TableCell className="text-right font-mono font-semibold tabular-nums text-amber-700 dark:text-amber-300">
+                    <TableCell className="text-right font-mono font-semibold tabular-nums text-warning">
                       {formatAmount(item.amount)}
                     </TableCell>
                     <TableCell>
@@ -812,8 +815,8 @@ function isNegative(value: string) {
 }
 
 function amountToneClass(value: string) {
-  if (isNegative(value)) return "text-rose-600 dark:text-rose-300";
-  if (String(value || "") !== "0") return "text-emerald-700 dark:text-emerald-300";
+  if (isNegative(value)) return "text-destructive";
+  if (String(value || "") !== "0") return "text-success";
   return "text-muted-foreground";
 }
 

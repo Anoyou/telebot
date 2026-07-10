@@ -158,7 +158,7 @@ export function InteractionIndex() {
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-base">
-              <AlertTriangle className="h-4 w-4 text-amber-500" />
+              <AlertTriangle className="h-4 w-4 text-warning" />
               暂无账号
             </CardTitle>
           </CardHeader>

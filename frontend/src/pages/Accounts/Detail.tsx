@@ -308,7 +308,7 @@ export function AccountDetail() {
                   <Button
                     size="sm"
                     variant="outline"
-                    className="border-amber-300 bg-amber-100 hover:bg-amber-200 dark:border-amber-800 dark:bg-amber-950/50 dark:hover:bg-amber-900/50"
+                    className="border-warning/50 bg-warning/15 hover:bg-warning/25"
                     disabled={restartWorkerMut.isPending}
                     onClick={() => restartWorkerMut.mutate()}
                   >

@@ -409,12 +409,12 @@ function AllowedPeerMultiSelect({
         })}
       </div>
       {unknownSelected.length > 0 ? (
-        <div className="flex flex-wrap gap-1.5 rounded-md border border-amber-200 bg-amber-50 px-2 py-1.5 text-xs text-amber-800 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-200">
+        <div className="flex flex-wrap gap-1.5 rounded-md border border-warning/30 bg-warning/10 px-2 py-1.5 text-xs text-warning">
           {unknownSelected.map((id) => (
             <button
               key={id}
               type="button"
-              className="rounded border border-amber-300/70 px-1.5 py-0.5 font-mono hover:bg-amber-100 dark:border-amber-800 dark:hover:bg-amber-900/40"
+              className="rounded border border-warning/40 px-1.5 py-0.5 font-mono hover:bg-warning/15"
               title="从本规则移除这个未在允许会话中的 Chat ID"
               onClick={() => removeSelectedId(id)}
             >
@@ -2428,17 +2428,17 @@ export function BotTab({
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
-            <div className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+            <div className="rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-xs text-warning">
               安全提示：涉及重启、安装等危险操作时，需在 Telegram 内完成二次确认后才会执行。
             </div>
-            <div className="space-y-3 rounded-md border border-red-300/70 bg-red-50 px-3 py-3 dark:border-red-400/40 dark:bg-red-950/30">
+            <div className="space-y-3 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-3">
               <div className="flex items-center gap-2">
-                <div className="text-sm font-medium text-red-900 dark:text-red-100">远程插件高风险开关（admin）</div>
+                <div className="text-sm font-medium text-destructive">远程插件高风险开关（admin）</div>
                 <Dialog>
                   <DialogTrigger asChild>
                     <button
                       type="button"
-                      className="text-xs font-medium text-red-700 underline underline-offset-2 hover:text-red-800 dark:text-red-200 dark:hover:text-red-100"
+                      className="text-xs font-medium text-destructive underline underline-offset-2 hover:text-destructive-hover"
                     >
                       详情
                     </button>
@@ -2462,7 +2462,7 @@ export function BotTab({
                   </DialogContent>
                 </Dialog>
               </div>
-              <div className="text-xs text-red-800 dark:text-red-200">
+              <div className="text-xs text-destructive">
                 默认全部关闭；即使开启后，Telegram 内仍需二次确认才会执行 install/update/uninstall/第三方启停。
               </div>
               <div className="grid gap-2 text-sm md:grid-cols-2">
@@ -2475,7 +2475,7 @@ export function BotTab({
                 ].map(([key, label]) => (
                   <label
                     key={key}
-                    className="flex items-center justify-between rounded border border-red-200/70 bg-white/95 px-3 py-2 text-red-950 dark:border-red-300/30 dark:bg-red-950/10 dark:text-red-100"
+                    className="flex items-center justify-between rounded border border-destructive/25 bg-card px-3 py-2 text-foreground"
                   >
                     <span>{label}</span>
                     <Switch
@@ -2738,7 +2738,7 @@ export function BotTab({
           ) : null}
 
           {isInteractionCenter ? (
-            <section className="rounded-lg border border-amber-300/70 bg-amber-50 px-3 py-3 text-sm text-amber-950 dark:border-amber-400/30 dark:bg-amber-950/20 dark:text-amber-100">
+            <section className="rounded-lg border border-warning/30 bg-warning/10 px-3 py-3 text-sm text-warning">
               <div className="flex items-start gap-2">
                 <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0" />
                 <div>

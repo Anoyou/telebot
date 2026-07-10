@@ -218,7 +218,7 @@ export function Login() {
                   </button>
                 </div>
                 {showPassword && (
-                  <p className="text-[11px] text-amber-600 dark:text-amber-300">
+                  <p className="text-[11px] text-warning">
                     密码已显示；输完后建议点击眼睛图标隐藏
                   </p>
                 )}
@@ -238,7 +238,7 @@ export function Login() {
                 </div>
               )}
               {isLogin && needOtp && (
-                <div className="rounded-md border border-amber-200 bg-amber-50/70 p-3 text-xs text-amber-900 dark:border-amber-900/60 dark:bg-amber-950/30 dark:text-amber-100">
+                <div className="rounded-md border border-warning/30 bg-warning/10 p-3 text-xs text-warning">
                   {otpMessage || "登录尝试较多，需要额外验证。"}
                 </div>
               )}

@@ -138,7 +138,7 @@ function DetailGroup({
               key={index}
               className={cn(
                 "rounded-md border px-3 py-2",
-                item.matched ? "border-emerald-500/25 bg-emerald-500/5" : "bg-muted/20",
+                item.matched ? "border-success/25 bg-success/10" : "bg-muted/20",
               )}
             >
               <div className="mb-2 flex flex-wrap items-center gap-2">
@@ -178,7 +178,7 @@ function StageNode({ stage, index, isLast }: { stage: DispatchTraceStage; index:
       <div
         className={cn(
           "absolute left-0 top-3 flex h-5 w-5 items-center justify-center rounded-full border bg-card",
-          stage.matched ? "border-emerald-500/40 text-emerald-600" : "border-muted-foreground/30 text-muted-foreground",
+          stage.matched ? "border-success/40 text-success" : "border-muted-foreground/30 text-muted-foreground",
         )}
       >
         <Icon className="h-3.5 w-3.5" />
@@ -361,7 +361,7 @@ export function DispatchDebugPage() {
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-base">
-              <AlertTriangle className="h-4 w-4 text-amber-500" />
+              <AlertTriangle className="h-4 w-4 text-warning" />
               暂无账号
             </CardTitle>
           </CardHeader>

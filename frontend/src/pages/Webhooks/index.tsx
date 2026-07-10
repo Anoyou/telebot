@@ -220,7 +220,7 @@ export function WebhooksPage() {
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-base">
-              <AlertTriangle className="h-4 w-4 text-amber-500" />
+              <AlertTriangle className="h-4 w-4 text-warning" />
               暂无账号
             </CardTitle>
           </CardHeader>
@@ -388,7 +388,7 @@ export function WebhooksPage() {
                 )}
                 {config && selectedHook ? (
                   <div className="mt-3 flex min-w-0 items-center gap-2 rounded-lg border bg-background/70 px-3 py-2 text-xs text-muted-foreground">
-                    <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-500" />
+                    <CheckCircle2 className="h-4 w-4 shrink-0 text-success" />
                     <span className="min-w-0 break-all">{deliveryUrl(config.account_id, selectedHook.key)}</span>
                   </div>
                 ) : null}
