@@ -298,48 +298,24 @@
 
   .app-frame {
     position: relative;
-    isolation: isolate;
   }
 
-  /* 底部安全区填充：让内容滚动时不透出到 Home 指示条下方。
-     顶部安全区不再用固定覆盖层——TopBar 自身的 ::before 已完整绘制顶部 chrome，
-     再叠一层 position:fixed 覆盖层会与 TopBar 的合成层在 iOS 上拼出一条发丝分割线。 */
-  .app-frame::after {
-    content: "";
-    position: fixed;
-    inset-inline: 0;
-    z-index: 45;
-    pointer-events: none;
-    bottom: 0;
-    height: calc(env(safe-area-inset-bottom) + 4px);
-    background: hsl(var(--background));
-  }
+  /* 不再用 position:fixed 覆盖层填充顶部/底部安全区：
+     - body/html 背景色即 --app-chrome，与 --background 明暗两套完全同值，
+       底部圆角安全区本就由 body 背景以同色透上来盖住，无需额外填充带；
+     - 任何 fixed 覆盖层都会与 overflow:auto 的 .app-main 各成一个合成层，
+       在 3x 屏含小数的 safe-area-inset 交界处被 WebKit 拼出 0.5px 发丝缝。 */
 
+  /* 顶栏：不做合成层提升（不加 translateZ / isolation），否则它与下方
+     overflow:auto 的 .app-main 各成一层，在 3x 屏含小数的 safe-area-inset-top
+     交界处 WebKit 会渲染一条 0.5px 发丝缝。顶栏自身 background 已连同
+     pt-[safe-area-inset-top] 内边距铺满整个顶部 chrome，无需额外覆盖层。 */
   .app-topbar {
-    position: relative;
-    isolation: isolate;
     border-bottom: 0;
     background: hsl(var(--app-chrome));
     box-shadow: none;
     -webkit-backdrop-filter: none;
     backdrop-filter: none;
-    transform: translateZ(0);
-  }
-
-  .app-topbar::before {
-    content: "";
-    position: absolute;
-    inset-inline: 0;
-    top: 0;
-    z-index: 0;
-    height: calc(env(safe-area-inset-top) + 4px);
-    background: inherit;
-    pointer-events: none;
-  }
-
-  .app-topbar > * {
-    position: relative;
-    z-index: 1;
   }
 
   .dialog-center {

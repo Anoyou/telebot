@@ -8,7 +8,6 @@ import {
   Bot,
   ChevronRight,
   Gauge,
-  Gamepad2,
   KeyRound,
   LayoutDashboard,
   Loader2,
@@ -106,12 +105,17 @@ export function AccountDetail() {
   const tabParam = searchParams.get("tab") || "overview";
   const defaultTab = tabParam === "bot"
     ? "bot-management"
-    : ["overview", "commands", "features", "bot-management", "interaction-bot", "rate", "proxy", "ignored"].includes(tabParam)
+    : ["overview", "commands", "features", "bot-management", "rate", "proxy", "ignored"].includes(tabParam)
     ? tabParam
     : "overview";
   const aid = Number(params.aid);
   const nav = useNavigate();
   const qc = useQueryClient();
+
+  useEffect(() => {
+    if (!aid || tabParam !== "interaction-bot") return;
+    nav(`/interaction?aid=${aid}`, { replace: true });
+  }, [aid, nav, tabParam]);
 
   const detailQ = useQuery({
     queryKey: ["account", aid],
@@ -271,9 +275,6 @@ export function AccountDetail() {
             </TabsTrigger>
             <TabsTrigger value="bot-management" className="shrink-0 gap-1.5">
               <MessageCircle className="h-4 w-4" /> 管理 Bot
-            </TabsTrigger>
-            <TabsTrigger value="interaction-bot" className="shrink-0 gap-1.5">
-              <Gamepad2 className="h-4 w-4" /> 交互通道
             </TabsTrigger>
             <TabsTrigger value="rate" className="shrink-0 gap-1.5">
               <Gauge className="h-4 w-4" /> 风控基础
@@ -644,11 +645,6 @@ export function AccountDetail() {
         {/* 账号绑定管理 Bot */}
         <TabsContent value="bot-management">
           <BotTab aid={aid} mode="management" />
-        </TabsContent>
-
-        {/* 交互 Bot 通道 */}
-        <TabsContent value="interaction-bot">
-          <BotTab aid={aid} mode="interaction" />
         </TabsContent>
 
         {/* 风控基础 */}

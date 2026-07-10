@@ -3,7 +3,6 @@ import { Link, useSearchParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AlertTriangle,
-  ArrowRight,
   Bot,
   MessageSquare,
   RefreshCw,
@@ -139,14 +138,6 @@ export function InteractionIndex() {
                 <Link to={`/logs?account_id=${selectedAid}`}>
                   <ScrollText className="mr-1 h-4 w-4" />
                   日志排障
-                </Link>
-              </Button>
-            ) : null}
-            {selectedAid !== null ? (
-              <Button asChild variant="outline" size="sm">
-                <Link to={`/accounts/${selectedAid}?tab=interaction-bot`}>
-                  账号详情入口
-                  <ArrowRight className="ml-1 h-4 w-4" />
                 </Link>
               </Button>
             ) : null}
