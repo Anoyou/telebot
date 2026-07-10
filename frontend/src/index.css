@@ -333,34 +333,11 @@
     backdrop-filter: none;
   }
 
-  /* 状态栏后方渐变遮罩：仅安全区高度，从上到下由半透明黑溶到全透明。
-     black-translucent 下状态栏文字恒为白——浅色 chrome 上靠这层暗底兜住可读性，
-     往下平滑溶入 chrome 色不留硬边；深色 chrome 上这层几乎不可见、无害。 */
-  .app-topbar::before {
-    content: "";
-    position: absolute;
-    inset-inline: 0;
-    top: 0;
-    height: calc(env(safe-area-inset-top) + 6px);
-    background: linear-gradient(
-      to bottom,
-      hsl(0 0% 0% / 0.32) 0%,
-      hsl(0 0% 0% / 0.16) 55%,
-      hsl(0 0% 0% / 0) 100%
-    );
-    pointer-events: none;
-  }
-
-  /* 深色主题下 chrome 本就够暗，白色状态栏文字直接可读，无需任何遮罩——
-     去掉渐变，避免顶部出现一坨明显更黑的色块。 */
-  .dark .app-topbar::before {
-    background: none;
-  }
-
-  .app-topbar > * {
-    position: relative;
-    z-index: 1;
-  }
+  /* 不再在状态栏后方叠任何遮罩层。
+     曾用 .app-topbar::before 铺一层黑渐变兜浅色下白色状态栏文字的可读性，
+     但它同时把已切成浅色的 chrome 又抹黑（看着像「浅色没生效」），其淡出下边缘
+     还表现为顶部那条「线」。删掉后：顶栏背景 --app-chrome 明暗两套都如实显示，
+     切主题时顶部会真正跟着变浅/变深，也没有渐变边缘的线。 */
 
   .dialog-center {
     position: fixed !important;
