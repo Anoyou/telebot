@@ -122,6 +122,8 @@ EVENT_REASON_CODES = {
     "plugin_runtime_error",
     "trace_write_failed",
     "unsupported_send_via",
+    "usage_limited",
+    "usage_pending",
     "userbot_command_message",
 }
 EVENT_MATCHED_REASON_CODE = "matched"

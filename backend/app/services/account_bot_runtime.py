@@ -4994,8 +4994,8 @@ async def _try_handle_event_bus_payment_notice(
         "entry_key": rule.get("module_action"),
     }
     result = dispatch_event(event, subscriptions, account_state)
-    handled = False
     all_ok = True
+    matched_decisions: list[Any] = []
     for decision in result.decisions:
         await record_span(
             trace_log_context(incoming.trace_id),
@@ -5012,65 +5012,111 @@ async def _try_handle_event_bus_payment_notice(
         )
         if not decision.matched:
             continue
-        handled = True
-        entry_key = str(decision.entry_key or "").strip()
-        if not entry_key:
-            all_ok = False
-            await record_span(
-                trace_log_context(incoming.trace_id),
-                "plugin_invoke",
-                TRACE_STATUS_SKIPPED,
-                component="event_bus_payment_notice",
-                plugin_key=decision.plugin_key,
-                reason_code="entry_key_missing",
-                message="Event Bus 付款订阅缺少 entry_key，无法投递给插件入口。",
+        matched_decisions.append(decision)
+
+    if not matched_decisions:
+        return False, True
+
+    usage_block = await _interaction_user_usage_block_message(incoming, rule, parsed)
+    if usage_block:
+        await _send(incoming, usage_block, reply_to_message_id=incoming.message_id)
+        await record_span(
+            trace_log_context(incoming.trace_id),
+            "plugin_invoke",
+            TRACE_STATUS_SKIPPED,
+            component="event_bus_payment_notice",
+            rule_id=rule.get("id"),
+            reason_code="usage_limited",
+            message="付款订阅已匹配，但用户次数或冷却限制阻止本次玩法启动。",
+        )
+        return True, True
+
+    claimed_usage, usage_pending_key = await _claim_interaction_user_usage(incoming, rule, parsed)
+    if not claimed_usage:
+        usage_block = await _interaction_user_usage_block_message(incoming, rule, parsed)
+        await _send(
+            incoming,
+            usage_block or "该用户正在处理该功能，请稍后再试。",
+            reply_to_message_id=incoming.message_id,
+        )
+        await record_span(
+            trace_log_context(incoming.trace_id),
+            "plugin_invoke",
+            TRACE_STATUS_SKIPPED,
+            component="event_bus_payment_notice",
+            rule_id=rule.get("id"),
+            reason_code="usage_pending",
+            message="付款订阅已匹配，但同一用户已有正在处理的玩法。",
+        )
+        return True, True
+
+    usage_marked = False
+    try:
+        for decision in matched_decisions:
+            entry_key = str(decision.entry_key or "").strip()
+            if not entry_key:
+                all_ok = False
+                await record_span(
+                    trace_log_context(incoming.trace_id),
+                    "plugin_invoke",
+                    TRACE_STATUS_SKIPPED,
+                    component="event_bus_payment_notice",
+                    plugin_key=decision.plugin_key,
+                    reason_code="entry_key_missing",
+                    message="Event Bus 付款订阅缺少 entry_key，无法投递给插件入口。",
+                )
+                continue
+            payload = _event_bus_payment_plugin_payload(incoming, event, decision, parsed)
+            payload.update(
+                {
+                    "rule_id": str(rule.get("id") or ""),
+                    "rule_name": str(rule.get("name") or ""),
+                    "entry_key": str(rule.get("module_action") or ""),
+                    "module_config": dict(rule.get("module_config") or {}) if isinstance(rule.get("module_config"), dict) else {},
+                    "valid_seconds": _interaction_session_ttl(rule),
+                }
             )
-            continue
-        payload = _event_bus_payment_plugin_payload(incoming, event, decision, parsed)
-        payload.update(
-            {
-                "rule_id": str(rule.get("id") or ""),
-                "rule_name": str(rule.get("name") or ""),
-                "entry_key": str(rule.get("module_action") or ""),
-                "module_config": dict(rule.get("module_config") or {}) if isinstance(rule.get("module_config"), dict) else {},
-                "valid_seconds": _interaction_session_ttl(rule),
-            }
-        )
-        prize = _interaction_module_prize(rule, payload)
-        if prize is not None:
-            payload["prize"] = prize
-        payload["session"] = _interaction_session_envelope(incoming, rule, payload)
-        trigger = payload.get("trigger") if isinstance(payload.get("trigger"), dict) else {}
-        trigger.update(_interaction_trigger_envelope(rule, "payment_confirmed", parsed))
-        trigger.update(
-            {
-                "dispatch_mode": decision.dispatch_mode,
-                "scope": decision.scope,
-                "filters": dict(decision.filters or {}),
-            }
-        )
-        payload["trigger"] = trigger
-        ok, error, actions = await _run_worker_interaction_entry(
-            incoming,
-            plugin_key=decision.plugin_key,
-            entry_key=entry_key,
-            payload=payload,
-        )
-        if not ok:
-            all_ok = False
-            _schedule_interaction_debug_state(incoming, stage="plugin_error", payload=payload, error=error)
-            continue
-        guarded = await _guard_interaction_actions(incoming, rule, actions)
-        keep_session = _interaction_actions_mark_success(guarded) and not _interaction_actions_request_no_session(guarded)
-        if keep_session:
-            await _save_interaction_session(incoming, rule, "payment_confirmed", parsed)
-        await _apply_interaction_start_session_actions(incoming, rule, guarded)
-        await _apply_interaction_actions(
-            incoming,
-            guarded,
-            context=_interaction_trace_context(payload),
-        )
-    return handled, all_ok
+            prize = _interaction_module_prize(rule, payload)
+            if prize is not None:
+                payload["prize"] = prize
+            payload["session"] = _interaction_session_envelope(incoming, rule, payload)
+            trigger = payload.get("trigger") if isinstance(payload.get("trigger"), dict) else {}
+            trigger.update(_interaction_trigger_envelope(rule, "payment_confirmed", parsed))
+            trigger.update(
+                {
+                    "dispatch_mode": decision.dispatch_mode,
+                    "scope": decision.scope,
+                    "filters": dict(decision.filters or {}),
+                }
+            )
+            payload["trigger"] = trigger
+            ok, error, actions = await _run_worker_interaction_entry(
+                incoming,
+                plugin_key=decision.plugin_key,
+                entry_key=entry_key,
+                payload=payload,
+            )
+            if not ok:
+                all_ok = False
+                _schedule_interaction_debug_state(incoming, stage="plugin_error", payload=payload, error=error)
+                continue
+            guarded = await _guard_interaction_actions(incoming, rule, actions)
+            action_success = _interaction_actions_mark_success(guarded)
+            keep_session = action_success and not _interaction_actions_request_no_session(guarded)
+            if keep_session:
+                await _save_interaction_session(incoming, rule, "payment_confirmed", parsed)
+            await _apply_interaction_start_session_actions(incoming, rule, guarded)
+            await _apply_interaction_actions(
+                incoming,
+                guarded,
+                context=_interaction_trace_context(payload),
+            )
+            if action_success and not usage_marked:
+                await _mark_interaction_user_usage(incoming, rule, parsed)
+                usage_marked = True
+    finally:
+        await _release_interaction_user_usage_claim(usage_pending_key)
+    return True, all_ok
 
 
 def _event_bus_subscriptions_for_rule(subscriptions: list[Any], rule: dict[str, Any]) -> list[Any]:

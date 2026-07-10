@@ -13372,6 +13372,229 @@ async def test_transfer_notice_event_bus_payment_uses_matching_rule_only(monkeyp
 
 
 @pytest.mark.asyncio
+async def test_transfer_notice_event_bus_payment_counts_payer_daily_limit(monkeypatch) -> None:
+    class _Result:
+        def scalars(self):
+            return self
+
+        def all(self):
+            return [SimpleNamespace(feature_key="math10")]
+
+    class _DB:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def execute(self, _stmt):  # noqa: ANN001
+            return _Result()
+
+        async def get(self, model, *_args):  # noqa: ANN002
+            if model is Account:
+                return SimpleNamespace(tg_username="owner", display_name="Owner", tg_user_id=999)
+            return None
+
+        async def commit(self):
+            return None
+
+    redis = _MemoryRedis()
+    send = AsyncMock()
+    run_entry = AsyncMock(return_value=(True, None, [{"type": "send_message", "text": "math ok"}]))
+    legacy_execute = AsyncMock(return_value=True)
+    monkeypatch.setattr(account_bot_runtime, "AsyncSessionLocal", lambda: _DB())
+    monkeypatch.setattr(account_bot_runtime, "get_redis", lambda: redis)
+    monkeypatch.setattr(account_bot_service, "send_message", send)
+    monkeypatch.setattr(account_bot_runtime.audit, "write", AsyncMock())
+    monkeypatch.setattr(account_bot_runtime, "_run_worker_interaction_entry", run_entry)
+    monkeypatch.setattr(account_bot_runtime, "_execute_interaction_rule", legacy_execute)
+    monkeypatch.setattr(account_bot_runtime, "_guard_interaction_actions", AsyncMock(side_effect=lambda _incoming, _rule, actions: actions))
+    monkeypatch.setattr(account_bot_runtime, "_apply_interaction_actions", AsyncMock())
+    monkeypatch.setattr(account_bot_service, "plugin_declares_telegram_native_raw", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(
+        account_bot_service,
+        "declared_module_event_subscriptions",
+        lambda _key: [
+            {
+                "source": ["external_payment_notice"],
+                "events": ["payment_confirmed"],
+                "scope": "all_allowed_chats",
+                "entry_key": "start_math_game",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        account_bot_service,
+        "get_transfer_notice_config",
+        AsyncMock(
+            return_value={
+                "enabled": True,
+                "trusted_bot_id": 456,
+                "rules": [
+                    {
+                        "id": "silly-math",
+                        "name": "傻瓜玩法",
+                        "enabled": True,
+                        "chat_ids": [-100123],
+                        "trigger_mode": "payment",
+                        "trigger_texts": ["转账成功"],
+                        "receiver_text": "Owner",
+                        "amount": 234,
+                        "amount_match_mode": "eq",
+                        "action": "module",
+                        "module_key": "math10",
+                        "module_action": "start_math_game",
+                        "daily_limit_per_user": 1,
+                    },
+                ],
+            }
+        ),
+    )
+
+    for update_id, message_id in [(17, 170), (18, 180)]:
+        await account_bot_runtime._handle_interaction_update(
+            1,
+            "bbot-token",
+            {
+                "update_id": update_id,
+                "message": {
+                    "message_id": message_id,
+                    "text": "转账成功\n付款人：AAA\n付款人ID：111\n收款人：Owner\n金额：234",
+                    "from": {"id": 456, "is_bot": True, "first_name": "Abot"},
+                    "chat": {"id": -100123, "type": "supergroup"},
+                },
+            },
+        )
+
+    assert run_entry.await_count == 1
+    legacy_execute.assert_not_awaited()
+    assert send.await_args.args[:3] == (
+        "bbot-token",
+        -100123,
+        "AAA 今日已成功傻瓜玩法 1/1 次，当日无法再次使用。",
+    )
+    daily_values = [
+        value
+        for key, value in redis.data.items()
+        if key.startswith("account_bot:interaction_user_daily:")
+    ]
+    assert daily_values == ["1"]
+    assert not any(key.startswith("account_bot:interaction_user_pending:") for key in redis.data)
+
+
+@pytest.mark.asyncio
+async def test_transfer_notice_event_bus_payment_failure_does_not_count_payer_limit(monkeypatch) -> None:
+    class _Result:
+        def scalars(self):
+            return self
+
+        def all(self):
+            return [SimpleNamespace(feature_key="math10")]
+
+    class _DB:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def execute(self, _stmt):  # noqa: ANN001
+            return _Result()
+
+        async def get(self, model, *_args):  # noqa: ANN002
+            if model is Account:
+                return SimpleNamespace(tg_username="owner", display_name="Owner", tg_user_id=999)
+            return None
+
+        async def commit(self):
+            return None
+
+    redis = _MemoryRedis()
+    send = AsyncMock()
+    run_entry = AsyncMock(
+        side_effect=[
+            (False, "boom", []),
+            (True, None, [{"type": "send_message", "text": "math ok"}]),
+        ]
+    )
+    legacy_execute = AsyncMock(return_value=True)
+    monkeypatch.setattr(account_bot_runtime, "AsyncSessionLocal", lambda: _DB())
+    monkeypatch.setattr(account_bot_runtime, "get_redis", lambda: redis)
+    monkeypatch.setattr(account_bot_service, "send_message", send)
+    monkeypatch.setattr(account_bot_runtime.audit, "write", AsyncMock())
+    monkeypatch.setattr(account_bot_runtime, "_run_worker_interaction_entry", run_entry)
+    monkeypatch.setattr(account_bot_runtime, "_execute_interaction_rule", legacy_execute)
+    monkeypatch.setattr(account_bot_runtime, "_guard_interaction_actions", AsyncMock(side_effect=lambda _incoming, _rule, actions: actions))
+    monkeypatch.setattr(account_bot_runtime, "_apply_interaction_actions", AsyncMock())
+    monkeypatch.setattr(account_bot_service, "plugin_declares_telegram_native_raw", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(
+        account_bot_service,
+        "declared_module_event_subscriptions",
+        lambda _key: [
+            {
+                "source": ["external_payment_notice"],
+                "events": ["payment_confirmed"],
+                "scope": "all_allowed_chats",
+                "entry_key": "start_math_game",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        account_bot_service,
+        "get_transfer_notice_config",
+        AsyncMock(
+            return_value={
+                "enabled": True,
+                "trusted_bot_id": 456,
+                "rules": [
+                    {
+                        "id": "silly-math",
+                        "name": "傻瓜玩法",
+                        "enabled": True,
+                        "chat_ids": [-100123],
+                        "trigger_mode": "payment",
+                        "trigger_texts": ["转账成功"],
+                        "receiver_text": "Owner",
+                        "amount": 234,
+                        "amount_match_mode": "eq",
+                        "action": "module",
+                        "module_key": "math10",
+                        "module_action": "start_math_game",
+                        "daily_limit_per_user": 1,
+                    },
+                ],
+            }
+        ),
+    )
+
+    for update_id, message_id in [(27, 270), (28, 280)]:
+        await account_bot_runtime._handle_interaction_update(
+            1,
+            "bbot-token",
+            {
+                "update_id": update_id,
+                "message": {
+                    "message_id": message_id,
+                    "text": "转账成功\n付款人：AAA\n付款人ID：111\n收款人：Owner\n金额：234",
+                    "from": {"id": 456, "is_bot": True, "first_name": "Abot"},
+                    "chat": {"id": -100123, "type": "supergroup"},
+                },
+            },
+        )
+
+    assert run_entry.await_count == 2
+    legacy_execute.assert_not_awaited()
+    send.assert_not_awaited()
+    daily_values = [
+        value
+        for key, value in redis.data.items()
+        if key.startswith("account_bot:interaction_user_daily:")
+    ]
+    assert daily_values == ["1"]
+    assert not any(key.startswith("account_bot:interaction_user_pending:") for key in redis.data)
+
+
+@pytest.mark.asyncio
 async def test_transfer_notice_respects_event_bus_delivery_switch(monkeypatch) -> None:
     class _Result:
         def scalars(self):

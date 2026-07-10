@@ -97,7 +97,7 @@ export function AppShell() {
         <nav
           className="
             pointer-events-none fixed inset-x-0 z-40 sm:hidden
-            bottom-[calc(0.25rem+env(safe-area-inset-bottom))]
+            bottom-[env(safe-area-inset-bottom)]
             px-[max(0.75rem,env(safe-area-inset-left))]
           "
         >

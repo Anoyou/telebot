@@ -40,6 +40,8 @@ NORMAL_NO_RESPONSE_REASON_CODES = {
     "scope_not_matched",
     "source_not_subscribed",
     "subscription_not_matched",
+    "usage_limited",
+    "usage_pending",
     "userbot_command_message",
 }
 
@@ -104,6 +106,8 @@ REASON_LABELS: dict[str, str] = {
     "telegram_api_error": "Telegram API 错误",
     "trace_write_failed": "Trace 写入降级",
     "unsupported_send_via": "发送通道不支持",
+    "usage_limited": "用户次数或冷却限制",
+    "usage_pending": "用户玩法处理中",
     "userbot_command_message": "UserBot 命令消息已让路",
     "userbot_offline": "UserBot 离线",
 }
