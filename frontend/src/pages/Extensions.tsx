@@ -579,7 +579,7 @@ function PluginContractBadges({
         <MetaBadge
           key={`${pluginKey}-event-${label}`}
           tone="outline"
-          className="border-sky-200/80 bg-sky-500/10 text-sky-700 dark:border-sky-300/25 dark:text-sky-300"
+          className="border-info/25 bg-info/10 text-info"
         >
           {label}
         </MetaBadge>
@@ -2194,12 +2194,12 @@ function PluginOverviewDetailDialog({
               <MetaBadge tone={trustTierTone(plugin.trust_tier)}>{trustTierLabel(plugin.trust_tier)}</MetaBadge>
             </div>
             {warningGroups.all.length > 0 ? (
-              <div className="mt-3 rounded-md border border-amber-500/25 bg-amber-50/70 px-3 py-2 dark:bg-amber-950/20">
-                <div className="flex flex-wrap items-center gap-2 text-xs font-medium text-amber-900 dark:text-amber-200">
+              <div className="mt-3 rounded-md border border-warning/30 bg-warning/10 px-3 py-2">
+                <div className="flex flex-wrap items-center gap-2 text-xs font-medium text-warning">
                   {warningGroups.high.length > 0 ? <AlertTriangle className="h-3.5 w-3.5" /> : null}
                   Lint warnings {warningGroups.all.length}
                 </div>
-                <div className="mt-2 space-y-1.5 text-xs text-amber-900 dark:text-amber-200">
+                <div className="mt-2 space-y-1.5 text-xs text-warning">
                   {warningGroups.all.map((warning, index) => (
                     <div key={`${plugin.key}-detail-warning-${index}`} className="break-all leading-5">
                       {warning}

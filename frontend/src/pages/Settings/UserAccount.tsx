@@ -297,7 +297,7 @@ export function UserAccount() {
             <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
               <div className="space-y-1">
                 <div className="flex items-center gap-2 text-sm font-medium">
-                  <ShieldCheck className="h-4 w-4 text-emerald-600" />
+                  <ShieldCheck className="h-4 w-4 text-success" />
                   TOTP 登录验证
                 </div>
                 <p className="max-w-2xl text-xs leading-5 text-muted-foreground">
@@ -464,7 +464,7 @@ export function UserAccount() {
             <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
               <div className="space-y-1">
                 <div className="flex items-center gap-2 text-sm font-medium">
-                  <Send className="h-4 w-4 text-sky-600" />
+                  <Send className="h-4 w-4 text-info" />
                   通知 Bot OTP 防爆破
                 </div>
                 <p className="max-w-2xl text-xs leading-5 text-muted-foreground">
@@ -542,7 +542,7 @@ export function UserAccount() {
 
           <section className="rounded-md border bg-muted/10 p-4">
             <div className="flex items-start gap-2">
-              <ShieldAlert className="mt-0.5 h-4 w-4 text-amber-600" />
+              <ShieldAlert className="mt-0.5 h-4 w-4 text-warning" />
               <div className="space-y-1">
                 <div className="text-sm font-medium">服务器一次性恢复码</div>
                 <p className="max-w-2xl text-xs leading-5 text-muted-foreground">

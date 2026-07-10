@@ -481,7 +481,7 @@ export function ProxyManager() {
                   )}
                   {result ? (
                     result.ok ? (
-                      <div className="text-xs text-emerald-700 dark:text-emerald-300">
+                      <div className="text-xs text-success">
                         ✓ 通过 · {result.latency_ms}ms ·{" "}
                         {flagOf(result.country)} {result.country || "?"}
                         {result.city ? ` · ${result.city}` : ""}

@@ -871,7 +871,7 @@ function RuntimeEventRow({ log, timezone, keyword }: { log: RuntimeLogItem; time
             <div className="mt-1 flex flex-wrap gap-1.5">
               {pluginKey ? <span className="rounded border border-white/10 px-1.5 py-0.5 font-mono text-[11px] text-zinc-400">插件 {pluginKey}</span> : null}
               {traceId ? <span className="rounded border border-white/10 px-1.5 py-0.5 font-mono text-[11px] text-zinc-400">{traceId}</span> : null}
-              {errorCode ? <span className="rounded border border-amber-400/30 px-1.5 py-0.5 font-mono text-[11px] text-amber-200">{errorCode}</span> : null}
+              {errorCode ? <span className="rounded border border-warning/30 px-1.5 py-0.5 font-mono text-[11px] text-warning">{errorCode}</span> : null}
             </div>
           </div>
           <div className="flex items-center justify-between gap-2 xl:justify-end">
@@ -1256,7 +1256,7 @@ function ProbeReportPanel({ report }: { report?: EventProbeReport | null }) {
         </div>
       ) : null}
       {warnings.length ? (
-        <div className="mt-3 rounded-lg border border-amber-300/70 bg-amber-50/70 p-2 text-sm text-amber-950 dark:bg-amber-500/10 dark:text-amber-200">
+        <div className="mt-3 rounded-lg border border-warning/40 bg-warning/10 p-2 text-sm text-warning">
           {warnings.map((item, index) => (
             <div key={`${item}-${index}`}>{item}</div>
           ))}
@@ -1314,7 +1314,7 @@ function ProbeSuggestionList({ title, items, jsonKey }: { title: string; items: 
 
 function ProbeRoutingRow({ item }: { item: EventProbeRoutingItem }) {
   return (
-    <div className={cn("rounded-lg border p-2", item.matched ? "border-emerald-200 bg-emerald-50/50 dark:bg-emerald-500/10" : "bg-muted/20")}>
+    <div className={cn("rounded-lg border p-2", item.matched ? "border-success/25 bg-success/10" : "bg-muted/20")}>
       <div className="flex flex-wrap items-center gap-1.5">
         <StatusBadge status={item.matched ? "ok" : item.status || "skipped"} />
         {item.phase ? <Badge variant="secondary">{phaseLabel(item.phase)}</Badge> : null}
@@ -1495,7 +1495,7 @@ function HighlightedMessage({ text, keyword }: { text: string; keyword: string }
   return (
     <>
       {text.slice(0, index)}
-      <mark className="rounded bg-yellow-200 px-0.5 text-yellow-950">{text.slice(index, index + q.length)}</mark>
+      <mark className="rounded bg-warning/30 px-0.5 text-foreground">{text.slice(index, index + q.length)}</mark>
       {text.slice(index + q.length)}
     </>
   );
@@ -1542,7 +1542,7 @@ function timelineItemClass(item: TimelineItem): string {
     return "";
   }
   if (isFailedStatus(item.span.status)) return "border-destructive/30 bg-destructive/5";
-  if (isWarnStatus(item.span.status) || isProblemTimelineItem(item)) return "border-amber-300/60 bg-amber-50/50 dark:bg-amber-500/10";
+  if (isWarnStatus(item.span.status) || isProblemTimelineItem(item)) return "border-warning/40 bg-warning/10";
   return "";
 }
 
@@ -1641,9 +1641,9 @@ function normalizeRuntimeLevel(level?: string | null): "debug" | "info" | "warn"
 }
 
 function runtimeRowClass(level: ReturnType<typeof normalizeRuntimeLevel>): string {
-  if (level === "error") return "bg-red-500/10";
-  if (level === "warn") return "bg-amber-500/10";
-  if (level === "debug") return "bg-sky-500/5";
+  if (level === "error") return "bg-destructive/10";
+  if (level === "warn") return "bg-warning/10";
+  if (level === "debug") return "bg-info/5";
   return "";
 }
 
@@ -1723,9 +1723,9 @@ function systemConsoleSourceLabel(source?: string | null): string {
 
 function consoleLineTone(line: string): string {
   const lowered = line.toLowerCase();
-  if (/(error|exception|traceback|failed|fatal|\bpanic\b)/i.test(lowered)) return "text-red-300";
-  if (/(warn|warning|retry|timeout)/i.test(lowered)) return "text-amber-200";
-  if (/(debug|verbose)/i.test(lowered)) return "text-sky-200";
+  if (/(error|exception|traceback|failed|fatal|\bpanic\b)/i.test(lowered)) return "text-destructive";
+  if (/(warn|warning|retry|timeout)/i.test(lowered)) return "text-warning";
+  if (/(debug|verbose)/i.test(lowered)) return "text-info";
   return "text-zinc-100";
 }
 
@@ -1735,7 +1735,7 @@ function verdictMeta(verdict: MessageVerdict) {
       label: "已响应",
       badgeVariant: "success" as const,
       icon: CheckCircle2,
-      panelClass: "border-emerald-500/20 bg-emerald-500/10",
+      panelClass: "border-success/20 bg-success/10",
     },
     no_response_normal: {
       label: "未响应正常",
@@ -1747,7 +1747,7 @@ function verdictMeta(verdict: MessageVerdict) {
       label: "卡住",
       badgeVariant: "warn" as const,
       icon: Clock,
-      panelClass: "border-amber-500/25 bg-amber-500/10",
+      panelClass: "border-warning/25 bg-warning/10",
     },
     failed: {
       label: "失败",
@@ -1760,9 +1760,9 @@ function verdictMeta(verdict: MessageVerdict) {
 }
 
 function stageClass(status: MessageFunelStage): string {
-  if (status === "pass") return "border-emerald-500/20 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300";
+  if (status === "pass") return "border-success/20 bg-success/10 text-success";
   if (status === "fail") return "border-destructive/30 bg-destructive/5 text-destructive";
-  if (status === "stuck") return "border-amber-500/25 bg-amber-500/10 text-amber-700 dark:text-amber-300";
+  if (status === "stuck") return "border-warning/25 bg-warning/10 text-warning";
   if (status === "skip") return "border-border bg-muted/60 text-muted-foreground";
   return "border-border bg-background text-muted-foreground";
 }

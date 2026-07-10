@@ -293,7 +293,7 @@ export function ConfigBackup() {
                   <div className="flex items-center gap-1.5">
                     <span className="text-sm font-medium">{cat.label}</span>
                     {cat.sensitive && (
-                      <span className="rounded bg-amber-50 px-1 text-[10px] text-amber-600 dark:bg-amber-950/40 dark:text-amber-300">
+                      <span className="rounded bg-warning/15 px-1 text-[10px] text-warning">
                         含敏感数据
                       </span>
                     )}
@@ -367,7 +367,7 @@ export function ConfigBackup() {
           {importResult && (
             <div className="rounded-md border px-3 py-2 space-y-2">
               <div className="flex items-center gap-4 text-sm">
-                <span className="flex items-center gap-1 text-emerald-600 dark:text-emerald-300">
+                <span className="flex items-center gap-1 text-success">
                   <CheckCircle2 className="h-4 w-4" />
                   成功 {importResult.imported}
                 </span>
@@ -377,7 +377,7 @@ export function ConfigBackup() {
                 </span>
               </div>
               {importResult.warnings.length > 0 && (
-                <div className="space-y-1 text-xs text-amber-600 dark:text-amber-300">
+                <div className="space-y-1 text-xs text-warning">
                   {importResult.warnings.slice(0, 5).map((w, i) => (
                     <p key={i}>{w}</p>
                   ))}
@@ -469,7 +469,7 @@ export function ConfigBackup() {
             <div className="space-y-3 rounded-md border px-3 py-3">
               <div className="text-sm font-medium">预览结果：现在还没有写入，只是在告诉你会发生什么</div>
               <div className="flex flex-wrap gap-3 text-sm">
-                <span className="flex items-center gap-1 text-emerald-600 dark:text-emerald-300">
+                <span className="flex items-center gap-1 text-success">
                   <CheckCircle2 className="h-4 w-4" />
                   新增 {bundleResult.counts.add}
                 </span>
@@ -477,7 +477,7 @@ export function ConfigBackup() {
                   <XCircle className="h-4 w-4" />
                   跳过 {bundleResult.counts.skip}
                 </span>
-                <span className="flex items-center gap-1 text-red-600 dark:text-red-300">
+                <span className="flex items-center gap-1 text-destructive">
                   <AlertCircle className="h-4 w-4" />
                   冲突 {bundleResult.counts.conflict}
                 </span>
@@ -486,7 +486,7 @@ export function ConfigBackup() {
                 bundle 大小 {Math.round(bundleResult.size_bytes / 1024)} KB
               </div>
               {bundleResult.warnings.length > 0 && (
-                <div className="space-y-1 text-xs text-amber-600 dark:text-amber-300">
+                <div className="space-y-1 text-xs text-warning">
                   {bundleResult.warnings.map((w, i) => (
                     <p key={i}>{w}</p>
                   ))}
@@ -499,9 +499,9 @@ export function ConfigBackup() {
                     className={[
                       "rounded border px-2 py-1",
                       item.action === "conflict"
-                        ? "border-red-300 bg-red-50 text-red-800 dark:border-red-900 dark:bg-red-950/40 dark:text-red-200"
+                        ? "border-destructive/25 bg-destructive/10 text-destructive"
                         : item.action === "add"
-                          ? "border-emerald-300 bg-emerald-50 text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950/40 dark:text-emerald-200"
+                          ? "border-success/25 bg-success/10 text-success"
                           : "border-border text-muted-foreground",
                     ].join(" ")}
                   >
