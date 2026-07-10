@@ -102,14 +102,13 @@ function VersionMismatchContent({ backendVersion }: { backendVersion: string }) 
       role="alert"
       className="
         flex items-center justify-between gap-3
-        border-b border-amber-300 bg-amber-50 px-4 py-2 text-sm text-amber-800
-        dark:border-amber-900/70 dark:bg-amber-950/35 dark:text-amber-100
+        border-b border-warning/40 bg-warning/10 px-4 py-2 text-sm text-warning
       "
     >
       <div className="flex min-w-0 items-center gap-2">
         <RefreshCw className="h-4 w-4 shrink-0" />
         <span className="font-medium">前后端版本不一致</span>
-        <span className="hidden text-amber-700 dark:text-amber-200 sm:inline">
+        <span className="hidden text-warning sm:inline">
           前端 v{APP_VERSION} · 后端 v{backendVersion}
           {" — 正在自动清缓存并刷新，如未恢复可手动修复"}
         </span>
@@ -117,7 +116,7 @@ function VersionMismatchContent({ backendVersion }: { backendVersion: string }) 
       <Button
         size="sm"
         variant="outline"
-        className="shrink-0 border-amber-400 bg-amber-100 hover:bg-amber-200 dark:border-amber-800 dark:bg-amber-950/50 dark:hover:bg-amber-900/50"
+        className="shrink-0 border-warning/50 bg-warning/15 hover:bg-warning/25"
         onClick={() => void hardRefreshWithoutSw()}
       >
         手动修复

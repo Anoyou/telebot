@@ -94,9 +94,9 @@ export function HealthDot({ compact = false }: { compact?: boolean }) {
     : aggregateTone(q.data);
 
   const cls = {
-    ok: "bg-emerald-500",
-    warn: "bg-amber-500",
-    err: "bg-rose-500",
+    ok: "bg-success",
+    warn: "bg-warning",
+    err: "bg-destructive",
     loading: "bg-muted-foreground/40",
   }[tone];
 
@@ -149,18 +149,18 @@ export function HealthDot({ compact = false }: { compact?: boolean }) {
           <div className="rounded-lg border border-border/70 bg-muted/35 p-3 text-xs">
             <div className="flex items-center gap-2 pb-2">
               {tone === "ok" ? (
-                <CheckCircle2 className="h-4 w-4 text-emerald-600 dark:text-emerald-300" />
+                <CheckCircle2 className="h-4 w-4 text-success" />
               ) : tone === "err" ? (
-                <AlertTriangle className="h-4 w-4 text-rose-600 dark:text-rose-300" />
+                <AlertTriangle className="h-4 w-4 text-destructive" />
               ) : (
-                <AlertTriangle className="h-4 w-4 text-amber-600 dark:text-amber-300" />
+                <AlertTriangle className="h-4 w-4 text-warning" />
               )}
               <span className="text-sm font-medium">系统状态：{label}</span>
             </div>
             {q.isLoading ? (
               <div className="text-muted-foreground">读取中...</div>
             ) : q.error ? (
-              <div className="text-rose-700 dark:text-rose-300">
+              <div className="text-destructive">
                 读取失败：{(q.error as Error).message}
               </div>
             ) : issues.length === 0 ? (

@@ -68,8 +68,8 @@ export function KillSwitch({ compact = false }: { compact?: boolean }) {
           "h-10 rounded-full bg-card text-xs font-semibold shadow-sm hover:bg-card hover:shadow-md",
           compact ? "w-10 px-0" : "w-10 px-0 sm:w-auto sm:gap-2 sm:px-3",
           enabled
-            ? "border-rose-200 bg-rose-50 text-rose-700 hover:bg-rose-100 hover:text-rose-800 dark:border-rose-900/70 dark:bg-rose-950/40 dark:text-rose-200"
-            : "border-rose-200 text-rose-600 hover:border-rose-300 hover:bg-rose-50 hover:text-rose-700 dark:border-rose-900/70 dark:text-rose-300 dark:hover:bg-rose-950/40 dark:hover:text-rose-200",
+            ? "border-destructive/30 bg-destructive/10 text-destructive hover:bg-destructive/[0.18]"
+            : "border-destructive/30 text-destructive hover:border-destructive/50 hover:bg-destructive/10",
         )}
         title={enabled ? "恢复全部账号 worker" : "紧急停用全部账号 worker"}
         aria-label={enabled ? "恢复全部账号 worker" : "紧急停用全部账号 worker"}
@@ -90,7 +90,7 @@ export function KillSwitch({ compact = false }: { compact?: boolean }) {
       <Dialog open={confirmOpen} onOpenChange={setConfirmOpen}>
         <DialogContent className="max-w-md">
           <DialogHeader>
-            <DialogTitle className="text-rose-700 dark:text-rose-200">
+            <DialogTitle className="text-destructive">
               确认紧急停用？
             </DialogTitle>
             <DialogDescription>
@@ -98,7 +98,7 @@ export function KillSwitch({ compact = false }: { compact?: boolean }) {
               指令都会暂停。
             </DialogDescription>
           </DialogHeader>
-          <div className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-800 dark:border-rose-900/70 dark:bg-rose-950/35 dark:text-rose-200">
+          <div className="rounded-xl border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
             这是全局总闸。确认后可从同一个按钮恢复运行。
           </div>
           <DialogFooter className="gap-2">

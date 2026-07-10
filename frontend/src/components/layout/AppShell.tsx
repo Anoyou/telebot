@@ -84,7 +84,7 @@ export function AppShell() {
             pb-[env(safe-area-inset-bottom)]
             pl-[env(safe-area-inset-left)]
             pr-[env(safe-area-inset-right)]
-            shadow-[0_-12px_32px_hsl(220_20%_20%/0.08)]
+            shadow-[0_-12px_32px_rgba(0,0,0,0.10)]
           "
         >
           <div

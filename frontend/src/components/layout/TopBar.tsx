@@ -130,7 +130,7 @@ export function TopBar({
               variant="outline"
               size="sm"
               className={cn(
-                "h-10 rounded-full bg-card text-xs shadow-sm hover:bg-card hover:shadow-md",
+                "h-10 rounded-full border-0 bg-secondary text-xs shadow-none hover:bg-secondary-hover",
                 isStandalone
                   ? "w-10 px-0"
                   : "w-10 px-0 sm:w-auto sm:max-w-[11rem] sm:gap-2 sm:px-1.5 sm:pr-2",
@@ -164,7 +164,7 @@ export function TopBar({
 
 function topbarActionClass(compact: boolean) {
   return cn(
-    "h-10 rounded-full bg-card text-xs shadow-sm hover:bg-card hover:shadow-md",
+    "h-10 rounded-full border-0 bg-secondary text-xs shadow-none hover:bg-secondary-hover",
     compact ? "w-10 px-0" : "w-10 px-0 sm:w-auto sm:gap-2 sm:px-3",
   );
 }

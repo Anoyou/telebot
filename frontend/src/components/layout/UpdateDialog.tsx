@@ -158,10 +158,10 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
   const getFrontendUpdateMessageClassName = () => {
     switch (frontendUpdateState) {
       case "up_to_date":
-        return "text-emerald-600 dark:text-emerald-300";
+        return "text-success";
       case "updating":
       case "unsupported":
-        return "text-amber-600 dark:text-amber-300";
+        return "text-warning";
       case "error":
         return "text-destructive";
       default:
@@ -398,7 +398,7 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
           )}
 
           {step?.kind === "up_to_date" && (
-            <div className="flex items-center gap-3 text-emerald-600 dark:text-emerald-300">
+            <div className="flex items-center gap-3 text-success">
               <CheckCircle2 className="h-5 w-5" />
               <div className="text-sm space-y-1">
                 <p>当前版本 <code className="bg-muted px-1 rounded">{step.commit}</code></p>
@@ -409,7 +409,7 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
 
           {step?.kind === "cannot_check" && (
             <div className="space-y-2 text-sm">
-              <div className="flex items-center gap-2 text-amber-600 dark:text-amber-300">
+              <div className="flex items-center gap-2 text-warning">
                 <AlertCircle className="h-5 w-5" />
                 <span>容器内无法自动检查更新</span>
               </div>
@@ -427,7 +427,7 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
 
           {step?.kind === "has_update" && (
             <div className="space-y-2 text-sm">
-              <div className="flex items-center gap-2 text-amber-600 dark:text-amber-300">
+              <div className="flex items-center gap-2 text-warning">
                 <AlertCircle className="h-5 w-5" />
                 {step.ahead > 0 ? (
                   <span>远程有 {step.ahead} 个新 commit</span>
@@ -469,7 +469,7 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
                 </div>
               )}
               {(step.plan.requiresBackup || step.plan.requiresFullUpdate) && (
-                <div className="rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-xs space-y-1">
+                <div className="rounded-md border border-warning/30 bg-warning/10 px-3 py-2 text-xs space-y-1">
                   {step.plan.requiresBackup && <p>建议先备份数据后再执行更新。</p>}
                   {step.plan.requiresFullUpdate && <p>该更新需要完整更新流程，耗时会更长。</p>}
                 </div>
@@ -523,7 +523,7 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
           )}
 
           {step?.kind === "pulled" && (
-            <div className="flex items-center gap-3 text-emerald-600 dark:text-emerald-300">
+            <div className="flex items-center gap-3 text-success">
               <CheckCircle2 className="h-5 w-5" />
               <div className="text-sm space-y-1">
                 {step.newCommit ? (
@@ -538,9 +538,9 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
                   <p className="text-muted-foreground">{step.plan.planDetail}</p>
                 )}
                 {step.plan.actionRequired === "restart" ? (
-                  <p className="text-amber-600 dark:text-amber-300">需要重启应用才能生效</p>
+                  <p className="text-warning">需要重启应用才能生效</p>
                 ) : (
-                  <p className="text-amber-600 dark:text-amber-300">
+                  <p className="text-warning">
                     更新已提交，请按提示刷新页面或等待服务完成重启。
                   </p>
                 )}
