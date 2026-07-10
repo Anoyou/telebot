@@ -20,6 +20,9 @@
 
 ## [Unreleased]
 
+### Changed
+- 前端整体换装 macOS 风设计系统：暖米白亮色 / 石墨暗色双主题、暖橙主色、五档圆角（badge 6 / control 8 / card 12 / popover 14 / sheet 16）与三档主题感知阴影；按钮五层级（主橙 / 次级灰 / 浅橙 tinted / 静默 quiet / 软危险），链接按钮与顶栏刷新等工具按钮改为带底色款；全站 400+ 处硬编码调色板色收敛为语义 token（success / warning / info / destructive），并删除成对的 `dark:` 配对类；PWA 状态栏与启动闪屏底色随新主题联动；清除 index.css 已失效的液态玻璃死代码（426 行）。移动端抽屉、底部导航、safe-area、输入防缩放（≤640px 16px 字号）等 PWA / 窄屏行为保持不变。
+
 ## [0.55.0] — 2026-07-10 · minor（次版本） · 简单模式 SDK · 开发者工具链 · 资金正确性加固
 
 ### Added
