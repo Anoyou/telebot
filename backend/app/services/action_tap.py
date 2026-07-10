@@ -49,13 +49,25 @@ _SUMMARY_KEYS = {
     "message_id",
     "message_id_key",
     "payout_key",
+    "paid_user_ids",
+    "participant_user_ids",
+    "payer_name",
+    "payer_user_id",
+    "player_user_ids",
     "reply_to_message_id",
     "reply_to_search_limit",
     "reply_to_user_id",
+    "receiver_name",
+    "receiver_user_id",
     "save_message_id_key",
     "send_via",
     "send_via_options",
+    "session_key",
+    "started_by_user_id",
     "channel_selector",
+    "entry_key",
+    "event_type",
+    "module_key",
     "show_alert",
     "text",
     "type",
@@ -265,7 +277,20 @@ def _result_summary(result: Any) -> dict[str, Any]:
     if not isinstance(result, dict):
         return {}
     out: dict[str, Any] = {}
-    for key in ("message_id", "chat_id", "reply_to_message_id", "reply_to_user_id", "error_code", "not_modified"):
+    for key in (
+        "message_id",
+        "chat_id",
+        "reply_to_message_id",
+        "reply_to_user_id",
+        "error_code",
+        "not_modified",
+        "participant_user_ids",
+        "paid_user_ids",
+        "player_user_ids",
+        "started_by_user_id",
+        "amount",
+        "session_key",
+    ):
         if key in result:
             out[key] = _json_safe(result.get(key), key=key)
     return out

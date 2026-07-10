@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 import { Link } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
+  ArrowLeft,
   ArrowDown,
   ArrowUp,
   Bell,
@@ -14,6 +15,7 @@ import {
   Plus,
   RefreshCw,
   Save,
+  Search,
   Send,
   ShieldCheck,
   Trash2,
@@ -356,7 +358,7 @@ function AllowedPeerMultiSelect({
 
   if (loading) {
     return (
-      <div className="flex h-10 items-center rounded-md border bg-background px-2 text-xs text-muted-foreground">
+      <div className="flex h-10 items-center nested-surface-item border bg-background px-2 text-xs text-muted-foreground">
         <Spinner className="mr-2 h-3.5 w-3.5 text-primary" />
         正在读取已允许会话
       </div>
@@ -365,7 +367,7 @@ function AllowedPeerMultiSelect({
 
   if (peers.length === 0) {
     return (
-      <div className="rounded-md border border-dashed bg-background px-3 py-2 text-xs leading-5 text-muted-foreground">
+      <div className="nested-surface-item border border-dashed bg-background px-3 py-2 text-xs leading-5 text-muted-foreground">
         暂无已允许会话。没有找到想选择的会话时，请先去{" "}
         <Link to={`/accounts/${aid}?tab=ignored`} className="font-medium text-primary hover:underline">
           账号详情页的允许会话
@@ -381,7 +383,7 @@ function AllowedPeerMultiSelect({
         <span>从已允许会话选择</span>
         <span>{selected.size} 个已选</span>
       </div>
-      <div className="flex max-h-24 flex-wrap gap-1.5 overflow-y-auto rounded-md border bg-background p-1.5">
+      <div className="nested-surface nested-surface-inset-2 flex max-h-24 flex-wrap gap-1.5 overflow-y-auto border bg-background">
         {peers.map((peer) => {
           const id = String(peer.peer_id);
           const active = selected.has(id);
@@ -390,7 +392,7 @@ function AllowedPeerMultiSelect({
               key={peer.id}
               type="button"
               className={cn(
-                "min-w-0 max-w-full rounded-md border px-2 py-1.5 text-left text-xs transition-colors",
+                "nested-surface-item min-w-0 max-w-full border px-2 py-1.5 text-left text-xs transition-colors",
                 active
                   ? "border-primary bg-primary/10 text-primary"
                   : "border-border bg-muted/30 text-muted-foreground [@media(hover:hover)]:hover:border-primary/40 [@media(hover:hover)]:hover:text-foreground",
@@ -409,7 +411,7 @@ function AllowedPeerMultiSelect({
         })}
       </div>
       {unknownSelected.length > 0 ? (
-        <div className="flex flex-wrap gap-1.5 rounded-md border border-warning/30 bg-warning/10 px-2 py-1.5 text-xs text-warning">
+        <div className="nested-surface-item flex flex-wrap gap-1.5 border border-warning/30 bg-warning/10 px-2 py-1.5 text-xs text-warning">
           {unknownSelected.map((id) => (
             <button
               key={id}
@@ -437,7 +439,7 @@ function AllowedPeerMultiSelect({
 function InteractionContractBlock({ title, items, empty }: { title: string; items: string[]; empty: string }) {
   const cleanItems = [...new Set(items.map((item) => item.trim()).filter(Boolean))];
   return (
-    <div className="min-w-0 rounded-md border bg-muted/20 px-2 py-1.5 text-xs">
+    <div className="nested-surface-item min-w-0 border bg-muted/20 px-2 py-1.5 text-xs">
       <div className="mb-1 font-medium text-muted-foreground">{title}</div>
       {cleanItems.length > 0 ? (
         <div className="flex flex-wrap gap-1">
@@ -1258,7 +1260,7 @@ function InteractionRuleEditor({
         key={item.value}
         type="button"
         className={cn(
-          "w-full rounded-md border p-3 text-left transition-colors",
+          "nested-surface w-full border text-left transition-colors",
           isActive ? "border-primary bg-primary/5 shadow-sm" : "bg-background [@media(hover:hover)]:hover:border-primary/40 [@media(hover:hover)]:hover:bg-muted/30",
         )}
         onClick={() => applyEntryOption(item)}
@@ -1341,8 +1343,8 @@ function InteractionRuleEditor({
     );
 
   return (
-    <div className="min-w-0 space-y-4 rounded-lg border bg-background p-3 shadow-sm sm:p-4">
-      <div className="space-y-3 rounded-lg border bg-muted/20 p-3">
+    <div className="nested-surface min-w-0 space-y-4 border bg-background shadow-sm">
+      <div className="nested-surface space-y-3 border bg-muted/20">
         <div className="grid min-w-0 gap-3">
           <div className="space-y-1.5">
             <Label>规则名称</Label>
@@ -1353,21 +1355,21 @@ function InteractionRuleEditor({
           </div>
         </div>
         <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
-          <div className="rounded-md border bg-background px-3 py-2">
+          <div className="nested-surface-item border bg-background px-3 py-2">
             <div className="text-xs text-muted-foreground">监听群</div>
             <div className="mt-1 text-sm font-medium">
               {ruleChatCount > 0 ? `${ruleChatCount} 个群` : "未填写"}
             </div>
           </div>
-          <div className="rounded-md border bg-background px-3 py-2">
+          <div className="nested-surface-item border bg-background px-3 py-2">
             <div className="text-xs text-muted-foreground">触发</div>
             <div className="mt-1 text-sm font-medium">{triggerSummary}</div>
           </div>
-          <div className="rounded-md border bg-background px-3 py-2">
+          <div className="nested-surface-item border bg-background px-3 py-2">
             <div className="text-xs text-muted-foreground">执行</div>
             <div className="mt-1 line-clamp-2 break-words text-sm font-medium">{executionSummary}</div>
           </div>
-          <div className="rounded-md border bg-background px-3 py-2">
+          <div className="nested-surface-item border bg-background px-3 py-2">
             <div className="text-xs text-muted-foreground">奖励与限制</div>
             <div className="mt-1 line-clamp-2 break-words text-sm font-medium">{limitSummary}</div>
           </div>
@@ -1439,7 +1441,7 @@ function InteractionRuleEditor({
         ) : null}
 
         {showsPaymentFields ? (
-          <details className="group rounded-md border bg-background px-3 py-2">
+          <details className="group nested-surface-item border bg-background px-3 py-2">
             <summary className="flex cursor-pointer list-none items-center justify-between gap-3 text-sm font-medium [&::-webkit-details-marker]:hidden">
               <span>转账匹配细节</span>
               <span className="flex shrink-0 items-center gap-2 text-xs font-normal text-muted-foreground">
@@ -1519,14 +1521,14 @@ function InteractionRuleEditor({
         ) : null}
 
         {rule.action === "math10" ? (
-          <div className="rounded-md border bg-background px-3 py-2 text-sm text-muted-foreground">
+          <div className="nested-surface-item border bg-background px-3 py-2 text-sm text-muted-foreground">
             触发后会由交互 Bot 发十以内算数题，适合用来测试监听和结果链路。
           </div>
         ) : null}
 
         {rule.action === "module" ? (
           <div className="space-y-3">
-            <div className="rounded-md border bg-background p-3">
+            <div className="nested-surface border bg-background">
               <div className="flex flex-wrap items-start justify-between gap-3">
                 <div className="min-w-0">
                   <div className="text-xs text-muted-foreground">当前会启动</div>
@@ -1561,7 +1563,7 @@ function InteractionRuleEditor({
                     />
                   </div>
                   {selectedContractWarnings.length > 0 ? (
-                    <div className="mt-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs leading-5 text-destructive">
+                    <div className="nested-surface-item mt-2 border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs leading-5 text-destructive">
                       {selectedContractWarnings.map((item) => (
                         <div key={item}>{item}</div>
                       ))}
@@ -1581,7 +1583,7 @@ function InteractionRuleEditor({
               </div>
             </div>
 
-            <details className="group rounded-lg border border-primary/35 bg-primary/5 px-3 py-2 shadow-sm" open={!selectedInteractionEntry}>
+            <details className="group nested-surface border border-primary/35 bg-primary/5 shadow-sm" open={!selectedInteractionEntry}>
               <summary className="flex cursor-pointer list-none items-center justify-between gap-3 text-sm font-semibold text-primary [&::-webkit-details-marker]:hidden">
                 <span className="min-w-0">
                   更换玩法入口
@@ -1617,27 +1619,20 @@ function InteractionRuleEditor({
                 </div>
                 {shouldUseEntryProfileTabs ? (
                   <Tabs value={entryProfileTab} onValueChange={setEntryProfileTab} className="space-y-3">
-                    <TabsList className="flex h-auto w-full flex-wrap justify-start gap-2 bg-transparent p-0">
-                      <TabsTrigger
-                        value="all"
-                        className="rounded-md border px-3 py-1.5 data-[state=active]:border-primary data-[state=active]:bg-primary/10"
-                      >
+                    <TabsList className="justify-start">
+                      <TabsTrigger value="all">
                         全部
                       </TabsTrigger>
                       {availableProfileGroups.map((group) => (
                         <TabsTrigger
                           key={group.profile}
                           value={group.profile}
-                          className="rounded-md border px-3 py-1.5 data-[state=active]:border-primary data-[state=active]:bg-primary/10"
                         >
                           {group.label}
                         </TabsTrigger>
                       ))}
                       {interactionEntries.some((item) => !item.entry.interaction_profile) ? (
-                        <TabsTrigger
-                          value="__ungrouped"
-                          className="rounded-md border px-3 py-1.5 data-[state=active]:border-primary data-[state=active]:bg-primary/10"
-                        >
+                        <TabsTrigger value="__ungrouped">
                           未分类
                         </TabsTrigger>
                       ) : null}
@@ -1645,7 +1640,7 @@ function InteractionRuleEditor({
                   </Tabs>
                 ) : null}
                 {visibleEntries.length <= 0 ? (
-                  <div className="rounded-md border bg-muted/20 px-3 py-3 text-sm text-muted-foreground">
+                  <div className="nested-surface-item border bg-muted/20 px-3 py-3 text-sm text-muted-foreground">
                     暂无可选交互入口。
                   </div>
                 ) : entryProfileTab === "all" ? (
@@ -1765,7 +1760,7 @@ function InteractionRuleEditor({
       ) : null}
 
       {rule.action === "module" && selectedInteractionEntry ? (
-        <details className="group rounded-lg border bg-muted/20 px-3 py-2">
+        <details className="group nested-surface border bg-muted/20">
           <summary className="flex cursor-pointer list-none items-center justify-between gap-3 text-sm font-medium [&::-webkit-details-marker]:hidden">
             <span>插件额外参数与技术详情</span>
             <span className="flex shrink-0 items-center gap-2 text-xs font-normal text-muted-foreground">
@@ -1792,20 +1787,20 @@ function InteractionRuleEditor({
                 />
               </div>
             ) : (
-              <div className="rounded-md border bg-background px-3 py-2 text-xs text-muted-foreground">
+              <div className="nested-surface-item border bg-background px-3 py-2 text-xs text-muted-foreground">
                 该玩法入口没有额外插件参数。
               </div>
             )}
             <div className="grid gap-2 sm:grid-cols-2">
-              <div className="min-w-0 rounded-md border bg-background px-3 py-2 text-xs">
+              <div className="nested-surface-item min-w-0 border bg-background px-3 py-2 text-xs">
                 <div className="mb-1 font-medium">module_key</div>
                 <code className="block truncate text-muted-foreground">{rule.moduleKey || selectedModule?.featureKey || "未选择"}</code>
               </div>
-              <div className="min-w-0 rounded-md border bg-background px-3 py-2 text-xs">
+              <div className="nested-surface-item min-w-0 border bg-background px-3 py-2 text-xs">
                 <div className="mb-1 font-medium">module_action</div>
                 <code className="block truncate text-muted-foreground">{moduleActionValue || "保存时尝试推断"}</code>
               </div>
-              <div className="min-w-0 rounded-md border bg-background px-3 py-2 text-xs sm:col-span-2">
+              <div className="nested-surface-item min-w-0 border bg-background px-3 py-2 text-xs sm:col-span-2">
                 <div className="mb-1 font-medium">插件会话范围</div>
                 <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_160px] sm:items-center">
                   <div className="text-muted-foreground">
@@ -1826,7 +1821,7 @@ function InteractionRuleEditor({
         </details>
       ) : null}
 
-      <details className="group rounded-lg border bg-muted/20 px-3 py-2">
+      <details className="group nested-surface border bg-muted/20">
         <summary className="flex cursor-pointer list-none items-center justify-between gap-3 text-sm font-medium [&::-webkit-details-marker]:hidden">
           <span>高级设置与规则管理指令</span>
           <span className="flex shrink-0 items-center gap-2 text-xs font-normal text-muted-foreground">
@@ -1917,6 +1912,8 @@ export function BotTab({
   const [interactionIdentityExpanded, setInteractionIdentityExpanded] = useState(false);
   const [interactionAdvancedExpanded, setInteractionAdvancedExpanded] = useState(false);
   const [mobileRuleEditorOpen, setMobileRuleEditorOpen] = useState(false);
+  const [ruleSearch, setRuleSearch] = useState("");
+  const [ruleStatusFilter, setRuleStatusFilter] = useState<"all" | "enabled" | "paused">("all");
 
   const botQ = useQuery({
     queryKey: ["account", aid, "bot"],
@@ -2262,6 +2259,7 @@ export function BotTab({
     setInteractionRules((rules) => {
       const nextRule = defaultRuleForm(rules.length);
       setSelectedInteractionRuleId(nextRule.id);
+      setMobileRuleEditorOpen(true);
       return [...rules, nextRule];
     });
   };
@@ -2278,6 +2276,7 @@ export function BotTab({
       const next = [...rules];
       next.splice(index + 1, 0, nextRule);
       setSelectedInteractionRuleId(nextRule.id);
+      setMobileRuleEditorOpen(true);
       return next;
     });
   };
@@ -2309,7 +2308,7 @@ export function BotTab({
 
   const selectInteractionRule = (ruleId: string) => {
     setSelectedInteractionRuleId(ruleId);
-    setMobileRuleEditorOpen(false);
+    setMobileRuleEditorOpen(true);
   };
 
   const addUserMut = useMutation({
@@ -2371,6 +2370,21 @@ export function BotTab({
   const selectedInteractionRuleIndex = interactionRules.findIndex((rule) => rule.id === selectedInteractionRuleId);
   const selectedInteractionRuleIndexSafe = selectedInteractionRuleIndex >= 0 ? selectedInteractionRuleIndex : 0;
   const selectedInteractionRule = interactionRules[selectedInteractionRuleIndexSafe];
+  const normalizedRuleSearch = ruleSearch.trim().toLocaleLowerCase();
+  const filteredInteractionRules = interactionRules
+    .map((rule, index) => ({ rule, index }))
+    .filter(({ rule }) => {
+      if (ruleStatusFilter === "enabled" && !rule.enabled) return false;
+      if (ruleStatusFilter === "paused" && rule.enabled) return false;
+      if (!normalizedRuleSearch) return true;
+      return [
+        rule.name,
+        rule.moduleKey,
+        rule.moduleAction,
+        rule.moduleStartKeywords,
+      ].some((value) => String(value || "").toLocaleLowerCase().includes(normalizedRuleSearch));
+    });
+  const enabledRuleCount = interactionRules.filter((rule) => rule.enabled).length;
 
   const managementStatus = (
     <div className="flex flex-wrap gap-2">
@@ -2397,10 +2411,10 @@ export function BotTab({
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
-            <div className="rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-xs text-warning">
+            <div className="nested-surface-item border border-warning/40 bg-warning/10 px-3 py-2 text-xs text-warning">
               安全提示：涉及重启、安装等危险操作时，需在 Telegram 内完成二次确认后才会执行。
             </div>
-            <div className="space-y-3 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-3">
+            <div className="nested-surface-item space-y-3 border border-destructive/30 bg-destructive/10 px-3 py-3">
               <div className="flex items-center gap-2">
                 <div className="text-sm font-medium text-destructive">远程插件高风险开关（admin）</div>
                 <Dialog>
@@ -2463,7 +2477,7 @@ export function BotTab({
             <div className="grid gap-3 sm:grid-cols-2">
               <div className="space-y-1.5">
                 <Label>运行状态</Label>
-                <div className="flex h-10 items-center gap-2 rounded-md border px-3 text-sm">
+                <div className="flex h-10 items-center gap-2 nested-surface-item border px-3 text-sm">
                   <Badge variant={bot?.enabled ? "default" : "secondary"}>
                     {bot?.enabled ? "已启用" : "未启用"}
                   </Badge>
@@ -2474,7 +2488,7 @@ export function BotTab({
               </div>
               <div className="space-y-1.5">
                 <Label>Bot 用户名（@开头的）</Label>
-                <div className="flex h-10 items-center rounded-md border px-3 text-sm">
+                <div className="flex h-10 items-center nested-surface-item border px-3 text-sm">
                   {bot?.username ? `@${bot.username}` : "保存 token 后自动读取"}
                 </div>
               </div>
@@ -2503,7 +2517,7 @@ export function BotTab({
             </div>
 
             {bot?.last_error ? (
-              <div className="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">
+              <div className="nested-surface-item border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">
                 {localizeBotRuntimeError(bot.last_error)}
               </div>
             ) : null}
@@ -2557,13 +2571,13 @@ export function BotTab({
           <CardContent className="space-y-3 text-sm">
             <div className="grid gap-2">
               {Object.entries(ROLE_META).map(([role, meta]) => (
-                <div key={role} className="flex items-center justify-between rounded-md border px-3 py-2">
+                <div key={role} className="flex items-center justify-between nested-surface-item border px-3 py-2">
                   <span className="font-mono">{meta.label}</span>
                   <span className="text-muted-foreground">{meta.desc}</span>
                 </div>
               ))}
             </div>
-            <pre className="overflow-x-auto rounded-md bg-muted px-3 py-2 text-xs leading-5">
+            <pre className="nested-surface-item overflow-x-auto bg-muted px-3 py-2 text-xs leading-5">
               {HELP_PREVIEW}
             </pre>
           </CardContent>
@@ -2602,12 +2616,12 @@ export function BotTab({
       <Card className="border-0 bg-transparent shadow-none">
         <CardContent className="flex flex-col gap-4 space-y-0 p-0">
           {interactionQ.data?.interaction_last_error ? (
-            <div className="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">
+            <div className="nested-surface-item border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">
               {localizeBotRuntimeError(interactionQ.data.interaction_last_error)}
             </div>
           ) : null}
 
-          <section className="rounded-lg border border-warning/30 bg-warning/10 px-3 py-3 text-sm text-warning">
+          <section className="nested-surface border border-warning/30 bg-warning/10 text-sm text-warning">
             <div className="flex items-start gap-2">
               <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0" />
               <div>
@@ -2619,7 +2633,7 @@ export function BotTab({
             </div>
           </section>
 
-          <section className="order-2 space-y-4 rounded-lg border p-3 sm:p-4">
+          <section className="order-2 nested-surface space-y-4 border">
             <div className="flex flex-wrap items-start justify-between gap-2">
               <div>
                 <div className="text-sm font-medium">身份配置</div>
@@ -2631,7 +2645,7 @@ export function BotTab({
                 <Badge variant={hasInteractionToken || interactionBotToken.trim() ? "secondary" : "destructive"}>
                   {hasInteractionToken || interactionBotToken.trim() ? "交互 Bot 已配置" : "交互 Bot 缺少 Token"}
                 </Badge>
-                <label className="flex items-center gap-2 rounded-md border bg-background px-3 py-1.5 text-sm">
+                <label className="flex items-center gap-2 nested-surface-item border bg-background px-3 py-1.5 text-sm">
                   <span>启用联动</span>
                   <Switch checked={transferEnabled} onCheckedChange={setTransferEnabled} />
                 </label>
@@ -2657,7 +2671,7 @@ export function BotTab({
 
             {interactionIdentityExpanded ? (
             <div id="interaction-identity-config" className="grid gap-3 2xl:grid-cols-2">
-              <div className="space-y-3 rounded-md border bg-muted/20 p-3">
+              <div className="nested-surface space-y-3 border bg-muted/20">
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <div>
                     <div className="text-sm font-medium">交互 Bot</div>
@@ -2672,7 +2686,7 @@ export function BotTab({
                 <div className="grid gap-3">
                   <div className="space-y-1.5">
                     <Label>用户名（@开头的）</Label>
-                    <div className="flex h-10 items-center rounded-md border bg-background px-3 text-sm">
+                    <div className="flex h-10 items-center nested-surface-item border bg-background px-3 text-sm">
                       {interactionQ.data?.interaction_bot_username
                         ? `@${interactionQ.data.interaction_bot_username}`
                         : "保存 Token 后自动读取"}
@@ -2717,7 +2731,7 @@ export function BotTab({
                 </div>
               </div>
 
-              <div className="space-y-3 rounded-md border bg-muted/20 p-3">
+              <div className="nested-surface space-y-3 border bg-muted/20">
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <div>
                     <div className="text-sm font-medium">真实转账结果通知 Bot</div>
@@ -2790,8 +2804,11 @@ export function BotTab({
             ) : null}
           </section>
 
-          <section className="order-1 space-y-3 rounded-lg border p-3 sm:p-4">
-            <div className="flex flex-wrap items-center justify-between gap-2">
+          <section className="order-1 nested-surface space-y-3 border">
+            <div className={cn(
+              "flex flex-wrap items-center justify-between gap-2",
+              mobileRuleEditorOpen && "hidden xl:flex",
+            )}>
               <div>
                 <div className="text-sm font-medium">规则列表</div>
                 <div className="text-xs text-muted-foreground">
@@ -2811,7 +2828,10 @@ export function BotTab({
               </div>
             </div>
 
-            <details className="rounded-md border bg-muted/20">
+            <details className={cn(
+              "nested-surface-item overflow-hidden border bg-muted/20",
+              mobileRuleEditorOpen && "hidden xl:block",
+            )}>
                 <summary className="cursor-pointer px-3 py-2 text-sm font-medium">
                   玩法查询设置
                   <span className="ml-2 text-xs font-normal text-muted-foreground">
@@ -2874,7 +2894,7 @@ export function BotTab({
                       />
                     </div>
                   </div>
-                  <div className="rounded-md border bg-background p-3 text-xs">
+                  <div className="nested-surface border bg-background text-xs">
                     <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
                       <div className="font-medium">查询预览</div>
                       <span className="text-[11px] text-muted-foreground">示例变量渲染</span>
@@ -2895,8 +2915,35 @@ export function BotTab({
             </details>
 
             <div className="grid gap-3 xl:h-[calc(100vh-18rem)] xl:min-h-[560px] xl:max-h-[860px] xl:grid-cols-[minmax(300px,380px)_minmax(0,1fr)] xl:items-stretch">
-              <div className="space-y-1.5 rounded-md border bg-muted/20 p-2 xl:h-full xl:overflow-y-auto">
-                {interactionRules.map((rule, index) => {
+              <div className={cn(
+                "nested-surface nested-surface-inset-2 space-y-2 border bg-muted/20 xl:h-full xl:overflow-y-auto",
+                mobileRuleEditorOpen && "hidden xl:block",
+              )}>
+                <div className="sticky top-0 z-10 space-y-2 bg-muted/95 pb-1 backdrop-blur-sm">
+                  <div className="relative">
+                    <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+                    <Input
+                      value={ruleSearch}
+                      onChange={(event) => setRuleSearch(event.target.value)}
+                      placeholder="搜索规则或插件"
+                      className="h-8 pl-8"
+                    />
+                  </div>
+                  <div className="flex items-center justify-between gap-2">
+                    <Tabs value={ruleStatusFilter} onValueChange={(value) => setRuleStatusFilter(value as typeof ruleStatusFilter)}>
+                      <TabsList className="w-auto flex-nowrap">
+                        <TabsTrigger value="all" className="min-w-0 px-2">全部</TabsTrigger>
+                        <TabsTrigger value="enabled" className="min-w-0 px-2">启用</TabsTrigger>
+                        <TabsTrigger value="paused" className="min-w-0 px-2">暂停</TabsTrigger>
+                      </TabsList>
+                    </Tabs>
+                    <span className="shrink-0 text-xs text-muted-foreground">
+                      {enabledRuleCount}/{interactionRules.length} 启用
+                    </span>
+                  </div>
+                </div>
+
+                {filteredInteractionRules.map(({ rule, index }) => {
                   const resolvedModule = resolveRuleModuleSelection(rule, interactionEntries);
                   const effectiveTriggerMode = rule.action === "notice" ? "payment" : rule.triggerMode;
                   const isSelected = rule.id === selectedInteractionRule?.id;
@@ -2917,11 +2964,11 @@ export function BotTab({
                     <div
                       key={rule.id}
                       className={cn(
-                        "rounded-md border bg-background transition-colors",
+                        "group nested-surface nested-surface-inset-2 border bg-background transition-colors",
                         isSelected ? "border-primary/50 bg-primary/5 shadow-sm ring-1 ring-primary/10" : "border-border/70 hover:border-primary/25",
                       )}
                     >
-                      <div className="flex items-start gap-2 p-2">
+                      <div className="flex items-start gap-2">
                         <button
                           type="button"
                           className="min-w-0 flex-1 text-left"
@@ -2929,7 +2976,7 @@ export function BotTab({
                         >
                           <div className="flex items-start gap-2.5">
                             <div className={cn(
-                              "grid h-8 w-8 shrink-0 place-items-center rounded-md border text-xs font-semibold",
+                              "grid h-8 w-8 shrink-0 place-items-center nested-surface-item border text-xs font-semibold",
                               isSelected ? "border-primary/40 bg-primary/10 text-primary" : "border-border bg-muted/40 text-muted-foreground",
                             )}>
                               {index + 1}
@@ -2975,24 +3022,20 @@ export function BotTab({
                         </button>
 
                         <div className="flex shrink-0 flex-col items-end gap-1">
-                          <div className="flex h-7 items-center gap-1 rounded-md bg-muted/40 px-1.5">
-                          <Switch
-                            id={`interaction-rule-enabled-${rule.id}`}
-                            checked={rule.enabled}
-                            onCheckedChange={(checked) => updateInteractionRule(index, { enabled: checked })}
-                            aria-label={`${rule.name || `规则 ${index + 1}`} ${rule.enabled ? "已启用" : "已暂停"}`}
-                          />
-                          <label
-                            htmlFor={`interaction-rule-enabled-${rule.id}`}
-                            className={cn(
-                              "truncate text-xs font-medium",
-                              rule.enabled ? "text-foreground" : "text-muted-foreground",
-                            )}
-                          >
-                            {rule.enabled ? "已启用" : "已暂停"}
-                          </label>
+                          <div className="flex h-7 items-center nested-surface-item bg-muted/40 px-1.5">
+                            <Switch
+                              id={`interaction-rule-enabled-${rule.id}`}
+                              checked={rule.enabled}
+                              onCheckedChange={(checked) => updateInteractionRule(index, { enabled: checked })}
+                              aria-label={`${rule.name || `规则 ${index + 1}`} ${rule.enabled ? "已启用" : "已暂停"}`}
+                            />
                           </div>
-                          <div className="grid grid-cols-2 gap-1">
+                          <div className={cn(
+                            "grid grid-cols-4 gap-0.5 transition-opacity",
+                            isSelected
+                              ? "opacity-100"
+                              : "opacity-70 xl:opacity-0 xl:group-hover:opacity-100 xl:group-focus-within:opacity-100",
+                          )}>
                           <Button
                             type="button"
                             variant="ghost"
@@ -3046,54 +3089,50 @@ export function BotTab({
                     </div>
                   );
                 })}
-              </div>
-
-              {selectedInteractionRule ? (
-                <div className="rounded-md border border-primary/25 bg-primary/5 p-3 xl:hidden">
-                  <div className="flex flex-wrap items-start justify-between gap-3">
-                    <div className="min-w-0">
-                      <div className="text-xs font-medium text-primary">当前规则</div>
-                      <div className="mt-1 line-clamp-2 break-words text-sm font-semibold">
-                        {selectedInteractionRule.name || `规则 ${selectedInteractionRuleIndexSafe + 1}`}
-                      </div>
-                      <div className="mt-1 line-clamp-2 break-words text-xs text-muted-foreground">
-                        {selectedInteractionRule.action === "module"
-                          ? describeRuleModuleSelection(
-                              selectedInteractionRule,
-                              resolveRuleModuleSelection(selectedInteractionRule, interactionEntries),
-                              { withVersion: true },
-                            )
-                          : getRuleActionLabel(selectedInteractionRule.action)}
-                      </div>
-                    </div>
-                    <Button
-                      type="button"
-                      variant={mobileRuleEditorOpen ? "secondary" : "outline"}
-                      size="sm"
-                      className="shrink-0"
-                      onClick={() => setMobileRuleEditorOpen((open) => !open)}
-                    >
-                      {mobileRuleEditorOpen ? "收起配置" : "编辑当前规则"}
-                    </Button>
+                {filteredInteractionRules.length === 0 ? (
+                  <div className="nested-surface-item border border-dashed bg-background px-3 py-8 text-center text-sm text-muted-foreground">
+                    没有符合当前筛选的规则
                   </div>
-                </div>
-              ) : null}
+                ) : null}
+              </div>
 
               <div className={cn(
                 "min-w-0 xl:h-full xl:overflow-y-auto",
                 !mobileRuleEditorOpen && "hidden xl:block",
               )}>
                 {selectedInteractionRule ? (
-                  <InteractionRuleEditor
-                    aid={aid}
-                    rule={selectedInteractionRule}
-                    interactionEntries={interactionEntries}
-                    allowedPeers={allowedPeersQ.data ?? []}
-                    allowedPeersLoading={allowedPeersQ.isLoading}
-                    onPatch={(patch) => updateInteractionRule(selectedInteractionRuleIndexSafe, patch)}
-                  />
+                  <div className="space-y-3">
+                    <div className="sticky top-0 z-20 flex items-center gap-2 border-b bg-background/95 pb-2 backdrop-blur-sm xl:hidden">
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        className="shrink-0"
+                        onClick={() => setMobileRuleEditorOpen(false)}
+                      >
+                        <ArrowLeft className="mr-1 h-4 w-4" />
+                        规则列表
+                      </Button>
+                      <div className="min-w-0">
+                        <div className="truncate text-sm font-semibold">
+                          {selectedInteractionRule.name || `规则 ${selectedInteractionRuleIndexSafe + 1}`}
+                        </div>
+                        <div className="truncate text-xs text-muted-foreground">
+                          第 {selectedInteractionRuleIndexSafe + 1} 条，共 {interactionRules.length} 条
+                        </div>
+                      </div>
+                    </div>
+                    <InteractionRuleEditor
+                      aid={aid}
+                      rule={selectedInteractionRule}
+                      interactionEntries={interactionEntries}
+                      allowedPeers={allowedPeersQ.data ?? []}
+                      allowedPeersLoading={allowedPeersQ.isLoading}
+                      onPatch={(patch) => updateInteractionRule(selectedInteractionRuleIndexSafe, patch)}
+                    />
+                  </div>
                 ) : (
-                  <div className="rounded-md border bg-muted/20 p-6 text-sm text-muted-foreground">
+                  <div className="nested-surface border bg-muted/20 text-sm text-muted-foreground">
                     当前没有可编辑的规则。
                   </div>
                 )}
@@ -3101,7 +3140,7 @@ export function BotTab({
             </div>
           </section>
 
-          <section className="order-3 space-y-3 rounded-lg border p-3 sm:p-4">
+          <section className="order-3 nested-surface space-y-3 border">
             <div className="flex flex-wrap items-start justify-between gap-2">
               <div>
                 <div className="text-sm font-medium">高级设置</div>
@@ -3151,7 +3190,7 @@ export function BotTab({
                     <span className="sm:col-span-2"><code>{"{payer_user_id_line}"}</code>：有付款人 ID 时渲染为“付款人ID：数字”，没有时自动留空</span>
                     <span className="sm:col-span-2"><code>{"{receiver_user_id_line}"}</code>：有收款人 ID 时渲染为“收款人ID：数字”，没有时自动留空</span>
                   </div>
-                  <div className="rounded-md border bg-background p-3 text-xs">
+                  <div className="nested-surface border bg-background text-xs">
                     <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
                       <div className="font-medium">消息预览</div>
                       <span className="text-[11px] text-muted-foreground">使用示例变量渲染</span>
@@ -3177,7 +3216,7 @@ export function BotTab({
                     value={debitNoticeTemplate}
                     onChange={(e) => setDebitNoticeTemplate(e.target.value)}
                   />
-                  <div className="rounded-md border bg-background p-3 text-xs">
+                  <div className="nested-surface border bg-background text-xs">
                     <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
                       <div className="font-medium">消息预览</div>
                       <span className="text-[11px] text-muted-foreground">使用示例变量渲染</span>
@@ -3196,7 +3235,7 @@ export function BotTab({
                   </div>
                 </div>
 
-                <div className="rounded-md bg-muted px-3 py-2 text-xs leading-5 text-muted-foreground">
+                <div className="nested-surface-item bg-muted px-3 py-2 text-xs leading-5 text-muted-foreground">
                   群里回复任意消息发送 <code>+123</code> 会生成带 <code>language-转账成功</code> 标识的 HTML 代码块；发送 <code>-123</code> 会生成带 <code>language-扣减成功</code> 标识的扣款通知。
                   没有测试用的转账通知结果 Bot 的 Token 时，交互 Bot 只监听群里真实出现的转账结果通知。
                 </div>
@@ -3219,7 +3258,7 @@ export function BotTab({
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
-          <div className="grid gap-3 rounded-md border p-3 lg:grid-cols-[180px_minmax(0,1fr)_150px_120px]">
+          <div className="nested-surface grid gap-3 border lg:grid-cols-[180px_minmax(0,1fr)_150px_120px]">
             <div className="space-y-1.5">
               <Label>Telegram 用户 ID</Label>
               <Input
@@ -3268,7 +3307,7 @@ export function BotTab({
 
           <div className="space-y-3 md:hidden">
             {users.map((u) => (
-              <div key={u.id} className="space-y-3 rounded-md border p-3">
+              <div key={u.id} className="nested-surface space-y-3 border">
                 <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0">
                     <div className="font-mono text-sm">{u.tg_user_id}</div>
@@ -3320,7 +3359,7 @@ export function BotTab({
                   </div>
                 </div>
                 <div className="grid gap-3 sm:grid-cols-2">
-                  <label className="flex items-center justify-between rounded-md border px-3 py-2 text-sm">
+                  <label className="nested-surface-item flex items-center justify-between border px-3 py-2 text-sm">
                     <span>通知</span>
                     <Switch
                       checked={u.notify_enabled}
@@ -3329,7 +3368,7 @@ export function BotTab({
                       }
                     />
                   </label>
-                  <label className="flex items-center justify-between rounded-md border px-3 py-2 text-sm">
+                  <label className="nested-surface-item flex items-center justify-between border px-3 py-2 text-sm">
                     <span>启用</span>
                     <Switch
                       checked={u.enabled}
@@ -3345,7 +3384,7 @@ export function BotTab({
               </div>
             ))}
             {users.length === 0 ? (
-              <div className="rounded-md border px-3 py-8 text-center text-sm text-muted-foreground">
+              <div className="nested-surface-item border px-3 py-8 text-center text-sm text-muted-foreground">
                 还没有授权用户
               </div>
             ) : null}

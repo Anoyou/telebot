@@ -83,6 +83,7 @@ class _StatsAccumulator:
     key: str
     label: str
     session_start_keys: set[str] = field(default_factory=set)
+    participant_user_ids: set[int] = field(default_factory=set)
     payout_success_count: int = 0
     payout_failure_count: int = 0
     ledger_income: Decimal = Decimal("0")
@@ -102,9 +103,9 @@ SOURCE_MATRIX = [
     MetricAvailability(
         key="participant_count",
         label="参与人数",
-        status=METRIC_STATUS_NEEDS_INSTRUMENTATION,
-        source="缺少稳定 SQL 参与者表或必填参与者动作字段",
-        note="需 WP0-tap 补字段后才能避免只统计到部分插件写入的 participant_user_ids。",
+        status=METRIC_STATUS_AVAILABLE,
+        source="action_event participant_user_ids/paid_user_ids/player_user_ids 去重",
+        note="优先读取 start_session 与付款事件中的结构化参与者字段。",
     ),
     MetricAvailability(
         key="payout_success_rate",
@@ -212,6 +213,8 @@ def _add_action_metrics(acc: _StatsAccumulator, row: ActionEvent, summary: dict[
     status = str(row.status or "").strip().upper()
     if _is_start_session(row, summary) and status == ACTION_EVENT_STATUS_OK:
         acc.session_start_keys.add(_session_start_key(row))
+    if status == ACTION_EVENT_STATUS_OK:
+        acc.participant_user_ids.update(_participant_ids_from_summary(summary))
     if not _is_payout_action(row, summary):
         return
     if status == ACTION_EVENT_STATUS_OK:
@@ -253,6 +256,42 @@ def _chat_id_from_summary(summary: dict[str, Any]) -> int | None:
     )
 
 
+def _participant_ids_from_summary(summary: dict[str, Any]) -> set[int]:
+    ids: set[int] = set()
+    for value in (
+        summary.get("participant_user_ids"),
+        summary.get("paid_user_ids"),
+        summary.get("player_user_ids"),
+        _nested(summary, "result", "participant_user_ids"),
+        _nested(summary, "result", "paid_user_ids"),
+        _nested(summary, "result", "player_user_ids"),
+    ):
+        ids.update(_ints_from_value(value))
+    for value in (
+        summary.get("started_by_user_id"),
+        summary.get("payer_user_id"),
+        _nested(summary, "result", "started_by_user_id"),
+    ):
+        user_id = _int_or_none(value)
+        if user_id is not None:
+            ids.add(user_id)
+    return ids
+
+
+def _ints_from_value(value: Any) -> set[int]:
+    out: set[int] = set()
+    if isinstance(value, (list, tuple, set)):
+        for item in value:
+            parsed = _int_or_none(item)
+            if parsed is not None:
+                out.add(parsed)
+        return out
+    parsed = _int_or_none(value)
+    if parsed is not None:
+        out.add(parsed)
+    return out
+
+
 def _apply_ledger_total(acc: _StatsAccumulator, summary: ledger_service.LedgerSummary) -> None:
     acc.ledger_income = _decimal_from_text(summary.income)
     acc.ledger_payout = _decimal_from_text(summary.payout)
@@ -277,7 +316,7 @@ def _total_from_acc(acc: _StatsAccumulator) -> OperationalStatsTotal:
     attempts = _payout_attempt_count(acc)
     return OperationalStatsTotal(
         started_sessions=len(acc.session_start_keys),
-        participant_count=None,
+        participant_count=len(acc.participant_user_ids),
         payout_success_count=acc.payout_success_count,
         payout_failure_count=acc.payout_failure_count,
         payout_attempt_count=attempts,

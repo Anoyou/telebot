@@ -55,7 +55,7 @@ async def test_operational_stats_net_matches_ledger_summary(stats_session_factor
         stats_session_factory,
         action_type="start_session",
         session_key="game:-100123:round-1",
-        params_summary={"type": "start_session", "chat_id": -100123},
+        params_summary={"type": "start_session", "chat_id": -100123, "participant_user_ids": [111, 222]},
         created_at=base,
     )
     await _insert_action_event(
@@ -77,7 +77,7 @@ async def test_operational_stats_net_matches_ledger_summary(stats_session_factor
     await _insert_action_event(
         stats_session_factory,
         action_type="payment_confirmed",
-        params_summary={"event_type": "payment_confirmed", "amount": "100", "chat_id": -100123},
+        params_summary={"event_type": "payment_confirmed", "amount": "100", "chat_id": -100123, "payer_user_id": 333},
         created_at=base + timedelta(minutes=2),
     )
     await _insert_action_event(
@@ -109,7 +109,7 @@ async def test_operational_stats_net_matches_ledger_summary(stats_session_factor
         ledger = await ledger_service.summarize_ledger(db, ledger_filters)
 
     assert stats.total.started_sessions == 1
-    assert stats.total.participant_count is None
+    assert stats.total.participant_count == 3
     assert stats.total.payout_success_count == 1
     assert stats.total.payout_failure_count == 1
     assert stats.total.payout_attempt_count == 2

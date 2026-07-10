@@ -321,7 +321,12 @@ function UsageDetailPanel({ record }: { record: LLMUsageRecord }) {
       </div>
       <div className="grid gap-3 lg:grid-cols-2">
         <PreviewBlock title="请求预览" text={record.request_preview} empty="这条历史调用没有保存请求预览；更新后产生的新调用会显示截断脱敏内容。" />
-        <PreviewBlock title="返回预览" text={record.response_preview} empty={record.success ? "这条历史调用没有保存返回预览；更新后产生的新调用会显示截断脱敏内容。" : "失败调用通常没有返回正文，先看错误类型和系统控制台日志。"} />
+        <PreviewBlock
+          title={record.success ? "返回预览" : "错误预览"}
+          text={record.response_preview || (!record.success ? llmErrorPreview(record) : null)}
+          empty={record.success ? "这条历史调用没有保存返回预览；更新后产生的新调用会显示截断脱敏内容。" : "这次失败没有保存响应正文；可继续看错误类型和系统控制台日志。"}
+          tone={record.success ? "normal" : "danger"}
+        />
       </div>
     </div>
   );
@@ -336,12 +341,22 @@ function InfoCell({ label, value }: { label: string; value: unknown }) {
   );
 }
 
-function PreviewBlock({ title, text, empty }: { title: string; text?: string | null; empty: string }) {
+function PreviewBlock({
+  title,
+  text,
+  empty,
+  tone = "normal",
+}: {
+  title: string;
+  text?: string | null;
+  empty: string;
+  tone?: "normal" | "danger";
+}) {
   const value = text?.trim();
   return (
-    <div className="rounded-lg border bg-background">
+    <div className={cn("rounded-lg border bg-background", tone === "danger" && "border-destructive/35 bg-destructive/5")}>
       <div className="flex items-center justify-between gap-2 border-b px-3 py-2">
-        <div className="text-sm font-medium">{title}</div>
+        <div className={cn("text-sm font-medium", tone === "danger" && "text-destructive")}>{title}</div>
         {value ? (
           <Button
             type="button"
@@ -362,6 +377,12 @@ function PreviewBlock({ title, text, empty }: { title: string; text?: string | n
       )}
     </div>
   );
+}
+
+function llmErrorPreview(record: LLMUsageRecord): string | null {
+  const errorType = record.error_type?.trim();
+  if (!errorType) return null;
+  return `错误类型：${errorType}`;
 }
 
 function usageSourceLabel(source?: string | null): string {

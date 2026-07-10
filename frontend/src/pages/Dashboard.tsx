@@ -666,6 +666,7 @@ function MetricCard({
   hint,
   meterValue,
   tone = "neutral",
+  action,
 }: {
   icon: LucideIcon;
   label: string;
@@ -673,13 +674,17 @@ function MetricCard({
   hint: string;
   meterValue?: number | null;
   tone?: VisualTone;
+  action?: ReactNode;
 }) {
   const toneClass = toneClasses(tone);
   return (
     <div className="rounded-xl border border-border/70 bg-muted/35 p-4">
       <div className="mb-3 flex items-center justify-between gap-3">
         <p className="text-xs font-medium uppercase text-muted-foreground">{label}</p>
-        <Icon className={cn("h-4 w-4", toneClass.icon)} />
+        <div className="flex shrink-0 items-center gap-2">
+          {action}
+          <Icon className={cn("h-4 w-4", toneClass.icon)} />
+        </div>
       </div>
       <p className="text-2xl font-bold tracking-tight">{value}</p>
       <MeterBar value={meterValue} tone={tone} className="mt-3" />
@@ -700,18 +705,21 @@ function ProcessMemoryCard({ data }: { data: ResourceDashboard }) {
 
   return (
     <DropdownMenu modal={false}>
-      <DropdownMenuTrigger asChild>
-        <button type="button" className="block w-full min-w-0 text-left">
-          <MetricCard
-            icon={Activity}
-            label="应用总内存"
-            value={formatMb(memoryMb)}
-            hint={projectMemoryHint(memoryMb, totalMb, data)}
-            meterValue={memoryPercent}
-            tone={resourceTone(memoryPercent)}
-          />
-        </button>
-      </DropdownMenuTrigger>
+      <MetricCard
+        icon={Activity}
+        label="应用总内存"
+        value={formatMb(memoryMb)}
+        hint={projectMemoryHint(memoryMb, totalMb, data)}
+        meterValue={memoryPercent}
+        tone={resourceTone(memoryPercent)}
+        action={(
+          <DropdownMenuTrigger asChild>
+            <Button type="button" variant="outline" size="sm" className="h-7 px-2 text-xs">
+              详情
+            </Button>
+          </DropdownMenuTrigger>
+        )}
+      />
       <DropdownMenuContent
         align={compactOverlay ? "center" : "end"}
         collisionPadding={12}

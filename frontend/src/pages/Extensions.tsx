@@ -10,7 +10,6 @@ import { useNavigate, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AlertTriangle,
-  ArrowLeft,
   Brain,
   BookOpen,
   ChevronDown,
@@ -80,7 +79,6 @@ import { MetaBadge } from "@/components/ui/meta-badge";
 import { Spinner } from "@/components/ui/misc";
 import { SectionHeader, SignalPill } from "@/components/ui/status";
 import { cn, formatDateTime } from "@/lib/utils";
-import { goBackOr } from "@/lib/navigation";
 import { getErrMsg } from "@/lib/api";
 import { splitPluginWarnings } from "@/lib/plugin-config-contract";
 import { isPlatformFeature } from "@/lib/plugin-modes";
@@ -611,21 +609,6 @@ export function Extensions() {
 
   return (
     <div className="space-y-6">
-      <div className="space-y-3">
-        <Button variant="default" size="sm" className="gap-1.5 shadow-sm" onClick={() => goBackOr(nav, "/plugins")}>
-          <ArrowLeft className="h-4 w-4" /> 返回上一页
-        </Button>
-        <Card>
-          <CardHeader>
-            <SectionHeader
-              icon={Puzzle}
-              title="插件安装与管理"
-              description="这里负责安装、更新、卸载远程插件；装好后回插件中心按账号启用和配置。"
-            />
-          </CardHeader>
-        </Card>
-      </div>
-
       <PluginWorkspaceNav activeTab="manage" />
 
       {guideActive ? (

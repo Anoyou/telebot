@@ -179,6 +179,25 @@
 }
 
 @layer utilities {
+  .nested-surface {
+    --nested-outer-radius: var(--radius);
+    --nested-inset: 0.75rem;
+    border-radius: var(--nested-outer-radius);
+    padding: var(--nested-inset);
+  }
+
+  .nested-surface-inset-2 {
+    --nested-inset: 0.5rem;
+  }
+
+  .nested-surface-inset-4 {
+    --nested-inset: 1rem;
+  }
+
+  .nested-surface-item {
+    border-radius: max(0px, calc(var(--nested-outer-radius) - var(--nested-inset)));
+  }
+
   /* 跑马灯边框裁进控件自身圆角，避免弹窗圆角外侧露出直角彩边。 */
   .siri-glow {
     position: relative;

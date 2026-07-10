@@ -15,7 +15,9 @@ import { toast } from "sonner";
 
 import { listAccounts } from "@/api/accounts";
 import { simulateDispatch, type DispatchTrace, type DispatchTraceStage } from "@/api/dispatch";
-import type { AccountSummary } from "@/api/types";
+import { listIgnoredPeers } from "@/api/ignored_peers";
+import { getSystemSettings } from "@/api/system";
+import type { AccountSummary, IgnoredPeer } from "@/api/types";
 import { AccountStatusBadge } from "@/components/AccountStatusBadge";
 import { DryRunDetail } from "@/components/DryRunDetail";
 import { PageHeader, PageShell } from "@/components/layout/PageScaffold";
@@ -55,6 +57,20 @@ function accountOptionLabel(account: AccountSummary): string {
   const name = account.display_name?.trim();
   const username = account.tg_username?.trim();
   return name || (username ? `@${username}` : null) || `账号 #${account.id}`;
+}
+
+function peerKindLabel(kind: string): string {
+  const labels: Record<string, string> = {
+    private: "私聊",
+    group: "群组",
+    supergroup: "超级群",
+    channel: "频道",
+  };
+  return labels[kind] || kind || "会话";
+}
+
+function peerLabel(peer: IgnoredPeer): string {
+  return peer.peer_label?.trim() || `${peerKindLabel(String(peer.peer_kind))} ${peer.peer_id}`;
 }
 
 function optionalInteger(value: string): number | null {
@@ -262,6 +278,7 @@ export function DispatchDebugPage() {
     queryKey: ["accounts"],
     queryFn: () => listAccounts(),
   });
+  const settingsQ = useQuery({ queryKey: ["system", "settings"], queryFn: getSystemSettings });
   const accounts = accountsQ.data ?? [];
   const [selectedAid, setSelectedAid] = useState<number | null>(null);
   const [chatType, setChatType] = useState("group");
@@ -275,6 +292,13 @@ export function DispatchDebugPage() {
     () => accounts.find((account) => account.id === selectedAid) ?? null,
     [accounts, selectedAid],
   );
+  const commandPrefix = settingsQ.data?.command_prefix || ",";
+  const allowedPeersQ = useQuery({
+    queryKey: ["accounts", selectedAid, "ignored-peers"],
+    queryFn: () => listIgnoredPeers(selectedAid as number),
+    enabled: selectedAid !== null,
+  });
+  const allowedPeers = allowedPeersQ.data ?? [];
 
   useEffect(() => {
     if (selectedAid !== null) return;
@@ -387,6 +411,7 @@ export function DispatchDebugPage() {
                     value={selectedAid?.toString() ?? ""}
                     onChange={(event) => {
                       setSelectedAid(Number(event.target.value));
+                      setChatId("");
                       setTrace(null);
                     }}
                     aria-label="选择账号"
@@ -404,6 +429,38 @@ export function DispatchDebugPage() {
                       {selectedAccount.tg_user_id ? <span>TG {selectedAccount.tg_user_id}</span> : null}
                     </div>
                   ) : null}
+                </div>
+
+                <div className="space-y-2">
+                  <Label htmlFor="dispatch-peer">会话</Label>
+                  <Select
+                    id="dispatch-peer"
+                    value={allowedPeers.some((peer) => String(peer.peer_id) === chatId.trim()) ? chatId.trim() : ""}
+                    onChange={(event) => {
+                      const id = event.target.value;
+                      const peer = allowedPeers.find((item) => String(item.peer_id) === id);
+                      setChatId(id);
+                      if (peer?.peer_kind) setChatType(String(peer.peer_kind));
+                      setTrace(null);
+                    }}
+                    disabled={allowedPeersQ.isLoading || allowedPeers.length === 0}
+                  >
+                    <option value="">
+                      {allowedPeersQ.isLoading
+                        ? "正在读取已允许会话"
+                        : allowedPeers.length
+                          ? "从已允许会话选择"
+                          : "暂无已允许会话，可手动填写"}
+                    </option>
+                    {allowedPeers.map((peer) => (
+                      <option key={peer.id} value={String(peer.peer_id)}>
+                        {peerLabel(peer)} · {peer.peer_id}
+                      </option>
+                    ))}
+                  </Select>
+                  <p className="text-xs leading-5 text-muted-foreground">
+                    交互规则通常按已允许会话生效；选择会话后会自动同步 Chat ID 和会话类型。
+                  </p>
                 </div>
 
                 <div className="grid gap-3 sm:grid-cols-2">
@@ -458,7 +515,7 @@ export function DispatchDebugPage() {
                     id="dispatch-text"
                     value={text}
                     onChange={(event) => setText(event.target.value)}
-                    placeholder=",help 或关键词文本"
+                    placeholder={`${commandPrefix}help 或关键词文本`}
                     className="min-h-36 resize-y"
                   />
                 </div>

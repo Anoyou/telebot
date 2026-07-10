@@ -162,7 +162,7 @@ export function InteractionIndex() {
         </Card>
       ) : (
         <>
-          <section className="grid gap-4 rounded-lg border bg-card p-4 shadow-sm lg:grid-cols-[minmax(0,420px)_minmax(0,1fr)]">
+          <section className="nested-surface nested-surface-inset-4 grid gap-4 border bg-card shadow-sm lg:grid-cols-[minmax(0,420px)_minmax(0,1fr)]">
             <div className="space-y-2">
               <div className="flex flex-col items-stretch gap-2 sm:flex-row sm:items-center">
                 <span className="text-sm text-muted-foreground">选择配置的账号：</span>

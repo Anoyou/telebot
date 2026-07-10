@@ -3143,12 +3143,12 @@ def _interaction_payment_payer_name(incoming: Incoming, data: dict[str, Any] | N
 
 
 def _interaction_participant_policy(rule: dict[str, Any]) -> str:
-    declared = _declared_interaction_participant_policy(rule)
-    if declared:
-        return declared
     raw = str(rule.get("participant_policy") or "").strip()
     if raw in account_bot_service.VALID_INTERACTION_PARTICIPANT_POLICIES:
         return raw
+    declared = _declared_interaction_participant_policy(rule)
+    if declared:
+        return declared
     scope = str(rule.get("module_session_scope") or rule.get("concurrency") or "chat")
     if scope == "user":
         return "solo_owner"
@@ -3561,6 +3561,32 @@ async def _apply_interaction_start_session_action(
             actual_send_via="interaction_session",
             result={"chat_id": target_chat_id, "participant_user_ids": sorted(participant_ids)},
         )
+        tap_action = {
+            **action,
+            "type": "start_session",
+            "chat_id": target_chat_id,
+            "entry_key": entry_key,
+            "module_key": module_key,
+            "session_key": session_key,
+            "started_by_user_id": started_by_user_id,
+            "participant_user_ids": sorted(participant_ids),
+            "event_type": payload.get("event_type"),
+        }
+        await emit_action_event(
+            account_id=incoming.account_id,
+            action=tap_action,
+            status=ACTION_EVENT_STATUS_OK,
+            channel="interaction_session",
+            session_key=session_key,
+            plugin_key=module_key,
+            entry_key=entry_key,
+            result={
+                "chat_id": target_chat_id,
+                "participant_user_ids": sorted(participant_ids),
+                "started_by_user_id": started_by_user_id,
+                "session_key": session_key,
+            },
+        )
     except Exception as exc:  # noqa: BLE001
         await record_action(
             action.get("context"),
@@ -3635,12 +3661,18 @@ def _interaction_session_list_participant_ids(session: dict[str, Any] | None) ->
     return ids
 
 
+def _interaction_session_has_explicit_participant_list(session: dict[str, Any] | None) -> bool:
+    if not isinstance(session, dict):
+        return False
+    return any(isinstance(session.get(key), list) for key in ("participant_user_ids", "paid_user_ids", "player_user_ids"))
+
+
 def _interaction_session_participant_ids(session: dict[str, Any] | None, *, policy: str | None = None) -> set[int]:
     if not isinstance(session, dict):
         return set()
     if policy == "paid_pool":
         ids = _interaction_session_list_participant_ids(session)
-        has_explicit_list = any(isinstance(session.get(key), list) for key in ("participant_user_ids", "paid_user_ids", "player_user_ids"))
+        has_explicit_list = _interaction_session_has_explicit_participant_list(session)
         if ids or has_explicit_list:
             return ids
     ids = set()
@@ -3680,6 +3712,8 @@ def _interaction_participant_block_message(
         return None
     participant_ids = _interaction_session_participant_ids(session, policy=policy)
     if not participant_ids:
+        if policy == "paid_pool" and _interaction_session_has_explicit_participant_list(session):
+            return "请先加入本局，再操作牌桌按钮。"
         return None
     if int(incoming.user_id) in participant_ids:
         return None
@@ -5484,7 +5518,7 @@ async def _try_handle_interaction_module_message(
         session = await _load_interaction_session(incoming, rule)
         if session is None:
             continue
-        participant_block = _interaction_participant_block_message(incoming, rule, session) if is_callback else None
+        participant_block = _interaction_participant_block_message(incoming, rule, session)
         if participant_block:
             if is_callback:
                 await _answer_callback(
@@ -7407,6 +7441,7 @@ async def _try_handle_transfer_notice(
             parsed_amount=parsed.get("amount"),
         )
         return True
+    await _emit_transfer_notice_income_tap(incoming, rule, parsed)
     if event_bus_enabled:
         event_bus_handled, event_bus_ok = await _try_handle_event_bus_payment_notice(db, incoming, cfg, parsed, rule)
     else:
@@ -7475,6 +7510,38 @@ async def _try_handle_transfer_notice(
         parsed.get("amount"),
     )
     return True
+
+
+async def _emit_transfer_notice_income_tap(incoming: Incoming, rule: dict[str, Any], parsed: dict[str, Any]) -> None:
+    module_key = str(rule.get("module_key") or "").strip() or None
+    entry_key = str(rule.get("module_action") or "").strip() or None
+    action = {
+        "type": "payment_confirmed",
+        "event_type": "payment_confirmed",
+        "chat_id": incoming.chat_id,
+        "message_id": incoming.message_id,
+        "amount": parsed.get("amount"),
+        "payer_user_id": parsed.get("payer_user_id") or parsed.get("reply_to_user_id"),
+        "payer_name": parsed.get("payer_name"),
+        "receiver_name": parsed.get("receiver_name"),
+        "receiver_user_id": parsed.get("receiver_user_id"),
+        "participant_user_ids": [
+            user_id
+            for user_id in (_int_or_none(parsed.get("payer_user_id") or parsed.get("reply_to_user_id")),)
+            if user_id is not None
+        ],
+        "module_key": module_key,
+        "entry_key": entry_key,
+    }
+    await emit_action_event(
+        account_id=incoming.account_id,
+        action=action,
+        status=ACTION_EVENT_STATUS_OK,
+        channel="external_payment_notice",
+        plugin_key=module_key,
+        entry_key=entry_key,
+        result={"chat_id": incoming.chat_id, "amount": parsed.get("amount")},
+    )
 
 
 async def _audit_transfer_notice(db: Any, incoming: Incoming, parsed: dict[str, Any]) -> None:

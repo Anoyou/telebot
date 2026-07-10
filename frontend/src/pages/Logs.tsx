@@ -55,6 +55,7 @@ import { Spinner } from "@/components/ui/misc";
 import { Select } from "@/components/ui/select";
 import { SectionHeader, SignalPill } from "@/components/ui/status";
 import { Switch } from "@/components/ui/switch";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn, formatDateTime } from "@/lib/utils";
 
 type LogView = "messages" | "console" | "runtime";
@@ -587,25 +588,23 @@ function LogViewSegment({ value, onChange }: { value: LogView; onChange: (value:
     { value: "runtime", label: "运行事件", icon: Workflow },
   ];
   return (
-    <div className="grid grid-cols-3 gap-1 rounded-lg border bg-muted/30 p-1 sm:w-fit">
-      {items.map((item) => {
-        const Icon = item.icon;
-        return (
-          <button
-            key={item.value}
-            type="button"
-            onClick={() => onChange(item.value)}
-            className={cn(
-              "inline-flex h-10 min-w-0 items-center justify-center gap-2 rounded-md px-3 text-sm font-medium transition",
-              value === item.value ? "bg-background text-foreground shadow-sm" : "text-muted-foreground hover:bg-background/60 hover:text-foreground",
-            )}
-          >
-            <Icon className="h-4 w-4 shrink-0" />
-            <span className="truncate">{item.label}</span>
-          </button>
-        );
-      })}
-    </div>
+    <Tabs value={value} onValueChange={(next) => onChange(next as LogView)}>
+      <TabsList>
+        {items.map((item) => {
+          const Icon = item.icon;
+          return (
+            <TabsTrigger
+              key={item.value}
+              value={item.value}
+              className="gap-2"
+            >
+              <Icon className="h-4 w-4 shrink-0" />
+              <span className="truncate">{item.label}</span>
+            </TabsTrigger>
+          );
+        })}
+      </TabsList>
+    </Tabs>
   );
 }
 
@@ -618,21 +617,15 @@ function VerdictSegment({ value, onChange }: { value: VerdictFilter; onChange: (
     { value: "failed", label: "失败" },
   ];
   return (
-    <div className="grid grid-cols-5 gap-1 rounded-lg border bg-muted/30 p-1">
-      {items.map((item) => (
-        <button
-          key={item.label}
-          type="button"
-          onClick={() => onChange(item.value)}
-          className={cn(
-            "h-8 min-w-0 rounded-md px-2 text-xs font-medium transition",
-            value === item.value ? "bg-background text-foreground shadow-sm" : "text-muted-foreground hover:bg-background/60 hover:text-foreground",
-          )}
-        >
-          <span className="block truncate">{item.label}</span>
-        </button>
-      ))}
-    </div>
+    <Tabs value={value || "all"} onValueChange={(next) => onChange(next === "all" ? "" : (next as VerdictFilter))}>
+      <TabsList className="w-full sm:w-auto">
+        {items.map((item) => (
+          <TabsTrigger key={item.label} value={item.value || "all"} className="min-w-0 px-2 sm:min-w-[4.5rem]">
+            <span className="block truncate">{item.label}</span>
+          </TabsTrigger>
+        ))}
+      </TabsList>
+    </Tabs>
   );
 }
 
@@ -1082,7 +1075,7 @@ function TraceDetailPanel({
   const verdict = message ? verdictMeta(message.verdict) : undefined;
   return (
     <div className="space-y-4 border-t bg-muted/20 p-3">
-      <section className={cn("rounded-lg border bg-background p-3", verdict?.panelClass)}>
+      <section className={cn("nested-surface border bg-background", verdict?.panelClass)}>
         <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
           <div className="min-w-0">
             <div className="flex flex-wrap items-center gap-2">
@@ -1098,9 +1091,9 @@ function TraceDetailPanel({
       </section>
 
       <OperationalTraceSummary detail={detail} message={message} />
-      {detail.text_preview ? <p className="rounded-lg border bg-background p-3 text-sm whitespace-pre-wrap">{detail.text_preview}</p> : null}
+      {detail.text_preview ? <p className="nested-surface border bg-background text-sm whitespace-pre-wrap">{detail.text_preview}</p> : null}
       <Timeline spans={detail.spans} actions={detail.actions} timezone={timezone} />
-      <details className="rounded-lg border bg-background p-3">
+      <details className="nested-surface border bg-background">
         <summary className="cursor-pointer text-sm font-medium">插件开发详情</summary>
         <div className="mt-3 space-y-3">
           <p className="rounded-md bg-muted px-3 py-2 text-xs leading-5 text-muted-foreground">
@@ -1123,11 +1116,10 @@ function OperationalTraceSummary({ detail, message }: { detail: EventTraceDetail
   const pluginText = pluginKeysLabel(detail.plugin_keys, detail.plugin_count);
   const sentText = sendSummary(detail.actions, message);
   return (
-    <section className="rounded-lg border bg-background p-3">
+    <section className="nested-surface border bg-background">
       <div className="mb-3 flex flex-wrap items-center gap-2">
         <MessageSquareText className="h-4 w-4 text-primary" />
         <span className="text-sm font-medium">排障摘要</span>
-        <Badge variant="secondary">默认只看人话版</Badge>
       </div>
       <div className="grid gap-2 text-xs sm:grid-cols-2 lg:grid-cols-4">
         <InfoCell label="会话" value={conversationLabel(detail)} />
@@ -1173,7 +1165,7 @@ function Timeline({ spans, actions, timezone }: { spans: EventSpanItem[]; action
       </div>
       <div className="space-y-2">
         {visibleItems.map((item, index) => (
-          <div key={`${item.kind}-${index}-${item.ts}`} className={cn("rounded-lg border bg-background p-3", timelineItemClass(item))}>
+          <div key={`${item.kind}-${index}-${item.ts}`} className={cn("nested-surface border bg-background", timelineItemClass(item))}>
             {item.kind === "span" ? (
               <div className="space-y-1.5">
                 <div className="flex flex-wrap items-center justify-between gap-2">
@@ -1218,7 +1210,7 @@ function ProbeReportPanel({ report }: { report?: EventProbeReport | null }) {
   const routing = report.routing ?? [];
   const warnings = report.warnings ?? [];
   return (
-    <section className="rounded-lg border bg-background p-3">
+    <section className="nested-surface border bg-background">
       <div className="flex flex-wrap items-start justify-between gap-2">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
@@ -1242,7 +1234,7 @@ function ProbeReportPanel({ report }: { report?: EventProbeReport | null }) {
       {capabilities.length ? (
         <div className="mt-3 grid gap-2 md:grid-cols-2">
           {capabilities.map((item, index) => (
-            <div key={`${item.title}-${index}`} className="rounded-lg border bg-muted/20 p-2">
+            <div key={`${item.title}-${index}`} className="nested-surface nested-surface-inset-2 border bg-muted/20">
               <div className="flex flex-wrap items-center gap-1.5">
                 <StatusBadge status={item.level || "info"} />
                 <span className="text-sm font-medium">{item.title}</span>
@@ -1263,7 +1255,7 @@ function ProbeReportPanel({ report }: { report?: EventProbeReport | null }) {
         </div>
       ) : null}
       {warnings.length ? (
-        <div className="mt-3 rounded-lg border border-warning/40 bg-warning/10 p-2 text-sm text-warning">
+        <div className="nested-surface nested-surface-inset-2 mt-3 border border-warning/40 bg-warning/10 text-sm text-warning">
           {warnings.map((item, index) => (
             <div key={`${item}-${index}`}>{item}</div>
           ))}
@@ -1275,12 +1267,12 @@ function ProbeReportPanel({ report }: { report?: EventProbeReport | null }) {
 
 function ProbeItemGrid({ title, items }: { title: string; items: EventProbeReport["field_paths"] }) {
   return (
-    <div className="rounded-lg border bg-muted/20 p-2">
+    <div className="nested-surface nested-surface-inset-2 border bg-muted/20">
       <div className="mb-2 text-xs font-medium text-muted-foreground">{title}</div>
       {items.length ? (
         <div className="space-y-2">
           {items.slice(0, 8).map((item, index) => (
-            <div key={`${item.path || item.label}-${index}`} className="rounded-md bg-background px-2 py-1.5">
+            <div key={`${item.path || item.label}-${index}`} className="nested-surface-item bg-background px-2 py-1.5">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <span className="text-[11px] text-muted-foreground">{item.label}</span>
                 {item.path ? <span className="break-all font-mono text-[11px] text-muted-foreground">{item.path}</span> : null}
@@ -1299,7 +1291,7 @@ function ProbeItemGrid({ title, items }: { title: string; items: EventProbeRepor
 
 function ProbeSuggestionList({ title, items, jsonKey }: { title: string; items: EventProbeSuggestion[]; jsonKey: "manifest" | "action" }) {
   return (
-    <div className="rounded-lg border bg-muted/20 p-2">
+    <div className="nested-surface nested-surface-inset-2 border bg-muted/20">
       <div className="mb-2 text-xs font-medium text-muted-foreground">{title}</div>
       {items.length ? items.map((item, index) => {
         const jsonValue = item[jsonKey];
@@ -1308,7 +1300,7 @@ function ProbeSuggestionList({ title, items, jsonKey }: { title: string; items: 
             <div className="text-sm font-medium">{item.title}</div>
             {item.reason ? <p className="mt-1 text-xs text-muted-foreground">{item.reason}</p> : null}
             {jsonValue ? (
-              <pre className="mt-2 max-h-52 overflow-auto rounded-md bg-background p-2 text-xs leading-relaxed whitespace-pre-wrap break-all">
+              <pre className="nested-surface-item mt-2 max-h-52 overflow-auto bg-background p-2 text-xs leading-relaxed whitespace-pre-wrap break-all">
                 {safeJsonStringify(jsonValue, 2)}
               </pre>
             ) : null}
@@ -1454,7 +1446,7 @@ function TraceMeta({ pluginKey, entryKey, reasonCode }: { pluginKey?: string | n
 
 function InfoCell({ label, value }: { label: string; value: unknown }) {
   return (
-    <div className="rounded-md bg-muted px-2 py-1.5">
+    <div className="nested-surface-item bg-muted px-2 py-1.5">
       <div className="text-[11px] text-muted-foreground">{label}</div>
       <div className="break-all text-xs text-foreground">{String(value ?? "-")}</div>
     </div>

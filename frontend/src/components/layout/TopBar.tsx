@@ -2,19 +2,14 @@
 // iOS PWA：背景色延伸到 safe-area-inset-top，并随主题同步系统状态栏底色，
 // 内容区高度仍维持 56px。
 import { useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   Check,
-  ChevronDown,
-  LogOut,
   Menu,
   Monitor,
   Moon,
   PanelLeft,
   RefreshCw,
   Sun,
-  UserCircle,
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -22,10 +17,8 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { logout } from "@/lib/auth";
 import { useTheme, type Theme } from "@/lib/theme";
 import { cn } from "@/lib/utils";
 import { BrandLogo } from "@/components/BrandLogo";
@@ -46,17 +39,8 @@ export function TopBar({
   onSidebarToggle,
   sidebarCollapsed,
 }: TopBarProps) {
-  const nav = useNavigate();
-  const qc = useQueryClient();
   const [updateOpen, setUpdateOpen] = useState(false);
   const isStandalone = useStandaloneDisplayMode();
-  const mut = useMutation({
-    mutationFn: logout,
-    onSettled: () => {
-      qc.clear();
-      nav("/login", { replace: true });
-    },
-  });
 
   return (
     <header
@@ -101,11 +85,7 @@ export function TopBar({
           title={sidebarCollapsed ? "展开侧边栏" : "收起侧边栏"}
         >
           <PanelLeft className="h-4 w-4" />
-          {isStandalone ? null : (
-            <span className="hidden text-xs sm:inline">
-              {sidebarCollapsed ? "展开侧栏" : "收起侧栏"}
-            </span>
-          )}
+          <span className="sr-only">{sidebarCollapsed ? "展开侧栏" : "收起侧栏"}</span>
         </Button>
       </div>
       <div className="flex shrink-0 items-center gap-1.5 sm:gap-2">
@@ -124,39 +104,7 @@ export function TopBar({
         <UpdateDialog open={updateOpen} onOpenChange={setUpdateOpen} />
         <ThemeSwitcher compact={isStandalone} />
         <KillSwitch compact={isStandalone} />
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <Button
-              variant="outline"
-              size="sm"
-              className={cn(
-                "h-10 rounded-full border-0 bg-secondary text-xs shadow-none hover:bg-secondary-hover",
-                isStandalone
-                  ? "w-10 px-0"
-                  : "w-10 px-0 sm:w-auto sm:max-w-[11rem] sm:gap-2 sm:px-1.5 sm:pr-2",
-              )}
-              aria-label={`当前用户：${username}`}
-              title={`当前用户：${username}`}
-            >
-              <span className="grid h-7 w-7 shrink-0 place-items-center rounded-full bg-primary/10 text-sm font-semibold text-primary">
-                {getInitial(username)}
-              </span>
-              {isStandalone ? null : (
-                <>
-                  <span className="hidden truncate text-xs font-medium sm:block">{username}</span>
-                  <ChevronDown className="hidden h-3.5 w-3.5 text-muted-foreground sm:block" />
-                </>
-              )}
-            </Button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="end">
-            <DropdownMenuItem disabled>已登录账号</DropdownMenuItem>
-            <DropdownMenuSeparator />
-            <DropdownMenuItem onSelect={() => mut.mutate()}>
-              <LogOut className="mr-2 h-4 w-4" /> 退出登录
-            </DropdownMenuItem>
-          </DropdownMenuContent>
-        </DropdownMenu>
+        <span className="sr-only">当前用户：{username}</span>
       </div>
     </header>
   );
@@ -242,10 +190,4 @@ function ThemeSwitcher({ compact = false }: { compact?: boolean }) {
       </DropdownMenuContent>
     </DropdownMenu>
   );
-}
-
-function getInitial(username: string) {
-  const trimmed = username.trim();
-  if (!trimmed) return <UserCircle className="h-4 w-4" />;
-  return trimmed.slice(0, 1).toUpperCase();
 }

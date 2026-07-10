@@ -3,9 +3,10 @@
 // 不提供"用户列表"——本系统是单租户的超管模型，只有一个 web 用户；
 // 真正需要换人时走数据库手动改 username + 密码即可。
 import { useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { Copy, KeyRound, Send, ShieldAlert, ShieldCheck, ShieldOff } from "lucide-react";
+import { Copy, KeyRound, LogOut, Send, ShieldAlert, ShieldCheck, ShieldOff } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -17,7 +18,7 @@ import {
   CardHeader,
 } from "@/components/ui/card";
 import { SectionHeader, SignalPill } from "@/components/ui/status";
-import { fetchMe } from "@/lib/auth";
+import { fetchMe, logout } from "@/lib/auth";
 import { api, getErrMsg } from "@/lib/api";
 import { getSystemSettings, patchSystemSettings } from "@/api/system";
 
@@ -29,6 +30,7 @@ interface TotpSetup {
 type TotpMode = "always" | "after_failures";
 
 export function UserAccount() {
+  const nav = useNavigate();
   const qc = useQueryClient();
   const meQ = useQuery({ queryKey: ["auth", "me"], queryFn: fetchMe });
   const settingsQ = useQuery({ queryKey: ["system", "settings"], queryFn: getSystemSettings });
@@ -59,6 +61,14 @@ export function UserAccount() {
       }, 800);
     },
     onError: (err) => toast.error(getErrMsg(err)),
+  });
+
+  const logoutMut = useMutation({
+    mutationFn: logout,
+    onSettled: () => {
+      qc.clear();
+      nav("/login", { replace: true });
+    },
   });
 
   const handleChange = () => {
@@ -209,13 +219,25 @@ export function UserAccount() {
             )
           }
           meta={
-            meQ.data ? (
-              <SignalPill
-                tone={meQ.data.has_totp ? "success" : "warn"}
-                label="TOTP"
-                value={meQ.data.has_totp ? "已启用" : "未启用"}
-              />
-            ) : null
+            <div className="flex flex-wrap items-center gap-2">
+              {meQ.data ? (
+                <SignalPill
+                  tone={meQ.data.has_totp ? "success" : "warn"}
+                  label="TOTP"
+                  value={meQ.data.has_totp ? "已启用" : "未启用"}
+                />
+              ) : null}
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => logoutMut.mutate()}
+                disabled={logoutMut.isPending}
+              >
+                <LogOut className="mr-1.5 h-4 w-4" />
+                退出登录
+              </Button>
+            </div>
           }
         />
       </CardHeader>

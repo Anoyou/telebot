@@ -216,6 +216,32 @@ export function WebhooksPage() {
         }
       />
 
+      <Card>
+        <CardHeader className="border-b bg-muted/30">
+          <CardTitle className="flex items-center gap-2 text-base">
+            <TerminalSquare className="h-4 w-4 text-primary" />
+            怎么用
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="grid gap-3 pt-5 md:grid-cols-3">
+          <UsageStep
+            index="1"
+            title="插件声明入口"
+            text="插件需要在 event_subscriptions 里声明 webhook，并指定 hook_key。默认入口是 default。"
+          />
+          <UsageStep
+            index="2"
+            title="复制地址和 Token"
+            text="左侧选择账号，右侧复制 Hook 地址；请求头带上本页生成的 X-TelePilot-Webhook-Token。"
+          />
+          <UsageStep
+            index="3"
+            title="外部系统 POST"
+            text="发送 JSON 后，TelePilot 会把正文包装成 webhook 事件，再投递给匹配的插件入口。"
+          />
+        </CardContent>
+      </Card>
+
       {accounts.length === 0 ? (
         <Card>
           <CardHeader>
@@ -398,5 +424,19 @@ export function WebhooksPage() {
         </div>
       )}
     </PageShell>
+  );
+}
+
+function UsageStep({ index, title, text }: { index: string; title: string; text: string }) {
+  return (
+    <div className="rounded-lg border border-border/70 bg-muted/25 p-3">
+      <div className="flex items-center gap-2">
+        <span className="grid h-6 w-6 place-items-center rounded-full bg-primary/10 text-xs font-semibold text-primary">
+          {index}
+        </span>
+        <div className="text-sm font-semibold">{title}</div>
+      </div>
+      <p className="mt-2 text-xs leading-5 text-muted-foreground">{text}</p>
+    </div>
   );
 }

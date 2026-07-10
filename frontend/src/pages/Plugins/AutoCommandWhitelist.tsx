@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
-import { useNavigate, useSearchParams } from "react-router-dom";
+import { useSearchParams } from "react-router-dom";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { ArrowLeft, Save, ShieldCheck } from "lucide-react";
+import { Save } from "lucide-react";
 import { toast } from "sonner";
 
 import { listAccounts } from "@/api/accounts";
@@ -17,14 +17,11 @@ import {
 } from "@/components/ui/card";
 import { Spinner } from "@/components/ui/misc";
 import { Select } from "@/components/ui/select";
-import { SectionHeader } from "@/components/ui/status";
 import { Textarea } from "@/components/ui/textarea";
 import { getErrMsg } from "@/lib/api";
-import { goBackOr } from "@/lib/navigation";
 import { PluginWorkspaceNav } from "./WorkspaceNav";
 
 export function PluginsAutoCommandWhitelistPage() {
-  const nav = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const aidFromQuery = Number(searchParams.get("aid"));
   const aid = Number.isFinite(aidFromQuery) && aidFromQuery > 0 ? aidFromQuery : 0;
@@ -72,19 +69,6 @@ export function PluginsAutoCommandWhitelistPage() {
 
   return (
     <div className="space-y-4">
-      <Button variant="default" size="sm" className="gap-1.5 shadow-sm" onClick={() => goBackOr(nav, "/plugins")}>
-        <ArrowLeft className="h-4 w-4" /> 返回上一页
-      </Button>
-
-      <Card>
-        <CardHeader>
-          <SectionHeader
-            icon={ShieldCheck}
-            title="自动指令白名单"
-            description="控制 scheduler/自动动作能触发哪些指令，按账号隔离配置。"
-          />
-        </CardHeader>
-      </Card>
       <PluginWorkspaceNav activeTab="whitelist" selectedAid={aid || null} />
 
       <Card>

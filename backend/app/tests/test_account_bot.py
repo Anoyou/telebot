@@ -4736,8 +4736,10 @@ async def test_interaction_start_session_action_merges_paid_participants(monkeyp
         "participant_user_ids": [111, 999],
     }
     record_action = AsyncMock()
+    emit_action_event = AsyncMock()
     monkeypatch.setattr(account_bot_runtime, "get_redis", lambda: redis)
     monkeypatch.setattr(account_bot_runtime, "record_action", record_action)
+    monkeypatch.setattr(account_bot_runtime, "emit_action_event", emit_action_event)
     monkeypatch.setattr(account_bot_service, "declared_module_entry_manifest", lambda *_args, **_kwargs: None)
 
     await account_bot_runtime._apply_interaction_start_session_action(incoming, rule, action)
@@ -4751,6 +4753,10 @@ async def test_interaction_start_session_action_merges_paid_participants(monkeyp
     assert isinstance(saved["expires_at"], float)
     assert redis.set_calls[-1][2]["ex"] == 600 + account_bot_runtime._INTERACTION_SESSION_TTL_GRACE_SECONDS
     record_action.assert_awaited_once()
+    emit_action_event.assert_awaited_once()
+    assert emit_action_event.await_args.kwargs["action"]["type"] == "start_session"
+    assert emit_action_event.await_args.kwargs["action"]["participant_user_ids"] == [111, 999]
+    assert emit_action_event.await_args.kwargs["channel"] == "interaction_session"
 
 
 def test_interaction_entry_manifest_normalizes_command_fallback() -> None:
@@ -7190,7 +7196,7 @@ def test_interaction_module_payload_preserves_plugin_timeout_config(monkeypatch)
     assert payload["prize"] == 888
 
 
-def test_declared_participant_policy_overrides_stale_saved_rule(monkeypatch) -> None:
+def test_saved_participant_policy_overrides_declared_default(monkeypatch) -> None:
     monkeypatch.setattr(
         account_bot_service,
         "declared_module_entry_manifest",
@@ -7204,6 +7210,24 @@ def test_declared_participant_policy_overrides_stale_saved_rule(monkeypatch) -> 
         "module_key": "ten_half",
         "module_action": "start_ten_half",
         "participant_policy": "solo_owner",
+    }
+
+    assert account_bot_runtime._interaction_participant_policy(rule) == "solo_owner"
+
+
+def test_declared_participant_policy_is_default_when_rule_unset(monkeypatch) -> None:
+    monkeypatch.setattr(
+        account_bot_service,
+        "declared_module_entry_manifest",
+        lambda module_key, entry_key: {"participant_policy": "paid_pool"}
+        if (module_key, entry_key) == ("ten_half", "start_ten_half")
+        else None,
+    )
+    rule = {
+        "id": "ten-half-paid",
+        "action": "module",
+        "module_key": "ten_half",
+        "module_action": "start_ten_half",
     }
 
     assert account_bot_runtime._interaction_participant_policy(rule) == "paid_pool"
@@ -7878,7 +7902,6 @@ async def test_paid_pool_chat_session_accumulates_paid_players(monkeypatch) -> N
         "module_key": "ten_half",
         "module_action": "start_ten_half",
         "module_session_scope": "chat",
-        "participant_policy": "solo_owner",
         "valid_seconds": 600,
     }
     keyword_incoming = account_bot_runtime.Incoming(
@@ -9500,7 +9523,7 @@ async def test_solo_owner_session_blocks_other_user_callback(monkeypatch) -> Non
 
 
 @pytest.mark.asyncio
-async def test_paid_pool_session_does_not_block_plain_message_before_plugin(monkeypatch) -> None:
+async def test_paid_pool_session_blocks_plain_message_before_plugin(monkeypatch) -> None:
     class _DB:
         async def __aenter__(self):
             return self
@@ -9531,6 +9554,8 @@ async def test_paid_pool_session_does_not_block_plain_message_before_plugin(monk
                 "module_key": "ten_half",
                 "entry_key": "start_ten_half",
                 "started_by_user_id": 111,
+                "participant_user_ids": [111],
+                "paid_user_ids": [111],
                 "event_type": "payment_confirmed",
             },
             ensure_ascii=False,
@@ -9562,11 +9587,9 @@ async def test_paid_pool_session_does_not_block_plain_message_before_plugin(monk
         },
     )
 
-    run_entry.assert_awaited_once()
-    payload = run_entry.await_args.kwargs["payload"]
-    assert payload["event_type"] == "message"
-    assert payload["message_text"] == "1"
-    send.assert_not_awaited()
+    run_entry.assert_not_awaited()
+    send.assert_awaited_once()
+    assert send.await_args.args[:3] == ("bbot-token", -100123, "请先加入本局，再操作牌桌按钮。")
 
 
 @pytest.mark.asyncio
