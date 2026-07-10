@@ -2645,10 +2645,6 @@ export function BotTab({
                 <Badge variant={hasInteractionToken || interactionBotToken.trim() ? "secondary" : "destructive"}>
                   {hasInteractionToken || interactionBotToken.trim() ? "交互 Bot 已配置" : "交互 Bot 缺少 Token"}
                 </Badge>
-                <label className="flex items-center gap-2 nested-surface-item border bg-background px-3 py-1.5 text-sm">
-                  <span>启用联动</span>
-                  <Switch checked={transferEnabled} onCheckedChange={setTransferEnabled} />
-                </label>
                 <Button
                   type="button"
                   size="sm"
@@ -2809,13 +2805,31 @@ export function BotTab({
               "flex flex-wrap items-center justify-between gap-2",
               mobileRuleEditorOpen && "hidden xl:flex",
             )}>
-              <div>
+              <div className="min-w-0">
                 <div className="text-sm font-medium">规则列表</div>
                 <div className="text-xs text-muted-foreground">
                   先在左侧挑规则，再到右侧按触发、启动内容、奖励限制配置当前规则。
                 </div>
               </div>
-              <div className="flex w-full flex-wrap gap-2 sm:w-auto sm:justify-end">
+              <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto sm:justify-end">
+                <label className="nested-surface-item flex min-w-0 flex-1 items-center justify-between gap-3 border bg-background px-3 py-2 sm:flex-none">
+                  <span className="min-w-0">
+                    <span className="flex items-center gap-2 text-sm font-medium">
+                      交互功能总开关
+                      <Badge variant={transferEnabled ? "secondary" : "outline"}>
+                        {transferEnabled ? "已开启" : "已关闭"}
+                      </Badge>
+                    </span>
+                    <span className="mt-0.5 block text-xs leading-5 text-muted-foreground">
+                      关闭后停用全部规则和交互 Bot，已有配置会保留。
+                    </span>
+                  </span>
+                  <Switch
+                    checked={transferEnabled}
+                    onCheckedChange={setTransferEnabled}
+                    aria-label="交互功能总开关"
+                  />
+                </label>
                 <Button
                   type="button"
                   variant="outline"

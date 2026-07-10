@@ -34,6 +34,12 @@ export interface LedgerEntry {
   status: string;
   account_id: number;
   chat_id: number | null;
+  chat_title: string | null;
+  payer_user_id: number | null;
+  payer_name: string | null;
+  receiver_user_id: number | null;
+  receiver_name: string | null;
+  receiver_username: string | null;
   plugin_key: string | null;
   entry_key: string | null;
   channel: string | null;
@@ -58,6 +64,17 @@ export interface LedgerSummaryBucket {
   count: number;
 }
 
+export interface LedgerRecipientBucket {
+  key: string;
+  label: string;
+  user_id: number | null;
+  username: string | null;
+  received: string;
+  income: string;
+  payout: string;
+  count: number;
+}
+
 export interface LedgerSummary {
   income: string;
   payout: string;
@@ -65,6 +82,7 @@ export interface LedgerSummary {
   count: number;
   by_day: LedgerSummaryBucket[];
   by_chat: LedgerSummaryBucket[];
+  by_recipient: LedgerRecipientBucket[];
 }
 
 export type MetricAvailabilityStatus = "available" | "needs_instrumentation";
@@ -120,6 +138,9 @@ export interface LedgerCompensation {
   entry_key: string | null;
   origin: string;
   chat_id: number;
+  chat_title: string | null;
+  receiver_user_id: number | null;
+  receiver_name: string | null;
   amount: string;
   status: string;
   error_code_first: string | null;
@@ -137,6 +158,11 @@ export interface LedgerCompensation {
 
 export interface LedgerCompensationsResponse {
   items: LedgerCompensation[];
+}
+
+export interface LedgerResetResult {
+  deleted_action_events: number;
+  deleted_compensations: number;
 }
 
 function cleanParams<T extends object>(params?: T): Partial<T> {
@@ -189,5 +215,12 @@ export async function markLedgerCompensationManualPaid(
     `/api/ledger/compensations/${compensationId}/manual-paid`,
     { note: note || null },
   );
+  return data;
+}
+
+export async function resetLedgerData(): Promise<LedgerResetResult> {
+  const { data } = await api.post<LedgerResetResult>("/api/ledger/reset", {
+    confirmation: "RESET_LEDGER",
+  });
   return data;
 }

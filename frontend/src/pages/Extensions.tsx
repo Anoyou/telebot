@@ -51,6 +51,7 @@ import rulesMd from "../../../docs/PLUGIN-RULES.md?raw";
 import safetyGuideMd from "../../../docs/PLUGIN-SAFETY.md?raw";
 
 import { Button } from "@/components/ui/button";
+import { PageShell } from "@/components/layout/PageScaffold";
 import {
   Card,
   CardContent,
@@ -82,7 +83,7 @@ import { cn, formatDateTime } from "@/lib/utils";
 import { getErrMsg } from "@/lib/api";
 import { splitPluginWarnings } from "@/lib/plugin-config-contract";
 import { isPlatformFeature } from "@/lib/plugin-modes";
-import { PluginWorkspaceNav } from "@/pages/Plugins/WorkspaceNav";
+import { PluginWorkspaceHeader } from "@/pages/Plugins/WorkspaceHeader";
 
 import { getFeatureMatrix } from "@/api/features";
 import {
@@ -608,8 +609,8 @@ export function Extensions() {
   }, [tabParam]);
 
   return (
-    <div className="space-y-6">
-      <PluginWorkspaceNav activeTab="manage" />
+    <PageShell>
+      <PluginWorkspaceHeader activeTab="manage" />
 
       {guideActive ? (
       <PluginInstallGuide
@@ -645,7 +646,7 @@ export function Extensions() {
           <DevGuideTab />
         </TabsContent>
       </Tabs>
-    </div>
+    </PageShell>
   );
 }
 

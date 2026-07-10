@@ -10,6 +10,7 @@ import {
   HandCoins,
   Percent,
   RefreshCw,
+  Trash2,
   Users,
   WalletCards,
 } from "lucide-react";
@@ -22,11 +23,14 @@ import {
   listLedgerCompensations,
   listLedgerEntries,
   markLedgerCompensationManualPaid,
+  resetLedgerData,
   type LedgerCompensation,
   type LedgerDirection,
   type LedgerEntry,
   type LedgerQueryParams,
+  type LedgerRecipientBucket,
   type LedgerStatsQueryParams,
+  type LedgerSummaryBucket,
   type LedgerSummary,
   type OperationalStats,
 } from "@/api/ledger";
@@ -42,6 +46,7 @@ import { Select } from "@/components/ui/select";
 import { SectionHeader, SignalPill, ToneRailCard } from "@/components/ui/status";
 import type { VisualTone } from "@/components/ui/status";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { getErrMsg } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
@@ -57,6 +62,8 @@ type FilterState = {
   amount_max: string;
   status: string;
 };
+
+type TrendPeriod = "day" | "week" | "month";
 
 const DEFAULT_FILTERS: FilterState = {
   since: "",
@@ -111,6 +118,14 @@ export function LedgerPage() {
     },
     onError: (err) => toast.error(getErrMsg(err)),
   });
+  const resetMut = useMutation({
+    mutationFn: resetLedgerData,
+    onSuccess: (result) => {
+      toast.success(`已重置 ${result.deleted_action_events} 条动作和 ${result.deleted_compensations} 条待补付记录`);
+      void queryClient.invalidateQueries({ queryKey: ["ledger"] });
+    },
+    onError: (err) => toast.error(getErrMsg(err)),
+  });
 
   const accounts = accountsQ.data || [];
   const accountLabel = (accountId: number | null | undefined) => {
@@ -132,9 +147,14 @@ export function LedgerPage() {
   };
 
   const handleManualPaid = (item: LedgerCompensation) => {
-    const note = window.prompt(`核销挂账 ${item.payout_key}，备注可留空。`);
+    const note = window.prompt(`核销待补付记录 ${item.payout_key}，备注可留空。`);
     if (note === null) return;
     manualPaidMut.mutate({ id: item.id, note });
+  };
+
+  const handleReset = () => {
+    if (!window.confirm("确认清空资金台账与运营统计？流水、趋势、开局统计和待补付记录都会被永久删除，此操作不可恢复。")) return;
+    resetMut.mutate();
   };
 
   return (
@@ -142,19 +162,25 @@ export function LedgerPage() {
       <PageHeader
         icon={WalletCards}
         title="资金台账"
-        description="按入账、出账和补付挂账核对每个账号与群的资金流。"
+        description="按入账、出账和待补付事项核对每个账号、群与收款方的资金流。待补付只在付款失败且自动补付尚未完成时出现，正常情况下应为 0。"
         actions={(
-          <Button type="button" variant="outline" onClick={refreshAll}>
-            <RefreshCw className="mr-2 h-4 w-4" />
-            刷新
-          </Button>
+          <>
+            <Button type="button" variant="outline" onClick={refreshAll}>
+              <RefreshCw className="mr-2 h-4 w-4" />
+              刷新
+            </Button>
+            <Button type="button" variant="destructive" onClick={handleReset} disabled={resetMut.isPending}>
+              {resetMut.isPending ? <Spinner className="mr-2" /> : <Trash2 className="mr-2 h-4 w-4" />}
+              重置数据
+            </Button>
+          </>
         )}
         signals={summary ? (
           <>
             <SignalPill tone="success" label="入账" value={formatAmount(summary.income)} />
             <SignalPill tone="warn" label="出账" value={formatAmount(summary.payout)} />
             <SignalPill tone={isNegative(summary.net) ? "danger" : "primary"} label="净额" value={formatAmount(summary.net)} />
-            <SignalPill tone={compensations.length > 0 ? "warn" : "neutral"} label="挂账" value={compensations.length} />
+            <SignalPill tone={compensations.length > 0 ? "warn" : "neutral"} label="待补付" value={compensations.length} />
           </>
         ) : null}
       />
@@ -184,7 +210,10 @@ export function LedgerPage() {
 
       <div className="grid gap-6 xl:grid-cols-[minmax(0,1.7fr)_minmax(320px,0.8fr)]">
         <TrendPanel summary={summary} loading={isLoading} />
-        <ChatSummaryPanel summary={summary} />
+        <div className="space-y-6">
+          <ChatSummaryPanel summary={summary} />
+          <RecipientSummaryPanel summary={summary} />
+        </div>
       </div>
 
       <LedgerTable
@@ -250,10 +279,10 @@ function OperationalOverview({ stats, loading }: { stats?: OperationalStats; loa
         <ToneRailCard
           icon={Users}
           title="参与人数"
-          value="需埋点"
-          description="需 WP0-tap 补参与者字段后统计"
-          tone="neutral"
-          valueClassName="truncate text-xl font-semibold"
+          value={formatInteger(total.participant_count ?? 0)}
+          description="按开局与付款事件中的参与者 User ID 去重统计"
+          tone={total.participant_count ? "primary" : "neutral"}
+          valueClassName="truncate font-mono text-2xl font-bold tabular-nums"
         />
       </div>
 
@@ -465,19 +494,30 @@ function FilterPanel({
 
 function TrendPanel({ summary, loading }: { summary?: LedgerSummary; loading: boolean }) {
   useTheme(); // 订阅主题，切换时重取图表色值
-  const xAxis = summary?.by_day.map((item) => item.key) || [];
+  const [period, setPeriod] = useState<TrendPeriod>("day");
+  const buckets = useMemo(() => aggregateTrendBuckets(summary?.by_day || [], period), [period, summary?.by_day]);
+  const xAxis = buckets.map((item) => item.label);
   const series = [
-    { name: "入账", data: summary?.by_day.map((item) => chartNumber(item.income)) || [], color: cssVarHsl("--success") },
-    { name: "出账", data: summary?.by_day.map((item) => chartNumber(item.payout)) || [], color: cssVarHsl("--warning") },
-    { name: "净额", data: summary?.by_day.map((item) => chartNumber(item.net)) || [], color: cssVarHsl("--primary") },
+    { name: "入账", data: buckets.map((item) => chartNumber(item.income)), color: cssVarHsl("--success") },
+    { name: "出账", data: buckets.map((item) => chartNumber(item.payout)), color: cssVarHsl("--warning") },
+    { name: "净额", data: buckets.map((item) => chartNumber(item.net)), color: cssVarHsl("--primary") },
   ];
   return (
     <Card>
       <CardHeader>
         <SectionHeader
           icon={WalletCards}
-          title="日趋势"
+          title="资金趋势"
           meta={summary ? <MetaBadge tone="outline">{summary.count} 条流水</MetaBadge> : null}
+          actions={(
+            <Tabs value={period} onValueChange={(value) => setPeriod(value as TrendPeriod)}>
+              <TabsList>
+                <TabsTrigger value="day">日</TabsTrigger>
+                <TabsTrigger value="week">周</TabsTrigger>
+                <TabsTrigger value="month">月</TabsTrigger>
+              </TabsList>
+            </Tabs>
+          )}
         />
       </CardHeader>
       <CardContent>
@@ -511,8 +551,8 @@ function ChatSummaryPanel({ summary }: { summary?: LedgerSummary }) {
                 className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3 rounded-lg border border-border/70 bg-muted/30 px-3 py-2"
               >
                 <div className="min-w-0">
-                  <div className="truncate font-mono text-sm">{item.label}</div>
-                  <div className="text-xs text-muted-foreground">{item.count} 条</div>
+                  <div className="truncate text-sm font-medium">{item.label}</div>
+                  <div className="font-mono text-[11px] text-muted-foreground">{item.key} · {item.count} 条</div>
                 </div>
                 <div className={cn("text-right font-mono text-sm font-semibold tabular-nums", amountToneClass(item.net))}>
                   {formatAmount(item.net)}
@@ -523,6 +563,45 @@ function ChatSummaryPanel({ summary }: { summary?: LedgerSummary }) {
         )}
       </CardContent>
     </Card>
+  );
+}
+
+function RecipientSummaryPanel({ summary }: { summary?: LedgerSummary }) {
+  const rows = summary?.by_recipient.slice(0, 8) || [];
+  return (
+    <Card>
+      <CardHeader>
+        <SectionHeader icon={Users} title="收款方汇总" description="按收款方 User ID 汇总入账和派奖金额。" />
+      </CardHeader>
+      <CardContent>
+        {rows.length === 0 ? (
+          <EmptyState text="暂无收款方身份记录" />
+        ) : (
+          <div className="space-y-2">
+            {rows.map((item) => (
+              <RecipientSummaryRow key={item.key} item={item} />
+            ))}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function RecipientSummaryRow({ item }: { item: LedgerRecipientBucket }) {
+  return (
+    <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3 rounded-lg border border-border/70 bg-muted/30 px-3 py-2">
+      <div className="min-w-0">
+        <div className="truncate text-sm font-medium">{item.label}</div>
+        <div className="truncate font-mono text-[11px] text-muted-foreground">
+          {item.user_id != null ? `UID ${item.user_id}` : "UID 未识别"} · {item.count} 笔
+        </div>
+      </div>
+      <div className="text-right">
+        <div className="font-mono text-sm font-semibold tabular-nums">{formatAmount(item.received)}</div>
+        <div className="text-[11px] text-muted-foreground">入 {formatAmount(item.income)} · 出 {formatAmount(item.payout)}</div>
+      </div>
+    </div>
   );
 }
 
@@ -550,7 +629,7 @@ function LedgerTable({
         ) : entries.length === 0 ? (
           <EmptyState text="暂无流水" />
         ) : (
-          <Table className="min-w-[1080px]">
+          <Table className="min-w-[1260px]">
             <TableHeader>
               <TableRow>
                 <TableHead>时间</TableHead>
@@ -558,6 +637,7 @@ function LedgerTable({
                 <TableHead>金额</TableHead>
                 <TableHead>账号</TableHead>
                 <TableHead>群</TableHead>
+                <TableHead>收款方</TableHead>
                 <TableHead>插件</TableHead>
                 <TableHead>状态</TableHead>
                 <TableHead>通道</TableHead>
@@ -581,7 +661,16 @@ function LedgerTable({
                     <div className="max-w-44 truncate">{accountLabel(entry.account_id)}</div>
                     <div className="font-mono text-[11px] text-muted-foreground">#{entry.account_id}</div>
                   </TableCell>
-                  <TableCell className="font-mono text-xs">{entry.chat_id ?? "-"}</TableCell>
+                  <TableCell>
+                    <div className="max-w-44 truncate text-sm">{entry.chat_title || "-"}</div>
+                    <div className="font-mono text-[11px] text-muted-foreground">{entry.chat_id ?? "-"}</div>
+                  </TableCell>
+                  <TableCell>
+                    <div className="max-w-44 truncate text-sm">{recipientDisplayName(entry)}</div>
+                    <div className="font-mono text-[11px] text-muted-foreground">
+                      {entry.receiver_user_id != null ? `UID ${entry.receiver_user_id}` : "UID -"}
+                    </div>
+                  </TableCell>
                   <TableCell>
                     <div className="max-w-40 truncate font-mono text-xs">{entry.plugin_key || "-"}</div>
                     <div className="max-w-40 truncate font-mono text-[11px] text-muted-foreground">{entry.entry_key || "-"}</div>
@@ -622,7 +711,8 @@ function CompensationTable({
       <CardHeader>
         <SectionHeader
           icon={HandCoins}
-          title="挂账"
+          title="待补付"
+          description="付款失败后进入自动补付队列的未结事项。队列成功补付或人工核销后会从这里消失。"
           meta={<MetaBadge tone={items.length > 0 ? "warn" : "outline"}>{items.length} 条</MetaBadge>}
         />
       </CardHeader>
@@ -630,14 +720,15 @@ function CompensationTable({
         {loading ? (
           <LoadingState />
         ) : items.length === 0 ? (
-          <EmptyState text="暂无挂账" />
+          <EmptyState text="暂无待补付事项" />
         ) : (
-          <Table className="min-w-[1100px]">
+          <Table className="min-w-[1240px]">
             <TableHeader>
               <TableRow>
                 <TableHead>创建时间</TableHead>
                 <TableHead>账号</TableHead>
                 <TableHead>群</TableHead>
+                <TableHead>收款方</TableHead>
                 <TableHead>金额</TableHead>
                 <TableHead>插件</TableHead>
                 <TableHead>状态</TableHead>
@@ -659,7 +750,16 @@ function CompensationTable({
                       <div className="max-w-44 truncate">{accountLabel(item.account_id)}</div>
                       <div className="font-mono text-[11px] text-muted-foreground">#{item.account_id}</div>
                     </TableCell>
-                    <TableCell className="font-mono text-xs">{item.chat_id}</TableCell>
+                    <TableCell>
+                      <div className="max-w-44 truncate text-sm">{item.chat_title || "-"}</div>
+                      <div className="font-mono text-[11px] text-muted-foreground">{item.chat_id}</div>
+                    </TableCell>
+                    <TableCell>
+                      <div className="max-w-44 truncate text-sm">{item.receiver_name || item.receiver_user_id || "-"}</div>
+                      <div className="font-mono text-[11px] text-muted-foreground">
+                        {item.receiver_user_id != null ? `UID ${item.receiver_user_id}` : "UID -"}
+                      </div>
+                    </TableCell>
                     <TableCell className="text-right font-mono font-semibold tabular-nums text-warning">
                       {formatAmount(item.amount)}
                     </TableCell>
@@ -779,6 +879,48 @@ function buildStatsQueryParams(filters: FilterState): LedgerStatsQueryParams {
     chat_id: filters.chat_id || undefined,
     plugin_key: filters.plugin_key.trim() || undefined,
   };
+}
+
+function aggregateTrendBuckets(items: LedgerSummaryBucket[], period: TrendPeriod): LedgerSummaryBucket[] {
+  if (period === "day") return items;
+  const buckets = new Map<string, { key: string; label: string; income: number; payout: number; count: number }>();
+  for (const item of items) {
+    const group = trendGroup(item.key, period);
+    const current = buckets.get(group.key) || { ...group, income: 0, payout: 0, count: 0 };
+    current.income += chartNumber(item.income);
+    current.payout += chartNumber(item.payout);
+    current.count += item.count;
+    buckets.set(group.key, current);
+  }
+  return [...buckets.values()].sort((a, b) => a.key.localeCompare(b.key)).map((item) => ({
+    key: item.key,
+    label: item.label,
+    income: String(item.income),
+    payout: String(item.payout),
+    net: String(item.income - item.payout),
+    count: item.count,
+  }));
+}
+
+function trendGroup(dayKey: string, period: Exclude<TrendPeriod, "day">) {
+  const date = new Date(`${dayKey}T00:00:00Z`);
+  if (period === "month") {
+    const key = dayKey.slice(0, 7);
+    return { key, label: key };
+  }
+  const weekday = date.getUTCDay() || 7;
+  date.setUTCDate(date.getUTCDate() + 4 - weekday);
+  const yearStart = new Date(Date.UTC(date.getUTCFullYear(), 0, 1));
+  const week = Math.ceil((((date.getTime() - yearStart.getTime()) / 86400000) + 1) / 7);
+  const key = `${date.getUTCFullYear()}-W${String(week).padStart(2, "0")}`;
+  return { key, label: key };
+}
+
+function recipientDisplayName(entry: LedgerEntry) {
+  if (entry.receiver_name) return entry.receiver_name;
+  if (entry.receiver_username) return `@${entry.receiver_username.replace(/^@/, "")}`;
+  if (entry.receiver_user_id != null) return String(entry.receiver_user_id);
+  return "-";
 }
 
 function formatAmount(value: string) {

@@ -69,7 +69,11 @@ async def test_emit_action_event_persists_status_and_publishes(
         "type": "payout",
         "send_via": "userbot_reply",
         "chat_id": -100123,
+        "chat_title": "测试群",
         "amount": Decimal("12.50"),
+        "receiver_user_id": 9001,
+        "receiver_name": "收款人",
+        "receiver_username": "receiver",
         "text": "+12.50",
         "context": {"plugin_key": "game24", "entry_key": "start", "session_key": "sess_1"},
     }
@@ -99,6 +103,10 @@ async def test_emit_action_event_persists_status_and_publishes(
     assert row.status == status
     assert row.error_code == error_code
     assert row.params_summary["amount"] == "12.50"
+    assert row.params_summary["chat_title"] == "测试群"
+    assert row.params_summary["receiver_user_id"] == 9001
+    assert row.params_summary["receiver_name"] == "收款人"
+    assert row.params_summary["receiver_username"] == "receiver"
     assert redis.published
     channel, payload = redis.published[-1]
     assert channel == "worker_event:7"
@@ -121,6 +129,13 @@ async def test_delivery_payout_dry_run_does_not_publish_worker_ipc(monkeypatch) 
         callback_already_acked=False,
         token="token",
         trace_id="evt_dry",
+        user_id=42,
+        display_name="中奖用户",
+        username="winner",
+        reply_to_user_id=None,
+        reply_to_display_name=None,
+        reply_to_username=None,
+        native_raw={"message": {"chat": {"id": -100123, "title": "测试群"}}},
     )
     executor = InteractionDeliveryExecutor(
         incoming=incoming,
@@ -152,6 +167,10 @@ async def test_delivery_payout_dry_run_does_not_publish_worker_ipc(monkeypatch) 
     assert record_action.await_args.kwargs["result"]["dry_run"] is True
     emit_action_event.assert_awaited_once()
     assert emit_action_event.await_args.kwargs["status"] == ACTION_EVENT_STATUS_DRY_RUN
+    tapped_action = emit_action_event.await_args.kwargs["action"]
+    assert tapped_action["chat_title"] == "测试群"
+    assert tapped_action["receiver_user_id"] == 42
+    assert tapped_action["receiver_name"] == "中奖用户"
 
 
 def _stage(trace: dict[str, Any], name: str) -> dict[str, Any]:

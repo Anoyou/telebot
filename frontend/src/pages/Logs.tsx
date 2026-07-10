@@ -288,7 +288,7 @@ export function Logs() {
           />
         </CardHeader>
         <CardContent className="space-y-4">
-          <div className="grid grid-cols-1 gap-3 md:grid-cols-[minmax(0,1fr)_180px_minmax(300px,340px)] 2xl:grid-cols-[220px_180px_340px_minmax(260px,1fr)]">
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-[240px_180px_minmax(300px,340px)] 2xl:grid-cols-[240px_180px_340px_minmax(260px,1fr)]">
             <Field label="账号">
               <Select value={accountId} onChange={(event) => setAccountId(event.target.value)}>
                 <option value="">全部账号</option>

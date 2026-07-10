@@ -16,6 +16,7 @@ from app.db.models.action_event import (
     ACTION_EVENT_STATUS_OK,
     ActionEvent,
 )
+from app.db.models.log import EventTrace
 from app.db.models.payout_compensation import (
     PAYOUT_COMPENSATION_STATUS_COMPENSATED,
     PAYOUT_COMPENSATION_STATUS_PENDING,
@@ -32,6 +33,7 @@ async def ledger_session_factory():
         await conn.execute(text("INSERT INTO account (id) VALUES (7), (8)"))
         await conn.run_sync(ActionEvent.__table__.create)
         await conn.run_sync(PayoutCompensation.__table__.create)
+        await conn.run_sync(EventTrace.__table__.create)
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     try:
         yield session_factory
@@ -93,19 +95,58 @@ async def _insert_compensation(session_factory, **overrides) -> PayoutCompensati
     return row
 
 
+async def _insert_event_trace(session_factory, **overrides) -> EventTrace:
+    row = EventTrace(
+        id=overrides.pop("id", 1),
+        trace_id=overrides.pop("trace_id", "trace_1"),
+        account_id=overrides.pop("account_id", 7),
+        source_channel=overrides.pop("source_channel", "interaction_bot"),
+        event_type=overrides.pop("event_type", "message"),
+        chat_id=overrides.pop("chat_id", -100123),
+        sender_user_id=overrides.pop("sender_user_id", 9001),
+        sender_name=overrides.pop("sender_name", "历史收款人"),
+        status=overrides.pop("status", "ok"),
+        payload_snapshot=overrides.pop("payload_snapshot", {"chat": {"title": "历史测试群"}}),
+        started_at=overrides.pop("started_at", datetime.now(UTC)),
+        **overrides,
+    )
+    async with session_factory() as db:
+        db.add(row)
+        await db.commit()
+        await db.refresh(row)
+    return row
+
+
 @pytest.mark.asyncio
 async def test_ledger_summary_matches_filtered_entries_sum(ledger_session_factory) -> None:
     base = datetime.now(UTC) - timedelta(days=1)
     await _insert_action_event(
         ledger_session_factory,
         action_type="payment_confirmed",
-        params_summary={"event_type": "payment_confirmed", "amount": "100.50", "chat_id": -100123},
+        params_summary={
+            "event_type": "payment_confirmed",
+            "amount": "100.50",
+            "chat_id": -100123,
+            "chat_title": "测试群",
+            "payer_user_id": 8001,
+            "payer_name": "付款人",
+            "receiver_user_id": 9001,
+            "receiver_name": "收款人甲",
+        },
         created_at=base,
     )
     await _insert_action_event(
         ledger_session_factory,
         action_type="payout",
-        params_summary={"type": "payout", "amount": "30.25", "chat_id": -100123, "payout_key": "pay_1"},
+        params_summary={
+            "type": "payout",
+            "amount": "30.25",
+            "chat_id": -100123,
+            "chat_title": "测试群",
+            "payout_key": "pay_1",
+            "receiver_user_id": 9002,
+            "receiver_name": "收款人乙",
+        },
         created_at=base + timedelta(minutes=5),
     )
     await _insert_action_event(
@@ -157,6 +198,16 @@ async def test_ledger_summary_matches_filtered_entries_sum(ledger_session_factor
     assert Decimal(summary.net) == income - payout == Decimal("70.25")
     assert {item.key for item in summary.by_day} == {base.date().isoformat()}
     assert {item.key for item in summary.by_chat} == {"-100123"}
+    assert summary.by_chat[0].label == "测试群"
+    assert {item.user_id for item in summary.by_recipient} == {9001, 9002}
+    recipient_amounts = {item.user_id: Decimal(item.received) for item in summary.by_recipient}
+    assert recipient_amounts == {9001: Decimal("100.50"), 9002: Decimal("30.25")}
+    income_entry = next(item for item in entries if item.direction == "in")
+    assert income_entry.chat_title == "测试群"
+    assert income_entry.payer_user_id == 8001
+    assert income_entry.payer_name == "付款人"
+    assert income_entry.receiver_user_id == 9001
+    assert income_entry.receiver_name == "收款人甲"
 
 
 @pytest.mark.asyncio
@@ -245,6 +296,34 @@ async def test_ledger_summary_applies_default_time_window(ledger_session_factory
 
 
 @pytest.mark.asyncio
+async def test_ledger_hydrates_historical_chat_and_recipient_labels(ledger_session_factory) -> None:
+    now = datetime.now(UTC)
+    await _insert_event_trace(ledger_session_factory, started_at=now)
+    await _insert_action_event(
+        ledger_session_factory,
+        action_type="payout",
+        params_summary={
+            "type": "payout",
+            "amount": "66",
+            "chat_id": -100123,
+            "reply_to_user_id": 9001,
+            "payout_key": "pay_historical",
+        },
+        created_at=now,
+    )
+
+    async with ledger_session_factory() as db:
+        entries = await ledger_service.list_ledger_entries(db)
+        summary = await ledger_service.summarize_ledger(db)
+
+    assert entries[0].chat_title == "历史测试群"
+    assert entries[0].receiver_user_id == 9001
+    assert entries[0].receiver_name == "历史收款人"
+    assert summary.by_chat[0].label == "历史测试群"
+    assert summary.by_recipient[0].label == "历史收款人"
+
+
+@pytest.mark.asyncio
 async def test_manual_paid_compensation_writes_audit_and_closes_row(
     ledger_session_factory,
     monkeypatch,
@@ -290,3 +369,35 @@ async def test_manual_paid_compensation_writes_audit_and_closes_row(
 
     assert open_rows == []
     assert len(all_rows) == 1
+
+
+@pytest.mark.asyncio
+async def test_reset_ledger_data_removes_financial_and_operational_rows_only(
+    ledger_session_factory,
+    monkeypatch,
+) -> None:
+    now = datetime.now(UTC)
+    for action_type in ("payment_confirmed", "payout", "start_session", "send_message"):
+        await _insert_action_event(
+            ledger_session_factory,
+            action_type=action_type,
+            params_summary={"type": action_type, "amount": "10", "chat_id": -100123},
+            created_at=now,
+        )
+    await _insert_compensation(ledger_session_factory, payout_key="pay_reset")
+    audit_write = AsyncMock()
+    monkeypatch.setattr(ledger_service.audit, "write", audit_write)
+
+    async with ledger_session_factory() as db:
+        result = await ledger_service.reset_ledger_data(db, user_id=42)
+        await db.commit()
+
+    assert result.deleted_action_events == 3
+    assert result.deleted_compensations == 1
+    audit_write.assert_awaited_once()
+    assert audit_write.await_args.args[2] == "ledger.reset"
+    async with ledger_session_factory() as db:
+        action_rows = (await db.execute(select(ActionEvent))).scalars().all()
+        compensation_rows = (await db.execute(select(PayoutCompensation))).scalars().all()
+    assert [row.action_type for row in action_rows] == ["send_message"]
+    assert compensation_rows == []

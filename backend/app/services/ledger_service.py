@@ -13,10 +13,11 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from fastapi import HTTPException
-from sqlalchemy import select
+from sqlalchemy import delete, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db.models.action_event import ACTION_EVENT_STATUS_COMPENSATED, ACTION_EVENT_STATUS_OK, ActionEvent
+from ..db.models.log import EventTrace
 from ..db.models.payout_compensation import (
     PAYOUT_COMPENSATION_STATUS_ABANDONED,
     PAYOUT_COMPENSATION_STATUS_COMPENSATED,
@@ -66,6 +67,12 @@ class LedgerEntry:
     status: str
     account_id: int
     chat_id: int | None
+    chat_title: str | None
+    payer_user_id: int | None
+    payer_name: str | None
+    receiver_user_id: int | None
+    receiver_name: str | None
+    receiver_username: str | None
     plugin_key: str | None
     entry_key: str | None
     channel: str | None
@@ -88,6 +95,18 @@ class LedgerSummaryBucket:
 
 
 @dataclass(slots=True)
+class LedgerRecipientBucket:
+    key: str
+    label: str
+    user_id: int | None
+    username: str | None
+    received: str
+    income: str
+    payout: str
+    count: int
+
+
+@dataclass(slots=True)
 class LedgerSummary:
     income: str
     payout: str
@@ -95,6 +114,7 @@ class LedgerSummary:
     count: int
     by_day: list[LedgerSummaryBucket]
     by_chat: list[LedgerSummaryBucket]
+    by_recipient: list[LedgerRecipientBucket]
 
 
 @dataclass(slots=True)
@@ -107,6 +127,9 @@ class LedgerCompensation:
     entry_key: str | None
     origin: str
     chat_id: int
+    chat_title: str | None
+    receiver_user_id: int | None
+    receiver_name: str | None
     amount: str
     status: str
     error_code_first: str | None
@@ -120,6 +143,12 @@ class LedgerCompensation:
     notified_at: datetime | None
     created_at: datetime
     updated_at: datetime
+
+
+@dataclass(slots=True)
+class LedgerResetResult:
+    deleted_action_events: int
+    deleted_compensations: int
 
 
 def _err(code: str, message: str, status: int = 400) -> HTTPException:
@@ -139,6 +168,7 @@ async def list_ledger_entries(db: AsyncSession, filters: LedgerFilters | None = 
         entries.append(entry)
         if active.limit is not None and len(entries) >= active.limit:
             break
+    await _hydrate_ledger_metadata(db, entries)
     return entries
 
 
@@ -158,6 +188,7 @@ async def summarize_ledger(db: AsyncSession, filters: LedgerFilters | None = Non
     payout = Decimal("0")
     day_buckets: dict[str, _SummaryAccumulator] = {}
     chat_buckets: dict[str, _SummaryAccumulator] = {}
+    recipient_buckets: dict[str, _RecipientAccumulator] = {}
 
     for entry in entries:
         amount = _decimal_from_any(entry.amount) or Decimal("0")
@@ -170,8 +201,12 @@ async def summarize_ledger(db: AsyncSession, filters: LedgerFilters | None = Non
         _add_to_bucket(day_buckets, day_key, day_key, entry.direction, amount)
 
         chat_key = str(entry.chat_id) if entry.chat_id is not None else "unknown"
-        chat_label = str(entry.chat_id) if entry.chat_id is not None else "未知群"
+        chat_label = entry.chat_title or (str(entry.chat_id) if entry.chat_id is not None else "未知群")
         _add_to_bucket(chat_buckets, chat_key, chat_label, entry.direction, amount)
+
+        recipient_key = _recipient_key(entry)
+        if recipient_key is not None:
+            _add_to_recipient_bucket(recipient_buckets, recipient_key, entry, amount)
 
     return LedgerSummary(
         income=_decimal_text(income),
@@ -184,6 +219,39 @@ async def summarize_ledger(db: AsyncSession, filters: LedgerFilters | None = Non
             sort_key=lambda item: (_decimal_from_any(item.net) or Decimal("0"), item.key),
             reverse=True,
         ),
+        by_recipient=_recipient_buckets(recipient_buckets),
+    )
+
+
+async def reset_ledger_data(db: AsyncSession, *, user_id: int | None) -> LedgerResetResult:
+    """清空资金台账、补付队列及本页运营统计所依赖的动作。"""
+
+    action_result = await db.execute(
+        delete(ActionEvent).where(
+            or_(
+                ActionEvent.action_type.in_(("payment_confirmed", "payout", "start_session")),
+                ActionEvent.action_type.endswith("_payout", autoescape=True),
+                ActionEvent.action_type.startswith("payout_", autoescape=True),
+            )
+        )
+    )
+    compensation_result = await db.execute(delete(PayoutCompensation))
+    deleted_action_events = int(getattr(action_result, "rowcount", 0) or 0)
+    deleted_compensations = int(getattr(compensation_result, "rowcount", 0) or 0)
+    await audit.write(
+        db,
+        user_id,
+        "ledger.reset",
+        target="ledger",
+        detail={
+            "deleted_action_events": deleted_action_events,
+            "deleted_compensations": deleted_compensations,
+        },
+    )
+    await db.flush()
+    return LedgerResetResult(
+        deleted_action_events=deleted_action_events,
+        deleted_compensations=deleted_compensations,
     )
 
 
@@ -266,6 +334,18 @@ class _SummaryAccumulator:
     count: int = 0
 
 
+@dataclass(slots=True)
+class _RecipientAccumulator:
+    key: str
+    label: str
+    user_id: int | None
+    username: str | None
+    received: Decimal = Decimal("0")
+    income: Decimal = Decimal("0")
+    payout: Decimal = Decimal("0")
+    count: int = 0
+
+
 def _normalize_filters(filters: LedgerFilters | None) -> LedgerFilters:
     active = replace(filters) if filters is not None else LedgerFilters()
     if active.direction:
@@ -292,7 +372,7 @@ def _apply_default_summary_window(filters: LedgerFilters) -> None:
 
 
 def _empty_summary() -> LedgerSummary:
-    return LedgerSummary(income="0", payout="0", net="0", count=0, by_day=[], by_chat=[])
+    return LedgerSummary(income="0", payout="0", net="0", count=0, by_day=[], by_chat=[], by_recipient=[])
 
 
 async def _load_action_rows(db: AsyncSession, filters: LedgerFilters) -> list[ActionEvent]:
@@ -314,6 +394,81 @@ async def _load_action_rows(db: AsyncSession, filters: LedgerFilters) -> list[Ac
         stmt = stmt.limit(max(filters.limit * 20, 1000))
     rows = (await db.execute(stmt)).scalars().all()
     return list(rows)
+
+
+async def _hydrate_ledger_metadata(db: AsyncSession, entries: list[LedgerEntry]) -> None:
+    if not entries:
+        return
+    account_ids = {entry.account_id for entry in entries}
+    chat_ids = {entry.chat_id for entry in entries if entry.chat_id is not None and not entry.chat_title}
+    user_ids = {
+        user_id
+        for entry in entries
+        for user_id in (entry.payer_user_id, entry.receiver_user_id)
+        if user_id is not None
+        and (
+            (user_id == entry.payer_user_id and not entry.payer_name)
+            or (user_id == entry.receiver_user_id and not entry.receiver_name)
+        )
+    }
+
+    chat_labels: dict[tuple[int, int], str] = {}
+    if chat_ids:
+        rows = (
+            await db.execute(
+                select(EventTrace.account_id, EventTrace.chat_id, EventTrace.payload_snapshot)
+                .where(
+                    EventTrace.account_id.in_(account_ids),
+                    EventTrace.chat_id.in_(chat_ids),
+                )
+                .order_by(EventTrace.started_at.desc(), EventTrace.id.desc())
+                .limit(5000)
+            )
+        ).all()
+        for account_id, chat_id, payload in rows:
+            if account_id is None or chat_id is None:
+                continue
+            key = (int(account_id), int(chat_id))
+            if key in chat_labels:
+                continue
+            payload_data = payload if isinstance(payload, dict) else {}
+            title = _text_or_none(
+                _nested(payload_data, "chat", "title"),
+                payload_data.get("chat_title"),
+            )
+            if title:
+                chat_labels[key] = title
+
+    user_labels: dict[tuple[int, int], str] = {}
+    if user_ids:
+        rows = (
+            await db.execute(
+                select(EventTrace.account_id, EventTrace.sender_user_id, EventTrace.sender_name)
+                .where(
+                    EventTrace.account_id.in_(account_ids),
+                    EventTrace.sender_user_id.in_(user_ids),
+                    EventTrace.sender_name.is_not(None),
+                )
+                .order_by(EventTrace.started_at.desc(), EventTrace.id.desc())
+                .limit(5000)
+            )
+        ).all()
+        for account_id, user_id, sender_name in rows:
+            if account_id is None or user_id is None:
+                continue
+            key = (int(account_id), int(user_id))
+            if key not in user_labels:
+                label = _text_or_none(sender_name)
+                if label:
+                    user_labels[key] = label
+
+    for entry in entries:
+        if entry.chat_id is not None and not entry.chat_title:
+            entry.chat_title = chat_labels.get((entry.account_id, entry.chat_id))
+        if entry.payer_user_id is not None and not entry.payer_name:
+            entry.payer_name = user_labels.get((entry.account_id, entry.payer_user_id))
+        if entry.receiver_user_id is not None and not entry.receiver_name:
+            entry.receiver_name = user_labels.get((entry.account_id, entry.receiver_user_id))
 
 
 def _entry_from_action_event(row: ActionEvent) -> LedgerEntry | None:
@@ -339,6 +494,26 @@ def _entry_from_action_event(row: ActionEvent) -> LedgerEntry | None:
             _nested(summary, "source", "chat_id"),
             _nested(summary, "chat", "id"),
             _nested(summary, "payment", "chat_id"),
+        ),
+        chat_title=_text_or_none(
+            summary.get("chat_title"),
+            _nested(summary, "chat", "title"),
+            _nested(summary, "payment", "chat_title"),
+        ),
+        payer_user_id=_int_or_none(summary.get("payer_user_id"), _nested(summary, "payment", "payer", "user_id")),
+        payer_name=_text_or_none(summary.get("payer_name"), _nested(summary, "payment", "payer", "display_name")),
+        receiver_user_id=_int_or_none(
+            summary.get("receiver_user_id"),
+            summary.get("reply_to_user_id"),
+            _nested(summary, "payment", "receiver", "user_id"),
+        ),
+        receiver_name=_text_or_none(
+            summary.get("receiver_name"),
+            _nested(summary, "payment", "receiver", "display_name"),
+        ),
+        receiver_username=_text_or_none(
+            summary.get("receiver_username"),
+            _nested(summary, "payment", "receiver", "username"),
         ),
         plugin_key=row.plugin_key,
         entry_key=row.entry_key,
@@ -400,11 +575,64 @@ def _add_to_bucket(
     amount: Decimal,
 ) -> None:
     bucket = buckets.setdefault(key, _SummaryAccumulator(key=key, label=label))
+    if bucket.label in {bucket.key, "未知群"} and label not in {key, "未知群"}:
+        bucket.label = label
     if direction == LEDGER_DIRECTION_IN:
         bucket.income += amount
     else:
         bucket.payout += amount
     bucket.count += 1
+
+
+def _recipient_key(entry: LedgerEntry) -> str | None:
+    if entry.receiver_user_id is not None:
+        return str(entry.receiver_user_id)
+    name = str(entry.receiver_name or entry.receiver_username or "").strip()
+    return f"name:{name.casefold()}" if name else None
+
+
+def _add_to_recipient_bucket(
+    buckets: dict[str, _RecipientAccumulator],
+    key: str,
+    entry: LedgerEntry,
+    amount: Decimal,
+) -> None:
+    label = entry.receiver_name or (f"@{entry.receiver_username.lstrip('@')}" if entry.receiver_username else None)
+    label = label or (str(entry.receiver_user_id) if entry.receiver_user_id is not None else "未知收款方")
+    bucket = buckets.setdefault(
+        key,
+        _RecipientAccumulator(
+            key=key,
+            label=label,
+            user_id=entry.receiver_user_id,
+            username=entry.receiver_username,
+        ),
+    )
+    if bucket.label in {bucket.key, "未知收款方"} and label not in {key, "未知收款方"}:
+        bucket.label = label
+    bucket.received += amount
+    if entry.direction == LEDGER_DIRECTION_IN:
+        bucket.income += amount
+    else:
+        bucket.payout += amount
+    bucket.count += 1
+
+
+def _recipient_buckets(buckets: dict[str, _RecipientAccumulator]) -> list[LedgerRecipientBucket]:
+    out = [
+        LedgerRecipientBucket(
+            key=item.key,
+            label=item.label,
+            user_id=item.user_id,
+            username=item.username,
+            received=_decimal_text(item.received),
+            income=_decimal_text(item.income),
+            payout=_decimal_text(item.payout),
+            count=item.count,
+        )
+        for item in buckets.values()
+    ]
+    return sorted(out, key=lambda item: (_decimal_from_any(item.received) or Decimal("0"), item.key), reverse=True)
 
 
 def _summary_buckets(
@@ -437,6 +665,9 @@ def _compensation_from_row(row: PayoutCompensation) -> LedgerCompensation:
         entry_key=row.entry_key,
         origin=row.origin,
         chat_id=int(row.chat_id),
+        chat_title=_text_or_none((row.payload or {}).get("chat_title")),
+        receiver_user_id=_int_or_none((row.payload or {}).get("receiver_user_id"), (row.payload or {}).get("reply_to_user_id")),
+        receiver_name=_text_or_none((row.payload or {}).get("receiver_name")),
         amount=_decimal_text(_decimal_from_any(row.amount) or Decimal("0")),
         status=row.status,
         error_code_first=row.error_code_first,
@@ -490,9 +721,12 @@ def _int_or_none(*values: Any) -> int | None:
     return None
 
 
-def _text_or_none(value: Any) -> str | None:
-    text = str(value or "").strip()
-    return text or None
+def _text_or_none(*values: Any) -> str | None:
+    for value in values:
+        text = str(value or "").strip()
+        if text:
+            return text
+    return None
 
 
 def today() -> date:
@@ -512,6 +746,7 @@ __all__ = [
     "list_compensations",
     "list_ledger_entries",
     "mark_compensation_manual_paid",
+    "reset_ledger_data",
     "summarize_ledger",
     "today",
 ]

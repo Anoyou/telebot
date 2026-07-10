@@ -19,7 +19,8 @@ import { Spinner } from "@/components/ui/misc";
 import { Select } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { getErrMsg } from "@/lib/api";
-import { PluginWorkspaceNav } from "./WorkspaceNav";
+import { PageShell } from "@/components/layout/PageScaffold";
+import { PluginWorkspaceHeader } from "./WorkspaceHeader";
 
 export function PluginsAutoCommandWhitelistPage() {
   const [searchParams, setSearchParams] = useSearchParams();
@@ -68,8 +69,8 @@ export function PluginsAutoCommandWhitelistPage() {
   });
 
   return (
-    <div className="space-y-4">
-      <PluginWorkspaceNav activeTab="whitelist" selectedAid={aid || null} />
+    <PageShell>
+      <PluginWorkspaceHeader activeTab="whitelist" selectedAid={aid || null} />
 
       <Card>
         <CardHeader>
@@ -135,6 +136,6 @@ export function PluginsAutoCommandWhitelistPage() {
           </div>
         </CardContent>
       </Card>
-    </div>
+    </PageShell>
   );
 }

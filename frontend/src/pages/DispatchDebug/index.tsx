@@ -404,63 +404,65 @@ export function DispatchDebugPage() {
             </CardHeader>
             <CardContent className="pt-5">
               <form className="space-y-4" onSubmit={submit}>
-                <div className="space-y-2">
-                  <Label htmlFor="dispatch-account">账号</Label>
-                  <Select
-                    id="dispatch-account"
-                    value={selectedAid?.toString() ?? ""}
-                    onChange={(event) => {
-                      setSelectedAid(Number(event.target.value));
-                      setChatId("");
-                      setTrace(null);
-                    }}
-                    aria-label="选择账号"
-                  >
-                    {accounts.map((account) => (
-                      <option key={account.id} value={account.id}>
-                        {accountOptionLabel(account)}
-                      </option>
-                    ))}
-                  </Select>
-                  {selectedAccount ? (
-                    <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-                      <AccountStatusBadge status={selectedAccount.status} />
-                      <span>ID {selectedAccount.id}</span>
-                      {selectedAccount.tg_user_id ? <span>TG {selectedAccount.tg_user_id}</span> : null}
-                    </div>
-                  ) : null}
-                </div>
+                <div className="grid gap-3 md:grid-cols-2">
+                  <div className="space-y-2">
+                    <Label htmlFor="dispatch-account">账号</Label>
+                    <Select
+                      id="dispatch-account"
+                      value={selectedAid?.toString() ?? ""}
+                      onChange={(event) => {
+                        setSelectedAid(Number(event.target.value));
+                        setChatId("");
+                        setTrace(null);
+                      }}
+                      aria-label="选择账号"
+                    >
+                      {accounts.map((account) => (
+                        <option key={account.id} value={account.id}>
+                          {accountOptionLabel(account)}
+                        </option>
+                      ))}
+                    </Select>
+                    {selectedAccount ? (
+                      <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                        <AccountStatusBadge status={selectedAccount.status} />
+                        <span>ID {selectedAccount.id}</span>
+                        {selectedAccount.tg_user_id ? <span>TG {selectedAccount.tg_user_id}</span> : null}
+                      </div>
+                    ) : null}
+                  </div>
 
-                <div className="space-y-2">
-                  <Label htmlFor="dispatch-peer">会话</Label>
-                  <Select
-                    id="dispatch-peer"
-                    value={allowedPeers.some((peer) => String(peer.peer_id) === chatId.trim()) ? chatId.trim() : ""}
-                    onChange={(event) => {
-                      const id = event.target.value;
-                      const peer = allowedPeers.find((item) => String(item.peer_id) === id);
-                      setChatId(id);
-                      if (peer?.peer_kind) setChatType(String(peer.peer_kind));
-                      setTrace(null);
-                    }}
-                    disabled={allowedPeersQ.isLoading || allowedPeers.length === 0}
-                  >
-                    <option value="">
-                      {allowedPeersQ.isLoading
-                        ? "正在读取已允许会话"
-                        : allowedPeers.length
-                          ? "从已允许会话选择"
-                          : "暂无已允许会话，可手动填写"}
-                    </option>
-                    {allowedPeers.map((peer) => (
-                      <option key={peer.id} value={String(peer.peer_id)}>
-                        {peerLabel(peer)} · {peer.peer_id}
+                  <div className="space-y-2">
+                    <Label htmlFor="dispatch-peer">会话</Label>
+                    <Select
+                      id="dispatch-peer"
+                      value={allowedPeers.some((peer) => String(peer.peer_id) === chatId.trim()) ? chatId.trim() : ""}
+                      onChange={(event) => {
+                        const id = event.target.value;
+                        const peer = allowedPeers.find((item) => String(item.peer_id) === id);
+                        setChatId(id);
+                        if (peer?.peer_kind) setChatType(String(peer.peer_kind));
+                        setTrace(null);
+                      }}
+                      disabled={allowedPeersQ.isLoading || allowedPeers.length === 0}
+                    >
+                      <option value="">
+                        {allowedPeersQ.isLoading
+                          ? "正在读取已允许会话"
+                          : allowedPeers.length
+                            ? "从已允许会话选择"
+                            : "暂无已允许会话，可手动填写"}
                       </option>
-                    ))}
-                  </Select>
-                  <p className="text-xs leading-5 text-muted-foreground">
-                    交互规则通常按已允许会话生效；选择会话后会自动同步 Chat ID 和会话类型。
-                  </p>
+                      {allowedPeers.map((peer) => (
+                        <option key={peer.id} value={String(peer.peer_id)}>
+                          {peerLabel(peer)} · {peer.peer_id}
+                        </option>
+                      ))}
+                    </Select>
+                    <p className="text-xs leading-5 text-muted-foreground">
+                      交互规则通常按已允许会话生效；选择会话后会自动同步 Chat ID 和会话类型。
+                    </p>
+                  </div>
                 </div>
 
                 <div className="grid gap-3 sm:grid-cols-2">

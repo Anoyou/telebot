@@ -1,11 +1,12 @@
 import { SchedulerConfig } from "@/pages/Plugins/configs/Scheduler";
-import { PluginWorkspaceNav } from "./WorkspaceNav";
+import { PageShell } from "@/components/layout/PageScaffold";
+import { PluginWorkspaceHeader } from "./WorkspaceHeader";
 
 export function PluginsSchedulerPage() {
   return (
-    <div className="space-y-4">
-      <PluginWorkspaceNav activeTab="scheduler" />
+    <PageShell>
+      <PluginWorkspaceHeader activeTab="scheduler" />
       <SchedulerConfig />
-    </div>
+    </PageShell>
   );
 }

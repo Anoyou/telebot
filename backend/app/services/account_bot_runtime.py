@@ -127,9 +127,15 @@ async def _emit_account_bot_action_tap(
     result: Any = None,
 ) -> None:
     account_id = getattr(incoming_or_account_id, "account_id", incoming_or_account_id)
+    action_payload = dict(action)
+    if isinstance(incoming_or_account_id, Incoming):
+        action_payload.setdefault("chat_id", incoming_or_account_id.chat_id)
+        chat_title = _incoming_chat_title(incoming_or_account_id)
+        if chat_title:
+            action_payload.setdefault("chat_title", chat_title)
     await emit_action_event(
         account_id=_int_or_none(account_id),
-        action=action,
+        action=action_payload,
         status=status,
         channel=channel,
         error_code=error_code,
@@ -7519,12 +7525,15 @@ async def _emit_transfer_notice_income_tap(incoming: Incoming, rule: dict[str, A
         "type": "payment_confirmed",
         "event_type": "payment_confirmed",
         "chat_id": incoming.chat_id,
+        "chat_title": _incoming_chat_title(incoming),
         "message_id": incoming.message_id,
         "amount": parsed.get("amount"),
         "payer_user_id": parsed.get("payer_user_id") or parsed.get("reply_to_user_id"),
         "payer_name": parsed.get("payer_name"),
+        "payer_username": parsed.get("payer_username"),
         "receiver_name": parsed.get("receiver_name"),
         "receiver_user_id": parsed.get("receiver_user_id"),
+        "receiver_username": parsed.get("receiver_username"),
         "participant_user_ids": [
             user_id
             for user_id in (_int_or_none(parsed.get("payer_user_id") or parsed.get("reply_to_user_id")),)
@@ -7684,6 +7693,16 @@ def _format_user_name(raw: dict[str, Any]) -> str | None:
     last = str(raw.get("last_name") or "").strip()
     name = " ".join(x for x in [first, last] if x)
     return name or None
+
+
+def _incoming_chat_title(incoming: Incoming) -> str | None:
+    msg = _native_raw_message(incoming)
+    chat = msg.get("chat") if isinstance(msg, dict) and isinstance(msg.get("chat"), dict) else {}
+    title = str(chat.get("title") or "").strip()
+    if title:
+        return title
+    username = str(chat.get("username") or "").strip().lstrip("@")
+    return f"@{username}" if username else None
 
 
 def _format_chat_name(raw: dict[str, Any]) -> str | None:

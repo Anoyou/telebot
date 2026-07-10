@@ -705,6 +705,7 @@ class InteractionDeliveryExecutor:
         reply_to_search_limit: int | None,
         parse_mode: str,
     ) -> None:
+        action = self._with_incoming_ledger_context(action)
         amount = _int_or_none(action.get("amount"))
         if amount is None or amount <= 0:
             await record_action(
@@ -767,6 +768,9 @@ class InteractionDeliveryExecutor:
             error_code = payout_compensation_service.normalize_payout_error_code(error_code, error)
             detail = _userbot_action_failure_result(payload, error=error, error_code=error_code, result=detail)
             payout_payload = dict(payload)
+            for key in ("chat_title", "receiver_user_id", "receiver_name", "receiver_username"):
+                if action.get(key) not in (None, ""):
+                    payout_payload[key] = action.get(key)
             context = action.get("context")
             if isinstance(context, dict):
                 payout_payload["context"] = dict(context)
@@ -828,6 +832,40 @@ class InteractionDeliveryExecutor:
                 error=error,
                 **log_detail,
             )
+
+
+    def _with_incoming_ledger_context(self, action: dict[str, Any]) -> dict[str, Any]:
+        enriched = dict(action)
+        incoming = self.incoming
+        raw = getattr(incoming, "native_raw", None)
+        msg: dict[str, Any] = {}
+        if isinstance(raw, dict):
+            for key in ("message", "edited_message"):
+                if isinstance(raw.get(key), dict):
+                    msg = raw[key]
+                    break
+            if not msg and isinstance(raw.get("callback_query"), dict):
+                callback_message = raw["callback_query"].get("message")
+                if isinstance(callback_message, dict):
+                    msg = callback_message
+        chat = msg.get("chat") if isinstance(msg.get("chat"), dict) else {}
+        chat_title = str(chat.get("title") or "").strip()
+        chat_username = str(chat.get("username") or "").strip().lstrip("@")
+        if chat_title or chat_username:
+            enriched.setdefault("chat_title", chat_title or f"@{chat_username}")
+
+        receiver_user_id = _reply_to_user_id_from_action(enriched) or _int_or_none(getattr(incoming, "user_id", None))
+        if receiver_user_id is not None:
+            enriched.setdefault("receiver_user_id", receiver_user_id)
+            incoming_user_id = _int_or_none(getattr(incoming, "user_id", None))
+            reply_user_id = _int_or_none(getattr(incoming, "reply_to_user_id", None))
+            if receiver_user_id == incoming_user_id:
+                enriched.setdefault("receiver_name", getattr(incoming, "display_name", None))
+                enriched.setdefault("receiver_username", getattr(incoming, "username", None))
+            elif receiver_user_id == reply_user_id:
+                enriched.setdefault("receiver_name", getattr(incoming, "reply_to_display_name", None))
+                enriched.setdefault("receiver_username", getattr(incoming, "reply_to_username", None))
+        return enriched
 
     async def _apply_send_message(
         self,

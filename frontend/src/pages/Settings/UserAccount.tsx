@@ -229,7 +229,7 @@ export function UserAccount() {
               ) : null}
               <Button
                 type="button"
-                variant="outline"
+                variant="destructive"
                 size="sm"
                 onClick={() => logoutMut.mutate()}
                 disabled={logoutMut.isPending}

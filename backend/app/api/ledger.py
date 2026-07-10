@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import asdict
 from datetime import datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Query
 from pydantic import BaseModel, Field
@@ -26,6 +26,12 @@ class LedgerEntryOut(BaseModel):
     status: str
     account_id: int
     chat_id: int | None
+    chat_title: str | None
+    payer_user_id: int | None
+    payer_name: str | None
+    receiver_user_id: int | None
+    receiver_name: str | None
+    receiver_username: str | None
     plugin_key: str | None
     entry_key: str | None
     channel: str | None
@@ -50,6 +56,17 @@ class LedgerSummaryBucketOut(BaseModel):
     count: int
 
 
+class LedgerRecipientBucketOut(BaseModel):
+    key: str
+    label: str
+    user_id: int | None
+    username: str | None
+    received: str
+    income: str
+    payout: str
+    count: int
+
+
 class LedgerSummaryOut(BaseModel):
     income: str
     payout: str
@@ -57,6 +74,7 @@ class LedgerSummaryOut(BaseModel):
     count: int
     by_day: list[LedgerSummaryBucketOut]
     by_chat: list[LedgerSummaryBucketOut]
+    by_recipient: list[LedgerRecipientBucketOut]
 
 
 class LedgerCompensationOut(BaseModel):
@@ -68,6 +86,9 @@ class LedgerCompensationOut(BaseModel):
     entry_key: str | None
     origin: str
     chat_id: int
+    chat_title: str | None
+    receiver_user_id: int | None
+    receiver_name: str | None
     amount: str
     status: str
     error_code_first: str | None
@@ -89,6 +110,15 @@ class LedgerCompensationsResponse(BaseModel):
 
 class LedgerManualPaidRequest(BaseModel):
     note: str | None = Field(default=None, max_length=500)
+
+
+class LedgerResetOut(BaseModel):
+    deleted_action_events: int
+    deleted_compensations: int
+
+
+class LedgerResetRequest(BaseModel):
+    confirmation: Literal["RESET_LEDGER"]
 
 
 class MetricAvailabilityOut(BaseModel):
@@ -305,3 +335,14 @@ async def mark_compensation_manual_paid(
     )
     await db.commit()
     return LedgerCompensationOut(**asdict(row))
+
+
+@router.post("/reset", response_model=LedgerResetOut)
+async def reset_ledger(
+    _payload: LedgerResetRequest,
+    db: DBSession,
+    user: CurrentUser,
+) -> LedgerResetOut:
+    result = await ledger_service.reset_ledger_data(db, user_id=user.id)
+    await db.commit()
+    return LedgerResetOut(**asdict(result))

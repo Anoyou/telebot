@@ -1,11 +1,12 @@
 import { CommandTemplates } from "@/pages/Plugins/TemplatesEditor";
-import { PluginWorkspaceNav } from "./WorkspaceNav";
+import { PageShell } from "@/components/layout/PageScaffold";
+import { PluginWorkspaceHeader } from "./WorkspaceHeader";
 
 export function PluginsTemplatesPage() {
   return (
-    <div className="space-y-4">
-      <PluginWorkspaceNav activeTab="templates" />
+    <PageShell>
+      <PluginWorkspaceHeader activeTab="templates" />
       <CommandTemplates />
-    </div>
+    </PageShell>
   );
 }

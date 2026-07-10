@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.db.models.account import Account  # noqa: F401 - registers FK target table metadata
 from app.db.models.action_event import ACTION_EVENT_STATUS_FAILED, ACTION_EVENT_STATUS_OK, ActionEvent
+from app.db.models.log import EventTrace
 from app.services import ledger_service, stats_service
 
 
@@ -19,6 +20,7 @@ async def stats_session_factory():
         await conn.execute(text("CREATE TABLE account (id BIGINT PRIMARY KEY)"))
         await conn.execute(text("INSERT INTO account (id) VALUES (7), (8)"))
         await conn.run_sync(ActionEvent.__table__.create)
+        await conn.run_sync(EventTrace.__table__.create)
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     try:
         yield session_factory
