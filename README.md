@@ -15,11 +15,14 @@ TelePilot 是一个给 Telegram UserBot 用的网页管理面板。你可以把�
 ## 核心能力
 
 - 多账号：一个面板管理多个 Telegram 账号，每个账号独立配置。
-- 插件：自动回复、消息转发、复读、24 点、算数题、远程插件等都可以在页面里开关和配置。
-- AI：可以接 OpenAI 兼容接口、Anthropic、Ollama 等，用来自定义 AI 指令。
-- 群互动 Bot：用普通 Bot 承接高频群互动，减少 UserBot 高频发言风险。
-- 日志和状态：出问题时优先按 Trace 事件链路排查消息、插件、动作和 reason_code，必要时再回看 Runtime / Audit 原始日志与系统健康状态。
-- 手机管理：Web 控制台支持 PWA，可以添加到手机主屏幕。
+- 插件：内置插件、官方远程插件、本地插件和 ZIP 上传插件都可以在页面里安装、启停、更新、卸载和按账号配置。
+- 消息框架：支持 userbot 命令会话、interaction bot 关键词/付款会话和低延时直通模式；插件只写业务逻辑，收发、路由、Trace 和动作落地交给框架。
+- AI：可以接 OpenAI 兼容接口、Anthropic、Ollama 等，用来自定义 AI 指令；调用记录、用量统计和近期调用重置都在 AI 中心里看。
+- 群互动 Bot：用普通 Bot 承接高频群互动，开局收款和结算付款仍强制走 userbot。
+- 资金与风控：资金台账、payout 补偿、单笔/日累计限额、AI 预算和账号级 dry-run 都已接入前后端。
+- 日志和状态：消息流按“收到 → 路由 → 插件 → 发送”排查，必要时再看系统控制台、Runtime / Audit 原始日志和系统健康状态。
+- 开发工具：插件脚手架、权限推导、命中调试、录制回放、入站 Webhook 和分级 Trace 用来开发和复盘插件。
+- 手机管理：Web 控制台支持 PWA，可以添加到手机主屏幕；移动底栏保留概览 / 插件 / 交互 / AI，其余入口折叠到“更多”。
 
 ## 先跑起来
 
@@ -110,6 +113,9 @@ flowchart LR
   PluginRuntime --> LLM["LLM Providers"]
   API --> AccountBot["Account Bot Polling Runtime"]
   AccountBot --> BotAPI["Telegram Bot API"]
+  API --> Ledger["Action Ledger / Payout Compensation"]
+  API --> Webhook["Inbound Webhook"]
+  Webhook --> Redis
 ```
 
 架构图详细说明见 [docs/TELEPILOT-ARCHITECTURE.md](docs/TELEPILOT-ARCHITECTURE.md)。
@@ -128,8 +134,9 @@ flowchart LR
 - 前端默认发送 `X-Requested-With: telepilot-ui` 并自动携带 double-submit CSRF token；后端过渡期同时接受旧的 `telebot-ui` 自定义头，避免旧页面缓存或脚本直接 403。
 - 用户界面和文档统一使用“插件 / 指令”口径；代码、API、数据库和文档引用实际字段时仍可保留 `plugin` / `feature` / `command` 等稳定内部名。
 - 插件最低版本字段推荐使用 `min_telepilot_version`；旧插件里的 `min_telebot_version` 仍作为 legacy alias 解析。
-- 0.18 线主要入口已收敛为“概览 / 插件 / AI / 日志 / 系统”，账号操作集中到概览和账号详情抽屉入口，独立账号页已退出主导航。
-- 插件框架采用个人可信插件标准：管理员安装并启用插件后，业务风险由安装者自行承担；平台负责 Event Bus 标准事件信封、Trace、MessageOps 受控代发、风险提示、审计、调试告警和客观失败返回。新插件应声明 `usage`、`event_subscriptions`、`capabilities`；旧 `interaction_entries`、平铺 payload、`notice` / `bbot_notice` 只作为迁移说明，群里的转账结果通知 Bot 只作为外部到账证据来源。
+- 0.55 线桌面主入口为“概览 / 插件 / 交互 / 资金台账 / 命中调试 / 入站 Webhook / AI / 日志 / 系统”；移动/PWA 底栏只保留“概览 / 插件 / 交互 / AI”，其余入口折叠到“更多”。账号操作集中到概览、账号详情和账号 Worker 弹窗。
+- 0.55.1 起前端切换到 macOS 风格设计系统：暖米白亮色 / 石墨暗色双主题、暖橙主色、主题感知阴影、PWA 安全区和启动底色随主题联动。
+- 插件框架采用个人可信插件标准：管理员安装并启用插件后，业务风险由安装者自行承担；平台负责 Event Bus 标准事件信封、Trace、MessageOps 受控代发、风险提示、审计、调试告警、客观失败返回和 action ledger 记账。新插件应声明 `usage`、`event_subscriptions`、`capabilities`；旧 `interaction_entries`、平铺 payload、`notice` / `bbot_notice` 只作为迁移说明，群里的转账结果通知 Bot 只作为外部到账证据来源。
 - 互动插件的统一主路径是“触发方式决定会话通道 + 单一 `on_interaction` 入口”：命令开局默认走 userbot，关键词/付款/按钮开局默认走 interaction bot，状态优先保存在 `session.data`，发奖优先用 `payout`，普通发送默认 `parse_mode="plain"`。
 - 插件生态按身份分层迁移：平台功能不伪装成插件；官方可选插件和官方远程插件必须完整声明使用说明、订阅事件和能力；示例插件只用于开发学习和 CI；用户安装插件不强制改代码，但安装/启用/更新时要显示规范警告和废弃通道错误。
 
@@ -148,7 +155,10 @@ flowchart LR
 | AI | 自定义指令模板 | reply_text / forward_to / run_plugin / ai 多类型模板，provider 缺失会在前端显式提示 |
 | AI | LLM Provider | OpenAI 兼容、Anthropic、Ollama、自定义 endpoint、proxy、tag 路由 |
 | Bot | 账号 Bot 联动 | 每账号独立 Bot Token、授权用户、viewer/operator/admin 角色 |
-| 日志 | 可观测性 | Trace 事件链路、插件动作、reason_code、Runtime / Audit fallback、资源占用和系统健康检查 |
+| 资金 | 资金台账与补偿 | 收付款流水、净盈亏、按日/群聚合、payout 失败补偿与人工核销 |
+| 开发 | 命中调试 / 录制回放 / dry-run | 模拟分发决策、录制入站信封、离线回放插件链路 |
+| 集成 | 入站 Webhook | 外部系统用账号级 token 投递事件给声明 webhook 订阅的插件 |
+| 日志 | 可观测性 | 消息流四段漏斗、系统控制台、Trace、插件动作、reason_code、Runtime / Audit fallback、资源占用和系统健康检查 |
 
 ## 技术栈
 
@@ -264,10 +274,12 @@ docker compose up -d --build
 | Web 管理员、登录与 2FA | 首次访问 / 系统设置 |
 | Telegram 账号绑定、API ID / API Hash、验证码、两步密码 | 概览 → 新增账号 |
 | 账号代理、默认设备信息、风控和拟人化参数 | 账号详情 / 系统设置 |
-| 插件启停、自动回复、转发、复读、24 点、定时任务 | 插件中心；自动回复、复读、24 点等官方可选插件需先到“安装插件”页按需安装 |
-| AI Provider、模型列表、API Key、路由标签和 AI 指令模板 | AI 中心 / 插件中心 |
+| 插件安装/启停/卸载、自动回复、转发、复读、24 点、定时任务 | 插件中心；支持远程、本地和 ZIP 上传插件 |
+| 账号级插件配置、规则 dry-run 和插件版本查看 | 插件中心 / 插件详情页 |
+| AI Provider、模型列表、API Key、路由标签、AI 指令模板、调用记录和近期统计重置 | AI 中心 / 插件中心 |
 | 普通 Bot Token、群互动 Bot、授权用户 | 账号详情 → Bot |
 | 远程插件安装、更新、账号级启用和配置 | 插件中心 → 安装插件 |
+| 资金台账、payout 补偿、AI 预算、payout 限额、命中调试、Webhook token | 资金台账 / 命中调试 / 入站 Webhook / 系统设置 |
 
 仍建议放在启动配置或反代配置里的内容：
 
@@ -407,6 +419,8 @@ LOG_INCOMING_MESSAGES_DEFAULT=false   # 默认就是 false；若需要排查再�
 
 TelePilot 用户界面和文档统一称“插件”，代码层仍使用 `Plugin` / `feature` 作为稳定 API 和数据库命名。新增插件按前端配置体验分为几类：
 
+最快路径是简单模式 SDK：一个 `@plugin.command` 函数就能生成可加载插件，适合账号命令、小工具和内部自动化。需要公开群互动、按钮、Inline、付款、Webhook、完整 Trace 或专属配置页时，再写显式 `MANIFEST` / `plugin.json`。
+
 | 形态 | 说明 | 示例 |
 | --- | --- | --- |
 | 规则配置页 | 多条规则的配置、CRUD 和试运行；Telegram 事件投递仍走 Event Bus + `event_subscriptions` | forward；官方可选 `auto_reply`、`autorepeat`；远程规则插件 |
@@ -415,11 +429,20 @@ TelePilot 用户界面和文档统一称“插件”，代码层仍使用 `Plugi
 
 不再新增“Schema 弹窗”类插件。`config_schema` 仍是字段、默认值、校验和配置页渲染的数据来源；旧 `x-ui-mode: "schema"` 只作为兼容别名处理，新增插件请优先声明 `rules`、`single` 或 `platform`。这里的 `rules` 只表示前端配置页形态，不是旧运行时规则驱动主路径；新 Telegram 插件仍应通过 `event_subscriptions` 接收事件，并通过 `ctx.messages` 或标准 action 输出结果。配置页必须使用独立页面，并按“使用说明 → 功能总开关 → 插件配置 → 插件预览”的顺序组织；有保存字段时，配置操作条固定在“插件配置”卡片底部。插件必须自己声明详细使用说明，缺失时会显示红色高级规范警告；消息预览是建议项，不阻断运行。
 
+本地开发常用工具链：
+
+- `make plugin-new name=xxx`：生成简单模式、规则插件、单配置插件、会话玩法等骨架。
+- `make plugin-check path=...`：校验 manifest、订阅、权限声明和安装包结构。
+- `make plugin-register path=...`：把本地目录登记进插件台账，避免手拷目录被孤立拒载。
+- 命中调试页 / `POST /api/dispatch/simulate`：贴账号和消息，查看直通、命令、关键词、Event Bus、Webhook 订阅会怎么路由。
+- 账号 `dev_mode.dry_run` / `dev_mode.recording`：让发送和 payout 只记不发，或录入站信封后用 `tp_replay` 离线回放。
+
 开发文档：
 
 - [5 分钟写出第一个插件](docs/PLUGIN-QUICKSTART.md)
 - [插件开发铁律](docs/PLUGIN-RULES.md)
 - [插件开发指南（索引、完整 API、官方插件库与远程插件）](docs/PLUGIN-DEV-GUIDE.md)
+- [插件开发者工具链](docs/PLUGIN-DEVTOOLS.md)
 
 ## 安全边界
 
@@ -446,8 +469,8 @@ ruff check app
 
 # 前端类型检查与构建
 cd ..
-pnpm -C frontend exec tsc -b --noEmit
-pnpm -C frontend build
+pnpm --dir frontend typecheck
+pnpm --dir frontend build
 ```
 
 发布前建议至少跑后端测试、后端静态检查、前端类型检查和前端生产构建。本文档不记录过期的本地验证结果，避免和当前工作区状态混淆。
@@ -462,11 +485,12 @@ pnpm -C frontend build
 - [插件 Quickstart](docs/PLUGIN-QUICKSTART.md)
 - [插件开发铁律](docs/PLUGIN-RULES.md)
 - [插件开发指南索引](docs/PLUGIN-DEV-GUIDE.md)
+- [插件开发者工具链](docs/PLUGIN-DEVTOOLS.md)
 - [贡献指南](CONTRIBUTING.md)
 
 ## 项目状态
 
-当前版本：`v0.41.4`
+当前版本：`v0.55.1`
 
 项目处于 Alpha / 个人自用阶段。核心链路已经能跑，但仍在快速迭代中，接口、页面和插件规范可能继续调整。欢迎 fork、参考和提 issue；大规模 PR 建议先开 issue 对齐方向。
 

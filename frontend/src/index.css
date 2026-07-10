@@ -179,64 +179,72 @@
 }
 
 @layer utilities {
-  /* 跑马灯边框以真实控件圆角为准：本体 12px，外圈外扩 2px 后用 14px。 */
+  /* 跑马灯边框裁进控件自身圆角，避免弹窗圆角外侧露出直角彩边。 */
   .siri-glow {
-    --siri-ring-radius: calc(var(--radius) + 2px);
     position: relative;
     isolation: isolate;
     overflow: visible;
-    border-radius: var(--radius);
     box-shadow: 0 8px 20px hsl(var(--primary) / 0.10);
   }
 
   .siri-glow::before {
     content: "";
     position: absolute;
-    inset: -2px;
-    z-index: -1;
-    border-radius: var(--siri-ring-radius);
-    border: 1.5px solid transparent;
-    background:
-      linear-gradient(hsl(var(--background)), hsl(var(--background))) padding-box,
-      conic-gradient(
-        from var(--siri-angle, 0deg),
-        #4cc9f0,
-        #7c3aed,
-        #ff4ecd,
-        #ffb703,
-        #37d67a,
-        #4cc9f0
-      ) border-box;
+    inset: 0;
+    z-index: 2;
+    border-radius: inherit;
+    padding: 2px;
+    background: conic-gradient(
+      from var(--siri-angle, 0deg),
+      #4cc9f0,
+      #7c3aed,
+      #ff4ecd,
+      #ffb703,
+      #37d67a,
+      #4cc9f0
+    );
+    -webkit-mask:
+      linear-gradient(#000 0 0) content-box,
+      linear-gradient(#000 0 0);
+    -webkit-mask-composite: xor;
+    mask:
+      linear-gradient(#000 0 0) content-box,
+      linear-gradient(#000 0 0);
+    mask-composite: exclude;
     pointer-events: none;
     animation: siri-orbit 2.4s linear infinite;
   }
 
   .siri-glow-soft {
-    --siri-ring-radius: calc(var(--radius) + 2px);
     position: relative;
     isolation: isolate;
     overflow: visible;
-    border-radius: var(--radius);
   }
 
   .siri-glow-soft::before {
     content: "";
     position: absolute;
-    inset: -2px;
-    z-index: -1;
-    border-radius: var(--siri-ring-radius);
-    border: 1.5px solid transparent;
-    background:
-      linear-gradient(hsl(var(--background)), hsl(var(--background))) padding-box,
-      conic-gradient(
-        from var(--siri-angle, 0deg),
-        #4cc9f0,
-        #7c3aed,
-        #ff4ecd,
-        #ffb703,
-        #37d67a,
-        #4cc9f0
-      ) border-box;
+    inset: 0;
+    z-index: 2;
+    border-radius: inherit;
+    padding: 2px;
+    background: conic-gradient(
+      from var(--siri-angle, 0deg),
+      #4cc9f0,
+      #7c3aed,
+      #ff4ecd,
+      #ffb703,
+      #37d67a,
+      #4cc9f0
+    );
+    -webkit-mask:
+      linear-gradient(#000 0 0) content-box,
+      linear-gradient(#000 0 0);
+    -webkit-mask-composite: xor;
+    mask:
+      linear-gradient(#000 0 0) content-box,
+      linear-gradient(#000 0 0);
+    mask-composite: exclude;
     pointer-events: none;
     animation: siri-orbit 3s linear infinite;
   }
@@ -282,11 +290,30 @@
   }
 
   .app-topbar {
+    position: relative;
+    isolation: isolate;
     border-bottom: 0;
-    background: hsl(var(--app-chrome) / 0.90);
+    background: hsl(var(--app-chrome));
     box-shadow: none;
-    -webkit-backdrop-filter: blur(20px) saturate(1.4);
-    backdrop-filter: blur(20px) saturate(1.4);
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+    transform: translateZ(0);
+  }
+
+  .app-topbar::before {
+    content: "";
+    position: absolute;
+    inset-inline: 0;
+    top: 0;
+    z-index: 0;
+    height: calc(env(safe-area-inset-top) + 2px);
+    background: inherit;
+    pointer-events: none;
+  }
+
+  .app-topbar > * {
+    position: relative;
+    z-index: 1;
   }
 
   .liquid-glass,
@@ -339,10 +366,11 @@
   }
 
   .liquid-bottom-nav {
-    border: 0;
-    border-radius: 0;
-    background: transparent;
-    box-shadow: none;
+    border: 1px solid hsl(var(--border) / 0.72);
+    border-bottom: 0;
+    border-radius: 1.25rem 1.25rem 0 0;
+    background: hsl(var(--card));
+    box-shadow: 0 -10px 30px hsl(0 0% 0% / 0.18);
   }
 
   .liquid-nav-item {

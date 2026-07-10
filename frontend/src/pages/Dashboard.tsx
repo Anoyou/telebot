@@ -282,12 +282,12 @@ function AccountWorkerTile({
     return (
       <Dialog open={open} onOpenChange={onOpenChange}>
         <DialogTrigger asChild>{trigger}</DialogTrigger>
-        <DialogContent className="siri-glow-soft bottom-0 top-auto max-h-[86dvh] w-full translate-y-0 gap-0 overflow-hidden rounded-b-none border-primary/45 p-0 shadow-2xl shadow-primary/10 ring-1 ring-primary/35 sm:bottom-auto sm:top-[50%] sm:max-w-lg sm:translate-y-[-50%] sm:rounded-lg">
+        <DialogContent className="siri-glow-soft !bottom-auto !top-[50%] max-h-[min(82dvh,34rem)] w-[calc(100vw-1.5rem)] max-w-lg !translate-y-[-50%] gap-0 overflow-hidden rounded-2xl border-primary/45 p-0 shadow-2xl shadow-primary/10 ring-1 ring-primary/35">
           <AccountWorkerPanel
             accounts={accounts}
             isLoading={isLoading}
             compact
-            className="max-h-[calc(86dvh-5rem)] overflow-y-auto"
+            className="max-h-[calc(min(82dvh,34rem)-5rem)] overflow-y-auto"
           />
         </DialogContent>
       </Dialog>

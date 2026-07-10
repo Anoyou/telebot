@@ -11,8 +11,8 @@ import pytest
 
 from app.services import action_tap
 from app.worker import replay as replay_mod
-from app.worker.plugins import loader as loader_mod
 from app.worker.plugins import base as plugin_base_mod
+from app.worker.plugins import loader as loader_mod
 from app.worker.plugins.base import Plugin
 from app.worker.replay import replay_recording
 

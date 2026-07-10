@@ -62,13 +62,13 @@ export function mobilePrimaryNavForAIState(aiEnabled: boolean): NavItem[] {
     item.to === "/" ||
     item.to === "/plugins" ||
     item.to === "/interaction" ||
-    item.to === "/ledger" ||
-    item.to === "/dispatch-debug" ||
-    item.to === "/webhooks" ||
-    item.to === "/ai" ||
-    item.to === "/logs" ||
-    item.to === "/settings",
+    item.to === "/ai",
   );
+}
+
+export function mobileMoreNavForAIState(aiEnabled: boolean): NavItem[] {
+  const primary = new Set(mobilePrimaryNavForAIState(aiEnabled).map((item) => item.to));
+  return navForAIState(aiEnabled).filter((item) => !primary.has(item.to));
 }
 
 function NavList({

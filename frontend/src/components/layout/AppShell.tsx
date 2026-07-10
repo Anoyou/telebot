@@ -5,13 +5,25 @@ import { useEffect, useState } from "react";
 import { flushSync } from "react-dom";
 import { Outlet, useLocation, useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
+import { MoreHorizontal } from "lucide-react";
 
-import { MobileSidebar, Sidebar, mobilePrimaryNavForAIState } from "./Sidebar";
+import {
+  MobileSidebar,
+  Sidebar,
+  mobileMoreNavForAIState,
+  mobilePrimaryNavForAIState,
+} from "./Sidebar";
 import { TopBar } from "./TopBar";
 import { GlobalAlertBar } from "./GlobalAlertBar";
 import { fetchMe } from "@/lib/auth";
 import { getSystemSettings } from "@/api/system";
 import { Spinner } from "@/components/ui/misc";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { cn } from "@/lib/utils";
 
 export function AppShell() {
@@ -35,7 +47,12 @@ export function AppShell() {
     queryFn: getSystemSettings,
     staleTime: 30_000,
   });
-  const mobileNavItems = mobilePrimaryNavForAIState(settingsQ.data?.ai_enabled ?? true);
+  const aiEnabled = settingsQ.data?.ai_enabled ?? true;
+  const mobileNavItems = mobilePrimaryNavForAIState(aiEnabled);
+  const mobileMoreNavItems = mobileMoreNavForAIState(aiEnabled);
+  const mobileMoreActive = mobileMoreNavItems.some((item) =>
+    isMobileNavActive(item.to, item.end, mobileActivePath),
+  );
 
   if (isLoading) {
     return (
@@ -80,7 +97,7 @@ export function AppShell() {
         <nav
           className="
             fixed inset-x-0 bottom-0 z-40 sm:hidden
-            border-t border-border/70 bg-card/92
+            border-t border-border/80 bg-card
             pb-[env(safe-area-inset-bottom)]
             pl-[env(safe-area-inset-left)]
             pr-[env(safe-area-inset-right)]
@@ -89,7 +106,7 @@ export function AppShell() {
         >
           <div
             className="liquid-bottom-nav mx-auto grid h-16 w-full max-w-md gap-1 px-2 py-1.5"
-            style={{ gridTemplateColumns: `repeat(${mobileNavItems.length}, minmax(0, 1fr))` }}
+            style={{ gridTemplateColumns: `repeat(${mobileNavItems.length + 1}, minmax(0, 1fr))` }}
           >
             {mobileNavItems.map((item) => {
               const active = isMobileNavActive(item.to, item.end, mobileActivePath);
@@ -124,6 +141,51 @@ export function AppShell() {
                 </button>
               );
             })}
+            <DropdownMenu modal={false}>
+              <DropdownMenuTrigger asChild>
+                <button
+                  type="button"
+                  aria-label="更多导航"
+                  data-active={mobileMoreActive ? "true" : undefined}
+                  className={cn(
+                    "liquid-nav-item flex min-w-0 flex-col items-center justify-center gap-0.5 rounded-2xl text-[10px] font-semibold text-muted-foreground transition-none",
+                    mobileMoreActive && "liquid-nav-item-active",
+                  )}
+                  style={{
+                    WebkitTapHighlightColor: "transparent",
+                    backgroundColor: mobileMoreActive ? "hsl(var(--foreground))" : undefined,
+                    color: mobileMoreActive ? "hsl(var(--background))" : undefined,
+                  }}
+                >
+                  <MoreHorizontal className="h-4 w-4 shrink-0" />
+                  <span className="max-w-full truncate">更多</span>
+                </button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent
+                side="top"
+                align="end"
+                sideOffset={12}
+                collisionPadding={12}
+                className="mb-2 w-52 p-1"
+              >
+                {mobileMoreNavItems.map((item) => {
+                  const active = isMobileNavActive(item.to, item.end, mobileActivePath);
+                  return (
+                    <DropdownMenuItem
+                      key={item.to}
+                      onClick={() => {
+                        flushSync(() => setMobileActivePath(item.to));
+                        navigate(item.to);
+                      }}
+                      className={cn("gap-2", active && "bg-accent text-accent-foreground")}
+                    >
+                      <item.icon className="h-4 w-4" />
+                      {item.label}
+                    </DropdownMenuItem>
+                  );
+                })}
+              </DropdownMenuContent>
+            </DropdownMenu>
           </div>
         </nav>
       </div>
