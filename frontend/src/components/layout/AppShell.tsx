@@ -80,7 +80,7 @@ export function AppShell() {
             app-main
             flex-1 overflow-auto
             px-4 py-5 md:px-8 md:py-7 xl:px-10
-            pb-[calc(5.75rem+env(safe-area-inset-bottom))]
+            pb-[calc(6.75rem+env(safe-area-inset-bottom))]
             sm:pb-[max(1rem,env(safe-area-inset-bottom))]
             pl-[max(1rem,env(safe-area-inset-left))]
             pr-[max(1rem,env(safe-area-inset-right))]
@@ -96,16 +96,13 @@ export function AppShell() {
         </main>
         <nav
           className="
-            fixed inset-x-0 bottom-0 z-40 sm:hidden
-            border-t border-border/80 bg-card
-            pb-[env(safe-area-inset-bottom)]
-            pl-[env(safe-area-inset-left)]
-            pr-[env(safe-area-inset-right)]
-            shadow-[0_-12px_32px_rgba(0,0,0,0.10)]
+            pointer-events-none fixed inset-x-0 z-40 sm:hidden
+            bottom-[calc(0.75rem+env(safe-area-inset-bottom))]
+            px-[max(0.75rem,env(safe-area-inset-left))]
           "
         >
           <div
-            className="liquid-bottom-nav mx-auto grid h-16 w-full max-w-md gap-1 px-2 py-1.5"
+            className="liquid-bottom-nav pointer-events-auto mx-auto grid h-14 w-full max-w-sm gap-1 px-1.5 py-1.5"
             style={{ gridTemplateColumns: `repeat(${mobileNavItems.length + 1}, minmax(0, 1fr))` }}
           >
             {mobileNavItems.map((item) => {
@@ -127,7 +124,7 @@ export function AppShell() {
                   aria-current={active ? "page" : undefined}
                   data-active={active ? "true" : undefined}
                   className={cn(
-                    "liquid-nav-item flex min-w-0 flex-col items-center justify-center gap-0.5 rounded-2xl text-[10px] font-semibold text-muted-foreground transition-none",
+                    "liquid-nav-item flex min-w-0 flex-col items-center justify-center gap-0.5 rounded-full text-[10px] font-semibold text-muted-foreground transition-none",
                     active && "liquid-nav-item-active",
                   )}
                   style={{
@@ -148,7 +145,7 @@ export function AppShell() {
                   aria-label="更多导航"
                   data-active={mobileMoreActive ? "true" : undefined}
                   className={cn(
-                    "liquid-nav-item flex min-w-0 flex-col items-center justify-center gap-0.5 rounded-2xl text-[10px] font-semibold text-muted-foreground transition-none",
+                    "liquid-nav-item flex min-w-0 flex-col items-center justify-center gap-0.5 rounded-full text-[10px] font-semibold text-muted-foreground transition-none",
                     mobileMoreActive && "liquid-nav-item-active",
                   )}
                   style={{
@@ -166,7 +163,7 @@ export function AppShell() {
                 align="end"
                 sideOffset={12}
                 collisionPadding={12}
-                className="mb-2 w-52 p-1"
+                className="mb-2 w-56 p-1.5"
               >
                 {mobileMoreNavItems.map((item) => {
                   const active = isMobileNavActive(item.to, item.end, mobileActivePath);
@@ -177,10 +174,10 @@ export function AppShell() {
                         flushSync(() => setMobileActivePath(item.to));
                         navigate(item.to);
                       }}
-                      className={cn("gap-2", active && "bg-accent text-accent-foreground")}
+                      className={cn("min-h-11 gap-3 rounded-lg px-3 text-sm", active && "bg-accent text-accent-foreground")}
                     >
-                      <item.icon className="h-4 w-4" />
-                      {item.label}
+                      <item.icon className="h-4 w-4 shrink-0" />
+                      <span className="truncate">{item.label}</span>
                     </DropdownMenuItem>
                   );
                 })}

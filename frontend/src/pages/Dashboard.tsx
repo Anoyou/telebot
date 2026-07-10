@@ -278,45 +278,24 @@ function AccountWorkerTile({
     </button>
   );
 
-  if (compactAccounts) {
-    return (
-      <Dialog open={open} onOpenChange={onOpenChange}>
-        <DialogTrigger asChild>{trigger}</DialogTrigger>
-        <DialogContent className="siri-glow-soft !bottom-auto !top-[50%] max-h-[min(82dvh,34rem)] w-[calc(100vw-1.5rem)] max-w-lg !translate-y-[-50%] gap-0 overflow-hidden rounded-2xl border-primary/45 p-0 shadow-2xl shadow-primary/10 ring-1 ring-primary/35">
-          <AccountWorkerPanel
-            accounts={accounts}
-            isLoading={isLoading}
-            compact
-            className="max-h-[calc(min(82dvh,34rem)-5rem)] overflow-y-auto"
-          />
-        </DialogContent>
-      </Dialog>
-    );
-  }
-
   return (
-    <DropdownMenu open={open} onOpenChange={onOpenChange}>
-      <DropdownMenuTrigger asChild>
-        {trigger}
-      </DropdownMenuTrigger>
-      <DropdownMenuContent
-        align="center"
-        collisionPadding={12}
-        sideOffset={8}
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogTrigger asChild>{trigger}</DialogTrigger>
+      <DialogContent
         className={
           singleAccount
-            ? "siri-glow-soft max-h-[min(72vh,42rem)] w-[min(30rem,calc(100vw-1rem))] border-primary/45 bg-card p-0 shadow-2xl shadow-primary/10 ring-1 ring-primary/35 data-[state=open]:animate-none sm:w-[min(30rem,calc(100vw-2rem))]"
-            : "siri-glow-soft max-h-[min(72vh,42rem)] w-[min(54rem,calc(100vw-1rem))] border-primary/45 bg-card p-0 shadow-2xl shadow-primary/10 ring-1 ring-primary/35 data-[state=open]:animate-none sm:w-[min(54rem,calc(100vw-2rem))]"
+            ? "dialog-center siri-glow-soft w-[calc(100vw-1.5rem)] max-w-[30rem] gap-0 overflow-hidden rounded-2xl border-primary/45 bg-card p-0 shadow-2xl shadow-primary/10 ring-1 ring-primary/35"
+            : "dialog-center siri-glow-soft w-[calc(100vw-1.5rem)] max-w-[54rem] gap-0 overflow-hidden rounded-2xl border-primary/45 bg-card p-0 shadow-2xl shadow-primary/10 ring-1 ring-primary/35"
         }
       >
         <AccountWorkerPanel
           accounts={accounts}
           isLoading={isLoading}
-          compact={false}
-          className="max-h-[calc(min(72vh,42rem)-4.5rem)] overflow-y-auto"
+          compact={compactAccounts}
+          className="max-h-[calc(min(82dvh,42rem)-5rem)] overflow-y-auto"
         />
-      </DropdownMenuContent>
-    </DropdownMenu>
+      </DialogContent>
+    </Dialog>
   );
 }
 

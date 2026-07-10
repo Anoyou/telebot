@@ -735,6 +735,7 @@ function PluginsManagementTab() {
 function LocalPluginImportCard() {
   const qc = useQueryClient();
   const localQ = useQuery({ queryKey: ["local-plugins"], queryFn: fetchLocalPlugins });
+  const [open, setOpen] = useState(false);
   const [zipFile, setZipFile] = useState<File | null>(null);
   const [signatureFile, setSignatureFile] = useState<File | null>(null);
   const localPlugins = localQ.data ?? [];
@@ -778,8 +779,15 @@ function LocalPluginImportCard() {
           icon={Upload}
           title="本地导入与 ZIP 上传"
           description="目录导入用于本地调试，ZIP 上传用于安装已打包签名的插件；两种方式安装后都会进入下方已安装列表。"
+          actions={(
+            <Button type="button" variant="outline" size="sm" onClick={() => setOpen((value) => !value)}>
+              <ChevronDown className={cn("mr-1 h-4 w-4 transition-transform", open && "rotate-180")} />
+              {open ? "收起" : "展开"}
+            </Button>
+          )}
         />
       </CardHeader>
+      {open ? (
       <CardContent className="grid gap-4 xl:grid-cols-2">
         <section className="rounded-lg border border-border/70 bg-background/70 p-4">
           <div className="mb-3 flex items-center gap-2">
@@ -871,6 +879,7 @@ function LocalPluginImportCard() {
           </div>
         </section>
       </CardContent>
+      ) : null}
     </Card>
   );
 }
@@ -1776,7 +1785,9 @@ function InstalledPluginsSection() {
         ) : builtin.length === 0 && installedOverview.length === 0 ? (
           <p className="py-8 text-center text-sm text-muted-foreground">暂无已安装插件</p>
         ) : (
-          <Table>
+          <>
+          <div className="hidden overflow-x-auto md:block">
+          <Table className="min-w-[980px]">
             <TableHeader>
               <TableRow>
                 <TableHead>插件</TableHead>
@@ -1978,6 +1989,190 @@ function InstalledPluginsSection() {
               })}
             </TableBody>
           </Table>
+          </div>
+          <div className="space-y-3 md:hidden">
+            {builtin.map((f) => {
+              const enabled = accounts.filter((account) => isAccountPluginEnabled(account, f.key)).length;
+              const expanded = expandedAccountPlugin === f.key;
+              return (
+                <div key={`mobile-${f.key}`} className="rounded-xl border border-border/70 bg-background/70 p-3">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="break-words text-sm font-semibold">{f.display_name}</div>
+                      <div className="mt-1 break-all font-mono text-xs text-muted-foreground">{f.key}</div>
+                    </div>
+                    <MetaBadge>平台能力</MetaBadge>
+                  </div>
+                  <div className="mt-3 flex flex-wrap gap-1.5">
+                    <MetaBadge tone="success">随系统更新</MetaBadge>
+                    <MetaBadge tone={enabled > 0 ? "success" : "outline"}>
+                      {accounts.length ? `${enabled}/${accounts.length} 账号` : "无账号"}
+                    </MetaBadge>
+                  </div>
+                  {accounts.length ? (
+                    <button
+                      type="button"
+                      className="mt-3 inline-flex items-center rounded-full border border-border/70 px-3 py-1.5 text-xs text-muted-foreground"
+                      onClick={() => toggleAccountPanel(f.key)}
+                    >
+                      <ChevronDown className={cn("mr-1 h-3.5 w-3.5 transition-transform", expanded && "rotate-180")} />
+                      账号开关
+                    </button>
+                  ) : null}
+                  {expanded ? (
+                    <div className="mt-3 grid gap-2">
+                      {accounts.map((account) => {
+                        const accountEnabled = isAccountPluginEnabled(account, f.key);
+                        const state = account.features[f.key] ?? "missing";
+                        return (
+                          <div key={`mobile-${f.key}-${account.id}`} className="flex items-center justify-between gap-3 rounded-lg border border-border/70 bg-muted/30 px-3 py-2">
+                            <div className="min-w-0">
+                              <div className="truncate text-sm font-medium">{account.name || `账号 ${account.id}`}</div>
+                              <div className="font-mono text-xs text-muted-foreground">#{account.id} · {state}</div>
+                            </div>
+                            <Switch
+                              checked={accountEnabled}
+                              disabled={accountToggleMut.isPending}
+                              onCheckedChange={(checked) => accountToggleMut.mutate({ accountId: account.id, key: f.key, enabled: checked })}
+                            />
+                          </div>
+                        );
+                      })}
+                    </div>
+                  ) : null}
+                  <Button size="sm" variant="outline" className="mt-3 w-full" onClick={() => nav("/plugins")}>
+                    去插件中心
+                  </Button>
+                </div>
+              );
+            })}
+            {installedOverview.map((row) => {
+              const summary = summarizeOverviewAccounts(row.accounts);
+              const hasWarnings = row.lint_warnings.length > 0;
+              const canUpdate = isRemoteManagedInstalledPlugin(row);
+              const canUseRemoteActions = isRemoteManagedInstalledPlugin(row);
+              const expanded = expandedAccountPlugin === row.key;
+              return (
+                <div key={`mobile-${row.key}`} className="rounded-xl border border-border/70 bg-background/70 p-3">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="break-words text-sm font-semibold">{row.display_name || row.key}</div>
+                      <div className="mt-1 break-all font-mono text-xs text-muted-foreground">{row.key}</div>
+                    </div>
+                    <MetaBadge tone={row.global_enabled ? "success" : "outline"}>
+                      {row.global_enabled ? "已启用" : "未启用"}
+                    </MetaBadge>
+                  </div>
+                  <div className="mt-3 flex flex-wrap gap-1.5">
+                    <MetaBadge tone={installedOverviewTypeTone(row)}>{installedOverviewTypeLabel(row)}</MetaBadge>
+                    <MetaBadge tone={installedOverviewVersionTone(row)}>{installedOverviewVersionLabel(row)}</MetaBadge>
+                    <MetaBadge tone={summary.enabled > 0 ? "success" : "outline"}>
+                      {summary.total ? `${summary.enabled}/${summary.total} 账号` : "无账号"}
+                    </MetaBadge>
+                    {row.update.update_available ? <MetaBadge tone="warn">有新版本</MetaBadge> : null}
+                    {summary.errors > 0 ? <MetaBadge tone="danger">{summary.errors} 异常</MetaBadge> : null}
+                    {hasWarnings ? <MetaBadge tone={splitPluginWarnings(row.lint_warnings).high.length > 0 ? "danger" : "warn"}>Lint {row.lint_warnings.length}</MetaBadge> : null}
+                  </div>
+                  <div className="mt-3 grid grid-cols-2 gap-2 text-xs">
+                    <PluginMobileInfo label="来源库" value={installSourceLibraryLabel(row.source, row.source_url, row.source_label, repos)} />
+                    <PluginMobileInfo label="版本" value={formatPluginVersion(row.version)} />
+                  </div>
+                  {row.update.last_update_check_error ? (
+                    <div className="mt-3 line-clamp-3 break-all rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+                      {row.update.last_update_check_error}
+                    </div>
+                  ) : null}
+                  {summary.total > 0 ? (
+                    <button
+                      type="button"
+                      className="mt-3 inline-flex items-center rounded-full border border-border/70 px-3 py-1.5 text-xs text-muted-foreground"
+                      onClick={() => toggleAccountPanel(row.key)}
+                    >
+                      <ChevronDown className={cn("mr-1 h-3.5 w-3.5 transition-transform", expanded && "rotate-180")} />
+                      账号开关
+                    </button>
+                  ) : null}
+                  {expanded ? (
+                    <div className="mt-3 grid gap-2">
+                      {row.accounts.map((account) => (
+                        <div key={`mobile-${row.key}-${account.account_id}`} className="flex items-center justify-between gap-3 rounded-lg border border-border/70 bg-muted/30 px-3 py-2">
+                          <div className="min-w-0">
+                            <div className="truncate text-sm font-medium">{account.account_name || `账号 ${account.account_id}`}</div>
+                            <div className="text-xs text-muted-foreground">
+                              <span className="font-mono">#{account.account_id}</span>
+                              <span> · {account.enabled ? accountStateLabel(account.state) : "已关闭"}</span>
+                            </div>
+                            {account.enabled && account.last_error ? (
+                              <div className="mt-1 line-clamp-2 break-all text-xs text-destructive">{account.last_error}</div>
+                            ) : null}
+                          </div>
+                          <Switch
+                            checked={account.enabled}
+                            disabled={accountToggleMut.isPending}
+                            onCheckedChange={(checked) => accountToggleMut.mutate({ accountId: account.account_id, key: row.key, enabled: checked })}
+                          />
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
+                  <div className="mt-3 grid grid-cols-2 gap-2">
+                    <Button size="sm" variant="outline" onClick={() => setSelectedDetailKey(row.key)}>
+                      详情
+                    </Button>
+                    {canUpdate ? (
+                      <Button
+                        size="sm"
+                        variant={row.update.update_available ? "default" : "outline"}
+                        onClick={() => updateRMMut.mutate(row.key)}
+                        disabled={updateRMMut.isPending || isLocalImportedInstalledPlugin(row)}
+                      >
+                        {row.update.update_available ? "更新到新版" : "更新"}
+                      </Button>
+                    ) : null}
+                    {row.global_enabled ? (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => {
+                          if (canUseRemoteActions) disableRMMut.mutate(row.key);
+                          else disableInstalledMut.mutate(row.key);
+                        }}
+                        disabled={disableInstalledMut.isPending || disableRMMut.isPending}
+                      >
+                        禁用
+                      </Button>
+                    ) : (
+                      <Button
+                        size="sm"
+                        onClick={() => {
+                          if (canUseRemoteActions) enableRMMut.mutate(row.key);
+                          else enableInstalledMut.mutate(row.key);
+                        }}
+                        disabled={enableInstalledMut.isPending || enableRMMut.isPending}
+                      >
+                        启用
+                      </Button>
+                    )}
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className={cn(DANGER_OUTLINE_BUTTON_CLASS, "col-span-2")}
+                      onClick={() => {
+                        if (!confirm(`确认卸载「${row.key}」？`)) return;
+                        if (canUseRemoteActions) uninstallRMMut.mutate(row.key);
+                        else uninstallInstalledMut.mutate(row.key);
+                      }}
+                      disabled={uninstallInstalledMut.isPending || uninstallRMMut.isPending}
+                    >
+                      <Trash2 className="mr-1 h-3 w-3" />
+                      卸载
+                    </Button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+          </>
         )}
         <PluginOverviewDetailDialog
           plugin={selectedDetail}
@@ -1997,6 +2192,21 @@ function InstalledPluginsSection() {
         />
       </CardContent>
     </Card>
+  );
+}
+
+function PluginMobileInfo({
+  label,
+  value,
+}: {
+  label: string;
+  value: ReactNode;
+}) {
+  return (
+    <div className="min-w-0 rounded-lg border border-border/70 bg-muted/30 px-3 py-2">
+      <div className="text-[11px] text-muted-foreground">{label}</div>
+      <div className="mt-1 truncate text-xs font-medium">{value}</div>
+    </div>
   );
 }
 
@@ -2535,7 +2745,7 @@ function DevGuideTab() {
       <CardContent className="p-0">
         <div className="grid min-h-[680px] border-t border-border/70 lg:grid-cols-[260px_minmax(0,1fr)]">
           <aside className="border-b border-border/70 bg-muted/20 p-3 lg:border-b-0 lg:border-r">
-            <nav className="flex gap-2 overflow-x-auto pb-1 lg:block lg:space-y-1 lg:overflow-visible lg:pb-0">
+            <nav className="horizontal-scroll-touch -mx-1 flex snap-x gap-2 px-1 pb-2 lg:mx-0 lg:block lg:space-y-1 lg:overflow-visible lg:px-0 lg:pb-0">
               {docs.map((doc) => {
                 const Icon = doc.icon;
                 const active = doc.id === activeDoc.id;
@@ -2544,7 +2754,7 @@ function DevGuideTab() {
                     key={doc.id}
                     type="button"
                     className={cn(
-                      "group flex min-w-[11rem] items-start gap-3 rounded-lg border px-3 py-3 text-left text-sm transition lg:w-full",
+                      "group flex min-w-[11rem] shrink-0 snap-start items-start gap-3 rounded-lg border px-3 py-3 text-left text-sm transition lg:w-full",
                       active
                         ? "border-primary/30 bg-primary/10 text-foreground shadow-sm"
                         : "border-transparent bg-background/65 text-muted-foreground hover:border-border hover:bg-background hover:text-foreground",

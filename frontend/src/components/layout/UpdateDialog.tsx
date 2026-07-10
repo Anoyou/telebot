@@ -365,7 +365,7 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="siri-glow-soft !bottom-auto !top-[50%] max-h-[min(88dvh,42rem)] max-w-md !translate-y-[-50%] overflow-y-auto border-primary/45 shadow-2xl shadow-primary/10 ring-1 ring-primary/35">
+      <DialogContent className="dialog-center siri-glow-soft w-[calc(100vw-1.5rem)] max-w-md overflow-y-auto border-primary/45 shadow-2xl shadow-primary/10 ring-1 ring-primary/35">
         <DialogHeader>
           <DialogTitle>检查更新</DialogTitle>
           <DialogDescription>

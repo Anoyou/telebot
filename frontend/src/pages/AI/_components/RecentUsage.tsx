@@ -132,7 +132,7 @@ export function RecentUsageContent() {
       <CardContent className="space-y-4">
         {summary && (
           <div className="space-y-3">
-            <div className="flex flex-wrap gap-2">
+            <div className="grid grid-cols-2 gap-2 sm:flex sm:flex-wrap">
               <SignalPill tone="primary" label="请求数" value={summary.request_count} />
               <SignalPill tone="success" label="成功" value={summary.success_count} />
               <SignalPill tone={summary.failed_count > 0 ? "warn" : "neutral"} label="失败" value={summary.failed_count} />
@@ -140,7 +140,7 @@ export function RecentUsageContent() {
               <SignalPill tone="neutral" label="总 Token" value={summary.total_tokens} />
               <SignalPill tone="primary" label="平均耗时" value={`${summary.avg_latency_ms}ms`} />
             </div>
-            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+            <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
               <ToneRailCard
                 icon={History}
                 title="成功率"
@@ -171,7 +171,8 @@ export function RecentUsageContent() {
             暂无调用记录。触发一次 AI 指令后再回来查看。
           </p>
         ) : (
-          <div className="overflow-x-auto">
+          <>
+          <div className="hidden overflow-x-auto md:block">
             <Table className="min-w-[900px]">
               <TableHeader>
                 <TableRow>
@@ -240,15 +241,78 @@ export function RecentUsageContent() {
               </TableBody>
             </Table>
           </div>
+          <div className="space-y-3 md:hidden">
+            {rows.map((r) => (
+              <UsageRecordCard
+                key={r.id}
+                record={r}
+                expanded={expandedId === r.id}
+                onToggle={() => setExpandedId((current) => (current === r.id ? null : r.id))}
+              />
+            ))}
+          </div>
+          </>
         )}
       </CardContent>
     </Card>
   );
 }
 
+function UsageRecordCard({
+  record,
+  expanded,
+  onToggle,
+}: {
+  record: LLMUsageRecord;
+  expanded: boolean;
+  onToggle: () => void;
+}) {
+  const tokens = (record.input_tokens || 0) + (record.output_tokens || 0);
+  return (
+    <div className="rounded-xl border border-border/70 bg-background/70 p-3">
+      <button type="button" className="block w-full text-left" onClick={onToggle}>
+        <div className="flex min-w-0 items-start justify-between gap-3">
+          <div className="min-w-0">
+            <div className="truncate text-sm font-semibold">
+              {record.provider_name || (record.provider_id ? `Provider #${record.provider_id}` : "未知 Provider")}
+            </div>
+            <div className="mt-1 truncate font-mono text-xs text-muted-foreground">
+              {record.model || "-"}
+            </div>
+          </div>
+          <MetaBadge tone={record.success ? "success" : "warn"}>
+            {record.success ? "成功" : "失败"}
+          </MetaBadge>
+        </div>
+        <div className="mt-3 grid grid-cols-2 gap-2 text-xs">
+          <InfoCell label="时间" value={new Date(record.created_at).toLocaleString()} />
+          <InfoCell label="来源" value={usageSourceLabel(record.source)} />
+          <InfoCell label="Token" value={tokens} />
+          <InfoCell label="耗时" value={record.latency_ms != null ? `${record.latency_ms}ms` : "-"} />
+        </div>
+        <div className="mt-3 flex items-center justify-between gap-2">
+          <div className="flex flex-wrap gap-1.5">
+            {record.used_fallback ? <MetaBadge tone="outline">已 Fallback</MetaBadge> : null}
+            {record.error_type ? <MetaBadge tone="warn">{record.error_type}</MetaBadge> : null}
+          </div>
+          <span className="inline-flex shrink-0 items-center rounded-full border border-primary/30 bg-primary/10 px-2.5 py-1 text-xs font-medium text-primary">
+            {expanded ? "收起详情" : "查看详情"}
+            <ChevronDown className={cn("ml-1 h-3.5 w-3.5 transition-transform", expanded && "rotate-180")} />
+          </span>
+        </div>
+      </button>
+      {expanded ? (
+        <div className="mt-3 border-t border-border/70 pt-3">
+          <UsageDetailPanel record={record} />
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function UsageDetailPanel({ record }: { record: LLMUsageRecord }) {
   return (
-    <div className="space-y-3 p-4">
+    <div className="space-y-3 md:p-4">
       <div className="grid gap-2 text-xs sm:grid-cols-2 lg:grid-cols-4">
         <InfoCell label="调用来源" value={usageSourceLabel(record.source)} />
         <InfoCell label="账号" value={record.account_id == null ? "-" : `#${record.account_id}`} />

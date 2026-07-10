@@ -16,6 +16,7 @@ import {
   PlusCircle,
   Sparkles,
   Trash2,
+  type LucideIcon,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -423,7 +424,8 @@ export function AIIndex() {
               </Button>
             </div>
           ) : (
-            <div className="overflow-x-auto">
+            <>
+            <div className="hidden overflow-x-auto md:block">
               <Table className="min-w-[820px]">
                 <TableHeader>
                   <TableRow>
@@ -466,6 +468,24 @@ export function AIIndex() {
                 </TableBody>
               </Table>
             </div>
+            <div className="space-y-3 md:hidden">
+              {aiTemplates.map((template) => {
+                const provider = providerById.get(Number(template.config?.provider_id));
+                const modelText =
+                  template.config?.mode === "image" && template.config?.image_backend === "codex_image"
+                    ? "codex_image 插件"
+                    : providerLabel(provider, template.config?.model);
+                return (
+                  <AICommandCard
+                    key={template.id}
+                    template={template}
+                    modelText={modelText}
+                    cmdPrefix={cmdPrefix}
+                  />
+                );
+              })}
+            </div>
+            </>
           )}
         </CardContent>
       </Card>
@@ -496,7 +516,7 @@ function Subnav({
 }) {
   const navigate = useNavigate();
   return (
-    <div className="flex flex-wrap items-center justify-center gap-2 sm:justify-start">
+    <div className="space-y-2">
       <Tabs
         className="w-full sm:w-auto"
         value={activeTab}
@@ -519,14 +539,50 @@ function Subnav({
           </TabsTrigger>
         </TabsList>
       </Tabs>
-      <Button asChild variant="outline" size="sm">
-        <Link to="/plugins/templates">
-          <FileText className="mr-1 h-4 w-4" />
-          查看已配置的指令
-        </Link>
-      </Button>
-      <AIHelpMenu open={helpOpen} onOpenChange={onHelpOpenChange} cmdPrefix={cmdPrefix} />
+      <div className="horizontal-scroll-touch -mx-1 px-1 pb-1">
+        <div className="flex min-w-max gap-2 sm:min-w-0 sm:flex-wrap">
+          <AIActionCard
+            icon={FileText}
+            title="查看指令"
+            description={`管理 ${cmdPrefix}ai 等模板`}
+            to="/plugins/templates"
+          />
+          <AIHelpMenu
+            open={helpOpen}
+            onOpenChange={onHelpOpenChange}
+            cmdPrefix={cmdPrefix}
+            triggerClassName="h-auto min-w-[11rem] justify-start rounded-lg border-border/70 bg-background/65 px-3 py-3 text-left hover:border-primary/30 hover:bg-primary/5"
+          />
+        </div>
+      </div>
     </div>
+  );
+}
+
+function AIActionCard({
+  icon: Icon,
+  title,
+  description,
+  to,
+}: {
+  icon: LucideIcon;
+  title: string;
+  description: string;
+  to: string;
+}) {
+  return (
+    <Link
+      to={to}
+      className="flex min-w-[11rem] items-start gap-3 rounded-lg border border-border/70 bg-background/65 px-3 py-3 text-left text-sm transition hover:border-primary/30 hover:bg-primary/5"
+    >
+      <span className="grid h-7 w-7 shrink-0 place-items-center rounded-md border border-border/70 bg-muted/60 text-primary">
+        <Icon className="h-4 w-4" />
+      </span>
+      <span className="min-w-0">
+        <span className="block font-medium">{title}</span>
+        <span className="mt-1 block text-xs leading-5 text-muted-foreground">{description}</span>
+      </span>
+    </Link>
   );
 }
 
@@ -534,17 +590,24 @@ function AIHelpMenu({
   open,
   onOpenChange,
   cmdPrefix,
+  triggerClassName,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   cmdPrefix: string;
+  triggerClassName?: string;
 }) {
   return (
     <DropdownMenu modal={false} open={open} onOpenChange={onOpenChange}>
       <DropdownMenuTrigger asChild>
-        <Button type="button" variant="outline" size="sm">
-          <BookOpen className="mr-1 h-4 w-4" />
-          AI 帮助
+        <Button type="button" variant="outline" size="sm" className={triggerClassName}>
+          <span className="grid h-7 w-7 shrink-0 place-items-center rounded-md border border-border/70 bg-muted/60 text-primary">
+            <BookOpen className="h-4 w-4" />
+          </span>
+          <span className="min-w-0">
+            <span className="block font-medium">AI 帮助</span>
+            <span className="mt-1 block text-xs leading-5 text-muted-foreground">配置示例与术语速查</span>
+          </span>
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent
@@ -566,6 +629,39 @@ function AIHelpMenu({
         </div>
       </DropdownMenuContent>
     </DropdownMenu>
+  );
+}
+
+function AICommandCard({
+  template,
+  modelText,
+  cmdPrefix,
+}: {
+  template: CommandTemplateOut;
+  modelText: string;
+  cmdPrefix: string;
+}) {
+  return (
+    <div className="rounded-xl border border-border/70 bg-background/70 p-3">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="break-all font-mono text-sm font-semibold">{cmdPrefix}{template.name}</div>
+          <div className="mt-1 text-xs leading-5 text-muted-foreground">{template.description || "未填写说明"}</div>
+        </div>
+        <MetaBadge tone={template.config?.routing_mode === "auto" ? "success" : "neutral"}>
+          {commandModeLabel(template)}
+        </MetaBadge>
+      </div>
+      <div className="mt-3 rounded-lg border border-border/70 bg-muted/30 px-3 py-2">
+        <div className="text-[11px] text-muted-foreground">模型</div>
+        <div className="mt-1 break-words text-sm font-medium">{modelText}</div>
+      </div>
+      <Button asChild variant="outline" size="sm" className="mt-3 w-full">
+        <Link to={`/plugins/templates?edit=${template.id}&returnTo=${encodeURIComponent("/ai")}`}>
+          编辑
+        </Link>
+      </Button>
+    </div>
   );
 }
 

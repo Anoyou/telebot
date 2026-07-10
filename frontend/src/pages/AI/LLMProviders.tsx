@@ -56,6 +56,7 @@ import { listProxies } from "@/api/proxies";
 import { getSystemSettings } from "@/api/system";
 import type { ChatTestModelResult, ChatTestTurn, DetectProviderProtocolsResponse, LLMApiFormat, LLMModality, LLMProviderKind, LLMProviderOut, LLMTag, LLMWebSearchApiFormat, ProviderModel, ProtocolProbeResult, ProxyOut } from "@/api/types";
 import { getErrMsg } from "@/lib/api";
+import { cn } from "@/lib/utils";
 
 // 各 provider 的默认 base_url 提示，仅作 placeholder
 const DEFAULT_BASE_URLS: Record<LLMProviderKind, string> = {
@@ -409,7 +410,9 @@ export function LLMProviders({
               <Spinner className="text-primary" />
             </div>
           ) : visibleProviders.length > 0 ? (
-            <Table>
+            <>
+            <div className="hidden overflow-x-auto md:block">
+            <Table className="min-w-[1080px]">
               <TableHeader>
                 <TableRow>
                   <TableHead>名称</TableHead>
@@ -518,6 +521,24 @@ export function LLMProviders({
                 })}
               </TableBody>
             </Table>
+            </div>
+            <div className="space-y-3 md:hidden">
+              {visibleProviders.map((p) => (
+                <ProviderMobileCard
+                  key={p.id}
+                  provider={p}
+                  proxyById={proxyById}
+                  deletePending={deleteMut.isPending}
+                  onEdit={() => onEdit(p)}
+                  onDelete={() => {
+                    if (confirm(`确认删除模型提供商「${p.name}」？引用此模型提供商的 AI 指令将失败`)) {
+                      deleteMut.mutate(p.id);
+                    }
+                  }}
+                />
+              ))}
+            </div>
+            </>
           ) : (
             <div className="rounded-md border border-dashed bg-muted/20 px-4 py-8 text-center">
               <p className="text-sm text-muted-foreground">
@@ -558,6 +579,88 @@ export function LLMProviders({
         onOpenChange={setChatTestOpen}
         providers={visibleProviders}
       />
+    </div>
+  );
+}
+
+function ProviderMobileCard({
+  provider,
+  proxyById,
+  deletePending,
+  onEdit,
+  onDelete,
+}: {
+  provider: LLMProviderOut;
+  proxyById: Map<number, ProxyOut>;
+  deletePending: boolean;
+  onEdit: () => void;
+  onDelete: () => void;
+}) {
+  const enabledModels = (provider.models || []).filter((m) => m.enabled);
+  const proxy = provider.proxy_id != null ? proxyById.get(provider.proxy_id) : null;
+  return (
+    <div className="rounded-xl border border-border/70 bg-background/70 p-3">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="break-words text-sm font-semibold">{provider.name}</div>
+          <div className="mt-1 flex flex-wrap gap-1.5">
+            <MetaBadge mono>{provider.provider}</MetaBadge>
+            <MetaBadge mono>{provider.api_format || "chat_completions"}</MetaBadge>
+            <MetaBadge tone={(provider.web_search_api_format || "auto") === "auto" ? "neutral" : "outline"} mono>
+              搜索 {provider.web_search_api_format || "auto"}
+            </MetaBadge>
+          </div>
+        </div>
+        <MetaBadge tone={provider.has_api_key ? "success" : "warn"}>
+          <KeyRound className="h-3 w-3" />
+          {provider.has_api_key ? "已配置" : "未配置"}
+        </MetaBadge>
+      </div>
+      <div className="mt-3 grid grid-cols-2 gap-2 text-xs">
+        <MobileInfo label="默认模型" value={provider.default_model || "-"} mono />
+        <MobileInfo label="启用模型" value={`${enabledModels.length} / ${(provider.models || []).length}`} />
+        <MobileInfo label="模态 / 成本" value={`${provider.modality || "text"} · tier ${provider.cost_tier ?? 2}`} />
+        <MobileInfo
+          label="代理"
+          value={provider.proxy_id == null ? "DIRECT" : proxy ? `${proxy.type}://${proxy.host}:${proxy.port}` : `#${provider.proxy_id} 已删除`}
+          mono={provider.proxy_id != null}
+        />
+      </div>
+      {(provider.tags || []).length > 0 ? (
+        <div className="mt-3 flex flex-wrap gap-1.5">
+          {(provider.tags || []).slice(0, 6).map((tag) => (
+            <MetaBadge key={tag}>{tag}</MetaBadge>
+          ))}
+          {(provider.tags || []).length > 6 ? <MetaBadge>+{(provider.tags || []).length - 6}</MetaBadge> : null}
+        </div>
+      ) : null}
+      <div className="mt-3 flex justify-end gap-2">
+        <Button variant="outline" size="sm" onClick={onEdit}>
+          <Edit3 className="mr-1 h-4 w-4" />
+          编辑
+        </Button>
+        <Button variant="outline" size="sm" className="border-destructive/40 text-destructive hover:bg-destructive/10 hover:text-destructive" disabled={deletePending} onClick={onDelete}>
+          <Trash2 className="mr-1 h-4 w-4" />
+          删除
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+function MobileInfo({
+  label,
+  value,
+  mono = false,
+}: {
+  label: string;
+  value: string;
+  mono?: boolean;
+}) {
+  return (
+    <div className="min-w-0 rounded-lg border border-border/70 bg-muted/30 px-3 py-2">
+      <div className="text-[11px] text-muted-foreground">{label}</div>
+      <div className={cn("mt-1 break-words text-xs font-medium", mono && "font-mono")}>{value}</div>
     </div>
   );
 }

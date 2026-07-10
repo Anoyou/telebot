@@ -722,7 +722,7 @@ function SystemConsoleStream({
   keyword: string;
 }) {
   const lines = data?.lines ?? [];
-  const services = data?.services?.length ? data.services.map(systemConsoleServiceLabel).join(" / ") : systemConsoleServiceLabel(service);
+  const services = data?.services?.length ? data.services.map(systemConsoleServiceLabel) : [systemConsoleServiceLabel(service)];
   return (
     <Card>
       <CardHeader>
@@ -731,9 +731,16 @@ function SystemConsoleStream({
           title="系统控制台"
           description="原样展示服务 stdout/stderr，排查启动失败、异常堆栈和部署输出时看这里。"
           meta={(
-            <div className="flex flex-wrap gap-1.5">
+            <div className="flex min-w-0 flex-wrap gap-1.5">
               <SignalPill tone={data?.ok === false ? "warn" : "success"} label="来源" value={systemConsoleSourceLabel(data?.source)} />
-              <SignalPill tone="neutral" label="服务" value={services} />
+              <div className="flex min-w-0 flex-wrap items-center gap-1.5 rounded-full border border-border/70 bg-muted/40 px-3 py-1.5 text-xs">
+                <span className="shrink-0 text-muted-foreground">服务</span>
+                {services.map((item) => (
+                  <span key={item} className="max-w-full break-words font-medium text-foreground">
+                    {item}
+                  </span>
+                ))}
+              </div>
             </div>
           )}
         />
@@ -748,7 +755,7 @@ function SystemConsoleStream({
         ) : lines.length ? (
           <div className="overflow-hidden rounded-lg border border-zinc-800 bg-zinc-950 text-zinc-100 shadow-inner">
             <div className="flex flex-wrap items-center justify-between gap-2 border-b border-white/10 px-3 py-2 text-xs text-zinc-400">
-              <span className="font-mono">$ docker compose logs --tail={data?.tail ?? 300} {service === "all" ? "" : service}</span>
+              <span className="min-w-0 break-all font-mono">$ docker compose logs --tail={data?.tail ?? 300} {service === "all" ? "" : service}</span>
               <span>{lines.length} 行</span>
             </div>
             <pre className="max-h-[640px] overflow-auto p-3 font-mono text-[11px] leading-5 whitespace-pre-wrap break-words">

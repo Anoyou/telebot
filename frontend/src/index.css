@@ -266,6 +266,13 @@
     scrollbar-width: thin;
   }
 
+  .horizontal-scroll-touch {
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+    -webkit-overflow-scrolling: touch;
+    touch-action: pan-x;
+  }
+
   .liquid-sidebar.liquid-sidebar-drawer {
     position: fixed;
     border-radius: 0 1rem 1rem 0;
@@ -289,6 +296,32 @@
     background: hsl(var(--background));
   }
 
+  .app-frame {
+    position: relative;
+    isolation: isolate;
+  }
+
+  .app-frame::before,
+  .app-frame::after {
+    content: "";
+    position: fixed;
+    inset-inline: 0;
+    z-index: 45;
+    pointer-events: none;
+  }
+
+  .app-frame::before {
+    top: 0;
+    height: calc(env(safe-area-inset-top) + 4px);
+    background: hsl(var(--app-chrome));
+  }
+
+  .app-frame::after {
+    bottom: 0;
+    height: calc(env(safe-area-inset-bottom) + 4px);
+    background: hsl(var(--background));
+  }
+
   .app-topbar {
     position: relative;
     isolation: isolate;
@@ -306,7 +339,7 @@
     inset-inline: 0;
     top: 0;
     z-index: 0;
-    height: calc(env(safe-area-inset-top) + 2px);
+    height: calc(env(safe-area-inset-top) + 4px);
     background: inherit;
     pointer-events: none;
   }
@@ -314,6 +347,21 @@
   .app-topbar > * {
     position: relative;
     z-index: 1;
+  }
+
+  .dialog-center {
+    position: fixed !important;
+    inset: auto auto auto auto !important;
+    left: 50% !important;
+    top: 50dvh !important;
+    transform: translate3d(-50%, -50%, 0) !important;
+    margin: 0 !important;
+    max-height: calc(100dvh - env(safe-area-inset-top) - env(safe-area-inset-bottom) - 2rem);
+  }
+
+  .dialog-center[data-state="open"],
+  .dialog-center[data-state="closed"] {
+    animation: none !important;
   }
 
   .liquid-glass,
@@ -366,11 +414,13 @@
   }
 
   .liquid-bottom-nav {
-    border: 1px solid hsl(var(--border) / 0.72);
-    border-bottom: 0;
-    border-radius: 1.25rem 1.25rem 0 0;
-    background: hsl(var(--card));
-    box-shadow: 0 -10px 30px hsl(0 0% 0% / 0.18);
+    border: 1px solid hsl(var(--border) / 0.70);
+    border-radius: 999px;
+    background: hsl(var(--card) / 0.98);
+    box-shadow:
+      0 16px 36px hsl(0 0% 0% / 0.18),
+      0 2px 8px hsl(0 0% 0% / 0.10),
+      inset 0 1px 0 hsl(0 0% 100% / 0.10);
   }
 
   .liquid-nav-item {

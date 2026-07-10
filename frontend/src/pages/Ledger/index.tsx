@@ -222,7 +222,7 @@ function OperationalOverview({ stats, loading }: { stats?: OperationalStats; loa
   const total = stats.total;
   return (
     <div className="space-y-4">
-      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+      <div className="grid grid-cols-2 gap-3 xl:grid-cols-4">
         <ToneRailCard
           icon={Gamepad2}
           title="开局数"
@@ -326,27 +326,27 @@ function SourceMatrixPanel({ stats }: { stats: OperationalStats }) {
 
 function SummaryTiles({ summary }: { summary: LedgerSummary }) {
   return (
-    <div className="grid gap-3 md:grid-cols-3">
+    <div className="grid grid-cols-3 gap-2 md:gap-3">
       <ToneRailCard
         icon={ArrowDownLeft}
         title="入账"
         value={formatAmount(summary.income)}
         tone="success"
-        valueClassName="truncate text-2xl font-bold tabular-nums tracking-tight"
+        valueClassName="truncate text-xl font-bold tabular-nums tracking-tight sm:text-2xl"
       />
       <ToneRailCard
         icon={ArrowUpRight}
         title="出账"
         value={formatAmount(summary.payout)}
         tone="warn"
-        valueClassName="truncate text-2xl font-bold tabular-nums tracking-tight"
+        valueClassName="truncate text-xl font-bold tabular-nums tracking-tight sm:text-2xl"
       />
       <ToneRailCard
         icon={WalletCards}
         title="净盈亏"
         value={formatAmount(summary.net)}
         tone={isNegative(summary.net) ? "danger" : "primary"}
-        valueClassName="truncate text-2xl font-bold tabular-nums tracking-tight"
+        valueClassName="truncate text-xl font-bold tabular-nums tracking-tight sm:text-2xl"
       />
     </div>
   );

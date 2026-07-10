@@ -774,7 +774,9 @@ export function CommandTemplates() {
               <Spinner className="text-primary" />
             </div>
           ) : visibleTemplates.length > 0 ? (
-            <Table>
+            <>
+            <div className="hidden overflow-x-auto md:block">
+            <Table className="min-w-[760px]">
               <TableHeader>
                 <TableRow>
                   <TableHead>指令</TableHead>
@@ -855,6 +857,80 @@ export function CommandTemplates() {
                 ))}
               </TableBody>
             </Table>
+            </div>
+            <div className="space-y-3 md:hidden">
+              {visibleTemplates.map((t) => {
+                const providerMissing =
+                  t.type === "ai" &&
+                  providersQ.isSuccess &&
+                  typeof t.config?.provider_id === "number" &&
+                  !providerIds.has(t.config.provider_id);
+                return (
+                  <div key={t.id} className="rounded-xl border border-border/70 bg-background/70 p-3">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="break-all font-mono text-sm font-semibold">{cmdPrefix}{t.name}</div>
+                        <div className="mt-1 text-xs leading-5 text-muted-foreground">
+                          {t.description || "未填写说明"}
+                        </div>
+                      </div>
+                      <div className="flex shrink-0 flex-col items-end gap-1.5">
+                        <Badge variant="secondary">{TYPE_LABELS[t.type] || t.type}</Badge>
+                        {providerMissing ? <Badge variant="destructive">模型缺失</Badge> : null}
+                      </div>
+                    </div>
+                    <div className="mt-3 rounded-lg border border-border/70 bg-muted/30 px-3 py-2">
+                      <div className="text-[11px] text-muted-foreground">别名</div>
+                      <div className="mt-1 flex flex-wrap gap-1">
+                        {(t.aliases || []).length === 0 ? (
+                          <span className="text-xs text-muted-foreground">无别名</span>
+                        ) : (
+                          (t.aliases || []).map((a) => (
+                            <Badge key={a} variant="outline" className="font-mono text-[11px]">
+                              {cmdPrefix}{a}
+                            </Badge>
+                          ))
+                        )}
+                      </div>
+                    </div>
+                    <div className="mt-3 grid grid-cols-3 gap-2">
+                      <Button variant="outline" size="sm" onClick={() => openEnableFlow(t)}>
+                        启用
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => {
+                          returnToRef.current = null;
+                          setFocusCapability(null);
+                          setEditing(formFromTemplate(t));
+                        }}
+                      >
+                        编辑
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="border-destructive/40 text-destructive hover:bg-destructive/10 hover:text-destructive"
+                        disabled={deleteMut.isPending}
+                        onClick={() => {
+                          if (
+                            confirm(
+                              `确认删除模板「${t.name}」？所有启用此模板的账号都会失去这个指令`,
+                            )
+                          ) {
+                            deleteMut.mutate(t.id);
+                          }
+                        }}
+                      >
+                        删除
+                      </Button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+            </>
           ) : (
             <p className="rounded-md border border-dashed py-8 text-center text-xs text-muted-foreground">
               {typeFilter ? "当前筛选下没有模板。" : "尚无模板。新建一个后即可在账号详情中勾选启用"}
