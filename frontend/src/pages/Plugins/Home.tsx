@@ -321,10 +321,10 @@ export function PluginsHome() {
   return (
     <PageShell className="pb-24">
       {bannerVisible ? (
-        <Card className="border-amber-300 bg-amber-50">
+        <Card className="border-warning/40 bg-warning/10">
           <CardHeader className="pb-2">
             <CardTitle className="text-base">0.13 安全变更提醒</CardTitle>
-            <CardDescription className="text-amber-900/90">
+            <CardDescription className="text-warning">
               Telegram 内高危指令（如 <CommandBadge>{cmdPrefix}reboot</CommandBadge>、<CommandBadge>{cmdPrefix}plugin install</CommandBadge>）已移除，请改为在 Web 控制台或账号 Bot 内执行。
             </CardDescription>
           </CardHeader>
@@ -477,14 +477,14 @@ export function PluginsHome() {
       </Card>
 
       {codexImageFeature && codexImageState === "failed" ? (
-        <Card className="border-amber-500/40 bg-amber-50/60">
+        <Card className="border-warning/40 bg-warning/10">
           <CardHeader className="pb-2">
-            <CardTitle className="text-base text-amber-900">codex_image 加载提示</CardTitle>
-            <CardDescription className="text-amber-800">
+            <CardTitle className="text-base text-warning">codex_image 加载提示</CardTitle>
+            <CardDescription className="text-warning">
               当前账号启用了 codex_image，但 worker 未能加载这个插件库插件。系统已自动降级为失败态并保持 worker 持续运行。
             </CardDescription>
           </CardHeader>
-          <CardContent className="pt-0 text-sm text-amber-900">
+          <CardContent className="pt-0 text-sm text-warning">
             如需恢复，请确认已在“插件管理”中安装 Codex 图片生成，并检查该账号的 Codex 配置或运行日志。
           </CardContent>
         </Card>
@@ -522,7 +522,7 @@ export function PluginsHome() {
             </div>
           ) : null}
           {pluginUsageQ.isError ? (
-            <div className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+            <div className="rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-sm text-warning">
               AI 用量暂不可用
             </div>
           ) : null}
@@ -632,10 +632,10 @@ function ModuleLintWarnings({ warnings }: { warnings?: string[] }) {
   const visibleWarnings = showAll ? cleanWarnings : cleanWarnings.slice(0, 3);
   const panelClassName = hasHighWarnings
     ? "mt-2 rounded-md border border-destructive/30 bg-destructive/10 px-2 py-1.5 text-xs text-destructive"
-    : "mt-2 rounded-md border border-amber-300 bg-amber-50/80 px-2 py-1.5 text-xs text-amber-900 dark:bg-amber-950/20 dark:text-amber-200";
+    : "mt-2 rounded-md border border-warning/40 bg-warning/10 px-2 py-1.5 text-xs text-warning";
   const linkClassName = hasHighWarnings
     ? "text-destructive underline underline-offset-2 hover:text-destructive/80"
-    : "text-amber-950 underline underline-offset-2 hover:text-amber-800 dark:text-amber-100";
+    : "text-warning underline underline-offset-2 hover:text-warning/80";
 
   return (
     <div className={panelClassName}>
@@ -895,7 +895,7 @@ function FeatureZone({
                               {pluginUsage.request_count} 次调用
                             </span>
                             {pluginUsage.failed_count > 0 ? (
-                              <span className="shrink-0 rounded-full border border-amber-300 bg-amber-50 px-2 py-0.5 text-[11px] text-amber-800">
+                              <span className="shrink-0 rounded-full border border-warning/40 bg-warning/10 px-2 py-0.5 text-[11px] text-warning">
                                 失败 {pluginUsage.failed_count}
                               </span>
                             ) : null}

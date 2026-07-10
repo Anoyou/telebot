@@ -595,13 +595,13 @@ function SetupStep({
     </>
   );
   return (
-    <div className={done ? "rounded-xl border border-emerald-500/40 bg-emerald-500/5 p-3" : "rounded-xl border bg-background p-3"}>
+    <div className={done ? "rounded-xl border border-success/25 bg-success/10 p-3" : "rounded-xl border bg-background p-3"}>
       <div className="flex items-start justify-between gap-3">
         <div className="flex items-center gap-2 font-medium">
           <span className="flex h-7 w-7 items-center justify-center rounded-full border text-xs">{no}</span>
           {title}
         </div>
-        {done ? <CheckCircle2 className="h-4 w-4 text-emerald-600" /> : <Sparkles className="h-4 w-4 text-muted-foreground" />}
+        {done ? <CheckCircle2 className="h-4 w-4 text-success" /> : <Sparkles className="h-4 w-4 text-muted-foreground" />}
       </div>
       <p className="mt-2 min-h-10 text-xs leading-5 text-muted-foreground">{desc}</p>
       {href ? (

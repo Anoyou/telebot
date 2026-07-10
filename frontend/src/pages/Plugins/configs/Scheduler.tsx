@@ -340,7 +340,7 @@ export function SchedulerConfig() {
                 定时任务调度器随 worker 初始化运行；是否执行由每条规则自己的启用状态控制。
               </CardDescription>
             </div>
-            <span className="rounded-full bg-emerald-50 px-3 py-1 text-xs font-medium text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300">
+            <span className="rounded-full bg-success/15 px-3 py-1 text-xs font-medium text-success">
               随 worker 启动
             </span>
           </div>
@@ -819,7 +819,7 @@ export function SchedulerConfig() {
                   <b
                     className={
                       execResult.ok
-                        ? "text-emerald-600 dark:text-emerald-300"
+                        ? "text-success"
                         : "text-destructive"
                     }
                   >
@@ -874,7 +874,7 @@ function CronPreview({ preview, timezone }: { preview: CronPreviewResult; timezo
       className={[
         "mt-2 rounded-md border px-3 py-2 text-xs",
         preview.ok
-          ? "border-emerald-200 bg-emerald-50/60 text-emerald-900 dark:border-emerald-900/60 dark:bg-emerald-950/20 dark:text-emerald-200"
+          ? "border-success/25 bg-success/10 text-success"
           : "border-destructive/30 bg-destructive/5 text-destructive",
       ].join(" ")}
     >

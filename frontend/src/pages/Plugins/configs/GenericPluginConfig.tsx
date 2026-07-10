@@ -1027,7 +1027,7 @@ function jobStatusBadgeVariant(status: string): "default" | "secondary" | "destr
 }
 
 function jobStatusIcon(status: string) {
-  if (status === "succeeded") return <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-600" />;
+  if (status === "succeeded") return <CheckCircle2 className="h-4 w-4 shrink-0 text-success" />;
   if (status === "failed") return <XCircle className="h-4 w-4 shrink-0 text-destructive" />;
   return <Clock3 className="h-4 w-4 shrink-0 text-muted-foreground" />;
 }
@@ -1035,14 +1035,14 @@ function jobStatusIcon(status: string) {
 function logLevelIcon(level: string) {
   const normalized = String(level || "").toLowerCase();
   if (normalized === "error") return <XCircle className="h-3.5 w-3.5 text-destructive" />;
-  if (normalized === "warn" || normalized === "warning") return <AlertTriangle className="h-3.5 w-3.5 text-amber-600" />;
-  return <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600" />;
+  if (normalized === "warn" || normalized === "warning") return <AlertTriangle className="h-3.5 w-3.5 text-warning" />;
+  return <CheckCircle2 className="h-3.5 w-3.5 text-success" />;
 }
 
 function resultToneIcon(tone: ConfigActionResultTone) {
   if (tone === "running") return <Loader2 className="h-4 w-4 animate-spin text-primary" />;
-  if (tone === "success") return <CheckCircle2 className="h-4 w-4 text-emerald-600" />;
-  if (tone === "warning") return <AlertTriangle className="h-4 w-4 text-amber-600" />;
+  if (tone === "success") return <CheckCircle2 className="h-4 w-4 text-success" />;
+  if (tone === "warning") return <AlertTriangle className="h-4 w-4 text-warning" />;
   return <XCircle className="h-4 w-4 text-destructive" />;
 }
 

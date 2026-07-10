@@ -738,7 +738,7 @@ export function CommandTemplates() {
         </CardHeader>
         <CardContent>
           {aiEnabled && providerUnavailable ? (
-            <div className="mb-3 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+            <div className="mb-3 rounded-md border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-warning">
               chat/search 类 AI 指令需要先添加模型提供商；image + codex_image 与 video + 插件后端可先使用插件配置。
               <Button
                 type="button"
@@ -1137,7 +1137,7 @@ function CommandEditDialog({
                   AI 能力已关闭，暂不提供 AI 类型；已有 AI 模板会保留。
                 </p>
               ) : providerUnavailable ? (
-                <p className="text-xs text-amber-700">
+                <p className="text-xs text-warning">
                   chat/search 需要模型提供商；image 和 video 可先桥接账号插件。
                   <Button
                     type="button"
