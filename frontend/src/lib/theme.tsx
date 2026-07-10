@@ -14,9 +14,10 @@ const THEME_STORAGE_KEY = "telepilot-theme";
 const LEGACY_THEME_STORAGE_KEY = "telebot-theme";
 const LIGHT_THEME_COLOR = "#F2F0EC";
 const DARK_THEME_COLOR = "#1C1C1E";
-// 两套主题都用 black-translucent：内容全屏透到状态栏下，消掉 default 模式的状态栏底边线。
-// 浅色下白色状态栏文字的可读性由 .app-topbar::before 渐变遮罩兜底。
-const STATUS_BAR_STYLE = "black-translucent";
+// 两套主题都用 default：让 iOS 用 theme-color 填状态栏底色、按亮度自动选文字色。
+// 不用 black-translucent——那模式下 iOS 强制白字并自绘一层深色半透明 scrim 保证可读，
+// 那层 scrim 是系统画的、CSS 删不掉，就是浅色主题顶部那条灰带的真身。
+const STATUS_BAR_STYLE = "default";
 
 interface ThemeContextValue {
   theme: Theme;

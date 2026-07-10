@@ -14,11 +14,14 @@
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-title" content="TelePilot" />
-    <!-- iOS 状态栏：静态用 black-translucent，让内容全屏透到状态栏下、由 app 自绘顶部
-         chrome 色，消掉 default 模式下不透明状态栏底边与内容之间那条分割线。
-         注意：iOS 在「添加到主屏」时锁定此值，运行时 JS 改它对已安装 PWA 无效——
-         改这里后 iPhone 需删除并重新添加到主屏才生效。 -->
-    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <!-- iOS 状态栏：用 default，而非 black-translucent。
+         black-translucent 下 iOS 会强制状态栏文字恒为白，并在其后自绘一层深色半透明
+         scrim 保证白字可读——那层 scrim 是系统画的、CSS 删不掉，就是浅色主题顶部那条
+         灰带的真身。default 模式下 iOS 改用 theme-color 填状态栏底色、按亮度自动选深/浅
+         文字色，无 scrim；顶栏 ::before 渐变与边框都已移除，也不会再有 default 旧版那条
+         分割线。注意：iOS 在「添加到主屏」时锁定此值，改这里后 iPhone 需删除并重新添加
+         到主屏才生效。 -->
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
     <meta name="format-detection" content="telephone=no" />
 
     <script>
@@ -33,9 +36,8 @@
           document.documentElement.style.backgroundColor = chrome;
           var meta = document.querySelector('meta[name="theme-color"]');
           if (meta) meta.setAttribute("content", chrome);
-          // 状态栏样式两套主题都用 black-translucent：内容全屏透到状态栏下，
-          // 消掉 default 模式的状态栏底边线。浅色白字的可读性由 .app-topbar::before
-          // 的渐变遮罩兜底。（此值 iOS 在添加到主屏时锁定，运行时改不动已装 PWA。）
+          // theme-color 已随主题同步为 chrome 色，default 模式下 iOS 用它填状态栏底色、
+          // 按亮度自动选文字色，无需再改 status-bar-style（且该值装机后锁定，运行时改不动）。
         } catch (e) {}
       })();
     </script>
