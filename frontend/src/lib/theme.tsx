@@ -12,8 +12,8 @@ export type ResolvedTheme = "light" | "dark";
 
 const THEME_STORAGE_KEY = "telepilot-theme";
 const LEGACY_THEME_STORAGE_KEY = "telebot-theme";
-const LIGHT_THEME_COLOR = "#ffffff";
-const DARK_THEME_COLOR = "#0b1120";
+const LIGHT_THEME_COLOR = "#F2F0EC";
+const DARK_THEME_COLOR = "#1C1C1E";
 const LIGHT_STATUS_BAR_STYLE = "default";
 const DARK_STATUS_BAR_STYLE = "black-translucent";
 

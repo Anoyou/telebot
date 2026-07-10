@@ -7,7 +7,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
 
     <!-- PWA 主题色（Android Chrome 顶栏 + iOS Safari 状态栏底色） -->
-    <meta name="theme-color" content="#ffffff" />
+    <meta name="theme-color" content="#F2F0EC" />
     <meta name="color-scheme" content="light dark" />
 
     <!-- iOS 全屏 PWA：从主屏幕启动时隐藏 Safari UI -->
@@ -24,7 +24,7 @@
           var theme = localStorage.getItem("telepilot-theme") || localStorage.getItem("telebot-theme") || "system";
           var prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
           var dark = theme === "dark" || (theme === "system" && prefersDark);
-          var chrome = dark ? "#0b1120" : "#ffffff";
+          var chrome = dark ? "#1C1C1E" : "#F2F0EC";
           document.documentElement.classList.toggle("dark", dark);
           document.documentElement.style.colorScheme = dark ? "dark" : "light";
           document.documentElement.style.backgroundColor = chrome;
