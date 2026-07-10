@@ -14,8 +14,9 @@ const THEME_STORAGE_KEY = "telepilot-theme";
 const LEGACY_THEME_STORAGE_KEY = "telebot-theme";
 const LIGHT_THEME_COLOR = "#F2F0EC";
 const DARK_THEME_COLOR = "#1C1C1E";
-const LIGHT_STATUS_BAR_STYLE = "default";
-const DARK_STATUS_BAR_STYLE = "black-translucent";
+// 两套主题都用 black-translucent：内容全屏透到状态栏下，消掉 default 模式的状态栏底边线。
+// 浅色下白色状态栏文字的可读性由 .app-topbar::before 渐变遮罩兜底。
+const STATUS_BAR_STYLE = "black-translucent";
 
 interface ThemeContextValue {
   theme: Theme;
@@ -56,8 +57,7 @@ function applyResolvedTheme(resolvedTheme: ResolvedTheme) {
     'meta[name="apple-mobile-web-app-status-bar-style"]',
   );
   if (statusBarMeta) {
-    statusBarMeta.content =
-      resolvedTheme === "dark" ? DARK_STATUS_BAR_STYLE : LIGHT_STATUS_BAR_STYLE;
+    statusBarMeta.content = STATUS_BAR_STYLE;
   }
 }
 

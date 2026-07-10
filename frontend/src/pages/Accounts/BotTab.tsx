@@ -1877,18 +1877,13 @@ function InteractionRuleEditor({
   );
 }
 
-type BotTabPresentation = "full" | "center";
-
 export function BotTab({
   aid,
   mode = "management",
-  presentation = "full",
 }: {
   aid: number;
   mode?: "management" | "interaction";
-  presentation?: BotTabPresentation;
 }) {
-  const isInteractionCenter = mode === "interaction" && presentation === "center";
   const qc = useQueryClient();
   const [enabled, setEnabled] = useState(false);
   const [token, setToken] = useState("");
@@ -1919,8 +1914,8 @@ export function BotTab({
     notify_enabled: true,
     enabled: true,
   });
-  const [interactionIdentityExpanded, setInteractionIdentityExpanded] = useState(() => !isInteractionCenter);
-  const [interactionAdvancedExpanded, setInteractionAdvancedExpanded] = useState(() => !isInteractionCenter);
+  const [interactionIdentityExpanded, setInteractionIdentityExpanded] = useState(false);
+  const [interactionAdvancedExpanded, setInteractionAdvancedExpanded] = useState(false);
   const [mobileRuleEditorOpen, setMobileRuleEditorOpen] = useState(false);
 
   const botQ = useQuery({
@@ -2314,9 +2309,7 @@ export function BotTab({
 
   const selectInteractionRule = (ruleId: string) => {
     setSelectedInteractionRuleId(ruleId);
-    if (isInteractionCenter) {
-      setMobileRuleEditorOpen(false);
-    }
+    setMobileRuleEditorOpen(false);
   };
 
   const addUserMut = useMutation({
@@ -2370,8 +2363,6 @@ export function BotTab({
   const hasInteractionToken = Boolean(interactionQ.data?.has_interaction_bot_token) && !clearInteractionBotToken;
   const hasTransferToken = Boolean(interactionQ.data?.has_transfer_bot_token) && !clearTransferBotToken;
   const hasRuleChatIds = interactionRules.some((rule) => rule.chatIds.trim());
-  const interactionReady = hasRuleChatIds && (hasInteractionToken || Boolean(interactionBotToken.trim()));
-  const interactionRunning = Boolean(interactionQ.data?.interaction_running);
   const transferReady =
     hasRuleChatIds
     && (hasInteractionToken || Boolean(interactionBotToken.trim()));
@@ -2380,34 +2371,12 @@ export function BotTab({
   const selectedInteractionRuleIndex = interactionRules.findIndex((rule) => rule.id === selectedInteractionRuleId);
   const selectedInteractionRuleIndexSafe = selectedInteractionRuleIndex >= 0 ? selectedInteractionRuleIndex : 0;
   const selectedInteractionRule = interactionRules[selectedInteractionRuleIndexSafe];
-  const activeRuleCount = interactionRules.filter((rule) => rule.enabled).length;
-  const moduleRuleCount = interactionRules.filter((rule) => rule.action === "module").length;
-  const keywordRuleCount = interactionRules.filter((rule) => {
-    const effectiveTriggerMode = rule.action === "notice" ? "payment" : rule.triggerMode;
-    return effectiveTriggerMode !== "payment";
-  }).length;
-  const chatCoverageCount = uniqueIntValues(
-    interactionRules.flatMap((rule) =>
-      parseTextLines(rule.chatIds)
-        .map((value) => Number(value))
-        .filter((value) => Number.isFinite(value)),
-    ),
-  ).length;
-  const interactionRuntimeTone = interactionRunning ? "success" : transferEnabled ? "warn" : "neutral";
 
   const managementStatus = (
     <div className="flex flex-wrap gap-2">
       <SignalPill tone={bot.enabled ? "success" : "warn"} label="管理 Bot" value={bot.enabled ? "已启用" : "未启用"} />
       <SignalPill tone={bot?.has_token ? "success" : "neutral"} label="Token" value={bot?.has_token ? "已配置" : "未配置"} />
       <SignalPill tone={users.length > 0 ? "primary" : "neutral"} label="授权用户" value={`${users.length} 人`} />
-    </div>
-  );
-
-  const interactionStatus = (
-    <div className="flex flex-wrap gap-2">
-      <SignalPill tone={interactionReady ? "primary" : "neutral"} label="互动规则" value={interactionReady ? "可执行" : "待配置"} />
-      <SignalPill tone={interactionRunning ? "success" : "neutral"} label="互动运行态" value={interactionRunning ? "运行中" : "未运行"} />
-      <SignalPill tone={activeRuleCount > 0 ? "primary" : "neutral"} label="启用规则" value={`${activeRuleCount}/${interactionRules.length}`} />
     </div>
   );
 
@@ -2603,7 +2572,7 @@ export function BotTab({
     </div>
   );
 
-  const floatingInteractionSaveButton = isInteractionCenter && typeof document !== "undefined"
+  const floatingInteractionSaveButton = mode === "interaction" && typeof document !== "undefined"
     ? createPortal(
         <div className="pointer-events-none fixed bottom-[calc(5rem+env(safe-area-inset-bottom))] right-4 z-[55] flex justify-end sm:bottom-6 sm:right-8">
           <Button
@@ -2628,130 +2597,29 @@ export function BotTab({
     : null;
 
   const interactionContent = (
-    <div className={cn(isInteractionCenter ? "space-y-4" : "space-y-6")}>
+    <div className="space-y-4">
       {floatingInteractionSaveButton}
-      {isInteractionCenter ? null : interactionStatus}
-      <Card className={cn(isInteractionCenter && "border-0 bg-transparent shadow-none")}>
-        {isInteractionCenter ? null : (
-        <CardHeader>
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-            <div className="space-y-1">
-              <CardTitle className="flex items-center gap-2 text-base">
-                <Bot className="h-4 w-4" /> 交互 Bot 通道
-              </CardTitle>
-              <CardDescription>
-                这里维护当前账号的交互 Bot、通知 Bot 和通知模板。规则、玩法、触发词和运行状态请到交互中心统一配置。
-              </CardDescription>
-            </div>
-            <Button asChild variant="outline" size="sm" className="shrink-0">
-              <Link to={`/interaction?aid=${aid}`}>
-                进入交互中心
-                <ChevronRight className="ml-1 h-4 w-4" />
-              </Link>
-            </Button>
-          </div>
-        </CardHeader>
-        )}
-        <CardContent className={cn("space-y-4", isInteractionCenter && "flex flex-col gap-4 space-y-0 p-0")}>
-          {isInteractionCenter ? null : (
-          <section className="space-y-3 rounded-lg border bg-muted/20 p-3 sm:p-4">
-            <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-              <div>
-                <div className="text-sm font-medium">状态总览</div>
-                <div className="text-xs text-muted-foreground">
-                  先看账号通道是否就绪；规则、玩法和奖励限制建议在交互中心维护。
-                </div>
-              </div>
-              <label className="flex items-center justify-between gap-2 rounded-md border bg-background px-3 py-2 text-sm sm:min-w-[136px]">
-                <span>启用联动</span>
-                <Switch checked={transferEnabled} onCheckedChange={setTransferEnabled} />
-              </label>
-            </div>
-            <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-              <div className="rounded-md border bg-background px-3 py-2">
-                <div className="text-xs text-muted-foreground">联动总闸</div>
-                <div className="mt-1 flex flex-wrap items-center gap-2">
-                  <Badge variant={transferEnabled ? "default" : "secondary"}>
-                    {transferEnabled ? "已启用" : "未启用"}
-                  </Badge>
-                  <span className="text-sm text-muted-foreground">
-                    {transferEnabled ? "规则命中后可执行" : "保存后才会对外生效"}
-                  </span>
-                </div>
-              </div>
-              <div className="rounded-md border bg-background px-3 py-2">
-                <div className="text-xs text-muted-foreground">交互 Bot 监听</div>
-                <div className="mt-1 flex flex-wrap items-center gap-2">
-                  <Badge variant={interactionReady ? "secondary" : "destructive"}>
-                    {interactionReady ? "可监听" : "待补齐"}
-                  </Badge>
-                  <span className="text-sm text-muted-foreground">
-                    {hasInteractionToken || interactionBotToken.trim() ? "Token 已就绪" : "缺少 Token"}
-                  </span>
-                </div>
-              </div>
-              <div className="rounded-md border bg-background px-3 py-2">
-                <div className="text-xs text-muted-foreground">运行状态</div>
-                <div className="mt-1 flex flex-wrap items-center gap-2">
-                  <SignalPill
-                    tone={interactionRuntimeTone}
-                    label="runtime"
-                    value={interactionRunning ? "运行中" : "未运行"}
-                  />
-                  {interactionQ.data?.interaction_last_update_id != null ? (
-                    <span className="text-sm text-muted-foreground">
-                      update #{interactionQ.data.interaction_last_update_id}
-                    </span>
-                  ) : null}
-                </div>
-              </div>
-              <div className="rounded-md border bg-background px-3 py-2">
-                <div className="text-xs text-muted-foreground">规则覆盖</div>
-                <div className="mt-1 flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
-                  <span>{interactionRules.length} 条规则</span>
-                  <span>{activeRuleCount} 条启用</span>
-                  <span>{chatCoverageCount} 个群</span>
-                </div>
-              </div>
-            </div>
-            <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
-              <div className="rounded-md border bg-background px-3 py-2 text-sm text-muted-foreground">
-                插件规则 <span className="font-medium text-foreground">{moduleRuleCount}</span> 条
-              </div>
-              <div className="rounded-md border bg-background px-3 py-2 text-sm text-muted-foreground">
-                关键词触发 <span className="font-medium text-foreground">{keywordRuleCount}</span> 条
-              </div>
-              <div className="rounded-md border bg-background px-3 py-2 text-sm text-muted-foreground">
-                通知 Bot {hasTransferToken || transferBotToken.trim() || trustedBotIdsText.trim() ? "已配置" : "可选"}
-              </div>
-              <div className="rounded-md border bg-background px-3 py-2 text-sm text-muted-foreground">
-                保存方式 <span className="font-medium text-foreground">沿用现有接口</span>
-              </div>
-            </div>
-          </section>
-          )}
-
+      <Card className="border-0 bg-transparent shadow-none">
+        <CardContent className="flex flex-col gap-4 space-y-0 p-0">
           {interactionQ.data?.interaction_last_error ? (
             <div className="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">
               {localizeBotRuntimeError(interactionQ.data.interaction_last_error)}
             </div>
           ) : null}
 
-          {isInteractionCenter ? (
-            <section className="rounded-lg border border-warning/30 bg-warning/10 px-3 py-3 text-sm text-warning">
-              <div className="flex items-start gap-2">
-                <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0" />
-                <div>
-                  <div className="font-medium">可信插件风险提示</div>
-                  <div className="mt-1 text-xs leading-5">
-                    插件和插件库由账号主人主动安装与启用。平台会完整下发匹配范围内的消息事件，并提供交互 Bot / UserBot 双通道操作能力；插件风险由安装者自行判断，TelePilot 负责提示风险、记录行为、展示告警和返回客观失败原因。
-                  </div>
+          <section className="rounded-lg border border-warning/30 bg-warning/10 px-3 py-3 text-sm text-warning">
+            <div className="flex items-start gap-2">
+              <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0" />
+              <div>
+                <div className="font-medium">可信插件风险提示</div>
+                <div className="mt-1 text-xs leading-5">
+                  插件和插件库由账号主人主动安装与启用。平台会完整下发匹配范围内的消息事件，并提供交互 Bot / UserBot 双通道操作能力；插件风险由安装者自行判断，TelePilot 负责提示风险、记录行为、展示告警和返回客观失败原因。
                 </div>
               </div>
-            </section>
-          ) : null}
+            </div>
+          </section>
 
-          <section className={cn("space-y-4 rounded-lg border p-3 sm:p-4", isInteractionCenter && "order-2")}>
+          <section className="order-2 space-y-4 rounded-lg border p-3 sm:p-4">
             <div className="flex flex-wrap items-start justify-between gap-2">
               <div>
                 <div className="text-sm font-medium">身份配置</div>
@@ -2763,35 +2631,31 @@ export function BotTab({
                 <Badge variant={hasInteractionToken || interactionBotToken.trim() ? "secondary" : "destructive"}>
                   {hasInteractionToken || interactionBotToken.trim() ? "交互 Bot 已配置" : "交互 Bot 缺少 Token"}
                 </Badge>
-                {isInteractionCenter ? (
-                  <label className="flex items-center gap-2 rounded-md border bg-background px-3 py-1.5 text-sm">
-                    <span>启用联动</span>
-                    <Switch checked={transferEnabled} onCheckedChange={setTransferEnabled} />
-                  </label>
-                ) : null}
-                {isInteractionCenter ? (
-                  <Button
-                    type="button"
-                    size="sm"
-                    variant="outline"
-                    className="h-8 gap-1.5"
-                    onClick={() => setInteractionIdentityExpanded((value) => !value)}
-                    aria-expanded={interactionIdentityExpanded}
-                    aria-controls="interaction-identity-config"
-                  >
-                    <ChevronRight
-                      className={cn(
-                        "h-4 w-4 transition-transform",
-                        interactionIdentityExpanded && "rotate-90",
-                      )}
-                    />
-                    {interactionIdentityExpanded ? "收起" : "展开"}
-                  </Button>
-                ) : null}
+                <label className="flex items-center gap-2 rounded-md border bg-background px-3 py-1.5 text-sm">
+                  <span>启用联动</span>
+                  <Switch checked={transferEnabled} onCheckedChange={setTransferEnabled} />
+                </label>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  className="h-8 gap-1.5"
+                  onClick={() => setInteractionIdentityExpanded((value) => !value)}
+                  aria-expanded={interactionIdentityExpanded}
+                  aria-controls="interaction-identity-config"
+                >
+                  <ChevronRight
+                    className={cn(
+                      "h-4 w-4 transition-transform",
+                      interactionIdentityExpanded && "rotate-90",
+                    )}
+                  />
+                  {interactionIdentityExpanded ? "收起" : "展开"}
+                </Button>
               </div>
             </div>
 
-            {(!isInteractionCenter || interactionIdentityExpanded) ? (
+            {interactionIdentityExpanded ? (
             <div id="interaction-identity-config" className="grid gap-3 2xl:grid-cols-2">
               <div className="space-y-3 rounded-md border bg-muted/20 p-3">
                 <div className="flex flex-wrap items-center justify-between gap-2">
@@ -2926,7 +2790,7 @@ export function BotTab({
             ) : null}
           </section>
 
-          <section className={cn("space-y-3 rounded-lg border p-3 sm:p-4", isInteractionCenter && "order-1")}>
+          <section className="order-1 space-y-3 rounded-lg border p-3 sm:p-4">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div>
                 <div className="text-sm font-medium">规则列表</div>
@@ -2947,8 +2811,7 @@ export function BotTab({
               </div>
             </div>
 
-            {isInteractionCenter ? (
-              <details className="rounded-md border bg-muted/20">
+            <details className="rounded-md border bg-muted/20">
                 <summary className="cursor-pointer px-3 py-2 text-sm font-medium">
                   玩法查询设置
                   <span className="ml-2 text-xs font-normal text-muted-foreground">
@@ -3029,83 +2892,7 @@ export function BotTab({
                     />
                   </div>
                 </div>
-              </details>
-            ) : null}
-
-            <div className={cn("grid gap-3 rounded-md border bg-muted/20 p-3 xl:grid-cols-[minmax(180px,260px)_minmax(280px,1fr)_minmax(300px,420px)] xl:items-start", isInteractionCenter && "hidden")}>
-              <div className="space-y-1.5">
-                <Label>玩法查询指令</Label>
-                <Textarea
-                  rows={2}
-                  className="h-16 !min-h-16 resize-y py-2 text-xs leading-5"
-                  placeholder={DEFAULT_INTERACTION_QUERY_COMMANDS}
-                  value={interactionQueryCommands}
-                  onChange={(e) => setInteractionQueryCommands(e.target.value)}
-                />
-                <div className="text-xs leading-5 text-muted-foreground">
-                  一行一个指令；留空则不开放群内玩法查询。
-                </div>
-              </div>
-              <div className="space-y-1.5">
-                <Label>玩法查询消息模板</Label>
-                <Textarea
-                  rows={5}
-                  className="min-h-[116px] resize-y py-2 text-xs leading-5"
-                  placeholder={DEFAULT_INTERACTION_QUERY_RESPONSE_TEMPLATE}
-                  value={interactionQueryResponseTemplate}
-                  onChange={(e) => setInteractionQueryResponseTemplate(e.target.value)}
-                />
-                <div className="grid gap-1 text-xs text-muted-foreground sm:grid-cols-2">
-                  <span><code>{"{items}"}</code>：由单项模板生成</span>
-                  <span><code>{"{count}"}</code>：开启数量</span>
-                  <span><code>{"{closed_count}"}</code>：临时关闭数量</span>
-                  <span><code>{"{chat_id}"}</code>：当前群 ID</span>
-                </div>
-                <div className="space-y-1.5">
-                  <Label>玩法列表单项模板</Label>
-                  <Textarea
-                    rows={3}
-                    className="min-h-[78px] resize-y py-2 text-xs leading-5"
-                    placeholder={DEFAULT_INTERACTION_QUERY_ITEM_TEMPLATE}
-                    value={interactionQueryItemTemplate}
-                    onChange={(e) => setInteractionQueryItemTemplate(e.target.value)}
-                  />
-                </div>
-                <div className="grid gap-1 text-xs text-muted-foreground sm:grid-cols-2">
-                  <span><code>{"{index}"}</code>：序号</span>
-                  <span><code>{"{name}"}</code>：规则名称</span>
-                  <span><code>{"{trigger}"}</code>：触发方式</span>
-                  <span><code>{"{kind}"}</code>：玩法类型</span>
-                  <span><code>{"{limit}"}</code>：限制摘要</span>
-                  <span><code>{"{module_key}"}</code>：插件 key</span>
-                </div>
-                <div className="space-y-1.5">
-                  <Label>无可用玩法提示</Label>
-                  <Input
-                    value={interactionQueryEmptyMessage}
-                    placeholder={DEFAULT_INTERACTION_QUERY_EMPTY_MESSAGE}
-                    onChange={(e) => setInteractionQueryEmptyMessage(e.target.value)}
-                  />
-                </div>
-              </div>
-              <div className="rounded-md border bg-background p-3 text-xs">
-                <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-                  <div className="font-medium">查询预览</div>
-                  <span className="text-[11px] text-muted-foreground">示例变量渲染</span>
-                </div>
-                <TelegramHtmlPreview
-                  value={renderInteractionQueryTemplatePreview(interactionQueryResponseTemplate, interactionQueryItemTemplate)}
-                  mode="html"
-                  title="交互 Bot"
-                  caption="玩法查询"
-                  hints={[
-                    { label: "count", value: "2" },
-                    { label: "closed", value: "0" },
-                    { label: "chat", value: "-1001234567890" },
-                  ]}
-                />
-              </div>
-            </div>
+            </details>
 
             <div className="grid gap-3 xl:h-[calc(100vh-18rem)] xl:min-h-[560px] xl:max-h-[860px] xl:grid-cols-[minmax(300px,380px)_minmax(0,1fr)] xl:items-stretch">
               <div className="space-y-1.5 rounded-md border bg-muted/20 p-2 xl:h-full xl:overflow-y-auto">
@@ -3261,7 +3048,7 @@ export function BotTab({
                 })}
               </div>
 
-              {isInteractionCenter && selectedInteractionRule ? (
+              {selectedInteractionRule ? (
                 <div className="rounded-md border border-primary/25 bg-primary/5 p-3 xl:hidden">
                   <div className="flex flex-wrap items-start justify-between gap-3">
                     <div className="min-w-0">
@@ -3294,7 +3081,7 @@ export function BotTab({
 
               <div className={cn(
                 "min-w-0 xl:h-full xl:overflow-y-auto",
-                isInteractionCenter && !mobileRuleEditorOpen && "hidden xl:block",
+                !mobileRuleEditorOpen && "hidden xl:block",
               )}>
                 {selectedInteractionRule ? (
                   <InteractionRuleEditor
@@ -3314,7 +3101,7 @@ export function BotTab({
             </div>
           </section>
 
-          <section className={cn("space-y-3 rounded-lg border p-3 sm:p-4", isInteractionCenter && "order-3")}>
+          <section className="order-3 space-y-3 rounded-lg border p-3 sm:p-4">
             <div className="flex flex-wrap items-start justify-between gap-2">
               <div>
                 <div className="text-sm font-medium">高级设置</div>
@@ -3326,28 +3113,26 @@ export function BotTab({
                 <Badge variant={hasTransferToken || transferBotToken.trim() ? "secondary" : "outline"}>
                   {hasTransferToken || transferBotToken.trim() ? "通知模板可联调" : "模板可先预设"}
                 </Badge>
-                {isInteractionCenter ? (
-                  <Button
-                    type="button"
-                    size="sm"
-                    variant="outline"
-                    className="h-8 gap-1.5"
-                    onClick={() => setInteractionAdvancedExpanded((value) => !value)}
-                    aria-expanded={interactionAdvancedExpanded}
-                    aria-controls="interaction-advanced-config"
-                  >
-                    <ChevronRight
-                      className={cn(
-                        "h-4 w-4 transition-transform",
-                        interactionAdvancedExpanded && "rotate-90",
-                      )}
-                    />
-                    {interactionAdvancedExpanded ? "收起" : "展开"}
-                  </Button>
-                ) : null}
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  className="h-8 gap-1.5"
+                  onClick={() => setInteractionAdvancedExpanded((value) => !value)}
+                  aria-expanded={interactionAdvancedExpanded}
+                  aria-controls="interaction-advanced-config"
+                >
+                  <ChevronRight
+                    className={cn(
+                      "h-4 w-4 transition-transform",
+                      interactionAdvancedExpanded && "rotate-90",
+                    )}
+                  />
+                  {interactionAdvancedExpanded ? "收起" : "展开"}
+                </Button>
               </div>
             </div>
-            {(!isInteractionCenter || interactionAdvancedExpanded) ? (
+            {interactionAdvancedExpanded ? (
               <>
                 <div id="interaction-advanced-config" className="space-y-1.5">
                   <Label>转账测试通知模板</Label>
@@ -3415,23 +3200,6 @@ export function BotTab({
                   群里回复任意消息发送 <code>+123</code> 会生成带 <code>language-转账成功</code> 标识的 HTML 代码块；发送 <code>-123</code> 会生成带 <code>language-扣减成功</code> 标识的扣款通知。
                   没有测试用的转账通知结果 Bot 的 Token 时，交互 Bot 只监听群里真实出现的转账结果通知。
                 </div>
-                {isInteractionCenter ? null : (
-                  <div className="flex justify-end">
-                    <Button
-                      variant="outline"
-                      className="w-full sm:w-auto sm:min-w-[156px]"
-                      onClick={() => saveTransferMut.mutate()}
-                      disabled={isInteractionConfigSaveDisabled}
-                    >
-                      {saveTransferMut.isPending ? (
-                        <Loader2 className="mr-1 h-4 w-4 animate-spin" />
-                      ) : (
-                        <Save className="mr-1 h-4 w-4" />
-                      )}
-                      保存整块交互配置
-                    </Button>
-                  </div>
-                )}
               </>
             ) : null}
           </section>

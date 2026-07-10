@@ -14,8 +14,11 @@
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-title" content="TelePilot" />
-    <!-- iOS 状态栏：浅色用 default 避免顶部被半透明黑罩灰；深色启动脚本会切到 black-translucent。 -->
-    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <!-- iOS 状态栏：静态用 black-translucent，让内容全屏透到状态栏下、由 app 自绘顶部
+         chrome 色，消掉 default 模式下不透明状态栏底边与内容之间那条分割线。
+         注意：iOS 在「添加到主屏」时锁定此值，运行时 JS 改它对已安装 PWA 无效——
+         改这里后 iPhone 需删除并重新添加到主屏才生效。 -->
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <meta name="format-detection" content="telephone=no" />
 
     <script>
@@ -30,8 +33,9 @@
           document.documentElement.style.backgroundColor = chrome;
           var meta = document.querySelector('meta[name="theme-color"]');
           if (meta) meta.setAttribute("content", chrome);
-          var statusBar = document.querySelector('meta[name="apple-mobile-web-app-status-bar-style"]');
-          if (statusBar) statusBar.setAttribute("content", dark ? "black-translucent" : "default");
+          // 状态栏样式两套主题都用 black-translucent：内容全屏透到状态栏下，
+          // 消掉 default 模式的状态栏底边线。浅色白字的可读性由 .app-topbar::before
+          // 的渐变遮罩兜底。（此值 iOS 在添加到主屏时锁定，运行时改不动已装 PWA。）
         } catch (e) {}
       })();
     </script>

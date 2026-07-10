@@ -241,7 +241,7 @@ export function InteractionIndex() {
               </div>
             </CardHeader>
             <CardContent className="p-3 sm:p-4">
-              {selectedAid !== null ? <BotTab aid={selectedAid} mode="interaction" presentation="center" /> : null}
+              {selectedAid !== null ? <BotTab aid={selectedAid} mode="interaction" /> : null}
             </CardContent>
           </Card>
         </>
