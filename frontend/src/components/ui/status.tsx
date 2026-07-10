@@ -31,28 +31,28 @@ export function toneClasses(tone: VisualTone): ToneClasses {
       bar: "bg-primary",
     },
     success: {
-      rail: "bg-emerald-500",
-      iconWrap: "bg-emerald-500/10",
-      icon: "text-emerald-600 dark:text-emerald-300",
-      pill: "border-emerald-500/20 bg-emerald-500/10",
-      dot: "bg-emerald-500",
-      bar: "bg-emerald-500",
+      rail: "bg-success",
+      iconWrap: "bg-success/10",
+      icon: "text-success",
+      pill: "border-success/20 bg-success/10",
+      dot: "bg-success",
+      bar: "bg-success",
     },
     warn: {
-      rail: "bg-amber-500",
-      iconWrap: "bg-amber-500/10",
-      icon: "text-amber-600 dark:text-amber-300",
-      pill: "border-amber-500/25 bg-amber-500/10",
-      dot: "bg-amber-500",
-      bar: "bg-amber-500",
+      rail: "bg-warning",
+      iconWrap: "bg-warning/10",
+      icon: "text-warning",
+      pill: "border-warning/25 bg-warning/10",
+      dot: "bg-warning",
+      bar: "bg-warning",
     },
     danger: {
-      rail: "bg-rose-500",
-      iconWrap: "bg-rose-500/10",
-      icon: "text-rose-600 dark:text-rose-300",
-      pill: "border-rose-500/25 bg-rose-500/10",
-      dot: "bg-rose-500",
-      bar: "bg-rose-500",
+      rail: "bg-destructive",
+      iconWrap: "bg-destructive/10",
+      icon: "text-destructive",
+      pill: "border-destructive/25 bg-destructive/10",
+      dot: "bg-destructive",
+      bar: "bg-destructive",
     },
     neutral: {
       rail: "bg-border",
@@ -137,7 +137,7 @@ export function ToneRailCard({
   return (
     <Card
       className={cn(
-        "group relative h-full overflow-hidden transition duration-200 hover:-translate-y-0.5 hover:shadow-[0_1px_2px_hsl(220_20%_20%/0.04),0_22px_54px_hsl(220_20%_20%/0.09)]",
+        "group relative h-full overflow-hidden transition duration-200 hover:-translate-y-0.5 hover:shadow-md",
         className,
       )}
     >
@@ -194,7 +194,7 @@ export function StatusSummaryPanel({
   return (
     <section
       className={cn(
-        "relative overflow-hidden rounded-lg border border-border/80 bg-card shadow-[0_1px_2px_hsl(220_20%_20%/0.04),0_20px_56px_hsl(220_20%_20%/0.07)]",
+        "relative overflow-hidden rounded-lg border border-border/80 bg-card shadow-md",
         className,
       )}
     >

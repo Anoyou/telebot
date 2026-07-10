@@ -6,8 +6,8 @@ type MetaBadgeTone = "neutral" | "success" | "warn" | "danger" | "outline";
 
 const toneClass: Record<MetaBadgeTone, string> = {
   neutral: "border-transparent bg-muted text-foreground",
-  success: "border-transparent bg-emerald-500/15 text-emerald-700 dark:text-emerald-300",
-  warn: "border-transparent bg-amber-500/15 text-amber-700 dark:text-amber-300",
+  success: "border-transparent bg-success/15 text-success",
+  warn: "border-transparent bg-warning/15 text-warning",
   danger: "border-transparent bg-destructive/15 text-destructive",
   outline: "border-border/80 bg-background text-foreground",
 };
