@@ -80,7 +80,7 @@ export function AppShell() {
             app-main
             flex-1 overflow-auto
             px-4 py-5 md:px-8 md:py-7 xl:px-10
-            pb-[calc(6.75rem+env(safe-area-inset-bottom))]
+            pb-[calc(5.25rem+env(safe-area-inset-bottom))]
             sm:pb-[max(1rem,env(safe-area-inset-bottom))]
             pl-[max(1rem,env(safe-area-inset-left))]
             pr-[max(1rem,env(safe-area-inset-right))]
@@ -102,7 +102,7 @@ export function AppShell() {
           "
         >
           <div
-            className="liquid-bottom-nav pointer-events-auto mx-auto grid h-14 w-full max-w-sm gap-1 px-1.5 py-1.5"
+            className="liquid-bottom-nav pointer-events-auto mx-auto grid h-[3.75rem] w-full max-w-sm gap-1 px-2 py-2"
             style={{ gridTemplateColumns: `repeat(${mobileNavItems.length + 1}, minmax(0, 1fr))` }}
           >
             {mobileNavItems.map((item) => {

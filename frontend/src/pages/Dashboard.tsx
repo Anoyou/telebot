@@ -95,7 +95,7 @@ export function Dashboard() {
       : "0";
 
   return (
-    <PageShell className="pb-24 md:space-y-6">
+    <PageShell className="md:space-y-6">
       <DashboardHero
         activeAccounts={activeAccounts}
         totalAccounts={accounts.length}

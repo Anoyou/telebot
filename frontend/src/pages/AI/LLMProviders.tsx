@@ -354,7 +354,7 @@ export function LLMProviders({
     <div className="space-y-6">
       <Card>
         <CardHeader>
-          <div className="flex items-start justify-between gap-3">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
             <SectionHeader
               icon={Package}
               title="模型提供商"
@@ -376,17 +376,18 @@ export function LLMProviders({
               }
               className="flex-1"
             />
-            <div className="flex shrink-0 items-center gap-2">
+            <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto sm:shrink-0 sm:justify-end">
               <Button
                 type="button"
                 size="sm"
                 variant="outline"
+                className="flex-1 sm:flex-none"
                 disabled={visibleProviders.length === 0}
                 onClick={() => setChatTestOpen(true)}
               >
                 <MessageSquare className="mr-1 h-4 w-4" /> 模型测活
               </Button>
-              <Button size="sm" onClick={() => setEditing({ ...EMPTY_FORM })}>
+              <Button size="sm" className="flex-1 sm:flex-none" onClick={() => setEditing({ ...EMPTY_FORM })}>
                 <Plus className="mr-1 h-4 w-4" /> 新建
               </Button>
             </div>
@@ -600,21 +601,19 @@ function ProviderMobileCard({
   const proxy = provider.proxy_id != null ? proxyById.get(provider.proxy_id) : null;
   return (
     <div className="rounded-xl border border-border/70 bg-background/70 p-3">
-      <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0">
-          <div className="break-words text-sm font-semibold">{provider.name}</div>
-          <div className="mt-1 flex flex-wrap gap-1.5">
-            <MetaBadge mono>{provider.provider}</MetaBadge>
-            <MetaBadge mono>{provider.api_format || "chat_completions"}</MetaBadge>
-            <MetaBadge tone={(provider.web_search_api_format || "auto") === "auto" ? "neutral" : "outline"} mono>
-              搜索 {provider.web_search_api_format || "auto"}
-            </MetaBadge>
-          </div>
+      <div className="space-y-2">
+        <div className="min-w-0 break-words text-sm font-semibold">{provider.name}</div>
+        <div className="flex flex-wrap gap-1.5">
+          <MetaBadge tone={provider.has_api_key ? "success" : "warn"}>
+            <KeyRound className="h-3 w-3" />
+            {provider.has_api_key ? "已配置" : "未配置"}
+          </MetaBadge>
+          <MetaBadge mono>{provider.provider}</MetaBadge>
+          <MetaBadge mono>{provider.api_format || "chat_completions"}</MetaBadge>
+          <MetaBadge tone={(provider.web_search_api_format || "auto") === "auto" ? "neutral" : "outline"} mono>
+            搜索 {provider.web_search_api_format || "auto"}
+          </MetaBadge>
         </div>
-        <MetaBadge tone={provider.has_api_key ? "success" : "warn"}>
-          <KeyRound className="h-3 w-3" />
-          {provider.has_api_key ? "已配置" : "未配置"}
-        </MetaBadge>
       </div>
       <div className="mt-3 grid grid-cols-2 gap-2 text-xs">
         <MobileInfo label="默认模型" value={provider.default_model || "-"} mono />

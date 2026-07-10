@@ -28,14 +28,9 @@ import type { AccountSummary, CommandTemplateOut, LLMProviderOut } from "@/api/t
 import { getErrMsg } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
-import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Spinner } from "@/components/ui/misc";
 import { MetaBadge } from "@/components/ui/meta-badge";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { MeterBar, SectionHeader, ToneRailCard } from "@/components/ui/status";
@@ -539,8 +534,8 @@ function Subnav({
           </TabsTrigger>
         </TabsList>
       </Tabs>
-      <div className="horizontal-scroll-touch -mx-1 px-1 pb-1">
-        <div className="flex min-w-max gap-2 sm:min-w-0 sm:flex-wrap">
+      <div className="-mx-1 px-1 pb-1">
+        <div className="grid grid-cols-2 gap-2 sm:flex sm:flex-wrap">
           <AIActionCard
             icon={FileText}
             title="查看指令"
@@ -551,7 +546,7 @@ function Subnav({
             open={helpOpen}
             onOpenChange={onHelpOpenChange}
             cmdPrefix={cmdPrefix}
-            triggerClassName="h-auto min-w-[11rem] justify-start rounded-lg border-border/70 bg-background/65 px-3 py-3 text-left hover:border-primary/30 hover:bg-primary/5"
+            triggerClassName="min-h-10 min-w-0 justify-start gap-2 rounded-md border-border/70 bg-background/65 px-2.5 py-2 text-left hover:border-primary/30 hover:bg-primary/5 sm:min-w-[9rem]"
           />
         </div>
       </div>
@@ -573,14 +568,14 @@ function AIActionCard({
   return (
     <Link
       to={to}
-      className="flex min-w-[11rem] items-start gap-3 rounded-lg border border-border/70 bg-background/65 px-3 py-3 text-left text-sm transition hover:border-primary/30 hover:bg-primary/5"
+      className="flex min-w-0 items-center gap-2 rounded-md border border-border/70 bg-background/65 px-2.5 py-2 text-left text-sm transition hover:border-primary/30 hover:bg-primary/5 sm:min-w-[9rem]"
     >
-      <span className="grid h-7 w-7 shrink-0 place-items-center rounded-md border border-border/70 bg-muted/60 text-primary">
-        <Icon className="h-4 w-4" />
+      <span className="grid h-6 w-6 shrink-0 place-items-center rounded-md border border-border/70 bg-muted/60 text-primary">
+        <Icon className="h-3.5 w-3.5" />
       </span>
       <span className="min-w-0">
-        <span className="block font-medium">{title}</span>
-        <span className="mt-1 block text-xs leading-5 text-muted-foreground">{description}</span>
+        <span className="block text-xs font-semibold sm:text-sm">{title}</span>
+        <span className="mt-0.5 hidden text-[11px] leading-4 text-muted-foreground sm:block">{description}</span>
       </span>
     </Link>
   );
@@ -598,37 +593,37 @@ function AIHelpMenu({
   triggerClassName?: string;
 }) {
   return (
-    <DropdownMenu modal={false} open={open} onOpenChange={onOpenChange}>
-      <DropdownMenuTrigger asChild>
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogTrigger asChild>
         <Button type="button" variant="outline" size="sm" className={triggerClassName}>
-          <span className="grid h-7 w-7 shrink-0 place-items-center rounded-md border border-border/70 bg-muted/60 text-primary">
-            <BookOpen className="h-4 w-4" />
+          <span className="grid h-6 w-6 shrink-0 place-items-center rounded-md border border-border/70 bg-muted/60 text-primary">
+            <BookOpen className="h-3.5 w-3.5" />
           </span>
           <span className="min-w-0">
-            <span className="block font-medium">AI 帮助</span>
-            <span className="mt-1 block text-xs leading-5 text-muted-foreground">配置示例与术语速查</span>
+            <span className="block text-xs font-semibold sm:text-sm">AI 帮助</span>
+            <span className="mt-0.5 hidden text-[11px] leading-4 text-muted-foreground sm:block">配置示例与术语速查</span>
           </span>
         </Button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent
-        align="end"
-        sideOffset={10}
-        className="max-h-[min(76vh,44rem)] w-[min(52rem,calc(100vw-2rem))] p-0"
-        style={{ overflowY: "auto" }}
+      </DialogTrigger>
+      <DialogContent
+        className="grid w-[min(52rem,calc(100vw-2rem))] max-w-[52rem] grid-rows-[auto_minmax(0,1fr)] gap-0 overflow-hidden p-0 sm:p-0"
+        style={{
+          maxHeight: "calc(100dvh - 2rem - env(safe-area-inset-top) - env(safe-area-inset-bottom))",
+        }}
       >
-        <div className="border-b px-4 py-3">
-          <div className="text-base font-semibold">AI 帮助</div>
-          <div className="mt-1 text-sm text-muted-foreground">
+        <DialogHeader className="border-b px-4 py-3 pr-10 sm:px-5">
+          <DialogTitle>AI 帮助</DialogTitle>
+          <DialogDescription>
             工作原理、配置示例和术语速查集中在这里，避免占用总览页纵向空间。
-          </div>
-        </div>
-        <div className="space-y-4 p-4">
+          </DialogDescription>
+        </DialogHeader>
+        <div className="min-h-0 space-y-4 overflow-y-auto p-4 sm:p-5">
           <HowItWorks cmdPrefix={cmdPrefix} defaultOpen />
           <RecommendedSetup cmdPrefix={cmdPrefix} defaultOpen />
           <Glossary defaultOpen />
         </div>
-      </DropdownMenuContent>
-    </DropdownMenu>
+      </DialogContent>
+    </Dialog>
   );
 }
 

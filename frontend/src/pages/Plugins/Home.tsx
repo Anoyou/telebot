@@ -319,7 +319,7 @@ export function PluginsHome() {
   }
 
   return (
-    <PageShell className="pb-24">
+    <PageShell>
       {bannerVisible ? (
         <Card className="border-warning/40 bg-warning/10">
           <CardHeader className="pb-2">

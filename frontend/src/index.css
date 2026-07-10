@@ -301,22 +301,15 @@
     isolation: isolate;
   }
 
-  .app-frame::before,
+  /* 底部安全区填充：让内容滚动时不透出到 Home 指示条下方。
+     顶部安全区不再用固定覆盖层——TopBar 自身的 ::before 已完整绘制顶部 chrome，
+     再叠一层 position:fixed 覆盖层会与 TopBar 的合成层在 iOS 上拼出一条发丝分割线。 */
   .app-frame::after {
     content: "";
     position: fixed;
     inset-inline: 0;
     z-index: 45;
     pointer-events: none;
-  }
-
-  .app-frame::before {
-    top: 0;
-    height: calc(env(safe-area-inset-top) + 4px);
-    background: hsl(var(--app-chrome));
-  }
-
-  .app-frame::after {
     bottom: 0;
     height: calc(env(safe-area-inset-bottom) + 4px);
     background: hsl(var(--background));
@@ -413,19 +406,30 @@
     box-shadow: var(--shadow-sm);
   }
 
+  /* iOS 26 悬浮胶囊 Tab Bar：半透明液态玻璃material（背景模糊 + 提饱和），
+     发丝描边 + 柔和投影，比旧版更高更松，触控目标更大。 */
   .liquid-bottom-nav {
-    border: 1px solid hsl(var(--border) / 0.70);
+    border: 1px solid hsl(var(--foreground) / 0.08);
     border-radius: 999px;
-    background: hsl(var(--card) / 0.98);
+    background: hsl(var(--card) / 0.72);
+    -webkit-backdrop-filter: blur(28px) saturate(1.7);
+    backdrop-filter: blur(28px) saturate(1.7);
     box-shadow:
-      0 16px 36px hsl(0 0% 0% / 0.18),
-      0 2px 8px hsl(0 0% 0% / 0.10),
-      inset 0 1px 0 hsl(0 0% 100% / 0.10);
+      0 12px 32px hsl(0 0% 0% / 0.22),
+      0 2px 10px hsl(0 0% 0% / 0.12),
+      inset 0 1px 0 hsl(0 0% 100% / 0.14);
+  }
+
+  /* 玻璃模糊不可用时（旧 WebView）退回近实心，避免文字透底看不清 */
+  @supports not ((-webkit-backdrop-filter: blur(1px)) or (backdrop-filter: blur(1px))) {
+    .liquid-bottom-nav {
+      background: hsl(var(--card) / 0.98);
+    }
   }
 
   .liquid-nav-item {
     border: 0;
-    border-radius: 1rem;
+    border-radius: 999px;
     background: transparent;
     box-shadow: none;
     touch-action: manipulation;
