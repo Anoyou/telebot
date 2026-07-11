@@ -1810,9 +1810,22 @@ async def _apply_userbot_event_bus_actions(
     session: dict[str, Any] | None = None,
     synthetic_callback: bool = False,
 ) -> bool:
-    failed = False
-    if len(actions) > 10:
-        dropped_actions = actions[10:]
+    """E1 adapter: channel handlers + shared ``run_action_batch`` dispatch core."""
+
+    from ...services.interaction.action_core import (
+        INTERACTION_ACTION_LIMIT,
+        ActionHandlers,
+        run_action_batch,
+    )
+
+    def _prepare(action: dict[str, Any]) -> dict[str, Any]:
+        action.setdefault(
+            "context",
+            trace_log_context(trace, plugin_key=plugin_key, entry_key=entry_key),
+        )
+        return action
+
+    async def _on_truncated(action: dict[str, Any]) -> bool:
         await _log(
             redis,
             state.account_id,
@@ -1822,142 +1835,137 @@ async def _apply_userbot_event_bus_actions(
             plugin_key=plugin_key,
             entry_key=entry_key,
             reason_code="action_limit_exceeded",
-            kept_count=10,
-            dropped_count=len(dropped_actions),
-            dropped_action_types=[str((item or {}).get("type") or "") for item in dropped_actions if isinstance(item, dict)],
+            kept_count=INTERACTION_ACTION_LIMIT,
+            dropped_count=1,
+            dropped_action_types=[str(action.get("type") or "")],
             **trace_log_context(trace),
         )
-        for raw_action in dropped_actions:
-            action = dict(raw_action) if isinstance(raw_action, dict) else {"type": "unknown"}
-            action.setdefault(
-                "context",
-                trace_log_context(trace, plugin_key=plugin_key, entry_key=entry_key),
-            )
-            await record_action(
-                action.get("context"),
-                action,
-                TRACE_STATUS_FAILED,
-                error_code="action_limit_exceeded",
-                error="worker event bus only executes the first 10 actions",
-            )
-    for raw_action in actions[:10]:
-        action = dict(raw_action)
-        action.setdefault(
-            "context",
-            trace_log_context(trace, plugin_key=plugin_key, entry_key=entry_key),
+        await record_action(
+            action.get("context"),
+            action,
+            TRACE_STATUS_FAILED,
+            error_code="action_limit_exceeded",
+            error="worker event bus only executes the first 10 actions",
         )
+        return False
+
+    async def _on_result(action: dict[str, Any]) -> bool:
         action_type = str(action.get("type") or "").strip()
-        if action_type == "result":
-            await record_action(
-                action.get("context"),
-                action,
-                TRACE_STATUS_SKIPPED,
-                error_code="session_control_action",
-                error=f"session control action: {action_type}",
-            )
-            continue
-        if action_type in {"end_session", "close_session", "no_session"}:
-            deleted = False
-            if session_key:
-                delete = getattr(redis, "delete", None)
-                if callable(delete):
-                    deleted = bool(await delete(session_key))
-                chat_id = _int_or_none((session or {}).get("chat_id"))
-                if chat_id is not None:
-                    await _refresh_userbot_session_chat_cache(state)
-            await record_action(
-                action.get("context"),
-                action,
-                TRACE_STATUS_SKIPPED,
-                error_code="session_control_action",
-                error=f"session control action: {action_type}",
-                result={"session_key": session_key, "deleted": deleted} if session_key else None,
-            )
-            continue
-        if action_type == "start_session":
-            failed = not await _apply_userbot_start_session_action(
-                state,
-                action,
-                plugin_key=plugin_key,
-                entry_key=entry_key,
-                redis=redis,
-            ) or failed
-            continue
-        if action_type == "settlement":
-            await record_action(action.get("context"), action, TRACE_STATUS_OK, actual_send_via="settlement")
-            continue
-        if action_type == "update_session":
-            failed = not await _apply_userbot_update_session_action(
-                state,
-                action,
-                redis=redis,
-                session_key=session_key,
-                session=session,
-            ) or failed
-            continue
-        if action_type == "payout":
-            failed = not await _apply_userbot_payout_action(state, event, action) or failed
-            continue
-        if action_type in {"send_message", "send_photo", "send_file", "edit_message", "edit_caption", "delete_message", "pin_message"}:
-            deprecated_channels = deprecated_send_via_values(action_send_via_raw_selector(action))
-            if deprecated_channels:
-                failed = True
-                await record_action(
-                    action.get("context"),
-                    action,
-                    TRACE_STATUS_FAILED,
-                    error_code=SEND_CHANNEL_DEPRECATED_REASON_CODE,
-                    error="notice/bbot_notice/notice_bot channel is deprecated",
-                    deprecated_send_via=deprecated_channels,
-                )
-                await _log(
-                    redis,
-                    state.account_id,
-                    "warn",
-                    "Event Bus action failed: deprecated send_via",
-                    source="plugin",
-                    plugin_key=plugin_key,
-                    entry_key=entry_key,
-                    reason_code=SEND_CHANNEL_DEPRECATED_REASON_CODE,
-                    action_type=action_type,
-                    deprecated_send_via=deprecated_channels,
-                    **trace_log_context(trace),
-                )
-                continue
-        if action_type == "send_message":
-            failed = not await _apply_userbot_send_message_action(
-                state,
-                event,
-                action,
-                redis=redis,
-                session_key=session_key,
-                session=session,
-            ) or failed
-            continue
-        if action_type == "edit_message":
-            failed = not await _apply_userbot_edit_message_action(state, event, action) or failed
-            continue
-        if action_type == "edit_caption":
-            failed = not await _apply_userbot_edit_caption_action(state, event, action) or failed
-            continue
-        if action_type in {"send_photo", "send_file"}:
-            failed = not await _apply_userbot_send_media_action(state, event, action) or failed
-            continue
-        if action_type == "delete_message":
-            failed = not await _apply_userbot_delete_message_action(state, event, action) or failed
-            continue
-        if action_type == "pin_message":
-            failed = not await _apply_userbot_pin_message_action(state, event, action) or failed
-            continue
-        if action_type == "answer_callback":
-            if synthetic_callback:
-                action["_tp_synthetic_callback"] = True
-            failed = not await _apply_userbot_answer_callback_action(state, action) or failed
-            continue
-        if action_type == "answer_inline_query":
-            failed = not await _apply_userbot_answer_inline_query_action(state, action) or failed
-            continue
-        failed = True
+        await record_action(
+            action.get("context"),
+            action,
+            TRACE_STATUS_SKIPPED,
+            error_code="session_control_action",
+            error=f"session control action: {action_type}",
+        )
+        return True
+
+    async def _on_session_control(action: dict[str, Any]) -> bool:
+        action_type = str(action.get("type") or "").strip()
+        deleted = False
+        if session_key:
+            delete = getattr(redis, "delete", None)
+            if callable(delete):
+                deleted = bool(await delete(session_key))
+            chat_id = _int_or_none((session or {}).get("chat_id"))
+            if chat_id is not None:
+                await _refresh_userbot_session_chat_cache(state)
+        await record_action(
+            action.get("context"),
+            action,
+            TRACE_STATUS_SKIPPED,
+            error_code="session_control_action",
+            error=f"session control action: {action_type}",
+            result={"session_key": session_key, "deleted": deleted} if session_key else None,
+        )
+        return True
+
+    async def _on_start_session(action: dict[str, Any]) -> bool:
+        return await _apply_userbot_start_session_action(
+            state,
+            action,
+            plugin_key=plugin_key,
+            entry_key=entry_key,
+            redis=redis,
+        )
+
+    async def _on_settlement(action: dict[str, Any]) -> bool:
+        await record_action(action.get("context"), action, TRACE_STATUS_OK, actual_send_via="settlement")
+        return True
+
+    async def _on_update_session(action: dict[str, Any]) -> bool:
+        return await _apply_userbot_update_session_action(
+            state,
+            action,
+            redis=redis,
+            session_key=session_key,
+            session=session,
+        )
+
+    async def _on_payout(action: dict[str, Any]) -> bool:
+        return await _apply_userbot_payout_action(state, event, action)
+
+    async def _on_deprecated(action: dict[str, Any]) -> bool:
+        action_type = str(action.get("type") or "").strip()
+        deprecated_channels = deprecated_send_via_values(action_send_via_raw_selector(action))
+        await record_action(
+            action.get("context"),
+            action,
+            TRACE_STATUS_FAILED,
+            error_code=SEND_CHANNEL_DEPRECATED_REASON_CODE,
+            error="notice/bbot_notice/notice_bot channel is deprecated",
+            deprecated_send_via=deprecated_channels,
+        )
+        await _log(
+            redis,
+            state.account_id,
+            "warn",
+            "Event Bus action failed: deprecated send_via",
+            source="plugin",
+            plugin_key=plugin_key,
+            entry_key=entry_key,
+            reason_code=SEND_CHANNEL_DEPRECATED_REASON_CODE,
+            action_type=action_type,
+            deprecated_send_via=deprecated_channels,
+            **trace_log_context(trace),
+        )
+        return False
+
+    async def _on_send_message(action: dict[str, Any]) -> bool:
+        return await _apply_userbot_send_message_action(
+            state,
+            event,
+            action,
+            redis=redis,
+            session_key=session_key,
+            session=session,
+        )
+
+    async def _on_edit_message(action: dict[str, Any]) -> bool:
+        return await _apply_userbot_edit_message_action(state, event, action)
+
+    async def _on_edit_caption(action: dict[str, Any]) -> bool:
+        return await _apply_userbot_edit_caption_action(state, event, action)
+
+    async def _on_send_media(action: dict[str, Any]) -> bool:
+        return await _apply_userbot_send_media_action(state, event, action)
+
+    async def _on_delete_message(action: dict[str, Any]) -> bool:
+        return await _apply_userbot_delete_message_action(state, event, action)
+
+    async def _on_pin_message(action: dict[str, Any]) -> bool:
+        return await _apply_userbot_pin_message_action(state, event, action)
+
+    async def _on_answer_callback(action: dict[str, Any]) -> bool:
+        if synthetic_callback:
+            action["_tp_synthetic_callback"] = True
+        return await _apply_userbot_answer_callback_action(state, action)
+
+    async def _on_answer_inline_query(action: dict[str, Any]) -> bool:
+        return await _apply_userbot_answer_inline_query_action(state, action)
+
+    async def _on_unsupported(action: dict[str, Any]) -> bool:
+        action_type = str(action.get("type") or "").strip()
         await record_action(
             action.get("context"),
             action,
@@ -1965,7 +1973,54 @@ async def _apply_userbot_event_bus_actions(
             error_code="unsupported_send_via",
             error=f"unsupported action type: {action_type}",
         )
-    return failed
+        return False
+
+    # Truncation log once (not per dropped action) when over limit.
+    if len(actions) > INTERACTION_ACTION_LIMIT:
+        dropped_actions = actions[INTERACTION_ACTION_LIMIT:]
+        await _log(
+            redis,
+            state.account_id,
+            "warn",
+            "Event Bus actions truncated by worker limit",
+            source="plugin",
+            plugin_key=plugin_key,
+            entry_key=entry_key,
+            reason_code="action_limit_exceeded",
+            kept_count=INTERACTION_ACTION_LIMIT,
+            dropped_count=len(dropped_actions),
+            dropped_action_types=[
+                str((item or {}).get("type") or "") for item in dropped_actions if isinstance(item, dict)
+            ],
+            **trace_log_context(trace),
+        )
+
+    handlers = ActionHandlers(
+        on_start_session=_on_start_session,
+        on_update_session=_on_update_session,
+        on_session_control=_on_session_control,
+        on_result=_on_result,
+        on_settlement=_on_settlement,
+        on_payout=_on_payout,
+        on_send_message=_on_send_message,
+        on_send_media=_on_send_media,
+        on_edit_message=_on_edit_message,
+        on_edit_caption=_on_edit_caption,
+        on_delete_message=_on_delete_message,
+        on_pin_message=_on_pin_message,
+        on_answer_callback=_on_answer_callback,
+        on_answer_inline_query=_on_answer_inline_query,
+        on_deprecated_send_via=_on_deprecated,
+        on_unsupported=_on_unsupported,
+        on_truncated=_on_truncated,
+    )
+    batch = await run_action_batch(
+        list(actions or []),
+        handlers,
+        limit=INTERACTION_ACTION_LIMIT,
+        prepare_action=_prepare,
+    )
+    return batch.failed > 0
 
 
 async def _apply_userbot_start_session_action(

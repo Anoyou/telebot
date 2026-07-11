@@ -63,29 +63,9 @@ _RULE: dict[str, Any] = {
     "valid_seconds": 600,
 }
 
-# 完整性守卫①的“真源”：所有被两侧执行体识别（分支）的动作类型。
-# 新增动作类型若只加进一侧，代表性覆盖会与此集合不一致 → 守卫失败。
-CANONICAL_ACTION_TYPES = frozenset(
-    {
-        "send_message",
-        "send_photo",
-        "send_file",
-        "edit_message",
-        "edit_caption",
-        "delete_message",
-        "pin_message",
-        "answer_callback",
-        "answer_inline_query",
-        "payout",
-        "update_session",
-        "start_session",
-        "settlement",
-        "result",
-        "end_session",
-        "close_session",
-        "no_session",
-    }
-)
+# 完整性守卫①的“真源”：与 action_core.CANONICAL_ACTION_TYPES 对齐。
+# 新增动作类型应先改 action_core，再补矩阵行。
+from app.services.interaction.action_core import CANONICAL_ACTION_TYPES  # noqa: E402
 
 Expect = tuple  # (status, error_code, actual_send_via)
 

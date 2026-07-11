@@ -103,146 +103,188 @@ class InteractionDeliveryExecutor:
         context: dict[str, Any] | None = None,
         replace_message_id: int | None = None,
     ) -> None:
-        if len(actions) > INTERACTION_ACTION_LIMIT:
-            dropped_actions = actions[INTERACTION_ACTION_LIMIT:]
+        """E2 adapter: delivery handlers + shared ``run_action_batch`` core."""
+
+        from .action_core import ActionHandlers, run_action_batch
+
+        replace_holder: dict[str, int | None] = {"id": replace_message_id}
+
+        def _prepare(action: dict[str, Any]) -> dict[str, Any]:
+            if context:
+                if isinstance(action.get("context"), dict):
+                    merged = dict(action["context"])
+                    merged.update(context)
+                    action["context"] = merged
+                else:
+                    action["context"] = dict(context)
+            return action
+
+        async def _on_truncated(action: dict[str, Any]) -> bool:
+            await record_action(
+                action.get("context"),
+                action,
+                TRACE_STATUS_FAILED,
+                error_code="action_limit_exceeded",
+                error="interaction delivery only executes the first 10 actions",
+            )
+            return False
+
+        async def _on_start_session(action: dict[str, Any]) -> bool:
+            await self._record_settlement(action)
+            await record_action(
+                action.get("context"),
+                action,
+                TRACE_STATUS_SKIPPED,
+                actual_send_via="interaction_session",
+                error_code="session_control_action",
+                error="session control action: start_session",
+            )
+            return True
+
+        async def _on_update_session(action: dict[str, Any]) -> bool:
+            await self._record_settlement(action)
+            await self._apply_update_session(action)
+            return True
+
+        async def _on_session_control(action: dict[str, Any]) -> bool:
+            await self._record_settlement(action)
+            action_type = str(action.get("type") or "").strip()
+            await record_action(
+                action.get("context"),
+                action,
+                TRACE_STATUS_SKIPPED,
+                error_code="session_control_action",
+                error=f"session control action: {action_type}",
+            )
+            return True
+
+        async def _on_result(action: dict[str, Any]) -> bool:
+            return await _on_session_control(action)
+
+        async def _on_settlement(action: dict[str, Any]) -> bool:
+            await self._record_settlement(action)
+            await record_action(
+                action.get("context"),
+                action,
+                TRACE_STATUS_OK,
+                actual_send_via="settlement",
+            )
+            return True
+
+        async def _on_deprecated(action: dict[str, Any]) -> bool:
+            await self._record_settlement(action)
+            action_type = str(action.get("type") or "").strip()
+            deprecated_channels = deprecated_send_via_values(action_send_via_raw_selector(action))
+            await record_action(
+                action.get("context"),
+                action,
+                TRACE_STATUS_FAILED,
+                error_code=SEND_CHANNEL_DEPRECATED_REASON_CODE,
+                error="notice/bbot_notice/notice_bot channel is deprecated",
+                deprecated_send_via=deprecated_channels,
+            )
             await self.write_log(
                 self.incoming,
                 "warn",
-                "interaction actions truncated by delivery limit",
-                reason_code="action_limit_exceeded",
-                kept_count=INTERACTION_ACTION_LIMIT,
-                dropped_count=len(dropped_actions),
-                dropped_action_types=[str((item or {}).get("type") or "") for item in dropped_actions if isinstance(item, dict)],
+                "interaction action failed: deprecated send_via",
+                reason_code=SEND_CHANNEL_DEPRECATED_REASON_CODE,
+                action_type=action_type,
+                deprecated_send_via=deprecated_channels,
                 **self.log_context(self.incoming),
             )
-            for raw_action in dropped_actions:
-                action = dict(raw_action) if isinstance(raw_action, dict) else {"type": "unknown"}
-                if context and isinstance(action.get("context"), dict):
-                    merged_context = dict(action["context"])
-                    merged_context.update(context)
-                    action["context"] = merged_context
-                elif context:
-                    action["context"] = dict(context)
-                await record_action(
-                    action.get("context"),
-                    action,
-                    TRACE_STATUS_FAILED,
-                    error_code="action_limit_exceeded",
-                    error="interaction delivery only executes the first 10 actions",
-                )
-        for raw_action in actions[:INTERACTION_ACTION_LIMIT]:
-            action = dict(raw_action)
-            if context:
-                action["context"] = dict(context)
-            action_type = str(action.get("type") or "").strip()
+            return False
+
+        async def _on_payout(action: dict[str, Any]) -> bool:
             await self._record_settlement(action)
-            if action_type == "start_session":
-                await record_action(
-                    action.get("context"),
-                    action,
-                    TRACE_STATUS_SKIPPED,
-                    actual_send_via="interaction_session",
-                    error_code="session_control_action",
-                    error="session control action: start_session",
-                )
-                continue
-            if action_type == "update_session":
-                await self._apply_update_session(action)
-                continue
-            if action_type in INTERACTION_SESSION_CONTROL_ACTIONS or action_type == "result":
-                await record_action(
-                    action.get("context"),
-                    action,
-                    TRACE_STATUS_SKIPPED,
-                    error_code="session_control_action",
-                    error=f"session control action: {action_type}",
-                )
-                continue
-            if action_type in {"send_message", "send_photo", "send_file", "edit_message", "edit_caption", "delete_message", "pin_message"}:
-                deprecated_channels = deprecated_send_via_values(action_send_via_raw_selector(action))
-                if deprecated_channels:
-                    await record_action(
-                        action.get("context"),
-                        action,
-                        TRACE_STATUS_FAILED,
-                        error_code=SEND_CHANNEL_DEPRECATED_REASON_CODE,
-                        error="notice/bbot_notice/notice_bot channel is deprecated",
-                        deprecated_send_via=deprecated_channels,
-                    )
-                    await self.write_log(
-                        self.incoming,
-                        "warn",
-                        "interaction action failed: deprecated send_via",
-                        reason_code=SEND_CHANNEL_DEPRECATED_REASON_CODE,
-                        action_type=action_type,
-                        deprecated_send_via=deprecated_channels,
-                        **self.log_context(self.incoming),
-                    )
-                    continue
-            if action_type == "settlement":
-                await record_action(
-                    action.get("context"),
-                    action,
-                    TRACE_STATUS_OK,
-                    actual_send_via="settlement",
-                )
-                continue
-            reply_to_message_id = _int_or_none(action.get("reply_to_message_id"))
-            reply_to_user_id = _reply_to_user_id_from_action(action)
-            reply_to_search_limit = _int_or_none(action.get("reply_to_search_limit"))
-            parse_mode = _action_parse_mode(action)
+            await self._apply_payout(
+                action,
+                reply_to_message_id=_int_or_none(action.get("reply_to_message_id")),
+                reply_to_user_id=_reply_to_user_id_from_action(action),
+                reply_to_search_limit=_int_or_none(action.get("reply_to_search_limit")),
+                parse_mode=_action_parse_mode(action),
+            )
+            return True
+
+        async def _on_answer_callback(action: dict[str, Any]) -> bool:
+            await self._record_settlement(action)
+            await self._answer_callback(action)
+            return True
+
+        async def _on_answer_inline(action: dict[str, Any]) -> bool:
+            await self._record_settlement(action)
+            await self._answer_inline_query(action)
+            return True
+
+        async def _on_delete(action: dict[str, Any]) -> bool:
+            await self._record_settlement(action)
+            await self._apply_delete_message(action)
+            return True
+
+        async def _on_pin(action: dict[str, Any]) -> bool:
+            await self._record_settlement(action)
+            await self._apply_pin_message(action)
+            return True
+
+        async def _on_edit_message(action: dict[str, Any]) -> bool:
+            await self._record_settlement(action)
             raw_reply_markup = action.get("reply_markup")
             reply_markup = raw_reply_markup if isinstance(raw_reply_markup, dict) else None
-            if action_type == "payout":
-                await self._apply_payout(
-                    action,
-                    reply_to_message_id=reply_to_message_id,
-                    reply_to_user_id=reply_to_user_id,
-                    reply_to_search_limit=reply_to_search_limit,
-                    parse_mode=parse_mode,
-                )
-                continue
-            if action_type == "answer_callback":
-                await self._answer_callback(action)
-                continue
-            if action_type == "answer_inline_query":
-                await self._answer_inline_query(action)
-                continue
-            if action_type == "delete_message":
-                await self._apply_delete_message(action)
-                continue
-            if action_type == "pin_message":
-                await self._apply_pin_message(action)
-                continue
-            if action_type == "edit_message":
-                await self._apply_edit_message(action, parse_mode=parse_mode, reply_markup=reply_markup)
-                continue
-            if action_type == "edit_caption":
-                await self._apply_edit_caption(action, parse_mode=parse_mode, reply_markup=reply_markup)
-                continue
-            if action_type == "send_message":
-                replace_message_id = await self._apply_send_message(
-                    action,
-                    reply_to_message_id=reply_to_message_id,
-                    reply_to_user_id=reply_to_user_id,
-                    reply_to_search_limit=reply_to_search_limit,
-                    parse_mode=parse_mode,
-                    reply_markup=reply_markup,
-                    replace_message_id=replace_message_id,
-                )
-                continue
-            if action_type in {"send_photo", "send_file"}:
-                replace_message_id = await self._apply_send_media(
-                    action,
-                    reply_to_message_id=reply_to_message_id,
-                    reply_to_user_id=reply_to_user_id,
-                    reply_to_search_limit=reply_to_search_limit,
-                    parse_mode=parse_mode,
-                    reply_markup=reply_markup,
-                    replace_message_id=replace_message_id,
-                )
-                continue
-            log.info("interaction action ignored: unsupported type=%s aid=%s", action_type, self.incoming.account_id)
+            await self._apply_edit_message(
+                action,
+                parse_mode=_action_parse_mode(action),
+                reply_markup=reply_markup,
+            )
+            return True
+
+        async def _on_edit_caption(action: dict[str, Any]) -> bool:
+            await self._record_settlement(action)
+            raw_reply_markup = action.get("reply_markup")
+            reply_markup = raw_reply_markup if isinstance(raw_reply_markup, dict) else None
+            await self._apply_edit_caption(
+                action,
+                parse_mode=_action_parse_mode(action),
+                reply_markup=reply_markup,
+            )
+            return True
+
+        async def _on_send_message(action: dict[str, Any]) -> bool:
+            await self._record_settlement(action)
+            raw_reply_markup = action.get("reply_markup")
+            reply_markup = raw_reply_markup if isinstance(raw_reply_markup, dict) else None
+            replace_holder["id"] = await self._apply_send_message(
+                action,
+                reply_to_message_id=_int_or_none(action.get("reply_to_message_id")),
+                reply_to_user_id=_reply_to_user_id_from_action(action),
+                reply_to_search_limit=_int_or_none(action.get("reply_to_search_limit")),
+                parse_mode=_action_parse_mode(action),
+                reply_markup=reply_markup,
+                replace_message_id=replace_holder["id"],
+            )
+            return True
+
+        async def _on_send_media(action: dict[str, Any]) -> bool:
+            await self._record_settlement(action)
+            raw_reply_markup = action.get("reply_markup")
+            reply_markup = raw_reply_markup if isinstance(raw_reply_markup, dict) else None
+            replace_holder["id"] = await self._apply_send_media(
+                action,
+                reply_to_message_id=_int_or_none(action.get("reply_to_message_id")),
+                reply_to_user_id=_reply_to_user_id_from_action(action),
+                reply_to_search_limit=_int_or_none(action.get("reply_to_search_limit")),
+                parse_mode=_action_parse_mode(action),
+                reply_markup=reply_markup,
+                replace_message_id=replace_holder["id"],
+            )
+            return True
+
+        async def _on_unsupported(action: dict[str, Any]) -> bool:
+            await self._record_settlement(action)
+            action_type = str(action.get("type") or "").strip()
+            log.info(
+                "interaction action ignored: unsupported type=%s aid=%s",
+                action_type,
+                self.incoming.account_id,
+            )
             await record_action(
                 action.get("context"),
                 action,
@@ -258,6 +300,48 @@ class InteractionDeliveryExecutor:
                 action=action,
                 **self.log_context(self.incoming),
             )
+            return True
+
+        if len(actions) > INTERACTION_ACTION_LIMIT:
+            dropped_actions = actions[INTERACTION_ACTION_LIMIT:]
+            await self.write_log(
+                self.incoming,
+                "warn",
+                "interaction actions truncated by delivery limit",
+                reason_code="action_limit_exceeded",
+                kept_count=INTERACTION_ACTION_LIMIT,
+                dropped_count=len(dropped_actions),
+                dropped_action_types=[
+                    str((item or {}).get("type") or "") for item in dropped_actions if isinstance(item, dict)
+                ],
+                **self.log_context(self.incoming),
+            )
+
+        handlers = ActionHandlers(
+            on_start_session=_on_start_session,
+            on_update_session=_on_update_session,
+            on_session_control=_on_session_control,
+            on_result=_on_result,
+            on_settlement=_on_settlement,
+            on_payout=_on_payout,
+            on_send_message=_on_send_message,
+            on_send_media=_on_send_media,
+            on_edit_message=_on_edit_message,
+            on_edit_caption=_on_edit_caption,
+            on_delete_message=_on_delete,
+            on_pin_message=_on_pin,
+            on_answer_callback=_on_answer_callback,
+            on_answer_inline_query=_on_answer_inline,
+            on_deprecated_send_via=_on_deprecated,
+            on_unsupported=_on_unsupported,
+            on_truncated=_on_truncated,
+        )
+        await run_action_batch(
+            list(actions or []),
+            handlers,
+            limit=INTERACTION_ACTION_LIMIT,
+            prepare_action=_prepare,
+        )
 
     async def delete_message(
         self,

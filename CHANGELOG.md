@@ -26,6 +26,7 @@
 - 交互 Worker RPC 使用长驻 pubsub broker 按 reply-channel 解复用，避免每次 RPC 独占连接池。
 - 会话反向索引 `account+chat → session keys`，热路径优先 SMEMBERS+GET，索引缺失时 SCAN 并集重建（不 DELETE，避免并发丢会话）。
 - 插件敏感字段加密递归支持 `array.items.properties` 上的 `x-sensitive` / `format=password`。
+- 交互执行体共享 `action_core.run_action_batch` 分发核与 `SessionRecord` 信封；E1/E2 改为通道适配器，parity 守卫对齐 `CANONICAL_ACTION_TYPES`。
 
 ### Fixed
 - `update_session` 统一走 Redis Lua CAS，合并 data / 延长过期 / 递增 revision，冲突返回明确错误，避免多执行体并发丢写。
