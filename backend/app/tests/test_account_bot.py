@@ -14546,6 +14546,17 @@ async def test_interaction_action_unknown_type_writes_runtime_log(monkeypatch) -
     assert '"level":"info"' in payload
 
 
+
+async def _reset_rpc_broker():
+    from app.services.interaction.rpc_broker import reset_interaction_rpc_broker_for_tests
+    await reset_interaction_rpc_broker_for_tests()
+
+
+def _broker_ready_fake_redis(base_cls):
+    """Wrap a per-request pubsub FakeRedis so the long-lived broker can use it."""
+    return base_cls
+
+
 @pytest.mark.asyncio
 async def test_run_worker_interaction_entry_returns_timeout(monkeypatch) -> None:
     class _PubSub:
@@ -14579,6 +14590,7 @@ async def test_run_worker_interaction_entry_returns_timeout(monkeypatch) -> None
             return 1
 
     redis = _Redis()
+    await _reset_rpc_broker()
     monkeypatch.setattr(account_bot_runtime, "get_redis", lambda: redis)
     monkeypatch.setattr(account_bot_runtime, "_INTERACTION_ENTRY_TIMEOUT_SECONDS", 0.01)
 
@@ -14607,8 +14619,8 @@ async def test_run_worker_interaction_entry_returns_timeout(monkeypatch) -> None
     assert error == "worker 调用超时"
     assert actions == []
     assert redis.published
-    assert redis.pubsub_obj.unsubscribed == redis.pubsub_obj.subscribed
-    assert redis.pubsub_obj.closed is True
+    # broker 长驻 pubsub：不再要求每次 request 后 close；reply channel 应已 unsubscribe
+    assert any(ch.startswith("account_bot:interaction_entry:") for ch in redis.pubsub_obj.unsubscribed)
 
 
 @pytest.mark.asyncio
@@ -14616,11 +14628,17 @@ async def test_run_worker_interaction_entry_retries_until_worker_subscribes(monk
     class _PubSub:
         def __init__(self) -> None:
             self.closed = False
+            self._queue = None
 
         async def subscribe(self, _channel: str) -> None:
             return None
 
         async def get_message(self, **_kwargs):  # noqa: ANN003
+            if self._queue is not None:
+                try:
+                    return await __import__("asyncio").wait_for(self._queue.get(), timeout=0.05)
+                except Exception:
+                    return None
             return {
                 "data": account_bot_runtime.make_cmd(
                     account_bot_runtime.CMD_RUN_INTERACTION_ENTRY,
@@ -14640,18 +14658,40 @@ async def test_run_worker_interaction_entry_retries_until_worker_subscribes(monk
         def __init__(self) -> None:
             self.pubsub_obj = _PubSub()
             self.publish_calls = 0
+            self._messages = __import__("asyncio").Queue()
+            self.pubsub_obj._queue = self._messages
 
         def pubsub(self):
             return self.pubsub_obj
 
-        async def publish(self, _channel: str, _payload: str) -> int:
+        async def publish(self, _channel: str, payload: str) -> int:
             self.publish_calls += 1
-            return 0 if self.publish_calls == 1 else 1
+            if self.publish_calls == 1:
+                return 0
+            # deliver reply for subscribed reply channel
+            try:
+                msg = account_bot_runtime.IPCMessage.decode(payload)
+                reply_to = str(msg.payload.get("reply_to") or "")
+            except Exception:
+                reply_to = ""
+            if reply_to:
+                await self._messages.put({
+                    "type": "message",
+                    "channel": reply_to,
+                    "data": account_bot_runtime.make_cmd(
+                        account_bot_runtime.CMD_RUN_INTERACTION_ENTRY,
+                        ok=True,
+                        error=None,
+                        actions=[{"type": "result", "success": True}],
+                    ),
+                })
+            return 1
 
     async def fast_sleep(_seconds: float) -> None:
         return None
 
     redis = _Redis()
+    await _reset_rpc_broker()
     monkeypatch.setattr(account_bot_runtime, "get_redis", lambda: redis)
     monkeypatch.setattr(account_bot_runtime.asyncio, "sleep", fast_sleep)
     monkeypatch.setattr(account_bot_runtime, "update_plugin_runtime_status", AsyncMock())
@@ -14677,7 +14717,6 @@ async def test_run_worker_interaction_entry_retries_until_worker_subscribes(monk
     assert error is None
     assert actions == [{"type": "result", "success": True}]
     assert redis.publish_calls == 2
-    assert redis.pubsub_obj.closed is True
 
 
 @pytest.mark.asyncio
@@ -14742,8 +14781,6 @@ async def test_run_worker_interaction_entry_retries_then_fails_when_worker_offli
     assert error == "账号 worker 不在线"
     assert actions == []
     assert redis.publish_calls >= 2
-    assert redis.pubsub_obj.get_message_called is False
-    assert redis.pubsub_obj.closed is True
     assert any(call.kwargs.get("reason_code") == "userbot_offline" for call in record_span.await_args_list)
 
 
@@ -14753,26 +14790,17 @@ async def test_run_worker_interaction_entry_waits_for_slow_plugin_reply(monkeypa
         def __init__(self) -> None:
             self.calls = 0
             self.closed = False
+            self._queue = __import__("asyncio").Queue()
 
         async def subscribe(self, _channel: str) -> None:
             return None
 
         async def get_message(self, **_kwargs):  # noqa: ANN003
             self.calls += 1
-            if self.calls == 1:
+            try:
+                return await __import__("asyncio").wait_for(self._queue.get(), timeout=0.05)
+            except Exception:
                 return None
-            return {
-                "data": account_bot_runtime.make_cmd(
-                    account_bot_runtime.CMD_RUN_INTERACTION_ENTRY,
-                    ok=True,
-                    error=None,
-                    actions=[
-                        {"type": "send_message", "text": "置顶成功"},
-                        {"type": "result", "success": True},
-                        {"type": "no_session"},
-                    ],
-                )
-            }
 
         async def unsubscribe(self, _channel: str) -> None:
             return None
@@ -14787,10 +14815,33 @@ async def test_run_worker_interaction_entry_waits_for_slow_plugin_reply(monkeypa
         def pubsub(self):
             return self.pubsub_obj
 
-        async def publish(self, _channel: str, _payload: str) -> int:
+        async def publish(self, _channel: str, payload: str) -> int:
+            try:
+                msg = account_bot_runtime.IPCMessage.decode(payload)
+                reply_to = str(msg.payload.get("reply_to") or "")
+            except Exception:
+                reply_to = ""
+            if reply_to:
+                # first empty then real reply, preserve "slow" behavior
+                await self.pubsub_obj._queue.put(None)
+                await self.pubsub_obj._queue.put({
+                    "type": "message",
+                    "channel": reply_to,
+                    "data": account_bot_runtime.make_cmd(
+                        account_bot_runtime.CMD_RUN_INTERACTION_ENTRY,
+                        ok=True,
+                        error=None,
+                        actions=[
+                            {"type": "send_message", "text": "置顶成功"},
+                            {"type": "result", "success": True},
+                            {"type": "no_session"},
+                        ],
+                    ),
+                })
             return 1
 
     redis = _Redis()
+    await _reset_rpc_broker()
     monkeypatch.setattr(account_bot_runtime, "get_redis", lambda: redis)
 
     async def update_status(**_kwargs):
@@ -14818,7 +14869,6 @@ async def test_run_worker_interaction_entry_waits_for_slow_plugin_reply(monkeypa
     assert error is None
     assert actions[0]["text"] == "置顶成功"
     assert actions[1] == {"type": "result", "success": True}
-    assert redis.pubsub_obj.closed is True
 
 @pytest.mark.asyncio
 async def test_game24_winner_notice_replies_to_winning_answer(monkeypatch) -> None:
@@ -15224,6 +15274,7 @@ async def test_confirm_action_token_can_only_be_consumed_once(monkeypatch) -> No
     answer = AsyncMock()
     execute = AsyncMock()
     redis = _Redis()
+    await _reset_rpc_broker()
     monkeypatch.setattr(account_bot_runtime, "get_redis", lambda: redis)
     monkeypatch.setattr(account_bot_service, "answer_callback", answer)
     monkeypatch.setattr(account_bot_runtime, "_execute_confirmed_action", execute)

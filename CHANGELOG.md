@@ -23,6 +23,8 @@
 ### Added
 - 插件配置敏感字段支持 `secret:v1` 版本化加密信封；提供 `migrate_plugin_config_secrets` 迁移脚本，rekey 覆盖插件 JSON 配置。
 - installed 插件注入命名空间 Redis facade（禁止 keys/scan/flush/pubsub/跨插件访问）；builtin 仍可用完整客户端。
+- 交互 Worker RPC 使用长驻 pubsub broker 按 reply-channel 解复用，避免每次 RPC 独占连接池。
+- 会话反向索引 `account+chat → session keys`，热路径优先 SMEMBERS+GET，索引缺失时 SCAN 重建。
 
 ### Fixed
 - `update_session` 统一走 Redis Lua CAS，合并 data / 延长过期 / 递增 revision，冲突返回明确错误，避免多执行体并发丢写。
@@ -31,6 +33,7 @@
 - Worker DB 默认 `max_overflow=2`，缓解并发写库串行超时。
 - runtime log / rate-limit 事件队列增加 LTRIM 上限，避免无界 RPUSH 撑爆小内存 Redis。
 - `remotePlugin` 安装/更新/检查更新前端超时放宽到 120s。
+- `stop_all_workers` 改为并行关停；runtime_log 通知任务有界并发，降低关停耗时与崩溃刷屏风险。
 
 ## [0.56.5] — 2026-07-12 · patch（补丁版本） · 资金台账与风控止血
 

@@ -97,6 +97,7 @@ from .interaction.delivery import (
     delivery_message_id,
     read_action_reply_target,
 )
+from .interaction.rpc_broker import get_interaction_rpc_broker, new_reply_channel
 
 log = logging.getLogger(__name__)
 
@@ -3453,6 +3454,18 @@ async def _save_interaction_session(
             json.dumps(payload, ensure_ascii=False),
             ex=ttl + _INTERACTION_SESSION_TTL_GRACE_SECONDS,
         )
+        try:
+            from .interaction.session_index import index_session_key
+
+            await index_session_key(
+                redis,
+                account_id=incoming.account_id,
+                chat_id=incoming.chat_id,
+                session_key=session_key,
+                ttl_seconds=ttl + _INTERACTION_SESSION_TTL_GRACE_SECONDS,
+            )
+        except Exception:  # noqa: BLE001
+            log.debug("index interaction session failed", exc_info=True)
         _remember_interaction_active_session_chat(incoming.account_id, incoming.chat_id)
         if not was_active:
             participant_ids = _interaction_session_list_participant_ids(payload)
@@ -6255,9 +6268,8 @@ async def _run_worker_interaction_entry(
     entry_key: str,
     payload: dict[str, Any],
 ) -> tuple[bool, str | None, list[dict[str, Any]]]:
-    reply_channel = f"account_bot:interaction_entry:{incoming.account_id}:{secrets.token_hex(8)}"
+    reply_channel = new_reply_channel("entry", incoming.account_id)
     redis = get_redis()
-    pubsub = redis.pubsub()
     trace_ctx = _interaction_trace_context(payload)
     trace_id = trace_ctx.get("trace_id") or incoming.trace_id
     started = time.time()
@@ -6270,7 +6282,7 @@ async def _run_worker_interaction_entry(
         entry_key=entry_key,
     )
     try:
-        await pubsub.subscribe(reply_channel)
+        broker = await get_interaction_rpc_broker()
         command = make_cmd(
             CMD_RUN_INTERACTION_ENTRY,
             plugin_key=plugin_key,
@@ -6278,24 +6290,16 @@ async def _run_worker_interaction_entry(
             payload=payload,
             reply_to=reply_channel,
         )
-        deadline = time.time() + _INTERACTION_ENTRY_TIMEOUT_SECONDS
-        online_deadline = time.time() + min(
-            _INTERACTION_ENTRY_TIMEOUT_SECONDS,
-            _INTERACTION_WORKER_ONLINE_WAIT_SECONDS,
+        online, publish_attempts, response, error = await broker.request(
+            cmd_channel=cmd_channel(incoming.account_id),
+            command=command,
+            reply_channel=reply_channel,
+            timeout_seconds=_INTERACTION_ENTRY_TIMEOUT_SECONDS,
+            online_wait_seconds=_INTERACTION_WORKER_ONLINE_WAIT_SECONDS,
+            redis=redis,
         )
-        publish_attempts = 0
-        while True:
-            publish_attempts += 1
-            subscriber_count = await redis.publish(cmd_channel(incoming.account_id), command)
-            if int(subscriber_count or 0) > 0:
-                break
-            now = time.time()
-            if now >= online_deadline:
-                break
-            await asyncio.sleep(min(0.25, max(0.01, online_deadline - now)))
-
-        if int(subscriber_count or 0) <= 0:
-            error = "账号 worker 不在线"
+        if not online:
+            err = error or "账号 worker 不在线"
             await record_span(
                 trace_ctx,
                 "plugin_return",
@@ -6304,7 +6308,7 @@ async def _run_worker_interaction_entry(
                 plugin_key=plugin_key,
                 entry_key=entry_key,
                 reason_code="userbot_offline",
-                error=error,
+                error=err,
                 publish_attempts=publish_attempts,
                 duration_ms=int((time.time() - started) * 1000),
             )
@@ -6314,36 +6318,58 @@ async def _run_worker_interaction_entry(
                 last_invocation_status=TRACE_STATUS_FAILED,
                 last_trace_id=str(trace_id or ""),
             )
-            return False, error, []
-        while time.time() < deadline:
-            msg = await pubsub.get_message(ignore_subscribe_messages=True, timeout=0.5)
-            if not msg:
-                continue
-            response = IPCMessage.decode(msg["data"]).payload
-            actions = response.get("actions") if isinstance(response.get("actions"), list) else []
-            ok = bool(response.get("ok"))
-            error = response.get("error")
+            return False, err, []
+        if response is None:
+            err = error or "worker 调用超时"
             await record_span(
                 trace_ctx,
                 "plugin_return",
-                TRACE_STATUS_OK if ok else TRACE_STATUS_FAILED,
+                TRACE_STATUS_FAILED,
                 component="worker",
                 plugin_key=plugin_key,
                 entry_key=entry_key,
-                reason_code=None if ok else "plugin_load_failed",
-                error=error,
-                action_count=len(actions),
+                reason_code="plugin_load_failed",
+                error=err,
+                publish_attempts=publish_attempts,
                 duration_ms=int((time.time() - started) * 1000),
             )
             await update_plugin_runtime_status(
                 account_id=incoming.account_id,
                 plugin_key=plugin_key,
-                last_invocation_status=TRACE_STATUS_OK if ok else TRACE_STATUS_FAILED,
+                last_invocation_status=TRACE_STATUS_FAILED,
                 last_trace_id=str(trace_id or ""),
             )
-            return ok, error, [item for item in actions if isinstance(item, dict)]
+            return False, err, []
+        actions = response.get("actions") if isinstance(response.get("actions"), list) else []
+        ok = bool(response.get("ok"))
+        resp_error = response.get("error")
+        await record_span(
+            trace_ctx,
+            "plugin_return",
+            TRACE_STATUS_OK if ok else TRACE_STATUS_FAILED,
+            component="worker",
+            plugin_key=plugin_key,
+            entry_key=entry_key,
+            reason_code=None if ok else "plugin_load_failed",
+            error=resp_error,
+            action_count=len(actions),
+            duration_ms=int((time.time() - started) * 1000),
+        )
+        await update_plugin_runtime_status(
+            account_id=incoming.account_id,
+            plugin_key=plugin_key,
+            last_invocation_status=TRACE_STATUS_OK if ok else TRACE_STATUS_FAILED,
+            last_trace_id=str(trace_id or ""),
+        )
+        return ok, resp_error, [item for item in actions if isinstance(item, dict)]
     except Exception as exc:  # noqa: BLE001
-        log.warning("interaction module ipc failed aid=%s plugin=%s entry=%s error=%s", incoming.account_id, plugin_key, entry_key, exc)
+        log.warning(
+            "interaction module ipc failed aid=%s plugin=%s entry=%s error=%s",
+            incoming.account_id,
+            plugin_key,
+            entry_key,
+            exc,
+        )
         await record_span(
             trace_ctx,
             "plugin_return",
@@ -6362,33 +6388,6 @@ async def _run_worker_interaction_entry(
             last_trace_id=str(trace_id or ""),
         )
         return False, f"{type(exc).__name__}: {exc}", []
-    finally:
-        try:
-            await pubsub.unsubscribe(reply_channel)
-        finally:
-            close = getattr(pubsub, "aclose", None) or getattr(pubsub, "close", None)
-            if close is not None:
-                ret = close()
-                if hasattr(ret, "__await__"):
-                    await ret
-    await record_span(
-        trace_ctx,
-        "plugin_return",
-        TRACE_STATUS_FAILED,
-        component="worker",
-        plugin_key=plugin_key,
-        entry_key=entry_key,
-        reason_code="plugin_load_failed",
-        error="worker 调用超时",
-        duration_ms=int((time.time() - started) * 1000),
-    )
-    await update_plugin_runtime_status(
-        account_id=incoming.account_id,
-        plugin_key=plugin_key,
-        last_invocation_status=TRACE_STATUS_FAILED,
-        last_trace_id=str(trace_id or ""),
-    )
-    return False, "worker 调用超时", []
 
 
 async def _run_worker_interaction_action(
@@ -6396,53 +6395,42 @@ async def _run_worker_interaction_action(
     *,
     payload: dict[str, Any],
 ) -> tuple[bool, str | None, dict[str, Any]]:
-    reply_channel = f"account_bot:interaction_action:{incoming.account_id}:{secrets.token_hex(8)}"
+    reply_channel = new_reply_channel("action", incoming.account_id)
     redis = get_redis()
-    pubsub = redis.pubsub()
     started = time.time()
     try:
-        await pubsub.subscribe(reply_channel)
-        subscriber_count = await redis.publish(
-            cmd_channel(incoming.account_id),
-            make_cmd(
+        broker = await get_interaction_rpc_broker()
+        online, _attempts, response, error = await broker.request(
+            cmd_channel=cmd_channel(incoming.account_id),
+            command=make_cmd(
                 CMD_RUN_INTERACTION_ACTION,
                 payload=payload,
                 reply_to=reply_channel,
             ),
+            reply_channel=reply_channel,
+            timeout_seconds=_INTERACTION_ENTRY_TIMEOUT_SECONDS,
+            online_wait_seconds=0.0,
+            redis=redis,
         )
-        if int(subscriber_count or 0) <= 0:
+        if not online:
             await record_span(
                 trace_log_context(incoming.trace_id),
                 "worker_action",
                 TRACE_STATUS_FAILED,
                 component="worker",
                 reason_code="userbot_offline",
-                error="账号 worker 不在线",
+                error=error or "账号 worker 不在线",
                 duration_ms=int((time.time() - started) * 1000),
                 action_type=payload.get("action_type"),
             )
-            return False, "账号 worker 不在线", {}
-        deadline = time.time() + _INTERACTION_ENTRY_TIMEOUT_SECONDS
-        while time.time() < deadline:
-            msg = await pubsub.get_message(ignore_subscribe_messages=True, timeout=0.5)
-            if not msg:
-                continue
-            response = IPCMessage.decode(msg["data"]).payload
-            result = response.get("result") if isinstance(response.get("result"), dict) else {}
-            return bool(response.get("ok")), response.get("error"), result
+            return False, error or "账号 worker 不在线", {}
+        if response is None:
+            return False, error or "worker 调用超时", {}
+        result = response.get("result") if isinstance(response.get("result"), dict) else {}
+        return bool(response.get("ok")), response.get("error"), result
     except Exception as exc:  # noqa: BLE001
         log.warning("interaction action ipc failed aid=%s error=%s", incoming.account_id, exc)
         return False, f"{type(exc).__name__}: {exc}", {}
-    finally:
-        try:
-            await pubsub.unsubscribe(reply_channel)
-        finally:
-            close = getattr(pubsub, "aclose", None) or getattr(pubsub, "close", None)
-            if close is not None:
-                ret = close()
-                if hasattr(ret, "__await__"):
-                    await ret
-    return False, "worker 调用超时", {}
 
 
 async def _write_interaction_runtime_log(

@@ -2049,6 +2049,18 @@ async def _apply_userbot_start_session_action(
             payload["participant_user_ids"] = sorted(paid_ids)
         await redis.set(session_key, json.dumps(payload, ensure_ascii=False), ex=ttl + 90)
         state.userbot_session_chats.add(target_chat_id)
+        try:
+            from ...services.interaction.session_index import index_session_key
+
+            await index_session_key(
+                redis,
+                account_id=state.account_id,
+                chat_id=target_chat_id,
+                session_key=session_key,
+                ttl_seconds=ttl + 90,
+            )
+        except Exception:  # noqa: BLE001
+            log.debug("index start_session failed", exc_info=True)
         await record_action(
             action.get("context"),
             action,
@@ -2079,11 +2091,27 @@ def _userbot_session_redis_ttl(session: dict[str, Any], *, now: float | None = N
 
 
 async def _write_userbot_session(redis: Any, key: str, session: dict[str, Any]) -> None:
+    ttl = _userbot_session_redis_ttl(session)
     await redis.set(
         key,
         json.dumps(session, ensure_ascii=False),
-        ex=_userbot_session_redis_ttl(session),
+        ex=ttl,
     )
+    try:
+        from ...services.interaction.session_index import index_session_key
+
+        chat_id = _int_or_none(session.get("chat_id"))
+        account_id = _int_or_none(session.get("account_id"))
+        if account_id is not None and chat_id is not None:
+            await index_session_key(
+                redis,
+                account_id=account_id,
+                chat_id=chat_id,
+                session_key=key,
+                ttl_seconds=ttl,
+            )
+    except Exception:  # noqa: BLE001
+        log.debug("index userbot session write failed", exc_info=True)
 
 
 async def _apply_userbot_update_session_action(
@@ -5035,27 +5063,68 @@ async def _load_userbot_sessions_for_chat(
     chat_id: int,
     sender_id: int | None,
 ) -> list[tuple[str, dict[str, Any]]]:
-    prefix = f"{_USERBOT_SESSION_KEY_PREFIX}{state.account_id}:"
-    patterns = [
-        f"{prefix}*:{chat_id}",
-        f"{prefix}*:{chat_id}:user:*",
-    ]
-    sessions: list[tuple[str, dict[str, Any]]] = []
-    seen: set[str] = set()
+    from ...services.interaction import session_index
+
+    async def _hydrate(keys: list[str]) -> list[tuple[str, dict[str, Any]]]:
+        sessions: list[tuple[str, dict[str, Any]]] = []
+        seen: set[str] = set()
+        for key in keys:
+            if key in seen:
+                continue
+            seen.add(key)
+            keyed_user_id = _userbot_session_key_user_id(key)
+            if keyed_user_id is not None and keyed_user_id != sender_id:
+                continue
+            try:
+                raw = await redis.get(key)
+            except Exception:  # noqa: BLE001
+                continue
+            session = _json_dict(raw)
+            if not _userbot_observed_session_is_active(session, chat_id):
+                # 过期/无效：从索引剔除，避免热路径反复 GET。
+                await session_index.unindex_session_key(
+                    redis,
+                    account_id=state.account_id,
+                    chat_id=chat_id,
+                    session_key=key,
+                )
+                continue
+            sessions.append((key, session))
+        return sessions
+
     try:
+        indexed = await session_index.list_indexed_session_keys(
+            redis,
+            account_id=state.account_id,
+            chat_id=chat_id,
+        )
+        if indexed is not None:
+            sessions = await _hydrate(indexed)
+            if not sessions:
+                state.userbot_session_chats.discard(chat_id)
+            return sessions
+
+        # 索引缺失：一次慢 SCAN 重建，避免永久假阴性。
+        prefix = f"{_USERBOT_SESSION_KEY_PREFIX}{state.account_id}:"
+        patterns = [
+            f"{prefix}*:{chat_id}",
+            f"{prefix}*:{chat_id}:user:*",
+        ]
+        scanned: list[str] = []
+        seen_scan: set[str] = set()
         for pattern in patterns:
             for key in await _redis_keys(redis, pattern):
-                if key in seen:
+                if key in seen_scan:
                     continue
-                seen.add(key)
-                keyed_user_id = _userbot_session_key_user_id(key)
-                if keyed_user_id is not None and keyed_user_id != sender_id:
-                    continue
-                raw = await redis.get(key)
-                session = _json_dict(raw)
-                if not _userbot_observed_session_is_active(session, chat_id):
-                    continue
-                sessions.append((key, session))
+                seen_scan.add(key)
+                scanned.append(key)
+        await session_index.rebuild_chat_index_from_scan(
+            redis,
+            account_id=state.account_id,
+            chat_id=chat_id,
+            scan_keys=scanned,
+        )
+        sessions = await _hydrate(scanned)
     except Exception:  # noqa: BLE001
         log.debug("读取 userbot 会话失败 account=%s chat=%s", state.account_id, chat_id, exc_info=True)
         return []
@@ -6315,6 +6384,18 @@ async def _create_manifest_command_userbot_session(
     await redis.set(session_key, json.dumps(session, ensure_ascii=False), ex=ttl + _USERBOT_SESSION_TTL_GRACE_SECONDS)
     if chat_id is not None:
         state.userbot_session_chats.add(chat_id)
+        try:
+            from ...services.interaction.session_index import index_session_key
+
+            await index_session_key(
+                redis,
+                account_id=state.account_id,
+                chat_id=chat_id,
+                session_key=session_key,
+                ttl_seconds=ttl + _USERBOT_SESSION_TTL_GRACE_SECONDS,
+            )
+        except Exception:  # noqa: BLE001
+            log.debug("index command session failed", exc_info=True)
     return session_key, session
 
 

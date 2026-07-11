@@ -270,17 +270,24 @@ async def update_interaction_session(
             grace,
             do_extend,
         )
-        return _result_from_lua(result, expected_revision=expected_revision)
-
-    return await _update_session_python(
+        update_result = _result_from_lua(result, expected_revision=expected_revision)
+    else:
+        update_result = await _update_session_python(
+            redis,
+            key,
+            data=patch,
+            extend_seconds=extend if do_extend else None,
+            expected_revision=expected_revision,
+            grace_seconds=grace,
+            now=now_ts,
+        )
+    await _maybe_index_session(
         redis,
         key,
-        data=patch,
-        extend_seconds=extend if do_extend else None,
-        expected_revision=expected_revision,
-        grace_seconds=grace,
-        now=now_ts,
+        update_result.session,
+        ttl_seconds=update_result.ttl_seconds,
     )
+    return update_result
 
 
 async def _update_session_python(
@@ -312,6 +319,31 @@ async def _update_session_python(
     )
     await redis.set(session_key, json.dumps(payload, ensure_ascii=False), ex=ttl)
     return _result_from_payload(payload, ttl_seconds=ttl)
+
+
+async def _maybe_index_session(
+    redis: Any,
+    session_key: str,
+    payload: dict[str, Any],
+    *,
+    ttl_seconds: int,
+) -> None:
+    try:
+        from .session_index import index_session_key
+
+        account_id = _as_int(payload.get("account_id"))
+        chat_id = _as_int(payload.get("chat_id"))
+        if account_id is None or chat_id is None:
+            return
+        await index_session_key(
+            redis,
+            account_id=account_id,
+            chat_id=chat_id,
+            session_key=session_key,
+            ttl_seconds=ttl_seconds,
+        )
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _result_from_lua(
