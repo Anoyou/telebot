@@ -62,11 +62,7 @@ class SessionRecord:
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
-        # Drop empty optional list/None noise only when unused? Keep full for stability.
-        if not self.paid_user_ids:
-            payload.pop("paid_user_ids", None)
-        if not self.participant_user_ids:
-            payload.pop("participant_user_ids", None)
+        # paid/participant 空列表对 paid_pool 有语义（尚未有人入池），保留。
         if self.payer_user_id is None:
             payload.pop("payer_user_id", None)
         if self.revision <= 0:

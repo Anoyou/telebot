@@ -34,7 +34,10 @@ async def index_session_key(
     key = chat_index_key(account_id, int(chat_id))
     try:
         await redis.sadd(key, session_key)
-        ex = int(ttl_seconds or CHAT_INDEX_TTL_SECONDS)
+        # 索引应比单会话更长寿：会话 TTL 往往只有数分钟，索引过早过期会迫使热路径
+        # 反复 SCAN。取 max(会话 TTL, 默认 7 天)；失效成员由读取路径 unindex 清理。
+        session_ttl = int(ttl_seconds) if ttl_seconds is not None else 0
+        ex = max(session_ttl, CHAT_INDEX_TTL_SECONDS) if session_ttl > 0 else CHAT_INDEX_TTL_SECONDS
         if ex > 0:
             await redis.expire(key, ex)
     except Exception:  # noqa: BLE001

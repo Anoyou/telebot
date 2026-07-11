@@ -27,6 +27,8 @@
 - 会话反向索引 `account+chat → session keys`，热路径优先 SMEMBERS+GET，索引缺失时 SCAN 并集重建（不 DELETE，避免并发丢会话）。
 - 插件敏感字段加密递归支持 `array.items.properties` 上的 `x-sensitive` / `format=password`。
 - 交互执行体共享 `action_core.run_action_batch` 分发核与 `SessionRecord` 信封；E1/E2 改为通道适配器，parity 守卫对齐 `CANONICAL_ACTION_TYPES`。
+- E3 userbot 交互动作收敛到共享 `userbot_actions` 核（send/payout/media + classify），runtime 仅注入限流/人化等依赖。
+- Bot / UserBot 会话 start 路径统一写入 `SessionRecord`；end/clear 同步 unindex 反向索引。
 
 ### Fixed
 - `update_session` 统一走 Redis Lua CAS，合并 data / 延长过期 / 递增 revision，冲突返回明确错误，避免多执行体并发丢写。
@@ -35,7 +37,9 @@
 - Worker DB 默认 `max_overflow=2`，缓解并发写库串行超时。
 - runtime log / rate-limit 事件队列增加 LTRIM 上限，避免无界 RPUSH 撑爆小内存 Redis。
 - `remotePlugin` 安装/更新/检查更新前端超时放宽到 120s。
-- `stop_all_workers` 改为并行关停；runtime_log 通知任务有界并发，降低关停耗时与崩溃刷屏风险。
+- `stop_all_workers` 改为并行关停；runtime_log 通知改为有界队列（容量 200、4 worker），崩溃刷屏时丢弃并告警，不再无界 `create_task`。
+- 插件 global 字段兼容回退路径对 `secret:v1` 信封解密后再交给运行时，避免插件读到密文。
+- 会话反向索引 TTL 取 `max(会话 TTL, 7 天)`，避免短会话把索引冲掉导致热路径反复 SCAN。
 
 ## [0.56.5] — 2026-07-12 · patch（补丁版本） · 资金台账与风控止血
 

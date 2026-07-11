@@ -3414,7 +3414,6 @@ async def _save_interaction_session(
     now = time.time()
     was_active = _interaction_session_payload_active(existing, now=now)
     ttl = _interaction_session_ttl(rule)
-    expires_at = now + ttl
     existing_data = existing.get("data")
     existing_channel = str(existing.get("channel") or "").strip()
     channel = (
@@ -3422,30 +3421,33 @@ async def _save_interaction_session(
         if existing_channel and _interaction_session_payload_active(existing, now=now)
         else "interaction_bot"
     )
-    payload = {
-        "account_id": incoming.account_id,
-        "chat_id": incoming.chat_id,
-        "rule_id": str(rule.get("id") or "legacy"),
-        "rule_name": str(rule.get("name") or ""),
-        "module_key": module_key,
-        "entry_key": entry_key,
-        "started_by_user_id": started_by_user_id,
-        "source_user_id": incoming.user_id,
-        "started_by_message_id": incoming.message_id,
-        "event_type": event_type,
-        "channel": channel,
-        "created_at": existing.get("created_at") or now,
-        "updated_at": now,
-        "expires_at": expires_at,
-        "data": dict(existing_data) if isinstance(existing_data, dict) else {},
-    }
+    from .interaction.session_record import SessionRecord
+
+    record = SessionRecord.from_dict(existing) or SessionRecord(
+        account_id=int(incoming.account_id),
+        chat_id=int(incoming.chat_id),
+        module_key=module_key,
+        entry_key=entry_key,
+    )
+    record.rule_id = str(rule.get("id") or "legacy")
+    record.rule_name = str(rule.get("name") or "")
+    record.started_by_user_id = started_by_user_id
+    record.source_user_id = incoming.user_id
+    record.started_by_message_id = incoming.message_id
+    record.event_type = event_type
+    record.channel = channel
+    # 与历史行为一致：此处只保留既有 session.data；业务 data 由 update_session / start_session 写入。
+    # 形参 data 仅用于解析 session 作用域（user/chat），不直接并入信封。
+    record.data = dict(existing_data) if isinstance(existing_data, dict) else {}
+    record.touch(now=now, ttl_seconds=ttl)
     if policy == "paid_pool":
         paid_ids = _interaction_session_list_participant_ids(existing)
         if event_type == "payment_confirmed" and session_user_id is not None:
             paid_ids.add(int(session_user_id))
-            payload["payer_user_id"] = int(session_user_id)
-        payload["paid_user_ids"] = sorted(paid_ids)
-        payload["participant_user_ids"] = sorted(paid_ids)
+            record.payer_user_id = int(session_user_id)
+        record.paid_user_ids = sorted(paid_ids)
+        record.participant_user_ids = sorted(paid_ids)
+    payload = record.to_dict()
     try:
         if redis is None:
             redis = get_redis()
@@ -3613,39 +3615,52 @@ async def _apply_interaction_start_session_action(
         if existing_channel and _interaction_session_payload_active(existing, now=now)
         else "interaction_bot"
     )
-    payload = {
-        "account_id": incoming.account_id,
-        "chat_id": target_chat_id,
-        "rule_id": str(rule.get("id") or "legacy"),
-        "rule_name": str(rule.get("name") or ""),
-        "module_key": module_key,
-        "entry_key": entry_key,
-        "started_by_user_id": started_by_user_id,
-        "started_by_message_id": (
-            _int_or_none(action.get("started_by_message_id"))
-            or existing.get("started_by_message_id")
-            or incoming.message_id
-        ),
-        "source_user_id": incoming.user_id,
-        "event_type": str(action.get("event_type") or existing.get("event_type") or "message"),
-        "channel": channel,
-        "created_at": existing.get("created_at") or now,
-        "updated_at": now,
-        "expires_at": now + ttl,
-        "data": {
-            **dict(existing_data if isinstance(existing_data, dict) else {}),
-            **dict(action_data if isinstance(action_data, dict) else {}),
-        },
+    from .interaction.session_record import SessionRecord
+
+    record = SessionRecord.from_dict(existing) or SessionRecord(
+        account_id=int(incoming.account_id),
+        chat_id=int(target_chat_id),
+        module_key=module_key,
+        entry_key=entry_key,
+    )
+    record.rule_id = str(rule.get("id") or "legacy")
+    record.rule_name = str(rule.get("name") or "")
+    record.started_by_user_id = started_by_user_id
+    record.started_by_message_id = (
+        _int_or_none(action.get("started_by_message_id"))
+        or _int_or_none(existing.get("started_by_message_id"))
+        or incoming.message_id
+    )
+    record.source_user_id = incoming.user_id
+    record.event_type = str(action.get("event_type") or existing.get("event_type") or "message")
+    record.channel = channel
+    record.data = {
+        **dict(existing_data if isinstance(existing_data, dict) else {}),
+        **dict(action_data if isinstance(action_data, dict) else {}),
     }
+    record.touch(now=now, ttl_seconds=ttl)
     if _interaction_participant_policy(rule) == "paid_pool":
-        payload["paid_user_ids"] = sorted(participant_ids)
-        payload["participant_user_ids"] = sorted(participant_ids)
+        record.paid_user_ids = sorted(participant_ids)
+        record.participant_user_ids = sorted(participant_ids)
+    payload = record.to_dict()
     try:
         await redis.set(
             session_key,
             json.dumps(payload, ensure_ascii=False),
             ex=ttl + _INTERACTION_SESSION_TTL_GRACE_SECONDS,
         )
+        try:
+            from .interaction.session_index import index_session_key
+
+            await index_session_key(
+                redis,
+                account_id=incoming.account_id,
+                chat_id=target_chat_id,
+                session_key=session_key,
+                ttl_seconds=ttl + _INTERACTION_SESSION_TTL_GRACE_SECONDS,
+            )
+        except Exception:  # noqa: BLE001
+            log.debug("index interaction start_session failed", exc_info=True)
         _remember_interaction_active_session_chat(incoming.account_id, target_chat_id)
         await record_action(
             action.get("context"),
@@ -4021,7 +4036,20 @@ async def _interaction_session_expire_loop(aid: int) -> None:
 async def _clear_interaction_session(account_id: int, rule: dict[str, Any], chat_id: int | None, user_id: int | None = None) -> bool:
     try:
         redis = get_redis()
-        deleted = await redis.delete(_interaction_session_key(account_id, rule, chat_id, user_id))
+        session_key = _interaction_session_key(account_id, rule, chat_id, user_id)
+        deleted = await redis.delete(session_key)
+        if deleted and chat_id is not None:
+            try:
+                from .interaction.session_index import unindex_session_key
+
+                await unindex_session_key(
+                    redis,
+                    account_id=account_id,
+                    chat_id=chat_id,
+                    session_key=session_key,
+                )
+            except Exception:  # noqa: BLE001
+                log.debug("unindex interaction session failed aid=%s", account_id, exc_info=True)
         return bool(deleted)
     except Exception:  # noqa: BLE001
         log.debug("clear interaction session failed aid=%s rule=%s", account_id, rule.get("id"), exc_info=True)
@@ -4033,7 +4061,20 @@ async def _clear_interaction_sessions_for_rule(account_id: int, rule: dict[str, 
     try:
         redis = get_redis()
         for key in await _interaction_session_keys_for_rule(account_id, rule, chat_id):
-            deleted += int(await redis.delete(key))
+            if int(await redis.delete(key)):
+                deleted += 1
+                if chat_id is not None:
+                    try:
+                        from .interaction.session_index import unindex_session_key
+
+                        await unindex_session_key(
+                            redis,
+                            account_id=account_id,
+                            chat_id=chat_id,
+                            session_key=key,
+                        )
+                    except Exception:  # noqa: BLE001
+                        log.debug("unindex interaction session failed aid=%s", account_id, exc_info=True)
         return deleted
     except Exception:  # noqa: BLE001
         log.debug("clear interaction user sessions failed aid=%s rule=%s", account_id, rule.get("id"), exc_info=True)

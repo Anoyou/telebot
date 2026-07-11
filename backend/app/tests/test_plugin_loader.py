@@ -5309,6 +5309,52 @@ async def test_merge_plugin_config_uses_legacy_account_global_field_when_global_
 
 
 @pytest.mark.asyncio
+async def test_merge_plugin_config_decrypts_legacy_account_global_secret_envelope(monkeypatch) -> None:
+    """兼容回退路径必须解密 secret:v1，避免插件拿到信封明文。"""
+    from app.crypto import generate_master_key
+    from app.services import plugin_config_secrets as secrets
+    from app.settings import settings
+    import app.crypto as crypto
+
+    monkeypatch.setattr(settings, "master_key", generate_master_key())
+    monkeypatch.setattr(crypto, "_fernet", None)
+
+    envelope = secrets.wrap_secret("sid=secret-legacy")
+    assert secrets.is_secret_envelope(envelope)
+
+    fake_db = _FakeDB(
+        accounts={1: _FakeAcc(id=1)},
+        humanize={1: None},
+        afs=[],
+        rules=[],
+        features={
+            "pt_promote": _FakeFeature(
+                key="pt_promote",
+                manifest={
+                    "config_schema": {
+                        "properties": {
+                            "command": {"default": "pt"},
+                            "cookie": {"default": "", "level": "global"},
+                        }
+                    }
+                },
+            )
+        },
+        plugin_global_configs={},
+    )
+
+    merged = await loader_mod._merge_plugin_config(
+        fake_db,
+        1,
+        "pt_promote",
+        {"command": "pt", "cookie": envelope},
+    )
+
+    assert merged["cookie"] == "sid=secret-legacy"
+    assert not secrets.is_secret_envelope(merged["cookie"])
+
+
+@pytest.mark.asyncio
 async def test_merge_plugin_config_prefers_saved_global_over_legacy_account_global_field() -> None:
     """全局配置保存成功后，应以 plugin_global_config 为准。"""
     fake_db = _FakeDB(

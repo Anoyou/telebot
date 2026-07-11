@@ -39,6 +39,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 from redis.exceptions import TimeoutError as RedisTimeoutError
 from sqlalchemy import delete, select, update
@@ -260,7 +261,58 @@ _BACKOFF = [5, 10, 20, 60, 300]
 # 否则「启动后短暂存活」会把 fail_count 清零，形成无限快速重启。
 _STABLE_WINDOW_SECONDS = 60.0
 # runtime_log 通知 Telegram 的有界并发（避免崩溃刷屏时 task 洪水）。
-_RUNTIME_LOG_NOTIFY_SEM: asyncio.Semaphore | None = None
+_RUNTIME_LOG_NOTIFY_QUEUE: asyncio.Queue[Any] | None = None
+_RUNTIME_LOG_NOTIFY_WORKERS: list[asyncio.Task[None]] = []
+_RUNTIME_LOG_NOTIFY_WORKER_COUNT = 4
+_RUNTIME_LOG_NOTIFY_QUEUE_MAX = 200
+_RUNTIME_LOG_NOTIFY_DROPPED = 0
+
+
+async def _ensure_runtime_log_notify_workers() -> asyncio.Queue[Any]:
+    """有界队列 + 固定 worker，替代每条日志 create_task。"""
+
+    global _RUNTIME_LOG_NOTIFY_QUEUE, _RUNTIME_LOG_NOTIFY_WORKERS
+    if _RUNTIME_LOG_NOTIFY_QUEUE is None:
+        _RUNTIME_LOG_NOTIFY_QUEUE = asyncio.Queue(maxsize=_RUNTIME_LOG_NOTIFY_QUEUE_MAX)
+    alive = [t for t in _RUNTIME_LOG_NOTIFY_WORKERS if not t.done()]
+    _RUNTIME_LOG_NOTIFY_WORKERS = alive
+    while len(_RUNTIME_LOG_NOTIFY_WORKERS) < _RUNTIME_LOG_NOTIFY_WORKER_COUNT:
+        _RUNTIME_LOG_NOTIFY_WORKERS.append(
+            asyncio.create_task(_runtime_log_notify_worker(), name="runtime-log-notify")
+        )
+    return _RUNTIME_LOG_NOTIFY_QUEUE
+
+
+async def _runtime_log_notify_worker() -> None:
+    from ..services.account_bot_runtime import notify_runtime_log
+
+    assert _RUNTIME_LOG_NOTIFY_QUEUE is not None
+    while True:
+        row = await _RUNTIME_LOG_NOTIFY_QUEUE.get()
+        try:
+            if isinstance(row, RuntimeLog):
+                await notify_runtime_log(row)
+        except Exception:  # noqa: BLE001
+            log.debug("account bot runtime log notify failed", exc_info=True)
+        finally:
+            _RUNTIME_LOG_NOTIFY_QUEUE.task_done()
+
+
+async def _enqueue_runtime_log_notifies(rows: list[RuntimeLog]) -> None:
+    global _RUNTIME_LOG_NOTIFY_DROPPED
+    if not rows:
+        return
+    queue = await _ensure_runtime_log_notify_workers()
+    for row in rows:
+        try:
+            queue.put_nowait(row)
+        except asyncio.QueueFull:
+            _RUNTIME_LOG_NOTIFY_DROPPED += 1
+            if _RUNTIME_LOG_NOTIFY_DROPPED % 50 == 1:
+                log.warning(
+                    "runtime_log notify queue full; dropped=%s",
+                    _RUNTIME_LOG_NOTIFY_DROPPED,
+                )
 
 
 # ── PID 文件：用于跨 uvicorn 重启识别+回收孤儿 worker ──────────────
@@ -925,24 +977,9 @@ async def _consume_stream_reliable(
                     await _cleanup_runtime_logs_if_due()
                 if consumer_name == "runtime_log":
                     try:
-                        from ..services.account_bot_runtime import notify_runtime_log
-
-                        # 有界并发，避免崩溃循环时 create_task 洪水淹没主循环。
-                        global _RUNTIME_LOG_NOTIFY_SEM
-                        if _RUNTIME_LOG_NOTIFY_SEM is None:
-                            _RUNTIME_LOG_NOTIFY_SEM = asyncio.Semaphore(8)
-                        notify_sem = _RUNTIME_LOG_NOTIFY_SEM
-
-                        async def _notify_one(log_row: RuntimeLog, *, _sem: asyncio.Semaphore = notify_sem) -> None:
-                            async with _sem:
-                                try:
-                                    await notify_runtime_log(log_row)
-                                except Exception:  # noqa: BLE001
-                                    log.debug("account bot runtime log notify failed", exc_info=True)
-
-                        for row in rows:
-                            if isinstance(row, RuntimeLog):
-                                asyncio.create_task(_notify_one(row))
+                        await _enqueue_runtime_log_notifies(
+                            [row for row in rows if isinstance(row, RuntimeLog)]
+                        )
                     except Exception:
                         log.debug("account bot runtime log notify skipped", exc_info=True)
                 for raw in ack_items:

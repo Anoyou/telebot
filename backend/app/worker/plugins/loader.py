@@ -1869,6 +1869,22 @@ async def _apply_userbot_event_bus_actions(
                 deleted = bool(await delete(session_key))
             chat_id = _int_or_none((session or {}).get("chat_id"))
             if chat_id is not None:
+                try:
+                    from ...services.interaction.session_index import unindex_session_key
+
+                    await unindex_session_key(
+                        redis,
+                        account_id=state.account_id,
+                        chat_id=chat_id,
+                        session_key=session_key,
+                    )
+                except Exception:  # noqa: BLE001
+                    log.debug(
+                        "unindex userbot session failed account=%s chat=%s",
+                        state.account_id,
+                        chat_id,
+                        exc_info=True,
+                    )
                 await _refresh_userbot_session_chat_cache(state)
         await record_action(
             action.get("context"),
@@ -2077,31 +2093,33 @@ async def _apply_userbot_start_session_action(
         if started_by_user_id is None:
             started_by_user_id = _int_or_none(existing.get("started_by_user_id"))
         ttl = _int_or_none(action.get("ttl_seconds")) or account_bot_runtime_service._interaction_session_ttl(rule)  # noqa: SLF001
-        expires_at = time.time() + ttl
-        payload = {
-            "account_id": state.account_id,
-            "chat_id": target_chat_id,
-            "rule_id": str(rule.get("id") or "legacy"),
-            "rule_name": str(rule.get("name") or ""),
-            "module_key": plugin_key,
-            "entry_key": target_entry_key,
-            "channel": "userbot",
-            "started_by_user_id": started_by_user_id,
-            "started_by_message_id": _int_or_none(action.get("started_by_message_id")),
-            "source_user_id": started_by_user_id,
-            "event_type": str(action.get("event_type") or "command"),
-            "created_at": existing.get("created_at") or time.time(),
-            "updated_at": time.time(),
-            "expires_at": expires_at,
-            "data": {
-                **dict(existing.get("data") if isinstance(existing.get("data"), dict) else {}),
-                **dict(action.get("data") if isinstance(action.get("data"), dict) else {}),
-            },
+        from ...services.interaction.session_record import SessionRecord
+
+        now = time.time()
+        record = SessionRecord.from_dict(existing) or SessionRecord(
+            account_id=int(state.account_id),
+            chat_id=int(target_chat_id),
+            module_key=plugin_key,
+            entry_key=target_entry_key,
+        )
+        record.rule_id = str(rule.get("id") or "legacy")
+        record.rule_name = str(rule.get("name") or "")
+        record.channel = "userbot"
+        record.started_by_user_id = started_by_user_id
+        record.started_by_message_id = _int_or_none(action.get("started_by_message_id"))
+        record.source_user_id = started_by_user_id
+        record.event_type = str(action.get("event_type") or "command")
+        record.data = {
+            **dict(existing.get("data") if isinstance(existing.get("data"), dict) else {}),
+            **dict(action.get("data") if isinstance(action.get("data"), dict) else {}),
         }
+        record.touch(now=now, ttl_seconds=ttl)
         policy = account_bot_runtime_service._interaction_participant_policy(rule)  # noqa: SLF001
         if policy == "paid_pool":
-            payload["paid_user_ids"] = sorted(paid_ids)
-            payload["participant_user_ids"] = sorted(paid_ids)
+            record.paid_user_ids = sorted(paid_ids)
+            record.participant_user_ids = sorted(paid_ids)
+        payload = record.to_dict()
+        expires_at = float(record.expires_at)
         await redis.set(session_key, json.dumps(payload, ensure_ascii=False), ex=ttl + 90)
         state.userbot_session_chats.add(target_chat_id)
         try:
@@ -6716,7 +6734,25 @@ async def _merge_plugin_config(
             # Compatibility for configs saved before a plugin moved a field to
             # level="global". Keep the old account-level value usable until
             # the next successful global-config save migrates it.
-            result[key] = account_config[key]
+            # 必须解密：account_config 可能仍是 secret:v1 信封（含 cookie 等
+            # 非 is_sensitive_key 字段名，不能只靠 schema/key 名判断）。
+            from ...services.plugin_config_secrets import (
+                is_secret_envelope,
+                unwrap_secret,
+            )
+
+            raw_value = account_config[key]
+            if is_secret_envelope(raw_value):
+                try:
+                    result[key] = unwrap_secret(raw_value)
+                except Exception:  # noqa: BLE001
+                    result[key] = raw_value
+            else:
+                migrated = decrypt_config_secrets(
+                    {key: raw_value},
+                    schema=config_schema if isinstance(config_schema, dict) else None,
+                )
+                result[key] = migrated.get(key, raw_value)
     result.update(account_only_config)
 
     return result

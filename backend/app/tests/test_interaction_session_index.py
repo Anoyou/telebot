@@ -57,7 +57,8 @@ async def test_index_and_list_session_keys() -> None:
     keys = await session_index.list_indexed_session_keys(redis, account_id=7, chat_id=-1001)
     assert keys is not None
     assert keys == ["account_bot:interaction_session:7:rule: -1001"]
-    assert redis.ttls[session_index.chat_index_key(7, -1001)] == 120
+    # 索引 TTL 取 max(会话 TTL, 默认 7 天)，避免短会话 TTL 把索引冲掉。
+    assert redis.ttls[session_index.chat_index_key(7, -1001)] == session_index.CHAT_INDEX_TTL_SECONDS
 
 
 @pytest.mark.asyncio

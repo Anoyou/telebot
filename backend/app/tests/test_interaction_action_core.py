@@ -90,6 +90,18 @@ async def test_run_action_batch_truncates() -> None:
     assert dropped == 2
 
 
+def test_classify_userbot_payload_rejects_session_control() -> None:
+    from app.services.interaction.userbot_actions import (
+        classify_userbot_payload,
+        normalize_userbot_payload_action_type,
+    )
+
+    assert normalize_userbot_payload_action_type({"action_type": "payout"}) == "payout"
+    assert normalize_userbot_payload_action_type({"type": "send_message"}) == "send_message"
+    assert classify_userbot_payload({"action_type": "end_session"}) == ActionKind.SESSION_CONTROL
+    assert classify_userbot_payload({"action_type": "payout"}) == ActionKind.PAYOUT
+
+
 def test_session_record_roundtrip() -> None:
     raw = {
         "account_id": 7,
