@@ -20,6 +20,8 @@
 
 ## [Unreleased]
 
+## [0.56.6] — 2026-07-12 · patch（补丁版本） · 交互框架可靠性与安全收敛
+
 ### Added
 - 插件配置敏感字段支持 `secret:v1` 版本化加密信封；提供 `migrate_plugin_config_secrets` 迁移脚本，rekey 覆盖插件 JSON 配置。
 - installed 插件注入命名空间 Redis facade（禁止 keys/scan/flush/pubsub/跨插件访问）；builtin 仍可用完整客户端。
@@ -31,6 +33,8 @@
 - Bot / UserBot 会话 start 路径统一写入 `SessionRecord`；end/clear 同步 unindex 反向索引。
 
 ### Fixed
+- 修复已有交互会话重新开局时沿用旧 `module_key` / `entry_key`，导致规则热更新后仍路由到旧插件入口的问题；Bot 与 UserBot 会话写入都会刷新为当前规则目标。
+- installed 插件的 `ctx.messages` 新增受控消息 ID 读取与删除接口，可访问平台 `tp:msgid` 命名空间而不暴露裸 Redis，避免插件无法编辑或清理平台保存的原消息。
 - `update_session` 统一走 Redis Lua CAS，合并 data / 延长过期 / 递增 revision，冲突返回明确错误，避免多执行体并发丢写。
 - BotTab 交互配置改为复合保存接口，规则与相关插件配置同一事务提交，消除半应用状态。
 - BotTab 编辑 dirty 时后台 refetch 不再覆盖本地输入；远端配置变化时提示用户选择保留或刷新。

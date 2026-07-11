@@ -3429,6 +3429,8 @@ async def _save_interaction_session(
         module_key=module_key,
         entry_key=entry_key,
     )
+    record.module_key = module_key
+    record.entry_key = entry_key
     record.rule_id = str(rule.get("id") or "legacy")
     record.rule_name = str(rule.get("name") or "")
     record.started_by_user_id = started_by_user_id
@@ -3623,6 +3625,8 @@ async def _apply_interaction_start_session_action(
         module_key=module_key,
         entry_key=entry_key,
     )
+    record.module_key = module_key
+    record.entry_key = entry_key
     record.rule_id = str(rule.get("id") or "legacy")
     record.rule_name = str(rule.get("name") or "")
     record.started_by_user_id = started_by_user_id

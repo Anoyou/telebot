@@ -2102,6 +2102,8 @@ async def _apply_userbot_start_session_action(
             module_key=plugin_key,
             entry_key=target_entry_key,
         )
+        record.module_key = plugin_key
+        record.entry_key = target_entry_key
         record.rule_id = str(rule.get("id") or "legacy")
         record.rule_name = str(rule.get("name") or "")
         record.channel = "userbot"
@@ -3933,6 +3935,23 @@ async def _read_action_message_id(state: _AccountState, raw_key: Any) -> int | N
     return _int_or_none(raw)
 
 
+async def _delete_action_message_id(state: _AccountState, raw_key: Any) -> bool:
+    delete_key = namespaced_action_save_message_id_key(state.account_id, raw_key)
+    if not delete_key:
+        return False
+    try:
+        redis = state.redis or get_redis()
+        return bool(await redis.delete(delete_key))
+    except Exception:  # noqa: BLE001
+        log.debug(
+            "delete plugin action message id failed account=%s key=%s",
+            state.account_id,
+            delete_key,
+            exc_info=True,
+        )
+        return False
+
+
 def _is_message_not_modified_error(exc: BaseException) -> bool:
     return "message is not modified" in str(exc).lower()
 
@@ -4840,6 +4859,16 @@ class _LiveMessageOps:
         await self.apply([action])
         return action
 
+    async def read_saved_message_id(self, key: str) -> int | None:
+        """Read a platform-owned saved message id without exposing raw Redis."""
+
+        return await _read_action_message_id(self._state, key)
+
+    async def delete_saved_message_id(self, key: str) -> bool:
+        """Delete a platform-owned saved message id without exposing raw Redis."""
+
+        return await _delete_action_message_id(self._state, key)
+
 
 class _InteractionEntryMessageOps(BufferedMessageOps):
     """Buffer current interaction actions while keeping live apply for delayed work."""
@@ -4864,6 +4893,12 @@ class _InteractionEntryMessageOps(BufferedMessageOps):
 
     async def apply(self, actions: list[dict[str, Any]], *, entry_key: str | None = None) -> None:
         await self._live.apply(actions, entry_key=entry_key)
+
+    async def read_saved_message_id(self, key: str) -> int | None:
+        return await self._live.read_saved_message_id(key)
+
+    async def delete_saved_message_id(self, key: str) -> bool:
+        return await self._live.delete_saved_message_id(key)
 
 
 async def _event_sender_id(event: Any) -> int | None:

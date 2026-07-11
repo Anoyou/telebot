@@ -299,6 +299,22 @@ class BufferedMessageOps:
         self.actions.append(action)
         return action
 
+    async def read_saved_message_id(self, key: str) -> int | None:
+        """Return a saved id when backed by a live platform facade.
+
+        A plain buffer has no Redis access; interaction adapters override this
+        method and resolve the platform-owned ``tp:msgid`` namespace safely.
+        """
+
+        del key
+        return None
+
+    async def delete_saved_message_id(self, key: str) -> bool:
+        """Delete a saved id when backed by a live platform facade."""
+
+        del key
+        return False
+
 
 def _apply_channel(action: dict[str, Any], channel: MessageChannelSelector) -> None:
     action["channel_selector"] = channel

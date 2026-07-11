@@ -7313,8 +7313,8 @@ async def test_interaction_session_save_preserves_active_existing_channel(monkey
             "account_id": 1,
             "chat_id": -100123,
             "rule_id": "grab-session",
-            "module_key": "game",
-            "entry_key": "start",
+            "module_key": "old_game",
+            "entry_key": "old_start",
             "channel": "userbot",
             "created_at": now - 30,
             "expires_at": now + 30,
@@ -7326,6 +7326,8 @@ async def test_interaction_session_save_preserves_active_existing_channel(monkey
 
     saved = json.loads(redis.data[session_key])
     assert saved["channel"] == "userbot"
+    assert saved["module_key"] == "game"
+    assert saved["entry_key"] == "start"
     assert saved["data"] == {"round": 2}
     assert saved["created_at"] == now - 30
     assert saved["updated_at"] == now
@@ -7802,8 +7804,8 @@ async def test_runtime_start_session_action_merges_existing_and_action_data(monk
             "account_id": 1,
             "chat_id": -100123,
             "rule_id": "explicit-merge",
-            "module_key": "explicit_game",
-            "entry_key": "start",
+            "module_key": "old_explicit_game",
+            "entry_key": "old_start",
             "channel": "userbot",
             "created_at": now - 20,
             "started_by_user_id": 111,
@@ -7839,6 +7841,8 @@ async def test_runtime_start_session_action_merges_existing_and_action_data(monk
 
     saved = json.loads(redis.data[session_key])
     assert saved["channel"] == "userbot"
+    assert saved["module_key"] == "explicit_game"
+    assert saved["entry_key"] == "start"
     assert saved["data"] == {"round": 1, "phase": "new", "answer": 24}
     assert saved["created_at"] == now - 20
     assert saved["started_by_user_id"] == 111

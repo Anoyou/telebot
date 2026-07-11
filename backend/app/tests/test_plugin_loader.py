@@ -5311,10 +5311,10 @@ async def test_merge_plugin_config_uses_legacy_account_global_field_when_global_
 @pytest.mark.asyncio
 async def test_merge_plugin_config_decrypts_legacy_account_global_secret_envelope(monkeypatch) -> None:
     """兼容回退路径必须解密 secret:v1，避免插件拿到信封明文。"""
+    import app.crypto as crypto
     from app.crypto import generate_master_key
     from app.services import plugin_config_secrets as secrets
     from app.settings import settings
-    import app.crypto as crypto
 
     monkeypatch.setattr(settings, "master_key", generate_master_key())
     monkeypatch.setattr(crypto, "_fernet", None)
@@ -5352,6 +5352,19 @@ async def test_merge_plugin_config_decrypts_legacy_account_global_secret_envelop
 
     assert merged["cookie"] == "sid=secret-legacy"
     assert not secrets.is_secret_envelope(merged["cookie"])
+
+
+@pytest.mark.asyncio
+async def test_live_message_ops_reads_and_deletes_platform_saved_message_id() -> None:
+    state = loader_mod._AccountState(account_id=77)
+    redis = _FakeRedis()
+    state.redis = redis
+    redis.values["tp:msgid:77:question:round-1"] = "901"
+    messages = loader_mod._LiveMessageOps(state, plugin_key="math10")
+
+    assert await messages.read_saved_message_id("question:round-1") == 901
+    assert await messages.delete_saved_message_id("question:round-1") is True
+    assert "tp:msgid:77:question:round-1" not in redis.values
 
 
 @pytest.mark.asyncio
