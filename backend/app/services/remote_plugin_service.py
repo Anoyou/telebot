@@ -189,6 +189,7 @@ class PluginMetadataSchema(BaseModel):
     permissions: list[str] = Field(default_factory=list)
     config_schema: dict[str, Any] | None = None
     config_actions: list[dict[str, Any]] = Field(default_factory=list)
+    agent_tools: list[dict[str, Any]] = Field(default_factory=list)
     category: str | None = None
     interaction_profile: str | None = None
     interaction_entries: list[dict[str, Any]] = Field(default_factory=list)
@@ -244,10 +245,39 @@ class PluginMetadataSchema(BaseModel):
             raise ValueError("category 只能是 interactive / automation / utility")
         return value
 
+    @field_validator("agent_tools")
+    @classmethod
+    def _validate_agent_tools(cls, value: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        seen: set[str] = set()
+        for index, raw in enumerate(value):
+            name = str(raw.get("name") or "").strip()
+            if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", name):
+                raise ValueError(f"agent_tools[{index}].name 格式无效")
+            if name in seen:
+                raise ValueError(f"agent_tools 工具名重复: {name}")
+            seen.add(name)
+            parameters = raw.get("parameters")
+            if not isinstance(parameters, dict) or parameters.get("type") != "object":
+                raise ValueError(f"agent_tools[{index}].parameters 必须是 type=object 的 JSON Schema")
+            if "read_only" in raw and not isinstance(raw.get("read_only"), bool):
+                raise ValueError(f"agent_tools[{index}].read_only 必须是布尔值")
+            if "strict" in raw and not isinstance(raw.get("strict"), bool):
+                raise ValueError(f"agent_tools[{index}].strict 必须是布尔值")
+        return value
+
     @model_validator(mode="after")
     def _fill_name_from_key(self) -> PluginMetadataSchema:
         if self.name is None and self.key is not None:
             self.name = self.key
+        if self.agent_tools:
+            agent_capability = (self.capabilities or {}).get("agent_tools")
+            enabled = agent_capability is True or (
+                isinstance(agent_capability, dict) and agent_capability.get("enabled") is True
+            )
+            if not enabled:
+                raise ValueError("声明 agent_tools 时必须启用 capabilities.agent_tools")
+            if "ai_agent" not in self.permissions:
+                raise ValueError("声明 agent_tools 时必须声明 permissions=['ai_agent']")
         return self
 
 
@@ -265,6 +295,7 @@ class PluginMetadata:
     permissions: list[str] = field(default_factory=list)
     config_schema: dict[str, Any] | None = None
     config_actions: list[dict[str, Any]] = field(default_factory=list)
+    agent_tools: list[dict[str, Any]] = field(default_factory=list)
     category: str | None = None
     interaction_profile: str | None = None
     interaction_entries: list[dict[str, Any]] = field(default_factory=list)
@@ -426,6 +457,8 @@ def _feature_manifest_from_meta(meta: PluginMetadata) -> dict[str, Any] | None:
         manifest["config_schema"] = meta.config_schema
     if meta.config_actions:
         manifest["config_actions"] = [item for item in meta.config_actions if isinstance(item, dict)]
+    if meta.agent_tools:
+        manifest["agent_tools"] = [item for item in meta.agent_tools if isinstance(item, dict)]
     if meta.usage:
         manifest["usage"] = meta.usage
     if meta.category:
@@ -724,6 +757,7 @@ def _read_plugin_metadata(plugin_dir: Path, *, fallback_name: str) -> PluginMeta
         permissions=list(validated.permissions or []),
         config_schema=validated.config_schema,
         config_actions=[item for item in validated.config_actions if isinstance(item, dict)],
+        agent_tools=[item for item in validated.agent_tools if isinstance(item, dict)],
         category=validated.category,
         interaction_profile=validated.interaction_profile,
         interaction_entries=[item for item in validated.interaction_entries if isinstance(item, dict)],
@@ -1049,6 +1083,8 @@ def _manifest_json_from_remote_meta(meta: PluginMetadata) -> dict[str, Any]:
         data["config_schema"] = meta.config_schema
     if meta.config_actions:
         data["config_actions"] = [item for item in meta.config_actions if isinstance(item, dict)]
+    if meta.agent_tools:
+        data["agent_tools"] = [item for item in meta.agent_tools if isinstance(item, dict)]
     if meta.category:
         data["category"] = meta.category
     if meta.interaction_profile:

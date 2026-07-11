@@ -65,6 +65,7 @@ _NON_CLIENT_PERMISSIONS: frozenset[str] = frozenset(
         "external_http",
         "external_http_bypass_proxy",
         "ai_text",
+        "ai_agent",
         "ai_vision",
         "ai_image",
         "ai_stt",

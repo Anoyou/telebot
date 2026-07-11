@@ -31,11 +31,32 @@ from ..db.models.command import (
     LLM_API_FORMAT_ANTHROPIC_MESSAGES,
     LLM_API_FORMAT_CHAT_COMPLETIONS,
     LLM_API_FORMAT_RESPONSES,
+    LLM_PROTOCOL_PROFILE_CLAUDE_CODE_PROXY,
+    LLM_PROTOCOL_PROFILE_STANDARD,
     LLM_PROVIDER_OLLAMA,
     LLMProvider,
     default_api_format_for,
 )
 from .llm_dto import LLMProviderDTO
+from .llm_protocol import (
+    ImageContent,
+    MessageRole,
+    ModelMessage,
+    ModelRequest,
+    ModelResponse,
+    ModelUsage,
+    NamedToolChoice,
+    StopReason,
+    TextContent,
+    ToolCall,
+    ToolChoiceMode,
+    ToolResult,
+    ToolSpec,
+    capabilities_for_api_format,
+    normalize_base_url,
+    provider_endpoint,
+    stop_reason_from_provider,
+)
 
 # 默认调用超时；prompt 较长 / TG 端用户体验角度都不宜过长
 _HTTP_TIMEOUT = httpx.Timeout(30.0, connect=10.0)
@@ -81,7 +102,7 @@ def _normalize_temperature(value: float | None) -> float | None:
 
 def _normalize_reasoning_effort(value: str | None) -> str | None:
     effort = (value or "").strip().lower()
-    return effort if effort in {"minimal", "low", "medium", "high"} else None
+    return effort if effort in {"minimal", "low", "medium", "high", "xhigh"} else None
 
 
 @dataclass
@@ -95,6 +116,9 @@ class LLMResult:
     image_urls: list = field(default_factory=list)  # LLM 生成的图片 URL（如 Grok 文生图）
     image_data: list = field(default_factory=list)  # LLM 生成的图片 base64 data URI（如 Grok 文生图）
     sources: list = field(default_factory=list)  # 联网搜索来源：[{url,title?}, ...]
+    tool_calls: list[ToolCall] = field(default_factory=list)
+    stop_reason: StopReason = StopReason.UNKNOWN
+    provider_status: str | None = None
 
 
 @dataclass(frozen=True)
@@ -106,6 +130,252 @@ class LLMStreamChunk:
     input_tokens: int | None = None
     output_tokens: int | None = None
     done: bool = False
+
+
+def _model_response_from_result(result: LLMResult) -> ModelResponse:
+    content = (TextContent(result.text),) if result.text else ()
+    return ModelResponse(
+        model=result.model,
+        content=content,
+        tool_calls=tuple(result.tool_calls),
+        usage=ModelUsage(
+            input_tokens=result.input_tokens,
+            output_tokens=result.output_tokens,
+        ),
+        stop_reason=result.stop_reason,
+        provider_status=result.provider_status,
+        sources=tuple(dict(item) for item in result.sources if isinstance(item, dict)),
+    )
+
+
+def _parse_tool_arguments(value: object) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return dict(value)
+    if value is None or value == "":
+        return {}
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return {"_raw": value}
+        if isinstance(parsed, dict):
+            return parsed
+        return {"value": parsed}
+    return {"value": value}
+
+
+def _tool_result_text(result: ToolResult) -> str:
+    if isinstance(result.content, str):
+        return result.content
+    return json.dumps(result.content, ensure_ascii=False, separators=(",", ":"))
+
+
+def _tool_specs_openai(tools: tuple[ToolSpec, ...]) -> list[dict[str, Any]]:
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": tool.name,
+                "description": tool.description,
+                "parameters": tool.parameters,
+                "strict": tool.strict,
+            },
+        }
+        for tool in tools
+    ]
+
+
+def _openai_tool_choice(choice: ToolChoiceMode | NamedToolChoice) -> object:
+    if isinstance(choice, NamedToolChoice):
+        return {"type": "function", "function": {"name": choice.name}}
+    return choice.value
+
+
+def _responses_tool_choice(choice: ToolChoiceMode | NamedToolChoice) -> object:
+    if isinstance(choice, NamedToolChoice):
+        return {"type": "function", "name": choice.name}
+    return choice.value
+
+
+def _anthropic_tool_choice(choice: ToolChoiceMode | NamedToolChoice) -> object:
+    if isinstance(choice, NamedToolChoice):
+        return {"type": "tool", "name": choice.name}
+    if choice is ToolChoiceMode.REQUIRED:
+        return {"type": "any"}
+    return {"type": choice.value}
+
+
+def _openai_content_text(value: object) -> str:
+    if isinstance(value, str):
+        return value.strip()
+    if not isinstance(value, list):
+        return ""
+    return "\n".join(
+        str(item.get("text") or "")
+        for item in value
+        if isinstance(item, dict) and item.get("type") in {"text", "output_text"}
+    ).strip()
+
+
+def _chat_messages(messages: tuple[ModelMessage, ...]) -> list[dict[str, Any]]:
+    output: list[dict[str, Any]] = []
+    for message in messages:
+        if message.role is MessageRole.TOOL:
+            for result in message.tool_results:
+                output.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": result.call_id,
+                        "name": result.name,
+                        "content": _tool_result_text(result),
+                    }
+                )
+            continue
+        text = message.text_content()
+        image_blocks = [
+            block for block in message.content if isinstance(block, ImageContent)
+        ]
+        if image_blocks and message.role is MessageRole.USER:
+            content: object = ([{"type": "text", "text": text}] if text else []) + [
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": block.url if block.url else _to_data_url(block.data or b""),
+                        **({"detail": block.detail} if block.detail else {}),
+                    },
+                }
+                for block in image_blocks
+            ]
+        else:
+            content = text or None
+        item: dict[str, Any] = {"role": message.role.value, "content": content}
+        if message.role is MessageRole.ASSISTANT and message.tool_calls:
+            item["tool_calls"] = [
+                {
+                    "id": call.id,
+                    "type": "function",
+                    "function": {
+                        "name": call.name,
+                        "arguments": json.dumps(call.arguments, ensure_ascii=False),
+                    },
+                }
+                for call in message.tool_calls
+            ]
+        output.append(item)
+    return output
+
+
+def _responses_input(messages: tuple[ModelMessage, ...]) -> list[dict[str, Any]]:
+    output: list[dict[str, Any]] = []
+    for message in messages:
+        if message.role is MessageRole.SYSTEM:
+            continue
+        if message.role is MessageRole.TOOL:
+            output.extend(
+                {
+                    "type": "function_call_output",
+                    "call_id": result.call_id,
+                    "output": _tool_result_text(result),
+                }
+                for result in message.tool_results
+            )
+            continue
+        content: list[dict[str, Any]] = []
+        text = message.text_content()
+        if text:
+            content.append(
+                {
+                    "type": "output_text" if message.role is MessageRole.ASSISTANT else "input_text",
+                    "text": text,
+                }
+            )
+        if message.role is MessageRole.USER:
+            content.extend(
+                {
+                    "type": "input_image",
+                    "image_url": block.url if block.url else _to_data_url(block.data or b""),
+                    **({"detail": block.detail} if block.detail else {}),
+                }
+                for block in message.content
+                if isinstance(block, ImageContent)
+            )
+        if content:
+            output.append({"type": "message", "role": message.role.value, "content": content})
+        output.extend(
+            {
+                "type": "function_call",
+                "call_id": call.id,
+                "name": call.name,
+                "arguments": json.dumps(call.arguments, ensure_ascii=False),
+            }
+            for call in message.tool_calls
+        )
+    return output
+
+
+def _system_instructions(messages: tuple[ModelMessage, ...]) -> str:
+    return "\n\n".join(
+        message.text_content()
+        for message in messages
+        if message.role is MessageRole.SYSTEM and message.text_content()
+    )
+
+
+def _anthropic_messages(messages: tuple[ModelMessage, ...]) -> list[dict[str, Any]]:
+    output: list[dict[str, Any]] = []
+    for message in messages:
+        if message.role is MessageRole.SYSTEM:
+            continue
+        if message.role is MessageRole.TOOL:
+            output.append(
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": result.call_id,
+                            "content": _tool_result_text(result),
+                            "is_error": result.is_error,
+                        }
+                        for result in message.tool_results
+                    ],
+                }
+            )
+            continue
+        content: list[dict[str, Any]] = []
+        for block in message.content:
+            if isinstance(block, TextContent) and block.text:
+                content.append({"type": "text", "text": block.text})
+            elif isinstance(block, ImageContent):
+                if block.data is None:
+                    raise ValueError("Anthropic 图片输入暂不支持 URL，仅支持内联字节")
+                content.append(
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": block.mime_type or _sniff_image_mime(block.data),
+                            "data": base64.b64encode(block.data).decode("ascii"),
+                        },
+                    }
+                )
+        if message.role is MessageRole.ASSISTANT:
+            content.extend(
+                {
+                    "type": "tool_use",
+                    "id": call.id,
+                    "name": call.name,
+                    "input": call.arguments,
+                }
+                for call in message.tool_calls
+            )
+        output.append(
+            {
+                "role": "assistant" if message.role is MessageRole.ASSISTANT else "user",
+                "content": content or "",
+            }
+        )
+    return output
 
 
 def _sniff_image_mime(data: bytes) -> str:
@@ -375,7 +645,6 @@ def _decode_responses_payload(prefix: str, resp: Any, api_key: str | None) -> di
 
 
 _RESPONSES_REMOVABLE_PARAMETERS = {
-    "max_output_tokens": "max_output_tokens",
     "temperature": "temperature",
     "reasoning": "reasoning",
     "reasoning.effort": "reasoning",
@@ -478,6 +747,39 @@ class LLMClient(ABC):
         """
         raise NotImplementedError
 
+    async def invoke(self, request: ModelRequest) -> ModelResponse:
+        """Compatibility bridge for clients without a native structured adapter."""
+
+        if request.tools:
+            raise NotImplementedError("当前 provider 尚未接入原生工具调用")
+        system = "\n\n".join(
+            message.text_content()
+            for message in request.messages
+            if message.role is MessageRole.SYSTEM and message.text_content()
+        )
+        user_messages = [
+            message for message in request.messages if message.role is MessageRole.USER
+        ]
+        if not user_messages:
+            raise ValueError("ModelRequest 至少需要一条 user message")
+        user_message = user_messages[-1]
+        images = [
+            block.data
+            for block in user_message.content
+            if isinstance(block, ImageContent) and block.data is not None
+        ]
+        result = await self.complete(
+            system,
+            user_message.text_content(),
+            max_tokens=request.max_output_tokens,
+            images=images or None,
+            web_search=request.web_search,
+            web_search_context_size=request.web_search_context_size,
+            temperature=request.temperature,
+            reasoning_effort=request.reasoning_effort,
+        )
+        return _model_response_from_result(result)
+
     async def stream_complete(
         self,
         system: str,
@@ -552,7 +854,7 @@ class OpenAIClient(LLMClient):
         proxy_url: str | None = None,
     ):
         self._api_key = api_key
-        self._base_url = (base_url or "https://api.openai.com/v1").rstrip("/")
+        self._base_url = normalize_base_url(base_url or "https://api.openai.com/v1")
         self._model = model
         self._proxy_url = proxy_url
 
@@ -570,7 +872,7 @@ class OpenAIClient(LLMClient):
     ) -> LLMResult:
         if web_search:
             raise LLMError("联网搜索需要使用 OpenAI Responses API（api_format=responses）")
-        url = f"{self._base_url}/chat/completions"
+        url = provider_endpoint(self._base_url, LLM_API_FORMAT_CHAT_COMPLETIONS)
         # Ollama 部署可能不需要 api_key；为空时不下发 Authorization 头
         headers = _llm_headers()
         if self._api_key:
@@ -660,6 +962,8 @@ class OpenAIClient(LLMClient):
                     image_data.append(item["data"])
             elif isinstance(item, str):
                 image_urls.append(item)
+        choice = data.get("choices", [{}])[0] if isinstance(data.get("choices"), list) else {}
+        finish_reason = choice.get("finish_reason") if isinstance(choice, dict) else None
         return LLMResult(
             text=text.strip(),
             model=str(data.get("model", self._model)),
@@ -667,6 +971,90 @@ class OpenAIClient(LLMClient):
             output_tokens=int(usage.get("completion_tokens") or 0),
             image_urls=image_urls,
             image_data=image_data,
+            stop_reason=stop_reason_from_provider(finish_reason),
+            provider_status=str(finish_reason) if finish_reason else None,
+        )
+
+    async def invoke(self, request: ModelRequest) -> ModelResponse:
+        capabilities_for_api_format(LLM_API_FORMAT_CHAT_COMPLETIONS).validate(
+            request,
+            LLM_API_FORMAT_CHAT_COMPLETIONS,
+        )
+        url = provider_endpoint(self._base_url, LLM_API_FORMAT_CHAT_COMPLETIONS)
+        headers = _llm_headers()
+        if self._api_key:
+            headers["Authorization"] = f"Bearer {self._api_key}"
+        body: dict[str, Any] = {
+            "model": request.model or self._model,
+            "messages": _chat_messages(request.messages),
+            "max_tokens": request.max_output_tokens,
+        }
+        if request.tools:
+            body["tools"] = _tool_specs_openai(request.tools)
+            body["tool_choice"] = _openai_tool_choice(request.tool_choice)
+        if request.temperature is not None:
+            body["temperature"] = _normalize_temperature(request.temperature)
+        if request.reasoning_effort:
+            body["reasoning_effort"] = _normalize_reasoning_effort(request.reasoning_effort)
+
+        client_kwargs: dict[str, object] = {"timeout": _timeout_for_call(self._base_url, None)}
+        if self._proxy_url:
+            client_kwargs["proxy"] = self._proxy_url
+        else:
+            client_kwargs["trust_env"] = False
+        try:
+            async with httpx.AsyncClient(**client_kwargs) as cli:
+                resp = await cli.post(url, headers=headers, json=body)
+        except httpx.HTTPError as exc:
+            raise LLMError(
+                _safe_error_message(_describe_http_error(exc, self._base_url), self._api_key),
+                retryable=True,
+            ) from None
+        if resp.status_code >= 400:
+            raise LLMError(
+                _safe_error_message(
+                    f"OpenAI 接口返回 {resp.status_code}: {resp.text[:200]}{_hint_for_status(resp.status_code)}",
+                    self._api_key,
+                ),
+                retryable=_is_retryable_status(resp.status_code),
+            )
+        try:
+            data = resp.json()
+        except json.JSONDecodeError as exc:
+            raise LLMError(f"OpenAI 返回非 JSON: {exc}") from None
+        choices = data.get("choices") or []
+        if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+            raise LLMError("OpenAI 返回结构异常: 缺少 choices[0]")
+        choice = choices[0]
+        message = choice.get("message") or {}
+        if not isinstance(message, dict):
+            raise LLMError("OpenAI 返回结构异常: message 不是对象")
+        tool_calls = tuple(
+            ToolCall(
+                id=str(item.get("id") or ""),
+                name=str((item.get("function") or {}).get("name") or ""),
+                arguments=_parse_tool_arguments((item.get("function") or {}).get("arguments")),
+            )
+            for item in message.get("tool_calls") or []
+            if isinstance(item, dict) and str((item.get("function") or {}).get("name") or "")
+        )
+        usage = data.get("usage") or {}
+        finish_reason = choice.get("finish_reason")
+        return ModelResponse(
+            model=str(data.get("model") or request.model or self._model),
+            content=(TextContent(_openai_content_text(message.get("content"))),)
+            if _openai_content_text(message.get("content"))
+            else (),
+            tool_calls=tool_calls,
+            usage=ModelUsage(
+                input_tokens=int(usage.get("prompt_tokens") or 0),
+                output_tokens=int(usage.get("completion_tokens") or 0),
+                reasoning_tokens=int(
+                    (usage.get("completion_tokens_details") or {}).get("reasoning_tokens") or 0
+                ),
+            ),
+            stop_reason=stop_reason_from_provider(finish_reason),
+            provider_status=str(finish_reason) if finish_reason else None,
         )
 
     async def transcribe(self, audio: bytes, model: str) -> str:
@@ -830,11 +1218,30 @@ class AnthropicClient(LLMClient):
         base_url: str | None,
         model: str,
         proxy_url: str | None = None,
+        protocol_profile: str = LLM_PROTOCOL_PROFILE_STANDARD,
     ):
         self._api_key = api_key
-        self._base_url = (base_url or "https://api.anthropic.com/v1").rstrip("/")
+        self._base_url = normalize_base_url(base_url or "https://api.anthropic.com/v1")
         self._model = model
         self._proxy_url = proxy_url
+        self._protocol_profile = protocol_profile
+
+    def _headers(self) -> dict[str, str]:
+        headers = {
+            "User-Agent": _LLM_USER_AGENT,
+            "x-api-key": self._api_key,
+            "anthropic-version": self._ANTHROPIC_VERSION,
+            "Content-Type": "application/json",
+        }
+        if self._protocol_profile == LLM_PROTOCOL_PROFILE_CLAUDE_CODE_PROXY:
+            headers.update(
+                {
+                    "anthropic-beta": "claude-code-20250219,context-1m-2025-08-07,interleaved-thinking-2025-05-14,effort-2025-11-24",
+                    "anthropic-dangerous-direct-browser-access": "true",
+                    "x-app": "cli",
+                }
+            )
+        return headers
 
     async def complete(
         self,
@@ -850,18 +1257,8 @@ class AnthropicClient(LLMClient):
     ) -> LLMResult:
         if web_search:
             raise LLMError("当前 Anthropic 调用路径尚未接入联网搜索；请使用 OpenAI Responses provider")
-        url = f"{self._base_url}/messages"
-        headers = {
-            "User-Agent": _LLM_USER_AGENT,
-            "x-api-key": self._api_key,
-            "anthropic-version": self._ANTHROPIC_VERSION,
-            "Content-Type": "application/json",
-            # 模拟 Claude 客户端的关键 headers
-            # Anyrouter 等反代强制校验 anthropic-beta 含 context-1m-2025-08-07
-            "anthropic-beta": "claude-code-20250219,context-1m-2025-08-07,interleaved-thinking-2025-05-14,effort-2025-11-24",
-            "anthropic-dangerous-direct-browser-access": "true",
-            "x-app": "cli",
-        }
+        url = provider_endpoint(self._base_url, LLM_API_FORMAT_ANTHROPIC_MESSAGES)
+        headers = self._headers()
         # 视觉路径：Anthropic 用 {"type":"image","source":{"type":"base64",...}}
         # 与 OpenAI 的 image_url 协议**不一样**，要分别构造
         if images:
@@ -891,7 +1288,7 @@ class AnthropicClient(LLMClient):
         }
         normalized_temperature = _normalize_temperature(temperature)
         if normalized_temperature is not None:
-            body["temperature"] = normalized_temperature
+            body["temperature"] = min(1.0, normalized_temperature)
         client_kwargs: dict[str, object] = {"timeout": _timeout_for_call(self._base_url, timeout_seconds)}
         if self._proxy_url:
             client_kwargs["proxy"] = self._proxy_url
@@ -911,6 +1308,7 @@ class AnthropicClient(LLMClient):
         model_name = self._model
         input_tokens = 0
         output_tokens = 0
+        provider_stop_reason: str | None = None
 
         try:
             async with httpx.AsyncClient(**client_kwargs) as cli:
@@ -952,8 +1350,19 @@ class AnthropicClient(LLMClient):
                                 if delta.get("type") == "text_delta":
                                     text_parts.append(delta.get("text", ""))
                             elif current_event == "message_delta":
+                                delta = payload.get("delta") or {}
+                                if isinstance(delta, dict) and delta.get("stop_reason"):
+                                    provider_stop_reason = str(delta["stop_reason"])
                                 usage = payload.get("usage") or {}
                                 output_tokens = int(usage.get("output_tokens") or 0)
+                            elif current_event == "error":
+                                error = payload.get("error") or payload
+                                raise LLMError(
+                                    _safe_error_message(
+                                        f"Anthropic streaming 返回错误事件: {str(error)[:200]}",
+                                        self._api_key,
+                                    )
+                                )
                             # message_stop / content_block_start / content_block_stop → 忽略
                             continue
                         # 空行 = 事件分隔符（SSE 规范）
@@ -979,6 +1388,92 @@ class AnthropicClient(LLMClient):
             model=model_name,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
+            stop_reason=stop_reason_from_provider(provider_stop_reason),
+            provider_status=provider_stop_reason,
+        )
+
+    async def invoke(self, request: ModelRequest) -> ModelResponse:
+        capabilities_for_api_format(LLM_API_FORMAT_ANTHROPIC_MESSAGES).validate(
+            request,
+            LLM_API_FORMAT_ANTHROPIC_MESSAGES,
+        )
+        url = provider_endpoint(self._base_url, LLM_API_FORMAT_ANTHROPIC_MESSAGES)
+        body: dict[str, Any] = {
+            "model": request.model or self._model,
+            "max_tokens": request.max_output_tokens,
+            "system": _system_instructions(request.messages),
+            "messages": _anthropic_messages(request.messages),
+            "stream": False,
+        }
+        if request.tools:
+            body["tools"] = [
+                {
+                    "name": tool.name,
+                    "description": tool.description,
+                    "input_schema": tool.parameters,
+                }
+                for tool in request.tools
+            ]
+            body["tool_choice"] = _anthropic_tool_choice(request.tool_choice)
+        if request.temperature is not None:
+            body["temperature"] = min(1.0, _normalize_temperature(request.temperature) or 0.0)
+
+        client_kwargs: dict[str, object] = {"timeout": _timeout_for_call(self._base_url, None)}
+        if self._proxy_url:
+            client_kwargs["proxy"] = self._proxy_url
+        else:
+            client_kwargs["trust_env"] = False
+        try:
+            async with httpx.AsyncClient(**client_kwargs) as cli:
+                resp = await cli.post(url, headers=self._headers(), json=body)
+        except httpx.HTTPError as exc:
+            raise LLMError(
+                _safe_error_message(_describe_http_error(exc, self._base_url), self._api_key),
+                retryable=True,
+            ) from None
+        if resp.status_code >= 400:
+            raise LLMError(
+                _safe_error_message(
+                    f"Anthropic 接口返回 {resp.status_code}: {resp.text[:200]}{_hint_for_status(resp.status_code)}",
+                    self._api_key,
+                ),
+                retryable=_is_retryable_status(resp.status_code),
+            )
+        try:
+            data = resp.json()
+        except json.JSONDecodeError as exc:
+            raise LLMError(f"Anthropic 返回非 JSON: {exc}") from None
+        content: list[TextContent] = []
+        tool_calls: list[ToolCall] = []
+        for item in data.get("content") or []:
+            if not isinstance(item, dict):
+                continue
+            if item.get("type") == "text" and isinstance(item.get("text"), str):
+                content.append(TextContent(item["text"]))
+            elif item.get("type") == "tool_use":
+                name = str(item.get("name") or "").strip()
+                if name:
+                    tool_calls.append(
+                        ToolCall(
+                            id=str(item.get("id") or ""),
+                            name=name,
+                            arguments=_parse_tool_arguments(item.get("input")),
+                        )
+                    )
+        usage = data.get("usage") or {}
+        stop_reason = data.get("stop_reason")
+        return ModelResponse(
+            model=str(data.get("model") or request.model or self._model),
+            content=tuple(content),
+            tool_calls=tuple(tool_calls),
+            usage=ModelUsage(
+                input_tokens=int(usage.get("input_tokens") or 0),
+                output_tokens=int(usage.get("output_tokens") or 0),
+                cache_read_tokens=int(usage.get("cache_read_input_tokens") or 0),
+                cache_write_tokens=int(usage.get("cache_creation_input_tokens") or 0),
+            ),
+            stop_reason=stop_reason_from_provider(stop_reason),
+            provider_status=str(stop_reason) if stop_reason else None,
         )
 
     async def stream_complete(
@@ -995,16 +1490,8 @@ class AnthropicClient(LLMClient):
     ) -> AsyncIterator[LLMStreamChunk]:
         if web_search:
             raise LLMError("当前 Anthropic streaming 尚未接入联网搜索；请使用 OpenAI Responses provider")
-        url = f"{self._base_url}/messages"
-        headers = {
-            "User-Agent": _LLM_USER_AGENT,
-            "x-api-key": self._api_key,
-            "anthropic-version": self._ANTHROPIC_VERSION,
-            "Content-Type": "application/json",
-            "anthropic-beta": "claude-code-20250219,context-1m-2025-08-07,interleaved-thinking-2025-05-14,effort-2025-11-24",
-            "anthropic-dangerous-direct-browser-access": "true",
-            "x-app": "cli",
-        }
+        url = provider_endpoint(self._base_url, LLM_API_FORMAT_ANTHROPIC_MESSAGES)
+        headers = self._headers()
         if images:
             user_content: object = [
                 *[
@@ -1031,7 +1518,7 @@ class AnthropicClient(LLMClient):
         }
         normalized_temperature = _normalize_temperature(temperature)
         if normalized_temperature is not None:
-            body["temperature"] = normalized_temperature
+            body["temperature"] = min(1.0, normalized_temperature)
 
         client_kwargs: dict[str, object] = {"timeout": _timeout_for_call(self._base_url, timeout_seconds)}
         if self._proxy_url:
@@ -1155,7 +1642,7 @@ class ResponsesClient(LLMClient):
         proxy_url: str | None = None,
     ):
         self._api_key = api_key
-        self._base_url = (base_url or "https://api.openai.com/v1").rstrip("/")
+        self._base_url = normalize_base_url(base_url or "https://api.openai.com/v1")
         self._model = model
         self._proxy_url = proxy_url
 
@@ -1171,7 +1658,7 @@ class ResponsesClient(LLMClient):
         reasoning_effort: str | None = None,
         timeout_seconds: int | None = None,
     ) -> LLMResult:
-        url = f"{self._base_url}/responses"
+        url = provider_endpoint(self._base_url, LLM_API_FORMAT_RESPONSES)
         headers = _llm_headers(accept="application/json")
         if self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"
@@ -1263,6 +1750,40 @@ class ResponsesClient(LLMClient):
                             text_parts.append(t)
             text = "".join(text_parts)
 
+        status = str(data.get("status") or "")
+        if status in {"failed", "cancelled"}:
+            detail = data.get("error") or data.get("incomplete_details") or status
+            raise LLMError(
+                _safe_error_message(
+                    f"Responses 返回状态异常: {status}: {str(detail)[:200]}",
+                    self._api_key,
+                )
+            )
+        tool_calls: list[ToolCall] = []
+        output_list = data.get("output") or []
+        for item in output_list if isinstance(output_list, list) else []:
+            if not isinstance(item, dict) or item.get("type") != "function_call":
+                continue
+            raw_arguments = item.get("arguments")
+            try:
+                arguments = json.loads(raw_arguments) if isinstance(raw_arguments, str) else raw_arguments
+            except json.JSONDecodeError:
+                arguments = {"_raw": raw_arguments}
+            if not isinstance(arguments, dict):
+                arguments = {"value": arguments}
+            name = str(item.get("name") or "").strip()
+            if name:
+                tool_calls.append(
+                    ToolCall(
+                        id=str(item.get("call_id") or item.get("id") or ""),
+                        name=name,
+                        arguments=arguments,
+                    )
+                )
+
+        incomplete = data.get("incomplete_details") or {}
+        incomplete_reason = incomplete.get("reason") if isinstance(incomplete, dict) else None
+        provider_reason = incomplete_reason or status
         # usage：input_tokens / output_tokens
         usage = data.get("usage") or {}
         return LLMResult(
@@ -1271,6 +1792,125 @@ class ResponsesClient(LLMClient):
             input_tokens=int(usage.get("input_tokens") or 0),
             output_tokens=int(usage.get("output_tokens") or 0),
             sources=_extract_response_sources(data),
+            tool_calls=tool_calls,
+            stop_reason=(
+                StopReason.MAX_TOKENS
+                if incomplete_reason in {"max_output_tokens", "max_tokens"}
+                else stop_reason_from_provider(provider_reason)
+            ),
+            provider_status=str(provider_reason) if provider_reason else None,
+        )
+
+    async def invoke(self, request: ModelRequest) -> ModelResponse:
+        capabilities_for_api_format(LLM_API_FORMAT_RESPONSES).validate(
+            request,
+            LLM_API_FORMAT_RESPONSES,
+        )
+        url = provider_endpoint(self._base_url, LLM_API_FORMAT_RESPONSES)
+        headers = _llm_headers(accept="application/json")
+        if self._api_key:
+            headers["Authorization"] = f"Bearer {self._api_key}"
+        body: dict[str, Any] = {
+            "model": request.model or self._model,
+            "instructions": _system_instructions(request.messages),
+            "input": _responses_input(request.messages),
+            "max_output_tokens": request.max_output_tokens,
+            "stream": False,
+            "store": False,
+        }
+        if request.tools:
+            body["tools"] = [
+                {
+                    "type": "function",
+                    "name": tool.name,
+                    "description": tool.description,
+                    "parameters": tool.parameters,
+                    "strict": tool.strict,
+                }
+                for tool in request.tools
+            ]
+            body["tool_choice"] = _responses_tool_choice(request.tool_choice)
+        if request.temperature is not None:
+            body["temperature"] = _normalize_temperature(request.temperature)
+        if request.reasoning_effort:
+            body["reasoning"] = {"effort": _normalize_reasoning_effort(request.reasoning_effort)}
+        if request.web_search:
+            size = (request.web_search_context_size or "medium").lower()
+            if size not in {"low", "medium", "high"}:
+                size = "medium"
+            body.setdefault("tools", []).append(
+                {"type": "web_search", "search_context_size": size}
+            )
+            body["include"] = ["web_search_call.action.sources"]
+
+        client_kwargs: dict[str, object] = {"timeout": _timeout_for_call(self._base_url, None)}
+        if self._proxy_url:
+            client_kwargs["proxy"] = self._proxy_url
+        else:
+            client_kwargs["trust_env"] = False
+        try:
+            async with httpx.AsyncClient(**client_kwargs) as cli:
+                resp = await _post_responses_compatible(cli, url, headers=headers, body=body)
+        except httpx.HTTPError as exc:
+            raise LLMError(
+                _safe_error_message(_describe_http_error(exc, self._base_url), self._api_key),
+                retryable=True,
+            ) from None
+        if resp.status_code >= 400:
+            raise LLMError(
+                _safe_error_message(
+                    f"Responses 接口返回 {resp.status_code}: {_response_text(resp)[:200]}{_hint_for_status(resp.status_code)}",
+                    self._api_key,
+                ),
+                retryable=_is_retryable_status(resp.status_code),
+            )
+        data = _decode_responses_payload("Responses", resp, self._api_key)
+        status = str(data.get("status") or "")
+        if status in {"failed", "cancelled"}:
+            raise LLMError(f"Responses 返回状态异常: {status}")
+        text_parts: list[str] = []
+        tool_calls: list[ToolCall] = []
+        for item in data.get("output") or []:
+            if not isinstance(item, dict):
+                continue
+            if item.get("type") == "function_call":
+                name = str(item.get("name") or "").strip()
+                if name:
+                    tool_calls.append(
+                        ToolCall(
+                            id=str(item.get("call_id") or item.get("id") or ""),
+                            name=name,
+                            arguments=_parse_tool_arguments(item.get("arguments")),
+                        )
+                    )
+            for content in item.get("content") or []:
+                if isinstance(content, dict) and isinstance(content.get("text"), str):
+                    text_parts.append(content["text"])
+        if not text_parts and isinstance(data.get("output_text"), str):
+            text_parts.append(data["output_text"])
+        usage = data.get("usage") or {}
+        details = usage.get("output_tokens_details") or {}
+        incomplete = data.get("incomplete_details") or {}
+        incomplete_reason = incomplete.get("reason") if isinstance(incomplete, dict) else None
+        provider_reason = incomplete_reason or status
+        return ModelResponse(
+            model=str(data.get("model") or request.model or self._model),
+            content=(TextContent("".join(text_parts).strip()),) if text_parts else (),
+            tool_calls=tuple(tool_calls),
+            usage=ModelUsage(
+                input_tokens=int(usage.get("input_tokens") or 0),
+                output_tokens=int(usage.get("output_tokens") or 0),
+                reasoning_tokens=int(details.get("reasoning_tokens") or 0),
+            ),
+            stop_reason=(
+                StopReason.MAX_TOKENS
+                if incomplete_reason in {"max_output_tokens", "max_tokens"}
+                else StopReason.TOOL_CALLS
+                if tool_calls
+                else stop_reason_from_provider(provider_reason)
+            ),
+            provider_status=str(provider_reason) if provider_reason else None,
+            sources=tuple(_extract_response_sources(data)),
         )
 
     async def stream_complete(
@@ -1285,7 +1925,7 @@ class ResponsesClient(LLMClient):
         reasoning_effort: str | None = None,
         timeout_seconds: int | None = None,
     ) -> AsyncIterator[LLMStreamChunk]:
-        url = f"{self._base_url}/responses"
+        url = provider_endpoint(self._base_url, LLM_API_FORMAT_RESPONSES)
         headers = _llm_headers(accept="text/event-stream")
         if self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"
@@ -1453,7 +2093,7 @@ class ResponsesClient(LLMClient):
         """
         if web_search:
             raise LLMError("图片生成不支持联网搜索，请关闭 web_search")
-        url = f"{self._base_url}/responses"
+        url = provider_endpoint(self._base_url, LLM_API_FORMAT_RESPONSES)
         headers = _llm_headers(accept="application/json")
         if self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"
@@ -1707,7 +2347,15 @@ def build_client(
         )
     if fmt == LLM_API_FORMAT_ANTHROPIC_MESSAGES:
         return AnthropicClient(
-            api_key=api_key, base_url=provider_row.base_url, model=model, proxy_url=proxy_url
+            api_key=api_key,
+            base_url=provider_row.base_url,
+            model=model,
+            proxy_url=proxy_url,
+            protocol_profile=getattr(
+                provider_row,
+                "protocol_profile",
+                LLM_PROTOCOL_PROFILE_STANDARD,
+            ),
         )
     raise ValueError(f"未知 api_format: {fmt}")
 
@@ -1757,7 +2405,11 @@ def build_client_from_dto(
         )
     if fmt == LLM_API_FORMAT_ANTHROPIC_MESSAGES:
         return AnthropicClient(
-            api_key=api_key, base_url=dto.base_url, model=model, proxy_url=final_proxy
+            api_key=api_key,
+            base_url=dto.base_url,
+            model=model,
+            proxy_url=final_proxy,
+            protocol_profile=dto.protocol_profile,
         )
     raise ValueError(f"未知 api_format: {fmt}")
 

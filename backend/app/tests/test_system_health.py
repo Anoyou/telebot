@@ -45,6 +45,24 @@ def test_auto_migrate_default_false() -> None:
     assert settings.auto_migrate_on_startup is False
 
 
+@pytest.mark.parametrize(
+    "key",
+    [
+        "account_webhooks:1",
+        "account_bot_transfer_notice:1",
+        "account_bot:interaction_runtime_state:1",
+        "account_bot:transfer_test_runtime_state:1",
+        "auth_login_recovery_code",
+    ],
+)
+def test_sensitive_system_settings_are_excluded_from_normal_export(key: str) -> None:
+    assert sh._system_setting_safe_for_export(key) is False
+
+
+def test_regular_system_settings_remain_exportable() -> None:
+    assert sh._system_setting_safe_for_export("command_prefix") is True
+
+
 # ════════════════════════════════════════════════════════════
 # 2) DB 探测
 # ════════════════════════════════════════════════════════════

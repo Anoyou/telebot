@@ -12,6 +12,7 @@ import {
   Loader2,
   MessageSquare,
   Minus,
+  RotateCcw,
   Save,
   UserRound,
   X,
@@ -59,6 +60,7 @@ import {
   pluginContractRiskWarnings,
   pluginEventSubscriptionLabels,
   pluginOperationalCapabilityLabels,
+  pluginSupportsDirectPassthrough,
 } from "@/types/pluginContract";
 import { featureConfigBackTarget, formatFeatureVersion } from "@/pages/Plugins/_shared/featureConfig";
 import { featureRuntimeText, featureSwitchText } from "./_shared/featureStatus";
@@ -76,6 +78,13 @@ function isConfigSchema(schema: unknown): schema is ConfigSchema {
 
 function sameConfig(a: Record<string, unknown>, b: Record<string, unknown>): boolean {
   return JSON.stringify(a) === JSON.stringify(b);
+}
+
+function directPassthroughConfig(config: Record<string, unknown>): Record<string, unknown> {
+  const raw = config.direct_passthrough;
+  return raw && typeof raw === "object" && !Array.isArray(raw)
+    ? raw as Record<string, unknown>
+    : {};
 }
 
 const EMPTY_CONFIG: Record<string, unknown> = {};
@@ -155,6 +164,8 @@ export function GenericPluginConfigPage() {
   const schema = isConfigSchema(feature?.config_schema) ? feature.config_schema : null;
   const globalConfig = globalConfigQ.data ?? EMPTY_CONFIG;
   const accountConfig = accountFeature?.config ?? EMPTY_CONFIG;
+  const supportsDirectPassthrough = pluginSupportsDirectPassthrough(feature?.capabilities);
+  const directPassthroughEnabled = directPassthroughConfig(accountConfig).enabled === true;
   const commandPrefix = settingsQ.data?.command_prefix || ",";
   const llmProvidersQ = useQuery({
     queryKey: ["llm-providers"],
@@ -262,6 +273,9 @@ export function GenericPluginConfigPage() {
         for (const [key] of accountFields) {
           if (key in editableAccountVals) accountOnlyVals[key] = editableAccountVals[key];
         }
+        if (supportsDirectPassthrough) {
+          accountOnlyVals.direct_passthrough = directPassthroughConfig(accountConfig);
+        }
         if (!sameConfig(accountOnlyVals, accountConfig)) {
           await updateAccountFeatureConfig(aid, featureKey, accountOnlyVals);
         }
@@ -281,6 +295,23 @@ export function GenericPluginConfigPage() {
   const toggleMut = useMutation({
     mutationFn: (enabled: boolean) => toggleAccountFeature(aid, featureKey, enabled),
     onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["account", aid, "features"] });
+      qc.invalidateQueries({ queryKey: ["matrix"] });
+    },
+    onError: (err) => toast.error(getErrMsg(err)),
+  });
+
+  const directPassthroughMut = useMutation({
+    mutationFn: (enabled: boolean) =>
+      updateAccountFeatureConfig(aid, featureKey, {
+        ...accountConfig,
+        direct_passthrough: {
+          ...directPassthroughConfig(accountConfig),
+          enabled,
+        },
+      }),
+    onSuccess: (_data, enabled) => {
+      toast.success(enabled ? "裸直通已为当前账号开启" : "裸直通已为当前账号关闭");
       qc.invalidateQueries({ queryKey: ["account", aid, "features"] });
       qc.invalidateQueries({ queryKey: ["matrix"] });
     },
@@ -509,6 +540,32 @@ export function GenericPluginConfigPage() {
             />
           </div>
         </CardHeader>
+        {supportsDirectPassthrough ? (
+          <CardContent>
+            <div className="flex flex-col gap-3 rounded-md border border-info/25 bg-info/5 px-3 py-3 sm:flex-row sm:items-center sm:justify-between">
+              <div className="min-w-0">
+                <div className="flex flex-wrap items-center gap-2">
+                  <div className="text-sm font-medium">账号级裸直通</div>
+                  <Badge variant="outline">二次开关</Badge>
+                </div>
+                <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                  开启后，该插件可在标准 Event Bus 之前接收当前账号的原始消息。只为你信任且确实需要低延时的插件开启。
+                </p>
+                {!accountFeature?.enabled ? (
+                  <p className="mt-1 text-xs text-warning">请先开启上方功能总开关。</p>
+                ) : null}
+              </div>
+              <Switch
+                checked={directPassthroughMut.isPending
+                  ? Boolean(directPassthroughMut.variables)
+                  : directPassthroughEnabled}
+                disabled={!accountFeature?.enabled || directPassthroughMut.isPending}
+                onCheckedChange={(enabled) => directPassthroughMut.mutate(enabled)}
+                aria-label="账号级裸直通"
+              />
+            </div>
+          </CardContent>
+        ) : null}
       </Card>
 
       {latestActionJob ? (
@@ -588,22 +645,27 @@ export function GenericPluginConfigPage() {
                   {dirty ? "有未保存修改，保存后 worker 会热加载。" : "当前配置已同步。"}
                 </div>
               </div>
-              <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:items-center sm:gap-4">
-                <Button className="w-full sm:w-auto" onClick={() => saveMut.mutate()} disabled={saveMut.isPending || !dirty}>
+              <div className="flex w-full flex-row items-center gap-2 sm:w-auto">
+                <Button
+                  className="min-w-0 flex-1 sm:flex-none sm:px-6"
+                  onClick={() => saveMut.mutate()}
+                  disabled={saveMut.isPending || !dirty}
+                >
                   {saveMut.isPending ? (
-                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                    <Loader2 className="h-4 w-4 shrink-0 animate-spin" />
                   ) : (
-                    <Save className="mr-2 h-4 w-4" />
+                    <Save className="h-4 w-4 shrink-0" />
                   )}
                   保存配置
                 </Button>
                 <Button
                   type="button"
-                  variant="ghost"
+                  variant="outline"
                   disabled={!dirty || saveMut.isPending}
                   onClick={resetForm}
-                  className="w-full sm:w-auto sm:px-0"
+                  className="min-w-0 flex-1 border-foreground/25 bg-background shadow-sm hover:border-foreground/40 sm:flex-none sm:px-6"
                 >
+                  <RotateCcw className="h-4 w-4 shrink-0" />
                   撤销
                 </Button>
               </div>

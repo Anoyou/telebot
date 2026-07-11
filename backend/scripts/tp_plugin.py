@@ -982,6 +982,8 @@ def _infer_permissions_from_plugin_py(plugin_py: Path) -> tuple[set[str], set[st
                 http_domains.add(domain)
             else:
                 dynamic_http_calls += 1
+        if len(chain) >= 3 and chain[0] == "ctx" and chain[1] == "ai":
+            inferred.add("ai_agent" if chain[2] == "run_agent" else "ai_text")
 
     return inferred, http_domains, dynamic_http_calls
 

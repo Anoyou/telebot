@@ -54,7 +54,7 @@ import {
 } from "@/api/commands";
 import { listProxies } from "@/api/proxies";
 import { getSystemSettings } from "@/api/system";
-import type { ChatTestModelResult, ChatTestTurn, DetectProviderProtocolsResponse, LLMApiFormat, LLMModality, LLMProviderKind, LLMProviderOut, LLMTag, LLMWebSearchApiFormat, ProviderModel, ProtocolProbeResult, ProxyOut } from "@/api/types";
+import type { ChatTestModelResult, ChatTestTurn, DetectProviderProtocolsResponse, LLMApiFormat, LLMModality, LLMProtocolProfile, LLMProviderKind, LLMProviderOut, LLMTag, LLMWebSearchApiFormat, ProviderModel, ProtocolProbeResult, ProxyOut } from "@/api/types";
 import { getErrMsg } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
@@ -167,6 +167,7 @@ interface FormState {
   default_model: string;
   // API Format（chat_completions / responses / anthropic_messages）
   api_format: LLMApiFormat;
+  protocol_profile: LLMProtocolProfile;
   web_search_api_format: LLMWebSearchApiFormat;
   // 编辑模式下，是否要"清空已有 key"（按钮触发）
   clearKey: boolean;
@@ -190,6 +191,7 @@ const EMPTY_FORM: FormState = {
   base_url: "",
   default_model: SUGGESTED_MODELS.openai,
   api_format: "chat_completions",
+  protocol_profile: "standard",
   web_search_api_format: "auto",
   clearKey: false,
   modality: "text",
@@ -264,6 +266,9 @@ export function LLMProviders({
         base_url: form.base_url || null,
         default_model: form.default_model.trim(),
         api_format: form.api_format,
+        ...(form.api_format === "anthropic_messages"
+          ? { protocol_profile: form.protocol_profile }
+          : {}),
         web_search_api_format: form.web_search_api_format,
         modality: form.modality,
         tags: form.tags,
@@ -295,6 +300,9 @@ export function LLMProviders({
         base_url: form.base_url || null,
         default_model: form.default_model.trim(),
         api_format: form.api_format,
+        ...(form.api_format === "anthropic_messages"
+          ? { protocol_profile: form.protocol_profile }
+          : {}),
         web_search_api_format: form.web_search_api_format,
         modality: form.modality,
         tags: form.tags,
@@ -332,6 +340,10 @@ export function LLMProviders({
       base_url: p.base_url || "",
       default_model: p.default_model,
       api_format: ((p.api_format as LLMApiFormat) || "chat_completions"),
+      protocol_profile:
+        p.api_format === "anthropic_messages" && p.protocol_profile === "claude_code_proxy"
+          ? "claude_code_proxy"
+          : "standard",
       web_search_api_format: ((p.web_search_api_format as LLMWebSearchApiFormat) || "auto"),
       clearKey: false,
       modality: ((p.modality as LLMModality) || "text"),
@@ -436,10 +448,15 @@ export function LLMProviders({
                     <TableRow key={p.id}>
                       <TableCell className="font-medium">{p.name}</TableCell>
                       <TableCell className="font-mono text-xs">{p.provider}</TableCell>
-                      <TableCell className="text-xs">
-                        <MetaBadge mono>
-                          {p.api_format || "chat_completions"}
-                        </MetaBadge>
+                      <TableCell className="space-y-1 text-xs">
+                        <MetaBadge mono>{p.api_format || "chat_completions"}</MetaBadge>
+                        {p.api_format === "anthropic_messages" ? (
+                          <div>
+                            <MetaBadge mono tone={p.protocol_profile === "claude_code_proxy" ? "warn" : "neutral"}>
+                              {p.protocol_profile || "standard"}
+                            </MetaBadge>
+                          </div>
+                        ) : null}
                       </TableCell>
                       <TableCell className="text-xs">
                         <MetaBadge mono tone={(p.web_search_api_format || "auto") === "auto" ? "neutral" : "outline"}>
@@ -610,6 +627,11 @@ function ProviderMobileCard({
           </MetaBadge>
           <MetaBadge mono>{provider.provider}</MetaBadge>
           <MetaBadge mono>{provider.api_format || "chat_completions"}</MetaBadge>
+          {provider.api_format === "anthropic_messages" ? (
+            <MetaBadge mono tone={provider.protocol_profile === "claude_code_proxy" ? "warn" : "neutral"}>
+              {provider.protocol_profile || "standard"}
+            </MetaBadge>
+          ) : null}
           <MetaBadge tone={(provider.web_search_api_format || "auto") === "auto" ? "neutral" : "outline"} mono>
             搜索 {provider.web_search_api_format || "auto"}
           </MetaBadge>
@@ -1180,9 +1202,12 @@ function ProviderEditDialog({
     onSuccess: (resp) => {
       setProtocolDetection(resp);
       if (resp.recommended_api_format) {
+        const recommendedApiFormat = resp.recommended_api_format as LLMApiFormat;
         onChange({
           ...form,
-          api_format: resp.recommended_api_format as LLMApiFormat,
+          api_format: recommendedApiFormat,
+          protocol_profile:
+            recommendedApiFormat === "anthropic_messages" ? form.protocol_profile : "standard",
           web_search_api_format: (resp.recommended_web_search_api_format || "auto") as LLMWebSearchApiFormat,
         });
         toast.success("已检测并填入推荐协议");
@@ -1287,7 +1312,15 @@ function ProviderEditDialog({
             </div>
             <Select
               value={form.api_format}
-              onChange={(e) => setField("api_format", e.target.value as LLMApiFormat)}
+              onChange={(e) => {
+                const apiFormat = e.target.value as LLMApiFormat;
+                onChange({
+                  ...form,
+                  api_format: apiFormat,
+                  protocol_profile:
+                    apiFormat === "anthropic_messages" ? form.protocol_profile : "standard",
+                });
+              }}
             >
               {API_FORMAT_OPTIONS.map((opt) => (
                 <option key={opt.value} value={opt.value}>
@@ -1304,6 +1337,22 @@ function ProviderEditDialog({
               </p>
             ) : null}
           </div>
+
+          {form.api_format === "anthropic_messages" ? (
+            <div className="space-y-1.5">
+              <Label>Anthropic 请求兼容模式</Label>
+              <Select
+                value={form.protocol_profile}
+                onChange={(e) => setField("protocol_profile", e.target.value as LLMProtocolProfile)}
+              >
+                <option value="standard">标准 Anthropic API（推荐）</option>
+                <option value="claude_code_proxy">Claude Code 反代兼容</option>
+              </Select>
+              <p className="text-xs text-muted-foreground">
+                标准模式遵循 Anthropic Messages 协议。仅当反代明确要求 Claude Code 专用兼容头时，才选择反代兼容模式；官方 Anthropic API 不需要开启。
+              </p>
+            </div>
+          ) : null}
 
           <div className="space-y-1.5">
             <Label>联网搜索 API Format</Label>
@@ -1504,8 +1553,8 @@ function ProviderEditDialog({
           </div>
         </div>
 
-        <DialogFooter>
-          <Button variant="ghost" onClick={onCancel} disabled={saving}>
+        <DialogFooter className="!flex !flex-row gap-2 sm:space-x-0 [&>*]:min-w-0 [&>*]:flex-1 sm:[&>*]:flex-none">
+          <Button variant="outline" onClick={onCancel} disabled={saving}>
             取消
           </Button>
           <Button onClick={onSave} disabled={saving}>

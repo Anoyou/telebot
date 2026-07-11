@@ -188,6 +188,19 @@ export function WebhooksPage() {
     );
   }
 
+
+  if (accountsQ.isError) {
+    return (
+      <PageShell>
+        <PageHeader icon={Webhook} title="入站 Webhook" description="账号列表加载失败。" />
+        <Card><CardContent className="flex flex-wrap items-center justify-between gap-3 pt-6 text-sm text-muted-foreground">
+          <span>{getErrMsg(accountsQ.error)}</span>
+          <Button size="sm" variant="outline" onClick={() => void accountsQ.refetch()}>重试</Button>
+        </CardContent></Card>
+      </PageShell>
+    );
+  }
+
   return (
     <PageShell>
       <PageHeader

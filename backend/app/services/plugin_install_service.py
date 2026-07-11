@@ -10,6 +10,7 @@
 
 安全约束：
 - zip 体积上限 ``settings.plugin_zip_max_bytes``
+- zip 成员数、单文件大小、总解压大小与压缩比上限
 - 拒绝路径穿越（绝对路径、含 ``..`` 的成员）
 - 拒绝与 builtin feature key 冲突
 - 解压后任意单个成员失败都视作整体失败（解压前先校验完所有 names）
@@ -120,7 +121,7 @@ def parse_zip(zip_bytes: bytes) -> ParsedPlugin:
 
         try:
             with zipfile.ZipFile(BytesIO(zip_bytes)) as zf:
-                # 1) 路径穿越校验：拒绝绝对路径与含 ".." 的成员
+                # 1) 在解压前完成结构与资源预算校验。
                 _validate_zip_members(zf)
                 zf.extractall(extract_dir)
         except zipfile.BadZipFile as exc:
@@ -170,8 +171,25 @@ def parse_zip(zip_bytes: bytes) -> ParsedPlugin:
 
 
 def _validate_zip_members(zf: zipfile.ZipFile) -> None:
-    """禁止绝对路径 / `..` 段，防止 zip slip。"""
-    for name in zf.namelist():
+    """在解压前拒绝路径穿越、加密成员和压缩炸弹。"""
+    members = zf.infolist()
+    max_members = max(1, int(settings.plugin_zip_max_members))
+    if len(members) > max_members:
+        raise InvalidZipStructure(
+            "ZIP_TOO_MANY_MEMBERS",
+            f"zip 成员数 {len(members)} 超出上限 {max_members}",
+        )
+
+    total_size = 0
+    max_member_size = max(1, int(settings.plugin_zip_max_member_bytes))
+    max_total_size = max(max_member_size, int(settings.plugin_zip_max_uncompressed_bytes))
+    max_ratio = max(1, int(settings.plugin_zip_max_compression_ratio))
+    seen: set[str] = set()
+    for info in members:
+        name = info.filename
+        if name in seen:
+            raise InvalidZipStructure("ZIP_DUPLICATE_MEMBER", f"zip 包含重复成员: {name!r}")
+        seen.add(name)
         # 拒绝绝对路径
         if name.startswith("/") or (len(name) >= 2 and name[1] == ":"):
             raise InvalidZipStructure(
@@ -183,6 +201,27 @@ def _validate_zip_members(zf: zipfile.ZipFile) -> None:
             raise InvalidZipStructure(
                 "ZIP_PATH_TRAVERSAL",
                 f"zip 不允许 .. 路径穿越: {name!r}",
+            )
+        if info.flag_bits & 0x1:
+            raise InvalidZipStructure("ZIP_ENCRYPTED_MEMBER", f"zip 不允许加密成员: {name!r}")
+        if info.is_dir():
+            continue
+        if info.file_size > max_member_size:
+            raise ZipTooLarge(
+                "ZIP_MEMBER_TOO_LARGE",
+                f"zip 成员 {name!r} 解压后超出 {max_member_size} bytes 上限",
+            )
+        total_size += int(info.file_size)
+        if total_size > max_total_size:
+            raise ZipTooLarge(
+                "ZIP_UNCOMPRESSED_TOO_LARGE",
+                f"zip 解压后总大小超出 {max_total_size} bytes 上限",
+            )
+        compressed_size = max(1, int(info.compress_size))
+        if info.file_size > 1024 and info.file_size / compressed_size > max_ratio:
+            raise ZipTooLarge(
+                "ZIP_COMPRESSION_RATIO_TOO_HIGH",
+                f"zip 成员 {name!r} 压缩比超过 {max_ratio}:1 上限",
             )
 
 

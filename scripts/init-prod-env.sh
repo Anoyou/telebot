@@ -36,6 +36,7 @@ while [[ $# -gt 0 ]]; do
 生成生产 Docker Compose 所需的 .env：
   - MASTER_KEY
   - JWT_SECRET
+  - UPDATER_TOKEN
   - POSTGRES_PASSWORD
   - WEB_PORT_PUBLISH
   - COOKIE_SECURE
@@ -67,17 +68,19 @@ import string
 alphabet = string.ascii_letters + string.digits
 print(base64.urlsafe_b64encode(os.urandom(32)).decode())
 print(secrets.token_urlsafe(64))
+print(secrets.token_urlsafe(64))
 print("".join(secrets.choice(alphabet) for _ in range(32)))
 PY
 )"
 
 MASTER_KEY_VALUE="$(printf '%s\n' "$random_values" | sed -n '1p')"
 JWT_SECRET_VALUE="$(printf '%s\n' "$random_values" | sed -n '2p')"
-POSTGRES_PASSWORD_VALUE="$(printf '%s\n' "$random_values" | sed -n '3p')"
+UPDATER_TOKEN_VALUE="$(printf '%s\n' "$random_values" | sed -n '3p')"
+POSTGRES_PASSWORD_VALUE="$(printf '%s\n' "$random_values" | sed -n '4p')"
 
 cp "$ROOT_DIR/.env.example" "$ENV_FILE"
 
-python3 - "$ENV_FILE" "$MASTER_KEY_VALUE" "$JWT_SECRET_VALUE" "$POSTGRES_PASSWORD_VALUE" "$WEB_PORT" "$COOKIE_SECURE_VALUE" <<'PY'
+python3 - "$ENV_FILE" "$MASTER_KEY_VALUE" "$JWT_SECRET_VALUE" "$UPDATER_TOKEN_VALUE" "$POSTGRES_PASSWORD_VALUE" "$WEB_PORT" "$COOKIE_SECURE_VALUE" <<'PY'
 from pathlib import Path
 import sys
 
@@ -85,12 +88,13 @@ path = Path(sys.argv[1])
 replacements = {
     "MASTER_KEY": sys.argv[2],
     "JWT_SECRET": sys.argv[3],
+    "UPDATER_TOKEN": sys.argv[4],
     "POSTGRES_USER": "telepilot",
-    "POSTGRES_PASSWORD": sys.argv[4],
+    "POSTGRES_PASSWORD": sys.argv[5],
     "POSTGRES_DB": "telepilot",
-    "DATABASE_URL": "postgresql+asyncpg://telepilot:{password}@postgres:5432/telepilot".format(password=sys.argv[4]),
-    "WEB_PORT_PUBLISH": sys.argv[5],
-    "COOKIE_SECURE": sys.argv[6].lower(),
+    "DATABASE_URL": "postgresql+asyncpg://telepilot:{password}@postgres:5432/telepilot".format(password=sys.argv[5]),
+    "WEB_PORT_PUBLISH": sys.argv[6],
+    "COOKIE_SECURE": sys.argv[7].lower(),
 }
 
 seen: set[str] = set()

@@ -27,6 +27,11 @@ from ...db.models.command import (
 )
 from ...services import llm_account_budget, llm_runtime, plugin_ai_quota
 from ...services.ai_feature import is_ai_enabled
+from ...services.llm_agent import AgentCallbacks, AgentLimits, run_agent, tools_from_manifest
+from ...services.llm_agent_observability import (
+    AgentObservationContext,
+    build_agent_observability_callbacks,
+)
 from ...services.llm_client import (
     LLMCallFailed,
     LLMError,
@@ -36,7 +41,13 @@ from ...services.llm_client import (
     build_client_from_dto as build_llm_client,
 )
 from ...services.llm_dto import LLMProviderDTO
-from ...services.llm_invoke import invoke as invoke_ai_runtime
+from ...services.llm_invoke import (
+    invoke as invoke_ai_runtime,
+)
+from ...services.llm_invoke import (
+    invoke_structured,
+)
+from ...services.llm_protocol import MessageRole, ModelMessage, ModelRequest, ModelUsage
 from ...settings import settings
 
 ProviderLoader = Callable[[], Awaitable[Mapping[int, LLMProviderDTO]]]
@@ -98,6 +109,19 @@ class AIProviderInfo:
     has_api_key: bool = False
 
 
+@dataclass(frozen=True)
+class AIAgentResult:
+    text: str
+    model: str
+    provider_id: int
+    provider_name: str
+    used_fallback: bool
+    steps: int
+    tool_calls: int
+    input_tokens: int
+    output_tokens: int
+
+
 class PluginAI:
     """MVP plugin AI facade for safe text completion."""
 
@@ -109,10 +133,14 @@ class PluginAI:
         provider_loader: ProviderLoader | None = None,
         max_tokens_limit: int | None = None,
         timeout_limit_seconds: int | None = None,
+        allow_agent: bool = False,
+        manifest: Mapping[str, Any] | None = None,
     ) -> None:
         self.account_id = account_id
         self.plugin_key = plugin_key
         self._provider_loader = provider_loader or load_llm_providers
+        self._allow_agent = bool(allow_agent)
+        self._manifest = dict(manifest or {})
         self.max_tokens_limit = _positive_int(
             max_tokens_limit,
             _positive_int(
@@ -135,6 +163,8 @@ class PluginAI:
         return cls(
             account_id=getattr(ctx, "account_id", None),
             plugin_key=str(getattr(ctx, "feature_key", "") or "unknown"),
+            allow_agent=bool(getattr(ctx, "allow_ai_agent", False)),
+            manifest=getattr(ctx, "plugin_manifest", None),
         )
 
     async def list_providers(self) -> list[AIProviderInfo]:
@@ -230,6 +260,127 @@ class PluginAI:
             raise
 
         return _result_from_llm(result, used_provider, used_fallback)
+
+    async def run_agent(
+        self,
+        system: str,
+        user: str,
+        *,
+        handlers: Mapping[str, Callable[[dict[str, Any]], Awaitable[Any]]],
+        provider: int | str | None = None,
+        provider_tag: str | None = None,
+        model: str | None = None,
+        max_tokens: int = 1024,
+        max_steps: int = 8,
+        max_tool_calls: int = 24,
+        max_total_tokens: int = 16_384,
+        timeout_seconds: int = DEFAULT_PLUGIN_AI_TIMEOUT_SECONDS,
+    ) -> AIAgentResult:
+        """Run manifest-declared tools through the bounded internal AgentRuntime."""
+
+        if not self._allow_agent:
+            raise AIUnavailableError("插件未声明独立 ai_agent 权限")
+        tools = tools_from_manifest(self._manifest, handlers)
+        if not tools:
+            raise AIUnavailableError("manifest 未声明可执行的 agent_tools，或宿主未注册 handler")
+        providers = await self._load_providers()
+        primary, matched_tag = _select_provider(
+            providers,
+            provider=provider,
+            provider_tag=provider_tag,
+        )
+        explicit_model = str(model or "").strip()
+        selected_model = explicit_model or str(primary.default_model or "").strip()
+        request = ModelRequest(
+            model=selected_model,
+            messages=(
+                ModelMessage.text(MessageRole.SYSTEM, str(system or "")),
+                ModelMessage.text(MessageRole.USER, str(user or "")),
+            ),
+            tools=tuple(tool.spec for tool in tools.values()),
+            max_output_tokens=self._clamp_max_tokens(max_tokens),
+            metadata={"model_pinned": bool(explicit_model)},
+        )
+        limits = AgentLimits(
+            max_steps=max(1, min(int(max_steps), 16)),
+            max_tool_calls=max(1, min(int(max_tool_calls), 64)),
+            max_calls_per_turn=8,
+            max_same_call=3,
+            max_total_tokens=max(1, min(int(max_total_tokens), 100_000)),
+            timeout_seconds=float(self._clamp_timeout(timeout_seconds)),
+        )
+        quota_ticket: plugin_ai_quota.PluginAIQuotaTicket | None = None
+        agent_actual_tokens = 0
+        used_provider = primary
+        used_fallback = False
+        try:
+            quota_ticket = await plugin_ai_quota.acquire(
+                self.plugin_key,
+                self.account_id,
+                estimated_tokens=limits.max_total_tokens,
+            )
+
+            async def model_call(current: ModelRequest):
+                nonlocal used_provider, used_fallback
+                response, actual_provider, fallback = await invoke_structured(
+                    primary,
+                    providers,
+                    current,
+                    account_id=self.account_id,
+                    source=f"plugin:{self.plugin_key}:agent",
+                    matched_tag=matched_tag,
+                )
+                used_provider = actual_provider
+                used_fallback = used_fallback or fallback
+                return response
+
+            callbacks = (
+                build_agent_observability_callbacks(
+                    AgentObservationContext(
+                        account_id=int(self.account_id),
+                        plugin_key=self.plugin_key,
+                    )
+                )
+                if self.account_id is not None
+                else AgentCallbacks()
+            )
+            observed_usage = callbacks.on_usage
+
+            async def track_usage(usage: ModelUsage) -> None:
+                nonlocal agent_actual_tokens
+                agent_actual_tokens = usage.total_tokens
+                if observed_usage is not None:
+                    await observed_usage(usage)
+
+            callbacks.on_usage = track_usage
+            result = await run_agent(
+                model_call,
+                request,
+                tools,
+                limits=limits,
+                callbacks=callbacks,
+            )
+            await plugin_ai_quota.release(quota_ticket, result.usage.total_tokens)
+        except plugin_ai_quota.PluginAIQuotaExceeded as exc:
+            raise AIQuotaError(str(exc)) from exc
+        except LLMCallFailed as exc:
+            await plugin_ai_quota.release(quota_ticket, agent_actual_tokens)
+            raise _facade_error_from_llm_call(exc) from exc
+        except Exception:
+            await plugin_ai_quota.release(quota_ticket, agent_actual_tokens)
+            raise
+
+        return AIAgentResult(
+            text=result.text,
+            model=result.model,
+            provider_id=used_provider.id,
+            provider_name=used_provider.name,
+            used_fallback=used_fallback,
+            steps=result.steps,
+            tool_calls=result.tool_calls,
+            input_tokens=result.usage.input_tokens,
+            output_tokens=result.usage.output_tokens,
+        )
 
     async def stream_complete(
         self,
@@ -646,6 +797,7 @@ def _proxy_url_from_row(proxy: Proxy | None) -> str | None:
 
 
 __all__ = [
+    "AIAgentResult",
     "AIProviderInfo",
     "AIQuotaError",
     "AIResult",

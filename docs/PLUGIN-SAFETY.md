@@ -38,6 +38,7 @@ Manifest 中的 `permissions` 字段声明插件需要的能力：
 | `external_http` | `ctx.http.get` / `ctx.http.post` | 安全 HTTP facade；必须同时声明 `allowed_hosts` |
 | `external_http_bypass_proxy` | direct 网络出口 | 预留高危权限；当前直连还必须通过 Manifest `http.allow_direct` 和账号配置共同开启 |
 | `ai_text` | `ctx.ai.complete` / `ctx.ai.list_providers` | 平台文本 LLM facade；返回脱敏 provider 元数据 |
+| `ai_agent` | `ctx.ai.run_agent` | 有界工具调用；还需 `capabilities.agent_tools.enabled=true`、`agent_tools[]` 与宿主 handler 双白名单 |
 
 `permissions` 默认是空列表。远程/本地/插件库安装型插件漏写权限时不会注入对应 facade，也不能调用未声明的 `ctx.client` / `event` helper 能力；核心平台兼容代码也建议显式写全，方便审计和后续迁移。
 
@@ -59,7 +60,7 @@ TelePilot 按个人可信插件模式运行：管理员安装并启用插件后�
 
 - `ctx` 不注入 Telegram live client，不允许借配置页按钮直接发消息、转账或改群。
 - `ctx.http` 仍要求 `external_http` + `allowed_hosts`，并继续阻断 localhost、内网和链路本地地址。
-- `ctx.ai` 仍要求 `ai_text`，复用 TelePilot Provider、预算和用量记录，不暴露明文 API Key。
+- `ctx.ai.complete` 要求 `ai_text`；`ctx.ai.run_agent` 独立要求 `ai_agent`，不互相继承。两者都复用 TelePilot Provider、预算和用量记录，不暴露明文 API Key。
 - 前端只合并插件返回的 `config_patch` 到当前表单；管理员仍需点击“保存配置”才会写入数据库并触发 worker 热加载。
 - 动作输入、URL、AI 输出都必须由插件二次校验，不要把 AI 输出当成可信配置直接执行。
 

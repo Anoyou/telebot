@@ -19,12 +19,13 @@ import pytest
 from fastapi import HTTPException
 
 from app.crypto import decrypt_str, encrypt_str
-from app.db.models.command import LLMProvider
+from app.db.models.command import LLMProvider, normalize_protocol_profile
 from app.schemas.command import (
     ChatTestModelsRequest,
     CommandTemplateBase,
     CommandTemplateCreate,
     LLMProviderCreate,
+    LLMProviderUpdate,
 )
 from app.services import command_service
 from app.services.command_service import _provider_to_out
@@ -34,6 +35,7 @@ from app.services.llm_client import (
     _safe_error_message,
     build_client,
 )
+from app.services.llm_dto import LLMProviderDTO
 from app.worker import command as wcmd
 
 
@@ -252,6 +254,126 @@ def test_llm_provider_create_validates_provider() -> None:
         LLMProviderCreate(
             name="x", provider="bad-vendor", api_key="x", default_model="x"
         )
+
+
+def test_protocol_profile_normalization_is_scoped_to_anthropic_messages() -> None:
+    assert (
+        normalize_protocol_profile("anthropic_messages", "claude_code_proxy")
+        == "claude_code_proxy"
+    )
+    assert normalize_protocol_profile("responses", "claude_code_proxy") == "standard"
+    assert normalize_protocol_profile("chat_completions", None) == "standard"
+
+
+def test_provider_protocol_profile_defaults_and_validates() -> None:
+    payload = LLMProviderCreate(
+        name="anthropic-main",
+        provider="anthropic",
+        default_model="claude-haiku-4-5",
+        api_format="anthropic_messages",
+    )
+    assert payload.protocol_profile == "standard"
+
+    with pytest.raises(ValueError):
+        LLMProviderCreate(
+            name="anthropic-main",
+            provider="anthropic",
+            default_model="claude-haiku-4-5",
+            api_format="anthropic_messages",
+            protocol_profile="unknown",
+        )
+
+
+@pytest.mark.asyncio
+async def test_create_provider_normalizes_profile_for_non_anthropic_protocol() -> None:
+    class _Result:
+        @staticmethod
+        def scalar_one_or_none():
+            return None
+
+    class _DB:
+        row: LLMProvider | None = None
+
+        async def execute(self, _query):
+            return _Result()
+
+        def add(self, row: LLMProvider) -> None:
+            self.row = row
+
+        async def flush(self) -> None:
+            assert self.row is not None
+            self.row.id = 11
+            self.row.created_at = datetime.now(UTC)
+
+    db = _DB()
+    out = await command_service.create_provider(
+        db,
+        LLMProviderCreate(
+            name="responses-proxy",
+            provider="openai",
+            default_model="gpt-4o-mini",
+            api_format="responses",
+            protocol_profile="claude_code_proxy",
+        ),
+    )
+
+    assert db.row is not None
+    assert db.row.protocol_profile == "standard"
+    assert out.protocol_profile == "standard"
+
+
+@pytest.mark.asyncio
+async def test_update_provider_resets_profile_when_leaving_anthropic_protocol() -> None:
+    row = LLMProvider(
+        id=12,
+        name="anthropic-proxy",
+        provider="anthropic",
+        api_key_enc=None,
+        base_url="https://proxy.example/v1",
+        default_model="claude-haiku-4-5",
+        api_format="anthropic_messages",
+        protocol_profile="claude_code_proxy",
+        created_at=datetime.now(UTC),
+    )
+
+    class _DB:
+        async def get(self, _model, _pid):
+            return row
+
+        async def flush(self) -> None:
+            return None
+
+    out = await command_service.update_provider(
+        _DB(),
+        row.id,
+        LLMProviderUpdate(api_format="responses"),
+    )
+
+    assert row.api_format == "responses"
+    assert row.protocol_profile == "standard"
+    assert out.protocol_profile == "standard"
+
+
+def test_provider_out_and_dto_preserve_only_effective_protocol_profile() -> None:
+    row = LLMProvider(
+        id=13,
+        name="anthropic-proxy",
+        provider="anthropic",
+        api_key_enc=None,
+        base_url="https://proxy.example/v1",
+        default_model="claude-haiku-4-5",
+        api_format="anthropic_messages",
+        protocol_profile="claude_code_proxy",
+        created_at=datetime.now(UTC),
+    )
+    assert _provider_to_out(row).protocol_profile == "claude_code_proxy"
+    assert LLMProviderDTO.from_orm_row(row).protocol_profile == "claude_code_proxy"
+
+    row.api_format = "chat_completions"
+    assert _provider_to_out(row).protocol_profile == "standard"
+    dto = LLMProviderDTO.from_orm_row(row)
+    assert dto.protocol_profile == "standard"
+    assert dto.to_dict()["protocol_profile"] == "standard"
 
 
 # ════════════════════════════════════════════════════════════
@@ -578,6 +700,7 @@ async def test_anthropic_client_vision_body_shape() -> None:
         await cli.complete("sys", "describe", images=[_TINY_PNG])
 
     body = captured_kwargs["json"]
+    headers = captured_kwargs["headers"]
     content = body["messages"][0]["content"]
     assert isinstance(content, list)
     img_blk = content[0]
@@ -588,6 +711,62 @@ async def test_anthropic_client_vision_body_shape() -> None:
     import base64 as _b64
     assert _b64.b64decode(img_blk["source"]["data"]) == _TINY_PNG
     assert content[1] == {"type": "text", "text": "describe"}
+    assert "anthropic-beta" not in headers
+    assert "anthropic-dangerous-direct-browser-access" not in headers
+
+
+@pytest.mark.asyncio
+async def test_anthropic_proxy_profile_adds_only_explicit_compatibility_headers() -> None:
+    from app.services.llm_client import AnthropicClient
+
+    class _FakeStreamResp:
+        status_code = 200
+
+        async def aiter_lines(self):
+            for line in (
+                "event: message_start",
+                'data: {"message":{"model":"claude","usage":{"input_tokens":1}}}',
+                "",
+                "event: content_block_delta",
+                'data: {"delta":{"type":"text_delta","text":"ok"}}',
+                "",
+                "event: message_delta",
+                'data: {"delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}',
+                "",
+            ):
+                yield line
+
+        async def aiter_text(self):
+            yield ""
+
+    class _FakeStreamCM:
+        async def __aenter__(self):
+            return _FakeStreamResp()
+
+        async def __aexit__(self, *_exc):
+            return False
+
+    captured: dict = {}
+
+    def _stream(*_args, **kwargs):
+        captured.update(kwargs)
+        return _FakeStreamCM()
+
+    fake = AsyncMock()
+    fake.__aenter__.return_value = fake
+    fake.stream = _stream
+    with patch("app.services.llm_client.httpx.AsyncClient", return_value=fake):
+        cli = AnthropicClient(
+            api_key="sk",
+            base_url=None,
+            model="claude",
+            protocol_profile="claude_code_proxy",
+        )
+        result = await cli.complete("sys", "user")
+
+    assert captured["headers"]["x-app"] == "cli"
+    assert "claude-code" in captured["headers"]["anthropic-beta"]
+    assert result.stop_reason.value == "completed"
 
 
 @pytest.mark.asyncio
@@ -1010,9 +1189,9 @@ async def test_responses_client_keeps_sse_delta_when_completed_body_has_no_text(
 
 
 @pytest.mark.asyncio
-async def test_responses_client_retries_without_max_output_tokens_when_unsupported() -> None:
-    """部分兼容站的 /responses 不支持 max_output_tokens，应自动用轻量 body 重试。"""
-    from app.services.llm_client import ResponsesClient
+async def test_responses_client_never_drops_max_output_tokens() -> None:
+    """输出上限是成本边界，兼容反代拒绝时必须失败，不能静默删掉。"""
+    from app.services.llm_client import LLMError, ResponsesClient
 
     cli = ResponsesClient(api_key="sk", base_url="https://api.example.com/v1", model="gpt-5.4")
 
@@ -1020,40 +1199,24 @@ async def test_responses_client_retries_without_max_output_tokens_when_unsupport
         status_code = 400
         text = '{"detail":"Unsupported parameter: max_output_tokens"}'
 
-    class _OkResp:
-        status_code = 200
-
-        @staticmethod
-        def json():
-            return {
-                "model": "gpt-5.4",
-                "output_text": "ok",
-                "usage": {"input_tokens": 3, "output_tokens": 1},
-            }
-
     fake = AsyncMock()
     fake.__aenter__.return_value = fake
-    fake.post = AsyncMock(side_effect=[_BadResp(), _OkResp()])
+    fake.post = AsyncMock(return_value=_BadResp())
     with patch("app.services.llm_client.httpx.AsyncClient", return_value=fake):
-        result = await cli.complete("sys", "user", max_tokens=9)
+        with pytest.raises(LLMError):
+            await cli.complete("sys", "user", max_tokens=9)
 
-    assert result.text == "ok"
     first_body = fake.post.await_args_list[0].kwargs["json"]
-    second_body = fake.post.await_args_list[1].kwargs["json"]
     assert first_body["max_output_tokens"] == 9
-    assert "max_output_tokens" not in second_body
+    assert fake.post.await_count == 1
 
 
 @pytest.mark.asyncio
-async def test_responses_client_strips_multiple_unsupported_parameters() -> None:
-    """Codex 类反代可能连续拒绝 max_output_tokens / temperature 等 OpenAI 参数。"""
+async def test_responses_client_can_strip_non_safety_compat_parameter() -> None:
+    """非安全边界的 temperature 可针对半兼容 Responses 端点降级。"""
     from app.services.llm_client import ResponsesClient
 
     cli = ResponsesClient(api_key="sk", base_url="https://codex.example.com/v1", model="gpt-5.5")
-
-    class _BadMaxResp:
-        status_code = 400
-        text = '{"detail":"Unsupported parameter: max_output_tokens"}'
 
     class _BadTemperatureResp:
         status_code = 400
@@ -1072,22 +1235,19 @@ async def test_responses_client_strips_multiple_unsupported_parameters() -> None
 
     fake = AsyncMock()
     fake.__aenter__.return_value = fake
-    fake.post = AsyncMock(side_effect=[_BadMaxResp(), _BadTemperatureResp(), _OkResp()])
+    fake.post = AsyncMock(side_effect=[_BadTemperatureResp(), _OkResp()])
     with patch("app.services.llm_client.httpx.AsyncClient", return_value=fake):
         result = await cli.complete("sys", "user", max_tokens=9, temperature=0.7)
 
     assert result.text == "ok"
     first_body = fake.post.await_args_list[0].kwargs["json"]
     second_body = fake.post.await_args_list[1].kwargs["json"]
-    third_body = fake.post.await_args_list[2].kwargs["json"]
     assert first_body["max_output_tokens"] == 9
     assert first_body["temperature"] == 0.7
     assert first_body["stream"] is False
-    assert "max_output_tokens" not in second_body
-    assert second_body["temperature"] == 0.7
-    assert "max_output_tokens" not in third_body
-    assert "temperature" not in third_body
-    assert third_body["stream"] is False
+    assert second_body["max_output_tokens"] == 9
+    assert "temperature" not in second_body
+    assert second_body["stream"] is False
 
 
 @pytest.mark.asyncio
@@ -1168,39 +1328,26 @@ async def test_responses_client_generate_image_uses_image_generation_tool() -> N
 
 
 @pytest.mark.asyncio
-async def test_responses_client_generate_image_retries_without_max_output_tokens() -> None:
-    """Responses 生图工具也复用半兼容接口兜底。"""
-    from app.services.llm_client import ResponsesClient
+async def test_responses_image_generation_keeps_max_output_tokens() -> None:
+    """Responses 生图也不能为兼容反代删除输出上限。"""
+    from app.services.llm_client import LLMError, ResponsesClient
 
-    img_b64 = base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"0" * 128).decode("ascii")
     cli = ResponsesClient(api_key="sk", base_url=None, model="gpt-5.4")
 
     class _BadResp:
         status_code = 400
         text = '{"error":"Unsupported parameter: max_output_tokens"}'
 
-    class _OkResp:
-        status_code = 200
-
-        @staticmethod
-        def json():
-            return {
-                "model": "gpt-5.4",
-                "output": [{"type": "image_generation_call", "result": img_b64}],
-                "usage": {"input_tokens": 6, "output_tokens": 1},
-            }
-
     fake = AsyncMock()
     fake.__aenter__.return_value = fake
-    fake.post = AsyncMock(side_effect=[_BadResp(), _OkResp()])
+    fake.post = AsyncMock(return_value=_BadResp())
     with patch("app.services.llm_client.httpx.AsyncClient", return_value=fake):
-        result = await cli.generate_image("sys", "画猫", max_tokens=12)
+        with pytest.raises(LLMError):
+            await cli.generate_image("sys", "画猫", max_tokens=12)
 
-    assert result.image_data == [f"data:image/png;base64,{img_b64}"]
     first_body = fake.post.await_args_list[0].kwargs["json"]
-    second_body = fake.post.await_args_list[1].kwargs["json"]
     assert first_body["max_output_tokens"] == 12
-    assert "max_output_tokens" not in second_body
+    assert fake.post.await_count == 1
 
 
 @pytest.mark.asyncio

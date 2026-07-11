@@ -76,8 +76,10 @@ function peerLabel(peer: IgnoredPeer): string {
 function optionalInteger(value: string): number | null {
   const trimmed = value.trim();
   if (!trimmed) return null;
+  if (!/^-?\d+$/.test(trimmed)) throw new Error("ID 必须是整数");
   const parsed = Number(trimmed);
-  return Number.isFinite(parsed) ? parsed : null;
+  if (!Number.isSafeInteger(parsed)) throw new Error("ID 超出安全整数范围");
+  return parsed;
 }
 
 function matchedCount(trace?: DispatchTrace | null): number {
@@ -329,14 +331,18 @@ export function DispatchDebugPage() {
       toast.error("请输入要模拟的文本");
       return;
     }
-    simulateMut.mutate({
-      account_id: selectedAid,
-      chat_type: chatType,
-      chat_id: optionalInteger(chatId),
-      sender_id: optionalInteger(senderId),
-      text,
-      via,
-    });
+    try {
+      simulateMut.mutate({
+        account_id: selectedAid,
+        chat_type: chatType,
+        chat_id: optionalInteger(chatId),
+        sender_id: optionalInteger(senderId),
+        text,
+        via,
+      });
+    } catch (error) {
+      toast.error(getErrMsg(error));
+    }
   };
 
   if (accountsQ.isLoading) {
@@ -350,6 +356,19 @@ export function DispatchDebugPage() {
         <div className="flex h-36 items-center justify-center rounded-lg border bg-card">
           <Spinner className="text-primary" />
         </div>
+      </PageShell>
+    );
+  }
+
+
+  if (accountsQ.isError) {
+    return (
+      <PageShell>
+        <PageHeader icon={Bug} title="命中调试" description="账号列表加载失败。" />
+        <Card><CardContent className="flex flex-wrap items-center justify-between gap-3 pt-6 text-sm text-muted-foreground">
+          <span>{getErrMsg(accountsQ.error)}</span>
+          <Button size="sm" variant="outline" onClick={() => void accountsQ.refetch()}>重试</Button>
+        </CardContent></Card>
       </PageShell>
     );
   }

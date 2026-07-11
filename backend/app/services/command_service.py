@@ -25,6 +25,7 @@ from ..db.models.command import (
     AccountCommandLink,
     CommandTemplate,
     LLMProvider,
+    normalize_protocol_profile,
 )
 from ..redis_client import get_redis
 from ..schemas.command import (
@@ -299,6 +300,10 @@ def _provider_to_out(row: LLMProvider) -> LLMProviderOut:
         base_url=row.base_url,
         default_model=row.default_model,
         api_format=getattr(row, "api_format", None) or "chat_completions",
+        protocol_profile=normalize_protocol_profile(
+            getattr(row, "api_format", None),
+            getattr(row, "protocol_profile", None),
+        ),
         web_search_api_format=getattr(row, "web_search_api_format", None) or "auto",
         # 路由元数据（老数据可能为 None / [] / 缺字段；用属性 getattr 兼容）
         modality=getattr(row, "modality", None) or "text",
@@ -369,6 +374,10 @@ async def create_provider(
         base_url=payload.base_url,
         default_model=payload.default_model,
         api_format=payload.api_format,
+        protocol_profile=normalize_protocol_profile(
+            payload.api_format,
+            payload.protocol_profile,
+        ),
         web_search_api_format=payload.web_search_api_format,
         # 路由元数据
         modality=payload.modality,
@@ -412,8 +421,13 @@ async def update_provider(
         row.base_url = data["base_url"]
     if "default_model" in data and data["default_model"]:
         row.default_model = data["default_model"]
+    effective_api_format = str(data.get("api_format") or row.api_format or "chat_completions")
     if "api_format" in data and data["api_format"]:
         row.api_format = data["api_format"]
+    row.protocol_profile = normalize_protocol_profile(
+        effective_api_format,
+        data.get("protocol_profile", getattr(row, "protocol_profile", None)),
+    )
     if "web_search_api_format" in data and data["web_search_api_format"]:
         row.web_search_api_format = data["web_search_api_format"]
 

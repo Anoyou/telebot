@@ -1,4 +1,5 @@
 import type { FeatureInfo } from "@/api/types";
+import { pluginSupportsDirectPassthrough } from "@/types/pluginContract";
 
 export const FEATURE_CONFIG_PAGE_KEYS = new Set([
   "auto_reply",
@@ -14,11 +15,15 @@ export type FeatureConfigSource = "account" | "plugins";
 export function featureConfigPath(
   aid: number | null | undefined,
   key: string,
-  feature?: Pick<FeatureInfo, "config_schema"> | null,
+  feature?: Pick<FeatureInfo, "config_schema" | "capabilities"> | null,
   options?: { source?: FeatureConfigSource },
 ): string | null {
   if (!aid || !key) return null;
-  if (!FEATURE_CONFIG_PAGE_KEYS.has(key) && !feature?.config_schema) return null;
+  if (
+    !FEATURE_CONFIG_PAGE_KEYS.has(key) &&
+    !feature?.config_schema &&
+    !pluginSupportsDirectPassthrough(feature?.capabilities)
+  ) return null;
   const path = `/accounts/${aid}/features/${key}`;
   if (!options?.source || options.source === "account") return path;
   const params = new URLSearchParams({ from: options.source });

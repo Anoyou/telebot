@@ -5,8 +5,10 @@ from typing import Any
 
 import pytest
 
+from app.services.llm_agent import AgentResult
 from app.services.llm_client import LLMCallFailed, LLMResult, LLMStreamChunk
 from app.services.llm_dto import LLMProviderDTO
+from app.services.llm_protocol import ModelResponse, ModelUsage, StopReason, TextContent
 from app.worker.plugins import ai_facade
 from app.worker.plugins.ai_facade import AIQuotaError, AIUnavailableError, PluginAI
 
@@ -219,6 +221,122 @@ async def test_complete_accepts_plugin_compat_aliases(monkeypatch) -> None:
     assert captured["matched_tag"] == "long_context"
     assert captured["override_model"] == "gpt-override"
     assert captured["timeout_seconds"] == 12
+
+
+@pytest.mark.asyncio
+async def test_agent_requires_separate_permission() -> None:
+    async def _loader():
+        return {1: _provider(1, api_format="responses")}
+
+    facade = PluginAI(account_id=7, plugin_key="demo", provider_loader=_loader)
+
+    with pytest.raises(AIUnavailableError, match="ai_agent"):
+        await facade.run_agent("sys", "user", handlers={})
+
+
+@pytest.mark.asyncio
+async def test_agent_uses_manifest_allowlist_and_shared_runtime(monkeypatch) -> None:
+    captured: dict[str, Any] = {}
+
+    async def _loader():
+        return {1: _provider(1, api_format="responses")}
+
+    async def lookup(arguments: dict[str, Any]) -> dict[str, Any]:
+        return {"value": arguments.get("id")}
+
+    async def _run_agent(model_call, request, tools, **kwargs):
+        captured["request"] = request
+        captured["tools"] = tools
+        captured["callbacks"] = kwargs["callbacks"]
+        response = await model_call(request)
+        return AgentResult(
+            text=response.text,
+            model=response.model,
+            messages=request.messages,
+            usage=response.usage,
+            steps=1,
+            tool_calls=0,
+            stop_reason=StopReason.COMPLETED,
+        )
+
+    async def _invoke(primary, providers, request, **kwargs):
+        captured["source"] = kwargs["source"]
+        return (
+            ModelResponse(
+                model=request.model,
+                content=(TextContent("done"),),
+                usage=ModelUsage(input_tokens=2, output_tokens=1),
+            ),
+            primary,
+            False,
+        )
+
+    monkeypatch.setattr(ai_facade, "run_agent", _run_agent)
+    monkeypatch.setattr(ai_facade, "invoke_structured", _invoke)
+    monkeypatch.setattr(ai_facade.plugin_ai_quota, "acquire", AsyncNoop(return_value=object()))
+    monkeypatch.setattr(ai_facade.plugin_ai_quota, "release", AsyncNoop())
+    facade = PluginAI(
+        account_id=7,
+        plugin_key="demo",
+        provider_loader=_loader,
+        allow_agent=True,
+        manifest={
+            "capabilities": {"agent_tools": {"enabled": True}},
+            "agent_tools": [
+                {
+                    "name": "lookup",
+                    "description": "Lookup",
+                    "parameters": {"type": "object", "properties": {}},
+                }
+            ],
+        },
+    )
+
+    result = await facade.run_agent("sys", "user", handlers={"lookup": lookup})
+
+    assert result.text == "done"
+    assert list(captured["tools"]) == ["lookup"]
+    assert captured["source"] == "plugin:demo:agent"
+    assert captured["callbacks"] is not None
+
+
+@pytest.mark.asyncio
+async def test_agent_failure_settles_plugin_quota_with_consumed_tokens(monkeypatch) -> None:
+    async def _loader():
+        return {1: _provider(1, api_format="responses")}
+
+    async def lookup(_arguments: dict[str, Any]) -> dict[str, Any]:
+        return {"ok": True}
+
+    async def _run_agent(_model_call, _request, _tools, **kwargs):
+        await kwargs["callbacks"].on_usage(ModelUsage(input_tokens=7, output_tokens=5))
+        raise RuntimeError("agent failed after model usage")
+
+    release = AsyncNoop()
+    monkeypatch.setattr(ai_facade, "run_agent", _run_agent)
+    monkeypatch.setattr(ai_facade.plugin_ai_quota, "acquire", AsyncNoop(return_value=object()))
+    monkeypatch.setattr(ai_facade.plugin_ai_quota, "release", release)
+    facade = PluginAI(
+        account_id=7,
+        plugin_key="demo",
+        provider_loader=_loader,
+        allow_agent=True,
+        manifest={
+            "capabilities": {"agent_tools": {"enabled": True}},
+            "agent_tools": [
+                {
+                    "name": "lookup",
+                    "description": "Lookup",
+                    "parameters": {"type": "object", "properties": {}},
+                }
+            ],
+        },
+    )
+
+    with pytest.raises(RuntimeError, match="failed after model usage"):
+        await facade.run_agent("sys", "user", handlers={"lookup": lookup})
+
+    assert release.calls[0][0][1] == 12
 
 
 @pytest.mark.parametrize("error_type", ["budget_exceeded", "rate_limit"])

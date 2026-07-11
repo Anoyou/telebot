@@ -8,6 +8,7 @@ import unicodedata
 
 from fastapi import APIRouter, HTTPException, Request, Response
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 
 from ..crypto import decrypt_str, encrypt_str
 from ..db.models.user import WebUser
@@ -175,7 +176,12 @@ async def register(
         password_hash=auth_service.hash_password(req.password),
     )
     db.add(user)
-    await db.flush()
+    try:
+        await db.flush()
+    except IntegrityError as exc:
+        # COUNT 仅用于快速拒绝；真正的并发安全由 web_user.singleton_key 唯一约束保证。
+        await db.rollback()
+        raise _err("REGISTER_DISABLED", "系统已存在用户，注册接口已禁用", 403) from exc
     await audit.write(db, user.id, "auth.register", target=f"user:{user.id}")
     await db.commit()
 

@@ -1,4 +1,4 @@
-"""Best-effort structured action tap.
+"""Structured action tap with explicit degraded-state observability.
 
 The tap writes an append-only action ledger row and publishes the same payload
 to the worker event channel. It must never decide delivery behavior.
@@ -38,6 +38,9 @@ ACTION_TAP_DICT_LIMIT = 40
 _ACTION_TAP_CIRCUIT_SECONDS = 30.0
 _DB_DISABLED_UNTIL = 0.0
 _REDIS_DISABLED_UNTIL = 0.0
+_DB_WRITE_FAILURES = 0
+_DB_DROPPED_EVENTS = 0
+_DB_LAST_ERROR: str | None = None
 RECORDINGS_DIR = Path(__file__).resolve().parents[3] / "data" / "recordings"
 
 _SUMMARY_KEYS = {
@@ -127,8 +130,9 @@ async def emit_action_event(
 ) -> ActionEvent | None:
     """Persist and publish one structured action event.
 
-    All failures are swallowed after debug logging. ``record_action`` remains
-    the trace source of truth; this tap is an additional structured ledger.
+    Delivery is not blocked by tap failures, but persistence failures are
+    surfaced at ERROR level and counted so this append-only view cannot be
+    mistaken for a reliable ledger while it is degraded.
     """
 
     account = _int_or_none(account_id)
@@ -223,19 +227,41 @@ def summarize_action_params(action: dict[str, Any] | None, *, result: Any = None
 
 
 async def _persist_action_event(row: ActionEvent) -> ActionEvent | None:
-    global _DB_DISABLED_UNTIL
+    global _DB_DISABLED_UNTIL, _DB_DROPPED_EVENTS, _DB_LAST_ERROR, _DB_WRITE_FAILURES
     now = time.monotonic()
     if _DB_DISABLED_UNTIL > now:
+        _DB_DROPPED_EVENTS += 1
         return None
     try:
         async with AsyncSessionLocal() as db:
             db.add(row)
             await db.commit()
             return row
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        _DB_WRITE_FAILURES += 1
+        _DB_DROPPED_EVENTS += 1
+        _DB_LAST_ERROR = f"{type(exc).__name__}: {exc}"[:ACTION_TAP_ERROR_LIMIT]
         _DB_DISABLED_UNTIL = time.monotonic() + _ACTION_TAP_CIRCUIT_SECONDS
-        log.debug("action tap DB write failed", exc_info=True)
+        log.error(
+            "ActionEvent 持久化失败，结构化资金视图已降级；dropped=%s failures=%s",
+            _DB_DROPPED_EVENTS,
+            _DB_WRITE_FAILURES,
+            exc_info=True,
+        )
         return None
+
+
+def action_tap_health() -> dict[str, Any]:
+    """Return process-local persistence health for diagnostics/tests."""
+
+    now = time.monotonic()
+    return {
+        "db_available": _DB_DISABLED_UNTIL <= now,
+        "db_write_failures": _DB_WRITE_FAILURES,
+        "db_dropped_events": _DB_DROPPED_EVENTS,
+        "db_last_error": _DB_LAST_ERROR,
+        "db_retry_after_seconds": max(0.0, _DB_DISABLED_UNTIL - now),
+    }
 
 
 async def _publish_action_event(account_id: int, row: ActionEvent, *, redis: Any | None = None) -> None:

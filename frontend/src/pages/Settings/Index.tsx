@@ -412,7 +412,7 @@ export function SettingsIndex() {
               ))}
             </Select>
           </div>
-          <DialogFooter>
+          <DialogFooter className="!flex !flex-row gap-2 sm:space-x-0 [&>*]:min-w-0 [&>*]:flex-1 sm:[&>*]:flex-none">
             <Button variant="outline" onClick={() => setQuickBindOpen(false)}>
               取消
             </Button>

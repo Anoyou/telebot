@@ -20,7 +20,7 @@ import inspect
 import logging
 import time
 from collections.abc import Awaitable, Callable, Coroutine
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -30,6 +30,7 @@ if TYPE_CHECKING:
 from ..settings import settings
 from . import llm_account_budget
 from .llm_client import build_client_from_dto
+from .llm_protocol import ModelRequest, ModelResponse
 from .redactor import redact_text
 
 log = logging.getLogger(__name__)
@@ -408,6 +409,178 @@ async def call_with_fallback(
     )
 
 
+async def invoke_model_with_fallback(
+    chain: FallbackChain,
+    request: ModelRequest,
+    *,
+    account_id: int | None = None,
+    triggered_by_account_id: int | None = None,
+    source: str | None = None,
+    client_factory: Callable[..., Any | Awaitable[Any]] | None = None,
+) -> tuple[ModelResponse, LLMProviderDTO, bool]:
+    """Invoke a structured model request through existing budget and fallback gates."""
+
+    from .llm_client import LLMCallFailed
+
+    providers = chain.all_providers
+    capped_request = replace(
+        request,
+        max_output_tokens=_apply_output_token_cap(request.max_output_tokens),
+    )
+    budget_check = await _check_budget(
+        account_id,
+        providers[0],
+        capped_request.max_output_tokens,
+    )
+    request_preview = _structured_request_preview(capped_request)
+    if budget_check.error:
+        await _emit_usage(
+            UsageRecord(
+                provider_id=providers[0].id,
+                account_id=account_id,
+                triggered_by_account_id=triggered_by_account_id,
+                provider_name=providers[0].name,
+                model=capped_request.model or providers[0].default_model,
+                success=False,
+                error_type="budget_exceeded",
+                source=source,
+                fallback_chain=chain.get_provider_names(),
+                request_preview=request_preview,
+            )
+        )
+        raise LLMCallFailed(
+            budget_check.error,
+            provider_id=providers[0].id,
+            provider_name=providers[0].name,
+            error_type="budget_exceeded",
+            retryable=False,
+        )
+
+    last_error: Exception | None = None
+    model_pinned = bool(capped_request.metadata.get("model_pinned", True))
+    for index, provider in enumerate(providers):
+        started = time.monotonic()
+        provider_request = replace(
+            capped_request,
+            model=capped_request.model if model_pinned else provider.default_model,
+        )
+        try:
+            response = await _invoke_model_with_retry(
+                provider,
+                provider_request,
+                client_factory=client_factory,
+            )
+            used_fallback = index > 0
+            await _emit_usage(
+                UsageRecord(
+                    provider_id=provider.id,
+                    account_id=account_id,
+                    triggered_by_account_id=triggered_by_account_id,
+                    provider_name=provider.name,
+                    model=response.model,
+                    input_tokens=response.usage.input_tokens,
+                    output_tokens=response.usage.output_tokens,
+                    latency_ms=int((time.monotonic() - started) * 1000),
+                    success=True,
+                    source=source,
+                    used_fallback=used_fallback,
+                    fallback_chain=chain.get_provider_names(),
+                    request_preview=request_preview,
+                    response_preview=preview_text_for_usage(response.text),
+                )
+            )
+            await llm_account_budget.settle(
+                budget_check.ticket,
+                actual_tokens=response.usage.total_tokens,
+                actual_provider=provider,
+                success=True,
+            )
+            return response, provider, used_fallback
+        except Exception as exc:
+            last_error = exc
+            retryable = _is_retryable_error(exc)
+            if index < len(providers) - 1 and retryable:
+                continue
+            await _emit_usage(
+                UsageRecord(
+                    provider_id=provider.id,
+                    account_id=account_id,
+                    triggered_by_account_id=triggered_by_account_id,
+                    provider_name=provider.name,
+                    model=provider_request.model,
+                    latency_ms=int((time.monotonic() - started) * 1000),
+                    success=False,
+                    error_type=_classify_error(exc),
+                    source=source,
+                    used_fallback=index > 0,
+                    fallback_chain=chain.get_provider_names(),
+                    request_preview=request_preview,
+                )
+            )
+            await llm_account_budget.settle(
+                budget_check.ticket,
+                actual_tokens=0,
+                actual_provider=None,
+                success=False,
+            )
+            raise LLMCallFailed(
+                f"所有 provider 都失败。最后错误: {type(exc).__name__}: {exc}",
+                provider_id=provider.id,
+                provider_name=provider.name,
+                error_type=_classify_error(exc),
+                retryable=False,
+            ) from exc
+
+    await llm_account_budget.settle(
+        budget_check.ticket,
+        actual_tokens=0,
+        actual_provider=None,
+        success=False,
+    )
+    raise LLMCallFailed(f"结构化调用未预期耗尽: {last_error}", error_type="exhausted")
+
+
+async def _invoke_model_with_retry(
+    provider: LLMProviderDTO,
+    request: ModelRequest,
+    *,
+    client_factory: Callable[..., Any | Awaitable[Any]] | None = None,
+    max_retries: int = _MAX_RETRIES,
+) -> ModelResponse:
+    provider.capabilities_for_model(request.model).validate(
+        request,
+        provider.api_format or "chat_completions",
+    )
+    last_error: Exception | None = None
+    for attempt in range(max_retries + 1):
+        try:
+            builder = client_factory or build_client_from_dto
+            client = builder(
+                provider,
+                override_model=request.model,
+                proxy_url=provider.proxy_url,
+            )
+            if inspect.isawaitable(client):
+                client = await client
+            return await client.invoke(request)
+        except Exception as exc:
+            last_error = exc
+            if not _is_retryable_error(exc) or attempt >= max_retries:
+                raise
+            await asyncio.sleep(_compute_retry_delay(attempt + 1))
+    raise last_error or RuntimeError("结构化调用重试耗尽")
+
+
+def _structured_request_preview(request: ModelRequest) -> str | None:
+    system = "\n".join(
+        message.text_content() for message in request.messages if message.role.value == "system"
+    )
+    user = "\n".join(
+        message.text_content() for message in request.messages if message.role.value == "user"
+    )
+    return request_preview_for_usage(system, user)
+
+
 def _apply_output_token_cap(max_tokens: int) -> int:
     """应用全局 LLM 输出 token 上限；0 表示不限制。"""
     cap = int(getattr(settings, "llm_max_output_tokens", 0) or 0)
@@ -646,5 +819,6 @@ __all__ = [
     "UsageRecord",
     "build_fallback_chain",
     "call_with_fallback",
+    "invoke_model_with_fallback",
     "register_usage_callback",
 ]

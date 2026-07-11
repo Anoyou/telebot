@@ -19,10 +19,12 @@ import {
   FileText,
   GitFork,
   Globe2,
+  Info,
   KeyRound,
   ListChecks,
   Network,
   Plus,
+  Power,
   Puzzle,
   RefreshCw,
   Save,
@@ -1535,14 +1537,14 @@ function RemoteInstallCard() {
           </div>
         )}
         <Dialog open={pendingBulkUpdate !== null} onOpenChange={(open) => !open && setPendingBulkUpdate(null)}>
-          <DialogContent className="max-h-[85vh] max-w-2xl overflow-y-auto">
-            <DialogHeader>
+          <DialogContent className="dialog-center !flex max-h-[85dvh] max-w-2xl flex-col gap-0 overflow-hidden p-0">
+            <DialogHeader className="shrink-0 border-b border-border/70 px-4 py-4 sm:px-6">
               <DialogTitle>确认批量更新插件</DialogTitle>
               <DialogDescription>
                 将从 {pendingBulkUpdate?.repoName ?? "该仓库"} 更新 {bulkPreviewPlugins.length} 个已安装插件。更新前请确认版本变化和高风险能力变化。
               </DialogDescription>
             </DialogHeader>
-            <div className="space-y-3">
+            <div className="safe-scrollbar min-h-0 flex-1 touch-pan-y space-y-3 overflow-y-auto overscroll-contain px-4 py-4 sm:px-6">
               {bulkPreviewPlugins.map((plugin) => {
                 const events = pluginEventSubscriptionLabels(plugin.event_subscriptions);
                 const capabilities = pluginOperationalCapabilityLabels({
@@ -1582,11 +1584,16 @@ function RemoteInstallCard() {
                 );
               })}
             </div>
-            <DialogFooter>
-              <Button variant="outline" onClick={() => setPendingBulkUpdate(null)}>
+            <DialogFooter className="!flex-row shrink-0 justify-end gap-2 border-t border-border/70 bg-card px-4 py-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] sm:space-x-0 sm:px-6">
+              <Button
+                variant="outline"
+                className="min-w-0 flex-1 border-foreground/25 bg-background shadow-sm hover:border-foreground/40 sm:flex-none sm:px-6"
+                onClick={() => setPendingBulkUpdate(null)}
+              >
                 取消
               </Button>
               <Button
+                className="min-w-0 flex-1 sm:flex-none sm:px-6"
                 onClick={() => {
                   if (!pendingBulkUpdate) return;
                   bulkUpdateRepoMut.mutate(pendingBulkUpdate.repoId);
@@ -2099,48 +2106,61 @@ function InstalledPluginsSection() {
                       ))}
                     </div>
                   ) : null}
-                  <div className="mt-3 grid grid-cols-2 gap-2">
-                    <Button size="sm" variant="outline" onClick={() => setSelectedDetailKey(row.key)}>
+                  <div className="mt-3 flex flex-nowrap gap-1.5">
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="min-w-0 flex-1 px-2"
+                      onClick={() => setSelectedDetailKey(row.key)}
+                    >
+                      <Info className="h-3.5 w-3.5 shrink-0" />
                       详情
                     </Button>
                     {canUpdate ? (
                       <Button
                         size="sm"
                         variant={row.update.update_available ? "default" : "outline"}
+                        className="min-w-0 flex-1 px-2"
                         onClick={() => updateRMMut.mutate(row.key)}
                         disabled={updateRMMut.isPending || isLocalImportedInstalledPlugin(row)}
+                        title={isLocalImportedInstalledPlugin(row) ? "本地导入插件不支持远程更新" : "从远程更新"}
                       >
-                        {row.update.update_available ? "更新到新版" : "更新"}
+                        <RefreshCw className="h-3.5 w-3.5 shrink-0" />
+                        更新
                       </Button>
                     ) : null}
                     {row.global_enabled ? (
                       <Button
                         size="sm"
                         variant="outline"
+                        className="min-w-0 flex-1 px-2"
                         onClick={() => {
                           if (canUseRemoteActions) disableRMMut.mutate(row.key);
                           else disableInstalledMut.mutate(row.key);
                         }}
                         disabled={disableInstalledMut.isPending || disableRMMut.isPending}
                       >
+                        <Power className="h-3.5 w-3.5 shrink-0" />
                         禁用
                       </Button>
                     ) : (
                       <Button
                         size="sm"
+                        className="min-w-0 flex-1 px-2"
                         onClick={() => {
                           if (canUseRemoteActions) enableRMMut.mutate(row.key);
                           else enableInstalledMut.mutate(row.key);
                         }}
                         disabled={enableInstalledMut.isPending || enableRMMut.isPending}
                       >
+                        <Power className="h-3.5 w-3.5 shrink-0" />
                         启用
                       </Button>
                     )}
                     <Button
                       size="sm"
                       variant="outline"
-                      className={cn(DANGER_OUTLINE_BUTTON_CLASS, "col-span-2")}
+                      className={cn(DANGER_OUTLINE_BUTTON_CLASS, "min-w-0 flex-1 px-2")}
                       onClick={() => {
                         if (!confirm(`确认卸载「${row.key}」？`)) return;
                         if (canUseRemoteActions) uninstallRMMut.mutate(row.key);
@@ -2148,7 +2168,7 @@ function InstalledPluginsSection() {
                       }}
                       disabled={uninstallInstalledMut.isPending || uninstallRMMut.isPending}
                     >
-                      <Trash2 className="mr-1 h-3 w-3" />
+                      <Trash2 className="h-3.5 w-3.5 shrink-0" />
                       卸载
                     </Button>
                   </div>
@@ -2291,8 +2311,8 @@ function PluginOverviewDetailDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="bottom-0 top-auto max-h-[86dvh] w-full translate-y-0 gap-0 overflow-hidden rounded-b-none border-border/80 p-0 shadow-2xl sm:top-[50%] sm:max-w-4xl sm:translate-y-[-50%] sm:rounded-lg">
-        <DialogHeader className="border-b border-border/70 px-5 py-4 sm:px-6">
+      <DialogContent className="dialog-center !flex w-[calc(100vw-1.5rem)] max-w-4xl flex-col gap-0 overflow-hidden border-border/80 p-0 shadow-2xl">
+        <DialogHeader className="shrink-0 border-b border-border/70 px-5 py-4 sm:px-6">
           <div className="pr-8">
             <div className="flex flex-wrap items-center gap-2">
               <DialogTitle className="text-base sm:text-lg">{plugin.display_name || plugin.key}</DialogTitle>
@@ -2307,7 +2327,7 @@ function PluginOverviewDetailDialog({
           </div>
         </DialogHeader>
 
-        <div className="space-y-5 overflow-y-auto px-5 py-4 sm:px-6">
+        <div className="safe-scrollbar min-h-0 flex-1 touch-pan-y space-y-5 overflow-y-auto overscroll-contain px-5 py-4 sm:px-6">
           <section className="grid gap-3 lg:grid-cols-[minmax(0,1.2fr)_minmax(0,0.8fr)]">
             <div className="rounded-md border border-border/70 bg-background/80 p-4">
               <div className="mb-3 text-sm font-medium">来源与版本</div>
@@ -2429,7 +2449,7 @@ function PluginOverviewDetailDialog({
           </section>
         </div>
 
-        <DialogFooter className="border-t border-border/70 px-5 py-4 sm:px-6">
+        <DialogFooter className="shrink-0 border-t border-border/70 px-5 py-4 sm:px-6">
           {plugin.recent_trace ? (
             <Button variant="outline" onClick={() => onOpenTrace(plugin.recent_trace!.trace_id)}>
               查看最近 trace

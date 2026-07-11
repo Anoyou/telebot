@@ -42,7 +42,12 @@ interface CategoryDef {
 }
 
 const CATEGORIES: CategoryDef[] = [
-  { key: "system_settings", label: "系统设置", desc: "指令前缀等全局配置" },
+  {
+    key: "system_settings",
+    label: "系统设置",
+    desc: "指令前缀等全局配置；Webhook Token 和恢复码仅在开启敏感导出时包含",
+    sensitive: ["webhook_token", "recovery_code"],
+  },
   { key: "command_templates", label: "自定义指令模板", desc: "所有回复/转发/AI 指令模板" },
   { key: "account_commands", label: "账号-指令绑定", desc: "每个账号启用了哪些指令" },
   { key: "llm_providers", label: "模型提供商", desc: "AI 模型提供商配置", sensitive: ["api_key"] },

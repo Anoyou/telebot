@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from app.api import features as features_api
 from app.db.models.feature import FEATURE_STATE_DISABLED, Feature
 from app.db.models.plugin import InstalledPlugin
 from app.db.models.plugin_global_config import PluginGlobalConfig
@@ -21,6 +22,65 @@ from app.services.feature_service import (
     set_plugin_global_config,
     validate_config_against_schema,
 )
+
+
+def test_account_schema_allows_direct_passthrough_only_when_declared() -> None:
+    schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {"command": {"type": "string"}},
+    }
+    manifest = {
+        "capabilities": {
+            "telegram_direct_passthrough": {"enabled": True},
+        }
+    }
+
+    extended = features_api._allow_account_direct_passthrough_config(schema, manifest)
+
+    assert extended["properties"]["direct_passthrough"]["properties"]["enabled"] == {
+        "type": "boolean",
+        "default": False,
+    }
+
+
+def test_account_schema_does_not_expose_direct_passthrough_without_capability() -> None:
+    schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {"command": {"type": "string"}},
+    }
+
+    extended = features_api._allow_account_direct_passthrough_config(schema, {})
+
+    assert "direct_passthrough" not in extended["properties"]
+
+
+def test_direct_only_plugin_gets_platform_account_schema() -> None:
+    manifest = {
+        "capabilities": {
+            "telegram_direct_passthrough": {"enabled": True},
+        }
+    }
+
+    schema = features_api._account_config_schema(
+        manifest,
+        {"direct_passthrough": {"enabled": True}},
+    )
+
+    assert schema is not None
+    assert schema["properties"]["direct_passthrough"]["additionalProperties"] is False
+
+
+def test_direct_passthrough_platform_field_requires_declared_capability() -> None:
+    with pytest.raises(Exception) as exc_info:
+        features_api._account_config_schema(
+            {},
+            {"direct_passthrough": {"enabled": True}},
+        )
+
+    assert getattr(exc_info.value, "status_code", None) == 400
+    assert "仅声明 telegram_direct_passthrough" in str(exc_info.value.detail)
 
 
 # ─────────────────────────────────────────────────────
@@ -453,6 +513,28 @@ async def test_feature_matrix_prefers_installed_plugin_version(monkeypatch) -> N
     assert row["version"] == "0.3.3"
     assert row["usage"] == "新按钮流程说明"
     assert row["capabilities"] == {"transfer": {"enabled": True}}
+
+
+def test_feature_info_falls_back_when_installed_display_name_is_null() -> None:
+    """安装清单缺少显示名时不能把 JSON null 渲染成字符串 ``None``。"""
+
+    feature = SimpleNamespace(
+        key="scheduler",
+        display_name="定时任务",
+        is_builtin=True,
+        version="0.2.0",
+        manifest={"category": "automation"},
+    )
+    installed_plugin = InstalledPlugin(
+        key="scheduler",
+        source="builtin",
+        version="0.2.0",
+        manifest_json={"name": "scheduler", "display_name": None},
+    )
+
+    info = FeatureInfo.from_feature(feature, installed_plugin=installed_plugin)
+
+    assert info.display_name == "定时任务"
 
 
 @pytest.mark.asyncio

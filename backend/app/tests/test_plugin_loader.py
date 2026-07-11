@@ -2513,6 +2513,7 @@ async def test_userbot_payout_action_resolves_reply_to_user_recent_message(monke
     )
     record_action = AsyncMock()
     monkeypatch.setattr(loader_mod, "record_action", record_action)
+    monkeypatch.setattr(loader_mod.payout_limit, "check_and_consume", AsyncMock(return_value=(True, None)))
 
     failed = await loader_mod._apply_userbot_event_bus_actions(
         state,
@@ -4233,6 +4234,11 @@ async def test_userbot_observed_interaction_session_keeps_logical_interaction_ch
     monkeypatch.setattr(loader_mod, "record_span", AsyncMock())
     monkeypatch.setattr(loader_mod, "update_plugin_runtime_status", AsyncMock())
     monkeypatch.setattr(loader_mod, "finish_trace", AsyncMock())
+    monkeypatch.setattr(
+        loader_mod.payout_limit,
+        "check_and_consume",
+        AsyncMock(return_value=(True, None)),
+    )
 
     consumed = await loader_mod._dispatch_userbot_session_message(
         state,
@@ -4947,8 +4953,8 @@ async def test_loader_injects_namespaced_plugin_storage(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_ai_facade_injected_only_with_ai_text_permission(monkeypatch) -> None:
-    """ctx.ai 只应给声明 ai_text 权限的插件，避免无权限插件直接调 LLM。"""
+async def test_ai_facade_requires_ai_text_or_ai_agent_permission(monkeypatch) -> None:
+    """ctx.ai 只应给声明 ai_text/ai_agent 的插件，Agent 权限独立保留。"""
     from app.worker.plugins.ai_facade import PluginAI
     from app.worker.plugins.base import _REGISTRY, register
 
@@ -4962,6 +4968,11 @@ async def test_ai_facade_injected_only_with_ai_text_permission(monkeypatch) -> N
         key = "_test_ai_denied"
         display_name = "无 AI 权限测试"
 
+    @register
+    class _TempAgentPlugin(Plugin):
+        key = "_test_ai_agent"
+        display_name = "Agent 权限测试"
+
     _TempAIPlugin._manifest = Manifest(
         key="_test_ai_allowed",
         display_name="AI 权限测试",
@@ -4972,6 +4983,18 @@ async def test_ai_facade_injected_only_with_ai_text_permission(monkeypatch) -> N
         display_name="无 AI 权限测试",
         permissions=[],
     )
+    _TempAgentPlugin._manifest = Manifest(
+        key="_test_ai_agent",
+        display_name="Agent 权限测试",
+        permissions=["ai_agent"],
+        capabilities={"agent_tools": {"enabled": True}},
+        agent_tools=[
+            {
+                "name": "lookup",
+                "parameters": {"type": "object", "properties": {}},
+            }
+        ],
+    )
 
     fake_db = _FakeDB(
         accounts={1: _FakeAcc(id=1)},
@@ -4979,6 +5002,7 @@ async def test_ai_facade_injected_only_with_ai_text_permission(monkeypatch) -> N
         afs=[
             _FakeAF(account_id=1, feature_key="_test_ai_allowed", enabled=True, config={}),
             _FakeAF(account_id=1, feature_key="_test_ai_denied", enabled=True, config={}),
+            _FakeAF(account_id=1, feature_key="_test_ai_agent", enabled=True, config={}),
         ],
         rules=[],
     )
@@ -4997,10 +5021,13 @@ async def test_ai_facade_injected_only_with_ai_text_permission(monkeypatch) -> N
 
         assert isinstance(state.contexts["_test_ai_allowed"].ai, PluginAI)
         assert state.contexts["_test_ai_denied"].ai is None
+        assert isinstance(state.contexts["_test_ai_agent"].ai, PluginAI)
+        assert state.contexts["_test_ai_agent"].ai._allow_agent is True
     finally:
         loader_mod._STATES.pop(1, None)
         _REGISTRY.pop("_test_ai_allowed", None)
         _REGISTRY.pop("_test_ai_denied", None)
+        _REGISTRY.pop("_test_ai_agent", None)
 
 
 @pytest.mark.asyncio

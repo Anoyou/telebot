@@ -44,10 +44,45 @@ async def action_event_session_factory(monkeypatch):
     monkeypatch.setattr(action_tap, "AsyncSessionLocal", session_factory)
     monkeypatch.setattr(action_tap, "_DB_DISABLED_UNTIL", 0.0)
     monkeypatch.setattr(action_tap, "_REDIS_DISABLED_UNTIL", 0.0)
+    monkeypatch.setattr(action_tap, "_DB_WRITE_FAILURES", 0)
+    monkeypatch.setattr(action_tap, "_DB_DROPPED_EVENTS", 0)
+    monkeypatch.setattr(action_tap, "_DB_LAST_ERROR", None)
     try:
         yield session_factory
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_action_event_persistence_failure_is_observable(monkeypatch, caplog) -> None:
+    class _BrokenSession:
+        async def __aenter__(self):
+            raise RuntimeError("database unavailable")
+
+        async def __aexit__(self, *_args):
+            return None
+
+    monkeypatch.setattr(action_tap, "AsyncSessionLocal", _BrokenSession)
+    monkeypatch.setattr(action_tap, "_DB_DISABLED_UNTIL", 0.0)
+    monkeypatch.setattr(action_tap, "_DB_WRITE_FAILURES", 0)
+    monkeypatch.setattr(action_tap, "_DB_DROPPED_EVENTS", 0)
+    monkeypatch.setattr(action_tap, "_DB_LAST_ERROR", None)
+
+    with caplog.at_level("ERROR"):
+        persisted = await action_tap.emit_action_event(
+            account_id=7,
+            action={"type": "payout", "amount": 10},
+            status=ACTION_EVENT_STATUS_OK,
+            redis=_FakeRedis(),
+        )
+
+    assert persisted is None
+    health = action_tap.action_tap_health()
+    assert health["db_available"] is False
+    assert health["db_write_failures"] == 1
+    assert health["db_dropped_events"] == 1
+    assert "database unavailable" in str(health["db_last_error"])
+    assert "结构化资金视图已降级" in caplog.text
 
 
 @pytest.mark.asyncio

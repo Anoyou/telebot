@@ -4,7 +4,7 @@
   - 单笔上限：超限直接拒，且不触碰 Redis（不消费日累计）
   - 日累计上限：累计到上限后拒，被拒的那笔不计入
   - 0 = 不限：single_max/daily_max 都为 0 时放行且不触碰 Redis
-  - Redis 故障：fail-open 放行
+  - Redis / DB 故障：fail-closed 拒绝并返回可辨识原因
   - 金额非正 / 缺账号：直接放行
 """
 
@@ -114,19 +114,19 @@ async def test_zero_limits_mean_unlimited_and_skip_redis(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_redis_failure_is_fail_open(monkeypatch) -> None:
+async def test_redis_failure_is_fail_closed(monkeypatch) -> None:
     redis = _patch(monkeypatch, limits={"single_max": 0, "daily_max": 100}, redis=_FakeRedis(fail=True))
 
     ok, reason = await payout_limit.check_and_consume(4, 50)
 
-    assert ok is True
-    assert reason is None
-    # ping 抛错走 fail-open，store 不应被写入
+    assert ok is False
+    assert reason == payout_limit.PAYOUT_LIMIT_COUNTER_UNAVAILABLE
+    # ping 抛错走 fail-closed，store 不应被写入
     assert redis.store == {}
 
 
 @pytest.mark.asyncio
-async def test_limit_load_failure_is_fail_open(monkeypatch) -> None:
+async def test_limit_load_failure_is_fail_closed(monkeypatch) -> None:
     async def _boom() -> dict[str, int]:
         raise RuntimeError("db down")
 
@@ -134,8 +134,8 @@ async def test_limit_load_failure_is_fail_open(monkeypatch) -> None:
 
     ok, reason = await payout_limit.check_and_consume(5, 50)
 
-    assert ok is True
-    assert reason is None
+    assert ok is False
+    assert reason == payout_limit.PAYOUT_LIMIT_CONFIG_UNAVAILABLE
 
 
 @pytest.mark.asyncio

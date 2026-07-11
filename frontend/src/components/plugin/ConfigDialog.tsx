@@ -226,8 +226,8 @@ export function ConfigDialog({
             />
           )}
         </div>
-        <DialogFooter>
-          <Button variant="ghost" onClick={() => onOpenChange(false)}>取消</Button>
+        <DialogFooter className="!flex !flex-row gap-2 sm:space-x-0 [&>*]:min-w-0 [&>*]:flex-1 sm:[&>*]:flex-none">
+          <Button variant="outline" onClick={() => onOpenChange(false)}>取消</Button>
           <Button onClick={handleSave} disabled={saving}>
             {saving ? <Spinner className="mr-2 h-4 w-4" /> : <Save className="mr-2 h-4 w-4" />}
             {saving ? "保存中…" : "保存"}
@@ -1102,8 +1102,8 @@ function ConfigListField({
             llmProvidersLoading={llmProvidersLoading}
             onChange={(key, nextValue) => setDraft((prev) => ({ ...prev, [key]: nextValue }))}
           />
-          <DialogFooter>
-            <Button type="button" variant="ghost" onClick={closeEditor}>取消</Button>
+          <DialogFooter className="!flex !flex-row gap-2 sm:space-x-0 [&>*]:min-w-0 [&>*]:flex-1 sm:[&>*]:flex-none">
+            <Button type="button" variant="outline" onClick={closeEditor}>取消</Button>
             <Button type="button" onClick={saveDraft}>保存</Button>
           </DialogFooter>
         </DialogContent>
@@ -1610,8 +1610,8 @@ function ConfigActionButton({
               />
             ))}
           </div>
-          <DialogFooter>
-            <Button type="button" variant="ghost" disabled={running} onClick={() => setOpen(false)}>取消</Button>
+          <DialogFooter className="!flex !flex-row gap-2 sm:space-x-0 [&>*]:min-w-0 [&>*]:flex-1 sm:[&>*]:flex-none">
+            <Button type="button" variant="outline" disabled={running} onClick={() => setOpen(false)}>取消</Button>
             <Button type="button" disabled={running} onClick={() => run(inputValues)}>
               {running ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Wand className="mr-2 h-4 w-4" />}
               {running ? "处理中…" : submitLabel}

@@ -334,10 +334,8 @@
      - 任何 fixed 覆盖层都会与 overflow:auto 的 .app-main 各成一个合成层，
        在 3x 屏含小数的 safe-area-inset 交界处被 WebKit 拼出 0.5px 发丝缝。 */
 
-  /* 顶栏：不做合成层提升（不加 translateZ / isolation），否则它与下方
-     overflow:auto 的 .app-main 各成一层，在 3x 屏含小数的 safe-area-inset-top
-     交界处 WebKit 会渲染一条 0.5px 发丝缝。顶栏自身 background 已连同
-     pt-[safe-area-inset-top] 内边距铺满整个顶部 chrome，无需额外覆盖层。 */
+  /* 顶栏不额外做 translateZ / isolation 提升，避免和 .app-main 的滚动层在
+     小数 safe-area 边界处拼出发丝缝。移动端玻璃材质仍由顶栏自身覆盖安全区。 */
   .app-topbar {
     position: relative;
     /* 盖在 .app-main 之上：.app-main 是 overflow:auto 独立合成层，其顶边压在顶栏
@@ -350,6 +348,18 @@
     box-shadow: none;
     -webkit-backdrop-filter: none;
     backdrop-filter: none;
+  }
+
+  @media (max-width: 767px) {
+    .app-topbar {
+      border-bottom: 1px solid hsl(var(--foreground) / 0.08);
+      background: hsl(var(--card) / 0.64);
+      -webkit-backdrop-filter: blur(28px) saturate(1.7);
+      backdrop-filter: blur(28px) saturate(1.7);
+      box-shadow:
+        0 6px 20px hsl(0 0% 0% / 0.08),
+        inset 0 1px 0 hsl(0 0% 100% / 0.1);
+    }
   }
 
   /* 不再在状态栏后方叠任何遮罩层。
@@ -371,6 +381,147 @@
   .dialog-center[data-state="open"],
   .dialog-center[data-state="closed"] {
     animation: none !important;
+  }
+
+  .reasoning-effort {
+    position: relative;
+    min-width: 0;
+    padding-bottom: 1.75rem;
+  }
+
+  .reasoning-effort-track {
+    position: relative;
+    height: 3rem;
+    overflow: hidden;
+    border: 1px solid hsl(var(--border));
+    border-radius: 9999px;
+    background: hsl(var(--muted));
+  }
+
+  .reasoning-effort-fill {
+    position: absolute;
+    inset-block: 0;
+    left: 0;
+    width: var(--reasoning-progress);
+    background: hsl(var(--info));
+    transition: width 180ms ease, background 180ms ease;
+  }
+
+  .reasoning-effort-stops {
+    position: absolute;
+    inset: 0 1.25rem;
+    z-index: 2;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  .reasoning-effort-stop {
+    width: 0.35rem;
+    height: 0.35rem;
+    border-radius: 9999px;
+    background: hsl(var(--muted-foreground) / 0.55);
+    transition: background-color 180ms ease, transform 180ms ease;
+  }
+
+  .reasoning-effort-stop.is-active {
+    background: hsl(0 0% 100% / 0.55);
+    transform: scale(1.1);
+  }
+
+  .reasoning-effort-thumb {
+    position: absolute;
+    left: var(--reasoning-thumb-position);
+    top: 50%;
+    z-index: 3;
+    width: 2rem;
+    height: 2rem;
+    border-radius: 9999px;
+    background: white;
+    box-shadow: 0 2px 8px rgb(0 0 0 / 0.22);
+    transform: translate(-50%, -50%);
+    transition: left 180ms ease, transform 180ms ease;
+  }
+
+  .reasoning-effort input[type="range"] {
+    position: absolute;
+    inset: 0 0 auto;
+    z-index: 4;
+    width: 100%;
+    height: 3rem;
+    cursor: pointer;
+    opacity: 0;
+  }
+
+  .reasoning-effort input[type="range"]:focus-visible + .reasoning-effort-caption {
+    color: hsl(var(--foreground));
+  }
+
+  .reasoning-effort:focus-within .reasoning-effort-track {
+    outline: 2px solid hsl(var(--ring));
+    outline-offset: 2px;
+  }
+
+  .reasoning-effort-caption {
+    position: absolute;
+    inset: auto 0 0;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    font-size: 0.75rem;
+    color: hsl(var(--muted-foreground));
+  }
+
+  .reasoning-effort-extreme .reasoning-effort-fill {
+    background: linear-gradient(90deg, hsl(216 92% 54%), hsl(270 86% 64%));
+  }
+
+  .reasoning-effort-extreme .reasoning-effort-thumb {
+    box-shadow: 0 0 0 4px hsl(270 92% 70% / 0.16), 0 2px 8px rgb(0 0 0 / 0.25);
+    animation: reasoning-thumb-pulse 1.8s ease-in-out infinite;
+  }
+
+  .reasoning-effort-sparks {
+    position: absolute;
+    inset: 0 2.25rem 0 0.75rem;
+    z-index: 2;
+    pointer-events: none;
+  }
+
+  .reasoning-effort-sparks i {
+    position: absolute;
+    width: 0.2rem;
+    height: 0.2rem;
+    border-radius: 9999px;
+    background: hsl(0 0% 100% / 0.75);
+    animation: reasoning-spark 1.4s ease-in-out infinite alternate;
+  }
+
+  .reasoning-effort-sparks i:nth-child(1) { left: 8%; top: 35%; }
+  .reasoning-effort-sparks i:nth-child(2) { left: 17%; top: 62%; animation-delay: 180ms; }
+  .reasoning-effort-sparks i:nth-child(3) { left: 29%; top: 29%; animation-delay: 360ms; }
+  .reasoning-effort-sparks i:nth-child(4) { left: 41%; top: 58%; animation-delay: 540ms; }
+  .reasoning-effort-sparks i:nth-child(5) { left: 53%; top: 38%; animation-delay: 720ms; }
+  .reasoning-effort-sparks i:nth-child(6) { left: 62%; top: 66%; animation-delay: 900ms; }
+  .reasoning-effort-sparks i:nth-child(7) { left: 72%; top: 25%; animation-delay: 1080ms; }
+  .reasoning-effort-sparks i:nth-child(8) { left: 82%; top: 55%; animation-delay: 1260ms; }
+  .reasoning-effort-sparks i:nth-child(9) { left: 91%; top: 35%; animation-delay: 1440ms; }
+
+  @keyframes reasoning-thumb-pulse {
+    50% { transform: translate(-50%, -50%) scale(1.06); }
+  }
+
+  @keyframes reasoning-spark {
+    from { opacity: 0.28; transform: translateY(2px) scale(0.75); }
+    to { opacity: 0.95; transform: translateY(-2px) scale(1.15); }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .reasoning-effort-extreme .reasoning-effort-thumb,
+    .reasoning-effort-sparks i {
+      animation: none;
+    }
   }
 
   .liquid-glass,
@@ -427,7 +578,7 @@
   .liquid-bottom-nav {
     border: 1px solid hsl(var(--foreground) / 0.08);
     border-radius: 999px;
-    background: hsl(var(--card) / 0.72);
+    background: hsl(var(--card) / 0.64);
     -webkit-backdrop-filter: blur(28px) saturate(1.7);
     backdrop-filter: blur(28px) saturate(1.7);
     box-shadow:
@@ -440,6 +591,12 @@
   @supports not ((-webkit-backdrop-filter: blur(1px)) or (backdrop-filter: blur(1px))) {
     .liquid-bottom-nav {
       background: hsl(var(--card) / 0.98);
+    }
+
+    @media (max-width: 767px) {
+      .app-topbar {
+        background: hsl(var(--card) / 0.98);
+      }
     }
   }
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 一次性环境初始化（幂等）：
 #   - 检查依赖（python3.12 / docker / pnpm）
-#   - 生成 .env（自动填 MASTER_KEY / JWT_SECRET）
+#   - 生成 .env（自动填 MASTER_KEY / JWT_SECRET / UPDATER_TOKEN）
 #   - 创建 backend/.venv 并装 pip 依赖
 #   - 装前端 pnpm 依赖
 # 多次执行无副作用——已就绪的部分会跳过。
@@ -56,20 +56,22 @@ if [[ ! -f .env ]]; then
   cp .env.example .env
   MASTER_KEY="$("$PYTHON_BIN" -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())' 2>/dev/null || true)"
   JWT_SECRET="$("$PYTHON_BIN" -c 'import secrets; print(secrets.token_urlsafe(64))' 2>/dev/null || true)"
+  UPDATER_TOKEN="$("$PYTHON_BIN" -c 'import secrets; print(secrets.token_urlsafe(64))' 2>/dev/null || true)"
   if [[ -z "$MASTER_KEY" || -z "$JWT_SECRET" ]]; then
     warn ".env 已创建，但密钥生成失败（cryptography 未装）；先继续装依赖，稍后会自动重试"
   else
     # 用 python 替换避免 sed 在 macOS / GNU 间差异
-    "$PYTHON_BIN" - "$MASTER_KEY" "$JWT_SECRET" <<'PY'
+    "$PYTHON_BIN" - "$MASTER_KEY" "$JWT_SECRET" "$UPDATER_TOKEN" <<'PY'
 import sys, pathlib, re
-mk, js = sys.argv[1], sys.argv[2]
+mk, js, updater = sys.argv[1:4]
 p = pathlib.Path(".env")
 text = p.read_text()
 text = re.sub(r'^MASTER_KEY=.*$', f'MASTER_KEY={mk}', text, flags=re.MULTILINE)
 text = re.sub(r'^JWT_SECRET=.*$', f'JWT_SECRET={js}', text, flags=re.MULTILINE)
+text = re.sub(r'^UPDATER_TOKEN=.*$', f'UPDATER_TOKEN={updater}', text, flags=re.MULTILINE)
 p.write_text(text)
 PY
-    ok ".env 已生成（MASTER_KEY / JWT_SECRET 自动填好；其余沿用默认）"
+    ok ".env 已生成（MASTER_KEY / JWT_SECRET / UPDATER_TOKEN 自动填好；其余沿用默认）"
   fi
 else
   # 已有 .env，但仍可能含占位 changeme- → 自动替换
@@ -92,6 +94,25 @@ PY
   else
     ok ".env 已存在（保持不变）"
   fi
+fi
+
+if ! grep -qE '^UPDATER_TOKEN=[^[:space:]]+$' .env 2>/dev/null || grep -q '^UPDATER_TOKEN=changeme-' .env 2>/dev/null; then
+  UPDATER_TOKEN="$("$PYTHON_BIN" -c 'import secrets; print(secrets.token_urlsafe(64))')"
+  "$PYTHON_BIN" - "$UPDATER_TOKEN" <<'PY'
+import pathlib
+import re
+import sys
+
+p = pathlib.Path(".env")
+text = p.read_text()
+line = f"UPDATER_TOKEN={sys.argv[1]}"
+if re.search(r"^UPDATER_TOKEN=.*$", text, flags=re.MULTILINE):
+    text = re.sub(r"^UPDATER_TOKEN=.*$", line, text, flags=re.MULTILINE)
+else:
+    text = text.rstrip() + "\n" + line + "\n"
+p.write_text(text)
+PY
+  ok ".env 已补齐独立 UPDATER_TOKEN"
 fi
 
 # ── 3. backend venv ───────────────────────────────────────────

@@ -204,6 +204,27 @@ class DemoPlugin:
     assert report.inferred_http_domains == ["api.example.com"]
 
 
+def test_check_infers_separate_ai_agent_permission(tmp_path: Path) -> None:
+    name = "demo_agent"
+    plugin_dir = tmp_path / name
+    tp.scaffold_plugin(name, "command", plugin_dir)
+    (plugin_dir / "plugin.py").write_text(
+        """
+class DemoPlugin:
+    async def run(self, ctx):
+        await ctx.ai.run_agent("system", "user", handlers={})
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    report = tp.check_plugin(plugin_dir)
+
+    assert "ai_agent" in report.inferred_permissions
+    assert "ai_agent" in report.missing_permissions
+    assert "ai_text" not in report.inferred_permissions
+
+
 # ─────────────────────────────────────────────────────
 # register（内存 FakeDB）
 # ─────────────────────────────────────────────────────

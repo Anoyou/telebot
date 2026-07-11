@@ -101,7 +101,7 @@ export function KillSwitch({ compact = false }: { compact?: boolean }) {
           <div className="rounded-xl border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
             这是全局总闸。确认后可从同一个按钮恢复运行。
           </div>
-          <DialogFooter className="gap-2">
+          <DialogFooter className="!flex !flex-row gap-2 sm:space-x-0 [&>*]:min-w-0 [&>*]:flex-1 sm:[&>*]:flex-none">
             <Button
               variant="outline"
               onClick={() => setConfirmOpen(false)}

@@ -13,9 +13,11 @@ import io
 import zipfile
 
 import pytest
+from pydantic import ValidationError
 
 from app.db.models.plugin import PluginInstall
 from app.services import plugin_install_service as pis
+from app.services.remote_plugin_service import PluginMetadataSchema
 
 
 class _FakeDB:
@@ -35,6 +37,34 @@ class _FakeDB:
 
     async def flush(self) -> None:
         return None
+
+
+def test_agent_tools_require_permission_capability_and_object_schema() -> None:
+    tool = {
+        "name": "lookup",
+        "description": "Lookup",
+        "parameters": {"type": "object", "properties": {}},
+        "read_only": True,
+    }
+    valid = PluginMetadataSchema(
+        name="agent-demo",
+        permissions=["ai_agent"],
+        capabilities={"agent_tools": {"enabled": True}},
+        agent_tools=[tool],
+    )
+    assert valid.agent_tools[0]["name"] == "lookup"
+
+    for payload in (
+        {"permissions": [], "capabilities": {"agent_tools": {"enabled": True}}, "agent_tools": [tool]},
+        {"permissions": ["ai_agent"], "capabilities": {}, "agent_tools": [tool]},
+        {
+            "permissions": ["ai_agent"],
+            "capabilities": {"agent_tools": {"enabled": True}},
+            "agent_tools": [{**tool, "parameters": {"type": "string"}}],
+        },
+    ):
+        with pytest.raises(ValidationError):
+            PluginMetadataSchema(name="invalid-agent-demo", **payload)
 
 
 def _make_zip(*, key: str = "demo", version: str = "0.1.0", extra_members: list[tuple[str, bytes]] | None = None) -> bytes:
@@ -167,3 +197,30 @@ def test_parse_zip_rejects_oversize(monkeypatch) -> None:
     payload = _make_zip(key="too_big")
     with pytest.raises(pis.ZipTooLarge):
         pis.parse_zip(payload)
+
+
+def test_parse_zip_rejects_excessive_uncompressed_size(monkeypatch) -> None:
+    monkeypatch.setattr(pis.settings, "plugin_zip_max_uncompressed_bytes", 1024)
+    monkeypatch.setattr(pis.settings, "plugin_zip_max_member_bytes", 1024)
+    payload = _make_zip(extra_members=[("payload.bin", b"x" * 2048)])
+    with pytest.raises(pis.ZipTooLarge) as ex:
+        pis.parse_zip(payload)
+    assert ex.value.code in {"ZIP_MEMBER_TOO_LARGE", "ZIP_UNCOMPRESSED_TOO_LARGE"}
+
+
+def test_parse_zip_rejects_too_many_members(monkeypatch) -> None:
+    monkeypatch.setattr(pis.settings, "plugin_zip_max_members", 3)
+    payload = _make_zip(extra_members=[("extra.txt", b"x")])
+    with pytest.raises(pis.InvalidZipStructure) as ex:
+        pis.parse_zip(payload)
+    assert ex.value.code == "ZIP_TOO_MANY_MEMBERS"
+
+
+def test_parse_zip_rejects_suspicious_compression_ratio(monkeypatch) -> None:
+    monkeypatch.setattr(pis.settings, "plugin_zip_max_compression_ratio", 5)
+    monkeypatch.setattr(pis.settings, "plugin_zip_max_member_bytes", 64 * 1024)
+    monkeypatch.setattr(pis.settings, "plugin_zip_max_uncompressed_bytes", 128 * 1024)
+    payload = _make_zip(extra_members=[("compressed.txt", b"a" * 16 * 1024)])
+    with pytest.raises(pis.ZipTooLarge) as ex:
+        pis.parse_zip(payload)
+    assert ex.value.code == "ZIP_COMPRESSION_RATIO_TOO_HIGH"

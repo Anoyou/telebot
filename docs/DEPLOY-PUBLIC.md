@@ -70,7 +70,7 @@ curl -fsSL https://raw.githubusercontent.com/Anoyou/telebot/main/scripts/install
 
 ```bash
 cp .env.example .env
-# 修改 MASTER_KEY / JWT_SECRET / POSTGRES_PASSWORD / COOKIE_SECURE / WEB_PORT_PUBLISH
+# 修改 MASTER_KEY / JWT_SECRET / UPDATER_TOKEN / POSTGRES_PASSWORD / COOKIE_SECURE / WEB_PORT_PUBLISH
 make prod-up
 ```
 
@@ -183,6 +183,8 @@ TELEPILOT_UPDATE_BRANCH=codex/0.33-interaction-framework make prod-update PROD_U
 
 生产栈会启动一个仅 Docker 内网可访问的 `updater` 服务。它挂载项目目录和 Docker socket，由已登录的 Web 后端通过共享 token 发起更新任务，不对公网暴露端口。
 
+由于 updater 能控制宿主机 Docker，`UPDATER_TOKEN` 必须使用独立随机值，不能与 `JWT_SECRET` 复用；缺失时服务会直接拒绝启动。
+
 - 检查更新：读取当前分支或 `TELEPILOT_UPDATE_BRANCH`，执行 `git fetch` 并按变更文件分类。
 - 应用更新：后台执行 `scripts/prod-update.sh`，优先增量重建 `web` / `frontend`；涉及 Compose、Dockerfile、依赖或部署脚本时自动回退完整更新。
 - 任务日志：Web 面板轮询 updater job，服务重启期间页面可能短暂断开，刷新后可重新检查版本。
@@ -194,7 +196,7 @@ cd /opt/telepilot
 TELEPILOT_HOST_PROJECT_DIR=/opt/telepilot make prod-up
 ```
 
-回滚到指定版本：
+没有数据库迁移时，可回滚到指定版本：
 
 ```bash
 cd /opt/telepilot
@@ -202,8 +204,7 @@ git checkout <tag-or-commit>
 make prod-up
 ```
 
-`make prod-up` 会重新构建镜像、启动容器，并在 `web` 容器启动时执行 `alembic upgrade head`。
-如果要恢复数据，先确认 `.env` 中的 `MASTER_KEY` 与备份时一致，再按 `deploy/restore.sh` 恢复数据库和 sessions。
+`make prod-up` 会重新构建镜像、启动容器，并在 `web` 容器启动时执行 `alembic upgrade head`。包含迁移的更新会在拉取代码前自动运行备份；切回旧 commit 不会撤销 schema，必须用迁移前备份恢复数据库。恢复前确认 `.env` 中的 `MASTER_KEY` 与备份时一致，再按 `deploy/restore.sh` 恢复数据库、sessions 与插件卷。
 
 ## 7. 备份
 
@@ -215,7 +216,7 @@ make prod-up
 
 仓库已有脚本可参考：
 
-- [deploy/backup.sh](../deploy/backup.sh)
+- [deploy/backup.sh](../deploy/backup.sh)（输出数据库、三个业务卷归档及 SHA-256 校验文件）
 - [deploy/backup-keys.sh](../deploy/backup-keys.sh)
 - [deploy/restore.sh](../deploy/restore.sh)
 

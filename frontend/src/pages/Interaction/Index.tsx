@@ -64,7 +64,11 @@ export function InteractionIndex() {
   });
 
   const accounts = accountsQ.data ?? [];
-  const aidParam = Number(searchParams.get("aid"));
+  const rawAidParam = searchParams.get("aid") ?? "";
+  const parsedAidParam = Number(rawAidParam);
+  const aidParam = /^\d+$/.test(rawAidParam) && Number.isSafeInteger(parsedAidParam) && parsedAidParam > 0
+    ? parsedAidParam
+    : null;
   const selectedAccount = useMemo(() => {
     if (!accounts.length) return null;
     const byParam = accounts.find((account) => account.id === aidParam);
@@ -111,6 +115,21 @@ export function InteractionIndex() {
         <div className="flex h-36 items-center justify-center rounded-lg border bg-card">
           <Spinner className="text-primary" />
         </div>
+      </PageShell>
+    );
+  }
+
+  if (accountsQ.isError) {
+    return (
+      <PageShell>
+        <PageHeader icon={Bot} title="交互中心" description="账号列表加载失败。" />
+        <Card>
+          <CardHeader><CardTitle className="flex items-center gap-2 text-base"><AlertTriangle className="h-4 w-4 text-destructive" />无法读取账号</CardTitle></CardHeader>
+          <CardContent className="flex flex-wrap items-center justify-between gap-3 text-sm text-muted-foreground">
+            <span>{String(accountsQ.error instanceof Error ? accountsQ.error.message : accountsQ.error)}</span>
+            <Button size="sm" variant="outline" onClick={() => void accountsQ.refetch()}>重试</Button>
+          </CardContent>
+        </Card>
       </PageShell>
     );
   }
@@ -215,7 +234,15 @@ export function InteractionIndex() {
             </div>
           </section>
 
-          <Card className="overflow-hidden">
+          {interactionQ.isError ? (
+            <Card>
+              <CardHeader><CardTitle className="flex items-center gap-2 text-base"><AlertTriangle className="h-4 w-4 text-destructive" />交互配置加载失败</CardTitle></CardHeader>
+              <CardContent className="flex flex-wrap items-center justify-between gap-3 text-sm text-muted-foreground">
+                <span>{String(interactionQ.error instanceof Error ? interactionQ.error.message : interactionQ.error)}</span>
+                <Button size="sm" variant="outline" onClick={() => void interactionQ.refetch()}>重试</Button>
+              </CardContent>
+            </Card>
+          ) : <Card className="overflow-hidden">
             <CardHeader className="border-b bg-muted/30">
               <div className="flex flex-wrap items-start justify-between gap-3">
                 <div>
@@ -243,7 +270,7 @@ export function InteractionIndex() {
             <CardContent className="p-3 sm:p-4">
               {selectedAid !== null ? <BotTab aid={selectedAid} mode="interaction" /> : null}
             </CardContent>
-          </Card>
+          </Card>}
         </>
       )}
     </PageShell>

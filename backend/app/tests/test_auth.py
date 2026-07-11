@@ -7,9 +7,16 @@
 from __future__ import annotations
 
 import time
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
 
 import pytest
+from sqlalchemy.exc import IntegrityError
+from starlette.requests import Request
+from starlette.responses import Response
 
+from app.api import auth as auth_api
+from app.schemas.auth import RegisterRequest
 from app.services import auth_service
 
 
@@ -83,6 +90,32 @@ def test_make_otpauth_url_format():
     assert "secret=ABC234" in url
     assert "issuer=" in url
     assert "admin" in url
+
+
+@pytest.mark.asyncio
+async def test_register_integrity_race_returns_register_disabled(monkeypatch) -> None:
+    """两个首次注册同时通过 COUNT 时，数据库唯一约束失败应返回稳定的 403。"""
+
+    db = AsyncMock()
+    db.add = Mock()
+    db.execute = AsyncMock(return_value=SimpleNamespace(scalar_one=lambda: 0))
+    db.flush = AsyncMock(side_effect=IntegrityError("insert", {}, RuntimeError("unique")))
+    enforce = AsyncMock()
+    monkeypatch.setattr(auth_api, "_enforce_login_rate_limit", enforce)
+    monkeypatch.setattr(auth_api.auth_service, "hash_password", lambda _password: "hash")
+    request = Request({"type": "http", "headers": [], "client": ("127.0.0.1", 1)})
+
+    with pytest.raises(auth_api.HTTPException) as exc_info:
+        await auth_api.register(
+            RegisterRequest(username="admin", password="secret"),
+            request,
+            Response(),
+            db,
+        )
+
+    assert exc_info.value.status_code == 403
+    assert exc_info.value.detail["code"] == "REGISTER_DISABLED"
+    db.rollback.assert_awaited_once()
 
 
 # ── 端到端（占位，等整合阶段连真 PG 时启用） ──────────────────────

@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import secrets
 import subprocess
 import threading
 import time
@@ -53,6 +54,10 @@ _FULL_UPDATE_PREFIXES = ("deploy/", "scripts/", "scripts/deploy", "scripts/prod"
 _jobs: dict[str, dict[str, Any]] = {}
 _jobs_lock = threading.Lock()
 _apply_lock = threading.Lock()
+
+
+def _token_configured() -> bool:
+    return len(TOKEN) >= 32 and not TOKEN.startswith("changeme-")
 
 
 def _json_response(handler: BaseHTTPRequestHandler, status: int, payload: dict[str, Any]) -> None:
@@ -250,9 +255,27 @@ def _check_plan(remote: str, branch: str) -> dict[str, Any]:
     target_out, err, rc = _run(["git", "rev-parse", remote_ref], timeout=10)
     if rc != 0:
         return {"ok": False, "error": f"读取远程 commit 失败: {err or target_out}"}
+    diff_base = current_out
+    deployment_pending = False
+    pending_path_out, _, pending_path_rc = _run(
+        ["git", "rev-parse", "--git-path", "telepilot-deploy-pending"],
+        timeout=10,
+    )
+    if pending_path_rc == 0 and pending_path_out:
+        pending_path = Path(pending_path_out)
+        if not pending_path.is_absolute():
+            pending_path = WORKSPACE / pending_path
+        try:
+            pending_old, pending_target = pending_path.read_text().split()[:2]
+        except (OSError, ValueError, IndexError):
+            pending_old = pending_target = ""
+        if current_out == target_out and pending_target == target_out and pending_old:
+            diff_base = pending_old
+            deployment_pending = True
+
     behind_out, _, behind_rc = _run(["git", "rev-list", "--count", f"{current_out}..{target_out}"], timeout=10)
     behind = int(behind_out) if behind_rc == 0 and behind_out.isdigit() else 0
-    changed_out, _, changed_rc = _run(["git", "diff", "--name-only", f"{current_out}..{target_out}"], timeout=30)
+    changed_out, _, changed_rc = _run(["git", "diff", "--name-only", f"{diff_base}..{target_out}"], timeout=30)
     changed_files = changed_out.splitlines()[:120] if changed_rc == 0 and changed_out else []
     components, requires_full_update, requires_backup = _classify_changed_files(changed_files)
     return {
@@ -261,8 +284,10 @@ def _check_plan(remote: str, branch: str) -> dict[str, Any]:
         "branch": branch,
         "current_commit": current_out[:12],
         "remote_commit": target_out[:12],
-        "has_update": current_out != target_out and behind > 0,
+        "has_update": (current_out != target_out and behind > 0) or deployment_pending,
         "ahead": behind,
+        "deployment_pending": deployment_pending,
+        "deploy_from_commit": diff_base[:12],
         "changed_files": changed_files,
         "components": components,
         "requires_full_update": requires_full_update,
@@ -347,9 +372,10 @@ class Handler(BaseHTTPRequestHandler):
     server_version = "TelePilotUpdater/1.0"
 
     def _authorized(self) -> bool:
-        if not TOKEN:
-            return True
-        return self.headers.get("X-TelePilot-Updater-Token", "") == TOKEN
+        if not _token_configured():
+            return False
+        supplied = self.headers.get("X-TelePilot-Updater-Token", "")
+        return secrets.compare_digest(supplied, TOKEN)
 
     def _read_json(self) -> dict[str, Any]:
         raw_len = int(self.headers.get("Content-Length") or "0")
@@ -427,6 +453,8 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
+    if not _token_configured():
+        raise SystemExit("a random UPDATER_TOKEN of at least 32 characters is required")
     host = os.getenv("UPDATER_HOST", "0.0.0.0")
     port = int(os.getenv("UPDATER_PORT", "8765"))
     server = ThreadingHTTPServer((host, port), Handler)

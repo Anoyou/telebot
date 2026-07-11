@@ -15,6 +15,7 @@ from app.db.models.account import Account  # noqa: F401 - registers FK target ta
 from app.db.models.payout_compensation import (
     PAYOUT_COMPENSATION_STATUS_ABANDONED,
     PAYOUT_COMPENSATION_STATUS_PENDING,
+    PAYOUT_COMPENSATION_STATUS_SENDING,
     PAYOUT_COMPENSATION_STATUS_SENT,
     PayoutCompensation,
 )
@@ -457,6 +458,62 @@ async def test_payout_replay_recovers_from_sent_marker_without_sending(
     assert client.sent == []
     assert record_action.await_args.kwargs["replay_recovered"] is True
     assert record_action.await_args.args[0]["trace_id"] == "evt_sent_marker"
+
+
+@pytest.mark.asyncio
+async def test_stale_sending_without_safe_probe_is_abandoned_without_duplicate_send(
+    payout_session_factory,
+    monkeypatch,
+) -> None:
+    row = await _insert_compensation_row(
+        payout_session_factory,
+        payout_key="pay_stale_sending",
+        trace_id="evt_stale_sending",
+        status=PAYOUT_COMPENSATION_STATUS_SENDING,
+        ambiguous=False,
+        next_attempt_at=datetime.now(UTC) - timedelta(seconds=1),
+    )
+    redis = _FakeRedis()
+    client = _ReplayClient(send_ids=[999])
+    monkeypatch.setattr(worker_runtime, "record_action", AsyncMock())
+
+    assert await worker_runtime._scan_payout_compensations_once(redis, client, 7, config=_scan_config()) == 1
+
+    saved = await _get_compensation_row(payout_session_factory, row.id)
+    assert saved.status == PAYOUT_COMPENSATION_STATUS_ABANDONED
+    assert saved.ambiguous is True
+    assert saved.error_code_last == payout_compensation_service.ERROR_AMBIGUOUS_DELIVERY
+    assert "人工核对" in str(saved.error_last)
+    assert client.sent == []
+
+
+@pytest.mark.asyncio
+async def test_stale_sending_probe_miss_is_not_automatically_resent(
+    payout_session_factory,
+    monkeypatch,
+) -> None:
+    row = await _insert_compensation_row(
+        payout_session_factory,
+        payout_key="pay_stale_probe_miss",
+        trace_id="evt_stale_probe_miss",
+        status=PAYOUT_COMPENSATION_STATUS_SENDING,
+        next_attempt_at=datetime.now(UTC) - timedelta(seconds=1),
+        payload={"reply_to_message_id": 31},
+    )
+    client = _ReplayClient(
+        send_ids=[1000],
+        messages=[SimpleNamespace(id=998, raw_text="+10", reply_to_msg_id=99, date=datetime.now(UTC))],
+    )
+    monkeypatch.setattr(worker_runtime, "record_action", AsyncMock())
+
+    assert await worker_runtime._scan_payout_compensations_once(
+        _FakeRedis(), client, 7, config=_scan_config()
+    ) == 1
+
+    saved = await _get_compensation_row(payout_session_factory, row.id)
+    assert saved.status == PAYOUT_COMPENSATION_STATUS_ABANDONED
+    assert saved.error_code_last == payout_compensation_service.ERROR_AMBIGUOUS_DELIVERY
+    assert client.sent == []
 
 
 @pytest.mark.asyncio

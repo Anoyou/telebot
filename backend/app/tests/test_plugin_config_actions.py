@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -377,6 +379,94 @@ async def test_create_plugin_config_action_job_writes_runtime_log_and_starts_tas
     assert len(runtime_logs) == 1
     assert runtime_logs[0].message == "配置动作已排队"
     assert runtime_logs[0].detail["config_action_job_id"] == job.job_id
+
+
+@pytest.mark.asyncio
+async def test_startup_converges_stale_config_action_jobs(monkeypatch) -> None:
+    jobs = [
+        SimpleNamespace(
+            job_id="pcaj_queued",
+            account_id=7,
+            plugin_key="demo",
+            action_key="sync",
+            status=plugin_config_action_jobs.STATUS_QUEUED,
+            message=None,
+            error_code=None,
+            error_message=None,
+            ended_at=None,
+            updated_at=None,
+        ),
+        SimpleNamespace(
+            job_id="pcaj_running",
+            account_id=8,
+            plugin_key="demo",
+            action_key="sync",
+            status=plugin_config_action_jobs.STATUS_RUNNING,
+            message=None,
+            error_code=None,
+            error_message=None,
+            ended_at=None,
+            updated_at=None,
+        ),
+    ]
+
+    class _Scalars:
+        def all(self):
+            return jobs
+
+    class _Result:
+        def scalars(self):
+            return _Scalars()
+
+    class _DB:
+        def __init__(self):
+            self.added = []
+            self.commits = 0
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def execute(self, _query):
+            return _Result()
+
+        def add(self, row):
+            self.added.append(row)
+
+        async def commit(self):
+            self.commits += 1
+
+    db = _DB()
+    monkeypatch.setattr(plugin_config_action_jobs, "AsyncSessionLocal", lambda: db)
+
+    assert await plugin_config_action_jobs.startup_plugin_config_action_jobs() == 2
+    assert db.commits == 1
+    assert all(job.status == plugin_config_action_jobs.STATUS_FAILED for job in jobs)
+    assert all(job.error_code == plugin_config_action_jobs.INTERRUPTED_ERROR_CODE for job in jobs)
+    assert all(job.ended_at is not None for job in jobs)
+    assert len([row for row in db.added if isinstance(row, RuntimeLog)]) == 2
+
+
+@pytest.mark.asyncio
+async def test_shutdown_cancels_and_awaits_owned_config_action_tasks(monkeypatch) -> None:
+    started = asyncio.Event()
+
+    async def _long_running() -> None:
+        started.set()
+        await asyncio.Event().wait()
+
+    task = asyncio.create_task(_long_running())
+    plugin_config_action_jobs._ACTIVE_TASKS.add(task)
+    await started.wait()
+    converge = AsyncMock(return_value=1)
+    monkeypatch.setattr(plugin_config_action_jobs, "_converge_interrupted_jobs", converge)
+
+    assert await plugin_config_action_jobs.shutdown_plugin_config_action_jobs() == 1
+    assert task.cancelled()
+    assert task not in plugin_config_action_jobs._ACTIVE_TASKS or task.done()
+    converge.assert_awaited_once()
 
 
 @pytest.mark.asyncio

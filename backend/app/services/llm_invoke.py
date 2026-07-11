@@ -15,10 +15,12 @@ from ..db.models.command import (
 from . import llm_account_budget, llm_client, llm_runtime
 from .llm_client import LLMCallFailed, LLMResult
 from .llm_dto import LLMProviderDTO
+from .llm_protocol import ModelRequest, ModelResponse
 from .llm_runtime import (
     UsageRecord,
     build_fallback_chain,
     call_with_fallback,
+    invoke_model_with_fallback,
     preview_text_for_usage,
 )
 
@@ -99,6 +101,36 @@ async def invoke(
         account_id=account_id,
         triggered_by_account_id=triggered_by_account_id,
         source=source,
+    )
+
+
+async def invoke_structured(
+    primary_provider: LLMProviderDTO,
+    providers: dict[int, LLMProviderDTO],
+    request: ModelRequest,
+    *,
+    account_id: int | None = None,
+    triggered_by_account_id: int | None = None,
+    source: str | None = None,
+    fallback_provider_id: int | None = None,
+    matched_tag: str | None = None,
+    client_factory: Callable[..., Any | Awaitable[Any]] | None = None,
+) -> tuple[ModelResponse, LLMProviderDTO, bool]:
+    """Structured multi-turn/tool invocation through the standard runtime gates."""
+
+    chain = build_fallback_chain(
+        primary_provider,
+        providers=providers,
+        fallback_provider_id=fallback_provider_id,
+        matched_tag=matched_tag,
+    )
+    return await invoke_model_with_fallback(
+        chain,
+        request,
+        account_id=account_id,
+        triggered_by_account_id=triggered_by_account_id,
+        source=source,
+        client_factory=client_factory,
     )
 
 

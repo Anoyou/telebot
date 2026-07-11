@@ -1279,7 +1279,7 @@ export interface AICommandConfig {
   /** 采样温度，0 更稳定，2 更发散；空表示不覆盖 provider 默认值 */
   temperature?: number;
   /** 推理模型的思考预算；当前主要用于 OpenAI Chat/Responses 协议 */
-  reasoning_effort?: "minimal" | "low" | "medium" | "high";
+  reasoning_effort?: "minimal" | "low" | "medium" | "high" | "xhigh";
   /** 单次 API 调用超时时间，单位秒 */
   timeout_seconds?: number;
   // ── 路由（Sprint2 #2 路由扩展）──
@@ -1346,6 +1346,7 @@ export type LLMProviderKind = "openai" | "anthropic" | "ollama";
  */
 export type LLMApiFormat = "chat_completions" | "responses" | "anthropic_messages";
 export type LLMWebSearchApiFormat = "auto" | LLMApiFormat;
+export type LLMProtocolProfile = "standard" | "claude_code_proxy";
 
 /**
  * LLMProvider 下挂的一个候选模型条目（与后端 ProviderModel 对齐）。
@@ -1360,6 +1361,10 @@ export interface ProviderModel {
   enabled: boolean;
   custom: boolean;
   label?: string | null;
+  supports_tools?: boolean | null;
+  supports_images?: boolean | null;
+  supports_temperature?: boolean | null;
+  reasoning_efforts?: Array<"minimal" | "low" | "medium" | "high" | "xhigh"> | null;
 }
 
 /**
@@ -1402,6 +1407,8 @@ export interface LLMProviderOut {
   default_model: string;
   /** API 协议；老数据可能缺，前端按 chat_completions 兜底 */
   api_format?: LLMApiFormat | string;
+  /** Anthropic Messages 请求兼容档案；其他协议固定为 standard */
+  protocol_profile?: LLMProtocolProfile | string;
   /** 联网搜索时的协议覆盖；auto = OpenAI/chat_completions 在联网时临时走 responses */
   web_search_api_format?: LLMWebSearchApiFormat | string;
   /** 模态；老数据可能缺，前端按 "text" 兜底 */
@@ -1427,6 +1434,8 @@ export interface LLMProviderCreate {
   base_url?: string | null;
   default_model: string;
   api_format?: LLMApiFormat;
+  /** 仅在 api_format=anthropic_messages 时生效 */
+  protocol_profile?: LLMProtocolProfile;
   web_search_api_format?: LLMWebSearchApiFormat;
   modality?: LLMModality;
   tags?: string[];
@@ -1458,6 +1467,8 @@ export interface LLMProviderUpdate {
   base_url?: string | null;
   default_model?: string;
   api_format?: LLMApiFormat;
+  /** 仅在 api_format=anthropic_messages 时生效 */
+  protocol_profile?: LLMProtocolProfile;
   web_search_api_format?: LLMWebSearchApiFormat;
   modality?: LLMModality;
   tags?: string[];

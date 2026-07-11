@@ -89,7 +89,7 @@ class PluginContext:
       - ``log``：写运行日志的协程；签名 ``async (level, message, **detail)``
       - ``scheduler``：平台调度器 facade，可在插件内注册 cron / interval / once 任务
       - ``http``：声明 ``external_http`` 和 ``allowed_hosts`` 后注入的安全 HTTP facade
-      - ``ai``：声明 ``ai_text`` 后注入的安全文本 LLM facade
+      - ``ai``：声明 ``ai_text`` 或独立 ``ai_agent`` 后注入的安全 LLM facade
       - ``messages``：标准消息动作 facade；交互入口内为缓冲动作，后台任务/命令中为实时受控投递
 
     为避免循环 import，``rules`` / ``engine`` / ``redis`` 都用 ``Any`` 标注。

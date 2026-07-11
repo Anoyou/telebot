@@ -4,7 +4,7 @@
 //   列表页：全表展示模板，name 徽章 type，编辑/删除按钮
 //   编辑对话框：根据 type 切不同子表单
 //   保存后后端会通知所有启用此模板的 worker 热加载
-import { forwardRef, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { forwardRef, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { ChevronDown, Loader2, Plus, Save, Trash2, Edit3 } from "lucide-react";
@@ -64,6 +64,7 @@ import type {
   LLMProviderOut,
 } from "@/api/types";
 import { getErrMsg } from "@/lib/api";
+import { cn } from "@/lib/utils";
 
 // 指令名仅允许 [a-zA-Z0-9_]，与后端正则对齐
 const NAME_RE = /^[a-zA-Z0-9_]{1,64}$/;
@@ -78,7 +79,19 @@ const TYPE_LABELS: Record<CommandTemplateType, string> = {
 
 type AiCapability = "routing" | "search" | "output" | "params";
 type AiCommandMode = "chat" | "search" | "image" | "video";
-type AiReasoningEffort = "" | "minimal" | "low" | "medium" | "high";
+type AiReasoningEffort = "" | "minimal" | "low" | "medium" | "high" | "xhigh";
+
+const AI_REASONING_OPTIONS: Array<{
+  value: AiReasoningEffort;
+  label: string;
+}> = [
+  { value: "", label: "自动" },
+  { value: "minimal", label: "极低" },
+  { value: "low", label: "低" },
+  { value: "medium", label: "中" },
+  { value: "high", label: "高" },
+  { value: "xhigh", label: "极高" },
+];
 
 const AI_MODE_DEFAULTS: Record<
   AiCommandMode,
@@ -190,6 +203,63 @@ function normalizeAiMode(value: unknown): AiCommandMode {
   return value === "search" || value === "image" || value === "video" ? value : "chat";
 }
 
+function ReasoningEffortSlider({
+  value,
+  onChange,
+}: {
+  value: AiReasoningEffort;
+  onChange: (value: AiReasoningEffort) => void;
+}) {
+  const selectedIndex = Math.max(
+    0,
+    AI_REASONING_OPTIONS.findIndex((option) => option.value === value),
+  );
+  const progress = (selectedIndex / (AI_REASONING_OPTIONS.length - 1)) * 100;
+  const selected = AI_REASONING_OPTIONS[selectedIndex];
+  const extreme = selected.value === "xhigh";
+  const thumbOffset = 1.25 - progress * 0.025;
+  const style = {
+    "--reasoning-progress": `${progress}%`,
+    "--reasoning-thumb-position": `calc(${progress}% + ${thumbOffset}rem)`,
+  } as CSSProperties;
+
+  return (
+    <div className={cn("reasoning-effort", extreme && "reasoning-effort-extreme")} style={style}>
+      <div className="reasoning-effort-track" aria-hidden="true">
+        <div className="reasoning-effort-fill" />
+        <div className="reasoning-effort-stops">
+          {AI_REASONING_OPTIONS.map((option, index) => (
+            <span
+              key={option.label}
+              className={cn("reasoning-effort-stop", index <= selectedIndex && "is-active")}
+            />
+          ))}
+        </div>
+        <div className="reasoning-effort-thumb" />
+        {extreme ? (
+          <div className="reasoning-effort-sparks">
+            {Array.from({ length: 9 }, (_, index) => <i key={index} />)}
+          </div>
+        ) : null}
+      </div>
+      <input
+        type="range"
+        min={0}
+        max={AI_REASONING_OPTIONS.length - 1}
+        step={1}
+        value={selectedIndex}
+        aria-label="推理强度"
+        aria-valuetext={`${selected.label}${selected.value ? `，${selected.value}` : "，使用提供商默认值"}`}
+        onChange={(event) => onChange(AI_REASONING_OPTIONS[Number(event.target.value)].value)}
+      />
+      <div className="reasoning-effort-caption">
+        <span className={cn("font-medium", extreme && "text-[hsl(270_92%_70%)]")}>{selected.label}</span>
+        <span>{selected.value || "使用提供商默认"}</span>
+      </div>
+    </div>
+  );
+}
+
 function applyAiModeDefaults(form: FormState, nextMode: AiCommandMode): Partial<FormState> {
   const currentDefaults = AI_MODE_DEFAULTS[form.ai_mode];
   const nextDefaults = AI_MODE_DEFAULTS[nextMode];
@@ -262,7 +332,8 @@ function formFromTemplate(t: CommandTemplateOut): FormState {
       cfg.reasoning_effort === "minimal" ||
         cfg.reasoning_effort === "low" ||
         cfg.reasoning_effort === "medium" ||
-        cfg.reasoning_effort === "high"
+        cfg.reasoning_effort === "high" ||
+        cfg.reasoning_effort === "xhigh"
         ? cfg.reasoning_effort
         : modeDefaults.reasoning_effort,
     ai_timeout_seconds:
@@ -1001,7 +1072,7 @@ export function CommandTemplates() {
                 ))}
               </Select>
             </div>
-            <DialogFooter>
+            <DialogFooter className="!flex !flex-row gap-2 sm:space-x-0 [&>*]:min-w-0 [&>*]:flex-1 sm:[&>*]:flex-none">
               <Button variant="outline" onClick={() => setEnableTargetTemplate(null)}>
                 取消
               </Button>
@@ -1172,15 +1243,15 @@ function CommandEditDialog({
 
   return (
     <Dialog open onOpenChange={(o) => !o && onCancel()}>
-      <DialogContent className="max-h-[85vh] max-w-2xl overflow-y-auto">
-        <DialogHeader>
+      <DialogContent className="dialog-center !flex w-[calc(100vw-1.5rem)] max-w-2xl flex-col gap-0 overflow-hidden p-0">
+        <DialogHeader className="shrink-0 border-b border-border/70 px-4 py-4 pr-12 sm:px-6">
           <DialogTitle>{isEdit ? "编辑" : "新建"} 自定义指令</DialogTitle>
           <DialogDescription>
             根据类型不同，下方表单会切到对应字段，*为必填项
           </DialogDescription>
         </DialogHeader>
 
-        <div className="space-y-4">
+        <div className="safe-scrollbar min-h-0 flex-1 touch-pan-y space-y-4 overflow-y-auto overscroll-contain px-4 py-4 sm:px-6">
           <div className="grid grid-cols-2 gap-3">
             <div className="space-y-1.5">
               <Label>指令 *</Label>
@@ -1623,21 +1694,10 @@ function CommandEditDialog({
                     </div>
                     <div className="space-y-1.5">
                       <Label>推理强度（reasoning_effort）</Label>
-                      <Select
+                      <ReasoningEffortSlider
                         value={form.ai_reasoning_effort}
-                        onChange={(e) =>
-                          setField(
-                            "ai_reasoning_effort",
-                            e.target.value as FormState["ai_reasoning_effort"],
-                          )
-                        }
-                      >
-                        <option value="">不下发</option>
-                        <option value="minimal">minimal · 极低</option>
-                        <option value="low">low · 低</option>
-                        <option value="medium">medium · 中</option>
-                        <option value="high">high · 高</option>
-                      </Select>
+                        onChange={(effort) => setField("ai_reasoning_effort", effort)}
+                      />
                       <p className="text-xs text-muted-foreground">
                         当前模式默认 {AI_MODE_DEFAULTS[form.ai_mode].reasoning_effort || "不下发"}；控制支持推理模型的思考预算，当前对 OpenAI Chat/Responses 协议下发。
                       </p>
@@ -1764,8 +1824,8 @@ function CommandEditDialog({
           )}
         </div>
 
-        <DialogFooter>
-          <Button variant="ghost" onClick={onCancel} disabled={saving}>
+        <DialogFooter className="!flex shrink-0 !flex-row gap-2 border-t border-border/70 px-4 py-3 sm:px-6 [&>*]:min-w-0 [&>*]:flex-1 sm:[&>*]:flex-none">
+          <Button variant="outline" onClick={onCancel} disabled={saving}>
             取消
           </Button>
           <Button onClick={onSave} disabled={saving}>

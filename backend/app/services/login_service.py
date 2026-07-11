@@ -57,6 +57,8 @@ class _PendingLogin:
     # 验证码 / 2FA 错误重试次数（超限后 token 作废）
     code_attempts: int = 0
     twofa_attempts: int = 0
+    # token 从验证码/2FA 校验开始到 finalize 完成前只允许一个请求持有。
+    claimed: bool = False
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
 
@@ -195,10 +197,7 @@ async def confirm_code(token: str, code: str) -> tuple[bool, _PendingLogin]:
     - ``require_2fa=True``：账号启用了两步验证，需要继续走 ``confirm_2fa``。
     - ``require_2fa=False``：可以直接进入 finalize。
     """
-    async with _LOCK:
-        pending = _PENDING.get(token)
-    if not pending:
-        raise _err("LOGIN_TOKEN_EXPIRED", "登录会话已过期，请重新发起绑定")
+    pending = await _claim_pending(token)
     try:
         await pending.client.sign_in(
             phone=pending.phone,
@@ -208,26 +207,28 @@ async def confirm_code(token: str, code: str) -> tuple[bool, _PendingLogin]:
     except SessionPasswordNeededError:
         # 账号启用了两步验证，停在此步等 2fa
         pending.require_2fa = True
+        await _release_claim(token, pending)
         return True, pending
     except PhoneCodeInvalidError as e:
         pending.code_attempts += 1
         if pending.code_attempts >= _MAX_CODE_ATTEMPTS:
             await _cleanup(token, disconnect=True)
             raise _err("LOGIN_ATTEMPTS_EXCEEDED", "验证码错误次数过多，请重新发起绑定", 429) from e
+        await _release_claim(token, pending)
         raise _err("CODE_INVALID", "验证码错误") from e
     except PhoneCodeExpiredError as e:
         # 验证码过期视为整个会话作废，回收 client
         await _cleanup(token, disconnect=True)
         raise _err("CODE_EXPIRED", "验证码已过期，请重新发起绑定") from e
+    except BaseException:
+        await _release_claim(token, pending)
+        raise
     return False, pending
 
 
 async def confirm_2fa(token: str, password: str) -> _PendingLogin:
     """第 3 步：提交两步验证密码。"""
-    async with _LOCK:
-        pending = _PENDING.get(token)
-    if not pending:
-        raise _err("LOGIN_TOKEN_EXPIRED", "登录会话已过期，请重新发起绑定")
+    pending = await _claim_pending(token)
     try:
         await pending.client.sign_in(password=password)
     except PasswordHashInvalidError as e:
@@ -235,12 +236,32 @@ async def confirm_2fa(token: str, password: str) -> _PendingLogin:
         if pending.twofa_attempts >= _MAX_2FA_ATTEMPTS:
             await _cleanup(token, disconnect=True)
             raise _err("LOGIN_ATTEMPTS_EXCEEDED", "两步密码错误次数过多，请重新发起绑定", 429) from e
+        await _release_claim(token, pending)
         raise _err("PASSWORD_INVALID", "两步密码错误") from e
+    except BaseException:
+        await _release_claim(token, pending)
+        raise
     return pending
 
 
 async def finalize(db: AsyncSession, token: str, pending: _PendingLogin) -> int:
     """登录成功后落库 + 通知 supervisor 拉起 worker。返回 account_id。"""
+    async with _LOCK:
+        current = _PENDING.get(token)
+        if current is not pending:
+            raise _err("LOGIN_TOKEN_EXPIRED", "登录会话已过期，请重新发起绑定")
+        if not pending.claimed:
+            pending.claimed = True
+    try:
+        return await _finalize_claimed(db, token, pending)
+    except BaseException:
+        await _release_claim(token, pending)
+        raise
+
+
+async def _finalize_claimed(db: AsyncSession, token: str, pending: _PendingLogin) -> int:
+    """执行已持有 token claim 的落库流程。"""
+
     me = await pending.client.get_me()
     session_str = pending.client.session.save()
 
@@ -321,6 +342,27 @@ async def _cleanup(token: str, *, disconnect: bool = False) -> None:
         pending = _PENDING.pop(token, None)
     if disconnect and pending is not None:
         await _safe_disconnect(pending.client)
+
+
+async def _claim_pending(token: str) -> _PendingLogin:
+    """原子占用一个登录 token，避免验证码、2FA 或 finalize 被并发执行。"""
+
+    async with _LOCK:
+        pending = _PENDING.get(token)
+        if pending is None:
+            raise _err("LOGIN_TOKEN_EXPIRED", "登录会话已过期，请重新发起绑定")
+        if pending.claimed:
+            raise _err("LOGIN_TOKEN_IN_USE", "登录会话正在处理中，请勿重复提交", 409)
+        pending.claimed = True
+        return pending
+
+
+async def _release_claim(token: str, pending: _PendingLogin) -> None:
+    """仅释放仍指向同一挂起对象的 claim，避免误解锁已替换 token。"""
+
+    async with _LOCK:
+        if _PENDING.get(token) is pending:
+            pending.claimed = False
 
 
 async def get_pending(token: str) -> _PendingLogin | None:

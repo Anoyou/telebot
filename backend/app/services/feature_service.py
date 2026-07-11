@@ -80,6 +80,9 @@ def _feature_manifest_from_installed_plugin(
     config_actions = manifest_json.get("config_actions")
     if isinstance(config_actions, list):
         manifest["config_actions"] = [item for item in config_actions if isinstance(item, dict)]
+    agent_tools = manifest_json.get("agent_tools")
+    if isinstance(agent_tools, list):
+        manifest["agent_tools"] = [item for item in agent_tools if isinstance(item, dict)]
     usage = str(manifest_json.get("usage") or "").strip()
     if usage:
         manifest["usage"] = usage

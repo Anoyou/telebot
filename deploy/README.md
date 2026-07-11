@@ -37,14 +37,14 @@ curl -fsSL https://raw.githubusercontent.com/Anoyou/telebot/main/scripts/install
 
 ```bash
 cp .env.example .env
-# 修改 MASTER_KEY / JWT_SECRET / POSTGRES_PASSWORD / COOKIE_SECURE 等
+# 修改 MASTER_KEY / JWT_SECRET / UPDATER_TOKEN / POSTGRES_PASSWORD / COOKIE_SECURE 等
 make prod-up
 ```
 
 生产栈包含：
 
 - `postgres`：主数据存储
-- `redis`：IPC、限速和短生命周期数据
+- `redis`：IPC、限速和任务状态；生产默认 AOF everysec + noeviction，磁盘不足时应先扩容或清理，不能依赖逐出关键键
 - `web`：FastAPI + worker supervisor
 - `frontend`：nginx 静态前端 + 后端反代
 
@@ -61,7 +61,7 @@ docker compose logs -f web
 
 脚本：
 
-- `deploy/backup.sh`：备份数据库和 sessions volume
+- `deploy/backup.sh`：备份数据库、sessions、已安装插件和插件仓库缓存，并生成 SHA-256 校验文件
 - `deploy/backup-keys.sh`：备份 `.env` 中关键密钥
 - `deploy/restore.sh`：恢复备份
 
@@ -90,6 +90,8 @@ TELEPILOT_UPDATE_BRANCH=codex/0.33-interaction-framework make prod-update
 
 生产栈包含一个仅 Docker 内网可访问的 `updater` 服务。它挂载项目目录和 Docker socket，由已登录的 Web 面板“检查更新”弹窗触发：
 
+`UPDATER_TOKEN` 必须是独立随机密钥，不得与 `JWT_SECRET` 复用；缺失时 updater 会拒绝启动。
+
 - 检查更新：读取当前分支或 `TELEPILOT_UPDATE_BRANCH`，执行 `git fetch`，按变更文件分类。
 - 应用更新：后台执行 `scripts/prod-update.sh`，优先增量重建 `web` / `frontend`；涉及 compose、Dockerfile、依赖、部署脚本等关键文件时自动回退完整更新。
 - 任务日志：Web 面板轮询 updater job，显示最近输出；服务重启期间页面可能短暂断开，刷新后可重新检查版本。
@@ -110,7 +112,7 @@ curl -fsS http://127.0.0.1:8000/healthz
 docker compose logs --tail=100 web
 ```
 
-回滚：
+仅代码且不含迁移时可回滚：
 
 ```bash
 cd /opt/telepilot
@@ -118,6 +120,6 @@ git checkout <tag-or-commit>
 make prod-up
 ```
 
-如果要恢复数据库或 sessions，先确认 `.env` 里的 `MASTER_KEY` 与备份时一致，再执行 `deploy/restore.sh`。
+如果更新执行了数据库迁移，切回旧代码并不能还原 schema，必须从迁移前备份恢复数据库。先确认 `.env` 里的 `MASTER_KEY` 与备份时一致，再执行 `deploy/restore.sh`；恢复脚本还可一并恢复插件卷。
 
 部分 Docker 默认值、数据库默认名和 volume 名仍保留 `telebot` 历史兼容命名，不影响对外产品名 TelePilot。

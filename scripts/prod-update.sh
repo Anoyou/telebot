@@ -19,6 +19,9 @@ BRANCH="${TELEPILOT_UPDATE_BRANCH:-main}"
 DRY_RUN=0
 FORCE_FULL=0
 OLD_COMMIT=""
+HEAD_ALREADY_UPDATED=0
+HANDOFF_SCHEDULED=0
+RUNNING_UPDATER_TOKEN="${UPDATER_TOKEN:-}"
 
 usage() {
   cat <<EOF
@@ -67,6 +70,7 @@ docker info >/dev/null 2>&1 || die "docker 守护进程未启动"
 docker compose version >/dev/null 2>&1 || die "缺 docker compose v2 插件"
 
 git rev-parse --is-inside-work-tree >/dev/null 2>&1 || die "当前目录不是 Git 工作树"
+PENDING_FILE="$(git rev-parse --git-path telepilot-deploy-pending)"
 
 REMOTE_REF="refs/remotes/${REMOTE}/${BRANCH}"
 
@@ -78,8 +82,23 @@ TARGET_COMMIT="$(git rev-parse "$REMOTE_REF")"
 OLD_COMMIT="$CURRENT_COMMIT"
 
 if [[ "$CURRENT_COMMIT" == "$TARGET_COMMIT" ]]; then
-  ok "当前已是最新 commit：${CURRENT_COMMIT:0:12}"
-  exit 0
+  if [[ -f "$PENDING_FILE" ]]; then
+    read -r pending_old pending_target < "$PENDING_FILE" || true
+    if [[ -n "${pending_old:-}" && "${pending_target:-}" == "$TARGET_COMMIT" ]] \
+      && git cat-file -e "${pending_old}^{commit}" 2>/dev/null; then
+      warn "检测到 commit 已拉取但部署未完成，继续重试 ${pending_old:0:12}..${TARGET_COMMIT:0:12}"
+      CURRENT_COMMIT="$pending_old"
+      OLD_COMMIT="$pending_old"
+      HEAD_ALREADY_UPDATED=1
+    else
+      warn "忽略与当前 HEAD 不匹配的旧部署 pending 标记"
+      rm -f "$PENDING_FILE"
+    fi
+  fi
+  if (( HEAD_ALREADY_UPDATED == 0 )); then
+    ok "当前已是最新 commit：${TARGET_COMMIT:0:12}"
+    exit 0
+  fi
 fi
 
 mapfile -t CHANGED_FILES < <(git diff --name-only "$CURRENT_COMMIT..$TARGET_COMMIT")
@@ -176,7 +195,7 @@ else
 fi
 
 if (( REQUIRES_BACKUP == 1 )); then
-  warn "本次包含数据库迁移。建议先执行 deploy/backup.sh 或确认已有新备份。"
+  warn "本次包含数据库迁移；应用代码回滚不能撤销已执行的数据库变更。"
 fi
 
 if (( DRY_RUN == 1 )); then
@@ -188,10 +207,30 @@ if [[ -n "$(git status --porcelain)" ]]; then
   die "工作区存在未提交改动，拒绝自动更新。请先提交、stash 或清理后重试。"
 fi
 
-log "执行 fast-forward 更新"
-git pull --ff-only "$REMOTE" "$BRANCH"
-NEW_COMMIT="$(git rev-parse HEAD)"
-ok "代码已更新到 ${NEW_COMMIT:0:12}"
+if (( HEAD_ALREADY_UPDATED == 0 )); then
+  log "执行 fast-forward 更新"
+  git pull --ff-only "$REMOTE" "$BRANCH"
+  NEW_COMMIT="$(git rev-parse HEAD)"
+  printf '%s %s\n' "$OLD_COMMIT" "$NEW_COMMIT" > "$PENDING_FILE"
+  ok "代码已更新到 ${NEW_COMMIT:0:12}"
+else
+  NEW_COMMIT="$(git rev-parse HEAD)"
+fi
+
+# 新版 compose 在解析任何服务前都要求 UPDATER_TOKEN。先补齐并与 JWT
+# 解耦，保证从旧部署升级时备份和后续 compose 命令都能执行。
+ensure_updater_token_env .env
+PERSISTED_UPDATER_TOKEN="$(grep -E '^UPDATER_TOKEN=' .env | head -n1 | cut -d= -f2- | tr -d ' "')"
+
+if (( REQUIRES_BACKUP == 1 )); then
+  if [[ "${TELEPILOT_MIGRATION_BACKUP_CONFIRMED:-0}" == "1" ]]; then
+    warn "已由操作者确认存在可恢复备份，跳过自动备份。"
+  else
+    log "迁移前创建数据库与持久化卷备份"
+    TELEPILOT_BACKUP_QUIESCE=1 "$ROOT_DIR/deploy/backup.sh"
+    ok "迁移前备份已完成；尚未启动新版容器或执行迁移。"
+  fi
+fi
 
 frontend_url() {
   local raw
@@ -209,9 +248,15 @@ frontend_url() {
 
 if (( NEEDS_FULL == 1 )); then
   if [[ "${TELEPILOT_SKIP_UPDATER_RECREATE:-0}" == "1" ]]; then
-    warn "当前由内部 updater 执行完整更新，跳过重建 updater 自身以避免任务被中途杀掉。"
+    warn "当前由内部 updater 执行完整更新，业务服务完成后由临时 handoff 容器重建 updater。"
     log "构建 + 启动业务容器（postgres / redis / web / frontend）"
-    docker compose up -d --build postgres redis web frontend
+    if [[ -n "$RUNNING_UPDATER_TOKEN" && "$RUNNING_UPDATER_TOKEN" != "$PERSISTED_UPDATER_TOKEN" ]]; then
+      # 过渡阶段先让新 web 与仍在运行的旧 updater 使用同一 token；handoff
+      # 随后会用 .env 中的新 token 一起重建两者。
+      UPDATER_TOKEN="$RUNNING_UPDATER_TOKEN" docker compose up -d --build postgres redis web frontend
+    else
+      docker compose up -d --build postgres redis web frontend
+    fi
     wait_compose_healthy docker-compose.yml postgres 60 || {
       docker compose logs --tail=80 postgres >&2
       exit 1
@@ -232,7 +277,13 @@ if (( NEEDS_FULL == 1 )); then
       docker compose logs --tail=80 frontend >&2
       exit 1
     }
-    ok "完整业务更新完成（updater 保持当前版本）"
+    log "构建新版 updater 并安排 token/镜像原子切换"
+    docker compose build updater
+    env -u UPDATER_TOKEN docker compose run -d --rm --no-deps --entrypoint sh updater -c \
+      'sleep 3; env -u UPDATER_TOKEN docker compose up -d --no-deps --force-recreate updater web && rm -f "$(git rev-parse --git-path telepilot-deploy-pending)"' \
+      >/dev/null
+    HANDOFF_SCHEDULED=1
+    ok "完整业务更新完成；updater/web handoff 已安排"
   else
     log "执行完整生产更新"
     "$SCRIPT_DIR/prod-up.sh"
@@ -266,6 +317,10 @@ else
   fi
 
   ok "增量更新完成"
+fi
+
+if (( HANDOFF_SCHEDULED == 0 )); then
+  rm -f "$PENDING_FILE"
 fi
 
 echo

@@ -123,6 +123,42 @@ need_cmd() {
   command -v "$1" >/dev/null 2>&1 || die "缺少命令：$1（$2）"
 }
 
+# 确保 updater 使用独立随机 token。参数为 env 文件路径，默认 .env。
+# 缺失、占位、过短或与 JWT_SECRET 相同时都会替换；不会改动其它密钥。
+ensure_updater_token_env() {
+  local env_file="${1:-.env}" py current jwt
+  [[ -f "$env_file" ]] || die "找不到环境文件：$env_file"
+  current="$(grep -E '^UPDATER_TOKEN=' "$env_file" 2>/dev/null | head -n1 | cut -d= -f2- | tr -d ' "' || true)"
+  jwt="$(grep -E '^JWT_SECRET=' "$env_file" 2>/dev/null | head -n1 | cut -d= -f2- | tr -d ' "' || true)"
+  if [[ -n "$current" && "$current" != changeme-* && ${#current} -ge 32 && "$current" != "$jwt" ]]; then
+    return 0
+  fi
+  if command -v python3 >/dev/null 2>&1; then
+    py=python3
+  elif [[ -x "$ROOT_DIR/backend/.venv/bin/python" ]]; then
+    py="$ROOT_DIR/backend/.venv/bin/python"
+  else
+    die "需要 Python 生成独立 UPDATER_TOKEN"
+  fi
+  "$py" - "$env_file" <<'PY'
+import pathlib
+import re
+import secrets
+import sys
+
+p = pathlib.Path(sys.argv[1])
+text = p.read_text()
+line = f"UPDATER_TOKEN={secrets.token_urlsafe(64)}"
+if re.search(r"^UPDATER_TOKEN=.*$", text, flags=re.MULTILINE):
+    text = re.sub(r"^UPDATER_TOKEN=.*$", line, text, flags=re.MULTILINE)
+else:
+    text = text.rstrip() + "\n" + line + "\n"
+p.write_text(text)
+PY
+  chmod 600 "$env_file" 2>/dev/null || true
+  ok "$env_file 已生成独立 UPDATER_TOKEN"
+}
+
 # ════════════════════════════════════════════════════════════
 # 自适应内存档位：根据 Docker 可用 RAM 选 tiny / small / large。
 # 用法：

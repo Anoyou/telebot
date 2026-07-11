@@ -257,7 +257,7 @@ async def test_periodic_userbot_session_expire_scan_calls_loader(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_run_interaction_userbot_action_payout_uses_rate_limit_and_parse_mode():
+async def test_run_interaction_userbot_action_payout_uses_rate_limit_and_parse_mode(monkeypatch):
     from app.worker import runtime as runtime_mod
 
     client = AsyncMock()
@@ -265,6 +265,7 @@ async def test_run_interaction_userbot_action_payout_uses_rate_limit_and_parse_m
     engine = SimpleNamespace(
         acquire=AsyncMock(return_value=SimpleNamespace(allowed=True, wait_seconds=0, outcome="ok"))
     )
+    monkeypatch.setattr(runtime_mod, "_check_payout_limit", AsyncMock(return_value=(True, None)))
 
     result = await runtime_mod._run_interaction_userbot_action(
         client,

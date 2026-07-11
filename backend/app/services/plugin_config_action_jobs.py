@@ -45,6 +45,81 @@ STATUS_RUNNING = "running"
 STATUS_SUCCEEDED = "succeeded"
 STATUS_FAILED = "failed"
 TERMINAL_STATUSES = frozenset({STATUS_SUCCEEDED, STATUS_FAILED})
+INTERRUPTED_ERROR_CODE = "CONFIG_ACTION_INTERRUPTED"
+_ACTIVE_TASKS: set[asyncio.Task[Any]] = set()
+
+
+async def startup_plugin_config_action_jobs() -> int:
+    """Fail stale in-process jobs left behind by a previous web process."""
+
+    return await _converge_interrupted_jobs("服务重启，未完成的配置动作已终止，请重新执行。")
+
+
+async def shutdown_plugin_config_action_jobs() -> int:
+    """Cancel owned tasks, await them, then converge any non-terminal rows."""
+
+    tasks = list(_ACTIVE_TASKS)
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+    return await _converge_interrupted_jobs("服务关闭，未完成的配置动作已终止，请重新执行。")
+
+
+async def _converge_interrupted_jobs(message: str) -> int:
+    async with AsyncSessionLocal() as db:
+        rows = (
+            await db.execute(
+                select(PluginConfigActionJob).where(
+                    PluginConfigActionJob.status.in_((STATUS_QUEUED, STATUS_RUNNING))
+                )
+            )
+        ).scalars().all()
+        now = _utcnow()
+        for job in rows:
+            job.status = STATUS_FAILED
+            job.message = message
+            job.error_code = INTERRUPTED_ERROR_CODE
+            job.error_message = message
+            job.ended_at = now
+            job.updated_at = now
+            await _write_runtime_log(
+                db,
+                job,
+                LEVEL_ERROR,
+                message,
+                step="interrupted",
+                error_code=INTERRUPTED_ERROR_CODE,
+            )
+        if rows:
+            await db.commit()
+        return len(rows)
+
+
+def _start_job_task(coro: Any) -> None:
+    task = asyncio.create_task(coro)
+    if not isinstance(task, asyncio.Task):
+        return
+    _ACTIVE_TASKS.add(task)
+
+    def _done(completed: asyncio.Task[Any]) -> None:
+        _ACTIVE_TASKS.discard(completed)
+        if completed.cancelled():
+            return
+        try:
+            error = completed.exception()
+        except Exception:  # noqa: BLE001
+            log.exception("读取插件配置任务结果失败")
+            return
+        if error is not None:
+            log.error(
+                "插件配置后台任务未捕获异常: %s: %s",
+                type(error).__name__,
+                error,
+                exc_info=(type(error), error, error.__traceback__),
+            )
+
+    task.add_done_callback(_done)
 
 
 async def create_plugin_config_action_job(
@@ -87,7 +162,7 @@ async def create_plugin_config_action_job(
     await db.commit()
     await db.refresh(job)
 
-    asyncio.create_task(
+    _start_job_task(
         _run_plugin_config_action_job(
             job.job_id,
             effective_config=dict(effective_config or {}),

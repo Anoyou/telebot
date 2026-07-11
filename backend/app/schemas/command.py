@@ -24,6 +24,7 @@ from ..db.models.command import (
     COMMAND_TYPE_RUN_PLUGIN,
     LLM_API_FORMAT_CHAT_COMPLETIONS,
     LLM_MODALITY_TEXT,
+    LLM_PROTOCOL_PROFILE_STANDARD,
     LLM_WEB_SEARCH_API_FORMAT_AUTO,
 )
 
@@ -313,6 +314,10 @@ class ProviderModel(BaseModel):
     enabled: bool = True
     custom: bool = False
     label: str | None = Field(default=None, max_length=128)
+    supports_tools: bool | None = None
+    supports_images: bool | None = None
+    supports_temperature: bool | None = None
+    reasoning_efforts: list[Literal["minimal", "low", "medium", "high", "xhigh"]] | None = None
 
     @field_validator("id")
     @classmethod
@@ -336,6 +341,11 @@ class LLMProviderCreate(BaseModel):
         LLM_API_FORMAT_CHAT_COMPLETIONS
     )
     """API 协议；和 provider 厂商解耦——同一个反代 base_url 可能只支持其中某种。"""
+
+    protocol_profile: Literal["standard", "claude_code_proxy"] = (
+        LLM_PROTOCOL_PROFILE_STANDARD
+    )
+    """Anthropic Messages 请求兼容档案；其他 API 协议会在服务层规范化为 standard。"""
 
     web_search_api_format: Literal["auto", "chat_completions", "responses", "anthropic_messages"] = (
         LLM_WEB_SEARCH_API_FORMAT_AUTO
@@ -411,6 +421,7 @@ class LLMProviderUpdate(BaseModel):
     base_url: str | None = Field(default=None, max_length=255)
     default_model: str | None = Field(default=None, min_length=1, max_length=64)
     api_format: Literal["chat_completions", "responses", "anthropic_messages"] | None = None
+    protocol_profile: Literal["standard", "claude_code_proxy"] | None = None
     web_search_api_format: Literal["auto", "chat_completions", "responses", "anthropic_messages"] | None = None
 
     # 路由元数据（全可选；None / 缺省 = 不动）
@@ -448,6 +459,7 @@ class LLMProviderOut(BaseModel):
     base_url: str | None = None
     default_model: str
     api_format: str = LLM_API_FORMAT_CHAT_COMPLETIONS
+    protocol_profile: str = LLM_PROTOCOL_PROFILE_STANDARD
     web_search_api_format: str = LLM_WEB_SEARCH_API_FORMAT_AUTO
     # 路由元数据（出参始终带，便于前端展示）
     modality: str = LLM_MODALITY_TEXT

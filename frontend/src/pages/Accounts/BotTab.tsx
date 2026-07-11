@@ -1909,6 +1909,7 @@ export function BotTab({
     notify_enabled: true,
     enabled: true,
   });
+  const [newUserTgId, setNewUserTgId] = useState("");
   const [interactionIdentityExpanded, setInteractionIdentityExpanded] = useState(false);
   const [interactionAdvancedExpanded, setInteractionAdvancedExpanded] = useState(false);
   const [mobileRuleEditorOpen, setMobileRuleEditorOpen] = useState(false);
@@ -1918,31 +1919,32 @@ export function BotTab({
   const botQ = useQuery({
     queryKey: ["account", aid, "bot"],
     queryFn: () => getAccountBot(aid),
-    enabled: !!aid,
+    enabled: !!aid && mode === "management",
   });
   const usersQ = useQuery({
     queryKey: ["account", aid, "bot", "users"],
     queryFn: () => listAccountBotUsers(aid),
-    enabled: !!aid,
+    enabled: !!aid && mode === "management",
   });
   const interactionQ = useQuery({
     queryKey: ["account", aid, "interaction-bot"],
     queryFn: () => getInteractionBotConfig(aid),
-    enabled: !!aid,
+    enabled: !!aid && mode === "interaction",
   });
   const allowedPeersQ = useQuery({
     queryKey: ["ignored-peers", aid],
     queryFn: () => listIgnoredPeers(aid),
-    enabled: !!aid,
+    enabled: !!aid && mode === "interaction",
   });
   const matrixQ = useQuery({
     queryKey: ["feature-matrix"],
     queryFn: getFeatureMatrix,
+    enabled: mode === "interaction",
   });
   const featuresQ = useQuery({
     queryKey: ["account", aid, "features"],
     queryFn: () => listAccountFeatures(aid),
-    enabled: !!aid,
+    enabled: !!aid && mode === "interaction",
   });
   const accountFeatureConfigByKey = new Map(
     (featuresQ.data ?? []).map((feature) => [feature.feature_key, feature.config ?? {}]),
@@ -2313,9 +2315,11 @@ export function BotTab({
 
   const addUserMut = useMutation({
     mutationFn: () => {
-      if (!newUser.tg_user_id) throw new Error("请填写 Telegram 用户 ID");
+      const tgUserId = parseOptionalPositiveInt(newUserTgId, "Telegram 用户 ID");
+      if (tgUserId == null) throw new Error("请填写 Telegram 用户 ID");
       return createAccountBotUser(aid, {
         ...newUser,
+        tg_user_id: tgUserId,
         display_name: newUser.display_name?.trim() || null,
       });
     },
@@ -2328,6 +2332,7 @@ export function BotTab({
         notify_enabled: true,
         enabled: true,
       });
+      setNewUserTgId("");
       invalidate();
     },
     onError: (err) => toast.error(getErrMsg(err)),
@@ -2349,10 +2354,25 @@ export function BotTab({
     onError: (err) => toast.error(getErrMsg(err)),
   });
 
-  if (botQ.isLoading || usersQ.isLoading || interactionQ.isLoading || featuresQ.isLoading) {
+  const isLoading = mode === "interaction"
+    ? interactionQ.isLoading || allowedPeersQ.isLoading || matrixQ.isLoading || featuresQ.isLoading
+    : botQ.isLoading || usersQ.isLoading;
+  const queryError = mode === "interaction"
+    ? interactionQ.error || allowedPeersQ.error || matrixQ.error || featuresQ.error
+    : botQ.error || usersQ.error;
+
+  if (isLoading) {
     return (
       <div className="flex h-28 items-center justify-center">
         <Spinner className="text-primary" />
+      </div>
+    );
+  }
+
+  if (queryError) {
+    return (
+      <div className="rounded-lg border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
+        配置加载失败：{getErrMsg(queryError)}
       </div>
     );
   }
@@ -2388,7 +2408,7 @@ export function BotTab({
 
   const managementStatus = (
     <div className="flex flex-wrap gap-2">
-      <SignalPill tone={bot.enabled ? "success" : "warn"} label="管理 Bot" value={bot.enabled ? "已启用" : "未启用"} />
+      <SignalPill tone={bot?.enabled ? "success" : "warn"} label="管理 Bot" value={bot?.enabled ? "已启用" : "未启用"} />
       <SignalPill tone={bot?.has_token ? "success" : "neutral"} label="Token" value={bot?.has_token ? "已配置" : "未配置"} />
       <SignalPill tone={users.length > 0 ? "primary" : "neutral"} label="授权用户" value={`${users.length} 人`} />
     </div>
@@ -3278,10 +3298,8 @@ export function BotTab({
               <Input
                 inputMode="numeric"
                 placeholder="123456789"
-                value={newUser.tg_user_id || ""}
-                onChange={(e) =>
-                  setNewUser((v) => ({ ...v, tg_user_id: Number(e.target.value) || 0 }))
-                }
+                value={newUserTgId}
+                onChange={(e) => setNewUserTgId(e.target.value)}
               />
             </div>
             <div className="space-y-1.5">

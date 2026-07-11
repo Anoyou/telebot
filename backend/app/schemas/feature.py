@@ -124,11 +124,12 @@ class FeatureInfo(BaseModel):
         if isinstance(installed_manifest, dict):
             installed_version = str(installed_manifest.get("version") or "").strip() or None
         installed_version = installed_version or str(getattr(installed_plugin, "version", "") or "").strip() or None
-        display_name = str(
+        raw_display_name = (
             installed_manifest.get("display_name")
             if isinstance(installed_manifest, dict)
-            else ""
-        ).strip()
+            else None
+        )
+        display_name = raw_display_name.strip() if isinstance(raw_display_name, str) else ""
         return cls(
             key=f.key,
             display_name=display_name or f.display_name,

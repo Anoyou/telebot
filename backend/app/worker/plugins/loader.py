@@ -3826,6 +3826,7 @@ _SUPPORTED_FACADE_PERMISSIONS: set[str] = {
     "external_http",
     "external_http_bypass_proxy",
     "ai_text",
+    "ai_agent",
 }
 _RESERVED_UNSUPPORTED_FACADE_PERMISSIONS: set[str] = {
     "ai_vision",
@@ -5975,17 +5976,17 @@ async def _activate(db, state: _AccountState, af: AccountFeature, redis: Any) ->
                 manifest_http=getattr(plugin_manifest, "http", None),
             )
     plugin_ai: Any = None
-    if plugin_manifest is not None and "ai_text" in plugin_permissions:
+    if plugin_manifest is not None and plugin_permissions & {"ai_text", "ai_agent"}:
         from ...services.ai_feature import is_ai_enabled
 
         if await is_ai_enabled(db):
             from .ai_facade import PluginAI  # 延迟 import，避免未用 AI 的插件增加依赖面
 
-            plugin_ai = PluginAI.from_context(
-                PluginContext(
-                    account_id=state.account_id,
-                    feature_key=af.feature_key,
-                )
+            plugin_ai = PluginAI(
+                account_id=state.account_id,
+                plugin_key=af.feature_key,
+                allow_agent="ai_agent" in plugin_permissions,
+                manifest=plugin_manifest.to_dict(),
             )
     declared_facade_permissions = plugin_permissions & (
         _SUPPORTED_FACADE_PERMISSIONS | _RESERVED_UNSUPPORTED_FACADE_PERMISSIONS

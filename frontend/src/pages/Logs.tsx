@@ -1,4 +1,4 @@
-import { useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { isAxiosError } from "axios";
@@ -135,15 +135,15 @@ const SYSTEM_CONSOLE_SERVICE_OPTIONS = [
 ];
 
 export function Logs() {
-  const [searchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useSearchParams();
   const initialTraceId = searchParams.get("trace_id") || "";
   const [view, setView] = useState<LogView>(() => parseLogView(searchParams.get("view")));
   const [accountId, setAccountId] = useState(() => searchParams.get("account_id") || searchParams.get("aid") || "");
   const [keyword, setKeyword] = useState(() => searchParams.get("keyword") || "");
   const [verdict, setVerdict] = useState<VerdictFilter>(() => parseVerdict(searchParams.get("verdict")));
-  const [timeRange, setTimeRange] = useState<TimeRange>("1h");
-  const [customSince, setCustomSince] = useState("");
-  const [customUntil, setCustomUntil] = useState("");
+  const [timeRange, setTimeRange] = useState<TimeRange>(() => parseTimeRange(searchParams.get("range")));
+  const [customSince, setCustomSince] = useState(() => searchParams.get("since") || "");
+  const [customUntil, setCustomUntil] = useState(() => searchParams.get("until") || "");
   const [showFilters, setShowFilters] = useState(false);
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [pluginKey, setPluginKey] = useState(() => searchParams.get("plugin_key") || "");
@@ -160,14 +160,50 @@ export function Logs() {
   const [runtimeSource, setRuntimeSource] = useState<RuntimeSourceFilter>(() => parseRuntimeSource(searchParams.get("source")));
   const [runtimeLimit, setRuntimeLimit] = useState(() => parseRuntimeLimit(searchParams.get("limit")));
   const [consoleService, setConsoleService] = useState(() => parseConsoleService(searchParams.get("service")));
+  const debouncedKeyword = useDebouncedValue(keyword.trim(), 350);
+  const debouncedTraceId = useDebouncedValue(traceId.trim(), 350);
+  const debouncedReasonCode = useDebouncedValue(reasonCode.trim(), 350);
+  const debouncedChatId = useDebouncedValue(chatId.trim(), 350);
+  const debouncedMessageId = useDebouncedValue(messageId.trim(), 350);
+  const debouncedSenderUserId = useDebouncedValue(senderUserId.trim(), 350);
+
+  useEffect(() => {
+    const next = new URLSearchParams();
+    const setValue = (key: string, value: string | number | undefined) => {
+      if (value !== undefined && String(value).trim()) next.set(key, String(value));
+    };
+    setValue("view", view === "messages" ? undefined : view);
+    setValue("account_id", accountId);
+    setValue("keyword", keyword.trim());
+    setValue("verdict", verdict);
+    setValue("range", timeRange === "1h" ? undefined : timeRange);
+    if (timeRange === "custom") {
+      setValue("since", customSince);
+      setValue("until", customUntil);
+    }
+    setValue("plugin_key", pluginKey);
+    setValue("event_type", eventType);
+    setValue("source_channel", sourceChannel);
+    setValue("status", status);
+    setValue("trace_id", traceId.trim() || selectedTraceId);
+    setValue("reason_code", reasonCode.trim());
+    setValue("chat_id", chatId.trim());
+    setValue("message_id", messageId.trim());
+    setValue("sender_user_id", senderUserId.trim());
+    setValue("level", runtimeLevel);
+    setValue("source", runtimeSource);
+    setValue("limit", runtimeLimit === 300 ? undefined : runtimeLimit);
+    setValue("service", consoleService === "all" ? undefined : consoleService);
+    if (next.toString() !== searchParams.toString()) setSearchParams(next, { replace: true });
+  }, [accountId, chatId, consoleService, customSince, customUntil, eventType, keyword, messageId, pluginKey, reasonCode, runtimeLevel, runtimeLimit, runtimeSource, searchParams, selectedTraceId, senderUserId, setSearchParams, sourceChannel, status, timeRange, traceId, verdict, view]);
 
   const settingsQ = useQuery({ queryKey: ["system", "settings"], queryFn: getSystemSettings });
   const accountsQ = useQuery({ queryKey: ["accounts"], queryFn: listAccounts });
   const matrixQ = useQuery({ queryKey: ["matrix"], queryFn: getFeatureMatrix });
   const timezone = settingsQ.data?.timezone || "";
   const range = useMemo(() => buildTimeRange(timeRange, customSince, customUntil), [customSince, customUntil, timeRange]);
-  const traceIdFilter = traceId.trim();
-  const reasonCodeFilter = reasonCode.trim();
+  const traceIdFilter = debouncedTraceId;
+  const reasonCodeFilter = debouncedReasonCode;
   const commonQuery = {
     account_id: accountId || undefined,
     source_channel: sourceChannel || undefined,
@@ -176,10 +212,10 @@ export function Logs() {
     plugin_key: pluginKey || undefined,
     trace_id: traceIdFilter || undefined,
     reason_code: reasonCodeFilter || undefined,
-    chat_id: chatId.trim() || undefined,
-    message_id: messageId.trim() || undefined,
-    sender_user_id: senderUserId.trim() || undefined,
-    keyword: keyword.trim() || undefined,
+    chat_id: safeIntegerFilter(debouncedChatId),
+    message_id: safeIntegerFilter(debouncedMessageId, false),
+    sender_user_id: safeIntegerFilter(debouncedSenderUserId, false),
+    keyword: debouncedKeyword || undefined,
     verdict: verdict || undefined,
     since: range.since,
     until: range.until,
@@ -190,13 +226,13 @@ export function Logs() {
     level: runtimeLevel || undefined,
     source: runtimeSource || undefined,
     plugin_key: pluginKey || undefined,
-    keyword: keyword.trim() || undefined,
+    keyword: debouncedKeyword || undefined,
     since: range.since,
     limit: runtimeLimit,
   };
   const consoleQuery = {
     service: consoleService,
-    keyword: keyword.trim() || undefined,
+    keyword: debouncedKeyword || undefined,
     tail: runtimeLimit,
   };
 
@@ -222,6 +258,7 @@ export function Logs() {
     queryKey: ["logs", "trace", "detail", selectedTraceId],
     queryFn: () => getEventTrace(selectedTraceId),
     enabled: view === "messages" && Boolean(selectedTraceId),
+    refetchInterval: autoRefresh && selectedTraceId ? 5_000 : false,
   });
   const selectedMessage = (messagesQ.data ?? []).find((item) => item.trace_id === selectedTraceId);
   const counts = countVerdicts(messagesQ.data ?? []);
@@ -1558,6 +1595,29 @@ function isWarnStatus(status?: string | null): boolean {
 function parseVerdict(value: string | null): VerdictFilter {
   if (value === "responded" || value === "no_response_normal" || value === "stuck" || value === "failed") return value;
   return "";
+}
+
+function useDebouncedValue<T>(value: T, delayMs: number): T {
+  const [debounced, setDebounced] = useState(value);
+  useEffect(() => {
+    const timer = window.setTimeout(() => setDebounced(value), delayMs);
+    return () => window.clearTimeout(timer);
+  }, [delayMs, value]);
+  return debounced;
+}
+
+function parseTimeRange(value: string | null): TimeRange {
+  if (value === "15m" || value === "6h" || value === "24h" || value === "custom") return value;
+  return "1h";
+}
+
+function safeIntegerFilter(value: string, allowNegative = true): string | undefined {
+  const normalized = value.trim();
+  if (!normalized) return undefined;
+  if (!(allowNegative ? /^-?\d+$/ : /^\d+$/).test(normalized)) return undefined;
+  const parsed = Number(normalized);
+  if (!Number.isSafeInteger(parsed) || (!allowNegative && parsed <= 0)) return undefined;
+  return normalized;
 }
 
 function parseLogView(value: string | null): LogView {

@@ -53,6 +53,8 @@ class Manifest:
     config_schema: dict[str, Any] | None = None
     # 配置页动作声明；也可放在 config_schema["x-config-actions"] 里。
     config_actions: list[dict[str, Any]] = field(default_factory=list)
+    # 声明性 Agent 工具；执行 handler 仍必须由宿主显式注册。
+    agent_tools: list[dict[str, Any]] = field(default_factory=list)
     # 模块身份分类：interactive（互动娱乐）/ automation（自动化）/ utility（工具能力）
     category: str = "utility"
     # 可由交互 Bot 启动的入口声明；未声明则默认不出现在交互 Bot 模块列表里
@@ -99,6 +101,7 @@ class Manifest:
             "requires_features": list(self.requires_features),
             "config_schema": self.config_schema,
             "config_actions": list(self.config_actions),
+            "agent_tools": list(self.agent_tools),
             "category": self.category,
             "interaction_entries": list(self.interaction_entries),
             "event_subscriptions": list(self.event_subscriptions),

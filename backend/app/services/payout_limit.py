@@ -7,11 +7,11 @@ payout 实质是 userbot 给群内第三方记账 bot 发 "+{amount}" 文本。�
 - 日累计上限（daily_max）：Redis 原子 check-and-consume（未超才 INCRBY + 当日过期
   key），风格照抄 ``llm_account_budget`` 的日累计写法。
 
-与 ``llm_account_budget`` 一致的取舍：Redis / 配置读取失败时 fail-open（放行）。
-风控不该在 Redis 抖动或 settings 迁移窗口把正常收付款卡死；宁可漏计也不误杀。
+资金发送采用 fail-closed：配置或 Redis 不可用时拒绝本笔 payout，并返回可辨识的
+基础设施错误说明。这样不会在风控依赖失效时绕过用户已经配置的资金保护。
 
 注意：check-and-consume 在发送前消费，若随后发送失败，该笔仍已计入日累计（偏保守，
-不做释放补偿）。发送失败属小概率，且方向与 fail-open 取舍不冲突。日累计 key 以 UTC
+不做释放补偿）。发送失败属小概率，且与 fail-closed 的保守方向一致。日累计 key 以 UTC
 日期分桶，与 ``llm_account_budget`` 的日限保持同一天界。
 """
 
@@ -67,6 +67,10 @@ class PayoutLimitExceeded(RuntimeError):
     """payout 超限。调用方可选择据此走各自的失败路径。"""
 
 
+PAYOUT_LIMIT_CONFIG_UNAVAILABLE = "payout 风控配置不可用，请检查数据库连接后重试。"
+PAYOUT_LIMIT_COUNTER_UNAVAILABLE = "payout 日累计风控不可用，请检查 Redis 连接后重试。"
+
+
 async def check_and_consume(
     account_id: int | None,
     amount: int,
@@ -89,8 +93,8 @@ async def check_and_consume(
     try:
         limits = await _load_payout_limits()
     except Exception:  # noqa: BLE001
-        log.debug("payout 限额读取失败，fail-open 放行 account=%s", account_id, exc_info=True)
-        return True, None
+        log.error("payout 限额读取失败，fail-closed 拒绝 account=%s", account_id, exc_info=True)
+        return False, PAYOUT_LIMIT_CONFIG_UNAVAILABLE
 
     single_max = int(limits["single_max"])
     daily_max = int(limits["daily_max"])
@@ -109,8 +113,8 @@ async def check_and_consume(
             idempotency_key=idempotency_key,
         )
     except Exception:  # noqa: BLE001
-        log.debug("payout 日累计 Redis 校验失败，fail-open 放行 account=%s", account_id, exc_info=True)
-        return True, None
+        log.error("payout 日累计 Redis 校验失败，fail-closed 拒绝 account=%s", account_id, exc_info=True)
+        return False, PAYOUT_LIMIT_COUNTER_UNAVAILABLE
     if allowed:
         return True, None
     return False, f"payout 日累计上限超限：今日已用 {used}，本笔 {amount_int}，日累计上限 {limit}。"
@@ -176,6 +180,8 @@ def _non_negative_int(value: Any, default: int) -> int:
 
 
 __all__ = [
+    "PAYOUT_LIMIT_CONFIG_UNAVAILABLE",
+    "PAYOUT_LIMIT_COUNTER_UNAVAILABLE",
     "PayoutLimitExceeded",
     "check_and_consume",
 ]

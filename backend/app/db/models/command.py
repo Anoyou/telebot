@@ -78,6 +78,25 @@ ALL_LLM_WEB_SEARCH_API_FORMATS = {
     *ALL_LLM_API_FORMATS,
 }
 
+# Anthropic Messages 请求兼容档案。标准模式只发送官方协议要求的请求字段；
+# claude_code_proxy 仅用于明确要求 Claude Code 兼容头的反代服务。
+LLM_PROTOCOL_PROFILE_STANDARD = "standard"
+LLM_PROTOCOL_PROFILE_CLAUDE_CODE_PROXY = "claude_code_proxy"
+
+ALL_LLM_PROTOCOL_PROFILES = {
+    LLM_PROTOCOL_PROFILE_STANDARD,
+    LLM_PROTOCOL_PROFILE_CLAUDE_CODE_PROXY,
+}
+
+
+def normalize_protocol_profile(api_format: str | None, protocol_profile: str | None) -> str:
+    """Return the only valid protocol profile for the effective API format."""
+    if api_format != LLM_API_FORMAT_ANTHROPIC_MESSAGES:
+        return LLM_PROTOCOL_PROFILE_STANDARD
+    if protocol_profile in ALL_LLM_PROTOCOL_PROFILES:
+        return str(protocol_profile)
+    return LLM_PROTOCOL_PROFILE_STANDARD
+
 
 def default_api_format_for(provider_kind: str) -> str:
     """给定 provider 厂商，返回默认 API 格式。
@@ -215,6 +234,12 @@ class LLMProvider(Base):
         String(32),
         nullable=False,
         server_default=LLM_API_FORMAT_CHAT_COMPLETIONS,
+    )
+    # Anthropic Messages 请求兼容档案；其他 API 协议始终规范化为 standard。
+    protocol_profile: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        server_default=LLM_PROTOCOL_PROFILE_STANDARD,
     )
     # 联网搜索调用时的协议覆盖：
     # - auto：OpenAI/chat_completions 日常走 chat，web_search 时临时走 responses

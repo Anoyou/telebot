@@ -372,6 +372,26 @@ async def test_manual_paid_compensation_writes_audit_and_closes_row(
 
 
 @pytest.mark.asyncio
+async def test_manual_paid_compensation_rejects_second_conditional_update(
+    ledger_session_factory,
+    monkeypatch,
+) -> None:
+    row = await _insert_compensation(ledger_session_factory, payout_key="pay_manual_race")
+    monkeypatch.setattr(ledger_service.audit, "write", AsyncMock())
+
+    async with ledger_session_factory() as first_db:
+        await ledger_service.mark_compensation_manual_paid(first_db, row.id, user_id=1)
+        await first_db.commit()
+
+    async with ledger_session_factory() as second_db:
+        with pytest.raises(Exception) as exc_info:
+            await ledger_service.mark_compensation_manual_paid(second_db, row.id, user_id=2)
+
+    assert getattr(exc_info.value, "status_code", None) == 409
+    assert "不能重复核销" in str(getattr(exc_info.value, "detail", ""))
+
+
+@pytest.mark.asyncio
 async def test_reset_ledger_data_removes_financial_and_operational_rows_only(
     ledger_session_factory,
     monkeypatch,

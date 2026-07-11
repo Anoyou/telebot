@@ -1,6 +1,6 @@
 # TelePilot 插件 AI facade
 
-`ctx.ai` 已作为第三方插件可用的受控文本 AI facade。插件需要在 `plugin.json` 和 `manifest.py` 中声明 `permissions=["ai_text"]`，运行时才会注入 `ctx.ai`。
+`ctx.ai` 是第三方插件可用的受控 AI facade。普通文本调用声明 `permissions=["ai_text"]`；需要模型自主选择工具时必须额外声明独立的 `ai_agent` 权限。两种入口都复用平台 Provider、fallback、账号预算、插件 quota、usage 和密钥隔离。
 
 ## Event Bus 主路径写法
 
@@ -42,6 +42,52 @@ async def on_event(self, ctx, payload):
 - `provider_tag`：推荐写法。按用途标签选择 provider，平台会在可用 provider 中挑选成本优先的匹配项。
 - `provider`：需要固定 provider 时可传 provider id 或 provider name。
 - `tag` / `tags`：兼容别名，已 deprecated；新插件请使用 `provider_tag`。
+
+## 有界 Agent 与工具调用
+
+Agent 工具采用双白名单：插件 manifest 先声明工具名称和参数 Schema，宿主代码调用 `run_agent()` 时还必须传入同名 handler。只有两侧同时存在的工具才会暴露给模型，插件不能用模型返回的任意名称调用 Python 函数。
+
+```json
+{
+  "permissions": ["ai_agent"],
+  "capabilities": {"agent_tools": {"enabled": true}},
+  "agent_tools": [
+    {
+      "name": "lookup_order",
+      "description": "按订单号查询只读摘要",
+      "parameters": {
+        "type": "object",
+        "properties": {"order_id": {"type": "string"}},
+        "required": ["order_id"],
+        "additionalProperties": false
+      },
+      "read_only": true,
+      "strict": true
+    }
+  ]
+}
+```
+
+```python
+async def lookup_order(arguments):
+    return await query_order_summary(arguments["order_id"])
+
+result = await ctx.ai.run_agent(
+    system="只根据工具结果回答，不要猜测订单状态。",
+    user="查询订单 A-100",
+    handlers={"lookup_order": lookup_order},
+    max_steps=6,
+    max_tool_calls=12,
+    max_total_tokens=12000,
+    timeout_seconds=90,
+)
+```
+
+- `ai_agent` 不继承 `ai_text`，反之亦然；按实际入口最小授权。
+- 同一轮全部为 `read_only=true` 时可并行执行；只要包含副作用工具就按模型顺序串行执行。
+- 平台限制总轮数、单轮/总工具数、重复同参调用、会话 token 和总超时；到达轮数上限后只允许无工具的最终总结。
+- 每次模型调用仍单独经过账号预算、fallback 和 usage；插件 quota 按会话上限预留，并按成功或异常前已实际消耗的累计 token 结算。
+- 工具开始/完成会写 ActionEvent。handler 异常会作为结构化工具错误返回模型，不会把未声明函数变成可执行入口。
 
 ## Quota 与脱敏
 
@@ -88,8 +134,8 @@ stub），可直接单测。
 
 两条硬约束：
 
-- **降级不依赖任何 AI 调用成功**：平台 LLM 运行时的重试/fallback 链目前不生效，因此每个
-  组件都有一条不调用 AI 也能走通的确定性降级路径。插件不得假设 AI 一定可用。
+- **降级不依赖任何 AI 调用成功**：平台虽然提供重试和 fallback，但网络、预算、模型能力或
+  Provider 配置仍可能让整条链失败，因此每个组件都有一条不调用 AI 也能走通的确定性降级路径。
 - **只走 `ctx.ai` 正常计量路径**：组件不 import `llm_client` / `llm_invoke` /
   `llm_runtime`，所有模型调用都经 `ctx.ai.complete()`，天然继承 quota、账号预算、usage
   记录与 token 钳制。禁止在组件里新增任何绕过计量的直连调用。

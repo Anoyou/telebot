@@ -1,22 +1,31 @@
 // PWA Service Worker 注册 + 更新提示。
 // vite-plugin-pwa 在构建时把 `virtual:pwa-register` 解析为真正的注册代码；
 // 类型声明在 src/vite-env.d.ts 里通过 `vite-plugin-pwa/client` 引入。
-import { toast } from "sonner";
-
 let pwaRegistration: ServiceWorkerRegistration | undefined;
 
 export async function checkFrontendUpdate(): Promise<"updating" | "up_to_date" | "unsupported" | "error"> {
   if (
     typeof window === "undefined" ||
     !("serviceWorker" in navigator) ||
+    !navigator.serviceWorker.controller ||
     !pwaRegistration
   ) {
     return "unsupported";
   }
 
   try {
-    await pwaRegistration.update();
-    if (pwaRegistration.installing || pwaRegistration.waiting) {
+    if (pwaRegistration.waiting || pwaRegistration.installing) return "updating";
+    let updateFound = false;
+    const onUpdateFound = () => {
+      updateFound = true;
+    };
+    pwaRegistration.addEventListener("updatefound", onUpdateFound);
+    try {
+      await pwaRegistration.update();
+    } finally {
+      pwaRegistration.removeEventListener("updatefound", onUpdateFound);
+    }
+    if (updateFound || pwaRegistration.installing || pwaRegistration.waiting) {
       return "updating";
     }
     return "up_to_date";
@@ -36,12 +45,6 @@ export function registerPWA() {
         // autoUpdate 模式不会调用 onNeedRefresh，新 SW 激活后会自动刷新页面。
         onRegisteredSW(_swUrl, registration) {
           pwaRegistration = registration;
-        },
-        // 首次缓存完成（可离线使用）
-        onOfflineReady() {
-          toast.success("前端资源已缓存", {
-            description: "断网时仍可打开控制台页面，不代表 Bot 离线运行。",
-          });
         },
         immediate: true,
       });

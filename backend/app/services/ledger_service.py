@@ -13,7 +13,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from fastapi import HTTPException
-from sqlalchemy import delete, or_, select
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db.models.action_event import ACTION_EVENT_STATUS_COMPENSATED, ACTION_EVENT_STATUS_OK, ActionEvent
@@ -289,17 +289,32 @@ async def mark_compensation_manual_paid(
     事务由调用方提交；函数会 flush 以便测试和 API 能立即观察到变更。
     """
 
-    row = await db.get(PayoutCompensation, int(compensation_id))
-    if row is None:
+    now = datetime.now(UTC)
+    current_status = await db.scalar(
+        select(PayoutCompensation.status).where(PayoutCompensation.id == int(compensation_id))
+    )
+    if current_status is None:
         raise _err("LEDGER_COMPENSATION_NOT_FOUND", "挂账记录不存在", 404)
-    if row.status not in COMPENSATION_OPEN_STATUSES:
+    if current_status not in COMPENSATION_OPEN_STATUSES:
+        raise _err("LEDGER_COMPENSATION_CLOSED", "该挂账记录已处理，不能重复核销", 409)
+    result = await db.execute(
+        update(PayoutCompensation)
+        .where(
+            PayoutCompensation.id == int(compensation_id),
+            PayoutCompensation.status == current_status,
+        )
+        .values(
+            status=PAYOUT_COMPENSATION_STATUS_COMPENSATED,
+            sent_at=func.coalesce(PayoutCompensation.sent_at, now),
+            updated_at=now,
+        )
+        .returning(PayoutCompensation)
+    )
+    row = result.scalar_one_or_none()
+    if row is None:
         raise _err("LEDGER_COMPENSATION_CLOSED", "该挂账记录已处理，不能重复核销", 409)
 
-    previous_status = row.status
-    now = datetime.now(UTC)
-    row.status = PAYOUT_COMPENSATION_STATUS_COMPENSATED
-    row.sent_at = row.sent_at or now
-    row.updated_at = now
+    previous_status = current_status
 
     detail = {
         "previous_status": previous_status,

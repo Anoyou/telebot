@@ -32,6 +32,7 @@ from ..db.models.feature import FEATURE_SCHEDULER, AccountFeature
 from ..db.models.payout_compensation import (
     PAYOUT_COMPENSATION_STATUS_ABANDONED,
     PAYOUT_COMPENSATION_STATUS_PENDING,
+    PAYOUT_COMPENSATION_STATUS_SENDING,
     PAYOUT_COMPENSATION_STATUS_SENT,
     PayoutCompensation,
 )
@@ -672,8 +673,10 @@ async def run_worker(account_id: int) -> None:
     try:
         await client.connect()
         if not await client.is_user_authorized():
-            await _publish(
-                redis, account_id, EVT_LOGIN_REQUIRED, message="session 失效，请重新登录"
+            await _handle_login_required(
+                redis,
+                account_id,
+                message="session 失效，请重新登录",
             )
             return
 
@@ -770,7 +773,7 @@ async def run_worker(account_id: int) -> None:
                     pass
     except (AuthKeyUnregisteredError, SessionRevokedError, UserDeactivatedError) as e:
         # session 失效类异常：通知主进程置 status=login_required
-        await _publish(redis, account_id, EVT_LOGIN_REQUIRED, reason=type(e).__name__)
+        await _handle_login_required(redis, account_id, reason=type(e).__name__)
         await _log(redis, account_id, "error", f"session 失效: {type(e).__name__}")
     except Exception as e:
         await _log(
@@ -1457,8 +1460,10 @@ async def _due_payout_compensation_ids(account_id: int, now: datetime, batch_siz
             select(PayoutCompensation.id)
             .where(
                 PayoutCompensation.account_id == int(account_id),
-                PayoutCompensation.status == PAYOUT_COMPENSATION_STATUS_PENDING,
                 PayoutCompensation.next_attempt_at <= now,
+                PayoutCompensation.status.in_(
+                    (PAYOUT_COMPENSATION_STATUS_PENDING, PAYOUT_COMPENSATION_STATUS_SENDING)
+                ),
             )
             .order_by(PayoutCompensation.id.asc())
             .limit(max(1, int(batch_size)))
@@ -1476,11 +1481,35 @@ async def _lease_payout_compensation(row_id: int, now: datetime) -> PayoutCompen
                 PayoutCompensation.status == PAYOUT_COMPENSATION_STATUS_PENDING,
                 PayoutCompensation.next_attempt_at <= now,
             )
-            .values(next_attempt_at=lease_until, updated_at=now)
+            .values(
+                status=PAYOUT_COMPENSATION_STATUS_SENDING,
+                next_attempt_at=lease_until,
+                updated_at=now,
+            )
         )
         if int(result.rowcount or 0) <= 0:
-            await db.rollback()
-            return None
+            # 上次进程可能在 Telegram 已接受消息、DB 尚未落 sent 之间退出。
+            # 只在租约过期后接管，并强制进入 ambiguous 探测路径，不能直接重发。
+            result = await db.execute(
+                update(PayoutCompensation)
+                .where(
+                    PayoutCompensation.id == int(row_id),
+                    PayoutCompensation.status == PAYOUT_COMPENSATION_STATUS_SENDING,
+                    PayoutCompensation.next_attempt_at <= now,
+                )
+                .values(
+                    ambiguous=True,
+                    error_code_last=payout_compensation.ERROR_AMBIGUOUS_DELIVERY,
+                    error_last="发送进程在确认落库前中断，需先核对 Telegram 送达状态。",
+                    next_attempt_at=lease_until,
+                    updated_at=now,
+                )
+            )
+            if int(result.rowcount or 0) <= 0:
+                # 没有写入，不使用 rollback；SQLite 单连接并发测试中 rollback 可能回滚
+                # 另一协程刚取得的租约，生产 PostgreSQL 下 commit 同样是空事务。
+                await db.commit()
+                return None
         row = await db.get(PayoutCompensation, int(row_id))
         await db.commit()
         return row
@@ -1504,7 +1533,18 @@ async def _replay_payout_compensation_row(
             )
         return
 
-    if bool(row.ambiguous) and bool(config.get("ambiguous_probe", True)):
+    if bool(row.ambiguous):
+        recovered_sending = row.error_code_last == payout_compensation.ERROR_AMBIGUOUS_DELIVERY
+        if not bool(config.get("ambiguous_probe", True)) or _payout_probe_expected_reply_to(row) is None:
+            await _apply_payout_replay_failure(
+                redis,
+                row,
+                error_code=payout_compensation.ERROR_AMBIGUOUS_DELIVERY,
+                error_text="无法可靠确认上次 payout 是否已送达，已停止自动重发并转人工核对。",
+                config=config,
+                now=now,
+            )
+            return
         try:
             probe_message_id = await _probe_ambiguous_payout_message(client, row)
         except _AmbiguousPayoutProbeError as exc:
@@ -1513,6 +1553,16 @@ async def _replay_payout_compensation_row(
                 row,
                 error_code=payout_compensation.ERROR_TELEGRAM_API,
                 error_text=f"{type(exc).__name__}: {exc}",
+                config=config,
+                now=now,
+            )
+            return
+        if probe_message_id is None and recovered_sending:
+            await _apply_payout_replay_failure(
+                redis,
+                row,
+                error_code=payout_compensation.ERROR_AMBIGUOUS_DELIVERY,
+                error_text="未找到可确认的已发送消息，已停止自动重发并转人工核对。",
                 config=config,
                 now=now,
             )
@@ -1721,13 +1771,22 @@ async def _record_payout_replay_action(
 
 async def _mark_payout_compensation_sent(row_id: int, message_id: Any, now: datetime) -> bool:
     async with AsyncSessionLocal() as db:
-        row = await db.get(PayoutCompensation, int(row_id))
-        if row is None or row.status != PAYOUT_COMPENSATION_STATUS_PENDING:
+        result = await db.execute(
+            update(PayoutCompensation)
+            .where(
+                PayoutCompensation.id == int(row_id),
+                PayoutCompensation.status == PAYOUT_COMPENSATION_STATUS_SENDING,
+            )
+            .values(
+                status=PAYOUT_COMPENSATION_STATUS_SENT,
+                sent_message_id=_int_or_none(message_id),
+                sent_at=now,
+                updated_at=now,
+            )
+        )
+        if int(result.rowcount or 0) <= 0:
+            await db.rollback()
             return False
-        row.status = PAYOUT_COMPENSATION_STATUS_SENT
-        row.sent_message_id = _int_or_none(message_id)
-        row.sent_at = now
-        row.updated_at = now
         await db.commit()
         return True
 
@@ -1798,8 +1857,9 @@ async def _apply_payout_replay_failure(
     )
     async with AsyncSessionLocal() as db:
         current = await db.get(PayoutCompensation, row.id)
-        if current is None or current.status != PAYOUT_COMPENSATION_STATUS_PENDING:
+        if current is None or current.status != PAYOUT_COMPENSATION_STATUS_SENDING:
             return
+        current.status = PAYOUT_COMPENSATION_STATUS_PENDING
         current.retry_count = retry_count
         current.next_attempt_at = next_attempt_at
         current.error_code_last = error_code
@@ -1817,9 +1877,10 @@ async def _defer_payout_compensation_to_next_day(
     next_attempt_at = _next_utc_day_retry_at(now, row_id)
     async with AsyncSessionLocal() as db:
         row = await db.get(PayoutCompensation, int(row_id))
-        if row is None or row.status != PAYOUT_COMPENSATION_STATUS_PENDING:
+        if row is None or row.status != PAYOUT_COMPENSATION_STATUS_SENDING:
             return False
         should_notify = row.notified_at is None
+        row.status = PAYOUT_COMPENSATION_STATUS_PENDING
         row.next_attempt_at = next_attempt_at
         row.error_code_last = error_code
         row.error_last = error_text
@@ -1840,7 +1901,7 @@ async def _abandon_payout_compensation(
 ) -> bool:
     async with AsyncSessionLocal() as db:
         row = await db.get(PayoutCompensation, int(row_id))
-        if row is None or row.status != PAYOUT_COMPENSATION_STATUS_PENDING:
+        if row is None or row.status != PAYOUT_COMPENSATION_STATUS_SENDING:
             return False
         should_notify = row.notified_at is None
         row.status = PAYOUT_COMPENSATION_STATUS_ABANDONED
@@ -2044,11 +2105,29 @@ async def _mark_login_required(account_id: int) -> None:
 
     from ..db.models.account import ACCOUNT_STATUS_LOGIN_REQUIRED
 
-    async with AsyncSessionLocal() as db:
-        account = await db.get(Account, account_id)
-        if account is not None:
-            account.status = ACCOUNT_STATUS_LOGIN_REQUIRED
-            await db.commit()
+    try:
+        async with AsyncSessionLocal() as db:
+            account = await db.get(Account, account_id)
+            if account is not None:
+                account.status = ACCOUNT_STATUS_LOGIN_REQUIRED
+                await db.commit()
+    except Exception:  # noqa: BLE001
+        # Redis 事件仍可能让外部观察者发现故障，不能因 DB 暂时不可用跳过通知。
+        log.exception("账号状态收敛为 login_required 失败: account_id=%s", account_id)
+
+
+async def _handle_login_required(redis, account_id: int, **payload) -> None:  # noqa: ANN001, ANN003
+    """独立执行 DB 收敛和事件通知，任一路径故障都不阻断另一条。"""
+
+    await _mark_login_required(account_id)
+    try:
+        await _publish(redis, account_id, EVT_LOGIN_REQUIRED, **payload)
+    except Exception:  # noqa: BLE001
+        log.warning(
+            "发布 login_required 事件失败，但数据库状态已尝试收敛: account_id=%s",
+            account_id,
+            exc_info=True,
+        )
 
 
 def _build_proxy_url(

@@ -256,6 +256,9 @@ _MP_CTX = mp.get_context("spawn")
 
 # 指数退避重启间隔（秒），用尽后置账号为 dead
 _BACKOFF = [5, 10, 20, 60, 300]
+# worker 连续存活达到该窗口后，才把之前的崩溃次数视为已经恢复。
+# 否则「启动后短暂存活」会把 fail_count 清零，形成无限快速重启。
+_STABLE_WINDOW_SECONDS = 60.0
 
 
 # ── PID 文件：用于跨 uvicorn 重启识别+回收孤儿 worker ──────────────
@@ -398,6 +401,7 @@ class _WorkerHandle:
     process: mp.Process | None = None
     fail_count: int = 0
     next_retry_at: float = 0.0
+    started_at: float = 0.0
     desired: str = "running"   # running | stopped
 
 
@@ -550,6 +554,8 @@ async def start_worker(account_id: int) -> None:
         p = _MP_CTX.Process(target=worker_entry, args=(account_id,), daemon=False)
         p.start()
         h.process = p
+        h.started_at = time.monotonic()
+        h.next_retry_at = 0.0
         # 写 PID 文件——下次启动时 ``_kill_stale_workers`` 据此回收孤儿。
         # 失败不阻塞启动（最多失去一次孤儿清理机会）。
         if p.pid is not None:
@@ -565,8 +571,16 @@ async def stop_worker(account_id: int) -> None:
         if not h:
             return
         h.desired = "stopped"
-        redis = get_redis()
-        await redis.publish(cmd_channel(account_id), make_cmd(CMD_STOP))
+        try:
+            redis = get_redis()
+            await redis.publish(cmd_channel(account_id), make_cmd(CMD_STOP))
+        except Exception:  # noqa: BLE001
+            # Redis 只是优雅关停通道，不能成为本地终止子进程的前置条件。
+            log.warning(
+                "发送 worker stop IPC 失败，改为本地终止: account=%d",
+                account_id,
+                exc_info=True,
+            )
         if h.process:
             # 等 5s 优雅退出（每 100ms 探测一次）
             for _ in range(50):
@@ -576,7 +590,12 @@ async def stop_worker(account_id: int) -> None:
             if h.process.is_alive():
                 h.process.terminate()
                 h.process.join(timeout=2)
+            if h.process.is_alive():
+                h.process.kill()
+                h.process.join(timeout=1)
             h.process = None
+        h.started_at = 0.0
+        h.next_retry_at = 0.0
         # 进程已确认死掉 → 删 PID 文件，避免被下次启动当孤儿误杀（PID 复用情形）
         _remove_pid_file(account_id)
         log.info("worker 停止: account=%d", account_id)
@@ -671,22 +690,49 @@ async def _monitor_loop() -> None:
     try:
         while True:
             await asyncio.sleep(2)
-            now = time.time()
+            now = time.monotonic()
             for aid, h in list(_WORKERS.items()):
                 if h.desired != "running":
                     continue
                 if h.process and h.process.is_alive():
-                    # 进程健康：清零失败计数
-                    h.fail_count = 0
+                    # 只有连续存活达到稳定窗口才清零；短暂存活仍属于同一轮崩溃。
+                    if (
+                        h.fail_count
+                        and h.started_at
+                        and now - h.started_at >= _STABLE_WINDOW_SECONDS
+                    ):
+                        h.fail_count = 0
+                        h.next_retry_at = 0.0
                     continue
                 # 进程死了
-                if now < h.next_retry_at:
-                    continue
                 status = await _account_status(aid)
                 if status != ACCOUNT_STATUS_ACTIVE:
                     h.desired = "stopped"
                     log.info("worker %d 已退出且账号状态为 %s，停止自动重启", aid, status)
                     continue
+                if h.next_retry_at:
+                    if now < h.next_retry_at:
+                        continue
+                    # 已等满上一轮计算出的退避时间，此时才真正重启。
+                    try:
+                        await start_worker(aid)
+                    except Exception:  # noqa: BLE001
+                        # spawn 本身失败也属于一次失败，交回下一轮重新计数和退避。
+                        h.next_retry_at = 0.0
+                        log.exception("worker %d 重启失败", aid)
+                    continue
+
+                # 首次观察到本轮退出：稳定运行过则开启新的失败序列。
+                if h.started_at and now - h.started_at >= _STABLE_WINDOW_SECONDS:
+                    h.fail_count = 0
+                if h.process is not None:
+                    try:
+                        h.process.join(timeout=0)
+                    except Exception:  # noqa: BLE001
+                        pass
+                    h.process = None
+                    _remove_pid_file(aid)
+                h.started_at = 0.0
                 h.fail_count += 1
                 if h.fail_count > len(_BACKOFF):
                     log.error(
@@ -724,12 +770,11 @@ async def _monitor_loop() -> None:
                 wait = _BACKOFF[min(h.fail_count - 1, len(_BACKOFF) - 1)]
                 h.next_retry_at = now + wait
                 log.warning(
-                    "worker %d 崩溃，%ds 后第 %d 次重启",
+                    "worker %d 崩溃，将在 %ds 后进行第 %d 次重启",
                     aid,
                     wait,
                     h.fail_count,
                 )
-                await start_worker(aid)
     except asyncio.CancelledError:
         pass
 

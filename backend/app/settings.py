@@ -91,6 +91,11 @@ class Settings(BaseSettings):
     plugin_allow_legacy_unsigned_plugins: bool = True
     # 上传 zip 体积上限（字节），默认 10 MiB。超出直接 413。
     plugin_zip_max_bytes: int = 10 * 1024 * 1024
+    # 解压资源上限：必须在执行 manifest.py 前完成检查，防止压缩炸弹耗尽磁盘/inode。
+    plugin_zip_max_members: int = 512
+    plugin_zip_max_member_bytes: int = 32 * 1024 * 1024
+    plugin_zip_max_uncompressed_bytes: int = 100 * 1024 * 1024
+    plugin_zip_max_compression_ratio: int = 200
 
     # 全局默认代理（仅当账号未绑定 Proxy 行时兜底）。
     # 格式：``socks5://[user:pass@]host:port`` 或 ``http://host:port`` 或 ``mtproxy://host:port?secret=xxx``

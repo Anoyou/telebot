@@ -56,6 +56,65 @@ def _bad(code: str, message: str, status: int = 400) -> HTTPException:
     return HTTPException(status_code=status, detail={"code": code, "message": message})
 
 
+def _declares_direct_passthrough(manifest: object) -> bool:
+    if not isinstance(manifest, dict):
+        return False
+    capabilities = manifest.get("capabilities")
+    if not isinstance(capabilities, dict):
+        return False
+    raw = capabilities.get("telegram_direct_passthrough")
+    if raw is True:
+        return True
+    return isinstance(raw, dict) and raw.get("enabled") is True
+
+
+def _allow_account_direct_passthrough_config(
+    schema: dict[str, object],
+    manifest: object,
+) -> dict[str, object]:
+    """Expose the platform-owned account opt-in only to declaring plugins."""
+
+    if not _declares_direct_passthrough(manifest):
+        return schema
+    properties = schema.setdefault("properties", {})
+    if isinstance(properties, dict):
+        properties.setdefault(
+            "direct_passthrough",
+            {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "enabled": {"type": "boolean", "default": False},
+                },
+            },
+        )
+    return schema
+
+
+def _account_config_schema(
+    manifest: object,
+    config: dict[str, object],
+) -> dict[str, object] | None:
+    """Build the account schema and protect the platform-owned direct opt-in."""
+
+    declares_direct = _declares_direct_passthrough(manifest)
+    if "direct_passthrough" in config and not declares_direct:
+        raise _bad(
+            "CONFIG_VALIDATION_ERROR",
+            "配置验证失败: direct_passthrough: 仅声明 telegram_direct_passthrough 的插件可使用此字段",
+        )
+
+    raw_schema = manifest.get("config_schema") if isinstance(manifest, dict) else None
+    if isinstance(raw_schema, dict):
+        scoped_schema = feature_service.config_schema_for_scope(raw_schema, "account")
+    elif declares_direct:
+        # A direct-only plugin still needs a schema for the platform-owned opt-in.
+        scoped_schema = {"type": "object", "properties": {}}
+    else:
+        return None
+    return _allow_account_direct_passthrough_config(scoped_schema, manifest)
+
+
 def _chatgpt_token_id(token: str) -> str:
     value = str(token or "").strip()
     if not value:
@@ -253,9 +312,8 @@ async def patch_account_feature(
             key,
         )
         payload.config = _normalize_feature_config(key, payload.config)
-        config_schema = (feature.manifest or {}).get("config_schema")
-        if config_schema:
-            scoped_schema = feature_service.config_schema_for_scope(config_schema, "account")
+        scoped_schema = _account_config_schema(feature.manifest, payload.config)
+        if scoped_schema is not None:
             payload.config = feature_service.apply_required_config_defaults(
                 payload.config,
                 scoped_schema,
@@ -323,9 +381,8 @@ async def update_account_feature_config(
         key,
     )
     payload.config = _normalize_feature_config(key, payload.config)
-    config_schema = (feature.manifest or {}).get("config_schema")
-    if config_schema:
-        scoped_schema = feature_service.config_schema_for_scope(config_schema, "account")
+    scoped_schema = _account_config_schema(feature.manifest, payload.config)
+    if scoped_schema is not None:
         payload.config = feature_service.apply_required_config_defaults(
             payload.config,
             scoped_schema,
@@ -341,7 +398,11 @@ async def update_account_feature_config(
             )
 
     af = await feature_service.set_account_feature(
-        db, aid, key, enabled=True, config=payload.config
+        db,
+        aid,
+        key,
+        enabled=bool(existing.enabled) if existing is not None else False,
+        config=payload.config,
     )
     await audit.write(
         db,

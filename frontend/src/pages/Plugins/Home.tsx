@@ -6,7 +6,6 @@ import {
   AlertTriangle,
   ArrowRight,
   BookOpen,
-  Boxes,
   ChevronDown,
   History,
   MessageSquareText,
@@ -27,7 +26,7 @@ import type { AccountFeatureItem, FeatureInfo } from "@/api/types";
 import type { PluginInstallOut } from "@/api/plugins";
 import type { PluginLLMUsageSummaryItem } from "@/api/llmUsage";
 import { CommandBadge } from "@/components/CommandBadge";
-import { PageHeader, PageShell } from "@/components/layout/PageScaffold";
+import { PageShell } from "@/components/layout/PageScaffold";
 import { Spinner } from "@/components/ui/misc";
 import { Button } from "@/components/ui/button";
 import { MetaBadge } from "@/components/ui/meta-badge";
@@ -57,7 +56,7 @@ import {
 } from "@/types/pluginContract";
 
 import { featureConfigPath } from "./_shared/featureConfig";
-import { PluginWorkspaceNav } from "./WorkspaceNav";
+import { PluginWorkspaceHeader } from "./WorkspaceHeader";
 
 type ModuleCategory = "direct_passthrough" | "interactive" | "automation" | "utility";
 const CATEGORY_META: Record<ModuleCategory, { title: string; hint: string; icon: ComponentType<{ className?: string }> }> = {
@@ -312,9 +311,12 @@ export function PluginsHome() {
 
   if (matrixQ.isLoading) {
     return (
-      <div className="flex h-[40vh] items-center justify-center">
-        <Spinner className="text-primary" />
-      </div>
+      <PageShell>
+        <PluginWorkspaceHeader activeTab="home" selectedAid={selectedAid} guideActive={guideActive} />
+        <div className="flex h-[40vh] items-center justify-center">
+          <Spinner className="text-primary" />
+        </div>
+      </PageShell>
     );
   }
 
@@ -382,20 +384,7 @@ export function PluginsHome() {
         </Card>
       ) : null}
 
-      <PageHeader
-        icon={Boxes}
-        title="插件中心"
-        description="先在这里沉淀一套好用的指令、消息和 AI 模板，再按账号启用复用；新账号不用从零重配。"
-        signals={(
-          <>
-            <SignalPill tone="primary" label="插件总数" value={pluginFeatures.length} />
-            <SignalPill tone="success" label="账号数量" value={accounts.length} />
-            <SignalPill tone="neutral" label="当前账号" value={selectedAccount?.name ?? "未选择"} />
-          </>
-        )}
-      />
-
-      <PluginWorkspaceNav activeTab="home" selectedAid={selectedAid} guideActive={guideActive} />
+      <PluginWorkspaceHeader activeTab="home" selectedAid={selectedAid} guideActive={guideActive} />
 
       <Card>
         <CardContent className="space-y-4 !pt-5">
@@ -795,6 +784,7 @@ function FeatureZone({
         ) : (
           <div className="space-y-2">
             {features.map((f) => {
+              const directPassthrough = pluginSupportsDirectPassthrough(f.capabilities);
               const status = selectedFeatures[f.key] ?? "disabled";
               const enabled = selectedFeatureEnabled[f.key] ?? status !== "disabled";
               const runtimeLabel = moduleRuntimeLabel(status, enabled);
@@ -802,7 +792,9 @@ function FeatureZone({
               const pluginUsage = pluginUsageByKey.get(f.key);
               const lastError = accountFeature?.last_error?.trim();
               const usageWarning = pluginUsageGuideWarning(f);
-              const contractWarnings = pluginContractRiskWarnings(f);
+              const contractWarnings = pluginContractRiskWarnings(f, {
+                directPassthroughGated: directPassthrough,
+              });
               const lintWarnings = [
                 ...(usageWarning ? [usageWarning] : []),
                 ...contractWarnings,
@@ -821,7 +813,9 @@ function FeatureZone({
                 config_schema: f.config_schema,
                 usage: f.usage,
               });
-              const highRiskContract = pluginHasHighRiskContract(f);
+              const highRiskContract = pluginHasHighRiskContract(f, {
+                directPassthroughGated: directPassthrough,
+              });
               const trustBadge = moduleTrustBadge(f, installByKey.get(f.key));
               const path = featureConfigPath(selectedAccountId, f.key, f, {
                 source: "plugins",
@@ -847,11 +841,11 @@ function FeatureZone({
                           可交互
                         </FeatureCapabilityBadge>
                         <FeatureCapabilityBadge
-                          show={pluginSupportsDirectPassthrough(f.capabilities)}
-                          tone="warn"
-                          title="插件声明 telegram_direct_passthrough，账号内还需要二次开启直通开关才会生效"
+                          show={directPassthrough}
+                          tone="outline"
+                          title="低延时能力，安装后还需在账号配置中二次开启才会生效"
                         >
-                          裸直通
+                          裸直通 · 二次开启
                         </FeatureCapabilityBadge>
                         <FeatureCapabilityBadge show={usesAI} tone="warn" title="插件会调用 TelePilot 的 AI 能力">
                           AI 调用

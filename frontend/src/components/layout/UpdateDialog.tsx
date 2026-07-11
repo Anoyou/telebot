@@ -145,9 +145,9 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
       case "up_to_date":
         return "已是最新版本";
       case "updating":
-        return "发现新版本，页面即将自动刷新";
+        return "发现新前端资源，浏览器正在安装；完成后页面会自动刷新";
       case "unsupported":
-        return "当前环境不支持（开发模式或浏览器不支持）";
+        return "当前页面尚未由 PWA 接管，开发模式或首次加载时无法检查";
       case "error":
         return "检查失败，请稍后重试";
       default:

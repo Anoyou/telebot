@@ -47,10 +47,11 @@ services:
     command:
       [
         "redis-server",
-        "--appendonly", "${REDIS_APPENDONLY:-no}",
+        "--appendonly", "${REDIS_APPENDONLY:-yes}",
+        "--appendfsync", "${REDIS_APPENDFSYNC:-everysec}",
         "--save", "${REDIS_SAVE:-}",
         "--maxmemory", "${REDIS_MAXMEMORY:-32mb}",
-        "--maxmemory-policy", "${REDIS_MAXMEMORY_POLICY:-allkeys-lru}",
+        "--maxmemory-policy", "${REDIS_MAXMEMORY_POLICY:-noeviction}",
       ]
     mem_limit: ${REDIS_MEM_LIMIT:-48m}
     mem_reservation: ${REDIS_MEM_RESERVATION:-32m}
@@ -88,7 +89,7 @@ services:
       PLUGINS_INSTALLED_DIR: /app/plugins/installed
       PLUGIN_REPOS_CACHE_DIR: /app/data/plugin_repos
       TELEPILOT_UPDATER_URL: http://updater:8765
-      TELEPILOT_UPDATER_TOKEN: ${JWT_SECRET:-telepilot-updater-local}
+      TELEPILOT_UPDATER_TOKEN: ${UPDATER_TOKEN:?UPDATER_TOKEN required}
       # #14：迁移只保留 command 里的那一次；应用启动期自动迁移关闭，避免重复执行
       AUTO_MIGRATE_ON_STARTUP: "false"
     mem_limit: ${WEB_MEM_LIMIT:-512m}
@@ -134,7 +135,7 @@ services:
       TELEPILOT_HOST_PROJECT_DIR: ${TELEPILOT_HOST_PROJECT_DIR:-.}
       TELEPILOT_UPDATE_REMOTE: ${TELEPILOT_UPDATE_REMOTE:-origin}
       TELEPILOT_UPDATE_BRANCH: ${TELEPILOT_UPDATE_BRANCH:-main}
-      UPDATER_TOKEN: ${JWT_SECRET:-telepilot-updater-local}
+      UPDATER_TOKEN: ${UPDATER_TOKEN:?UPDATER_TOKEN required}
     volumes:
       # 只挂载到 compose 私有网络里的 updater。它通过宿主机 Docker socket
       # 执行 prod-update，避免 Web 容器自身拥有 Docker 控制能力。

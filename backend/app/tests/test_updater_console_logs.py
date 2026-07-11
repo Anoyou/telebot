@@ -102,3 +102,65 @@ def test_console_logs_filters_internal_health_checks(monkeypatch) -> None:
 
     assert result["ok"] is True
     assert result["lines"] == ["web-1      | INFO:app.worker:真实业务日志"]
+
+
+def test_updater_rejects_requests_when_token_is_missing(monkeypatch) -> None:
+    updater = _load_updater_module()
+    handler = object.__new__(updater.Handler)
+    handler.headers = {}
+    monkeypatch.setattr(updater, "TOKEN", "")
+
+    assert handler._authorized() is False
+
+
+def test_updater_main_refuses_to_start_without_token(monkeypatch) -> None:
+    updater = _load_updater_module()
+    monkeypatch.setattr(updater, "TOKEN", "")
+
+    try:
+        updater.main()
+    except SystemExit as exc:
+        assert "UPDATER_TOKEN" in str(exc)
+    else:
+        raise AssertionError("updater must not start without UPDATER_TOKEN")
+
+
+def test_updater_rejects_placeholder_and_short_tokens(monkeypatch) -> None:
+    updater = _load_updater_module()
+
+    for token in ("changeme-please-replace", "too-short"):
+        monkeypatch.setattr(updater, "TOKEN", token)
+        assert updater._token_configured() is False
+
+
+def test_update_plan_retries_commit_with_pending_deployment(monkeypatch, tmp_path) -> None:
+    updater = _load_updater_module()
+    workspace = tmp_path / "repo"
+    git_dir = workspace / ".git"
+    git_dir.mkdir(parents=True)
+    (git_dir / "telepilot-deploy-pending").write_text("oldcommit targetcommit\n")
+    monkeypatch.setattr(updater, "WORKSPACE", workspace)
+
+    def fake_run(args, **_kwargs):  # noqa: ANN001
+        if args[:2] == ["git", "fetch"]:
+            return "", "", 0
+        if args == ["git", "rev-parse", "HEAD"]:
+            return "targetcommit", "", 0
+        if args == ["git", "rev-parse", "refs/remotes/origin/main"]:
+            return "targetcommit", "", 0
+        if args == ["git", "rev-parse", "--git-path", "telepilot-deploy-pending"]:
+            return ".git/telepilot-deploy-pending", "", 0
+        if args[:3] == ["git", "rev-list", "--count"]:
+            return "0", "", 0
+        if args[:3] == ["git", "diff", "--name-only"]:
+            assert args[-1] == "oldcommit..targetcommit"
+            return "scripts/prod-update.sh", "", 0
+        raise AssertionError(args)
+
+    monkeypatch.setattr(updater, "_run", fake_run)
+
+    result = updater._check_plan("origin", "main")
+
+    assert result["has_update"] is True
+    assert result["deployment_pending"] is True
+    assert result["deploy_from_commit"] == "oldcommit"

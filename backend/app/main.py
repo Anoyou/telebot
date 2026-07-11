@@ -36,6 +36,7 @@ from .services import (
     event_trace,
     interaction_bot_runtime,
     notify_service,
+    plugin_config_action_jobs,
     remote_plugin_service,
 )
 from .services.login_service import cleanup_expired_loop
@@ -148,6 +149,13 @@ async def lifespan(app: FastAPI):
     except Exception:  # noqa: BLE001
         logging.exception("刷新 Trace 写入配置失败，使用默认配置继续启动")
 
+    try:
+        interrupted_jobs = await plugin_config_action_jobs.startup_plugin_config_action_jobs()
+        if interrupted_jobs:
+            logging.warning("已收敛 %d 个上次进程遗留的插件配置任务", interrupted_jobs)
+    except Exception:  # noqa: BLE001
+        logging.exception("收敛遗留插件配置任务失败")
+
     # 1) 启动登录会话清理后台任务（每 60s 扫一次）
     cleanup_task = asyncio.create_task(cleanup_expired_loop())
     remote_plugin_update_task = asyncio.create_task(remote_plugin_service.auto_update_check_loop())
@@ -189,6 +197,10 @@ async def lifespan(app: FastAPI):
         yield
     finally:
         # 3) 退出：取消清理任务 + 关停所有 worker
+        try:
+            await plugin_config_action_jobs.shutdown_plugin_config_action_jobs()
+        except Exception:  # noqa: BLE001
+            logging.exception("停止插件配置后台任务失败")
         try:
             await interaction_bot_runtime.stop_interaction_bot_manager()
         except Exception:  # noqa: BLE001

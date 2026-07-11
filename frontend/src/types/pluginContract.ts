@@ -136,14 +136,17 @@ export function pluginContractRiskWarnings(input: {
   capabilities?: PluginCapabilities | null;
   event_subscriptions?: PluginEventSubscription[] | null;
   lint_warnings?: string[] | null;
-}): string[] {
+}, options?: { directPassthroughGated?: boolean }): string[] {
   const haystack = JSON.stringify({
     capabilities: input.capabilities ?? {},
     event_subscriptions: input.event_subscriptions ?? [],
     lint_warnings: input.lint_warnings ?? [],
   }).toLowerCase();
   const warnings: string[] = [];
-  if (pluginSupportsDirectPassthrough(input.capabilities)) {
+  if (
+    pluginSupportsDirectPassthrough(input.capabilities) &&
+    !options?.directPassthroughGated
+  ) {
     warnings.push("高风险：插件声明裸直通，会在标准 Event Bus / Trace / MessageOps 链路前收到原始消息。");
   }
   if (haystack.includes("telegram_native_raw") || haystack.includes("native_raw")) {
@@ -168,10 +171,12 @@ export function pluginHasHighRiskContract(input: {
   capabilities?: PluginCapabilities | null;
   event_subscriptions?: PluginEventSubscription[] | null;
   lint_warnings?: string[] | null;
-}): boolean {
+}, options?: { directPassthroughGated?: boolean }): boolean {
   const haystack = JSON.stringify(input).toLowerCase();
-  return pluginSupportsDirectPassthrough(input.capabilities) ||
-    HIGH_RISK_TERMS.some((term) => haystack.includes(term)) ||
+  return (
+    pluginSupportsDirectPassthrough(input.capabilities) &&
+    !options?.directPassthroughGated
+  ) || HIGH_RISK_TERMS.some((term) => haystack.includes(term)) ||
     DEPRECATED_SEND_CHANNELS.some((channel) => containsDeprecatedSendChannel(input, channel));
 }
 

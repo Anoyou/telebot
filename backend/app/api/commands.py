@@ -43,6 +43,7 @@ from ..schemas.command import (
 )
 from ..services import audit, command_service
 from ..services.ai_feature import is_ai_enabled
+from ..services.llm_protocol import normalize_base_url, provider_endpoint, provider_models_endpoint
 
 router = APIRouter(tags=["commands"])
 
@@ -521,7 +522,7 @@ async def fetch_models_preview(
             # pid 错也无所谓，继续走"无 key"路径让用户看到具体的 401
             api_key = ""
 
-    base_url = (payload.base_url or "https://api.openai.com/v1").rstrip("/")
+    base_url = normalize_base_url(payload.base_url or "https://api.openai.com/v1")
     proxy_url = await _resolve_proxy_url(db, payload.proxy_id)
 
     headers = {"Accept": "application/json"}
@@ -534,7 +535,10 @@ async def fetch_models_preview(
 
     try:
         async with httpx.AsyncClient(**client_kwargs) as cli:
-            resp = await cli.get(f"{base_url}/models", headers=headers)
+            resp = await cli.get(
+                provider_models_endpoint(base_url, payload.api_format),
+                headers=headers,
+            )
     except httpx.HTTPError as exc:
         raise _llm_err(
             "FETCH_NETWORK",
@@ -607,13 +611,13 @@ async def detect_provider_protocols(
 
     provider = payload.provider
     if provider == "anthropic":
-        base_url = (payload.base_url or "https://api.anthropic.com/v1").rstrip("/")
+        base_url = normalize_base_url(payload.base_url or "https://api.anthropic.com/v1")
         model = (payload.model or "claude-haiku-4-5").strip()
     elif provider == "ollama":
-        base_url = (payload.base_url or "http://localhost:11434/v1").rstrip("/")
+        base_url = normalize_base_url(payload.base_url or "http://localhost:11434/v1")
         model = (payload.model or "llama3:8b").strip()
     else:
-        base_url = (payload.base_url or "https://api.openai.com/v1").rstrip("/")
+        base_url = normalize_base_url(payload.base_url or "https://api.openai.com/v1")
         model = (payload.model or "gpt-4o-mini").strip()
     proxy_url = await _resolve_proxy_url(db, payload.proxy_id)
 
@@ -629,7 +633,10 @@ async def detect_provider_protocols(
             headers["Authorization"] = f"Bearer {api_key}"
         started = _time.monotonic()
         try:
-            resp = await cli.get(f"{base_url}/models", headers=headers)
+            resp = await cli.get(
+                provider_models_endpoint(base_url, "chat_completions"),
+                headers=headers,
+            )
             latency_ms = int((_time.monotonic() - started) * 1000)
             return _probe_result(resp, latency_ms, api_key=api_key)
         except httpx.HTTPError as exc:
@@ -646,7 +653,11 @@ async def detect_provider_protocols(
         }
         started = _time.monotonic()
         try:
-            resp = await cli.post(f"{base_url}/chat/completions", headers=headers, json=body)
+            resp = await cli.post(
+                provider_endpoint(base_url, "chat_completions"),
+                headers=headers,
+                json=body,
+            )
             latency_ms = int((_time.monotonic() - started) * 1000)
             return _probe_result(resp, latency_ms, api_key=api_key)
         except httpx.HTTPError as exc:
@@ -663,18 +674,16 @@ async def detect_provider_protocols(
         }
         started = _time.monotonic()
         try:
-            resp = await cli.post(f"{base_url}/responses", headers=headers, json=body)
+            resp = await cli.post(
+                provider_endpoint(base_url, "responses"),
+                headers=headers,
+                json=body,
+            )
             latency_ms = int((_time.monotonic() - started) * 1000)
             if _probe_unsupported_parameter(resp, "max_output_tokens"):
-                compat_body = dict(body)
-                compat_body.pop("max_output_tokens", None)
-                compat_started = _time.monotonic()
-                compat_resp = await cli.post(f"{base_url}/responses", headers=headers, json=compat_body)
-                compat_latency_ms = int((_time.monotonic() - compat_started) * 1000)
-                compat_result = _probe_result(compat_resp, compat_latency_ms, api_key=api_key)
-                if compat_result.ok:
-                    compat_result.error = "Responses 兼容模式可用：该接口不支持 max_output_tokens，运行时会自动省略。"
-                return compat_result
+                result = _probe_result(resp, latency_ms, api_key=api_key)
+                result.error = "该 Responses 接口拒绝 max_output_tokens；为避免失去输出与成本上限，运行时不会自动省略该参数。"
+                return result
             return _probe_result(resp, latency_ms, api_key=api_key)
         except httpx.HTTPError as exc:
             return _probe_error(exc, started)
@@ -693,7 +702,11 @@ async def detect_provider_protocols(
         }
         started = _time.monotonic()
         try:
-            resp = await cli.post(f"{base_url}/messages", headers=headers, json=body)
+            resp = await cli.post(
+                provider_endpoint(base_url, "anthropic_messages"),
+                headers=headers,
+                json=body,
+            )
             latency_ms = int((_time.monotonic() - started) * 1000)
             return _probe_result(resp, latency_ms, api_key=api_key)
         except httpx.HTTPError as exc:
@@ -841,7 +854,7 @@ async def fetch_models(
             422,
         )
 
-    base_url = (row.base_url or "https://api.openai.com/v1").rstrip("/")
+    base_url = normalize_base_url(row.base_url or "https://api.openai.com/v1")
     api_key = decrypt_str(row.api_key_enc) if row.api_key_enc else ""
     proxy_url = await _resolve_proxy_url(db, row.proxy_id)
 
@@ -855,7 +868,10 @@ async def fetch_models(
 
     try:
         async with httpx.AsyncClient(**client_kwargs) as cli:
-            resp = await cli.get(f"{base_url}/models", headers=headers)
+            resp = await cli.get(
+                provider_models_endpoint(base_url, fmt),
+                headers=headers,
+            )
     except httpx.HTTPError as exc:
         raise _llm_err(
             "FETCH_NETWORK",

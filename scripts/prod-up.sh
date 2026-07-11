@@ -28,7 +28,7 @@ fi
 chmod 600 .env 2>/dev/null || true
 
 # 校验密钥已替换
-if grep -qE '^(MASTER_KEY|JWT_SECRET)=(changeme|$)' .env; then
+if grep -qE '^(MASTER_KEY|JWT_SECRET)=(changeme.*)?$' .env; then
   err ".env 中 MASTER_KEY / JWT_SECRET 还是占位值！"
   echo "  自动重新生成（不会动其它字段）..."
   if command -v python3.12 >/dev/null 2>&1; then
@@ -51,6 +51,36 @@ p.write_text(text)
 PY
   ok ".env 密钥已生成"
 fi
+
+# updater 拥有宿主机 Docker socket 控制能力，必须使用独立于 Web JWT 的随机密钥。
+ensure_updater_token_env .env
+
+# 非占位但格式无效的 MASTER_KEY 不能自动替换，否则已有密文会永久不可解。
+_secret_py="$(command -v python3.12 || true)"
+[[ -n "$_secret_py" ]] || _secret_py="$(command -v python3 || true)"
+[[ -n "$_secret_py" ]] || [[ ! -x backend/.venv/bin/python ]] || _secret_py=backend/.venv/bin/python
+[[ -n "$_secret_py" ]] || die "需要 Python 校验生产密钥"
+"$_secret_py" - .env <<'PY'
+import base64
+import pathlib
+import sys
+
+values = {}
+for line in pathlib.Path(sys.argv[1]).read_text().splitlines():
+    if "=" in line and not line.lstrip().startswith("#"):
+        key, value = line.split("=", 1)
+        values[key.strip()] = value.strip().strip('"')
+try:
+    master_key = values.get("MASTER_KEY", "").encode("ascii")
+    if len(base64.urlsafe_b64decode(master_key)) != 32:
+        raise ValueError("解码后长度不是 32 字节")
+except Exception as exc:
+    raise SystemExit(f"MASTER_KEY 不是合法 Fernet key：{exc}") from None
+if len(values.get("JWT_SECRET", "")) < 32:
+    raise SystemExit("JWT_SECRET 长度不足 32 字符")
+if values.get("UPDATER_TOKEN") == values.get("JWT_SECRET"):
+    raise SystemExit("UPDATER_TOKEN 不得与 JWT_SECRET 复用")
+PY
 
 # 校验 Postgres 密码不是默认弱密码（仅生产强制）
 _pg_pwd="$(grep -E '^POSTGRES_PASSWORD=' .env 2>/dev/null | head -n1 | cut -d= -f2- | tr -d ' "' || true)"

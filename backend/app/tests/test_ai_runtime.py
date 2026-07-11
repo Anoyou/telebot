@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
+from app.services import llm_client
 from app.services import llm_invoke as service_ai_runtime
 from app.services.llm_client import LLMResult
 from app.services.llm_dto import LLMProviderDTO
@@ -19,6 +20,11 @@ def _reset_ctx():
     wcmd.set_command_context(CommandContext(account_id=1, templates={}, providers={}))
     yield
     wcmd.set_command_context(CommandContext(account_id=1, templates={}, providers={}))
+
+
+def test_xhigh_reasoning_effort_is_preserved_for_supported_models() -> None:
+    assert llm_client._normalize_reasoning_effort("xhigh") == "xhigh"
+    assert ai_runtime._optional_reasoning_effort("xhigh") == "xhigh"
 
 
 @pytest.mark.asyncio

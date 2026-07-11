@@ -2080,6 +2080,13 @@ _EXPORT_DEFS: dict[str, dict[str, Any]] = {
 
 # 敏感字段的完整集合（include_sensitive=true 时不排除）
 _ALL_SENSITIVE = {"session_enc", "api_key_enc", "api_id_enc", "api_hash_enc", "phone", "bot_token_enc", "password_enc"}
+_SENSITIVE_SYSTEM_SETTING_KEYS = {"auth_login_recovery_code"}
+_SENSITIVE_SYSTEM_SETTING_PREFIXES = (
+    "account_webhooks:",
+    "account_bot_transfer_notice:",
+    "account_bot:interaction_runtime_state:",
+    "account_bot:transfer_test_runtime_state:",
+)
 
 
 class ExportConfigRequest(BaseModel):
@@ -2101,6 +2108,13 @@ def _row_to_dict(row: Any, exclude: set[str], include_sensitive: bool) -> dict[s
                 val = val.hex() if include_sensitive else None
             data[name] = val
     return {k: v for k, v in data.items() if v is not None}
+
+
+def _system_setting_safe_for_export(key: Any) -> bool:
+    normalized = str(key or "").strip()
+    if normalized in _SENSITIVE_SYSTEM_SETTING_KEYS:
+        return False
+    return not any(normalized.startswith(prefix) for prefix in _SENSITIVE_SYSTEM_SETTING_PREFIXES)
 
 
 @router.post("/export-config")
@@ -2166,6 +2180,8 @@ async def export_config(
                     for k, v in filt.items():
                         query = query.where(getattr(model_cls, k) == v)
                 rows = (await db.execute(query)).scalars().all()
+                if model_cls is SystemSetting and not body.include_sensitive:
+                    rows = [row for row in rows if _system_setting_safe_for_export(getattr(row, "key", ""))]
                 result[cat] = [_row_to_dict(r, exclude, body.include_sensitive) for r in rows]
         except Exception as e:  # noqa: BLE001
             result[cat] = {"_error": f"{type(e).__name__}: {str(e)[:200]}"}
