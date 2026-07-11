@@ -10,7 +10,17 @@ import {
   DialogFooter,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
-import { checkUpdate, getUpdateJob, pullUpdate, restartApp } from "@/api/system";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import {
+  checkUpdate,
+  getSystemSettings,
+  getUpdateJob,
+  patchSystemSettings,
+  pullUpdate,
+  restartApp,
+} from "@/api/system";
+import type { AppUpdateTarget } from "@/api/system";
 import type {
   CheckUpdateResult,
   PullUpdateResult,
@@ -73,8 +83,13 @@ interface UpdateDialogProps {
 export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
   const [step, setStep] = useState<Step | null>(null);
   const [frontendUpdateState, setFrontendUpdateState] = useState<FrontendUpdateState>("idle");
+  const [updateRemote, setUpdateRemote] = useState("origin");
+  const [updateBranch, setUpdateBranch] = useState("main");
+  const [targetSaving, setTargetSaving] = useState(false);
   const timerRef = useRef<ReturnType<typeof setInterval>>();
   const jobPollTokenRef = useRef(0);
+  const checkTokenRef = useRef(0);
+  const dialogGenerationRef = useRef(0);
 
   const normalizeAction = (raw: CheckUpdateResult["action_required"]): UpdateActionRequired => {
     return typeof raw === "string" ? raw : "none";
@@ -180,10 +195,13 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
   };
 
   // 打开时自动检查更新
-  const doCheck = useCallback(async () => {
+  const doCheck = useCallback(async (target: AppUpdateTarget) => {
+    const checkToken = checkTokenRef.current + 1;
+    checkTokenRef.current = checkToken;
     setStep({ kind: "checking" });
     try {
-      const res: CheckUpdateResult = await checkUpdate();
+      const res: CheckUpdateResult = await checkUpdate(target);
+      if (checkTokenRef.current !== checkToken) return;
       if (res.error) {
         setStep({ kind: "check_failed", error: res.error });
       } else if (res.can_check === false) {
@@ -201,6 +219,7 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
         });
       }
     } catch (e) {
+      if (checkTokenRef.current !== checkToken) return;
       setStep({
         kind: "check_failed",
         error: e instanceof Error ? e.message : String(e),
@@ -210,12 +229,28 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
 
   useEffect(() => {
     if (open) {
+      const dialogGeneration = dialogGenerationRef.current + 1;
+      dialogGenerationRef.current = dialogGeneration;
       setFrontendUpdateState("idle");
-      doCheck();
+      void (async () => {
+        try {
+          const settings = await getSystemSettings();
+          if (dialogGenerationRef.current !== dialogGeneration) return;
+          const target = settings.app_update_target ?? { remote: "origin", branch: "main" };
+          setUpdateRemote(target.remote || "origin");
+          setUpdateBranch(target.branch || "main");
+          await doCheck(target);
+        } catch {
+          if (dialogGenerationRef.current !== dialogGeneration) return;
+          await doCheck({ remote: "origin", branch: "main" });
+        }
+      })();
     } else {
+      dialogGenerationRef.current += 1;
       setStep(null);
       setFrontendUpdateState("idle");
       jobPollTokenRef.current += 1;
+      checkTokenRef.current += 1;
       if (timerRef.current) {
         clearInterval(timerRef.current);
         timerRef.current = undefined;
@@ -232,7 +267,11 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
   const doPull = async () => {
     setStep({ kind: "pulling" });
     try {
-      const res: PullUpdateResult = await pullUpdate();
+      const activePlan = step?.kind === "has_update" ? step.plan : null;
+      const res: PullUpdateResult = await pullUpdate({
+        remote: activePlan?.remote || updateRemote,
+        branch: activePlan?.branch || updateBranch,
+      });
       if (res.success) {
         const plan = parsePlanMeta(res);
         if (res.job_id) {
@@ -255,6 +294,30 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
         kind: "pull_failed",
         error: e instanceof Error ? e.message : String(e),
       });
+    }
+  };
+
+  const saveTargetAndCheck = async () => {
+    const remote = updateRemote.trim();
+    const branch = updateBranch.trim();
+    if (!remote || !branch) {
+      setStep({ kind: "check_failed", error: "更新远端和分支不能为空" });
+      return;
+    }
+    setTargetSaving(true);
+    try {
+      const settings = await patchSystemSettings({ app_update_target: { remote, branch } });
+      const saved = settings.app_update_target ?? { remote, branch };
+      setUpdateRemote(saved.remote);
+      setUpdateBranch(saved.branch);
+      await doCheck(saved);
+    } catch (error) {
+      setStep({
+        kind: "check_failed",
+        error: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      setTargetSaving(false);
     }
   };
 
@@ -388,6 +451,51 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
           <div className="mb-3 flex items-center justify-between gap-3 rounded-md border border-primary/20 bg-primary/5 px-3 py-2 text-xs">
             <span className="text-muted-foreground">当前应用版本</span>
             <code className="rounded bg-background px-2 py-1 font-mono text-foreground">{APP_VERSION_LABEL}</code>
+          </div>
+
+          <div className="mb-4 rounded-md border bg-background px-3 py-3">
+            <div className="grid min-w-0 gap-3 sm:grid-cols-[100px_minmax(0,1fr)]">
+              <div className="min-w-0 space-y-1.5">
+                <Label htmlFor="app-update-remote">Git 远端</Label>
+                <Input
+                  id="app-update-remote"
+                  value={updateRemote}
+                  onChange={(event) => setUpdateRemote(event.target.value)}
+                  placeholder="origin"
+                  autoComplete="off"
+                />
+              </div>
+              <div className="min-w-0 space-y-1.5">
+                <Label htmlFor="app-update-branch">检查分支</Label>
+                <Input
+                  id="app-update-branch"
+                  list="app-update-branch-options"
+                  value={updateBranch}
+                  onChange={(event) => setUpdateBranch(event.target.value)}
+                  placeholder="main"
+                  autoComplete="off"
+                />
+                <datalist id="app-update-branch-options">
+                  <option value="main" />
+                  <option value="codex/0.33-interaction-framework" />
+                </datalist>
+              </div>
+            </div>
+            <div className="mt-3 flex items-center justify-between gap-3">
+              <p className="min-w-0 text-xs text-muted-foreground">
+                检查和应用更新会使用同一目标分支。
+              </p>
+              <Button
+                type="button"
+                size="sm"
+                className="shrink-0"
+                onClick={() => void saveTargetAndCheck()}
+                disabled={targetSaving || step?.kind === "checking" || step?.kind === "pulling" || step?.kind === "job_running"}
+              >
+                {targetSaving ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="mr-1 h-3.5 w-3.5" />}
+                保存并检查
+              </Button>
+            </div>
           </div>
 
           {step?.kind === "checking" && (
@@ -608,14 +716,14 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
         {isActionable && (
           <DialogFooter className="gap-2">
             {(step?.kind === "check_failed" || step?.kind === "pull_failed") && (
-              <Button variant="outline" size="sm" onClick={doCheck}>
+              <Button variant="outline" size="sm" onClick={() => void doCheck({ remote: updateRemote, branch: updateBranch })}>
                 <RefreshCw className="mr-1 h-3.5 w-3.5" />
                 重新检查
               </Button>
             )}
             {step?.kind === "cannot_check" && (
               <>
-                <Button variant="outline" size="sm" onClick={doCheck}>
+                <Button variant="outline" size="sm" onClick={() => void doCheck({ remote: updateRemote, branch: updateBranch })}>
                   <RefreshCw className="mr-1 h-3.5 w-3.5" />
                   重新检查
                 </Button>
@@ -642,7 +750,7 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
             )}
             {step?.kind === "pulled" && (
               <>
-                <Button variant="outline" size="sm" onClick={doCheck}>
+                <Button variant="outline" size="sm" onClick={() => void doCheck({ remote: updateRemote, branch: updateBranch })}>
                   再次检查
                 </Button>
                 {!step.plan.runtimeMode || step.plan.actionRequired === "restart" ? (

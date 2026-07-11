@@ -29,12 +29,13 @@ from typing import Any
 
 from fastapi import APIRouter, Body, File, UploadFile
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import func, select, text
 
 from ..db.base import AsyncSessionLocal
 from ..db.models.account import Account, Proxy
 from ..db.models.command import LLMProvider
+from ..db.models.system import SystemSetting
 from ..deps import CurrentUser
 from ..redis_client import get_redis
 
@@ -1535,6 +1536,31 @@ class UpdateRequest(BaseModel):
     branch: str | None = None
     full: bool = False
 
+    @field_validator("remote")
+    @classmethod
+    def validate_remote(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", normalized):
+            raise ValueError("更新远端名称格式无效")
+        return normalized
+
+    @field_validator("branch")
+    @classmethod
+    def validate_branch(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        if (
+            not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,199}", normalized)
+            or ".." in normalized
+            or "//" in normalized
+            or normalized.endswith(("/", "."))
+        ):
+            raise ValueError("更新分支格式无效")
+        return normalized
+
 
 class UpdateJobStatusResponse(BaseModel):
     ok: bool = False
@@ -1553,14 +1579,24 @@ class UpdateJobStatusResponse(BaseModel):
     plan: dict[str, Any] | None = None
 
 
-def _normalize_update_request(payload: UpdateRequest | None) -> tuple[str, str, bool]:
+async def _resolve_update_request(payload: UpdateRequest | None) -> tuple[str, str, bool]:
     if not isinstance(payload, UpdateRequest):
         payload = None
     default_remote, default_branch = _default_update_remote_branch()
-    remote = str((payload.remote if payload else None) or default_remote).strip() or default_remote
-    branch = str((payload.branch if payload else None) or default_branch).strip() or default_branch
-    full = bool(payload.full) if payload else False
-    return remote, branch, full
+    try:
+        async with AsyncSessionLocal() as db:
+            row = await db.get(SystemSetting, "app_update_target")
+        if row is not None and isinstance(row.value, dict):
+            default_remote = str(row.value.get("remote") or default_remote)
+            default_branch = str(row.value.get("branch") or default_branch)
+    except Exception:  # noqa: BLE001
+        pass
+    candidate = payload or UpdateRequest()
+    return (
+        str(candidate.remote or default_remote).strip() or default_remote,
+        str(candidate.branch or default_branch).strip() or default_branch,
+        bool(candidate.full),
+    )
 
 
 def _int_or_none(value: Any) -> int | None:
@@ -1581,7 +1617,7 @@ async def check_update(
     runtime_mode, updater, root = await asyncio.to_thread(_detect_runtime_mode)
     can_apply = runtime_mode in {RUNTIME_LOCAL_SOURCE, RUNTIME_PROD_CONTAINER_WITH_UPDATER}
     manual_command = _manual_command_for_runtime(runtime_mode, updater)
-    remote, branch, _force_full = _normalize_update_request(payload)
+    remote, branch, _force_full = await _resolve_update_request(payload)
 
     try:
         if runtime_mode == RUNTIME_PROD_CONTAINER_WITH_UPDATER and updater and updater.startswith(("http://", "https://")):
@@ -1768,7 +1804,7 @@ async def pull_update(
     runtime_mode, updater, _root = await asyncio.to_thread(_detect_runtime_mode)
     manual_command = _manual_command_for_runtime(runtime_mode, updater)
     can_apply = runtime_mode in {RUNTIME_LOCAL_SOURCE, RUNTIME_PROD_CONTAINER_WITH_UPDATER}
-    remote, branch, force_full = _normalize_update_request(payload)
+    remote, branch, force_full = await _resolve_update_request(payload)
 
     try:
         if runtime_mode == RUNTIME_PROD_CONTAINER_WITH_UPDATER and updater and updater.startswith(("http://", "https://")):

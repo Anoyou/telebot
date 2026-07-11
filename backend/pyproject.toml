@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "telepilot-backend"
-version = "0.56.3"
+version = "0.56.4"
 description = "TelePilot后端"
 requires-python = ">=3.12"
 license = {text = "MIT"}

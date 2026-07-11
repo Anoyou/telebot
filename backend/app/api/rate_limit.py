@@ -16,6 +16,8 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import re
 from datetime import datetime
 from datetime import time as dtime
 from typing import Any
@@ -593,6 +595,14 @@ async def get_system_settings(db: DBSession, _user: CurrentUser) -> dict[str, An
         "remote_plugin_update_check",
         {"enabled": True, "interval_minutes": 360},
     )
+    app_update_target_val = await _get_setting(
+        db,
+        "app_update_target",
+        {
+            "remote": os.getenv("TELEPILOT_UPDATE_REMOTE", "origin"),
+            "branch": os.getenv("TELEPILOT_UPDATE_BRANCH", "main"),
+        },
+    )
     ai_enabled_val = await _get_setting(db, AI_ENABLED_SETTING_KEY, {"enabled": True})
     llm_val = await _get_setting(db, "llm_limits", {})
     payout_val = await _get_setting(db, "payout_limits", {})
@@ -617,6 +627,7 @@ async def get_system_settings(db: DBSession, _user: CurrentUser) -> dict[str, An
         login_security_val if isinstance(login_security_val, dict) else {}
     )
     remote_update = remote_update_val if isinstance(remote_update_val, dict) else {}
+    app_update_target = app_update_target_val if isinstance(app_update_target_val, dict) else {}
     try:
         remote_update_interval = int(remote_update.get("interval_minutes", 360) or 360)
     except (TypeError, ValueError):
@@ -628,6 +639,10 @@ async def get_system_settings(db: DBSession, _user: CurrentUser) -> dict[str, An
         "remote_plugin_update_check": {
             "enabled": bool(remote_update.get("enabled", True)),
             "interval_minutes": max(30, min(10080, remote_update_interval)),
+        },
+        "app_update_target": {
+            "remote": str(app_update_target.get("remote") or "origin"),
+            "branch": str(app_update_target.get("branch") or "main"),
         },
         "sudo_enabled": bool(sudo_val.get("enabled", False)) if isinstance(sudo_val, dict) else bool(sudo_val),
         "command_prefix_required": (
@@ -712,6 +727,11 @@ class _RemotePluginUpdateCheckPatch(BaseModel):
     interval_minutes: int | None = None
 
 
+class _AppUpdateTargetPatch(BaseModel):
+    remote: str | None = None
+    branch: str | None = None
+
+
 class _LoginSecurityPatch(BaseModel):
     notify_otp_enabled: bool | None = None
     notify_otp_failed_attempt_threshold: int | None = None
@@ -735,6 +755,7 @@ class _SettingsPatch(BaseModel):
     command_echo_guard_previous_messages: int | None = None
     login_security: _LoginSecurityPatch | None = None
     remote_plugin_update_check: _RemotePluginUpdateCheckPatch | None = None
+    app_update_target: _AppUpdateTargetPatch | None = None
     llm_limits: _LLMLimitsPatch | None = None
     payout_limits: _PayoutLimitsPatch | None = None
     log_retention: _LogRetentionPatch | None = None
@@ -846,6 +867,30 @@ async def patch_system_settings(
             target="system",
             detail={"enabled": enabled, "interval_minutes": interval},
         )
+    if payload.app_update_target is not None:
+        current = await _get_setting(
+            db,
+            "app_update_target",
+            {
+                "remote": os.getenv("TELEPILOT_UPDATE_REMOTE", "origin"),
+                "branch": os.getenv("TELEPILOT_UPDATE_BRANCH", "main"),
+            },
+        )
+        current = current if isinstance(current, dict) else {}
+        remote = str(payload.app_update_target.remote or current.get("remote") or "origin").strip()
+        branch = str(payload.app_update_target.branch or current.get("branch") or "main").strip()
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", remote):
+            raise _bad("invalid_update_remote", "更新远端名称格式无效")
+        if (
+            not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,199}", branch)
+            or ".." in branch
+            or "//" in branch
+            or branch.endswith(("/", "."))
+        ):
+            raise _bad("invalid_update_branch", "更新分支格式无效")
+        target = {"remote": remote, "branch": branch}
+        await _set_setting(db, "app_update_target", target)
+        await _audit(db, user.id, "set_app_update_target", target="system", detail=target)
     if payload.command_echo_guard_previous_messages is not None:
         limit = int(payload.command_echo_guard_previous_messages)
         if limit < 0 or limit > 50:

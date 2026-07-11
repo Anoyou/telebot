@@ -3136,7 +3136,7 @@ export function BotTab({
               )}>
                 {selectedInteractionRule ? (
                   <div className="space-y-3">
-                    <div className="sticky top-0 z-20 flex items-center gap-2 border-b bg-background/95 pb-2 backdrop-blur-sm xl:hidden">
+                    <div className="sticky top-0 z-20 flex min-h-12 items-center gap-2 rounded-md border bg-background/95 px-2 py-2 backdrop-blur-sm xl:hidden">
                       <Button
                         type="button"
                         variant="outline"
@@ -3147,11 +3147,11 @@ export function BotTab({
                         <ArrowLeft className="mr-1 h-4 w-4" />
                         规则列表
                       </Button>
-                      <div className="min-w-0">
-                        <div className="truncate text-sm font-semibold">
+                      <div className="flex min-w-0 flex-col justify-center">
+                        <div className="truncate text-sm font-semibold leading-5">
                           {selectedInteractionRule.name || `规则 ${selectedInteractionRuleIndexSafe + 1}`}
                         </div>
-                        <div className="truncate text-xs text-muted-foreground">
+                        <div className="truncate text-xs leading-4 text-muted-foreground">
                           第 {selectedInteractionRuleIndexSafe + 1} 条，共 {interactionRules.length} 条
                         </div>
                       </div>

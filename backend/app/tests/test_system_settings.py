@@ -5,6 +5,7 @@ from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
+from fastapi import HTTPException
 
 from app.api import rate_limit
 from app.db.models.system import SystemSetting
@@ -109,6 +110,46 @@ async def test_system_settings_command_prefix_required_roundtrip(monkeypatch) ->
     assert db.rows["command_prefix_required"].value == {"enabled": False}
     assert result["command_prefix_required"] is False
     broadcast.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_system_settings_app_update_target_roundtrip(monkeypatch) -> None:
+    db = _FakeSettingsDB()
+    audit = AsyncMock()
+    monkeypatch.setattr(rate_limit, "_audit", audit)
+
+    result = await rate_limit.patch_system_settings(
+        rate_limit._SettingsPatch(
+            app_update_target=rate_limit._AppUpdateTargetPatch(
+                remote="origin",
+                branch="codex/0.33-interaction-framework",
+            )
+        ),
+        db,  # type: ignore[arg-type]
+        SimpleNamespace(id=1),
+    )
+
+    expected = {"remote": "origin", "branch": "codex/0.33-interaction-framework"}
+    assert db.rows["app_update_target"].value == expected
+    assert result["app_update_target"] == expected
+    audit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_system_settings_app_update_target_rejects_invalid_branch(monkeypatch) -> None:
+    db = _FakeSettingsDB()
+    monkeypatch.setattr(rate_limit, "_audit", AsyncMock())
+
+    with pytest.raises(HTTPException) as exc_info:
+        await rate_limit.patch_system_settings(
+            rate_limit._SettingsPatch(
+                app_update_target=rate_limit._AppUpdateTargetPatch(branch="../main")
+            ),
+            db,  # type: ignore[arg-type]
+            SimpleNamespace(id=1),
+        )
+
+    assert exc_info.value.status_code == 400
 
 
 @pytest.mark.asyncio

@@ -60,6 +60,21 @@ def _token_configured() -> bool:
     return len(TOKEN) >= 32 and not TOKEN.startswith("changeme-")
 
 
+def _normalize_update_target(remote: str, branch: str) -> tuple[str, str]:
+    remote = remote.strip()
+    branch = branch.strip()
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", remote):
+        raise ValueError("更新远端名称格式无效")
+    if (
+        not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,199}", branch)
+        or ".." in branch
+        or "//" in branch
+        or branch.endswith(("/", "."))
+    ):
+        raise ValueError("更新分支格式无效")
+    return remote, branch
+
+
 def _json_response(handler: BaseHTTPRequestHandler, status: int, payload: dict[str, Any]) -> None:
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     handler.send_response(status)
@@ -423,8 +438,14 @@ class Handler(BaseHTTPRequestHandler):
             _json_response(self, 403, {"ok": False, "error": "forbidden"})
             return
         payload = self._read_json()
-        remote = str(payload.get("remote") or DEFAULT_REMOTE).strip() or DEFAULT_REMOTE
-        branch = str(payload.get("branch") or DEFAULT_BRANCH).strip() or DEFAULT_BRANCH
+        try:
+            remote, branch = _normalize_update_target(
+                str(payload.get("remote") or DEFAULT_REMOTE),
+                str(payload.get("branch") or DEFAULT_BRANCH),
+            )
+        except ValueError as exc:
+            _json_response(self, 400, {"ok": False, "error": str(exc)})
+            return
         if self.path == "/check":
             _json_response(self, 200, _check_plan(remote, branch))
             return

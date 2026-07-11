@@ -917,15 +917,15 @@ function RemoteUpdateSettingsCard() {
           description="后台只检查是否有新版本，不会自动安装；发现更新后会在插件中心和已安装插件里提示。"
         />
       </CardHeader>
-      <CardContent className="flex flex-col gap-3 md:flex-row md:items-end">
-        <div className="flex items-center gap-3 rounded-md border px-3 py-2">
+      <CardContent className="grid gap-3 md:grid-cols-2 md:items-end xl:grid-cols-[minmax(140px,180px)_minmax(180px,1fr)_auto]">
+        <div className="flex min-w-0 items-center gap-3 rounded-md border px-3 py-2">
           <Switch checked={enabled} onCheckedChange={setEnabled} />
-          <div>
-            <div className="text-sm font-medium">自动检查</div>
+          <div className="min-w-0">
+            <div className="whitespace-nowrap text-sm font-medium">自动检查</div>
             <div className="text-xs text-muted-foreground">{enabled ? "已开启" : "已关闭"}</div>
           </div>
         </div>
-        <div className="w-full space-y-1.5 md:w-56">
+        <div className="min-w-0 space-y-1.5">
           <Label>检查间隔（分钟）</Label>
           <Input
             inputMode="numeric"
@@ -935,7 +935,7 @@ function RemoteUpdateSettingsCard() {
           />
           <div className="text-xs text-muted-foreground">最小 30，最大 10080</div>
         </div>
-        <div className="flex gap-2">
+        <div className="flex gap-2 md:col-span-2 md:justify-end xl:col-span-1">
           <Button onClick={() => saveMut.mutate()} disabled={saveMut.isPending}>
             {saveMut.isPending ? <Spinner className="mr-2 h-4 w-4" /> : <Save className="mr-2 h-4 w-4" />}
             保存
@@ -1255,16 +1255,16 @@ function RemoteInstallCard() {
       </CardHeader>
       <CardContent className="space-y-4">
         {/* 添加仓库 */}
-        <div className="grid gap-2 md:grid-cols-[160px_minmax(220px,1fr)_minmax(180px,280px)_auto]">
+        <div className="grid min-w-0 gap-2 md:grid-cols-2 xl:grid-cols-[160px_minmax(0,1fr)_minmax(0,280px)_auto]">
           <Input
-            className="h-9 rounded-md bg-background"
+            className="h-9 min-w-0 rounded-md bg-background"
             placeholder="仓库名（可选）"
             value={addName}
             onChange={(e) => setAddName(e.target.value)}
             disabled={addRepoMut.isPending}
           />
           <Input
-            className="h-9 rounded-md bg-background"
+            className="h-9 min-w-0 rounded-md bg-background"
             placeholder="https://github.com/user/repo.git 或 /tree/branch"
             value={addUrl}
             onChange={(e) => setAddUrl(e.target.value)}
@@ -1274,7 +1274,7 @@ function RemoteInstallCard() {
             disabled={addRepoMut.isPending}
           />
           <Input
-            className="h-9 rounded-md bg-background"
+            className="h-9 min-w-0 rounded-md bg-background"
             type="password"
             autoComplete="off"
             placeholder="GitHub Token（私有库可选）"
@@ -1285,7 +1285,7 @@ function RemoteInstallCard() {
           <Button
             onClick={() => addRepoMut.mutate()}
             disabled={!addUrl.trim() || addRepoMut.isPending}
-            className="shrink-0"
+            className="shrink-0 md:justify-self-start xl:justify-self-auto"
           >
             {addRepoMut.isPending ? (
               <><Spinner className="mr-2 h-4 w-4" /> 添加中…</>
@@ -1296,7 +1296,7 @@ function RemoteInstallCard() {
               </>
             )}
           </Button>
-          <p className="text-xs text-muted-foreground md:col-span-4">
+          <p className="text-xs text-muted-foreground md:col-span-2 xl:col-span-4">
             私有 GitHub 仓库请填写 fine-grained token，至少授予对应仓库 Contents 读取权限。Token 会加密保存且不会回显。
           </p>
         </div>

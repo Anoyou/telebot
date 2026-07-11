@@ -972,6 +972,10 @@ export interface SystemSettings {
     enabled: boolean;
     interval_minutes: number;
   };
+  app_update_target?: {
+    remote: string;
+    branch: string;
+  };
   login_security?: {
     notify_otp_enabled: boolean;
     notify_otp_failed_attempt_threshold: number;

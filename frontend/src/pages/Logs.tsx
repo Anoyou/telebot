@@ -325,7 +325,7 @@ export function Logs() {
           />
         </CardHeader>
         <CardContent className="space-y-4">
-          <div className="grid grid-cols-1 gap-3 md:grid-cols-[240px_180px_minmax(300px,340px)] 2xl:grid-cols-[240px_180px_340px_minmax(260px,1fr)]">
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-[minmax(0,1fr)_140px] xl:grid-cols-[180px_140px_minmax(0,1fr)] 2xl:grid-cols-[180px_140px_minmax(340px,1fr)_minmax(260px,0.8fr)]">
             <Field label="账号">
               <Select value={accountId} onChange={(event) => setAccountId(event.target.value)}>
                 <option value="">全部账号</option>
@@ -343,10 +343,10 @@ export function Logs() {
                 ))}
               </Select>
             </Field>
-            <Field label="结果">
+            <Field label="结果" className="md:col-span-2 xl:col-span-1">
               <VerdictSegment value={verdict} onChange={setVerdict} />
             </Field>
-            <Field label="搜索">
+            <Field label="搜索" className="md:col-span-2 xl:col-span-3 2xl:col-span-1">
               <SearchBox value={keyword} onChange={setKeyword} />
             </Field>
           </div>
@@ -654,10 +654,10 @@ function VerdictSegment({ value, onChange }: { value: VerdictFilter; onChange: (
     { value: "failed", label: "失败" },
   ];
   return (
-    <Tabs value={value || "all"} onValueChange={(next) => onChange(next === "all" ? "" : (next as VerdictFilter))}>
-      <TabsList className="scrollable-tab-list w-full flex-nowrap justify-start sm:w-auto">
+    <Tabs className="w-full min-w-0" value={value || "all"} onValueChange={(next) => onChange(next === "all" ? "" : (next as VerdictFilter))}>
+      <TabsList className="w-full flex-nowrap justify-stretch sm:w-full">
         {items.map((item) => (
-          <TabsTrigger key={item.label} value={item.value || "all"} className="min-w-[3.75rem] px-2 sm:min-w-[4.5rem]">
+          <TabsTrigger key={item.label} value={item.value || "all"} className="min-w-0 flex-1 px-1 sm:min-w-0 sm:px-2">
             <span>{item.label}</span>
           </TabsTrigger>
         ))}
@@ -1407,9 +1407,9 @@ function NativeRawSummary({ meta }: { meta?: EventTraceSummary["native_raw_meta"
   );
 }
 
-function Field({ label, children }: { label: string; children: ReactNode }) {
+function Field({ label, children, className }: { label: string; children: ReactNode; className?: string }) {
   return (
-    <div className="min-w-0 space-y-1.5">
+    <div className={cn("min-w-0 space-y-1.5", className)}>
       <Label>{label}</Label>
       {children}
     </div>
