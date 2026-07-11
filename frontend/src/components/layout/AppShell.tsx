@@ -32,6 +32,9 @@ export function AppShell() {
   const location = useLocation();
   const navigate = useNavigate();
   const [mobileActivePath, setMobileActivePath] = useState(location.pathname);
+  const pageTransitionKey = location.pathname === "/plugins" || location.pathname.startsWith("/plugins/")
+    ? "/plugins"
+    : location.pathname;
 
   useEffect(() => {
     setMobileActivePath(location.pathname);
@@ -88,7 +91,7 @@ export function AppShell() {
           "
         >
           <div
-            key={location.pathname}
+            key={pageTransitionKey}
             className="min-h-full w-full animate-page-enter"
           >
             <Outlet />
