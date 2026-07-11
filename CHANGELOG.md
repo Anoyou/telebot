@@ -20,6 +20,11 @@
 
 ## [Unreleased]
 
+### Fixed
+- `update_session` 统一走 Redis Lua CAS，合并 data / 延长过期 / 递增 revision，冲突返回明确错误，避免多执行体并发丢写。
+- BotTab 交互配置改为复合保存接口，规则与相关插件配置同一事务提交，消除半应用状态。
+- BotTab 编辑 dirty 时后台 refetch 不再覆盖本地输入；远端配置变化时提示用户选择保留或刷新。
+
 ## [0.56.5] — 2026-07-12 · patch（补丁版本） · 资金台账与风控止血
 
 ### Fixed

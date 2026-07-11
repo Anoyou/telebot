@@ -2094,34 +2094,41 @@ async def _apply_userbot_update_session_action(
     session_key: str | None = None,
     session: dict[str, Any] | None = None,
 ) -> bool:
+    from ...services.interaction.session_store import (
+        SessionNotFoundError,
+        SessionRevisionConflictError,
+        SessionUpdateError,
+        update_interaction_session,
+    )
+
     key = str(action.get("session_key") or session_key or "").strip()
     if not key:
         await record_action(action.get("context"), action, TRACE_STATUS_FAILED, error_code="session_not_found", error="update_session missing session_key")
         return False
-    current = dict(session or {})
-    if not current:
-        raw = await redis.get(key)
-        current = _json_dict(raw)
-    session_channel = _session_channel(current)
+    # Channel gate still uses the caller's in-memory snapshot when present so
+    # unobserved sessions fail before the Redis CAS write.
+    preview = dict(session or {})
+    if not preview:
+        preview = _json_dict(await redis.get(key))
+    session_channel = _session_channel(preview)
     if session_channel not in _SESSION_CHANNELS_OBSERVED_BY_USERBOT:
         await record_action(action.get("context"), action, TRACE_STATUS_FAILED, error_code="session_not_found", error="userbot-observed session not found")
         return False
     patch_data = action.get("data")
     if not isinstance(patch_data, dict):
         patch_data = {}
-    existing_data = current.get("data") if isinstance(current.get("data"), dict) else {}
-    current["data"] = {**dict(existing_data), **dict(patch_data)}
-    current["updated_at"] = time.time()
     extend_seconds = _int_or_none(action.get("extend_seconds"))
-    if extend_seconds is not None and extend_seconds > 0:
-        base = time.time()
-        try:
-            base = max(base, float(current.get("expires_at") or 0))
-        except (TypeError, ValueError):
-            pass
-        current["expires_at"] = base + extend_seconds
+    expected_revision = _int_or_none(action.get("expected_revision"))
     try:
-        await _write_userbot_session(redis, key, current)
+        updated = await update_interaction_session(
+            redis,
+            key,
+            data=patch_data,
+            extend_seconds=extend_seconds,
+            expected_revision=expected_revision,
+            grace_seconds=_USERBOT_SESSION_TTL_GRACE_SECONDS,
+        )
+        current = updated.session
         chat_id = _int_or_none(current.get("chat_id"))
         if chat_id is not None:
             state.userbot_session_chats.add(chat_id)
@@ -2136,11 +2143,39 @@ async def _apply_userbot_update_session_action(
             result={
                 "session_key": key,
                 "channel": session_channel,
-                "data_keys": sorted(current["data"].keys()),
-                "expires_at": current.get("expires_at"),
+                "data_keys": sorted(updated.data.keys()),
+                "expires_at": updated.expires_at,
+                "revision": updated.revision,
             },
         )
         return True
+    except SessionRevisionConflictError as exc:
+        await record_action(
+            action.get("context"),
+            action,
+            TRACE_STATUS_FAILED,
+            error_code="session_revision_conflict",
+            error=str(exc),
+        )
+        return False
+    except SessionNotFoundError as exc:
+        await record_action(
+            action.get("context"),
+            action,
+            TRACE_STATUS_FAILED,
+            error_code="session_not_found",
+            error=str(exc),
+        )
+        return False
+    except SessionUpdateError as exc:
+        await record_action(
+            action.get("context"),
+            action,
+            TRACE_STATUS_FAILED,
+            error_code="interaction_session_error",
+            error=f"{type(exc).__name__}: {exc}",
+        )
+        return False
     except Exception as exc:  # noqa: BLE001
         await record_action(action.get("context"), action, TRACE_STATUS_FAILED, error_code="redis_error", error=f"{type(exc).__name__}: {exc}")
         return False

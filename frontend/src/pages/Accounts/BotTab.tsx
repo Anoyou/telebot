@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { Link } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -64,7 +64,6 @@ import {
 } from "@/components/ui/table";
 import {
   listAccountFeatures,
-  updateAccountFeatureConfig,
 } from "@/api/accounts";
 import {
   createAccountBotUser,
@@ -73,6 +72,7 @@ import {
   getInteractionBotConfig,
   listAccountBotUsers,
   restartAccountBotRuntime,
+  saveInteractionBotComposite,
   testAccountBot,
   updateAccountBot,
   updateAccountBotUser,
@@ -1915,6 +1915,61 @@ export function BotTab({
   const [mobileRuleEditorOpen, setMobileRuleEditorOpen] = useState(false);
   const [ruleSearch, setRuleSearch] = useState("");
   const [ruleStatusFilter, setRuleStatusFilter] = useState<"all" | "enabled" | "paused">("all");
+  // 交互表单 dirty：后台 refetch 不得覆盖用户编辑中的输入。
+  const interactionFormDirtyRef = useRef(false);
+  const interactionInitAidRef = useRef<number | null>(null);
+  const [remoteInteractionChanged, setRemoteInteractionChanged] = useState(false);
+
+  const markInteractionDirty = () => {
+    interactionFormDirtyRef.current = true;
+  };
+
+  const applyInteractionServerState = (data: AccountBotInteractionConfig, entries: typeof interactionEntries) => {
+    setTransferEnabled(data.enabled);
+    setInteractionBotToken("");
+    setClearInteractionBotToken(false);
+    const trustedBotIds = data.trusted_bot_ids?.length
+      ? data.trusted_bot_ids
+      : data.trusted_bot_id == null
+        ? []
+        : [data.trusted_bot_id];
+    setTrustedBotIdsText(trustedBotIds.map((id) => String(id)).join("\n"));
+    setTransferBotToken("");
+    setClearTransferBotToken(false);
+    setTransferNoticeTemplate(data.transfer_notice_template || DEFAULT_TRANSFER_NOTICE_TEMPLATE);
+    setDebitNoticeTemplate(data.debit_notice_template || DEFAULT_DEBIT_NOTICE_TEMPLATE);
+    setInteractionQueryCommands(
+      data.query_commands?.length
+        ? data.query_commands.join("\n")
+        : DEFAULT_INTERACTION_QUERY_COMMANDS,
+    );
+    setInteractionQueryResponseTemplate(
+      data.query_response_template || DEFAULT_INTERACTION_QUERY_RESPONSE_TEMPLATE,
+    );
+    setInteractionQueryItemTemplate(
+      data.query_item_template || DEFAULT_INTERACTION_QUERY_ITEM_TEMPLATE,
+    );
+    setInteractionQueryEmptyMessage(
+      data.query_empty_message || DEFAULT_INTERACTION_QUERY_EMPTY_MESSAGE,
+    );
+    const sourceRules = data.rules?.length
+      ? data.rules
+      : [legacyRuleFromConfig(data)];
+    const fallbackChatIds = data.chat_ids?.length
+      ? data.chat_ids
+      : data.chat_id == null
+        ? []
+        : [data.chat_id];
+    const nextRules = sourceRules.map((rule, index) => ruleFormFromRule(rule, index, fallbackChatIds, entries));
+    setInteractionRules(nextRules);
+    setSelectedInteractionRuleId((current) =>
+      nextRules.some((rule) => rule.id === current)
+        ? current
+        : nextRules[0]?.id ?? null,
+    );
+    interactionFormDirtyRef.current = false;
+    setRemoteInteractionChanged(false);
+  };
 
   const botQ = useQuery({
     queryKey: ["account", aid, "bot"],
@@ -1986,51 +2041,27 @@ export function BotTab({
   }, [botQ.data?.enabled, botQ.data?.has_token, botQ.data?.remote_plugin_policy]);
 
   useEffect(() => {
-    if (interactionQ.data) {
-      setTransferEnabled(interactionQ.data.enabled);
-      setInteractionBotToken("");
-      setClearInteractionBotToken(false);
-      const trustedBotIds = interactionQ.data.trusted_bot_ids?.length
-        ? interactionQ.data.trusted_bot_ids
-        : interactionQ.data.trusted_bot_id == null
-          ? []
-          : [interactionQ.data.trusted_bot_id];
-      setTrustedBotIdsText(trustedBotIds.map((id) => String(id)).join("\n"));
-      setTransferBotToken("");
-      setClearTransferBotToken(false);
-      setTransferNoticeTemplate(interactionQ.data.transfer_notice_template || DEFAULT_TRANSFER_NOTICE_TEMPLATE);
-      setDebitNoticeTemplate(interactionQ.data.debit_notice_template || DEFAULT_DEBIT_NOTICE_TEMPLATE);
-      setInteractionQueryCommands(
-        interactionQ.data.query_commands?.length
-          ? interactionQ.data.query_commands.join("\n")
-          : DEFAULT_INTERACTION_QUERY_COMMANDS,
-      );
-      setInteractionQueryResponseTemplate(
-        interactionQ.data.query_response_template || DEFAULT_INTERACTION_QUERY_RESPONSE_TEMPLATE,
-      );
-      setInteractionQueryItemTemplate(
-        interactionQ.data.query_item_template || DEFAULT_INTERACTION_QUERY_ITEM_TEMPLATE,
-      );
-      setInteractionQueryEmptyMessage(
-        interactionQ.data.query_empty_message || DEFAULT_INTERACTION_QUERY_EMPTY_MESSAGE,
-      );
-      const sourceRules = interactionQ.data.rules?.length
-        ? interactionQ.data.rules
-        : [legacyRuleFromConfig(interactionQ.data)];
-      const fallbackChatIds = interactionQ.data.chat_ids?.length
-        ? interactionQ.data.chat_ids
-        : interactionQ.data.chat_id == null
-          ? []
-          : [interactionQ.data.chat_id];
-      const nextRules = sourceRules.map((rule, index) => ruleFormFromRule(rule, index, fallbackChatIds, interactionEntries));
-      setInteractionRules(nextRules);
-      setSelectedInteractionRuleId((current) =>
-        nextRules.some((rule) => rule.id === current)
-          ? current
-          : nextRules[0]?.id ?? null,
-      );
+    // 账号切换：强制用服务端状态重建表单。
+    if (interactionInitAidRef.current !== aid) {
+      interactionInitAidRef.current = aid;
+      interactionFormDirtyRef.current = false;
+      setRemoteInteractionChanged(false);
+      if (interactionQ.data) {
+        applyInteractionServerState(interactionQ.data, interactionEntries);
+      }
+      return;
     }
-  }, [interactionQ.data, matrixQ.data, featuresQ.data]);
+    if (!interactionQ.data) return;
+    // 首次拿到 interaction 数据时初始化；之后 dirty 则不覆盖。
+    if (!interactionFormDirtyRef.current) {
+      applyInteractionServerState(interactionQ.data, interactionEntries);
+      return;
+    }
+    // dirty 期间服务端数据变化：提示用户，不静默冲表单。
+    setRemoteInteractionChanged(true);
+    // 仅依赖 interaction 主数据；matrix/features 后到不再整表重置。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [aid, interactionQ.data]);
 
   useEffect(() => {
     setSelectedInteractionRuleId((current) =>
@@ -2167,10 +2198,15 @@ export function BotTab({
   const saveInteractionConfig = async () => {
     const payload = buildInteractionPayload();
     const pluginConfigUpdates = buildPluginConfigUpdates();
-    for (const update of pluginConfigUpdates) {
-      await updateAccountFeatureConfig(aid, update.pluginKey, update.config);
-    }
-    await updateInteractionBotConfig(aid, payload);
+    await saveInteractionBotComposite(aid, {
+      interaction: payload,
+      plugin_configs: pluginConfigUpdates.map((update) => ({
+        plugin_key: update.pluginKey,
+        config: update.config,
+      })),
+    });
+    interactionFormDirtyRef.current = false;
+    setRemoteInteractionChanged(false);
   };
 
   const saveTransferMut = useMutation({
@@ -2235,6 +2271,7 @@ export function BotTab({
     index: number,
     patch: Partial<InteractionRuleForm>,
   ) => {
+    markInteractionDirty();
     setInteractionRules((rules) =>
       rules.map((rule, i) => {
         const target = rules[index];
@@ -2258,6 +2295,7 @@ export function BotTab({
   };
 
   const addInteractionRule = () => {
+    markInteractionDirty();
     setInteractionRules((rules) => {
       const nextRule = defaultRuleForm(rules.length);
       setSelectedInteractionRuleId(nextRule.id);
@@ -2267,6 +2305,7 @@ export function BotTab({
   };
 
   const copyInteractionRule = (index: number) => {
+    markInteractionDirty();
     setInteractionRules((rules) => {
       const source = rules[index];
       if (!source) return rules;
@@ -2284,6 +2323,7 @@ export function BotTab({
   };
 
   const removeInteractionRule = (index: number) => {
+    markInteractionDirty();
     setInteractionRules((rules) => {
       if (rules.length <= 1) {
         toast.error("至少需要保留一条规则");
@@ -2299,6 +2339,7 @@ export function BotTab({
   };
 
   const moveInteractionRule = (index: number, direction: -1 | 1) => {
+    markInteractionDirty();
     setInteractionRules((rules) => {
       const nextIndex = index + direction;
       if (nextIndex < 0 || nextIndex >= rules.length) return rules;
@@ -2653,6 +2694,40 @@ export function BotTab({
             </div>
           </section>
 
+          {remoteInteractionChanged ? (
+            <section className="nested-surface border border-primary/30 bg-primary/5 text-sm">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <div className="font-medium">远端配置已变化</div>
+                  <div className="mt-0.5 text-xs text-muted-foreground">
+                    你正在编辑本地草稿；后台刷新不会覆盖当前输入。可选择用服务端最新配置覆盖本地。
+                  </div>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    onClick={() => setRemoteInteractionChanged(false)}
+                  >
+                    继续编辑
+                  </Button>
+                  <Button
+                    type="button"
+                    size="sm"
+                    onClick={() => {
+                      if (interactionQ.data) {
+                        applyInteractionServerState(interactionQ.data, interactionEntries);
+                      }
+                    }}
+                  >
+                    使用服务端配置
+                  </Button>
+                </div>
+              </div>
+            </section>
+          ) : null}
+
           <section className="order-2 nested-surface space-y-4 border">
             <div className="flex flex-wrap items-start justify-between gap-2">
               <div>
@@ -2715,7 +2790,10 @@ export function BotTab({
                       autoComplete="off"
                       placeholder={interactionQ.data?.has_interaction_bot_token ? MASKED_SECRET_PLACEHOLDER : "123456:ABC-DEF..."}
                       value={interactionBotToken}
-                      onChange={(e) => setInteractionBotToken(e.target.value)}
+                      onChange={(e) => {
+                        markInteractionDirty();
+                        setInteractionBotToken(e.target.value);
+                      }}
                     />
                   </div>
                 </div>
@@ -2767,7 +2845,10 @@ export function BotTab({
                       inputMode="numeric"
                       placeholder={"例如：\n6920251805\n6929566752"}
                       value={trustedBotIdsText}
-                      onChange={(e) => setTrustedBotIdsText(e.target.value)}
+                      onChange={(e) => {
+                        markInteractionDirty();
+                        setTrustedBotIdsText(e.target.value);
+                      }}
                     />
                     <div className="text-xs text-muted-foreground">
                       参考群内转账结果消息的发送者 ID；保存时会自动去重，测试模拟 Token 识别出的 Bot 会额外加入信任。
@@ -2780,7 +2861,10 @@ export function BotTab({
                       autoComplete="off"
                       placeholder={interactionQ.data?.has_transfer_bot_token ? MASKED_SECRET_PLACEHOLDER : "测试模拟通知时填写"}
                       value={transferBotToken}
-                      onChange={(e) => setTransferBotToken(e.target.value)}
+                      onChange={(e) => {
+                        markInteractionDirty();
+                        setTransferBotToken(e.target.value);
+                      }}
                     />
                     <div className="text-xs text-muted-foreground">
                       {interactionQ.data?.transfer_bot_id
@@ -2846,7 +2930,10 @@ export function BotTab({
                   </span>
                   <Switch
                     checked={transferEnabled}
-                    onCheckedChange={setTransferEnabled}
+                    onCheckedChange={(value) => {
+                      markInteractionDirty();
+                      setTransferEnabled(value);
+                    }}
                     aria-label="交互功能总开关"
                   />
                 </label>
@@ -2880,7 +2967,10 @@ export function BotTab({
                       className="h-16 !min-h-16 resize-y py-2 text-xs leading-5"
                       placeholder={DEFAULT_INTERACTION_QUERY_COMMANDS}
                       value={interactionQueryCommands}
-                      onChange={(e) => setInteractionQueryCommands(e.target.value)}
+                      onChange={(e) => {
+                        markInteractionDirty();
+                        setInteractionQueryCommands(e.target.value);
+                      }}
                     />
                     <div className="text-xs leading-5 text-muted-foreground">
                       一行一个指令；留空则不开放群内玩法查询。
@@ -2893,7 +2983,10 @@ export function BotTab({
                       className="min-h-[78px] resize-y py-2 text-xs leading-5"
                       placeholder={DEFAULT_INTERACTION_QUERY_RESPONSE_TEMPLATE}
                       value={interactionQueryResponseTemplate}
-                      onChange={(e) => setInteractionQueryResponseTemplate(e.target.value)}
+                      onChange={(e) => {
+                        markInteractionDirty();
+                        setInteractionQueryResponseTemplate(e.target.value);
+                      }}
                     />
                     <div className="grid gap-1 text-xs text-muted-foreground sm:grid-cols-2">
                       <span><code>{"{items}"}</code>：由右侧单项模板生成</span>
@@ -2908,7 +3001,10 @@ export function BotTab({
                         className="min-h-[78px] resize-y py-2 text-xs leading-5"
                         placeholder={DEFAULT_INTERACTION_QUERY_ITEM_TEMPLATE}
                         value={interactionQueryItemTemplate}
-                        onChange={(e) => setInteractionQueryItemTemplate(e.target.value)}
+                        onChange={(e) => {
+                          markInteractionDirty();
+                          setInteractionQueryItemTemplate(e.target.value);
+                        }}
                       />
                     </div>
                     <div className="grid gap-1 text-xs text-muted-foreground sm:grid-cols-2">
@@ -2924,7 +3020,10 @@ export function BotTab({
                       <Input
                         value={interactionQueryEmptyMessage}
                         placeholder={DEFAULT_INTERACTION_QUERY_EMPTY_MESSAGE}
-                        onChange={(e) => setInteractionQueryEmptyMessage(e.target.value)}
+                        onChange={(e) => {
+                          markInteractionDirty();
+                          setInteractionQueryEmptyMessage(e.target.value);
+                        }}
                       />
                     </div>
                   </div>
@@ -3213,7 +3312,10 @@ export function BotTab({
                     rows={5}
                     placeholder={DEFAULT_TRANSFER_NOTICE_TEMPLATE}
                     value={transferNoticeTemplate}
-                    onChange={(e) => setTransferNoticeTemplate(e.target.value)}
+                    onChange={(e) => {
+                      markInteractionDirty();
+                      setTransferNoticeTemplate(e.target.value);
+                    }}
                   />
                   <div className="grid gap-1 text-xs text-muted-foreground sm:grid-cols-2">
                     <span><code>{"{payer_name}"}</code>：付款人显示名</span>
@@ -3248,7 +3350,10 @@ export function BotTab({
                     rows={4}
                     placeholder={DEFAULT_DEBIT_NOTICE_TEMPLATE}
                     value={debitNoticeTemplate}
-                    onChange={(e) => setDebitNoticeTemplate(e.target.value)}
+                    onChange={(e) => {
+                      markInteractionDirty();
+                      setDebitNoticeTemplate(e.target.value);
+                    }}
                   />
                   <div className="nested-surface border bg-background text-xs">
                     <div className="mb-2 flex flex-wrap items-center justify-between gap-2">

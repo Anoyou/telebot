@@ -633,6 +633,7 @@ async def set_account_feature(
     config: dict[str, Any] | None = None,
     *,
     notify: bool = True,
+    commit: bool = True,
 ) -> AccountFeature:
     """对 [账号 × feature] 做 upsert。
 
@@ -642,6 +643,7 @@ async def set_account_feature(
     - ``config`` 不为 None 时整体覆盖（便于前端"保存即覆盖"语义）。
 
     完成后视 ``notify`` 决定是否发 IPC 通知 worker reload。
+    ``commit=False`` 时仅 flush，由调用方负责事务边界（复合保存用）。
     """
     af = (
         await db.execute(
@@ -668,8 +670,12 @@ async def set_account_feature(
             # 立刻把状态置 disabled；激活由 worker 反向写
             af.state = FEATURE_STATE_DISABLED
             af.last_error = None
-    await db.commit()
-    await db.refresh(af)
+    if commit:
+        await db.commit()
+        await db.refresh(af)
+    else:
+        await db.flush()
+        await db.refresh(af)
     if notify:
         await _notify_reload(aid)
     return af

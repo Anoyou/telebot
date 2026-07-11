@@ -6,7 +6,6 @@ import base64
 import binascii
 import json
 import logging
-import math
 import re
 import time
 from collections.abc import Awaitable, Callable
@@ -1048,38 +1047,47 @@ class InteractionDeliveryExecutor:
             )
             return
 
+        expected_revision = _int_or_none(action.get("expected_revision"))
         try:
-            from .. import account_bot_runtime as account_bot_runtime_service
+            from .session_store import (
+                DEFAULT_SESSION_TTL_GRACE_SECONDS,
+                SessionNotFoundError,
+                SessionRevisionConflictError,
+                SessionUpdateError,
+                update_interaction_session,
+            )
 
             redis = self.get_redis_client()
-            existing = _json_dict(await redis.get(session_key))
-            if not existing:
-                raise KeyError("session not found")
-
-            expires_at = _float_or_none(existing.get("expires_at"))
-            if expires_at is None:
-                raise ValueError("session expires_at missing")
-
-            now = time.time()
-            if extend_seconds:
-                expires_at = max(expires_at, now) + extend_seconds
-
-            merged_session_data = dict(existing.get("data") if isinstance(existing.get("data"), dict) else {})
-            merged_session_data.update(session_data_update)
-
-            payload = dict(existing)
-            payload["data"] = merged_session_data
-            payload["updated_at"] = now
-            payload["expires_at"] = expires_at
-
-            grace_seconds = int(account_bot_runtime_service._INTERACTION_SESSION_TTL_GRACE_SECONDS)  # noqa: SLF001
-            ttl_seconds = max(1, int(math.ceil(max(0.0, expires_at - now)))) + grace_seconds
-            await redis.set(
+            updated = await update_interaction_session(
+                redis,
                 session_key,
-                json.dumps(payload, ensure_ascii=False),
-                ex=ttl_seconds,
+                data=session_data_update,
+                extend_seconds=extend_seconds,
+                expected_revision=expected_revision,
+                grace_seconds=DEFAULT_SESSION_TTL_GRACE_SECONDS,
             )
-        except Exception as exc:  # noqa: BLE001
+            expires_at = updated.expires_at
+            merged_session_data = updated.data
+        except SessionRevisionConflictError as exc:
+            await record_action(
+                action.get("context"),
+                action,
+                TRACE_STATUS_FAILED,
+                actual_send_via="interaction_session",
+                error_code="session_revision_conflict",
+                error=str(exc),
+            )
+            await self.write_log(
+                self.incoming,
+                "warn",
+                "interaction session update failed",
+                action_type="update_session",
+                session_key=session_key,
+                error=str(exc),
+                **self.log_context(self.incoming),
+            )
+            return
+        except (SessionNotFoundError, SessionUpdateError, Exception) as exc:  # noqa: BLE001
             await record_action(
                 action.get("context"),
                 action,
@@ -1109,6 +1117,7 @@ class InteractionDeliveryExecutor:
                 "expires_at": expires_at,
                 "extend_seconds": extend_seconds,
                 "data_keys": sorted(merged_session_data),
+                "revision": updated.revision,
             },
         )
 
@@ -1924,27 +1933,6 @@ def _int_or_none(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
-
-
-def _float_or_none(value: Any) -> float | None:
-    try:
-        if value in (None, ""):
-            return None
-        return float(value)
-    except (TypeError, ValueError):
-        return None
-
-
-def _json_dict(raw: Any) -> dict[str, Any]:
-    if isinstance(raw, bytes):
-        raw = raw.decode("utf-8", errors="ignore")
-    if not raw:
-        return {}
-    try:
-        parsed = json.loads(raw) if isinstance(raw, str) else raw
-    except (TypeError, ValueError):
-        return {}
-    return dict(parsed) if isinstance(parsed, dict) else {}
 
 
 def _session_key_from_action(action: dict[str, Any]) -> str:

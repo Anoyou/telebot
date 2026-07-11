@@ -411,6 +411,36 @@ class AccountBotInteractionConfig(BaseModel):
 AccountBotTransferNoticeConfig = AccountBotInteractionConfig
 
 
+class AccountBotInteractionCompositePluginConfig(BaseModel):
+    """单次复合保存中的一项账号级插件配置。"""
+
+    plugin_key: str = Field(min_length=1, max_length=128)
+    config: dict[str, Any] = Field(default_factory=dict)
+
+
+class AccountBotInteractionCompositeSaveRequest(BaseModel):
+    """交互 Bot 规则 + 相关插件配置的原子保存请求。"""
+
+    interaction: AccountBotInteractionConfig
+    plugin_configs: list[AccountBotInteractionCompositePluginConfig] = Field(
+        default_factory=list,
+        max_length=50,
+    )
+
+
+class AccountBotInteractionCompositePluginSummary(BaseModel):
+    plugin_key: str
+    config_keys: list[str] = Field(default_factory=list)
+    enabled: bool = False
+
+
+class AccountBotInteractionCompositeSaveResponse(BaseModel):
+    """复合保存结果：交互配置 + 各插件最终摘要。"""
+
+    interaction: AccountBotInteractionConfig
+    plugins: list[AccountBotInteractionCompositePluginSummary] = Field(default_factory=list)
+
+
 class AccountBotRuntimeResponse(BaseModel):
     ok: bool
     status: str | None = None

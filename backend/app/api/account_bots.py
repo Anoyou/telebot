@@ -8,10 +8,15 @@ from fastapi import APIRouter, HTTPException
 from sqlalchemy import select
 
 from ..db.models.account_bot import ACCOUNT_BOT_STATUS_DISABLED, AccountBot
+from ..db.models.feature import AccountFeature, Feature
 from ..deps import CurrentUser, DBSession
 from ..schemas.account_bot import (
     AccountBotConfigResponse,
     AccountBotConfigUpdate,
+    AccountBotInteractionCompositePluginConfig,
+    AccountBotInteractionCompositePluginSummary,
+    AccountBotInteractionCompositeSaveRequest,
+    AccountBotInteractionCompositeSaveResponse,
     AccountBotInteractionConfig,
     AccountBotRemotePluginPolicy,
     AccountBotRuntimeResponse,
@@ -30,6 +35,7 @@ from ..services import (
     interaction_bot_runtime,
     interaction_bot_service,
 )
+from . import features as features_api
 
 router = APIRouter(prefix="/api/accounts", tags=["account-bots"])
 
@@ -285,6 +291,135 @@ async def update_account_bot_interaction(
     data = _with_interaction_runtime_state(aid, data)
     data = await _with_polling_dlq_count(aid, data)
     return AccountBotInteractionConfig(**data)
+
+
+async def _prepare_account_feature_config_for_save(
+    db: DBSession,
+    aid: int,
+    item: AccountBotInteractionCompositePluginConfig,
+) -> tuple[str, dict[str, Any], bool]:
+    """Validate one plugin config update; returns (key, config, enabled)."""
+
+    key = str(item.plugin_key or "").strip()
+    if not key:
+        raise HTTPException(
+            400,
+            detail={"code": "PLUGIN_KEY_REQUIRED", "message": "plugin_key 不能为空"},
+        )
+    feature = await db.get(Feature, key)
+    if feature is None:
+        raise HTTPException(
+            404,
+            detail={"code": "FEATURE_NOT_FOUND", "message": f"未注册的 feature: {key}"},
+        )
+    existing = await db.get(AccountFeature, (aid, key))
+    config = features_api._preserve_existing_sensitive_values(  # noqa: SLF001
+        dict(existing.config or {}) if existing is not None else None,
+        dict(item.config or {}),
+        key,
+    )
+    config = features_api._normalize_feature_config(key, config)  # noqa: SLF001
+    scoped_schema = features_api._account_config_schema(feature.manifest, config)  # noqa: SLF001
+    if scoped_schema is not None:
+        config = feature_service.apply_required_config_defaults(config, scoped_schema)
+        validation = feature_service.validate_config_against_schema(config, scoped_schema)
+        if not validation.valid:
+            raise HTTPException(
+                400,
+                detail={
+                    "code": "CONFIG_VALIDATION_ERROR",
+                    "message": (
+                        f"配置验证失败 ({key}): "
+                        + "; ".join(f"{e.field}: {e.message}" for e in validation.errors)
+                    ),
+                },
+            )
+    enabled = bool(existing.enabled) if existing is not None else False
+    return key, config, enabled
+
+
+@router.put(
+    "/{aid}/interaction-bot/composite",
+    response_model=AccountBotInteractionCompositeSaveResponse,
+)
+async def save_account_bot_interaction_composite(
+    aid: int,
+    payload: AccountBotInteractionCompositeSaveRequest,
+    db: DBSession,
+    user: CurrentUser,
+) -> AccountBotInteractionCompositeSaveResponse:
+    """原子保存交互 Bot 配置与相关 AccountFeature 配置。
+
+    任一插件配置校验失败或写库失败时整体回滚，避免规则半应用。
+    """
+
+    await account_bot_service.ensure_account(db, aid)
+    await feature_service.seed_builtin_features(db)
+
+    interaction_payload = payload.interaction.model_dump()
+    await _ensure_keyword_rules_have_interaction_bot_token(db, aid, interaction_payload)
+
+    prepared_plugins: list[tuple[str, dict[str, Any], bool]] = []
+    seen_keys: set[str] = set()
+    for raw in payload.plugin_configs:
+        key, config, enabled = await _prepare_account_feature_config_for_save(db, aid, raw)
+        if key in seen_keys:
+            raise HTTPException(
+                400,
+                detail={
+                    "code": "DUPLICATE_PLUGIN_CONFIG",
+                    "message": f"plugin_configs 中重复的 plugin_key: {key}",
+                },
+            )
+        seen_keys.add(key)
+        prepared_plugins.append((key, config, enabled))
+
+    plugin_summaries: list[AccountBotInteractionCompositePluginSummary] = []
+    for key, config, enabled in prepared_plugins:
+        af = await feature_service.set_account_feature(
+            db,
+            aid,
+            key,
+            enabled=enabled,
+            config=config,
+            notify=False,
+            commit=False,
+        )
+        plugin_summaries.append(
+            AccountBotInteractionCompositePluginSummary(
+                plugin_key=af.feature_key,
+                config_keys=sorted(str(k) for k in (af.config or {}).keys()),
+                enabled=bool(af.enabled),
+            )
+        )
+
+    data = await interaction_bot_service.update_interaction_bot_config(
+        db,
+        aid,
+        interaction_payload,
+    )
+    await audit.write(
+        db,
+        user.id,
+        "account_bot.interaction_composite_save",
+        target=f"account:{aid}/bot/interaction-composite",
+        detail={
+            "enabled": data.get("enabled"),
+            "rule_count": len(data.get("rules") or []),
+            "plugin_keys": [item.plugin_key for item in plugin_summaries],
+            "interaction_bot_id": data.get("interaction_bot_id"),
+            "trusted_bot_ids": data.get("trusted_bot_ids"),
+        },
+    )
+    await db.commit()
+    await feature_service._notify_reload(aid)  # noqa: SLF001
+    await interaction_bot_runtime.restart_interaction_bot(aid)
+    data = _with_interaction_runtime_state(aid, data)
+    data = await _with_polling_dlq_count(aid, data)
+    return AccountBotInteractionCompositeSaveResponse(
+        interaction=AccountBotInteractionConfig(**data),
+        plugins=plugin_summaries,
+    )
 
 
 def _polling_dlq_id_or_400(loop: str, update_id: int) -> str:
