@@ -97,6 +97,30 @@ def count_encryptable_secrets(
     return counters
 
 
+def _child_schema_for_value(prop: dict[str, Any] | None, value: Any) -> dict[str, Any] | None:
+    """Descend schema for object/array nesting (including items.properties)."""
+
+    if not isinstance(prop, dict):
+        return None
+    prop_type = str(prop.get("type") or "").strip().lower()
+    if isinstance(value, dict):
+        # object property schema, or array items that are objects
+        if prop_type in {"", "object"} and isinstance(prop.get("properties"), dict):
+            return prop
+        if prop_type == "array" and isinstance(prop.get("items"), dict):
+            items = prop["items"]
+            if isinstance(items, dict) and (
+                str(items.get("type") or "").strip().lower() in {"", "object"}
+                or isinstance(items.get("properties"), dict)
+            ):
+                return items
+        return prop if isinstance(prop.get("properties"), dict) else None
+    if isinstance(value, list):
+        items = prop.get("items")
+        return items if isinstance(items, dict) else None
+    return None
+
+
 def _transform_config(
     value: Any,
     *,
@@ -106,7 +130,7 @@ def _transform_config(
     parent_prop: dict[str, Any] | None = None,
 ) -> Any:
     if isinstance(value, dict):
-        properties = {}
+        properties: dict[str, Any] = {}
         if isinstance(schema, dict):
             raw_props = schema.get("properties")
             if isinstance(raw_props, dict):
@@ -114,9 +138,10 @@ def _transform_config(
         out: dict[str, Any] = {}
         for key, item in value.items():
             prop = properties.get(key) if isinstance(properties.get(key), dict) else None
+            child_schema = _child_schema_for_value(prop, item)
             out[str(key)] = _transform_config(
                 item,
-                schema=prop if isinstance(prop, dict) and prop.get("type") == "object" else None,
+                schema=child_schema,
                 mode=mode,
                 parent_key=str(key),
                 parent_prop=prop,
@@ -126,13 +151,17 @@ def _transform_config(
         item_schema = None
         if isinstance(schema, dict) and isinstance(schema.get("items"), dict):
             item_schema = schema.get("items")
+        elif isinstance(schema, dict) and str(schema.get("type") or "").strip().lower() != "array":
+            # schema 已是 array items 对象定义（从父级 items 传入）
+            item_schema = schema
         return [
             _transform_config(
                 item,
                 schema=item_schema if isinstance(item_schema, dict) else None,
                 mode=mode,
-                parent_key=parent_key,
-                parent_prop=parent_prop,
+                # 数组元素是 object 时，敏感键在元素字段名上，不再沿用父数组字段名。
+                parent_key=None if isinstance(item, dict) else parent_key,
+                parent_prop=None if isinstance(item, dict) else parent_prop,
             )
             for item in value
         ]
@@ -165,28 +194,33 @@ def _count_walk(
     parent_prop: dict[str, Any] | None = None,
 ) -> None:
     if isinstance(value, dict):
-        properties = {}
+        properties: dict[str, Any] = {}
         if isinstance(schema, dict) and isinstance(schema.get("properties"), dict):
             properties = schema["properties"]
         for key, item in value.items():
             prop = properties.get(key) if isinstance(properties.get(key), dict) else None
+            child_schema = _child_schema_for_value(prop, item)
             _count_walk(
                 item,
-                schema=prop if isinstance(prop, dict) and prop.get("type") == "object" else None,
+                schema=child_schema,
                 counters=counters,
                 parent_key=str(key),
                 parent_prop=prop,
             )
         return
     if isinstance(value, list):
-        item_schema = schema.get("items") if isinstance(schema, dict) else None
+        item_schema = None
+        if isinstance(schema, dict) and isinstance(schema.get("items"), dict):
+            item_schema = schema.get("items")
+        elif isinstance(schema, dict) and str(schema.get("type") or "").strip().lower() != "array":
+            item_schema = schema
         for item in value:
             _count_walk(
                 item,
                 schema=item_schema if isinstance(item_schema, dict) else None,
                 counters=counters,
-                parent_key=parent_key,
-                parent_prop=parent_prop,
+                parent_key=None if isinstance(item, dict) else parent_key,
+                parent_prop=None if isinstance(item, dict) else parent_prop,
             )
         return
     if parent_key is None or not _path_is_sensitive(parent_key, parent_prop):

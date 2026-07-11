@@ -73,3 +73,47 @@ def test_count_encryptable_secrets() -> None:
     counts = secrets.count_encryptable_secrets(config)
     assert counts["plain"] == 1
     assert counts["envelope"] == 1
+
+
+def test_array_items_x_sensitive_fields_are_encrypted() -> None:
+    """profiles[].access 仅由 schema x-sensitive 标记时也必须加密。"""
+
+    schema = {
+        "type": "object",
+        "properties": {
+            "profiles": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "access": {"type": "string", "x-sensitive": True},
+                        "password": {"type": "string", "format": "password"},
+                    },
+                },
+            }
+        },
+    }
+    raw = {
+        "profiles": [
+            {"name": "a", "access": "should-encrypt", "password": "p1"},
+            {"name": "b", "access": "also-secret", "password": "p2"},
+        ]
+    }
+    enc = secrets.encrypt_config_secrets(raw, schema=schema)
+    assert enc["profiles"][0]["name"] == "a"
+    assert secrets.is_secret_envelope(enc["profiles"][0]["access"])
+    assert secrets.is_secret_envelope(enc["profiles"][0]["password"])
+    assert secrets.is_secret_envelope(enc["profiles"][1]["access"])
+    assert "should-encrypt" not in enc["profiles"][0]["access"]
+
+    plain = secrets.decrypt_config_secrets(enc, schema=schema)
+    assert plain["profiles"][0]["access"] == "should-encrypt"
+    assert plain["profiles"][1]["password"] == "p2"
+
+    counts = secrets.count_encryptable_secrets(raw, schema=schema)
+    assert counts["plain"] == 4
+    assert counts["envelope"] == 0
+    counts_enc = secrets.count_encryptable_secrets(enc, schema=schema)
+    assert counts_enc["plain"] == 0
+    assert counts_enc["envelope"] == 4

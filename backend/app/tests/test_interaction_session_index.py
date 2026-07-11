@@ -68,13 +68,29 @@ async def test_missing_index_returns_none_for_rebuild() -> None:
 
 
 @pytest.mark.asyncio
-async def test_rebuild_replaces_membership() -> None:
+async def test_rebuild_merges_scan_without_deleting_concurrent_adds() -> None:
     redis = _FakeRedis()
     await session_index.index_session_key(
-        redis, account_id=1, chat_id=9, session_key="old"
+        redis, account_id=1, chat_id=9, session_key="old-session"
     )
-    await session_index.rebuild_chat_index_from_scan(
-        redis, account_id=1, chat_id=9, scan_keys=["a", "b"]
+    # 模拟：SCAN 只看到 old；并发新会话已写入索引
+    await session_index.index_session_key(
+        redis, account_id=1, chat_id=9, session_key="new-session"
+    )
+    merged = await session_index.rebuild_chat_index_from_scan(
+        redis, account_id=1, chat_id=9, scan_keys=["old-session"]
     )
     keys = await session_index.list_indexed_session_keys(redis, account_id=1, chat_id=9)
+    assert set(keys or []) == {"old-session", "new-session"}
+    assert set(merged) == {"old-session", "new-session"}
+
+
+@pytest.mark.asyncio
+async def test_rebuild_adds_scan_keys_into_empty_index() -> None:
+    redis = _FakeRedis()
+    merged = await session_index.rebuild_chat_index_from_scan(
+        redis, account_id=2, chat_id=3, scan_keys=["a", "b"]
+    )
+    keys = await session_index.list_indexed_session_keys(redis, account_id=2, chat_id=3)
     assert set(keys or []) == {"a", "b"}
+    assert set(merged) == {"a", "b"}

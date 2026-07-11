@@ -102,28 +102,45 @@ async def rebuild_chat_index_from_scan(
     chat_id: int,
     scan_keys: list[str],
 ) -> list[str]:
-    """Replace chat index membership with ``scan_keys`` (may be empty)."""
+    """Merge SCAN results into the chat index without deleting concurrent adds.
+
+    旧实现先 DELETE 再 SADD：若新会话在 SCAN 之后、pipeline 之前写入索引，
+    DELETE 会抹掉它且扫描结果又不含它，热路径此后不再 SCAN，导致最长 TTL
+    内丢会话。重建只做并集写入；失效成员由读取路径 unindex 清理。
+    """
 
     if redis is None:
         return list(scan_keys)
     key = chat_index_key(account_id, chat_id)
     try:
-        pipe = getattr(redis, "pipeline", None)
-        if callable(pipe):
-            p = redis.pipeline()
-            p.delete(key)
-            if scan_keys:
-                p.sadd(key, *scan_keys)
-                p.expire(key, CHAT_INDEX_TTL_SECONDS)
-            await p.execute()
-        else:
-            await redis.delete(key)
-            if scan_keys:
-                await redis.sadd(key, *scan_keys)
-                await redis.expire(key, CHAT_INDEX_TTL_SECONDS)
+        if scan_keys:
+            await redis.sadd(key, *scan_keys)
+        # 即使 scan 为空也确保 key 存在，避免热路径反复把「空集合」当成「索引缺失」。
+        # 用 expire 刷新 TTL；若 key 仍不存在（无任何 member），sadd 一个占位再删掉不划算，
+        # 空结果允许返回 None 路径——调用方已 hydrate 完成。
+        exists = await redis.exists(key)
+        if int(exists or 0):
+            await redis.expire(key, CHAT_INDEX_TTL_SECONDS)
+        elif not scan_keys:
+            # 标记「已重建且为空」：写入短暂空集合哨兵，避免下一请求再全量 SCAN。
+            # 用空 set + expire：sadd 需要 member，改为 set 一个标记 key 不合适（smembers 语义）。
+            # 这里保持「不存在」= 可重建；空 chat 会再次慢路径，频率低可接受。
+            pass
     except Exception:  # noqa: BLE001
         log.debug("rebuild chat index failed account=%s chat=%s", account_id, chat_id, exc_info=True)
-    return list(scan_keys)
+    # 返回并集视图（扫描结果 ∪ 当前索引），便于调用方 hydrate。
+    try:
+        members = await redis.smembers(key)
+        out: list[str] = []
+        seen: set[str] = set()
+        for raw in list(scan_keys) + list(members or []):
+            text = raw.decode("utf-8", errors="ignore") if isinstance(raw, bytes) else str(raw)
+            if text and text not in seen:
+                seen.add(text)
+                out.append(text)
+        return out
+    except Exception:  # noqa: BLE001
+        return list(scan_keys)
 
 
 def session_still_active(session: dict[str, Any], *, now: float | None = None) -> bool:

@@ -24,7 +24,8 @@
 - 插件配置敏感字段支持 `secret:v1` 版本化加密信封；提供 `migrate_plugin_config_secrets` 迁移脚本，rekey 覆盖插件 JSON 配置。
 - installed 插件注入命名空间 Redis facade（禁止 keys/scan/flush/pubsub/跨插件访问）；builtin 仍可用完整客户端。
 - 交互 Worker RPC 使用长驻 pubsub broker 按 reply-channel 解复用，避免每次 RPC 独占连接池。
-- 会话反向索引 `account+chat → session keys`，热路径优先 SMEMBERS+GET，索引缺失时 SCAN 重建。
+- 会话反向索引 `account+chat → session keys`，热路径优先 SMEMBERS+GET，索引缺失时 SCAN 并集重建（不 DELETE，避免并发丢会话）。
+- 插件敏感字段加密递归支持 `array.items.properties` 上的 `x-sensitive` / `format=password`。
 
 ### Fixed
 - `update_session` 统一走 Redis Lua CAS，合并 data / 延长过期 / 递增 revision，冲突返回明确错误，避免多执行体并发丢写。
