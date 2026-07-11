@@ -183,7 +183,8 @@ def userbot_rate_limit_action(action_type: str, chat_id: Any) -> str:
         chat = int(chat_id) if chat_id not in (None, "") else None
     except (TypeError, ValueError):
         chat = None
-    if action_type in {"send_message", "respond", "reply"}:
+    # payout 与 send_message 共用发送桶，避免分布式引擎无默认阈值的裸 "payout" 桶。
+    if action_type in {"send_message", "respond", "reply", "payout"}:
         return "send_message_private" if chat is not None and chat > 0 else "send_message_group"
     if action_type in {"edit", "edit_message", "edit_caption"}:
         return "edit_message"
@@ -239,24 +240,171 @@ async def _command_rate_limit_engine(account_id: int) -> RateLimitEngine | None:
     return engine
 
 
+# 进程内保守令牌桶：Redis/DB 不可用时保护 Telegram 账号，避免无限放行。
+# key -> (tokens, last_refill_monotonic)
+_LOCAL_RATE_LIMIT_BUCKETS: dict[str, tuple[float, float]] = {}
+_LOCAL_RATE_LIMIT_LOCK = asyncio.Lock()
+# peer 桶：单会话突发保护；account 桶：跨群总发送速率保护。
+_LOCAL_FALLBACK_PEER_CAPACITY = 3.0
+_LOCAL_FALLBACK_PEER_REFILL_PER_SEC = 1.0
+_LOCAL_FALLBACK_ACCOUNT_CAPACITY = 8.0
+_LOCAL_FALLBACK_ACCOUNT_REFILL_PER_SEC = 2.0
+_LOCAL_RATE_LIMIT_TTL_SECONDS = 600.0
+_LOCAL_RATE_LIMIT_MAX_KEYS = 4096
+
+
+def _local_rate_limit_peer_key(account_id: int, limit_action: str, peer_id: int | None) -> str:
+    peer = "none" if peer_id is None else str(int(peer_id))
+    return f"peer:{int(account_id)}:{limit_action}:{peer}"
+
+
+def _local_rate_limit_account_key(account_id: int, limit_action: str) -> str:
+    return f"acct:{int(account_id)}:{limit_action}"
+
+
+def reset_local_rate_limit_buckets() -> None:
+    """测试与运维用：清空进程内本地限流状态。"""
+
+    _LOCAL_RATE_LIMIT_BUCKETS.clear()
+
+
+def _prune_local_rate_limit_buckets(now: float) -> None:
+    """丢弃过期条目；超容量时按最久未刷新淘汰。"""
+
+    stale = [
+        key
+        for key, (_tokens, last) in _LOCAL_RATE_LIMIT_BUCKETS.items()
+        if (now - last) > _LOCAL_RATE_LIMIT_TTL_SECONDS
+    ]
+    for key in stale:
+        _LOCAL_RATE_LIMIT_BUCKETS.pop(key, None)
+    overflow = len(_LOCAL_RATE_LIMIT_BUCKETS) - _LOCAL_RATE_LIMIT_MAX_KEYS
+    if overflow <= 0:
+        return
+    oldest = sorted(_LOCAL_RATE_LIMIT_BUCKETS.items(), key=lambda item: item[1][1])[:overflow]
+    for key, _ in oldest:
+        _LOCAL_RATE_LIMIT_BUCKETS.pop(key, None)
+
+
+def _consume_local_bucket(
+    key: str,
+    *,
+    capacity: float,
+    refill_per_sec: float,
+    now: float,
+) -> tuple[bool, float]:
+    """Try consume 1 token; return (allowed, wait_seconds_if_denied)."""
+
+    tokens, last = _LOCAL_RATE_LIMIT_BUCKETS.get(key, (capacity, now))
+    elapsed = max(0.0, now - last)
+    tokens = min(capacity, tokens + elapsed * refill_per_sec)
+    if tokens < 1.0:
+        _LOCAL_RATE_LIMIT_BUCKETS[key] = (tokens, now)
+        wait_seconds = (1.0 - tokens) / refill_per_sec if refill_per_sec > 0 else 1.0
+        return False, wait_seconds
+    tokens -= 1.0
+    _LOCAL_RATE_LIMIT_BUCKETS[key] = (tokens, now)
+    return True, 0.0
+
+
+async def _acquire_local_rate_limit_fallback(
+    account_id: int,
+    limit_action: str,
+    peer_id: int | None,
+    *,
+    action_type: str,
+) -> tuple[bool, dict[str, Any]]:
+    """Conservative in-process token bucket used when distributed limiting fails."""
+
+    # payout / 资金相关动作：基础设施不稳时宁可不发，也不盲放。
+    if str(action_type or "").strip().lower() == "payout" or str(limit_action).startswith("payout"):
+        return False, {
+            "rate_limit_action": limit_action,
+            "rate_limit_backend": "local_fallback",
+            "outcome": "rejected",
+            "reason": "distributed_rate_limit_unavailable",
+        }
+
+    peer_key = _local_rate_limit_peer_key(account_id, limit_action, peer_id)
+    account_key = _local_rate_limit_account_key(account_id, limit_action)
+    now = time.monotonic()
+    async with _LOCAL_RATE_LIMIT_LOCK:
+        _prune_local_rate_limit_buckets(now)
+        account_ok, account_wait = _consume_local_bucket(
+            account_key,
+            capacity=_LOCAL_FALLBACK_ACCOUNT_CAPACITY,
+            refill_per_sec=_LOCAL_FALLBACK_ACCOUNT_REFILL_PER_SEC,
+            now=now,
+        )
+        if not account_ok:
+            return False, {
+                "rate_limit_action": limit_action,
+                "rate_limit_backend": "local_fallback",
+                "outcome": "rejected",
+                "wait_seconds": account_wait,
+                "reason": "local_fallback_account_throttled",
+            }
+        peer_ok, peer_wait = _consume_local_bucket(
+            peer_key,
+            capacity=_LOCAL_FALLBACK_PEER_CAPACITY,
+            refill_per_sec=_LOCAL_FALLBACK_PEER_REFILL_PER_SEC,
+            now=now,
+        )
+        if not peer_ok:
+            # 归还账号桶 1 token，避免 peer 拒绝却扣了账号配额。
+            tokens, last = _LOCAL_RATE_LIMIT_BUCKETS.get(
+                account_key, (_LOCAL_FALLBACK_ACCOUNT_CAPACITY, now)
+            )
+            _LOCAL_RATE_LIMIT_BUCKETS[account_key] = (
+                min(_LOCAL_FALLBACK_ACCOUNT_CAPACITY, tokens + 1.0),
+                last,
+            )
+            return False, {
+                "rate_limit_action": limit_action,
+                "rate_limit_backend": "local_fallback",
+                "outcome": "rejected",
+                "wait_seconds": peer_wait,
+                "reason": "local_fallback_throttled",
+            }
+    return True, {
+        "rate_limit_action": limit_action,
+        "rate_limit_backend": "local_fallback",
+        "outcome": "allowed",
+    }
+
+
 async def acquire_userbot_action_rate_limit(
     account_id: int | None,
     action_type: str,
     chat_id: Any,
 ) -> tuple[bool, dict[str, Any]]:
-    """Best-effort UserBot action rate-limit check for direct Telethon send paths."""
+    """UserBot action rate-limit check for direct Telethon send paths.
+
+    Redis/DB 正常时走分布式引擎；异常时降级到进程内保守令牌桶。
+    payout 在分布式不可用时 fail-closed，避免资金路径在风控失效时放行。
+    """
 
     if account_id is None:
-        return True, {}
+        return True, {"rate_limit_backend": "skipped", "outcome": "allowed"}
     limit_action = userbot_rate_limit_action(action_type, chat_id)
     peer_id = _rate_limit_peer_id(chat_id)
     try:
         engine = await _command_rate_limit_engine(int(account_id))
     except Exception:  # noqa: BLE001
         log.debug("load command rate limit engine failed account=%s", account_id, exc_info=True)
-        return True, {"rate_limit_action": limit_action}
+        return await _acquire_local_rate_limit_fallback(
+            int(account_id),
+            limit_action,
+            peer_id,
+            action_type=str(action_type or ""),
+        )
     if engine is None:
-        return True, {"rate_limit_action": limit_action}
+        return await _acquire_local_rate_limit_fallback(
+            int(account_id),
+            limit_action,
+            peer_id,
+            action_type=str(action_type or ""),
+        )
     try:
         decision: RateLimitDecision = await engine.acquire(int(account_id), limit_action, peer_id=peer_id)
     except Exception:  # noqa: BLE001
@@ -267,20 +415,28 @@ async def acquire_userbot_action_rate_limit(
             chat_id,
             exc_info=True,
         )
-        return True, {"rate_limit_action": limit_action}
+        return await _acquire_local_rate_limit_fallback(
+            int(account_id),
+            limit_action,
+            peer_id,
+            action_type=str(action_type or ""),
+        )
     detail = {
         "outcome": getattr(decision, "outcome", None),
         "wait_seconds": getattr(decision, "wait_seconds", None),
         "rate_limit_action": limit_action,
+        "rate_limit_backend": "distributed",
     }
     if not bool(getattr(decision, "allowed", False)):
         reason = getattr(decision, "reason", None)
         if reason:
             detail["reason"] = reason
+        detail["outcome"] = detail.get("outcome") or "rejected"
         return False, detail
     wait_seconds = float(getattr(decision, "wait_seconds", 0.0) or 0.0)
     if math.isfinite(wait_seconds) and wait_seconds > 0:
         await asyncio.sleep(wait_seconds)
+    detail["outcome"] = detail.get("outcome") or "allowed"
     return True, detail
 
 

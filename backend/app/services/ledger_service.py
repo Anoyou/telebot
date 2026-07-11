@@ -25,6 +25,7 @@ from ..db.models.payout_compensation import (
     PayoutCompensation,
 )
 from . import audit
+from .action_tap import emit_compensated_payout_event
 
 LEDGER_DIRECTION_IN = "in"
 LEDGER_DIRECTION_OUT = "out"
@@ -316,6 +317,37 @@ async def mark_compensation_manual_paid(
 
     previous_status = current_status
 
+    payload = dict(row.payload or {})
+    ledger_action = {
+        "type": "payout",
+        "action_type": "payout",
+        "payout_key": row.payout_key,
+        "chat_id": row.chat_id,
+        "amount": row.amount,
+        "text": str(payload.get("text") or f"+{int(row.amount)}").strip(),
+    }
+    for key in ("receiver_user_id", "receiver_name", "receiver_username", "chat_title", "reply_to_user_id"):
+        if payload.get(key) not in (None, ""):
+            ledger_action[key] = payload.get(key)
+    await emit_compensated_payout_event(
+        account_id=int(row.account_id),
+        payout_key=str(row.payout_key),
+        amount=row.amount,
+        chat_id=int(row.chat_id),
+        plugin_key=row.plugin_key,
+        entry_key=row.entry_key,
+        channel="manual_compensation",
+        compensation_source="manual_paid",
+        previous_error_code=row.error_code_last or row.error_code_first,
+        result={
+            "message_id": row.sent_message_id,
+            "chat_id": row.chat_id,
+            "manual_note": (str(note or "").strip()[:500] or None),
+        },
+        action=ledger_action,
+        db=db,
+    )
+
     detail = {
         "previous_status": previous_status,
         "status": PAYOUT_COMPENSATION_STATUS_COMPENSATED,
@@ -535,7 +567,7 @@ def _entry_from_action_event(row: ActionEvent) -> LedgerEntry | None:
         channel=row.channel,
         session_key=row.session_key,
         action_type=row.action_type,
-        payout_key=_text_or_none(summary.get("payout_key")),
+        payout_key=_text_or_none(getattr(row, "payout_key", None), summary.get("payout_key")),
         error_code=row.error_code,
         created_at=row.created_at,
         params_summary=summary,

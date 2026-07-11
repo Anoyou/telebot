@@ -2211,32 +2211,44 @@ async def _acquire_userbot_action_rate_limit(
     limit_action = _userbot_rate_limit_action(action_type, target_chat_id)
     engine = getattr(state, "engine", None)
     redis = state.redis or get_redis()
+
+    async def _best_effort_log(message: str, **detail: Any) -> None:
+        try:
+            await _log(
+                redis,
+                state.account_id,
+                "warn",
+                message,
+                source="plugin",
+                action_type=action_type,
+                rate_limit_action=limit_action,
+                chat_id=target_chat_id,
+                **detail,
+            )
+        except Exception:  # noqa: BLE001
+            log.debug("userbot rate limit log failed account=%s", state.account_id, exc_info=True)
+
     if engine is None:
-        await _log(
-            redis,
-            state.account_id,
-            "warn",
-            "UserBot 交互动作未接入限速引擎，已降级直发。",
-            source="plugin",
-            action_type=action_type,
-            rate_limit_action=limit_action,
-            chat_id=target_chat_id,
+        # 与 command/runtime 对齐：引擎缺失时走本地降级桶，不再 fail-open 直发。
+        from ..command import acquire_userbot_action_rate_limit as _cmd_acquire
+
+        allowed, detail = await _cmd_acquire(state.account_id, action_type, target_chat_id)
+        await _best_effort_log(
+            "UserBot 交互动作未接入限速引擎，已走本地降级限流。",
+            rate_limit_backend=detail.get("rate_limit_backend"),
         )
-        return True
+        return bool(allowed)
     try:
         decision = await engine.acquire(state.account_id, limit_action, peer_id=target_chat_id)
     except Exception as exc:  # noqa: BLE001
-        await _log(
-            redis,
-            state.account_id,
-            "warn",
-            f"UserBot 交互动作限速检查失败，已降级直发：{type(exc).__name__}: {exc}",
-            source="plugin",
-            action_type=action_type,
-            rate_limit_action=limit_action,
-            chat_id=target_chat_id,
+        from ..command import acquire_userbot_action_rate_limit as _cmd_acquire
+
+        allowed, detail = await _cmd_acquire(state.account_id, action_type, target_chat_id)
+        await _best_effort_log(
+            f"UserBot 交互动作限速检查失败，已走本地降级限流：{type(exc).__name__}: {exc}",
+            rate_limit_backend=detail.get("rate_limit_backend"),
         )
-        return True
+        return bool(allowed)
     if not bool(getattr(decision, "allowed", False)):
         await record_action(
             action.get("context"),
@@ -2640,6 +2652,7 @@ async def _apply_userbot_payout_action(state: _AccountState, event: Any, action:
             reply_to_user_id=reply_to_user_id,
         )
         return False
+    # Telegram 发送与本地落标/记账分离：成功发送后绝不因本地异常进入可盲重发补偿。
     try:
         sent = await state.client.send_message(
             target_chat_id,
@@ -2647,40 +2660,6 @@ async def _apply_userbot_payout_action(state: _AccountState, event: Any, action:
             reply_to=reply_to,
             parse_mode=_telethon_parse_mode(parse_mode),
         )
-        result = {
-            "message_id": getattr(sent, "id", None),
-            "chat_id": target_chat_id,
-            "reply_to_message_id": reply_to,
-            "reply_to_user_id": reply_to_user_id,
-        }
-        await payout_compensation.mark_payout_sent_marker(
-            state.redis or get_redis(),
-            state.account_id,
-            payout_key,
-            result.get("message_id"),
-        )
-        await _save_action_message_id(state, action, result)
-        await _save_userbot_reply_target(
-            state,
-            target_chat_id=target_chat_id,
-            result=result,
-            reply_to_user_id=reply_to_user_id,
-        )
-        await record_action(
-            action.get("context"),
-            action,
-            TRACE_STATUS_OK,
-            actual_send_via="userbot_reply",
-            result=result,
-        )
-        await _emit_userbot_action_tap(
-            state,
-            action,
-            ACTION_EVENT_STATUS_OK,
-            channel="userbot_reply",
-            result=result,
-        )
-        return True
     except Exception as exc:  # noqa: BLE001
         flood_detail = await _feed_engine_flood_wait(
             state,
@@ -2705,6 +2684,69 @@ async def _apply_userbot_payout_action(state: _AccountState, event: Any, action:
             reply_to_user_id=reply_to_user_id,
         )
         return False
+
+    result = {
+        "message_id": getattr(sent, "id", None),
+        "chat_id": target_chat_id,
+        "reply_to_message_id": reply_to,
+        "reply_to_user_id": reply_to_user_id,
+        "payout_key": payout_key,
+    }
+    await payout_compensation.mark_payout_sent_marker(
+        state.redis or get_redis(),
+        state.account_id,
+        payout_key,
+        result.get("message_id"),
+    )
+    try:
+        await _save_action_message_id(state, action, result)
+        await _save_userbot_reply_target(
+            state,
+            target_chat_id=target_chat_id,
+            result=result,
+            reply_to_user_id=reply_to_user_id,
+        )
+        await record_action(
+            action.get("context"),
+            action,
+            TRACE_STATUS_OK,
+            actual_send_via="userbot_reply",
+            result=result,
+        )
+        await _emit_userbot_action_tap(
+            state,
+            action,
+            ACTION_EVENT_STATUS_OK,
+            channel="userbot_reply",
+            result=result,
+        )
+        return True
+    except Exception as post_exc:  # noqa: BLE001
+        log.warning(
+            "payout post-send bookkeeping failed account=%s payout_key=%s error=%s",
+            state.account_id,
+            payout_key,
+            post_exc,
+            exc_info=True,
+        )
+        # 消息已发出：挂歧义单供人工/probe，禁止进入可盲重发路径。
+        await _enqueue_compensation(
+            payout_compensation.ERROR_AMBIGUOUS_DELIVERY,
+            post_exc,
+            reply_to_message_id=reply_to,
+            reply_to_user_id=reply_to_user_id,
+        )
+        try:
+            await _emit_userbot_action_tap(
+                state,
+                action,
+                ACTION_EVENT_STATUS_OK,
+                channel="userbot_reply",
+                result={**result, "post_send_bookkeeping_failed": True},
+            )
+        except Exception:  # noqa: BLE001
+            log.debug("payout post-send tap failed", exc_info=True)
+        return True
 
 
 async def _apply_userbot_send_message_action(

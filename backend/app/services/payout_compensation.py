@@ -60,8 +60,13 @@ RETRYABLE_ERROR_CODES = {
     ERROR_RATE_LIMITED,
 }
 
-NON_COMPENSABLE_ERROR_CODES = {
+# 可入队但不可盲重发：用于 Telegram 已接受消息、本地落标/记账失败等歧义窗口。
+# 扫描侧只允许 probe / 人工核销，不得直接重发。
+ENQUEUE_AMBIGUOUS_ONLY_ERROR_CODES = {
     ERROR_AMBIGUOUS_DELIVERY,
+}
+
+NON_COMPENSABLE_ERROR_CODES = {
     ERROR_INVALID_PAYOUT_AMOUNT,
     ERROR_EMPTY_MESSAGE_TEXT,
     ERROR_SCOPE_NOT_MATCHED,
@@ -155,6 +160,14 @@ def normalize_payout_error_code(error_code: Any, error: Any = None) -> str:
 
 def classify_payout_error(error_code: Any, error: Any = None) -> PayoutErrorClassification:
     code = normalize_payout_error_code(error_code, error)
+    if code in ENQUEUE_AMBIGUOUS_ONLY_ERROR_CODES:
+        return PayoutErrorClassification(
+            error_code=code,
+            should_enqueue=True,
+            retryable=False,
+            ambiguous=True,
+            initial_delay_seconds=0,
+        )
     retryable = code in RETRYABLE_ERROR_CODES
     should_enqueue = retryable
     delay = 0 if code == ERROR_USERBOT_OFFLINE else DEFAULT_RETRY_BACKOFF_SECONDS

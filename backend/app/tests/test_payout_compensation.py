@@ -12,6 +12,10 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.db.models.account import Account  # noqa: F401 - registers FK target table metadata
+from app.db.models.action_event import (
+    ACTION_EVENT_STATUS_COMPENSATED,
+    ActionEvent,
+)
 from app.db.models.payout_compensation import (
     PAYOUT_COMPENSATION_STATUS_ABANDONED,
     PAYOUT_COMPENSATION_STATUS_PENDING,
@@ -76,15 +80,33 @@ def test_payout_error_classification_marks_ambiguous_only_for_timeout_or_network
     assert flood_wait.ambiguous is False
 
 
+def test_ambiguous_delivery_error_enqueues_probe_only_not_retryable() -> None:
+    classification = payout_compensation_service.classify_payout_error(
+        "ambiguous_delivery",
+        "post-send bookkeeping failed",
+    )
+    assert classification.should_enqueue is True
+    assert classification.retryable is False
+    assert classification.ambiguous is True
+
+
 @pytest.fixture
 async def payout_session_factory(monkeypatch):
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as conn:
         await conn.execute(text("CREATE TABLE account (id BIGINT PRIMARY KEY)"))
+        await conn.execute(text("INSERT INTO account (id) VALUES (7)"))
         await conn.run_sync(PayoutCompensation.__table__.create)
+        await conn.run_sync(ActionEvent.__table__.create)
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     monkeypatch.setattr(payout_compensation_service, "AsyncSessionLocal", session_factory)
     monkeypatch.setattr(worker_runtime, "AsyncSessionLocal", session_factory)
+    try:
+        from app.services import action_tap as action_tap_mod
+
+        monkeypatch.setattr(action_tap_mod, "AsyncSessionLocal", session_factory)
+    except Exception:  # noqa: BLE001
+        pass
     try:
         yield session_factory
     finally:
@@ -459,6 +481,44 @@ async def test_payout_replay_recovers_from_sent_marker_without_sending(
     assert record_action.await_args.kwargs["replay_recovered"] is True
     assert record_action.await_args.args[0]["trace_id"] == "evt_sent_marker"
 
+    async with payout_session_factory() as db:
+        events = (await db.execute(select(ActionEvent))).scalars().all()
+    assert len(events) == 1
+    assert events[0].status == ACTION_EVENT_STATUS_COMPENSATED
+    assert events[0].action_type == "payout"
+    assert events[0].params_summary.get("payout_key") == "pay_sent_marker"
+
+
+@pytest.mark.asyncio
+async def test_payout_replay_ledger_event_is_idempotent_on_double_mark(
+    payout_session_factory,
+    monkeypatch,
+) -> None:
+    row = await _insert_compensation_row(
+        payout_session_factory,
+        payout_key="pay_ledger_once",
+        trace_id="evt_ledger_once",
+        status=PAYOUT_COMPENSATION_STATUS_SENDING,
+        next_attempt_at=datetime.now(UTC) + timedelta(hours=1),
+    )
+    monkeypatch.setattr(worker_runtime, "record_action", AsyncMock())
+    now = datetime.now(UTC)
+    result = {"message_id": 777, "chat_id": -100123, "replay": True}
+
+    first = await worker_runtime._mark_payout_compensation_sent(
+        row.id, 777, now, result=result, compensation_source="auto_replay"
+    )
+    second = await worker_runtime._mark_payout_compensation_sent(
+        row.id, 777, now, result=result, compensation_source="auto_replay"
+    )
+    assert first is True
+    assert second is False
+
+    async with payout_session_factory() as db:
+        events = (await db.execute(select(ActionEvent))).scalars().all()
+    assert len(events) == 1
+    assert events[0].status == ACTION_EVENT_STATUS_COMPENSATED
+
 
 @pytest.mark.asyncio
 async def test_stale_sending_without_safe_probe_is_abandoned_without_duplicate_send(
@@ -555,10 +615,12 @@ async def test_payout_replay_ambiguous_probe_requires_reply_anchor_and_paginates
 
 
 @pytest.mark.asyncio
-async def test_payout_replay_ambiguous_probe_without_strong_match_sends_observably(
+async def test_payout_replay_ambiguous_probe_without_strong_match_does_not_blind_resend(
     payout_session_factory,
     monkeypatch,
 ) -> None:
+    """ambiguous 且历史探测未命中时不得盲重发（波次一止血）。"""
+
     now = datetime.now(UTC)
     row = await _insert_compensation_row(
         payout_session_factory,
@@ -581,9 +643,9 @@ async def test_payout_replay_ambiguous_probe_without_strong_match_sends_observab
     await worker_runtime._scan_payout_compensations_once(redis, client, 7, config=_scan_config())
 
     saved = await _get_compensation_row(payout_session_factory, row.id)
-    assert saved.status == PAYOUT_COMPENSATION_STATUS_SENT
-    assert saved.sent_message_id == 556
-    assert client.sent == [{"chat_id": -100123, "text": "+10", "reply_to": 31, "parse_mode": None}]
+    assert saved.status == PAYOUT_COMPENSATION_STATUS_ABANDONED
+    assert saved.error_code_last == payout_compensation_service.ERROR_AMBIGUOUS_DELIVERY
+    assert client.sent == []
 
 
 @pytest.mark.asyncio

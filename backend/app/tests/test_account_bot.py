@@ -11632,6 +11632,182 @@ async def test_interaction_plain_message_claim_miss_continues_to_other_rules(mon
 
 
 @pytest.mark.asyncio
+async def test_interaction_message_edited_also_claims_cross_channel(monkeypatch) -> None:
+    class _DB:
+        async def get(self, *_args):  # noqa: ANN002
+            return None
+
+    incoming = account_bot_runtime.Incoming(
+        account_id=1,
+        token="bbot-token",
+        update_id=13663,
+        user_id=111,
+        chat_id=-100777,
+        chat_type="supergroup",
+        message_id=13663,
+        text="我改了答案",
+        display_name="AAA",
+        event_type="message_edited",
+        trace_id="evt_edited_claim",
+    )
+    rule = {
+        "id": "dice-active",
+        "enabled": True,
+        "chat_ids": [-100777],
+        "action": "module",
+        "module_key": "dice_grid_hunt",
+        "module_action": "answer_dice_grid_hunt",
+    }
+    run_entry = AsyncMock(return_value=(True, None, [{"type": "send_message", "text": "ok"}]))
+    claim = AsyncMock(return_value=True)
+    apply_actions = AsyncMock()
+    monkeypatch.setattr(account_bot_runtime, "_run_worker_interaction_entry", run_entry)
+    monkeypatch.setattr(account_bot_runtime, "_load_interaction_session", AsyncMock(return_value={"rule_id": "dice-active"}))
+    monkeypatch.setattr(account_bot_runtime, "claim_interaction_message", claim)
+    monkeypatch.setattr(account_bot_runtime, "record_span", AsyncMock())
+    monkeypatch.setattr(account_bot_runtime, "_apply_interaction_actions", apply_actions)
+    monkeypatch.setattr(account_bot_runtime, "_apply_interaction_start_session_actions", AsyncMock())
+    monkeypatch.setattr(account_bot_runtime, "_guard_interaction_actions", AsyncMock(side_effect=lambda _i, _r, actions: actions))
+    monkeypatch.setattr(account_bot_service, "declared_module_entry_events", lambda *_args: ["message", "message_edited"])
+
+    handled = await account_bot_runtime._try_handle_interaction_module_message(
+        _DB(),
+        incoming,
+        {"enabled": True, "rules": [rule]},
+    )
+
+    assert handled is True
+    claim.assert_awaited_once_with(
+        account_id=1,
+        chat_id=-100777,
+        message_id=13663,
+        rule_id="dice-active",
+    )
+    run_entry.assert_awaited_once()
+    apply_actions.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_interaction_zero_actions_releases_claim(monkeypatch) -> None:
+    class _DB:
+        async def get(self, *_args):  # noqa: ANN002
+            return None
+
+    incoming = account_bot_runtime.Incoming(
+        account_id=1,
+        token="bbot-token",
+        update_id=13664,
+        user_id=111,
+        chat_id=-100777,
+        chat_type="supergroup",
+        message_id=13664,
+        text="我选第 6 格",
+        display_name="AAA",
+        trace_id="evt_release_no_actions",
+    )
+    rule = {
+        "id": "dice-active",
+        "enabled": True,
+        "chat_ids": [-100777],
+        "action": "module",
+        "module_key": "dice_grid_hunt",
+        "module_action": "answer_dice_grid_hunt",
+    }
+    run_entry = AsyncMock(return_value=(True, None, []))
+    claim = AsyncMock(return_value=True)
+    release = AsyncMock()
+    record_span = AsyncMock()
+    monkeypatch.setattr(account_bot_runtime, "_run_worker_interaction_entry", run_entry)
+    monkeypatch.setattr(account_bot_runtime, "_load_interaction_session", AsyncMock(return_value={"rule_id": "dice-active"}))
+    monkeypatch.setattr(account_bot_runtime, "claim_interaction_message", claim)
+    monkeypatch.setattr(account_bot_runtime, "release_interaction_message", release)
+    monkeypatch.setattr(account_bot_runtime, "record_span", record_span)
+
+    handled = await account_bot_runtime._try_handle_interaction_module_message(
+        _DB(),
+        incoming,
+        {"enabled": True, "rules": [rule]},
+    )
+
+    assert handled is False
+    claim.assert_awaited_once_with(
+        account_id=1,
+        chat_id=-100777,
+        message_id=13664,
+        rule_id="dice-active",
+    )
+    release.assert_awaited_once_with(
+        account_id=1,
+        chat_id=-100777,
+        message_id=13664,
+        rule_id="dice-active",
+    )
+    assert any(
+        call.args[1:3] == ("route", account_bot_runtime.TRACE_STATUS_SKIPPED)
+        and call.kwargs.get("reason_code") == "claim_released_no_actions"
+        for call in record_span.await_args_list
+    )
+
+
+@pytest.mark.asyncio
+async def test_interaction_callback_zero_actions_releases_claim_and_answers(monkeypatch) -> None:
+    class _DB:
+        async def get(self, *_args):  # noqa: ANN002
+            return None
+
+    incoming = account_bot_runtime.Incoming(
+        account_id=1,
+        token="bbot-token",
+        update_id=13665,
+        user_id=111,
+        chat_id=-100777,
+        chat_type="supergroup",
+        message_id=13665,
+        text="",
+        callback_id="cb-release",
+        callback_data="dice:pick:1",
+        display_name="AAA",
+        trace_id="evt_cb_release_no_actions",
+    )
+    rule = {
+        "id": "dice-active",
+        "enabled": True,
+        "chat_ids": [-100777],
+        "action": "module",
+        "module_key": "dice_grid_hunt",
+        "module_action": "answer_dice_grid_hunt",
+    }
+    run_entry = AsyncMock(return_value=(True, None, []))
+    claim = AsyncMock(return_value=True)
+    release = AsyncMock()
+    answer = AsyncMock()
+    monkeypatch.setattr(account_bot_runtime, "_run_worker_interaction_entry", run_entry)
+    monkeypatch.setattr(account_bot_runtime, "_load_interaction_session", AsyncMock(return_value={"rule_id": "dice-active"}))
+    monkeypatch.setattr(account_bot_runtime, "claim_interaction_message", claim)
+    monkeypatch.setattr(account_bot_runtime, "release_interaction_message", release)
+    monkeypatch.setattr(account_bot_runtime, "record_span", AsyncMock())
+    monkeypatch.setattr(account_bot_runtime, "_answer_callback", answer)
+    monkeypatch.setattr(account_bot_runtime, "_maybe_fast_ack_callback", AsyncMock())
+    monkeypatch.setattr(account_bot_service, "declared_module_entry_events", lambda *_args: ["callback_query"])
+
+    handled = await account_bot_runtime._try_handle_interaction_module_message(
+        _DB(),
+        incoming,
+        {"enabled": True, "rules": [rule]},
+    )
+
+    assert handled is True
+    claim.assert_awaited_once()
+    release.assert_awaited_once_with(
+        account_id=1,
+        chat_id=-100777,
+        message_id=13665,
+        rule_id="dice-active",
+    )
+    answer.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_interaction_media_message_without_text_routes_to_active_session(monkeypatch) -> None:
     class _DB:
         async def __aenter__(self):

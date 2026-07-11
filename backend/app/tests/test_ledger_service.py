@@ -42,6 +42,10 @@ async def ledger_session_factory():
 
 
 async def _insert_action_event(session_factory, **overrides) -> ActionEvent:
+    params_summary = overrides.pop("params_summary")
+    payout_key = overrides.pop("payout_key", None)
+    if payout_key is None and isinstance(params_summary, dict):
+        payout_key = params_summary.get("payout_key")
     row = ActionEvent(
         account_id=overrides.pop("account_id", 7),
         channel=overrides.pop("channel", "interaction_bot"),
@@ -49,10 +53,11 @@ async def _insert_action_event(session_factory, **overrides) -> ActionEvent:
         plugin_key=overrides.pop("plugin_key", "game"),
         entry_key=overrides.pop("entry_key", "main"),
         action_type=overrides.pop("action_type"),
-        params_summary=overrides.pop("params_summary"),
+        params_summary=params_summary,
         status=overrides.pop("status", ACTION_EVENT_STATUS_OK),
         error_code=overrides.pop("error_code", None),
         error_summary=overrides.pop("error_summary", None),
+        payout_key=payout_key,
         created_at=overrides.pop("created_at"),
     )
     async with session_factory() as db:
@@ -369,6 +374,44 @@ async def test_manual_paid_compensation_writes_audit_and_closes_row(
 
     assert open_rows == []
     assert len(all_rows) == 1
+
+    async with ledger_session_factory() as db:
+        events = (await db.execute(select(ActionEvent))).scalars().all()
+    assert len(events) == 1
+    assert events[0].status == ACTION_EVENT_STATUS_COMPENSATED
+    assert events[0].action_type == "payout"
+    assert events[0].params_summary.get("payout_key") == "pay_manual"
+
+
+@pytest.mark.asyncio
+async def test_manual_paid_writes_compensated_action_event_once(
+    ledger_session_factory,
+    monkeypatch,
+) -> None:
+    row = await _insert_compensation(ledger_session_factory, payout_key="pay_manual_ledger")
+    monkeypatch.setattr(ledger_service.audit, "write", AsyncMock())
+
+    async with ledger_session_factory() as db:
+        await ledger_service.mark_compensation_manual_paid(db, row.id, user_id=1, note="ok")
+        await db.commit()
+
+    from fastapi import HTTPException
+
+    async with ledger_session_factory() as db:
+        with pytest.raises(HTTPException) as exc_info:
+            await ledger_service.mark_compensation_manual_paid(db, row.id, user_id=2)
+        assert exc_info.value.status_code == 409
+
+    async with ledger_session_factory() as db:
+        events = list((await db.execute(select(ActionEvent))).scalars().all())
+    assert len(events) == 1
+    assert events[0].status == ACTION_EVENT_STATUS_COMPENSATED
+    assert events[0].params_summary.get("payout_key") == "pay_manual_ledger"
+
+    async with ledger_session_factory() as db:
+        summary = await ledger_service.summarize_ledger(db)
+    assert Decimal(summary.payout) == Decimal("88")
+    assert Decimal(summary.net) == Decimal("-88")
 
 
 @pytest.mark.asyncio

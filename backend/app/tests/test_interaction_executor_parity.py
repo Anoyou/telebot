@@ -398,15 +398,15 @@ PARITY_MATRIX: list[ParityCase] = [
         (TRACE_STATUS_FAILED, "interaction_session_error", "interaction_session"),
         drift="⑥/⑦ update_session 错误码族 + actual_send_via 分叉",
     ),
-    # 限流拒绝分叉（漂移⑤）：E1 SKIPPED rate_limited vs E3 raise → E2 记 FAILED telegram_api_error
+    # 限流拒绝：E1 SKIPPED rate_limited；E3 raise rate_limited → E2 FAILED rate_limited（波次一已对齐错误码）
     _row(
         "send_message_rate_limited",
         [{"type": "send_message", "send_via": "userbot_reply", "text": "hi", "chat_id": CHAT}],
         "send_message",
         (TRACE_STATUS_SKIPPED, "rate_limited", "userbot_reply"),
-        (TRACE_STATUS_FAILED, "telegram_api_error", "userbot_reply"),
+        (TRACE_STATUS_FAILED, "rate_limited", "userbot_reply"),
         engine_denies=True,
-        drift="⑤ 限流拒绝分叉（E1 SKIPPED rate_limited vs E3 raise→FAILED telegram_api_error）",
+        drift="⑤ 限流拒绝状态分叉（E1 SKIPPED vs E2 FAILED；error_code 均为 rate_limited）",
     ),
     # 超 10 条截断：第 11 条被丢弃，两侧均记 action_limit_exceeded
     _row(
@@ -480,7 +480,8 @@ async def _drive_worker(monkeypatch: pytest.MonkeyPatch, case: ParityCase) -> Ex
     state = loader_mod._AccountState(1)  # noqa: SLF001
     state.redis = mem
     state.client = _FakeClient()
-    state.engine = _DenyEngine() if case.engine_denies else None
+    # 与 E3 一致：非限流用例挂 AllowEngine，避免 loader 本地降级改写快照。
+    state.engine = _DenyEngine() if case.engine_denies else _AllowEngine()
 
     await loader_mod._apply_userbot_event_bus_actions(  # noqa: SLF001
         state,
@@ -496,6 +497,19 @@ async def _drive_worker(monkeypatch: pytest.MonkeyPatch, case: ParityCase) -> Ex
     return _extract(rec, case.assert_type)
 
 
+class _AllowEngine:
+    """限速引擎：一律放行（parity 用例默认不测限流时使用，避免本地降级桶介入）。"""
+
+    async def acquire(self, _account_id, _action, *, peer_id=None):  # noqa: ANN001
+        return SimpleNamespace(allowed=True, outcome="ok", reason=None, wait_seconds=0.0)
+
+    async def on_flood_wait(self, *_a, **_k):  # noqa: ANN002, ANN003
+        return None
+
+    async def on_peer_flood(self, *_a, **_k):  # noqa: ANN002, ANN003
+        return None
+
+
 async def _drive_bot(monkeypatch: pytest.MonkeyPatch, case: ParityCase) -> Expect:
     rec = AsyncMock()
     monkeypatch.setattr(delivery_mod, "record_action", rec)
@@ -508,7 +522,8 @@ async def _drive_bot(monkeypatch: pytest.MonkeyPatch, case: ParityCase) -> Expec
     if case.seed_session:
         mem.data[SESSION_KEY] = json.dumps(SEED_SESSION)
     client = _FakeClient()
-    engine = _DenyEngine() if case.engine_denies else None
+    # engine is None 会走本地降级 fail-closed（payout）或本地桶，污染非限流用例快照。
+    engine = _DenyEngine() if case.engine_denies else _AllowEngine()
 
     incoming = account_bot_runtime.Incoming(
         account_id=1,

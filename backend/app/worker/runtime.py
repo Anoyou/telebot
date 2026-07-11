@@ -39,6 +39,7 @@ from ..db.models.payout_compensation import (
 from ..db.models.system import SystemSetting
 from ..redis_client import get_redis
 from ..services import payout_compensation
+from ..services.action_tap import emit_compensated_payout_event
 from ..services.ai_feature import is_ai_enabled
 from ..services.event_trace import (
     TRACE_STATUS_OK,
@@ -135,31 +136,45 @@ async def _acquire_interaction_userbot_rate_limit(
     if account_id is None:
         return
     limit_action = _interaction_userbot_rate_limit_action(action_type, chat_id)
+    # 与 command.acquire_userbot_action_rate_limit 对齐：引擎缺失/异常时不无限放行。
+    # 降级路径上的 Redis 告警必须 best-effort，绝不能反向击穿限流决策。
+    async def _best_effort_rate_limit_log(message: str, **detail: Any) -> None:
+        if redis is None:
+            return
+        try:
+            await _log(redis, account_id, "warn", message, **detail)
+        except Exception:  # noqa: BLE001
+            log.debug("rate limit fallback log failed account=%s", account_id, exc_info=True)
+
     if engine is None:
-        if redis is not None:
-            await _log(
-                redis,
-                account_id,
-                "warn",
-                "UserBot 交互动作未接入限速引擎，已降级直发。",
-                action_type=action_type,
-                rate_limit_action=limit_action,
-                chat_id=chat_id,
-            )
+        from .command import acquire_userbot_action_rate_limit
+
+        allowed, detail = await acquire_userbot_action_rate_limit(account_id, action_type, chat_id)
+        await _best_effort_rate_limit_log(
+            "UserBot 交互动作未接入限速引擎，已走本地降级限流。",
+            action_type=action_type,
+            rate_limit_action=limit_action,
+            rate_limit_backend=detail.get("rate_limit_backend"),
+            chat_id=chat_id,
+        )
+        if not allowed:
+            raise RuntimeError(f"rate_limited: {detail.get('reason') or detail.get('outcome') or 'local_fallback'}")
         return
     try:
         decision = await engine.acquire(account_id, limit_action, peer_id=chat_id)
     except Exception as exc:  # noqa: BLE001
-        if redis is not None:
-            await _log(
-                redis,
-                account_id,
-                "warn",
-                f"UserBot 交互动作限速检查失败，已降级直发：{type(exc).__name__}: {exc}",
-                action_type=action_type,
-                rate_limit_action=limit_action,
-                chat_id=chat_id,
-            )
+        from .command import acquire_userbot_action_rate_limit
+
+        allowed, detail = await acquire_userbot_action_rate_limit(account_id, action_type, chat_id)
+        await _best_effort_rate_limit_log(
+            f"UserBot 交互动作限速检查失败，已走本地降级限流：{type(exc).__name__}: {exc}",
+            action_type=action_type,
+            rate_limit_action=limit_action,
+            rate_limit_backend=detail.get("rate_limit_backend"),
+            chat_id=chat_id,
+        )
+        if not allowed:
+            raise RuntimeError(f"rate_limited: {detail.get('reason') or detail.get('outcome') or 'local_fallback'}") from exc
         return
     if not bool(getattr(decision, "allowed", False)):
         outcome = str(getattr(decision, "outcome", "") or "rate_limited")
@@ -436,13 +451,7 @@ async def _run_interaction_userbot_action(
             reply_markup = payload.get("reply_markup") if isinstance(payload.get("reply_markup"), dict) else None
             text = _render_interaction_userbot_button_fallback(text, reply_markup)
         parse_mode = _interaction_action_parse_mode(payload)
-        await _acquire_interaction_userbot_rate_limit(
-            redis=redis,
-            account_id=account_id,
-            engine=engine,
-            action_type=action_type,
-            chat_id=chat_id,
-        )
+        # 资金限额先于发送限流：避免限流降级 fail-closed 掩盖 payout_limit_exceeded。
         if action_type == "payout":
             payout_key = _str_or_none(payload.get("payout_key"))
             if payout_key:
@@ -455,6 +464,13 @@ async def _run_interaction_userbot_action(
                 payout_ok, payout_reason = await _check_payout_limit(account_id, amount)
             if not payout_ok:
                 raise PayoutLimitExceeded(payout_reason or "payout 超过限额")
+        await _acquire_interaction_userbot_rate_limit(
+            redis=redis,
+            account_id=account_id,
+            engine=engine,
+            action_type=action_type,
+            chat_id=chat_id,
+        )
         if action_type == "send_message" and not _is_settlement_send_payload(payload):
             await _simulate_interaction_userbot_reply_humanize(client, chat_id, engine)
         msg = await client.send_message(chat_id, text, reply_to=reply_to, parse_mode=_telethon_parse_mode(parse_mode))
@@ -465,19 +481,34 @@ async def _run_interaction_userbot_action(
             "reply_to_user_id": reply_to_user_id,
         }
         if action_type == "payout":
+            # Telegram 已接受后立刻落 sent marker；后续本地异常不得触发盲重发。
             await payout_compensation.mark_payout_sent_marker(
                 redis,
                 account_id,
                 payload.get("payout_key"),
                 result.get("message_id"),
             )
-        await save_action_reply_target(
-            redis or get_redis(),
-            account_id=account_id,
-            chat_id=chat_id,
-            message_id=result.get("message_id"),
-            reply_to_user_id=reply_to_user_id,
-        )
+            result["payout_key"] = _str_or_none(payload.get("payout_key"))
+        try:
+            await save_action_reply_target(
+                redis or get_redis(),
+                account_id=account_id,
+                chat_id=chat_id,
+                message_id=result.get("message_id"),
+                reply_to_user_id=reply_to_user_id,
+            )
+        except Exception as post_exc:  # noqa: BLE001
+            if action_type == "payout":
+                log.warning(
+                    "payout post-send reply target save failed account=%s payout_key=%s error=%s",
+                    account_id,
+                    payload.get("payout_key"),
+                    post_exc,
+                    exc_info=True,
+                )
+                result["post_send_bookkeeping_failed"] = True
+            else:
+                raise
         return result
 
     if action_type == "edit_message":
@@ -1372,6 +1403,10 @@ def _interaction_action_error_code(error: Any) -> str:
     text = str(error or "").strip().lower()
     if not text:
         return "action_failed"
+    if "payout" in text and ("上限" in text or "limit" in text or "exceed" in text):
+        return "payout_limit_exceeded"
+    if text.startswith("rate_limited") or "rate_limited" in text or "local_fallback" in text:
+        return "rate_limited"
     if "reply_anchor_missing" in text or "近期消息" in text or "定位发奖回复目标" in text:
         return "reply_anchor_missing"
     if "worker 不在线" in text or "userbot client unavailable" in text:
@@ -1525,12 +1560,19 @@ async def _replay_payout_compensation_row(
     now = _utc_now()
     sent_message_id = await _read_payout_sent_marker(redis, row.account_id, row.payout_key)
     if sent_message_id is not None:
-        if await _mark_payout_compensation_sent(row.id, sent_message_id, now):
-            await _record_payout_replay_action(
-                row,
-                {"message_id": sent_message_id or None, "chat_id": row.chat_id, "replay_recovered": True},
-                replay_recovered=True,
-            )
+        recovered = {
+            "message_id": sent_message_id or None,
+            "chat_id": row.chat_id,
+            "replay_recovered": True,
+        }
+        if await _mark_payout_compensation_sent(
+            row.id,
+            sent_message_id,
+            now,
+            result=recovered,
+            compensation_source="sent_marker_recover",
+        ):
+            await _record_payout_replay_action(row, recovered, replay_recovered=True)
         return
 
     if bool(row.ambiguous):
@@ -1569,19 +1611,36 @@ async def _replay_payout_compensation_row(
             return
         if probe_message_id is not None:
             await payout_compensation.mark_payout_sent_marker(redis, row.account_id, row.payout_key, probe_message_id)
-            if await _mark_payout_compensation_sent(row.id, probe_message_id, now):
+            recovered = {
+                "message_id": probe_message_id,
+                "chat_id": row.chat_id,
+                "replay_recovered": True,
+                "ambiguous_probe": True,
+            }
+            if await _mark_payout_compensation_sent(
+                row.id,
+                probe_message_id,
+                now,
+                result=recovered,
+                compensation_source="ambiguous_probe",
+            ):
                 await _record_payout_replay_action(
                     row,
-                    {
-                        "message_id": probe_message_id,
-                        "chat_id": row.chat_id,
-                        "replay_recovered": True,
-                        "ambiguous_probe": True,
-                    },
+                    recovered,
                     replay_recovered=True,
                     ambiguous_probe=True,
                 )
             return
+        # ambiguous 且 probe 未命中、也非 recovered_sending：不得盲重发，转人工。
+        await _apply_payout_replay_failure(
+            redis,
+            row,
+            error_code=payout_compensation.ERROR_AMBIGUOUS_DELIVERY,
+            error_text="歧义送达无法在历史消息中确认，已停止自动重发并转人工核对。",
+            config=config,
+            now=now,
+        )
+        return
 
     payload = _payout_replay_payload(row)
     try:
@@ -1592,7 +1651,13 @@ async def _replay_payout_compensation_row(
             engine=_interaction_userbot_engine(row.account_id),
             redis=redis,
         )
-        if await _mark_payout_compensation_sent(row.id, result.get("message_id"), now):
+        if await _mark_payout_compensation_sent(
+            row.id,
+            result.get("message_id"),
+            now,
+            result=result,
+            compensation_source="auto_replay",
+        ):
             await _record_payout_replay_action(row, result, replay=True)
         return
     except Exception as exc:  # noqa: BLE001
@@ -1611,7 +1676,13 @@ async def _replay_payout_compensation_row(
                 engine=_interaction_userbot_engine(row.account_id),
                 redis=redis,
             )
-            if await _mark_payout_compensation_sent(row.id, result.get("message_id"), now):
+            if await _mark_payout_compensation_sent(
+                row.id,
+                result.get("message_id"),
+                now,
+                result=result,
+                compensation_source="auto_replay_drop_anchor",
+            ):
                 await _record_payout_replay_action(
                     row,
                     result,
@@ -1769,9 +1840,48 @@ async def _record_payout_replay_action(
     )
 
 
-async def _mark_payout_compensation_sent(row_id: int, message_id: Any, now: datetime) -> bool:
+async def _emit_payout_compensation_ledger_event(
+    row: PayoutCompensation,
+    result: dict[str, Any] | None,
+    *,
+    db: Any,
+    compensation_source: str,
+) -> None:
+    """Write one COMPENSATED ActionEvent inside the caller's DB transaction."""
+
+    action = _payout_replay_action(row)
+    result_detail = dict(result or {})
+    result_detail.setdefault("payout_key", row.payout_key)
+    result_detail.setdefault("message_id", row.sent_message_id)
+    result_detail.setdefault("chat_id", row.chat_id)
+    await emit_compensated_payout_event(
+        account_id=int(row.account_id),
+        payout_key=str(row.payout_key),
+        amount=row.amount,
+        chat_id=int(row.chat_id),
+        plugin_key=row.plugin_key,
+        entry_key=row.entry_key,
+        channel="userbot_reply",
+        compensation_source=compensation_source,
+        previous_error_code=row.error_code_last or row.error_code_first,
+        result=result_detail,
+        action=action,
+        db=db,
+    )
+
+
+async def _mark_payout_compensation_sent(
+    row_id: int,
+    message_id: Any,
+    now: datetime,
+    *,
+    result: dict[str, Any] | None = None,
+    compensation_source: str = "auto_replay",
+) -> bool:
+    """Mark compensation sent and emit ledger ActionEvent in one transaction."""
+
     async with AsyncSessionLocal() as db:
-        result = await db.execute(
+        update_result = await db.execute(
             update(PayoutCompensation)
             .where(
                 PayoutCompensation.id == int(row_id),
@@ -1784,9 +1894,19 @@ async def _mark_payout_compensation_sent(row_id: int, message_id: Any, now: date
                 updated_at=now,
             )
         )
-        if int(result.rowcount or 0) <= 0:
+        if int(update_result.rowcount or 0) <= 0:
             await db.rollback()
             return False
+        row = await db.get(PayoutCompensation, int(row_id))
+        if row is None:
+            await db.rollback()
+            return False
+        await _emit_payout_compensation_ledger_event(
+            row,
+            result,
+            db=db,
+            compensation_source=compensation_source,
+        )
         await db.commit()
         return True
 

@@ -14,3 +14,17 @@ if str(REPO_ROOT) not in sys.path:
 
 if not hasattr(pytest, "mock"):
     pytest.mock = mock  # type: ignore[attr-defined]
+
+
+@pytest.fixture(autouse=True)
+def _reset_local_userbot_rate_limit_state() -> None:
+    """避免进程内本地限流桶在测试间泄漏（波次一 fail-closed 降级）。"""
+
+    try:
+        from app.worker import command as command_mod
+
+        command_mod.reset_local_rate_limit_buckets()
+        yield
+        command_mod.reset_local_rate_limit_buckets()
+    except Exception:  # noqa: BLE001
+        yield

@@ -87,7 +87,7 @@ from .event_trace import (
     update_plugin_runtime_status,
 )
 from .interaction.contracts import guard_interaction_actions
-from .interaction.dedupe import claim_interaction_message
+from .interaction.dedupe import claim_interaction_message, release_interaction_message
 from .interaction.delivery import (
     INTERACTION_SESSION_CONTROL_ACTIONS as _INTERACTION_SESSION_CONTROL_ACTIONS,
 )
@@ -5631,7 +5631,7 @@ async def _try_handle_interaction_module_message(
         )
         if decision is None or not decision.matched:
             continue
-        if event_type == "message" and not await claim_interaction_message(
+        if not await claim_interaction_message(
             account_id=incoming.account_id,
             chat_id=incoming.chat_id,
             message_id=incoming.message_id,
@@ -5700,6 +5700,24 @@ async def _try_handle_interaction_module_message(
             )
             continue
         if not actions:
+            await release_interaction_message(
+                account_id=incoming.account_id,
+                chat_id=incoming.chat_id,
+                message_id=incoming.message_id,
+                rule_id=rule.get("id"),
+            )
+            await record_span(
+                trace_log_context(incoming.trace_id, plugin_key=module_key, entry_key=entry_key),
+                "route",
+                TRACE_STATUS_SKIPPED,
+                component="interaction_session",
+                plugin_key=module_key,
+                entry_key=entry_key,
+                reason_code="claim_released_no_actions",
+                message="插件零动作，释放跨管道去重占用，允许另一条交互管道处理。",
+                rule_id=rule.get("id"),
+                message_id=incoming.message_id,
+            )
             if is_callback:
                 await _answer_callback(incoming)
                 return True

@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import JSON, BigInteger, DateTime, ForeignKey, Index, Integer, String, Text, func
+from sqlalchemy import JSON, BigInteger, DateTime, ForeignKey, Index, Integer, String, Text, func, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from ..base import Base
@@ -22,6 +22,11 @@ ACTION_EVENT_STATUSES = {
     ACTION_EVENT_STATUS_DRY_RUN,
     ACTION_EVENT_STATUS_COMPENSATED,
 }
+
+# 可计入资金台账的 payout 状态（与 ledger LEDGER_SUMMARY_STATUSES 对齐）。
+ACTION_EVENT_COUNTABLE_PAYOUT_STATUSES = frozenset(
+    {ACTION_EVENT_STATUS_OK, ACTION_EVENT_STATUS_COMPENSATED}
+)
 
 
 class ActionEvent(Base):
@@ -53,16 +58,33 @@ class ActionEvent(Base):
     status: Mapped[str] = mapped_column(String(32), nullable=False)
     error_code: Mapped[str | None] = mapped_column(String(120), nullable=True)
     error_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 可索引幂等键：可计账 payout（OK/COMPENSATED）在 DB 层 partial unique（见 alembic 0038）。
+    payout_key: Mapped[str | None] = mapped_column(String(80), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
     __table_args__ = (
         Index("ix_action_event_account_created", "account_id", "created_at"),
         Index("ix_action_event_plugin_created", "account_id", "plugin_key", "created_at"),
         Index("ix_action_event_status_created", "status", "created_at"),
+        Index("ix_action_event_payout_key", "payout_key"),
+        # Partial unique：同一 payout_key 在可计账状态下至多一行。
+        # PostgreSQL / SQLite 均支持；create_all 与 alembic 0038 保持一致。
+        Index(
+            "uq_action_event_countable_payout_key",
+            "payout_key",
+            unique=True,
+            sqlite_where=text(
+                "payout_key IS NOT NULL AND action_type = 'payout' AND status IN ('OK', 'COMPENSATED')"
+            ),
+            postgresql_where=text(
+                "payout_key IS NOT NULL AND action_type = 'payout' AND status IN ('OK', 'COMPENSATED')"
+            ),
+        ),
     )
 
 
 __all__ = [
+    "ACTION_EVENT_COUNTABLE_PAYOUT_STATUSES",
     "ACTION_EVENT_STATUS_COMPENSATED",
     "ACTION_EVENT_STATUS_DRY_RUN",
     "ACTION_EVENT_STATUS_FAILED",

@@ -292,7 +292,67 @@ async def test_run_interaction_userbot_action_payout_uses_rate_limit_and_parse_m
         "chat_id": -100333,
         "reply_to_message_id": 44,
         "reply_to_user_id": None,
+        "payout_key": None,
     }
+
+
+@pytest.mark.asyncio
+async def test_acquire_userbot_rate_limit_falls_back_to_local_bucket(monkeypatch):
+    from app.worker import command as command_mod
+
+    command_mod.reset_local_rate_limit_buckets()
+    monkeypatch.setattr(command_mod, "_command_rate_limit_engine", AsyncMock(return_value=None))
+
+    allowed, detail = await command_mod.acquire_userbot_action_rate_limit(9, "send_message", -1001)
+    assert allowed is True
+    assert detail["rate_limit_backend"] == "local_fallback"
+    assert detail["outcome"] == "allowed"
+
+    # 耗尽本地突发配额后应拒绝
+    for _ in range(5):
+        await command_mod.acquire_userbot_action_rate_limit(9, "send_message", -1001)
+    allowed_after, detail_after = await command_mod.acquire_userbot_action_rate_limit(9, "send_message", -1001)
+    assert allowed_after is False
+    assert detail_after["rate_limit_backend"] == "local_fallback"
+    assert detail_after["outcome"] == "rejected"
+    command_mod.reset_local_rate_limit_buckets()
+
+
+@pytest.mark.asyncio
+async def test_acquire_userbot_rate_limit_payout_fail_closed_when_engine_missing(monkeypatch):
+    from app.worker import command as command_mod
+
+    command_mod.reset_local_rate_limit_buckets()
+    monkeypatch.setattr(command_mod, "_command_rate_limit_engine", AsyncMock(return_value=None))
+
+    allowed, detail = await command_mod.acquire_userbot_action_rate_limit(9, "payout", -1001)
+    assert allowed is False
+    assert detail["rate_limit_backend"] == "local_fallback"
+    assert detail["outcome"] == "rejected"
+    assert detail["reason"] == "distributed_rate_limit_unavailable"
+    # payout 必须映射到发送桶名，不能落到无默认阈值的裸 "payout" 动作。
+    assert command_mod.userbot_rate_limit_action("payout", -1001) == "send_message_group"
+    assert command_mod.userbot_rate_limit_action("payout", 42) == "send_message_private"
+    command_mod.reset_local_rate_limit_buckets()
+
+
+@pytest.mark.asyncio
+async def test_local_rate_limit_account_bucket_caps_cross_peer_burst(monkeypatch):
+    from app.worker import command as command_mod
+
+    command_mod.reset_local_rate_limit_buckets()
+    monkeypatch.setattr(command_mod, "_command_rate_limit_engine", AsyncMock(return_value=None))
+
+    allowed_count = 0
+    for peer in range(100):
+        allowed, _detail = await command_mod.acquire_userbot_action_rate_limit(
+            9, "send_message", -(1000 + peer)
+        )
+        if allowed:
+            allowed_count += 1
+    # 账号级桶 capacity=8，不能靠切换 peer 无限放行。
+    assert allowed_count <= int(command_mod._LOCAL_FALLBACK_ACCOUNT_CAPACITY)
+    command_mod.reset_local_rate_limit_buckets()
 
 
 @pytest.mark.asyncio

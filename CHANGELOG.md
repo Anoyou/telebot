@@ -20,6 +20,16 @@
 
 ## [Unreleased]
 
+## [0.56.5] — 2026-07-12 · patch（补丁版本） · 资金台账与风控止血
+
+### Fixed
+- 补偿自动重放成功与人工核销现在会写入 `ActionEvent(status=COMPENSATED)`，资金台账不再漏记补偿出账；`action_event.payout_key` 可索引列 + 可计账 partial unique 保证同一 `payout_key` 幂等，重复核销/重试不双计。
+- ActionEvent 的 Redis 广播按事务层级分栈：nested commit 合并到父层、nested rollback 丢弃该层、仅最外层 commit 发布，外层回滚清空，避免幽灵事件。
+- Alembic 0038 兼容 PostgreSQL `JSON`（不用 `?` 操作符），建唯一索引前清理历史重复 `payout_key`。
+- payout 发送成功后与本地记账分离：Telegram 已接受后本地异常改为挂 `ambiguous_delivery` 探测单，禁止盲重发；ambiguous 探测未命中时停止自动重发并转人工。
+- UserBot 发送限流在 Redis/DB 不可用时改为进程内保守令牌桶（账号级 + peer 级、TTL/容量上限），日志 best-effort 不击穿控制流；payout 映射到发送动作桶并在分布式不可用时 fail-closed；`rate_limited` 错误码正确映射。
+- 交互 Bot 会话分发：插件返回零动作时释放跨管道 claim；claim 覆盖 `message_edited` 等带 message_id 的事件，与 UserBot 侧对齐。
+
 ## [0.56.4] — 2026-07-11 · patch（补丁版本） · 更新分支配置与响应式布局修复
 
 ### Added

@@ -14,8 +14,14 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+from sqlalchemy import event as sa_event
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
+
 from ..db.base import AsyncSessionLocal
 from ..db.models.action_event import (
+    ACTION_EVENT_COUNTABLE_PAYOUT_STATUSES,
     ACTION_EVENT_STATUS_COMPENSATED,
     ACTION_EVENT_STATUS_DRY_RUN,
     ACTION_EVENT_STATUS_FAILED,
@@ -42,6 +48,10 @@ _DB_WRITE_FAILURES = 0
 _DB_DROPPED_EVENTS = 0
 _DB_LAST_ERROR: str | None = None
 RECORDINGS_DIR = Path(__file__).resolve().parents[3] / "data" / "recordings"
+# session.info key：按事务层级分层的 publish 队列栈。
+# stack[0] = 最外层事务；stack[-1] = 当前 SAVEPOINT 层。
+# nested commit → 合并到父层；nested rollback → 丢弃该层；outer commit → 发布。
+_PENDING_ACTION_EVENT_STACK = "telepilot_pending_action_event_stack"
 
 _SUMMARY_KEYS = {
     "amount",
@@ -114,6 +124,147 @@ def action_context_dry_run_enabled(action: dict[str, Any] | None) -> bool:
     return dev_mode_dry_run_enabled(context) or dev_mode_dry_run_enabled(context.get("account_config"))
 
 
+def _extract_payout_key(action: dict[str, Any] | None, result: Any = None) -> str | None:
+    payload = dict(action or {})
+    for candidate in (
+        payload.get("payout_key"),
+        (result or {}).get("payout_key") if isinstance(result, dict) else None,
+    ):
+        text = str(candidate or "").strip()
+        if text:
+            return text[:80]
+    return None
+
+
+def _session_info_target(session: Any) -> dict[str, Any]:
+    """Resolve the sync Session.info used by AsyncSession wrappers."""
+
+    sync_session = getattr(session, "sync_session", None)
+    if sync_session is not None:
+        return sync_session.info
+    return session.info
+
+
+def _publish_payload_from_row(row: ActionEvent, *, redis: Any | None = None) -> dict[str, Any]:
+    return {
+        "account_id": int(row.account_id),
+        "row_id": getattr(row, "id", None),
+        "channel": row.channel,
+        "session_key": row.session_key,
+        "plugin_key": row.plugin_key,
+        "entry_key": row.entry_key,
+        "action_type": row.action_type,
+        "params_summary": dict(row.params_summary or {}),
+        "status": row.status,
+        "error_code": row.error_code,
+        "error_summary": row.error_summary,
+        "payout_key": row.payout_key,
+        "redis": redis,
+    }
+
+
+def _pending_stack(session_or_info: Any) -> list[list[dict[str, Any]]]:
+    info = session_or_info if isinstance(session_or_info, dict) else _session_info_target(session_or_info)
+    stack = info.get(_PENDING_ACTION_EVENT_STACK)
+    if not isinstance(stack, list):
+        stack = []
+        info[_PENDING_ACTION_EVENT_STACK] = stack
+    return stack
+
+
+def _ensure_root_pending_layer(session: Any) -> list[dict[str, Any]]:
+    """Ensure at least the outermost layer exists for events outside begin_nested."""
+
+    stack = _pending_stack(session)
+    if not stack:
+        stack.append([])
+    return stack[-1]
+
+
+def _schedule_action_event_publish(
+    session: Any,
+    row: ActionEvent,
+    *,
+    redis: Any | None = None,
+) -> None:
+    """Queue Redis publish on the current transaction layer."""
+
+    layer = _ensure_root_pending_layer(session)
+    layer.append(_publish_payload_from_row(row, redis=redis))
+
+
+def _drain_pending_payloads(pending: list[dict[str, Any]]) -> None:
+    if not pending:
+        return
+    try:
+        import asyncio
+
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        for item in pending:
+            try:
+                import asyncio as _asyncio
+
+                _asyncio.run(_publish_action_event_payload(item))
+            except Exception:  # noqa: BLE001
+                log.debug("action tap deferred publish failed", exc_info=True)
+        return
+    for item in pending:
+        loop.create_task(_publish_action_event_payload(item))
+
+
+def _install_action_event_after_commit_hooks() -> None:
+    """Layered pending queue: nested rollback drops only that layer's events.
+
+    - ``after_begin(nested)``: push a new empty layer.
+    - ``after_commit`` with layers > 1: pop nested layer and merge into parent
+      (SAVEPOINT released successfully).
+    - ``after_commit`` with single layer: outermost commit → publish all.
+    - ``after_rollback`` with layers > 1: pop and discard nested layer.
+    - ``after_rollback`` with single/empty layer: outer rollback → clear all.
+    """
+
+    if getattr(Session, "_telepilot_action_event_hooks", False):
+        return
+
+    @sa_event.listens_for(Session, "after_begin")
+    def _after_begin(session: Session, transaction: Any, connection: Any) -> None:  # noqa: ARG001
+        stack = _pending_stack(session)
+        if getattr(transaction, "nested", False):
+            stack.append([])
+        elif not stack:
+            # Root transaction begin: ensure a root layer exists.
+            stack.append([])
+
+    @sa_event.listens_for(Session, "after_commit")
+    def _after_commit(session: Session) -> None:
+        stack = _pending_stack(session)
+        if len(stack) > 1:
+            # Nested SAVEPOINT commit: merge child events into parent, do not publish.
+            child = stack.pop()
+            stack[-1].extend(child)
+            return
+        # Outermost commit.
+        pending = list(stack.pop()) if stack else []
+        session.info.pop(_PENDING_ACTION_EVENT_STACK, None)
+        _drain_pending_payloads(pending)
+
+    @sa_event.listens_for(Session, "after_rollback")
+    def _after_rollback(session: Session) -> None:
+        stack = _pending_stack(session)
+        if len(stack) > 1:
+            # Nested SAVEPOINT rollback: drop only this layer's queued events.
+            stack.pop()
+            return
+        # Outermost rollback (or empty): discard everything.
+        session.info.pop(_PENDING_ACTION_EVENT_STACK, None)
+
+    Session._telepilot_action_event_hooks = True  # type: ignore[attr-defined]
+
+
+_install_action_event_after_commit_hooks()
+
+
 async def emit_action_event(
     *,
     account_id: int | None,
@@ -127,12 +278,17 @@ async def emit_action_event(
     error: Any = None,
     result: Any = None,
     redis: Any | None = None,
+    db: Any | None = None,
 ) -> ActionEvent | None:
     """Persist and publish one structured action event.
 
     Delivery is not blocked by tap failures, but persistence failures are
     surfaced at ERROR level and counted so this append-only view cannot be
     mistaken for a reliable ledger while it is degraded.
+
+    When ``db`` is provided the row is added to that session without commit
+    (caller owns the transaction). Redis publish is deferred until after the
+    session successfully commits, so rollbacks never emit ghost events.
     """
 
     account = _int_or_none(account_id)
@@ -159,6 +315,9 @@ async def emit_action_event(
     resolved_entry_key = _first_text(entry_key, context.get("entry_key"))
     error_summary = _error_summary(error)
     params_summary = summarize_action_params(action_payload, result=result)
+    payout_key = _extract_payout_key(action_payload, result)
+    if payout_key and "payout_key" not in params_summary:
+        params_summary["payout_key"] = payout_key
     row = ActionEvent(
         account_id=account,
         channel=resolved_channel,
@@ -170,14 +329,122 @@ async def emit_action_event(
         status=normalized_status,
         error_code=_first_text(error_code),
         error_summary=error_summary,
+        payout_key=payout_key,
     )
+    if db is not None:
+        db.add(row)
+        await db.flush()
+        _schedule_action_event_publish(db, row, redis=redis)
+        return row
     persisted = await _persist_action_event(row)
-    await _publish_action_event(
-        account,
-        row,
-        redis=redis,
-    )
+    if persisted is not None:
+        await _publish_action_event(account, persisted, redis=redis)
     return persisted
+
+
+async def find_payout_ledger_event(
+    db: Any,
+    *,
+    account_id: int | None = None,
+    payout_key: str,
+) -> ActionEvent | None:
+    """Return an existing ledger-countable payout ActionEvent for ``payout_key``."""
+
+    key = str(payout_key or "").strip()
+    if not key:
+        return None
+    stmt = select(ActionEvent).where(
+        ActionEvent.payout_key == key,
+        ActionEvent.action_type == "payout",
+        ActionEvent.status.in_(tuple(ACTION_EVENT_COUNTABLE_PAYOUT_STATUSES)),
+    )
+    if account_id is not None:
+        stmt = stmt.where(ActionEvent.account_id == int(account_id))
+    stmt = stmt.order_by(ActionEvent.id.desc()).limit(1)
+    return (await db.execute(stmt)).scalar_one_or_none()
+
+
+async def emit_compensated_payout_event(
+    *,
+    account_id: int,
+    payout_key: str,
+    amount: Any,
+    chat_id: int | None = None,
+    plugin_key: str | None = None,
+    entry_key: str | None = None,
+    channel: str | None = "userbot_reply",
+    result: Any = None,
+    compensation_source: str | None = None,
+    previous_error_code: str | None = None,
+    db: Any | None = None,
+    redis: Any | None = None,
+    action: dict[str, Any] | None = None,
+) -> ActionEvent | None:
+    """Idempotently write one COMPENSATED payout ActionEvent for the ledger.
+
+    Uses the indexed ``payout_key`` column + partial unique constraint so
+    concurrent writers cannot double-count. Redis publish is deferred until
+    the owning transaction commits.
+    """
+
+    key = str(payout_key or "").strip()
+    if not key or account_id is None:
+        return None
+
+    action_payload = dict(action or {})
+    action_payload.setdefault("type", "payout")
+    action_payload.setdefault("action_type", "payout")
+    action_payload["payout_key"] = key
+    if amount is not None and action_payload.get("amount") in (None, ""):
+        action_payload["amount"] = amount
+    if chat_id is not None and action_payload.get("chat_id") in (None, ""):
+        action_payload["chat_id"] = chat_id
+    result_payload = dict(result or {})
+    result_payload.setdefault("payout_key", key)
+    if compensation_source:
+        result_payload.setdefault("compensation_source", compensation_source)
+    if previous_error_code:
+        result_payload.setdefault("previous_error_code", previous_error_code)
+
+    async def _write(session: Any) -> ActionEvent | None:
+        existing = await find_payout_ledger_event(session, account_id=int(account_id), payout_key=key)
+        if existing is not None:
+            return existing
+        try:
+            async with session.begin_nested():
+                return await emit_action_event(
+                    account_id=int(account_id),
+                    action=action_payload,
+                    status=ACTION_EVENT_STATUS_COMPENSATED,
+                    channel=channel,
+                    plugin_key=plugin_key or action_payload.get("plugin_key"),
+                    entry_key=entry_key or action_payload.get("entry_key"),
+                    result=result_payload,
+                    redis=redis,
+                    db=session,
+                )
+        except IntegrityError:
+            # 并发下 partial unique 命中：回滚 savepoint 后返回已存在行。
+            existing = await find_payout_ledger_event(session, account_id=int(account_id), payout_key=key)
+            if existing is not None:
+                return existing
+            raise
+
+    if db is not None:
+        return await _write(db)
+    try:
+        async with AsyncSessionLocal() as session:
+            row = await _write(session)
+            await session.commit()
+            return row
+    except Exception:  # noqa: BLE001
+        log.error(
+            "补偿 ActionEvent 写入失败 account=%s payout_key=%s",
+            account_id,
+            key,
+            exc_info=True,
+        )
+        return None
 
 
 async def emit_inbound_event(
@@ -236,7 +503,24 @@ async def _persist_action_event(row: ActionEvent) -> ActionEvent | None:
         async with AsyncSessionLocal() as db:
             db.add(row)
             await db.commit()
+            await db.refresh(row)
             return row
+    except IntegrityError:
+        # 可计账 payout 唯一约束冲突：返回已有行，不计入 dropped。
+        if row.payout_key and row.action_type == "payout":
+            try:
+                async with AsyncSessionLocal() as db:
+                    existing = await find_payout_ledger_event(db, payout_key=str(row.payout_key))
+                    if existing is not None:
+                        return existing
+            except Exception:  # noqa: BLE001
+                log.debug("lookup existing payout ActionEvent after integrity error failed", exc_info=True)
+        _DB_WRITE_FAILURES += 1
+        _DB_DROPPED_EVENTS += 1
+        _DB_LAST_ERROR = "IntegrityError"
+        _DB_DISABLED_UNTIL = time.monotonic() + _ACTION_TAP_CIRCUIT_SECONDS
+        log.error("ActionEvent 唯一约束冲突且无法读取已有行 payout_key=%s", row.payout_key, exc_info=True)
+        return None
     except Exception as exc:  # noqa: BLE001
         _DB_WRITE_FAILURES += 1
         _DB_DROPPED_EVENTS += 1
@@ -264,23 +548,26 @@ def action_tap_health() -> dict[str, Any]:
     }
 
 
-async def _publish_action_event(account_id: int, row: ActionEvent, *, redis: Any | None = None) -> None:
+async def _publish_action_event_payload(item: dict[str, Any]) -> None:
     global _REDIS_DISABLED_UNTIL
     now = time.monotonic()
+    redis = item.get("redis")
     if redis is None and _REDIS_DISABLED_UNTIL > now:
         return
+    account_id = int(item["account_id"])
     payload = {
-        "id": getattr(row, "id", None),
-        "account_id": row.account_id,
-        "channel": row.channel,
-        "session_key": row.session_key,
-        "plugin_key": row.plugin_key,
-        "entry_key": row.entry_key,
-        "action_type": row.action_type,
-        "params_summary": row.params_summary,
-        "status": row.status,
-        "error_code": row.error_code,
-        "error_summary": row.error_summary,
+        "id": item.get("row_id"),
+        "account_id": account_id,
+        "channel": item.get("channel"),
+        "session_key": item.get("session_key"),
+        "plugin_key": item.get("plugin_key"),
+        "entry_key": item.get("entry_key"),
+        "action_type": item.get("action_type"),
+        "params_summary": item.get("params_summary"),
+        "status": item.get("status"),
+        "error_code": item.get("error_code"),
+        "error_summary": item.get("error_summary"),
+        "payout_key": item.get("payout_key"),
     }
     try:
         client = redis or get_redis()
@@ -289,6 +576,26 @@ async def _publish_action_event(account_id: int, row: ActionEvent, *, redis: Any
         if redis is None:
             _REDIS_DISABLED_UNTIL = time.monotonic() + _ACTION_TAP_CIRCUIT_SECONDS
         log.debug("action tap redis publish failed account=%s", account_id, exc_info=True)
+
+
+async def _publish_action_event(account_id: int, row: ActionEvent, *, redis: Any | None = None) -> None:
+    await _publish_action_event_payload(
+        {
+            "account_id": account_id,
+            "row_id": getattr(row, "id", None),
+            "channel": row.channel,
+            "session_key": row.session_key,
+            "plugin_key": row.plugin_key,
+            "entry_key": row.entry_key,
+            "action_type": row.action_type,
+            "params_summary": dict(row.params_summary or {}),
+            "status": row.status,
+            "error_code": row.error_code,
+            "error_summary": row.error_summary,
+            "payout_key": row.payout_key,
+            "redis": redis,
+        }
+    )
 
 
 def _normalize_status(status: str) -> str | None:
@@ -319,8 +626,15 @@ def _result_summary(result: Any) -> dict[str, Any]:
         "started_by_user_id",
         "amount",
         "session_key",
+        "payout_key",
+        "compensation_source",
+        "previous_error_code",
+        "manual_note",
+        "replay_recovered",
+        "ambiguous_probe",
+        "post_send_bookkeeping_failed",
     ):
-        if key in result:
+        if key in result and result.get(key) is not None:
             out[key] = _json_safe(result.get(key), key=key)
     return out
 
@@ -398,6 +712,8 @@ __all__ = [
     "dev_mode_dry_run_enabled",
     "dev_mode_recording_enabled",
     "emit_action_event",
+    "emit_compensated_payout_event",
     "emit_inbound_event",
+    "find_payout_ledger_event",
     "summarize_action_params",
 ]
