@@ -655,7 +655,7 @@ function VerdictSegment({ value, onChange }: { value: VerdictFilter; onChange: (
   ];
   return (
     <Tabs value={value || "all"} onValueChange={(next) => onChange(next === "all" ? "" : (next as VerdictFilter))}>
-      <TabsList className="w-full flex-nowrap justify-start overflow-x-auto sm:w-auto">
+      <TabsList className="scrollable-tab-list w-full flex-nowrap justify-start sm:w-auto">
         {items.map((item) => (
           <TabsTrigger key={item.label} value={item.value || "all"} className="min-w-[3.75rem] px-2 sm:min-w-[4.5rem]">
             <span>{item.label}</span>
