@@ -96,6 +96,28 @@ class _FakeRedis:
         return [1, 0, 0]
 
 
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (True, True),
+        (False, False),
+        ("true", False),
+        ("false", False),
+        (1, False),
+        (None, False),
+    ],
+)
+def test_direct_passthrough_account_opt_in_requires_strict_true(value: object, expected: bool) -> None:
+    ctx = PluginContext(
+        account_id=1,
+        feature_key="strict_direct_opt_in",
+        account_config={"direct_passthrough": {"enabled": value}},
+        generation=1,
+    )
+
+    assert loader_mod._plugin_direct_passthrough_enabled(ctx) is expected  # noqa: SLF001
+
+
 # ─────────────────────────────────────────────────────
 # Fake ORM 行（避免连真 PG）
 # ─────────────────────────────────────────────────────

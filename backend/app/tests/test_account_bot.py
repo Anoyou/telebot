@@ -7236,7 +7236,9 @@ def test_declared_participant_policy_is_default_when_rule_unset(monkeypatch) -> 
 @pytest.mark.asyncio
 async def test_payment_interaction_session_uses_payer_user_scope(monkeypatch) -> None:
     redis = _MemoryRedis()
+    emit_action_event = AsyncMock()
     monkeypatch.setattr(account_bot_runtime, "get_redis", lambda: redis)
+    monkeypatch.setattr(account_bot_runtime, "emit_action_event", emit_action_event)
     incoming = account_bot_runtime.Incoming(
         account_id=1,
         token="bbot-token",
@@ -7273,14 +7275,22 @@ async def test_payment_interaction_session_uses_payer_user_scope(monkeypatch) ->
     assert saved["channel"] == "interaction_bot"
     assert isinstance(saved["expires_at"], float)
     assert redis.set_calls[-1][2]["ex"] == 600 + account_bot_runtime._INTERACTION_SESSION_TTL_GRACE_SECONDS
+    emit_action_event.assert_awaited_once()
+    tapped = emit_action_event.await_args.kwargs
+    assert tapped["action"]["type"] == "start_session"
+    assert tapped["action"]["started_by_user_id"] == 111
+    assert tapped["action"]["participant_user_ids"] == [111]
+    assert tapped["session_key"] == payer_key
 
 
 @pytest.mark.asyncio
 async def test_interaction_session_save_preserves_active_existing_channel(monkeypatch) -> None:
     redis = _MemoryRedis()
+    emit_action_event = AsyncMock()
     now = 1_720_100_000.0
     monkeypatch.setattr(account_bot_runtime, "get_redis", lambda: redis)
     monkeypatch.setattr(account_bot_runtime.time, "time", lambda: now)
+    monkeypatch.setattr(account_bot_runtime, "emit_action_event", emit_action_event)
     incoming = account_bot_runtime.Incoming(
         account_id=1,
         token="bbot-token",
@@ -7319,6 +7329,7 @@ async def test_interaction_session_save_preserves_active_existing_channel(monkey
     assert saved["data"] == {"round": 2}
     assert saved["created_at"] == now - 30
     assert saved["updated_at"] == now
+    emit_action_event.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -7710,8 +7721,10 @@ async def test_opening_start_session_then_update_session_keeps_explicit_fields(m
         "valid_seconds": 120,
     }
     record_action = AsyncMock()
+    emit_action_event = AsyncMock()
     monkeypatch.setattr(account_bot_runtime, "AsyncSessionLocal", lambda: _InteractionRuntimeTestDB())
     monkeypatch.setattr(account_bot_runtime, "get_redis", lambda: redis)
+    monkeypatch.setattr(account_bot_runtime, "emit_action_event", emit_action_event)
     monkeypatch.setattr(
         account_bot_runtime,
         "_event_framework_flags",
@@ -7764,6 +7777,9 @@ async def test_opening_start_session_then_update_session_keeps_explicit_fields(m
         and call.args[2] == account_bot_runtime.TRACE_STATUS_OK
         for call in record_action.await_args_list
     )
+    emit_action_event.assert_awaited_once()
+    assert emit_action_event.await_args.kwargs["action"]["type"] == "start_session"
+    assert emit_action_event.await_args.kwargs["action"]["started_by_user_id"] == 222
 
 
 @pytest.mark.asyncio

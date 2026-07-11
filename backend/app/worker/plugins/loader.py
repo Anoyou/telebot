@@ -1509,7 +1509,7 @@ def _plugin_direct_passthrough_enabled(ctx: PluginContext | None) -> bool:
     cfg = ctx.account_config if isinstance(ctx.account_config, dict) else {}
     raw = cfg.get("direct_passthrough")
     if isinstance(raw, dict):
-        return bool(raw.get("enabled", False))
+        return raw.get("enabled") is True
     return False
 
 

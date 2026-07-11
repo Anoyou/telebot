@@ -256,7 +256,7 @@ function OperationalOverview({ stats, loading }: { stats?: OperationalStats; loa
           icon={Gamepad2}
           title="开局数"
           value={formatInteger(total.started_sessions)}
-          description="OK start_session 按 session_key 去重"
+          description="按已记录的有效开局事件统计"
           tone="primary"
           valueClassName="truncate font-mono text-2xl font-bold tabular-nums"
         />
@@ -280,7 +280,7 @@ function OperationalOverview({ stats, loading }: { stats?: OperationalStats; loa
           icon={Users}
           title="参与人数"
           value={formatInteger(total.participant_count ?? 0)}
-          description="按开局与付款事件中的参与者 User ID 去重统计"
+          description="按开局、付款与派奖对象的 User ID 去重统计"
           tone={total.participant_count ? "primary" : "neutral"}
           valueClassName="truncate font-mono text-2xl font-bold tabular-nums"
         />
@@ -297,6 +297,14 @@ function OperationalOverview({ stats, loading }: { stats?: OperationalStats; loa
 function OperationalTrend({ stats }: { stats: OperationalStats }) {
   useTheme(); // 订阅主题，切换时重取图表色值
   const xAxis = stats.by_day.map((item) => item.key);
+  const totals = stats.by_day.reduce(
+    (result, item) => ({
+      started: result.started + item.started_sessions,
+      succeeded: result.succeeded + item.payout_success_count,
+      failed: result.failed + item.payout_failure_count,
+    }),
+    { started: 0, succeeded: 0, failed: 0 },
+  );
   const series = [
     { name: "开局", data: stats.by_day.map((item) => item.started_sessions), color: cssVarHsl("--primary") },
     { name: "派奖成功", data: stats.by_day.map((item) => item.payout_success_count), color: cssVarHsl("--success") },
@@ -315,10 +323,41 @@ function OperationalTrend({ stats }: { stats: OperationalStats }) {
         {xAxis.length === 0 ? (
           <EmptyState text="暂无运营动作" />
         ) : (
-          <LineTrend xAxis={xAxis} series={series} height={260} />
+          <div className="space-y-4">
+            <LineTrend xAxis={xAxis} series={series} height={260} />
+            <div className="grid grid-cols-3 gap-3 border-t border-border/70 pt-3">
+              <TrendValue label="开局" value={totals.started} tone="primary" />
+              <TrendValue label="派奖成功" value={totals.succeeded} tone="success" />
+              <TrendValue label="派奖失败" value={totals.failed} tone="danger" />
+            </div>
+          </div>
         )}
       </CardContent>
     </Card>
+  );
+}
+
+function TrendValue({
+  label,
+  value,
+  tone,
+}: {
+  label: string;
+  value: number;
+  tone: "primary" | "success" | "danger";
+}) {
+  const toneClass = {
+    primary: "text-primary",
+    success: "text-success",
+    danger: "text-destructive",
+  }[tone];
+  return (
+    <div className="min-w-0 text-center">
+      <div className="truncate text-xs text-muted-foreground">{label}</div>
+      <div className={cn("mt-1 font-mono text-lg font-bold tabular-nums", toneClass)}>
+        {formatInteger(value)}
+      </div>
+    </div>
   );
 }
 

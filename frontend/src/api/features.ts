@@ -58,6 +58,15 @@ export async function updateAccountFeatureConfig(
   await api.patch(`/api/accounts/${aid}/features/${pluginKey}/config`, { config });
 }
 
+/** 独立更新账号级裸直通开关，不重交插件的其它历史配置。 */
+export async function updateAccountFeatureDirectPassthrough(
+  aid: number,
+  pluginKey: string,
+  enabled: boolean,
+): Promise<void> {
+  await api.patch(`/api/accounts/${aid}/features/${pluginKey}/direct-passthrough`, { enabled });
+}
+
 /** 验证配置是否符合 schema */
 export async function validatePluginConfig(
   pluginKey: string,

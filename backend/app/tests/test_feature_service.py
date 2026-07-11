@@ -83,6 +83,18 @@ def test_direct_passthrough_platform_field_requires_declared_capability() -> Non
     assert "仅声明 telegram_direct_passthrough" in str(exc_info.value.detail)
 
 
+def test_direct_passthrough_toggle_preserves_legacy_plugin_config() -> None:
+    config = features_api._with_direct_passthrough_enabled(  # noqa: SLF001
+        {"trigger_probability": 0.16, "direct_passthrough": {"enabled": "false"}},
+        True,
+    )
+
+    assert config == {
+        "trigger_probability": 0.16,
+        "direct_passthrough": {"enabled": True},
+    }
+
+
 # ─────────────────────────────────────────────────────
 # JSON Schema 验证测试
 # ─────────────────────────────────────────────────────

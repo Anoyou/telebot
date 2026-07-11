@@ -22,6 +22,7 @@ from ..db.models.plugin import InstalledPlugin
 from ..deps import CurrentUser, DBSession
 from ..schemas.feature import (
     AccountFeatureConfigUpdate,
+    AccountFeatureDirectPassthroughUpdate,
     AccountFeatureItem,
     AccountFeatureToggle,
     ConfigValidationResponse,
@@ -89,6 +90,17 @@ def _allow_account_direct_passthrough_config(
             },
         )
     return schema
+
+
+def _with_direct_passthrough_enabled(
+    config: dict[str, object] | None,
+    enabled: bool,
+) -> dict[str, object]:
+    """只替换平台开关，保留插件自身可能仍待迁移的历史配置。"""
+
+    merged = dict(config or {})
+    merged["direct_passthrough"] = {"enabled": enabled}
+    return merged
 
 
 def _account_config_schema(
@@ -410,6 +422,60 @@ async def update_account_feature_config(
         "feature.config.update",
         target=f"account:{aid}/feature:{key}",
         detail={"config_keys": sorted(payload.config.keys())},
+    )
+    await db.commit()
+    return AccountFeatureItem(
+        feature_key=af.feature_key,
+        enabled=af.enabled,
+        state=af.state,
+        last_error=af.last_error,
+        config=_sanitize_config(dict(af.config or {}), key),
+    )
+
+
+@router.patch(
+    "/api/accounts/{aid}/features/{key}/direct-passthrough",
+    response_model=AccountFeatureItem,
+)
+async def update_account_feature_direct_passthrough(
+    aid: int,
+    key: str,
+    payload: AccountFeatureDirectPassthroughUpdate,
+    db: DBSession,
+    user: CurrentUser,
+) -> AccountFeatureItem:
+    """独立更新裸直通开关，避免插件历史配置失效时无法紧急关闭。"""
+
+    if await db.get(Account, aid) is None:
+        raise _bad("ACCOUNT_NOT_FOUND", "账号不存在", 404)
+    await feature_service.seed_builtin_features(db)
+    feature = await db.get(Feature, key)
+    if feature is None:
+        raise _bad("FEATURE_NOT_FOUND", f"未注册的 feature: {key}", 404)
+    if not _declares_direct_passthrough(feature.manifest):
+        raise _bad(
+            "CONFIG_VALIDATION_ERROR",
+            "配置验证失败: direct_passthrough: 插件未声明 telegram_direct_passthrough",
+        )
+
+    existing = await db.get(AccountFeature, (aid, key))
+    config = _with_direct_passthrough_enabled(
+        dict(existing.config or {}) if existing is not None else None,
+        payload.enabled,
+    )
+    af = await feature_service.set_account_feature(
+        db,
+        aid,
+        key,
+        enabled=bool(existing.enabled) if existing is not None else False,
+        config=config,
+    )
+    await audit.write(
+        db,
+        user.id,
+        "feature.direct_passthrough.update",
+        target=f"account:{aid}/feature:{key}",
+        detail={"enabled": payload.enabled},
     )
     await db.commit()
     return AccountFeatureItem(

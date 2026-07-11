@@ -97,15 +97,15 @@ SOURCE_MATRIX = [
         key="started_sessions",
         label="开局数",
         status=METRIC_STATUS_AVAILABLE,
-        source="action_event.action_type=start_session, status=OK, session_key 去重",
-        note="可按日、按群统计已成功开启的结构化会话动作。",
+        source="action_event.action_type=start_session, status=OK, canonical 事件实例",
+        note="按首次进入活跃状态时写入的结构化会话事件统计。",
     ),
     MetricAvailability(
         key="participant_count",
         label="参与人数",
         status=METRIC_STATUS_AVAILABLE,
-        source="action_event participant_user_ids/paid_user_ids/player_user_ids 去重",
-        note="优先读取 start_session 与付款事件中的结构化参与者字段。",
+        source="action_event 会话/付款参与者与成功派奖接收者 User ID 去重",
+        note="优先读取结构化参与者字段，并兼容从成功派奖接收者恢复历史赢家。",
     ),
     MetricAvailability(
         key="payout_success_rate",
@@ -215,7 +215,10 @@ def _add_action_metrics(acc: _StatsAccumulator, row: ActionEvent, summary: dict[
         acc.session_start_keys.add(_session_start_key(row))
     if status == ACTION_EVENT_STATUS_OK:
         acc.participant_user_ids.update(_participant_ids_from_summary(summary))
-    if not _is_payout_action(row, summary):
+    is_payout = _is_payout_action(row, summary)
+    if is_payout and status == ACTION_EVENT_STATUS_OK:
+        acc.participant_user_ids.update(_payout_participant_ids_from_summary(summary))
+    if not is_payout:
         return
     if status == ACTION_EVENT_STATUS_OK:
         acc.payout_success_count += 1
@@ -238,9 +241,7 @@ def _action_name(row: ActionEvent, summary: dict[str, Any]) -> str:
 
 
 def _session_start_key(row: ActionEvent) -> str:
-    session_key = str(row.session_key or "").strip()
-    if session_key:
-        return f"{int(row.account_id)}:{session_key}"
+    # session_key identifies the reusable Redis slot, not one game round.
     return f"event:{int(row.id)}"
 
 
@@ -271,6 +272,20 @@ def _participant_ids_from_summary(summary: dict[str, Any]) -> set[int]:
         summary.get("started_by_user_id"),
         summary.get("payer_user_id"),
         _nested(summary, "result", "started_by_user_id"),
+    ):
+        user_id = _int_or_none(value)
+        if user_id is not None:
+            ids.add(user_id)
+    return ids
+
+
+def _payout_participant_ids_from_summary(summary: dict[str, Any]) -> set[int]:
+    ids: set[int] = set()
+    for value in (
+        summary.get("reply_to_user_id"),
+        summary.get("receiver_user_id"),
+        _nested(summary, "result", "reply_to_user_id"),
+        _nested(summary, "result", "receiver_user_id"),
     ):
         user_id = _int_or_none(value)
         if user_id is not None:

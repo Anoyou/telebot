@@ -3381,6 +3381,8 @@ async def _save_interaction_session(
     rule: dict[str, Any],
     event_type: str,
     data: dict[str, Any] | None = None,
+    *,
+    start_action: dict[str, Any] | None = None,
 ) -> None:
     module_key = str(rule.get("module_key") or "").strip()
     entry_key = str(rule.get("module_action") or "").strip()
@@ -3407,8 +3409,9 @@ async def _save_interaction_session(
     policy = _interaction_participant_policy(rule)
     started_by_user_id = _int_or_none(existing.get("started_by_user_id"))
     if started_by_user_id is None:
-        started_by_user_id = session_user_id
+        started_by_user_id = _int_or_none((start_action or {}).get("started_by_user_id")) or session_user_id
     now = time.time()
+    was_active = _interaction_session_payload_active(existing, now=now)
     ttl = _interaction_session_ttl(rule)
     expires_at = now + ttl
     existing_data = existing.get("data")
@@ -3451,6 +3454,24 @@ async def _save_interaction_session(
             ex=ttl + _INTERACTION_SESSION_TTL_GRACE_SECONDS,
         )
         _remember_interaction_active_session_chat(incoming.account_id, incoming.chat_id)
+        if not was_active:
+            participant_ids = _interaction_session_list_participant_ids(payload)
+            participant_ids.update(_interaction_action_participant_ids(start_action or {}))
+            if started_by_user_id is not None and (
+                policy != "paid_pool" or bool((start_action or {}).get("include_started_by", False))
+            ):
+                participant_ids.add(int(started_by_user_id))
+            await _emit_interaction_session_start_tap(
+                incoming,
+                plugin_key=module_key,
+                entry_key=entry_key,
+                chat_id=incoming.chat_id,
+                session_key=session_key,
+                started_by_user_id=started_by_user_id,
+                participant_user_ids=participant_ids,
+                event_type=event_type,
+                action=start_action,
+            )
     except Exception as exc:  # noqa: BLE001
         log.debug("save interaction session failed aid=%s rule=%s", incoming.account_id, rule.get("id"), exc_info=True)
         await _write_interaction_runtime_log(
@@ -3474,6 +3495,58 @@ def _interaction_action_participant_ids(action: dict[str, Any]) -> set[int]:
             if user_id is not None:
                 ids.add(user_id)
     return ids
+
+
+def _first_interaction_start_session_action(actions: list[dict[str, Any]]) -> dict[str, Any] | None:
+    return next(
+        (
+            action
+            for action in actions
+            if isinstance(action, dict) and str(action.get("type") or "").strip() == "start_session"
+        ),
+        None,
+    )
+
+
+async def _emit_interaction_session_start_tap(
+    incoming: Incoming,
+    *,
+    plugin_key: str,
+    entry_key: str,
+    chat_id: int | None,
+    session_key: str,
+    started_by_user_id: int | None,
+    participant_user_ids: set[int],
+    event_type: str,
+    action: dict[str, Any] | None = None,
+) -> None:
+    participants = sorted(participant_user_ids)
+    tap_action = {
+        **dict(action or {}),
+        "type": "start_session",
+        "chat_id": chat_id,
+        "entry_key": entry_key,
+        "module_key": plugin_key,
+        "session_key": session_key,
+        "started_by_user_id": started_by_user_id,
+        "participant_user_ids": participants,
+        "event_type": event_type,
+    }
+    await emit_action_event(
+        account_id=incoming.account_id,
+        action=tap_action,
+        status=ACTION_EVENT_STATUS_OK,
+        channel="interaction_session",
+        session_key=session_key,
+        plugin_key=plugin_key,
+        entry_key=entry_key,
+        result={
+            "chat_id": chat_id,
+            "participant_user_ids": participants,
+            "started_by_user_id": started_by_user_id,
+            "session_key": session_key,
+        },
+    )
 
 
 async def _apply_interaction_start_session_action(
@@ -3509,6 +3582,8 @@ async def _apply_interaction_start_session_action(
     except Exception:  # noqa: BLE001
         existing = {}
 
+    now = time.time()
+    was_active = _interaction_session_payload_active(existing, now=now)
     if started_by_user_id is None:
         started_by_user_id = _int_or_none(existing.get("started_by_user_id")) or incoming.user_id
     participant_ids = _interaction_session_list_participant_ids(existing)
@@ -3516,7 +3591,6 @@ async def _apply_interaction_start_session_action(
     if started_by_user_id is not None and action.get("include_started_by", False):
         participant_ids.add(int(started_by_user_id))
 
-    now = time.time()
     ttl = _int_or_none(action.get("ttl_seconds")) or _interaction_session_ttl(rule)
     existing_data = existing.get("data")
     action_data = action.get("data")
@@ -3567,32 +3641,18 @@ async def _apply_interaction_start_session_action(
             actual_send_via="interaction_session",
             result={"chat_id": target_chat_id, "participant_user_ids": sorted(participant_ids)},
         )
-        tap_action = {
-            **action,
-            "type": "start_session",
-            "chat_id": target_chat_id,
-            "entry_key": entry_key,
-            "module_key": module_key,
-            "session_key": session_key,
-            "started_by_user_id": started_by_user_id,
-            "participant_user_ids": sorted(participant_ids),
-            "event_type": payload.get("event_type"),
-        }
-        await emit_action_event(
-            account_id=incoming.account_id,
-            action=tap_action,
-            status=ACTION_EVENT_STATUS_OK,
-            channel="interaction_session",
-            session_key=session_key,
-            plugin_key=module_key,
-            entry_key=entry_key,
-            result={
-                "chat_id": target_chat_id,
-                "participant_user_ids": sorted(participant_ids),
-                "started_by_user_id": started_by_user_id,
-                "session_key": session_key,
-            },
-        )
+        if not was_active:
+            await _emit_interaction_session_start_tap(
+                incoming,
+                plugin_key=module_key,
+                entry_key=entry_key,
+                chat_id=target_chat_id,
+                session_key=session_key,
+                started_by_user_id=started_by_user_id,
+                participant_user_ids=participant_ids,
+                event_type=str(payload.get("event_type") or "message"),
+                action=action,
+            )
     except Exception as exc:  # noqa: BLE001
         await record_action(
             action.get("context"),
@@ -5144,7 +5204,13 @@ async def _try_handle_event_bus_payment_notice(
             action_success = _interaction_actions_mark_success(guarded)
             keep_session = action_success and not _interaction_actions_request_no_session(guarded)
             if keep_session:
-                await _save_interaction_session(incoming, rule, "payment_confirmed", parsed)
+                await _save_interaction_session(
+                    incoming,
+                    rule,
+                    "payment_confirmed",
+                    parsed,
+                    start_action=_first_interaction_start_session_action(guarded),
+                )
             await _apply_interaction_start_session_actions(incoming, rule, guarded)
             await _apply_interaction_actions(
                 incoming,
@@ -7084,7 +7150,13 @@ async def _run_interaction_module(
     success = _interaction_actions_mark_success(actions)
     keep_session = not _interaction_actions_request_no_session(actions)
     if success and keep_session:
-        await _save_interaction_session(incoming, rule, event_type, parsed)
+        await _save_interaction_session(
+            incoming,
+            rule,
+            event_type,
+            parsed,
+            start_action=_first_interaction_start_session_action(actions),
+        )
     await _apply_interaction_start_session_actions(incoming, rule, actions)
     await _apply_interaction_actions(
         incoming,

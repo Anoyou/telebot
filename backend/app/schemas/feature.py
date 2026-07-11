@@ -180,6 +180,11 @@ class AccountFeatureConfigUpdate(BaseModel):
     config: dict[str, Any]
 
 
+class AccountFeatureDirectPassthroughUpdate(BaseModel):
+    """仅更新平台拥有的账号级裸直通开关。"""
+    enabled: bool
+
+
 class AccountFeatureItem(BaseModel):
     feature_key: str
     enabled: bool

@@ -110,7 +110,7 @@ async def test_operational_stats_net_matches_ledger_summary(stats_session_factor
         stats = await stats_service.summarize_operational_stats(db, stats_filters)
         ledger = await ledger_service.summarize_ledger(db, ledger_filters)
 
-    assert stats.total.started_sessions == 1
+    assert stats.total.started_sessions == 2
     assert stats.total.participant_count == 3
     assert stats.total.payout_success_count == 1
     assert stats.total.payout_failure_count == 1
@@ -122,7 +122,7 @@ async def test_operational_stats_net_matches_ledger_summary(stats_session_factor
     assert stats.total.ledger_count == ledger.count == 2
 
     by_day = {item.key: item for item in stats.by_day}
-    assert by_day["2026-07-09"].started_sessions == 1
+    assert by_day["2026-07-09"].started_sessions == 2
     assert by_day["2026-07-09"].payout_success_count == 1
     assert Decimal(by_day["2026-07-09"].ledger_net) == Decimal("70")
     assert by_day["2026-07-10"].started_sessions == 0
@@ -130,7 +130,7 @@ async def test_operational_stats_net_matches_ledger_summary(stats_session_factor
     assert Decimal(by_day["2026-07-10"].ledger_net) == Decimal("0")
 
     by_chat = {item.key: item for item in stats.by_chat}
-    assert by_chat["-100123"].started_sessions == 1
+    assert by_chat["-100123"].started_sessions == 2
     assert by_chat["-100123"].payout_success_count == 1
     assert Decimal(by_chat["-100123"].ledger_net) == Decimal("70")
     assert by_chat["-100456"].started_sessions == 0
@@ -163,3 +163,34 @@ async def test_operational_stats_chat_filter_matches_ledger_filter(stats_session
     assert stats.total.payout_attempt_count == 0
     assert Decimal(stats.total.ledger_net) == Decimal(ledger.net) == Decimal("100")
     assert [item.key for item in stats.by_chat] == ["-100123"]
+
+
+@pytest.mark.asyncio
+async def test_operational_stats_recovers_participants_from_successful_payouts(stats_session_factory) -> None:
+    base = datetime(2026, 7, 9, 8, 0, tzinfo=UTC)
+    await _insert_action_event(
+        stats_session_factory,
+        action_type="payout",
+        params_summary={"type": "payout", "amount": "10", "chat_id": -100123, "reply_to_user_id": 111},
+        created_at=base,
+    )
+    await _insert_action_event(
+        stats_session_factory,
+        action_type="payout",
+        params_summary={"type": "payout", "amount": "10", "chat_id": -100123, "result": {"reply_to_user_id": 222}},
+        created_at=base + timedelta(seconds=1),
+    )
+    await _insert_action_event(
+        stats_session_factory,
+        action_type="payout",
+        params_summary={"type": "payout", "amount": "10", "chat_id": -100123, "receiver_user_id": 999},
+        status=ACTION_EVENT_STATUS_FAILED,
+        created_at=base + timedelta(seconds=2),
+    )
+
+    async with stats_session_factory() as db:
+        stats = await stats_service.summarize_operational_stats(db, stats_service.StatsFilters(account_id=7))
+
+    assert stats.total.participant_count == 2
+    assert stats.total.payout_success_count == 2
+    assert stats.total.payout_failure_count == 1

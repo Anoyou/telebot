@@ -30,6 +30,7 @@ import {
   setPluginGlobalConfig,
   startPluginConfigActionJob,
   updateAccountFeatureConfig,
+  updateAccountFeatureDirectPassthrough,
   type PluginConfigActionJobStatus,
 } from "@/api/features";
 import { getSystemSettings } from "@/api/system";
@@ -303,13 +304,7 @@ export function GenericPluginConfigPage() {
 
   const directPassthroughMut = useMutation({
     mutationFn: (enabled: boolean) =>
-      updateAccountFeatureConfig(aid, featureKey, {
-        ...accountConfig,
-        direct_passthrough: {
-          ...directPassthroughConfig(accountConfig),
-          enabled,
-        },
-      }),
+      updateAccountFeatureDirectPassthrough(aid, featureKey, enabled),
     onSuccess: (_data, enabled) => {
       toast.success(enabled ? "裸直通已为当前账号开启" : "裸直通已为当前账号关闭");
       qc.invalidateQueries({ queryKey: ["account", aid, "features"] });
@@ -549,7 +544,7 @@ export function GenericPluginConfigPage() {
                   <Badge variant="outline">二次开关</Badge>
                 </div>
                 <p className="mt-1 text-xs leading-5 text-muted-foreground">
-                  开启后，该插件可在标准 Event Bus 之前接收当前账号的原始消息。只为你信任且确实需要低延时的插件开启。
+                  开启后，该插件可在标准 Event Bus 之前接收当前账号的原始消息。关闭只停用低延时直通，不影响插件的标准 Event Bus、指令或交互入口。
                 </p>
                 {!accountFeature?.enabled ? (
                   <p className="mt-1 text-xs text-warning">请先开启上方功能总开关。</p>
