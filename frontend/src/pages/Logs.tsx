@@ -1775,6 +1775,7 @@ function systemConsoleServiceLabel(service?: string | null): string {
 function systemConsoleSourceLabel(source?: string | null): string {
   const value = (source || "").toLowerCase();
   if (value === "docker_compose") return "Docker";
+  if (value === "docker_containers") return "Docker 容器";
   if (value === "local_files") return "本地日志";
   if (value === "unavailable") return "不可用";
   return source || "系统";

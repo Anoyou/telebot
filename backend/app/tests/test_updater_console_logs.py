@@ -44,13 +44,30 @@ def test_console_logs_respects_explicit_compose_project_name(monkeypatch) -> Non
     commands: list[list[str]] = []
 
     monkeypatch.setenv("TELEPILOT_COMPOSE_PROJECT_NAME", "custom_stack")
-    monkeypatch.setattr(updater, "_run", lambda args, **_kw: (commands.append(args) or ("", "", 0)))
+    monkeypatch.setattr(
+        updater,
+        "_run",
+        lambda args, **_kw: (commands.append(args) or ("custom-web-1 | ready", "", 0)),
+    )
 
     result = updater._tail_console_logs("all", 20, None)
 
     assert result["ok"] is True
     assert result["project"] == "custom_stack"
     assert commands[0][:4] == ["docker", "compose", "-p", "custom_stack"]
+
+
+def test_apply_job_env_uses_host_compose_project_name(monkeypatch) -> None:
+    updater = _load_updater_module()
+    monkeypatch.setattr(updater, "HOST_PROJECT_DIR", Path("/opt/TelePilot"))
+    monkeypatch.delenv("COMPOSE_PROJECT_NAME", raising=False)
+    monkeypatch.delenv("TELEPILOT_COMPOSE_PROJECT_NAME", raising=False)
+
+    env = updater._apply_job_env("origin", "codex/0.33-interaction-framework")
+
+    assert env["COMPOSE_PROJECT_NAME"] == "telepilot"
+    assert env["TELEPILOT_UPDATE_REMOTE"] == "origin"
+    assert env["TELEPILOT_UPDATE_BRANCH"] == "codex/0.33-interaction-framework"
 
 
 def test_console_logs_returns_partial_lines_when_compose_times_out(monkeypatch) -> None:
@@ -102,6 +119,55 @@ def test_console_logs_filters_internal_health_checks(monkeypatch) -> None:
 
     assert result["ok"] is True
     assert result["lines"] == ["web-1      | INFO:app.worker:真实业务日志"]
+
+
+def test_console_logs_falls_back_to_labeled_containers_when_project_is_wrong(monkeypatch) -> None:
+    updater = _load_updater_module()
+    monkeypatch.setattr(updater, "HOST_PROJECT_DIR", Path("/srv/TelePilot"))
+
+    def fake_run(args, **_kwargs):  # noqa: ANN001
+        if args[:2] == ["docker", "compose"]:
+            return "", "", 0
+        if args[:3] == ["docker", "ps", "-a"]:
+            return "abc123|custom-web-1|custom|web|/srv/TelePilot", "", 0
+        if args[:2] == ["docker", "logs"]:
+            assert args[-1] == "abc123"
+            return "2026-07-12T01:02:03Z INFO server ready", "", 0
+        raise AssertionError(args)
+
+    monkeypatch.setattr(updater, "_run", fake_run)
+
+    result = updater._tail_console_logs("all", 20, None)
+
+    assert result["ok"] is True
+    assert result["source"] == "docker_containers"
+    assert result["project"] == "custom"
+    assert result["services"] == ["web"]
+    assert result["lines"] == ["web  | 2026-07-12T01:02:03Z INFO server ready"]
+
+
+def test_console_logs_reports_ambiguous_compose_projects(monkeypatch) -> None:
+    updater = _load_updater_module()
+    monkeypatch.setattr(updater, "HOST_PROJECT_DIR", Path())
+
+    def fake_run(args, **_kwargs):  # noqa: ANN001
+        if args[:2] == ["docker", "compose"]:
+            return "", "", 0
+        if args[:3] == ["docker", "ps", "-a"]:
+            return "\n".join(
+                [
+                    "abc|one-web-1|one|web|/srv/one",
+                    "def|two-web-1|two|web|/srv/two",
+                ]
+            ), "", 0
+        raise AssertionError(args)
+
+    monkeypatch.setattr(updater, "_run", fake_run)
+
+    result = updater._tail_console_logs("all", 20, None)
+
+    assert result["ok"] is False
+    assert "无法唯一识别" in result["error"]
 
 
 def test_updater_rejects_requests_when_token_is_missing(monkeypatch) -> None:

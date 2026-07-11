@@ -149,6 +149,19 @@ def _compose_project_name() -> str | None:
     return normalized or None
 
 
+def _apply_job_env(remote: str, branch: str) -> dict[str, str]:
+    env = {
+        "TELEPILOT_UPDATE_REMOTE": remote,
+        "TELEPILOT_UPDATE_BRANCH": branch,
+        "TELEPILOT_HOST_PROJECT_DIR": os.getenv("TELEPILOT_HOST_PROJECT_DIR", str(WORKSPACE)),
+        "TELEPILOT_SKIP_UPDATER_RECREATE": "1",
+    }
+    project = _compose_project_name()
+    if project:
+        env["COMPOSE_PROJECT_NAME"] = project
+    return env
+
+
 def _is_console_noise_line(line: str) -> bool:
     lowered = line.lower()
     if "127.0.0.1" not in lowered:
@@ -167,6 +180,105 @@ def _console_lines(out: str, keyword: str | None) -> list[str]:
     if q:
         lines = [line for line in lines if q in line.lower()]
     return lines
+
+
+def _tail_labeled_container_logs(services: list[str], tail: int, keyword: str | None) -> dict[str, Any]:
+    format_arg = (
+        '{{.ID}}|{{.Names}}|{{.Label "com.docker.compose.project"}}|'
+        '{{.Label "com.docker.compose.service"}}|{{.Label "com.docker.compose.project.working_dir"}}'
+    )
+    out, err, rc = _run(
+        [
+            "docker",
+            "ps",
+            "-a",
+            "--filter",
+            "label=com.docker.compose.service",
+            "--format",
+            format_arg,
+        ],
+        timeout=CONSOLE_LOG_COMMAND_TIMEOUT_SECONDS,
+    )
+    if rc != 0:
+        return {"ok": False, "error": err or out or "无法枚举 Compose 容器", "lines": []}
+
+    containers: list[dict[str, str]] = []
+    for line in out.splitlines():
+        parts = line.split("|", 4)
+        if len(parts) != 5:
+            continue
+        container_id, name, project, service, working_dir = (part.strip() for part in parts)
+        if container_id and project and service in CONSOLE_LOG_SERVICES:
+            containers.append(
+                {
+                    "id": container_id,
+                    "name": name,
+                    "project": project,
+                    "service": service,
+                    "working_dir": working_dir,
+                }
+            )
+    if not containers:
+        return {"ok": False, "error": "未发现带 Compose 服务标签的 TelePilot 容器", "lines": []}
+
+    projects: dict[str, list[dict[str, str]]] = {}
+    for item in containers:
+        projects.setdefault(item["project"], []).append(item)
+    host_dir = str(HOST_PROJECT_DIR)
+    exact_host = {
+        item["project"]
+        for item in containers
+        if host_dir and host_dir not in {"", "."} and item["working_dir"] == host_dir
+    }
+    inferred = _compose_project_name()
+    if len(exact_host) == 1:
+        selected_project = next(iter(exact_host))
+    elif inferred and inferred in projects:
+        selected_project = inferred
+    else:
+        web_projects = {
+            project
+            for project, items in projects.items()
+            if any(item["service"] == "web" for item in items)
+        }
+        if len(web_projects) != 1:
+            names = ", ".join(sorted(web_projects or projects))
+            return {
+                "ok": False,
+                "error": f"无法唯一识别 TelePilot Compose 项目，候选：{names}",
+                "lines": [],
+            }
+        selected_project = next(iter(web_projects))
+
+    requested = set(services or CONSOLE_LOG_SERVICES)
+    selected = [
+        item
+        for item in projects[selected_project]
+        if item["service"] in requested
+    ]
+    collected: list[str] = []
+    failed: list[str] = []
+    for item in selected:
+        log_out, log_err, log_rc = _run(
+            ["docker", "logs", "--timestamps", f"--tail={tail}", item["id"]],
+            timeout=CONSOLE_LOG_COMMAND_TIMEOUT_SECONDS,
+        )
+        if log_rc != 0:
+            failed.append(f"{item['service']}: {log_err or log_out or f'退出码 {log_rc}'}")
+            continue
+        raw = "\n".join(part for part in (log_out, log_err) if part)
+        prefix = f"{item['service']}  | "
+        collected.extend(f"{prefix}{line}" for line in raw.splitlines())
+    lines = _console_lines("\n".join(collected), keyword)
+    return {
+        "ok": bool(selected) and not (failed and not lines),
+        "source": "docker_containers",
+        "services": sorted({item["service"] for item in selected}),
+        "project": selected_project,
+        "tail": tail,
+        "lines": lines[-MAX_CONSOLE_LOG_LINES:],
+        "error": "; ".join(failed) if failed else None,
+    }
 
 
 def _tail_console_logs(service: str | None, tail: int, keyword: str | None) -> dict[str, Any]:
@@ -193,12 +305,14 @@ def _tail_console_logs(service: str | None, tail: int, keyword: str | None) -> d
                 "lines": lines[-MAX_CONSOLE_LOG_LINES:],
                 "error": "Docker 日志命令超时，仅展示已取得的部分内容。",
             }
-        return {
-            "ok": False,
-            "error": err or out or f"docker compose logs 退出码 {rc}",
-            "services": services or list(CONSOLE_LOG_SERVICES),
-            "lines": [],
-        }
+        fallback = _tail_labeled_container_logs(services, tail, keyword)
+        if fallback.get("ok") or fallback.get("lines"):
+            return fallback
+        fallback["error"] = fallback.get("error") or err or out or f"docker compose logs 退出码 {rc}"
+        return fallback
+    if not out.strip():
+        fallback = _tail_labeled_container_logs(services, tail, keyword)
+        return fallback
     lines = _console_lines(out, keyword)
     return {
         "ok": True,
@@ -344,12 +458,7 @@ def _run_apply_job(job_id: str, remote: str, branch: str, force_full: bool) -> N
         if not plan.get("has_update"):
             _set_job(job_id, status="succeeded", finished_at=int(time.time()), returncode=0, summary="当前已是最新版本。")
             return
-        env = {
-            "TELEPILOT_UPDATE_REMOTE": remote,
-            "TELEPILOT_UPDATE_BRANCH": branch,
-            "TELEPILOT_HOST_PROJECT_DIR": os.getenv("TELEPILOT_HOST_PROJECT_DIR", str(WORKSPACE)),
-            "TELEPILOT_SKIP_UPDATER_RECREATE": "1",
-        }
+        env = _apply_job_env(remote, branch)
         cmd = ["bash", "scripts/prod-update.sh"]
         if force_full:
             cmd.append("--full")

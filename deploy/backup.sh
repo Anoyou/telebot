@@ -25,7 +25,33 @@ mkdir -p "$DIR"
 DIR="$(cd "$DIR" && pwd)"
 
 WEB_CONTAINER="$(docker compose ps -q web)"
-[[ -n "$WEB_CONTAINER" ]] || { echo "找不到 web 容器，请先启动生产栈" >&2; exit 1; }
+if [[ -z "$WEB_CONTAINER" ]]; then
+  # updater 在 /workspace 内运行时，Compose 会误推断项目名为 workspace。
+  # 从现有 web 容器标签恢复宿主项目名，并写回 .env 供本次更新后续命令复用。
+  HOST_PROJECT_DIR="${TELEPILOT_HOST_PROJECT_DIR:-$ROOT_DIR}"
+  CANDIDATES="$(docker ps -a \
+    --filter label=com.docker.compose.service=web \
+    --format '{{.ID}}|{{.Label "com.docker.compose.project.working_dir"}}|{{.Label "com.docker.compose.project"}}')"
+  SELECTED="$(printf '%s\n' "$CANDIDATES" | awk -F'|' -v host="$HOST_PROJECT_DIR" '$2 == host { print; exit }')"
+  if [[ -z "$SELECTED" && -n "$CANDIDATES" && "$(printf '%s\n' "$CANDIDATES" | sed '/^$/d' | wc -l | tr -d ' ')" == "1" ]]; then
+    SELECTED="$CANDIDATES"
+  fi
+  if [[ -n "$SELECTED" ]]; then
+    WEB_CONTAINER="${SELECTED%%|*}"
+    COMPOSE_PROJECT_NAME="${SELECTED##*|}"
+    [[ "$COMPOSE_PROJECT_NAME" =~ ^[a-z0-9][a-z0-9_-]*$ ]] || {
+      echo "识别到无效的 Compose 项目名：$COMPOSE_PROJECT_NAME" >&2
+      exit 1
+    }
+    export COMPOSE_PROJECT_NAME
+    if [[ -n "$COMPOSE_PROJECT_NAME" ]] && ! grep -qE '^COMPOSE_PROJECT_NAME=' .env 2>/dev/null; then
+      printf '\nCOMPOSE_PROJECT_NAME=%s\n' "$COMPOSE_PROJECT_NAME" >> .env
+      chmod 600 .env 2>/dev/null || true
+      echo "已从运行中容器识别 Compose 项目：$COMPOSE_PROJECT_NAME"
+    fi
+  fi
+fi
+[[ -n "$WEB_CONTAINER" ]] || { echo "找不到 web 容器，请确认生产栈已启动且 TELEPILOT_HOST_PROJECT_DIR 指向当前项目" >&2; exit 1; }
 WEB_WAS_RUNNING="$(docker inspect "$WEB_CONTAINER" --format '{{.State.Running}}' 2>/dev/null || echo false)"
 
 resume_web() {

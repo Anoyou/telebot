@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Loader2, RefreshCw, RotateCcw, CheckCircle2, AlertCircle } from "lucide-react";
+import { Loader2, RefreshCw, RotateCcw, CheckCircle2, AlertCircle, Copy } from "lucide-react";
 
 import {
   Dialog,
@@ -86,6 +86,7 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
   const [updateRemote, setUpdateRemote] = useState("origin");
   const [updateBranch, setUpdateBranch] = useState("main");
   const [targetSaving, setTargetSaving] = useState(false);
+  const [errorCopied, setErrorCopied] = useState(false);
   const timerRef = useRef<ReturnType<typeof setInterval>>();
   const jobPollTokenRef = useRef(0);
   const checkTokenRef = useRef(0);
@@ -249,6 +250,7 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
       dialogGenerationRef.current += 1;
       setStep(null);
       setFrontendUpdateState("idle");
+      setErrorCopied(false);
       jobPollTokenRef.current += 1;
       checkTokenRef.current += 1;
       if (timerRef.current) {
@@ -400,6 +402,16 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
     }
   };
 
+  const copyErrorDetails = async (error: string) => {
+    try {
+      await navigator.clipboard.writeText(error);
+      setErrorCopied(true);
+      window.setTimeout(() => setErrorCopied(false), 1600);
+    } catch {
+      window.alert("复制失败，请长按错误内容手动复制。");
+    }
+  };
+
   const doPrimaryAction = async (plan: UpdatePlanMeta) => {
     if (plan.actionRequired === "restart") {
       await doRestart();
@@ -428,8 +440,8 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="dialog-center siri-glow-soft w-[calc(100vw-1.5rem)] max-w-md overflow-y-auto border-primary/45 shadow-2xl shadow-primary/10 ring-1 ring-primary/35">
-        <DialogHeader>
+      <DialogContent className="dialog-center siri-glow-soft !flex max-h-[calc(100dvh-1.5rem)] w-[calc(100vw-1.5rem)] max-w-md flex-col overflow-hidden border-primary/45 shadow-2xl shadow-primary/10 ring-1 ring-primary/35">
+        <DialogHeader className="shrink-0 pr-6">
           <DialogTitle>检查更新</DialogTitle>
           <DialogDescription>
             {step?.kind === "checking" && "正在检查远程仓库..."}
@@ -447,7 +459,7 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
         </DialogHeader>
 
         {/* 内容区 */}
-        <div className="min-h-[80px]">
+        <div className="min-h-0 flex-1 overflow-y-auto pr-1">
           <div className="mb-3 flex items-center justify-between gap-3 rounded-md border border-primary/20 bg-primary/5 px-3 py-2 text-xs">
             <span className="text-muted-foreground">当前应用版本</span>
             <code className="rounded bg-background px-2 py-1 font-mono text-foreground">{APP_VERSION_LABEL}</code>
@@ -662,11 +674,23 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
           )}
 
           {(step?.kind === "pull_failed" || step?.kind === "check_failed") && (
-            <div className="flex items-start gap-3 text-destructive">
-              <AlertCircle className="h-5 w-5 mt-0.5" />
-              <div className="text-sm space-y-1">
-                <p>错误信息：</p>
-                <pre className="rounded bg-muted px-3 py-2 text-xs overflow-x-auto">
+            <div className="flex min-w-0 items-start gap-3 text-destructive">
+              <AlertCircle className="mt-0.5 h-5 w-5 shrink-0" />
+              <div className="min-w-0 flex-1 space-y-2 text-sm">
+                <div className="flex items-center justify-between gap-3">
+                  <p>错误信息：</p>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="h-8 shrink-0 text-foreground"
+                    onClick={() => void copyErrorDetails(step.error)}
+                  >
+                    {errorCopied ? <CheckCircle2 className="mr-1 h-3.5 w-3.5" /> : <Copy className="mr-1 h-3.5 w-3.5" />}
+                    {errorCopied ? "已复制" : "复制错误"}
+                  </Button>
+                </div>
+                <pre className="max-h-72 max-w-full overflow-auto whitespace-pre-wrap break-words rounded bg-muted px-3 py-2 text-xs">
                   {step.error}
                 </pre>
               </div>
@@ -714,7 +738,7 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
 
         {/* 按钮区 */}
         {isActionable && (
-          <DialogFooter className="gap-2">
+          <DialogFooter className="shrink-0 gap-2">
             {(step?.kind === "check_failed" || step?.kind === "pull_failed") && (
               <Button variant="outline" size="sm" onClick={() => void doCheck({ remote: updateRemote, branch: updateBranch })}>
                 <RefreshCw className="mr-1 h-3.5 w-3.5" />
