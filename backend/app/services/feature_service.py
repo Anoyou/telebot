@@ -653,19 +653,27 @@ async def set_account_feature(
             )
         )
     ).scalar_one_or_none()
+    from .plugin_config_secrets import encrypt_config_secrets
+
+    feature_row = await db.get(Feature, key)
+    schema = None
+    if feature_row is not None and isinstance(feature_row.manifest, dict):
+        raw_schema = feature_row.manifest.get("config_schema")
+        schema = raw_schema if isinstance(raw_schema, dict) else None
+
     if af is None:
         af = AccountFeature(
             account_id=aid,
             feature_key=key,
             enabled=enabled,
-            config=dict(config or {}),
+            config=encrypt_config_secrets(dict(config or {}), schema=schema),
             state=FEATURE_STATE_DISABLED,
         )
         db.add(af)
     else:
         af.enabled = enabled
         if config is not None:
-            af.config = dict(config)
+            af.config = encrypt_config_secrets(dict(config), schema=schema)
         if not enabled:
             # 立刻把状态置 disabled；激活由 worker 反向写
             af.state = FEATURE_STATE_DISABLED
@@ -846,7 +854,10 @@ async def set_plugin_global_config(
             error_msgs = [f"{e.field}: {e.message}" for e in validation.errors]
             raise ValueError(f"Config validation failed: {'; '.join(error_msgs)}")
 
+    from .plugin_config_secrets import encrypt_config_secrets
+
     # 提取 global 字段（level === "global" 的字段）
+    schema = config_schema if isinstance(config_schema, dict) else None
     if config_schema and "properties" in config_schema:
         global_fields = {
             k for k, v in config_schema["properties"].items()
@@ -856,6 +867,7 @@ async def set_plugin_global_config(
     else:
         # 如果没有 level 标记，全部视为 account config
         global_config = {}
+    global_config = encrypt_config_secrets(global_config, schema=schema)
 
     # 写入新表
     row = await db.get(PluginGlobalConfig, plugin_key)

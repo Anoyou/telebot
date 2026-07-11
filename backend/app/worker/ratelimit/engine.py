@@ -559,7 +559,17 @@ class RateLimitEngine:
             detail=detail,
         )
         try:
-            await self.redis.rpush(RATELIMIT_EVENT_STREAM, payload.encode())
+            pipe = getattr(self.redis, "pipeline", None)
+            if callable(pipe):
+                p = self.redis.pipeline()
+                p.rpush(RATELIMIT_EVENT_STREAM, payload.encode())
+                p.ltrim(RATELIMIT_EVENT_STREAM, -2000, -1)
+                await p.execute()
+            else:
+                await self.redis.rpush(RATELIMIT_EVENT_STREAM, payload.encode())
+                ltrim = getattr(self.redis, "ltrim", None)
+                if callable(ltrim):
+                    await ltrim(RATELIMIT_EVENT_STREAM, -2000, -1)
         except Exception:
             log.exception("写 RATELIMIT_EVENT_STREAM 失败")
         try:

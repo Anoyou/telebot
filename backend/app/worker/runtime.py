@@ -2541,7 +2541,22 @@ async def _log(
         message=message,
         detail=detail or None,
     )
+    # 有界队列：保留最新 N 条，防止消费者停滞时无限增长拖垮 noeviction Redis。
+    pipe = getattr(redis, "pipeline", None)
+    if callable(pipe):
+        try:
+            p = redis.pipeline()
+            p.rpush(RUNTIME_LOG_STREAM, payload.encode())
+            p.ltrim(RUNTIME_LOG_STREAM, -5000, -1)
+            await p.execute()
+            return
+        except Exception:  # noqa: BLE001
+            pass
     await redis.rpush(RUNTIME_LOG_STREAM, payload.encode())
+    try:
+        await redis.ltrim(RUNTIME_LOG_STREAM, -5000, -1)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def worker_main(account_id: int) -> None:

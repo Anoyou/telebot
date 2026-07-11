@@ -6081,12 +6081,31 @@ async def _activate(db, state: _AccountState, af: AccountFeature, redis: Any) ->
             plugin_key=af.feature_key,
         )
 
-    plugin_redis = state.redis or redis
+    raw_redis = state.redis or redis
+    # installed 插件只拿命名空间 facade；builtin 仍可拿完整客户端（内部基础设施）。
+    if plugin_source == "installed":
+        from .redis_facade import PluginRedisFacade
+
+        try:
+            plugin_redis: Any = PluginRedisFacade(
+                account_id=state.account_id,
+                plugin_key=af.feature_key,
+                redis=raw_redis,
+            )
+        except Exception:  # noqa: BLE001
+            log.exception("build PluginRedisFacade failed feature=%s", af.feature_key)
+            plugin_redis = None
+    else:
+        plugin_redis = raw_redis
+    # account_config 给插件时同样解密，避免插件读到 secret:v1 信封。
+    from ...services.plugin_config_secrets import decrypt_config_secrets
+
+    runtime_account_config = decrypt_config_secrets(account_config)
     ctx = PluginContext(
         account_id=state.account_id,
         feature_key=af.feature_key,
         config=effective_config,
-        account_config=account_config,
+        account_config=runtime_account_config,
         rules=list(rules),
         client=plugin_client,
         engine=state.engine if plugin_source != "installed" else None,
@@ -6102,7 +6121,12 @@ async def _activate(db, state: _AccountState, af: AccountFeature, redis: Any) ->
         generation=state.generation,
         account_proxy_url=state.account_proxy_url,
     )
-    ctx.storage = PluginStorage.from_context(ctx)
+    # storage 始终基于原始 redis + 自己的前缀，不经过 facade 双重前缀。
+    ctx.storage = PluginStorage(
+        account_id=state.account_id,
+        plugin_key=af.feature_key,
+        redis=raw_redis,
+    )
 
     try:
         await inst.on_startup(ctx)
@@ -6540,7 +6564,14 @@ async def _merge_plugin_config(
     # 提取 account 专属字段（排除 global 字段）
     account_only_config = {k: v for k, v in account_config.items() if k not in global_fields}
 
-    # 合并：defaults < global < account_only
+    from ...services.plugin_config_secrets import decrypt_config_secrets
+
+    # 合并：defaults < global < account_only；敏感字段解密后再交给插件运行时。
+    global_config = decrypt_config_secrets(global_config, schema=config_schema if isinstance(config_schema, dict) else None)
+    account_only_config = decrypt_config_secrets(
+        account_only_config,
+        schema=config_schema if isinstance(config_schema, dict) else None,
+    )
     result = {**defaults}
     for key in global_fields:
         if key in global_config:
@@ -6858,7 +6889,21 @@ async def _log(
             message=message,
             detail=detail or None,
         )
-        await redis.rpush(RUNTIME_LOG_STREAM, payload.encode())
+        pipe = getattr(redis, "pipeline", None)
+        if callable(pipe):
+            try:
+                p = redis.pipeline()
+                p.rpush(RUNTIME_LOG_STREAM, payload.encode())
+                p.ltrim(RUNTIME_LOG_STREAM, -5000, -1)
+                await p.execute()
+            except Exception:  # noqa: BLE001
+                await redis.rpush(RUNTIME_LOG_STREAM, payload.encode())
+        else:
+            await redis.rpush(RUNTIME_LOG_STREAM, payload.encode())
+            try:
+                await redis.ltrim(RUNTIME_LOG_STREAM, -5000, -1)
+            except Exception:  # noqa: BLE001
+                pass
     except Exception:  # noqa: BLE001
         log.exception("写 runtime_log_stream 失败 account=%s", account_id)
 

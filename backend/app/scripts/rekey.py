@@ -50,6 +50,7 @@ SCALAR_FIELDS: tuple[RekeyField, ...] = (
 )
 SYSTEM_SETTING_PREFIX = "account_bot_transfer_notice:"
 SYSTEM_SETTING_ENCRYPTED_KEYS = ("interaction_bot_token_enc", "transfer_bot_token_enc")
+PLUGIN_SECRET_ENVELOPE_PREFIX = "secret:v1:"
 
 
 def _build_fernet(raw_key: str, *, label: str) -> Fernet:
@@ -177,6 +178,104 @@ def _rekey_system_settings(
             conn.execute(update(table).where(key_col == setting_key).values(value=new_value))
 
 
+def _reencrypt_plugin_config_value(value: Any, *, old: Fernet, new: Fernet) -> tuple[Any, int, list[str]]:
+    """Re-encrypt secret:v1 envelopes inside JSON config trees.
+
+    Returns (new_value, changed_count, failures).
+    """
+
+    failures: list[str] = []
+
+    def walk(node: Any, path: str) -> Any:
+        nonlocal failures
+        if isinstance(node, dict):
+            return {str(k): walk(v, f"{path}.{k}" if path else str(k)) for k, v in node.items()}
+        if isinstance(node, list):
+            return [walk(item, f"{path}[{idx}]") for idx, item in enumerate(node)]
+        if isinstance(node, str) and node.startswith(PLUGIN_SECRET_ENVELOPE_PREFIX):
+            token = node[len(PLUGIN_SECRET_ENVELOPE_PREFIX) :]
+            try:
+                plain = old.decrypt(token.encode())
+                return f"{PLUGIN_SECRET_ENVELOPE_PREFIX}{new.encrypt(plain).decode()}"
+            except (InvalidToken, TypeError, ValueError) as exc:
+                failures.append(f"{path}: {exc}")
+                return node
+        return node
+
+    changed_holder = {"n": 0}
+
+    def walk_count(node: Any, path: str) -> Any:
+        if isinstance(node, dict):
+            out = {}
+            for k, v in node.items():
+                nv = walk_count(v, f"{path}.{k}" if path else str(k))
+                out[str(k)] = nv
+            return out
+        if isinstance(node, list):
+            return [walk_count(item, f"{path}[{idx}]") for idx, item in enumerate(node)]
+        if isinstance(node, str) and node.startswith(PLUGIN_SECRET_ENVELOPE_PREFIX):
+            token = node[len(PLUGIN_SECRET_ENVELOPE_PREFIX) :]
+            try:
+                plain = old.decrypt(token.encode())
+                changed_holder["n"] += 1
+                return f"{PLUGIN_SECRET_ENVELOPE_PREFIX}{new.encrypt(plain).decode()}"
+            except (InvalidToken, TypeError, ValueError) as exc:
+                failures.append(f"{path}: {exc}")
+                return node
+        return node
+
+    new_value = walk_count(value, "")
+    return new_value, changed_holder["n"], failures
+
+
+def _rekey_plugin_json_configs(
+    conn: Connection,
+    metadata: MetaData,
+    result: RekeyResult,
+    *,
+    old: Fernet,
+    new: Fernet,
+    dry_run: bool,
+) -> None:
+    """Re-encrypt plugin AccountFeature.config / PluginGlobalConfig.config envelopes."""
+
+    targets = (
+        ("account_feature", ("account_id", "feature_key"), "config"),
+        ("plugin_global_config", ("plugin_key",), "config"),
+    )
+    for table_name, pk_cols, value_col_name in targets:
+        if not _has_table(conn, table_name):
+            result.missing += 1
+            continue
+        table = _load_table(conn, metadata, table_name)
+        if value_col_name not in table.c or any(col not in table.c for col in pk_cols):
+            result.missing += 1
+            continue
+        cols = [table.c[name] for name in pk_cols] + [table.c[value_col_name]]
+        rows = conn.execute(select(*cols)).all()
+        for row in rows:
+            pk_values = row[:-1]
+            value = row[-1]
+            if not isinstance(value, dict):
+                result.skipped += 1
+                continue
+            result.scanned += 1
+            new_value, changed, failures = _reencrypt_plugin_config_value(value, old=old, new=new)
+            for fail in failures:
+                pk_label = ",".join(str(v) for v in pk_values)
+                result.failures.append(f"{table_name}.config#{pk_label}:{fail}")
+            if changed <= 0:
+                result.skipped += 1
+                continue
+            result.changed += changed
+            if not dry_run:
+                where_clause = None
+                for name, pk_val in zip(pk_cols, pk_values, strict=True):
+                    clause = table.c[name] == pk_val
+                    where_clause = clause if where_clause is None else (where_clause & clause)
+                conn.execute(update(table).where(where_clause).values({value_col_name: new_value}))
+
+
 def rekey_database(
     *,
     old_key: str,
@@ -200,6 +299,7 @@ def rekey_database(
             for field in SCALAR_FIELDS:
                 _rekey_scalar_field(conn, metadata, result, field, old=old, new=new, dry_run=dry_run)
             _rekey_system_settings(conn, metadata, result, old=old, new=new, dry_run=dry_run)
+            _rekey_plugin_json_configs(conn, metadata, result, old=old, new=new, dry_run=dry_run)
             if result.failures and raise_on_failure:
                 detail = "；".join(result.failures[:5])
                 more = f"；另有 {result.failed - 5} 个失败" if result.failed > 5 else ""

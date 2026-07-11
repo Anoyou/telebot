@@ -1,0 +1,213 @@
+"""插件配置敏感字段的版本化加密信封。
+
+落库形态：``secret:v1:<fernet-ciphertext>``。
+API 始终返回遮罩；Worker 合并生效配置时才解密为明文。
+明文旧值读兼容，写路径会加密新的敏感字段。
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from ..crypto import decrypt_str, encrypt_str
+from .redactor import REDACTED, is_sensitive_key
+
+SECRET_ENVELOPE_PREFIX = "secret:v1:"
+_MASK_PLACEHOLDERS = frozenset({"", REDACTED, "••••••••••••••••", "***"})
+
+
+def is_secret_envelope(value: Any) -> bool:
+    return isinstance(value, str) and value.startswith(SECRET_ENVELOPE_PREFIX)
+
+
+def wrap_secret(plain: str) -> str:
+    text = str(plain or "")
+    if not text or is_secret_envelope(text):
+        return text
+    return f"{SECRET_ENVELOPE_PREFIX}{encrypt_str(text)}"
+
+
+def unwrap_secret(value: Any) -> str:
+    """Decrypt envelope or return plain text for legacy values."""
+
+    if value is None:
+        return ""
+    text = str(value)
+    if not is_secret_envelope(text):
+        return text
+    return decrypt_str(text[len(SECRET_ENVELOPE_PREFIX) :])
+
+
+def _schema_marks_sensitive(prop: dict[str, Any]) -> bool:
+    if prop.get("x-sensitive") is True or prop.get("sensitive") is True:
+        return True
+    fmt = str(prop.get("format") or "").strip().lower()
+    if fmt in {"password", "secret", "token"}:
+        return True
+    return str(prop.get("type") or "").strip().lower() == "password"
+
+
+def _path_is_sensitive(key: str, prop: dict[str, Any] | None = None) -> bool:
+    if is_sensitive_key(key):
+        return True
+    if isinstance(prop, dict) and _schema_marks_sensitive(prop):
+        return True
+    return False
+
+
+def encrypt_config_secrets(
+    config: dict[str, Any] | None,
+    *,
+    schema: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Recursively encrypt sensitive string fields for DB storage."""
+
+    return _transform_config(dict(config or {}), schema=schema, mode="encrypt")
+
+
+def decrypt_config_secrets(
+    config: dict[str, Any] | None,
+    *,
+    schema: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Recursively decrypt secret envelopes for runtime use."""
+
+    return _transform_config(dict(config or {}), schema=schema, mode="decrypt")
+
+
+def mask_config_secrets(
+    config: dict[str, Any] | None,
+    *,
+    schema: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Return API-safe config with sensitive values masked."""
+
+    return _transform_config(dict(config or {}), schema=schema, mode="mask")
+
+
+def count_encryptable_secrets(
+    config: dict[str, Any] | None,
+    *,
+    schema: dict[str, Any] | None = None,
+) -> dict[str, int]:
+    """Count sensitive plaintexts and already-encrypted envelopes (no secrets leaked)."""
+
+    counters = {"plain": 0, "envelope": 0, "empty": 0}
+    _count_walk(dict(config or {}), schema=schema, counters=counters)
+    return counters
+
+
+def _transform_config(
+    value: Any,
+    *,
+    schema: dict[str, Any] | None,
+    mode: str,
+    parent_key: str | None = None,
+    parent_prop: dict[str, Any] | None = None,
+) -> Any:
+    if isinstance(value, dict):
+        properties = {}
+        if isinstance(schema, dict):
+            raw_props = schema.get("properties")
+            if isinstance(raw_props, dict):
+                properties = raw_props
+        out: dict[str, Any] = {}
+        for key, item in value.items():
+            prop = properties.get(key) if isinstance(properties.get(key), dict) else None
+            out[str(key)] = _transform_config(
+                item,
+                schema=prop if isinstance(prop, dict) and prop.get("type") == "object" else None,
+                mode=mode,
+                parent_key=str(key),
+                parent_prop=prop,
+            )
+        return out
+    if isinstance(value, list):
+        item_schema = None
+        if isinstance(schema, dict) and isinstance(schema.get("items"), dict):
+            item_schema = schema.get("items")
+        return [
+            _transform_config(
+                item,
+                schema=item_schema if isinstance(item_schema, dict) else None,
+                mode=mode,
+                parent_key=parent_key,
+                parent_prop=parent_prop,
+            )
+            for item in value
+        ]
+    if parent_key is None or not _path_is_sensitive(parent_key, parent_prop):
+        return value
+    if not isinstance(value, str):
+        return value
+    if value in _MASK_PLACEHOLDERS:
+        return value if mode != "mask" else (REDACTED if value else "")
+    if mode == "encrypt":
+        return wrap_secret(value)
+    if mode == "decrypt":
+        try:
+            return unwrap_secret(value)
+        except Exception:  # noqa: BLE001
+            # 解密失败时保留信封，避免启动时拖垮整个插件配置。
+            return value
+    # mask
+    if not value:
+        return ""
+    return REDACTED
+
+
+def _count_walk(
+    value: Any,
+    *,
+    schema: dict[str, Any] | None,
+    counters: dict[str, int],
+    parent_key: str | None = None,
+    parent_prop: dict[str, Any] | None = None,
+) -> None:
+    if isinstance(value, dict):
+        properties = {}
+        if isinstance(schema, dict) and isinstance(schema.get("properties"), dict):
+            properties = schema["properties"]
+        for key, item in value.items():
+            prop = properties.get(key) if isinstance(properties.get(key), dict) else None
+            _count_walk(
+                item,
+                schema=prop if isinstance(prop, dict) and prop.get("type") == "object" else None,
+                counters=counters,
+                parent_key=str(key),
+                parent_prop=prop,
+            )
+        return
+    if isinstance(value, list):
+        item_schema = schema.get("items") if isinstance(schema, dict) else None
+        for item in value:
+            _count_walk(
+                item,
+                schema=item_schema if isinstance(item_schema, dict) else None,
+                counters=counters,
+                parent_key=parent_key,
+                parent_prop=parent_prop,
+            )
+        return
+    if parent_key is None or not _path_is_sensitive(parent_key, parent_prop):
+        return
+    if not isinstance(value, str) or value in _MASK_PLACEHOLDERS:
+        if value in ("", None):
+            counters["empty"] += 1
+        return
+    if is_secret_envelope(value):
+        counters["envelope"] += 1
+    else:
+        counters["plain"] += 1
+
+
+__all__ = [
+    "SECRET_ENVELOPE_PREFIX",
+    "count_encryptable_secrets",
+    "decrypt_config_secrets",
+    "encrypt_config_secrets",
+    "is_secret_envelope",
+    "mask_config_secrets",
+    "unwrap_secret",
+    "wrap_secret",
+]

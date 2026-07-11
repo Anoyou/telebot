@@ -44,7 +44,8 @@ class Settings(BaseSettings):
     # worker.entry.worker_entry 会在 import runtime 之前设 ``TELEBOT_WORKER_PROC=1``，
     # db.base / redis_client 据此切到下面的 ``*_worker`` 默认值。
     db_pool_size_worker: int = 1
-    db_max_overflow_worker: int = 0
+    # 允许短时突发（payout 扫描 + reconcile + IPC）借 2 条连接，避免 30s pool_timeout。
+    db_max_overflow_worker: int = 2
     redis_url: str = "redis://localhost:6379/0"
     redis_max_connections: int = 16
     redis_max_connections_worker: int = 8

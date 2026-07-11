@@ -188,9 +188,13 @@ def _sanitize_chatgpt_image_config(config: dict[str, object]) -> dict[str, objec
 
 
 def _sanitize_config(config: dict[str, object], key: str | None = None) -> dict[str, object]:
+    from ..services.plugin_config_secrets import mask_config_secrets
+
     if key == "chatgpt_image":
         return _sanitize_chatgpt_image_config(config)
-    return redact_value(config)
+    # 先遮罩加密信封/敏感键，再走通用 redactor。
+    masked = mask_config_secrets(dict(config or {}))
+    return redact_value(masked)
 
 
 def _preserve_existing_sensitive_values(
