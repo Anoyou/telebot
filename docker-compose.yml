@@ -13,7 +13,7 @@ services:
   postgres:
     image: postgres:16-alpine
     restart: unless-stopped
-    # synchronous_commit=off：单机自托管场景以小幅崩溃数据丢失换显著吞吐 + 内存
+    # 资金严谨 profile 默认 synchronous_commit=on；只有明确接受崩溃丢失窗口时才改 off。
     # huge_pages=off：1G 机器上几乎不会有 huge pages 配额，关掉避免日志噪声
     command:
       [
@@ -22,8 +22,8 @@ services:
         "-c", "effective_cache_size=${POSTGRES_EFFECTIVE_CACHE_SIZE:-96MB}",
         "-c", "work_mem=${POSTGRES_WORK_MEM:-2MB}",
         "-c", "maintenance_work_mem=${POSTGRES_MAINTENANCE_WORK_MEM:-16MB}",
-        "-c", "max_connections=${POSTGRES_MAX_CONNECTIONS:-20}",
-        "-c", "synchronous_commit=off",
+        "-c", "max_connections=${POSTGRES_MAX_CONNECTIONS:-30}",
+        "-c", "synchronous_commit=${POSTGRES_SYNCHRONOUS_COMMIT:-on}",
         "-c", "huge_pages=off",
       ]
     environment:

@@ -147,6 +147,30 @@ class _DenyEngine:
         return None
 
 
+def _mock_payout_delivery(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        loader_mod.payout_compensation,
+        "claim_payout_delivery",
+        AsyncMock(
+            return_value=loader_mod.payout_compensation.PayoutDeliveryClaim(
+                status="acquired",
+                row_id=1,
+                claim_token="parity-token",
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        loader_mod.payout_compensation,
+        "complete_payout_delivery",
+        AsyncMock(return_value=True),
+    )
+    monkeypatch.setattr(
+        loader_mod.payout_compensation,
+        "release_payout_delivery_claim",
+        AsyncMock(),
+    )
+
+
 # ---------------------------------------------------------------------------
 # matrix
 # ---------------------------------------------------------------------------
@@ -453,6 +477,7 @@ async def _drive_worker(monkeypatch: pytest.MonkeyPatch, case: ParityCase) -> Ex
     monkeypatch.setattr(payout_limit_mod, "check_and_consume", AsyncMock(return_value=(True, None)))
     monkeypatch.setattr(account_bot_service, "answer_callback", AsyncMock(return_value={}))
     monkeypatch.setattr(account_bot_service, "answer_inline_query", AsyncMock(return_value={}))
+    _mock_payout_delivery(monkeypatch)
 
     mem = _MemRedis()
     if case.seed_session:
@@ -497,6 +522,7 @@ async def _drive_bot(monkeypatch: pytest.MonkeyPatch, case: ParityCase) -> Expec
     monkeypatch.setattr(account_bot_service, "answer_inline_query", AsyncMock(return_value={}))
     # E3 通过 from-import 绑定 _check_payout_limit，必须在 worker_runtime 命名空间打桩。
     monkeypatch.setattr(worker_runtime, "_check_payout_limit", AsyncMock(return_value=(True, None)))
+    _mock_payout_delivery(monkeypatch)
 
     mem = _MemRedis()
     if case.seed_session:

@@ -15,12 +15,13 @@ from datetime import UTC, datetime, timedelta
 from secrets import token_hex
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import delete, select, update
 from sqlalchemy.exc import IntegrityError
 
 from ..db.base import AsyncSessionLocal
 from ..db.models.payout_compensation import (
     PAYOUT_COMPENSATION_STATUS_PENDING,
+    PAYOUT_COMPENSATION_STATUS_SENT,
     PayoutCompensation,
 )
 
@@ -29,6 +30,7 @@ log = logging.getLogger(__name__)
 PAYOUT_KEY_PREFIX = "pay_"
 PAYOUT_KEY_MAX_LENGTH = 80
 PAYOUT_SENT_TTL_SECONDS = 604_800
+PAYOUT_DELIVERY_CLAIM_TTL_SECONDS = 300
 DEFAULT_RETRY_BACKOFF_SECONDS = 60
 SETTING_KEY = "payout_compensation"
 DEFAULT_CONFIG: dict[str, Any] = {
@@ -108,6 +110,17 @@ class PayoutErrorClassification:
     initial_delay_seconds: int
 
 
+@dataclass(frozen=True, slots=True)
+class PayoutDeliveryClaim:
+    """Result of atomically claiming one logical payout delivery."""
+
+    status: str
+    row_id: int | None = None
+    claim_key: str | None = None
+    claim_token: str | None = None
+    sent_message_id: int | None = None
+
+
 def ensure_payout_key(carrier: dict[str, Any]) -> str:
     """Return an existing key or inject a new stage-2 idempotency key."""
 
@@ -124,6 +137,174 @@ def payout_sent_key(account_id: int | None, payout_key: Any) -> str | None:
     if account_id is None or not key:
         return None
     return f"payout:sent:{int(account_id)}:{key}"
+
+
+def payout_delivery_claim_key(account_id: int | None, payout_key: Any) -> str | None:
+    key = _str_or_none(payout_key)
+    if account_id is None or not key:
+        return None
+    return f"payout:delivery:{int(account_id)}:{key}"
+
+
+async def claim_payout_delivery(
+    redis: Any | None,
+    account_id: int | None,
+    payout_key: Any,
+    *,
+    payload: Mapping[str, Any],
+    origin: str,
+) -> PayoutDeliveryClaim:
+    """Persist a durable send intent before Telegram side effects."""
+
+    sent_key = payout_sent_key(account_id, payout_key)
+    claim_key = payout_delivery_claim_key(account_id, payout_key)
+    if account_id is None or sent_key is None or claim_key is None:
+        raise RuntimeError("payout delivery claim backend unavailable")
+
+    if redis is not None:
+        sent = await redis.get(sent_key)
+        if sent is not None:
+            return PayoutDeliveryClaim(status="sent", sent_message_id=_int_or_none(sent) or 0)
+
+    token = token_hex(16)
+    now = datetime.now(UTC)
+    snapshot = _payload_snapshot(payload)
+    chat_id = _int_or_none(snapshot.get("chat_id"))
+    amount = _int_or_none(snapshot.get("amount"))
+    if chat_id is None or amount is None:
+        raise RuntimeError("payout delivery intent missing chat_id/amount")
+
+    async with AsyncSessionLocal() as db:
+        existing = await db.scalar(
+            select(PayoutCompensation).where(
+                PayoutCompensation.account_id == int(account_id),
+                PayoutCompensation.payout_key == str(payout_key),
+            )
+        )
+        if existing is not None:
+            if existing.status in {PAYOUT_COMPENSATION_STATUS_SENT, "compensated"}:
+                return PayoutDeliveryClaim(
+                    status="sent",
+                    row_id=int(existing.id),
+                    sent_message_id=_int_or_none(existing.sent_message_id) or 0,
+                )
+            return PayoutDeliveryClaim(status="in_progress", row_id=int(existing.id))
+
+        row = PayoutCompensation(
+            payout_key=str(payout_key),
+            account_id=int(account_id),
+            origin=str(origin or "runtime")[:32],
+            chat_id=int(chat_id),
+            amount=int(amount),
+            payload=snapshot,
+            status="sending",
+            ambiguous=False,
+            retry_count=0,
+            delivery_token=token,
+            next_attempt_at=now + timedelta(seconds=PAYOUT_DELIVERY_CLAIM_TTL_SECONDS),
+            created_at=now,
+            updated_at=now,
+        )
+        db.add(row)
+        try:
+            await db.commit()
+        except IntegrityError:
+            await db.rollback()
+            existing = await db.scalar(
+                select(PayoutCompensation).where(
+                    PayoutCompensation.account_id == int(account_id),
+                    PayoutCompensation.payout_key == str(payout_key),
+                )
+            )
+            if existing is None:
+                raise
+            if existing.status in {PAYOUT_COMPENSATION_STATUS_SENT, "compensated"}:
+                return PayoutDeliveryClaim(
+                    status="sent",
+                    row_id=int(existing.id),
+                    sent_message_id=_int_or_none(existing.sent_message_id) or 0,
+                )
+            return PayoutDeliveryClaim(status="in_progress", row_id=int(existing.id))
+        await db.refresh(row)
+        return PayoutDeliveryClaim(
+            status="acquired",
+            row_id=int(row.id),
+            claim_key=claim_key,
+            claim_token=token,
+        )
+
+
+async def release_payout_delivery_claim(redis: Any | None, claim: PayoutDeliveryClaim | None) -> None:
+    if (
+        claim is None
+        or claim.status != "acquired"
+        or claim.row_id is None
+        or not claim.claim_token
+    ):
+        return
+    try:
+        async with AsyncSessionLocal() as db:
+            await db.execute(
+                delete(PayoutCompensation).where(
+                    PayoutCompensation.id == int(claim.row_id),
+                    PayoutCompensation.delivery_token == claim.claim_token,
+                    PayoutCompensation.status == "sending",
+                )
+            )
+            await db.commit()
+    except Exception:  # noqa: BLE001
+        log.debug("release payout delivery claim failed row=%s", claim.row_id, exc_info=True)
+
+
+async def complete_payout_delivery(
+    redis: Any | None,
+    claim: PayoutDeliveryClaim,
+    account_id: int | None,
+    payout_key: Any,
+    message_id: Any,
+) -> bool:
+    """Atomically publish the sent marker and release the matching claim."""
+
+    sent_key = payout_sent_key(account_id, payout_key)
+    if (
+        sent_key is None
+        or claim.status != "acquired"
+        or claim.row_id is None
+        or not claim.claim_token
+    ):
+        return False
+    sent_at = datetime.now(UTC)
+    try:
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(
+                update(PayoutCompensation)
+                .where(
+                    PayoutCompensation.id == int(claim.row_id),
+                    PayoutCompensation.delivery_token == claim.claim_token,
+                    PayoutCompensation.status == "sending",
+                )
+                .values(
+                    status=PAYOUT_COMPENSATION_STATUS_SENT,
+                    sent_message_id=_int_or_none(message_id),
+                    sent_at=sent_at,
+                    delivery_token=None,
+                    updated_at=sent_at,
+                )
+            )
+            await db.commit()
+            persisted = int(result.rowcount or 0) > 0
+        if not persisted:
+            return False
+        await mark_payout_sent_marker(redis, account_id, payout_key, message_id)
+        return True
+    except Exception:  # noqa: BLE001
+        log.error(
+            "complete payout delivery marker failed account=%s payout_key=%s",
+            account_id,
+            payout_key,
+            exc_info=True,
+        )
+        return False
 
 
 async def mark_payout_sent_marker(
@@ -228,7 +409,12 @@ async def enqueue_payout_compensation(
     error_text = _error_text(error)
 
     async with AsyncSessionLocal() as db:
-        existing = await db.scalar(select(PayoutCompensation).where(PayoutCompensation.payout_key == payout_key))
+        existing = await db.scalar(
+            select(PayoutCompensation).where(
+                PayoutCompensation.account_id == int(account_id),
+                PayoutCompensation.payout_key == payout_key,
+            )
+        )
         if existing is not None:
             existing.error_code_last = classification.error_code
             existing.error_last = error_text
@@ -263,7 +449,12 @@ async def enqueue_payout_compensation(
             await db.commit()
         except IntegrityError:
             await db.rollback()
-            existing = await db.scalar(select(PayoutCompensation).where(PayoutCompensation.payout_key == payout_key))
+            existing = await db.scalar(
+                select(PayoutCompensation).where(
+                    PayoutCompensation.account_id == int(account_id),
+                    PayoutCompensation.payout_key == payout_key,
+                )
+            )
             if existing is not None:
                 existing.error_code_last = classification.error_code
                 existing.error_last = error_text
@@ -377,15 +568,21 @@ __all__ = [
     "NON_COMPENSABLE_ERROR_CODES",
     "DEFAULT_CONFIG",
     "PAYOUT_KEY_PREFIX",
+    "PAYOUT_DELIVERY_CLAIM_TTL_SECONDS",
     "PAYOUT_SENT_TTL_SECONDS",
+    "PayoutDeliveryClaim",
     "PayoutErrorClassification",
     "RETRYABLE_ERROR_CODES",
     "SETTING_KEY",
     "classify_payout_error",
+    "claim_payout_delivery",
+    "complete_payout_delivery",
     "enqueue_payout_compensation",
     "ensure_payout_key",
     "mark_payout_sent_marker",
     "normalize_config",
     "normalize_payout_error_code",
+    "payout_delivery_claim_key",
     "payout_sent_key",
+    "release_payout_delivery_claim",
 ]

@@ -95,7 +95,7 @@ async def payout_session_factory(monkeypatch):
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as conn:
         await conn.execute(text("CREATE TABLE account (id BIGINT PRIMARY KEY)"))
-        await conn.execute(text("INSERT INTO account (id) VALUES (7)"))
+        await conn.execute(text("INSERT INTO account (id) VALUES (7), (8)"))
         await conn.run_sync(PayoutCompensation.__table__.create)
         await conn.run_sync(ActionEvent.__table__.create)
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -266,6 +266,70 @@ async def test_enqueue_payout_compensation_is_idempotent_by_payout_key(payout_se
 
 
 @pytest.mark.asyncio
+async def test_durable_payout_delivery_claim_blocks_retry_until_sent(payout_session_factory) -> None:
+    payload = {
+        "action_type": "payout",
+        "payout_key": "pay_durable",
+        "chat_id": -100123,
+        "amount": 12,
+        "text": "+12",
+    }
+    first = await payout_compensation_service.claim_payout_delivery(
+        None,
+        7,
+        "pay_durable",
+        payload=payload,
+        origin="test",
+    )
+    concurrent = await payout_compensation_service.claim_payout_delivery(
+        None,
+        7,
+        "pay_durable",
+        payload=payload,
+        origin="test",
+    )
+
+    assert first.status == "acquired"
+    assert concurrent.status == "in_progress"
+    assert await payout_compensation_service.complete_payout_delivery(
+        None,
+        first,
+        7,
+        "pay_durable",
+        991,
+    )
+    replay = await payout_compensation_service.claim_payout_delivery(
+        None,
+        7,
+        "pay_durable",
+        payload=payload,
+        origin="test",
+    )
+    assert replay.status == "sent"
+    assert replay.sent_message_id == 991
+
+
+@pytest.mark.asyncio
+async def test_durable_payout_delivery_key_is_isolated_by_account(payout_session_factory) -> None:
+    payload = {
+        "action_type": "payout",
+        "payout_key": "pay_shared",
+        "chat_id": -100123,
+        "amount": 5,
+        "text": "+5",
+    }
+    account_7 = await payout_compensation_service.claim_payout_delivery(
+        None, 7, "pay_shared", payload=payload, origin="test"
+    )
+    account_8 = await payout_compensation_service.claim_payout_delivery(
+        None, 8, "pay_shared", payload=payload, origin="test"
+    )
+    assert account_7.status == "acquired"
+    assert account_8.status == "acquired"
+    assert account_7.row_id != account_8.row_id
+
+
+@pytest.mark.asyncio
 async def test_delivery_failed_payout_enqueues_and_records_detail(monkeypatch) -> None:
     incoming = account_bot_runtime.Incoming(
         account_id=1,
@@ -346,6 +410,18 @@ async def test_loader_payout_retryable_failures_enqueue(monkeypatch) -> None:
         acquire=AsyncMock(return_value=SimpleNamespace(allowed=True, wait_seconds=0, outcome="ok"))
     )
     monkeypatch.setattr(loader_mod.payout_limit, "check_and_consume", AsyncMock(return_value=(True, None)))
+    monkeypatch.setattr(
+        loader_mod.payout_compensation,
+        "claim_payout_delivery",
+        AsyncMock(
+            return_value=payout_compensation_service.PayoutDeliveryClaim(
+                status="acquired",
+                row_id=1,
+                claim_token="test-token",
+            )
+        ),
+    )
+    monkeypatch.setattr(loader_mod.payout_compensation, "release_payout_delivery_claim", AsyncMock())
     assert (
         await loader_mod._apply_userbot_payout_action(
             api_state,

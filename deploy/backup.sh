@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # 生产数据备份：PostgreSQL + sessions + 已安装插件 + 插件仓库缓存。
 set -euo pipefail
+# 数据库、Telegram session 与插件配置都可能包含密钥；禁止继承宽松 umask。
+umask 077
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT_DIR"
@@ -22,7 +24,12 @@ RETENTION_DAYS="${BACKUP_RETENTION_DAYS:-30}"
 command -v docker >/dev/null 2>&1 || { echo "缺少 docker" >&2; exit 1; }
 docker compose version >/dev/null 2>&1 || { echo "缺少 Docker Compose v2" >&2; exit 1; }
 mkdir -p "$DIR"
+chmod 700 "$DIR"
 DIR="$(cd "$DIR" && pwd)"
+# 自动收紧旧版本留下的宽权限备份；等价的一次性修复无需另跑命令。
+find "$DIR" -maxdepth 1 -type f \( -name 'db-*.sql' -o -name 'sessions-*.tgz' \
+  -o -name 'plugins-installed-*.tgz' -o -name 'plugin-repos-*.tgz' \
+  -o -name 'checksums-*.sha256' \) -exec chmod 600 {} + 2>/dev/null || true
 
 WEB_CONTAINER="$(docker compose ps -q web)"
 if [[ -z "$WEB_CONTAINER" ]]; then
@@ -75,6 +82,7 @@ archive_volume() {
     tar czf "/backup/$(basename "$archive")" -C /data .
   [[ -s "$archive" ]] || { echo "备份归档为空：$archive" >&2; exit 1; }
   tar tzf "$archive" >/dev/null
+  chmod 600 "$archive"
   printf '%s\n' "$archive"
 }
 
@@ -86,6 +94,7 @@ fi
 DB_DUMP="$DIR/db-$TS.sql"
 docker compose exec -T postgres pg_dump -U "$PG_USER" -d "$PG_DB" --no-owner > "$DB_DUMP"
 [[ -s "$DB_DUMP" ]] || { echo "数据库备份为空：$DB_DUMP" >&2; exit 1; }
+chmod 600 "$DB_DUMP"
 
 SESSIONS_ARCHIVE="$(archive_volume sessions /app/sessions)"
 PLUGINS_ARCHIVE="$(archive_volume plugins-installed /app/plugins/installed)"
@@ -99,6 +108,7 @@ else
   (cd "$DIR" && shasum -a 256 "$(basename "$DB_DUMP")" "$(basename "$SESSIONS_ARCHIVE")" \
     "$(basename "$PLUGINS_ARCHIVE")" "$(basename "$REPOS_ARCHIVE")") > "$CHECKSUM_FILE"
 fi
+chmod 600 "$CHECKSUM_FILE"
 
 find "$DIR" -type f \( -name 'db-*.sql' -o -name 'sessions-*.tgz' \
   -o -name 'plugins-installed-*.tgz' -o -name 'plugin-repos-*.tgz' \

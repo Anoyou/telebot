@@ -41,12 +41,13 @@ async def claim_interaction_message(
     rule_id: Any,
     redis: Any | None = None,
     ttl_seconds: int | None = None,
+    fail_open: bool = True,
 ) -> bool:
     """Claim a message for one interaction rule.
 
     Missing message ids cannot be correlated safely across Bot API and
-    Telethon, so they intentionally pass through. Redis errors also fail open
-    to avoid dropping user replies during transient infrastructure issues.
+    Telethon, so they intentionally pass through. Callers that may execute
+    session or financial side effects must pass ``fail_open=False``.
     """
 
     key = interaction_message_claim_key(account_id, chat_id, message_id, rule_id)
@@ -64,7 +65,7 @@ async def claim_interaction_message(
             rule_id,
             exc_info=True,
         )
-        return True
+        return bool(fail_open)
 
 
 async def release_interaction_message(

@@ -31,6 +31,11 @@ def event_channel(account_id: int) -> str:
 GLOBAL_CHANNEL = "worker_global"
 RUNTIME_LOG_STREAM = "runtime_log_stream"          # 主进程消费此 list 落库
 RATELIMIT_EVENT_STREAM = "ratelimit_event_stream"  # 主进程消费此 list 落库
+RPC_RESULT_TTL_SECONDS = 3600
+
+
+def rpc_result_key(request_id: str) -> str:
+    return f"interaction_rpc:result:{request_id}"
 
 
 # ── 指令类型（主→worker） ────────────────────────────────────────

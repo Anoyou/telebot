@@ -16,6 +16,16 @@ SECRET_ENVELOPE_PREFIX = "secret:v1:"
 _MASK_PLACEHOLDERS = frozenset({"", REDACTED, "••••••••••••••••", "***"})
 
 
+class PluginConfigDecryptionError(ValueError):
+    """Raised when a runtime plugin config contains an unreadable envelope."""
+
+    def __init__(self, field_path: str) -> None:
+        self.field_paths = (field_path or "<root>",)
+        super().__init__(
+            f"插件配置敏感字段解密失败: {self.field_paths[0]}（请检查 MASTER_KEY 或重新保存配置）"
+        )
+
+
 def is_secret_envelope(value: Any) -> bool:
     return isinstance(value, str) and value.startswith(SECRET_ENVELOPE_PREFIX)
 
@@ -69,10 +79,16 @@ def decrypt_config_secrets(
     config: dict[str, Any] | None,
     *,
     schema: dict[str, Any] | None = None,
+    strict: bool = False,
 ) -> dict[str, Any]:
     """Recursively decrypt secret envelopes for runtime use."""
 
-    return _transform_config(dict(config or {}), schema=schema, mode="decrypt")
+    return _transform_config(
+        dict(config or {}),
+        schema=schema,
+        mode="decrypt",
+        strict_decrypt=strict,
+    )
 
 
 def mask_config_secrets(
@@ -128,6 +144,8 @@ def _transform_config(
     mode: str,
     parent_key: str | None = None,
     parent_prop: dict[str, Any] | None = None,
+    strict_decrypt: bool = False,
+    field_path: str = "",
 ) -> Any:
     if isinstance(value, dict):
         properties: dict[str, Any] = {}
@@ -137,14 +155,17 @@ def _transform_config(
                 properties = raw_props
         out: dict[str, Any] = {}
         for key, item in value.items():
+            key_text = str(key)
             prop = properties.get(key) if isinstance(properties.get(key), dict) else None
             child_schema = _child_schema_for_value(prop, item)
-            out[str(key)] = _transform_config(
+            out[key_text] = _transform_config(
                 item,
                 schema=child_schema,
                 mode=mode,
-                parent_key=str(key),
+                parent_key=key_text,
                 parent_prop=prop,
+                strict_decrypt=strict_decrypt,
+                field_path=f"{field_path}.{key_text}" if field_path else key_text,
             )
         return out
     if isinstance(value, list):
@@ -162,10 +183,16 @@ def _transform_config(
                 # 数组元素是 object 时，敏感键在元素字段名上，不再沿用父数组字段名。
                 parent_key=None if isinstance(item, dict) else parent_key,
                 parent_prop=None if isinstance(item, dict) else parent_prop,
+                strict_decrypt=strict_decrypt,
+                field_path=f"{field_path}[{index}]",
             )
-            for item in value
+            for index, item in enumerate(value)
         ]
-    if parent_key is None or not _path_is_sensitive(parent_key, parent_prop):
+    envelope = is_secret_envelope(value)
+    if (
+        parent_key is None
+        or not _path_is_sensitive(parent_key, parent_prop)
+    ) and not (envelope and mode in {"decrypt", "mask"}):
         return value
     if not isinstance(value, str):
         return value
@@ -176,8 +203,10 @@ def _transform_config(
     if mode == "decrypt":
         try:
             return unwrap_secret(value)
-        except Exception:  # noqa: BLE001
-            # 解密失败时保留信封，避免启动时拖垮整个插件配置。
+        except Exception as exc:  # noqa: BLE001
+            if strict_decrypt:
+                raise PluginConfigDecryptionError(field_path or parent_key or "<root>") from exc
+            # API / 迁移等非运行时读取保留信封；Worker 使用 strict=True 隔离故障插件。
             return value
     # mask
     if not value:
@@ -236,6 +265,7 @@ def _count_walk(
 
 
 __all__ = [
+    "PluginConfigDecryptionError",
     "SECRET_ENVELOPE_PREFIX",
     "count_encryptable_secrets",
     "decrypt_config_secrets",

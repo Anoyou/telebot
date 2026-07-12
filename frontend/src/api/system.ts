@@ -85,9 +85,7 @@ export interface SystemConsoleLogQuery {
 export async function listSystemConsoleLogs(
   q: SystemConsoleLogQuery = {},
 ): Promise<SystemConsoleLogsResponse> {
-  const { data } = await api.get<SystemConsoleLogsResponse>("/api/logs/system-console", {
-    params: q,
-  });
+  const { data } = await api.post<SystemConsoleLogsResponse>("/api/logs/system-console", q);
   return data;
 }
 

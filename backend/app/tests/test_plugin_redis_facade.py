@@ -55,6 +55,17 @@ async def test_facade_blocks_keys_and_cross_namespace() -> None:
         await facade.get("plugin_store:7:other:secret")
 
 
+def test_facade_does_not_store_raw_client_on_instance() -> None:
+    redis = _FakeRedis()
+    facade = PluginRedisFacade(account_id=7, plugin_key="game", redis=redis)
+
+    assert "_redis" not in PluginRedisFacade.__slots__
+    with pytest.raises(PluginRedisPermissionError):
+        _ = facade._redis  # type: ignore[attr-defined]  # noqa: SLF001
+    with pytest.raises(AttributeError):
+        object.__getattribute__(facade, "_redis")
+
+
 @pytest.mark.asyncio
 async def test_facade_allows_incr_and_delete() -> None:
     redis = _FakeRedis()

@@ -9,6 +9,7 @@ import {
   Cpu,
   LayoutDashboard,
   Plus,
+  RefreshCw,
   Sparkles,
   type LucideIcon,
   Users,
@@ -86,13 +87,15 @@ export function Dashboard() {
   const readyProviders = providers.filter(
     (provider) => provider.has_api_key || provider.provider === "ollama",
   ).length;
-  const workerValue = accountsQ.isLoading ? "-" : `${activeAccounts}/${accounts.length}`;
-  const providerValue = providersQ.isLoading ? "-" : `${readyProviders}/${providers.length}`;
+  const workerValue = accountsQ.isError ? "读取失败" : accountsQ.isLoading ? "-" : `${activeAccounts}/${accounts.length}`;
+  const providerValue = providersQ.isError ? "读取失败" : providersQ.isLoading ? "-" : `${readyProviders}/${providers.length}`;
   const logValue = resourceQ.data
     ? `${resourceQ.data.logs.last_5m_total}`
+    : resourceQ.isError
+      ? "读取失败"
     : resourceQ.isLoading
       ? "-"
-      : "0";
+      : "等待采样";
 
   return (
     <PageShell className="md:space-y-6">
@@ -105,12 +108,36 @@ export function Dashboard() {
         providerValue={providerValue}
         accountsLoading={accountsQ.isLoading}
         providersLoading={providersQ.isLoading}
+        accountsError={accountsQ.isError}
+        providersError={providersQ.isError}
         logErrorCount={resourceQ.data?.logs.last_5m_error ?? 0}
         logWarnCount={resourceQ.data?.logs.last_5m_warn ?? 0}
         logsLoading={resourceQ.isLoading}
+        logsError={resourceQ.isError}
         guideActive={guideActive}
         onGuideToggle={() => setGuideActive(!guideActive)}
       />
+
+      {accountsQ.isError || providersQ.isError || resourceQ.isError ? (
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border px-4 py-3 text-sm alert-danger">
+          <span>
+            概览数据读取失败：
+            {[
+              accountsQ.isError ? "账号" : null,
+              providersQ.isError ? "模型提供商" : null,
+              resourceQ.isError ? "资源与日志" : null,
+            ].filter(Boolean).join("、")}
+          </span>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => void Promise.all([accountsQ.refetch(), providersQ.refetch(), resourceQ.refetch()])}
+          >
+            <RefreshCw className="mr-1.5 h-4 w-4" />
+            重试
+          </Button>
+        </div>
+      ) : null}
 
       {guideActive ? (
         <GuidePanel
@@ -124,9 +151,10 @@ export function Dashboard() {
       <div className="grid grid-cols-2 gap-3 md:gap-4 xl:grid-cols-4">
         <AccountWorkerTile
           value={workerValue}
-          tone={overviewTone(activeAccounts, accounts.length, accountsQ.isLoading)}
+          tone={accountsQ.isError ? "danger" : overviewTone(activeAccounts, accounts.length, accountsQ.isLoading)}
           accounts={accounts}
           isLoading={accountsQ.isLoading}
+          error={accountsQ.error}
           open={accountsOpen}
           onOpenChange={(open) => {
             const next = new URLSearchParams(searchParams);
@@ -139,8 +167,8 @@ export function Dashboard() {
           icon={Sparkles}
           title="AI"
           value={providerValue}
-          description="可调用模型 / 已配置模型"
-          tone={overviewTone(readyProviders, providers.length, providersQ.isLoading)}
+          description={providersQ.isError ? "模型提供商读取失败，点击后重试" : "可调用模型 / 已配置模型"}
+          tone={providersQ.isError ? "danger" : overviewTone(readyProviders, providers.length, providersQ.isLoading)}
           to="/ai?tab=providers"
         />
         <OverviewTile
@@ -155,8 +183,8 @@ export function Dashboard() {
           icon={Activity}
           title="5 分钟日志"
           value={logValue}
-          description={`错误 ${resourceQ.data?.logs.last_5m_error ?? 0} / 警告 ${resourceQ.data?.logs.last_5m_warn ?? 0}`}
-          tone={logTone(resourceQ.data)}
+          description={resourceQ.isError ? "日志统计读取失败，点击后重试" : `错误 ${resourceQ.data?.logs.last_5m_error ?? 0} / 警告 ${resourceQ.data?.logs.last_5m_warn ?? 0}`}
+          tone={resourceQ.isError ? "danger" : logTone(resourceQ.data)}
           to="/logs"
         />
       </div>
@@ -181,9 +209,12 @@ function DashboardHero({
   providerValue,
   accountsLoading,
   providersLoading,
+  accountsError,
+  providersError,
   logErrorCount,
   logWarnCount,
   logsLoading,
+  logsError,
   guideActive,
   onGuideToggle,
 }: {
@@ -195,15 +226,20 @@ function DashboardHero({
   providerValue: string;
   accountsLoading: boolean;
   providersLoading: boolean;
+  accountsError: boolean;
+  providersError: boolean;
   logErrorCount: number;
   logWarnCount: number;
   logsLoading: boolean;
+  logsError: boolean;
   guideActive: boolean;
   onGuideToggle: () => void;
 }) {
-  const accountTone = overviewTone(activeAccounts, totalAccounts, accountsLoading);
-  const providerTone = overviewTone(readyProviders, totalProviders, providersLoading);
-  const logStatusTone: VisualTone = logsLoading
+  const accountTone = accountsError ? "danger" : overviewTone(activeAccounts, totalAccounts, accountsLoading);
+  const providerTone = providersError ? "danger" : overviewTone(readyProviders, totalProviders, providersLoading);
+  const logStatusTone: VisualTone = logsError
+    ? "danger"
+    : logsLoading
     ? "neutral"
     : logErrorCount > 0
       ? "danger"
@@ -223,7 +259,7 @@ function DashboardHero({
           <SignalPill
             tone={logStatusTone}
             label="日志信号"
-            value={logsLoading ? "采样中" : `${logErrorCount} 错误 / ${logWarnCount} 警告`}
+            value={logsError ? "读取失败" : logsLoading ? "采样中" : `${logErrorCount} 错误 / ${logWarnCount} 警告`}
           />
         </>
       }
@@ -254,6 +290,7 @@ function AccountWorkerTile({
   tone,
   accounts,
   isLoading,
+  error,
   open,
   onOpenChange,
 }: {
@@ -261,6 +298,7 @@ function AccountWorkerTile({
   tone: VisualTone;
   accounts: Awaited<ReturnType<typeof listAccounts>>;
   isLoading: boolean;
+  error: unknown;
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }) {
@@ -291,6 +329,7 @@ function AccountWorkerTile({
         <AccountWorkerPanel
           accounts={accounts}
           isLoading={isLoading}
+          error={error}
           compact={compactAccounts}
           className="max-h-[calc(min(82dvh,42rem)-5rem)] overflow-y-auto"
         />
@@ -302,11 +341,13 @@ function AccountWorkerTile({
 function AccountWorkerPanel({
   accounts,
   isLoading,
+  error,
   compact,
   className,
 }: {
   accounts: Awaited<ReturnType<typeof listAccounts>>;
   isLoading: boolean;
+  error: unknown;
   compact: boolean;
   className?: string;
 }) {
@@ -333,6 +374,10 @@ function AccountWorkerPanel({
         {isLoading ? (
           <div className="flex h-36 items-center justify-center">
             <Spinner className="text-primary" />
+          </div>
+        ) : error ? (
+          <div className="rounded-lg border px-3 py-3 text-sm alert-danger">
+            账号列表读取失败：{(error as Error)?.message || "未知错误"}
           </div>
         ) : accounts.length === 0 ? (
           <div className="rounded-xl border border-dashed p-8 text-center text-sm text-muted-foreground">

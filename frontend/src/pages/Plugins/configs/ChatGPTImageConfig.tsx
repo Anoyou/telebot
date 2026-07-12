@@ -33,6 +33,7 @@ import { Select } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { getErrMsg } from "@/lib/api";
+import { confirmDiscardChanges, useUnsavedChanges } from "@/lib/unsavedChanges";
 import { featureConfigBackTarget } from "@/pages/Plugins/_shared/featureConfig";
 import { featureRuntimeText, featureSwitchText } from "./_shared/featureStatus";
 
@@ -327,8 +328,13 @@ export function ChatGPTImageConfigPage() {
   const [cpaFileNames, setCpaFileNames] = useState(DEFAULT_CONFIG.cpa_file_names);
   const [logPromptPreview, setLogPromptPreview] = useState(DEFAULT_CONFIG.log_prompt_preview);
   const [dirty, setDirty] = useState(false);
+  const [remoteConfigChanged, setRemoteConfigChanged] = useState(false);
 
   useEffect(() => {
+    if (dirty) {
+      setRemoteConfigChanged(true);
+      return;
+    }
     const cfg = (configQ.data ?? {}) as Record<string, unknown>;
     setCommand(text(cfg.command, DEFAULT_CONFIG.command));
     setEditCommand(text(cfg.edit_command, DEFAULT_CONFIG.edit_command));
@@ -363,7 +369,9 @@ export function ChatGPTImageConfigPage() {
     setCpaFileNames(text(cfg.cpa_file_names, DEFAULT_CONFIG.cpa_file_names));
     setLogPromptPreview(bool(cfg.log_prompt_preview, DEFAULT_CONFIG.log_prompt_preview));
     setDirty(false);
+    setRemoteConfigChanged(false);
   }, [configQ.data]);
+  useUnsavedChanges(dirty);
 
   const modelOptions = useMemo(
     () => availableModels.split(/\n+/).map((item) => item.trim()).filter(Boolean),
@@ -376,6 +384,7 @@ export function ChatGPTImageConfigPage() {
     onSuccess: () => {
       toast.success("配置已保存，worker 会自动热加载");
       setDirty(false);
+      setRemoteConfigChanged(false);
       setNewToken("");
       setNewTokenNote("");
       qc.invalidateQueries({ queryKey: ["account", aid, "features"] });
@@ -518,7 +527,7 @@ export function ChatGPTImageConfigPage() {
             variant="default"
             size="sm"
             className="gap-1.5 shadow-sm"
-            onClick={() => nav(backTarget.backHref)}
+            onClick={() => confirmDiscardChanges(dirty) && nav(backTarget.backHref)}
           >
             <ArrowLeft className="h-4 w-4" /> {backTarget.backLabel}
           </Button>
@@ -927,7 +936,11 @@ export function ChatGPTImageConfigPage() {
             <div className="text-sm">
               <div className="font-medium">配置操作</div>
               <div className="text-xs text-muted-foreground">
-                {dirty ? "有未保存修改，保存后 worker 会热加载。" : "当前配置已同步。"}
+                {remoteConfigChanged
+                  ? "服务端配置已变化；当前草稿已保留，保存会以草稿为准。"
+                  : dirty
+                    ? "有未保存修改，保存后 worker 会热加载。"
+                    : "当前配置已同步。"}
               </div>
             </div>
             <Button onClick={handleSave} disabled={saveMut.isPending || !dirty}>

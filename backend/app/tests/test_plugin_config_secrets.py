@@ -21,15 +21,22 @@ def _master_key(monkeypatch):
 
 
 def test_encrypt_decrypt_roundtrip_by_key_name() -> None:
-    raw = {"api_key": "sk-test-123456", "name": "demo", "nested": {"bot_token": "123:ABC"}}
+    raw = {
+        "api_key": "sk-test-123456",
+        "cookie": "uid=legacy-cookie",
+        "name": "demo",
+        "nested": {"bot_token": "123:ABC"},
+    }
     enc = secrets.encrypt_config_secrets(raw)
     assert secrets.is_secret_envelope(enc["api_key"])
+    assert secrets.is_secret_envelope(enc["cookie"])
     assert enc["name"] == "demo"
     assert secrets.is_secret_envelope(enc["nested"]["bot_token"])
     assert "sk-test" not in enc["api_key"]
 
     plain = secrets.decrypt_config_secrets(enc)
     assert plain["api_key"] == "sk-test-123456"
+    assert plain["cookie"] == "uid=legacy-cookie"
     assert plain["nested"]["bot_token"] == "123:ABC"
 
 
@@ -117,3 +124,24 @@ def test_array_items_x_sensitive_fields_are_encrypted() -> None:
     counts_enc = secrets.count_encryptable_secrets(enc, schema=schema)
     assert counts_enc["plain"] == 0
     assert counts_enc["envelope"] == 4
+
+
+def test_strict_decrypt_rejects_corrupt_envelope_without_exposing_value() -> None:
+    corrupt = f"{secrets.SECRET_ENVELOPE_PREFIX}not-a-fernet-token"
+
+    with pytest.raises(secrets.PluginConfigDecryptionError) as exc_info:
+        secrets.decrypt_config_secrets(
+            {"profiles": [{"cookie": corrupt}]},
+            strict=True,
+        )
+
+    assert exc_info.value.field_paths == ("profiles[0].cookie",)
+    assert corrupt not in str(exc_info.value)
+
+
+def test_envelope_decrypts_even_when_legacy_schema_does_not_mark_key_sensitive() -> None:
+    envelope = secrets.wrap_secret("legacy-cookie")
+
+    plain = secrets.decrypt_config_secrets({"cookie": envelope}, strict=True)
+
+    assert plain["cookie"] == "legacy-cookie"

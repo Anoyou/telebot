@@ -24,6 +24,7 @@ import { Select } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { getErrMsg } from "@/lib/api";
+import { confirmDiscardChanges, useUnsavedChanges } from "@/lib/unsavedChanges";
 import { featureConfigBackTarget } from "@/pages/Plugins/_shared/featureConfig";
 import { featureRuntimeText } from "./_shared/featureStatus";
 
@@ -174,10 +175,15 @@ export function CodexImageConfigPage() {
   const [reasoningEffort, setReasoningEffort] = useState(DEFAULT_CONFIG.reasoning_effort);
   const [customInstructions, setCustomInstructions] = useState(DEFAULT_CONFIG.custom_instructions);
   const [dirty, setDirty] = useState(false);
+  const [remoteConfigChanged, setRemoteConfigChanged] = useState(false);
   const [showToken, setShowToken] = useState(false);
   const [hasToken, setHasToken] = useState(false);
 
   useEffect(() => {
+    if (dirty) {
+      setRemoteConfigChanged(true);
+      return;
+    }
     setCommand(currentConfig.command ?? DEFAULT_CONFIG.command);
     setAccessToken("");
     setHasToken(Boolean(currentConfig.access_token));
@@ -199,7 +205,9 @@ export function CodexImageConfigPage() {
     setReasoningEffort(currentConfig.reasoning_effort ?? DEFAULT_CONFIG.reasoning_effort);
     setCustomInstructions(currentConfig.custom_instructions ?? DEFAULT_CONFIG.custom_instructions);
     setDirty(false);
+    setRemoteConfigChanged(false);
   }, [feature?.config]);
+  useUnsavedChanges(dirty);
 
   const saveMut = useMutation({
     mutationFn: async (config: CodexImageConfig) => {
@@ -215,6 +223,7 @@ export function CodexImageConfigPage() {
       setAccessToken("");
       setShowToken(false);
       setDirty(false);
+      setRemoteConfigChanged(false);
       qc.invalidateQueries({ queryKey: ["account", aid, "features"] });
       qc.invalidateQueries({ queryKey: ["matrix"] });
       qc.invalidateQueries({ queryKey: ["message-templates", "catalog", aid] });
@@ -283,6 +292,7 @@ export function CodexImageConfigPage() {
     setReasoningEffort(currentConfig.reasoning_effort ?? DEFAULT_CONFIG.reasoning_effort);
     setCustomInstructions(currentConfig.custom_instructions ?? DEFAULT_CONFIG.custom_instructions);
     setDirty(false);
+    setRemoteConfigChanged(false);
   }
 
   const effectiveCommand = command || DEFAULT_CONFIG.command;
@@ -319,7 +329,7 @@ export function CodexImageConfigPage() {
           variant="default"
           size="sm"
           className="gap-1.5 shadow-sm"
-          onClick={() => nav(backTarget.backHref)}
+          onClick={() => confirmDiscardChanges(dirty) && nav(backTarget.backHref)}
         >
           <ArrowLeft className="h-4 w-4" /> {backTarget.backLabel}
         </Button>
@@ -718,7 +728,11 @@ export function CodexImageConfigPage() {
             <div className="text-sm">
               <div className="font-medium">配置操作</div>
               <div className="text-xs text-muted-foreground">
-                {dirty ? "有未保存修改，保存后 worker 会热加载。" : "当前配置已同步。"}
+                {remoteConfigChanged
+                  ? "服务端配置已变化；当前草稿已保留，保存会以草稿为准。"
+                  : dirty
+                    ? "有未保存修改，保存后 worker 会热加载。"
+                    : "当前配置已同步。"}
               </div>
             </div>
             <div className="flex items-center gap-4">

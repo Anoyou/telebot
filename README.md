@@ -400,6 +400,7 @@ LOG_INCOMING_MESSAGES_DEFAULT=false   # 默认就是 false；若需要排查再�
 | `COOKIE_SECURE` | HTTPS 部署设为 `true`，本地 HTTP 调试保持 `false` |
 | `DATABASE_URL` | PostgreSQL async DSN |
 | `DB_POOL_SIZE` / `DB_MAX_OVERFLOW` | 后端与每个 worker 的数据库连接池上限，小 VPS 不宜过大 |
+| `POSTGRES_SYNCHRONOUS_COMMIT` | 默认 `on` 的资金严谨 profile；部署后可用 `SHOW synchronous_commit` 核验 |
 | `REDIS_URL` | Redis 连接地址 |
 | `REDIS_MAX_CONNECTIONS` | 后端与每个 worker 的 Redis 客户端连接池上限 |
 | `TG_DEFAULT_PROXY` | 默认 Telegram 出口代理，可被账号级代理覆盖 |

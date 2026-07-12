@@ -13,6 +13,8 @@ from app.services.interaction.session_store import (
     SessionNotFoundError,
     SessionRevisionConflictError,
     SessionUpdateResult,
+    claim_expired_interaction_session,
+    finish_expired_interaction_session,
     merge_session_update,
     session_redis_ttl_seconds,
     update_interaction_session,
@@ -221,6 +223,9 @@ class _NoEvalRedis:
         self.data[key] = value
         return True
 
+    async def delete(self, key: str):
+        return 1 if self.data.pop(key, None) is not None else 0
+
 
 @pytest.mark.asyncio
 async def test_python_fallback_without_eval() -> None:
@@ -256,3 +261,57 @@ def test_session_redis_ttl_matches_grace_constants() -> None:
     now = 1000.0
     assert session_redis_ttl_seconds(now + 120, now=now) == 120 + DEFAULT_SESSION_TTL_GRACE_SECONDS
     assert DEFAULT_SESSION_TTL_GRACE_SECONDS == 90
+
+
+@pytest.mark.asyncio
+async def test_expiry_claim_allows_only_one_scanner_and_failure_releases() -> None:
+    redis = _NoEvalRedis()
+    key = "account_bot:interaction_session:1:demo:-100"
+    now = 1_720_000_000.0
+    redis.data[key] = json.dumps({"revision": 4, "expires_at": now - 1, "data": {}})
+
+    first = await claim_expired_interaction_session(
+        redis, key, expected_revision=4, now=now, token="scanner-a"
+    )
+    second = await claim_expired_interaction_session(
+        redis, key, expected_revision=4, now=now, token="scanner-b"
+    )
+
+    assert first is not None
+    assert second is None
+    assert await finish_expired_interaction_session(redis, key, first, success=False) is False
+    retry = await claim_expired_interaction_session(
+        redis, key, expected_revision=4, now=now + 1, token="scanner-b"
+    )
+    assert retry is not None
+    assert await finish_expired_interaction_session(redis, key, retry, success=True) is True
+    assert key not in redis.data
+
+
+@pytest.mark.asyncio
+async def test_expiry_compare_delete_preserves_concurrent_renewal() -> None:
+    redis = _NoEvalRedis()
+    key = "account_bot:interaction_session:1:demo:-100"
+    now = 1_720_000_000.0
+    redis.data[key] = json.dumps({"revision": 2, "expires_at": now - 1, "data": {"round": 1}})
+    claim = await claim_expired_interaction_session(
+        redis, key, expected_revision=2, now=now, token="scanner-a"
+    )
+    assert claim is not None
+
+    renewed = await update_interaction_session(
+        redis,
+        key,
+        data={"renewed": True},
+        extend_seconds=120,
+        expected_revision=2,
+        now=now,
+    )
+    assert renewed.revision == 3
+    assert await finish_expired_interaction_session(redis, key, claim, success=True) is False
+
+    stored = json.loads(redis.data[key])
+    assert stored["revision"] == 3
+    assert stored["data"] == {"round": 1, "renewed": True}
+    assert stored["expires_at"] == now + 120
+    assert "_expiry_claim" not in stored

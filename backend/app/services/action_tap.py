@@ -79,6 +79,7 @@ _SUMMARY_KEYS = {
     "send_via",
     "send_via_options",
     "session_key",
+    "source_event_key",
     "started_by_user_id",
     "channel_selector",
     "entry_key",
@@ -159,6 +160,7 @@ def _publish_payload_from_row(row: ActionEvent, *, redis: Any | None = None) -> 
         "error_code": row.error_code,
         "error_summary": row.error_summary,
         "payout_key": row.payout_key,
+        "source_event_key": row.source_event_key,
         "redis": redis,
     }
 
@@ -316,6 +318,10 @@ async def emit_action_event(
     error_summary = _error_summary(error)
     params_summary = summarize_action_params(action_payload, result=result)
     payout_key = _extract_payout_key(action_payload, result)
+    source_event_key = _first_text(
+        action_payload.get("source_event_key"),
+        (result or {}).get("source_event_key") if isinstance(result, dict) else None,
+    )
     if payout_key and "payout_key" not in params_summary:
         params_summary["payout_key"] = payout_key
     row = ActionEvent(
@@ -330,14 +336,15 @@ async def emit_action_event(
         error_code=_first_text(error_code),
         error_summary=error_summary,
         payout_key=payout_key,
+        source_event_key=source_event_key,
     )
     if db is not None:
         db.add(row)
         await db.flush()
         _schedule_action_event_publish(db, row, redis=redis)
         return row
-    persisted = await _persist_action_event(row)
-    if persisted is not None:
+    persisted, created = await _persist_action_event(row)
+    if persisted is not None and created:
         await _publish_action_event(account, persisted, redis=redis)
     return persisted
 
@@ -360,6 +367,28 @@ async def find_payout_ledger_event(
     )
     if account_id is not None:
         stmt = stmt.where(ActionEvent.account_id == int(account_id))
+    stmt = stmt.order_by(ActionEvent.id.desc()).limit(1)
+    return (await db.execute(stmt)).scalar_one_or_none()
+
+
+async def find_source_action_event(
+    db: Any,
+    *,
+    account_id: int,
+    channel: str | None,
+    source_event_key: str,
+) -> ActionEvent | None:
+    key = str(source_event_key or "").strip()
+    if not key:
+        return None
+    stmt = select(ActionEvent).where(
+        ActionEvent.account_id == int(account_id),
+        ActionEvent.source_event_key == key,
+    )
+    if channel is None:
+        stmt = stmt.where(ActionEvent.channel.is_(None))
+    else:
+        stmt = stmt.where(ActionEvent.channel == str(channel))
     stmt = stmt.order_by(ActionEvent.id.desc()).limit(1)
     return (await db.execute(stmt)).scalar_one_or_none()
 
@@ -493,34 +522,51 @@ def summarize_action_params(action: dict[str, Any] | None, *, result: Any = None
     return redact_value(summary, drop_sensitive_keys=True)
 
 
-async def _persist_action_event(row: ActionEvent) -> ActionEvent | None:
+async def _persist_action_event(row: ActionEvent) -> tuple[ActionEvent | None, bool]:
     global _DB_DISABLED_UNTIL, _DB_DROPPED_EVENTS, _DB_LAST_ERROR, _DB_WRITE_FAILURES
     now = time.monotonic()
     if _DB_DISABLED_UNTIL > now:
         _DB_DROPPED_EVENTS += 1
-        return None
+        return None, False
     try:
         async with AsyncSessionLocal() as db:
             db.add(row)
             await db.commit()
             await db.refresh(row)
-            return row
+            return row, True
     except IntegrityError:
         # 可计账 payout 唯一约束冲突：返回已有行，不计入 dropped。
         if row.payout_key and row.action_type == "payout":
             try:
                 async with AsyncSessionLocal() as db:
-                    existing = await find_payout_ledger_event(db, payout_key=str(row.payout_key))
+                    existing = await find_payout_ledger_event(
+                        db,
+                        account_id=int(row.account_id),
+                        payout_key=str(row.payout_key),
+                    )
                     if existing is not None:
-                        return existing
+                        return existing, False
             except Exception:  # noqa: BLE001
                 log.debug("lookup existing payout ActionEvent after integrity error failed", exc_info=True)
+        if row.source_event_key:
+            try:
+                async with AsyncSessionLocal() as db:
+                    existing = await find_source_action_event(
+                        db,
+                        account_id=int(row.account_id),
+                        channel=row.channel,
+                        source_event_key=str(row.source_event_key),
+                    )
+                    if existing is not None:
+                        return existing, False
+            except Exception:  # noqa: BLE001
+                log.debug("lookup existing source ActionEvent after integrity error failed", exc_info=True)
         _DB_WRITE_FAILURES += 1
         _DB_DROPPED_EVENTS += 1
         _DB_LAST_ERROR = "IntegrityError"
         _DB_DISABLED_UNTIL = time.monotonic() + _ACTION_TAP_CIRCUIT_SECONDS
         log.error("ActionEvent 唯一约束冲突且无法读取已有行 payout_key=%s", row.payout_key, exc_info=True)
-        return None
+        return None, False
     except Exception as exc:  # noqa: BLE001
         _DB_WRITE_FAILURES += 1
         _DB_DROPPED_EVENTS += 1
@@ -532,7 +578,7 @@ async def _persist_action_event(row: ActionEvent) -> ActionEvent | None:
             _DB_WRITE_FAILURES,
             exc_info=True,
         )
-        return None
+        return None, False
 
 
 def action_tap_health() -> dict[str, Any]:
@@ -568,6 +614,7 @@ async def _publish_action_event_payload(item: dict[str, Any]) -> None:
         "error_code": item.get("error_code"),
         "error_summary": item.get("error_summary"),
         "payout_key": item.get("payout_key"),
+        "source_event_key": item.get("source_event_key"),
     }
     try:
         client = redis or get_redis()
@@ -715,5 +762,6 @@ __all__ = [
     "emit_compensated_payout_event",
     "emit_inbound_event",
     "find_payout_ledger_event",
+    "find_source_action_event",
     "summarize_action_params",
 ]

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 
 import pytest
 
@@ -39,6 +40,7 @@ class _FakeRedis:
         self.published: list[tuple[str, str]] = []
         self.subscribed: set[str] = set()
         self._pubsub = _FakePubSub(self)
+        self.store: dict[str, str] = {}
 
     def pubsub(self) -> _FakePubSub:
         return self._pubsub
@@ -55,6 +57,13 @@ class _FakeRedis:
             await self.inbox.put({"type": "message", "channel": reply_to, "data": raw})
             return 1
         return 0
+
+    async def get(self, key: str):  # noqa: ANN201
+        return self.store.get(key)
+
+    async def set(self, key: str, value: str, **_kwargs) -> bool:  # noqa: ANN003
+        self.store[key] = value
+        return True
 
 
 @pytest.mark.asyncio
@@ -120,4 +129,48 @@ async def test_broker_reports_offline_when_no_subscriber() -> None:
     assert online is False
     assert payload is None
     assert "不在线" in str(error)
+    await rpc_broker.reset_interaction_rpc_broker_for_tests()
+
+
+@pytest.mark.asyncio
+async def test_broker_timeout_exposes_request_id_and_reconciles_late_result() -> None:
+    from app.worker.ipc import rpc_result_key
+
+    await rpc_broker.reset_interaction_rpc_broker_for_tests()
+    redis = _FakeRedis()
+    request_id = "rpc-late-result"
+
+    async def publish_late(_channel: str, payload: str) -> int:
+        command = IPCMessage.decode(payload)
+        assert command.payload["request_id"] == request_id
+        assert int(command.payload["deadline_at_ms"]) > 0
+
+        async def finish_late() -> None:
+            await asyncio.sleep(0.2)
+            redis.store[rpc_result_key(request_id)] = json.dumps(
+                {"ok": True, "result": {"message_id": 77}, "request_id": request_id}
+            )
+
+        asyncio.create_task(finish_late())
+        return 1
+
+    redis.publish = publish_late  # type: ignore[method-assign]
+    broker = await rpc_broker.get_interaction_rpc_broker()
+    reply = "account_bot:interaction_action:1:late"
+    online, _attempts, payload, error = await broker.request(
+        cmd_channel="cmd:1",
+        command=make_cmd("run_action", reply_to=reply),
+        reply_channel=reply,
+        timeout_seconds=0.05,
+        online_wait_seconds=0.0,
+        redis=redis,
+        request_id=request_id,
+    )
+    assert online is True
+    assert payload is None
+    assert request_id in str(error)
+
+    await asyncio.sleep(0.25)
+    reconciled = await broker.reconcile(request_id, redis=redis)
+    assert reconciled == {"ok": True, "result": {"message_id": 77}, "request_id": request_id}
     await rpc_broker.reset_interaction_rpc_broker_for_tests()

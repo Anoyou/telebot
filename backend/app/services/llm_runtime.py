@@ -30,7 +30,14 @@ if TYPE_CHECKING:
 from ..settings import settings
 from . import llm_account_budget
 from .llm_client import build_client_from_dto
-from .llm_protocol import ModelRequest, ModelResponse
+from .llm_protocol import (
+    ApiFormat,
+    ImageContent,
+    ModelRequest,
+    ModelResponse,
+    StopReason,
+    UnsupportedCapabilityError,
+)
 from .redactor import redact_text
 
 log = logging.getLogger(__name__)
@@ -71,6 +78,7 @@ class BudgetCheck:
     """Result of the account-level LLM budget gate."""
 
     error: str | None = None
+    scope: str | None = None
     ticket: llm_account_budget.LLMAccountBudgetTicket | None = None
 
 
@@ -180,6 +188,129 @@ def _classify_error(exc: Exception) -> str:
     return type(exc).__name__.lower()
 
 
+def _error_scope(exc: Exception) -> str:
+    from .llm_client import LLMCallFailed, LLMError, LLMErrorScope
+
+    if isinstance(exc, UnsupportedCapabilityError):
+        return LLMErrorScope.CAPABILITY_MISMATCH.value
+    if isinstance(exc, (LLMCallFailed, LLMError)):
+        return exc.scope.value
+    return LLMErrorScope.UNKNOWN.value
+
+
+def _should_try_next_provider(exc: Exception) -> bool:
+    from .llm_client import LLMErrorScope
+
+    if _is_retryable_error(exc):
+        return True
+    return _error_scope(exc) in {
+        LLMErrorScope.PROVIDER_LOCAL.value,
+        LLMErrorScope.CAPABILITY_MISMATCH.value,
+    }
+
+
+def _ensure_legacy_result_product(result: LLMResult) -> None:
+    """Reject only semantically empty successes; tool/image/refusal remain valid."""
+    from .llm_client import LLMError, LLMErrorScope
+
+    if str(result.text or "").strip():
+        return
+    if result.tool_calls or result.image_urls or result.image_data:
+        return
+    if result.stop_reason in {StopReason.REFUSAL, StopReason.CONTENT_FILTER}:
+        return
+    raise LLMError(
+        "Provider 返回 HTTP 200 但没有文本、工具调用、图片或合法终止语义",
+        scope=LLMErrorScope.PROVIDER_LOCAL,
+    )
+
+
+def _ensure_model_response_product(response: ModelResponse) -> None:
+    from .llm_client import LLMError, LLMErrorScope
+
+    if response.text or response.tool_calls:
+        return
+    if response.stop_reason in {StopReason.REFUSAL, StopReason.CONTENT_FILTER}:
+        return
+    raise LLMError(
+        "Provider 返回 HTTP 200 但没有文本、工具调用或合法终止语义",
+        scope=LLMErrorScope.PROVIDER_LOCAL,
+    )
+
+
+def _estimate_text_tokens(value: str) -> int:
+    raw = value.encode("utf-8")
+    return max(1, (len(raw) + 3) // 4) if raw else 0
+
+
+def _estimate_legacy_request_tokens(
+    system: str,
+    user: str,
+    max_output_tokens: int,
+    images: list[bytes] | None,
+) -> int:
+    image_units = 1024 * len(images or [])
+    return max(
+        1,
+        _estimate_text_tokens(system) + _estimate_text_tokens(user) + image_units
+        + max(0, int(max_output_tokens or 0)),
+    )
+
+
+def _estimate_structured_request_tokens(request: ModelRequest) -> int:
+    text_units = sum(
+        _estimate_text_tokens(message.text_content()) for message in request.messages
+    )
+    image_units = 1024 * sum(
+        isinstance(block, ImageContent)
+        for message in request.messages
+        for block in message.content
+    )
+    tool_units = sum(
+        _estimate_text_tokens(tool.name)
+        + _estimate_text_tokens(tool.description)
+        + _estimate_text_tokens(str(tool.parameters))
+        for tool in request.tools
+    )
+    return max(1, text_units + image_units + tool_units + request.max_output_tokens)
+
+
+def _legacy_capability_errors(
+    provider: LLMProviderDTO,
+    *,
+    model: str,
+    images: list[bytes] | None,
+    web_search: bool,
+    reasoning_effort: str | None,
+    native_image: bool,
+) -> list[str]:
+    capabilities = provider.capabilities_for_model(model)
+    errors: list[str] = []
+    if images and not capabilities.images:
+        errors.append("provider 不支持图片输入")
+    if web_search:
+        fmt = str(provider.api_format or "chat_completions").strip().lower()
+        search_fmt = str(provider.web_search_api_format or "auto").strip().lower()
+        can_switch_to_responses = (
+            provider.provider.lower() == "openai"
+            and search_fmt in {"auto", "responses"}
+            and fmt in {"chat_completions", "responses"}
+        )
+        if not capabilities.web_search and not can_switch_to_responses:
+            errors.append("provider 不支持原生联网搜索")
+    if reasoning_effort:
+        if not capabilities.reasoning:
+            errors.append("provider 不支持 reasoning")
+        elif (
+            capabilities.reasoning_efforts
+            and reasoning_effort not in capabilities.reasoning_efforts
+        ):
+            errors.append(f"provider 不支持 reasoning_effort={reasoning_effort}")
+    if native_image and provider.provider.lower() != "openai":
+        errors.append("provider 不支持原生图片生成")
+    return errors
+
+
 # ── Call with Fallback ───────────────────────────────────────
 
 @dataclass
@@ -248,40 +379,63 @@ async def call_with_fallback(
     Raises:
         LLMCallFailed: 所有 provider 都失败时抛出
     """
-    from .llm_client import LLMCallFailed
+    from .llm_client import LLMCallFailed, LLMError, LLMErrorScope
 
     all_providers = chain.all_providers
     max_tokens = _apply_output_token_cap(max_tokens)
-    budget_check = await _check_budget(account_id, all_providers[0], max_tokens)
-    if budget_check.error:
-        usage_record = UsageRecord(
-            provider_id=all_providers[0].id if all_providers else None,
-            account_id=account_id,
-            triggered_by_account_id=triggered_by_account_id,
-            provider_name=all_providers[0].name if all_providers else None,
-            model=override_model or (all_providers[0].default_model if all_providers else None),
-            success=False,
-            error_type="budget_exceeded",
-            source=source,
-            used_fallback=False,
-            fallback_chain=chain.get_provider_names(),
-            request_preview=request_preview_for_usage(system, user),
-        )
-        await _emit_usage(usage_record)
-        raise LLMCallFailed(
-            budget_check.error,
-            provider_id=all_providers[0].id if all_providers else None,
-            provider_name=all_providers[0].name if all_providers else None,
-            error_type="budget_exceeded",
-            retryable=False,
-        )
-
-    tried_providers: list[str] = []
+    estimated_tokens = _estimate_legacy_request_tokens(system, user, max_tokens, images)
     last_error: Exception | None = None
 
     for idx, provider_dto in enumerate(all_providers):
         is_fallback = idx > 0
-        tried_providers.append(provider_dto.name)
+        model = override_model or provider_dto.default_model
+        capability_errors = _legacy_capability_errors(
+            provider_dto,
+            model=model,
+            images=images,
+            web_search=web_search,
+            reasoning_effort=reasoning_effort,
+            native_image=native_image,
+        )
+        if capability_errors:
+            last_error = LLMError(
+                "; ".join(capability_errors),
+                scope=LLMErrorScope.CAPABILITY_MISMATCH,
+            )
+            log.info(
+                "[llm-runtime] 跳过不兼容 provider=%s reason=%s",
+                provider_dto.name,
+                str(last_error),
+            )
+            continue
+
+        budget_check = await _check_budget(account_id, provider_dto, estimated_tokens)
+        if budget_check.error:
+            last_error = LLMCallFailed(
+                budget_check.error,
+                provider_id=provider_dto.id,
+                provider_name=provider_dto.name,
+                error_type="budget_exceeded",
+                retryable=False,
+            )
+            await _emit_usage(
+                UsageRecord(
+                    provider_id=provider_dto.id,
+                    account_id=account_id,
+                    triggered_by_account_id=triggered_by_account_id,
+                    provider_name=provider_dto.name,
+                    model=model,
+                    success=False,
+                    error_type="budget_exceeded",
+                    source=source,
+                    used_fallback=is_fallback,
+                    fallback_chain=chain.get_provider_names(),
+                    request_preview=request_preview_for_usage(system, user),
+                )
+            )
+            if budget_check.scope == "premium_daily" and idx < len(all_providers) - 1:
+                continue
+            raise last_error
 
         # 记录当前尝试的 provider（不记录完整 prompt）
         log.info(
@@ -310,6 +464,7 @@ async def call_with_fallback(
                 log_prompt_preview=log_prompt_preview,
                 client_factory=client_factory,
             )
+            _ensure_legacy_result_product(result)
             latency_ms = int((time.monotonic() - attempt_start) * 1000)
             # 成功
             used_fallback = is_fallback
@@ -353,16 +508,24 @@ async def call_with_fallback(
             latency_ms = int((time.monotonic() - attempt_start) * 1000)
             error_type = _classify_error(exc)
             retryable = _is_retryable_error(exc)
+            scope = _error_scope(exc)
 
             log.warning(
-                "[llm-runtime] provider=%s 调用失败 error=%s retryable=%s",
+                "[llm-runtime] provider=%s 调用失败 error=%s retryable=%s scope=%s",
                 provider_dto.name,
                 error_type,
                 retryable,
+                scope,
             )
 
-            # 认证/配置类错误不应 fallback，否则会把不可恢复配置错误伪装成线路问题。
-            if idx == len(all_providers) - 1 or not retryable:
+            await llm_account_budget.settle(
+                budget_check.ticket,
+                actual_tokens=0,
+                actual_provider=None,
+                success=False,
+            )
+
+            if idx == len(all_providers) - 1 or not _should_try_next_provider(exc):
                 # 记录失败 usage
                 usage_record = UsageRecord(
                     provider_id=provider_dto.id,
@@ -379,33 +542,21 @@ async def call_with_fallback(
                     request_preview=request_preview_for_usage(system, user),
                 )
                 await _emit_usage(usage_record)
-                await llm_account_budget.settle(
-                    budget_check.ticket,
-                    actual_tokens=0,
-                    actual_provider=None,
-                    success=False,
-                )
-
                 raise LLMCallFailed(
                     f"所有 provider 都失败。最后错误: {type(last_error).__name__}: {last_error}",
                     provider_id=provider_dto.id,
                     provider_name=provider_dto.name,
                     error_type=error_type,
                     retryable=False,
+                    scope=scope,
                 ) from last_error
 
-    # 理论上不会走到这里
-    await llm_account_budget.settle(
-        budget_check.ticket,
-        actual_tokens=0,
-        actual_provider=None,
-        success=False,
-    )
     raise LLMCallFailed(
-        f"未预期的错误链 exhausted: {last_error}",
+        f"所有 provider 均不兼容或调用失败: {last_error}",
         provider_id=all_providers[-1].id if all_providers else None,
         error_type="exhausted",
         retryable=False,
+        scope=_error_scope(last_error) if last_error else LLMErrorScope.UNKNOWN,
     )
 
 
@@ -420,56 +571,57 @@ async def invoke_model_with_fallback(
 ) -> tuple[ModelResponse, LLMProviderDTO, bool]:
     """Invoke a structured model request through existing budget and fallback gates."""
 
-    from .llm_client import LLMCallFailed
+    from .llm_client import LLMCallFailed, LLMErrorScope
 
     providers = chain.all_providers
     capped_request = replace(
         request,
         max_output_tokens=_apply_output_token_cap(request.max_output_tokens),
     )
-    budget_check = await _check_budget(
-        account_id,
-        providers[0],
-        capped_request.max_output_tokens,
-    )
     request_preview = _structured_request_preview(capped_request)
-    if budget_check.error:
-        await _emit_usage(
-            UsageRecord(
-                provider_id=providers[0].id,
-                account_id=account_id,
-                triggered_by_account_id=triggered_by_account_id,
-                provider_name=providers[0].name,
-                model=capped_request.model or providers[0].default_model,
-                success=False,
-                error_type="budget_exceeded",
-                source=source,
-                fallback_chain=chain.get_provider_names(),
-                request_preview=request_preview,
-            )
-        )
-        raise LLMCallFailed(
-            budget_check.error,
-            provider_id=providers[0].id,
-            provider_name=providers[0].name,
-            error_type="budget_exceeded",
-            retryable=False,
-        )
-
+    estimated_tokens = _estimate_structured_request_tokens(capped_request)
     last_error: Exception | None = None
     model_pinned = bool(capped_request.metadata.get("model_pinned", True))
     for index, provider in enumerate(providers):
-        started = time.monotonic()
         provider_request = replace(
             capped_request,
             model=capped_request.model if model_pinned else provider.default_model,
         )
+        capability_errors = provider.capabilities_for_model(
+            provider_request.model
+        ).validation_errors(provider_request)
+        if capability_errors:
+            last_error = UnsupportedCapabilityError(
+                ApiFormat(provider.api_format or "chat_completions"),
+                tuple(capability_errors),
+            )
+            log.info(
+                "[llm-runtime] 跳过不兼容 provider=%s reason=%s",
+                provider.name,
+                last_error,
+            )
+            continue
+
+        budget_check = await _check_budget(account_id, provider, estimated_tokens)
+        if budget_check.error:
+            last_error = LLMCallFailed(
+                budget_check.error,
+                provider_id=provider.id,
+                provider_name=provider.name,
+                error_type="budget_exceeded",
+            )
+            if budget_check.scope == "premium_daily" and index < len(providers) - 1:
+                continue
+            raise last_error
+
+        started = time.monotonic()
         try:
             response = await _invoke_model_with_retry(
                 provider,
                 provider_request,
                 client_factory=client_factory,
             )
+            _ensure_model_response_product(response)
             used_fallback = index > 0
             await _emit_usage(
                 UsageRecord(
@@ -498,8 +650,13 @@ async def invoke_model_with_fallback(
             return response, provider, used_fallback
         except Exception as exc:
             last_error = exc
-            retryable = _is_retryable_error(exc)
-            if index < len(providers) - 1 and retryable:
+            await llm_account_budget.settle(
+                budget_check.ticket,
+                actual_tokens=0,
+                actual_provider=None,
+                success=False,
+            )
+            if index < len(providers) - 1 and _should_try_next_provider(exc):
                 continue
             await _emit_usage(
                 UsageRecord(
@@ -517,27 +674,20 @@ async def invoke_model_with_fallback(
                     request_preview=request_preview,
                 )
             )
-            await llm_account_budget.settle(
-                budget_check.ticket,
-                actual_tokens=0,
-                actual_provider=None,
-                success=False,
-            )
             raise LLMCallFailed(
                 f"所有 provider 都失败。最后错误: {type(exc).__name__}: {exc}",
                 provider_id=provider.id,
                 provider_name=provider.name,
                 error_type=_classify_error(exc),
                 retryable=False,
+                scope=_error_scope(exc),
             ) from exc
 
-    await llm_account_budget.settle(
-        budget_check.ticket,
-        actual_tokens=0,
-        actual_provider=None,
-        success=False,
+    raise LLMCallFailed(
+        f"所有 provider 均不兼容或调用失败: {last_error}",
+        error_type="exhausted",
+        scope=_error_scope(last_error) if last_error else LLMErrorScope.UNKNOWN,
     )
-    raise LLMCallFailed(f"结构化调用未预期耗尽: {last_error}", error_type="exhausted")
 
 
 async def _invoke_model_with_retry(
@@ -596,17 +746,11 @@ async def _check_budget(
     provider_dto: LLMProviderDTO,
     estimated_tokens: int,
 ) -> BudgetCheck:
-    """Reserve account-level LLM budget before the first provider call.
-
-    The pre-call budget gate keeps the existing runtime contract: it only checks
-    the primary provider before entering the fallback chain. Settlement later
-    releases failed calls and corrects token/premium counters for successful
-    fallback calls without adding a second fallback-provider gate.
-    """
+    """Atomically reserve account-level budget before one provider candidate."""
     try:
         ticket = await llm_account_budget.acquire(account_id, provider_dto, estimated_tokens)
     except llm_account_budget.LLMAccountBudgetExceeded as exc:
-        return BudgetCheck(error=str(exc))
+        return BudgetCheck(error=str(exc), scope=exc.scope)
     return BudgetCheck(ticket=ticket)
 
 

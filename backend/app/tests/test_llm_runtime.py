@@ -15,7 +15,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from app.services.llm_client import LLMCallFailed, LLMError
+from app.services.llm_client import LLMCallFailed, LLMError, LLMErrorScope, LLMResult
 from app.services.llm_dto import LLMProviderDTO
 from app.services.llm_invoke import _api_format_for_call
 from app.services.llm_runtime import (
@@ -624,7 +624,7 @@ async def test_llm_budget_premium_limit_is_per_provider(monkeypatch) -> None:
 
 @pytest.mark.asyncio
 async def test_llm_budget_fallback_settlement_corrects_tokens_and_premium(monkeypatch) -> None:
-    """预算仍只在首 provider 前检查，但 fallback 成功时按实际 provider 修正预扣。"""
+    """首候选失败释放预留后，fallback 成功只结算实际用量。"""
     from app.services import llm_account_budget
     from app.services import llm_runtime as _rt
     from app.services.llm_client import LLMResult
@@ -1052,20 +1052,22 @@ def _fail_ok_chain() -> FallbackChain:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "outcome,expected_retryable",
+    "outcome,expected_retryable,expected_scope",
     [
-        ("network", True),
-        (429, True),
-        (500, True),
-        (503, True),
-        (400, False),
-        (401, False),
-        (403, False),
-        (404, False),
+        ("network", True, LLMErrorScope.TRANSIENT),
+        (429, True, LLMErrorScope.TRANSIENT),
+        (500, True, LLMErrorScope.TRANSIENT),
+        (503, True, LLMErrorScope.TRANSIENT),
+        (400, False, LLMErrorScope.REQUEST_INVALID),
+        (401, False, LLMErrorScope.PROVIDER_LOCAL),
+        (403, False, LLMErrorScope.PROVIDER_LOCAL),
+        (404, False, LLMErrorScope.PROVIDER_LOCAL),
     ],
 )
-async def test_openai_client_wraps_error_with_correct_retryable(monkeypatch, outcome, expected_retryable) -> None:
-    """真实 OpenAIClient 包装路径按错误类型正确设置 LLMError.retryable。"""
+async def test_openai_client_wraps_typed_error(
+    monkeypatch, outcome, expected_retryable, expected_scope
+) -> None:
+    """真实 OpenAIClient 同时保留重试属性与跨 provider 作用域。"""
     import httpx
 
     from app.services import llm_client
@@ -1085,6 +1087,27 @@ async def test_openai_client_wraps_error_with_correct_retryable(monkeypatch, out
         await client.complete("sys", "user", max_tokens=10)
 
     assert exc_info.value.retryable is expected_retryable
+    assert exc_info.value.scope is expected_scope
+
+
+@pytest.mark.asyncio
+async def test_openai_client_classifies_policy_403_as_account_scope(monkeypatch) -> None:
+    from app.services import llm_client
+    from app.services.llm_client import OpenAIClient
+
+    monkeypatch.setattr(
+        llm_client.httpx,
+        "AsyncClient",
+        _make_fake_async_client(
+            _FakeHTTPResponse(403, text="request blocked by safety policy"), []
+        ),
+    )
+    with pytest.raises(LLMError) as exc_info:
+        await OpenAIClient(
+            api_key="sk-test", base_url="https://fail.example/v1", model="gpt-4o"
+        ).complete("sys", "user", max_tokens=10)
+
+    assert exc_info.value.scope is LLMErrorScope.ACCOUNT_POLICY
 
 
 @pytest.mark.asyncio
@@ -1140,8 +1163,8 @@ async def test_call_with_fallback_retryable_status_falls_back(monkeypatch, statu
 
 
 @pytest.mark.asyncio
-async def test_call_with_fallback_auth_error_no_retry_no_fallback(monkeypatch) -> None:
-    """401 经包装成不可重试 LLMError → 不重试、不 fallback，立即抛 LLMCallFailed。"""
+async def test_call_with_fallback_provider_auth_error_skips_to_fallback(monkeypatch) -> None:
+    """Provider 本地的 401 不重试当前线路，但允许切换健康 fallback。"""
     from app.services import llm_client
     from app.services import llm_runtime as _rt
 
@@ -1153,15 +1176,236 @@ async def test_call_with_fallback_auth_error_no_retry_no_fallback(monkeypatch) -
     # 即便退避可用，认证错误也不该产生任何重试
     monkeypatch.setattr(_rt, "_compute_retry_delay", lambda attempt: 0.0)
 
-    with pytest.raises(LLMCallFailed) as exc_info:
-        await _rt.call_with_fallback(
-            _fail_ok_chain(), "sys", "user", max_tokens=50, client_factory=_openai_client_factory
+    result, provider, used_fallback = await _rt.call_with_fallback(
+        _fail_ok_chain(), "sys", "user", max_tokens=50, client_factory=_openai_client_factory
+    )
+
+    # primary 只调用一次（无重试），随后切换 fallback。
+    assert [u for u in call_log if "fail" in u] == ["https://fail.example/v1/chat/completions"]
+    assert any("ok.example" in u for u in call_log)
+    assert result.text == "fallback-ok"
+    assert provider.id == 2
+    assert used_fallback is True
+
+
+@pytest.mark.asyncio
+async def test_call_with_fallback_request_invalid_stops_chain(monkeypatch) -> None:
+    """请求本身无效时必须终止，不能把所有 4xx 都视为可 fallback。"""
+    from app.services import llm_runtime as _rt
+
+    calls: list[int] = []
+
+    async def fake_call(provider_dto, *args, **kwargs):
+        calls.append(provider_dto.id)
+        raise LLMError(
+            "messages 格式无效",
+            scope=LLMErrorScope.REQUEST_INVALID,
         )
 
-    # primary 只调用一次（无重试），且从不尝试 fallback
-    assert [u for u in call_log if "fail" in u] == ["https://fail.example/v1/chat/completions"]
-    assert not any("ok.example" in u for u in call_log)
-    assert exc_info.value.error_type == "auth"
+    monkeypatch.setattr(_rt, "_call_with_retry", fake_call)
+    with pytest.raises(LLMCallFailed):
+        await _rt.call_with_fallback(_fail_ok_chain(), "sys", "user", max_tokens=50)
+
+    assert calls == [1]
+
+
+@pytest.mark.asyncio
+async def test_call_with_fallback_invalid_empty_result_uses_next_provider(monkeypatch) -> None:
+    """无文本、无工具、无图片且无明确 stop 语义的 200 不是成功。"""
+    from app.services import llm_runtime as _rt
+
+    calls: list[int] = []
+
+    async def fake_call(provider_dto, *args, **kwargs):
+        calls.append(provider_dto.id)
+        return LLMResult(
+            text="" if provider_dto.id == 1 else "fallback-ok",
+            model="model",
+            input_tokens=1,
+            output_tokens=1,
+        )
+
+    monkeypatch.setattr(_rt, "_call_with_retry", fake_call)
+    result, provider, used_fallback = await _rt.call_with_fallback(
+        _fail_ok_chain(), "sys", "user", max_tokens=50
+    )
+
+    assert calls == [1, 2]
+    assert result.text == "fallback-ok"
+    assert provider.id == 2
+    assert used_fallback is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stop_reason", ["refusal", "content_filter"])
+async def test_call_with_fallback_accepts_explicit_legal_empty_stop(monkeypatch, stop_reason) -> None:
+    """明确 refusal/content-filter 是合法空产物，不应误切 fallback。"""
+    from app.services import llm_runtime as _rt
+    from app.services.llm_protocol import stop_reason_from_provider
+
+    calls: list[int] = []
+
+    async def fake_call(provider_dto, *args, **kwargs):
+        calls.append(provider_dto.id)
+        return LLMResult(
+            text="",
+            model="model",
+            input_tokens=1,
+            output_tokens=0,
+            stop_reason=stop_reason_from_provider(stop_reason),
+            provider_status=stop_reason,
+        )
+
+    monkeypatch.setattr(_rt, "_call_with_retry", fake_call)
+    result, provider, used_fallback = await _rt.call_with_fallback(
+        _fail_ok_chain(), "sys", "user", max_tokens=50
+    )
+
+    assert result.text == ""
+    assert provider.id == 1
+    assert used_fallback is False
+    assert calls == [1]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("product", ["tool", "image_url", "image_data"])
+async def test_call_with_fallback_accepts_non_text_product(monkeypatch, product) -> None:
+    """tool-only 和 image-only 都是合法产物，不能被空文本规则误杀。"""
+    from app.services import llm_runtime as _rt
+    from app.services.llm_protocol import ToolCall
+
+    calls: list[int] = []
+
+    async def fake_call(provider_dto, *args, **kwargs):
+        calls.append(provider_dto.id)
+        result = LLMResult(text="", model="model", input_tokens=1, output_tokens=1)
+        if product == "tool":
+            result.tool_calls = [ToolCall("call-1", "lookup", {})]
+        elif product == "image_url":
+            result.image_urls = ["https://example.test/image.png"]
+        else:
+            result.image_data = ["data:image/png;base64,AAAA"]
+        return result
+
+    monkeypatch.setattr(_rt, "_call_with_retry", fake_call)
+    result, provider, used_fallback = await _rt.call_with_fallback(
+        _fail_ok_chain(), "sys", "user", max_tokens=50
+    )
+
+    assert result.text == ""
+    assert provider.id == 1
+    assert used_fallback is False
+    assert calls == [1]
+
+
+@pytest.mark.asyncio
+async def test_call_with_fallback_reserves_input_plus_output_for_each_candidate(monkeypatch) -> None:
+    """预算按输入+输出预留，且每个真正候选调用前都重新 gate。"""
+    from app.services import llm_runtime as _rt
+
+    checks: list[tuple[int, int]] = []
+    called: list[int] = []
+
+    async def check(account_id, provider, estimate):
+        checks.append((provider.id, estimate))
+        if provider.id == 2:
+            return _rt.BudgetCheck(error="高价 LLM 今日调用次数已达上限（1/day）。")
+        return _rt.BudgetCheck()
+
+    async def fake_call(provider_dto, *args, **kwargs):
+        called.append(provider_dto.id)
+        raise LLMError("temporary", retryable=True)
+
+    monkeypatch.setattr(_rt, "_check_budget", check)
+    monkeypatch.setattr(_rt, "_call_with_retry", fake_call)
+    with pytest.raises(LLMCallFailed):
+        await _rt.call_with_fallback(
+            _fail_ok_chain(),
+            "system",
+            "x" * 360,
+            max_tokens=10,
+            account_id=7,
+        )
+
+    assert [provider_id for provider_id, _ in checks] == [1, 2]
+    assert all(estimate >= 100 for _, estimate in checks)
+    assert called == [1]
+
+
+@pytest.mark.asyncio
+async def test_premium_fallback_budget_gate_blocks_network_call(monkeypatch) -> None:
+    """cheap primary 失败后，premium fallback 已达限时必须在网络调用前被拒绝。"""
+    from app.services import llm_account_budget
+    from app.services import llm_runtime as _rt
+
+    redis = _BudgetRedis()
+    primary = LLMProviderDTO(id=1, name="cheap", provider="openai", cost_tier=1)
+    premium = LLMProviderDTO(id=2, name="premium", provider="openai", cost_tier=3)
+    premium_key = llm_account_budget._daily_premium_key(7, premium.id)
+    redis.strings[premium_key] = 1
+    called: list[int] = []
+
+    monkeypatch.setattr(llm_account_budget, "get_redis", lambda: redis)
+    monkeypatch.setattr(
+        llm_account_budget,
+        "_load_budget_limits",
+        AsyncMock(
+            return_value={
+                "per_minute": 0,
+                "daily_requests": 0,
+                "daily_tokens": 1000,
+                "premium_daily": 1,
+            }
+        ),
+    )
+
+    async def fake_call(provider_dto, *args, **kwargs):
+        called.append(provider_dto.id)
+        raise LLMError("temporary", retryable=True)
+
+    monkeypatch.setattr(_rt, "_call_with_retry", fake_call)
+    with pytest.raises(LLMCallFailed) as exc_info:
+        await _rt.call_with_fallback(
+            FallbackChain(primary, [premium]),
+            "system",
+            "question",
+            max_tokens=10,
+            account_id=7,
+        )
+
+    assert exc_info.value.error_type == "budget_exceeded"
+    assert called == [primary.id]
+
+
+@pytest.mark.asyncio
+async def test_premium_candidate_gate_is_atomic_under_concurrency(monkeypatch) -> None:
+    """并发请求同时 gate 同一 premium provider 时，只能有一个预留成功。"""
+    from app.services import llm_account_budget
+    from app.services import llm_runtime as _rt
+
+    redis = _BudgetRedis()
+    premium = LLMProviderDTO(id=2, name="premium", provider="openai", cost_tier=3)
+    monkeypatch.setattr(llm_account_budget, "get_redis", lambda: redis)
+    monkeypatch.setattr(
+        llm_account_budget,
+        "_load_budget_limits",
+        AsyncMock(
+            return_value={
+                "per_minute": 0,
+                "daily_requests": 0,
+                "daily_tokens": 0,
+                "premium_daily": 1,
+            }
+        ),
+    )
+
+    checks = await asyncio.gather(
+        _rt._check_budget(7, premium, 10),
+        _rt._check_budget(7, premium, 10),
+    )
+
+    assert sum(check.error is None for check in checks) == 1
+    assert sum(check.scope == "premium_daily" for check in checks) == 1
 
 
 @pytest.mark.asyncio

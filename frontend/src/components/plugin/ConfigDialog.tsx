@@ -9,7 +9,7 @@
  * 配置合并顺序（前端用于展示）：
  * schema defaults < globalConfig < accountConfig
  */
-import { useState, useEffect, useCallback, type ReactNode } from "react";
+import { useState, useEffect, useCallback, useRef, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import {
@@ -34,6 +34,8 @@ import { getSystemSettings } from "@/api/system";
 import type { IgnoredPeer, LLMProviderOut } from "@/api/types";
 import { getErrMsg } from "@/lib/api";
 import { cn } from "@/lib/utils";
+import { queryKeys } from "@/lib/queryKeys";
+import { confirmDiscardChanges, useUnsavedChanges } from "@/lib/unsavedChanges";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -130,6 +132,8 @@ export function ConfigDialog({
   const [globalVals, setGlobalVals] = useState<Record<string, unknown>>({});
   const [accountVals, setAccountVals] = useState<Record<string, unknown>>({});
   const [saving, setSaving] = useState(false);
+  const initialValuesRef = useRef("");
+  const initializedDialogRef = useRef<string | null>(null);
   const settingsQ = useQuery({
     queryKey: ["system", "settings"],
     queryFn: getSystemSettings,
@@ -160,20 +164,37 @@ export function ConfigDialog({
     }
   }, [onSave, schema, globalVals, accountVals, effectiveGlobalConfig, effectiveAccountConfig, onOpenChange]);
 
-  // 初始化配置值
+  const serializedValues = JSON.stringify([globalVals, accountVals]);
+  const dirty = Boolean(initialValuesRef.current) && serializedValues !== initialValuesRef.current;
+  useUnsavedChanges(open && dirty);
+
+  const requestClose = useCallback(() => {
+    if (saving || !confirmDiscardChanges(dirty)) return;
+    onOpenChange(false);
+  }, [dirty, onOpenChange, saving]);
+
+  // 每次打开只初始化一次，后台 refetch 不覆盖正在编辑的草稿。
   useEffect(() => {
-    if (open && schema && typeof schema === "object" && "properties" in schema) {
+    if (!open) {
+      initializedDialogRef.current = null;
+      return;
+    }
+    const dialogKey = `${pluginKey}:${accountId ?? "global"}`;
+    if (initializedDialogRef.current === dialogKey) return;
+    if (schema && typeof schema === "object" && "properties" in schema) {
       const s = schema as ConfigSchema;
       const { globalVals: gv, accountVals: av } = buildScopedConfigValues(s, effectiveGlobalConfig, effectiveAccountConfig);
       setGlobalVals(gv);
       setAccountVals(av);
+      initialValuesRef.current = JSON.stringify([gv, av]);
+      initializedDialogRef.current = dialogKey;
     }
-  }, [open, schema, effectiveGlobalConfig, effectiveAccountConfig]);
+  }, [accountId, open, pluginKey, schema, effectiveGlobalConfig, effectiveAccountConfig]);
 
   const s = schema as ConfigSchema | null;
   if (!s?.properties || Object.keys(s.properties).length === 0) {
     return (
-      <Dialog open={open} onOpenChange={onOpenChange}>
+      <Dialog open={open} onOpenChange={(next) => next ? onOpenChange(true) : requestClose()}>
         <DialogContent className="max-w-2xl">
           <DialogHeader>
             <DialogTitle>{pluginName} — 配置</DialogTitle>
@@ -189,7 +210,7 @@ export function ConfigDialog({
   const accountFields = Object.entries(s.properties).filter(([, f]) => f.level !== "global");
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={(next) => next ? onOpenChange(true) : requestClose()}>
       <DialogContent className="max-h-[85vh] max-w-2xl overflow-y-auto">
         <DialogHeader>
           <DialogTitle>{pluginName} — 配置</DialogTitle>
@@ -227,7 +248,7 @@ export function ConfigDialog({
           )}
         </div>
         <DialogFooter className="!flex !flex-row gap-2 sm:space-x-0 [&>*]:min-w-0 [&>*]:flex-1 sm:[&>*]:flex-none">
-          <Button variant="outline" onClick={() => onOpenChange(false)}>取消</Button>
+          <Button variant="outline" onClick={requestClose} disabled={saving}>取消</Button>
           <Button onClick={handleSave} disabled={saving}>
             {saving ? <Spinner className="mr-2 h-4 w-4" /> : <Save className="mr-2 h-4 w-4" />}
             {saving ? "保存中…" : "保存"}
@@ -1206,7 +1227,7 @@ function AllowedPeerMultiSelectField({
   const selectedIds = normalizeAllowedPeerIds(value);
   const selected = new Set(selectedIds.map(String));
   const peersQ = useQuery({
-    queryKey: ["ignored-peers", accountId],
+    queryKey: queryKeys.ignoredPeers(accountId),
     queryFn: () => listIgnoredPeers(Number(accountId)),
     enabled: Number.isFinite(Number(accountId)) && Number(accountId) > 0,
   });

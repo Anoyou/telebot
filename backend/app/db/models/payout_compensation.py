@@ -5,7 +5,19 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import JSON, BigInteger, Boolean, DateTime, ForeignKey, Index, Integer, String, Text, func
+from sqlalchemy import (
+    JSON,
+    BigInteger,
+    Boolean,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from ..base import Base
@@ -32,7 +44,7 @@ class PayoutCompensation(Base):
         primary_key=True,
         autoincrement=True,
     )
-    payout_key: Mapped[str] = mapped_column(String(80), nullable=False, unique=True)
+    payout_key: Mapped[str] = mapped_column(String(80), nullable=False)
     account_id: Mapped[int] = mapped_column(
         BigInteger, ForeignKey("account.id", ondelete="CASCADE"), nullable=False
     )
@@ -43,6 +55,7 @@ class PayoutCompensation(Base):
     chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     amount: Mapped[int] = mapped_column(BigInteger, nullable=False)
     payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    delivery_token: Mapped[str | None] = mapped_column(String(64), nullable=True)
     status: Mapped[str] = mapped_column(
         String(32),
         nullable=False,
@@ -67,6 +80,7 @@ class PayoutCompensation(Base):
     )
 
     __table_args__ = (
+        UniqueConstraint("account_id", "payout_key", name="uq_payout_compensation_account_key"),
         Index("ix_payout_comp_acct_status_next", "account_id", "status", "next_attempt_at"),
     )
 

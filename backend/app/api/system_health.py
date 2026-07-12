@@ -23,11 +23,13 @@ import time
 import urllib.error
 import urllib.request
 from collections import Counter
-from datetime import datetime
+from collections.abc import Callable
+from datetime import date, datetime
+from datetime import time as datetime_time
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Body, File, UploadFile
+from fastapi import APIRouter, Body, File, HTTPException, UploadFile
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import func, select, text
@@ -38,6 +40,7 @@ from ..db.models.command import LLMProvider
 from ..db.models.system import SystemSetting
 from ..deps import CurrentUser
 from ..redis_client import get_redis
+from ..settings import settings
 
 router = APIRouter(prefix="/api/system", tags=["system"])
 _APP_STARTED_AT = time.time()
@@ -135,6 +138,9 @@ class WorkersStatus(BaseModel):
     """desired=running 且 alive=true 的数量。"""
     runtime_failing: int = 0
     """fail_count>0 的数量。"""
+    db_connection_estimate: int = 0
+    db_connection_budget: int = 0
+    db_capacity_warning: str | None = None
 
 
 class HealthOverview(BaseModel):
@@ -373,6 +379,22 @@ async def _probe_workers() -> WorkersStatus:
         except Exception:
             # runtime 快照失败时不影响 DB 状态统计
             pass
+        db_connection_budget = max(1, int(os.environ.get("POSTGRES_MAX_CONNECTIONS", "30") or 30))
+        db_connection_estimate = (
+            max(1, int(settings.db_pool_size or 1))
+            + max(0, int(settings.db_max_overflow or 0))
+            + runtime_desired_running
+            * (
+                max(1, int(settings.db_pool_size_worker or 1))
+                + max(0, int(settings.db_max_overflow_worker or 0))
+            )
+        )
+        db_capacity_warning = None
+        if db_connection_estimate >= int(db_connection_budget * 0.8):
+            db_capacity_warning = (
+                f"预估 DB 连接峰值 {db_connection_estimate}/{db_connection_budget}，"
+                "已达容量预警线；增加账号前请先扩容或收紧连接池。"
+            )
         return WorkersStatus(
             total=total,
             by_status=by_status,
@@ -381,6 +403,9 @@ async def _probe_workers() -> WorkersStatus:
             runtime_desired_running=runtime_desired_running,
             runtime_desired_running_alive=runtime_desired_running_alive,
             runtime_failing=runtime_failing,
+            db_connection_estimate=db_connection_estimate,
+            db_connection_budget=db_connection_budget,
+            db_capacity_warning=db_capacity_warning,
         )
     except Exception:  # noqa: BLE001
         return WorkersStatus()
@@ -2048,71 +2073,172 @@ async def restart_app(_user: CurrentUser) -> RestartResponse:
 # 配置备份与导出 / 导入
 # ════════════════════════════════════════════════════════════
 
-# 每个类别定义：ORM 模型、序列化时排除的敏感字段、标识字段（用于去重）
+# 配置包格式版本。V1 是 0.56.7 及更早的无版本 JSON；V2 增加依赖拓扑和 ID 映射。
+_CONFIG_BUNDLE_FORMAT = "telepilot-config"
+_CONFIG_BUNDLE_VERSION = 2
+
+# 每个类别定义：ORM 模型、敏感字段、自然标识、ID 映射与依赖关系。
 _EXPORT_DEFS: dict[str, dict[str, Any]] = {
     "system_settings": {
         "model": "SystemSetting",
         "exclude_fields": set(),
-        "id_fields": {"key"},
+        "id_fields": ("key",),
+        "pk_field": "key",
+    },
+    "proxies": {
+        "model": "Proxy",
+        "exclude_fields": {"password_enc"},
+        "id_fields": ("type", "host", "port", "username"),
+        "nullable_identity_fields": {"username"},
+        "pk_field": "id",
+    },
+    "device_profiles": {
+        "model": "DeviceProfile",
+        "exclude_fields": set(),
+        "id_fields": ("name",),
+        "pk_field": "id",
+    },
+    "feature_registry": {
+        "model": "Feature",
+        "exclude_fields": set(),
+        "id_fields": ("key",),
+        "pk_field": "key",
+    },
+    "plugin_global_configs": {
+        "model": "PluginGlobalConfig",
+        "exclude_fields": set(),
+        "id_fields": ("plugin_key",),
+        "dependencies": ("feature_registry",),
+        "references": {"plugin_key": "feature_registry"},
     },
     "command_templates": {
         "model": "CommandTemplate",
         "exclude_fields": set(),
-        "id_fields": {"name"},
+        "id_fields": ("name",),
+        "pk_field": "id",
+        "dependencies": ("llm_providers",),
     },
     "account_commands": {
         "model": "AccountCommandLink",
         "exclude_fields": set(),
-        "id_fields": {"account_id", "template_id"},
+        "id_fields": ("account_id", "template_id"),
+        "dependencies": ("account_settings", "command_templates"),
+        "references": {
+            "account_id": "account_settings",
+            "template_id": "command_templates",
+        },
     },
     "llm_providers": {
         "model": "LLMProvider",
         "exclude_fields": {"api_key_enc"},
-        "id_fields": {"name"},
+        "id_fields": ("name",),
+        "pk_field": "id",
+        "dependencies": ("proxies",),
+        "references": {"proxy_id": "proxies"},
     },
     "forward_rules": {
         "model": "Rule",
         "exclude_fields": set(),
         "filter": {"feature_key": "forward"},
-        "id_fields": {"account_id", "feature_key", "name"},
+        "id_fields": ("account_id", "feature_key", "name"),
+        "pk_field": "id",
+        "map_group": "rules",
+        "dependencies": ("account_settings",),
+        "references": {"account_id": "account_settings"},
     },
     "auto_reply_rules": {
         "model": "Rule",
         "exclude_fields": set(),
         "filter": {"feature_key": "auto_reply"},
-        "id_fields": {"account_id", "feature_key", "name"},
+        "id_fields": ("account_id", "feature_key", "name"),
+        "pk_field": "id",
+        "map_group": "rules",
+        "dependencies": ("account_settings",),
+        "references": {"account_id": "account_settings"},
     },
     "rate_limit_templates": {
         "model": "RateLimitTemplate",
         "exclude_fields": set(),
-        "id_fields": {"name"},
+        "id_fields": ("name",),
+        "pk_field": "id",
     },
     "rate_limit_rules": {
         "model": "RateLimitRule",
         "exclude_fields": set(),
-        "id_fields": {"scope", "scope_id", "action"},
+        "id_fields": ("scope", "scope_id", "action"),
+        "pk_field": "id",
+        "dependencies": (
+            "rate_limit_templates",
+            "account_settings",
+            "forward_rules",
+            "auto_reply_rules",
+        ),
     },
     "feature_config": {
         "model": "AccountFeature",
         "exclude_fields": set(),
-        "id_fields": {"account_id", "feature_key"},
+        "id_fields": ("account_id", "feature_key"),
+        "dependencies": ("account_settings", "feature_registry"),
+        "references": {
+            "account_id": "account_settings",
+            "feature_key": "feature_registry",
+        },
     },
     "account_settings": {
         "model": "Account",
         "exclude_fields": {"session_enc", "api_id_enc", "api_hash_enc", "phone"},
-        "id_fields": {"id"},
+        "id_fields": ("phone",),
+        "identity_candidates": (("phone",), ("tg_user_id",)),
+        "pk_field": "id",
+        "dependencies": ("rate_limit_templates", "proxies", "device_profiles"),
+        "references": {
+            "template_id": "rate_limit_templates",
+            "proxy_id": "proxies",
+            "device_profile_id": "device_profiles",
+        },
+    },
+    "humanize_configs": {
+        "model": "HumanizeConfig",
+        "exclude_fields": set(),
+        "id_fields": ("account_id",),
+        "dependencies": ("account_settings",),
+        "references": {"account_id": "account_settings"},
     },
     "ignored_peers": {
         "model": "IgnoredPeer",
         "exclude_fields": set(),
-        "id_fields": {"account_id", "peer_id"},
+        "id_fields": ("account_id", "peer_id"),
+        "pk_field": "id",
+        "dependencies": ("account_settings",),
+        "references": {"account_id": "account_settings"},
     },
     "notify_bots": {
         "model": "NotifyBot",
         "exclude_fields": {"bot_token_enc"},
-        "id_fields": {"name"},
+        "id_fields": ("name",),
+        "pk_field": "id",
     },
 }
+
+_IMPORT_TOPOLOGY = (
+    "system_settings",
+    "proxies",
+    "device_profiles",
+    "feature_registry",
+    "plugin_global_configs",
+    "rate_limit_templates",
+    "account_settings",
+    "humanize_configs",
+    "llm_providers",
+    "command_templates",
+    "forward_rules",
+    "auto_reply_rules",
+    "feature_config",
+    "ignored_peers",
+    "notify_bots",
+    "account_commands",
+    "rate_limit_rules",
+)
 
 # 敏感字段的完整集合（include_sensitive=true 时不排除）
 _ALL_SENSITIVE = {"session_enc", "api_key_enc", "api_id_enc", "api_hash_enc", "phone", "bot_token_enc", "password_enc"}
@@ -2143,7 +2269,7 @@ def _row_to_dict(row: Any, exclude: set[str], include_sensitive: bool) -> dict[s
             elif isinstance(val, (bytes, bytearray)):
                 val = val.hex() if include_sensitive else None
             data[name] = val
-    return {k: v for k, v in data.items() if v is not None}
+    return data
 
 
 def _system_setting_safe_for_export(key: Any) -> bool:
@@ -2153,29 +2279,32 @@ def _system_setting_safe_for_export(key: Any) -> bool:
     return not any(normalized.startswith(prefix) for prefix in _SENSITIVE_SYSTEM_SETTING_PREFIXES)
 
 
-@router.post("/export-config")
-async def export_config(
-    _user: CurrentUser,
-    body: ExportConfigRequest,
-) -> JSONResponse:
-    """导出配置为 JSON 文件下载。"""
-    from .. import __version__
+def _config_model_map() -> dict[str, Any]:
     from ..db.models import (
         Account,
         AccountCommandLink,
         AccountFeature,
         CommandTemplate,
+        Feature,
+        HumanizeConfig,
         IgnoredPeer,
         LLMProvider,
         NotifyBot,
+        PluginGlobalConfig,
+        Proxy,
         RateLimitRule,
         RateLimitTemplate,
         Rule,
     )
+    from ..db.models.account import DeviceProfile
     from ..db.models.system import SystemSetting
 
-    model_map = {
+    return {
         "SystemSetting": SystemSetting,
+        "Proxy": Proxy,
+        "DeviceProfile": DeviceProfile,
+        "Feature": Feature,
+        "PluginGlobalConfig": PluginGlobalConfig,
         "CommandTemplate": CommandTemplate,
         "AccountCommandLink": AccountCommandLink,
         "LLMProvider": LLMProvider,
@@ -2184,43 +2313,90 @@ async def export_config(
         "RateLimitRule": RateLimitRule,
         "AccountFeature": AccountFeature,
         "Account": Account,
+        "HumanizeConfig": HumanizeConfig,
         "IgnoredPeer": IgnoredPeer,
         "NotifyBot": NotifyBot,
     }
 
+
+def _expand_export_categories(categories: list[str]) -> list[str]:
+    wanted: set[str] = set()
+
+    def include(category: str) -> None:
+        if category in wanted or category not in _EXPORT_DEFS:
+            return
+        for dependency in _EXPORT_DEFS[category].get("dependencies", ()):
+            include(dependency)
+        wanted.add(category)
+
+    for category in categories:
+        include(category)
+    return [category for category in _IMPORT_TOPOLOGY if category in wanted]
+
+
+async def _build_export_payload(
+    *,
+    categories: list[str],
+    include_sensitive: bool,
+    session_factory: Callable[[], Any] | None = None,
+    model_map: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    from .. import __version__
+
+    selected = [category for category in categories if category in _EXPORT_DEFS]
+    included = _expand_export_categories(selected)
+    models = model_map or _config_model_map()
+    factory = session_factory or AsyncSessionLocal
     result: dict[str, Any] = {
         "_meta": {
+            "format": _CONFIG_BUNDLE_FORMAT,
+            "bundle_version": _CONFIG_BUNDLE_VERSION,
+            "app_version": __version__,
+            # 保留旧字段，方便旧版 UI 展示来源版本。
             "version": __version__,
             "exported_at": datetime.now().isoformat(),
-            "include_sensitive": body.include_sensitive,
+            "include_sensitive": include_sensitive,
+            "requested_categories": selected,
+            "included_categories": included,
+            "dependency_order": list(_IMPORT_TOPOLOGY),
         },
     }
+    async with factory() as db:
+        for category in included:
+            definition = _EXPORT_DEFS[category]
+            model_cls = models.get(definition["model"])
+            if model_cls is None:
+                continue
+            query = select(model_cls)
+            for key, value in (definition.get("filter") or {}).items():
+                query = query.where(getattr(model_cls, key) == value)
+            rows = (await db.execute(query)).scalars().all()
+            if model_cls.__name__ == "SystemSetting" and not include_sensitive:
+                rows = [
+                    row
+                    for row in rows
+                    if _system_setting_safe_for_export(getattr(row, "key", ""))
+                ]
+            exclude = set() if include_sensitive else definition["exclude_fields"]
+            result[category] = [
+                _row_to_dict(row, exclude, include_sensitive) for row in rows
+            ]
+    return result
 
-    for cat in body.categories:
-        defn = _EXPORT_DEFS.get(cat)
-        if not defn:
-            continue
-        model_cls = model_map.get(defn["model"])
-        if not model_cls:
-            continue
 
-        exclude = defn["exclude_fields"]
-        if body.include_sensitive:
-            exclude = set()
-
-        try:
-            async with AsyncSessionLocal() as db:
-                query = select(model_cls)
-                filt = defn.get("filter")
-                if filt:
-                    for k, v in filt.items():
-                        query = query.where(getattr(model_cls, k) == v)
-                rows = (await db.execute(query)).scalars().all()
-                if model_cls is SystemSetting and not body.include_sensitive:
-                    rows = [row for row in rows if _system_setting_safe_for_export(getattr(row, "key", ""))]
-                result[cat] = [_row_to_dict(r, exclude, body.include_sensitive) for r in rows]
-        except Exception as e:  # noqa: BLE001
-            result[cat] = {"_error": f"{type(e).__name__}: {str(e)[:200]}"}
+@router.post("/export-config")
+async def export_config(
+    _user: CurrentUser,
+    body: ExportConfigRequest,
+) -> JSONResponse:
+    """导出配置为 JSON 文件下载。"""
+    try:
+        result = await _build_export_payload(
+            categories=body.categories,
+            include_sensitive=body.include_sensitive,
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail="导出配置失败，未生成不完整备份") from exc
 
     filename = f"telepilot-config-{datetime.now().strftime('%Y-%m-%d')}.json"
     return JSONResponse(
@@ -2234,6 +2410,313 @@ class ImportConfigResponse(BaseModel):
     imported: int = 0
     skipped: int = 0
     warnings: list[str] = Field(default_factory=list)
+    bundle_version: int = _CONFIG_BUNDLE_VERSION
+    affected_categories: list[str] = Field(default_factory=list)
+    affected_accounts: list[int] = Field(default_factory=list)
+    reloaded_accounts: list[int] = Field(default_factory=list)
+    restart_required: bool = False
+    id_mappings: dict[str, dict[str, Any]] = Field(default_factory=dict)
+
+
+class ConfigImportError(RuntimeError):
+    def __init__(self, message: str, *, imported: int = 0) -> None:
+        super().__init__(message)
+        self.imported = imported
+
+
+def _coerce_import_value(column: Any, value: Any) -> Any:
+    if value is None:
+        return None
+    try:
+        python_type = column.type.python_type
+    except (AttributeError, NotImplementedError):
+        return value
+    if python_type is bytes and isinstance(value, str):
+        return bytes.fromhex(value)
+    if python_type is datetime and isinstance(value, str):
+        return datetime.fromisoformat(value)
+    if python_type is date and isinstance(value, str):
+        return date.fromisoformat(value)
+    if python_type is datetime_time and isinstance(value, str):
+        return datetime_time.fromisoformat(value)
+    return value
+
+
+def _mapping_key(value: Any) -> str:
+    return str(value)
+
+
+def _lookup_mapping(
+    mappings: dict[str, dict[str, Any]],
+    category: str,
+    source_value: Any,
+) -> Any:
+    mapped = mappings.get(category, {}).get(_mapping_key(source_value))
+    if mapped is None:
+        raise ConfigImportError(
+            f"缺少依赖映射：{category} 的旧 ID {source_value}；请使用完整的 V2 配置包"
+        )
+    return mapped
+
+
+def _remap_command_config(
+    config: Any,
+    mappings: dict[str, dict[str, Any]],
+) -> Any:
+    if not isinstance(config, dict):
+        return config
+    remapped = dict(config)
+    provider_id = remapped.get("provider_id")
+    if provider_id is not None:
+        remapped["provider_id"] = _lookup_mapping(
+            mappings, "llm_providers", provider_id
+        )
+    fallback_ids = remapped.get("fallback_provider_ids")
+    if isinstance(fallback_ids, list):
+        remapped["fallback_provider_ids"] = [
+            _lookup_mapping(mappings, "llm_providers", value)
+            for value in fallback_ids
+        ]
+    return remapped
+
+
+def _remap_import_row(
+    category: str,
+    row: dict[str, Any],
+    mappings: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    definition = _EXPORT_DEFS[category]
+    remapped = dict(row)
+    for field, dependency in definition.get("references", {}).items():
+        value = remapped.get(field)
+        if value is not None:
+            remapped[field] = _lookup_mapping(mappings, dependency, value)
+    if category == "rate_limit_rules":
+        scope = str(remapped.get("scope") or "")
+        dependency = {
+            "template": "rate_limit_templates",
+            "account": "account_settings",
+            "rule": "rules",
+        }.get(scope)
+        if dependency and remapped.get("scope_id") is not None:
+            remapped["scope_id"] = _lookup_mapping(
+                mappings, dependency, remapped["scope_id"]
+            )
+    if category == "command_templates" and "config" in remapped:
+        remapped["config"] = _remap_command_config(remapped["config"], mappings)
+    return remapped
+
+
+async def _import_config_payload(
+    payload: dict[str, Any],
+    *,
+    session_factory: Callable[[], Any] | None = None,
+    model_map: dict[str, Any] | None = None,
+) -> ImportConfigResponse:
+    if not isinstance(payload, dict):
+        raise ConfigImportError("配置包根节点必须是 JSON object")
+    meta = payload.get("_meta") if isinstance(payload.get("_meta"), dict) else {}
+    bundle_format = meta.get("format")
+    if bundle_format not in (None, _CONFIG_BUNDLE_FORMAT):
+        raise ConfigImportError(f"不支持的配置包格式：{bundle_format}")
+    raw_version = meta.get("bundle_version", 1)
+    try:
+        bundle_version = int(raw_version)
+    except (TypeError, ValueError) as exc:
+        raise ConfigImportError("配置包版本不是整数") from exc
+    if bundle_version < 1 or bundle_version > _CONFIG_BUNDLE_VERSION:
+        raise ConfigImportError(f"不支持的配置包版本：{bundle_version}")
+    if bundle_version >= 2 and bundle_format != _CONFIG_BUNDLE_FORMAT:
+        raise ConfigImportError("V2 配置包缺少合法的 format 标识")
+    payload_categories = {key for key in payload if key != "_meta"}
+    unknown_categories = sorted(payload_categories - set(_EXPORT_DEFS))
+    if unknown_categories:
+        raise ConfigImportError(f"配置包包含未知类别：{', '.join(unknown_categories)}")
+    if not payload_categories:
+        raise ConfigImportError("配置包不包含任何可恢复类别")
+    declared_categories = meta.get("included_categories")
+    if isinstance(declared_categories, list):
+        missing_categories = sorted(
+            {str(value) for value in declared_categories} - payload_categories
+        )
+        if missing_categories:
+            raise ConfigImportError(
+                f"配置包内容不完整，缺少声明类别：{', '.join(missing_categories)}"
+            )
+
+    models = model_map or _config_model_map()
+    factory = session_factory or AsyncSessionLocal
+    mappings: dict[str, dict[str, Any]] = {}
+    imported = 0
+    skipped = 0
+    affected_categories: set[str] = set()
+    affected_accounts: set[int] = set()
+    db = None
+
+    try:
+        async with factory() as db:
+            for category in _IMPORT_TOPOLOGY:
+                rows = payload.get(category)
+                if rows is None:
+                    continue
+                if not isinstance(rows, list):
+                    raise ConfigImportError(f"[{category}] 必须是数组")
+                definition = _EXPORT_DEFS[category]
+                model_cls = models.get(definition["model"])
+                if model_cls is None:
+                    raise ConfigImportError(f"[{category}] 当前运行版本缺少对应模型")
+                table_columns = {column.name: column for column in model_cls.__table__.columns}
+                category_map = mappings.setdefault(category, {})
+                map_group = definition.get("map_group")
+                group_map = mappings.setdefault(map_group, {}) if map_group else None
+
+                for source in rows:
+                    if not isinstance(source, dict):
+                        raise ConfigImportError(f"[{category}] 行必须是 object")
+                    source_pk = source.get(definition.get("pk_field", ""))
+                    remapped = _remap_import_row(category, source, mappings)
+                    filtered: dict[str, Any] = {}
+                    exclude = (
+                        set()
+                        if bool(meta.get("include_sensitive"))
+                        else definition["exclude_fields"]
+                    )
+                    for key, value in remapped.items():
+                        if key not in table_columns or key in exclude:
+                            continue
+                        if key in {"created_at", "updated_at", "added_at", "installed_at"}:
+                            continue
+                        if key == definition.get("pk_field") and key == "id":
+                            continue
+                        filtered[key] = _coerce_import_value(table_columns[key], value)
+
+                    identity: dict[str, Any] | None = None
+                    candidates = definition.get(
+                        "identity_candidates", (definition["id_fields"],)
+                    )
+                    nullable_identity_fields = definition.get(
+                        "nullable_identity_fields", set()
+                    )
+                    for candidate in candidates:
+                        if all(
+                            field in filtered
+                            and (
+                                filtered[field] is not None
+                                or field in nullable_identity_fields
+                            )
+                            for field in candidate
+                        ):
+                            identity = {field: filtered[field] for field in candidate}
+                            break
+                    if identity is None:
+                        raise ConfigImportError(
+                            f"[{category}] 缺少稳定标识字段："
+                            f"{', '.join(definition['id_fields'])}"
+                        )
+                    query = select(model_cls)
+                    for field, value in identity.items():
+                        query = query.where(getattr(model_cls, field) == value)
+                    existing = (await db.execute(query.limit(1))).scalar_one_or_none()
+                    if existing is not None:
+                        skipped += 1
+                        target_pk_field = definition.get("pk_field")
+                        if source_pk is not None and target_pk_field:
+                            target_pk = getattr(existing, target_pk_field)
+                            category_map[_mapping_key(source_pk)] = target_pk
+                            if group_map is not None:
+                                group_map[_mapping_key(source_pk)] = target_pk
+                        if hasattr(existing, "account_id"):
+                            affected_accounts.add(int(existing.account_id))
+                        continue
+
+                    new_row = model_cls(**filtered)
+                    db.add(new_row)
+                    await db.flush()
+                    imported += 1
+                    affected_categories.add(category)
+                    target_pk_field = definition.get("pk_field")
+                    if source_pk is not None and target_pk_field:
+                        target_pk = getattr(new_row, target_pk_field)
+                        category_map[_mapping_key(source_pk)] = target_pk
+                        if group_map is not None:
+                            group_map[_mapping_key(source_pk)] = target_pk
+                    if category == "account_settings":
+                        affected_accounts.add(int(new_row.id))
+                    elif hasattr(new_row, "account_id"):
+                        affected_accounts.add(int(new_row.account_id))
+
+            runtime_categories = {
+                "system_settings",
+                "llm_providers",
+                "command_templates",
+                "plugin_global_configs",
+                "rate_limit_templates",
+                "rate_limit_rules",
+            }
+            if affected_categories & runtime_categories and "Account" in models:
+                account_ids = (await db.execute(select(models["Account"].id))).scalars().all()
+                affected_accounts.update(int(account_id) for account_id in account_ids)
+            await db.commit()
+    except ConfigImportError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        if db is not None:
+            try:
+                await db.rollback()
+            except Exception:  # noqa: BLE001
+                pass
+        raise ConfigImportError(f"配置导入事务失败：{type(exc).__name__}: {exc}", imported=0) from exc
+
+    public_mappings = {
+        category: values
+        for category, values in mappings.items()
+        if category in _EXPORT_DEFS and values
+    }
+    return ImportConfigResponse(
+        imported=imported,
+        skipped=skipped,
+        bundle_version=bundle_version,
+        affected_categories=[
+            category for category in _IMPORT_TOPOLOGY if category in affected_categories
+        ],
+        affected_accounts=sorted(affected_accounts),
+        id_mappings=public_mappings,
+    )
+
+
+async def _reload_imported_runtime(account_ids: list[int]) -> tuple[list[int], bool]:
+    if not account_ids:
+        return [], False
+    from ..worker.ipc import (
+        CMD_RELOAD_COMMANDS,
+        CMD_RELOAD_CONFIG,
+        CMD_RELOAD_IGNORED,
+        publish_cmd_with_ack,
+    )
+
+    try:
+        redis = get_redis()
+        semaphore = asyncio.Semaphore(4)
+
+        async def reload_one(account_id: int) -> tuple[int, bool]:
+            confirmed = True
+            async with semaphore:
+                for command in (
+                    CMD_RELOAD_CONFIG,
+                    CMD_RELOAD_COMMANDS,
+                    CMD_RELOAD_IGNORED,
+                ):
+                    confirmed = bool(
+                        await publish_cmd_with_ack(redis, account_id, command)
+                    ) and confirmed
+            return account_id, confirmed
+
+        results = await asyncio.gather(*(reload_one(value) for value in account_ids))
+    except Exception:  # noqa: BLE001
+        return [], True
+    reloaded = [account_id for account_id, confirmed in results if confirmed]
+    restart_required = any(not confirmed for _, confirmed in results)
+    return reloaded, restart_required
 
 
 @router.post("/import-config", response_model=ImportConfigResponse)
@@ -2244,109 +2727,33 @@ async def import_config(
     """从上传的 JSON 文件导入配置。冲突策略：同名/同 ID 跳过并记录。"""
     import json as _json
 
-    from ..db.models import (
-        Account,
-        AccountCommandLink,
-        AccountFeature,
-        CommandTemplate,
-        IgnoredPeer,
-        LLMProvider,
-        NotifyBot,
-        RateLimitRule,
-        RateLimitTemplate,
-        Rule,
-    )
-    from ..db.models.system import SystemSetting
-
-    model_map = {
-        "SystemSetting": SystemSetting,
-        "CommandTemplate": CommandTemplate,
-        "AccountCommandLink": AccountCommandLink,
-        "LLMProvider": LLMProvider,
-        "Rule": Rule,
-        "RateLimitTemplate": RateLimitTemplate,
-        "RateLimitRule": RateLimitRule,
-        "AccountFeature": AccountFeature,
-        "Account": Account,
-        "IgnoredPeer": IgnoredPeer,
-        "NotifyBot": NotifyBot,
-    }
-
     content = await file.read()
+    if len(content) > 10 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="配置包超过 10MB")
     try:
         data = _json.loads(content)
-    except Exception:
-        return ImportConfigResponse(warnings=["上传的文件不是合法的 JSON"])
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="上传的文件不是合法的 JSON") from exc
 
-    meta = data.pop("_meta", {})
-    imported = 0
-    skipped = 0
-    warnings: list[str] = []
+    try:
+        outcome = await _import_config_payload(data)
+    except ConfigImportError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
-    for cat, rows in data.items():
-        defn = _EXPORT_DEFS.get(cat)
-        if not defn or not isinstance(rows, list):
-            if isinstance(rows, dict) and "_error" in rows:
-                warnings.append(f"[{cat}] 导出时出错: {rows['_error']}")
-            continue
-
-        model_cls = model_map.get(defn["model"])
-        if not model_cls:
-            continue
-
-        id_fields = defn["id_fields"]
-        exclude = defn["exclude_fields"]
-        include_sensitive = meta.get("include_sensitive", False)
-        if include_sensitive:
-            exclude = set()
-
-        try:
-            async with AsyncSessionLocal() as db:
-                for row_data in rows:
-                    if not isinstance(row_data, dict):
-                        continue
-                    # 检查是否已存在（按 id_fields 判断冲突）
-                    exists_query = select(model_cls)
-                    for f in id_fields:
-                        if f in row_data:
-                            exists_query = exists_query.where(
-                                getattr(model_cls, f) == row_data[f]
-                            )
-                    existing = (await db.execute(exists_query.limit(1))).scalar_one_or_none()
-                    if existing is not None:
-                        skipped += 1
-                        continue
-
-                    # 过滤排除字段 + 不允许覆盖 id 等自动生成字段
-                    auto_fields = {"id", "created_at", "updated_at"}
-                    filtered = {
-                        k: v for k, v in row_data.items()
-                        if k not in exclude and k not in auto_fields
-                    }
-
-                    # hex 字符串转回 bytes（session_enc）
-                    for k, v in list(filtered.items()):
-                        col_type = getattr(model_cls.__table__.c, k, None)
-                        if col_type and hasattr(col_type.type, "python_type"):
-                            try:
-                                py_type = col_type.type.python_type
-                                if py_type is bytes and isinstance(v, str):
-                                    filtered[k] = bytes.fromhex(v)
-                            except Exception:
-                                pass
-
-                    try:
-                        new_row = model_cls(**filtered)
-                        db.add(new_row)
-                        imported += 1
-                    except Exception as exc:  # noqa: BLE001
-                        warnings.append(f"[{cat}] 插入失败: {str(exc)[:100]}")
-
-                await db.commit()
-        except Exception as exc:  # noqa: BLE001
-            warnings.append(f"[{cat}] 批量导入失败: {str(exc)[:200]}")
-
-    return ImportConfigResponse(imported=imported, skipped=skipped, warnings=warnings)
+    reloaded, restart_required = await _reload_imported_runtime(
+        outcome.affected_accounts
+    )
+    return outcome.model_copy(
+        update={
+            "reloaded_accounts": reloaded,
+            "restart_required": restart_required,
+            "warnings": (
+                ["部分 Worker 未确认配置热重载，请重启应用后再继续操作"]
+                if restart_required
+                else []
+            ),
+        }
+    )
 
 
 __all__ = ["router"]

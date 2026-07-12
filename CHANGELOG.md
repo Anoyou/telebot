@@ -20,6 +20,29 @@
 
 ## [Unreleased]
 
+## [0.56.8] — 2026-07-12 · patch（补丁版本） · 全链路可靠性与恢复能力修复
+
+### Added
+- payout 发送新增数据库持久化 intent / claim / sent 状态机，以 `(account_id, payout_key)` 作为统一幂等边界；收入事件新增 `source_event_key` 持久化去重，补偿、台账和 Redis 标记共享同一身份合同。
+- Worker RPC 增加稳定 request ID、deadline、副作用前二次检查、结果短期持久化与超时 reconcile，并改为每账号有界并发队列，避免无界任务和超时后重复执行。
+- 配置备份升级为 V2 bundle，恢复时按依赖拓扑执行 ID 重映射、单事务提交和运行时 reload；旧备份继续兼容。
+- 插件调用增加超时和按插件隔离的熔断器；installed 插件在执行 Python 前先静态检查 `plugin.json` 兼容性。
+
+### Fixed
+- 修复稳定 `payout_key` 串行、并发或超时重试仍可能重复触发 Telegram 副作用，以及不同账号同 key 被全局唯一约束误伤的问题；Alembic 0039 同步修正历史账本和 downgrade 的旧全局命名空间映射。
+- 修复收款通知重放可能重复计入收入、台账列表在大量非资金事件后漏掉真实流水，以及补偿记录与 ActionEvent 查询未完整带账号作用域的问题。
+- 修复 Bot / UserBot 同时扫描过期会话时可能重复触发 `session_expired`，以及处理期间并发续期仍删除新会话的问题；现使用带 token 和 revision 的 Redis Lua 租约与 compare-delete。
+- 资金或会话路径的跨管道消息 claim 改为 Redis 故障时 fail-closed；普通非关键路径仍保留原有兼容策略。
+- 修复 LLM 空 200、数组 content、fallback 错误作用域、候选能力筛选、备用 Provider 预算穿透和 Anthropic 推理强度映射等协议边界问题。
+- 修复配置恢复过程中的外键 ID 漂移、半应用状态和恢复后 Worker 未刷新；备份目录、数据库 dump、会话与插件归档统一收紧为私有权限。
+- 修复插件全局敏感字段回退时可能把 `secret:v1` 信封原样交给插件；解密失败会隔离对应插件并记录脱敏错误，不再带着损坏配置启动。
+- 修复日志搜索 GET 过长、结果翻页受新日志插入影响、前端 query key 漂移和后台 refetch 覆盖未保存编辑等问题；Dashboard 与配置页补齐明确错误状态。
+- 修复 PWA 首次在线打开后未缓存导航 HTML，导致安装后首次断网无法重新进入控制台的问题。
+
+### Changed
+- PostgreSQL 默认启用 `synchronous_commit=on`，并按 Worker overflow 调整小、中、大部署档位的连接预算与系统健康预警。
+- Provider fallback、插件 quota、usage 与结构化错误继续复用公共 LLM runtime；协议候选会在调用前排除明显不兼容的模型能力。
+
 ## [0.56.7] — 2026-07-12 · patch（补丁版本） · 网页更新恢复与弹窗布局修复
 
 ### Fixed

@@ -151,6 +151,44 @@ async def test_emit_action_event_persists_status_and_publishes(
 
 
 @pytest.mark.asyncio
+async def test_income_source_event_is_deduplicated_across_replays(
+    action_event_session_factory,
+) -> None:
+    redis = _FakeRedis()
+    action = {
+        "type": "payment_confirmed",
+        "source_event_key": "update:7788",
+        "chat_id": -100123,
+        "amount": 10,
+    }
+
+    first = await action_tap.emit_action_event(
+        account_id=7,
+        action=action,
+        status=ACTION_EVENT_STATUS_OK,
+        channel="external_payment_notice",
+        redis=redis,
+    )
+    second = await action_tap.emit_action_event(
+        account_id=7,
+        action=action,
+        status=ACTION_EVENT_STATUS_OK,
+        channel="external_payment_notice",
+        redis=redis,
+    )
+
+    async with action_event_session_factory() as db:
+        rows = (
+            await db.execute(
+                select(ActionEvent).where(ActionEvent.source_event_key == "update:7788")
+            )
+        ).scalars().all()
+    assert len(rows) == 1
+    assert first is not None or second is not None
+    assert len(redis.published) == 1
+
+
+@pytest.mark.asyncio
 async def test_delivery_payout_dry_run_does_not_publish_worker_ipc(monkeypatch) -> None:
     run_worker_action = AsyncMock(return_value=(True, None, {"message_id": 1}))
     record_action = AsyncMock()

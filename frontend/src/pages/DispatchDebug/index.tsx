@@ -32,6 +32,7 @@ import { SignalPill } from "@/components/ui/status";
 import { Textarea } from "@/components/ui/textarea";
 import { getErrMsg } from "@/lib/api";
 import { cn } from "@/lib/utils";
+import { queryKeys } from "@/lib/queryKeys";
 
 const STAGE_LABELS: Record<string, string> = {
   direct_passthrough: "直通",
@@ -296,7 +297,7 @@ export function DispatchDebugPage() {
   );
   const commandPrefix = settingsQ.data?.command_prefix || ",";
   const allowedPeersQ = useQuery({
-    queryKey: ["accounts", selectedAid, "ignored-peers"],
+    queryKey: queryKeys.ignoredPeers(selectedAid || undefined),
     queryFn: () => listIgnoredPeers(selectedAid as number),
     enabled: selectedAid !== null,
   });

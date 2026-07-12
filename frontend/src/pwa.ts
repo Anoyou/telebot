@@ -2,6 +2,16 @@
 // vite-plugin-pwa 在构建时把 `virtual:pwa-register` 解析为真正的注册代码；
 // 类型声明在 src/vite-env.d.ts 里通过 `vite-plugin-pwa/client` 引入。
 let pwaRegistration: ServiceWorkerRegistration | undefined;
+const HTML_CACHE_NAME = "html";
+
+async function warmOfflineShell(): Promise<void> {
+  if (!("caches" in window)) return;
+  const shellUrl = new URL("/", window.location.origin).toString();
+  const response = await fetch(shellUrl, { cache: "no-store", credentials: "same-origin" });
+  if (!response.ok) return;
+  const cache = await caches.open(HTML_CACHE_NAME);
+  await cache.put(shellUrl, response);
+}
 
 export async function checkFrontendUpdate(): Promise<"updating" | "up_to_date" | "unsupported" | "error"> {
   if (
@@ -45,6 +55,9 @@ export function registerPWA() {
         // autoUpdate 模式不会调用 onNeedRefresh，新 SW 激活后会自动刷新页面。
         onRegisteredSW(_swUrl, registration) {
           pwaRegistration = registration;
+          void warmOfflineShell().catch(() => {
+            // 在线预热失败不影响当前页；下次在线启动会再试。
+          });
         },
         immediate: true,
       });

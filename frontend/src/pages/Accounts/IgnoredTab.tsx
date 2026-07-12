@@ -23,6 +23,7 @@ import {
 import { getAccount } from "@/api/accounts";
 import type { IgnoredPeer, PeerKind, RecentPeerItem } from "@/api/types";
 import { getErrMsg } from "@/lib/api";
+import { queryKeys } from "@/lib/queryKeys";
 
 // ── peer_kind 中文标签 ────────────────────────────────────────────
 const KIND_LABEL: Record<string, string> = {
@@ -65,7 +66,7 @@ export function IgnoredTab({ aid }: { aid: number }) {
     refetchIntervalInBackground: false,
   });
   const ignoredQ = useQuery({
-    queryKey: ["ignored-peers", aid],
+    queryKey: queryKeys.ignoredPeers(aid),
     queryFn: () => listIgnoredPeers(aid),
   });
 
@@ -96,7 +97,7 @@ export function IgnoredTab({ aid }: { aid: number }) {
     }) => addIgnoredPeer(aid, vars),
     onSuccess: () => {
       toast.success("已加入允许会话");
-      qc.invalidateQueries({ queryKey: ["ignored-peers", aid] });
+      qc.invalidateQueries({ queryKey: queryKeys.ignoredPeers(aid) });
     },
     onError: (err) => toast.error(getErrMsg(err)),
   });
@@ -105,7 +106,7 @@ export function IgnoredTab({ aid }: { aid: number }) {
     mutationFn: async (id: number) => removeIgnoredPeer(aid, id),
     onSuccess: () => {
       toast.success("已移除");
-      qc.invalidateQueries({ queryKey: ["ignored-peers", aid] });
+      qc.invalidateQueries({ queryKey: queryKeys.ignoredPeers(aid) });
     },
     onError: (err) => toast.error(getErrMsg(err)),
   });

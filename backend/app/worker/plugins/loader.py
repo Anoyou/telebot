@@ -37,6 +37,7 @@ import re
 import shutil
 import time
 import traceback
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from io import BytesIO
 from pathlib import Path
@@ -1418,12 +1419,19 @@ async def _invoke_userbot_event_bus_entry(
         call_log = _trace_log
     call_ctx = replace(ctx, messages=buffered_messages, client=call_client, log=call_log)
     plugin_payload = attach_tp_event(dict(payload))
-    if _plugin_overrides(inst, "on_event"):
-        actions = await inst.on_event(call_ctx, plugin_payload)
-    elif _plugin_overrides(inst, "on_interaction"):
-        actions = await inst.on_interaction(call_ctx, entry_key, plugin_payload)
-    else:
+
+    async def _call_handler() -> Any:
+        if _plugin_overrides(inst, "on_event"):
+            return await inst.on_event(call_ctx, plugin_payload)
+        if _plugin_overrides(inst, "on_interaction"):
+            return await inst.on_interaction(call_ctx, entry_key, plugin_payload)
         raise RuntimeError("插件未实现 on_event 或 on_interaction 入口")
+
+    actions = (
+        await _invoke_plugin_with_resilience(state, plugin_key, _call_handler)
+        if state is not None
+        else await _call_handler()
+    )
     if actions is None:
         actions = []
     if not isinstance(actions, list) or not all(isinstance(item, dict) for item in actions):
@@ -1715,7 +1723,11 @@ async def _dispatch_userbot_direct_passthrough(
         else:
             call_ctx = replace(ctx, client=call_client, log=call_log)
         try:
-            await handler(call_ctx, event)
+            await _invoke_plugin_with_resilience(
+                state,
+                plugin_key,
+                lambda _handler=handler, _ctx=call_ctx, _event=event: _handler(_ctx, _event),
+            )
             await record_span(
                 trace,
                 "plugin_invoke",
@@ -2790,6 +2802,67 @@ async def _apply_userbot_payout_action(state: _AccountState, event: Any, action:
             reply_to_user_id=reply_to_user_id,
         )
         return False
+    payout_redis = state.redis or get_redis()
+    try:
+        payout_claim = await payout_compensation.claim_payout_delivery(
+            payout_redis,
+            state.account_id,
+            payout_key,
+            payload={
+                **action,
+                "payout_key": payout_key,
+                "chat_id": target_chat_id,
+                "amount": amount,
+                "text": text,
+            },
+            origin="worker",
+        )
+    except Exception as exc:  # noqa: BLE001
+        await _record_userbot_action_failure(
+            state,
+            action,
+            error_code="payout_claim_unavailable",
+            error=f"{type(exc).__name__}: {exc}",
+            target_chat_id=target_chat_id,
+            reply_to_message_id=reply_to,
+            reply_to_user_id=reply_to_user_id,
+        )
+        return False
+    if payout_claim.status == "sent":
+        result = {
+            "message_id": payout_claim.sent_message_id or None,
+            "chat_id": target_chat_id,
+            "reply_to_message_id": reply_to,
+            "reply_to_user_id": reply_to_user_id,
+            "payout_key": payout_key,
+            "idempotent_replay": True,
+        }
+        await record_action(
+            action.get("context"),
+            action,
+            TRACE_STATUS_OK,
+            actual_send_via="userbot_reply",
+            result=result,
+        )
+        await _emit_userbot_action_tap(
+            state,
+            action,
+            ACTION_EVENT_STATUS_OK,
+            channel="userbot_reply",
+            result=result,
+        )
+        return True
+    if payout_claim.status != "acquired":
+        await _record_userbot_action_failure(
+            state,
+            action,
+            error_code="payout_in_progress",
+            error="payout delivery already in progress",
+            target_chat_id=target_chat_id,
+            reply_to_message_id=reply_to,
+            reply_to_user_id=reply_to_user_id,
+        )
+        return False
     # Telegram 发送与本地落标/记账分离：成功发送后绝不因本地异常进入可盲重发补偿。
     try:
         sent = await state.client.send_message(
@@ -2799,6 +2872,12 @@ async def _apply_userbot_payout_action(state: _AccountState, event: Any, action:
             parse_mode=_telethon_parse_mode(parse_mode),
         )
     except Exception as exc:  # noqa: BLE001
+        classification = payout_compensation.classify_payout_error(
+            payout_compensation.ERROR_TELEGRAM_API,
+            exc,
+        )
+        if not classification.ambiguous:
+            await payout_compensation.release_payout_delivery_claim(payout_redis, payout_claim)
         flood_detail = await _feed_engine_flood_wait(
             state,
             exc,
@@ -2830,12 +2909,21 @@ async def _apply_userbot_payout_action(state: _AccountState, event: Any, action:
         "reply_to_user_id": reply_to_user_id,
         "payout_key": payout_key,
     }
-    await payout_compensation.mark_payout_sent_marker(
-        state.redis or get_redis(),
+    marker_ok = await payout_compensation.complete_payout_delivery(
+        payout_redis,
+        payout_claim,
         state.account_id,
         payout_key,
         result.get("message_id"),
     )
+    if not marker_ok:
+        result["post_send_bookkeeping_failed"] = True
+        await _enqueue_compensation(
+            payout_compensation.ERROR_AMBIGUOUS_DELIVERY,
+            "payout sent marker write failed",
+            reply_to_message_id=reply_to,
+            reply_to_user_id=reply_to_user_id,
+        )
     try:
         await _save_action_message_id(state, action, result)
         await _save_userbot_reply_target(
@@ -4230,6 +4318,35 @@ def _manifest_compatible(manifest: Manifest) -> tuple[bool, str | None]:
     return True, None
 
 
+def _preflight_installed_plugin(path: Path) -> tuple[bool, str | None]:
+    """Reject incompatible installed plugins using static metadata before import."""
+
+    metadata_path = path / "plugin.json"
+    if not metadata_path.is_file():
+        return False, "缺少 plugin.json，无法在执行 Python 前验证兼容性"
+    try:
+        raw = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return False, f"plugin.json 无法读取: {type(exc).__name__}"
+    if not isinstance(raw, dict):
+        return False, "plugin.json 顶层必须是对象"
+
+    static_key = str(raw.get("name") or raw.get("key") or "").strip()
+    if static_key != path.name:
+        return False, f"plugin.json key={static_key!r} 与目录名 {path.name!r} 不一致"
+
+    static_manifest = SimpleNamespace(
+        min_telepilot_version=raw.get("min_telepilot_version"),
+        min_telebot_version=raw.get("min_telebot_version"),
+        requires_features=(
+            raw.get("requires_features")
+            if isinstance(raw.get("requires_features"), list)
+            else []
+        ),
+    )
+    return _manifest_compatible(static_manifest)
+
+
 def _warn_manifest_event_subscription_lint(manifest: Manifest) -> None:
     raw_subscriptions = getattr(manifest, "event_subscriptions", None)
     if not isinstance(raw_subscriptions, list):
@@ -4367,6 +4484,11 @@ def _load_dir(path: Path, source: str) -> dict[str, type[Plugin]]:
     if not init_file.exists():
         log.warning("插件目录 %s 缺少 __init__.py，跳过", path)
         return {}
+    if source == "installed":
+        compatible, reason = _preflight_installed_plugin(path)
+        if not compatible:
+            log.warning("installed 插件 %s 静态兼容检查失败，跳过: %s", path.name, reason)
+            return {}
     from .base import _REGISTRY  # 延迟 import 避免循环
 
     registry_snapshot = dict(_REGISTRY)
@@ -4640,6 +4762,33 @@ async def _write_account_feature_load_state(
     )
 
 
+async def _record_plugin_config_decryption_failure(
+    db: Any,
+    state: _AccountState,
+    feature_key: str,
+    redis: Any,
+    exc: Exception,
+) -> None:
+    """Fail only the affected plugin without logging an encrypted value."""
+
+    last_error = f"PLUGIN_CONFIG_DECRYPT_FAILED: {exc}"
+    await _write_account_feature_load_state(
+        db,
+        state.account_id,
+        feature_key,
+        state=FEATURE_STATE_FAILED,
+        last_error=last_error,
+    )
+    await _log(
+        redis,
+        state.account_id,
+        "error",
+        f"插件 {feature_key} 配置解密失败，已停止加载: {exc}",
+        source="system",
+        plugin_key=feature_key,
+    )
+
+
 async def _deny_installed_plugin_load(
     db: Any,
     redis: Any,
@@ -4734,6 +4883,48 @@ class _AccountState:
         # 未就绪时不启用“空集合=无会话”短路，避免进程刚起 / reload 后 / Redis 抖动
         # 导致历史会话不在集合里而产生全量假阴性（漏会话）。
         self.userbot_session_chats_ready: bool = False
+        # 连续失败熔断只针对协作式 async handler；无法中断不 yield 的 CPU 死循环。
+        self.plugin_circuits: dict[str, dict[str, float | int]] = {}
+
+
+async def _invoke_plugin_with_resilience(
+    state: _AccountState,
+    plugin_key: str,
+    factory: Callable[[], Awaitable[Any]],
+    *,
+    deadline_at_ms: int | None = None,
+) -> Any:
+    now = time.monotonic()
+    circuit = state.plugin_circuits.get(plugin_key)
+    if circuit is not None and float(circuit.get("opened_until") or 0) > now:
+        raise RuntimeError(f"PLUGIN_CIRCUIT_OPEN: {plugin_key}")
+
+    timeout = max(0.05, float(app_settings.plugin_invoke_timeout_seconds or 30.0))
+    if deadline_at_ms is not None and deadline_at_ms > 0:
+        timeout = min(timeout, max(0.0, (deadline_at_ms / 1000) - time.time()))
+    if timeout <= 0:
+        raise TimeoutError(f"PLUGIN_INVOKE_TIMEOUT: {plugin_key}")
+
+    try:
+        result = await asyncio.wait_for(factory(), timeout=timeout)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        failed_at = time.monotonic()
+        threshold = max(1, int(app_settings.plugin_circuit_failure_threshold or 3))
+        current = state.plugin_circuits.get(plugin_key) or {}
+        failures = int(current.get("failures") or 0) + 1
+        opened_until = 0.0
+        if failures >= threshold:
+            opened_until = failed_at + max(1.0, float(app_settings.plugin_circuit_cooldown_seconds or 60.0))
+        state.plugin_circuits[plugin_key] = {
+            "failures": failures,
+            "opened_until": opened_until,
+        }
+        raise
+    else:
+        state.plugin_circuits.pop(plugin_key, None)
+        return result
 
 
 # 进程级状态字典（一个 worker 进程通常只服务一个账号；用 dict 是为了灵活）
@@ -5436,6 +5627,7 @@ async def _dispatch_userbot_session_message(
             message_id=message_id,
             rule_id=session.get("rule_id"),
             redis=redis,
+            fail_open=False,
         ):
             await record_span(
                 trace,
@@ -5636,6 +5828,12 @@ def _userbot_session_expired_payload(
 
 
 async def scan_userbot_expired_sessions_once(account_id: int) -> int:
+    from ...services.interaction.session_index import unindex_session_key
+    from ...services.interaction.session_store import (
+        claim_expired_interaction_session,
+        finish_expired_interaction_session,
+    )
+
     state = _STATES.get(account_id)
     if state is None:
         return 0
@@ -5651,14 +5849,19 @@ async def scan_userbot_expired_sessions_once(account_id: int) -> int:
             expired = True
         if not expired:
             continue
+        claim = await claim_expired_interaction_session(
+            redis,
+            key,
+            expected_revision=_int_or_none(session.get("revision")) or 0,
+        )
+        if claim is None:
+            continue
         plugin_key = str(session.get("module_key") or "").strip()
         entry_key = str(session.get("entry_key") or "").strip()
+        success = False
         if not plugin_key or not entry_key:
-            delete = getattr(redis, "delete", None)
-            if callable(delete):
-                await delete(key)
-            continue
-        if not _entry_declares_session_expired(plugin_key, entry_key):
+            success = True
+        elif not _entry_declares_session_expired(plugin_key, entry_key):
             # 对齐 bot 侧：入口未声明 session_expired 事件则不派发插件，仅按原逻辑清理会话 key。
             log.debug(
                 "UserBot 会话过期跳过派发：入口未声明 session_expired plugin=%s entry=%s key=%s",
@@ -5677,72 +5880,77 @@ async def scan_userbot_expired_sessions_once(account_id: int) -> int:
                 message="插件入口未声明 session_expired 事件。",
                 session_key=key,
             )
-            delete = getattr(redis, "delete", None)
-            if callable(delete):
-                await delete(key)
-            continue
-        payload = _userbot_session_expired_payload(state, session_key=key, session=session)
-        trace = await _start_userbot_session_trace(state, payload, event_label="session_expired")
-        if trace is not None:
-            payload["trace_id"] = trace.trace_id
-        failed = False
-        try:
-            actions = await invoke_interaction_entry(
-                state.account_id,
-                plugin_key=plugin_key,
-                entry_key=entry_key,
-                payload=payload,
-                default_send_via=["userbot_reply"],
-            )
-            failed = await _apply_userbot_event_bus_actions(
-                state,
-                trace,
-                SimpleNamespace(chat_id=_int_or_none(session.get("chat_id"))),
-                plugin_key=plugin_key,
-                entry_key=entry_key,
-                actions=actions,
-                redis=redis,
-                session_key=key,
-                session=session,
-            )
-            await update_plugin_runtime_status(
-                account_id=state.account_id,
-                plugin_key=plugin_key,
-                last_invocation_status=TRACE_STATUS_FAILED if failed else TRACE_STATUS_OK,
-                last_trace_id=getattr(trace, "trace_id", None),
-            )
-        except Exception as exc:  # noqa: BLE001
-            failed = True
-            await record_span(
-                trace,
-                "plugin_invoke",
-                TRACE_STATUS_FAILED,
-                component="userbot_session_expired",
-                plugin_key=plugin_key,
-                entry_key=entry_key,
-                reason_code="plugin_runtime_error",
-                error=f"{type(exc).__name__}: {exc}",
-            )
-            await _log(
-                redis,
-                state.account_id,
-                "error",
-                f"插件 {plugin_key} 处理 UserBot 会话超时时出错：{type(exc).__name__}: {exc}。",
-                source="plugin",
-                plugin_key=plugin_key,
-                entry_key=entry_key,
-                session_key=key,
-                traceback=traceback.format_exc(limit=8),
-                **trace_log_context(trace),
-            )
-        finally:
-            delete = getattr(redis, "delete", None)
-            if callable(delete):
-                await delete(key)
+            success = True
+        else:
+            payload = _userbot_session_expired_payload(state, session_key=key, session=session)
+            trace = await _start_userbot_session_trace(state, payload, event_label="session_expired")
+            if trace is not None:
+                payload["trace_id"] = trace.trace_id
+            failed = False
+            try:
+                actions = await invoke_interaction_entry(
+                    state.account_id,
+                    plugin_key=plugin_key,
+                    entry_key=entry_key,
+                    payload=payload,
+                    default_send_via=["userbot_reply"],
+                )
+                failed = await _apply_userbot_event_bus_actions(
+                    state,
+                    trace,
+                    SimpleNamespace(chat_id=_int_or_none(session.get("chat_id"))),
+                    plugin_key=plugin_key,
+                    entry_key=entry_key,
+                    actions=actions,
+                    redis=redis,
+                    session_key=key,
+                    session=session,
+                )
+                await update_plugin_runtime_status(
+                    account_id=state.account_id,
+                    plugin_key=plugin_key,
+                    last_invocation_status=TRACE_STATUS_FAILED if failed else TRACE_STATUS_OK,
+                    last_trace_id=getattr(trace, "trace_id", None),
+                )
+            except Exception as exc:  # noqa: BLE001
+                failed = True
+                await record_span(
+                    trace,
+                    "plugin_invoke",
+                    TRACE_STATUS_FAILED,
+                    component="userbot_session_expired",
+                    plugin_key=plugin_key,
+                    entry_key=entry_key,
+                    reason_code="plugin_runtime_error",
+                    error=f"{type(exc).__name__}: {exc}",
+                )
+                await _log(
+                    redis,
+                    state.account_id,
+                    "error",
+                    f"插件 {plugin_key} 处理 UserBot 会话超时时出错：{type(exc).__name__}: {exc}。",
+                    source="plugin",
+                    plugin_key=plugin_key,
+                    entry_key=entry_key,
+                    session_key=key,
+                    traceback=traceback.format_exc(limit=8),
+                    **trace_log_context(trace),
+                )
+            finally:
+                await finish_trace(trace, TRACE_STATUS_FAILED if failed else TRACE_STATUS_OK)
+            success = not failed
+
+        deleted = await finish_expired_interaction_session(redis, key, claim, success=success)
+        if deleted:
             chat_id = _int_or_none(session.get("chat_id"))
+            await unindex_session_key(
+                redis,
+                account_id=account_id,
+                chat_id=chat_id,
+                session_key=key,
+            )
             if chat_id is not None:
                 await _refresh_userbot_session_chat_cache(state)
-            await finish_trace(trace, TRACE_STATUS_FAILED if failed else TRACE_STATUS_OK)
             processed += 1
     return processed
 
@@ -5992,7 +6200,11 @@ async def load_plugins_for_account(
                 plugin_event = _wrap_event_for_context(event, call_ctx)
                 started = time.monotonic()
                 try:
-                    await handler(call_ctx, plugin_event)
+                    await _invoke_plugin_with_resilience(
+                        state,
+                        fkey,
+                        lambda _handler=handler, _ctx=call_ctx, _event=plugin_event: _handler(_ctx, _event),
+                    )
                     invoked_count += 1
                     await record_span(
                         trace,
@@ -6208,10 +6420,36 @@ async def _activate(db, state: _AccountState, af: AccountFeature, redis: Any) ->
             account_id=state.account_id,
         )
 
-    effective_config = await _merge_plugin_config(
-        db, state.account_id, af.feature_key, dict(af.config or {})
-    )
     account_config = dict(af.config or {})
+    from ...services.plugin_config_secrets import (
+        PluginConfigDecryptionError,
+        decrypt_config_secrets,
+    )
+
+    config_schema = (
+        plugin_manifest.config_schema
+        if plugin_manifest is not None and isinstance(plugin_manifest.config_schema, dict)
+        else None
+    )
+    try:
+        effective_config = await _merge_plugin_config(
+            db, state.account_id, af.feature_key, account_config
+        )
+        runtime_account_config = decrypt_config_secrets(
+            account_config,
+            schema=config_schema,
+            strict=True,
+        )
+    except PluginConfigDecryptionError as exc:
+        await _record_plugin_config_decryption_failure(
+            db,
+            state,
+            af.feature_key,
+            redis,
+            exc,
+        )
+        return
+
     plugin_permissions = set(plugin_manifest.permissions or []) if plugin_manifest is not None else set()
     plugin_http: Any = None
     if plugin_manifest is not None and "external_http" in plugin_permissions:
@@ -6274,10 +6512,6 @@ async def _activate(db, state: _AccountState, af: AccountFeature, redis: Any) ->
             plugin_redis = None
     else:
         plugin_redis = raw_redis
-    # account_config 给插件时同样解密，避免插件读到 secret:v1 信封。
-    from ...services.plugin_config_secrets import decrypt_config_secrets
-
-    runtime_account_config = decrypt_config_secrets(account_config)
     ctx = PluginContext(
         account_id=state.account_id,
         feature_key=af.feature_key,
@@ -6726,7 +6960,9 @@ async def _merge_plugin_config(
     # 获取 feature manifest
     feature = await db.get(Feature, feature_key)
     if feature is None:
-        return account_config
+        from ...services.plugin_config_secrets import decrypt_config_secrets
+
+        return decrypt_config_secrets(account_config, strict=True)
 
     manifest = feature.manifest or {}
     config_schema = manifest.get("config_schema", {})
@@ -6756,10 +6992,15 @@ async def _merge_plugin_config(
     from ...services.plugin_config_secrets import decrypt_config_secrets
 
     # 合并：defaults < global < account_only；敏感字段解密后再交给插件运行时。
-    global_config = decrypt_config_secrets(global_config, schema=config_schema if isinstance(config_schema, dict) else None)
+    global_config = decrypt_config_secrets(
+        global_config,
+        schema=config_schema if isinstance(config_schema, dict) else None,
+        strict=True,
+    )
     account_only_config = decrypt_config_secrets(
         account_only_config,
         schema=config_schema if isinstance(config_schema, dict) else None,
+        strict=True,
     )
     result = {**defaults}
     for key in global_fields:
@@ -6772,6 +7013,7 @@ async def _merge_plugin_config(
             # 必须解密：account_config 可能仍是 secret:v1 信封（含 cookie 等
             # 非 is_sensitive_key 字段名，不能只靠 schema/key 名判断）。
             from ...services.plugin_config_secrets import (
+                PluginConfigDecryptionError,
                 is_secret_envelope,
                 unwrap_secret,
             )
@@ -6780,12 +7022,13 @@ async def _merge_plugin_config(
             if is_secret_envelope(raw_value):
                 try:
                     result[key] = unwrap_secret(raw_value)
-                except Exception:  # noqa: BLE001
-                    result[key] = raw_value
+                except Exception as exc:  # noqa: BLE001
+                    raise PluginConfigDecryptionError(key) from exc
             else:
                 migrated = decrypt_config_secrets(
                     {key: raw_value},
                     schema=config_schema if isinstance(config_schema, dict) else None,
+                    strict=True,
                 )
                 result[key] = migrated.get(key, raw_value)
     result.update(account_only_config)
@@ -6944,7 +7187,48 @@ async def reload_account_config(account_id: int, payload: dict | None = None) ->
 
             # 合并配置：schema defaults < global config < account config
             old_config = dict(ctx.config or {})
-            new_config = await _merge_plugin_config(db, account_id, fkey, dict(af.config or {}))
+            from ...services.plugin_config_secrets import (
+                PluginConfigDecryptionError,
+                decrypt_config_secrets,
+            )
+
+            loaded_manifest = _loaded_plugin_manifest(type(inst), inst)
+            loaded_schema = (
+                loaded_manifest.config_schema
+                if loaded_manifest is not None
+                and isinstance(loaded_manifest.config_schema, dict)
+                else None
+            )
+            try:
+                new_config = await _merge_plugin_config(
+                    db,
+                    account_id,
+                    fkey,
+                    dict(af.config or {}),
+                )
+                new_account_config = decrypt_config_secrets(
+                    dict(af.config or {}),
+                    schema=loaded_schema,
+                    strict=True,
+                )
+            except PluginConfigDecryptionError as exc:
+                unregister_all_plugin_commands(owner_plugin_key=fkey)
+                if state.scheduler is not None:
+                    state.scheduler.unregister_owner(fkey)
+                try:
+                    await inst.on_shutdown(ctx)
+                except Exception:  # noqa: BLE001
+                    log.exception("配置解密失败后 on_shutdown 失败 feature=%s", fkey)
+                state.instances.pop(fkey, None)
+                state.contexts.pop(fkey, None)
+                await _record_plugin_config_decryption_failure(
+                    db,
+                    state,
+                    fkey,
+                    redis,
+                    exc,
+                )
+                continue
             command_config_keys = set(getattr(inst, "command_config_keys", set()) or set())
             command_config_changed = any(
                 old_config.get(k) != new_config.get(k) for k in command_config_keys
@@ -6963,7 +7247,7 @@ async def reload_account_config(account_id: int, payload: dict | None = None) ->
                 continue
 
             ctx.config = new_config
-            ctx.account_config = dict(af.config or {})
+            ctx.account_config = new_account_config
             ctx.rules = list(rules)
             ctx.generation = state.generation
             ctx.scheduler = (
@@ -7296,6 +7580,7 @@ async def invoke_interaction_entry(
     entry_key: str,
     payload: dict[str, Any],
     default_send_via: list[str] | None = None,
+    deadline_at_ms: int | None = None,
 ) -> list[dict[str, Any]]:
     """调用已加载插件的交互 Bot 入口，返回平台标准动作。"""
 
@@ -7341,7 +7626,16 @@ async def invoke_interaction_entry(
         call_log = _trace_log
     call_ctx = replace(ctx, messages=buffered_messages, client=call_client, log=call_log)
     plugin_payload = attach_tp_event(dict(payload or {}))
-    actions = await inst.on_interaction(call_ctx, entry_key, plugin_payload)
+
+    async def _call_handler() -> Any:
+        return await inst.on_interaction(call_ctx, entry_key, plugin_payload)
+
+    actions = await _invoke_plugin_with_resilience(
+        state,
+        plugin_key,
+        _call_handler,
+        deadline_at_ms=deadline_at_ms,
+    )
     if actions is None and not buffered_messages.actions:
         raise RuntimeError(f"模块尚未实现交互入口：{plugin_key}.{entry_key}")
     if actions is None:

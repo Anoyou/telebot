@@ -85,6 +85,7 @@ import { cn, formatDateTime } from "@/lib/utils";
 import { getErrMsg } from "@/lib/api";
 import { splitPluginWarnings } from "@/lib/plugin-config-contract";
 import { isPlatformFeature } from "@/lib/plugin-modes";
+import { queryKeys } from "@/lib/queryKeys";
 import { PluginWorkspaceHeader } from "@/pages/Plugins/WorkspaceHeader";
 
 import { getFeatureMatrix } from "@/api/features";
@@ -734,7 +735,7 @@ function LocalPluginImportCard() {
       qc.invalidateQueries({ queryKey: REMOTE_QK });
       qc.invalidateQueries({ queryKey: PLUGINS_QK });
       qc.invalidateQueries({ queryKey: INSTALLED_OVERVIEW_QK });
-      qc.invalidateQueries({ queryKey: ["matrix"] });
+      qc.invalidateQueries({ queryKey: queryKeys.featureMatrix });
       qc.invalidateQueries({ queryKey: ["local-plugins"] });
     },
     onError: (err) => toast.error(getErrMsg(err)),
@@ -753,7 +754,7 @@ function LocalPluginImportCard() {
       qc.invalidateQueries({ queryKey: INSTALLED_OVERVIEW_QK });
       qc.invalidateQueries({ queryKey: OFFICIAL_PLUGINS_QK });
       qc.invalidateQueries({ queryKey: REMOTE_QK });
-      qc.invalidateQueries({ queryKey: ["matrix"] });
+      qc.invalidateQueries({ queryKey: queryKeys.featureMatrix });
     },
     onError: (err) => toast.error(getErrMsg(err)),
   });
@@ -903,7 +904,7 @@ function RemoteUpdateSettingsCard() {
       toast.success(`检查完成：${res.update_available} 个插件有更新`);
       qc.invalidateQueries({ queryKey: INSTALLED_OVERVIEW_QK });
       qc.invalidateQueries({ queryKey: REMOTE_QK });
-      qc.invalidateQueries({ queryKey: ["matrix"] });
+      qc.invalidateQueries({ queryKey: queryKeys.featureMatrix });
     },
     onError: (err) => toast.error(getErrMsg(err)),
   });
@@ -963,7 +964,7 @@ function OfficialPluginsCard() {
       qc.invalidateQueries({ queryKey: PLUGINS_QK });
       qc.invalidateQueries({ queryKey: INSTALLED_OVERVIEW_QK });
       qc.invalidateQueries({ queryKey: REMOTE_QK });
-      qc.invalidateQueries({ queryKey: ["matrix"] });
+      qc.invalidateQueries({ queryKey: queryKeys.featureMatrix });
     },
     onError: (err) => toast.error(getErrMsg(err)),
   });
@@ -975,7 +976,7 @@ function OfficialPluginsCard() {
       qc.invalidateQueries({ queryKey: PLUGINS_QK });
       qc.invalidateQueries({ queryKey: INSTALLED_OVERVIEW_QK });
       qc.invalidateQueries({ queryKey: REMOTE_QK });
-      qc.invalidateQueries({ queryKey: ["matrix"] });
+      qc.invalidateQueries({ queryKey: queryKeys.featureMatrix });
     },
     onError: (err) => toast.error(getErrMsg(err)),
   });
@@ -1200,7 +1201,7 @@ function RemoteInstallCard() {
       qc.invalidateQueries({ queryKey: REMOTE_QK });
       qc.invalidateQueries({ queryKey: PLUGINS_QK });
       qc.invalidateQueries({ queryKey: INSTALLED_OVERVIEW_QK });
-      qc.invalidateQueries({ queryKey: ["matrix"] });
+      qc.invalidateQueries({ queryKey: queryKeys.featureMatrix });
       qc.invalidateQueries({ queryKey: ["repo-plugins", expandedRepoId] });
     },
     onError: (err) => toast.error(getErrMsg(err)),
@@ -1213,7 +1214,7 @@ function RemoteInstallCard() {
       toastPluginLintWarnings(row);
       qc.invalidateQueries({ queryKey: INSTALLED_OVERVIEW_QK });
       qc.invalidateQueries({ queryKey: REMOTE_QK });
-      qc.invalidateQueries({ queryKey: ["matrix"] });
+      qc.invalidateQueries({ queryKey: queryKeys.featureMatrix });
       qc.invalidateQueries({ queryKey: ["repo-plugins", expandedRepoId] });
     },
     onError: (err) => toast.error(getErrMsg(err)),
@@ -1237,7 +1238,7 @@ function RemoteInstallCard() {
       qc.invalidateQueries({ queryKey: INSTALLED_OVERVIEW_QK });
       qc.invalidateQueries({ queryKey: REMOTE_QK });
       qc.invalidateQueries({ queryKey: PLUGINS_QK });
-      qc.invalidateQueries({ queryKey: ["matrix"] });
+      qc.invalidateQueries({ queryKey: queryKeys.featureMatrix });
       qc.invalidateQueries({ queryKey: ["repo-plugins", res.repo_id] });
     },
     onError: (err) => toast.error(getErrMsg(err)),
@@ -1618,7 +1619,7 @@ function InstalledPluginsSection() {
   const qc = useQueryClient();
   const [expandedAccountPlugin, setExpandedAccountPlugin] = useState<string | null>(null);
   const [selectedDetailKey, setSelectedDetailKey] = useState<string | null>(null);
-  const matrixQ = useQuery({ queryKey: ["matrix"], queryFn: getFeatureMatrix });
+  const matrixQ = useQuery({ queryKey: queryKeys.featureMatrix, queryFn: getFeatureMatrix });
   const overviewQ = useQuery({ queryKey: INSTALLED_OVERVIEW_QK, queryFn: listInstalledOverview });
   const reposQ = useQuery({ queryKey: PLUGIN_REPOS_QK, queryFn: fetchPluginRepos });
   const builtin = useMemo(
@@ -1645,7 +1646,7 @@ function InstalledPluginsSection() {
       qc.invalidateQueries({ queryKey: PLUGINS_QK });
       qc.invalidateQueries({ queryKey: INSTALLED_OVERVIEW_QK });
       qc.invalidateQueries({ queryKey: OFFICIAL_PLUGINS_QK });
-      qc.invalidateQueries({ queryKey: ["matrix"] });
+      qc.invalidateQueries({ queryKey: queryKeys.featureMatrix });
     },
     onError: (err) => toast.error(getErrMsg(err)),
   });
@@ -1656,7 +1657,7 @@ function InstalledPluginsSection() {
       qc.invalidateQueries({ queryKey: PLUGINS_QK });
       qc.invalidateQueries({ queryKey: INSTALLED_OVERVIEW_QK });
       qc.invalidateQueries({ queryKey: OFFICIAL_PLUGINS_QK });
-      qc.invalidateQueries({ queryKey: ["matrix"] });
+      qc.invalidateQueries({ queryKey: queryKeys.featureMatrix });
     },
     onError: (err) => toast.error(getErrMsg(err)),
   });
@@ -1667,7 +1668,7 @@ function InstalledPluginsSection() {
       qc.invalidateQueries({ queryKey: PLUGINS_QK });
       qc.invalidateQueries({ queryKey: INSTALLED_OVERVIEW_QK });
       qc.invalidateQueries({ queryKey: OFFICIAL_PLUGINS_QK });
-      qc.invalidateQueries({ queryKey: ["matrix"] });
+      qc.invalidateQueries({ queryKey: queryKeys.featureMatrix });
     },
     onError: (err) => toast.error(getErrMsg(err)),
   });
@@ -1680,7 +1681,7 @@ function InstalledPluginsSection() {
       qc.invalidateQueries({ queryKey: INSTALLED_OVERVIEW_QK });
       qc.invalidateQueries({ queryKey: PLUGINS_QK });
       qc.invalidateQueries({ queryKey: REMOTE_QK });
-      qc.invalidateQueries({ queryKey: ["matrix"] });
+      qc.invalidateQueries({ queryKey: queryKeys.featureMatrix });
     },
     onError: (err) => toast.error(getErrMsg(err)),
   });
@@ -1691,7 +1692,7 @@ function InstalledPluginsSection() {
       qc.invalidateQueries({ queryKey: INSTALLED_OVERVIEW_QK });
       qc.invalidateQueries({ queryKey: PLUGINS_QK });
       qc.invalidateQueries({ queryKey: REMOTE_QK });
-      qc.invalidateQueries({ queryKey: ["matrix"] });
+      qc.invalidateQueries({ queryKey: queryKeys.featureMatrix });
     },
     onError: (err) => toast.error(getErrMsg(err)),
   });
@@ -1703,7 +1704,7 @@ function InstalledPluginsSection() {
       qc.invalidateQueries({ queryKey: INSTALLED_OVERVIEW_QK });
       qc.invalidateQueries({ queryKey: PLUGINS_QK });
       qc.invalidateQueries({ queryKey: REMOTE_QK });
-      qc.invalidateQueries({ queryKey: ["matrix"] });
+      qc.invalidateQueries({ queryKey: queryKeys.featureMatrix });
     },
     onError: (err) => toast.error(getErrMsg(err)),
   });
@@ -1714,7 +1715,7 @@ function InstalledPluginsSection() {
       qc.invalidateQueries({ queryKey: INSTALLED_OVERVIEW_QK });
       qc.invalidateQueries({ queryKey: PLUGINS_QK });
       qc.invalidateQueries({ queryKey: REMOTE_QK });
-      qc.invalidateQueries({ queryKey: ["matrix"] });
+      qc.invalidateQueries({ queryKey: queryKeys.featureMatrix });
     },
     onError: (err) => toast.error(getErrMsg(err)),
   });
@@ -1723,7 +1724,7 @@ function InstalledPluginsSection() {
       toggleAccountFeature(accountId, key, enabled),
     onSuccess: (_row, vars) => {
       toast.success(`${vars.enabled ? "已启用" : "已禁用"}账号插件`);
-      qc.invalidateQueries({ queryKey: ["matrix"] });
+      qc.invalidateQueries({ queryKey: queryKeys.featureMatrix });
       qc.invalidateQueries({ queryKey: INSTALLED_OVERVIEW_QK });
       qc.invalidateQueries({ queryKey: PLUGINS_QK });
       qc.invalidateQueries({ queryKey: REMOTE_QK });

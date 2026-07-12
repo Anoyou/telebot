@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import math
 import time
+import uuid
 from dataclasses import dataclass
 from typing import Any
 
@@ -17,6 +18,8 @@ from typing import Any
 # and loader._USERBOT_SESSION_TTL_GRACE_SECONDS.
 DEFAULT_SESSION_TTL_GRACE_SECONDS = 90
 _FALLBACK_REMAINING_SECONDS = 600
+DEFAULT_EXPIRY_LEASE_SECONDS = 60
+_EXPIRY_CLAIM_FIELD = "_expiry_claim"
 
 # KEYS[1] = session key
 # ARGV[1] = data patch JSON object
@@ -114,6 +117,71 @@ redis.call('SET', KEYS[1], payload, 'EX', ttl)
 return {'ok', payload}
 """
 
+_CLAIM_EXPIRED_SESSION_SCRIPT = """
+local raw = redis.call('GET', KEYS[1])
+if not raw then
+  return {'missing', ''}
+end
+local ok, session = pcall(cjson.decode, raw)
+if not ok or type(session) ~= 'table' then
+  return {'invalid', 'session json invalid'}
+end
+local current_rev = tonumber(session['revision']) or 0
+local expected_rev = tonumber(ARGV[1]) or 0
+if current_rev ~= expected_rev then
+  return {'conflict', tostring(current_rev)}
+end
+local now = tonumber(ARGV[2]) or 0
+local expires_at = tonumber(session['expires_at'])
+if expires_at == nil or expires_at > now then
+  return {'active', ''}
+end
+local existing = session['__EXPIRY_CLAIM_FIELD__']
+if type(existing) == 'table' and tonumber(existing['expires_at']) and tonumber(existing['expires_at']) > now then
+  return {'busy', ''}
+end
+session['__EXPIRY_CLAIM_FIELD__'] = {
+  token = ARGV[3],
+  expires_at = now + (tonumber(ARGV[4]) or 60)
+}
+if cjson.encode_empty_table_as_object then
+  cjson.encode_empty_table_as_object(true)
+end
+redis.call('SET', KEYS[1], cjson.encode(session), 'KEEPTTL')
+return {'ok', ARGV[3]}
+""".replace("__EXPIRY_CLAIM_FIELD__", _EXPIRY_CLAIM_FIELD)
+
+_FINISH_EXPIRED_SESSION_SCRIPT = """
+local raw = redis.call('GET', KEYS[1])
+if not raw then
+  return {'missing', ''}
+end
+local ok, session = pcall(cjson.decode, raw)
+if not ok or type(session) ~= 'table' then
+  return {'invalid', 'session json invalid'}
+end
+local claim = session['__EXPIRY_CLAIM_FIELD__']
+if type(claim) ~= 'table' or tostring(claim['token'] or '') ~= ARGV[1] then
+  return {'not_owner', ''}
+end
+local expected_rev = tonumber(ARGV[2]) or 0
+local current_rev = tonumber(session['revision']) or 0
+local should_delete = tonumber(ARGV[3]) or 0
+if should_delete == 1 and current_rev == expected_rev then
+  redis.call('DEL', KEYS[1])
+  return {'deleted', ''}
+end
+session['__EXPIRY_CLAIM_FIELD__'] = nil
+if cjson.encode_empty_table_as_object then
+  cjson.encode_empty_table_as_object(true)
+end
+redis.call('SET', KEYS[1], cjson.encode(session), 'KEEPTTL')
+if current_rev ~= expected_rev then
+  return {'stale', tostring(current_rev)}
+end
+return {'released', ''}
+""".replace("__EXPIRY_CLAIM_FIELD__", _EXPIRY_CLAIM_FIELD)
+
 
 class SessionUpdateError(Exception):
     """Base error for atomic session updates."""
@@ -139,12 +207,105 @@ class SessionInvalidError(SessionUpdateError):
 
 
 @dataclass(slots=True, frozen=True)
+class ExpiredSessionClaim:
+    token: str
+    revision: int
+
+
+@dataclass(slots=True, frozen=True)
 class SessionUpdateResult:
     session: dict[str, Any]
     revision: int
     expires_at: float
     data: dict[str, Any]
     ttl_seconds: int
+
+
+async def claim_expired_interaction_session(
+    redis: Any,
+    session_key: str,
+    *,
+    expected_revision: int,
+    now: float | None = None,
+    lease_seconds: int = DEFAULT_EXPIRY_LEASE_SECONDS,
+    token: str | None = None,
+) -> ExpiredSessionClaim | None:
+    """Atomically lease an expired session at one exact revision."""
+
+    key = str(session_key or "").strip()
+    if not key:
+        return None
+    now_ts = time.time() if now is None else float(now)
+    lease = max(1, int(lease_seconds))
+    claim_token = str(token or uuid.uuid4().hex)
+    eval_fn = getattr(redis, "eval", None)
+    if callable(eval_fn):
+        result = await eval_fn(
+            _CLAIM_EXPIRED_SESSION_SCRIPT,
+            1,
+            key,
+            int(expected_revision),
+            now_ts,
+            claim_token,
+            lease,
+        )
+        status = _lua_status(result)
+        if status == "ok":
+            return ExpiredSessionClaim(token=claim_token, revision=int(expected_revision))
+        return None
+
+    payload = _json_dict(await redis.get(key))
+    if not payload or (_as_int(payload.get("revision"), default=0) or 0) != int(expected_revision):
+        return None
+    expires_at = _as_float(payload.get("expires_at"))
+    if expires_at is None or expires_at > now_ts:
+        return None
+    current_claim = payload.get(_EXPIRY_CLAIM_FIELD)
+    if isinstance(current_claim, dict) and (_as_float(current_claim.get("expires_at")) or 0) > now_ts:
+        return None
+    payload[_EXPIRY_CLAIM_FIELD] = {"token": claim_token, "expires_at": now_ts + lease}
+    await redis.set(key, json.dumps(payload, ensure_ascii=False), keepttl=True)
+    return ExpiredSessionClaim(token=claim_token, revision=int(expected_revision))
+
+
+async def finish_expired_interaction_session(
+    redis: Any,
+    session_key: str,
+    claim: ExpiredSessionClaim,
+    *,
+    success: bool,
+) -> bool:
+    """Delete a successfully handled lease, or release it for retry.
+
+    Successful deletion is allowed only while both the claim token and session
+    revision still match. A concurrent update therefore preserves the session.
+    """
+
+    key = str(session_key or "").strip()
+    if not key:
+        return False
+    eval_fn = getattr(redis, "eval", None)
+    if callable(eval_fn):
+        result = await eval_fn(
+            _FINISH_EXPIRED_SESSION_SCRIPT,
+            1,
+            key,
+            claim.token,
+            int(claim.revision),
+            1 if success else 0,
+        )
+        return _lua_status(result) == "deleted"
+
+    payload = _json_dict(await redis.get(key))
+    current_claim = payload.get(_EXPIRY_CLAIM_FIELD) if payload else None
+    if not isinstance(current_claim, dict) or str(current_claim.get("token") or "") != claim.token:
+        return False
+    current_revision = _as_int(payload.get("revision"), default=0) or 0
+    if success and current_revision == claim.revision:
+        return bool(await redis.delete(key))
+    payload.pop(_EXPIRY_CLAIM_FIELD, None)
+    await redis.set(key, json.dumps(payload, ensure_ascii=False), keepttl=True)
+    return False
 
 
 def session_redis_ttl_seconds(
@@ -421,6 +582,12 @@ def _decode(value: Any) -> str:
     if isinstance(value, bytes):
         return value.decode("utf-8", errors="ignore")
     return str(value if value is not None else "")
+
+
+def _lua_status(result: Any) -> str:
+    if isinstance(result, (list, tuple)) and result:
+        return _decode(result[0])
+    return _decode(result)
 
 
 def _as_int(value: Any, default: int | None = None) -> int | None:

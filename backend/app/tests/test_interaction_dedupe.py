@@ -88,6 +88,14 @@ async def test_claim_interaction_message_allows_missing_message_id_and_fail_open
         rule_id="rule-a",
         redis=_BrokenRedis(),
     ) is True
+    assert await claim_interaction_message(
+        account_id=1,
+        chat_id=-100,
+        message_id=26,
+        rule_id="rule-a",
+        redis=_BrokenRedis(),
+        fail_open=False,
+    ) is False
 
 
 @pytest.mark.asyncio

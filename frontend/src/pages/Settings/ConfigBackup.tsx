@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AlertTriangle,
   Download,
@@ -55,8 +55,18 @@ const CATEGORIES: CategoryDef[] = [
   { key: "auto_reply_rules", label: "自动回复规则", desc: "自动回复配置" },
   { key: "rate_limit_templates", label: "风控模板", desc: "限速规则模板" },
   { key: "rate_limit_rules", label: "风控规则", desc: "账号级限速配置" },
+  { key: "proxies", label: "代理配置", desc: "账号和模型提供商引用的代理", sensitive: ["password"] },
+  { key: "device_profiles", label: "设备配置", desc: "账号登录使用的设备伪装参数" },
+  { key: "feature_registry", label: "插件索引", desc: "插件配置依赖的功能登记信息" },
+  {
+    key: "plugin_global_configs",
+    label: "插件全局配置",
+    desc: "跨账号共享的插件配置",
+    sensitive: ["插件密钥"],
+  },
   { key: "feature_config", label: "插件功能配置", desc: "各账号的插件开关和配置" },
   { key: "account_settings", label: "账号设置", desc: "拟人化、标签等（不含登录信息）", sensitive: ["session", "api_id", "api_hash", "phone"] },
+  { key: "humanize_configs", label: "拟人化配置", desc: "每个账号的延迟、打字和活跃时段" },
   { key: "ignored_peers", label: "允许会话", desc: "自动回复/转发允许通过的会话白名单" },
   { key: "notify_bots", label: "通知 Bot", desc: "通知机器人配置", sensitive: ["bot_token"] },
 ];
@@ -69,6 +79,7 @@ const BUNDLE_ENTITY_LABEL: Record<string, string> = {
 };
 
 export function ConfigBackup() {
+  const queryClient = useQueryClient();
   const [searchParams] = useSearchParams();
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [includeSensitive, setIncludeSensitive] = useState(false);
@@ -76,6 +87,9 @@ export function ConfigBackup() {
     imported: number;
     skipped: number;
     warnings: string[];
+    affected_accounts: number[];
+    reloaded_accounts: number[];
+    restart_required: boolean;
   } | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const bundleFileRef = useRef<HTMLInputElement>(null);
@@ -155,11 +169,36 @@ export function ConfigBackup() {
       const { data } = await api.post("/api/system/import-config", form, {
         headers: { "Content-Type": "multipart/form-data" },
       });
-      return data as { imported: number; skipped: number; warnings: string[] };
+      return data as {
+        imported: number;
+        skipped: number;
+        warnings: string[];
+        affected_accounts: number[];
+        reloaded_accounts: number[];
+        restart_required: boolean;
+      };
     },
-    onSuccess: (data) => {
+    onSuccess: async (data) => {
       setImportResult(data);
-      toast.success(`导入完成：${data.imported} 条成功，${data.skipped} 条跳过`);
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["system"] }),
+        queryClient.invalidateQueries({ queryKey: ["accounts"] }),
+        queryClient.invalidateQueries({ queryKey: ["account"] }),
+        queryClient.invalidateQueries({ queryKey: ["matrix"] }),
+        queryClient.invalidateQueries({ queryKey: ["llm-providers"] }),
+        queryClient.invalidateQueries({ queryKey: ["cmd-tpl"] }),
+        queryClient.invalidateQueries({ queryKey: ["rate-templates"] }),
+        queryClient.invalidateQueries({ queryKey: ["proxies"] }),
+        queryClient.invalidateQueries({ queryKey: ["device-profiles"] }),
+        queryClient.invalidateQueries({ queryKey: ["notify-bots"] }),
+      ]);
+      if (data.restart_required) {
+        toast.warning(
+          `导入已提交：${data.imported} 条成功；部分 Worker 未确认热重载，请重启应用`,
+        );
+      } else {
+        toast.success(`导入完成：${data.imported} 条成功，${data.skipped} 条跳过`);
+      }
     },
     onError: (err) => toast.error(getErrMsg(err)),
   });
@@ -347,7 +386,8 @@ export function ConfigBackup() {
         <div className="space-y-3">
           <Label className="text-sm font-medium">导入配置</Label>
           <p className="text-xs text-muted-foreground">
-            上传之前导出的 JSON 文件。同名/同 ID 的配置项将被跳过。
+            上传之前导出的版本化 JSON 配置包。恢复会按依赖顺序在单个事务中完成，
+            同一自然标识的配置项将被跳过。
           </p>
 
           <input
@@ -389,6 +429,18 @@ export function ConfigBackup() {
                   {importResult.warnings.length > 5 && (
                     <p>... 还有 {importResult.warnings.length - 5} 条警告</p>
                   )}
+                </div>
+              )}
+              {importResult.affected_accounts.length > 0 && (
+                <p className="text-xs text-muted-foreground">
+                  已通知 {importResult.reloaded_accounts.length}/
+                  {importResult.affected_accounts.length} 个账号 Worker 刷新配置
+                </p>
+              )}
+              {importResult.restart_required && (
+                <div className="flex items-start gap-2 text-xs text-warning">
+                  <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+                  <span>部分运行时未确认刷新。请重启应用后再验证恢复结果。</span>
                 </div>
               )}
             </div>

@@ -293,6 +293,7 @@ async def test_probe_workers_aggregates_by_status() -> None:
             "app.worker.supervisor.get_worker_runtime_snapshot",
             return_value=runtime_rows,
         ),
+        patch.dict(sh.os.environ, {"POSTGRES_MAX_CONNECTIONS": "10"}),
     ):
         out = await _probe_workers()
 
@@ -303,6 +304,9 @@ async def test_probe_workers_aggregates_by_status() -> None:
     assert out.runtime_desired_running == 2
     assert out.runtime_desired_running_alive == 1
     assert out.runtime_failing == 1
+    assert out.db_connection_budget == 10
+    assert out.db_connection_estimate == 4
+    assert out.db_capacity_warning is None
 
 
 # ════════════════════════════════════════════════════════════

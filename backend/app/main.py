@@ -74,32 +74,6 @@ def _warn_if_forwarded_for_misconfigured() -> None:
         )
 
 
-def _try_acquire_migration_lock() -> bool:
-    """尝试获取迁移互斥锁（Postgres advisory lock）。"""
-    if not settings.database_url_sync.startswith("postgresql"):
-        # 仅 PostgreSQL 支持该语义；其他 DB 保持兼容并继续迁移流程。
-        return True
-    try:
-        from sqlalchemy import create_engine, text
-    except Exception:  # noqa: BLE001
-        logging.exception("导入 SQLAlchemy 失败，无法获取迁移互斥锁")
-        return False
-    engine = create_engine(settings.database_url_sync, future=True)
-    try:
-        with engine.connect() as conn:
-            res = conn.execute(
-                text("SELECT pg_try_advisory_lock(:k)"),
-                {"k": _MIGRATION_ADVISORY_LOCK_KEY},
-            )
-            locked = bool(res.scalar())
-        return locked
-    except Exception:  # noqa: BLE001
-        logging.exception("获取迁移互斥锁失败，跳过本进程自动迁移")
-        return False
-    finally:
-        engine.dispose()
-
-
 def _run_alembic_upgrade() -> None:
     """同步调 ``alembic upgrade head``。
 
@@ -109,14 +83,29 @@ def _run_alembic_upgrade() -> None:
 
     任何失败只 log，不抛——上面注释里有"失败不阻止启动"的设计理由。
     """
+    engine = None
+    lock_connection = None
+    lock_acquired = False
     try:
-        if not _try_acquire_migration_lock():
-            logging.warning("另一个实例正在执行迁移（或锁获取失败），本实例跳过启动期自动迁移")
-            return
-        # 局部 import：alembic 是 dev 路径常驻依赖，但 import 时会扫脚本目录，放函数内更轻
+        # 局部 import：alembic 是 dev 路径常驻依赖，但 import 时会扫脚本目录，放函数内更轻。
         from alembic.config import Config
+        from sqlalchemy import create_engine, text
 
         from alembic import command
+
+        # PostgreSQL advisory lock 是 session 级锁。持锁连接必须活到 upgrade 返回，
+        # 否则 with connect() 退出时锁会提前释放，两个实例仍可并发迁移。
+        if settings.database_url_sync.startswith("postgresql"):
+            engine = create_engine(settings.database_url_sync, future=True)
+            lock_connection = engine.connect()
+            result = lock_connection.execute(
+                text("SELECT pg_try_advisory_lock(:k)"),
+                {"k": _MIGRATION_ADVISORY_LOCK_KEY},
+            )
+            lock_acquired = bool(result.scalar())
+            if not lock_acquired:
+                logging.warning("另一个实例正在执行迁移，本实例跳过启动期自动迁移")
+                return
 
         # alembic.ini 在 backend/ 根目录；以本文件所在目录的上一级定位，避免 cwd 漂移
         ini_path = Path(__file__).resolve().parents[1] / "alembic.ini"
@@ -132,6 +121,19 @@ def _run_alembic_upgrade() -> None:
         logging.exception(
             "alembic 启动期自动迁移失败；服务仍会继续启动，请尽快手动 `make migrate` 排查"
         )
+    finally:
+        if lock_connection is not None:
+            if lock_acquired:
+                try:
+                    lock_connection.execute(
+                        text("SELECT pg_advisory_unlock(:k)"),
+                        {"k": _MIGRATION_ADVISORY_LOCK_KEY},
+                    )
+                except Exception:  # noqa: BLE001
+                    logging.exception("释放迁移 advisory lock 失败；连接关闭后将自动释放")
+            lock_connection.close()
+        if engine is not None:
+            engine.dispose()
 
 
 @asynccontextmanager

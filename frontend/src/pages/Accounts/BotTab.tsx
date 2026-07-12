@@ -28,6 +28,7 @@ import {
   type ConfigSchema,
   ConfigScopeSection,
 } from "@/components/plugin/ConfigDialog";
+import { queryKeys } from "@/lib/queryKeys";
 import { TelegramHtmlPreview } from "@/components/TelegramHtmlPreview";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -1987,12 +1988,12 @@ export function BotTab({
     enabled: !!aid && mode === "interaction",
   });
   const allowedPeersQ = useQuery({
-    queryKey: ["ignored-peers", aid],
+    queryKey: queryKeys.ignoredPeers(aid),
     queryFn: () => listIgnoredPeers(aid),
     enabled: !!aid && mode === "interaction",
   });
   const matrixQ = useQuery({
-    queryKey: ["feature-matrix"],
+    queryKey: queryKeys.featureMatrix,
     queryFn: getFeatureMatrix,
     enabled: mode === "interaction",
   });

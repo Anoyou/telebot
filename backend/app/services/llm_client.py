@@ -21,6 +21,7 @@ import re
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
+from enum import StrEnum
 from typing import Any
 
 import httpx
@@ -871,7 +872,10 @@ class OpenAIClient(LLMClient):
         timeout_seconds: int | None = None,
     ) -> LLMResult:
         if web_search:
-            raise LLMError("联网搜索需要使用 OpenAI Responses API（api_format=responses）")
+            raise LLMError(
+                "联网搜索需要使用 OpenAI Responses API（api_format=responses）",
+                scope=LLMErrorScope.CAPABILITY_MISMATCH,
+            )
         url = provider_endpoint(self._base_url, LLM_API_FORMAT_CHAT_COMPLETIONS)
         # Ollama 部署可能不需要 api_key；为空时不下发 Authorization 头
         headers = _llm_headers()
@@ -933,6 +937,8 @@ class OpenAIClient(LLMClient):
                     self._api_key,
                 ),
                 retryable=_is_retryable_status(resp.status_code),
+                scope=_error_scope_for_http(resp.status_code, resp.text),
+                status_code=resp.status_code,
             )
         try:
             data = resp.json()
@@ -941,8 +947,9 @@ class OpenAIClient(LLMClient):
 
         # 标准 OpenAI 形态：choices[0].message.content
         try:
-            text = data["choices"][0]["message"]["content"] or ""
-        except (KeyError, IndexError, TypeError) as exc:
+            message = data["choices"][0]["message"]
+            text = _openai_content_text(message.get("content"))
+        except (AttributeError, KeyError, IndexError, TypeError) as exc:
             raise LLMError(f"OpenAI 返回结构异常: {exc}") from None
 
         usage = data.get("usage") or {}
@@ -964,15 +971,37 @@ class OpenAIClient(LLMClient):
                 image_urls.append(item)
         choice = data.get("choices", [{}])[0] if isinstance(data.get("choices"), list) else {}
         finish_reason = choice.get("finish_reason") if isinstance(choice, dict) else None
+        tool_calls = [
+            ToolCall(
+                id=str(item.get("id") or ""),
+                name=str((item.get("function") or {}).get("name") or ""),
+                arguments=_parse_tool_arguments((item.get("function") or {}).get("arguments")),
+            )
+            for item in message.get("tool_calls") or []
+            if isinstance(item, dict) and str((item.get("function") or {}).get("name") or "")
+        ]
+        refusal = message.get("refusal")
+        resolved_stop_reason = (
+            StopReason.REFUSAL
+            if isinstance(refusal, str) and refusal.strip()
+            else StopReason.TOOL_CALLS
+            if tool_calls
+            else stop_reason_from_provider(finish_reason)
+        )
         return LLMResult(
-            text=text.strip(),
+            text=text,
             model=str(data.get("model", self._model)),
             input_tokens=int(usage.get("prompt_tokens") or 0),
             output_tokens=int(usage.get("completion_tokens") or 0),
             image_urls=image_urls,
             image_data=image_data,
-            stop_reason=stop_reason_from_provider(finish_reason),
-            provider_status=str(finish_reason) if finish_reason else None,
+            tool_calls=tool_calls,
+            stop_reason=resolved_stop_reason,
+            provider_status=(
+                "refusal"
+                if resolved_stop_reason is StopReason.REFUSAL
+                else str(finish_reason) if finish_reason else None
+            ),
         )
 
     async def invoke(self, request: ModelRequest) -> ModelResponse:
@@ -1017,6 +1046,8 @@ class OpenAIClient(LLMClient):
                     self._api_key,
                 ),
                 retryable=_is_retryable_status(resp.status_code),
+                scope=_error_scope_for_http(resp.status_code, resp.text),
+                status_code=resp.status_code,
             )
         try:
             data = resp.json()
@@ -1100,6 +1131,8 @@ class OpenAIClient(LLMClient):
                     self._api_key,
                 ),
                 retryable=_is_retryable_status(resp.status_code),
+                scope=_error_scope_for_http(resp.status_code, resp.text),
+                status_code=resp.status_code,
             )
         try:
             payload = resp.json()
@@ -1170,6 +1203,8 @@ class OpenAIClient(LLMClient):
                     self._api_key,
                 ),
                 retryable=_is_retryable_status(resp.status_code),
+                scope=_error_scope_for_http(resp.status_code, resp.text),
+                status_code=resp.status_code,
             )
         try:
             data = resp.json()
@@ -1256,7 +1291,10 @@ class AnthropicClient(LLMClient):
         timeout_seconds: int | None = None,
     ) -> LLMResult:
         if web_search:
-            raise LLMError("当前 Anthropic 调用路径尚未接入联网搜索；请使用 OpenAI Responses provider")
+            raise LLMError(
+                "当前 Anthropic 调用路径尚未接入联网搜索；请使用 OpenAI Responses provider",
+                scope=LLMErrorScope.CAPABILITY_MISMATCH,
+            )
         url = provider_endpoint(self._base_url, LLM_API_FORMAT_ANTHROPIC_MESSAGES)
         headers = self._headers()
         # 视觉路径：Anthropic 用 {"type":"image","source":{"type":"base64",...}}
@@ -1289,6 +1327,7 @@ class AnthropicClient(LLMClient):
         normalized_temperature = _normalize_temperature(temperature)
         if normalized_temperature is not None:
             body["temperature"] = min(1.0, normalized_temperature)
+        self._apply_reasoning_effort(body, reasoning_effort)
         client_kwargs: dict[str, object] = {"timeout": _timeout_for_call(self._base_url, timeout_seconds)}
         if self._proxy_url:
             client_kwargs["proxy"] = self._proxy_url
@@ -1326,6 +1365,8 @@ class AnthropicClient(LLMClient):
                                 self._api_key,
                             ),
                             retryable=_is_retryable_status(resp.status_code),
+                            scope=_error_scope_for_http(resp.status_code, error_body),
+                            status_code=resp.status_code,
                         )
                     # 逐行解析 SSE 事件
                     current_event = ""
@@ -1380,17 +1421,44 @@ class AnthropicClient(LLMClient):
             ) from None
 
         text = "".join(text_parts).strip()
-        if not text:
-            raise LLMError("Anthropic 返回空内容（SSE 流中未收到 text_delta 事件）")
+        resolved_stop_reason = stop_reason_from_provider(provider_stop_reason)
+        if not text and resolved_stop_reason not in {
+            StopReason.REFUSAL,
+            StopReason.CONTENT_FILTER,
+        }:
+            raise LLMError(
+                "Anthropic 返回空内容（SSE 流中未收到 text_delta 事件）",
+                scope=LLMErrorScope.PROVIDER_LOCAL,
+            )
 
         return LLMResult(
             text=text,
             model=model_name,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
-            stop_reason=stop_reason_from_provider(provider_stop_reason),
+            stop_reason=resolved_stop_reason,
             provider_status=provider_stop_reason,
         )
+
+    def _apply_reasoning_effort(
+        self,
+        body: dict[str, Any],
+        reasoning_effort: str | None,
+    ) -> None:
+        normalized = _normalize_reasoning_effort(reasoning_effort)
+        if reasoning_effort and normalized is None:
+            raise LLMError(
+                f"Anthropic 不支持 reasoning_effort={reasoning_effort}",
+                scope=LLMErrorScope.REQUEST_INVALID,
+            )
+        if normalized is None:
+            return
+        if self._protocol_profile != LLM_PROTOCOL_PROFILE_CLAUDE_CODE_PROXY:
+            raise LLMError(
+                "Anthropic standard profile 未声明 reasoning_effort 能力",
+                scope=LLMErrorScope.CAPABILITY_MISMATCH,
+            )
+        body["output_config"] = {"effort": normalized}
 
     async def invoke(self, request: ModelRequest) -> ModelResponse:
         capabilities_for_api_format(LLM_API_FORMAT_ANTHROPIC_MESSAGES).validate(
@@ -1417,6 +1485,7 @@ class AnthropicClient(LLMClient):
             body["tool_choice"] = _anthropic_tool_choice(request.tool_choice)
         if request.temperature is not None:
             body["temperature"] = min(1.0, _normalize_temperature(request.temperature) or 0.0)
+        self._apply_reasoning_effort(body, request.reasoning_effort)
 
         client_kwargs: dict[str, object] = {"timeout": _timeout_for_call(self._base_url, None)}
         if self._proxy_url:
@@ -1438,6 +1507,8 @@ class AnthropicClient(LLMClient):
                     self._api_key,
                 ),
                 retryable=_is_retryable_status(resp.status_code),
+                scope=_error_scope_for_http(resp.status_code, resp.text),
+                status_code=resp.status_code,
             )
         try:
             data = resp.json()
@@ -1489,7 +1560,10 @@ class AnthropicClient(LLMClient):
         timeout_seconds: int | None = None,
     ) -> AsyncIterator[LLMStreamChunk]:
         if web_search:
-            raise LLMError("当前 Anthropic streaming 尚未接入联网搜索；请使用 OpenAI Responses provider")
+            raise LLMError(
+                "当前 Anthropic streaming 尚未接入联网搜索；请使用 OpenAI Responses provider",
+                scope=LLMErrorScope.CAPABILITY_MISMATCH,
+            )
         url = provider_endpoint(self._base_url, LLM_API_FORMAT_ANTHROPIC_MESSAGES)
         headers = self._headers()
         if images:
@@ -1519,6 +1593,7 @@ class AnthropicClient(LLMClient):
         normalized_temperature = _normalize_temperature(temperature)
         if normalized_temperature is not None:
             body["temperature"] = min(1.0, normalized_temperature)
+        self._apply_reasoning_effort(body, reasoning_effort)
 
         client_kwargs: dict[str, object] = {"timeout": _timeout_for_call(self._base_url, timeout_seconds)}
         if self._proxy_url:
@@ -1546,6 +1621,8 @@ class AnthropicClient(LLMClient):
                                 self._api_key,
                             ),
                             retryable=_is_retryable_status(resp.status_code),
+                            scope=_error_scope_for_http(resp.status_code, error_body),
+                            status_code=resp.status_code,
                         )
 
                     current_event = ""
@@ -1722,6 +1799,8 @@ class ResponsesClient(LLMClient):
                     self._api_key,
                 ),
                 retryable=_is_retryable_status(resp.status_code),
+                scope=_error_scope_for_http(resp.status_code, _response_text(resp)),
+                status_code=resp.status_code,
             )
 
         data = _decode_responses_payload("Responses", resp, self._api_key)
@@ -1730,6 +1809,7 @@ class ResponsesClient(LLMClient):
         # 形态 1：data["output_text"] = "..."（部分实现的便利字段）
         # 形态 2：data["output"] = [{"type":"message","content":[{"type":"output_text","text":"..."}]}]
         text = ""
+        has_refusal = False
         ot = data.get("output_text")
         if isinstance(ot, str):
             text = ot
@@ -1744,6 +1824,8 @@ class ResponsesClient(LLMClient):
                     for c in content:
                         if not isinstance(c, dict):
                             continue
+                        if c.get("type") == "refusal" and c.get("refusal"):
+                            has_refusal = True
                         t = c.get("text")
                         # type 通常是 output_text；保险起见全收
                         if isinstance(t, str):
@@ -1794,7 +1876,9 @@ class ResponsesClient(LLMClient):
             sources=_extract_response_sources(data),
             tool_calls=tool_calls,
             stop_reason=(
-                StopReason.MAX_TOKENS
+                StopReason.REFUSAL
+                if has_refusal
+                else StopReason.MAX_TOKENS
                 if incomplete_reason in {"max_output_tokens", "max_tokens"}
                 else stop_reason_from_provider(provider_reason)
             ),
@@ -1863,6 +1947,8 @@ class ResponsesClient(LLMClient):
                     self._api_key,
                 ),
                 retryable=_is_retryable_status(resp.status_code),
+                scope=_error_scope_for_http(resp.status_code, _response_text(resp)),
+                status_code=resp.status_code,
             )
         data = _decode_responses_payload("Responses", resp, self._api_key)
         status = str(data.get("status") or "")
@@ -1870,6 +1956,7 @@ class ResponsesClient(LLMClient):
             raise LLMError(f"Responses 返回状态异常: {status}")
         text_parts: list[str] = []
         tool_calls: list[ToolCall] = []
+        has_refusal = False
         for item in data.get("output") or []:
             if not isinstance(item, dict):
                 continue
@@ -1884,7 +1971,11 @@ class ResponsesClient(LLMClient):
                         )
                     )
             for content in item.get("content") or []:
-                if isinstance(content, dict) and isinstance(content.get("text"), str):
+                if not isinstance(content, dict):
+                    continue
+                if content.get("type") == "refusal" and content.get("refusal"):
+                    has_refusal = True
+                if isinstance(content.get("text"), str):
                     text_parts.append(content["text"])
         if not text_parts and isinstance(data.get("output_text"), str):
             text_parts.append(data["output_text"])
@@ -1903,7 +1994,9 @@ class ResponsesClient(LLMClient):
                 reasoning_tokens=int(details.get("reasoning_tokens") or 0),
             ),
             stop_reason=(
-                StopReason.MAX_TOKENS
+                StopReason.REFUSAL
+                if has_refusal
+                else StopReason.MAX_TOKENS
                 if incomplete_reason in {"max_output_tokens", "max_tokens"}
                 else StopReason.TOOL_CALLS
                 if tool_calls
@@ -1987,6 +2080,8 @@ class ResponsesClient(LLMClient):
                                 self._api_key,
                             ),
                             retryable=_is_retryable_status(resp.status_code),
+                            scope=_error_scope_for_http(resp.status_code, error_body),
+                            status_code=resp.status_code,
                         )
 
                     current_event = ""
@@ -2157,6 +2252,8 @@ class ResponsesClient(LLMClient):
                     self._api_key,
                 ),
                 retryable=_is_retryable_status(resp.status_code),
+                scope=_error_scope_for_http(resp.status_code, _response_text(resp)),
+                status_code=resp.status_code,
             )
         data = _decode_responses_payload("Responses 生图", resp, self._api_key)
 
@@ -2181,12 +2278,34 @@ class ResponsesClient(LLMClient):
 # ────────────────────────────────────────────────────────────
 
 
+class LLMErrorScope(StrEnum):
+    """Decides whether an error belongs to this provider or the whole request."""
+
+    TRANSIENT = "transient"
+    PROVIDER_LOCAL = "provider_local"
+    CAPABILITY_MISMATCH = "capability_mismatch"
+    REQUEST_INVALID = "request_invalid"
+    ACCOUNT_POLICY = "account_policy"
+    UNKNOWN = "unknown"
+
+
 class LLMError(Exception):
     """LLM 调用层统一异常；message 已脱敏。"""
 
-    def __init__(self, message: str, *, retryable: bool = False):
+    def __init__(
+        self,
+        message: str,
+        *,
+        retryable: bool = False,
+        scope: LLMErrorScope | str | None = None,
+        status_code: int | None = None,
+    ):
         super().__init__(message)
         self.retryable = retryable  # 是否可重试（timeout/429/5xx/网络错误）
+        self.scope = LLMErrorScope(
+            scope or (LLMErrorScope.TRANSIENT if retryable else LLMErrorScope.UNKNOWN)
+        )
+        self.status_code = status_code
 
 
 class LLMCallFailed(Exception):
@@ -2200,6 +2319,7 @@ class LLMCallFailed(Exception):
         error_type: str | None = None,
         status_code: int | None = None,
         retryable: bool = False,
+        scope: LLMErrorScope | str | None = None,
     ):
         super().__init__(message)
         self.provider_id = provider_id
@@ -2207,11 +2327,43 @@ class LLMCallFailed(Exception):
         self.error_type = error_type  # "timeout" / "network" / "rate_limit" / "auth" / "server_error"
         self.status_code = status_code
         self.retryable = retryable
+        self.scope = LLMErrorScope(scope or LLMErrorScope.UNKNOWN)
 
 
 def _is_retryable_status(status_code: int) -> bool:
     """HTTP 状态码是否值得重试：429 限流与 5xx 服务端错误可重试，4xx 认证/配置类不可重试。"""
     return status_code == 429 or 500 <= status_code < 600
+
+
+def _error_scope_for_http(status_code: int, body: str = "") -> LLMErrorScope:
+    """Classify HTTP failures without treating every 4xx as interchangeable."""
+
+    if _is_retryable_status(status_code):
+        return LLMErrorScope.TRANSIENT
+    normalized = body.lower()
+    if status_code in {401, 404}:
+        return LLMErrorScope.PROVIDER_LOCAL
+    if status_code == 403:
+        if any(word in normalized for word in ("policy", "safety", "moderation", "blocked")):
+            return LLMErrorScope.ACCOUNT_POLICY
+        return LLMErrorScope.PROVIDER_LOCAL
+    if status_code == 400:
+        if any(
+            word in normalized
+            for word in (
+                "model_not_found",
+                "model not found",
+                "unknown model",
+                "deployment not found",
+            )
+        ):
+            return LLMErrorScope.PROVIDER_LOCAL
+        if any(word in normalized for word in ("unsupported", "does not support", "not supported")):
+            return LLMErrorScope.CAPABILITY_MISMATCH
+        return LLMErrorScope.REQUEST_INVALID
+    if status_code in {409, 422}:
+        return LLMErrorScope.REQUEST_INVALID
+    return LLMErrorScope.UNKNOWN
 
 
 def _safe_error_message(msg: str, api_key: str | None) -> str:
@@ -2419,6 +2571,7 @@ __all__ = [
     "LLMCallFailed",
     "LLMClient",
     "LLMError",
+    "LLMErrorScope",
     "LLMResult",
     "LLMStreamChunk",
     "OpenAIClient",

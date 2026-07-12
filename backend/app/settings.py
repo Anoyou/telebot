@@ -44,8 +44,8 @@ class Settings(BaseSettings):
     # worker.entry.worker_entry 会在 import runtime 之前设 ``TELEBOT_WORKER_PROC=1``，
     # db.base / redis_client 据此切到下面的 ``*_worker`` 默认值。
     db_pool_size_worker: int = 1
-    # 允许短时突发（payout 扫描 + reconcile + IPC）借 2 条连接，避免 30s pool_timeout。
-    db_max_overflow_worker: int = 2
+    # 允许短时突发借 1 条连接；10 账号四协程压测 p99 等待 <1s，且避免击穿 PG 连接上限。
+    db_max_overflow_worker: int = 1
     redis_url: str = "redis://localhost:6379/0"
     redis_max_connections: int = 16
     redis_max_connections_worker: int = 8
@@ -119,6 +119,10 @@ class Settings(BaseSettings):
     # 第三方插件 ctx.ai 的额外保护上限；插件只能请求文本补全，且输出/超时默认收紧。
     plugin_ai_max_output_tokens: int = 4096
     plugin_ai_timeout_seconds: int = 600
+    # 插件 handler 协作式 deadline 与连续失败熔断。不是 CPU/恶意代码沙箱。
+    plugin_invoke_timeout_seconds: float = 30.0
+    plugin_circuit_failure_threshold: int = 3
+    plugin_circuit_cooldown_seconds: float = 60.0
 
     # ── 启动期自动迁移 ────────────────────────────────────────────
     # True = backend 启动时自动 ``alembic upgrade head``，把 DB schema 升到代码期望的版本

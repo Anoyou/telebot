@@ -57,6 +57,7 @@ class _FakeCmdRedis:
         self.messages: asyncio.Queue[dict] = asyncio.Queue()
         self.published: list[tuple[str, str]] = []
         self.logs: list[tuple[str, str]] = []
+        self.store: dict[str, str] = {}
 
     def pubsub(self) -> _FakeCmdPubSub:
         return _FakeCmdPubSub(self.messages)
@@ -68,6 +69,13 @@ class _FakeCmdRedis:
     async def rpush(self, key: str, payload: str) -> int:
         self.logs.append((key, payload))
         return len(self.logs)
+
+    async def get(self, key: str):  # noqa: ANN201
+        return self.store.get(key)
+
+    async def set(self, key: str, value: str, **_kwargs) -> bool:  # noqa: ANN003
+        self.store[key] = value
+        return True
 
     async def send_cmd(self, payload: str) -> None:
         await self.messages.put({"type": "message", "data": payload})
@@ -232,6 +240,61 @@ async def test_worker_stop_cancels_inflight_rpc(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_worker_rpc_executor_bounds_one_hundred_slow_requests(monkeypatch):
+    from app.worker import runtime as runtime_mod
+    from app.worker.plugins import loader as loader_mod
+
+    release = asyncio.Event()
+    started = 0
+
+    async def _slow_entry(*_args, **_kwargs):
+        nonlocal started
+        started += 1
+        await release.wait()
+        return []
+
+    monkeypatch.setattr(loader_mod, "invoke_interaction_entry", _slow_entry)
+    redis = _FakeCmdRedis()
+    executor = runtime_mod._RpcCommandExecutor(
+        redis=redis,
+        client=AsyncMock(),
+        account_id=109,
+        platform_scheduler=None,
+    )
+    executor.start()
+    await asyncio.sleep(0)
+    deadline_at_ms = int(__import__("time").time() * 1000) + 60_000
+    for index in range(100):
+        await executor.submit(
+            IPCMessage(
+                CMD_RUN_INTERACTION_ENTRY,
+                {
+                    "request_id": f"slow-{index}",
+                    "deadline_at_ms": deadline_at_ms,
+                    "reply_to": f"slow-reply-{index}",
+                    "plugin_key": "demo",
+                    "entry_key": "main",
+                    "payload": {},
+                },
+            )
+        )
+
+    await asyncio.sleep(0)
+    stats = runtime_mod.worker_rpc_executor_stats(109)
+    assert started == runtime_mod._RPC_MAX_CONCURRENCY
+    assert stats["running"] == runtime_mod._RPC_MAX_CONCURRENCY
+    assert stats["queued"] <= runtime_mod._RPC_QUEUE_CAPACITY
+    assert stats["accepted"] == stats["running"] + stats["queued"]
+    assert stats["accepted"] <= runtime_mod._RPC_MAX_CONCURRENCY + runtime_mod._RPC_QUEUE_CAPACITY
+    assert stats["rejected"] == 100 - stats["accepted"]
+
+    await executor.stop()
+    stopped = runtime_mod.worker_rpc_executor_stats(109)
+    assert stopped["running"] == 0
+    assert stopped["queued"] == 0
+
+
+@pytest.mark.asyncio
 async def test_periodic_userbot_session_expire_scan_calls_loader(monkeypatch):
     """worker 后台扫描器应周期性调用 loader 的 userbot 会话过期扫描入口。"""
     from app.worker import runtime as runtime_mod
@@ -260,6 +323,27 @@ async def test_periodic_userbot_session_expire_scan_calls_loader(monkeypatch):
 async def test_run_interaction_userbot_action_payout_uses_rate_limit_and_parse_mode(monkeypatch):
     from app.worker import runtime as runtime_mod
 
+    monkeypatch.setattr(
+        runtime_mod.payout_compensation,
+        "claim_payout_delivery",
+        AsyncMock(
+            return_value=runtime_mod.payout_compensation.PayoutDeliveryClaim(
+                status="acquired",
+                row_id=1,
+                claim_token="test-token",
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        runtime_mod.payout_compensation,
+        "complete_payout_delivery",
+        AsyncMock(return_value=True),
+    )
+    monkeypatch.setattr(
+        runtime_mod.payout_compensation,
+        "release_payout_delivery_claim",
+        AsyncMock(),
+    )
     client = AsyncMock()
     client.send_message = AsyncMock(return_value=SimpleNamespace(id=808))
     engine = SimpleNamespace(
@@ -287,13 +371,11 @@ async def test_run_interaction_userbot_action_payout_uses_rate_limit_and_parse_m
         reply_to=44,
         parse_mode="html",
     )
-    assert result == {
-        "message_id": 808,
-        "chat_id": -100333,
-        "reply_to_message_id": 44,
-        "reply_to_user_id": None,
-        "payout_key": None,
-    }
+    assert result["message_id"] == 808
+    assert result["chat_id"] == -100333
+    assert result["reply_to_message_id"] == 44
+    assert result["reply_to_user_id"] is None
+    assert str(result["payout_key"]).startswith("pay_")
 
 
 @pytest.mark.asyncio

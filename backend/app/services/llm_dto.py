@@ -144,10 +144,19 @@ class LLMProviderDTO:
     def capabilities_for_model(self, model: str):
         """Apply optional model metadata over protocol-level capabilities."""
 
+        from ..db.models.command import LLM_PROTOCOL_PROFILE_CLAUDE_CODE_PROXY
         from .llm_protocol import capabilities_for_api_format
 
         api_format = str(self.api_format or "chat_completions")
         capabilities = capabilities_for_api_format(api_format)
+        if (
+            api_format == "anthropic_messages"
+            and self.protocol_profile == LLM_PROTOCOL_PROFILE_CLAUDE_CODE_PROXY
+        ):
+            capabilities = capabilities.with_overrides(
+                reasoning=True,
+                reasoning_efforts=frozenset({"minimal", "low", "medium", "high", "xhigh"}),
+            )
         metadata = next(
             (
                 item

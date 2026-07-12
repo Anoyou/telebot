@@ -88,7 +88,6 @@ class _MemoryRedis:
             added += 0 if member in bucket else 1
             bucket[member] = float(score)
         return added
-
     async def zcard(self, key: str):
         return len(self.zsets.get(key, {}))
 
@@ -116,6 +115,28 @@ class _MemoryRedis:
         for member in members:
             deleted += 1 if bucket.pop(member, None) is not None else 0
         return deleted
+
+
+def _allow_interaction_claim(monkeypatch) -> AsyncMock:
+    claim = AsyncMock(return_value=True)
+    monkeypatch.setattr(account_bot_runtime, "claim_interaction_message", claim)
+    return claim
+
+
+def _mock_userbot_payout_delivery(monkeypatch) -> tuple[AsyncMock, AsyncMock, AsyncMock]:
+    claim = AsyncMock(
+        return_value=worker_runtime.payout_compensation.PayoutDeliveryClaim(
+            status="acquired",
+            row_id=1,
+            claim_token="test-token",
+        )
+    )
+    complete = AsyncMock(return_value=True)
+    release = AsyncMock()
+    monkeypatch.setattr(worker_runtime.payout_compensation, "claim_payout_delivery", claim)
+    monkeypatch.setattr(worker_runtime.payout_compensation, "complete_payout_delivery", complete)
+    monkeypatch.setattr(worker_runtime.payout_compensation, "release_payout_delivery_claim", release)
+    return claim, complete, release
 
 
 class _InteractionRuntimeTestResult:
@@ -343,6 +364,7 @@ async def test_userbot_interaction_action_humanize_skips_when_switches_disabled(
 
 @pytest.mark.asyncio
 async def test_userbot_interaction_action_payout_skips_humanize(monkeypatch) -> None:
+    _mock_userbot_payout_delivery(monkeypatch)
     client = SimpleNamespace(send_message=AsyncMock(return_value=SimpleNamespace(id=91)))
     engine = SimpleNamespace(
         humanize=HumanizeOpts(read_before_reply=True, typing_simulate=True),
@@ -7475,7 +7497,63 @@ async def test_interaction_session_expired_scan_dispatches_interaction_bot_sessi
 
 
 @pytest.mark.asyncio
+async def test_interaction_expiry_scan_preserves_concurrent_renewal(monkeypatch) -> None:
+    from app.services.interaction.session_store import update_interaction_session
+
+    redis = _MemoryRedis()
+    now = 1710001000.0
+    rule = {
+        "id": "renew-game",
+        "enabled": True,
+        "action": "module",
+        "module_key": "renew_game",
+        "module_action": "on_event",
+    }
+    key = account_bot_runtime._interaction_session_key(1, rule, -100123, None)
+    redis.data[key] = json.dumps(
+        {
+            "account_id": 1,
+            "chat_id": -100123,
+            "rule_id": "renew-game",
+            "module_key": "renew_game",
+            "entry_key": "on_event",
+            "channel": "interaction_bot",
+            "revision": 2,
+            "expires_at": now - 1,
+            "data": {"round": 3},
+        }
+    )
+
+    async def renew_during_dispatch(*_args, **_kwargs):
+        await update_interaction_session(
+            redis,
+            key,
+            data={"renewed": True},
+            extend_seconds=120,
+            expected_revision=2,
+            now=now,
+        )
+        return True
+
+    monkeypatch.setattr(account_bot_runtime, "get_redis", lambda: redis)
+    monkeypatch.setattr(account_bot_runtime.time, "time", lambda: now)
+    monkeypatch.setattr(account_bot_runtime, "_dispatch_interaction_session_expired", renew_during_dispatch)
+
+    processed = await account_bot_runtime._scan_interaction_expired_sessions_once(
+        1, "bbot-token", {"enabled": True, "rules": [rule]}
+    )
+
+    assert processed == 0
+    stored = json.loads(redis.data[key])
+    assert stored["revision"] == 3
+    assert stored["expires_at"] == now + 120
+    assert stored["data"]["renewed"] is True
+    assert "_expiry_claim" not in stored
+
+
+@pytest.mark.asyncio
 async def test_keyword_start_saves_session_before_update_and_routes_answer_payload(monkeypatch) -> None:
+    _allow_interaction_claim(monkeypatch)
     redis = _MemoryRedis()
     state = {"active": True, "target": 7}
     payloads: list[dict[str, Any]] = []
@@ -11445,6 +11523,8 @@ async def test_worker_suppresses_interaction_keyword_with_empty_chat_scope(monke
 
 @pytest.mark.asyncio
 async def test_interaction_plain_message_routes_to_worker_entry_as_message(monkeypatch) -> None:
+    _allow_interaction_claim(monkeypatch)
+
     class _DB:
         async def __aenter__(self):
             return self
@@ -11572,6 +11652,7 @@ async def test_interaction_plain_message_skips_cross_channel_duplicate(monkeypat
         chat_id=-100777,
         message_id=13661,
         rule_id="dice-active",
+        fail_open=False,
     )
     run_entry.assert_not_awaited()
     assert any(
@@ -11686,6 +11767,7 @@ async def test_interaction_message_edited_also_claims_cross_channel(monkeypatch)
         chat_id=-100777,
         message_id=13663,
         rule_id="dice-active",
+        fail_open=False,
     )
     run_entry.assert_awaited_once()
     apply_actions.assert_awaited_once()
@@ -11739,6 +11821,7 @@ async def test_interaction_zero_actions_releases_claim(monkeypatch) -> None:
         chat_id=-100777,
         message_id=13664,
         rule_id="dice-active",
+        fail_open=False,
     )
     release.assert_awaited_once_with(
         account_id=1,
@@ -11813,6 +11896,8 @@ async def test_interaction_callback_zero_actions_releases_claim_and_answers(monk
 
 @pytest.mark.asyncio
 async def test_interaction_media_message_without_text_routes_to_active_session(monkeypatch) -> None:
+    _allow_interaction_claim(monkeypatch)
+
     class _DB:
         async def __aenter__(self):
             return self
@@ -11878,6 +11963,8 @@ async def test_interaction_media_message_without_text_routes_to_active_session(m
 
 @pytest.mark.asyncio
 async def test_interaction_edited_message_routes_to_worker_entry(monkeypatch) -> None:
+    _allow_interaction_claim(monkeypatch)
+
     class _DB:
         async def __aenter__(self):
             return self
@@ -11943,6 +12030,8 @@ async def test_interaction_edited_message_routes_to_worker_entry(monkeypatch) ->
 
 @pytest.mark.asyncio
 async def test_interaction_callback_routes_disabled_active_session_to_worker_entry_and_answers_callback(monkeypatch) -> None:
+    _allow_interaction_claim(monkeypatch)
+
     class _DB:
         async def __aenter__(self):
             return self
@@ -12055,6 +12144,8 @@ async def test_interaction_callback_routes_disabled_active_session_to_worker_ent
 
 @pytest.mark.asyncio
 async def test_interaction_callback_without_actions_is_still_acknowledged(monkeypatch) -> None:
+    _allow_interaction_claim(monkeypatch)
+
     class _DB:
         async def __aenter__(self):
             return self
@@ -12114,6 +12205,8 @@ async def test_interaction_callback_without_actions_is_still_acknowledged(monkey
 
 @pytest.mark.asyncio
 async def test_interaction_callback_fast_ack_skips_later_answer_callback(monkeypatch) -> None:
+    _allow_interaction_claim(monkeypatch)
+
     class _DB:
         async def __aenter__(self):
             return self
@@ -12214,6 +12307,8 @@ async def test_interaction_callback_fast_ack_skips_later_answer_callback(monkeyp
 
 @pytest.mark.asyncio
 async def test_interaction_callback_without_fast_ack_waits_for_plugin_answer(monkeypatch) -> None:
+    _allow_interaction_claim(monkeypatch)
+
     class _DB:
         async def __aenter__(self):
             return self
@@ -12370,6 +12465,8 @@ async def test_interaction_plain_message_skips_entries_without_message_event(mon
 
 @pytest.mark.asyncio
 async def test_interaction_plain_message_control_action_clears_session(monkeypatch) -> None:
+    _allow_interaction_claim(monkeypatch)
+
     class _DB:
         async def __aenter__(self):
             return self
@@ -12425,6 +12522,8 @@ async def test_interaction_plain_message_control_action_clears_session(monkeypat
 
 @pytest.mark.asyncio
 async def test_chat_scoped_module_session_survives_user_usage_limits(monkeypatch) -> None:
+    _allow_interaction_claim(monkeypatch)
+
     class _DB:
         async def __aenter__(self):
             return self
@@ -12901,6 +13000,8 @@ async def test_transfer_test_update_skips_prefixed_userbot_command_messages(monk
 
 @pytest.mark.asyncio
 async def test_paid_module_start_keyword_is_blocked_but_answer_message_routes(monkeypatch) -> None:
+    _allow_interaction_claim(monkeypatch)
+
     class _DB:
         async def __aenter__(self):
             return self
@@ -14620,7 +14721,9 @@ async def test_run_worker_interaction_entry_returns_timeout(monkeypatch) -> None
     )
 
     assert ok is False
-    assert error == "worker 调用超时"
+    assert error is not None
+    assert error.startswith("worker 调用超时，终态未知 (request_id=")
+    assert error.endswith(")")
     assert actions == []
     assert redis.published
     # broker 长驻 pubsub：不再要求每次 request 后 close；reply channel 应已 unsubscribe
@@ -14876,6 +14979,8 @@ async def test_run_worker_interaction_entry_waits_for_slow_plugin_reply(monkeypa
 
 @pytest.mark.asyncio
 async def test_game24_winner_notice_replies_to_winning_answer(monkeypatch) -> None:
+    _allow_interaction_claim(monkeypatch)
+
     class _DB:
         async def __aenter__(self):
             return self

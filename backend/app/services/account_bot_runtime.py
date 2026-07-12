@@ -3927,17 +3927,16 @@ async def _dispatch_interaction_session_expired(
     cfg: dict[str, Any],
     key: str,
     session: dict[str, Any],
-) -> None:
+) -> bool:
     if str(session.get("channel") or "interaction_bot") != "interaction_bot":
-        return
+        return False
     expires_at = _int_or_none(session.get("expires_at"))
     if expires_at is None or expires_at > time.time():
-        return
+        return False
     rule = _interaction_rule_for_session(cfg, {**session, "session_key": key})
     incoming = _incoming_from_interaction_session_expired(aid, token, session)
     if rule is None or incoming is None:
-        await get_redis().delete(key)
-        return
+        return True
     if not _rule_entry_allows_event(rule, "session_expired"):
         await record_span(
             trace_log_context(incoming.trace_id, plugin_key=rule.get("module_key"), entry_key=rule.get("module_action")),
@@ -3950,8 +3949,7 @@ async def _dispatch_interaction_session_expired(
             message="插件入口未声明 session_expired 事件。",
             session_key=key,
         )
-        await get_redis().delete(key)
-        return
+        return True
     trace = None
     flags = await _event_framework_flags()
     final_status = TRACE_STATUS_SKIPPED
@@ -3988,18 +3986,22 @@ async def _dispatch_interaction_session_expired(
         if not ok:
             final_status = TRACE_STATUS_FAILED
             _schedule_interaction_debug_state(incoming, stage="plugin_error", payload=payload, error=error)
-            return
+            return False
         guarded = await _guard_interaction_actions(incoming, rule, actions)
         await _apply_interaction_actions(incoming, guarded, context=_interaction_trace_context(payload))
         final_status = TRACE_STATUS_OK
+        return True
     finally:
-        try:
-            await get_redis().delete(key)
-        finally:
-            await finish_trace(trace, final_status)
+        await finish_trace(trace, final_status)
 
 
 async def _scan_interaction_expired_sessions_once(aid: int, token: str, cfg: dict[str, Any]) -> int:
+    from .interaction.session_index import unindex_session_key
+    from .interaction.session_store import (
+        claim_expired_interaction_session,
+        finish_expired_interaction_session,
+    )
+
     processed = 0
     redis = get_redis()
     for key in await _iter_interaction_session_keys_for_account(aid):
@@ -4016,9 +4018,32 @@ async def _scan_interaction_expired_sessions_once(aid: int, token: str, cfg: dic
         if not isinstance(session, dict):
             await redis.delete(key)
             continue
+        if str(session.get("channel") or "interaction_bot") != "interaction_bot":
+            continue
         before = time.time()
-        await _dispatch_interaction_session_expired(aid, token, cfg, key, session)
-        if (_int_or_none(session.get("expires_at")) or before + 1) <= before:
+        if (_int_or_none(session.get("expires_at")) or before + 1) > before:
+            continue
+        claim = await claim_expired_interaction_session(
+            redis,
+            key,
+            expected_revision=_int_or_none(session.get("revision")) or 0,
+            now=before,
+        )
+        if claim is None:
+            continue
+        success = False
+        try:
+            success = await _dispatch_interaction_session_expired(aid, token, cfg, key, session)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("interaction session expiry handler failed key=%s error=%s", key, exc, exc_info=True)
+        deleted = await finish_expired_interaction_session(redis, key, claim, success=success)
+        if deleted:
+            await unindex_session_key(
+                redis,
+                account_id=aid,
+                chat_id=_int_or_none(session.get("chat_id")),
+                session_key=key,
+            )
             processed += 1
     return processed
 
@@ -5694,6 +5719,7 @@ async def _try_handle_interaction_module_message(
             chat_id=incoming.chat_id,
             message_id=incoming.message_id,
             rule_id=rule.get("id"),
+            fail_open=False,
         ):
             await record_span(
                 trace_log_context(incoming.trace_id, plugin_key=module_key, entry_key=entry_key),
@@ -6342,6 +6368,11 @@ async def _run_worker_interaction_entry(
             timeout_seconds=_INTERACTION_ENTRY_TIMEOUT_SECONDS,
             online_wait_seconds=_INTERACTION_WORKER_ONLINE_WAIT_SECONDS,
             redis=redis,
+            request_id=(
+                f"entry:{incoming.account_id}:{trace_id}:{plugin_key}:{entry_key}"
+                if trace_id
+                else None
+            ),
         )
         if not online:
             err = error or "账号 worker 不在线"
@@ -6456,6 +6487,11 @@ async def _run_worker_interaction_action(
             timeout_seconds=_INTERACTION_ENTRY_TIMEOUT_SECONDS,
             online_wait_seconds=0.0,
             redis=redis,
+            request_id=(
+                f"payout:{incoming.account_id}:{payload.get('payout_key')}"
+                if payload.get("action_type") == "payout" and payload.get("payout_key")
+                else None
+            ),
         )
         if not online:
             await record_span(
@@ -7647,6 +7683,15 @@ async def _emit_transfer_notice_income_tap(incoming: Incoming, rule: dict[str, A
     action = {
         "type": "payment_confirmed",
         "event_type": "payment_confirmed",
+        "source_event_key": (
+            f"update:{incoming.update_id}"
+            if incoming.update_id
+            else (
+                f"message:{incoming.chat_id}:{incoming.message_id}"
+                if incoming.chat_id is not None and incoming.message_id is not None
+                else None
+            )
+        ),
         "chat_id": incoming.chat_id,
         "chat_title": _incoming_chat_title(incoming),
         "message_id": incoming.message_id,

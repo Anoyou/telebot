@@ -21,6 +21,7 @@ import { Label } from "@/components/ui/label";
 import { Spinner } from "@/components/ui/misc";
 import { Switch } from "@/components/ui/switch";
 import { getErrMsg } from "@/lib/api";
+import { confirmDiscardChanges, useUnsavedChanges } from "@/lib/unsavedChanges";
 import { featureConfigBackTarget, formatFeatureVersion } from "@/pages/Plugins/_shared/featureConfig";
 import { featureRuntimeText } from "./_shared/featureStatus";
 
@@ -78,8 +79,13 @@ export function Game24ConfigPage() {
     String(DEFAULT_CONFIG.timeout),
   );
   const [dirty, setDirty] = useState(false);
+  const [remoteConfigChanged, setRemoteConfigChanged] = useState(false);
 
   useEffect(() => {
+    if (dirty) {
+      setRemoteConfigChanged(true);
+      return;
+    }
     if (currentConfig.command !== undefined) {
       setCommand(currentConfig.command);
     }
@@ -87,7 +93,9 @@ export function Game24ConfigPage() {
       setTimeoutInput(String(currentConfig.timeout));
     }
     setDirty(false);
+    setRemoteConfigChanged(false);
   }, [game24Feature?.config]);
+  useUnsavedChanges(dirty);
 
   const saveMut = useMutation({
     mutationFn: async (config: Game24Config) => {
@@ -100,6 +108,7 @@ export function Game24ConfigPage() {
     onSuccess: () => {
       toast.success("配置已保存（worker 热加载）");
       setDirty(false);
+      setRemoteConfigChanged(false);
       qc.invalidateQueries({ queryKey: ["account", aid, "features"] });
       qc.invalidateQueries({ queryKey: ["matrix"] });
     },
@@ -128,6 +137,7 @@ export function Game24ConfigPage() {
     setCommand(currentConfig.command ?? DEFAULT_CONFIG.command);
     setTimeoutInput(String(currentConfig.timeout ?? DEFAULT_CONFIG.timeout));
     setDirty(false);
+    setRemoteConfigChanged(false);
   }
 
   if (!aid) return <p>账号 ID 不合法</p>;
@@ -144,7 +154,7 @@ export function Game24ConfigPage() {
   return (
     <div className="space-y-6 pb-24">
       <div className="flex flex-wrap items-center gap-3">
-        <Button variant="default" size="sm" className="gap-1.5 shadow-sm" onClick={() => nav(backTarget.backHref)}>
+        <Button variant="default" size="sm" className="gap-1.5 shadow-sm" onClick={() => confirmDiscardChanges(dirty) && nav(backTarget.backHref)}>
           <ArrowLeft className="h-4 w-4" /> {backTarget.backLabel}
         </Button>
         <div className="min-w-0">
@@ -245,7 +255,11 @@ export function Game24ConfigPage() {
             <div className="text-sm">
               <div className="font-medium">配置操作</div>
               <div className="text-xs text-muted-foreground">
-                {dirty ? "有未保存修改，保存后 worker 会热加载。" : "当前配置已同步。"}
+                {remoteConfigChanged
+                  ? "服务端配置已变化；当前草稿已保留，保存会以草稿为准。"
+                  : dirty
+                    ? "有未保存修改，保存后 worker 会热加载。"
+                    : "当前配置已同步。"}
               </div>
             </div>
             <div className="flex items-center gap-4">

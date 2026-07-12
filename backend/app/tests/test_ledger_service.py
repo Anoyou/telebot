@@ -301,6 +301,45 @@ async def test_ledger_summary_applies_default_time_window(ledger_session_factory
 
 
 @pytest.mark.asyncio
+async def test_ledger_list_scans_past_sparse_non_financial_rows(ledger_session_factory) -> None:
+    now = datetime.now(UTC)
+    async with ledger_session_factory() as db:
+        db.add_all(
+            [
+                ActionEvent(
+                    account_id=7,
+                    channel="interaction_bot",
+                    action_type="send_message",
+                    params_summary={"type": "send_message", "text": f"noise-{index}"},
+                    status=ACTION_EVENT_STATUS_OK,
+                    created_at=now - timedelta(seconds=index),
+                )
+                for index in range(1201)
+            ]
+        )
+        db.add(
+            ActionEvent(
+                account_id=7,
+                channel="external_payment_notice",
+                action_type="payment_confirmed",
+                params_summary={"event_type": "payment_confirmed", "amount": "16", "chat_id": -100123},
+                status=ACTION_EVENT_STATUS_OK,
+                created_at=now - timedelta(seconds=1300),
+            )
+        )
+        await db.commit()
+
+        entries = await ledger_service.list_ledger_entries(
+            db,
+            ledger_service.LedgerFilters(account_id=7, limit=1),
+        )
+
+    assert len(entries) == 1
+    assert entries[0].direction == ledger_service.LEDGER_DIRECTION_IN
+    assert entries[0].amount == "16"
+
+
+@pytest.mark.asyncio
 async def test_ledger_hydrates_historical_chat_and_recipient_labels(ledger_session_factory) -> None:
     now = datetime.now(UTC)
     await _insert_event_trace(ledger_session_factory, started_at=now)

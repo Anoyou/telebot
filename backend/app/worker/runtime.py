@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import asyncio
 import gc
+import json
 import logging
+import time
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -80,6 +82,7 @@ from .ipc import (
     GCMD_KILL_SWITCH,
     GCMD_RELOAD_GLOBAL,
     GLOBAL_CHANNEL,
+    RPC_RESULT_TTL_SECONDS,
     RUNTIME_LOG_STREAM,
     IPCMessage,
     RuntimeLogPayload,
@@ -87,6 +90,7 @@ from .ipc import (
     event_channel,
     make_cmd,
     make_event,
+    rpc_result_key,
 )
 from .ratelimit.humanize import simulate_read, simulate_typing
 from .scheduler_runtime import PlatformScheduler
@@ -108,6 +112,9 @@ _BACKGROUND_RPC_COMMAND_TYPES = {
     CMD_RUN_INTERACTION_ENTRY,
     CMD_RUN_INTERACTION_ACTION,
 }
+_RPC_MAX_CONCURRENCY = 4
+_RPC_QUEUE_CAPACITY = 32
+_RPC_EXECUTOR_STATS: dict[int, dict[str, int]] = {}
 
 
 class _AmbiguousPayoutProbeError(RuntimeError):
@@ -665,7 +672,13 @@ async def _listen_cmd(
     等待 3s 后重新 subscribe，不会让 IPC 命令通道永久失效。
     仅在收到 CMD_STOP（主动退出）时才真正退出循环。
     """
-    inflight_rpc_tasks: set[asyncio.Task[None]] = set()
+    rpc_executor = _RpcCommandExecutor(
+        redis=redis,
+        client=client,
+        account_id=account_id,
+        platform_scheduler=platform_scheduler,
+    )
+    rpc_executor.start()
     while True:
         try:
             pubsub = redis.pubsub()
@@ -682,14 +695,7 @@ async def _listen_cmd(
                     ack_ok = True
                     ack_error: str | None = None
                     if _should_schedule_background_rpc(cmd):
-                        _schedule_background_rpc(
-                            inflight_rpc_tasks,
-                            redis=redis,
-                            client=client,
-                            account_id=account_id,
-                            platform_scheduler=platform_scheduler,
-                            cmd=cmd,
-                        )
+                        await rpc_executor.submit(cmd)
                         continue
                     if cmd.type == CMD_PAUSE:
                         paused.clear()
@@ -701,7 +707,7 @@ async def _listen_cmd(
                         await _log(redis, account_id, "info", "已恢复")
                     elif cmd.type == CMD_STOP:
                         await _log(redis, account_id, "info", "收到 stop 指令")
-                        await _cancel_inflight_rpc_tasks(inflight_rpc_tasks)
+                        await rpc_executor.stop()
                         # ── 安全：先调用插件 on_shutdown，再断开 client ──
                         try:
                             from .plugins.loader import _STATES  # 延迟 import 避免循环
@@ -838,6 +844,9 @@ async def _listen_cmd(
                     await pubsub.close()
                 except Exception:  # noqa: BLE001
                     pass
+        except asyncio.CancelledError:
+            await rpc_executor.stop()
+            raise
         except Exception as exc:  # noqa: BLE001
             # Redis 断连等异常 → 等 3s 后重新 subscribe
             log.warning("worker_cmd listener 异常，3s 后重连: %s: %s", type(exc).__name__, exc)
@@ -855,44 +864,198 @@ def _should_schedule_background_rpc(cmd: IPCMessage) -> bool:
     return cmd.type in _BACKGROUND_RPC_COMMAND_TYPES and _valid_reply_to(cmd) is not None
 
 
-def _schedule_background_rpc(
-    tasks: set[asyncio.Task[None]],
-    *,
+def _rpc_request_id(cmd: IPCMessage) -> str | None:
+    value = cmd.payload.get("request_id")
+    return str(value).strip() if isinstance(value, str) and value.strip() else None
+
+
+def _rpc_deadline_expired(cmd: IPCMessage) -> bool:
+    try:
+        deadline_at_ms = int(cmd.payload.get("deadline_at_ms") or 0)
+    except (TypeError, ValueError):
+        return False
+    return deadline_at_ms > 0 and int(time.time() * 1000) >= deadline_at_ms
+
+
+async def _load_rpc_result(redis: Any, cmd: IPCMessage) -> dict[str, Any] | None:
+    request_id = _rpc_request_id(cmd)
+    getter = getattr(redis, "get", None)
+    if request_id is None or not callable(getter):
+        return None
+    try:
+        raw = await getter(rpc_result_key(request_id))
+    except Exception:  # noqa: BLE001
+        return None
+    if raw is None:
+        return None
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8", errors="replace")
+    try:
+        payload = json.loads(str(raw))
+    except (TypeError, ValueError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+async def _publish_rpc_payload(
     redis: Any,
-    client: Any,
-    account_id: int,
-    platform_scheduler: PlatformScheduler | None,
     cmd: IPCMessage,
+    payload: dict[str, Any],
+    *,
+    persist: bool = True,
 ) -> None:
-    task = asyncio.create_task(
-        _run_background_rpc_command(
-            redis,
-            client,
-            account_id,
-            platform_scheduler,
-            cmd,
-        )
-    )
-    tasks.add(task)
-
-    def _forget(done: asyncio.Task[None]) -> None:
-        tasks.discard(done)
-        if done.cancelled():
-            return
+    request_id = _rpc_request_id(cmd)
+    response = dict(payload)
+    if request_id is not None:
+        response.setdefault("request_id", request_id)
+        if persist:
+            setter = getattr(redis, "set", None)
+            if callable(setter):
+                try:
+                    await setter(
+                        rpc_result_key(request_id),
+                        json.dumps(response, ensure_ascii=False, separators=(",", ":")),
+                        ex=RPC_RESULT_TTL_SECONDS,
+                    )
+                except Exception:  # noqa: BLE001
+                    log.warning("persist worker RPC result failed request_id=%s", request_id, exc_info=True)
+    reply_to = _valid_reply_to(cmd)
+    if reply_to is not None:
         try:
-            exc = done.exception()
-        except Exception as err:  # noqa: BLE001
-            log.warning("worker RPC task state check failed: %s: %s", type(err).__name__, err)
-            return
-        if exc is not None:
-            log.error(
-                "worker RPC task failed: %s: %s",
-                type(exc).__name__,
-                exc,
-                exc_info=(type(exc), exc, exc.__traceback__),
-            )
+            await redis.publish(reply_to, make_cmd(cmd.type, **response))
+        except Exception:  # noqa: BLE001
+            log.warning("publish worker RPC result failed request_id=%s", request_id, exc_info=True)
 
-    task.add_done_callback(_forget)
+
+async def _reject_rpc_command(redis: Any, cmd: IPCMessage, error: str) -> None:
+    request_id = _rpc_request_id(cmd)
+    if cmd.type == CMD_RUN_INTERACTION_ENTRY:
+        payload: dict[str, Any] = {"ok": False, "error": error, "actions": []}
+    elif cmd.type == CMD_RUN_INTERACTION_ACTION:
+        payload = {
+            "ok": False,
+            "error": error,
+            "result": {"rpc_status": "rejected", "request_id": request_id},
+        }
+    else:
+        payload = {"ok": False, "error": error}
+    await _publish_rpc_payload(redis, cmd, payload)
+    await _ack_cmd(redis, cmd, ok=False, error=error)
+
+
+class _RpcCommandExecutor:
+    """每账号有界 RPC 执行器；控制面指令不进此队列。"""
+
+    def __init__(
+        self,
+        *,
+        redis: Any,
+        client: Any,
+        account_id: int,
+        platform_scheduler: PlatformScheduler | None,
+    ) -> None:
+        self.redis = redis
+        self.client = client
+        self.account_id = account_id
+        self.platform_scheduler = platform_scheduler
+        self.queue: asyncio.Queue[IPCMessage] = asyncio.Queue(maxsize=_RPC_QUEUE_CAPACITY)
+        self.workers: list[asyncio.Task[None]] = []
+        self.stats = {
+            "running": 0,
+            "queued": 0,
+            "accepted": 0,
+            "rejected": 0,
+            "completed": 0,
+        }
+        _RPC_EXECUTOR_STATS[account_id] = self.stats
+
+    def start(self) -> None:
+        if self.workers:
+            return
+        self.workers = [
+            asyncio.create_task(self._worker(), name=f"worker-rpc:{self.account_id}:{idx}")
+            for idx in range(_RPC_MAX_CONCURRENCY)
+        ]
+
+    async def submit(self, cmd: IPCMessage) -> bool:
+        cached = await _load_rpc_result(self.redis, cmd)
+        if cached is not None:
+            await _publish_rpc_payload(self.redis, cmd, cached, persist=False)
+            await _ack_cmd(self.redis, cmd, ok=bool(cached.get("ok", False)), error=cached.get("error"))
+            return True
+        if _rpc_deadline_expired(cmd):
+            self.stats["rejected"] += 1
+            await _reject_rpc_command(self.redis, cmd, "rpc deadline exceeded before enqueue")
+            return False
+        try:
+            self.queue.put_nowait(cmd)
+        except asyncio.QueueFull:
+            self.stats["rejected"] += 1
+            await _reject_rpc_command(self.redis, cmd, "worker rpc overloaded")
+            await _log(
+                self.redis,
+                self.account_id,
+                "warn",
+                "worker RPC 队列已满，拒绝过载请求",
+                queue_depth=self.queue.qsize(),
+                queue_capacity=_RPC_QUEUE_CAPACITY,
+                rejected=self.stats["rejected"],
+            )
+            return False
+        self.stats["accepted"] += 1
+        self.stats["queued"] = self.queue.qsize()
+        return True
+
+    async def _worker(self) -> None:
+        while True:
+            cmd = await self.queue.get()
+            self.stats["queued"] = self.queue.qsize()
+            self.stats["running"] += 1
+            try:
+                if _rpc_deadline_expired(cmd):
+                    self.stats["rejected"] += 1
+                    await _reject_rpc_command(self.redis, cmd, "rpc deadline exceeded in queue")
+                else:
+                    await _run_background_rpc_command(
+                        self.redis,
+                        self.client,
+                        self.account_id,
+                        self.platform_scheduler,
+                        cmd,
+                    )
+                    self.stats["completed"] += 1
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                log.error(
+                    "worker RPC executor task failed: %s: %s",
+                    type(exc).__name__,
+                    exc,
+                    exc_info=(type(exc), exc, exc.__traceback__),
+                )
+            finally:
+                self.stats["running"] -= 1
+                self.queue.task_done()
+
+    async def stop(self) -> None:
+        while True:
+            try:
+                self.queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            else:
+                self.queue.task_done()
+        self.stats["queued"] = 0
+        workers, self.workers = self.workers, []
+        for task in workers:
+            task.cancel()
+        if workers:
+            await asyncio.gather(*workers, return_exceptions=True)
+        self.stats["running"] = 0
+
+
+def worker_rpc_executor_stats(account_id: int) -> dict[str, int]:
+    return dict(_RPC_EXECUTOR_STATS.get(account_id, {}))
 
 
 async def _run_background_rpc_command(
@@ -921,17 +1084,6 @@ async def _run_background_rpc_command(
         await _ack_cmd(redis, cmd, ok=ack_ok, error=ack_error)
 
 
-async def _cancel_inflight_rpc_tasks(tasks: set[asyncio.Task[None]]) -> None:
-    pending = [task for task in list(tasks) if not task.done()]
-    if not pending:
-        tasks.clear()
-        return
-    for task in pending:
-        task.cancel()
-    await asyncio.gather(*pending, return_exceptions=True)
-    tasks.difference_update(pending)
-
-
 async def _handle_rpc_command(
     redis: Any,
     client: Any,
@@ -945,14 +1097,14 @@ async def _handle_rpc_command(
         reply_to = _valid_reply_to(cmd)
         if reply_to is None:
             return False, True, None
-        await _handle_get_recent_peers_command(redis, account_id, reply_to)
+        await _handle_get_recent_peers_command(redis, account_id, cmd, reply_to)
         return True, True, None
     if cmd.type == CMD_EXECUTE_RULE:
         reply_to = _valid_reply_to(cmd)
         rule_id = cmd.payload.get("rule_id")
         if reply_to is None or not isinstance(rule_id, int):
             return False, True, None
-        await _handle_execute_rule_command(redis, account_id, platform_scheduler, reply_to, rule_id)
+        await _handle_execute_rule_command(redis, account_id, platform_scheduler, cmd, reply_to, rule_id)
         return True, True, None
     if cmd.type == CMD_RUN_INTERACTION_ENTRY:
         reply_to = _valid_reply_to(cmd)
@@ -967,6 +1119,30 @@ async def _handle_rpc_command(
         await _handle_run_interaction_action_command(redis, client, account_id, cmd, reply_to)
         return True, True, None
     return False, True, None
+
+
+class _DeadlineClientProxy:
+    """在真正 Telegram 副作用调用前重新检查 RPC deadline。"""
+
+    _SIDE_EFFECT_METHODS = frozenset(
+        {"send_message", "send_file", "edit_message", "delete_messages", "pin_message"}
+    )
+
+    def __init__(self, client: Any, cmd: IPCMessage) -> None:
+        self._client = client
+        self._cmd = cmd
+
+    def __getattr__(self, name: str) -> Any:
+        target = getattr(self._client, name)
+        if name not in self._SIDE_EFFECT_METHODS or not callable(target):
+            return target
+
+        async def _guarded(*args: Any, **kwargs: Any) -> Any:
+            if _rpc_deadline_expired(self._cmd):
+                raise TimeoutError("rpc deadline exceeded before Telegram side effect")
+            return await target(*args, **kwargs)
+
+        return _guarded
 
 
 async def _handle_fetch_avatar_command(redis: Any, client: Any, account_id: int, cmd: IPCMessage) -> bool:
@@ -993,8 +1169,14 @@ async def _handle_fetch_avatar_command(redis: Any, client: Any, account_id: int,
         return False
 
 
-async def _handle_get_recent_peers_command(redis: Any, account_id: int, reply_to: str) -> None:
+async def _handle_get_recent_peers_command(
+    redis: Any,
+    account_id: int,
+    cmd: IPCMessage,
+    reply_to: str,
+) -> None:
     # Sprint2 #3 RPC：把内存里的最近活跃 peer 列表回发到 reply_to 频道。
+    cmd.payload.setdefault("reply_to", reply_to)
     items: list[dict] = []
     try:
         from .plugins.loader import get_recent_peers  # type: ignore
@@ -1006,7 +1188,7 @@ async def _handle_get_recent_peers_command(redis: Any, account_id: int, reply_to
             f"get_recent_peers 失败: {type(e).__name__}: {e}",
         )
     try:
-        await redis.publish(reply_to, make_cmd(CMD_GET_RECENT_PEERS, items=items))
+        await _publish_rpc_payload(redis, cmd, {"items": items})
     except Exception:  # noqa: BLE001
         pass
 
@@ -1015,9 +1197,11 @@ async def _handle_execute_rule_command(
     redis: Any,
     account_id: int,
     platform_scheduler: PlatformScheduler | None,
+    cmd: IPCMessage,
     reply_to: str,
     rule_id: int,
 ) -> None:
+    cmd.payload.setdefault("reply_to", reply_to)
     result_ok = False
     result_error: str | None = None
     try:
@@ -1031,10 +1215,7 @@ async def _handle_execute_rule_command(
         result_error = f"{type(e).__name__}: {e}"
         await _log(redis, account_id, "warn", f"execute_rule 失败: {result_error}")
     try:
-        await redis.publish(
-            reply_to,
-            make_cmd(CMD_EXECUTE_RULE, ok=result_ok, error=result_error),
-        )
+        await _publish_rpc_payload(redis, cmd, {"ok": result_ok, "error": result_error})
     except Exception:  # noqa: BLE001
         pass
 
@@ -1045,6 +1226,7 @@ async def _handle_run_interaction_entry_command(
     cmd: IPCMessage,
     reply_to: str,
 ) -> None:
+    cmd.payload.setdefault("reply_to", reply_to)
     result_ok = False
     result_error: str | None = None
     actions: list[dict[str, Any]] = []
@@ -1056,6 +1238,7 @@ async def _handle_run_interaction_entry_command(
             plugin_key=str(cmd.payload.get("plugin_key") or ""),
             entry_key=str(cmd.payload.get("entry_key") or ""),
             payload=dict(cmd.payload.get("payload") or {}),
+            deadline_at_ms=_int_or_none(cmd.payload.get("deadline_at_ms")),
         )
         result_ok = True
     except Exception as e:  # noqa: BLE001
@@ -1064,9 +1247,10 @@ async def _handle_run_interaction_entry_command(
         if not _should_defer_interaction_entry_error_log(plugin_key, result_error):
             await _log(redis, account_id, "warn", f"run_interaction_entry 失败: {result_error}")
     try:
-        await redis.publish(
-            reply_to,
-            make_cmd(CMD_RUN_INTERACTION_ENTRY, ok=result_ok, error=result_error, actions=actions),
+        await _publish_rpc_payload(
+            redis,
+            cmd,
+            {"ok": result_ok, "error": result_error, "actions": actions},
         )
     except Exception:  # noqa: BLE001
         pass
@@ -1079,6 +1263,7 @@ async def _handle_run_interaction_action_command(
     cmd: IPCMessage,
     reply_to: str,
 ) -> None:
+    cmd.payload.setdefault("reply_to", reply_to)
     result_ok = False
     result_error: str | None = None
     result_payload: dict[str, Any] = {}
@@ -1093,7 +1278,7 @@ async def _handle_run_interaction_action_command(
         except Exception:  # noqa: BLE001
             engine = None
         result_payload = await _run_interaction_userbot_action(
-            client,
+            _DeadlineClientProxy(client, cmd),
             payload,
             account_id=account_id,
             engine=engine,
@@ -1139,14 +1324,10 @@ async def _handle_run_interaction_action_command(
             **_interaction_action_log_detail(result_payload),
         )
     try:
-        await redis.publish(
-            reply_to,
-            make_cmd(
-                CMD_RUN_INTERACTION_ACTION,
-                ok=result_ok,
-                error=result_error,
-                result=result_payload,
-            ),
+        await _publish_rpc_payload(
+            redis,
+            cmd,
+            {"ok": result_ok, "error": result_error, "result": result_payload},
         )
     except Exception:  # noqa: BLE001
         pass
@@ -1566,6 +1747,7 @@ def _payout_replay_payload(row: PayoutCompensation) -> dict[str, Any]:
     payload["amount"] = int(row.amount)
     payload["payout_key"] = row.payout_key
     payload["text"] = _payout_replay_text(row)
+    payload["_payout_compensation_replay"] = True
     if row.trace_id:
         context = dict(payload.get("context") or {})
         context.setdefault("trace_id", row.trace_id)

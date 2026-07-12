@@ -13,7 +13,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from fastapi import HTTPException
-from sqlalchemy import delete, func, or_, select, update
+from sqlalchemy import and_, delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db.models.action_event import ACTION_EVENT_STATUS_COMPENSATED, ACTION_EVENT_STATUS_OK, ActionEvent
@@ -160,15 +160,26 @@ async def list_ledger_entries(db: AsyncSession, filters: LedgerFilters | None = 
     """查询资金流水，金额过滤使用绝对金额。"""
 
     active = _normalize_filters(filters)
-    rows = await _load_action_rows(db, active)
     entries: list[LedgerEntry] = []
-    for row in rows:
-        entry = _entry_from_action_event(row)
-        if entry is None or not _entry_matches(entry, active):
-            continue
-        entries.append(entry)
+    cursor: tuple[datetime, int] | None = None
+    batch_size = None if active.limit is None else max(200, active.limit * 4)
+    while True:
+        rows = await _load_action_rows(db, active, cursor=cursor, batch_size=batch_size)
+        if not rows:
+            break
+        for row in rows:
+            entry = _entry_from_action_event(row)
+            if entry is None or not _entry_matches(entry, active):
+                continue
+            entries.append(entry)
+            if active.limit is not None and len(entries) >= active.limit:
+                break
         if active.limit is not None and len(entries) >= active.limit:
             break
+        if batch_size is None or len(rows) < batch_size:
+            break
+        last = rows[-1]
+        cursor = (last.created_at, int(last.id))
     await _hydrate_ledger_metadata(db, entries)
     return entries
 
@@ -422,7 +433,13 @@ def _empty_summary() -> LedgerSummary:
     return LedgerSummary(income="0", payout="0", net="0", count=0, by_day=[], by_chat=[], by_recipient=[])
 
 
-async def _load_action_rows(db: AsyncSession, filters: LedgerFilters) -> list[ActionEvent]:
+async def _load_action_rows(
+    db: AsyncSession,
+    filters: LedgerFilters,
+    *,
+    cursor: tuple[datetime, int] | None = None,
+    batch_size: int | None = None,
+) -> list[ActionEvent]:
     stmt = select(ActionEvent)
     if filters.since is not None:
         stmt = stmt.where(ActionEvent.created_at >= filters.since)
@@ -436,9 +453,17 @@ async def _load_action_rows(db: AsyncSession, filters: LedgerFilters) -> list[Ac
         stmt = stmt.where(ActionEvent.status == filters.status)
     elif filters.statuses:
         stmt = stmt.where(ActionEvent.status.in_(filters.statuses))
+    if cursor is not None:
+        created_at, row_id = cursor
+        stmt = stmt.where(
+            or_(
+                ActionEvent.created_at < created_at,
+                and_(ActionEvent.created_at == created_at, ActionEvent.id < int(row_id)),
+            )
+        )
     stmt = stmt.order_by(ActionEvent.created_at.desc(), ActionEvent.id.desc())
-    if filters.limit is not None:
-        stmt = stmt.limit(max(filters.limit * 20, 1000))
+    if batch_size is not None:
+        stmt = stmt.limit(max(1, int(batch_size)))
     rows = (await db.execute(stmt)).scalars().all()
     return list(rows)
 

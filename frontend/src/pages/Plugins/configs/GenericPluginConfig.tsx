@@ -56,6 +56,7 @@ import {
 import { Spinner } from "@/components/ui/misc";
 import { Switch } from "@/components/ui/switch";
 import { getErrMsg } from "@/lib/api";
+import { confirmDiscardChanges, useUnsavedChanges } from "@/lib/unsavedChanges";
 import { pluginUsageGuideWarning } from "@/lib/plugin-config-contract";
 import {
   pluginContractRiskWarnings,
@@ -186,6 +187,7 @@ export function GenericPluginConfigPage() {
   const [globalVals, setGlobalVals] = useState<Record<string, unknown>>({});
   const [accountVals, setAccountVals] = useState<Record<string, unknown>>({});
   const [dirty, setDirty] = useState(false);
+  const [remoteConfigChanged, setRemoteConfigChanged] = useState(false);
   const [activeActionJob, setActiveActionJob] = useState<{
     jobId: string;
     actionTitle: string;
@@ -196,11 +198,17 @@ export function GenericPluginConfigPage() {
 
   useEffect(() => {
     if (!schema) return;
+    if (dirty) {
+      setRemoteConfigChanged(true);
+      return;
+    }
     const next = buildScopedConfigValues(schema, globalConfig, accountConfig);
     setGlobalVals(next.globalVals);
     setAccountVals(next.accountVals);
     setDirty(false);
+    setRemoteConfigChanged(false);
   }, [schema, globalConfig, accountConfig]);
+  useUnsavedChanges(dirty);
 
   const { globalFields, accountFields, previewFields } = useMemo(() => {
     const properties = schema?.properties ?? {};
@@ -285,6 +293,7 @@ export function GenericPluginConfigPage() {
     onSuccess: () => {
       toast.success("配置已保存（worker 热加载）");
       setDirty(false);
+      setRemoteConfigChanged(false);
       qc.invalidateQueries({ queryKey: ["account", aid, "features"] });
       qc.invalidateQueries({ queryKey: ["plugin", "global", featureKey] });
       qc.invalidateQueries({ queryKey: ["matrix"] });
@@ -392,6 +401,7 @@ export function GenericPluginConfigPage() {
     setGlobalVals(next.globalVals);
     setAccountVals(next.accountVals);
     setDirty(false);
+    setRemoteConfigChanged(false);
   }
 
   async function handleConfigAction(action: ConfigAction, input: Record<string, unknown>) {
@@ -413,7 +423,7 @@ export function GenericPluginConfigPage() {
   return (
     <div className="space-y-6 pb-24">
       <div className="flex flex-wrap items-center gap-3">
-        <Button variant="default" size="sm" className="gap-1.5 shadow-sm" onClick={() => nav(backTarget.backHref)}>
+        <Button variant="default" size="sm" className="gap-1.5 shadow-sm" onClick={() => confirmDiscardChanges(dirty) && nav(backTarget.backHref)}>
           <ArrowLeft className="h-4 w-4" /> {backTarget.backLabel}
         </Button>
         <div>
@@ -521,7 +531,7 @@ export function GenericPluginConfigPage() {
                     variant="outline"
                     size="sm"
                     className="h-7 border-destructive/40 bg-destructive/10 px-2 text-destructive hover:bg-destructive/15 hover:text-destructive"
-                    onClick={() => nav(`/logs?tab=plugins&account_id=${aid}&plugin_key=${encodeURIComponent(featureKey)}&status=failed`)}
+                    onClick={() => confirmDiscardChanges(dirty) && nav(`/logs?tab=plugins&account_id=${aid}&plugin_key=${encodeURIComponent(featureKey)}&status=failed`)}
                   >
                     查看日志
                   </Button>
@@ -637,7 +647,11 @@ export function GenericPluginConfigPage() {
               <div className="text-sm">
                 <div className="font-medium">配置操作</div>
                 <div className="text-xs text-muted-foreground">
-                  {dirty ? "有未保存修改，保存后 worker 会热加载。" : "当前配置已同步。"}
+                  {remoteConfigChanged
+                    ? "服务端配置已变化；当前草稿已保留，保存会以草稿为准。"
+                    : dirty
+                      ? "有未保存修改，保存后 worker 会热加载。"
+                      : "当前配置已同步。"}
                 </div>
               </div>
               <div className="flex w-full flex-row items-center gap-2 sm:w-auto">

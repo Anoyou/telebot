@@ -1,9 +1,9 @@
 """Account-level LLM budget reservations backed by Redis.
 
-The gate remains intentionally scoped to the first provider in the runtime
-fallback chain. Settlement adjusts token and premium-provider counters to the
-actual provider that finally succeeded, but it does not add a new pre-call gate
-for fallback providers.
+The runtime acquires one reservation immediately before each actual provider
+candidate. Failed candidates release their reservation before fallback, so the
+successful call is charged once while every premium candidate is atomically
+gated before it can reach the network.
 """
 
 from __future__ import annotations
@@ -160,6 +160,10 @@ return {1, 'ok'}
 
 class LLMAccountBudgetExceeded(RuntimeError):
     """Raised when an account-level LLM budget reservation is rejected."""
+
+    def __init__(self, message: str, *, scope: str = "budget") -> None:
+        super().__init__(message)
+        self.scope = scope
 
 
 @dataclass(frozen=True)
@@ -335,7 +339,7 @@ async def _try_redis_acquire(
         return
     scope = str(result[1] if len(result) > 1 else "budget")
     limit = int(result[3] if len(result) > 3 else 0)
-    raise LLMAccountBudgetExceeded(_budget_message(scope, limit))
+    raise LLMAccountBudgetExceeded(_budget_message(scope, limit), scope=scope)
 
 
 async def _load_budget_limits() -> dict[str, int]:

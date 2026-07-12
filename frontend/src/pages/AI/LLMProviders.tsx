@@ -57,6 +57,7 @@ import { getSystemSettings } from "@/api/system";
 import type { ChatTestModelResult, ChatTestTurn, DetectProviderProtocolsResponse, LLMApiFormat, LLMModality, LLMProtocolProfile, LLMProviderKind, LLMProviderOut, LLMTag, LLMWebSearchApiFormat, ProviderModel, ProtocolProbeResult, ProxyOut } from "@/api/types";
 import { getErrMsg } from "@/lib/api";
 import { cn } from "@/lib/utils";
+import { confirmDiscardChanges, useUnsavedChanges } from "@/lib/unsavedChanges";
 
 // 各 provider 的默认 base_url 提示，仅作 placeholder
 const DEFAULT_BASE_URLS: Record<LLMProviderKind, string> = {
@@ -1165,6 +1166,13 @@ function ProviderEditDialog({
   saving: boolean;
 }) {
   const isEdit = !!form.id;
+  const initialFormRef = useRef(JSON.stringify(form));
+  const dirty = JSON.stringify(form) !== initialFormRef.current;
+  useUnsavedChanges(dirty);
+  const requestCancel = () => {
+    if (saving || !confirmDiscardChanges(dirty)) return;
+    onCancel();
+  };
   const setField = <K extends keyof FormState>(k: K, v: FormState[K]) =>
     onChange({ ...form, [k]: v });
 
@@ -1219,7 +1227,7 @@ function ProviderEditDialog({
   });
 
   return (
-    <Dialog open onOpenChange={(o) => !o && onCancel()}>
+    <Dialog open onOpenChange={(o) => !o && requestCancel()}>
       <DialogContent className="max-h-[85vh] max-w-2xl overflow-y-auto">
         <DialogHeader>
           <DialogTitle>{isEdit ? "编辑" : "新建"}模型提供商</DialogTitle>
@@ -1554,7 +1562,7 @@ function ProviderEditDialog({
         </div>
 
         <DialogFooter className="!flex !flex-row gap-2 sm:space-x-0 [&>*]:min-w-0 [&>*]:flex-1 sm:[&>*]:flex-none">
-          <Button variant="outline" onClick={onCancel} disabled={saving}>
+          <Button variant="outline" onClick={requestCancel} disabled={saving}>
             取消
           </Button>
           <Button onClick={onSave} disabled={saving}>

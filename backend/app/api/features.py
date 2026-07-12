@@ -171,7 +171,11 @@ def _chatgpt_token_entries(config: dict[str, object]) -> list[dict[str, str]]:
 
 
 def _sanitize_chatgpt_image_config(config: dict[str, object]) -> dict[str, object]:
-    entries = _chatgpt_token_entries(config)
+    from ..services.plugin_config_secrets import decrypt_config_secrets
+
+    # token_id 必须基于明文 token，而不是每次 rekey 都会变化的 Fernet 信封。
+    runtime_config = decrypt_config_secrets(config)
+    entries = _chatgpt_token_entries(runtime_config)
     rest = dict(config)
     rest["token"] = ""
     rest["tokens"] = []
@@ -222,7 +226,9 @@ def _preserve_chatgpt_image_tokens(
 ) -> dict[str, object]:
     if "tokens" not in incoming or not isinstance(incoming.get("tokens"), list):
         return incoming
-    existing_entries = _chatgpt_token_entries(existing)
+    from ..services.plugin_config_secrets import decrypt_config_secrets
+
+    existing_entries = _chatgpt_token_entries(decrypt_config_secrets(existing))
     by_id = {_chatgpt_token_id(entry["token"]): entry["token"] for entry in existing_entries}
     by_mask = {_chatgpt_mask_token(entry["token"]): entry["token"] for entry in existing_entries}
     normalized: list[dict[str, str]] = []

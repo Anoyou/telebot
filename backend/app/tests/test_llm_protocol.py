@@ -159,3 +159,21 @@ def test_model_metadata_narrows_protocol_capabilities() -> None:
         "provider 不支持 temperature",
         "provider 不支持 reasoning_effort=xhigh",
     ]
+
+
+def test_claude_code_profile_declares_reasoning_effort_capability() -> None:
+    provider = LLMProviderDTO(
+        id=1,
+        name="Claude Code proxy",
+        provider="anthropic",
+        api_format="anthropic_messages",
+        protocol_profile="claude_code_proxy",
+        default_model="claude",
+    )
+    request = ModelRequest(
+        model="claude",
+        messages=(Message.text(MessageRole.USER, "question"),),
+        reasoning_effort="xhigh",
+    )
+
+    assert provider.capabilities_for_model("claude").validation_errors(request) == []

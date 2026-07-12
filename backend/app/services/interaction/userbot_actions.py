@@ -120,6 +120,7 @@ async def execute_userbot_interaction_action(
     if action_type in {"send_message", "payout"}:
         text = str(payload.get("text") or "").strip()
         amount: int | None = None
+        compensation_replay = action_type == "payout" and bool(payload.get("_payout_compensation_replay"))
         if action_type == "payout":
             amount = _int_or_none(payload.get("amount"))
             if amount is None or amount <= 0:
@@ -132,18 +133,37 @@ async def execute_userbot_interaction_action(
             reply_markup = payload.get("reply_markup") if isinstance(payload.get("reply_markup"), dict) else None
             text = render_button_fallback(text, reply_markup)
         parse_mode = parse_mode_of(payload)
+        payout_claim: payout_compensation.PayoutDeliveryClaim | None = None
+        payout_redis = redis
         if action_type == "payout":
-            payout_key = _str_or_none(payload.get("payout_key"))
-            if payout_key:
-                payout_ok, payout_reason = await check_payout_limit(
-                    account_id,
-                    amount,
-                    idempotency_key=payout_key,
-                )
-            else:
-                payout_ok, payout_reason = await check_payout_limit(account_id, amount)
+            payout_key = payout_compensation.ensure_payout_key(payload)
+            payout_ok, payout_reason = await check_payout_limit(
+                account_id,
+                amount,
+                idempotency_key=payout_key,
+            )
             if not payout_ok:
                 raise PayoutLimitExceeded(payout_reason or "payout 超过限额")
+            payout_redis = redis or get_redis()
+            if not compensation_replay:
+                payout_claim = await payout_compensation.claim_payout_delivery(
+                    payout_redis,
+                    account_id,
+                    payout_key,
+                    payload=payload,
+                    origin="worker_rpc",
+                )
+                if payout_claim.status == "sent":
+                    return {
+                        "message_id": payout_claim.sent_message_id or None,
+                        "chat_id": chat_id,
+                        "reply_to_message_id": reply_to,
+                        "reply_to_user_id": reply_to_user_id,
+                        "payout_key": payout_key,
+                        "idempotent_replay": True,
+                    }
+                if payout_claim.status != "acquired":
+                    raise RuntimeError("payout delivery already in progress")
         await acquire_rate_limit(
             redis=redis,
             account_id=account_id,
@@ -153,20 +173,40 @@ async def execute_userbot_interaction_action(
         )
         if action_type == "send_message" and not is_settlement_send(payload):
             await simulate_humanize(client, chat_id, engine)
-        msg = await client.send_message(chat_id, text, reply_to=reply_to, parse_mode=telethon_parse_mode(parse_mode))
+        try:
+            msg = await client.send_message(
+                chat_id,
+                text,
+                reply_to=reply_to,
+                parse_mode=telethon_parse_mode(parse_mode),
+            )
+        except Exception as exc:
+            if action_type == "payout" and payout_claim is not None:
+                classification = payout_compensation.classify_payout_error(
+                    payout_compensation.ERROR_TELEGRAM_API,
+                    exc,
+                )
+                if not classification.ambiguous:
+                    await payout_compensation.release_payout_delivery_claim(payout_redis, payout_claim)
+            raise
         result: dict[str, Any] = {
             "message_id": int(getattr(msg, "id", 0) or 0) or None,
             "chat_id": chat_id,
             "reply_to_message_id": reply_to,
             "reply_to_user_id": reply_to_user_id,
         }
-        if action_type == "payout":
-            await payout_compensation.mark_payout_sent_marker(
-                redis,
+        if action_type == "payout" and payout_claim is not None:
+            marker_ok = await payout_compensation.complete_payout_delivery(
+                payout_redis,
+                payout_claim,
                 account_id,
                 payload.get("payout_key"),
                 result.get("message_id"),
             )
+            if not marker_ok:
+                result["post_send_bookkeeping_failed"] = True
+            result["payout_key"] = _str_or_none(payload.get("payout_key"))
+        elif action_type == "payout":
             result["payout_key"] = _str_or_none(payload.get("payout_key"))
         try:
             await save_action_reply_target(

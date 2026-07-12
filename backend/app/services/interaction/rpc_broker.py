@@ -8,13 +8,14 @@ demultiplexes replies by channel name onto asyncio Futures.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import secrets
 import time
 from typing import Any
 
 from ...redis_client import get_redis
-from ...worker.ipc import IPCMessage
+from ...worker.ipc import IPCMessage, rpc_result_key
 
 log = logging.getLogger(__name__)
 
@@ -88,6 +89,7 @@ class InteractionRpcBroker:
         timeout_seconds: float = _DEFAULT_TIMEOUT_SECONDS,
         online_wait_seconds: float = 2.0,
         redis: Any | None = None,
+        request_id: str | None = None,
     ) -> tuple[bool, int, dict[str, Any] | None, str | None]:
         """Publish ``command`` and wait for a reply on ``reply_channel``.
 
@@ -96,8 +98,21 @@ class InteractionRpcBroker:
 
         await self.start(redis=redis)
         client = redis or self._redis or get_redis()
+        request_id = str(request_id or secrets.token_hex(16))
+        cached = await self.reconcile(request_id, redis=client)
+        if cached is not None:
+            return True, 0, cached, None
         if len(self._pending) >= _MAX_INFLIGHT:
             return True, 0, None, "interaction rpc broker overloaded"
+
+        deadline_at_ms = int((time.time() + max(0.1, float(timeout_seconds))) * 1000)
+        try:
+            envelope = IPCMessage.decode(command)
+            envelope.payload.setdefault("request_id", request_id)
+            envelope.payload.setdefault("deadline_at_ms", deadline_at_ms)
+            command = envelope.encode()
+        except Exception as exc:  # noqa: BLE001
+            return True, 0, None, f"invalid interaction rpc command: {type(exc).__name__}: {exc}"
 
         loop = asyncio.get_running_loop()
         fut: asyncio.Future[dict[str, Any]] = loop.create_future()
@@ -140,7 +155,10 @@ class InteractionRpcBroker:
             payload = await asyncio.wait_for(asyncio.shield(fut), timeout=remaining)
             return True, publish_attempts, payload, None
         except TimeoutError:
-            return True, publish_attempts, None, "worker 调用超时"
+            reconciled = await self.reconcile(request_id, redis=client)
+            if reconciled is not None:
+                return True, publish_attempts, reconciled, None
+            return True, publish_attempts, None, f"worker 调用超时，终态未知 (request_id={request_id})"
         except Exception as exc:  # noqa: BLE001
             return True, publish_attempts, None, f"{type(exc).__name__}: {exc}"
         finally:
@@ -153,6 +171,30 @@ class InteractionRpcBroker:
                 log.debug("interaction rpc unsubscribe failed channel=%s", reply_channel, exc_info=True)
             if not fut.done():
                 fut.cancel()
+
+    async def reconcile(
+        self,
+        request_id: str,
+        *,
+        redis: Any | None = None,
+    ) -> dict[str, Any] | None:
+        """读取 Worker 在回包前持久化的 RPC 终态。"""
+
+        client = redis or self._redis or get_redis()
+        try:
+            raw = await client.get(rpc_result_key(str(request_id)))
+        except Exception:  # noqa: BLE001
+            log.debug("interaction rpc result reconcile failed request_id=%s", request_id, exc_info=True)
+            return None
+        if raw is None:
+            return None
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8", errors="replace")
+        try:
+            payload = json.loads(str(raw))
+        except (TypeError, ValueError):
+            return None
+        return payload if isinstance(payload, dict) else None
 
     async def _listen_loop(self) -> None:
         assert self._pubsub is not None

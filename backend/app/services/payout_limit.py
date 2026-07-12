@@ -129,7 +129,7 @@ async def _try_consume_daily(
 ) -> tuple[bool, int, int]:
     redis = get_redis()
     await redis.ping()
-    counted_key = _counted_key(idempotency_key)
+    counted_key = _counted_key(account_id, idempotency_key)
     use_counted = 1 if counted_key != _COUNTED_KEY_UNUSED else 0
     result = await redis.eval(
         _CONSUME_SCRIPT,
@@ -165,11 +165,11 @@ def _daily_key(account_id: int) -> str:
     return f"payout_limit:{int(account_id)}:daily:{today}"
 
 
-def _counted_key(idempotency_key: str | None) -> str:
+def _counted_key(account_id: int, idempotency_key: str | None) -> str:
     key = str(idempotency_key or "").strip()
     if not key:
         return _COUNTED_KEY_UNUSED
-    return f"{_COUNTED_KEY_PREFIX}{key[:160]}"
+    return f"{_COUNTED_KEY_PREFIX}{int(account_id)}:{key[:160]}"
 
 
 def _non_negative_int(value: Any, default: int) -> int:

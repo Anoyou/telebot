@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from app.api import rules
@@ -20,6 +22,10 @@ class _DryRunDB:
 
 def _write_installed_plugin(plugin_dir, *, key: str) -> None:
     plugin_dir.mkdir(parents=True, exist_ok=True)
+    (plugin_dir / "plugin.json").write_text(
+        json.dumps({"name": key, "version": "1.0.0"}),
+        encoding="utf-8",
+    )
     (plugin_dir / "__init__.py").write_text(
         "from .manifest import MANIFEST\n"
         "from .plugin import DemoPlugin, _dry_run_match\n"

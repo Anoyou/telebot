@@ -22,6 +22,7 @@ SENSITIVE_KEYS = {
     "authorization",
     "credential",
     "credentials",
+    "cookie",
     "proxy_user",
     "proxy_pass",
     "session",

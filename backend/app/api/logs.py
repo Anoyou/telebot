@@ -23,7 +23,7 @@ from urllib import request as urllib_request
 
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import String, cast, desc, func, or_, select
+from sqlalchemy import String, and_, cast, desc, func, or_, select
 
 from ..db.models.log import AuditLog, EventAction, EventSpan, EventTrace, RuntimeLog
 from ..deps import CurrentUser, DBSession
@@ -93,6 +93,17 @@ class SystemConsoleLogsResponse(BaseModel):
     tail: int
     lines: list[str] = Field(default_factory=list)
     error: str | None = None
+
+
+class SystemConsoleLogsRequest(BaseModel):
+    """系统控制台日志查询条件。
+
+    keyword 必须放在请求体中，避免敏感搜索词进入代理和应用 access log。
+    """
+
+    service: str = "all"
+    keyword: str | None = Field(None, max_length=500)
+    tail: int = Field(300, ge=20, le=1000)
 
 
 class EventSpanItem(BaseModel):
@@ -293,7 +304,7 @@ def _updater_token() -> str:
     return (os.getenv("TELEPILOT_UPDATER_TOKEN") or "").strip()
 
 
-def _fetch_updater_console_logs(service: str, tail: int, keyword: str | None) -> dict[str, Any]:
+def _fetch_updater_console_logs(service: str, tail: int) -> dict[str, Any]:
     raw_url = (os.getenv("TELEPILOT_UPDATER_URL") or "").strip().rstrip("/")
     if not raw_url:
         raise RuntimeError("内部 updater 未配置")
@@ -301,7 +312,6 @@ def _fetch_updater_console_logs(service: str, tail: int, keyword: str | None) ->
         {
             "service": service,
             "tail": str(tail),
-            "keyword": keyword or "",
         }
     )
     headers: dict[str, str] = {}
@@ -321,6 +331,16 @@ def _fetch_updater_console_logs(service: str, tail: int, keyword: str | None) ->
         return parsed if isinstance(parsed, dict) else {"ok": False, "error": str(exc)}
     parsed = json.loads(text) if text else {}
     return parsed if isinstance(parsed, dict) else {}
+
+
+def _filter_console_payload(payload: dict[str, Any], keyword: str | None) -> dict[str, Any]:
+    q = (keyword or "").strip().lower()
+    if not q:
+        return payload
+    raw_lines = payload.get("lines")
+    if not isinstance(raw_lines, list):
+        return payload
+    return {**payload, "lines": [line for line in raw_lines if q in str(line).lower()]}
 
 
 def _tail_file(path: Path, max_lines: int) -> list[str]:
@@ -493,9 +513,11 @@ def _event_trace_stmt(
     keyword: str | None = None,
     since: datetime | None = None,
     until: datetime | None = None,
+    before_started_at: datetime | None = None,
+    before_id: int | None = None,
     limit: int = 100,
 ):
-    stmt = select(EventTrace).order_by(desc(EventTrace.started_at)).limit(limit)
+    stmt = select(EventTrace).order_by(desc(EventTrace.started_at), desc(EventTrace.id)).limit(limit)
     if account_id is not None:
         stmt = stmt.where(EventTrace.account_id == account_id)
     if source_channel:
@@ -529,6 +551,13 @@ def _event_trace_stmt(
         stmt = stmt.where(EventTrace.started_at >= since)
     if until is not None:
         stmt = stmt.where(EventTrace.started_at <= until)
+    if before_started_at is not None and before_id is not None:
+        stmt = stmt.where(
+            or_(
+                EventTrace.started_at < before_started_at,
+                and_(EventTrace.started_at == before_started_at, EventTrace.id < before_id),
+            )
+        )
     if keyword:
         like = f"%{keyword}%"
         stmt = stmt.where(
@@ -726,39 +755,53 @@ async def list_log_messages(
     """返回一页式消息流。
 
     复用 trace 列表过滤条件，然后批量读取 span/action 计算四段漏斗。
-    verdict 是派生字段，先取一小段窗口后在 Python 侧过滤。
+    verdict 是派生字段，使用稳定游标分批计算，直到填满请求数量或耗尽筛选范围。
     """
-    fetch_limit = min(500, limit * 3) if verdict else limit
-    stmt = _event_trace_stmt(
-        account_id=account_id,
-        source_channel=source_channel,
-        event_type=event_type,
-        chat_id=chat_id,
-        message_id=message_id,
-        update_id=update_id,
-        sender_user_id=sender_user_id,
-        plugin_key=plugin_key,
-        status=status,
-        trace_id=trace_id,
-        reason_code=reason_code,
-        keyword=keyword,
-        since=since,
-        until=until,
-        limit=fetch_limit,
-    )
-    rows = (await db.execute(stmt)).scalars().all()
-    trace_ids = [row.trace_id for row in rows]
-    spans_by_trace, actions_by_trace = await _span_action_groups(db, trace_ids)
-    items = [
-        _message_funel_item(
-            row,
-            spans_by_trace.get(row.trace_id, []),
-            actions_by_trace.get(row.trace_id, []),
+    batch_size = min(500, max(3, limit * 3)) if verdict else limit
+    items: list[MessageFunelItem] = []
+    before_started_at: datetime | None = None
+    before_id: int | None = None
+    while True:
+        stmt = _event_trace_stmt(
+            account_id=account_id,
+            source_channel=source_channel,
+            event_type=event_type,
+            chat_id=chat_id,
+            message_id=message_id,
+            update_id=update_id,
+            sender_user_id=sender_user_id,
+            plugin_key=plugin_key,
+            status=status,
+            trace_id=trace_id,
+            reason_code=reason_code,
+            keyword=keyword,
+            since=since,
+            until=until,
+            before_started_at=before_started_at,
+            before_id=before_id,
+            limit=batch_size,
         )
-        for row in rows
-    ]
-    if verdict:
-        items = [item for item in items if item.verdict == verdict]
+        rows = (await db.execute(stmt)).scalars().all()
+        if not rows:
+            break
+        trace_ids = [row.trace_id for row in rows]
+        spans_by_trace, actions_by_trace = await _span_action_groups(db, trace_ids)
+        batch = [
+            _message_funel_item(
+                row,
+                spans_by_trace.get(row.trace_id, []),
+                actions_by_trace.get(row.trace_id, []),
+            )
+            for row in rows
+        ]
+        if verdict:
+            batch = [item for item in batch if item.verdict == verdict]
+        items.extend(batch)
+        if len(items) >= limit or not verdict or len(rows) < batch_size:
+            break
+        last_row = rows[-1]
+        before_started_at = last_row.started_at
+        before_id = last_row.id
     return items[:limit]
 
 
@@ -872,12 +915,10 @@ async def list_runtime_logs(
     return [RuntimeLogItem.from_row(r) for r in rows]
 
 
-@router.get("/api/logs/system-console", response_model=SystemConsoleLogsResponse)
+@router.post("/api/logs/system-console", response_model=SystemConsoleLogsResponse)
 async def list_system_console_logs(
+    body: SystemConsoleLogsRequest,
     _user: CurrentUser,
-    service: str = Query("all", description="all | web | frontend | postgres | redis | updater"),
-    keyword: str | None = Query(None, description="原始日志行关键词过滤"),
-    tail: int = Query(300, ge=20, le=1000, description="读取最近 N 行"),
 ) -> SystemConsoleLogsResponse:
     """读取真正的系统级控制台日志。
 
@@ -885,7 +926,7 @@ async def list_system_console_logs(
     容器直接持有 Docker socket。开发环境没有 updater 时，回退读取本地
     ``logs/backend.log`` / ``logs/frontend.log``。
     """
-    normalized_service = service.strip().lower() or "all"
+    normalized_service = body.service.strip().lower() or "all"
     if normalized_service not in _SYSTEM_CONSOLE_SERVICES:
         raise HTTPException(status_code=400, detail="不支持的系统日志服务")
 
@@ -893,12 +934,12 @@ async def list_system_console_logs(
         payload = await asyncio.to_thread(
             _fetch_updater_console_logs,
             normalized_service,
-            tail,
-            keyword,
+            body.tail,
         )
     except Exception:
-        return _read_local_console_logs(normalized_service, tail, keyword)
+        return _read_local_console_logs(normalized_service, body.tail, body.keyword)
 
+    payload = _filter_console_payload(payload, body.keyword)
     if payload.get("ok") or payload.get("error"):
-        return _system_console_response(payload, service=normalized_service, tail=tail)
-    return _read_local_console_logs(normalized_service, tail, keyword)
+        return _system_console_response(payload, service=normalized_service, tail=body.tail)
+    return _read_local_console_logs(normalized_service, body.tail, body.keyword)

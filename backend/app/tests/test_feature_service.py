@@ -95,6 +95,40 @@ def test_direct_passthrough_toggle_preserves_legacy_plugin_config() -> None:
     }
 
 
+def test_chatgpt_image_token_identity_is_stable_across_rekey(monkeypatch) -> None:
+    import app.crypto as crypto
+    from app.crypto import generate_master_key
+    from app.services.plugin_config_secrets import wrap_secret
+    from app.settings import settings
+
+    token = "eyJhbGciOiJub25lIn0.stable-chatgpt-image-token"
+
+    monkeypatch.setattr(settings, "master_key", generate_master_key())
+    monkeypatch.setattr(crypto, "_fernet", None)
+    first = features_api._sanitize_chatgpt_image_config(  # noqa: SLF001
+        {"tokens": [{"token": wrap_secret(token), "note": "primary"}]}
+    )
+
+    monkeypatch.setattr(settings, "master_key", generate_master_key())
+    monkeypatch.setattr(crypto, "_fernet", None)
+    second = features_api._sanitize_chatgpt_image_config(  # noqa: SLF001
+        {"tokens": [{"token": wrap_secret(token), "note": "primary"}]}
+    )
+
+    assert first["tokens"][0]["token_id"] == second["tokens"][0]["token_id"]
+    assert first["tokens"][0]["token"] == second["tokens"][0]["token"]
+    assert "secret:v1:" not in first["tokens"][0]["token"]
+
+
+def test_legacy_plain_cookie_is_masked_before_migration() -> None:
+    sanitized = features_api._sanitize_config(  # noqa: SLF001
+        {"cookie": "uid=legacy-plaintext", "site_url": "https://example.com"},
+        "pt_promote",
+    )
+
+    assert sanitized == {"cookie": "***", "site_url": "https://example.com"}
+
+
 # ─────────────────────────────────────────────────────
 # JSON Schema 验证测试
 # ─────────────────────────────────────────────────────
@@ -917,10 +951,14 @@ class TestSetPluginGlobalConfig:
         ):
             result = await set_plugin_global_config(db, "pt_promote", {"cookie": "sid=ok"})
 
-        assert result == {"cookie": "sid=ok"}
+        from app.services.plugin_config_secrets import is_secret_envelope, unwrap_secret
+
+        assert is_secret_envelope(result["cookie"])
+        assert unwrap_secret(result["cookie"]) == "sid=ok"
         added_row = db.add.call_args.args[0]
         assert isinstance(added_row, PluginGlobalConfig)
-        assert added_row.config == {"cookie": "sid=ok"}
+        assert is_secret_envelope(added_row.config["cookie"])
+        assert unwrap_secret(added_row.config["cookie"]) == "sid=ok"
 
     @pytest.mark.asyncio
     async def test_updates_existing_global_config_row(self) -> None:

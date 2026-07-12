@@ -43,6 +43,19 @@ from app.worker.plugins.manifest import Manifest
 from app.worker.ratelimit.humanize import HumanizeOpts
 
 
+def _write_installed_plugin_json(plugin_dir, plugin_key: str, **extra) -> None:
+    metadata = {
+        "name": plugin_key,
+        "key": plugin_key,
+        "version": "0.1.0",
+        **extra,
+    }
+    (plugin_dir / "plugin.json").write_text(
+        json.dumps(metadata),
+        encoding="utf-8",
+    )
+
+
 # ─────────────────────────────────────────────────────
 # 极简 fake redis（loader 仅用 rpush）
 # ─────────────────────────────────────────────────────
@@ -94,6 +107,22 @@ class _FakeRedis:
 
     async def evalsha(self, *_a, **_kw):
         return [1, 0, 0]
+
+
+def _mock_payout_delivery(monkeypatch):
+    claim = AsyncMock(
+        return_value=loader_mod.payout_compensation.PayoutDeliveryClaim(
+            status="acquired",
+            row_id=1,
+            claim_token="test-token",
+        )
+    )
+    complete = AsyncMock(return_value=True)
+    release = AsyncMock()
+    monkeypatch.setattr(loader_mod.payout_compensation, "claim_payout_delivery", claim)
+    monkeypatch.setattr(loader_mod.payout_compensation, "complete_payout_delivery", complete)
+    monkeypatch.setattr(loader_mod.payout_compensation, "release_payout_delivery_claim", release)
+    return claim, complete, release
 
 
 @pytest.mark.parametrize(
@@ -371,6 +400,7 @@ def test_load_dir_tracks_installed_child_modules(tmp_path, monkeypatch) -> None:
     plugin_key = "_test_installed_tracking"
     plugin_dir = tmp_path / plugin_key
     plugin_dir.mkdir()
+    _write_installed_plugin_json(plugin_dir, plugin_key)
     (plugin_dir / "__init__.py").write_text(
         "from .plugin import PLUGIN_CLASS, MANIFEST\n",
         encoding="utf-8",
@@ -425,6 +455,7 @@ def test_load_dir_warns_manifest_event_subscription_lint_once(tmp_path, monkeypa
     plugin_key = "_test_installed_subscription_lint"
     plugin_dir = tmp_path / plugin_key
     plugin_dir.mkdir()
+    _write_installed_plugin_json(plugin_dir, plugin_key)
     (plugin_dir / "__init__.py").write_text(
         "from .plugin import PLUGIN_CLASS, MANIFEST\n",
         encoding="utf-8",
@@ -482,6 +513,7 @@ async def test_load_dir_builds_simple_mode_command_plugin_and_dispatches(tmp_pat
     plugin_key = "_test_simple_ping"
     plugin_dir = tmp_path / plugin_key
     plugin_dir.mkdir()
+    _write_installed_plugin_json(plugin_dir, plugin_key)
     (plugin_dir / "__init__.py").write_text(
         "\n".join(
             [
@@ -552,6 +584,8 @@ def test_simple_mode_plugin_coexists_with_explicit_manifest_plugin(tmp_path, mon
     explicit_dir = tmp_path / explicit_key
     simple_dir.mkdir()
     explicit_dir.mkdir()
+    _write_installed_plugin_json(simple_dir, simple_key)
+    _write_installed_plugin_json(explicit_dir, explicit_key)
     (simple_dir / "__init__.py").write_text(
         "\n".join(
             [
@@ -615,6 +649,7 @@ def test_clear_installed_module_cache_prunes_lazy_and_origin_modules(tmp_path, m
     plugin_key = "_test_installed_lazy_tracking"
     plugin_dir = tmp_path / plugin_key
     plugin_dir.mkdir()
+    _write_installed_plugin_json(plugin_dir, plugin_key)
     (plugin_dir / "__init__.py").write_text(
         "from .plugin import PLUGIN_CLASS, MANIFEST\n",
         encoding="utf-8",
@@ -682,6 +717,7 @@ def test_installed_plugin_identity_mismatch_does_not_pollute_registry(tmp_path) 
 
     plugin_dir = tmp_path / "evil"
     plugin_dir.mkdir()
+    _write_installed_plugin_json(plugin_dir, "evil")
     (plugin_dir / "__init__.py").write_text(
         "\n".join(
             [
@@ -722,6 +758,7 @@ def test_installed_plugin_import_failure_rolls_back_registry(tmp_path) -> None:
 
     plugin_dir = tmp_path / "boom"
     plugin_dir.mkdir()
+    _write_installed_plugin_json(plugin_dir, "boom")
     (plugin_dir / "__init__.py").write_text(
         "\n".join(
             [
@@ -746,6 +783,27 @@ def test_installed_plugin_import_failure_rolls_back_registry(tmp_path) -> None:
     finally:
         _REGISTRY.pop("auto_reply", None)
         _clear_installed_module_cache("boom")
+
+
+def test_incompatible_installed_plugin_is_rejected_before_python_exec(tmp_path) -> None:
+    plugin_key = "future_plugin"
+    plugin_dir = tmp_path / plugin_key
+    plugin_dir.mkdir()
+    sentinel = tmp_path / "imported.txt"
+    _write_installed_plugin_json(
+        plugin_dir,
+        plugin_key,
+        min_telepilot_version="999.0.0",
+    )
+    (plugin_dir / "__init__.py").write_text(
+        f"from pathlib import Path\nPath({str(sentinel)!r}).write_text('executed')\n",
+        encoding="utf-8",
+    )
+
+    loaded = _load_dir(plugin_dir, source="installed")
+
+    assert loaded == {}
+    assert not sentinel.exists()
 
 
 def test_clear_installed_module_cache_removes_pycache(monkeypatch, tmp_path) -> None:
@@ -1023,6 +1081,7 @@ async def test_activate_installed_plugin_import_failure_updates_runtime_status(t
     plugin_key = "_test_import_failed"
     plugin_dir = tmp_path / "installed" / plugin_key
     plugin_dir.mkdir(parents=True)
+    _write_installed_plugin_json(plugin_dir, plugin_key)
     (plugin_dir / "__init__.py").write_text("raise RuntimeError('broken import')\n", encoding="utf-8")
     monkeypatch.setattr(loader_mod, "_installed_dir", lambda: tmp_path / "installed")
     update_status = AsyncMock()
@@ -2266,6 +2325,7 @@ async def test_userbot_payout_action_skips_humanize_when_sent(monkeypatch) -> No
     monkeypatch.setattr(loader_mod, "simulate_typing", simulate_typing)
     monkeypatch.setattr(loader_mod, "record_action", AsyncMock())
     monkeypatch.setattr(loader_mod.payout_limit, "check_and_consume", AsyncMock(return_value=(True, None)))
+    _mock_payout_delivery(monkeypatch)
 
     ok = await loader_mod._apply_userbot_payout_action(
         state,
@@ -2299,6 +2359,7 @@ async def test_userbot_payout_action_floodwait_feeds_engine(monkeypatch) -> None
     monkeypatch.setattr(loader_mod, "record_action", record_action)
     # 放行 payout 限额，隔离 FloodWait 行为
     monkeypatch.setattr(loader_mod.payout_limit, "check_and_consume", AsyncMock(return_value=(True, None)))
+    _mock_payout_delivery(monkeypatch)
 
     ok = await loader_mod._apply_userbot_payout_action(
         state,
@@ -2359,7 +2420,7 @@ async def test_scan_expired_session_skips_plugin_when_event_not_declared(monkeyp
         for call in record_span.await_args_list
     )
     assert key not in redis.values
-    assert processed == 0
+    assert processed == 1
 
 
 @pytest.mark.asyncio
@@ -2479,6 +2540,7 @@ async def test_userbot_payout_action_uses_userbot_rate_limit_and_default_text(mo
     check_and_consume = AsyncMock(return_value=(True, None))
     monkeypatch.setattr(loader_mod, "record_action", record_action)
     monkeypatch.setattr(loader_mod.payout_limit, "check_and_consume", check_and_consume)
+    _claim, complete_delivery, _release = _mock_payout_delivery(monkeypatch)
 
     failed = await loader_mod._apply_userbot_event_bus_actions(
         state,
@@ -2508,7 +2570,7 @@ async def test_userbot_payout_action_uses_userbot_rate_limit_and_default_text(mo
         reply_to=34,
         parse_mode=None,
     )
-    assert state.redis.sets == [(f"payout:sent:44:{payout_key}", "777", {"ex": 604800, "nx": True})]
+    complete_delivery.assert_awaited_once()
     assert record_action.await_args.args[1]["type"] == "payout"
     assert record_action.await_args.kwargs["actual_send_via"] == "userbot_reply"
     assert record_action.await_args.kwargs["result"]["message_id"] == 777
@@ -2536,6 +2598,7 @@ async def test_userbot_payout_action_resolves_reply_to_user_recent_message(monke
     record_action = AsyncMock()
     monkeypatch.setattr(loader_mod, "record_action", record_action)
     monkeypatch.setattr(loader_mod.payout_limit, "check_and_consume", AsyncMock(return_value=(True, None)))
+    _mock_payout_delivery(monkeypatch)
 
     failed = await loader_mod._apply_userbot_event_bus_actions(
         state,
@@ -4202,6 +4265,7 @@ async def test_userbot_session_dispatch_invokes_interaction_entry_and_skips_lega
 
 @pytest.mark.asyncio
 async def test_userbot_observed_interaction_session_keeps_logical_interaction_channel(monkeypatch) -> None:
+    _mock_payout_delivery(monkeypatch)
     redis = _FakeRedis()
     state = loader_mod._AccountState(82)
     state.redis = redis
@@ -4749,6 +4813,7 @@ async def test_userbot_session_message_skips_cross_channel_duplicate(monkeypatch
         message_id=8901,
         rule_id="rule-dupe",
         redis=redis,
+        fail_open=False,
     )
     invoke.assert_not_awaited()
     assert any(
@@ -5105,6 +5170,111 @@ async def test_activate_logs_reserved_unsupported_facade_permission() -> None:
         and log["detail"]["plugin_key"] == plugin_key
         for log in decoded_logs
     )
+
+
+@pytest.mark.asyncio
+async def test_activate_decrypts_schema_only_account_secret(monkeypatch) -> None:
+    import app.crypto as crypto
+    from app.crypto import generate_master_key
+    from app.services.plugin_config_secrets import wrap_secret
+    from app.settings import settings
+    from app.worker.plugins.base import _REGISTRY, register
+
+    captured = {}
+
+    @register
+    class _SchemaSecretPlugin(Plugin):
+        key = "_test_schema_account_secret"
+        display_name = "schema secret"
+
+        async def on_startup(self, ctx: PluginContext) -> None:
+            captured.update(ctx.account_config)
+
+    schema = {
+        "type": "object",
+        "properties": {
+            "credential": {"type": "string", "x-sensitive": True},
+        },
+    }
+    plugin_key = _SchemaSecretPlugin.key
+    _SchemaSecretPlugin._source = "installed"
+    _SchemaSecretPlugin._manifest = Manifest(
+        key=plugin_key,
+        display_name="schema secret",
+        config_schema=schema,
+    )
+    monkeypatch.setattr(settings, "master_key", generate_master_key())
+    monkeypatch.setattr(crypto, "_fernet", None)
+    af = _FakeAF(
+        account_id=1,
+        feature_key=plugin_key,
+        enabled=True,
+        config={"credential": wrap_secret("schema-only-value")},
+    )
+    db = _FakeDB(
+        accounts={1: _FakeAcc(id=1)},
+        humanize={1: None},
+        afs=[af],
+        rules=[],
+        features={plugin_key: _FakeFeature(key=plugin_key, manifest={"config_schema": schema})},
+        installed_plugins={plugin_key: _FakeInstalledPlugin(plugin_key)},
+    )
+    state = loader_mod._AccountState(account_id=1)
+    state.client = MagicMock()
+
+    try:
+        await loader_mod._activate(db, state, af, _FakeRedis())
+        assert captured["credential"] == "schema-only-value"
+    finally:
+        _REGISTRY.pop(plugin_key, None)
+
+
+@pytest.mark.asyncio
+async def test_activate_isolates_corrupt_plugin_secret(monkeypatch) -> None:
+    from app.worker.plugins.base import _REGISTRY, register
+
+    startup = AsyncMock()
+
+    @register
+    class _CorruptSecretPlugin(Plugin):
+        key = "_test_corrupt_secret"
+        display_name = "corrupt secret"
+        on_startup = startup
+
+    plugin_key = _CorruptSecretPlugin.key
+    _CorruptSecretPlugin._source = "installed"
+    _CorruptSecretPlugin._manifest = Manifest(
+        key=plugin_key,
+        display_name="corrupt secret",
+    )
+    envelope = "secret:v1:corrupt-ciphertext"
+    af = _FakeAF(
+        account_id=1,
+        feature_key=plugin_key,
+        enabled=True,
+        config={"cookie": envelope},
+    )
+    db = _FakeDB(
+        accounts={1: _FakeAcc(id=1)},
+        humanize={1: None},
+        afs=[af],
+        rules=[],
+        features={plugin_key: _FakeFeature(key=plugin_key, manifest={})},
+        installed_plugins={plugin_key: _FakeInstalledPlugin(plugin_key)},
+    )
+    state = loader_mod._AccountState(account_id=1)
+    state.client = MagicMock()
+
+    try:
+        await loader_mod._activate(db, state, af, _FakeRedis())
+        startup.assert_not_awaited()
+        assert plugin_key not in state.instances
+        assert af.state == "failed"
+        assert "PLUGIN_CONFIG_DECRYPT_FAILED" in (af.last_error or "")
+        assert "cookie" in (af.last_error or "")
+        assert envelope not in (af.last_error or "")
+    finally:
+        _REGISTRY.pop(plugin_key, None)
 
 
 # ─────────────────────────────────────────────────────
@@ -5713,3 +5883,115 @@ async def test_scan_userbot_expired_sessions_invokes_entry_and_deletes(monkeypat
     assert invoked["payload"]["event_type"] == "session_expired"
     assert invoked["payload"]["session"]["data"] == {"round": 2}
     assert invoked["default_send_via"] == ["userbot_reply"]
+
+
+@pytest.mark.asyncio
+async def test_userbot_expiry_failure_releases_lease_and_retries(monkeypatch) -> None:
+    redis = _FakeRedis()
+    state = loader_mod._AccountState(account_id=82)
+    state.redis = redis
+    key = "account_bot:interaction_session:82:manifest_command:quiz:start:-10082"
+    redis.values[key] = json.dumps(
+        {
+            "account_id": 82,
+            "chat_id": -10082,
+            "channel": "userbot",
+            "module_key": "quiz",
+            "entry_key": "start",
+            "revision": 7,
+            "expires_at": time.time() - 1,
+            "data": {"round": 2},
+        }
+    )
+    invoke = AsyncMock(side_effect=RuntimeError("temporary failure"))
+    monkeypatch.setitem(loader_mod._STATES, 82, state)
+    monkeypatch.setattr(loader_mod, "_entry_declares_session_expired", lambda *_args: True)
+    monkeypatch.setattr(loader_mod, "_start_userbot_session_trace", AsyncMock(return_value=None))
+    monkeypatch.setattr(loader_mod, "invoke_interaction_entry", invoke)
+    monkeypatch.setattr(loader_mod, "_apply_userbot_event_bus_actions", AsyncMock(return_value=False))
+    monkeypatch.setattr(loader_mod, "update_plugin_runtime_status", AsyncMock())
+    monkeypatch.setattr(loader_mod, "finish_trace", AsyncMock())
+    monkeypatch.setattr(loader_mod, "_log", AsyncMock())
+    try:
+        first = await loader_mod.scan_userbot_expired_sessions_once(82)
+        assert first == 0
+        retained = json.loads(redis.values[key])
+        assert retained["revision"] == 7
+        assert "_expiry_claim" not in retained
+
+        invoke.side_effect = None
+        invoke.return_value = []
+        second = await loader_mod.scan_userbot_expired_sessions_once(82)
+    finally:
+        loader_mod._STATES.pop(82, None)
+
+    assert second == 1
+    assert invoke.await_count == 2
+    assert key not in redis.values
+
+
+@pytest.mark.asyncio
+async def test_plugin_invoke_deadline_and_circuit_are_scoped_per_plugin(monkeypatch) -> None:
+    slow_key = "_test_slow_plugin"
+    fast_key = "_test_fast_plugin"
+    slow_calls = 0
+
+    class _SlowPlugin(Plugin):
+        key = slow_key
+        display_name = "slow"
+
+        async def on_interaction(self, _ctx, _entry_key, _payload):  # noqa: ANN001
+            nonlocal slow_calls
+            slow_calls += 1
+            await asyncio.sleep(60)
+            return []
+
+    class _FastPlugin(Plugin):
+        key = fast_key
+        display_name = "fast"
+
+        async def on_interaction(self, _ctx, _entry_key, _payload):  # noqa: ANN001
+            return [{"type": "send_message", "text": "ok"}]
+
+    monkeypatch.setattr(loader_mod.app_settings, "plugin_invoke_timeout_seconds", 0.01)
+    monkeypatch.setattr(loader_mod.app_settings, "plugin_circuit_failure_threshold", 2)
+    monkeypatch.setattr(loader_mod.app_settings, "plugin_circuit_cooldown_seconds", 60.0)
+    state = loader_mod._AccountState(account_id=183)
+    for key, instance in ((slow_key, _SlowPlugin()), (fast_key, _FastPlugin())):
+        state.instances[key] = instance
+        state.contexts[key] = PluginContext(account_id=183, feature_key=key, client=MagicMock())
+    loader_mod._STATES[183] = state
+
+    try:
+        with pytest.raises(TimeoutError):
+            await loader_mod.invoke_interaction_entry(
+                183,
+                plugin_key=slow_key,
+                entry_key="main",
+                payload={},
+            )
+        with pytest.raises(TimeoutError):
+            await loader_mod.invoke_interaction_entry(
+                183,
+                plugin_key=slow_key,
+                entry_key="main",
+                payload={},
+            )
+        with pytest.raises(RuntimeError, match="PLUGIN_CIRCUIT_OPEN"):
+            await loader_mod.invoke_interaction_entry(
+                183,
+                plugin_key=slow_key,
+                entry_key="main",
+                payload={},
+            )
+        assert slow_calls == 2
+
+        actions = await loader_mod.invoke_interaction_entry(
+            183,
+            plugin_key=fast_key,
+            entry_key="main",
+            payload={},
+        )
+        assert actions[0]["text"] == "ok"
+    finally:
+        loader_mod._STATES.pop(183, None)

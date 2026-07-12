@@ -440,19 +440,25 @@ async def test_scheduler_execute_rule_ipc_handler_replies_with_result() -> None:
             return_value=scheduler_runtime.SchedulerExecutionResult(True)
         )
     )
+    reply_to = "worker_reply:42:exec_rule:test"
+    cmd = IPCMessage(
+        type=CMD_EXECUTE_RULE,
+        payload={"reply_to": reply_to, "rule_id": 9},
+    )
 
     await worker_runtime._handle_execute_rule_command(
         redis,
         42,
         platform_scheduler,
-        "worker_reply:42:exec_rule:test",
+        cmd,
+        reply_to,
         9,
     )
 
     platform_scheduler.execute_rule.assert_awaited_once_with(9)
     redis.publish.assert_awaited_once()
     reply_channel, raw_message = redis.publish.await_args.args
-    assert reply_channel == "worker_reply:42:exec_rule:test"
+    assert reply_channel == reply_to
     message = IPCMessage.decode(raw_message)
     assert message.type == CMD_EXECUTE_RULE
     assert message.payload == {"ok": True, "error": None}
