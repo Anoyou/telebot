@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+from app.api import commands
 from app.services import llm_identity
 from app.services.llm_identity import (
     CLIENT_IDENTITY_CLAUDE_CODE,
@@ -113,3 +114,10 @@ def test_version_key_metadata_detectability() -> None:
 def test_setting_key_is_stable() -> None:
     # 存储键固定，避免升级后读不到历史覆盖。
     assert llm_identity.CLIENT_IDENTITY_VERSIONS_SETTING_KEY == "llm_client_identity_versions"
+
+
+def test_identity_version_routes_match_frontend_api_prefix() -> None:
+    paths = {route.path for route in commands.router.routes}
+
+    assert "/api/commands/llm-providers/identity-versions" in paths
+    assert "/api/commands/llm-providers/identity-versions/detect" in paths

@@ -155,8 +155,11 @@ make frontend
 ```bash
 cd /opt/telepilot
 ./deploy/backup.sh
-cp .env "/var/backups/telebot/env-$(date +%Y%m%d-%H%M).bak"
-cp docker-compose.yml "/var/backups/telebot/docker-compose-$(date +%Y%m%d-%H%M).yml.bak"
+
+# 默认保留最近 7 个完整备份组；可在 .env 中调整
+# BACKUP_RETENTION_COUNT=7
+cp .env "/var/backups/telepilot/env-$(date +%Y%m%d-%H%M).bak"
+cp docker-compose.yml "/var/backups/telepilot/docker-compose-$(date +%Y%m%d-%H%M).yml.bak"
 TELEPILOT_UPDATE_BRANCH=main make prod-update
 ```
 

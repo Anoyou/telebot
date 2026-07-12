@@ -16,20 +16,53 @@ fi
 export UPDATER_TOKEN="${UPDATER_TOKEN:-backup-only-compose-parse-token-0000000000000000}"
 
 TS="$(date +%Y%m%d-%H%M%S)"
-DIR="${BACKUP_DIR:-/var/backups/telebot}"
+DIR="${BACKUP_DIR:-/var/backups/telepilot}"
 PG_USER="${POSTGRES_USER:-telebot}"
 PG_DB="${POSTGRES_DB:-telebot}"
 RETENTION_DAYS="${BACKUP_RETENTION_DAYS:-30}"
+RETENTION_COUNT="${BACKUP_RETENTION_COUNT:-7}"
 
 command -v docker >/dev/null 2>&1 || { echo "缺少 docker" >&2; exit 1; }
 docker compose version >/dev/null 2>&1 || { echo "缺少 Docker Compose v2" >&2; exit 1; }
 mkdir -p "$DIR"
 chmod 700 "$DIR"
 DIR="$(cd "$DIR" && pwd)"
+[[ "$RETENTION_COUNT" =~ ^[1-9][0-9]*$ ]] || {
+  echo "BACKUP_RETENTION_COUNT 必须是大于 0 的整数" >&2
+  exit 1
+}
 # 自动收紧旧版本留下的宽权限备份；等价的一次性修复无需另跑命令。
 find "$DIR" -maxdepth 1 -type f \( -name 'db-*.sql' -o -name 'sessions-*.tgz' \
   -o -name 'plugins-installed-*.tgz' -o -name 'plugin-repos-*.tgz' \
   -o -name 'checksums-*.sha256' \) -exec chmod 600 {} + 2>/dev/null || true
+
+remove_backup_set() {
+  local stamp="$1"
+  rm -f \
+    "$DIR/db-$stamp.sql" \
+    "$DIR/sessions-$stamp.tgz" \
+    "$DIR/plugins-installed-$stamp.tgz" \
+    "$DIR/plugin-repos-$stamp.tgz" \
+    "$DIR/checksums-$stamp.sha256"
+}
+
+prune_complete_sets() {
+  local keep="$1" index=0 checksum stamp
+  while IFS= read -r checksum; do
+    index=$((index + 1))
+    (( index <= keep )) && continue
+    stamp="$(basename "$checksum")"
+    stamp="${stamp#checksums-}"
+    stamp="${stamp%.sha256}"
+    remove_backup_set "$stamp"
+  done < <(find "$DIR" -maxdepth 1 -type f -name 'checksums-*.sha256' -print | sort -r)
+}
+
+# 在创建新 dump 前先给本轮腾出一个完整备份组的位置，同时至少保留最近一组。
+# 这样高频网页更新不会等到 30 天后才释放空间，也不会先删光所有可恢复点。
+PRE_BACKUP_KEEP=$((RETENTION_COUNT - 1))
+(( PRE_BACKUP_KEEP < 1 )) && PRE_BACKUP_KEEP=1
+prune_complete_sets "$PRE_BACKUP_KEEP"
 
 WEB_CONTAINER="$(docker compose ps -q web)"
 if [[ -z "$WEB_CONTAINER" ]]; then
@@ -109,6 +142,8 @@ else
     "$(basename "$PLUGINS_ARCHIVE")" "$(basename "$REPOS_ARCHIVE")") > "$CHECKSUM_FILE"
 fi
 chmod 600 "$CHECKSUM_FILE"
+
+prune_complete_sets "$RETENTION_COUNT"
 
 find "$DIR" -type f \( -name 'db-*.sql' -o -name 'sessions-*.tgz' \
   -o -name 'plugins-installed-*.tgz' -o -name 'plugin-repos-*.tgz' \

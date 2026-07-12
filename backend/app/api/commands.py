@@ -1662,7 +1662,10 @@ def _client_identity_version_items() -> list[ClientIdentityVersionItem]:
     return items
 
 
-@router.get("/llm-providers/identity-versions", response_model=ClientIdentityVersionsResponse)
+@router.get(
+    "/api/commands/llm-providers/identity-versions",
+    response_model=ClientIdentityVersionsResponse,
+)
 async def get_client_identity_versions(_user: CurrentUser) -> ClientIdentityVersionsResponse:
     """读取客户端身份 UA 版本配置（生效值 + 默认值 + 检测源）。"""
     return ClientIdentityVersionsResponse(items=_client_identity_version_items())
@@ -1693,7 +1696,10 @@ async def _detect_registry_latest(registry: str) -> tuple[str | None, str | None
         return None, f"{type(exc).__name__}: {str(exc)[:80]}"
 
 
-@router.post("/llm-providers/identity-versions/detect", response_model=ClientIdentityVersionDetectResponse)
+@router.post(
+    "/api/commands/llm-providers/identity-versions/detect",
+    response_model=ClientIdentityVersionDetectResponse,
+)
 async def detect_client_identity_versions(_user: CurrentUser) -> ClientIdentityVersionDetectResponse:
     """检测有公共 registry 的版本键的远端最新版本（只读、不落库、不消耗 quota）。"""
     current = llm_identity.current_client_versions()
@@ -1717,7 +1723,10 @@ async def detect_client_identity_versions(_user: CurrentUser) -> ClientIdentityV
     return ClientIdentityVersionDetectResponse(items=items)
 
 
-@router.put("/llm-providers/identity-versions", response_model=ClientIdentityVersionsResponse)
+@router.put(
+    "/api/commands/llm-providers/identity-versions",
+    response_model=ClientIdentityVersionsResponse,
+)
 async def update_client_identity_versions(
     payload: ClientIdentityVersionsUpdateRequest,
     _user: CurrentUser,

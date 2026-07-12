@@ -62,6 +62,7 @@ docker compose logs -f web
 脚本：
 
 - `deploy/backup.sh`：备份数据库、sessions、已安装插件和插件仓库缓存，并生成 SHA-256 校验文件
+- 默认写入 `/var/backups/telepilot`；`BACKUP_RETENTION_COUNT` 默认保留最近 7 个完整备份组，`BACKUP_RETENTION_DAYS` 继续作为最长保留天数。
 - `deploy/backup-keys.sh`：备份 `.env` 中关键密钥
 - `deploy/restore.sh`：恢复备份
 
@@ -74,8 +75,8 @@ docker compose logs -f web
 ```bash
 cd /opt/telepilot
 ./deploy/backup.sh
-cp .env "/var/backups/telebot/env-$(date +%Y%m%d-%H%M).bak"
-cp docker-compose.yml "/var/backups/telebot/docker-compose-$(date +%Y%m%d-%H%M).yml.bak"
+cp .env "/var/backups/telepilot/env-$(date +%Y%m%d-%H%M).bak"
+cp docker-compose.yml "/var/backups/telepilot/docker-compose-$(date +%Y%m%d-%H%M).yml.bak"
 TELEPILOT_UPDATE_BRANCH=main make prod-update
 ```
 

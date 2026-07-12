@@ -137,7 +137,7 @@ services:
     environment:
       TELEPILOT_WORKSPACE: /workspace
       TELEPILOT_HOST_PROJECT_DIR: ${TELEPILOT_HOST_PROJECT_DIR:-.}
-      BACKUP_DIR: ${BACKUP_DIR:-/var/backups/telebot}
+      BACKUP_DIR: ${BACKUP_DIR:-/var/backups/telepilot}
       TELEPILOT_UPDATE_REMOTE: ${TELEPILOT_UPDATE_REMOTE:-origin}
       TELEPILOT_UPDATE_BRANCH: ${TELEPILOT_UPDATE_BRANCH:-main}
       TELEPILOT_COMPOSE_PROJECT_NAME: ${COMPOSE_PROJECT_NAME:-}
@@ -148,7 +148,7 @@ services:
       - ${TELEPILOT_HOST_PROJECT_DIR:-.}:/workspace
       # updater 内的 backup.sh 与通过 Docker socket 启动的归档容器必须看到
       # 同一个绝对路径，否则数据库 dump 与卷归档会落在不同文件系统。
-      - ${BACKUP_DIR:-/var/backups/telebot}:${BACKUP_DIR:-/var/backups/telebot}
+      - ${BACKUP_DIR:-/var/backups/telepilot}:${BACKUP_DIR:-/var/backups/telepilot}
       - /var/run/docker.sock:/var/run/docker.sock
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8765/health"]
