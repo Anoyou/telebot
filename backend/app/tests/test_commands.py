@@ -630,8 +630,8 @@ async def test_openai_client_text_only_keeps_string_content() -> None:
     body = fake.post.call_args.kwargs["json"]
     headers = fake.post.call_args.kwargs["headers"]
     assert body["messages"][1]["content"] == "纯文本"
-    assert headers["User-Agent"].startswith("TelePilot/")
-    assert headers["User-Agent"].endswith(" LLM Client")
+    # 0.57.0 起不再发送 TelePilot 产品 UA；直接构造的 client 无身份档案时不注入 UA。
+    assert "TelePilot/" not in headers.get("User-Agent", "")
 
 
 @pytest.mark.asyncio

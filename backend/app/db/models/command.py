@@ -98,6 +98,31 @@ def normalize_protocol_profile(api_format: str | None, protocol_profile: str | N
     return LLM_PROTOCOL_PROFILE_STANDARD
 
 
+# 客户端身份档案（0.57.0 阶段 A）：控制 UA 与身份相关的安全请求头；
+# 与 protocol_profile 相互独立（后者控制协议语义 / beta 头）。
+# 取值集中定义在 ``services.llm_identity``；这里保留 DB 层允许集合与默认值，
+# 避免模型层反向依赖 service 层。
+LLM_CLIENT_IDENTITY_AUTO = "auto"
+
+ALL_LLM_CLIENT_IDENTITY_PROFILES = {
+    "auto",
+    "minimal",
+    "openai_sdk",
+    "codex_cli",
+    "codex_desktop",
+    "claude_code",
+    "claude_desktop",
+}
+
+
+def normalize_client_identity_profile(value: str | None) -> str:
+    """规范化客户端身份档案；未知值降级为 auto（不拒绝）。"""
+    candidate = (value or "").strip().lower()
+    if candidate in ALL_LLM_CLIENT_IDENTITY_PROFILES:
+        return candidate
+    return LLM_CLIENT_IDENTITY_AUTO
+
+
 def default_api_format_for(provider_kind: str) -> str:
     """给定 provider 厂商，返回默认 API 格式。
 
@@ -240,6 +265,13 @@ class LLMProvider(Base):
         String(32),
         nullable=False,
         server_default=LLM_PROTOCOL_PROFILE_STANDARD,
+    )
+    # 客户端身份档案（0.57.0 阶段 A）：控制 UA 与身份相关安全头，与 protocol_profile 独立。
+    # auto = 按本次实际协议解析；minimal = 仅协议必需头；其余为具体产品身份。
+    client_identity_profile: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        server_default=LLM_CLIENT_IDENTITY_AUTO,
     )
     # 联网搜索调用时的协议覆盖：
     # - auto：OpenAI/chat_completions 日常走 chat，web_search 时临时走 responses

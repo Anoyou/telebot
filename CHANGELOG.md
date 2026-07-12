@@ -20,6 +20,9 @@
 
 ## [Unreleased]
 
+### Added
+- 阶段 A（LLM 客户端身份基础层）：新增 `client_identity_profile` Provider 字段（数据库列 + Alembic 0040 + CHECK 约束 + Schema/DTO/前端表单），并建立集中式客户端身份目录 `services/llm_identity.py`。身份依据"本次实际协议"解析：`auto` 在 chat_completions→OpenAI SDK、responses→Codex CLI、anthropic_messages→Claude Code 之间映射，`api_format_override`（联网搜索、生图）覆盖协议后同步重算身份。三个协议 Client 统一接收身份档案并停止发送 TelePilot 产品 UA；`minimal` 只发协议必需头、不模拟任何产品客户端。`protocol_profile` 与 `client_identity_profile` 相互独立，切换身份不会打开 beta。配置备份导入未知身份值降级为 `auto` 而非拒绝整份备份。产品身份 UA/originator/x-app 均来自本机安装的真实客户端与上游开源实现（Codex CLI `codex_cli_rs`、Claude Code `claude-cli` + `x-app: cli`、OpenAI Python SDK），无法验证的 Codex/Claude Desktop 档案保持不可选。
+
 ## [0.56.8] — 2026-07-12 · patch（补丁版本） · 全链路可靠性与恢复能力修复
 
 ### Added

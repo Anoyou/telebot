@@ -2590,6 +2590,21 @@ async def _import_config_payload(
                             continue
                         filtered[key] = _coerce_import_value(table_columns[key], value)
 
+                    # 导入旧 / 跨版本备份时，未知的客户端身份档案降级为 auto（不拒绝整份备份）。
+                    if (
+                        model_cls.__name__ == "LLMProvider"
+                        and "client_identity_profile" in filtered
+                    ):
+                        from ..db.models.command import (
+                            normalize_client_identity_profile,
+                        )
+
+                        filtered["client_identity_profile"] = (
+                            normalize_client_identity_profile(
+                                filtered["client_identity_profile"]
+                            )
+                        )
+
                     identity: dict[str, Any] | None = None
                     candidates = definition.get(
                         "identity_candidates", (definition["id_fields"],)

@@ -25,6 +25,7 @@ from ..db.models.command import (
     AccountCommandLink,
     CommandTemplate,
     LLMProvider,
+    normalize_client_identity_profile,
     normalize_protocol_profile,
 )
 from ..redis_client import get_redis
@@ -305,6 +306,9 @@ def _provider_to_out(row: LLMProvider) -> LLMProviderOut:
             getattr(row, "protocol_profile", None),
         ),
         web_search_api_format=getattr(row, "web_search_api_format", None) or "auto",
+        client_identity_profile=normalize_client_identity_profile(
+            getattr(row, "client_identity_profile", None)
+        ),
         # 路由元数据（老数据可能为 None / [] / 缺字段；用属性 getattr 兼容）
         modality=getattr(row, "modality", None) or "text",
         tags=list(getattr(row, "tags", None) or []),
@@ -379,6 +383,9 @@ async def create_provider(
             payload.protocol_profile,
         ),
         web_search_api_format=payload.web_search_api_format,
+        client_identity_profile=normalize_client_identity_profile(
+            payload.client_identity_profile
+        ),
         # 路由元数据
         modality=payload.modality,
         tags=list(payload.tags or []),
@@ -430,6 +437,10 @@ async def update_provider(
     )
     if "web_search_api_format" in data and data["web_search_api_format"]:
         row.web_search_api_format = data["web_search_api_format"]
+    if "client_identity_profile" in data and data["client_identity_profile"]:
+        row.client_identity_profile = normalize_client_identity_profile(
+            data["client_identity_profile"]
+        )
 
     # 路由元数据：明确出现在 patch 内才覆盖
     if "modality" in data and data["modality"] is not None:

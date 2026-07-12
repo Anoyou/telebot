@@ -1351,6 +1351,18 @@ export type LLMProviderKind = "openai" | "anthropic" | "ollama";
 export type LLMApiFormat = "chat_completions" | "responses" | "anthropic_messages";
 export type LLMWebSearchApiFormat = "auto" | LLMApiFormat;
 export type LLMProtocolProfile = "standard" | "claude_code_proxy";
+/**
+ * 客户端身份档案（0.57.0 阶段 A）：控制 UA 与身份相关的安全请求头，
+ * 与 protocol_profile（协议语义 / beta 头）相互独立。auto 按本次实际协议解析。
+ */
+export type LLMClientIdentityProfile =
+  | "auto"
+  | "minimal"
+  | "openai_sdk"
+  | "codex_cli"
+  | "codex_desktop"
+  | "claude_code"
+  | "claude_desktop";
 
 /**
  * LLMProvider 下挂的一个候选模型条目（与后端 ProviderModel 对齐）。
@@ -1415,6 +1427,8 @@ export interface LLMProviderOut {
   protocol_profile?: LLMProtocolProfile | string;
   /** 联网搜索时的协议覆盖；auto = OpenAI/chat_completions 在联网时临时走 responses */
   web_search_api_format?: LLMWebSearchApiFormat | string;
+  /** 客户端身份档案；auto 按本次实际协议解析。与 protocol_profile 相互独立 */
+  client_identity_profile?: LLMClientIdentityProfile | string;
   /** 模态；老数据可能缺，前端按 "text" 兜底 */
   modality?: LLMModality | string;
   /** 路由标签；老数据可能为空数组 */
@@ -1441,6 +1455,8 @@ export interface LLMProviderCreate {
   /** 仅在 api_format=anthropic_messages 时生效 */
   protocol_profile?: LLMProtocolProfile;
   web_search_api_format?: LLMWebSearchApiFormat;
+  /** 客户端身份档案；auto 按本次实际协议解析。与 protocol_profile 相互独立 */
+  client_identity_profile?: LLMClientIdentityProfile;
   modality?: LLMModality;
   tags?: string[];
   cost_tier?: number;
@@ -1474,6 +1490,8 @@ export interface LLMProviderUpdate {
   /** 仅在 api_format=anthropic_messages 时生效 */
   protocol_profile?: LLMProtocolProfile;
   web_search_api_format?: LLMWebSearchApiFormat;
+  /** 客户端身份档案；auto 按本次实际协议解析。与 protocol_profile 相互独立 */
+  client_identity_profile?: LLMClientIdentityProfile;
   modality?: LLMModality;
   tags?: string[];
   cost_tier?: number;

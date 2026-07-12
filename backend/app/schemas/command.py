@@ -23,6 +23,7 @@ from ..db.models.command import (
     COMMAND_TYPE_REPLY_TEXT,
     COMMAND_TYPE_RUN_PLUGIN,
     LLM_API_FORMAT_CHAT_COMPLETIONS,
+    LLM_CLIENT_IDENTITY_AUTO,
     LLM_MODALITY_TEXT,
     LLM_PROTOCOL_PROFILE_STANDARD,
     LLM_WEB_SEARCH_API_FORMAT_AUTO,
@@ -352,6 +353,17 @@ class LLMProviderCreate(BaseModel):
     )
     """联网搜索时的协议覆盖；auto 会让 OpenAI/chat_completions 在联网时临时走 responses。"""
 
+    client_identity_profile: Literal[
+        "auto",
+        "minimal",
+        "openai_sdk",
+        "codex_cli",
+        "codex_desktop",
+        "claude_code",
+        "claude_desktop",
+    ] = LLM_CLIENT_IDENTITY_AUTO
+    """客户端身份档案；auto 按本次实际协议解析。与 protocol_profile 相互独立。"""
+
     # ── 路由元数据（全可选；不填走默认）───────────────────────
     modality: Literal["text", "vision", "audio", "multimodal"] = Field(
         default=LLM_MODALITY_TEXT
@@ -422,6 +434,18 @@ class LLMProviderUpdate(BaseModel):
     default_model: str | None = Field(default=None, min_length=1, max_length=64)
     api_format: Literal["chat_completions", "responses", "anthropic_messages"] | None = None
     protocol_profile: Literal["standard", "claude_code_proxy"] | None = None
+    client_identity_profile: (
+        Literal[
+            "auto",
+            "minimal",
+            "openai_sdk",
+            "codex_cli",
+            "codex_desktop",
+            "claude_code",
+            "claude_desktop",
+        ]
+        | None
+    ) = None
     web_search_api_format: Literal["auto", "chat_completions", "responses", "anthropic_messages"] | None = None
 
     # 路由元数据（全可选；None / 缺省 = 不动）
@@ -460,6 +484,7 @@ class LLMProviderOut(BaseModel):
     default_model: str
     api_format: str = LLM_API_FORMAT_CHAT_COMPLETIONS
     protocol_profile: str = LLM_PROTOCOL_PROFILE_STANDARD
+    client_identity_profile: str = LLM_CLIENT_IDENTITY_AUTO
     web_search_api_format: str = LLM_WEB_SEARCH_API_FORMAT_AUTO
     # 路由元数据（出参始终带，便于前端展示）
     modality: str = LLM_MODALITY_TEXT

@@ -54,7 +54,7 @@ import {
 } from "@/api/commands";
 import { listProxies } from "@/api/proxies";
 import { getSystemSettings } from "@/api/system";
-import type { ChatTestModelResult, ChatTestTurn, DetectProviderProtocolsResponse, LLMApiFormat, LLMModality, LLMProtocolProfile, LLMProviderKind, LLMProviderOut, LLMTag, LLMWebSearchApiFormat, ProviderModel, ProtocolProbeResult, ProxyOut } from "@/api/types";
+import type { ChatTestModelResult, ChatTestTurn, DetectProviderProtocolsResponse, LLMApiFormat, LLMClientIdentityProfile, LLMModality, LLMProtocolProfile, LLMProviderKind, LLMProviderOut, LLMTag, LLMWebSearchApiFormat, ProviderModel, ProtocolProbeResult, ProxyOut } from "@/api/types";
 import { getErrMsg } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { confirmDiscardChanges, useUnsavedChanges } from "@/lib/unsavedChanges";
@@ -115,6 +115,53 @@ const WEB_SEARCH_API_FORMAT_OPTIONS: { value: LLMWebSearchApiFormat; label: stri
   },
 ];
 
+// 客户端身份档案选项（与后端 services.llm_identity 对齐）。
+// Desktop 档案暂无可复核证据，标记 disabled，前端不可选。
+const CLIENT_IDENTITY_OPTIONS: {
+  value: LLMClientIdentityProfile;
+  label: string;
+  hint: string;
+  disabled?: boolean;
+}[] = [
+  {
+    value: "auto",
+    label: "自动（推荐）",
+    hint: "按本次实际协议解析：chat_completions→OpenAI SDK / responses→Codex CLI / anthropic_messages→Claude Code。",
+  },
+  {
+    value: "minimal",
+    label: "最小（仅协议必需头）",
+    hint: "不附加任何产品模拟头，仅发送协议必需头。上游不校验客户端身份时使用。",
+  },
+  {
+    value: "openai_sdk",
+    label: "OpenAI SDK",
+    hint: "OpenAI 官方 Python SDK 身份，用于 Chat Completions。",
+  },
+  {
+    value: "codex_cli",
+    label: "Codex CLI",
+    hint: "Codex CLI 身份（originator=codex_cli_rs），用于 Responses。",
+  },
+  {
+    value: "claude_code",
+    label: "Claude Code",
+    hint: "Claude Code 身份（x-app=cli），用于 Anthropic Messages。",
+  },
+  {
+    value: "codex_desktop",
+    label: "Codex Desktop（暂不可用）",
+    hint: "缺少可复核的请求头证据，暂不可选。",
+    disabled: true,
+  },
+  {
+    value: "claude_desktop",
+    label: "Claude Desktop（暂不可用）",
+    hint: "缺少可复核的请求头证据，暂不可选。",
+    disabled: true,
+  },
+];
+
 // 模态选项 + 中文解释（与后端 ALL_LLM_MODALITIES 对齐）
 const MODALITY_OPTIONS: { value: LLMModality; label: string; hint: string }[] = [
   { value: "text", label: "纯文本（text）", hint: "只支持文本输入输出（绝大多数 LLM）" },
@@ -170,6 +217,8 @@ interface FormState {
   api_format: LLMApiFormat;
   protocol_profile: LLMProtocolProfile;
   web_search_api_format: LLMWebSearchApiFormat;
+  // 客户端身份档案；与 protocol_profile 相互独立
+  client_identity_profile: LLMClientIdentityProfile;
   // 编辑模式下，是否要"清空已有 key"（按钮触发）
   clearKey: boolean;
   // ── 路由元数据 ──
@@ -194,6 +243,7 @@ const EMPTY_FORM: FormState = {
   api_format: "chat_completions",
   protocol_profile: "standard",
   web_search_api_format: "auto",
+  client_identity_profile: "auto",
   clearKey: false,
   modality: "text",
   tags: ["chat"],
@@ -271,6 +321,7 @@ export function LLMProviders({
           ? { protocol_profile: form.protocol_profile }
           : {}),
         web_search_api_format: form.web_search_api_format,
+        client_identity_profile: form.client_identity_profile,
         modality: form.modality,
         tags: form.tags,
         cost_tier: form.cost_tier,
@@ -305,6 +356,7 @@ export function LLMProviders({
           ? { protocol_profile: form.protocol_profile }
           : {}),
         web_search_api_format: form.web_search_api_format,
+        client_identity_profile: form.client_identity_profile,
         modality: form.modality,
         tags: form.tags,
         cost_tier: form.cost_tier,
@@ -346,6 +398,7 @@ export function LLMProviders({
           ? "claude_code_proxy"
           : "standard",
       web_search_api_format: ((p.web_search_api_format as LLMWebSearchApiFormat) || "auto"),
+      client_identity_profile: ((p.client_identity_profile as LLMClientIdentityProfile) || "auto"),
       clearKey: false,
       modality: ((p.modality as LLMModality) || "text"),
       tags: ((p.tags as LLMTag[]) || []).filter((t) =>
@@ -1382,6 +1435,41 @@ function ProviderEditDialog({
           {protocolDetection ? (
             <ProtocolDetectionPanel result={protocolDetection} />
           ) : null}
+
+          <div className="space-y-1.5">
+            <Label>客户端身份</Label>
+            <Select
+              value={form.client_identity_profile}
+              onChange={(e) =>
+                setField(
+                  "client_identity_profile",
+                  e.target.value as LLMClientIdentityProfile,
+                )
+              }
+            >
+              {CLIENT_IDENTITY_OPTIONS.map((opt) => (
+                <option key={opt.value} value={opt.value} disabled={opt.disabled}>
+                  {opt.label}
+                </option>
+              ))}
+            </Select>
+            <p className="text-xs text-muted-foreground">
+              {CLIENT_IDENTITY_OPTIONS.find((o) => o.value === form.client_identity_profile)?.hint}
+            </p>
+            {form.client_identity_profile === "auto" ? (
+              <p className="text-xs text-muted-foreground">
+                当前协议 <span className="font-mono">{form.api_format}</span> 将解析为{" "}
+                <span className="font-mono">
+                  {form.api_format === "responses"
+                    ? "codex_cli"
+                    : form.api_format === "anthropic_messages"
+                      ? "claude_code"
+                      : "openai_sdk"}
+                </span>
+                。标准模式不再发送 TelePilot 产品 UA。
+              </p>
+            ) : null}
+          </div>
 
           <div className="space-y-1.5">
             <Label>API Key {isEdit ? "" : "*（建议）"}</Label>
