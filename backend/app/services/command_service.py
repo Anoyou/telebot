@@ -25,6 +25,7 @@ from ..db.models.command import (
     AccountCommandLink,
     CommandTemplate,
     LLMProvider,
+    default_api_format_for,
     normalize_client_identity_profile,
     normalize_protocol_profile,
 )
@@ -38,6 +39,7 @@ from ..schemas.command import (
     LLMProviderOut,
     LLMProviderUpdate,
 )
+from ..services.llm_identity import validate_identity_for_save
 from ..worker.ipc import CMD_RELOAD_COMMANDS, publish_cmd_with_ack
 
 log = logging.getLogger(__name__)
@@ -370,6 +372,19 @@ async def create_provider(
     if payload.proxy_id is not None:
         await _validate_proxy_for_llm(db, payload.proxy_id)
 
+    # 阶段 F 收口 #2：校验固定身份与本次协议兼容、且是已验证档案。
+    effective_api_format = (
+        str(payload.api_format).strip()
+        if payload.api_format
+        else default_api_format_for(payload.provider)
+    )
+    identity_profile = normalize_client_identity_profile(
+        payload.client_identity_profile
+    )
+    identity_error = validate_identity_for_save(identity_profile, effective_api_format)
+    if identity_error:
+        raise _err("LLM_PROVIDER_IDENTITY_INVALID", identity_error, 422)
+
     row = LLMProvider(
         name=payload.name,
         provider=payload.provider,
@@ -383,9 +398,7 @@ async def create_provider(
             payload.protocol_profile,
         ),
         web_search_api_format=payload.web_search_api_format,
-        client_identity_profile=normalize_client_identity_profile(
-            payload.client_identity_profile
-        ),
+        client_identity_profile=identity_profile,
         # 路由元数据
         modality=payload.modality,
         tags=list(payload.tags or []),
@@ -437,10 +450,16 @@ async def update_provider(
     )
     if "web_search_api_format" in data and data["web_search_api_format"]:
         row.web_search_api_format = data["web_search_api_format"]
-    if "client_identity_profile" in data and data["client_identity_profile"]:
-        row.client_identity_profile = normalize_client_identity_profile(
-            data["client_identity_profile"]
-        )
+    # 阶段 F 收口 #2：identity 或 api_format 变更时，校验最终生效组合。
+    effective_identity = normalize_client_identity_profile(
+        data["client_identity_profile"]
+        if ("client_identity_profile" in data and data["client_identity_profile"])
+        else getattr(row, "client_identity_profile", None)
+    )
+    identity_error = validate_identity_for_save(effective_identity, effective_api_format)
+    if identity_error:
+        raise _err("LLM_PROVIDER_IDENTITY_INVALID", identity_error, 422)
+    row.client_identity_profile = effective_identity
 
     # 路由元数据：明确出现在 patch 内才覆盖
     if "modality" in data and data["modality"] is not None:

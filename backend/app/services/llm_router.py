@@ -117,6 +117,9 @@ class RoutingDecision:
     client_identity_profile: str | None = None
     """该 provider 配置的客户端身份档案（脱敏摘要用）。"""
 
+    effective_client_identity_profile: str | None = None
+    """本次实际生效的身份档案（配置身份经协议兼容/证据校验后的解析结果）。"""
+
     def summary(self) -> dict[str, Any]:
         """脱敏路由摘要（可安全返回给插件 / 前端；不含 key / base_url / 代理）。"""
         return {
@@ -126,6 +129,7 @@ class RoutingDecision:
             "model": self.model,
             "api_format": self.api_format,
             "client_identity_profile": self.client_identity_profile,
+            "effective_client_identity_profile": self.effective_client_identity_profile,
         }
 
 
@@ -219,7 +223,20 @@ def _finalize_decision(decision: RoutingDecision, providers: dict[int, dict[str,
     decision.model = _pick_model_for(p)
     decision.api_format = str(p.get("api_format") or "") or None
     decision.client_identity_profile = str(p.get("client_identity_profile") or "auto")
+    decision.effective_client_identity_profile = _resolve_effective_identity(
+        decision.client_identity_profile, decision.api_format
+    )
     return decision
+
+
+def _resolve_effective_identity(profile: str | None, api_format: str | None) -> str | None:
+    """把配置身份解析为本次实际生效的身份档案名（脱敏摘要用，保存值/摘要/请求头一致）。"""
+    try:
+        from .llm_identity import resolve_identity
+
+        return resolve_identity(profile, api_format).profile
+    except Exception:  # noqa: BLE001 - 解析异常时退回配置值，不阻断路由
+        return profile
 
 
 def _select_by_tag(

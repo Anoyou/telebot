@@ -2522,3 +2522,111 @@ async def test_builtin_help_lists_templates() -> None:
     # 模板命令也出现
     assert "hi" in args
     assert "[reply_text]" in args
+
+
+# ═══════════ 阶段 F 收口 #2：Provider 身份保存校验 ═══════════
+class _IdentityValidationDB:
+    """create_provider 用的最小 DB mock：无重名、记录 add 的 row。"""
+
+    row = None
+
+    @staticmethod
+    def _result():
+        class _R:
+            @staticmethod
+            def scalar_one_or_none():
+                return None
+
+        return _R()
+
+    async def execute(self, _q):
+        return self._result()
+
+    def add(self, r):
+        self.row = r
+
+    async def flush(self):
+        self.row.id = 77
+        self.row.created_at = datetime.now(UTC)
+
+
+@pytest.mark.asyncio
+async def test_create_provider_rejects_unverified_identity() -> None:
+    """未验证档案（claude_desktop）不能作为固定身份保存。"""
+    with pytest.raises(HTTPException) as ei:
+        await command_service.create_provider(
+            _IdentityValidationDB(),
+            LLMProviderCreate(
+                name="idv-unverified",
+                provider="anthropic",
+                default_model="claude-3-5-sonnet",
+                api_format="anthropic_messages",
+                client_identity_profile="claude_desktop",
+            ),
+        )
+    assert ei.value.status_code == 422
+    assert ei.value.detail["code"] == "LLM_PROVIDER_IDENTITY_INVALID"
+
+
+@pytest.mark.asyncio
+async def test_create_provider_rejects_incompatible_identity() -> None:
+    """协议不兼容的固定身份（responses 选 claude_code）必须被拒。"""
+    with pytest.raises(HTTPException) as ei:
+        await command_service.create_provider(
+            _IdentityValidationDB(),
+            LLMProviderCreate(
+                name="idv-incompat",
+                provider="openai",
+                default_model="gpt-5-codex",
+                api_format="responses",
+                client_identity_profile="claude_code",
+            ),
+        )
+    assert ei.value.status_code == 422
+    assert ei.value.detail["code"] == "LLM_PROVIDER_IDENTITY_INVALID"
+
+
+@pytest.mark.asyncio
+async def test_create_provider_allows_verified_compatible_identity() -> None:
+    """已验证且协议兼容的固定身份（chat + openai_sdk）允许保存。"""
+    db = _IdentityValidationDB()
+    out = await command_service.create_provider(
+        db,
+        LLMProviderCreate(
+            name="idv-ok",
+            provider="openai",
+            default_model="gpt-4o",
+            api_format="chat_completions",
+            client_identity_profile="openai_sdk",
+        ),
+    )
+    assert out.client_identity_profile == "openai_sdk"
+
+
+@pytest.mark.asyncio
+async def test_update_provider_rejects_incompatible_identity() -> None:
+    """更新时把身份改成与协议不兼容的固定身份必须被拒。"""
+    row = LLMProvider(
+        id=88,
+        name="idv-upd",
+        provider="anthropic",
+        api_key_enc=None,
+        base_url="https://proxy.example/v1",
+        default_model="claude-3-5-sonnet",
+        api_format="anthropic_messages",
+        client_identity_profile="auto",
+    )
+
+    class _DB:
+        async def get(self, _model, _pk):
+            return row
+
+        async def flush(self):
+            return None
+
+    with pytest.raises(HTTPException) as ei:
+        await command_service.update_provider(
+            _DB(), 88, LLMProviderUpdate(client_identity_profile="codex_cli")
+        )
+    assert ei.value.status_code == 422
+    assert ei.value.detail["code"] == "LLM_PROVIDER_IDENTITY_INVALID"

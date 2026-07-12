@@ -499,6 +499,39 @@ def get_identity(profile: str) -> ClientIdentity | None:
     return _CATALOG.get(normalize_identity_profile(profile))
 
 
+def validate_identity_for_save(profile: str | None, api_format: str | None) -> str | None:
+    """保存时校验固定身份是否可用（阶段 F 收口 #2）。
+
+    返回中文错误说明；``None`` 表示校验通过。契约：
+    - ``auto`` / ``minimal``：始终允许（兼容所有协议）。
+    - 未知档案名：拒绝（避免存进无法解析的值）。
+    - 未验证 / 实验档案（如 Claude Desktop）：拒绝——不能保存一个执行时必然回落的
+      固定身份，否则保存值、路由摘要与实际请求头会不一致。
+    - 与本次协议不兼容（如给 anthropic provider 选 codex_cli）：拒绝。
+
+    这样"保存成功的固定身份"与"执行时真正生效的身份"保持一致，不再静默回落。
+    """
+    normalized = normalize_identity_profile(profile)
+    if normalized in {CLIENT_IDENTITY_AUTO, CLIENT_IDENTITY_MINIMAL}:
+        return None
+    identity = _CATALOG.get(normalized)
+    if identity is None:
+        return f"未知的客户端身份档案：{profile}"
+    if not identity.verified:
+        return (
+            f"客户端身份 {normalized} 尚无可复核证据、不可作为固定身份保存"
+            "（执行时会回落到自动身份）。请选择 auto 或已验证档案。"
+        )
+    fmt = (api_format or "").strip().lower()
+    if fmt and fmt not in identity.api_formats:
+        allowed = "、".join(sorted(identity.api_formats)) or "（无）"
+        return (
+            f"客户端身份 {normalized} 与协议 {fmt} 不兼容"
+            f"（该身份仅适用于：{allowed}）。请改用 auto 或兼容档案。"
+        )
+    return None
+
+
 def selectable_identities() -> list[dict[str, Any]]:
     """返回前端可选的身份档案清单（含 auto / minimal 与已验证产品档案）。
 
@@ -555,4 +588,5 @@ __all__ = [
     "normalize_identity_profile",
     "resolve_identity",
     "selectable_identities",
+    "validate_identity_for_save",
 ]
