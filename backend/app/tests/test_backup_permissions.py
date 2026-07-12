@@ -8,6 +8,15 @@ import subprocess
 from pathlib import Path
 
 
+def test_updater_mounts_backup_directory_at_the_same_host_path() -> None:
+    repo_root = Path(__file__).resolve().parents[3]
+    compose = (repo_root / "docker-compose.yml").read_text(encoding="utf-8")
+
+    backup_path = "${BACKUP_DIR:-/var/backups/telebot}"
+    assert f"BACKUP_DIR: {backup_path}" in compose
+    assert f"- {backup_path}:{backup_path}" in compose
+
+
 def test_backup_script_creates_private_directory_and_artifacts(tmp_path: Path) -> None:
     repo_root = Path(__file__).resolve().parents[3]
     fake_bin = tmp_path / "bin"
