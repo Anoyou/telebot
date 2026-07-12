@@ -49,50 +49,56 @@ def _provider(
 # ── _resolve_route: 三种模式 ────────────────────────────────
 
 
-def test_resolve_route_fixed_by_explicit_mode() -> None:
+@pytest.mark.asyncio
+async def test_resolve_route_fixed_by_explicit_mode() -> None:
     pool = {1: _provider(1, name="a"), 2: _provider(2, name="b")}
-    dto, tag, mode = ai_facade._resolve_route(pool, provider=2, provider_tag=None, route="fixed")
+    dto, tag, mode = await ai_facade._resolve_route(pool, provider=2, provider_tag=None, route="fixed")
     assert dto.id == 2
     assert mode == "fixed"
     assert tag is None
 
 
-def test_resolve_route_fixed_missing_provider_raises() -> None:
+@pytest.mark.asyncio
+async def test_resolve_route_fixed_missing_provider_raises() -> None:
     pool = {1: _provider(1)}
     with pytest.raises(AIUnavailableError):
-        ai_facade._resolve_route(pool, provider=None, provider_tag=None, route="fixed")
+        await ai_facade._resolve_route(pool, provider=None, provider_tag=None, route="fixed")
 
 
-def test_resolve_route_tag_picks_cheapest() -> None:
+@pytest.mark.asyncio
+async def test_resolve_route_tag_picks_cheapest() -> None:
     pool = {
         1: _provider(1, name="expensive", tags=["code"], cost_tier=3),
         2: _provider(2, name="cheap", tags=["code"], cost_tier=1),
     }
-    dto, tag, mode = ai_facade._resolve_route(pool, provider=None, provider_tag="code", route="tag")
+    dto, tag, mode = await ai_facade._resolve_route(pool, provider=None, provider_tag="code", route="tag")
     assert dto.id == 2
     assert tag == "code"
     assert mode == "tag"
 
 
-def test_resolve_route_tag_missing_tag_raises() -> None:
+@pytest.mark.asyncio
+async def test_resolve_route_tag_missing_tag_raises() -> None:
     pool = {1: _provider(1)}
     with pytest.raises(AIUnavailableError):
-        ai_facade._resolve_route(pool, provider=None, provider_tag=None, route="tag")
+        await ai_facade._resolve_route(pool, provider=None, provider_tag=None, route="tag")
 
 
-def test_resolve_route_tag_no_match_raises() -> None:
+@pytest.mark.asyncio
+async def test_resolve_route_tag_no_match_raises() -> None:
     pool = {1: _provider(1, tags=["chat"])}
     with pytest.raises(AIUnavailableError):
-        ai_facade._resolve_route(pool, provider=None, provider_tag="vision", route="tag")
+        await ai_facade._resolve_route(pool, provider=None, provider_tag="vision", route="tag")
 
 
-def test_resolve_route_auto_prefers_chat_cheapest() -> None:
+@pytest.mark.asyncio
+async def test_resolve_route_auto_prefers_chat_cheapest() -> None:
     pool = {
         1: _provider(1, name="chat-hi", tags=["chat"], cost_tier=3),
         2: _provider(2, name="chat-lo", tags=["chat"], cost_tier=1),
         3: _provider(3, name="misc", tags=["math"], cost_tier=1),
     }
-    dto, tag, mode = ai_facade._resolve_route(pool, provider=None, provider_tag=None, route="auto")
+    dto, tag, mode = await ai_facade._resolve_route(pool, provider=None, provider_tag=None, route="auto")
     assert dto.id == 2
     assert tag == "chat"
     assert mode == "auto"
@@ -101,45 +107,50 @@ def test_resolve_route_auto_prefers_chat_cheapest() -> None:
 # ── 旧参数推断兼容 ─────────────────────────────────────────
 
 
-def test_resolve_route_infers_fixed_when_provider_given() -> None:
+@pytest.mark.asyncio
+async def test_resolve_route_infers_fixed_when_provider_given() -> None:
     pool = {1: _provider(1, name="a"), 2: _provider(2, name="b")}
-    dto, _tag, mode = ai_facade._resolve_route(pool, provider="b", provider_tag=None, route=None)
+    dto, _tag, mode = await ai_facade._resolve_route(pool, provider="b", provider_tag=None, route=None)
     assert dto.id == 2
     assert mode == "fixed"
 
 
-def test_resolve_route_infers_tag_when_only_tag_given() -> None:
+@pytest.mark.asyncio
+async def test_resolve_route_infers_tag_when_only_tag_given() -> None:
     pool = {1: _provider(1, tags=["code"])}
-    _dto, tag, mode = ai_facade._resolve_route(pool, provider=None, provider_tag="code", route=None)
+    _dto, tag, mode = await ai_facade._resolve_route(pool, provider=None, provider_tag="code", route=None)
     assert tag == "code"
     assert mode == "tag"
 
 
-def test_resolve_route_infers_auto_when_nothing_given() -> None:
+@pytest.mark.asyncio
+async def test_resolve_route_infers_auto_when_nothing_given() -> None:
     pool = {1: _provider(1, tags=["chat"])}
-    _dto, _tag, mode = ai_facade._resolve_route(pool, provider=None, provider_tag=None, route=None)
+    _dto, _tag, mode = await ai_facade._resolve_route(pool, provider=None, provider_tag=None, route=None)
     assert mode == "auto"
 
 
 # ── require_tools 预排除无启用模型的 Provider ────────────────
 
 
-def test_resolve_route_require_tools_excludes_providers_without_enabled_models() -> None:
+@pytest.mark.asyncio
+async def test_resolve_route_require_tools_excludes_providers_without_enabled_models() -> None:
     pool = {
         1: _provider(1, name="no-models", models=[], default_model=""),
         2: _provider(2, name="disabled", models=[{"id": "m", "enabled": False}], default_model=""),
         3: _provider(3, name="usable", models=[{"id": "m3", "enabled": True}]),
     }
-    dto, _tag, _mode = ai_facade._resolve_route(
+    dto, _tag, _mode = await ai_facade._resolve_route(
         pool, provider=None, provider_tag=None, route="auto", require_tools=True
     )
     assert dto.id == 3
 
 
-def test_resolve_route_require_tools_all_excluded_raises() -> None:
+@pytest.mark.asyncio
+async def test_resolve_route_require_tools_all_excluded_raises() -> None:
     pool = {1: _provider(1, models=[{"id": "m", "enabled": False}], default_model="")}
     with pytest.raises(AIUnavailableError):
-        ai_facade._resolve_route(
+        await ai_facade._resolve_route(
             pool, provider=None, provider_tag=None, route="auto", require_tools=True
         )
 

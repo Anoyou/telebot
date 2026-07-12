@@ -219,11 +219,12 @@ class PluginAI:
         selected_tag = provider_tag or tag
         if selected_tag is None and tags:
             selected_tag = str(tags[0]) if tags[0] else None
-        primary, matched_tag, resolved_mode = _resolve_route(
+        primary, matched_tag, resolved_mode = await _resolve_route(
             providers,
             provider=provider,
             provider_tag=selected_tag,
             route=route,
+            user_content=user_prompt,
         )
         clamped_tokens = self._clamp_max_tokens(max_tokens)
         clamped_timeout = self._clamp_timeout(timeout_seconds if timeout_seconds is not None else timeout)
@@ -308,12 +309,13 @@ class PluginAI:
         if not tools:
             raise AIUnavailableError("manifest 未声明可执行的 agent_tools，或宿主未注册 handler")
         providers = await self._load_providers()
-        primary, matched_tag, resolved_mode = _resolve_route(
+        primary, matched_tag, resolved_mode = await _resolve_route(
             providers,
             provider=provider,
             provider_tag=provider_tag,
             route=route,
             require_tools=True,
+            user_content=str(user or ""),
         )
         explicit_model = str(model or "").strip()
         selected_model = explicit_model or _enabled_model_for_dto(primary, None) or str(primary.default_model or "").strip()
@@ -451,11 +453,12 @@ class PluginAI:
         selected_tag = provider_tag or tag
         if selected_tag is None and tags:
             selected_tag = str(tags[0]) if tags[0] else None
-        primary, _matched_tag, _resolved_mode = _resolve_route(
+        primary, _matched_tag, _resolved_mode = await _resolve_route(
             providers,
             provider=provider,
             provider_tag=selected_tag,
             route=route,
+            user_content=str(user or ""),
         )
         api_format = _effective_api_format(primary)
         if api_format not in {LLM_API_FORMAT_RESPONSES, LLM_API_FORMAT_ANTHROPIC_MESSAGES}:
@@ -704,18 +707,24 @@ def _enabled_model_for_dto(dto: LLMProviderDTO, explicit: str | None) -> str | N
     return enabled[0]
 
 
-def _resolve_route(
+async def _resolve_route(
     providers: Mapping[int, LLMProviderDTO],
     *,
     provider: int | str | None,
     provider_tag: str | None,
     route: str | None,
     require_tools: bool = False,
+    user_content: str | None = None,
 ) -> tuple[LLMProviderDTO, str | None, str]:
-    """统一 fixed / tag / auto 路由解析（阶段 E）。
+    """统一 fixed / tag / auto 路由解析（阶段 E；阶段 F 收口 #4）。
 
     - ``route`` 显式指定 ``fixed`` / ``tag`` / ``auto``；留空时按旧行为推断
       （给了 provider→fixed、给了 provider_tag→tag、都没有→auto）。
+    - **显式** ``route="auto"``：复用共享 Router（``llm_router.pick_provider``），按
+      内容特征（code/math/vision/reason 等规则）选 Provider，与模板 auto 行为一致；
+      插件受限——分类器与全局 fallback 一律禁用（那是宿主级能力）。
+    - **推断** auto（旧参数全缺省）：保持向后兼容的"chat 优先 / cost_tier 升序"，
+      不引入内容路由，避免改变既有插件行为。
     - 插件不能指定 UA / 身份 / 密钥 / 代理 / 内部分类器 / 全局 fallback：
       此函数只在"已配置 key 的候选"内做启用/能力/tag 过滤，不触碰这些维度。
     - ``require_tools``（run_agent）：预先排除不支持 tools 的模型（无已启用模型的
@@ -731,8 +740,9 @@ def _resolve_route(
     if not usable:
         raise AIUnavailableError("没有可用的 LLM provider（未配置 key 或无已启用模型）")
 
-    mode = str(route or "").strip().lower()
-    if mode not in {"fixed", "tag", "auto"}:
+    explicit = str(route or "").strip().lower()
+    mode = explicit if explicit in {"fixed", "tag", "auto"} else ""
+    if not mode:
         if provider is not None:
             mode = "fixed"
         elif provider_tag:
@@ -758,11 +768,59 @@ def _resolve_route(
         tagged.sort(key=lambda p: (p.cost_tier, p.id))
         return tagged[0], tag, "tag"
 
-    # auto：chat 优先、cost_tier 升序（省钱）；与 _select_provider 默认一致。
+    # auto。显式 route="auto" → 走共享 Router（内容路由）；推断 auto → 旧兼容行为。
+    if explicit == "auto":
+        selected = await _shared_router_auto(usable, user_content, require_tools=require_tools)
+        if selected is not None:
+            dto, matched = selected
+            return dto, matched, "auto"
+
+    # 推断 auto / 共享 Router 无结果时的兜底：chat 优先、cost_tier 升序（省钱）。
     chat = [p for p in usable if "chat" in set(p.tags or [])]
     pool = list(chat or usable)
     pool.sort(key=lambda p: (p.cost_tier, p.id))
     return pool[0], ("chat" if chat else None), "auto"
+
+
+async def _shared_router_auto(
+    usable: list[LLMProviderDTO],
+    user_content: str | None,
+    *,
+    require_tools: bool = False,
+) -> tuple[LLMProviderDTO, str | None] | None:
+    """用共享 Router 对可用候选做内容路由（插件版：无分类器 / 无全局 fallback）。
+
+    返回 ``(dto, matched_tag)``；候选为空或 Router 未命中时返回 None 交由上层兜底。
+    """
+    from ...services import llm_router
+
+    by_id = {int(p.id): p for p in usable}
+    if not by_id:
+        return None
+    # 构造共享 Router 需要的 provider dict（含 api_key_enc 以通过其 _has_api_key 过滤）。
+    router_pool: dict[int, dict[str, Any]] = {}
+    for pid, dto in by_id.items():
+        d = dto.to_dict()
+        d["api_key_enc"] = dto.api_key_enc
+        router_pool[pid] = d
+    try:
+        decision = await llm_router.pick_provider(
+            str(user_content or ""),
+            None,
+            False,
+            router_pool,
+            classifier_provider_id=None,  # 插件不能用内部分类器
+            fallback_provider_id=None,  # 插件不能用全局 fallback
+        )
+    except Exception:  # noqa: BLE001 - Router 异常时回落到上层兜底策略
+        return None
+    chosen = by_id.get(int(decision.provider_id))
+    if chosen is None:
+        return None
+    if require_tools and not _enabled_model_for_dto(chosen, None):
+        # Router 选中的 Provider 无可用模型（不支持 tools）→ 交回上层兜底。
+        return None
+    return chosen, (decision.matched_tag or None)
 
 
 def _find_provider(providers: list[LLMProviderDTO], provider: int | str) -> LLMProviderDTO | None:
