@@ -22,6 +22,11 @@
 
 暂无已记录变更。
 
+## [0.57.4] — 2026-07-13 · patch（补丁版本） · updater handoff 项目名修复
+
+### Fixed
+- updater handoff 现在从现有 `web` 容器标签读取真实 Compose 项目名，并显式传入临时容器；修复宿主机手动恢复更新时因工作目录 `/workspace` 被误识别为新项目，导致新版 updater 启动到 `workspace` 栈而正式 `telepilot` updater 仍停留在旧容器的问题。
+
 ## [0.57.3] — 2026-07-13 · patch（补丁版本） · 服务级在线增量更新
 
 ### Changed

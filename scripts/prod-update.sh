@@ -221,6 +221,29 @@ frontend_url() {
   fi
 }
 
+compose_project_name() {
+  local web_id project
+  web_id="$(docker compose ps -q web 2>/dev/null || true)"
+  if [[ -n "$web_id" ]]; then
+    project="$(docker inspect --format '{{ index .Config.Labels "com.docker.compose.project" }}' "$web_id" 2>/dev/null || true)"
+  fi
+  if [[ -z "${project:-}" ]]; then
+    project="$(basename "$ROOT_DIR" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9_-')"
+  fi
+  printf '%s' "${project:-telepilot}"
+}
+
+schedule_updater_handoff() {
+  local project
+  project="$(compose_project_name)"
+  docker compose build updater
+  env -u UPDATER_TOKEN docker compose run -d --rm --no-deps \
+    -e COMPOSE_PROJECT_NAME="$project" --entrypoint sh updater -c \
+    'sleep 3; env -u UPDATER_TOKEN docker compose up -d --no-deps --force-recreate updater && rm -f "$(git rev-parse --git-path telepilot-deploy-pending)"' \
+    >/dev/null
+  HANDOFF_SCHEDULED=1
+}
+
 if (( NEEDS_FULL == 1 )); then
   if [[ "${TELEPILOT_SKIP_UPDATER_RECREATE:-0}" == "1" ]]; then
     warn "当前由内部 updater 执行完整更新，业务服务完成后由临时 handoff 容器重建 updater。"
@@ -253,11 +276,7 @@ if (( NEEDS_FULL == 1 )); then
       exit 1
     }
     log "构建新版 updater 并安排 token/镜像原子切换"
-    docker compose build updater
-    env -u UPDATER_TOKEN docker compose run -d --rm --no-deps --entrypoint sh updater -c \
-      'sleep 3; env -u UPDATER_TOKEN docker compose up -d --no-deps --force-recreate updater && rm -f "$(git rev-parse --git-path telepilot-deploy-pending)"' \
-      >/dev/null
-    HANDOFF_SCHEDULED=1
+    schedule_updater_handoff
     ok "完整业务更新完成；updater handoff 已安排"
   else
     log "执行完整生产更新"
@@ -295,11 +314,7 @@ else
 
   if (( NEEDS_UPDATER == 1 )); then
     log "构建新版 updater 并安排独立 handoff"
-    docker compose build updater
-    env -u UPDATER_TOKEN docker compose run -d --rm --no-deps --entrypoint sh updater -c \
-      'sleep 3; env -u UPDATER_TOKEN docker compose up -d --no-deps --force-recreate updater && rm -f "$(git rev-parse --git-path telepilot-deploy-pending)"' \
-      >/dev/null
-    HANDOFF_SCHEDULED=1
+    schedule_updater_handoff
   fi
 
   ok "增量更新完成"

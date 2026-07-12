@@ -94,6 +94,8 @@ def test_incremental_script_never_recreates_web_with_updater() -> None:
 
     assert "--force-recreate updater web" not in script
     assert "docker compose up -d --build --no-deps" in script
+    assert '-e COMPOSE_PROJECT_NAME="$project"' in script
+    assert 'com.docker.compose.project' in script
 
 
 def test_console_logs_returns_partial_lines_when_compose_times_out(monkeypatch) -> None:
