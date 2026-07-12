@@ -46,17 +46,20 @@ import {
   chatTestProviderModels,
   createLLMProvider,
   deleteLLMProvider,
+  detectClientIdentityVersions,
   detectProviderProtocols,
   fetchProviderModelsPreview,
   fullLivenessPreview,
   fullLivenessRun,
+  getClientIdentityVersions,
   listLLMProviders,
   patchLLMProvider,
   testProviderModel,
+  updateClientIdentityVersions,
 } from "@/api/commands";
 import { listProxies } from "@/api/proxies";
 import { getSystemSettings } from "@/api/system";
-import type { ChatTestModelResult, ChatTestTurn, DetectProviderProtocolsResponse, FullLivenessPreviewResponse, FullLivenessRunResponse, LLMApiFormat, LLMClientIdentityProfile, LLMModality, LLMProtocolProfile, LLMProviderKind, LLMProviderOut, LLMTag, LLMWebSearchApiFormat, ProviderModel, ProtocolProbeResult, ProxyOut } from "@/api/types";
+import type { ChatTestModelResult, ChatTestTurn, ClientIdentityVersionDetectItem, ClientIdentityVersionItem, DetectProviderProtocolsResponse, FullLivenessPreviewResponse, FullLivenessRunResponse, LLMApiFormat, LLMClientIdentityProfile, LLMModality, LLMProtocolProfile, LLMProviderKind, LLMProviderOut, LLMTag, LLMWebSearchApiFormat, ProviderModel, ProtocolProbeResult, ProxyOut } from "@/api/types";
 import { getErrMsg } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { confirmDiscardChanges, useUnsavedChanges } from "@/lib/unsavedChanges";
@@ -282,6 +285,7 @@ export function LLMProviders({
   const [editing, setEditing] = useState<FormState | null>(null);
   const [chatTestOpen, setChatTestOpen] = useState(false);
   const [fullLivenessOpen, setFullLivenessOpen] = useState(false);
+  const [identityVersionsOpen, setIdentityVersionsOpen] = useState(false);
 
   const visibleProviders = (listQ.data || []).filter((p) => {
     if (!isVisionFilter) return true;
@@ -464,6 +468,15 @@ export function LLMProviders({
                 onClick={() => setFullLivenessOpen(true)}
               >
                 <MessageSquare className="mr-1 h-4 w-4" /> 全量测活
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                className="flex-1 sm:flex-none"
+                onClick={() => setIdentityVersionsOpen(true)}
+              >
+                客户端身份版本
               </Button>
               <Button size="sm" className="flex-1 sm:flex-none" onClick={() => setEditing({ ...EMPTY_FORM })}>
                 <Plus className="mr-1 h-4 w-4" /> 新建
@@ -664,6 +677,7 @@ export function LLMProviders({
         providers={visibleProviders}
       />
       <FullLivenessDialog open={fullLivenessOpen} onOpenChange={setFullLivenessOpen} />
+      <IdentityVersionsDialog open={identityVersionsOpen} onOpenChange={setIdentityVersionsOpen} />
     </div>
   );
 }
@@ -2338,6 +2352,160 @@ function FullLivenessDialog({
           >
             {running ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : null}
             {running ? "测活中…" : "开始测活"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+// ═══════════ 客户端身份 UA 版本配置弹窗（0.57.0 收口） ═══════════
+function IdentityVersionsDialog({
+  open,
+  onOpenChange,
+}: {
+  open: boolean;
+  onOpenChange: (v: boolean) => void;
+}) {
+  const [items, setItems] = useState<ClientIdentityVersionItem[]>([]);
+  const [drafts, setDrafts] = useState<Record<string, string>>({});
+  const [detected, setDetected] = useState<Record<string, ClientIdentityVersionDetectItem>>({});
+  const [loading, setLoading] = useState(false);
+  const [detecting, setDetecting] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    let alive = true;
+    setError(null);
+    setDetected({});
+    setLoading(true);
+    getClientIdentityVersions()
+      .then((resp) => {
+        if (!alive) return;
+        setItems(resp.items);
+        setDrafts(Object.fromEntries(resp.items.map((i) => [i.key, i.current])));
+      })
+      .catch((e) => {
+        if (alive) setError(getErrMsg(e));
+      })
+      .finally(() => {
+        if (alive) setLoading(false);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [open]);
+
+  const detect = async () => {
+    setDetecting(true);
+    setError(null);
+    try {
+      const resp = await detectClientIdentityVersions();
+      setDetected(Object.fromEntries(resp.items.map((i) => [i.key, i])));
+    } catch (e) {
+      setError(getErrMsg(e));
+    } finally {
+      setDetecting(false);
+    }
+  };
+
+  const save = async () => {
+    setSaving(true);
+    setError(null);
+    try {
+      // 只提交与当前生效值不同的项（overrides 语义：留空回落默认）。
+      const overrides: Record<string, string> = {};
+      for (const it of items) {
+        const v = (drafts[it.key] ?? "").trim();
+        if (v) overrides[it.key] = v;
+      }
+      const resp = await updateClientIdentityVersions({ overrides });
+      setItems(resp.items);
+      setDrafts(Object.fromEntries(resp.items.map((i) => [i.key, i.current])));
+      toast.success("已保存客户端身份 UA 版本");
+    } catch (e) {
+      setError(getErrMsg(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-2xl">
+        <DialogHeader>
+          <DialogTitle>客户端身份 UA 版本</DialogTitle>
+        </DialogHeader>
+        <div className="space-y-4">
+          <p className="text-sm text-muted-foreground">
+            仅调整身份 UA 里的版本号；UA 结构与请求头字段由证据锁定，不随此处变化。检测按钮向公共
+            registry 查询最新版本作为建议值，保存后对后续 AI 请求生效。
+          </p>
+          {error ? <p className="break-words text-sm text-destructive">{error}</p> : null}
+          {loading ? (
+            <p className="text-sm text-muted-foreground">
+              <Loader2 className="mr-1 inline h-4 w-4 animate-spin" /> 加载中…
+            </p>
+          ) : (
+            <div className="space-y-3">
+              {items.map((it) => {
+                const det = detected[it.key];
+                return (
+                  <div key={it.key} className="rounded-md border p-3">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="min-w-0">
+                        <p className="truncate text-sm font-medium">{it.label}</p>
+                        <p className="truncate text-xs text-muted-foreground">
+                          默认 {it.default}
+                          {it.registry ? ` · 源 ${it.registry}` : " · 仅手动填写"}
+                        </p>
+                      </div>
+                      <Input
+                        className="w-40 font-mono text-xs"
+                        value={drafts[it.key] ?? ""}
+                        onChange={(e) =>
+                          setDrafts((prev) => ({ ...prev, [it.key]: e.target.value }))
+                        }
+                      />
+                    </div>
+                    {det ? (
+                      <p className="mt-2 break-words text-xs text-muted-foreground">
+                        {det.error
+                          ? `检测失败：${det.error}`
+                          : det.latest
+                            ? det.up_to_date
+                              ? `已是最新（${det.latest}）`
+                              : `最新 ${det.latest}（当前 ${det.current}）`
+                            : "无检测结果"}
+                        {det.latest && !det.up_to_date && !det.error ? (
+                          <button
+                            type="button"
+                            className="ml-2 underline"
+                            onClick={() =>
+                              setDrafts((prev) => ({ ...prev, [it.key]: det.latest ?? prev[it.key] }))
+                            }
+                          >
+                            填入
+                          </button>
+                        ) : null}
+                      </p>
+                    ) : null}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+        <DialogFooter>
+          <Button type="button" variant="outline" onClick={() => void detect()} disabled={detecting || loading}>
+            {detecting ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : null}
+            检测最新版本
+          </Button>
+          <Button type="button" onClick={() => void save()} disabled={saving || loading}>
+            {saving ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : null}
+            保存
           </Button>
         </DialogFooter>
       </DialogContent>

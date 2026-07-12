@@ -780,3 +780,54 @@ class FullLivenessRunResponse(BaseModel):
     skipped: int = 0
     cancelled: int = 0
     results: list[LivenessResultItem] = Field(default_factory=list)
+
+
+# ═══════════════ 客户端身份 UA 版本配置（0.57.0 收口） ═══════════════
+class ClientIdentityVersionItem(BaseModel):
+    """单个客户端身份档案的版本信息（用于 UA 版本段）。"""
+
+    key: str
+    """版本键，如 codex_cli / claude_code / openai_sdk / codex_desktop_core。"""
+
+    label: str
+    """前端展示名。"""
+
+    current: str
+    """当前生效版本（含已应用的覆盖）。"""
+
+    default: str
+    """采集时核对过的默认版本（覆盖缺失时回落值）。"""
+
+    registry: str | None = None
+    """远端版本查询源标识（npm 包名 / pypi 包名）；None 表示无公共源、仅手动。"""
+
+    detectable: bool = False
+    """是否支持"检测最新版本"按钮（有公共 registry 才为 True）。"""
+
+
+class ClientIdentityVersionsResponse(BaseModel):
+    """客户端身份 UA 版本配置总览。"""
+
+    items: list[ClientIdentityVersionItem] = Field(default_factory=list)
+
+
+class ClientIdentityVersionDetectItem(BaseModel):
+    """单个版本键的远端检测结果。"""
+
+    key: str
+    current: str
+    latest: str | None = None
+    up_to_date: bool | None = None
+    error: str | None = None
+
+
+class ClientIdentityVersionDetectResponse(BaseModel):
+    """远端最新版本检测结果（只读查询，不落库）。"""
+
+    items: list[ClientIdentityVersionDetectItem] = Field(default_factory=list)
+
+
+class ClientIdentityVersionsUpdateRequest(BaseModel):
+    """保存版本覆盖（只改 UA 版本号，不动 UA 结构与请求头）。"""
+
+    overrides: dict[str, str] = Field(default_factory=dict)

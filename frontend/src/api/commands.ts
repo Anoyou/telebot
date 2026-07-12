@@ -6,6 +6,9 @@ import type {
   BuiltinCommandItem,
   ChatTestModelsRequest,
   ChatTestModelsResponse,
+  ClientIdentityVersionDetectResponse,
+  ClientIdentityVersionsResponse,
+  ClientIdentityVersionsUpdateRequest,
   CommandTemplateCreate,
   CommandTemplateOut,
   CommandTemplateUpdate,
@@ -230,6 +233,33 @@ export async function disableAccountCommand(
 export async function getAICommandEnablementSummary(): Promise<AICommandEnablementSummary> {
   const { data } = await api.get<AICommandEnablementSummary>(
     "/api/commands/ai/enablement-summary",
+  );
+  return data;
+}
+
+// ===================== 客户端身份 UA 版本配置（0.57.0） =====================
+export async function getClientIdentityVersions(): Promise<ClientIdentityVersionsResponse> {
+  const { data } = await api.get<ClientIdentityVersionsResponse>(
+    "/api/commands/llm-providers/identity-versions",
+  );
+  return data;
+}
+
+export async function detectClientIdentityVersions(): Promise<ClientIdentityVersionDetectResponse> {
+  const { data } = await api.post<ClientIdentityVersionDetectResponse>(
+    "/api/commands/llm-providers/identity-versions/detect",
+    {},
+    { timeout: 30000 },
+  );
+  return data;
+}
+
+export async function updateClientIdentityVersions(
+  payload: ClientIdentityVersionsUpdateRequest,
+): Promise<ClientIdentityVersionsResponse> {
+  const { data } = await api.put<ClientIdentityVersionsResponse>(
+    "/api/commands/llm-providers/identity-versions",
+    payload,
   );
   return data;
 }

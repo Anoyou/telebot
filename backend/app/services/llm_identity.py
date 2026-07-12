@@ -246,6 +246,25 @@ _DEFAULT_CLIENT_VERSIONS: dict[str, str] = {
 # 当前生效版本；``apply_version_overrides`` 可用系统设置里的值覆盖（只改版本号）。
 _CLIENT_VERSIONS: dict[str, str] = dict(_DEFAULT_CLIENT_VERSIONS)
 
+# 系统设置键：存放运维手动填写的 UA 版本覆盖（JSON: {version_key: version}）。
+CLIENT_IDENTITY_VERSIONS_SETTING_KEY = "llm_client_identity_versions"
+
+# 每个版本键的元数据：前端展示名 + 远端检测源。
+# ``registry`` 非空表示有公共只读源可查最新版本（检测按钮可用）；None 表示只能手动填
+# （Codex Desktop 的核心版本与 app 构建号都没有公共 registry）。
+_VERSION_KEY_META: dict[str, dict[str, str | None]] = {
+    "codex_cli": {"label": "Codex CLI", "registry": "npm:@openai/codex"},
+    "claude_code": {"label": "Claude Code", "registry": "npm:@anthropic-ai/claude-code"},
+    "openai_sdk": {"label": "OpenAI Python SDK", "registry": "pypi:openai"},
+    "codex_desktop_core": {"label": "Codex Desktop · 核心版本", "registry": None},
+    "codex_desktop_build": {"label": "Codex Desktop · app 构建号", "registry": None},
+}
+
+
+def version_key_metadata() -> dict[str, dict[str, str | None]]:
+    """返回版本键元数据（展示名 + 远端检测源）的副本。"""
+    return {k: dict(v) for k, v in _VERSION_KEY_META.items()}
+
 
 def _build_catalog() -> dict[str, ClientIdentity]:
     catalog: dict[str, ClientIdentity] = {}
@@ -324,7 +343,9 @@ def _build_catalog() -> dict[str, ClientIdentity]:
         ),
         extra_headers={"originator": "Codex Desktop"},
         source=(
-            "本机 Surge 抓包 Codex Desktop 0.144.0-alpha.4（app build 26.707.51957）；"
+            "本机 Surge 抓包 Codex Desktop 0.144.0-alpha.4（app build 26.707.51957，"
+            "该构建号在 responses UA 与 sentry-release 两处独立印证）；此 originator "
+            "面向 ChatGPT 后端（codex 订阅），对标准 OpenAI API 端点可能不适用；"
             "证据来自单台机器的 alpha 预发布版，stable 版 UA 可能变，需再核对"
         ),
         captured_at="2026-07-13",
@@ -387,6 +408,30 @@ def apply_version_overrides(overrides: dict[str, str] | None) -> dict[str, str]:
     _CLIENT_VERSIONS.update(effective)
     _CATALOG = _build_catalog()
     return dict(_CLIENT_VERSIONS)
+
+
+async def load_version_overrides_from_db() -> dict[str, str]:
+    """启动时从 ``system_setting`` 读取运维保存的版本覆盖并应用。
+
+    读不到 / 反序列化失败时静默保持默认版本，绝不因配置缺失阻塞启动。
+    返回应用后的生效版本映射。
+    """
+    from ..db.base import AsyncSessionLocal
+    from ..db.models.system import SystemSetting
+
+    try:
+        async with AsyncSessionLocal() as db:
+            row = await db.get(SystemSetting, CLIENT_IDENTITY_VERSIONS_SETTING_KEY)
+            raw = row.value if row is not None else None
+    except Exception:  # noqa: BLE001 - 启动期任何 DB 异常都不应阻塞
+        return dict(_CLIENT_VERSIONS)
+
+    overrides: dict[str, str] = {}
+    if isinstance(raw, dict):
+        for key, value in raw.items():
+            if isinstance(key, str) and isinstance(value, str):
+                overrides[key] = value
+    return apply_version_overrides(overrides)
 
 
 def normalize_identity_profile(value: str | None) -> str:
@@ -496,14 +541,17 @@ __all__ = [
     "CLIENT_IDENTITY_OPENAI_SDK",
     "DEFAULT_CLIENT_IDENTITY_PROFILE",
     "IDENTITY_PROBE_ORDER",
+    "CLIENT_IDENTITY_VERSIONS_SETTING_KEY",
     "ClientIdentity",
     "apply_version_overrides",
     "current_client_versions",
     "default_client_versions",
+    "version_key_metadata",
     "default_identity_for_format",
     "get_identity",
     "is_identity_compatible",
     "is_valid_version",
+    "load_version_overrides_from_db",
     "normalize_identity_profile",
     "resolve_identity",
     "selectable_identities",

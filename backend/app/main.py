@@ -151,6 +151,14 @@ async def lifespan(app: FastAPI):
     except Exception:  # noqa: BLE001
         logging.exception("刷新 Trace 写入配置失败，使用默认配置继续启动")
 
+    # 启动期加载客户端身份 UA 版本覆盖（system_setting）。失败不阻塞启动。
+    try:
+        from .services import llm_identity
+
+        await llm_identity.load_version_overrides_from_db()
+    except Exception:  # noqa: BLE001
+        logging.exception("加载客户端身份 UA 版本覆盖失败，使用默认版本继续启动")
+
     try:
         interrupted_jobs = await plugin_config_action_jobs.startup_plugin_config_action_jobs()
         if interrupted_jobs:

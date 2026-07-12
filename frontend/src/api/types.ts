@@ -1864,3 +1864,33 @@ export interface UpdateJobStatus {
   logs: string[];
   plan?: Record<string, unknown> | null;
 }
+
+// ═══════════════ 客户端身份 UA 版本配置（0.57.0 收口） ═══════════════
+export interface ClientIdentityVersionItem {
+  key: string;
+  label: string;
+  current: string;
+  default: string;
+  registry?: string | null;
+  detectable: boolean;
+}
+
+export interface ClientIdentityVersionsResponse {
+  items: ClientIdentityVersionItem[];
+}
+
+export interface ClientIdentityVersionDetectItem {
+  key: string;
+  current: string;
+  latest?: string | null;
+  up_to_date?: boolean | null;
+  error?: string | null;
+}
+
+export interface ClientIdentityVersionDetectResponse {
+  items: ClientIdentityVersionDetectItem[];
+}
+
+export interface ClientIdentityVersionsUpdateRequest {
+  overrides: Record<string, string>;
+}

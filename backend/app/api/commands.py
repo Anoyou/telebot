@@ -27,6 +27,11 @@ from ..schemas.command import (
     ChatTestModelResult,
     ChatTestModelsRequest,
     ChatTestModelsResponse,
+    ClientIdentityVersionDetectItem,
+    ClientIdentityVersionDetectResponse,
+    ClientIdentityVersionItem,
+    ClientIdentityVersionsResponse,
+    ClientIdentityVersionsUpdateRequest,
     CommandTemplateCreate,
     CommandTemplateOut,
     CommandTemplateUpdate,
@@ -48,7 +53,7 @@ from ..schemas.command import (
     TestModelRequest,
     TestModelResponse,
 )
-from ..services import audit, command_service, llm_diagnostics, llm_liveness
+from ..services import audit, command_service, llm_diagnostics, llm_identity, llm_liveness
 from ..services.ai_feature import is_ai_enabled
 from ..services.llm_identity import (
     IDENTITY_PROBE_ORDER,
@@ -1442,6 +1447,126 @@ def _liveness_status_from_error(exc: Any) -> str:
     if "空" in text or "empty" in text:
         return llm_liveness.diag.DIAG_EMPTY_RESPONSE
     return llm_liveness.diag.DIAG_UPSTREAM_ERROR
+
+
+# ═══════════════ 客户端身份 UA 版本配置（0.57.0 收口） ═══════════════
+
+
+def _client_identity_version_items() -> list[ClientIdentityVersionItem]:
+    """组装当前版本总览（生效值 + 默认值 + 检测源元数据）。"""
+    current = llm_identity.current_client_versions()
+    defaults = llm_identity.default_client_versions()
+    meta = llm_identity.version_key_metadata()
+    items: list[ClientIdentityVersionItem] = []
+    for key, info in meta.items():
+        registry = info.get("registry")
+        items.append(
+            ClientIdentityVersionItem(
+                key=key,
+                label=str(info.get("label") or key),
+                current=current.get(key, defaults.get(key, "")),
+                default=defaults.get(key, ""),
+                registry=registry,
+                detectable=bool(registry),
+            )
+        )
+    return items
+
+
+@router.get("/llm-providers/identity-versions", response_model=ClientIdentityVersionsResponse)
+async def get_client_identity_versions(_user: CurrentUser) -> ClientIdentityVersionsResponse:
+    """读取客户端身份 UA 版本配置（生效值 + 默认值 + 检测源）。"""
+    return ClientIdentityVersionsResponse(items=_client_identity_version_items())
+
+
+async def _detect_registry_latest(registry: str) -> tuple[str | None, str | None]:
+    """向公共 registry 查询最新版本（只读，不装 CLI、不落库）。
+
+    返回 ``(latest, error)``。支持 ``npm:<pkg>`` 与 ``pypi:<pkg>``。
+    """
+    try:
+        kind, _, pkg = registry.partition(":")
+        if not pkg:
+            return None, "无效的检测源"
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            if kind == "npm":
+                resp = await client.get(f"https://registry.npmjs.org/{pkg}/latest")
+                if resp.status_code != 200:
+                    return None, f"registry 返回 {resp.status_code}"
+                return str(resp.json().get("version") or "") or None, None
+            if kind == "pypi":
+                resp = await client.get(f"https://pypi.org/pypi/{pkg}/json")
+                if resp.status_code != 200:
+                    return None, f"registry 返回 {resp.status_code}"
+                return str(resp.json().get("info", {}).get("version") or "") or None, None
+        return None, f"未知检测源类型: {kind}"
+    except Exception as exc:  # noqa: BLE001 - 网络异常降级为逐项 error，不抛 500
+        return None, f"{type(exc).__name__}: {str(exc)[:80]}"
+
+
+@router.post("/llm-providers/identity-versions/detect", response_model=ClientIdentityVersionDetectResponse)
+async def detect_client_identity_versions(_user: CurrentUser) -> ClientIdentityVersionDetectResponse:
+    """检测有公共 registry 的版本键的远端最新版本（只读、不落库、不消耗 quota）。"""
+    current = llm_identity.current_client_versions()
+    meta = llm_identity.version_key_metadata()
+    detect_targets = [(k, str(v["registry"])) for k, v in meta.items() if v.get("registry")]
+    results = await asyncio.gather(
+        *(_detect_registry_latest(reg) for _, reg in detect_targets)
+    )
+    items: list[ClientIdentityVersionDetectItem] = []
+    for (key, _registry), (latest, error) in zip(detect_targets, results, strict=True):
+        cur = current.get(key, "")
+        items.append(
+            ClientIdentityVersionDetectItem(
+                key=key,
+                current=cur,
+                latest=latest,
+                up_to_date=(latest == cur) if latest else None,
+                error=error,
+            )
+        )
+    return ClientIdentityVersionDetectResponse(items=items)
+
+
+@router.put("/llm-providers/identity-versions", response_model=ClientIdentityVersionsResponse)
+async def update_client_identity_versions(
+    payload: ClientIdentityVersionsUpdateRequest,
+    _user: CurrentUser,
+    db: DBSession,
+) -> ClientIdentityVersionsResponse:
+    """保存 UA 版本覆盖（只改版本号，不动 UA 结构与请求头）。
+
+    非法版本值（不符合版本格式）会被后端 ``apply_version_overrides`` 静默忽略；
+    这里先做一次显式校验，把明确非法的键回报为 400，避免用户以为已保存。
+    """
+    from ..db.models.system import SystemSetting
+
+    valid_keys = set(llm_identity.version_key_metadata().keys())
+    cleaned: dict[str, str] = {}
+    invalid: list[str] = []
+    for key, value in (payload.overrides or {}).items():
+        if key not in valid_keys:
+            continue
+        if llm_identity.is_valid_version(value):
+            cleaned[key] = str(value).strip()
+        else:
+            invalid.append(key)
+    if invalid:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "INVALID_VERSION", "message": f"版本号格式非法: {', '.join(invalid)}"},
+        )
+
+    row = await db.get(SystemSetting, llm_identity.CLIENT_IDENTITY_VERSIONS_SETTING_KEY)
+    if row is None:
+        db.add(SystemSetting(key=llm_identity.CLIENT_IDENTITY_VERSIONS_SETTING_KEY, value=cleaned))
+    else:
+        row.value = cleaned
+    await db.commit()
+
+    # 立即应用到进程内目录，使新版本对后续请求生效。
+    llm_identity.apply_version_overrides(cleaned)
+    return ClientIdentityVersionsResponse(items=_client_identity_version_items())
 
 
 __all__ = ["router"]
