@@ -41,6 +41,7 @@ from ..db.models.system import SystemSetting
 from ..deps import CurrentUser
 from ..redis_client import get_redis
 from ..settings import settings
+from ..util.update_plan import build_update_plan, classify_changed_files
 
 router = APIRouter(prefix="/api/system", tags=["system"])
 _APP_STARTED_AT = time.time()
@@ -1149,32 +1150,6 @@ RUNTIME_PROD_CONTAINER_WITH_UPDATER = "prod_container_with_updater"
 RUNTIME_PROD_CONTAINER_MANUAL = "prod_container_manual"
 RUNTIME_UNSUPPORTED = "unsupported"
 
-_DOC_SUFFIXES = (".md", ".rst", ".txt")
-_FULL_UPDATE_BASENAMES = {
-    ".dockerignore",
-    "docker-compose.yml",
-    "docker-compose.dev.yml",
-    "docker-compose.prod.yml",
-    "Dockerfile",
-    "Makefile",
-    ".npmrc",
-    "package.json",
-    "pyproject.toml",
-    "requirements.txt",
-    "poetry.lock",
-    "Pipfile.lock",
-    "package-lock.json",
-    "yarn.lock",
-    "pnpm-lock.yaml",
-}
-_FULL_UPDATE_PREFIXES = (
-    "deploy/",
-    "scripts/",
-    "scripts/deploy",
-    "scripts/prod",
-)
-
-
 def _run_git(*args: str, timeout: int = 30) -> tuple[str, str, int]:
     """同步执行 git 命令，返回 (stdout, stderr, returncode)。"""
     root = _git_root()
@@ -1325,49 +1300,9 @@ def _detect_runtime_mode() -> tuple[str, str | None, Path | None]:
     return RUNTIME_UNSUPPORTED, updater, root
 
 
-def _normalize_changed_file(path: str) -> str:
-    return path.strip().lstrip("./")
-
-
-def _is_docs_file(path: str) -> bool:
-    normalized = _normalize_changed_file(path)
-    lowered = normalized.lower()
-    name = Path(normalized).name.lower()
-    if normalized in {"CHANGELOG.md", "docs/PLUGIN-DEV-GUIDE.md"}:
-        return False
-    return lowered.startswith("docs/") or lowered.startswith("readme") or name.endswith(_DOC_SUFFIXES)
-
-
-def _is_full_update_file(path: str) -> bool:
-    normalized = _normalize_changed_file(path)
-    name = Path(normalized).name
-    if name in _FULL_UPDATE_BASENAMES:
-        return True
-    return any(normalized.startswith(prefix) for prefix in _FULL_UPDATE_PREFIXES)
-
-
 def _classify_changed_files(changed_files: list[str]) -> tuple[list[str], bool, bool]:
-    files = [_normalize_changed_file(path) for path in changed_files if path.strip()]
-    if not files:
-        return ["none"], False, False
-
-    requires_full_update = any(_is_full_update_file(path) for path in files)
-    requires_backup = any(path.startswith("backend/alembic/versions/") for path in files)
-
-    if all(_is_docs_file(path) for path in files):
-        components = ["docs_only"]
-    else:
-        components: list[str] = []
-        if any(path.startswith("frontend/") or path in {"CHANGELOG.md", "docs/PLUGIN-DEV-GUIDE.md"} for path in files):
-            components.append("frontend")
-        if any(path.startswith("backend/") or path.startswith("plugins/") for path in files):
-            components.append("backend")
-        if not components:
-            components.append("docs_only")
-
-    if requires_full_update:
-        components = ["full_update", *[x for x in components if x != "full_update"]]
-    return components, requires_full_update, requires_backup
+    plan = classify_changed_files(changed_files)
+    return plan.components, plan.requires_full_update, plan.requires_backup
 
 
 def _manual_command_for_runtime(runtime_mode: str, updater: str | None) -> str | None:
@@ -1394,12 +1329,15 @@ def _action_required_for_plan(
         return "docs_only"
     has_backend = "backend" in components
     has_frontend = "frontend" in components
-    if has_backend and has_frontend:
+    has_updater = "updater" in components
+    if sum((has_backend, has_frontend, has_updater)) > 1:
         return "mixed"
     if has_backend:
         return "backend"
     if has_frontend:
         return "frontend"
+    if has_updater:
+        return "updater"
     return "full_update"
 
 
@@ -1407,8 +1345,10 @@ def _plan_text(
     runtime_mode: str,
     has_update: bool,
     components: list[str],
+    services: list[str],
     requires_full_update: bool,
     requires_backup: bool,
+    requires_migration: bool,
     can_apply: bool,
 ) -> tuple[str, str]:
     if not has_update:
@@ -1418,8 +1358,14 @@ def _plan_text(
     detail_parts: list[str] = []
     if components and components != ["none"]:
         detail_parts.append(f"变更分类：{', '.join(components)}")
+    if services:
+        detail_parts.append(f"仅切换服务：{', '.join(services)}；其余容器保持运行。")
+    elif components == ["docs_only"]:
+        detail_parts.append("不需要重建或重启运行服务。")
     if requires_backup:
-        detail_parts.append("包含数据库迁移，建议先备份数据库。")
+        detail_parts.append("包含数据库迁移，将先备份再切换 web。")
+    elif not requires_migration:
+        detail_parts.append("不执行数据库备份或迁移。")
     if requires_full_update:
         detail_parts.append("涉及部署/依赖关键文件，建议完整更新流程。")
 
@@ -1468,8 +1414,10 @@ def _check_response_from_plan(
     has_update = bool(plan.get("has_update"))
     changed_files = [str(item) for item in plan.get("changed_files") or []]
     components = [str(item) for item in plan.get("components") or ["none"]]
+    services = [str(item) for item in plan.get("services") or []]
     requires_full_update = bool(plan.get("requires_full_update"))
     requires_backup = bool(plan.get("requires_backup"))
+    requires_migration = bool(plan.get("requires_migration"))
     action_required = _action_required_for_plan(
         runtime_mode,
         has_update,
@@ -1480,8 +1428,10 @@ def _check_response_from_plan(
         runtime_mode=runtime_mode,
         has_update=has_update,
         components=components,
+        services=services,
         requires_full_update=requires_full_update,
         requires_backup=requires_backup,
+        requires_migration=requires_migration,
         can_apply=can_apply,
     )
     return CheckUpdateResponse(
@@ -1498,8 +1448,10 @@ def _check_response_from_plan(
         plan_label=plan_label,
         plan_detail=plan_detail,
         components=components,
+        services=services,
         requires_full_update=requires_full_update,
         requires_backup=requires_backup,
+        requires_migration=requires_migration,
         can_apply=can_apply,
         manual_command=manual_command,
     )
@@ -1522,8 +1474,10 @@ class CheckUpdateResponse(BaseModel):
     plan_detail: str = ""
     changed_files: list[str] = Field(default_factory=list)
     components: list[str] = Field(default_factory=lambda: ["none"])
+    services: list[str] = Field(default_factory=list)
     requires_full_update: bool = False
     requires_backup: bool = False
+    requires_migration: bool = False
     can_apply: bool = False
     manual_command: str | None = None
     error: str | None = None
@@ -1544,8 +1498,10 @@ class PullUpdateResponse(BaseModel):
     plan_detail: str = ""
     changed_files: list[str] = Field(default_factory=list)
     components: list[str] = Field(default_factory=lambda: ["none"])
+    services: list[str] = Field(default_factory=list)
     requires_full_update: bool = False
     requires_backup: bool = False
+    requires_migration: bool = False
     can_apply: bool = False
     manual_command: str | None = None
     error: str | None = None
@@ -1730,11 +1686,12 @@ async def check_update(
                 _run_git, "rev-list", "--count", f"{head_out}..{remote_out}", timeout=10
             )
             behind = int(behind_out) if not behind_rc else 0
-            changed_out, _, changed_rc = await asyncio.to_thread(
-                _run_git, "diff", "--name-only", f"HEAD..{remote_ref}", timeout=10
-            )
-            changed_files = changed_out.splitlines()[:80] if changed_rc == 0 and changed_out else []
-            components, requires_full_update, requires_backup = _classify_changed_files(changed_files)
+            update_plan = await asyncio.to_thread(build_update_plan, root, head_out, remote_out)
+            changed_files = update_plan.changed_files[:80]
+            components = update_plan.components
+            services = update_plan.services
+            requires_full_update = update_plan.requires_full_update
+            requires_backup = update_plan.requires_backup
             has_update = has_update and behind > 0
             if has_update and requires_full_update and runtime_mode == RUNTIME_LOCAL_SOURCE:
                 can_apply = False
@@ -1747,8 +1704,10 @@ async def check_update(
                 runtime_mode=runtime_mode,
                 has_update=has_update,
                 components=components,
+                services=services,
                 requires_full_update=requires_full_update,
                 requires_backup=requires_backup,
+                requires_migration=update_plan.requires_migration,
                 can_apply=can_apply,
             )
             return CheckUpdateResponse(
@@ -1765,8 +1724,10 @@ async def check_update(
                 plan_label=plan_label,
                 plan_detail=plan_detail,
                 components=components,
+                services=services,
                 requires_full_update=requires_full_update,
                 requires_backup=requires_backup,
+                requires_migration=update_plan.requires_migration,
                 can_apply=can_apply,
                 manual_command=manual_command,
             )

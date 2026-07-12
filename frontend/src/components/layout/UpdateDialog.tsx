@@ -35,6 +35,7 @@ type UpdateActionRequired =
   | "frontend"
   | "backend"
   | "mixed"
+  | "updater"
   | "full_update"
   | "manual"
   | "unsupported"
@@ -46,8 +47,10 @@ interface UpdatePlanMeta {
   planLabel: string | null;
   planDetail: string | null;
   components: string[];
+  services: string[];
   requiresFullUpdate: boolean;
   requiresBackup: boolean;
+  requiresMigration: boolean;
   canApply: boolean;
   manualCommand: string | null;
   remote: string | null;
@@ -102,8 +105,10 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
     planLabel: res.plan_label ?? null,
     planDetail: res.plan_detail ?? null,
     components: res.components ?? [],
+    services: res.services ?? [],
     requiresFullUpdate: Boolean(res.requires_full_update),
     requiresBackup: Boolean(res.requires_backup),
+    requiresMigration: Boolean(res.requires_migration),
     canApply: res.can_apply ?? true,
     manualCommand: res.manual_command ?? null,
     remote: res.remote ?? null,
@@ -136,6 +141,8 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
       case "mixed":
         if (plan.runtimeMode === "local_source") return "拉取并重启使更新生效";
         return "执行增量更新";
+      case "updater":
+        return "更新在线更新器";
       case "docs_only":
         return "应用文档更新";
       case "none":
@@ -275,7 +282,8 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
         branch: activePlan?.branch || updateBranch,
       });
       if (res.success) {
-        const plan = parsePlanMeta(res);
+        const responsePlan = parsePlanMeta(res);
+        const plan = activePlan && responsePlan.components.length === 0 ? activePlan : responsePlan;
         if (res.job_id) {
           setStep({
             kind: "job_running",
@@ -588,9 +596,15 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
                   </div>
                 </div>
               )}
+              {step.plan.services.length > 0 && (
+                <div className="rounded-md border border-success/30 bg-success/10 px-3 py-2 text-xs space-y-1">
+                  <p>本次仅切换：{step.plan.services.join("、")}</p>
+                  {!step.plan.requiresMigration && <p>PostgreSQL / Redis 保持运行，不备份、不迁移。</p>}
+                </div>
+              )}
               {(step.plan.requiresBackup || step.plan.requiresFullUpdate) && (
                 <div className="rounded-md border border-warning/30 bg-warning/10 px-3 py-2 text-xs space-y-1">
-                  {step.plan.requiresBackup && <p>建议先备份数据后再执行更新。</p>}
+                  {step.plan.requiresBackup && <p>检测到数据库迁移，将自动备份后再切换后端。</p>}
                   {step.plan.requiresFullUpdate && <p>该更新需要完整更新流程，耗时会更长。</p>}
                 </div>
               )}

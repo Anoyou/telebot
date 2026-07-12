@@ -1809,6 +1809,7 @@ export interface CheckUpdateResult {
     | "frontend"
     | "backend"
     | "mixed"
+    | "updater"
     | "full_update"
     | "manual"
     | "unsupported"
@@ -1817,8 +1818,10 @@ export interface CheckUpdateResult {
   plan_label?: string | null;
   plan_detail?: string | null;
   components?: string[] | null;
+  services?: string[] | null;
   requires_full_update?: boolean | null;
   requires_backup?: boolean | null;
+  requires_migration?: boolean | null;
   can_apply?: boolean | null;
   manual_command?: string | null;
   error: string | null;
@@ -1839,6 +1842,7 @@ export interface PullUpdateResult {
     | "frontend"
     | "backend"
     | "mixed"
+    | "updater"
     | "full_update"
     | "manual"
     | "unsupported"
@@ -1847,8 +1851,10 @@ export interface PullUpdateResult {
   plan_label?: string | null;
   plan_detail?: string | null;
   components?: string[] | null;
+  services?: string[] | null;
   requires_full_update?: boolean | null;
   requires_backup?: boolean | null;
+  requires_migration?: boolean | null;
   can_apply?: boolean | null;
   manual_command?: string | null;
   error: string | null;

@@ -101,71 +101,46 @@ if [[ "$CURRENT_COMMIT" == "$TARGET_COMMIT" ]]; then
   fi
 fi
 
-mapfile -t CHANGED_FILES < <(git diff --name-only "$CURRENT_COMMIT..$TARGET_COMMIT")
+need_cmd python3 "服务级更新计划"
+PLAN_JSON="$(python3 backend/app/util/update_plan.py \
+  --root "$ROOT_DIR" --old "$CURRENT_COMMIT" --new "$TARGET_COMMIT")" || {
+  die "无法生成服务级更新计划"
+}
 
+plan_value() {
+  local key="$1"
+  PLAN_JSON="$PLAN_JSON" PLAN_KEY="$key" python3 - <<'PY'
+import json
+import os
+
+value = json.loads(os.environ["PLAN_JSON"]).get(os.environ["PLAN_KEY"])
+if isinstance(value, list):
+    print("\n".join(str(item) for item in value))
+elif isinstance(value, bool):
+    print("1" if value else "0")
+else:
+    print(value or "")
+PY
+}
+
+mapfile -t CHANGED_FILES < <(plan_value changed_files)
+mapfile -t PLAN_COMPONENTS < <(plan_value components)
+mapfile -t PLAN_SERVICES < <(plan_value services)
 NEEDS_BACKEND=0
 NEEDS_FRONTEND=0
-NEEDS_FULL=0
-REQUIRES_BACKUP=0
-DOCS_ONLY=1
-
-mark_backend() {
-  NEEDS_BACKEND=1
-  DOCS_ONLY=0
-}
-
-mark_frontend() {
-  NEEDS_FRONTEND=1
-  DOCS_ONLY=0
-}
-
-mark_full() {
-  NEEDS_FULL=1
-  DOCS_ONLY=0
-}
-
-classify_file() {
-  local file="$1"
-  case "$file" in
-    docker-compose.yml|docker-compose.dev.yml|Makefile)
-      mark_full
-      ;;
-    .dockerignore|backend/.dockerignore|frontend/.dockerignore)
-      mark_full
-      ;;
-    backend/Dockerfile|frontend/Dockerfile)
-      mark_full
-      ;;
-    backend/pyproject.toml|frontend/package.json|frontend/pnpm-lock.yaml|frontend/.npmrc)
-      mark_full
-      ;;
-    scripts/_lib.sh|scripts/prod-up.sh|scripts/install-server.sh|scripts/prod-update.sh|scripts/bootstrap.sh)
-      mark_full
-      ;;
-    deploy/*|.github/*)
-      mark_full
-      ;;
-    backend/alembic/versions/*)
-      mark_backend
-      REQUIRES_BACKUP=1
-      ;;
-    backend/*|plugins/*)
-      mark_backend
-      ;;
-    frontend/*|CHANGELOG.md|docs/PLUGIN-DEV-GUIDE.md)
-      mark_frontend
-      ;;
-    README.md|CONTRIBUTING.md|LICENSE|AGENTS.md|docs/*|examples/*)
-      ;;
-    *)
-      mark_full
-      ;;
-  esac
-}
-
-for file in "${CHANGED_FILES[@]}"; do
-  classify_file "$file"
+NEEDS_UPDATER=0
+NEEDS_FULL="$(plan_value requires_full_update)"
+REQUIRES_BACKUP="$(plan_value requires_backup)"
+REQUIRES_MIGRATION="$(plan_value requires_migration)"
+DOCS_ONLY=0
+for service in "${PLAN_SERVICES[@]}"; do
+  [[ "$service" == "web" ]] && NEEDS_BACKEND=1
+  [[ "$service" == "frontend" ]] && NEEDS_FRONTEND=1
+  [[ "$service" == "updater" ]] && NEEDS_UPDATER=1
 done
+if [[ "$(plan_value components)" == "docs_only" ]]; then
+  DOCS_ONLY=1
+fi
 
 if (( FORCE_FULL == 1 )); then
   NEEDS_FULL=1
@@ -188,10 +163,10 @@ if (( NEEDS_FULL == 1 )); then
 elif (( DOCS_ONLY == 1 )); then
   ok "分类结果：仅文档/说明变更，无需重建服务"
 else
-  components=()
-  (( NEEDS_BACKEND == 1 )) && components+=("web")
-  (( NEEDS_FRONTEND == 1 )) && components+=("frontend")
-  ok "分类结果：增量更新 ${components[*]}"
+  ok "分类结果：服务级增量更新 ${PLAN_SERVICES[*]}"
+  if (( ${#PLAN_COMPONENTS[@]} > 0 )); then
+    log "影响组件：${PLAN_COMPONENTS[*]}"
+  fi
 fi
 
 if (( REQUIRES_BACKUP == 1 )); then
@@ -249,13 +224,13 @@ frontend_url() {
 if (( NEEDS_FULL == 1 )); then
   if [[ "${TELEPILOT_SKIP_UPDATER_RECREATE:-0}" == "1" ]]; then
     warn "当前由内部 updater 执行完整更新，业务服务完成后由临时 handoff 容器重建 updater。"
-    log "构建 + 启动业务容器（postgres / redis / web / frontend）"
+    log "构建 + 启动业务容器（仅显式指定 postgres / redis / web / frontend）"
     if [[ -n "$RUNNING_UPDATER_TOKEN" && "$RUNNING_UPDATER_TOKEN" != "$PERSISTED_UPDATER_TOKEN" ]]; then
       # 过渡阶段先让新 web 与仍在运行的旧 updater 使用同一 token；handoff
       # 随后会用 .env 中的新 token 一起重建两者。
-      UPDATER_TOKEN="$RUNNING_UPDATER_TOKEN" docker compose up -d --build postgres redis web frontend
+      UPDATER_TOKEN="$RUNNING_UPDATER_TOKEN" docker compose up -d --build --no-deps postgres redis web frontend
     else
-      docker compose up -d --build postgres redis web frontend
+      docker compose up -d --build --no-deps postgres redis web frontend
     fi
     wait_compose_healthy docker-compose.yml postgres 60 || {
       docker compose logs --tail=80 postgres >&2
@@ -280,10 +255,10 @@ if (( NEEDS_FULL == 1 )); then
     log "构建新版 updater 并安排 token/镜像原子切换"
     docker compose build updater
     env -u UPDATER_TOKEN docker compose run -d --rm --no-deps --entrypoint sh updater -c \
-      'sleep 3; env -u UPDATER_TOKEN docker compose up -d --no-deps --force-recreate updater web && rm -f "$(git rev-parse --git-path telepilot-deploy-pending)"' \
+      'sleep 3; env -u UPDATER_TOKEN docker compose up -d --no-deps --force-recreate updater && rm -f "$(git rev-parse --git-path telepilot-deploy-pending)"' \
       >/dev/null
     HANDOFF_SCHEDULED=1
-    ok "完整业务更新完成；updater/web handoff 已安排"
+    ok "完整业务更新完成；updater handoff 已安排"
   else
     log "执行完整生产更新"
     "$SCRIPT_DIR/prod-up.sh"
@@ -295,8 +270,10 @@ else
   (( NEEDS_BACKEND == 1 )) && services+=("web")
   (( NEEDS_FRONTEND == 1 )) && services+=("frontend")
 
-  log "增量重建服务：${services[*]}"
-  docker compose up -d --build --no-deps "${services[@]}"
+  if (( ${#services[@]} > 0 )); then
+    log "增量重建服务：${services[*]}"
+    docker compose up -d --build --no-deps "${services[@]}"
+  fi
 
   if (( NEEDS_BACKEND == 1 )); then
     wait_compose_healthy docker-compose.yml web 120 || {
@@ -314,6 +291,15 @@ else
       docker compose logs --tail=80 frontend >&2
       exit 1
     }
+  fi
+
+  if (( NEEDS_UPDATER == 1 )); then
+    log "构建新版 updater 并安排独立 handoff"
+    docker compose build updater
+    env -u UPDATER_TOKEN docker compose run -d --rm --no-deps --entrypoint sh updater -c \
+      'sleep 3; env -u UPDATER_TOKEN docker compose up -d --no-deps --force-recreate updater && rm -f "$(git rev-parse --git-path telepilot-deploy-pending)"' \
+      >/dev/null
+    HANDOFF_SCHEDULED=1
   fi
 
   ok "增量更新完成"

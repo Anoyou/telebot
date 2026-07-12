@@ -31,26 +31,6 @@ CONSOLE_LOG_COMMAND_TIMEOUT_SECONDS = 5
 CONSOLE_LOG_SERVICES = ("web", "frontend", "postgres", "redis", "updater")
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 
-_DOC_SUFFIXES = (".md", ".rst", ".txt")
-_FULL_UPDATE_BASENAMES = {
-    ".dockerignore",
-    "docker-compose.yml",
-    "docker-compose.dev.yml",
-    "docker-compose.prod.yml",
-    "Dockerfile",
-    "Makefile",
-    ".npmrc",
-    "package.json",
-    "pyproject.toml",
-    "requirements.txt",
-    "poetry.lock",
-    "Pipfile.lock",
-    "package-lock.json",
-    "yarn.lock",
-    "pnpm-lock.yaml",
-}
-_FULL_UPDATE_PREFIXES = ("deploy/", "scripts/", "scripts/deploy", "scripts/prod")
-
 _jobs: dict[str, dict[str, Any]] = {}
 _jobs_lock = threading.Lock()
 _apply_lock = threading.Lock()
@@ -151,6 +131,8 @@ def _compose_project_name() -> str | None:
 
 def _apply_job_env(remote: str, branch: str) -> dict[str, str]:
     env = {
+        "COMPOSE_DOCKER_CLI_BUILD": "1",
+        "DOCKER_BUILDKIT": "1",
         "TELEPILOT_UPDATE_REMOTE": remote,
         "TELEPILOT_UPDATE_BRANCH": branch,
         "TELEPILOT_HOST_PROJECT_DIR": os.getenv("TELEPILOT_HOST_PROJECT_DIR", str(WORKSPACE)),
@@ -324,49 +306,6 @@ def _tail_console_logs(service: str | None, tail: int, keyword: str | None) -> d
     }
 
 
-def _normalize_changed_file(path: str) -> str:
-    return path.strip().lstrip("./")
-
-
-def _is_docs_file(path: str) -> bool:
-    normalized = _normalize_changed_file(path)
-    lowered = normalized.lower()
-    name = Path(normalized).name.lower()
-    if normalized in {"CHANGELOG.md", "docs/PLUGIN-DEV-GUIDE.md"}:
-        return False
-    return lowered.startswith("docs/") or lowered.startswith("readme") or name.endswith(_DOC_SUFFIXES)
-
-
-def _is_full_update_file(path: str) -> bool:
-    normalized = _normalize_changed_file(path)
-    name = Path(normalized).name
-    if name in _FULL_UPDATE_BASENAMES:
-        return True
-    return any(normalized.startswith(prefix) for prefix in _FULL_UPDATE_PREFIXES)
-
-
-def _classify_changed_files(changed_files: list[str]) -> tuple[list[str], bool, bool]:
-    files = [_normalize_changed_file(path) for path in changed_files if path.strip()]
-    if not files:
-        return ["none"], False, False
-
-    requires_full_update = any(_is_full_update_file(path) for path in files)
-    requires_backup = any(path.startswith("backend/alembic/versions/") for path in files)
-    if all(_is_docs_file(path) for path in files):
-        components = ["docs_only"]
-    else:
-        components: list[str] = []
-        if any(path.startswith("frontend/") or path in {"CHANGELOG.md", "docs/PLUGIN-DEV-GUIDE.md"} for path in files):
-            components.append("frontend")
-        if any(path.startswith("backend/") or path.startswith("plugins/") for path in files):
-            components.append("backend")
-        if not components:
-            components.append("docs_only")
-    if requires_full_update:
-        components = ["full_update", *[x for x in components if x != "full_update"]]
-    return components, requires_full_update, requires_backup
-
-
 def _check_plan(remote: str, branch: str) -> dict[str, Any]:
     if not (WORKSPACE / ".git").exists():
         return {
@@ -404,9 +343,26 @@ def _check_plan(remote: str, branch: str) -> dict[str, Any]:
 
     behind_out, _, behind_rc = _run(["git", "rev-list", "--count", f"{current_out}..{target_out}"], timeout=10)
     behind = int(behind_out) if behind_rc == 0 and behind_out.isdigit() else 0
-    changed_out, _, changed_rc = _run(["git", "diff", "--name-only", f"{diff_base}..{target_out}"], timeout=30)
-    changed_files = changed_out.splitlines()[:120] if changed_rc == 0 and changed_out else []
-    components, requires_full_update, requires_backup = _classify_changed_files(changed_files)
+    plan_out, plan_err, plan_rc = _run(
+        [
+            "python",
+            "backend/app/util/update_plan.py",
+            "--root",
+            str(WORKSPACE),
+            "--old",
+            diff_base,
+            "--new",
+            target_out,
+        ],
+        timeout=60,
+    )
+    if plan_rc != 0:
+        return {"ok": False, "error": f"生成更新计划失败: {plan_err or plan_out}"}
+    try:
+        update_plan = json.loads(plan_out)
+    except json.JSONDecodeError:
+        return {"ok": False, "error": "生成更新计划失败: 返回内容不是 JSON"}
+    changed_files = [str(item) for item in update_plan.get("changed_files") or []][:120]
     return {
         "ok": True,
         "remote": remote,
@@ -418,22 +374,51 @@ def _check_plan(remote: str, branch: str) -> dict[str, Any]:
         "deployment_pending": deployment_pending,
         "deploy_from_commit": diff_base[:12],
         "changed_files": changed_files,
-        "components": components,
-        "requires_full_update": requires_full_update,
-        "requires_backup": requires_backup,
+        "components": update_plan.get("components") or ["none"],
+        "services": update_plan.get("services") or [],
+        "requires_full_update": bool(update_plan.get("requires_full_update")),
+        "requires_backup": bool(update_plan.get("requires_backup")),
+        "requires_migration": bool(update_plan.get("requires_migration")),
+        "compose_changed_services": update_plan.get("compose_changed_services") or [],
+        "reasons": update_plan.get("reasons") or [],
     }
 
 
 def _job_snapshot(job_id: str) -> dict[str, Any] | None:
     with _jobs_lock:
         job = _jobs.get(job_id)
-        return dict(job) if job else None
+        if job:
+            return dict(job)
+    path = _job_path(job_id)
+    try:
+        parsed = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _job_path(job_id: str) -> Path:
+    return WORKSPACE / ".git" / "telepilot-update-jobs" / f"{job_id}.json"
+
+
+def _persist_job(job_id: str, job: dict[str, Any]) -> None:
+    try:
+        path = _job_path(job_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix(".tmp")
+        temporary.write_text(json.dumps(job, ensure_ascii=False), encoding="utf-8")
+        temporary.replace(path)
+    except OSError:
+        # 只读工作树仍可执行更新；持久化失败不能让实际更新任务失败。
+        return
 
 
 def _set_job(job_id: str, **updates: Any) -> None:
     with _jobs_lock:
         job = _jobs.setdefault(job_id, {"job_id": job_id, "logs": []})
         job.update(updates)
+        snapshot = dict(job)
+    _persist_job(job_id, snapshot)
 
 
 def _append_job_log(job_id: str, line: str) -> None:
@@ -442,6 +427,8 @@ def _append_job_log(job_id: str, line: str) -> None:
         logs = list(job.get("logs") or [])
         logs.append(line.rstrip())
         job["logs"] = logs[-MAX_LOG_LINES:]
+        snapshot = dict(job)
+    _persist_job(job_id, snapshot)
 
 
 def _run_apply_job(job_id: str, remote: str, branch: str, force_full: bool) -> None:

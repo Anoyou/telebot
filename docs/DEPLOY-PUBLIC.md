@@ -163,10 +163,12 @@ cp docker-compose.yml "/var/backups/telepilot/docker-compose-$(date +%Y%m%d-%H%M
 TELEPILOT_UPDATE_BRANCH=main make prod-update
 ```
 
-`make prod-update` 会先检查远程变更，再按文件范围选择增量动作：仅后端变更时只重建
-`web`，仅前端变更时只重建 `frontend`，纯文档变更不重启服务；如果涉及 Dockerfile、
-Compose、依赖锁文件或部署脚本，会自动回退到完整 `make prod-up`。更新前如果工作区
-存在未提交改动会拒绝执行，避免覆盖服务器上的本地修改。
+`make prod-update` 会先检查远程变更，再生成服务级更新计划：仅后端变化时只切换
+`web`，仅前端变化时只切换 `frontend`，updater 在业务服务健康后最后独立切换，纯文档
+变化不重启服务。Dockerfile、依赖文件与 Compose 变化也会映射到具体服务；只有
+PostgreSQL / Redis 配置、卷结构或无法识别的基础设施变化才进入完整更新。没有 Alembic
+迁移时不会创建备份或处理数据库。更新前如果工作区存在未提交改动会拒绝执行，避免
+覆盖服务器上的本地修改。
 
 发布候选分支不要覆盖 `main`，用环境变量显式指定：
 
@@ -188,9 +190,9 @@ TELEPILOT_UPDATE_BRANCH=codex/0.33-interaction-framework make prod-update PROD_U
 
 由于 updater 能控制宿主机 Docker，`UPDATER_TOKEN` 必须使用独立随机值，不能与 `JWT_SECRET` 复用；缺失时服务会直接拒绝启动。
 
-- 检查更新：读取当前分支或 `TELEPILOT_UPDATE_BRANCH`，执行 `git fetch` 并按变更文件分类。
-- 应用更新：后台执行 `scripts/prod-update.sh`，优先增量重建 `web` / `frontend`；涉及 Compose、Dockerfile、依赖或部署脚本时自动回退完整更新。
-- 任务日志：Web 面板轮询 updater job，服务重启期间页面可能短暂断开，刷新后可重新检查版本。
+- 检查更新：读取当前分支或 `TELEPILOT_UPDATE_BRANCH`，执行 `git fetch` 并展示具体受影响服务、数据库迁移和备份要求。
+- 应用更新：后台执行 `scripts/prod-update.sh`，使用 `--no-deps` 只切换计划内的 `web` / `frontend` / `updater`；PostgreSQL / Redis 默认保持运行。
+- 任务日志：Web 面板轮询持久化的 updater job；updater 自更新时页面可能短暂无法轮询，但新进程启动后可继续读取任务结果。
 
 首次把 `updater` 服务部署到服务器仍需要一次宿主机操作；之后常规补丁不再依赖 SSH 登录。若部署目录不是当前 shell 的工作目录，可显式指定：
 

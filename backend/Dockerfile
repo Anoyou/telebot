@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1.7
 # 后端镜像：多阶段构建
 #   - builder 阶段：安装编译依赖 + 通过 pyproject.toml 安装 Python 依赖
 #   - runtime 阶段：仅保留必要运行库 + 已装好的 site-packages，体积更小
@@ -15,14 +16,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # 先拷贝依赖清单并安装 runtime 依赖。不要在这一层拷贝 app/，否则任意后端
 # 代码变更都会打穿依赖安装缓存，生产增量更新会被迫重装 Telethon / cryptg 等包。
 COPY pyproject.toml /app/
-RUN pip install --no-cache-dir --upgrade pip
-RUN python -c 'import tomllib; from pathlib import Path; data = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8")); print("\n".join(data["project"]["dependencies"]))' \
+RUN --mount=type=cache,target=/root/.cache/pip pip install --upgrade pip
+RUN --mount=type=cache,target=/root/.cache/pip \
+    python -c 'import tomllib; from pathlib import Path; data = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8")); print("\n".join(data["project"]["dependencies"]))' \
     > /tmp/requirements.txt && \
-    pip install --no-cache-dir -r /tmp/requirements.txt
+    pip install -r /tmp/requirements.txt
 
 # 再拷贝源码并安装本项目本身；这里会随业务代码变更重跑，但不再重装三方依赖。
 COPY app /app/app
-RUN pip install --no-cache-dir --no-deps .
+RUN --mount=type=cache,target=/root/.cache/pip pip install --no-deps .
 
 
 FROM python:3.12-slim AS runtime

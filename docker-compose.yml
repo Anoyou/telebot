@@ -108,8 +108,6 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-      updater:
-        condition: service_healthy
     volumes:
       # session 加密文件落盘目录，volume 持久化
       - sessions:/app/sessions

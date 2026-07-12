@@ -349,8 +349,8 @@ def test_run_git_without_worktree_returns_deploy_hint(monkeypatch) -> None:
     assert "git root not found" not in err
 
 
-def test_classify_changed_files_marks_full_update_and_backup() -> None:
-    """更新计划分类应识别 full_update 与 alembic 备份风险。"""
+def test_classify_changed_files_marks_service_update_and_backup() -> None:
+    """迁移与前端变化应保持服务级更新，只为迁移要求备份。"""
 
     components, requires_full_update, requires_backup = sh._classify_changed_files(
         [
@@ -360,10 +360,10 @@ def test_classify_changed_files_marks_full_update_and_backup() -> None:
         ]
     )
 
-    assert components[0] == "full_update"
+    assert components[0] == "migration"
     assert "backend" in components
     assert "frontend" in components
-    assert requires_full_update is True
+    assert requires_full_update is False
     assert requires_backup is True
 
 
@@ -391,15 +391,15 @@ def test_classify_changed_files_frontend_bundled_docs() -> None:
     assert requires_backup is False
 
 
-def test_classify_changed_files_makefile_requires_full_update() -> None:
-    """Makefile / 部署脚本变更应回退完整更新。"""
+def test_classify_changed_files_makefile_does_not_restart_runtime() -> None:
+    """Makefile / 安装脚本变化不应重启已运行的生产服务。"""
 
     components, requires_full_update, requires_backup = sh._classify_changed_files(
         ["Makefile", "scripts/bootstrap.sh"]
     )
 
-    assert components[0] == "full_update"
-    assert requires_full_update is True
+    assert components == ["docs_only"]
+    assert requires_full_update is False
     assert requires_backup is False
 
 

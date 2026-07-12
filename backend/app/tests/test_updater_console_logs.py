@@ -68,6 +68,32 @@ def test_apply_job_env_uses_host_compose_project_name(monkeypatch) -> None:
     assert env["COMPOSE_PROJECT_NAME"] == "telepilot"
     assert env["TELEPILOT_UPDATE_REMOTE"] == "origin"
     assert env["TELEPILOT_UPDATE_BRANCH"] == "codex/0.33-interaction-framework"
+    assert env["DOCKER_BUILDKIT"] == "1"
+    assert env["COMPOSE_DOCKER_CLI_BUILD"] == "1"
+
+
+def test_update_job_survives_updater_restart(monkeypatch, tmp_path) -> None:
+    updater = _load_updater_module()
+    workspace = tmp_path / "repo"
+    (workspace / ".git").mkdir(parents=True)
+    monkeypatch.setattr(updater, "WORKSPACE", workspace)
+
+    updater._set_job("job123", status="succeeded", logs=["done"])
+    updater._jobs.clear()
+
+    assert updater._job_snapshot("job123") == {
+        "job_id": "job123",
+        "status": "succeeded",
+        "logs": ["done"],
+    }
+
+
+def test_incremental_script_never_recreates_web_with_updater() -> None:
+    repo_root = Path(__file__).resolve().parents[3]
+    script = (repo_root / "scripts" / "prod-update.sh").read_text(encoding="utf-8")
+
+    assert "--force-recreate updater web" not in script
+    assert "docker compose up -d --build --no-deps" in script
 
 
 def test_console_logs_returns_partial_lines_when_compose_times_out(monkeypatch) -> None:
@@ -218,9 +244,16 @@ def test_update_plan_retries_commit_with_pending_deployment(monkeypatch, tmp_pat
             return ".git/telepilot-deploy-pending", "", 0
         if args[:3] == ["git", "rev-list", "--count"]:
             return "0", "", 0
-        if args[:3] == ["git", "diff", "--name-only"]:
-            assert args[-1] == "oldcommit..targetcommit"
-            return "scripts/prod-update.sh", "", 0
+        if args[:2] == ["python", "backend/app/util/update_plan.py"]:
+            assert args[-4:] == ["--old", "oldcommit", "--new", "targetcommit"]
+            return (
+                '{"changed_files":["scripts/prod-update.sh"],'
+                '"components":["updater"],"services":["updater"],'
+                '"requires_full_update":false,"requires_backup":false,'
+                '"requires_migration":false}',
+                "",
+                0,
+            )
         raise AssertionError(args)
 
     monkeypatch.setattr(updater, "_run", fake_run)
