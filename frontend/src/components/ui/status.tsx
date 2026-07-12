@@ -9,7 +9,7 @@ import {
 } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
 
-export type VisualTone = "primary" | "success" | "warn" | "danger" | "neutral";
+export type VisualTone = "primary" | "success" | "warn" | "danger" | "info" | "neutral";
 
 type ToneClasses = {
   rail: string;
@@ -53,6 +53,14 @@ export function toneClasses(tone: VisualTone): ToneClasses {
       pill: "border-destructive/25 bg-destructive/10",
       dot: "bg-destructive",
       bar: "bg-destructive",
+    },
+    info: {
+      rail: "bg-info",
+      iconWrap: "bg-info/10",
+      icon: "text-info",
+      pill: "border-info/20 bg-info/10",
+      dot: "bg-info",
+      bar: "bg-info",
     },
     neutral: {
       rail: "bg-border",
@@ -122,6 +130,7 @@ export function ToneRailCard({
   value,
   description,
   tone = "neutral",
+  railTone,
   className,
   valueClassName,
 }: {
@@ -130,10 +139,12 @@ export function ToneRailCard({
   value: ReactNode;
   description?: ReactNode;
   tone?: VisualTone;
+  railTone?: VisualTone;
   className?: string;
   valueClassName?: string;
 }) {
   const toneClass = toneClasses(tone);
+  const railClass = toneClasses(railTone ?? tone).rail;
   return (
     <Card
       className={cn(
@@ -141,7 +152,7 @@ export function ToneRailCard({
         className,
       )}
     >
-      <div className={cn("absolute inset-x-0 top-0 h-1", toneClass.rail)} />
+      <div className={cn("absolute inset-x-0 top-0 h-1", railClass)} />
       <CardHeader className="flex-row items-start justify-between space-y-0">
         <div className="min-w-0">
           <CardTitle className="inline-flex max-w-full items-center gap-2 truncate">

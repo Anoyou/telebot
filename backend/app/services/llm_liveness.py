@@ -16,6 +16,8 @@
 from __future__ import annotations
 
 import asyncio
+import time
+import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -190,17 +192,27 @@ def build_task_pool(preview: LivenessPreview) -> list[LivenessTask]:
 
 
 class CancelToken:
-    """协作式取消令牌。"""
+    """协作式取消令牌。
+
+    ``cancel()`` 后调度器停止发起新任务，并取消在途 asyncio Task（触发
+    httpx client 上下文退出，中断上游请求），避免前端已放弃仍继续烧 quota。
+    """
 
     def __init__(self) -> None:
         self._cancelled = False
+        self._event = asyncio.Event()
 
     def cancel(self) -> None:
         self._cancelled = True
+        self._event.set()
 
     @property
     def cancelled(self) -> bool:
         return self._cancelled
+
+    async def wait(self) -> None:
+        """阻塞直到被取消（供 watcher 与调度器共享）。"""
+        await self._event.wait()
 
 
 # 单个任务的执行器签名：接收 task，返回 (diagnostic_status, result_dict)。
@@ -223,7 +235,8 @@ async def run_liveness_pool(
     - Provider 轮询（round-robin）取任务，避免单个大 Provider 独占全局槽位。
     - ``429``（rate_limited）：把该 Provider 的并发上限降到 1，其它 Provider 继续。
     - ``401``（auth_failed）：停止该 Provider 剩余任务并标记为 config/auth 跳过。
-    - 取消：未开始任务标记为 ``cancelled``，不再发起新请求；已完成结果保留。
+    - 取消：未开始任务标记为 ``cancelled``；在途 asyncio Task 被 cancel，结果记
+      ``cancelled``；已完成结果保留。
     - 已完成（含失败）不重试；重试由上层按范围重新构造任务池。
 
     返回每个任务的结果 dict（含 status / provider / model 等，已脱敏）。
@@ -245,7 +258,8 @@ async def run_liveness_pool(
     provider_cap: dict[int, int] = {pid: provider_concurrency for pid in order}
     stopped_providers: set[int] = set()
     results: list[dict[str, Any]] = []
-    running: set[asyncio.Task[Any]] = set()
+    # task_fut -> LivenessTask，取消在途时需要知道对应业务任务。
+    running: dict[asyncio.Task[Any], LivenessTask] = {}
     rr_index = 0
 
     def _record(task: LivenessTask, status: str, payload: dict[str, Any]) -> None:
@@ -288,55 +302,193 @@ async def run_liveness_pool(
     async def _run(task: LivenessTask) -> tuple[LivenessTask, str, dict[str, Any]]:
         try:
             status, payload = await runner(task)
+        except asyncio.CancelledError:
+            # 在途取消：记为 cancelled，不再向上抛以免调度器丢失结果。
+            return (
+                task,
+                diag.DIAG_CANCELLED,
+                {
+                    "skipped": True,
+                    "error": "cancelled",
+                    "error_category": diag.DIAG_CANCELLED,
+                    "suggestion": diag.suggestion_for(diag.DIAG_CANCELLED),
+                },
+            )
         except Exception as exc:  # noqa: BLE001
             status = diag.classify_exception(exc)
             payload = {"error": diag.redact(f"{type(exc).__name__}: {exc}")}
+            return (task, status, payload)
         return (task, status, payload)
 
     def _has_pending() -> bool:
         return any(queues.get(pid) for pid in order if pid not in stopped_providers)
 
-    while True:
-        # 取消：清空所有未开始任务，等待在途完成后退出。
-        if cancel_token.cancelled:
-            for pid in order:
-                _drain_provider(pid, diag.DIAG_CANCELLED)
+    def _cancel_inflight() -> None:
+        """取消所有在途 asyncio Task（触发 httpx 上下文退出）。"""
+        for fut in list(running):
+            if not fut.done():
+                fut.cancel()
 
-        # 尽量填满全局并发槽位。
-        while (
-            not cancel_token.cancelled
-            and len(running) < global_concurrency
-            and _has_pending()
-        ):
-            task = _next_task()
-            if task is None:
+    cancel_waiter = asyncio.create_task(cancel_token.wait())
+    try:
+        while True:
+            # 取消：清空未开始任务，并中断在途请求。
+            if cancel_token.cancelled:
+                for pid in order:
+                    _drain_provider(pid, diag.DIAG_CANCELLED)
+                _cancel_inflight()
+
+            # 尽量填满全局并发槽位。
+            while (
+                not cancel_token.cancelled
+                and len(running) < global_concurrency
+                and _has_pending()
+            ):
+                task = _next_task()
+                if task is None:
+                    break
+                inflight_by_provider[task.provider_id] += 1
+                fut = asyncio.ensure_future(_run(task))
+                running[fut] = task
+
+            if not running:
+                if cancel_token.cancelled or not _has_pending():
+                    break
                 break
-            inflight_by_provider[task.provider_id] += 1
-            running.add(asyncio.ensure_future(_run(task)))
 
-        if not running:
-            if cancel_token.cancelled or not _has_pending():
-                break
-            # 无在途且无可调度（全部达到 per-provider 上限但仍有 pending）——
-            # 理论上不会发生，因为 provider_cap>=1 且 inflight 会随完成回落。
-            break
-
-        done, _ = await asyncio.wait(running, return_when=asyncio.FIRST_COMPLETED)
-        for fut in done:
-            running.discard(fut)
-            task, status, payload = fut.result()
-            inflight_by_provider[task.provider_id] -= 1
-            _record(task, status, payload)
-            # 失败类别策略（不换身份、不改生产 cooldown）：
-            if status == diag.DIAG_RATE_LIMITED:
-                # 429：该 Provider 并发降到 1（本轮生效）。
-                provider_cap[task.provider_id] = 1
-            elif status == diag.DIAG_AUTH_FAILED:
-                # 401：停止该 Provider 剩余任务，避免所有模型重复失败。
-                stopped_providers.add(task.provider_id)
-                _drain_provider(task.provider_id, diag.DIAG_AUTH_FAILED)
+            waiters = set(running.keys())
+            if not cancel_token.cancelled:
+                waiters.add(cancel_waiter)
+            done, _ = await asyncio.wait(waiters, return_when=asyncio.FIRST_COMPLETED)
+            if cancel_waiter in done:
+                continue
+            for fut in done:
+                liveness_task = running.pop(fut)
+                inflight_by_provider[liveness_task.provider_id] -= 1
+                try:
+                    task, status, payload = fut.result()
+                except asyncio.CancelledError:
+                    task = liveness_task
+                    status = diag.DIAG_CANCELLED
+                    payload = {
+                        "skipped": True,
+                        "error": "cancelled",
+                        "error_category": diag.DIAG_CANCELLED,
+                        "suggestion": diag.suggestion_for(diag.DIAG_CANCELLED),
+                    }
+                _record(task, status, payload)
+                if status == diag.DIAG_RATE_LIMITED:
+                    provider_cap[task.provider_id] = 1
+                elif status == diag.DIAG_AUTH_FAILED:
+                    stopped_providers.add(task.provider_id)
+                    _drain_provider(task.provider_id, diag.DIAG_AUTH_FAILED)
+    finally:
+        cancel_waiter.cancel()
+        await asyncio.gather(cancel_waiter, return_exceptions=True)
 
     return results
+
+
+# ── 异步测活 Job 注册表（run_id / 轮询 / 取消 / 逐项进度） ────
+
+_LIVENESS_JOB_TTL_SECONDS = 30 * 60  # 完成后保留 30 分钟供轮询
+_LIVENESS_JOB_MAX = 64
+
+
+@dataclass
+class LivenessJob:
+    """一次全量测活运行的内存态（不落库；诊断窗口短期保留）。"""
+
+    run_id: str
+    status: str  # queued | running | completed | cancelled
+    task_total: int
+    created_at: float
+    updated_at: float
+    results: list[dict[str, Any]] = field(default_factory=list)
+    cancel_token: CancelToken = field(default_factory=CancelToken)
+    error: str | None = None
+    bg_task: asyncio.Task[Any] | None = field(default=None, repr=False)
+
+    def snapshot(self) -> dict[str, Any]:
+        items = list(self.results)
+        healthy = sum(1 for r in items if r.get("status") == diag.DIAG_HEALTHY)
+        cancelled = sum(1 for r in items if r.get("status") == diag.DIAG_CANCELLED)
+        skipped = sum(
+            1
+            for r in items
+            if r.get("skipped") and r.get("status") != diag.DIAG_CANCELLED
+        )
+        failed = len(items) - healthy - cancelled - skipped
+        return {
+            "run_id": self.run_id,
+            "status": self.status,
+            "task_total": self.task_total,
+            "completed": len(items),
+            "healthy": healthy,
+            "failed": max(0, failed),
+            "skipped": skipped,
+            "cancelled": cancelled,
+            "results": items,
+            "error": self.error,
+        }
+
+
+class LivenessJobRegistry:
+    """进程内测活 Job 注册表。"""
+
+    def __init__(self) -> None:
+        self._jobs: dict[str, LivenessJob] = {}
+        self._lock = asyncio.Lock()
+
+    async def create(self, *, task_total: int) -> LivenessJob:
+        now = time.monotonic()
+        job = LivenessJob(
+            run_id=str(uuid.uuid4()),
+            status="queued",
+            task_total=int(task_total),
+            created_at=now,
+            updated_at=now,
+        )
+        async with self._lock:
+            self._purge_locked(now)
+            # 容量保护：超限时剔除最旧已结束 job。
+            while len(self._jobs) >= _LIVENESS_JOB_MAX:
+                finished = [
+                    j
+                    for j in self._jobs.values()
+                    if j.status in {"completed", "cancelled"}
+                ]
+                if not finished:
+                    break
+                oldest = min(finished, key=lambda j: j.updated_at)
+                self._jobs.pop(oldest.run_id, None)
+            self._jobs[job.run_id] = job
+        return job
+
+    def get(self, run_id: str) -> LivenessJob | None:
+        return self._jobs.get(run_id)
+
+    def cancel(self, run_id: str) -> LivenessJob | None:
+        job = self._jobs.get(run_id)
+        if job is None:
+            return None
+        job.cancel_token.cancel()
+        job.updated_at = time.monotonic()
+        return job
+
+    def _purge_locked(self, now: float) -> None:
+        expired = [
+            rid
+            for rid, job in self._jobs.items()
+            if job.status in {"completed", "cancelled"}
+            and (now - job.updated_at) > _LIVENESS_JOB_TTL_SECONDS
+        ]
+        for rid in expired:
+            self._jobs.pop(rid, None)
+
+
+# 模块级单例：API 进程内共享。
+liveness_jobs = LivenessJobRegistry()
 
 
 __all__ = [
@@ -346,12 +498,15 @@ __all__ = [
     "DEFAULT_PROVIDER_CONCURRENCY",
     "LARGE_RUN_MODEL_THRESHOLD",
     "CancelToken",
+    "LivenessJob",
+    "LivenessJobRegistry",
     "LivenessPreview",
     "LivenessTask",
     "ProviderPlan",
     "build_preview",
     "build_task_pool",
     "enabled_models_of",
+    "liveness_jobs",
     "normalize_global_concurrency",
     "run_liveness_pool",
 ]

@@ -318,7 +318,9 @@ class PluginAI:
             user_content=str(user or ""),
         )
         explicit_model = str(model or "").strip()
-        selected_model = explicit_model or _enabled_model_for_dto(primary, None) or str(primary.default_model or "").strip()
+        selected_model = _tools_model_for_dto(primary, explicit_model)
+        if selected_model is None:
+            raise AIUnavailableError("所选模型不支持 tools，且该 Provider 没有其它可用 tools 模型")
         request = ModelRequest(
             model=selected_model,
             messages=(
@@ -707,6 +709,23 @@ def _enabled_model_for_dto(dto: LLMProviderDTO, explicit: str | None) -> str | N
     return enabled[0]
 
 
+def _tools_model_for_dto(dto: LLMProviderDTO, explicit: str | None = None) -> str | None:
+    """返回一个已启用且声明支持 tools 的模型。"""
+    explicit_clean = str(explicit or "").strip()
+    if explicit_clean:
+        enabled = _explicit_enabled_models(dto)
+        if enabled and explicit_clean not in enabled:
+            return None
+        return explicit_clean if dto.capabilities_for_model(explicit_clean).tools else None
+    candidate = _enabled_model_for_dto(dto, None)
+    if candidate and dto.capabilities_for_model(candidate).tools:
+        return candidate
+    for model_id in _explicit_enabled_models(dto):
+        if dto.capabilities_for_model(model_id).tools:
+            return model_id
+    return None
+
+
 async def _resolve_route(
     providers: Mapping[int, LLMProviderDTO],
     *,
@@ -736,7 +755,7 @@ async def _resolve_route(
         # Agent 路由：预先排除不支持 tools 的 Provider——必须存在一个可用模型
         # （显式启用的模型，或在没有显式启用清单时回落到 default_model）。
         # 若 Provider 有显式 models 清单但全部禁用且无 default_model，则视为不可用。
-        usable = [p for p in usable if _enabled_model_for_dto(p, None)]
+        usable = [p for p in usable if _tools_model_for_dto(p) is not None]
     if not usable:
         raise AIUnavailableError("没有可用的 LLM provider（未配置 key 或无已启用模型）")
 
@@ -817,7 +836,7 @@ async def _shared_router_auto(
     chosen = by_id.get(int(decision.provider_id))
     if chosen is None:
         return None
-    if require_tools and not _enabled_model_for_dto(chosen, None):
+    if require_tools and _tools_model_for_dto(chosen) is None:
         # Router 选中的 Provider 无可用模型（不支持 tools）→ 交回上层兜底。
         return None
     return chosen, (decision.matched_tag or None)

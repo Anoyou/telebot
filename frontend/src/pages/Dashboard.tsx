@@ -162,6 +162,7 @@ export function Dashboard() {
             else next.delete("accounts");
             setSearchParams(next, { replace: true });
           }}
+          railTone="primary"
         />
         <OverviewTile
           icon={Sparkles}
@@ -169,6 +170,7 @@ export function Dashboard() {
           value={providerValue}
           description={providersQ.isError ? "模型提供商读取失败，点击后重试" : "可调用模型 / 已配置模型"}
           tone={providersQ.isError ? "danger" : overviewTone(readyProviders, providers.length, providersQ.isLoading)}
+          railTone="info"
           to="/ai?tab=providers"
         />
         <OverviewTile
@@ -177,6 +179,7 @@ export function Dashboard() {
           value="指令与插件"
           description="管理指令和自动化"
           tone="primary"
+          railTone="warn"
           to="/plugins"
         />
         <OverviewTile
@@ -185,6 +188,7 @@ export function Dashboard() {
           value={logValue}
           description={resourceQ.isError ? "日志统计读取失败，点击后重试" : `错误 ${resourceQ.data?.logs.last_5m_error ?? 0} / 警告 ${resourceQ.data?.logs.last_5m_warn ?? 0}`}
           tone={resourceQ.isError ? "danger" : logTone(resourceQ.data)}
+          railTone="success"
           to="/logs"
         />
       </div>
@@ -293,6 +297,7 @@ function AccountWorkerTile({
   error,
   open,
   onOpenChange,
+  railTone,
 }: {
   value: string;
   tone: VisualTone;
@@ -301,6 +306,7 @@ function AccountWorkerTile({
   error: unknown;
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  railTone?: VisualTone;
 }) {
   const compactAccounts = useCompactOverlay();
   const singleAccount = accounts.length <= 1;
@@ -312,6 +318,7 @@ function AccountWorkerTile({
         value={value}
         description="运行中 / 总账号，点击查看全部账号"
         tone={tone}
+        railTone={railTone}
       />
     </button>
   );
@@ -450,6 +457,7 @@ function OverviewTile({
   to,
   onClick,
   asButton = false,
+  railTone,
 }: {
   icon: LucideIcon;
   title: string;
@@ -459,9 +467,10 @@ function OverviewTile({
   to?: string;
   onClick?: () => void;
   asButton?: boolean;
+  railTone?: VisualTone;
 }) {
   const content = (
-    <TileCard icon={Icon} title={title} value={value} description={description} tone={tone} />
+    <TileCard icon={Icon} title={title} value={value} description={description} tone={tone} railTone={railTone} />
   );
 
   if (asButton) {
@@ -572,12 +581,14 @@ function TileCard({
   value,
   description,
   tone = "neutral",
+  railTone,
 }: {
   icon: LucideIcon;
   title: string;
   value: string;
   description: string;
   tone?: VisualTone;
+  railTone?: VisualTone;
 }) {
   return (
     <ToneRailCard
@@ -586,6 +597,7 @@ function TileCard({
       value={value}
       description={description}
       tone={tone}
+      railTone={railTone}
     />
   );
 }

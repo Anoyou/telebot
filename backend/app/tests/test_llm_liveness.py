@@ -156,10 +156,51 @@ async def test_cancel_marks_unstarted_as_cancelled() -> None:
     )
     cancelled = [r for r in results if r["status"] == diag.DIAG_CANCELLED]
     assert len(cancelled) > 0
-    # 已开始的仍完成。
+    # 真实取消会中断在途请求，因此本例不应留下健康结果。
     healthy = [r for r in results if r["status"] == diag.DIAG_HEALTHY]
-    assert len(healthy) >= 1
+    assert healthy == []
     assert len(results) == len(tasks)
+
+
+@pytest.mark.asyncio
+async def test_cancel_interrupts_inflight_tasks() -> None:
+    tasks = [lv.LivenessTask(1, "p1", f"m{i}") for i in range(4)]
+    token = lv.CancelToken()
+    entered = asyncio.Event()
+    interrupted = 0
+
+    async def runner(task):
+        nonlocal interrupted
+        entered.set()
+        try:
+            await asyncio.sleep(10)
+        except asyncio.CancelledError:
+            interrupted += 1
+            raise
+        return (diag.DIAG_HEALTHY, {})
+
+    pool_task = asyncio.create_task(
+        lv.run_liveness_pool(
+            tasks, runner, global_concurrency=2, provider_concurrency=2, cancel_token=token
+        )
+    )
+    await entered.wait()
+    token.cancel()
+    results = await asyncio.wait_for(pool_task, timeout=1)
+    assert interrupted == 2
+    assert len(results) == len(tasks)
+    assert all(r["status"] == diag.DIAG_CANCELLED for r in results)
+
+
+@pytest.mark.asyncio
+async def test_job_cancel_stays_running_until_background_finishes() -> None:
+    registry = lv.LivenessJobRegistry()
+    job = await registry.create(task_total=1)
+    job.status = "running"
+    cancelled = registry.cancel(job.run_id)
+    assert cancelled is job
+    assert job.cancel_token.cancelled is True
+    assert job.status == "running"
 
 
 @pytest.mark.asyncio

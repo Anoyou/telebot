@@ -577,7 +577,7 @@ function FeatureCapabilityBadge({
   children,
 }: {
   show: boolean;
-  tone?: "neutral" | "success" | "warn" | "danger" | "outline";
+  tone?: "neutral" | "success" | "warn" | "danger" | "info" | "outline";
   title?: string;
   onClick?: () => void;
   children: React.ReactNode;
@@ -772,7 +772,6 @@ function FeatureZone({
           description={hint}
           meta={(
             <div className="flex items-center gap-2">
-              <MetaBadge>{features.length}</MetaBadge>
               <SignalPill tone="neutral" label="插件" value={features.length} className="h-8" />
             </div>
           )}
@@ -837,12 +836,12 @@ function FeatureZone({
                         <div className="break-all font-mono text-xs leading-5 text-muted-foreground">{f.key}</div>
                       </div>
                       <div className="flex shrink-0 flex-wrap gap-1.5 sm:justify-end">
-                        <FeatureCapabilityBadge show={Boolean(f.interaction_entries?.length)} tone="success">
+                        <FeatureCapabilityBadge show={Boolean(f.interaction_entries?.length)} tone="info">
                           可交互
                         </FeatureCapabilityBadge>
                         <FeatureCapabilityBadge
                           show={directPassthrough}
-                          tone="outline"
+                          tone="warn"
                           title="低延时能力，安装后还需在账号配置中二次开启才会生效"
                         >
                           裸直通 · 二次开启

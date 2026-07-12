@@ -1688,12 +1688,22 @@ export interface LivenessResultItem {
 }
 
 export interface FullLivenessRunResponse {
+  run_id: string;
+  status: "queued" | "running" | "completed" | "cancelled";
   task_total: number;
+  completed: number;
   healthy: number;
   failed: number;
   skipped: number;
   cancelled: number;
   results: LivenessResultItem[];
+  error?: string | null;
+}
+
+export interface FullLivenessRunStartResponse {
+  run_id: string;
+  status: "queued" | "running";
+  task_total: number;
 }
 
 // ===== Sprint4 #2C =====

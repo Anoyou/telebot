@@ -71,6 +71,14 @@ select = ["E", "F", "I", "B", "UP"]
 # B008: FastAPI 用法 ``param: T = Query(...)`` 是官方推荐写法，不是真 bug
 ignore = ["E501", "B008"]
 
+[tool.ruff.lint.per-file-ignores]
+# 这些已发布迁移必须保持与 927bbf10 字节级一致，不能为 import 排序重写历史。
+"alembic/versions/0016_command_alias.py" = ["I001"]
+"alembic/versions/0017_sudo_user.py" = ["I001"]
+"alembic/versions/0020_llm_usage.py" = ["I001"]
+"alembic/versions/0023_account_bot_remote_plugin_policy.py" = ["I001"]
+"alembic/versions/0024_llm_provider_web_search_api_format.py" = ["I001"]
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["app/tests"]

@@ -771,15 +771,31 @@ class LivenessResultItem(BaseModel):
     skipped: bool = False
 
 
-class FullLivenessRunResponse(BaseModel):
-    """全量测活结果汇总。"""
+class FullLivenessRunStartResponse(BaseModel):
+    """``POST …/liveness/run`` 立即返回：创建异步 Job，前端凭 run_id 轮询。"""
 
+    run_id: str
+    status: str = "queued"
+    task_total: int = 0
+
+
+class FullLivenessRunResponse(BaseModel):
+    """全量测活结果汇总（轮询 status 或同步兼容）。
+
+    ``status``：queued | running | completed | cancelled。
+    ``completed``：已出结果的任务数（含成功/失败/跳过/取消），用于逐项进度。
+    """
+
+    run_id: str | None = None
+    status: str = "completed"
     task_total: int
+    completed: int = 0
     healthy: int = 0
     failed: int = 0
     skipped: int = 0
     cancelled: int = 0
     results: list[LivenessResultItem] = Field(default_factory=list)
+    error: str | None = None
 
 
 # ═══════════════ 客户端身份 UA 版本配置（0.57.0 收口） ═══════════════

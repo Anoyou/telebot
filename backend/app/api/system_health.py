@@ -2549,6 +2549,7 @@ async def _import_config_payload(
     mappings: dict[str, dict[str, Any]] = {}
     imported = 0
     skipped = 0
+    warnings: list[str] = []
     affected_categories: set[str] = set()
     affected_accounts: set[int] = set()
     db = None
@@ -2592,18 +2593,20 @@ async def _import_config_payload(
 
                     # 导入旧 / 跨版本备份时，未知的客户端身份档案降级为 auto（不拒绝整份备份）。
                     if (
-                        model_cls.__name__ == "LLMProvider"
+                        category == "llm_providers"
                         and "client_identity_profile" in filtered
                     ):
                         from ..db.models.command import (
                             normalize_client_identity_profile,
                         )
 
-                        filtered["client_identity_profile"] = (
-                            normalize_client_identity_profile(
-                                filtered["client_identity_profile"]
+                        original_identity = filtered["client_identity_profile"]
+                        normalized_identity = normalize_client_identity_profile(original_identity)
+                        if normalized_identity != original_identity:
+                            warnings.append(
+                                f"[llm_providers] 客户端身份档案 {original_identity!r} 未知，已降级为 auto"
                             )
-                        )
+                        filtered["client_identity_profile"] = normalized_identity
 
                     identity: dict[str, Any] | None = None
                     candidates = definition.get(
@@ -2690,6 +2693,7 @@ async def _import_config_payload(
     return ImportConfigResponse(
         imported=imported,
         skipped=skipped,
+        warnings=warnings,
         bundle_version=bundle_version,
         affected_categories=[
             category for category in _IMPORT_TOPOLOGY if category in affected_categories
@@ -2762,7 +2766,8 @@ async def import_config(
         update={
             "reloaded_accounts": reloaded,
             "restart_required": restart_required,
-            "warnings": (
+            "warnings": outcome.warnings
+            + (
                 ["部分 Worker 未确认配置热重载，请重启应用后再继续操作"]
                 if restart_required
                 else []

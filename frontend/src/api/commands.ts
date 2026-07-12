@@ -20,6 +20,7 @@ import type {
   FullLivenessPreviewRequest,
   FullLivenessPreviewResponse,
   FullLivenessRunRequest,
+  FullLivenessRunStartResponse,
   FullLivenessRunResponse,
   LLMProviderCreate,
   LLMProviderOut,
@@ -193,15 +194,25 @@ export async function fullLivenessPreview(
 /** 按已启用模型执行全量 / 范围测活；返回脱敏诊断结果汇总。 */
 export async function fullLivenessRun(
   payload: FullLivenessRunRequest,
-  opts?: { signal?: AbortSignal },
-): Promise<FullLivenessRunResponse> {
-  const { data } = await api.post<FullLivenessRunResponse>(
+): Promise<FullLivenessRunStartResponse> {
+  const { data } = await api.post<FullLivenessRunStartResponse>(
     "/api/commands/llm-providers/liveness/run",
     payload,
-    {
-      timeout: (payload.timeout_seconds ?? 90) * 1000 * 4 + TEST_REQUEST_TIMEOUT_MARGIN_MS,
-      signal: opts?.signal,
-    },
+    { timeout: LLM_PROVIDER_OPERATION_TIMEOUT_MS },
+  );
+  return data;
+}
+
+export async function fullLivenessStatus(runId: string): Promise<FullLivenessRunResponse> {
+  const { data } = await api.get<FullLivenessRunResponse>(
+    `/api/commands/llm-providers/liveness/${runId}`,
+  );
+  return data;
+}
+
+export async function cancelFullLiveness(runId: string): Promise<FullLivenessRunResponse> {
+  const { data } = await api.post<FullLivenessRunResponse>(
+    `/api/commands/llm-providers/liveness/${runId}/cancel`,
   );
   return data;
 }

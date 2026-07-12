@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import time as _time
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
@@ -44,6 +45,7 @@ from ..schemas.command import (
     FullLivenessPreviewResponse,
     FullLivenessRunRequest,
     FullLivenessRunResponse,
+    FullLivenessRunStartResponse,
     LivenessResultItem,
     LLMProviderCreate,
     LLMProviderOut,
@@ -648,6 +650,27 @@ async def detect_provider_protocols(
     probe_system = (payload.system_prompt or "").strip() or "You are a helpful assistant. Answer briefly."
     probe_message = (payload.message or "").strip() or "用一句话简单介绍你自己。"
     probe_max_tokens = 64
+    usage_provider = SimpleNamespace(id=payload.pid, name=f"detect:{provider}", default_model=model)
+
+    async def _record_protocol_probe(
+        result: ProtocolProbeResult,
+        started: float,
+        api_format: str,
+    ) -> None:
+        """把每次真实探测请求记入诊断 usage，失败也要可审计。"""
+        try:
+            await _emit_llm_diagnostic_usage(
+                provider_row=usage_provider,
+                source="diagnostic:protocol_detection",
+                started=started,
+                system=probe_system,
+                user_prompt=probe_message,
+                model=model,
+                result=None if not result.ok else SimpleNamespace(text=None),
+                error=None if result.ok else ValueError(result.error or result.error_category or api_format),
+            )
+        except Exception:  # noqa: BLE001 - 诊断记录不得改变探测结论
+            pass
 
     def _probe_body(api_format: str) -> dict:
         if api_format == "responses":
@@ -688,7 +711,11 @@ async def detect_provider_protocols(
 
     async def probe_models(cli: httpx.AsyncClient) -> ProtocolProbeResult:
         headers = {"Accept": "application/json"}
-        if api_key:
+        if provider == "anthropic":
+            headers["anthropic-version"] = "2023-06-01"
+            if api_key:
+                headers["x-api-key"] = api_key
+        elif api_key:
             headers["Authorization"] = f"Bearer {api_key}"
         started = _time.monotonic()
         try:
@@ -697,9 +724,13 @@ async def detect_provider_protocols(
                 headers=headers,
             )
             latency_ms = int((_time.monotonic() - started) * 1000)
-            return _probe_result(resp, latency_ms, api_key=api_key, base_url=base_url, stage="credentials")
+            result = _probe_result(resp, latency_ms, api_key=api_key, base_url=base_url, stage="credentials")
+            await _record_protocol_probe(result, started, "models")
+            return result
         except httpx.HTTPError as exc:
-            return _probe_error(exc, started, api_key=api_key, base_url=base_url)
+            result = _probe_error(exc, started, api_key=api_key, base_url=base_url)
+            await _record_protocol_probe(result, started, "models")
+            return result
 
     async def probe_with_identity(
         cli: httpx.AsyncClient,
@@ -730,10 +761,12 @@ async def detect_provider_protocols(
                 and _probe_unsupported_parameter(resp, "max_output_tokens")
             ):
                 result.error = "该 Responses 接口拒绝 max_output_tokens；为避免失去输出与成本上限，运行时不会自动省略该参数。"
+            await _record_protocol_probe(result, started, api_format)
             return result
         except httpx.HTTPError as exc:
             result = _probe_error(exc, started, api_key=api_key, base_url=base_url)
             result.client_identity_profile = identity_profile
+            await _record_protocol_probe(result, started, api_format)
             return result
 
     async def probe_protocol(
@@ -1361,25 +1394,66 @@ async def full_liveness_preview(
     return FullLivenessPreviewResponse(**data)
 
 
+def _liveness_result_items(raw: list[dict[str, Any]]) -> list[LivenessResultItem]:
+    return [
+        LivenessResultItem(
+            provider_id=r["provider_id"],
+            provider_name=r["provider_name"],
+            model_id=r["model_id"],
+            status=r["status"],
+            latency_ms=int(r.get("latency_ms") or 0),
+            input_tokens=int(r.get("input_tokens") or 0),
+            output_tokens=int(r.get("output_tokens") or 0),
+            preview=r.get("preview"),
+            error=r.get("error"),
+            error_category=r.get("error_category"),
+            suggestion=r.get("suggestion"),
+            client_identity_profile=r.get("client_identity_profile"),
+            effective_api_format=r.get("effective_api_format"),
+            skipped=bool(r.get("skipped")),
+        )
+        for r in raw
+    ]
+
+
+def _liveness_snapshot_response(job: llm_liveness.LivenessJob) -> FullLivenessRunResponse:
+    snap = job.snapshot()
+    return FullLivenessRunResponse(
+        run_id=snap["run_id"],
+        status=snap["status"],
+        task_total=int(snap["task_total"]),
+        completed=int(snap["completed"]),
+        healthy=int(snap["healthy"]),
+        failed=int(snap["failed"]),
+        skipped=int(snap["skipped"]),
+        cancelled=int(snap["cancelled"]),
+        results=_liveness_result_items(snap["results"]),
+        error=snap.get("error"),
+    )
+
+
 @router.post(
     "/api/commands/llm-providers/liveness/run",
-    response_model=FullLivenessRunResponse,
+    response_model=FullLivenessRunStartResponse,
 )
 async def full_liveness_run(
     payload: FullLivenessRunRequest, db: DBSession, _user: CurrentUser
-) -> FullLivenessRunResponse:
-    """按已启用模型执行全量 / 范围测活。
+) -> FullLivenessRunStartResponse:
+    """启动全量 / 范围测活异步 Job，立即返回 ``run_id``。
 
     - 有界公平调度：全局并发 + 单 Provider 并发；Provider 轮询防独占。
     - 429 降对应 Provider 并发；401 停止该 Provider 剩余任务。
     - 手工测活不改生产 cooldown、不自动禁用模型；仅返回脱敏诊断结果。
+    - 前端凭 ``run_id`` 轮询 ``GET …/liveness/{run_id}`` 获取逐项进度；
+      ``POST …/liveness/{run_id}/cancel`` 真实取消（停新任务 + 中断在途请求）。
     """
     await _require_ai_enabled(db)
 
     from ..services.llm_client import LLMError, build_client
 
     rows = await _load_liveness_provider_rows(db, payload.only_provider_ids)
-    row_by_id = {int(r.id): r for r in rows}
+    # 后台任务不能复用请求级 ORM 会话；把 runner 所需字段快照到内存。
+    row_snapshots: dict[int, Any] = {int(r.id): r for r in rows}
     proxy_by_id: dict[int, str | None] = {}
     for r in rows:
         proxy_by_id[int(r.id)] = await _resolve_proxy_url(db, getattr(r, "proxy_id", None))
@@ -1394,8 +1468,15 @@ async def full_liveness_run(
         only = {m.strip() for m in payload.only_models if m.strip()}
         tasks = [t for t in tasks if t.model_id in only]
 
+    job = await llm_liveness.liveness_jobs.create(task_total=len(tasks))
+    system_prompt = payload.system_prompt
+    message = payload.message
+    max_tokens = payload.max_tokens
+    timeout_seconds = payload.timeout_seconds
+    global_concurrency = payload.global_concurrency
+
     async def runner(task: llm_liveness.LivenessTask) -> tuple[str, dict[str, Any]]:
-        row = row_by_id.get(task.provider_id)
+        row = row_snapshots.get(task.provider_id)
         if row is None:
             return (llm_liveness.diag.DIAG_SKIPPED_PROVIDER_MISSING, {"skipped": True})
         started = _time.monotonic()
@@ -1403,18 +1484,18 @@ async def full_liveness_run(
         try:
             cli = build_client(row, override_model=task.model_id, proxy_url=proxy_url)
             result = await cli.complete(
-                payload.system_prompt,
-                payload.message,
-                max_tokens=payload.max_tokens,
-                timeout_seconds=payload.timeout_seconds,
+                system_prompt,
+                message,
+                max_tokens=max_tokens,
+                timeout_seconds=timeout_seconds,
             )
             elapsed_ms = int((_time.monotonic() - started) * 1000)
             await _emit_llm_diagnostic_usage(
                 provider_row=row,
                 source="diagnostic:full-liveness",
                 started=started,
-                system=payload.system_prompt,
-                user_prompt=payload.message,
+                system=system_prompt,
+                user_prompt=message,
                 model=result.model or task.model_id,
                 result=result,
             )
@@ -1432,16 +1513,21 @@ async def full_liveness_run(
                     "output_tokens": int(result.output_tokens or 0),
                     "preview": text[:240] or None,
                     "effective_api_format": getattr(row, "api_format", None),
+                    "client_identity_profile": getattr(
+                        row, "client_identity_profile", None
+                    ),
                 },
             )
+        except asyncio.CancelledError:
+            raise
         except LLMError as exc:
             elapsed_ms = int((_time.monotonic() - started) * 1000)
             await _emit_llm_diagnostic_usage(
                 provider_row=row,
                 source="diagnostic:full-liveness",
                 started=started,
-                system=payload.system_prompt,
-                user_prompt=payload.message,
+                system=system_prompt,
+                user_prompt=message,
                 model=task.model_id,
                 error=exc,
             )
@@ -1454,6 +1540,9 @@ async def full_liveness_run(
                     "error_category": status,
                     "suggestion": llm_liveness.diag.suggestion_for(status),
                     "effective_api_format": getattr(row, "api_format", None),
+                    "client_identity_profile": getattr(
+                        row, "client_identity_profile", None
+                    ),
                 },
             )
         except Exception as exc:  # noqa: BLE001
@@ -1469,43 +1558,70 @@ async def full_liveness_run(
                 },
             )
 
-    raw = await llm_liveness.run_liveness_pool(
-        tasks,
-        runner,
-        global_concurrency=payload.global_concurrency,
-        provider_concurrency=llm_liveness.DEFAULT_PROVIDER_CONCURRENCY,
+    def on_result(
+        _task: llm_liveness.LivenessTask, _status: str, entry: dict[str, Any]
+    ) -> None:
+        job.results.append(entry)
+        job.updated_at = _time.monotonic()
+
+    async def _run_job() -> None:
+        import time as _time_mod
+
+        job.status = "running"
+        job.updated_at = _time_mod.monotonic()
+        try:
+            await llm_liveness.run_liveness_pool(
+                tasks,
+                runner,
+                global_concurrency=global_concurrency,
+                provider_concurrency=llm_liveness.DEFAULT_PROVIDER_CONCURRENCY,
+                cancel_token=job.cancel_token,
+                on_result=on_result,
+            )
+        except Exception as exc:  # noqa: BLE001
+            job.error = llm_liveness.diag.redact(f"{type(exc).__name__}: {exc}")
+        finally:
+            # 若用户已 cancel，保持 cancelled；否则 completed。
+            if job.cancel_token.cancelled:
+                job.status = "cancelled"
+            else:
+                job.status = "completed"
+            job.updated_at = _time_mod.monotonic()
+
+    job.bg_task = asyncio.create_task(_run_job())
+    return FullLivenessRunStartResponse(
+        run_id=job.run_id,
+        status=job.status,
+        task_total=job.task_total,
     )
 
-    items = [
-        LivenessResultItem(
-            provider_id=r["provider_id"],
-            provider_name=r["provider_name"],
-            model_id=r["model_id"],
-            status=r["status"],
-            latency_ms=int(r.get("latency_ms") or 0),
-            input_tokens=int(r.get("input_tokens") or 0),
-            output_tokens=int(r.get("output_tokens") or 0),
-            preview=r.get("preview"),
-            error=r.get("error"),
-            error_category=r.get("error_category"),
-            suggestion=r.get("suggestion"),
-            effective_api_format=r.get("effective_api_format"),
-            skipped=bool(r.get("skipped")),
-        )
-        for r in raw
-    ]
-    healthy = sum(1 for i in items if i.status == llm_liveness.diag.DIAG_HEALTHY)
-    cancelled = sum(1 for i in items if i.status == llm_liveness.diag.DIAG_CANCELLED)
-    skipped = sum(1 for i in items if i.skipped and i.status != llm_liveness.diag.DIAG_CANCELLED)
-    failed = len(items) - healthy - cancelled - skipped
-    return FullLivenessRunResponse(
-        task_total=len(items),
-        healthy=healthy,
-        failed=failed,
-        skipped=skipped,
-        cancelled=cancelled,
-        results=items,
-    )
+
+@router.get(
+    "/api/commands/llm-providers/liveness/{run_id}",
+    response_model=FullLivenessRunResponse,
+)
+async def full_liveness_status(
+    run_id: str, _user: CurrentUser
+) -> FullLivenessRunResponse:
+    """轮询测活 Job：返回当前已完成的逐项结果与汇总计数。"""
+    job = llm_liveness.liveness_jobs.get(run_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="测活运行不存在或已过期")
+    return _liveness_snapshot_response(job)
+
+
+@router.post(
+    "/api/commands/llm-providers/liveness/{run_id}/cancel",
+    response_model=FullLivenessRunResponse,
+)
+async def full_liveness_cancel(
+    run_id: str, _user: CurrentUser
+) -> FullLivenessRunResponse:
+    """真实取消测活：停止发起新任务，并 cancel 在途 asyncio Task（中断上游请求）。"""
+    job = llm_liveness.liveness_jobs.cancel(run_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="测活运行不存在或已过期")
+    return _liveness_snapshot_response(job)
 
 
 def _liveness_status_from_error(exc: Any) -> str:

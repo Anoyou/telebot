@@ -155,6 +155,42 @@ async def test_resolve_route_require_tools_all_excluded_raises() -> None:
         )
 
 
+@pytest.mark.asyncio
+async def test_resolve_route_require_tools_excludes_models_without_tools() -> None:
+    pool = {
+        1: _provider(1, models=[{"id": "plain", "enabled": True, "supports_tools": False}]),
+        2: _provider(2, models=[{"id": "agent", "enabled": True, "supports_tools": True}]),
+    }
+    dto, _tag, _mode = await ai_facade._resolve_route(
+        pool, provider=None, provider_tag=None, route=None, require_tools=True
+    )
+    assert dto.id == 2
+
+
+def test_tools_model_skips_unsupported_default() -> None:
+    dto = _provider(
+        1,
+        default_model="plain",
+        models=[
+            {"id": "plain", "enabled": True, "supports_tools": False},
+            {"id": "agent", "enabled": True, "supports_tools": True},
+        ],
+    )
+    assert ai_facade._tools_model_for_dto(dto) == "agent"
+
+
+def test_tools_model_rejects_explicit_unsupported_or_disabled_model() -> None:
+    dto = _provider(
+        1,
+        models=[
+            {"id": "plain", "enabled": True, "supports_tools": False},
+            {"id": "disabled-agent", "enabled": False, "supports_tools": True},
+        ],
+    )
+    assert ai_facade._tools_model_for_dto(dto, "plain") is None
+    assert ai_facade._tools_model_for_dto(dto, "disabled-agent") is None
+
+
 # ── _enabled_model_for_dto ─────────────────────────────────
 
 

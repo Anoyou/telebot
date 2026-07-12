@@ -179,6 +179,7 @@ async def test_detect_stops_after_standard_identity_success(monkeypatch) -> None
     from app.schemas.command import DetectProviderProtocolsRequest
 
     calls: list[dict] = []
+    usage_calls: list[dict] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         fmt = "chat" if "chat/completions" in str(request.url) else (
@@ -206,6 +207,11 @@ async def test_detect_stops_after_standard_identity_success(monkeypatch) -> None
     monkeypatch.setattr(commands, "_require_ai_enabled", _noop)
     monkeypatch.setattr(commands.audit, "write", _noop)
 
+    async def _capture_usage(**kwargs):
+        usage_calls.append(kwargs)
+
+    monkeypatch.setattr(commands, "_emit_llm_diagnostic_usage", _capture_usage)
+
     class _DB:
         async def commit(self):
             return None
@@ -229,6 +235,10 @@ async def test_detect_stops_after_standard_identity_success(monkeypatch) -> None
     assert resp.recommended_client_identity_profile == "openai_sdk"
     # UA 不含 TelePilot。
     assert all("TelePilot" not in c["ua"] for c in calls)
+    assert len(usage_calls) == len(calls) == 4
+    assert all(call["source"] == "diagnostic:protocol_detection" for call in usage_calls)
+    assert sum(call["error"] is None for call in usage_calls) == 2
+    assert sum(call["error"] is not None for call in usage_calls) == 2
 
 
 @pytest.mark.asyncio
@@ -287,6 +297,52 @@ async def test_detect_retries_identity_only_on_client_rejection(monkeypatch) -> 
     assert resp.recommended_client_identity_profile == "codex_cli"
     profiles = [a.client_identity_profile for a in responses_attempts]
     assert "codex_cli" in profiles
+
+
+@pytest.mark.asyncio
+async def test_anthropic_models_probe_uses_x_api_key(monkeypatch) -> None:
+    from app.api import commands
+    from app.schemas.command import DetectProviderProtocolsRequest
+
+    model_headers: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/models"):
+            model_headers.update(request.headers)
+        return httpx.Response(404, text="Not Found")
+
+    def _fake_client(**kwargs):
+        return _REAL_ASYNC_CLIENT(transport=httpx.MockTransport(handler))
+
+    monkeypatch.setattr(commands.httpx, "AsyncClient", _fake_client)
+
+    async def _noop(*a, **k):
+        return None
+
+    monkeypatch.setattr(commands, "_require_ai_enabled", _noop)
+    monkeypatch.setattr(commands.audit, "write", _noop)
+    monkeypatch.setattr(commands, "_emit_llm_diagnostic_usage", _noop)
+
+    class _DB:
+        async def commit(self):
+            return None
+
+    class _User:
+        id = 1
+
+    await commands.detect_provider_protocols(
+        DetectProviderProtocolsRequest(
+            provider="anthropic",
+            base_url="https://api.anthropic.com/v1",
+            api_key="sk-ant-test",
+            model="claude-haiku-4-5",
+        ),
+        _DB(),
+        _User(),
+    )
+    assert model_headers.get("x-api-key") == "sk-ant-test"
+    assert "authorization" not in model_headers
+    assert model_headers.get("anthropic-version") == "2023-06-01"
 
 
 # ── 阶段 F 收口 #3：2xx 响应结构校验 ──────────────────────────

@@ -44,6 +44,7 @@ import {
 
 import {
   chatTestProviderModels,
+  cancelFullLiveness,
   createLLMProvider,
   deleteLLMProvider,
   detectClientIdentityVersions,
@@ -51,6 +52,7 @@ import {
   fetchProviderModelsPreview,
   fullLivenessPreview,
   fullLivenessRun,
+  fullLivenessStatus,
   getClientIdentityVersions,
   listLLMProviders,
   patchLLMProvider,
@@ -2185,14 +2187,18 @@ function FullLivenessDialog({
   const [result, setResult] = useState<FullLivenessRunResponse | null>(null);
   const [maxTokens, setMaxTokens] = useState(256);
   const [globalConcurrency, setGlobalConcurrency] = useState(8);
-  const abortRef = useRef<AbortController | null>(null);
+  const runIdRef = useRef<string | null>(null);
+  const pollRef = useRef<number | null>(null);
 
   useEffect(() => {
     if (!open) {
+      const activeRunId = runIdRef.current;
       setPreview(null);
       setResult(null);
-      abortRef.current?.abort();
-      abortRef.current = null;
+      if (pollRef.current != null) window.clearTimeout(pollRef.current);
+      pollRef.current = null;
+      runIdRef.current = null;
+      if (activeRunId) void cancelFullLiveness(activeRunId).catch(() => undefined);
     }
   }, [open]);
 
@@ -2206,25 +2212,31 @@ function FullLivenessDialog({
   });
 
   const runMut = useMutation({
-    mutationFn: () => {
-      const controller = new AbortController();
-      abortRef.current = controller;
-      return fullLivenessRun(
-        { max_tokens: maxTokens, global_concurrency: globalConcurrency },
-        { signal: controller.signal },
-      );
-    },
+    mutationFn: () => fullLivenessRun({ max_tokens: maxTokens, global_concurrency: globalConcurrency }),
     onSuccess: (resp) => {
-      setResult(resp);
-      abortRef.current = null;
+      runIdRef.current = resp.run_id;
+      setResult({ run_id: resp.run_id, status: resp.status, task_total: resp.task_total, completed: 0, healthy: 0, failed: 0, skipped: 0, cancelled: 0, results: [] });
+      const poll = async () => {
+        if (!runIdRef.current) return;
+        try {
+          const next = await fullLivenessStatus(runIdRef.current);
+          setResult(next);
+          if (next.status === "queued" || next.status === "running") {
+            pollRef.current = window.setTimeout(poll, 500);
+          } else {
+            runIdRef.current = null;
+          }
+        } catch (err) {
+          toast.error(getErrMsg(err));
+          runIdRef.current = null;
+        }
+      };
+      void poll();
     },
-    onError: (err) => {
-      abortRef.current = null;
-      toast.error(getErrMsg(err));
-    },
+    onError: (err) => toast.error(getErrMsg(err)),
   });
 
-  const running = runMut.isPending;
+  const running = runMut.isPending || result?.status === "queued" || result?.status === "running";
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -2308,12 +2320,14 @@ function FullLivenessDialog({
           {result ? (
             <div className="rounded-md border bg-muted/30 p-3 text-xs">
               <div className="mb-2 flex flex-wrap items-center gap-2">
+                <MetaBadge>{result.completed}/{result.task_total}</MetaBadge>
                 <MetaBadge tone="success">正常 {result.healthy}</MetaBadge>
                 <MetaBadge tone="warn">失败 {result.failed}</MetaBadge>
                 {result.skipped ? <MetaBadge>跳过 {result.skipped}</MetaBadge> : null}
                 {result.cancelled ? <MetaBadge>取消 {result.cancelled}</MetaBadge> : null}
                 <MetaBadge>共 {result.task_total}</MetaBadge>
               </div>
+              {result.error ? <div className="mb-2 break-words text-amber-600 dark:text-amber-400">{result.error}</div> : null}
               <div className="max-h-72 space-y-1 overflow-y-auto">
                 {result.results.map((r, i) => (
                   <div key={`${r.provider_id}-${r.model_id}-${i}`} className="rounded border bg-background px-2 py-1.5">
@@ -2338,8 +2352,11 @@ function FullLivenessDialog({
               type="button"
               variant="outline"
               onClick={() => {
-                abortRef.current?.abort();
-                abortRef.current = null;
+                if (runIdRef.current) {
+                  cancelFullLiveness(runIdRef.current)
+                    .then(setResult)
+                    .catch((err) => toast.error(getErrMsg(err)));
+                }
               }}
             >
               停止

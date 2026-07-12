@@ -52,6 +52,14 @@ class _AccountCommandLink(_Base):
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
 
 
+class _LLMProvider(_Base):
+    __tablename__ = "backup_test_llm_provider"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String, nullable=False, unique=True)
+    client_identity_profile: Mapped[str] = mapped_column(String, nullable=False, default="auto")
+
+
 _MODEL_MAP = {
     "Account": _Account,
     "CommandTemplate": _CommandTemplate,
@@ -122,6 +130,34 @@ async def test_config_import_round_trip_into_fresh_database() -> None:
             link = (await db.execute(select(_AccountCommandLink))).scalar_one()
             assert link.account_id == 1
             assert link.template_id == 1
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_config_import_warns_when_unknown_identity_falls_back_to_auto() -> None:
+    engine, maker = await _database()
+    try:
+        outcome = await system_health._import_config_payload(  # noqa: SLF001
+            {
+                "_meta": {
+                    "format": "telepilot-config",
+                    "bundle_version": 2,
+                    "include_sensitive": True,
+                },
+                "llm_providers": [
+                    {"id": 9, "name": "legacy", "client_identity_profile": "future_client"}
+                ],
+            },
+            session_factory=_factory(maker),
+            model_map={**_MODEL_MAP, "LLMProvider": _LLMProvider},
+        )
+        assert outcome.warnings == [
+            "[llm_providers] 客户端身份档案 'future_client' 未知，已降级为 auto"
+        ]
+        async with maker() as db:
+            row = (await db.execute(select(_LLMProvider))).scalar_one()
+            assert row.client_identity_profile == "auto"
     finally:
         await engine.dispose()
 
