@@ -692,3 +692,91 @@ class ChatTestModelsResponse(BaseModel):
     provider_id: int
     provider_name: str
     results: list[ChatTestModelResult]
+
+
+# ── 阶段 C：全量已启用模型测活 ────────────────────────────────
+class FullLivenessPreviewRequest(BaseModel):
+    """``POST /api/commands/llm-providers/liveness/preview`` 入参。"""
+
+    max_tokens: int = Field(default=256, ge=64, le=8000)
+    global_concurrency: int = Field(default=8)
+
+
+class LivenessProviderPlan(BaseModel):
+    """预览中单个 Provider 的目标模型与可执行性。"""
+
+    provider_id: int
+    provider_name: str
+    enabled_models: list[str] = Field(default_factory=list)
+    executable: bool
+    skipped_reason: str | None = None
+
+
+class FullLivenessPreviewResponse(BaseModel):
+    """全量测活执行预览（权威快照）。"""
+
+    provider_total: int
+    executable_provider_total: int
+    enabled_model_total: int
+    task_total: int
+    max_tokens: int
+    max_output_tokens: int
+    global_concurrency: int
+    provider_concurrency: int
+    needs_confirmation: bool
+    providers: list[LivenessProviderPlan] = Field(default_factory=list)
+
+
+class FullLivenessRunRequest(BaseModel):
+    """``POST /api/commands/llm-providers/liveness/run`` 入参。
+
+    全量测活不携带历史，确保所有模型收到完全相同的输入并可横向比较。
+    可选 ``only_provider_ids`` / ``only_models`` 用于失败重测等范围过滤。
+    """
+
+    system_prompt: str = Field(
+        default="你是一个自然、简洁的中文聊天助手。请像真实聊天一样直接回复用户，不要只返回 ping/pong。",
+        min_length=1,
+        max_length=2000,
+    )
+    message: str = Field(
+        default="用一句话自我介绍，并说明你现在能做什么。",
+        min_length=1,
+        max_length=2000,
+    )
+    max_tokens: int = Field(default=256, ge=64, le=8000)
+    timeout_seconds: int = Field(default=90, ge=10, le=600)
+    global_concurrency: int = Field(default=8)
+    # 范围过滤（失败重测 / 只测某 Provider / 只测新启用模型）。
+    only_provider_ids: list[int] | None = Field(default=None)
+    only_models: list[str] | None = Field(default=None, max_length=500)
+
+
+class LivenessResultItem(BaseModel):
+    """单个测活任务结果（已脱敏）。"""
+
+    provider_id: int
+    provider_name: str
+    model_id: str
+    status: str
+    latency_ms: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    preview: str | None = None
+    error: str | None = None
+    error_category: str | None = None
+    suggestion: str | None = None
+    client_identity_profile: str | None = None
+    effective_api_format: str | None = None
+    skipped: bool = False
+
+
+class FullLivenessRunResponse(BaseModel):
+    """全量测活结果汇总。"""
+
+    task_total: int
+    healthy: int = 0
+    failed: int = 0
+    skipped: int = 0
+    cancelled: int = 0
+    results: list[LivenessResultItem] = Field(default_factory=list)

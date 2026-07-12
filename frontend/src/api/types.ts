@@ -1633,6 +1633,69 @@ export interface ChatTestModelsResponse {
   results: ChatTestModelResult[];
 }
 
+// ===== 0.57.0 阶段 C：全量已启用模型测活 =====
+export interface FullLivenessPreviewRequest {
+  max_tokens?: number;
+  global_concurrency?: number;
+}
+
+export interface LivenessProviderPlan {
+  provider_id: number;
+  provider_name: string;
+  enabled_models: string[];
+  executable: boolean;
+  skipped_reason?: string | null;
+}
+
+export interface FullLivenessPreviewResponse {
+  provider_total: number;
+  executable_provider_total: number;
+  enabled_model_total: number;
+  task_total: number;
+  max_tokens: number;
+  max_output_tokens: number;
+  global_concurrency: number;
+  provider_concurrency: number;
+  needs_confirmation: boolean;
+  providers: LivenessProviderPlan[];
+}
+
+export interface FullLivenessRunRequest {
+  system_prompt?: string;
+  message?: string;
+  max_tokens?: number;
+  timeout_seconds?: number;
+  global_concurrency?: number;
+  only_provider_ids?: number[] | null;
+  only_models?: string[] | null;
+}
+
+export interface LivenessResultItem {
+  provider_id: number;
+  provider_name: string;
+  model_id: string;
+  status: string;
+  latency_ms: number;
+  input_tokens: number;
+  output_tokens: number;
+  preview?: string | null;
+  error?: string | null;
+  error_category?: string | null;
+  suggestion?: string | null;
+  client_identity_profile?: string | null;
+  effective_api_format?: string | null;
+  skipped: boolean;
+}
+
+export interface FullLivenessRunResponse {
+  task_total: number;
+  healthy: number;
+  failed: number;
+  skipped: number;
+  cancelled: number;
+  results: LivenessResultItem[];
+}
+
 // ===== Sprint4 #2C =====
 export type SchedulerKind = "cron" | "once" | "interval";
 export type SchedulerActionType = "send_message" | "run_command" | "call_llm";

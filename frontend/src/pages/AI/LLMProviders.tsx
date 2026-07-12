@@ -48,13 +48,15 @@ import {
   deleteLLMProvider,
   detectProviderProtocols,
   fetchProviderModelsPreview,
+  fullLivenessPreview,
+  fullLivenessRun,
   listLLMProviders,
   patchLLMProvider,
   testProviderModel,
 } from "@/api/commands";
 import { listProxies } from "@/api/proxies";
 import { getSystemSettings } from "@/api/system";
-import type { ChatTestModelResult, ChatTestTurn, DetectProviderProtocolsResponse, LLMApiFormat, LLMClientIdentityProfile, LLMModality, LLMProtocolProfile, LLMProviderKind, LLMProviderOut, LLMTag, LLMWebSearchApiFormat, ProviderModel, ProtocolProbeResult, ProxyOut } from "@/api/types";
+import type { ChatTestModelResult, ChatTestTurn, DetectProviderProtocolsResponse, FullLivenessPreviewResponse, FullLivenessRunResponse, LLMApiFormat, LLMClientIdentityProfile, LLMModality, LLMProtocolProfile, LLMProviderKind, LLMProviderOut, LLMTag, LLMWebSearchApiFormat, ProviderModel, ProtocolProbeResult, ProxyOut } from "@/api/types";
 import { getErrMsg } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { confirmDiscardChanges, useUnsavedChanges } from "@/lib/unsavedChanges";
@@ -280,6 +282,7 @@ export function LLMProviders({
 
   const [editing, setEditing] = useState<FormState | null>(null);
   const [chatTestOpen, setChatTestOpen] = useState(false);
+  const [fullLivenessOpen, setFullLivenessOpen] = useState(false);
 
   const visibleProviders = (listQ.data || []).filter((p) => {
     if (!isVisionFilter) return true;
@@ -452,6 +455,16 @@ export function LLMProviders({
                 onClick={() => setChatTestOpen(true)}
               >
                 <MessageSquare className="mr-1 h-4 w-4" /> 模型测活
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                className="flex-1 sm:flex-none"
+                disabled={visibleProviders.length === 0}
+                onClick={() => setFullLivenessOpen(true)}
+              >
+                <MessageSquare className="mr-1 h-4 w-4" /> 全量测活
               </Button>
               <Button size="sm" className="flex-1 sm:flex-none" onClick={() => setEditing({ ...EMPTY_FORM })}>
                 <Plus className="mr-1 h-4 w-4" /> 新建
@@ -651,6 +664,7 @@ export function LLMProviders({
         onOpenChange={setChatTestOpen}
         providers={visibleProviders}
       />
+      <FullLivenessDialog open={fullLivenessOpen} onOpenChange={setFullLivenessOpen} />
     </div>
   );
 }
@@ -2114,5 +2128,220 @@ function ProviderModelsSection({
         </div>
       )}
     </div>
+  );
+}
+
+// ════════════════════════════════════════════════════════════
+// 阶段 C：全量已启用模型测活弹窗
+// ════════════════════════════════════════════════════════════
+
+function livenessStatusTone(status: string): "success" | "warn" | "neutral" {
+  if (status === "healthy") return "success";
+  if (status === "cancelled" || status === "skipped_disabled") return "neutral";
+  return "warn";
+}
+
+const LIVENESS_STATUS_LABEL: Record<string, string> = {
+  healthy: "正常",
+  empty_response: "空响应",
+  rate_limited: "限流(429)",
+  auth_failed: "鉴权失败(401)",
+  client_rejected: "身份被拒",
+  protocol_rejected: "协议不符",
+  model_missing: "模型缺失",
+  timeout: "超时",
+  upstream_error: "上游错误",
+  config_error: "配置缺失",
+  cancelled: "已取消",
+  network_error: "网络异常",
+  skipped_provider_missing: "Provider 缺失",
+};
+
+function livenessStatusLabel(status: string): string {
+  return LIVENESS_STATUS_LABEL[status] ?? status;
+}
+
+function FullLivenessDialog({
+  open,
+  onOpenChange,
+}: {
+  open: boolean;
+  onOpenChange: (v: boolean) => void;
+}) {
+  const [preview, setPreview] = useState<FullLivenessPreviewResponse | null>(null);
+  const [result, setResult] = useState<FullLivenessRunResponse | null>(null);
+  const [maxTokens, setMaxTokens] = useState(256);
+  const [globalConcurrency, setGlobalConcurrency] = useState(8);
+  const abortRef = useRef<AbortController | null>(null);
+
+  useEffect(() => {
+    if (!open) {
+      setPreview(null);
+      setResult(null);
+      abortRef.current?.abort();
+      abortRef.current = null;
+    }
+  }, [open]);
+
+  const previewMut = useMutation({
+    mutationFn: () => fullLivenessPreview({ max_tokens: maxTokens, global_concurrency: globalConcurrency }),
+    onSuccess: (resp) => {
+      setPreview(resp);
+      setResult(null);
+    },
+    onError: (err) => toast.error(getErrMsg(err)),
+  });
+
+  const runMut = useMutation({
+    mutationFn: () => {
+      const controller = new AbortController();
+      abortRef.current = controller;
+      return fullLivenessRun(
+        { max_tokens: maxTokens, global_concurrency: globalConcurrency },
+        { signal: controller.signal },
+      );
+    },
+    onSuccess: (resp) => {
+      setResult(resp);
+      abortRef.current = null;
+    },
+    onError: (err) => {
+      abortRef.current = null;
+      toast.error(getErrMsg(err));
+    },
+  });
+
+  const running = runMut.isPending;
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-3xl">
+        <DialogHeader>
+          <DialogTitle>全量模型测活</DialogTitle>
+          <DialogDescription>
+            按各 Provider 已启用（enabled）的模型做真实调用探活。仅返回脱敏诊断结果，不修改生产健康状态、不自动禁用模型。
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="space-y-3 text-sm">
+          <div className="flex flex-wrap items-end gap-3">
+            <div className="space-y-1">
+              <Label className="text-xs">输出上限 (max_tokens)</Label>
+              <Input
+                type="number"
+                className="w-32"
+                min={64}
+                max={8000}
+                value={maxTokens}
+                onChange={(e) => setMaxTokens(Math.max(64, Math.min(8000, Number(e.target.value) || 256)))}
+                disabled={running}
+              />
+            </div>
+            <div className="space-y-1">
+              <Label className="text-xs">全局并发</Label>
+              <Select
+                className="w-24"
+                value={String(globalConcurrency)}
+                onChange={(e) => setGlobalConcurrency(Number(e.target.value))}
+                disabled={running}
+              >
+                {[2, 4, 8, 12].map((n) => (
+                  <option key={n} value={n}>{n}</option>
+                ))}
+              </Select>
+            </div>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => previewMut.mutate()}
+              disabled={previewMut.isPending || running}
+            >
+              {previewMut.isPending ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : null}
+              生成预览
+            </Button>
+          </div>
+
+          {preview ? (
+            <div className="rounded-md border bg-muted/30 p-3 text-xs">
+              <div className="flex flex-wrap items-center gap-2">
+                <MetaBadge>可执行 Provider {preview.executable_provider_total}/{preview.provider_total}</MetaBadge>
+                <MetaBadge>任务 {preview.task_total}</MetaBadge>
+                <MetaBadge>已启用模型 {preview.enabled_model_total}</MetaBadge>
+                <MetaBadge mono>最多输出 ~{preview.max_output_tokens} tok</MetaBadge>
+                {preview.needs_confirmation ? (
+                  <MetaBadge tone="warn">任务较多，请确认</MetaBadge>
+                ) : null}
+              </div>
+              <div className="mt-2 space-y-1">
+                {preview.providers.map((p) => (
+                  <div key={p.provider_id} className="flex flex-wrap items-center justify-between gap-2 rounded border bg-background px-2 py-1">
+                    <span className="font-medium">{p.provider_name}</span>
+                    <span className="flex flex-wrap items-center gap-1">
+                      {p.executable ? (
+                        <MetaBadge tone="success">{p.enabled_models.length} 个已启用模型</MetaBadge>
+                      ) : (
+                        <MetaBadge tone="warn">跳过：{livenessStatusLabel(p.skipped_reason || "no_enabled_models")}</MetaBadge>
+                      )}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : (
+            <p className="text-xs text-muted-foreground">先生成预览，确认执行范围与成本后再运行。</p>
+          )}
+
+          {result ? (
+            <div className="rounded-md border bg-muted/30 p-3 text-xs">
+              <div className="mb-2 flex flex-wrap items-center gap-2">
+                <MetaBadge tone="success">正常 {result.healthy}</MetaBadge>
+                <MetaBadge tone="warn">失败 {result.failed}</MetaBadge>
+                {result.skipped ? <MetaBadge>跳过 {result.skipped}</MetaBadge> : null}
+                {result.cancelled ? <MetaBadge>取消 {result.cancelled}</MetaBadge> : null}
+                <MetaBadge>共 {result.task_total}</MetaBadge>
+              </div>
+              <div className="max-h-72 space-y-1 overflow-y-auto">
+                {result.results.map((r, i) => (
+                  <div key={`${r.provider_id}-${r.model_id}-${i}`} className="rounded border bg-background px-2 py-1.5">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <span className="min-w-0 break-all font-mono text-[11px]">{r.provider_name} · {r.model_id}</span>
+                      <MetaBadge mono tone={livenessStatusTone(r.status)}>
+                        {livenessStatusLabel(r.status)}{r.latency_ms ? ` · ${r.latency_ms}ms` : ""}
+                      </MetaBadge>
+                    </div>
+                    {r.preview ? <div className="mt-1 break-words text-muted-foreground">{r.preview}</div> : null}
+                    {r.error ? <div className="mt-1 break-words text-amber-600 dark:text-amber-400">{r.error}</div> : null}
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : null}
+        </div>
+
+        <DialogFooter>
+          {running ? (
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => {
+                abortRef.current?.abort();
+                abortRef.current = null;
+              }}
+            >
+              停止
+            </Button>
+          ) : null}
+          <Button
+            type="button"
+            onClick={() => runMut.mutate()}
+            disabled={running || !preview || preview.task_total === 0}
+          >
+            {running ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : null}
+            {running ? "测活中…" : "开始测活"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }

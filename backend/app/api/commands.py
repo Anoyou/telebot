@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import time as _time
+from typing import Any
 
 import httpx
 from fastapi import APIRouter, HTTPException
@@ -34,6 +35,11 @@ from ..schemas.command import (
     FetchModelsPreviewRequest,
     FetchModelsPreviewResponse,
     FetchModelsResponse,
+    FullLivenessPreviewRequest,
+    FullLivenessPreviewResponse,
+    FullLivenessRunRequest,
+    FullLivenessRunResponse,
+    LivenessResultItem,
     LLMProviderCreate,
     LLMProviderOut,
     LLMProviderUpdate,
@@ -42,7 +48,7 @@ from ..schemas.command import (
     TestModelRequest,
     TestModelResponse,
 )
-from ..services import audit, command_service, llm_diagnostics
+from ..services import audit, command_service, llm_diagnostics, llm_liveness
 from ..services.ai_feature import is_ai_enabled
 from ..services.llm_identity import (
     IDENTITY_PROBE_ORDER,
@@ -1233,6 +1239,209 @@ async def chat_test_models(
         provider_name=row.name,
         results=list(results),
     )
+
+
+# ════════════════════════════════════════════════════════════
+# 阶段 C：全量已启用模型测活（当前 Provider / 全部 Provider）
+# ════════════════════════════════════════════════════════════
+
+
+async def _load_liveness_provider_rows(
+    db: DBSession, only_provider_ids: list[int] | None
+) -> list[Any]:
+    """加载测活范围内的 Provider 行（None=全部；否则按 id 过滤）。"""
+    from sqlalchemy import select
+
+    from ..db.models.command import LLMProvider
+
+    query = select(LLMProvider).order_by(LLMProvider.id.asc())
+    if only_provider_ids:
+        query = query.where(LLMProvider.id.in_(list(only_provider_ids)))
+    return list((await db.execute(query)).scalars().all())
+
+
+@router.post(
+    "/api/commands/llm-providers/liveness/preview",
+    response_model=FullLivenessPreviewResponse,
+)
+async def full_liveness_preview(
+    payload: FullLivenessPreviewRequest, db: DBSession, _user: CurrentUser
+) -> FullLivenessPreviewResponse:
+    """全量测活执行预览：只读数据库，不调用上游、不消耗 quota。
+
+    仅统计 ``models[].enabled == True`` 的模型；缺凭据 / 无启用模型的 Provider
+    标记为不可执行并给出原因。
+    """
+    await _require_ai_enabled(db)
+    rows = await _load_liveness_provider_rows(db, None)
+    preview = llm_liveness.build_preview(
+        rows,
+        max_tokens=payload.max_tokens,
+        global_concurrency=payload.global_concurrency,
+    )
+    data = preview.to_dict()
+    return FullLivenessPreviewResponse(**data)
+
+
+@router.post(
+    "/api/commands/llm-providers/liveness/run",
+    response_model=FullLivenessRunResponse,
+)
+async def full_liveness_run(
+    payload: FullLivenessRunRequest, db: DBSession, _user: CurrentUser
+) -> FullLivenessRunResponse:
+    """按已启用模型执行全量 / 范围测活。
+
+    - 有界公平调度：全局并发 + 单 Provider 并发；Provider 轮询防独占。
+    - 429 降对应 Provider 并发；401 停止该 Provider 剩余任务。
+    - 手工测活不改生产 cooldown、不自动禁用模型；仅返回脱敏诊断结果。
+    """
+    await _require_ai_enabled(db)
+
+    from ..services.llm_client import LLMError, build_client
+
+    rows = await _load_liveness_provider_rows(db, payload.only_provider_ids)
+    row_by_id = {int(r.id): r for r in rows}
+    proxy_by_id: dict[int, str | None] = {}
+    for r in rows:
+        proxy_by_id[int(r.id)] = await _resolve_proxy_url(db, getattr(r, "proxy_id", None))
+
+    preview = llm_liveness.build_preview(
+        rows,
+        max_tokens=payload.max_tokens,
+        global_concurrency=payload.global_concurrency,
+    )
+    tasks = llm_liveness.build_task_pool(preview)
+    if payload.only_models:
+        only = {m.strip() for m in payload.only_models if m.strip()}
+        tasks = [t for t in tasks if t.model_id in only]
+
+    async def runner(task: llm_liveness.LivenessTask) -> tuple[str, dict[str, Any]]:
+        row = row_by_id.get(task.provider_id)
+        if row is None:
+            return (llm_liveness.diag.DIAG_SKIPPED_PROVIDER_MISSING, {"skipped": True})
+        started = _time.monotonic()
+        proxy_url = proxy_by_id.get(task.provider_id)
+        try:
+            cli = build_client(row, override_model=task.model_id, proxy_url=proxy_url)
+            result = await cli.complete(
+                payload.system_prompt,
+                payload.message,
+                max_tokens=payload.max_tokens,
+                timeout_seconds=payload.timeout_seconds,
+            )
+            elapsed_ms = int((_time.monotonic() - started) * 1000)
+            await _emit_llm_diagnostic_usage(
+                provider_row=row,
+                source="diagnostic:full-liveness",
+                started=started,
+                system=payload.system_prompt,
+                user_prompt=payload.message,
+                model=result.model or task.model_id,
+                result=result,
+            )
+            text = (result.text or "").strip()
+            status = (
+                llm_liveness.diag.DIAG_HEALTHY
+                if text
+                else llm_liveness.diag.DIAG_EMPTY_RESPONSE
+            )
+            return (
+                status,
+                {
+                    "latency_ms": elapsed_ms,
+                    "input_tokens": int(result.input_tokens or 0),
+                    "output_tokens": int(result.output_tokens or 0),
+                    "preview": text[:240] or None,
+                    "effective_api_format": getattr(row, "api_format", None),
+                },
+            )
+        except LLMError as exc:
+            elapsed_ms = int((_time.monotonic() - started) * 1000)
+            await _emit_llm_diagnostic_usage(
+                provider_row=row,
+                source="diagnostic:full-liveness",
+                started=started,
+                system=payload.system_prompt,
+                user_prompt=payload.message,
+                model=task.model_id,
+                error=exc,
+            )
+            status = _liveness_status_from_error(exc)
+            return (
+                status,
+                {
+                    "latency_ms": elapsed_ms,
+                    "error": llm_liveness.diag.redact(str(exc)),
+                    "error_category": status,
+                    "suggestion": llm_liveness.diag.suggestion_for(status),
+                    "effective_api_format": getattr(row, "api_format", None),
+                },
+            )
+        except Exception as exc:  # noqa: BLE001
+            elapsed_ms = int((_time.monotonic() - started) * 1000)
+            status = llm_liveness.diag.classify_exception(exc)
+            return (
+                status,
+                {
+                    "latency_ms": elapsed_ms,
+                    "error": llm_liveness.diag.redact(f"{type(exc).__name__}: {exc}"),
+                    "error_category": status,
+                    "suggestion": llm_liveness.diag.suggestion_for(status),
+                },
+            )
+
+    raw = await llm_liveness.run_liveness_pool(
+        tasks,
+        runner,
+        global_concurrency=payload.global_concurrency,
+        provider_concurrency=llm_liveness.DEFAULT_PROVIDER_CONCURRENCY,
+    )
+
+    items = [
+        LivenessResultItem(
+            provider_id=r["provider_id"],
+            provider_name=r["provider_name"],
+            model_id=r["model_id"],
+            status=r["status"],
+            latency_ms=int(r.get("latency_ms") or 0),
+            input_tokens=int(r.get("input_tokens") or 0),
+            output_tokens=int(r.get("output_tokens") or 0),
+            preview=r.get("preview"),
+            error=r.get("error"),
+            error_category=r.get("error_category"),
+            suggestion=r.get("suggestion"),
+            effective_api_format=r.get("effective_api_format"),
+            skipped=bool(r.get("skipped")),
+        )
+        for r in raw
+    ]
+    healthy = sum(1 for i in items if i.status == llm_liveness.diag.DIAG_HEALTHY)
+    cancelled = sum(1 for i in items if i.status == llm_liveness.diag.DIAG_CANCELLED)
+    skipped = sum(1 for i in items if i.skipped and i.status != llm_liveness.diag.DIAG_CANCELLED)
+    failed = len(items) - healthy - cancelled - skipped
+    return FullLivenessRunResponse(
+        task_total=len(items),
+        healthy=healthy,
+        failed=failed,
+        skipped=skipped,
+        cancelled=cancelled,
+        results=items,
+    )
+
+
+def _liveness_status_from_error(exc: Any) -> str:
+    """把 LLMError 映射为诊断状态（用于测活结果分类）。"""
+    text = str(exc).lower()
+    if "429" in text or "rate" in text or "too many" in text:
+        return llm_liveness.diag.DIAG_RATE_LIMITED
+    if "401" in text or "unauthor" in text or "api key" in text:
+        return llm_liveness.diag.DIAG_AUTH_FAILED
+    if "timeout" in text or "timed out" in text:
+        return llm_liveness.diag.DIAG_TIMEOUT
+    if "空" in text or "empty" in text:
+        return llm_liveness.diag.DIAG_EMPTY_RESPONSE
+    return llm_liveness.diag.DIAG_UPSTREAM_ERROR
 
 
 __all__ = ["router"]

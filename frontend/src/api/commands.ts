@@ -14,6 +14,10 @@ import type {
   FetchModelsPreviewRequest,
   FetchModelsPreviewResponse,
   FetchModelsResponse,
+  FullLivenessPreviewRequest,
+  FullLivenessPreviewResponse,
+  FullLivenessRunRequest,
+  FullLivenessRunResponse,
   LLMProviderCreate,
   LLMProviderOut,
   LLMProviderUpdate,
@@ -165,6 +169,34 @@ export async function chatTestProviderModels(
     payload,
     {
       timeout: (payload.timeout_seconds ?? 90) * 1000 + TEST_REQUEST_TIMEOUT_MARGIN_MS,
+      signal: opts?.signal,
+    },
+  );
+  return data;
+}
+
+/** 全量已启用模型测活执行预览（只读，不调用上游、不消耗 quota）。 */
+export async function fullLivenessPreview(
+  payload: FullLivenessPreviewRequest,
+): Promise<FullLivenessPreviewResponse> {
+  const { data } = await api.post<FullLivenessPreviewResponse>(
+    "/api/commands/llm-providers/liveness/preview",
+    payload,
+    { timeout: LLM_PROVIDER_OPERATION_TIMEOUT_MS },
+  );
+  return data;
+}
+
+/** 按已启用模型执行全量 / 范围测活；返回脱敏诊断结果汇总。 */
+export async function fullLivenessRun(
+  payload: FullLivenessRunRequest,
+  opts?: { signal?: AbortSignal },
+): Promise<FullLivenessRunResponse> {
+  const { data } = await api.post<FullLivenessRunResponse>(
+    "/api/commands/llm-providers/liveness/run",
+    payload,
+    {
+      timeout: (payload.timeout_seconds ?? 90) * 1000 * 4 + TEST_REQUEST_TIMEOUT_MARGIN_MS,
       signal: opts?.signal,
     },
   );
