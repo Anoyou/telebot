@@ -155,6 +155,43 @@ class LLMProviderDTO:
             return True
         return bool(self.api_key_enc)
 
+    def enabled_model_ids(self) -> list[str]:
+        """严格返回 models[].enabled == True 的模型 id（顺序保留、去重）。"""
+        out: list[str] = []
+        seen: set[str] = set()
+        for item in self.models or []:
+            if not isinstance(item, dict) or not bool(item.get("enabled")):
+                continue
+            mid = str(item.get("id") or "").strip()
+            if mid and mid not in seen:
+                seen.add(mid)
+                out.append(mid)
+        return out
+
+    def has_model_list(self) -> bool:
+        """是否声明了显式 models 清单（至少一条带 id）。"""
+        return any(
+            isinstance(m, dict) and str(m.get("id") or "").strip()
+            for m in (self.models or [])
+        )
+
+    def pick_enabled_model(self) -> str | None:
+        """为该 provider 选一个可用模型（fallback 重选模型时用）。
+
+        - 有 enabled 模型：default_model∈enabled 优先，否则第一个 enabled。
+        - 有显式清单但全部禁用：返回 None（该 provider 无可用模型）。
+        - 无显式清单（老配置）：回落 default_model。
+        """
+        enabled = self.enabled_model_ids()
+        default_model = str(self.default_model or "").strip()
+        if enabled:
+            if default_model and default_model in enabled:
+                return default_model
+            return enabled[0]
+        if self.has_model_list():
+            return None
+        return default_model or None
+
     def capabilities_for_model(self, model: str):
         """Apply optional model metadata over protocol-level capabilities."""
 

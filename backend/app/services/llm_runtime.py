@@ -343,6 +343,12 @@ async def call_with_fallback(
     timeout_seconds: int | None = None,
     native_image: bool = False,
     *,
+    # 阶段 F 收口 #6：区分「用户固定模型」与「Router 自动模型」。
+    #   - override_model：用户/模板显式固定的模型，对所有 provider 生效（原行为）。
+    #   - routed_model：auto 路由为 primary 选出的模型；仅作 primary 的提示，
+    #     fallback 切换 provider 后必须**按新 provider 重选** enabled 模型，
+    #     绝不把 primary 的模型 ID 硬套到 fallback provider 上。
+    routed_model: str | None = None,
     # 隐私控制
     log_prompt_preview: bool = False,  # 设为 True 时只记录前 100 字符
     client_factory: Callable[..., Any | Awaitable[Any]] | None = None,
@@ -388,7 +394,24 @@ async def call_with_fallback(
 
     for idx, provider_dto in enumerate(all_providers):
         is_fallback = idx > 0
-        model = override_model or provider_dto.default_model
+        # 阶段 F 收口 #6：解析本 provider 实际使用的模型。
+        #   - override_model（用户固定）：所有 provider 都用它（原行为）。
+        #   - 否则若 routed_model 存在（auto 路由）：primary 用 routed_model，
+        #     fallback provider 按自身 enabled 集重选，避免硬套 primary 模型 ID。
+        #   - 都没有：回落 provider.default_model。
+        if override_model:
+            effective_model = override_model
+        elif routed_model and not is_fallback:
+            effective_model = routed_model
+        elif routed_model and is_fallback:
+            # fallback provider 按自身 enabled 集重选，避免硬套 primary 模型 ID。
+            effective_model = provider_dto.pick_enabled_model() or provider_dto.default_model
+        else:
+            # 既无用户固定模型、也无 auto 路由模型：保持旧契约，传 None 让
+            # build_client 用 provider.default_model（inline @name 场景依赖此行为）。
+            effective_model = None
+        # 用于日志 / 能力校验 / usage 记录的模型名（effective_model 为 None 时回落展示）。
+        model = effective_model or provider_dto.default_model
         capability_errors = _legacy_capability_errors(
             provider_dto,
             model=model,
@@ -442,7 +465,7 @@ async def call_with_fallback(
             "[llm-runtime] 尝试 provider=%s (fallback=%s) model=%s",
             provider_dto.name,
             is_fallback,
-            override_model or provider_dto.default_model,
+            model,
         )
 
         # 记录本次 provider 尝试的墙钟耗时（含重试退避），成功/失败都写入 usage.latency_ms
@@ -452,7 +475,7 @@ async def call_with_fallback(
                 provider_dto,
                 system,
                 user,
-                override_model=override_model,
+                override_model=effective_model,
                 max_tokens=max_tokens,
                 images=images,
                 web_search=web_search,
@@ -532,7 +555,7 @@ async def call_with_fallback(
                     account_id=account_id,
                     triggered_by_account_id=triggered_by_account_id,
                     provider_name=provider_dto.name,
-                    model=override_model or provider_dto.default_model,
+                    model=model,
                     latency_ms=latency_ms,
                     success=False,
                     error_type=error_type,

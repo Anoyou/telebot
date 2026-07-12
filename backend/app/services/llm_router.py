@@ -180,20 +180,31 @@ def _enabled_models_of(p: dict[str, Any]) -> list[str]:
     return out
 
 
+def _has_model_list(p: dict[str, Any]) -> bool:
+    """provider 是否声明了显式 models 清单（哪怕只有一条）。"""
+    return bool([m for m in (p.get("models") or []) if isinstance(m, dict) and str(m.get("id") or "").strip()])
+
+
 def _pick_model_for(p: dict[str, Any]) -> str | None:
     """为选中的 provider 选一个已启用模型。
 
-    优先 default_model（若它在已启用集合里或没有显式启用清单），否则取第一个已启用
-    模型；都没有则返回 None（上层回落 provider.default_model）。
+    边界（阶段 F 收口 #5）：
+    - 有显式 models 清单且有 enabled：default_model∈enabled 优先，否则第一个 enabled。
+    - 有显式 models 清单但**全部禁用**：返回 None——该 provider 无可用模型，不得
+      回落 default_model（回落会绕过用户的启用开关）。
+    - **没有**显式 models 清单（老 provider）：向后兼容，回落 default_model。
     """
     enabled = _enabled_models_of(p)
     default_model = str(p.get("default_model") or "").strip()
-    if not enabled:
-        # 没有显式启用清单：沿用 default_model（None 交由上层回落）。
-        return default_model or None
-    if default_model and default_model in enabled:
-        return default_model
-    return enabled[0]
+    if enabled:
+        if default_model and default_model in enabled:
+            return default_model
+        return enabled[0]
+    if _has_model_list(p):
+        # 有清单但全禁用 → 不可用（None）。
+        return None
+    # 无清单：老配置，沿用 default_model。
+    return default_model or None
 
 
 def _finalize_decision(decision: RoutingDecision, providers: dict[int, dict[str, Any]]) -> RoutingDecision:
@@ -463,10 +474,12 @@ async def _pick_provider_impl(
     Raises:
         ValueError: 没有任何可用 provider（候选池空 / 全无 api_key）
     """
-    # 仅留有 api_key 的 provider（ollama 例外）
-    candidates = [p for p in providers.values() if _has_api_key(p)]
+    # 仅留有 api_key 且有可用模型的 provider（ollama 例外）。
+    # 阶段 F 收口 #5：候选必须能选出一个已启用模型（老配置无清单时回落 default_model），
+    # 有清单但全禁用的 provider 不参与路由。
+    candidates = [p for p in providers.values() if _has_api_key(p) and _pick_model_for(p)]
     if not candidates:
-        raise ValueError("没有任何可用 provider（候选池为空或全部未配 api_key）")
+        raise ValueError("没有任何可用 provider（候选池为空、全部未配 api_key、或无已启用模型）")
 
     # 1) 规则层
     rule = _rule_route(user_q, replied_text, has_replied_photo, candidates)
@@ -495,10 +508,10 @@ async def _pick_provider_impl(
                         label,
                     )
 
-    # 3) fallback_provider_id
+    # 3) fallback_provider_id（同样要求有可用模型，避免绕过启用开关）
     if fallback_provider_id is not None:
         fp = providers.get(int(fallback_provider_id))
-        if fp is not None and _has_api_key(fp):
+        if fp is not None and _has_api_key(fp) and _pick_model_for(fp):
             return RoutingDecision(
                 int(fp["id"]),
                 "fallback (no rule/classifier match)",

@@ -151,6 +151,7 @@ class _LLMRequestSettings:
     reasoning_effort: str | None
     timeout_seconds: int | None
     override_model: str | None
+    routed_model: str | None = None
 
 
 def _build_llm_request_settings(
@@ -181,18 +182,22 @@ def _build_llm_request_settings(
     )
     system = base_system if native_image_mode else base_system + anti_hallucination
 
-    # 决策 override_model 优先级：
-    #   1. inline @name:model 显式指定 → 用该 model
-    #   2. inline @name（未指定 model）→ 清空 override，让 build_client 用 provider.default_model
-    #   3. 都没 inline override → 用模板配置的 model（可能为 None）
+    # 决策 model 优先级（阶段 F 收口 #6：区分"用户固定"与"auto 路由"）：
+    #   1. inline @name:model 显式指定 → 用户固定 override_model（所有 provider 都用）
+    #   2. inline @name（未指定 model）→ 清空 override，用 provider.default_model
+    #   3. 模板固定了 cfg.model → 用户固定 override_model
+    #   4. 否则 auto 路由选出的 routed_model → 只作为"建议模型"，fallback 时每个
+    #      provider 按自身 enabled 集重选（不作为全局 override）。
+    effective_override: str | None = None
+    effective_routed: str | None = None
     if inline_model_override:
-        override_model = inline_model_override
+        effective_override = inline_model_override
     elif inline_provider_override is not None:
-        override_model = None
+        effective_override = None
+    elif cfg.get("model"):
+        effective_override = cfg.get("model")
     else:
-        # 阶段 D：模板未固定 model 时，用 auto 路由选出的已启用模型；
-        # 都没有则回落到 provider.default_model（override_model=None）。
-        override_model = cfg.get("model") or routed_model
+        effective_routed = routed_model
 
     return _LLMRequestSettings(
         system=system,
@@ -200,7 +205,8 @@ def _build_llm_request_settings(
         temperature=_optional_float(cfg.get("temperature"), min_value=0.0, max_value=2.0),
         reasoning_effort=_optional_reasoning_effort(cfg.get("reasoning_effort")),
         timeout_seconds=_optional_int(cfg.get("timeout_seconds"), min_value=5, max_value=600),
-        override_model=override_model,
+        override_model=effective_override,
+        routed_model=effective_routed,
     )
 
 
@@ -279,6 +285,7 @@ async def _call_llm_provider(
     system: str,
     user_msg: str,
     override_model: str | None,
+    routed_model: str | None = None,
     max_tokens: int,
     image_bytes_list: list[bytes],
     native_image_mode: bool,
@@ -317,6 +324,7 @@ async def _call_llm_provider(
             system,
             user_msg,
             override_model=override_model,
+            routed_model=routed_model,
             max_tokens=max_tokens,
             images=image_bytes_list or None,
             web_search=web_search,

@@ -32,6 +32,7 @@ async def invoke(
     user: str,
     *,
     override_model: str | None = None,
+    routed_model: str | None = None,
     max_tokens: int = 512,
     images: list[bytes] | None = None,
     web_search: bool = False,
@@ -47,7 +48,12 @@ async def invoke(
     matched_tag: str | None = None,
     client_factory: Callable[..., Any | Awaitable[Any]] | None = None,
 ) -> tuple[LLMResult, LLMProviderDTO, bool]:
-    """Call a standard LLM provider with shared fallback / retry / usage logic."""
+    """Call a standard LLM provider with shared fallback / retry / usage logic.
+
+    ``override_model`` 是用户固定模型（对所有 provider 生效）；``routed_model`` 是
+    auto 路由为 primary 选出的已启用模型——fallback 切换 provider 时按各自 enabled
+    集重选，不硬套 primary 的模型 ID（阶段 F 收口 #6）。
+    """
 
     chain = build_fallback_chain(
         primary_provider,
@@ -89,6 +95,7 @@ async def invoke(
         system,
         user,
         override_model=override_model,
+        routed_model=routed_model,
         max_tokens=max_tokens,
         images=images,
         web_search=web_search,
