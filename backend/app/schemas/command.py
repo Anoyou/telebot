@@ -551,15 +551,42 @@ class DetectProviderProtocolsRequest(BaseModel):
     proxy_id: int | None = Field(default=None, ge=1)
     pid: int | None = Field(default=None, ge=1)
     model: str | None = Field(default=None, max_length=128)
+    # 阶段 B：可选自然提示词；不传则用稳定默认。探测使用自然语言而非字面量 ping。
+    system_prompt: str | None = Field(default=None, max_length=2000)
+    message: str | None = Field(default=None, max_length=2000)
 
 
 class ProtocolProbeResult(BaseModel):
-    """单个 API 协议探测结果。"""
+    """单个 API 协议探测结果。
+
+    阶段 B 起补充身份、阶段与结构化错误分类字段（全部可选，向后兼容）。
+    """
 
     ok: bool
     status_code: int | None = None
     latency_ms: int
     error: str | None = None
+    # 阶段 B：本次探测使用的客户端身份档案（openai_sdk / codex_cli / claude_code / minimal ...）。
+    client_identity_profile: str | None = None
+    # 探测阶段：network / credentials / protocol / identity。
+    stage: str | None = None
+    # 结构化错误分类（见 llm_identity / 诊断状态枚举）。
+    error_category: str | None = None
+    # 面向用户的修复建议（脱敏）。
+    suggestion: str | None = None
+
+
+class ProtocolIdentityAttempt(BaseModel):
+    """某协议下按身份顺序的单次身份尝试结果。"""
+
+    api_format: str
+    client_identity_profile: str
+    ok: bool
+    status_code: int | None = None
+    latency_ms: int = 0
+    error_category: str | None = None
+    error: str | None = None
+    suggestion: str | None = None
 
 
 class DetectProviderProtocolsResponse(BaseModel):
@@ -570,6 +597,9 @@ class DetectProviderProtocolsResponse(BaseModel):
     anthropic_messages: ProtocolProbeResult
     models: ProtocolProbeResult
     recommended_api_format: str | None = None
+    # 阶段 B：推荐客户端身份 + 每协议身份尝试列表。
+    recommended_client_identity_profile: str | None = None
+    identity_attempts: list[ProtocolIdentityAttempt] = Field(default_factory=list)
     recommended_web_search_api_format: str = LLM_WEB_SEARCH_API_FORMAT_AUTO
     note: str | None = None
 

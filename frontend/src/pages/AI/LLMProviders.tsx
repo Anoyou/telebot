@@ -1270,8 +1270,11 @@ function ProviderEditDialog({
           protocol_profile:
             recommendedApiFormat === "anthropic_messages" ? form.protocol_profile : "standard",
           web_search_api_format: (resp.recommended_web_search_api_format || "auto") as LLMWebSearchApiFormat,
+          client_identity_profile:
+            (resp.recommended_client_identity_profile as LLMClientIdentityProfile) ||
+            form.client_identity_profile,
         });
-        toast.success("已检测并填入推荐协议");
+        toast.success("已检测并填入推荐协议与客户端身份");
       } else {
         toast.warning("没有检测到推荐协议，请查看探测详情");
       }
@@ -1671,6 +1674,12 @@ function ProtocolDetectionPanel({ result }: { result: DetectProviderProtocolsRes
         {result.recommended_api_format ? (
           <div className="text-muted-foreground">
             推荐：<MetaBadge mono>{result.recommended_api_format}</MetaBadge>
+            {result.recommended_client_identity_profile ? (
+              <>
+                {" "}· 身份{" "}
+                <MetaBadge mono>{result.recommended_client_identity_profile}</MetaBadge>
+              </>
+            ) : null}
             {" "}· 联网{" "}
             <MetaBadge mono>
               {result.recommended_web_search_api_format || "auto"}
@@ -1685,6 +1694,33 @@ function ProtocolDetectionPanel({ result }: { result: DetectProviderProtocolsRes
         <ProbeRow label="responses" probe={result.responses} />
         <ProbeRow label="anthropic/messages" probe={result.anthropic_messages} />
       </div>
+      {result.identity_attempts && result.identity_attempts.length > 0 ? (
+        <details className="mt-2">
+          <summary className="cursor-pointer text-muted-foreground">
+            身份尝试详情（{result.identity_attempts.length}）
+          </summary>
+          <div className="mt-1.5 space-y-1">
+            {result.identity_attempts.map((a, i) => (
+              <div
+                key={`${a.api_format}-${a.client_identity_profile}-${i}`}
+                className="flex flex-wrap items-center gap-1.5 rounded-md border bg-background px-2 py-1"
+              >
+                <MetaBadge mono>{a.api_format}</MetaBadge>
+                <MetaBadge mono>{a.client_identity_profile}</MetaBadge>
+                <MetaBadge mono tone={a.ok ? "success" : "warn"}>
+                  {a.ok ? "OK" : a.status_code ? `HTTP ${a.status_code}` : "FAIL"}
+                </MetaBadge>
+                {a.error_category ? (
+                  <span className="text-muted-foreground">{a.error_category}</span>
+                ) : null}
+                {a.suggestion ? (
+                  <span className="w-full break-words text-muted-foreground">{a.suggestion}</span>
+                ) : null}
+              </div>
+            ))}
+          </div>
+        </details>
+      ) : null}
     </div>
   );
 }

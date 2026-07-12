@@ -37,12 +37,18 @@ from ..schemas.command import (
     LLMProviderCreate,
     LLMProviderOut,
     LLMProviderUpdate,
+    ProtocolIdentityAttempt,
     ProtocolProbeResult,
     TestModelRequest,
     TestModelResponse,
 )
-from ..services import audit, command_service
+from ..services import audit, command_service, llm_diagnostics
 from ..services.ai_feature import is_ai_enabled
+from ..services.llm_identity import (
+    IDENTITY_PROBE_ORDER,
+    default_identity_for_format,
+    resolve_identity,
+)
 from ..services.llm_protocol import normalize_base_url, provider_endpoint, provider_models_endpoint
 
 router = APIRouter(tags=["commands"])
@@ -627,6 +633,48 @@ async def detect_provider_protocols(
     else:
         client_kwargs["trust_env"] = False
 
+    # 阶段 B：使用自然提示词（而非字面量 ping）与足够输出上限（64 tokens）。
+    probe_system = (payload.system_prompt or "").strip() or "You are a helpful assistant. Answer briefly."
+    probe_message = (payload.message or "").strip() or "用一句话简单介绍你自己。"
+    probe_max_tokens = 64
+
+    def _probe_body(api_format: str) -> dict:
+        if api_format == "responses":
+            return {
+                "model": model,
+                "instructions": probe_system,
+                "input": [{"role": "user", "content": probe_message}],
+                "max_output_tokens": probe_max_tokens,
+            }
+        if api_format == "anthropic_messages":
+            return {
+                "model": model,
+                "max_tokens": probe_max_tokens,
+                "system": probe_system,
+                "messages": [{"role": "user", "content": probe_message}],
+            }
+        return {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": probe_system},
+                {"role": "user", "content": probe_message},
+            ],
+            "max_tokens": probe_max_tokens,
+        }
+
+    def _identity_headers(api_format: str, identity_profile: str) -> dict[str, str]:
+        """构造某协议 + 身份的探测请求头（含 UA / 身份头 + 鉴权 + 协议必需头）。"""
+        headers: dict[str, str] = {"Content-Type": "application/json"}
+        identity = resolve_identity(identity_profile, api_format)
+        headers.update(identity.headers())
+        if api_format == "anthropic_messages":
+            headers["anthropic-version"] = "2023-06-01"
+            if api_key:
+                headers["x-api-key"] = api_key
+        elif api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+        return headers
+
     async def probe_models(cli: httpx.AsyncClient) -> ProtocolProbeResult:
         headers = {"Accept": "application/json"}
         if api_key:
@@ -638,85 +686,77 @@ async def detect_provider_protocols(
                 headers=headers,
             )
             latency_ms = int((_time.monotonic() - started) * 1000)
-            return _probe_result(resp, latency_ms, api_key=api_key)
+            return _probe_result(resp, latency_ms, api_key=api_key, base_url=base_url, stage="credentials")
         except httpx.HTTPError as exc:
             return _probe_error(exc, started)
 
-    async def probe_chat(cli: httpx.AsyncClient) -> ProtocolProbeResult:
-        headers = {"Content-Type": "application/json"}
-        if api_key:
-            headers["Authorization"] = f"Bearer {api_key}"
-        body = {
-            "model": model,
-            "messages": [{"role": "user", "content": "ping"}],
-            "max_tokens": 1,
-        }
+    async def probe_with_identity(
+        cli: httpx.AsyncClient,
+        api_format: str,
+        identity_profile: str,
+    ) -> ProtocolProbeResult:
+        headers = _identity_headers(api_format, identity_profile)
+        body = _probe_body(api_format)
         started = _time.monotonic()
         try:
             resp = await cli.post(
-                provider_endpoint(base_url, "chat_completions"),
+                provider_endpoint(base_url, api_format),
                 headers=headers,
                 json=body,
             )
             latency_ms = int((_time.monotonic() - started) * 1000)
-            return _probe_result(resp, latency_ms, api_key=api_key)
-        except httpx.HTTPError as exc:
-            return _probe_error(exc, started)
-
-    async def probe_responses(cli: httpx.AsyncClient) -> ProtocolProbeResult:
-        headers = {"Content-Type": "application/json"}
-        if api_key:
-            headers["Authorization"] = f"Bearer {api_key}"
-        body = {
-            "model": model,
-            "input": [{"role": "user", "content": "ping"}],
-            "max_output_tokens": 1,
-        }
-        started = _time.monotonic()
-        try:
-            resp = await cli.post(
-                provider_endpoint(base_url, "responses"),
-                headers=headers,
-                json=body,
+            result = _probe_result(
+                resp, latency_ms, api_key=api_key, base_url=base_url, stage="protocol"
             )
-            latency_ms = int((_time.monotonic() - started) * 1000)
-            if _probe_unsupported_parameter(resp, "max_output_tokens"):
-                result = _probe_result(resp, latency_ms, api_key=api_key)
+            result.client_identity_profile = identity_profile
+            if (
+                api_format == "responses"
+                and _probe_unsupported_parameter(resp, "max_output_tokens")
+            ):
                 result.error = "该 Responses 接口拒绝 max_output_tokens；为避免失去输出与成本上限，运行时不会自动省略该参数。"
-                return result
-            return _probe_result(resp, latency_ms, api_key=api_key)
+            return result
         except httpx.HTTPError as exc:
-            return _probe_error(exc, started)
+            result = _probe_error(exc, started)
+            result.client_identity_profile = identity_profile
+            return result
 
-    async def probe_anthropic(cli: httpx.AsyncClient) -> ProtocolProbeResult:
-        headers = {
-            "Content-Type": "application/json",
-            "anthropic-version": "2023-06-01",
-        }
-        if api_key:
-            headers["x-api-key"] = api_key
-        body = {
-            "model": model,
-            "messages": [{"role": "user", "content": "ping"}],
-            "max_tokens": 1,
-        }
-        started = _time.monotonic()
-        try:
-            resp = await cli.post(
-                provider_endpoint(base_url, "anthropic_messages"),
-                headers=headers,
-                json=body,
+    async def probe_protocol(
+        cli: httpx.AsyncClient, api_format: str
+    ) -> tuple[ProtocolProbeResult, list[ProtocolIdentityAttempt]]:
+        """按身份顺序探测某协议；标准身份成功即停止，不再尝试其它身份。"""
+        attempts: list[ProtocolIdentityAttempt] = []
+        best: ProtocolProbeResult | None = None
+        for identity_profile in IDENTITY_PROBE_ORDER.get(api_format, ("minimal",)):
+            result = await probe_with_identity(cli, api_format, identity_profile)
+            attempts.append(
+                ProtocolIdentityAttempt(
+                    api_format=api_format,
+                    client_identity_profile=identity_profile,
+                    ok=result.ok,
+                    status_code=result.status_code,
+                    latency_ms=result.latency_ms,
+                    error_category=result.error_category,
+                    error=result.error,
+                    suggestion=result.suggestion,
+                )
             )
-            latency_ms = int((_time.monotonic() - started) * 1000)
-            return _probe_result(resp, latency_ms, api_key=api_key)
-        except httpx.HTTPError as exc:
-            return _probe_error(exc, started)
+            if best is None or result.ok:
+                best = result
+            if result.ok:
+                break
+            # 只有明确的 client_rejected 才继续尝试下一个身份；
+            # 401/429/超时/5xx 不换身份（换身份无意义且可能重复计费/触发限流）。
+            if result.error_category != llm_diagnostics.DIAG_CLIENT_REJECTED:
+                break
+        return (best or ProtocolProbeResult(ok=False, latency_ms=0), attempts)
 
+    identity_attempts: list[ProtocolIdentityAttempt] = []
     async with httpx.AsyncClient(**client_kwargs) as cli:
         models = await probe_models(cli)
-        chat = await probe_chat(cli)
-        responses = await probe_responses(cli)
-        anthropic = await probe_anthropic(cli)
+        chat, chat_attempts = await probe_protocol(cli, "chat_completions")
+        responses, responses_attempts = await probe_protocol(cli, "responses")
+        anthropic, anthropic_attempts = await probe_protocol(cli, "anthropic_messages")
+    identity_attempts = chat_attempts + responses_attempts + anthropic_attempts
 
     recommended_api_format: str | None = None
     recommended_web_search_api_format = "auto"
@@ -751,6 +791,22 @@ async def detect_provider_protocols(
         else:
             note = "未探测到可用聊天协议；请检查 Base URL、API Key、模型 ID 或代理。"
 
+    # 阶段 B：推荐身份 = 推荐协议下探测成功所用的身份；无则按协议 auto 默认。
+    recommended_client_identity_profile: str | None = None
+    if recommended_api_format:
+        result_by_format = {
+            "chat_completions": chat,
+            "responses": responses,
+            "anthropic_messages": anthropic,
+        }
+        chosen = result_by_format.get(recommended_api_format)
+        if chosen is not None and chosen.ok and chosen.client_identity_profile:
+            recommended_client_identity_profile = chosen.client_identity_profile
+        else:
+            recommended_client_identity_profile = default_identity_for_format(
+                recommended_api_format
+            )
+
     await audit.write(
         db,
         user.id,
@@ -762,6 +818,7 @@ async def detect_provider_protocols(
             "responses": responses.ok,
             "anthropic": anthropic.ok,
             "models": models.ok,
+            "recommended_identity": recommended_client_identity_profile,
         },
     )
     await db.commit()
@@ -772,21 +829,52 @@ async def detect_provider_protocols(
         anthropic_messages=anthropic,
         models=models,
         recommended_api_format=recommended_api_format,
+        recommended_client_identity_profile=recommended_client_identity_profile,
+        identity_attempts=identity_attempts,
         recommended_web_search_api_format=recommended_web_search_api_format,
         note=note,
     )
 
 
-def _probe_result(resp: httpx.Response, latency_ms: int, *, api_key: str) -> ProtocolProbeResult:
+def _probe_result(
+    resp: httpx.Response,
+    latency_ms: int,
+    *,
+    api_key: str,
+    base_url: str | None = None,
+    stage: str | None = None,
+) -> ProtocolProbeResult:
+    from ..services import llm_diagnostics as diag
+
     if resp.status_code < 400:
-        return ProtocolProbeResult(ok=True, status_code=resp.status_code, latency_ms=latency_ms)
-    body = resp.text[:220]
-    if api_key:
-        body = body.replace(api_key, "<redacted>")
+        # 成功 HTTP，但仍需识别空响应 / 非 JSON（不算协议不通，标记 error_category 供参考）。
+        text = resp.text or ""
+        error_category: str | None = None
+        error: str | None = None
+        if not text.strip():
+            error_category = diag.DIAG_EMPTY_RESPONSE
+            error = "上游返回空响应体。"
+        elif not diag.is_valid_json(text):
+            # 非 JSON 成功响应：多数协议端点应返回 JSON；标记但不判定协议失败。
+            error_category = diag.DIAG_EMPTY_RESPONSE
+            error = "上游返回非 JSON 响应体。"
+        return ProtocolProbeResult(
+            ok=True,
+            status_code=resp.status_code,
+            latency_ms=latency_ms,
+            stage=stage,
+            error_category=error_category,
+            error=error,
+        )
+    body = diag.redact(resp.text, api_key=api_key or None, base_url=base_url)
+    category = diag.classify_status_code(resp.status_code, resp.text or "")
     return ProtocolProbeResult(
         ok=False,
         status_code=resp.status_code,
         latency_ms=latency_ms,
+        stage=stage,
+        error_category=category,
+        suggestion=diag.suggestion_for(category),
         error=f"HTTP {resp.status_code}: {body}",
     )
 
@@ -808,11 +896,15 @@ def _probe_unsupported_parameter(resp: httpx.Response, parameter: str) -> bool:
 
 
 def _probe_error(exc: httpx.HTTPError, started: float) -> ProtocolProbeResult:
+    category = llm_diagnostics.classify_exception(exc)
     return ProtocolProbeResult(
         ok=False,
         status_code=None,
         latency_ms=int((_time.monotonic() - started) * 1000),
         error=f"{type(exc).__name__}: {str(exc) or '(无详情；常见 SSL/DNS/代理问题)'}",
+        stage="network",
+        error_category=category,
+        suggestion=llm_diagnostics.suggestion_for(category),
     )
 
 

@@ -1536,6 +1536,9 @@ export interface DetectProviderProtocolsRequest {
   proxy_id?: number | null;
   pid?: number | null;
   model?: string | null;
+  /** 阶段 B：可选自然提示词；不传用稳定默认 */
+  system_prompt?: string | null;
+  message?: string | null;
 }
 
 export interface ProtocolProbeResult {
@@ -1543,6 +1546,26 @@ export interface ProtocolProbeResult {
   status_code?: number | null;
   latency_ms: number;
   error?: string | null;
+  /** 阶段 B：本次探测所用客户端身份 */
+  client_identity_profile?: string | null;
+  /** 探测阶段：network / credentials / protocol / identity */
+  stage?: string | null;
+  /** 结构化错误分类 */
+  error_category?: string | null;
+  /** 脱敏修复建议 */
+  suggestion?: string | null;
+}
+
+/** 某协议下按身份顺序的单次身份尝试结果 */
+export interface ProtocolIdentityAttempt {
+  api_format: string;
+  client_identity_profile: string;
+  ok: boolean;
+  status_code?: number | null;
+  latency_ms: number;
+  error_category?: string | null;
+  error?: string | null;
+  suggestion?: string | null;
 }
 
 export interface DetectProviderProtocolsResponse {
@@ -1551,6 +1574,10 @@ export interface DetectProviderProtocolsResponse {
   anthropic_messages: ProtocolProbeResult;
   models: ProtocolProbeResult;
   recommended_api_format?: LLMApiFormat | string | null;
+  /** 阶段 B：推荐客户端身份 */
+  recommended_client_identity_profile?: LLMClientIdentityProfile | string | null;
+  /** 阶段 B：每协议身份尝试列表 */
+  identity_attempts?: ProtocolIdentityAttempt[];
   recommended_web_search_api_format: LLMWebSearchApiFormat | string;
   note?: string | null;
 }
