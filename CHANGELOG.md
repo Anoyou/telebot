@@ -20,6 +20,8 @@
 
 ## [Unreleased]
 
+## [0.57.0] — 2026-07-13 · minor（次要版本） · LLM 客户端身份、测活与统一路由
+
 ### Added
 - 阶段 A（LLM 客户端身份基础层）：新增 `client_identity_profile` Provider 字段（数据库列 + Alembic 0040 + CHECK 约束 + Schema/DTO/前端表单），并建立集中式客户端身份目录 `services/llm_identity.py`。身份依据"本次实际协议"解析：`auto` 在 chat_completions→OpenAI SDK、responses→Codex CLI、anthropic_messages→Claude Code 之间映射，`api_format_override`（联网搜索、生图）覆盖协议后同步重算身份。三个协议 Client 统一接收身份档案并停止发送 TelePilot 产品 UA；`minimal` 只发协议必需头、不模拟任何产品客户端。`protocol_profile` 与 `client_identity_profile` 相互独立，切换身份不会打开 beta。配置备份导入未知身份值降级为 `auto` 而非拒绝整份备份。产品身份 UA/originator/x-app 均来自本机安装的真实客户端与上游开源实现（Codex CLI `codex_cli_rs`、Claude Code `claude-cli` + `x-app: cli`、OpenAI Python SDK），无法验证的 Codex/Claude Desktop 档案保持不可选。
 - 阶段 B（身份感知协议检测）：协议检测改用自然语言提示词与 64 token 输出上限（不再用字面量 `ping`）；三种协议各自按身份顺序探测（chat→openai_sdk→minimal、responses→codex_cli→minimal、anthropic→claude_code→minimal），标准身份成功即停止，仅在明确 `client_rejected` 时才尝试下一个身份，401/429/超时/5xx 不换身份。新增诊断分类模块 `services/llm_diagnostics.py`，把 401/403/404/429/5xx/超时/空响应/非 JSON 归类为结构化 `diagnostic_status` 并给出脱敏中文建议；检测响应新增每协议身份尝试列表、推荐客户端身份、阶段与错误分类，前端检测面板同步展示推荐身份与被拒身份提示。所有错误文本剥离 api_key / base_url。
