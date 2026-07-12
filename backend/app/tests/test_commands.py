@@ -18,6 +18,7 @@ import httpx
 import pytest
 from fastapi import HTTPException
 
+from app.api import commands as commands_api
 from app.crypto import decrypt_str, encrypt_str
 from app.db.models.command import LLMProvider, normalize_protocol_profile
 from app.schemas.command import (
@@ -92,6 +93,25 @@ def test_provider_to_out_no_key() -> None:
     )
     out = _provider_to_out(row)
     assert out.has_api_key is False
+
+
+def test_liveness_transport_metadata_resolves_effective_identity() -> None:
+    """测活结果必须返回 auto 解析后的真实客户端，而不是配置字面值。"""
+    row = LLMProvider(
+        id=3,
+        name="responses-auto",
+        provider="openai",
+        api_key_enc=encrypt_str("sk-test-effective-identity"),
+        base_url="https://api.example.test/v1",
+        default_model="gpt-5",
+        api_format="responses",
+        client_identity_profile="auto",
+    )
+
+    assert commands_api._liveness_transport_metadata(row) == {
+        "effective_api_format": "responses",
+        "client_identity_profile": "codex_cli",
+    }
 
 
 # ════════════════════════════════════════════════════════════

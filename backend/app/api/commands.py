@@ -1416,6 +1416,19 @@ def _liveness_result_items(raw: list[dict[str, Any]]) -> list[LivenessResultItem
     ]
 
 
+def _liveness_transport_metadata(row: Any) -> dict[str, str | None]:
+    """返回本次测活真正采用的协议与客户端身份。"""
+    effective_api_format = getattr(row, "api_format", None)
+    effective_identity = llm_identity.resolve_identity(
+        getattr(row, "client_identity_profile", None),
+        effective_api_format,
+    ).profile
+    return {
+        "effective_api_format": effective_api_format,
+        "client_identity_profile": effective_identity,
+    }
+
+
 def _liveness_snapshot_response(job: llm_liveness.LivenessJob) -> FullLivenessRunResponse:
     snap = job.snapshot()
     return FullLivenessRunResponse(
@@ -1481,6 +1494,7 @@ async def full_liveness_run(
             return (llm_liveness.diag.DIAG_SKIPPED_PROVIDER_MISSING, {"skipped": True})
         started = _time.monotonic()
         proxy_url = proxy_by_id.get(task.provider_id)
+        transport_metadata = _liveness_transport_metadata(row)
         try:
             cli = build_client(row, override_model=task.model_id, proxy_url=proxy_url)
             result = await cli.complete(
@@ -1512,10 +1526,7 @@ async def full_liveness_run(
                     "input_tokens": int(result.input_tokens or 0),
                     "output_tokens": int(result.output_tokens or 0),
                     "preview": text[:240] or None,
-                    "effective_api_format": getattr(row, "api_format", None),
-                    "client_identity_profile": getattr(
-                        row, "client_identity_profile", None
-                    ),
+                    **transport_metadata,
                 },
             )
         except asyncio.CancelledError:
@@ -1539,10 +1550,7 @@ async def full_liveness_run(
                     "error": llm_liveness.diag.redact(str(exc)),
                     "error_category": status,
                     "suggestion": llm_liveness.diag.suggestion_for(status),
-                    "effective_api_format": getattr(row, "api_format", None),
-                    "client_identity_profile": getattr(
-                        row, "client_identity_profile", None
-                    ),
+                    **transport_metadata,
                 },
             )
         except Exception as exc:  # noqa: BLE001
@@ -1555,6 +1563,7 @@ async def full_liveness_run(
                     "error": llm_liveness.diag.redact(f"{type(exc).__name__}: {exc}"),
                     "error_category": status,
                     "suggestion": llm_liveness.diag.suggestion_for(status),
+                    **transport_metadata,
                 },
             )
 
