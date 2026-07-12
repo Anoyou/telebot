@@ -1877,8 +1877,19 @@ export interface UpdateJobStatus {
   new_commit?: string | null;
   summary?: string | null;
   error?: string | null;
+  progress?: number | null;
+  phase?: string | null;
+  detail?: string | null;
   logs: string[];
   plan?: Record<string, unknown> | null;
+}
+
+export interface UpdateTargetOptions {
+  ok: boolean;
+  remotes: string[];
+  branches: string[];
+  remote?: string | null;
+  error?: string | null;
 }
 
 // ═══════════════ 客户端身份 UA 版本配置（0.57.0 收口） ═══════════════

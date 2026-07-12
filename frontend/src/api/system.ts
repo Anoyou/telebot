@@ -6,6 +6,7 @@ import type {
   BackendVersionInfo,
   CheckUpdateResult,
   UpdateJobStatus,
+  UpdateTargetOptions,
   EventTraceDetail,
   EventTraceSummary,
   HealthOverview,
@@ -249,6 +250,13 @@ export async function pullUpdate(target?: AppUpdateTarget): Promise<PullUpdateRe
 }
 export async function getUpdateJob(jobId: string): Promise<UpdateJobStatus> {
   const { data } = await api.get<UpdateJobStatus>(`/api/system/update-jobs/${jobId}`);
+  return data;
+}
+export async function getUpdateTargetOptions(remote?: string): Promise<UpdateTargetOptions> {
+  const { data } = await api.get<UpdateTargetOptions>("/api/system/update-target-options", {
+    params: remote ? { remote } : undefined,
+    timeout: 60_000,
+  });
   return data;
 }
 export async function restartApp(): Promise<RestartResult> {

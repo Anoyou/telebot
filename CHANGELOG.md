@@ -22,6 +22,19 @@
 
 暂无已记录变更。
 
+## [0.57.6] — 2026-07-13 · patch（补丁版本） · 在线更新提速与进度反馈
+
+### Added
+- 在线更新弹窗新增真实 Git 远端/分支下拉选择，并按 updater Job 的结构化阶段展示进度条、百分比与当前步骤。
+
+### Changed
+- 前端镜像构建为 TypeScript `tsbuildinfo` 接入 BuildKit 持久缓存，减少连续补丁更新时重复全量类型检查的耗时。
+- 后端镜像不再把业务源码重复构建为 wheel 后又复制到运行目录，业务代码更新只刷新源码层，依赖层保持缓存。
+- 内部 updater 执行 Job 时复用计划阶段已拉取的远端引用，避免应用阶段再次重复 `git fetch`。
+
+### Fixed
+- 修复 updater 容器内错误访问 `localhost` 前端端口，导致服务已 healthy 后仍固定等待 30 秒、任务误报失败并残留 deployment pending 的问题；前端就绪统一以 Compose healthcheck 为准。
+
 ## [0.57.5] — 2026-07-13 · patch（补丁版本） · 模型测活结果分组与保留
 
 ### Changed

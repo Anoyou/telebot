@@ -449,6 +449,31 @@ async def test_check_update_uses_internal_updater(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_update_target_options_use_internal_updater(monkeypatch) -> None:
+    monkeypatch.setattr(
+        sh,
+        "_detect_runtime_mode",
+        lambda: (sh.RUNTIME_PROD_CONTAINER_WITH_UPDATER, "http://updater:8765", None),
+    )
+    monkeypatch.setattr(
+        sh,
+        "_updater_request",
+        lambda path, payload=None, timeout=30: {
+            "ok": True,
+            "remote": "origin",
+            "remotes": ["origin", "backup"],
+            "branches": ["main", "codex/update"],
+        },
+    )
+
+    out = await sh.get_update_target_options(_user=None, remote="origin")  # type: ignore[arg-type]
+
+    assert out.ok is True
+    assert out.remotes == ["origin", "backup"]
+    assert out.branches == ["main", "codex/update"]
+
+
+@pytest.mark.asyncio
 async def test_check_update_manual_container_reports_cannot_check(monkeypatch) -> None:
     """容器内无 updater / 无工作树时应诚实返回"无法自动检查"，不再无条件谎报有更新。"""
 

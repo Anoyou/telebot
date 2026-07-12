@@ -22,9 +22,8 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     > /tmp/requirements.txt && \
     pip install -r /tmp/requirements.txt
 
-# 再拷贝源码并安装本项目本身；这里会随业务代码变更重跑，但不再重装三方依赖。
-COPY app /app/app
-RUN --mount=type=cache,target=/root/.cache/pip pip install --no-deps .
+# 业务源码由 runtime 阶段直接复制到 /app。应用没有 console entry point，
+# 无需再构建一份重复 wheel 到 site-packages；后端代码变化因此不会打穿依赖层。
 
 
 FROM python:3.12-slim AS runtime

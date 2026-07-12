@@ -22,6 +22,12 @@ OLD_COMMIT=""
 HEAD_ALREADY_UPDATED=0
 HANDOFF_SCHEDULED=0
 RUNNING_UPDATER_TOKEN="${UPDATER_TOKEN:-}"
+PROGRESS_PREFIX="@@TELEPILOT_PROGRESS@@"
+
+emit_progress() {
+  local percent="$1" phase="$2" detail="${3:-}"
+  printf '%s%s|%s|%s\n' "$PROGRESS_PREFIX" "$percent" "$phase" "$detail"
+}
 
 usage() {
   cat <<EOF
@@ -74,8 +80,13 @@ PENDING_FILE="$(git rev-parse --git-path telepilot-deploy-pending)"
 
 REMOTE_REF="refs/remotes/${REMOTE}/${BRANCH}"
 
-log "拉取远程索引 ${REMOTE}/${BRANCH}"
-git fetch "$REMOTE" "${BRANCH}:${REMOTE_REF}" >/dev/null
+emit_progress 4 "检查远端" "读取 ${REMOTE}/${BRANCH}"
+if [[ "${TELEPILOT_UPDATE_PREFETCHED:-0}" == "1" ]] && git cat-file -e "${REMOTE_REF}^{commit}" 2>/dev/null; then
+  ok "复用 updater 已拉取的远程索引 ${REMOTE}/${BRANCH}"
+else
+  log "拉取远程索引 ${REMOTE}/${BRANCH}"
+  git fetch "$REMOTE" "${BRANCH}:${REMOTE_REF}" >/dev/null
+fi
 
 CURRENT_COMMIT="$(git rev-parse HEAD)"
 TARGET_COMMIT="$(git rev-parse "$REMOTE_REF")"
@@ -106,6 +117,7 @@ PLAN_JSON="$(python3 backend/app/util/update_plan.py \
   --root "$ROOT_DIR" --old "$CURRENT_COMMIT" --new "$TARGET_COMMIT")" || {
   die "无法生成服务级更新计划"
 }
+emit_progress 12 "生成计划" "计算需要切换的服务"
 
 plan_value() {
   local key="$1"
@@ -183,6 +195,7 @@ if [[ -n "$(git status --porcelain)" ]]; then
 fi
 
 if (( HEAD_ALREADY_UPDATED == 0 )); then
+  emit_progress 18 "拉取代码" "Fast-forward 到目标 commit"
   log "执行 fast-forward 更新"
   git pull --ff-only "$REMOTE" "$BRANCH"
   NEW_COMMIT="$(git rev-parse HEAD)"
@@ -198,6 +211,7 @@ ensure_updater_token_env .env
 PERSISTED_UPDATER_TOKEN="$(grep -E '^UPDATER_TOKEN=' .env | head -n1 | cut -d= -f2- | tr -d ' "')"
 
 if (( REQUIRES_BACKUP == 1 )); then
+  emit_progress 24 "备份数据" "迁移前创建恢复点"
   if [[ "${TELEPILOT_MIGRATION_BACKUP_CONFIRMED:-0}" == "1" ]]; then
     warn "已由操作者确认存在可恢复备份，跳过自动备份。"
   else
@@ -206,20 +220,6 @@ if (( REQUIRES_BACKUP == 1 )); then
     ok "迁移前备份已完成；尚未启动新版容器或执行迁移。"
   fi
 fi
-
-frontend_url() {
-  local raw
-  raw="$(grep -E '^WEB_PORT_PUBLISH=' .env 2>/dev/null | tail -n1 | cut -d= -f2- | tr -d ' "' || true)"
-  raw="${raw:-80}"
-  if [[ "$raw" == *:* ]]; then
-    local host="${raw%:*}"
-    local port="${raw##*:}"
-    [[ "$host" == "0.0.0.0" || "$host" == "::" ]] && host="127.0.0.1"
-    printf 'http://%s:%s' "$host" "$port"
-  else
-    printf 'http://localhost:%s' "$raw"
-  fi
-}
 
 compose_project_name() {
   local web_id project
@@ -248,6 +248,7 @@ if (( NEEDS_FULL == 1 )); then
   if [[ "${TELEPILOT_SKIP_UPDATER_RECREATE:-0}" == "1" ]]; then
     warn "当前由内部 updater 执行完整更新，业务服务完成后由临时 handoff 容器重建 updater。"
     log "构建 + 启动业务容器（仅显式指定 postgres / redis / web / frontend）"
+    emit_progress 30 "构建镜像" "构建并切换业务服务"
     if [[ -n "$RUNNING_UPDATER_TOKEN" && "$RUNNING_UPDATER_TOKEN" != "$PERSISTED_UPDATER_TOKEN" ]]; then
       # 过渡阶段先让新 web 与仍在运行的旧 updater 使用同一 token；handoff
       # 随后会用 .env 中的新 token 一起重建两者。
@@ -255,6 +256,7 @@ if (( NEEDS_FULL == 1 )); then
     else
       docker compose up -d --build --no-deps postgres redis web frontend
     fi
+    emit_progress 78 "健康检查" "等待业务服务 ready"
     wait_compose_healthy docker-compose.yml postgres 60 || {
       docker compose logs --tail=80 postgres >&2
       exit 1
@@ -271,11 +273,9 @@ if (( NEEDS_FULL == 1 )); then
       docker compose logs --tail=80 frontend >&2
       exit 1
     }
-    wait_http "$(frontend_url)" 30 "前端" || {
-      docker compose logs --tail=80 frontend >&2
-      exit 1
-    }
+    emit_progress 92 "服务就绪" "业务服务已通过健康检查"
     log "构建新版 updater 并安排 token/镜像原子切换"
+    emit_progress 96 "更新更新器" "安排 updater handoff"
     schedule_updater_handoff
     ok "完整业务更新完成；updater handoff 已安排"
   else
@@ -290,8 +290,10 @@ else
   (( NEEDS_FRONTEND == 1 )) && services+=("frontend")
 
   if (( ${#services[@]} > 0 )); then
+    emit_progress 30 "构建镜像" "增量重建 ${services[*]}"
     log "增量重建服务：${services[*]}"
     docker compose up -d --build --no-deps "${services[@]}"
+    emit_progress 78 "健康检查" "等待新容器 ready"
   fi
 
   if (( NEEDS_BACKEND == 1 )); then
@@ -306,13 +308,12 @@ else
       docker compose logs --tail=80 frontend >&2
       exit 1
     }
-    wait_http "$(frontend_url)" 30 "前端" || {
-      docker compose logs --tail=80 frontend >&2
-      exit 1
-    }
   fi
 
+  emit_progress 92 "服务就绪" "受影响服务已通过健康检查"
+
   if (( NEEDS_UPDATER == 1 )); then
+    emit_progress 96 "更新更新器" "安排 updater handoff"
     log "构建新版 updater 并安排独立 handoff"
     schedule_updater_handoff
   fi
@@ -325,4 +326,5 @@ if (( HANDOFF_SCHEDULED == 0 )); then
 fi
 
 echo
+emit_progress 100 "更新完成" "所有计划步骤已完成"
 ok "TelePilot 已更新到 ${NEW_COMMIT:0:12}"

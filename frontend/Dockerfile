@@ -22,7 +22,8 @@ RUN --mount=type=cache,id=telepilot-pnpm,target=/pnpm/store \
 COPY frontend/ .
 COPY docs/ /docs/
 COPY CHANGELOG.md /CHANGELOG.md
-RUN pnpm build
+RUN --mount=type=cache,id=telepilot-tsbuild,target=/app/node_modules/.cache/tsbuild \
+    pnpm build
 
 
 FROM nginx:1.27-alpine AS runtime

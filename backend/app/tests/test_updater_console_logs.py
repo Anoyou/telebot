@@ -68,6 +68,7 @@ def test_apply_job_env_uses_host_compose_project_name(monkeypatch) -> None:
     assert env["COMPOSE_PROJECT_NAME"] == "telepilot"
     assert env["TELEPILOT_UPDATE_REMOTE"] == "origin"
     assert env["TELEPILOT_UPDATE_BRANCH"] == "codex/0.33-interaction-framework"
+    assert env["TELEPILOT_UPDATE_PREFETCHED"] == "1"
     assert env["DOCKER_BUILDKIT"] == "1"
     assert env["COMPOSE_DOCKER_CLI_BUILD"] == "1"
 
@@ -96,6 +97,66 @@ def test_incremental_script_never_recreates_web_with_updater() -> None:
     assert "docker compose up -d --build --no-deps" in script
     assert '-e COMPOSE_PROJECT_NAME="$project"' in script
     assert 'com.docker.compose.project' in script
+
+
+def test_incremental_script_uses_compose_health_without_localhost_frontend_probe() -> None:
+    repo_root = Path(__file__).resolve().parents[3]
+    script = (repo_root / "scripts" / "prod-update.sh").read_text(encoding="utf-8")
+
+    assert "frontend_url" not in script
+    assert 'wait_http "$(frontend_url)"' not in script
+    assert "wait_compose_healthy docker-compose.yml frontend" in script
+    assert "@@TELEPILOT_PROGRESS@@" in script
+
+
+def test_runtime_dockerfiles_preserve_incremental_build_caches() -> None:
+    repo_root = Path(__file__).resolve().parents[3]
+    frontend_dockerfile = (repo_root / "frontend" / "Dockerfile").read_text(encoding="utf-8")
+    backend_dockerfile = (repo_root / "backend" / "Dockerfile").read_text(encoding="utf-8")
+
+    assert "id=telepilot-tsbuild" in frontend_dockerfile
+    assert "pip install --no-deps ." not in backend_dockerfile
+
+
+def test_updater_parses_structured_progress() -> None:
+    updater = _load_updater_module()
+
+    assert updater._parse_progress("@@TELEPILOT_PROGRESS@@78|健康检查|等待新容器 ready") == (
+        78,
+        "健康检查",
+        "等待新容器 ready",
+    )
+    assert updater._parse_progress("ordinary log line") is None
+
+
+def test_update_target_options_come_from_git(monkeypatch, tmp_path) -> None:
+    updater = _load_updater_module()
+    workspace = tmp_path / "repo"
+    (workspace / ".git").mkdir(parents=True)
+    monkeypatch.setattr(updater, "WORKSPACE", workspace)
+
+    def fake_run(args, **_kwargs):  # noqa: ANN001
+        if args == ["git", "remote"]:
+            return "origin\nbackup", "", 0
+        if args == ["git", "ls-remote", "--heads", "origin"]:
+            return (
+                "a\trefs/heads/main\n"
+                "b\trefs/heads/codex/0.33-interaction-framework\n",
+                "",
+                0,
+            )
+        raise AssertionError(args)
+
+    monkeypatch.setattr(updater, "_run", fake_run)
+
+    result = updater._update_target_options("origin")
+
+    assert result == {
+        "ok": True,
+        "remotes": ["origin", "backup"],
+        "branches": ["main", "codex/0.33-interaction-framework"],
+        "remote": "origin",
+    }
 
 
 def test_console_logs_returns_partial_lines_when_compose_times_out(monkeypatch) -> None:

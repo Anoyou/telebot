@@ -29,6 +29,7 @@ MAX_LOG_LINES = 240
 MAX_CONSOLE_LOG_LINES = 1000
 CONSOLE_LOG_COMMAND_TIMEOUT_SECONDS = 5
 CONSOLE_LOG_SERVICES = ("web", "frontend", "postgres", "redis", "updater")
+PROGRESS_PREFIX = "@@TELEPILOT_PROGRESS@@"
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 
 _jobs: dict[str, dict[str, Any]] = {}
@@ -53,6 +54,44 @@ def _normalize_update_target(remote: str, branch: str) -> tuple[str, str]:
     ):
         raise ValueError("更新分支格式无效")
     return remote, branch
+
+
+def _update_target_options(remote: str | None = None) -> dict[str, Any]:
+    """Return selectable remotes and branches from the host Git worktree."""
+    if not (WORKSPACE / ".git").exists():
+        return {"ok": False, "remotes": [], "branches": [], "error": "更新工作树不可用"}
+    remotes_out, remotes_err, remotes_rc = _run(["git", "remote"], timeout=10)
+    if remotes_rc != 0:
+        return {"ok": False, "remotes": [], "branches": [], "error": remotes_err or remotes_out}
+    remotes = [item.strip() for item in remotes_out.splitlines() if item.strip()]
+    selected = (remote or DEFAULT_REMOTE).strip()
+    if selected not in remotes:
+        selected = DEFAULT_REMOTE if DEFAULT_REMOTE in remotes else (remotes[0] if remotes else "")
+    branches: list[str] = []
+    if selected:
+        heads_out, heads_err, heads_rc = _run(["git", "ls-remote", "--heads", selected], timeout=45)
+        if heads_rc == 0:
+            for line in heads_out.splitlines():
+                ref = line.split("\t", 1)[-1].strip()
+                if ref.startswith("refs/heads/"):
+                    branches.append(ref.removeprefix("refs/heads/"))
+        elif not branches:
+            return {"ok": False, "remotes": remotes, "branches": [], "remote": selected, "error": heads_err or heads_out}
+    branches = sorted(set(branches), key=lambda item: (item not in {"main", DEFAULT_BRANCH}, item))
+    return {"ok": bool(remotes and selected), "remotes": remotes, "branches": branches, "remote": selected}
+
+
+def _parse_progress(line: str) -> tuple[int, str, str] | None:
+    if not line.startswith(PROGRESS_PREFIX):
+        return None
+    parts = line[len(PROGRESS_PREFIX):].rstrip("\r\n").split("|", 2)
+    if len(parts) != 3:
+        return None
+    try:
+        percent = max(0, min(100, int(parts[0])))
+    except ValueError:
+        return None
+    return percent, parts[1] or "更新中", parts[2]
 
 
 def _json_response(handler: BaseHTTPRequestHandler, status: int, payload: dict[str, Any]) -> None:
@@ -137,6 +176,7 @@ def _apply_job_env(remote: str, branch: str) -> dict[str, str]:
         "TELEPILOT_UPDATE_BRANCH": branch,
         "TELEPILOT_HOST_PROJECT_DIR": os.getenv("TELEPILOT_HOST_PROJECT_DIR", str(WORKSPACE)),
         "TELEPILOT_SKIP_UPDATER_RECREATE": "1",
+        "TELEPILOT_UPDATE_PREFETCHED": "1",
     }
     project = _compose_project_name()
     if project:
@@ -436,14 +476,40 @@ def _run_apply_job(job_id: str, remote: str, branch: str, force_full: bool) -> N
         _set_job(job_id, status="failed", finished_at=int(time.time()), error="已有更新任务正在执行。")
         return
     try:
-        _set_job(job_id, status="running", started_at=int(time.time()), remote=remote, branch=branch)
+        _set_job(
+            job_id,
+            status="running",
+            started_at=int(time.time()),
+            remote=remote,
+            branch=branch,
+            progress=1,
+            phase="检查远端",
+            detail=f"读取 {remote}/{branch}",
+        )
         plan = _check_plan(remote, branch)
         _set_job(job_id, plan=plan)
         if not plan.get("ok"):
-            _set_job(job_id, status="failed", finished_at=int(time.time()), error=plan.get("error") or "更新检查失败")
+            _set_job(
+                job_id,
+                status="failed",
+                finished_at=int(time.time()),
+                progress=1,
+                phase="更新失败",
+                detail=plan.get("error") or "更新检查失败",
+                error=plan.get("error") or "更新检查失败",
+            )
             return
         if not plan.get("has_update"):
-            _set_job(job_id, status="succeeded", finished_at=int(time.time()), returncode=0, summary="当前已是最新版本。")
+            _set_job(
+                job_id,
+                status="succeeded",
+                finished_at=int(time.time()),
+                returncode=0,
+                progress=100,
+                phase="已是最新",
+                detail="当前已是最新版本。",
+                summary="当前已是最新版本。",
+            )
             return
         env = _apply_job_env(remote, branch)
         cmd = ["bash", "scripts/prod-update.sh"]
@@ -461,20 +527,37 @@ def _run_apply_job(job_id: str, remote: str, branch: str, force_full: bool) -> N
         )
         assert proc.stdout is not None
         for line in proc.stdout:
-            _append_job_log(job_id, line)
+            progress = _parse_progress(line.strip())
+            if progress is not None:
+                percent, phase, detail = progress
+                _set_job(job_id, progress=percent, phase=phase, detail=detail)
+            else:
+                _append_job_log(job_id, line)
         rc = proc.wait()
         head, _, _ = _run(["git", "rev-parse", "HEAD"], timeout=10)
+        current_job = _job_snapshot(job_id) or {}
+        final_progress = 100 if rc == 0 else int(current_job.get("progress") or 0)
         _set_job(
             job_id,
             status="succeeded" if rc == 0 else "failed",
             finished_at=int(time.time()),
             returncode=rc,
             new_commit=head[:12] if head else None,
+            progress=final_progress,
+            phase="更新完成" if rc == 0 else "更新失败",
+            detail="所有计划步骤已完成" if rc == 0 else f"prod-update 退出码 {rc}",
             summary="更新完成。" if rc == 0 else "更新失败，请查看日志。",
             error=None if rc == 0 else f"prod-update 退出码 {rc}",
         )
     except Exception as exc:  # noqa: BLE001
-        _set_job(job_id, status="failed", finished_at=int(time.time()), error=f"{type(exc).__name__}: {exc}")
+        _set_job(
+            job_id,
+            status="failed",
+            finished_at=int(time.time()),
+            phase="更新失败",
+            detail=f"{type(exc).__name__}: {exc}",
+            error=f"{type(exc).__name__}: {exc}",
+        )
     finally:
         _apply_lock.release()
 
@@ -534,6 +617,15 @@ class Handler(BaseHTTPRequestHandler):
             _json_response(self, 403, {"ok": False, "error": "forbidden"})
             return
         payload = self._read_json()
+        if self.path == "/targets":
+            try:
+                remote = str(payload.get("remote") or DEFAULT_REMOTE)
+                _normalize_update_target(remote, DEFAULT_BRANCH)
+            except ValueError as exc:
+                _json_response(self, 400, {"ok": False, "error": str(exc)})
+                return
+            _json_response(self, 200, _update_target_options(remote))
+            return
         try:
             remote, branch = _normalize_update_target(
                 str(payload.get("remote") or DEFAULT_REMOTE),
@@ -553,6 +645,9 @@ class Handler(BaseHTTPRequestHandler):
                 created_at=int(time.time()),
                 remote=remote,
                 branch=branch,
+                progress=0,
+                phase="排队中",
+                detail="等待 updater 执行",
                 logs=[],
             )
             thread = threading.Thread(

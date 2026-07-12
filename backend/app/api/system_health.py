@@ -1556,8 +1556,19 @@ class UpdateJobStatusResponse(BaseModel):
     new_commit: str | None = None
     summary: str | None = None
     error: str | None = None
+    progress: int | None = None
+    phase: str | None = None
+    detail: str | None = None
     logs: list[str] = Field(default_factory=list)
     plan: dict[str, Any] | None = None
+
+
+class UpdateTargetOptionsResponse(BaseModel):
+    ok: bool = False
+    remotes: list[str] = Field(default_factory=list)
+    branches: list[str] = Field(default_factory=list)
+    remote: str | None = None
+    error: str | None = None
 
 
 async def _resolve_update_request(payload: UpdateRequest | None) -> tuple[str, str, bool]:
@@ -1585,6 +1596,86 @@ def _int_or_none(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+@router.get("/update-target-options", response_model=UpdateTargetOptionsResponse)
+async def get_update_target_options(
+    _user: CurrentUser,
+    remote: str | None = None,
+) -> UpdateTargetOptionsResponse:
+    """返回当前 Git 工作树可选的远端与远端分支。"""
+    default_remote, _, _ = await _resolve_update_request(None)
+    try:
+        selected_remote = UpdateRequest(remote=remote or default_remote).remote or default_remote
+    except ValueError as exc:
+        return UpdateTargetOptionsResponse(error=str(exc))
+
+    runtime_mode, updater, root = await asyncio.to_thread(_detect_runtime_mode)
+    if runtime_mode == RUNTIME_PROD_CONTAINER_WITH_UPDATER and updater:
+        result = await asyncio.to_thread(
+            _updater_request,
+            "/targets",
+            {"remote": selected_remote},
+            timeout=45,
+        )
+        return UpdateTargetOptionsResponse(
+            ok=bool(result.get("ok")),
+            remotes=[str(item) for item in result.get("remotes") or []],
+            branches=[str(item) for item in result.get("branches") or []],
+            remote=str(result.get("remote") or selected_remote),
+            error=str(result.get("error") or "") or None,
+        )
+
+    if runtime_mode == RUNTIME_LOCAL_SOURCE and root is not None:
+        def read_local_targets() -> UpdateTargetOptionsResponse:
+            remotes_proc = subprocess.run(
+                ["git", "remote"],
+                cwd=root,
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+            remotes = [item.strip() for item in remotes_proc.stdout.splitlines() if item.strip()]
+            selected = selected_remote if selected_remote in remotes else (remotes[0] if remotes else selected_remote)
+            heads_proc = subprocess.run(
+                ["git", "ls-remote", "--heads", selected],
+                cwd=root,
+                capture_output=True,
+                text=True,
+                timeout=45,
+                check=False,
+            )
+            branches = sorted(
+                {
+                    line.split("\t", 1)[-1].removeprefix("refs/heads/")
+                    for line in heads_proc.stdout.splitlines()
+                    if "refs/heads/" in line
+                },
+                key=lambda item: (item != "main", item),
+            )
+            return UpdateTargetOptionsResponse(
+                ok=remotes_proc.returncode == 0 and heads_proc.returncode == 0,
+                remotes=remotes,
+                branches=branches,
+                remote=selected,
+                error=(heads_proc.stderr.strip() or remotes_proc.stderr.strip() or None),
+            )
+
+        try:
+            return await asyncio.to_thread(read_local_targets)
+        except (OSError, subprocess.SubprocessError, ValueError) as exc:
+            return UpdateTargetOptionsResponse(
+                remotes=[selected_remote],
+                remote=selected_remote,
+                error=f"读取 Git 目标失败: {type(exc).__name__}: {exc}",
+            )
+
+    return UpdateTargetOptionsResponse(
+        remotes=[selected_remote],
+        remote=selected_remote,
+        error="当前运行环境无法读取 Git 远端列表",
+    )
 
 
 @router.post("/check-update", response_model=CheckUpdateResponse)
@@ -1998,6 +2089,9 @@ async def get_update_job(job_id: str, _user: CurrentUser) -> UpdateJobStatusResp
         new_commit=str(result.get("new_commit") or "") or None,
         summary=str(result.get("summary") or "") or None,
         error=str(result.get("error") or "") or None,
+        progress=_int_or_none(result.get("progress")),
+        phase=str(result.get("phase") or "") or None,
+        detail=str(result.get("detail") or "") or None,
         logs=[str(line) for line in result.get("logs") or []],
         plan=result.get("plan") if isinstance(result.get("plan"), dict) else None,
     )

@@ -10,12 +10,13 @@ import {
   DialogFooter,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Select } from "@/components/ui/select";
 import {
   checkUpdate,
   getSystemSettings,
   getUpdateJob,
+  getUpdateTargetOptions,
   patchSystemSettings,
   pullUpdate,
   restartApp,
@@ -64,9 +65,9 @@ type Step =
   | { kind: "cannot_check"; plan: UpdatePlanMeta }
   | { kind: "has_update"; current: string; remote: string; ahead: number; changedFiles: string[]; plan: UpdatePlanMeta }
   | { kind: "pulling" }
-  | { kind: "job_running"; jobId: string; status: string; logs: string[]; plan: UpdatePlanMeta }
+  | { kind: "job_running"; jobId: string; status: string; logs: string[]; plan: UpdatePlanMeta; progress: number; phase: string; detail: string | null }
   | { kind: "pulled"; newCommit: string | null; summary: string | null; plan: UpdatePlanMeta }
-  | { kind: "pull_failed"; error: string }
+  | { kind: "pull_failed"; error: string; progress?: number; phase?: string; detail?: string | null }
   | { kind: "check_failed"; error: string }
   | { kind: "restarting"; countdown: number };
 
@@ -83,17 +84,57 @@ interface UpdateDialogProps {
   onOpenChange: (open: boolean) => void;
 }
 
+function UpdateProgress({
+  progress,
+  phase,
+  detail,
+  failed = false,
+}: {
+  progress: number;
+  phase: string;
+  detail?: string | null;
+  failed?: boolean;
+}) {
+  const normalized = Math.max(0, Math.min(100, progress));
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center justify-between gap-3 text-xs">
+        <span className={failed ? "font-medium text-destructive" : "font-medium text-foreground"}>{phase}</span>
+        <span className="font-mono tabular-nums text-muted-foreground">{normalized}%</span>
+      </div>
+      <div
+        className="h-2 overflow-hidden rounded-full bg-muted"
+        role="progressbar"
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={normalized}
+        aria-label={phase}
+      >
+        <div
+          className={`h-full rounded-full transition-[width] duration-500 ease-out ${failed ? "bg-destructive" : "bg-primary"}`}
+          style={{ width: `${normalized}%` }}
+        />
+      </div>
+      {detail ? <p className="text-xs text-muted-foreground">{detail}</p> : null}
+    </div>
+  );
+}
+
 export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
   const [step, setStep] = useState<Step | null>(null);
   const [frontendUpdateState, setFrontendUpdateState] = useState<FrontendUpdateState>("idle");
   const [updateRemote, setUpdateRemote] = useState("origin");
   const [updateBranch, setUpdateBranch] = useState("main");
+  const [remoteOptions, setRemoteOptions] = useState(["origin"]);
+  const [branchOptions, setBranchOptions] = useState(["main"]);
+  const [targetsLoading, setTargetsLoading] = useState(false);
   const [targetSaving, setTargetSaving] = useState(false);
   const [errorCopied, setErrorCopied] = useState(false);
   const timerRef = useRef<ReturnType<typeof setInterval>>();
   const jobPollTokenRef = useRef(0);
   const checkTokenRef = useRef(0);
   const dialogGenerationRef = useRef(0);
+  const targetOptionsTokenRef = useRef(0);
 
   const normalizeAction = (raw: CheckUpdateResult["action_required"]): UpdateActionRequired => {
     return typeof raw === "string" ? raw : "none";
@@ -202,6 +243,37 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
     }
   };
 
+  const loadTargetOptions = useCallback(async (remote: string, preferredBranch?: string) => {
+    const token = targetOptionsTokenRef.current + 1;
+    targetOptionsTokenRef.current = token;
+    setTargetsLoading(true);
+    try {
+      const result = await getUpdateTargetOptions(remote);
+      if (targetOptionsTokenRef.current !== token) return;
+      const remotes = Array.from(new Set([...(result.remotes || []), remote].filter(Boolean)));
+      const discoveredBranches = result.branches || [];
+      const branches = discoveredBranches.length
+        ? Array.from(new Set(discoveredBranches))
+        : [preferredBranch || "main"];
+      const selectedRemote = result.remote && remotes.includes(result.remote) ? result.remote : remote;
+      const selectedBranch = preferredBranch && branches.includes(preferredBranch)
+        ? preferredBranch
+        : (branches[0] || "main");
+      setRemoteOptions(remotes.length ? remotes : [remote || "origin"]);
+      setBranchOptions(branches.length ? branches : [selectedBranch]);
+      setUpdateRemote(selectedRemote || "origin");
+      setUpdateBranch(selectedBranch);
+    } catch {
+      if (targetOptionsTokenRef.current !== token) return;
+      setRemoteOptions((current) => Array.from(new Set([...current, remote].filter(Boolean))));
+      if (preferredBranch) {
+        setBranchOptions((current) => Array.from(new Set([...current, preferredBranch])));
+      }
+    } finally {
+      if (targetOptionsTokenRef.current === token) setTargetsLoading(false);
+    }
+  }, []);
+
   // 打开时自动检查更新
   const doCheck = useCallback(async (target: AppUpdateTarget) => {
     const checkToken = checkTokenRef.current + 1;
@@ -247,6 +319,7 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
           const target = settings.app_update_target ?? { remote: "origin", branch: "main" };
           setUpdateRemote(target.remote || "origin");
           setUpdateBranch(target.branch || "main");
+          void loadTargetOptions(target.remote || "origin", target.branch || "main");
           await doCheck(target);
         } catch {
           if (dialogGenerationRef.current !== dialogGeneration) return;
@@ -260,6 +333,7 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
       setErrorCopied(false);
       jobPollTokenRef.current += 1;
       checkTokenRef.current += 1;
+      targetOptionsTokenRef.current += 1;
       if (timerRef.current) {
         clearInterval(timerRef.current);
         timerRef.current = undefined;
@@ -271,7 +345,7 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
         timerRef.current = undefined;
       }
     };
-  }, [open, doCheck]);
+  }, [open, doCheck, loadTargetOptions]);
 
   const doPull = async () => {
     setStep({ kind: "pulling" });
@@ -291,6 +365,9 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
             status: res.status || "queued",
             logs: [],
             plan,
+            progress: 0,
+            phase: "排队中",
+            detail: "等待 updater 执行",
           });
           pollUpdateJob(res.job_id, plan);
           return;
@@ -357,6 +434,9 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
           setStep({
             kind: "pull_failed",
             error: [job.error || "更新任务失败", ...logs.slice(-16)].join("\n"),
+            progress: job.progress ?? 0,
+            phase: job.phase || "更新失败",
+            detail: job.detail ?? null,
           });
           return;
         }
@@ -366,6 +446,9 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
           status: job.status || "running",
           logs,
           plan,
+          progress: job.progress ?? 0,
+          phase: job.phase || "更新中",
+          detail: job.detail ?? null,
         });
       } catch (e) {
         failures += 1;
@@ -477,28 +560,29 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
             <div className="grid min-w-0 gap-3 sm:grid-cols-[100px_minmax(0,1fr)]">
               <div className="min-w-0 space-y-1.5">
                 <Label htmlFor="app-update-remote">Git 远端</Label>
-                <Input
+                <Select
                   id="app-update-remote"
                   value={updateRemote}
-                  onChange={(event) => setUpdateRemote(event.target.value)}
-                  placeholder="origin"
-                  autoComplete="off"
-                />
+                  onChange={(event) => {
+                    const nextRemote = event.target.value;
+                    setUpdateRemote(nextRemote);
+                    void loadTargetOptions(nextRemote, updateBranch);
+                  }}
+                  disabled={targetsLoading || step?.kind === "pulling" || step?.kind === "job_running"}
+                >
+                  {remoteOptions.map((remote) => <option key={remote} value={remote}>{remote}</option>)}
+                </Select>
               </div>
               <div className="min-w-0 space-y-1.5">
                 <Label htmlFor="app-update-branch">检查分支</Label>
-                <Input
+                <Select
                   id="app-update-branch"
-                  list="app-update-branch-options"
                   value={updateBranch}
                   onChange={(event) => setUpdateBranch(event.target.value)}
-                  placeholder="main"
-                  autoComplete="off"
-                />
-                <datalist id="app-update-branch-options">
-                  <option value="main" />
-                  <option value="codex/0.33-interaction-framework" />
-                </datalist>
+                  disabled={targetsLoading || step?.kind === "pulling" || step?.kind === "job_running"}
+                >
+                  {branchOptions.map((branch) => <option key={branch} value={branch}>{branch}</option>)}
+                </Select>
               </div>
             </div>
             <div className="mt-3 flex items-center justify-between gap-3">
@@ -510,10 +594,10 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
                 size="sm"
                 className="shrink-0"
                 onClick={() => void saveTargetAndCheck()}
-                disabled={targetSaving || step?.kind === "checking" || step?.kind === "pulling" || step?.kind === "job_running"}
+                disabled={targetsLoading || targetSaving || step?.kind === "checking" || step?.kind === "pulling" || step?.kind === "job_running"}
               >
-                {targetSaving ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="mr-1 h-3.5 w-3.5" />}
-                保存并检查
+                {targetSaving || targetsLoading ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="mr-1 h-3.5 w-3.5" />}
+                {targetsLoading ? "读取分支" : "保存并检查"}
               </Button>
             </div>
           </div>
@@ -633,9 +717,12 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
           )}
 
           {step?.kind === "pulling" && (
-            <div className="flex items-center gap-3 text-muted-foreground">
-              <Loader2 className="h-5 w-5 animate-spin" />
-              <span className="text-sm">正在执行更新计划，请稍候...</span>
+            <div className="space-y-3">
+              <div className="flex items-center gap-3 text-muted-foreground">
+                <Loader2 className="h-5 w-5 animate-spin" />
+                <span className="text-sm">正在创建更新任务...</span>
+              </div>
+              <UpdateProgress progress={2} phase="准备更新" detail="提交目标远端与分支" />
             </div>
           )}
 
@@ -645,6 +732,7 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
                 <Loader2 className="h-5 w-5 animate-spin" />
                 <span>任务 {step.jobId} · {step.status}</span>
               </div>
+              <UpdateProgress progress={step.progress} phase={step.phase} detail={step.detail} />
               <div className="rounded-md border bg-background px-3 py-2">
                 <p className="mb-1 text-xs text-muted-foreground">
                   {(step.plan.remote || "origin")}/{step.plan.branch || "main"} · 最近日志
@@ -691,6 +779,14 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
             <div className="flex min-w-0 items-start gap-3 text-destructive">
               <AlertCircle className="mt-0.5 h-5 w-5 shrink-0" />
               <div className="min-w-0 flex-1 space-y-2 text-sm">
+                {step.kind === "pull_failed" && step.phase ? (
+                  <UpdateProgress
+                    progress={step.progress ?? 0}
+                    phase={step.phase}
+                    detail={step.detail}
+                    failed
+                  />
+                ) : null}
                 <div className="flex items-center justify-between gap-3">
                   <p>错误信息：</p>
                   <Button
