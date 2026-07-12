@@ -97,13 +97,76 @@ def test_probe_result_classifies_and_redacts() -> None:
     assert "sk-secret999" not in (result.error or "")
 
 
-def test_probe_result_empty_success_marked() -> None:
+def test_probe_result_empty_2xx_is_not_ok() -> None:
+    """阶段 F 收口 #3：2xx 但空响应体不再判成功。"""
     from app.api.commands import _probe_result
 
     resp = httpx.Response(200, text="", request=httpx.Request("POST", "https://x/v1"))
     result = _probe_result(resp, 5, api_key="", base_url=None, stage="protocol")
-    assert result.ok is True
+    assert result.ok is False
     assert result.error_category == diag.DIAG_EMPTY_RESPONSE
+
+
+def test_probe_result_2xx_non_json_is_not_ok() -> None:
+    """2xx 但响应体非 JSON（HTML 登录页等）判为协议不可用。"""
+    from app.api.commands import _probe_result
+
+    resp = httpx.Response(
+        200,
+        text="<html><body>login</body></html>",
+        request=httpx.Request("POST", "https://x/v1"),
+    )
+    result = _probe_result(
+        resp, 5, api_key="", base_url=None, stage="protocol", api_format="chat_completions"
+    )
+    assert result.ok is False
+    assert result.error_category == diag.DIAG_PROTOCOL_REJECTED
+
+
+def test_probe_result_2xx_irrelevant_json_is_not_ok() -> None:
+    """2xx 但 JSON 结构不符该协议（无关 JSON）判为协议不可用。"""
+    from app.api.commands import _probe_result
+
+    resp = httpx.Response(
+        200, json={"ok": True}, request=httpx.Request("POST", "https://x/v1")
+    )
+    result = _probe_result(
+        resp, 5, api_key="", base_url=None, stage="protocol", api_format="chat_completions"
+    )
+    assert result.ok is False
+    assert result.error_category == diag.DIAG_PROTOCOL_REJECTED
+
+
+def test_probe_result_2xx_valid_chat_structure_is_ok() -> None:
+    """2xx + 合法 chat_completions 结构（含 refusal / tool call 亦可）判成功。"""
+    from app.api.commands import _probe_result
+
+    resp = httpx.Response(
+        200,
+        json={"choices": [{"message": {"role": "assistant", "content": "hi"}, "finish_reason": "stop"}]},
+        request=httpx.Request("POST", "https://x/v1"),
+    )
+    result = _probe_result(
+        resp, 5, api_key="", base_url=None, stage="protocol", api_format="chat_completions"
+    )
+    assert result.ok is True
+
+
+def test_probe_result_2xx_valid_anthropic_and_responses_structures() -> None:
+    """responses / anthropic_messages 的最小有效结构分别判成功。"""
+    from app.api.commands import _probe_result
+
+    resp_r = httpx.Response(
+        200, json={"output_text": "hi"}, request=httpx.Request("POST", "https://x/v1")
+    )
+    assert _probe_result(resp_r, 5, api_key="", base_url=None, api_format="responses").ok is True
+
+    resp_a = httpx.Response(
+        200,
+        json={"type": "message", "role": "assistant", "content": [{"type": "text", "text": "hi"}]},
+        request=httpx.Request("POST", "https://x/v1"),
+    )
+    assert _probe_result(resp_a, 5, api_key="", base_url=None, api_format="anthropic_messages").ok is True
 
 
 # ── 端到端：身份顺序探测 ────────────────────────────────────
@@ -224,3 +287,67 @@ async def test_detect_retries_identity_only_on_client_rejection(monkeypatch) -> 
     assert resp.recommended_client_identity_profile == "codex_cli"
     profiles = [a.client_identity_profile for a in responses_attempts]
     assert "codex_cli" in profiles
+
+
+# ── 阶段 F 收口 #3：2xx 响应结构校验 ──────────────────────────
+def _resp(status: int, payload_text: str) -> httpx.Response:
+    return httpx.Response(
+        status, text=payload_text, request=httpx.Request("POST", "https://x/v1")
+    )
+
+
+def test_probe_result_chat_valid_text() -> None:
+    from app.api.commands import _probe_result
+
+    body = '{"choices": [{"message": {"content": "hi"}, "finish_reason": "stop"}]}'
+    r = _probe_result(_resp(200, body), 5, api_key="", stage="protocol", api_format="chat_completions")
+    assert r.ok is True
+
+
+def test_probe_result_chat_valid_toolcall() -> None:
+    from app.api.commands import _probe_result
+
+    body = '{"choices": [{"message": {"tool_calls": [{"id": "t1"}]}, "finish_reason": "tool_calls"}]}'
+    r = _probe_result(_resp(200, body), 5, api_key="", stage="protocol", api_format="chat_completions")
+    assert r.ok is True
+
+
+def test_probe_result_responses_valid() -> None:
+    from app.api.commands import _probe_result
+
+    body = '{"object": "response", "output": [{"type": "message"}], "status": "completed"}'
+    r = _probe_result(_resp(200, body), 5, api_key="", stage="protocol", api_format="responses")
+    assert r.ok is True
+
+
+def test_probe_result_anthropic_valid() -> None:
+    from app.api.commands import _probe_result
+
+    body = '{"type": "message", "role": "assistant", "content": [{"type": "text", "text": "hi"}]}'
+    r = _probe_result(_resp(200, body), 5, api_key="", stage="protocol", api_format="anthropic_messages")
+    assert r.ok is True
+
+
+def test_probe_result_html_login_page_rejected() -> None:
+    from app.api.commands import _probe_result
+
+    r = _probe_result(_resp(200, "<html><body>login</body></html>"), 5, api_key="", stage="protocol", api_format="chat_completions")
+    assert r.ok is False
+    assert r.error_category == diag.DIAG_PROTOCOL_REJECTED
+
+
+def test_probe_result_irrelevant_json_rejected() -> None:
+    from app.api.commands import _probe_result
+
+    # 无关 JSON（如健康检查 / 模型列表）不得被判为协议可用。
+    r = _probe_result(_resp(200, '{"ok": true, "data": []}'), 5, api_key="", stage="protocol", api_format="chat_completions")
+    assert r.ok is False
+
+
+def test_probe_result_wrong_protocol_shape_rejected() -> None:
+    from app.api.commands import _probe_result
+
+    # chat 结构发给 anthropic 协议校验 → 不符 → 拒绝。
+    body = '{"choices": [{"message": {"content": "hi"}}]}'
+    r = _probe_result(_resp(200, body), 5, api_key="", stage="protocol", api_format="anthropic_messages")
+    assert r.ok is False

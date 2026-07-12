@@ -699,7 +699,7 @@ async def detect_provider_protocols(
             latency_ms = int((_time.monotonic() - started) * 1000)
             return _probe_result(resp, latency_ms, api_key=api_key, base_url=base_url, stage="credentials")
         except httpx.HTTPError as exc:
-            return _probe_error(exc, started)
+            return _probe_error(exc, started, api_key=api_key, base_url=base_url)
 
     async def probe_with_identity(
         cli: httpx.AsyncClient,
@@ -717,7 +717,12 @@ async def detect_provider_protocols(
             )
             latency_ms = int((_time.monotonic() - started) * 1000)
             result = _probe_result(
-                resp, latency_ms, api_key=api_key, base_url=base_url, stage="protocol"
+                resp,
+                latency_ms,
+                api_key=api_key,
+                base_url=base_url,
+                stage="protocol",
+                api_format=api_format,
             )
             result.client_identity_profile = identity_profile
             if (
@@ -727,7 +732,7 @@ async def detect_provider_protocols(
                 result.error = "该 Responses 接口拒绝 max_output_tokens；为避免失去输出与成本上限，运行时不会自动省略该参数。"
             return result
         except httpx.HTTPError as exc:
-            result = _probe_error(exc, started)
+            result = _probe_error(exc, started, api_key=api_key, base_url=base_url)
             result.client_identity_profile = identity_profile
             return result
 
@@ -847,6 +852,41 @@ async def detect_provider_protocols(
     )
 
 
+def _probe_response_is_valid(api_format: str | None, data: Any) -> bool:
+    """校验 2xx 响应体是否为该协议的最小有效结构（阶段 F 收口 #3）。
+
+    只有真正长得像该协议生成结果的响应才算协议可用——正常文本、拒答（refusal）、
+    工具调用（tool call）都接受；空响应、HTML 登录页、无关 JSON（如 ``{"ok":true}``、
+    模型列表）一律判为无效，避免把任意 2xx 误判为协议可用。
+    """
+    if not isinstance(data, dict):
+        return False
+    fmt = (api_format or "").strip().lower()
+    if fmt == "chat_completions":
+        # {choices: [{message|delta|text|finish_reason ...}], ...}
+        choices = data.get("choices")
+        if not isinstance(choices, list) or not choices:
+            return False
+        first = choices[0]
+        if not isinstance(first, dict):
+            return False
+        return any(k in first for k in ("message", "delta", "text", "finish_reason"))
+    if fmt == "responses":
+        # Responses：{output: [...]} / {output_text: ...} / {status: ...} / {response: ...}
+        if any(k in data for k in ("output", "output_text", "response")):
+            return True
+        # 有些实现直接回 {id, object: "response", status: ...}
+        return str(data.get("object") or "").startswith("response") or "status" in data
+    if fmt == "anthropic_messages":
+        # Anthropic：{type: "message", content: [...], role: "assistant", ...}
+        if data.get("type") == "message" and isinstance(data.get("content"), list):
+            return True
+        # 兼容部分反代：{content: [...]} 或 {role: "assistant", content: ...}
+        return isinstance(data.get("content"), list) or data.get("role") == "assistant"
+    # 未知协议：保守起见，只要是 JSON 对象即接受（不额外收紧既有行为）。
+    return True
+
+
 def _probe_result(
     resp: httpx.Response,
     latency_ms: int,
@@ -854,28 +894,53 @@ def _probe_result(
     api_key: str,
     base_url: str | None = None,
     stage: str | None = None,
+    api_format: str | None = None,
 ) -> ProtocolProbeResult:
     from ..services import llm_diagnostics as diag
 
     if resp.status_code < 400:
-        # 成功 HTTP，但仍需识别空响应 / 非 JSON（不算协议不通，标记 error_category 供参考）。
+        # 阶段 F 收口 #3：2xx 不再无条件判成功。空响应 / 非 JSON / 结构不符该协议
+        # （HTML 登录页、无关 JSON）一律 ok=False，只有最小有效结构才算协议可用。
         text = resp.text or ""
-        error_category: str | None = None
-        error: str | None = None
         if not text.strip():
-            error_category = diag.DIAG_EMPTY_RESPONSE
-            error = "上游返回空响应体。"
-        elif not diag.is_valid_json(text):
-            # 非 JSON 成功响应：多数协议端点应返回 JSON；标记但不判定协议失败。
-            error_category = diag.DIAG_EMPTY_RESPONSE
-            error = "上游返回非 JSON 响应体。"
+            return ProtocolProbeResult(
+                ok=False,
+                status_code=resp.status_code,
+                latency_ms=latency_ms,
+                stage=stage,
+                error_category=diag.DIAG_EMPTY_RESPONSE,
+                suggestion=diag.suggestion_for(diag.DIAG_EMPTY_RESPONSE),
+                error="上游返回 2xx 但响应体为空。",
+            )
+        if not diag.is_valid_json(text):
+            return ProtocolProbeResult(
+                ok=False,
+                status_code=resp.status_code,
+                latency_ms=latency_ms,
+                stage=stage,
+                error_category=diag.DIAG_PROTOCOL_REJECTED,
+                suggestion=diag.suggestion_for(diag.DIAG_PROTOCOL_REJECTED),
+                error="上游返回 2xx 但响应体非 JSON（可能是 HTML 登录页或错误网关）。",
+            )
+        try:
+            data = resp.json()
+        except Exception:  # noqa: BLE001
+            data = None
+        if not _probe_response_is_valid(api_format, data):
+            return ProtocolProbeResult(
+                ok=False,
+                status_code=resp.status_code,
+                latency_ms=latency_ms,
+                stage=stage,
+                error_category=diag.DIAG_PROTOCOL_REJECTED,
+                suggestion=diag.suggestion_for(diag.DIAG_PROTOCOL_REJECTED),
+                error="上游返回 2xx 但响应结构不符合该协议（非有效的生成结果）。",
+            )
         return ProtocolProbeResult(
             ok=True,
             status_code=resp.status_code,
             latency_ms=latency_ms,
             stage=stage,
-            error_category=error_category,
-            error=error,
         )
     body = diag.redact(resp.text, api_key=api_key or None, base_url=base_url)
     category = diag.classify_status_code(resp.status_code, resp.text or "")
@@ -906,13 +971,21 @@ def _probe_unsupported_parameter(resp: httpx.Response, parameter: str) -> bool:
     )
 
 
-def _probe_error(exc: httpx.HTTPError, started: float) -> ProtocolProbeResult:
+def _probe_error(
+    exc: httpx.HTTPError,
+    started: float,
+    *,
+    api_key: str | None = None,
+    base_url: str | None = None,
+) -> ProtocolProbeResult:
     category = llm_diagnostics.classify_exception(exc)
+    # 阶段 F 收口：网络异常文本也可能带 base_url / 代理凭据，统一脱敏。
+    raw = f"{type(exc).__name__}: {str(exc) or '(无详情；常见 SSL/DNS/代理问题)'}"
     return ProtocolProbeResult(
         ok=False,
         status_code=None,
         latency_ms=int((_time.monotonic() - started) * 1000),
-        error=f"{type(exc).__name__}: {str(exc) or '(无详情；常见 SSL/DNS/代理问题)'}",
+        error=llm_diagnostics.redact(raw, api_key=api_key or None, base_url=base_url),
         stage="network",
         error_category=category,
         suggestion=llm_diagnostics.suggestion_for(category),
