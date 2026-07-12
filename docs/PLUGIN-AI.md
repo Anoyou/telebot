@@ -39,9 +39,16 @@ async def on_event(self, ctx, payload):
 
 ## Provider 选择
 
-- `provider_tag`：推荐写法。按用途标签选择 provider，平台会在可用 provider 中挑选成本优先的匹配项。
+- `route`（0.57.0 起）：显式选择路由模式，取值 `fixed` / `tag` / `auto`。
+  - `fixed`：固定某个 provider，需同时传 `provider`（id 或 name）。
+  - `tag`：按用途标签选择，需同时传 `provider_tag`；平台在可用 provider 中挑成本优先的匹配项。
+  - `auto`：平台自动挑选（chat 优先、成本优先）。
+  - 留空时按旧参数推断（给了 `provider`→fixed、给了 `provider_tag`→tag、都没有→auto），保持向后兼容。
+- `provider_tag`：推荐写法。按用途标签选择 provider。
 - `provider`：需要固定 provider 时可传 provider id 或 provider name。
 - `tag` / `tags`：兼容别名，已 deprecated；新插件请使用 `provider_tag`。
+
+`complete()` / `run_agent()` 返回值带 `routing` 脱敏摘要（`mode` / `provider_id` / `provider_name` / `matched_tag` / `model` / `api_format` / `client_identity_profile` / `used_fallback`）。插件**不能**指定 UA、客户端身份、API Key、Base URL、代理、内部分类器或全局 fallback 策略——这些由平台统一决定，路由摘要也绝不含密钥 / Base URL / 代理。`run_agent()` 会预先排除没有已启用模型的 provider（无法支撑 tools 调用）。
 
 ## 有界 Agent 与工具调用
 

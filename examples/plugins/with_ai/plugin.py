@@ -50,13 +50,18 @@ async def ai_complete_handler(
     prompt = " ".join(args).strip() or "用一句话介绍 TelePilot 插件。"
     provider_tag = str(ctx.config.get("provider_tag") or DEFAULT_PROVIDER_TAG).strip() or None
 
+    # route 可选：fixed / tag / auto。留空时按传入参数推断，保持旧行为兼容。
+    # 这里显式声明 tag 路由；平台在带该 tag 的可用 provider 中挑成本优先项。
     result = await ctx.ai.complete(
         system="你是 TelePilot 第三方模块里的简洁助手。",
         user=prompt,
+        route="tag" if provider_tag else "auto",
         provider_tag=provider_tag,
         max_tokens=160,
         timeout_seconds=20,
     )
+    # result.routing 是脱敏路由摘要（mode/provider/model/tag/protocol/identity/fallback），
+    # 不含 api_key / base_url / 代理，可安全展示或记录。
     await event.edit(result.text.strip()[:800] or "AI 返回了空内容。")
 
 

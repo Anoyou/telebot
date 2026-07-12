@@ -91,6 +91,8 @@ class AIResult:
     input_tokens: int = 0
     output_tokens: int = 0
     sources: list[dict[str, Any]] = field(default_factory=list)
+    # 阶段 E：脱敏路由摘要（不含 key / base_url / 代理 / 内部分类器细节）。
+    routing: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -120,6 +122,8 @@ class AIAgentResult:
     tool_calls: int
     input_tokens: int
     output_tokens: int
+    # 阶段 E：脱敏路由摘要。
+    routing: dict[str, Any] = field(default_factory=dict)
 
 
 class PluginAI:
@@ -180,6 +184,7 @@ class PluginAI:
         *,
         provider: int | str | None = None,
         provider_tag: str | None = None,
+        route: str | None = None,
         tag: str | None = None,
         tags: list[str] | tuple[str, ...] | None = None,
         model: str | None = None,
@@ -193,7 +198,8 @@ class PluginAI:
 
         ``provider`` accepts an id or provider name. ``provider_tag`` /
         ``tag`` / first ``tags`` item select the cheapest usable provider with
-        that tag.
+        that tag. ``route`` 显式选择 ``fixed`` / ``tag`` / ``auto``（阶段 E）；
+        留空时按旧参数推断，保持向后兼容。
         """
 
         if tag is not None or tags:
@@ -213,10 +219,11 @@ class PluginAI:
         selected_tag = provider_tag or tag
         if selected_tag is None and tags:
             selected_tag = str(tags[0]) if tags[0] else None
-        primary, matched_tag = _select_provider(
+        primary, matched_tag, resolved_mode = _resolve_route(
             providers,
             provider=provider,
             provider_tag=selected_tag,
+            route=route,
         )
         clamped_tokens = self._clamp_max_tokens(max_tokens)
         clamped_timeout = self._clamp_timeout(timeout_seconds if timeout_seconds is not None else timeout)
@@ -259,7 +266,19 @@ class PluginAI:
             await plugin_ai_quota.release(quota_ticket, 0)
             raise
 
-        return _result_from_llm(result, used_provider, used_fallback)
+        ai_result = _result_from_llm(result, used_provider, used_fallback)
+        object.__setattr__(
+            ai_result,
+            "routing",
+            _routing_summary(
+                used_provider,
+                mode=resolved_mode,
+                matched_tag=matched_tag,
+                selected_model=selected_model,
+                used_fallback=used_fallback,
+            ),
+        )
+        return ai_result
 
     async def run_agent(
         self,
@@ -269,6 +288,7 @@ class PluginAI:
         handlers: Mapping[str, Callable[[dict[str, Any]], Awaitable[Any]]],
         provider: int | str | None = None,
         provider_tag: str | None = None,
+        route: str | None = None,
         model: str | None = None,
         max_tokens: int = 1024,
         max_steps: int = 8,
@@ -276,7 +296,11 @@ class PluginAI:
         max_total_tokens: int = 16_384,
         timeout_seconds: int = DEFAULT_PLUGIN_AI_TIMEOUT_SECONDS,
     ) -> AIAgentResult:
-        """Run manifest-declared tools through the bounded internal AgentRuntime."""
+        """Run manifest-declared tools through the bounded internal AgentRuntime.
+
+        ``route`` 显式选择 ``fixed`` / ``tag`` / ``auto``（阶段 E）；Agent 路由会
+        预先排除没有已启用模型的 Provider（无法支撑 tools 调用）。
+        """
 
         if not self._allow_agent:
             raise AIUnavailableError("插件未声明独立 ai_agent 权限")
@@ -284,13 +308,15 @@ class PluginAI:
         if not tools:
             raise AIUnavailableError("manifest 未声明可执行的 agent_tools，或宿主未注册 handler")
         providers = await self._load_providers()
-        primary, matched_tag = _select_provider(
+        primary, matched_tag, resolved_mode = _resolve_route(
             providers,
             provider=provider,
             provider_tag=provider_tag,
+            route=route,
+            require_tools=True,
         )
         explicit_model = str(model or "").strip()
-        selected_model = explicit_model or str(primary.default_model or "").strip()
+        selected_model = explicit_model or _enabled_model_for_dto(primary, None) or str(primary.default_model or "").strip()
         request = ModelRequest(
             model=selected_model,
             messages=(
@@ -389,6 +415,7 @@ class PluginAI:
         *,
         provider: int | str | None = None,
         provider_tag: str | None = None,
+        route: str | None = None,
         tag: str | None = None,
         tags: list[str] | tuple[str, ...] | None = None,
         model: str | None = None,
@@ -424,10 +451,11 @@ class PluginAI:
         selected_tag = provider_tag or tag
         if selected_tag is None and tags:
             selected_tag = str(tags[0]) if tags[0] else None
-        primary, _matched_tag = _select_provider(
+        primary, _matched_tag, _resolved_mode = _resolve_route(
             providers,
             provider=provider,
             provider_tag=selected_tag,
+            route=route,
         )
         api_format = _effective_api_format(primary)
         if api_format not in {LLM_API_FORMAT_RESPONSES, LLM_API_FORMAT_ANTHROPIC_MESSAGES}:
@@ -626,34 +654,115 @@ async def load_llm_providers() -> dict[int, LLMProviderDTO]:
     return providers
 
 
-def _select_provider(
+def _routing_summary(
+    dto: LLMProviderDTO,
+    *,
+    mode: str,
+    matched_tag: str | None,
+    selected_model: str | None,
+    used_fallback: bool = False,
+) -> dict[str, Any]:
+    """构造脱敏路由摘要（阶段 E）。
+
+    只暴露 provider_id / name / 模式 / 命中 tag / 生效模型 / 协议 / 身份 与
+    是否 fallback；**绝不**含 api_key、base_url、代理或内部分类器细节。
+    """
+    return {
+        "mode": mode,
+        "provider_id": int(dto.id),
+        "provider_name": dto.name,
+        "matched_tag": matched_tag,
+        "model": selected_model or (dto.default_model or None),
+        "api_format": dto.api_format,
+        "client_identity_profile": getattr(dto, "client_identity_profile", "auto"),
+        "used_fallback": bool(used_fallback),
+    }
+
+
+def _explicit_enabled_models(dto: LLMProviderDTO) -> list[str]:
+    """严格返回 ``models[].enabled == true`` 的模型 id（不回落 default_model）。"""
+    enabled: list[str] = []
+    for item in dto.models or []:
+        if isinstance(item, dict) and bool(item.get("enabled")):
+            mid = str(item.get("id") or "").strip()
+            if mid and mid not in enabled:
+                enabled.append(mid)
+    return enabled
+
+
+def _enabled_model_for_dto(dto: LLMProviderDTO, explicit: str | None) -> str | None:
+    """为插件路由选一个已启用模型：显式 > default_model∈enabled > 第一个 enabled。"""
+    explicit_clean = str(explicit or "").strip()
+    if explicit_clean:
+        return explicit_clean
+    enabled = _explicit_enabled_models(dto)
+    default_model = str(dto.default_model or "").strip()
+    if not enabled:
+        return default_model or None
+    if default_model and default_model in enabled:
+        return default_model
+    return enabled[0]
+
+
+def _resolve_route(
     providers: Mapping[int, LLMProviderDTO],
     *,
     provider: int | str | None,
     provider_tag: str | None,
-) -> tuple[LLMProviderDTO, str | None]:
-    usable = [p for p in providers.values() if p.has_api_key]
-    if not usable:
-        raise AIUnavailableError("没有已配置 API key 的 LLM provider")
+    route: str | None,
+    require_tools: bool = False,
+) -> tuple[LLMProviderDTO, str | None, str]:
+    """统一 fixed / tag / auto 路由解析（阶段 E）。
 
-    if provider is not None:
+    - ``route`` 显式指定 ``fixed`` / ``tag`` / ``auto``；留空时按旧行为推断
+      （给了 provider→fixed、给了 provider_tag→tag、都没有→auto）。
+    - 插件不能指定 UA / 身份 / 密钥 / 代理 / 内部分类器 / 全局 fallback：
+      此函数只在"已配置 key 的候选"内做启用/能力/tag 过滤，不触碰这些维度。
+    - ``require_tools``（run_agent）：预先排除不支持 tools 的模型（无已启用模型的
+      Provider 视为不可用）。
+    返回 ``(dto, matched_tag, resolved_mode)``。
+    """
+    usable = [p for p in providers.values() if p.has_api_key]
+    if require_tools:
+        # Agent 路由：预先排除不支持 tools 的 Provider——必须存在一个可用模型
+        # （显式启用的模型，或在没有显式启用清单时回落到 default_model）。
+        # 若 Provider 有显式 models 清单但全部禁用且无 default_model，则视为不可用。
+        usable = [p for p in usable if _enabled_model_for_dto(p, None)]
+    if not usable:
+        raise AIUnavailableError("没有可用的 LLM provider（未配置 key 或无已启用模型）")
+
+    mode = str(route or "").strip().lower()
+    if mode not in {"fixed", "tag", "auto"}:
+        if provider is not None:
+            mode = "fixed"
+        elif provider_tag:
+            mode = "tag"
+        else:
+            mode = "auto"
+
+    if mode == "fixed":
+        if provider is None:
+            raise AIUnavailableError("route=fixed 需要指定 provider")
         selected = _find_provider(usable, provider)
         if selected is None:
             raise AIUnavailableError(f"找不到可用 provider: {provider}")
-        return selected, None
+        return selected, None, "fixed"
 
-    tag = str(provider_tag or "").strip()
-    if tag:
+    if mode == "tag":
+        tag = str(provider_tag or "").strip()
+        if not tag:
+            raise AIUnavailableError("route=tag 需要指定 provider_tag")
         tagged = [p for p in usable if tag in set(p.tags or [])]
         if not tagged:
             raise AIUnavailableError(f"找不到带有 tag={tag} 的可用 provider")
         tagged.sort(key=lambda p: (p.cost_tier, p.id))
-        return tagged[0], tag
+        return tagged[0], tag, "tag"
 
+    # auto：chat 优先、cost_tier 升序（省钱）；与 _select_provider 默认一致。
     chat = [p for p in usable if "chat" in set(p.tags or [])]
-    pool = chat or usable
+    pool = list(chat or usable)
     pool.sort(key=lambda p: (p.cost_tier, p.id))
-    return pool[0], "chat" if chat else None
+    return pool[0], ("chat" if chat else None), "auto"
 
 
 def _find_provider(providers: list[LLMProviderDTO], provider: int | str) -> LLMProviderDTO | None:
