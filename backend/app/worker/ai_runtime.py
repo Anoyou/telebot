@@ -159,6 +159,7 @@ def _build_llm_request_settings(
     native_image_mode: bool,
     inline_model_override: str | None,
     inline_provider_override: int | None,
+    routed_model: str | None = None,
 ) -> _LLMRequestSettings:
     # 普通 chat/search/vision 永远附加反幻觉约束；原生生图路径不附加，
     # 否则会把"只描述真实图像"之类的识图约束混进生成提示词。
@@ -189,7 +190,9 @@ def _build_llm_request_settings(
     elif inline_provider_override is not None:
         override_model = None
     else:
-        override_model = cfg.get("model")
+        # 阶段 D：模板未固定 model 时，用 auto 路由选出的已启用模型；
+        # 都没有则回落到 provider.default_model（override_model=None）。
+        override_model = cfg.get("model") or routed_model
 
     return _LLMRequestSettings(
         system=system,
@@ -950,6 +953,7 @@ async def invoke(
         routing_mode = str(cfg.get("routing_mode") or "fixed").lower()
     routing_note: str | None = None  # 自动路由时附加在结尾的说明
     routing_matched_tag: str | None = None
+    routed_model: str | None = None  # 阶段 D：auto 路由选出的已启用模型（回落链的一环）
     chosen_provider_id = (
         inline_provider_override
         if inline_provider_override is not None
@@ -983,6 +987,7 @@ async def invoke(
             await event.edit(f"✗ AI 路由异常：{type(e).__name__}: {str(e)[:120]}")
             return
         chosen_provider_id = decision.provider_id
+        routed_model = getattr(decision, "model", None)
         routing_note = f"auto · {decision.reason}"
         routing_matched_tag = getattr(decision, "matched_tag", None)
     elif inline_provider_override is not None:
@@ -1087,6 +1092,7 @@ async def invoke(
         native_image_mode=native_image_mode,
         inline_model_override=inline_model_override,
         inline_provider_override=inline_provider_override,
+        routed_model=routed_model,
     )
 
     # 占位回显，避免用户以为没反应（注意：edit 失败也要继续，非致命）

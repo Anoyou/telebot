@@ -92,7 +92,11 @@ _MOD_MULTIMODAL = "multimodal"
 
 @dataclass
 class RoutingDecision:
-    """路由决策结果。"""
+    """路由决策结果。
+
+    0.57.0 阶段 D：升级为 Provider + 已启用模型级决策。新增字段全部带默认值，
+    旧调用方（只读 ``provider_id`` / ``reason`` / ``matched_tag``）保持兼容。
+    """
 
     provider_id: int
     """选中的 provider id。"""
@@ -102,6 +106,27 @@ class RoutingDecision:
 
     matched_tag: str | None = None
     """命中的 tag（若是规则路由）；分类器兜底时也会填这里。"""
+
+    # 阶段 D：模型级路由结果（None 表示交由 provider.default_model 决定）。
+    model: str | None = None
+    """选中的已启用模型 id；None 时上层回落到 provider.default_model。"""
+
+    api_format: str | None = None
+    """该 provider 本次实际协议（用于身份/协议重算）。"""
+
+    client_identity_profile: str | None = None
+    """该 provider 配置的客户端身份档案（脱敏摘要用）。"""
+
+    def summary(self) -> dict[str, Any]:
+        """脱敏路由摘要（可安全返回给插件 / 前端；不含 key / base_url / 代理）。"""
+        return {
+            "provider_id": self.provider_id,
+            "reason": self.reason,
+            "matched_tag": self.matched_tag,
+            "model": self.model,
+            "api_format": self.api_format,
+            "client_identity_profile": self.client_identity_profile,
+        }
 
 
 # ════════════════════════════════════════════════════════════
@@ -136,6 +161,54 @@ def _cost_tier(p: dict[str, Any]) -> int:
         return int(v) if v is not None else 2
     except (TypeError, ValueError):
         return 2
+
+
+def _enabled_models_of(p: dict[str, Any]) -> list[str]:
+    """严格返回 provider.models[].enabled == True 的模型 id（顺序保留）。"""
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in p.get("models") or []:
+        if not isinstance(item, dict):
+            continue
+        if not bool(item.get("enabled")):
+            continue
+        mid = str(item.get("id") or "").strip()
+        if not mid or mid in seen:
+            continue
+        seen.add(mid)
+        out.append(mid)
+    return out
+
+
+def _pick_model_for(p: dict[str, Any]) -> str | None:
+    """为选中的 provider 选一个已启用模型。
+
+    优先 default_model（若它在已启用集合里或没有显式启用清单），否则取第一个已启用
+    模型；都没有则返回 None（上层回落 provider.default_model）。
+    """
+    enabled = _enabled_models_of(p)
+    default_model = str(p.get("default_model") or "").strip()
+    if not enabled:
+        # 没有显式启用清单：沿用 default_model（None 交由上层回落）。
+        return default_model or None
+    if default_model and default_model in enabled:
+        return default_model
+    return enabled[0]
+
+
+def _finalize_decision(decision: RoutingDecision, providers: dict[int, dict[str, Any]]) -> RoutingDecision:
+    """在选定 provider 后补齐模型 / 协议 / 身份字段（阶段 D）。
+
+    每次（含 fallback 切换 provider）都基于该 provider 的最新配置重算，保证
+    模型级结果与协议、身份一致。
+    """
+    p = providers.get(int(decision.provider_id))
+    if p is None:
+        return decision
+    decision.model = _pick_model_for(p)
+    decision.api_format = str(p.get("api_format") or "") or None
+    decision.client_identity_profile = str(p.get("client_identity_profile") or "auto")
+    return decision
 
 
 def _select_by_tag(
@@ -344,6 +417,35 @@ async def pick_provider(
     account_id: int | None = None,
     triggered_by_account_id: int | None = None,
 ) -> RoutingDecision:
+    """选 provider 并补齐模型 / 协议 / 身份（阶段 D 对外入口）。
+
+    在内部决策函数之上统一调用 ``_finalize_decision``，保证任何返回路径（规则 /
+    分类器 / fallback）都带上模型级结果，且切换 provider 后同步重算。
+    """
+    decision = await _pick_provider_impl(
+        user_q,
+        replied_text,
+        has_replied_photo,
+        providers,
+        classifier_provider_id=classifier_provider_id,
+        fallback_provider_id=fallback_provider_id,
+        account_id=account_id,
+        triggered_by_account_id=triggered_by_account_id,
+    )
+    return _finalize_decision(decision, providers)
+
+
+async def _pick_provider_impl(
+    user_q: str,
+    replied_text: str | None,
+    has_replied_photo: bool,
+    providers: dict[int, dict[str, Any]],
+    *,
+    classifier_provider_id: int | None = None,
+    fallback_provider_id: int | None = None,
+    account_id: int | None = None,
+    triggered_by_account_id: int | None = None,
+) -> RoutingDecision:
     """根据消息内容挑一个 provider。
 
     Args:
@@ -409,7 +511,38 @@ async def pick_provider(
     return RoutingDecision(int(p["id"]), "fallback (first available)", None)
 
 
+async def preview_route(
+    user_q: str,
+    replied_text: str | None,
+    has_replied_photo: bool,
+    providers: dict[int, dict[str, Any]],
+    *,
+    classifier_provider_id: int | None = None,
+    fallback_provider_id: int | None = None,
+) -> dict[str, Any]:
+    """只做路由决策、不调用上游、不消耗 quota，返回脱敏摘要（阶段 D）。
+
+    注意：为保证"预览不消耗 quota / 不调用上游"，此处**禁用**分类器兜底
+    （分类器本身是一次真实 LLM 调用）。因此 ``classifier_provider_id`` 仅用于
+    在摘要里标注"实际执行时会启用分类器"，不会真正调用。
+    """
+    decision = await _pick_provider_impl(
+        user_q,
+        replied_text,
+        has_replied_photo,
+        providers,
+        classifier_provider_id=None,  # 预览绝不调用分类器（那会消耗 quota）
+        fallback_provider_id=fallback_provider_id,
+    )
+    decision = _finalize_decision(decision, providers)
+    summary = decision.summary()
+    summary["classifier_enabled"] = classifier_provider_id is not None
+    summary["preview_only"] = True
+    return summary
+
+
 __all__ = [
     "RoutingDecision",
     "pick_provider",
+    "preview_route",
 ]
