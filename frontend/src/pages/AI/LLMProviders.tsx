@@ -152,9 +152,8 @@ const CLIENT_IDENTITY_OPTIONS: {
   },
   {
     value: "codex_desktop",
-    label: "Codex Desktop（暂不可用）",
-    hint: "缺少可复核的请求头证据，暂不可选。",
-    disabled: true,
+    label: "Codex Desktop",
+    hint: "Codex Desktop 身份（originator=Codex Desktop），用于 Responses。证据来自本机抓包的 alpha 预发布版，stable 版可能变化。",
   },
   {
     value: "claude_desktop",

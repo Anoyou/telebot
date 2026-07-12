@@ -20,7 +20,7 @@
 
 ## [Unreleased]
 
-## [0.57.0] — 2026-07-13 · minor（次要版本） · LLM 客户端身份、测活与统一路由
+## [0.57.0] — 2026-07-13 · minor（次版本） · LLM 客户端身份、测活与统一路由
 
 ### Added
 - 阶段 A（LLM 客户端身份基础层）：新增 `client_identity_profile` Provider 字段（数据库列 + Alembic 0040 + CHECK 约束 + Schema/DTO/前端表单），并建立集中式客户端身份目录 `services/llm_identity.py`。身份依据"本次实际协议"解析：`auto` 在 chat_completions→OpenAI SDK、responses→Codex CLI、anthropic_messages→Claude Code 之间映射，`api_format_override`（联网搜索、生图）覆盖协议后同步重算身份。三个协议 Client 统一接收身份档案并停止发送 TelePilot 产品 UA；`minimal` 只发协议必需头、不模拟任何产品客户端。`protocol_profile` 与 `client_identity_profile` 相互独立，切换身份不会打开 beta。配置备份导入未知身份值降级为 `auto` 而非拒绝整份备份。产品身份 UA/originator/x-app 均来自本机安装的真实客户端与上游开源实现（Codex CLI `codex_cli_rs`、Claude Code `claude-cli` + `x-app: cli`、OpenAI Python SDK），无法验证的 Codex/Claude Desktop 档案保持不可选。
@@ -28,7 +28,9 @@
 - 阶段 C（全量已启用模型测活）：新增 `services/llm_liveness.py` 与 `POST /api/commands/llm-providers/liveness/{preview,run}` 两个端点。预览只读数据库、不调用上游、不消耗 quota，仅统计 `models[].enabled == true` 的模型并给出任务数、成本上限（任务数 × max_tokens）、缺凭据/无启用模型的跳过原因；执行采用有界公平调度（全局并发 + 单 Provider 并发 + Provider 轮询防独占），支持范围过滤（失败重测 / 指定 Provider / 指定模型）与协作式取消。429 只把对应 Provider 并发降到 1、401 停止该 Provider 剩余任务，其它 Provider 不受影响；手工测活不修改生产 cooldown、不自动禁用模型，结果面向前端全部脱敏。前端新增全量测活弹窗（执行预览确认 + 逐项结果 + 取消）。
 - 阶段 D（共享 Router 与模型级路由）：`services/llm_router.py` 的 `RoutingDecision` 升级为 Provider + 已启用模型级结果（新增 `model` / `api_format` / `client_identity_profile` 字段与脱敏 `summary()`，旧字段保持兼容）。`pick_provider` 拆为对外 wrapper + 内部实现，所有返回路径（规则 / 分类器 / fallback）统一经 `_finalize_decision` 补齐模型 / 协议 / 身份，切换 Provider 后同步重算。模型选择严格取 `models[].enabled == true`（default_model 命中启用集则优先，否则取第一个启用模型）。auto 路由结果的模型接入 worker 的 `inline > 模板 cfg > 路由模型 > provider.default_model` 回落链。新增 `preview_route` 只做决策、不调用上游、不消耗 quota、禁用分类器，返回脱敏摘要。
 - 阶段 E（插件统一路由）：`ctx.ai.complete()` / `run_agent()` / `stream_complete()` 新增 `route` 参数，显式支持 `fixed` / `tag` / `auto` 三种路由；留空时按旧 `provider` / `provider_tag` 参数推断，完全向后兼容。新增统一解析器 `_resolve_route` 只在"已配置 key 的候选"内做启用 / 能力 / tag 过滤——插件不能指定 UA、身份、密钥、代理、内部分类器或全局 fallback。`run_agent` 路由预先排除没有已启用模型的 Provider（无法支撑 tools 调用）。三个入口的返回结果新增脱敏 `routing` 摘要（mode / provider / model / tag / 协议 / 身份 / 是否 fallback），绝不含 api_key、base_url、代理或分类器细节。同步更新 `docs/PLUGIN-AI.md`、`docs/PLUGIN-API-REFERENCE.md` 与 `examples/plugins/with_ai` 示例。telebot-plugins 无需改动（facade 向后兼容，已装插件不依赖新参数）。
-- 阶段 F（Desktop 档案证据门槛）：Codex Desktop 与 Claude Desktop 客户端身份档案在没有真实捕获、上游开源实现或可复核证据前，保持 `verified=False` / `experimental=True` / 前端不可选，且不参与协议探测。`resolve_identity` 对未验证或与本次协议不兼容的档案一律回落到该协议的 `auto` 默认身份，绝不发送未经证实的 UA / originator / x-app / 账户 / 设备头。已验证的三个档案证据来源如实标注：Codex CLI（本机 codex-cli 0.143.0 + 上游 `codex-rs/login/src/auth/default_client.rs`）、Claude Code（本机 `@anthropic-ai/claude-code` 2.1.205）、OpenAI Python SDK（上游 openai-python 2.45.0）。新增契约测试锁定 Desktop 档案不可选、不发头、解析回落行为。
+- 阶段 F（Desktop 档案证据门槛）：客户端身份档案严格按证据门槛落地。已验证档案证据来源如实标注——OpenAI Python SDK（openai-python 2.45.0）、Codex CLI（本机 codex-cli 0.143.0 + 上游 `codex-rs/login/src/auth/default_client.rs`）、Claude Code（本机 `@anthropic-ai/claude-code` 2.1.205）。依据真实抓包 + 本机 codex 原生二进制核对，修正 Codex UA 的 OS 段为 `Mac OS`（原误写 `macos`）；`claude_code` 注释订正为「`(external, cli)` 中的 entrypoint 是运行时环境变量默认值，desktop-3p / agent-sdk 等动态段属单次运行态、不写死」。**Codex Desktop** 依据本机 Surge 真实抓包（`Codex Desktop/0.144.0-alpha.4 (Mac OS …; arm64) unknown (Codex Desktop; 26.707.51957)` + `originator: Codex Desktop`）落地为已验证、可选档案，并明确排除 `x-codex-beta-features` / `x-openai-internal-*` / session-id / turn-metadata / installation_id 等 beta 开关、运行态与设备指纹；来源标注为单台机器 alpha 预发布版，stable 版需再核对。**Claude Desktop** 仍无可复核的独立档案证据，保持 `verified=False`、不可选、解析回落。UA 版本段改为可被 `system_setting` 覆盖的可配置项（`apply_version_overrides`，仅接受纯数字/预发布格式版本号、只改版本不动 UA 结构与头）。新增契约测试锁定：已验证档案有证据来源、Codex Desktop 真实 UA 结构、Claude Desktop 不可选且回落、身份头永不含凭证/设备字段。
+
+## [0.56.8] — 2026-07-12 · patch（补丁版本） · 全链路可靠性与恢复能力修复
 
 ### Added
 - payout 发送新增数据库持久化 intent / claim / sent 状态机，以 `(account_id, payout_key)` 作为统一幂等边界；收入事件新增 `source_event_key` 持久化去重，补偿、台账和 Redis 标记共享同一身份合同。

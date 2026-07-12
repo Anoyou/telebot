@@ -112,7 +112,8 @@ def test_minimal_identity_has_no_product_headers() -> None:
 
 def test_unverified_desktop_profile_not_selectable_and_falls_back() -> None:
     items = {item["profile"]: item for item in selectable_identities()}
-    assert items["codex_desktop"]["selectable"] is False
+    # codex_desktop 已有真实抓包证据 → 可选；claude_desktop 仍无证据 → 不可选。
+    assert items["codex_desktop"]["selectable"] is True
     assert items["claude_desktop"]["selectable"] is False
     # 未验证档案解析时回落到该协议 auto 默认身份，绝不发送未验证头。
     identity = resolve_identity("claude_desktop", LLM_API_FORMAT_ANTHROPIC_MESSAGES)

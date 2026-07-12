@@ -31,6 +31,7 @@
 from __future__ import annotations
 
 import platform
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -144,10 +145,16 @@ class ClientIdentity:
 # ────────────────────────────────────────────────────────────
 
 def _os_slug() -> str:
-    """返回小写 OS 标识（用于 Codex UA 的 os 段）。"""
-    system = platform.system().lower()
-    if system == "darwin":
-        return "macos"
+    """返回 Codex UA os 段的 OS 名。
+
+    格式对照本机 codex 原生二进制（``login/src/auth/default_client.rs``）与真实
+    抓包：macOS 拼作 ``Mac OS``（带空格、首字母大写），不是 ``macos``。
+    """
+    system = platform.system()
+    if system == "Darwin":
+        return "Mac OS"
+    if system == "Windows":
+        return "Windows"
     return system or "unknown"
 
 
@@ -175,6 +182,24 @@ def _codex_user_agent(client_version: str) -> str:
     )
 
 
+def _codex_desktop_user_agent(core_version: str, app_build: str) -> str:
+    """复刻 Codex Desktop 的 UA 结构。
+
+    证据来自本机 Surge 抓包（Codex Desktop 0.144.0-alpha.4、app 构建号
+    26.707.51957）：
+        ``Codex Desktop/{core_version} ({os} {os_version}; {arch}) unknown``
+        ``(Codex Desktop; {app_build})``
+    ``core_version`` 是 codex 核心版本、``app_build`` 是桌面 app 构建号，两者都由
+    可配置版本项提供；OS/arch 如实反映运行主机，终端段用稳定占位 ``unknown``。
+    session-id / installation_id / turn-metadata 等运行态与设备指纹**不进目录**。
+    """
+    return (
+        f"Codex Desktop/{core_version} "
+        f"({_os_slug()} {_os_version()}; {_arch_slug()}) unknown "
+        f"(Codex Desktop; {app_build})"
+    )
+
+
 # ────────────────────────────────────────────────────────────
 # 身份目录
 #
@@ -182,20 +207,44 @@ def _codex_user_agent(client_version: str) -> str:
 # 版本升级时先更新 fixture，再更新此处常量。
 # ────────────────────────────────────────────────────────────
 
+# ── 版本号（仅 UA 里的版本段，可被系统设置覆盖）────────────
+#
+# 重要边界：这里只维护"版本号"这一个可随上游发版漂移的字段。UA 的**结构**、
+# 请求头字段名/值都必须由人工对照真实客户端核对后写入下方 catalog，绝不随版本
+# 自动变化。运维可通过 ``GET {npm/PyPI}`` 查询最新版本号并手动刷新（见
+# ``apply_version_overrides``），但结构变更仍需重新核对证据。
+#
 # Codex CLI 采集自本机 codex-cli 0.143.0（/opt/homebrew 安装）与上游
 # openai/codex 源码（codex-rs/login/src/auth/default_client.rs：
 # DEFAULT_ORIGINATOR="codex_cli_rs"、get_codex_user_agent 结构；
 # 请求头 "originator" + "User-Agent"）。
-_CODEX_CLI_VERSION = "0.143.0"
-
-# Claude Code 采集自本机 @anthropic-ai/claude-code 2.1.205：
-# UA 前缀 ``claude-cli/<version> (external, cli)``、请求头 ``x-app: cli``、
-# ``anthropic-version: 2023-06-01``（后者由 Anthropic Client 统一装配）。
-_CLAUDE_CODE_VERSION = "2.1.205"
-
+#
+# Claude Code 采集自本机 @anthropic-ai/claude-code 2.1.205 原生二进制：
+# UA 模板 ``claude-cli/<version> (external, <entrypoint>[, agent-sdk/<v>...])``。
+# 二进制内真实构造为
+# ``claude-cli/${version} (external, ${CLAUDE_CODE_ENTRYPOINT ?? "cli"}...)``：
+# ``entrypoint`` 是运行时环境变量，裸终端默认 ``cli``（本档案即取此默认值），
+# 经 agent SDK / desktop-3p 入口启动时才会拼上 ``claude-desktop-3p`` /
+# ``agent-sdk/<ver>`` 等动态段——那些属于单次运行态，不是固定身份，故不写死。
+# 请求头 ``x-app: cli``（后台任务时上游发 ``cli-bg``，此处取前台默认 ``cli``）；
+# ``anthropic-version: 2023-06-01`` 由 Anthropic Client 统一装配。
+#
 # OpenAI 官方 Python SDK 采集自上游 openai-python 2.45.0
 # (src/openai/_base_client.py::user_agent → ``OpenAI/Python <version>``)。
-_OPENAI_SDK_VERSION = "2.45.0"
+
+# 采集时核对过 UA 结构的真实版本（DB 覆盖缺失时回落这些）。
+_DEFAULT_CLIENT_VERSIONS: dict[str, str] = {
+    "codex_cli": "0.143.0",
+    "claude_code": "2.1.205",
+    "openai_sdk": "2.45.0",
+    # Codex Desktop 需两段版本：codex 核心版本（可含 -alpha.N 预发布后缀）与
+    # 桌面 app 构建号。均来自本机 Surge 抓包（2026-07-12）。
+    "codex_desktop_core": "0.144.0-alpha.4",
+    "codex_desktop_build": "26.707.51957",
+}
+
+# 当前生效版本；``apply_version_overrides`` 可用系统设置里的值覆盖（只改版本号）。
+_CLIENT_VERSIONS: dict[str, str] = dict(_DEFAULT_CLIENT_VERSIONS)
 
 
 def _build_catalog() -> dict[str, ClientIdentity]:
@@ -223,58 +272,71 @@ def _build_catalog() -> dict[str, ClientIdentity]:
         api_formats=frozenset(
             {LLM_API_FORMAT_CHAT_COMPLETIONS, LLM_API_FORMAT_RESPONSES}
         ),
-        user_agent=f"OpenAI/Python {_OPENAI_SDK_VERSION}",
+        user_agent=f"OpenAI/Python {_CLIENT_VERSIONS['openai_sdk']}",
         extra_headers={"X-Stainless-Lang": "python"},
         source="openai-python _base_client.py user_agent",
         captured_at="2026-07-12",
-        client_version=_OPENAI_SDK_VERSION,
+        client_version=_CLIENT_VERSIONS["openai_sdk"],
         verified=True,
     )
 
     catalog[CLIENT_IDENTITY_CODEX_CLI] = ClientIdentity(
         profile=CLIENT_IDENTITY_CODEX_CLI,
         api_formats=frozenset({LLM_API_FORMAT_RESPONSES}),
-        user_agent=_codex_user_agent(_CODEX_CLI_VERSION),
+        user_agent=_codex_user_agent(_CLIENT_VERSIONS["codex_cli"]),
         # 上游对每个 Responses 请求发送 "originator" 头；session-id 等元数据是
         # 单次会话动态值，属于身份无关的运行态信息，这里不伪造固定值。
         extra_headers={"originator": "codex_cli_rs"},
         source="codex-cli 0.143.0 本机二进制 + codex-rs default_client.rs",
         captured_at="2026-07-12",
-        client_version=_CODEX_CLI_VERSION,
+        client_version=_CLIENT_VERSIONS["codex_cli"],
         verified=True,
     )
 
     catalog[CLIENT_IDENTITY_CLAUDE_CODE] = ClientIdentity(
         profile=CLIENT_IDENTITY_CLAUDE_CODE,
         api_formats=frozenset({LLM_API_FORMAT_ANTHROPIC_MESSAGES}),
-        user_agent=f"claude-cli/{_CLAUDE_CODE_VERSION} (external, cli)",
+        user_agent=f"claude-cli/{_CLIENT_VERSIONS['claude_code']} (external, cli)",
         # 上游 Claude Code 请求发送 ``x-app: cli``。anthropic-version 由
         # Anthropic Client 统一装配（本身就是协议必需头，不算身份模拟）。
         extra_headers={"x-app": "cli"},
         source="@anthropic-ai/claude-code 2.1.205 本机二进制",
         captured_at="2026-07-12",
-        client_version=_CLAUDE_CODE_VERSION,
+        client_version=_CLIENT_VERSIONS["claude_code"],
         verified=True,
     )
 
-    # ── 未验证 / 实验档案 ──────────────────────────────────
-    # 阶段 F 约束：没有真实捕获 / 上游开源实现 / 可复核证据前，Desktop 档案保持
-    # 不可选、不参与探测。占位存在只为让枚举、迁移、前端 disabled 项一致。
+    # ── Codex Desktop：本机 Surge 抓包实证（0.144.0-alpha.4 / build 26.707.51957）──
+    # 抓包实测请求头只提取两项身份字段：
+    #   originator: Codex Desktop
+    #   user-agent: Codex Desktop/{core} ({os} {osver}; {arch}) unknown (Codex Desktop; {build})
+    # 明确排除的抓包内容（阶段 F / 安全边界）：Authorization Bearer、session-id、
+    # thread-id、x-client-request-id、x-codex-window-id、installation_id、
+    # x-codex-turn-metadata（含仓库路径 / git commit / 设备指纹）等运行态与机密；
+    # 以及 x-codex-beta-features、x-openai-internal-codex-responses-lite 等会改变
+    # 上游语义 / 开 beta 的头——身份切换不得改语义，一律不带。
     catalog[CLIENT_IDENTITY_CODEX_DESKTOP] = ClientIdentity(
         profile=CLIENT_IDENTITY_CODEX_DESKTOP,
         api_formats=frozenset({LLM_API_FORMAT_RESPONSES}),
-        user_agent=None,
-        extra_headers={},
-        source="未获得可复核的 Codex Desktop 请求头证据",
-        verified=False,
-        experimental=True,
+        user_agent=_codex_desktop_user_agent(
+            _CLIENT_VERSIONS["codex_desktop_core"],
+            _CLIENT_VERSIONS["codex_desktop_build"],
+        ),
+        extra_headers={"originator": "Codex Desktop"},
+        source=(
+            "本机 Surge 抓包 Codex Desktop 0.144.0-alpha.4（app build 26.707.51957）；"
+            "证据来自单台机器的 alpha 预发布版，stable 版 UA 可能变，需再核对"
+        ),
+        captured_at="2026-07-13",
+        client_version=_CLIENT_VERSIONS["codex_desktop_core"],
+        verified=True,
     )
     catalog[CLIENT_IDENTITY_CLAUDE_DESKTOP] = ClientIdentity(
         profile=CLIENT_IDENTITY_CLAUDE_DESKTOP,
         api_formats=frozenset({LLM_API_FORMAT_ANTHROPIC_MESSAGES}),
         user_agent=None,
         extra_headers={},
-        source="未获得可复核的 Claude Desktop 请求头证据",
+        source="未获得可复核的 Claude Desktop 请求头证据（按用户决定暂不落地）",
         verified=False,
         experimental=True,
     )
@@ -283,6 +345,48 @@ def _build_catalog() -> dict[str, ClientIdentity]:
 
 
 _CATALOG: dict[str, ClientIdentity] = _build_catalog()
+
+
+# 允许被系统设置覆盖版本号的档案键（与 _DEFAULT_CLIENT_VERSIONS 对齐）。
+_VERSION_OVERRIDE_KEYS = frozenset(_DEFAULT_CLIENT_VERSIONS.keys())
+
+# 版本号必须形如 x.y[.z...]，可带一个 -alpha.N / -beta.N / -rc.N 预发布后缀
+# （Codex Desktop 用 0.144.0-alpha.4 这类格式）。仅允许字母/数字/点/连字符，
+# 拒绝空格、引号、控制字符等任何可能污染 UA 头的内容。
+_VERSION_RE = re.compile(r"^\d+(?:\.\d+){1,3}(?:-[A-Za-z]+(?:\.\d+)?)?$")
+
+
+def default_client_versions() -> dict[str, str]:
+    """返回采集时核对过的默认版本号（DB 覆盖缺失时的回落值）。"""
+    return dict(_DEFAULT_CLIENT_VERSIONS)
+
+
+def current_client_versions() -> dict[str, str]:
+    """返回当前生效的版本号（含已应用的覆盖）。"""
+    return dict(_CLIENT_VERSIONS)
+
+
+def is_valid_version(value: str | None) -> bool:
+    """校验版本号字符串是否为安全的纯数字点分格式。"""
+    return bool(value and _VERSION_RE.match(str(value).strip()))
+
+
+def apply_version_overrides(overrides: dict[str, str] | None) -> dict[str, str]:
+    """用系统设置里的版本号覆盖 UA 版本段，并重建身份目录。
+
+    只接受 ``_VERSION_OVERRIDE_KEYS`` 里的键、且值必须通过 ``is_valid_version``；
+    非法/未知项忽略。缺省项回落到采集默认值。**只改版本号，不动 UA 结构与头。**
+    返回应用后的生效版本映射。
+    """
+    global _CATALOG
+    effective = dict(_DEFAULT_CLIENT_VERSIONS)
+    for key, value in (overrides or {}).items():
+        if key in _VERSION_OVERRIDE_KEYS and is_valid_version(value):
+            effective[key] = str(value).strip()
+    _CLIENT_VERSIONS.clear()
+    _CLIENT_VERSIONS.update(effective)
+    _CATALOG = _build_catalog()
+    return dict(_CLIENT_VERSIONS)
 
 
 def normalize_identity_profile(value: str | None) -> str:
@@ -393,9 +497,13 @@ __all__ = [
     "DEFAULT_CLIENT_IDENTITY_PROFILE",
     "IDENTITY_PROBE_ORDER",
     "ClientIdentity",
+    "apply_version_overrides",
+    "current_client_versions",
+    "default_client_versions",
     "default_identity_for_format",
     "get_identity",
     "is_identity_compatible",
+    "is_valid_version",
     "normalize_identity_profile",
     "resolve_identity",
     "selectable_identities",
