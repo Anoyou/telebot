@@ -3,7 +3,7 @@
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-3.12+-3776ab.svg)](backend/pyproject.toml)
 [![React](https://img.shields.io/badge/React-18-61dafb.svg)](frontend/package.json)
-[![Version](https://img.shields.io/badge/version-0.57.7-f97316.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.57.8-f97316.svg)](CHANGELOG.md)
 [![Status](https://img.shields.io/badge/status-alpha-orange.svg)](#项目状态)
 
 自托管的 Telegram 多账号 UserBot 控制台。
@@ -234,7 +234,7 @@ backend/.venv/bin/python scripts/validate-installed-interaction-plugins.py
 
 ## 项目状态
 
-当前源码版本：`0.57.7`。
+当前源码版本：`0.57.8`。
 
 项目处于 Alpha 阶段，主要面向自托管和个人可信环境。接口、页面和插件契约仍可能调整；升级前请阅读 [CHANGELOG](CHANGELOG.md) 并完成备份。较大的功能改动建议先开 issue 对齐方向。
 

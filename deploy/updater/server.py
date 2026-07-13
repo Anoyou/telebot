@@ -148,7 +148,7 @@ def _console_services(raw: str | None) -> list[str]:
     return services
 
 
-def _compose_project_name() -> str | None:
+def _compose_project_name(host_project_dir: Path | None = None) -> str | None:
     """Return the Docker Compose project name used by the host deployment.
 
     The updater runs inside a container with the host project mounted at
@@ -161,6 +161,7 @@ def _compose_project_name() -> str | None:
     raw = (
         os.getenv("TELEPILOT_COMPOSE_PROJECT_NAME")
         or os.getenv("COMPOSE_PROJECT_NAME")
+        or (host_project_dir.name if host_project_dir and host_project_dir.name else "")
         or (HOST_PROJECT_DIR.name if str(HOST_PROJECT_DIR) and HOST_PROJECT_DIR.name not in {"", "."} else "")
         or WORKSPACE.name
     )
@@ -168,17 +169,57 @@ def _compose_project_name() -> str | None:
     return normalized or None
 
 
+def _absolute_host_project_dir() -> str:
+    """Resolve the host-side project path used by Docker bind mounts.
+
+    A relative value such as ``.`` is valid when Compose runs on the host, but
+    not when the updater invokes the host Docker daemon from ``/workspace``:
+    Compose would resolve it to the container path and bind the wrong host
+    directory.  Prefer an explicit absolute value, otherwise recover the
+    original host working directory from this container's Compose label.
+    """
+    if HOST_PROJECT_DIR.is_absolute():
+        return str(HOST_PROJECT_DIR)
+
+    container_id = (os.getenv("HOSTNAME") or "").strip()
+    if not container_id:
+        try:
+            container_id = Path("/etc/hostname").read_text(encoding="utf-8").strip()
+        except OSError:
+            container_id = ""
+    if container_id:
+        out, _, rc = _run(
+            [
+                "docker",
+                "inspect",
+                "--format",
+                '{{ index .Config.Labels "com.docker.compose.project.working_dir" }}',
+                container_id,
+            ],
+            timeout=5,
+        )
+        candidate = Path(out.strip())
+        if rc == 0 and candidate.is_absolute():
+            return str(candidate)
+
+    raise RuntimeError(
+        "TELEPILOT_HOST_PROJECT_DIR 必须是宿主机绝对路径；"
+        "当前无法从 updater 容器标签恢复部署目录"
+    )
+
+
 def _apply_job_env(remote: str, branch: str) -> dict[str, str]:
+    host_project_dir = _absolute_host_project_dir()
     env = {
         "COMPOSE_DOCKER_CLI_BUILD": "1",
         "DOCKER_BUILDKIT": "1",
         "TELEPILOT_UPDATE_REMOTE": remote,
         "TELEPILOT_UPDATE_BRANCH": branch,
-        "TELEPILOT_HOST_PROJECT_DIR": os.getenv("TELEPILOT_HOST_PROJECT_DIR", str(WORKSPACE)),
+        "TELEPILOT_HOST_PROJECT_DIR": host_project_dir,
         "TELEPILOT_SKIP_UPDATER_RECREATE": "1",
         "TELEPILOT_UPDATE_PREFETCHED": "1",
     }
-    project = _compose_project_name()
+    project = _compose_project_name(Path(host_project_dir))
     if project:
         env["COMPOSE_PROJECT_NAME"] = project
     return env

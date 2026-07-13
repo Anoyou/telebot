@@ -98,6 +98,8 @@ TELEPILOT_UPDATE_BRANCH=codex/0.33-interaction-framework make prod-update
 - updater 自更新：业务服务完成健康检查后，由独立 handoff 最后切换 updater，避免更新器重建自身导致任务中断。
 - 任务日志：Web 面板轮询 updater job，任务状态同时持久化到 Git 目录；updater 重启后仍可读取结果。
 
+`TELEPILOT_HOST_PROJECT_DIR` 必须是宿主机上的绝对部署路径。宿主机直接运行 Compose 时相对路径虽然可解析，但 updater 在容器内调用宿主 Docker daemon 时会把 `.` 解释为容器工作目录 `/workspace`。更新器会优先从自身 Compose 标签恢复真实宿主路径；无法恢复时拒绝更新，不会继续使用不确定的挂载目录。handoff 结果写入 `.git/telepilot-updater-handoff.log`，更新后仍反复提示部署未完成时，应同时检查该日志与 `.git/telepilot-deploy-pending`。
+
 首次把 `updater` 服务部署到服务器仍需要一次宿主机操作；之后常规补丁不再依赖 SSH 登录。若部署目录不是当前 shell 的工作目录，可显式指定：
 
 ```bash

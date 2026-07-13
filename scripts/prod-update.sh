@@ -13,6 +13,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/_lib.sh"
 cd "$ROOT_DIR"
 export TELEPILOT_HOST_PROJECT_DIR="${TELEPILOT_HOST_PROJECT_DIR:-$ROOT_DIR}"
+[[ "$TELEPILOT_HOST_PROJECT_DIR" == /* ]] \
+  || die "TELEPILOT_HOST_PROJECT_DIR 必须是宿主机绝对路径，拒绝从容器内解析相对挂载目录"
 
 REMOTE="${TELEPILOT_UPDATE_REMOTE:-origin}"
 BRANCH="${TELEPILOT_UPDATE_BRANCH:-main}"
@@ -234,12 +236,16 @@ compose_project_name() {
 }
 
 schedule_updater_handoff() {
-  local project
+  local project handoff_log
   project="$(compose_project_name)"
+  handoff_log="$(git rev-parse --git-path telepilot-updater-handoff.log)"
+  rm -f "$handoff_log"
   docker compose build updater
   env -u UPDATER_TOKEN docker compose run -d --rm --no-deps \
-    -e COMPOSE_PROJECT_NAME="$project" --entrypoint sh updater -c \
-    'sleep 3; env -u UPDATER_TOKEN docker compose up -d --no-deps --force-recreate updater && rm -f "$(git rev-parse --git-path telepilot-deploy-pending)"' \
+    -e COMPOSE_PROJECT_NAME="$project" \
+    -e TELEPILOT_HOST_PROJECT_DIR="$TELEPILOT_HOST_PROJECT_DIR" \
+    --entrypoint sh updater -c \
+    'sleep 3; log="$(git rev-parse --git-path telepilot-updater-handoff.log)"; if env -u UPDATER_TOKEN docker compose up -d --no-deps --force-recreate updater >"$log" 2>&1; then printf "handoff succeeded\n" >>"$log"; rm -f "$(git rev-parse --git-path telepilot-deploy-pending)"; else rc=$?; printf "handoff failed: exit %s\n" "$rc" >>"$log"; exit "$rc"; fi' \
     >/dev/null
   HANDOFF_SCHEDULED=1
 }

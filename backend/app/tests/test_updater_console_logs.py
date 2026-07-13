@@ -73,6 +73,40 @@ def test_apply_job_env_uses_host_compose_project_name(monkeypatch) -> None:
     assert env["COMPOSE_DOCKER_CLI_BUILD"] == "1"
 
 
+def test_apply_job_env_recovers_absolute_host_dir_from_container_label(monkeypatch) -> None:
+    updater = _load_updater_module()
+    monkeypatch.setattr(updater, "HOST_PROJECT_DIR", Path("."))
+    monkeypatch.setenv("HOSTNAME", "container-id")
+    monkeypatch.setattr(
+        updater,
+        "_run",
+        lambda args, **_kw: (
+            ("/TelePilot", "", 0)
+            if args[:3] == ["docker", "inspect", "--format"]
+            else ("", "", 1)
+        ),
+    )
+
+    env = updater._apply_job_env("origin", "main")
+
+    assert env["TELEPILOT_HOST_PROJECT_DIR"] == "/TelePilot"
+    assert env["COMPOSE_PROJECT_NAME"] == "telepilot"
+
+
+def test_apply_job_env_rejects_unresolved_relative_host_dir(monkeypatch) -> None:
+    updater = _load_updater_module()
+    monkeypatch.setattr(updater, "HOST_PROJECT_DIR", Path("."))
+    monkeypatch.setenv("HOSTNAME", "container-id")
+    monkeypatch.setattr(updater, "_run", lambda *_args, **_kw: ("", "missing", 1))
+
+    try:
+        updater._apply_job_env("origin", "main")
+    except RuntimeError as exc:
+        assert "绝对路径" in str(exc)
+    else:
+        raise AssertionError("relative host project dir must fail closed")
+
+
 def test_update_job_survives_updater_restart(monkeypatch, tmp_path) -> None:
     updater = _load_updater_module()
     workspace = tmp_path / "repo"
@@ -96,6 +130,8 @@ def test_incremental_script_never_recreates_web_with_updater() -> None:
     assert "--force-recreate updater web" not in script
     assert "docker compose up -d --build --no-deps" in script
     assert '-e COMPOSE_PROJECT_NAME="$project"' in script
+    assert '-e TELEPILOT_HOST_PROJECT_DIR="$TELEPILOT_HOST_PROJECT_DIR"' in script
+    assert "telepilot-updater-handoff.log" in script
     assert 'com.docker.compose.project' in script
 
 

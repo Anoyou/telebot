@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from app.util.update_plan import classify_changed_files
+import subprocess
+from pathlib import Path
+
+from app.util.update_plan import build_update_plan, classify_changed_files
 
 
 def test_version_bumps_are_service_scoped() -> None:
@@ -79,3 +82,34 @@ def test_unknown_runtime_file_fails_closed() -> None:
     assert plan.components == ["full_update"]
     assert plan.requires_full_update is True
     assert plan.reasons == ["无法确定运行影响范围：runtime-new-format.toml"]
+
+
+def test_dotfile_and_unicode_docs_are_not_misclassified_as_runtime(tmp_path: Path) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=root, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=root, check=True)
+    (root / ".env.example").write_text("A=1\n", encoding="utf-8")
+    docs = root / "docs"
+    docs.mkdir()
+    (docs / "审查.md").write_text("old\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=root, check=True)
+    subprocess.run(["git", "commit", "-qm", "old"], cwd=root, check=True)
+    old = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=root, check=True, capture_output=True, text=True
+    ).stdout.strip()
+
+    (root / ".env.example").write_text("A=2\n", encoding="utf-8")
+    (docs / "审查.md").write_text("new\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=root, check=True)
+    subprocess.run(["git", "commit", "-qm", "new"], cwd=root, check=True)
+    new = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=root, check=True, capture_output=True, text=True
+    ).stdout.strip()
+
+    plan = build_update_plan(root, old, new)
+
+    assert plan.changed_files == [".env.example", "docs/审查.md"]
+    assert plan.components == ["docs_only"]
+    assert plan.requires_full_update is False

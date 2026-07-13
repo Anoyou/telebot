@@ -24,6 +24,7 @@ _NO_RUNTIME_PREFIXES = (
     "examples/",
 )
 _NO_RUNTIME_FILES = {
+    ".env.example",
     "AGENTS.md",
     "CONTRIBUTING.md",
     "LICENSE",
@@ -62,7 +63,10 @@ class UpdatePlan:
 
 
 def _normalize(path: str) -> str:
-    return path.strip().lstrip("./")
+    normalized = path.strip()
+    while normalized.startswith("./"):
+        normalized = normalized[2:]
+    return normalized
 
 
 def _is_docs_file(path: str) -> bool:
@@ -261,10 +265,13 @@ def _compose_changes(root: Path, old_revision: str, new_revision: str) -> tuple[
 
 def build_update_plan(root: Path, old_revision: str, new_revision: str) -> UpdatePlan:
     root = root.resolve()
-    diff = _run(["git", "diff", "--name-only", f"{old_revision}..{new_revision}"], cwd=root)
+    diff = _run(
+        ["git", "-c", "core.quotePath=false", "diff", "--name-only", "-z", f"{old_revision}..{new_revision}"],
+        cwd=root,
+    )
     if diff.returncode != 0:
         raise RuntimeError(diff.stderr.strip() or "git diff 失败")
-    changed_files = [line for line in diff.stdout.splitlines() if line.strip()]
+    changed_files = [path for path in diff.stdout.split("\0") if path.strip()]
 
     compose_services: set[str] | None = None
     compose_failed = False

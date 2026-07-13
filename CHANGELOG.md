@@ -22,6 +22,12 @@
 
 暂无已记录变更。
 
+## [0.57.8] — 2026-07-13 · patch（补丁版本） · 在线更新 handoff 收敛
+
+### Fixed
+- 修复在线更新 handoff 在 `TELEPILOT_HOST_PROJECT_DIR=.` 时把宿主挂载目录误解析为 `/workspace`、旧 updater 未切换却提前报告成功并残留 deployment pending 的问题；更新器现在从 Compose 容器标签恢复绝对宿主路径，无法确认时 fail-closed，并保留 handoff 结果日志。
+- 修复更新计划剥掉 `.env.example` 前导点、无法解析 Git 中文路径转义，导致纯模板/文档变化被误判为完整更新的问题。
+
 ## [0.57.7] — 2026-07-13 · patch（补丁版本） · 安全边界收敛与文档整理
 
 ### Changed
