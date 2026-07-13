@@ -70,6 +70,16 @@ def test_golden_codex_desktop_headers() -> None:
     }
 
 
+def test_golden_grok_cli_headers() -> None:
+    ident = get_identity("grok_cli")
+    assert ident is not None
+    assert ident.verified is True
+    assert ident.headers() == {
+        "User-Agent": "grok-cli/0.2.93",
+        "x-grok-client-version": "0.2.93",
+    }
+
+
 def test_golden_minimal_emits_no_product_headers() -> None:
     ident = get_identity("minimal")
     assert ident is not None
@@ -138,6 +148,7 @@ def test_default_client_versions_locked() -> None:
         "codex_cli": "0.143.0",
         "claude_code": "2.1.205",
         "openai_sdk": "2.45.0",
+        "grok_cli": "0.2.93",
         "codex_desktop_core": "0.144.0-alpha.4",
         "codex_desktop_build": "26.707.51957",
     }

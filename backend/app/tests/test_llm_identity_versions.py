@@ -106,6 +106,7 @@ def test_version_key_metadata_detectability() -> None:
     assert meta["codex_cli"]["registry"] == "npm:@openai/codex"
     assert meta["claude_code"]["registry"] == "npm:@anthropic-ai/claude-code"
     assert meta["openai_sdk"]["registry"] == "pypi:openai"
+    assert meta["grok_cli"]["registry"] is None
     # Codex Desktop 两段无公共 registry（仅手动）
     assert meta["codex_desktop_core"]["registry"] is None
     assert meta["codex_desktop_build"]["registry"] is None

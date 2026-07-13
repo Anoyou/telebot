@@ -361,6 +361,7 @@ class LLMProviderCreate(BaseModel):
         "codex_desktop",
         "claude_code",
         "claude_desktop",
+        "grok_cli",
     ] = LLM_CLIENT_IDENTITY_AUTO
     """客户端身份档案；auto 按本次实际协议解析。与 protocol_profile 相互独立。"""
 
@@ -443,6 +444,7 @@ class LLMProviderUpdate(BaseModel):
             "codex_desktop",
             "claude_code",
             "claude_desktop",
+            "grok_cli",
         ]
         | None
     ) = None
@@ -684,6 +686,8 @@ class ChatTestModelResult(BaseModel):
     output_tokens: int = 0
     empty_response: bool = False
     error: str | None = None
+    client_identity_profile: str | None = None
+    effective_api_format: str | None = None
 
 
 class ChatTestModelsResponse(BaseModel):

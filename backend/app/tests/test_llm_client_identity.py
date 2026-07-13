@@ -35,6 +35,7 @@ from app.services.llm_dto import LLMProviderDTO
 from app.services.llm_identity import (
     CLIENT_IDENTITY_CLAUDE_CODE,
     CLIENT_IDENTITY_CODEX_CLI,
+    CLIENT_IDENTITY_GROK_CLI,
     CLIENT_IDENTITY_MINIMAL,
     CLIENT_IDENTITY_OPENAI_SDK,
     default_identity_for_format,
@@ -128,6 +129,8 @@ def test_identity_compat_matrix() -> None:
     assert is_identity_compatible("codex_cli", LLM_API_FORMAT_CHAT_COMPLETIONS) is False
     assert is_identity_compatible("claude_code", LLM_API_FORMAT_ANTHROPIC_MESSAGES) is True
     assert is_identity_compatible("claude_code", LLM_API_FORMAT_RESPONSES) is False
+    assert is_identity_compatible("grok_cli", LLM_API_FORMAT_RESPONSES) is True
+    assert is_identity_compatible("grok_cli", LLM_API_FORMAT_CHAT_COMPLETIONS) is False
 
 
 def test_normalize_unknown_identity_degrades_to_auto() -> None:
@@ -190,6 +193,23 @@ async def test_responses_client_sends_codex_identity() -> None:
     assert "TelePilot" not in headers.get("User-Agent", "")
     assert headers.get("User-Agent", "").startswith("codex_cli_rs/")
     assert headers.get("originator") == "codex_cli_rs"
+
+
+@pytest.mark.asyncio
+async def test_responses_client_sends_minimal_grok_cli_identity() -> None:
+    fake = AsyncMock()
+    fake.__aenter__.return_value = fake
+    fake.post = AsyncMock(return_value=_responses_response())
+    identity = resolve_identity(CLIENT_IDENTITY_GROK_CLI, LLM_API_FORMAT_RESPONSES)
+    with patch("app.services.llm_client.httpx.AsyncClient", return_value=fake):
+        await ResponsesClient("sk", "https://api.example/v1", "model", identity=identity).complete(
+            "system", "hello"
+        )
+    headers = fake.post.await_args.kwargs["headers"]
+    assert headers.get("User-Agent") == "grok-cli/0.2.93"
+    assert headers.get("x-grok-client-version") == "0.2.93"
+    for forbidden in ("authorization", "x-xai-token-auth", "x-grok-conv-id"):
+        assert forbidden not in {key.lower() for key in identity.extra_headers}
 
 
 @pytest.mark.asyncio

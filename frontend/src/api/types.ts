@@ -1362,7 +1362,8 @@ export type LLMClientIdentityProfile =
   | "codex_cli"
   | "codex_desktop"
   | "claude_code"
-  | "claude_desktop";
+  | "claude_desktop"
+  | "grok_cli";
 
 /**
  * LLMProvider 下挂的一个候选模型条目（与后端 ProviderModel 对齐）。
@@ -1625,6 +1626,8 @@ export interface ChatTestModelResult {
   output_tokens: number;
   empty_response: boolean;
   error?: string | null;
+  client_identity_profile?: string | null;
+  effective_api_format?: string | null;
 }
 
 export interface ChatTestModelsResponse {

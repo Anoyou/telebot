@@ -1275,6 +1275,7 @@ async def chat_test_models(
     row = await command_service.get_provider_row(db, pid)
     proxy_url = await _resolve_proxy_url(db, row.proxy_id)
     user_prompt = _build_chat_test_prompt(payload)
+    transport_metadata = _liveness_transport_metadata(row)
 
     async def run_one(model_id: str) -> ChatTestModelResult:
         started = _time.monotonic()
@@ -1308,6 +1309,7 @@ async def chat_test_models(
                 output_tokens=int(result.output_tokens or 0),
                 empty_response=not bool(text),
                 error=None if text else "上游请求已完成，但返回文本为空。",
+                **transport_metadata,
             )
         except LLMError as exc:
             elapsed_ms = int((_time.monotonic() - started) * 1000)
@@ -1325,6 +1327,7 @@ async def chat_test_models(
                 requested_model=model_id,
                 latency_ms=elapsed_ms,
                 error=str(exc),
+                **transport_metadata,
             )
         except Exception as exc:  # noqa: BLE001
             elapsed_ms = int((_time.monotonic() - started) * 1000)
@@ -1342,6 +1345,7 @@ async def chat_test_models(
                 requested_model=model_id,
                 latency_ms=elapsed_ms,
                 error=f"{type(exc).__name__}: {str(exc)[:200]}",
+                **transport_metadata,
             )
 
     results = await asyncio.gather(*(run_one(model_id) for model_id in payload.models))

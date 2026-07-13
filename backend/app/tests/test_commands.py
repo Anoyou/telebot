@@ -1853,6 +1853,8 @@ async def test_chat_test_models_endpoint_success(monkeypatch) -> None:
         api_key_enc=None,
         base_url="https://api.example.com/v1",
         default_model="gpt-4o",
+        api_format="responses",
+        client_identity_profile="grok_cli",
         created_at=datetime.now(UTC),
     )
 
@@ -1912,6 +1914,8 @@ async def test_chat_test_models_endpoint_success(monkeypatch) -> None:
     assert result.preview == "我在想晚饭吃什么。"
     assert result.input_tokens == 11
     assert result.output_tokens == 7
+    assert result.effective_api_format == "responses"
+    assert result.client_identity_profile == "grok_cli"
     assert captured["system"] == "你叫阿光。"
     assert "上一句" in str(captured["user"])
     assert "上一答" in str(captured["user"])
@@ -1943,6 +1947,8 @@ async def test_chat_test_models_endpoint_empty_response(monkeypatch) -> None:
         api_key_enc=None,
         base_url="https://api.example.com/v1",
         default_model="gpt-4o",
+        api_format="responses",
+        client_identity_profile="grok_cli",
         created_at=datetime.now(UTC),
     )
 
@@ -1969,6 +1975,8 @@ async def test_chat_test_models_endpoint_empty_response(monkeypatch) -> None:
     assert result.empty_response is True
     assert result.response is None
     assert result.error == "上游请求已完成，但返回文本为空。"
+    assert result.effective_api_format == "responses"
+    assert result.client_identity_profile == "grok_cli"
 
 
 @pytest.mark.asyncio
@@ -1985,6 +1993,8 @@ async def test_chat_test_models_endpoint_llm_error(monkeypatch) -> None:
         api_key_enc=None,
         base_url="https://api.example.com/v1",
         default_model="gpt-4o",
+        api_format="responses",
+        client_identity_profile="grok_cli",
         created_at=datetime.now(UTC),
     )
 
@@ -2018,6 +2028,10 @@ async def test_chat_test_models_endpoint_llm_error(monkeypatch) -> None:
     assert by_model["ok-model"].ok is True
     assert by_model["bad-model"].ok is False
     assert "404" in (by_model["bad-model"].error or "")
+    assert by_model["ok-model"].effective_api_format == "responses"
+    assert by_model["ok-model"].client_identity_profile == "grok_cli"
+    assert by_model["bad-model"].effective_api_format == "responses"
+    assert by_model["bad-model"].client_identity_profile == "grok_cli"
 
 
 # ════════════════════════════════════════════════════════════

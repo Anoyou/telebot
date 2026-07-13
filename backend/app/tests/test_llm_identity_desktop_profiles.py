@@ -25,6 +25,7 @@ from app.services.llm_identity import (
     CLIENT_IDENTITY_CLAUDE_DESKTOP,
     CLIENT_IDENTITY_CODEX_CLI,
     CLIENT_IDENTITY_CODEX_DESKTOP,
+    CLIENT_IDENTITY_GROK_CLI,
     get_identity,
     resolve_identity,
     selectable_identities,
@@ -115,6 +116,7 @@ def test_verified_product_profiles_have_evidence_source() -> None:
         CLIENT_IDENTITY_CODEX_CLI,
         CLIENT_IDENTITY_CLAUDE_CODE,
         CLIENT_IDENTITY_CODEX_DESKTOP,
+        CLIENT_IDENTITY_GROK_CLI,
     ):
         identity = get_identity(profile)
         assert identity is not None

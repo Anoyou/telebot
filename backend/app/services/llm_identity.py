@@ -49,6 +49,7 @@ CLIENT_IDENTITY_CODEX_CLI = "codex_cli"
 CLIENT_IDENTITY_CODEX_DESKTOP = "codex_desktop"
 CLIENT_IDENTITY_CLAUDE_CODE = "claude_code"
 CLIENT_IDENTITY_CLAUDE_DESKTOP = "claude_desktop"
+CLIENT_IDENTITY_GROK_CLI = "grok_cli"
 
 # 数据库 / schema 允许写入的取值（含 auto / minimal）。
 ALL_CLIENT_IDENTITY_PROFILES = {
@@ -59,6 +60,7 @@ ALL_CLIENT_IDENTITY_PROFILES = {
     CLIENT_IDENTITY_CODEX_DESKTOP,
     CLIENT_IDENTITY_CLAUDE_CODE,
     CLIENT_IDENTITY_CLAUDE_DESKTOP,
+    CLIENT_IDENTITY_GROK_CLI,
 }
 
 DEFAULT_CLIENT_IDENTITY_PROFILE = CLIENT_IDENTITY_AUTO
@@ -237,6 +239,8 @@ _DEFAULT_CLIENT_VERSIONS: dict[str, str] = {
     "codex_cli": "0.143.0",
     "claude_code": "2.1.205",
     "openai_sdk": "2.45.0",
+    # 本机官方 Grok CLI ``--version`` 与二进制字符串表核对（2026-07-14）。
+    "grok_cli": "0.2.93",
     # Codex Desktop 需两段版本：codex 核心版本（可含 -alpha.N 预发布后缀）与
     # 桌面 app 构建号。均来自本机 Surge 抓包（2026-07-12）。
     "codex_desktop_core": "0.144.0-alpha.4",
@@ -256,6 +260,7 @@ _VERSION_KEY_META: dict[str, dict[str, str | None]] = {
     "codex_cli": {"label": "Codex CLI", "registry": "npm:@openai/codex"},
     "claude_code": {"label": "Claude Code", "registry": "npm:@anthropic-ai/claude-code"},
     "openai_sdk": {"label": "OpenAI Python SDK", "registry": "pypi:openai"},
+    "grok_cli": {"label": "Grok CLI", "registry": None},
     "codex_desktop_core": {"label": "Codex Desktop · 核心版本", "registry": None},
     "codex_desktop_build": {"label": "Codex Desktop · app 构建号", "registry": None},
 }
@@ -322,6 +327,25 @@ def _build_catalog() -> dict[str, ClientIdentity]:
         source="@anthropic-ai/claude-code 2.1.205 本机二进制",
         captured_at="2026-07-12",
         client_version=_CLIENT_VERSIONS["claude_code"],
+        verified=True,
+    )
+
+    # Grok CLI：只保留官方二进制中可复核、且不改变认证语义的身份字段。
+    # 证据来自本机官方 grok 0.2.93 ``--version`` 与二进制字符串表，后者包含
+    # ``x-grok-client-version``；UA 结构同时由 Cockpit Tools v1.3.0 的
+    # ``grok_account.rs`` 交叉核对。明确排除 Authorization、x-xai-token-auth、
+    # x-grok-conv-id、账号 ID、设备字段，以及第三方自己的 client identifier。
+    catalog[CLIENT_IDENTITY_GROK_CLI] = ClientIdentity(
+        profile=CLIENT_IDENTITY_GROK_CLI,
+        api_formats=frozenset({LLM_API_FORMAT_RESPONSES}),
+        user_agent=f"grok-cli/{_CLIENT_VERSIONS['grok_cli']}",
+        extra_headers={"x-grok-client-version": _CLIENT_VERSIONS["grok_cli"]},
+        source=(
+            "本机官方 Grok CLI 0.2.93 --version + 二进制字符串表；"
+            "Cockpit Tools v1.3.0 grok_account.rs 交叉核对 UA 结构"
+        ),
+        captured_at="2026-07-14",
+        client_version=_CLIENT_VERSIONS["grok_cli"],
         verified=True,
     )
 
@@ -554,6 +578,7 @@ def selectable_identities() -> list[dict[str, Any]]:
         CLIENT_IDENTITY_CODEX_DESKTOP,
         CLIENT_IDENTITY_CLAUDE_CODE,
         CLIENT_IDENTITY_CLAUDE_DESKTOP,
+        CLIENT_IDENTITY_GROK_CLI,
     ):
         identity = _CATALOG[profile]
         item = identity.summary()
@@ -570,6 +595,7 @@ __all__ = [
     "CLIENT_IDENTITY_CLAUDE_DESKTOP",
     "CLIENT_IDENTITY_CODEX_CLI",
     "CLIENT_IDENTITY_CODEX_DESKTOP",
+    "CLIENT_IDENTITY_GROK_CLI",
     "CLIENT_IDENTITY_MINIMAL",
     "CLIENT_IDENTITY_OPENAI_SDK",
     "DEFAULT_CLIENT_IDENTITY_PROFILE",

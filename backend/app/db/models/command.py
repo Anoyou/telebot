@@ -112,6 +112,7 @@ ALL_LLM_CLIENT_IDENTITY_PROFILES = {
     "codex_desktop",
     "claude_code",
     "claude_desktop",
+    "grok_cli",
 }
 
 
