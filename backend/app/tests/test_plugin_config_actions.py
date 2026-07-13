@@ -149,6 +149,27 @@ def test_declared_config_actions_reads_installed_manifest_metadata() -> None:
     ]
 
 
+def test_build_ai_facade_registers_usage_callback_in_web_process(monkeypatch) -> None:
+    from app.services import llm_usage_service
+    from app.worker.plugins.ai_facade import PluginAI
+
+    registrations = []
+    monkeypatch.setattr(
+        llm_usage_service,
+        "ensure_llm_usage_callback_registered",
+        lambda: registrations.append("registered"),
+    )
+
+    facade = plugin_config_actions._build_ai_facade(
+        7,
+        "ai_redpacket",
+        {"permissions": ["ai_text"]},
+    )
+
+    assert isinstance(facade, PluginAI)
+    assert registrations == ["registered"]
+
+
 def test_feature_info_reads_installed_manifest_config_actions() -> None:
     feature = SimpleNamespace(
         key="quick_qa",

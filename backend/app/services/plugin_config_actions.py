@@ -251,7 +251,11 @@ def _build_ai_facade(account_id: int, plugin_key: str, manifest: Mapping[str, An
     if "ai_text" not in permissions:
         return None
     from ..worker.plugins.ai_facade import PluginAI
+    from .llm_usage_service import ensure_llm_usage_callback_registered
 
+    # 配置动作运行在 Web 进程，不经过账号 worker 的启动流程；必须在当前
+    # 进程注册 Usage 持久化回调，否则模型调用成功也不会出现在 AI 中心。
+    ensure_llm_usage_callback_registered()
     return PluginAI(account_id=account_id, plugin_key=plugin_key)
 
 
