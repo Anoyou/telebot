@@ -5,7 +5,7 @@
 
 @layer base {
   :root {
-    /* macOS 暖调亮色，来源 docs/design/telepilot-ui-preview.html */
+    /* macOS 暖调亮色基线 */
     --background: 40 19% 94%;
     --foreground: 36 8% 12%;
 

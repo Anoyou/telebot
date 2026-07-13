@@ -190,8 +190,8 @@ async def acquire(
 ) -> LLMAccountBudgetTicket:
     """Reserve one LLM call for an account.
 
-    Redis and DB failures are fail-open by design: AI calls should not be locked
-    out during Redis blips or settings-table migration windows.
+    Budget backend failures are fail-closed.  A configured cost boundary must
+    never disappear merely because Redis or the settings table is unavailable.
     """
 
     estimate = _positive_int(estimated_tokens, 1)
@@ -202,8 +202,11 @@ async def acquire(
     try:
         limits = await _load_budget_limits()
     except Exception:  # noqa: BLE001
-        log.debug("LLM budget limit load failed; allowing account=%s", account_id, exc_info=True)
-        return LLMAccountBudgetTicket(account_id, provider_id, estimate, backend="fail-open")
+        log.error("LLM budget limit load failed; rejecting account=%s", account_id, exc_info=True)
+        raise LLMAccountBudgetExceeded(
+            "LLM 预算服务暂不可用，已为避免失控费用拒绝本次调用。",
+            scope="backend_unavailable",
+        ) from None
 
     per_minute = int(limits["per_minute"])
     daily_requests = int(limits["daily_requests"])
@@ -230,8 +233,11 @@ async def acquire(
     except LLMAccountBudgetExceeded:
         raise
     except Exception:  # noqa: BLE001
-        log.debug("LLM budget Redis reservation failed; allowing account=%s", account_id, exc_info=True)
-        return LLMAccountBudgetTicket(account_id, provider_id, estimate, backend="fail-open", limited=True)
+        log.error("LLM budget Redis reservation failed; rejecting account=%s", account_id, exc_info=True)
+        raise LLMAccountBudgetExceeded(
+            "LLM 预算服务暂不可用，已为避免失控费用拒绝本次调用。",
+            scope="backend_unavailable",
+        ) from None
 
     return LLMAccountBudgetTicket(
         account_id,

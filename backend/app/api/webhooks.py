@@ -21,6 +21,7 @@ from ..db.models.system import SystemSetting
 from ..deps import CurrentUser, DBSession
 from ..redis_client import get_redis
 from ..services import rate_limit_service
+from ..settings import settings
 from ..worker.ipc import CMD_WEBHOOK_DELIVER, publish_cmd_with_ack
 from ..worker.ratelimit.buckets import TokenBuckets
 
@@ -288,7 +289,11 @@ def _whitelisted_headers(request: Request) -> dict[str, str]:
 
 
 def _provided_token(header_token: str | None, query_token: str | None) -> str:
-    return str(header_token or query_token or "").strip()
+    if header_token:
+        return str(header_token).strip()
+    if settings.webhook_allow_query_token:
+        return str(query_token or "").strip()
+    return ""
 
 
 def _require_valid_token(config: dict[str, Any], provided: str) -> None:

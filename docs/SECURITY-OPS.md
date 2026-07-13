@@ -24,6 +24,10 @@
 | `LOGIN_OTP_FAIL_WINDOW_SECONDS` | 默认 900 | 登录失败计数窗口 |
 | `LOGIN_OTP_TTL_SECONDS` | 默认 300 | 通知 Bot 登录验证码有效期 |
 | `LOGIN_OTP_MAX_ATTEMPTS` | 默认 3 | 同一个通知验证码最多尝试次数 |
+| `WEBHOOK_ALLOW_QUERY_TOKEN` | `false` | 默认只接受 `X-TelePilot-Webhook-Token` 请求头；查询参数 token 会进入 URL、反代和访问日志，仅旧系统迁移期临时开启 |
+| `PLUGIN_PUBKEY` | Ed25519 PEM 公钥或留空 | 配置后新 ZIP 必须携带有效 detached signature；完整 PEM 建议由部署 secret 注入 |
+| `PLUGIN_ALLOW_NEW_UNSIGNED_PLUGINS` | `false` | 新上传 ZIP 默认必须验签；只有明确接受未签名 community 插件风险时才临时开启 |
+| `PLUGIN_ALLOW_LEGACY_UNSIGNED_PLUGINS` | `true` | 只控制历史 `signature_ok=NULL` 插件能否继续加载，不会放宽新 ZIP 安装入口 |
 
 ### 1.2 文件权限
 
@@ -128,6 +132,22 @@ docker compose exec web python -m app.scripts.auth_recovery --username admin --t
 2. 再确保至少有一个通知 Bot 已启用并能收到测试消息。
 3. 绑定 TOTP 密钥后，先用当前浏览器确认验证码可验证，再打开 TOTP 登录验证开关。
 4. 不要在没有恢复码路径的情况下把所有登录都强制绑定二次验证。
+
+### 2.5 敏感配置导出与 Webhook token
+
+「系统设置 → 配置备份」勾选敏感字段后，后端会重新验证当前密码；账号已绑定 TOTP 时，还必须提供有效动态验证码。普通非敏感导出不要求二次验证。导出文件可能包含 Telegram session、API Hash、Bot Token、LLM Key 和代理密码，下载后应立即移入受控存储，不要留在浏览器默认下载目录或聊天软件中。
+
+入站 Webhook 默认只从 `X-TelePilot-Webhook-Token` 请求头读取账号 token。`?token=` 查询参数只有在 `WEBHOOK_ALLOW_QUERY_TOKEN=true` 时才兼容，生产环境应保持关闭。迁移旧调用方时，先改客户端发送请求头，再关闭兼容开关并检查反代访问日志中是否残留旧 token。
+
+### 2.6 ZIP 插件签名策略
+
+新 ZIP 安装和历史未签名插件加载使用两个独立开关：
+
+- 配置了 `PLUGIN_PUBKEY` 时，新 ZIP 必须携带有效签名，缺失或验签失败都会在解压和执行 Python 前拒绝。
+- 未配置公钥时，新 ZIP 仍默认拒绝；只有 `PLUGIN_ALLOW_NEW_UNSIGNED_PLUGINS=true` 才允许以 community 信任级别安装。
+- `PLUGIN_ALLOW_LEGACY_UNSIGNED_PLUGINS=true` 只兼容历史 `signature_ok=NULL` 的已安装插件，不允许新的未签名 ZIP 越过安装门禁。
+
+个人可信插件模型允许管理员主动安装自有代码，但生产环境仍应保留来源、版本、哈希和签名记录。临时开启新未签名安装后，应在完成安装后立即关闭。
 
 ---
 
@@ -247,6 +267,20 @@ docker compose restart web
 3. 在新机器上重建：跑 §1 一次性配置 → 用最近一次干净的 DB 备份恢复 → 走 §3.3 强制密钥轮换 →
    通知所有 TG 账号持有人重新绑定。
 
+### 3.6 全局紧急停用
+
+Web 顶部总闸和 `POST /api/system/kill-switch` 会先保存目标状态，再并行停止账号 Worker、账号 Bot manager 和交互 Bot manager，并通过 Redis 广播给其它监听者。任一停止动作或广播失败时，接口返回 `503 KILL_SWITCH_PARTIAL_FAILURE`，表示目标状态已经写入，但运行时尚未完全收敛。
+
+遇到 503 时不要把页面上的“已停用”当成所有进程都已停止。应立即检查：
+
+```bash
+docker compose ps
+docker compose logs --tail=200 web
+curl -fsS https://<host>/readyz
+```
+
+Redis 或数据库异常时，Worker 和 Bot runtime 的关键副作用路径按 fail-closed 处理；仍应确认异常子进程已经退出。恢复总闸前先修复依赖，确认 `/readyz` 正常，再重新启用。
+
 ---
 
 ## 4. 日常巡检建议
@@ -327,7 +361,7 @@ YYYY-MM-DD HH:MM UTC
 
 **超限行为**：拒绝执行，action 记 `FAILED`、`error_code=payout_limit_exceeded`。超限**不进补偿队列、不自动重试**，需要人工调额度或等次日重置。
 
-**容错取舍**：Redis 或配置读取失败时 **fail-open（放行）**——风控不该在 Redis 抖动 / 配置迁移窗口把正常收付款卡死，宁可漏计不误杀。
+**容错取舍**：Redis 或配置读取失败时 **fail-closed（拒绝）**。动作结果会返回“payout 风控配置不可用”或“payout 日累计风控不可用”的明确原因，不会在限额状态未知时继续付款。依赖恢复后可重试原 payout；不要用关闭限额的方式绕过故障。
 
 ### 7.2 payout 失败补偿（自动重放 + 放弃通知）
 
@@ -339,9 +373,9 @@ YYYY-MM-DD HH:MM UTC
 
 **哪些不补偿（直接终态 FAILED，不入队）**：`payout_limit_exceeded`、`invalid_payout_amount`、`empty_message_text`、`scope_not_matched`、`action_limit_exceeded`、`reply_anchor_missing`。
 
-**重放**：每个账号 worker 内周期扫描（`scan_interval_seconds`），到期先领租（防多进程 / 多次重复处理）再经 userbot 重发；退避为 `backoff_base * 2^(n-1)` 封顶 `backoff_max`。补发成功→补偿单置 `sent`，并落一条**新的 OK trace**（同 `payout_key`、带 `replay` 标记）。原始那次仍是 `FAILED`（带 `compensation_queued=true`）。
+**重放**：每个账号 worker 内周期扫描（`scan_interval_seconds`），到期先领租（防多进程 / 多次重复处理）再经 userbot 重发；退避为 `backoff_base * 2^(n-1)` 封顶 `backoff_max`。补发成功后，补偿单的 `sent` 状态与对应 ActionEvent 在同一数据库事务提交。原始那次仍是 `FAILED`（带 `compensation_queued=true`）。
 
-**幂等**：`payout_key`（未显式给会自动生成）+ Redis 已发标记 +（对超时 / 网络类“暧昧”失败）回查账号最近自己发言，保证同一笔最多真正发一次、日累计最多计一次。
+**幂等与暧昧状态**：`payout_key` 是数据库持久化幂等边界，发送结果明确被 Telegram 拒绝时才释放 claim。超时、连接断开或未知异常无法证明消息未送达，因此保留 durable intent 并标记 ambiguous。只有 payload 带稳定 `payout_probe_fingerprint` 时，worker 才会回查账号最近自己发言并自动确认送达；旧记录或缺少 fingerprint 的记录转人工核对，不会只凭相同金额、文本和回复锚点猜测已发送。
 
 **放弃 = 会告警**：重试耗尽或遇到不可补偿错误→补偿单置 `abandoned`，首次置 `notified_at` 并写一条 **error 级运维日志**（“payout 补偿已放弃 / 重试耗尽”）。日累计上限阻塞的重放会**延后到次日**而不是放弃。
 
@@ -361,6 +395,7 @@ psql "$DATABASE_URL" -c "
 
 ## Changelog
 
+- **2026-07-13**：同步敏感导出二次验证、Webhook 请求头 token、ZIP 插件双开关、全局总闸收敛，以及 payout fail-closed 和 ambiguous 核对语义。
 - **2026-07-09** —— 新增 §7 收付款风控与补偿：payout 限额（风控与预算卡片 `payout_limits`，默认 0 不限）与失败自动补偿（`payout_compensation` 重放 + abandoned 放弃告警）运维说明，§4 巡检加放弃补偿单查询。
 - **2026-05-06** —— Sprint 4 Wave 3：开源向润色，新增应急响应工单模板。
 - **2026-05-03** —— Sprint 2 #1：初稿，覆盖一次性配置、三项已知接受风险、五条应急 SOP。

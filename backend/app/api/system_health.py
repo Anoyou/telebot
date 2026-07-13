@@ -34,12 +34,14 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import func, select, text
 
+from ..crypto import decrypt_str
 from ..db.base import AsyncSessionLocal
 from ..db.models.account import Account, Proxy
 from ..db.models.command import LLMProvider
 from ..db.models.system import SystemSetting
 from ..deps import CurrentUser
 from ..redis_client import get_redis
+from ..services import auth_service
 from ..settings import settings
 from ..util.update_plan import build_update_plan, classify_changed_files
 
@@ -2309,6 +2311,8 @@ _SENSITIVE_SYSTEM_SETTING_PREFIXES = (
 class ExportConfigRequest(BaseModel):
     categories: list[str] = Field(default_factory=list)
     include_sensitive: bool = False
+    password: str | None = None
+    totp_code: str | None = None
 
 
 def _row_to_dict(row: Any, exclude: set[str], include_sensitive: bool) -> dict[str, Any]:
@@ -2441,10 +2445,19 @@ async def _build_export_payload(
 
 @router.post("/export-config")
 async def export_config(
-    _user: CurrentUser,
+    user: CurrentUser,
     body: ExportConfigRequest,
 ) -> JSONResponse:
     """导出配置为 JSON 文件下载。"""
+    if body.include_sensitive:
+        if not body.password or not auth_service.verify_password(body.password, user.password_hash):
+            raise HTTPException(status_code=403, detail="敏感配置导出需要重新验证当前密码")
+        if user.totp_secret_enc:
+            if not body.totp_code or not auth_service.verify_totp(
+                decrypt_str(user.totp_secret_enc),
+                body.totp_code,
+            ):
+                raise HTTPException(status_code=403, detail="敏感配置导出需要有效的 TOTP 动态验证码")
     try:
         result = await _build_export_payload(
             categories=body.categories,

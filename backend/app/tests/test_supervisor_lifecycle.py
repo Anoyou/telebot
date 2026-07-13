@@ -71,6 +71,20 @@ async def test_stop_worker_terminates_locally_when_redis_publish_fails(
     assert supervisor._WORKERS[7].desired == "stopped"
 
 
+def test_worker_entry_strips_updater_control_plane_secrets(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TELEPILOT_UPDATER_TOKEN", "web-secret")
+    monkeypatch.setenv("UPDATER_TOKEN", "updater-secret")
+
+    def _entry(account_id: int) -> None:
+        assert account_id == 7
+        assert "TELEPILOT_UPDATER_TOKEN" not in supervisor.os.environ
+        assert "UPDATER_TOKEN" not in supervisor.os.environ
+
+    monkeypatch.setattr(supervisor, "worker_entry", _entry)
+
+    supervisor._worker_entry_without_control_plane_secrets(7)
+
+
 @pytest.mark.asyncio
 async def test_monitor_schedules_backoff_without_immediate_restart(
     monkeypatch: pytest.MonkeyPatch,

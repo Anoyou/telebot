@@ -4,19 +4,56 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
+from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
+from fastapi import HTTPException
 from sqlalchemy import JSON, Boolean, ForeignKey, Integer, String, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from app.api import system_health
+from app.services import auth_service
 from app.worker import ipc
 
 
 class _Base(DeclarativeBase):
     pass
+
+
+@pytest.mark.asyncio
+async def test_sensitive_export_requires_password_reauthentication(monkeypatch) -> None:
+    user = SimpleNamespace(
+        id=1,
+        password_hash=auth_service.hash_password("correct-password"),
+        totp_secret_enc=None,
+    )
+    build = AsyncMock(return_value={"_meta": {"include_sensitive": True}})
+    monkeypatch.setattr(system_health, "_build_export_payload", build)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await system_health.export_config(
+            user,
+            system_health.ExportConfigRequest(
+                categories=["account_settings"],
+                include_sensitive=True,
+            ),
+        )
+    assert exc_info.value.status_code == 403
+    build.assert_not_awaited()
+
+    response = await system_health.export_config(
+        user,
+        system_health.ExportConfigRequest(
+            categories=["account_settings"],
+            include_sensitive=True,
+            password="correct-password",
+        ),
+    )
+    assert response.status_code == 200
+    build.assert_awaited_once()
 
 
 class _Account(_Base):

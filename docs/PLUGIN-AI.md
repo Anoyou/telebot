@@ -39,7 +39,7 @@ async def on_event(self, ctx, payload):
 
 ## Provider 选择
 
-- `route`（0.57.0 起）：显式选择路由模式，取值 `fixed` / `tag` / `auto`。
+- `route`：显式选择路由模式，取值 `fixed` / `tag` / `auto`。
   - `fixed`：固定某个 provider，需同时传 `provider`（id 或 name）。
   - `tag`：按用途标签选择，需同时传 `provider_tag`；平台在可用 provider 中挑成本优先的匹配项。
   - `auto`：平台自动挑选（chat 优先、成本优先）。

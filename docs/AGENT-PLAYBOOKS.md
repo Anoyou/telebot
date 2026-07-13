@@ -128,8 +128,8 @@ git diff --check
 
 ```bash
 make status
-make health
 curl -fsS http://127.0.0.1:8000/healthz
+curl -fsS http://127.0.0.1:8000/readyz
 docker compose ps
 docker compose logs --tail=100 web
 ```
@@ -150,6 +150,14 @@ docker compose logs --tail=100 web
 3. 版本文件、changelog、CI version-sync 是否仍覆盖发布风险。
 4. 前端关键页面是否有可复用的验收路径和截图更新口径。
 5. 插件开发文档是否写清数据链路、兼容边界、排查顺序和最小示例。
+
+文档更新门禁：
+
+- 新增或修改公开 API、环境变量、默认开关、错误码、fail-open / fail-closed 语义、资金状态机或插件契约时，同一批改动必须更新对应 README、部署、安全或插件文档。
+- “当前版本”只从四处版本文件核对；不要把旧版本号写进长期有效的架构和开发说明，版本历史留在 `CHANGELOG.md`。
+- 源码证据优先引用文件和稳定函数/类名，不引用容易漂移的行号。接口请求体以 FastAPI `/docs` 和 Pydantic schema 为准，CLI 参数以 `--help` 为准。
+- `/healthz` 只用于 liveness，生产就绪和更新完成使用 `/readyz`。文档必须明确两者差异。
+- 示例命令要在仓库当前 Makefile、脚本或 package scripts 中真实存在；相对路径要写清从仓库根目录还是子目录执行。
 
 交付要求：
 

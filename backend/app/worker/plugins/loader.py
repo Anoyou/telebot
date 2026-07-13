@@ -2872,12 +2872,10 @@ async def _apply_userbot_payout_action(state: _AccountState, event: Any, action:
             parse_mode=_telethon_parse_mode(parse_mode),
         )
     except Exception as exc:  # noqa: BLE001
-        classification = payout_compensation.classify_payout_error(
-            payout_compensation.ERROR_TELEGRAM_API,
-            exc,
-        )
-        if not classification.ambiguous:
+        if payout_compensation.payout_error_definitely_rejected(exc):
             await payout_compensation.release_payout_delivery_claim(payout_redis, payout_claim)
+        else:
+            await payout_compensation.mark_payout_delivery_ambiguous(payout_claim, exc)
         flood_detail = await _feed_engine_flood_wait(
             state,
             exc,
@@ -2915,9 +2913,17 @@ async def _apply_userbot_payout_action(state: _AccountState, event: Any, action:
         state.account_id,
         payout_key,
         result.get("message_id"),
+        ledger_action=action,
+        ledger_result=result,
     )
     if not marker_ok:
         result["post_send_bookkeeping_failed"] = True
+        result["delivery_ambiguous"] = True
+        result["error_code"] = payout_compensation.ERROR_AMBIGUOUS_DELIVERY
+        await payout_compensation.mark_payout_delivery_ambiguous(
+            payout_claim,
+            "payout sent but durable completion failed",
+        )
         await _enqueue_compensation(
             payout_compensation.ERROR_AMBIGUOUS_DELIVERY,
             "payout sent marker write failed",

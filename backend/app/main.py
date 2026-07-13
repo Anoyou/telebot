@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import secrets
+from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -57,6 +58,41 @@ _SECURITY_HEADERS = {
     "Referrer-Policy": "same-origin",
     "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
 }
+_RUNTIME_COMPONENTS: dict[str, bool | None] = {
+    "worker_supervisor": None,
+    "account_bot_manager": None,
+    "interaction_bot_manager": None,
+}
+_RUNTIME_COMPONENT_ERRORS: dict[str, str] = {}
+
+
+async def _start_runtime_component(
+    name: str,
+    starter: Callable[[], Awaitable[object]],
+) -> bool:
+    _RUNTIME_COMPONENTS[name] = False
+    try:
+        await starter()
+    except Exception as exc:  # noqa: BLE001
+        _RUNTIME_COMPONENT_ERRORS[name] = f"{type(exc).__name__}: {exc}"[:300]
+        logging.exception("启动关键组件 %s 失败", name)
+        return False
+    _RUNTIME_COMPONENTS[name] = True
+    _RUNTIME_COMPONENT_ERRORS.pop(name, None)
+    return True
+
+
+async def _retry_runtime_component(
+    name: str,
+    starter: Callable[[], Awaitable[object]],
+) -> None:
+    delay = 2.0
+    while not _RUNTIME_COMPONENTS.get(name):
+        await asyncio.sleep(delay)
+        if await _start_runtime_component(name, starter):
+            logging.info("关键组件 %s 已自动恢复", name)
+            return
+        delay = min(delay * 2, 30.0)
 
 
 def _is_container_env() -> bool:
@@ -170,19 +206,28 @@ async def lifespan(app: FastAPI):
     cleanup_task = asyncio.create_task(cleanup_expired_loop())
     remote_plugin_update_task = asyncio.create_task(remote_plugin_service.auto_update_check_loop())
 
-    # 2) 拉起 worker supervisor；导入失败时跳过，服务仍启动以便排查。
+    retry_tasks: list[asyncio.Task[None]] = []
+    for component in _RUNTIME_COMPONENTS:
+        _RUNTIME_COMPONENTS[component] = False
+    _RUNTIME_COMPONENT_ERRORS.clear()
+
+    # 2) 拉起 worker supervisor；失败时 readiness 保持失败并后台重试。
     stop_all_workers = None
     try:
         from .worker.supervisor import start_supervisor
         from .worker.supervisor import stop_all_workers as _stop_all
     except ImportError:
         logging.warning("worker.supervisor 导入失败，本进程不会拉起 worker 子进程")
+        _RUNTIME_COMPONENT_ERRORS["worker_supervisor"] = "ImportError: worker.supervisor 导入失败"
     else:
-        try:
-            await start_supervisor()
-            stop_all_workers = _stop_all
-        except Exception as exc:  # noqa: BLE001
-            logging.exception("启动 worker supervisor 失败：%s", exc)
+        stop_all_workers = _stop_all
+        if not await _start_runtime_component("worker_supervisor", start_supervisor):
+            retry_tasks.append(
+                asyncio.create_task(
+                    _retry_runtime_component("worker_supervisor", start_supervisor),
+                    name="retry-worker-supervisor",
+                )
+            )
 
     # 2-D: 项目启动通知（若未配置 NotifyBot，send 会返回 False 并静默）
     try:
@@ -191,22 +236,43 @@ async def lifespan(app: FastAPI):
         logging.exception("发送启动通知失败")
 
     # 2-E: 账号绑定普通 Bot polling runtime（每账号独立 Bot）。
-    try:
-        await account_bot_runtime.start_account_bot_manager()
-    except Exception:  # noqa: BLE001
-        logging.exception("启动 account bot manager 失败")
+    if not await _start_runtime_component(
+        "account_bot_manager",
+        account_bot_runtime.start_account_bot_manager,
+    ):
+        retry_tasks.append(
+            asyncio.create_task(
+                _retry_runtime_component(
+                    "account_bot_manager",
+                    account_bot_runtime.start_account_bot_manager,
+                ),
+                name="retry-account-bot-manager",
+            )
+        )
 
     # 2-F: 高频群互动使用独立交互 Bot runtime，避免和管理 Bot 生命周期混在一起。
-    try:
-        interaction_count = await interaction_bot_runtime.start_interaction_bot_manager()
-        logging.info("interaction bot manager started: %d task(s)", interaction_count)
-    except Exception:  # noqa: BLE001
-        logging.exception("启动 interaction bot manager 失败")
+    if not await _start_runtime_component(
+        "interaction_bot_manager",
+        interaction_bot_runtime.start_interaction_bot_manager,
+    ):
+        retry_tasks.append(
+            asyncio.create_task(
+                _retry_runtime_component(
+                    "interaction_bot_manager",
+                    interaction_bot_runtime.start_interaction_bot_manager,
+                ),
+                name="retry-interaction-bot-manager",
+            )
+        )
 
     try:
         yield
     finally:
         # 3) 退出：取消清理任务 + 关停所有 worker
+        for task in retry_tasks:
+            task.cancel()
+        if retry_tasks:
+            await asyncio.gather(*retry_tasks, return_exceptions=True)
         try:
             await plugin_config_action_jobs.shutdown_plugin_config_action_jobs()
         except Exception:  # noqa: BLE001
@@ -238,6 +304,9 @@ async def lifespan(app: FastAPI):
             await event_trace.stop_trace_writer()
         except Exception:  # noqa: BLE001
             logging.exception("停止 Trace 后台写入器失败")
+        for component in _RUNTIME_COMPONENTS:
+            _RUNTIME_COMPONENTS[component] = None
+        _RUNTIME_COMPONENT_ERRORS.clear()
 
 
 app = FastAPI(title="TelePilot", version=__version__, lifespan=lifespan)
@@ -272,7 +341,12 @@ def _is_public_webhook_delivery(request: Request) -> bool:
     )
 
 
-def _set_csrf_cookie(response: JSONResponse) -> JSONResponse:
+def _request_uses_https(request: Request) -> bool:
+    forwarded_proto = request.headers.get("x-forwarded-proto", "").split(",", 1)[0].strip().lower()
+    return settings.cookie_secure or request.url.scheme == "https" or forwarded_proto == "https"
+
+
+def _set_csrf_cookie(response: JSONResponse, request: Request) -> JSONResponse:
     """下发 double-submit CSRF token：JS 可读 cookie + 写请求 header 回传。"""
     response.set_cookie(
         key=_CSRF_TOKEN_COOKIE,
@@ -280,7 +354,7 @@ def _set_csrf_cookie(response: JSONResponse) -> JSONResponse:
         max_age=12 * 3600,
         httponly=False,
         samesite="lax",
-        secure=settings.cookie_secure,
+        secure=_request_uses_https(request),
     )
     return response
 
@@ -294,8 +368,8 @@ def _with_security_headers(response):
 
 
 @app.get("/api/auth/csrf")
-async def csrf_token() -> JSONResponse:
-    return _set_csrf_cookie(JSONResponse(content={"ok": True}))
+async def csrf_token(request: Request) -> JSONResponse:
+    return _set_csrf_cookie(JSONResponse(content={"ok": True}), request)
 
 
 @app.middleware("http")
@@ -429,6 +503,18 @@ async def readyz() -> dict:
         overall_ok = False
     else:
         checks["redis"] = {"ok": True}
+
+    for name, component_ok in _RUNTIME_COMPONENTS.items():
+        if component_ok is None:
+            continue
+        if component_ok:
+            checks[name] = {"ok": True}
+        else:
+            checks[name] = {
+                "ok": False,
+                "error": _RUNTIME_COMPONENT_ERRORS.get(name, "组件尚未启动"),
+            }
+            overall_ok = False
 
     body = {"ok": overall_ok, "checks": checks}
     if not overall_ok:

@@ -554,21 +554,45 @@ async def post_kill_switch(payload: KillSwitchRequest, db: DBSession, user: Curr
         target="system",
         detail={"enabled": enabled},
     )
-    try:
-        from ..worker import supervisor
+    from ..services import account_bot_runtime, interaction_bot_runtime
+    from ..worker import supervisor
 
-        if enabled:
-            await supervisor.stop_running_workers()
-        else:
-            await supervisor.start_active_workers()
-    except Exception:  # noqa: BLE001
-        pass
-    # 全局广播给其它监听者 / 多进程场景
+    operations = (
+        (
+            supervisor.stop_running_workers(),
+            account_bot_runtime.stop_account_bot_manager(),
+            interaction_bot_runtime.stop_interaction_bot_manager(),
+        )
+        if enabled
+        else (
+            supervisor.start_active_workers(),
+            account_bot_runtime.start_account_bot_manager(),
+            interaction_bot_runtime.start_interaction_bot_manager(),
+        )
+    )
+    results = await asyncio.gather(*operations, return_exceptions=True)
+    failures = [
+        f"{type(result).__name__}: {result}"
+        for result in results
+        if isinstance(result, BaseException)
+    ]
+
+    # 全局广播给其它监听者 / 多进程场景；失败也必须反馈，不能伪装成全局已收敛。
     try:
         redis = get_redis()
         await redis.publish(GLOBAL_CHANNEL, make_cmd(GCMD_KILL_SWITCH, enabled=enabled))
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001
+        failures.append(f"Redis broadcast {type(exc).__name__}: {exc}")
+    if failures:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "code": "KILL_SWITCH_PARTIAL_FAILURE",
+                "message": "总闸目标状态已保存，但运行时未完全收敛。",
+                "enabled": enabled,
+                "errors": failures,
+            },
+        )
     return {"enabled": enabled}
 
 

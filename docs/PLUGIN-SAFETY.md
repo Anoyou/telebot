@@ -44,6 +44,16 @@ Manifest 中的 `permissions` 字段声明插件需要的能力：
 
 TelePilot 按个人可信插件模式运行：管理员安装并启用插件后，远程插件的业务风险由管理员自行承担；平台不做公共插件市场式强沙箱，但仍保留频控、审计、急停、Trace 和 token/session 隔离。标准 Telegram 会话插件必须走 Event Bus + MessageOps：在 `plugin.json` 声明 `usage`、`event_subscriptions`、`capabilities`，运行时只读取标准事件信封，所有发送、编辑、删除、置顶、按钮 ACK、Inline answer 和结算都返回标准 action 或通过 `ctx.messages` 生成。裸直通插件只接 userbot 原始 Telethon event，不接 interaction bot，也不会自动获得标准 action/Trace。`ctx.client` 保留给管理员命令和高级兼容场景，不作为普通 Bot 按钮回调的主入口。群里已有的转账结果通知 Bot 只作为外部付款证据来源，不是插件主动发送通道。
 
+### 安装来源与签名边界
+
+个人可信不等于默认接受任意未签名包。ZIP 安装在解压和执行 Python 前完成签名与静态兼容检查：
+
+- 配置 `PLUGIN_PUBKEY` 时，新 ZIP 必须通过签名验证。
+- 未配置公钥时，新 ZIP 默认拒绝，只有 `PLUGIN_ALLOW_NEW_UNSIGNED_PLUGINS=true` 才允许管理员显式安装 community 插件。
+- `PLUGIN_ALLOW_LEGACY_UNSIGNED_PLUGINS` 只兼容历史 `signature_ok=NULL` 的已安装插件，不能用于放宽新上传入口。
+
+未签名开关适合本地自研插件的短期安装窗口，不应作为生产常驻默认值。安装前仍要检查来源、版本、哈希、权限声明、HTTP host 白名单和高风险能力；安装后恢复关闭，并先在账号 dry-run 下验证。
+
 ### 会话通道边界
 
 消息链路统一后，插件要额外记住三个安全边界：

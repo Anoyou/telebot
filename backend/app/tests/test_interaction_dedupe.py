@@ -45,6 +45,14 @@ def test_interaction_message_claim_key_includes_rule_id() -> None:
     assert interaction_message_claim_key(1, -100, None, "rule-a") is None
 
 
+def test_callback_claim_key_includes_callback_identity() -> None:
+    first = interaction_message_claim_key(1, -100, 25, "rule-a", "callback:one")
+    second = interaction_message_claim_key(1, -100, 25, "rule-a", "callback:two")
+
+    assert first != second
+    assert first == "account_bot:interaction_msg_claim:1:-100:25:rule-a:callback:one"
+
+
 @pytest.mark.asyncio
 async def test_claim_interaction_message_uses_nx_and_clamped_ttl() -> None:
     redis = _Redis()

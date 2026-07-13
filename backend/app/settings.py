@@ -22,6 +22,8 @@ class Settings(BaseSettings):
     # 登录限速（针对 /api/auth/login 与 /api/auth/register）
     # 0 表示不限速；默认 30 次/分钟，按 IP+用户名两个维度同时计数
     login_rate_limit_per_min: int = 30
+    # 兼容旧 Webhook URL 的 query token；生产默认关闭，避免 token 进入访问日志。
+    webhook_allow_query_token: bool = False
     # 登录密码连续失败达到阈值后，下一次正确密码需要通知 Bot OTP。
     # 默认关闭；生产建议在 Web 设置页确认恢复码路径和通知 Bot 后再开启。
     login_otp_failed_attempt_threshold: int = 0
@@ -90,6 +92,8 @@ class Settings(BaseSettings):
     # 兼容旧版本已安装且 signature_ok=NULL 的 zip 插件；新安装流程仍强制验签通过。
     # 设为 false 后，历史未签名插件即使 PluginInstall.enabled=true 也不会被 worker 加载。
     plugin_allow_legacy_unsigned_plugins: bool = True
+    # 新上传 ZIP 是否允许免签安装；与历史加载兼容分离，生产默认拒绝。
+    plugin_allow_new_unsigned_plugins: bool = False
     # 上传 zip 体积上限（字节），默认 10 MiB。超出直接 413。
     plugin_zip_max_bytes: int = 10 * 1024 * 1024
     # 解压资源上限：必须在执行 manifest.py 前完成检查，防止压缩炸弹耗尽磁盘/inode。

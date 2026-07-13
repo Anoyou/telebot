@@ -271,7 +271,8 @@ class RateLimitEngine:
         try:
             mult_action = await get_multiplier(self.redis, account_id, action)
         except Exception:
-            mult_action = 1.0
+            log.exception("读取限速 override 失败，按 fail-closed 暂停动作 account=%s action=%s", account_id, action)
+            mult_action = 0.0
         cold_factor = cold_start_factor(self.humanize)
         eff = _scale_limits(eff, mult_action * cold_factor)
         if eff.disabled:
@@ -299,7 +300,8 @@ class RateLimitEngine:
         try:
             mult_total = await get_multiplier(self.redis, account_id, "api_total")
         except Exception:
-            mult_total = 1.0
+            log.exception("读取 api_total override 失败，按 fail-closed 暂停动作 account=%s", account_id)
+            mult_total = 0.0
         eff_total = _scale_limits(eff_total_raw, mult_total * cold_factor)
         allowed_t, retry_t, idx_t = await self.buckets.check_and_consume(
             account_id,

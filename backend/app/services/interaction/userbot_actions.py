@@ -182,12 +182,10 @@ async def execute_userbot_interaction_action(
             )
         except Exception as exc:
             if action_type == "payout" and payout_claim is not None:
-                classification = payout_compensation.classify_payout_error(
-                    payout_compensation.ERROR_TELEGRAM_API,
-                    exc,
-                )
-                if not classification.ambiguous:
+                if payout_compensation.payout_error_definitely_rejected(exc):
                     await payout_compensation.release_payout_delivery_claim(payout_redis, payout_claim)
+                else:
+                    await payout_compensation.mark_payout_delivery_ambiguous(payout_claim, exc)
             raise
         result: dict[str, Any] = {
             "message_id": int(getattr(msg, "id", 0) or 0) or None,
@@ -196,16 +194,24 @@ async def execute_userbot_interaction_action(
             "reply_to_user_id": reply_to_user_id,
         }
         if action_type == "payout" and payout_claim is not None:
+            result["payout_key"] = _str_or_none(payload.get("payout_key"))
             marker_ok = await payout_compensation.complete_payout_delivery(
                 payout_redis,
                 payout_claim,
                 account_id,
                 payload.get("payout_key"),
                 result.get("message_id"),
+                ledger_action=payload,
+                ledger_result=result,
             )
             if not marker_ok:
                 result["post_send_bookkeeping_failed"] = True
-            result["payout_key"] = _str_or_none(payload.get("payout_key"))
+                result["delivery_ambiguous"] = True
+                result["error_code"] = payout_compensation.ERROR_AMBIGUOUS_DELIVERY
+                await payout_compensation.mark_payout_delivery_ambiguous(
+                    payout_claim,
+                    "payout sent but durable completion failed",
+                )
         elif action_type == "payout":
             result["payout_key"] = _str_or_none(payload.get("payout_key"))
         try:

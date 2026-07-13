@@ -120,7 +120,63 @@ class _MemoryRedis:
 def _allow_interaction_claim(monkeypatch) -> AsyncMock:
     claim = AsyncMock(return_value=True)
     monkeypatch.setattr(account_bot_runtime, "claim_interaction_message", claim)
+    monkeypatch.setattr(
+        account_bot_runtime,
+        "_claim_interaction_trigger",
+        AsyncMock(return_value=True),
+    )
     return claim
+
+
+@pytest.fixture(autouse=True)
+def _allow_transfer_notice_trigger_claims(request, monkeypatch) -> None:
+    """转账路由测试默认隔离 Redis claim；故障语义由独立单测覆盖。"""
+    if request.node.name.startswith("test_transfer_notice_"):
+        monkeypatch.setattr(
+            account_bot_runtime,
+            "_claim_interaction_trigger",
+            AsyncMock(return_value=True),
+        )
+
+
+@pytest.mark.asyncio
+async def test_claim_interaction_trigger_fails_closed_when_redis_is_unavailable(monkeypatch) -> None:
+    incoming = SimpleNamespace(account_id=1, chat_id=-100, message_id=10, update_id=20)
+    monkeypatch.setattr(
+        account_bot_runtime,
+        "get_redis",
+        MagicMock(side_effect=RuntimeError("redis unavailable")),
+    )
+
+    claimed = await account_bot_runtime._claim_interaction_trigger(
+        incoming,
+        {"id": 7, "valid_seconds": 60},
+        "transfer_notice",
+        {"amount": 10},
+    )
+
+    assert claimed is False
+
+
+@pytest.mark.asyncio
+async def test_payment_confirmation_lease_releases_for_retry_and_completes_once() -> None:
+    redis = _MemoryRedis()
+    nonce = "payment-confirm-retry"
+    ticket_key = account_bot_runtime._interaction_payment_confirm_key(nonce)
+    redis.data[ticket_key] = '{"ok":true}'
+
+    raw, lease = await account_bot_runtime._claim_interaction_payment_confirm_payload(redis, nonce)
+    assert raw == '{"ok":true}'
+    assert lease
+    assert ticket_key in redis.data
+
+    await account_bot_runtime._release_interaction_payment_confirm_lease(redis, nonce, lease)
+    raw_retry, retry_lease = await account_bot_runtime._claim_interaction_payment_confirm_payload(redis, nonce)
+    assert raw_retry == '{"ok":true}'
+    assert retry_lease
+
+    await account_bot_runtime._complete_interaction_payment_confirm(redis, nonce, retry_lease)
+    assert ticket_key not in redis.data
 
 
 def _mock_userbot_payout_delivery(monkeypatch) -> tuple[AsyncMock, AsyncMock, AsyncMock]:
@@ -11890,6 +11946,7 @@ async def test_interaction_callback_zero_actions_releases_claim_and_answers(monk
         chat_id=-100777,
         message_id=13665,
         rule_id="dice-active",
+        event_key="callback:cb-release",
     )
     answer.assert_awaited_once()
 

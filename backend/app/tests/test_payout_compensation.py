@@ -80,6 +80,10 @@ def test_payout_error_classification_marks_ambiguous_only_for_timeout_or_network
     assert flood_wait.ambiguous is False
 
 
+def test_unknown_post_send_error_is_not_safe_to_release() -> None:
+    assert payout_compensation_service.payout_error_definitely_rejected(ValueError("bad response")) is False
+
+
 def test_ambiguous_delivery_error_enqueues_probe_only_not_retryable() -> None:
     classification = payout_compensation_service.classify_payout_error(
         "ambiguous_delivery",
@@ -307,6 +311,48 @@ async def test_durable_payout_delivery_claim_blocks_retry_until_sent(payout_sess
     )
     assert replay.status == "sent"
     assert replay.sent_message_id == 991
+
+
+@pytest.mark.asyncio
+async def test_complete_payout_delivery_commits_countable_ledger_in_same_transaction(
+    payout_session_factory,
+) -> None:
+    payload = {
+        "action_type": "payout",
+        "payout_key": "pay_atomic_ledger",
+        "chat_id": -100123,
+        "amount": 12,
+        "text": "+12",
+        "context": {"plugin_key": "game", "entry_key": "main"},
+    }
+    claim = await payout_compensation_service.claim_payout_delivery(
+        None,
+        7,
+        payload["payout_key"],
+        payload=payload,
+        origin="test",
+    )
+    result = {"message_id": 992, "chat_id": -100123, "payout_key": payload["payout_key"]}
+
+    assert await payout_compensation_service.complete_payout_delivery(
+        None,
+        claim,
+        7,
+        payload["payout_key"],
+        992,
+        ledger_action=payload,
+        ledger_result=result,
+    )
+
+    async with payout_session_factory() as db:
+        row = await db.scalar(
+            select(ActionEvent).where(
+                ActionEvent.account_id == 7,
+                ActionEvent.payout_key == payload["payout_key"],
+            )
+        )
+    assert row is not None
+    assert row.status == "OK"
 
 
 @pytest.mark.asyncio
@@ -664,7 +710,11 @@ async def test_payout_replay_ambiguous_probe_requires_reply_anchor_and_paginates
         trace_id="evt_ambiguous_hit",
         ambiguous=True,
         created_at=now - timedelta(seconds=200),
-        payload={"reply_to_message_id": 31},
+        payload={
+            "reply_to_message_id": 31,
+            "text": "+10 #TP-ambiguous-hit",
+            "payout_probe_fingerprint": "#TP-ambiguous-hit",
+        },
     )
     redis = _FakeRedis()
     noisy_messages = [
@@ -674,7 +724,12 @@ async def test_payout_replay_ambiguous_probe_requires_reply_anchor_and_paginates
     client = _ReplayClient(
         messages=[
             *noisy_messages,
-            SimpleNamespace(id=555, raw_text="+10", date=now - timedelta(seconds=101), reply_to_msg_id=31),
+            SimpleNamespace(
+                id=555,
+                raw_text="+10 #TP-ambiguous-hit",
+                date=now - timedelta(seconds=101),
+                reply_to_msg_id=31,
+            ),
         ]
     )
     record_action = AsyncMock()
@@ -734,7 +789,11 @@ async def test_payout_replay_ambiguous_probe_error_defers_without_sending(
         payout_key="pay_ambiguous_error",
         trace_id="evt_ambiguous_error",
         ambiguous=True,
-        payload={"reply_to_message_id": 31},
+        payload={
+            "reply_to_message_id": 31,
+            "text": "+10 #TP-probe-error",
+            "payout_probe_fingerprint": "#TP-probe-error",
+        },
     )
     redis = _FakeRedis()
     client = _ReplayClient(send_ids=[556], iter_error=RuntimeError("probe failed"))

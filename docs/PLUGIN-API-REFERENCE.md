@@ -62,7 +62,7 @@ async def on_direct_message(self, ctx, event):
 4. 普通发送类动作不要写 `send_via`，平台会继承 `session.channel`；只有跨通道公告、特殊管理消息或迁移桥兼容这类高级场景才显式覆盖。
 5. userbot 会话里的按钮会降级为文本编号面板；玩家回复编号后，平台会把它合成为 `callback_query`，并在 `source.synthetic="text_button"` 标记来源。
 
-如果当前运行环境尚未合入对应 runtime/worker 分支，`interaction_trigger_modes`、`default_trigger_modes`、`callback_fast_ack` 这类入口控制字段只作为文档约定，不会自动改变旧实例行为。
+`interaction_trigger_modes`、`default_trigger_modes`、`callback_fast_ack` 是当前运行时契约。插件发布前应在目标 TelePilot 版本上运行示例校验和真实账号 smoke test，不要为旧分支猜测兼容行为。
 
 ## 3. Plugin 基类（兼容层）
 
@@ -277,7 +277,7 @@ if attempts is not None and attempts > 5:
 | `config_schema` | dict | JSON Schema，有配置的插件必须写 |
 | `requires_features` | list | 依赖的其他插件 key |
 | `min_telepilot_version` | str | 最低 TelePilot 版本要求，远程插件建议填写 |
-| `min_telebot_version` | str | 旧字段名，0.15 起仅作为兼容别名保留，新插件不要再新增 |
+| `min_telebot_version` | str | 旧字段名，仅作为兼容别名保留，新插件不要再新增 |
 | `category` | str | `interactive` / `automation` / `utility`，只决定展示分组 |
 | `event_subscriptions` | list | 标准链路订阅声明，描述插件想从 Event Bus 接收哪些事件 |
 | `capabilities` | dict | 高风险能力声明，例如 `telegram_native_raw` |
@@ -464,6 +464,14 @@ name_pattern = r"^[A-Za-z0-9_][A-Za-z0-9_-]*$"
 version_pattern = r"^\d+\.\d+\.\d+"
 ```
 
+ZIP 上传还会在解压和加载 Python 前执行供应链门禁：
+
+- 配置 `PLUGIN_PUBKEY` 后，签名缺失或验签失败都会拒绝安装。
+- 未配置公钥时，新 ZIP 默认仍拒绝；只有管理员显式设置 `PLUGIN_ALLOW_NEW_UNSIGNED_PLUGINS=true` 才允许以 `trust_tier=community` 安装。
+- `PLUGIN_ALLOW_LEGACY_UNSIGNED_PLUGINS` 只控制历史 `signature_ok=NULL` 插件能否继续加载，不影响新 ZIP 安装。
+
+这两个未签名开关不能互相替代。兼容历史插件时可以保留 legacy 开关，但新安装入口仍应保持关闭；临时允许未签名安装后，应在完成安装后恢复为 `false`。
+
 ### 标准链路内部契约：Event Bus + Trace + MessageOps
 
 userbot 命令会话和 interaction bot 规则会话的内部链路是：
@@ -600,7 +608,7 @@ curl -X POST "https://<telepilot-host>/api/webhooks/{account_id}/{hook_key}" \
   --data '{"order_id":"A-1","status":"paid"}'
 ```
 
-也支持 `?token=<account_webhook_token>` 查询参数。`hook_key` 必须是 1-64 位的字母、数字、下划线、点或短横线组合，且必须存在于账号 webhook 配置并处于启用状态。请求体上限为 64 KiB；投递接口返回 `202` 只表示 worker 已确认接收，插件是否命中和执行结果请在日志/trace 中查看。Webhook 投递受 `webhook_deliver` 风控动作限流。
+默认只接受 `X-TelePilot-Webhook-Token` 请求头。旧调用方只有在服务端显式设置 `WEBHOOK_ALLOW_QUERY_TOKEN=true` 时才能继续使用 `?token=<account_webhook_token>`；查询参数可能进入 URL、反代和访问日志，生产环境不建议开启。`hook_key` 必须是 1-64 位的字母、数字、下划线、点或短横线组合，且必须存在于账号 webhook 配置并处于启用状态。请求体上限为 64 KiB；投递接口返回 `202` 只表示 worker 已确认接收，插件是否命中和执行结果请在日志/trace 中查看。Webhook 投递受 `webhook_deliver` 风控动作限流，Worker 暂停或全局总闸开启时拒绝投递。
 
 标准事件信封优先读这些字段：`source`、`message`、`chat`、`sender`、`actor`、`source_actor`、`player`、`payment`、`reply_to`、`trigger`、`session`、`native_raw_meta`。新插件不要依赖 `payload["text"]`、`payload["chat_id"]`、`payload.get("message")` 这类旧平铺字段；`payload["message"]` 是消息对象，不是配置字符串。
 
@@ -714,7 +722,8 @@ return [{
 
 - **超限直接拒**：账号可在「系统设置 → 风控与预算」配置 `payout` 的单笔上限与日累计上限（默认 `0` = 不限，按业务币种 / 积分的整数口径填写）。本笔金额超单笔上限、或“今日已累计 + 本笔”超日累计上限时，`payout` 被拒绝执行，action 记 `FAILED`、`error_code=payout_limit_exceeded`。超限属配置拒绝，**不进补偿队列、也不自动重试**；需要人工调额度，日累计上限跨 UTC 零点自动重置。
 - **瞬时失败自动补偿**：userbot 离线（`userbot_offline`）、Telegram API 报错（`telegram_api_error`）、命中限速（`rate_limited`）这类可恢复失败，平台会把这一笔 `payout` 写进补偿队列并按退避自动重放。插件侧看到的仍是本次的 `FAILED` action（detail 带 `compensation_queued=true` 和 `payout_key`）；补发成功后会**以一条新的 `OK` action 出现**（同 `payout_key`、带 `replay` 标记）。**插件不要自己重试 `payout`**——补发交给平台，重复返回只会靠幂等去重。
-- **补发幂等**：平台用 `payout_key`（不显式给会自动生成）+ 已发标记 +（对超时 / 网络类暧昧失败）回查自己最近发言，保证同一笔 `payout` 最多真正发一次、日累计最多计一次。插件若要把多次调用视为“同一笔”，可自带稳定的 `payout_key`。
+- **补发幂等**：平台以数据库中的 `payout_key` intent / claim / sent 状态作为持久化幂等边界，发送完成状态与 ActionEvent 在同一事务提交。只有 Telegram 明确拒绝发送时才释放 claim；超时、断连或未知异常会进入 ambiguous，不会假定“异常等于未发送”。
+- **暧昧送达核对**：只有 payload 带稳定 `payout_probe_fingerprint` 时，worker 才会回查账号最近自己发言并自动确认送达。旧记录或缺少 fingerprint 的记录需要人工核对，平台不会只凭相同文本和回复锚点认定已发送。插件若要把多次调用视为同一笔，应提供稳定 `payout_key`，不要自行重试。
 - **彻底放弃会告警**：重放次数耗尽或遇到不可补偿错误时，补偿单置为 `abandoned` 并写一条 error 级运维日志，供“收款成功但发奖失败”场景人工介入。运维侧配置与巡检见 [SECURITY-OPS](./SECURITY-OPS.md) §7。
 
 按钮回调：
@@ -1978,7 +1987,7 @@ const FEATURE_CONFIG_PAGES: Record<string, { title: string; description: string 
 
 #### 5. FEATURE_CONFIG_PAGE_KEYS — 共享入口点
 
-0.18.0 起，账号详情与插件中心统一复用同一个 helper，不再维护两份 Set。新增专属配置页时只改这一处：
+账号详情与插件中心统一复用同一个 helper，不维护两份 Set。新增专属配置页时只改这一处：
 
 ```tsx
 // frontend/src/pages/Plugins/_shared/featureConfig.ts
@@ -2255,7 +2264,7 @@ class DemoPlugin(Plugin):
 - [ ] 用户可见文案使用“插件”，不展示内部分类名或“Schema 弹窗”
 - [ ] 如需 dry-run：`plugin.py` 导出 `_dry_run_match`，`__init__.py` re-export；平台专属配置页再按需接入 `rules.py`
 - [ ] 如需接入平台 `rules.py` 专属 dry-run：`feature.py` 中有 `FEATURE_XXX` 常量，后端通过已安装插件目录动态调用 `_dry_run_match`；普通远程/本地插件可先用插件自身测试覆盖 dry-run 纯函数
-- [ ] 前端 `pnpm -C frontend exec tsc -b --noEmit` 和 `pnpm -C frontend build` 通过
+- [ ] 前端 `pnpm --dir frontend typecheck` 和 `pnpm --dir frontend build` 通过
 
 ---
 

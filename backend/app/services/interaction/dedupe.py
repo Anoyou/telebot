@@ -26,11 +26,14 @@ def interaction_message_claim_key(
     chat_id: int,
     message_id: int | None,
     rule_id: Any,
+    event_key: Any | None = None,
 ) -> str | None:
     if message_id is None:
         return None
     rule_key = str(rule_id or "legacy").strip() or "legacy"
-    return f"{INTERACTION_MESSAGE_CLAIM_PREFIX}{int(account_id)}:{int(chat_id)}:{int(message_id)}:{rule_key}"
+    suffix = str(event_key or "").strip()
+    base = f"{INTERACTION_MESSAGE_CLAIM_PREFIX}{int(account_id)}:{int(chat_id)}:{int(message_id)}:{rule_key}"
+    return f"{base}:{suffix}" if suffix else base
 
 
 async def claim_interaction_message(
@@ -39,6 +42,7 @@ async def claim_interaction_message(
     chat_id: int,
     message_id: int | None,
     rule_id: Any,
+    event_key: Any | None = None,
     redis: Any | None = None,
     ttl_seconds: int | None = None,
     fail_open: bool = True,
@@ -50,7 +54,7 @@ async def claim_interaction_message(
     session or financial side effects must pass ``fail_open=False``.
     """
 
-    key = interaction_message_claim_key(account_id, chat_id, message_id, rule_id)
+    key = interaction_message_claim_key(account_id, chat_id, message_id, rule_id, event_key)
     if key is None:
         return True
     try:
@@ -74,11 +78,12 @@ async def release_interaction_message(
     chat_id: int,
     message_id: int | None,
     rule_id: Any,
+    event_key: Any | None = None,
     redis: Any | None = None,
 ) -> None:
     """仅用于"成功调用但零动作"场景，把消息让还给另一条管道。"""
 
-    key = interaction_message_claim_key(account_id, chat_id, message_id, rule_id)
+    key = interaction_message_claim_key(account_id, chat_id, message_id, rule_id, event_key)
     if key is None:
         return
     try:

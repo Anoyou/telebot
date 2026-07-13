@@ -19,7 +19,7 @@
 - [开发者工具链](./PLUGIN-DEVTOOLS.md)
 - [速查表](./PLUGIN-CHEATSHEET.md)
 
-## 0.48 收口速览
+## 当前插件链路速览
 
 消息链路统一后，互动插件默认按这一套模型理解：
 
@@ -44,7 +44,7 @@
 
 ## 开发者工具链速览
 
-本轮新增工具链统一收口到 [开发者工具链](./PLUGIN-DEVTOOLS.md)。推荐顺序是：
+工具链说明统一收口到 [开发者工具链](./PLUGIN-DEVTOOLS.md)。推荐顺序是：
 
 1. 用 `tp_plugin new <name> --profile session_game|command|passthrough` 生成骨架。
 2. 写 `plugin.py`、`plugin.json` / `manifest.py` 的入口、权限、事件订阅和配置。
@@ -58,6 +58,5 @@
 ## 兼容说明
 
 - 旧章节锚点已经不再提供。
-- `docs/REMOTE-PLUGIN-GUIDE.md` 仍保留为兼容入口，但正文已指向新的远程插件文档。
 - `docs/PLUGIN-AI.md` 保持独立。
-- `interaction_trigger_modes`、`default_trigger_modes`、`callback_fast_ack` 属于消息链路统一阶段的入口约定；若运行环境还未合入对应 runtime/worker 分支，以当前实例实际行为为准。
+- `interaction_trigger_modes`、`default_trigger_modes`、`callback_fast_ack` 是当前运行时入口契约；插件发布前应使用当前版本的示例校验脚本验证，不要按旧分支行为兼容。

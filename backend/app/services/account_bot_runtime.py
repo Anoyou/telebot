@@ -960,18 +960,60 @@ def _interaction_payment_confirm_key(nonce: str) -> str:
     return _INTERACTION_PAYMENT_CONFIRM_PREFIX + digest
 
 
-async def _consume_interaction_payment_confirm_payload(redis: Any, nonce: str) -> str | None:
-    key = _interaction_payment_confirm_key(nonce)
-    getdel = getattr(redis, "getdel", None)
-    if callable(getdel):
-        raw = await getdel(key)
-        return raw.decode("utf-8", errors="ignore") if isinstance(raw, bytes) else raw
+def _interaction_payment_confirm_lease_key(nonce: str) -> str:
+    return f"{_interaction_payment_confirm_key(nonce)}:processing"
+
+
+async def _release_interaction_payment_confirm_lease(redis: Any, nonce: str, lease_token: str) -> None:
+    key = _interaction_payment_confirm_lease_key(nonce)
+    evaluator = getattr(redis, "eval", None)
+    if callable(evaluator):
+        try:
+            await evaluator(
+                "if redis.call('GET',KEYS[1]) == ARGV[1] then return redis.call('DEL',KEYS[1]) end return 0",
+                1,
+                key,
+                lease_token,
+            )
+            return
+        except Exception:  # noqa: BLE001
+            pass
     raw = await redis.get(key)
-    if raw:
-        delete = getattr(redis, "delete", None)
-        if callable(delete):
-            await delete(key)
-    return raw.decode("utf-8", errors="ignore") if isinstance(raw, bytes) else raw
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8", errors="ignore")
+    if raw == lease_token:
+        await redis.delete(key)
+
+
+async def _claim_interaction_payment_confirm_payload(
+    redis: Any,
+    nonce: str,
+) -> tuple[str | None, str | None]:
+    lease_token = secrets.token_urlsafe(16)
+    claimed = await redis.set(
+        _interaction_payment_confirm_lease_key(nonce),
+        lease_token,
+        ex=90,
+        nx=True,
+    )
+    if not claimed:
+        return None, None
+    raw = await redis.get(_interaction_payment_confirm_key(nonce))
+    if not raw:
+        await _release_interaction_payment_confirm_lease(redis, nonce, lease_token)
+        return None, None
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8", errors="ignore")
+    return str(raw), lease_token
+
+
+async def _complete_interaction_payment_confirm(
+    redis: Any,
+    nonce: str,
+    lease_token: str,
+) -> None:
+    await redis.delete(_interaction_payment_confirm_key(nonce))
+    await _release_interaction_payment_confirm_lease(redis, nonce, lease_token)
 
 
 async def _read_interaction_payment_confirm_payload(redis: Any, nonce: str) -> str | None:
@@ -1079,6 +1121,16 @@ async def start_interaction_bot_manager() -> int:
     """启动所有已启用的交互 Bot polling task。"""
 
     async with AsyncSessionLocal() as db:
+        kill_row = await db.get(SystemSetting, "kill_switch")
+        kill_value = kill_row.value if kill_row is not None else None
+        kill_enabled = (
+            bool(kill_value.get("enabled", False))
+            if isinstance(kill_value, dict)
+            else bool(kill_value)
+        )
+        if kill_enabled:
+            log.warning("kill switch 已开启，跳过 interaction bot manager 启动")
+            return 0
         rows = (
             await db.execute(
                 select(SystemSetting).where(
@@ -1141,8 +1193,19 @@ async def restart_interaction_bot(aid: int) -> None:
         should_start_transfer = False
         async with AsyncSessionLocal() as db:
             cfg = await account_bot_service.get_transfer_notice_config(db, aid)
-            should_start = bool(cfg.get("enabled") and cfg.get("has_interaction_bot_token"))
-            should_start_transfer = bool(cfg.get("enabled") and cfg.get("has_transfer_bot_token"))
+            kill_row = await db.get(SystemSetting, "kill_switch")
+            kill_value = kill_row.value if kill_row is not None else None
+            kill_enabled = (
+                bool(kill_value.get("enabled", False))
+                if isinstance(kill_value, dict)
+                else bool(kill_value)
+            )
+            should_start = bool(
+                not kill_enabled and cfg.get("enabled") and cfg.get("has_interaction_bot_token")
+            )
+            should_start_transfer = bool(
+                not kill_enabled and cfg.get("enabled") and cfg.get("has_transfer_bot_token")
+            )
             await _set_interaction_runtime_state(db, aid, error=None)
             await _set_transfer_test_runtime_state(db, aid, error=None)
         if should_start:
@@ -4358,7 +4421,7 @@ async def _claim_interaction_trigger(incoming: Incoming, rule: dict[str, Any], k
         return bool(await redis.set(_interaction_dedupe_key(incoming, rule, kind, payload), "1", ex=ttl, nx=True))
     except Exception:  # noqa: BLE001
         log.debug("claim interaction trigger failed aid=%s rule=%s", incoming.account_id, rule.get("id"), exc_info=True)
-        return True
+        return False
 
 
 def _interaction_user_usage_identity(incoming: Incoming, data: dict[str, Any] | None = None) -> tuple[str, str] | None:
@@ -4470,6 +4533,7 @@ async def _interaction_user_usage_block_message(
             return f"{user} 今日已成功{feature}{limit_part}距离下次可用 CD 还剩 {_format_duration(remaining)}。"
     except Exception:  # noqa: BLE001
         log.debug("interaction user usage check failed aid=%s rule=%s", incoming.account_id, rule.get("id"), exc_info=True)
+        return f"{user} 的{feature}次数限制服务暂不可用，请稍后再试。"
     return None
 
 
@@ -4496,7 +4560,7 @@ async def _claim_interaction_user_usage(
         return bool(claimed), pending_key if claimed else None
     except Exception:  # noqa: BLE001
         log.debug("interaction user usage claim failed aid=%s rule=%s", incoming.account_id, rule.get("id"), exc_info=True)
-        return True, None
+        return False, None
 
 
 async def _release_interaction_user_usage_claim(pending_key: str | None) -> None:
@@ -4900,11 +4964,11 @@ async def _try_handle_interaction_payment_confirm(
             show_alert=True,
         )
         return True
-    consumed = await _consume_interaction_payment_confirm_payload(redis, nonce)
-    if not consumed:
+    _claimed_payload, lease_token = await _claim_interaction_payment_confirm_payload(redis, nonce)
+    if not lease_token:
         await _answer_callback(
             incoming,
-            text="确认已被处理，请勿重复点击。",
+            text="确认正在处理或已完成，请勿重复点击。",
             show_alert=True,
         )
         return True
@@ -4917,6 +4981,7 @@ async def _try_handle_interaction_payment_confirm(
     replay_incoming.reply_to_username = incoming.username
     usage_block = await _interaction_user_usage_block_message(replay_incoming, rule, parsed)
     if usage_block:
+        await _release_interaction_payment_confirm_lease(redis, nonce, lease_token)
         await _answer_callback(
             incoming,
             text=_plain_callback_text(usage_block),
@@ -4925,6 +4990,7 @@ async def _try_handle_interaction_payment_confirm(
         return True
     claimed_usage, usage_pending_key = await _claim_interaction_user_usage(replay_incoming, rule, parsed)
     if not claimed_usage:
+        await _release_interaction_payment_confirm_lease(redis, nonce, lease_token)
         await _answer_callback(
             incoming,
             text="你正在处理该功能，请稍后再试。",
@@ -4935,7 +5001,13 @@ async def _try_handle_interaction_payment_confirm(
     try:
         executed = await _execute_interaction_rule(replay_incoming, rule, parsed, cfg=cfg)
         if executed:
+            await _complete_interaction_payment_confirm(redis, nonce, lease_token)
             await _mark_interaction_user_usage(replay_incoming, rule, parsed)
+        else:
+            await _release_interaction_payment_confirm_lease(redis, nonce, lease_token)
+    except Exception:
+        await _release_interaction_payment_confirm_lease(redis, nonce, lease_token)
+        raise
     finally:
         await _release_interaction_user_usage_claim(usage_pending_key)
     await _answer_callback(
@@ -5714,12 +5786,16 @@ async def _try_handle_interaction_module_message(
         )
         if decision is None or not decision.matched:
             continue
+        claim_kwargs: dict[str, Any] = {}
+        if is_callback:
+            claim_kwargs["event_key"] = f"callback:{incoming.callback_id}"
         if not await claim_interaction_message(
             account_id=incoming.account_id,
             chat_id=incoming.chat_id,
             message_id=incoming.message_id,
             rule_id=rule.get("id"),
             fail_open=False,
+            **claim_kwargs,
         ):
             await record_span(
                 trace_log_context(incoming.trace_id, plugin_key=module_key, entry_key=entry_key),
@@ -5784,11 +5860,15 @@ async def _try_handle_interaction_module_message(
             )
             continue
         if not actions:
+            release_kwargs: dict[str, Any] = {}
+            if is_callback:
+                release_kwargs["event_key"] = f"callback:{incoming.callback_id}"
             await release_interaction_message(
                 account_id=incoming.account_id,
                 chat_id=incoming.chat_id,
                 message_id=incoming.message_id,
                 rule_id=rule.get("id"),
+                **release_kwargs,
             )
             await record_span(
                 trace_log_context(incoming.trace_id, plugin_key=module_key, entry_key=entry_key),

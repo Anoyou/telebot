@@ -17,10 +17,12 @@ from typing import Any
 
 from sqlalchemy import delete, select, update
 from sqlalchemy.exc import IntegrityError
+from telethon.errors import RPCError
 
 from ..db.base import AsyncSessionLocal
 from ..db.models.payout_compensation import (
     PAYOUT_COMPENSATION_STATUS_PENDING,
+    PAYOUT_COMPENSATION_STATUS_SENDING,
     PAYOUT_COMPENSATION_STATUS_SENT,
     PayoutCompensation,
 )
@@ -256,14 +258,73 @@ async def release_payout_delivery_claim(redis: Any | None, claim: PayoutDelivery
         log.debug("release payout delivery claim failed row=%s", claim.row_id, exc_info=True)
 
 
+def payout_error_definitely_rejected(error: BaseException) -> bool:
+    """Return whether Telegram explicitly rejected the RPC before applying it.
+
+    Once ``send_message`` has been entered, unknown client-side exceptions are
+    ambiguous: text matching cannot prove whether Telegram accepted the side
+    effect.  Telethon ``RPCError`` values are server rejections and are the only
+    errors for which releasing the durable delivery intent is safe.
+    """
+
+    return isinstance(error, RPCError)
+
+
+async def mark_payout_delivery_ambiguous(
+    claim: PayoutDeliveryClaim | None,
+    error: Any,
+) -> bool:
+    """Keep an acquired delivery intent and make it immediately probe/manual-only."""
+
+    if (
+        claim is None
+        or claim.status != "acquired"
+        or claim.row_id is None
+        or not claim.claim_token
+    ):
+        return False
+    now = datetime.now(UTC)
+    try:
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(
+                update(PayoutCompensation)
+                .where(
+                    PayoutCompensation.id == int(claim.row_id),
+                    PayoutCompensation.delivery_token == claim.claim_token,
+                    PayoutCompensation.status == PAYOUT_COMPENSATION_STATUS_SENDING,
+                )
+                .values(
+                    ambiguous=True,
+                    error_code_last=ERROR_AMBIGUOUS_DELIVERY,
+                    error_last=_error_text(error) or "Telegram 发送结果未知，需探测或人工确认。",
+                    delivery_token=None,
+                    next_attempt_at=now,
+                    updated_at=now,
+                )
+            )
+            await db.commit()
+            return int(result.rowcount or 0) > 0
+    except Exception:  # noqa: BLE001
+        log.error(
+            "mark payout delivery ambiguous failed row=%s",
+            claim.row_id,
+            exc_info=True,
+        )
+        return False
+
+
 async def complete_payout_delivery(
     redis: Any | None,
     claim: PayoutDeliveryClaim,
     account_id: int | None,
     payout_key: Any,
     message_id: Any,
+    *,
+    ledger_action: Mapping[str, Any] | None = None,
+    ledger_result: Mapping[str, Any] | None = None,
+    ledger_channel: str = "userbot_reply",
 ) -> bool:
-    """Atomically publish the sent marker and release the matching claim."""
+    """Commit sent state and its countable ledger row in one DB transaction."""
 
     sent_key = payout_sent_key(account_id, payout_key)
     if (
@@ -291,8 +352,20 @@ async def complete_payout_delivery(
                     updated_at=sent_at,
                 )
             )
-            await db.commit()
             persisted = int(result.rowcount or 0) > 0
+            if persisted and ledger_action is not None:
+                from .action_tap import ACTION_EVENT_STATUS_OK, emit_action_event
+
+                await emit_action_event(
+                    account_id=account_id,
+                    action=dict(ledger_action),
+                    status=ACTION_EVENT_STATUS_OK,
+                    channel=ledger_channel,
+                    result=dict(ledger_result or {}),
+                    redis=redis,
+                    db=db,
+                )
+            await db.commit()
         if not persisted:
             return False
         await mark_payout_sent_marker(redis, account_id, payout_key, message_id)
@@ -580,9 +653,11 @@ __all__ = [
     "enqueue_payout_compensation",
     "ensure_payout_key",
     "mark_payout_sent_marker",
+    "mark_payout_delivery_ambiguous",
     "normalize_config",
     "normalize_payout_error_code",
     "payout_delivery_claim_key",
     "payout_sent_key",
     "release_payout_delivery_claim",
+    "payout_error_definitely_rejected",
 ]

@@ -578,7 +578,7 @@ async def run_worker(account_id: int) -> None:
         reconcile_task = asyncio.create_task(_periodic_config_reconcile(redis, account_id))
         session_expire_task = asyncio.create_task(_periodic_userbot_session_expire_scan(redis, account_id))
         payout_compensation_task = asyncio.create_task(
-            _periodic_payout_compensation_scan(redis, client, account_id)
+            _periodic_payout_compensation_scan(redis, client, account_id, paused)
         )
         scheduler_task = asyncio.create_task(platform_scheduler.run())
 
@@ -695,6 +695,9 @@ async def _listen_cmd(
                     ack_ok = True
                     ack_error: str | None = None
                     if _should_schedule_background_rpc(cmd):
+                        if not paused.is_set() and _rpc_blocked_while_paused(cmd):
+                            await _reject_rpc_command(redis, cmd, "kill switch / account pause is active")
+                            continue
                         await rpc_executor.submit(cmd)
                         continue
                     if cmd.type == CMD_PAUSE:
@@ -820,13 +823,17 @@ async def _listen_cmd(
                             ack_ok = False
                             ack_error = f"{type(e).__name__}: {e}"
                     elif cmd.type == CMD_WEBHOOK_DELIVER:
-                        try:
-                            from .plugins.loader import dispatch_webhook_event  # type: ignore
-
-                            await dispatch_webhook_event(account_id, cmd.payload, redis=redis)
-                        except Exception as e:  # noqa: BLE001
+                        if not paused.is_set():
                             ack_ok = False
-                            ack_error = f"{type(e).__name__}: {e}"
+                            ack_error = "kill switch / account pause is active"
+                        else:
+                            try:
+                                from .plugins.loader import dispatch_webhook_event  # type: ignore
+
+                                await dispatch_webhook_event(account_id, cmd.payload, redis=redis)
+                            except Exception as e:  # noqa: BLE001
+                                ack_ok = False
+                                ack_error = f"{type(e).__name__}: {e}"
                     elif cmd.type in _BACKGROUND_RPC_COMMAND_TYPES:
                         handled, ack_ok, ack_error = await _handle_rpc_command(
                             redis,
@@ -862,6 +869,14 @@ def _should_schedule_background_rpc(cmd: IPCMessage) -> bool:
     if cmd.type == CMD_FETCH_AVATAR:
         return True
     return cmd.type in _BACKGROUND_RPC_COMMAND_TYPES and _valid_reply_to(cmd) is not None
+
+
+def _rpc_blocked_while_paused(cmd: IPCMessage) -> bool:
+    return cmd.type in {
+        CMD_EXECUTE_RULE,
+        CMD_RUN_INTERACTION_ENTRY,
+        CMD_RUN_INTERACTION_ACTION,
+    }
 
 
 def _rpc_request_id(cmd: IPCMessage) -> str | None:
@@ -1284,7 +1299,11 @@ async def _handle_run_interaction_action_command(
             engine=engine,
             redis=redis,
         )
-        result_ok = True
+        if bool(result_payload.get("delivery_ambiguous")):
+            result_error = "payout delivery is ambiguous; durable completion pending"
+            result_ok = False
+        else:
+            result_ok = True
     except Exception as e:  # noqa: BLE001
         result_error = f"{type(e).__name__}: {e}"
         if isinstance(e, PayoutLimitExceeded):
@@ -1415,11 +1434,16 @@ async def _load_payout_compensation_config() -> dict[str, Any]:
     return payout_compensation.normalize_config(value)
 
 
-async def _periodic_payout_compensation_scan(redis: Any, client: Any, account_id: int) -> None:
+async def _periodic_payout_compensation_scan(
+    redis: Any,
+    client: Any,
+    account_id: int,
+    paused: asyncio.Event,
+) -> None:
     while True:
         config = await _load_payout_compensation_config()
         try:
-            if bool(config.get("enabled", True)):
+            if paused.is_set() and bool(config.get("enabled", True)):
                 await _scan_payout_compensations_once(
                     redis,
                     client,
@@ -1684,6 +1708,12 @@ async def _replay_payout_compensation_row(
 
 async def _probe_ambiguous_payout_message(client: Any, row: PayoutCompensation) -> int | None:
     target_text = _payout_replay_text(row)
+    fingerprint = str((row.payload or {}).get("payout_probe_fingerprint") or "").strip()
+    if not fingerprint:
+        # Text + reply anchor is not a unique delivery proof: another payout can
+        # legitimately have the same amount and anchor.  Old rows without an
+        # explicit fingerprint must be reconciled manually.
+        return None
     created_at = _as_utc(row.created_at)
     expected_reply_to = _payout_probe_expected_reply_to(row)
     if expected_reply_to is None:
@@ -1711,7 +1741,8 @@ async def _probe_ambiguous_payout_message(client: Any, row: PayoutCompensation) 
                     break
                 if msg_id is None:
                     continue
-                if _telegram_message_text(msg).strip() != target_text:
+                message_text = _telegram_message_text(msg).strip()
+                if message_text != target_text or fingerprint not in message_text:
                     continue
                 if _telegram_message_reply_to_id(msg) == expected_reply_to:
                     return msg_id

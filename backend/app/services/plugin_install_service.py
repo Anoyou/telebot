@@ -342,8 +342,8 @@ async def install_zip(
 
     验签策略随 ``settings.plugin_pubkey`` 分两路（与本地导入通道 ``install_local_plugin`` 对齐）：
     - 配了公钥：强制验签，签名缺失或校验失败一律拒绝；通过则 ``signature_ok=True``（trust=verified）。
-    - 没配公钥：仅当 ``settings.plugin_allow_legacy_unsigned_plugins`` 为 True 才放行未签名包，
-      记 ``signature_ok=None``（trust=community，语义同 local_imports）；开关关掉则拒绝。
+    - 没配公钥：仅当 ``settings.plugin_allow_new_unsigned_plugins`` 为 True 才放行新未签名包，
+      记 ``signature_ok=None``（trust=community）；历史 NULL 插件加载策略由独立开关控制。
 
     存在同名 ``key`` 时视作"升级"：写库 UPDATE 同时覆盖目录，保留旧的 ``enabled`` 状态。
     """
@@ -357,11 +357,11 @@ async def install_zip(
                 "SIGNATURE_FAILED",
                 "插件签名缺失或校验失败，已拒绝安装",
             )
-    elif not settings.plugin_allow_legacy_unsigned_plugins:
-        # 没配公钥且关闭了未签名兼容开关 → 拒（与 worker 的加载策略保持一致）。
+    elif not settings.plugin_allow_new_unsigned_plugins:
+        # 历史 NULL 插件兼容与新上传策略分离；新 ZIP 默认必须显式允许免签。
         raise SignatureFailed(
             "SIGNATURE_FAILED",
-            "未配置插件公钥且未允许未签名插件安装，已拒绝安装",
+            "未配置插件公钥且未显式允许新未签名插件安装，已拒绝安装",
         )
     # 走到这里：sig_ok 为 True（验签通过）或 None（免签放行）。
 

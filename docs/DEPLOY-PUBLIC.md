@@ -81,9 +81,13 @@ COOKIE_SECURE=true
 TRUST_FORWARDED_FOR=true
 CORS_ORIGINS=https://telepilot.example.com
 WEB_PORT_PUBLISH=127.0.0.1:8080
+WEBHOOK_ALLOW_QUERY_TOKEN=false
+PLUGIN_ALLOW_NEW_UNSIGNED_PLUGINS=false
+PLUGIN_ALLOW_LEGACY_UNSIGNED_PLUGINS=true
 ```
 
 `WEB_PORT_PUBLISH=127.0.0.1:8080` 可以避免 nginx 前端容器直接裸露到公网，只让 Caddy 作为唯一外部入口。
+Webhook token 默认只允许通过请求头传递；新 ZIP 插件默认必须签名。历史未签名插件的兼容开关与新安装策略相互独立，不要为了加载旧插件打开新未签名安装入口。
 
 ## 4. Caddy 配置
 
@@ -174,14 +178,14 @@ PostgreSQL / Redis 配置、卷结构或无法识别的基础设施变化才进�
 
 ```bash
 cd /opt/telepilot
-TELEPILOT_UPDATE_BRANCH=codex/0.33-interaction-framework make prod-update
+TELEPILOT_UPDATE_BRANCH=<release-candidate-branch> make prod-update
 ```
 
 想先看本次会走哪条路径，可以执行：
 
 ```bash
 cd /opt/telepilot
-TELEPILOT_UPDATE_BRANCH=codex/0.33-interaction-framework make prod-update PROD_UPDATE_ARGS=--dry-run
+TELEPILOT_UPDATE_BRANCH=<release-candidate-branch> make prod-update PROD_UPDATE_ARGS=--dry-run
 ```
 
 ### Web 面板自更新
@@ -231,13 +235,14 @@ make prod-up
 
 1. `git rev-parse HEAD` 是本次目标 commit，`grep` 四处版本号一致。
 2. `docker compose ps` 中 `postgres` / `redis` / `web` / `frontend` 均为 running 或 healthy。
-3. `curl -fsS http://127.0.0.1:8000/healthz` 返回健康结果。
-4. `curl -I http://127.0.0.1:8080` 能返回前端响应。
-5. `docker compose logs --tail=100 web` 没有迁移、导入、路由或 worker 启动错误。
-6. `https://telepilot.example.com` 可打开登录页。
-7. 浏览器 Cookie 带 `Secure`，确认 `COOKIE_SECURE=true` 生效。
-8. 服务器安全组只对公网开放 `80/tcp` 和 `443/tcp`，不要额外开放 `8000`。
-9. 登录后确认概览、日志、交互、插件、设置页可打开。
+3. `curl -fsS http://127.0.0.1:8000/healthz` 返回健康结果，确认 FastAPI 进程存活。
+4. `curl -fsS http://127.0.0.1:8000/readyz` 返回 `ok=true`，并确认 DB、Redis、Worker Supervisor、账号 Bot manager 和交互 Bot manager 均正常；生产流量与更新完成判定以此为准。
+5. `curl -I http://127.0.0.1:8080` 能返回前端响应。
+6. `docker compose logs --tail=100 web` 没有迁移、导入、路由或关键组件反复重试错误。
+7. `https://telepilot.example.com` 可打开登录页。
+8. 浏览器 Cookie 带 `Secure`，确认 `COOKIE_SECURE=true` 生效。
+9. 服务器安全组只对公网开放 `80/tcp` 和 `443/tcp`，不要额外开放 `8000`。
+10. 登录后确认概览、日志、交互、插件、设置页可打开。
 
 ## 9. 常见问题
 
@@ -249,6 +254,9 @@ A: 检查 `.env` 中 `CORS_ORIGINS` 是否和实际访问地址完全一致，�
 
 Q: PWA 安装后无法保持登录怎么办？
 A: 公网 HTTPS 部署必须设置 `COOKIE_SECURE=true`，并通过 `https://` 访问。
+
+Q: `/healthz` 正常但 Compose 仍显示 unhealthy 怎么办？
+A: `/healthz` 只检查进程存活。继续请求 `/readyz` 并查看 `checks` 字段；DB、Redis 或三个关键 runtime manager 任一未就绪都会返回 503。检查 `docker compose logs --tail=200 web`，等待自动重试恢复或先修复对应依赖。
 
 Q: 远程插件更新后重建容器，插件文件不见了怎么办？
 A: 确认 `docker-compose.yml` 里的 `plugins_installed` 和 `plugin_repos` volume 没有被改成容器临时目录。

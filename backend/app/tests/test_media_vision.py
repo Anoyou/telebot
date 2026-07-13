@@ -15,6 +15,19 @@ from app.services.llm_client import LLMResult
 from app.worker import command as wcmd
 from app.worker import media as _media
 
+
+@pytest.fixture(autouse=True)
+def _allow_llm_budget(monkeypatch):
+    """媒体单测隔离预算后端；预算故障行为由预算服务单测覆盖。"""
+    from app.services import llm_account_budget
+
+    monkeypatch.setattr(
+        llm_account_budget,
+        "acquire",
+        AsyncMock(return_value=llm_account_budget.LLMAccountBudgetTicket(1, 1, 512)),
+    )
+    monkeypatch.setattr(llm_account_budget, "settle", AsyncMock(return_value=None))
+
 # ── 静态 helpers ──────────────────────────────────────────────
 
 

@@ -517,8 +517,8 @@ async def test_llm_budget_reservation_rejects_over_daily_token_limit(monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_llm_budget_redis_failure_is_fail_open(monkeypatch) -> None:
-    """Redis 异常时预算检查 fail-open，不阻断 LLM 调用。"""
+async def test_llm_budget_redis_failure_is_fail_closed(monkeypatch) -> None:
+    """配置预算后 Redis 异常必须拒绝调用，避免费用总闸失效。"""
     from app.services import llm_account_budget
     from app.services import llm_runtime as _rt
 
@@ -540,9 +540,9 @@ async def test_llm_budget_redis_failure_is_fail_open(monkeypatch) -> None:
 
     check = await _rt._check_budget(7, provider, 10)
 
-    assert check.error is None
-    assert check.ticket is not None
-    assert check.ticket.backend == "fail-open"
+    assert check.error == "LLM 预算服务暂不可用，已为避免失控费用拒绝本次调用。"
+    assert check.scope == "backend_unavailable"
+    assert check.ticket is None
 
 
 @pytest.mark.asyncio

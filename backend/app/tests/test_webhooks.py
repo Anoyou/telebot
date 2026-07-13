@@ -137,6 +137,23 @@ async def test_deliver_webhook_exempt_from_csrf_header(monkeypatch: pytest.Monke
 
 
 @pytest.mark.asyncio
+async def test_deliver_webhook_rejects_query_token_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    db = _FakeDB(token="good-token")
+    monkeypatch.setattr(webhooks_api, "publish_cmd_with_ack", AsyncMock())
+
+    async with _client(db) as client:
+        response = await client.post(
+            "/api/webhooks/1/default?token=good-token",
+            headers={"Content-Type": "application/json"},
+            json={"event": "demo"},
+        )
+
+    assert response.status_code == 401
+    assert response.json()["error"]["code"] == "WEBHOOK_TOKEN_INVALID"
+    webhooks_api.publish_cmd_with_ack.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_reset_webhook_token_requires_csrf_header() -> None:
     db = _FakeDB(token="good-token")
 

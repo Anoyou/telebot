@@ -64,14 +64,7 @@ tp_plugin register /tmp/tp-plugins/my_game --force
 
 当源目录不在 `plugins/local_imports` 时，工具会先复制到本地导入目录再登记。如果目标已存在且内容不同，默认报 `STALE_LOCAL_IMPORT_COPY`，防止旧副本被静默覆盖；确认要用外部目录覆盖旧副本时再加 `--force`。`--enable` 会登记后默认启用，开发时通常先不加，回到插件中心按账号启用更可控。
 
-对码依据：
-
-- `backend/scripts/tp_plugin.py:1`-`21`：CLI 设计和三条子命令说明。
-- `backend/scripts/tp_plugin.py:45`：`--profile` 可选值 `session_game|command|passthrough`。
-- `backend/scripts/tp_plugin.py:857`-`884`：`new` 生成文件并落盘。
-- `backend/scripts/tp_plugin.py:1064`-`1121`：`check` 校验流程。
-- `backend/scripts/tp_plugin.py:1159`-`1209`：`register` 复制、陈旧副本保护和登记逻辑。
-- `backend/scripts/tp_plugin.py:1239`-`1306`：CLI 参数，包括 `--profile`、`--dir`、`--dry-run`、`--force`、`--enable`。
+代码入口：`backend/scripts/tp_plugin.py`。查看 `PROFILES`、`scaffold_plugin()`、`check_plugin()`、`register_plugin()` 和 `build_parser()`，分别对应 profile、生成、校验、登记和 CLI 参数。命令行为有变化时，以 `tp_plugin <subcommand> --help` 为准，不依赖文档中的源码行号。
 
 ## 2. 权限自动推导
 
@@ -101,13 +94,7 @@ tp_plugin register /tmp/tp-plugins/my_game --force
 - 它基于 AST 和字面量识别；如果把 `ctx.messages` 赋给别名、封装在 helper 里、动态构造 action type 或 URL，可能漏报，需要人工复核。
 - `payout` 属于高风险权限，必须显式声明并在 PR / 发布说明里写清用途。
 
-对码依据：
-
-- `backend/scripts/tp_plugin.py:52`-`60`：权限风险分级，`payout` / `modify_identity` 为高风险。
-- `backend/scripts/tp_plugin.py:61`-`79`：`ctx.messages.*` 和 action type 到权限的映射。
-- `backend/scripts/tp_plugin.py:956`-`986`：AST 静态扫描 `plugin.py`，推导权限、HTTP 域名和动态 URL 次数。
-- `backend/scripts/tp_plugin.py:989`-`1022`：生成草案、漏声明、多声明、高风险和 HTTP 域名警告。
-- `backend/scripts/tp_plugin.py:1109`-`1111`：权限推导审计只报 diff，不改写文件。
+代码入口：`backend/scripts/tp_plugin.py` 的 `_infer_permissions_from_plugin_py()` 和 `_collect_permission_issues()`。前者负责 AST 推导，后者比较声明与实际使用并生成错误或警告。
 
 ## 3. 录制回放
 
@@ -142,18 +129,7 @@ python scripts/tp_replay.py run ../data/recordings/123/2026-07-10.jsonl --accoun
 
 `tp_replay` 会强制 dry-run：回放期间禁用再次录制，mock Telegram Bot API / Telethon client，把 action event 捕获到内存并输出 JSON。注意：默认分发器仍会通过 `AsyncSessionLocal` 读取真实数据库里的账号和插件状态，只允许连接 dev DB 运行。
 
-对码依据：
-
-- `backend/app/services/action_tap.py:76`-`84`：`dev_mode.recording` 开关识别。
-- `backend/app/services/action_tap.py:164`-`186`：入站信封写入账号 JSONL。
-- `backend/app/worker/plugins/loader.py:1523`-`1528`：从账号插件上下文找 recording 配置。
-- `backend/app/worker/plugins/loader.py:5611`-`5616`：userbot 入站事件写录制信封。
-- `backend/app/worker/replay.py:1`-`10`：回放隔离边界和 dev DB 警告。
-- `backend/app/worker/replay.py:41`-`74`：读取 JSONL 并 replay。
-- `backend/app/worker/replay.py:77`-`104`：强制 dry-run 回放并捕获 action events。
-- `backend/app/worker/replay.py:494`-`507`：回放信封和配置强制 `dry_run=true`、`recording=false`。
-- `backend/scripts/tp_replay.py:25`-`36`：`tp_replay run` 参数。
-- `backend/scripts/tp_replay.py:39`-`55`：dev DB 警告和 JSON 输出。
+代码入口：`backend/app/services/action_tap.py` 的 `dev_mode_recording_enabled()` 与 `emit_inbound_event()`，`backend/app/worker/replay.py` 的 `load_recording()`、`replay_recording()` 和 `_force_envelope_dry_run()`，以及 `backend/scripts/tp_replay.py` 的 CLI parser。
 
 ## 4. 命中调试器
 
@@ -180,14 +156,7 @@ POST /api/dispatch/simulate
 
 返回值是 worker 内存态评估出的 trace，核心字段包括 `account_id`、`via`、`chat`、`text` 和 `stages`。`stages` 会列出各阶段的 matched / skipped 结果和 reason code；如果账号 worker 不在线，API 返回 `WORKER_OFFLINE`。
 
-对码依据：
-
-- `backend/app/api/dispatch_debug.py:25`：路由前缀 `/api/dispatch`。
-- `backend/app/api/dispatch_debug.py:28`-`35`：simulate 请求体字段。
-- `backend/app/api/dispatch_debug.py:102`-`114`：`POST /simulate` 端点和 `WORKER_OFFLINE` 返回。
-- `backend/app/worker/ipc.py:59`：IPC 命令 `dispatch_simulate`。
-- `backend/app/worker/runtime.py:948`-`980`：worker 接收模拟命令并调用 `evaluate_dispatch`。
-- `backend/app/worker/plugins/loader.py:1001`-`1084`：无副作用评估 direct passthrough、prefix command、keyword、event subscription。
+代码入口：`backend/app/api/dispatch_debug.py` 的 `DispatchSimulateRequest` 与 `simulate_dispatch()`，以及 `backend/app/worker/plugins/loader.py` 的 `evaluate_dispatch()`。接口 schema 以 FastAPI `/docs` 为准。
 
 ## 5. `dry_run` 干跑
 
@@ -203,17 +172,7 @@ POST /api/dispatch/simulate
 
 打开后，插件产生的发送、编辑、删除、媒体和 `payout` 等出口会记录 action / action_event，但不真实发送、不真实派奖。建议玩法插件开发时先开启 `dry_run`，配合命中调试器验证入口，再观察 action event / trace 里的参数摘要。
 
-对码依据：
-
-- `backend/app/services/action_tap.py:65`-`73`：`dev_mode.dry_run` 开关识别。
-- `backend/app/services/action_tap.py:92`-`97`：从 action context / account_config 读取 dry-run。
-- `backend/app/worker/plugins/loader.py:1516`-`1538`：插件上下文和 action 层 dry-run 判断。
-- `backend/app/worker/plugins/loader.py:1563`-`1583`：userbot 出口 dry-run 记录 action 和 action_event。
-- `backend/app/worker/plugins/loader.py:2537`-`2548`：userbot `payout` dry-run 只记录。
-- `backend/app/worker/plugins/loader.py:2727`-`2738`：userbot `send_message` dry-run 只记录。
-- `backend/app/services/interaction/delivery.py:76`-`98`：interaction delivery dry-run 判断和记录。
-- `backend/app/services/interaction/delivery.py:745`-`754`：interaction `payout` dry-run 只记录。
-- `backend/app/services/interaction/delivery.py:873`-`884`：interaction `send_message` dry-run 只记录。
+代码入口：`backend/app/services/action_tap.py` 的 `dev_mode_dry_run_enabled()` 与 `action_context_dry_run_enabled()`，`backend/app/worker/plugins/loader.py` 的 `_plugin_dev_mode_dry_run_enabled()` 和 `_record_userbot_dry_run()`，以及 `backend/app/services/interaction/delivery.py` 的 Delivery Executor。
 
 ## 6. 分级 trace
 
@@ -242,18 +201,7 @@ POST /api/dispatch/router-debug-trace
 
 `plugin_key` 和 `chat_id` 都可省略；省略时按账号范围打开。TTL 最小 1 秒，最大 3600 秒。
 
-对码依据：
-
-- `backend/app/services/account_bot_runtime.py:167`-`199`：默认轻量 router delivery stats。
-- `backend/app/services/account_bot_runtime.py:240`-`310`：router-debug trace Redis key、TTL、启用和读取。
-- `backend/app/api/dispatch_debug.py:37`-`42`：router-debug 请求体字段。
-- `backend/app/api/dispatch_debug.py:117`-`124`：`POST /api/dispatch/router-debug-trace`。
-- `backend/app/worker/plugins/manifest.py:23`-`24`、`71`-`72`、`109`：manifest `strict_trace` 字段。
-- `backend/app/services/account_bot_runtime.py:313`-`330`：读取 builtin / installed 插件的 `strict_trace`。
-- `backend/app/services/account_bot_runtime.py:346`-`377`：资金路由、规则插件和 Event Bus 候选触发 strict trace。
-- `backend/app/services/account_bot_runtime.py:380`-`392`：启动 router trace 并记录原因。
-- `backend/app/services/account_bot_runtime.py:1986`-`2076`：account bot debug trace 和轻量 stats。
-- `backend/app/services/account_bot_runtime.py:2086`-`2225`：interaction bot debug / strict trace、路由 span 和轻量 stats。
+代码入口：`backend/app/services/account_bot_runtime.py` 的 `set_router_debug_trace()`、`_router_debug_trace_enabled()`、`_plugin_declares_strict_trace()` 与 `_start_router_trace()`，`backend/app/api/dispatch_debug.py` 的 `RouterDebugTraceRequest` 和 `enable_router_debug_trace()`，以及 `backend/app/worker/plugins/manifest.py` 的 `strict_trace` 字段。
 
 ## 7. 从零开发一个玩法插件的推荐流程
 

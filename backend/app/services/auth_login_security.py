@@ -527,7 +527,11 @@ async def verify_recovery_code(
     code_norm = normalize_recovery_code(code)
     if not code_norm:
         return False
-    row = await db.get(SystemSetting, RECOVERY_SETTING_KEY)
+    row = await db.scalar(
+        select(SystemSetting)
+        .where(SystemSetting.key == RECOVERY_SETTING_KEY)
+        .with_for_update()
+    )
     payload = row.value if row is not None and isinstance(row.value, dict) else None
     if not payload:
         return False

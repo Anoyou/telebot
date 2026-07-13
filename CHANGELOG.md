@@ -22,6 +22,24 @@
 
 暂无已记录变更。
 
+## [0.57.7] — 2026-07-13 · patch（补丁版本） · 安全边界收敛与文档整理
+
+### Changed
+- 新装 ZIP 插件默认必须通过签名验证；历史已安装未签名插件继续由独立兼容开关控制，避免兼容策略意外放宽供应链入口。
+- Webhook 默认只接受请求头令牌，查询参数令牌改为显式兼容开关；敏感配置导出新增密码与已启用 TOTP 的二次验证。
+- 开发文档同步现行安全契约：补齐 payout fail-closed 与 ambiguous 核对、总闸和 readiness、Webhook token、敏感导出二次验证，以及 ZIP 插件双开关说明。
+- 清理历史审查、旧执行计划、设计预览、0.40.x release 证据、已无调用方的兼容跳转页和孤立旧截图，移除对应残留引用，只保留现行开发文档与本次 0.57.6 三份审查结果。
+- 重写 GitHub 首页 README，按产品定位、界面、核心能力、运行模型、快速部署、安全边界、插件开发和文档导航组织，并删除与专项文档重复的历史说明和调优细节。
+
+### Fixed
+- 收紧 payout 崩溃窗口：未知发送异常进入 ambiguous 人工/探测状态而不释放幂等 claim；发送完成状态与 ActionEvent 同事务提交，Interaction RPC 不再把未完成发送误报为成功，缺少稳定指纹时不再凭文本猜测已送达。
+- kill switch 改为端到端 fail-closed：Redis、数据库或任一 Worker/Bot manager 停止失败均显式报错，暂停期间拒绝规则、交互、Webhook 与 payout 补偿副作用；批量停止不再被单账号异常提前中断。
+- 修复 Supervisor、账号 Bot 与交互 Bot 启动失败后不自愈且 readiness 仍健康的问题，关键组件现在指数退避重试并进入就绪检查。
+- 修复 LLM 预算与账号风控 override 在 Redis/数据库异常或缓存丢失时 fail-open 的问题；风控 override 支持从数据库回源并短期回填缓存。
+- 修复支付确认 ticket 执行前即被消费、callback 去重未包含 callback 身份、交互触发与用量限制在 Redis 故障时继续执行的问题。
+- 修复恢复码并发消费竞态、HTTPS 反向代理场景认证/CSRF Cookie 未自动设置 Secure，以及 Worker 子进程继承 updater 控制令牌的问题。
+- 敏感配置导出界面补齐密码与 TOTP 输入，并在成功导出后清除二次认证字段。
+
 ## [0.57.6] — 2026-07-13 · patch（补丁版本） · 在线更新提速与进度反馈
 
 ### Added

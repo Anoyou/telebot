@@ -13,6 +13,7 @@ import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
+import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { Select } from "@/components/ui/select";
 import {
@@ -83,6 +84,8 @@ export function ConfigBackup() {
   const [searchParams] = useSearchParams();
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [includeSensitive, setIncludeSensitive] = useState(false);
+  const [sensitivePassword, setSensitivePassword] = useState("");
+  const [sensitiveTotp, setSensitiveTotp] = useState("");
   const [importResult, setImportResult] = useState<{
     imported: number;
     skipped: number;
@@ -143,6 +146,8 @@ export function ConfigBackup() {
       const res = await api.post("/api/system/export-config", {
         categories: Array.from(selected),
         includeSensitive,
+        password: includeSensitive ? sensitivePassword : undefined,
+        totp_code: includeSensitive ? sensitiveTotp || undefined : undefined,
       }, { responseType: "blob" });
       // 从 Content-Disposition 提取文件名
       const disposition = res.headers["content-disposition"] || "";
@@ -158,7 +163,11 @@ export function ConfigBackup() {
       a.remove();
       URL.revokeObjectURL(url);
     },
-    onSuccess: () => toast.success("配置已导出"),
+    onSuccess: () => {
+      setSensitivePassword("");
+      setSensitiveTotp("");
+      toast.success("配置已导出");
+    },
     onError: (err) => toast.error(getErrMsg(err)),
   });
 
@@ -363,15 +372,39 @@ export function ConfigBackup() {
           </div>
 
           {includeSensitive && (
-            <div className="flex items-start gap-2 rounded-md border px-3 py-2 text-xs alert-warning">
-              <AlertTriangle className="h-4 w-4 mt-0.5 shrink-0" />
-              <span>导出后请妥善保管文件。导入端需使用相同的 MASTER_KEY 才能解密敏感数据。</span>
+            <div className="space-y-3 rounded-md border px-3 py-3 alert-warning">
+              <div className="flex items-start gap-2 text-xs">
+                <AlertTriangle className="h-4 w-4 mt-0.5 shrink-0" />
+                <span>敏感导出需要重新验证。导出后请妥善保管文件，导入端需使用相同的 MASTER_KEY。</span>
+              </div>
+              <div className="grid gap-3 sm:grid-cols-2">
+                <div className="space-y-1.5">
+                  <Label htmlFor="sensitive-export-password">当前密码</Label>
+                  <Input
+                    id="sensitive-export-password"
+                    type="password"
+                    autoComplete="current-password"
+                    value={sensitivePassword}
+                    onChange={(event) => setSensitivePassword(event.target.value)}
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor="sensitive-export-totp">TOTP 动态码（已绑定时必填）</Label>
+                  <Input
+                    id="sensitive-export-totp"
+                    inputMode="numeric"
+                    autoComplete="one-time-code"
+                    value={sensitiveTotp}
+                    onChange={(event) => setSensitiveTotp(event.target.value.replace(/\D/g, "").slice(0, 6))}
+                  />
+                </div>
+              </div>
             </div>
           )}
 
           <Button
             onClick={() => exportMut.mutate()}
-            disabled={selected.size === 0 || exportMut.isPending}
+            disabled={selected.size === 0 || exportMut.isPending || (includeSensitive && !sensitivePassword)}
             className="gap-1.5"
           >
             <Download className="h-4 w-4" />

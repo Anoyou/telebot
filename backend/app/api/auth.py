@@ -40,21 +40,30 @@ def _err(code: str, message: str, status: int = 400) -> HTTPException:
     return HTTPException(status_code=status, detail={"code": code, "message": message})
 
 
-def _set_auth_cookie(resp: Response, token: str, max_age: int) -> None:
+def _cookie_secure_for_request(request: Request | None) -> bool:
+    from ..settings import settings as _s
+
+    if _s.cookie_secure:
+        return True
+    if request is None:
+        return False
+    forwarded_proto = request.headers.get("x-forwarded-proto", "").split(",", 1)[0].strip().lower()
+    return request.url.scheme == "https" or forwarded_proto == "https"
+
+
+def _set_auth_cookie(resp: Response, token: str, max_age: int, *, request: Request | None = None) -> None:
     """统一的 cookie 设置：HttpOnly + SameSite=Lax + (可选)Secure。
 
     生产 HTTPS 部署在 .env 里设 ``COOKIE_SECURE=true``，会在响应里直接打 Secure
     标记；本地 HTTP 调试默认 false。
     """
-    from ..settings import settings as _s
-
     resp.set_cookie(
         key=_COOKIE_NAME,
         value=token,
         max_age=max_age,
         httponly=True,
         samesite="lax",
-        secure=_s.cookie_secure,
+        secure=_cookie_secure_for_request(request),
     )
 
 
@@ -189,7 +198,7 @@ async def register(
     from ..settings import settings as _s  # 局部 import 减小模块顶部依赖
 
     token = auth_service.issue_jwt_token(user.id, getattr(user, "pwd_version", 0) or 0)
-    _set_auth_cookie(response, token, _s.jwt_expire_seconds)
+    _set_auth_cookie(response, token, _s.jwt_expire_seconds, request=request)
     return LoginResponse(ok=True, require_totp=False)
 
 
@@ -297,21 +306,19 @@ async def login(req: LoginRequest, request: Request, response: Response, db: DBS
     from ..settings import settings as _s
 
     token = auth_service.issue_jwt_token(user.id, getattr(user, "pwd_version", 0) or 0)
-    _set_auth_cookie(response, token, _s.jwt_expire_seconds)
+    _set_auth_cookie(response, token, _s.jwt_expire_seconds, request=request)
     return LoginResponse(ok=True, require_totp=False)
 
 
 # ── 注销 ──────────────────────────────────────────────────────────
 @router.post("/logout")
-async def logout(response: Response) -> dict[str, bool]:
+async def logout(request: Request, response: Response) -> dict[str, bool]:
     """清除 auth_token cookie。"""
-    from ..settings import settings as _s
-
     # delete_cookie 必须把 path/samesite/secure 等属性匹配上，浏览器才会真正清理
     response.delete_cookie(
         _COOKIE_NAME,
         samesite="lax",
-        secure=_s.cookie_secure,
+        secure=_cookie_secure_for_request(request),
         httponly=True,
     )
     return {"ok": True}
@@ -385,6 +392,7 @@ async def change_password(
     req: ChangePasswordRequest,
     user: CurrentUser,
     db: DBSession,
+    request: Request,
     response: Response,
 ) -> dict[str, bool]:
     """修改当前用户密码。
@@ -404,12 +412,10 @@ async def change_password(
     await db.commit()
 
     # 强制下线：清当前 session 的 cookie，前端拦到 401 会跳登录页
-    from ..settings import settings as _s
-
     response.delete_cookie(
         _COOKIE_NAME,
         samesite="lax",
-        secure=_s.cookie_secure,
+        secure=_cookie_secure_for_request(request),
         httponly=True,
     )
     return {"ok": True}

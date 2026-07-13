@@ -240,6 +240,35 @@ async def test_worker_stop_cancels_inflight_rpc(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_paused_worker_rejects_interaction_payout_rpc() -> None:
+    from app.worker import runtime as runtime_mod
+
+    redis = _FakeCmdRedis()
+    client = AsyncMock()
+    paused = asyncio.Event()
+    listener = asyncio.create_task(runtime_mod._listen_cmd(redis, client, 103, paused))
+    try:
+        await redis.send_cmd(
+            make_cmd(
+                CMD_RUN_INTERACTION_ACTION,
+                reply_to="rpc-paused",
+                request_id="paused-1",
+                payload={"action_type": "payout", "chat_id": -100, "amount": 10},
+            )
+        )
+        _, rpc_msg = await _wait_for_publish(
+            redis,
+            lambda ch, item: ch == "rpc-paused" and item.type == CMD_RUN_INTERACTION_ACTION,
+        )
+        assert rpc_msg.payload["ok"] is False
+        assert "pause" in rpc_msg.payload["error"]
+        client.send_message.assert_not_awaited()
+    finally:
+        await redis.send_cmd(make_cmd(CMD_STOP))
+        await asyncio.wait_for(listener, timeout=1)
+
+
+@pytest.mark.asyncio
 async def test_worker_rpc_executor_bounds_one_hundred_slow_requests(monkeypatch):
     from app.worker import runtime as runtime_mod
     from app.worker.plugins import loader as loader_mod

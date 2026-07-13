@@ -41,6 +41,9 @@ class _FakeDB:
             return self.settings.get(key)
         return None
 
+    async def scalar(self, _stmt):
+        return self.settings.get(auth_login_security.RECOVERY_SETTING_KEY)
+
     def add(self, row):
         self.added.append(row)
         if isinstance(row, SystemSetting):

@@ -71,6 +71,7 @@ from .ipc import (
 )
 
 log = logging.getLogger(__name__)
+_WORKER_STRIPPED_ENV_KEYS = ("TELEPILOT_UPDATER_TOKEN", "UPDATER_TOKEN")
 
 _LOG_RETENTION_CACHE: tuple[float, dict[str, int]] = (0.0, {})
 _LAST_RUNTIME_LOG_CLEANUP_AT = 0.0
@@ -82,6 +83,14 @@ def invalidate_log_retention_cache() -> None:
 
     global _LOG_RETENTION_CACHE
     _LOG_RETENTION_CACHE = (0.0, {})
+
+
+def _worker_entry_without_control_plane_secrets(account_id: int) -> None:
+    """Spawn target that removes updater credentials before plugin code can run."""
+
+    for key in _WORKER_STRIPPED_ENV_KEYS:
+        os.environ.pop(key, None)
+    worker_entry(account_id)
 
 
 async def _get_log_retention_config() -> dict[str, int]:
@@ -607,7 +616,11 @@ async def start_worker(account_id: int) -> None:
         h.desired = "running"
         if h.process and h.process.is_alive():
             return
-        p = _MP_CTX.Process(target=worker_entry, args=(account_id,), daemon=False)
+        p = _MP_CTX.Process(
+            target=_worker_entry_without_control_plane_secrets,
+            args=(account_id,),
+            daemon=False,
+        )
         p.start()
         h.process = p
         h.started_at = time.monotonic()
@@ -671,8 +684,28 @@ async def resume_worker(account_id: int) -> None:
 
 async def stop_running_workers() -> None:
     """停止当前 supervisor 托管的全部 worker，但不取消后台监听任务。"""
-    for aid in list(_WORKERS.keys()):
-        await stop_worker(aid)
+    aids = list(_WORKERS.keys())
+    if not aids:
+        return
+    results = await asyncio.gather(*(stop_worker(aid) for aid in aids), return_exceptions=True)
+    failures = [
+        f"account={aid}: {type(result).__name__}: {result}"
+        for aid, result in zip(aids, results, strict=True)
+        if isinstance(result, BaseException)
+    ]
+    alive: list[int] = []
+    for aid in aids:
+        handle = _WORKERS.get(aid)
+        if handle is None or handle.process is None:
+            continue
+        try:
+            if handle.process.is_alive():
+                alive.append(aid)
+        except Exception:  # noqa: BLE001
+            alive.append(aid)
+    if failures or alive:
+        detail = "; ".join(failures + ([f"仍存活账号={alive}"] if alive else []))
+        raise RuntimeError(f"部分 worker 停止失败: {detail}")
 
 
 async def start_active_workers() -> None:
@@ -698,7 +731,8 @@ async def _kill_switch_enabled() -> bool:
             return bool(value.get("enabled", False))
         return bool(value)
     except Exception:  # noqa: BLE001
-        return False
+        log.exception("读取 kill switch 失败，按 fail-closed 视为已开启")
+        return True
 
 
 async def _account_status(account_id: int) -> str | None:

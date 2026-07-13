@@ -15,6 +15,7 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ...db.base import AsyncSessionLocal
 from ...db.models.rate_limit import RateLimitOverride
 
 
@@ -79,14 +80,40 @@ async def add_override(
 
 
 async def get_multiplier(redis, account_id: int, action: str) -> float:
-    """从 Redis 拿当前 multiplier，未命中视作 1.0（不打折）。"""
-    val = await redis.get(_redis_key(account_id, action))
-    if val is None:
-        return 1.0
+    """Read the multiplier, falling back to the durable DB source on cache miss."""
+
+    key = _redis_key(account_id, action)
     try:
-        return float(val)
-    except (TypeError, ValueError):
-        return 1.0
+        val = await redis.get(key)
+    except Exception:  # noqa: BLE001
+        val = None
+    if val is not None:
+        try:
+            return float(val)
+        except (TypeError, ValueError):
+            pass
+
+    now = datetime.now(UTC)
+    async with AsyncSessionLocal() as db:
+        record = await db.scalar(
+            select(RateLimitOverride)
+            .where(
+                RateLimitOverride.account_id == int(account_id),
+                RateLimitOverride.action == str(action),
+                RateLimitOverride.expires_at > now,
+            )
+            .order_by(RateLimitOverride.multiplier.asc(), RateLimitOverride.expires_at.desc())
+            .limit(1)
+        )
+    multiplier = float(record.multiplier) if record is not None else 1.0
+    ttl = 30
+    if record is not None:
+        ttl = max(1, int((record.expires_at - now).total_seconds()))
+    try:
+        await redis.set(key, str(multiplier), ex=ttl)
+    except Exception:  # noqa: BLE001
+        pass
+    return multiplier
 
 
 async def list_active(db: AsyncSession, account_id: int) -> list[RateLimitOverride]:
