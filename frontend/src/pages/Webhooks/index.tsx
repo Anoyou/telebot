@@ -66,9 +66,6 @@ function curlExample(config: AccountWebhookConfig, hookKey: string): string {
   const url = deliveryUrl(config.account_id, hookKey);
   return [
     `curl -X POST '${url}' \\`,
-    "  -H 'X-Requested-With: telepilot-ui' \\",
-    "  -H 'Cookie: csrf_token=webhook' \\",
-    "  -H 'X-CSRF-Token: webhook' \\",
     `  -H '${config.token_header}: ${config.token}' \\`,
     "  -H 'Content-Type: application/json' \\",
     "  -d '{\"event\":\"demo\",\"value\":1}'",

@@ -178,6 +178,7 @@ make plugin-register dir=plugins/local_imports/my_game
 入口文档：
 
 - [5 分钟 Quickstart](docs/PLUGIN-QUICKSTART.md)
+- [入站 Webhook Quickstart](docs/PLUGIN-WEBHOOK-QUICKSTART.md)
 - [插件开发铁律](docs/PLUGIN-RULES.md)
 - [插件 API 参考](docs/PLUGIN-API-REFERENCE.md)
 - [插件安全边界](docs/PLUGIN-SAFETY.md)
@@ -220,6 +221,7 @@ backend/.venv/bin/python scripts/validate-installed-interaction-plugins.py
 | 组件、数据流和生命周期 | [架构说明](docs/TELEPILOT-ARCHITECTURE.md) |
 | 插件文档入口 | [插件开发指南](docs/PLUGIN-DEV-GUIDE.md) |
 | 插件字段、事件、action 和生命周期 | [插件 API 参考](docs/PLUGIN-API-REFERENCE.md) |
+| 外部系统通过 HTTP 触发插件 | [入站 Webhook Quickstart](docs/PLUGIN-WEBHOOK-QUICKSTART.md) |
 | 插件 HTTP 与 AI 能力 | [HTTP facade](docs/PLUGIN-HTTP.md) / [AI facade](docs/PLUGIN-AI.md) |
 | 远程插件仓库与发布 | [远程插件](docs/PLUGIN-REMOTE.md) |
 | 版本变化 | [CHANGELOG](CHANGELOG.md) |

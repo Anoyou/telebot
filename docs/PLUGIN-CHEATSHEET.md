@@ -12,11 +12,11 @@
 - 显式 Manifest 模式必须保留最小目录：`plugin.json`、`manifest.py`、`plugin.py`、`__init__.py`。`plugin.json.name`、`MANIFEST.key`、插件类 `key` 必须一致。
 - 必须把 `usage` 写成插件中心可展示的使用说明；有 `config_schema` 时也可以补 `x-usage-guide` / `x-usage-steps`，但不要只靠口头说明。
 - 禁止用空 `usage` 绕过检查；缺失会触发高级规范警告，插件库维护插件和示例插件都必须完整声明。
-- `event_subscriptions[].events` 常用值：`message`、`command`、`callback_query`、`inline_query`、`chosen_inline_result`、`payment_confirmed`、`session_close`、`message_edited`、`session_expired`、`all_events`；`all_messages` 仍只等于 `message` / `command`。
-- `event_subscriptions[].source` 常用值：`userbot`、`interaction_bot`、`external_payment_notice`。
+- `event_subscriptions[].events` 常用值：`message`、`command`、`callback_query`、`inline_query`、`chosen_inline_result`、`payment_confirmed`、`webhook`、`session_close`、`message_edited`、`session_expired`、`all_events`；`all_messages` 仍只等于 `message` / `command`。
+- `event_subscriptions[].source` 常用值：`userbot`、`interaction_bot`、`external_payment_notice`、`webhook`。
 - `event_subscriptions[].scope` 常用值：`all_allowed_chats`、`owner_only`、`known_users`、`rule_bound`、`inline_all`；Inline 插件必须显式用 `inline_all`。
 - `known_users` 只认平台 state 提供的真实集合，不会自动把当前 sender 算进去。
-- `filters` 常见键：`keywords`、`contains`、`callback_data`、`commands`、`rule_id`；未知 key 会保留但会告 warning。
+- `filters` 常见键：`keywords`、`contains`、`callback_data`、`commands`、`rule_id`、`hook_key`、`hook_keys`；未知 key 会保留但会告 warning。
 - 严格来说只有 `telegram_direct_passthrough` 叫裸直通；Event Bus、会话入口、legacy hook 都是消息分发/会话路由。
 - `capabilities.telegram_native_raw` 是高风险能力声明；需要原生 Telegram 字段时写 `enabled=true`、`reason`、`sources`，并处理 `native_raw_meta.enabled=false` 的降级。
 - 标准事件信封优先读：`source`、`message`、`chat`、`sender`、`actor`、`source_actor`、`player`、`payment`、`reply_to`、`trigger`、`session`、`native_raw_meta`。
@@ -48,7 +48,7 @@
 - 规则 `concurrency=user` 只是触发频控粒度，不等于插件会话 key。
 - 抢答、竞猜、抽奖要加锁和二次检查；禁用、热重载、超时和卸载都要清理状态。
 - 外部请求必须有 timeout；日志里不要写 token、session、完整原生 payload、隐私消息或完整文件路径。
-- 维护示例：新主模板看 `examples/plugins/event_bus_demo`；HTTP 看 `with_http`；AI 看 `with_ai`；旧交互迁移看 `with_interaction`。
+- 维护示例：新主模板看 `examples/plugins/event_bus_demo`；Webhook 看 `webhook_receiver`；HTTP 看 `with_http`；AI 看 `with_ai`；旧交互迁移看 `with_interaction`。
 - 迁移边界：平台功能不伪装成插件；插件库维护插件必须完整声明；示例插件只用于学习和 CI；用户安装插件可保留代码但启用/更新时要提示规范警告。
 - 验证示例：`backend/.venv/bin/python scripts/validate-plugin-examples.py`；检查已安装互动插件：`backend/.venv/bin/python scripts/validate-installed-interaction-plugins.py`。
 

@@ -549,6 +549,8 @@ Telegram 来源
 
 ### 入站 webhook 事件
 
+第一次接入请先看 [入站 Webhook Quickstart](./PLUGIN-WEBHOOK-QUICKSTART.md)，可运行示例位于 `examples/plugins/webhook_receiver`。
+
 插件可以通过 Event Bus 订阅外部 HTTP webhook。Manifest / `plugin.json` 写法如下：
 
 ```json
@@ -558,7 +560,7 @@ Telegram 来源
       "source": ["webhook"],
       "events": ["webhook"],
       "scope": "all_allowed_chats",
-      "filters": {"hook_key": "orders"}
+      "filters": {"hook_key": "default"}
     }
   ]
 }
@@ -573,7 +575,7 @@ Telegram 来源
       "source": ["webhook"],
       "events": ["webhook"],
       "scope": "all_allowed_chats",
-      "triggers": {"webhook": "orders"}
+      "triggers": {"webhook": "default"}
     }
   ]
 }
@@ -590,19 +592,19 @@ Telegram 来源
     "type": "webhook",
     "channel": "webhook",
     "driver": "http_webhook",
-    "hook_key": "orders"
+    "hook_key": "default"
   },
-  "trigger": {"hook_key": "orders"},
+  "trigger": {"hook_key": "default"},
   "message": {"text": "{\"order_id\":\"A-1\"}"},
   "webhook": {
-    "hook_key": "orders",
+    "hook_key": "default",
     "body": {"order_id": "A-1"},
     "headers": {"content-type": "application/json"},
     "body_size": 19,
     "content_type": "application/json",
     "received_at": "2026-07-10T00:00:00+00:00"
   },
-  "hook_key": "orders",
+  "hook_key": "default",
   "body": {"order_id": "A-1"},
   "headers": {"content-type": "application/json"}
 }
@@ -619,7 +621,7 @@ curl -X POST "https://<telepilot-host>/api/webhooks/{account_id}/{hook_key}" \
   --data '{"order_id":"A-1","status":"paid"}'
 ```
 
-默认只接受 `X-TelePilot-Webhook-Token` 请求头。旧调用方只有在服务端显式设置 `WEBHOOK_ALLOW_QUERY_TOKEN=true` 时才能继续使用 `?token=<account_webhook_token>`；查询参数可能进入 URL、反代和访问日志，生产环境不建议开启。`hook_key` 必须是 1-64 位的字母、数字、下划线、点或短横线组合，且必须存在于账号 webhook 配置并处于启用状态。请求体上限为 64 KiB；投递接口返回 `202` 只表示 worker 已确认接收，插件是否命中和执行结果请在日志/trace 中查看。Webhook 投递受 `webhook_deliver` 风控动作限流，Worker 暂停或全局总闸开启时拒绝投递。
+默认只接受 `X-TelePilot-Webhook-Token` 请求头。旧调用方只有在服务端显式设置 `WEBHOOK_ALLOW_QUERY_TOKEN=true` 时才能继续使用 `?token=<account_webhook_token>`；查询参数可能进入 URL、反代和访问日志，生产环境不建议开启。`hook_key` 必须是 1-64 位的字母、数字、下划线、点或短横线组合，且必须存在于账号 webhook 配置并处于启用状态；当前页面保证提供 `default`，插件声明不会自动创建其他 Hook key。请求体上限为 64 KiB；投递接口返回 `202` 只表示 worker 已确认接收，插件是否命中和执行结果请在日志/trace 中查看。Webhook 投递受 `webhook_deliver` 风控动作限流，Worker 暂停或全局总闸开启时拒绝投递。
 
 标准事件信封优先读这些字段：`source`、`message`、`chat`、`sender`、`actor`、`source_actor`、`player`、`payment`、`reply_to`、`trigger`、`session`、`native_raw_meta`。新插件不要依赖 `payload["text"]`、`payload["chat_id"]`、`payload.get("message")` 这类旧平铺字段；`payload["message"]` 是消息对象，不是配置字符串。
 

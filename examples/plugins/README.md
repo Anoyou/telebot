@@ -6,6 +6,7 @@
 
 - `hello_ping`：入门最小示例，只订阅 `message`，只匹配纯文本 `ping`，只返回 `send_message` / `pong`。新开发者优先从它复制目录结构。
 - `event_bus_demo`：最终版主模板，演示 `usage` / `event_subscriptions` / `capabilities.telegram_native_raw`、message/command/callback/inline/payment fixtures、`answer_inline_query` 与 `settlement`。
+- `webhook_receiver`：入站 Webhook 完整示例，订阅 `default` Hook、读取标准 Webhook payload，并把订单摘要发送到配置的 Telegram Chat ID。
 
 ## Facade 兼容示例
 

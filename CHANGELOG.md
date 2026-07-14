@@ -22,6 +22,15 @@
 
 暂无已记录变更。
 
+## [0.60.1] — 2026-07-15 · patch（补丁版本） · Webhook 开发快速上手
+
+### Added
+- 新增入站 Webhook Quickstart 和可运行的 `webhook_receiver` 示例插件，覆盖订阅声明、标准 payload、目标 Chat ID 配置、外部调用、错误排查、安全边界与订单事件回归校验。
+
+### Fixed
+- 入站 Webhook 页面生成的 `curl` 示例移除不需要的登录 Cookie、CSRF 与 `X-Requested-With` 请求头，只保留账号 Webhook Token 和正文类型。
+- Webhook 文档和示例统一使用页面保证提供的 `default` 入口，并明确插件订阅不会自动创建新的 Hook key，避免照抄自定义入口后收到 `404`。
+
 ## [0.60.0] — 2026-07-15 · minor（次版本） · Bot 原生富消息与通知路由
 
 ### Added

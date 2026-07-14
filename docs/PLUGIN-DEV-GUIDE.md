@@ -9,6 +9,7 @@
 ## 目录
 
 - [5 分钟 Quickstart](./PLUGIN-QUICKSTART.md)
+- [入站 Webhook Quickstart](./PLUGIN-WEBHOOK-QUICKSTART.md)
 - [插件开发铁律](./PLUGIN-RULES.md)
 - [完整 API 参考](./PLUGIN-API-REFERENCE.md)
 - [插件概览](./PLUGIN-OVERVIEW.md)
@@ -38,10 +39,11 @@
 3. 查字段、facade、标准事件信封、MessageOps、Trace 和生命周期时看 [完整 API 参考](./PLUGIN-API-REFERENCE.md)。
 4. 需要理解个人可信插件标准模式、安装/启用/更新/卸载心智时看 [插件概览](./PLUGIN-OVERVIEW.md)。
 5. 需要外部网络能力时看 [HTTP facade](./PLUGIN-HTTP.md)，需要 AI 能力时看 [AI facade](./PLUGIN-AI.md)。
-6. 需要 Git 安装、`plugin.json`、Registry、发布检查时看 [远程插件](./PLUGIN-REMOTE.md)。
-7. 需要权限、前缀、消息发送、并发和清理约束时看 [安全边界](./PLUGIN-SAFETY.md)。
-8. 从零开发、校验、登记、命中调试、dry-run 安全测试、录制回放回归时看 [开发者工具链](./PLUGIN-DEVTOOLS.md)。
-9. 需要快速回忆字段名和常用模式时看 [速查表](./PLUGIN-CHEATSHEET.md)。
+6. 需要让 n8n、GitHub、监控或业务系统触发插件时看 [入站 Webhook Quickstart](./PLUGIN-WEBHOOK-QUICKSTART.md)。
+7. 需要 Git 安装、`plugin.json`、Registry、发布检查时看 [远程插件](./PLUGIN-REMOTE.md)。
+8. 需要权限、前缀、消息发送、并发和清理约束时看 [安全边界](./PLUGIN-SAFETY.md)。
+9. 从零开发、校验、登记、命中调试、dry-run 安全测试、录制回放回归时看 [开发者工具链](./PLUGIN-DEVTOOLS.md)。
+10. 需要快速回忆字段名和常用模式时看 [速查表](./PLUGIN-CHEATSHEET.md)。
 
 ## 开发者工具链速览
 

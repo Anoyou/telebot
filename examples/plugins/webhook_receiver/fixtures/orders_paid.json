@@ -1,0 +1,23 @@
+{
+  "event_type": "webhook",
+  "source": {
+    "type": "webhook",
+    "channel": "webhook",
+    "driver": "http_webhook",
+    "hook_key": "default"
+  },
+  "trigger": {"hook_key": "default"},
+  "message": {"text": "{\"order_id\":\"A-1001\",\"status\":\"paid\",\"amount\":88}"},
+  "webhook": {
+    "hook_key": "default",
+    "body": {"order_id": "A-1001", "status": "paid", "amount": 88},
+    "headers": {"content-type": "application/json"},
+    "body_size": 54,
+    "content_type": "application/json",
+    "received_at": "2026-07-15T00:00:00+00:00"
+  },
+  "hook_key": "default",
+  "body": {"order_id": "A-1001", "status": "paid", "amount": 88},
+  "headers": {"content-type": "application/json"},
+  "native_raw_meta": {"enabled": false, "source": "webhook"}
+}

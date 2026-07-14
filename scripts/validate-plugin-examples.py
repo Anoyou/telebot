@@ -32,6 +32,7 @@ INCLUDED_EXAMPLES = {
     "with_ai_components",
     "with_http",
     "with_interaction",
+    "webhook_receiver",
 }
 SKIPPED_EXAMPLES = {
     "translate": "历史示例仍依赖后端私有 LLM 链路，迁移到 ctx.ai 前不纳入稳定 API gate。",
@@ -41,8 +42,9 @@ REQUIRED_PERMISSIONS = {
     "with_ai": {"ai_text"},
     "with_ai_components": {"ai_text"},
     "with_http": {"external_http"},
+    "webhook_receiver": {"send_message"},
 }
-EVENT_EXAMPLES = {"event_bus_demo", "hello_ping", "with_interaction"}
+EVENT_EXAMPLES = {"event_bus_demo", "hello_ping", "with_interaction", "webhook_receiver"}
 NATIVE_RAW_EXAMPLES = {"event_bus_demo", "with_interaction"}
 REQUIRED_EVENT_TYPES = {
     "event_bus_demo": {
@@ -55,6 +57,7 @@ REQUIRED_EVENT_TYPES = {
     },
     "hello_ping": {"message"},
     "with_interaction": {"message", "callback_query", "payment_confirmed"},
+    "webhook_receiver": {"webhook"},
 }
 DEPRECATED_RISK_TOKENS = ("notice", "bbot_notice", "notice_bot", "raw_event")
 DEPRECATED_RISK_PATTERN = re.compile(
@@ -304,6 +307,27 @@ def _validate_hello_ping_runtime(name: str, plugin: Plugin) -> None:
         raise AssertionError(f"{name}: 非 ping 文本不能返回 action")
 
 
+def _validate_webhook_receiver_runtime(name: str, plugin_dir: Path, plugin: Plugin) -> None:
+    if name != "webhook_receiver":
+        return
+    payload = json.loads(
+        (plugin_dir / "fixtures/orders_paid.json").read_text(encoding="utf-8")
+    )
+    ctx = SimpleNamespace(
+        config={"target_chat_id": -100123, "title": "订单事件"},
+        log=None,
+    )
+    actions = asyncio.run(plugin.on_event(ctx, payload))
+    if not isinstance(actions, list) or len(actions) != 1:
+        raise AssertionError(f"{name}: default Webhook 必须返回一条消息动作")
+    action = actions[0]
+    if action.get("type") != "send_message" or action.get("chat_id") != -100123:
+        raise AssertionError(f"{name}: Webhook 消息动作或目标 Chat ID 不正确: {action}")
+    text = str(action.get("text") or "")
+    if "default" not in text or "A-1001" not in text or "paid" not in text:
+        raise AssertionError(f"{name}: Webhook 消息缺少 Hook 或订单摘要: {text}")
+
+
 def _validate_example(name: str) -> None:
     plugin_dir = EXAMPLES_ROOT / name
     missing = sorted(file for file in REQUIRED_FILES if not (plugin_dir / file).is_file())
@@ -340,12 +364,19 @@ def _validate_example(name: str) -> None:
         )
     if list(metadata.get("interaction_entries") or []) != list(manifest.interaction_entries):
         raise AssertionError(f"{name}: plugin.json.interaction_entries 与 MANIFEST.interaction_entries 不一致")
+    if name == "webhook_receiver":
+        metadata_schema = metadata.get("config_schema")
+        if not isinstance(metadata_schema, dict) or metadata_schema != manifest.config_schema:
+            raise AssertionError(
+                f"{name}: plugin.json.config_schema 与 MANIFEST.config_schema 不一致"
+            )
     _validate_usage(name, metadata)
     _validate_event_contract(name, metadata, manifest)
     _validate_deprecated_risks(name, plugin_dir, metadata)
     _validate_event_fixtures(name, plugin_dir)
     _validate_event_demo_runtime(name, plugin_dir, instance)
     _validate_hello_ping_runtime(name, instance)
+    _validate_webhook_receiver_runtime(name, plugin_dir, instance)
 
     for field in ("permissions", "allowed_hosts"):
         expected = list(metadata.get(field) or [])
