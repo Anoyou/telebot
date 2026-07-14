@@ -13,12 +13,14 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time as _time
 from types import SimpleNamespace
 from typing import Any
 
 import httpx
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import StreamingResponse
 
 from ..deps import CurrentUser, DBSession
 from ..schemas.command import (
@@ -1239,11 +1241,15 @@ async def test_model(
     )
 
 
-def _build_chat_test_prompt(payload: ChatTestModelsRequest) -> str:
+def _build_chat_test_prompt(
+    payload: ChatTestModelsRequest,
+    model_id: str | None = None,
+) -> str:
     lines: list[str] = []
-    if payload.history:
+    history = payload.history_by_model.get(model_id, payload.history) if model_id else payload.history
+    if history:
         lines.append("以下是同一个测试窗口里的最近对话，请只当作上下文：")
-        for turn in payload.history[-12:]:
+        for turn in history[-12:]:
             name = "用户" if turn.role == "user" else "助手"
             lines.append(f"{name}: {turn.content}")
         lines.append("")
@@ -1274,7 +1280,6 @@ async def chat_test_models(
 
     row = await command_service.get_provider_row(db, pid)
     proxy_url = await _resolve_proxy_url(db, row.proxy_id)
-    user_prompt = _build_chat_test_prompt(payload)
     transport_metadata = _liveness_transport_metadata(
         row,
         api_format_override=payload.api_format_override,
@@ -1283,6 +1288,7 @@ async def chat_test_models(
 
     async def run_one(model_id: str) -> ChatTestModelResult:
         started = _time.monotonic()
+        user_prompt = _build_chat_test_prompt(payload, model_id)
         try:
             cli = build_client(
                 row,
@@ -1363,6 +1369,259 @@ async def chat_test_models(
         provider_id=pid,
         provider_name=row.name,
         results=list(results),
+    )
+
+
+def _chat_stream_can_fallback(exc: Exception) -> bool:
+    """只在流式能力不兼容时改走完整响应，避免掩盖真实上游故障。"""
+
+    from ..services.llm_client import LLMError, LLMErrorScope
+
+    if isinstance(exc, NotImplementedError):
+        return True
+    if not isinstance(exc, LLMError):
+        return False
+    if exc.scope is LLMErrorScope.CAPABILITY_MISMATCH:
+        return True
+    if exc.status_code in {405, 406, 415, 501}:
+        return True
+    message = str(exc).lower()
+    return exc.status_code in {400, 422} and "stream" in message and any(
+        marker in message
+        for marker in ("不支持", "unsupported", "not support", "unknown parameter")
+    )
+
+
+@router.post("/api/commands/llm-providers/{pid}/chat-test-models/stream")
+async def stream_chat_test_models(
+    pid: int,
+    payload: ChatTestModelsRequest,
+    db: DBSession,
+    _user: CurrentUser,
+) -> StreamingResponse:
+    """优先使用上游原生流式协议，以 NDJSON 并发推送各模型结果。"""
+
+    await _require_ai_enabled(db)
+
+    from ..services.llm_client import LLMError, LLMResult, build_client
+
+    row = await command_service.get_provider_row(db, pid)
+    proxy_url = await _resolve_proxy_url(db, row.proxy_id)
+    transport_metadata = _liveness_transport_metadata(
+        row,
+        api_format_override=payload.api_format_override,
+        identity_override=payload.client_identity_profile_override,
+    )
+
+    async def event_source():
+        queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=256)
+
+        async def emit(event: dict[str, Any]) -> None:
+            await queue.put(event)
+
+        async def run_one(model_id: str) -> None:
+            started = _time.monotonic()
+            user_prompt = _build_chat_test_prompt(payload, model_id)
+            text_parts: list[str] = []
+            response_chars = 0
+            max_response_chars = max(16_384, payload.max_tokens * 16)
+            actual_model: str | None = None
+            input_tokens = 0
+            output_tokens = 0
+            streaming = True
+            stream_fallback = False
+            await emit(
+                {
+                    "type": "start",
+                    "requested_model": model_id,
+                    "streaming": True,
+                    **transport_metadata,
+                }
+            )
+            try:
+                cli = build_client(
+                    row,
+                    override_model=model_id,
+                    proxy_url=proxy_url,
+                    api_format_override=payload.api_format_override,
+                    identity_override=payload.client_identity_profile_override,
+                )
+                try:
+                    async with asyncio.timeout(payload.timeout_seconds):
+                        try:
+                            async for chunk in cli.stream_complete(
+                                payload.system_prompt,
+                                user_prompt,
+                                max_tokens=payload.max_tokens,
+                                timeout_seconds=payload.timeout_seconds,
+                            ):
+                                if chunk.model:
+                                    actual_model = chunk.model
+                                if chunk.input_tokens is not None:
+                                    input_tokens = int(chunk.input_tokens)
+                                if chunk.output_tokens is not None:
+                                    output_tokens = int(chunk.output_tokens)
+                                if chunk.delta:
+                                    response_chars += len(chunk.delta)
+                                    if response_chars > max_response_chars:
+                                        raise LLMError("模型流式输出超过测活内容上限。")
+                                    text_parts.append(chunk.delta)
+                                    await emit(
+                                        {
+                                            "type": "delta",
+                                            "requested_model": model_id,
+                                            "delta": chunk.delta,
+                                            "model": actual_model,
+                                        }
+                                    )
+                        except (LLMError, NotImplementedError) as exc:
+                            if any(part.strip() for part in text_parts) or not _chat_stream_can_fallback(exc):
+                                raise
+                            stream_fallback = True
+
+                        if stream_fallback:
+                            streaming = False
+                            elapsed_seconds = _time.monotonic() - started
+                            remaining_seconds = max(
+                                1,
+                                payload.timeout_seconds - int(elapsed_seconds),
+                            )
+                            completed = await cli.complete(
+                                payload.system_prompt,
+                                user_prompt,
+                                max_tokens=payload.max_tokens,
+                                timeout_seconds=remaining_seconds,
+                            )
+                            if len(completed.text or "") > max_response_chars:
+                                raise LLMError("模型完整响应超过测活内容上限。")
+                            text_parts = [completed.text or ""]
+                            actual_model = completed.model or actual_model
+                            input_tokens = int(completed.input_tokens or 0)
+                            output_tokens = int(completed.output_tokens or 0)
+                except TimeoutError:
+                    raise LLMError("模型测活超过总超时时间。", retryable=True) from None
+
+                elapsed_ms = int((_time.monotonic() - started) * 1000)
+                text = "".join(text_parts).strip()
+                usage_result = LLMResult(
+                    text=text,
+                    model=actual_model or model_id,
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                )
+                await _emit_llm_diagnostic_usage(
+                    provider_row=row,
+                    source="diagnostic:chat-test",
+                    started=started,
+                    system=payload.system_prompt,
+                    user_prompt=user_prompt,
+                    model=actual_model or model_id,
+                    result=usage_result,
+                )
+                result = ChatTestModelResult(
+                    ok=bool(text),
+                    requested_model=model_id,
+                    model=actual_model,
+                    latency_ms=elapsed_ms,
+                    response=text or None,
+                    preview=text[:240] if text else None,
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                    empty_response=not bool(text),
+                    error=None if text else "上游请求已完成，但返回文本为空。",
+                    streaming=streaming,
+                    stream_fallback=stream_fallback,
+                    **transport_metadata,
+                )
+                await emit(
+                    {
+                        "type": "done",
+                        "requested_model": model_id,
+                        "result": result.model_dump(mode="json"),
+                    }
+                )
+            except asyncio.CancelledError:
+                raise
+            except LLMError as exc:
+                elapsed_ms = int((_time.monotonic() - started) * 1000)
+                await _emit_llm_diagnostic_usage(
+                    provider_row=row,
+                    source="diagnostic:chat-test",
+                    started=started,
+                    system=payload.system_prompt,
+                    user_prompt=user_prompt,
+                    model=actual_model or model_id,
+                    error=exc,
+                )
+                result = ChatTestModelResult(
+                    ok=False,
+                    requested_model=model_id,
+                    model=actual_model,
+                    latency_ms=elapsed_ms,
+                    response="".join(text_parts).strip() or None,
+                    error=str(exc),
+                    streaming=streaming,
+                    stream_fallback=stream_fallback,
+                    **transport_metadata,
+                )
+                await emit(
+                    {
+                        "type": "error",
+                        "requested_model": model_id,
+                        "result": result.model_dump(mode="json"),
+                    }
+                )
+            except Exception as exc:  # noqa: BLE001
+                elapsed_ms = int((_time.monotonic() - started) * 1000)
+                await _emit_llm_diagnostic_usage(
+                    provider_row=row,
+                    source="diagnostic:chat-test",
+                    started=started,
+                    system=payload.system_prompt,
+                    user_prompt=user_prompt,
+                    model=actual_model or model_id,
+                    error=exc,
+                )
+                result = ChatTestModelResult(
+                    ok=False,
+                    requested_model=model_id,
+                    model=actual_model,
+                    latency_ms=elapsed_ms,
+                    response="".join(text_parts).strip() or None,
+                    error=f"上游流式响应解析失败（{type(exc).__name__}）。",
+                    streaming=streaming,
+                    stream_fallback=stream_fallback,
+                    **transport_metadata,
+                )
+                await emit(
+                    {
+                        "type": "error",
+                        "requested_model": model_id,
+                        "result": result.model_dump(mode="json"),
+                    }
+                )
+
+        tasks = [asyncio.create_task(run_one(model_id)) for model_id in payload.models]
+        remaining = len(tasks)
+        try:
+            while remaining:
+                event = await queue.get()
+                if event.get("type") in {"done", "error"}:
+                    remaining -= 1
+                yield json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n"
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    return StreamingResponse(
+        event_source(),
+        media_type="application/x-ndjson",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",
+        },
     )
 
 

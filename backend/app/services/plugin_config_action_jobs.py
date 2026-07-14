@@ -44,9 +44,13 @@ STATUS_QUEUED = "queued"
 STATUS_RUNNING = "running"
 STATUS_SUCCEEDED = "succeeded"
 STATUS_FAILED = "failed"
-TERMINAL_STATUSES = frozenset({STATUS_SUCCEEDED, STATUS_FAILED})
+STATUS_PAUSED = "paused"
+STATUS_CANCELLED = "cancelled"
+TERMINAL_STATUSES = frozenset({STATUS_SUCCEEDED, STATUS_FAILED, STATUS_PAUSED, STATUS_CANCELLED})
 INTERRUPTED_ERROR_CODE = "CONFIG_ACTION_INTERRUPTED"
 _ACTIVE_TASKS: set[asyncio.Task[Any]] = set()
+_ACTIVE_TASKS_BY_JOB_ID: dict[str, asyncio.Task[Any]] = {}
+_CREATE_LOCKS_BY_ACTION: dict[tuple[int, str, str], asyncio.Lock] = {}
 
 
 async def startup_plugin_config_action_jobs() -> int:
@@ -96,14 +100,17 @@ async def _converge_interrupted_jobs(message: str) -> int:
         return len(rows)
 
 
-def _start_job_task(coro: Any) -> None:
+def _start_job_task(job_id: str, coro: Any) -> None:
     task = asyncio.create_task(coro)
     if not isinstance(task, asyncio.Task):
         return
     _ACTIVE_TASKS.add(task)
+    _ACTIVE_TASKS_BY_JOB_ID[job_id] = task
 
     def _done(completed: asyncio.Task[Any]) -> None:
         _ACTIVE_TASKS.discard(completed)
+        if _ACTIVE_TASKS_BY_JOB_ID.get(job_id) is completed:
+            _ACTIVE_TASKS_BY_JOB_ID.pop(job_id, None)
         if completed.cancelled():
             return
         try:
@@ -138,6 +145,46 @@ async def create_plugin_config_action_job(
     key = str(action_key or "").strip()
     if not any(str(action.get("key") or "").strip() == key for action in declared_config_actions(feature, installed_plugin)):
         raise PluginConfigActionNotFound(f"插件 {feature.key} 未声明配置动作 {key}")
+    lock_key = (int(account.id), str(feature.key), key)
+    lock = _CREATE_LOCKS_BY_ACTION.setdefault(lock_key, asyncio.Lock())
+    async with lock:
+        return await _create_plugin_config_action_job_locked(
+            db,
+            account=account,
+            feature=feature,
+            action_key=key,
+            effective_config=effective_config,
+            current_config=current_config,
+            action_input=action_input,
+        )
+
+
+async def _create_plugin_config_action_job_locked(
+    db: AsyncSession,
+    *,
+    account: Account,
+    feature: Feature,
+    action_key: str,
+    effective_config: Mapping[str, Any],
+    current_config: Mapping[str, Any] | None,
+    action_input: Mapping[str, Any] | None,
+) -> PluginConfigActionJob:
+    """Check and create one job while the process-local action key is locked."""
+
+    key = action_key
+    active_result = await db.execute(
+        select(PluginConfigActionJob).where(
+            PluginConfigActionJob.account_id == account.id,
+            PluginConfigActionJob.plugin_key == feature.key,
+            PluginConfigActionJob.action_key == key,
+            PluginConfigActionJob.status.in_((STATUS_QUEUED, STATUS_RUNNING)),
+        )
+    )
+    active_job = active_result.scalars().first()
+    if active_job is not None:
+        raise PluginConfigActionUnavailable(
+            f"配置动作正在执行（任务 {active_job.job_id}），请先中断或终止后再重新开始"
+        )
 
     job = PluginConfigActionJob(
         job_id=f"pcaj_{uuid.uuid4().hex}",
@@ -163,6 +210,7 @@ async def create_plugin_config_action_job(
     await db.refresh(job)
 
     _start_job_task(
+        job.job_id,
         _run_plugin_config_action_job(
             job.job_id,
             effective_config=dict(effective_config or {}),
@@ -171,6 +219,51 @@ async def create_plugin_config_action_job(
         )
     )
     return job
+
+
+async def control_plugin_config_action_job(
+    db: AsyncSession,
+    job_id: str,
+    *,
+    action: str,
+) -> PluginConfigActionJobResponse | None:
+    """Pause or cancel one in-process background config action."""
+
+    mode = str(action or "").strip().lower()
+    if mode not in {"pause", "cancel"}:
+        raise ValueError("配置动作控制只支持 pause 或 cancel")
+    job = await _load_job(db, job_id)
+    if job is None:
+        return None
+    if job.status in TERMINAL_STATUSES:
+        return job_response(job, logs=await _load_job_logs(db, job.job_id))
+
+    task = _ACTIVE_TASKS_BY_JOB_ID.get(job.job_id)
+    if task is not None and not task.done():
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+    await db.refresh(job)
+    if job.status in TERMINAL_STATUSES:
+        return job_response(job, logs=await _load_job_logs(db, job.job_id))
+
+    now = _utcnow()
+    paused = mode == "pause"
+    job.status = STATUS_PAUSED if paused else STATUS_CANCELLED
+    job.message = "配置动作已中断，可调整配置后继续执行。" if paused else "配置动作已终止。"
+    job.error_code = "CONFIG_ACTION_PAUSED" if paused else "CONFIG_ACTION_CANCELLED"
+    job.error_message = None
+    job.ended_at = now
+    job.updated_at = now
+    await _write_runtime_log(
+        db,
+        job,
+        LEVEL_WARN,
+        job.message,
+        step="paused" if paused else "cancelled",
+        error_code=job.error_code,
+    )
+    await db.commit()
+    return job_response(job, logs=await _load_job_logs(db, job.job_id))
 
 
 async def get_plugin_config_action_job(

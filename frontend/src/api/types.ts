@@ -1610,6 +1610,7 @@ export interface ChatTestModelsRequest {
   models: string[];
   message: string;
   history?: ChatTestTurn[];
+  history_by_model?: Record<string, ChatTestTurn[]>;
   system_prompt?: string;
   max_tokens?: number;
   timeout_seconds?: number;
@@ -1630,6 +1631,8 @@ export interface ChatTestModelResult {
   error?: string | null;
   client_identity_profile?: string | null;
   effective_api_format?: string | null;
+  streaming?: boolean;
+  stream_fallback?: boolean;
 }
 
 export interface ChatTestModelsResponse {

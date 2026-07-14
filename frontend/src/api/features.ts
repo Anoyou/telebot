@@ -118,6 +118,17 @@ export interface PluginConfigActionJobStatus {
   logs: PluginConfigActionJobLogItem[];
 }
 
+export async function controlPluginConfigActionJob(
+  jobId: string,
+  action: "pause" | "cancel",
+): Promise<PluginConfigActionJobStatus> {
+  const { data } = await api.post<PluginConfigActionJobStatus>(
+    `/api/plugin-config-action-jobs/${jobId}/control`,
+    { action },
+  );
+  return data;
+}
+
 export async function runPluginConfigAction(
   aid: number,
   pluginKey: string,

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -261,6 +261,12 @@ class PluginConfigActionJobLogItem(BaseModel):
     level: str
     message: str
     detail: dict[str, Any] | None = None
+
+
+class PluginConfigActionControlRequest(BaseModel):
+    """暂停或终止插件配置后台任务。"""
+
+    action: Literal["pause", "cancel"]
 
 
 class PluginConfigActionJobResponse(BaseModel):

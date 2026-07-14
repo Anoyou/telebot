@@ -1,9 +1,10 @@
 // 自定义命令 + LLM Provider API 包装（Sprint2 #2）
-import { api } from "@/lib/api";
+import { api, apiFetch } from "@/lib/api";
 import type {
   AccountCommandItem,
   AICommandEnablementSummary,
   BuiltinCommandItem,
+  ChatTestModelResult,
   ChatTestModelsRequest,
   ChatTestModelsResponse,
   ClientIdentityVersionDetectResponse,
@@ -177,6 +178,108 @@ export async function chatTestProviderModels(
     },
   );
   return data;
+}
+
+export type ChatTestStreamEvent =
+  | {
+      type: "start";
+      requested_model: string;
+      streaming: true;
+      effective_api_format?: string | null;
+      client_identity_profile?: string | null;
+    }
+  | {
+      type: "delta";
+      requested_model: string;
+      delta: string;
+      model?: string | null;
+    }
+  | {
+      type: "done" | "error";
+      requested_model: string;
+      result: ChatTestModelResult;
+    };
+
+function streamErrorMessage(payload: unknown, fallback: string): string {
+  if (!payload || typeof payload !== "object") return fallback;
+  const value = payload as {
+    error?: { message?: string };
+    detail?: string | { message?: string } | Array<{ message?: string; msg?: string }>;
+  };
+  if (value.error?.message) return value.error.message;
+  if (typeof value.detail === "string") return value.detail;
+  if (Array.isArray(value.detail)) {
+    const message = value.detail.map((item) => item.message || item.msg).filter(Boolean).join("；");
+    if (message) return message;
+  }
+  if (value.detail && !Array.isArray(value.detail) && value.detail.message) {
+    return value.detail.message;
+  }
+  return fallback;
+}
+
+/** 优先消费后端 NDJSON 流；每个模型的增量与最终结果通过回调即时交给页面。 */
+export async function streamChatTestProviderModels(
+  id: number,
+  payload: ChatTestModelsRequest,
+  onEvent: (event: ChatTestStreamEvent) => void,
+  opts?: { signal?: AbortSignal },
+): Promise<void> {
+  const response = await apiFetch(
+    `/api/commands/llm-providers/${id}/chat-test-models/stream`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/x-ndjson" },
+      body: JSON.stringify(payload),
+      signal: opts?.signal,
+    },
+  );
+  if (!response.ok) {
+    let payloadError: unknown;
+    try {
+      payloadError = await response.json();
+    } catch {
+      payloadError = null;
+    }
+    throw new Error(streamErrorMessage(payloadError, `测活请求失败（HTTP ${response.status}）`));
+  }
+  if (!response.body) throw new Error("浏览器没有提供可读取的流式响应。");
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  const completedModels = new Set<string>();
+  let streamFinished = false;
+  let buffer = "";
+  const consumeLine = (line: string) => {
+    const trimmed = line.trim();
+    if (!trimmed) return;
+    const event = JSON.parse(trimmed) as ChatTestStreamEvent;
+    if (event.type === "done" || event.type === "error") {
+      completedModels.add(event.requested_model);
+    }
+    onEvent(event);
+  };
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      buffer += decoder.decode(value, { stream: !done });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() || "";
+      lines.forEach(consumeLine);
+      if (done) break;
+    }
+    if (buffer.trim()) consumeLine(buffer);
+    const incompleteModels = payload.models.filter((model) => !completedModels.has(model));
+    if (incompleteModels.length > 0) {
+      throw new Error(`流式响应提前结束，${incompleteModels.length} 个模型没有返回最终状态。`);
+    }
+    streamFinished = true;
+  } finally {
+    if (!streamFinished) {
+      await reader.cancel().catch(() => undefined);
+    }
+    reader.releaseLock();
+  }
 }
 
 /** 全量已启用模型测活执行预览（只读，不调用上游、不消耗 quota）。 */

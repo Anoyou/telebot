@@ -5,6 +5,7 @@ const CSRF_COOKIE = "csrf_token";
 const CSRF_HEADER = "X-CSRF-Token";
 const REQUESTED_WITH_HEADER = "X-Requested-With";
 const REQUESTED_WITH_VALUE = "telepilot-ui";
+const API_BASE = import.meta.env.VITE_API_BASE || "/";
 
 let csrfFetch: Promise<string | null> | null = null;
 
@@ -53,13 +54,61 @@ async function ensureCsrfToken(forceRefresh = false): Promise<string | null> {
 }
 
 export const api = axios.create({
-  baseURL: import.meta.env.VITE_API_BASE || "/",
+  baseURL: API_BASE,
   withCredentials: true,
   timeout: 15000,
   headers: {
     [REQUESTED_WITH_HEADER]: REQUESTED_WITH_VALUE,
   },
 });
+
+function resolveApiUrl(path: string): string {
+  if (/^https?:\/\//i.test(path)) return path;
+  const base = API_BASE.endsWith("/") ? API_BASE : `${API_BASE}/`;
+  const relative = path.replace(/^\//, "");
+  if (/^https?:\/\//i.test(base)) return new URL(relative, base).toString();
+  return `${base}${relative}`.replace(/\/{2,}/g, "/");
+}
+
+/** fetch 版 API 通道，供浏览器 ReadableStream 等 Axios/XHR 无法覆盖的场景使用。 */
+export async function apiFetch(path: string, init: RequestInit = {}): Promise<Response> {
+  const method = (init.method || "GET").toUpperCase();
+  const headers = new Headers(init.headers);
+  headers.set(REQUESTED_WITH_HEADER, REQUESTED_WITH_VALUE);
+  if (!["GET", "HEAD", "OPTIONS"].includes(method)) {
+    const token = await ensureCsrfToken();
+    if (token) headers.set(CSRF_HEADER, token);
+  }
+
+  const execute = () => fetch(resolveApiUrl(path), {
+    ...init,
+    method,
+    headers,
+    credentials: "include",
+  });
+  let response = await execute();
+  if (response.status === 403 && !["GET", "HEAD", "OPTIONS"].includes(method)) {
+    let code: string | undefined;
+    try {
+      const payload = await response.clone().json() as ApiErrorPayload;
+      const detail = payload.detail;
+      code = payload.error?.code
+        || (!Array.isArray(detail) && typeof detail === "object" ? detail?.code : undefined);
+    } catch {
+      // 非 JSON 的 403 交给调用方按原响应处理。
+    }
+    if (code === "CSRF_TOKEN_REQUIRED" || code === "CSRF_HEADER_REQUIRED") {
+      clearCookie(CSRF_COOKIE);
+      const token = await ensureCsrfToken(true);
+      if (token) headers.set(CSRF_HEADER, token);
+      response = await execute();
+    }
+  }
+  if (response.status === 401 && !location.pathname.startsWith("/login")) {
+    location.href = "/login";
+  }
+  return response;
+}
 
 api.interceptors.request.use(async (config) => {
   const headers = writeRequestHeaders(config);

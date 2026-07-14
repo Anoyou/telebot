@@ -27,6 +27,7 @@ from ..schemas.feature import (
     AccountFeatureToggle,
     ConfigValidationResponse,
     FeatureMatrixResponse,
+    PluginConfigActionControlRequest,
     PluginConfigActionJobResponse,
     PluginConfigActionRequest,
     PluginConfigActionResponse,
@@ -35,6 +36,7 @@ from ..schemas.feature import (
 )
 from ..services import audit, feature_service
 from ..services.plugin_config_action_jobs import (
+    control_plugin_config_action_job,
     create_plugin_config_action_job,
     get_plugin_config_action_job,
     job_response,
@@ -598,6 +600,8 @@ async def start_account_feature_config_action_job(
         )
     except PluginConfigActionNotFound as exc:
         raise _bad("CONFIG_ACTION_NOT_FOUND", str(exc), 404) from exc
+    except PluginConfigActionUnavailable as exc:
+        raise _bad("CONFIG_ACTION_ALREADY_RUNNING", str(exc), 409) from exc
 
     await audit.write(
         db,
@@ -624,6 +628,32 @@ async def get_config_action_job_status(
     response = await get_plugin_config_action_job(db, job_id)
     if response is None:
         raise _bad("CONFIG_ACTION_JOB_NOT_FOUND", "配置动作任务不存在", 404)
+    return response
+
+
+@router.post(
+    "/api/plugin-config-action-jobs/{job_id}/control",
+    response_model=PluginConfigActionJobResponse,
+)
+async def control_config_action_job(
+    job_id: str,
+    payload: PluginConfigActionControlRequest,
+    db: DBSession,
+    user: CurrentUser,
+) -> PluginConfigActionJobResponse:
+    """中断或终止配置动作后台任务。"""
+
+    response = await control_plugin_config_action_job(db, job_id, action=payload.action)
+    if response is None:
+        raise _bad("CONFIG_ACTION_JOB_NOT_FOUND", "配置动作任务不存在", 404)
+    await audit.write(
+        db,
+        user.id,
+        f"feature.config.action.job.{payload.action}",
+        target=f"plugin-config-action-job:{job_id}",
+        detail={"job_id": job_id, "action": payload.action},
+    )
+    await db.commit()
     return response
 
 

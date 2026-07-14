@@ -436,11 +436,15 @@ return {
 }
 ```
 
-`config_patch` 会合并回当前表单，用户仍需点击“保存配置”才会写入数据库并触发 worker 热加载。通用 API 路径是：
+后台配置动作完成后，`config_patch` 会自动写入配置并通知 worker 热加载；前端当前草稿若已有未保存修改会继续保留并提示远端配置已变化。通用 API 路径是：
 
 ```text
-POST /api/accounts/{aid}/features/{key}/config/actions/{action_key}
+POST /api/accounts/{aid}/features/{key}/config/actions/{action_key}/jobs
+GET  /api/plugin-config-action-jobs/{job_id}
+POST /api/plugin-config-action-jobs/{job_id}/control  {"action":"pause"|"cancel"}
 ```
+
+长时间动作支持真实中断和终止。`pause` 将任务标记为“已中断”，适合插件已经分批持久化阶段性结果后调整配置再重新执行；`cancel` 将任务标记为“已终止”。平台会取消当前进程中的在途异步调用，但“继续”的业务进度仍需插件自行持久化，不能只保存在插件实例内存中。
 
 **字段验证清单（平台能力与插件库插件）：**
 

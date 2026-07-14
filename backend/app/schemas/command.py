@@ -644,6 +644,11 @@ class ChatTestModelsRequest(BaseModel):
     """本轮模拟用户消息。"""
     history: list[ChatTestTurn] = Field(default_factory=list, max_length=20)
     """同一测试窗口里的临时历史，用于模拟连续对话。"""
+    history_by_model: dict[str, list[ChatTestTurn]] = Field(
+        default_factory=dict,
+        max_length=20,
+    )
+    """批量流式测活时各模型独立的临时历史；未提供的模型回退使用 history。"""
     system_prompt: str = Field(
         default="你是一个自然、简洁的中文聊天助手。请像真实聊天一样直接回复用户，不要只返回 ping/pong。",
         min_length=1,
@@ -687,6 +692,19 @@ class ChatTestModelsRequest(BaseModel):
             raise ValueError("至少选择一个模型")
         return out
 
+    @field_validator("history_by_model")
+    @classmethod
+    def _validate_history_by_model(
+        cls,
+        values: dict[str, list[ChatTestTurn]],
+    ) -> dict[str, list[ChatTestTurn]]:
+        for model, turns in values.items():
+            if not str(model).strip() or len(str(model)) > 128:
+                raise ValueError("模型历史中的模型 ID 无效")
+            if len(turns) > 20:
+                raise ValueError("每个模型最多保留 20 条临时历史")
+        return values
+
 
 class ChatTestModelResult(BaseModel):
     """单个模型真实聊天测活结果。"""
@@ -703,6 +721,10 @@ class ChatTestModelResult(BaseModel):
     error: str | None = None
     client_identity_profile: str | None = None
     effective_api_format: str | None = None
+    streaming: bool = False
+    """本次结果是否通过上游原生流式协议获得。"""
+    stream_fallback: bool = False
+    """上游不支持流式或未产生增量时，是否已回退为完整响应。"""
 
 
 class ChatTestModelsResponse(BaseModel):

@@ -143,6 +143,73 @@ class LLMStreamChunk:
     done: bool = False
 
 
+def _completed_json_as_stream_result(
+    data: object,
+    *,
+    api_format: str,
+    default_model: str,
+) -> LLMResult:
+    """解析忽略 ``stream=true`` 而返回的普通 JSON，避免再次请求上游。"""
+
+    if not isinstance(data, dict):
+        raise LLMError("上游流式请求返回的 JSON 不是对象")
+    text = ""
+    usage = data.get("usage") or {}
+    if not isinstance(usage, dict):
+        usage = {}
+    try:
+        if api_format == LLM_API_FORMAT_CHAT_COMPLETIONS:
+            choices = data.get("choices") or []
+            choice = choices[0] if isinstance(choices, list) and choices else {}
+            message = choice.get("message") if isinstance(choice, dict) else {}
+            text = _openai_content_text(message.get("content")) if isinstance(message, dict) else ""
+            input_tokens = int(usage.get("prompt_tokens") or 0)
+            output_tokens = int(usage.get("completion_tokens") or 0)
+        elif api_format == LLM_API_FORMAT_ANTHROPIC_MESSAGES:
+            text = "".join(
+                str(item.get("text") or "")
+                for item in data.get("content") or []
+                if isinstance(item, dict) and item.get("type") == "text"
+            )
+            input_tokens = int(usage.get("input_tokens") or 0)
+            output_tokens = int(usage.get("output_tokens") or 0)
+        else:
+            if isinstance(data.get("output_text"), str):
+                text = str(data["output_text"])
+            if not text:
+                text = "".join(
+                    str(content.get("text") or "")
+                    for item in data.get("output") or []
+                    if isinstance(item, dict)
+                    for content in item.get("content") or []
+                    if isinstance(content, dict) and isinstance(content.get("text"), str)
+                )
+            input_tokens = int(usage.get("input_tokens") or 0)
+            output_tokens = int(usage.get("output_tokens") or 0)
+    except (TypeError, ValueError):
+        raise LLMError("上游流式请求返回的 usage 字段格式无效") from None
+    return LLMResult(
+        text=text,
+        model=str(data.get("model") or default_model),
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+    )
+
+
+async def _read_limited_stream_json(response: Any, *, limit_bytes: int = 1_048_576) -> object:
+    """读取忽略流式参数的 JSON 响应，并限制传输层累计大小。"""
+
+    body = bytearray()
+    async for chunk in response.aiter_bytes():
+        body.extend(chunk)
+        if len(body) > limit_bytes:
+            raise LLMError("上游流式请求返回的 JSON 超过 1 MiB 限制")
+    try:
+        return json.loads(bytes(body))
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        raise LLMError("上游 streaming 返回了无法解析的 JSON") from None
+
+
 def _model_response_from_result(result: LLMResult) -> ModelResponse:
     content = (TextContent(result.text),) if result.text else ()
     return ModelResponse(
@@ -1016,6 +1083,177 @@ class OpenAIClient(LLMClient):
             ),
         )
 
+    async def stream_complete(
+        self,
+        system: str,
+        user: str,
+        max_tokens: int = 512,
+        images: list[bytes] | None = None,
+        web_search: bool = False,
+        web_search_context_size: str | None = None,
+        temperature: float | None = None,
+        reasoning_effort: str | None = None,
+        timeout_seconds: int | None = None,
+    ) -> AsyncIterator[LLMStreamChunk]:
+        """通过 Chat Completions SSE 逐段返回文本。
+
+        不主动发送 ``stream_options``，以兼容只实现了基础 ``stream=true`` 的
+        OpenAI-compatible 上游；如果上游自带 usage chunk，仍会正常采集。
+        """
+        if web_search:
+            raise LLMError(
+                "联网搜索需要使用 OpenAI Responses API（api_format=responses）",
+                scope=LLMErrorScope.CAPABILITY_MISMATCH,
+            )
+        url = provider_endpoint(self._base_url, LLM_API_FORMAT_CHAT_COMPLETIONS)
+        headers = _llm_headers(identity=self._identity, accept="text/event-stream")
+        if self._api_key:
+            headers["Authorization"] = f"Bearer {self._api_key}"
+        if images:
+            user_content: object = [
+                {"type": "text", "text": user},
+                *[
+                    {"type": "image_url", "image_url": {"url": _to_data_url(img)}}
+                    for img in images
+                ],
+            ]
+        else:
+            user_content = user
+        body: dict[str, Any] = {
+            "model": self._model,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user_content},
+            ],
+            "max_tokens": max_tokens,
+            "stream": True,
+        }
+        normalized_temperature = _normalize_temperature(temperature)
+        if normalized_temperature is not None:
+            body["temperature"] = normalized_temperature
+        normalized_effort = _normalize_reasoning_effort(reasoning_effort)
+        if normalized_effort is not None:
+            body["reasoning_effort"] = normalized_effort
+
+        client_kwargs: dict[str, object] = {
+            "timeout": _timeout_for_call(self._base_url, timeout_seconds)
+        }
+        if self._proxy_url:
+            client_kwargs["proxy"] = self._proxy_url
+        else:
+            client_kwargs["trust_env"] = False
+
+        model_name = self._model
+        input_tokens = 0
+        output_tokens = 0
+        final_sent = False
+        try:
+            async with httpx.AsyncClient(**client_kwargs) as cli:
+                async with cli.stream("POST", url, headers=headers, json=body) as resp:
+                    if resp.status_code >= 400:
+                        error_body = ""
+                        async for chunk in resp.aiter_text():
+                            error_body += chunk
+                            if len(error_body) > 500:
+                                break
+                        raise LLMError(
+                            _safe_error_message(
+                                f"OpenAI streaming 接口返回 {resp.status_code}: "
+                                f"{error_body[:200]}{_hint_for_status(resp.status_code)}",
+                                self._api_key,
+                            ),
+                            retryable=_is_retryable_status(resp.status_code),
+                            scope=_error_scope_for_http(resp.status_code, error_body),
+                            status_code=resp.status_code,
+                        )
+
+                    response_headers = getattr(resp, "headers", {})
+                    content_type = str(response_headers.get("content-type") or "")
+                    if "json" in content_type.lower():
+                        payload = await _read_limited_stream_json(resp)
+                        result = _completed_json_as_stream_result(
+                            payload,
+                            api_format=LLM_API_FORMAT_CHAT_COMPLETIONS,
+                            default_model=self._model,
+                        )
+                        if result.text:
+                            yield LLMStreamChunk(delta=result.text, model=result.model)
+                        yield LLMStreamChunk(
+                            model=result.model,
+                            input_tokens=result.input_tokens,
+                            output_tokens=result.output_tokens,
+                            done=True,
+                        )
+                        return
+
+                    async for line in resp.aiter_lines():
+                        line = line.strip()
+                        if not line or line.startswith(":") or not line.startswith("data:"):
+                            continue
+                        raw = line.removeprefix("data:").strip()
+                        if raw == "[DONE]":
+                            final_sent = True
+                            yield LLMStreamChunk(
+                                model=model_name,
+                                input_tokens=input_tokens,
+                                output_tokens=output_tokens,
+                                done=True,
+                            )
+                            return
+                        try:
+                            payload = json.loads(raw)
+                        except json.JSONDecodeError:
+                            continue
+                        if not isinstance(payload, dict):
+                            continue
+                        if payload.get("error"):
+                            raise LLMError(
+                                _safe_error_message(
+                                    f"OpenAI streaming 返回错误事件: {str(payload['error'])[:200]}",
+                                    self._api_key,
+                                )
+                            )
+                        model_name = str(payload.get("model") or model_name)
+                        usage = payload.get("usage") or {}
+                        if isinstance(usage, dict):
+                            input_tokens = int(usage.get("prompt_tokens") or input_tokens or 0)
+                            output_tokens = int(
+                                usage.get("completion_tokens") or output_tokens or 0
+                            )
+                        choices = payload.get("choices") or []
+                        if not isinstance(choices, list) or not choices:
+                            continue
+                        choice = choices[0]
+                        if not isinstance(choice, dict):
+                            continue
+                        delta = choice.get("delta") or {}
+                        if isinstance(delta, dict):
+                            text = _openai_content_text(delta.get("content"))
+                            if text:
+                                yield LLMStreamChunk(delta=text, model=model_name)
+                        if choice.get("finish_reason") and not final_sent:
+                            # usage 可能位于 finish chunk 或其后的独立 chunk；继续读到
+                            # [DONE]，若反代不发送 [DONE] 则在流结束后统一收尾。
+                            continue
+        except LLMError:
+            raise
+        except httpx.HTTPError as exc:
+            raise LLMError(
+                _safe_error_message(
+                    _describe_http_error(exc, self._base_url),
+                    self._api_key,
+                ),
+                retryable=True,
+            ) from None
+
+        if not final_sent:
+            yield LLMStreamChunk(
+                model=model_name,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                done=True,
+            )
+
     async def invoke(self, request: ModelRequest) -> ModelResponse:
         capabilities_for_api_format(LLM_API_FORMAT_CHAT_COMPLETIONS).validate(
             request,
@@ -1647,6 +1885,25 @@ class AnthropicClient(LLMClient):
                             status_code=resp.status_code,
                         )
 
+                    response_headers = getattr(resp, "headers", {})
+                    content_type = str(response_headers.get("content-type") or "")
+                    if "json" in content_type.lower():
+                        payload = await _read_limited_stream_json(resp)
+                        result = _completed_json_as_stream_result(
+                            payload,
+                            api_format=LLM_API_FORMAT_ANTHROPIC_MESSAGES,
+                            default_model=self._model,
+                        )
+                        if result.text:
+                            yield LLMStreamChunk(delta=result.text, model=result.model)
+                        yield LLMStreamChunk(
+                            model=result.model,
+                            input_tokens=result.input_tokens,
+                            output_tokens=result.output_tokens,
+                            done=True,
+                        )
+                        return
+
                     current_event = ""
                     async for line in resp.aiter_lines():
                         line = line.rstrip("\r\n")
@@ -2107,6 +2364,25 @@ class ResponsesClient(LLMClient):
                             scope=_error_scope_for_http(resp.status_code, error_body),
                             status_code=resp.status_code,
                         )
+
+                    response_headers = getattr(resp, "headers", {})
+                    content_type = str(response_headers.get("content-type") or "")
+                    if "json" in content_type.lower():
+                        payload = await _read_limited_stream_json(resp)
+                        result = _completed_json_as_stream_result(
+                            payload,
+                            api_format=LLM_API_FORMAT_RESPONSES,
+                            default_model=self._model,
+                        )
+                        if result.text:
+                            yield LLMStreamChunk(delta=result.text, model=result.model)
+                        yield LLMStreamChunk(
+                            model=result.model,
+                            input_tokens=result.input_tokens,
+                            output_tokens=result.output_tokens,
+                            done=True,
+                        )
+                        return
 
                     current_event = ""
                     async for line in resp.aiter_lines():

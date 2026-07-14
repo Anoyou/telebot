@@ -109,6 +109,9 @@ class FakeDB:
     async def get(self, *_args, **_kwargs):
         return None
 
+    async def execute(self, *_args, **_kwargs):
+        return SimpleNamespace(scalars=lambda: SimpleNamespace(first=lambda: None))
+
 
 def test_declared_config_actions_reads_schema_metadata() -> None:
     feature = SimpleNamespace(
@@ -403,6 +406,70 @@ async def test_create_plugin_config_action_job_writes_runtime_log_and_starts_tas
 
 
 @pytest.mark.asyncio
+async def test_create_plugin_config_action_job_rejects_duplicate_running_action() -> None:
+    existing = SimpleNamespace(job_id="pcaj_existing")
+
+    class _DB(FakeDB):
+        async def execute(self, *_args, **_kwargs):
+            return SimpleNamespace(scalars=lambda: SimpleNamespace(first=lambda: existing))
+
+    feature = SimpleNamespace(
+        key="ai_redpacket",
+        manifest={"config_actions": [{"key": "generate_question_bank", "title": "生成"}]},
+    )
+    with pytest.raises(plugin_config_actions.PluginConfigActionUnavailable, match="请先中断或终止"):
+        await create_plugin_config_action_job(
+            _DB(),
+            account=SimpleNamespace(id=7),
+            feature=feature,
+            action_key="generate_question_bank",
+            effective_config={},
+        )
+
+
+@pytest.mark.asyncio
+async def test_create_plugin_config_action_job_serializes_same_action_key(monkeypatch) -> None:
+    running = 0
+    maximum_running = 0
+
+    async def _create_locked(*_args, **_kwargs):
+        nonlocal running, maximum_running
+        running += 1
+        maximum_running = max(maximum_running, running)
+        await asyncio.sleep(0)
+        running -= 1
+        return SimpleNamespace(job_id=f"pcaj_{maximum_running}")
+
+    monkeypatch.setattr(
+        plugin_config_action_jobs,
+        "_create_plugin_config_action_job_locked",
+        _create_locked,
+    )
+    feature = SimpleNamespace(
+        key="ai_redpacket",
+        manifest={"config_actions": [{"key": "generate_question_bank", "title": "生成"}]},
+    )
+    kwargs = {
+        "account": SimpleNamespace(id=77),
+        "feature": feature,
+        "action_key": "generate_question_bank",
+        "effective_config": {},
+    }
+    try:
+        await asyncio.gather(
+            create_plugin_config_action_job(FakeDB(), **kwargs),
+            create_plugin_config_action_job(FakeDB(), **kwargs),
+        )
+    finally:
+        plugin_config_action_jobs._CREATE_LOCKS_BY_ACTION.pop(
+            (77, "ai_redpacket", "generate_question_bank"),
+            None,
+        )
+
+    assert maximum_running == 1
+
+
+@pytest.mark.asyncio
 async def test_startup_converges_stale_config_action_jobs(monkeypatch) -> None:
     jobs = [
         SimpleNamespace(
@@ -488,6 +555,111 @@ async def test_shutdown_cancels_and_awaits_owned_config_action_tasks(monkeypatch
     assert task.cancelled()
     assert task not in plugin_config_action_jobs._ACTIVE_TASKS or task.done()
     converge.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_pause_config_action_job_cancels_task_and_records_resumable_state(monkeypatch) -> None:
+    started = asyncio.Event()
+
+    async def _long_running() -> None:
+        started.set()
+        await asyncio.Event().wait()
+
+    task = asyncio.create_task(_long_running())
+    await started.wait()
+    job = SimpleNamespace(
+        job_id="pcaj_pause",
+        account_id=7,
+        plugin_key="ai_redpacket",
+        action_key="generate_question_bank",
+        status=plugin_config_action_jobs.STATUS_RUNNING,
+        message=None,
+        error_code=None,
+        error_message=None,
+        result={},
+        config_patch={},
+        created_at=None,
+        started_at=None,
+        ended_at=None,
+        updated_at=None,
+    )
+
+    class _DB:
+        def __init__(self):
+            self.commits = 0
+
+        async def refresh(self, _job):
+            return None
+
+        async def commit(self):
+            self.commits += 1
+
+    db = _DB()
+    monkeypatch.setattr(plugin_config_action_jobs, "_load_job", AsyncMock(return_value=job))
+    monkeypatch.setattr(plugin_config_action_jobs, "_load_job_logs", AsyncMock(return_value=[]))
+    write_log = AsyncMock()
+    monkeypatch.setattr(plugin_config_action_jobs, "_write_runtime_log", write_log)
+    plugin_config_action_jobs._ACTIVE_TASKS.add(task)
+    plugin_config_action_jobs._ACTIVE_TASKS_BY_JOB_ID[job.job_id] = task
+
+    response = await plugin_config_action_jobs.control_plugin_config_action_job(
+        db,
+        job.job_id,
+        action="pause",
+    )
+
+    assert task.cancelled()
+    assert response is not None
+    assert response.status == plugin_config_action_jobs.STATUS_PAUSED
+    assert response.error_code == "CONFIG_ACTION_PAUSED"
+    assert "继续" in (response.message or "")
+    assert db.commits == 1
+    write_log.assert_awaited_once()
+    plugin_config_action_jobs._ACTIVE_TASKS.discard(task)
+    plugin_config_action_jobs._ACTIVE_TASKS_BY_JOB_ID.pop(job.job_id, None)
+
+
+@pytest.mark.asyncio
+async def test_control_does_not_overwrite_job_that_just_succeeded(monkeypatch) -> None:
+    job = SimpleNamespace(
+        job_id="pcaj_finished_during_control",
+        account_id=7,
+        plugin_key="ai_redpacket",
+        action_key="generate_question_bank",
+        status=plugin_config_action_jobs.STATUS_RUNNING,
+        message=None,
+        error_code=None,
+        error_message=None,
+        result={},
+        config_patch={},
+        created_at=None,
+        started_at=None,
+        ended_at=None,
+        updated_at=None,
+    )
+
+    class _DB:
+        async def refresh(self, target):
+            target.status = plugin_config_action_jobs.STATUS_SUCCEEDED
+            target.message = "配置动作已完成"
+
+        async def commit(self):
+            raise AssertionError("已成功任务不应被控制请求覆盖")
+
+    monkeypatch.setattr(plugin_config_action_jobs, "_load_job", AsyncMock(return_value=job))
+    monkeypatch.setattr(plugin_config_action_jobs, "_load_job_logs", AsyncMock(return_value=[]))
+    write_log = AsyncMock()
+    monkeypatch.setattr(plugin_config_action_jobs, "_write_runtime_log", write_log)
+
+    response = await plugin_config_action_jobs.control_plugin_config_action_job(
+        _DB(),
+        job.job_id,
+        action="pause",
+    )
+
+    assert response is not None
+    assert response.status == plugin_config_action_jobs.STATUS_SUCCEEDED
+    write_log.assert_not_awaited()
 
 
 @pytest.mark.asyncio

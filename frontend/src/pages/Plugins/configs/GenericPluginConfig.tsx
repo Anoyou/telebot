@@ -12,8 +12,10 @@ import {
   Loader2,
   MessageSquare,
   Minus,
+  Pause,
   RotateCcw,
   Save,
+  Square,
   UserRound,
   X,
   XCircle,
@@ -23,6 +25,7 @@ import { toast } from "sonner";
 import { getAccount, listAccountFeatures, toggleAccountFeature } from "@/api/accounts";
 import { listLLMProviders } from "@/api/commands";
 import {
+  controlPluginConfigActionJob,
   getPluginConfigActionJob,
   getFeatureMatrix,
   getPluginGlobalConfig,
@@ -90,7 +93,7 @@ function directPassthroughConfig(config: Record<string, unknown>): Record<string
 }
 
 const EMPTY_CONFIG: Record<string, unknown> = {};
-const CONFIG_ACTION_TERMINAL_STATUSES = new Set(["succeeded", "failed"]);
+const CONFIG_ACTION_TERMINAL_STATUSES = new Set(["succeeded", "failed", "paused", "cancelled"]);
 
 function normalizeConfigActions(rawActions: unknown[]): ConfigAction[] {
   const seen = new Set<string>();
@@ -341,6 +344,24 @@ export function GenericPluginConfigPage() {
     },
   });
   const latestActionJob = recentActionJobsQ.data?.[0];
+  const controlActionJobMut = useMutation({
+    mutationFn: ({ jobId, action }: { jobId: string; action: "pause" | "cancel" }) =>
+      controlPluginConfigActionJob(jobId, action),
+    onSuccess: (job) => {
+      qc.setQueryData(["plugin-config-action-job", job.job_id], job);
+      qc.invalidateQueries({ queryKey: ["plugin-config-action-jobs", aid, featureKey] });
+      if (job.status === "paused") {
+        toast.success("任务已中断，阶段性结果已保留");
+      } else if (job.status === "cancelled") {
+        toast.success("任务已终止");
+      } else if (job.status === "succeeded") {
+        toast.success("任务已在控制请求生效前完成");
+      } else {
+        toast.error(job.error_message || job.message || "任务控制失败");
+      }
+    },
+    onError: (err) => toast.error(getErrMsg(err)),
+  });
 
   useEffect(() => {
     if (activeActionJob || !latestActionJob) return;
@@ -375,6 +396,9 @@ export function GenericPluginConfigPage() {
     } else if (job.status === "failed") {
       setFinalizedActionJobs((prev) => ({ ...prev, [job.job_id]: true }));
       toast.error(job.error_message || job.message || "配置动作失败");
+      qc.invalidateQueries({ queryKey: ["plugin-config-action-jobs", aid, featureKey] });
+    } else if (job.status === "paused" || job.status === "cancelled") {
+      setFinalizedActionJobs((prev) => ({ ...prev, [job.job_id]: true }));
       qc.invalidateQueries({ queryKey: ["plugin-config-action-jobs", aid, featureKey] });
     }
   }, [actionJobQ.data, finalizedActionJobs, schema, qc, aid, featureKey]);
@@ -716,6 +740,13 @@ export function GenericPluginConfigPage() {
           onMinimize={() => setActiveActionJob((prev) => prev ? { ...prev, minimized: true } : prev)}
           onRestore={() => setActiveActionJob((prev) => prev ? { ...prev, minimized: false } : prev)}
           onClose={() => setActiveActionJob((prev) => prev ? { ...prev, hidden: true } : prev)}
+          controlling={controlActionJobMut.isPending}
+          onPause={() => activeActionJob && controlActionJobMut.mutate({ jobId: activeActionJob.jobId, action: "pause" })}
+          onCancel={() => {
+            if (!activeActionJob) return;
+            if (!window.confirm("确定终止当前任务吗？已经保存的阶段性结果会保留。")) return;
+            controlActionJobMut.mutate({ jobId: activeActionJob.jobId, action: "cancel" });
+          }}
         />
       ) : null}
     </div>
@@ -801,6 +832,9 @@ function ConfigActionJobWindow({
   onMinimize,
   onRestore,
   onClose,
+  controlling,
+  onPause,
+  onCancel,
 }: {
   title: string;
   job?: PluginConfigActionJobStatus;
@@ -810,6 +844,9 @@ function ConfigActionJobWindow({
   onMinimize: () => void;
   onRestore: () => void;
   onClose: () => void;
+  controlling: boolean;
+  onPause: () => void;
+  onCancel: () => void;
 }) {
   const status = job?.status ?? "queued";
   const statusText = configActionJobStatusText(status);
@@ -870,11 +907,29 @@ function ConfigActionJobWindow({
         </div>
         <div className="flex flex-wrap items-center justify-between gap-2 border-t bg-background px-4 py-3">
           <div className="text-xs text-muted-foreground">
-            关闭窗口不会停止后台执行。
+            {status === "paused"
+              ? "阶段性结果已保留。关闭窗口后可切换 Provider 或模型，再点击继续生成。"
+              : status === "cancelled"
+                ? "任务已终止，已经落库的题目仍可使用。"
+                : "关闭窗口不会停止后台执行。"}
           </div>
-          <Button type="button" variant="outline" size="sm" className="border-primary/35 bg-primary/5 text-primary hover:bg-primary/10" onClick={onOpenLogs}>
-            查看日志
-          </Button>
+          <div className="flex flex-wrap items-center gap-2">
+            {!terminal ? (
+              <>
+                <Button type="button" variant="outline" size="sm" disabled={controlling} onClick={onPause}>
+                  {controlling ? <Loader2 className="h-4 w-4 animate-spin" /> : <Pause className="h-4 w-4" />}
+                  中断
+                </Button>
+                <Button type="button" variant="destructive" size="sm" disabled={controlling} onClick={onCancel}>
+                  <Square className="h-4 w-4" />
+                  终止
+                </Button>
+              </>
+            ) : null}
+            <Button type="button" variant="outline" size="sm" className="border-primary/35 bg-primary/5 text-primary hover:bg-primary/10" onClick={onOpenLogs}>
+              查看日志
+            </Button>
+          </div>
         </div>
       </div>
     </div>,
@@ -1072,6 +1127,8 @@ function configActionJobStatusText(status: string): string {
   if (status === "running") return "执行中";
   if (status === "succeeded") return "已完成";
   if (status === "failed") return "失败";
+  if (status === "paused") return "已中断";
+  if (status === "cancelled") return "已终止";
   return status || "未知";
 }
 
@@ -1087,12 +1144,15 @@ function configActionJobSummaryMessage(job: PluginConfigActionJobStatus): string
   }
   if (job.status === "succeeded") return "配置动作已完成，结果已写入配置。";
   if (job.status === "failed") return job.error_message || job.message || "配置动作失败";
+  if (job.status === "paused") return job.message || "配置动作已中断，可调整配置后继续执行。";
+  if (job.status === "cancelled") return job.message || "配置动作已终止。";
   return job.message || configActionJobStatusText(job.status);
 }
 
 function jobStatusBadgeVariant(status: string): "default" | "secondary" | "destructive" | "outline" | "success" {
   if (status === "succeeded") return "success";
   if (status === "failed") return "destructive";
+  if (status === "cancelled") return "destructive";
   if (status === "running") return "default";
   return "secondary";
 }
@@ -1100,6 +1160,8 @@ function jobStatusBadgeVariant(status: string): "default" | "secondary" | "destr
 function jobStatusIcon(status: string) {
   if (status === "succeeded") return <CheckCircle2 className="h-4 w-4 shrink-0 text-success" />;
   if (status === "failed") return <XCircle className="h-4 w-4 shrink-0 text-destructive" />;
+  if (status === "cancelled") return <Square className="h-4 w-4 shrink-0 text-destructive" />;
+  if (status === "paused") return <Pause className="h-4 w-4 shrink-0 text-warning" />;
   return <Clock3 className="h-4 w-4 shrink-0 text-muted-foreground" />;
 }
 
@@ -1155,12 +1217,19 @@ function buildConfigActionResultView(job?: PluginConfigActionJobStatus): ConfigA
       result?.empty_response,
   );
   if (!hasModelTestShape) {
-    const failed = job.status === "failed";
+    const failed = job.status === "failed" || job.status === "cancelled";
+    const paused = job.status === "paused";
     return {
       kind: "generic",
       title: "配置动作结果",
       statusLabel: configActionJobStatusText(job.status),
-      tone: !CONFIG_ACTION_TERMINAL_STATUSES.has(job.status) ? "running" : failed ? "error" : "success",
+      tone: !CONFIG_ACTION_TERMINAL_STATUSES.has(job.status)
+        ? "running"
+        : failed
+          ? "error"
+          : paused
+            ? "warning"
+            : "success",
       summary: configActionJobSummaryMessageWithoutResultView(job),
       testMessage: "",
       assistantMessage: "",
@@ -1260,6 +1329,8 @@ function buildConfigActionResultView(job?: PluginConfigActionJobStatus): ConfigA
 function configActionJobSummaryMessageWithoutResultView(job: PluginConfigActionJobStatus): string {
   if (job.status === "succeeded") return "配置动作已完成，结果已写入配置。";
   if (job.status === "failed") return job.error_message || job.message || "配置动作失败";
+  if (job.status === "paused") return job.message || "配置动作已中断，可调整配置后继续执行。";
+  if (job.status === "cancelled") return job.message || "配置动作已终止。";
   return job.message || configActionJobStatusText(job.status);
 }
 

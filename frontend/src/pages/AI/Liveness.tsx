@@ -20,8 +20,8 @@ import {
 import { toast } from "sonner";
 
 import {
-  chatTestProviderModels,
   listLLMProviders,
+  streamChatTestProviderModels,
 } from "@/api/commands";
 import type {
   ChatTestModelResult,
@@ -224,7 +224,7 @@ function ChatResponseBranch({
 
   const statusTone = result.pending ? undefined : result.ok ? "success" : "danger";
   const statusLabel = result.pending
-    ? "请求中"
+    ? result.streaming ? "流式回复中" : "请求中"
     : result.ok
       ? "正常"
       : result.empty_response
@@ -265,6 +265,13 @@ function ChatResponseBranch({
       </button>
 
       <div className="mt-2 flex flex-wrap gap-1.5">
+        {result.pending && result.streaming ? (
+          <MetaBadge tone="info">流式</MetaBadge>
+        ) : result.ok && result.streaming ? (
+          <MetaBadge tone="success">流式完成</MetaBadge>
+        ) : result.stream_fallback ? (
+          <MetaBadge tone="outline">已回退完整响应</MetaBadge>
+        ) : null}
         {result.effective_api_format ? (
           result.ok || result.pending ? (
             <MetaBadge tone="outline">协议 {protocolLabel(result.effective_api_format)}</MetaBadge>
@@ -296,16 +303,28 @@ function ChatResponseBranch({
       </div>
 
       {expanded && result.pending ? (
-        <div className="mt-3 flex items-center gap-2 text-sm text-muted-foreground">
-          <Loader2 className="h-4 w-4 animate-spin text-primary" />
-          正在等待上游返回
-        </div>
+        result.response ? (
+          <div className="mt-3 whitespace-pre-wrap break-words text-sm leading-7 text-foreground">
+            {result.response}
+            <span className="ml-0.5 inline-block h-4 w-0.5 translate-y-0.5 animate-pulse bg-primary" aria-hidden="true" />
+          </div>
+        ) : (
+          <div className="mt-3 flex items-center gap-2 text-sm text-muted-foreground">
+            <Loader2 className="h-4 w-4 animate-spin text-primary" />
+            正在等待上游返回首段内容
+          </div>
+        )
       ) : expanded && result.ok && result.response ? (
         <div className="mt-3 whitespace-pre-wrap break-words text-sm leading-7 text-foreground">
           {result.response}
         </div>
       ) : expanded && !result.ok ? (
         <>
+          {result.response ? (
+            <div className="mt-3 whitespace-pre-wrap break-words border-l-2 border-destructive/40 pl-3 text-sm leading-7 text-muted-foreground">
+              {result.response}
+            </div>
+          ) : null}
           <div className="mt-3 flex items-start gap-2 rounded-md bg-destructive/10 px-3 py-2 text-sm leading-6 text-destructive">
             <XCircle className="mt-0.5 h-4 w-4 shrink-0" />
             <span className="min-w-0 break-words">{result.error || "没有拿到可展示文本。"}</span>
@@ -478,6 +497,7 @@ export function LLMLivenessPage() {
     abortRef.current = null;
     if (!mountedRef.current) return;
     setRunning(false);
+    setRetryingModel(null);
     setRounds((current) =>
       current.map((round) => ({
         ...round,
@@ -532,14 +552,20 @@ export function LLMLivenessPage() {
     setHistories({});
   };
 
-  const updateRoundResult = (roundId: string, modelId: string, result: ChatDisplayResult) => {
+  const updateRoundResult = (
+    roundId: string,
+    modelId: string,
+    update: ChatDisplayResult | ((current: ChatDisplayResult) => ChatDisplayResult),
+  ) => {
     setRounds((current) =>
       current.map((round) =>
         round.id === roundId
           ? {
               ...round,
               results: round.results.map((item) =>
-                item.requested_model === modelId ? result : item,
+                item.requested_model === modelId
+                  ? typeof update === "function" ? update(item) : update
+                  : item,
               ),
             }
           : round,
@@ -597,58 +623,67 @@ export function LLMLivenessPage() {
     });
 
     try {
-      await Promise.all(
-        modelsToTest.map(async (modelId) => {
-          try {
-            const response = await chatTestProviderModels(
-              provider.id,
-              {
-                models: [modelId],
-                message: text,
-                history: historiesForRequest[modelId] || [],
-                system_prompt: systemPrompt.trim() || DEFAULT_SYSTEM_PROMPT,
-                max_tokens: maxTokens,
-                timeout_seconds: timeoutSeconds,
-              },
-              { signal: controller.signal },
-            );
-            if (controller.signal.aborted) return;
-            const result = response.results[0] || {
-              ok: false,
-              requested_model: modelId,
-              latency_ms: 0,
-              input_tokens: 0,
-              output_tokens: 0,
-              empty_response: true,
-              error: "后端没有返回该模型的测活结果。",
-            };
-            updateRoundResult(roundId, modelId, result);
-            if (result.ok && result.response) {
-              setHistories((current) => {
-                const key = `${provider.id}:${modelId}`;
-                return {
-                  ...current,
-                  [key]: [
-                    ...(current[key] || []),
-                    { role: "assistant", content: result.response },
-                  ].slice(-16) as ChatTestTurn[],
-                };
-              });
-            }
-          } catch (error) {
-            if (controller.signal.aborted) return;
-            updateRoundResult(roundId, modelId, {
-              ok: false,
-              requested_model: modelId,
-              latency_ms: 0,
-              input_tokens: 0,
-              output_tokens: 0,
-              empty_response: false,
-              error: getErrMsg(error),
+      await streamChatTestProviderModels(
+        provider.id,
+        {
+          models: modelsToTest,
+          message: text,
+          history_by_model: historiesForRequest,
+          system_prompt: systemPrompt.trim() || DEFAULT_SYSTEM_PROMPT,
+          max_tokens: maxTokens,
+          timeout_seconds: timeoutSeconds,
+        },
+        (event) => {
+          if (controller.signal.aborted) return;
+          const modelId = event.requested_model;
+          if (event.type === "start") {
+            updateRoundResult(roundId, modelId, (current) => ({
+              ...current,
+              pending: true,
+              streaming: true,
+              effective_api_format: event.effective_api_format,
+              client_identity_profile: event.client_identity_profile,
+            }));
+            return;
+          }
+          if (event.type === "delta") {
+            updateRoundResult(roundId, modelId, (current) => ({
+              ...current,
+              pending: true,
+              streaming: true,
+              model: event.model || current.model,
+              response: `${current.response || ""}${event.delta}`,
+            }));
+            return;
+          }
+          const result = event.result;
+          updateRoundResult(roundId, modelId, result);
+          if (event.type === "done" && result.ok && result.response) {
+            setHistories((current) => {
+              const key = `${provider.id}:${modelId}`;
+              return {
+                ...current,
+                [key]: [
+                  ...(current[key] || []),
+                  { role: "assistant", content: result.response as string },
+                ].slice(-16) as ChatTestTurn[],
+              };
             });
           }
-        }),
+        },
+        { signal: controller.signal },
       );
+    } catch (error) {
+      if (!controller.signal.aborted) {
+        for (const modelId of modelsToTest) {
+          updateRoundResult(roundId, modelId, (current) => current.pending ? {
+            ...current,
+            pending: false,
+            ok: false,
+            error: getErrMsg(error),
+          } : current);
+        }
+      }
     } finally {
       if (abortRef.current === controller) {
         abortRef.current = null;
@@ -665,6 +700,8 @@ export function LLMLivenessPage() {
   ) => {
     const round = rounds.find((item) => item.id === roundId);
     if (!round || busy) return;
+    const controller = new AbortController();
+    abortRef.current = controller;
     setRetryingModel(modelId);
     updateRoundResult(roundId, modelId, {
       ok: false,
@@ -678,39 +715,59 @@ export function LLMLivenessPage() {
       client_identity_profile: identity,
     });
     try {
-      const response = await chatTestProviderModels(round.providerId, {
-        models: [modelId],
-        message: round.message,
-        history: round.histories[modelId] || [],
-        system_prompt: systemPrompt.trim() || DEFAULT_SYSTEM_PROMPT,
-        max_tokens: maxTokens,
-        timeout_seconds: timeoutSeconds,
-        api_format_override: apiFormat,
-        client_identity_profile_override: identity,
-      });
-      const result = response.results[0] || {
-        ok: false,
-        requested_model: modelId,
-        latency_ms: 0,
-        input_tokens: 0,
-        output_tokens: 0,
-        empty_response: true,
-        error: "后端没有返回该模型的测活结果。",
-      };
-      updateRoundResult(roundId, modelId, result);
-      const isLatestRound = !rounds.some((item) => item.createdAt > round.createdAt);
-      if (isLatestRound && result.ok && result.response) {
-        const key = `${round.providerId}:${modelId}`;
-        setHistories((current) => ({
-          ...current,
-          [key]: [
-            ...(round.histories[modelId] || []),
-            { role: "user", content: round.message },
-            { role: "assistant", content: result.response as string },
-          ].slice(-16) as ChatTestTurn[],
-        }));
-      }
+      await streamChatTestProviderModels(
+        round.providerId,
+        {
+          models: [modelId],
+          message: round.message,
+          history: round.histories[modelId] || [],
+          system_prompt: systemPrompt.trim() || DEFAULT_SYSTEM_PROMPT,
+          max_tokens: maxTokens,
+          timeout_seconds: timeoutSeconds,
+          api_format_override: apiFormat,
+          client_identity_profile_override: identity,
+        },
+        (event) => {
+          if (controller.signal.aborted || !mountedRef.current) return;
+          if (event.type === "start") {
+            updateRoundResult(roundId, modelId, (current) => ({
+              ...current,
+              pending: true,
+              streaming: true,
+              effective_api_format: event.effective_api_format,
+              client_identity_profile: event.client_identity_profile,
+            }));
+            return;
+          }
+          if (event.type === "delta") {
+            updateRoundResult(roundId, modelId, (current) => ({
+              ...current,
+              pending: true,
+              streaming: true,
+              model: event.model || current.model,
+              response: `${current.response || ""}${event.delta}`,
+            }));
+            return;
+          }
+          const result = event.result;
+          updateRoundResult(roundId, modelId, result);
+          const isLatestRound = !rounds.some((item) => item.createdAt > round.createdAt);
+          if (event.type === "done" && isLatestRound && result.ok && result.response) {
+            const key = `${round.providerId}:${modelId}`;
+            setHistories((current) => ({
+              ...current,
+              [key]: [
+                ...(round.histories[modelId] || []),
+                { role: "user", content: round.message },
+                { role: "assistant", content: result.response as string },
+              ].slice(-16) as ChatTestTurn[],
+            }));
+          }
+        },
+        { signal: controller.signal },
+      );
     } catch (error) {
+      if (controller.signal.aborted) return;
       updateRoundResult(roundId, modelId, {
         ok: false,
         requested_model: modelId,
@@ -723,7 +780,8 @@ export function LLMLivenessPage() {
         client_identity_profile: identity,
       });
     } finally {
-      setRetryingModel(null);
+      if (abortRef.current === controller) abortRef.current = null;
+      if (mountedRef.current) setRetryingModel(null);
     }
   };
 
@@ -1172,11 +1230,12 @@ export function LLMLivenessPage() {
                   <Button
                     type="button"
                     className="h-11 w-11 shrink-0 p-0"
-                    disabled={busy || !message.trim() || selectedModels.length === 0}
-                    onClick={() => void sendTest()}
+                    variant={busy ? "outline" : "default"}
+                    disabled={!busy && (!message.trim() || selectedModels.length === 0)}
+                    onClick={() => busy ? abortInFlight() : void sendTest()}
                   >
-                    {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
-                    <span className="sr-only">发送测试消息</span>
+                    {busy ? <X className="h-4 w-4" /> : <Send className="h-4 w-4" />}
+                    <span className="sr-only">{busy ? "取消测活请求" : "发送测试消息"}</span>
                   </Button>
                 </div>
                 <div className="mt-1.5 flex items-center justify-between gap-2 px-1 text-[10px] text-muted-foreground">
