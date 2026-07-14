@@ -114,6 +114,8 @@ token，但服务端 TTL 和 Redis 删除让窗口更短，也便于主动作废
 
 Web 登录密码失败达到阈值后，下一次正确密码不会直接签发 cookie，而是先通过已启用的通知 Bot 发送 6 位登录验证码。通知 Bot 不可用、Telegram 不通或 TOTP 无法使用时，管理员可以 SSH 到服务器生成一次性恢复码。
 
+通知 Bot 是单向发送路由，不会接收命令或启动 `getUpdates`。路由名 `default` 承接启动通知与登录验证码，`alert` 可单独承接账号 Worker 连续崩溃告警；未配置 `alert` 时，告警会回退到 `default` 或首条已启用路由。`默认接收 Chat ID` 填通知目标，私聊用户通常是正数，群聊是负数，超级群或频道通常以 `-100` 开头。通知路由既可保存独立 Bot Token，也可引用某个账号已配置的管理 Bot Token；引用只复用加密凭据发送消息，不会创建第二个 polling 消费者。
+
 ```bash
 # 本地/开发环境
 make auth-recovery

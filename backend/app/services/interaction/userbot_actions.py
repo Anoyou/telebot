@@ -90,6 +90,8 @@ async def execute_userbot_interaction_action(
         ActionKind.UNSUPPORTED,
     }:
         raise ValueError(f"不支持的交互动作: {action_type}")
+    if kind == ActionKind.SEND_RICH_MESSAGE:
+        raise ValueError("rich_message_requires_interaction_bot")
 
     try:
         chat_id = int(payload["chat_id"])

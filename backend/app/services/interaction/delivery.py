@@ -262,6 +262,14 @@ class InteractionDeliveryExecutor:
             )
             return True
 
+        async def _on_send_rich_message(action: dict[str, Any]) -> bool:
+            await self._record_settlement(action)
+            replace_holder["id"] = await self._apply_send_rich_message(
+                action,
+                replace_message_id=replace_holder["id"],
+            )
+            return True
+
         async def _on_send_media(action: dict[str, Any]) -> bool:
             await self._record_settlement(action)
             raw_reply_markup = action.get("reply_markup")
@@ -325,6 +333,7 @@ class InteractionDeliveryExecutor:
             on_settlement=_on_settlement,
             on_payout=_on_payout,
             on_send_message=_on_send_message,
+            on_send_rich_message=_on_send_rich_message,
             on_send_media=_on_send_media,
             on_edit_message=_on_edit_message,
             on_edit_caption=_on_edit_caption,
@@ -1075,6 +1084,144 @@ class InteractionDeliveryExecutor:
                     "chat_id": chat_id,
                     "send_via": used_send_via,
                     "context": action.get("context"),
+                }
+            )
+        return replace_message_id
+
+    async def _apply_send_rich_message(
+        self,
+        action: dict[str, Any],
+        *,
+        replace_message_id: int | None,
+    ) -> int | None:
+        rich_message = action.get("rich_message")
+        if not isinstance(rich_message, dict):
+            await record_action(
+                action.get("context"),
+                action,
+                TRACE_STATUS_FAILED,
+                error_code="invalid_rich_message",
+                error="send_rich_message rich_message must be an object",
+            )
+            return replace_message_id
+        chat_id = _int_or_none(action.get("chat_id"))
+        target_chat_id = self._target_chat_id(chat_id)
+        if target_chat_id is None:
+            await record_action(
+                action.get("context"),
+                action,
+                TRACE_STATUS_FAILED,
+                error_code="scope_not_matched",
+                error="target chat_id missing",
+            )
+            return replace_message_id
+        send_via_options = action_send_via_options(action)
+        if self._dry_run_enabled(action):
+            await self._record_dry_run(
+                action,
+                channel=send_via_options[0] if send_via_options else "interaction_bot",
+                result={
+                    "dry_run": True,
+                    "chat_id": target_chat_id,
+                    "rich_message": rich_message,
+                    "send_via_options": send_via_options,
+                },
+            )
+            return replace_message_id
+
+        reply_to_message_id = _int_or_none(action.get("reply_to_message_id"))
+        reply_markup = action.get("reply_markup") if isinstance(action.get("reply_markup"), dict) else None
+        last_result: dict[str, Any] = {
+            "error": "send_rich_message only supports interaction_bot",
+            "error_code": "rich_message_requires_interaction_bot",
+        }
+        used_send_via = send_via_options[0] if send_via_options else "interaction_bot"
+        ok = False
+        for send_via in send_via_options:
+            used_send_via = send_via
+            if send_via != "interaction_bot":
+                continue
+            token = await self._resolve_token(send_via)
+            if not token:
+                last_result = {
+                    "error": "interaction bot token unavailable",
+                    "error_code": "bot_token_missing",
+                }
+                continue
+            try:
+                last_result = await account_bot_service.send_rich_message(
+                    token,
+                    target_chat_id,
+                    rich_message,
+                    reply_to_message_id=reply_to_message_id,
+                    reply_markup=reply_markup,
+                )
+                ok = True
+                break
+            except ValueError as exc:
+                last_result = {
+                    "error": str(exc),
+                    "error_code": "invalid_rich_message",
+                }
+                break
+            except Exception as exc:  # noqa: BLE001
+                last_result = {
+                    "error": str(exc),
+                    "error_code": "telegram_api_error",
+                }
+
+        context = action.get("context") if isinstance(action.get("context"), dict) else None
+        await record_action(
+            context,
+            action,
+            TRACE_STATUS_OK if ok else TRACE_STATUS_FAILED,
+            actual_send_via=used_send_via,
+            result=last_result,
+            error_code=None if ok else _result_error_code(last_result, "action_failed"),
+            error=None if ok else last_result.get("error"),
+        )
+        await self._emit_action_tap(
+            action,
+            ACTION_EVENT_STATUS_OK if ok else ACTION_EVENT_STATUS_FAILED,
+            channel=used_send_via,
+            error_code=None if ok else _result_error_code(last_result, "action_failed"),
+            error=None if ok else last_result.get("error"),
+            result=last_result,
+        )
+        if not ok:
+            await self.write_log(
+                self.incoming,
+                "warn",
+                "interaction rich message delivery failed",
+                send_via=used_send_via,
+                error=last_result.get("error"),
+                **self.log_context(self.incoming),
+            )
+            return replace_message_id
+
+        save_key = namespaced_action_save_message_id_key(
+            self.incoming.account_id,
+            action.get("save_message_id_key"),
+        )
+        message_id = delivery_message_id(last_result)
+        if save_key and message_id is not None:
+            await self.get_redis_client().set(save_key, str(message_id), ex=7200)
+        if replace_message_id is not None:
+            await self.delete_message(
+                replace_message_id,
+                chat_id=self.incoming.chat_id,
+                context=context,
+                record=True,
+            )
+            replace_message_id = None
+        if action.get("pin") and message_id is not None:
+            await self._apply_pin_message(
+                {
+                    "type": "pin_message",
+                    "message_id": message_id,
+                    "chat_id": chat_id,
+                    "send_via": "interaction_bot",
+                    "context": context,
                 }
             )
         return replace_message_id

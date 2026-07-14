@@ -1401,6 +1401,10 @@ def _interaction_action_error_code(error: Any) -> str:
     text = str(error or "").strip().lower()
     if not text:
         return "action_failed"
+    if "rich_message_requires_interaction_bot" in text:
+        return "rich_message_requires_interaction_bot"
+    if "invalid_rich_message" in text:
+        return "invalid_rich_message"
     if "payout" in text and ("上限" in text or "limit" in text or "exceed" in text):
         return "payout_limit_exceeded"
     if text.startswith("rate_limited") or "rate_limited" in text or "local_fallback" in text:

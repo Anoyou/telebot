@@ -22,6 +22,19 @@
 
 暂无已记录变更。
 
+## [0.60.0] — 2026-07-15 · minor（次版本） · Bot 原生富消息与通知路由
+
+### Added
+- 插件 MessageOps 新增 `ctx.messages.send_rich()` 和标准 `send_rich_message` action，可通过 Interaction Bot 发送 Telegram Bot API 10.2 原生 Rich Message，支持标题、任务列表、折叠详情、表格、Markdown/HTML/blocks、回复、按钮、置顶与消息 ID 保存。
+
+### Changed
+- 原生 Rich Message 固定路由到 Interaction Bot；UserBot-only 请求会以 `rich_message_requires_interaction_bot` 明确失败，不静默降级。插件开发文档、权限推导、动作校验、Trace 与双执行器回归覆盖同步更新。
+- 账号 Bot 的首页、帮助、状态、功能、插件、命令模板、规则和运行日志页面已直接采用原生标题、任务列表、折叠详情与表格；运行告警和 Worker 停止通知也优先发送 Rich Message，并在 Bot API 不支持或格式发送失败时回退到原有 HTML 消息。
+- 通知 Bot 配置改为清晰的“通知路由”：说明启动、登录验证码与 Worker 崩溃告警三类用途，支持安全引用账号管理 Bot 的已加密 Token，并用页面弹窗可靠修改接收 Chat ID；未配置专用 `alert` 路由时，告警回退到 `default` 或首条已启用路由。
+- 账号管理 Bot 页面补全 `/help` 与远程插件安装、更新、卸载命令，并为每个远程插件高风险开关增加中文用途说明。
+- 工作台侧边栏调整为“概览、插件、AI、交互、资金台账、入站 Webhook、命中调试、日志、系统”的任务顺序。
+- 窄屏与 PWA 模式恢复标题卡片和顶栏之间的 16px 全局留白，并进一步降低顶栏与底部导航的玻璃底色不透明度。
+
 ## [0.59.6] — 2026-07-15 · patch（补丁版本） · 资金台账失败记录纠正
 
 ### Fixed

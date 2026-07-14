@@ -408,6 +408,25 @@ async def test_run_interaction_userbot_action_payout_uses_rate_limit_and_parse_m
 
 
 @pytest.mark.asyncio
+async def test_run_interaction_userbot_action_rejects_native_rich_message() -> None:
+    from app.worker import runtime as runtime_mod
+
+    with pytest.raises(ValueError, match="rich_message_requires_interaction_bot") as exc_info:
+        await runtime_mod._run_interaction_userbot_action(
+            AsyncMock(),
+            {
+                "action_type": "send_rich_message",
+                "chat_id": -100333,
+                "rich_message": {"html": "<h1>状态</h1>"},
+            },
+        )
+    assert (
+        runtime_mod._interaction_action_error_code(str(exc_info.value))
+        == "rich_message_requires_interaction_bot"
+    )
+
+
+@pytest.mark.asyncio
 async def test_acquire_userbot_rate_limit_falls_back_to_local_bucket(monkeypatch):
     from app.worker import command as command_mod
 

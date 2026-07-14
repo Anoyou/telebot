@@ -670,6 +670,46 @@ return [
 
 默认 `send_message` 类动作按 `parse_mode="plain"` 发送；只有显式写 `parse_mode="html"` 时才启用 HTML。HTML 内容应先用 `app.worker.plugins.textutil.html_escape()` 或等价工具转义，再把标签手动拼好。
 
+#### 原生 Rich Message
+
+需要标题、任务列表、折叠详情、表格等 Telegram 原生结构时，使用 Bot API Rich Message，而不是把普通 `send_message` 的 HTML 当成同一种格式：
+
+```python
+await ctx.messages.send_rich(
+    chat_id=event.message.chat_id,
+    html=(
+        "<h1>巡检结果</h1>"
+        "<ul>"
+        '<li><input type="checkbox" checked>数据库正常</li>'
+        '<li><input type="checkbox">等待人工复核</li>'
+        "</ul>"
+        "<details><summary>失败详情</summary><p>上游返回 429</p></details>"
+        "<table bordered striped>"
+        "<tr><th>模型</th><th>状态</th></tr>"
+        "<tr><td>grok-4</td><td>正常</td></tr>"
+        "</table>"
+    ),
+    reply_to_message_id=event.message.message_id,
+    save_message_id_key="latest_health_report",
+)
+```
+
+`ctx.messages.send_rich()` 必须且只能提供 `html`、`markdown`、`blocks` 其中一个；也可附带 `media`、`is_rtl`、`skip_entity_detection`、`reply_markup`、`save_message_id_key` 和 `pin`。动态文本嵌入 `html` 前仍要转义。对应标准 action 为：
+
+```python
+return [{
+    "type": "send_rich_message",
+    "chat_id": event.message.chat_id,
+    "rich_message": {
+        "markdown": "# 巡检结果\n\n- [x] 数据库正常\n- [ ] 等待人工复核",
+    },
+}]
+```
+
+Rich Message 是 Telegram Bot API 10.2 的 Bot 专属能力。TelePilot 始终通过 `interaction_bot` 执行：即使当前是 UserBot 命令会话，省略通道也会切到 Interaction Bot；显式指定 `userbot_reply` 会以 `rich_message_requires_interaction_bot` 拒绝，不做静默降级。Telegram 的原生限制为 32768 个 UTF-8 字符、500 个结构块、16 层嵌套、50 个媒体附件、表格最多 20 列；TelePilot 会先做结构和 JSON 安全检查，最终格式解析仍以 [Telegram Rich Message 文档](https://core.telegram.org/bots/api#rich-message-formatting-options) 为准。
+
+插件 action 的失败语义保持严格，不会自动改成普通消息。只有 TelePilot 自己拥有的账号 Bot 移动控制页和系统告警采用“同一个 Bot 先发 Rich Message，Bot API 拒绝时回退原有 HTML”的兼容策略；这个内部回退不会切换到 UserBot，也不会改变插件 action 的契约。
+
 会话内状态更新示例：
 
 ```python
@@ -812,6 +852,7 @@ userbot 会话里的 `reply_markup` 不会直接丢掉：
 | `contract_warning` / `contract_failed` | 插件越声明调用被告警放行，或请求客观不可执行能力 |
 | `action_limit_exceeded` | 插件返回的动作超出平台允许数量，后续动作被截断并写入可见告警 |
 | `send_channel_deprecated` / `unsupported_send_via` | 请求旧 `notice` 通道或未知通道 |
+| `rich_message_requires_interaction_bot` / `invalid_rich_message` | 原生 Rich Message 被要求走 UserBot，或内容结构未通过校验 |
 | `bot_not_configured` / `bot_token_missing` / `userbot_offline` | 交互 Bot 未配置、Bot token 缺失或 UserBot 离线 |
 | `settlement_requires_userbot` / `telegram_api_error` | 普通 Bot 请求钱相关能力，或 Telegram API 返回失败 |
 | `trace_write_failed` | Trace 写库失败，平台已降级写入旧 runtime log |
@@ -1081,6 +1122,9 @@ class GuessNumberPlugin(Plugin):
 | `send_message` | `reply_markup` | 可选，Bot API inline keyboard；只会透传给 `interaction_bot`，`userbot_reply` 不承接按钮 |
 | `send_message` | `save_message_id_key` | 可选；发送成功后把本次 Telegram `message_id` 按 key 保存 2 小时，供后续编辑、删除或替换使用 |
 | `send_message` | `replace_saved_message_id_key` | 可选；发送新消息并保存新 `message_id` 后，读取该 key 原来的消息 ID 并删除旧消息，适合“只保留最新一条”的滚动通知 |
+| `send_rich_message` | `rich_message` | Telegram 原生 Rich Message；对象中必须且只能提供 `html`、`markdown`、`blocks` 之一，可表达标题、任务列表、表格、折叠详情、公式和媒体块 |
+| `send_rich_message` | `reply_to_message_id`、`reply_markup`、`save_message_id_key`、`pin` | 可选；回复、按钮、保存消息 ID 和发送后置顶均由 Interaction Bot 执行 |
+| `send_rich_message` | `send_via` | 可省略，平台固定选择 `interaction_bot`；显式只选 `userbot_reply` 会以 `rich_message_requires_interaction_bot` 拒绝 |
 | `send_photo` / `send_file` | `photo_base64` / `file_base64` | 按动作通道发送图片/文件字节；交互 Bot 下 `send_photo` 走 `sendPhoto`，`send_file` 走 `sendDocument` |
 | `send_photo` / `send_file` | `filename`、`caption`、`reply_to_message_id` | 可选，文件名、说明文字、回复目标 |
 | `send_photo` / `send_file` | `save_message_id_key` | 可选；媒体发送成功后把 Telegram `message_id` 按 key 保存 2 小时，供后续 `edit_caption`、删除或替换使用 |
@@ -1093,7 +1137,7 @@ class GuessNumberPlugin(Plugin):
 | `payout` | `amount`、`text`、`reply_to_message_id`、`reply_to_user_id`、`reply_to_search_limit`、`reply_anchor_missing_text` | UserBot 发奖动作；有消息 ID 时直接回复，否则可按用户 ID 查找近期发言作为锚点。超限拒（`error_code=payout_limit_exceeded`），瞬时失败自动进补偿队列重发，插件无需自己重试（见上文 payout 语义） |
 | `end_session` | 无 | 本次入口处理完成后不保留交互会话，适合彩票、红包等长期轮回插件 |
 
-通道原则是：**触发方式决定会话通道，插件默认不感知通道，框架负责路由和执行**。命令触发的会话收发全走 userbot，关键词/付款/按钮触发的会话收发全走交互 Bot；唯一例外是 `payout`、收款确认和发奖等钱相关动作，物理上只有 userbot 能做，永远路由给 userbot。插件只有在跨通道公告、特殊管理提示或迁移桥兼容时才显式写 `send_via`：
+通道原则是：**触发方式决定会话通道，插件默认不感知通道，框架负责路由和执行**。命令触发的普通会话收发走 userbot，关键词/付款/按钮触发的普通会话收发走交互 Bot。能力固定路由有两个例外：`payout`、收款确认和发奖等钱相关动作永远走 userbot；`send_rich_message` 永远走 Interaction Bot。其他动作只有在跨通道公告、特殊管理提示或迁移桥兼容时才显式写 `send_via`：
 
 | send_via | 含义 | 约束 |
 | --- | --- | --- |
@@ -1109,6 +1153,10 @@ class GuessNumberPlugin(Plugin):
 await ctx.messages.send(
     text="题面或回复内容",
     reply_to_message_id=event_from_interaction_payload(payload).message.message_id,
+)
+
+await ctx.messages.send_rich(
+    html="<h1>任务状态</h1><ul><li><input type=\"checkbox\" checked>已完成</li></ul>",
 )
 
 await ctx.messages.send(
@@ -1129,7 +1177,7 @@ await ctx.messages.edit_caption(
 )
 ```
 
-推荐迁移路径：旧插件继续返回 `list[dict]` 标准动作可以兼容；新插件或重构插件优先调用 `ctx.messages.send/send_photo/send_file/edit/edit_caption/delete/pin/answer_callback`。`ctx.messages` 只缓存动作，不会暴露 Bot Token，也不会直接调用 Telegram API。
+推荐迁移路径：旧插件继续返回 `list[dict]` 标准动作可以兼容；新插件或重构插件优先调用 `ctx.messages.send/send_rich/send_photo/send_file/edit/edit_caption/delete/pin/answer_callback`。`ctx.messages` 只缓存动作，不会暴露 Bot Token，也不会直接调用 Telegram API。
 
 框架层源码位于 `backend/app/services/interaction/`：`contracts.py` 负责记录 `result_contract` 告警与旧通道失败，`delivery.py` 负责受控发送、编辑、删除、置顶、按钮 ACK、媒体发送和 message_id 保存。
 
@@ -1144,6 +1192,8 @@ Contract Guard 不是公共插件市场式硬沙箱，而是个人可信插件�
 | `send_via` 同时包含受控通道和旧 `notice` / `bbot_notice` / `notice_bot` | 整个动作记录 `guard_level=failed`，返回 `send_channel_deprecated`，不做自动改写 |
 | `send_via` 只包含未知值 | 记录 `guard_level=failed`，返回不可执行失败和迁移提示 |
 | `send_via` 同时包含受控通道和非旧未知值 | 记录 `guard_level=warning`，保留可执行受控通道并继续执行 |
+| `send_rich_message` 未指定通道或使用 `auto` | 固定或收窄到 `interaction_bot`；不会交给 UserBot |
+| `send_rich_message` 只指定 `userbot_reply` | 记录 `guard_level=failed`，返回 `rich_message_requires_interaction_bot` |
 | 交互 Bot token 缺失、UserBot worker 离线、Telegram API 失败 | 返回客观能力失败，不伪装成功 |
 
 #### 标准事件信封

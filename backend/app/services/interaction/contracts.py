@@ -9,6 +9,7 @@ from ..event_bus import EVENT_REASON_CODES
 
 INTERACTION_SEND_VIA = {"interaction_bot", "userbot_reply"}
 INTERACTION_BUTTON_CHANNELS = {"interaction_bot"}
+INTERACTION_RICH_MESSAGE_CHANNELS = {"interaction_bot"}
 TRUSTED_DEFAULT_SEND_VIA = ("interaction_bot", "userbot_reply")
 DEPRECATED_SEND_VIA = {"notice", "bbot_notice", "notice_bot"}
 SEND_CHANNEL_DEPRECATED_REASON_CODE = "send_channel_deprecated"
@@ -216,9 +217,26 @@ async def guard_interaction_actions(
                 allowed_actions=sorted(allowed_actions),
                 **context,
             )
-        if action_type in {"send_message", "send_photo", "send_file", "edit_message", "edit_caption", "delete_message", "pin_message"}:
+        if action_type in {
+            "send_message",
+            "send_rich_message",
+            "send_photo",
+            "send_file",
+            "edit_message",
+            "edit_caption",
+            "delete_message",
+            "pin_message",
+        }:
             requested_raw = action_send_via_raw_selector(action)
-            requested_send_via = action_send_via_options(action) if explicit_selector else [normalized_session_channel]
+            requested_send_via = (
+                action_send_via_options(action)
+                if explicit_selector
+                else [
+                    "interaction_bot"
+                    if action_type == "send_rich_message"
+                    else normalized_session_channel
+                ]
+            )
             unsupported_send_via = unsupported_send_via_values(requested_raw)
             deprecated_send_via = [item for item in unsupported_send_via if item in DEPRECATED_SEND_VIA]
             if deprecated_send_via:
@@ -267,6 +285,31 @@ async def guard_interaction_actions(
                 )
                 continue
             send_via_options = list(requested_send_via)
+            if action_type == "send_rich_message":
+                rich_channels = [
+                    item for item in send_via_options if item in INTERACTION_RICH_MESSAGE_CHANNELS
+                ]
+                if not rich_channels:
+                    await write_log(
+                        "warn",
+                        "interaction rich message requires Interaction Bot",
+                        guard_level="failed",
+                        reason_code="rich_message_requires_interaction_bot",
+                        action_type=action_type,
+                        send_via=send_via_options,
+                        **context,
+                    )
+                    continue
+                if rich_channels != send_via_options:
+                    await write_log(
+                        "info",
+                        "interaction rich message send_via narrowed to Interaction Bot",
+                        action_type=action_type,
+                        send_via=send_via_options,
+                        narrowed_send_via=rich_channels,
+                        **context,
+                    )
+                send_via_options = rich_channels
             undeclared_send_via = [item for item in send_via_options if item not in allowed_send_via]
             if undeclared_send_via:
                 await write_log(
@@ -324,6 +367,7 @@ def _entry_result_contract(
 
 __all__ = [
     "INTERACTION_BUTTON_CHANNELS",
+    "INTERACTION_RICH_MESSAGE_CHANNELS",
     "INTERACTION_SEND_VIA",
     "INTERACTION_SEND_VIA_ALIASES",
     "SEND_CHANNEL_DEPRECATED_REASON_CODE",

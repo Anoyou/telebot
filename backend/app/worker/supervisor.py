@@ -852,6 +852,16 @@ async def _monitor_loop() -> None:
                             aid,
                             f"⚠️ <b>账号 worker 已停止</b>\n账号：<code>{aid}</code>\n"
                             f"连续失败：<code>{h.fail_count}</code> 次，状态已置为 dead。",
+                            rich_html=(
+                                "<h1>⚠️ 账号 Worker 已停止</h1>"
+                                "<table bordered>"
+                                f"<tr><th>账号</th><td><code>{aid}</code></td></tr>"
+                                f"<tr><th>连续失败</th><td>{h.fail_count} 次</td></tr>"
+                                "<tr><th>当前状态</th><td><code>dead</code></td></tr>"
+                                "</table>"
+                                "<details open><summary>处理建议</summary>"
+                                "<p>检查最近运行日志与登录状态，修复后再恢复账号。</p></details>"
+                            ),
                         )
                     except Exception:
                         log.exception("发送 account bot dead 告警失败: aid=%d", aid)

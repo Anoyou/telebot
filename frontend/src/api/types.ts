@@ -1758,13 +1758,16 @@ export interface NotifyBotOut {
   default_chat_id: number;
   enabled: boolean;
   has_token: boolean;
+  credential_source: "direct" | "account_bot";
+  source_account_id?: number | null;
   created_at: string;
   updated_at: string;
 }
 
 export interface NotifyBotCreate {
   name: string;
-  bot_token: string;
+  bot_token?: string | null;
+  source_account_id?: number | null;
   default_chat_id: number;
   enabled?: boolean;
 }
@@ -1775,6 +1778,7 @@ export interface NotifyBotUpdate {
   enabled?: boolean;
   bot_token?: string;
   clear_token?: boolean;
+  source_account_id?: number | null;
 }
 
 export interface NotifyBotTestRequest {

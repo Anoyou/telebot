@@ -8,7 +8,7 @@
 | userbot 命令会话 | UserBot 前缀命令触发，进入标准事件信封 | 后续收发默认都走 userbot | 管理员命令、账号身份动作、需要沿用当前账号上下文的流程 |
 | interaction bot 规则会话 | 关键词、付款确认、按钮回调触发，进入标准事件信封 | 后续收发默认都走 interaction bot | 高频群内互动、按钮、题面、普通会话提示 |
 
-唯一例外：`payout`、收付款、发奖永远由 userbot 执行，不随会话通道切到 interaction bot。
+能力固定路由有两个例外：`payout`、收付款、发奖永远由 userbot 执行；Bot API 原生 `send_rich_message` 永远由 interaction bot 执行。两者都不会为了迁就当前会话通道而静默降级。
 
 Event Bus、Trace、MessageOps 是标准链路的内部契约：Event Bus 负责把标准事件投递给插件，Trace 负责记录匹配、执行和失败原因，MessageOps/action 负责把插件输出交给平台路由和审计。它们服务于 userbot 命令会话和 interaction bot 规则会话，不是第四种运行模式。新插件不再以 `interaction_entries`、旧交互规则、旧平铺 payload 或 `notice` 通道作为主路径；这些内容只用于迁移旧插件。
 
@@ -17,6 +17,7 @@ Event Bus、Trace、MessageOps 是标准链路的内部契约：Event Bus 负责
 - 把第三方插件以 zip、Git 仓库或 Registry 条目分发给 TelePilot。
 - 插件需要接收 Telegram 标准事件：消息、管理员命令、按钮回调、Inline、付款确认。
 - 插件需要通过 TelePilot 代发消息、ACK 按钮、回答 Inline Query 或记录结算动作。
+- 插件需要通过 Interaction Bot 发送标题、任务列表、折叠详情、表格等 Telegram 原生 Rich Message。
 - 插件需要声明 HTTP、AI、原生 Telegram raw 等风险能力，供安装前提示和 Trace 排障。
 - 插件确有低延时 userbot 直通需求，并愿意承担无标准 action/Trace 的审计缺口。
 
@@ -364,6 +365,29 @@ class EventBusDemoPlugin(Plugin):
         }]
 ```
 
+发送 Bot API 原生 Rich Message 时继续复用 `send_message` 权限，通过 MessageOps 构造动作：
+
+```python
+async def on_event(self, ctx: PluginContext, payload: dict[str, Any]) -> list[dict[str, Any]]:
+    event = event_from_interaction_payload(payload)
+    await ctx.messages.send_rich(
+        chat_id=event.message.chat_id,
+        html=(
+            "<h1>任务进度</h1>"
+            "<ul>"
+            '<li><input type="checkbox" checked>已接收</li>'
+            '<li><input type="checkbox">待处理</li>'
+            "</ul>"
+            "<details><summary>调试信息</summary><p>trace 已写入</p></details>"
+            "<table bordered><tr><th>项目</th><th>状态</th></tr>"
+            "<tr><td>Worker</td><td>正常</td></tr></table>"
+        ),
+    )
+    return []
+```
+
+`send_rich()` 的 `html`、`markdown`、`blocks` 三选一。它固定生成 `send_via="interaction_bot"`；直接返回 `send_rich_message` action 时省略通道也会得到相同行为。UserBot/Telethon 当前没有 `sendRichMessage` 对等接口，显式指定 `userbot_reply` 会返回 `rich_message_requires_interaction_bot`，不会转成普通文本。详见 [API 参考的 Rich Message 说明](./PLUGIN-API-REFERENCE.md#原生-rich-message)。
+
 示例代码见 `examples/plugins/event_bus_demo`，fixtures 覆盖 message、command、callback、inline、chosen inline 和 payment。
 
 ## 旧 interaction_entries 迁移
@@ -409,6 +433,7 @@ backend/.venv/bin/python scripts/validate-installed-interaction-plugins.py
 - [ ] `capabilities` 已声明；需要原生字段时写明 `telegram_native_raw.reason` 和 `sources`。
 - [ ] 插件只读取标准事件信封，不依赖旧平铺 payload。
 - [ ] 所有发送、编辑、按钮 ACK、Inline answer、结算都走 MessageOps/action。
+- [ ] 原生 Rich Message 使用 `send_rich_message`，复用 `send_message` 权限，并确认账号已配置 Interaction Bot；不要要求 UserBot 发送或静默降级。
 - [ ] `answer_inline_query` 插件同时处理 `chosen_inline_result` 或明确忽略。
 - [ ] 付款插件使用 `payment.status=confirmed` 与 `settlement`，普通 Bot 不执行转账。
 - [ ] 旧 `interaction_entries` 只出现在迁移桥或兼容说明里。

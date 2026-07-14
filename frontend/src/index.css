@@ -315,13 +315,12 @@
     background: hsl(var(--background));
   }
 
-  /* 上移 1px 塞进顶栏底下（顶栏 z-index:2 会盖住这条会发缝的顶边），
-     padding-top 补回 1px 保证内容不被顶栏遮住。 */
+  /* 上移 1px 塞进顶栏底下（顶栏 z-index:2 会盖住这条会发缝的顶边）。
+     不在这里重写 padding-top，否则会覆盖 AppShell 的全局页面留白。 */
   .app-main {
     position: relative;
     z-index: 1;
     margin-top: -1px;
-    padding-top: 1px;
   }
 
   .app-frame {
@@ -353,7 +352,7 @@
   @media (max-width: 767px) {
     .app-topbar {
       border-bottom: 1px solid hsl(var(--foreground) / 0.08);
-      background: hsl(var(--card) / 0.64);
+      background: hsl(var(--card) / 0.48);
       -webkit-backdrop-filter: blur(28px) saturate(1.7);
       backdrop-filter: blur(28px) saturate(1.7);
       box-shadow:
@@ -578,7 +577,7 @@
   .liquid-bottom-nav {
     border: 1px solid hsl(var(--foreground) / 0.08);
     border-radius: 999px;
-    background: hsl(var(--card) / 0.64);
+    background: hsl(var(--card) / 0.48);
     -webkit-backdrop-filter: blur(28px) saturate(1.7);
     backdrop-filter: blur(28px) saturate(1.7);
     box-shadow:

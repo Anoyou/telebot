@@ -22,6 +22,7 @@ from .contracts import (
 CANONICAL_ACTION_TYPES = frozenset(
     {
         "send_message",
+        "send_rich_message",
         "send_photo",
         "send_file",
         "edit_message",
@@ -46,6 +47,7 @@ SEND_MEDIA_ACTIONS = frozenset({"send_photo", "send_file"})
 SEND_TEXT_OR_MEDIA_ACTIONS = frozenset(
     {
         "send_message",
+        "send_rich_message",
         "send_photo",
         "send_file",
         "edit_message",
@@ -68,6 +70,7 @@ class ActionKind(StrEnum):
     SETTLEMENT = "settlement"
     PAYOUT = "payout"
     SEND_MESSAGE = "send_message"
+    SEND_RICH_MESSAGE = "send_rich_message"
     SEND_MEDIA = "send_media"
     EDIT_MESSAGE = "edit_message"
     EDIT_CAPTION = "edit_caption"
@@ -102,6 +105,8 @@ def classify_action(action: dict[str, Any]) -> ActionKind:
             return ActionKind.DEPRECATED_SEND_VIA
     if action_type == "send_message":
         return ActionKind.SEND_MESSAGE
+    if action_type == "send_rich_message":
+        return ActionKind.SEND_RICH_MESSAGE
     if action_type in SEND_MEDIA_ACTIONS:
         return ActionKind.SEND_MEDIA
     if action_type == "edit_message":
@@ -130,6 +135,7 @@ class ActionHandlers:
     on_settlement: ActionHandler | None = None
     on_payout: ActionHandler | None = None
     on_send_message: ActionHandler | None = None
+    on_send_rich_message: ActionHandler | None = None
     on_send_media: ActionHandler | None = None
     on_edit_message: ActionHandler | None = None
     on_edit_caption: ActionHandler | None = None
@@ -160,6 +166,7 @@ def _handler_for(kind: ActionKind, handlers: ActionHandlers) -> ActionHandler | 
         ActionKind.SETTLEMENT: handlers.on_settlement,
         ActionKind.PAYOUT: handlers.on_payout,
         ActionKind.SEND_MESSAGE: handlers.on_send_message,
+        ActionKind.SEND_RICH_MESSAGE: handlers.on_send_rich_message,
         ActionKind.SEND_MEDIA: handlers.on_send_media,
         ActionKind.EDIT_MESSAGE: handlers.on_edit_message,
         ActionKind.EDIT_CAPTION: handlers.on_edit_caption,

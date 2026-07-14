@@ -1230,7 +1230,7 @@ async def restart_interaction_bot(aid: int) -> None:
         await asyncio.gather(old_expire, return_exceptions=True)
 
 
-async def notify_account(account_id: int, text: str) -> int:
+async def notify_account(account_id: int, text: str, *, rich_html: str | None = None) -> int:
     """给某账号 Bot 的已授权通知用户发送消息。"""
 
     async with AsyncSessionLocal() as db:
@@ -1267,19 +1267,66 @@ async def notify_account(account_id: int, text: str) -> int:
         )
     for user in targets:
         action = {
-            "type": "send_message",
+            "type": "send_rich_message" if rich_html else "send_message",
             "send_via": "account_bot",
             "chat_id": int(user.last_chat_id),
-            "text": text,
             "context": trace_log_context(trace, plugin_key="system_notify"),
         }
+        if rich_html:
+            action["rich_message"] = {"html": rich_html}
+        else:
+            action["text"] = text
         try:
-            result = await account_bot_service.send_message(
-                token,
-                int(user.last_chat_id),
-                text,
-                parse_mode="HTML",
-            )
+            if rich_html:
+                try:
+                    result = await account_bot_service.send_rich_message(
+                        token,
+                        int(user.last_chat_id),
+                        {"html": rich_html},
+                    )
+                except Exception as rich_exc:  # noqa: BLE001
+                    await record_action(
+                        trace,
+                        action,
+                        TRACE_STATUS_FAILED,
+                        actual_send_via="account_bot",
+                        error_code="telegram_api_error",
+                        error=f"rich message fallback: {type(rich_exc).__name__}",
+                    )
+                    await _emit_account_bot_action_tap(
+                        account_id,
+                        action,
+                        ACTION_EVENT_STATUS_FAILED,
+                        channel="account_bot",
+                        error_code="telegram_api_error",
+                        error=f"rich message fallback: {type(rich_exc).__name__}",
+                    )
+                    log.debug(
+                        "account bot rich notify failed; fallback to sendMessage aid=%s tg_user=%s",
+                        account_id,
+                        user.tg_user_id,
+                        exc_info=True,
+                    )
+                    action = {
+                        "type": "send_message",
+                        "send_via": "account_bot",
+                        "chat_id": int(user.last_chat_id),
+                        "text": text,
+                        "context": trace_log_context(trace, plugin_key="system_notify"),
+                    }
+                    result = await account_bot_service.send_message(
+                        token,
+                        int(user.last_chat_id),
+                        text,
+                        parse_mode="HTML",
+                    )
+            else:
+                result = await account_bot_service.send_message(
+                    token,
+                    int(user.last_chat_id),
+                    text,
+                    parse_mode="HTML",
+                )
             await record_action(trace, action, TRACE_STATUS_OK, actual_send_via="account_bot", result=result)
             await _emit_account_bot_action_tap(
                 account_id,
@@ -1346,6 +1393,14 @@ async def notify_runtime_log(row: RuntimeLog) -> None:
     await notify_account(
         int(row.account_id),
         f"⚠️ <b>账号运行告警</b>\n来源：<code>{source}</code>\n内容：{message}",
+        rich_html=(
+            "<h1>⚠️ 账号运行告警</h1>"
+            "<table bordered>"
+            f"<tr><th>级别</th><td>{account_bot_service.html_text(row.level)}</td></tr>"
+            f"<tr><th>来源</th><td><code>{source}</code></td></tr>"
+            "</table>"
+            f"<details open><summary>告警详情</summary><p>{message}</p></details>"
+        ),
     )
 
 
@@ -8206,16 +8261,37 @@ async def _show_start(incoming: Incoming, role: str, *, edit: bool = False) -> N
         f"你的角色：<code>{account_bot_service.html_text(role)}</code>\n\n"
         "这个 Bot 是当前 UserBot 账号的移动控制入口；复杂配置仍建议回到 GUI。"
     )
-    await _send(incoming, text, reply_markup=_main_keyboard(incoming.account_id), edit=edit)
+    rich_html = (
+        "<h1>🤖 账号 Bot 联动</h1>"
+        "<table bordered>"
+        f"<tr><th>账号</th><td><code>{incoming.account_id}</code></td></tr>"
+        f"<tr><th>你的角色</th><td><code>{account_bot_service.html_text(role)}</code></td></tr>"
+        "</table>"
+        "<details><summary>入口说明</summary>"
+        "<p>这是当前 UserBot 账号的移动控制入口；复杂配置仍建议回到 GUI。</p>"
+        "</details>"
+    )
+    await _send(
+        incoming,
+        text,
+        rich_html=rich_html,
+        reply_markup=_main_keyboard(incoming.account_id),
+        edit=edit,
+    )
 
 
 async def _show_help(incoming: Incoming, role: str, *, edit: bool = False) -> None:
     text = (
         "📖 <b>可用命令</b>\n"
+        "/start 打开主菜单\n"
+        "/help 查看完整命令与角色说明\n"
         "/status 查看账号、worker 与最近错误\n"
         "/features 查看并启停账号功能\n"
         "/commands 查看并启停自定义命令模板\n"
         "/plugins 查看插件入口（远程插件高风险能力默认关闭）\n"
+        "  /plugins install &lt;git-url&gt; 安装远程插件\n"
+        "  /plugins update &lt;name&gt; 更新远程插件\n"
+        "  /plugins uninstall &lt;name&gt; 卸载远程插件\n"
         "/rules 查看规则，scheduler 规则可手动执行\n"
         "/logs 查看最近运行日志\n"
         "/pause /resume 暂停或恢复账号\n"
@@ -8223,7 +8299,37 @@ async def _show_help(incoming: Incoming, role: str, *, edit: bool = False) -> No
         "<b>角色说明</b>\n"
         "viewer：只读查看；operator：可启停功能/命令/规则和暂停恢复；admin：可执行危险动作。"
     )
-    await _send(incoming, text, reply_markup=_main_keyboard(incoming.account_id), edit=edit)
+    rich_html = (
+        "<h1>📖 可用命令</h1>"
+        "<table bordered striped>"
+        "<tr><th>命令</th><th>作用</th></tr>"
+        "<tr><td><code>/start</code></td><td>打开主菜单</td></tr>"
+        "<tr><td><code>/help</code></td><td>查看完整命令与角色说明</td></tr>"
+        "<tr><td><code>/status</code></td><td>账号、Worker 与最近错误</td></tr>"
+        "<tr><td><code>/features</code></td><td>查看并启停账号功能</td></tr>"
+        "<tr><td><code>/commands</code></td><td>查看并启停命令模板</td></tr>"
+        "<tr><td><code>/plugins</code></td><td>查看插件与高风险入口</td></tr>"
+        "<tr><td><code>/rules</code></td><td>查看规则并执行 Scheduler</td></tr>"
+        "<tr><td><code>/logs</code></td><td>查看最近运行日志</td></tr>"
+        "<tr><td><code>/pause</code> / <code>/resume</code></td><td>暂停或恢复账号</td></tr>"
+        "<tr><td><code>/restart</code></td><td>重启 Worker，需要二次确认</td></tr>"
+        "</table>"
+        "<details><summary>远程插件高风险命令</summary>"
+        "<p><code>/plugins install &lt;git-url&gt;</code><br>"
+        "<code>/plugins update &lt;name&gt;</code><br>"
+        "<code>/plugins uninstall &lt;name&gt;</code></p></details>"
+        "<details><summary>角色说明</summary>"
+        "<p><b>viewer</b>：只读查看<br>"
+        "<b>operator</b>：可启停功能、命令、规则和暂停恢复<br>"
+        "<b>admin</b>：可执行危险动作</p></details>"
+    )
+    await _send(
+        incoming,
+        text,
+        rich_html=rich_html,
+        reply_markup=_main_keyboard(incoming.account_id),
+        edit=edit,
+    )
 
 
 async def _show_status(incoming: Incoming, *, edit: bool = False) -> None:
@@ -8247,24 +8353,48 @@ async def _show_status(incoming: Incoming, *, edit: bool = False) -> None:
         ).scalar_one_or_none()
     if acc is None:
         text = "账号不存在。"
+        rich_html = "<h1>📌 账号状态</h1><p>账号不存在。</p>"
     else:
         name = acc.display_name or (f"@{acc.tg_username}" if acc.tg_username else f"#{acc.id}")
+        safe_name = account_bot_service.html_text(name)
+        safe_status = account_bot_service.html_text(acc.status)
         text = (
             "📌 <b>账号状态</b>\n"
-            f"账号：{account_bot_service.html_text(name)}\n"
+            f"账号：{safe_name}\n"
             f"系统 ID：<code>{acc.id}</code>\n"
             f"Telegram ID：<code>{acc.tg_user_id or '未同步'}</code>\n"
-            f"状态：<code>{account_bot_service.html_text(acc.status)}</code>\n"
+            f"状态：<code>{safe_status}</code>\n"
             f"已启用功能：<code>{len(enabled_features)}</code>\n"
         )
+        rich_html = (
+            "<h1>📌 账号状态</h1>"
+            "<table bordered striped>"
+            f"<tr><th>账号</th><td>{safe_name}</td></tr>"
+            f"<tr><th>系统 ID</th><td><code>{acc.id}</code></td></tr>"
+            f"<tr><th>Telegram ID</th><td><code>{acc.tg_user_id or '未同步'}</code></td></tr>"
+            f"<tr><th>状态</th><td><code>{safe_status}</code></td></tr>"
+            f"<tr><th>已启用功能</th><td>{len(enabled_features)}</td></tr>"
+            "</table>"
+        )
         if last_log:
+            log_level = account_bot_service.html_text(last_log.level)
+            log_source = account_bot_service.html_text(last_log.source or "worker")
+            log_message = account_bot_service.html_text(last_log.message)
             text += (
                 "\n<b>最近日志</b>\n"
-                f"{account_bot_service.html_text(last_log.level)} · "
-                f"{account_bot_service.html_text(last_log.source or 'worker')}\n"
-                f"{account_bot_service.html_text(last_log.message)}"
+                f"{log_level} · {log_source}\n{log_message}"
             )
-    await _send(incoming, text, reply_markup=_main_keyboard(incoming.account_id), edit=edit)
+            rich_html += (
+                f"<details open><summary>最近日志 · {log_level}</summary>"
+                f"<p><b>来源：</b><code>{log_source}</code><br>{log_message}</p></details>"
+            )
+    await _send(
+        incoming,
+        text,
+        rich_html=rich_html,
+        reply_markup=_main_keyboard(incoming.account_id),
+        edit=edit,
+    )
 
 
 async def _show_features(incoming: Incoming, role: str, *, edit: bool = False) -> None:
@@ -8273,11 +8403,18 @@ async def _show_features(incoming: Incoming, role: str, *, edit: bool = False) -
         afs = await feature_service.get_account_features(db, incoming.account_id)
     state = {af.feature_key: af for af in afs}
     lines = ["🧩 <b>账号功能</b>", "点击按钮可启停；复杂配置请用 GUI。", ""]
+    rich_items: list[str] = []
     rows: list[list[dict[str, str]]] = []
     for feature in features[:_MAX_BUTTON_ROWS]:
         af = state.get(feature.key)
         enabled = bool(af and af.enabled)
-        lines.append(f"{'✅' if enabled else '⬜️'} {account_bot_service.html_text(feature.display_name)} <code>{feature.key}</code>")
+        display_name = account_bot_service.html_text(feature.display_name)
+        feature_key = account_bot_service.html_text(feature.key)
+        lines.append(f"{'✅' if enabled else '⬜️'} {display_name} <code>{feature_key}</code>")
+        checked = " checked" if enabled else ""
+        rich_items.append(
+            f'<li><input type="checkbox"{checked}>{display_name} <code>{feature_key}</code></li>'
+        )
         if account_bot_service.role_allows(role, ACCOUNT_BOT_ROLE_OPERATOR):
             rows.append([
                 _button(
@@ -8288,7 +8425,18 @@ async def _show_features(incoming: Incoming, role: str, *, edit: bool = False) -
                 )
             ])
     rows.append([_button("返回主菜单", "view", "main", aid=incoming.account_id)])
-    await _send(incoming, "\n".join(lines), reply_markup=_keyboard(rows), edit=edit)
+    rich_html = (
+        "<h1>🧩 账号功能</h1>"
+        "<p>点击下方按钮可启停；复杂配置请使用 GUI。</p>"
+        f"<ul>{''.join(rich_items)}</ul>"
+    )
+    await _send(
+        incoming,
+        "\n".join(lines),
+        rich_html=rich_html,
+        reply_markup=_keyboard(rows),
+        edit=edit,
+    )
 
 
 async def _show_plugins(incoming: Incoming, role: str, *, edit: bool = False) -> None:
@@ -8314,14 +8462,23 @@ async def _show_plugins(incoming: Incoming, role: str, *, edit: bool = False) ->
         f"远程高风险开关：{policy_summary}",
         "",
     ]
+    rich_items: list[str] = []
+    rich_remote_rows: list[str] = []
     rows: list[list[dict[str, str]]] = []
     for feature in features[:_MAX_BUTTON_ROWS]:
         af = state.get(feature.key)
         enabled = bool(af and af.enabled)
         source = "内置" if feature.is_builtin else "第三方"
+        display_name = account_bot_service.html_text(feature.display_name)
+        feature_key = account_bot_service.html_text(feature.key)
         lines.append(
-            f"{'✅' if enabled else '⬜️'} {account_bot_service.html_text(feature.display_name)}"
-            f" · {source} · <code>{feature.key}</code>"
+            f"{'✅' if enabled else '⬜️'} {display_name}"
+            f" · {source} · <code>{feature_key}</code>"
+        )
+        checked = " checked" if enabled else ""
+        rich_items.append(
+            f'<li><input type="checkbox"{checked}>{display_name} · {source} · '
+            f"<code>{feature_key}</code></li>"
         )
         if account_bot_service.role_allows(role, ACCOUNT_BOT_ROLE_OPERATOR):
             rows.append([
@@ -8336,13 +8493,39 @@ async def _show_plugins(incoming: Incoming, role: str, *, edit: bool = False) ->
         lines.append("")
         lines.append("<b>远程插件</b>")
         for row in remotes[:12]:
+            remote_name = account_bot_service.html_text(row.display_name or row.name)
+            remote_version = account_bot_service.html_text(row.version)
+            remote_key = account_bot_service.html_text(row.name)
             lines.append(
                 f"{'✅' if row.enabled else '⬜️'} "
-                f"{account_bot_service.html_text(row.display_name or row.name)}"
-                f" · v{account_bot_service.html_text(row.version)} · <code>{row.name}</code>"
+                f"{remote_name} · v{remote_version} · <code>{remote_key}</code>"
+            )
+            rich_remote_rows.append(
+                f"<tr><td>{remote_name}</td><td>v{remote_version}</td>"
+                f"<td>{'已启用' if row.enabled else '已停用'}</td></tr>"
             )
     rows.append([_button("返回主菜单", "view", "main", aid=incoming.account_id)])
-    await _send(incoming, "\n".join(lines), reply_markup=_keyboard(rows), edit=edit)
+    rich_html = (
+        "<h1>🧱 插件列表</h1>"
+        f"<details><summary>远程高风险开关</summary><p>{account_bot_service.html_text(policy_summary)}</p>"
+        "<p><code>/plugins install &lt;git-url&gt;</code><br>"
+        "<code>/plugins update &lt;name&gt;</code><br>"
+        "<code>/plugins uninstall &lt;name&gt;</code></p></details>"
+        f"<ul>{''.join(rich_items)}</ul>"
+    )
+    if rich_remote_rows:
+        rich_html += (
+            "<h2>远程插件</h2><table bordered striped>"
+            "<tr><th>插件</th><th>版本</th><th>状态</th></tr>"
+            f"{''.join(rich_remote_rows)}</table>"
+        )
+    await _send(
+        incoming,
+        "\n".join(lines),
+        rich_html=rich_html,
+        reply_markup=_keyboard(rows),
+        edit=edit,
+    )
 
 
 async def _handle_plugins_command(incoming: Incoming, role: str) -> None:
@@ -8408,12 +8591,21 @@ async def _show_commands(incoming: Incoming, role: str, *, edit: bool = False) -
         cmd_prefix = await _load_command_prefix(db)
         items = await command_service.list_for_account(db, incoming.account_id)
     lines = ["⌨️ <b>自定义命令模板</b>", "点击按钮可启停当前账号的模板。", ""]
+    rich_items: list[str] = []
     rows: list[list[dict[str, str]]] = []
     for item in items[:_MAX_BUTTON_ROWS]:
         tpl = item.template
+        command = (
+            f"{account_bot_service.html_text(cmd_prefix)}"
+            f"{account_bot_service.html_text(tpl.name)}"
+        )
+        template_type = account_bot_service.html_text(tpl.type)
         lines.append(
-            f"{'✅' if item.enabled else '⬜️'} <code>{account_bot_service.html_text(cmd_prefix)}{account_bot_service.html_text(tpl.name)}</code>"
-            f" · {account_bot_service.html_text(tpl.type)}"
+            f"{'✅' if item.enabled else '⬜️'} <code>{command}</code> · {template_type}"
+        )
+        checked = " checked" if item.enabled else ""
+        rich_items.append(
+            f'<li><input type="checkbox"{checked}><code>{command}</code> · {template_type}</li>'
         )
         if account_bot_service.role_allows(role, ACCOUNT_BOT_ROLE_OPERATOR):
             rows.append([
@@ -8425,7 +8617,18 @@ async def _show_commands(incoming: Incoming, role: str, *, edit: bool = False) -
                 )
             ])
     rows.append([_button("返回主菜单", "view", "main", aid=incoming.account_id)])
-    await _send(incoming, "\n".join(lines), reply_markup=_keyboard(rows), edit=edit)
+    rich_html = (
+        "<h1>⌨️ 自定义命令模板</h1>"
+        "<p>点击下方按钮可启停当前账号的模板。</p>"
+        f"<ul>{''.join(rich_items)}</ul>"
+    )
+    await _send(
+        incoming,
+        "\n".join(lines),
+        rich_html=rich_html,
+        reply_markup=_keyboard(rows),
+        edit=edit,
+    )
 
 
 async def _show_rules(incoming: Incoming, role: str, *, edit: bool = False) -> None:
@@ -8439,11 +8642,19 @@ async def _show_rules(incoming: Incoming, role: str, *, edit: bool = False) -> N
             )
         ).scalars().all()
     lines = ["📋 <b>规则</b>", "展示最近 20 条规则；scheduler 规则可手动执行。", ""]
+    rich_items: list[str] = []
     rows: list[list[dict[str, str]]] = []
     for rule in rules:
+        rule_name = account_bot_service.html_text(rule.name)
+        feature_key = account_bot_service.html_text(rule.feature_key)
         lines.append(
             f"{'✅' if rule.enabled else '⬜️'} #{rule.id} "
-            f"{account_bot_service.html_text(rule.name)} · <code>{rule.feature_key}</code>"
+            f"{rule_name} · <code>{feature_key}</code>"
+        )
+        checked = " checked" if rule.enabled else ""
+        rich_items.append(
+            f'<li><input type="checkbox"{checked}>#{rule.id} {rule_name} · '
+            f"<code>{feature_key}</code></li>"
         )
         if account_bot_service.role_allows(role, ACCOUNT_BOT_ROLE_OPERATOR):
             row = [
@@ -8459,8 +8670,20 @@ async def _show_rules(incoming: Incoming, role: str, *, edit: bool = False) -> N
             rows.append(row)
     if not rules:
         lines.append("暂无规则。")
+        rich_items.append("<li>暂无规则</li>")
     rows.append([_button("返回主菜单", "view", "main", aid=incoming.account_id)])
-    await _send(incoming, "\n".join(lines), reply_markup=_keyboard(rows), edit=edit)
+    rich_html = (
+        "<h1>📋 规则</h1>"
+        "<p>展示最近 20 条规则；Scheduler 规则可手动执行。</p>"
+        f"<ul>{''.join(rich_items)}</ul>"
+    )
+    await _send(
+        incoming,
+        "\n".join(lines),
+        rich_html=rich_html,
+        reply_markup=_keyboard(rows),
+        edit=edit,
+    )
 
 
 async def _show_logs(incoming: Incoming, *, edit: bool = False) -> None:
@@ -8474,17 +8697,24 @@ async def _show_logs(incoming: Incoming, *, edit: bool = False) -> None:
             )
         ).scalars().all()
     lines = ["🧾 <b>最近运行日志</b>"]
+    rich_details: list[str] = []
     for row in logs:
+        level = account_bot_service.html_text(row.level)
+        source = account_bot_service.html_text(row.source or "worker")
+        message = account_bot_service.html_text(row.message)
         lines.append(
-            f"{account_bot_service.html_text(row.level)} · "
-            f"{account_bot_service.html_text(row.source or 'worker')} · "
-            f"{account_bot_service.html_text(row.message)}"
+            f"{level} · {source} · {message}"
+        )
+        rich_details.append(
+            f"<details><summary>{level} · {source}</summary><p>{message}</p></details>"
         )
     if not logs:
         lines.append("暂无日志。")
+        rich_details.append("<p>暂无日志。</p>")
     await _send(
         incoming,
         "\n".join(lines),
+        rich_html=f"<h1>🧾 最近运行日志</h1>{''.join(rich_details)}",
         reply_markup=_main_keyboard(incoming.account_id),
         edit=edit,
     )
@@ -8952,6 +9182,7 @@ async def _send(
     incoming: Incoming,
     text: str,
     *,
+    rich_html: str | None = None,
     reply_markup: dict[str, Any] | None = None,
     reply_to_message_id: int | None = None,
     edit: bool = False,
@@ -8967,6 +9198,55 @@ async def _send(
         "text": text,
     }
     if edit and incoming.message_id is not None:
+        if rich_html:
+            rich_edit_action = {
+                "type": "edit_message",
+                "send_via": "interaction_bot",
+                "chat_id": incoming.chat_id,
+                "message_id": incoming.message_id,
+                "rich_message": {"html": rich_html},
+            }
+            try:
+                result = await account_bot_service.edit_rich_message(
+                    incoming.token,
+                    incoming.chat_id,
+                    incoming.message_id,
+                    {"html": rich_html},
+                    reply_markup=reply_markup,
+                )
+                await record_action(
+                    trace_log_context(incoming.trace_id),
+                    rich_edit_action,
+                    TRACE_STATUS_OK,
+                    actual_send_via="interaction_bot",
+                    result=result,
+                )
+                await _emit_account_bot_action_tap(
+                    incoming,
+                    rich_edit_action,
+                    ACTION_EVENT_STATUS_OK,
+                    channel="interaction_bot",
+                    result=result,
+                )
+                return result
+            except Exception as exc:  # noqa: BLE001
+                await record_action(
+                    trace_log_context(incoming.trace_id),
+                    rich_edit_action,
+                    TRACE_STATUS_FAILED,
+                    actual_send_via="interaction_bot",
+                    error_code="telegram_api_error",
+                    error=f"rich edit fallback: {type(exc).__name__}",
+                )
+                await _emit_account_bot_action_tap(
+                    incoming,
+                    rich_edit_action,
+                    ACTION_EVENT_STATUS_FAILED,
+                    channel="interaction_bot",
+                    error_code="telegram_api_error",
+                    error=f"rich edit fallback: {type(exc).__name__}",
+                )
+                log.debug("edit rich account bot message failed, fallback HTML edit", exc_info=True)
         try:
             result = await account_bot_service.edit_message(
                 incoming.token,
@@ -9015,6 +9295,55 @@ async def _send(
         "reply_to_message_id": reply_to_message_id,
         "text": text,
     }
+    if rich_html:
+        rich_send_action = {
+            "type": "send_rich_message",
+            "send_via": "interaction_bot",
+            "chat_id": incoming.chat_id,
+            "reply_to_message_id": reply_to_message_id,
+            "rich_message": {"html": rich_html},
+        }
+        try:
+            result = await account_bot_service.send_rich_message(
+                incoming.token,
+                incoming.chat_id,
+                {"html": rich_html},
+                reply_markup=reply_markup,
+                reply_to_message_id=reply_to_message_id,
+            )
+            await record_action(
+                trace_log_context(incoming.trace_id),
+                rich_send_action,
+                TRACE_STATUS_OK,
+                actual_send_via="interaction_bot",
+                result=result,
+            )
+            await _emit_account_bot_action_tap(
+                incoming,
+                rich_send_action,
+                ACTION_EVENT_STATUS_OK,
+                channel="interaction_bot",
+                result=result,
+            )
+            return result
+        except Exception as exc:  # noqa: BLE001
+            await record_action(
+                trace_log_context(incoming.trace_id),
+                rich_send_action,
+                TRACE_STATUS_FAILED,
+                actual_send_via="interaction_bot",
+                error_code="telegram_api_error",
+                error=f"rich send fallback: {type(exc).__name__}",
+            )
+            await _emit_account_bot_action_tap(
+                incoming,
+                rich_send_action,
+                ACTION_EVENT_STATUS_FAILED,
+                channel="interaction_bot",
+                error_code="telegram_api_error",
+                error=f"rich send fallback: {type(exc).__name__}",
+            )
+            log.debug("send rich account bot message failed, fallback sendMessage", exc_info=True)
     try:
         result = await account_bot_service.send_message(
             incoming.token,

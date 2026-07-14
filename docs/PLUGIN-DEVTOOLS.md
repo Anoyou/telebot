@@ -72,7 +72,7 @@ tp_plugin register /tmp/tp-plugins/my_game --force
 
 会推导的典型权限：
 
-- `ctx.messages.send()` / `reply()` 或 action `send_message`、`send_photo`、`send_file` -> `send_message`
+- `ctx.messages.send()` / `send_rich()` / `reply()` 或 action `send_message`、`send_rich_message`、`send_photo`、`send_file` -> `send_message`
 - `ctx.messages.read()` / `get()` / `history()` -> `read_chat`
 - `ctx.messages.edit()` 或 action `edit_message`、`edit_caption` -> `edit_message`
 - `ctx.messages.delete()` 或 action `delete_message` -> `delete_message`

@@ -253,7 +253,7 @@ class Plugin:
           平铺字段只作为历史兼容来源
 
         标准动作约定：
-        - ``send_message`` / ``send_photo`` / ``send_file``
+        - ``send_message`` / ``send_rich_message`` / ``send_photo`` / ``send_file``
         - ``edit_message`` 编辑纯文本消息；``edit_caption`` 编辑图片/文件 caption
         - 普通发送动作默认继承会话通道；``send_via`` / ``channel`` /
           ``channel_selector`` 只用于跨通道公告、管理提示和迁移兼容等高级覆盖
@@ -261,7 +261,9 @@ class Plugin:
         - 可选 ``settlement``，供平台记录和后续结算
 
         新插件可优先使用 ``ctx.messages`` 生成受控消息动作，例如
-        ``await ctx.messages.send(chat_id=..., text="...")``。
+        ``await ctx.messages.send(chat_id=..., text="...")``；需要标题、任务列表、
+        折叠详情或表格时使用仅限 Interaction Bot 的
+        ``await ctx.messages.send_rich(html="...")``。
         这些动作不会直接调用 Bot API 或 Telethon，而是随本 hook 的返回结果交给
         平台统一校验、限流、审计和发送。
         """

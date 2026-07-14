@@ -60,6 +60,18 @@ BOT_API_BASE = "https://api.telegram.org"
 BOT_API_TIMEOUT = httpx.Timeout(connect=5.0, read=35.0, write=10.0, pool=5.0)
 BOT_MESSAGE_TEXT_LIMIT = 4000
 BOT_MESSAGE_CAPTION_LIMIT = 1024
+BOT_RICH_MESSAGE_TEXT_LIMIT = 32_768
+BOT_RICH_MESSAGE_BLOCK_LIMIT = 500
+BOT_RICH_MESSAGE_NESTING_LIMIT = 16
+BOT_RICH_MESSAGE_TABLE_COLUMN_LIMIT = 20
+BOT_RICH_MESSAGE_MEDIA_LIMIT = 50
+BOT_RICH_MESSAGE_JSON_LIMIT = 1_048_576
+_RICH_MESSAGE_TEXT_FIELDS = frozenset(
+    {"alternative_text", "caption", "credit", "expression", "label", "summary", "text"}
+)
+_RICH_MESSAGE_MEDIA_BLOCK_TYPES = frozenset(
+    {"animation", "audio", "photo", "video", "voice_note"}
+)
 TRANSFER_NOTICE_SETTING_PREFIX = "account_bot_transfer_notice:"
 VALID_TRIGGER_MODES = {"payment", "keyword", "both"}
 VALID_AMOUNT_MATCH_MODES = {"eq", "gte"}
@@ -1520,6 +1532,192 @@ async def send_message(
     return await call_bot_api(token, "sendMessage", payload)
 
 
+def normalize_rich_message(raw: Any) -> dict[str, Any]:
+    """Validate a Bot API ``InputRichMessage`` without exposing a raw HTTP sink.
+
+    Telegram requires exactly one of ``html``, ``markdown`` or ``blocks``. The
+    generic block grammar is intentionally passed through for forward
+    compatibility. Inexpensive structural limits are checked locally; Telegram
+    remains the source of truth for parsing HTML/Markdown and new block types.
+    """
+
+    if not isinstance(raw, dict):
+        raise ValueError("rich_message 必须是对象")
+    allowed_keys = {
+        "blocks",
+        "html",
+        "markdown",
+        "media",
+        "is_rtl",
+        "skip_entity_detection",
+    }
+    unsupported = sorted(str(key) for key in raw if str(key) not in allowed_keys)
+    if unsupported:
+        raise ValueError(f"rich_message 包含不支持的字段：{', '.join(unsupported)}")
+
+    selected: list[str] = []
+    for key in ("html", "markdown"):
+        value = raw.get(key)
+        if value not in (None, ""):
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"rich_message.{key} 必须是非空字符串")
+            selected.append(key)
+    if raw.get("blocks") not in (None, []):
+        if not isinstance(raw.get("blocks"), list) or not raw["blocks"]:
+            raise ValueError("rich_message.blocks 必须是非空数组")
+        selected.append("blocks")
+    if len(selected) != 1:
+        raise ValueError("rich_message 必须且只能提供 html、markdown、blocks 其中一个")
+
+    media = raw.get("media")
+    if media is not None:
+        if not isinstance(media, list):
+            raise ValueError("rich_message.media 必须是数组")
+        if len(media) > BOT_RICH_MESSAGE_MEDIA_LIMIT:
+            raise ValueError(f"rich_message.media 最多 {BOT_RICH_MESSAGE_MEDIA_LIMIT} 项")
+        if selected[0] == "blocks" and media:
+            raise ValueError("rich_message.media 只可与 html 或 markdown 一起使用")
+
+    stats = {"text": 0, "blocks": 0, "media": len(media or [])}
+    selected_value = raw[selected[0]]
+    _validate_rich_message_json_node(
+        selected_value,
+        depth=0,
+        stats=stats,
+        text_field=selected[0] in {"html", "markdown"},
+    )
+    if selected[0] == "blocks":
+        _validate_rich_message_blocks(selected_value, stats=stats)
+    if stats["text"] > BOT_RICH_MESSAGE_TEXT_LIMIT:
+        raise ValueError(f"rich_message 文本最多 {BOT_RICH_MESSAGE_TEXT_LIMIT} 个字符")
+    if stats["blocks"] > BOT_RICH_MESSAGE_BLOCK_LIMIT:
+        raise ValueError(f"rich_message 最多 {BOT_RICH_MESSAGE_BLOCK_LIMIT} 个结构块")
+    if stats["media"] > BOT_RICH_MESSAGE_MEDIA_LIMIT:
+        raise ValueError(f"rich_message 最多 {BOT_RICH_MESSAGE_MEDIA_LIMIT} 个媒体附件")
+
+    normalized = {key: raw[key] for key in allowed_keys if key in raw}
+    try:
+        encoded_size = len(json.dumps(normalized, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("rich_message 必须可以序列化为 JSON") from exc
+    if encoded_size > BOT_RICH_MESSAGE_JSON_LIMIT:
+        raise ValueError("rich_message JSON 超过 1 MiB 限制")
+    return normalized
+
+
+def _validate_rich_message_json_node(
+    value: Any,
+    *,
+    depth: int,
+    stats: dict[str, int],
+    text_field: bool = False,
+) -> None:
+    if isinstance(value, str):
+        if text_field:
+            stats["text"] += len(value)
+        return
+    if value is None or isinstance(value, (bool, int, float)):
+        return
+    if isinstance(value, list):
+        next_depth = depth + 1
+        if next_depth > BOT_RICH_MESSAGE_NESTING_LIMIT:
+            raise ValueError(f"rich_message 最多嵌套 {BOT_RICH_MESSAGE_NESTING_LIMIT} 层")
+        for item in value:
+            _validate_rich_message_json_node(
+                item,
+                depth=next_depth,
+                stats=stats,
+                text_field=text_field,
+            )
+        return
+    if not isinstance(value, dict):
+        raise ValueError("rich_message 只能包含 JSON 类型")
+    next_depth = depth + 1
+    if next_depth > BOT_RICH_MESSAGE_NESTING_LIMIT:
+        raise ValueError(f"rich_message 最多嵌套 {BOT_RICH_MESSAGE_NESTING_LIMIT} 层")
+
+    for key, item in value.items():
+        if not isinstance(key, str):
+            raise ValueError("rich_message 对象字段名必须是字符串")
+        _validate_rich_message_json_node(
+            item,
+            depth=next_depth,
+            stats=stats,
+            text_field=key in _RICH_MESSAGE_TEXT_FIELDS,
+        )
+
+
+def _validate_rich_message_blocks(blocks: Any, *, stats: dict[str, int]) -> None:
+    if not isinstance(blocks, list):
+        raise ValueError("rich_message.blocks 必须是数组")
+    stats["blocks"] += len(blocks)
+    for block in blocks:
+        if not isinstance(block, dict):
+            raise ValueError("rich_message.blocks 每一项必须是对象")
+        block_type = str(block.get("type") or "").strip()
+        if block_type in _RICH_MESSAGE_MEDIA_BLOCK_TYPES:
+            stats["media"] += 1
+
+        nested_blocks = block.get("blocks")
+        if nested_blocks is not None:
+            _validate_rich_message_blocks(nested_blocks, stats=stats)
+
+        if block_type == "list":
+            items = block.get("items")
+            if not isinstance(items, list):
+                raise ValueError("rich_message 列表 items 必须是数组")
+            stats["blocks"] += len(items)
+            for item in items:
+                if not isinstance(item, dict):
+                    raise ValueError("rich_message 列表项必须是对象")
+                _validate_rich_message_blocks(item.get("blocks"), stats=stats)
+
+        if block_type == "table":
+            rows = block.get("cells")
+            if not isinstance(rows, list):
+                raise ValueError("rich_message 表格 cells 必须是二维数组")
+            stats["blocks"] += len(rows)
+            for row in rows:
+                if not isinstance(row, list):
+                    raise ValueError("rich_message 表格每一行必须是数组")
+                columns = 0
+                for cell in row:
+                    if not isinstance(cell, dict):
+                        raise ValueError("rich_message 表格单元格必须是对象")
+                    colspan = cell.get("colspan", 1)
+                    if not isinstance(colspan, int) or isinstance(colspan, bool) or colspan < 1:
+                        raise ValueError("rich_message 表格 colspan 必须是正整数")
+                    columns += colspan
+                if columns > BOT_RICH_MESSAGE_TABLE_COLUMN_LIMIT:
+                    raise ValueError(
+                        f"rich_message 表格每行最多 {BOT_RICH_MESSAGE_TABLE_COLUMN_LIMIT} 列"
+                    )
+
+
+async def send_rich_message(
+    token: str,
+    chat_id: int,
+    rich_message: dict[str, Any],
+    *,
+    reply_markup: dict[str, Any] | None = None,
+    reply_to_message_id: int | None = None,
+) -> dict[str, Any]:
+    """Send a native Bot API 10.2 rich message through an Interaction Bot."""
+
+    payload: dict[str, Any] = {
+        "chat_id": chat_id,
+        "rich_message": normalize_rich_message(rich_message),
+    }
+    if reply_markup is not None:
+        payload["reply_markup"] = reply_markup
+    if reply_to_message_id is not None:
+        payload["reply_parameters"] = {
+            "message_id": reply_to_message_id,
+            "allow_sending_without_reply": True,
+        }
+    return await call_bot_api(token, "sendRichMessage", payload)
+
+
 async def send_photo_bytes(
     token: str,
     chat_id: int,
@@ -1606,6 +1804,26 @@ async def edit_message(
     }
     if normalized_parse_mode:
         payload["parse_mode"] = normalized_parse_mode
+    if reply_markup is not None:
+        payload["reply_markup"] = reply_markup
+    return await call_bot_api(token, "editMessageText", payload)
+
+
+async def edit_rich_message(
+    token: str,
+    chat_id: int,
+    message_id: int,
+    rich_message: dict[str, Any],
+    *,
+    reply_markup: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Edit a message using the Bot API 10.2 native rich-message field."""
+
+    payload: dict[str, Any] = {
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "rich_message": normalize_rich_message(rich_message),
+    }
     if reply_markup is not None:
         payload["reply_markup"] = reply_markup
     return await call_bot_api(token, "editMessageText", payload)

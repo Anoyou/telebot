@@ -83,6 +83,8 @@ EVENT_REASON_CODES = {
     "session_not_found",
     "session_expired",
     "rate_limited",
+    "rich_message_requires_interaction_bot",
+    "invalid_rich_message",
     "callback_query",
     "command_matched",
     "command_not_matched",

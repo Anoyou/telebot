@@ -60,6 +60,7 @@ _PERMISSION_RISK: dict[str, tuple[str, str]] = {
 }
 _CTX_MESSAGE_METHOD_PERMISSIONS = {
     "send": "send_message",
+    "send_rich": "send_message",
     "reply": "send_message",
     "read": "read_chat",
     "get": "read_chat",
@@ -70,6 +71,7 @@ _CTX_MESSAGE_METHOD_PERMISSIONS = {
 }
 _ACTION_TYPE_PERMISSIONS = {
     "send_message": "send_message",
+    "send_rich_message": "send_message",
     "send_photo": "send_message",
     "send_file": "send_message",
     "edit_message": "edit_message",

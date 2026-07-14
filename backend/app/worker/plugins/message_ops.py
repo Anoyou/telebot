@@ -63,6 +63,55 @@ class BufferedMessageOps:
         self.actions.append(action)
         return action
 
+    async def send_rich(
+        self,
+        *,
+        chat_id: int | None = None,
+        html: str | None = None,
+        markdown: str | None = None,
+        blocks: list[dict[str, Any]] | None = None,
+        media: list[dict[str, Any]] | None = None,
+        is_rtl: bool | None = None,
+        skip_entity_detection: bool | None = None,
+        reply_to_message_id: int | None = None,
+        reply_markup: dict[str, Any] | None = None,
+        save_message_id_key: str | None = None,
+        pin: bool = False,
+    ) -> dict[str, Any]:
+        """Buffer a native Bot API rich message for the Interaction Bot only."""
+
+        selected = sum(value not in (None, "", []) for value in (html, markdown, blocks))
+        if selected != 1:
+            raise ValueError("send_rich 必须且只能提供 html、markdown、blocks 其中一个")
+        rich_message: dict[str, Any] = {}
+        if html not in (None, ""):
+            rich_message["html"] = html
+        if markdown not in (None, ""):
+            rich_message["markdown"] = markdown
+        if blocks not in (None, []):
+            rich_message["blocks"] = blocks
+        if media is not None:
+            rich_message["media"] = media
+        if is_rtl is not None:
+            rich_message["is_rtl"] = bool(is_rtl)
+        if skip_entity_detection is not None:
+            rich_message["skip_entity_detection"] = bool(skip_entity_detection)
+        action: dict[str, Any] = {
+            "type": "send_rich_message",
+            "send_via": "interaction_bot",
+            "chat_id": chat_id,
+            "rich_message": rich_message,
+            "reply_to_message_id": reply_to_message_id,
+        }
+        if reply_markup is not None:
+            action["reply_markup"] = dict(reply_markup)
+        if save_message_id_key:
+            action["save_message_id_key"] = save_message_id_key
+        if pin:
+            action["pin"] = True
+        self.actions.append(action)
+        return action
+
     async def send_photo(
         self,
         *,

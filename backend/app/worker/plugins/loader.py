@@ -1969,6 +1969,9 @@ async def _apply_userbot_event_bus_actions(
             session=session,
         )
 
+    async def _on_send_rich_message(action: dict[str, Any]) -> bool:
+        return await _apply_userbot_send_rich_message_action(state, event, action)
+
     async def _on_edit_message(action: dict[str, Any]) -> bool:
         return await _apply_userbot_edit_message_action(state, event, action)
 
@@ -2031,6 +2034,7 @@ async def _apply_userbot_event_bus_actions(
         on_settlement=_on_settlement,
         on_payout=_on_payout,
         on_send_message=_on_send_message,
+        on_send_rich_message=_on_send_rich_message,
         on_send_media=_on_send_media,
         on_edit_message=_on_edit_message,
         on_edit_caption=_on_edit_caption,
@@ -2342,7 +2346,7 @@ async def _find_interaction_rule_for_plugin_session(
 
 
 def _userbot_rate_limit_action(action_type: str, chat_id: int | None) -> str:
-    if action_type in {"send_message", "payout"}:
+    if action_type in {"send_message", "send_rich_message", "payout"}:
         return "send_message_private" if chat_id is not None and chat_id > 0 else "send_message_group"
     if action_type in {"edit_message", "edit_caption"}:
         return "edit_message"
@@ -3171,6 +3175,136 @@ async def _apply_userbot_send_message_action(
             target_chat_id,
             reply_to_user_id=_int_or_none(action.get("reply_to_user_id")),
         )
+    return False
+
+
+async def _apply_userbot_send_rich_message_action(
+    state: _AccountState,
+    event: Any,
+    action: dict[str, Any],
+) -> bool:
+    target_chat_id = _action_chat_id(action, event)
+    if target_chat_id is None:
+        await record_action(
+            action.get("context"),
+            action,
+            TRACE_STATUS_FAILED,
+            error_code="scope_not_matched",
+            error="target chat_id missing",
+        )
+        return False
+    rich_message = action.get("rich_message")
+    if not isinstance(rich_message, dict):
+        await record_action(
+            action.get("context"),
+            action,
+            TRACE_STATUS_FAILED,
+            error_code="invalid_rich_message",
+            error="send_rich_message rich_message must be an object",
+        )
+        return False
+    options = action_send_via_options(action)
+    if _action_dev_mode_dry_run_enabled(state, action):
+        await _record_userbot_dry_run(
+            state,
+            action,
+            channel=options[0] if options else "interaction_bot",
+            result={
+                "dry_run": True,
+                "chat_id": target_chat_id,
+                "rich_message": rich_message,
+                "send_via_options": options,
+            },
+        )
+        return True
+
+    reply_to = _int_or_none(action.get("reply_to_message_id"))
+    reply_markup = action.get("reply_markup") if isinstance(action.get("reply_markup"), dict) else None
+    last_code = "rich_message_requires_interaction_bot"
+    last_error = "send_rich_message only supports interaction_bot"
+    last_result = _userbot_action_failure_result(
+        action,
+        target_chat_id=target_chat_id,
+        error_code=last_code,
+        error=last_error,
+        reply_to_message_id=reply_to,
+    )
+    for send_via in options:
+        if send_via != "interaction_bot":
+            continue
+        token = await _interaction_bot_token_for_account(state.account_id)
+        if not token:
+            last_code = "bot_token_missing"
+            last_error = "interaction bot token unavailable"
+            last_result = _userbot_action_failure_result(
+                action,
+                target_chat_id=target_chat_id,
+                error_code=last_code,
+                error=last_error,
+                reply_to_message_id=reply_to,
+            )
+            continue
+        try:
+            result = await account_bot_service.send_rich_message(
+                token,
+                target_chat_id,
+                rich_message,
+                reply_to_message_id=reply_to,
+                reply_markup=reply_markup,
+            )
+            await _save_action_message_id(state, action, result)
+            await record_action(
+                action.get("context"),
+                action,
+                TRACE_STATUS_OK,
+                actual_send_via="interaction_bot",
+                result=result,
+            )
+            await _emit_userbot_action_tap(
+                state,
+                action,
+                ACTION_EVENT_STATUS_OK,
+                channel="interaction_bot",
+                result=result,
+            )
+            return True
+        except ValueError as exc:
+            last_code = "invalid_rich_message"
+            last_error = str(exc)
+        except Exception as exc:  # noqa: BLE001
+            last_code = "telegram_api_error"
+            last_error = f"{type(exc).__name__}: {exc}"
+        last_result = _userbot_action_failure_result(
+            action,
+            target_chat_id=target_chat_id,
+            error_code=last_code,
+            error=last_error,
+            reply_to_message_id=reply_to,
+        )
+
+    await record_action(
+        action.get("context"),
+        action,
+        TRACE_STATUS_FAILED,
+        error_code=last_code,
+        error=last_error,
+        result=last_result,
+    )
+    await _emit_userbot_action_tap(
+        state,
+        action,
+        ACTION_EVENT_STATUS_FAILED,
+        channel=options[0] if options else None,
+        error_code=last_code,
+        error=last_error,
+        result=last_result,
+    )
+    await _log_userbot_action_failure(
+        state,
+        action,
+        result=last_result,
+        message="userbot send_rich_message action failed",
+    )
     return False
 
 
@@ -7551,7 +7685,14 @@ def get_recent_peers(account_id: int) -> list[dict[str, Any]]:
     return out
 
 
-_INTERACTION_SEND_ACTIONS = {"send_message", "send_photo", "send_file", "edit_message", "edit_caption"}
+_INTERACTION_SEND_ACTIONS = {
+    "send_message",
+    "send_rich_message",
+    "send_photo",
+    "send_file",
+    "edit_message",
+    "edit_caption",
+}
 _INTERACTION_CONTROL_ACTIONS = {"delete_message", "pin_message"}
 
 
@@ -7569,7 +7710,9 @@ def _normalize_interaction_action(
     action["type"] = action_type
     if action_type in _INTERACTION_SEND_ACTIONS or action_type in _INTERACTION_CONTROL_ACTIONS:
         send_via_options = action_send_via_options(action)
-        if not has_explicit_send_via and default_send_via:
+        if action_type == "send_rich_message" and not has_explicit_send_via:
+            send_via_options = ["interaction_bot"]
+        elif not has_explicit_send_via and default_send_via:
             send_via_options = list(default_send_via)
         apply_action_send_via_options(action, send_via_options)
         if raw_channel_selector is not None and _channel_selector_needs_guard_trace(raw_channel_selector):

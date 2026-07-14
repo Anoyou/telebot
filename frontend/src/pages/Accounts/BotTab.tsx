@@ -118,14 +118,50 @@ const ROLE_META: Record<AccountBotRole, { label: string; desc: string }> = {
 };
 
 const HELP_PREVIEW = `/start  打开主菜单
+/help 查看完整命令与角色说明
 /status 查看账号、worker 与最近错误
 /features 查看并启停账号功能
 /commands 查看并启停自定义指令模板
 /plugins 查看插件入口
+  /plugins install <git-url> 安装远程插件（admin + 二次确认）
+  /plugins update <name> 更新远程插件（admin + 二次确认）
+  /plugins uninstall <name> 卸载远程插件（admin + 二次确认）
 /rules 查看规则，scheduler 规则可手动执行
 /logs 查看最近运行日志
 /pause /resume 暂停或恢复账号
 /restart 重启账号 worker（admin + 二次确认）`;
+
+const REMOTE_POLICY_OPTIONS: Array<{
+  key: keyof AccountBotRemotePluginPolicy;
+  label: string;
+  description: string;
+}> = [
+  {
+    key: "enabled",
+    label: "启用远程插件管理",
+    description: "总开关。关闭后，Telegram 内所有远程插件高风险操作都会被拦截。",
+  },
+  {
+    key: "install",
+    label: "允许安装插件",
+    description: "允许 admin 使用 /plugins install <git-url> 发起远程安装。",
+  },
+  {
+    key: "update",
+    label: "允许更新插件",
+    description: "允许 admin 使用 /plugins update <name> 更新已安装插件。",
+  },
+  {
+    key: "uninstall",
+    label: "允许卸载插件",
+    description: "允许 admin 使用 /plugins uninstall <name> 卸载插件。",
+  },
+  {
+    key: "enable_disable",
+    label: "允许启停第三方插件",
+    description: "允许 admin 在 Telegram 内启用或停用非内置插件。",
+  },
+];
 
 const DEFAULT_REMOTE_POLICY: AccountBotRemotePluginPolicy = {
   enabled: false,
@@ -2501,20 +2537,20 @@ export function BotTab({
                 默认全部关闭；即使开启后，Telegram 内仍需二次确认才会执行 install/update/uninstall/第三方启停。
               </div>
               <div className="grid gap-2 text-sm md:grid-cols-2">
-                {[
-                  ["enabled", "总开关"],
-                  ["install", "允许 install"],
-                  ["update", "允许 update"],
-                  ["uninstall", "允许 uninstall"],
-                  ["enable_disable", "允许第三方 enable/disable"],
-                ].map(([key, label]) => (
+                {REMOTE_POLICY_OPTIONS.map(({ key, label, description }) => (
                   <label
                     key={key}
-                    className="flex items-center justify-between rounded border border-destructive/25 bg-card px-3 py-2 text-foreground"
+                    className="flex items-start justify-between gap-3 rounded border border-destructive/25 bg-card px-3 py-2.5 text-foreground"
                   >
-                    <span>{label}</span>
+                    <span className="min-w-0">
+                      <span className="block font-medium">{label}</span>
+                      <span className="mt-0.5 block text-xs leading-5 text-muted-foreground">
+                        {description}
+                      </span>
+                    </span>
                     <Switch
-                      checked={remotePolicy[key as keyof AccountBotRemotePluginPolicy]}
+                      className="mt-0.5 shrink-0"
+                      checked={remotePolicy[key]}
                       onCheckedChange={(checked) =>
                         setRemotePolicy((prev) => ({
                           ...prev,

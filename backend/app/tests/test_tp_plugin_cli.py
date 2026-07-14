@@ -181,6 +181,30 @@ class DemoPlugin:
     assert "中风险" in out
 
 
+def test_check_infers_send_message_permission_for_rich_messages(tmp_path: Path) -> None:
+    name = "demo_rich_message"
+    plugin_dir = tmp_path / name
+    tp.scaffold_plugin(name, "command", plugin_dir)
+
+    plugin_py = plugin_dir / "plugin.py"
+    plugin_py.write_text(
+        """
+from __future__ import annotations
+
+class DemoPlugin:
+    async def run(self, ctx):
+        await ctx.messages.send_rich(html="<h1>状态</h1>")
+        return [{"type": "send_rich_message", "rich_message": {"html": "<h2>结果</h2>"}}]
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    report = tp.check_plugin(plugin_dir)
+    assert "send_message" in report.inferred_permissions
+    assert "send_message" not in report.missing_permissions
+
+
 def test_check_reports_extra_permission(tmp_path: Path, capsys) -> None:
     name = "demo_extra_permission"
     plugin_dir = tmp_path / name

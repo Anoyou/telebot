@@ -7,6 +7,7 @@ from sqlalchemy import delete, select
 
 from .. import __version__
 from ..crypto import encrypt_str
+from ..db.models.account_bot import AccountBot
 from ..db.models.notify import NotifyBot
 from ..deps import CurrentUser, DBSession
 from ..schemas.notify import (
@@ -22,13 +23,24 @@ router = APIRouter(prefix="/api/notify-bots", tags=["notify-bots"])
 
 
 
-def _to_out(row: NotifyBot) -> NotifyBotOut:
+async def _source_account_bot(db: DBSession, account_id: int | None) -> AccountBot | None:
+    if account_id is None:
+        return None
+    return (
+        await db.execute(select(AccountBot).where(AccountBot.account_id == int(account_id)))
+    ).scalar_one_or_none()
+
+
+async def _to_out(db: DBSession, row: NotifyBot) -> NotifyBotOut:
+    source = await _source_account_bot(db, row.source_account_id)
     return NotifyBotOut(
         id=row.id,
         name=row.name,
         default_chat_id=row.default_chat_id,
         enabled=row.enabled,
-        has_token=bool(row.bot_token_enc),
+        has_token=bool(source.bot_token_enc) if source is not None else bool(row.bot_token_enc),
+        credential_source="account_bot" if row.source_account_id is not None else "direct",
+        source_account_id=row.source_account_id,
         created_at=row.created_at,
         updated_at=row.updated_at,
     )
@@ -39,7 +51,7 @@ async def list_notify_bots(db: DBSession, _user: CurrentUser) -> list[NotifyBotO
     rows = (
         await db.execute(select(NotifyBot).order_by(NotifyBot.id.asc()))
     ).scalars().all()
-    return [_to_out(r) for r in rows]
+    return [await _to_out(db, r) for r in rows]
 
 
 @router.post("", response_model=NotifyBotOut, status_code=status.HTTP_201_CREATED)
@@ -57,9 +69,17 @@ async def create_notify_bot(
             detail={"code": "CONFLICT", "message": "name 已存在"},
         )
 
+    source = await _source_account_bot(db, payload.source_account_id)
+    if payload.source_account_id is not None and (source is None or not source.bot_token_enc):
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "ACCOUNT_BOT_TOKEN_REQUIRED", "message": "所选账号尚未配置管理 Bot Token"},
+        )
+
     row = NotifyBot(
         name=payload.name,
-        bot_token_enc=encrypt_str(payload.bot_token),
+        bot_token_enc=encrypt_str(payload.bot_token) if payload.bot_token else None,
+        source_account_id=payload.source_account_id,
         default_chat_id=payload.default_chat_id,
         enabled=payload.enabled,
     )
@@ -71,11 +91,16 @@ async def create_notify_bot(
         user.id,
         "notify_bot.create",
         target=f"notify_bot:{row.id}",
-        detail={"name": row.name, "enabled": row.enabled},
+        detail={
+            "name": row.name,
+            "enabled": row.enabled,
+            "credential_source": "account_bot" if row.source_account_id is not None else "direct",
+            "source_account_id": row.source_account_id,
+        },
     )
     await db.commit()
     await db.refresh(row)
-    return _to_out(row)
+    return await _to_out(db, row)
 
 
 @router.patch("/{bot_id}", response_model=NotifyBotOut)
@@ -110,8 +135,25 @@ async def update_notify_bot(
         row.enabled = payload.enabled
     if payload.clear_token:
         row.bot_token_enc = None
+        row.source_account_id = None
+    if payload.bot_token is not None and "source_account_id" in payload.model_fields_set:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "CREDENTIAL_SOURCE_CONFLICT", "message": "不能同时填写独立 Token 和引用管理 Bot"},
+        )
+    if "source_account_id" in payload.model_fields_set:
+        source = await _source_account_bot(db, payload.source_account_id)
+        if payload.source_account_id is not None and (source is None or not source.bot_token_enc):
+            raise HTTPException(
+                status_code=422,
+                detail={"code": "ACCOUNT_BOT_TOKEN_REQUIRED", "message": "所选账号尚未配置管理 Bot Token"},
+            )
+        row.source_account_id = payload.source_account_id
+        if payload.source_account_id is not None:
+            row.bot_token_enc = None
     if payload.bot_token is not None:
         row.bot_token_enc = encrypt_str(payload.bot_token)
+        row.source_account_id = None
 
     await audit.write(
         db,
@@ -125,7 +167,7 @@ async def update_notify_bot(
     )
     await db.commit()
     await db.refresh(row)
-    return _to_out(row)
+    return await _to_out(db, row)
 
 
 @router.delete("/{bot_id}")

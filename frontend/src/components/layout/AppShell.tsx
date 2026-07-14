@@ -82,7 +82,7 @@ export function AppShell() {
           className="
             app-main
             flex-1 overflow-auto
-            px-4 py-5 md:px-8 md:py-7 xl:px-10
+            px-4 py-4 md:px-8 md:py-7 xl:px-10
             pb-[calc(5.25rem+env(safe-area-inset-bottom))]
             sm:pb-[max(1rem,env(safe-area-inset-bottom))]
             pl-[max(1rem,env(safe-area-inset-left))]

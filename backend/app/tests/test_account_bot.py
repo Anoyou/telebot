@@ -798,6 +798,129 @@ async def test_account_bot_send_message_html_truncates_without_breaking_entity_o
 
 
 @pytest.mark.asyncio
+async def test_account_bot_send_rich_message_uses_native_bot_api(monkeypatch) -> None:
+    call_bot_api = AsyncMock(return_value={"message_id": 187, "rich_message": {}})
+    monkeypatch.setattr(account_bot_service, "call_bot_api", call_bot_api)
+
+    await account_bot_service.send_rich_message(
+        "123:token",
+        -100,
+        {
+            "html": (
+                "<h1>巡检</h1><ul><li><input type=\"checkbox\" checked>完成</li></ul>"
+                "<details><summary>详情</summary>失败原因</details>"
+                "<table bordered><tr><th>模型</th><th>状态</th></tr>"
+                "<tr><td>grok</td><td>正常</td></tr></table>"
+            )
+        },
+        reply_to_message_id=41,
+        reply_markup={"inline_keyboard": []},
+    )
+
+    assert call_bot_api.await_args.args == (
+        "123:token",
+        "sendRichMessage",
+        {
+            "chat_id": -100,
+            "rich_message": {
+                "html": (
+                    "<h1>巡检</h1><ul><li><input type=\"checkbox\" checked>完成</li></ul>"
+                    "<details><summary>详情</summary>失败原因</details>"
+                    "<table bordered><tr><th>模型</th><th>状态</th></tr>"
+                    "<tr><td>grok</td><td>正常</td></tr></table>"
+                )
+            },
+            "reply_markup": {"inline_keyboard": []},
+            "reply_parameters": {"message_id": 41, "allow_sending_without_reply": True},
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_account_bot_edit_rich_message_uses_native_bot_api(monkeypatch) -> None:
+    call_bot_api = AsyncMock(return_value={"message_id": 187, "rich_message": {}})
+    monkeypatch.setattr(account_bot_service, "call_bot_api", call_bot_api)
+
+    await account_bot_service.edit_rich_message(
+        "123:token",
+        -100,
+        187,
+        {"html": "<h1>更新后的状态</h1>"},
+        reply_markup={"inline_keyboard": []},
+    )
+
+    call_bot_api.assert_awaited_once_with(
+        "123:token",
+        "editMessageText",
+        {
+            "chat_id": -100,
+            "message_id": 187,
+            "rich_message": {"html": "<h1>更新后的状态</h1>"},
+            "reply_markup": {"inline_keyboard": []},
+        },
+    )
+
+
+@pytest.mark.parametrize(
+    ("rich_message", "error"),
+    [
+        ({}, "必须且只能提供"),
+        ({"html": "<h1>A</h1>", "markdown": "# A"}, "必须且只能提供"),
+        (
+            {
+                "blocks": [
+                    {
+                        "type": "table",
+                        "cells": [[{"text": "x"} for _ in range(21)]],
+                    }
+                ]
+            },
+            "最多 20 列",
+        ),
+        (
+            {"blocks": [{"type": "divider"} for _ in range(501)]},
+            "最多 500 个结构块",
+        ),
+        (
+            {
+                "blocks": [
+                    {"type": "paragraph", "text": "x" * 32_769},
+                ]
+            },
+            "文本最多 32768",
+        ),
+        ({"html": "x" * 32_769}, "文本最多 32768"),
+        (
+            {"blocks": [{"type": "photo", "photo": {"media": "file-id"}} for _ in range(51)]},
+            "最多 50 个媒体附件",
+        ),
+        (
+            {"blocks": [{"type": "paragraph", "text": "x"}], "media": [{"id": "photo"}]},
+            "只可与 html 或 markdown 一起使用",
+        ),
+        ({"html": "x", "unknown": True}, "不支持的字段"),
+    ],
+)
+def test_account_bot_rich_message_validation_rejects_invalid_payloads(
+    rich_message: dict[str, object],
+    error: str,
+) -> None:
+    with pytest.raises(ValueError, match=error):
+        account_bot_service.normalize_rich_message(rich_message)
+
+
+def test_account_bot_rich_message_validation_rejects_excessive_nesting() -> None:
+    rich_text: object = "最深层"
+    for _ in range(16):
+        rich_text = {"type": "bold", "text": rich_text}
+
+    with pytest.raises(ValueError, match="最多嵌套 16 层"):
+        account_bot_service.normalize_rich_message(
+            {"blocks": [{"type": "paragraph", "text": rich_text}]}
+        )
+
+
+@pytest.mark.asyncio
 async def test_account_bot_bot_api_client_is_reused_and_closable(monkeypatch) -> None:
     await account_bot_service.close_bot_api_client()
 
@@ -2233,6 +2356,51 @@ async def test_interaction_delivery_executor_deletes_placeholder_from_trigger_ch
 
 
 @pytest.mark.asyncio
+async def test_interaction_delivery_executor_sends_native_rich_message(monkeypatch) -> None:
+    incoming = account_bot_runtime.Incoming(
+        account_id=1,
+        token="123:token",
+        update_id=10,
+        user_id=20,
+        chat_id=-100,
+        message_id=30,
+        text="",
+    )
+    send_rich_message = AsyncMock(return_value={"message_id": 187, "chat_id": -100})
+    record_action = AsyncMock()
+    monkeypatch.setattr(account_bot_service, "send_rich_message", send_rich_message)
+    monkeypatch.setattr("app.services.interaction.delivery.record_action", record_action)
+    executor = InteractionDeliveryExecutor(
+        incoming=incoming,
+        write_log=AsyncMock(),
+        run_worker_action=AsyncMock(),
+        log_context=account_bot_runtime._interaction_log_context,
+        trace_context=account_bot_runtime._interaction_trace_context,
+    )
+
+    await executor.apply(
+        [
+            {
+                "type": "send_rich_message",
+                "send_via": "interaction_bot",
+                "rich_message": {"html": "<h1>巡检</h1>"},
+                "reply_to_message_id": 30,
+            }
+        ]
+    )
+
+    send_rich_message.assert_awaited_once_with(
+        "123:token",
+        -100,
+        {"html": "<h1>巡检</h1>"},
+        reply_to_message_id=30,
+        reply_markup=None,
+    )
+    assert record_action.await_args.args[2] == account_bot_runtime.TRACE_STATUS_OK
+    assert record_action.await_args.kwargs["actual_send_via"] == "interaction_bot"
+
+
+@pytest.mark.asyncio
 async def test_message_ops_buffers_standard_actions() -> None:
     ops = BufferedMessageOps()
 
@@ -2281,6 +2449,41 @@ async def test_message_ops_buffers_standard_actions() -> None:
     assert ops.actions[3]["message_id"] == 41
     assert ops.actions[3]["parse_mode"] == "plain"
     assert ops.actions[4]["callback_query_id"] == "cb-1"
+
+
+@pytest.mark.asyncio
+async def test_message_ops_buffers_native_rich_message_for_interaction_bot() -> None:
+    ops = BufferedMessageOps()
+
+    await ops.send_rich(
+        chat_id=-100,
+        html="<h1>巡检</h1><table><tr><td>正常</td></tr></table>",
+        reply_to_message_id=41,
+        save_message_id_key="demo:rich:1",
+        pin=True,
+    )
+
+    assert ops.actions == [
+        {
+            "type": "send_rich_message",
+            "send_via": "interaction_bot",
+            "chat_id": -100,
+            "rich_message": {
+                "html": "<h1>巡检</h1><table><tr><td>正常</td></tr></table>"
+            },
+            "reply_to_message_id": 41,
+            "save_message_id_key": "demo:rich:1",
+            "pin": True,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_message_ops_rich_message_requires_exactly_one_content_format() -> None:
+    ops = BufferedMessageOps()
+
+    with pytest.raises(ValueError, match="必须且只能提供"):
+        await ops.send_rich(html="<h1>A</h1>", markdown="# A")
 
 
 @pytest.mark.asyncio
@@ -2535,6 +2738,49 @@ async def test_interaction_result_contract_accepts_channel_aliases_without_manif
             "text": "alias",
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_rich_message_defaults_to_interaction_bot_in_userbot_session() -> None:
+    write_log = AsyncMock()
+
+    guarded = await interaction_contracts.guard_interaction_actions(
+        rule={},
+        actions=[{"type": "send_rich_message", "rich_message": {"html": "<h1>状态</h1>"}}],
+        resolve_entry_manifest=lambda *_args: None,
+        write_log=write_log,
+        session_channel="userbot_reply",
+    )
+
+    assert guarded == [
+        {
+            "type": "send_rich_message",
+            "rich_message": {"html": "<h1>状态</h1>"},
+            "send_via": "interaction_bot",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_rich_message_rejects_userbot_only_channel() -> None:
+    write_log = AsyncMock()
+
+    guarded = await interaction_contracts.guard_interaction_actions(
+        rule={},
+        actions=[
+            {
+                "type": "send_rich_message",
+                "send_via": "userbot_reply",
+                "rich_message": {"html": "<h1>状态</h1>"},
+            }
+        ],
+        resolve_entry_manifest=lambda *_args: None,
+        write_log=write_log,
+        session_channel="userbot_reply",
+    )
+
+    assert guarded == []
+    assert write_log.await_args.kwargs["reason_code"] == "rich_message_requires_interaction_bot"
 
 
 @pytest.mark.asyncio
@@ -15748,6 +15994,114 @@ async def test_notify_runtime_log_deduplicates_same_error(monkeypatch) -> None:
     await account_bot_runtime.notify_runtime_log(row)
 
     assert notify.await_count == 1
+    assert "<table bordered>" in notify.await_args.kwargs["rich_html"]
+    assert "<details open>" in notify.await_args.kwargs["rich_html"]
+
+
+@pytest.mark.asyncio
+async def test_account_bot_send_prefers_rich_and_falls_back_to_html(monkeypatch) -> None:
+    incoming = account_bot_runtime.Incoming(
+        account_id=7,
+        token="bot-token",
+        update_id=1,
+        user_id=2,
+        chat_id=12345,
+        message_id=99,
+        text="/status",
+    )
+    send_rich = AsyncMock(side_effect=RuntimeError("method unavailable"))
+    send_message = AsyncMock(return_value={"message_id": 188})
+    record_action = AsyncMock()
+    emit_tap = AsyncMock()
+    monkeypatch.setattr(account_bot_service, "send_rich_message", send_rich)
+    monkeypatch.setattr(account_bot_service, "send_message", send_message)
+    monkeypatch.setattr(account_bot_runtime, "record_action", record_action)
+    monkeypatch.setattr(account_bot_runtime, "_emit_account_bot_action_tap", emit_tap)
+
+    result = await account_bot_runtime._send(
+        incoming,
+        "<b>账号状态</b>",
+        rich_html="<h1>账号状态</h1><table><tr><td>正常</td></tr></table>",
+        reply_markup={"inline_keyboard": []},
+    )
+
+    assert result == {"message_id": 188}
+    send_rich.assert_awaited_once_with(
+        "bot-token",
+        12345,
+        {"html": "<h1>账号状态</h1><table><tr><td>正常</td></tr></table>"},
+        reply_markup={"inline_keyboard": []},
+        reply_to_message_id=None,
+    )
+    send_message.assert_awaited_once_with(
+        "bot-token",
+        12345,
+        "<b>账号状态</b>",
+        reply_markup={"inline_keyboard": []},
+        reply_to_message_id=None,
+    )
+    assert record_action.await_args_list[0].args[2] == account_bot_runtime.TRACE_STATUS_FAILED
+    assert record_action.await_args_list[1].args[2] == account_bot_runtime.TRACE_STATUS_OK
+
+
+@pytest.mark.asyncio
+async def test_account_bot_rich_help_uses_table_and_details(monkeypatch) -> None:
+    incoming = account_bot_runtime.Incoming(
+        account_id=7,
+        token="bot-token",
+        update_id=1,
+        user_id=2,
+        chat_id=12345,
+        message_id=99,
+        text="/help",
+    )
+    send = AsyncMock()
+    monkeypatch.setattr(account_bot_runtime, "_send", send)
+
+    await account_bot_runtime._show_help(incoming, "admin")
+
+    assert "<table bordered striped>" in send.await_args.kwargs["rich_html"]
+    assert "<details>" in send.await_args.kwargs["rich_html"]
+    assert "<code>/start</code>" in send.await_args.kwargs["rich_html"]
+    assert "<code>/help</code>" in send.await_args.kwargs["rich_html"]
+    assert "/plugins install" in send.await_args.kwargs["rich_html"]
+    assert send.await_args.kwargs["reply_markup"]
+
+
+@pytest.mark.asyncio
+async def test_account_bot_rich_features_use_native_task_list(monkeypatch) -> None:
+    incoming = account_bot_runtime.Incoming(
+        account_id=7,
+        token="bot-token",
+        update_id=1,
+        user_id=2,
+        chat_id=12345,
+        message_id=99,
+        text="/features",
+    )
+    send = AsyncMock()
+    monkeypatch.setattr(account_bot_runtime, "_send", send)
+    monkeypatch.setattr(
+        account_bot_runtime.feature_service,
+        "list_features",
+        AsyncMock(
+            return_value=[
+                SimpleNamespace(key="demo", display_name="演示功能", is_builtin=True),
+                SimpleNamespace(key="off", display_name="未启用功能", is_builtin=True),
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        account_bot_runtime.feature_service,
+        "get_account_features",
+        AsyncMock(return_value=[SimpleNamespace(feature_key="demo", enabled=True)]),
+    )
+
+    await account_bot_runtime._show_features(incoming, "viewer")
+
+    rich_html = send.await_args.kwargs["rich_html"]
+    assert '<input type="checkbox" checked>演示功能' in rich_html
+    assert '<input type="checkbox">未启用功能' in rich_html
 
 
 @pytest.mark.asyncio

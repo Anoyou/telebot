@@ -205,6 +205,21 @@ PARITY_MATRIX: list[ParityCase] = [
         covers="send_message",
     ),
     _row(
+        "send_rich_message_interaction_bot_ok",
+        [
+            {
+                "type": "send_rich_message",
+                "send_via": "interaction_bot",
+                "rich_message": {"html": "<h1>状态</h1><table><tr><td>正常</td></tr></table>"},
+                "chat_id": CHAT,
+            }
+        ],
+        "send_rich_message",
+        (TRACE_STATUS_OK, None, "interaction_bot"),
+        (TRACE_STATUS_OK, None, "interaction_bot"),
+        covers="send_rich_message",
+    ),
+    _row(
         "send_photo_userbot_ok",
         [{"type": "send_photo", "send_via": "userbot_reply", "photo_base64": B64, "chat_id": CHAT}],
         "send_photo",
@@ -477,6 +492,11 @@ async def _drive_worker(monkeypatch: pytest.MonkeyPatch, case: ParityCase) -> Ex
     monkeypatch.setattr(payout_limit_mod, "check_and_consume", AsyncMock(return_value=(True, None)))
     monkeypatch.setattr(account_bot_service, "answer_callback", AsyncMock(return_value={}))
     monkeypatch.setattr(account_bot_service, "answer_inline_query", AsyncMock(return_value={}))
+    monkeypatch.setattr(
+        account_bot_service,
+        "send_rich_message",
+        AsyncMock(return_value={"message_id": 103, "chat_id": CHAT}),
+    )
     _mock_payout_delivery(monkeypatch)
 
     mem = _MemRedis()
@@ -520,6 +540,11 @@ async def _drive_bot(monkeypatch: pytest.MonkeyPatch, case: ParityCase) -> Expec
     monkeypatch.setattr(delivery_mod, "record_action", rec)
     monkeypatch.setattr(account_bot_service, "answer_callback", AsyncMock(return_value={}))
     monkeypatch.setattr(account_bot_service, "answer_inline_query", AsyncMock(return_value={}))
+    monkeypatch.setattr(
+        account_bot_service,
+        "send_rich_message",
+        AsyncMock(return_value={"message_id": 103, "chat_id": CHAT}),
+    )
     # E3 通过 from-import 绑定 _check_payout_limit，必须在 worker_runtime 命名空间打桩。
     monkeypatch.setattr(worker_runtime, "_check_payout_limit", AsyncMock(return_value=(True, None)))
     _mock_payout_delivery(monkeypatch)

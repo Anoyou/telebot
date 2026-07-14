@@ -23,6 +23,7 @@ def test_classify_action_kinds() -> None:
     assert classify_action({"type": "update_session"}) == ActionKind.UPDATE_SESSION
     assert classify_action({"type": "end_session"}) == ActionKind.SESSION_CONTROL
     assert classify_action({"type": "payout"}) == ActionKind.PAYOUT
+    assert classify_action({"type": "send_rich_message"}) == ActionKind.SEND_RICH_MESSAGE
     assert classify_action({"type": "send_photo"}) == ActionKind.SEND_MEDIA
     assert classify_action({"type": "unknown_x"}) == ActionKind.UNSUPPORTED
     assert (

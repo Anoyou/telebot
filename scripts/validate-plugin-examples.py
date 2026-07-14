@@ -248,7 +248,7 @@ def _validate_event_demo_runtime(name: str, plugin_dir: Path, plugin: Plugin) ->
             )
         for action in actions:
             action_type = str(action.get("type") or "").strip()
-            if action_type in {"send_message", "send_photo", "send_file"}:
+            if action_type in {"send_message", "send_rich_message", "send_photo", "send_file"}:
                 send_via = action.get("send_via")
                 send_via_values = send_via if isinstance(send_via, list) else [send_via]
                 if any(str(item) in DEPRECATED_SEND_VIA for item in send_via_values):
