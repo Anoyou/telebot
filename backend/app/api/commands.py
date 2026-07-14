@@ -1286,7 +1286,7 @@ async def chat_test_models(
         identity_override=payload.client_identity_profile_override,
     )
 
-    async def run_one(model_id: str) -> ChatTestModelResult:
+    async def run_one_unbounded(model_id: str) -> ChatTestModelResult:
         started = _time.monotonic()
         user_prompt = _build_chat_test_prompt(payload, model_id)
         try:
@@ -1327,6 +1327,23 @@ async def chat_test_models(
                 error=None if text else "上游请求已完成，但返回文本为空。",
                 **transport_metadata,
             )
+        except asyncio.CancelledError:
+            cancelled = LLMError("模型对话测活已取消")
+            try:
+                await asyncio.shield(
+                    _emit_llm_diagnostic_usage(
+                        provider_row=row,
+                        source="diagnostic:chat-test",
+                        started=started,
+                        system=payload.system_prompt,
+                        user_prompt=user_prompt,
+                        model=model_id,
+                        error=cancelled,
+                    )
+                )
+            except Exception:  # noqa: BLE001 - 取消路径不能被记账失败阻塞
+                pass
+            raise
         except LLMError as exc:
             elapsed_ms = int((_time.monotonic() - started) * 1000)
             await _emit_llm_diagnostic_usage(
@@ -1363,6 +1380,10 @@ async def chat_test_models(
                 error=f"{type(exc).__name__}: {str(exc)[:200]}",
                 **transport_metadata,
             )
+
+    async def run_one(model_id: str) -> ChatTestModelResult:
+        async with llm_liveness.diagnostic_slot():
+            return await run_one_unbounded(model_id)
 
     results = await asyncio.gather(*(run_one(model_id) for model_id in payload.models))
     return ChatTestModelsResponse(
@@ -1419,7 +1440,7 @@ async def stream_chat_test_models(
         async def emit(event: dict[str, Any]) -> None:
             await queue.put(event)
 
-        async def run_one(model_id: str) -> None:
+        async def run_one_unbounded(model_id: str) -> None:
             started = _time.monotonic()
             user_prompt = _build_chat_test_prompt(payload, model_id)
             text_parts: list[str] = []
@@ -1541,6 +1562,28 @@ async def stream_chat_test_models(
                     }
                 )
             except asyncio.CancelledError:
+                partial = LLMResult(
+                    text="".join(text_parts).strip(),
+                    model=actual_model or model_id,
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                )
+                cancelled = LLMError("模型流式测活已取消")
+                try:
+                    await asyncio.shield(
+                        _emit_llm_diagnostic_usage(
+                            provider_row=row,
+                            source="diagnostic:chat-test",
+                            started=started,
+                            system=payload.system_prompt,
+                            user_prompt=user_prompt,
+                            model=actual_model or model_id,
+                            result=partial,
+                            error=cancelled,
+                        )
+                    )
+                except Exception:  # noqa: BLE001 - 取消路径不能被记账失败阻塞
+                    pass
                 raise
             except LLMError as exc:
                 elapsed_ms = int((_time.monotonic() - started) * 1000)
@@ -1600,6 +1643,10 @@ async def stream_chat_test_models(
                         "result": result.model_dump(mode="json"),
                     }
                 )
+
+        async def run_one(model_id: str) -> None:
+            async with llm_liveness.diagnostic_slot():
+                await run_one_unbounded(model_id)
 
         tasks = [asyncio.create_task(run_one(model_id)) for model_id in payload.models]
         remaining = len(tasks)
@@ -1759,7 +1806,38 @@ async def full_liveness_run(
         only = {m.strip() for m in payload.only_models if m.strip()}
         tasks = [t for t in tasks if t.model_id in only]
 
-    job = await llm_liveness.liveness_jobs.create(task_total=len(tasks))
+    if len(tasks) > llm_liveness.MAX_LIVENESS_TASKS:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "LIVENESS_TASK_LIMIT",
+                "message": (
+                    f"单次测活最多允许 {llm_liveness.MAX_LIVENESS_TASKS} 个模型，"
+                    "请缩小 Provider 或模型范围"
+                ),
+            },
+        )
+
+    if len(tasks) > llm_liveness.LARGE_RUN_MODEL_THRESHOLD and not payload.confirm_large_run:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "LIVENESS_CONFIRMATION_REQUIRED",
+                "message": (
+                    f"本次将测试 {len(tasks)} 个模型，请先确认真实上游额度消耗"
+                ),
+                "task_total": len(tasks),
+            },
+        )
+
+    try:
+        job = await llm_liveness.liveness_jobs.create(task_total=len(tasks))
+    except llm_liveness.LivenessCapacityExceeded as exc:
+        raise HTTPException(
+            status_code=429,
+            detail={"code": "LIVENESS_BUSY", "message": str(exc)},
+            headers={"Retry-After": "3"},
+        ) from exc
     system_prompt = payload.system_prompt
     message = payload.message
     max_tokens = payload.max_tokens
@@ -1808,6 +1886,21 @@ async def full_liveness_run(
                 },
             )
         except asyncio.CancelledError:
+            cancelled = LLMError("全局模型巡检已取消")
+            try:
+                await asyncio.shield(
+                    _emit_llm_diagnostic_usage(
+                        provider_row=row,
+                        source="diagnostic:full-liveness",
+                        started=started,
+                        system=system_prompt,
+                        user_prompt=message,
+                        model=task.model_id,
+                        error=cancelled,
+                    )
+                )
+            except Exception:  # noqa: BLE001 - 取消路径不能被记账失败阻塞
+                pass
             raise
         except LLMError as exc:
             elapsed_ms = int((_time.monotonic() - started) * 1000)
@@ -1833,6 +1926,15 @@ async def full_liveness_run(
             )
         except Exception as exc:  # noqa: BLE001
             elapsed_ms = int((_time.monotonic() - started) * 1000)
+            await _emit_llm_diagnostic_usage(
+                provider_row=row,
+                source="diagnostic:full-liveness",
+                started=started,
+                system=system_prompt,
+                user_prompt=message,
+                model=task.model_id,
+                error=exc,
+            )
             status = llm_liveness.diag.classify_exception(exc)
             return (
                 status,
@@ -2051,6 +2153,11 @@ async def update_client_identity_versions(
 
     # 立即应用到进程内目录，使新版本对后续请求生效。
     llm_identity.apply_version_overrides(cleaned)
+    # Telegram 命令与插件运行在 multiprocessing spawn worker 中，各自持有独立的
+    # 身份目录。复用 reload_commands 让全部账号 worker 从 DB 重载版本覆盖；Redis
+    # 消息未确认时仍会由 worker 的周期 reconcile 最终收敛。
+    aids = await command_service.list_all_account_ids(db)
+    await command_service.notify_reload(aids)
     return ClientIdentityVersionsResponse(items=_client_identity_version_items())
 
 

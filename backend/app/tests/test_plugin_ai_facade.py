@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any
 
 import pytest
 
 from app.services.llm_agent import AgentResult
-from app.services.llm_client import LLMCallFailed, LLMResult, LLMStreamChunk
+from app.services.llm_client import LLMCallFailed, LLMError, LLMResult, LLMStreamChunk
 from app.services.llm_dto import LLMProviderDTO
 from app.services.llm_protocol import ModelResponse, ModelUsage, StopReason, TextContent
 from app.worker.plugins import ai_facade
@@ -21,6 +22,8 @@ def _provider(
     tags: list[str] | None = None,
     cost_tier: int = 2,
     api_format: str = "chat_completions",
+    default_model: str = "gpt-test",
+    models: list[dict[str, Any]] | None = None,
 ) -> LLMProviderDTO:
     return LLMProviderDTO(
         id=provider_id,
@@ -28,16 +31,19 @@ def _provider(
         provider="openai",
         api_format=api_format,
         base_url="https://secret-base.example/v1",
-        default_model="gpt-test",
+        default_model=default_model,
         api_key_enc=api_key_enc,
         proxy_url="socks5://user:pass@127.0.0.1:1080",
         modality="text",
         tags=tags or ["chat"],
         cost_tier=cost_tier,
-        models=[
+        models=models
+        if models is not None
+        else [
             {
                 "id": "gpt-test",
                 "label": "Test",
+                "enabled": True,
                 "base_url": "https://model-secret.example",
                 "api_key_enc": "model-secret",
             }
@@ -177,6 +183,64 @@ async def test_complete_selects_provider_tag_without_exposing_api_key(monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_complete_auto_routes_to_enabled_non_default_model(monkeypatch) -> None:
+    captured: dict[str, Any] = {}
+
+    async def _loader():
+        return {
+            1: _provider(
+                1,
+                default_model="gpt-disabled-default",
+                models=[
+                    {"id": "gpt-disabled-default", "enabled": False},
+                    {"id": "gpt-enabled", "enabled": True},
+                ],
+            )
+        }
+
+    async def _invoke(primary, providers, system, user, **kwargs):
+        captured.update(kwargs)
+        return (
+            LLMResult(text="ok", model="gpt-enabled", input_tokens=1, output_tokens=1),
+            primary,
+            False,
+        )
+
+    monkeypatch.setattr(ai_facade, "invoke_ai_runtime", _invoke)
+    monkeypatch.setattr(ai_facade.plugin_ai_quota, "acquire", AsyncNoop(return_value=object()))
+    monkeypatch.setattr(ai_facade.plugin_ai_quota, "release", AsyncNoop())
+    facade = PluginAI(account_id=7, plugin_key="demo", provider_loader=_loader)
+
+    result = await facade.complete("sys", "hello", route="auto")
+
+    assert captured["override_model"] is None
+    assert captured["routed_model"] == "gpt-enabled"
+    assert result.routing["model"] == "gpt-enabled"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("explicit_model", [None, "gpt-disabled"])
+async def test_complete_cannot_bypass_disabled_model_list(monkeypatch, explicit_model) -> None:
+    async def _loader():
+        return {
+            1: _provider(
+                1,
+                default_model="gpt-disabled",
+                models=[{"id": "gpt-disabled", "enabled": False}],
+            )
+        }
+
+    acquire = AsyncNoop(return_value=object())
+    monkeypatch.setattr(ai_facade.plugin_ai_quota, "acquire", acquire)
+    facade = PluginAI(account_id=7, plugin_key="demo", provider_loader=_loader)
+
+    with pytest.raises(AIUnavailableError, match="未在 .* 中启用|没有已启用模型"):
+        await facade.complete("sys", "hello", model=explicit_model)
+
+    assert acquire.calls == []
+
+
+@pytest.mark.asyncio
 async def test_complete_accepts_plugin_compat_aliases(monkeypatch) -> None:
     """兼容已迁移插件传入的 timeout_seconds / override_model / tags 形态。"""
 
@@ -185,7 +249,13 @@ async def test_complete_accepts_plugin_compat_aliases(monkeypatch) -> None:
     async def _loader():
         return {
             1: _provider(1, name="chat", tags=["chat"], cost_tier=1),
-            2: _provider(2, name="long", tags=["long_context"], cost_tier=2),
+            2: _provider(
+                2,
+                name="long",
+                tags=["long_context"],
+                cost_tier=2,
+                models=[{"id": "gpt-override", "enabled": True}],
+            ),
         }
 
     async def _invoke(primary, providers, system, user, **kwargs):
@@ -298,6 +368,9 @@ async def test_agent_uses_manifest_allowlist_and_shared_runtime(monkeypatch) -> 
     assert list(captured["tools"]) == ["lookup"]
     assert captured["source"] == "plugin:demo:agent"
     assert captured["callbacks"] is not None
+    assert result.routing["mode"] == "auto"
+    assert result.routing["provider_id"] == 1
+    assert result.routing["model"] == "gpt-test"
 
 
 @pytest.mark.asyncio
@@ -403,7 +476,12 @@ async def test_stream_complete_yields_text_deltas_and_settles_quota(monkeypatch)
         )
 
     async def _budget_settle(ticket, *, actual_tokens, actual_provider, success):
-        budget_calls["settle"] = (ticket, actual_tokens, actual_provider.id if actual_provider else None, success)
+        budget_calls["settle"] = (
+            ticket,
+            actual_tokens,
+            actual_provider.id if actual_provider else None,
+            success,
+        )
 
     async def _emit_usage(record):
         usage_records.append(record)
@@ -422,10 +500,7 @@ async def test_stream_complete_yields_text_deltas_and_settles_quota(monkeypatch)
         timeout_limit_seconds=9,
     )
 
-    deltas = [
-        delta
-        async for delta in facade.stream_complete("sys", "hello", max_tokens=9999, timeout=99)
-    ]
+    deltas = [delta async for delta in facade.stream_complete("sys", "hello", max_tokens=9999, timeout=99)]
 
     assert deltas == ["hel", "lo"]
     assert captured["system"] == "sys"
@@ -448,6 +523,144 @@ async def test_stream_complete_yields_text_deltas_and_settles_quota(monkeypatch)
     assert usage.output_tokens == 2
     assert usage.success is True
     assert usage.fallback_chain == ["primary"]
+
+
+def _install_stream_test_doubles(monkeypatch, client, *, api_format: str = "responses"):
+    usage_records: list[Any] = []
+    quota_release = AsyncNoop()
+    budget_settle = AsyncNoop()
+
+    async def _loader():
+        return {1: _provider(1, api_format=api_format)}
+
+    async def _quota_acquire(plugin_key, account_id, estimated_tokens):
+        return ai_facade.plugin_ai_quota.PluginAIQuotaTicket(
+            plugin_key,
+            account_id,
+            estimated_tokens,
+        )
+
+    async def _budget_acquire(account_id, provider, estimated_tokens):
+        return ai_facade.llm_account_budget.LLMAccountBudgetTicket(
+            account_id,
+            provider.id,
+            estimated_tokens,
+            backend="test",
+        )
+
+    async def _emit_usage(record):
+        usage_records.append(record)
+
+    monkeypatch.setattr(ai_facade, "build_llm_client", lambda *_args, **_kwargs: client)
+    monkeypatch.setattr(ai_facade.plugin_ai_quota, "acquire", _quota_acquire)
+    monkeypatch.setattr(ai_facade.plugin_ai_quota, "release", quota_release)
+    monkeypatch.setattr(ai_facade.llm_account_budget, "acquire", _budget_acquire)
+    monkeypatch.setattr(ai_facade.llm_account_budget, "settle", budget_settle)
+    monkeypatch.setattr(ai_facade.llm_runtime, "_emit_usage", _emit_usage)
+    facade = PluginAI(
+        account_id=7,
+        plugin_key="demo",
+        provider_loader=_loader,
+        max_tokens_limit=8,
+        timeout_limit_seconds=9,
+    )
+    return facade, quota_release, budget_settle, usage_records
+
+
+@pytest.mark.asyncio
+async def test_stream_complete_aclose_after_first_delta_keeps_conservative_charge(monkeypatch) -> None:
+    class _Client:
+        async def stream_complete(self, *_args, **_kwargs):
+            yield LLMStreamChunk(delta="partial", model="gpt-stream")
+            await asyncio.sleep(10)
+
+    facade, quota_release, budget_settle, usage_records = _install_stream_test_doubles(
+        monkeypatch,
+        _Client(),
+    )
+    stream = facade.stream_complete("sys", "hello", max_tokens=8)
+
+    assert await anext(stream) == "partial"
+    await stream.aclose()
+
+    assert quota_release.calls[-1][0][1] == 10
+    settle_kwargs = budget_settle.calls[-1][1]
+    assert settle_kwargs["actual_tokens"] == 10
+    assert settle_kwargs["success"] is False
+    assert settle_kwargs["charge"] is True
+    assert usage_records[-1].error_type == "consumer_closed"
+    assert usage_records[-1].input_tokens == 10
+
+
+@pytest.mark.asyncio
+async def test_stream_complete_task_cancel_keeps_conservative_charge(monkeypatch) -> None:
+    entered = asyncio.Event()
+
+    class _Client:
+        async def stream_complete(self, *_args, **_kwargs):
+            entered.set()
+            await asyncio.sleep(10)
+            yield LLMStreamChunk(delta="never")
+
+    facade, quota_release, budget_settle, usage_records = _install_stream_test_doubles(
+        monkeypatch,
+        _Client(),
+    )
+
+    async def consume() -> None:
+        async for _ in facade.stream_complete("sys", "hello", max_tokens=8):
+            pass
+
+    task = asyncio.create_task(consume())
+    await entered.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert quota_release.calls[-1][0][1] == 10
+    assert budget_settle.calls[-1][1]["charge"] is True
+    assert usage_records[-1].error_type == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_stream_complete_partial_output_then_error_keeps_conservative_charge(monkeypatch) -> None:
+    class _Client:
+        async def stream_complete(self, *_args, **_kwargs):
+            yield LLMStreamChunk(delta="partial", model="gpt-stream")
+            raise LLMError("upstream disconnected")
+
+    facade, quota_release, budget_settle, usage_records = _install_stream_test_doubles(
+        monkeypatch,
+        _Client(),
+    )
+
+    with pytest.raises(AIUnavailableError, match="upstream disconnected"):
+        async for _ in facade.stream_complete("sys", "hello", max_tokens=8):
+            pass
+
+    assert quota_release.calls[-1][0][1] == 10
+    assert budget_settle.calls[-1][1]["charge"] is True
+    assert usage_records[-1].error_type == "LLMError"
+
+
+@pytest.mark.asyncio
+async def test_stream_complete_timeout_has_actionable_message(monkeypatch) -> None:
+    class _Client:
+        async def stream_complete(self, *_args, **_kwargs):
+            await asyncio.sleep(10)
+            yield LLMStreamChunk(delta="never")
+
+    facade, _quota_release, _budget_settle, usage_records = _install_stream_test_doubles(
+        monkeypatch,
+        _Client(),
+    )
+    monkeypatch.setattr(facade, "_clamp_timeout", lambda _value: 0.01)
+
+    with pytest.raises(AIUnavailableError, match="超过 0.01 秒总超时时间"):
+        async for _ in facade.stream_complete("sys", "hello", max_tokens=8):
+            pass
+
+    assert usage_records[-1].error_type == "timeout"
 
 
 @pytest.mark.asyncio
@@ -496,25 +709,61 @@ async def test_stream_complete_account_budget_precheck_is_mapped_to_quota_error(
 
 
 @pytest.mark.asyncio
-async def test_stream_complete_rejects_non_streaming_provider(monkeypatch) -> None:
+async def test_stream_complete_chat_completions_success(monkeypatch) -> None:
+    class _Client:
+        async def stream_complete(self, *_args, **_kwargs):
+            yield LLMStreamChunk(delta="chat")
+            yield LLMStreamChunk(done=True, input_tokens=2, output_tokens=1)
+
+    facade, quota_release, _budget_settle, usage_records = _install_stream_test_doubles(
+        monkeypatch,
+        _Client(),
+        api_format="chat_completions",
+    )
+
+    deltas = [delta async for delta in facade.stream_complete("sys", "hello", max_tokens=8)]
+
+    assert deltas == ["chat"]
+    assert quota_release.calls[-1][0][1] == 3
+    assert usage_records[-1].success is True
+
+
+@pytest.mark.asyncio
+async def test_stream_complete_rejects_explicit_disabled_model_before_quota(monkeypatch) -> None:
     async def _loader():
-        return {1: _provider(1, api_format="chat_completions")}
+        return {
+            1: _provider(
+                1,
+                api_format="responses",
+                default_model="gpt-disabled",
+                models=[{"id": "gpt-disabled", "enabled": False}],
+            )
+        }
 
-    invoked = False
-
-    def _build_client(*_args, **_kwargs):
-        nonlocal invoked
-        invoked = True
-        raise AssertionError("chat_completions provider should not be built for streaming")
-
-    monkeypatch.setattr(ai_facade, "build_llm_client", _build_client)
+    acquire = AsyncNoop(return_value=object())
+    monkeypatch.setattr(ai_facade.plugin_ai_quota, "acquire", acquire)
     facade = PluginAI(account_id=7, plugin_key="demo", provider_loader=_loader)
 
-    with pytest.raises(AIUnavailableError, match="暂不支持 streaming"):
-        async for _delta in facade.stream_complete("sys", "hello"):
+    with pytest.raises(AIUnavailableError, match="未在 provider primary 中启用"):
+        async for _ in facade.stream_complete("sys", "hello", model="gpt-disabled"):
             pass
 
-    assert invoked is False
+    assert acquire.calls == []
+
+
+@pytest.mark.asyncio
+async def test_stream_complete_protocol_error_lists_all_supported_formats() -> None:
+    async def _loader():
+        return {1: _provider(1, api_format="unsupported")}
+
+    facade = PluginAI(account_id=7, plugin_key="demo", provider_loader=_loader)
+
+    with pytest.raises(
+        AIUnavailableError,
+        match="chat_completions、responses 或 anthropic_messages",
+    ):
+        async for _ in facade.stream_complete("sys", "hello"):
+            pass
 
 
 @pytest.mark.asyncio

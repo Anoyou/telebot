@@ -19,6 +19,7 @@ import asyncio
 import time
 import uuid
 from collections.abc import Awaitable, Callable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -31,8 +32,34 @@ ALLOWED_GLOBAL_CONCURRENCY = (2, 4, 8, 12)
 
 # 全量测活默认输出上限（成本保护；用户可上调但需看到成本影响）。
 DEFAULT_FULL_MAX_TOKENS = 256
-# 超过该模型数触发前端二次确认（由前端消费；此处仅作为常量约定）。
+# 超过该模型数时，前端展示二次确认，后端也要求确认标记。
 LARGE_RUN_MODEL_THRESHOLD = 30
+# 跨 Job / 对话测活共享的进程级上游并发边界。
+MAX_DIAGNOSTIC_CONCURRENCY = max(ALLOWED_GLOBAL_CONCURRENCY)
+MAX_ACTIVE_LIVENESS_JOBS = 4
+MAX_LIVENESS_TASKS = 2_000
+
+_diagnostic_loop: asyncio.AbstractEventLoop | None = None
+_diagnostic_semaphore: asyncio.Semaphore | None = None
+
+
+def _diagnostic_limiter() -> asyncio.Semaphore:
+    """返回当前事件循环专属的诊断并发器，兼容 pytest 多 loop。"""
+
+    global _diagnostic_loop, _diagnostic_semaphore
+    loop = asyncio.get_running_loop()
+    if _diagnostic_loop is not loop or _diagnostic_semaphore is None:
+        _diagnostic_loop = loop
+        _diagnostic_semaphore = asyncio.Semaphore(MAX_DIAGNOSTIC_CONCURRENCY)
+    return _diagnostic_semaphore
+
+
+@asynccontextmanager
+async def diagnostic_slot():
+    """所有真实诊断上游调用共享的进程级并发槽位。"""
+
+    async with _diagnostic_limiter():
+        yield
 
 
 @dataclass
@@ -301,7 +328,8 @@ async def run_liveness_pool(
 
     async def _run(task: LivenessTask) -> tuple[LivenessTask, str, dict[str, Any]]:
         try:
-            status, payload = await runner(task)
+            async with diagnostic_slot():
+                status, payload = await runner(task)
         except asyncio.CancelledError:
             # 在途取消：记为 cancelled，不再向上抛以免调度器丢失结果。
             return (
@@ -339,11 +367,7 @@ async def run_liveness_pool(
                 _cancel_inflight()
 
             # 尽量填满全局并发槽位。
-            while (
-                not cancel_token.cancelled
-                and len(running) < global_concurrency
-                and _has_pending()
-            ):
+            while not cancel_token.cancelled and len(running) < global_concurrency and _has_pending():
                 task = _next_task()
                 if task is None:
                     break
@@ -395,6 +419,10 @@ _LIVENESS_JOB_TTL_SECONDS = 30 * 60  # 完成后保留 30 分钟供轮询
 _LIVENESS_JOB_MAX = 64
 
 
+class LivenessCapacityExceeded(RuntimeError):
+    """进程内已有过多活跃测活任务，拒绝继续放大资源占用。"""
+
+
 @dataclass
 class LivenessJob:
     """一次全量测活运行的内存态（不落库；诊断窗口短期保留）。"""
@@ -413,11 +441,7 @@ class LivenessJob:
         items = list(self.results)
         healthy = sum(1 for r in items if r.get("status") == diag.DIAG_HEALTHY)
         cancelled = sum(1 for r in items if r.get("status") == diag.DIAG_CANCELLED)
-        skipped = sum(
-            1
-            for r in items
-            if r.get("skipped") and r.get("status") != diag.DIAG_CANCELLED
-        )
+        skipped = sum(1 for r in items if r.get("skipped") and r.get("status") != diag.DIAG_CANCELLED)
         failed = len(items) - healthy - cancelled - skipped
         return {
             "run_id": self.run_id,
@@ -451,15 +475,14 @@ class LivenessJobRegistry:
         )
         async with self._lock:
             self._purge_locked(now)
+            active = sum(existing.status in {"queued", "running"} for existing in self._jobs.values())
+            if active >= MAX_ACTIVE_LIVENESS_JOBS:
+                raise LivenessCapacityExceeded(f"已有 {active} 个测活任务运行中，请等待完成或先停止现有任务")
             # 容量保护：超限时剔除最旧已结束 job。
             while len(self._jobs) >= _LIVENESS_JOB_MAX:
-                finished = [
-                    j
-                    for j in self._jobs.values()
-                    if j.status in {"completed", "cancelled"}
-                ]
+                finished = [j for j in self._jobs.values() if j.status in {"completed", "cancelled"}]
                 if not finished:
-                    break
+                    raise LivenessCapacityExceeded("测活任务历史已满，请稍后重试")
                 oldest = min(finished, key=lambda j: j.updated_at)
                 self._jobs.pop(oldest.run_id, None)
             self._jobs[job.run_id] = job
@@ -480,8 +503,7 @@ class LivenessJobRegistry:
         expired = [
             rid
             for rid, job in self._jobs.items()
-            if job.status in {"completed", "cancelled"}
-            and (now - job.updated_at) > _LIVENESS_JOB_TTL_SECONDS
+            if job.status in {"completed", "cancelled"} and (now - job.updated_at) > _LIVENESS_JOB_TTL_SECONDS
         ]
         for rid in expired:
             self._jobs.pop(rid, None)
@@ -497,7 +519,11 @@ __all__ = [
     "DEFAULT_GLOBAL_CONCURRENCY",
     "DEFAULT_PROVIDER_CONCURRENCY",
     "LARGE_RUN_MODEL_THRESHOLD",
+    "MAX_ACTIVE_LIVENESS_JOBS",
+    "MAX_DIAGNOSTIC_CONCURRENCY",
+    "MAX_LIVENESS_TASKS",
     "CancelToken",
+    "LivenessCapacityExceeded",
     "LivenessJob",
     "LivenessJobRegistry",
     "LivenessPreview",
@@ -506,6 +532,7 @@ __all__ = [
     "build_preview",
     "build_task_pool",
     "enabled_models_of",
+    "diagnostic_slot",
     "liveness_jobs",
     "normalize_global_concurrency",
     "run_liveness_pool",

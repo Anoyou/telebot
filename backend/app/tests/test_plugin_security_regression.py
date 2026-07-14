@@ -1286,6 +1286,8 @@ class TestPluginRepoInstallFlow:
         legacy_writer.execute("CREATE TABLE question_bank(id INTEGER PRIMARY KEY, question TEXT NOT NULL)")
         legacy_writer.execute("INSERT INTO question_bank(question) VALUES ('更新前已存在')")
         legacy_writer.commit()
+        legacy_json = tmp_path / "installed" / "update_demo" / "runtime.json"
+        legacy_json.write_text('{"round": 7}', encoding="utf-8")
 
         async def _cached(_url: str, **_kwargs):
             return repo_dir
@@ -1342,6 +1344,12 @@ class TestPluginRepoInstallFlow:
                 "更新前已存在",
                 "旧连接更新后继续写入",
             ]
+        migrated_json = tmp_path / "installed" / "_data" / "update_demo" / "runtime.json"
+        assert migrated_json.read_text(encoding="utf-8") == '{"round": 7}'
+        installed_json = tmp_path / "installed" / "update_demo" / "runtime.json"
+        assert installed_json.is_symlink()
+        installed_json.write_text('{"round": 8}', encoding="utf-8")
+        assert migrated_json.read_text(encoding="utf-8") == '{"round": 8}'
         assert not (tmp_path / "installed" / "update_demo.installing").exists()
         assert not (tmp_path / "installed" / "update_demo.bak-update").exists()
 

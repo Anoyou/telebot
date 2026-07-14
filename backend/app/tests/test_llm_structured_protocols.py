@@ -138,8 +138,8 @@ async def test_anthropic_claude_code_profile_maps_reasoning_effort() -> None:
         async def __aexit__(self, *args):
             return False
 
-        async def aiter_lines(self):
-            for line in (
+        async def aiter_bytes(self):
+            lines = (
                 'event: message_start',
                 'data: {"message":{"model":"claude","usage":{"input_tokens":1}}}',
                 '',
@@ -148,8 +148,8 @@ async def test_anthropic_claude_code_profile_maps_reasoning_effort() -> None:
                 '',
                 'event: message_delta',
                 'data: {"delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}',
-            ):
-                yield line
+            )
+            yield ("\n".join(lines) + "\n").encode()
 
     class _Client:
         async def __aenter__(self):
@@ -185,15 +185,15 @@ async def test_anthropic_complete_preserves_explicit_empty_refusal() -> None:
         async def __aexit__(self, *args):
             return False
 
-        async def aiter_lines(self):
-            for line in (
+        async def aiter_bytes(self):
+            lines = (
                 "event: message_start",
                 'data: {"message":{"model":"claude","usage":{"input_tokens":1}}}',
                 "",
                 "event: message_delta",
                 'data: {"delta":{"stop_reason":"refusal"},"usage":{"output_tokens":0}}',
-            ):
-                yield line
+            )
+            yield ("\n".join(lines) + "\n").encode()
 
     class _Client:
         async def __aenter__(self):

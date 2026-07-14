@@ -789,8 +789,10 @@ class FullLivenessRunRequest(BaseModel):
     max_tokens: int = Field(default=256, ge=64, le=8000)
     timeout_seconds: int = Field(default=90, ge=10, le=600)
     global_concurrency: int = Field(default=8)
+    confirm_large_run: bool = False
+    """任务数超过安全提示阈值时，调用方必须在明确二次确认后传 true。"""
     # 范围过滤（失败重测 / 只测某 Provider / 只测新启用模型）。
-    only_provider_ids: list[int] | None = Field(default=None)
+    only_provider_ids: list[int] | None = Field(default=None, max_length=200)
     only_models: list[str] | None = Field(default=None, max_length=500)
 
 

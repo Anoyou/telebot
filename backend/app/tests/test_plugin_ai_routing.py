@@ -194,8 +194,13 @@ def test_tools_model_rejects_explicit_unsupported_or_disabled_model() -> None:
 # ── _enabled_model_for_dto ─────────────────────────────────
 
 
-def test_enabled_model_prefers_explicit() -> None:
+def test_enabled_model_rejects_explicit_value_outside_enabled_list() -> None:
     dto = _provider(1, models=[{"id": "a", "enabled": True}])
+    assert ai_facade._enabled_model_for_dto(dto, "custom") is None
+
+
+def test_enabled_model_keeps_explicit_legacy_value_without_model_list() -> None:
+    dto = _provider(1, models=[])
     assert ai_facade._enabled_model_for_dto(dto, "custom") == "custom"
 
 
@@ -217,8 +222,13 @@ def test_enabled_model_falls_back_to_first_enabled() -> None:
     assert ai_facade._enabled_model_for_dto(dto, None) == "b"
 
 
-def test_enabled_model_no_enabled_uses_default_model() -> None:
+def test_enabled_model_all_disabled_does_not_fall_back_to_default() -> None:
     dto = _provider(1, default_model="d", models=[{"id": "a", "enabled": False}])
+    assert ai_facade._enabled_model_for_dto(dto, None) is None
+
+
+def test_enabled_model_legacy_provider_without_list_uses_default() -> None:
+    dto = _provider(1, default_model="d", models=[])
     assert ai_facade._enabled_model_for_dto(dto, None) == "d"
 
 

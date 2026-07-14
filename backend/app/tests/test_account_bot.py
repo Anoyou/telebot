@@ -5136,16 +5136,20 @@ async def test_management_bot_polling_recovers_when_initial_db_checkout_fails(mo
     def _db_factory():
         nonlocal db_calls
         db_calls += 1
-        return _DB(fail=db_calls in {1, 2})
+        return _DB(fail=db_calls == 1)
 
     sleep = AsyncMock()
+    persist_state = AsyncMock()
     monkeypatch.setattr(account_bot_runtime, "AsyncSessionLocal", _db_factory)
+    monkeypatch.setattr(account_bot_runtime, "_set_account_bot_runtime_state_best_effort", persist_state)
     monkeypatch.setattr(account_bot_runtime.asyncio, "sleep", sleep)
 
     await account_bot_runtime._polling_loop(1)
 
-    assert db_calls == 3
+    assert db_calls == 2
     sleep.assert_awaited_once_with(2.0)
+    persist_state.assert_awaited_once()
+    assert persist_state.await_args.kwargs["status"] == account_bot_runtime.ACCOUNT_BOT_STATUS_ERROR
 
 
 @pytest.mark.asyncio

@@ -4069,6 +4069,7 @@ _NON_CORE_BUILTIN_COMPAT_KEYS: frozenset[str] = frozenset(
         "math10",
     }
 )
+_PLUGIN_LOAD_ERRORS: dict[str, str] = {}
 
 
 def _installed_dir() -> Path:
@@ -4323,7 +4324,11 @@ def _manifest_compatible(manifest: Manifest) -> tuple[bool, str | None]:
         or getattr(manifest, "min_telebot_version", None)
     )
     if min_version and _version_tuple(TELEPILOT_VERSION) < _version_tuple(min_version):
-        return False, f"需要 TelePilot >= {min_version}，当前 {TELEPILOT_VERSION}"
+        return False, (
+            "当前 TelePilot 版本太旧，暂时不能运行这个插件。"
+            f"当前版本是 {TELEPILOT_VERSION}，插件至少需要 {min_version}。"
+            "请先更新 TelePilot，再重新启用插件。"
+        )
 
     missing = [
         key for key in list(getattr(manifest, "requires_features", None) or [])
@@ -4498,12 +4503,15 @@ def _load_dir(path: Path, source: str) -> dict[str, type[Plugin]]:
     ``_source`` 属性上，方便后续运行期、API 层直接读取。
     """
     init_file = path / "__init__.py"
+    _PLUGIN_LOAD_ERRORS.pop(path.name, None)
     if not init_file.exists():
         log.warning("插件目录 %s 缺少 __init__.py，跳过", path)
         return {}
     if source == "installed":
         compatible, reason = _preflight_installed_plugin(path)
         if not compatible:
+            if reason:
+                _PLUGIN_LOAD_ERRORS[path.name] = reason
             log.warning("installed 插件 %s 静态兼容检查失败，跳过: %s", path.name, reason)
             return {}
     from .base import _REGISTRY  # 延迟 import 避免循环
@@ -4585,6 +4593,8 @@ def _load_dir(path: Path, source: str) -> dict[str, type[Plugin]]:
         return {}
     ok, reason = _manifest_compatible(manifest)
     if not ok:
+        if reason:
+            _PLUGIN_LOAD_ERRORS[path.name] = reason
         log.warning("插件 %s manifest 不兼容，跳过: %s", manifest.key, reason)
         if source == "installed":
             _clear_installed_module_cache(path.name)
@@ -4600,6 +4610,7 @@ def _load_dir(path: Path, source: str) -> dict[str, type[Plugin]]:
     cls._manifest = manifest
     cls._source = source
     cls._loaded_at = time.time()
+    _PLUGIN_LOAD_ERRORS.pop(path.name, None)
     _warn_manifest_event_subscription_lint(manifest)
 
     # 防御性写入注册表：plugin.py 里若有 @register 已经写过；此处再写一次幂等
@@ -6368,8 +6379,11 @@ async def _activate(db, state: _AccountState, af: AccountFeature, redis: Any) ->
             cls = get_plugin(af.feature_key)
     if cls is None:
         if load_attempted:
-            last_error = "PLUGIN_LOAD_FAILED: plugin import failed or manifest invalid"
-            log_message = f"feature {af.feature_key} 插件目录存在但加载失败或 manifest 无效"
+            last_error = _PLUGIN_LOAD_ERRORS.get(
+                af.feature_key,
+                "插件加载失败。请检查插件文件是否完整、版本是否兼容，然后重试。",
+            )
+            log_message = f"插件 {af.feature_key} 暂时无法运行：{last_error}"
         else:
             last_error, log_message = _missing_plugin_error(af.feature_key)
         await _log(

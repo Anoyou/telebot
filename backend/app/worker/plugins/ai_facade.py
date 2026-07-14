@@ -8,6 +8,7 @@ consistent with first-party AI commands.
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
@@ -21,6 +22,7 @@ from ...db.base import AsyncSessionLocal
 from ...db.models.account import Proxy
 from ...db.models.command import (
     LLM_API_FORMAT_ANTHROPIC_MESSAGES,
+    LLM_API_FORMAT_CHAT_COMPLETIONS,
     LLM_API_FORMAT_RESPONSES,
     LLMProvider,
     default_api_format_for,
@@ -228,7 +230,13 @@ class PluginAI:
         )
         clamped_tokens = self._clamp_max_tokens(max_tokens)
         clamped_timeout = self._clamp_timeout(timeout_seconds if timeout_seconds is not None else timeout)
-        selected_model = str(model or override_model or "").strip() or None
+        requested_model = str(model or override_model or "").strip() or None
+        selected_model = _enabled_model_for_dto(primary, requested_model) if requested_model else None
+        if requested_model and not selected_model:
+            raise AIUnavailableError(f"模型 {requested_model} 未在 provider {primary.name} 中启用")
+        routed_model = None if selected_model else _enabled_model_for_dto(primary, None)
+        if not selected_model and not routed_model:
+            raise AIUnavailableError(f"provider {primary.name} 没有已启用模型")
         quota_ticket: plugin_ai_quota.PluginAIQuotaTicket | None = None
         try:
             estimated_tokens = _estimate_total_tokens(system_prompt, user_prompt, clamped_tokens)
@@ -244,6 +252,7 @@ class PluginAI:
                 system_prompt,
                 user_prompt,
                 override_model=selected_model,
+                routed_model=routed_model,
                 max_tokens=clamped_tokens,
                 timeout_seconds=clamped_timeout,
                 account_id=self.account_id,
@@ -275,7 +284,7 @@ class PluginAI:
                 used_provider,
                 mode=resolved_mode,
                 matched_tag=matched_tag,
-                selected_model=selected_model,
+                selected_model=result.model or selected_model or routed_model,
                 used_fallback=used_fallback,
             ),
         )
@@ -410,6 +419,13 @@ class PluginAI:
             tool_calls=result.tool_calls,
             input_tokens=result.usage.input_tokens,
             output_tokens=result.usage.output_tokens,
+            routing=_routing_summary(
+                used_provider,
+                mode=resolved_mode,
+                matched_tag=matched_tag,
+                selected_model=result.model or selected_model,
+                used_fallback=used_fallback,
+            ),
         )
 
     async def stream_complete(
@@ -463,14 +479,25 @@ class PluginAI:
             user_content=str(user or ""),
         )
         api_format = _effective_api_format(primary)
-        if api_format not in {LLM_API_FORMAT_RESPONSES, LLM_API_FORMAT_ANTHROPIC_MESSAGES}:
+        if api_format not in {
+            LLM_API_FORMAT_CHAT_COMPLETIONS,
+            LLM_API_FORMAT_RESPONSES,
+            LLM_API_FORMAT_ANTHROPIC_MESSAGES,
+        }:
             raise AIUnavailableError(
-                f"provider {primary.name} 暂不支持 streaming；请使用 responses 或 anthropic_messages provider"
+                f"provider {primary.name} 暂不支持 streaming；请使用 "
+                "chat_completions、responses 或 anthropic_messages provider"
             )
 
         clamped_tokens = self._clamp_max_tokens(max_tokens)
         clamped_timeout = self._clamp_timeout(timeout_seconds if timeout_seconds is not None else timeout)
-        selected_model = str(model or override_model or "").strip() or None
+        requested_model = str(model or override_model or "").strip() or None
+        selected_model = _enabled_model_for_dto(primary, requested_model) if requested_model else None
+        if requested_model and not selected_model:
+            raise AIUnavailableError(f"模型 {requested_model} 未在 provider {primary.name} 中启用")
+        routed_model = None if selected_model else _enabled_model_for_dto(primary, None)
+        if not selected_model and not routed_model:
+            raise AIUnavailableError(f"provider {primary.name} 没有已启用模型")
         quota_ticket: plugin_ai_quota.PluginAIQuotaTicket | None = None
         budget_ticket: llm_account_budget.LLMAccountBudgetTicket | None = None
         quota_settled = False
@@ -478,10 +505,42 @@ class PluginAI:
         actual_tokens = 0
         final_input_tokens = 0
         final_output_tokens = 0
-        final_model = selected_model or primary.default_model
+        final_model = selected_model or routed_model or primary.default_model
         response_preview_parts: list[str] = []
         response_preview_chars = 0
         started_at = time.monotonic()
+        estimated_tokens = 0
+        provider_call_started = False
+
+        async def settle_interrupted(error_type: str) -> None:
+            """Conservatively charge a stream once provider execution started."""
+
+            nonlocal budget_settled, quota_settled
+            charged_tokens = estimated_tokens if provider_call_started else 0
+            await llm_account_budget.settle(
+                budget_ticket,
+                actual_tokens=charged_tokens,
+                actual_provider=primary if provider_call_started else None,
+                success=False,
+                charge=provider_call_started,
+            )
+            budget_settled = True
+            await plugin_ai_quota.release(quota_ticket, charged_tokens)
+            quota_settled = True
+            await _emit_stream_usage(
+                account_id=self.account_id,
+                plugin_key=self.plugin_key,
+                provider=primary,
+                model=final_model,
+                input_tokens=charged_tokens,
+                output_tokens=0,
+                success=False,
+                error_type=error_type,
+                started_at=started_at,
+                request_preview=llm_runtime.request_preview_for_usage(system_prompt, user_prompt),
+                response_preview=llm_runtime.preview_text_for_usage("".join(response_preview_parts)),
+            )
+
         try:
             estimated_tokens = _estimate_total_tokens(system_prompt, user_prompt, clamped_tokens)
             quota_ticket = await plugin_ai_quota.acquire(
@@ -496,32 +555,35 @@ class PluginAI:
             )
             client = build_llm_client(
                 primary,
-                override_model=selected_model,
+                override_model=selected_model or routed_model,
                 proxy_url=primary.proxy_url,
                 api_format_override=None,
             )
             if inspect.isawaitable(client):
                 client = await client
-            async for chunk in client.stream_complete(
-                system_prompt,
-                user_prompt,
-                max_tokens=clamped_tokens,
-                temperature=temperature,
-                reasoning_effort=reasoning_effort,
-                timeout_seconds=clamped_timeout,
-            ):
-                if getattr(chunk, "done", False):
-                    final_input_tokens = int(getattr(chunk, "input_tokens", None) or 0)
-                    final_output_tokens = int(getattr(chunk, "output_tokens", None) or 0)
+            provider_call_started = True
+            async with asyncio.timeout(clamped_timeout):
+                async for chunk in client.stream_complete(
+                    system_prompt,
+                    user_prompt,
+                    max_tokens=clamped_tokens,
+                    temperature=temperature,
+                    reasoning_effort=reasoning_effort,
+                    timeout_seconds=clamped_timeout,
+                ):
+                    if getattr(chunk, "done", False):
+                        final_input_tokens = int(getattr(chunk, "input_tokens", None) or 0)
+                        final_output_tokens = int(getattr(chunk, "output_tokens", None) or 0)
+                        final_model = str(getattr(chunk, "model", None) or final_model or "")
+                        continue
                     final_model = str(getattr(chunk, "model", None) or final_model or "")
-                    continue
-                final_model = str(getattr(chunk, "model", None) or final_model or "")
-                delta = str(getattr(chunk, "delta", "") or "")
-                if delta:
-                    if response_preview_chars < 2000:
-                        response_preview_parts.append(delta[: max(0, 2000 - response_preview_chars)])
-                        response_preview_chars += len(delta)
-                    yield delta
+                    delta = str(getattr(chunk, "delta", "") or "")
+                    if delta:
+                        if response_preview_chars < 2000:
+                            kept = delta[: max(0, 2000 - response_preview_chars)]
+                            response_preview_parts.append(kept)
+                            response_preview_chars += len(kept)
+                        yield delta
             actual_tokens = final_input_tokens + final_output_tokens
             if actual_tokens <= 0 and quota_ticket is not None:
                 actual_tokens = int(quota_ticket.estimated_tokens or 0)
@@ -564,60 +626,33 @@ class PluginAI:
                 request_preview=llm_runtime.request_preview_for_usage(system_prompt, user_prompt),
             )
             raise AIQuotaError(str(exc)) from exc
+        except (GeneratorExit, asyncio.CancelledError) as exc:
+            await settle_interrupted("consumer_closed" if isinstance(exc, GeneratorExit) else "cancelled")
+            raise
+        except TimeoutError as exc:
+            await settle_interrupted("timeout")
+            raise AIUnavailableError(f"ctx.ai.stream_complete 超过 {clamped_timeout:g} 秒总超时时间") from exc
         except (LLMError, ValueError, NotImplementedError) as exc:
-            await llm_account_budget.settle(
-                budget_ticket,
-                actual_tokens=0,
-                actual_provider=None,
-                success=False,
-            )
-            budget_settled = True
-            await plugin_ai_quota.release(quota_ticket, 0)
-            quota_settled = True
-            await _emit_stream_usage(
-                account_id=self.account_id,
-                plugin_key=self.plugin_key,
-                provider=primary,
-                model=final_model,
-                success=False,
-                error_type=type(exc).__name__,
-                started_at=started_at,
-                request_preview=llm_runtime.request_preview_for_usage(system_prompt, user_prompt),
-                response_preview=llm_runtime.preview_text_for_usage("".join(response_preview_parts)),
-            )
+            await settle_interrupted(type(exc).__name__)
             raise AIUnavailableError(str(exc)) from exc
         except Exception:
-            await llm_account_budget.settle(
-                budget_ticket,
-                actual_tokens=0,
-                actual_provider=None,
-                success=False,
-            )
-            budget_settled = True
-            await plugin_ai_quota.release(quota_ticket, 0)
-            quota_settled = True
-            await _emit_stream_usage(
-                account_id=self.account_id,
-                plugin_key=self.plugin_key,
-                provider=primary,
-                model=final_model,
-                success=False,
-                error_type="unexpected_error",
-                started_at=started_at,
-                request_preview=llm_runtime.request_preview_for_usage(system_prompt, user_prompt),
-                response_preview=llm_runtime.preview_text_for_usage("".join(response_preview_parts)),
-            )
+            await settle_interrupted("unexpected_error")
             raise
         finally:
             if budget_ticket is not None and not budget_settled:
+                charged_tokens = estimated_tokens if provider_call_started else 0
                 await llm_account_budget.settle(
                     budget_ticket,
-                    actual_tokens=0,
-                    actual_provider=None,
+                    actual_tokens=charged_tokens,
+                    actual_provider=primary if provider_call_started else None,
                     success=False,
+                    charge=provider_call_started,
                 )
             if quota_ticket is not None and not quota_settled:
-                await plugin_ai_quota.release(quota_ticket, 0)
+                await plugin_ai_quota.release(
+                    quota_ticket,
+                    estimated_tokens if provider_call_started else 0,
+                )
 
     async def _load_providers(self) -> dict[int, LLMProviderDTO]:
         if not await is_ai_enabled():
@@ -696,17 +731,13 @@ def _explicit_enabled_models(dto: LLMProviderDTO) -> list[str]:
 
 
 def _enabled_model_for_dto(dto: LLMProviderDTO, explicit: str | None) -> str | None:
-    """为插件路由选一个已启用模型：显式 > default_model∈enabled > 第一个 enabled。"""
+    """为插件路由选择模型，不允许显式参数绕过 Provider 启用清单。"""
     explicit_clean = str(explicit or "").strip()
     if explicit_clean:
+        if dto.has_model_list() and explicit_clean not in dto.enabled_model_ids():
+            return None
         return explicit_clean
-    enabled = _explicit_enabled_models(dto)
-    default_model = str(dto.default_model or "").strip()
-    if not enabled:
-        return default_model or None
-    if default_model and default_model in enabled:
-        return default_model
-    return enabled[0]
+    return dto.pick_enabled_model()
 
 
 def _tools_model_for_dto(dto: LLMProviderDTO, explicit: str | None = None) -> str | None:
@@ -714,7 +745,7 @@ def _tools_model_for_dto(dto: LLMProviderDTO, explicit: str | None = None) -> st
     explicit_clean = str(explicit or "").strip()
     if explicit_clean:
         enabled = _explicit_enabled_models(dto)
-        if enabled and explicit_clean not in enabled:
+        if dto.has_model_list() and explicit_clean not in enabled:
             return None
         return explicit_clean if dto.capabilities_for_model(explicit_clean).tools else None
     candidate = _enabled_model_for_dto(dto, None)

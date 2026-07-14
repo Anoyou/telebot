@@ -638,6 +638,58 @@ def _attach_legacy_plugin_sqlite_links(
             _replace_with_symlink(link, target_link)
 
 
+def _relocate_legacy_plugin_json(install_path: Path, plugin_name: str) -> list[str]:
+    """Move top-level runtime JSON files into the update-safe plugin data dir."""
+
+    if not install_path.is_dir():
+        return []
+    data_dir = _plugin_data_dir(plugin_name)
+    names: list[str] = []
+    for source in sorted(install_path.glob("*.json")):
+        if source.name == "plugin.json":
+            continue
+        target = data_dir / source.name
+        if source.is_symlink():
+            if source.resolve(strict=False) != target.resolve(strict=False) or not target.is_file():
+                raise RemotePluginError(
+                    "PLUGIN_DATA_CONFLICT",
+                    f"插件 {plugin_name} 的旧 JSON 链接目标异常: {source.name}",
+                )
+            names.append(source.name)
+            continue
+        if not source.is_file():
+            continue
+        names.append(source.name)
+        if target.exists():
+            if not target.is_file():
+                raise RemotePluginError(
+                    "PLUGIN_DATA_CONFLICT",
+                    f"插件 {plugin_name} 的持久化 JSON 路径不是文件: {source.name}",
+                )
+            continue
+        temporary = target.with_name(f".{target.name}.migrating-{uuid.uuid4().hex}")
+        try:
+            shutil.copy2(source, temporary)
+            temporary.replace(target)
+        finally:
+            temporary.unlink(missing_ok=True)
+    return names
+
+
+def _attach_legacy_plugin_json_links(
+    install_path: Path,
+    plugin_name: str,
+    json_names: list[str],
+) -> None:
+    """Keep old and new plugin code pointed at migrated runtime JSON files."""
+
+    data_dir = _plugin_data_dir(plugin_name)
+    for name in json_names:
+        target = data_dir / name
+        if target.is_file():
+            _replace_with_symlink(install_path / name, target)
+
+
 def _legacy_plugin_dir(name: str) -> Path:
     """旧版本在 backend/ 工作目录下运行时可能写到 backend/plugins/installed。"""
     backend_root = Path(__file__).resolve().parents[2]
@@ -1338,6 +1390,7 @@ async def _copy_plugin_from_source_url(
 
     swapped = False
     legacy_sqlite_names: list[str] = []
+    legacy_json_names: list[str] = []
     try:
         with tempfile.TemporaryDirectory(prefix="telepilot-plugin-update-") as tmp:
             repo_dir = Path(tmp) / "repo"
@@ -1357,11 +1410,13 @@ async def _copy_plugin_from_source_url(
             _validate_runtime_plugin_shape(staging, staged_meta)
 
         legacy_sqlite_names = _relocate_legacy_plugin_sqlite(target, name)
+        legacy_json_names = _relocate_legacy_plugin_json(target, name)
         if replace_existing and target.exists():
             target.rename(backup)
         staging.rename(target)
         swapped = True
         _attach_legacy_plugin_sqlite_links(target, name, legacy_sqlite_names)
+        _attach_legacy_plugin_json_links(target, name, legacy_json_names)
     except Exception:
         if staging.exists():
             shutil.rmtree(staging, ignore_errors=True)

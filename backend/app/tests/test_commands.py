@@ -163,6 +163,156 @@ async def test_full_liveness_preview_forwards_provider_scope(monkeypatch) -> Non
     assert out.provider_total == 0
 
 
+@pytest.mark.asyncio
+async def test_full_liveness_run_rejects_task_pool_over_hard_limit(monkeypatch) -> None:
+    """后端必须独立限制任务数，不能只依赖前端预览和确认提示。"""
+    from app.schemas.command import FullLivenessRunRequest
+    from app.services.llm_liveness import LivenessTask
+
+    tasks = [
+        LivenessTask(provider_id=1, provider_name="p", model_id=f"m-{index}")
+        for index in range(commands_api.llm_liveness.MAX_LIVENESS_TASKS + 1)
+    ]
+    monkeypatch.setattr(commands_api, "_require_ai_enabled", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        commands_api,
+        "_load_liveness_provider_rows",
+        AsyncMock(return_value=[]),
+    )
+    monkeypatch.setattr(commands_api.llm_liveness, "build_task_pool", lambda _rows: tasks)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await commands_api.full_liveness_run(
+            payload=FullLivenessRunRequest(),
+            db=AsyncMock(),
+            _user=AsyncMock(),
+        )
+
+    assert exc_info.value.status_code == 422
+    assert exc_info.value.detail["code"] == "LIVENESS_TASK_LIMIT"
+
+
+@pytest.mark.asyncio
+async def test_full_liveness_run_requires_server_side_large_run_confirmation(monkeypatch) -> None:
+    """大任务不能绕过前端弹窗直接调用 API 启动。"""
+    from app.schemas.command import FullLivenessRunRequest
+    from app.services.llm_liveness import LivenessTask
+
+    tasks = [
+        LivenessTask(provider_id=1, provider_name="p", model_id=f"m-{index}")
+        for index in range(commands_api.llm_liveness.LARGE_RUN_MODEL_THRESHOLD + 1)
+    ]
+    create = AsyncMock()
+    monkeypatch.setattr(commands_api, "_require_ai_enabled", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        commands_api,
+        "_load_liveness_provider_rows",
+        AsyncMock(return_value=[]),
+    )
+    monkeypatch.setattr(commands_api.llm_liveness, "build_task_pool", lambda _rows: tasks)
+    monkeypatch.setattr(commands_api.llm_liveness.liveness_jobs, "create", create)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await commands_api.full_liveness_run(
+            payload=FullLivenessRunRequest(),
+            db=AsyncMock(),
+            _user=AsyncMock(),
+        )
+
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail["code"] == "LIVENESS_CONFIRMATION_REQUIRED"
+    assert exc_info.value.detail["task_total"] == len(tasks)
+    create.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_full_liveness_run_maps_busy_admission_to_retryable_429(monkeypatch) -> None:
+    """进程内 admission 满时，API 要给出可重试的 429 和 Retry-After。"""
+    from app.schemas.command import FullLivenessRunRequest
+
+    monkeypatch.setattr(commands_api, "_require_ai_enabled", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        commands_api,
+        "_load_liveness_provider_rows",
+        AsyncMock(return_value=[]),
+    )
+    monkeypatch.setattr(commands_api.llm_liveness, "build_task_pool", lambda _rows: [])
+    monkeypatch.setattr(
+        commands_api.llm_liveness.liveness_jobs,
+        "create",
+        AsyncMock(
+            side_effect=commands_api.llm_liveness.LivenessCapacityExceeded(
+                "已有 4 个测活任务运行中"
+            )
+        ),
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await commands_api.full_liveness_run(
+            payload=FullLivenessRunRequest(),
+            db=AsyncMock(),
+            _user=AsyncMock(),
+        )
+
+    assert exc_info.value.status_code == 429
+    assert exc_info.value.headers == {"Retry-After": "3"}
+    assert exc_info.value.detail["code"] == "LIVENESS_BUSY"
+
+
+@pytest.mark.asyncio
+async def test_full_liveness_cancel_records_single_diagnostic_usage(monkeypatch) -> None:
+    """取消在途全局巡检时应中断请求，并且只记录一次取消用量。"""
+    from app.schemas.command import FullLivenessRunRequest
+    from app.services import llm_client, llm_liveness
+
+    row = LLMProvider(
+        id=1,
+        name="Cancelable",
+        provider="openai",
+        api_key_enc="encrypted-test-key",
+        base_url="https://api.example.com/v1",
+        default_model="cancel-model",
+        api_format="responses",
+        models=[{"id": "cancel-model", "enabled": True}],
+        created_at=datetime.now(UTC),
+    )
+    entered = asyncio.Event()
+
+    class _FakeClient:
+        async def complete(self, *_args, **_kwargs):
+            entered.set()
+            await asyncio.Event().wait()
+
+    registry = llm_liveness.LivenessJobRegistry()
+    monkeypatch.setattr(commands_api.llm_liveness, "liveness_jobs", registry)
+    monkeypatch.setattr(commands_api, "_require_ai_enabled", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        commands_api,
+        "_load_liveness_provider_rows",
+        AsyncMock(return_value=[row]),
+    )
+    monkeypatch.setattr(commands_api, "_resolve_proxy_url", AsyncMock(return_value=None))
+    monkeypatch.setattr(llm_client, "build_client", lambda *_args, **_kwargs: _FakeClient())
+    emitted = _capture_llm_usage(monkeypatch)
+
+    started = await commands_api.full_liveness_run(
+        payload=FullLivenessRunRequest(),
+        db=AsyncMock(),
+        _user=AsyncMock(),
+    )
+    await asyncio.wait_for(entered.wait(), timeout=1)
+    cancelled = await commands_api.full_liveness_cancel(started.run_id, AsyncMock())
+    job = registry.get(started.run_id)
+    assert job is not None and job.bg_task is not None
+    await asyncio.wait_for(job.bg_task, timeout=1)
+
+    assert cancelled.status in {"running", "cancelled"}
+    assert job.status == "cancelled"
+    assert len(emitted) == 1
+    assert emitted[0].success is False
+    assert emitted[0].error_type == "llmerror"
+
+
 # ════════════════════════════════════════════════════════════
 # 2) Pydantic schema 校验
 # ════════════════════════════════════════════════════════════
@@ -733,9 +883,8 @@ async def test_anthropic_client_vision_body_shape() -> None:
     class _FakeStreamResp:
         status_code = 200
 
-        async def aiter_lines(self):
-            for line in sse_lines:
-                yield line
+        async def aiter_bytes(self):
+            yield ("\n".join(sse_lines) + "\n").encode()
 
         async def aiter_text(self):  # 错误路径才用得到
             yield ""
@@ -791,8 +940,8 @@ async def test_anthropic_proxy_profile_adds_only_explicit_compatibility_headers(
     class _FakeStreamResp:
         status_code = 200
 
-        async def aiter_lines(self):
-            for line in (
+        async def aiter_bytes(self):
+            lines = (
                 "event: message_start",
                 'data: {"message":{"model":"claude","usage":{"input_tokens":1}}}',
                 "",
@@ -802,8 +951,8 @@ async def test_anthropic_proxy_profile_adds_only_explicit_compatibility_headers(
                 "event: message_delta",
                 'data: {"delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}',
                 "",
-            ):
-                yield line
+            )
+            yield ("\n".join(lines) + "\n").encode()
 
         async def aiter_text(self):
             yield ""
@@ -864,9 +1013,8 @@ async def test_anthropic_client_stream_complete_yields_text_deltas() -> None:
     class _FakeStreamResp:
         status_code = 200
 
-        async def aiter_lines(self):
-            for line in sse_lines:
-                yield line
+        async def aiter_bytes(self):
+            yield ("\n".join(sse_lines) + "\n").encode()
 
         async def aiter_text(self):
             yield ""
@@ -917,9 +1065,8 @@ async def test_openai_client_stream_complete_yields_text_deltas() -> None:
     class _FakeStreamResp:
         status_code = 200
 
-        async def aiter_lines(self):
-            for line in sse_lines:
-                yield line
+        async def aiter_bytes(self):
+            yield ("\n".join(sse_lines) + "\n").encode()
 
         async def aiter_text(self):
             yield ""
@@ -1041,9 +1188,8 @@ async def test_responses_client_stream_complete_yields_text_deltas() -> None:
     class _FakeStreamResp:
         status_code = 200
 
-        async def aiter_lines(self):
-            for line in sse_lines:
-                yield line
+        async def aiter_bytes(self):
+            yield ("\n".join(sse_lines) + "\n").encode()
 
         async def aiter_text(self):
             yield ""
@@ -2428,6 +2574,57 @@ async def test_stream_chat_test_models_enforces_absolute_timeout(monkeypatch) ->
 
     error = next(event["result"] for event in events if event["type"] == "error")
     assert "总超时" in error["error"]
+
+
+@pytest.mark.asyncio
+async def test_stream_chat_disconnect_records_single_cancelled_usage(monkeypatch) -> None:
+    """客户端拿到部分文本后断开时，只写一次带部分响应的取消用量。"""
+    from app.api import commands as cmds_api
+    from app.services import llm_client
+    from app.services.llm_client import LLMStreamChunk
+
+    row = LLMProvider(
+        id=1,
+        name="Disconnect",
+        provider="openai",
+        api_key_enc=None,
+        base_url="https://api.example.com/v1",
+        default_model="disconnect-model",
+        api_format="responses",
+        created_at=datetime.now(UTC),
+    )
+
+    class _FakeClient:
+        async def stream_complete(self, *_args, **_kwargs):
+            yield LLMStreamChunk(delta="partial", model="disconnect-real")
+            await asyncio.Event().wait()
+
+    monkeypatch.setattr(
+        cmds_api.command_service,
+        "get_provider_row",
+        AsyncMock(return_value=row),
+    )
+    monkeypatch.setattr(cmds_api, "_resolve_proxy_url", AsyncMock(return_value=None))
+    monkeypatch.setattr(llm_client, "build_client", lambda *_args, **_kwargs: _FakeClient())
+    emitted = _capture_llm_usage(monkeypatch)
+
+    response = await cmds_api.stream_chat_test_models(
+        pid=1,
+        payload=ChatTestModelsRequest(models=["disconnect-model"], message="测一下"),
+        db=AsyncMock(),
+        _user=AsyncMock(),
+    )
+    start = json.loads(await anext(response.body_iterator))
+    delta = json.loads(await anext(response.body_iterator))
+    assert start["type"] == "start"
+    assert delta["type"] == "delta"
+
+    await response.body_iterator.aclose()
+
+    assert len(emitted) == 1
+    assert emitted[0].success is False
+    assert emitted[0].error_type == "llmerror"
+    assert emitted[0].response_preview == "partial"
 
 
 # ════════════════════════════════════════════════════════════

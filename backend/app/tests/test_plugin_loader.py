@@ -800,10 +800,16 @@ def test_incompatible_installed_plugin_is_rejected_before_python_exec(tmp_path) 
         encoding="utf-8",
     )
 
-    loaded = _load_dir(plugin_dir, source="installed")
+    try:
+        loaded = _load_dir(plugin_dir, source="installed")
 
-    assert loaded == {}
-    assert not sentinel.exists()
+        assert loaded == {}
+        assert not sentinel.exists()
+        assert "当前 TelePilot 版本太旧" in loader_mod._PLUGIN_LOAD_ERRORS[plugin_key]
+        assert "插件至少需要 999.0.0" in loader_mod._PLUGIN_LOAD_ERRORS[plugin_key]
+        assert "请先更新 TelePilot，再重新启用插件" in loader_mod._PLUGIN_LOAD_ERRORS[plugin_key]
+    finally:
+        loader_mod._PLUGIN_LOAD_ERRORS.pop(plugin_key, None)
 
 
 def test_clear_installed_module_cache_removes_pycache(monkeypatch, tmp_path) -> None:
@@ -1103,14 +1109,54 @@ async def test_activate_installed_plugin_import_failure_updates_runtime_status(t
 
     assert plugin_key not in state.instances
     assert af.state == "failed"
-    assert af.last_error == "PLUGIN_LOAD_FAILED: plugin import failed or manifest invalid"
+    assert af.last_error == "插件加载失败。请检查插件文件是否完整、版本是否兼容，然后重试。"
     update_status.assert_awaited_with(
         account_id=1,
         plugin_key=plugin_key,
         enabled=False,
         load_status="failed",
-        last_load_error="PLUGIN_LOAD_FAILED: plugin import failed or manifest invalid",
+        last_load_error="插件加载失败。请检查插件文件是否完整、版本是否兼容，然后重试。",
     )
+
+
+@pytest.mark.asyncio
+async def test_activate_incompatible_plugin_exposes_plain_language_version_error(tmp_path, monkeypatch) -> None:
+    plugin_key = "_test_version_too_old"
+    plugin_dir = tmp_path / "installed" / plugin_key
+    plugin_dir.mkdir(parents=True)
+    _write_installed_plugin_json(plugin_dir, plugin_key, min_telepilot_version="999.0.0")
+    (plugin_dir / "__init__.py").write_text("raise AssertionError('must not import')\n", encoding="utf-8")
+    monkeypatch.setattr(loader_mod, "_installed_dir", lambda: tmp_path / "installed")
+    update_status = AsyncMock()
+    monkeypatch.setattr(loader_mod, "update_plugin_runtime_status", update_status)
+
+    af = _FakeAF(account_id=1, feature_key=plugin_key, enabled=True, config={})
+    db = _FakeDB(
+        accounts={1: _FakeAcc(id=1)},
+        humanize={1: None},
+        afs=[af],
+        rules=[],
+        installed_plugins={plugin_key: _FakeInstalledPlugin(plugin_key)},
+    )
+    state = loader_mod._AccountState(account_id=1)
+    state.client = MagicMock()
+
+    try:
+        await loader_mod._activate(db, state, af, _FakeRedis())
+
+        assert af.state == "failed"
+        assert "当前 TelePilot 版本太旧" in af.last_error
+        assert "插件至少需要 999.0.0" in af.last_error
+        assert "请先更新 TelePilot，再重新启用插件" in af.last_error
+        update_status.assert_awaited_with(
+            account_id=1,
+            plugin_key=plugin_key,
+            enabled=False,
+            load_status="failed",
+            last_load_error=af.last_error,
+        )
+    finally:
+        loader_mod._PLUGIN_LOAD_ERRORS.pop(plugin_key, None)
 
 
 @pytest.mark.asyncio
@@ -1395,7 +1441,9 @@ def test_manifest_min_telepilot_version_is_preferred() -> None:
 
     assert ok is False
     assert reason is not None
-    assert "TelePilot >= 999.0.0" in reason
+    assert "当前 TelePilot 版本太旧" in reason
+    assert "插件至少需要 999.0.0" in reason
+    assert "请先更新 TelePilot，再重新启用插件" in reason
 
 
 def test_manifest_min_telebot_version_kept_as_legacy_alias() -> None:
@@ -1409,7 +1457,9 @@ def test_manifest_min_telebot_version_kept_as_legacy_alias() -> None:
 
     assert ok is False
     assert reason is not None
-    assert "TelePilot >= 999.0.0" in reason
+    assert "当前 TelePilot 版本太旧" in reason
+    assert "插件至少需要 999.0.0" in reason
+    assert "请先更新 TelePilot，再重新启用插件" in reason
 
 
 @pytest.mark.asyncio

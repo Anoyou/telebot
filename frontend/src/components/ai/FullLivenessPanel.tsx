@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation } from "@tanstack/react-query";
 import {
   ChevronDown,
@@ -22,6 +22,14 @@ import { Label } from "@/components/ui/label";
 import { MetaBadge } from "@/components/ui/meta-badge";
 import { Select } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { getErrMsg } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
@@ -45,6 +53,8 @@ type FullLivenessPersistedState = {
   preview: FullLivenessPreviewResponse | null;
   result: FullLivenessRunResponse | null;
   selectedProviderIds?: number[];
+  activeRunId?: string | null;
+  previewInputKey?: string | null;
 };
 
 function readFullLivenessState(): FullLivenessPersistedState {
@@ -53,16 +63,19 @@ function readFullLivenessState(): FullLivenessPersistedState {
     if (!raw) return { preview: null, result: null };
     const parsed = JSON.parse(raw) as Partial<FullLivenessPersistedState>;
     const result = parsed.result ?? null;
-    // 页面刷新会丢失轮询句柄，不能把孤立的后台任务继续显示成“运行中”。
-    const normalizedResult = result && (result.status === "queued" || result.status === "running")
-      ? { ...result, status: "cancelled" as const }
-      : result;
+    const activeRunId = typeof parsed.activeRunId === "string"
+      ? parsed.activeRunId
+      : result && (result.status === "queued" || result.status === "running")
+        ? result.run_id
+        : null;
     return {
       preview: parsed.preview ?? null,
-      result: normalizedResult,
+      result,
       selectedProviderIds: Array.isArray(parsed.selectedProviderIds)
         ? parsed.selectedProviderIds.filter((value): value is number => typeof value === "number")
         : undefined,
+      activeRunId: activeRunId || null,
+      previewInputKey: typeof parsed.previewInputKey === "string" ? parsed.previewInputKey : null,
     };
   } catch {
     return { preview: null, result: null };
@@ -77,16 +90,32 @@ function writeFullLivenessState(state: FullLivenessPersistedState): void {
   }
 }
 
-function markFullLivenessRunCancelled(runId: string): FullLivenessPersistedState {
-  const retained = readFullLivenessState();
-  if (
-    retained.result?.run_id === runId
-    && (retained.result.status === "queued" || retained.result.status === "running")
-  ) {
-    retained.result = { ...retained.result, status: "cancelled" };
-    writeFullLivenessState(retained);
-  }
-  return retained;
+function isRunActive(result: FullLivenessRunResponse | null | undefined): boolean {
+  return result?.status === "queued" || result?.status === "running";
+}
+
+function startedRunResult(
+  runId: string,
+  status: "queued" | "running",
+  taskTotal: number,
+): FullLivenessRunResponse {
+  return {
+    run_id: runId,
+    status,
+    task_total: taskTotal,
+    completed: 0,
+    healthy: 0,
+    failed: 0,
+    skipped: 0,
+    cancelled: 0,
+    results: [],
+  };
+}
+
+function responseStatus(error: unknown): number | null {
+  if (!error || typeof error !== "object") return null;
+  const response = (error as { response?: { status?: unknown } }).response;
+  return typeof response?.status === "number" ? response.status : null;
 }
 function livenessStatusTone(status: string): "success" | "warn" | "danger" | "neutral" {
   if (status === "healthy") return "success";
@@ -142,6 +171,7 @@ interface FullLivenessPanelProps {
   onSystemPromptChange: (value: string) => void;
   message: string;
   onMessageChange: (value: string) => void;
+  onBusyChange: (busy: boolean) => void;
 }
 
 export function FullLivenessPanel({
@@ -150,6 +180,7 @@ export function FullLivenessPanel({
   onSystemPromptChange,
   message,
   onMessageChange,
+  onBusyChange,
 }: FullLivenessPanelProps) {
   const retainedState = useRef(readFullLivenessState()).current;
   const [preview, setPreview] = useState<FullLivenessPreviewResponse | null>(retainedState.preview);
@@ -168,17 +199,139 @@ export function FullLivenessPanel({
   const [resultFilter, setResultFilter] = useState<LivenessResultFilter>("all");
   const [collapsedPreviewProviders, setCollapsedPreviewProviders] = useState<Record<number, boolean>>({});
   const [collapsedResultProviders, setCollapsedResultProviders] = useState<Record<number, boolean>>({});
-  const runIdRef = useRef<string | null>(null);
+  const [activeRunId, setActiveRunId] = useState<string | null>(retainedState.activeRunId || null);
+  const [previewInputKey, setPreviewInputKey] = useState<string | null>(retainedState.previewInputKey || null);
+  const [confirmationOpen, setConfirmationOpen] = useState(false);
+  const [pollingError, setPollingError] = useState<string | null>(null);
+  const [pollRetryDelayMs, setPollRetryDelayMs] = useState<number | null>(null);
+  const [cancelling, setCancelling] = useState(false);
+  const [cancelPendingStart, setCancelPendingStart] = useState(false);
+  const activeRunIdRef = useRef<string | null>(retainedState.activeRunId || null);
+  const resultRef = useRef<FullLivenessRunResponse | null>(retainedState.result);
   const pollRef = useRef<number | null>(null);
+  const pollRunRef = useRef<(runId: string) => Promise<void>>(async () => undefined);
+  const pollFailureCountRef = useRef(0);
+  const mountedRef = useRef(false);
+  const cancelRequestedRef = useRef(false);
+  const deferredUnmountCancelRef = useRef<number | null>(null);
+
+  resultRef.current = result;
+
+  const currentPreviewInputKey = useMemo(() => {
+    const selectedIds = [...selectedProviderIds].sort((a, b) => a - b);
+    const modelScope = providers
+      .filter((provider) => selectedIds.includes(provider.id))
+      .map((provider) => ({
+        providerId: provider.id,
+        models: (provider.models || [])
+          .filter((model) => model.enabled)
+          .map((model) => model.id)
+          .sort(),
+      }))
+      .sort((a, b) => a.providerId - b.providerId);
+    return JSON.stringify({
+      selectedProviderIds: selectedIds,
+      modelScope,
+      maxTokens,
+      globalConcurrency,
+    });
+  }, [globalConcurrency, maxTokens, providers, selectedProviderIds]);
+  const currentPreviewInputKeyRef = useRef(currentPreviewInputKey);
+  currentPreviewInputKeyRef.current = currentPreviewInputKey;
+
+  const clearPollTimer = useCallback(() => {
+    if (pollRef.current != null) window.clearTimeout(pollRef.current);
+    pollRef.current = null;
+  }, []);
+
+  const trackActiveRun = useCallback((runId: string | null) => {
+    activeRunIdRef.current = runId;
+    setActiveRunId(runId);
+  }, []);
+
+  const pollRun = useCallback(async (runId: string) => {
+    if (!mountedRef.current || activeRunIdRef.current !== runId) return;
+    try {
+      const next = await fullLivenessStatus(runId);
+      if (!mountedRef.current || activeRunIdRef.current !== runId) return;
+      setResult(next);
+      setPollingError(null);
+      setPollRetryDelayMs(null);
+      pollFailureCountRef.current = 0;
+      if (isRunActive(next)) {
+        clearPollTimer();
+        pollRef.current = window.setTimeout(() => {
+          void pollRunRef.current(runId);
+        }, 500);
+      } else {
+        clearPollTimer();
+        trackActiveRun(null);
+      }
+    } catch (error) {
+      if (!mountedRef.current || activeRunIdRef.current !== runId) return;
+      if (responseStatus(error) === 404) {
+        const previous = resultRef.current;
+        setResult({
+          ...(previous || startedRunResult(runId, "running", 0)),
+          status: "cancelled",
+          error: "测活运行不存在或已过期，已停止恢复轮询。",
+        });
+        clearPollTimer();
+        trackActiveRun(null);
+        return;
+      }
+      pollFailureCountRef.current += 1;
+      const retryDelay = Math.min(1000 * (2 ** (pollFailureCountRef.current - 1)), 15_000);
+      const messageText = getErrMsg(error);
+      setPollingError(messageText);
+      setPollRetryDelayMs(retryDelay);
+      if (pollFailureCountRef.current === 1) {
+        toast.error(`巡检状态暂时读取失败，将自动重试：${messageText}`);
+      }
+      clearPollTimer();
+      pollRef.current = window.setTimeout(() => {
+        void pollRunRef.current(runId);
+      }, retryDelay);
+    }
+  }, [clearPollTimer, trackActiveRun]);
+  pollRunRef.current = pollRun;
+
+  const startPolling = useCallback((runId: string, immediate = true) => {
+    clearPollTimer();
+    pollFailureCountRef.current = 0;
+    setPollingError(null);
+    setPollRetryDelayMs(null);
+    trackActiveRun(runId);
+    if (immediate) {
+      void pollRunRef.current(runId);
+    } else {
+      pollRef.current = window.setTimeout(() => {
+        void pollRunRef.current(runId);
+      }, 500);
+    }
+  }, [clearPollTimer, trackActiveRun]);
 
   useEffect(() => {
-    writeFullLivenessState({ preview, result, selectedProviderIds });
-  }, [preview, result, selectedProviderIds]);
+    writeFullLivenessState({
+      preview,
+      result,
+      selectedProviderIds,
+      activeRunId,
+      previewInputKey,
+    });
+  }, [activeRunId, preview, previewInputKey, result, selectedProviderIds]);
 
   useEffect(() => {
     const validIds = new Set(providers.map((provider) => provider.id));
     setSelectedProviderIds((current) => current.filter((id) => validIds.has(id)));
   }, [providers]);
+
+  useEffect(() => {
+    if (!preview || previewInputKey === currentPreviewInputKey) return;
+    setPreview(null);
+    setPreviewInputKey(null);
+    setConfirmationOpen(false);
+  }, [currentPreviewInputKey, preview, previewInputKey]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -190,30 +343,16 @@ export function FullLivenessPanel({
     return () => window.removeEventListener("keydown", onKeyDown);
   }, []);
 
-  useEffect(() => () => {
-    const activeRunId = runIdRef.current;
-    if (pollRef.current != null) window.clearTimeout(pollRef.current);
-    pollRef.current = null;
-    runIdRef.current = null;
-    if (activeRunId) {
-      markFullLivenessRunCancelled(activeRunId);
-      void cancelFullLiveness(activeRunId)
-        .then((next) => {
-          const retained = readFullLivenessState();
-          writeFullLivenessState({ ...retained, result: next });
-        })
-        .catch(() => undefined);
-    }
-  }, []);
-
   const previewMut = useMutation({
-    mutationFn: () => fullLivenessPreview({
+    mutationFn: (variables: { inputKey: string; providerIds: number[] }) => fullLivenessPreview({
       max_tokens: maxTokens,
       global_concurrency: globalConcurrency,
-      only_provider_ids: selectedProviderIds,
+      only_provider_ids: variables.providerIds,
     }),
-    onSuccess: (resp) => {
+    onSuccess: (resp, variables) => {
+      if (variables.inputKey !== currentPreviewInputKeyRef.current) return;
       setPreview(resp);
+      setPreviewInputKey(variables.inputKey);
       setPreviewExpanded(true);
       setCollapsedPreviewProviders({});
     },
@@ -221,41 +360,105 @@ export function FullLivenessPanel({
   });
 
   const runMut = useMutation({
-    mutationFn: () => fullLivenessRun({
-      system_prompt: systemPrompt.trim() || DEFAULT_CHAT_TEST_SYSTEM_PROMPT,
-      message: message.trim(),
-      max_tokens: maxTokens,
-      timeout_seconds: timeoutSeconds,
-      global_concurrency: globalConcurrency,
-      only_provider_ids: selectedProviderIds,
-    }),
+    mutationFn: async (variables: { confirmLargeRun: boolean }) => {
+      const response = await fullLivenessRun({
+        system_prompt: systemPrompt.trim() || DEFAULT_CHAT_TEST_SYSTEM_PROMPT,
+        message: message.trim(),
+        max_tokens: maxTokens,
+        timeout_seconds: timeoutSeconds,
+        global_concurrency: globalConcurrency,
+        confirm_large_run: variables.confirmLargeRun,
+        only_provider_ids: selectedProviderIds,
+      });
+      if (mountedRef.current && !cancelRequestedRef.current) return response;
+
+      const started = startedRunResult(response.run_id, response.status, response.task_total);
+      writeFullLivenessState({
+        ...readFullLivenessState(),
+        result: started,
+        activeRunId: response.run_id,
+      });
+      try {
+        const cancelled = await cancelFullLiveness(response.run_id);
+        writeFullLivenessState({
+          ...readFullLivenessState(),
+          result: cancelled,
+          activeRunId: isRunActive(cancelled) ? response.run_id : null,
+        });
+      } catch {
+        // 保留 run_id；若页面仍在或稍后重新进入，可继续轮询并再次停止。
+      }
+      return null;
+    },
     onSuccess: (resp) => {
-      runIdRef.current = resp.run_id;
-      setResult({ run_id: resp.run_id, status: resp.status, task_total: resp.task_total, completed: 0, healthy: 0, failed: 0, skipped: 0, cancelled: 0, results: [] });
+      cancelRequestedRef.current = false;
+      if (!mountedRef.current) return;
+      setCancelPendingStart(false);
+      setCancelling(false);
+      if (!resp) {
+        const retained = readFullLivenessState();
+        setResult(retained.result);
+        if (retained.activeRunId) startPolling(retained.activeRunId);
+        else trackActiveRun(null);
+        return;
+      }
+      const started = startedRunResult(resp.run_id, resp.status, resp.task_total);
+      writeFullLivenessState({
+        ...readFullLivenessState(),
+        result: started,
+        activeRunId: resp.run_id,
+      });
+      setResult(started);
       setResultExpanded(true);
       setResultFilter("all");
       setCollapsedResultProviders({});
-      const poll = async () => {
-        if (!runIdRef.current) return;
-        try {
-          const next = await fullLivenessStatus(runIdRef.current);
-          setResult(next);
-          if (next.status === "queued" || next.status === "running") {
-            pollRef.current = window.setTimeout(poll, 500);
-          } else {
-            runIdRef.current = null;
-          }
-        } catch (err) {
-          toast.error(getErrMsg(err));
-          runIdRef.current = null;
-        }
-      };
-      void poll();
+      startPolling(resp.run_id);
     },
-    onError: (err) => toast.error(getErrMsg(err)),
+    onError: (err) => {
+      cancelRequestedRef.current = false;
+      if (!mountedRef.current) return;
+      setCancelPendingStart(false);
+      setCancelling(false);
+      toast.error(getErrMsg(err));
+    },
   });
 
-  const running = runMut.isPending || result?.status === "queued" || result?.status === "running";
+  const running = runMut.isPending || activeRunId !== null || isRunActive(result);
+
+  useEffect(() => {
+    onBusyChange(running);
+    return () => onBusyChange(false);
+  }, [onBusyChange, running]);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    if (deferredUnmountCancelRef.current != null) {
+      window.clearTimeout(deferredUnmountCancelRef.current);
+      deferredUnmountCancelRef.current = null;
+    }
+    const retainedRunId = activeRunIdRef.current;
+    if (retainedRunId) startPolling(retainedRunId);
+
+    return () => {
+      mountedRef.current = false;
+      clearPollTimer();
+      const runId = activeRunIdRef.current;
+      if (!runId) return;
+      // StrictMode 会立刻重新挂载 effect；延后一拍可避免开发模式误取消真实任务。
+      deferredUnmountCancelRef.current = window.setTimeout(() => {
+        if (mountedRef.current) return;
+        void cancelFullLiveness(runId)
+          .then((next) => {
+            writeFullLivenessState({
+              ...readFullLivenessState(),
+              result: next,
+              activeRunId: isRunActive(next) ? runId : null,
+            });
+          })
+          .catch(() => undefined);
+      }, 0);
+    };
+  }, [clearPollTimer, startPolling]);
   const visibleProviders = useMemo(() => {
     const query = providerQuery.trim().toLowerCase();
     if (!query) return providers;
@@ -272,6 +475,8 @@ export function FullLivenessPanel({
     if (running) return;
     setSelectedProviderIds([...new Set(next)]);
     setPreview(null);
+    setPreviewInputKey(null);
+    setConfirmationOpen(false);
   };
 
   const toggleProvider = (providerId: number) => {
@@ -281,6 +486,74 @@ export function FullLivenessPanel({
         : [...selectedProviderIds, providerId],
     );
   };
+
+  const refreshPreview = () => {
+    previewMut.mutate({
+      inputKey: currentPreviewInputKey,
+      providerIds: [...selectedProviderIds],
+    });
+  };
+
+  const beginRun = () => {
+    if (!preview || previewInputKey !== currentPreviewInputKey) {
+      setConfirmationOpen(false);
+      setPreview(null);
+      setPreviewInputKey(null);
+      toast.error("巡检范围或请求设置已经变化，请重新刷新模型范围。");
+      return;
+    }
+    cancelRequestedRef.current = false;
+    setCancelPendingStart(false);
+    setConfirmationOpen(false);
+    onBusyChange(true);
+    runMut.mutate({ confirmLargeRun: preview.needs_confirmation });
+  };
+
+  const requestRun = () => {
+    if (!preview || previewInputKey !== currentPreviewInputKey) {
+      setPreview(null);
+      setPreviewInputKey(null);
+      toast.error("请先刷新当前模型范围。");
+      return;
+    }
+    if (preview.needs_confirmation) {
+      setConfirmationOpen(true);
+      return;
+    }
+    beginRun();
+  };
+
+  const stopRun = async () => {
+    cancelRequestedRef.current = true;
+    const runId = activeRunIdRef.current;
+    if (!runId) {
+      if (runMut.isPending) {
+        setCancelPendingStart(true);
+        setCancelling(true);
+      }
+      return;
+    }
+    setCancelling(true);
+    try {
+      const next = await cancelFullLiveness(runId);
+      if (!mountedRef.current || activeRunIdRef.current !== runId) return;
+      setResult(next);
+      if (isRunActive(next)) {
+        startPolling(runId, false);
+      } else {
+        clearPollTimer();
+        trackActiveRun(null);
+      }
+    } catch (error) {
+      if (mountedRef.current) toast.error(getErrMsg(error));
+    } finally {
+      if (mountedRef.current) {
+        setCancelling(false);
+        setCancelPendingStart(false);
+      }
+    }
+  };
+
   const filteredResults = result?.results.filter((item) => (
     resultFilter === "all" || livenessResultCategory(item) === resultFilter
   )) ?? [];
@@ -343,8 +616,10 @@ export function FullLivenessPanel({
       ) : null}
       <aside
         className={cn(
-          "fixed inset-y-0 left-0 z-[70] w-[min(320px,90vw)] overflow-y-auto border-r bg-card p-4 shadow-lg transition-transform duration-200 xl:static xl:z-auto xl:w-auto xl:translate-x-0 xl:rounded-lg xl:border xl:shadow-sm",
-          scopeOpen ? "translate-x-0" : "-translate-x-full xl:translate-x-0",
+          "fixed bottom-[calc(4.75rem+env(safe-area-inset-bottom))] left-0 top-[calc(5rem+env(safe-area-inset-top))] z-[70] w-[min(320px,90vw)] overflow-y-auto border-r bg-card p-4 shadow-lg transition-transform duration-200 sm:bottom-0 xl:static xl:z-auto xl:w-auto xl:translate-x-0 xl:rounded-lg xl:border xl:shadow-sm",
+          scopeOpen
+            ? "visible translate-x-0"
+            : "invisible -translate-x-full xl:visible xl:translate-x-0",
         )}
         aria-label="全局巡检 Provider 范围"
       >
@@ -438,6 +713,12 @@ export function FullLivenessPanel({
           <div className="mt-1 truncate text-xs text-muted-foreground" title={message}>
             测活词：{message || "未填写"}
           </div>
+          {pollingError && activeRunId ? (
+            <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[11px] text-amber-600 dark:text-amber-400">
+              <span>状态读取失败，后台任务仍受控。</span>
+              {pollRetryDelayMs ? <span>将在 {Math.ceil(pollRetryDelayMs / 1000)} 秒内重试。</span> : null}
+            </div>
+          ) : null}
         </div>
         <div className="min-h-0 flex-1 space-y-3 overflow-y-auto bg-muted/20 p-3 text-xs">
           {preview ? (
@@ -626,20 +907,16 @@ export function FullLivenessPanel({
             <Button
               type="button"
               variant="outline"
-              onClick={() => {
-                if (runIdRef.current) {
-                  cancelFullLiveness(runIdRef.current)
-                    .then(setResult)
-                    .catch((err) => toast.error(getErrMsg(err)));
-                }
-              }}
+              disabled={cancelling}
+              onClick={() => void stopRun()}
             >
-              停止
+              {cancelling ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : null}
+              {cancelPendingStart ? "等待任务编号后停止" : cancelling ? "停止中…" : "停止"}
             </Button>
           ) : null}
           <Button
             type="button"
-            onClick={() => runMut.mutate()}
+            onClick={requestRun}
             disabled={running || selectedProviderIds.length === 0 || !preview || preview.task_total === 0 || !message.trim() || !systemPrompt.trim()}
           >
             {running ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : null}
@@ -658,8 +935,10 @@ export function FullLivenessPanel({
       ) : null}
       <aside
         className={cn(
-          "fixed inset-y-0 right-0 z-[70] w-[min(320px,90vw)] overflow-y-auto border-l bg-card p-4 shadow-lg transition-transform duration-200 2xl:static 2xl:z-auto 2xl:w-auto 2xl:translate-x-0 2xl:rounded-lg 2xl:border 2xl:shadow-sm",
-          settingsOpen ? "translate-x-0" : "translate-x-full 2xl:translate-x-0",
+          "fixed bottom-[calc(4.75rem+env(safe-area-inset-bottom))] right-0 top-[calc(5rem+env(safe-area-inset-top))] z-[70] w-[min(320px,90vw)] overflow-y-auto border-l bg-card p-4 shadow-lg transition-transform duration-200 sm:bottom-0 2xl:static 2xl:z-auto 2xl:w-auto 2xl:translate-x-0 2xl:rounded-lg 2xl:border 2xl:shadow-sm",
+          settingsOpen
+            ? "visible translate-x-0"
+            : "invisible translate-x-full 2xl:visible 2xl:translate-x-0",
         )}
         aria-label="全局巡检请求设置"
       >
@@ -688,7 +967,7 @@ export function FullLivenessPanel({
               max={8000}
               value={maxTokens}
               onChange={(event) => setMaxTokens(Math.max(64, Math.min(8000, Number(event.target.value) || 256)))}
-              disabled={running}
+              disabled={running || previewMut.isPending}
             />
           </div>
           <div className="space-y-1.5">
@@ -708,7 +987,7 @@ export function FullLivenessPanel({
           <Select
             value={String(globalConcurrency)}
             onChange={(event) => setGlobalConcurrency(Number(event.target.value))}
-            disabled={running}
+            disabled={running || previewMut.isPending}
           >
             {[2, 4, 8, 12].map((value) => (
               <option key={value} value={value}>{value}</option>
@@ -739,13 +1018,35 @@ export function FullLivenessPanel({
           type="button"
           variant="outline"
           className="mt-4 w-full"
-          onClick={() => previewMut.mutate()}
+          onClick={refreshPreview}
           disabled={previewMut.isPending || running || selectedProviderIds.length === 0 || !message.trim() || !systemPrompt.trim()}
         >
           {previewMut.isPending ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : null}
           刷新所选模型范围
         </Button>
       </aside>
+
+      <Dialog open={confirmationOpen} onOpenChange={setConfirmationOpen}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>确认执行大规模巡检</DialogTitle>
+            <DialogDescription>
+              本次将并发测试 {preview?.task_total || 0} 个模型，最大可能输出约 {preview?.max_output_tokens || 0} Token，会消耗真实上游额度。
+            </DialogDescription>
+          </DialogHeader>
+          <div className="rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm leading-6 text-amber-700 dark:text-amber-300">
+            请确认 Provider 范围和 Token 上限无误后再继续。
+          </div>
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={() => setConfirmationOpen(false)}>
+              取消
+            </Button>
+            <Button type="button" onClick={beginRun}>
+              确认并开始
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

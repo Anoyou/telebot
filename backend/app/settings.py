@@ -120,8 +120,9 @@ class Settings(BaseSettings):
     llm_premium_daily_request_limit_per_account: int = 0
     # 0 表示不覆盖调用方传入的 max_tokens。
     llm_max_output_tokens: int = 0
-    # 第三方插件 ctx.ai 的额外保护上限；插件只能请求文本补全，且输出/超时默认收紧。
-    plugin_ai_max_output_tokens: int = 4096
+    # 第三方插件 ctx.ai 的额外保护上限；仅放宽调用方可请求的上限，
+    # 普通插件仍按各自传入的 max_tokens 执行。长时间离线建库任务可主动请求大输出。
+    plugin_ai_max_output_tokens: int = 131072
     plugin_ai_timeout_seconds: int = 600
     # 插件 handler 协作式 deadline 与连续失败熔断。不是 CPU/恶意代码沙箱。
     plugin_invoke_timeout_seconds: float = 30.0

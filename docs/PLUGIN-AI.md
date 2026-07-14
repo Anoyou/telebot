@@ -110,6 +110,8 @@ result = await ctx.ai.run_agent(
 
 ## 配额限制
 
+`plugin_ai_max_output_tokens` 是宿主对单次插件 AI 输出的保护上限，默认为 `131072`。它只是上限：插件仍必须通过 `max_tokens` 主动请求所需长度，普通对话不会因此自动变长。AI 题库、离线摘要等长时间任务仍应使用可恢复的分段格式，避免上游模型的实际最大输出低于请求值时丢失整批结果。
+
 平台从 `system_setting` 的 `plugin_ai_quota` 读取插件 AI 配额配置。示例：
 
 ```json

@@ -144,13 +144,16 @@ class _BudgetRedis:
                         self.strings.get(daily_premium_key, 0) - reservation["premium_units"],
                     )
                 if actual_premium:
-                    self.strings[actual_premium_key] = self.strings.get(actual_premium_key, 0) + actual_premium
+                    self.strings[actual_premium_key] = (
+                        self.strings.get(actual_premium_key, 0) + actual_premium
+                    )
         return [1, "ok"]
 
 
 class _BrokenBudgetRedis:
     async def ping(self) -> bool:
         raise RuntimeError("redis down")
+
 
 # ════════════════════════════════════════════════════════════
 # 1) LLMProviderDTO 测试
@@ -228,6 +231,23 @@ def test_dto_from_dict_missing_fields() -> None:
     assert dto.cost_tier == 2
 
 
+@pytest.mark.asyncio
+async def test_stream_sse_rejects_oversized_frame_without_newline() -> None:
+    from app.services import llm_client
+
+    class _Response:
+        async def aiter_bytes(self):
+            yield b"data: " + (b"x" * 64)
+
+    with pytest.raises(LLMError, match="单个 SSE 事件"):
+        async for _line in llm_client._iter_limited_sse_lines(
+            _Response(),
+            line_limit_bytes=32,
+            total_limit_bytes=128,
+        ):
+            pass
+
+
 def test_dto_has_api_key() -> None:
     """has_api_key 属性正确判断。"""
     # ollama 不需要 key
@@ -267,8 +287,12 @@ def test_build_fallback_chain() -> None:
     """build_fallback_chain 正确构造 chain。"""
     providers = {
         1: LLMProviderDTO(id=1, name="primary", provider="openai", tags=["chat"], cost_tier=2),
-        2: LLMProviderDTO(id=2, name="fallback", provider="openai", tags=["chat"], cost_tier=1, api_key_enc="key"),
-        3: LLMProviderDTO(id=3, name="same-tag-cheaper", provider="openai", tags=["chat"], cost_tier=1, api_key_enc="key"),
+        2: LLMProviderDTO(
+            id=2, name="fallback", provider="openai", tags=["chat"], cost_tier=1, api_key_enc="key"
+        ),
+        3: LLMProviderDTO(
+            id=3, name="same-tag-cheaper", provider="openai", tags=["chat"], cost_tier=1, api_key_enc="key"
+        ),
     }
     primary = providers[1]
 
@@ -589,6 +613,42 @@ async def test_llm_budget_failed_call_releases_reservation(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_llm_budget_interrupted_stream_keeps_conservative_charge(monkeypatch) -> None:
+    from app.services import llm_account_budget
+    from app.services import llm_runtime as _rt
+
+    redis = _BudgetRedis()
+    provider = LLMProviderDTO(id=1, name="primary", provider="openai", cost_tier=3)
+    monkeypatch.setattr(llm_account_budget, "get_redis", lambda: redis)
+    monkeypatch.setattr(
+        llm_account_budget,
+        "_load_budget_limits",
+        AsyncMock(
+            return_value={
+                "per_minute": 10,
+                "daily_requests": 10,
+                "daily_tokens": 100,
+                "premium_daily": 10,
+            }
+        ),
+    )
+
+    check = await _rt._check_budget(7, provider, 30)
+    assert check.ticket is not None
+    await llm_account_budget.settle(
+        check.ticket,
+        actual_tokens=30,
+        actual_provider=provider,
+        success=False,
+        charge=True,
+    )
+
+    assert any(value == 1 for key, value in redis.strings.items() if ":daily_requests:" in key)
+    assert any(value == 30 for key, value in redis.strings.items() if ":daily_tokens:" in key)
+    assert any(value == 1 for key, value in redis.strings.items() if ":daily_premium:" in key)
+
+
+@pytest.mark.asyncio
 async def test_llm_budget_premium_limit_is_per_provider(monkeypatch) -> None:
     """高价 provider 每日次数沿用旧语义：同账号下按 provider_id 分桶。"""
     from app.services import llm_account_budget
@@ -630,8 +690,12 @@ async def test_llm_budget_fallback_settlement_corrects_tokens_and_premium(monkey
     from app.services.llm_client import LLMResult
 
     redis = _BudgetRedis()
-    primary = LLMProviderDTO(id=1, name="primary", provider="openai", cost_tier=3)
-    fallback = LLMProviderDTO(id=2, name="fallback", provider="openai", cost_tier=1)
+    primary = LLMProviderDTO(
+        id=1, name="primary", provider="openai", cost_tier=3, default_model="primary-model"
+    )
+    fallback = LLMProviderDTO(
+        id=2, name="fallback", provider="openai", cost_tier=1, default_model="fallback-model"
+    )
     chain = FallbackChain(primary=primary, fallbacks=[fallback])
 
     monkeypatch.setattr(llm_account_budget, "get_redis", lambda: redis)
@@ -679,8 +743,12 @@ async def test_llm_budget_fallback_settlement_moves_premium_bucket_to_actual_pro
     from app.services.llm_client import LLMResult
 
     redis = _BudgetRedis()
-    primary = LLMProviderDTO(id=1, name="primary", provider="openai", cost_tier=3)
-    fallback = LLMProviderDTO(id=2, name="fallback", provider="openai", cost_tier=3)
+    primary = LLMProviderDTO(
+        id=1, name="primary", provider="openai", cost_tier=3, default_model="primary-model"
+    )
+    fallback = LLMProviderDTO(
+        id=2, name="fallback", provider="openai", cost_tier=3, default_model="fallback-model"
+    )
     chain = FallbackChain(primary=primary, fallbacks=[fallback])
 
     monkeypatch.setattr(llm_account_budget, "get_redis", lambda: redis)
@@ -706,12 +774,8 @@ async def test_llm_budget_fallback_settlement_moves_premium_bucket_to_actual_pro
 
     await _rt.call_with_fallback(chain, "sys", "user", max_tokens=30, account_id=7)
 
-    primary_premium = [
-        value for key, value in redis.strings.items() if ":daily_premium:1:" in key
-    ]
-    fallback_premium = [
-        value for key, value in redis.strings.items() if ":daily_premium:2:" in key
-    ]
+    primary_premium = [value for key, value in redis.strings.items() if ":daily_premium:1:" in key]
+    fallback_premium = [value for key, value in redis.strings.items() if ":daily_premium:2:" in key]
     assert primary_premium == [0]
     assert fallback_premium == [1]
 
@@ -832,6 +896,7 @@ async def test_call_with_fallback_success_on_primary(monkeypatch) -> None:
     class _FakeClient:
         async def complete(self, system, user, max_tokens=512, images=None):
             from app.services.llm_client import LLMResult
+
             return LLMResult(text="ok", model="gpt-4o", input_tokens=1, output_tokens=1)
 
     async def fake_call(*a, **k):
@@ -840,9 +905,7 @@ async def test_call_with_fallback_success_on_primary(monkeypatch) -> None:
     chain = FallbackChain(primary=primary)
 
     with patch("app.services.llm_runtime.build_client_from_dto", fake_call):
-        result, provider, used_fb = await _rt.call_with_fallback(
-            chain, "sys", "user", max_tokens=100
-        )
+        result, provider, used_fb = await _rt.call_with_fallback(chain, "sys", "user", max_tokens=100)
 
     assert result.text == "ok"
     assert provider.id == 1
@@ -867,12 +930,14 @@ async def test_call_with_fallback_falls_back_on_failure(monkeypatch) -> None:
         async def complete(self, system, user, max_tokens=512, images=None):
             attempt_order.append("primary")
             from app.services.llm_client import LLMError
+
             raise LLMError("primary failed", retryable=True)
 
     class _FallbackClient:
         async def complete(self, system, user, max_tokens=512, images=None):
             attempt_order.append("fallback")
             from app.services.llm_client import LLMResult
+
             return LLMResult(text="fallback-ok", model="gpt-4o", input_tokens=1, output_tokens=1)
 
     async def fake_build(dto, **k):
@@ -883,15 +948,50 @@ async def test_call_with_fallback_falls_back_on_failure(monkeypatch) -> None:
     chain = FallbackChain(primary=primary, fallbacks=[fallback])
 
     with patch("app.services.llm_runtime.build_client_from_dto", fake_build):
-        result, provider, used_fb = await _rt.call_with_fallback(
-            chain, "sys", "user", max_tokens=100
-        )
+        result, provider, used_fb = await _rt.call_with_fallback(chain, "sys", "user", max_tokens=100)
 
     assert result.text == "fallback-ok"
     assert provider.id == 2
     assert used_fb is True
     assert "primary" in attempt_order
     assert "fallback" in attempt_order
+
+
+@pytest.mark.asyncio
+async def test_call_with_fallback_skips_fallback_with_all_models_disabled(monkeypatch) -> None:
+    from app.services import llm_runtime as _rt
+
+    primary = LLMProviderDTO(
+        id=1,
+        name="primary",
+        provider="openai",
+        default_model="primary-model",
+        models=[{"id": "primary-model", "enabled": True}],
+    )
+    fallback = LLMProviderDTO(
+        id=2,
+        name="fallback",
+        provider="openai",
+        default_model="fallback-model",
+        models=[{"id": "fallback-model", "enabled": False}],
+    )
+    calls: list[int] = []
+
+    async def fake_call(provider_dto, *_args, **_kwargs):
+        calls.append(provider_dto.id)
+        raise LLMError("temporary", retryable=True)
+
+    monkeypatch.setattr(_rt, "_call_with_retry", fake_call)
+
+    with pytest.raises(LLMCallFailed, match="没有已启用模型"):
+        await _rt.call_with_fallback(
+            FallbackChain(primary, [fallback]),
+            "sys",
+            "user",
+            routed_model="primary-model",
+        )
+
+    assert calls == [primary.id]
 
 
 @pytest.mark.asyncio
@@ -910,6 +1010,7 @@ async def test_call_with_fallback_all_fail_raises(monkeypatch) -> None:
         async def complete(self, system, user, max_tokens=512, images=None):
             # 不可重试的错误（认证失败）
             from app.services.llm_client import LLMError
+
             raise LLMError("401 Unauthorized", retryable=False)
 
     async def fake_build(*a, **k):
@@ -1040,12 +1141,20 @@ def _openai_client_factory(dto, override_model=None, proxy_url=None):
 
 def _fail_ok_chain() -> FallbackChain:
     primary = LLMProviderDTO(
-        id=1, name="primary", provider="openai",
-        base_url="https://fail.example/v1", default_model="gpt-4o", api_key_enc="sk-test",
+        id=1,
+        name="primary",
+        provider="openai",
+        base_url="https://fail.example/v1",
+        default_model="gpt-4o",
+        api_key_enc="sk-test",
     )
     fallback = LLMProviderDTO(
-        id=2, name="fallback", provider="openai",
-        base_url="https://ok.example/v1", default_model="gpt-4o", api_key_enc="sk-test",
+        id=2,
+        name="fallback",
+        provider="openai",
+        base_url="https://ok.example/v1",
+        default_model="gpt-4o",
+        api_key_enc="sk-test",
     )
     return FallbackChain(primary=primary, fallbacks=[fallback])
 
@@ -1078,9 +1187,7 @@ async def test_openai_client_wraps_typed_error(
     else:
         primary_outcome = _FakeHTTPResponse(outcome, text="upstream error")
 
-    monkeypatch.setattr(
-        llm_client.httpx, "AsyncClient", _make_fake_async_client(primary_outcome, [])
-    )
+    monkeypatch.setattr(llm_client.httpx, "AsyncClient", _make_fake_async_client(primary_outcome, []))
 
     client = OpenAIClient(api_key="sk-test", base_url="https://fail.example/v1", model="gpt-4o")
     with pytest.raises(LLMError) as exc_info:
@@ -1098,14 +1205,12 @@ async def test_openai_client_classifies_policy_403_as_account_scope(monkeypatch)
     monkeypatch.setattr(
         llm_client.httpx,
         "AsyncClient",
-        _make_fake_async_client(
-            _FakeHTTPResponse(403, text="request blocked by safety policy"), []
-        ),
+        _make_fake_async_client(_FakeHTTPResponse(403, text="request blocked by safety policy"), []),
     )
     with pytest.raises(LLMError) as exc_info:
-        await OpenAIClient(
-            api_key="sk-test", base_url="https://fail.example/v1", model="gpt-4o"
-        ).complete("sys", "user", max_tokens=10)
+        await OpenAIClient(api_key="sk-test", base_url="https://fail.example/v1", model="gpt-4o").complete(
+            "sys", "user", max_tokens=10
+        )
 
     assert exc_info.value.scope is LLMErrorScope.ACCOUNT_POLICY
 
@@ -1120,7 +1225,8 @@ async def test_call_with_fallback_network_error_retries_and_falls_back(monkeypat
 
     call_log: list[str] = []
     monkeypatch.setattr(
-        llm_client.httpx, "AsyncClient",
+        llm_client.httpx,
+        "AsyncClient",
         _make_fake_async_client(httpx.ConnectError("connection refused"), call_log),
     )
     # 去掉退避真实 sleep，让重试瞬间完成
@@ -1147,7 +1253,8 @@ async def test_call_with_fallback_retryable_status_falls_back(monkeypatch, statu
 
     call_log: list[str] = []
     monkeypatch.setattr(
-        llm_client.httpx, "AsyncClient",
+        llm_client.httpx,
+        "AsyncClient",
         _make_fake_async_client(_FakeHTTPResponse(status, text="upstream error"), call_log),
     )
     monkeypatch.setattr(_rt, "_compute_retry_delay", lambda attempt: 0.0)
@@ -1170,7 +1277,8 @@ async def test_call_with_fallback_provider_auth_error_skips_to_fallback(monkeypa
 
     call_log: list[str] = []
     monkeypatch.setattr(
-        llm_client.httpx, "AsyncClient",
+        llm_client.httpx,
+        "AsyncClient",
         _make_fake_async_client(_FakeHTTPResponse(401, text="unauthorized"), call_log),
     )
     # 即便退避可用，认证错误也不该产生任何重试
@@ -1339,8 +1447,10 @@ async def test_premium_fallback_budget_gate_blocks_network_call(monkeypatch) -> 
     from app.services import llm_runtime as _rt
 
     redis = _BudgetRedis()
-    primary = LLMProviderDTO(id=1, name="cheap", provider="openai", cost_tier=1)
-    premium = LLMProviderDTO(id=2, name="premium", provider="openai", cost_tier=3)
+    primary = LLMProviderDTO(id=1, name="cheap", provider="openai", cost_tier=1, default_model="cheap-model")
+    premium = LLMProviderDTO(
+        id=2, name="premium", provider="openai", cost_tier=3, default_model="premium-model"
+    )
     premium_key = llm_account_budget._daily_premium_key(7, premium.id)
     redis.strings[premium_key] = 1
     called: list[int] = []

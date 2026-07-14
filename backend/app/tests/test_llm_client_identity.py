@@ -225,8 +225,8 @@ async def test_anthropic_client_sends_claude_code_identity_and_no_telepilot() ->
         async def __aexit__(self, *a):
             return False
 
-        async def aiter_lines(self):
-            for line in (
+        async def aiter_bytes(self):
+            lines = (
                 "event: message_start",
                 'data: {"message":{"model":"claude","usage":{"input_tokens":1}}}',
                 "",
@@ -235,8 +235,8 @@ async def test_anthropic_client_sends_claude_code_identity_and_no_telepilot() ->
                 "",
                 "event: message_delta",
                 'data: {"delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}',
-            ):
-                yield line
+            )
+            yield ("\n".join(lines) + "\n").encode()
 
     class _Client:
         async def __aenter__(self):
@@ -277,8 +277,8 @@ async def test_anthropic_claude_code_proxy_keeps_beta_independent_of_identity() 
         async def __aexit__(self, *a):
             return False
 
-        async def aiter_lines(self):
-            for line in (
+        async def aiter_bytes(self):
+            lines = (
                 "event: message_start",
                 'data: {"message":{"model":"claude","usage":{"input_tokens":1}}}',
                 "",
@@ -287,8 +287,8 @@ async def test_anthropic_claude_code_proxy_keeps_beta_independent_of_identity() 
                 "",
                 "event: message_delta",
                 'data: {"delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}',
-            ):
-                yield line
+            )
+            yield ("\n".join(lines) + "\n").encode()
 
     class _Client:
         async def __aenter__(self):

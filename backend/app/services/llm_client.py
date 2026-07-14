@@ -66,6 +66,11 @@ from .llm_protocol import (
 _HTTP_TIMEOUT = httpx.Timeout(30.0, connect=10.0)
 # 本地桥接（如 grok-bridge）需要等待浏览器 JS 执行 + LLM 生成，超时更长
 _LOCAL_TIMEOUT = httpx.Timeout(180.0, connect=10.0)
+# 流式上游属于不可信输入：限制单行与整条响应，避免 ``aiter_lines`` 在缺少
+# 换行时无限缓存。8000 output tokens 的正常文本通常远低于这些上限。
+_STREAM_SSE_LINE_LIMIT_BYTES = 1_048_576
+_STREAM_SSE_TOTAL_LIMIT_BYTES = 8 * 1_048_576
+
 
 def _llm_headers(
     *,
@@ -120,9 +125,9 @@ def _normalize_reasoning_effort(value: str | None) -> str | None:
 class LLMResult:
     """LLM 调用的统一结果。"""
 
-    text: str           # 模型回答正文
-    model: str          # 实际使用的模型名（便于 TG 内回显）
-    input_tokens: int   # 入 tokens；若供应商不返就给 0
+    text: str  # 模型回答正文
+    model: str  # 实际使用的模型名（便于 TG 内回显）
+    input_tokens: int  # 入 tokens；若供应商不返就给 0
     output_tokens: int  # 出 tokens；若供应商不返就给 0
     image_urls: list = field(default_factory=list)  # LLM 生成的图片 URL（如 Grok 文生图）
     image_data: list = field(default_factory=list)  # LLM 生成的图片 base64 data URI（如 Grok 文生图）
@@ -208,6 +213,46 @@ async def _read_limited_stream_json(response: Any, *, limit_bytes: int = 1_048_5
         return json.loads(bytes(body))
     except (json.JSONDecodeError, UnicodeDecodeError):
         raise LLMError("上游 streaming 返回了无法解析的 JSON") from None
+
+
+async def _iter_limited_sse_lines(
+    response: Any,
+    *,
+    line_limit_bytes: int = _STREAM_SSE_LINE_LIMIT_BYTES,
+    total_limit_bytes: int = _STREAM_SSE_TOTAL_LIMIT_BYTES,
+) -> AsyncIterator[str]:
+    """按原始字节有界解析 SSE 行，拒绝超长单行和无限滴流响应。"""
+
+    pending = bytearray()
+    total = 0
+    async for chunk in response.aiter_bytes():
+        if not isinstance(chunk, (bytes, bytearray)):
+            raise LLMError("上游 streaming 返回了无效的字节流")
+        total += len(chunk)
+        if total > total_limit_bytes:
+            raise LLMError("上游 streaming 响应超过 8 MiB 限制")
+        pending.extend(chunk)
+        while True:
+            newline = pending.find(b"\n")
+            if newline < 0:
+                if len(pending) > line_limit_bytes:
+                    raise LLMError("上游 streaming 单个 SSE 事件超过 1 MiB 限制")
+                break
+            raw = bytes(pending[:newline])
+            del pending[: newline + 1]
+            if len(raw) > line_limit_bytes:
+                raise LLMError("上游 streaming 单个 SSE 事件超过 1 MiB 限制")
+            try:
+                yield raw.rstrip(b"\r").decode("utf-8")
+            except UnicodeDecodeError:
+                raise LLMError("上游 streaming 返回了无效的 UTF-8 SSE 数据") from None
+    if pending:
+        if len(pending) > line_limit_bytes:
+            raise LLMError("上游 streaming 单个 SSE 事件超过 1 MiB 限制")
+        try:
+            yield bytes(pending).rstrip(b"\r").decode("utf-8")
+        except UnicodeDecodeError:
+            raise LLMError("上游 streaming 返回了无效的 UTF-8 SSE 数据") from None
 
 
 def _model_response_from_result(result: LLMResult) -> ModelResponse:
@@ -310,9 +355,7 @@ def _chat_messages(messages: tuple[ModelMessage, ...]) -> list[dict[str, Any]]:
                 )
             continue
         text = message.text_content()
-        image_blocks = [
-            block for block in message.content if isinstance(block, ImageContent)
-        ]
+        image_blocks = [block for block in message.content if isinstance(block, ImageContent)]
         if image_blocks and message.role is MessageRole.USER:
             content: object = ([{"type": "text", "text": text}] if text else []) + [
                 {
@@ -584,14 +627,20 @@ def _extract_response_sources(data: Any) -> list[dict[str, str]]:
             typ = str(node.get("type") or "")
             if typ in {"url_citation", "citation"}:
                 add(node.get("url"), node.get("title"))
-            if isinstance(node.get("url"), str) and (
-                "title" in node or "source" in typ or "citation" in typ
-            ):
+            if isinstance(node.get("url"), str) and ("title" in node or "source" in typ or "citation" in typ):
                 add(node.get("url"), node.get("title"))
             web = node.get("web")
             if isinstance(web, dict):
                 add(web.get("uri") or web.get("url"), web.get("title"))
-            for key in ("sources", "annotations", "grounding_chunks", "groundingChunks", "output", "content", "action"):
+            for key in (
+                "sources",
+                "annotations",
+                "grounding_chunks",
+                "groundingChunks",
+                "output",
+                "content",
+                "action",
+            ):
                 value = node.get(key)
                 if value is not None:
                     walk(value)
@@ -710,9 +759,7 @@ def _decode_responses_payload(prefix: str, resp: Any, api_key: str | None) -> di
         try:
             return _parse_responses_sse(text)
         except ValueError as exc:
-            raise LLMError(
-                _safe_error_message(f"{prefix} SSE 返回结构异常: {exc}", api_key)
-            ) from None
+            raise LLMError(_safe_error_message(f"{prefix} SSE 返回结构异常: {exc}", api_key)) from None
     try:
         data = resp.json()
     except json.JSONDecodeError as exc:
@@ -835,9 +882,7 @@ class LLMClient(ABC):
             for message in request.messages
             if message.role is MessageRole.SYSTEM and message.text_content()
         )
-        user_messages = [
-            message for message in request.messages if message.role is MessageRole.USER
-        ]
+        user_messages = [message for message in request.messages if message.role is MessageRole.USER]
         if not user_messages:
             raise ValueError("ModelRequest 至少需要一条 user message")
         user_message = user_messages[-1]
@@ -964,10 +1009,7 @@ class OpenAIClient(LLMClient):
         if images:
             user_content: object = [
                 {"type": "text", "text": user},
-                *[
-                    {"type": "image_url", "image_url": {"url": _to_data_url(img)}}
-                    for img in images
-                ],
+                *[{"type": "image_url", "image_url": {"url": _to_data_url(img)}} for img in images],
             ]
         else:
             user_content = user
@@ -1079,7 +1121,9 @@ class OpenAIClient(LLMClient):
             provider_status=(
                 "refusal"
                 if resolved_stop_reason is StopReason.REFUSAL
-                else str(finish_reason) if finish_reason else None
+                else str(finish_reason)
+                if finish_reason
+                else None
             ),
         )
 
@@ -1112,10 +1156,7 @@ class OpenAIClient(LLMClient):
         if images:
             user_content: object = [
                 {"type": "text", "text": user},
-                *[
-                    {"type": "image_url", "image_url": {"url": _to_data_url(img)}}
-                    for img in images
-                ],
+                *[{"type": "image_url", "image_url": {"url": _to_data_url(img)}} for img in images],
             ]
         else:
             user_content = user
@@ -1135,9 +1176,7 @@ class OpenAIClient(LLMClient):
         if normalized_effort is not None:
             body["reasoning_effort"] = normalized_effort
 
-        client_kwargs: dict[str, object] = {
-            "timeout": _timeout_for_call(self._base_url, timeout_seconds)
-        }
+        client_kwargs: dict[str, object] = {"timeout": _timeout_for_call(self._base_url, timeout_seconds)}
         if self._proxy_url:
             client_kwargs["proxy"] = self._proxy_url
         else:
@@ -1186,7 +1225,7 @@ class OpenAIClient(LLMClient):
                         )
                         return
 
-                    async for line in resp.aiter_lines():
+                    async for line in _iter_limited_sse_lines(resp):
                         line = line.strip()
                         if not line or line.startswith(":") or not line.startswith("data:"):
                             continue
@@ -1217,9 +1256,7 @@ class OpenAIClient(LLMClient):
                         usage = payload.get("usage") or {}
                         if isinstance(usage, dict):
                             input_tokens = int(usage.get("prompt_tokens") or input_tokens or 0)
-                            output_tokens = int(
-                                usage.get("completion_tokens") or output_tokens or 0
-                            )
+                            output_tokens = int(usage.get("completion_tokens") or output_tokens or 0)
                         choices = payload.get("choices") or []
                         if not isinstance(choices, list) or not choices:
                             continue
@@ -1414,7 +1451,9 @@ class OpenAIClient(LLMClient):
         if web_search:
             raise LLMError("图片生成不支持联网搜索，请关闭 web_search")
         if images:
-            raise LLMError("当前 /images/generations 路径暂不支持参考图；请改用 api_format=responses 的 Provider")
+            raise LLMError(
+                "当前 /images/generations 路径暂不支持参考图；请改用 api_format=responses 的 Provider"
+            )
 
         url = f"{self._base_url}/images/generations"
         headers = _llm_headers(identity=self._identity)
@@ -1630,7 +1669,7 @@ class AnthropicClient(LLMClient):
                         )
                     # 逐行解析 SSE 事件
                     current_event = ""
-                    async for line in resp.aiter_lines():
+                    async for line in _iter_limited_sse_lines(resp):
                         line = line.rstrip("\r\n")
                         if line.startswith("event: "):
                             current_event = line[7:].strip()
@@ -1905,7 +1944,7 @@ class AnthropicClient(LLMClient):
                         return
 
                     current_event = ""
-                    async for line in resp.aiter_lines():
+                    async for line in _iter_limited_sse_lines(resp):
                         line = line.rstrip("\r\n")
                         if line.startswith("event: "):
                             current_event = line[7:].strip()
@@ -2025,10 +2064,7 @@ class ResponsesClient(LLMClient):
         if images:
             input_content: object = [
                 {"type": "input_text", "text": user},
-                *[
-                    {"type": "input_image", "image_url": _to_data_url(img)}
-                    for img in images
-                ],
+                *[{"type": "input_image", "image_url": _to_data_url(img)} for img in images],
             ]
         else:
             input_content = user
@@ -2203,9 +2239,7 @@ class ResponsesClient(LLMClient):
             size = (request.web_search_context_size or "medium").lower()
             if size not in {"low", "medium", "high"}:
                 size = "medium"
-            body.setdefault("tools", []).append(
-                {"type": "web_search", "search_context_size": size}
-            )
+            body.setdefault("tools", []).append({"type": "web_search", "search_context_size": size})
             body["include"] = ["web_search_call.action.sources"]
 
         client_kwargs: dict[str, object] = {"timeout": _timeout_for_call(self._base_url, None)}
@@ -2306,10 +2340,7 @@ class ResponsesClient(LLMClient):
         if images:
             input_content: object = [
                 {"type": "input_text", "text": user},
-                *[
-                    {"type": "input_image", "image_url": _to_data_url(img)}
-                    for img in images
-                ],
+                *[{"type": "input_image", "image_url": _to_data_url(img)} for img in images],
             ]
         else:
             input_content = user
@@ -2385,7 +2416,7 @@ class ResponsesClient(LLMClient):
                         return
 
                     current_event = ""
-                    async for line in resp.aiter_lines():
+                    async for line in _iter_limited_sse_lines(resp):
                         line = line.rstrip("\r\n")
                         if line.startswith("event:"):
                             current_event = line.removeprefix("event:").strip()
@@ -2496,10 +2527,7 @@ class ResponsesClient(LLMClient):
         if images:
             input_content: object = [
                 {"type": "input_text", "text": user},
-                *[
-                    {"type": "input_image", "image_url": _to_data_url(img)}
-                    for img in images
-                ],
+                *[{"type": "input_image", "image_url": _to_data_url(img)} for img in images],
             ]
         else:
             input_content = user
@@ -2602,9 +2630,7 @@ class LLMError(Exception):
     ):
         super().__init__(message)
         self.retryable = retryable  # 是否可重试（timeout/429/5xx/网络错误）
-        self.scope = LLMErrorScope(
-            scope or (LLMErrorScope.TRANSIENT if retryable else LLMErrorScope.UNKNOWN)
-        )
+        self.scope = LLMErrorScope(scope or (LLMErrorScope.TRANSIENT if retryable else LLMErrorScope.UNKNOWN))
         self.status_code = status_code
 
 
@@ -2689,7 +2715,9 @@ def _safe_error_message(msg: str, api_key: str | None) -> str:
     # Bearer token
     out = re.sub(r"Bearer\s+[A-Za-z0-9_.\-]{8,}", "Bearer <token>", out)
     # 常见的其他 key 格式
-    out = re.sub(r"(?i)(api[_-]?key|secret|token)\s*[=:]\s*['\"]?[A-Za-z0-9_.\-]{8,}['\"]?", r"\1=<redacted>", out)
+    out = re.sub(
+        r"(?i)(api[_-]?key|secret|token)\s*[=:]\s*['\"]?[A-Za-z0-9_.\-]{8,}['\"]?", r"\1=<redacted>", out
+    )
     return out
 
 
@@ -2785,9 +2813,7 @@ def build_client(
         or getattr(provider_row, "api_format", None)
         or default_api_format_for(provider_row.provider)
     )
-    configured_identity = identity_override or getattr(
-        provider_row, "client_identity_profile", None
-    )
+    configured_identity = identity_override or getattr(provider_row, "client_identity_profile", None)
     identity = resolve_identity(configured_identity, fmt)
 
     if fmt == LLM_API_FORMAT_CHAT_COMPLETIONS:

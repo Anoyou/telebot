@@ -57,6 +57,7 @@ from .remote_plugin_service import (
     PluginMetadata,
     RemotePluginError,
     RemotePluginView,
+    _attach_legacy_plugin_json_links,
     _attach_legacy_plugin_sqlite_links,
     _derive_name_from_url,
     _feature_manifest_from_meta,
@@ -64,6 +65,7 @@ from .remote_plugin_service import (
     _merge_feature_manifest_preserving_global_config,
     _plugin_dir,
     _read_plugin_metadata,
+    _relocate_legacy_plugin_json,
     _relocate_legacy_plugin_sqlite,
     _remote_info_from_manifest,
     _run_git,
@@ -736,6 +738,7 @@ async def _replace_installed_plugin_from_repo_dir(
     install_path.parent.mkdir(parents=True, exist_ok=True)
     swapped = False
     legacy_sqlite_names: list[str] = []
+    legacy_json_names: list[str] = []
     try:
         shutil.copytree(
             plugin_dir,
@@ -752,11 +755,13 @@ async def _replace_installed_plugin_from_repo_dir(
         lint_warnings = lint_plugin_metadata_files(staging)
 
         legacy_sqlite_names = _relocate_legacy_plugin_sqlite(install_path, final_name)
+        legacy_json_names = _relocate_legacy_plugin_json(install_path, final_name)
         if install_path.exists():
             install_path.rename(backup)
         staging.rename(install_path)
         swapped = True
         _attach_legacy_plugin_sqlite_links(install_path, final_name, legacy_sqlite_names)
+        _attach_legacy_plugin_json_links(install_path, final_name, legacy_json_names)
     except Exception as exc:
         if staging.exists():
             shutil.rmtree(staging, ignore_errors=True)
@@ -1327,6 +1332,7 @@ async def install_official_plugin(
     renamed = False
     backed_up = False
     legacy_sqlite_names: list[str] = []
+    legacy_json_names: list[str] = []
     try:
         shutil.copytree(
             source.plugin_dir,
@@ -1346,12 +1352,14 @@ async def install_official_plugin(
         lint_warnings = lint_plugin_metadata_files(staging)
         if updating_existing:
             legacy_sqlite_names = _relocate_legacy_plugin_sqlite(install_path, final_name)
+            legacy_json_names = _relocate_legacy_plugin_json(install_path, final_name)
         if updating_existing and install_path.exists():
             install_path.rename(backup)
             backed_up = True
         staging.rename(install_path)
         renamed = True
         _attach_legacy_plugin_sqlite_links(install_path, final_name, legacy_sqlite_names)
+        _attach_legacy_plugin_json_links(install_path, final_name, legacy_json_names)
     except Exception as exc:
         if staging.exists():
             shutil.rmtree(staging, ignore_errors=True)

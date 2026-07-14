@@ -2295,14 +2295,23 @@ def _build_proxy_url(
 async def _refresh_command_context(account_id: int) -> None:
     """从 DB 拉本账号已启用的命令模板 + 全部 LLM provider，写入 worker-local ctx。
 
-    用作两个时机：
+    用作以下时机：
     - worker 启动时一次（确保新连上 TG 就能响应 ``,模板名``）
     - 收到 IPC ``CMD_RELOAD_COMMANDS`` 时热更新
+    - 周期 reconcile 与全局配置刷新时兜底收敛
 
     实现细节：
     - 避免拿原 ORM 实例（脱离 session 后属性访问会报 DetachedInstanceError），转 dict
     - LLM provider 仍持有 ``api_key_enc``（Fernet token）；解密在调用前的 ``build_client`` 里做
     """
+    # worker 由 multiprocessing ``spawn`` 启动，不继承 Web 进程内已经应用的
+    # 客户端身份 UA 版本目录。启动与 reload_commands 都会经过本函数，因此在读取
+    # Provider 上下文前先从 system_setting 重建 worker-local 身份目录；周期 reconcile
+    # 也会复用这条路径，作为 Redis reload 消息丢失时的最终收敛保障。
+    from ..services import llm_identity
+
+    await llm_identity.load_version_overrides_from_db()
+
     templates: dict[str, dict] = {}
     providers: dict[int, dict] = {}
     ai_enabled = True

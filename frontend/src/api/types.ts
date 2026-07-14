@@ -1675,6 +1675,7 @@ export interface FullLivenessRunRequest {
   max_tokens?: number;
   timeout_seconds?: number;
   global_concurrency?: number;
+  confirm_large_run?: boolean;
   only_provider_ids?: number[] | null;
   only_models?: string[] | null;
 }

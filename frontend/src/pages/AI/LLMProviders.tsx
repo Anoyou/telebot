@@ -1714,11 +1714,11 @@ function IdentityVersionsDialog({
     setSaving(true);
     setError(null);
     try {
-      // 只提交与当前生效值不同的项（overrides 语义：留空回落默认）。
+      // overrides 只保存偏离内置默认值的非空项；留空或填回默认值都会删除覆盖。
       const overrides: Record<string, string> = {};
       for (const it of items) {
         const v = (drafts[it.key] ?? "").trim();
-        if (v) overrides[it.key] = v;
+        if (v && v !== it.default.trim()) overrides[it.key] = v;
       }
       const resp = await updateClientIdentityVersions({ overrides });
       setItems(resp.items);

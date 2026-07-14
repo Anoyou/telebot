@@ -72,7 +72,9 @@ export default {
       keyframes: {
         "page-enter": {
           "0%": { opacity: "0", transform: "translateY(6px)" },
-          "100%": { opacity: "1", transform: "translateY(0)" },
+          // 终态必须回到 none；translateY(0) 仍会创建 containing block，
+          // 导致页面内 fixed 抽屉随内容滚动并偏离真实视口。
+          "100%": { opacity: "1", transform: "none" },
         },
         "fade-in": {
           "0%": { opacity: "0" },
@@ -98,7 +100,9 @@ export default {
         },
       },
       animation: {
-        "page-enter": "page-enter 180ms ease-out both",
+        // backwards 只在动画开始前应用首帧，结束后释放 transform，避免 fixed
+        // 子元素被永久绑定到页面内容容器。
+        "page-enter": "page-enter 180ms ease-out backwards",
         "fade-in": "fade-in 160ms ease-out both",
         "fade-out": "fade-out 120ms ease-in both",
         "scale-in": "scale-in 160ms ease-out both",

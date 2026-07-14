@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link, useSearchParams } from "react-router-dom";
 import {
@@ -49,6 +49,7 @@ const DEFAULT_SYSTEM_PROMPT =
 const DEFAULT_SELECTED_MODEL_LIMIT = 8;
 const MAX_CHAT_MODELS = 20;
 const CHAT_STORAGE_KEY = "telepilot:llm-conversation";
+const CHAT_PERSIST_DEBOUNCE_MS = 250;
 
 interface ChatDisplayResult extends ChatTestModelResult {
   pending?: boolean;
@@ -62,6 +63,9 @@ interface ChatRound {
   createdAt: number;
   results: ChatDisplayResult[];
   histories: Record<string, ChatTestTurn[]>;
+  systemPrompt: string;
+  maxTokens: number;
+  timeoutSeconds: number;
 }
 
 interface PersistedConversation {
@@ -87,15 +91,31 @@ function readConversation(): PersistedConversation {
     const raw = window.localStorage.getItem(CHAT_STORAGE_KEY);
     if (!raw) return EMPTY_CONVERSATION;
     const parsed = JSON.parse(raw) as Partial<PersistedConversation>;
+    const restoredSystemPrompt = typeof parsed.systemPrompt === "string" && parsed.systemPrompt.trim()
+      ? parsed.systemPrompt
+      : DEFAULT_SYSTEM_PROMPT;
     return {
       providerId: typeof parsed.providerId === "number" ? parsed.providerId : null,
       selectedModels: Array.isArray(parsed.selectedModels) ? parsed.selectedModels : [],
       message: typeof parsed.message === "string" ? parsed.message : DEFAULT_MESSAGE,
-      systemPrompt: typeof parsed.systemPrompt === "string" ? parsed.systemPrompt : DEFAULT_SYSTEM_PROMPT,
+      systemPrompt: restoredSystemPrompt,
       rounds: Array.isArray(parsed.rounds)
         ? parsed.rounds.map((round) => ({
             ...round,
             histories: round.histories || {},
+            systemPrompt: typeof round.systemPrompt === "string" && round.systemPrompt.trim()
+              ? round.systemPrompt
+              : restoredSystemPrompt,
+            maxTokens: Number.isFinite(round.maxTokens)
+              && round.maxTokens >= 64
+              && round.maxTokens <= 8000
+              ? round.maxTokens
+              : 1200,
+            timeoutSeconds: Number.isFinite(round.timeoutSeconds)
+              && round.timeoutSeconds >= 10
+              && round.timeoutSeconds <= 600
+              ? round.timeoutSeconds
+              : 90,
             results: (round.results || []).map((result) => (
               result.pending
                 ? { ...result, pending: false, ok: false, error: "页面刷新，请求已取消" }
@@ -110,11 +130,12 @@ function readConversation(): PersistedConversation {
   }
 }
 
-function writeConversation(state: PersistedConversation): void {
+function writeConversation(state: PersistedConversation): boolean {
   try {
     window.localStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify(state));
+    return true;
   } catch {
-    // 持久存储不可用时仍允许测活，只是不跨刷新保留对话。
+    return false;
   }
 }
 
@@ -418,13 +439,42 @@ export function LLMLivenessPage() {
   );
   const [running, setRunning] = useState(false);
   const [retryingModel, setRetryingModel] = useState<string | null>(null);
+  const [fullLivenessBusy, setFullLivenessBusy] = useState(false);
   const [scopeOpen, setScopeOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
   const mountedRef = useRef(true);
   const scrollRef = useRef<HTMLDivElement | null>(null);
+  const persistTimerRef = useRef<number | null>(null);
+  const persistenceWarningShownRef = useRef(false);
+  const forceConversationFlushRef = useRef(false);
+  const latestConversationRef = useRef<PersistedConversation>({
+    providerId: initialProviderId,
+    selectedModels: canRestoreConversation ? retainedConversation.selectedModels : [],
+    message: canRestoreConversation ? retainedConversation.message : DEFAULT_MESSAGE,
+    systemPrompt: canRestoreConversation ? retainedConversation.systemPrompt : DEFAULT_SYSTEM_PROMPT,
+    rounds: canRestoreConversation ? retainedConversation.rounds : [],
+    histories: canRestoreConversation ? retainedConversation.histories : {},
+  });
   const modelsLocked = rounds.length > 0;
   const busy = running || retryingModel !== null;
+  const modeSwitchBusy = busy || fullLivenessBusy;
+
+  const persistConversationNow = useCallback((state: PersistedConversation) => {
+    if (writeConversation(state) || persistenceWarningShownRef.current) return;
+    persistenceWarningShownRef.current = true;
+    toast.warning("对话记录暂时无法写入浏览器存储；当前页面仍可继续测活。", {
+      duration: 6000,
+    });
+  }, []);
+
+  const flushConversation = useCallback(() => {
+    if (persistTimerRef.current != null) {
+      window.clearTimeout(persistTimerRef.current);
+      persistTimerRef.current = null;
+    }
+    persistConversationNow(latestConversationRef.current);
+  }, [persistConversationNow]);
 
   const visibleModels = modelChoices.filter((model) =>
     model.id.toLowerCase().includes(modelQuery.trim().toLowerCase()),
@@ -435,8 +485,15 @@ export function LLMLivenessPage() {
     return () => {
       mountedRef.current = false;
       abortRef.current?.abort();
+      flushConversation();
     };
-  }, []);
+  }, [flushConversation]);
+
+  useEffect(() => {
+    const onPageHide = () => flushConversation();
+    window.addEventListener("pagehide", onPageHide);
+    return () => window.removeEventListener("pagehide", onPageHide);
+  }, [flushConversation]);
 
   useEffect(() => {
     if (providers.length === 0) return;
@@ -448,16 +505,36 @@ export function LLMLivenessPage() {
   }, [providers, requestedProviderId]);
 
   useEffect(() => {
-    if (providerId == null) return;
-    writeConversation({
+    latestConversationRef.current = {
       providerId,
       selectedModels,
       message,
       systemPrompt,
       rounds,
       histories,
-    });
-  }, [providerId, selectedModels, message, systemPrompt, rounds, histories]);
+    };
+    if (persistTimerRef.current != null) window.clearTimeout(persistTimerRef.current);
+    if (forceConversationFlushRef.current) {
+      forceConversationFlushRef.current = false;
+      flushConversation();
+      return;
+    }
+    persistTimerRef.current = window.setTimeout(() => {
+      persistTimerRef.current = null;
+      persistConversationNow(latestConversationRef.current);
+    }, CHAT_PERSIST_DEBOUNCE_MS);
+  }, [
+    flushConversation,
+    histories,
+    message,
+    persistConversationNow,
+    providerId,
+    retryingModel,
+    rounds,
+    running,
+    selectedModels,
+    systemPrompt,
+  ]);
 
   useEffect(() => {
     if (providers.length === 0 || rounds.length === 0) return;
@@ -496,6 +573,7 @@ export function LLMLivenessPage() {
     controller.abort();
     abortRef.current = null;
     if (!mountedRef.current) return;
+    forceConversationFlushRef.current = true;
     setRunning(false);
     setRetryingModel(null);
     setRounds((current) =>
@@ -540,14 +618,16 @@ export function LLMLivenessPage() {
 
   const resetConversation = () => {
     abortInFlight();
-    writeConversation({
+    const emptyState: PersistedConversation = {
       providerId,
       selectedModels,
       message,
       systemPrompt,
       rounds: [],
       histories: {},
-    });
+    };
+    latestConversationRef.current = emptyState;
+    persistConversationNow(emptyState);
     setRounds([]);
     setHistories({});
   };
@@ -587,6 +667,9 @@ export function LLMLivenessPage() {
     const createdAt = Date.now();
     const roundId = `${createdAt}`;
     const modelsToTest = [...selectedModels];
+    const roundSystemPrompt = systemPrompt.trim() || DEFAULT_SYSTEM_PROMPT;
+    const roundMaxTokens = maxTokens;
+    const roundTimeoutSeconds = timeoutSeconds;
     const historiesForRequest = modelsToTest.reduce<Record<string, ChatTestTurn[]>>((acc, modelId) => {
       acc[modelId] = histories[`${provider.id}:${modelId}`] || [];
       return acc;
@@ -601,6 +684,9 @@ export function LLMLivenessPage() {
         message: text,
         createdAt,
         histories: historiesForRequest,
+        systemPrompt: roundSystemPrompt,
+        maxTokens: roundMaxTokens,
+        timeoutSeconds: roundTimeoutSeconds,
         results: modelsToTest.map((modelId) => ({
           ok: false,
           requested_model: modelId,
@@ -612,16 +698,6 @@ export function LLMLivenessPage() {
         })),
       },
     ]);
-    setHistories((current) => {
-      const next = { ...current };
-      const userTurn: ChatTestTurn = { role: "user", content: text };
-      for (const modelId of modelsToTest) {
-        const key = `${provider.id}:${modelId}`;
-        next[key] = [...(next[key] || []), userTurn].slice(-16);
-      }
-      return next;
-    });
-
     try {
       await streamChatTestProviderModels(
         provider.id,
@@ -629,9 +705,9 @@ export function LLMLivenessPage() {
           models: modelsToTest,
           message: text,
           history_by_model: historiesForRequest,
-          system_prompt: systemPrompt.trim() || DEFAULT_SYSTEM_PROMPT,
-          max_tokens: maxTokens,
-          timeout_seconds: timeoutSeconds,
+          system_prompt: roundSystemPrompt,
+          max_tokens: roundMaxTokens,
+          timeout_seconds: roundTimeoutSeconds,
         },
         (event) => {
           if (controller.signal.aborted) return;
@@ -664,7 +740,8 @@ export function LLMLivenessPage() {
               return {
                 ...current,
                 [key]: [
-                  ...(current[key] || []),
+                  ...(historiesForRequest[modelId] || []),
+                  { role: "user", content: text },
                   { role: "assistant", content: result.response as string },
                 ].slice(-16) as ChatTestTurn[],
               };
@@ -675,6 +752,7 @@ export function LLMLivenessPage() {
       );
     } catch (error) {
       if (!controller.signal.aborted) {
+        forceConversationFlushRef.current = true;
         for (const modelId of modelsToTest) {
           updateRoundResult(roundId, modelId, (current) => current.pending ? {
             ...current,
@@ -687,7 +765,10 @@ export function LLMLivenessPage() {
     } finally {
       if (abortRef.current === controller) {
         abortRef.current = null;
-        if (mountedRef.current) setRunning(false);
+        if (mountedRef.current) {
+          forceConversationFlushRef.current = true;
+          setRunning(false);
+        }
       }
     }
   };
@@ -721,9 +802,9 @@ export function LLMLivenessPage() {
           models: [modelId],
           message: round.message,
           history: round.histories[modelId] || [],
-          system_prompt: systemPrompt.trim() || DEFAULT_SYSTEM_PROMPT,
-          max_tokens: maxTokens,
-          timeout_seconds: timeoutSeconds,
+          system_prompt: round.systemPrompt,
+          max_tokens: round.maxTokens,
+          timeout_seconds: round.timeoutSeconds,
           api_format_override: apiFormat,
           client_identity_profile_override: identity,
         },
@@ -768,20 +849,22 @@ export function LLMLivenessPage() {
       );
     } catch (error) {
       if (controller.signal.aborted) return;
-      updateRoundResult(roundId, modelId, {
+      forceConversationFlushRef.current = true;
+      updateRoundResult(roundId, modelId, (current) => current.pending ? {
+        ...current,
+        pending: false,
         ok: false,
-        requested_model: modelId,
-        latency_ms: 0,
-        input_tokens: 0,
-        output_tokens: 0,
         empty_response: false,
         error: getErrMsg(error),
         effective_api_format: apiFormat,
         client_identity_profile: identity,
-      });
+      } : current);
     } finally {
       if (abortRef.current === controller) abortRef.current = null;
-      if (mountedRef.current) setRetryingModel(null);
+      if (mountedRef.current) {
+        forceConversationFlushRef.current = true;
+        setRetryingModel(null);
+      }
     }
   };
 
@@ -1062,6 +1145,7 @@ export function LLMLivenessPage() {
             type="button"
             size="sm"
             variant={mode === "conversation" ? "secondary" : "ghost"}
+            disabled={modeSwitchBusy}
             onClick={() => setMode("conversation")}
           >
             <MessageSquare className="mr-1 h-4 w-4" />Provider 多模型对话
@@ -1070,6 +1154,7 @@ export function LLMLivenessPage() {
             type="button"
             size="sm"
             variant={mode === "all" ? "secondary" : "ghost"}
+            disabled={modeSwitchBusy}
             onClick={() => setMode("all")}
           >
             <Activity className="mr-1 h-4 w-4" />全部 Provider 巡检
@@ -1087,6 +1172,7 @@ export function LLMLivenessPage() {
           onSystemPromptChange={setSystemPrompt}
           message={message}
           onMessageChange={setMessage}
+          onBusyChange={setFullLivenessBusy}
         />
       ) : (
         <div className="relative grid min-h-0 gap-4 xl:grid-cols-[280px_minmax(0,1fr)] 2xl:grid-cols-[280px_minmax(0,1fr)_280px]">
@@ -1118,8 +1204,10 @@ export function LLMLivenessPage() {
           ) : null}
           <aside
             className={cn(
-              "fixed inset-y-0 left-0 z-[70] w-[min(320px,90vw)] overflow-y-auto border-r bg-card p-4 shadow-lg transition-transform duration-200 xl:static xl:z-auto xl:w-auto xl:translate-x-0 xl:rounded-lg xl:border xl:shadow-sm",
-              scopeOpen ? "translate-x-0" : "-translate-x-full xl:translate-x-0",
+              "fixed bottom-[calc(4.75rem+env(safe-area-inset-bottom))] left-0 top-[calc(5rem+env(safe-area-inset-top))] z-[70] w-[min(320px,90vw)] overflow-y-auto border-r bg-card p-4 shadow-lg transition-transform duration-200 sm:bottom-0 xl:static xl:z-auto xl:w-auto xl:translate-x-0 xl:rounded-lg xl:border xl:shadow-sm",
+              scopeOpen
+                ? "visible translate-x-0"
+                : "invisible -translate-x-full xl:visible xl:translate-x-0",
             )}
             aria-label="Provider 与模型范围"
           >
@@ -1256,8 +1344,10 @@ export function LLMLivenessPage() {
           ) : null}
           <aside
             className={cn(
-              "fixed inset-y-0 right-0 z-[70] w-[min(320px,90vw)] overflow-y-auto border-l bg-card p-4 shadow-lg transition-transform duration-200 2xl:static 2xl:z-auto 2xl:w-auto 2xl:translate-x-0 2xl:rounded-lg 2xl:border 2xl:shadow-sm",
-              settingsOpen ? "translate-x-0" : "translate-x-full 2xl:translate-x-0",
+              "fixed bottom-[calc(4.75rem+env(safe-area-inset-bottom))] right-0 top-[calc(5rem+env(safe-area-inset-top))] z-[70] w-[min(320px,90vw)] overflow-y-auto border-l bg-card p-4 shadow-lg transition-transform duration-200 sm:bottom-0 2xl:static 2xl:z-auto 2xl:w-auto 2xl:translate-x-0 2xl:rounded-lg 2xl:border 2xl:shadow-sm",
+              settingsOpen
+                ? "visible translate-x-0"
+                : "invisible translate-x-full 2xl:visible 2xl:translate-x-0",
             )}
             aria-label="请求设置与诊断"
           >

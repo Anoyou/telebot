@@ -53,9 +53,11 @@ _USAGE_PREVIEW_CHARS = 2000
 
 # ── Usage Record ────────────────────────────────────────────
 
+
 @dataclass
 class UsageRecord:
     """单次 LLM 调用的 usage 记录。"""
+
     provider_id: int | None = None
     account_id: int | None = None
     triggered_by_account_id: int | None = None
@@ -133,15 +135,18 @@ def request_preview_for_usage(system: str, user: str) -> str | None:
 
 # ── Retry 计算 ──────────────────────────────────────────────
 
+
 def _compute_retry_delay(attempt: int) -> float:
     """计算指数退避延迟：base * 2^(attempt-1)，加抖动后限制在 max_delay 内。"""
     import random
+
     delay = _RETRY_BASE_DELAY * (2 ** (attempt - 1))
     jitter = delay * 0.25 * (2 * random.random() - 1)
     return min(delay + jitter, _RETRY_MAX_DELAY)
 
 
 # ── Error 分类 ───────────────────────────────────────────────
+
 
 def _is_retryable_error(exc: Exception) -> bool:
     """判断错误是否可重试。
@@ -158,9 +163,18 @@ def _is_retryable_error(exc: Exception) -> bool:
 
     exc_name = type(exc).__name__
     retryable_types = {
-        "TimeoutException", "ConnectTimeout", "ReadTimeout", "WriteTimeout",
-        "PoolTimeout", "ConnectError", "ReadError", "WriteError",
-        "ProxyError", "SSLError", "ProtocolError", "HTTPError",
+        "TimeoutException",
+        "ConnectTimeout",
+        "ReadTimeout",
+        "WriteTimeout",
+        "PoolTimeout",
+        "ConnectError",
+        "ReadError",
+        "WriteError",
+        "ProxyError",
+        "SSLError",
+        "ProtocolError",
+        "HTTPError",
         "asyncio.TimeoutError",
     }
     return exc_name in retryable_types
@@ -252,19 +266,17 @@ def _estimate_legacy_request_tokens(
     image_units = 1024 * len(images or [])
     return max(
         1,
-        _estimate_text_tokens(system) + _estimate_text_tokens(user) + image_units
+        _estimate_text_tokens(system)
+        + _estimate_text_tokens(user)
+        + image_units
         + max(0, int(max_output_tokens or 0)),
     )
 
 
 def _estimate_structured_request_tokens(request: ModelRequest) -> int:
-    text_units = sum(
-        _estimate_text_tokens(message.text_content()) for message in request.messages
-    )
+    text_units = sum(_estimate_text_tokens(message.text_content()) for message in request.messages)
     image_units = 1024 * sum(
-        isinstance(block, ImageContent)
-        for message in request.messages
-        for block in message.content
+        isinstance(block, ImageContent) for message in request.messages for block in message.content
     )
     tool_units = sum(
         _estimate_text_tokens(tool.name)
@@ -301,10 +313,7 @@ def _legacy_capability_errors(
     if reasoning_effort:
         if not capabilities.reasoning:
             errors.append("provider 不支持 reasoning")
-        elif (
-            capabilities.reasoning_efforts
-            and reasoning_effort not in capabilities.reasoning_efforts
-        ):
+        elif capabilities.reasoning_efforts and reasoning_effort not in capabilities.reasoning_efforts:
             errors.append(f"provider 不支持 reasoning_effort={reasoning_effort}")
     if native_image and provider.provider.lower() != "openai":
         errors.append("provider 不支持原生图片生成")
@@ -313,9 +322,11 @@ def _legacy_capability_errors(
 
 # ── Call with Fallback ───────────────────────────────────────
 
+
 @dataclass
 class FallbackChain:
     """Fallback provider 链。"""
+
     primary: LLMProviderDTO
     fallbacks: list[LLMProviderDTO] = field(default_factory=list)
 
@@ -327,6 +338,28 @@ class FallbackChain:
     def get_provider_names(self) -> list[str]:
         """返回 provider 名称列表（用于日志）。"""
         return [p.name for p in self.all_providers]
+
+
+def _effective_model_for_provider(
+    provider: LLMProviderDTO,
+    *,
+    explicit_model: str | None,
+    routed_model: str | None,
+    is_fallback: bool,
+) -> str | None:
+    """按显式固定、Router 选择、Provider 启用清单解析实际模型。"""
+
+    if is_fallback and provider.has_model_list() and not provider.enabled_model_ids():
+        return None
+    if explicit_model:
+        return explicit_model
+    if routed_model and not is_fallback:
+        return routed_model
+    # 老 Provider 没有显式模型清单时，继续让 build_client 使用 default_model，
+    # 保持 inline @Provider 未指定模型时 override_model=None 的既有契约。
+    if not provider.has_model_list():
+        return None
+    return provider.pick_enabled_model()
 
 
 async def call_with_fallback(
@@ -399,18 +432,24 @@ async def call_with_fallback(
         #   - 否则若 routed_model 存在（auto 路由）：primary 用 routed_model，
         #     fallback provider 按自身 enabled 集重选，避免硬套 primary 模型 ID。
         #   - 都没有：回落 provider.default_model。
-        if override_model:
-            effective_model = override_model
-        elif routed_model and not is_fallback:
-            effective_model = routed_model
-        elif routed_model and is_fallback:
-            # fallback provider 按自身 enabled 集重选，避免硬套 primary 模型 ID。
-            effective_model = provider_dto.pick_enabled_model() or provider_dto.default_model
-        else:
-            # 既无用户固定模型、也无 auto 路由模型：保持旧契约，传 None 让
-            # build_client 用 provider.default_model（inline @name 场景依赖此行为）。
-            effective_model = None
-        # 用于日志 / 能力校验 / usage 记录的模型名（effective_model 为 None 时回落展示）。
+        effective_model = _effective_model_for_provider(
+            provider_dto,
+            explicit_model=override_model,
+            routed_model=routed_model,
+            is_fallback=is_fallback,
+        )
+        uses_legacy_default = (
+            not override_model
+            and not (routed_model and not is_fallback)
+            and not provider_dto.has_model_list()
+            and bool(str(provider_dto.default_model or "").strip())
+        )
+        if not effective_model and not uses_legacy_default:
+            last_error = LLMError(
+                f"provider {provider_dto.name} 没有已启用模型",
+                scope=LLMErrorScope.CAPABILITY_MISMATCH,
+            )
+            continue
         model = effective_model or provider_dto.default_model
         capability_errors = _legacy_capability_errors(
             provider_dto,
@@ -594,7 +633,7 @@ async def invoke_model_with_fallback(
 ) -> tuple[ModelResponse, LLMProviderDTO, bool]:
     """Invoke a structured model request through existing budget and fallback gates."""
 
-    from .llm_client import LLMCallFailed, LLMErrorScope
+    from .llm_client import LLMCallFailed, LLMError, LLMErrorScope
 
     providers = chain.all_providers
     capped_request = replace(
@@ -606,13 +645,28 @@ async def invoke_model_with_fallback(
     last_error: Exception | None = None
     model_pinned = bool(capped_request.metadata.get("model_pinned", True))
     for index, provider in enumerate(providers):
-        provider_request = replace(
-            capped_request,
-            model=capped_request.model if model_pinned else provider.default_model,
+        if index > 0 and provider.has_model_list() and not provider.enabled_model_ids():
+            last_error = LLMError(
+                f"provider {provider.name} 没有已启用模型",
+                scope=LLMErrorScope.CAPABILITY_MISMATCH,
+            )
+            continue
+        if model_pinned:
+            provider_model = capped_request.model
+        elif index == 0:
+            provider_model = capped_request.model or provider.pick_enabled_model()
+        else:
+            provider_model = provider.pick_enabled_model()
+        if not provider_model:
+            last_error = LLMError(
+                f"provider {provider.name} 没有已启用模型",
+                scope=LLMErrorScope.CAPABILITY_MISMATCH,
+            )
+            continue
+        provider_request = replace(capped_request, model=provider_model)
+        capability_errors = provider.capabilities_for_model(provider_request.model).validation_errors(
+            provider_request
         )
-        capability_errors = provider.capabilities_for_model(
-            provider_request.model
-        ).validation_errors(provider_request)
         if capability_errors:
             last_error = UnsupportedCapabilityError(
                 ApiFormat(provider.api_format or "chat_completions"),
@@ -748,9 +802,7 @@ def _structured_request_preview(request: ModelRequest) -> str | None:
     system = "\n".join(
         message.text_content() for message in request.messages if message.role.value == "system"
     )
-    user = "\n".join(
-        message.text_content() for message in request.messages if message.role.value == "user"
-    )
+    user = "\n".join(message.text_content() for message in request.messages if message.role.value == "user")
     return request_preview_for_usage(system, user)
 
 
@@ -926,6 +978,7 @@ async def _call_generate_image_compat(
 
 # ── 辅助函数 ────────────────────────────────────────────────
 
+
 def build_fallback_chain(
     primary: LLMProviderDTO,
     providers: dict[int, LLMProviderDTO] | None = None,
@@ -956,7 +1009,8 @@ def build_fallback_chain(
     # 2. 同 tag 低价 provider
     if providers and matched_tag:
         same_tag = [
-            p for p in providers.values()
+            p
+            for p in providers.values()
             if p.id != primary.id
             and matched_tag in p.tags
             and p.cost_tier < primary.cost_tier
@@ -970,10 +1024,7 @@ def build_fallback_chain(
     # 3. 其他有 key 的 provider
     if providers:
         others = [
-            p for p in providers.values()
-            if p.id != primary.id
-            and p not in fallbacks
-            and p.has_api_key
+            p for p in providers.values() if p.id != primary.id and p not in fallbacks and p.has_api_key
         ]
         others.sort(key=lambda p: p.cost_tier)
         fallbacks.extend(others[:2])  # 最多再加 2 个通用 fallback

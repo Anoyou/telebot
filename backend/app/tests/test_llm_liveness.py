@@ -20,7 +20,9 @@ from app.services import llm_liveness as lv
 
 
 class _Row:
-    def __init__(self, pid, name, models, *, provider="openai", api_key_enc="enc", api_format="chat_completions"):
+    def __init__(
+        self, pid, name, models, *, provider="openai", api_key_enc="enc", api_format="chat_completions"
+    ):
         self.id = pid
         self.name = name
         self.models = models
@@ -180,9 +182,7 @@ async def test_cancel_interrupts_inflight_tasks() -> None:
         return (diag.DIAG_HEALTHY, {})
 
     pool_task = asyncio.create_task(
-        lv.run_liveness_pool(
-            tasks, runner, global_concurrency=2, provider_concurrency=2, cancel_token=token
-        )
+        lv.run_liveness_pool(tasks, runner, global_concurrency=2, provider_concurrency=2, cancel_token=token)
     )
     await entered.wait()
     token.cancel()
@@ -201,6 +201,65 @@ async def test_job_cancel_stays_running_until_background_finishes() -> None:
     assert cancelled is job
     assert job.cancel_token.cancelled is True
     assert job.status == "running"
+
+
+@pytest.mark.asyncio
+async def test_job_registry_rejects_when_active_admission_is_full() -> None:
+    registry = lv.LivenessJobRegistry()
+    for _ in range(lv.MAX_ACTIVE_LIVENESS_JOBS):
+        job = await registry.create(task_total=1)
+        job.status = "running"
+
+    with pytest.raises(lv.LivenessCapacityExceeded, match="运行中"):
+        await registry.create(task_total=1)
+
+
+@pytest.mark.asyncio
+async def test_job_registry_hard_rejects_when_64_jobs_cannot_be_evicted(monkeypatch) -> None:
+    registry = lv.LivenessJobRegistry()
+    monkeypatch.setattr(lv, "MAX_ACTIVE_LIVENESS_JOBS", lv._LIVENESS_JOB_MAX + 1)
+    for _ in range(lv._LIVENESS_JOB_MAX):
+        job = await registry.create(task_total=1)
+        job.status = "running"
+
+    with pytest.raises(lv.LivenessCapacityExceeded, match="历史已满"):
+        await registry.create(task_total=1)
+
+
+@pytest.mark.asyncio
+async def test_two_pools_share_process_wide_concurrency_cap() -> None:
+    tasks_a = [lv.LivenessTask(1, "a", f"a-{index}") for index in range(18)]
+    tasks_b = [lv.LivenessTask(2, "b", f"b-{index}") for index in range(18)]
+    current = 0
+    peak = 0
+    lock = asyncio.Lock()
+
+    async def runner(_task):
+        nonlocal current, peak
+        async with lock:
+            current += 1
+            peak = max(peak, current)
+        await asyncio.sleep(0.01)
+        async with lock:
+            current -= 1
+        return (diag.DIAG_HEALTHY, {})
+
+    await asyncio.gather(
+        lv.run_liveness_pool(
+            tasks_a,
+            runner,
+            global_concurrency=12,
+            provider_concurrency=12,
+        ),
+        lv.run_liveness_pool(
+            tasks_b,
+            runner,
+            global_concurrency=12,
+            provider_concurrency=12,
+        ),
+    )
+
+    assert peak <= lv.MAX_DIAGNOSTIC_CONCURRENCY
 
 
 @pytest.mark.asyncio

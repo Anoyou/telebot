@@ -271,7 +271,9 @@ async def _check_db_usage(
     day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     source = f"plugin:{plugin_key}"
     async with AsyncSessionLocal() as db:
-        filters = [LLMUsage.source == source, LLMUsage.success.is_(True)]
+        # 失败/取消流也可能已经产生上游费用；只要 usage 记录了保守 token，
+        # DB 降级检查就必须计入，不能让主动 aclose 绕过 quota。
+        filters = [LLMUsage.source == source]
         if account_id is None:
             filters.append(LLMUsage.account_id.is_(None))
         else:
@@ -279,9 +281,13 @@ async def _check_db_usage(
         token_expr = func.coalesce(func.sum(LLMUsage.input_tokens + LLMUsage.output_tokens), 0)
 
         if per_minute > 0:
-            minute_used = await db.scalar(select(token_expr).where(*filters, LLMUsage.created_at >= minute_start))
+            minute_used = await db.scalar(
+                select(token_expr).where(*filters, LLMUsage.created_at >= minute_start)
+            )
             if int(minute_used or 0) + estimate > per_minute:
-                raise PluginAIQuotaExceeded(_quota_message("per_minute", int(minute_used or 0), estimate, per_minute))
+                raise PluginAIQuotaExceeded(
+                    _quota_message("per_minute", int(minute_used or 0), estimate, per_minute)
+                )
 
         if daily > 0:
             daily_used = await db.scalar(select(token_expr).where(*filters, LLMUsage.created_at >= day_start))

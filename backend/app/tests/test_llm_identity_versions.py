@@ -9,7 +9,13 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
+import pytest
+
 from app.api import commands
+from app.schemas.command import ClientIdentityVersionsUpdateRequest
 from app.services import llm_identity
 from app.services.llm_identity import (
     CLIENT_IDENTITY_CLAUDE_CODE,
@@ -122,3 +128,66 @@ def test_identity_version_routes_match_frontend_api_prefix() -> None:
 
     assert "/api/commands/llm-providers/identity-versions" in paths
     assert "/api/commands/llm-providers/identity-versions/detect" in paths
+
+
+@pytest.mark.asyncio
+async def test_identity_version_save_notifies_all_spawn_workers(monkeypatch) -> None:
+    """保存进程内目录后必须广播 reload，让 spawn worker 重读同一份 DB 设置。"""
+
+    events: list[object] = []
+    row = SimpleNamespace(value={})
+
+    class _DB:
+        async def get(self, _model, _key):  # noqa: ANN001, ANN202
+            return row
+
+        async def commit(self) -> None:
+            events.append("commit")
+
+    async def _list_accounts(_db):  # noqa: ANN001, ANN202
+        events.append("list_accounts")
+        return [7, 9]
+
+    async def _notify_reload(aids):  # noqa: ANN001, ANN202
+        events.append(("notify_reload", aids))
+
+    monkeypatch.setattr(commands.command_service, "list_all_account_ids", _list_accounts)
+    monkeypatch.setattr(commands.command_service, "notify_reload", _notify_reload)
+
+    try:
+        response = await commands.update_client_identity_versions(
+            ClientIdentityVersionsUpdateRequest(overrides={"codex_cli": "0.199.0"}),
+            None,
+            _DB(),
+        )
+        assert row.value == {"codex_cli": "0.199.0"}
+        assert events == ["commit", "list_accounts", ("notify_reload", [7, 9])]
+        assert next(item for item in response.items if item.key == "codex_cli").current == "0.199.0"
+    finally:
+        _reset()
+
+
+@pytest.mark.asyncio
+async def test_worker_command_context_refreshes_identity_versions_before_context_db(
+    monkeypatch,
+) -> None:
+    """启动、IPC reload 与周期 reconcile 共用的刷新入口要先重建 worker 身份目录。"""
+
+    from app.worker import runtime as worker_runtime
+
+    load_overrides = AsyncMock(return_value={"codex_cli": "0.199.0"})
+    monkeypatch.setattr(llm_identity, "load_version_overrides_from_db", load_overrides)
+
+    class _FailingSession:
+        async def __aenter__(self):  # noqa: ANN204
+            raise RuntimeError("stop after identity refresh")
+
+        async def __aexit__(self, *_args):  # noqa: ANN204
+            return False
+
+    monkeypatch.setattr(worker_runtime, "AsyncSessionLocal", _FailingSession)
+
+    with pytest.raises(RuntimeError, match="stop after identity refresh"):
+        await worker_runtime._refresh_command_context(7)
+
+    load_overrides.assert_awaited_once_with()

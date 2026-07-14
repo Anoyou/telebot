@@ -260,8 +260,14 @@ async def settle(
     actual_tokens: int,
     actual_provider: Any | None,
     success: bool,
+    charge: bool | None = None,
 ) -> None:
-    """Settle or release a previous reservation."""
+    """Settle or release a reservation.
+
+    ``charge`` defaults to ``success``. Streaming callers may set it to true
+    after a request reached the provider but ended partially/cancelled, keeping
+    conservative request, token and premium counters without claiming success.
+    """
 
     if (
         ticket is None
@@ -275,7 +281,8 @@ async def settle(
     ):
         return
 
-    if success:
+    should_charge = success if charge is None else bool(charge)
+    if should_charge:
         tokens = max(0, int(actual_tokens or 0))
         actual_premium = 1 if int(getattr(actual_provider, "cost_tier", 2) or 2) >= 3 else 0
         keep_request = 1
@@ -286,7 +293,11 @@ async def settle(
 
     try:
         redis = get_redis()
-        actual_premium_key = _settlement_premium_key(ticket, actual_provider, success=success)
+        actual_premium_key = _settlement_premium_key(
+            ticket,
+            actual_provider,
+            success=should_charge,
+        )
         await redis.eval(
             _SETTLE_SCRIPT,
             6,
@@ -368,7 +379,9 @@ async def _load_budget_limits() -> dict[str, int]:
     return limits
 
 
-def _budget_keys(account_id: int, provider_id: int | None, reservation_id: str) -> tuple[str, str, str, str, str]:
+def _budget_keys(
+    account_id: int, provider_id: int | None, reservation_id: str
+) -> tuple[str, str, str, str, str]:
     today = datetime.now(UTC).strftime("%Y%m%d")
     account = int(account_id)
     base = f"llm_budget:{account}"

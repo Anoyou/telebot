@@ -141,6 +141,8 @@ class PluginContext:
 
 插件需要 SQLite、索引文件或其他文件型持久化时，必须写入 `ctx.data_dir`，不要写进 `Path(__file__).parent`、插件安装目录或仓库源码目录。TelePilot 更新插件时会整体替换代码目录，而 `ctx.data_dir` 位于持久化插件卷的 `_data/<plugin_key>/` 下，不随代码更新删除。插件仍需使用 `ctx.account_id` 隔离账号数据；若一个数据库文件服务多个账号，表结构必须包含账号隔离键。
 
+为兼容旧插件，更新器会在替换代码目录前迁移插件根目录的 `*.sqlite3` 和顶层运行态 `*.json`（排除 `plugin.json`），并在新目录保留兼容链接；已有 `ctx.data_dir` 文件不会被旧文件覆盖。这个迁移只负责旧数据过渡，不扫描嵌套目录，也不能替代新代码直接使用 `ctx.data_dir`。
+
 ### 4.0 受控 facade：ctx.http 与 ctx.ai
 
 第三方插件可以使用两个受控 facade，但必须在 Manifest 中显式声明权限；未声明或策略不完整时字段会是 `None`：
