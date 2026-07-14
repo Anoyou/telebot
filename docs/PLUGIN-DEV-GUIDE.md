@@ -26,6 +26,7 @@
 - 触发方式决定会话通道。带前缀命令开局，整段会话收发走 `userbot`；关键词、付款确认、按钮回调开局，整段会话收发走 `interaction_bot`；插件默认不感知通道，只有 `payout` 固定走 `userbot`。
 - 新玩法优先写成一个 `on_interaction(ctx, entry_key, payload)` 入口，在同一个入口里按 `tp_event.type` 或 `payload["source"]["type"]` 处理 `command`、`keyword`、`payment_confirmed`、`message`、`callback_query`、`session_expired`。
 - 单局状态优先写进 `session.data`，通过 `update_session` 持久化；不要再把游戏状态放进进程内全局字典、锁和自建超时任务。
+- 普通 JSON 状态优先使用 `ctx.storage`；确需 SQLite、缓存文件或索引文件时写入 `ctx.data_dir`。禁止把运行数据写到插件代码目录或 `Path(__file__).parent`，因为安装和更新会整体替换该目录。
 - 免费参与、按钮加入、互动游戏可按自身玩法保存完整业务状态；仅从后续发奖锚点角度，保存玩家 `tgid` 并通过 `payout.reply_to_user_id` 交给平台搜索近期发言即可。找不到锚点时平台默认提示，并允许插件用 `reply_anchor_missing_text` 自定义失败提示。
 - `ctx.messages.send/send_photo/edit/edit_caption/payout(...)` 和标准 action 默认按 `parse_mode="plain"` 发送；图片/文件 caption 更新用 `edit_caption`，不要把媒体消息交给 `edit_message` 猜类型。只有显式写 `html` 时才启用 HTML，并先做 `html_escape()`。
 - userbot 会话没有原生 inline 按钮能力。平台会把按钮降级成“回复序号选择”的文本面板，并把命中的回复合成为 callback 事件回投插件；强依赖按钮的入口应配合 `keyword_only` / `default_trigger_modes` 关闭命令触发。

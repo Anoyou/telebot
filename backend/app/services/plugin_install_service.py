@@ -42,6 +42,8 @@ from ..db.models.plugin_global_config import PluginGlobalConfig
 from ..settings import settings
 from ..worker.plugins.manifest import Manifest
 from .remote_plugin_service import (
+    _attach_legacy_plugin_sqlite_links,
+    _relocate_legacy_plugin_sqlite,
     lint_plugin_metadata_files,
     upsert_installed_plugin,
 )
@@ -366,6 +368,10 @@ async def install_zip(
     # 走到这里：sig_ok 为 True（验签通过）或 None（免签放行）。
 
     parsed = parse_zip(zip_bytes)
+    staging: Path | None = None
+    backup: Path | None = None
+    final_dir: Path | None = None
+    swapped = False
     try:
         # 路径计算
         installed_root = settings.plugins_installed_path
@@ -382,11 +388,20 @@ async def install_zip(
         existing = await db.get(InstalledPlugin, parsed.manifest.key)
         was_enabled = bool(existing.enabled) if existing is not None else False
 
-        # 删除旧目录后把临时目录搬过去
+        staging = final_dir.with_name(f"{final_dir.name}.installing")
+        backup = final_dir.with_name(f"{final_dir.name}.bak-zip")
+        if staging.exists():
+            shutil.rmtree(staging, ignore_errors=True)
+        if backup.exists():
+            shutil.rmtree(backup, ignore_errors=True)
+        shutil.move(str(parsed.extract_dir), str(staging))
+
+        legacy_sqlite_names = _relocate_legacy_plugin_sqlite(final_dir, parsed.manifest.key)
         if final_dir.exists():
-            shutil.rmtree(final_dir)
-        shutil.move(str(parsed.extract_dir), str(final_dir))
-        # parsed.extract_dir 已被 move 走，不必再 rmtree
+            final_dir.rename(backup)
+        staging.rename(final_dir)
+        swapped = True
+        _attach_legacy_plugin_sqlite_links(final_dir, parsed.manifest.key, legacy_sqlite_names)
 
         # 升级保留旧 enabled；验签失败的包已在上面拒绝，走到这里只有验签通过或免签放行
         final_enabled = was_enabled
@@ -409,9 +424,16 @@ async def install_zip(
             lint_warnings=lint_warnings,
         )
         await db.flush()
+        if backup.exists():
+            shutil.rmtree(backup, ignore_errors=True)
         return row
     except Exception:
-        # 任何失败都清理临时目录（如果还在）
+        if staging is not None and staging.exists():
+            shutil.rmtree(staging, ignore_errors=True)
+        if swapped and final_dir is not None and final_dir.exists():
+            shutil.rmtree(final_dir, ignore_errors=True)
+        if backup is not None and backup.exists() and final_dir is not None:
+            backup.rename(final_dir)
         if parsed.extract_dir.exists():
             shutil.rmtree(parsed.extract_dir, ignore_errors=True)
         raise

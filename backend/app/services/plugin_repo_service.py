@@ -57,12 +57,14 @@ from .remote_plugin_service import (
     PluginMetadata,
     RemotePluginError,
     RemotePluginView,
+    _attach_legacy_plugin_sqlite_links,
     _derive_name_from_url,
     _feature_manifest_from_meta,
     _manifest_json_from_remote_meta,
     _merge_feature_manifest_preserving_global_config,
     _plugin_dir,
     _read_plugin_metadata,
+    _relocate_legacy_plugin_sqlite,
     _remote_info_from_manifest,
     _run_git,
     _validate_runtime_plugin_shape,
@@ -733,6 +735,7 @@ async def _replace_installed_plugin_from_repo_dir(
 
     install_path.parent.mkdir(parents=True, exist_ok=True)
     swapped = False
+    legacy_sqlite_names: list[str] = []
     try:
         shutil.copytree(
             plugin_dir,
@@ -748,10 +751,12 @@ async def _replace_installed_plugin_from_repo_dir(
         _validate_runtime_plugin_shape(staging, staged_meta)
         lint_warnings = lint_plugin_metadata_files(staging)
 
+        legacy_sqlite_names = _relocate_legacy_plugin_sqlite(install_path, final_name)
         if install_path.exists():
             install_path.rename(backup)
         staging.rename(install_path)
         swapped = True
+        _attach_legacy_plugin_sqlite_links(install_path, final_name, legacy_sqlite_names)
     except Exception as exc:
         if staging.exists():
             shutil.rmtree(staging, ignore_errors=True)
@@ -1321,6 +1326,7 @@ async def install_official_plugin(
     install_path.parent.mkdir(parents=True, exist_ok=True)
     renamed = False
     backed_up = False
+    legacy_sqlite_names: list[str] = []
     try:
         shutil.copytree(
             source.plugin_dir,
@@ -1338,16 +1344,23 @@ async def install_official_plugin(
             )
         )
         lint_warnings = lint_plugin_metadata_files(staging)
+        if updating_existing:
+            legacy_sqlite_names = _relocate_legacy_plugin_sqlite(install_path, final_name)
         if updating_existing and install_path.exists():
             install_path.rename(backup)
             backed_up = True
         staging.rename(install_path)
         renamed = True
+        _attach_legacy_plugin_sqlite_links(install_path, final_name, legacy_sqlite_names)
     except Exception as exc:
         if staging.exists():
             shutil.rmtree(staging, ignore_errors=True)
-        if backed_up and backup.exists() and not install_path.exists():
+        if backed_up and backup.exists():
+            if install_path.exists():
+                shutil.rmtree(install_path, ignore_errors=True)
             backup.rename(install_path)
+        elif renamed and install_path.exists():
+            shutil.rmtree(install_path, ignore_errors=True)
         raise PluginRepoError("COPY_FAILED", f"复制插件库插件目录失败: {exc}") from exc
     finally:
         if staging.exists():

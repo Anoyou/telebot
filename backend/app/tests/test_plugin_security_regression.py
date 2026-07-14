@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -28,6 +29,16 @@ from app.services import remote_plugin_service as svc
 
 class TestRemotePluginSecurity:
     """远程插件安全测试。"""
+
+    def test_plugin_data_dir_rejects_plugin_level_symlink(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(svc.settings, "plugins_installed_dir", str(tmp_path / "installed"))
+        data_root = tmp_path / "installed" / "_data"
+        other = data_root / "other_plugin"
+        other.mkdir(parents=True)
+        (data_root / "linked_plugin").symlink_to(other)
+
+        with pytest.raises(svc.RemotePluginError, match="不得是符号链接"):
+            svc._plugin_data_dir("linked_plugin")
 
     # ── 1. manifest.py 在安装阶段不执行 ──────────────────────────
 
@@ -1269,6 +1280,12 @@ class TestPluginRepoInstallFlow:
         _write_runtime_plugin(repo_dir / "same_demo", key="same_demo", version="1.0.0")
         _write_runtime_plugin(repo_dir / "new_demo", key="new_demo", version="9.9.9")
         _write_runtime_plugin(tmp_path / "installed" / "update_demo", key="update_demo", version="1.0.0")
+        legacy_db = tmp_path / "installed" / "update_demo" / "runtime.sqlite3"
+        legacy_writer = sqlite3.connect(legacy_db)
+        legacy_writer.execute("PRAGMA journal_mode = WAL")
+        legacy_writer.execute("CREATE TABLE question_bank(id INTEGER PRIMARY KEY, question TEXT NOT NULL)")
+        legacy_writer.execute("INSERT INTO question_bank(question) VALUES ('更新前已存在')")
+        legacy_writer.commit()
 
         async def _cached(_url: str, **_kwargs):
             return repo_dir
@@ -1295,6 +1312,9 @@ class TestPluginRepoInstallFlow:
         )
 
         result = await repo_svc.update_installed_plugins_from_repo(db, 1)
+        legacy_writer.execute("INSERT INTO question_bank(question) VALUES ('旧连接更新后继续写入')")
+        legacy_writer.commit()
+        legacy_writer.close()
 
         assert result.checked == 2
         assert result.update_available == 1
@@ -1314,6 +1334,14 @@ class TestPluginRepoInstallFlow:
         assert updated.manifest_json["_telepilot_remote"]["default_enabled"] is True
         assert "new_demo" not in db.installed_rows
         assert (tmp_path / "installed" / "update_demo" / "plugin.json").read_text(encoding="utf-8").find("1.2.0") >= 0
+        migrated_db = tmp_path / "installed" / "_data" / "update_demo" / "runtime.sqlite3"
+        assert migrated_db.is_file()
+        assert (tmp_path / "installed" / "update_demo" / "runtime.sqlite3").is_symlink()
+        with sqlite3.connect(migrated_db) as conn:
+            assert [row[0] for row in conn.execute("SELECT question FROM question_bank ORDER BY id")] == [
+                "更新前已存在",
+                "旧连接更新后继续写入",
+            ]
         assert not (tmp_path / "installed" / "update_demo.installing").exists()
         assert not (tmp_path / "installed" / "update_demo.bak-update").exists()
 
@@ -1364,6 +1392,62 @@ class TestPluginRepoInstallFlow:
         assert updated.manifest_json["version"] == "0.3.2"
         assert updated.manifest_json["_telepilot_remote"]["update_available"] is False
         assert updated.manifest_json["_telepilot_remote"]["latest_version"] == "0.3.2"
+
+    @pytest.mark.asyncio
+    async def test_repo_update_link_failure_rolls_back_and_retry_keeps_database(
+        self,
+        monkeypatch,
+        tmp_path,
+    ):
+        monkeypatch.setattr(repo_svc.settings, "plugins_installed_dir", str(tmp_path / "installed"))
+        repo_dir = tmp_path / "repo"
+        _write_runtime_plugin(repo_dir / "retry_demo", key="retry_demo", version="1.1.0")
+        install_dir = tmp_path / "installed" / "retry_demo"
+        _write_runtime_plugin(install_dir, key="retry_demo", version="1.0.0")
+        legacy_db = install_dir / "runtime.sqlite3"
+        with sqlite3.connect(legacy_db) as conn:
+            conn.execute("CREATE TABLE events(value TEXT NOT NULL)")
+            conn.execute("INSERT INTO events(value) VALUES ('before-failure')")
+
+        async def _cached(_url: str, **_kwargs):
+            return repo_dir
+
+        monkeypatch.setattr(repo_svc, "_ensure_repo_cached", _cached)
+        db = _FakePluginRepoDB(PluginRepo(id=1, url="https://example.com/repo.git", name="Repo"))
+        db.installed_rows["retry_demo"] = InstalledPlugin(
+            key="retry_demo",
+            source="repo",
+            source_url="https://example.com/repo.git",
+            installed_path=str(install_dir),
+            version="1.0.0",
+            enabled=True,
+            manifest_json={"name": "retry_demo"},
+        )
+        real_attach = repo_svc._attach_legacy_plugin_sqlite_links
+        monkeypatch.setattr(
+            repo_svc,
+            "_attach_legacy_plugin_sqlite_links",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("link failed")),
+        )
+
+        failed = await repo_svc.update_installed_plugins_from_repo(db, 1)
+
+        assert failed.failed == 1
+        assert "1.0.0" in (install_dir / "plugin.json").read_text(encoding="utf-8")
+        assert not (tmp_path / "installed" / "retry_demo.bak-update").exists()
+        with sqlite3.connect(legacy_db) as conn:
+            conn.execute("INSERT INTO events(value) VALUES ('after-failure')")
+
+        monkeypatch.setattr(repo_svc, "_attach_legacy_plugin_sqlite_links", real_attach)
+        succeeded = await repo_svc.update_installed_plugins_from_repo(db, 1)
+
+        assert succeeded.updated == 1
+        persisted = tmp_path / "installed" / "_data" / "retry_demo" / "runtime.sqlite3"
+        with sqlite3.connect(persisted) as conn:
+            assert [row[0] for row in conn.execute("SELECT value FROM events ORDER BY rowid")] == [
+                "before-failure",
+                "after-failure",
+            ]
 
     @pytest.mark.asyncio
     async def test_install_local_plugin_writes_installed_plugin(self, monkeypatch, tmp_path):
@@ -1486,6 +1570,45 @@ class TestPluginRepoInstallFlow:
         assert installed.version == "4.1.0"
         assert installed.enabled is True
         assert (install_dir / "plugin.json").read_text(encoding="utf-8").count("4.1.0") == 1
+
+    @pytest.mark.asyncio
+    async def test_official_update_link_failure_restores_previous_directory(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(repo_svc.settings, "plugins_installed_dir", str(tmp_path / "installed"))
+        monkeypatch.setattr(repo_svc, "_official_plugin_root", lambda: tmp_path / "empty-official")
+        remote_root = tmp_path / "remote-official"
+        _write_runtime_plugin(remote_root / "official_retry", key="official_retry", version="2.0.0")
+        (remote_root / "official_retry" / "plugin.json").write_text(
+            '{"name":"official_retry","display_name":"Official Retry","version":"2.0.0","tags":["official"]}',
+            encoding="utf-8",
+        )
+
+        async def _remote_root(*, force_refresh: bool = False):  # noqa: ARG001
+            return remote_root
+
+        monkeypatch.setattr(repo_svc, "_official_remote_plugin_root", _remote_root)
+        install_dir = tmp_path / "installed" / "official_retry"
+        _write_runtime_plugin(install_dir, key="official_retry", version="1.0.0")
+        (install_dir / "runtime.sqlite3").touch()
+        db = _FakePluginRepoDB()
+        db.installed_rows["official_retry"] = InstalledPlugin(
+            key="official_retry",
+            source="official",
+            source_url="https://example.com/official.git",
+            installed_path=str(install_dir),
+            version="1.0.0",
+            enabled=True,
+        )
+        monkeypatch.setattr(
+            repo_svc,
+            "_attach_legacy_plugin_sqlite_links",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("link failed")),
+        )
+
+        with pytest.raises(repo_svc.PluginRepoError, match="link failed"):
+            await repo_svc.install_official_plugin(db, "official_retry", default_enabled=False)
+
+        assert "1.0.0" in (install_dir / "plugin.json").read_text(encoding="utf-8")
+        assert not (tmp_path / "installed" / "official_retry.bak-official").exists()
 
 
 class TestPluginMetadataSchema:

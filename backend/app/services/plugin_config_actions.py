@@ -78,10 +78,13 @@ async def run_plugin_config_action(
 
     runtime_config = _merge_current_config(effective_config, current_config)
     manifest = _plugin_manifest_dict(plugin_cls, feature)
+    from ..worker.plugins import loader as plugin_loader
+
     ctx = PluginContext(
         account_id=account.id,
         feature_key=feature.key,
         config=runtime_config,
+        data_dir=plugin_loader._plugin_data_dir(feature.key),  # noqa: SLF001 - shared plugin runtime contract
         log=log,
         http=await _build_http_facade(db, account, feature.key, manifest, runtime_config),
         ai=_build_ai_facade(account.id, feature.key, manifest),

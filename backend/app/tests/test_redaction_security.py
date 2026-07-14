@@ -7,7 +7,11 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from app.api.features import _preserve_existing_sensitive_values, _sanitize_config
+from app.api.features import (
+    _preserve_existing_read_only_values,
+    _preserve_existing_sensitive_values,
+    _sanitize_config,
+)
 from app.api.logs import RuntimeLogItem, list_audit_logs
 from app.logging_redaction import SensitiveDataLogFilter
 from app.services import audit
@@ -92,6 +96,49 @@ def test_feature_config_preserve_sensitive_values() -> None:
     assert merged["access_token"] == "old"
     assert merged["command"] == "new-cmd"
     assert _sanitize_config({"access_token": "real"})["access_token"] == "***"
+
+
+def test_feature_config_preserves_server_owned_read_only_values() -> None:
+    merged = _preserve_existing_read_only_values(
+        {
+            "question_bank_status": "已生成：测试题库（200 题）",
+            "question_bank_count": 200,
+            "question_bank_id": "bank-1",
+        },
+        {
+            "question_bank_status": "伪造状态",
+            "question_bank_count": 999,
+            "question_bank_id": "bank-2",
+        },
+        {
+            "config_schema": {
+                "properties": {
+                    "question_bank_status": {"type": "string", "readOnly": True},
+                    "question_bank_count": {"type": "integer", "readOnly": True},
+                    "question_bank_id": {"type": "string"},
+                }
+            }
+        },
+    )
+
+    assert merged["question_bank_status"] == "已生成：测试题库（200 题）"
+    assert merged["question_bank_count"] == 200
+    assert merged["question_bank_id"] == "bank-2"
+
+    first_save = _preserve_existing_read_only_values(
+        None,
+        {"question_bank_status": "伪造状态", "question_bank_id": "bank-2"},
+        {
+            "config_schema": {
+                "properties": {
+                    "question_bank_status": {"type": "string", "readOnly": True},
+                    "question_bank_id": {"type": "string"},
+                }
+            }
+        },
+    )
+    assert "question_bank_status" not in first_save
+    assert first_save["question_bank_id"] == "bank-2"
 
 
 def test_runtime_log_item_redacts_message_and_detail() -> None:

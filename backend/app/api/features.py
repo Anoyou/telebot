@@ -222,6 +222,31 @@ def _preserve_existing_sensitive_values(
     return merged
 
 
+def _preserve_existing_read_only_values(
+    existing: dict[str, object] | None,
+    incoming: dict[str, object],
+    manifest: object,
+) -> dict[str, object]:
+    """Keep server-owned read-only config fields across replacement-style saves."""
+
+    merged = dict(incoming)
+    existing_dict = dict(existing or {})
+    raw_schema = manifest.get("config_schema") if isinstance(manifest, dict) else None
+    properties = raw_schema.get("properties") if isinstance(raw_schema, dict) else None
+    if not isinstance(properties, dict):
+        return merged
+    for item_key, field in properties.items():
+        if (
+            isinstance(field, dict)
+            and field.get("readOnly") is True
+        ):
+            if item_key in existing_dict:
+                merged[str(item_key)] = existing_dict[item_key]
+            else:
+                merged.pop(str(item_key), None)
+    return merged
+
+
 def _preserve_chatgpt_image_tokens(
     existing: dict[str, object],
     incoming: dict[str, object],
@@ -399,10 +424,16 @@ async def update_account_feature_config(
 
     # 验证 JSON Schema
     existing = await db.get(AccountFeature, (aid, key))
+    existing_config = dict(existing.config or {}) if existing is not None else None
     payload.config = _preserve_existing_sensitive_values(
-        dict(existing.config or {}) if existing is not None else None,
+        existing_config,
         dict(payload.config),
         key,
+    )
+    payload.config = _preserve_existing_read_only_values(
+        existing_config,
+        payload.config,
+        feature.manifest,
     )
     payload.config = _normalize_feature_config(key, payload.config)
     scoped_schema = _account_config_schema(feature.manifest, payload.config)

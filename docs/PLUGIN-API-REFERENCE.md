@@ -127,6 +127,7 @@ class PluginContext:
     engine: Any | None     # RateLimitEngine；安装型插件通常为 None
     redis: Any | None      # redis.asyncio.Redis；低层兼容入口
     storage: Any | None    # PluginStorage；按账号和插件隔离的持久化 KV facade
+    data_dir: Path | None  # 插件独享的持久化文件目录；更新插件代码时不会被覆盖
     log: Callable          # 日志函数
     scheduler: Any         # 平台调度器 facade
     generation: int        # generation guard 计数
@@ -137,6 +138,8 @@ class PluginContext:
 ```
 
 注意：核心平台兼容代码可能拿到完整运行时能力；远程/本地/插件库安装型插件拿到的是受控上下文：`ctx.client` 是平台提供的客户端 facade，指令 handler 中传入的 `client` 参数与 `ctx.client` 同源。当前 worker 加载路径会向插件上下文注入低层 `ctx.redis`，并基于同一个 Redis 后端构造 `ctx.storage`；新插件需要持久化状态时应优先使用 `ctx.storage`，不要自行拼 Redis key。`ctx.engine` 仍只供核心 builtin 兼容代码直接依赖，安装型插件通常为 `None`。受控上下文用于收口常用操作和审计，不是公共插件市场式强沙箱。
+
+插件需要 SQLite、索引文件或其他文件型持久化时，必须写入 `ctx.data_dir`，不要写进 `Path(__file__).parent`、插件安装目录或仓库源码目录。TelePilot 更新插件时会整体替换代码目录，而 `ctx.data_dir` 位于持久化插件卷的 `_data/<plugin_key>/` 下，不随代码更新删除。插件仍需使用 `ctx.account_id` 隔离账号数据；若一个数据库文件服务多个账号，表结构必须包含账号隔离键。
 
 ### 4.0 受控 facade：ctx.http 与 ctx.ai
 

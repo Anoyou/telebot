@@ -4086,6 +4086,17 @@ def _installed_dir() -> Path:
         return Path("./plugins/installed").resolve()
 
 
+def _plugin_data_dir(plugin_key: str) -> Path:
+    """Return the stable on-volume data directory for one installed plugin."""
+
+    data_root = (_installed_dir() / "_data").resolve()
+    target = (data_root / str(plugin_key)).resolve()
+    if target == data_root or data_root not in target.parents:
+        raise ValueError(f"invalid plugin data directory key: {plugin_key!r}")
+    target.mkdir(parents=True, exist_ok=True)
+    return target
+
+
 def _scan_builtin_dirs() -> list[Path]:
     """扫描 builtin 子目录（仅取目录，跳过 ``__pycache__`` 等下划线开头的私有目录）。
 
@@ -6527,6 +6538,7 @@ async def _activate(db, state: _AccountState, af: AccountFeature, redis: Any) ->
         client=plugin_client,
         engine=state.engine if plugin_source != "installed" else None,
         redis=plugin_redis,
+        data_dir=_plugin_data_dir(af.feature_key),
         log=_make_logger(redis, state.account_id, af.feature_key),
         scheduler=(
             state.scheduler.for_plugin(af.feature_key, state.generation)

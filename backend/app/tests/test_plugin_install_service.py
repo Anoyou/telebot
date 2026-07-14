@@ -20,6 +20,7 @@ from __future__ import annotations
 import base64
 import io
 import shutil
+import sqlite3
 import zipfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -429,15 +430,58 @@ async def test_install_zip_upgrade_keeps_enabled(tmp_path, monkeypatch) -> None:
     # 1) 先装 1.0.0 + 开启
     row = await pis.install_zip(db, zip_bytes=z1, signature=sig1)
     row.enabled = True
+    legacy_db = Path(row.installed_path) / "runtime.sqlite3"
+    legacy_writer = sqlite3.connect(legacy_db)
+    legacy_writer.execute("PRAGMA journal_mode = WAL")
+    legacy_writer.execute("CREATE TABLE events(value TEXT NOT NULL)")
+    legacy_writer.execute("INSERT INTO events(value) VALUES ('before-upgrade')")
+    legacy_writer.commit()
 
     # 2) 装 1.1.0 → 版本升级、enabled 保留 True
     z2 = _make_zip(key="upgr", version="1.1.0")
     sig2 = priv.sign(z2)
     row2 = await pis.install_zip(db, zip_bytes=z2, signature=sig2)
+    legacy_writer.execute("INSERT INTO events(value) VALUES ('old-connection-after-upgrade')")
+    legacy_writer.commit()
+    legacy_writer.close()
     assert row2.version == "1.1.0"
     assert row2.enabled is True
     assert db.installed_rows["upgr"].enabled is True
     assert db.installed_rows["upgr"].version == "1.1.0"
+    persisted = tmp_path / "installed" / "_data" / "upgr" / "runtime.sqlite3"
+    with sqlite3.connect(persisted) as conn:
+        assert [row[0] for row in conn.execute("SELECT value FROM events ORDER BY rowid")] == [
+            "before-upgrade",
+            "old-connection-after-upgrade",
+        ]
+
+
+@pytest.mark.asyncio
+async def test_install_zip_upgrade_link_failure_restores_previous_directory(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(pis.settings, "plugins_installed_dir", str(tmp_path / "installed"))
+    db = _FakeDB()
+    private_key, public_key = _ed25519_keypair()
+    monkeypatch.setattr(pis.settings, "plugin_pubkey", public_key)
+    first = _make_zip(key="zip_retry", version="1.0.0")
+    row = await pis.install_zip(db, zip_bytes=first, signature=private_key.sign(first))
+    with sqlite3.connect(Path(row.installed_path) / "runtime.sqlite3") as conn:
+        conn.execute("CREATE TABLE events(value TEXT NOT NULL)")
+        conn.execute("INSERT INTO events(value) VALUES ('preserved')")
+    monkeypatch.setattr(
+        pis,
+        "_attach_legacy_plugin_sqlite_links",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("link failed")),
+    )
+    second = _make_zip(key="zip_retry", version="2.0.0")
+
+    with pytest.raises(OSError, match="link failed"):
+        await pis.install_zip(db, zip_bytes=second, signature=private_key.sign(second))
+
+    install_dir = tmp_path / "installed" / "zip_retry"
+    assert "1.0.0" in (install_dir / "manifest.py").read_text(encoding="utf-8")
+    assert not (tmp_path / "installed" / "zip_retry.bak-zip").exists()
+    with sqlite3.connect(install_dir / "runtime.sqlite3") as conn:
+        assert conn.execute("SELECT value FROM events").fetchone()[0] == "preserved"
 
 
 @pytest.mark.asyncio

@@ -29,7 +29,9 @@ import logging
 import os
 import re
 import shutil
+import sqlite3
 import tempfile
+import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -524,6 +526,116 @@ def _plugin_dir(name: str) -> Path:
             f"插件名派生路径越界: {name!r}",
         )
     return target
+
+
+def _plugin_data_dir(name: str) -> Path:
+    """Return the update-safe persistent file directory for one plugin."""
+
+    _plugin_dir(name)  # Reuse the plugin-name and confinement validation.
+    data_root = (_installed_root() / "_data").resolve()
+    candidate = data_root / name
+    if candidate.is_symlink():
+        raise RemotePluginError("PLUGIN_DATA_CONFLICT", f"插件数据目录不得是符号链接: {name!r}")
+    target = candidate.resolve()
+    if target == data_root or data_root not in target.parents:
+        raise RemotePluginError("BAD_PLUGIN_NAME", f"插件数据目录越界: {name!r}")
+    target.mkdir(parents=True, exist_ok=True)
+    return target
+
+
+def _replace_with_symlink(path: Path, target: Path) -> None:
+    temporary = path.with_name(f".{path.name}.persist-link-{uuid.uuid4().hex}")
+    try:
+        temporary.symlink_to(target)
+        temporary.replace(path)
+    finally:
+        if temporary.is_symlink():
+            temporary.unlink()
+
+
+def _relocate_legacy_plugin_sqlite(install_path: Path, plugin_name: str) -> list[str]:
+    """Atomically redirect legacy SQLite paths without changing the live inode."""
+
+    if not install_path.is_dir():
+        return []
+    data_dir = _plugin_data_dir(plugin_name)
+    names: list[str] = []
+    for source in sorted(install_path.glob("*.sqlite3")):
+        target = data_dir / source.name
+        source_is_persistent_link = False
+        if source.is_symlink():
+            if source.resolve(strict=False) == target.resolve(strict=False) and target.is_file():
+                names.append(source.name)
+                source_is_persistent_link = True
+            else:
+                raise RemotePluginError(
+                    "PLUGIN_DATA_CONFLICT",
+                    f"插件 {plugin_name} 的旧数据库链接目标异常: {source.name}",
+                )
+        else:
+            if not source.is_file():
+                continue
+            names.append(source.name)
+        with sqlite3.connect(source, timeout=10.0, isolation_level=None) as migration_guard:
+            migration_guard.execute("PRAGMA busy_timeout = 10000")
+            migration_guard.execute("BEGIN IMMEDIATE")
+            try:
+                if not source_is_persistent_link:
+                    if target.exists():
+                        if not target.is_file() or not os.path.samefile(source, target):
+                            raise RemotePluginError(
+                                "PLUGIN_DATA_CONFLICT",
+                                f"插件 {plugin_name} 的持久化数据库与旧数据库冲突: {source.name}",
+                            )
+                    else:
+                        os.link(source, target)
+                for suffix in ("-wal", "-shm"):
+                    legacy_sidecar = install_path / f"{source.name}{suffix}"
+                    persistent_sidecar = data_dir / f"{source.name}{suffix}"
+                    if legacy_sidecar.is_symlink():
+                        if legacy_sidecar.resolve(strict=False) != persistent_sidecar.resolve(strict=False):
+                            raise RemotePluginError(
+                                "PLUGIN_DATA_CONFLICT",
+                                f"插件 {plugin_name} 的 SQLite 辅助文件链接异常: {legacy_sidecar.name}",
+                            )
+                        continue
+                    if legacy_sidecar.exists():
+                        if persistent_sidecar.exists():
+                            if not os.path.samefile(legacy_sidecar, persistent_sidecar):
+                                raise RemotePluginError(
+                                    "PLUGIN_DATA_CONFLICT",
+                                    f"插件 {plugin_name} 的 SQLite 辅助文件冲突: {legacy_sidecar.name}",
+                                )
+                        else:
+                            os.link(legacy_sidecar, persistent_sidecar)
+                    _replace_with_symlink(legacy_sidecar, persistent_sidecar)
+                if not source_is_persistent_link:
+                    _replace_with_symlink(source, target)
+                migration_guard.commit()
+            except Exception:
+                migration_guard.rollback()
+                raise
+    return names
+
+
+def _attach_legacy_plugin_sqlite_links(
+    install_path: Path,
+    plugin_name: str,
+    sqlite_names: list[str],
+) -> None:
+    """Keep legacy plugin code pointed at the migrated DB until worker reload completes."""
+
+    data_dir = _plugin_data_dir(plugin_name)
+    for name in sqlite_names:
+        target = data_dir / name
+        if not target.is_file():
+            continue
+        for suffix in ("", "-wal", "-shm"):
+            link = install_path / f"{name}{suffix}"
+            target_link = data_dir / f"{name}{suffix}"
+            if link.is_symlink() and link.resolve(strict=False) == target_link.resolve(strict=False):
+                continue
+            _replace_with_symlink(link, target_link)
 
 
 def _legacy_plugin_dir(name: str) -> Path:
@@ -1225,6 +1337,7 @@ async def _copy_plugin_from_source_url(
     target.parent.mkdir(parents=True, exist_ok=True)
 
     swapped = False
+    legacy_sqlite_names: list[str] = []
     try:
         with tempfile.TemporaryDirectory(prefix="telepilot-plugin-update-") as tmp:
             repo_dir = Path(tmp) / "repo"
@@ -1243,10 +1356,12 @@ async def _copy_plugin_from_source_url(
                 )
             _validate_runtime_plugin_shape(staging, staged_meta)
 
+        legacy_sqlite_names = _relocate_legacy_plugin_sqlite(target, name)
         if replace_existing and target.exists():
             target.rename(backup)
         staging.rename(target)
         swapped = True
+        _attach_legacy_plugin_sqlite_links(target, name, legacy_sqlite_names)
     except Exception:
         if staging.exists():
             shutil.rmtree(staging, ignore_errors=True)

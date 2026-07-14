@@ -14,6 +14,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 from typing import Any
 
 from telethon import TelegramClient, events
@@ -86,6 +87,7 @@ class PluginContext:
       - ``engine``：风控引擎（C Agent 提供，支持 ``acquire`` 与各 ``on_*`` 回调）
       - ``redis``：异步 Redis 客户端
       - ``storage``：按 [账号 × 插件] 隔离的持久化 key-value facade
+      - ``data_dir``：插件独享、更新插件代码时不会被覆盖的持久化文件目录
       - ``log``：写运行日志的协程；签名 ``async (level, message, **detail)``
       - ``scheduler``：平台调度器 facade，可在插件内注册 cron / interval / once 任务
       - ``http``：声明 ``external_http`` 和 ``allowed_hosts`` 后注入的安全 HTTP facade
@@ -104,6 +106,7 @@ class PluginContext:
     engine: Any = None  # RateLimitEngine
     redis: Any = None  # redis.asyncio.Redis
     storage: Any = None  # PluginStorage
+    data_dir: Path | None = None
     log: Callable[..., Awaitable[None]] | None = None
     scheduler: Any = None  # SchedulerFacade
     http: Any = None  # PluginHTTP
