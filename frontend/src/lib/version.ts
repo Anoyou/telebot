@@ -21,7 +21,7 @@
 //   - 路线图阶段："MVP"、"Sprint 2"、"RC1"
 //   - 生产稳定时设为 null（达到 1.0.0 通常就摘掉）
 
-export const APP_VERSION = "0.58.0";
+export const APP_VERSION = "0.58.1";
 export const APP_STAGE: string | null = null;
 
 /** Sidebar / About 等 UI 处使用的展示串。例："v0.2.0 · Sprint 2" 或 "v0.2.0"（STAGE 为 null 时）。 */

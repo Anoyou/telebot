@@ -20,6 +20,10 @@
 
 ## [Unreleased]
 
+暂无已记录变更。
+
+## [0.58.1] — 2026-07-14 · patch（补丁版本） · 模型测活工作台交互完善
+
 ### Added
 - 全局模型巡检新增 LLM Provider 多选范围，可将勾选的多个 Provider 及其已启用模型并发测活。
 - 对话测活失败模型新增折叠详情与单模型临时重试，可切换 API 协议和客户端身份，且不会写回 Provider 配置。
@@ -28,11 +32,6 @@
 - 模型测活工作台将窄屏下收起的测试范围与请求设置改为左右贴边入口；全局巡检和 Provider 多模型对话分别管理自己的侧栏。
 - 两种测活模式现在共用系统提示词与测活词，默认测活词调整为“你怎么又不行啦？”，对话记录会持续保留，直到用户主动清空。
 - Provider 页面强化“对话测活”和“客户端身份版本”入口；模型范围中的启用状态缩小为“已被启用”。
-- 插件开发 Quickstart、速查表与 `tp_plugin new` 脚手架统一要求运行时通过 `current_command_prefix()` 展示系统指令前缀，schema/usage 使用 `{prefix}`，不再生成裸命令示例。
-- 通用插件配置 schema 新增 `x-ui-placeholder` 浅色占位内容和 `dynamic-select` 动态单选控件，供插件展示内置提示词与运行期生成的选项。
-
-### Fixed
-- 插件契约中的 `delete_message`、`payout`、`session_expired`、`message_edited`、`all_events` 现在统一显示中文标签，不再把内部标识直接暴露在“可用能力”和“触发入口”中。
 
 ## [0.58.0] — 2026-07-14 · minor（次版本） · Provider 优先模型测活与 Grok CLI
 
