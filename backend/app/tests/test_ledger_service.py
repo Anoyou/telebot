@@ -186,17 +186,41 @@ async def test_ledger_summary_matches_filtered_entries_sum(ledger_session_factor
     filters = ledger_service.LedgerFilters(account_id=7, plugin_key="game", limit=None)
     async with ledger_session_factory() as db:
         entries = await ledger_service.list_ledger_entries(db, filters)
+        empty_status_entries = await ledger_service.list_ledger_entries(
+            db,
+            ledger_service.LedgerFilters(account_id=7, plugin_key="game", status="", limit=None),
+        )
+        failed_entries = await ledger_service.list_ledger_entries(
+            db,
+            ledger_service.LedgerFilters(
+                account_id=7,
+                plugin_key="game",
+                status=ACTION_EVENT_STATUS_FAILED,
+                limit=None,
+            ),
+        )
+        dry_run_entries = await ledger_service.list_ledger_entries(
+            db,
+            ledger_service.LedgerFilters(
+                account_id=7,
+                plugin_key="game",
+                status=ACTION_EVENT_STATUS_DRY_RUN,
+                limit=None,
+            ),
+        )
         summary = await ledger_service.summarize_ledger(db, filters)
 
-    real_entries = {
-        item.id: item
-        for item in entries
-        if item.status in {ACTION_EVENT_STATUS_OK, ACTION_EVENT_STATUS_COMPENSATED}
-    }
+    real_entries = {item.id: item for item in entries}
     income = sum((Decimal(item.amount) for item in real_entries.values() if item.direction == "in"), Decimal("0"))
     payout = sum((Decimal(item.amount) for item in real_entries.values() if item.direction == "out"), Decimal("0"))
 
-    assert len(entries) == 4
+    assert len(entries) == 2
+    assert [item.id for item in empty_status_entries] == [item.id for item in entries]
+    assert {item.status for item in entries} == {ACTION_EVENT_STATUS_OK}
+    assert len(failed_entries) == 1
+    assert failed_entries[0].error_code == "telegram_api_error"
+    assert len(dry_run_entries) == 1
+    assert dry_run_entries[0].status == ACTION_EVENT_STATUS_DRY_RUN
     assert summary.count == len(real_entries) == 2
     assert Decimal(summary.income) == income == Decimal("100.50")
     assert Decimal(summary.payout) == payout == Decimal("30.25")
@@ -216,16 +240,17 @@ async def test_ledger_summary_matches_filtered_entries_sum(ledger_session_factor
 
 
 @pytest.mark.asyncio
-async def test_ledger_summary_excludes_failed_replay_when_compensation_ok_exists(ledger_session_factory) -> None:
+async def test_ledger_defaults_to_single_success_after_failed_retries(ledger_session_factory) -> None:
     base = datetime.now(UTC) - timedelta(days=1)
-    await _insert_action_event(
-        ledger_session_factory,
-        action_type="payout",
-        params_summary={"type": "payout", "amount": "10", "chat_id": -100456, "payout_key": "pay_retry"},
-        status=ACTION_EVENT_STATUS_FAILED,
-        error_code="telegram_api_error",
-        created_at=base,
-    )
+    for index in range(6):
+        await _insert_action_event(
+            ledger_session_factory,
+            action_type="payout",
+            params_summary={"type": "payout", "amount": "10", "chat_id": -100456, "payout_key": "pay_retry"},
+            status=ACTION_EVENT_STATUS_FAILED,
+            error_code="reply_anchor_missing",
+            created_at=base + timedelta(seconds=index),
+        )
     await _insert_action_event(
         ledger_session_factory,
         action_type="payout",
@@ -235,11 +260,29 @@ async def test_ledger_summary_excludes_failed_replay_when_compensation_ok_exists
     )
 
     async with ledger_session_factory() as db:
+        entries = await ledger_service.list_ledger_entries(
+            db,
+            ledger_service.LedgerFilters(account_id=7, plugin_key="game", limit=None),
+        )
+        failed_entries = await ledger_service.list_ledger_entries(
+            db,
+            ledger_service.LedgerFilters(
+                account_id=7,
+                plugin_key="game",
+                status=ACTION_EVENT_STATUS_FAILED,
+                limit=None,
+            ),
+        )
         summary = await ledger_service.summarize_ledger(
             db,
             ledger_service.LedgerFilters(account_id=7, plugin_key="game", limit=None),
         )
 
+    assert len(entries) == 1
+    assert entries[0].status == ACTION_EVENT_STATUS_OK
+    assert entries[0].payout_key == "pay_retry"
+    assert len(failed_entries) == 6
+    assert {item.error_code for item in failed_entries} == {"reply_anchor_missing"}
     assert summary.count == 1
     assert Decimal(summary.payout) == Decimal("10")
     assert Decimal(summary.net) == Decimal("-10")

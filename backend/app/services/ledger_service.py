@@ -160,6 +160,8 @@ async def list_ledger_entries(db: AsyncSession, filters: LedgerFilters | None = 
     """查询资金流水，金额过滤使用绝对金额。"""
 
     active = _normalize_filters(filters)
+    if active.status is None and not active.statuses:
+        active.statuses = LEDGER_SUMMARY_STATUSES
     entries: list[LedgerEntry] = []
     cursor: tuple[datetime, int] | None = None
     batch_size = None if active.limit is None else max(200, active.limit * 4)
@@ -413,7 +415,7 @@ def _normalize_filters(filters: LedgerFilters | None) -> LedgerFilters:
         active.direction = direction
     if active.plugin_key:
         active.plugin_key = str(active.plugin_key).strip() or None
-    if active.status:
+    if active.status is not None:
         active.status = str(active.status).strip().upper() or None
     if active.statuses:
         active.statuses = frozenset(str(status).strip().upper() for status in active.statuses if str(status).strip())

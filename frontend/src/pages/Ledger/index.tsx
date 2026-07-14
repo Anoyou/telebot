@@ -495,12 +495,12 @@ function FilterPanel({
           </Field>
           <Field label="状态">
             <Select value={filters.status} onChange={(event) => patch("status", event.target.value)}>
-              <option value="">全部状态</option>
-              <option value="OK">OK</option>
-              <option value="FAILED">FAILED</option>
-              <option value="DRY_RUN">DRY_RUN</option>
-              <option value="PENDING">PENDING</option>
-              <option value="COMPENSATED">COMPENSATED</option>
+              <option value="">已计账（OK / COMPENSATED）</option>
+              <option value="OK">成功（OK）</option>
+              <option value="FAILED">失败尝试（FAILED）</option>
+              <option value="DRY_RUN">演练（DRY_RUN）</option>
+              <option value="PENDING">处理中（PENDING）</option>
+              <option value="COMPENSATED">已补付（COMPENSATED）</option>
             </Select>
           </Field>
           <Field label="金额">
@@ -685,43 +685,49 @@ function LedgerTable({
               </TableRow>
             </TableHeader>
             <TableBody>
-              {entries.map((entry) => (
-                <TableRow key={`${entry.source}:${entry.source_id}`}>
-                  <TableCell className="whitespace-nowrap text-xs text-muted-foreground">
-                    {formatDateTime(entry.created_at)}
-                  </TableCell>
-                  <TableCell>
-                    <DirectionBadge direction={entry.direction} />
-                  </TableCell>
-                  <TableCell className={cn("text-right font-mono font-semibold tabular-nums", amountToneClass(entry.signed_amount))}>
-                    {formatSignedAmount(entry)}
-                  </TableCell>
-                  <TableCell>
-                    <div className="max-w-44 truncate">{accountLabel(entry.account_id)}</div>
-                    <div className="font-mono text-[11px] text-muted-foreground">#{entry.account_id}</div>
-                  </TableCell>
-                  <TableCell>
-                    <div className="max-w-44 truncate text-sm">{entry.chat_title || "-"}</div>
-                    <div className="font-mono text-[11px] text-muted-foreground">{entry.chat_id ?? "-"}</div>
-                  </TableCell>
-                  <TableCell>
-                    <div className="max-w-44 truncate text-sm">{recipientDisplayName(entry)}</div>
-                    <div className="font-mono text-[11px] text-muted-foreground">
-                      {entry.receiver_user_id != null ? `UID ${entry.receiver_user_id}` : "UID -"}
-                    </div>
-                  </TableCell>
-                  <TableCell>
-                    <div className="max-w-40 truncate font-mono text-xs">{entry.plugin_key || "-"}</div>
-                    <div className="max-w-40 truncate font-mono text-[11px] text-muted-foreground">{entry.entry_key || "-"}</div>
-                  </TableCell>
-                  <TableCell>
-                    <StatusBadge status={entry.status} />
-                  </TableCell>
-                  <TableCell className="font-mono text-xs">{entry.channel || "-"}</TableCell>
-                  <TableCell className="max-w-40 truncate font-mono text-xs">{entry.error_code || "-"}</TableCell>
-                  <TableCell className="max-w-40 truncate font-mono text-xs">{entry.payout_key || `#${entry.source_id}`}</TableCell>
-                </TableRow>
-              ))}
+              {entries.map((entry) => {
+                const posted = isPostedLedgerStatus(entry.status);
+                return (
+                  <TableRow key={`${entry.source}:${entry.source_id}`} className={posted ? undefined : "bg-muted/20"}>
+                    <TableCell className="whitespace-nowrap text-xs text-muted-foreground">
+                      {formatDateTime(entry.created_at)}
+                    </TableCell>
+                    <TableCell>
+                      <DirectionBadge direction={entry.direction} posted={posted} />
+                    </TableCell>
+                    <TableCell className={cn(
+                      "text-right font-mono font-semibold tabular-nums",
+                      posted ? amountToneClass(entry.signed_amount) : "text-muted-foreground",
+                    )}>
+                      {posted ? formatSignedAmount(entry) : `未计账 · ${formatAmount(entry.amount)}`}
+                    </TableCell>
+                    <TableCell>
+                      <div className="max-w-44 truncate">{accountLabel(entry.account_id)}</div>
+                      <div className="font-mono text-[11px] text-muted-foreground">#{entry.account_id}</div>
+                    </TableCell>
+                    <TableCell>
+                      <div className="max-w-44 truncate text-sm">{entry.chat_title || "-"}</div>
+                      <div className="font-mono text-[11px] text-muted-foreground">{entry.chat_id ?? "-"}</div>
+                    </TableCell>
+                    <TableCell>
+                      <div className="max-w-44 truncate text-sm">{recipientDisplayName(entry)}</div>
+                      <div className="font-mono text-[11px] text-muted-foreground">
+                        {entry.receiver_user_id != null ? `UID ${entry.receiver_user_id}` : "UID -"}
+                      </div>
+                    </TableCell>
+                    <TableCell>
+                      <div className="max-w-40 truncate font-mono text-xs">{entry.plugin_key || "-"}</div>
+                      <div className="max-w-40 truncate font-mono text-[11px] text-muted-foreground">{entry.entry_key || "-"}</div>
+                    </TableCell>
+                    <TableCell>
+                      <StatusBadge status={entry.status} />
+                    </TableCell>
+                    <TableCell className="font-mono text-xs">{entry.channel || "-"}</TableCell>
+                    <TableCell className="max-w-40 truncate font-mono text-xs">{entry.error_code || "-"}</TableCell>
+                    <TableCell className="max-w-40 truncate font-mono text-xs">{entry.payout_key || `#${entry.source_id}`}</TableCell>
+                  </TableRow>
+                );
+              })}
             </TableBody>
           </Table>
         )}
@@ -846,7 +852,15 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
   );
 }
 
-function DirectionBadge({ direction }: { direction: LedgerDirection }) {
+function DirectionBadge({ direction, posted = true }: { direction: LedgerDirection; posted?: boolean }) {
+  if (!posted) {
+    return (
+      <MetaBadge tone="outline">
+        {direction === "in" ? <ArrowDownLeft className="h-3 w-3" /> : <ArrowUpRight className="h-3 w-3" />}
+        {direction === "in" ? "入账尝试" : "出账尝试"}
+      </MetaBadge>
+    );
+  }
   if (direction === "in") {
     return (
       <MetaBadge tone="success">
@@ -861,6 +875,10 @@ function DirectionBadge({ direction }: { direction: LedgerDirection }) {
       出账
     </MetaBadge>
   );
+}
+
+function isPostedLedgerStatus(status: string): boolean {
+  return status === "OK" || status === "COMPENSATED";
 }
 
 function StatusBadge({ status }: { status: string }) {
