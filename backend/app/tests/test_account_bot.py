@@ -580,6 +580,42 @@ def _decode_action_reply(redis: _IPCRecordingRedis) -> dict[str, object]:
 
 
 @pytest.mark.asyncio
+async def test_payout_rpc_does_not_reuse_business_payout_key_as_request_id(monkeypatch) -> None:
+    requests: list[dict[str, object]] = []
+
+    class _Broker:
+        async def request(self, **kwargs):  # noqa: ANN003
+            requests.append(dict(kwargs))
+            return True, 1, {"ok": False, "error": "旧失败", "result": {}}, None
+
+    monkeypatch.setattr(account_bot_runtime, "get_interaction_rpc_broker", AsyncMock(return_value=_Broker()))
+    monkeypatch.setattr(account_bot_runtime, "get_redis", lambda: object())
+    incoming = account_bot_runtime.Incoming(
+        account_id=1,
+        token="token",
+        update_id=1,
+        user_id=7,
+        chat_id=-1001,
+        message_id=88,
+        text="",
+    )
+    payload = {
+        "action_type": "payout",
+        "chat_id": -1001,
+        "amount": 1530,
+        "payout_key": "ai_redpacket:1:packet:slot:user",
+        "reply_to_message_id": 1018260,
+    }
+
+    await account_bot_runtime._run_worker_interaction_action(incoming, payload=payload)
+    await account_bot_runtime._run_worker_interaction_action(incoming, payload=payload)
+
+    assert len(requests) == 2
+    assert all(request.get("request_id") is None for request in requests)
+    assert all("reply_to_message_id" in worker_runtime.IPCMessage.decode(request["command"]).payload["payload"] for request in requests)
+
+
+@pytest.mark.asyncio
 async def test_run_interaction_action_command_payout_over_limit_reports_error_code(monkeypatch) -> None:
     redis = _IPCRecordingRedis()
 

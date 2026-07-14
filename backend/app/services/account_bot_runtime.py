@@ -6659,11 +6659,6 @@ async def _run_worker_interaction_action(
             timeout_seconds=_INTERACTION_ENTRY_TIMEOUT_SECONDS,
             online_wait_seconds=0.0,
             redis=redis,
-            request_id=(
-                f"payout:{incoming.account_id}:{payload.get('payout_key')}"
-                if payload.get("action_type") == "payout" and payload.get("payout_key")
-                else None
-            ),
         )
         if not online:
             await record_span(
