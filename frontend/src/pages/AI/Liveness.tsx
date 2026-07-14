@@ -4,8 +4,10 @@ import { Link, useSearchParams } from "react-router-dom";
 import {
   Activity,
   ArrowLeft,
+  ChevronDown,
+  ChevronLeft,
+  ChevronRight,
   Filter,
-  ListFilter,
   Loader2,
   LockKeyhole,
   MessageSquare,
@@ -24,6 +26,8 @@ import {
 import type {
   ChatTestModelResult,
   ChatTestTurn,
+  LLMApiFormat,
+  LLMClientIdentityProfile,
   LLMProviderOut,
   ProviderModel,
 } from "@/api/types";
@@ -39,11 +43,12 @@ import { getErrMsg } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { FullLivenessPanel } from "@/components/ai/FullLivenessPanel";
 
-const DEFAULT_MESSAGE = "用一句话说明你是谁，并告诉我当前最适合用你完成什么任务。";
+const DEFAULT_MESSAGE = "你怎么又不行啦？";
 const DEFAULT_SYSTEM_PROMPT =
   "你是一个自然、简洁的中文聊天助手。请像真实聊天一样直接回复用户，不要只返回 ping/pong。";
 const DEFAULT_SELECTED_MODEL_LIMIT = 8;
 const MAX_CHAT_MODELS = 20;
+const CHAT_STORAGE_KEY = "telepilot:llm-conversation";
 
 interface ChatDisplayResult extends ChatTestModelResult {
   pending?: boolean;
@@ -56,6 +61,61 @@ interface ChatRound {
   message: string;
   createdAt: number;
   results: ChatDisplayResult[];
+  histories: Record<string, ChatTestTurn[]>;
+}
+
+interface PersistedConversation {
+  providerId: number | null;
+  selectedModels: string[];
+  message: string;
+  systemPrompt: string;
+  rounds: ChatRound[];
+  histories: Record<string, ChatTestTurn[]>;
+}
+
+const EMPTY_CONVERSATION: PersistedConversation = {
+  providerId: null,
+  selectedModels: [],
+  message: DEFAULT_MESSAGE,
+  systemPrompt: DEFAULT_SYSTEM_PROMPT,
+  rounds: [],
+  histories: {},
+};
+
+function readConversation(): PersistedConversation {
+  try {
+    const raw = window.localStorage.getItem(CHAT_STORAGE_KEY);
+    if (!raw) return EMPTY_CONVERSATION;
+    const parsed = JSON.parse(raw) as Partial<PersistedConversation>;
+    return {
+      providerId: typeof parsed.providerId === "number" ? parsed.providerId : null,
+      selectedModels: Array.isArray(parsed.selectedModels) ? parsed.selectedModels : [],
+      message: typeof parsed.message === "string" ? parsed.message : DEFAULT_MESSAGE,
+      systemPrompt: typeof parsed.systemPrompt === "string" ? parsed.systemPrompt : DEFAULT_SYSTEM_PROMPT,
+      rounds: Array.isArray(parsed.rounds)
+        ? parsed.rounds.map((round) => ({
+            ...round,
+            histories: round.histories || {},
+            results: (round.results || []).map((result) => (
+              result.pending
+                ? { ...result, pending: false, ok: false, error: "页面刷新，请求已取消" }
+                : result
+            )),
+          }))
+        : [],
+      histories: parsed.histories && typeof parsed.histories === "object" ? parsed.histories : {},
+    };
+  } catch {
+    return EMPTY_CONVERSATION;
+  }
+}
+
+function writeConversation(state: PersistedConversation): void {
+  try {
+    window.localStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify(state));
+  } catch {
+    // 持久存储不可用时仍允许测活，只是不跨刷新保留对话。
+  }
 }
 
 const IDENTITY_LABELS: Record<string, string> = {
@@ -111,7 +171,57 @@ function formatTime(timestamp: number): string {
   });
 }
 
-function ChatResponseBranch({ result }: { result: ChatDisplayResult }) {
+const API_FORMAT_OPTIONS: Array<{ value: LLMApiFormat; label: string }> = [
+  { value: "chat_completions", label: "Chat Completions" },
+  { value: "responses", label: "Responses" },
+  { value: "anthropic_messages", label: "Anthropic Messages" },
+];
+
+const IDENTITY_OPTIONS: Array<{ value: LLMClientIdentityProfile; label: string }> = [
+  { value: "auto", label: "自动选择" },
+  { value: "minimal", label: "最小身份" },
+  { value: "openai_sdk", label: "OpenAI SDK" },
+  { value: "codex_cli", label: "Codex CLI" },
+  { value: "codex_desktop", label: "Codex Desktop" },
+  { value: "claude_code", label: "Claude Code" },
+  { value: "claude_desktop", label: "Claude Desktop" },
+  { value: "grok_cli", label: "Grok CLI" },
+];
+
+function ChatResponseBranch({
+  result,
+  onRetry,
+}: {
+  result: ChatDisplayResult;
+  onRetry: (
+    apiFormat: LLMApiFormat,
+    identity: LLMClientIdentityProfile,
+  ) => Promise<void>;
+}) {
+  const [expanded, setExpanded] = useState(result.pending || result.ok);
+  const [showOverrides, setShowOverrides] = useState(false);
+  const [apiFormat, setApiFormat] = useState<LLMApiFormat>(
+    (result.effective_api_format as LLMApiFormat) || "chat_completions",
+  );
+  const [identity, setIdentity] = useState<LLMClientIdentityProfile>(
+    (result.client_identity_profile as LLMClientIdentityProfile) || "auto",
+  );
+
+  useEffect(() => {
+    if (result.pending || result.ok) setExpanded(true);
+    else setExpanded(false);
+  }, [result.pending, result.ok]);
+
+  useEffect(() => {
+    if (result.pending) return;
+    if (result.effective_api_format) {
+      setApiFormat(result.effective_api_format as LLMApiFormat);
+    }
+    if (result.client_identity_profile) {
+      setIdentity(result.client_identity_profile as LLMClientIdentityProfile);
+    }
+  }, [result.pending, result.effective_api_format, result.client_identity_profile]);
+
   const statusTone = result.pending ? undefined : result.ok ? "success" : "danger";
   const statusLabel = result.pending
     ? "请求中"
@@ -123,8 +233,14 @@ function ChatResponseBranch({ result }: { result: ChatDisplayResult }) {
 
   return (
     <article className="py-4 first:pt-2 [&+article]:border-t">
-      <div className="flex min-w-0 items-start justify-between gap-3">
-        <div className="min-w-0">
+      <button
+        type="button"
+        className="flex min-h-10 w-full min-w-0 items-start justify-between gap-3 rounded-md px-2 py-1.5 text-left focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/30 enabled:hover:bg-muted/40"
+        aria-expanded={expanded}
+        disabled={result.pending}
+        onClick={() => setExpanded((value) => !value)}
+      >
+        <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
             <span className="break-all font-mono text-xs font-semibold">
               {result.requested_model}
@@ -141,38 +257,111 @@ function ChatResponseBranch({ result }: { result: ChatDisplayResult }) {
             ) : null}
           </div>
         </div>
-      </div>
+        {!result.pending ? (
+          expanded
+            ? <ChevronDown className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
+            : <ChevronRight className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
+        ) : null}
+      </button>
 
       <div className="mt-2 flex flex-wrap gap-1.5">
         {result.effective_api_format ? (
-          <MetaBadge tone="outline">协议 {protocolLabel(result.effective_api_format)}</MetaBadge>
+          result.ok || result.pending ? (
+            <MetaBadge tone="outline">协议 {protocolLabel(result.effective_api_format)}</MetaBadge>
+          ) : (
+            <button
+              type="button"
+              className="min-h-8 rounded-md focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/30"
+              title="临时切换协议后重试"
+              onClick={() => { setExpanded(true); setShowOverrides(true); }}
+            >
+              <MetaBadge tone="outline">协议 {protocolLabel(result.effective_api_format)}</MetaBadge>
+            </button>
+          )
         ) : null}
         {result.client_identity_profile ? (
-          <MetaBadge tone="info">客户端 {identityLabel(result.client_identity_profile)}</MetaBadge>
+          result.ok || result.pending ? (
+            <MetaBadge tone="info">客户端 {identityLabel(result.client_identity_profile)}</MetaBadge>
+          ) : (
+            <button
+              type="button"
+              className="min-h-8 rounded-md focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/30"
+              title="临时切换客户端身份后重试"
+              onClick={() => { setExpanded(true); setShowOverrides(true); }}
+            >
+              <MetaBadge tone="info">客户端 {identityLabel(result.client_identity_profile)}</MetaBadge>
+            </button>
+          )
         ) : null}
       </div>
 
-      {result.pending ? (
+      {expanded && result.pending ? (
         <div className="mt-3 flex items-center gap-2 text-sm text-muted-foreground">
           <Loader2 className="h-4 w-4 animate-spin text-primary" />
           正在等待上游返回
         </div>
-      ) : result.ok && result.response ? (
+      ) : expanded && result.ok && result.response ? (
         <div className="mt-3 whitespace-pre-wrap break-words text-sm leading-7 text-foreground">
           {result.response}
         </div>
-      ) : (
-        <div className="mt-3 flex items-start gap-2 rounded-md bg-destructive/10 px-3 py-2 text-sm leading-6 text-destructive">
-          <XCircle className="mt-0.5 h-4 w-4 shrink-0" />
-          <span className="break-words">{result.error || "没有拿到可展示文本。"}</span>
-        </div>
-      )}
+      ) : expanded && !result.ok ? (
+        <>
+          <div className="mt-3 flex items-start gap-2 rounded-md bg-destructive/10 px-3 py-2 text-sm leading-6 text-destructive">
+            <XCircle className="mt-0.5 h-4 w-4 shrink-0" />
+            <span className="min-w-0 break-words">{result.error || "没有拿到可展示文本。"}</span>
+          </div>
+          <div className="mt-3 border-t pt-3">
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="h-8 px-2 text-xs"
+              onClick={() => setShowOverrides((value) => !value)}
+            >
+              <SlidersHorizontal className="mr-1 h-3.5 w-3.5" />
+              {showOverrides ? "收起临时配置" : "换协议或客户端重试"}
+            </Button>
+            {showOverrides ? (
+              <div className="mt-2 grid gap-2 rounded-md bg-muted/35 p-3 sm:grid-cols-2">
+                <div className="space-y-1.5">
+                  <Label className="text-xs">临时协议</Label>
+                  <Select value={apiFormat} onChange={(event) => setApiFormat(event.target.value as LLMApiFormat)}>
+                    {API_FORMAT_OPTIONS.map((option) => (
+                      <option key={option.value} value={option.value}>{option.label}</option>
+                    ))}
+                  </Select>
+                </div>
+                <div className="space-y-1.5">
+                  <Label className="text-xs">临时客户端</Label>
+                  <Select value={identity} onChange={(event) => setIdentity(event.target.value as LLMClientIdentityProfile)}>
+                    {IDENTITY_OPTIONS.map((option) => (
+                      <option key={option.value} value={option.value}>{option.label}</option>
+                    ))}
+                  </Select>
+                </div>
+                <Button
+                  type="button"
+                  size="sm"
+                  className="sm:col-span-2"
+                  onClick={() => void onRetry(apiFormat, identity)}
+                >
+                  使用临时配置重试此模型
+                </Button>
+                <p className="text-[11px] leading-5 text-muted-foreground sm:col-span-2">
+                  只影响这次重试，不会保存到 Provider 配置。
+                </p>
+              </div>
+            ) : null}
+          </div>
+        </>
+      ) : null}
     </article>
   );
 }
 
 export function LLMLivenessPage() {
   const [searchParams, setSearchParams] = useSearchParams();
+  const retainedConversation = useRef(readConversation()).current;
   const providersQ = useQuery({
     queryKey: ["llm-providers"],
     queryFn: listLLMProviders,
@@ -180,29 +369,43 @@ export function LLMLivenessPage() {
   const providers = providersQ.data || [];
   const providerParam = searchParams.get("provider");
   const requestedProviderId = providerParam ? Number(providerParam) : Number.NaN;
+  const canRestoreConversation = !Number.isFinite(requestedProviderId)
+    || requestedProviderId === retainedConversation.providerId;
   const initialProviderId = Number.isFinite(requestedProviderId)
     ? requestedProviderId
-    : providers[0]?.id ?? null;
+    : retainedConversation.providerId;
 
   const [mode, setMode] = useState<"conversation" | "all">("conversation");
   const [providerId, setProviderId] = useState<number | null>(initialProviderId);
   const selectedProvider = providers.find((item) => item.id === providerId) || providers[0] || null;
   const modelChoices = useMemo(() => providerModels(selectedProvider), [selectedProvider]);
-  const [selectedModels, setSelectedModels] = useState<string[]>([]);
+  const [selectedModels, setSelectedModels] = useState<string[]>(
+    canRestoreConversation ? retainedConversation.selectedModels : [],
+  );
   const [modelQuery, setModelQuery] = useState("");
-  const [message, setMessage] = useState(DEFAULT_MESSAGE);
-  const [systemPrompt, setSystemPrompt] = useState(DEFAULT_SYSTEM_PROMPT);
+  const [message, setMessage] = useState(
+    canRestoreConversation ? retainedConversation.message : DEFAULT_MESSAGE,
+  );
+  const [systemPrompt, setSystemPrompt] = useState(
+    canRestoreConversation ? retainedConversation.systemPrompt : DEFAULT_SYSTEM_PROMPT,
+  );
   const [maxTokens, setMaxTokens] = useState(1200);
   const [timeoutSeconds, setTimeoutSeconds] = useState(90);
-  const [rounds, setRounds] = useState<ChatRound[]>([]);
-  const [histories, setHistories] = useState<Record<string, ChatTestTurn[]>>({});
+  const [rounds, setRounds] = useState<ChatRound[]>(
+    canRestoreConversation ? retainedConversation.rounds : [],
+  );
+  const [histories, setHistories] = useState<Record<string, ChatTestTurn[]>>(
+    canRestoreConversation ? retainedConversation.histories : {},
+  );
   const [running, setRunning] = useState(false);
+  const [retryingModel, setRetryingModel] = useState<string | null>(null);
   const [scopeOpen, setScopeOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
   const mountedRef = useRef(true);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const modelsLocked = rounds.length > 0;
+  const busy = running || retryingModel !== null;
 
   const visibleModels = modelChoices.filter((model) =>
     model.id.toLowerCase().includes(modelQuery.trim().toLowerCase()),
@@ -224,6 +427,26 @@ export function LLMLivenessPage() {
       return providers.some((item) => item.id === current) ? current : providers[0].id;
     });
   }, [providers, requestedProviderId]);
+
+  useEffect(() => {
+    if (providerId == null) return;
+    writeConversation({
+      providerId,
+      selectedModels,
+      message,
+      systemPrompt,
+      rounds,
+      histories,
+    });
+  }, [providerId, selectedModels, message, systemPrompt, rounds, histories]);
+
+  useEffect(() => {
+    if (providers.length === 0 || rounds.length === 0) return;
+    if (providers.some((provider) => provider.id === rounds[0].providerId)) return;
+    setRounds([]);
+    setHistories({});
+    setSelectedModels([]);
+  }, [providers, rounds]);
 
   useEffect(() => {
     if (!selectedProvider || modelsLocked) return;
@@ -268,7 +491,7 @@ export function LLMLivenessPage() {
   };
 
   const selectProvider = (nextId: number) => {
-    if (modelsLocked || running) return;
+    if (modelsLocked || busy) return;
     abortInFlight();
     setProviderId(nextId);
     setSelectedModels([]);
@@ -279,7 +502,7 @@ export function LLMLivenessPage() {
   };
 
   const setModelSelection = (next: string[]) => {
-    if (modelsLocked || running) return;
+    if (modelsLocked || busy) return;
     const unique = [...new Set(next)];
     if (unique.length > MAX_CHAT_MODELS) {
       toast.error(`单次对话最多选择 ${MAX_CHAT_MODELS} 个模型`);
@@ -297,6 +520,14 @@ export function LLMLivenessPage() {
 
   const resetConversation = () => {
     abortInFlight();
+    writeConversation({
+      providerId,
+      selectedModels,
+      message,
+      systemPrompt,
+      rounds: [],
+      histories: {},
+    });
     setRounds([]);
     setHistories({});
   };
@@ -319,6 +550,7 @@ export function LLMLivenessPage() {
   const sendTest = async () => {
     const provider = selectedProvider;
     const text = message.trim();
+    if (busy) return;
     if (!provider) return toast.error("请先选择模型提供商");
     if (selectedModels.length === 0) return toast.error("请至少选择一个模型");
     if (!text) return toast.error("测试语不能为空");
@@ -326,7 +558,6 @@ export function LLMLivenessPage() {
     const controller = new AbortController();
     abortRef.current = controller;
     setRunning(true);
-    setMessage("");
     const createdAt = Date.now();
     const roundId = `${createdAt}`;
     const modelsToTest = [...selectedModels];
@@ -343,6 +574,7 @@ export function LLMLivenessPage() {
         providerName: provider.name,
         message: text,
         createdAt,
+        histories: historiesForRequest,
         results: modelsToTest.map((modelId) => ({
           ok: false,
           requested_model: modelId,
@@ -425,6 +657,76 @@ export function LLMLivenessPage() {
     }
   };
 
+  const retryModel = async (
+    roundId: string,
+    modelId: string,
+    apiFormat: LLMApiFormat,
+    identity: LLMClientIdentityProfile,
+  ) => {
+    const round = rounds.find((item) => item.id === roundId);
+    if (!round || busy) return;
+    setRetryingModel(modelId);
+    updateRoundResult(roundId, modelId, {
+      ok: false,
+      requested_model: modelId,
+      latency_ms: 0,
+      input_tokens: 0,
+      output_tokens: 0,
+      empty_response: false,
+      pending: true,
+      effective_api_format: apiFormat,
+      client_identity_profile: identity,
+    });
+    try {
+      const response = await chatTestProviderModels(round.providerId, {
+        models: [modelId],
+        message: round.message,
+        history: round.histories[modelId] || [],
+        system_prompt: systemPrompt.trim() || DEFAULT_SYSTEM_PROMPT,
+        max_tokens: maxTokens,
+        timeout_seconds: timeoutSeconds,
+        api_format_override: apiFormat,
+        client_identity_profile_override: identity,
+      });
+      const result = response.results[0] || {
+        ok: false,
+        requested_model: modelId,
+        latency_ms: 0,
+        input_tokens: 0,
+        output_tokens: 0,
+        empty_response: true,
+        error: "后端没有返回该模型的测活结果。",
+      };
+      updateRoundResult(roundId, modelId, result);
+      const isLatestRound = !rounds.some((item) => item.createdAt > round.createdAt);
+      if (isLatestRound && result.ok && result.response) {
+        const key = `${round.providerId}:${modelId}`;
+        setHistories((current) => ({
+          ...current,
+          [key]: [
+            ...(round.histories[modelId] || []),
+            { role: "user", content: round.message },
+            { role: "assistant", content: result.response as string },
+          ].slice(-16) as ChatTestTurn[],
+        }));
+      }
+    } catch (error) {
+      updateRoundResult(roundId, modelId, {
+        ok: false,
+        requested_model: modelId,
+        latency_ms: 0,
+        input_tokens: 0,
+        output_tokens: 0,
+        empty_response: false,
+        error: getErrMsg(error),
+        effective_api_format: apiFormat,
+        client_identity_profile: identity,
+      });
+    } finally {
+      setRetryingModel(null);
+    }
+  };
+
   if (providersQ.isLoading) {
     return <div className="flex h-56 items-center justify-center"><Spinner className="text-primary" /></div>;
   }
@@ -488,7 +790,7 @@ export function LLMLivenessPage() {
         <Select
           id="liveness-provider"
           value={String(selectedProvider.id)}
-          disabled={modelsLocked || running}
+          disabled={modelsLocked || busy}
           onChange={(event) => selectProvider(Number(event.target.value))}
         >
           {providers.map((provider) => (
@@ -521,7 +823,7 @@ export function LLMLivenessPage() {
             variant="ghost"
             size="sm"
             className="h-7 px-2 text-xs"
-            disabled={modelsLocked || running}
+            disabled={modelsLocked || busy}
             onClick={() => setModelSelection(modelChoices.filter((item) => item.enabled).map((item) => item.id))}
           >
             已启用
@@ -531,7 +833,7 @@ export function LLMLivenessPage() {
             variant="ghost"
             size="sm"
             className="h-7 px-2 text-xs"
-            disabled={modelsLocked || running}
+            disabled={modelsLocked || busy}
             onClick={() => setModelSelection(modelChoices.map((item) => item.id))}
           >
             全选
@@ -541,7 +843,7 @@ export function LLMLivenessPage() {
             variant="ghost"
             size="sm"
             className="h-7 px-2 text-xs"
-            disabled={modelsLocked || running}
+            disabled={modelsLocked || busy}
             onClick={() => setModelSelection([])}
           >
             清空
@@ -553,18 +855,22 @@ export function LLMLivenessPage() {
               key={model.id}
               className={cn(
                 "flex min-h-10 items-center gap-2 rounded px-2 py-1.5 text-xs",
-                modelsLocked ? "cursor-not-allowed opacity-70" : "cursor-pointer hover:bg-muted/60",
+                modelsLocked || busy ? "cursor-not-allowed opacity-70" : "cursor-pointer hover:bg-muted/60",
               )}
             >
               <input
                 type="checkbox"
                 checked={selectedModels.includes(model.id)}
-                disabled={modelsLocked || running}
+                disabled={modelsLocked || busy}
                 onChange={() => toggleModel(model.id)}
               />
               <span className="min-w-0 flex-1 break-all font-mono">{model.id}</span>
               {model.id === selectedProvider.default_model ? <MetaBadge tone="success">默认</MetaBadge> : null}
-              {model.enabled ? <MetaBadge>启用</MetaBadge> : null}
+              {model.enabled ? (
+                <span className="shrink-0 rounded bg-emerald-500/10 px-1.5 py-0.5 text-[9px] font-medium text-emerald-700 dark:text-emerald-300">
+                  已被启用
+                </span>
+              ) : null}
             </label>
           )) : (
             <div className="px-3 py-8 text-center text-xs text-muted-foreground">没有匹配的模型。</div>
@@ -673,35 +979,22 @@ export function LLMLivenessPage() {
       <PageHeader
         icon={Activity}
         title="模型测活"
-        description="在同一个 LLM Provider 内向多个模型发送真实对话，比较模型回复、实际协议、客户端身份与上游耗时。"
+        description={mode === "conversation"
+          ? "在同一个 LLM Provider 内向多个模型发送真实对话，比较模型回复、实际协议、客户端身份与上游耗时。"
+          : "勾选多个 LLM Provider，对其已启用模型发送同一条真实测试语并并发比较结果。"}
         signals={
-          <>
-            <MetaBadge tone="success">{selectedProvider.name}</MetaBadge>
-            <MetaBadge>{selectedModels.length} 个模型</MetaBadge>
-            {rounds.length > 0 ? <MetaBadge mono>{healthyResults}/{completedResults} 正常</MetaBadge> : null}
-          </>
-        }
-        actions={
-          <>
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              className="xl:hidden"
-              onClick={() => { setSettingsOpen(false); setScopeOpen(true); }}
-            >
-              <ListFilter className="mr-1 h-4 w-4" />测试范围
-            </Button>
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              className="2xl:hidden"
-              onClick={() => { setScopeOpen(false); setSettingsOpen(true); }}
-            >
-              <SlidersHorizontal className="mr-1 h-4 w-4" />请求设置
-            </Button>
-          </>
+          mode === "conversation" ? (
+            <>
+              <MetaBadge tone="success">{selectedProvider.name}</MetaBadge>
+              <MetaBadge>{selectedModels.length} 个模型</MetaBadge>
+              {rounds.length > 0 ? <MetaBadge mono>{healthyResults}/{completedResults} 正常</MetaBadge> : null}
+            </>
+          ) : (
+            <>
+              <MetaBadge tone="success">全局巡检</MetaBadge>
+              <MetaBadge>{providers.length} 个 Provider 可选</MetaBadge>
+            </>
+          )
         }
       />
 
@@ -730,9 +1023,33 @@ export function LLMLivenessPage() {
       </div>
 
       {mode === "all" ? (
-        <FullLivenessPanel />
+        <FullLivenessPanel
+          providers={providers}
+          systemPrompt={systemPrompt}
+          onSystemPromptChange={setSystemPrompt}
+          message={message}
+          onMessageChange={setMessage}
+        />
       ) : (
         <div className="relative grid min-h-0 gap-4 xl:grid-cols-[280px_minmax(0,1fr)] 2xl:grid-cols-[280px_minmax(0,1fr)_280px]">
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="absolute left-0 top-1/2 z-20 -translate-y-1/2 rounded-l-none border-l-0 bg-card pl-2 pr-3 shadow-md xl:hidden"
+            onClick={() => { setSettingsOpen(false); setScopeOpen(true); }}
+          >
+            <ChevronRight className="mr-1 h-4 w-4" />测试范围
+          </Button>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="absolute right-0 top-1/2 z-20 -translate-y-1/2 rounded-r-none border-r-0 bg-card pl-3 pr-2 shadow-md 2xl:hidden"
+            onClick={() => { setScopeOpen(false); setSettingsOpen(true); }}
+          >
+            请求设置<ChevronLeft className="ml-1 h-4 w-4" />
+          </Button>
           {scopeOpen ? (
             <button
               type="button"
@@ -767,7 +1084,7 @@ export function LLMLivenessPage() {
                 type="button"
                 variant="ghost"
                 size="sm"
-                disabled={running || rounds.length === 0}
+                disabled={busy || rounds.length === 0}
                 onClick={resetConversation}
               >
                 <RotateCcw className="mr-1 h-4 w-4" />清空对话
@@ -807,7 +1124,16 @@ export function LLMLivenessPage() {
                           </div>
                           <div>
                             {round.results.map((result) => (
-                              <ChatResponseBranch key={`${round.id}:${result.requested_model}`} result={result} />
+                              <ChatResponseBranch
+                                key={`${round.id}:${result.requested_model}`}
+                                result={result}
+                                onRetry={(apiFormat, identity) => retryModel(
+                                  round.id,
+                                  result.requested_model,
+                                  apiFormat,
+                                  identity,
+                                )}
+                              />
                             ))}
                           </div>
                         </div>
@@ -832,12 +1158,12 @@ export function LLMLivenessPage() {
                     value={message}
                     rows={2}
                     maxLength={2000}
-                    disabled={running}
+                    disabled={busy}
                     onChange={(event) => setMessage(event.target.value)}
                     onKeyDown={(event) => {
                       if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
                         event.preventDefault();
-                        if (!running) void sendTest();
+                        if (!busy) void sendTest();
                       }
                     }}
                     placeholder="输入测试消息，Enter 发送"
@@ -846,10 +1172,10 @@ export function LLMLivenessPage() {
                   <Button
                     type="button"
                     className="h-11 w-11 shrink-0 p-0"
-                    disabled={running || !message.trim() || selectedModels.length === 0}
+                    disabled={busy || !message.trim() || selectedModels.length === 0}
                     onClick={() => void sendTest()}
                   >
-                    {running ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
+                    {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
                     <span className="sr-only">发送测试消息</span>
                   </Button>
                 </div>

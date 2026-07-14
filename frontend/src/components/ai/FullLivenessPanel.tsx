@@ -1,10 +1,21 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation } from "@tanstack/react-query";
-import { ChevronDown, ChevronRight, Filter, Loader2 } from "lucide-react";
+import {
+  ChevronDown,
+  ChevronLeft,
+  ChevronRight,
+  Filter,
+  Loader2,
+  X,
+} from "lucide-react";
 import { toast } from "sonner";
 
 import { cancelFullLiveness, fullLivenessPreview, fullLivenessRun, fullLivenessStatus } from "@/api/commands";
-import type { FullLivenessPreviewResponse, FullLivenessRunResponse } from "@/api/types";
+import type {
+  FullLivenessPreviewResponse,
+  FullLivenessRunResponse,
+  LLMProviderOut,
+} from "@/api/types";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -12,6 +23,7 @@ import { MetaBadge } from "@/components/ui/meta-badge";
 import { Select } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { getErrMsg } from "@/lib/api";
+import { cn } from "@/lib/utils";
 
 const DEFAULT_CHAT_TEST_SYSTEM_PROMPT =
   "你是一个自然、简洁的中文聊天助手。请像真实聊天一样直接回复用户，不要只返回 ping/pong。";
@@ -32,6 +44,7 @@ const FULL_LIVENESS_STORAGE_KEY = "telepilot:llm-full-liveness-result";
 type FullLivenessPersistedState = {
   preview: FullLivenessPreviewResponse | null;
   result: FullLivenessRunResponse | null;
+  selectedProviderIds?: number[];
 };
 
 function readFullLivenessState(): FullLivenessPersistedState {
@@ -47,6 +60,9 @@ function readFullLivenessState(): FullLivenessPersistedState {
     return {
       preview: parsed.preview ?? null,
       result: normalizedResult,
+      selectedProviderIds: Array.isArray(parsed.selectedProviderIds)
+        ? parsed.selectedProviderIds.filter((value): value is number => typeof value === "number")
+        : undefined,
     };
   } catch {
     return { preview: null, result: null };
@@ -120,15 +136,33 @@ function livenessIdentityLabel(value?: string | null): string {
   return CLIENT_IDENTITY_LABELS[value || ""] || value || "未知客户端";
 }
 
-export function FullLivenessPanel() {
+interface FullLivenessPanelProps {
+  providers: LLMProviderOut[];
+  systemPrompt: string;
+  onSystemPromptChange: (value: string) => void;
+  message: string;
+  onMessageChange: (value: string) => void;
+}
+
+export function FullLivenessPanel({
+  providers,
+  systemPrompt,
+  onSystemPromptChange,
+  message,
+  onMessageChange,
+}: FullLivenessPanelProps) {
   const retainedState = useRef(readFullLivenessState()).current;
   const [preview, setPreview] = useState<FullLivenessPreviewResponse | null>(retainedState.preview);
   const [result, setResult] = useState<FullLivenessRunResponse | null>(retainedState.result);
   const [maxTokens, setMaxTokens] = useState(256);
   const [timeoutSeconds, setTimeoutSeconds] = useState(90);
   const [globalConcurrency, setGlobalConcurrency] = useState(8);
-  const [systemPrompt, setSystemPrompt] = useState(DEFAULT_CHAT_TEST_SYSTEM_PROMPT);
-  const [message, setMessage] = useState("用一句话自我介绍，并说明你现在能做什么。");
+  const [selectedProviderIds, setSelectedProviderIds] = useState<number[]>(
+    retainedState.selectedProviderIds ?? providers.map((provider) => provider.id),
+  );
+  const [providerQuery, setProviderQuery] = useState("");
+  const [scopeOpen, setScopeOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [previewExpanded, setPreviewExpanded] = useState(true);
   const [resultExpanded, setResultExpanded] = useState(true);
   const [resultFilter, setResultFilter] = useState<LivenessResultFilter>("all");
@@ -138,8 +172,23 @@ export function FullLivenessPanel() {
   const pollRef = useRef<number | null>(null);
 
   useEffect(() => {
-    writeFullLivenessState({ preview, result });
-  }, [preview, result]);
+    writeFullLivenessState({ preview, result, selectedProviderIds });
+  }, [preview, result, selectedProviderIds]);
+
+  useEffect(() => {
+    const validIds = new Set(providers.map((provider) => provider.id));
+    setSelectedProviderIds((current) => current.filter((id) => validIds.has(id)));
+  }, [providers]);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      setScopeOpen(false);
+      setSettingsOpen(false);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
 
   useEffect(() => () => {
     const activeRunId = runIdRef.current;
@@ -158,7 +207,11 @@ export function FullLivenessPanel() {
   }, []);
 
   const previewMut = useMutation({
-    mutationFn: () => fullLivenessPreview({ max_tokens: maxTokens, global_concurrency: globalConcurrency }),
+    mutationFn: () => fullLivenessPreview({
+      max_tokens: maxTokens,
+      global_concurrency: globalConcurrency,
+      only_provider_ids: selectedProviderIds,
+    }),
     onSuccess: (resp) => {
       setPreview(resp);
       setPreviewExpanded(true);
@@ -174,6 +227,7 @@ export function FullLivenessPanel() {
       max_tokens: maxTokens,
       timeout_seconds: timeoutSeconds,
       global_concurrency: globalConcurrency,
+      only_provider_ids: selectedProviderIds,
     }),
     onSuccess: (resp) => {
       runIdRef.current = resp.run_id;
@@ -202,6 +256,31 @@ export function FullLivenessPanel() {
   });
 
   const running = runMut.isPending || result?.status === "queued" || result?.status === "running";
+  const visibleProviders = useMemo(() => {
+    const query = providerQuery.trim().toLowerCase();
+    if (!query) return providers;
+    return providers.filter((provider) => (
+      provider.name.toLowerCase().includes(query)
+      || provider.provider.toLowerCase().includes(query)
+    ));
+  }, [providerQuery, providers]);
+  const selectedModelCount = providers
+    .filter((provider) => selectedProviderIds.includes(provider.id))
+    .reduce((count, provider) => count + (provider.models || []).filter((model) => model.enabled).length, 0);
+
+  const setProviderSelection = (next: number[]) => {
+    if (running) return;
+    setSelectedProviderIds([...new Set(next)]);
+    setPreview(null);
+  };
+
+  const toggleProvider = (providerId: number) => {
+    setProviderSelection(
+      selectedProviderIds.includes(providerId)
+        ? selectedProviderIds.filter((id) => id !== providerId)
+        : [...selectedProviderIds, providerId],
+    );
+  };
   const filteredResults = result?.results.filter((item) => (
     resultFilter === "all" || livenessResultCategory(item) === resultFilter
   )) ?? [];
@@ -234,81 +313,130 @@ export function FullLivenessPanel() {
   ];
 
   return (
-    <div className="grid min-h-0 flex-1 gap-4 overflow-hidden lg:grid-cols-[320px_minmax(0,1fr)]">
-      <div className="min-h-0 space-y-4 overflow-y-auto rounded-md border bg-muted/20 p-3">
-        <div className="grid grid-cols-2 gap-2">
-          <div className="space-y-1.5">
-            <Label className="text-xs">最大输出 Token</Label>
-            <Input
-              type="number"
-              min={64}
-              max={8000}
-              value={maxTokens}
-              onChange={(e) => setMaxTokens(Math.max(64, Math.min(8000, Number(e.target.value) || 256)))}
-              disabled={running}
-            />
-          </div>
-          <div className="space-y-1.5">
-            <Label className="text-xs">超时秒数</Label>
-            <Input
-              type="number"
-              min={10}
-              max={600}
-              value={timeoutSeconds}
-              onChange={(e) => setTimeoutSeconds(Math.max(10, Math.min(600, Number(e.target.value) || 90)))}
-              disabled={running}
-            />
-          </div>
-        </div>
-        <div className="space-y-1.5">
-          <Label className="text-xs">全局并发</Label>
-          <Select
-            value={String(globalConcurrency)}
-            onChange={(e) => setGlobalConcurrency(Number(e.target.value))}
-            disabled={running}
-          >
-            {[2, 4, 8, 12].map((n) => (
-              <option key={n} value={n}>{n}</option>
-            ))}
-          </Select>
-        </div>
-        <div className="space-y-1.5">
-          <Label className="text-xs">系统提示词</Label>
-          <Textarea
-            value={systemPrompt}
-            rows={4}
-            maxLength={2000}
-            onChange={(e) => setSystemPrompt(e.target.value)}
-            disabled={running}
-          />
-        </div>
-        <div className="space-y-1.5">
-          <Label className="text-xs">测活词</Label>
-          <Textarea
-            value={message}
-            rows={3}
-            maxLength={2000}
-            onChange={(e) => setMessage(e.target.value)}
-            disabled={running}
-          />
-        </div>
-        <Button
-          type="button"
-          variant="outline"
-          className="w-full"
-          onClick={() => previewMut.mutate()}
-          disabled={previewMut.isPending || running || !message.trim() || !systemPrompt.trim()}
-        >
-          {previewMut.isPending ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : null}
-          刷新模型范围
-        </Button>
-      </div>
+    <div className="relative grid min-h-0 flex-1 gap-4 overflow-hidden xl:grid-cols-[280px_minmax(0,1fr)] 2xl:grid-cols-[280px_minmax(0,1fr)_280px]">
+      <Button
+        type="button"
+        variant="outline"
+        size="sm"
+        className="absolute left-0 top-1/2 z-20 -translate-y-1/2 rounded-l-none border-l-0 bg-card pl-2 pr-3 shadow-md xl:hidden"
+        onClick={() => { setSettingsOpen(false); setScopeOpen(true); }}
+      >
+        <ChevronRight className="mr-1 h-4 w-4" />Provider 范围
+      </Button>
+      <Button
+        type="button"
+        variant="outline"
+        size="sm"
+        className="absolute right-0 top-1/2 z-20 -translate-y-1/2 rounded-r-none border-r-0 bg-card pl-3 pr-2 shadow-md 2xl:hidden"
+        onClick={() => { setScopeOpen(false); setSettingsOpen(true); }}
+      >
+        请求设置<ChevronLeft className="ml-1 h-4 w-4" />
+      </Button>
 
-      <div className="flex min-h-0 flex-col overflow-hidden rounded-md border bg-background">
+      {scopeOpen ? (
+        <button
+          type="button"
+          className="fixed inset-0 z-[69] bg-black/60 xl:hidden"
+          aria-label="关闭 Provider 范围"
+          onClick={() => setScopeOpen(false)}
+        />
+      ) : null}
+      <aside
+        className={cn(
+          "fixed inset-y-0 left-0 z-[70] w-[min(320px,90vw)] overflow-y-auto border-r bg-card p-4 shadow-lg transition-transform duration-200 xl:static xl:z-auto xl:w-auto xl:translate-x-0 xl:rounded-lg xl:border xl:shadow-sm",
+          scopeOpen ? "translate-x-0" : "-translate-x-full xl:translate-x-0",
+        )}
+        aria-label="全局巡检 Provider 范围"
+      >
+        <div className="flex items-start justify-between gap-3 border-b pb-3">
+          <div>
+            <div className="text-sm font-semibold">Provider 范围</div>
+            <div className="mt-1 text-xs text-muted-foreground">勾选多个 LLM Provider 并发测活。</div>
+          </div>
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className="h-9 w-9 p-0 xl:hidden"
+            aria-label="关闭 Provider 范围"
+            onClick={() => setScopeOpen(false)}
+          >
+            <X className="h-4 w-4" />
+          </Button>
+        </div>
+        <div className="mt-4 flex items-center justify-between gap-2">
+          <Label>LLM Provider</Label>
+          <MetaBadge tone={selectedProviderIds.length > 0 ? "success" : "warn"}>
+            已选 {selectedProviderIds.length}/{providers.length}
+          </MetaBadge>
+        </div>
+        <div className="relative mt-2">
+          <Filter className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+          <Input
+            value={providerQuery}
+            onChange={(event) => setProviderQuery(event.target.value)}
+            placeholder="搜索 Provider"
+            className="pl-9"
+          />
+        </div>
+        <div className="mt-2 flex gap-1">
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className="h-7 px-2 text-xs"
+            disabled={running}
+            onClick={() => setProviderSelection(providers.map((provider) => provider.id))}
+          >
+            全选
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className="h-7 px-2 text-xs"
+            disabled={running}
+            onClick={() => setProviderSelection([])}
+          >
+            清空
+          </Button>
+        </div>
+        <div className="mt-2 max-h-[62vh] space-y-1 overflow-y-auto rounded-md border bg-background p-1 xl:max-h-[560px]">
+          {visibleProviders.map((provider) => {
+            const enabledCount = (provider.models || []).filter((model) => model.enabled).length;
+            return (
+              <label
+                key={provider.id}
+                className={cn(
+                  "flex min-h-11 items-center gap-2 rounded px-2 py-1.5 text-xs",
+                  running ? "cursor-not-allowed opacity-70" : "cursor-pointer hover:bg-muted/60",
+                )}
+              >
+                <input
+                  type="checkbox"
+                  checked={selectedProviderIds.includes(provider.id)}
+                  disabled={running}
+                  onChange={() => toggleProvider(provider.id)}
+                />
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate font-medium">{provider.name}</span>
+                  <span className="mt-0.5 block truncate font-mono text-[10px] text-muted-foreground">{provider.provider}</span>
+                </span>
+                <span className="shrink-0 text-[10px] tabular-nums text-muted-foreground">{enabledCount} 模型</span>
+              </label>
+            );
+          })}
+        </div>
+      </aside>
+
+      <div className="flex h-[calc(100dvh-15rem)] min-h-[560px] min-w-0 flex-col overflow-hidden rounded-lg border bg-card shadow-sm xl:min-h-[650px]">
         <div className="border-b px-3 py-2">
-          <div className="text-sm font-medium">全量已启用模型</div>
+          <div className="text-sm font-medium">多 Provider 并发巡检</div>
           <div className="mt-0.5 text-xs text-muted-foreground">
-            每个模型收到相同提示词，仅记录脱敏诊断，不修改生产健康状态。
+            已选择 {selectedProviderIds.length} 个 Provider、{selectedModelCount} 个已启用模型。
+          </div>
+          <div className="mt-1 truncate text-xs text-muted-foreground" title={message}>
+            测活词：{message || "未填写"}
           </div>
         </div>
         <div className="min-h-0 flex-1 space-y-3 overflow-y-auto bg-muted/20 p-3 text-xs">
@@ -512,13 +640,112 @@ export function FullLivenessPanel() {
           <Button
             type="button"
             onClick={() => runMut.mutate()}
-            disabled={running || !preview || preview.task_total === 0 || !message.trim() || !systemPrompt.trim()}
+            disabled={running || selectedProviderIds.length === 0 || !preview || preview.task_total === 0 || !message.trim() || !systemPrompt.trim()}
           >
             {running ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : null}
             {running ? "测活中…" : "开始全量测活"}
           </Button>
         </div>
       </div>
+
+      {settingsOpen ? (
+        <button
+          type="button"
+          className="fixed inset-0 z-[69] bg-black/60 2xl:hidden"
+          aria-label="关闭请求设置"
+          onClick={() => setSettingsOpen(false)}
+        />
+      ) : null}
+      <aside
+        className={cn(
+          "fixed inset-y-0 right-0 z-[70] w-[min(320px,90vw)] overflow-y-auto border-l bg-card p-4 shadow-lg transition-transform duration-200 2xl:static 2xl:z-auto 2xl:w-auto 2xl:translate-x-0 2xl:rounded-lg 2xl:border 2xl:shadow-sm",
+          settingsOpen ? "translate-x-0" : "translate-x-full 2xl:translate-x-0",
+        )}
+        aria-label="全局巡检请求设置"
+      >
+        <div className="flex items-start justify-between gap-3 border-b pb-3">
+          <div>
+            <div className="text-sm font-semibold">请求设置</div>
+            <div className="mt-1 text-xs text-muted-foreground">两种测活模式共用系统提示词与测活词。</div>
+          </div>
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className="h-9 w-9 p-0 2xl:hidden"
+            aria-label="关闭请求设置"
+            onClick={() => setSettingsOpen(false)}
+          >
+            <X className="h-4 w-4" />
+          </Button>
+        </div>
+        <div className="mt-4 grid grid-cols-2 gap-2">
+          <div className="space-y-1.5">
+            <Label className="text-xs">最大输出 Token</Label>
+            <Input
+              type="number"
+              min={64}
+              max={8000}
+              value={maxTokens}
+              onChange={(event) => setMaxTokens(Math.max(64, Math.min(8000, Number(event.target.value) || 256)))}
+              disabled={running}
+            />
+          </div>
+          <div className="space-y-1.5">
+            <Label className="text-xs">超时秒数</Label>
+            <Input
+              type="number"
+              min={10}
+              max={600}
+              value={timeoutSeconds}
+              onChange={(event) => setTimeoutSeconds(Math.max(10, Math.min(600, Number(event.target.value) || 90)))}
+              disabled={running}
+            />
+          </div>
+        </div>
+        <div className="mt-4 space-y-1.5">
+          <Label className="text-xs">全局并发</Label>
+          <Select
+            value={String(globalConcurrency)}
+            onChange={(event) => setGlobalConcurrency(Number(event.target.value))}
+            disabled={running}
+          >
+            {[2, 4, 8, 12].map((value) => (
+              <option key={value} value={value}>{value}</option>
+            ))}
+          </Select>
+        </div>
+        <div className="mt-4 space-y-1.5">
+          <Label className="text-xs">系统提示词</Label>
+          <Textarea
+            value={systemPrompt}
+            rows={6}
+            maxLength={2000}
+            onChange={(event) => onSystemPromptChange(event.target.value)}
+            disabled={running}
+          />
+        </div>
+        <div className="mt-4 space-y-1.5">
+          <Label className="text-xs">测活词</Label>
+          <Textarea
+            value={message}
+            rows={4}
+            maxLength={2000}
+            onChange={(event) => onMessageChange(event.target.value)}
+            disabled={running}
+          />
+        </div>
+        <Button
+          type="button"
+          variant="outline"
+          className="mt-4 w-full"
+          onClick={() => previewMut.mutate()}
+          disabled={previewMut.isPending || running || selectedProviderIds.length === 0 || !message.trim() || !systemPrompt.trim()}
+        >
+          {previewMut.isPending ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : null}
+          刷新所选模型范围
+        </Button>
+      </aside>
     </div>
   );
 }

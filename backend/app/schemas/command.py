@@ -652,6 +652,21 @@ class ChatTestModelsRequest(BaseModel):
     """测试用 system prompt。"""
     max_tokens: int = Field(default=1200, ge=64, le=8000)
     timeout_seconds: int = Field(default=90, ge=10, le=600)
+    api_format_override: Literal[
+        "chat_completions", "responses", "anthropic_messages"
+    ] | None = None
+    """仅本次测活使用的临时协议，不写回 Provider。"""
+    client_identity_profile_override: Literal[
+        "auto",
+        "minimal",
+        "openai_sdk",
+        "codex_cli",
+        "codex_desktop",
+        "claude_code",
+        "claude_desktop",
+        "grok_cli",
+    ] | None = None
+    """仅本次测活使用的临时客户端身份，不写回 Provider。"""
 
     @field_validator("models")
     @classmethod
@@ -704,6 +719,7 @@ class FullLivenessPreviewRequest(BaseModel):
 
     max_tokens: int = Field(default=256, ge=64, le=8000)
     global_concurrency: int = Field(default=8)
+    only_provider_ids: list[int] | None = Field(default=None, max_length=200)
 
 
 class LivenessProviderPlan(BaseModel):
@@ -744,7 +760,7 @@ class FullLivenessRunRequest(BaseModel):
         max_length=2000,
     )
     message: str = Field(
-        default="用一句话自我介绍，并说明你现在能做什么。",
+        default="你怎么又不行啦？",
         min_length=1,
         max_length=2000,
     )

@@ -1275,12 +1275,22 @@ async def chat_test_models(
     row = await command_service.get_provider_row(db, pid)
     proxy_url = await _resolve_proxy_url(db, row.proxy_id)
     user_prompt = _build_chat_test_prompt(payload)
-    transport_metadata = _liveness_transport_metadata(row)
+    transport_metadata = _liveness_transport_metadata(
+        row,
+        api_format_override=payload.api_format_override,
+        identity_override=payload.client_identity_profile_override,
+    )
 
     async def run_one(model_id: str) -> ChatTestModelResult:
         started = _time.monotonic()
         try:
-            cli = build_client(row, override_model=model_id, proxy_url=proxy_url)
+            cli = build_client(
+                row,
+                override_model=model_id,
+                proxy_url=proxy_url,
+                api_format_override=payload.api_format_override,
+                identity_override=payload.client_identity_profile_override,
+            )
             result = await cli.complete(
                 payload.system_prompt,
                 user_prompt,
@@ -1388,7 +1398,7 @@ async def full_liveness_preview(
     标记为不可执行并给出原因。
     """
     await _require_ai_enabled(db)
-    rows = await _load_liveness_provider_rows(db, None)
+    rows = await _load_liveness_provider_rows(db, payload.only_provider_ids)
     preview = llm_liveness.build_preview(
         rows,
         max_tokens=payload.max_tokens,
@@ -1420,11 +1430,16 @@ def _liveness_result_items(raw: list[dict[str, Any]]) -> list[LivenessResultItem
     ]
 
 
-def _liveness_transport_metadata(row: Any) -> dict[str, str | None]:
+def _liveness_transport_metadata(
+    row: Any,
+    *,
+    api_format_override: str | None = None,
+    identity_override: str | None = None,
+) -> dict[str, str | None]:
     """返回本次测活真正采用的协议与客户端身份。"""
-    effective_api_format = getattr(row, "api_format", None)
+    effective_api_format = api_format_override or getattr(row, "api_format", None)
     effective_identity = llm_identity.resolve_identity(
-        getattr(row, "client_identity_profile", None),
+        identity_override or getattr(row, "client_identity_profile", None),
         effective_api_format,
     ).profile
     return {

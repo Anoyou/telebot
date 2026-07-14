@@ -1613,6 +1613,8 @@ export interface ChatTestModelsRequest {
   system_prompt?: string;
   max_tokens?: number;
   timeout_seconds?: number;
+  api_format_override?: LLMApiFormat | null;
+  client_identity_profile_override?: LLMClientIdentityProfile | null;
 }
 
 export interface ChatTestModelResult {
@@ -1640,6 +1642,7 @@ export interface ChatTestModelsResponse {
 export interface FullLivenessPreviewRequest {
   max_tokens?: number;
   global_concurrency?: number;
+  only_provider_ids?: number[] | null;
 }
 
 export interface LivenessProviderPlan {

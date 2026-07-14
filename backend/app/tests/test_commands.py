@@ -112,6 +112,54 @@ def test_liveness_transport_metadata_resolves_effective_identity() -> None:
         "effective_api_format": "responses",
         "client_identity_profile": "codex_cli",
     }
+    assert commands_api._liveness_transport_metadata(
+        row,
+        api_format_override="anthropic_messages",
+        identity_override="claude_code",
+    ) == {
+        "effective_api_format": "anthropic_messages",
+        "client_identity_profile": "claude_code",
+    }
+
+
+@pytest.mark.asyncio
+async def test_full_liveness_preview_forwards_provider_scope(monkeypatch) -> None:
+    """全局巡检预览必须只加载用户勾选的 Provider。"""
+    from app.schemas.command import FullLivenessPreviewRequest
+
+    captured: dict[str, object] = {}
+
+    async def _load_rows(_db, provider_ids):
+        captured["provider_ids"] = provider_ids
+        return []
+
+    class _Preview:
+        def to_dict(self):
+            return {
+                "provider_total": 0,
+                "executable_provider_total": 0,
+                "enabled_model_total": 0,
+                "task_total": 0,
+                "max_tokens": 256,
+                "max_output_tokens": 0,
+                "global_concurrency": 8,
+                "provider_concurrency": 2,
+                "needs_confirmation": False,
+                "providers": [],
+            }
+
+    monkeypatch.setattr(commands_api, "_require_ai_enabled", AsyncMock(return_value=None))
+    monkeypatch.setattr(commands_api, "_load_liveness_provider_rows", _load_rows)
+    monkeypatch.setattr(commands_api.llm_liveness, "build_preview", lambda *_a, **_k: _Preview())
+
+    out = await commands_api.full_liveness_preview(
+        payload=FullLivenessPreviewRequest(only_provider_ids=[7, 11]),
+        db=AsyncMock(),
+        _user=AsyncMock(),
+    )
+
+    assert captured["provider_ids"] == [7, 11]
+    assert out.provider_total == 0
 
 
 # ════════════════════════════════════════════════════════════
@@ -1895,6 +1943,8 @@ async def test_chat_test_models_endpoint_success(monkeypatch) -> None:
         system_prompt="你叫阿光。",
         max_tokens=1234,
         timeout_seconds=77,
+        api_format_override="anthropic_messages",
+        client_identity_profile_override="claude_code",
     )
     out = await cmds_api.chat_test_models(
         pid=1,
@@ -1914,8 +1964,8 @@ async def test_chat_test_models_endpoint_success(monkeypatch) -> None:
     assert result.preview == "我在想晚饭吃什么。"
     assert result.input_tokens == 11
     assert result.output_tokens == 7
-    assert result.effective_api_format == "responses"
-    assert result.client_identity_profile == "grok_cli"
+    assert result.effective_api_format == "anthropic_messages"
+    assert result.client_identity_profile == "claude_code"
     assert captured["system"] == "你叫阿光。"
     assert "上一句" in str(captured["user"])
     assert "上一答" in str(captured["user"])
@@ -1924,6 +1974,8 @@ async def test_chat_test_models_endpoint_success(monkeypatch) -> None:
     assert captured["build_kwargs"] == {
         "override_model": "model-a",
         "proxy_url": "socks5://127.0.0.1:1080",
+        "api_format_override": "anthropic_messages",
+        "identity_override": "claude_code",
     }
     assert captured["kwargs"] == {"max_tokens": 1234, "timeout_seconds": 77}
     assert len(emitted) == 1

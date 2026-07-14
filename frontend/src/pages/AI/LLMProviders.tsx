@@ -444,12 +444,11 @@ export function LLMProviders({
                 />
               }
             />
-            <div className="flex flex-wrap items-center gap-2 border-t border-border/60 pt-3">
+            <div className="flex flex-wrap items-center gap-2 rounded-md border border-primary/20 bg-primary/[0.04] p-2 shadow-sm">
               <Button
                 type="button"
                 size="sm"
-                variant="outline"
-                className="min-w-0 flex-1 sm:flex-none"
+                className="min-w-0 flex-1 shadow-sm sm:flex-none"
                 disabled={visibleProviders.length === 0}
                 onClick={() => navigate(`/ai/liveness?provider=${visibleProviders[0].id}`)}
               >
@@ -458,11 +457,11 @@ export function LLMProviders({
               <Button
                 type="button"
                 size="sm"
-                variant="outline"
-                className="min-w-0 flex-1 sm:flex-none"
+                variant="secondary"
+                className="min-w-0 flex-1 border border-border/80 shadow-sm sm:flex-none"
                 onClick={() => setIdentityVersionsOpen(true)}
               >
-                客户端身份版本
+                <KeyRound className="mr-1 h-4 w-4" />客户端身份版本
               </Button>
               <Button size="sm" className="min-w-0 flex-1 sm:ml-auto sm:flex-none" onClick={() => setEditing({ ...EMPTY_FORM })}>
                 <Plus className="mr-1 h-4 w-4" /> 新建
