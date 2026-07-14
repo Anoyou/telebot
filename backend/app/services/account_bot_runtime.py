@@ -1721,35 +1721,77 @@ async def _handle_interaction_polling_updates_batch(
     return batch_last_update_id, batch_error
 
 
+async def _set_account_bot_runtime_state_best_effort(
+    aid: int,
+    *,
+    status: str,
+    error: str | None = None,
+    only_if_enabled: bool = False,
+) -> None:
+    """尽力保存管理 Bot 运行状态，连接池已满时不向 polling loop 传播二次异常。"""
+
+    try:
+        async with AsyncSessionLocal() as db:
+            row = (
+                await db.execute(
+                    select(AccountBot).where(AccountBot.account_id == aid)
+                )
+            ).scalar_one_or_none()
+            if row is None or (only_if_enabled and not row.enabled):
+                return
+            row.status = status
+            row.last_error = error
+            await db.commit()
+    except asyncio.CancelledError:
+        raise
+    except Exception:  # noqa: BLE001
+        log.warning("account bot runtime state update failed aid=%s", aid, exc_info=True)
+
+
 async def _polling_loop(aid: int) -> None:
     backoff = 2.0
     token = ""
     try:
         while True:
-            async with AsyncSessionLocal() as db:
-                row = (
-                    await db.execute(
-                        select(AccountBot).where(AccountBot.account_id == aid)
-                    )
-                ).scalar_one_or_none()
-                if row is None or not row.enabled or not row.bot_token_enc:
-                    if row is not None:
-                        row.status = ACCOUNT_BOT_STATUS_DISABLED
+            try:
+                async with AsyncSessionLocal() as db:
+                    row = (
+                        await db.execute(
+                            select(AccountBot).where(AccountBot.account_id == aid)
+                        )
+                    ).scalar_one_or_none()
+                    if row is None or not row.enabled or not row.bot_token_enc:
+                        if row is not None:
+                            row.status = ACCOUNT_BOT_STATUS_DISABLED
+                            await db.commit()
+                        return
+                    try:
+                        token = account_bot_service.decrypt_bot_token(row)
+                    except Exception as exc:  # noqa: BLE001
+                        row.status = ACCOUNT_BOT_STATUS_ERROR
+                        row.last_error = account_bot_service.sanitize_bot_error(exc)
                         await db.commit()
-                    return
-                try:
-                    token = account_bot_service.decrypt_bot_token(row)
-                except Exception as exc:  # noqa: BLE001
-                    row.status = ACCOUNT_BOT_STATUS_ERROR
-                    row.last_error = account_bot_service.sanitize_bot_error(exc)
-                    await db.commit()
-                    return
-                offset = (row.last_update_id + 1) if row.last_update_id is not None else None
-                if row.status != ACCOUNT_BOT_STATUS_RUNNING:
-                    row.status = ACCOUNT_BOT_STATUS_RUNNING
-                    row.last_error = None
-                    await db.commit()
-                event_flags = await _event_framework_flags()
+                        return
+                    offset = (row.last_update_id + 1) if row.last_update_id is not None else None
+                    if row.status != ACCOUNT_BOT_STATUS_RUNNING:
+                        row.status = ACCOUNT_BOT_STATUS_RUNNING
+                        row.last_error = None
+                        await db.commit()
+                    event_flags = await _event_framework_flags()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                clean = account_bot_service.sanitize_bot_error(exc, token=token)
+                clean = account_bot_service.label_bot_polling_error(clean, role="management")
+                await _set_account_bot_runtime_state_best_effort(
+                    aid,
+                    status=ACCOUNT_BOT_STATUS_ERROR,
+                    error=clean,
+                )
+                log.warning("account bot polling config error aid=%s: %s", aid, clean)
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 60.0)
+                continue
 
             try:
                 result = await account_bot_service.call_bot_api(
@@ -1806,29 +1848,20 @@ async def _polling_loop(aid: int) -> None:
             except Exception as exc:  # noqa: BLE001
                 clean = account_bot_service.sanitize_bot_error(exc, token=token)
                 clean = account_bot_service.label_bot_polling_error(clean, role="management")
-                async with AsyncSessionLocal() as db:
-                    row = (
-                        await db.execute(
-                            select(AccountBot).where(AccountBot.account_id == aid)
-                        )
-                    ).scalar_one_or_none()
-                    if row is not None:
-                        row.status = ACCOUNT_BOT_STATUS_ERROR
-                        row.last_error = clean
-                        await db.commit()
+                await _set_account_bot_runtime_state_best_effort(
+                    aid,
+                    status=ACCOUNT_BOT_STATUS_ERROR,
+                    error=clean,
+                )
                 log.warning("account bot polling error aid=%s: %s", aid, clean)
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 60.0)
     except asyncio.CancelledError:
-        async with AsyncSessionLocal() as db:
-            row = (
-                await db.execute(
-                    select(AccountBot).where(AccountBot.account_id == aid)
-                )
-            ).scalar_one_or_none()
-            if row is not None and row.enabled:
-                row.status = ACCOUNT_BOT_STATUS_STOPPED
-                await db.commit()
+        await _set_account_bot_runtime_state_best_effort(
+            aid,
+            status=ACCOUNT_BOT_STATUS_STOPPED,
+            only_if_enabled=True,
+        )
         raise
 
 
@@ -1914,21 +1947,57 @@ async def _set_transfer_test_runtime_state(
     )
 
 
+async def _set_polling_runtime_state_best_effort(
+    aid: int,
+    setter: Any,
+    *,
+    loop_name: str,
+    last_update_id: int | None = None,
+    error: str | None = None,
+) -> None:
+    """尽力保存 polling 游标/错误，不让诊断写库失败反过来杀死 polling task。"""
+
+    try:
+        async with AsyncSessionLocal() as db:
+            await setter(
+                db,
+                aid,
+                last_update_id=last_update_id,
+                error=error,
+            )
+    except asyncio.CancelledError:
+        raise
+    except Exception:  # noqa: BLE001
+        log.warning(
+            "%s runtime state update failed aid=%s",
+            loop_name,
+            aid,
+            exc_info=True,
+        )
+
+
 async def _interaction_polling_loop(aid: int) -> None:
     backoff = 2.0
     token = ""
     try:
         while True:
-            token_opt, cfg = await _load_interaction_runtime_config(aid)
-            if not cfg.get("enabled") or not token_opt:
-                async with AsyncSessionLocal() as db:
-                    await _set_interaction_runtime_state(db, aid, error=None)
-                return
-            token = token_opt
-            offset = (int(cfg["interaction_last_update_id"]) + 1) if cfg.get("interaction_last_update_id") is not None else None
-            event_flags = await _event_framework_flags()
-
             try:
+                token_opt, cfg = await _load_interaction_runtime_config(aid)
+                if not cfg.get("enabled") or not token_opt:
+                    await _set_polling_runtime_state_best_effort(
+                        aid,
+                        _set_interaction_runtime_state,
+                        loop_name="interaction bot",
+                        error=None,
+                    )
+                    return
+                token = token_opt
+                offset = (
+                    int(cfg["interaction_last_update_id"]) + 1
+                    if cfg.get("interaction_last_update_id") is not None
+                    else None
+                )
+                event_flags = await _event_framework_flags()
                 result = await account_bot_service.call_bot_api(
                     token,
                     "getUpdates",
@@ -1952,26 +2021,34 @@ async def _interaction_polling_loop(aid: int) -> None:
                     handler=_handle_interaction_update,
                 )
                 if batch_last_update_id is not None:
-                    async with AsyncSessionLocal() as db:
-                        await _set_interaction_runtime_state(
-                            db,
-                            aid,
-                            last_update_id=batch_last_update_id,
-                            error=batch_error,
-                        )
+                    await _set_polling_runtime_state_best_effort(
+                        aid,
+                        _set_interaction_runtime_state,
+                        loop_name="interaction bot",
+                        last_update_id=batch_last_update_id,
+                        error=batch_error,
+                    )
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001
                 clean = account_bot_service.sanitize_bot_error(exc, token=token)
                 clean = account_bot_service.label_bot_polling_error(clean, role="interaction")
-                async with AsyncSessionLocal() as db:
-                    await _set_interaction_runtime_state(db, aid, error=clean)
+                await _set_polling_runtime_state_best_effort(
+                    aid,
+                    _set_interaction_runtime_state,
+                    loop_name="interaction bot",
+                    error=clean,
+                )
                 log.warning("interaction bot polling error aid=%s: %s", aid, clean)
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 60.0)
     except asyncio.CancelledError:
-        async with AsyncSessionLocal() as db:
-            await _set_interaction_runtime_state(db, aid, error="已停止")
+        await _set_polling_runtime_state_best_effort(
+            aid,
+            _set_interaction_runtime_state,
+            loop_name="interaction bot",
+            error="已停止",
+        )
         raise
 
 
@@ -1980,15 +2057,22 @@ async def _transfer_test_polling_loop(aid: int) -> None:
     token = ""
     try:
         while True:
-            token_opt, cfg = await _load_transfer_test_runtime_config(aid)
-            if not cfg.get("enabled") or not token_opt:
-                async with AsyncSessionLocal() as db:
-                    await _set_transfer_test_runtime_state(db, aid, error=None)
-                return
-            token = token_opt
-            offset = (int(cfg["transfer_last_update_id"]) + 1) if cfg.get("transfer_last_update_id") is not None else None
-
             try:
+                token_opt, cfg = await _load_transfer_test_runtime_config(aid)
+                if not cfg.get("enabled") or not token_opt:
+                    await _set_polling_runtime_state_best_effort(
+                        aid,
+                        _set_transfer_test_runtime_state,
+                        loop_name="transfer test bot",
+                        error=None,
+                    )
+                    return
+                token = token_opt
+                offset = (
+                    int(cfg["transfer_last_update_id"]) + 1
+                    if cfg.get("transfer_last_update_id") is not None
+                    else None
+                )
                 result = await account_bot_service.call_bot_api(
                     token,
                     "getUpdates",
@@ -2021,28 +2105,36 @@ async def _transfer_test_polling_loop(aid: int) -> None:
                         update_id
                         if batch_last_update_id is None
                         else max(batch_last_update_id, update_id)
-                    )
+                )
                 if batch_last_update_id is not None:
-                    async with AsyncSessionLocal() as db:
-                        await _set_transfer_test_runtime_state(
-                            db,
-                            aid,
-                            last_update_id=batch_last_update_id,
-                            error=batch_error,
-                        )
+                    await _set_polling_runtime_state_best_effort(
+                        aid,
+                        _set_transfer_test_runtime_state,
+                        loop_name="transfer test bot",
+                        last_update_id=batch_last_update_id,
+                        error=batch_error,
+                    )
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001
                 clean = account_bot_service.sanitize_bot_error(exc, token=token)
                 clean = account_bot_service.label_bot_polling_error(clean, role="transfer_test")
-                async with AsyncSessionLocal() as db:
-                    await _set_transfer_test_runtime_state(db, aid, error=clean)
+                await _set_polling_runtime_state_best_effort(
+                    aid,
+                    _set_transfer_test_runtime_state,
+                    loop_name="transfer test bot",
+                    error=clean,
+                )
                 log.warning("transfer test bot polling error aid=%s: %s", aid, clean)
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 60.0)
     except asyncio.CancelledError:
-        async with AsyncSessionLocal() as db:
-            await _set_transfer_test_runtime_state(db, aid, error="已停止")
+        await _set_polling_runtime_state_best_effort(
+            aid,
+            _set_transfer_test_runtime_state,
+            loop_name="transfer test bot",
+            error="已停止",
+        )
         raise
 
 

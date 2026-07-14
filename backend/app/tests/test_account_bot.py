@@ -5065,6 +5065,89 @@ async def test_interaction_polling_respects_inline_updates_switch(monkeypatch) -
     assert captured_payloads[0]["allowed_updates"] == ["message", "edited_message", "callback_query"]
 
 
+@pytest.mark.parametrize(
+    ("loop_name", "loader_name", "setter_name"),
+    [
+        ("_interaction_polling_loop", "_load_interaction_runtime_config", "_set_interaction_runtime_state"),
+        ("_transfer_test_polling_loop", "_load_transfer_test_runtime_config", "_set_transfer_test_runtime_state"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_bot_polling_recovers_when_config_and_error_state_db_access_temporarily_fail(
+    monkeypatch,
+    loop_name: str,
+    loader_name: str,
+    setter_name: str,
+) -> None:
+    class _DB:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+    load_calls = 0
+
+    async def _load_config(_aid: int):
+        nonlocal load_calls
+        load_calls += 1
+        if load_calls == 1:
+            raise RuntimeError("QueuePool connection timed out")
+        return None, {"enabled": False}
+
+    sleep = AsyncMock()
+    state_setter = AsyncMock(side_effect=RuntimeError("state write pool exhausted"))
+    monkeypatch.setattr(account_bot_runtime, loader_name, _load_config)
+    monkeypatch.setattr(account_bot_runtime, setter_name, state_setter)
+    monkeypatch.setattr(account_bot_runtime, "AsyncSessionLocal", lambda: _DB())
+    monkeypatch.setattr(account_bot_runtime.asyncio, "sleep", sleep)
+
+    await getattr(account_bot_runtime, loop_name)(1)
+
+    assert load_calls == 2
+    sleep.assert_awaited_once_with(2.0)
+    assert state_setter.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_management_bot_polling_recovers_when_initial_db_checkout_fails(monkeypatch) -> None:
+    class _Result:
+        @staticmethod
+        def scalar_one_or_none():
+            return None
+
+    class _DB:
+        def __init__(self, *, fail: bool):
+            self.fail = fail
+
+        async def __aenter__(self):
+            if self.fail:
+                raise RuntimeError("QueuePool connection timed out")
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def execute(self, _query):
+            return _Result()
+
+    db_calls = 0
+
+    def _db_factory():
+        nonlocal db_calls
+        db_calls += 1
+        return _DB(fail=db_calls in {1, 2})
+
+    sleep = AsyncMock()
+    monkeypatch.setattr(account_bot_runtime, "AsyncSessionLocal", _db_factory)
+    monkeypatch.setattr(account_bot_runtime.asyncio, "sleep", sleep)
+
+    await account_bot_runtime._polling_loop(1)
+
+    assert db_calls == 3
+    sleep.assert_awaited_once_with(2.0)
+
+
 @pytest.mark.asyncio
 async def test_handle_interaction_update_reads_transfer_config_once_for_matching_route(monkeypatch) -> None:
     class _DB:
