@@ -360,10 +360,12 @@ MANIFEST = Manifest(
 | `x-ui-widget: "textarea"` | `string` | 多行文本 |
 | `x-ui-widget: "llm-provider-select"` | `string` | 选择当前 TelePilot AI Provider |
 | `x-ui-widget: "llm-model-select"` | `string` | 选择 Provider 下的模型；用 `x-ui-provider-field` 指向 Provider 字段 |
+| `x-ui-widget: "dynamic-select"` | `string` | 从同一配置对象的动态选项数组中单选；用 `x-ui-options-field` 指向 `[{value,label}]` 字段 |
 | `x-ui-widget: "multi-select"` | `array` + `items.enum` | 多选列表 |
 | `x-ui-widget: "list-select"` | `string` + `enum` | 列表式单选 |
 | `x-ui-widget: "config-list"` | `array` + `items.type="object"` | 多组配置行，支持添加、编辑、复制、删除、启停、排序 |
 | `x-ui-widget: "allowed-peer-multi-select"` | `array` + `items.type="integer"` | 从当前账号“允许会话”中选择群聊/频道，保存为 Chat ID 数组；适合插件群聊白名单 |
+| `x-ui-placeholder` | `string` / `textarea` | 输入框浅色占位内容；与实际 `default` 分离，适合展示内置提示词但让留空继续使用内置值 |
 | `x-ui-hidden: true` | 任意字段 | 不在 UI 渲染，但仍保留在表单值和保存链路中 |
 
 `config-list` 适合“多组配置，每组一行”的常见体验。支持这些元数据：

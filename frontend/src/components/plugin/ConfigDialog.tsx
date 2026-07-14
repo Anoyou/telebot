@@ -67,6 +67,8 @@ export interface ConfigField {
   "x-ui-order"?: number;
   "x-ui-columns"?: 1 | 2 | 3 | number;
   "x-ui-provider-field"?: string;
+  "x-ui-options-field"?: string;
+  "x-ui-placeholder"?: string;
   "x-ui-model-modality"?: string;
   "x-ui-summary"?: string;
   "x-ui-title-field"?: string;
@@ -669,6 +671,29 @@ function FieldInput({
     );
   }
 
+  if (field["x-ui-widget"] === "dynamic-select") {
+    const optionsField = field["x-ui-options-field"];
+    const options = dynamicSelectOptions(optionsField ? values[optionsField] : undefined);
+    const selected = value != null ? String(value) : "";
+    if (selected && !options.some((option) => option.value === selected)) {
+      options.unshift({ value: selected, label: `当前值：${selected}` });
+    }
+    return (
+      <div className="space-y-1.5">
+        <Label htmlFor={inputId}>{label}</Label>
+        {description && <p className="text-xs text-muted-foreground">{description}</p>}
+        <Select id={inputId} value={selected} onChange={(event) => onChange(event.target.value)}>
+          <option value="">未设置</option>
+          {options.map((option) => (
+            <option key={option.value} value={option.value}>
+              {option.label}
+            </option>
+          ))}
+        </Select>
+      </div>
+    );
+  }
+
   if (field.type === "array" && field["x-ui-widget"] === "config-list") {
     return (
       <ConfigListField
@@ -874,6 +899,7 @@ function FieldInput({
     textValue.includes("\n") ||
     defaultValue.includes("\n") ||
     /message|text|prompt|content/i.test(fk);
+  const configuredPlaceholder = formatConfigValue(field["x-ui-placeholder"]);
 
   if (multiline) {
     return (
@@ -885,7 +911,7 @@ function FieldInput({
           value={textValue}
           rows={4}
           onChange={(e) => onChange(e.target.value)}
-          placeholder={defaultValue}
+          placeholder={configuredPlaceholder || defaultValue}
         />
       </div>
     );
@@ -900,7 +926,7 @@ function FieldInput({
         type={isSensitive ? "password" : "text"}
         value={textValue}
         onChange={(e) => onChange(e.target.value)}
-        placeholder={isSensitive && !textValue ? MASKED_SECRET_PLACEHOLDER : defaultValue}
+        placeholder={isSensitive && !textValue ? MASKED_SECRET_PLACEHOLDER : configuredPlaceholder || defaultValue}
       />
     </div>
   );
@@ -1716,6 +1742,20 @@ function defaultValueForField(field: ConfigField): unknown {
   return "";
 }
 
+function dynamicSelectOptions(value: unknown): Array<{ value: string; label: string }> {
+  if (!Array.isArray(value)) return [];
+  const options: Array<{ value: string; label: string }> = [];
+  for (const item of value) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+    const row = item as Record<string, unknown>;
+    const optionValue = String(row.value ?? row.id ?? "").trim();
+    if (!optionValue) continue;
+    const label = String(row.label ?? row.title ?? optionValue).trim() || optionValue;
+    options.push({ value: optionValue, label });
+  }
+  return options;
+}
+
 function cloneDefaultValue(value: unknown): unknown {
   if (value == null || typeof value !== "object") return value;
   try {
@@ -2026,6 +2066,31 @@ function renderTemplateSample(
     summary: "1) 讨论了版本回滚原因\n2) 确认改为平台 AI 路由\n3) 约定今天内回归验证",
     time: "2026-05-26 14:30",
     message_count: formatConfigValue(values.default_count) || "100",
+    total_amount: "150000",
+    question_count: "40",
+    redpacket_id: "a1b2c3d4e5f6",
+    date: "2026-07-14",
+    daily_limit: "1",
+    retry_count: "1",
+    question: "示例题目：网页正文中提到的核心结论是什么？",
+    options: "A. 示例正确答案\nB. 示例错误答案一\nC. 示例错误答案二",
+    reward: "3888",
+    answer: "A. 示例正确答案",
+    explanation: "正文明确给出了该结论。",
+    source: "https://example.com/source",
+    status: "已全部领完",
+    claimed_amount: "150000",
+    claim_count: "40",
+    luckiest_name: "好运用户",
+    luckiest_reward: "9888",
+    unluckiest_name: "保底用户",
+    unluckiest_reward: "1",
+    ranking: "<blockquote expandable><b>领取总名单（金额降序）</b>\n1. 好运用户 · 9888\n2. 保底用户 · 1</blockquote>",
+    weekly_title: "AI 红包周榜结算",
+    period_start: "2026-07-12 10:00",
+    period_end: "2026-07-19 10:00",
+    count_ranking: "1. 答题王 · 7 次\n2. 小明 · 5 次",
+    reward_ranking: "1. 奖金王 · 18888\n2. 小红 · 12888",
   };
   sample.title = "九宫格竞猜";
   sample.target_line = `目标点数：<b>${sample.target_sum}</b>（9 格里唯一）`;

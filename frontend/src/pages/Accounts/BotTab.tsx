@@ -95,6 +95,7 @@ import { getErrMsg } from "@/lib/api";
 import { cn, formatDateTime } from "@/lib/utils";
 import {
   pluginContractRiskWarnings,
+  pluginEventLabel,
   pluginEventSubscriptionLabels,
   pluginOperationalCapabilityLabels,
   type PluginCapabilities,
@@ -464,17 +465,6 @@ function interactionProfileLabel(profile?: string | null): string | null {
   if (profile === "reward_pool") return "奖池玩法";
   if (profile === "utility_trigger") return "工具触发";
   return null;
-}
-
-function interactionEventLabel(event?: string | null): string {
-  if (event === "all_messages") return "全部消息";
-  if (event === "callback_query") return "按钮回调";
-  if (event === "chosen_inline_result") return "Inline 选择";
-  if (event === "inline_query") return "Inline 查询";
-  if (event === "message") return "普通消息";
-  if (event === "payment_confirmed") return "付款确认";
-  if (event === "session_close") return "会话关闭";
-  return event || "未声明";
 }
 
 function interactionDispatchLabels(entry: FeatureInteractionEntry): string[] {
@@ -1159,7 +1149,7 @@ function InteractionRuleEditor({
     event_subscriptions: selectedModule?.eventSubscriptions,
     lint_warnings: selectedModule?.lintWarnings,
   });
-  const selectedEntryEvents = (selectedInteractionEntry?.events ?? []).map((event) => interactionEventLabel(event));
+  const selectedEntryEvents = (selectedInteractionEntry?.events ?? []).map((event) => pluginEventLabel(event));
   const [entryProfileTab, setEntryProfileTab] = useState<string>("all");
   const effectiveTriggerMode = rule.action === "notice" ? "payment" : rule.triggerMode;
   const showsPaymentFields = effectiveTriggerMode !== "keyword";
@@ -1248,7 +1238,7 @@ function InteractionRuleEditor({
     const isActive = item.value === selectedModule?.value;
     const title = item.entry.title || item.entry.label || item.entry.key;
     const dispatchLabels = interactionDispatchLabels(item.entry);
-    const entryEvents = (item.entry.events ?? []).map((event) => interactionEventLabel(event));
+    const entryEvents = (item.entry.events ?? []).map((event) => pluginEventLabel(event));
     const capabilityLabels = pluginOperationalCapabilityLabels({
       capabilities: item.capabilities,
       permissions: item.permissions,

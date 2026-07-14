@@ -39,7 +39,7 @@
 - `ctx.http` 需要 `permissions=["external_http"]` 和 `allowed_hosts`。
 - `ctx.ai` 需要 `permissions=["ai_text"]`，复用平台 LLM Provider、fallback、预算和 usage 记录。
 - `ctx.client` 只保留给管理员命令和高级兼容场景；远程插件仍不能直接拿 token、session、Bot API client 或 live event。
-- `command` 只保存裸指令名，不保存前缀；帮助文案用 `{prefix}`。
+- `command` 只保存裸指令名，不保存前缀；schema/usage 模板用 `{prefix}`，运行时帮助与错误示例必须调用 `from app.worker.command import current_command_prefix`，使用 `current_command_prefix(fallback=",")`。不要从 `ctx.account_config` 读取系统前缀，也不要硬编码逗号。
 - `on_command(ctx, cmd, args, event) -> bool` 保留给账号主人/授权管理员命令；群友公开触发走 Event Bus 订阅。
 - `on_message` 是旧消息监听兼容 hook；新增 Telegram 交互优先写标准事件入口或 `on_interaction` 迁移桥。
 - 已有 `interaction_entries` 插件迁移时，要把入口事件映射到 `event_subscriptions`，把 `payload_contract/result_contract/settlement` 转成标准信封和标准 action。

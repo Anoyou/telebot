@@ -22,6 +22,15 @@
 
 暂无已记录变更。
 
+## [0.58.2] — 2026-07-14 · patch（补丁版本） · 插件配置控件与开发契约完善
+
+### Changed
+- 插件开发 Quickstart、速查表与 `tp_plugin new` 脚手架统一要求运行时通过 `current_command_prefix()` 展示系统指令前缀，schema/usage 使用 `{prefix}`，不再生成裸命令示例。
+- 通用插件配置 schema 新增 `x-ui-placeholder` 浅色占位内容和 `dynamic-select` 动态单选控件，供插件展示内置提示词与运行期生成的选项。
+
+### Fixed
+- 插件契约中的 `delete_message`、`payout`、`session_expired`、`message_edited`、`all_events` 现在统一显示中文标签，不再把内部标识直接暴露在“可用能力”和“触发入口”中。
+
 ## [0.58.1] — 2026-07-14 · patch（补丁版本） · 模型测活工作台交互完善
 
 ### Added

@@ -12,6 +12,7 @@ const DEPRECATED_SEND_CHANNELS = ["notice", "bbot_notice", "notice_bot"];
 const AI_PERMISSION_TERMS = ["ai", "ai_text", "llm", "llm_text", "openai", "anthropic"];
 
 const EVENT_LABELS: Record<string, string> = {
+  all_events: "全部事件",
   all_messages: "全部消息",
   callback_query: "按钮回调",
   chosen_inline_result: "Inline 选择",
@@ -20,8 +21,10 @@ const EVENT_LABELS: Record<string, string> = {
   inline_query: "Inline 查询",
   keyword: "关键词",
   message: "普通消息",
+  message_edited: "消息编辑",
   payment_confirmed: "付款确认",
   session_close: "会话关闭",
+  session_expired: "会话过期",
 };
 
 const CAPABILITY_LABELS: Record<string, string> = {
@@ -42,13 +45,20 @@ const CAPABILITY_LABELS: Record<string, string> = {
 const PERMISSION_LABELS: Record<string, string> = {
   ai: "AI 调用",
   ai_text: "AI 文本",
+  delete_message: "删除消息",
   edit_message: "编辑消息",
   external_http: "HTTP 请求",
+  payout: "派奖",
   read_chat: "读取消息",
   resolve_entity: "解析会话",
   send_file: "发送文件",
   send_message: "发送消息",
 };
+
+export function pluginEventLabel(event?: string | null): string {
+  const key = String(event || "").trim();
+  return key ? EVENT_LABELS[key] || key : "未声明";
+}
 
 export function pluginEventSubscriptionLabels(
   subscriptions?: PluginEventSubscription[] | null,
@@ -58,12 +68,12 @@ export function pluginEventSubscriptionLabels(
     const rawEvents = firstArrayValue(subscription, ["event_types", "events", "types"]);
     for (const event of rawEvents) {
       if (typeof event === "string" && event.trim()) {
-        labels.add(EVENT_LABELS[event] || event);
+        labels.add(pluginEventLabel(event));
       }
     }
     const rawType = subscription.event_type ?? subscription.type ?? subscription.event;
     if (typeof rawType === "string" && rawType.trim()) {
-      labels.add(EVENT_LABELS[rawType] || rawType);
+      labels.add(pluginEventLabel(rawType));
     }
     const source = subscription.source_channel ?? subscription.source;
     if (typeof source === "string" && source.trim()) {

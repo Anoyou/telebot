@@ -71,6 +71,22 @@ def test_new_scaffold_passes_check(profile: str, tmp_path: Path) -> None:
     assert not report.unknown_filter_keys
 
 
+@pytest.mark.parametrize("profile", ["session_game", "command"])
+def test_command_scaffolds_use_system_prefix_contract(profile: str, tmp_path: Path) -> None:
+    name = f"prefix_{profile}"
+    plugin_dir = tmp_path / name
+    tp.scaffold_plugin(name, profile, plugin_dir)
+
+    manifest = (plugin_dir / "manifest.py").read_text(encoding="utf-8")
+    plugin_json = json.loads((plugin_dir / "plugin.json").read_text(encoding="utf-8"))
+    assert f"{{prefix}}{name}" in manifest
+    assert f"{{prefix}}{name}" in plugin_json["usage"]
+    if profile == "session_game":
+        plugin_source = (plugin_dir / "plugin.py").read_text(encoding="utf-8")
+        assert "from app.worker.command import current_command_prefix" in plugin_source
+        assert "current_command_prefix(fallback=',')" in plugin_source
+
+
 async def test_session_game_scaffold_starts_session_before_update(tmp_path: Path) -> None:
     name = "demo_session"
     plugin_dir = tmp_path / name

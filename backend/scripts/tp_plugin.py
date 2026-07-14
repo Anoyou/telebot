@@ -257,9 +257,9 @@ def _profile_meta(profile: str) -> dict[str, str]:
 
 def _usage(name: str, profile: str) -> str:
     if profile == "session_game":
-        return f"安装并在账号启用后，用交互 Bot 命令 {name} 或群内关键词开局；群友直接发口令抢答，答对派奖并结算。"
+        return f"安装并在账号启用后，用 {{prefix}}{name} 或群内关键词开局；群友直接发口令抢答，答对派奖并结算。"
     if profile == "command":
-        return f"安装并在账号启用后，用交互 Bot 命令 {name} 触发一次性动作，插件回复一条消息并结束。"
+        return f"安装并在账号启用后，用 {{prefix}}{name} 触发一次性动作，插件回复一条消息并结束。"
     return "高级直通示例：账号侧手动开启直通后，私聊/群里命中触发词即由 on_direct_message 低延时回复。"
 
 
@@ -365,6 +365,7 @@ from __future__ import annotations
 import time
 from typing import Any
 
+from app.worker.command import current_command_prefix
 from app.worker.plugins.base import Plugin, PluginContext, register
 from app.worker.plugins.events import TelePilotEvent, event_from_interaction_payload
 
@@ -386,7 +387,7 @@ class {cls}(Plugin):
         self._command = str(cfg.get("command") or "{name}").strip() or "{name}"
         self._timeout = self._int(cfg.get("timeout"), 300, minimum=10, maximum=86400)
         if ctx.log:
-            await ctx.log("info", f"[{name}] 已启动，交互指令：{{self._command}}")
+            await ctx.log("info", f"[{name}] 已启动，交互指令：{{current_command_prefix(fallback=',')}}{{self._command}}")
 
     async def on_interaction(
         self,

@@ -33,6 +33,25 @@ async def ping(ctx):
 2. 用该账号的命令前缀触发，例如默认前缀是逗号时发送 `,ping`。
 3. 正常结果是当前命令消息收到 `pong` 回复。
 
+### 命令前缀必须读取系统实时值
+
+`command` 配置只保存裸指令名。插件在运行时展示帮助、示例、启动日志或错误用法时，必须使用平台 API 读取“系统设置 → 指令前缀”，不要读取 `ctx.account_config`，也不要硬编码逗号：
+
+```python
+from app.worker.command import current_command_prefix
+
+prefix = current_command_prefix(fallback=",")
+usage = f"用法：{prefix}{command} 100"
+```
+
+配置 schema、`usage` 和消息模板中的静态说明使用 `{prefix}`，由插件中心按系统设置渲染：
+
+```python
+usage = "发送 {prefix}guess 100 开始游戏。"
+```
+
+`ctx.account_config` 是当前插件的账号级原始配置，不包含系统 `command_prefix`。把它当成系统设置读取会长期回退成 `,`，这是插件帮助文案前缀错误的常见根因。
+
 简单模式和显式 Manifest 模式可以共存：同一个系统里可以同时加载只有 `@plugin.command` 的简单插件，也可以加载带 `PLUGIN_CLASS` / `MANIFEST` 的完整插件。简单模式适合快速玩法、账号命令、小工具和内部自动化；显式 Manifest 适合需要 `plugin.json` 展示字段、`event_subscriptions`、`interaction_entries`、配置 schema、HTTP/AI 权限、按钮回调、Inline、付款、会话状态或完整 Trace 的插件。
 
 > 当前 `tp_plugin new` 只提供 `session_game` / `command` / `passthrough` 三种 profile，代码里没有 `--profile simple`。所以简单模式先按上面的单文件方式手写；不要在文档或脚本里使用不存在的 `tp_plugin new --profile simple`。
