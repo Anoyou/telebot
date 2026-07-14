@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+from app.worker import runtime
 from app.worker.plugins.base import public_entity_display_name
 from app.worker.runtime import _build_proxy_url
 
@@ -58,3 +59,19 @@ def test_build_proxy_url_mtproxy_not_supported() -> None:
 
 def test_build_proxy_url_unknown_type_returns_none() -> None:
     assert _build_proxy_url("ftp", "x", 21, None, "") is None
+
+
+def test_worker_main_installs_sensitive_log_filter_after_logging_setup(monkeypatch) -> None:
+    calls: list[object] = []
+    worker_result = object()
+
+    monkeypatch.setattr(runtime.logging, "basicConfig", lambda **kwargs: calls.append(("logging", kwargs)))
+    monkeypatch.setattr(runtime, "install_sensitive_log_filter", lambda: calls.append(("redaction", None)))
+    monkeypatch.setattr(runtime, "run_worker", lambda account_id: worker_result)
+    monkeypatch.setattr(runtime.asyncio, "run", lambda value: calls.append(("run", value)))
+
+    runtime.worker_main(7)
+
+    assert [item[0] for item in calls] == ["logging", "redaction", "run"]
+    assert calls[0][1]["format"] == "%(asctime)s [worker:7] %(levelname)s %(message)s"
+    assert calls[2][1] is worker_result

@@ -17,6 +17,10 @@
 - 可能存在用户或其他 agent 的未提交改动。不要 revert、checkout 或 reset 你没有明确负责的改动。
 - 手工编辑文件使用 `apply_patch`。
 
+## 日志安全
+
+- 主进程或独立 worker 子进程调用 `logging.basicConfig()` 后，必须安装 `install_sensitive_log_filter()`；新增进程入口时要用回归测试确认 Telegram Bot API URL、Authorization 和代理凭据不会以明文进入日志。
+
 ## 项目级 Agent Playbook
 
 - 处理代码、文档、排障、UI、部署或发布任务时，先阅读并按需使用 `docs/AGENT-PLAYBOOKS.md`。
