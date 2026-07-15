@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import re
 import shlex
@@ -44,8 +45,14 @@ from ..redis_client import get_redis
 from ..services import auth_service
 from ..settings import settings
 from ..util.update_plan import build_update_plan, classify_changed_files
+from ..util.update_target import (
+    normalize_update_branch,
+    normalize_update_remote,
+    normalize_update_target,
+)
 
 router = APIRouter(prefix="/api/system", tags=["system"])
+log = logging.getLogger(__name__)
 _APP_STARTED_AT = time.time()
 
 
@@ -1524,25 +1531,14 @@ class UpdateRequest(BaseModel):
     def validate_remote(cls, value: str | None) -> str | None:
         if value is None:
             return None
-        normalized = value.strip()
-        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", normalized):
-            raise ValueError("更新远端名称格式无效")
-        return normalized
+        return normalize_update_remote(value)
 
     @field_validator("branch")
     @classmethod
     def validate_branch(cls, value: str | None) -> str | None:
         if value is None:
             return None
-        normalized = value.strip()
-        if (
-            not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,199}", normalized)
-            or ".." in normalized
-            or "//" in normalized
-            or normalized.endswith(("/", "."))
-        ):
-            raise ValueError("更新分支格式无效")
-        return normalized
+        return normalize_update_branch(value)
 
 
 class UpdateJobStatusResponse(BaseModel):
@@ -1578,19 +1574,35 @@ async def _resolve_update_request(payload: UpdateRequest | None) -> tuple[str, s
         payload = None
     default_remote, default_branch = _default_update_remote_branch()
     try:
+        defaults = normalize_update_target(
+            {"remote": default_remote, "branch": default_branch}
+        )
+    except ValueError:
+        log.warning("忽略环境或 Git upstream 中的非法更新目标，回退 origin/main")
+        defaults = {"remote": "origin", "branch": "main"}
+    default_remote = defaults["remote"]
+    default_branch = defaults["branch"]
+    try:
         async with AsyncSessionLocal() as db:
             row = await db.get(SystemSetting, "app_update_target")
         if row is not None and isinstance(row.value, dict):
-            default_remote = str(row.value.get("remote") or default_remote)
-            default_branch = str(row.value.get("branch") or default_branch)
+            try:
+                saved = normalize_update_target(row.value)
+            except ValueError:
+                log.warning("忽略数据库中的非法 app_update_target，继续使用安全默认值")
+            else:
+                default_remote = saved["remote"]
+                default_branch = saved["branch"]
     except Exception:  # noqa: BLE001
         pass
     candidate = payload or UpdateRequest()
-    return (
-        str(candidate.remote or default_remote).strip() or default_remote,
-        str(candidate.branch or default_branch).strip() or default_branch,
-        bool(candidate.full),
+    target = normalize_update_target(
+        {
+            "remote": candidate.remote or default_remote,
+            "branch": candidate.branch or default_branch,
+        }
     )
+    return target["remote"], target["branch"], bool(candidate.full)
 
 
 def _int_or_none(value: Any) -> int | None:
@@ -2658,6 +2670,14 @@ async def _import_config_payload(
                         if key == definition.get("pk_field") and key == "id":
                             continue
                         filtered[key] = _coerce_import_value(table_columns[key], value)
+
+                    if category == "system_settings" and filtered.get("key") == "app_update_target":
+                        try:
+                            filtered["value"] = normalize_update_target(filtered.get("value"))
+                        except ValueError as exc:
+                            raise ConfigImportError(
+                                f"[system_settings] app_update_target 非法：{exc}"
+                            ) from exc
 
                     # 导入旧 / 跨版本备份时，未知的客户端身份档案降级为 auto（不拒绝整份备份）。
                     if (

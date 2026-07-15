@@ -88,7 +88,8 @@ python -m app.scripts.rekey --old "$OLD_MASTER_KEY" --new "$NEW_MASTER_KEY"
 ```
 
 覆盖字段：账号 API ID/API Hash/session、代理密码、LLM API Key、通知 Bot Token、账号 Bot Token、
-Web TOTP secret，以及 `account_bot_transfer_notice:*` 系统设置内的交互/转账 Bot Token。
+Web TOTP secret，以及 `account_bot_transfer_notice:*` 内的交互/转账 Bot Token和
+`account_webhooks:*` 内的 Webhook Token。旧版 `account_webhooks:*` 明文 `token` 会在重钥时直接迁移为新密钥加密的 `token_enc`。
 
 **风险范围**：中低。计划内轮换可平滑完成；若确认 `MASTER_KEY` 与数据库备份同时泄露，
 攻击者可能已解开旧密文，仍需按 §3.3 评估是否强制重绑账号与轮换第三方 token。
@@ -139,7 +140,9 @@ docker compose exec web python -m app.scripts.auth_recovery --username admin --t
 
 「系统设置 → 配置备份」勾选敏感字段后，后端会重新验证当前密码；账号已绑定 TOTP 时，还必须提供有效动态验证码。普通非敏感导出不要求二次验证。导出文件可能包含 Telegram session、API Hash、Bot Token、LLM Key 和代理密码，下载后应立即移入受控存储，不要留在浏览器默认下载目录或聊天软件中。
 
-入站 Webhook 默认只从 `X-TelePilot-Webhook-Token` 请求头读取账号 token。`?token=` 查询参数只有在 `WEBHOOK_ALLOW_QUERY_TOKEN=true` 时才兼容，生产环境应保持关闭。迁移旧调用方时，先改客户端发送请求头，再关闭兼容开关并检查反代访问日志中是否残留旧 token。
+入站 Webhook Token 使用 `MASTER_KEY` 加密保存在 `account_webhooks:*` 系统设置中；0.60.3 及更早版本留下的明文会在认证后的管理访问、成功鉴权的投递请求或 `rekey` 时迁移。接口默认只从 `X-TelePilot-Webhook-Token` 请求头读取账号 token。`?token=` 查询参数只有在 `WEBHOOK_ALLOW_QUERY_TOKEN=true` 时才兼容，生产环境应保持关闭。迁移旧调用方时，先改客户端发送请求头，再关闭兼容开关并检查反代访问日志中是否残留旧 token。
+
+公开投递在查询账号和配置前先按可信客户端 IP 执行独立 Redis 限流；超过入口阈值返回 `WEBHOOK_INGRESS_RATE_LIMITED`，Redis 不可用时返回 `WEBHOOK_RATE_LIMIT_UNAVAILABLE` 并 fail-closed。Token 通过后仍会继续执行账号级 `webhook_deliver` 风控，两个限流层不能互相替代。
 
 ### 2.6 ZIP 插件签名策略
 

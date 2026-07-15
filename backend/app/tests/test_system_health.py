@@ -413,6 +413,24 @@ def test_default_update_branch_prefers_env(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_resolve_update_request_ignores_invalid_saved_target(monkeypatch) -> None:
+    """历史脏数据不能绕过当前校验进入实际 Git 更新参数。"""
+
+    fake_session = AsyncMock()
+    fake_session.get = AsyncMock(
+        return_value=SimpleNamespace(
+            value={"remote": "--upload-pack=sh", "branch": "../main"},
+        )
+    )
+    fake_ctx = AsyncMock()
+    fake_ctx.__aenter__.return_value = fake_session
+    monkeypatch.setattr(sh, "_default_update_remote_branch", lambda: ("origin", "main"))
+    monkeypatch.setattr(sh, "AsyncSessionLocal", lambda: fake_ctx)
+
+    assert await sh._resolve_update_request(None) == ("origin", "main", False)
+
+
+@pytest.mark.asyncio
 async def test_check_update_uses_internal_updater(monkeypatch) -> None:
     """生产容器内有 updater 时，检查更新应由 updater 读取宿主机工作树。"""
 

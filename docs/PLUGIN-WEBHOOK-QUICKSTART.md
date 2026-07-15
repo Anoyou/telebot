@@ -125,7 +125,9 @@ HTTP `202` 表示账号 Worker 已确认接收，不表示插件动作已经成�
 | `401` | `WEBHOOK_TOKEN_INVALID` | 检查账号是否选对，Token 是否放在请求头；重置后旧 Token 会立即失效 |
 | `404` | `WEBHOOK_HOOK_NOT_FOUND` | 确认插件已为该账号启用，订阅的 `hook_key` 与 URL 一致 |
 | `413` | `WEBHOOK_BODY_TOO_LARGE` | 请求正文不得超过 64 KiB |
+| `429` | `WEBHOOK_INGRESS_RATE_LIMITED` | 当前来源 IP 请求过多，按 `Retry-After` 退避 |
 | `429` | `WEBHOOK_RATE_LIMITED` | 按 `Retry-After` 退避，不要立即并发重试 |
+| `503` | `WEBHOOK_RATE_LIMIT_UNAVAILABLE` | 入口限流依赖暂不可用，等待 Redis 恢复后重试 |
 | `503` | `WEBHOOK_WORKER_OFFLINE` | 确认账号 Worker 在线且未暂停 |
 | `503` | `WEBHOOK_DELIVERY_FAILED` | 查看 Redis、Worker 和后端日志 |
 
@@ -133,10 +135,10 @@ HTTP `202` 表示账号 Worker 已确认接收，不表示插件动作已经成�
 
 ## 6. 生产安全
 
-- 只通过请求头传递账号 Webhook Token，避免 Token 进入 URL、反向代理和访问日志。
+- 只通过请求头传递账号 Webhook Token，避免 Token 进入 URL、反向代理和访问日志；TelePilot 使用 `MASTER_KEY` 加密落库。
 - 公网入口使用 HTTPS。怀疑 Token 泄漏时，在页面重置 Token，并同步更新所有调用方。
 - Webhook Token 只鉴权到 TelePilot 账号。GitHub、支付平台等来源还应在插件中验证各自的签名、时间戳和重放保护。
 - 会产生订单、发货、资金或权限副作用的插件需要业务幂等键。不要把一次 HTTP `202` 当成业务已经完成。
-- 请求正文上限为 64 KiB；默认限流为每秒 2 次、每分钟 60 次、每小时 1000 次、每天 5000 次。
+- 请求正文上限为 64 KiB；入口按来源 IP 先执行每秒 10 次、每分钟 120 次的预鉴权限流，Token 通过后再执行账号级每秒 2 次、每分钟 60 次、每小时 1000 次、每天 5000 次限流。
 
 完整字段、请求头白名单和事件信封见 [插件 API 参考](./PLUGIN-API-REFERENCE.md#入站-webhook-事件)。

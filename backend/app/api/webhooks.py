@@ -6,7 +6,9 @@ The setting stores the account-level shared token and the configured hook keys.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import logging
 import math
 import re
 import secrets
@@ -16,6 +18,7 @@ from typing import Any
 from fastapi import APIRouter, Header, HTTPException, Query, Request, status
 from pydantic import BaseModel
 
+from ..crypto import decrypt_str, encrypt_str
 from ..db.models.account import Account
 from ..db.models.system import SystemSetting
 from ..deps import CurrentUser, DBSession
@@ -26,10 +29,12 @@ from ..worker.ipc import CMD_WEBHOOK_DELIVER, publish_cmd_with_ack
 from ..worker.ratelimit.buckets import TokenBuckets
 
 router = APIRouter(prefix="/api/webhooks", tags=["webhooks"])
+log = logging.getLogger(__name__)
 
 SETTING_PREFIX = "account_webhooks:"
 TOKEN_HEADER = "X-TelePilot-Webhook-Token"
 WEBHOOK_RATE_LIMIT_ACTION = "webhook_deliver"
+WEBHOOK_INGRESS_RATE_LIMIT_ACTION = "webhook_ingress"
 MAX_WEBHOOK_BODY_BYTES = 64 * 1024
 DEFAULT_HOOK_KEY = "default"
 HOOK_KEY_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
@@ -52,6 +57,10 @@ DEFAULT_LIMITS = {
     "per_hour": 1000,
     "per_day": 5000,
     "same_peer_per_minute": None,
+}
+INGRESS_LIMITS = {
+    "per_second": 10,
+    "per_minute": 120,
 }
 
 
@@ -102,7 +111,7 @@ def _new_token() -> str:
 def _default_config() -> dict[str, Any]:
     now = _now_iso()
     return {
-        "token": _new_token(),
+        "token_enc": encrypt_str(_new_token()),
         "hooks": [{"key": DEFAULT_HOOK_KEY, "label": "默认入口", "enabled": True}],
         "created_at": now,
         "updated_at": now,
@@ -125,9 +134,13 @@ def _normalize_hook(raw: Any) -> dict[str, Any] | None:
 def _normalize_config(value: Any) -> tuple[dict[str, Any], bool]:
     changed = False
     data = dict(value) if isinstance(value, dict) else {}
-    token = str(data.get("token") or "").strip()
-    if not token:
-        data["token"] = _new_token()
+    token_enc = str(data.get("token_enc") or "").strip()
+    legacy_token = str(data.get("token") or "").strip()
+    if not token_enc:
+        data["token_enc"] = encrypt_str(legacy_token or _new_token())
+        changed = True
+    if "token" in data:
+        data.pop("token", None)
         changed = True
     raw_hooks = data.get("hooks")
     hooks = [_normalize_hook(item) for item in raw_hooks] if isinstance(raw_hooks, list) else []
@@ -144,6 +157,14 @@ def _normalize_config(value: Any) -> tuple[dict[str, Any], bool]:
     if changed or not data.get("updated_at"):
         data["updated_at"] = _now_iso()
     return data, changed
+
+
+def _config_token(config: dict[str, Any]) -> str:
+    token_enc = str(config.get("token_enc") or "").strip()
+    if token_enc:
+        return decrypt_str(token_enc)
+    # 兼容 0.54.0-0.60.3 已落库的旧明文；只在认证成功后持久化迁移。
+    return str(config.get("token") or "").strip()
 
 
 async def _ensure_account(db: Any, account_id: int) -> Account:
@@ -189,7 +210,7 @@ def _config_out(account_id: int, config: dict[str, Any], limit: dict[str, Any]) 
     ]
     return AccountWebhookConfigOut(
         account_id=account_id,
-        token=str(config.get("token") or ""),
+        token=_config_token(config),
         token_storage=f"system_setting:{_setting_key(account_id)}",
         hooks=hooks,
         rate_limit=WebhookRateLimitOut(**limit),
@@ -248,6 +269,53 @@ async def _enforce_webhook_rate_limit(db: Any, redis: Any, account_id: int, hook
     return limits
 
 
+def _client_ip(request: Request) -> str:
+    if settings.trust_forwarded_for:
+        forwarded = request.headers.get("x-forwarded-for", "")
+        if forwarded:
+            client = forwarded.split(",", 1)[0].strip()
+            if client:
+                return client
+    return request.client.host if request.client else "?"
+
+
+def _ingress_bucket_id(request: Request) -> int:
+    digest = hashlib.blake2b(_client_ip(request).encode("utf-8"), digest_size=8).digest()
+    return int.from_bytes(digest, "big") & ((1 << 63) - 1)
+
+
+async def _enforce_webhook_ingress_rate_limit(request: Request, redis: Any) -> None:
+    try:
+        allowed, retry_after, _idx = await TokenBuckets(redis).check_and_consume(
+            _ingress_bucket_id(request),
+            WEBHOOK_INGRESS_RATE_LIMIT_ACTION,
+            INGRESS_LIMITS["per_second"],
+            INGRESS_LIMITS["per_minute"],
+            None,
+            None,
+            None,
+            peer_id=None,
+            consume=True,
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("webhook ingress rate-limit unavailable: %s", type(exc).__name__)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "code": "WEBHOOK_RATE_LIMIT_UNAVAILABLE",
+                "message": "Webhook 入口保护暂不可用，请稍后重试",
+            },
+        ) from exc
+    if allowed:
+        return
+    retry = max(1, int(math.ceil(float(retry_after or 1))))
+    raise HTTPException(
+        status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+        detail={"code": "WEBHOOK_INGRESS_RATE_LIMITED", "message": "Webhook 请求过于频繁，请稍后重试"},
+        headers={"Retry-After": str(retry)},
+    )
+
+
 async def _read_body(request: Request) -> tuple[Any, int]:
     length_header = request.headers.get("content-length")
     if length_header:
@@ -297,7 +365,10 @@ def _provided_token(header_token: str | None, query_token: str | None) -> str:
 
 
 def _require_valid_token(config: dict[str, Any], provided: str) -> None:
-    expected = str(config.get("token") or "").strip()
+    try:
+        expected = _config_token(config)
+    except ValueError:
+        expected = ""
     if not provided or not expected or not secrets.compare_digest(provided, expected):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -330,7 +401,8 @@ async def reset_account_webhook_token(
 ) -> AccountWebhookConfigOut:
     await _ensure_account(db, account_id)
     config = await _get_or_create_config(db, account_id)
-    config["token"] = _new_token()
+    config["token_enc"] = encrypt_str(_new_token())
+    config.pop("token", None)
     config["updated_at"] = _now_iso()
     row = await db.get(SystemSetting, _setting_key(account_id))
     if row is None:
@@ -351,14 +423,26 @@ async def deliver_webhook(
     x_telepilot_webhook_token: str | None = Header(default=None, alias=TOKEN_HEADER),
     token: str | None = Query(default=None),
 ) -> WebhookDeliverOut:
+    redis = get_redis()
+    await _enforce_webhook_ingress_rate_limit(request, redis)
     account = await db.get(Account, account_id)
     if account is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail={"code": "WEBHOOK_TOKEN_INVALID", "message": "Webhook token 无效"},
         )
-    config = await _get_or_create_config(db, account_id)
+    row = await db.get(SystemSetting, _setting_key(account_id))
+    if row is None or not isinstance(row.value, dict):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={"code": "WEBHOOK_TOKEN_INVALID", "message": "Webhook token 无效"},
+        )
+    config = dict(row.value)
     _require_valid_token(config, _provided_token(x_telepilot_webhook_token, token))
+    config, changed = _normalize_config(config)
+    if changed:
+        row.value = config
+        await db.commit()
     hook = _hook_for(config, hook_key)
     if hook is None:
         raise HTTPException(
@@ -366,7 +450,6 @@ async def deliver_webhook(
             detail={"code": "WEBHOOK_HOOK_NOT_FOUND", "message": "Webhook hook_key 不存在或已停用"},
         )
 
-    redis = get_redis()
     await _enforce_webhook_rate_limit(db, redis, account_id, hook_key)
     body, body_size = await _read_body(request)
     payload = {

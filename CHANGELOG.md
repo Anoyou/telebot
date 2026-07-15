@@ -22,6 +22,14 @@
 
 暂无已记录变更。
 
+## [0.60.4] — 2026-07-16 · patch（补丁版本） · 安全与发布边界加固
+
+### Fixed
+- Webhook Token 改为使用 `MASTER_KEY` 加密落库，旧明文配置会在认证后的管理访问或成功鉴权的投递请求中迁移，并纳入 `rekey` 密钥轮换；错误 Token 和未初始化账号不再创建或修改配置。
+- 公开 Webhook 投递在访问数据库前增加基于可信客户端 IP 的独立 Redis 限流，保护失效时 fail-closed，避免未鉴权流量绕过账号级限流耗尽数据库连接。
+- 后端包改用 setuptools 包发现，正式安装产物会包含 `app.*` 与公开 `telepilot` SDK，`from telepilot import plugin` 不再依赖当前工作目录。
+- 配置恢复与更新执行统一复用远端/分支校验，非法 `app_update_target` 无法通过配置包绕过设置 API 的安全边界。
+
 ## [0.60.3] — 2026-07-15 · patch（补丁版本） · Redis 并发与插件说明折叠
 
 ### Changed

@@ -146,10 +146,10 @@ make prod-up
 
 ## 安全与正确性边界
 
-- `MASTER_KEY` 用于加密 Telegram session、API Hash、Bot Token、TOTP secret 和 LLM Key。丢失后旧密文无法恢复，请单独备份。
+- `MASTER_KEY` 用于加密 Telegram session、API Hash、Bot Token、Webhook Token、TOTP secret 和 LLM Key。丢失后旧密文无法恢复，请单独备份。
 - 公网环境必须使用 HTTPS，设置强 `JWT_SECRET` 和数据库密码，并限制后端端口只在可信网络可见。
 - TelePilot 采用个人可信插件模型，不提供公共插件市场式强沙箱。新 ZIP 默认拒绝未签名安装；历史未签名插件使用独立兼容开关。
-- Webhook token 默认只接受 `X-TelePilot-Webhook-Token` 请求头，不通过查询参数传递。
+- Webhook Token 使用 `MASTER_KEY` 加密落库，默认只接受 `X-TelePilot-Webhook-Token` 请求头；公开入口在访问数据库前另有 IP 限流。
 - payout 限额、AI 预算、关键风控和交互 claim 在依赖故障时采用 fail-closed。
 - payout 遇到超时或未知发送结果时进入 ambiguous，不会把异常简单视为未发送后自动重付。
 - 全局紧急停用会同时收敛 Worker、Account Bot 和 Interaction Bot；部分失败会返回 `KILL_SWITCH_PARTIAL_FAILURE`。

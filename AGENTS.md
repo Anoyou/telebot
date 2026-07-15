@@ -20,6 +20,7 @@
 ## 日志安全
 
 - 主进程或独立 worker 子进程调用 `logging.basicConfig()` 后，必须安装 `install_sensitive_log_filter()`；新增进程入口时要用回归测试确认 Telegram Bot API URL、Authorization 和代理凭据不会以明文进入日志。
+- `SystemSetting` 中保存的 Token、密码或其他可复用凭据必须使用 `*_enc` 字段经 `MASTER_KEY` 加密，并同步加入 `app.scripts.rekey` 覆盖；公开鉴权入口不得在凭据校验前创建或修改持久化配置。
 
 ## 项目级 Agent Playbook
 

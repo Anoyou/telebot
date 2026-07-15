@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "telepilot-backend"
-version = "0.60.3"
+version = "0.60.4"
 description = "TelePilot后端"
 requires-python = ">=3.12"
 license = {text = "MIT"}
@@ -59,8 +59,9 @@ dev = [
     "httpx>=0.27.0",
 ]
 
-[tool.setuptools]
-packages = ["app"]
+[tool.setuptools.packages.find]
+include = ["app", "app.*", "telepilot", "telepilot.*"]
+exclude = ["app.tests", "app.tests.*"]
 
 [tool.ruff]
 line-length = 110

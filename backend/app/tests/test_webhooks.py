@@ -8,8 +8,10 @@ from unittest.mock import AsyncMock
 import pytest
 from fastapi import HTTPException
 from httpx import ASGITransport, AsyncClient
+from starlette.requests import Request
 
 from app.api import webhooks as webhooks_api
+from app.crypto import decrypt_str
 from app.db.models.account import Account
 from app.db.models.rate_limit import ACTION_KEYS
 from app.db.models.system import SystemSetting
@@ -21,6 +23,8 @@ from app.worker.plugins import loader as loader_mod
 from app.worker.plugins.base import Plugin, PluginContext
 from app.worker.plugins.manifest import Manifest
 
+_REAL_INGRESS_LIMITER = webhooks_api._enforce_webhook_ingress_rate_limit
+
 CSRF_HEADERS = {
     "X-Requested-With": "telepilot-ui",
     "X-CSRF-Token": "test-token",
@@ -29,10 +33,17 @@ CSRF_HEADERS = {
 
 
 class _FakeDB:
-    def __init__(self, *, token: str = "secret", hook_key: str = "default") -> None:
+    def __init__(
+        self,
+        *,
+        token: str = "secret",
+        hook_key: str = "default",
+        configured: bool = True,
+    ) -> None:
         self.accounts = {1: SimpleNamespace(id=1, template_id=None)}
-        self.settings: dict[str, SystemSetting] = {
-            webhooks_api._setting_key(1): SystemSetting(
+        self.settings: dict[str, SystemSetting] = {}
+        if configured:
+            self.settings[webhooks_api._setting_key(1)] = SystemSetting(
                 key=webhooks_api._setting_key(1),
                 value={
                     "token": token,
@@ -41,11 +52,12 @@ class _FakeDB:
                     "updated_at": "2026-07-10T00:00:00+00:00",
                 },
             )
-        }
         self.added: list[Any] = []
         self.commits = 0
+        self.get_calls: list[tuple[Any, Any]] = []
 
     async def get(self, model: Any, key: Any) -> Any:
+        self.get_calls.append((model, key))
         table = getattr(model, "__tablename__", "")
         if model is Account or table == "account":
             return self.accounts.get(int(key))
@@ -64,6 +76,15 @@ class _FakeDB:
 
 class _FakeRedis:
     pass
+
+
+@pytest.fixture(autouse=True)
+def _allow_webhook_ingress(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(
+        webhooks_api,
+        "_enforce_webhook_ingress_rate_limit",
+        AsyncMock(return_value=None),
+    )
 
 
 @asynccontextmanager
@@ -110,7 +131,117 @@ async def test_deliver_webhook_rejects_bad_token(monkeypatch: pytest.MonkeyPatch
 
     assert response.status_code == 401
     assert response.json()["error"]["code"] == "WEBHOOK_TOKEN_INVALID"
+    assert db.commits == 0
+    assert db.settings[webhooks_api._setting_key(1)].value["token"] == "good-token"
     webhooks_api.publish_cmd_with_ack.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_deliver_webhook_without_config_does_not_create_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db = _FakeDB(configured=False)
+    monkeypatch.setattr(webhooks_api, "publish_cmd_with_ack", AsyncMock())
+
+    async with _client(db) as client:
+        response = await client.post(
+            "/api/webhooks/1/default",
+            headers=_headers("bad-token"),
+            json={"event": "demo"},
+        )
+
+    assert response.status_code == 401
+    assert db.commits == 0
+    assert db.added == []
+    assert db.settings == {}
+
+
+@pytest.mark.asyncio
+async def test_management_access_migrates_legacy_plaintext_token() -> None:
+    db = _FakeDB(token="legacy-token")
+
+    config = await webhooks_api._get_or_create_config(db, 1)
+
+    assert "token" not in config
+    assert decrypt_str(config["token_enc"]) == "legacy-token"
+    assert db.commits == 1
+
+
+@pytest.mark.asyncio
+async def test_ingress_limit_rejects_before_database_access(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db = _FakeDB()
+    limiter = AsyncMock(side_effect=HTTPException(status_code=429, detail={"code": "limited"}))
+    monkeypatch.setattr(webhooks_api, "_enforce_webhook_ingress_rate_limit", limiter)
+
+    async with _client(db) as client:
+        response = await client.post(
+            "/api/webhooks/1/default",
+            headers=_headers("good-token"),
+            json={"event": "demo"},
+        )
+
+    assert response.status_code == 429
+    assert db.get_calls == []
+
+
+@pytest.mark.asyncio
+async def test_ingress_limit_uses_hashed_client_bucket(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+
+    class _Buckets:
+        async def check_and_consume(self, account_id: int, action: str, *limits: Any, **kwargs: Any):
+            captured.update(account_id=account_id, action=action, limits=limits, kwargs=kwargs)
+            return False, 3, 1
+
+    monkeypatch.setattr(webhooks_api, "TokenBuckets", lambda _redis: _Buckets())
+    request = Request(
+        {
+            "type": "http",
+            "headers": [],
+            "method": "POST",
+            "path": "/api/webhooks/1/default",
+            "client": ("203.0.113.8", 12345),
+        }
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await _REAL_INGRESS_LIMITER(request, _FakeRedis())
+
+    assert exc_info.value.status_code == 429
+    assert captured["action"] == webhooks_api.WEBHOOK_INGRESS_RATE_LIMIT_ACTION
+    assert captured["account_id"] != 0
+    assert captured["limits"][:2] == (
+        webhooks_api.INGRESS_LIMITS["per_second"],
+        webhooks_api.INGRESS_LIMITS["per_minute"],
+    )
+
+
+@pytest.mark.asyncio
+async def test_ingress_limit_fails_closed_when_redis_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Buckets:
+        async def check_and_consume(self, *_args: Any, **_kwargs: Any):
+            raise ConnectionError("redis unavailable")
+
+    monkeypatch.setattr(webhooks_api, "TokenBuckets", lambda _redis: _Buckets())
+    request = Request(
+        {
+            "type": "http",
+            "headers": [],
+            "method": "POST",
+            "path": "/api/webhooks/1/default",
+            "client": ("203.0.113.9", 12345),
+        }
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await _REAL_INGRESS_LIMITER(request, _FakeRedis())
+
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.detail["code"] == "WEBHOOK_RATE_LIMIT_UNAVAILABLE"
 
 
 @pytest.mark.asyncio
@@ -317,3 +448,6 @@ async def test_deliver_webhook_mock_ipc_reaches_subscribed_plugin(monkeypatch: p
     assert payload["webhook"]["body"] == {"order_id": "A-1", "status": "paid"}
     assert payload["webhook"]["headers"]["content-type"] == "application/json"
     assert "x-telepilot-webhook-token" not in payload["webhook"]["headers"]
+    stored = db.settings[webhooks_api._setting_key(1)].value
+    assert "token" not in stored
+    assert decrypt_str(stored["token_enc"]) == "good-token"

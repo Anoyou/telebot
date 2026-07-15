@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-import re
 from datetime import datetime
 from datetime import time as dtime
 from typing import Any
@@ -56,6 +55,7 @@ from ..services import audit as audit_svc
 from ..services import auth_login_security, event_trace
 from ..services import rate_limit_service as svc
 from ..services.ai_feature import AI_ENABLED_SETTING_KEY, normalize_ai_enabled
+from ..util.update_target import normalize_update_branch, normalize_update_remote
 from ..worker.ipc import GCMD_KILL_SWITCH, GCMD_RELOAD_GLOBAL, GLOBAL_CHANNEL, make_cmd
 from ..worker.ratelimit.buckets import TokenBuckets
 from ..worker.ratelimit.overrides import add_override, drop_override, list_active
@@ -901,17 +901,18 @@ async def patch_system_settings(
             },
         )
         current = current if isinstance(current, dict) else {}
-        remote = str(payload.app_update_target.remote or current.get("remote") or "origin").strip()
-        branch = str(payload.app_update_target.branch or current.get("branch") or "main").strip()
-        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", remote):
-            raise _bad("invalid_update_remote", "更新远端名称格式无效")
-        if (
-            not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,199}", branch)
-            or ".." in branch
-            or "//" in branch
-            or branch.endswith(("/", "."))
-        ):
-            raise _bad("invalid_update_branch", "更新分支格式无效")
+        try:
+            remote = normalize_update_remote(
+                payload.app_update_target.remote or current.get("remote") or "origin"
+            )
+        except ValueError as exc:
+            raise _bad("invalid_update_remote", str(exc)) from exc
+        try:
+            branch = normalize_update_branch(
+                payload.app_update_target.branch or current.get("branch") or "main"
+            )
+        except ValueError as exc:
+            raise _bad("invalid_update_branch", str(exc)) from exc
         target = {"remote": remote, "branch": branch}
         await _set_setting(db, "app_update_target", target)
         await _audit(db, user.id, "set_app_update_target", target="system", detail=target)

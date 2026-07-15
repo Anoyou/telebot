@@ -48,8 +48,13 @@ SCALAR_FIELDS: tuple[RekeyField, ...] = (
     RekeyField("account_bot", "id", "bot_token_enc"),
     RekeyField("plugin_repo", "id", "credential_enc"),
 )
-SYSTEM_SETTING_PREFIX = "account_bot_transfer_notice:"
-SYSTEM_SETTING_ENCRYPTED_KEYS = ("interaction_bot_token_enc", "transfer_bot_token_enc")
+SYSTEM_SETTING_ENCRYPTED_KEYS_BY_PREFIX = {
+    "account_bot_transfer_notice:": ("interaction_bot_token_enc", "transfer_bot_token_enc"),
+    "account_webhooks:": ("token_enc",),
+}
+SYSTEM_SETTING_LEGACY_PLAINTEXT_KEYS_BY_PREFIX = {
+    "account_webhooks:": {"token": "token_enc"},
+}
 PLUGIN_SECRET_ENVELOPE_PREFIX = "secret:v1:"
 
 
@@ -150,32 +155,51 @@ def _rekey_system_settings(
 
     key_col = table.c.key
     value_col = table.c.value
-    rows = conn.execute(select(key_col, value_col).where(key_col.like(f"{SYSTEM_SETTING_PREFIX}%"))).all()
-    for row in rows:
-        setting_key = row[0]
-        value = row[1]
-        if not isinstance(value, dict):
-            result.skipped += 1
-            continue
-
-        changed = False
-        new_value = dict(value)
-        for encrypted_key in SYSTEM_SETTING_ENCRYPTED_KEYS:
-            token = new_value.get(encrypted_key)
-            if not token:
+    for prefix, encrypted_keys in SYSTEM_SETTING_ENCRYPTED_KEYS_BY_PREFIX.items():
+        rows = conn.execute(select(key_col, value_col).where(key_col.like(f"{prefix}%"))).all()
+        for row in rows:
+            setting_key = row[0]
+            value = row[1]
+            if not isinstance(value, dict):
                 result.skipped += 1
                 continue
-            result.scanned += 1
-            try:
-                new_value[encrypted_key] = _reencrypt_token(str(token), old=old, new=new)
-            except (InvalidToken, TypeError, ValueError) as exc:
-                result.failures.append(f"{table_name}.value[{encrypted_key}]#{setting_key}: {exc}")
-                continue
-            changed = True
-            result.changed += 1
 
-        if changed and not dry_run:
-            conn.execute(update(table).where(key_col == setting_key).values(value=new_value))
+            changed = False
+            new_value = dict(value)
+            migrated_encrypted_keys: set[str] = set()
+            for plaintext_key, encrypted_key in SYSTEM_SETTING_LEGACY_PLAINTEXT_KEYS_BY_PREFIX.get(
+                prefix, {}
+            ).items():
+                plain = str(new_value.get(plaintext_key) or "")
+                if not plain:
+                    continue
+                if not new_value.get(encrypted_key):
+                    result.scanned += 1
+                    new_value[encrypted_key] = new.encrypt(plain.encode()).decode()
+                    migrated_encrypted_keys.add(encrypted_key)
+                    result.changed += 1
+                new_value.pop(plaintext_key, None)
+                changed = True
+
+            for encrypted_key in encrypted_keys:
+                token = new_value.get(encrypted_key)
+                if not token:
+                    result.skipped += 1
+                    continue
+                # 旧明文已直接用新密钥加密，不要再尝试用旧密钥解密。
+                if encrypted_key in migrated_encrypted_keys:
+                    continue
+                result.scanned += 1
+                try:
+                    new_value[encrypted_key] = _reencrypt_token(str(token), old=old, new=new)
+                except (InvalidToken, TypeError, ValueError) as exc:
+                    result.failures.append(f"{table_name}.value[{encrypted_key}]#{setting_key}: {exc}")
+                    continue
+                changed = True
+                result.changed += 1
+
+            if changed and not dry_run:
+                conn.execute(update(table).where(key_col == setting_key).values(value=new_value))
 
 
 def _reencrypt_plugin_config_value(value: Any, *, old: Fernet, new: Fernet) -> tuple[Any, int, list[str]]:

@@ -97,6 +97,13 @@ class _LLMProvider(_Base):
     client_identity_profile: Mapped[str] = mapped_column(String, nullable=False, default="auto")
 
 
+class _SystemSetting(_Base):
+    __tablename__ = "backup_test_system_setting"
+
+    key: Mapped[str] = mapped_column(String, primary_key=True)
+    value: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+
+
 _MODEL_MAP = {
     "Account": _Account,
     "CommandTemplate": _CommandTemplate,
@@ -195,6 +202,35 @@ async def test_config_import_warns_when_unknown_identity_falls_back_to_auto() ->
         async with maker() as db:
             row = (await db.execute(select(_LLMProvider))).scalar_one()
             assert row.client_identity_profile == "auto"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_config_import_rejects_invalid_app_update_target() -> None:
+    engine, maker = await _database()
+    try:
+        with pytest.raises(system_health.ConfigImportError, match="app_update_target 非法"):
+            await system_health._import_config_payload(  # noqa: SLF001
+                {
+                    "_meta": {
+                        "format": "telepilot-config",
+                        "bundle_version": 2,
+                        "include_sensitive": False,
+                    },
+                    "system_settings": [
+                        {
+                            "key": "app_update_target",
+                            "value": {"remote": "--upload-pack=sh", "branch": "../main"},
+                        }
+                    ],
+                },
+                session_factory=_factory(maker),
+                model_map={**_MODEL_MAP, "SystemSetting": _SystemSetting},
+            )
+
+        async with maker() as db:
+            assert (await db.execute(select(_SystemSetting))).scalars().all() == []
     finally:
         await engine.dispose()
 
