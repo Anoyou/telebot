@@ -83,9 +83,8 @@ class _ReplyRecorder:
         self.replies.append(text)
 
 
+@requires_installed_plugins
 def test_installed_interaction_validator_discovers_only_nonempty_interaction_entries() -> None:
-    if not INSTALLED_ROOT.is_dir():
-        pytest.skip("本机未安装交互插件样本")
     validate_installed_interactions = _load_validator_module()
 
     assert validate_installed_interactions._installed_plugin_keys() == list(REQUIRED_INSTALLED_PLUGIN_KEYS)

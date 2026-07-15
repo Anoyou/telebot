@@ -29,6 +29,7 @@
 - 公开 Webhook 投递在访问数据库前增加基于可信客户端 IP 的独立 Redis 限流，保护失效时 fail-closed，避免未鉴权流量绕过账号级限流耗尽数据库连接。
 - 后端包改用 setuptools 包发现，正式安装产物会包含 `app.*` 与公开 `telepilot` SDK，`from telepilot import plugin` 不再依赖当前工作目录。
 - 配置恢复与更新执行统一复用远端/分支校验，非法 `app_update_target` 无法通过配置包绕过设置 API 的安全边界。
+- 后端测试移除对本机已安装插件样本和数据库连接池环境变量的隐式依赖，干净 checkout 与开发机使用同一套确定性断言。
 
 ## [0.60.3] — 2026-07-15 · patch（补丁版本） · Redis 并发与插件说明折叠
 

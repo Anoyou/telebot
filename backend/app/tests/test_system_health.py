@@ -293,6 +293,10 @@ async def test_probe_workers_aggregates_by_status() -> None:
             "app.worker.supervisor.get_worker_runtime_snapshot",
             return_value=runtime_rows,
         ),
+        patch.object(sh.settings, "db_pool_size", 2),
+        patch.object(sh.settings, "db_max_overflow", 0),
+        patch.object(sh.settings, "db_pool_size_worker", 1),
+        patch.object(sh.settings, "db_max_overflow_worker", 0),
         patch.dict(sh.os.environ, {"POSTGRES_MAX_CONNECTIONS": "10"}),
     ):
         out = await _probe_workers()

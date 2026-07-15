@@ -3869,7 +3869,33 @@ def test_interaction_rule_uses_declared_installed_entry_session_scope(monkeypatc
     assert rule["daily_limit_per_user"] == 2
 
 
-def test_account_bot_interaction_rule_filters_strict_plugin_module_config() -> None:
+def test_account_bot_interaction_rule_filters_strict_plugin_module_config(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    plugin_dir = tmp_path / "dice_grid_hunt"
+    plugin_dir.mkdir()
+    (plugin_dir / "plugin.json").write_text(
+        json.dumps(
+            {
+                "name": "dice_grid_hunt",
+                "interaction_entries": [
+                    {
+                        "key": "start_dice_grid_hunt",
+                        "input_schema": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "properties": {"timeout": {"type": "integer"}},
+                        },
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(account_bot_service, "settings", SimpleNamespace(plugins_installed_path=tmp_path))
+
     cfg = account_bot_service.normalize_transfer_notice_config(
         {
             "enabled": True,
