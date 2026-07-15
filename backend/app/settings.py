@@ -50,7 +50,7 @@ class Settings(BaseSettings):
     db_max_overflow_worker: int = 1
     redis_url: str = "redis://localhost:6379/0"
     redis_max_connections: int = 16
-    redis_max_connections_worker: int = 8
+    redis_max_connections_worker: int = 15
 
     # Worker 周期性配置 reconcile 间隔（秒）；只是 IPC 丢消息兜底，
     # 180s 足够，原 60s 在多账号下产生不必要的 DB 抖动。

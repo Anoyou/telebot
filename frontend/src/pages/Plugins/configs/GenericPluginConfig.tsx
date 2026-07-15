@@ -1,4 +1,10 @@
-import { useEffect, useMemo, useState, type Dispatch, type SetStateAction } from "react";
+import {
+  useEffect,
+  useMemo,
+  useState,
+  type Dispatch,
+  type SetStateAction,
+} from "react";
 import { createPortal } from "react-dom";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -68,6 +74,7 @@ import {
   pluginSupportsDirectPassthrough,
 } from "@/types/pluginContract";
 import { featureConfigBackTarget, formatFeatureVersion } from "@/pages/Plugins/_shared/featureConfig";
+import { CollapsibleUsageContent } from "./_shared/CollapsibleUsageContent";
 import { featureRuntimeText, featureSwitchText } from "./_shared/featureStatus";
 
 function isConfigSchema(schema: unknown): schema is ConfigSchema {
@@ -488,30 +495,32 @@ export function GenericPluginConfigPage() {
               </div>
             </div>
           ) : (
-            <div className="space-y-3 rounded-md border bg-muted/20 p-3 text-xs text-muted-foreground">
-              <div className="whitespace-pre-wrap leading-relaxed text-foreground">
-                {usageGuide.customText}
-              </div>
-              {usageGuide.commandExamples.length > 0 ? (
-                <div>
-                  <div className="mb-1 font-medium text-foreground">插件声明的指令参考</div>
-                  <div className="space-y-1">
-                    {usageGuide.commandExamples.map((item) => (
-                      <div key={item} className="rounded border bg-background px-2 py-1 font-mono text-[11px] text-foreground">
-                        {item}
-                      </div>
-                    ))}
-                  </div>
+            <CollapsibleUsageContent resetKey={`${featureKey}:${usageGuide.customText}`}>
+              <div className="space-y-3 rounded-md border bg-muted/20 p-3 text-xs text-muted-foreground">
+                <div className="whitespace-pre-wrap leading-relaxed text-foreground">
+                  {usageGuide.customText}
                 </div>
-              ) : null}
-              {usageGuide.notes.length > 0 ? (
-                <ul className="list-inside list-disc space-y-1">
-                  {usageGuide.notes.map((item) => (
-                    <li key={item}>{item}</li>
-                  ))}
-                </ul>
-              ) : null}
-            </div>
+                {usageGuide.commandExamples.length > 0 ? (
+                  <div>
+                    <div className="mb-1 font-medium text-foreground">插件声明的指令参考</div>
+                    <div className="space-y-1">
+                      {usageGuide.commandExamples.map((item) => (
+                        <div key={item} className="rounded border bg-background px-2 py-1 font-mono text-[11px] text-foreground">
+                          {item}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
+                {usageGuide.notes.length > 0 ? (
+                  <ul className="list-inside list-disc space-y-1">
+                    {usageGuide.notes.map((item) => (
+                      <li key={item}>{item}</li>
+                    ))}
+                  </ul>
+                ) : null}
+              </div>
+            </CollapsibleUsageContent>
           )}
         </CardContent>
       </Card>

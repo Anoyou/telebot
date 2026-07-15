@@ -10,26 +10,30 @@ from .settings import settings
 
 # 全局共享实例（按 use case 复用连接池）
 _pool: redis_async.ConnectionPool | None = None
+_POOL_WAIT_TIMEOUT_SECONDS = 5.0
 
 
 def _max_connections() -> int:
     """主进程 vs worker 子进程使用不同上限。
 
-    Worker 子进程的 IPC + RPUSH 通常只占用 1-2 条连接，没必要按主进程
-    16 条预留；多账号场景能显著少分配 socket / fd。
+    Worker 常驻命令与全局 Pub/Sub 会固定占用 2 条连接，RPC、周期任务和
+    消息插件还会并发访问 Redis。保留 15 条连接可避免正常突发流量耗尽池子。
     """
     if os.environ.get("TELEBOT_WORKER_PROC") == "1":
-        return max(2, int(settings.redis_max_connections_worker or 4))
+        return max(15, int(settings.redis_max_connections_worker or 15))
     return max(4, int(settings.redis_max_connections or 16))
 
 
 def get_pool() -> redis_async.ConnectionPool:
     global _pool
     if _pool is None:
-        _pool = redis_async.ConnectionPool.from_url(
+        # 普通 ConnectionPool 在短时并发达到上限时会立即抛 MaxConnectionsError。
+        # 阻塞池允许请求短暂等待空闲连接，同时用超时避免 Redis 故障时无限挂起。
+        _pool = redis_async.BlockingConnectionPool.from_url(
             settings.redis_url,
             decode_responses=True,
             max_connections=_max_connections(),
+            timeout=_POOL_WAIT_TIMEOUT_SECONDS,
         )
     return _pool
 
