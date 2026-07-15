@@ -22,6 +22,11 @@
 
 暂无已记录变更。
 
+## [0.60.2] — 2026-07-15 · patch（补丁版本） · 回复锚点提示格式修复
+
+### Fixed
+- UserBot 找不到用户近期发言时，自定义 `reply_anchor_missing_text` 会沿用 action 的 `parse_mode`，允许插件在 HTML 提示中提供可点击复制的命令，同时保持纯文本 action 的原有行为。
+
 ## [0.60.1] — 2026-07-15 · patch（补丁版本） · Webhook 开发快速上手
 
 ### Added

@@ -116,7 +116,12 @@ async def execute_userbot_interaction_action(
         if reply_to is None:
             text = reply_anchor_missing_text(payload, reply_to_user_id)
             if text and not bool(payload.get("suppress_reply_anchor_missing_notice")):
-                await client.send_message(chat_id, text, reply_to=None, parse_mode=None)
+                await client.send_message(
+                    chat_id,
+                    text,
+                    reply_to=None,
+                    parse_mode=telethon_parse_mode(parse_mode_of(payload)),
+                )
             raise ValueError(f"找不到用户 {reply_to_user_id} 在当前群的近期消息，无法定位发奖回复目标")
 
     if action_type in {"send_message", "payout"}:

@@ -4069,7 +4069,12 @@ async def _send_reply_anchor_missing_notice(
     ):
         return
     try:
-        await state.client.send_message(target_chat_id, text, reply_to=None, parse_mode=None)
+        await state.client.send_message(
+            target_chat_id,
+            text,
+            reply_to=None,
+            parse_mode=_telethon_parse_mode(_action_parse_mode(action)),
+        )
     except Exception:  # noqa: BLE001
         log.debug(
             "reply anchor missing notice send failed account=%s chat=%s user=%s",

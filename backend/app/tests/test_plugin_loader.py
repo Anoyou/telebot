@@ -2710,8 +2710,9 @@ async def test_userbot_payout_action_sends_notice_when_reply_anchor_missing(monk
             {
                 "type": "payout",
                 "amount": 12,
+                "parse_mode": "html",
                 "reply_to_user_id": 12345,
-                "reply_anchor_missing_text": "没有找到 {user_id} 的近期发言，无法发奖。",
+                "reply_anchor_missing_text": "没有找到 {user_id} 的近期发言。<code>/airp list</code>",
             }
         ],
         redis=state.redis,
@@ -2720,9 +2721,9 @@ async def test_userbot_payout_action_sends_notice_when_reply_anchor_missing(monk
     assert failed is True
     state.client.send_message.assert_awaited_once_with(
         -100456,
-        "没有找到 12345 的近期发言，无法发奖。",
+        "没有找到 12345 的近期发言。<code>/airp list</code>",
         reply_to=None,
-        parse_mode=None,
+        parse_mode="html",
     )
     assert record_action.await_args.args[2] == loader_mod.TRACE_STATUS_FAILED
     assert record_action.await_args.kwargs["error_code"] == "reply_anchor_missing"

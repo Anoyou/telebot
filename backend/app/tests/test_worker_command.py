@@ -581,9 +581,10 @@ async def test_run_interaction_action_command_reports_reply_anchor_diagnostics()
         "action_type": "payout",
         "chat_id": -100333,
         "amount": 25,
+        "parse_mode": "html",
         "reply_to_user_id": 111,
         "reply_to_search_limit": 20,
-        "reply_anchor_missing_text": "没有找到 {user_id} 的近期发言，无法发奖。",
+        "reply_anchor_missing_text": "没有找到 {user_id} 的近期发言。<code>/airp list</code>",
     }
 
     client = _Client()
@@ -614,9 +615,9 @@ async def test_run_interaction_action_command_reports_reply_anchor_diagnostics()
     assert client.sent == [
         {
             "chat_id": -100333,
-            "text": "没有找到 111 的近期发言，无法发奖。",
+            "text": "没有找到 111 的近期发言。<code>/airp list</code>",
             "reply_to": None,
-            "parse_mode": None,
+            "parse_mode": "html",
         }
     ]
 

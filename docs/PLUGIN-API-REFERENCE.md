@@ -754,7 +754,7 @@ return [
 ]
 ```
 
-平台会用账号的 userbot 在当前群搜索该用户最近一条消息，找到后把 `+88` 回复到那条消息。若插件已经有明确的 `reply_to_message_id`，平台优先使用它；若只给了 `settlement.winner_user_id` 而没写 `reply_to_user_id`，平台也会尝试用赢家 user_id 作为回复锚点。找不到近期消息时，本次 `userbot_reply` 会失败并记录 action 错误，避免把发奖消息误发成普通群消息；平台默认会在群里提示 `未找到对应用户（用户 ID）的近期消息。`，插件可通过 `reply_anchor_missing_text` 自定义失败提示，提示文案支持 `{user_id}` 占位符。
+平台会用账号的 userbot 在当前群搜索该用户最近一条消息，找到后把 `+88` 回复到那条消息。若插件已经有明确的 `reply_to_message_id`，平台优先使用它；若只给了 `settlement.winner_user_id` 而没写 `reply_to_user_id`，平台也会尝试用赢家 user_id 作为回复锚点。找不到近期消息时，本次 `userbot_reply` 会失败并记录 action 错误，避免把发奖消息误发成普通群消息；平台默认会在群里提示 `未找到对应用户（用户 ID）的近期消息。`，插件可通过 `reply_anchor_missing_text` 自定义失败提示，提示文案支持 `{user_id}` 占位符，并沿用当前 action 的 `parse_mode`。例如在 HTML 模式中使用 `<code>/command</code>`，Telegram 会将命令显示为可点击复制的代码文本。
 
 更推荐的新写法是直接返回 `payout`：
 
