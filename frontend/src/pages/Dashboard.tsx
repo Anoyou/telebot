@@ -9,6 +9,7 @@ import {
   Cpu,
   LayoutDashboard,
   Plus,
+  RefreshCw,
   Sparkles,
   type LucideIcon,
   Users,
@@ -26,7 +27,6 @@ import {
   MeterBar,
   SectionHeader,
   SignalPill,
-  StatusSummaryPanel,
   ToneRailCard,
   type VisualTone,
   toneClasses,
@@ -45,7 +45,7 @@ import {
   DialogTrigger,
 } from "@/components/ui/dialog";
 import { AccountSummaryCard } from "@/components/AccountSummaryCard";
-import { PageShell } from "@/components/layout/PageScaffold";
+import { PageHeader, PageShell } from "@/components/layout/PageScaffold";
 import { Spinner } from "@/components/ui/misc";
 import { listAccounts } from "@/api/accounts";
 import { listLLMProviders } from "@/api/commands";
@@ -87,16 +87,18 @@ export function Dashboard() {
   const readyProviders = providers.filter(
     (provider) => provider.has_api_key || provider.provider === "ollama",
   ).length;
-  const workerValue = accountsQ.isLoading ? "-" : `${activeAccounts}/${accounts.length}`;
-  const providerValue = providersQ.isLoading ? "-" : `${readyProviders}/${providers.length}`;
+  const workerValue = accountsQ.isError ? "读取失败" : accountsQ.isLoading ? "-" : `${activeAccounts}/${accounts.length}`;
+  const providerValue = providersQ.isError ? "读取失败" : providersQ.isLoading ? "-" : `${readyProviders}/${providers.length}`;
   const logValue = resourceQ.data
     ? `${resourceQ.data.logs.last_5m_total}`
+    : resourceQ.isError
+      ? "读取失败"
     : resourceQ.isLoading
       ? "-"
-      : "0";
+      : "等待采样";
 
   return (
-    <PageShell className="pb-24 md:space-y-6">
+    <PageShell className="md:space-y-6">
       <DashboardHero
         activeAccounts={activeAccounts}
         totalAccounts={accounts.length}
@@ -106,14 +108,36 @@ export function Dashboard() {
         providerValue={providerValue}
         accountsLoading={accountsQ.isLoading}
         providersLoading={providersQ.isLoading}
+        accountsError={accountsQ.isError}
+        providersError={providersQ.isError}
         logErrorCount={resourceQ.data?.logs.last_5m_error ?? 0}
         logWarnCount={resourceQ.data?.logs.last_5m_warn ?? 0}
         logsLoading={resourceQ.isLoading}
-        sampledAt={resourceQ.data?.host.sampled_at}
-        uptimeSeconds={resourceQ.data?.host.uptime_seconds}
+        logsError={resourceQ.isError}
         guideActive={guideActive}
         onGuideToggle={() => setGuideActive(!guideActive)}
       />
+
+      {accountsQ.isError || providersQ.isError || resourceQ.isError ? (
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border px-4 py-3 text-sm alert-danger">
+          <span>
+            概览数据读取失败：
+            {[
+              accountsQ.isError ? "账号" : null,
+              providersQ.isError ? "模型提供商" : null,
+              resourceQ.isError ? "资源与日志" : null,
+            ].filter(Boolean).join("、")}
+          </span>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => void Promise.all([accountsQ.refetch(), providersQ.refetch(), resourceQ.refetch()])}
+          >
+            <RefreshCw className="mr-1.5 h-4 w-4" />
+            重试
+          </Button>
+        </div>
+      ) : null}
 
       {guideActive ? (
         <GuidePanel
@@ -124,12 +148,13 @@ export function Dashboard() {
         />
       ) : null}
 
-      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+      <div className="grid grid-cols-2 gap-3 md:gap-4 xl:grid-cols-4">
         <AccountWorkerTile
           value={workerValue}
-          tone={overviewTone(activeAccounts, accounts.length, accountsQ.isLoading)}
+          tone={accountsQ.isError ? "danger" : overviewTone(activeAccounts, accounts.length, accountsQ.isLoading)}
           accounts={accounts}
           isLoading={accountsQ.isLoading}
+          error={accountsQ.error}
           open={accountsOpen}
           onOpenChange={(open) => {
             const next = new URLSearchParams(searchParams);
@@ -137,13 +162,15 @@ export function Dashboard() {
             else next.delete("accounts");
             setSearchParams(next, { replace: true });
           }}
+          railTone="primary"
         />
         <OverviewTile
           icon={Sparkles}
           title="AI"
           value={providerValue}
-          description="可调用模型 / 已配置模型"
-          tone={overviewTone(readyProviders, providers.length, providersQ.isLoading)}
+          description={providersQ.isError ? "模型提供商读取失败，点击后重试" : "可调用模型 / 已配置模型"}
+          tone={providersQ.isError ? "danger" : overviewTone(readyProviders, providers.length, providersQ.isLoading)}
+          railTone="info"
           to="/ai?tab=providers"
         />
         <OverviewTile
@@ -152,14 +179,16 @@ export function Dashboard() {
           value="指令与插件"
           description="管理指令和自动化"
           tone="primary"
+          railTone="warn"
           to="/plugins"
         />
         <OverviewTile
           icon={Activity}
           title="5 分钟日志"
           value={logValue}
-          description={`错误 ${resourceQ.data?.logs.last_5m_error ?? 0} / 警告 ${resourceQ.data?.logs.last_5m_warn ?? 0}`}
-          tone={logTone(resourceQ.data)}
+          description={resourceQ.isError ? "日志统计读取失败，点击后重试" : `错误 ${resourceQ.data?.logs.last_5m_error ?? 0} / 警告 ${resourceQ.data?.logs.last_5m_warn ?? 0}`}
+          tone={resourceQ.isError ? "danger" : logTone(resourceQ.data)}
+          railTone="success"
           to="/logs"
         />
       </div>
@@ -184,11 +213,12 @@ function DashboardHero({
   providerValue,
   accountsLoading,
   providersLoading,
+  accountsError,
+  providersError,
   logErrorCount,
   logWarnCount,
   logsLoading,
-  sampledAt,
-  uptimeSeconds,
+  logsError,
   guideActive,
   onGuideToggle,
 }: {
@@ -200,21 +230,20 @@ function DashboardHero({
   providerValue: string;
   accountsLoading: boolean;
   providersLoading: boolean;
+  accountsError: boolean;
+  providersError: boolean;
   logErrorCount: number;
   logWarnCount: number;
   logsLoading: boolean;
-  sampledAt?: number | null;
-  uptimeSeconds?: number | null;
+  logsError: boolean;
   guideActive: boolean;
   onGuideToggle: () => void;
 }) {
-  const sampledLabel = sampledAt
-    ? new Date(sampledAt * 1000).toLocaleTimeString()
-    : "等待采样";
-  const uptimeLabel = formatUptime(uptimeSeconds);
-  const accountTone = overviewTone(activeAccounts, totalAccounts, accountsLoading);
-  const providerTone = overviewTone(readyProviders, totalProviders, providersLoading);
-  const logStatusTone: VisualTone = logsLoading
+  const accountTone = accountsError ? "danger" : overviewTone(activeAccounts, totalAccounts, accountsLoading);
+  const providerTone = providersError ? "danger" : overviewTone(readyProviders, totalProviders, providersLoading);
+  const logStatusTone: VisualTone = logsError
+    ? "danger"
+    : logsLoading
     ? "neutral"
     : logErrorCount > 0
       ? "danger"
@@ -223,7 +252,7 @@ function DashboardHero({
         : "success";
 
   return (
-    <StatusSummaryPanel
+    <PageHeader
       icon={LayoutDashboard}
       title="概览"
       description="集中查看 TelePilot 的账号、插件、AI 和资源运行情况；优先暴露需要处理的信号。"
@@ -234,21 +263,9 @@ function DashboardHero({
           <SignalPill
             tone={logStatusTone}
             label="日志信号"
-            value={logsLoading ? "采样中" : `${logErrorCount} 错误 / ${logWarnCount} 警告`}
+            value={logsError ? "读取失败" : logsLoading ? "采样中" : `${logErrorCount} 错误 / ${logWarnCount} 警告`}
           />
         </>
-      }
-      aside={
-        sampledLabel ? (
-          <div className="rounded-lg border border-border/70 bg-background/80 p-3 shadow-sm">
-            <div className="text-xs font-medium text-muted-foreground">资源采样</div>
-            <div className="mt-1 text-lg font-semibold tracking-tight">{sampledLabel}</div>
-            <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-muted-foreground">
-              <span>自动每 15 秒刷新</span>
-              {uptimeLabel ? <span>已正常运行 {uptimeLabel}</span> : null}
-            </div>
-          </div>
-        ) : null
       }
       actions={
         <>
@@ -277,15 +294,19 @@ function AccountWorkerTile({
   tone,
   accounts,
   isLoading,
+  error,
   open,
   onOpenChange,
+  railTone,
 }: {
   value: string;
   tone: VisualTone;
   accounts: Awaited<ReturnType<typeof listAccounts>>;
   isLoading: boolean;
+  error: unknown;
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  railTone?: VisualTone;
 }) {
   const compactAccounts = useCompactOverlay();
   const singleAccount = accounts.length <= 1;
@@ -297,56 +318,43 @@ function AccountWorkerTile({
         value={value}
         description="运行中 / 总账号，点击查看全部账号"
         tone={tone}
+        railTone={railTone}
       />
     </button>
   );
 
-  if (compactAccounts) {
-    return (
-      <Dialog open={open} onOpenChange={onOpenChange}>
-        <DialogTrigger asChild>{trigger}</DialogTrigger>
-        <DialogContent className="bottom-0 top-auto max-h-[86dvh] w-full translate-y-0 gap-0 overflow-hidden rounded-b-none border-border/80 p-0 shadow-2xl sm:bottom-auto sm:top-[50%] sm:max-w-lg sm:translate-y-[-50%] sm:rounded-lg">
-          <AccountWorkerPanel
-            accounts={accounts}
-            isLoading={isLoading}
-            compact
-            className="max-h-[calc(86dvh-5rem)] overflow-y-auto"
-          />
-        </DialogContent>
-      </Dialog>
-    );
-  }
-
   return (
-    <DropdownMenu open={open} onOpenChange={onOpenChange}>
-      <DropdownMenuTrigger asChild>
-        {trigger}
-      </DropdownMenuTrigger>
-      <DropdownMenuContent
-        align="center"
-        collisionPadding={12}
-        sideOffset={8}
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogTrigger asChild>{trigger}</DialogTrigger>
+      <DialogContent
         className={
           singleAccount
-            ? "max-h-[min(72vh,42rem)] w-[min(30rem,calc(100vw-1rem))] border-primary/45 bg-card p-0 shadow-2xl shadow-primary/10 ring-1 ring-primary/35 data-[state=open]:animate-none sm:w-[min(30rem,calc(100vw-2rem))]"
-            : "max-h-[min(72vh,42rem)] w-[min(54rem,calc(100vw-1rem))] border-primary/45 bg-card p-0 shadow-2xl shadow-primary/10 ring-1 ring-primary/35 data-[state=open]:animate-none sm:w-[min(54rem,calc(100vw-2rem))]"
+            ? "dialog-center siri-glow-soft w-[calc(100vw-1.5rem)] max-w-[30rem] gap-0 overflow-hidden rounded-2xl border-primary/45 bg-card p-0 shadow-2xl shadow-primary/10 ring-1 ring-primary/35"
+            : "dialog-center siri-glow-soft w-[calc(100vw-1.5rem)] max-w-[54rem] gap-0 overflow-hidden rounded-2xl border-primary/45 bg-card p-0 shadow-2xl shadow-primary/10 ring-1 ring-primary/35"
         }
-        style={{ overflowY: "auto" }}
       >
-        <AccountWorkerPanel accounts={accounts} isLoading={isLoading} compact={false} />
-      </DropdownMenuContent>
-    </DropdownMenu>
+        <AccountWorkerPanel
+          accounts={accounts}
+          isLoading={isLoading}
+          error={error}
+          compact={compactAccounts}
+          className="max-h-[calc(min(82dvh,42rem)-5rem)] overflow-y-auto"
+        />
+      </DialogContent>
+    </Dialog>
   );
 }
 
 function AccountWorkerPanel({
   accounts,
   isLoading,
+  error,
   compact,
   className,
 }: {
   accounts: Awaited<ReturnType<typeof listAccounts>>;
   isLoading: boolean;
+  error: unknown;
   compact: boolean;
   className?: string;
 }) {
@@ -373,6 +381,10 @@ function AccountWorkerPanel({
         {isLoading ? (
           <div className="flex h-36 items-center justify-center">
             <Spinner className="text-primary" />
+          </div>
+        ) : error ? (
+          <div className="rounded-lg border px-3 py-3 text-sm alert-danger">
+            账号列表读取失败：{(error as Error)?.message || "未知错误"}
           </div>
         ) : accounts.length === 0 ? (
           <div className="rounded-xl border border-dashed p-8 text-center text-sm text-muted-foreground">
@@ -445,6 +457,7 @@ function OverviewTile({
   to,
   onClick,
   asButton = false,
+  railTone,
 }: {
   icon: LucideIcon;
   title: string;
@@ -454,9 +467,10 @@ function OverviewTile({
   to?: string;
   onClick?: () => void;
   asButton?: boolean;
+  railTone?: VisualTone;
 }) {
   const content = (
-    <TileCard icon={Icon} title={title} value={value} description={description} tone={tone} />
+    <TileCard icon={Icon} title={title} value={value} description={description} tone={tone} railTone={railTone} />
   );
 
   if (asButton) {
@@ -567,12 +581,14 @@ function TileCard({
   value,
   description,
   tone = "neutral",
+  railTone,
 }: {
   icon: LucideIcon;
   title: string;
   value: string;
   description: string;
   tone?: VisualTone;
+  railTone?: VisualTone;
 }) {
   return (
     <ToneRailCard
@@ -581,6 +597,7 @@ function TileCard({
       value={value}
       description={description}
       tone={tone}
+      railTone={railTone}
     />
   );
 }
@@ -603,7 +620,7 @@ function ResourceUsageCard({
           description="上方是 TelePilot 应用占用；下方是宿主机/服务器整体资源。"
           meta={data?.host.sampled_at ? (
             <span className="shrink-0 text-xs text-muted-foreground">
-              {new Date(data.host.sampled_at * 1000).toLocaleTimeString()}
+              自动每 15 秒刷新
             </span>
           ) : null}
         />
@@ -619,6 +636,7 @@ function ResourceUsageCard({
           </div>
         ) : (
           <>
+            <ResourceSamplingPanel data={data} />
             <div className="grid gap-3 sm:grid-cols-2">
               <MetricCard
                 icon={Cpu}
@@ -664,6 +682,40 @@ function ResourceUsageCard({
   );
 }
 
+function ResourceSamplingPanel({ data }: { data: ResourceDashboard }) {
+  const sampledLabel = data.host.sampled_at
+    ? new Date(data.host.sampled_at * 1000).toLocaleTimeString()
+    : "等待采样";
+  const hostUptimeLabel = formatUptime(data.host.uptime_seconds) ?? "-";
+  const appUptimeLabel = formatUptime(data.app_uptime_seconds) ?? "-";
+
+  return (
+    <div className="grid gap-3 md:grid-cols-3">
+      <ResourceMeta label="资源采样" value={sampledLabel} hint="自动每 15 秒刷新" />
+      <ResourceMeta label="宿主机运行时间" value={hostUptimeLabel} hint="服务器开机后累计" />
+      <ResourceMeta label="项目运行时间" value={appUptimeLabel} hint="当前 TelePilot 后端进程" />
+    </div>
+  );
+}
+
+function ResourceMeta({
+  label,
+  value,
+  hint,
+}: {
+  label: string;
+  value: string;
+  hint: string;
+}) {
+  return (
+    <div className="rounded-xl border border-border/70 bg-muted/35 p-3">
+      <div className="text-xs font-medium text-muted-foreground">{label}</div>
+      <div className="mt-1 text-lg font-semibold tracking-tight">{value}</div>
+      <div className="mt-1 text-[11px] leading-4 text-muted-foreground">{hint}</div>
+    </div>
+  );
+}
+
 function MetricCard({
   icon: Icon,
   label,
@@ -671,6 +723,7 @@ function MetricCard({
   hint,
   meterValue,
   tone = "neutral",
+  action,
 }: {
   icon: LucideIcon;
   label: string;
@@ -678,13 +731,17 @@ function MetricCard({
   hint: string;
   meterValue?: number | null;
   tone?: VisualTone;
+  action?: ReactNode;
 }) {
   const toneClass = toneClasses(tone);
   return (
     <div className="rounded-xl border border-border/70 bg-muted/35 p-4">
       <div className="mb-3 flex items-center justify-between gap-3">
         <p className="text-xs font-medium uppercase text-muted-foreground">{label}</p>
-        <Icon className={cn("h-4 w-4", toneClass.icon)} />
+        <div className="flex shrink-0 items-center gap-2">
+          {action}
+          <Icon className={cn("h-4 w-4", toneClass.icon)} />
+        </div>
       </div>
       <p className="text-2xl font-bold tracking-tight">{value}</p>
       <MeterBar value={meterValue} tone={tone} className="mt-3" />
@@ -705,18 +762,21 @@ function ProcessMemoryCard({ data }: { data: ResourceDashboard }) {
 
   return (
     <DropdownMenu modal={false}>
-      <DropdownMenuTrigger asChild>
-        <button type="button" className="block w-full min-w-0 text-left">
-          <MetricCard
-            icon={Activity}
-            label="应用总内存"
-            value={formatMb(memoryMb)}
-            hint={projectMemoryHint(memoryMb, totalMb, data)}
-            meterValue={memoryPercent}
-            tone={resourceTone(memoryPercent)}
-          />
-        </button>
-      </DropdownMenuTrigger>
+      <MetricCard
+        icon={Activity}
+        label="应用总内存"
+        value={formatMb(memoryMb)}
+        hint={projectMemoryHint(memoryMb, totalMb, data)}
+        meterValue={memoryPercent}
+        tone={resourceTone(memoryPercent)}
+        action={(
+          <DropdownMenuTrigger asChild>
+            <Button type="button" variant="outline" size="sm" className="h-7 px-2 text-xs">
+              详情
+            </Button>
+          </DropdownMenuTrigger>
+        )}
+      />
       <DropdownMenuContent
         align={compactOverlay ? "center" : "end"}
         collisionPadding={12}

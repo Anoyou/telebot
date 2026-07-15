@@ -7,27 +7,46 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
 
     <!-- PWA 主题色（Android Chrome 顶栏 + iOS Safari 状态栏底色） -->
-    <meta name="theme-color" content="#2563eb" />
-    <meta name="color-scheme" content="dark light" />
+    <meta name="theme-color" content="#F2F0EC" />
+    <meta name="color-scheme" content="light dark" />
 
     <!-- iOS 全屏 PWA：从主屏幕启动时隐藏 Safari UI -->
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-title" content="TelePilot" />
-    <!-- iOS 状态栏：black-translucent 让内容延伸到刘海/灵动岛区域，配合 viewport-fit=cover 使用 -->
-    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <!-- iOS 状态栏保持 default，让系统按当前页面明暗选择图标颜色。
+         Safari 26 不再可靠使用 theme-color 填充主屏 Web App 的状态栏，而是在首帧取样
+         页面 canvas/body；因此下面的 head 内联样式必须在 body 创建前先铺好主题底色。 -->
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
     <meta name="format-detection" content="telephone=no" />
 
-    <script>
+    <style id="telepilot-chrome-bootstrap">
+      html,
+      body,
+      #root {
+        margin: 0;
+        min-height: 100%;
+        background-color: var(--telepilot-app-chrome, #F2F0EC);
+      }
+    </style>
+
+    <script data-telepilot-chrome-bootstrap>
       (function () {
         try {
           var theme = localStorage.getItem("telepilot-theme") || localStorage.getItem("telebot-theme") || "system";
           var prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
           var dark = theme === "dark" || (theme === "system" && prefersDark);
+          var chrome = dark ? "#1C1C1E" : "#F2F0EC";
           document.documentElement.classList.toggle("dark", dark);
           document.documentElement.style.colorScheme = dark ? "dark" : "light";
+          document.documentElement.style.setProperty("--telepilot-app-chrome", chrome);
+          document.documentElement.style.backgroundColor = chrome;
           var meta = document.querySelector('meta[name="theme-color"]');
-          if (meta) meta.setAttribute("content", dark ? "#0b1120" : "#2563eb");
+          if (meta) meta.setAttribute("content", chrome);
+          var colorScheme = document.querySelector('meta[name="color-scheme"]');
+          if (colorScheme) colorScheme.setAttribute("content", dark ? "dark" : "light");
+          // iOS 26 的主屏 Web App 会在 React 启动前取样 body/canvas；CSS 变量由 html
+          // 继承到稍后创建的 body，使状态栏和应用顶栏从第一帧就是同一块实色背景。
         } catch (e) {}
       })();
     </script>

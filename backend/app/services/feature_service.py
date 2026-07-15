@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import logging
+import shutil
 from collections.abc import Iterable
 from copy import deepcopy
 from typing import Any
@@ -38,6 +39,8 @@ from ..db.models.feature import (
 )
 from ..db.models.plugin import InstalledPlugin
 from ..db.models.plugin_global_config import PluginGlobalConfig
+from ..db.models.rule import Rule
+from ..db.models.system import SystemSetting
 from ..redis_client import get_redis
 from ..schemas.feature import (
     ConfigValidationError,
@@ -45,8 +48,84 @@ from ..schemas.feature import (
     FeatureInfo,
 )
 from ..worker.ipc import CMD_RELOAD_CONFIG, publish_cmd_with_ack
+from .account_bot_service import normalize_interaction_entry_manifest
 
 log = logging.getLogger(__name__)
+_OPTIONAL_OFFICIAL_PLUGIN_KEYS: frozenset[str] = frozenset(
+    {
+        "auto_reply",
+        "autorepeat",
+        "chatgpt_image",
+        "codex_image",
+        "game24",
+        "math10",
+    }
+)
+
+
+def _feature_manifest_from_installed_plugin(
+    installed_plugin: InstalledPlugin,
+) -> dict[str, Any] | None:
+    """从已安装插件记录生成 feature 索引 manifest。
+
+    ``installed_plugin`` 是插件安装与更新后的权威元数据源；``feature`` 表只是
+    账号矩阵和旧配置页使用的索引，不能反过来覆盖已安装插件的版本或契约。
+    """
+
+    manifest_json = installed_plugin.manifest_json if isinstance(installed_plugin.manifest_json, dict) else {}
+    manifest: dict[str, Any] = {}
+    cfg_schema = manifest_json.get("config_schema")
+    if isinstance(cfg_schema, dict):
+        manifest["config_schema"] = cfg_schema
+    config_actions = manifest_json.get("config_actions")
+    if isinstance(config_actions, list):
+        manifest["config_actions"] = [item for item in config_actions if isinstance(item, dict)]
+    agent_tools = manifest_json.get("agent_tools")
+    if isinstance(agent_tools, list):
+        manifest["agent_tools"] = [item for item in agent_tools if isinstance(item, dict)]
+    usage = str(manifest_json.get("usage") or "").strip()
+    if usage:
+        manifest["usage"] = usage
+    category = str(manifest_json.get("category") or "").strip()
+    if category:
+        manifest["category"] = category
+    interaction_profile = str(manifest_json.get("interaction_profile") or "").strip()
+    if interaction_profile:
+        manifest["interaction_profile"] = interaction_profile
+    entries = manifest_json.get("interaction_entries")
+    if isinstance(entries, list):
+        manifest["interaction_entries"] = [item for item in entries if isinstance(item, dict)]
+    subscriptions = manifest_json.get("event_subscriptions")
+    if isinstance(subscriptions, list):
+        manifest["event_subscriptions"] = [item for item in subscriptions if isinstance(item, dict)]
+    capabilities = manifest_json.get("capabilities")
+    if isinstance(capabilities, dict):
+        manifest["capabilities"] = dict(capabilities)
+    permissions = manifest_json.get("permissions")
+    if isinstance(permissions, list):
+        manifest["permissions"] = list(permissions)
+    if manifest_json.get("x-experimental") or manifest_json.get("experimental"):
+        manifest["x-experimental"] = True
+    for version_key in ("min_telepilot_version", "min_telebot_version"):
+        version_value = str(manifest_json.get(version_key) or "").strip()
+        if version_value:
+            manifest[version_key] = version_value
+    source_label = getattr(installed_plugin, "source_label", None) or getattr(installed_plugin, "source", None)
+    if source_label:
+        manifest["source_label"] = str(source_label)
+    return manifest or None
+
+
+def _merge_feature_manifest_preserving_global_config(
+    current: dict[str, Any] | None,
+    next_manifest: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """刷新索引 manifest，同时保留一轮旧版 global_config 兼容字段。"""
+
+    if current and "global_config" in current:
+        next_manifest = dict(next_manifest or {})
+        next_manifest["global_config"] = current["global_config"]
+    return next_manifest
 
 
 # ─────────────────────────────────────────────────────
@@ -67,26 +146,40 @@ async def seed_builtin_features(db: AsyncSession) -> int:
 
     rows = (await db.execute(select(Feature))).scalars().all()
     existing: dict[str, Feature] = {f.key: f for f in rows}
+    migrated_count, migrated_changed = await _migrate_optional_builtin_features(db, existing)
     added = 0
-    changed_existing = False
+    changed_existing = migrated_changed
     for key, name in BUILTIN_FEATURES.items():
         # 尝试从 manifest 读取 config_schema 和 version
         cfg_schema = None
         ver = None
         experimental = False
+        usage = None
         category = "utility"
         interaction_profile = None
         interaction_entries: list[dict[str, Any]] = []
+        event_subscriptions: list[dict[str, Any]] = []
+        capabilities: dict[str, Any] | None = None
         m = BUILTIN_FEATURES.manifest_for(key)
         if m is not None:
             cfg_schema = getattr(m, "config_schema", None)
             ver = getattr(m, "version", None)
             experimental = bool(getattr(m, "experimental", False))
+            usage = str(getattr(m, "usage", None) or "").strip() or None
             category = str(getattr(m, "category", None) or "utility")
             interaction_profile = str(getattr(m, "interaction_profile", None) or "").strip() or None
+            raw_subscriptions = getattr(m, "event_subscriptions", None) or []
+            if isinstance(raw_subscriptions, list):
+                event_subscriptions = [item for item in raw_subscriptions if isinstance(item, dict)]
+            raw_capabilities = getattr(m, "capabilities", None)
+            capabilities = dict(raw_capabilities) if isinstance(raw_capabilities, dict) else None
             raw_entries = getattr(m, "interaction_entries", None) or []
             if isinstance(raw_entries, list):
-                interaction_entries = [item for item in raw_entries if isinstance(item, dict)]
+                interaction_entries = [
+                    entry
+                    for item in raw_entries
+                    if (entry := normalize_interaction_entry_manifest(item)) is not None
+                ]
         if category not in {"interactive", "automation", "utility"}:
             category = "utility"
 
@@ -102,10 +195,25 @@ async def seed_builtin_features(db: AsyncSession) -> int:
             if ver and f.version != ver:
                 f.version = ver
                 changed = True
-            if cfg_schema or experimental or category or interaction_entries or interaction_profile:
+            if (
+                cfg_schema
+                or experimental
+                or usage
+                or category
+                or interaction_entries
+                or event_subscriptions
+                or capabilities
+                or interaction_profile
+            ):
                 manifest = dict(f.manifest or {})
                 if manifest.get("config_schema") != cfg_schema:
                     manifest["config_schema"] = cfg_schema
+                    changed = True
+                if manifest.get("usage") != usage:
+                    if usage:
+                        manifest["usage"] = usage
+                    else:
+                        manifest.pop("usage", None)
                     changed = True
                 if manifest.get("category") != category:
                     manifest["category"] = category
@@ -116,6 +224,12 @@ async def seed_builtin_features(db: AsyncSession) -> int:
                 if manifest.get("interaction_entries") != interaction_entries:
                     manifest["interaction_entries"] = interaction_entries
                     changed = True
+                if manifest.get("event_subscriptions") != event_subscriptions:
+                    manifest["event_subscriptions"] = event_subscriptions
+                    changed = True
+                if manifest.get("capabilities") != capabilities:
+                    manifest["capabilities"] = capabilities
+                    changed = True
                 if manifest.get("x-experimental") != experimental:
                     manifest["x-experimental"] = experimental
                     changed = True
@@ -125,26 +239,186 @@ async def seed_builtin_features(db: AsyncSession) -> int:
                 await db.flush()
             continue
         manifest_data: dict[str, Any] | None = None
-        if cfg_schema or experimental or category or interaction_entries or interaction_profile:
+        if cfg_schema or experimental or usage or category or interaction_entries or event_subscriptions or capabilities or interaction_profile:
             manifest_data = {}
             if cfg_schema:
                 manifest_data["config_schema"] = cfg_schema
+            if usage:
+                manifest_data["usage"] = usage
             manifest_data["category"] = category
             if interaction_profile:
                 manifest_data["interaction_profile"] = interaction_profile
             if interaction_entries:
                 manifest_data["interaction_entries"] = interaction_entries
+            if event_subscriptions:
+                manifest_data["event_subscriptions"] = event_subscriptions
+            if capabilities:
+                manifest_data["capabilities"] = capabilities
             manifest_data["x-experimental"] = experimental
         db.add(Feature(key=key, display_name=name, is_builtin=True, version=ver, manifest=manifest_data))
         added += 1
     installed_added, installed_changed = await _seed_local_installed_features(db, existing)
-    added += installed_added
+    added += migrated_count + installed_added
     changed_existing = changed_existing or installed_changed
     if added:
         await db.commit()
     elif changed_existing:
         await db.commit()
     return added
+
+
+async def _migrate_optional_builtin_features(
+    db: AsyncSession,
+    existing: dict[str, Feature],
+) -> tuple[int, bool]:
+    """把历史 builtin 可选插件收敛成插件库 installed 插件。
+
+    0.35 起这些插件不再作为 builtin 自动出现。若旧数据库里已经有账号开关、
+    规则引用、全局配置或交互规则引用，则自动登记为插件库已安装包，保证旧配置
+    继续可用；若从未使用，则删除旧 feature 行，避免插件中心继续展示。
+    """
+
+    keys = sorted(key for key in _OPTIONAL_OFFICIAL_PLUGIN_KEYS if key in existing)
+    if not keys:
+        return 0, False
+
+    try:
+        from ..db.models.plugin import (
+            PLUGIN_SOURCE_REPO,
+            PLUGIN_TRUST_COMMUNITY,
+        )
+        from . import plugin_repo_service
+        from .remote_plugin_service import upsert_installed_plugin
+    except Exception:  # noqa: BLE001
+        log.warning("加载官方插件迁移工具失败，跳过本轮收敛", exc_info=True)
+        return 0, False
+
+    account_feature_rows = (
+        await db.execute(
+            select(AccountFeature).where(AccountFeature.feature_key.in_(keys))
+        )
+    ).scalars().all()
+    rule_rows = (
+        await db.execute(select(Rule).where(Rule.feature_key.in_(keys)))
+    ).scalars().all()
+    global_config_rows = (
+        await db.execute(
+            select(PluginGlobalConfig).where(PluginGlobalConfig.plugin_key.in_(keys))
+        )
+    ).scalars().all()
+    interaction_settings = (
+        await db.execute(
+            select(SystemSetting).where(SystemSetting.key.like("account_bot_transfer_notice:%"))
+        )
+    ).scalars().all()
+    used_keys = {row.feature_key for row in account_feature_rows}
+    used_keys.update(row.feature_key for row in rule_rows)
+    used_keys.update(row.plugin_key for row in global_config_rows)
+    for row in rule_rows:
+        cfg = row.config if isinstance(row.config, dict) else {}
+        module_key = str(cfg.get("module_key") or "").strip()
+        if module_key in _OPTIONAL_OFFICIAL_PLUGIN_KEYS:
+            used_keys.add(module_key)
+    for setting in interaction_settings:
+        value = setting.value if isinstance(setting.value, dict) else {}
+        module_key = str(value.get("module_key") or "").strip()
+        if module_key in _OPTIONAL_OFFICIAL_PLUGIN_KEYS:
+            used_keys.add(module_key)
+        raw_rules = value.get("rules")
+        if isinstance(raw_rules, list):
+            for item in raw_rules:
+                if not isinstance(item, dict):
+                    continue
+                module_key = str(item.get("module_key") or "").strip()
+                if module_key in _OPTIONAL_OFFICIAL_PLUGIN_KEYS:
+                    used_keys.add(module_key)
+
+    added = 0
+    changed = False
+    for key in keys:
+        feature = existing[key]
+        if key not in used_keys:
+            if bool(feature.is_builtin):
+                await db.delete(feature)
+                existing.pop(key, None)
+                changed = True
+            continue
+        try:
+            official_source = await plugin_repo_service._find_official_plugin_source(key)
+        except Exception:  # noqa: BLE001
+            log.warning("历史 builtin 插件 %s 已被使用，但读取推荐插件源失败", key, exc_info=True)
+            continue
+        if official_source is None:
+            log.warning(
+                "历史 builtin 插件 %s 已被使用，但 Core 已不再随包携带源码；请在安装插件页从推荐插件源安装该插件",
+                key,
+            )
+            continue
+
+        try:
+            plugin_dir = official_source.plugin_dir
+            meta = official_source.meta
+            manifest_json = plugin_repo_service._manifest_json_for_official_source(official_source)
+            feature_manifest = plugin_repo_service._feature_manifest_from_manifest_json(manifest_json)
+            lint_warnings = plugin_repo_service.lint_plugin_metadata_files(plugin_dir)
+        except Exception:  # noqa: BLE001
+            log.warning("迁移历史 builtin 插件 %s 到 official 失败", key, exc_info=True)
+            continue
+
+        if not (plugin_repo_service._plugin_dir(key)).exists():
+            try:
+                target = plugin_repo_service._plugin_dir(key)
+                staging = target.parent / f"{target.name}.installing"
+                if staging.exists():
+                    shutil.rmtree(staging, ignore_errors=True)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copytree(
+                    plugin_dir,
+                    staging,
+                    ignore=shutil.ignore_patterns(".git", ".gitignore", "__pycache__"),
+                )
+                staging.rename(target)
+            except Exception:  # noqa: BLE001
+                log.warning("复制插件库插件 %s 到 installed 失败", key, exc_info=True)
+                continue
+
+        if feature.is_builtin:
+            feature.is_builtin = False
+            changed = True
+        display_name = str(manifest_json.get("display_name") or meta.display_name or key)
+        version = str(manifest_json.get("version") or meta.version)
+        if feature.display_name != display_name:
+            feature.display_name = display_name
+            changed = True
+        if feature.version != version:
+            feature.version = version
+            changed = True
+        if (feature.manifest or {}) != (feature_manifest or {}):
+            feature.manifest = feature_manifest
+            changed = True
+
+        installed = await db.get(InstalledPlugin, key)
+        was_enabled = bool(getattr(installed, "enabled", False)) if installed is not None else bool(
+            any(row.feature_key == key and row.enabled for row in account_feature_rows)
+        )
+        await upsert_installed_plugin(
+            db,
+            key=key,
+            source=PLUGIN_SOURCE_REPO,
+            source_url=official_source.source_url,
+            installed_path=str(plugin_repo_service._plugin_dir(key)),
+            version=version,
+            manifest_json=manifest_json,
+            enabled=was_enabled,
+            signature_ok=None,
+            trust_tier=PLUGIN_TRUST_COMMUNITY,
+            source_label="Plugin Repo",
+            last_install_error=None,
+            lint_warnings=lint_warnings,
+        )
+        added += 1 if installed is None else 0
+        await db.flush()
+    return added, changed
 
 
 async def _seed_local_installed_features(
@@ -157,20 +431,64 @@ async def _seed_local_installed_features(
     loader 的安全策略决定。
     """
 
-    try:
-        from ..settings import settings
-
-        root = settings.plugins_installed_path
-    except Exception:  # noqa: BLE001
-        return 0, False
-    if not root.exists():
-        return 0, False
-
     installed_plugin_rows = (await db.execute(select(InstalledPlugin))).scalars().all()
     installed_plugin_by_key = {str(row.key): row for row in installed_plugin_rows}
 
     added = 0
     changed = False
+    for key, installed_plugin in sorted(installed_plugin_by_key.items()):
+        if not key or "/" in key or "\\" in key:
+            continue
+        installed_source = str(getattr(installed_plugin, "source", "") or "")
+        if installed_source == "builtin":
+            continue
+        manifest_json = installed_plugin.manifest_json if isinstance(installed_plugin.manifest_json, dict) else {}
+        display_name = str(manifest_json.get("display_name") or key)
+        version = str(manifest_json.get("version") or getattr(installed_plugin, "version", "") or "") or None
+        manifest_data = _feature_manifest_from_installed_plugin(installed_plugin)
+
+        if key in existing:
+            row = existing[key]
+            row_changed = False
+            if row.is_builtin:
+                row.is_builtin = False
+                row_changed = True
+            if row.display_name != display_name:
+                row.display_name = display_name
+                row_changed = True
+            if version and row.version != version:
+                row.version = version
+                row_changed = True
+            next_manifest = _merge_feature_manifest_preserving_global_config(row.manifest, manifest_data)
+            if (row.manifest or None) != (next_manifest or None):
+                row.manifest = next_manifest
+                flag_modified(row, "manifest")
+                row_changed = True
+            if row_changed:
+                await db.flush()
+                changed = True
+            continue
+
+        row = Feature(
+            key=key,
+            display_name=display_name,
+            is_builtin=False,
+            version=version,
+            manifest=manifest_data,
+        )
+        db.add(row)
+        existing[key] = row
+        added += 1
+
+    try:
+        from ..settings import settings
+
+        root = settings.plugins_installed_path
+    except Exception:  # noqa: BLE001
+        return added, changed
+    if not root.exists():
+        return added, changed
+
     for plugin_json in sorted(root.glob("*/plugin.json")):
         try:
             meta = json.loads(plugin_json.read_text(encoding="utf-8"))
@@ -182,6 +500,8 @@ async def _seed_local_installed_features(
             continue
         installed_plugin = installed_plugin_by_key.get(key)
         is_orphan = installed_plugin is None
+        if installed_plugin is not None and isinstance(installed_plugin.manifest_json, dict):
+            meta = dict(installed_plugin.manifest_json)
         display_name = str(meta.get("display_name") or key)
         version = str(meta.get("version") or "") or None
         cfg_schema = meta.get("config_schema")
@@ -193,7 +513,15 @@ async def _seed_local_installed_features(
         raw_entries = meta.get("interaction_entries")
         if raw_entries is None and isinstance(cfg_schema, dict):
             raw_entries = cfg_schema.get("x-interaction-entries")
-        interaction_entries = raw_entries if isinstance(raw_entries, list) else []
+        interaction_entries = [
+            entry
+            for item in raw_entries
+            if (entry := normalize_interaction_entry_manifest(item)) is not None
+        ] if isinstance(raw_entries, list) else []
+        raw_subscriptions = meta.get("event_subscriptions")
+        event_subscriptions = [item for item in raw_subscriptions if isinstance(item, dict)] if isinstance(raw_subscriptions, list) else []
+        raw_capabilities = meta.get("capabilities")
+        capabilities = dict(raw_capabilities) if isinstance(raw_capabilities, dict) else None
         tags = meta.get("tags") or []
         experimental = bool(meta.get("experimental")) or "experimental" in tags
         if is_orphan:
@@ -217,9 +545,11 @@ async def _seed_local_installed_features(
         if interaction_profile:
             manifest["interaction_profile"] = interaction_profile
         if interaction_entries:
-            manifest["interaction_entries"] = [
-                item for item in interaction_entries if isinstance(item, dict)
-            ]
+            manifest["interaction_entries"] = interaction_entries
+        if event_subscriptions:
+            manifest["event_subscriptions"] = event_subscriptions
+        if capabilities:
+            manifest["capabilities"] = capabilities
         if experimental:
             manifest["x-experimental"] = True
         if meta.get("permissions"):
@@ -303,6 +633,7 @@ async def set_account_feature(
     config: dict[str, Any] | None = None,
     *,
     notify: bool = True,
+    commit: bool = True,
 ) -> AccountFeature:
     """对 [账号 × feature] 做 upsert。
 
@@ -312,6 +643,7 @@ async def set_account_feature(
     - ``config`` 不为 None 时整体覆盖（便于前端"保存即覆盖"语义）。
 
     完成后视 ``notify`` 决定是否发 IPC 通知 worker reload。
+    ``commit=False`` 时仅 flush，由调用方负责事务边界（复合保存用）。
     """
     af = (
         await db.execute(
@@ -321,25 +653,37 @@ async def set_account_feature(
             )
         )
     ).scalar_one_or_none()
+    from .plugin_config_secrets import encrypt_config_secrets
+
+    feature_row = await db.get(Feature, key)
+    schema = None
+    if feature_row is not None and isinstance(feature_row.manifest, dict):
+        raw_schema = feature_row.manifest.get("config_schema")
+        schema = raw_schema if isinstance(raw_schema, dict) else None
+
     if af is None:
         af = AccountFeature(
             account_id=aid,
             feature_key=key,
             enabled=enabled,
-            config=dict(config or {}),
+            config=encrypt_config_secrets(dict(config or {}), schema=schema),
             state=FEATURE_STATE_DISABLED,
         )
         db.add(af)
     else:
         af.enabled = enabled
         if config is not None:
-            af.config = dict(config)
+            af.config = encrypt_config_secrets(dict(config), schema=schema)
         if not enabled:
             # 立刻把状态置 disabled；激活由 worker 反向写
             af.state = FEATURE_STATE_DISABLED
             af.last_error = None
-    await db.commit()
-    await db.refresh(af)
+    if commit:
+        await db.commit()
+        await db.refresh(af)
+    else:
+        await db.flush()
+        await db.refresh(af)
     if notify:
         await _notify_reload(aid)
     return af
@@ -510,7 +854,10 @@ async def set_plugin_global_config(
             error_msgs = [f"{e.field}: {e.message}" for e in validation.errors]
             raise ValueError(f"Config validation failed: {'; '.join(error_msgs)}")
 
+    from .plugin_config_secrets import encrypt_config_secrets
+
     # 提取 global 字段（level === "global" 的字段）
+    schema = config_schema if isinstance(config_schema, dict) else None
     if config_schema and "properties" in config_schema:
         global_fields = {
             k for k, v in config_schema["properties"].items()
@@ -520,6 +867,7 @@ async def set_plugin_global_config(
     else:
         # 如果没有 level 标记，全部视为 account config
         global_config = {}
+    global_config = encrypt_config_secrets(global_config, schema=schema)
 
     # 写入新表
     row = await db.get(PluginGlobalConfig, plugin_key)
@@ -633,6 +981,35 @@ def validate_config_against_schema(
         )
 
 
+def apply_required_config_defaults(
+    config: dict[str, Any],
+    config_schema: dict[str, Any],
+) -> dict[str, Any]:
+    """补齐当前配置 scope 内带默认值的必填字段。
+
+    插件配置页会用 schema defaults 初始化表单；交互规则页只同步入口额外参数时，
+    可能会提交一个局部 config。这里在服务端补齐 ``command`` 这类有默认值的
+    required 字段，避免把局部保存误判成配置缺失；真正没有 default 的必填项
+    仍然交给 JSON Schema 正常报错。
+    """
+
+    if not isinstance(config_schema, dict):
+        return dict(config)
+    properties = config_schema.get("properties")
+    required = config_schema.get("required")
+    if not isinstance(properties, dict) or not isinstance(required, list):
+        return dict(config)
+
+    out = dict(config)
+    for key in required:
+        if not isinstance(key, str) or key in out:
+            continue
+        field = properties.get(key)
+        if isinstance(field, dict) and "default" in field:
+            out[key] = deepcopy(field["default"])
+    return out
+
+
 def config_schema_for_scope(
     config_schema: dict[str, Any],
     scope: str,
@@ -677,6 +1054,7 @@ def config_schema_for_scope(
 
 
 __all__ = [
+    "apply_required_config_defaults",
     "bulk_set_enabled",
     "config_schema_for_scope",
     "feature_matrix",

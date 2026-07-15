@@ -6,9 +6,9 @@
 // 一条 ,ai 指令该把请求送给哪个 provider；详见 backend/services/llm_router.py
 import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useSearchParams } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { toast } from "sonner";
-import { Plus, Trash2, KeyRound, Edit3, Download, Loader2, CheckCircle2, XCircle, Star, ChevronDown, ChevronRight, Filter, X, Package, Save } from "lucide-react";
+import { Plus, Trash2, KeyRound, Edit3, Download, Loader2, CheckCircle2, XCircle, Star, ChevronDown, ChevronRight, Filter, X, Package, Save, MessageSquare } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { CommandBadge } from "@/components/CommandBadge";
@@ -45,16 +45,21 @@ import {
 import {
   createLLMProvider,
   deleteLLMProvider,
+  detectClientIdentityVersions,
   detectProviderProtocols,
   fetchProviderModelsPreview,
+  getClientIdentityVersions,
   listLLMProviders,
   patchLLMProvider,
   testProviderModel,
+  updateClientIdentityVersions,
 } from "@/api/commands";
 import { listProxies } from "@/api/proxies";
 import { getSystemSettings } from "@/api/system";
-import type { DetectProviderProtocolsResponse, LLMApiFormat, LLMModality, LLMProviderKind, LLMProviderOut, LLMTag, LLMWebSearchApiFormat, ProviderModel, ProtocolProbeResult, ProxyOut } from "@/api/types";
+import type { ClientIdentityVersionDetectItem, ClientIdentityVersionItem, DetectProviderProtocolsResponse, LLMApiFormat, LLMClientIdentityProfile, LLMModality, LLMProtocolProfile, LLMProviderKind, LLMProviderOut, LLMTag, LLMWebSearchApiFormat, ProviderModel, ProtocolProbeResult, ProxyOut } from "@/api/types";
 import { getErrMsg } from "@/lib/api";
+import { cn } from "@/lib/utils";
+import { confirmDiscardChanges, useUnsavedChanges } from "@/lib/unsavedChanges";
 
 // 各 provider 的默认 base_url 提示，仅作 placeholder
 const DEFAULT_BASE_URLS: Record<LLMProviderKind, string> = {
@@ -112,6 +117,57 @@ const WEB_SEARCH_API_FORMAT_OPTIONS: { value: LLMWebSearchApiFormat; label: stri
   },
 ];
 
+// 客户端身份档案选项（与后端 services.llm_identity 对齐）。
+// Desktop 档案暂无可复核证据，标记 disabled，前端不可选。
+const CLIENT_IDENTITY_OPTIONS: {
+  value: LLMClientIdentityProfile;
+  label: string;
+  hint: string;
+  disabled?: boolean;
+}[] = [
+  {
+    value: "auto",
+    label: "自动（推荐）",
+    hint: "按本次实际协议解析：chat_completions→OpenAI SDK / responses→Codex CLI / anthropic_messages→Claude Code。",
+  },
+  {
+    value: "minimal",
+    label: "最小（仅协议必需头）",
+    hint: "不附加任何产品模拟头，仅发送协议必需头。上游不校验客户端身份时使用。",
+  },
+  {
+    value: "openai_sdk",
+    label: "OpenAI SDK",
+    hint: "OpenAI 官方 Python SDK 身份，用于 Chat Completions。",
+  },
+  {
+    value: "codex_cli",
+    label: "Codex CLI",
+    hint: "Codex CLI 身份（originator=codex_cli_rs），用于 Responses。",
+  },
+  {
+    value: "claude_code",
+    label: "Claude Code",
+    hint: "Claude Code 身份（x-app=cli），用于 Anthropic Messages。",
+  },
+  {
+    value: "codex_desktop",
+    label: "Codex Desktop",
+    hint: "Codex Desktop 身份（originator=Codex Desktop），用于 Responses。证据来自本机抓包的 alpha 预发布版，stable 版可能变化。",
+  },
+  {
+    value: "grok_cli",
+    label: "Grok CLI",
+    hint: "Grok CLI 身份（grok-cli UA + x-grok-client-version），用于 Responses；不附加 OAuth、账号或设备字段。",
+  },
+  {
+    value: "claude_desktop",
+    label: "Claude Desktop（暂不可用）",
+    hint: "缺少可复核的请求头证据，暂不可选。",
+    disabled: true,
+  },
+];
+
 // 模态选项 + 中文解释（与后端 ALL_LLM_MODALITIES 对齐）
 const MODALITY_OPTIONS: { value: LLMModality; label: string; hint: string }[] = [
   { value: "text", label: "纯文本（text）", hint: "只支持文本输入输出（绝大多数 LLM）" },
@@ -165,7 +221,10 @@ interface FormState {
   default_model: string;
   // API Format（chat_completions / responses / anthropic_messages）
   api_format: LLMApiFormat;
+  protocol_profile: LLMProtocolProfile;
   web_search_api_format: LLMWebSearchApiFormat;
+  // 客户端身份档案；与 protocol_profile 相互独立
+  client_identity_profile: LLMClientIdentityProfile;
   // 编辑模式下，是否要"清空已有 key"（按钮触发）
   clearKey: boolean;
   // ── 路由元数据 ──
@@ -188,7 +247,9 @@ const EMPTY_FORM: FormState = {
   base_url: "",
   default_model: SUGGESTED_MODELS.openai,
   api_format: "chat_completions",
+  protocol_profile: "standard",
   web_search_api_format: "auto",
+  client_identity_profile: "auto",
   clearKey: false,
   modality: "text",
   tags: ["chat"],
@@ -204,6 +265,7 @@ export function LLMProviders({
   openCreateOnMount?: boolean;
 }) {
   const qc = useQueryClient();
+  const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const didHandleCreateOnMount = useRef(false);
   const providerFilter = searchParams.get("filter");
@@ -224,6 +286,7 @@ export function LLMProviders({
   );
 
   const [editing, setEditing] = useState<FormState | null>(null);
+  const [identityVersionsOpen, setIdentityVersionsOpen] = useState(false);
 
   const visibleProviders = (listQ.data || []).filter((p) => {
     if (!isVisionFilter) return true;
@@ -261,7 +324,11 @@ export function LLMProviders({
         base_url: form.base_url || null,
         default_model: form.default_model.trim(),
         api_format: form.api_format,
+        ...(form.api_format === "anthropic_messages"
+          ? { protocol_profile: form.protocol_profile }
+          : {}),
         web_search_api_format: form.web_search_api_format,
+        client_identity_profile: form.client_identity_profile,
         modality: form.modality,
         tags: form.tags,
         cost_tier: form.cost_tier,
@@ -292,7 +359,11 @@ export function LLMProviders({
         base_url: form.base_url || null,
         default_model: form.default_model.trim(),
         api_format: form.api_format,
+        ...(form.api_format === "anthropic_messages"
+          ? { protocol_profile: form.protocol_profile }
+          : {}),
         web_search_api_format: form.web_search_api_format,
+        client_identity_profile: form.client_identity_profile,
         modality: form.modality,
         tags: form.tags,
         cost_tier: form.cost_tier,
@@ -329,7 +400,12 @@ export function LLMProviders({
       base_url: p.base_url || "",
       default_model: p.default_model,
       api_format: ((p.api_format as LLMApiFormat) || "chat_completions"),
+      protocol_profile:
+        p.api_format === "anthropic_messages" && p.protocol_profile === "claude_code_proxy"
+          ? "claude_code_proxy"
+          : "standard",
       web_search_api_format: ((p.web_search_api_format as LLMWebSearchApiFormat) || "auto"),
+      client_identity_profile: ((p.client_identity_profile as LLMClientIdentityProfile) || "auto"),
       clearKey: false,
       modality: ((p.modality as LLMModality) || "text"),
       tags: ((p.tags as LLMTag[]) || []).filter((t) =>
@@ -351,17 +427,13 @@ export function LLMProviders({
     <div className="space-y-6">
       <Card>
         <CardHeader>
-          <div className="flex items-start justify-between gap-3">
+          <div className="space-y-4">
             <SectionHeader
               icon={Package}
               title="模型提供商"
               description={
                 <>
-                  一行 = 一个模型供应商凭据。配完 API Key + Base URL 后，在编辑里点
-                  <strong>「Fetch 模型列表」</strong>就能自动拉取并可手动选择要启用的模型。<br />
-                  <span className="text-muted-foreground/80">
-                    modality（模态）+ tags（标签）+ cost_tier（成本档）这三项决定「自动路由」模式下该模型提供商所配置的模型是否被选中——详见 AI 帮助里的配置示例。
-                  </span>
+                  每行对应一组供应商凭据。编辑 Provider 可拉取模型列表，并选择参与路由的模型。
                 </>
               }
               meta={
@@ -371,11 +443,30 @@ export function LLMProviders({
                   value={`${visibleProviders.length}`}
                 />
               }
-              className="flex-1"
             />
-            <Button size="sm" onClick={() => setEditing({ ...EMPTY_FORM })}>
-              <Plus className="mr-1 h-4 w-4" /> 新建
-            </Button>
+            <div className="flex flex-wrap items-center gap-2 rounded-md border border-primary/20 bg-primary/[0.04] p-2 shadow-sm">
+              <Button
+                type="button"
+                size="sm"
+                className="min-w-0 flex-1 shadow-sm sm:flex-none"
+                disabled={visibleProviders.length === 0}
+                onClick={() => navigate(`/ai/liveness?provider=${visibleProviders[0].id}`)}
+              >
+                <MessageSquare className="mr-1 h-4 w-4" /> 对话测活
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                variant="secondary"
+                className="min-w-0 flex-1 border border-border/80 shadow-sm sm:flex-none"
+                onClick={() => setIdentityVersionsOpen(true)}
+              >
+                <KeyRound className="mr-1 h-4 w-4" />客户端身份版本
+              </Button>
+              <Button size="sm" className="min-w-0 flex-1 sm:ml-auto sm:flex-none" onClick={() => setEditing({ ...EMPTY_FORM })}>
+                <Plus className="mr-1 h-4 w-4" /> 新建
+              </Button>
+            </div>
           </div>
         </CardHeader>
         <CardContent>
@@ -396,7 +487,9 @@ export function LLMProviders({
               <Spinner className="text-primary" />
             </div>
           ) : visibleProviders.length > 0 ? (
-            <Table>
+            <>
+            <div className="hidden overflow-x-auto md:block">
+            <Table className="min-w-[1080px]">
               <TableHeader>
                 <TableRow>
                   <TableHead>名称</TableHead>
@@ -419,10 +512,15 @@ export function LLMProviders({
                     <TableRow key={p.id}>
                       <TableCell className="font-medium">{p.name}</TableCell>
                       <TableCell className="font-mono text-xs">{p.provider}</TableCell>
-                      <TableCell className="text-xs">
-                        <MetaBadge mono>
-                          {p.api_format || "chat_completions"}
-                        </MetaBadge>
+                      <TableCell className="space-y-1 text-xs">
+                        <MetaBadge mono>{p.api_format || "chat_completions"}</MetaBadge>
+                        {p.api_format === "anthropic_messages" ? (
+                          <div>
+                            <MetaBadge mono tone={p.protocol_profile === "claude_code_proxy" ? "warn" : "neutral"}>
+                              {p.protocol_profile || "standard"}
+                            </MetaBadge>
+                          </div>
+                        ) : null}
                       </TableCell>
                       <TableCell className="text-xs">
                         <MetaBadge mono tone={(p.web_search_api_format || "auto") === "auto" ? "neutral" : "outline"}>
@@ -505,6 +603,24 @@ export function LLMProviders({
                 })}
               </TableBody>
             </Table>
+            </div>
+            <div className="space-y-3 md:hidden">
+              {visibleProviders.map((p) => (
+                <ProviderMobileCard
+                  key={p.id}
+                  provider={p}
+                  proxyById={proxyById}
+                  deletePending={deleteMut.isPending}
+                  onEdit={() => onEdit(p)}
+                  onDelete={() => {
+                    if (confirm(`确认删除模型提供商「${p.name}」？引用此模型提供商的 AI 指令将失败`)) {
+                      deleteMut.mutate(p.id);
+                    }
+                  }}
+                />
+              ))}
+            </div>
+            </>
           ) : (
             <div className="rounded-md border border-dashed bg-muted/20 px-4 py-8 text-center">
               <p className="text-sm text-muted-foreground">
@@ -540,6 +656,92 @@ export function LLMProviders({
           saving={createMut.isPending || updateMut.isPending}
         />
       )}
+      <IdentityVersionsDialog open={identityVersionsOpen} onOpenChange={setIdentityVersionsOpen} />
+    </div>
+  );
+}
+
+function ProviderMobileCard({
+  provider,
+  proxyById,
+  deletePending,
+  onEdit,
+  onDelete,
+}: {
+  provider: LLMProviderOut;
+  proxyById: Map<number, ProxyOut>;
+  deletePending: boolean;
+  onEdit: () => void;
+  onDelete: () => void;
+}) {
+  const enabledModels = (provider.models || []).filter((m) => m.enabled);
+  const proxy = provider.proxy_id != null ? proxyById.get(provider.proxy_id) : null;
+  return (
+    <div className="rounded-xl border border-border/70 bg-background/70 p-3">
+      <div className="space-y-2">
+        <div className="min-w-0 break-words text-sm font-semibold">{provider.name}</div>
+        <div className="flex flex-wrap gap-1.5">
+          <MetaBadge tone={provider.has_api_key ? "success" : "warn"}>
+            <KeyRound className="h-3 w-3" />
+            {provider.has_api_key ? "已配置" : "未配置"}
+          </MetaBadge>
+          <MetaBadge mono>{provider.provider}</MetaBadge>
+          <MetaBadge mono>{provider.api_format || "chat_completions"}</MetaBadge>
+          {provider.api_format === "anthropic_messages" ? (
+            <MetaBadge mono tone={provider.protocol_profile === "claude_code_proxy" ? "warn" : "neutral"}>
+              {provider.protocol_profile || "standard"}
+            </MetaBadge>
+          ) : null}
+          <MetaBadge tone={(provider.web_search_api_format || "auto") === "auto" ? "neutral" : "outline"} mono>
+            搜索 {provider.web_search_api_format || "auto"}
+          </MetaBadge>
+        </div>
+      </div>
+      <div className="mt-3 grid grid-cols-2 gap-2 text-xs">
+        <MobileInfo label="默认模型" value={provider.default_model || "-"} mono />
+        <MobileInfo label="启用模型" value={`${enabledModels.length} / ${(provider.models || []).length}`} />
+        <MobileInfo label="模态 / 成本" value={`${provider.modality || "text"} · tier ${provider.cost_tier ?? 2}`} />
+        <MobileInfo
+          label="代理"
+          value={provider.proxy_id == null ? "DIRECT" : proxy ? `${proxy.type}://${proxy.host}:${proxy.port}` : `#${provider.proxy_id} 已删除`}
+          mono={provider.proxy_id != null}
+        />
+      </div>
+      {(provider.tags || []).length > 0 ? (
+        <div className="mt-3 flex flex-wrap gap-1.5">
+          {(provider.tags || []).slice(0, 6).map((tag) => (
+            <MetaBadge key={tag}>{tag}</MetaBadge>
+          ))}
+          {(provider.tags || []).length > 6 ? <MetaBadge>+{(provider.tags || []).length - 6}</MetaBadge> : null}
+        </div>
+      ) : null}
+      <div className="mt-3 flex justify-end gap-2">
+        <Button variant="outline" size="sm" onClick={onEdit}>
+          <Edit3 className="mr-1 h-4 w-4" />
+          编辑
+        </Button>
+        <Button variant="outline" size="sm" className="border-destructive/40 text-destructive hover:bg-destructive/10 hover:text-destructive" disabled={deletePending} onClick={onDelete}>
+          <Trash2 className="mr-1 h-4 w-4" />
+          删除
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+function MobileInfo({
+  label,
+  value,
+  mono = false,
+}: {
+  label: string;
+  value: string;
+  mono?: boolean;
+}) {
+  return (
+    <div className="min-w-0 rounded-lg border border-border/70 bg-muted/30 px-3 py-2">
+      <div className="text-[11px] text-muted-foreground">{label}</div>
+      <div className={cn("mt-1 break-words text-xs font-medium", mono && "font-mono")}>{value}</div>
     </div>
   );
 }
@@ -558,6 +760,13 @@ function ProviderEditDialog({
   saving: boolean;
 }) {
   const isEdit = !!form.id;
+  const initialFormRef = useRef(JSON.stringify(form));
+  const dirty = JSON.stringify(form) !== initialFormRef.current;
+  useUnsavedChanges(dirty);
+  const requestCancel = () => {
+    if (saving || !confirmDiscardChanges(dirty)) return;
+    onCancel();
+  };
   const setField = <K extends keyof FormState>(k: K, v: FormState[K]) =>
     onChange({ ...form, [k]: v });
 
@@ -595,12 +804,18 @@ function ProviderEditDialog({
     onSuccess: (resp) => {
       setProtocolDetection(resp);
       if (resp.recommended_api_format) {
+        const recommendedApiFormat = resp.recommended_api_format as LLMApiFormat;
         onChange({
           ...form,
-          api_format: resp.recommended_api_format as LLMApiFormat,
+          api_format: recommendedApiFormat,
+          protocol_profile:
+            recommendedApiFormat === "anthropic_messages" ? form.protocol_profile : "standard",
           web_search_api_format: (resp.recommended_web_search_api_format || "auto") as LLMWebSearchApiFormat,
+          client_identity_profile:
+            (resp.recommended_client_identity_profile as LLMClientIdentityProfile) ||
+            form.client_identity_profile,
         });
-        toast.success("已检测并填入推荐协议");
+        toast.success("已检测并填入推荐协议与客户端身份");
       } else {
         toast.warning("没有检测到推荐协议，请查看探测详情");
       }
@@ -609,7 +824,7 @@ function ProviderEditDialog({
   });
 
   return (
-    <Dialog open onOpenChange={(o) => !o && onCancel()}>
+    <Dialog open onOpenChange={(o) => !o && requestCancel()}>
       <DialogContent className="max-h-[85vh] max-w-2xl overflow-y-auto">
         <DialogHeader>
           <DialogTitle>{isEdit ? "编辑" : "新建"}模型提供商</DialogTitle>
@@ -702,7 +917,15 @@ function ProviderEditDialog({
             </div>
             <Select
               value={form.api_format}
-              onChange={(e) => setField("api_format", e.target.value as LLMApiFormat)}
+              onChange={(e) => {
+                const apiFormat = e.target.value as LLMApiFormat;
+                onChange({
+                  ...form,
+                  api_format: apiFormat,
+                  protocol_profile:
+                    apiFormat === "anthropic_messages" ? form.protocol_profile : "standard",
+                });
+              }}
             >
               {API_FORMAT_OPTIONS.map((opt) => (
                 <option key={opt.value} value={opt.value}>
@@ -719,6 +942,22 @@ function ProviderEditDialog({
               </p>
             ) : null}
           </div>
+
+          {form.api_format === "anthropic_messages" ? (
+            <div className="space-y-1.5">
+              <Label>Anthropic 请求兼容模式</Label>
+              <Select
+                value={form.protocol_profile}
+                onChange={(e) => setField("protocol_profile", e.target.value as LLMProtocolProfile)}
+              >
+                <option value="standard">标准 Anthropic API（推荐）</option>
+                <option value="claude_code_proxy">Claude Code 反代兼容</option>
+              </Select>
+              <p className="text-xs text-muted-foreground">
+                标准模式遵循 Anthropic Messages 协议。仅当反代明确要求 Claude Code 专用兼容头时，才选择反代兼容模式；官方 Anthropic API 不需要开启。
+              </p>
+            </div>
+          ) : null}
 
           <div className="space-y-1.5">
             <Label>联网搜索 API Format</Label>
@@ -740,6 +979,41 @@ function ProviderEditDialog({
           {protocolDetection ? (
             <ProtocolDetectionPanel result={protocolDetection} />
           ) : null}
+
+          <div className="space-y-1.5">
+            <Label>客户端身份</Label>
+            <Select
+              value={form.client_identity_profile}
+              onChange={(e) =>
+                setField(
+                  "client_identity_profile",
+                  e.target.value as LLMClientIdentityProfile,
+                )
+              }
+            >
+              {CLIENT_IDENTITY_OPTIONS.map((opt) => (
+                <option key={opt.value} value={opt.value} disabled={opt.disabled}>
+                  {opt.label}
+                </option>
+              ))}
+            </Select>
+            <p className="text-xs text-muted-foreground">
+              {CLIENT_IDENTITY_OPTIONS.find((o) => o.value === form.client_identity_profile)?.hint}
+            </p>
+            {form.client_identity_profile === "auto" ? (
+              <p className="text-xs text-muted-foreground">
+                当前协议 <span className="font-mono">{form.api_format}</span> 将解析为{" "}
+                <span className="font-mono">
+                  {form.api_format === "responses"
+                    ? "codex_cli"
+                    : form.api_format === "anthropic_messages"
+                      ? "claude_code"
+                      : "openai_sdk"}
+                </span>
+                。标准模式不再发送 TelePilot 产品 UA。
+              </p>
+            ) : null}
+          </div>
 
           <div className="space-y-1.5">
             <Label>API Key {isEdit ? "" : "*（建议）"}</Label>
@@ -919,8 +1193,8 @@ function ProviderEditDialog({
           </div>
         </div>
 
-        <DialogFooter>
-          <Button variant="ghost" onClick={onCancel} disabled={saving}>
+        <DialogFooter className="!flex !flex-row gap-2 sm:space-x-0 [&>*]:min-w-0 [&>*]:flex-1 sm:[&>*]:flex-none">
+          <Button variant="outline" onClick={requestCancel} disabled={saving}>
             取消
           </Button>
           <Button onClick={onSave} disabled={saving}>
@@ -941,6 +1215,12 @@ function ProtocolDetectionPanel({ result }: { result: DetectProviderProtocolsRes
         {result.recommended_api_format ? (
           <div className="text-muted-foreground">
             推荐：<MetaBadge mono>{result.recommended_api_format}</MetaBadge>
+            {result.recommended_client_identity_profile ? (
+              <>
+                {" "}· 身份{" "}
+                <MetaBadge mono>{result.recommended_client_identity_profile}</MetaBadge>
+              </>
+            ) : null}
             {" "}· 联网{" "}
             <MetaBadge mono>
               {result.recommended_web_search_api_format || "auto"}
@@ -955,6 +1235,33 @@ function ProtocolDetectionPanel({ result }: { result: DetectProviderProtocolsRes
         <ProbeRow label="responses" probe={result.responses} />
         <ProbeRow label="anthropic/messages" probe={result.anthropic_messages} />
       </div>
+      {result.identity_attempts && result.identity_attempts.length > 0 ? (
+        <details className="mt-2">
+          <summary className="cursor-pointer text-muted-foreground">
+            身份尝试详情（{result.identity_attempts.length}）
+          </summary>
+          <div className="mt-1.5 space-y-1">
+            {result.identity_attempts.map((a, i) => (
+              <div
+                key={`${a.api_format}-${a.client_identity_profile}-${i}`}
+                className="flex flex-wrap items-center gap-1.5 rounded-md border bg-background px-2 py-1"
+              >
+                <MetaBadge mono>{a.api_format}</MetaBadge>
+                <MetaBadge mono>{a.client_identity_profile}</MetaBadge>
+                <MetaBadge mono tone={a.ok ? "success" : "warn"}>
+                  {a.ok ? "OK" : a.status_code ? `HTTP ${a.status_code}` : "FAIL"}
+                </MetaBadge>
+                {a.error_category ? (
+                  <span className="text-muted-foreground">{a.error_category}</span>
+                ) : null}
+                {a.suggestion ? (
+                  <span className="w-full break-words text-muted-foreground">{a.suggestion}</span>
+                ) : null}
+              </div>
+            ))}
+          </div>
+        </details>
+      ) : null}
     </div>
   );
 }
@@ -1015,6 +1322,17 @@ function ProviderModelsSection({
   const [testResults, setTestResults] = useState<
     Record<string, { ok: boolean; latency_ms: number; error?: string | null; preview?: string | null; model?: string | null }>
   >({});
+  // 在途 test-model 请求的 AbortController：组件卸载 / 关编辑弹窗时中断，中断后不再回写状态。
+  const abortRef = useRef<AbortController | null>(null);
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      abortRef.current?.abort();
+      abortRef.current = null;
+    };
+  }, []);
   // 未启用模型组：默认折叠（仅当存在已启用模型时；如果一条都没启用，
   // 用户一进来就需要看到全部，强制展开避免"看着是空的"）
   const enabledCount = models.filter((m) => m.enabled).length;
@@ -1076,14 +1394,17 @@ function ProviderModelsSection({
     onError: (err) => toast.error(getErrMsg(err)),
   });
 
-  const testMut = useMutation({
-    mutationFn: (modelId: string) => testProviderModel(providerId!, { model: modelId }),
-  });
-
   const onTest = async (modelId: string) => {
+    const controller = new AbortController();
+    abortRef.current = controller;
     setTestingId(modelId);
     try {
-      const r = await testMut.mutateAsync(modelId);
+      const r = await testProviderModel(
+        providerId!,
+        { model: modelId },
+        { signal: controller.signal },
+      );
+      if (controller.signal.aborted) return;
       setTestResults((prev) => ({
         ...prev,
         [modelId]: {
@@ -1100,9 +1421,13 @@ function ProviderModelsSection({
         toast.error(`${modelId} 失败（${r.latency_ms} ms）：${r.error || "未知"}`);
       }
     } catch (e) {
+      if (controller.signal.aborted) return; // 被中断：静默
       toast.error(getErrMsg(e));
     } finally {
-      setTestingId(null);
+      if (abortRef.current === controller) {
+        abortRef.current = null;
+        if (mountedRef.current) setTestingId(null);
+      }
     }
   };
 
@@ -1330,5 +1655,159 @@ function ProviderModelsSection({
         </div>
       )}
     </div>
+  );
+}
+
+// ═══════════ 客户端身份 UA 版本配置弹窗（0.57.0 收口） ═══════════
+function IdentityVersionsDialog({
+  open,
+  onOpenChange,
+}: {
+  open: boolean;
+  onOpenChange: (v: boolean) => void;
+}) {
+  const [items, setItems] = useState<ClientIdentityVersionItem[]>([]);
+  const [drafts, setDrafts] = useState<Record<string, string>>({});
+  const [detected, setDetected] = useState<Record<string, ClientIdentityVersionDetectItem>>({});
+  const [loading, setLoading] = useState(false);
+  const [detecting, setDetecting] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    let alive = true;
+    setError(null);
+    setDetected({});
+    setLoading(true);
+    getClientIdentityVersions()
+      .then((resp) => {
+        if (!alive) return;
+        setItems(resp.items);
+        setDrafts(Object.fromEntries(resp.items.map((i) => [i.key, i.current])));
+      })
+      .catch((e) => {
+        if (alive) setError(getErrMsg(e));
+      })
+      .finally(() => {
+        if (alive) setLoading(false);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [open]);
+
+  const detect = async () => {
+    setDetecting(true);
+    setError(null);
+    try {
+      const resp = await detectClientIdentityVersions();
+      setDetected(Object.fromEntries(resp.items.map((i) => [i.key, i])));
+    } catch (e) {
+      setError(getErrMsg(e));
+    } finally {
+      setDetecting(false);
+    }
+  };
+
+  const save = async () => {
+    setSaving(true);
+    setError(null);
+    try {
+      // overrides 只保存偏离内置默认值的非空项；留空或填回默认值都会删除覆盖。
+      const overrides: Record<string, string> = {};
+      for (const it of items) {
+        const v = (drafts[it.key] ?? "").trim();
+        if (v && v !== it.default.trim()) overrides[it.key] = v;
+      }
+      const resp = await updateClientIdentityVersions({ overrides });
+      setItems(resp.items);
+      setDrafts(Object.fromEntries(resp.items.map((i) => [i.key, i.current])));
+      toast.success("已保存客户端身份 UA 版本");
+    } catch (e) {
+      setError(getErrMsg(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-2xl">
+        <DialogHeader>
+          <DialogTitle>客户端身份 UA 版本</DialogTitle>
+        </DialogHeader>
+        <div className="space-y-4">
+          <p className="text-sm text-muted-foreground">
+            仅调整身份 UA 里的版本号；UA 结构与请求头字段由证据锁定，不随此处变化。检测按钮向公共
+            registry 查询最新版本作为建议值，保存后对后续 AI 请求生效。
+          </p>
+          {error ? <p className="break-words text-sm text-destructive">{error}</p> : null}
+          {loading ? (
+            <p className="text-sm text-muted-foreground">
+              <Loader2 className="mr-1 inline h-4 w-4 animate-spin" /> 加载中…
+            </p>
+          ) : (
+            <div className="space-y-3">
+              {items.map((it) => {
+                const det = detected[it.key];
+                return (
+                  <div key={it.key} className="rounded-md border p-3">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="min-w-0">
+                        <p className="truncate text-sm font-medium">{it.label}</p>
+                        <p className="truncate text-xs text-muted-foreground">
+                          默认 {it.default}
+                          {it.registry ? ` · 源 ${it.registry}` : " · 仅手动填写"}
+                        </p>
+                      </div>
+                      <Input
+                        className="w-40 font-mono text-xs"
+                        value={drafts[it.key] ?? ""}
+                        onChange={(e) =>
+                          setDrafts((prev) => ({ ...prev, [it.key]: e.target.value }))
+                        }
+                      />
+                    </div>
+                    {det ? (
+                      <p className="mt-2 break-words text-xs text-muted-foreground">
+                        {det.error
+                          ? `检测失败：${det.error}`
+                          : det.latest
+                            ? det.up_to_date
+                              ? `已是最新（${det.latest}）`
+                              : `最新 ${det.latest}（当前 ${det.current}）`
+                            : "无检测结果"}
+                        {det.latest && !det.up_to_date && !det.error ? (
+                          <button
+                            type="button"
+                            className="ml-2 underline"
+                            onClick={() =>
+                              setDrafts((prev) => ({ ...prev, [it.key]: det.latest ?? prev[it.key] }))
+                            }
+                          >
+                            填入
+                          </button>
+                        ) : null}
+                      </p>
+                    ) : null}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+        <DialogFooter>
+          <Button type="button" variant="outline" onClick={() => void detect()} disabled={detecting || loading}>
+            {detecting ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : null}
+            检测最新版本
+          </Button>
+          <Button type="button" onClick={() => void save()} disabled={saving || loading}>
+            {saving ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : null}
+            保存
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }

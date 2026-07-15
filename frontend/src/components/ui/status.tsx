@@ -9,7 +9,7 @@ import {
 } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
 
-export type VisualTone = "primary" | "success" | "warn" | "danger" | "neutral";
+export type VisualTone = "primary" | "success" | "warn" | "danger" | "info" | "neutral";
 
 type ToneClasses = {
   rail: string;
@@ -31,28 +31,36 @@ export function toneClasses(tone: VisualTone): ToneClasses {
       bar: "bg-primary",
     },
     success: {
-      rail: "bg-emerald-500",
-      iconWrap: "bg-emerald-500/10",
-      icon: "text-emerald-600 dark:text-emerald-300",
-      pill: "border-emerald-500/20 bg-emerald-500/10",
-      dot: "bg-emerald-500",
-      bar: "bg-emerald-500",
+      rail: "bg-success",
+      iconWrap: "bg-success/10",
+      icon: "text-success",
+      pill: "border-success/20 bg-success/10",
+      dot: "bg-success",
+      bar: "bg-success",
     },
     warn: {
-      rail: "bg-amber-500",
-      iconWrap: "bg-amber-500/10",
-      icon: "text-amber-600 dark:text-amber-300",
-      pill: "border-amber-500/25 bg-amber-500/10",
-      dot: "bg-amber-500",
-      bar: "bg-amber-500",
+      rail: "bg-warning",
+      iconWrap: "bg-warning/10",
+      icon: "text-warning",
+      pill: "border-warning/25 bg-warning/10",
+      dot: "bg-warning",
+      bar: "bg-warning",
     },
     danger: {
-      rail: "bg-rose-500",
-      iconWrap: "bg-rose-500/10",
-      icon: "text-rose-600 dark:text-rose-300",
-      pill: "border-rose-500/25 bg-rose-500/10",
-      dot: "bg-rose-500",
-      bar: "bg-rose-500",
+      rail: "bg-destructive",
+      iconWrap: "bg-destructive/10",
+      icon: "text-destructive",
+      pill: "border-destructive/25 bg-destructive/10",
+      dot: "bg-destructive",
+      bar: "bg-destructive",
+    },
+    info: {
+      rail: "bg-info",
+      iconWrap: "bg-info/10",
+      icon: "text-info",
+      pill: "border-info/20 bg-info/10",
+      dot: "bg-info",
+      bar: "bg-info",
     },
     neutral: {
       rail: "bg-border",
@@ -122,6 +130,7 @@ export function ToneRailCard({
   value,
   description,
   tone = "neutral",
+  railTone,
   className,
   valueClassName,
 }: {
@@ -130,18 +139,20 @@ export function ToneRailCard({
   value: ReactNode;
   description?: ReactNode;
   tone?: VisualTone;
+  railTone?: VisualTone;
   className?: string;
   valueClassName?: string;
 }) {
   const toneClass = toneClasses(tone);
+  const railClass = toneClasses(railTone ?? tone).rail;
   return (
     <Card
       className={cn(
-        "group relative h-full overflow-hidden transition duration-200 hover:-translate-y-0.5 hover:shadow-[0_1px_2px_hsl(220_20%_20%/0.04),0_22px_54px_hsl(220_20%_20%/0.09)]",
+        "group relative h-full overflow-hidden transition duration-200 hover:-translate-y-0.5 hover:shadow-md",
         className,
       )}
     >
-      <div className={cn("absolute inset-x-0 top-0 h-1", toneClass.rail)} />
+      <div className={cn("absolute inset-x-0 top-0 h-1", railClass)} />
       <CardHeader className="flex-row items-start justify-between space-y-0">
         <div className="min-w-0">
           <CardTitle className="inline-flex max-w-full items-center gap-2 truncate">
@@ -194,7 +205,7 @@ export function StatusSummaryPanel({
   return (
     <section
       className={cn(
-        "relative overflow-hidden rounded-lg border border-border/80 bg-card shadow-[0_1px_2px_hsl(220_20%_20%/0.04),0_20px_56px_hsl(220_20%_20%/0.07)]",
+        "relative overflow-hidden rounded-lg border border-border/80 bg-card shadow-md",
         className,
       )}
     >

@@ -4,6 +4,18 @@
 
 ## 12. 安全边界
 
+### 三模式安全模型
+
+插件安全边界先按三种运行模式判断：
+
+| 模式 | 输入对象 | 默认收发 | 安全边界 |
+| --- | --- | --- | --- |
+| 裸直通 | userbot 原始 Telethon event | 插件自行处理 userbot 能力 | 只给 userbot，不覆盖 interaction bot；不自动生成标准 action、Trace 或 MessageOps 记录 |
+| userbot 命令会话 | UserBot 前缀命令进入标准事件信封 | 普通收发默认 userbot | 适合管理员命令和账号身份动作；按钮会降级成文本编号 |
+| interaction bot 规则会话 | 关键词、付款确认、按钮回调进入标准事件信封 | 普通收发默认 interaction bot | 适合高频群内互动、按钮、题面和会话提示 |
+
+固定路由例外有两类：`payout`、收付款、发奖永远由 userbot 执行；Bot API 原生 `send_rich_message` 永远由 interaction bot 执行。Event Bus、Trace、MessageOps 只是标准会话链路的内部契约，不是第四种模式。
+
 ### 指令前缀（command_prefix）
 
 - 所有 Telegram 指令必须有明确前缀（如 `,` 或自定义）
@@ -15,8 +27,8 @@ Manifest 中的 `permissions` 字段声明插件需要的能力：
 
 | 权限 | 典型方法 | 说明 |
 |------|----------|------|
-| `send_message` | `send_message` / `respond` / `reply` | 发送文本消息 |
-| `edit_message` | `edit` / `edit_message` | 编辑消息 |
+| `send_message` | `send_message` / `send_rich_message` / `respond` / `reply` | 发送普通文本或由 Interaction Bot 发送原生 Rich Message |
+| `edit_message` | `edit` / `edit_message` / `edit_caption` | 编辑文本消息或媒体 caption |
 | `read_chat` | `get_messages` / `get_chat` / `iter_messages` | 读取聊天历史 |
 | `resolve_entity` | `get_entity` | 解析用户名、频道、群等实体 |
 | `send_file` | `send_file` | 发送图片或文件 |
@@ -26,8 +38,45 @@ Manifest 中的 `permissions` 字段声明插件需要的能力：
 | `external_http` | `ctx.http.get` / `ctx.http.post` | 安全 HTTP facade；必须同时声明 `allowed_hosts` |
 | `external_http_bypass_proxy` | direct 网络出口 | 预留高危权限；当前直连还必须通过 Manifest `http.allow_direct` 和账号配置共同开启 |
 | `ai_text` | `ctx.ai.complete` / `ctx.ai.list_providers` | 平台文本 LLM facade；返回脱敏 provider 元数据 |
+| `ai_agent` | `ctx.ai.run_agent` | 有界工具调用；还需 `capabilities.agent_tools.enabled=true`、`agent_tools[]` 与宿主 handler 双白名单 |
 
-`permissions` 默认是空列表。第三方插件漏写权限时不会注入对应 facade，也不能调用未声明的 `ctx.client` / `event` helper 能力；内置插件也建议显式写全，方便审计和后续迁移。
+`permissions` 默认是空列表。远程/本地/插件库安装型插件漏写权限时不会注入对应 facade，也不能调用未声明的 `ctx.client` / `event` helper 能力；核心平台兼容代码也建议显式写全，方便审计和后续迁移。
+
+TelePilot 按个人可信插件模式运行：管理员安装并启用插件后，远程插件的业务风险由管理员自行承担；平台不做公共插件市场式强沙箱，但仍保留频控、审计、急停、Trace 和 token/session 隔离。标准 Telegram 会话插件必须走 Event Bus + MessageOps：在 `plugin.json` 声明 `usage`、`event_subscriptions`、`capabilities`，运行时只读取标准事件信封，所有发送、编辑、删除、置顶、按钮 ACK、Inline answer 和结算都返回标准 action 或通过 `ctx.messages` 生成。裸直通插件只接 userbot 原始 Telethon event，不接 interaction bot，也不会自动获得标准 action/Trace。`ctx.client` 保留给管理员命令和高级兼容场景，不作为普通 Bot 按钮回调的主入口。群里已有的转账结果通知 Bot 只作为外部付款证据来源，不是插件主动发送通道。
+
+### 安装来源与签名边界
+
+个人可信不等于默认接受任意未签名包。ZIP 安装在解压和执行 Python 前完成签名与静态兼容检查：
+
+- 配置 `PLUGIN_PUBKEY` 时，新 ZIP 必须通过签名验证。
+- 未配置公钥时，新 ZIP 默认拒绝，只有 `PLUGIN_ALLOW_NEW_UNSIGNED_PLUGINS=true` 才允许管理员显式安装 community 插件。
+- `PLUGIN_ALLOW_LEGACY_UNSIGNED_PLUGINS` 只兼容历史 `signature_ok=NULL` 的已安装插件，不能用于放宽新上传入口。
+
+未签名开关适合本地自研插件的短期安装窗口，不应作为生产常驻默认值。安装前仍要检查来源、版本、哈希、权限声明、HTTP host 白名单和高风险能力；安装后恢复关闭，并先在账号 dry-run 下验证。
+
+### 会话通道边界
+
+消息链路统一后，插件要额外记住三个安全边界：
+
+- 会话通道由触发方式决定。命令开局默认走 userbot，关键词/付款/按钮开局默认走 interaction bot；普通发送动作应继承 `session.channel`，不要每条消息手动改通道。
+- `payout`、收付款、发奖永远经 userbot 执行，并进入 `RateLimitEngine`、trace 和失败回写。插件不要把 Bot 公告伪装成转账，也不要把发奖逻辑拆成“先发普通消息，再等旧文案协议补发”。
+- `send_rich_message` 是 Telegram Bot API 原生能力，固定经 Interaction Bot 执行。UserBot/Telethon 没有对等发送接口；显式请求 `userbot_reply` 必须以 `rich_message_requires_interaction_bot` 失败，禁止静默转成普通 HTML 或纯文本。
+- TelePilot 自有的账号 Bot 控制页与系统告警可以在同一个 Bot 内从 Rich Message 回退到旧 HTML，以兼容 Bot API 暂不支持或格式拒绝；插件 `send_rich_message` 不继承这个内部兼容策略。
+- userbot 会话没有原生 inline 按钮能力。平台会把按钮降级成文本编号，并把玩家回复合成为 callback 事件；这意味着强按钮玩法最好默认 `keyword_only`，避免命令开局落到不适合的通道。
+
+### 配置页动作边界
+
+通用配置页支持 `config_actions` / `x-config-actions`，但它不是任意 HTML、CSS 或 JavaScript 注入能力。插件只能声明按钮、输入 schema 和放置位置；点击按钮后，平台在后端调用插件的 `on_config_action(ctx, action_key, payload)`。
+
+配置动作的安全边界：
+
+- `ctx` 不注入 Telegram live client，不允许借配置页按钮直接发消息、转账或改群。
+- `ctx.http` 仍要求 `external_http` + `allowed_hosts`，并继续阻断 localhost、内网和链路本地地址。
+- `ctx.ai.complete` 要求 `ai_text`；`ctx.ai.run_agent` 独立要求 `ai_agent`，不互相继承。两者都复用 TelePilot Provider、预算和用量记录，不暴露明文 API Key。
+- 前端只合并插件返回的 `config_patch` 到当前表单；管理员仍需点击“保存配置”才会写入数据库并触发 worker 热加载。
+- 动作输入、URL、AI 输出都必须由插件二次校验，不要把 AI 输出当成可信配置直接执行。
+
+安全顾虑主要来自内部插件代码被授予能力后的扩权面，而不是来自外部 URL 字符串本身。外部内容必须通过受控 HTTP/AI facade 进入插件；平台不允许插件用配置页承载自定义脚本来绕过这些边界。
 
 ### 禁止行为
 
@@ -35,6 +84,20 @@ Manifest 中的 `permissions` 字段声明插件需要的能力：
 - 不允许把明文 key 写入日志
 - 不允许持久化完整隐私消息到外部系统
 - 对外部请求必须做超时和异常处理
+- 不允许把旧 `notice` / `bbot_notice` / `notice_bot` 当主动发送通道
+- 不允许依赖旧 `raw_event` 或旧平铺 payload；需要原生字段必须声明 `capabilities.telegram_native_raw`
+
+### 标准链路能力声明
+
+标准会话插件安全检查先看三个字段：
+
+| 字段 | 必要性 | 安全意义 |
+| --- | --- | --- |
+| `usage` | 必填 | 让安装者知道插件会监听什么、发什么、如何启用 |
+| `event_subscriptions` | Telegram 事件插件必填 | 明确 message/command/callback/inline/payment 的来源和范围 |
+| `capabilities` | 必填，空能力写 `{}` | 暴露高风险能力，例如 `telegram_native_raw` |
+
+`capabilities.telegram_native_raw.enabled=true` 时必须写 `reason` 和 `sources`。插件只能把 `native_raw` 当排障补充，业务判断仍以标准事件信封为准；当 `native_raw_meta.enabled=false` 时必须降级运行。需要完全跳过标准信封的低延时场景，必须显式声明裸直通能力，并且只允许走 userbot 原始 Telethon event。
 
 ---
 
@@ -55,7 +118,7 @@ Manifest 中的 `permissions` 字段声明插件需要的能力：
 
 #### 消息与交互
 
-- 优先复用用户触发指令消息或已有业务消息：指令状态用 `event.edit(...)`，题面进度用编辑原题面消息，答对奖励再回复答题者消息。
+- 标准链路新插件优先通过 `ctx.messages` 或标准 action 复用/编辑已有业务消息；只有管理员命令兼容 hook 才直接用 `event.edit(...)` 表示指令状态。题面进度、答对奖励和按钮反馈都应让平台记录 trace/action。
 - 插件进行中时，重复触发指令必须给出明确提示，并说明下一步：继续当前流程、等待超时、或使用 `stop` / `cancel` / `结束`。
 - 指令型插件必须提供帮助入口或帮助子命令，例如 `help` / `status` / 空参数展示帮助；帮助内容要显示当前配置的指令名和当前系统指令前缀。
 - 视觉题、图片题、文件题不要在文本说明、alt 文案、日志或 preview 中泄露答案；文本只说明规则和限时。
@@ -82,6 +145,20 @@ Manifest 中的 `permissions` 字段声明插件需要的能力：
 - 平台不支持编辑、删除、发媒体时，应降级为回复文本或普通发送；降级路径要写日志，并避免发送多条重复消息。
 - 可配置指令发生变化时，建议保留常用历史别名一段时间，或在重复触发/未知指令提示里告诉用户新指令。
 
+#### 插件清理检查表
+
+禁用、热重载、卸载、超时和异常退出都要按同一张清单检查：
+
+- handler：注销命令、事件回调、内部订阅和自定义路由，避免旧实例继续响应。
+- session：结束或迁移未完成会话，给用户一个可见的取消、超时或失败反馈。
+- scheduler job：注销 `ctx.scheduler` 注册的 job，避免旧 generation 继续触发。
+- asyncio task：取消后台任务并处理 `CancelledError`，不要留下悬挂协程。
+- 临时消息：按配置删除或编辑题面、占位消息、按钮消息和中间状态消息。
+- 临时文件：删除生成图片、缓存文件、下载文件和一次性导出包。
+- 游戏状态：清理 chat/user 维度锁、题目、答案、赢家、付款等待态和发奖状态。
+- 外部资源：关闭 HTTP stream、文件句柄、数据库游标和第三方 SDK client。
+- 日志：只记录必要摘要和 reason_code，不记录 token、session、完整原生 payload 或隐私消息。
+
 ### 指令权限底线
 
 `owner_only` 不是“公开指令开关”。框架约定如下：
@@ -91,7 +168,16 @@ Manifest 中的 `permissions` 字段声明插件需要的能力：
 - 平台内部动作（自动回复、scheduler）如果需要触发指令，应通过内部命令派发能力执行，并把返回结果转成回复/普通发送；不要要求用户直接发送管理指令。
 - 指令 handler 内可以假设事件来自当前账号 outgoing 消息，因此可以优先 `event.edit(...)`；`on_message` 处理 incoming 消息时不要 `event.edit(...)`。
 
-示例模型：
+新版等价流程应优先写成：
+
+```text
+用户: 我想玩 24 点
+插件 event_subscriptions: 命中关键词 / 付款确认 / callback
+插件 on_event: 读取标准事件信封，创建会话
+插件 ctx.messages/action: 由 interaction_bot 发开局和按钮；转账/发奖走 userbot 或 settlement
+```
+
+下面是旧自动回复/命令兼容模型，仅用于迁移历史配置，不作为新插件推荐主路径：
 
 ```text
 用户: 我想玩 24 点
@@ -144,59 +230,50 @@ Manifest 中的 `permissions` 字段声明插件需要的能力：
 
 ### 消息发送能力边界
 
-不同回调能拿到的对象不同，不要在没有 `event` 的地方调用 `event.reply`，也不要尝试编辑别人的 incoming 消息。推荐按下表选择发送方式：
+标准 Telegram 会话插件的默认路径是 Event Bus + MessageOps + Trace：插件读取标准事件信封，返回标准 action，或通过 `ctx.messages` 生成同等 action；平台按当前会话通道和动作类型路由并记录 trace/action/reason_code。裸直通不走这条链路，只能接 userbot 原始 Telethon event。普通消息默认按 `parse_mode="plain"` 发送，只有显式声明 `parse_mode="html"` 时才启用普通 HTML；标题、任务列表、折叠详情、表格等原生结构使用独立的 `send_rich_message`。两种 HTML 都必须先转义动态文本再拼标签。旧 hook 仍可作为内置插件和迁移桥兼容，但不能作为远程插件的新模板。
 
-| 场景 | 有 `event` | 推荐方式 | 适用说明 | 远程插件权限 |
-|------|------------|----------|----------|--------------|
-| `on_command` 指令回调 | 有 | `event.edit(...)` | 把用户发出的指令改成状态/结果，适合 UserBot 自己发出的指令 | `edit_message` |
-| `on_command` 需要另发一条 | 有 | `event.respond(...)` 或 `ctx.client.send_message(event.chat_id, ...)` | 不想覆盖原指令，或指令消息可能已删除 | `send_message` |
-| `on_message` 回复触发消息 | 有 | `event.reply(...)` | 自动回复、答题奖励、引用原消息 | `send_message` |
-| `on_message` 普通发送 | 有 | `event.respond(...)` | 在同一聊天里发新消息，不引用原消息 | `send_message` |
-| 跨聊天发送/转发 | 有或无 | `ctx.client.send_message(target_chat_id, ...)` / `ctx.client.send_file(...)` | 转发、通知、发图、调度任务 | `send_message` / `send_file` |
-| `ctx.scheduler` 定时回调 | 无 | `ctx.client.send_message(chat_id, ...)` | 定时任务没有原始 `event`，必须从配置或规则里拿 `chat_id` | `send_message` |
-| `on_startup` / `on_shutdown` | 无 | 默认不发；确需通知时用 `ctx.client.send_message(...)` | 启停阶段容易重复触发，必须有显式配置开关 | `send_message` |
-| `ctx.conversation()` | conversation 内部 | `conv.send(...)` / `conv.get_response(...)` | 与 BotFather 或其它 bot 进行会话 | 取决于底层发送/读取能力 |
-| 成员管理 | 有 | `ctx.client.mute_user(chat_id, user_id, duration_seconds=3600)` / `ctx.client.kick_user(chat_id, user_id)` / `ctx.client.ban_user(chat_id, user_id)` | 反广告、风控等明确需要处理违规成员的场景；调用前应先确认目标，避免误操作管理员或无关用户 | `moderate_chat` |
+| 场景 | 标准会话主路径 | 旧 hook 兼容边界 |
+|------|--------------|------------------|
+| 普通消息/关键词 | 返回 `send_message` / `send_photo` / `send_file`，默认省略 `send_via` 并继承会话通道；原生结构化内容返回 `send_rich_message` 并固定走 Interaction Bot；媒体题面可保存 `save_message_id_key` 后用 `edit_caption` 原地更新 caption | `on_message` 的 `event.reply(...)` / `event.respond(...)` 仅用于历史内置或迁移桥 |
+| 管理员命令 | `command` 事件进入 Event Bus 后返回 action；需要编辑原指令时声明 `edit_message` | `on_command` 的 `event.edit(...)` 可保留；另发消息时不要绕过 MessageOps 记录 |
+| 按钮回调 | 返回 `answer_callback`，再按需返回 `send_message` / `edit_message` / `edit_caption` | 不直接拼 Bot API，不假设 incoming message 可编辑 |
+| Inline Query | 返回 `answer_inline_query`；选择结果用 `chosen_inline_result` 记录 | 旧 hook 没有统一 trace，不作为新插件入口 |
+| 付款/发奖 | 返回 `settlement` 或 `userbot_reply` 受控动作；普通 Bot 只公告结果 | 不把外部转账通知 Bot 当主动发送通道 |
+| 定时任务/后台任务 | 保存目标 chat/session 后通过 `ctx.messages` 或标准 action 输出 | 直接使用受控 client 发消息只作为旧调度代码兼容，不作为新模板 |
+| 启停阶段 | 默认不发；确需通知时必须有显式配置开关并记录日志 | 不在 `on_startup` / `on_shutdown` 里无条件群发 |
+| 成员管理 | 声明 `moderate_chat`，由受控 facade 执行并记录审计 | 不开放 raw MTProto 或 live client 给远程插件 |
 
-#### 安全回复模板
+#### 旧 hook 安全回复模板（仅迁移兼容）
 
-群组、频道、匿名频道消息里，`event.reply` 可能失败。需要强可靠发送时，使用“reply 优先，send_message 兜底”的写法：
+下面的模板只用于尚未迁移的内置插件或历史 hook；新 Event Bus 插件应改为返回 `send_message` action，由 Delivery Executor 记录成功/失败。
 
 ```python
-async def safe_reply(ctx, event, text: str, *, chat_id: int, reply_to_id: int | None = None) -> bool:
-    try:
-        reply = getattr(event, "reply", None)
-        if callable(reply):
-            await reply(text)
-            return True
-    except Exception as exc:
-        if ctx.log:
-            await ctx.log(
-                "warn",
-                "引用回复失败，准备改用普通发送兜底。",
-                error=type(exc).__name__,
-                chat_id=chat_id,
-                reply_to_id=reply_to_id,
-            )
-
-    if ctx.client is None:
-        return False
-
-    try:
-        await ctx.client.send_message(chat_id, text, reply_to=reply_to_id)
-        return True
-    except Exception:
-        await ctx.client.send_message(chat_id, text)
-        return True
+async def safe_reply_action(ctx, text: str, *, chat_id: int, reply_to_id: int | None = None) -> dict:
+    if ctx.messages is not None:
+        return await ctx.messages.send(
+            channel="auto",
+            chat_id=chat_id,
+            text=text,
+            reply_to_message_id=reply_to_id,
+        )
+    return {
+        "type": "send_message",
+        "channel_selector": "auto",
+        "chat_id": chat_id,
+        "text": text,
+        "reply_to_message_id": reply_to_id,
+    }
 ```
 
 注意：
 
 - `event.edit(...)` 只适合编辑当前账号自己发出的指令/状态消息；不要用它编辑别人发来的 incoming 消息。
-- 远程插件安装阶段只读 `plugin.json`，但运行时仍会受 `manifest.py` 的 `permissions` 沙箱限制。
-- 第三方插件不要把 `event.reply/respond/edit` 当作绕过权限的路径；凡是会发送、编辑、删除、读取消息的行为，都必须在 `permissions` 中声明对应能力。
+- 远程插件安装阶段只读 `plugin.json`；运行时由 TelePilot facade 代发、记录和限流，插件不直接接触 Bot Token 或 userbot session。
+- 第三方插件不要把 `event.reply/respond/edit` 当作绕过审计的路径；新插件发送、编辑、删除、置顶、按钮 ACK、Inline answer 都应通过 `ctx.messages` 或标准 action 交给平台，方便 Trace、限流和问题追踪。
+- 若启用 `callback_fast_ack`，按钮会先被平台立即 ACK；插件后续返回的 `answer_callback` 只会记 trace，不会再真正调用 Telegram。需要 `show_alert` 的入口不要开启它。
 - 需要发送图片、文件时，为 `BytesIO` 设置 `name`，例如 `image_file.name = "result.png"`，否则 Telegram 客户端可能显示无后缀文件。
 - 长消息要按 Telegram 4096 字符限制分段；HTML 模式下切分前要保证标签闭合，失败时应降级为纯文本。
+- Rich Message 受 Telegram 的 32768 字符、500 个结构块、16 层嵌套、50 个媒体附件和表格 20 列限制；内容结构不合法时按 `invalid_rich_message` 失败，不要捕获后改用 UserBot 重发。
 
 ### 并发与抢答标准模板
 
@@ -387,9 +464,11 @@ config_schema={
 
 `{prefix}` 是平台约定的系统级占位符，表示“系统设置 → 指令前缀”的当前值。运行时需要展示指令示例、帮助列表、错误提示里的用法示例时，优先从 worker 的当前指令前缀读取；前端配置预览中应通过 `getSystemSettings().command_prefix` 注入示例上下文，接口未返回时才兜底使用 `,`。不要把逗号硬编码成固定前缀。
 
-如果插件有专属配置页，建议提供只读预览：用户修改模板后，用示例上下文渲染一段 `template_preview`。预览应展示“模板 + 示例上下文”替换后的最终消息效果，而不是简单重复默认值或字段说明。没有专属页面时，也至少在字段描述里给出一条完整示例，避免用户猜最终效果。
+只要插件声明 `config_schema` 并进入配置页，就必须声明详细使用说明。优先在 schema 顶层写 `x-usage-guide`、`x-usage-instructions` 或 `x-usage-steps`；也可以提供只读字段 `usage_preview`、`usage_guide`、`usage_instructions`、`ai_usage_guide`。平台不再给“全局配置共享、命令不写前缀、模板可预览”这类默认兜底说明；缺少说明会在插件中心和配置页显示红色高级规范警告。
 
-配置页里的模板预览体验应对齐自定义指令模板：模板输入、占位符说明/按钮、最终消息预览三者放在同一个配置上下文里。预览只使用模拟数据，不读取真实群消息，也不触发实际发送；如果模板支持 Telegram HTML，应复用 `frontend/src/components/TelegramHtmlPreview.tsx`。
+如果插件会发送消息，建议提供只读预览：用户修改模板后，用示例上下文渲染一段 `template_preview` 或 `*_preview`。预览应展示“模板 + 示例上下文”替换后的最终消息效果，而不是简单重复默认值或字段说明。预览不是强制项，没有预览不会阻断保存和运行，但至少应在字段描述里给出一条完整示例，避免用户猜最终效果。
+
+配置页里的模板预览体验应对齐自定义指令模板：模板输入和占位符说明放在“插件配置”里，最终消息预览放在独立“插件预览”卡片里。预览只使用模拟数据，不读取真实群消息，也不触发实际发送；如果模板支持 Telegram HTML，应复用 `frontend/src/components/TelegramHtmlPreview.tsx`。
 
 #### Telegram 消息预览规范
 
@@ -403,7 +482,7 @@ config_schema={
 - 预览只使用模拟数据，不读取真实聊天、账号、用户资料，也不触发发送或编辑消息。
 - 如果插件或页面需要做消息模板预览，优先直接使用 `TelegramHtmlPreview`；只有需要嵌入极小空间时，才使用更轻量的纯内容预览。
 
-通用独立配置页兼容已有 schema 约定：`message_template` / `*_template` 是可编辑多行模板；`template_placeholders` 是只读占位符说明；`template_preview` / `*_preview` 是只读渲染预览。插件只需在 schema 中提供这些字段和默认值，不需要额外协议。多个 `*_preview` 字段会合并到同一个预览区域，以多条 Telegram 气泡展示。
+通用独立配置页兼容已有 schema 约定：`message_template` / `*_template` 是可编辑多行模板；`template_placeholders` 是只读占位符说明；`usage_preview` / `usage_guide` / `usage_instructions` / `ai_usage_guide` 只进入“使用说明”；`template_preview` / `*_preview` 进入独立“插件预览”。多个 `*_preview` 字段会合并到同一个预览区域，以多条 Telegram 气泡展示。
 
 ### 定时任务与后台任务生命周期
 
@@ -512,12 +591,13 @@ await ctx.log(
 - [ ] 模板类配置包含占位符说明和示例预览。
 - [ ] 高频交互插件有冷却/限流/超时策略，并在用户文案里说明关键规则。
 - [ ] 取消、完成、超时、禁用、热重载路径都会清理状态和后台任务。
+- [ ] 动作数量超出平台限制时会触发 `action_limit_exceeded`，并在日志里可见截断结果。
 - [ ] 所有外部 HTTP 请求有 timeout，错误提示不泄露 token、路径、session。
 - [ ] 插件日志能说明“收到什么、判断了什么、为什么跳过/为什么执行、失败在哪一步”。
 
-### 可复制的游戏插件骨架
+### 旧 hook 游戏插件骨架（仅内置/迁移兼容）
 
-下面是一个最小抢答游戏骨架，包含指令注册、状态管理、并发锁、超时、日志和清理。真实插件可以从这里删改。
+下面骨架保留给现有 `on_command` / `on_message` 插件迁移时对照状态、并发锁、超时、日志和清理。新远程插件不要从这里直接复制入口和发送方式；请以 `examples/plugins/event_bus_demo` 为主模板，并把群友触发、按钮、Inline、付款确认都写成 `event_subscriptions` + 标准 action。
 
 **plugin.py：**
 
@@ -611,11 +691,10 @@ class GuessNumberPlugin(Plugin):
         if ctx.log:
             await ctx.log("info", "猜数字答对，准备发送奖励文案。", chat_id=chat_id, reward=state.reward)
         prize_text = f"+{state.reward}"
-        try:
-            await event.reply(prize_text)
-        except Exception:
-            if ctx.client:
-                await ctx.client.send_message(chat_id, prize_text)
+        if ctx.messages is not None:
+            await ctx.messages.payout(chat_id=chat_id, amount=state.reward, text=prize_text)
+        else:
+            return [{"type": "payout", "chat_id": chat_id, "amount": state.reward, "text": prize_text}]
 
     async def _timeout_round(self, ctx: PluginContext, chat_id: int, timeout: int) -> None:
         try:
@@ -625,8 +704,11 @@ class GuessNumberPlugin(Plugin):
                 if not state or state.answered:
                     return
                 self._rounds.pop(chat_id, None)
-            if ctx.client:
-                await ctx.client.send_message(chat_id, f"本轮超时，答案是 {state.answer}。")
+            if ctx.messages is not None:
+                await ctx.messages.send(
+                    chat_id=chat_id,
+                    text=f"本轮超时，答案是 {state.answer}。",
+                )
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -652,7 +734,16 @@ MANIFEST = Manifest(
     version="0.1.0",
     author="example",
     description="一个可作为游戏插件模板的猜数字抢答插件。",
+    category="interactive",
     permissions=["send_message", "edit_message", "read_chat"],
+    event_subscriptions=[
+        {
+            "events": ["message", "command", "session_close"],
+            "source": ["userbot", "interaction_bot"],
+            "scope": "all_allowed_chats",
+        }
+    ],
+    capabilities={},
     config_schema={
         "type": "object",
         "x-ui-mode": "single",
@@ -694,7 +785,17 @@ MANIFEST = Manifest(
   "author": "example",
   "version": "0.1.0",
   "entry": "plugin.py",
-  "permissions": ["send_message", "edit_message", "read_chat"]
+  "category": "interactive",
+  "permissions": ["send_message", "edit_message", "read_chat"],
+  "usage": "迁移兼容示例：管理员命令开局，群友消息参与；新插件应优先改写为 Event Bus 标准事件入口。",
+  "event_subscriptions": [
+    {
+      "events": ["message", "command", "session_close"],
+      "source": ["userbot", "interaction_bot"],
+      "scope": "all_allowed_chats"
+    }
+  ],
+  "capabilities": {}
 }
 ```
 

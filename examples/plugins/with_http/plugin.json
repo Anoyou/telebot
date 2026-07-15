@@ -10,6 +10,9 @@
   "category": "utility",
   "permissions": ["external_http", "edit_message"],
   "allowed_hosts": ["api.github.com"],
+  "usage": "安装后使用账号命令 http_status 发起受控 HTTP 请求；URL 必须匹配 allowed_hosts。该示例不订阅 Telegram Event Bus。",
+  "event_subscriptions": [],
+  "capabilities": {},
   "config_schema": {
     "type": "object",
     "x-ui-mode": "single",

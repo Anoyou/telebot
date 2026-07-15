@@ -33,6 +33,8 @@ class PluginRepo(Base):
     name: Mapped[str] = mapped_column(String(255), nullable=False, default="")
     url: Mapped[str] = mapped_column(Text, nullable=False, unique=True, index=True)
     description: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    auth_type: Mapped[str] = mapped_column(String(32), nullable=False, default="none")
+    credential_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
     added_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
@@ -42,6 +44,11 @@ class PluginRepo(Base):
         onupdate=func.now(),
         nullable=False,
     )
+
+    @property
+    def has_credentials(self) -> bool:
+        """是否已保存私有仓库凭证；不暴露密文本身。"""
+        return bool(self.credential_enc)
 
 
 __all__ = ["PluginRepo"]

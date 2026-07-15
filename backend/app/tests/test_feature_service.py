@@ -7,12 +7,14 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from app.db.models.feature import FEATURE_STATE_DISABLED
+from app.api import features as features_api
+from app.db.models.feature import FEATURE_STATE_DISABLED, Feature
 from app.db.models.plugin import InstalledPlugin
 from app.db.models.plugin_global_config import PluginGlobalConfig
 from app.schemas.feature import FeatureInfo
 from app.services.feature_service import (
     _seed_local_installed_features,
+    apply_required_config_defaults,
     config_schema_for_scope,
     feature_matrix,
     get_effective_plugin_config,
@@ -20,6 +22,111 @@ from app.services.feature_service import (
     set_plugin_global_config,
     validate_config_against_schema,
 )
+
+
+def test_account_schema_allows_direct_passthrough_only_when_declared() -> None:
+    schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {"command": {"type": "string"}},
+    }
+    manifest = {
+        "capabilities": {
+            "telegram_direct_passthrough": {"enabled": True},
+        }
+    }
+
+    extended = features_api._allow_account_direct_passthrough_config(schema, manifest)
+
+    assert extended["properties"]["direct_passthrough"]["properties"]["enabled"] == {
+        "type": "boolean",
+        "default": False,
+    }
+
+
+def test_account_schema_does_not_expose_direct_passthrough_without_capability() -> None:
+    schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {"command": {"type": "string"}},
+    }
+
+    extended = features_api._allow_account_direct_passthrough_config(schema, {})
+
+    assert "direct_passthrough" not in extended["properties"]
+
+
+def test_direct_only_plugin_gets_platform_account_schema() -> None:
+    manifest = {
+        "capabilities": {
+            "telegram_direct_passthrough": {"enabled": True},
+        }
+    }
+
+    schema = features_api._account_config_schema(
+        manifest,
+        {"direct_passthrough": {"enabled": True}},
+    )
+
+    assert schema is not None
+    assert schema["properties"]["direct_passthrough"]["additionalProperties"] is False
+
+
+def test_direct_passthrough_platform_field_requires_declared_capability() -> None:
+    with pytest.raises(Exception) as exc_info:
+        features_api._account_config_schema(
+            {},
+            {"direct_passthrough": {"enabled": True}},
+        )
+
+    assert getattr(exc_info.value, "status_code", None) == 400
+    assert "仅声明 telegram_direct_passthrough" in str(exc_info.value.detail)
+
+
+def test_direct_passthrough_toggle_preserves_legacy_plugin_config() -> None:
+    config = features_api._with_direct_passthrough_enabled(  # noqa: SLF001
+        {"trigger_probability": 0.16, "direct_passthrough": {"enabled": "false"}},
+        True,
+    )
+
+    assert config == {
+        "trigger_probability": 0.16,
+        "direct_passthrough": {"enabled": True},
+    }
+
+
+def test_chatgpt_image_token_identity_is_stable_across_rekey(monkeypatch) -> None:
+    import app.crypto as crypto
+    from app.crypto import generate_master_key
+    from app.services.plugin_config_secrets import wrap_secret
+    from app.settings import settings
+
+    token = "eyJhbGciOiJub25lIn0.stable-chatgpt-image-token"
+
+    monkeypatch.setattr(settings, "master_key", generate_master_key())
+    monkeypatch.setattr(crypto, "_fernet", None)
+    first = features_api._sanitize_chatgpt_image_config(  # noqa: SLF001
+        {"tokens": [{"token": wrap_secret(token), "note": "primary"}]}
+    )
+
+    monkeypatch.setattr(settings, "master_key", generate_master_key())
+    monkeypatch.setattr(crypto, "_fernet", None)
+    second = features_api._sanitize_chatgpt_image_config(  # noqa: SLF001
+        {"tokens": [{"token": wrap_secret(token), "note": "primary"}]}
+    )
+
+    assert first["tokens"][0]["token_id"] == second["tokens"][0]["token_id"]
+    assert first["tokens"][0]["token"] == second["tokens"][0]["token"]
+    assert "secret:v1:" not in first["tokens"][0]["token"]
+
+
+def test_legacy_plain_cookie_is_masked_before_migration() -> None:
+    sanitized = features_api._sanitize_config(  # noqa: SLF001
+        {"cookie": "uid=legacy-plaintext", "site_url": "https://example.com"},
+        "pt_promote",
+    )
+
+    assert sanitized == {"cookie": "***", "site_url": "https://example.com"}
 
 
 # ─────────────────────────────────────────────────────
@@ -132,6 +239,45 @@ class TestValidateConfigAgainstSchema:
             {"command": "pt", "torrent_cooldown_seconds": "12h"},
             account_schema,
         ).valid is True
+
+    def test_required_defaults_are_applied_before_validation(self) -> None:
+        """交互页局部保存插件参数时，带默认值的必填字段应由服务端补齐。"""
+        schema = {
+            "type": "object",
+            "properties": {
+                "command": {"type": "string", "default": "redpack"},
+                "delete_delay_seconds": {"type": "integer", "default": 60},
+                "cookie": {"type": "string"},
+            },
+            "required": ["command", "delete_delay_seconds", "cookie"],
+        }
+
+        config = apply_required_config_defaults({"cookie": "sid=ok"}, schema)
+
+        assert config == {
+            "command": "redpack",
+            "delete_delay_seconds": 60,
+            "cookie": "sid=ok",
+        }
+        assert validate_config_against_schema(config, schema).valid is True
+
+    def test_required_defaults_do_not_hide_missing_user_values(self) -> None:
+        """没有 default 的必填字段仍然必须由用户配置。"""
+        schema = {
+            "type": "object",
+            "properties": {
+                "command": {"type": "string", "default": "pt"},
+                "cookie": {"type": "string"},
+            },
+            "required": ["command", "cookie"],
+        }
+
+        config = apply_required_config_defaults({}, schema)
+        result = validate_config_against_schema(config, schema)
+
+        assert config == {"command": "pt"}
+        assert result.valid is False
+        assert result.errors[0].field == "cookie"
 
 
 # ─────────────────────────────────────────────────────
@@ -359,6 +505,85 @@ async def test_feature_matrix_passes_installed_plugin_lint_warnings(monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_feature_matrix_prefers_installed_plugin_version(monkeypatch) -> None:
+    """已安装插件版本是权威值，避免账号配置页展示 feature 表里的旧索引。"""
+
+    class Result:
+        def __init__(self, rows):
+            self.rows = rows
+
+        def scalars(self):
+            return self
+
+        def all(self):
+            return self.rows
+
+    feature = SimpleNamespace(
+        key="ten_half",
+        display_name="十点半",
+        is_builtin=False,
+        version="0.2.27",
+        manifest={"usage": "旧玩法说明"},
+    )
+    installed_plugin = InstalledPlugin(
+        key="ten_half",
+        source="repo",
+        source_url="https://github.com/Anoyou/telebot-plugins/tree/0.33.x",
+        version="0.3.3",
+        manifest_json={
+            "name": "ten_half",
+            "display_name": "十点半",
+            "version": "0.3.3",
+            "usage": "新按钮流程说明",
+            "capabilities": {"transfer": {"enabled": True}},
+        },
+        lint_warnings=[],
+    )
+
+    monkeypatch.setattr(
+        "app.services.feature_service.list_features",
+        AsyncMock(return_value=[feature]),
+    )
+    db = AsyncMock()
+    db.execute = AsyncMock(
+        side_effect=[
+            Result([installed_plugin]),  # InstalledPlugin
+            Result([]),  # Account
+            Result([]),  # AccountFeature
+        ],
+    )
+
+    data = await feature_matrix(db)
+    row = data["features"][0]
+
+    assert row["version"] == "0.3.3"
+    assert row["usage"] == "新按钮流程说明"
+    assert row["capabilities"] == {"transfer": {"enabled": True}}
+
+
+def test_feature_info_falls_back_when_installed_display_name_is_null() -> None:
+    """安装清单缺少显示名时不能把 JSON null 渲染成字符串 ``None``。"""
+
+    feature = SimpleNamespace(
+        key="scheduler",
+        display_name="定时任务",
+        is_builtin=True,
+        version="0.2.0",
+        manifest={"category": "automation"},
+    )
+    installed_plugin = InstalledPlugin(
+        key="scheduler",
+        source="builtin",
+        version="0.2.0",
+        manifest_json={"name": "scheduler", "display_name": None},
+    )
+
+    info = FeatureInfo.from_feature(feature, installed_plugin=installed_plugin)
+
+    assert info.display_name == "定时任务"
+
+
+@pytest.mark.asyncio
 async def test_seed_local_installed_features_skips_orphan_dirs(monkeypatch, tmp_path) -> None:
     """磁盘孤儿目录不再写入模块矩阵；已有孤儿 feature 行会被清掉。"""
 
@@ -394,6 +619,61 @@ async def test_seed_local_installed_features_skips_orphan_dirs(monkeypatch, tmp_
     assert added == 0
     assert changed is True
     db.delete.assert_awaited_once_with(existing_row)
+
+
+@pytest.mark.asyncio
+async def test_seed_local_installed_features_repairs_stale_feature_from_installed_plugin(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    """seed 时用 InstalledPlugin 自愈旧 Feature 索引，不依赖手动修库。"""
+
+    class Result:
+        def __init__(self, rows):
+            self.rows = rows
+
+        def scalars(self):
+            return self
+
+        def all(self):
+            return self.rows
+
+    monkeypatch.setattr("app.settings.settings.plugins_installed_dir", str(tmp_path / "missing"))
+    feature = Feature(
+        key="ten_half",
+        display_name="十点半",
+        is_builtin=False,
+        version="0.2.27",
+        manifest={"usage": "旧玩法说明"},
+    )
+    installed_plugin = InstalledPlugin(
+        key="ten_half",
+        source="repo",
+        source_url="https://github.com/Anoyou/telebot-plugins/tree/0.33.x",
+        version="0.3.3",
+        manifest_json={
+            "name": "ten_half",
+            "display_name": "十点半",
+            "version": "0.3.3",
+            "usage": "新按钮流程说明",
+            "event_subscriptions": [{"events": ["message"]}],
+        },
+        lint_warnings=[],
+    )
+    db = AsyncMock()
+    db.execute = AsyncMock(return_value=Result([installed_plugin]))
+    db.flush = AsyncMock()
+
+    added, changed = await _seed_local_installed_features(db, {"ten_half": feature})
+
+    assert added == 0
+    assert changed is True
+    assert feature.version == "0.3.3"
+    assert feature.manifest == {
+        "usage": "新按钮流程说明",
+        "event_subscriptions": [{"events": ["message"]}],
+        "source_label": "repo",
+    }
 
 
 # ─────────────────────────────────────────────────────
@@ -447,6 +727,43 @@ class TestGetPluginGlobalConfig:
 
 
 class TestFeatureInfo:
+    def test_from_feature_prefers_installed_plugin_metadata(self) -> None:
+        feature = SimpleNamespace(
+            key="ten_half",
+            display_name="十点半",
+            is_builtin=False,
+            version="0.2.27",
+            manifest={
+                "usage": "旧玩法说明",
+                "config_schema": {"properties": {"old": {"type": "string"}}},
+                "capabilities": {"old": True},
+            },
+        )
+        installed = SimpleNamespace(
+            source="repo",
+            source_url="https://github.com/Anoyou/telebot-plugins/tree/0.33.x",
+            source_label="Plugin Repo",
+            version="0.3.3",
+            signature_ok=None,
+            manifest_json={
+                "display_name": "十点半",
+                "version": "0.3.3",
+                "usage": "新按钮流程说明",
+                "config_schema": {"properties": {"max_players": {"type": "integer"}}},
+                "event_subscriptions": [{"events": ["message", "callback_query"]}],
+                "capabilities": {"transfer": {"enabled": True}},
+            },
+            lint_warnings=[],
+        )
+
+        info = FeatureInfo.from_feature(feature, installed_plugin=installed)
+
+        assert info.version == "0.3.3"
+        assert info.usage == "新按钮流程说明"
+        assert info.config_schema == {"properties": {"max_players": {"type": "integer"}}}
+        assert info.event_subscriptions == [{"events": ["message", "callback_query"]}]
+        assert info.capabilities == {"transfer": {"enabled": True}}
+
     def test_from_feature_marks_experimental_manifest(self) -> None:
         feature = MagicMock()
         feature.key = "codex_image"
@@ -470,6 +787,7 @@ class TestFeatureInfo:
         feature.version = "1.2.0"
         feature.manifest = {
             "category": "interactive",
+            "usage": "发送“开始九宫格”启动玩法；点击按钮或回复答案继续。",
             "interaction_profile": "session_game",
             "interaction_entries": [
                 {
@@ -480,10 +798,24 @@ class TestFeatureInfo:
                     "session_scope": "chat",
                 }
             ],
+            "event_subscriptions": [
+                {
+                    "source": ["interaction_bot"],
+                    "events": ["message", "callback_query"],
+                    "scope": "all_allowed_chats",
+                }
+            ],
+            "capabilities": {
+                "telegram_native_raw": {
+                    "enabled": True,
+                    "reason": "风控需要原始数字 ID",
+                }
+            },
         }
 
         info = FeatureInfo.from_feature(feature)
         assert info.category == "interactive"
+        assert info.usage == "发送“开始九宫格”启动玩法；点击按钮或回复答案继续。"
         assert info.interaction_profile == "session_game"
         assert info.interaction_entries == [
             {
@@ -494,6 +826,19 @@ class TestFeatureInfo:
                 "session_scope": "chat",
             }
         ]
+        assert info.event_subscriptions == [
+            {
+                "source": ["interaction_bot"],
+                "events": ["message", "callback_query"],
+                "scope": "all_allowed_chats",
+            }
+        ]
+        assert info.capabilities == {
+            "telegram_native_raw": {
+                "enabled": True,
+                "reason": "风控需要原始数字 ID",
+            }
+        }
 
 
 class TestSetPluginGlobalConfig:
@@ -606,10 +951,14 @@ class TestSetPluginGlobalConfig:
         ):
             result = await set_plugin_global_config(db, "pt_promote", {"cookie": "sid=ok"})
 
-        assert result == {"cookie": "sid=ok"}
+        from app.services.plugin_config_secrets import is_secret_envelope, unwrap_secret
+
+        assert is_secret_envelope(result["cookie"])
+        assert unwrap_secret(result["cookie"]) == "sid=ok"
         added_row = db.add.call_args.args[0]
         assert isinstance(added_row, PluginGlobalConfig)
-        assert added_row.config == {"cookie": "sid=ok"}
+        assert is_secret_envelope(added_row.config["cookie"])
+        assert unwrap_secret(added_row.config["cookie"]) == "sid=ok"
 
     @pytest.mark.asyncio
     async def test_updates_existing_global_config_row(self) -> None:

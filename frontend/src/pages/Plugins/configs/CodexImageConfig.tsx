@@ -24,6 +24,7 @@ import { Select } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { getErrMsg } from "@/lib/api";
+import { confirmDiscardChanges, useUnsavedChanges } from "@/lib/unsavedChanges";
 import { featureConfigBackTarget } from "@/pages/Plugins/_shared/featureConfig";
 import { featureRuntimeText } from "./_shared/featureStatus";
 
@@ -174,10 +175,15 @@ export function CodexImageConfigPage() {
   const [reasoningEffort, setReasoningEffort] = useState(DEFAULT_CONFIG.reasoning_effort);
   const [customInstructions, setCustomInstructions] = useState(DEFAULT_CONFIG.custom_instructions);
   const [dirty, setDirty] = useState(false);
+  const [remoteConfigChanged, setRemoteConfigChanged] = useState(false);
   const [showToken, setShowToken] = useState(false);
   const [hasToken, setHasToken] = useState(false);
 
   useEffect(() => {
+    if (dirty) {
+      setRemoteConfigChanged(true);
+      return;
+    }
     setCommand(currentConfig.command ?? DEFAULT_CONFIG.command);
     setAccessToken("");
     setHasToken(Boolean(currentConfig.access_token));
@@ -199,7 +205,9 @@ export function CodexImageConfigPage() {
     setReasoningEffort(currentConfig.reasoning_effort ?? DEFAULT_CONFIG.reasoning_effort);
     setCustomInstructions(currentConfig.custom_instructions ?? DEFAULT_CONFIG.custom_instructions);
     setDirty(false);
+    setRemoteConfigChanged(false);
   }, [feature?.config]);
+  useUnsavedChanges(dirty);
 
   const saveMut = useMutation({
     mutationFn: async (config: CodexImageConfig) => {
@@ -215,6 +223,7 @@ export function CodexImageConfigPage() {
       setAccessToken("");
       setShowToken(false);
       setDirty(false);
+      setRemoteConfigChanged(false);
       qc.invalidateQueries({ queryKey: ["account", aid, "features"] });
       qc.invalidateQueries({ queryKey: ["matrix"] });
       qc.invalidateQueries({ queryKey: ["message-templates", "catalog", aid] });
@@ -283,6 +292,7 @@ export function CodexImageConfigPage() {
     setReasoningEffort(currentConfig.reasoning_effort ?? DEFAULT_CONFIG.reasoning_effort);
     setCustomInstructions(currentConfig.custom_instructions ?? DEFAULT_CONFIG.custom_instructions);
     setDirty(false);
+    setRemoteConfigChanged(false);
   }
 
   const effectiveCommand = command || DEFAULT_CONFIG.command;
@@ -313,42 +323,19 @@ export function CodexImageConfigPage() {
   const backTarget = featureConfigBackTarget(aid, location.search);
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 pb-24">
       <div className="flex flex-wrap items-center gap-3">
         <Button
-          variant="ghost"
+          variant="default"
           size="sm"
-          onClick={() => nav(backTarget.backHref)}
+          className="gap-1.5 shadow-sm"
+          onClick={() => confirmDiscardChanges(dirty) && nav(backTarget.backHref)}
         >
-          <ArrowLeft className="mr-1 h-4 w-4" /> {backTarget.backLabel}
+          <ArrowLeft className="h-4 w-4" /> {backTarget.backLabel}
         </Button>
         <h1 className="text-2xl font-semibold tracking-tight">
           Codex 图片生成
         </h1>
-      </div>
-
-      <div className="sticky top-0 z-30 -mx-2 rounded-b-lg border bg-background/95 px-2 py-3 shadow-sm backdrop-blur supports-[backdrop-filter]:bg-background/80">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="text-sm">
-            <div className="font-medium">配置操作</div>
-            <div className="text-xs text-muted-foreground">
-              {dirty ? "有未保存修改，保存后 worker 会热加载。" : "当前配置已同步。"}
-            </div>
-          </div>
-          <div className="flex items-center gap-4">
-            <Button disabled={!dirty || saveMut.isPending} onClick={handleSave}>
-              {saveMut.isPending ? (
-                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-              ) : (
-                <Save className="mr-2 h-4 w-4" />
-              )}
-              保存配置
-            </Button>
-            <Button type="button" variant="ghost" disabled={!dirty || saveMut.isPending} onClick={resetForm} className="px-0">
-              撤销
-            </Button>
-          </div>
-        </div>
       </div>
 
       <Card>
@@ -367,7 +354,7 @@ export function CodexImageConfigPage() {
             </div>
           </div>
           <div className="rounded-md border bg-muted/20 p-3 text-xs text-muted-foreground">
-            <ul className="mt-1.5 list-inside list-disc space-y-0.5">
+            <ul className="mt-1.5 list-inside list-disc space-y-1 break-words">
               <li>
                 发送 <CommandBadge>{cmdPrefix}{effectiveCommand} 提示词</CommandBadge> 纯文本生成图片
               </li>
@@ -416,12 +403,12 @@ export function CodexImageConfigPage() {
 
       <Card>
         <CardHeader>
-          <CardTitle className="text-base">配置</CardTitle>
+          <CardTitle className="text-base">插件配置</CardTitle>
           <CardDescription>
             配置 Codex API 的鉴权 Token、模型和超时时间。修改后 worker 会自动热加载，无需重启。
           </CardDescription>
         </CardHeader>
-        <CardContent className="space-y-6">
+        <CardContent className="space-y-6 pb-0">
           <div className="grid gap-6 md:grid-cols-2 xl:grid-cols-3">
           <div className="space-y-1.5">
             <Label htmlFor="command">触发指令名</Label>
@@ -675,10 +662,6 @@ export function CodexImageConfigPage() {
                 setDirty(true);
               }}
             />
-            <div className="rounded-md border bg-background p-3 text-xs">
-              <div className="mb-1 font-medium">预览</div>
-              <TelegramHtmlPreview value={renderTemplate(messageTemplate, previewValues)} />
-            </div>
           </div>
 
           <div className="grid gap-3 sm:grid-cols-2">
@@ -739,6 +722,43 @@ export function CodexImageConfigPage() {
             />
           </div>
 
+        </CardContent>
+        <div className="static z-20 mt-4 rounded-b-lg border-t bg-background/95 px-4 py-3 shadow-[0_-8px_20px_rgba(15,23,42,0.06)] backdrop-blur supports-[backdrop-filter]:bg-background/85 sm:sticky sm:bottom-0 sm:px-6">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="text-sm">
+              <div className="font-medium">配置操作</div>
+              <div className="text-xs text-muted-foreground">
+                {remoteConfigChanged
+                  ? "服务端配置已变化；当前草稿已保留，保存会以草稿为准。"
+                  : dirty
+                    ? "有未保存修改，保存后 worker 会热加载。"
+                    : "当前配置已同步。"}
+              </div>
+            </div>
+            <div className="flex items-center gap-4">
+              <Button disabled={!dirty || saveMut.isPending} onClick={handleSave}>
+                {saveMut.isPending ? (
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                ) : (
+                  <Save className="mr-2 h-4 w-4" />
+                )}
+                保存配置
+              </Button>
+              <Button type="button" variant="ghost" disabled={!dirty || saveMut.isPending} onClick={resetForm} className="px-0">
+                撤销
+              </Button>
+            </div>
+          </div>
+        </div>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">插件预览</CardTitle>
+          <CardDescription>使用模拟上下文渲染当前消息模板，不会触发真实发送。</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <TelegramHtmlPreview value={renderTemplate(messageTemplate, previewValues)} />
         </CardContent>
       </Card>
     </div>

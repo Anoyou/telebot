@@ -4,16 +4,21 @@
 // 两者共享 NavList，移动端点击导航后自动关闭抽屉。
 import { useState } from "react";
 import { NavLink } from "react-router-dom";
+import { useQuery } from "@tanstack/react-query";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
   Boxes,
+  Bot,
+  Bug,
   Cog,
   Github,
   Home,
   ScrollText,
   Sparkles,
+  WalletCards,
+  Webhook,
   X,
 } from "lucide-react";
 import { BrandLogo } from "@/components/BrandLogo";
@@ -24,6 +29,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { cn } from "@/lib/utils";
 import { APP_VERSION_LABEL } from "@/lib/version";
+import { getSystemSettings } from "@/api/system";
 import changelogRaw from "../../../../CHANGELOG.md?raw";
 
 interface NavItem {
@@ -39,13 +45,31 @@ const NAV: NavItem[] = [
   { to: "/", label: "概览", icon: Home, end: true },
   { to: "/plugins", label: "插件", icon: Boxes },
   { to: "/ai", label: "AI", icon: Sparkles },
+  { to: "/interaction", label: "交互", icon: Bot },
+  { to: "/ledger", label: "资金台账", icon: WalletCards },
+  { to: "/webhooks", label: "入站 Webhook", icon: Webhook },
+  { to: "/dispatch-debug", label: "命中调试", icon: Bug },
   { to: "/logs", label: "日志", icon: ScrollText },
   { to: "/settings", label: "系统", icon: Cog },
 ];
 
-export const MOBILE_PRIMARY_NAV: NavItem[] = NAV.filter(
-  (item) => item.to === "/" || item.to === "/plugins" || item.to === "/ai" || item.to === "/logs" || item.to === "/settings",
-);
+function navForAIState(aiEnabled: boolean): NavItem[] {
+  return NAV.filter((item) => aiEnabled || item.to !== "/ai");
+}
+
+export function mobilePrimaryNavForAIState(aiEnabled: boolean): NavItem[] {
+  return navForAIState(aiEnabled).filter((item) =>
+    item.to === "/" ||
+    item.to === "/plugins" ||
+    item.to === "/interaction" ||
+    item.to === "/ai",
+  );
+}
+
+export function mobileMoreNavForAIState(aiEnabled: boolean): NavItem[] {
+  const primary = new Set(mobilePrimaryNavForAIState(aiEnabled).map((item) => item.to));
+  return navForAIState(aiEnabled).filter((item) => !primary.has(item.to));
+}
 
 function NavList({
   collapsed = false,
@@ -54,9 +78,16 @@ function NavList({
   collapsed?: boolean;
   onNavigate?: () => void;
 }) {
+  const settingsQ = useQuery({
+    queryKey: ["system", "settings"],
+    queryFn: getSystemSettings,
+    staleTime: 30_000,
+  });
+  const navItems = navForAIState(settingsQ.data?.ai_enabled ?? true);
+
   return (
     <nav className="flex-1 space-y-1.5 overflow-y-auto px-4 py-3 text-sm">
-      {NAV.map((item) => (
+      {navItems.map((item) => (
         <NavLink
           key={item.to}
           to={item.to}
@@ -239,7 +270,7 @@ export function MobileSidebar({ open, onOpenChange }: MobileSidebarProps) {
         />
         <DialogPrimitive.Content
           className={cn(
-            "liquid-glass liquid-sidebar liquid-sidebar-drawer fixed inset-y-0 left-0 z-[60] flex w-64 max-w-[80vw] flex-col md:hidden",
+            "liquid-glass liquid-sidebar liquid-sidebar-drawer inset-y-0 left-0 z-[60] flex w-64 max-w-[80vw] flex-col md:hidden",
             // 安全区适配：iPhone 横屏时左侧刘海，全屏 PWA 顶/底状态栏区
             "pl-[env(safe-area-inset-left)] pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]",
             "data-[state=closed]:pointer-events-none",

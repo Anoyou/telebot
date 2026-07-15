@@ -9,7 +9,9 @@
 """
 from __future__ import annotations
 
+import asyncio
 import base64
+import json
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock, patch
 
@@ -17,12 +19,15 @@ import httpx
 import pytest
 from fastapi import HTTPException
 
+from app.api import commands as commands_api
 from app.crypto import decrypt_str, encrypt_str
-from app.db.models.command import LLMProvider
+from app.db.models.command import LLMProvider, normalize_protocol_profile
 from app.schemas.command import (
+    ChatTestModelsRequest,
     CommandTemplateBase,
     CommandTemplateCreate,
     LLMProviderCreate,
+    LLMProviderUpdate,
 )
 from app.services import command_service
 from app.services.command_service import _provider_to_out
@@ -32,6 +37,7 @@ from app.services.llm_client import (
     _safe_error_message,
     build_client,
 )
+from app.services.llm_dto import LLMProviderDTO
 from app.worker import command as wcmd
 
 
@@ -88,6 +94,223 @@ def test_provider_to_out_no_key() -> None:
     )
     out = _provider_to_out(row)
     assert out.has_api_key is False
+
+
+def test_liveness_transport_metadata_resolves_effective_identity() -> None:
+    """测活结果必须返回 auto 解析后的真实客户端，而不是配置字面值。"""
+    row = LLMProvider(
+        id=3,
+        name="responses-auto",
+        provider="openai",
+        api_key_enc=encrypt_str("sk-test-effective-identity"),
+        base_url="https://api.example.test/v1",
+        default_model="gpt-5",
+        api_format="responses",
+        client_identity_profile="auto",
+    )
+
+    assert commands_api._liveness_transport_metadata(row) == {
+        "effective_api_format": "responses",
+        "client_identity_profile": "codex_cli",
+    }
+    assert commands_api._liveness_transport_metadata(
+        row,
+        api_format_override="anthropic_messages",
+        identity_override="claude_code",
+    ) == {
+        "effective_api_format": "anthropic_messages",
+        "client_identity_profile": "claude_code",
+    }
+
+
+@pytest.mark.asyncio
+async def test_full_liveness_preview_forwards_provider_scope(monkeypatch) -> None:
+    """全局巡检预览必须只加载用户勾选的 Provider。"""
+    from app.schemas.command import FullLivenessPreviewRequest
+
+    captured: dict[str, object] = {}
+
+    async def _load_rows(_db, provider_ids):
+        captured["provider_ids"] = provider_ids
+        return []
+
+    class _Preview:
+        def to_dict(self):
+            return {
+                "provider_total": 0,
+                "executable_provider_total": 0,
+                "enabled_model_total": 0,
+                "task_total": 0,
+                "max_tokens": 256,
+                "max_output_tokens": 0,
+                "global_concurrency": 8,
+                "provider_concurrency": 2,
+                "needs_confirmation": False,
+                "providers": [],
+            }
+
+    monkeypatch.setattr(commands_api, "_require_ai_enabled", AsyncMock(return_value=None))
+    monkeypatch.setattr(commands_api, "_load_liveness_provider_rows", _load_rows)
+    monkeypatch.setattr(commands_api.llm_liveness, "build_preview", lambda *_a, **_k: _Preview())
+
+    out = await commands_api.full_liveness_preview(
+        payload=FullLivenessPreviewRequest(only_provider_ids=[7, 11]),
+        db=AsyncMock(),
+        _user=AsyncMock(),
+    )
+
+    assert captured["provider_ids"] == [7, 11]
+    assert out.provider_total == 0
+
+
+@pytest.mark.asyncio
+async def test_full_liveness_run_rejects_task_pool_over_hard_limit(monkeypatch) -> None:
+    """后端必须独立限制任务数，不能只依赖前端预览和确认提示。"""
+    from app.schemas.command import FullLivenessRunRequest
+    from app.services.llm_liveness import LivenessTask
+
+    tasks = [
+        LivenessTask(provider_id=1, provider_name="p", model_id=f"m-{index}")
+        for index in range(commands_api.llm_liveness.MAX_LIVENESS_TASKS + 1)
+    ]
+    monkeypatch.setattr(commands_api, "_require_ai_enabled", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        commands_api,
+        "_load_liveness_provider_rows",
+        AsyncMock(return_value=[]),
+    )
+    monkeypatch.setattr(commands_api.llm_liveness, "build_task_pool", lambda _rows: tasks)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await commands_api.full_liveness_run(
+            payload=FullLivenessRunRequest(),
+            db=AsyncMock(),
+            _user=AsyncMock(),
+        )
+
+    assert exc_info.value.status_code == 422
+    assert exc_info.value.detail["code"] == "LIVENESS_TASK_LIMIT"
+
+
+@pytest.mark.asyncio
+async def test_full_liveness_run_requires_server_side_large_run_confirmation(monkeypatch) -> None:
+    """大任务不能绕过前端弹窗直接调用 API 启动。"""
+    from app.schemas.command import FullLivenessRunRequest
+    from app.services.llm_liveness import LivenessTask
+
+    tasks = [
+        LivenessTask(provider_id=1, provider_name="p", model_id=f"m-{index}")
+        for index in range(commands_api.llm_liveness.LARGE_RUN_MODEL_THRESHOLD + 1)
+    ]
+    create = AsyncMock()
+    monkeypatch.setattr(commands_api, "_require_ai_enabled", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        commands_api,
+        "_load_liveness_provider_rows",
+        AsyncMock(return_value=[]),
+    )
+    monkeypatch.setattr(commands_api.llm_liveness, "build_task_pool", lambda _rows: tasks)
+    monkeypatch.setattr(commands_api.llm_liveness.liveness_jobs, "create", create)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await commands_api.full_liveness_run(
+            payload=FullLivenessRunRequest(),
+            db=AsyncMock(),
+            _user=AsyncMock(),
+        )
+
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail["code"] == "LIVENESS_CONFIRMATION_REQUIRED"
+    assert exc_info.value.detail["task_total"] == len(tasks)
+    create.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_full_liveness_run_maps_busy_admission_to_retryable_429(monkeypatch) -> None:
+    """进程内 admission 满时，API 要给出可重试的 429 和 Retry-After。"""
+    from app.schemas.command import FullLivenessRunRequest
+
+    monkeypatch.setattr(commands_api, "_require_ai_enabled", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        commands_api,
+        "_load_liveness_provider_rows",
+        AsyncMock(return_value=[]),
+    )
+    monkeypatch.setattr(commands_api.llm_liveness, "build_task_pool", lambda _rows: [])
+    monkeypatch.setattr(
+        commands_api.llm_liveness.liveness_jobs,
+        "create",
+        AsyncMock(
+            side_effect=commands_api.llm_liveness.LivenessCapacityExceeded(
+                "已有 4 个测活任务运行中"
+            )
+        ),
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await commands_api.full_liveness_run(
+            payload=FullLivenessRunRequest(),
+            db=AsyncMock(),
+            _user=AsyncMock(),
+        )
+
+    assert exc_info.value.status_code == 429
+    assert exc_info.value.headers == {"Retry-After": "3"}
+    assert exc_info.value.detail["code"] == "LIVENESS_BUSY"
+
+
+@pytest.mark.asyncio
+async def test_full_liveness_cancel_records_single_diagnostic_usage(monkeypatch) -> None:
+    """取消在途全局巡检时应中断请求，并且只记录一次取消用量。"""
+    from app.schemas.command import FullLivenessRunRequest
+    from app.services import llm_client, llm_liveness
+
+    row = LLMProvider(
+        id=1,
+        name="Cancelable",
+        provider="openai",
+        api_key_enc="encrypted-test-key",
+        base_url="https://api.example.com/v1",
+        default_model="cancel-model",
+        api_format="responses",
+        models=[{"id": "cancel-model", "enabled": True}],
+        created_at=datetime.now(UTC),
+    )
+    entered = asyncio.Event()
+
+    class _FakeClient:
+        async def complete(self, *_args, **_kwargs):
+            entered.set()
+            await asyncio.Event().wait()
+
+    registry = llm_liveness.LivenessJobRegistry()
+    monkeypatch.setattr(commands_api.llm_liveness, "liveness_jobs", registry)
+    monkeypatch.setattr(commands_api, "_require_ai_enabled", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        commands_api,
+        "_load_liveness_provider_rows",
+        AsyncMock(return_value=[row]),
+    )
+    monkeypatch.setattr(commands_api, "_resolve_proxy_url", AsyncMock(return_value=None))
+    monkeypatch.setattr(llm_client, "build_client", lambda *_args, **_kwargs: _FakeClient())
+    emitted = _capture_llm_usage(monkeypatch)
+
+    started = await commands_api.full_liveness_run(
+        payload=FullLivenessRunRequest(),
+        db=AsyncMock(),
+        _user=AsyncMock(),
+    )
+    await asyncio.wait_for(entered.wait(), timeout=1)
+    cancelled = await commands_api.full_liveness_cancel(started.run_id, AsyncMock())
+    job = registry.get(started.run_id)
+    assert job is not None and job.bg_task is not None
+    await asyncio.wait_for(job.bg_task, timeout=1)
+
+    assert cancelled.status in {"running", "cancelled"}
+    assert job.status == "cancelled"
+    assert len(emitted) == 1
+    assert emitted[0].success is False
+    assert emitted[0].error_type == "llmerror"
 
 
 # ════════════════════════════════════════════════════════════
@@ -250,6 +473,126 @@ def test_llm_provider_create_validates_provider() -> None:
         LLMProviderCreate(
             name="x", provider="bad-vendor", api_key="x", default_model="x"
         )
+
+
+def test_protocol_profile_normalization_is_scoped_to_anthropic_messages() -> None:
+    assert (
+        normalize_protocol_profile("anthropic_messages", "claude_code_proxy")
+        == "claude_code_proxy"
+    )
+    assert normalize_protocol_profile("responses", "claude_code_proxy") == "standard"
+    assert normalize_protocol_profile("chat_completions", None) == "standard"
+
+
+def test_provider_protocol_profile_defaults_and_validates() -> None:
+    payload = LLMProviderCreate(
+        name="anthropic-main",
+        provider="anthropic",
+        default_model="claude-haiku-4-5",
+        api_format="anthropic_messages",
+    )
+    assert payload.protocol_profile == "standard"
+
+    with pytest.raises(ValueError):
+        LLMProviderCreate(
+            name="anthropic-main",
+            provider="anthropic",
+            default_model="claude-haiku-4-5",
+            api_format="anthropic_messages",
+            protocol_profile="unknown",
+        )
+
+
+@pytest.mark.asyncio
+async def test_create_provider_normalizes_profile_for_non_anthropic_protocol() -> None:
+    class _Result:
+        @staticmethod
+        def scalar_one_or_none():
+            return None
+
+    class _DB:
+        row: LLMProvider | None = None
+
+        async def execute(self, _query):
+            return _Result()
+
+        def add(self, row: LLMProvider) -> None:
+            self.row = row
+
+        async def flush(self) -> None:
+            assert self.row is not None
+            self.row.id = 11
+            self.row.created_at = datetime.now(UTC)
+
+    db = _DB()
+    out = await command_service.create_provider(
+        db,
+        LLMProviderCreate(
+            name="responses-proxy",
+            provider="openai",
+            default_model="gpt-4o-mini",
+            api_format="responses",
+            protocol_profile="claude_code_proxy",
+        ),
+    )
+
+    assert db.row is not None
+    assert db.row.protocol_profile == "standard"
+    assert out.protocol_profile == "standard"
+
+
+@pytest.mark.asyncio
+async def test_update_provider_resets_profile_when_leaving_anthropic_protocol() -> None:
+    row = LLMProvider(
+        id=12,
+        name="anthropic-proxy",
+        provider="anthropic",
+        api_key_enc=None,
+        base_url="https://proxy.example/v1",
+        default_model="claude-haiku-4-5",
+        api_format="anthropic_messages",
+        protocol_profile="claude_code_proxy",
+        created_at=datetime.now(UTC),
+    )
+
+    class _DB:
+        async def get(self, _model, _pid):
+            return row
+
+        async def flush(self) -> None:
+            return None
+
+    out = await command_service.update_provider(
+        _DB(),
+        row.id,
+        LLMProviderUpdate(api_format="responses"),
+    )
+
+    assert row.api_format == "responses"
+    assert row.protocol_profile == "standard"
+    assert out.protocol_profile == "standard"
+
+
+def test_provider_out_and_dto_preserve_only_effective_protocol_profile() -> None:
+    row = LLMProvider(
+        id=13,
+        name="anthropic-proxy",
+        provider="anthropic",
+        api_key_enc=None,
+        base_url="https://proxy.example/v1",
+        default_model="claude-haiku-4-5",
+        api_format="anthropic_messages",
+        protocol_profile="claude_code_proxy",
+        created_at=datetime.now(UTC),
+    )
+    assert _provider_to_out(row).protocol_profile == "claude_code_proxy"
+    assert LLMProviderDTO.from_orm_row(row).protocol_profile == "claude_code_proxy"
+
+    row.api_format = "chat_completions"
+    assert _provider_to_out(row).protocol_profile == "standard"
+    dto = LLMProviderDTO.from_orm_row(row)
+    assert dto.protocol_profile == "standard"
+    assert dto.to_dict()["protocol_profile"] == "standard"
 
 
 # ════════════════════════════════════════════════════════════
@@ -504,7 +847,10 @@ async def test_openai_client_text_only_keeps_string_content() -> None:
         await cli.complete("sys", "纯文本", images=None)
 
     body = fake.post.call_args.kwargs["json"]
+    headers = fake.post.call_args.kwargs["headers"]
     assert body["messages"][1]["content"] == "纯文本"
+    # 0.57.0 起不再发送 TelePilot 产品 UA；直接构造的 client 无身份档案时不注入 UA。
+    assert "TelePilot/" not in headers.get("User-Agent", "")
 
 
 @pytest.mark.asyncio
@@ -537,9 +883,8 @@ async def test_anthropic_client_vision_body_shape() -> None:
     class _FakeStreamResp:
         status_code = 200
 
-        async def aiter_lines(self):
-            for line in sse_lines:
-                yield line
+        async def aiter_bytes(self):
+            yield ("\n".join(sse_lines) + "\n").encode()
 
         async def aiter_text(self):  # 错误路径才用得到
             yield ""
@@ -573,6 +918,7 @@ async def test_anthropic_client_vision_body_shape() -> None:
         await cli.complete("sys", "describe", images=[_TINY_PNG])
 
     body = captured_kwargs["json"]
+    headers = captured_kwargs["headers"]
     content = body["messages"][0]["content"]
     assert isinstance(content, list)
     img_blk = content[0]
@@ -583,6 +929,213 @@ async def test_anthropic_client_vision_body_shape() -> None:
     import base64 as _b64
     assert _b64.b64decode(img_blk["source"]["data"]) == _TINY_PNG
     assert content[1] == {"type": "text", "text": "describe"}
+    assert "anthropic-beta" not in headers
+    assert "anthropic-dangerous-direct-browser-access" not in headers
+
+
+@pytest.mark.asyncio
+async def test_anthropic_proxy_profile_adds_only_explicit_compatibility_headers() -> None:
+    from app.services.llm_client import AnthropicClient
+
+    class _FakeStreamResp:
+        status_code = 200
+
+        async def aiter_bytes(self):
+            lines = (
+                "event: message_start",
+                'data: {"message":{"model":"claude","usage":{"input_tokens":1}}}',
+                "",
+                "event: content_block_delta",
+                'data: {"delta":{"type":"text_delta","text":"ok"}}',
+                "",
+                "event: message_delta",
+                'data: {"delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}',
+                "",
+            )
+            yield ("\n".join(lines) + "\n").encode()
+
+        async def aiter_text(self):
+            yield ""
+
+    class _FakeStreamCM:
+        async def __aenter__(self):
+            return _FakeStreamResp()
+
+        async def __aexit__(self, *_exc):
+            return False
+
+    captured: dict = {}
+
+    def _stream(*_args, **kwargs):
+        captured.update(kwargs)
+        return _FakeStreamCM()
+
+    fake = AsyncMock()
+    fake.__aenter__.return_value = fake
+    fake.stream = _stream
+    with patch("app.services.llm_client.httpx.AsyncClient", return_value=fake):
+        cli = AnthropicClient(
+            api_key="sk",
+            base_url=None,
+            model="claude",
+            protocol_profile="claude_code_proxy",
+        )
+        result = await cli.complete("sys", "user")
+
+    assert captured["headers"]["x-app"] == "cli"
+    assert "claude-code" in captured["headers"]["anthropic-beta"]
+    assert result.stop_reason.value == "completed"
+
+
+@pytest.mark.asyncio
+async def test_anthropic_client_stream_complete_yields_text_deltas() -> None:
+    """stream_complete 应直接产出 Anthropic SSE 的 text_delta 增量。"""
+    from app.services.llm_client import AnthropicClient
+
+    sse_lines = [
+        "event: message_start",
+        'data: {"type":"message_start","message":{"model":"claude-x","usage":{"input_tokens":4}}}',
+        "",
+        "event: content_block_delta",
+        'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"你"}}',
+        "",
+        "event: content_block_delta",
+        'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"好"}}',
+        "",
+        "event: message_delta",
+        'data: {"type":"message_delta","usage":{"output_tokens":2}}',
+        "",
+        "event: message_stop",
+        'data: {"type":"message_stop"}',
+        "",
+    ]
+
+    class _FakeStreamResp:
+        status_code = 200
+
+        async def aiter_bytes(self):
+            yield ("\n".join(sse_lines) + "\n").encode()
+
+        async def aiter_text(self):
+            yield ""
+
+    class _FakeStreamCM:
+        async def __aenter__(self):
+            return _FakeStreamResp()
+
+        async def __aexit__(self, *exc):
+            return False
+
+    captured_kwargs: dict = {}
+
+    def _make_stream(*_args, **kwargs):
+        captured_kwargs.update(kwargs)
+        return _FakeStreamCM()
+
+    fake = AsyncMock()
+    fake.__aenter__.return_value = fake
+    fake.stream = _make_stream
+
+    with patch("app.services.llm_client.httpx.AsyncClient", return_value=fake):
+        cli = AnthropicClient(api_key="sk", base_url=None, model="claude-x")
+        chunks = [chunk async for chunk in cli.stream_complete("sys", "user")]
+
+    assert captured_kwargs["json"]["stream"] is True
+    assert [chunk.delta for chunk in chunks if chunk.delta] == ["你", "好"]
+    assert chunks[-1].done is True
+    assert chunks[-1].model == "claude-x"
+    assert chunks[-1].input_tokens == 4
+    assert chunks[-1].output_tokens == 2
+
+
+@pytest.mark.asyncio
+async def test_openai_client_stream_complete_yields_text_deltas() -> None:
+    """Chat Completions streaming 应解析 delta.content 与最终 usage。"""
+    sse_lines = [
+        'data: {"model":"gpt-stream","choices":[{"delta":{"content":"你"}}]}',
+        "",
+        'data: {"model":"gpt-stream","choices":[{"delta":{"content":"好"},"finish_reason":"stop"}]}',
+        "",
+        'data: {"model":"gpt-stream","choices":[],"usage":{"prompt_tokens":4,"completion_tokens":2}}',
+        "",
+        "data: [DONE]",
+        "",
+    ]
+
+    class _FakeStreamResp:
+        status_code = 200
+
+        async def aiter_bytes(self):
+            yield ("\n".join(sse_lines) + "\n").encode()
+
+        async def aiter_text(self):
+            yield ""
+
+    class _FakeStreamCM:
+        async def __aenter__(self):
+            return _FakeStreamResp()
+
+        async def __aexit__(self, *exc):
+            return False
+
+    captured_kwargs: dict = {}
+
+    def _make_stream(*_args, **kwargs):
+        captured_kwargs.update(kwargs)
+        return _FakeStreamCM()
+
+    fake = AsyncMock()
+    fake.__aenter__.return_value = fake
+    fake.stream = _make_stream
+
+    with patch("app.services.llm_client.httpx.AsyncClient", return_value=fake):
+        cli = OpenAIClient(api_key="sk", base_url=None, model="gpt-x")
+        chunks = [chunk async for chunk in cli.stream_complete("sys", "user")]
+
+    assert captured_kwargs["json"]["stream"] is True
+    assert [chunk.delta for chunk in chunks if chunk.delta] == ["你", "好"]
+    assert chunks[-1].done is True
+    assert chunks[-1].model == "gpt-stream"
+    assert chunks[-1].input_tokens == 4
+    assert chunks[-1].output_tokens == 2
+
+
+@pytest.mark.asyncio
+async def test_openai_stream_complete_consumes_ignored_stream_json_once() -> None:
+    """上游忽略 stream=true 返回普通 JSON 时，应在同一请求内解析而非再次调用。"""
+    class _FakeStreamResp:
+        status_code = 200
+        headers = {"content-type": "application/json"}
+
+        async def aiter_bytes(self):
+            yield json.dumps(
+                {
+                    "model": "gpt-json",
+                    "choices": [{"message": {"content": "完整 JSON 回复"}}],
+                    "usage": {"prompt_tokens": 5, "completion_tokens": 3},
+                }
+            ).encode()
+
+    class _FakeStreamCM:
+        async def __aenter__(self):
+            return _FakeStreamResp()
+
+        async def __aexit__(self, *exc):
+            return False
+
+    fake = AsyncMock()
+    fake.__aenter__.return_value = fake
+    fake.stream = lambda *_args, **_kwargs: _FakeStreamCM()
+
+    with patch("app.services.llm_client.httpx.AsyncClient", return_value=fake):
+        cli = OpenAIClient(api_key="sk", base_url=None, model="gpt-x")
+        chunks = [chunk async for chunk in cli.stream_complete("sys", "user")]
+
+    assert [chunk.delta for chunk in chunks if chunk.delta] == ["完整 JSON 回复"]
+    assert chunks[-1].done is True
+    assert chunks[-1].model == "gpt-json"
+    assert chunks[-1].input_tokens == 5
+    assert chunks[-1].output_tokens == 3
 
 
 @pytest.mark.asyncio
@@ -612,6 +1165,63 @@ async def test_responses_client_vision_body_shape() -> None:
     assert content[0] == {"type": "input_text", "text": "describe"}
     assert content[1]["type"] == "input_image"
     assert content[1]["image_url"].startswith("data:image/png;base64,")
+
+
+@pytest.mark.asyncio
+async def test_responses_client_stream_complete_yields_text_deltas() -> None:
+    """Responses streaming 应设置 stream=true，并 yield output_text.delta。"""
+    from app.services.llm_client import ResponsesClient
+
+    sse_lines = [
+        "event: response.output_text.delta",
+        'data: {"type":"response.output_text.delta","delta":"hello"}',
+        "",
+        "event: response.output_text.delta",
+        'data: {"type":"response.output_text.delta","delta":" world"}',
+        "",
+        "event: response.completed",
+        'data: {"type":"response.completed","response":{"model":"gpt-stream","status":"completed",'
+        '"usage":{"input_tokens":3,"output_tokens":2}}}',
+        "",
+    ]
+
+    class _FakeStreamResp:
+        status_code = 200
+
+        async def aiter_bytes(self):
+            yield ("\n".join(sse_lines) + "\n").encode()
+
+        async def aiter_text(self):
+            yield ""
+
+    class _FakeStreamCM:
+        async def __aenter__(self):
+            return _FakeStreamResp()
+
+        async def __aexit__(self, *exc):
+            return False
+
+    captured_kwargs: dict = {}
+
+    def _make_stream(*_args, **kwargs):
+        captured_kwargs.update(kwargs)
+        return _FakeStreamCM()
+
+    fake = AsyncMock()
+    fake.__aenter__.return_value = fake
+    fake.stream = _make_stream
+
+    with patch("app.services.llm_client.httpx.AsyncClient", return_value=fake):
+        cli = ResponsesClient(api_key="sk", base_url=None, model="gpt-x")
+        chunks = [chunk async for chunk in cli.stream_complete("sys", "user")]
+
+    body = captured_kwargs["json"]
+    assert body["stream"] is True
+    assert [chunk.delta for chunk in chunks if chunk.delta] == ["hello", " world"]
+    assert chunks[-1].done is True
+    assert chunks[-1].model == "gpt-stream"
+    assert chunks[-1].input_tokens == 3
+    assert chunks[-1].output_tokens == 2
 
 
 def test_build_client_passes_proxy_to_openai() -> None:
@@ -772,6 +1382,181 @@ async def test_responses_client_parses_output_text_top_level() -> None:
 
 
 @pytest.mark.asyncio
+async def test_responses_client_parses_sse_completed_response() -> None:
+    """Codex/CLIProxyAPI 类反代可能无视 stream=false，仍返回 Responses SSE。"""
+    from app.services.llm_client import ResponsesClient
+
+    cli = ResponsesClient(api_key="sk", base_url="https://codex.example.com/v1", model="gpt-5.5")
+
+    class _Resp:
+        status_code = 200
+        headers = {"content-type": "text/event-stream; charset=utf-8"}
+        text = (
+            "event: response.created\n"
+            'data: {"type":"response.created","response":{"id":"resp_1","status":"in_progress"}}\n'
+            "\n"
+            "event: response.completed\n"
+            'data: {"type":"response.completed","response":{"model":"gpt-5.5-codex","status":"completed",'
+            '"output_text":"sse ok","usage":{"input_tokens":7,"output_tokens":2}}}\n'
+            "\n"
+        )
+
+        @staticmethod
+        def json():
+            raise json.JSONDecodeError("Expecting value", "", 0)
+
+    fake = AsyncMock()
+    fake.__aenter__.return_value = fake
+    fake.post = AsyncMock(return_value=_Resp())
+    with patch("app.services.llm_client.httpx.AsyncClient", return_value=fake):
+        result = await cli.complete("sys", "user")
+
+    assert result.text == "sse ok"
+    assert result.model == "gpt-5.5-codex"
+    assert result.input_tokens == 7
+    assert result.output_tokens == 2
+
+
+@pytest.mark.asyncio
+async def test_responses_client_parses_sse_text_delta_without_completed_body() -> None:
+    """半兼容反代如果只给文本增量，也应折叠成 output_text。"""
+    from app.services.llm_client import ResponsesClient
+
+    cli = ResponsesClient(api_key="sk", base_url="https://codex.example.com/v1", model="gpt-5.5")
+
+    class _Resp:
+        status_code = 200
+        headers = {"content-type": "text/event-stream"}
+        text = (
+            "event: response.output_text.delta\n"
+            'data: {"type":"response.output_text.delta","delta":"hello"}\n'
+            "\n"
+            "event: response.output_text.delta\n"
+            'data: {"type":"response.output_text.delta","delta":" world"}\n'
+            "\n"
+            "event: response.output_text.done\n"
+            'data: {"type":"response.output_text.done","text":"hello world"}\n'
+            "\n"
+        )
+
+        @staticmethod
+        def json():
+            raise json.JSONDecodeError("Expecting value", "", 0)
+
+    fake = AsyncMock()
+    fake.__aenter__.return_value = fake
+    fake.post = AsyncMock(return_value=_Resp())
+    with patch("app.services.llm_client.httpx.AsyncClient", return_value=fake):
+        result = await cli.complete("sys", "user")
+
+    assert result.text == "hello world"
+    assert result.model == "gpt-5.5"
+    assert result.input_tokens == 0
+    assert result.output_tokens == 0
+
+
+@pytest.mark.asyncio
+async def test_responses_client_keeps_sse_delta_when_completed_body_has_no_text() -> None:
+    """Codex 反代可能把正文只放在 delta，completed body 只带状态和 usage。"""
+    from app.services.llm_client import ResponsesClient
+
+    cli = ResponsesClient(api_key="sk", base_url="https://codex.example.com/v1", model="gpt-5.5")
+
+    class _Resp:
+        status_code = 200
+        headers = {"content-type": "text/event-stream"}
+        text = (
+            "event: response.output_text.delta\n"
+            'data: {"type":"response.output_text.delta","delta":"hello"}\n'
+            "\n"
+            "event: response.output_text.delta\n"
+            'data: {"type":"response.output_text.delta","delta":" world"}\n'
+            "\n"
+            "event: response.completed\n"
+            'data: {"type":"response.completed","response":{"model":"gpt-5.5-codex",'
+            '"status":"completed","usage":{"input_tokens":7,"output_tokens":2}}}\n'
+            "\n"
+        )
+
+        @staticmethod
+        def json():
+            raise json.JSONDecodeError("Expecting value", "", 0)
+
+    fake = AsyncMock()
+    fake.__aenter__.return_value = fake
+    fake.post = AsyncMock(return_value=_Resp())
+    with patch("app.services.llm_client.httpx.AsyncClient", return_value=fake):
+        result = await cli.complete("sys", "user")
+
+    assert result.text == "hello world"
+    assert result.model == "gpt-5.5-codex"
+    assert result.input_tokens == 7
+    assert result.output_tokens == 2
+
+
+@pytest.mark.asyncio
+async def test_responses_client_never_drops_max_output_tokens() -> None:
+    """输出上限是成本边界，兼容反代拒绝时必须失败，不能静默删掉。"""
+    from app.services.llm_client import LLMError, ResponsesClient
+
+    cli = ResponsesClient(api_key="sk", base_url="https://api.example.com/v1", model="gpt-5.4")
+
+    class _BadResp:
+        status_code = 400
+        text = '{"detail":"Unsupported parameter: max_output_tokens"}'
+
+    fake = AsyncMock()
+    fake.__aenter__.return_value = fake
+    fake.post = AsyncMock(return_value=_BadResp())
+    with patch("app.services.llm_client.httpx.AsyncClient", return_value=fake):
+        with pytest.raises(LLMError):
+            await cli.complete("sys", "user", max_tokens=9)
+
+    first_body = fake.post.await_args_list[0].kwargs["json"]
+    assert first_body["max_output_tokens"] == 9
+    assert fake.post.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_responses_client_can_strip_non_safety_compat_parameter() -> None:
+    """非安全边界的 temperature 可针对半兼容 Responses 端点降级。"""
+    from app.services.llm_client import ResponsesClient
+
+    cli = ResponsesClient(api_key="sk", base_url="https://codex.example.com/v1", model="gpt-5.5")
+
+    class _BadTemperatureResp:
+        status_code = 400
+        text = '{"detail":"Unsupported parameter: temperature"}'
+
+    class _OkResp:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {
+                "model": "gpt-5.5",
+                "output_text": "ok",
+                "usage": {"input_tokens": 3, "output_tokens": 1},
+            }
+
+    fake = AsyncMock()
+    fake.__aenter__.return_value = fake
+    fake.post = AsyncMock(side_effect=[_BadTemperatureResp(), _OkResp()])
+    with patch("app.services.llm_client.httpx.AsyncClient", return_value=fake):
+        result = await cli.complete("sys", "user", max_tokens=9, temperature=0.7)
+
+    assert result.text == "ok"
+    first_body = fake.post.await_args_list[0].kwargs["json"]
+    second_body = fake.post.await_args_list[1].kwargs["json"]
+    assert first_body["max_output_tokens"] == 9
+    assert first_body["temperature"] == 0.7
+    assert first_body["stream"] is False
+    assert second_body["max_output_tokens"] == 9
+    assert "temperature" not in second_body
+    assert second_body["stream"] is False
+
+
+@pytest.mark.asyncio
 async def test_responses_client_parses_output_array_form() -> None:
     """``output=[{type:message, content:[{type:output_text, text:"..."}]}]`` 形态。"""
     from app.services.llm_client import ResponsesClient
@@ -846,6 +1631,29 @@ async def test_responses_client_generate_image_uses_image_generation_tool() -> N
     assert result.text == "done"
     assert result.input_tokens == 8
     assert result.output_tokens == 2
+
+
+@pytest.mark.asyncio
+async def test_responses_image_generation_keeps_max_output_tokens() -> None:
+    """Responses 生图也不能为兼容反代删除输出上限。"""
+    from app.services.llm_client import LLMError, ResponsesClient
+
+    cli = ResponsesClient(api_key="sk", base_url=None, model="gpt-5.4")
+
+    class _BadResp:
+        status_code = 400
+        text = '{"error":"Unsupported parameter: max_output_tokens"}'
+
+    fake = AsyncMock()
+    fake.__aenter__.return_value = fake
+    fake.post = AsyncMock(return_value=_BadResp())
+    with patch("app.services.llm_client.httpx.AsyncClient", return_value=fake):
+        with pytest.raises(LLMError):
+            await cli.generate_image("sys", "画猫", max_tokens=12)
+
+    first_body = fake.post.await_args_list[0].kwargs["json"]
+    assert first_body["max_output_tokens"] == 12
+    assert fake.post.await_count == 1
 
 
 @pytest.mark.asyncio
@@ -1006,6 +1814,35 @@ async def test_responses_client_520_includes_cf_hint() -> None:
     assert "520" in msg
     # 有人话提示
     assert "反代" in msg or "上游" in msg or "Cloudflare" in msg
+
+
+@pytest.mark.asyncio
+async def test_responses_client_non_json_error_includes_response_summary() -> None:
+    """非 JSON 响应要带状态码、content-type 和脱敏 body 摘要，便于排查反代返回。"""
+    from app.services.llm_client import LLMError, ResponsesClient
+
+    cli = ResponsesClient(api_key="sk-secret-Z", base_url=None, model="x")
+
+    class _Resp:
+        status_code = 200
+        text = "<html>bad gateway sk-secret-Z</html>"
+        headers = {"content-type": "text/html; charset=utf-8"}
+
+        @staticmethod
+        def json():
+            raise json.JSONDecodeError("Expecting value", "", 0)
+
+    fake = AsyncMock()
+    fake.__aenter__.return_value = fake
+    fake.post = AsyncMock(return_value=_Resp())
+    with patch("app.services.llm_client.httpx.AsyncClient", return_value=fake):
+        with pytest.raises(LLMError) as exc:
+            await cli.complete("s", "u")
+    msg = str(exc.value)
+    assert "status=200" in msg
+    assert "text/html" in msg
+    assert "body=<html>bad gateway" in msg
+    assert "sk-secret-Z" not in msg
 
 
 @pytest.mark.asyncio
@@ -1181,6 +2018,19 @@ def test_ai_command_search_forces_web_search() -> None:
 # ════════════════════════════════════════════════════════════
 
 
+def _capture_llm_usage(monkeypatch):
+    from app.services import llm_runtime, llm_usage_service
+
+    emitted = []
+
+    async def _emit(record):
+        emitted.append(record)
+
+    monkeypatch.setattr(llm_usage_service, "ensure_llm_usage_callback_registered", lambda: None)
+    monkeypatch.setattr(llm_runtime, "_emit_usage", _emit)
+    return emitted
+
+
 @pytest.mark.asyncio
 async def test_test_model_endpoint_success(monkeypatch) -> None:
     """test-model 成功路径：返 ok=True + 延时 + preview。"""
@@ -1215,6 +2065,7 @@ async def test_test_model_endpoint_success(monkeypatch) -> None:
     from app.services import llm_client
 
     monkeypatch.setattr(llm_client, "build_client", lambda *a, **k: fake_client)
+    emitted = _capture_llm_usage(monkeypatch)
 
     out = await cmds_api.test_model(
         pid=1, payload=TestModelRequest(model="gpt-4o"), db=fake_db, user=AsyncMock()
@@ -1223,6 +2074,11 @@ async def test_test_model_endpoint_success(monkeypatch) -> None:
     assert out.model == "gpt-4o-2025"
     assert out.preview == "pong"
     assert out.latency_ms >= 0
+    assert len(emitted) == 1
+    assert emitted[0].source == "diagnostic:test-model"
+    assert emitted[0].success is True
+    assert emitted[0].input_tokens == 1
+    assert emitted[0].output_tokens == 1
 
 
 @pytest.mark.asyncio
@@ -1252,6 +2108,7 @@ async def test_test_model_endpoint_llm_error(monkeypatch) -> None:
     fake_cli = AsyncMock()
     fake_cli.complete = AsyncMock(side_effect=LLMError("OpenAI 接口返回 404: Model not found"))
     monkeypatch.setattr(llm_client, "build_client", lambda *a, **k: fake_cli)
+    emitted = _capture_llm_usage(monkeypatch)
 
     out = await cmds_api.test_model(
         pid=1,
@@ -1262,6 +2119,512 @@ async def test_test_model_endpoint_llm_error(monkeypatch) -> None:
     assert out.ok is False
     assert out.error and "404" in out.error
     assert out.latency_ms >= 0
+    assert len(emitted) == 1
+    assert emitted[0].source == "diagnostic:test-model"
+    assert emitted[0].success is False
+    assert emitted[0].error_type == "llmerror"
+
+
+@pytest.mark.asyncio
+async def test_chat_test_models_endpoint_success(monkeypatch) -> None:
+    """chat-test-models 走真实聊天入参：自定义测试语 + 历史 + token/timeout。"""
+    from app.api import commands as cmds_api
+    from app.services import llm_client
+    from app.services.llm_client import LLMResult
+
+    row = LLMProvider(
+        id=1,
+        name="AnyGPT",
+        provider="openai",
+        api_key_enc=None,
+        base_url="https://api.example.com/v1",
+        default_model="gpt-4o",
+        api_format="responses",
+        client_identity_profile="grok_cli",
+        created_at=datetime.now(UTC),
+    )
+
+    async def _get_provider_row(_db, _pid):
+        return row
+
+    captured: dict[str, object] = {}
+
+    class _FakeClient:
+        async def complete(self, system, user, **kwargs):
+            captured["system"] = system
+            captured["user"] = user
+            captured["kwargs"] = kwargs
+            return LLMResult(
+                text="我在想晚饭吃什么。",
+                model="model-a-real",
+                input_tokens=11,
+                output_tokens=7,
+            )
+
+    def _build_client(provider, **kwargs):
+        captured["provider"] = provider
+        captured["build_kwargs"] = kwargs
+        return _FakeClient()
+
+    monkeypatch.setattr(cmds_api.command_service, "get_provider_row", _get_provider_row)
+    monkeypatch.setattr(cmds_api, "_resolve_proxy_url", AsyncMock(return_value="socks5://127.0.0.1:1080"))
+    monkeypatch.setattr(llm_client, "build_client", _build_client)
+    emitted = _capture_llm_usage(monkeypatch)
+
+    payload = ChatTestModelsRequest(
+        models=["model-a"],
+        message="我好无聊，你在想啥？",
+        history=[
+            {"role": "user", "content": "上一句"},
+            {"role": "assistant", "content": "上一答"},
+        ],
+        system_prompt="你叫阿光。",
+        max_tokens=1234,
+        timeout_seconds=77,
+        api_format_override="anthropic_messages",
+        client_identity_profile_override="claude_code",
+    )
+    out = await cmds_api.chat_test_models(
+        pid=1,
+        payload=payload,
+        db=AsyncMock(),
+        _user=AsyncMock(),
+    )
+
+    assert out.provider_id == 1
+    assert out.provider_name == "AnyGPT"
+    assert len(out.results) == 1
+    result = out.results[0]
+    assert result.ok is True
+    assert result.requested_model == "model-a"
+    assert result.model == "model-a-real"
+    assert result.response == "我在想晚饭吃什么。"
+    assert result.preview == "我在想晚饭吃什么。"
+    assert result.input_tokens == 11
+    assert result.output_tokens == 7
+    assert result.effective_api_format == "anthropic_messages"
+    assert result.client_identity_profile == "claude_code"
+    assert captured["system"] == "你叫阿光。"
+    assert "上一句" in str(captured["user"])
+    assert "上一答" in str(captured["user"])
+    assert "用户刚刚说：" in str(captured["user"])
+    assert "我好无聊，你在想啥？" in str(captured["user"])
+    assert captured["build_kwargs"] == {
+        "override_model": "model-a",
+        "proxy_url": "socks5://127.0.0.1:1080",
+        "api_format_override": "anthropic_messages",
+        "identity_override": "claude_code",
+    }
+    assert captured["kwargs"] == {"max_tokens": 1234, "timeout_seconds": 77}
+    assert len(emitted) == 1
+    assert emitted[0].source == "diagnostic:chat-test"
+    assert emitted[0].success is True
+    assert emitted[0].input_tokens == 11
+    assert emitted[0].output_tokens == 7
+
+
+@pytest.mark.asyncio
+async def test_chat_test_models_endpoint_empty_response(monkeypatch) -> None:
+    """上游完成但空文本时，前端需要拿到明确的空返回状态。"""
+    from app.api import commands as cmds_api
+    from app.services import llm_client
+    from app.services.llm_client import LLMResult
+
+    row = LLMProvider(
+        id=1,
+        name="AnyGPT",
+        provider="openai",
+        api_key_enc=None,
+        base_url="https://api.example.com/v1",
+        default_model="gpt-4o",
+        api_format="responses",
+        client_identity_profile="grok_cli",
+        created_at=datetime.now(UTC),
+    )
+
+    async def _get_provider_row(_db, _pid):
+        return row
+
+    class _FakeClient:
+        async def complete(self, *_args, **_kwargs):
+            return LLMResult(text="  ", model="model-empty", input_tokens=3, output_tokens=0)
+
+    monkeypatch.setattr(cmds_api.command_service, "get_provider_row", _get_provider_row)
+    monkeypatch.setattr(cmds_api, "_resolve_proxy_url", AsyncMock(return_value=None))
+    monkeypatch.setattr(llm_client, "build_client", lambda *a, **k: _FakeClient())
+
+    out = await cmds_api.chat_test_models(
+        pid=1,
+        payload=ChatTestModelsRequest(models=["model-empty"], message="说句话"),
+        db=AsyncMock(),
+        _user=AsyncMock(),
+    )
+
+    result = out.results[0]
+    assert result.ok is False
+    assert result.empty_response is True
+    assert result.response is None
+    assert result.error == "上游请求已完成，但返回文本为空。"
+    assert result.effective_api_format == "responses"
+    assert result.client_identity_profile == "grok_cli"
+
+
+@pytest.mark.asyncio
+async def test_chat_test_models_endpoint_llm_error(monkeypatch) -> None:
+    """LLMError 按单模型失败返回，不应拖垮同批其它模型。"""
+    from app.api import commands as cmds_api
+    from app.services import llm_client
+    from app.services.llm_client import LLMError, LLMResult
+
+    row = LLMProvider(
+        id=1,
+        name="AnyGPT",
+        provider="openai",
+        api_key_enc=None,
+        base_url="https://api.example.com/v1",
+        default_model="gpt-4o",
+        api_format="responses",
+        client_identity_profile="grok_cli",
+        created_at=datetime.now(UTC),
+    )
+
+    async def _get_provider_row(_db, _pid):
+        return row
+
+    class _FakeClient:
+        def __init__(self, model: str):
+            self.model = model
+
+        async def complete(self, *_args, **_kwargs):
+            if self.model == "bad-model":
+                raise LLMError("OpenAI 接口返回 404: Model not found")
+            return LLMResult(text="好的", model=self.model, input_tokens=1, output_tokens=1)
+
+    def _build_client(_provider, **kwargs):
+        return _FakeClient(str(kwargs.get("override_model")))
+
+    monkeypatch.setattr(cmds_api.command_service, "get_provider_row", _get_provider_row)
+    monkeypatch.setattr(cmds_api, "_resolve_proxy_url", AsyncMock(return_value=None))
+    monkeypatch.setattr(llm_client, "build_client", _build_client)
+
+    out = await cmds_api.chat_test_models(
+        pid=1,
+        payload=ChatTestModelsRequest(models=["ok-model", "bad-model"], message="测一下"),
+        db=AsyncMock(),
+        _user=AsyncMock(),
+    )
+
+    by_model = {item.requested_model: item for item in out.results}
+    assert by_model["ok-model"].ok is True
+    assert by_model["bad-model"].ok is False
+    assert "404" in (by_model["bad-model"].error or "")
+    assert by_model["ok-model"].effective_api_format == "responses"
+    assert by_model["ok-model"].client_identity_profile == "grok_cli"
+    assert by_model["bad-model"].effective_api_format == "responses"
+    assert by_model["bad-model"].client_identity_profile == "grok_cli"
+
+
+@pytest.mark.asyncio
+async def test_stream_chat_test_models_emits_incremental_results(monkeypatch) -> None:
+    """NDJSON 端点应逐模型推送 start/delta/done，并只结算一次 usage。"""
+    from app.api import commands as cmds_api
+    from app.services import llm_client
+    from app.services.llm_client import LLMStreamChunk
+
+    row = LLMProvider(
+        id=1,
+        name="AnyGPT",
+        provider="openai",
+        api_key_enc=None,
+        base_url="https://api.example.com/v1",
+        default_model="gpt-4o",
+        api_format="responses",
+        client_identity_profile="grok_cli",
+        created_at=datetime.now(UTC),
+    )
+
+    async def _get_provider_row(_db, _pid):
+        return row
+
+    prompts: dict[str, str] = {}
+
+    class _FakeClient:
+        def __init__(self, model: str):
+            self.model = model
+
+        async def stream_complete(self, _system, user, **_kwargs):
+            prompts[self.model] = user
+            yield LLMStreamChunk(delta=f"{self.model}-a", model=f"{self.model}-real")
+            await asyncio.sleep(0)
+            yield LLMStreamChunk(delta="-b", model=f"{self.model}-real")
+            yield LLMStreamChunk(
+                model=f"{self.model}-real",
+                input_tokens=3,
+                output_tokens=2,
+                done=True,
+            )
+
+    monkeypatch.setattr(cmds_api.command_service, "get_provider_row", _get_provider_row)
+    monkeypatch.setattr(cmds_api, "_resolve_proxy_url", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        llm_client,
+        "build_client",
+        lambda _provider, **kwargs: _FakeClient(str(kwargs["override_model"])),
+    )
+    emitted = _capture_llm_usage(monkeypatch)
+
+    response = await cmds_api.stream_chat_test_models(
+        pid=1,
+        payload=ChatTestModelsRequest(
+            models=["model-a", "model-b"],
+            message="测一下",
+            history_by_model={
+                "model-a": [{"role": "assistant", "content": "A 的上一答"}],
+                "model-b": [{"role": "assistant", "content": "B 的上一答"}],
+            },
+        ),
+        db=AsyncMock(),
+        _user=AsyncMock(),
+    )
+    body = ""
+    async for chunk in response.body_iterator:
+        body += chunk.decode() if isinstance(chunk, bytes) else chunk
+    events = [json.loads(line) for line in body.splitlines() if line]
+
+    assert sum(event["type"] == "start" for event in events) == 2
+    assert sum(event["type"] == "delta" for event in events) == 4
+    done = {event["requested_model"]: event["result"] for event in events if event["type"] == "done"}
+    assert done["model-a"]["response"] == "model-a-a-b"
+    assert done["model-b"]["response"] == "model-b-a-b"
+    assert done["model-a"]["streaming"] is True
+    assert done["model-a"]["stream_fallback"] is False
+    assert "A 的上一答" in prompts["model-a"]
+    assert "B 的上一答" not in prompts["model-a"]
+    assert "B 的上一答" in prompts["model-b"]
+    assert len(emitted) == 2
+
+
+@pytest.mark.asyncio
+async def test_stream_chat_test_models_falls_back_to_complete(monkeypatch) -> None:
+    """协议没有原生流式实现时，应回退完整响应而不是把模型标记为失败。"""
+    from app.api import commands as cmds_api
+    from app.services import llm_client
+    from app.services.llm_client import LLMResult, LLMStreamChunk
+
+    row = LLMProvider(
+        id=1,
+        name="Legacy",
+        provider="openai",
+        api_key_enc=None,
+        base_url="https://api.example.com/v1",
+        default_model="legacy-model",
+        api_format="chat_completions",
+        created_at=datetime.now(UTC),
+    )
+
+    async def _get_provider_row(_db, _pid):
+        return row
+
+    class _FakeClient:
+        async def stream_complete(self, *_args, **_kwargs):
+            if False:
+                yield LLMStreamChunk()
+            raise NotImplementedError("no stream")
+
+        async def complete(self, *_args, **_kwargs):
+            return LLMResult(text="完整回复", model="legacy-real", input_tokens=5, output_tokens=2)
+
+    monkeypatch.setattr(cmds_api.command_service, "get_provider_row", _get_provider_row)
+    monkeypatch.setattr(cmds_api, "_resolve_proxy_url", AsyncMock(return_value=None))
+    monkeypatch.setattr(llm_client, "build_client", lambda *_args, **_kwargs: _FakeClient())
+    _capture_llm_usage(monkeypatch)
+
+    response = await cmds_api.stream_chat_test_models(
+        pid=1,
+        payload=ChatTestModelsRequest(models=["legacy-model"], message="测一下"),
+        db=AsyncMock(),
+        _user=AsyncMock(),
+    )
+    body = ""
+    async for chunk in response.body_iterator:
+        body += chunk.decode() if isinstance(chunk, bytes) else chunk
+    events = [json.loads(line) for line in body.splitlines() if line]
+    result = next(event["result"] for event in events if event["type"] == "done")
+
+    assert result["ok"] is True
+    assert result["response"] == "完整回复"
+    assert result["streaming"] is False
+    assert result["stream_fallback"] is True
+
+
+@pytest.mark.asyncio
+async def test_stream_chat_test_models_does_not_replay_completed_empty_stream(monkeypatch) -> None:
+    """已完成但无文本的流不能再次调用上游，应直接返回空响应结果。"""
+    from app.api import commands as cmds_api
+    from app.services import llm_client
+    from app.services.llm_client import LLMStreamChunk
+
+    row = LLMProvider(
+        id=1,
+        name="Empty",
+        provider="openai",
+        api_key_enc=None,
+        base_url="https://api.example.com/v1",
+        default_model="empty-model",
+        api_format="chat_completions",
+        created_at=datetime.now(UTC),
+    )
+
+    class _FakeClient:
+        async def stream_complete(self, *_args, **_kwargs):
+            yield LLMStreamChunk(model="empty-model", input_tokens=2, output_tokens=0, done=True)
+
+        async def complete(self, *_args, **_kwargs):
+            raise AssertionError("完成的空流不应重放请求")
+
+    monkeypatch.setattr(
+        cmds_api.command_service,
+        "get_provider_row",
+        AsyncMock(return_value=row),
+    )
+    monkeypatch.setattr(cmds_api, "_resolve_proxy_url", AsyncMock(return_value=None))
+    monkeypatch.setattr(llm_client, "build_client", lambda *_args, **_kwargs: _FakeClient())
+    _capture_llm_usage(monkeypatch)
+
+    response = await cmds_api.stream_chat_test_models(
+        pid=1,
+        payload=ChatTestModelsRequest(models=["empty-model"], message="测一下"),
+        db=AsyncMock(),
+        _user=AsyncMock(),
+    )
+    body = ""
+    async for chunk in response.body_iterator:
+        body += chunk.decode() if isinstance(chunk, bytes) else chunk
+    result = next(
+        event["result"]
+        for event in (json.loads(line) for line in body.splitlines() if line)
+        if event["type"] == "done"
+    )
+
+    assert result["ok"] is False
+    assert result["empty_response"] is True
+    assert result["streaming"] is True
+    assert result["stream_fallback"] is False
+
+
+def test_chat_stream_fallback_only_accepts_stream_capability_errors() -> None:
+    """普通参数 400 不应被误判为流式不兼容，避免重复发起真实对话。"""
+    from app.api import commands as cmds_api
+    from app.services.llm_client import LLMError
+
+    assert cmds_api._chat_stream_can_fallback(
+        LLMError("unknown parameter: stream", status_code=400)
+    )
+    assert not cmds_api._chat_stream_can_fallback(
+        LLMError("max_tokens must be greater than zero", status_code=400)
+    )
+
+
+@pytest.mark.asyncio
+async def test_stream_chat_test_models_enforces_absolute_timeout(monkeypatch) -> None:
+    """即使上游持续保活但不产出 delta，端点也必须按总时限结束。"""
+    from app.api import commands as cmds_api
+    from app.services import llm_client
+    from app.services.llm_client import LLMStreamChunk
+
+    row = LLMProvider(
+        id=1,
+        name="Slow",
+        provider="openai",
+        api_key_enc=None,
+        base_url="https://api.example.com/v1",
+        default_model="slow-model",
+        api_format="chat_completions",
+        created_at=datetime.now(UTC),
+    )
+
+    class _FakeClient:
+        async def stream_complete(self, *_args, **_kwargs):
+            await asyncio.Event().wait()
+            if False:
+                yield LLMStreamChunk()
+
+    monkeypatch.setattr(
+        cmds_api.command_service,
+        "get_provider_row",
+        AsyncMock(return_value=row),
+    )
+    monkeypatch.setattr(cmds_api, "_resolve_proxy_url", AsyncMock(return_value=None))
+    monkeypatch.setattr(llm_client, "build_client", lambda *_args, **_kwargs: _FakeClient())
+    _capture_llm_usage(monkeypatch)
+    payload = ChatTestModelsRequest(models=["slow-model"], message="测一下").model_copy(
+        update={"timeout_seconds": 0.01}
+    )
+
+    response = await cmds_api.stream_chat_test_models(
+        pid=1,
+        payload=payload,
+        db=AsyncMock(),
+        _user=AsyncMock(),
+    )
+    body = ""
+    async for chunk in response.body_iterator:
+        body += chunk.decode() if isinstance(chunk, bytes) else chunk
+    events = [json.loads(line) for line in body.splitlines() if line]
+
+    error = next(event["result"] for event in events if event["type"] == "error")
+    assert "总超时" in error["error"]
+
+
+@pytest.mark.asyncio
+async def test_stream_chat_disconnect_records_single_cancelled_usage(monkeypatch) -> None:
+    """客户端拿到部分文本后断开时，只写一次带部分响应的取消用量。"""
+    from app.api import commands as cmds_api
+    from app.services import llm_client
+    from app.services.llm_client import LLMStreamChunk
+
+    row = LLMProvider(
+        id=1,
+        name="Disconnect",
+        provider="openai",
+        api_key_enc=None,
+        base_url="https://api.example.com/v1",
+        default_model="disconnect-model",
+        api_format="responses",
+        created_at=datetime.now(UTC),
+    )
+
+    class _FakeClient:
+        async def stream_complete(self, *_args, **_kwargs):
+            yield LLMStreamChunk(delta="partial", model="disconnect-real")
+            await asyncio.Event().wait()
+
+    monkeypatch.setattr(
+        cmds_api.command_service,
+        "get_provider_row",
+        AsyncMock(return_value=row),
+    )
+    monkeypatch.setattr(cmds_api, "_resolve_proxy_url", AsyncMock(return_value=None))
+    monkeypatch.setattr(llm_client, "build_client", lambda *_args, **_kwargs: _FakeClient())
+    emitted = _capture_llm_usage(monkeypatch)
+
+    response = await cmds_api.stream_chat_test_models(
+        pid=1,
+        payload=ChatTestModelsRequest(models=["disconnect-model"], message="测一下"),
+        db=AsyncMock(),
+        _user=AsyncMock(),
+    )
+    start = json.loads(await anext(response.body_iterator))
+    delta = json.loads(await anext(response.body_iterator))
+    assert start["type"] == "start"
+    assert delta["type"] == "delta"
+
+    await response.body_iterator.aclose()
+
+    assert len(emitted) == 1
+    assert emitted[0].success is False
+    assert emitted[0].error_type == "llmerror"
+    assert emitted[0].response_preview == "partial"
 
 
 # ════════════════════════════════════════════════════════════
@@ -1786,3 +3149,111 @@ async def test_builtin_help_lists_templates() -> None:
     # 模板命令也出现
     assert "hi" in args
     assert "[reply_text]" in args
+
+
+# ═══════════ 阶段 F 收口 #2：Provider 身份保存校验 ═══════════
+class _IdentityValidationDB:
+    """create_provider 用的最小 DB mock：无重名、记录 add 的 row。"""
+
+    row = None
+
+    @staticmethod
+    def _result():
+        class _R:
+            @staticmethod
+            def scalar_one_or_none():
+                return None
+
+        return _R()
+
+    async def execute(self, _q):
+        return self._result()
+
+    def add(self, r):
+        self.row = r
+
+    async def flush(self):
+        self.row.id = 77
+        self.row.created_at = datetime.now(UTC)
+
+
+@pytest.mark.asyncio
+async def test_create_provider_rejects_unverified_identity() -> None:
+    """未验证档案（claude_desktop）不能作为固定身份保存。"""
+    with pytest.raises(HTTPException) as ei:
+        await command_service.create_provider(
+            _IdentityValidationDB(),
+            LLMProviderCreate(
+                name="idv-unverified",
+                provider="anthropic",
+                default_model="claude-3-5-sonnet",
+                api_format="anthropic_messages",
+                client_identity_profile="claude_desktop",
+            ),
+        )
+    assert ei.value.status_code == 422
+    assert ei.value.detail["code"] == "LLM_PROVIDER_IDENTITY_INVALID"
+
+
+@pytest.mark.asyncio
+async def test_create_provider_rejects_incompatible_identity() -> None:
+    """协议不兼容的固定身份（responses 选 claude_code）必须被拒。"""
+    with pytest.raises(HTTPException) as ei:
+        await command_service.create_provider(
+            _IdentityValidationDB(),
+            LLMProviderCreate(
+                name="idv-incompat",
+                provider="openai",
+                default_model="gpt-5-codex",
+                api_format="responses",
+                client_identity_profile="claude_code",
+            ),
+        )
+    assert ei.value.status_code == 422
+    assert ei.value.detail["code"] == "LLM_PROVIDER_IDENTITY_INVALID"
+
+
+@pytest.mark.asyncio
+async def test_create_provider_allows_verified_compatible_identity() -> None:
+    """已验证且协议兼容的固定身份（chat + openai_sdk）允许保存。"""
+    db = _IdentityValidationDB()
+    out = await command_service.create_provider(
+        db,
+        LLMProviderCreate(
+            name="idv-ok",
+            provider="openai",
+            default_model="gpt-4o",
+            api_format="chat_completions",
+            client_identity_profile="openai_sdk",
+        ),
+    )
+    assert out.client_identity_profile == "openai_sdk"
+
+
+@pytest.mark.asyncio
+async def test_update_provider_rejects_incompatible_identity() -> None:
+    """更新时把身份改成与协议不兼容的固定身份必须被拒。"""
+    row = LLMProvider(
+        id=88,
+        name="idv-upd",
+        provider="anthropic",
+        api_key_enc=None,
+        base_url="https://proxy.example/v1",
+        default_model="claude-3-5-sonnet",
+        api_format="anthropic_messages",
+        client_identity_profile="auto",
+    )
+
+    class _DB:
+        async def get(self, _model, _pk):
+            return row
+
+        async def flush(self):
+            return None
+
+    with pytest.raises(HTTPException) as ei:
+        await command_service.update_provider(
+            _DB(), 88, LLMProviderUpdate(client_identity_profile="codex_cli")
+        )
+    assert ei.value.status_code == 422
+    assert ei.value.detail["code"] == "LLM_PROVIDER_IDENTITY_INVALID"

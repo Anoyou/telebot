@@ -58,6 +58,15 @@ export async function updateAccountFeatureConfig(
   await api.patch(`/api/accounts/${aid}/features/${pluginKey}/config`, { config });
 }
 
+/** 独立更新账号级裸直通开关，不重交插件的其它历史配置。 */
+export async function updateAccountFeatureDirectPassthrough(
+  aid: number,
+  pluginKey: string,
+  enabled: boolean,
+): Promise<void> {
+  await api.patch(`/api/accounts/${aid}/features/${pluginKey}/direct-passthrough`, { enabled });
+}
+
 /** 验证配置是否符合 schema */
 export async function validatePluginConfig(
   pluginKey: string,
@@ -66,6 +75,103 @@ export async function validatePluginConfig(
   const { data } = await api.post<{ valid: boolean; errors: Array<{ field: string; message: string }> }>(
     `/api/plugins/${pluginKey}/config/validate`,
     { config }
+  );
+  return data;
+}
+
+export interface PluginConfigActionPayload {
+  input?: Record<string, unknown>;
+  config?: Record<string, unknown>;
+}
+
+export interface PluginConfigActionResponse {
+  success: boolean;
+  message?: string | null;
+  toast?: string | null;
+  config_patch?: Record<string, unknown>;
+  result?: Record<string, unknown>;
+}
+
+export interface PluginConfigActionJobLogItem {
+  id: number;
+  ts: string;
+  level: string;
+  message: string;
+  detail?: Record<string, unknown> | null;
+}
+
+export interface PluginConfigActionJobStatus {
+  job_id: string;
+  account_id: number;
+  plugin_key: string;
+  action_key: string;
+  status: "queued" | "running" | "succeeded" | "failed" | string;
+  message?: string | null;
+  error_code?: string | null;
+  error_message?: string | null;
+  result?: Record<string, unknown>;
+  config_patch?: Record<string, unknown>;
+  created_at?: string | null;
+  started_at?: string | null;
+  ended_at?: string | null;
+  updated_at?: string | null;
+  logs: PluginConfigActionJobLogItem[];
+}
+
+export async function controlPluginConfigActionJob(
+  jobId: string,
+  action: "pause" | "cancel",
+): Promise<PluginConfigActionJobStatus> {
+  const { data } = await api.post<PluginConfigActionJobStatus>(
+    `/api/plugin-config-action-jobs/${jobId}/control`,
+    { action },
+  );
+  return data;
+}
+
+export async function runPluginConfigAction(
+  aid: number,
+  pluginKey: string,
+  actionKey: string,
+  payload: PluginConfigActionPayload,
+): Promise<PluginConfigActionResponse> {
+  const { data } = await api.post<PluginConfigActionResponse>(
+    `/api/accounts/${aid}/features/${pluginKey}/config/actions/${actionKey}`,
+    payload,
+  );
+  return data;
+}
+
+export async function startPluginConfigActionJob(
+  aid: number,
+  pluginKey: string,
+  actionKey: string,
+  payload: PluginConfigActionPayload,
+): Promise<PluginConfigActionJobStatus> {
+  const { data } = await api.post<PluginConfigActionJobStatus>(
+    `/api/accounts/${aid}/features/${pluginKey}/config/actions/${actionKey}/jobs`,
+    payload,
+  );
+  return data;
+}
+
+export async function getPluginConfigActionJob(
+  jobId: string,
+): Promise<PluginConfigActionJobStatus> {
+  const { data } = await api.get<PluginConfigActionJobStatus>(
+    `/api/plugin-config-action-jobs/${jobId}`,
+  );
+  return data;
+}
+
+export async function listPluginConfigActionJobs(
+  aid: number,
+  pluginKey: string,
+  limit = 10,
+): Promise<PluginConfigActionJobStatus[]> {
+  const { data } = await api.get<PluginConfigActionJobStatus[]>(
+    `/api/accounts/${aid}/features/${pluginKey}/config/action-jobs`,
+    { params: { limit } },
   );
   return data;
 }

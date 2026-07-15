@@ -10,8 +10,8 @@ export function PluginsAliasesPage() {
 
   return (
     <div className="space-y-4">
-      <Button variant="ghost" size="sm" onClick={() => goBackOr(nav, "/plugins")}>
-        <ArrowLeft className="mr-1 h-4 w-4" /> 返回上一页
+      <Button variant="default" size="sm" className="gap-1.5 shadow-sm" onClick={() => goBackOr(nav, "/plugins")}>
+        <ArrowLeft className="h-4 w-4" /> 返回上一页
       </Button>
       <AliasManagement />
     </div>

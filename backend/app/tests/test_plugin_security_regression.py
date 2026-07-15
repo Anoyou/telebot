@@ -12,8 +12,10 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -27,6 +29,16 @@ from app.services import remote_plugin_service as svc
 
 class TestRemotePluginSecurity:
     """远程插件安全测试。"""
+
+    def test_plugin_data_dir_rejects_plugin_level_symlink(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(svc.settings, "plugins_installed_dir", str(tmp_path / "installed"))
+        data_root = tmp_path / "installed" / "_data"
+        other = data_root / "other_plugin"
+        other.mkdir(parents=True)
+        (data_root / "linked_plugin").symlink_to(other)
+
+        with pytest.raises(svc.RemotePluginError, match="不得是符号链接"):
+            svc._plugin_data_dir("linked_plugin")
 
     # ── 1. manifest.py 在安装阶段不执行 ──────────────────────────
 
@@ -131,6 +143,7 @@ class TestRemotePluginSecurity:
               "description": "群内小游戏，支持下注、开奖和历史统计",
               "config_schema": {
                 "type": "object",
+                "x-usage-guide": "发送 {prefix}{command} 100 开始一局，支持群内下注、开奖和历史统计。",
                 "properties": {
                   "draw_numbers": {
                     "type": "string",
@@ -153,6 +166,77 @@ class TestRemotePluginSecurity:
         )
 
         assert svc.lint_plugin_metadata_files(plugin_dir) == []
+
+    def test_metadata_lint_warns_when_config_schema_lacks_usage_guide(self, tmp_path):
+        """有配置页的插件必须声明自有使用说明。"""
+        plugin_dir = tmp_path / "installed" / "missing_usage"
+        plugin_dir.mkdir(parents=True)
+        (plugin_dir / "plugin.json").write_text(
+            """
+            {
+              "name": "missing_usage",
+              "version": "1.0.0",
+              "config_schema": {
+                "type": "object",
+                "properties": {
+                  "command": {
+                    "type": "string",
+                    "default": "demo"
+                  }
+                }
+              }
+            }
+            """,
+            encoding="utf-8",
+        )
+
+        warnings = svc.lint_plugin_metadata_files(plugin_dir)
+        assert any("高级规范警告" in item and "未声明详细使用说明" in item for item in warnings)
+
+    def test_metadata_lint_accepts_usage_guide_declaration(self, tmp_path):
+        """x-usage-guide 或 usage_preview 可满足配置页说明要求。"""
+        plugin_dir = tmp_path / "installed" / "declared_usage"
+        plugin_dir.mkdir(parents=True)
+        (plugin_dir / "plugin.json").write_text(
+            """
+            {
+              "name": "declared_usage",
+              "version": "1.0.0",
+              "config_schema": {
+                "type": "object",
+                "x-usage-guide": "发送 {prefix}{command} 文本即可触发插件。",
+                "properties": {
+                  "command": {
+                    "type": "string",
+                    "default": "demo"
+                  }
+                }
+              }
+            }
+            """,
+            encoding="utf-8",
+        )
+
+        warnings = svc.lint_plugin_metadata_files(plugin_dir)
+        assert not any("未声明详细使用说明" in item for item in warnings)
+
+    def test_metadata_lint_accepts_top_level_usage_declaration(self, tmp_path):
+        """新版 plugin.json 顶层 usage 可满足插件使用说明要求。"""
+        plugin_dir = tmp_path / "installed" / "declared_top_usage"
+        plugin_dir.mkdir(parents=True)
+        (plugin_dir / "plugin.json").write_text(
+            """
+            {
+              "name": "declared_top_usage",
+              "version": "1.0.0",
+              "usage": "在允许会话内发送“开始演示”启动插件。"
+            }
+            """,
+            encoding="utf-8",
+        )
+
+        warnings = svc.lint_plugin_metadata_files(plugin_dir)
+        assert not any("未声明详细使用说明" in item for item in warnings)
 
     def test_runtime_discovery_does_not_execute_installed_by_default(self, monkeypatch, tmp_path):
         """worker 刷新 builtin 注册表时不能顺手执行 installed 插件代码。"""
@@ -229,6 +313,17 @@ class TestRemotePluginSecurity:
         """https:// scheme 必须被允许。"""
         svc._validate_source_url("https://github.com/user/repo.git")
         svc._validate_source_url("https://gitlab.com/user/repo")
+        svc._validate_source_url("https://github.com/user/repo/tree/feature/demo")
+
+    def test_normalize_git_source_url_supports_github_tree_branch(self):
+        """GitHub tree/<branch> 页面链接应转为 clone URL + 分支。"""
+        source = svc.normalize_git_source_url(
+            "https://github.com/user/repo/tree/feature/demo"
+        )
+
+        assert source.clone_url == "https://github.com/user/repo.git"
+        assert source.ref == "feature/demo"
+        assert svc._derive_name_from_url("https://github.com/user/repo/tree/feature/demo") == "repo"
 
     def test_validate_source_url_allows_git_ssh(self):
         """git+ssh:// scheme 必须被允许。"""
@@ -360,7 +455,10 @@ class TestSandboxClientSecurity:
         assert seen["client"] is sandbox
         assert seen["client"] is not raw_client
         assert seen["account_id"] == 7
-        assert seen["ctx"] is ctx
+        assert seen["ctx"] is not ctx
+        assert seen["ctx"].client is sandbox
+        assert seen["ctx"].account_id == ctx.account_id
+        assert seen["ctx"].feature_key == ctx.feature_key
 
     def test_sandbox_blocks_private_attrs(self):
         """禁止访问私有属性。"""
@@ -391,6 +489,17 @@ class TestSandboxClientSecurity:
 
         resolver = SandboxClient(FakeClient(), ["resolve_entity"], plugin_key="demo")
         assert callable(resolver.get_entity)
+
+    def test_sandbox_forward_messages_uses_forward_message_permission(self):
+        """原生转发使用 Telethon 复数方法，但 manifest 能力名保持 forward_message。"""
+        from app.worker.plugins.sandbox import SandboxClient
+
+        class FakeClient:
+            def forward_messages(self, *args, **kwargs):
+                return None
+
+        sandbox = SandboxClient(FakeClient(), ["forward_message"], plugin_key="demo")
+        assert callable(sandbox.forward_messages)
 
     def test_sandbox_blocks_undelared_attrs(self):
         """未声明的属性访问必须被拒绝。"""
@@ -456,27 +565,38 @@ class TestSandboxClientSecurity:
         """installed 插件不能通过 event helper 绕过 SandboxClient 权限。"""
         from app.worker.plugins.sandbox import SandboxClient, SandboxEvent
 
-        calls: list[str] = []
+        calls: list[tuple[str, tuple, dict]] = []
 
         class RawEvent:
             raw_text = "hello"
             chat_id = 123
+            id = 777
 
             def __init__(self) -> None:
-                self.message = SimpleNamespace(reply=self.reply, text="hello")
+                self.message = SimpleNamespace(reply=self.reply, text="hello", chat_id=123, id=999)
 
             async def reply(self, *_args, **_kwargs):
-                calls.append("reply")
+                calls.append(("raw_reply", _args, _kwargs))
 
             async def edit(self, *_args, **_kwargs):
-                calls.append("edit")
+                calls.append(("raw_edit", _args, _kwargs))
 
             async def delete(self):
-                calls.append("delete")
+                calls.append(("raw_delete", (), {}))
 
             async def get_reply_message(self):
-                calls.append("get_reply_message")
+                calls.append(("get_reply_message", (), {}))
                 return SimpleNamespace(raw_text="reply")
+
+        class FakeClient:
+            async def send_message(self, *args, **kwargs):
+                calls.append(("send_message", args, kwargs))
+
+            async def edit_message(self, *args, **kwargs):
+                calls.append(("edit_message", args, kwargs))
+
+            async def delete_messages(self, *args, **kwargs):
+                calls.append(("delete_messages", args, kwargs))
 
         raw_event = RawEvent()
         denied = SandboxEvent(raw_event, SandboxClient(SimpleNamespace(), [], plugin_key="demo"), plugin_key="demo")
@@ -498,7 +618,7 @@ class TestSandboxClientSecurity:
         allowed = SandboxEvent(
             raw_event,
             SandboxClient(
-                SimpleNamespace(),
+                FakeClient(),
                 ["send_message", "edit_message", "delete_message", "read_chat"],
                 plugin_key="demo",
             ),
@@ -510,9 +630,48 @@ class TestSandboxClientSecurity:
         replied = await allowed.get_reply_message()
         await allowed.message.reply("x")
 
-        assert calls == ["reply", "edit", "delete", "get_reply_message", "reply"]
+        assert calls == [
+            ("send_message", (123, "x"), {"reply_to": 777}),
+            ("edit_message", (123, 777, "x"), {}),
+            ("delete_messages", (123, 777), {}),
+            ("get_reply_message", (), {}),
+            ("send_message", (123, "x"), {"reply_to": 999}),
+        ]
         with pytest.raises(PermissionError):
             _ = replied.__dict__
+
+    @pytest.mark.asyncio
+    async def test_sandbox_event_reply_routes_through_trace_client(self, monkeypatch):
+        """允许的 event.reply 必须走 trace-aware client 并记录 event_action。"""
+        from app.worker.plugins import loader as plugin_loader
+        from app.worker.plugins.sandbox import SandboxClient, SandboxEvent
+
+        class FakeClient:
+            async def send_message(self, *_args, **_kwargs):
+                return SimpleNamespace(id=42, chat_id=123)
+
+        record_action = AsyncMock()
+        monkeypatch.setattr(plugin_loader, "record_action", record_action)
+        sandbox_client = SandboxClient(FakeClient(), ["send_message"], plugin_key="demo")
+        trace_client = plugin_loader._trace_plugin_client(
+            sandbox_client,
+            "evt_sandbox_reply",
+            plugin_key="demo",
+            component="sandbox_event_test",
+        )
+        event = SandboxEvent(
+            SimpleNamespace(raw_text="hello", chat_id=123, id=777),
+            trace_client,
+            plugin_key="demo",
+        )
+
+        await event.reply("x")
+
+        record_action.assert_awaited_once()
+        assert record_action.await_args.args[0]["trace_id"] == "evt_sandbox_reply"
+        assert record_action.await_args.args[1]["type"] == "send_message"
+        assert record_action.await_args.args[1]["reply_to_message_id"] == 777
+        assert record_action.await_args.args[2] == plugin_loader.TRACE_STATUS_OK
 
     @pytest.mark.asyncio
     async def test_sandbox_event_message_layer_still_enforces_permissions(self):
@@ -658,6 +817,9 @@ class _FakeResult:
 
     def scalars(self):
         return _FakeScalars(self._items)
+
+    def all(self):
+        return self._items
 
 
 class _FakeRemotePluginDB:
@@ -916,6 +1078,36 @@ class TestRemotePluginEnableFlow:
         assert any("httpx.get" in item and "timeout" in item for item in installed.lint_warnings)
 
     @pytest.mark.asyncio
+    async def test_install_supports_github_tree_branch_url(self, monkeypatch, tmp_path):
+        """GitHub tree/<branch> 分支链接安装时应 clone 仓库并指定分支。"""
+        monkeypatch.setattr(svc.settings, "plugins_installed_dir", str(tmp_path / "installed"))
+        calls: list[tuple[str, ...]] = []
+
+        async def _fake_clone(*args, **_kwargs):  # noqa: ANN001
+            calls.append(tuple(args))
+            plugin_dir = Path(args[-1])
+            plugin_dir.mkdir(parents=True)
+            _write_runtime_plugin(plugin_dir, key="git_demo", version="1.2.3")
+            return ""
+
+        monkeypatch.setattr(svc, "_run_git", _fake_clone)
+        db = _FakeRemoteInstallDB()
+
+        await svc.install(db, "https://github.com/example/git_demo/tree/feature/demo")
+
+        assert calls[0] == (
+            "clone",
+            "--depth",
+            "1",
+            "--branch",
+            "feature/demo",
+            "--single-branch",
+            "https://github.com/example/git_demo.git",
+            str(tmp_path / "installed" / "git_demo.installing"),
+        )
+        assert db.installed_rows["git_demo"].source_url == "https://github.com/example/git_demo/tree/feature/demo"
+
+    @pytest.mark.asyncio
     async def test_update_writes_installed_plugin(self, monkeypatch, tmp_path):
         """Git 更新成功后刷新 installed_plugin。"""
         monkeypatch.setattr(svc.settings, "plugins_installed_dir", str(tmp_path / "installed"))
@@ -1056,7 +1248,7 @@ class TestPluginRepoInstallFlow:
             extra_py="import httpx\nhttpx.get('https://example.com')\n",
         )
 
-        async def _cached(_url: str):
+        async def _cached(_url: str, **_kwargs):
             return repo_dir
 
         monkeypatch.setattr(repo_svc, "_ensure_repo_cached", _cached)
@@ -1075,6 +1267,195 @@ class TestPluginRepoInstallFlow:
         assert (tmp_path / "installed" / "repo_demo").is_dir()
         assert not (tmp_path / "installed" / "repo_demo.installing").exists()
         assert any("httpx.get" in item and "timeout" in item for item in installed.lint_warnings)
+
+    @pytest.mark.asyncio
+    async def test_update_installed_plugins_from_repo_only_updates_newer_installed(
+        self,
+        monkeypatch,
+        tmp_path,
+    ):
+        monkeypatch.setattr(repo_svc.settings, "plugins_installed_dir", str(tmp_path / "installed"))
+        repo_dir = tmp_path / "repo"
+        _write_runtime_plugin(repo_dir / "update_demo", key="update_demo", version="1.2.0")
+        _write_runtime_plugin(repo_dir / "same_demo", key="same_demo", version="1.0.0")
+        _write_runtime_plugin(repo_dir / "new_demo", key="new_demo", version="9.9.9")
+        _write_runtime_plugin(tmp_path / "installed" / "update_demo", key="update_demo", version="1.0.0")
+        legacy_db = tmp_path / "installed" / "update_demo" / "runtime.sqlite3"
+        legacy_writer = sqlite3.connect(legacy_db)
+        legacy_writer.execute("PRAGMA journal_mode = WAL")
+        legacy_writer.execute("CREATE TABLE question_bank(id INTEGER PRIMARY KEY, question TEXT NOT NULL)")
+        legacy_writer.execute("INSERT INTO question_bank(question) VALUES ('更新前已存在')")
+        legacy_writer.commit()
+        legacy_json = tmp_path / "installed" / "update_demo" / "runtime.json"
+        legacy_json.write_text('{"round": 7}', encoding="utf-8")
+
+        async def _cached(_url: str, **_kwargs):
+            return repo_dir
+
+        monkeypatch.setattr(repo_svc, "_ensure_repo_cached", _cached)
+        db = _FakePluginRepoDB(PluginRepo(id=1, url="https://example.com/repo.git", name="Repo"))
+        db.installed_rows["update_demo"] = InstalledPlugin(
+            key="update_demo",
+            source="repo",
+            source_url="https://example.com/old.git",
+            installed_path=str(tmp_path / "installed" / "update_demo"),
+            version="1.0.0",
+            enabled=True,
+            manifest_json={"name": "update_demo", "_telepilot_remote": {"default_enabled": True}},
+        )
+        db.installed_rows["same_demo"] = InstalledPlugin(
+            key="same_demo",
+            source="repo",
+            source_url="https://example.com/repo.git",
+            installed_path=str(tmp_path / "installed" / "same_demo"),
+            version="1.0.0",
+            enabled=False,
+            manifest_json={"name": "same_demo"},
+        )
+
+        result = await repo_svc.update_installed_plugins_from_repo(db, 1)
+        legacy_writer.execute("INSERT INTO question_bank(question) VALUES ('旧连接更新后继续写入')")
+        legacy_writer.commit()
+        legacy_writer.close()
+
+        assert result.checked == 2
+        assert result.update_available == 1
+        assert result.updated == 1
+        assert result.skipped == 1
+        assert result.failed == 0
+        assert [(item.name, item.status, item.from_version, item.to_version) for item in result.items] == [
+            ("same_demo", "skipped", "1.0.0", "1.0.0"),
+            ("update_demo", "updated", "1.0.0", "1.2.0"),
+        ]
+        updated = db.installed_rows["update_demo"]
+        assert updated.version == "1.2.0"
+        assert updated.source == "repo"
+        assert updated.source_url == "https://example.com/repo.git"
+        assert updated.enabled is True
+        assert updated.manifest_json["version"] == "1.2.0"
+        assert updated.manifest_json["_telepilot_remote"]["default_enabled"] is True
+        assert "new_demo" not in db.installed_rows
+        assert (tmp_path / "installed" / "update_demo" / "plugin.json").read_text(encoding="utf-8").find("1.2.0") >= 0
+        migrated_db = tmp_path / "installed" / "_data" / "update_demo" / "runtime.sqlite3"
+        assert migrated_db.is_file()
+        assert (tmp_path / "installed" / "update_demo" / "runtime.sqlite3").is_symlink()
+        with sqlite3.connect(migrated_db) as conn:
+            assert [row[0] for row in conn.execute("SELECT question FROM question_bank ORDER BY id")] == [
+                "更新前已存在",
+                "旧连接更新后继续写入",
+            ]
+        migrated_json = tmp_path / "installed" / "_data" / "update_demo" / "runtime.json"
+        assert migrated_json.read_text(encoding="utf-8") == '{"round": 7}'
+        installed_json = tmp_path / "installed" / "update_demo" / "runtime.json"
+        assert installed_json.is_symlink()
+        installed_json.write_text('{"round": 8}', encoding="utf-8")
+        assert migrated_json.read_text(encoding="utf-8") == '{"round": 8}'
+        assert not (tmp_path / "installed" / "update_demo.installing").exists()
+        assert not (tmp_path / "installed" / "update_demo.bak-update").exists()
+
+    @pytest.mark.asyncio
+    async def test_update_installed_plugins_from_repo_refreshes_stale_same_version_manifest(
+        self,
+        monkeypatch,
+        tmp_path,
+    ):
+        monkeypatch.setattr(repo_svc.settings, "plugins_installed_dir", str(tmp_path / "installed"))
+        repo_dir = tmp_path / "repo"
+        _write_runtime_plugin(repo_dir / "ten_half", key="ten_half", version="0.3.2")
+        _write_runtime_plugin(tmp_path / "installed" / "ten_half", key="ten_half", version="0.3.2")
+
+        async def _cached(_url: str, **_kwargs):
+            return repo_dir
+
+        monkeypatch.setattr(repo_svc, "_ensure_repo_cached", _cached)
+        db = _FakePluginRepoDB(PluginRepo(id=1, url="https://example.com/repo.git", name="Repo"))
+        db.installed_rows["ten_half"] = InstalledPlugin(
+            key="ten_half",
+            source="repo",
+            source_url="https://example.com/repo.git",
+            installed_path=str(tmp_path / "installed" / "ten_half"),
+            version="0.3.2",
+            enabled=True,
+            manifest_json={
+                "name": "ten_half",
+                "version": "0.3.1",
+                "_telepilot_remote": {
+                    "default_enabled": False,
+                    "latest_version": "0.3.2",
+                    "update_available": True,
+                },
+            },
+        )
+
+        result = await repo_svc.update_installed_plugins_from_repo(db, 1)
+
+        assert result.checked == 1
+        assert result.updated == 1
+        assert result.skipped == 0
+        assert [(item.name, item.status, item.message) for item in result.items] == [
+            ("ten_half", "updated", "已同步元数据"),
+        ]
+        updated = db.installed_rows["ten_half"]
+        assert updated.version == "0.3.2"
+        assert updated.manifest_json["version"] == "0.3.2"
+        assert updated.manifest_json["_telepilot_remote"]["update_available"] is False
+        assert updated.manifest_json["_telepilot_remote"]["latest_version"] == "0.3.2"
+
+    @pytest.mark.asyncio
+    async def test_repo_update_link_failure_rolls_back_and_retry_keeps_database(
+        self,
+        monkeypatch,
+        tmp_path,
+    ):
+        monkeypatch.setattr(repo_svc.settings, "plugins_installed_dir", str(tmp_path / "installed"))
+        repo_dir = tmp_path / "repo"
+        _write_runtime_plugin(repo_dir / "retry_demo", key="retry_demo", version="1.1.0")
+        install_dir = tmp_path / "installed" / "retry_demo"
+        _write_runtime_plugin(install_dir, key="retry_demo", version="1.0.0")
+        legacy_db = install_dir / "runtime.sqlite3"
+        with sqlite3.connect(legacy_db) as conn:
+            conn.execute("CREATE TABLE events(value TEXT NOT NULL)")
+            conn.execute("INSERT INTO events(value) VALUES ('before-failure')")
+
+        async def _cached(_url: str, **_kwargs):
+            return repo_dir
+
+        monkeypatch.setattr(repo_svc, "_ensure_repo_cached", _cached)
+        db = _FakePluginRepoDB(PluginRepo(id=1, url="https://example.com/repo.git", name="Repo"))
+        db.installed_rows["retry_demo"] = InstalledPlugin(
+            key="retry_demo",
+            source="repo",
+            source_url="https://example.com/repo.git",
+            installed_path=str(install_dir),
+            version="1.0.0",
+            enabled=True,
+            manifest_json={"name": "retry_demo"},
+        )
+        real_attach = repo_svc._attach_legacy_plugin_sqlite_links
+        monkeypatch.setattr(
+            repo_svc,
+            "_attach_legacy_plugin_sqlite_links",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("link failed")),
+        )
+
+        failed = await repo_svc.update_installed_plugins_from_repo(db, 1)
+
+        assert failed.failed == 1
+        assert "1.0.0" in (install_dir / "plugin.json").read_text(encoding="utf-8")
+        assert not (tmp_path / "installed" / "retry_demo.bak-update").exists()
+        with sqlite3.connect(legacy_db) as conn:
+            conn.execute("INSERT INTO events(value) VALUES ('after-failure')")
+
+        monkeypatch.setattr(repo_svc, "_attach_legacy_plugin_sqlite_links", real_attach)
+        succeeded = await repo_svc.update_installed_plugins_from_repo(db, 1)
+
+        assert succeeded.updated == 1
+        persisted = tmp_path / "installed" / "_data" / "retry_demo" / "runtime.sqlite3"
+        with sqlite3.connect(persisted) as conn:
+            assert [row[0] for row in conn.execute("SELECT value FROM events ORDER BY rowid")] == [
+                "before-failure",
+                "after-failure",
+            ]
 
     @pytest.mark.asyncio
     async def test_install_local_plugin_writes_installed_plugin(self, monkeypatch, tmp_path):
@@ -1096,6 +1477,146 @@ class TestPluginRepoInstallFlow:
         assert installed.source_label == "Local"
         assert (tmp_path / "installed" / "local_demo").is_dir()
         assert not (tmp_path / "installed" / "local_demo.installing").exists()
+
+    @pytest.mark.asyncio
+    async def test_install_official_plugin_ignores_local_bundled_source(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(repo_svc.settings, "plugins_installed_dir", str(tmp_path / "installed"))
+        official_root = tmp_path / "official"
+        _write_runtime_plugin(official_root / "official_demo", key="official_demo", version="4.0.0")
+        monkeypatch.setattr(repo_svc, "_official_plugin_root", lambda: official_root)
+        db = _FakePluginRepoDB()
+
+        with pytest.raises(repo_svc.PluginNotInRepo):
+            await repo_svc.install_official_plugin(db, "official_demo", default_enabled=False)
+
+        assert "official_demo" not in db.installed_rows
+        assert not (tmp_path / "installed" / "official_demo").exists()
+
+    @pytest.mark.asyncio
+    async def test_remote_official_repo_lists_only_official_tagged_plugins(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(repo_svc, "_official_plugin_root", lambda: tmp_path / "empty-official")
+        remote_root = tmp_path / "remote-official"
+        _write_runtime_plugin(remote_root / "official_remote", key="official_remote", version="4.1.0")
+        _write_runtime_plugin(remote_root / "community_remote", key="community_remote", version="1.0.0")
+        (remote_root / "official_remote" / "plugin.json").write_text(
+            '{"name":"official_remote","display_name":"Official Remote","version":"4.1.0","tags":["official"]}',
+            encoding="utf-8",
+        )
+
+        async def _remote_root(*, force_refresh: bool = False):  # noqa: ARG001
+            return remote_root
+
+        monkeypatch.setattr(repo_svc, "_official_remote_plugin_root", _remote_root)
+
+        rows = await repo_svc.list_official_plugins(_FakePluginRepoDB())
+
+        assert [row.name for row in rows] == ["official_remote"]
+
+    @pytest.mark.asyncio
+    async def test_install_remote_official_plugin_writes_repo_record(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(repo_svc.settings, "plugins_installed_dir", str(tmp_path / "installed"))
+        monkeypatch.setattr(repo_svc.settings, "official_plugin_repo_url", "https://github.com/Anoyou/telebot-plugins")
+        monkeypatch.setattr(repo_svc, "_official_plugin_root", lambda: tmp_path / "empty-official")
+        remote_root = tmp_path / "remote-official"
+        _write_runtime_plugin(remote_root / "official_remote", key="official_remote", version="4.1.0")
+        (remote_root / "official_remote" / "plugin.json").write_text(
+            '{"name":"official_remote","display_name":"Official Remote","version":"4.1.0","tags":["official"]}',
+            encoding="utf-8",
+        )
+
+        async def _remote_root(*, force_refresh: bool = False):  # noqa: ARG001
+            return remote_root
+
+        monkeypatch.setattr(repo_svc, "_official_remote_plugin_root", _remote_root)
+        db = _FakePluginRepoDB()
+
+        row = await repo_svc.install_official_plugin(db, "official_remote", default_enabled=False)
+
+        installed = db.installed_rows["official_remote"]
+        assert row.name == "official_remote"
+        assert installed.source == "repo"
+        assert installed.source_url == "https://github.com/Anoyou/telebot-plugins"
+        assert installed.version == "4.1.0"
+        assert installed.signature_ok is None
+        assert installed.trust_tier == "community"
+        assert installed.source_label == "Plugin Repo"
+        assert (tmp_path / "installed" / "official_remote").is_dir()
+
+    @pytest.mark.asyncio
+    async def test_install_remote_official_plugin_updates_existing_version(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(repo_svc.settings, "plugins_installed_dir", str(tmp_path / "installed"))
+        monkeypatch.setattr(repo_svc.settings, "official_plugin_repo_url", "https://github.com/Anoyou/telebot-plugins")
+        monkeypatch.setattr(repo_svc, "_official_plugin_root", lambda: tmp_path / "empty-official")
+        remote_root = tmp_path / "remote-official"
+        _write_runtime_plugin(remote_root / "official_remote", key="official_remote", version="4.1.0")
+        (remote_root / "official_remote" / "plugin.json").write_text(
+            '{"name":"official_remote","display_name":"Official Remote","version":"4.1.0","tags":["official"]}',
+            encoding="utf-8",
+        )
+
+        async def _remote_root(*, force_refresh: bool = False):  # noqa: ARG001
+            return remote_root
+
+        monkeypatch.setattr(repo_svc, "_official_remote_plugin_root", _remote_root)
+        install_dir = tmp_path / "installed" / "official_remote"
+        _write_runtime_plugin(install_dir, key="official_remote", version="4.0.0")
+        db = _FakePluginRepoDB()
+        db.installed_rows["official_remote"] = InstalledPlugin(
+            key="official_remote",
+            source="official",
+            source_url="https://github.com/Anoyou/telebot-plugins",
+            installed_path=str(install_dir),
+            version="4.0.0",
+            enabled=True,
+        )
+
+        row = await repo_svc.install_official_plugin(db, "official_remote", default_enabled=False)
+
+        installed = db.installed_rows["official_remote"]
+        assert row.version == "4.1.0"
+        assert installed.source == "repo"
+        assert installed.version == "4.1.0"
+        assert installed.enabled is True
+        assert (install_dir / "plugin.json").read_text(encoding="utf-8").count("4.1.0") == 1
+
+    @pytest.mark.asyncio
+    async def test_official_update_link_failure_restores_previous_directory(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(repo_svc.settings, "plugins_installed_dir", str(tmp_path / "installed"))
+        monkeypatch.setattr(repo_svc, "_official_plugin_root", lambda: tmp_path / "empty-official")
+        remote_root = tmp_path / "remote-official"
+        _write_runtime_plugin(remote_root / "official_retry", key="official_retry", version="2.0.0")
+        (remote_root / "official_retry" / "plugin.json").write_text(
+            '{"name":"official_retry","display_name":"Official Retry","version":"2.0.0","tags":["official"]}',
+            encoding="utf-8",
+        )
+
+        async def _remote_root(*, force_refresh: bool = False):  # noqa: ARG001
+            return remote_root
+
+        monkeypatch.setattr(repo_svc, "_official_remote_plugin_root", _remote_root)
+        install_dir = tmp_path / "installed" / "official_retry"
+        _write_runtime_plugin(install_dir, key="official_retry", version="1.0.0")
+        (install_dir / "runtime.sqlite3").touch()
+        db = _FakePluginRepoDB()
+        db.installed_rows["official_retry"] = InstalledPlugin(
+            key="official_retry",
+            source="official",
+            source_url="https://example.com/official.git",
+            installed_path=str(install_dir),
+            version="1.0.0",
+            enabled=True,
+        )
+        monkeypatch.setattr(
+            repo_svc,
+            "_attach_legacy_plugin_sqlite_links",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("link failed")),
+        )
+
+        with pytest.raises(repo_svc.PluginRepoError, match="link failed"):
+            await repo_svc.install_official_plugin(db, "official_retry", default_enabled=False)
+
+        assert "1.0.0" in (install_dir / "plugin.json").read_text(encoding="utf-8")
+        assert not (tmp_path / "installed" / "official_retry.bak-official").exists()
 
 
 class TestPluginMetadataSchema:
@@ -1168,18 +1689,46 @@ class TestPluginMetadataSchema:
                     "result_contract": {"send_via": ["interaction_bot", "userbot_reply"]},
                 }
             ],
+            "event_subscriptions": [
+                {
+                    "source": ["interaction_bot"],
+                    "events": ["message", "callback_query"],
+                    "scope": "all_allowed_chats",
+                }
+            ],
+            "capabilities": {
+                "telegram_native_raw": {
+                    "enabled": True,
+                    "reason": "风控需要原始数字 ID",
+                }
+            },
+            "config_actions": [
+                {
+                    "key": "generate_knowledge_base",
+                    "title": "获取并整理为题库",
+                    "placement": "field:knowledge_bases",
+                }
+            ],
         }
         schema = PluginMetadataSchema(**data)
         assert schema.category == "interactive"
         assert schema.interaction_profile == "session_game"
         assert schema.interaction_entries[0]["key"] == "start_game24"
+        assert schema.event_subscriptions[0]["events"] == ["message", "callback_query"]
+        assert schema.capabilities["telegram_native_raw"]["enabled"] is True
+        assert schema.config_actions[0]["key"] == "generate_knowledge_base"
 
     def test_manifest_json_from_remote_meta_keeps_interaction_fields(self):
-        from app.services.remote_plugin_service import PluginMetadata, _manifest_json_from_remote_meta
+        from app.services.remote_plugin_service import (
+            PluginMetadata,
+            _feature_manifest_from_meta,
+            _manifest_json_from_remote_meta,
+        )
 
         meta = PluginMetadata(
             name="dice_grid_hunt",
             display_name="九宫格猜骰",
+            usage="发送“开始九宫格”启动玩法；点击按钮或回复答案继续。",
             version="1.0.0",
             category="interactive",
             interaction_profile="session_game",
@@ -1190,11 +1739,40 @@ class TestPluginMetadataSchema:
                     "preserve_command_trigger": True,
                 }
             ],
+            event_subscriptions=[
+                {
+                    "source": ["interaction_bot"],
+                    "events": ["message", "callback_query"],
+                    "scope": "all_allowed_chats",
+                }
+            ],
+            capabilities={
+                "telegram_native_raw": {
+                    "enabled": True,
+                    "reason": "风控需要原始数字 ID",
+                }
+            },
+            config_actions=[
+                {
+                    "key": "generate_knowledge_base",
+                    "title": "获取并整理为题库",
+                    "placement": "field:knowledge_bases",
+                }
+            ],
         )
 
         manifest_json = _manifest_json_from_remote_meta(meta)
+        feature_manifest = _feature_manifest_from_meta(meta)
+        assert manifest_json["usage"] == "发送“开始九宫格”启动玩法；点击按钮或回复答案继续。"
         assert manifest_json["category"] == "interactive"
         assert manifest_json["interaction_profile"] == "session_game"
+        assert manifest_json["config_actions"] == [
+            {
+                "key": "generate_knowledge_base",
+                "title": "获取并整理为题库",
+                "placement": "field:knowledge_bases",
+            }
+        ]
         assert manifest_json["interaction_entries"] == [
             {
                 "key": "start_dice_grid_hunt",
@@ -1202,6 +1780,16 @@ class TestPluginMetadataSchema:
                 "preserve_command_trigger": True,
             }
         ]
+        assert manifest_json["event_subscriptions"] == [
+            {
+                "source": ["interaction_bot"],
+                "events": ["message", "callback_query"],
+                "scope": "all_allowed_chats",
+            }
+        ]
+        assert manifest_json["capabilities"]["telegram_native_raw"]["enabled"] is True
+        assert feature_manifest is not None
+        assert feature_manifest["config_actions"][0]["key"] == "generate_knowledge_base"
 
 
 def test_lint_plugin_metadata_files_warns_on_bad_interaction_contract(tmp_path) -> None:
@@ -1231,3 +1819,87 @@ def test_lint_plugin_metadata_files_warns_on_bad_interaction_contract(tmp_path) 
     assert any("events" in item for item in warnings)
     assert any("result_contract.send_via" in item for item in warnings)
     assert any("interaction_profile" in item for item in warnings)
+
+
+def test_lint_plugin_metadata_files_warns_event_subscription_consequences(tmp_path) -> None:
+    plugin_dir = tmp_path / "plugin"
+    plugin_dir.mkdir()
+    (plugin_dir / "plugin.json").write_text(
+        """
+        {
+          "name": "bad_subscription",
+          "version": "1.0.0",
+          "event_subscriptions": [
+            {
+              "events": ["message", "ghost_event"],
+              "filters": {
+                "keywords": ["开始"],
+                "mystery": true
+              }
+            }
+          ]
+        }
+        """,
+        encoding="utf-8",
+    )
+
+    warnings = svc.lint_plugin_metadata_files(plugin_dir)
+
+    assert any("filters 含未知 key: mystery" in item and "不会生效" in item for item in warnings)
+    assert any("events 含未知类型: ghost_event" in item and "不会匹配任何当前支持的事件" in item for item in warnings)
+
+
+def test_lint_plugin_metadata_files_rejects_removed_notice_channel(tmp_path) -> None:
+    plugin_dir = tmp_path / "plugin"
+    plugin_dir.mkdir()
+    (plugin_dir / "plugin.json").write_text(
+        """
+        {
+          "name": "good_interaction",
+          "version": "1.0.0",
+          "interaction_entries": [
+            {
+              "key": "start_good",
+              "session_scope": "chat",
+              "events": ["keyword", "message"],
+              "interaction_profile": "session_game",
+              "result_contract": {
+                "send_via": ["bot", {"prefer": ["userbot", "notice"], "fallback": true}, "auto"]
+              }
+            }
+          ]
+        }
+        """,
+        encoding="utf-8",
+    )
+
+    warnings = svc.lint_plugin_metadata_files(plugin_dir)
+    assert any("result_contract.send_via" in item for item in warnings)
+
+
+def test_lint_plugin_metadata_files_accepts_standard_channel_aliases(tmp_path) -> None:
+    plugin_dir = tmp_path / "plugin"
+    plugin_dir.mkdir()
+    (plugin_dir / "plugin.json").write_text(
+        """
+        {
+          "name": "good_interaction",
+          "version": "1.0.0",
+          "interaction_entries": [
+            {
+              "key": "start_good",
+              "session_scope": "chat",
+              "events": ["keyword", "message"],
+              "interaction_profile": "session_game",
+              "result_contract": {
+                "send_via": ["bot", {"prefer": ["userbot"], "fallback": true}, "auto"]
+              }
+            }
+          ]
+        }
+        """,
+        encoding="utf-8",
+    )
+
+    warnings = svc.lint_plugin_metadata_files(plugin_dir)
+    assert not any("result_contract.send_via" in item for item in warnings)

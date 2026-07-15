@@ -22,8 +22,8 @@ export function RulePageHeader({
   return (
     <div className="flex flex-wrap items-center gap-3">
       {backHref ? (
-        <Button variant="ghost" size="sm" onClick={() => nav(backHref)}>
-          <ArrowLeft className="mr-1 h-4 w-4" /> {backLabel}
+        <Button variant="default" size="sm" className="gap-1.5 shadow-sm" onClick={() => nav(backHref)}>
+          <ArrowLeft className="h-4 w-4" /> {backLabel}
         </Button>
       ) : null}
       <h1 className="text-2xl font-semibold tracking-tight">{title}</h1>

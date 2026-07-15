@@ -34,9 +34,10 @@
 
 1. 用 `git diff --stat` 和关键 diff 确认本批实际变更，不写愿景式发布说明。
 2. 按 SemVer 判断版本级别：
-   - `MAJOR`：破坏兼容的数据库迁移、配置格式、API 路径或语义变化。
-   - `MINOR`：用户可感知的新能力、主入口重组、新插件或重要工作流变化。
-   - `PATCH`：修复、文案、小 UI、测试、兼容性补丁。
+   - `MAJOR（主版本）`：破坏兼容的数据库迁移、配置格式、API 路径或语义变化。
+   - `MINOR（次版本）`：用户可感知的新能力、主入口重组、新插件或重要工作流变化。
+   - `PATCH（补丁版本）`：修复、文案、小 UI、测试、兼容性补丁。
+   - 0.x 阶段：`0.X.0` 是阶段性能力版本，`0.X.Y` 是同阶段补丁，不把第三位当流水号。
 3. 同步更新四处版本号：
    - `backend/app/__init__.py`
    - `backend/pyproject.toml`
@@ -53,8 +54,8 @@ pnpm --dir frontend typecheck
 pnpm --dir frontend build
 cd backend && . .venv/bin/activate && ruff check app
 cd backend && . .venv/bin/activate && pytest
-python scripts/validate-plugin-examples.py
-python scripts/validate-installed-interaction-plugins.py
+backend/.venv/bin/python scripts/validate-plugin-examples.py
+backend/.venv/bin/python scripts/validate-installed-interaction-plugins.py
 git diff --check
 ```
 
@@ -127,8 +128,8 @@ git diff --check
 
 ```bash
 make status
-make health
 curl -fsS http://127.0.0.1:8000/healthz
+curl -fsS http://127.0.0.1:8000/readyz
 docker compose ps
 docker compose logs --tail=100 web
 ```
@@ -149,6 +150,14 @@ docker compose logs --tail=100 web
 3. 版本文件、changelog、CI version-sync 是否仍覆盖发布风险。
 4. 前端关键页面是否有可复用的验收路径和截图更新口径。
 5. 插件开发文档是否写清数据链路、兼容边界、排查顺序和最小示例。
+
+文档更新门禁：
+
+- 新增或修改公开 API、环境变量、默认开关、错误码、fail-open / fail-closed 语义、资金状态机或插件契约时，同一批改动必须更新对应 README、部署、安全或插件文档。
+- “当前版本”只从四处版本文件核对；不要把旧版本号写进长期有效的架构和开发说明，版本历史留在 `CHANGELOG.md`。
+- 源码证据优先引用文件和稳定函数/类名，不引用容易漂移的行号。接口请求体以 FastAPI `/docs` 和 Pydantic schema 为准，CLI 参数以 `--help` 为准。
+- `/healthz` 只用于 liveness，生产就绪和更新完成使用 `/readyz`。文档必须明确两者差异。
+- 示例命令要在仓库当前 Makefile、脚本或 package scripts 中真实存在；相对路径要写清从仓库根目录还是子目录执行。
 
 交付要求：
 

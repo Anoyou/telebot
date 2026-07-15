@@ -1,8 +1,11 @@
+import type { PluginCapabilities, PluginEventSubscription } from "@/types/pluginContract";
+
 export interface RemotePlugin {
   id: number;
   name: string;
   display_name: string;
   description: string;
+  usage?: string | null;
   author: string;
   source_url: string;
   version: string;
@@ -11,6 +14,9 @@ export interface RemotePlugin {
   last_update_check_at?: string | null;
   last_update_check_error?: string | null;
   lint_warnings?: string[];
+  event_subscriptions?: PluginEventSubscription[];
+  capabilities?: PluginCapabilities;
+  permissions?: string[];
   enabled: boolean;
   default_enabled: boolean;
   installed_at: string | null;

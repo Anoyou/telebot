@@ -2,13 +2,14 @@ import type { HTMLAttributes } from "react";
 
 import { cn } from "@/lib/utils";
 
-type MetaBadgeTone = "neutral" | "success" | "warn" | "danger" | "outline";
+type MetaBadgeTone = "neutral" | "success" | "warn" | "danger" | "info" | "outline";
 
 const toneClass: Record<MetaBadgeTone, string> = {
   neutral: "border-transparent bg-muted text-foreground",
-  success: "border-transparent bg-emerald-500/15 text-emerald-700 dark:text-emerald-300",
-  warn: "border-transparent bg-amber-500/15 text-amber-700 dark:text-amber-300",
+  success: "border-transparent bg-success/15 text-success",
+  warn: "border-transparent bg-warning/15 text-warning",
   danger: "border-transparent bg-destructive/15 text-destructive",
+  info: "border-transparent bg-info/15 text-info",
   outline: "border-border/80 bg-background text-foreground",
 };
 
@@ -24,7 +25,7 @@ export function MetaBadge({
   return (
     <span
       className={cn(
-        "inline-flex items-center gap-1 rounded-full border px-2.5 py-0.5 text-xs font-semibold leading-5",
+        "inline-flex max-w-full shrink-0 items-center gap-1 overflow-hidden text-ellipsis whitespace-nowrap rounded-full border px-2.5 py-0.5 text-xs font-semibold leading-5",
         mono && "font-mono",
         toneClass[tone],
         className,

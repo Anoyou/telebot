@@ -22,6 +22,14 @@ class Settings(BaseSettings):
     # 登录限速（针对 /api/auth/login 与 /api/auth/register）
     # 0 表示不限速；默认 30 次/分钟，按 IP+用户名两个维度同时计数
     login_rate_limit_per_min: int = 30
+    # 兼容旧 Webhook URL 的 query token；生产默认关闭，避免 token 进入访问日志。
+    webhook_allow_query_token: bool = False
+    # 登录密码连续失败达到阈值后，下一次正确密码需要通知 Bot OTP。
+    # 默认关闭；生产建议在 Web 设置页确认恢复码路径和通知 Bot 后再开启。
+    login_otp_failed_attempt_threshold: int = 0
+    login_otp_fail_window_seconds: int = 15 * 60
+    login_otp_ttl_seconds: int = 5 * 60
+    login_otp_max_attempts: int = 3
     # 登录向导挂起会话上限（防止批量 start_login 造成进程内存占用过高）
     max_pending_logins: int = 100
     # 是否信任 X-Forwarded-For 取客户端 IP；
@@ -38,10 +46,11 @@ class Settings(BaseSettings):
     # worker.entry.worker_entry 会在 import runtime 之前设 ``TELEBOT_WORKER_PROC=1``，
     # db.base / redis_client 据此切到下面的 ``*_worker`` 默认值。
     db_pool_size_worker: int = 1
-    db_max_overflow_worker: int = 0
+    # 允许短时突发借 1 条连接；10 账号四协程压测 p99 等待 <1s，且避免击穿 PG 连接上限。
+    db_max_overflow_worker: int = 1
     redis_url: str = "redis://localhost:6379/0"
     redis_max_connections: int = 16
-    redis_max_connections_worker: int = 8
+    redis_max_connections_worker: int = 15
 
     # Worker 周期性配置 reconcile 间隔（秒）；只是 IPC 丢消息兜底，
     # 180s 足够，原 60s 在多账号下产生不必要的 DB 抖动。
@@ -74,14 +83,24 @@ class Settings(BaseSettings):
     plugins_installed_dir: str = "./plugins/installed"
     # 插件仓库（plugin_repo）本地克隆缓存目录；用于浏览仓库内可装插件而不重复克隆。
     plugin_repos_cache_dir: str = "./data/plugin_repos"
+    # 推荐插件库。Core 不再随包携带普通插件源码；安装页通过这个仓库
+    # 读取带 official/recommended 标签的插件。
+    official_plugin_repo_url: str = "https://github.com/Anoyou/telebot-plugins"
     # 上传 zip 时验签使用的 Ed25519 公钥（PEM）；为空表示不验签，前端给出"未签名"警告。
     # 公钥示例：-----BEGIN PUBLIC KEY-----\nMC...\n-----END PUBLIC KEY-----
     plugin_pubkey: str = ""
     # 兼容旧版本已安装且 signature_ok=NULL 的 zip 插件；新安装流程仍强制验签通过。
     # 设为 false 后，历史未签名插件即使 PluginInstall.enabled=true 也不会被 worker 加载。
     plugin_allow_legacy_unsigned_plugins: bool = True
+    # 新上传 ZIP 是否允许免签安装；与历史加载兼容分离，生产默认拒绝。
+    plugin_allow_new_unsigned_plugins: bool = False
     # 上传 zip 体积上限（字节），默认 10 MiB。超出直接 413。
     plugin_zip_max_bytes: int = 10 * 1024 * 1024
+    # 解压资源上限：必须在执行 manifest.py 前完成检查，防止压缩炸弹耗尽磁盘/inode。
+    plugin_zip_max_members: int = 512
+    plugin_zip_max_member_bytes: int = 32 * 1024 * 1024
+    plugin_zip_max_uncompressed_bytes: int = 100 * 1024 * 1024
+    plugin_zip_max_compression_ratio: int = 200
 
     # 全局默认代理（仅当账号未绑定 Proxy 行时兜底）。
     # 格式：``socks5://[user:pass@]host:port`` 或 ``http://host:port`` 或 ``mtproxy://host:port?secret=xxx``
@@ -90,7 +109,6 @@ class Settings(BaseSettings):
 
     # ── 全局风控 ──────────────────────────────────────────────────
     kill_switch: bool = False
-    global_api_qps: int = 0  # 0 表示不限制
 
     # ── LLM 成本控制 ───────────────────────────────────────────────
     # 以下限制按账号生效，0 表示关闭该项限制。限制在 worker 调用 LLM 前检查，
@@ -102,9 +120,14 @@ class Settings(BaseSettings):
     llm_premium_daily_request_limit_per_account: int = 0
     # 0 表示不覆盖调用方传入的 max_tokens。
     llm_max_output_tokens: int = 0
-    # 第三方插件 ctx.ai 的额外保护上限；插件只能请求文本补全，且输出/超时默认收紧。
-    plugin_ai_max_output_tokens: int = 4096
-    plugin_ai_timeout_seconds: int = 60
+    # 第三方插件 ctx.ai 的额外保护上限；仅放宽调用方可请求的上限，
+    # 普通插件仍按各自传入的 max_tokens 执行。长时间离线建库任务可主动请求大输出。
+    plugin_ai_max_output_tokens: int = 131072
+    plugin_ai_timeout_seconds: int = 600
+    # 插件 handler 协作式 deadline 与连续失败熔断。不是 CPU/恶意代码沙箱。
+    plugin_invoke_timeout_seconds: float = 30.0
+    plugin_circuit_failure_threshold: int = 3
+    plugin_circuit_cooldown_seconds: float = 60.0
 
     # ── 启动期自动迁移 ────────────────────────────────────────────
     # True = backend 启动时自动 ``alembic upgrade head``，把 DB schema 升到代码期望的版本

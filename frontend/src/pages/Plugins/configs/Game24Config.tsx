@@ -5,6 +5,7 @@ import { ArrowLeft, Loader2, Save } from "lucide-react";
 import { toast } from "sonner";
 
 import { listAccountFeatures, toggleAccountFeature } from "@/api/accounts";
+import { getFeatureMatrix } from "@/api/features";
 import { getSystemSettings } from "@/api/system";
 import { CommandBadge } from "@/components/CommandBadge";
 import { Button } from "@/components/ui/button";
@@ -20,7 +21,8 @@ import { Label } from "@/components/ui/label";
 import { Spinner } from "@/components/ui/misc";
 import { Switch } from "@/components/ui/switch";
 import { getErrMsg } from "@/lib/api";
-import { featureConfigBackTarget } from "@/pages/Plugins/_shared/featureConfig";
+import { confirmDiscardChanges, useUnsavedChanges } from "@/lib/unsavedChanges";
+import { featureConfigBackTarget, formatFeatureVersion } from "@/pages/Plugins/_shared/featureConfig";
 import { featureRuntimeText } from "./_shared/featureStatus";
 
 interface Game24Config {
@@ -57,6 +59,10 @@ export function Game24ConfigPage() {
     queryFn: () => listAccountFeatures(aid),
     enabled: !!aid,
   });
+  const matrixQ = useQuery({
+    queryKey: ["matrix"],
+    queryFn: getFeatureMatrix,
+  });
 
   const settingsQ = useQuery({
     queryKey: ["system", "settings"],
@@ -65,6 +71,7 @@ export function Game24ConfigPage() {
   const cmdPrefix = settingsQ.data?.command_prefix || ",";
 
   const game24Feature = featuresQ.data?.find((f) => f.feature_key === "game24");
+  const game24Info = matrixQ.data?.features.find((feature) => feature.key === "game24");
   const currentConfig = (game24Feature?.config ?? {}) as Partial<Game24Config>;
 
   const [command, setCommand] = useState(DEFAULT_CONFIG.command);
@@ -72,8 +79,13 @@ export function Game24ConfigPage() {
     String(DEFAULT_CONFIG.timeout),
   );
   const [dirty, setDirty] = useState(false);
+  const [remoteConfigChanged, setRemoteConfigChanged] = useState(false);
 
   useEffect(() => {
+    if (dirty) {
+      setRemoteConfigChanged(true);
+      return;
+    }
     if (currentConfig.command !== undefined) {
       setCommand(currentConfig.command);
     }
@@ -81,7 +93,9 @@ export function Game24ConfigPage() {
       setTimeoutInput(String(currentConfig.timeout));
     }
     setDirty(false);
+    setRemoteConfigChanged(false);
   }, [game24Feature?.config]);
+  useUnsavedChanges(dirty);
 
   const saveMut = useMutation({
     mutationFn: async (config: Game24Config) => {
@@ -94,6 +108,7 @@ export function Game24ConfigPage() {
     onSuccess: () => {
       toast.success("配置已保存（worker 热加载）");
       setDirty(false);
+      setRemoteConfigChanged(false);
       qc.invalidateQueries({ queryKey: ["account", aid, "features"] });
       qc.invalidateQueries({ queryKey: ["matrix"] });
     },
@@ -122,6 +137,7 @@ export function Game24ConfigPage() {
     setCommand(currentConfig.command ?? DEFAULT_CONFIG.command);
     setTimeoutInput(String(currentConfig.timeout ?? DEFAULT_CONFIG.timeout));
     setDirty(false);
+    setRemoteConfigChanged(false);
   }
 
   if (!aid) return <p>账号 ID 不合法</p>;
@@ -136,34 +152,19 @@ export function Game24ConfigPage() {
   const backTarget = featureConfigBackTarget(aid, location.search);
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 pb-24">
       <div className="flex flex-wrap items-center gap-3">
-        <Button variant="ghost" size="sm" onClick={() => nav(backTarget.backHref)}>
-          <ArrowLeft className="mr-1 h-4 w-4" /> {backTarget.backLabel}
+        <Button variant="default" size="sm" className="gap-1.5 shadow-sm" onClick={() => confirmDiscardChanges(dirty) && nav(backTarget.backHref)}>
+          <ArrowLeft className="h-4 w-4" /> {backTarget.backLabel}
         </Button>
-        <h1 className="text-2xl font-semibold tracking-tight">24 点游戏</h1>
-      </div>
-
-      <div className="sticky top-0 z-30 -mx-2 rounded-b-lg border bg-background/95 px-2 py-3 shadow-sm backdrop-blur supports-[backdrop-filter]:bg-background/80">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="text-sm">
-            <div className="font-medium">配置操作</div>
-            <div className="text-xs text-muted-foreground">
-              {dirty ? "有未保存修改，保存后 worker 会热加载。" : "当前配置已同步。"}
-            </div>
-          </div>
-          <div className="flex items-center gap-4">
-            <Button disabled={!dirty || saveMut.isPending} onClick={handleSave}>
-              {saveMut.isPending ? (
-                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-              ) : (
-                <Save className="mr-2 h-4 w-4" />
-              )}
-              保存配置
-            </Button>
-            <Button type="button" variant="ghost" disabled={!dirty || saveMut.isPending} onClick={resetForm} className="px-0">
-              撤销
-            </Button>
+        <div className="min-w-0">
+          <h1 className="text-2xl font-semibold tracking-tight">24 点游戏</h1>
+          <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+            <code>game24</code>
+            <span>账号 #{aid}</span>
+            <span className="rounded-full border border-primary/20 bg-primary/10 px-2 py-0.5 font-medium text-primary">
+              当前版本 {formatFeatureVersion(game24Info?.version)}
+            </span>
           </div>
         </div>
       </div>
@@ -175,7 +176,7 @@ export function Game24ConfigPage() {
         </CardHeader>
         <CardContent>
           <div className="rounded-md border bg-muted/20 p-3 text-xs text-muted-foreground">
-            <ul className="mt-1.5 list-inside list-disc space-y-0.5">
+            <ul className="mt-1.5 list-inside list-disc space-y-1 break-words">
               <li>在群内发送 <CommandBadge>{cmdPrefix}{command} 奖金金额</CommandBadge> 开始游戏（例：<CommandBadge>{cmdPrefix}{command} 2000</CommandBadge>）</li>
               <li>系统生成 4 个数字，第一个用算式答对的人获得奖金</li>
               <li>可用运算符：+ - * / ( )，也支持 x / ÷ / × 别名</li>
@@ -207,12 +208,12 @@ export function Game24ConfigPage() {
 
       <Card>
         <CardHeader>
-          <CardTitle className="text-base">配置</CardTitle>
+          <CardTitle className="text-base">插件配置</CardTitle>
           <CardDescription>
             配置触发指令名和答题限时。修改后 worker 会自动热加载，无需重启。
           </CardDescription>
         </CardHeader>
-        <CardContent className="grid gap-6 md:grid-cols-2">
+        <CardContent className="grid gap-6 pb-0 md:grid-cols-2">
           <div className="space-y-1.5">
             <Label htmlFor="command">触发指令名</Label>
             <p className="text-xs text-muted-foreground">
@@ -248,6 +249,45 @@ export function Game24ConfigPage() {
             />
           </div>
 
+        </CardContent>
+        <div className="static z-20 mt-4 rounded-b-lg border-t bg-background/95 px-4 py-3 shadow-[0_-8px_20px_rgba(15,23,42,0.06)] backdrop-blur supports-[backdrop-filter]:bg-background/85 sm:sticky sm:bottom-0 sm:px-6">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="text-sm">
+              <div className="font-medium">配置操作</div>
+              <div className="text-xs text-muted-foreground">
+                {remoteConfigChanged
+                  ? "服务端配置已变化；当前草稿已保留，保存会以草稿为准。"
+                  : dirty
+                    ? "有未保存修改，保存后 worker 会热加载。"
+                    : "当前配置已同步。"}
+              </div>
+            </div>
+            <div className="flex items-center gap-4">
+              <Button disabled={!dirty || saveMut.isPending} onClick={handleSave}>
+                {saveMut.isPending ? (
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                ) : (
+                  <Save className="mr-2 h-4 w-4" />
+                )}
+                保存配置
+              </Button>
+              <Button type="button" variant="ghost" disabled={!dirty || saveMut.isPending} onClick={resetForm} className="px-0">
+                撤销
+              </Button>
+            </div>
+          </div>
+        </div>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">插件预览</CardTitle>
+          <CardDescription>该插件没有声明模板预览；建议后续补充题面和结算消息的渲染示例。</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div className="rounded-md border border-dashed bg-muted/20 px-3 py-4 text-sm text-muted-foreground">
+            当前页面只配置触发指令和答题限时，游戏题面由运行时动态生成。
+          </div>
         </CardContent>
       </Card>
     </div>

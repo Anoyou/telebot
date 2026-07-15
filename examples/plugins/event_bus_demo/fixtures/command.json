@@ -1,0 +1,15 @@
+{
+  "source": {
+    "type": "command",
+    "channel": "userbot",
+    "account_id": 1,
+    "message_id": 42
+  },
+  "chat": {"id": -100100200300, "type": "supergroup"},
+  "message": {"chat_id": -100100200300, "message_id": 42, "text": ",event_bus_demo status"},
+  "actor": {"user_id": 10001, "display_name": "账号主人"},
+  "sender": {"user_id": 10001, "display_name": "账号主人"},
+  "command": {"name": "event_bus_demo", "args": ["status"], "prefix": ","},
+  "trigger": {"mode": "admin_command"},
+  "native_raw_meta": {"enabled": false, "reason": "not_requested"}
+}

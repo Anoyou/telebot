@@ -160,7 +160,6 @@ export function AccountWizard() {
   const cloneMut = useMutation({
     mutationFn: () =>
       cloneConfig(createdAid!, Number(cloneFrom), [
-        "auto_reply",
         "scheduler",
       ]),
     onSuccess: () => {
@@ -193,8 +192,8 @@ export function AccountWizard() {
       </div>
 
       {isRelogin ? (
-        <Card className="border-amber-200 bg-amber-50/70 dark:border-amber-900 dark:bg-amber-950/25">
-          <CardContent className="pt-4 text-sm text-amber-950 dark:text-amber-100">
+        <Card className="border-warning/30 bg-warning/10">
+          <CardContent className="pt-4 text-sm text-warning">
             这次不会新建账号，也不会删除原配置。成功后只覆盖当前账号的
             session、API 凭据和运行状态，允许会话、插件规则、指令绑定都会保留。
           </CardContent>
@@ -209,7 +208,7 @@ export function AccountWizard() {
               className={cn(
                 "flex h-6 w-6 items-center justify-center rounded-full border text-xs",
                 step === s.n && "border-primary bg-primary text-primary-foreground",
-                step > s.n && "border-emerald-500 bg-emerald-500 text-white",
+                step > s.n && "border-success bg-success text-white",
               )}
             >
               {step > s.n ? <Check className="h-3.5 w-3.5" /> : s.n}

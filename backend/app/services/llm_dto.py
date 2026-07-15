@@ -17,6 +17,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from ..db.models.command import (
+    normalize_client_identity_profile,
+    normalize_protocol_profile,
+)
+
 
 @dataclass
 class LLMProviderDTO:
@@ -29,6 +34,7 @@ class LLMProviderDTO:
     - name: 友好名称（前端展示）
     - provider: 厂商类型（openai/anthropic/ollama）
     - api_format: API 协议格式（chat_completions/responses/anthropic_messages）
+    - protocol_profile: Anthropic Messages 请求兼容档案
     - web_search_api_format: 联网搜索时的 API 协议覆盖（auto/responses/...）
     - base_url: API 端点 base URL
     - default_model: 默认模型名
@@ -43,6 +49,8 @@ class LLMProviderDTO:
     name: str
     provider: str
     api_format: str | None = None
+    protocol_profile: str = "standard"
+    client_identity_profile: str = "auto"
     web_search_api_format: str | None = None
     base_url: str | None = None
     default_model: str = ""
@@ -57,6 +65,13 @@ class LLMProviderDTO:
         """规范化字段类型。"""
         self.id = int(self.id)
         self.cost_tier = int(self.cost_tier)
+        self.protocol_profile = normalize_protocol_profile(
+            self.api_format,
+            self.protocol_profile,
+        )
+        self.client_identity_profile = normalize_client_identity_profile(
+            self.client_identity_profile
+        )
         if self.tags is None:
             self.tags = []
         if self.models is None:
@@ -70,6 +85,10 @@ class LLMProviderDTO:
             name=str(d.get("name", "")),
             provider=str(d.get("provider", "")),
             api_format=d.get("api_format"),
+            protocol_profile=str(d.get("protocol_profile", "standard") or "standard"),
+            client_identity_profile=str(
+                d.get("client_identity_profile", "auto") or "auto"
+            ),
             web_search_api_format=d.get("web_search_api_format"),
             base_url=d.get("base_url"),
             default_model=str(d.get("default_model", "") or ""),
@@ -89,6 +108,10 @@ class LLMProviderDTO:
             name=str(row.name or ""),
             provider=str(row.provider or ""),
             api_format=getattr(row, "api_format", None),
+            protocol_profile=str(getattr(row, "protocol_profile", "standard") or "standard"),
+            client_identity_profile=str(
+                getattr(row, "client_identity_profile", "auto") or "auto"
+            ),
             web_search_api_format=getattr(row, "web_search_api_format", None),
             base_url=row.base_url,
             default_model=str(row.default_model or ""),
@@ -107,6 +130,8 @@ class LLMProviderDTO:
             "name": self.name,
             "provider": self.provider,
             "api_format": self.api_format,
+            "protocol_profile": self.protocol_profile,
+            "client_identity_profile": self.client_identity_profile,
             "web_search_api_format": self.web_search_api_format,
             "base_url": self.base_url,
             "default_model": self.default_model,
@@ -129,6 +154,86 @@ class LLMProviderDTO:
         if self.is_ollama:
             return True
         return bool(self.api_key_enc)
+
+    def enabled_model_ids(self) -> list[str]:
+        """严格返回 models[].enabled == True 的模型 id（顺序保留、去重）。"""
+        out: list[str] = []
+        seen: set[str] = set()
+        for item in self.models or []:
+            if not isinstance(item, dict) or not bool(item.get("enabled")):
+                continue
+            mid = str(item.get("id") or "").strip()
+            if mid and mid not in seen:
+                seen.add(mid)
+                out.append(mid)
+        return out
+
+    def has_model_list(self) -> bool:
+        """是否声明了显式 models 清单（至少一条带 id）。"""
+        return any(
+            isinstance(m, dict) and str(m.get("id") or "").strip()
+            for m in (self.models or [])
+        )
+
+    def pick_enabled_model(self) -> str | None:
+        """为该 provider 选一个可用模型（fallback 重选模型时用）。
+
+        - 有 enabled 模型：default_model∈enabled 优先，否则第一个 enabled。
+        - 有显式清单但全部禁用：返回 None（该 provider 无可用模型）。
+        - 无显式清单（老配置）：回落 default_model。
+        """
+        enabled = self.enabled_model_ids()
+        default_model = str(self.default_model or "").strip()
+        if enabled:
+            if default_model and default_model in enabled:
+                return default_model
+            return enabled[0]
+        if self.has_model_list():
+            return None
+        return default_model or None
+
+    def capabilities_for_model(self, model: str):
+        """Apply optional model metadata over protocol-level capabilities."""
+
+        from ..db.models.command import LLM_PROTOCOL_PROFILE_CLAUDE_CODE_PROXY
+        from .llm_protocol import capabilities_for_api_format
+
+        api_format = str(self.api_format or "chat_completions")
+        capabilities = capabilities_for_api_format(api_format)
+        if (
+            api_format == "anthropic_messages"
+            and self.protocol_profile == LLM_PROTOCOL_PROFILE_CLAUDE_CODE_PROXY
+        ):
+            capabilities = capabilities.with_overrides(
+                reasoning=True,
+                reasoning_efforts=frozenset({"minimal", "low", "medium", "high", "xhigh"}),
+            )
+        metadata = next(
+            (
+                item
+                for item in self.models
+                if str(item.get("id") or "").strip() == str(model or "").strip()
+            ),
+            None,
+        )
+        if not metadata:
+            return capabilities
+        overrides: dict[str, Any] = {}
+        for key, capability_key in (
+            ("supports_tools", "tools"),
+            ("supports_images", "images"),
+            ("supports_temperature", "temperature"),
+        ):
+            if isinstance(metadata.get(key), bool):
+                overrides[capability_key] = metadata[key]
+        efforts = metadata.get("reasoning_efforts")
+        if isinstance(efforts, list):
+            normalized = frozenset(
+                str(item) for item in efforts if str(item) in {"minimal", "low", "medium", "high", "xhigh"}
+            )
+            overrides["reasoning"] = bool(normalized)
+            overrides["reasoning_efforts"] = normalized
+        return capabilities.with_overrides(**overrides)
 
 
 def provider_to_dto(provider_dict: dict[str, Any]) -> LLMProviderDTO:

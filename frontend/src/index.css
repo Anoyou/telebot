@@ -5,70 +5,97 @@
 
 @layer base {
   :root {
-    --background: 240 5% 96%;
-    --foreground: 240 8% 8%;
+    /* macOS 暖调亮色基线 */
+    --background: 40 19% 94%;
+    --foreground: 36 8% 12%;
 
-    --card: 0 0% 100%;
-    --card-foreground: 240 8% 8%;
+    --card: 45 29% 97%;
+    --card-foreground: 36 8% 12%;
+    --card-2: 40 21% 95%;
 
-    --popover: 0 0% 100%;
-    --popover-foreground: 240 8% 8%;
+    --popover: 45 29% 97%;
+    --popover-foreground: 36 8% 12%;
 
-    --primary: 212 92% 55%;
-    --primary-foreground: 210 40% 98%;
+    --primary: 22 87% 45%;
+    --primary-hover: 22 88% 40%;
+    --primary-foreground: 0 0% 100%;
 
-    --secondary: 240 5% 92%;
-    --secondary-foreground: 240 8% 12%;
+    --secondary: 40 16% 89%;
+    --secondary-hover: 44 14% 85%;
+    --secondary-foreground: 36 8% 12%;
 
-    --muted: 240 5% 91%;
-    --muted-foreground: 240 4% 45%;
+    --muted: 40 22% 92%;
+    --muted-foreground: 38 5% 41%;
+    --faint-foreground: 39 8% 64%;
 
-    --accent: 240 5% 92%;
-    --accent-foreground: 240 8% 10%;
+    --accent: 42 16% 88%;
+    --accent-foreground: 36 8% 12%;
 
-    --destructive: 0 84.2% 60.2%;
-    --destructive-foreground: 210 40% 98%;
+    --success: 146 65% 34%;
+    --warning: 37 91% 38%;
+    --info: 212 90% 44%;
+    --destructive: 4 71% 50%;
+    --destructive-hover: 4 75% 44%;
+    --destructive-foreground: 0 0% 100%;
 
-    --border: 240 6% 88%;
-    --input: 240 6% 87%;
-    --ring: 212 92% 55%;
+    --border: 38 11% 86%;
+    --border-strong: 36 9% 82%;
+    --input: 36 9% 82%;
+    --input-bg: 45 29% 97%;
+    --ring: 22 87% 45%;
+    --app-chrome: 40 19% 94%;
 
-    /* 圆角：参照 macOS / iOS 设计语言。
-     * - 卡片 / 浮层 (rounded-lg = --radius)         = 12px
-     * - 按钮 / 输入框 (rounded-md = --radius - 2px) = 10px
-     * - 标签 / 徽章   (rounded-sm = --radius - 4px) = 8px
-     */
     --radius: 0.75rem;
+
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.06);
+    --shadow-md: 0 1px 3px rgba(0, 0, 0, 0.08), 0 4px 14px rgba(0, 0, 0, 0.06);
+    --shadow-lg: 0 2px 6px rgba(0, 0, 0, 0.10), 0 12px 32px rgba(0, 0, 0, 0.12);
   }
 
   .dark {
-    --background: 222 47% 7%;
-    --foreground: 210 40% 98%;
+    /* 中性石墨暗色（去蓝染） */
+    --background: 240 3% 11%;
+    --foreground: 240 11% 96%;
 
-    --card: 222 38% 10%;
-    --card-foreground: 210 40% 98%;
+    --card: 240 5% 16%;
+    --card-foreground: 240 11% 96%;
+    --card-2: 240 4% 18%;
 
-    --popover: 222 38% 9%;
-    --popover-foreground: 210 40% 98%;
+    --popover: 240 4% 18%;
+    --popover-foreground: 240 11% 96%;
 
-    --primary: 217.2 91.2% 59.8%;
-    --primary-foreground: 222.2 47.4% 11.2%;
+    --primary: 25 87% 53%;
+    --primary-hover: 24 100% 60%;
+    --primary-foreground: 0 0% 100%;
 
-    --secondary: 217 28% 17%;
-    --secondary-foreground: 210 40% 98%;
+    --secondary: 240 3% 24%;
+    --secondary-hover: 240 3% 28%;
+    --secondary-foreground: 240 11% 96%;
 
-    --muted: 217 26% 16%;
-    --muted-foreground: 215 20.2% 65.1%;
+    --muted: 240 4% 20%;
+    --muted-foreground: 240 3% 64%;
+    --faint-foreground: 240 2% 44%;
 
-    --accent: 217 26% 18%;
-    --accent-foreground: 210 40% 98%;
+    --accent: 240 4% 25%;
+    --accent-foreground: 240 11% 96%;
 
-    --destructive: 0 62.8% 30.6%;
-    --destructive-foreground: 210 40% 98%;
+    --success: 144 59% 48%;
+    --warning: 40 90% 61%;
+    --info: 210 100% 65%;
+    --destructive: 4 100% 66%;
+    --destructive-hover: 4 100% 70%;
+    --destructive-foreground: 0 0% 100%;
 
-    --border: 217 22% 22%;
-    --input: 217 22% 22%;
-    --ring: 217.2 91.2% 59.8%;
+    --border: 240 2% 20%;
+    --border-strong: 240 2% 27%;
+    --input: 240 2% 27%;
+    --input-bg: 240 5% 12%;
+    --ring: 25 87% 53%;
+    --app-chrome: 240 3% 11%;
+
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.40);
+    --shadow-md: 0 1px 3px rgba(0, 0, 0, 0.45), 0 4px 14px rgba(0, 0, 0, 0.35);
+    --shadow-lg: 0 2px 6px rgba(0, 0, 0, 0.50), 0 16px 40px rgba(0, 0, 0, 0.45);
   }
 }
 
@@ -77,6 +104,7 @@
     width: 100%;
     min-height: 100%;
     overflow-x: hidden;
+    background-color: hsl(var(--app-chrome));
     -webkit-text-size-adjust: 100%;
     text-size-adjust: 100%;
     touch-action: manipulation;
@@ -87,6 +115,7 @@
     width: 100%;
     min-height: 100dvh;
     overflow-x: hidden;
+    background-color: hsl(var(--app-chrome));
   }
 
   * {
@@ -122,9 +151,22 @@
 
   body {
     @apply bg-background text-foreground;
+    background-color: hsl(var(--app-chrome));
     font-family:
       -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
       "Hiragino Sans GB", "Microsoft YaHei", "Helvetica Neue", Arial, sans-serif;
+  }
+
+  [data-sonner-toaster][data-y-position="top"] {
+    top: max(1rem, calc(env(safe-area-inset-top) + 1rem)) !important;
+  }
+
+  [data-sonner-toaster][data-x-position="right"] {
+    right: max(1rem, calc(env(safe-area-inset-right) + 1rem)) !important;
+  }
+
+  [data-sonner-toaster][data-x-position="left"] {
+    left: max(1rem, calc(env(safe-area-inset-left) + 1rem)) !important;
   }
 
   @media (max-width: 640px) {
@@ -137,64 +179,91 @@
 }
 
 @layer utilities {
-  /* 跑马灯边框以真实控件圆角为准：本体 12px，外圈外扩 2px 后用 14px。 */
+  .nested-surface {
+    --nested-outer-radius: var(--radius);
+    --nested-inset: 0.75rem;
+    border-radius: var(--nested-outer-radius);
+    padding: var(--nested-inset);
+  }
+
+  .nested-surface-inset-2 {
+    --nested-inset: 0.5rem;
+  }
+
+  .nested-surface-inset-4 {
+    --nested-inset: 1rem;
+  }
+
+  .nested-surface-item {
+    border-radius: max(0px, calc(var(--nested-outer-radius) - var(--nested-inset)));
+  }
+
+  /* 跑马灯边框裁进控件自身圆角，避免弹窗圆角外侧露出直角彩边。 */
   .siri-glow {
-    --siri-ring-radius: calc(var(--radius) + 2px);
     position: relative;
     isolation: isolate;
     overflow: visible;
-    border-radius: var(--radius);
     box-shadow: 0 8px 20px hsl(var(--primary) / 0.10);
   }
 
   .siri-glow::before {
     content: "";
     position: absolute;
-    inset: -2px;
-    z-index: -1;
-    border-radius: var(--siri-ring-radius);
-    border: 1.5px solid transparent;
-    background:
-      linear-gradient(hsl(var(--background)), hsl(var(--background))) padding-box,
-      conic-gradient(
-        from var(--siri-angle, 0deg),
-        #4cc9f0,
-        #7c3aed,
-        #ff4ecd,
-        #ffb703,
-        #37d67a,
-        #4cc9f0
-      ) border-box;
+    inset: 0;
+    z-index: 2;
+    border-radius: inherit;
+    padding: 2px;
+    background: conic-gradient(
+      from var(--siri-angle, 0deg),
+      #4cc9f0,
+      #7c3aed,
+      #ff4ecd,
+      #ffb703,
+      #37d67a,
+      #4cc9f0
+    );
+    -webkit-mask:
+      linear-gradient(#000 0 0) content-box,
+      linear-gradient(#000 0 0);
+    -webkit-mask-composite: xor;
+    mask:
+      linear-gradient(#000 0 0) content-box,
+      linear-gradient(#000 0 0);
+    mask-composite: exclude;
     pointer-events: none;
     animation: siri-orbit 2.4s linear infinite;
   }
 
   .siri-glow-soft {
-    --siri-ring-radius: calc(var(--radius) + 2px);
     position: relative;
     isolation: isolate;
     overflow: visible;
-    border-radius: var(--radius);
   }
 
   .siri-glow-soft::before {
     content: "";
     position: absolute;
-    inset: -2px;
-    z-index: -1;
-    border-radius: var(--siri-ring-radius);
-    border: 1.5px solid transparent;
-    background:
-      linear-gradient(hsl(var(--background)), hsl(var(--background))) padding-box,
-      conic-gradient(
-        from var(--siri-angle, 0deg),
-        #4cc9f0,
-        #7c3aed,
-        #ff4ecd,
-        #ffb703,
-        #37d67a,
-        #4cc9f0
-      ) border-box;
+    inset: 0;
+    z-index: 2;
+    border-radius: inherit;
+    padding: 2px;
+    background: conic-gradient(
+      from var(--siri-angle, 0deg),
+      #4cc9f0,
+      #7c3aed,
+      #ff4ecd,
+      #ffb703,
+      #37d67a,
+      #4cc9f0
+    );
+    -webkit-mask:
+      linear-gradient(#000 0 0) content-box,
+      linear-gradient(#000 0 0);
+    -webkit-mask-composite: xor;
+    mask:
+      linear-gradient(#000 0 0) content-box,
+      linear-gradient(#000 0 0);
+    mask-composite: exclude;
     pointer-events: none;
     animation: siri-orbit 3s linear infinite;
   }
@@ -211,403 +280,33 @@
     }
   }
 
-  .keep-words {
-    word-break: keep-all;
-    overflow-wrap: normal;
-  }
-
   .safe-scrollbar {
     -webkit-overflow-scrolling: touch;
     scrollbar-width: thin;
   }
 
-  .app-frame {
-    background:
-      linear-gradient(135deg, hsl(var(--background)) 0%, hsl(var(--muted) / 0.34) 52%, hsl(var(--background)) 100%);
+  .horizontal-scroll-touch {
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+    -webkit-overflow-scrolling: touch;
+    touch-action: pan-x;
   }
 
-  .app-workspace {
-    position: relative;
-    background:
-      radial-gradient(circle at 0% 0%, hsl(var(--primary) / 0.055), transparent 34rem),
-      linear-gradient(180deg, hsl(var(--background) / 0.92), hsl(var(--background) / 0.98));
-  }
-
-  .app-workspace::before {
-    content: "";
-    position: absolute;
-    inset: 0 auto 0 0;
-    width: 2.5rem;
-    z-index: 0;
-    background:
-      linear-gradient(90deg, hsl(222 47% 8% / 0.08), transparent 70%),
-      linear-gradient(90deg, hsl(var(--background) / 0.36), transparent);
-    pointer-events: none;
-  }
-
-  .app-workspace > * {
-    position: relative;
-    z-index: 1;
-  }
-
-  .app-main {
-    background:
-      radial-gradient(circle at 12% 10%, hsl(var(--primary) / 0.045), transparent 26rem),
-      radial-gradient(circle at 92% 0%, hsl(var(--foreground) / 0.035), transparent 24rem);
-  }
-
-  .app-topbar {
-    border-bottom: 1px solid hsl(var(--border) / 0.42);
-    background:
-      linear-gradient(180deg, hsl(var(--card) / 0.84), hsl(var(--card) / 0.62)),
-      linear-gradient(90deg, hsl(var(--background) / 0.18), transparent 32%);
-    box-shadow:
-      0 1px 0 hsl(var(--background) / 0.44),
-      0 14px 36px hsl(222 47% 8% / 0.045);
-    -webkit-backdrop-filter: blur(24px) saturate(180%);
-    backdrop-filter: blur(24px) saturate(180%);
-  }
-
-  .liquid-glass,
-  .liquid-tab-list {
-    position: relative;
-    isolation: isolate;
-    overflow: hidden;
-    transform: translateZ(0);
-    border: 1px solid hsl(var(--background) / 0.30);
-    background:
-      linear-gradient(118deg, transparent 0 20%, hsl(var(--background) / 0.38) 30%, transparent 46% 100%),
-      linear-gradient(135deg, hsl(var(--background) / 0.46), hsl(var(--background) / 0.12) 52%, hsl(var(--foreground) / 0.08)),
-      linear-gradient(160deg, hsl(var(--background) / 0.34) 0%, transparent 36%),
-      linear-gradient(320deg, transparent 0 58%, hsl(var(--primary) / 0.18) 78%, transparent 100%),
-      hsl(var(--card) / 0.12);
-    background-blend-mode: screen, normal, screen, soft-light, normal;
-    box-shadow:
-      0 26px 72px hsl(222 47% 8% / 0.22),
-      0 8px 24px hsl(222 47% 8% / 0.10),
-      inset 0 1px 0 hsl(var(--background) / 0.78),
-      inset 0 0 0 1px hsl(var(--background) / 0.18),
-      inset 0 -1px 0 hsl(var(--foreground) / 0.10),
-      inset 0 -22px 44px hsl(var(--foreground) / 0.06);
-    -webkit-backdrop-filter: blur(42px) saturate(260%) brightness(1.12) contrast(1.06);
-    backdrop-filter: blur(42px) saturate(260%) brightness(1.12) contrast(1.06);
-  }
-
-  .liquid-glass > *,
-  .liquid-tab-list > * {
-    position: relative;
-    z-index: 1;
-  }
-
-  .liquid-glass::before,
-  .liquid-tab-list::before {
-    content: "";
-    position: absolute;
-    inset: 0;
-    z-index: 0;
-    border-radius: inherit;
-    background:
-      linear-gradient(118deg, hsl(var(--background) / 0.62) 0%, transparent 20% 58%, hsl(var(--background) / 0.22) 74%, transparent 100%),
-      linear-gradient(180deg, hsl(var(--background) / 0.46), transparent 36%),
-      linear-gradient(90deg, transparent 0 36%, hsl(var(--background) / 0.22) 50%, transparent 68% 100%),
-      linear-gradient(205deg, transparent 0 70%, hsl(var(--foreground) / 0.08) 100%);
-    opacity: 0.82;
-    pointer-events: none;
-    mix-blend-mode: screen;
-  }
-
-  .liquid-glass::after,
-  .liquid-tab-list::after {
-    content: "";
-    position: absolute;
-    inset: 1px;
-    z-index: 0;
-    border-radius: inherit;
-    background:
-      linear-gradient(150deg, hsl(var(--background) / 0.22), transparent 34% 64%, hsl(var(--foreground) / 0.08));
-    box-shadow:
-      inset 0 0 0 1px hsl(var(--background) / 0.20),
-      inset 12px 0 24px hsl(var(--background) / 0.12),
-      inset -14px -18px 28px hsl(var(--foreground) / 0.06);
-    pointer-events: none;
-  }
-
-  .liquid-bottom-nav {
-    border-radius: 2rem;
-    background:
-      linear-gradient(116deg, transparent 0 18%, hsl(var(--background) / 0.44) 30%, transparent 48%),
-      linear-gradient(135deg, hsl(var(--background) / 0.50), hsl(var(--background) / 0.12) 54%, hsl(var(--foreground) / 0.10)),
-      linear-gradient(180deg, hsl(var(--background) / 0.42), transparent 50%),
-      linear-gradient(310deg, transparent 0 56%, hsl(var(--primary) / 0.18) 78%, transparent 100%),
-      hsl(var(--card) / 0.10);
-    box-shadow:
-      0 28px 82px hsl(222 47% 8% / 0.28),
-      0 8px 24px hsl(222 47% 8% / 0.14),
-      inset 0 1px 0 hsl(var(--background) / 0.82),
-      inset 0 0 0 1px hsl(var(--background) / 0.20),
-      inset 0 -24px 42px hsl(var(--foreground) / 0.06);
-    -webkit-backdrop-filter: blur(48px) saturate(280%) brightness(1.14) contrast(1.08);
-    backdrop-filter: blur(48px) saturate(280%) brightness(1.14) contrast(1.08);
-  }
-
-  .liquid-bottom-nav::before {
-    background:
-      linear-gradient(105deg, transparent 0 22%, hsl(var(--background) / 0.58) 36%, transparent 52% 100%),
-      linear-gradient(180deg, hsl(var(--background) / 0.52), transparent 34%),
-      linear-gradient(90deg, transparent, hsl(var(--primary) / 0.12), transparent);
-    opacity: 0.9;
-  }
-
-  .liquid-bottom-nav::after {
-    box-shadow:
-      inset 0 0 0 1px hsl(var(--background) / 0.24),
-      inset 14px 0 30px hsl(var(--background) / 0.14),
-      inset -16px -22px 34px hsl(var(--foreground) / 0.07),
-      0 1px 0 hsl(var(--background) / 0.24);
-  }
-
-  .liquid-nav-item {
-    position: relative;
-    overflow: hidden;
-    border: 1px solid transparent;
-  }
-
-  .liquid-tab-trigger {
-    position: relative;
-    overflow: hidden;
-    border: 1px solid transparent;
-  }
-
-  .liquid-nav-item > *,
-  .liquid-tab-trigger > *,
-  .liquid-sidebar-link > * {
-    position: relative;
-    z-index: 1;
-  }
-
-  .liquid-nav-item::before {
-    content: "";
-    position: absolute;
-    inset: 0;
-    border-radius: inherit;
-    background:
-      linear-gradient(180deg, hsl(var(--background) / 0.42), transparent 72%),
-      linear-gradient(135deg, hsl(var(--background) / 0.26), transparent 42%);
-    opacity: 0;
-    transition: opacity 160ms ease;
-    pointer-events: none;
-    mix-blend-mode: screen;
-  }
-
-  .liquid-nav-item:hover::before,
-  .liquid-nav-item-active::before {
-    opacity: 1;
-  }
-
-  .liquid-nav-item-active {
-    color: hsl(var(--foreground));
-    border-color: hsl(var(--background) / 0.34);
-    background:
-      linear-gradient(112deg, transparent 0 18%, hsl(var(--background) / 0.46) 36%, transparent 62%),
-      linear-gradient(180deg, hsl(var(--background) / 0.58), hsl(var(--background) / 0.22)),
-      linear-gradient(320deg, transparent 0 62%, hsl(var(--primary) / 0.14) 100%),
-      hsl(var(--card) / 0.12);
-    box-shadow:
-      0 12px 30px hsl(222 47% 8% / 0.18),
-      inset 0 1px 0 hsl(var(--background) / 0.82),
-      inset 0 0 0 1px hsl(var(--background) / 0.26),
-      inset 0 -1px 0 hsl(var(--foreground) / 0.10),
-      inset 0 -10px 18px hsl(var(--foreground) / 0.05);
-    -webkit-backdrop-filter: blur(26px) saturate(240%) brightness(1.10);
-    backdrop-filter: blur(26px) saturate(240%) brightness(1.10);
-    transform: translateY(-1px);
-  }
-
-  .liquid-nav-item-active::after {
-    content: "";
-    position: absolute;
-    inset: 1px;
-    border-radius: inherit;
-    background:
-      linear-gradient(135deg, hsl(var(--background) / 0.18), transparent 42% 72%, hsl(var(--foreground) / 0.06));
-    box-shadow:
-      inset 0 0 0 1px hsl(var(--background) / 0.20),
-      inset 8px 0 16px hsl(var(--background) / 0.12),
-      inset -8px -10px 16px hsl(var(--foreground) / 0.05);
-    pointer-events: none;
-  }
-
-  .liquid-tab-list {
-    border-color: hsl(var(--border) / 0.42);
-    background:
-      linear-gradient(116deg, transparent 0 22%, hsl(var(--background) / 0.26) 34%, transparent 50%),
-      linear-gradient(135deg, hsl(var(--background) / 0.34), hsl(var(--background) / 0.10) 56%, hsl(var(--foreground) / 0.045)),
-      linear-gradient(180deg, hsl(var(--background) / 0.24), transparent 62%),
-      hsl(var(--muted) / 0.10);
-    box-shadow:
-      inset 0 1px 0 hsl(var(--background) / 0.52),
-      inset 0 0 0 1px hsl(var(--background) / 0.10),
-      inset 0 -1px 0 hsl(var(--foreground) / 0.035),
-      0 8px 22px hsl(222 47% 8% / 0.055);
-    -webkit-backdrop-filter: blur(28px) saturate(190%) brightness(1.04);
-    backdrop-filter: blur(28px) saturate(190%) brightness(1.04);
-  }
-
-  .liquid-tab-trigger[data-state="active"] {
-    border: 1px solid hsl(var(--background) / 0.34);
-    background:
-      linear-gradient(112deg, transparent 0 18%, hsl(var(--background) / 0.48) 38%, transparent 64%),
-      linear-gradient(180deg, hsl(var(--background) / 0.58), hsl(var(--background) / 0.24)),
-      linear-gradient(320deg, transparent 0 64%, hsl(var(--primary) / 0.14) 100%),
-      hsl(var(--card) / 0.12);
-    box-shadow:
-      0 10px 24px hsl(222 47% 8% / 0.16),
-      inset 0 1px 0 hsl(var(--background) / 0.82),
-      inset 0 0 0 1px hsl(var(--background) / 0.26),
-      inset 0 -1px 0 hsl(var(--foreground) / 0.10),
-      inset 0 -10px 18px hsl(var(--foreground) / 0.05);
-    -webkit-backdrop-filter: blur(24px) saturate(240%) brightness(1.10);
-    backdrop-filter: blur(24px) saturate(240%) brightness(1.10);
-    transform: translateY(-1px);
-  }
-
-  .liquid-tab-trigger[data-state="active"]::after {
-    content: "";
-    position: absolute;
-    inset: 1px;
-    border-radius: inherit;
-    background:
-      linear-gradient(135deg, hsl(var(--background) / 0.18), transparent 42% 72%, hsl(var(--foreground) / 0.05));
-    box-shadow:
-      inset 0 0 0 1px hsl(var(--background) / 0.18),
-      inset 8px 0 16px hsl(var(--background) / 0.12),
-      inset -8px -10px 16px hsl(var(--foreground) / 0.04);
-    pointer-events: none;
-  }
-
-  .liquid-sidebar {
-    border-radius: 0;
-    border-width: 0 1px 0 0;
-    border-color: hsl(var(--border) / 0.30);
-    outline-width: 0;
-    background:
-      linear-gradient(118deg, transparent 0 14%, hsl(var(--background) / 0.38) 30%, transparent 48%),
-      linear-gradient(180deg, hsl(var(--background) / 0.42), hsl(var(--background) / 0.14) 56%, hsl(var(--foreground) / 0.06)),
-      linear-gradient(300deg, transparent 0 54%, hsl(var(--primary) / 0.12) 78%, transparent 100%),
-      hsl(var(--card) / 0.14);
-    box-shadow:
-      18px 0 46px hsl(222 47% 8% / 0.10),
-      3px 0 12px hsl(222 47% 8% / 0.055),
-      inset -1px 0 0 hsl(var(--background) / 0.20),
-      inset 1px 0 0 hsl(var(--background) / 0.22),
-      inset -18px 0 36px hsl(var(--foreground) / 0.04);
-    -webkit-backdrop-filter: blur(40px) saturate(240%) brightness(1.10);
-    backdrop-filter: blur(40px) saturate(240%) brightness(1.10);
-  }
-
-  .liquid-sidebar-drawer {
+  .liquid-sidebar.liquid-sidebar-drawer {
+    position: fixed;
     border-radius: 0 1rem 1rem 0;
+    background: hsl(var(--card));
     transform: translate3d(-100%, 0, 0) translateZ(0);
     transition: transform 200ms ease-out;
     will-change: transform;
   }
 
-  .liquid-sidebar-drawer[data-state="open"] {
+  .liquid-sidebar.liquid-sidebar-drawer[data-state="open"] {
     transform: translate3d(0, 0, 0) translateZ(0);
   }
 
-  .liquid-sidebar-drawer[data-state="closed"] {
+  .liquid-sidebar.liquid-sidebar-drawer[data-state="closed"] {
     transform: translate3d(-100%, 0, 0) translateZ(0);
-  }
-
-  .liquid-sidebar::before {
-    background:
-      linear-gradient(112deg, transparent 0 18%, hsl(var(--background) / 0.52) 34%, transparent 52%),
-      linear-gradient(180deg, hsl(var(--background) / 0.46), transparent 30%),
-      linear-gradient(90deg, transparent 70%, hsl(var(--background) / 0.20));
-    opacity: 0.86;
-  }
-
-  .liquid-sidebar::after {
-    inset: 0;
-    border-width: 0 1px 0 0;
-    box-shadow:
-      inset -1px 0 0 hsl(var(--background) / 0.18),
-      inset -18px 0 34px hsl(var(--foreground) / 0.035),
-      1px 0 0 hsl(var(--background) / 0.12);
-  }
-
-  .liquid-sidebar-header,
-  .liquid-sidebar-footer {
-    background:
-      linear-gradient(180deg, hsl(var(--background) / 0.18), transparent);
-    box-shadow:
-      inset 0 1px 0 hsl(var(--background) / 0.30),
-      inset 0 -1px 0 hsl(var(--foreground) / 0.04);
-  }
-
-  .liquid-sidebar-header {
-    border-bottom: 1px solid hsl(var(--background) / 0.16);
-  }
-
-  .liquid-sidebar-footer {
-    border-top: 1px solid hsl(var(--background) / 0.14);
-  }
-
-  .liquid-sidebar-link {
-    position: relative;
-    overflow: hidden;
-    border: 1px solid transparent;
-  }
-
-  .liquid-sidebar-link::before {
-    content: "";
-    position: absolute;
-    inset: 0;
-    border-radius: inherit;
-    background:
-      linear-gradient(112deg, transparent 0 18%, hsl(var(--background) / 0.38) 36%, transparent 60%),
-      linear-gradient(180deg, hsl(var(--background) / 0.28), transparent 72%);
-    opacity: 0;
-    transition: opacity 160ms ease;
-    pointer-events: none;
-    mix-blend-mode: screen;
-  }
-
-  .liquid-sidebar-link:hover::before,
-  .liquid-sidebar-link-active::before {
-    opacity: 1;
-  }
-
-  .liquid-sidebar-link-active {
-    border-color: hsl(var(--background) / 0.30);
-    background:
-      linear-gradient(112deg, transparent 0 16%, hsl(var(--background) / 0.46) 36%, transparent 64%),
-      linear-gradient(180deg, hsl(var(--background) / 0.48), hsl(var(--background) / 0.16)),
-      linear-gradient(300deg, transparent 0 62%, hsl(var(--primary) / 0.14) 100%),
-      hsl(var(--card) / 0.12);
-    box-shadow:
-      0 10px 26px hsl(222 47% 8% / 0.14),
-      inset 0 1px 0 hsl(var(--background) / 0.78),
-      inset 0 0 0 1px hsl(var(--background) / 0.24),
-      inset 0 -1px 0 hsl(var(--foreground) / 0.09);
-    -webkit-backdrop-filter: blur(22px) saturate(220%) brightness(1.08);
-    backdrop-filter: blur(22px) saturate(220%) brightness(1.08);
-    transform: translateX(1px);
-  }
-
-  .liquid-sidebar-link-active::after {
-    content: "";
-    position: absolute;
-    inset: 1px;
-    border-radius: inherit;
-    background:
-      linear-gradient(135deg, hsl(var(--background) / 0.16), transparent 42% 72%, hsl(var(--foreground) / 0.05));
-    box-shadow:
-      inset 0 0 0 1px hsl(var(--background) / 0.18),
-      inset 8px 0 16px hsl(var(--background) / 0.10),
-      inset -8px -10px 16px hsl(var(--foreground) / 0.04);
-    pointer-events: none;
   }
 
   .app-frame,
@@ -616,56 +315,221 @@
     background: hsl(var(--background));
   }
 
-  .app-workspace::before,
-  .liquid-glass::before,
-  .liquid-glass::after,
-  .liquid-tab-list::before,
-  .liquid-tab-list::after,
-  .liquid-bottom-nav::before,
-  .liquid-bottom-nav::after,
-  .liquid-nav-item::before,
-  .liquid-nav-item-active::after,
-  .liquid-tab-trigger[data-state="active"]::after,
-  .liquid-sidebar::before,
-  .liquid-sidebar::after,
-  .liquid-sidebar-link::before,
-  .liquid-sidebar-link-active::after {
-    content: none;
-    display: none;
+  /* 上移 1px 塞进顶栏底下（顶栏 z-index:2 会盖住这条会发缝的顶边）。
+     不在这里重写 padding-top，否则会覆盖 AppShell 的全局页面留白。 */
+  .app-main {
+    position: relative;
+    z-index: 1;
+    margin-top: -1px;
   }
 
+  .app-frame {
+    position: relative;
+  }
+
+  /* 不再用 position:fixed 覆盖层填充顶部/底部安全区：
+     - body/html 背景色即 --app-chrome，与 --background 明暗两套完全同值，
+       底部圆角安全区本就由 body 背景以同色透上来盖住，无需额外填充带；
+     - 任何 fixed 覆盖层都会与 overflow:auto 的 .app-main 各成一个合成层，
+       在 3x 屏含小数的 safe-area-inset 交界处被 WebKit 拼出 0.5px 发丝缝。 */
+
+  /* 顶栏不额外做 translateZ / isolation 提升，避免和 .app-main 的滚动层在
+     小数 safe-area 边界处拼出发丝缝。移动端玻璃材质仍由顶栏自身覆盖安全区。 */
   .app-topbar {
+    position: relative;
+    /* 盖在 .app-main 之上：.app-main 是 overflow:auto 独立合成层，其顶边压在顶栏
+       底边上，3x 屏 + 含小数安全区高度下 WebKit 会在层边缘渲染 0.33px 发丝缝。
+       顶栏抬到上层 + .app-main 上移 1px 塞进顶栏底下，让顶栏实色背景盖住那条边，
+       顶部 chrome 与主体连成一块连续面，缝隙消失。 */
+    z-index: 2;
     border-bottom: 0;
-    background: hsl(var(--background) / 0.92);
+    background: hsl(var(--app-chrome));
     box-shadow: none;
-    -webkit-backdrop-filter: blur(18px);
-    backdrop-filter: blur(18px);
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
   }
 
-  .hero-icon-button {
-    height: 2.5rem;
-    width: 2.5rem;
-    border-radius: 0.75rem;
+  @media (max-width: 767px) {
+    .app-topbar {
+      border-bottom: 1px solid hsl(var(--foreground) / 0.08);
+      background: hsl(var(--card) / 0.48);
+      -webkit-backdrop-filter: blur(28px) saturate(1.7);
+      backdrop-filter: blur(28px) saturate(1.7);
+      box-shadow:
+        0 6px 20px hsl(0 0% 0% / 0.08),
+        inset 0 1px 0 hsl(0 0% 100% / 0.1);
+    }
+  }
+
+  /* 不再在状态栏后方叠任何遮罩层。
+     曾用 .app-topbar::before 铺一层黑渐变兜浅色下白色状态栏文字的可读性，
+     但它同时把已切成浅色的 chrome 又抹黑（看着像「浅色没生效」），其淡出下边缘
+     还表现为顶部那条「线」。删掉后：顶栏背景 --app-chrome 明暗两套都如实显示，
+     切主题时顶部会真正跟着变浅/变深，也没有渐变边缘的线。 */
+
+  .dialog-center {
+    position: fixed !important;
+    inset: auto auto auto auto !important;
+    left: 50% !important;
+    top: 50dvh !important;
+    transform: translate3d(-50%, -50%, 0) !important;
+    margin: 0 !important;
+    max-height: calc(100dvh - env(safe-area-inset-top) - env(safe-area-inset-bottom) - 2rem);
+  }
+
+  .dialog-center[data-state="open"],
+  .dialog-center[data-state="closed"] {
+    animation: none !important;
+  }
+
+  .reasoning-effort {
+    position: relative;
+    min-width: 0;
+    padding-bottom: 1.75rem;
+  }
+
+  .reasoning-effort-track {
+    position: relative;
+    height: 3rem;
+    overflow: hidden;
+    border: 1px solid hsl(var(--border));
+    border-radius: 9999px;
+    background: hsl(var(--muted));
+  }
+
+  .reasoning-effort-fill {
+    position: absolute;
+    inset-block: 0;
+    left: 0;
+    width: var(--reasoning-progress);
+    background: hsl(var(--info));
+    transition: width 180ms ease, background 180ms ease;
+  }
+
+  .reasoning-effort-stops {
+    position: absolute;
+    inset: 0 1.25rem;
+    z-index: 2;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  .reasoning-effort-stop {
+    width: 0.35rem;
+    height: 0.35rem;
+    border-radius: 9999px;
+    background: hsl(var(--muted-foreground) / 0.55);
+    transition: background-color 180ms ease, transform 180ms ease;
+  }
+
+  .reasoning-effort-stop.is-active {
+    background: hsl(0 0% 100% / 0.55);
+    transform: scale(1.1);
+  }
+
+  .reasoning-effort-thumb {
+    position: absolute;
+    left: var(--reasoning-thumb-position);
+    top: 50%;
+    z-index: 3;
+    width: 2rem;
+    height: 2rem;
+    border-radius: 9999px;
+    background: white;
+    box-shadow: 0 2px 8px rgb(0 0 0 / 0.22);
+    transform: translate(-50%, -50%);
+    transition: left 180ms ease, transform 180ms ease;
+  }
+
+  .reasoning-effort input[type="range"] {
+    position: absolute;
+    inset: 0 0 auto;
+    z-index: 4;
+    width: 100%;
+    height: 3rem;
+    cursor: pointer;
+    opacity: 0;
+  }
+
+  .reasoning-effort input[type="range"]:focus-visible + .reasoning-effort-caption {
     color: hsl(var(--foreground));
   }
 
-  .hero-icon-button:hover {
-    background: hsl(var(--card));
-    box-shadow: 0 8px 24px hsl(220 18% 20% / 0.08);
+  .reasoning-effort:focus-within .reasoning-effort-track {
+    outline: 2px solid hsl(var(--ring));
+    outline-offset: 2px;
+  }
+
+  .reasoning-effort-caption {
+    position: absolute;
+    inset: auto 0 0;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    font-size: 0.75rem;
+    color: hsl(var(--muted-foreground));
+  }
+
+  .reasoning-effort-extreme .reasoning-effort-fill {
+    background: linear-gradient(90deg, hsl(216 92% 54%), hsl(270 86% 64%));
+  }
+
+  .reasoning-effort-extreme .reasoning-effort-thumb {
+    box-shadow: 0 0 0 4px hsl(270 92% 70% / 0.16), 0 2px 8px rgb(0 0 0 / 0.25);
+    animation: reasoning-thumb-pulse 1.8s ease-in-out infinite;
+  }
+
+  .reasoning-effort-sparks {
+    position: absolute;
+    inset: 0 2.25rem 0 0.75rem;
+    z-index: 2;
+    pointer-events: none;
+  }
+
+  .reasoning-effort-sparks i {
+    position: absolute;
+    width: 0.2rem;
+    height: 0.2rem;
+    border-radius: 9999px;
+    background: hsl(0 0% 100% / 0.75);
+    animation: reasoning-spark 1.4s ease-in-out infinite alternate;
+  }
+
+  .reasoning-effort-sparks i:nth-child(1) { left: 8%; top: 35%; }
+  .reasoning-effort-sparks i:nth-child(2) { left: 17%; top: 62%; animation-delay: 180ms; }
+  .reasoning-effort-sparks i:nth-child(3) { left: 29%; top: 29%; animation-delay: 360ms; }
+  .reasoning-effort-sparks i:nth-child(4) { left: 41%; top: 58%; animation-delay: 540ms; }
+  .reasoning-effort-sparks i:nth-child(5) { left: 53%; top: 38%; animation-delay: 720ms; }
+  .reasoning-effort-sparks i:nth-child(6) { left: 62%; top: 66%; animation-delay: 900ms; }
+  .reasoning-effort-sparks i:nth-child(7) { left: 72%; top: 25%; animation-delay: 1080ms; }
+  .reasoning-effort-sparks i:nth-child(8) { left: 82%; top: 55%; animation-delay: 1260ms; }
+  .reasoning-effort-sparks i:nth-child(9) { left: 91%; top: 35%; animation-delay: 1440ms; }
+
+  @keyframes reasoning-thumb-pulse {
+    50% { transform: translate(-50%, -50%) scale(1.06); }
+  }
+
+  @keyframes reasoning-spark {
+    from { opacity: 0.28; transform: translateY(2px) scale(0.75); }
+    to { opacity: 0.95; transform: translateY(-2px) scale(1.15); }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .reasoning-effort-extreme .reasoning-effort-thumb,
+    .reasoning-effort-sparks i {
+      animation: none;
+    }
   }
 
   .liquid-glass,
   .liquid-tab-list {
     position: relative;
-    isolation: auto;
     overflow: hidden;
-    transform: none;
-    border: 1px solid hsl(var(--border) / 0.72);
+    border: 1px solid hsl(var(--border));
     background: hsl(var(--card));
-    background-blend-mode: normal;
-    box-shadow: 0 1px 2px hsl(220 20% 20% / 0.04), 0 18px 44px hsl(220 20% 20% / 0.06);
-    -webkit-backdrop-filter: none;
-    backdrop-filter: none;
+    box-shadow: var(--shadow-sm);
   }
 
   .liquid-sidebar {
@@ -680,13 +544,7 @@
   .liquid-sidebar-footer {
     background: transparent;
     box-shadow: none;
-  }
-
-  .liquid-sidebar-header {
     border-bottom: 0;
-  }
-
-  .liquid-sidebar-footer {
     border-top: 0;
   }
 
@@ -708,27 +566,42 @@
   }
 
   .liquid-sidebar-link-active {
-    border-color: hsl(var(--border) / 0.64);
+    border-color: hsl(var(--border));
     background: hsl(var(--card));
     color: hsl(var(--foreground));
-    box-shadow: 0 1px 1px hsl(220 20% 20% / 0.04), 0 8px 18px hsl(220 20% 20% / 0.08);
-    -webkit-backdrop-filter: none;
-    backdrop-filter: none;
-    transform: none;
+    box-shadow: var(--shadow-sm);
   }
 
+  /* iOS 26 悬浮胶囊 Tab Bar：半透明液态玻璃material（背景模糊 + 提饱和），
+     发丝描边 + 柔和投影，比旧版更高更松，触控目标更大。 */
   .liquid-bottom-nav {
-    border: 0;
-    border-radius: 0;
-    background: transparent;
-    box-shadow: none;
-    -webkit-backdrop-filter: none;
-    backdrop-filter: none;
+    border: 1px solid hsl(var(--foreground) / 0.08);
+    border-radius: 999px;
+    background: hsl(var(--card) / 0.48);
+    -webkit-backdrop-filter: blur(28px) saturate(1.7);
+    backdrop-filter: blur(28px) saturate(1.7);
+    box-shadow:
+      0 12px 32px hsl(0 0% 0% / 0.22),
+      0 2px 10px hsl(0 0% 0% / 0.12),
+      inset 0 1px 0 hsl(0 0% 100% / 0.14);
+  }
+
+  /* 玻璃模糊不可用时（旧 WebView）退回近实心，避免文字透底看不清 */
+  @supports not ((-webkit-backdrop-filter: blur(1px)) or (backdrop-filter: blur(1px))) {
+    .liquid-bottom-nav {
+      background: hsl(var(--card) / 0.98);
+    }
+
+    @media (max-width: 767px) {
+      .app-topbar {
+        background: hsl(var(--card) / 0.98);
+      }
+    }
   }
 
   .liquid-nav-item {
     border: 0;
-    border-radius: 1rem;
+    border-radius: 999px;
     background: transparent;
     box-shadow: none;
     touch-action: manipulation;
@@ -753,8 +626,6 @@
     background: hsl(var(--foreground)) !important;
     color: hsl(var(--background)) !important;
     box-shadow: none;
-    -webkit-backdrop-filter: none;
-    backdrop-filter: none;
     transform: none;
     transition: none;
   }
@@ -769,17 +640,23 @@
     border-color: transparent;
     background: hsl(var(--muted));
     box-shadow: inset 0 0 0 1px hsl(var(--border) / 0.66);
-    -webkit-backdrop-filter: none;
-    backdrop-filter: none;
+  }
+
+  .liquid-tab-list.scrollable-tab-list {
+    overflow-x: auto;
+    overflow-y: hidden;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+  }
+
+  .liquid-tab-list.scrollable-tab-list::-webkit-scrollbar {
+    display: none;
   }
 
   .liquid-tab-trigger[data-state="active"] {
-    border-color: hsl(var(--border) / 0.7);
+    border-color: hsl(var(--border));
     background: hsl(var(--card));
-    box-shadow: 0 1px 1px hsl(220 20% 20% / 0.04), 0 8px 18px hsl(220 20% 20% / 0.08);
-    -webkit-backdrop-filter: none;
-    backdrop-filter: none;
-    transform: none;
+    box-shadow: var(--shadow-sm);
   }
 
   .siri-glow,
@@ -819,19 +696,19 @@
   }
 
   .alert-info {
-    @apply border-blue-200 bg-blue-50/70 text-blue-800 dark:border-blue-900/70 dark:bg-blue-950/30 dark:text-blue-200;
+    @apply border-info/25 bg-info/10 text-info;
   }
 
   .alert-warning {
-    @apply border-amber-200 bg-amber-50/80 text-amber-800 dark:border-amber-900/70 dark:bg-amber-950/30 dark:text-amber-200;
+    @apply border-warning/30 bg-warning/10 text-warning;
   }
 
   .alert-danger {
-    @apply border-rose-200 bg-rose-50 text-rose-700 dark:border-rose-900/70 dark:bg-rose-950/30 dark:text-rose-200;
+    @apply border-destructive/25 bg-destructive/10 text-destructive;
   }
 
   .alert-success {
-    @apply border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-900/70 dark:bg-emerald-950/30 dark:text-emerald-200;
+    @apply border-success/25 bg-success/10 text-success;
   }
 }
 

@@ -1,8 +1,10 @@
-# builtin 插件目录说明
+# builtin 目录说明
 
-## codex_image 内置实验插件（0.18.1）
+`backend/app/worker/plugins/builtin/` 只代表 TelePilot 核心平台能力和仍需随 Core 发布的轻量兼容代码，不再等同于“所有随包插件”。
 
-- `codex_image` 已恢复为真正的 builtin 插件，目录为 `backend/app/worker/plugins/builtin/codex_image/`。
-- 生产 Docker 镜像只构建 `backend/` 上下文，因此必须把它放在 builtin 目录内，才能随镜像发布并由 builtin registry 自动 seed。
-- 插件仍标记为 experimental；旧账号保留的 `account_feature(feature_key='codex_image')` 会按普通内置插件路径加载，不需要数据迁移。
-- `plugins/installed/codex_image` 只保留给历史部署的运行时残留，不再作为源码里的 TelePilot 内置入口。
+当前口径：
+
+- `scheduler` 是平台调度能力，运行时由 `PlatformScheduler` 承接，builtin 目录只保留兼容壳。
+- `forward` 保留为核心兼容插件。
+- `auto_reply`、`autorepeat`、`chatgpt_image`、`codex_image`、`game24`、`math10` 都不随 TelePilot 本体分发；推荐入口只从 `OFFICIAL_PLUGIN_REPO_URL` 指向的插件库读取并安装。
+- `feature_registry` 和 worker loader 仍保留非核心可选插件的跳过名单，用来防止旧镜像或增量部署残留目录被重新注册为 builtin；这不是这些插件仍属于 Core 的信号。

@@ -36,6 +36,21 @@ export function Login() {
   const [showPassword, setShowPassword] = useState(false);
   const [totpCode, setTotpCode] = useState("");
   const [needTotp, setNeedTotp] = useState(false);
+  const [needOtp, setNeedOtp] = useState(false);
+  const [otpToken, setOtpToken] = useState("");
+  const [otpCode, setOtpCode] = useState("");
+  const [otpMessage, setOtpMessage] = useState("");
+  const [recoveryCode, setRecoveryCode] = useState("");
+
+  const resetLoginChallenge = () => {
+    setNeedTotp(false);
+    setNeedOtp(false);
+    setTotpCode("");
+    setOtpToken("");
+    setOtpCode("");
+    setOtpMessage("");
+    setRecoveryCode("");
+  };
 
   // 登录 mutation：返回 require_totp 时切换到第二步
   const loginMut = useMutation({
@@ -44,11 +59,22 @@ export function Login() {
         username,
         password,
         totp_code: needTotp ? totpCode : null,
+        otp_token: needOtp ? otpToken || null : null,
+        otp_code: needOtp ? otpCode || null : null,
+        recovery_code: needOtp || needTotp ? recoveryCode || null : null,
       }),
     onSuccess: (res) => {
       if (res.require_totp && !needTotp) {
         setNeedTotp(true);
         toast.info("请输入二次验证码（TOTP）");
+        return;
+      }
+      if (res.require_otp) {
+        setNeedOtp(true);
+        setOtpToken(res.otp_token || "");
+        setOtpCode("");
+        setOtpMessage(res.otp_message || "请输入通知 Bot 收到的登录验证码");
+        toast.info(res.otp_message || "请输入通知 Bot 登录验证码");
         return;
       }
       toast.success("登录成功");
@@ -66,6 +92,12 @@ export function Login() {
         setNeedTotp(true);
         toast.info("请输入二次验证码（TOTP）");
         return;
+      }
+      if (code === "OTP_INVALID") {
+        setOtpCode("");
+      }
+      if (code === "RECOVERY_CODE_INVALID") {
+        setRecoveryCode("");
       }
       toast.error(getErrMsg(err));
     },
@@ -91,6 +123,14 @@ export function Login() {
     e.preventDefault();
     if (!username || !password) {
       toast.error("请填写用户名和密码");
+      return;
+    }
+    if (needOtp && !recoveryCode.trim() && (!otpToken || !otpCode.trim())) {
+      toast.error(otpToken ? "请输入通知 Bot 验证码或服务器恢复码" : "请输入服务器恢复码");
+      return;
+    }
+    if (needTotp && !totpCode.trim() && !recoveryCode.trim()) {
+      toast.error("请输入 TOTP 动态验证码，或使用服务器恢复码");
       return;
     }
     if (mode === "login") loginMut.mutate();
@@ -129,7 +169,10 @@ export function Login() {
                   id="username"
                   autoComplete="username"
                   value={username}
-                  onChange={(e) => setUsername(e.target.value)}
+                  onChange={(e) => {
+                    setUsername(e.target.value);
+                    resetLoginChallenge();
+                  }}
                 />
               </div>
               <div className="space-y-1.5">
@@ -149,7 +192,10 @@ export function Login() {
                     spellCheck={showPassword ? false : undefined}
                     className="pr-10"
                     value={password}
-                    onChange={(e) => setPassword(e.target.value)}
+                    onChange={(e) => {
+                      setPassword(e.target.value);
+                      resetLoginChallenge();
+                    }}
                   />
                   <button
                     type="button"
@@ -172,7 +218,7 @@ export function Login() {
                   </button>
                 </div>
                 {showPassword && (
-                  <p className="text-[11px] text-amber-600 dark:text-amber-300">
+                  <p className="text-[11px] text-warning">
                     密码已显示；输完后建议点击眼睛图标隐藏
                   </p>
                 )}
@@ -191,6 +237,40 @@ export function Login() {
                   />
                 </div>
               )}
+              {isLogin && needOtp && (
+                <div className="rounded-md border border-warning/30 bg-warning/10 p-3 text-xs text-warning">
+                  {otpMessage || "登录尝试较多，需要额外验证。"}
+                </div>
+              )}
+              {isLogin && needOtp && otpToken && (
+                <div className="space-y-1.5">
+                  <Label htmlFor="login-otp">通知 Bot 登录验证码</Label>
+                  <Input
+                    id="login-otp"
+                    inputMode="numeric"
+                    autoComplete="one-time-code"
+                    maxLength={6}
+                    value={otpCode}
+                    onChange={(e) => setOtpCode(e.target.value)}
+                    placeholder="6 位数字"
+                  />
+                </div>
+              )}
+              {isLogin && (needOtp || needTotp) && (
+                <div className="space-y-1.5">
+                  <Label htmlFor="recovery-code">服务器一次性恢复码</Label>
+                  <Input
+                    id="recovery-code"
+                    autoComplete="one-time-code"
+                    value={recoveryCode}
+                    onChange={(e) => setRecoveryCode(e.target.value)}
+                    placeholder="TP-XXXXX-XXXXX-XXXXX-XXXXX"
+                  />
+                  <p className="text-[11px] leading-relaxed text-muted-foreground">
+                    无法收到验证码时，可在服务器执行恢复码命令后填写；仍需正确密码。
+                  </p>
+                </div>
+              )}
             </CardContent>
             <CardFooter className="flex flex-col gap-2">
               <Button type="submit" className="w-full" disabled={submitting}>
@@ -201,8 +281,7 @@ export function Login() {
                 className="text-xs text-muted-foreground hover:underline"
                 onClick={() => {
                   setMode(isLogin ? "register" : "login");
-                  setNeedTotp(false);
-                  setTotpCode("");
+                  resetLoginChallenge();
                 }}
               >
                 {isLogin ? "首次部署？点此创建管理员" : "已有账号？返回登录"}

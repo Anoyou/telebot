@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from app.worker.plugins.base import PluginContext
+from app.worker.plugins.message_ops import BufferedMessageOps
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 INSTALLED_ROOT = PROJECT_ROOT / "plugins" / "installed"
@@ -82,12 +83,11 @@ class _ReplyRecorder:
         self.replies.append(text)
 
 
+@requires_installed_plugins
 def test_installed_interaction_validator_discovers_only_nonempty_interaction_entries() -> None:
-    if not INSTALLED_ROOT.is_dir():
-        pytest.skip("本机未安装交互插件样本")
     validate_installed_interactions = _load_validator_module()
 
-    assert validate_installed_interactions._installed_interaction_plugin_keys() == list(REQUIRED_INSTALLED_PLUGIN_KEYS)
+    assert validate_installed_interactions._installed_plugin_keys() == list(REQUIRED_INSTALLED_PLUGIN_KEYS)
 
 
 @pytest.mark.asyncio
@@ -100,10 +100,49 @@ async def test_example_with_interaction_preserves_original_command_trigger() -> 
     handled = await plugin.on_command(ctx, "with_interaction", [], event)
 
     assert handled is True
-    assert event.replies == ["原命令触发仍然可用"]
+    assert event.replies == []
+    ctx.log.assert_awaited()
 
     ignored = await plugin.on_command(ctx, "other_command", [], event)
     assert ignored is False
+
+
+@pytest.mark.asyncio
+async def test_example_with_interaction_uses_message_ops_for_visible_reply() -> None:
+    plugin_module = importlib.import_module("examples.plugins.with_interaction")
+    plugin = plugin_module.PLUGIN_CLASS()
+    messages = BufferedMessageOps()
+    ctx = PluginContext(account_id=1, feature_key="with_interaction", log=AsyncMock(), messages=messages)
+
+    actions = await plugin.on_interaction(
+        ctx,
+            "start_with_interaction",
+            {
+                "message": {"chat_id": -100123, "text": "框架消息"},
+                "response_text": "你好，交互 Bot",
+                "source": {"type": "message", "chat_id": -100123},
+                "actor": {"user_id": 111, "display_name": "AAA"},
+            },
+        )
+
+    assert messages.actions == [
+        {
+                "type": "send_message",
+                "chat_id": -100123,
+                "text": "你好，交互 Bot\n收到：框架消息\n触发人：AAA",
+                "parse_mode": "plain",
+                "reply_to_message_id": None,
+            }
+        ]
+    assert actions == [
+        {
+            "type": "result",
+            "success": True,
+            "result": {"status": "ok", "actor_user_id": 111, "entry_key": "start_with_interaction"},
+            "settlement": {"mode": "announce_only", "winner_user_id": 111, "winner_name": "AAA"},
+        },
+        {"type": "end_session"},
+    ]
 
 
 @pytest.mark.asyncio
@@ -125,15 +164,6 @@ async def test_installed_interaction_plugins_keep_original_command_handlers() ->
         async def edit(self, text: str, **_kwargs) -> _ReplyMsg:
             self.replies.append(text)
             return _ReplyMsg()
-
-    guess_module = _load_installed_module("guess_number", "plugin.py")
-    guess_plugin = guess_module.GuessNumberPlugin()
-    guess_event = _CmdEvent()
-    guess_ctx = PluginContext(account_id=1, feature_key="guess_number", log=AsyncMock())
-    await guess_plugin.on_startup(guess_ctx)
-
-    await guess_plugin._cmd_handler(None, guess_event, ["guess", "123"], 1, guess_ctx)
-    assert guess_event.replies, "猜数字原命令仍应能回复"
 
     poetry_module = _load_installed_module("poetry_blank", "plugin.py")
     poetry_plugin = poetry_module.PoetryBlankPlugin()
@@ -209,9 +239,20 @@ def test_guess_number_manifest_declares_interaction_contract() -> None:
     assert entry["interaction_profile"] == "session_game"
     assert entry["launch_mode"] == "hybrid"
     assert entry["session_scope"] == "chat"
+    assert entry["events"] == ["command", "keyword", "payment_confirmed", "message", "callback_query", "session_expired", "session_close"]
+    assert entry["triggers"]["command"] == "guess"
     assert entry["preserve_command_trigger"] is True
     assert entry["command_fallback"]["command"] == "guess"
-    assert entry["result_contract"]["send_via"] == ["interaction_bot", "userbot_reply", "bbot_notice"]
+    assert entry["result_contract"]["actions"] == [
+        "send_message",
+        "answer_callback",
+        "update_session",
+        "payout",
+        "end_session",
+        "result",
+        "settlement",
+    ]
+    assert entry["result_contract"]["send_via"] == ["interaction_bot", "userbot_reply"]
     assert "valid_seconds" in entry["input_schema"]["properties"]
 
 
@@ -226,9 +267,12 @@ def test_poetry_blank_manifest_declares_interaction_contract() -> None:
     assert entry["interaction_profile"] == "session_game"
     assert entry["launch_mode"] == "hybrid"
     assert entry["session_scope"] == "chat"
+    assert entry["events"] == ["command", "payment_confirmed", "keyword", "message", "session_expired", "session_close"]
+    assert entry["triggers"]["command"] == "poetry"
     assert entry["preserve_command_trigger"] is True
     assert entry["command_fallback"]["command"] == "poetry"
-    assert entry["result_contract"]["send_via"] == ["interaction_bot", "userbot_reply", "bbot_notice"]
+    assert entry["result_contract"]["actions"] == ["send_message", "update_session", "payout", "end_session", "result", "settlement"]
+    assert entry["result_contract"]["send_via"] == ["interaction_bot", "userbot_reply"]
     assert "valid_seconds" in entry["input_schema"]["properties"]
 
 
@@ -243,9 +287,20 @@ def test_dice_grid_hunt_manifest_declares_interaction_contract() -> None:
     assert entry["interaction_profile"] == "session_game"
     assert entry["launch_mode"] == "hybrid"
     assert entry["session_scope"] == "chat"
+    assert entry["events"] == ["command", "payment_confirmed", "keyword", "message", "callback_query", "session_expired", "session_close"]
+    assert entry["triggers"]["command"] == "dicegrid"
     assert entry["preserve_command_trigger"] is True
     assert entry["command_fallback"]["command"] == "dicegrid"
-    assert entry["result_contract"]["send_via"] == ["interaction_bot", "userbot_reply", "bbot_notice"]
+    assert entry["result_contract"]["actions"] == [
+        "send_message",
+        "send_photo",
+        "update_session",
+        "payout",
+        "end_session",
+        "result",
+        "settlement",
+    ]
+    assert entry["result_contract"]["send_via"] == ["interaction_bot", "userbot_reply"]
     assert "valid_seconds" in entry["input_schema"]["properties"]
 
 
@@ -261,9 +316,10 @@ def test_lottery_plus_manifest_declares_interaction_contract() -> None:
     assert entry["launch_mode"] == "hybrid"
     assert entry["session_scope"] == "chat"
     assert entry["events"] == ["payment_confirmed", "message", "session_close"]
+    assert entry["triggers"]["command"] == "lotto"
     assert entry["preserve_command_trigger"] is True
     assert entry["command_fallback"]["command"] == "lotto"
-    assert entry["result_contract"]["send_via"] == ["interaction_bot", "userbot_reply", "bbot_notice"]
+    assert entry["result_contract"]["send_via"] == ["interaction_bot", "userbot_reply"]
     assert "message" in entry["input_schema"]["properties"]
 
 
@@ -281,7 +337,7 @@ def test_redpack_manifest_declares_interaction_contract() -> None:
     assert entry["events"] == ["keyword", "payment_confirmed", "message", "session_close"]
     assert entry["preserve_command_trigger"] is True
     assert entry["command_fallback"]["command"] == "redpack"
-    assert entry["result_contract"]["send_via"] == ["interaction_bot", "userbot_reply", "bbot_notice"]
+    assert entry["result_contract"]["send_via"] == ["interaction_bot", "userbot_reply"]
     assert "total_amount" in entry["input_schema"]["properties"]
     assert "count" in entry["input_schema"]["properties"]
 
@@ -298,6 +354,7 @@ def test_pt_promote_manifest_declares_interaction_contract() -> None:
     assert entry["launch_mode"] == "hybrid"
     assert entry["session_scope"] == "user"
     assert entry["events"] == ["keyword", "payment_confirmed", "message"]
+    assert entry["triggers"]["command"] == "pt"
     assert entry["preserve_command_trigger"] is True
     assert entry["command_fallback"]["command"] == "pt"
     assert entry["result_contract"]["send_via"] == ["interaction_bot", "userbot_reply"]
@@ -326,45 +383,54 @@ def test_installed_interaction_plugin_json_matches_manifest_contracts() -> None:
 
 @pytest.mark.asyncio
 @requires_installed_plugins
-async def test_guess_number_on_interaction_accepts_legacy_entry_and_returns_result() -> None:
+async def test_guess_number_on_interaction_uses_session_data_and_payout() -> None:
     plugin_module = _load_installed_module("guess_number", "plugin.py")
     plugin = plugin_module.GuessNumberPlugin()
     ctx = PluginContext(account_id=1, feature_key="guess_number", log=AsyncMock())
 
     start_actions = await plugin.on_interaction(
         ctx,
-        "start_game",
+        "start_guess_number",
         {
-            "source": {"type": "payment_confirmed", "chat_id": -100123, "message_id": 70},
-            "session": {"scope": "chat", "ttl_seconds": 120},
-            "prize": 321,
+            "source": {"type": "command", "chat_id": -100123, "message_id": 70},
+            "trigger": {"type": "command", "command": "guess", "args": ["321", "1", "100", "5"]},
+            "session": {"scope": "chat", "channel": "userbot", "ttl_seconds": 120, "data": {}},
             "valid_seconds": 120,
         },
     )
-    assert start_actions == [
-        {
-            "type": "send_message",
-            "text": "猜数字开始\n奖励：+321\n范围：1 ~ 100\n限时：120 秒\n直接发送数字开始竞猜。",
-        }
-    ]
-
-    game = plugin._games[-100123]
-    game.target = 42
+    assert start_actions is not None
+    assert start_actions[0]["type"] == "send_message"
+    assert start_actions[0]["chat_id"] == -100123
+    assert start_actions[0]["parse_mode"] == "plain"
+    assert start_actions[0]["reply_markup"]["inline_keyboard"][0][1]["callback_data"] == "guess:50"
+    assert start_actions[1]["type"] == "update_session"
+    state = dict(start_actions[1]["data"])
+    state["target"] = 42
 
     answer_actions = await plugin.on_interaction(
         ctx,
-        "start_game",
+        "start_guess_number",
         {
             "source": {"type": "message", "chat_id": -100123, "message_id": 99, "text": "42"},
             "actor": {"user_id": 111, "display_name": "AAA"},
-            "settlement": {"mode": "auto", "payout_account_label": "@owner"},
+            "session": {"scope": "chat", "channel": "userbot", "data": state},
         },
     )
 
     assert answer_actions == [
         {
             "type": "send_message",
-            "text": "答对了：AAA\n题目：猜数字 1 ~ 100\n答案：42\n奖金：321\n奖金将由 @owner 账号自动发放。",
+            "chat_id": -100123,
+            "text": "答对了：AAA\n题目：猜数字 1 ~ 100\n答案：42\n奖金：321",
+            "parse_mode": "plain",
+            "reply_to_message_id": 99,
+        },
+        {
+            "type": "payout",
+            "chat_id": -100123,
+            "amount": 321,
+            "text": "+321",
+            "parse_mode": "plain",
             "reply_to_message_id": 99,
         },
         {
@@ -380,17 +446,73 @@ async def test_guess_number_on_interaction_accepts_legacy_entry_and_returns_resu
                 "range": [1, 100],
                 "attempts": 1,
                 "prize": 321,
-                "payout_mode": "auto",
-                "payout_account_label": "@owner",
             },
             "settlement": {
                 "mode": "auto",
                 "amount": 321,
                 "winner_user_id": 111,
                 "winner_name": "AAA",
-                "payout_account_label": "@owner",
-                "status": "announced",
+                "status": "payout_requested",
             },
+        },
+        {"type": "end_session"},
+    ]
+
+
+@pytest.mark.asyncio
+@requires_installed_plugins
+async def test_guess_number_handles_callback_and_session_expired() -> None:
+    plugin_module = _load_installed_module("guess_number", "plugin.py")
+    plugin = plugin_module.GuessNumberPlugin()
+    ctx = PluginContext(account_id=1, feature_key="guess_number", log=AsyncMock())
+    state = {
+        "active": True,
+        "target": 50,
+        "low": 1,
+        "high": 100,
+        "prize": 123,
+        "attempts": 0,
+        "max_attempts": 0,
+        "timeout": 120,
+        "history": [],
+    }
+
+    callback_actions = await plugin.on_interaction(
+        ctx,
+        "start_guess_number",
+        {
+            "source": {
+                "type": "callback_query",
+                "chat_id": -100123,
+                "message_id": 70,
+                "callback_query_id": "cb-1",
+                "callback_data": "guess:25",
+            },
+            "actor": {"user_id": 111, "display_name": "AAA"},
+            "session": {"scope": "chat", "channel": "interaction_bot", "data": state},
+        },
+    )
+    assert callback_actions is not None
+    assert callback_actions[0] == {"type": "answer_callback", "callback_query_id": "cb-1", "text": ""}
+    assert callback_actions[1]["type"] == "send_message"
+    assert callback_actions[1]["parse_mode"] == "plain"
+    assert callback_actions[2]["type"] == "update_session"
+    assert callback_actions[2]["data"]["attempts"] == 1
+
+    expired_actions = await plugin.on_interaction(
+        ctx,
+        "start_guess_number",
+        {
+            "source": {"type": "session_expired", "chat_id": -100123},
+            "session": {"scope": "chat", "channel": "interaction_bot", "data": state},
+        },
+    )
+    assert expired_actions == [
+        {
+            "type": "send_message",
+            "chat_id": -100123,
+            "text": "猜数字已超时，答案是 50。",
+            "parse_mode": "plain",
         },
         {"type": "end_session"},
     ]
@@ -415,11 +537,44 @@ async def test_poetry_blank_on_interaction_returns_result_from_standard_envelope
             "valid_seconds": 120,
         },
     )
+    assert start_actions[0] == {
+        "type": "send_message",
+        "text": "诗词填空开始\n奖金：+456\n\n床前__光\n\n提示：李白 · 《静夜思》\n请直接发送答案抢答。",
+        "parse_mode": "plain",
+    }
+    assert start_actions[1]["type"] == "update_session"
+    assert start_actions[1]["data"] == {
+        "active": True,
+        "full_line": "床前明月光",
+        "author": "李白",
+        "title": "静夜思",
+        "blanked": "床前__光",
+        "answer": ["明", "月"],
+        "prize": 456,
+        "started_at": start_actions[1]["data"]["started_at"],
+        "timeout": 120,
+    }
+    state = dict(start_actions[1]["data"])
     assert start_actions == [
         {
             "type": "send_message",
             "text": "诗词填空开始\n奖金：+456\n\n床前__光\n\n提示：李白 · 《静夜思》\n请直接发送答案抢答。",
-        }
+            "parse_mode": "plain",
+        },
+        {
+            "type": "update_session",
+            "data": {
+                "active": True,
+                "full_line": "床前明月光",
+                "author": "李白",
+                "title": "静夜思",
+                "blanked": "床前__光",
+                "answer": ["明", "月"],
+                "prize": 456,
+                "started_at": start_actions[1]["data"]["started_at"],
+                "timeout": 120,
+            },
+        },
     ]
 
     answer_actions = await plugin.on_interaction(
@@ -428,14 +583,24 @@ async def test_poetry_blank_on_interaction_returns_result_from_standard_envelope
         {
             "source": {"type": "message", "chat_id": -100123, "message_id": 99, "text": "明月"},
             "actor": {"user_id": 111, "display_name": "AAA"},
-            "settlement": {"mode": "manual", "payout_account_label": "@owner"},
+            "session": {"scope": "chat", "channel": "userbot", "data": state},
         },
     )
 
     assert answer_actions == [
         {
             "type": "send_message",
-            "text": "答对了：AAA\n题目：床前__光\n原句：床前明月光\n出处：李白 · 《静夜思》\n奖金：456\n请由 @owner 人工回复赢家发放奖金。",
+            "chat_id": -100123,
+            "text": "答对了：AAA\n题目：床前__光\n原句：床前明月光\n出处：李白 · 《静夜思》\n奖金：456",
+            "parse_mode": "plain",
+            "reply_to_message_id": 99,
+        },
+        {
+            "type": "payout",
+            "chat_id": -100123,
+            "amount": 456,
+            "text": "+456",
+            "parse_mode": "plain",
             "reply_to_message_id": 99,
         },
         {
@@ -451,16 +616,13 @@ async def test_poetry_blank_on_interaction_returns_result_from_standard_envelope
                 "title": "静夜思",
                 "answer": "明月",
                 "prize": 456,
-                "payout_mode": "manual",
-                "payout_account_label": "@owner",
             },
             "settlement": {
-                "mode": "announce_only",
+                "mode": "auto",
                 "amount": 456,
                 "winner_user_id": 111,
                 "winner_name": "AAA",
-                "payout_account_label": "@owner",
-                "status": "announced",
+                "status": "payout_requested",
             },
         },
         {"type": "end_session"},
@@ -498,7 +660,10 @@ async def test_dice_grid_hunt_on_interaction_returns_result_from_standard_envelo
     )
     assert start_actions[0]["type"] == "send_photo"
     assert start_actions[0]["filename"] == "dice_grid_hunt.png"
+    assert start_actions[0]["parse_mode"] == "html"
     assert start_actions[0]["reply_to_message_id"] == 70
+    assert start_actions[1]["type"] == "update_session"
+    state = dict(start_actions[1]["data"])
 
     first_guess_actions = await plugin.on_interaction(
         ctx,
@@ -506,10 +671,12 @@ async def test_dice_grid_hunt_on_interaction_returns_result_from_standard_envelo
         {
             "source": {"type": "message", "chat_id": -100123, "message_id": 98, "text": "5"},
             "actor": {"user_id": 111, "display_name": "AAA"},
-            "settlement": {"mode": "auto", "payout_account_label": "@owner"},
+            "session": {"scope": "chat", "channel": "userbot", "data": state},
         },
     )
-    assert first_guess_actions == []
+    assert first_guess_actions is not None
+    assert first_guess_actions[0]["type"] == "update_session"
+    state = dict(first_guess_actions[0]["data"])
 
     throttled_actions = await plugin.on_interaction(
         ctx,
@@ -517,7 +684,7 @@ async def test_dice_grid_hunt_on_interaction_returns_result_from_standard_envelo
         {
             "source": {"type": "message", "chat_id": -100123, "message_id": 99, "text": "6"},
             "actor": {"user_id": 111, "display_name": "AAA"},
-            "settlement": {"mode": "auto", "payout_account_label": "@owner"},
+            "session": {"scope": "chat", "channel": "userbot", "data": state},
         },
     )
     assert throttled_actions == []
@@ -528,13 +695,22 @@ async def test_dice_grid_hunt_on_interaction_returns_result_from_standard_envelo
         {
             "source": {"type": "message", "chat_id": -100123, "message_id": 100, "text": "6"},
             "actor": {"user_id": 222, "display_name": "BBB"},
-            "settlement": {"mode": "auto", "payout_account_label": "@owner"},
+            "session": {"scope": "chat", "channel": "userbot", "data": state},
         },
     )
     assert answer_actions[0]["type"] == "send_message"
     assert "答对了：BBB" in answer_actions[0]["text"]
+    assert answer_actions[0]["parse_mode"] == "plain"
     assert answer_actions[0]["reply_to_message_id"] == 100
     assert answer_actions[1] == {
+        "type": "payout",
+        "chat_id": -100123,
+        "amount": 777,
+        "text": "+777",
+        "parse_mode": "plain",
+        "reply_to_message_id": 100,
+    }
+    assert answer_actions[2] == {
         "type": "result",
         "success": True,
         "result": {
@@ -545,16 +721,13 @@ async def test_dice_grid_hunt_on_interaction_returns_result_from_standard_envelo
             "target_sum": 17,
             "answer_index": 6,
             "prize": 777,
-            "payout_mode": "auto",
-            "payout_account_label": "@owner",
         },
         "settlement": {
             "mode": "auto",
             "amount": 777,
             "winner_user_id": 222,
             "winner_name": "BBB",
-            "payout_account_label": "@owner",
-            "status": "announced",
+            "status": "payout_requested",
         },
     }
-    assert answer_actions[2] == {"type": "end_session"}
+    assert answer_actions[3] == {"type": "end_session"}

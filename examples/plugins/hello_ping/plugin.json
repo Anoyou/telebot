@@ -1,0 +1,21 @@
+{
+  "name": "hello_ping",
+  "display_name": "Hello Ping",
+  "description": "最小 Event Bus + MessageOps 入门示例。",
+  "author": "examples",
+  "version": "0.1.0",
+  "entry": "plugin.py",
+  "min_telepilot_version": "0.41.0",
+  "category": "utility",
+  "permissions": ["send_message"],
+  "interaction_profile": "utility_trigger",
+  "usage": "安装并在账号上启用后，在已允许会话发送 ping，插件会回复 pong。",
+  "event_subscriptions": [
+    {
+      "events": ["message"],
+      "source": ["userbot", "interaction_bot"],
+      "scope": "all_allowed_chats"
+    }
+  ],
+  "capabilities": {}
+}

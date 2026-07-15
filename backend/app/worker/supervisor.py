@@ -39,6 +39,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 from redis.exceptions import TimeoutError as RedisTimeoutError
 from sqlalchemy import delete, select, update
@@ -53,6 +54,7 @@ from ..db.models.log import RuntimeLog
 from ..db.models.rate_limit import RateLimitEvent
 from ..db.models.system import SystemSetting
 from ..redis_client import get_redis
+from ..services.event_trace import cleanup_event_traces
 from ..services.redactor import redact_text, redact_value
 from .entry import worker_entry
 from .ipc import (
@@ -69,6 +71,7 @@ from .ipc import (
 )
 
 log = logging.getLogger(__name__)
+_WORKER_STRIPPED_ENV_KEYS = ("TELEPILOT_UPDATER_TOKEN", "UPDATER_TOKEN")
 
 _LOG_RETENTION_CACHE: tuple[float, dict[str, int]] = (0.0, {})
 _LAST_RUNTIME_LOG_CLEANUP_AT = 0.0
@@ -80,6 +83,14 @@ def invalidate_log_retention_cache() -> None:
 
     global _LOG_RETENTION_CACHE
     _LOG_RETENTION_CACHE = (0.0, {})
+
+
+def _worker_entry_without_control_plane_secrets(account_id: int) -> None:
+    """Spawn target that removes updater credentials before plugin code can run."""
+
+    for key in _WORKER_STRIPPED_ENV_KEYS:
+        os.environ.pop(key, None)
+    worker_entry(account_id)
 
 
 async def _get_log_retention_config() -> dict[str, int]:
@@ -95,6 +106,10 @@ async def _get_log_retention_config() -> dict[str, int]:
         "runtime_log_max_message_chars": 2000,
         "runtime_log_max_detail_chars": 8000,
         "runtime_log_min_level": "info",
+        "trace_retention_days": 30,
+        "trace_payload_snapshot_retention_days": 7,
+        "native_raw_persist_enabled": False,
+        "native_raw_retention_days": 1,
     }
     try:
         async with AsyncSessionLocal() as db:
@@ -124,6 +139,27 @@ async def _get_log_retention_config() -> dict[str, int]:
                 if str(raw.get("runtime_log_min_level", defaults["runtime_log_min_level"]) or "info").lower()
                 in {"debug", "info", "warn", "error"}
                 else "info"
+            ),
+            "trace_retention_days": max(
+                0,
+                int(raw.get("trace_retention_days", defaults["trace_retention_days"]) or 0),
+            ),
+            "trace_payload_snapshot_retention_days": max(
+                0,
+                int(
+                    raw.get(
+                        "trace_payload_snapshot_retention_days",
+                        defaults["trace_payload_snapshot_retention_days"],
+                    )
+                    or 0
+                ),
+            ),
+            "native_raw_persist_enabled": bool(
+                raw.get("native_raw_persist_enabled", defaults["native_raw_persist_enabled"])
+            ),
+            "native_raw_retention_days": max(
+                0,
+                int(raw.get("native_raw_retention_days", defaults["native_raw_retention_days"]) or 0),
             ),
         }
     except Exception:
@@ -186,7 +222,7 @@ def _runtime_log_level_allowed(level: str, min_level: str) -> bool:
 
 
 async def _cleanup_runtime_logs_if_due() -> None:
-    """按 log_retention 定期清理过期运行日志；0 天表示不自动删除。"""
+    """按 log_retention 定期清理过期运行日志和 Trace；0 天表示不自动删除。"""
 
     global _LAST_RUNTIME_LOG_CLEANUP_AT
     now = time.monotonic()
@@ -204,6 +240,16 @@ async def _cleanup_runtime_logs_if_due() -> None:
             await db.commit()
     except Exception:
         log.debug("清理过期 runtime_log 失败", exc_info=True)
+    try:
+        await cleanup_event_traces(
+            trace_retention_days=int(cfg.get("trace_retention_days", 30) or 0),
+            payload_snapshot_retention_days=int(
+                cfg.get("trace_payload_snapshot_retention_days", 7) or 0
+            ),
+            native_raw_retention_days=int(cfg.get("native_raw_retention_days", 1) or 0),
+        )
+    except Exception:
+        log.debug("清理过期 event_trace 失败", exc_info=True)
 
 # ⚠ 强制 spawn 启动方式（不要 fork）
 #
@@ -220,6 +266,62 @@ _MP_CTX = mp.get_context("spawn")
 
 # 指数退避重启间隔（秒），用尽后置账号为 dead
 _BACKOFF = [5, 10, 20, 60, 300]
+# worker 连续存活达到该窗口后，才把之前的崩溃次数视为已经恢复。
+# 否则「启动后短暂存活」会把 fail_count 清零，形成无限快速重启。
+_STABLE_WINDOW_SECONDS = 60.0
+# runtime_log 通知 Telegram 的有界并发（避免崩溃刷屏时 task 洪水）。
+_RUNTIME_LOG_NOTIFY_QUEUE: asyncio.Queue[Any] | None = None
+_RUNTIME_LOG_NOTIFY_WORKERS: list[asyncio.Task[None]] = []
+_RUNTIME_LOG_NOTIFY_WORKER_COUNT = 4
+_RUNTIME_LOG_NOTIFY_QUEUE_MAX = 200
+_RUNTIME_LOG_NOTIFY_DROPPED = 0
+
+
+async def _ensure_runtime_log_notify_workers() -> asyncio.Queue[Any]:
+    """有界队列 + 固定 worker，替代每条日志 create_task。"""
+
+    global _RUNTIME_LOG_NOTIFY_QUEUE, _RUNTIME_LOG_NOTIFY_WORKERS
+    if _RUNTIME_LOG_NOTIFY_QUEUE is None:
+        _RUNTIME_LOG_NOTIFY_QUEUE = asyncio.Queue(maxsize=_RUNTIME_LOG_NOTIFY_QUEUE_MAX)
+    alive = [t for t in _RUNTIME_LOG_NOTIFY_WORKERS if not t.done()]
+    _RUNTIME_LOG_NOTIFY_WORKERS = alive
+    while len(_RUNTIME_LOG_NOTIFY_WORKERS) < _RUNTIME_LOG_NOTIFY_WORKER_COUNT:
+        _RUNTIME_LOG_NOTIFY_WORKERS.append(
+            asyncio.create_task(_runtime_log_notify_worker(), name="runtime-log-notify")
+        )
+    return _RUNTIME_LOG_NOTIFY_QUEUE
+
+
+async def _runtime_log_notify_worker() -> None:
+    from ..services.account_bot_runtime import notify_runtime_log
+
+    assert _RUNTIME_LOG_NOTIFY_QUEUE is not None
+    while True:
+        row = await _RUNTIME_LOG_NOTIFY_QUEUE.get()
+        try:
+            if isinstance(row, RuntimeLog):
+                await notify_runtime_log(row)
+        except Exception:  # noqa: BLE001
+            log.debug("account bot runtime log notify failed", exc_info=True)
+        finally:
+            _RUNTIME_LOG_NOTIFY_QUEUE.task_done()
+
+
+async def _enqueue_runtime_log_notifies(rows: list[RuntimeLog]) -> None:
+    global _RUNTIME_LOG_NOTIFY_DROPPED
+    if not rows:
+        return
+    queue = await _ensure_runtime_log_notify_workers()
+    for row in rows:
+        try:
+            queue.put_nowait(row)
+        except asyncio.QueueFull:
+            _RUNTIME_LOG_NOTIFY_DROPPED += 1
+            if _RUNTIME_LOG_NOTIFY_DROPPED % 50 == 1:
+                log.warning(
+                    "runtime_log notify queue full; dropped=%s",
+                    _RUNTIME_LOG_NOTIFY_DROPPED,
+                )
 
 
 # ── PID 文件：用于跨 uvicorn 重启识别+回收孤儿 worker ──────────────
@@ -362,6 +464,7 @@ class _WorkerHandle:
     process: mp.Process | None = None
     fail_count: int = 0
     next_retry_at: float = 0.0
+    started_at: float = 0.0
     desired: str = "running"   # running | stopped
 
 
@@ -488,8 +591,10 @@ def _install_kill_hooks() -> None:
 
 async def stop_all_workers() -> None:
     """FastAPI lifespan shutdown 调用：停止所有 worker 与后台协程。"""
-    for aid in list(_WORKERS.keys()):
-        await stop_worker(aid)
+    aids = list(_WORKERS.keys())
+    if aids:
+        # 并行关停，总耗时接近最慢单 worker，而不是 N×5s 串行。
+        await asyncio.gather(*(stop_worker(aid) for aid in aids), return_exceptions=True)
     for t in _BG_TASKS:
         t.cancel()
     _BG_TASKS.clear()
@@ -511,9 +616,15 @@ async def start_worker(account_id: int) -> None:
         h.desired = "running"
         if h.process and h.process.is_alive():
             return
-        p = _MP_CTX.Process(target=worker_entry, args=(account_id,), daemon=False)
+        p = _MP_CTX.Process(
+            target=_worker_entry_without_control_plane_secrets,
+            args=(account_id,),
+            daemon=False,
+        )
         p.start()
         h.process = p
+        h.started_at = time.monotonic()
+        h.next_retry_at = 0.0
         # 写 PID 文件——下次启动时 ``_kill_stale_workers`` 据此回收孤儿。
         # 失败不阻塞启动（最多失去一次孤儿清理机会）。
         if p.pid is not None:
@@ -529,8 +640,16 @@ async def stop_worker(account_id: int) -> None:
         if not h:
             return
         h.desired = "stopped"
-        redis = get_redis()
-        await redis.publish(cmd_channel(account_id), make_cmd(CMD_STOP))
+        try:
+            redis = get_redis()
+            await redis.publish(cmd_channel(account_id), make_cmd(CMD_STOP))
+        except Exception:  # noqa: BLE001
+            # Redis 只是优雅关停通道，不能成为本地终止子进程的前置条件。
+            log.warning(
+                "发送 worker stop IPC 失败，改为本地终止: account=%d",
+                account_id,
+                exc_info=True,
+            )
         if h.process:
             # 等 5s 优雅退出（每 100ms 探测一次）
             for _ in range(50):
@@ -540,7 +659,12 @@ async def stop_worker(account_id: int) -> None:
             if h.process.is_alive():
                 h.process.terminate()
                 h.process.join(timeout=2)
+            if h.process.is_alive():
+                h.process.kill()
+                h.process.join(timeout=1)
             h.process = None
+        h.started_at = 0.0
+        h.next_retry_at = 0.0
         # 进程已确认死掉 → 删 PID 文件，避免被下次启动当孤儿误杀（PID 复用情形）
         _remove_pid_file(account_id)
         log.info("worker 停止: account=%d", account_id)
@@ -560,8 +684,28 @@ async def resume_worker(account_id: int) -> None:
 
 async def stop_running_workers() -> None:
     """停止当前 supervisor 托管的全部 worker，但不取消后台监听任务。"""
-    for aid in list(_WORKERS.keys()):
-        await stop_worker(aid)
+    aids = list(_WORKERS.keys())
+    if not aids:
+        return
+    results = await asyncio.gather(*(stop_worker(aid) for aid in aids), return_exceptions=True)
+    failures = [
+        f"account={aid}: {type(result).__name__}: {result}"
+        for aid, result in zip(aids, results, strict=True)
+        if isinstance(result, BaseException)
+    ]
+    alive: list[int] = []
+    for aid in aids:
+        handle = _WORKERS.get(aid)
+        if handle is None or handle.process is None:
+            continue
+        try:
+            if handle.process.is_alive():
+                alive.append(aid)
+        except Exception:  # noqa: BLE001
+            alive.append(aid)
+    if failures or alive:
+        detail = "; ".join(failures + ([f"仍存活账号={alive}"] if alive else []))
+        raise RuntimeError(f"部分 worker 停止失败: {detail}")
 
 
 async def start_active_workers() -> None:
@@ -587,7 +731,8 @@ async def _kill_switch_enabled() -> bool:
             return bool(value.get("enabled", False))
         return bool(value)
     except Exception:  # noqa: BLE001
-        return False
+        log.exception("读取 kill switch 失败，按 fail-closed 视为已开启")
+        return True
 
 
 async def _account_status(account_id: int) -> str | None:
@@ -635,22 +780,49 @@ async def _monitor_loop() -> None:
     try:
         while True:
             await asyncio.sleep(2)
-            now = time.time()
+            now = time.monotonic()
             for aid, h in list(_WORKERS.items()):
                 if h.desired != "running":
                     continue
                 if h.process and h.process.is_alive():
-                    # 进程健康：清零失败计数
-                    h.fail_count = 0
+                    # 只有连续存活达到稳定窗口才清零；短暂存活仍属于同一轮崩溃。
+                    if (
+                        h.fail_count
+                        and h.started_at
+                        and now - h.started_at >= _STABLE_WINDOW_SECONDS
+                    ):
+                        h.fail_count = 0
+                        h.next_retry_at = 0.0
                     continue
                 # 进程死了
-                if now < h.next_retry_at:
-                    continue
                 status = await _account_status(aid)
                 if status != ACCOUNT_STATUS_ACTIVE:
                     h.desired = "stopped"
                     log.info("worker %d 已退出且账号状态为 %s，停止自动重启", aid, status)
                     continue
+                if h.next_retry_at:
+                    if now < h.next_retry_at:
+                        continue
+                    # 已等满上一轮计算出的退避时间，此时才真正重启。
+                    try:
+                        await start_worker(aid)
+                    except Exception:  # noqa: BLE001
+                        # spawn 本身失败也属于一次失败，交回下一轮重新计数和退避。
+                        h.next_retry_at = 0.0
+                        log.exception("worker %d 重启失败", aid)
+                    continue
+
+                # 首次观察到本轮退出：稳定运行过则开启新的失败序列。
+                if h.started_at and now - h.started_at >= _STABLE_WINDOW_SECONDS:
+                    h.fail_count = 0
+                if h.process is not None:
+                    try:
+                        h.process.join(timeout=0)
+                    except Exception:  # noqa: BLE001
+                        pass
+                    h.process = None
+                    _remove_pid_file(aid)
+                h.started_at = 0.0
                 h.fail_count += 1
                 if h.fail_count > len(_BACKOFF):
                     log.error(
@@ -680,6 +852,16 @@ async def _monitor_loop() -> None:
                             aid,
                             f"⚠️ <b>账号 worker 已停止</b>\n账号：<code>{aid}</code>\n"
                             f"连续失败：<code>{h.fail_count}</code> 次，状态已置为 dead。",
+                            rich_html=(
+                                "<h1>⚠️ 账号 Worker 已停止</h1>"
+                                "<table bordered>"
+                                f"<tr><th>账号</th><td><code>{aid}</code></td></tr>"
+                                f"<tr><th>连续失败</th><td>{h.fail_count} 次</td></tr>"
+                                "<tr><th>当前状态</th><td><code>dead</code></td></tr>"
+                                "</table>"
+                                "<details open><summary>处理建议</summary>"
+                                "<p>检查最近运行日志与登录状态，修复后再恢复账号。</p></details>"
+                            ),
                         )
                     except Exception:
                         log.exception("发送 account bot dead 告警失败: aid=%d", aid)
@@ -688,12 +870,11 @@ async def _monitor_loop() -> None:
                 wait = _BACKOFF[min(h.fail_count - 1, len(_BACKOFF) - 1)]
                 h.next_retry_at = now + wait
                 log.warning(
-                    "worker %d 崩溃，%ds 后第 %d 次重启",
+                    "worker %d 崩溃，将在 %ds 后进行第 %d 次重启",
                     aid,
                     wait,
                     h.fail_count,
                 )
-                await start_worker(aid)
     except asyncio.CancelledError:
         pass
 
@@ -840,11 +1021,9 @@ async def _consume_stream_reliable(
                     await _cleanup_runtime_logs_if_due()
                 if consumer_name == "runtime_log":
                     try:
-                        from ..services.account_bot_runtime import notify_runtime_log
-
-                        for row in rows:
-                            if isinstance(row, RuntimeLog):
-                                asyncio.create_task(notify_runtime_log(row))
+                        await _enqueue_runtime_log_notifies(
+                            [row for row in rows if isinstance(row, RuntimeLog)]
+                        )
                     except Exception:
                         log.debug("account bot runtime log notify skipped", exc_info=True)
                 for raw in ack_items:

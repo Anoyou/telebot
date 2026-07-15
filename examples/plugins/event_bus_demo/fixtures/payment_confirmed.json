@@ -1,0 +1,22 @@
+{
+  "source": {
+    "type": "payment_confirmed",
+    "channel": "external_payment_notice",
+    "account_id": 1,
+    "message_id": 88
+  },
+  "chat": {"id": -100100200300, "type": "supergroup"},
+  "message": {"chat_id": -100100200300, "message_id": 88, "text": "到账 100"},
+  "source_actor": {"user_id": 8980553289, "display_name": "可信转账通知 Bot"},
+  "player": {"user_id": 501, "display_name": "玩家 A"},
+  "payment": {
+    "status": "confirmed",
+    "amount": 100,
+    "currency": "POINT",
+    "payer": {"user_id": 501, "display_name": "玩家 A"},
+    "receiver": {"user_id": 10001, "display_name": "账号主人"}
+  },
+  "reply_to": {"message_id": 77, "text": "我要开局"},
+  "trigger": {"mode": "payment", "rule_id": 12},
+  "native_raw_meta": {"enabled": false, "reason": "external_notice_normalized"}
+}

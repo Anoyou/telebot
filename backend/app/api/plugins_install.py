@@ -1,12 +1,14 @@
-"""第三方插件安装管理 API（本地已安装列表 + 启停/卸载）。"""
+"""第三方插件安装管理 API（本地已安装列表 + 上传/启停/卸载）。"""
 
 from __future__ import annotations
 
+import base64
+import binascii
 import logging
 from datetime import datetime
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
 from sqlalchemy import select
 
@@ -14,7 +16,9 @@ from ..db.models.account import Account
 from ..db.models.plugin import InstalledPlugin
 from ..deps import CurrentUser, DBSession
 from ..redis_client import get_redis
+from ..schemas.plugin_center import PluginCenterItem
 from ..services import audit
+from ..services import plugin_center_service as pcs
 from ..services import plugin_install_service as pis
 from ..worker.ipc import CMD_RELOAD_CONFIG, cmd_channel, make_cmd
 
@@ -25,6 +29,8 @@ router = APIRouter(tags=["plugins"])
 class PluginInstallOut(BaseModel):
     key: str
     source: str
+    source_url: str | None = None
+    source_label: str | None = None
     version: str
     enabled: bool
     signature_ok: bool | None
@@ -38,6 +44,8 @@ def _to_out(row: InstalledPlugin) -> PluginInstallOut:
     return PluginInstallOut(
         key=row.key,
         source=row.source,
+        source_url=row.source_url,
+        source_label=row.source_label,
         version=row.version,
         enabled=bool(row.enabled),
         signature_ok=row.signature_ok,
@@ -57,6 +65,28 @@ def _map_install_error(exc: pis.PluginInstallError) -> HTTPException:
         "PLUGIN_NOT_FOUND": 404,
     }
     return _bad(exc.code, exc.message, status_map.get(exc.code, 400))
+
+
+async def _read_signature(
+    signature_file: UploadFile | None,
+    signature: str | None,
+) -> bytes | None:
+    if signature_file is not None:
+        data = await signature_file.read()
+        return data or None
+    raw = (signature or "").strip()
+    if not raw:
+        return None
+    if len(raw) % 2 == 0 and all(ch in "0123456789abcdefABCDEF" for ch in raw):
+        try:
+            return bytes.fromhex(raw)
+        except ValueError:
+            pass
+    try:
+        return base64.b64decode(raw, validate=True)
+    except (binascii.Error, ValueError):
+        pass
+    return raw.encode("utf-8")
 
 
 async def _broadcast_reload_config(db) -> int:
@@ -83,6 +113,33 @@ async def list_installed_packages(
 ) -> list[PluginInstallOut]:
     rows = await pis.list_installed(db)
     return [_to_out(r) for r in rows]
+
+
+@router.get("/api/plugins/installed-overview", response_model=list[PluginCenterItem])
+async def list_installed_overview(
+    db: DBSession, _user: CurrentUser
+) -> list[PluginCenterItem]:
+    return await pcs.list_installed_plugins_overview(db)
+
+
+@router.post("/api/plugins/install/upload", response_model=PluginInstallOut)
+async def upload_plugin_package(
+    db: DBSession,
+    user: CurrentUser,
+    file: UploadFile = File(...),
+    signature_file: UploadFile | None = File(None),
+    signature: str | None = Form(None),
+) -> PluginInstallOut:
+    zip_bytes = await file.read()
+    sig_bytes = await _read_signature(signature_file, signature)
+    try:
+        row = await pis.install_zip(db, zip_bytes=zip_bytes, signature=sig_bytes)
+    except pis.PluginInstallError as exc:
+        raise _map_install_error(exc) from exc
+    await audit.write(db, user.id, "plugin.install_upload", target=f"plugin:{row.key}")
+    await db.commit()
+    await _broadcast_reload_config(db)
+    return _to_out(row)
 
 
 @router.post("/api/plugins/install/{key}/enable", response_model=PluginInstallOut)

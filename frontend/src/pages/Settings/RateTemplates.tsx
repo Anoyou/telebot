@@ -116,7 +116,7 @@ export function RateTemplates() {
                 <div className="flex min-w-0 flex-wrap items-center gap-2">
                   <span className="truncate font-medium">{t.name}</span>
                   {t.is_default ? (
-                    <span className="inline-flex items-center gap-0.5 rounded bg-amber-100 px-1.5 py-0.5 text-xs text-amber-700 dark:bg-amber-950/40 dark:text-amber-300">
+                    <span className="inline-flex items-center gap-0.5 rounded bg-warning/15 px-1.5 py-0.5 text-xs text-warning">
                       <Star className="h-3 w-3" /> 默认
                     </span>
                   ) : null}

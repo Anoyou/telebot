@@ -21,6 +21,13 @@ class ContextEchoPlugin(Plugin):
                 feature=runtime_ctx.feature_key,
             )
             payload = " ".join(args) if args else "ok"
-            await event.reply(f"[aid={account_id}] {payload}")
+            # 旧命令 hook 只用于兼容触发和日志演示；新插件发送消息请参考
+            # examples/plugins/event_bus_demo，通过 ctx.messages 或标准 action 交给平台执行。
+            await runtime_ctx.log(
+                "info",
+                "context_echo.payload",
+                account_id=account_id,
+                payload=payload,
+            )
 
         self.commands = {self._command: _handler}

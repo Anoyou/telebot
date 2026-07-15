@@ -2,14 +2,21 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from fastapi import APIRouter, HTTPException
 from sqlalchemy import select
 
 from ..db.models.account_bot import ACCOUNT_BOT_STATUS_DISABLED, AccountBot
+from ..db.models.feature import AccountFeature, Feature
 from ..deps import CurrentUser, DBSession
 from ..schemas.account_bot import (
     AccountBotConfigResponse,
     AccountBotConfigUpdate,
+    AccountBotInteractionCompositePluginConfig,
+    AccountBotInteractionCompositePluginSummary,
+    AccountBotInteractionCompositeSaveRequest,
+    AccountBotInteractionCompositeSaveResponse,
     AccountBotInteractionConfig,
     AccountBotRemotePluginPolicy,
     AccountBotRuntimeResponse,
@@ -24,11 +31,17 @@ from ..services import (
     account_bot_runtime,
     account_bot_service,
     audit,
+    feature_service,
     interaction_bot_runtime,
     interaction_bot_service,
 )
+from . import features as features_api
 
 router = APIRouter(prefix="/api/accounts", tags=["account-bots"])
+
+_KEYWORD_RULE_REQUIRES_INTERACTION_BOT_MESSAGE = (
+    "关键词触发依赖交互 Bot，请先配置交互 Bot Token 或改用命令触发"
+)
 
 
 def _with_interaction_runtime_state(aid: int, data: dict) -> dict:
@@ -41,6 +54,54 @@ def _with_interaction_runtime_state(aid: int, data: dict) -> dict:
         "interaction_running": running,
         "interaction_runtime_status": "running" if running else "stopped",
     }
+
+
+async def _with_polling_dlq_count(aid: int, data: dict) -> dict:
+    try:
+        count = await account_bot_runtime._count_polling_dead_letters(aid)  # noqa: SLF001
+    except Exception:  # noqa: BLE001
+        count = 0
+    return {
+        **data,
+        "polling_dlq_count": count,
+    }
+
+
+def _enabled_keyword_rules_require_interaction_bot(data: dict[str, Any]) -> bool:
+    if not data.get("enabled"):
+        return False
+    for rule in data.get("rules") or []:
+        if not isinstance(rule, dict) or not bool(rule.get("enabled", True)):
+            continue
+        trigger_mode = str(rule.get("trigger_mode") or "payment").strip()
+        if trigger_mode in {"keyword", "both"}:
+            return True
+        if rule.get("module_start_keywords"):
+            return True
+    return False
+
+
+async def _ensure_keyword_rules_have_interaction_bot_token(
+    db: DBSession,
+    aid: int,
+    payload_data: dict[str, Any],
+) -> None:
+    current = await interaction_bot_service.get_interaction_bot_config(db, aid)
+    incoming = dict(payload_data or {})
+    candidate = interaction_bot_service.normalize_transfer_notice_config({**current, **incoming})
+    current_has_token = bool(current.get("has_interaction_bot_token"))
+    incoming_token = str(incoming.get("interaction_bot_token") or "").strip()
+    has_token_after_save = bool(incoming_token) or (
+        current_has_token and not bool(incoming.get("clear_interaction_bot_token"))
+    )
+    if _enabled_keyword_rules_require_interaction_bot(candidate) and not has_token_after_save:
+        raise HTTPException(
+            400,
+            detail={
+                "code": "INTERACTION_BOT_TOKEN_REQUIRED_FOR_KEYWORD_RULES",
+                "message": _KEYWORD_RULE_REQUIRES_INTERACTION_BOT_MESSAGE,
+            },
+        )
 
 
 @router.get("/{aid}/bot", response_model=AccountBotConfigResponse)
@@ -187,6 +248,8 @@ async def get_account_bot_interaction(
 
     data = await interaction_bot_service.get_interaction_bot_config(db, aid)
     data = _with_interaction_runtime_state(aid, data)
+    data = await _with_polling_dlq_count(aid, data)
+    data["interaction_debug"] = await account_bot_runtime.get_interaction_debug_snapshot(aid)
     return AccountBotInteractionConfig(**data)
 
 
@@ -200,10 +263,12 @@ async def update_account_bot_interaction(
 ) -> AccountBotInteractionConfig:
     """保存交互 Bot / 转账联动测试配置。"""
 
+    payload_data = payload.model_dump()
+    await _ensure_keyword_rules_have_interaction_bot_token(db, aid, payload_data)
     data = await interaction_bot_service.update_interaction_bot_config(
         db,
         aid,
-        payload.model_dump(),
+        payload_data,
     )
     await audit.write(
         db,
@@ -216,13 +281,233 @@ async def update_account_bot_interaction(
             "interaction_bot_id": data.get("interaction_bot_id"),
             "interaction_bot_username": data.get("interaction_bot_username"),
             "trusted_bot_id": data.get("trusted_bot_id"),
+            "trusted_bot_ids": data.get("trusted_bot_ids"),
             "amount": data.get("amount"),
         },
     )
     await db.commit()
+    await feature_service._notify_reload(aid)  # noqa: SLF001 - 交互规则可能同步启用插件，需要 worker 即时加载。
     await interaction_bot_runtime.restart_interaction_bot(aid)
     data = _with_interaction_runtime_state(aid, data)
+    data = await _with_polling_dlq_count(aid, data)
     return AccountBotInteractionConfig(**data)
+
+
+async def _prepare_account_feature_config_for_save(
+    db: DBSession,
+    aid: int,
+    item: AccountBotInteractionCompositePluginConfig,
+) -> tuple[str, dict[str, Any], bool]:
+    """Validate one plugin config update; returns (key, config, enabled)."""
+
+    key = str(item.plugin_key or "").strip()
+    if not key:
+        raise HTTPException(
+            400,
+            detail={"code": "PLUGIN_KEY_REQUIRED", "message": "plugin_key 不能为空"},
+        )
+    feature = await db.get(Feature, key)
+    if feature is None:
+        raise HTTPException(
+            404,
+            detail={"code": "FEATURE_NOT_FOUND", "message": f"未注册的 feature: {key}"},
+        )
+    existing = await db.get(AccountFeature, (aid, key))
+    config = features_api._preserve_existing_sensitive_values(  # noqa: SLF001
+        dict(existing.config or {}) if existing is not None else None,
+        dict(item.config or {}),
+        key,
+    )
+    config = features_api._normalize_feature_config(key, config)  # noqa: SLF001
+    scoped_schema = features_api._account_config_schema(feature.manifest, config)  # noqa: SLF001
+    if scoped_schema is not None:
+        config = feature_service.apply_required_config_defaults(config, scoped_schema)
+        validation = feature_service.validate_config_against_schema(config, scoped_schema)
+        if not validation.valid:
+            raise HTTPException(
+                400,
+                detail={
+                    "code": "CONFIG_VALIDATION_ERROR",
+                    "message": (
+                        f"配置验证失败 ({key}): "
+                        + "; ".join(f"{e.field}: {e.message}" for e in validation.errors)
+                    ),
+                },
+            )
+    enabled = bool(existing.enabled) if existing is not None else False
+    return key, config, enabled
+
+
+@router.put(
+    "/{aid}/interaction-bot/composite",
+    response_model=AccountBotInteractionCompositeSaveResponse,
+)
+async def save_account_bot_interaction_composite(
+    aid: int,
+    payload: AccountBotInteractionCompositeSaveRequest,
+    db: DBSession,
+    user: CurrentUser,
+) -> AccountBotInteractionCompositeSaveResponse:
+    """原子保存交互 Bot 配置与相关 AccountFeature 配置。
+
+    任一插件配置校验失败或写库失败时整体回滚，避免规则半应用。
+    """
+
+    await account_bot_service.ensure_account(db, aid)
+    await feature_service.seed_builtin_features(db)
+
+    interaction_payload = payload.interaction.model_dump()
+    await _ensure_keyword_rules_have_interaction_bot_token(db, aid, interaction_payload)
+
+    prepared_plugins: list[tuple[str, dict[str, Any], bool]] = []
+    seen_keys: set[str] = set()
+    for raw in payload.plugin_configs:
+        key, config, enabled = await _prepare_account_feature_config_for_save(db, aid, raw)
+        if key in seen_keys:
+            raise HTTPException(
+                400,
+                detail={
+                    "code": "DUPLICATE_PLUGIN_CONFIG",
+                    "message": f"plugin_configs 中重复的 plugin_key: {key}",
+                },
+            )
+        seen_keys.add(key)
+        prepared_plugins.append((key, config, enabled))
+
+    plugin_summaries: list[AccountBotInteractionCompositePluginSummary] = []
+    for key, config, enabled in prepared_plugins:
+        af = await feature_service.set_account_feature(
+            db,
+            aid,
+            key,
+            enabled=enabled,
+            config=config,
+            notify=False,
+            commit=False,
+        )
+        plugin_summaries.append(
+            AccountBotInteractionCompositePluginSummary(
+                plugin_key=af.feature_key,
+                config_keys=sorted(str(k) for k in (af.config or {}).keys()),
+                enabled=bool(af.enabled),
+            )
+        )
+
+    data = await interaction_bot_service.update_interaction_bot_config(
+        db,
+        aid,
+        interaction_payload,
+    )
+    await audit.write(
+        db,
+        user.id,
+        "account_bot.interaction_composite_save",
+        target=f"account:{aid}/bot/interaction-composite",
+        detail={
+            "enabled": data.get("enabled"),
+            "rule_count": len(data.get("rules") or []),
+            "plugin_keys": [item.plugin_key for item in plugin_summaries],
+            "interaction_bot_id": data.get("interaction_bot_id"),
+            "trusted_bot_ids": data.get("trusted_bot_ids"),
+        },
+    )
+    await db.commit()
+    await feature_service._notify_reload(aid)  # noqa: SLF001
+    await interaction_bot_runtime.restart_interaction_bot(aid)
+    data = _with_interaction_runtime_state(aid, data)
+    data = await _with_polling_dlq_count(aid, data)
+    return AccountBotInteractionCompositeSaveResponse(
+        interaction=AccountBotInteractionConfig(**data),
+        plugins=plugin_summaries,
+    )
+
+
+def _polling_dlq_id_or_400(loop: str, update_id: int) -> str:
+    try:
+        return account_bot_runtime._polling_dlq_id(loop, update_id)  # noqa: SLF001
+    except ValueError as exc:
+        raise HTTPException(
+            400,
+            detail={
+                "code": "INVALID_POLLING_DLQ_LOOP",
+                "message": "未知 polling DLQ 类型",
+            },
+        ) from exc
+
+
+@router.get("/{aid}/bot/polling-dlq", response_model=dict)
+async def list_account_bot_polling_dlq(
+    aid: int,
+    db: DBSession,
+    _user: CurrentUser,
+    limit: int = 100,
+) -> dict[str, Any]:
+    await account_bot_service.ensure_account(db, aid)
+    items = await account_bot_runtime._list_polling_dead_letters(aid, limit=limit)  # noqa: SLF001
+    return {
+        "ok": True,
+        "count": await account_bot_runtime._count_polling_dead_letters(aid),  # noqa: SLF001
+        "items": items,
+    }
+
+
+@router.post("/{aid}/bot/polling-dlq/{loop}/{update_id}/replay", response_model=dict)
+async def replay_account_bot_polling_dlq(
+    aid: int,
+    loop: str,
+    update_id: int,
+    db: DBSession,
+    user: CurrentUser,
+) -> dict[str, Any]:
+    await account_bot_service.ensure_account(db, aid)
+    dlq_id = _polling_dlq_id_or_400(loop, update_id)
+    result = await account_bot_runtime._replay_polling_dead_letter(aid, dlq_id)  # noqa: SLF001
+    if not result.get("ok") and str(result.get("error") or "") == "DLQ 条目不存在":
+        raise HTTPException(
+            404,
+            detail={
+                "code": "POLLING_DLQ_NOT_FOUND",
+                "message": "DLQ 条目不存在",
+            },
+        )
+    await audit.write(
+        db,
+        user.id,
+        "account_bot.polling_dlq_replay",
+        target=f"account:{aid}/bot/polling_dlq:{dlq_id}",
+        detail={"ok": bool(result.get("ok")), "error": result.get("error")},
+    )
+    await db.commit()
+    return {"dlq_id": dlq_id, **result}
+
+
+@router.delete("/{aid}/bot/polling-dlq/{loop}/{update_id}", response_model=dict)
+async def discard_account_bot_polling_dlq(
+    aid: int,
+    loop: str,
+    update_id: int,
+    db: DBSession,
+    user: CurrentUser,
+) -> dict[str, Any]:
+    await account_bot_service.ensure_account(db, aid)
+    dlq_id = _polling_dlq_id_or_400(loop, update_id)
+    deleted = await account_bot_runtime._discard_polling_dead_letter(aid, dlq_id)  # noqa: SLF001
+    if not deleted:
+        raise HTTPException(
+            404,
+            detail={
+                "code": "POLLING_DLQ_NOT_FOUND",
+                "message": "DLQ 条目不存在",
+            },
+        )
+    await audit.write(
+        db,
+        user.id,
+        "account_bot.polling_dlq_discard",
+        target=f"account:{aid}/bot/polling_dlq:{dlq_id}",
+    )
+    await db.commit()
+    return {"ok": True, "dlq_id": dlq_id, "deleted": True}
 
 
 @router.get("/{aid}/bot/transfer-notice", response_model=AccountBotTransferNoticeConfig)

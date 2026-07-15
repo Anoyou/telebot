@@ -1,0 +1,12 @@
+{
+  "source": {
+    "type": "inline_query",
+    "channel": "interaction_bot",
+    "account_id": 1
+  },
+  "inline_query": {"id": "inline-1001", "query": "demo", "offset": ""},
+  "actor": {"user_id": 501, "display_name": "玩家 A"},
+  "sender": {"user_id": 501, "display_name": "玩家 A"},
+  "trigger": {"scope": "inline_all"},
+  "native_raw_meta": {"enabled": false, "reason": "snapshot_disabled"}
+}

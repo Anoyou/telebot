@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any
@@ -39,8 +40,12 @@ from app.worker.plugins.loader import (
 class _FakeRedis:
     """loader 仅用 rpush 写日志；publish 也不会真到 worker。"""
 
+    def __init__(self) -> None:
+        self.list_pushes: list[tuple[str, str]] = []
+
     async def rpush(self, key: str, val: str) -> int:
-        return 1
+        self.list_pushes.append((key, val))
+        return len(self.list_pushes)
 
     async def publish(self, *_a, **_kw) -> int:
         return 0
@@ -273,6 +278,39 @@ async def test_reload_ignored_peers_pulls_new_set(monkeypatch) -> None:
 
     await reload_ignored_peers(7)
     assert state.ignored_peers == {10, 20, 30}
+
+
+@pytest.mark.asyncio
+async def test_reload_ignored_peers_can_log_debug_for_periodic_reconcile(monkeypatch) -> None:
+    """周期性名单收敛可降为 debug，避免默认运行事件页重复刷成功日志。"""
+    state = _AccountState(account_id=7)
+    state.redis = _FakeRedis()
+    monkeypatch.setitem(loader_mod._STATES, 7, state)
+
+    fake_db = _FakeDB(ignored_rows=[_FakeIgnored(10), _FakeIgnored(20)])
+    monkeypatch.setattr(loader_mod, "AsyncSessionLocal", lambda: _fake_session_factory(fake_db))
+
+    await reload_ignored_peers(7, log_level="debug")
+
+    payload = json.loads(state.redis.list_pushes[-1][1])
+    assert payload["level"] == "debug"
+    assert payload["message"] == "允许群组名单已热更新（共 2 个 peer）"
+
+
+@pytest.mark.asyncio
+async def test_reload_ignored_peers_can_stay_silent_for_periodic_reconcile(monkeypatch) -> None:
+    """周期性名单兜底成功时可静默，避免运行事件页重复刷成功日志。"""
+    state = _AccountState(account_id=7)
+    state.redis = _FakeRedis()
+    monkeypatch.setitem(loader_mod._STATES, 7, state)
+
+    fake_db = _FakeDB(ignored_rows=[_FakeIgnored(10), _FakeIgnored(20)])
+    monkeypatch.setattr(loader_mod, "AsyncSessionLocal", lambda: _fake_session_factory(fake_db))
+
+    await reload_ignored_peers(7, log_level=None)
+
+    assert state.ignored_peers == {10, 20}
+    assert state.redis.list_pushes == []
 
 
 @pytest.mark.asyncio

@@ -2,7 +2,69 @@
 
 本文是当前维护的插件 API 参考，覆盖配置、派发、日志、前端集成、调试和示例。用户界面与开发文档统一使用“插件”指代可安装、可启停、可配置的扩展能力；历史代码字段名仍按兼容要求保留。
 
-## 3. Plugin 基类
+## 1. 三模式心智模型
+
+新插件先判断自己属于哪种模式，再看 Event Bus、Trace、MessageOps 这些内部契约：
+
+| 模式 | 触发与输入 | 默认收发通道 | 典型用法 |
+| --- | --- | --- | --- |
+| 裸直通 | userbot 原始 Telethon event | 插件自行处理 userbot 能力 | 抢首响、极低延时 userbot 监听；不覆盖 interaction bot |
+| userbot 命令会话 | UserBot 前缀命令触发，进入标准事件信封 | 后续收发默认都走 userbot | 管理员命令、账号身份动作、需要沿用当前账号上下文的流程 |
+| interaction bot 规则会话 | 关键词、付款确认、按钮回调触发，进入标准事件信封 | 后续收发默认都走 interaction bot | 高频群内互动、按钮、题面、普通会话提示 |
+
+唯一例外：`payout`、收付款、发奖永远由 userbot 执行，不随会话通道切到 interaction bot。
+
+Event Bus、Trace、MessageOps 是标准链路内部契约，不是第四种模式。userbot 命令会话和 interaction bot 规则会话都使用标准事件信封，并通过 `ctx.messages` / 标准 action 输出：
+
+```python
+from app.worker.plugins.events import event_from_interaction_payload
+
+
+async def on_interaction(self, ctx, entry_key, payload):
+    event = payload["tp_event"] if "tp_event" in payload else event_from_interaction_payload(payload)
+    text = event.message.text or ""
+    if "ping" not in text:
+        return []
+    return [{
+        "type": "send_message",
+        "chat_id": event.message.chat_id,
+        "reply_to_message_id": event.message.message_id,
+        "text": "pong",
+    }]
+```
+
+旧 `on_message`、`on_command`、`interaction_entries`、旧平铺 payload 只作为迁移兼容说明出现，不再是公共群玩法或新插件的推荐主路径。
+
+裸直通入口只给 userbot 使用：
+
+```python
+async def on_direct_message(self, ctx, event):
+    ...
+```
+
+这里的 `event` 是 live Telethon event，不是 `payload`，也不会自动生成 `ctx.messages` action、Trace 或 MessageOps 记录。它不接 interaction bot 事件；需要按钮、Inline、付款确认、规则会话或审计回放时，改用标准会话链路。
+
+## 2. 标准会话链路与单入口模型
+
+进入标准链路后，互动插件按“触发方式决定整段会话通道”理解；插件全程不需要感知或选择收发通道：
+
+| 开局方式 | 会话通道（收 + 发） | 说明 |
+| --- | --- | --- |
+| UserBot 前缀命令 | `userbot` | 后续消息、继续追问、普通回复默认都走 userbot，不覆盖 interaction bot |
+| 关键词 / 付款确认 / 按钮回调 | `interaction_bot` | 题面、按钮、编辑消息默认都走 interaction bot |
+| `payout` | 固定 `userbot` | 不受会话通道影响，始终经 userbot 执行 |
+
+推荐写法：
+
+1. 用一个 `on_interaction(ctx, entry_key, payload)` 覆盖 `command`、`keyword`、`payment_confirmed`、`message`、`callback_query`、`session_expired`。
+2. 读取 `payload["tp_event"]` 或 `event_from_interaction_payload(payload)`，不要再围绕旧平铺字段写分支。
+3. 单局状态保存在 `session.data`，变更后返回 `update_session`；不要再依赖进程内全局状态才能继续游戏。
+4. 普通发送类动作不要写 `send_via`，平台会继承 `session.channel`；只有跨通道公告、特殊管理消息或迁移桥兼容这类高级场景才显式覆盖。
+5. userbot 会话里的按钮会降级为文本编号面板；玩家回复编号后，平台会把它合成为 `callback_query`，并在 `source.synthetic="text_button"` 标记来源。
+
+`interaction_trigger_modes`、`default_trigger_modes`、`callback_fast_ack` 是当前运行时契约。插件发布前应在目标 TelePilot 版本上运行示例校验和真实账号 smoke test，不要为旧分支猜测兼容行为。
+
+## 3. Plugin 基类（兼容层）
 
 ```python
 class Plugin:
@@ -56,10 +118,16 @@ class PluginContext:
     account_id: int
     feature_key: str
     config: dict           # 当前账号的插件配置
+    account_config: dict   # 原始账号级配置（不含 schema/global 合并值）
     rules: list            # 规则列表
-    client: TelegramClient | None
-    engine: Any            # RateLimitEngine
-    redis: Any             # redis.asyncio.Redis
+    client: Any | None     # 受控客户端 facade；新插件不要作为主动发送主路径
+    messages: Any | None   # MessageOps facade；发送/编辑/删除/按钮/Inline 主路径
+    http: Any | None       # HTTP facade；需要 external_http + allowed_hosts
+    ai: Any | None         # AI facade；需要 ai_text
+    engine: Any | None     # RateLimitEngine；安装型插件通常为 None
+    redis: Any | None      # redis.asyncio.Redis；低层兼容入口
+    storage: Any | None    # PluginStorage；按账号和插件隔离的持久化 KV facade
+    data_dir: Path | None  # 插件独享的持久化文件目录；更新插件代码时不会被覆盖
     log: Callable          # 日志函数
     scheduler: Any         # 平台调度器 facade
     generation: int        # generation guard 计数
@@ -69,7 +137,11 @@ class PluginContext:
         """创建与 bot 的对话会话。"""
 ```
 
-注意：内置插件会拿到完整运行时能力；远程/第三方插件拿到的是受限上下文：`ctx.client` 为 `SandboxClient`，指令 handler 中传入的 `client` 参数与 `ctx.client` 同源（同样是 sandbox client），`ctx.engine` 和 `ctx.redis` 为 `None`，只能通过声明过的权限和 `ctx.scheduler` facade 使用有限能力。
+注意：核心平台兼容代码可能拿到完整运行时能力；远程/本地/插件库安装型插件拿到的是受控上下文：`ctx.client` 是平台提供的客户端 facade，指令 handler 中传入的 `client` 参数与 `ctx.client` 同源。当前 worker 加载路径会向插件上下文注入低层 `ctx.redis`，并基于同一个 Redis 后端构造 `ctx.storage`；新插件需要持久化状态时应优先使用 `ctx.storage`，不要自行拼 Redis key。`ctx.engine` 仍只供核心 builtin 兼容代码直接依赖，安装型插件通常为 `None`。受控上下文用于收口常用操作和审计，不是公共插件市场式强沙箱。
+
+插件需要 SQLite、索引文件或其他文件型持久化时，必须写入 `ctx.data_dir`，不要写进 `Path(__file__).parent`、插件安装目录或仓库源码目录。TelePilot 更新插件时会整体替换代码目录，而 `ctx.data_dir` 位于持久化插件卷的 `_data/<plugin_key>/` 下，不随代码更新删除。插件仍需使用 `ctx.account_id` 隔离账号数据；若一个数据库文件服务多个账号，表结构必须包含账号隔离键。
+
+为兼容旧插件，更新器会在替换代码目录前迁移插件根目录的 `*.sqlite3` 和顶层运行态 `*.json`（排除 `plugin.json`），并在新目录保留兼容链接；已有 `ctx.data_dir` 文件不会被旧文件覆盖。这个迁移只负责旧数据过渡，不扫描嵌套目录，也不能替代新代码直接使用 `ctx.data_dir`。
 
 ### 4.0 受控 facade：ctx.http 与 ctx.ai
 
@@ -77,30 +149,76 @@ class PluginContext:
 
 - `ctx.http`：声明 `permissions=["external_http"]` 且填写 `allowed_hosts` 后注入。它限制协议、域名、超时、响应大小，并在发起请求前阻断 localhost/内网/链路本地地址。默认走账号代理；只有 Manifest 的 `http={"allow_direct": true}` 且账号配置请求 direct 时才允许直连。
 - `ctx.ai`：声明 `permissions=["ai_text"]` 后注入。它复用 TelePilot 的 LLM Provider 池、fallback 链、账号级预算和 usage 记录；插件只能拿到脱敏 provider 元数据，不能读取 `api_key_enc`、`base_url` 或代理 URL。
-- `ctx.ai.complete()` 推荐用 `provider_tag` 按用途选择 provider；`tag` / `tags` 是兼容别名且已 deprecated，新插件不要依赖它们作为主要入口。
+- `ctx.ai.complete()` 推荐用 `provider_tag` 按用途选择 provider；`tag` / `tags` 是兼容别名且已 deprecated，新插件不要依赖它们作为主要入口。可选 `route="fixed"|"tag"|"auto"` 显式声明路由模式（留空时按旧参数推断，向后兼容）；返回结果的 `routing` 字段是脱敏路由摘要（模式 / provider / 生效模型 / 命中 tag / 协议 / 身份 / 是否 fallback），不含 key、base_url、代理或内部分类器细节。插件不能指定 UA、身份、密钥、代理、内部分类器或全局 fallback。
+- `ctx.ai.run_agent()` 需要独立 `ai_agent` 权限，并同时要求 `capabilities.agent_tools.enabled=true`、manifest `agent_tools[]` 声明和调用方传入同名 handler。平台限制轮数、工具数、重复调用、token 与总超时；只读工具可并行，副作用工具串行。同样支持 `route="fixed"|"tag"|"auto"`，且 Agent 路由会预先排除没有已启用模型的 provider（无法支撑 tools 调用）。
 - `ctx.ai.list_providers()` 可用于展示当前账号可见的脱敏 provider 摘要；更完整的 AI facade 说明见 `docs/PLUGIN-AI.md`。
 
-示例：
+标准链路示例：
 
 ```python
-if ctx.http is None:
-    await event.edit("本插件需要 external_http 权限和 allowed_hosts")
-    return True
-response = await ctx.http.get("https://api.github.com/zen")
+async def on_event(self, ctx, payload):
+    message = payload["message"]
+    chat_id = message.get("chat_id") or (payload.get("chat") or {}).get("id")
+    reply_to = message.get("message_id")
 
-if ctx.ai is None:
-    await event.edit("本插件需要 ai_text 权限")
-    return True
-providers = await ctx.ai.list_providers()
-result = await ctx.ai.complete(
-    system="你是助手",
-    user="总结这段文本",
-    provider_tag="chat",
-    max_tokens=512,
-)
+    if ctx.http is None:
+        return [{
+            "type": "send_message",
+            "chat_id": chat_id,
+            "reply_to_message_id": reply_to,
+            "text": "本插件需要 external_http 权限和 allowed_hosts",
+        }]
+
+    response = await ctx.http.get("https://api.github.com/zen")
+    preview = response.text.strip().replace("\n", " ")[:120]
+    return [{
+        "type": "send_message",
+        "chat_id": chat_id,
+        "reply_to_message_id": reply_to,
+        "text": f"HTTP {response.status_code}: {preview}",
+    }]
 ```
 
-### 4.1 可用上下文与访问方式（PluginContext Contract）
+管理员命令兼容示例可以继续用 `event.edit(...)` 更新命令消息；标准公共互动插件应优先返回标准 action 或通过 `ctx.messages` 缓存标准 action。
+
+### 4.1 持久化 facade：ctx.storage
+
+`ctx.storage` 是 `PluginStorage` facade，用于插件自己的持久化 key-value 状态。运行时从 `PluginContext.account_id`、`PluginContext.feature_key` 和 `ctx.redis` 构造它，Redis key 前缀为 `plugin_store:{account_id}:{plugin_key}:`，因此同一插件在不同账号之间、同一账号的不同插件之间不会串数据。
+
+API 签名：
+
+| 方法 | 签名 | 返回 | 说明 |
+|------|------|------|------|
+| `available` | `ctx.storage.available` | `bool` | 是否挂载了 Redis 后端 |
+| `get` | `await ctx.storage.get(key, default=None)` | `Any` | 读取 JSON 值；缺失、Redis 不可用或 JSON 不可读时返回 `default` |
+| `set` | `await ctx.storage.set(key, value, *, ttl=None)` | `bool` | 写入 JSON 值；`ttl` 为可选秒数，必须大于 0；Redis 不可用时返回 `False` |
+| `delete` | `await ctx.storage.delete(*keys)` | `int` | 删除一个或多个用户 key，返回删除数量 |
+| `incr` | `await ctx.storage.incr(key, amount=1, *, ttl=None)` | `int | None` | 整数递增；Redis 不可用时返回 `None` |
+| `get_all` | `await ctx.storage.get_all()` | `dict[str, Any]` | 返回当前账号和插件命名空间下全部可解析 JSON 值 |
+| `items` | `await ctx.storage.items()` | `dict[str, Any]` | `get_all()` 别名 |
+
+`key` 会先转成去首尾空白的字符串，空 key 会抛 `ValueError`。`value` 通过 `json.dumps(..., ensure_ascii=False, separators=(",", ":"))` 序列化，不能 JSON 序列化的值会在 `set` 时抛出原始序列化错误。
+
+`ttl` 只支持 `set` 和 `incr`，单位为秒，可传 `int` / `float` / 可转整数的值；`None` 表示不设置过期，`<= 0` 或不可转整数会抛 `ValueError`。`get_all()` / `items()` 只扫描当前命名空间，过期或不可解析 JSON 的值会被跳过。
+
+`incr(ttl=...)` 的窗口语义要特别注意：Redis 后端优先使用 `INCRBY` / `INCR` 做递增，然后单独调用 `EXPIRE` 刷新 TTL，所以 TTL 是“每次递增都续期”的滑动窗口，不是固定窗口。递增和设置过期不是一个事务；如果进程在两条命令之间崩溃，可能留下已递增但未设置过期的 key。若 Redis facade 没有 `incrby` / `incr`，实现会退回 `get` + `set`，该退回路径本身也不是原子递增。需要 NX、CAS、锁或严格原子计数时，不要把 `ctx.storage` 当分布式锁使用，应交给平台会话/结算链路或官方受控低层实现。
+
+不使用时没有额外开销：运行时只是在上下文里挂载 facade；插件不调用 `ctx.storage`，就不会触发 Redis 读写或扫描。
+
+推荐写法：
+
+```python
+round_key = f"round:{chat_id}"
+
+state = await ctx.storage.get(round_key, default={})
+await ctx.storage.set(round_key, {"answer": 24, "active": True}, ttl=3600)
+
+attempts = await ctx.storage.incr(f"attempts:{chat_id}:{user_id}", ttl=60)
+if attempts is not None and attempts > 5:
+    return [{"type": "send_message", "text": "尝试太频繁，请稍后再试。"}]
+```
+
+### 4.2 可用上下文与访问方式（PluginContext Contract）
 
 插件请只从 `PluginContext` 读取运行时信息，不要跨层 import worker 私有实现。
 
@@ -109,32 +227,36 @@ result = await ctx.ai.complete(
 | `ctx.account_id` | `ctx.account_id` | 当前账号 ID（账号级隔离边界） |
 | `ctx.feature_key` | `ctx.feature_key` | 当前插件 feature key |
 | `ctx.config` | `ctx.config.get("k")` | 插件配置（账号/全局已合并后的可见配置） |
+| `ctx.account_config` | `ctx.account_config.get("k")` | 原始账号级配置；通常优先读已合并的 `ctx.config` |
 | `ctx.rules` | 遍历 `ctx.rules` | 当前账号 + 当前插件已启用规则 |
-| `ctx.client` | `await ctx.client.send_message(...)` | Telegram 客户端；第三方插件场景会是 `SandboxClient` 包装 |
-| `ctx.engine` | `await ctx.engine.acquire(...)` | 仅内置插件可用；第三方插件通常为 `None` |
-| `ctx.redis` | `await ctx.redis.get(...)` | 仅内置插件可用；第三方插件通常为 `None` |
+| `ctx.client` | 高级兼容场景只读或受控调用 | UserBot 客户端 facade；新插件不要用它作为主动发送主路径，消息输出优先使用 `ctx.messages` 或标准 action |
+| `ctx.engine` | `await ctx.engine.acquire(...)` | 仅核心 builtin 兼容代码可直接依赖；安装型插件通常为 `None` |
+| `ctx.redis` | `await ctx.redis.get(...)` | 低层 Redis 客户端；当前运行时会注入，但新插件不应自行拼 key，持久化优先用 `ctx.storage` |
+| `ctx.storage` | `await ctx.storage.get("k")` / `await ctx.storage.set("k", value, ttl=3600)` | 推荐的插件持久化 facade；按账号 + 插件自动命名空间隔离 |
 | `ctx.log` | `await ctx.log("info", "...", **detail)` | 运行日志写入器 |
 | `ctx.scheduler` | `ctx.scheduler.register(job_id, schedule, callback, *, replace=True)` / `ctx.scheduler.unregister(job_id)` | 调度 facade（按权限/能力边界开放） |
 | `ctx.http` | `await ctx.http.get(url, params={...})` / `await ctx.http.post(url, json={...})` | 安全 HTTP facade；第三方插件需声明 `external_http` + `allowed_hosts` |
 | `ctx.ai` | `await ctx.ai.complete(system="...", user="...")` | 文本 LLM facade；第三方插件需声明 `ai_text` |
+| `ctx.ai` | `await ctx.ai.run_agent(..., handlers={...})` | 有界工具调用；第三方插件需声明独立 `ai_agent` 与工具双白名单 |
+| `ctx.messages` | `await ctx.messages.send(...)` / `send_photo(...)` / `edit_caption(...)` / `answer_callback(...)` | 交互入口消息操作 facade；只生成平台标准动作，由 TelePilot 统一代发、审计和执行 |
 | `ctx.conversation(...)` | `async with ctx.conversation(peer)` | 与目标 peer 建立会话 |
 
-### 4.2 权限边界与禁止事项
+### 4.3 权限边界与禁止事项
 
 1. 第三方插件必须遵循 `manifest.permissions` 最小授权，未声明的客户端能力不可调用。
-2. 第三方插件不得假设 `ctx.engine`、`ctx.redis` 恒可用；访问前必须判空。
+2. 第三方插件不得假设 `ctx.engine` 恒可用；需要状态持久化时优先使用 `ctx.storage`，只有确需低层 Redis 语义且已处理命名空间、原子性和降级时才访问 `ctx.redis`。
 3. 禁止通过插件绕过账号边界：不要读写其他账号配置、规则、会话状态。
 4. 禁止在插件中执行系统级/运维级动作（如重启进程、安装/卸载插件、修改权限模型）。
 5. 禁止依赖 worker 私有实现或 monkey patch 运行时对象来“扩权”。
 6. 禁止把敏感凭据直接打到日志；`ctx.log` 只记录最小必要信息。
 
-### 4.3 配置/账号/运行时数据访问建议
+### 4.4 配置/账号/运行时数据访问建议
 
 1. 配置：通过 `ctx.config` 读取；按 `config_schema` 的 `level` 设计字段，不自行拼接跨账号配置。
-2. 账号：通过 `ctx.account_id` 做所有业务隔离键，不缓存到跨账号全局变量。
-3. 运行时：仅使用 `ctx.client` / `ctx.scheduler` / `ctx.conversation` 提供的公开入口。
+2. 账号：通过 `ctx.account_id` 做所有业务隔离键；插件持久化状态优先放进 `ctx.storage`，由平台按账号 + 插件隔离。
+3. 运行时：管理员命令兼容场景可使用 `ctx.client` / `ctx.scheduler` / `ctx.conversation` 提供的公开入口；公共群互动、按钮、Inline、付款确认和后台通知优先使用 `ctx.messages` 或标准 action。
 4. 日志：统一用 `ctx.log`，并在 `detail` 里带结构化字段（如 `chat_id`、`action`）。
-5. 兜底：对可选能力（`engine`/`redis`）做 feature-detection，保证第三方插件在受限上下文也能安全降级。
+5. 兜底：对可选能力（`engine`/`storage`/`redis`）做 feature-detection，保证第三方插件在受限上下文也能安全降级。
 
 最小示例见：[docs/examples/plugin_context_minimal.py](./examples/plugin_context_minimal.py)。
 
@@ -160,7 +282,12 @@ result = await ctx.ai.complete(
 | `config_schema` | dict | JSON Schema，有配置的插件必须写 |
 | `requires_features` | list | 依赖的其他插件 key |
 | `min_telepilot_version` | str | 最低 TelePilot 版本要求，远程插件建议填写 |
-| `min_telebot_version` | str | 旧字段名，0.15 起仅作为兼容别名保留，新插件不要再新增 |
+| `min_telebot_version` | str | 旧字段名，仅作为兼容别名保留，新插件不要再新增 |
+| `category` | str | `interactive` / `automation` / `utility`，只决定展示分组 |
+| `event_subscriptions` | list | 标准链路订阅声明，描述插件想从 Event Bus 接收哪些事件 |
+| `capabilities` | dict | 高风险能力声明，例如 `telegram_native_raw` |
+| `agent_tools` | list | Agent 工具名、说明、object JSON Schema、`read_only` 与 `strict`；必须配合 `ai_agent` 权限和 `capabilities.agent_tools` |
+| `strict_trace` | bool | 是否要求路由投递层常驻全链路 trace；默认 `false`，资金类 / `payout` 插件建议开启 |
 
 ### 完整示例
 
@@ -173,7 +300,22 @@ MANIFEST = Manifest(
     version="1.0.0",
     author="your_name",
     description="插件功能描述",
+    category="interactive",
     permissions=["send_message", "edit_message", "read_chat"],
+    event_subscriptions=[
+        {
+            "events": ["message", "command", "callback_query"],
+            "source": ["userbot", "interaction_bot"],
+            "scope": "all_allowed_chats",
+        }
+    ],
+    capabilities={
+        "telegram_native_raw": {
+            "enabled": False,
+            "reason": "默认只读取标准事件信封。",
+        }
+    },
+    strict_trace=False,
     config_schema={
         "type": "object",
         "properties": {
@@ -206,7 +348,7 @@ MANIFEST = Manifest(
 **优先级：** 账号级配置 > 插件全局配置 > config_schema 中的 default
 
 **前端渲染：** `config_schema["x-ui-mode"]` 决定插件配置入口：
-- `rules` → 规则驱动独立配置页，适合多条规则 CRUD 和 dry-run
+- `rules` → 规则配置独立页，适合多条规则 CRUD 和 dry-run；不表示旧运行时规则驱动主路径
 - `single` → 单配置对象独立配置页；没有专属页面的轻量插件也应按通用独立配置页处理
 - `platform` → 平台基础能力页，不混在普通插件列表里
 - `schema` → 兼容旧插件的别名；不再代表“Schema 弹窗”类，按通用单配置独立页读取字段
@@ -214,19 +356,114 @@ MANIFEST = Manifest(
 - `level: account` 的字段 → 账号配置区（按账号隔离）
 - 无 level 的字段 → 默认按账号隔离
 
-**必填字段验证清单（内置插件）：**
+#### 通用配置控件
+
+通用独立配置页支持声明式控件，插件不要为了某个字段新增 TelePilot 前端特例。常用扩展字段：
+
+| 声明 | 适用字段 | 效果 |
+|------|----------|------|
+| `x-ui-widget: "textarea"` | `string` | 多行文本 |
+| `x-ui-widget: "llm-provider-select"` | `string` | 选择当前 TelePilot AI Provider |
+| `x-ui-widget: "llm-model-select"` | `string` | 选择 Provider 下的模型；用 `x-ui-provider-field` 指向 Provider 字段 |
+| `x-ui-widget: "dynamic-select"` | `string` | 从同一配置对象的动态选项数组中单选；用 `x-ui-options-field` 指向 `[{value,label}]` 字段 |
+| `x-ui-widget: "multi-select"` | `array` + `items.enum` | 多选列表 |
+| `x-ui-widget: "list-select"` | `string` + `enum` | 列表式单选 |
+| `x-ui-widget: "config-list"` | `array` + `items.type="object"` | 多组配置行，支持添加、编辑、复制、删除、启停、排序 |
+| `x-ui-widget: "allowed-peer-multi-select"` | `array` + `items.type="integer"` | 从当前账号“允许会话”中选择群聊/频道，保存为 Chat ID 数组；适合插件群聊白名单 |
+| `x-ui-placeholder` | `string` / `textarea` | 输入框浅色占位内容；与实际 `default` 分离，适合展示内置提示词但让留空继续使用内置值 |
+| `x-ui-hidden: true` | 任意字段 | 不在 UI 渲染，但仍保留在表单值和保存链路中 |
+
+`config-list` 适合“多组配置，每组一行”的常见体验。支持这些元数据：
+
+| 字段 | 说明 |
+|------|------|
+| `x-ui-summary` | 行摘要模板，支持 `{field}` 和 `{items.length}` 这类简单路径 |
+| `x-ui-title-field` | 行标题字段，例如 `remark` / `title` / `name` |
+| `x-ui-description-field` | 行描述字段，例如 `url` / `description` |
+| `x-ui-enabled-field` | 启停开关字段，通常为 `enabled` |
+| `x-ui-reorderable` | 是否允许拖拽和上下移动，默认允许 |
+| `x-ui-add-label` | 添加按钮文案 |
+
+示例：
+
+```python
+"knowledge_bases": {
+    "type": "array",
+    "title": "题库",
+    "x-ui-widget": "config-list",
+    "x-ui-summary": "{questions.length} 题 · {summary}",
+    "x-ui-title-field": "title",
+    "x-ui-description-field": "url",
+    "x-ui-enabled-field": "enabled",
+    "items": {
+        "type": "object",
+        "properties": {
+            "enabled": {"type": "boolean", "title": "启用", "default": True},
+            "title": {"type": "string", "title": "标题"},
+            "url": {"type": "string", "title": "URL"},
+            "summary": {"type": "string", "title": "摘要", "x-ui-widget": "textarea"},
+            "questions": {"type": "array", "title": "题目 JSON", "items": {"type": "object"}},
+        },
+    },
+}
+```
+
+#### 配置页动作
+
+插件可以在 `Manifest.config_actions` 或 `config_schema["x-config-actions"]` 声明配置页按钮。前端按 `placement` 放置按钮，当前推荐 `field:<字段名>`，例如 `field:knowledge_bases`。
+
+```python
+config_actions=[
+    {
+        "key": "generate_knowledge_base",
+        "title": "获取并整理为题库",
+        "placement": "field:knowledge_bases",
+        "submit_label": "生成题库",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "title": "来源 URL"},
+                "title": {"type": "string", "title": "标题提示（可选）"},
+            },
+            "required": ["url"],
+        },
+    }
+]
+```
+
+后端会调用插件的 `on_config_action(ctx, action_key, payload)`。`ctx` 不带 Telegram client，但会按 manifest 权限注入受控 `ctx.http` 与 `ctx.ai`；`payload["input"]` 是按钮弹窗输入，`payload["config"]` 是当前表单配置。插件返回：
+
+```python
+return {
+    "message": "已生成题库，请保存配置后生效。",
+    "config_patch": {"knowledge_bases": next_items},
+    "result": {},
+}
+```
+
+后台配置动作完成后，`config_patch` 会自动写入配置并通知 worker 热加载；前端当前草稿若已有未保存修改会继续保留并提示远端配置已变化。通用 API 路径是：
+
+```text
+POST /api/accounts/{aid}/features/{key}/config/actions/{action_key}/jobs
+GET  /api/plugin-config-action-jobs/{job_id}
+POST /api/plugin-config-action-jobs/{job_id}/control  {"action":"pause"|"cancel"}
+```
+
+长时间动作支持真实中断和终止。`pause` 将任务标记为“已中断”，适合插件已经分批持久化阶段性结果后调整配置再重新执行；`cancel` 将任务标记为“已终止”。平台会取消当前进程中的在途异步调用，但“继续”的业务进度仍需插件自行持久化，不能只保存在插件实例内存中。
+
+**字段验证清单（平台能力与插件库插件）：**
 
 | 插件 | config_schema | UI 模式 | 状态 |
 |------|--------------|---------|------|
-| forward | ✅ target_chat_id, mode | `rules` | 已有 |
-| auto_reply | 规则通过 Rules API 管理 | `rules` fallback | 已有 |
-| autorepeat | ✅ trigger / repeat / chat 配置 | `rules` | 已有 |
-| game24 | ✅ command, timeout | `single` | 已补 |
-| math10 | ✅ interaction_entries.start_math_game / prize | `single` | 交互 Bot 可启动 |
-| codex_image | ✅ command, access_token, model, message_template, image_size/aspect_ratio/image_format, timeout/status/output/instructions | `single` | 内置图片插件 |
-| scheduler | ✅ default_notify, max_tasks | `platform` | 已迁移为平台基础能力 |
+| forward | ✅ target_chat_id, mode | `rules` | 核心兼容插件 |
+| auto_reply | 规则通过 Rules API 管理 | `rules` | 插件库推荐插件，按需安装 |
+| autorepeat | ✅ trigger / repeat / chat 配置 | `rules` | 插件库推荐插件，按需安装 |
+| game24 | ✅ command, timeout | `single` | 插件库插件，按需安装 |
+| math10 | ✅ Event Bus / prize；历史 `interaction_entries.start_math_game` 兼容 | `single` | 插件库插件，交互 Bot 可启动 |
+| codex_image | ✅ command, access_token, model, message_template, image_size/aspect_ratio/image_format, timeout/status/output/instructions | `single` | 插件库图片插件，按需安装 |
+| scheduler | ✅ default_notify, max_tasks | `platform` | 平台基础能力 |
 
-`examples/plugins/translate` 是历史示例目录，不属于当前内置插件清单；其中直接复用后端私有 LLM 链路的写法也不是第三方插件推荐模板。新增第三方插件应优先参考本文的远程插件骨架；需要 HTTP 时参考 `examples/plugins/with_http`，需要 AI 文本能力时参考 `examples/plugins/with_ai`，需要原命令与交互 Bot 双兼容时参考 `examples/plugins/with_interaction`。
+`examples/plugins/translate` 是历史示例目录，不属于当前内置插件清单；其中直接复用后端私有 LLM 链路的写法也不是第三方插件推荐模板。新增第三方 Telegram 事件插件优先参考 `examples/plugins/event_bus_demo`；需要 HTTP 时参考 `examples/plugins/with_http`，需要 AI 文本能力时参考 `examples/plugins/with_ai`，需要把旧交互入口迁移到标准信封时参考 `examples/plugins/with_interaction`。
 
 ### Manifest 验证
 
@@ -238,25 +475,409 @@ name_pattern = r"^[A-Za-z0-9_][A-Za-z0-9_-]*$"
 version_pattern = r"^\d+\.\d+\.\d+"
 ```
 
+ZIP 上传还会在解压和加载 Python 前执行供应链门禁：
+
+- 配置 `PLUGIN_PUBKEY` 后，签名缺失或验签失败都会拒绝安装。
+- 未配置公钥时，新 ZIP 默认仍拒绝；只有管理员显式设置 `PLUGIN_ALLOW_NEW_UNSIGNED_PLUGINS=true` 才允许以 `trust_tier=community` 安装。
+- `PLUGIN_ALLOW_LEGACY_UNSIGNED_PLUGINS` 只控制历史 `signature_ok=NULL` 插件能否继续加载，不影响新 ZIP 安装。
+
+这两个未签名开关不能互相替代。兼容历史插件时可以保留 legacy 开关，但新安装入口仍应保持关闭；临时允许未签名安装后，应在完成安装后恢复为 `false`。
+
+### 标准链路内部契约：Event Bus + Trace + MessageOps
+
+userbot 命令会话和 interaction bot 规则会话的内部链路是：
+
+```text
+Telegram 来源
+  -> Source Adapter
+  -> TelePilotEvent 标准事件信封
+  -> Trace / Event Bus matcher
+  -> 插件标准入口
+  -> MessageOps/action
+  -> Delivery Executor
+```
+
+开发新插件时先写 `plugin.json`：
+
+```json
+{
+  "name": "event_bus_demo",
+  "display_name": "Event Bus 示例",
+  "version": "0.1.0",
+  "category": "interactive",
+  "permissions": ["send_message", "read_chat"],
+  "usage": "启用后按 Event Bus 订阅处理 message/command/callback/inline/payment。",
+  "event_subscriptions": [
+    {"events": ["message", "command"], "source": ["userbot", "interaction_bot"], "scope": "all_allowed_chats"},
+    {"events": ["callback_query"], "source": ["interaction_bot"], "scope": "rule_bound"},
+    {"events": ["inline_query", "chosen_inline_result"], "source": ["interaction_bot"], "scope": "inline_all"},
+    {"events": ["payment_confirmed"], "source": ["external_payment_notice", "userbot"], "scope": "rule_bound"}
+  ],
+  "capabilities": {
+    "telegram_native_raw": {
+      "enabled": false,
+      "reason": "默认只读取标准事件信封。"
+    }
+  }
+}
+```
+
+`usage` 必须让开发者和安装者不用理解旧规则也能知道插件怎么启用。`event_subscriptions` 描述 Event Bus 投递范围；`capabilities` 描述高风险能力，没有高风险能力也建议显式写 `{}`。这组契约服务于标准会话链路，不是裸直通，也不是独立于三模式之外的第四种模式。
+
+`strict_trace` 是布尔字段，默认 `false`。开启后，插件声明的路由投递层会更积极保留全链路 trace，便于复盘订阅匹配、插件执行、动作投递和失败原因；动作层 `record_action` 不受这个开关影响。涉及资金、发奖、`payout`、补偿重放或对账的插件建议设为 `true`，普通查询/娱乐插件可保持默认。
+
+当前标准事件：
+
+| event.type | 说明 |
+| --- | --- |
+| `message` | 普通消息，读取 `payload["message"]["text"]` |
+| `command` | 管理员/授权用户命令，仍受 UserBot command 权限约束 |
+| `callback_query` | Inline keyboard 按钮回调，用 `answer_callback` ACK |
+| `inline_query` | Inline 查询，用 `answer_inline_query` 返回结果 |
+| `chosen_inline_result` | 用户选择了 Inline 结果，用于记录选择或后续结算 |
+| `payment_confirmed` | 可信外部通知或平台解析确认到账后生成 |
+| `message_edited` | 平台已登记的编辑后消息事件，需显式订阅 |
+| `session_expired` | 会话 TTL 到期后由平台投递，供插件清理状态 |
+| `webhook` | 外部 HTTP 入站 webhook，经账号 token 鉴权后投递 |
+| `all_messages` | 兼容聚合订阅，当前仍只覆盖 `message` / `command` |
+| `all_events` | 平台聚合订阅，覆盖当前已登记的常见事件类型 |
+| `session_close` | 会话关闭或规则关闭，插件可清理状态 |
+
+`all_messages` 目前仍只等于 `message` / `command`；需要覆盖更多已登记事件时，使用 `all_events`。Inline 相关事件、付款确认、`message_edited` 与 `session_expired` 仍可按需显式订阅。
+
+`known_users` 只认平台 state 提供的真实集合，不会自动把当前 sender 算进去。
+
+### 入站 webhook 事件
+
+第一次接入请先看 [入站 Webhook Quickstart](./PLUGIN-WEBHOOK-QUICKSTART.md)，可运行示例位于 `examples/plugins/webhook_receiver`。
+
+插件可以通过 Event Bus 订阅外部 HTTP webhook。Manifest / `plugin.json` 写法如下：
+
+```json
+{
+  "event_subscriptions": [
+    {
+      "source": ["webhook"],
+      "events": ["webhook"],
+      "scope": "all_allowed_chats",
+      "filters": {"hook_key": "default"}
+    }
+  ]
+}
+```
+
+`filters.hook_key` 可写单个字符串，`filters.hook_keys` 可写多个 key。也可以使用 trigger 简写：
+
+```json
+{
+  "event_subscriptions": [
+    {
+      "source": ["webhook"],
+      "events": ["webhook"],
+      "scope": "all_allowed_chats",
+      "triggers": {"webhook": "default"}
+    }
+  ]
+}
+```
+
+`triggers.webhook` 会被归一化为 `filters.hook_key`；对象形式也支持 `{"hook_key": "orders"}`、`{"hook_keys": ["orders", "billing"]}`、`{"key": "orders"}` 或 `{"keys": [...]}`。Webhook 事件的 `scope="all_allowed_chats"` 会直接通过 scope 检查，因为外部 HTTP 请求没有 Telegram `chat_id`。
+
+插件收到的标准 payload 包含：
+
+```json
+{
+  "event_type": "webhook",
+  "source": {
+    "type": "webhook",
+    "channel": "webhook",
+    "driver": "http_webhook",
+    "hook_key": "default"
+  },
+  "trigger": {"hook_key": "default"},
+  "message": {"text": "{\"order_id\":\"A-1\"}"},
+  "webhook": {
+    "hook_key": "default",
+    "body": {"order_id": "A-1"},
+    "headers": {"content-type": "application/json"},
+    "body_size": 19,
+    "content_type": "application/json",
+    "received_at": "2026-07-10T00:00:00+00:00"
+  },
+  "hook_key": "default",
+  "body": {"order_id": "A-1"},
+  "headers": {"content-type": "application/json"}
+}
+```
+
+`body` 会按 `Content-Type` 尝试解析 JSON；JSON 解析失败或非 JSON 请求会保留为文本。`message.text` 是 body 的文本摘要，最长 2000 字符。headers 只保留白名单字段，并统一小写，单个值最多 512 字符；当前白名单为 `content-type`、`user-agent`、`x-request-id`、`x-correlation-id`、`x-github-event`、`x-gitlab-event`、`x-hub-signature`、`x-hub-signature-256`、`x-signature`、`x-telegram-bot-api-secret-token`。账号 token 头不会进入插件 payload。
+
+外部触发方式：
+
+```bash
+curl -X POST "https://<telepilot-host>/api/webhooks/{account_id}/{hook_key}" \
+  -H "X-TelePilot-Webhook-Token: <account_webhook_token>" \
+  -H "Content-Type: application/json" \
+  --data '{"order_id":"A-1","status":"paid"}'
+```
+
+默认只接受 `X-TelePilot-Webhook-Token` 请求头。旧调用方只有在服务端显式设置 `WEBHOOK_ALLOW_QUERY_TOKEN=true` 时才能继续使用 `?token=<account_webhook_token>`；查询参数可能进入 URL、反代和访问日志，生产环境不建议开启。`hook_key` 必须是 1-64 位的字母、数字、下划线、点或短横线组合，且必须存在于账号 webhook 配置并处于启用状态；当前页面保证提供 `default`，插件声明不会自动创建其他 Hook key。请求体上限为 64 KiB；投递接口返回 `202` 只表示 worker 已确认接收，插件是否命中和执行结果请在日志/trace 中查看。Webhook 投递受 `webhook_deliver` 风控动作限流，Worker 暂停或全局总闸开启时拒绝投递。
+
+标准事件信封优先读这些字段：`source`、`message`、`chat`、`sender`、`actor`、`source_actor`、`player`、`payment`、`reply_to`、`trigger`、`session`、`native_raw_meta`。新插件不要依赖 `payload["text"]`、`payload["chat_id"]`、`payload.get("message")` 这类旧平铺字段；`payload["message"]` 是消息对象，不是配置字符串。
+
+重点补充字段：
+
+- `payload["tp_event"]`：进程内调用时已挂好的 `TelePilotEvent` 投影对象；跨 IPC 路径平台会重建同形对象。
+- `message.entities` / `message.media` / `message.date`：统一消息摘要，编辑消息和媒体消息也走同一套字段。
+- `chat.title` / `chat.username`：群标题、username 等可直接读取，不必回头翻 `native_raw`。
+- `session.channel` / `session.expires_at` / `session.data`：当前会话通道、超时点和持久化状态。
+- `source.synthetic`：平台合成事件来源，例如 userbot 文本按钮降级后的 `text_button`。
+
+`tp_event` 对象字段主看：
+
+| 字段 | 说明 |
+| --- | --- |
+| `tp_event.type` | 事件类型，等价于 `payload["source"]["type"]` |
+| `tp_event.source_channel` | 当前事件来源通道 |
+| `tp_event.message` | `MessageRef`，含 `text/caption/date/entities/media/forward/sender_chat/edited` |
+| `tp_event.callback` | `CallbackRef`，按钮事件时可读 `id/data` |
+| `tp_event.payment` | `PaymentRef`，付款确认场景可读金额、币种、payer/receiver |
+| `tp_event.session` | `SessionRef`，可读 `key/scope/channel/data` |
+| `tp_event.trigger` | 命中的规则、入口和触发参数 |
+
+`capabilities.telegram_native_raw` 只用于排障。声明 `enabled=true` 时必须写 `reason` 和 `sources`，插件仍要先检查：
+
+```python
+native_raw_meta = payload.get("native_raw_meta") or {}
+if not native_raw_meta.get("enabled"):
+    # 降级到标准事件信封。
+    pass
+```
+
+不要读取旧 `raw_event`。它只能作为迁移风险或回归测试名出现。
+
+MessageOps/action 示例：
+
+```python
+event = event_from_interaction_payload(payload)
+return [
+    {
+        "type": "send_message",
+        "chat_id": event.message.chat_id,
+        "reply_to_message_id": event.message.message_id,
+        "text": f"收到：{event.message.text}",
+    }
+]
+```
+
+默认 `send_message` 类动作按 `parse_mode="plain"` 发送；只有显式写 `parse_mode="html"` 时才启用 HTML。HTML 内容应先用 `app.worker.plugins.textutil.html_escape()` 或等价工具转义，再把标签手动拼好。
+
+#### 原生 Rich Message
+
+需要标题、任务列表、折叠详情、表格等 Telegram 原生结构时，使用 Bot API Rich Message，而不是把普通 `send_message` 的 HTML 当成同一种格式：
+
+```python
+await ctx.messages.send_rich(
+    chat_id=event.message.chat_id,
+    html=(
+        "<h1>巡检结果</h1>"
+        "<ul>"
+        '<li><input type="checkbox" checked>数据库正常</li>'
+        '<li><input type="checkbox">等待人工复核</li>'
+        "</ul>"
+        "<details><summary>失败详情</summary><p>上游返回 429</p></details>"
+        "<table bordered striped>"
+        "<tr><th>模型</th><th>状态</th></tr>"
+        "<tr><td>grok-4</td><td>正常</td></tr>"
+        "</table>"
+    ),
+    reply_to_message_id=event.message.message_id,
+    save_message_id_key="latest_health_report",
+)
+```
+
+`ctx.messages.send_rich()` 必须且只能提供 `html`、`markdown`、`blocks` 其中一个；也可附带 `media`、`is_rtl`、`skip_entity_detection`、`reply_markup`、`save_message_id_key` 和 `pin`。动态文本嵌入 `html` 前仍要转义。对应标准 action 为：
+
+```python
+return [{
+    "type": "send_rich_message",
+    "chat_id": event.message.chat_id,
+    "rich_message": {
+        "markdown": "# 巡检结果\n\n- [x] 数据库正常\n- [ ] 等待人工复核",
+    },
+}]
+```
+
+Rich Message 是 Telegram Bot API 10.2 的 Bot 专属能力。TelePilot 始终通过 `interaction_bot` 执行：即使当前是 UserBot 命令会话，省略通道也会切到 Interaction Bot；显式指定 `userbot_reply` 会以 `rich_message_requires_interaction_bot` 拒绝，不做静默降级。Telegram 的原生限制为 32768 个 UTF-8 字符、500 个结构块、16 层嵌套、50 个媒体附件、表格最多 20 列；TelePilot 会先做结构和 JSON 安全检查，最终格式解析仍以 [Telegram Rich Message 文档](https://core.telegram.org/bots/api#rich-message-formatting-options) 为准。
+
+插件 action 的失败语义保持严格，不会自动改成普通消息。只有 TelePilot 自己拥有的账号 Bot 移动控制页和系统告警采用“同一个 Bot 先发 Rich Message，Bot API 拒绝时回退原有 HTML”的兼容策略；这个内部回退不会切换到 UserBot，也不会改变插件 action 的契约。
+
+会话内状态更新示例：
+
+```python
+return [{
+    "type": "update_session",
+    "data": {
+        "answer": "42",
+        "attempts": 3,
+    },
+}]
+```
+
+`update_session` 会回写当前 `session.data`，并按平台规则续租 Redis TTL；除非额外声明 `extend_seconds`，它不会偷偷改掉原来的 `expires_at`。
+
+免费答题、抽奖、按钮加入、互动游戏这类“不想让玩家为了发奖额外刷消息”的玩法，推荐让玩家点击 inline 按钮加入或确认参与。按钮回调里的点击者在 `payload["sender"]["user_id"]`；插件仍可按自身玩法保存完整业务状态，仅从后续发奖锚点角度，至少保留这个 `tgid` 即可。发奖时交给平台用 `reply_to_user_id` 在当前群查找该玩家最近一次发言作为回复锚点，不需要插件自己遍历群消息。
+
+如果还在用显式 `userbot_reply` 发奖消息，可以这样写：
+
+```python
+event = event_from_interaction_payload(payload)
+winner_user_id = event.sender.user_id
+
+return [
+    {
+        "type": "send_message",
+        "send_via": "userbot_reply",
+        "chat_id": event.message.chat_id,
+        "reply_to_user_id": winner_user_id,
+        "reply_to_search_limit": 200,
+        "reply_anchor_missing_text": "未找到对应用户（{user_id}）的近期消息，本次发奖需要人工补发。",
+        "text": "+88",
+        "settlement": {
+            "mode": "auto",
+            "amount": 88,
+            "winner_user_id": winner_user_id,
+            "winner_name": event.sender.display_name,
+            "status": "announced",
+        },
+    }
+]
+```
+
+平台会用账号的 userbot 在当前群搜索该用户最近一条消息，找到后把 `+88` 回复到那条消息。若插件已经有明确的 `reply_to_message_id`，平台优先使用它；若只给了 `settlement.winner_user_id` 而没写 `reply_to_user_id`，平台也会尝试用赢家 user_id 作为回复锚点。找不到近期消息时，本次 `userbot_reply` 会失败并记录 action 错误，避免把发奖消息误发成普通群消息；平台默认会在群里提示 `未找到对应用户（用户 ID）的近期消息。`，插件可通过 `reply_anchor_missing_text` 自定义失败提示，提示文案支持 `{user_id}` 占位符，并沿用当前 action 的 `parse_mode`。例如在 HTML 模式中使用 `<code>/command</code>`，Telegram 会将命令显示为可点击复制的代码文本。
+
+更推荐的新写法是直接返回 `payout`：
+
+```python
+return [{
+    "type": "payout",
+    "chat_id": event.message.chat_id,
+    "amount": 88,
+    "reply_to_user_id": winner_user_id,
+    "reply_to_search_limit": 200,
+    "reply_anchor_missing_text": "未找到对应用户（{user_id}）的近期消息，本次发奖需要人工补发。",
+}]
+```
+
+`payout` 永远经 userbot 执行，并进入限速与 trace。它适合“发奖文案本身就是协议”的玩法，普通 Bot 不会代替它执行转账样动作。找不到 `reply_to_user_id` 对应的近期发言时，`payout` 同样会失败、写入日志，并发送默认或自定义的 `reply_anchor_missing_text` 提示。
+
+`payout` 的额度校验与失败补偿由平台负责，插件不用自己实现，但要理解它对 trace 的影响：
+
+- **超限直接拒**：账号可在「系统设置 → 风控与预算」配置 `payout` 的单笔上限与日累计上限（默认 `0` = 不限，按业务币种 / 积分的整数口径填写）。本笔金额超单笔上限、或“今日已累计 + 本笔”超日累计上限时，`payout` 被拒绝执行，action 记 `FAILED`、`error_code=payout_limit_exceeded`。超限属配置拒绝，**不进补偿队列、也不自动重试**；需要人工调额度，日累计上限跨 UTC 零点自动重置。
+- **瞬时失败自动补偿**：userbot 离线（`userbot_offline`）、Telegram API 报错（`telegram_api_error`）、命中限速（`rate_limited`）这类可恢复失败，平台会把这一笔 `payout` 写进补偿队列并按退避自动重放。插件侧看到的仍是本次的 `FAILED` action（detail 带 `compensation_queued=true` 和 `payout_key`）；补发成功后会**以一条新的 `OK` action 出现**（同 `payout_key`、带 `replay` 标记）。**插件不要自己重试 `payout`**——补发交给平台，重复返回只会靠幂等去重。
+- **补发幂等**：平台以数据库中的 `payout_key` intent / claim / sent 状态作为持久化幂等边界，发送完成状态与 ActionEvent 在同一事务提交。只有 Telegram 明确拒绝发送时才释放 claim；超时、断连或未知异常会进入 ambiguous，不会假定“异常等于未发送”。
+- **暧昧送达核对**：只有 payload 带稳定 `payout_probe_fingerprint` 时，worker 才会回查账号最近自己发言并自动确认送达。旧记录或缺少 fingerprint 的记录需要人工核对，平台不会只凭相同文本和回复锚点认定已发送。插件若要把多次调用视为同一笔，应提供稳定 `payout_key`，不要自行重试。
+- **彻底放弃会告警**：重放次数耗尽或遇到不可补偿错误时，补偿单置为 `abandoned` 并写一条 error 级运维日志，供“收款成功但发奖失败”场景人工介入。运维侧配置与巡检见 [SECURITY-OPS](./SECURITY-OPS.md) §7。
+
+按钮回调：
+
+```python
+return [{
+    "type": "answer_callback",
+    "callback_query_id": payload["source"]["callback_query_id"],
+    "text": "按钮已收到",
+    "show_alert": False,
+}]
+```
+
+Inline：
+
+```python
+return [{
+    "type": "answer_inline_query",
+    "inline_query_id": payload["inline_query"]["id"],
+    "results": [{
+        "type": "article",
+        "id": "demo",
+        "title": "示例结果",
+        "input_message_content": {"message_text": "Inline 示例"},
+    }],
+    "cache_time": 0,
+    "is_personal": True,
+}]
+```
+
+付款确认：
+
+```python
+return [{
+    "type": "settlement",
+    "mode": "confirm_only",
+    "payer_user_id": payload["payment"]["payer"]["user_id"],
+    "amount": payload["payment"]["amount"],
+    "currency": payload["payment"]["currency"],
+    "status": "confirmed",
+}]
+```
+
+`notice` / `bbot_notice` / `notice_bot` 不再是可执行发送通道，只能出现在迁移说明或故意回归测试里。普通 Bot 不执行转账、催付或发奖；钱相关动作应交给 `settlement`、`userbot_reply` 或平台受控结算链路。
+
+userbot 会话里的 `reply_markup` 不会直接丢掉：
+
+- 平台会把按钮渲染成文本编号列表。
+- 玩家回复序号或按钮文案后，平台会合成 `callback_query` 回投插件。
+- 这类事件的 `callback_query_id` 可能为空，同时 `source.synthetic="text_button"`。
+- 对合成 callback 返回 `answer_callback` 时，平台会按“已合成事件”跳过真正的 Bot API ACK。
+
+入口控制字段：
+
+| 字段 | 位置 | 作用 |
+| --- | --- | --- |
+| `interaction_trigger_modes` | 平台注入的配置字段 | `all` / `keyword_only`，控制声明了 command trigger 的入口是否仍注册命令 |
+| `default_trigger_modes` | manifest entry | 为 `interaction_trigger_modes` 提供默认值，强按钮玩法建议设为 `keyword_only` |
+| `callback_fast_ack` | manifest entry | callback 分类后立即空 ACK，插件晚到的 `answer_callback` 会记为 `already_acked` |
+
+`callback_fast_ack` 只适合“先消除按钮转圈，再慢慢算结果”的入口；启用后不要再依赖 `show_alert=True` 的晚返回提示。
+
+常见 `reason_code` 排障表：
+
+| reason_code | 说明 |
+| --- | --- |
+| `matched` | Event Bus 订阅命中，准备投递 |
+| `subscription_not_matched` / `event_type_not_subscribed` / `source_not_subscribed` | 没有订阅命中、事件类型未订阅或来源未订阅 |
+| `scope_not_matched` / `filter_not_matched` | 允许会话、owner_only、inline_all 等范围不匹配，或关键词、金额、callback data 等过滤不匹配 |
+| `plugin_disabled` / `plugin_load_failed` / `plugin_runtime_error` | 插件未启用、加载失败或运行异常 |
+| `entry_key_missing` | 订阅缺少可投递的插件入口 |
+| `command_matched` / `command_not_matched` / `command_unauthorized` | 管理员命令命中、普通文本未命中命令、权限不足 |
+| `event_bus_delivery_disabled` / `inline_disabled` | 运维回滚开关关闭 Event Bus 新投递路径或 Inline updates |
+| `native_raw_not_allowed` / `native_raw_skipped` | 插件未声明 `telegram_native_raw` 或本次因来源、大小、设置未下发 |
+| `contract_warning` / `contract_failed` | 插件越声明调用被告警放行，或请求客观不可执行能力 |
+| `action_limit_exceeded` | 插件返回的动作超出平台允许数量，后续动作被截断并写入可见告警 |
+| `send_channel_deprecated` / `unsupported_send_via` | 请求旧 `notice` 通道或未知通道 |
+| `rich_message_requires_interaction_bot` / `invalid_rich_message` | 原生 Rich Message 被要求走 UserBot，或内容结构未通过校验 |
+| `bot_not_configured` / `bot_token_missing` / `userbot_offline` | 交互 Bot 未配置、Bot token 缺失或 UserBot 离线 |
+| `settlement_requires_userbot` / `telegram_api_error` | 普通 Bot 请求钱相关能力，或 Telegram API 返回失败 |
+| `trace_write_failed` | Trace 写库失败，平台已降级写入旧 runtime log |
+
 运行阶段 loader 会 import `__init__.py`，并检查：
 
 - `PLUGIN_CLASS` 是 `Plugin` 子类
 - `MANIFEST` 是 `Manifest` 实例
 - `MANIFEST.key` 与插件 key / 目录名保持一致
 
-### 交互 Bot 兼容声明（interaction entries）
+### 旧交互 Bot 兼容声明（interaction entries，仅迁移）
 
-交互 Bot 用来承接群内高频互动，不能直接复用 UserBot 插件命令作为启动入口；否则高频游戏又会回到 UserBot 账号身上，违背风控隔离目标。后续插件要支持“转账命中后启动”，应通过 Manifest 声明一个或多个交互入口，并实现 `on_interaction` 返回平台标准动作。
+本节只用于迁移历史 `interaction_entries` / `on_interaction` 插件。新插件不要把旧交互规则、旧平铺 payload 或旧入口声明当主路径；请优先使用上一节的 `usage`、`event_subscriptions`、`capabilities` 和标准 action。
 
-推荐在 `manifest.py` 顶层声明 `category` 和 `interaction_entries`；旧写法也兼容 `config_schema["x-category"]` 与 `config_schema["x-interaction-entries"]`。这是声明式协议，不要求插件自己解析转账通知、Bot Token 或群消息格式。
+迁移旧插件时，可以暂时保留 `manifest.py` 顶层的 `interaction_entries`，但必须同时补齐 `event_subscriptions`。旧 `config_schema["x-category"]` 与 `config_schema["x-interaction-entries"]` 仅作为兼容入口，新插件不要再新增。
 
-### 三角联动里的 UserBot 角色
+### 双通道与外部转账证据
 
-这里的三角联动，指的是 `Bbot` 负责群内公告和规则触发，交互 Bot 负责承接高频互动，`UserBot` 负责最后一段账号动作。`UserBot` 不是拿来跑高频游戏的，也不是拿来直接接收所有群消息的，它只需要稳定监听 `Bbot` 的公告和命中结果，在需要发奖或补发时按公告去回复即可。
+当前标准模式只有两个主动发送通道：交互 Bot 负责承接高频互动、按钮和会话提示，`UserBot` 负责管理员命令、账号身份动作、收款确认和发奖。群里已有的转账结果通知 Bot 只属于外部付款证据来源；TelePilot 监听它的到账消息并生成 `payment_confirmed`，但不会把它作为插件主动发送通道。
 
 `outgoing` 的频率控制，指的是当前 `UserBot` 账号自己发出的消息要保持低频、可解释、可回溯，避免把大量游戏交互都压回账号本身。`incoming` 订阅则只表示这个账号愿意看见哪些外部消息，用来做公告监听、状态同步和必要的自动回复，不表示这些消息都能直接触发指令，更不表示可以绕过风控做批量互动。
 
-原则上，`Bbot` 不碰钱，只负责公告、命中、对账提示和规则事件；真正的奖金发放仍由 `UserBot` 根据 `Bbot` 公告去回复完成。插件如果要做发奖、结算或红包类动作，也应把钱相关动作留在 `UserBot` 侧，不要把转账、发奖、催付这些动作混进交互 Bot 的高频入口里。
+原则上，交互 Bot 不碰钱，只负责题面、答复、结果提示、按钮和规则事件；真正的奖金发放仍由 `UserBot` 或平台受控结算链路完成。插件如果要做发奖、结算或红包类动作，也应把钱相关动作留在 `UserBot` 侧，不要把转账、发奖、催付这些动作混进交互 Bot 的高频入口里。
 
 插件分类只保留三类，前端会按中文分组展示：
 
@@ -266,11 +887,11 @@ version_pattern = r"^\d+\.\d+\.\d+"
 | `automation` | 自动化 | 自动回复、转发、定时任务等账号自动化能力 |
 | `utility` | 工具能力 | AI、媒体生成、查询、辅助工具等能力 |
 
-`category` 只决定展示分组；是否能被交互 Bot 启动，只看是否声明了 `interaction_entries`。
+`category` 只决定展示分组；标准会话事件投递看 `event_subscriptions`。`interaction_entries` 只用于旧交互中心规则迁移和入口参数兼容。
 
 注意：`interaction_entries` 只负责“让前端知道这个插件有哪些交互入口可选”。真正运行时，worker 会调用插件实例的 `on_interaction(ctx, entry_key, payload)`。如果插件只声明入口但没有实现这个 hook，交互 Bot 会提示“插件尚未实现交互入口”。
 
-交互 Bot 运行时采用事件路由模型：Bbot 负责接收群消息、转账通知和规则指令；平台只把命中规则且存在活跃会话的事件投递给对应插件，不会把所有群消息广播给所有插件。插件应在同一个 `on_interaction` 中按 `payload["event"]["type"]` 区分事件。
+交互 Bot 运行时采用事件路由模型：普通 Bot 负责接收群消息、按钮回调和规则指令；UserBot/回复上下文与外部转账通知来源负责补充付款证据；平台只把命中规则且存在活跃会话的事件投递给对应插件，不会把所有群消息广播给所有插件。插件应在同一个 `on_interaction` 中按标准事件信封的 `payload["source"]["type"]` 区分事件，或直接使用 `event_from_interaction_payload(payload)` 转成稳定事件对象。
 
 交互入口是新增触发面，不是命令系统的替代品。插件原有 `commands`、`on_command`、`message_channels` 和 `on_message` 语义必须保持不变；任何新入口都不得让普通 incoming 消息绕过 UserBot outgoing 指令边界。需要复用能力时，把业务逻辑抽成共享函数，由 UserBot 命令和交互入口分别调用。
 
@@ -299,7 +920,7 @@ version_pattern = r"^\d+\.\d+\.\d+"
 
 不要把自动回复做成“业务实现”。自动回复可以作为轻量触发器，但 PT 促销、抽奖、游戏、查询这类能力必须沉到插件本体里，再由交互 Bot 或 UserBot 命令调用。
 
-当前标准事件类型：
+当前标准事件类型写在 `payload["source"]["type"]`：
 
 | event.type | 触发时机 | 说明 |
 | --- | --- | --- |
@@ -309,15 +930,18 @@ version_pattern = r"^\d+\.\d+\.\d+"
 | `callback_query` | 规则已有活跃会话后的 inline keyboard 按钮点击 | 常用于按钮选择、翻页、确认操作 |
 | `session_close` | 规则被关闭或会话被强制结束 | 插件可清理状态，第一版可按需实现 |
 
-#### interaction_entries 字段
+#### interaction_entries 迁移字段
 
-每个交互入口都必须把启动方式、事件、会话和输出边界写清楚。推荐字段如下：
+旧交互入口迁移时必须把启动方式、事件、会话和输出边界写清楚。推荐同时映射到 `event_subscriptions` 和标准 action：
 
 | 字段 | 必填 | 说明 |
 | --- | --- | --- |
 | `key` | 是 | 传给插件 `on_interaction(ctx, entry_key, payload)` 的入口名 |
 | `title` / `description` | 推荐 | 前端选择器、实验室和日志里展示给人的说明 |
-| `launch_mode` | 是 | `bridge` / `direct` / `hybrid`，决定交互 Bot 如何启动插件 |
+| `launch_mode` | 兼容 | `bridge` / `direct` / `hybrid`，旧字段；新插件建议同时声明 `dispatch_modes` |
+| `dispatch_modes` | 推荐 | `admin_command` / `public_keyword`，分别表示管理员带前缀命令触发、群友关键词/转账规则触发 |
+| `message_channels` | 兼容 | 旧 `Plugin` hook 的 incoming/outgoing 监听方向；不要把它当发送通道偏好 |
+| `money_channel` | 兼容 | 旧文档提示字段；钱相关动作现在由 `payout` / 结算链路固定路由 userbot |
 | `events` | 是 | 入口接受的事件白名单，例如 `keyword`、`payment_confirmed`、`message`、`callback_query`、`session_close` |
 | `session_scope` | 是 | `chat` / `user` / `none`，决定平台如何保存会话和路由后续消息 |
 | `session_policy` | 推荐 | 会话 TTL、重复触发、关闭策略、并发策略的声明 |
@@ -343,7 +967,7 @@ version_pattern = r"^\d+\.\d+\.\d+"
 | launch_mode | 启动路径 | 适用场景 |
 | --- | --- | --- |
 | `bridge` | 交互 Bot 收到事件，平台组装信封后调用插件 `on_interaction` | 群局、抢答、抽奖、转账命中开局等高频群内流程 |
-| `direct` | UserBot 原有命令或插件内部调用直接执行业务，不经过交互 Bot | 管理员命令、私有工具、无需 Bbot 规则的能力 |
+| `direct` | UserBot 原有命令或插件内部调用直接执行业务，不经过交互 Bot | 管理员命令、私有工具、无需交互 Bot 规则的能力 |
 | `hybrid` | 同一能力同时支持 `bridge` 和 `direct`，但两边仍是独立触发边界 | 既允许管理员 `{prefix}24d 100` 开局，也允许群友关键词/转账由交互 Bot 开局 |
 
 `direct` 和 `hybrid` 都不表示普通群友 incoming 消息可以直接触发 `commands`。`command_fallback` 只用于平台提示或受控内部派发，不能把群友文本原样送入 `on_command`。如果启用回退，必须同时声明 `preserve_command_trigger: true`，并保证原命令名、参数格式、权限和 outgoing 限制保持兼容。
@@ -360,6 +984,7 @@ MANIFEST = Manifest(
             "title": "付费开局",
             "description": "转账命中或插件关键词命中后，由交互 Bot 开启一局游戏。",
             "launch_mode": "hybrid",
+            "dispatch_modes": ["admin_command", "public_keyword"],
             "session_scope": "chat",
             "events": ["payment_confirmed", "keyword", "message", "callback_query", "session_close"],
             "preserve_command_trigger": True,
@@ -399,7 +1024,6 @@ MANIFEST = Manifest(
             },
             "result_contract": {
                 "actions": ["send_message", "send_photo", "end_session"],
-                "send_via": ["interaction_bot", "bbot_notice"],
             },
             "settlement": {
                 "mode": "announce_only",
@@ -434,14 +1058,15 @@ MANIFEST = Manifest(
 }
 ```
 
-运行时入口收到的 payload 会包含当前规则的 `module_config` 字段，并把其中的键平铺到 payload 顶层；Web 端会在选择入口时用 `input_schema.properties.*.default` 辅助生成初始 JSON。插件应从 `payload.get("prize")` / `payload.get("timeout")` 读取本次规则参数；插件自身的账号级配置仍通过 `ctx.config` 读取。
+运行时入口收到的 payload 会包含当前规则的 `module_config` 字段。Web 端会在选择入口时用 `input_schema.properties.*.default` 辅助生成初始 JSON。新插件应从 `payload["module_config"]` 读取本次规则参数；插件自身的账号级配置仍通过 `ctx.config` 读取。历史兼容层可能继续在 payload 顶层附带平铺字段，但那只用于旧插件迁移，不作为新插件示例或主路径。
 
-### on_interaction 实现
+### on_interaction 迁移实现
 
 ```python
 from typing import Any
 
 from app.worker.plugins.base import Plugin, PluginContext, register
+from app.worker.plugins.events import event_from_interaction_payload
 
 
 @register
@@ -458,77 +1083,158 @@ class GuessNumberPlugin(Plugin):
         if entry_key != "start_guess_number":
             return None
 
-        event = payload.get("event") if isinstance(payload.get("event"), dict) else {}
-        event_type = str(event.get("type") or payload.get("event_type") or "")
+        event = event_from_interaction_payload(payload)
+        event_type = event.type
 
         if event_type == "message":
-            answer = str(event.get("text") or "").strip()
+            answer = event.message.text.strip()
             if answer != "42":
                 return []
-            return [
-                {
-                    "type": "send_message",
-                    "text": f"答对了：{event.get('display_name') or '玩家'}\n奖金：{payload.get('prize') or 123}",
-                    "reply_to_message_id": event.get("message_id"),
-                }
-            ]
+            if ctx.messages:
+                await ctx.messages.send(
+                    text=f"答对了：{event.actor.display_name or '玩家'}\n奖金：{payload.get('prize') or 123}",
+                    reply_to_message_id=event.message.message_id,
+                )
+                return []
+            return [{"type": "send_message", "text": "答对了"}]
 
-        prize = int(payload.get("prize") or 123)
-        return [
-            {
-                "type": "send_message",
-                "text": f"猜数字开始，奖金：{prize}",
-            }
-        ]
+        module_config = payload.get("module_config") if isinstance(payload.get("module_config"), dict) else {}
+        prize = int(module_config.get("prize") or 123)
+        if ctx.messages:
+            await ctx.messages.send(
+                text=f"猜数字开始，奖金：{prize}",
+                reply_markup={
+                    "inline_keyboard": [[{"text": "查看状态", "callback_data": "guess:status"}]]
+                },
+            )
+            return []
+        return [{"type": "send_message", "text": f"猜数字开始，奖金：{prize}"}]
 ```
 
 当前平台已支持的标准动作：
 
 | type | 字段 | 说明 |
 | --- | --- | --- |
-| `send_message` | `text` | 由交互 Bot 在命中的群里发送消息 |
+| `send_message` | `text` | 在命中的群或动作指定的 `chat_id` 发送消息 |
 | `send_message` | `reply_to_message_id` | 可选，指定回复哪条消息 |
-| `send_message` | `send_via` | 可选但必须在入口 `result_contract.send_via` 白名单内 |
-| `send_message` | `reply_markup` | 可选，Bot API inline keyboard；只有 `send_via=interaction_bot` / `bbot_notice` 会透传，`userbot_reply` 不承接按钮 |
-| `send_photo` / `send_file` | `photo_base64` / `file_base64` | 由交互 Bot 发送图片/文件字节，适合题图 |
+| `send_message` | `reply_to_user_id` / `reply_to_search_limit` | 可选；`send_via=userbot_reply` 时，平台按用户 ID 搜索近期发言作为回复锚点 |
+| `send_message` | `reply_anchor_missing_text` | 可选；找不到 `reply_to_user_id` 的近期发言时发送的提示，支持 `{user_id}` |
+| `send_message` | `chat_id` | 可选；不填时发送到触发会话，填写时由平台按通道能力发送到指定会话 |
+| `send_message` | `send_via` / `channel` / `channel_selector` / `send_via_options` | 高级可选；普通互动省略，平台继承 `session.channel`，只在跨通道公告、管理提示或迁移桥兼容时显式覆盖 |
+| `send_message` | `reply_markup` | 可选，Bot API inline keyboard；只会透传给 `interaction_bot`，`userbot_reply` 不承接按钮 |
+| `send_message` | `save_message_id_key` | 可选；发送成功后把本次 Telegram `message_id` 按 key 保存 2 小时，供后续编辑、删除或替换使用 |
+| `send_message` | `replace_saved_message_id_key` | 可选；发送新消息并保存新 `message_id` 后，读取该 key 原来的消息 ID 并删除旧消息，适合“只保留最新一条”的滚动通知 |
+| `send_rich_message` | `rich_message` | Telegram 原生 Rich Message；对象中必须且只能提供 `html`、`markdown`、`blocks` 之一，可表达标题、任务列表、表格、折叠详情、公式和媒体块 |
+| `send_rich_message` | `reply_to_message_id`、`reply_markup`、`save_message_id_key`、`pin` | 可选；回复、按钮、保存消息 ID 和发送后置顶均由 Interaction Bot 执行 |
+| `send_rich_message` | `send_via` | 可省略，平台固定选择 `interaction_bot`；显式只选 `userbot_reply` 会以 `rich_message_requires_interaction_bot` 拒绝 |
+| `send_photo` / `send_file` | `photo_base64` / `file_base64` | 按动作通道发送图片/文件字节；交互 Bot 下 `send_photo` 走 `sendPhoto`，`send_file` 走 `sendDocument` |
 | `send_photo` / `send_file` | `filename`、`caption`、`reply_to_message_id` | 可选，文件名、说明文字、回复目标 |
+| `send_photo` / `send_file` | `save_message_id_key` | 可选；媒体发送成功后把 Telegram `message_id` 按 key 保存 2 小时，供后续 `edit_caption`、删除或替换使用 |
+| `edit_message` | `message_id`、`text` | 编辑纯文本消息；不用于编辑媒体 caption |
+| `edit_caption` | `message_id` / `message_id_key`、`caption` | 编辑图片或文件消息的 caption；`message_id_key` 会读取同账号命名空间下由 `save_message_id_key` 保存的消息 ID |
+| `edit_caption` | `parse_mode`、`reply_markup` | 可选；`parse_mode="html"` 时按 HTML 发送，`reply_markup` 只由 `interaction_bot` 原生承接 |
+| `delete_message` | `message_id` | 删除对应 Bot 通道可操作的消息 |
+| `pin_message` | `message_id` | 置顶对应 Bot 通道可操作的消息 |
+| `answer_callback` | `callback_query_id`、`text`、`show_alert` | 回应 inline keyboard 按钮回调 |
+| `payout` | `amount`、`text`、`reply_to_message_id`、`reply_to_user_id`、`reply_to_search_limit`、`reply_anchor_missing_text` | UserBot 发奖动作；有消息 ID 时直接回复，否则可按用户 ID 查找近期发言作为锚点。超限拒（`error_code=payout_limit_exceeded`），瞬时失败自动进补偿队列重发，插件无需自己重试（见上文 payout 语义） |
 | `end_session` | 无 | 本次入口处理完成后不保留交互会话，适合彩票、红包等长期轮回插件 |
 
-`send_via` 是发送者白名单，不是插件自由选择账号的能力。推荐只使用这些值：
+通道原则是：**触发方式决定会话通道，插件默认不感知通道，框架负责路由和执行**。命令触发的普通会话收发走 userbot，关键词/付款/按钮触发的普通会话收发走交互 Bot。能力固定路由有两个例外：`payout`、收款确认和发奖等钱相关动作永远走 userbot；`send_rich_message` 永远走 Interaction Bot。其他动作只有在跨通道公告、特殊管理提示或迁移桥兼容时才显式写 `send_via`：
 
 | send_via | 含义 | 约束 |
 | --- | --- | --- |
-| `interaction_bot` | 由交互 Bot 发送群内题面、答复、图片、会话提示 | 默认值，适合高频互动 |
-| `userbot_reply` | 由当前账号 worker 的 userbot 代发指定消息 | 适合低频、可审计、确有账号身份需要的动作，平台会通过账号 worker 的 Telethon client 执行 |
-| `bbot_notice` | 由通知 Bot 发公告、命中、对账提示 | 不处理钱相关执行动作 |
+| `interaction_bot` | 由交互 Bot 发送群内题面、答复、图片、会话提示 | 高级覆盖值；别名 `bot` |
+| `userbot_reply` | 由当前账号 worker 的 userbot 代发指定消息 | 高级覆盖值；适合确有账号身份需要的动作 |
+| `auto` | 按平台默认候选顺序尝试 | 迁移兼容值；新互动插件通常不需要使用 |
 
-入口未声明 `result_contract.send_via` 时，平台应按最小权限只允许 `interaction_bot`。涉及奖金、补发、转账、催付的插件必须在 `settlement` 中写清职责：交互 Bot 只能公告和给出可对账结果，真正发奖仍由账号 worker 的 userbot 代发或由平台受控结算流程处理。
+入口未声明 `result_contract.send_via` 时，平台按会话通道和动作类型决定实际发送方。入口声明了 `result_contract.actions` 或 `result_contract.send_via` 时，运行时把它作为可见契约和调试依据：插件调用未声明动作或未声明通道会写入 runtime log、交互中心调试面板和插件 lint 告警，但不会因为“未声明”本身静默丢弃动作。`reply_markup` 在 interaction bot 会话中由 Bot API 承接；在 userbot 会话中由平台降级成文本编号并把玩家回复合成为 callback 事件。`bbot_notice` / `notice` / `notice_bot` 已移除且不兼容，不再作为插件主动发送通道；插件显式请求这些旧通道会返回明确失败并提示迁移到会话通道模型。群里已有的转账结果通知 Bot 只作为外部到账证据来源，TelePilot 监听它来确认付款，不用它发送插件结果。涉及奖金、补发、转账、催付的插件必须在 `settlement` 或 `payout` 中写清职责：普通 Bot 只能公告和给出可对账结果，真正收款确认和发奖仍由账号 worker 的 userbot 代发或由平台受控结算流程处理。
 
-`payload["event"]` 的核心字段：
+普通互动推荐不写通道：
 
-| 字段 | 说明 |
+```python
+await ctx.messages.send(
+    text="题面或回复内容",
+    reply_to_message_id=event_from_interaction_payload(payload).message.message_id,
+)
+
+await ctx.messages.send_rich(
+    html="<h1>任务状态</h1><ul><li><input type=\"checkbox\" checked>已完成</li></ul>",
+)
+
+await ctx.messages.send(
+    chat_id=-1001234567890,
+    text="指定会话发送，仍由平台按会话通道执行",
+)
+
+await ctx.messages.send_photo(
+    photo=image_bytes,
+    filename="round.png",
+    caption="题面",
+    save_message_id_key="round",
+)
+
+await ctx.messages.edit_caption(
+    message_id_key="round",
+    caption="题面\n\n答对结果",
+)
+```
+
+推荐迁移路径：旧插件继续返回 `list[dict]` 标准动作可以兼容；新插件或重构插件优先调用 `ctx.messages.send/send_rich/send_photo/send_file/edit/edit_caption/delete/pin/answer_callback`。`ctx.messages` 只缓存动作，不会暴露 Bot Token，也不会直接调用 Telegram API。
+
+框架层源码位于 `backend/app/services/interaction/`：`contracts.py` 负责记录 `result_contract` 告警与旧通道失败，`delivery.py` 负责受控发送、编辑、删除、置顶、按钮 ACK、媒体发送和 message_id 保存。
+
+#### Contract Guard 行为
+
+Contract Guard 不是公共插件市场式硬沙箱，而是个人可信插件标准下的契约提示器：
+
+| 场景 | 运行时行为 |
 | --- | --- |
-| `type` | 事件类型，如 `payment_confirmed`、`message` |
-| `account_id` / `chat_id` | 账号与群 ID |
-| `rule_id` / `rule_name` | 命中的交互规则 |
-| `module_key` / `entry_key` | 规则绑定的插件与入口 |
-| `update_id` / `message_id` | Telegram update 与消息 ID |
-| `user_id` / `display_name` / `username` | 触发事件的用户身份 |
-| `text` | 原始消息文本 |
-| `reply_to_user_id` / `reply_to_display_name` / `reply_to_username` | 被回复消息的用户身份 |
-| `data` | 事件附加数据；转账事件包含 `payer_name`、`receiver_name`、`amount` 等 |
+| 调用未声明 `result_contract.actions` 的动作 | 记录 `guard_level=warning`，动作继续进入执行链路 |
+| 显式请求未声明 `result_contract.send_via` 的高级覆盖通道 | 记录 `guard_level=warning`，按可执行能力尝试并保留审计 |
+| `send_via` 同时包含受控通道和旧 `notice` / `bbot_notice` / `notice_bot` | 整个动作记录 `guard_level=failed`，返回 `send_channel_deprecated`，不做自动改写 |
+| `send_via` 只包含未知值 | 记录 `guard_level=failed`，返回不可执行失败和迁移提示 |
+| `send_via` 同时包含受控通道和非旧未知值 | 记录 `guard_level=warning`，保留可执行受控通道并继续执行 |
+| `send_rich_message` 未指定通道或使用 `auto` | 固定或收窄到 `interaction_bot`；不会交给 UserBot |
+| `send_rich_message` 只指定 `userbot_reply` | 记录 `guard_level=failed`，返回 `rich_message_requires_interaction_bot` |
+| 交互 Bot token 缺失、UserBot worker 离线、Telegram API 失败 | 返回客观能力失败，不伪装成功 |
 
-#### 标准 payload 信封
+#### 标准事件信封
 
-新版交互入口使用“信封 + event + 参数”的结构。旧字段仍可兼容平铺读取，但新插件应优先读取这些对象：
+`payload` 本身就是标准事件信封。新插件不要把旧平铺字段当主路径，也不要依赖 `payload["event"]`；如果想少写字段判断，优先使用 `event_from_interaction_payload(payload)`。
 
 ```json
 {
   "source": {
-    "type": "interaction_bot",
-    "bot_key": "bbot",
+    "type": "payment_confirmed",
+    "channel": "interaction_bot",
+    "driver": "telegram_bot_api",
     "account_id": 1,
-    "chat_id": -100123
+    "chat_id": -100123,
+    "chat_type": "supergroup",
+    "update_id": 10,
+    "message_id": 81,
+    "callback_query_id": null,
+    "callback_data": null
+  },
+  "message": {
+    "chat_id": -100123,
+    "message_id": 81,
+    "text": "转账成功...",
+    "entities": [],
+    "media": null,
+    "date": null,
+    "reply_to_message_id": 80
+  },
+  "chat": {
+    "id": -100123,
+    "type": "supergroup",
+    "title": null,
+    "username": null
+  },
+  "sender": {
+    "user_id": 8980553289,
+    "display_name": "转账通知 Bot",
+    "username": null
   },
   "actor": {
     "user_id": 111,
@@ -543,46 +1249,56 @@ class GuessNumberPlugin(Plugin):
     "status": "confirmed",
     "amount": 100,
     "payer_user_id": 111,
-    "payer_name": "AAA",
-    "receiver_name": "BBB",
+    "payer_display_name": "AAA",
+    "receiver_display_name": "BBB",
     "notice_sender_user_id": 8980553289,
-    "notice_message_id": 81
+    "notice_message_id": 81,
+    "source_message_id": 81,
+    "reply_to_message_id": 80
   },
   "player": {
     "user_id": 111,
     "display_name": "AAA",
+    "username": "aaa",
     "identity_key": "tg:111",
     "identity_confidence": "reply_context"
   },
   "reply_to": {
     "message_id": 99,
-    "user_id": 111
+    "user_id": 111,
+    "display_name": "AAA",
+    "text": "+100"
   },
   "trigger": {
-    "type": "keyword",
+    "type": "payment_confirmed",
     "rule_id": "game24-ticket",
     "rule_name": "24 点门票",
     "module_key": "game24",
-    "entry_key": "start_paid_game",
-    "message_id": 80,
-    "text": "开始 24 点"
+    "entry_key": "start_paid_game"
   },
   "session": {
+    "key": "account_bot:interaction_session:...",
     "scope": "chat",
-    "id": "account:1:chat:-100123:game24:start_paid_game",
     "ttl_seconds": 3600,
-    "is_new": true
+    "active": true,
+    "data": {}
   },
-  "event": {
-    "type": "keyword",
-    "chat_id": -100123,
-    "message_id": 80,
-    "text": "开始 24 点"
+  "raw": {
+    "update_id": 10,
+    "message_id": 81,
+    "event_type": "payment_confirmed",
+    "rule_id": "game24-ticket",
+    "module_key": "game24",
+    "entry_key": "start_paid_game",
+    "parsed": {
+      "payer_name": "AAA",
+      "receiver_name": "BBB",
+      "amount": 100
+    }
   },
   "module_config": {
     "prize": 200
-  },
-  "prize": 200
+  }
 }
 ```
 
@@ -590,18 +1306,22 @@ class GuessNumberPlugin(Plugin):
 
 | 字段 | 说明 |
 | --- | --- |
-| `source` | 事件来源和发送通道，不等同于中奖用户；用于判断来自交互 Bot、UserBot 还是平台内部 |
+| `source` | 事件来源、事件类型、update/message/callback 基础索引；`source.type` 是插件分流主字段 |
+| `message` | 当前消息文本、消息 ID、回复目标、实体和媒体摘要 |
+| `chat` | 当前会话 ID、类型、标题和 username；标题可能为空 |
+| `sender` | Telegram 实际发送者；转账触发时通常是外部转账通知 Bot |
 | `source_actor` | 实际发来本条 Telegram 消息的 Bot/用户。转账触发时通常是可信转账通知 Bot，不应当作玩家 |
-| `actor` | 当前事件的行为主体。答题、按钮点击、关键词触发时通常就是发送者；付费开局时平台会尽量映射到付款玩家以兼容旧插件 |
+| `actor` | 当前事件的业务行为主体。答题、按钮点击、关键词触发时通常就是发送者；付费开局时平台会尽量映射到付款玩家 |
 | `payment` | 可信转账通知 Bot 已确认到账后的结构化凭证，包含金额、付款人、收款人和通知消息信息 |
 | `player` | 付费开局绑定的玩家身份。独玩/按钮玩法应优先读取它，并检查 `player.user_id` 是否存在 |
 | `reply_to` | 本动作应引用的原消息或被回复对象，中奖公告必须尽量带上 |
 | `trigger` | 命中的规则、入口、消息和触发类型；用于排障和幂等 |
-| `session` | 平台会话标识、作用域、TTL 和是否新建；插件内部状态 key 应与它一致 |
+| `session` | 平台会话标识、作用域、TTL 和数据；插件内部状态 key 应与它一致 |
+| `raw` | 脱敏后的 Telegram 更新摘要，只用于排障，不作为常规业务字段 |
 
 `payload_contract` 用来声明插件对上述信封的要求。平台和前端可以据此校验规则是否能保存，排障时也能判断是“事件没到”还是“字段不满足”。不要把敏感原文、Bot Token、完整付款通知文本写进信封；只传插件业务需要的结构化字段。
 
-付费触发有两个证据源：UserBot/回复上下文负责补充付款玩家身份，可信转账通知 Bot 负责证明到账成功。插件不得把普通 `+金额` 文本当作到账依据；只有 `event.type=payment_confirmed` 且 `payment.status=confirmed` 才表示平台已经通过转账通知完成金额、收款人和规则校验。如果转账通知只提供付款人名称，平台会把 `player.identity_confidence` 标为 `name_only`；`participant_policy=solo_owner` 或 `paid_pool` 的入口会先要求付款人点击确认来获得真实 `player.user_id`。
+付费触发有两个证据源：UserBot/回复上下文负责补充付款玩家身份，可信转账通知 Bot 负责证明到账成功。插件不得把普通 `+金额` 文本当作到账依据；只有 `source.type=payment_confirmed` 且 `payment.status=confirmed` 才表示平台已经通过转账通知完成金额、收款人和规则校验。如果转账通知只提供付款人名称，平台会把 `player.identity_confidence` 标为 `name_only`；`participant_policy=solo_owner` 或 `paid_pool` 的入口会先要求付款人点击确认来获得真实 `player.user_id`。
 
 入口可声明 `participant_policy` 来描述参与边界：
 
@@ -629,6 +1349,12 @@ class GuessNumberPlugin(Plugin):
 
 如果插件没有声明 `session_scope`，平台只能回退到规则 `concurrency`，这很容易让群局被误判成用户私有会话。所有声明了 `interaction_entries` 的插件都必须显式填写 `session_scope`。
 
+### 事件过滤与 rule_bound
+
+当前事件订阅支持 `filters` 过滤。已知过滤键按平台约定校验，常见值包括 `keywords`、`contains`、`callback_data`、`commands` 和 `rule_id`；未知 filter key 会被保留用于兼容，但会触发 warning，便于插件作者尽快修正。
+
+`rule_bound` 订阅如果声明了 `filters.rule_id`，它必须与当前触发上下文里的 `trigger.rule_id` 完全相等，否则本次订阅会被判定为 `filter_not_matched`。这条规则用于把“规则绑定”从松散匹配收紧到明确的一对一绑定，避免跨规则误投递。
+
 #### 入口参数来源
 
 交互入口 payload 由平台运行时组装，当前不会在后端再次读取 manifest 默认值或插件账号级配置做自动合并。有效来源如下，越靠后越容易覆盖同名字段：
@@ -651,40 +1377,81 @@ class GuessNumberPlugin(Plugin):
 }
 ```
 
-`payload_contract` 描述输入，`result_contract` 描述输出。两者是文档化契约，不应被插件拿来动态扩权。`result_contract.actions` 只能列标准动作；`result_contract.send_via` 是发送者白名单；`settlement` 只说明结算/公告语义，不能让交互 Bot 直接拥有发奖权限。
+`payload_contract` 描述输入，`result_contract` 描述输出。它们是文档化契约，也会成为 Contract Guard 告警依据。`result_contract.actions` 只能列标准动作；`result_contract.send_via` 只用于高级覆盖或迁移兼容的可见契约，不是普通互动必填项，也不是硬沙箱白名单；`settlement` 只说明结算/公告语义，不能让普通 Bot 直接拥有发奖权限。
 
 #### 标准事件输入
 
-平台调用交互入口时，会提供标准信封；历史适配层或旧规则还可能同时提供下面这种平铺事件对象。插件不要依赖转账通知原文，新插件应优先读取 `source` / `actor` / `reply_to` / `trigger` / `session` 信封。
+平台调用交互入口时，会提供标准信封；历史适配层或旧规则还可能同时提供平铺字段。新插件不要依赖转账通知原文或旧平铺字段，优先读取 `source` / `message` / `chat` / `sender` / `actor` / `source_actor` / `player` / `payment` / `reply_to` / `trigger` / `session` 信封。
 
 ```json
 {
-  "account_id": 1,
-  "chat_id": -100123,
-  "rule_id": "game24-ticket",
-  "payer_user_id": 111,
-  "payer_name": "AAA",
-  "receiver_name": "BBB",
-  "amount": 100,
-  "source_message_id": 80,
-  "notice_message_id": 81
+  "source": {
+    "type": "payment_confirmed",
+    "channel": "interaction_bot",
+    "driver": "telegram_bot_api",
+    "account_id": 1,
+    "chat_id": -100123,
+    "message_id": 81
+  },
+  "message": {
+    "chat_id": -100123,
+    "message_id": 81,
+    "text": "转账成功...",
+    "reply_to_message_id": 80
+  },
+  "sender": {
+    "user_id": 8980553289,
+    "display_name": "转账通知 Bot"
+  },
+  "actor": {
+    "user_id": 111,
+    "display_name": "AAA"
+  },
+  "payment": {
+    "status": "confirmed",
+    "amount": 100,
+    "payer_user_id": 111,
+    "payer_display_name": "AAA",
+    "receiver_display_name": "BBB",
+    "source_message_id": 81,
+    "reply_to_message_id": 80
+  },
+  "player": {
+    "user_id": 111,
+    "display_name": "AAA",
+    "identity_key": "tg:111",
+    "identity_confidence": "reply_context"
+  },
+  "trigger": {
+    "type": "payment_confirmed",
+    "rule_id": "game24-ticket",
+    "module_key": "game24",
+    "entry_key": "start_paid_game"
+  },
+  "session": {
+    "key": "account_bot:interaction_session:...",
+    "scope": "chat",
+    "ttl_seconds": 3600,
+    "active": true,
+    "data": {}
+  }
 }
 ```
 
+为了兼容历史插件，payload 顶层还可能同时带 `account_id`、`chat_id`、`payer_user_id`、`notice_message_id` 等平铺字段。它们只用于旧插件迁移期，不要在新插件里当作标准输入主路径。
+
 #### 标准动作输出
 
-交互入口或适配器应返回平台可执行的标准动作，而不是直接调用 Telegram API。交互 Bot runtime 统一负责发送、回复与基础动作执行；业务状态和幂等锁由插件自己放在 `ctx.redis`。
+交互入口或适配器应返回平台可执行的标准动作，或通过 `ctx.messages` 缓存这些动作，而不是直接调用 Telegram API。交互 Bot runtime 统一负责发送、回复、删除、置顶、按钮 ACK 与基础动作执行。需要跨消息保存业务状态时，插件应优先使用 `ctx.storage`；它会按账号和插件自动隔离命名空间。`ctx.redis` 当前会被注入，但属于低层兼容入口，新插件不要自行拼接 Redis key。需要 NX、CAS、锁或严格原子抢占时，`ctx.storage` 不提供这些语义，应交给平台会话/结算链路或官方受控低层实现。
 
 ```json
 [
   {
     "type": "send_message",
-    "send_via": "interaction_bot",
     "text": "24 点开始..."
   },
   {
     "type": "send_message",
-    "send_via": "bbot_notice",
     "text": "答对了：AAA\n题目：24 点 [1 5 5 5]\n奖金：123",
     "reply_to_message_id": 99,
     "settlement": {
@@ -696,7 +1463,6 @@ class GuessNumberPlugin(Plugin):
   },
   {
     "type": "send_photo",
-    "send_via": "interaction_bot",
     "photo_base64": "...",
     "filename": "puzzle.png",
     "caption": "题面"
@@ -706,15 +1472,15 @@ class GuessNumberPlugin(Plugin):
 
 #### 端到端示例：24 点交互入口
 
-下面是 `payment_confirmed` / `keyword` 开局、`message` 答题、`session_close` 清理的最小形态。真实插件可以把 `generate_24_puzzle()`、`check_answer()`、`render_start()` 拆成纯函数复用。
+下面是 `payment_confirmed` / `keyword` 开局、`message` 答题、`session_close` 清理的最小形态。真实插件可以把 `generate_24_puzzle()`、`check_answer()`、`render_start()` 拆成纯函数复用。示例用 `ctx.storage` 做持久化状态；它适合普通会话状态，不适合充当原子抢答锁。
 
 ```python
-import json
 import secrets
 import time
 from typing import Any
 
 from app.worker.plugins.base import Plugin, PluginContext, register
+from app.worker.plugins.events import event_from_interaction_payload
 
 
 @register
@@ -730,17 +1496,27 @@ class Game24Plugin(Plugin):
     ) -> list[dict[str, Any]] | None:
         if entry_key != "start_paid_game":
             return None
-        event = payload.get("event") if isinstance(payload.get("event"), dict) else {}
-        event_type = str(event.get("type") or payload.get("event_type") or "")
-        chat_id = int(payload.get("chat_id") or event.get("chat_id") or 0)
+        event = event_from_interaction_payload(payload)
+        event_type = event.type
+        chat_id = int(event.message.chat_id or 0)
         if not chat_id:
             return []
 
-        state_key = f"userbot_reply:game24:{ctx.account_id}:{chat_id}"
+        state_key = f"game24:{chat_id}"
+        if ctx.storage is None or not ctx.storage.available:
+            if event_type in ("payment_confirmed", "keyword"):
+                return [
+                    {
+                        "type": "send_message",
+                        "text": "当前运行上下文没有可用状态存储，无法启动需要持续会话的游戏。",
+                    }
+                ]
+            return []
 
         if event_type in ("payment_confirmed", "keyword"):
             numbers = generate_24_puzzle()
-            prize = int(payload.get("prize") or 123)
+            module_config = payload.get("module_config") if isinstance(payload.get("module_config"), dict) else {}
+            prize = int(module_config.get("prize") or 123)
             state = {
                 "account_id": ctx.account_id,
                 "chat_id": chat_id,
@@ -750,31 +1526,31 @@ class Game24Plugin(Plugin):
                 "game_id": secrets.token_hex(8),
                 "created_at": time.time(),
             }
-            await ctx.redis.set(state_key, json.dumps(state, ensure_ascii=False), ex=3600)
+            await ctx.storage.set(state_key, state, ttl=3600)
             return [{"type": "send_message", "text": render_start(numbers, prize)}]
 
-        raw = await ctx.redis.get(state_key)
-        state = json.loads(raw.decode() if isinstance(raw, bytes) else raw or "{}")
+        state = await ctx.storage.get(state_key, default={})
         if event_type == "message":
-            if not state.get("active") or not check_answer(str(payload.get("message_text") or ""), state["numbers"]):
+            if not state.get("active") or not check_answer(event.message.text, state["numbers"]):
                 return []
-            claim_key = f"userbot_reply:game24_claim:{ctx.account_id}:{chat_id}:{state['game_id']}"
-            if not await ctx.redis.set(claim_key, str(payload.get("message_id") or ""), nx=True, ex=3600):
+            claim_key = f"game24_claim:{chat_id}:{state['game_id']}"
+            if await ctx.storage.get(claim_key):
                 return []
+            await ctx.storage.set(claim_key, event.message.message_id or "", ttl=3600)
             state["active"] = False
-            await ctx.redis.set(state_key, json.dumps(state, ensure_ascii=False), ex=3600)
+            await ctx.storage.set(state_key, state, ttl=3600)
             return [
                 {
                     "type": "send_message",
-                    "text": f"答对了：{payload.get('sender_name') or '玩家'}\n奖金：{state['prize']}",
-                    "reply_to_message_id": payload.get("message_id"),
+                    "text": f"答对了：{event.actor.display_name or '玩家'}\n奖金：{state['prize']}",
+                    "reply_to_message_id": event.message.message_id,
                 }
             ]
 
         if event_type == "session_close":
             if state.get("active"):
                 state["active"] = False
-                await ctx.redis.set(state_key, json.dumps(state, ensure_ascii=False), ex=3600)
+                await ctx.storage.set(state_key, state, ttl=3600)
             return []
 
         return []
@@ -784,14 +1560,14 @@ class Game24Plugin(Plugin):
 
 1. 原插件本体不得为了交互 Bot 直接改写 `commands` / `on_message` 语义；UserBot 入口和交互 Bot 入口是两套边界。
 2. 可以把纯业务逻辑抽到共享函数，例如题目生成、答案校验、渲染模板；UserBot 插件和交互 Bot 适配器共同调用这些纯函数。
-3. 插件不处理 Bot Token、Bbot 通知格式、转账过滤、发奖账号；这些都属于平台层职责，钱相关动作也不该放进交互 Bot 的高频入口。
-4. 交互 Bot 中奖公告必须引用赢家的答案消息，方便 `UserBot` 账号按 `Bbot` 公告自动回复发奖或补发奖金。
+3. 插件不处理 Bot Token、外部转账通知原文格式、转账过滤、发奖账号；这些都属于平台层职责，钱相关动作也不该放进交互 Bot 的高频入口。
+4. 交互 Bot 中奖公告必须引用赢家的答案消息，方便 `UserBot` 账号按结构化公告自动回复发奖或补发奖金。
 5. 若插件未声明 `interaction_entries`，前端不应把它展示为可由交互 Bot 启动的插件。旧 `config_schema["x-interaction-entries"]` 仅作为兼容入口，新插件不要再用旧字段。
 6. `interaction_entries[].session_scope` 必须和插件内部状态 key 一致：群局状态 key 应包含 `chat_id`，用户私有流程状态 key 应同时包含 `chat_id` 和 `user_id`。
 7. 返回 `end_session` / `close_session` / `no_session` 时，平台会清理规则会话；插件自己的 Redis 状态仍由插件负责清理。
 8. `preserve_command_trigger` 必须保持为 `true`。交互入口新增后，原本能用的 UserBot 指令仍要按原指令名、原参数和原权限工作。
-9. `send_via` 必须命中入口声明的白名单；插件不得通过动作结果临时指定未声明发送者。
-10. 使用 inline keyboard 时，入口必须声明 `callback_query` 事件；按钮动作只通过 `send_message.reply_markup` 交给交互 Bot 或通知 Bot 发送，`userbot_reply` 不承接按钮。
+9. 新插件建议声明 `dispatch_modes`，让前端明确入口来源；不要用 `message_channels` / `money_channel` 表达发送通道，普通动作继承 `session.channel`，`payout` 永远 userbot。
+10. 使用 inline keyboard 时，入口必须声明 `callback_query` 事件；按钮动作只通过 `send_message.reply_markup` 交给交互 Bot 发送，`userbot_reply` 不承接按钮。
 11. `settlement` / `result_contract` 只描述可对账结果和平台动作，不得把发奖、转账、催付等钱相关动作塞进交互 Bot 高频入口。
 
 ---
@@ -821,10 +1597,10 @@ class Game24Plugin(Plugin):
 "help_message_template": {"type": "string", "default": ",game 100 - 开始一局"}
 ```
 
-红包、抢答、24 点、猜数字这类“公共参与 + 私有管理”的插件必须按这个模型设计：
+红包、抢答、24 点、猜数字这类“公共参与 + 私有管理”的新插件，标准会话链路应先声明 `event_subscriptions`，由 Event Bus 接收玩家关键词、答案、callback、inline 和付款确认，再通过 `ctx.messages` 或标准 action 输出结果。下面的 `commands` / `on_message` 模型仅用于管理员命令兼容和仍未迁移的旧 hook 插件，不应作为公开玩法的新模板：
 
-- 开局、发红包、撤销、强制结束、查看管理状态等管理动作写成 `commands`，只能由本账号 outgoing 指令触发。
-- 领取口令、答题、参与投票等普通成员行为写在 `on_message`，通过普通文本判断，不要求用户发送系统指令前缀。
+- 开局、发红包、撤销、强制结束、查看管理状态等管理动作优先声明为 `command` 事件；保留旧 hook 时才写成 `commands`，且只能由本账号 outgoing 指令触发。
+- 领取口令、答题、参与投票等普通成员行为优先订阅 `message` / `callback_query` / `inline_query`；保留旧 hook 时才写在 `on_message`，通过普通文本判断，不要求用户发送系统指令前缀。
 - 如果自动回复、定时任务等平台内部动作需要“代替本账号执行指令”，使用平台内部派发能力，不让普通 incoming 消息直接进 `commands`。
 - 自动回复需要把群友输入的参数传给指令时，可以用变量模式：例如模式 `置顶 id=数字` 会匹配群友消息 `置顶 id=12345`，回复内容 `{prefix}pt {id}` 会使用 `12345`；游戏金额建议写 `num=数字`，可选参数写 `num=数字?`，`?` 表示这个 `num=...` 参数整体可以不填，默认值写 `{num|1000}`。熟悉正则时也可用模式 `^置顶\s+(\d+)$`、回复内容 `{prefix}pt {1}`。这些自动命令仍必须通过自动指令白名单，并受规则冷却、冷却对象和每人每日上限限制；冷却时间支持 `2s`、`2m`、`2h`、`2d`，纯数字按秒处理。自动命令成功后会按规则名称或 `usage_label` 把“今日已成功置顶促销 1/2 次”追加到结果底部；冷却中也会提示剩余 CD 和今日次数，达到每日上限时提示当日不可再用；管理员可回复群友消息发送 `{prefix}arcd`，或发送 `{prefix}arcd 用户ID` 重置当前会话相关的自动回复会话/用户冷却与该用户今日次数。
 
@@ -887,7 +1663,7 @@ class MyPlugin(Plugin):
 
 ### 事件对象兼容写法
 
-插件收到的对象通常是 `events.NewMessage.Event`，但在测试、热重载、Telethon 代理属性等场景里，也可能表现得更像裸 `Message`。因此建议用 `getattr` 做兼容，不要直接假设 `event.outgoing`、`event.message.id` 一定存在：
+插件收到的对象通常表现为 Telegram 消息事件，但在测试、热重载、代理属性等场景里，也可能表现得更像裸 `Message`。因此建议用 `getattr` 做兼容，不要直接假设 `event.outgoing`、`event.message.id` 一定存在：
 
 ```python
 def event_message(event):
@@ -1055,11 +1831,11 @@ class MyPlugin(Plugin):
 
 | 分类 | 适用场景 | 大白话 | 典型功能 | 配置入口 |
 |------|---------|--------|---------|---------|
-| **规则驱动配置页** | 多条规则独立配置，需 CRUD + 试运行 | 像自动化流水线：先建规则，再按匹配条件触发动作 | forward、auto_reply、autorepeat | 专属配置页 |
-| **单配置对象 / 通用独立配置页** | 每个账号只保存一份插件配置，或轻量插件只需要字段表单 | 像一个工具面板：配置好触发指令和参数，直接运行；普通字段由 schema 驱动渲染 | game24、codex_image、简单远程插件 / 小工具插件 | 专属或通用独立配置页 |
+| **规则配置页** | 多条规则独立配置，需 CRUD + 试运行 | 像自动化流水线：先建规则，规则只保存配置和 dry-run 输入 | forward、插件库 auto_reply / autorepeat、远程规则插件 | 专属配置页 |
+| **单配置对象 / 通用独立配置页** | 每个账号只保存一份插件配置，或轻量插件只需要字段表单 | 像一个工具面板：配置好触发指令和参数，直接运行；普通字段由 schema 驱动渲染 | 插件库 game24 / math10 / codex_image / chatgpt_image、简单远程插件 / 小工具插件 | 专属或通用独立配置页 |
 | **基础能力 — 平台内置** | 系统运行时常驻能力，不作为普通插件展示 | 像底座服务：给插件或平台调用，不强调启停 | scheduler | 平台功能页 |
 
-**关键判断**：需要维护多条规则 → `rules`；只有一份账号配置或普通字段表单足够 → `single`；旧插件已经写了 `schema` → 按 `single` 通用独立页兼容；像调度器这种系统服务 → `platform`。
+**关键判断**：需要维护多条规则 → `rules`；只有一份账号配置或普通字段表单足够 → `single`；旧插件已经写了 `schema` → 按 `single` 通用独立页兼容；像调度器这种系统服务 → `platform`。这里的 `rules` 只表示配置页/CRUD/dry-run 形态，不是旧运行时规则驱动主路径；标准会话事件投递仍以 Event Bus + `event_subscriptions` + 标准 action 为主。
 
 #### 自动分类规则
 
@@ -1077,7 +1853,7 @@ config_schema={
 
 | `x-ui-mode` | 展示位置 | 说明 |
 |-------------|----------|------|
-| `rules` | 规则驱动配置页 | 规则驱动插件，通常有规则列表、创建/编辑、dry-run |
+| `rules` | 规则配置页 | 多条规则配置插件，通常有规则列表、创建/编辑、dry-run；不改变标准会话链路的投递方式 |
 | `single` | 单配置对象 / 通用独立配置页 | 单配置对象或通用独立配置页，字段可由 `config_schema` 驱动 |
 | `schema` | legacy alias | 旧别名；不要在新插件中使用，不再表示弹窗类 |
 | `platform` | 基础能力 | 平台内置能力，不混在普通插件列表里 |
@@ -1093,17 +1869,17 @@ config_schema={
 配置页从上到下固定为：
 
 1. 返回按钮 + 插件标题
-2. 顶部冻结“配置操作”条（只有存在可保存配置的页面需要）
-3. 使用说明
-4. 功能总开关
-5. 配置主体（规则列表或字段表单）
+2. 使用说明
+3. 功能总开关
+4. 插件配置（规则列表或字段表单）
+5. 插件预览（建议项；没有预览时显示轻量提示）
 
-#### 顶部冻结“配置操作”
+#### 配置操作条
 
-长表单页必须把保存操作放在标题下方的 sticky 工具条中，参考 `ChatGPTImageConfig.tsx`、`CodexImageConfig.tsx`、`Game24Config.tsx` 和 `GenericPluginConfig.tsx`：
+长表单页必须把保存操作放在“插件配置”卡片底部的 sticky 工具条中，参考 `ChatGPTImageConfig.tsx`、`CodexImageConfig.tsx`、`Game24Config.tsx` 和 `GenericPluginConfig.tsx`：
 
 ```tsx
-<div className="sticky top-0 z-30 -mx-2 rounded-b-lg border bg-background/95 px-2 py-3 shadow-sm backdrop-blur supports-[backdrop-filter]:bg-background/80">
+<div className="sticky bottom-0 z-20 mt-4 rounded-b-lg border-t bg-background/95 px-6 py-3 shadow-[0_-8px_20px_rgba(15,23,42,0.06)] backdrop-blur supports-[backdrop-filter]:bg-background/85">
   <div className="flex flex-wrap items-center justify-between gap-3">
     <div className="text-sm">
       <div className="font-medium">配置操作</div>
@@ -1123,23 +1899,25 @@ config_schema={
 </div>
 ```
 
-规则驱动页面如果单条规则在 Dialog 内保存，主页面可以不放 sticky 保存条；但 Dialog 外的说明、总开关和规则列表顺序仍必须一致。
+规则配置页如果单条规则在 Dialog 内保存，主页面可以不放 sticky 保存条；但 Dialog 外的说明、总开关和规则列表顺序仍必须一致。
 
 #### 使用说明卡片
 
 “使用说明”必须是独立 `Card`，放在“功能总开关”之前。说明内容用一层 `rounded-md border bg-muted/20 p-3 text-xs text-muted-foreground` 包住，再用短 bullet 写真实用法、指令示例、触发条件和排障入口。不要把使用说明写成页面顶部散落的提示块，也不要把总开关塞进说明卡。
 
-规则驱动页面复用 `RuleInfoBox`，单配置和通用 schema 页面直接使用同样结构。指令示例必须读取当前系统前缀和当前配置中的指令名，不要写死 `,draw`、`,24d`、`,cximg`。
+规则配置页复用 `RuleInfoBox`，单配置和通用 schema 页面直接使用同样结构。指令示例必须读取当前系统前缀和当前配置中的指令名，不要写死 `,draw`、`,24d`、`,cximg`。
+
+通用 schema 配置页不再提供默认兜底说明。插件只要声明 `config_schema` 并进入配置页，就必须自带详细使用说明。推荐在 schema 顶层写 `x-usage-guide`、`x-usage-instructions` 或 `x-usage-steps`；也可以继续提供只读字段 `usage_preview`、`usage_guide`、`usage_instructions`、`ai_usage_guide`。缺少这些内容时，插件中心会显示红色“高级规范警告”，配置页也会用红色警告替代说明内容。
 
 #### 功能总开关卡片
 
 “功能总开关”也必须是独立 `Card`，放在“使用说明”之后、“配置”之前。卡片右侧放 `Switch`，左侧展示说明、启用 Badge、`state` 和 `last_error`。关闭总开关表示当前账号不运行该插件，但仍允许进入配置页提前填写配置。
 
-规则驱动页面复用 `RuleFeatureToggleCard`；单配置和通用页面按同样布局实现。不要再使用旧的“运行状态”卡片替代总开关。
+规则配置页复用 `RuleFeatureToggleCard`；单配置和通用页面按同样布局实现。不要再使用旧的“运行状态”卡片替代总开关。
 
-#### 配置主体与宽度
+#### 插件配置与宽度
 
-配置主体必须独立成“配置”或“规则”卡片，宽度跟随页面容器自适应，不要给表单区域加 `max-w-lg`、`max-w-3xl` 这类窄宽限制。字段多时用响应式网格：
+配置主体必须独立成“插件配置”或“规则”卡片，宽度跟随页面容器自适应，不要给表单区域加 `max-w-lg`、`max-w-3xl` 这类窄宽限制。字段多时用响应式网格：
 
 - 普通字段：`grid gap-4 md:grid-cols-2 xl:grid-cols-3`
 - 小型配置：`grid gap-6 md:grid-cols-2`
@@ -1147,19 +1925,35 @@ config_schema={
 
 字段控件统一使用项目内 `Input`、`Select`、`Switch`、`Textarea`、`Label`、`Button`、`Card`、`Badge`、`Table`。指令字段只填指令名，不填系统前缀；密码、Token 和只读预览字段要遵守现有脱敏和只读规则。
 
+通用 schema 页允许插件在平台容器内声明更自由的布局，但不能注入任意 HTML、外链样式或脚本。可用声明：
+
+- `x-ui-section`：把字段放进同名分组。
+- `x-ui-order`：控制字段排序，数值越小越靠前。
+- `x-ui-columns`：控制分组列数，允许 1 到 3。
+- `x-ui-widget: "config-list"`：把 `array<object>` 渲染为多组配置列表，内置添加、编辑、复制、删除、启停和排序。
+- `x-ui-widget: "multi-select"`：把枚举数组渲染为多选列表。
+- `x-ui-widget: "list-select"`：把枚举字符串渲染为列表式单选。
+- `x-ui-widget: "allowed-peer-multi-select"`：把 `array<integer>` 渲染为当前账号“允许会话”选择器，保存 Chat ID 数组；留空语义由插件自行定义，常用于群聊白名单。
+- `x-ui-hidden: true`：隐藏兼容字段或内部字段，但仍保留保存链路。
+- `config_actions` / `x-config-actions`：把插件后端动作渲染为字段旁按钮，动作只能调用插件的 `on_config_action`，不能执行任意前端脚本。
+
+#### 插件预览
+
+“插件预览”是独立 `Card`，位于“插件配置”之后。预览不是强制项，但强烈建议所有会发送消息的插件声明 `template_preview` 或 `*_preview`，让用户能用模拟上下文看到最终 Telegram 消息效果。没有预览字段时，通用配置页只显示建议提示，不阻断保存或运行。
+
 #### 禁止回退
 
 - 不新增 Schema 配置弹窗；`ConfigDialog` 只作为通用 schema 表单实现细节或兼容代码存在。
 - 不在账号详情页展示内部分类名或 legacy schema 分组。
-- 不把“使用说明”“功能总开关”“配置”合并到同一张卡片。
-- 不把保存按钮只放在长表单底部。
+- 不把“使用说明”“功能总开关”“插件配置”“插件预览”合并到同一张卡片。
+- 不把保存按钮放到页面顶部，或只放在滚动到底才能看到的位置。
 - 不在用户界面继续使用“模块”指代可启停能力；面向用户统一称“插件”。
 
 ---
 
-### 规则驱动配置页（Forward / AutoReply / Autorepeat）
+### 规则配置页（Forward / AutoReply / Autorepeat）
 
-规则驱动插件每条 rule 存储独立的 `config` JSON，通过 CRUD API 管理。前端专属页面提供：规则列表 + 创建/编辑对话框 + 试运行（dry-run）。
+规则配置页每条 rule 存储独立的 `config` JSON，通过 CRUD API 管理。前端专属页面提供：规则列表 + 创建/编辑对话框 + 试运行（dry-run）。这只定义配置数据和页面形态；真正的 Telegram 消息投递仍应通过 Event Bus 的 `event_subscriptions`、标准事件信封和标准 action 完成。
 
 #### 适配清单（6 处必改）
 
@@ -1167,7 +1961,7 @@ config_schema={
 |---|------|---------|
 | 1 | `frontend/src/api/types.ts` | 添加 `XxxRuleConfig` 接口（描述单条规则的 config 字段） |
 | 2 | `frontend/src/pages/Plugins/configs/XxxConfig.tsx` | **新建**：规则列表页（参考 `AutoReply.tsx` 或 `Forward.tsx`） |
-| 3 | `backend/app/worker/plugins/builtin/xxx/manifest.py` | `config_schema["x-ui-mode"] = "rules"` |
+| 3 | 插件包内 `manifest.py` | `config_schema["x-ui-mode"] = "rules"`；新插件应放在远程仓库或 `plugins/local_imports/xxx/` 后由 Web 安装 |
 | 4 | `frontend/src/App.tsx` | ① import 新页面组件 ② 添加路由 `:aid/features/xxx` ③ 在 `FEATURE_CONFIG_PAGES` 中添加 key |
 | 5 | `frontend/src/pages/Plugins/_shared/featureConfig.ts` | 在共享的 `FEATURE_CONFIG_PAGE_KEYS` Set 中添加 key |
 | 6 | `backend/app/db/models/feature.py` | 添加 `FEATURE_XXX = "xxx"` 常量（如已有可跳过） |
@@ -1256,7 +2050,7 @@ const FEATURE_CONFIG_PAGES: Record<string, { title: string; description: string 
 
 #### 5. FEATURE_CONFIG_PAGE_KEYS — 共享入口点
 
-0.18.0 起，账号详情与插件中心统一复用同一个 helper，不再维护两份 Set。新增专属配置页时只改这一处：
+账号详情与插件中心统一复用同一个 helper，不维护两份 Set。新增专属配置页时只改这一处：
 
 ```tsx
 // frontend/src/pages/Plugins/_shared/featureConfig.ts
@@ -1275,18 +2069,19 @@ const FEATURE_CONFIG_PAGE_KEYS = new Set([
 FEATURE_XXX = "xxx"
 ```
 
-此常量供 `rules.py` dry-run 分支和其它插件引用。
+此常量只在 TelePilot 主仓库为插件新增专属后端分支时需要。普通远程/本地插件不需要改 `feature.py`，安装流程会根据 `plugin.json` / `manifest.py` 自动登记 `Feature`。
 
 ---
 
-### 规则驱动补充：后端 Dry-Run 适配
+### 规则配置页补充：后端 Dry-Run 适配
 
-规则驱动页面通常需要试运行功能，后端需同步适配 `rules.py`：
+规则配置页通常需要试运行功能，后端需同步适配 `rules.py`：
 
 #### 插件侧导出 _dry_run_match
 
 ```python
-# backend/app/worker/plugins/builtin/xxx/plugin.py
+# plugins/local_imports/xxx/plugin.py
+# 或远程插件仓库中的 xxx/plugin.py
 
 def _dry_run_match(cfg: dict, text: str, chat_id: int | None = None) -> tuple[bool, str | None]:
     """纯函数：给定规则 config + 样本消息，返回 (matched, output)。
@@ -1299,7 +2094,7 @@ def _dry_run_match(cfg: dict, text: str, chat_id: int | None = None) -> tuple[bo
 ```
 
 ```python
-# backend/app/worker/plugins/builtin/xxx/__init__.py
+# 插件包 __init__.py
 from .plugin import _dry_run_match  # noqa: F401 — 供 API dry-run 导入
 ```
 
@@ -1310,7 +2105,8 @@ from .plugin import _dry_run_match  # noqa: F401 — 供 API dry-run 导入
 
 # ① import
 from ..db.models.feature import FEATURE_XXX
-from ..worker.plugins.builtin.xxx.plugin import _dry_run_match as _xxx_dry_run_match
+# 普通插件不从 TelePilot 本体 import。需要接入平台 rules.py 时，应通过
+# 已安装插件目录动态加载其 `_dry_run_match`，并在插件自身测试中覆盖该纯函数。
 
 # ② 在 dry_run_rule() 函数中，在 fallback return 之前添加分支
 #    ⚠️ 必须放在最后的 `return RuleDryRunResponse(matched=False, ...)` 之前！
@@ -1344,7 +2140,7 @@ if key == FEATURE_XXX:
 
 - 创建 `frontend/src/pages/Plugins/configs/XxxConfig.tsx`，直接展示/编辑单个 config 对象
 - `manifest.py` 中声明 `config_schema["x-ui-mode"] = "single"`
-- 其余适配步骤与规则驱动专属页相同（App.tsx 路由 + FEATURE_CONFIG_PAGES + 两个 PAGE_KEYS）
+- 其余适配步骤与规则配置专属页相同（App.tsx 路由 + FEATURE_CONFIG_PAGES + 两个 PAGE_KEYS）
 - 后端不需要 dry-run 分支
 
 #### 页面布局约定
@@ -1352,12 +2148,12 @@ if key == FEATURE_XXX:
 单配置对象页参考 `Game24Config.tsx`、`CodexImageConfig.tsx` 与 `ChatGPTImageConfig.tsx`，并遵守“统一配置页样式规范”。页面从上到下固定为：
 
 1. 返回按钮 + 插件标题
-2. 顶部冻结“配置操作”条（保存配置 / 撤销，滚动长表单时保持可见）
-3. 使用说明（真实触发指令示例、参数示例、注意事项）
-4. 功能总开关（当前账号是否启用、关键运行状态、最近错误）
-5. 配置表单（账号级配置为主，必要时展示全局配置）
+2. 使用说明（真实触发指令示例、参数示例、注意事项）
+3. 功能总开关（当前账号是否启用、关键运行状态、最近错误）
+4. 插件配置（账号级配置为主，必要时展示全局配置；保存条固定在卡片底部）
+5. 插件预览（模板预览是建议项，没有预览时给出提示）
 
-“使用说明 → 功能总开关 → 配置”要作为三张独立卡片，不要把总开关塞进说明或配置里。单配置插件通常靠指令触发，用户最关心的是“怎么叫它”“现在能不能用”“要改哪些参数”，所以顺序保持稳定。配置字段要按可用屏幕宽度展开，避免窄表单造成长配置反复滚动。
+“使用说明 → 功能总开关 → 插件配置 → 插件预览”要作为独立卡片，不要把总开关塞进说明或配置里。单配置插件通常靠指令触发，用户最关心的是“怎么叫它”“现在能不能用”“要改哪些参数”“最终发出去是什么样”，所以顺序保持稳定。配置字段要按可用屏幕宽度展开，避免窄表单造成长配置反复滚动。
 
 #### 指令型插件配置
 
@@ -1397,7 +2193,7 @@ config_schema={
 
 专属页面字段应与运行时实际读取的配置保持一致；`manifest.config_schema` 也要同步，避免通用配置页、接口校验和文档出现三套口径。
 
-`codex_image` 是内置图片插件，代码位于 `backend/app/worker/plugins/builtin/codex_image/`，会随后端镜像发布并由 builtin registry 自动 seed。旧数据库里的 `account_feature(feature_key="codex_image")` 不需要迁移，worker 会按普通内置插件路径加载；若未来再次作为远程插件发布，必须另起 key 或先设计清晰迁移策略，避免和 builtin key 冲突。
+`codex_image` 现在是插件库图片插件，源码由插件库分发，用户需在“安装插件”页安装后才会复制到 `plugins/installed/codex_image/` 并加载。旧数据库中已经启用或保存配置的 `codex_image` 会在 seed 阶段尝试从插件库登记为 repo installed 插件，保留账号配置和规则引用；未使用过的旧 builtin feature 行会被清理，避免误展示。
 
 ---
 
@@ -1409,12 +2205,14 @@ config_schema={
 - `level: "account"` 或无 level → 账号配置区
 - **不需要**添加到 `FEATURE_CONFIG_PAGE_KEYS`，不需要创建插件专属页面文件
 - 新插件请优先写 `config_schema["x-ui-mode"] = "single"`；`schema` 只保留为旧插件兼容别名
-- 页面同样使用“使用说明 → 功能总开关 → 配置”的独立卡片顺序，并在有可保存字段时显示顶部冻结“配置操作”条
+- 页面同样使用“使用说明 → 功能总开关 → 插件配置 → 插件预览”的独立卡片顺序，并在有可保存字段时把“配置操作”条固定在插件配置卡片底部
 - 页面宽度、滚动高度、字段间距和控件风格应与 ChatGPT2API / 自定义指令 / LLM 等系统配置页保持一致：使用统一的 `Input`、`Select`、`Switch`、`Textarea`、`Label` 视觉语言，不在字段标题里放 emoji 或临时说明块
-- 普通配置字段展示在配置区顶部；`message_template` / `*_message_template` / `*_template` 等消息模板字段进入“消息模板”折叠组；`template_preview` / `*_preview` 进入底部“预览结果”。
+- 普通配置字段展示在配置区顶部；`message_template` / `*_message_template` / `*_template` 等消息模板字段进入“消息模板”折叠组；`template_preview` / `*_preview` 进入独立“插件预览”卡片。
 - `message_template`、`*_message_template`、`prompt`、`content`、`text` 等长文案字段会按多行文本体验展示；字段描述里应写清占位符和示例值。
 - `field.readOnly === true`、`template_preview`、`*_preview`、`template_placeholders` 会自动按只读块渲染，不会保存回配置；其中预览字段使用 `TelegramHtmlPreview` 展示最终 HTML 消息效果。
 - 多个预览字段应在同一个 Telegram 风格预览场景里按字段顺序展示为多条气泡，方便同时检查开局、进行中、答对、超时、取消和错误提示等模板。
+- `usage_preview` / `usage_guide` / `usage_instructions` / `ai_usage_guide` 只用于“使用说明”卡片，不会再出现在插件配置字段区；`template_placeholders` 只作为只读占位符说明，不算详细使用说明。
+- 配置布局可使用 `x-ui-section`、`x-ui-order`、`x-ui-columns` 在平台容器内做分组、排序和列数控制。
 
 ```python
 # config_schema 示例（适用于通用独立配置页自动渲染）
@@ -1492,7 +2290,7 @@ class DemoPlugin(Plugin):
 - callback 异常会写入插件日志，并保留任务等待下次 tick；不要把异常吞掉后静默失败
 - `ctx.scheduler` 注册的是运行期任务；worker 重启后会由插件 `on_startup` 重新注册，若需要精确保存 `last_fire` / `next_fire`，插件应把状态写回自己的配置或规则表
 - 如果任务依赖插件配置，配置变更后建议触发插件热重载，或在 callback 中读取最新 `ctx.config`
-- 第三方插件拿到的是 scheduler facade，不会直接获得 Redis / DB / Telethon session
+- 第三方插件拿到的是 scheduler facade，不会直接获得 Redis / DB / userbot session
 - GUI 定时任务页仍走 `Rule(feature_key="scheduler")`，由同一个 `PlatformScheduler` 调度；后续新增插件不要依赖 `SchedulerPlugin`，只依赖 `ctx.scheduler`
 
 ---
@@ -1501,9 +2299,9 @@ class DemoPlugin(Plugin):
 
 - 与 TelePilot 现有页面风格一致
 - React + TypeScript + TailwindCSS
-- 新页面参考 `AutoReply.tsx`（规则驱动）、`Game24Config.tsx` / `CodexImageConfig.tsx` / `ChatGPTImageConfig.tsx`（单配置）或 `GenericPluginConfig.tsx`（通用 schema）的代码结构
-- 使用说明、功能总开关、配置主体必须是独立卡片，顺序固定为“使用说明 → 功能总开关 → 配置”
-- 有可保存字段的长表单必须使用顶部冻结“配置操作”条，按钮文案统一为“保存配置”“撤销”
+- 新页面参考 `AutoReply.tsx`（规则配置页）、`Game24Config.tsx` / `CodexImageConfig.tsx` / `ChatGPTImageConfig.tsx`（单配置）或 `GenericPluginConfig.tsx`（通用 schema）的代码结构
+- 使用说明、功能总开关、插件配置、插件预览必须是独立卡片，顺序固定为“使用说明 → 功能总开关 → 插件配置 → 插件预览”
+- 有可保存字段的长表单必须在插件配置卡片底部使用 sticky“配置操作”条，按钮文案统一为“保存配置”“撤销”
 - 配置区域宽度随页面自适应，不使用窄 `max-w-*` 限制；字段多时使用响应式 grid
 - 表格列宽要稳定，账号详情页和插件中心的同类列表要纵向对齐
 - 配置按钮不依赖启用状态；即使插件当前关闭，也应允许先配置
@@ -1514,6 +2312,7 @@ class DemoPlugin(Plugin):
 新增插件前端配置页后，逐项检查：
 
 - [ ] `manifest.py` 中 `config_schema["x-ui-mode"]` 已声明：推荐 `rules` / `single` / `platform`；仅旧插件保留 `schema`
+- [ ] `config_schema` 已声明详细使用说明：优先使用 `x-usage-guide` / `x-usage-steps`，或只读 `usage_preview`
 - [ ] `types.ts` 中 `XxxRuleConfig` 接口与 `manifest.py` config_schema 字段一致
 - [ ] 如果有专属页面：`App.tsx` 中路由路径 `:aid/features/{key}` 与插件 key 一致
 - [ ] 如果有专属页面：`App.tsx` 中 `FEATURE_CONFIG_PAGES` 包含该 key
@@ -1521,13 +2320,14 @@ class DemoPlugin(Plugin):
 - [ ] 如果是指令型插件：`command` 字段可配置，`Plugin.command_config_keys = {"command"}`，说明文案动态读取当前指令
 - [ ] 指令型插件的帮助、取消/结束、撤销、自动删除、冷却/超时、消息模板等用户常调行为已尽量配置化；帮助模板支持 `{prefix}`，不硬编码 `,命令`
 - [ ] `owner_only=False` 仅用于开放 `on_message`，没有把普通 incoming 消息当成管理指令入口
-- [ ] 页面按“使用说明 → 功能总开关 → 配置”的独立卡片顺序排布；不要把说明、总开关和配置混在一张卡片
-- [ ] 有可保存字段的页面使用顶部冻结“配置操作”条；长配置不只在底部放保存按钮
+- [ ] 页面按“使用说明 → 功能总开关 → 插件配置 → 插件预览”的独立卡片顺序排布；不要把说明、总开关、配置和预览混在一张卡片
+- [ ] 有可保存字段的页面在插件配置卡片底部使用 sticky“配置操作”条；长配置不只在滚动到底才能保存
+- [ ] 如会发送消息，建议提供 `template_preview` 或 `*_preview`；没有预览不会阻断运行，但会降低配置体验
 - [ ] 配置主体宽度自适应屏幕宽度，字段用响应式 grid 或分组，不使用窄 `max-w-*` 限制
 - [ ] 用户可见文案使用“插件”，不展示内部分类名或“Schema 弹窗”
-- [ ] 如需 dry-run：`plugin.py` 导出 `_dry_run_match`，`__init__.py` re-export，`rules.py` 在 fallback 之前添加分支
-- [ ] 如需 dry-run：`feature.py` 中有 `FEATURE_XXX` 常量
-- [ ] 前端 `pnpm -C frontend exec tsc -b --noEmit` 和 `pnpm -C frontend build` 通过
+- [ ] 如需 dry-run：`plugin.py` 导出 `_dry_run_match`，`__init__.py` re-export；平台专属配置页再按需接入 `rules.py`
+- [ ] 如需接入平台 `rules.py` 专属 dry-run：`feature.py` 中有 `FEATURE_XXX` 常量，后端通过已安装插件目录动态调用 `_dry_run_match`；普通远程/本地插件可先用插件自身测试覆盖 dry-run 纯函数
+- [ ] 前端 `pnpm --dir frontend typecheck` 和 `pnpm --dir frontend build` 通过
 
 ---
 
@@ -1537,24 +2337,31 @@ class DemoPlugin(Plugin):
 
 - [ ] `__init__.py` 是否导出 `PLUGIN_CLASS` 和 `MANIFEST`
 - [ ] `MANIFEST.key` 是否和插件 class key 一致
+- [ ] 新 Telegram 交互插件是否声明了 `usage`、`event_subscriptions`、`capabilities`
+- [ ] 插件主入口是否读取标准事件信封，例如 `payload["message"]`、`payload["chat"]`、`payload["sender"]`、`payload["payment"]`
+- [ ] 发送、编辑、删除、置顶、按钮 ACK、Inline answer、结算是否通过 `ctx.messages` 或标准 action，而不是直接调用 live client
+- [ ] 日志页是否能用 `trace_id`、`plugin_key`、`reason_code` 查到订阅匹配、插件执行和动作结果
 - [ ] `permissions` 是否覆盖实际调用的方法
-- [ ] `on_command` 签名是否是 5 参数
+- [ ] 如果保留旧管理员命令 hook，`on_command` 签名是否是 5 参数；不要把旧 hook 当作公共玩法的新入口
 - [ ] 错误是否都被捕获并反馈给用户
 
-### 为什么我的 on_interaction 没被调用
+### 为什么我的 Event Bus / on_interaction 没被调用
 
-按这条顺序排查，基本能定位 90% 的交互 Bot 问题：
+按这条顺序排查，基本能定位 90% 的插件启动问题：
 
 - `InstalledPlugin.enabled`：远程插件是否已安装并启用（旧 `RemotePlugin` 表仅作只读兼容）。
 - `AccountFeature.enabled`：当前账号是否启用了这个插件。
-- 规则动作是否是 `action == "module"`，不是普通通知或算数题。
-- `module_key` 是否和 `MANIFEST.key` 完全一致，`module_action` 是否等于 `interaction_entries[].key`。
+- `plugin.json` / `manifest.py` 是否声明了 `event_subscriptions`，事件来源、事件类型、scope 和 filters 是否覆盖当前输入。
+- 日志页按 `trace_id` 或消息 ID 搜索，查看 `subscription_match` 的 `reason_code`：`source_not_subscribed`、`event_type_not_subscribed`、`scope_not_matched`、`filter_not_matched` 通常能直接说明未触发原因。
+- 需要原生字段的插件是否声明 `capabilities.telegram_native_raw.enabled=true`；未声明时读取不到 `native_raw` 是正常边界。
+- 返回 action 后，日志页是否有 `event_action`；如果出现 `send_channel_deprecated`，说明插件还在请求旧 `notice` / `bbot_notice` 通道。
+- 如果仍使用旧 `interaction_entries` / `on_interaction` 兼容层，再检查规则动作是否是 `action == "module"`，`module_key` 是否和 `MANIFEST.key` 完全一致，`module_action` 是否等于 `interaction_entries[].key`。
 - 当前群 `chat_id` 是否在规则 `chat_ids` 内；未配置时才表示所有群。
 - 触发模式是否匹配：付费通知走 `payment_confirmed`，免费关键词走 `keyword`，已有会话后的群消息才走 `message`。
-- 群局插件是否声明了 `interaction_entries[].session_scope = "chat"`；如果漏写，规则设置 `concurrency=user` 后，后续群友消息可能找不到会话。
+- 群局兼容入口是否声明了 `interaction_entries[].session_scope = "chat"`；如果漏写，规则设置 `concurrency=user` 后，后续群友消息可能找不到会话。
 - 用户私有流程是否声明了 `session_scope = "user"`，并在插件内部状态 key 中包含用户 ID。
 - worker 是否在线；离线时交互 Bot 会返回“插件启动失败：worker 调用超时”。
-- 日志页搜索 `run_interaction_entry`、`interaction module`、`unsupported type`，未知 action type 会写入 runtime log，便于发现返回了平台尚不支持的动作。
+- 日志页搜索 `plugin_runtime_status`、`run_interaction_entry`、`interaction module`、`unsupported type`、`result_contract`，未知 action type 或越权 `send_via` 会写入 trace/runtime log，便于发现返回了平台尚不支持或未声明的动作。
 
 ### 常见问题
 
@@ -1571,7 +2378,9 @@ class DemoPlugin(Plugin):
 
 ## 17. 完整示例
 
-### 天气查询插件
+标准 Telegram 交互插件请优先参考 `examples/plugins/event_bus_demo`，它覆盖 message、command、callback、inline、payment、`native_raw` 和旧 `notice` 迁移错误。下面的天气查询插件是 **管理员命令型兼容示例**，用于说明旧 `on_command` API 和前缀处理；它不应作为公共群玩法或高频交互插件的新模板。
+
+### 天气查询插件（管理员命令兼容）
 
 ```python
 # manifest.py
@@ -1628,6 +2437,7 @@ class WeatherPlugin(Plugin):
         city = " ".join(args) if args else str(ctx.config.get("default_city") or "Beijing")
         try:
             # 第三方插件发布时应声明 external_http + allowed_hosts，并优先使用 ctx.http。
+            # 这里保留直接 httpx 调用只是为了展示旧管理员命令兼容写法。
             async with httpx.AsyncClient(timeout=10.0) as client:
                 geo = await client.get(
                     "https://geocoding-api.open-meteo.com/v1/search",

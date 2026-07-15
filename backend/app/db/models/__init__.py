@@ -2,12 +2,22 @@
 
 from .account import Account, HumanizeConfig, Proxy
 from .account_bot import AccountBot, AccountBotUser
+from .action_event import ActionEvent
 from .command import AccountCommandLink, CommandTemplate, LLMProvider
 from .feature import AccountFeature, Feature
 from .ignored_peer import IgnoredPeer
 from .llm_usage import LLMUsage
-from .log import AuditLog, RuntimeLog
+from .log import (
+    AuditLog,
+    EventAction,
+    EventSpan,
+    EventTrace,
+    PluginConfigActionJob,
+    PluginRuntimeStatus,
+    RuntimeLog,
+)
 from .notify import NotifyBot
+from .payout_compensation import PayoutCompensation
 from .plugin import InstalledPlugin, PluginInstall
 from .plugin_global_config import PluginGlobalConfig
 from .plugin_repo import PluginRepo
@@ -22,9 +32,13 @@ __all__ = [
     "AccountBot",
     "AccountBotUser",
     "AccountCommandLink",
+    "ActionEvent",
     "AccountFeature",
     "AuditLog",
     "CommandTemplate",
+    "EventAction",
+    "EventSpan",
+    "EventTrace",
     "Feature",
     "HumanizeConfig",
     "IgnoredPeer",
@@ -33,9 +47,12 @@ __all__ = [
     "LLMUsage",
     "NotificationChannel",
     "NotifyBot",
+    "PayoutCompensation",
     "PluginInstall",
     "PluginGlobalConfig",
+    "PluginConfigActionJob",
     "PluginRepo",
+    "PluginRuntimeStatus",
     "Proxy",
     "RateLimitEvent",
     "RateLimitOverride",

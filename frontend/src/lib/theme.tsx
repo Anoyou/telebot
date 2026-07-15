@@ -12,8 +12,12 @@ export type ResolvedTheme = "light" | "dark";
 
 const THEME_STORAGE_KEY = "telepilot-theme";
 const LEGACY_THEME_STORAGE_KEY = "telebot-theme";
-const LIGHT_THEME_COLOR = "#2563eb";
-const DARK_THEME_COLOR = "#0b1120";
+const LIGHT_THEME_COLOR = "#F2F0EC";
+const DARK_THEME_COLOR = "#1C1C1E";
+// 两套主题都用 default：让 iOS 用 theme-color 填状态栏底色、按亮度自动选文字色。
+// 不用 black-translucent——那模式下 iOS 强制白字并自绘一层深色半透明 scrim 保证可读，
+// 那层 scrim 是系统画的、CSS 删不掉，就是浅色主题顶部那条灰带的真身。
+const STATUS_BAR_STYLE = "default";
 
 interface ThemeContextValue {
   theme: Theme;
@@ -38,12 +42,23 @@ function resolveTheme(theme: Theme): ResolvedTheme {
 
 function applyResolvedTheme(resolvedTheme: ResolvedTheme) {
   const root = document.documentElement;
+  const chromeColor = resolvedTheme === "dark" ? DARK_THEME_COLOR : LIGHT_THEME_COLOR;
+
   root.classList.toggle("dark", resolvedTheme === "dark");
   root.style.colorScheme = resolvedTheme;
+  root.style.backgroundColor = chromeColor;
+  document.body.style.backgroundColor = chromeColor;
 
   const meta = document.querySelector<HTMLMetaElement>('meta[name="theme-color"]');
   if (meta) {
-    meta.content = resolvedTheme === "dark" ? DARK_THEME_COLOR : LIGHT_THEME_COLOR;
+    meta.content = chromeColor;
+  }
+
+  const statusBarMeta = document.querySelector<HTMLMetaElement>(
+    'meta[name="apple-mobile-web-app-status-bar-style"]',
+  );
+  if (statusBarMeta) {
+    statusBarMeta.content = STATUS_BAR_STYLE;
   }
 }
 

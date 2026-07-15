@@ -1,0 +1,28 @@
+{
+  "source": {
+    "type": "message",
+    "channel": "userbot",
+    "driver": "telethon",
+    "account_id": 1,
+    "message_id": 9001
+  },
+  "chat": {"id": -100100200300, "type": "supergroup"},
+  "message": {"chat_id": -100100200300, "message_id": 9001, "text": "native raw audit ping"},
+  "actor": {"user_id": 501, "display_name": "玩家 A"},
+  "sender": {"user_id": 501, "display_name": "玩家 A"},
+  "trigger": {"mode": "audit_fixture"},
+  "native_raw_meta": {
+    "enabled": true,
+    "source": "userbot",
+    "driver": "telethon",
+    "object": "message",
+    "stored_in_trace": false,
+    "size_bytes": 245
+  },
+  "native_raw": {
+    "id": 9001,
+    "peer_id": {"channel_id": 100100200300},
+    "from_id": {"user_id": 501},
+    "message": "native raw audit ping"
+  }
+}

@@ -9,7 +9,6 @@
 //  - 都不显示时返回 null（不占空间）
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { RefreshCw, ShieldAlert } from "lucide-react";
-import { useEffect, useRef } from "react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -78,49 +77,36 @@ async function hardRefreshWithoutSw(): Promise<void> {
     }
   }
 
-  // 强制整页重载
-  window.location.replace(`${window.location.pathname}?_v=${Date.now()}${window.location.hash}`);
+  // 保留当前路由与筛选参数，只追加缓存破坏参数。
+  const target = new URL(window.location.href);
+  target.searchParams.set("_v", String(Date.now()));
+  window.location.replace(target.toString());
 }
 
 function VersionMismatchContent({ backendVersion }: { backendVersion: string }) {
-  const autoAttemptedRef = useRef(false);
-
-  useEffect(() => {
-    if (autoAttemptedRef.current) return;
-    autoAttemptedRef.current = true;
-
-    // 每个版本差异组合仅自动修复一次，避免极端情况下循环刷新。
-    const guardKey = `telepilot-version-sync-attempt:${APP_VERSION}->${backendVersion}`;
-    if (sessionStorage.getItem(guardKey) === "1") return;
-    sessionStorage.setItem(guardKey, "1");
-
-    void hardRefreshWithoutSw();
-  }, [backendVersion]);
-
   return (
     <div
       role="alert"
       className="
         flex items-center justify-between gap-3
-        border-b border-amber-300 bg-amber-50 px-4 py-2 text-sm text-amber-800
-        dark:border-amber-900/70 dark:bg-amber-950/35 dark:text-amber-100
+        border-b border-warning/40 bg-warning/10 px-4 py-2 text-sm text-warning
       "
     >
       <div className="flex min-w-0 items-center gap-2">
         <RefreshCw className="h-4 w-4 shrink-0" />
         <span className="font-medium">前后端版本不一致</span>
-        <span className="hidden text-amber-700 dark:text-amber-200 sm:inline">
+        <span className="hidden text-warning sm:inline">
           前端 v{APP_VERSION} · 后端 v{backendVersion}
-          {" — 正在自动清缓存并刷新，如未恢复可手动修复"}
+          {"，清缓存后仍不一致说明服务器尚未部署对应前端"}
         </span>
       </div>
       <Button
         size="sm"
         variant="outline"
-        className="shrink-0 border-amber-400 bg-amber-100 hover:bg-amber-200 dark:border-amber-800 dark:bg-amber-950/50 dark:hover:bg-amber-900/50"
+        className="shrink-0 border-warning/50 bg-warning/15 hover:bg-warning/25"
         onClick={() => void hardRefreshWithoutSw()}
       >
-        手动修复
+        清缓存重载
       </Button>
     </div>
   );

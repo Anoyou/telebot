@@ -8,7 +8,7 @@
   - 一键调严 / override 列表
   - 拟人化配置 GET/PUT
   - 模拟测算（MVP 简化）
-  - 全局总闸 + 全局每秒上限
+  - 全局总闸
 
 写操作通过 ``_audit`` 写一条 ``AuditLog``；A Agent 的 audit 服务到位时可改为调用它。
 """
@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from datetime import datetime
 from datetime import time as dtime
 from typing import Any
@@ -40,7 +41,6 @@ from ..schemas.rate_limit import (
     AccountRateLimitOut,
     EstimateRequest,
     EstimateResponse,
-    GlobalLimitsRequest,
     HumanizeOut,
     HumanizeUpdate,
     KillSwitchRequest,
@@ -52,7 +52,10 @@ from ..schemas.rate_limit import (
     UsageResponse,
 )
 from ..services import audit as audit_svc
+from ..services import auth_login_security, event_trace
 from ..services import rate_limit_service as svc
+from ..services.ai_feature import AI_ENABLED_SETTING_KEY, normalize_ai_enabled
+from ..util.update_target import normalize_update_branch, normalize_update_remote
 from ..worker.ipc import GCMD_KILL_SWITCH, GCMD_RELOAD_GLOBAL, GLOBAL_CHANNEL, make_cmd
 from ..worker.ratelimit.buckets import TokenBuckets
 from ..worker.ratelimit.overrides import add_override, drop_override, list_active
@@ -551,45 +554,46 @@ async def post_kill_switch(payload: KillSwitchRequest, db: DBSession, user: Curr
         target="system",
         detail={"enabled": enabled},
     )
-    try:
-        from ..worker import supervisor
+    from ..services import account_bot_runtime, interaction_bot_runtime
+    from ..worker import supervisor
 
-        if enabled:
-            await supervisor.stop_running_workers()
-        else:
-            await supervisor.start_active_workers()
-    except Exception:  # noqa: BLE001
-        pass
-    # 全局广播给其它监听者 / 多进程场景
+    operations = (
+        (
+            supervisor.stop_running_workers(),
+            account_bot_runtime.stop_account_bot_manager(),
+            interaction_bot_runtime.stop_interaction_bot_manager(),
+        )
+        if enabled
+        else (
+            supervisor.start_active_workers(),
+            account_bot_runtime.start_account_bot_manager(),
+            interaction_bot_runtime.start_interaction_bot_manager(),
+        )
+    )
+    results = await asyncio.gather(*operations, return_exceptions=True)
+    failures = [
+        f"{type(result).__name__}: {result}"
+        for result in results
+        if isinstance(result, BaseException)
+    ]
+
+    # 全局广播给其它监听者 / 多进程场景；失败也必须反馈，不能伪装成全局已收敛。
     try:
         redis = get_redis()
         await redis.publish(GLOBAL_CHANNEL, make_cmd(GCMD_KILL_SWITCH, enabled=enabled))
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001
+        failures.append(f"Redis broadcast {type(exc).__name__}: {exc}")
+    if failures:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "code": "KILL_SWITCH_PARTIAL_FAILURE",
+                "message": "总闸目标状态已保存，但运行时未完全收敛。",
+                "enabled": enabled,
+                "errors": failures,
+            },
+        )
     return {"enabled": enabled}
-
-
-@router.get("/api/system/global-limits")
-async def get_global_limits(db: DBSession, _user: CurrentUser) -> dict[str, int]:
-    val = await _get_setting(db, "global_api_qps", {"api_qps_total": 0})
-    qps = val.get("api_qps_total", 0) if isinstance(val, dict) else int(val)
-    return {"api_qps_total": int(qps)}
-
-
-@router.put("/api/system/global-limits")
-async def put_global_limits(
-    payload: GlobalLimitsRequest, db: DBSession, user: CurrentUser
-) -> dict[str, int]:
-    await _set_setting(db, "global_api_qps", {"api_qps_total": int(payload.api_qps_total)})
-    await _audit(
-        db,
-        user.id,
-        "set_global_limits",
-        target="system",
-        detail={"api_qps_total": payload.api_qps_total},
-    )
-    await _broadcast_reload()
-    return {"api_qps_total": payload.api_qps_total}
 
 
 # ─────────────────────────────────────────────────────
@@ -609,16 +613,27 @@ async def get_system_settings(db: DBSession, _user: CurrentUser) -> dict[str, An
     else:
         prefix = str(prefix_val)
     kill_val = await _get_setting(db, "kill_switch", {"enabled": False})
-    qps_val = await _get_setting(db, "global_api_qps", {"api_qps_total": 0})
     tz_val = await _get_setting(db, "timezone", {"value": "Asia/Shanghai"})
     remote_update_val = await _get_setting(
         db,
         "remote_plugin_update_check",
         {"enabled": True, "interval_minutes": 360},
     )
+    app_update_target_val = await _get_setting(
+        db,
+        "app_update_target",
+        {
+            "remote": os.getenv("TELEPILOT_UPDATE_REMOTE", "origin"),
+            "branch": os.getenv("TELEPILOT_UPDATE_BRANCH", "main"),
+        },
+    )
+    ai_enabled_val = await _get_setting(db, AI_ENABLED_SETTING_KEY, {"enabled": True})
     llm_val = await _get_setting(db, "llm_limits", {})
+    payout_val = await _get_setting(db, "payout_limits", {})
     log_val = await _get_setting(db, "log_retention", {})
+    login_security_val = await _get_setting(db, "login_security", {})
     sudo_val = await _get_setting(db, "sudo_enabled", {"enabled": False})
+    prefix_required_val = await _get_setting(db, "command_prefix_required", {"enabled": True})
     echo_guard_val = await _get_setting(db, "command_echo_guard_previous_messages", None)
     if echo_guard_val is None:
         from ..settings import settings as app_settings
@@ -630,8 +645,13 @@ async def get_system_settings(db: DBSession, _user: CurrentUser) -> dict[str, An
         echo_guard_source = echo_guard_val
     tz = str(tz_val.get("value", "")) if isinstance(tz_val, dict) else str(tz_val)
     llm_limits = llm_val if isinstance(llm_val, dict) else {}
+    payout_limits = payout_val if isinstance(payout_val, dict) else {}
     log_retention = log_val if isinstance(log_val, dict) else {}
+    login_security = auth_login_security.normalize_login_security_config(
+        login_security_val if isinstance(login_security_val, dict) else {}
+    )
     remote_update = remote_update_val if isinstance(remote_update_val, dict) else {}
+    app_update_target = app_update_target_val if isinstance(app_update_target_val, dict) else {}
     try:
         remote_update_interval = int(remote_update.get("interval_minutes", 360) or 360)
     except (TypeError, ValueError):
@@ -639,21 +659,38 @@ async def get_system_settings(db: DBSession, _user: CurrentUser) -> dict[str, An
     return {
         "command_prefix": prefix,
         "kill_switch": bool(kill_val.get("enabled", False)) if isinstance(kill_val, dict) else bool(kill_val),
-        "api_qps_total": int(qps_val.get("api_qps_total", 0)) if isinstance(qps_val, dict) else int(qps_val),
         "timezone": tz or "Asia/Shanghai",
         "remote_plugin_update_check": {
             "enabled": bool(remote_update.get("enabled", True)),
             "interval_minutes": max(30, min(10080, remote_update_interval)),
         },
+        "app_update_target": {
+            "remote": str(app_update_target.get("remote") or "origin"),
+            "branch": str(app_update_target.get("branch") or "main"),
+        },
         "sudo_enabled": bool(sudo_val.get("enabled", False)) if isinstance(sudo_val, dict) else bool(sudo_val),
+        "command_prefix_required": (
+            bool(prefix_required_val.get("enabled", True))
+            if isinstance(prefix_required_val, dict)
+            else bool(prefix_required_val)
+        ),
+        "ai_enabled": normalize_ai_enabled(ai_enabled_val),
         "command_echo_guard_previous_messages": _normalize_command_echo_guard_limit(echo_guard_source),
+        "login_security": auth_login_security.login_security_config_to_dict(login_security),
         "llm_limits": {
             "per_minute": max(0, int(llm_limits.get("per_minute", 0) or 0)),
             "daily_requests": max(0, int(llm_limits.get("daily_requests", 0) or 0)),
             "daily_tokens": max(0, int(llm_limits.get("daily_tokens", 0) or 0)),
             "premium_daily": max(0, int(llm_limits.get("premium_daily", 0) or 0)),
         },
+        "payout_limits": {
+            "single_max": max(0, int(payout_limits.get("single_max", 0) or 0)),
+            "daily_max": max(0, int(payout_limits.get("daily_max", 0) or 0)),
+        },
         "log_retention": {
+            "trace_enabled": bool(log_retention.get("trace_enabled", True)),
+            "event_bus_delivery_enabled": bool(log_retention.get("event_bus_delivery_enabled", True)),
+            "inline_updates_enabled": bool(log_retention.get("inline_updates_enabled", True)),
             "runtime_log_retention_days": max(
                 0, int(log_retention.get("runtime_log_retention_days", 30) or 0)
             ),
@@ -669,6 +706,16 @@ async def get_system_settings(db: DBSession, _user: CurrentUser) -> dict[str, An
                 in {"debug", "info", "warn", "error"}
                 else "info"
             ),
+            "trace_retention_days": max(
+                0, int(log_retention.get("trace_retention_days", 30) or 0)
+            ),
+            "trace_payload_snapshot_retention_days": max(
+                0, int(log_retention.get("trace_payload_snapshot_retention_days", 7) or 0)
+            ),
+            "native_raw_persist_enabled": bool(log_retention.get("native_raw_persist_enabled", False)),
+            "native_raw_retention_days": max(
+                0, int(log_retention.get("native_raw_retention_days", 1) or 0)
+            ),
         },
     }
 
@@ -680,11 +727,23 @@ class _LLMLimitsPatch(BaseModel):
     premium_daily: int | None = None
 
 
+class _PayoutLimitsPatch(BaseModel):
+    single_max: int | None = None
+    daily_max: int | None = None
+
+
 class _LogRetentionPatch(BaseModel):
+    trace_enabled: bool | None = None
+    event_bus_delivery_enabled: bool | None = None
+    inline_updates_enabled: bool | None = None
     runtime_log_retention_days: int | None = None
     runtime_log_max_message_chars: int | None = None
     runtime_log_max_detail_chars: int | None = None
     runtime_log_min_level: str | None = None
+    trace_retention_days: int | None = None
+    trace_payload_snapshot_retention_days: int | None = None
+    native_raw_persist_enabled: bool | None = None
+    native_raw_retention_days: int | None = None
 
 
 class _RemotePluginUpdateCheckPatch(BaseModel):
@@ -692,15 +751,37 @@ class _RemotePluginUpdateCheckPatch(BaseModel):
     interval_minutes: int | None = None
 
 
+class _AppUpdateTargetPatch(BaseModel):
+    remote: str | None = None
+    branch: str | None = None
+
+
+class _LoginSecurityPatch(BaseModel):
+    notify_otp_enabled: bool | None = None
+    notify_otp_failed_attempt_threshold: int | None = None
+    notify_otp_fail_window_seconds: int | None = None
+    notify_otp_ttl_seconds: int | None = None
+    notify_otp_max_attempts: int | None = None
+    totp_enabled: bool | None = None
+    totp_mode: str | None = None
+    totp_failed_attempt_threshold: int | None = None
+    recovery_code_ttl_seconds: int | None = None
+
+
 class _SettingsPatch(BaseModel):
     """前端只会传子集；未传字段保持不变。"""
 
     command_prefix: str | None = None
     timezone: str | None = None
+    ai_enabled: bool | None = None
     sudo_enabled: bool | None = None
+    command_prefix_required: bool | None = None
     command_echo_guard_previous_messages: int | None = None
+    login_security: _LoginSecurityPatch | None = None
     remote_plugin_update_check: _RemotePluginUpdateCheckPatch | None = None
+    app_update_target: _AppUpdateTargetPatch | None = None
     llm_limits: _LLMLimitsPatch | None = None
+    payout_limits: _PayoutLimitsPatch | None = None
     log_retention: _LogRetentionPatch | None = None
 
 
@@ -724,11 +805,65 @@ async def patch_system_settings(
         if tz and tz not in __import__("zoneinfo").available_timezones():  # noqa: PLC0415
             raise _bad("invalid_timezone", f"无效时区：{tz}")
         await _set_setting(db, "timezone", {"value": tz or "Asia/Shanghai"})
+    if payload.ai_enabled is not None:
+        enabled = bool(payload.ai_enabled)
+        await _set_setting(db, AI_ENABLED_SETTING_KEY, {"enabled": enabled})
+        await _audit(db, user.id, "set_ai_enabled", target="system", detail={"enabled": enabled})
+        await _broadcast_reload()
     if payload.sudo_enabled is not None:
         enabled = bool(payload.sudo_enabled)
         await _set_setting(db, "sudo_enabled", {"enabled": enabled})
         await _audit(db, user.id, "set_sudo_enabled", target="system", detail={"enabled": enabled})
         await _broadcast_reload()
+    if payload.command_prefix_required is not None:
+        enabled = bool(payload.command_prefix_required)
+        await _set_setting(db, "command_prefix_required", {"enabled": enabled})
+        await _audit(
+            db,
+            user.id,
+            "set_command_prefix_required",
+            target="system",
+            detail={"enabled": enabled},
+        )
+        await _broadcast_reload()
+    if payload.login_security is not None:
+        current = await _get_setting(db, "login_security", {})
+        current_config = auth_login_security.normalize_login_security_config(
+            current if isinstance(current, dict) else {}
+        )
+        next_config = auth_login_security.login_security_config_to_dict(current_config)
+        data = payload.login_security.model_dump(exclude_unset=True)
+        bool_keys = {"notify_otp_enabled", "totp_enabled"}
+        bounds = {
+            "notify_otp_failed_attempt_threshold": (0, 50),
+            "notify_otp_fail_window_seconds": (60, 86400),
+            "notify_otp_ttl_seconds": (60, 1800),
+            "notify_otp_max_attempts": (1, 10),
+            "totp_failed_attempt_threshold": (1, 50),
+            "recovery_code_ttl_seconds": (60, 86400),
+        }
+        for key, value in data.items():
+            if value is None:
+                continue
+            if key in bool_keys:
+                next_config[key] = bool(value)
+                continue
+            if key == "totp_mode":
+                mode = str(value).strip().lower()
+                if mode not in auth_login_security.TOTP_MODES:
+                    raise _bad("invalid_login_security", "totp_mode 必须是 always 或 after_failures")
+                next_config[key] = mode
+                continue
+            lo, hi = bounds[key]
+            ivalue = int(value)
+            if ivalue < lo or ivalue > hi:
+                raise _bad("invalid_login_security", f"{key} 必须在 {lo}~{hi} 之间")
+            next_config[key] = ivalue
+        # 通知 OTP 没有阈值等于无效开启，直接收敛成关闭，避免误以为已保护。
+        if int(next_config.get("notify_otp_failed_attempt_threshold", 0) or 0) <= 0:
+            next_config["notify_otp_enabled"] = False
+        await _set_setting(db, "login_security", next_config)
+        await _audit(db, user.id, "set_login_security", target="system", detail=next_config)
     if payload.remote_plugin_update_check is not None:
         raw = payload.remote_plugin_update_check
         current = await _get_setting(
@@ -756,6 +891,31 @@ async def patch_system_settings(
             target="system",
             detail={"enabled": enabled, "interval_minutes": interval},
         )
+    if payload.app_update_target is not None:
+        current = await _get_setting(
+            db,
+            "app_update_target",
+            {
+                "remote": os.getenv("TELEPILOT_UPDATE_REMOTE", "origin"),
+                "branch": os.getenv("TELEPILOT_UPDATE_BRANCH", "main"),
+            },
+        )
+        current = current if isinstance(current, dict) else {}
+        try:
+            remote = normalize_update_remote(
+                payload.app_update_target.remote or current.get("remote") or "origin"
+            )
+        except ValueError as exc:
+            raise _bad("invalid_update_remote", str(exc)) from exc
+        try:
+            branch = normalize_update_branch(
+                payload.app_update_target.branch or current.get("branch") or "main"
+            )
+        except ValueError as exc:
+            raise _bad("invalid_update_branch", str(exc)) from exc
+        target = {"remote": remote, "branch": branch}
+        await _set_setting(db, "app_update_target", target)
+        await _audit(db, user.id, "set_app_update_target", target="system", detail=target)
     if payload.command_echo_guard_previous_messages is not None:
         limit = int(payload.command_echo_guard_previous_messages)
         if limit < 0 or limit > 50:
@@ -788,12 +948,32 @@ async def patch_system_settings(
             next_limits[key] = int(value)
         await _set_setting(db, "llm_limits", next_limits)
         await _audit(db, user.id, "set_llm_limits", target="system", detail=next_limits)
+    if payload.payout_limits is not None:
+        current = await _get_setting(db, "payout_limits", {})
+        if not isinstance(current, dict):
+            current = {}
+        data = payload.payout_limits.model_dump(exclude_unset=True)
+        next_payout = {
+            "single_max": max(0, int(current.get("single_max", 0) or 0)),
+            "daily_max": max(0, int(current.get("daily_max", 0) or 0)),
+        }
+        for key, value in data.items():
+            if value is None:
+                continue
+            if value < 0:
+                raise _bad("invalid_payout_limit", "payout 限额不能为负数")
+            next_payout[key] = int(value)
+        await _set_setting(db, "payout_limits", next_payout)
+        await _audit(db, user.id, "set_payout_limits", target="system", detail=next_payout)
     if payload.log_retention is not None:
         current = await _get_setting(db, "log_retention", {})
         if not isinstance(current, dict):
             current = {}
         data = payload.log_retention.model_dump(exclude_unset=True)
         next_retention = {
+            "trace_enabled": bool(current.get("trace_enabled", True)),
+            "event_bus_delivery_enabled": bool(current.get("event_bus_delivery_enabled", True)),
+            "inline_updates_enabled": bool(current.get("inline_updates_enabled", True)),
             "runtime_log_retention_days": max(
                 0, int(current.get("runtime_log_retention_days", 30) or 0)
             ),
@@ -809,14 +989,31 @@ async def patch_system_settings(
                 in {"debug", "info", "warn", "error"}
                 else "info"
             ),
+            "trace_retention_days": max(
+                0, int(current.get("trace_retention_days", 30) or 0)
+            ),
+            "trace_payload_snapshot_retention_days": max(
+                0, int(current.get("trace_payload_snapshot_retention_days", 7) or 0)
+            ),
+            "native_raw_persist_enabled": bool(current.get("native_raw_persist_enabled", False)),
+            "native_raw_retention_days": max(
+                0, int(current.get("native_raw_retention_days", 1) or 0)
+            ),
         }
+        bool_keys = {"trace_enabled", "event_bus_delivery_enabled", "inline_updates_enabled", "native_raw_persist_enabled"}
         bounds = {
             "runtime_log_retention_days": (0, 3650),
             "runtime_log_max_message_chars": (200, 20000),
             "runtime_log_max_detail_chars": (0, 50000),
+            "trace_retention_days": (0, 3650),
+            "trace_payload_snapshot_retention_days": (0, 3650),
+            "native_raw_retention_days": (0, 30),
         }
         for key, value in data.items():
             if value is None:
+                continue
+            if key in bool_keys:
+                next_retention[key] = bool(value)
                 continue
             if key == "runtime_log_min_level":
                 norm = str(value).strip().lower()
@@ -834,6 +1031,7 @@ async def patch_system_settings(
             next_retention[key] = ivalue
         await _set_setting(db, "log_retention", next_retention)
         await _audit(db, user.id, "set_log_retention", target="system", detail=next_retention)
+        await event_trace.refresh_trace_settings()
         try:
             from ..worker.supervisor import invalidate_log_retention_cache
 

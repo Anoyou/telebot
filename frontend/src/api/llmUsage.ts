@@ -13,6 +13,8 @@ export interface LLMUsageRecord {
   success: boolean;
   error_type?: string | null;
   used_fallback?: boolean;
+  request_preview?: string | null;
+  response_preview?: string | null;
   created_at: string;
 }
 
@@ -45,6 +47,10 @@ export interface PluginLLMUsageSummaryItem {
 
 export interface PluginLLMUsageSummaryResponse {
   items: PluginLLMUsageSummaryItem[];
+}
+
+export interface LLMUsageResetResponse {
+  deleted: number;
 }
 
 function buildSummaryFromItems(items: LLMUsageRecord[]): LLMUsageSummary {
@@ -92,5 +98,10 @@ export async function listPluginLLMUsageSummary(params?: {
   const { data } = await api.get<PluginLLMUsageSummaryResponse>("/api/llm/usage/plugins/summary", {
     params,
   });
+  return data;
+}
+
+export async function resetRecentLLMUsage(): Promise<LLMUsageResetResponse> {
+  const { data } = await api.delete<LLMUsageResetResponse>("/api/llm/usage/recent");
   return data;
 }

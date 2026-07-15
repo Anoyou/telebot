@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 把 .env 里关键密钥（MASTER_KEY / JWT_SECRET）单独导出成一份小文件，
+# 把 .env 里关键密钥（MASTER_KEY / JWT_SECRET / UPDATER_TOKEN）单独导出成一份小文件，
 # 便于离线 / 异地备份。
 #
 # 默认走 gpg 对称加密（提示你输口令）→ 输出 .gpg；
@@ -65,8 +65,8 @@ chmod 600 "$TMP"
   echo "# 还原方式：把下列内容写回 .env，保持 KEY=VALUE 原样即可。"
   echo "# 重要：恢复 DB 备份时，MASTER_KEY 必须与备份当时一致，否则 session 解密失败。"
   echo "#"
-  grep -E '^(MASTER_KEY|JWT_SECRET)=' "$ENV_FILE" || {
-    echo "✗ .env 里没有 MASTER_KEY / JWT_SECRET" >&2
+  grep -E '^(MASTER_KEY|JWT_SECRET|UPDATER_TOKEN)=' "$ENV_FILE" || {
+    echo "✗ .env 里没有可备份的关键密钥" >&2
     exit 2
   }
 } > "$TMP"

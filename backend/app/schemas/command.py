@@ -23,7 +23,9 @@ from ..db.models.command import (
     COMMAND_TYPE_REPLY_TEXT,
     COMMAND_TYPE_RUN_PLUGIN,
     LLM_API_FORMAT_CHAT_COMPLETIONS,
+    LLM_CLIENT_IDENTITY_AUTO,
     LLM_MODALITY_TEXT,
+    LLM_PROTOCOL_PROFILE_STANDARD,
     LLM_WEB_SEARCH_API_FORMAT_AUTO,
 )
 
@@ -313,6 +315,10 @@ class ProviderModel(BaseModel):
     enabled: bool = True
     custom: bool = False
     label: str | None = Field(default=None, max_length=128)
+    supports_tools: bool | None = None
+    supports_images: bool | None = None
+    supports_temperature: bool | None = None
+    reasoning_efforts: list[Literal["minimal", "low", "medium", "high", "xhigh"]] | None = None
 
     @field_validator("id")
     @classmethod
@@ -337,10 +343,27 @@ class LLMProviderCreate(BaseModel):
     )
     """API 协议；和 provider 厂商解耦——同一个反代 base_url 可能只支持其中某种。"""
 
+    protocol_profile: Literal["standard", "claude_code_proxy"] = (
+        LLM_PROTOCOL_PROFILE_STANDARD
+    )
+    """Anthropic Messages 请求兼容档案；其他 API 协议会在服务层规范化为 standard。"""
+
     web_search_api_format: Literal["auto", "chat_completions", "responses", "anthropic_messages"] = (
         LLM_WEB_SEARCH_API_FORMAT_AUTO
     )
     """联网搜索时的协议覆盖；auto 会让 OpenAI/chat_completions 在联网时临时走 responses。"""
+
+    client_identity_profile: Literal[
+        "auto",
+        "minimal",
+        "openai_sdk",
+        "codex_cli",
+        "codex_desktop",
+        "claude_code",
+        "claude_desktop",
+        "grok_cli",
+    ] = LLM_CLIENT_IDENTITY_AUTO
+    """客户端身份档案；auto 按本次实际协议解析。与 protocol_profile 相互独立。"""
 
     # ── 路由元数据（全可选；不填走默认）───────────────────────
     modality: Literal["text", "vision", "audio", "multimodal"] = Field(
@@ -411,6 +434,20 @@ class LLMProviderUpdate(BaseModel):
     base_url: str | None = Field(default=None, max_length=255)
     default_model: str | None = Field(default=None, min_length=1, max_length=64)
     api_format: Literal["chat_completions", "responses", "anthropic_messages"] | None = None
+    protocol_profile: Literal["standard", "claude_code_proxy"] | None = None
+    client_identity_profile: (
+        Literal[
+            "auto",
+            "minimal",
+            "openai_sdk",
+            "codex_cli",
+            "codex_desktop",
+            "claude_code",
+            "claude_desktop",
+            "grok_cli",
+        ]
+        | None
+    ) = None
     web_search_api_format: Literal["auto", "chat_completions", "responses", "anthropic_messages"] | None = None
 
     # 路由元数据（全可选；None / 缺省 = 不动）
@@ -448,6 +485,8 @@ class LLMProviderOut(BaseModel):
     base_url: str | None = None
     default_model: str
     api_format: str = LLM_API_FORMAT_CHAT_COMPLETIONS
+    protocol_profile: str = LLM_PROTOCOL_PROFILE_STANDARD
+    client_identity_profile: str = LLM_CLIENT_IDENTITY_AUTO
     web_search_api_format: str = LLM_WEB_SEARCH_API_FORMAT_AUTO
     # 路由元数据（出参始终带，便于前端展示）
     modality: str = LLM_MODALITY_TEXT
@@ -514,15 +553,42 @@ class DetectProviderProtocolsRequest(BaseModel):
     proxy_id: int | None = Field(default=None, ge=1)
     pid: int | None = Field(default=None, ge=1)
     model: str | None = Field(default=None, max_length=128)
+    # 阶段 B：可选自然提示词；不传则用稳定默认。探测使用自然语言而非字面量 ping。
+    system_prompt: str | None = Field(default=None, max_length=2000)
+    message: str | None = Field(default=None, max_length=2000)
 
 
 class ProtocolProbeResult(BaseModel):
-    """单个 API 协议探测结果。"""
+    """单个 API 协议探测结果。
+
+    阶段 B 起补充身份、阶段与结构化错误分类字段（全部可选，向后兼容）。
+    """
 
     ok: bool
     status_code: int | None = None
     latency_ms: int
     error: str | None = None
+    # 阶段 B：本次探测使用的客户端身份档案（openai_sdk / codex_cli / claude_code / minimal ...）。
+    client_identity_profile: str | None = None
+    # 探测阶段：network / credentials / protocol / identity。
+    stage: str | None = None
+    # 结构化错误分类（见 llm_identity / 诊断状态枚举）。
+    error_category: str | None = None
+    # 面向用户的修复建议（脱敏）。
+    suggestion: str | None = None
+
+
+class ProtocolIdentityAttempt(BaseModel):
+    """某协议下按身份顺序的单次身份尝试结果。"""
+
+    api_format: str
+    client_identity_profile: str
+    ok: bool
+    status_code: int | None = None
+    latency_ms: int = 0
+    error_category: str | None = None
+    error: str | None = None
+    suggestion: str | None = None
 
 
 class DetectProviderProtocolsResponse(BaseModel):
@@ -533,6 +599,9 @@ class DetectProviderProtocolsResponse(BaseModel):
     anthropic_messages: ProtocolProbeResult
     models: ProtocolProbeResult
     recommended_api_format: str | None = None
+    # 阶段 B：推荐客户端身份 + 每协议身份尝试列表。
+    recommended_client_identity_profile: str | None = None
+    identity_attempts: list[ProtocolIdentityAttempt] = Field(default_factory=list)
     recommended_web_search_api_format: str = LLM_WEB_SEARCH_API_FORMAT_AUTO
     note: str | None = None
 
@@ -557,3 +626,268 @@ class TestModelResponse(BaseModel):
     """返回 text 前 80 字符；用于让用户在 UI 一眼看出"这个模型确实回话了"。"""
     error: str | None = None
     """失败时的错误消息（已脱敏，不含 api_key）。"""
+
+
+class ChatTestTurn(BaseModel):
+    """模型真实聊天测活的临时上下文，不落库。"""
+
+    role: Literal["user", "assistant"]
+    content: str = Field(min_length=1, max_length=4000)
+
+
+class ChatTestModelsRequest(BaseModel):
+    """``POST /api/commands/llm-providers/{pid}/chat-test-models`` 入参。"""
+
+    models: list[str] = Field(min_length=1, max_length=20)
+    """要并发测试的模型 ID 列表。"""
+    message: str = Field(min_length=1, max_length=2000)
+    """本轮模拟用户消息。"""
+    history: list[ChatTestTurn] = Field(default_factory=list, max_length=20)
+    """同一测试窗口里的临时历史，用于模拟连续对话。"""
+    history_by_model: dict[str, list[ChatTestTurn]] = Field(
+        default_factory=dict,
+        max_length=20,
+    )
+    """批量流式测活时各模型独立的临时历史；未提供的模型回退使用 history。"""
+    system_prompt: str = Field(
+        default="你是一个自然、简洁的中文聊天助手。请像真实聊天一样直接回复用户，不要只返回 ping/pong。",
+        min_length=1,
+        max_length=2000,
+    )
+    """测试用 system prompt。"""
+    max_tokens: int = Field(default=1200, ge=64, le=8000)
+    timeout_seconds: int = Field(default=90, ge=10, le=600)
+    api_format_override: Literal[
+        "chat_completions", "responses", "anthropic_messages"
+    ] | None = None
+    """仅本次测活使用的临时协议，不写回 Provider。"""
+    client_identity_profile_override: Literal[
+        "auto",
+        "minimal",
+        "openai_sdk",
+        "codex_cli",
+        "codex_desktop",
+        "claude_code",
+        "claude_desktop",
+        "grok_cli",
+    ] | None = None
+    """仅本次测活使用的临时客户端身份，不写回 Provider。"""
+
+    @field_validator("models")
+    @classmethod
+    def _strip_models(cls, values: list[str]) -> list[str]:
+        out: list[str] = []
+        seen: set[str] = set()
+        for value in values:
+            model = str(value or "").strip()
+            if not model:
+                continue
+            if len(model) > 128:
+                raise ValueError("模型 ID 不能超过 128 字符")
+            if model in seen:
+                continue
+            seen.add(model)
+            out.append(model)
+        if not out:
+            raise ValueError("至少选择一个模型")
+        return out
+
+    @field_validator("history_by_model")
+    @classmethod
+    def _validate_history_by_model(
+        cls,
+        values: dict[str, list[ChatTestTurn]],
+    ) -> dict[str, list[ChatTestTurn]]:
+        for model, turns in values.items():
+            if not str(model).strip() or len(str(model)) > 128:
+                raise ValueError("模型历史中的模型 ID 无效")
+            if len(turns) > 20:
+                raise ValueError("每个模型最多保留 20 条临时历史")
+        return values
+
+
+class ChatTestModelResult(BaseModel):
+    """单个模型真实聊天测活结果。"""
+
+    ok: bool
+    requested_model: str
+    model: str | None = None
+    latency_ms: int
+    response: str | None = None
+    preview: str | None = None
+    input_tokens: int = 0
+    output_tokens: int = 0
+    empty_response: bool = False
+    error: str | None = None
+    client_identity_profile: str | None = None
+    effective_api_format: str | None = None
+    streaming: bool = False
+    """本次结果是否通过上游原生流式协议获得。"""
+    stream_fallback: bool = False
+    """上游不支持流式或未产生增量时，是否已回退为完整响应。"""
+
+
+class ChatTestModelsResponse(BaseModel):
+    """真实聊天测活批量结果。"""
+
+    provider_id: int
+    provider_name: str
+    results: list[ChatTestModelResult]
+
+
+# ── 阶段 C：全量已启用模型测活 ────────────────────────────────
+class FullLivenessPreviewRequest(BaseModel):
+    """``POST /api/commands/llm-providers/liveness/preview`` 入参。"""
+
+    max_tokens: int = Field(default=256, ge=64, le=8000)
+    global_concurrency: int = Field(default=8)
+    only_provider_ids: list[int] | None = Field(default=None, max_length=200)
+
+
+class LivenessProviderPlan(BaseModel):
+    """预览中单个 Provider 的目标模型与可执行性。"""
+
+    provider_id: int
+    provider_name: str
+    enabled_models: list[str] = Field(default_factory=list)
+    executable: bool
+    skipped_reason: str | None = None
+
+
+class FullLivenessPreviewResponse(BaseModel):
+    """全量测活执行预览（权威快照）。"""
+
+    provider_total: int
+    executable_provider_total: int
+    enabled_model_total: int
+    task_total: int
+    max_tokens: int
+    max_output_tokens: int
+    global_concurrency: int
+    provider_concurrency: int
+    needs_confirmation: bool
+    providers: list[LivenessProviderPlan] = Field(default_factory=list)
+
+
+class FullLivenessRunRequest(BaseModel):
+    """``POST /api/commands/llm-providers/liveness/run`` 入参。
+
+    全量测活不携带历史，确保所有模型收到完全相同的输入并可横向比较。
+    可选 ``only_provider_ids`` / ``only_models`` 用于失败重测等范围过滤。
+    """
+
+    system_prompt: str = Field(
+        default="你是一个自然、简洁的中文聊天助手。请像真实聊天一样直接回复用户，不要只返回 ping/pong。",
+        min_length=1,
+        max_length=2000,
+    )
+    message: str = Field(
+        default="你怎么又不行啦？",
+        min_length=1,
+        max_length=2000,
+    )
+    max_tokens: int = Field(default=256, ge=64, le=8000)
+    timeout_seconds: int = Field(default=90, ge=10, le=600)
+    global_concurrency: int = Field(default=8)
+    confirm_large_run: bool = False
+    """任务数超过安全提示阈值时，调用方必须在明确二次确认后传 true。"""
+    # 范围过滤（失败重测 / 只测某 Provider / 只测新启用模型）。
+    only_provider_ids: list[int] | None = Field(default=None, max_length=200)
+    only_models: list[str] | None = Field(default=None, max_length=500)
+
+
+class LivenessResultItem(BaseModel):
+    """单个测活任务结果（已脱敏）。"""
+
+    provider_id: int
+    provider_name: str
+    model_id: str
+    status: str
+    latency_ms: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    preview: str | None = None
+    error: str | None = None
+    error_category: str | None = None
+    suggestion: str | None = None
+    client_identity_profile: str | None = None
+    effective_api_format: str | None = None
+    skipped: bool = False
+
+
+class FullLivenessRunStartResponse(BaseModel):
+    """``POST …/liveness/run`` 立即返回：创建异步 Job，前端凭 run_id 轮询。"""
+
+    run_id: str
+    status: str = "queued"
+    task_total: int = 0
+
+
+class FullLivenessRunResponse(BaseModel):
+    """全量测活结果汇总（轮询 status 或同步兼容）。
+
+    ``status``：queued | running | completed | cancelled。
+    ``completed``：已出结果的任务数（含成功/失败/跳过/取消），用于逐项进度。
+    """
+
+    run_id: str | None = None
+    status: str = "completed"
+    task_total: int
+    completed: int = 0
+    healthy: int = 0
+    failed: int = 0
+    skipped: int = 0
+    cancelled: int = 0
+    results: list[LivenessResultItem] = Field(default_factory=list)
+    error: str | None = None
+
+
+# ═══════════════ 客户端身份 UA 版本配置（0.57.0 收口） ═══════════════
+class ClientIdentityVersionItem(BaseModel):
+    """单个客户端身份档案的版本信息（用于 UA 版本段）。"""
+
+    key: str
+    """版本键，如 codex_cli / claude_code / openai_sdk / codex_desktop_core。"""
+
+    label: str
+    """前端展示名。"""
+
+    current: str
+    """当前生效版本（含已应用的覆盖）。"""
+
+    default: str
+    """采集时核对过的默认版本（覆盖缺失时回落值）。"""
+
+    registry: str | None = None
+    """远端版本查询源标识（npm 包名 / pypi 包名）；None 表示无公共源、仅手动。"""
+
+    detectable: bool = False
+    """是否支持"检测最新版本"按钮（有公共 registry 才为 True）。"""
+
+
+class ClientIdentityVersionsResponse(BaseModel):
+    """客户端身份 UA 版本配置总览。"""
+
+    items: list[ClientIdentityVersionItem] = Field(default_factory=list)
+
+
+class ClientIdentityVersionDetectItem(BaseModel):
+    """单个版本键的远端检测结果。"""
+
+    key: str
+    current: str
+    latest: str | None = None
+    up_to_date: bool | None = None
+    error: str | None = None
+
+
+class ClientIdentityVersionDetectResponse(BaseModel):
+    """远端最新版本检测结果（只读查询，不落库）。"""
+
+    items: list[ClientIdentityVersionDetectItem] = Field(default_factory=list)
+
+
+class ClientIdentityVersionsUpdateRequest(BaseModel):
+    """保存版本覆盖（只改 UA 版本号，不动 UA 结构与请求头）。"""
+
+    overrides: dict[str, str] = Field(default_factory=dict)

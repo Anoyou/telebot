@@ -33,6 +33,7 @@ import { Select } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { getErrMsg } from "@/lib/api";
+import { confirmDiscardChanges, useUnsavedChanges } from "@/lib/unsavedChanges";
 import { featureConfigBackTarget } from "@/pages/Plugins/_shared/featureConfig";
 import { featureRuntimeText, featureSwitchText } from "./_shared/featureStatus";
 
@@ -327,8 +328,13 @@ export function ChatGPTImageConfigPage() {
   const [cpaFileNames, setCpaFileNames] = useState(DEFAULT_CONFIG.cpa_file_names);
   const [logPromptPreview, setLogPromptPreview] = useState(DEFAULT_CONFIG.log_prompt_preview);
   const [dirty, setDirty] = useState(false);
+  const [remoteConfigChanged, setRemoteConfigChanged] = useState(false);
 
   useEffect(() => {
+    if (dirty) {
+      setRemoteConfigChanged(true);
+      return;
+    }
     const cfg = (configQ.data ?? {}) as Record<string, unknown>;
     setCommand(text(cfg.command, DEFAULT_CONFIG.command));
     setEditCommand(text(cfg.edit_command, DEFAULT_CONFIG.edit_command));
@@ -363,7 +369,9 @@ export function ChatGPTImageConfigPage() {
     setCpaFileNames(text(cfg.cpa_file_names, DEFAULT_CONFIG.cpa_file_names));
     setLogPromptPreview(bool(cfg.log_prompt_preview, DEFAULT_CONFIG.log_prompt_preview));
     setDirty(false);
+    setRemoteConfigChanged(false);
   }, [configQ.data]);
+  useUnsavedChanges(dirty);
 
   const modelOptions = useMemo(
     () => availableModels.split(/\n+/).map((item) => item.trim()).filter(Boolean),
@@ -376,6 +384,7 @@ export function ChatGPTImageConfigPage() {
     onSuccess: () => {
       toast.success("配置已保存，worker 会自动热加载");
       setDirty(false);
+      setRemoteConfigChanged(false);
       setNewToken("");
       setNewTokenNote("");
       qc.invalidateQueries({ queryKey: ["account", aid, "features"] });
@@ -511,15 +520,16 @@ export function ChatGPTImageConfigPage() {
   const backTarget = featureConfigBackTarget(aid, location.search);
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 pb-24">
       <div className="flex flex-wrap items-center gap-3">
         <div className="flex items-center gap-3">
           <Button
-            variant="ghost"
+            variant="default"
             size="sm"
-            onClick={() => nav(backTarget.backHref)}
+            className="gap-1.5 shadow-sm"
+            onClick={() => confirmDiscardChanges(dirty) && nav(backTarget.backHref)}
           >
-            <ArrowLeft className="mr-1 h-4 w-4" /> {backTarget.backLabel}
+            <ArrowLeft className="h-4 w-4" /> {backTarget.backLabel}
           </Button>
           <div>
             <h1 className="text-2xl font-semibold tracking-tight">ChatGPT2API</h1>
@@ -527,21 +537,6 @@ export function ChatGPTImageConfigPage() {
               实验性 · 开关：{featureSwitchText(feature)} · 运行状态：{featureRuntimeText(feature)}
             </p>
           </div>
-        </div>
-      </div>
-
-      <div className="sticky top-0 z-30 -mx-2 rounded-b-lg border bg-background/95 px-2 py-3 shadow-sm backdrop-blur supports-[backdrop-filter]:bg-background/80">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="text-sm">
-            <div className="font-medium">配置操作</div>
-            <div className="text-xs text-muted-foreground">
-              {dirty ? "有未保存修改，保存后 worker 会热加载。" : "当前配置已同步。"}
-            </div>
-          </div>
-          <Button onClick={handleSave} disabled={saveMut.isPending || !dirty}>
-            {saveMut.isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Save className="mr-2 h-4 w-4" />}
-            保存配置
-          </Button>
         </div>
       </div>
 
@@ -562,7 +557,7 @@ export function ChatGPTImageConfigPage() {
           </div>
 
           <div className="rounded-md border bg-muted/20 p-3 text-xs text-muted-foreground">
-            <ul className="mt-1.5 list-inside list-disc space-y-0.5">
+            <ul className="mt-1.5 list-inside list-disc space-y-1 break-words">
               <li>文生图：<CommandBadge>{cmdPrefix}{effectiveCommand} 提示词</CommandBadge></li>
               <li>
                 指定模型/数量/风格：{" "}
@@ -609,12 +604,17 @@ export function ChatGPTImageConfigPage() {
 
       <Card>
         <CardHeader>
-          <CardTitle className="text-base">基础配置</CardTitle>
+          <CardTitle className="text-base">插件配置</CardTitle>
           <CardDescription>
-            指令、模型、输出格式和 ChatGPT 访问参数。所有指令名都不需要填写系统前缀。
+            指令、模型、Token、网络和高级参数。所有指令名都不需要填写系统前缀。
           </CardDescription>
         </CardHeader>
-        <CardContent className="space-y-5">
+        <CardContent className="space-y-6 pb-0">
+          <section className="space-y-5 rounded-md border bg-muted/20 p-4">
+            <div>
+              <div className="text-sm font-semibold">基础配置</div>
+              <p className="text-xs text-muted-foreground">指令、模型、输出格式和 ChatGPT 访问参数。</p>
+            </div>
           <div className="grid gap-4 md:grid-cols-3">
             <div className="space-y-1.5">
               <Label>文生图指令</Label>
@@ -726,10 +726,6 @@ export function ChatGPTImageConfigPage() {
               value={messageTemplate}
               onChange={(e) => { setMessageTemplate(e.target.value); markDirty(); }}
             />
-            <div className="rounded-md border bg-background p-3 text-xs">
-              <div className="mb-1 font-medium">消息预览</div>
-              <TelegramHtmlPreview value={renderTemplate(messageTemplate, previewValues)} />
-            </div>
           </div>
 
           <div className="grid gap-4 md:grid-cols-3">
@@ -755,17 +751,13 @@ export function ChatGPTImageConfigPage() {
               </div>
             </div>
           </div>
-        </CardContent>
-      </Card>
+          </section>
 
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-base">网络与 Token 池</CardTitle>
-          <CardDescription>
-            插件网络出口跟随当前账号代理；这里逐条管理 ChatGPT access token。
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-5">
+          <section className="space-y-5 rounded-md border bg-muted/20 p-4">
+            <div>
+              <div className="text-sm font-semibold">网络与 Token 池</div>
+              <p className="text-xs text-muted-foreground">插件网络出口跟随当前账号代理；这里逐条管理 ChatGPT access token。</p>
+            </div>
           <div className="grid gap-4 md:grid-cols-3">
             <div className="space-y-1.5">
               <Label>请求超时</Label>
@@ -839,17 +831,13 @@ export function ChatGPTImageConfigPage() {
               </div>
             </div>
           </div>
-        </CardContent>
-      </Card>
+          </section>
 
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-base">高级配置</CardTitle>
-          <CardDescription>
-            风格模板、导入来源和健康检测。外部来源配置默认折叠，避免常用项被淹没。
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-4">
+          <section className="space-y-4 rounded-md border bg-muted/20 p-4">
+            <div>
+              <div className="text-sm font-semibold">高级配置</div>
+              <p className="text-xs text-muted-foreground">风格模板、导入来源和健康检测。外部来源配置默认折叠，避免常用项被淹没。</p>
+            </div>
           <div className="grid gap-4 md:grid-cols-[minmax(0,1fr)_220px]">
             <div className="space-y-1.5">
               <Label>风格模板</Label>
@@ -941,6 +929,35 @@ export function ChatGPTImageConfigPage() {
               </div>
             </div>
           </CollapsibleSection>
+          </section>
+        </CardContent>
+        <div className="static z-20 mt-4 rounded-b-lg border-t bg-background/95 px-4 py-3 shadow-[0_-8px_20px_rgba(15,23,42,0.06)] backdrop-blur supports-[backdrop-filter]:bg-background/85 sm:sticky sm:bottom-0 sm:px-6">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="text-sm">
+              <div className="font-medium">配置操作</div>
+              <div className="text-xs text-muted-foreground">
+                {remoteConfigChanged
+                  ? "服务端配置已变化；当前草稿已保留，保存会以草稿为准。"
+                  : dirty
+                    ? "有未保存修改，保存后 worker 会热加载。"
+                    : "当前配置已同步。"}
+              </div>
+            </div>
+            <Button onClick={handleSave} disabled={saveMut.isPending || !dirty}>
+              {saveMut.isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Save className="mr-2 h-4 w-4" />}
+              保存配置
+            </Button>
+          </div>
+        </div>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">插件预览</CardTitle>
+          <CardDescription>使用模拟上下文渲染当前消息模板，不会触发真实发送。</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <TelegramHtmlPreview value={renderTemplate(messageTemplate, previewValues)} />
         </CardContent>
       </Card>
     </div>

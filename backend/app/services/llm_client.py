@@ -17,8 +17,11 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 from abc import ABC, abstractmethod
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
+from enum import StrEnum
 from typing import Any
 
 import httpx
@@ -28,24 +31,68 @@ from ..db.models.command import (
     LLM_API_FORMAT_ANTHROPIC_MESSAGES,
     LLM_API_FORMAT_CHAT_COMPLETIONS,
     LLM_API_FORMAT_RESPONSES,
+    LLM_PROTOCOL_PROFILE_CLAUDE_CODE_PROXY,
+    LLM_PROTOCOL_PROFILE_STANDARD,
     LLM_PROVIDER_OLLAMA,
     LLMProvider,
     default_api_format_for,
 )
 from .llm_dto import LLMProviderDTO
+from .llm_identity import (
+    ClientIdentity,
+    resolve_identity,
+)
+from .llm_protocol import (
+    ImageContent,
+    MessageRole,
+    ModelMessage,
+    ModelRequest,
+    ModelResponse,
+    ModelUsage,
+    NamedToolChoice,
+    StopReason,
+    TextContent,
+    ToolCall,
+    ToolChoiceMode,
+    ToolResult,
+    ToolSpec,
+    capabilities_for_api_format,
+    normalize_base_url,
+    provider_endpoint,
+    stop_reason_from_provider,
+)
 
 # 默认调用超时；prompt 较长 / TG 端用户体验角度都不宜过长
 _HTTP_TIMEOUT = httpx.Timeout(30.0, connect=10.0)
 # 本地桥接（如 grok-bridge）需要等待浏览器 JS 执行 + LLM 生成，超时更长
 _LOCAL_TIMEOUT = httpx.Timeout(180.0, connect=10.0)
+# 流式上游属于不可信输入：限制单行与整条响应，避免 ``aiter_lines`` 在缺少
+# 换行时无限缓存。8000 output tokens 的正常文本通常远低于这些上限。
+_STREAM_SSE_LINE_LIMIT_BYTES = 1_048_576
+_STREAM_SSE_TOTAL_LIMIT_BYTES = 8 * 1_048_576
 
-# ── Retry 策略常量 ──────────────────────────────────────────
-# 最大重试次数（不含首次调用）
-_MAX_RETRIES = 3
-# 重试睡票基数（秒），指数退避
-_RETRY_BASE_DELAY = 1.0
-# 最大退避时间（秒）
-_RETRY_MAX_DELAY = 30.0
+
+def _llm_headers(
+    *,
+    identity: ClientIdentity | None = None,
+    content_type: str | None = "application/json",
+    accept: str | None = None,
+) -> dict[str, str]:
+    """构造 LLM 请求头。
+
+    0.57.0 起不再发送 TelePilot 产品 UA：身份头（含 UA）由集中身份目录解析后的
+    ``identity`` 提供。``identity=None`` 或 ``minimal`` 档案时不注入任何身份 UA，
+    仅保留协议必需头（Content-Type / Accept 与调用方自行装配的 Authorization）。
+    """
+    headers: dict[str, str] = {}
+    if content_type:
+        headers["Content-Type"] = content_type
+    if accept:
+        headers["Accept"] = accept
+    if identity is not None:
+        # 身份头覆盖（含 UA）；minimal 档案 headers() 为空，不注入产品模拟头。
+        headers.update(identity.headers())
+    return headers
 
 
 def _timeout_for_call(base_url: str, timeout_seconds: int | None) -> httpx.Timeout:
@@ -71,20 +118,385 @@ def _normalize_temperature(value: float | None) -> float | None:
 
 def _normalize_reasoning_effort(value: str | None) -> str | None:
     effort = (value or "").strip().lower()
-    return effort if effort in {"minimal", "low", "medium", "high"} else None
+    return effort if effort in {"minimal", "low", "medium", "high", "xhigh"} else None
 
 
 @dataclass
 class LLMResult:
     """LLM 调用的统一结果。"""
 
-    text: str           # 模型回答正文
-    model: str          # 实际使用的模型名（便于 TG 内回显）
-    input_tokens: int   # 入 tokens；若供应商不返就给 0
+    text: str  # 模型回答正文
+    model: str  # 实际使用的模型名（便于 TG 内回显）
+    input_tokens: int  # 入 tokens；若供应商不返就给 0
     output_tokens: int  # 出 tokens；若供应商不返就给 0
     image_urls: list = field(default_factory=list)  # LLM 生成的图片 URL（如 Grok 文生图）
     image_data: list = field(default_factory=list)  # LLM 生成的图片 base64 data URI（如 Grok 文生图）
     sources: list = field(default_factory=list)  # 联网搜索来源：[{url,title?}, ...]
+    tool_calls: list[ToolCall] = field(default_factory=list)
+    stop_reason: StopReason = StopReason.UNKNOWN
+    provider_status: str | None = None
+
+
+@dataclass(frozen=True)
+class LLMStreamChunk:
+    """Incremental text chunk from a provider streaming response."""
+
+    delta: str = ""
+    model: str | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    done: bool = False
+
+
+def _completed_json_as_stream_result(
+    data: object,
+    *,
+    api_format: str,
+    default_model: str,
+) -> LLMResult:
+    """解析忽略 ``stream=true`` 而返回的普通 JSON，避免再次请求上游。"""
+
+    if not isinstance(data, dict):
+        raise LLMError("上游流式请求返回的 JSON 不是对象")
+    text = ""
+    usage = data.get("usage") or {}
+    if not isinstance(usage, dict):
+        usage = {}
+    try:
+        if api_format == LLM_API_FORMAT_CHAT_COMPLETIONS:
+            choices = data.get("choices") or []
+            choice = choices[0] if isinstance(choices, list) and choices else {}
+            message = choice.get("message") if isinstance(choice, dict) else {}
+            text = _openai_content_text(message.get("content")) if isinstance(message, dict) else ""
+            input_tokens = int(usage.get("prompt_tokens") or 0)
+            output_tokens = int(usage.get("completion_tokens") or 0)
+        elif api_format == LLM_API_FORMAT_ANTHROPIC_MESSAGES:
+            text = "".join(
+                str(item.get("text") or "")
+                for item in data.get("content") or []
+                if isinstance(item, dict) and item.get("type") == "text"
+            )
+            input_tokens = int(usage.get("input_tokens") or 0)
+            output_tokens = int(usage.get("output_tokens") or 0)
+        else:
+            if isinstance(data.get("output_text"), str):
+                text = str(data["output_text"])
+            if not text:
+                text = "".join(
+                    str(content.get("text") or "")
+                    for item in data.get("output") or []
+                    if isinstance(item, dict)
+                    for content in item.get("content") or []
+                    if isinstance(content, dict) and isinstance(content.get("text"), str)
+                )
+            input_tokens = int(usage.get("input_tokens") or 0)
+            output_tokens = int(usage.get("output_tokens") or 0)
+    except (TypeError, ValueError):
+        raise LLMError("上游流式请求返回的 usage 字段格式无效") from None
+    return LLMResult(
+        text=text,
+        model=str(data.get("model") or default_model),
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+    )
+
+
+async def _read_limited_stream_json(response: Any, *, limit_bytes: int = 1_048_576) -> object:
+    """读取忽略流式参数的 JSON 响应，并限制传输层累计大小。"""
+
+    body = bytearray()
+    async for chunk in response.aiter_bytes():
+        body.extend(chunk)
+        if len(body) > limit_bytes:
+            raise LLMError("上游流式请求返回的 JSON 超过 1 MiB 限制")
+    try:
+        return json.loads(bytes(body))
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        raise LLMError("上游 streaming 返回了无法解析的 JSON") from None
+
+
+async def _iter_limited_sse_lines(
+    response: Any,
+    *,
+    line_limit_bytes: int = _STREAM_SSE_LINE_LIMIT_BYTES,
+    total_limit_bytes: int = _STREAM_SSE_TOTAL_LIMIT_BYTES,
+) -> AsyncIterator[str]:
+    """按原始字节有界解析 SSE 行，拒绝超长单行和无限滴流响应。"""
+
+    pending = bytearray()
+    total = 0
+    async for chunk in response.aiter_bytes():
+        if not isinstance(chunk, (bytes, bytearray)):
+            raise LLMError("上游 streaming 返回了无效的字节流")
+        total += len(chunk)
+        if total > total_limit_bytes:
+            raise LLMError("上游 streaming 响应超过 8 MiB 限制")
+        pending.extend(chunk)
+        while True:
+            newline = pending.find(b"\n")
+            if newline < 0:
+                if len(pending) > line_limit_bytes:
+                    raise LLMError("上游 streaming 单个 SSE 事件超过 1 MiB 限制")
+                break
+            raw = bytes(pending[:newline])
+            del pending[: newline + 1]
+            if len(raw) > line_limit_bytes:
+                raise LLMError("上游 streaming 单个 SSE 事件超过 1 MiB 限制")
+            try:
+                yield raw.rstrip(b"\r").decode("utf-8")
+            except UnicodeDecodeError:
+                raise LLMError("上游 streaming 返回了无效的 UTF-8 SSE 数据") from None
+    if pending:
+        if len(pending) > line_limit_bytes:
+            raise LLMError("上游 streaming 单个 SSE 事件超过 1 MiB 限制")
+        try:
+            yield bytes(pending).rstrip(b"\r").decode("utf-8")
+        except UnicodeDecodeError:
+            raise LLMError("上游 streaming 返回了无效的 UTF-8 SSE 数据") from None
+
+
+def _model_response_from_result(result: LLMResult) -> ModelResponse:
+    content = (TextContent(result.text),) if result.text else ()
+    return ModelResponse(
+        model=result.model,
+        content=content,
+        tool_calls=tuple(result.tool_calls),
+        usage=ModelUsage(
+            input_tokens=result.input_tokens,
+            output_tokens=result.output_tokens,
+        ),
+        stop_reason=result.stop_reason,
+        provider_status=result.provider_status,
+        sources=tuple(dict(item) for item in result.sources if isinstance(item, dict)),
+    )
+
+
+def _parse_tool_arguments(value: object) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return dict(value)
+    if value is None or value == "":
+        return {}
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return {"_raw": value}
+        if isinstance(parsed, dict):
+            return parsed
+        return {"value": parsed}
+    return {"value": value}
+
+
+def _tool_result_text(result: ToolResult) -> str:
+    if isinstance(result.content, str):
+        return result.content
+    return json.dumps(result.content, ensure_ascii=False, separators=(",", ":"))
+
+
+def _tool_specs_openai(tools: tuple[ToolSpec, ...]) -> list[dict[str, Any]]:
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": tool.name,
+                "description": tool.description,
+                "parameters": tool.parameters,
+                "strict": tool.strict,
+            },
+        }
+        for tool in tools
+    ]
+
+
+def _openai_tool_choice(choice: ToolChoiceMode | NamedToolChoice) -> object:
+    if isinstance(choice, NamedToolChoice):
+        return {"type": "function", "function": {"name": choice.name}}
+    return choice.value
+
+
+def _responses_tool_choice(choice: ToolChoiceMode | NamedToolChoice) -> object:
+    if isinstance(choice, NamedToolChoice):
+        return {"type": "function", "name": choice.name}
+    return choice.value
+
+
+def _anthropic_tool_choice(choice: ToolChoiceMode | NamedToolChoice) -> object:
+    if isinstance(choice, NamedToolChoice):
+        return {"type": "tool", "name": choice.name}
+    if choice is ToolChoiceMode.REQUIRED:
+        return {"type": "any"}
+    return {"type": choice.value}
+
+
+def _openai_content_text(value: object) -> str:
+    if isinstance(value, str):
+        return value.strip()
+    if not isinstance(value, list):
+        return ""
+    return "\n".join(
+        str(item.get("text") or "")
+        for item in value
+        if isinstance(item, dict) and item.get("type") in {"text", "output_text"}
+    ).strip()
+
+
+def _chat_messages(messages: tuple[ModelMessage, ...]) -> list[dict[str, Any]]:
+    output: list[dict[str, Any]] = []
+    for message in messages:
+        if message.role is MessageRole.TOOL:
+            for result in message.tool_results:
+                output.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": result.call_id,
+                        "name": result.name,
+                        "content": _tool_result_text(result),
+                    }
+                )
+            continue
+        text = message.text_content()
+        image_blocks = [block for block in message.content if isinstance(block, ImageContent)]
+        if image_blocks and message.role is MessageRole.USER:
+            content: object = ([{"type": "text", "text": text}] if text else []) + [
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": block.url if block.url else _to_data_url(block.data or b""),
+                        **({"detail": block.detail} if block.detail else {}),
+                    },
+                }
+                for block in image_blocks
+            ]
+        else:
+            content = text or None
+        item: dict[str, Any] = {"role": message.role.value, "content": content}
+        if message.role is MessageRole.ASSISTANT and message.tool_calls:
+            item["tool_calls"] = [
+                {
+                    "id": call.id,
+                    "type": "function",
+                    "function": {
+                        "name": call.name,
+                        "arguments": json.dumps(call.arguments, ensure_ascii=False),
+                    },
+                }
+                for call in message.tool_calls
+            ]
+        output.append(item)
+    return output
+
+
+def _responses_input(messages: tuple[ModelMessage, ...]) -> list[dict[str, Any]]:
+    output: list[dict[str, Any]] = []
+    for message in messages:
+        if message.role is MessageRole.SYSTEM:
+            continue
+        if message.role is MessageRole.TOOL:
+            output.extend(
+                {
+                    "type": "function_call_output",
+                    "call_id": result.call_id,
+                    "output": _tool_result_text(result),
+                }
+                for result in message.tool_results
+            )
+            continue
+        content: list[dict[str, Any]] = []
+        text = message.text_content()
+        if text:
+            content.append(
+                {
+                    "type": "output_text" if message.role is MessageRole.ASSISTANT else "input_text",
+                    "text": text,
+                }
+            )
+        if message.role is MessageRole.USER:
+            content.extend(
+                {
+                    "type": "input_image",
+                    "image_url": block.url if block.url else _to_data_url(block.data or b""),
+                    **({"detail": block.detail} if block.detail else {}),
+                }
+                for block in message.content
+                if isinstance(block, ImageContent)
+            )
+        if content:
+            output.append({"type": "message", "role": message.role.value, "content": content})
+        output.extend(
+            {
+                "type": "function_call",
+                "call_id": call.id,
+                "name": call.name,
+                "arguments": json.dumps(call.arguments, ensure_ascii=False),
+            }
+            for call in message.tool_calls
+        )
+    return output
+
+
+def _system_instructions(messages: tuple[ModelMessage, ...]) -> str:
+    return "\n\n".join(
+        message.text_content()
+        for message in messages
+        if message.role is MessageRole.SYSTEM and message.text_content()
+    )
+
+
+def _anthropic_messages(messages: tuple[ModelMessage, ...]) -> list[dict[str, Any]]:
+    output: list[dict[str, Any]] = []
+    for message in messages:
+        if message.role is MessageRole.SYSTEM:
+            continue
+        if message.role is MessageRole.TOOL:
+            output.append(
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": result.call_id,
+                            "content": _tool_result_text(result),
+                            "is_error": result.is_error,
+                        }
+                        for result in message.tool_results
+                    ],
+                }
+            )
+            continue
+        content: list[dict[str, Any]] = []
+        for block in message.content:
+            if isinstance(block, TextContent) and block.text:
+                content.append({"type": "text", "text": block.text})
+            elif isinstance(block, ImageContent):
+                if block.data is None:
+                    raise ValueError("Anthropic 图片输入暂不支持 URL，仅支持内联字节")
+                content.append(
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": block.mime_type or _sniff_image_mime(block.data),
+                            "data": base64.b64encode(block.data).decode("ascii"),
+                        },
+                    }
+                )
+        if message.role is MessageRole.ASSISTANT:
+            content.extend(
+                {
+                    "type": "tool_use",
+                    "id": call.id,
+                    "name": call.name,
+                    "input": call.arguments,
+                }
+                for call in message.tool_calls
+            )
+        output.append(
+            {
+                "role": "assistant" if message.role is MessageRole.ASSISTANT else "user",
+                "content": content or "",
+            }
+        )
+    return output
 
 
 def _sniff_image_mime(data: bytes) -> str:
@@ -215,14 +627,20 @@ def _extract_response_sources(data: Any) -> list[dict[str, str]]:
             typ = str(node.get("type") or "")
             if typ in {"url_citation", "citation"}:
                 add(node.get("url"), node.get("title"))
-            if isinstance(node.get("url"), str) and (
-                "title" in node or "source" in typ or "citation" in typ
-            ):
+            if isinstance(node.get("url"), str) and ("title" in node or "source" in typ or "citation" in typ):
                 add(node.get("url"), node.get("title"))
             web = node.get("web")
             if isinstance(web, dict):
                 add(web.get("uri") or web.get("url"), web.get("title"))
-            for key in ("sources", "annotations", "grounding_chunks", "groundingChunks", "output", "content", "action"):
+            for key in (
+                "sources",
+                "annotations",
+                "grounding_chunks",
+                "groundingChunks",
+                "output",
+                "content",
+                "action",
+            ):
                 value = node.get(key)
                 if value is not None:
                     walk(value)
@@ -232,6 +650,203 @@ def _extract_response_sources(data: Any) -> list[dict[str, str]]:
 
     walk(data)
     return out[:12]
+
+
+def _response_text(resp: Any) -> str:
+    return str(getattr(resp, "text", "") or "")
+
+
+def _response_content_type(resp: Any) -> str:
+    headers = getattr(resp, "headers", {}) or {}
+    try:
+        return str(headers.get("content-type") or headers.get("Content-Type") or "")
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _parse_responses_sse(text: str) -> dict[str, Any]:
+    """把 Responses API 的 SSE 成功流折叠为普通 Responses JSON。
+
+    部分 Codex/CLIProxyAPI 反代即使请求里带了 ``stream: false``，仍会返回
+    ``text/event-stream``。这里优先使用 ``response.completed`` 里的完整响应；
+    如果反代只给了文本增量，则退化为顶层 ``output_text``。
+    """
+    events: list[tuple[str, str]] = []
+    event_name = "message"
+    data_lines: list[str] = []
+
+    def flush() -> None:
+        nonlocal event_name, data_lines
+        if data_lines:
+            events.append((event_name, "\n".join(data_lines)))
+        event_name = "message"
+        data_lines = []
+
+    for raw_line in text.splitlines():
+        line = raw_line.rstrip("\r")
+        if not line:
+            flush()
+            continue
+        if line.startswith(":"):
+            continue
+        if line.startswith("event:"):
+            event_name = line.removeprefix("event:").strip() or "message"
+            continue
+        if line.startswith("data:"):
+            data_lines.append(line.removeprefix("data:").strip())
+    flush()
+
+    delta_parts: list[str] = []
+    done_text = ""
+    last_response: dict[str, Any] | None = None
+    error_payload: Any = None
+
+    def text_from_stream() -> str:
+        return (done_text or "".join(delta_parts)).strip()
+
+    def with_stream_text(response: dict[str, Any]) -> dict[str, Any]:
+        stream_text = text_from_stream()
+        if not stream_text:
+            return response
+        image_data, image_urls, output_text = _extract_response_image_outputs(response)
+        if output_text or image_data or image_urls:
+            return response
+        response = dict(response)
+        response["output_text"] = stream_text
+        return response
+
+    for event_name, raw_data in events:
+        if not raw_data or raw_data == "[DONE]":
+            continue
+        try:
+            payload = json.loads(raw_data)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(payload, dict):
+            continue
+
+        payload_type = str(payload.get("type") or event_name or "")
+        if payload_type in {"error", "response.error"}:
+            error_payload = payload.get("error") or payload
+            continue
+
+        response = payload.get("response")
+        if isinstance(response, dict):
+            last_response = response
+            if payload_type == "response.completed" or response.get("status") == "completed":
+                return with_stream_text(response)
+
+        if payload_type == "response.output_text.delta" and isinstance(payload.get("delta"), str):
+            delta_parts.append(payload["delta"])
+        elif payload_type == "response.output_text.done" and isinstance(payload.get("text"), str):
+            done_text = payload["text"]
+
+    if last_response and last_response.get("status") not in {"failed", "cancelled"}:
+        image_data, image_urls, output_text = _extract_response_image_outputs(last_response)
+        if output_text or image_data or image_urls:
+            return last_response
+    if delta_parts or done_text:
+        return {"output_text": text_from_stream()}
+    if error_payload is not None:
+        raise ValueError(f"error event: {str(error_payload)[:200]}")
+    raise ValueError("缺少 response.completed 或 output_text 增量事件")
+
+
+def _decode_responses_payload(prefix: str, resp: Any, api_key: str | None) -> dict[str, Any]:
+    content_type = _response_content_type(resp).lower()
+    text = _response_text(resp)
+    if "text/event-stream" in content_type or text.lstrip().startswith(("event:", "data:")):
+        try:
+            return _parse_responses_sse(text)
+        except ValueError as exc:
+            raise LLMError(_safe_error_message(f"{prefix} SSE 返回结构异常: {exc}", api_key)) from None
+    try:
+        data = resp.json()
+    except json.JSONDecodeError as exc:
+        raise _non_json_error(prefix, resp, exc, api_key) from None
+    if not isinstance(data, dict):
+        raise LLMError(f"{prefix} 返回结构异常: 顶层不是对象")
+    return data
+
+
+_RESPONSES_REMOVABLE_PARAMETERS = {
+    "temperature": "temperature",
+    "reasoning": "reasoning",
+    "reasoning.effort": "reasoning",
+    "stream": "stream",
+}
+
+
+def _unsupported_parameter_name(resp: Any) -> str | None:
+    if int(getattr(resp, "status_code", 0) or 0) < 400:
+        return None
+    lowered = _response_text(resp).lower()
+    if not (
+        "unsupported parameter" in lowered
+        or "unknown parameter" in lowered
+        or "unrecognized parameter" in lowered
+        or "invalid parameter" in lowered
+    ):
+        return None
+    match = re.search(
+        r"(?:unsupported|unknown|unrecognized|invalid)\s+parameter(?:s)?\s*[:=]?\s*[`'\"]?([a-z0-9_.-]+)",
+        lowered,
+    )
+    if match:
+        return match.group(1).strip("`'\" ")
+    for parameter in _RESPONSES_REMOVABLE_PARAMETERS:
+        if parameter in lowered:
+            return parameter
+    return None
+
+
+def _is_unsupported_parameter(resp: Any, parameter: str) -> bool:
+    return _unsupported_parameter_name(resp) == parameter.lower()
+
+
+def _remove_unsupported_parameter(body: dict[str, Any], parameter: str) -> str | None:
+    parameter = parameter.strip().lower()
+    key = _RESPONSES_REMOVABLE_PARAMETERS.get(parameter)
+    if key is None and "." in parameter:
+        key = _RESPONSES_REMOVABLE_PARAMETERS.get(parameter.split(".", 1)[0])
+    if key is None or key not in body:
+        return None
+    body.pop(key, None)
+    return key
+
+
+async def _post_responses_compatible(
+    cli: httpx.AsyncClient,
+    url: str,
+    *,
+    headers: dict[str, str],
+    body: dict[str, Any],
+) -> httpx.Response:
+    current_body = dict(body)
+    removed: set[str] = set()
+    while True:
+        resp = await cli.post(url, headers=headers, json=dict(current_body))
+        parameter = _unsupported_parameter_name(resp)
+        if not parameter:
+            return resp
+        removed_key = _remove_unsupported_parameter(current_body, parameter)
+        if not removed_key or removed_key in removed:
+            return resp
+        removed.add(removed_key)
+
+
+def _non_json_error(prefix: str, resp: Any, exc: json.JSONDecodeError, api_key: str | None) -> LLMError:
+    content_type = _response_content_type(resp)
+    status_code = int(getattr(resp, "status_code", 0) or 0)
+    body = _response_text(resp).replace("\n", "\\n")[:200]
+    if not body:
+        body = "<empty>"
+    return LLMError(
+        _safe_error_message(
+            f"{prefix} 返回非 JSON: status={status_code} content-type={content_type or 'unknown'} body={body} parse_error={exc}",
+            api_key,
+        )
+    )
 
 
 class LLMClient(ABC):
@@ -256,6 +871,59 @@ class LLMClient(ABC):
         非空时各实现按自己的 vision 协议把图片塞进 user message 的 content 块里。
         """
         raise NotImplementedError
+
+    async def invoke(self, request: ModelRequest) -> ModelResponse:
+        """Compatibility bridge for clients without a native structured adapter."""
+
+        if request.tools:
+            raise NotImplementedError("当前 provider 尚未接入原生工具调用")
+        system = "\n\n".join(
+            message.text_content()
+            for message in request.messages
+            if message.role is MessageRole.SYSTEM and message.text_content()
+        )
+        user_messages = [message for message in request.messages if message.role is MessageRole.USER]
+        if not user_messages:
+            raise ValueError("ModelRequest 至少需要一条 user message")
+        user_message = user_messages[-1]
+        images = [
+            block.data
+            for block in user_message.content
+            if isinstance(block, ImageContent) and block.data is not None
+        ]
+        result = await self.complete(
+            system,
+            user_message.text_content(),
+            max_tokens=request.max_output_tokens,
+            images=images or None,
+            web_search=request.web_search,
+            web_search_context_size=request.web_search_context_size,
+            temperature=request.temperature,
+            reasoning_effort=request.reasoning_effort,
+        )
+        return _model_response_from_result(result)
+
+    async def stream_complete(
+        self,
+        system: str,
+        user: str,
+        max_tokens: int = 512,
+        images: list[bytes] | None = None,
+        web_search: bool = False,
+        web_search_context_size: str | None = None,
+        temperature: float | None = None,
+        reasoning_effort: str | None = None,
+        timeout_seconds: int | None = None,
+    ) -> AsyncIterator[LLMStreamChunk]:
+        """Yield provider-native text deltas.
+
+        Providers that have not wired a real streaming protocol must leave this
+        explicit instead of emulating streaming from a completed response.
+        """
+
+        if False:
+            yield LLMStreamChunk()
+        raise NotImplementedError("当前 provider 协议尚未接入原生 streaming")
 
     async def transcribe(self, audio: bytes, model: str) -> str:
         """语音转写：把音频字节喂给 ``/audio/transcriptions`` 之类的 STT 端点。
@@ -307,11 +975,13 @@ class OpenAIClient(LLMClient):
         base_url: str | None,
         model: str,
         proxy_url: str | None = None,
+        identity: ClientIdentity | None = None,
     ):
         self._api_key = api_key
-        self._base_url = (base_url or "https://api.openai.com/v1").rstrip("/")
+        self._base_url = normalize_base_url(base_url or "https://api.openai.com/v1")
         self._model = model
         self._proxy_url = proxy_url
+        self._identity = identity
 
     async def complete(
         self,
@@ -326,20 +996,20 @@ class OpenAIClient(LLMClient):
         timeout_seconds: int | None = None,
     ) -> LLMResult:
         if web_search:
-            raise LLMError("联网搜索需要使用 OpenAI Responses API（api_format=responses）")
-        url = f"{self._base_url}/chat/completions"
+            raise LLMError(
+                "联网搜索需要使用 OpenAI Responses API（api_format=responses）",
+                scope=LLMErrorScope.CAPABILITY_MISMATCH,
+            )
+        url = provider_endpoint(self._base_url, LLM_API_FORMAT_CHAT_COMPLETIONS)
         # Ollama 部署可能不需要 api_key；为空时不下发 Authorization 头
-        headers = {"Content-Type": "application/json"}
+        headers = _llm_headers(identity=self._identity)
         if self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"
         # 视觉路径：content 改成数组，先 text 再 image_url（OpenAI / mimo / GLM-4V 均如此）
         if images:
             user_content: object = [
                 {"type": "text", "text": user},
-                *[
-                    {"type": "image_url", "image_url": {"url": _to_data_url(img)}}
-                    for img in images
-                ],
+                *[{"type": "image_url", "image_url": {"url": _to_data_url(img)}} for img in images],
             ]
         else:
             user_content = user
@@ -377,7 +1047,8 @@ class OpenAIClient(LLMClient):
                 _safe_error_message(
                     _describe_http_error(exc, self._base_url),
                     self._api_key,
-                )
+                ),
+                retryable=True,
             ) from None
         if resp.status_code >= 400:
             # 不要把 api_key 回显到错误里；构造前先剥离
@@ -385,7 +1056,10 @@ class OpenAIClient(LLMClient):
                 _safe_error_message(
                     f"OpenAI 接口返回 {resp.status_code}: {resp.text[:200]}{_hint_for_status(resp.status_code)}",
                     self._api_key,
-                )
+                ),
+                retryable=_is_retryable_status(resp.status_code),
+                scope=_error_scope_for_http(resp.status_code, resp.text),
+                status_code=resp.status_code,
             )
         try:
             data = resp.json()
@@ -394,8 +1068,9 @@ class OpenAIClient(LLMClient):
 
         # 标准 OpenAI 形态：choices[0].message.content
         try:
-            text = data["choices"][0]["message"]["content"] or ""
-        except (KeyError, IndexError, TypeError) as exc:
+            message = data["choices"][0]["message"]
+            text = _openai_content_text(message.get("content"))
+        except (AttributeError, KeyError, IndexError, TypeError) as exc:
             raise LLMError(f"OpenAI 返回结构异常: {exc}") from None
 
         usage = data.get("usage") or {}
@@ -415,13 +1090,289 @@ class OpenAIClient(LLMClient):
                     image_data.append(item["data"])
             elif isinstance(item, str):
                 image_urls.append(item)
+        choice = data.get("choices", [{}])[0] if isinstance(data.get("choices"), list) else {}
+        finish_reason = choice.get("finish_reason") if isinstance(choice, dict) else None
+        tool_calls = [
+            ToolCall(
+                id=str(item.get("id") or ""),
+                name=str((item.get("function") or {}).get("name") or ""),
+                arguments=_parse_tool_arguments((item.get("function") or {}).get("arguments")),
+            )
+            for item in message.get("tool_calls") or []
+            if isinstance(item, dict) and str((item.get("function") or {}).get("name") or "")
+        ]
+        refusal = message.get("refusal")
+        resolved_stop_reason = (
+            StopReason.REFUSAL
+            if isinstance(refusal, str) and refusal.strip()
+            else StopReason.TOOL_CALLS
+            if tool_calls
+            else stop_reason_from_provider(finish_reason)
+        )
         return LLMResult(
-            text=text.strip(),
+            text=text,
             model=str(data.get("model", self._model)),
             input_tokens=int(usage.get("prompt_tokens") or 0),
             output_tokens=int(usage.get("completion_tokens") or 0),
             image_urls=image_urls,
             image_data=image_data,
+            tool_calls=tool_calls,
+            stop_reason=resolved_stop_reason,
+            provider_status=(
+                "refusal"
+                if resolved_stop_reason is StopReason.REFUSAL
+                else str(finish_reason)
+                if finish_reason
+                else None
+            ),
+        )
+
+    async def stream_complete(
+        self,
+        system: str,
+        user: str,
+        max_tokens: int = 512,
+        images: list[bytes] | None = None,
+        web_search: bool = False,
+        web_search_context_size: str | None = None,
+        temperature: float | None = None,
+        reasoning_effort: str | None = None,
+        timeout_seconds: int | None = None,
+    ) -> AsyncIterator[LLMStreamChunk]:
+        """通过 Chat Completions SSE 逐段返回文本。
+
+        不主动发送 ``stream_options``，以兼容只实现了基础 ``stream=true`` 的
+        OpenAI-compatible 上游；如果上游自带 usage chunk，仍会正常采集。
+        """
+        if web_search:
+            raise LLMError(
+                "联网搜索需要使用 OpenAI Responses API（api_format=responses）",
+                scope=LLMErrorScope.CAPABILITY_MISMATCH,
+            )
+        url = provider_endpoint(self._base_url, LLM_API_FORMAT_CHAT_COMPLETIONS)
+        headers = _llm_headers(identity=self._identity, accept="text/event-stream")
+        if self._api_key:
+            headers["Authorization"] = f"Bearer {self._api_key}"
+        if images:
+            user_content: object = [
+                {"type": "text", "text": user},
+                *[{"type": "image_url", "image_url": {"url": _to_data_url(img)}} for img in images],
+            ]
+        else:
+            user_content = user
+        body: dict[str, Any] = {
+            "model": self._model,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user_content},
+            ],
+            "max_tokens": max_tokens,
+            "stream": True,
+        }
+        normalized_temperature = _normalize_temperature(temperature)
+        if normalized_temperature is not None:
+            body["temperature"] = normalized_temperature
+        normalized_effort = _normalize_reasoning_effort(reasoning_effort)
+        if normalized_effort is not None:
+            body["reasoning_effort"] = normalized_effort
+
+        client_kwargs: dict[str, object] = {"timeout": _timeout_for_call(self._base_url, timeout_seconds)}
+        if self._proxy_url:
+            client_kwargs["proxy"] = self._proxy_url
+        else:
+            client_kwargs["trust_env"] = False
+
+        model_name = self._model
+        input_tokens = 0
+        output_tokens = 0
+        final_sent = False
+        try:
+            async with httpx.AsyncClient(**client_kwargs) as cli:
+                async with cli.stream("POST", url, headers=headers, json=body) as resp:
+                    if resp.status_code >= 400:
+                        error_body = ""
+                        async for chunk in resp.aiter_text():
+                            error_body += chunk
+                            if len(error_body) > 500:
+                                break
+                        raise LLMError(
+                            _safe_error_message(
+                                f"OpenAI streaming 接口返回 {resp.status_code}: "
+                                f"{error_body[:200]}{_hint_for_status(resp.status_code)}",
+                                self._api_key,
+                            ),
+                            retryable=_is_retryable_status(resp.status_code),
+                            scope=_error_scope_for_http(resp.status_code, error_body),
+                            status_code=resp.status_code,
+                        )
+
+                    response_headers = getattr(resp, "headers", {})
+                    content_type = str(response_headers.get("content-type") or "")
+                    if "json" in content_type.lower():
+                        payload = await _read_limited_stream_json(resp)
+                        result = _completed_json_as_stream_result(
+                            payload,
+                            api_format=LLM_API_FORMAT_CHAT_COMPLETIONS,
+                            default_model=self._model,
+                        )
+                        if result.text:
+                            yield LLMStreamChunk(delta=result.text, model=result.model)
+                        yield LLMStreamChunk(
+                            model=result.model,
+                            input_tokens=result.input_tokens,
+                            output_tokens=result.output_tokens,
+                            done=True,
+                        )
+                        return
+
+                    async for line in _iter_limited_sse_lines(resp):
+                        line = line.strip()
+                        if not line or line.startswith(":") or not line.startswith("data:"):
+                            continue
+                        raw = line.removeprefix("data:").strip()
+                        if raw == "[DONE]":
+                            final_sent = True
+                            yield LLMStreamChunk(
+                                model=model_name,
+                                input_tokens=input_tokens,
+                                output_tokens=output_tokens,
+                                done=True,
+                            )
+                            return
+                        try:
+                            payload = json.loads(raw)
+                        except json.JSONDecodeError:
+                            continue
+                        if not isinstance(payload, dict):
+                            continue
+                        if payload.get("error"):
+                            raise LLMError(
+                                _safe_error_message(
+                                    f"OpenAI streaming 返回错误事件: {str(payload['error'])[:200]}",
+                                    self._api_key,
+                                )
+                            )
+                        model_name = str(payload.get("model") or model_name)
+                        usage = payload.get("usage") or {}
+                        if isinstance(usage, dict):
+                            input_tokens = int(usage.get("prompt_tokens") or input_tokens or 0)
+                            output_tokens = int(usage.get("completion_tokens") or output_tokens or 0)
+                        choices = payload.get("choices") or []
+                        if not isinstance(choices, list) or not choices:
+                            continue
+                        choice = choices[0]
+                        if not isinstance(choice, dict):
+                            continue
+                        delta = choice.get("delta") or {}
+                        if isinstance(delta, dict):
+                            text = _openai_content_text(delta.get("content"))
+                            if text:
+                                yield LLMStreamChunk(delta=text, model=model_name)
+                        if choice.get("finish_reason") and not final_sent:
+                            # usage 可能位于 finish chunk 或其后的独立 chunk；继续读到
+                            # [DONE]，若反代不发送 [DONE] 则在流结束后统一收尾。
+                            continue
+        except LLMError:
+            raise
+        except httpx.HTTPError as exc:
+            raise LLMError(
+                _safe_error_message(
+                    _describe_http_error(exc, self._base_url),
+                    self._api_key,
+                ),
+                retryable=True,
+            ) from None
+
+        if not final_sent:
+            yield LLMStreamChunk(
+                model=model_name,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                done=True,
+            )
+
+    async def invoke(self, request: ModelRequest) -> ModelResponse:
+        capabilities_for_api_format(LLM_API_FORMAT_CHAT_COMPLETIONS).validate(
+            request,
+            LLM_API_FORMAT_CHAT_COMPLETIONS,
+        )
+        url = provider_endpoint(self._base_url, LLM_API_FORMAT_CHAT_COMPLETIONS)
+        headers = _llm_headers(identity=self._identity)
+        if self._api_key:
+            headers["Authorization"] = f"Bearer {self._api_key}"
+        body: dict[str, Any] = {
+            "model": request.model or self._model,
+            "messages": _chat_messages(request.messages),
+            "max_tokens": request.max_output_tokens,
+        }
+        if request.tools:
+            body["tools"] = _tool_specs_openai(request.tools)
+            body["tool_choice"] = _openai_tool_choice(request.tool_choice)
+        if request.temperature is not None:
+            body["temperature"] = _normalize_temperature(request.temperature)
+        if request.reasoning_effort:
+            body["reasoning_effort"] = _normalize_reasoning_effort(request.reasoning_effort)
+
+        client_kwargs: dict[str, object] = {"timeout": _timeout_for_call(self._base_url, None)}
+        if self._proxy_url:
+            client_kwargs["proxy"] = self._proxy_url
+        else:
+            client_kwargs["trust_env"] = False
+        try:
+            async with httpx.AsyncClient(**client_kwargs) as cli:
+                resp = await cli.post(url, headers=headers, json=body)
+        except httpx.HTTPError as exc:
+            raise LLMError(
+                _safe_error_message(_describe_http_error(exc, self._base_url), self._api_key),
+                retryable=True,
+            ) from None
+        if resp.status_code >= 400:
+            raise LLMError(
+                _safe_error_message(
+                    f"OpenAI 接口返回 {resp.status_code}: {resp.text[:200]}{_hint_for_status(resp.status_code)}",
+                    self._api_key,
+                ),
+                retryable=_is_retryable_status(resp.status_code),
+                scope=_error_scope_for_http(resp.status_code, resp.text),
+                status_code=resp.status_code,
+            )
+        try:
+            data = resp.json()
+        except json.JSONDecodeError as exc:
+            raise LLMError(f"OpenAI 返回非 JSON: {exc}") from None
+        choices = data.get("choices") or []
+        if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+            raise LLMError("OpenAI 返回结构异常: 缺少 choices[0]")
+        choice = choices[0]
+        message = choice.get("message") or {}
+        if not isinstance(message, dict):
+            raise LLMError("OpenAI 返回结构异常: message 不是对象")
+        tool_calls = tuple(
+            ToolCall(
+                id=str(item.get("id") or ""),
+                name=str((item.get("function") or {}).get("name") or ""),
+                arguments=_parse_tool_arguments((item.get("function") or {}).get("arguments")),
+            )
+            for item in message.get("tool_calls") or []
+            if isinstance(item, dict) and str((item.get("function") or {}).get("name") or "")
+        )
+        usage = data.get("usage") or {}
+        finish_reason = choice.get("finish_reason")
+        return ModelResponse(
+            model=str(data.get("model") or request.model or self._model),
+            content=(TextContent(_openai_content_text(message.get("content"))),)
+            if _openai_content_text(message.get("content"))
+            else (),
+            tool_calls=tool_calls,
+            usage=ModelUsage(
+                input_tokens=int(usage.get("prompt_tokens") or 0),
+                output_tokens=int(usage.get("completion_tokens") or 0),
+                reasoning_tokens=int(
+                    (usage.get("completion_tokens_details") or {}).get("reasoning_tokens") or 0
+                ),
+            ),
+            stop_reason=stop_reason_from_provider(finish_reason),
+            provider_status=str(finish_reason) if finish_reason else None,
         )
 
     async def transcribe(self, audio: bytes, model: str) -> str:
@@ -435,7 +1386,7 @@ class OpenAIClient(LLMClient):
         if not model:
             raise LLMError("transcribe() 必须指定 model（如 'whisper-1'）")
         url = f"{self._base_url}/audio/transcriptions"
-        headers = {}
+        headers = _llm_headers(identity=self._identity, content_type=None)
         if self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"
         # 文件名给个通用后缀，让上游按二进制 audio 流处理
@@ -457,14 +1408,18 @@ class OpenAIClient(LLMClient):
                 _safe_error_message(
                     _describe_http_error(exc, self._base_url),
                     self._api_key,
-                )
+                ),
+                retryable=True,
             ) from None
         if resp.status_code >= 400:
             raise LLMError(
                 _safe_error_message(
                     f"STT 接口返回 {resp.status_code}: {resp.text[:200]}{_hint_for_status(resp.status_code)}",
                     self._api_key,
-                )
+                ),
+                retryable=_is_retryable_status(resp.status_code),
+                scope=_error_scope_for_http(resp.status_code, resp.text),
+                status_code=resp.status_code,
             )
         try:
             payload = resp.json()
@@ -496,10 +1451,12 @@ class OpenAIClient(LLMClient):
         if web_search:
             raise LLMError("图片生成不支持联网搜索，请关闭 web_search")
         if images:
-            raise LLMError("当前 /images/generations 路径暂不支持参考图；请改用 api_format=responses 的 Provider")
+            raise LLMError(
+                "当前 /images/generations 路径暂不支持参考图；请改用 api_format=responses 的 Provider"
+            )
 
         url = f"{self._base_url}/images/generations"
-        headers = {"Content-Type": "application/json"}
+        headers = _llm_headers(identity=self._identity)
         if self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"
 
@@ -525,14 +1482,18 @@ class OpenAIClient(LLMClient):
                 _safe_error_message(
                     _describe_http_error(exc, self._base_url),
                     self._api_key,
-                )
+                ),
+                retryable=True,
             ) from None
         if resp.status_code >= 400:
             raise LLMError(
                 _safe_error_message(
                     f"Images 接口返回 {resp.status_code}: {resp.text[:200]}{_hint_for_status(resp.status_code)}",
                     self._api_key,
-                )
+                ),
+                retryable=_is_retryable_status(resp.status_code),
+                scope=_error_scope_for_http(resp.status_code, resp.text),
+                status_code=resp.status_code,
             )
         try:
             data = resp.json()
@@ -581,11 +1542,40 @@ class AnthropicClient(LLMClient):
         base_url: str | None,
         model: str,
         proxy_url: str | None = None,
+        protocol_profile: str = LLM_PROTOCOL_PROFILE_STANDARD,
+        identity: ClientIdentity | None = None,
     ):
         self._api_key = api_key
-        self._base_url = (base_url or "https://api.anthropic.com/v1").rstrip("/")
+        self._base_url = normalize_base_url(base_url or "https://api.anthropic.com/v1")
         self._model = model
         self._proxy_url = proxy_url
+        self._protocol_profile = protocol_profile
+        self._identity = identity
+
+    def _headers(self) -> dict[str, str]:
+        # 协议必需头：x-api-key / anthropic-version / Content-Type。
+        # 身份头（UA、x-app 等）由集中身份目录提供，不再发送 TelePilot 产品 UA；
+        # minimal 身份不注入任何产品模拟头。
+        headers = {
+            "x-api-key": self._api_key,
+            "anthropic-version": self._ANTHROPIC_VERSION,
+            "Content-Type": "application/json",
+        }
+        if self._identity is not None:
+            headers.update(self._identity.headers())
+        # protocol_profile 只控制协议语义 / beta 头，与身份相互独立：
+        # 切换身份不会打开 beta，配置 claude_code_proxy 才发送 beta 头。
+        if self._protocol_profile == LLM_PROTOCOL_PROFILE_CLAUDE_CODE_PROXY:
+            # claude_code_proxy 历史上就绑定这组兼容头（含 x-app: cli），
+            # 反代依赖它分发；保留以兼容既有 Provider，与身份档案是否提供 x-app 无关。
+            headers.update(
+                {
+                    "anthropic-beta": "claude-code-20250219,context-1m-2025-08-07,interleaved-thinking-2025-05-14,effort-2025-11-24",
+                    "anthropic-dangerous-direct-browser-access": "true",
+                    "x-app": "cli",
+                }
+            )
+        return headers
 
     async def complete(
         self,
@@ -600,18 +1590,12 @@ class AnthropicClient(LLMClient):
         timeout_seconds: int | None = None,
     ) -> LLMResult:
         if web_search:
-            raise LLMError("当前 Anthropic 调用路径尚未接入联网搜索；请使用 OpenAI Responses provider")
-        url = f"{self._base_url}/messages"
-        headers = {
-            "x-api-key": self._api_key,
-            "anthropic-version": self._ANTHROPIC_VERSION,
-            "Content-Type": "application/json",
-            # 模拟 Claude 客户端的关键 headers
-            # Anyrouter 等反代强制校验 anthropic-beta 含 context-1m-2025-08-07
-            "anthropic-beta": "claude-code-20250219,context-1m-2025-08-07,interleaved-thinking-2025-05-14,effort-2025-11-24",
-            "anthropic-dangerous-direct-browser-access": "true",
-            "x-app": "cli",
-        }
+            raise LLMError(
+                "当前 Anthropic 调用路径尚未接入联网搜索；请使用 OpenAI Responses provider",
+                scope=LLMErrorScope.CAPABILITY_MISMATCH,
+            )
+        url = provider_endpoint(self._base_url, LLM_API_FORMAT_ANTHROPIC_MESSAGES)
+        headers = self._headers()
         # 视觉路径：Anthropic 用 {"type":"image","source":{"type":"base64",...}}
         # 与 OpenAI 的 image_url 协议**不一样**，要分别构造
         if images:
@@ -641,7 +1625,8 @@ class AnthropicClient(LLMClient):
         }
         normalized_temperature = _normalize_temperature(temperature)
         if normalized_temperature is not None:
-            body["temperature"] = normalized_temperature
+            body["temperature"] = min(1.0, normalized_temperature)
+        self._apply_reasoning_effort(body, reasoning_effort)
         client_kwargs: dict[str, object] = {"timeout": _timeout_for_call(self._base_url, timeout_seconds)}
         if self._proxy_url:
             client_kwargs["proxy"] = self._proxy_url
@@ -661,6 +1646,7 @@ class AnthropicClient(LLMClient):
         model_name = self._model
         input_tokens = 0
         output_tokens = 0
+        provider_stop_reason: str | None = None
 
         try:
             async with httpx.AsyncClient(**client_kwargs) as cli:
@@ -676,11 +1662,14 @@ class AnthropicClient(LLMClient):
                             _safe_error_message(
                                 f"Anthropic 接口返回 {resp.status_code}: {error_body[:200]}{_hint_for_status(resp.status_code)}",
                                 self._api_key,
-                            )
+                            ),
+                            retryable=_is_retryable_status(resp.status_code),
+                            scope=_error_scope_for_http(resp.status_code, error_body),
+                            status_code=resp.status_code,
                         )
                     # 逐行解析 SSE 事件
                     current_event = ""
-                    async for line in resp.aiter_lines():
+                    async for line in _iter_limited_sse_lines(resp):
                         line = line.rstrip("\r\n")
                         if line.startswith("event: "):
                             current_event = line[7:].strip()
@@ -701,8 +1690,19 @@ class AnthropicClient(LLMClient):
                                 if delta.get("type") == "text_delta":
                                     text_parts.append(delta.get("text", ""))
                             elif current_event == "message_delta":
+                                delta = payload.get("delta") or {}
+                                if isinstance(delta, dict) and delta.get("stop_reason"):
+                                    provider_stop_reason = str(delta["stop_reason"])
                                 usage = payload.get("usage") or {}
                                 output_tokens = int(usage.get("output_tokens") or 0)
+                            elif current_event == "error":
+                                error = payload.get("error") or payload
+                                raise LLMError(
+                                    _safe_error_message(
+                                        f"Anthropic streaming 返回错误事件: {str(error)[:200]}",
+                                        self._api_key,
+                                    )
+                                )
                             # message_stop / content_block_start / content_block_stop → 忽略
                             continue
                         # 空行 = 事件分隔符（SSE 规范）
@@ -715,19 +1715,300 @@ class AnthropicClient(LLMClient):
                 _safe_error_message(
                     _describe_http_error(exc, self._base_url),
                     self._api_key,
-                )
+                ),
+                retryable=True,
             ) from None
 
         text = "".join(text_parts).strip()
-        if not text:
-            raise LLMError("Anthropic 返回空内容（SSE 流中未收到 text_delta 事件）")
+        resolved_stop_reason = stop_reason_from_provider(provider_stop_reason)
+        if not text and resolved_stop_reason not in {
+            StopReason.REFUSAL,
+            StopReason.CONTENT_FILTER,
+        }:
+            raise LLMError(
+                "Anthropic 返回空内容（SSE 流中未收到 text_delta 事件）",
+                scope=LLMErrorScope.PROVIDER_LOCAL,
+            )
 
         return LLMResult(
             text=text,
             model=model_name,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
+            stop_reason=resolved_stop_reason,
+            provider_status=provider_stop_reason,
         )
+
+    def _apply_reasoning_effort(
+        self,
+        body: dict[str, Any],
+        reasoning_effort: str | None,
+    ) -> None:
+        normalized = _normalize_reasoning_effort(reasoning_effort)
+        if reasoning_effort and normalized is None:
+            raise LLMError(
+                f"Anthropic 不支持 reasoning_effort={reasoning_effort}",
+                scope=LLMErrorScope.REQUEST_INVALID,
+            )
+        if normalized is None:
+            return
+        if self._protocol_profile != LLM_PROTOCOL_PROFILE_CLAUDE_CODE_PROXY:
+            raise LLMError(
+                "Anthropic standard profile 未声明 reasoning_effort 能力",
+                scope=LLMErrorScope.CAPABILITY_MISMATCH,
+            )
+        body["output_config"] = {"effort": normalized}
+
+    async def invoke(self, request: ModelRequest) -> ModelResponse:
+        capabilities_for_api_format(LLM_API_FORMAT_ANTHROPIC_MESSAGES).validate(
+            request,
+            LLM_API_FORMAT_ANTHROPIC_MESSAGES,
+        )
+        url = provider_endpoint(self._base_url, LLM_API_FORMAT_ANTHROPIC_MESSAGES)
+        body: dict[str, Any] = {
+            "model": request.model or self._model,
+            "max_tokens": request.max_output_tokens,
+            "system": _system_instructions(request.messages),
+            "messages": _anthropic_messages(request.messages),
+            "stream": False,
+        }
+        if request.tools:
+            body["tools"] = [
+                {
+                    "name": tool.name,
+                    "description": tool.description,
+                    "input_schema": tool.parameters,
+                }
+                for tool in request.tools
+            ]
+            body["tool_choice"] = _anthropic_tool_choice(request.tool_choice)
+        if request.temperature is not None:
+            body["temperature"] = min(1.0, _normalize_temperature(request.temperature) or 0.0)
+        self._apply_reasoning_effort(body, request.reasoning_effort)
+
+        client_kwargs: dict[str, object] = {"timeout": _timeout_for_call(self._base_url, None)}
+        if self._proxy_url:
+            client_kwargs["proxy"] = self._proxy_url
+        else:
+            client_kwargs["trust_env"] = False
+        try:
+            async with httpx.AsyncClient(**client_kwargs) as cli:
+                resp = await cli.post(url, headers=self._headers(), json=body)
+        except httpx.HTTPError as exc:
+            raise LLMError(
+                _safe_error_message(_describe_http_error(exc, self._base_url), self._api_key),
+                retryable=True,
+            ) from None
+        if resp.status_code >= 400:
+            raise LLMError(
+                _safe_error_message(
+                    f"Anthropic 接口返回 {resp.status_code}: {resp.text[:200]}{_hint_for_status(resp.status_code)}",
+                    self._api_key,
+                ),
+                retryable=_is_retryable_status(resp.status_code),
+                scope=_error_scope_for_http(resp.status_code, resp.text),
+                status_code=resp.status_code,
+            )
+        try:
+            data = resp.json()
+        except json.JSONDecodeError as exc:
+            raise LLMError(f"Anthropic 返回非 JSON: {exc}") from None
+        content: list[TextContent] = []
+        tool_calls: list[ToolCall] = []
+        for item in data.get("content") or []:
+            if not isinstance(item, dict):
+                continue
+            if item.get("type") == "text" and isinstance(item.get("text"), str):
+                content.append(TextContent(item["text"]))
+            elif item.get("type") == "tool_use":
+                name = str(item.get("name") or "").strip()
+                if name:
+                    tool_calls.append(
+                        ToolCall(
+                            id=str(item.get("id") or ""),
+                            name=name,
+                            arguments=_parse_tool_arguments(item.get("input")),
+                        )
+                    )
+        usage = data.get("usage") or {}
+        stop_reason = data.get("stop_reason")
+        return ModelResponse(
+            model=str(data.get("model") or request.model or self._model),
+            content=tuple(content),
+            tool_calls=tuple(tool_calls),
+            usage=ModelUsage(
+                input_tokens=int(usage.get("input_tokens") or 0),
+                output_tokens=int(usage.get("output_tokens") or 0),
+                cache_read_tokens=int(usage.get("cache_read_input_tokens") or 0),
+                cache_write_tokens=int(usage.get("cache_creation_input_tokens") or 0),
+            ),
+            stop_reason=stop_reason_from_provider(stop_reason),
+            provider_status=str(stop_reason) if stop_reason else None,
+        )
+
+    async def stream_complete(
+        self,
+        system: str,
+        user: str,
+        max_tokens: int = 512,
+        images: list[bytes] | None = None,
+        web_search: bool = False,
+        web_search_context_size: str | None = None,
+        temperature: float | None = None,
+        reasoning_effort: str | None = None,
+        timeout_seconds: int | None = None,
+    ) -> AsyncIterator[LLMStreamChunk]:
+        if web_search:
+            raise LLMError(
+                "当前 Anthropic streaming 尚未接入联网搜索；请使用 OpenAI Responses provider",
+                scope=LLMErrorScope.CAPABILITY_MISMATCH,
+            )
+        url = provider_endpoint(self._base_url, LLM_API_FORMAT_ANTHROPIC_MESSAGES)
+        headers = self._headers()
+        if images:
+            user_content: object = [
+                *[
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": _sniff_image_mime(img),
+                            "data": base64.b64encode(img).decode("ascii"),
+                        },
+                    }
+                    for img in images
+                ],
+                {"type": "text", "text": user},
+            ]
+        else:
+            user_content = user
+        body = {
+            "model": self._model,
+            "max_tokens": max_tokens,
+            "system": system,
+            "messages": [{"role": "user", "content": user_content}],
+            "stream": True,
+        }
+        normalized_temperature = _normalize_temperature(temperature)
+        if normalized_temperature is not None:
+            body["temperature"] = min(1.0, normalized_temperature)
+        self._apply_reasoning_effort(body, reasoning_effort)
+
+        client_kwargs: dict[str, object] = {"timeout": _timeout_for_call(self._base_url, timeout_seconds)}
+        if self._proxy_url:
+            client_kwargs["proxy"] = self._proxy_url
+        else:
+            client_kwargs["trust_env"] = False
+
+        model_name = self._model
+        input_tokens = 0
+        output_tokens = 0
+        final_sent = False
+
+        try:
+            async with httpx.AsyncClient(**client_kwargs) as cli:
+                async with cli.stream("POST", url, headers=headers, json=body) as resp:
+                    if resp.status_code >= 400:
+                        error_body = ""
+                        async for chunk in resp.aiter_text():
+                            error_body += chunk
+                            if len(error_body) > 500:
+                                break
+                        raise LLMError(
+                            _safe_error_message(
+                                f"Anthropic streaming 接口返回 {resp.status_code}: {error_body[:200]}{_hint_for_status(resp.status_code)}",
+                                self._api_key,
+                            ),
+                            retryable=_is_retryable_status(resp.status_code),
+                            scope=_error_scope_for_http(resp.status_code, error_body),
+                            status_code=resp.status_code,
+                        )
+
+                    response_headers = getattr(resp, "headers", {})
+                    content_type = str(response_headers.get("content-type") or "")
+                    if "json" in content_type.lower():
+                        payload = await _read_limited_stream_json(resp)
+                        result = _completed_json_as_stream_result(
+                            payload,
+                            api_format=LLM_API_FORMAT_ANTHROPIC_MESSAGES,
+                            default_model=self._model,
+                        )
+                        if result.text:
+                            yield LLMStreamChunk(delta=result.text, model=result.model)
+                        yield LLMStreamChunk(
+                            model=result.model,
+                            input_tokens=result.input_tokens,
+                            output_tokens=result.output_tokens,
+                            done=True,
+                        )
+                        return
+
+                    current_event = ""
+                    async for line in _iter_limited_sse_lines(resp):
+                        line = line.rstrip("\r\n")
+                        if line.startswith("event: "):
+                            current_event = line[7:].strip()
+                            continue
+                        if line.startswith("data: "):
+                            raw = line[6:]
+                            if raw == "[DONE]":
+                                continue
+                            try:
+                                payload = json.loads(raw)
+                            except json.JSONDecodeError:
+                                continue
+                            if current_event == "message_start":
+                                msg = payload.get("message") or {}
+                                model_name = str(msg.get("model", self._model))
+                                usage = msg.get("usage") or {}
+                                input_tokens = int(usage.get("input_tokens") or 0)
+                            elif current_event == "content_block_delta":
+                                delta = payload.get("delta") or {}
+                                if delta.get("type") == "text_delta":
+                                    text = delta.get("text")
+                                    if isinstance(text, str) and text:
+                                        yield LLMStreamChunk(delta=text, model=model_name)
+                            elif current_event == "message_delta":
+                                usage = payload.get("usage") or {}
+                                output_tokens = int(usage.get("output_tokens") or 0)
+                            elif current_event == "error":
+                                error = payload.get("error") or payload
+                                raise LLMError(
+                                    _safe_error_message(
+                                        f"Anthropic streaming 返回错误事件: {str(error)[:200]}",
+                                        self._api_key,
+                                    )
+                                )
+                            elif current_event == "message_stop":
+                                final_sent = True
+                                yield LLMStreamChunk(
+                                    model=model_name,
+                                    input_tokens=input_tokens,
+                                    output_tokens=output_tokens,
+                                    done=True,
+                                )
+                                return
+                            continue
+                        if not line:
+                            current_event = ""
+        except LLMError:
+            raise
+        except httpx.HTTPError as exc:
+            raise LLMError(
+                _safe_error_message(
+                    _describe_http_error(exc, self._base_url),
+                    self._api_key,
+                ),
+                retryable=True,
+            ) from None
+
+        if not final_sent:
+            yield LLMStreamChunk(
+                model=model_name,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                done=True,
+            )
 
 
 # ────────────────────────────────────────────────────────────
@@ -754,11 +2035,13 @@ class ResponsesClient(LLMClient):
         base_url: str | None,
         model: str,
         proxy_url: str | None = None,
+        identity: ClientIdentity | None = None,
     ):
         self._api_key = api_key
-        self._base_url = (base_url or "https://api.openai.com/v1").rstrip("/")
+        self._base_url = normalize_base_url(base_url or "https://api.openai.com/v1")
         self._model = model
         self._proxy_url = proxy_url
+        self._identity = identity
 
     async def complete(
         self,
@@ -772,8 +2055,8 @@ class ResponsesClient(LLMClient):
         reasoning_effort: str | None = None,
         timeout_seconds: int | None = None,
     ) -> LLMResult:
-        url = f"{self._base_url}/responses"
-        headers = {"Content-Type": "application/json"}
+        url = provider_endpoint(self._base_url, LLM_API_FORMAT_RESPONSES)
+        headers = _llm_headers(identity=self._identity, accept="application/json")
         if self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"
         # 视觉路径：Responses API 的 content 是 [{"type":"input_text"}, {"type":"input_image"}]
@@ -781,10 +2064,7 @@ class ResponsesClient(LLMClient):
         if images:
             input_content: object = [
                 {"type": "input_text", "text": user},
-                *[
-                    {"type": "input_image", "image_url": _to_data_url(img)}
-                    for img in images
-                ],
+                *[{"type": "input_image", "image_url": _to_data_url(img)} for img in images],
             ]
         else:
             input_content = user
@@ -797,6 +2077,7 @@ class ResponsesClient(LLMClient):
             ],
             # Responses API 用 max_output_tokens（不是 max_tokens）
             "max_output_tokens": max_tokens,
+            "stream": False,
         }
         normalized_temperature = _normalize_temperature(temperature)
         if normalized_temperature is not None:
@@ -818,32 +2099,34 @@ class ResponsesClient(LLMClient):
             client_kwargs["trust_env"] = False
         try:
             async with httpx.AsyncClient(**client_kwargs) as cli:
-                resp = await cli.post(url, headers=headers, json=body)
+                resp = await _post_responses_compatible(cli, url, headers=headers, body=body)
         except httpx.HTTPError as exc:
             raise LLMError(
                 _safe_error_message(
                     _describe_http_error(exc, self._base_url),
                     self._api_key,
-                )
+                ),
+                retryable=True,
             ) from None
 
         if resp.status_code >= 400:
             raise LLMError(
                 _safe_error_message(
-                    f"Responses 接口返回 {resp.status_code}: {resp.text[:200]}{_hint_for_status(resp.status_code)}",
+                    f"Responses 接口返回 {resp.status_code}: {_response_text(resp)[:200]}{_hint_for_status(resp.status_code)}",
                     self._api_key,
-                )
+                ),
+                retryable=_is_retryable_status(resp.status_code),
+                scope=_error_scope_for_http(resp.status_code, _response_text(resp)),
+                status_code=resp.status_code,
             )
 
-        try:
-            data = resp.json()
-        except json.JSONDecodeError as exc:
-            raise LLMError(f"Responses 返回非 JSON: {exc}") from None
+        data = _decode_responses_payload("Responses", resp, self._api_key)
 
         # 解析 output：兼容多种形态
         # 形态 1：data["output_text"] = "..."（部分实现的便利字段）
         # 形态 2：data["output"] = [{"type":"message","content":[{"type":"output_text","text":"..."}]}]
         text = ""
+        has_refusal = False
         ot = data.get("output_text")
         if isinstance(ot, str):
             text = ot
@@ -858,12 +2141,48 @@ class ResponsesClient(LLMClient):
                     for c in content:
                         if not isinstance(c, dict):
                             continue
+                        if c.get("type") == "refusal" and c.get("refusal"):
+                            has_refusal = True
                         t = c.get("text")
                         # type 通常是 output_text；保险起见全收
                         if isinstance(t, str):
                             text_parts.append(t)
             text = "".join(text_parts)
 
+        status = str(data.get("status") or "")
+        if status in {"failed", "cancelled"}:
+            detail = data.get("error") or data.get("incomplete_details") or status
+            raise LLMError(
+                _safe_error_message(
+                    f"Responses 返回状态异常: {status}: {str(detail)[:200]}",
+                    self._api_key,
+                )
+            )
+        tool_calls: list[ToolCall] = []
+        output_list = data.get("output") or []
+        for item in output_list if isinstance(output_list, list) else []:
+            if not isinstance(item, dict) or item.get("type") != "function_call":
+                continue
+            raw_arguments = item.get("arguments")
+            try:
+                arguments = json.loads(raw_arguments) if isinstance(raw_arguments, str) else raw_arguments
+            except json.JSONDecodeError:
+                arguments = {"_raw": raw_arguments}
+            if not isinstance(arguments, dict):
+                arguments = {"value": arguments}
+            name = str(item.get("name") or "").strip()
+            if name:
+                tool_calls.append(
+                    ToolCall(
+                        id=str(item.get("call_id") or item.get("id") or ""),
+                        name=name,
+                        arguments=arguments,
+                    )
+                )
+
+        incomplete = data.get("incomplete_details") or {}
+        incomplete_reason = incomplete.get("reason") if isinstance(incomplete, dict) else None
+        provider_reason = incomplete_reason or status
         # usage：input_tokens / output_tokens
         usage = data.get("usage") or {}
         return LLMResult(
@@ -872,7 +2191,308 @@ class ResponsesClient(LLMClient):
             input_tokens=int(usage.get("input_tokens") or 0),
             output_tokens=int(usage.get("output_tokens") or 0),
             sources=_extract_response_sources(data),
+            tool_calls=tool_calls,
+            stop_reason=(
+                StopReason.REFUSAL
+                if has_refusal
+                else StopReason.MAX_TOKENS
+                if incomplete_reason in {"max_output_tokens", "max_tokens"}
+                else stop_reason_from_provider(provider_reason)
+            ),
+            provider_status=str(provider_reason) if provider_reason else None,
         )
+
+    async def invoke(self, request: ModelRequest) -> ModelResponse:
+        capabilities_for_api_format(LLM_API_FORMAT_RESPONSES).validate(
+            request,
+            LLM_API_FORMAT_RESPONSES,
+        )
+        url = provider_endpoint(self._base_url, LLM_API_FORMAT_RESPONSES)
+        headers = _llm_headers(identity=self._identity, accept="application/json")
+        if self._api_key:
+            headers["Authorization"] = f"Bearer {self._api_key}"
+        body: dict[str, Any] = {
+            "model": request.model or self._model,
+            "instructions": _system_instructions(request.messages),
+            "input": _responses_input(request.messages),
+            "max_output_tokens": request.max_output_tokens,
+            "stream": False,
+            "store": False,
+        }
+        if request.tools:
+            body["tools"] = [
+                {
+                    "type": "function",
+                    "name": tool.name,
+                    "description": tool.description,
+                    "parameters": tool.parameters,
+                    "strict": tool.strict,
+                }
+                for tool in request.tools
+            ]
+            body["tool_choice"] = _responses_tool_choice(request.tool_choice)
+        if request.temperature is not None:
+            body["temperature"] = _normalize_temperature(request.temperature)
+        if request.reasoning_effort:
+            body["reasoning"] = {"effort": _normalize_reasoning_effort(request.reasoning_effort)}
+        if request.web_search:
+            size = (request.web_search_context_size or "medium").lower()
+            if size not in {"low", "medium", "high"}:
+                size = "medium"
+            body.setdefault("tools", []).append({"type": "web_search", "search_context_size": size})
+            body["include"] = ["web_search_call.action.sources"]
+
+        client_kwargs: dict[str, object] = {"timeout": _timeout_for_call(self._base_url, None)}
+        if self._proxy_url:
+            client_kwargs["proxy"] = self._proxy_url
+        else:
+            client_kwargs["trust_env"] = False
+        try:
+            async with httpx.AsyncClient(**client_kwargs) as cli:
+                resp = await _post_responses_compatible(cli, url, headers=headers, body=body)
+        except httpx.HTTPError as exc:
+            raise LLMError(
+                _safe_error_message(_describe_http_error(exc, self._base_url), self._api_key),
+                retryable=True,
+            ) from None
+        if resp.status_code >= 400:
+            raise LLMError(
+                _safe_error_message(
+                    f"Responses 接口返回 {resp.status_code}: {_response_text(resp)[:200]}{_hint_for_status(resp.status_code)}",
+                    self._api_key,
+                ),
+                retryable=_is_retryable_status(resp.status_code),
+                scope=_error_scope_for_http(resp.status_code, _response_text(resp)),
+                status_code=resp.status_code,
+            )
+        data = _decode_responses_payload("Responses", resp, self._api_key)
+        status = str(data.get("status") or "")
+        if status in {"failed", "cancelled"}:
+            raise LLMError(f"Responses 返回状态异常: {status}")
+        text_parts: list[str] = []
+        tool_calls: list[ToolCall] = []
+        has_refusal = False
+        for item in data.get("output") or []:
+            if not isinstance(item, dict):
+                continue
+            if item.get("type") == "function_call":
+                name = str(item.get("name") or "").strip()
+                if name:
+                    tool_calls.append(
+                        ToolCall(
+                            id=str(item.get("call_id") or item.get("id") or ""),
+                            name=name,
+                            arguments=_parse_tool_arguments(item.get("arguments")),
+                        )
+                    )
+            for content in item.get("content") or []:
+                if not isinstance(content, dict):
+                    continue
+                if content.get("type") == "refusal" and content.get("refusal"):
+                    has_refusal = True
+                if isinstance(content.get("text"), str):
+                    text_parts.append(content["text"])
+        if not text_parts and isinstance(data.get("output_text"), str):
+            text_parts.append(data["output_text"])
+        usage = data.get("usage") or {}
+        details = usage.get("output_tokens_details") or {}
+        incomplete = data.get("incomplete_details") or {}
+        incomplete_reason = incomplete.get("reason") if isinstance(incomplete, dict) else None
+        provider_reason = incomplete_reason or status
+        return ModelResponse(
+            model=str(data.get("model") or request.model or self._model),
+            content=(TextContent("".join(text_parts).strip()),) if text_parts else (),
+            tool_calls=tuple(tool_calls),
+            usage=ModelUsage(
+                input_tokens=int(usage.get("input_tokens") or 0),
+                output_tokens=int(usage.get("output_tokens") or 0),
+                reasoning_tokens=int(details.get("reasoning_tokens") or 0),
+            ),
+            stop_reason=(
+                StopReason.REFUSAL
+                if has_refusal
+                else StopReason.MAX_TOKENS
+                if incomplete_reason in {"max_output_tokens", "max_tokens"}
+                else StopReason.TOOL_CALLS
+                if tool_calls
+                else stop_reason_from_provider(provider_reason)
+            ),
+            provider_status=str(provider_reason) if provider_reason else None,
+            sources=tuple(_extract_response_sources(data)),
+        )
+
+    async def stream_complete(
+        self,
+        system: str,
+        user: str,
+        max_tokens: int = 512,
+        images: list[bytes] | None = None,
+        web_search: bool = False,
+        web_search_context_size: str | None = None,
+        temperature: float | None = None,
+        reasoning_effort: str | None = None,
+        timeout_seconds: int | None = None,
+    ) -> AsyncIterator[LLMStreamChunk]:
+        url = provider_endpoint(self._base_url, LLM_API_FORMAT_RESPONSES)
+        headers = _llm_headers(identity=self._identity, accept="text/event-stream")
+        if self._api_key:
+            headers["Authorization"] = f"Bearer {self._api_key}"
+        if images:
+            input_content: object = [
+                {"type": "input_text", "text": user},
+                *[{"type": "input_image", "image_url": _to_data_url(img)} for img in images],
+            ]
+        else:
+            input_content = user
+        body = {
+            "model": self._model,
+            "instructions": system,
+            "input": [
+                {"role": "user", "content": input_content},
+            ],
+            "max_output_tokens": max_tokens,
+            "stream": True,
+        }
+        normalized_temperature = _normalize_temperature(temperature)
+        if normalized_temperature is not None:
+            body["temperature"] = normalized_temperature
+        normalized_effort = _normalize_reasoning_effort(reasoning_effort)
+        if normalized_effort is not None:
+            body["reasoning"] = {"effort": normalized_effort}
+        if web_search:
+            size = (web_search_context_size or "medium").lower()
+            if size not in {"low", "medium", "high"}:
+                size = "medium"
+            body["tools"] = [{"type": "web_search", "search_context_size": size}]
+            body["include"] = ["web_search_call.action.sources"]
+
+        client_kwargs: dict[str, object] = {"timeout": _timeout_for_call(self._base_url, timeout_seconds)}
+        if self._proxy_url:
+            client_kwargs["proxy"] = self._proxy_url
+        else:
+            client_kwargs["trust_env"] = False
+
+        model_name = self._model
+        input_tokens = 0
+        output_tokens = 0
+        final_sent = False
+
+        try:
+            async with httpx.AsyncClient(**client_kwargs) as cli:
+                async with cli.stream("POST", url, headers=headers, json=body) as resp:
+                    if resp.status_code >= 400:
+                        error_body = ""
+                        async for chunk in resp.aiter_text():
+                            error_body += chunk
+                            if len(error_body) > 500:
+                                break
+                        raise LLMError(
+                            _safe_error_message(
+                                f"Responses streaming 接口返回 {resp.status_code}: {error_body[:200]}{_hint_for_status(resp.status_code)}",
+                                self._api_key,
+                            ),
+                            retryable=_is_retryable_status(resp.status_code),
+                            scope=_error_scope_for_http(resp.status_code, error_body),
+                            status_code=resp.status_code,
+                        )
+
+                    response_headers = getattr(resp, "headers", {})
+                    content_type = str(response_headers.get("content-type") or "")
+                    if "json" in content_type.lower():
+                        payload = await _read_limited_stream_json(resp)
+                        result = _completed_json_as_stream_result(
+                            payload,
+                            api_format=LLM_API_FORMAT_RESPONSES,
+                            default_model=self._model,
+                        )
+                        if result.text:
+                            yield LLMStreamChunk(delta=result.text, model=result.model)
+                        yield LLMStreamChunk(
+                            model=result.model,
+                            input_tokens=result.input_tokens,
+                            output_tokens=result.output_tokens,
+                            done=True,
+                        )
+                        return
+
+                    current_event = ""
+                    async for line in _iter_limited_sse_lines(resp):
+                        line = line.rstrip("\r\n")
+                        if line.startswith("event:"):
+                            current_event = line.removeprefix("event:").strip()
+                            continue
+                        if line.startswith("data:"):
+                            raw = line.removeprefix("data:").strip()
+                            if not raw or raw == "[DONE]":
+                                continue
+                            try:
+                                payload = json.loads(raw)
+                            except json.JSONDecodeError:
+                                continue
+                            if not isinstance(payload, dict):
+                                continue
+                            payload_type = str(payload.get("type") or current_event or "")
+                            if payload_type in {"error", "response.error"}:
+                                error = payload.get("error") or payload
+                                raise LLMError(
+                                    _safe_error_message(
+                                        f"Responses streaming 返回错误事件: {str(error)[:200]}",
+                                        self._api_key,
+                                    )
+                                )
+                            response = payload.get("response")
+                            if isinstance(response, dict):
+                                model_name = str(response.get("model") or model_name)
+                                usage = response.get("usage") or {}
+                                input_tokens = int(usage.get("input_tokens") or input_tokens or 0)
+                                output_tokens = int(usage.get("output_tokens") or output_tokens or 0)
+                                status = str(response.get("status") or "")
+                                if payload_type == "response.completed" or status == "completed":
+                                    final_sent = True
+                                    yield LLMStreamChunk(
+                                        model=model_name,
+                                        input_tokens=input_tokens,
+                                        output_tokens=output_tokens,
+                                        done=True,
+                                    )
+                                    return
+                                if status in {"failed", "cancelled"}:
+                                    raise LLMError(
+                                        _safe_error_message(
+                                            f"Responses streaming 结束状态异常: {status}",
+                                            self._api_key,
+                                        )
+                                    )
+                            if payload_type == "response.output_text.delta":
+                                delta = payload.get("delta")
+                                if isinstance(delta, str) and delta:
+                                    yield LLMStreamChunk(delta=delta, model=model_name)
+                            elif payload_type == "response.output_text.done":
+                                text = payload.get("text")
+                                if isinstance(text, str) and text and not final_sent:
+                                    # done 事件只用于兼容不发送 completed 的反代；不重复输出文本。
+                                    continue
+                            continue
+                        if not line:
+                            current_event = ""
+        except LLMError:
+            raise
+        except httpx.HTTPError as exc:
+            raise LLMError(
+                _safe_error_message(
+                    _describe_http_error(exc, self._base_url),
+                    self._api_key,
+                ),
+                retryable=True,
+            ) from None
+
+        if not final_sent:
+            yield LLMStreamChunk(
+                model=model_name,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                done=True,
+            )
 
     async def transcribe(self, audio: bytes, model: str) -> str:
         """OpenAI Responses 协议厂商一般也在同一个 base_url 下挂 ``/audio/transcriptions``——
@@ -899,18 +2519,15 @@ class ResponsesClient(LLMClient):
         """
         if web_search:
             raise LLMError("图片生成不支持联网搜索，请关闭 web_search")
-        url = f"{self._base_url}/responses"
-        headers = {"Content-Type": "application/json"}
+        url = provider_endpoint(self._base_url, LLM_API_FORMAT_RESPONSES)
+        headers = _llm_headers(identity=self._identity, accept="application/json")
         if self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"
 
         if images:
             input_content: object = [
                 {"type": "input_text", "text": user},
-                *[
-                    {"type": "input_image", "image_url": _to_data_url(img)}
-                    for img in images
-                ],
+                *[{"type": "input_image", "image_url": _to_data_url(img)} for img in images],
             ]
         else:
             input_content = user
@@ -930,6 +2547,7 @@ class ResponsesClient(LLMClient):
             "tools": [image_tool],
             "tool_choice": {"type": "image_generation"},
             "max_output_tokens": max_tokens,
+            "stream": False,
         }
         normalized_temperature = _normalize_temperature(temperature)
         if normalized_temperature is not None:
@@ -945,26 +2563,27 @@ class ResponsesClient(LLMClient):
             client_kwargs["trust_env"] = False
         try:
             async with httpx.AsyncClient(**client_kwargs) as cli:
-                resp = await cli.post(url, headers=headers, json=body)
+                resp = await _post_responses_compatible(cli, url, headers=headers, body=body)
         except httpx.HTTPError as exc:
             raise LLMError(
                 _safe_error_message(
                     _describe_http_error(exc, self._base_url),
                     self._api_key,
-                )
+                ),
+                retryable=True,
             ) from None
 
         if resp.status_code >= 400:
             raise LLMError(
                 _safe_error_message(
-                    f"Responses 生图接口返回 {resp.status_code}: {resp.text[:200]}{_hint_for_status(resp.status_code)}",
+                    f"Responses 生图接口返回 {resp.status_code}: {_response_text(resp)[:200]}{_hint_for_status(resp.status_code)}",
                     self._api_key,
-                )
+                ),
+                retryable=_is_retryable_status(resp.status_code),
+                scope=_error_scope_for_http(resp.status_code, _response_text(resp)),
+                status_code=resp.status_code,
             )
-        try:
-            data = resp.json()
-        except json.JSONDecodeError as exc:
-            raise LLMError(f"Responses 生图返回非 JSON: {exc}") from None
+        data = _decode_responses_payload("Responses 生图", resp, self._api_key)
 
         image_data, image_urls, output_text = _extract_response_image_outputs(data)
         if not image_data and not image_urls:
@@ -987,13 +2606,32 @@ class ResponsesClient(LLMClient):
 # ────────────────────────────────────────────────────────────
 
 
+class LLMErrorScope(StrEnum):
+    """Decides whether an error belongs to this provider or the whole request."""
+
+    TRANSIENT = "transient"
+    PROVIDER_LOCAL = "provider_local"
+    CAPABILITY_MISMATCH = "capability_mismatch"
+    REQUEST_INVALID = "request_invalid"
+    ACCOUNT_POLICY = "account_policy"
+    UNKNOWN = "unknown"
+
+
 class LLMError(Exception):
     """LLM 调用层统一异常；message 已脱敏。"""
 
-    def __init__(self, message: str, *, retryable: bool = False, fallback: bool = False):
+    def __init__(
+        self,
+        message: str,
+        *,
+        retryable: bool = False,
+        scope: LLMErrorScope | str | None = None,
+        status_code: int | None = None,
+    ):
         super().__init__(message)
         self.retryable = retryable  # 是否可重试（timeout/429/5xx/网络错误）
-        self.fallback = fallback     # 是否可 fallback（网络错误/非认证错误）
+        self.scope = LLMErrorScope(scope or (LLMErrorScope.TRANSIENT if retryable else LLMErrorScope.UNKNOWN))
+        self.status_code = status_code
 
 
 class LLMCallFailed(Exception):
@@ -1007,6 +2645,7 @@ class LLMCallFailed(Exception):
         error_type: str | None = None,
         status_code: int | None = None,
         retryable: bool = False,
+        scope: LLMErrorScope | str | None = None,
     ):
         super().__init__(message)
         self.provider_id = provider_id
@@ -1014,75 +2653,43 @@ class LLMCallFailed(Exception):
         self.error_type = error_type  # "timeout" / "network" / "rate_limit" / "auth" / "server_error"
         self.status_code = status_code
         self.retryable = retryable
+        self.scope = LLMErrorScope(scope or LLMErrorScope.UNKNOWN)
 
 
-def _is_retryable_error(exc: Exception, status_code: int | None = None) -> bool:
-    """判断错误是否可重试。
-
-    可重试：timeout / ConnectError / 网络错误 / 429 / 5xx
-    不可重试：400 / 401 / 403 / 404（认证/配置错误，重试无意义）
-    """
-    if status_code is not None:
-        # 4xx 客户端错误中，只有 429 限流可重试
-        if status_code == 429:
-            return True
-        # 5xx 服务端错误可重试
-        if 500 <= status_code < 600:
-            return True
-        # 400/401/403/404 等不可重试
-        return False
-
-    # 无 status_code 时，判断异常类型
-    exc_name = type(exc).__name__
-    retryable_types = {
-        "TimeoutException",
-        "ConnectTimeout",
-        "ReadTimeout",
-        "WriteTimeout",
-        "PoolTimeout",
-        "ConnectError",
-        "ReadError",
-        "WriteError",
-        "ProxyError",
-        "SSLError",
-        "ProtocolError",
-        "HTTPError",  # httpx 基础异常，包含各种网络问题
-    }
-    return exc_name in retryable_types
+def _is_retryable_status(status_code: int) -> bool:
+    """HTTP 状态码是否值得重试：429 限流与 5xx 服务端错误可重试，4xx 认证/配置类不可重试。"""
+    return status_code == 429 or 500 <= status_code < 600
 
 
-def _classify_error(exc: Exception, status_code: int | None = None) -> str:
-    """分类错误类型（用于日志和用户提示）。"""
-    if status_code is not None:
-        if status_code == 429:
-            return "rate_limit"
-        if status_code == 401 or status_code == 403:
-            return "auth"
-        if status_code == 404:
-            return "not_found"
-        if 500 <= status_code < 600:
-            return "server_error"
-        if 400 <= status_code < 500:
-            return "client_error"
-        return "unknown"
+def _error_scope_for_http(status_code: int, body: str = "") -> LLMErrorScope:
+    """Classify HTTP failures without treating every 4xx as interchangeable."""
 
-    exc_name = type(exc).__name__
-    if "Timeout" in exc_name:
-        return "timeout"
-    if "Connect" in exc_name or "Proxy" in exc_name or "SSL" in exc_name:
-        return "network"
-    if "HTTP" in exc_name:
-        return "network"
-    return "unknown"
-
-
-def _compute_retry_delay(attempt: int, base: float = _RETRY_BASE_DELAY, max_delay: float = _RETRY_MAX_DELAY) -> float:
-    """计算指数退避延迟：base * 2^(attempt-1)，加抖动后限制在 max_delay 内。"""
-    import random
-    delay = base * (2 ** (attempt - 1))
-    # 加 ±25% 抖动
-    jitter = delay * 0.25 * (2 * random.random() - 1)
-    return min(delay + jitter, max_delay)
+    if _is_retryable_status(status_code):
+        return LLMErrorScope.TRANSIENT
+    normalized = body.lower()
+    if status_code in {401, 404}:
+        return LLMErrorScope.PROVIDER_LOCAL
+    if status_code == 403:
+        if any(word in normalized for word in ("policy", "safety", "moderation", "blocked")):
+            return LLMErrorScope.ACCOUNT_POLICY
+        return LLMErrorScope.PROVIDER_LOCAL
+    if status_code == 400:
+        if any(
+            word in normalized
+            for word in (
+                "model_not_found",
+                "model not found",
+                "unknown model",
+                "deployment not found",
+            )
+        ):
+            return LLMErrorScope.PROVIDER_LOCAL
+        if any(word in normalized for word in ("unsupported", "does not support", "not supported")):
+            return LLMErrorScope.CAPABILITY_MISMATCH
+        return LLMErrorScope.REQUEST_INVALID
+    if status_code in {409, 422}:
+        return LLMErrorScope.REQUEST_INVALID
+    return LLMErrorScope.UNKNOWN
 
 
 def _safe_error_message(msg: str, api_key: str | None) -> str:
@@ -1108,7 +2715,9 @@ def _safe_error_message(msg: str, api_key: str | None) -> str:
     # Bearer token
     out = re.sub(r"Bearer\s+[A-Za-z0-9_.\-]{8,}", "Bearer <token>", out)
     # 常见的其他 key 格式
-    out = re.sub(r"(?i)(api[_-]?key|secret|token)\s*[=:]\s*['\"]?[A-Za-z0-9_.\-]{8,}['\"]?", r"\1=<redacted>", out)
+    out = re.sub(
+        r"(?i)(api[_-]?key|secret|token)\s*[=:]\s*['\"]?[A-Za-z0-9_.\-]{8,}['\"]?", r"\1=<redacted>", out
+    )
     return out
 
 
@@ -1175,6 +2784,7 @@ def build_client(
     override_model: str | None = None,
     proxy_url: str | None = None,
     api_format_override: str | None = None,
+    identity_override: str | None = None,
 ) -> LLMClient:
     """根据 ORM 行装配具体 LLMClient。
 
@@ -1186,6 +2796,9 @@ def build_client(
     - 解密 api_key（若该 provider 行没有 key 字段则 client 拿空串）
     - ``override_model`` 优先于 provider.default_model
     - ``proxy_url`` 给 None 表示直连；socks5/http/https 都接受 httpx URL
+    - 客户端身份依据"本次实际协议"（``fmt``，即 override 生效后的协议）解析；
+      ``identity_override`` 供协议检测按顺序显式指定身份使用，正式业务调用留空
+      即用 Provider 配置的 ``client_identity_profile``。
     """
     api_key = ""
     if provider_row.api_key_enc:
@@ -1200,6 +2813,8 @@ def build_client(
         or getattr(provider_row, "api_format", None)
         or default_api_format_for(provider_row.provider)
     )
+    configured_identity = identity_override or getattr(provider_row, "client_identity_profile", None)
+    identity = resolve_identity(configured_identity, fmt)
 
     if fmt == LLM_API_FORMAT_CHAT_COMPLETIONS:
         # ollama 兜底 base_url（chat_completions 也兼容）
@@ -1211,14 +2826,28 @@ def build_client(
             base_url=base,
             model=model,
             proxy_url=proxy_url,
+            identity=identity,
         )
     if fmt == LLM_API_FORMAT_RESPONSES:
         return ResponsesClient(
-            api_key=api_key, base_url=provider_row.base_url, model=model, proxy_url=proxy_url
+            api_key=api_key,
+            base_url=provider_row.base_url,
+            model=model,
+            proxy_url=proxy_url,
+            identity=identity,
         )
     if fmt == LLM_API_FORMAT_ANTHROPIC_MESSAGES:
         return AnthropicClient(
-            api_key=api_key, base_url=provider_row.base_url, model=model, proxy_url=proxy_url
+            api_key=api_key,
+            base_url=provider_row.base_url,
+            model=model,
+            proxy_url=proxy_url,
+            protocol_profile=getattr(
+                provider_row,
+                "protocol_profile",
+                LLM_PROTOCOL_PROFILE_STANDARD,
+            ),
+            identity=identity,
         )
     raise ValueError(f"未知 api_format: {fmt}")
 
@@ -1228,6 +2857,7 @@ def build_client_from_dto(
     override_model: str | None = None,
     proxy_url: str | None = None,
     api_format_override: str | None = None,
+    identity_override: str | None = None,
 ) -> LLMClient:
     """根据 LLMProviderDTO 装配具体 LLMClient。
 
@@ -1238,6 +2868,7 @@ def build_client_from_dto(
         dto: LLMProviderDTO 对象
         override_model: 覆盖模型名（优先于 dto.default_model）
         proxy_url: 代理 URL（优先于 dto.proxy_url）
+        identity_override: 显式身份档案（协议检测用）；留空用 dto 配置。
     """
     api_key = ""
     if dto.api_key_enc:
@@ -1251,6 +2882,9 @@ def build_client_from_dto(
 
     # proxy 合并：参数传入 > dto 内置
     final_proxy = proxy_url if proxy_url else dto.proxy_url
+    # 身份依据本次实际协议解析（override 生效后）。
+    configured_identity = identity_override or dto.client_identity_profile
+    identity = resolve_identity(configured_identity, fmt)
 
     if fmt == LLM_API_FORMAT_CHAT_COMPLETIONS:
         base = dto.base_url
@@ -1261,14 +2895,24 @@ def build_client_from_dto(
             base_url=base,
             model=model,
             proxy_url=final_proxy,
+            identity=identity,
         )
     if fmt == LLM_API_FORMAT_RESPONSES:
         return ResponsesClient(
-            api_key=api_key, base_url=dto.base_url, model=model, proxy_url=final_proxy
+            api_key=api_key,
+            base_url=dto.base_url,
+            model=model,
+            proxy_url=final_proxy,
+            identity=identity,
         )
     if fmt == LLM_API_FORMAT_ANTHROPIC_MESSAGES:
         return AnthropicClient(
-            api_key=api_key, base_url=dto.base_url, model=model, proxy_url=final_proxy
+            api_key=api_key,
+            base_url=dto.base_url,
+            model=model,
+            proxy_url=final_proxy,
+            protocol_profile=dto.protocol_profile,
+            identity=identity,
         )
     raise ValueError(f"未知 api_format: {fmt}")
 
@@ -1278,7 +2922,9 @@ __all__ = [
     "LLMCallFailed",
     "LLMClient",
     "LLMError",
+    "LLMErrorScope",
     "LLMResult",
+    "LLMStreamChunk",
     "OpenAIClient",
     "ResponsesClient",
     "build_client",

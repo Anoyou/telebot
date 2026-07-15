@@ -10,10 +10,15 @@ class PluginContext:
     account_id: int
     feature_key: str
     config: dict           # 当前账号的插件配置
+    account_config: dict   # 原始账号级配置（不含 schema/global 合并值）
     rules: list            # 规则列表
-    client: TelegramClient | None
-    engine: Any            # RateLimitEngine
-    redis: Any             # redis.asyncio.Redis
+    client: Any | None     # 受控客户端 facade；新插件不要作为主动发送主路径
+    messages: Any | None   # MessageOps facade；发送/编辑/删除/按钮/Inline 主路径
+    http: Any | None       # HTTP facade；需要 external_http + allowed_hosts
+    ai: Any | None         # AI facade；需要 ai_text
+    engine: Any | None     # RateLimitEngine；安装型插件通常为 None
+    redis: Any | None      # redis.asyncio.Redis；低层兼容入口
+    storage: Any | None    # PluginStorage；按账号和插件隔离的持久化 KV facade
     log: Callable          # 日志函数
     scheduler: Any         # 平台调度器 facade
     generation: int        # generation guard 计数
@@ -23,7 +28,7 @@ class PluginContext:
         """创建与 bot 的对话会话。"""
 ```
 
-注意：内置插件会拿到完整运行时能力；远程/第三方插件拿到的是受限上下文：`ctx.client` 为 `SandboxClient`，指令 handler 中传入的 `client` 参数与 `ctx.client` 同源（同样是 sandbox client），`ctx.engine` 和 `ctx.redis` 为 `None`，只能通过声明过的权限和 `ctx.scheduler` facade 使用有限能力。
+注意：核心平台兼容代码可能拿到完整运行时能力；远程/本地/插件库安装型插件拿到的是受控上下文：`ctx.client` 是平台提供的客户端 facade，指令 handler 中传入的 `client` 参数与 `ctx.client` 同源。当前 worker 加载路径会向插件上下文注入低层 `ctx.redis`，并基于同一个 Redis 后端构造 `ctx.storage`；新插件需要持久化状态时应优先使用 `ctx.storage`，不要自行拼 Redis key。`ctx.engine` 仍只供核心 builtin 兼容代码直接依赖，安装型插件通常为 `None`。受控上下文用于收口常用操作和审计，不是公共插件市场式强沙箱。
 
 ### 4.0 受控 facade：ctx.http 与 ctx.ai
 
@@ -34,25 +39,34 @@ class PluginContext:
 - `ctx.ai.complete()` 推荐用 `provider_tag` 按用途选择 provider；`tag` / `tags` 是兼容别名且已 deprecated，新插件不要依赖它们作为主要入口。
 - `ctx.ai.list_providers()` 可用于展示当前账号可见的脱敏 provider 摘要；更完整的 AI facade 说明见 `docs/PLUGIN-AI.md`。
 
-示例：
+Event Bus 主路径示例：
 
 ```python
-if ctx.http is None:
-    await event.edit("本插件需要 external_http 权限和 allowed_hosts")
-    return True
-response = await ctx.http.get("https://api.github.com/zen")
+async def on_event(self, ctx, payload):
+    message = payload["message"]
+    chat = payload["chat"]
+    chat_id = message.get("chat_id") or chat["id"]
+    reply_to = message.get("message_id")
 
-if ctx.ai is None:
-    await event.edit("本插件需要 ai_text 权限")
-    return True
-providers = await ctx.ai.list_providers()
-result = await ctx.ai.complete(
-    system="你是助手",
-    user="总结这段文本",
-    provider_tag="chat",
-    max_tokens=512,
-)
+    if ctx.http is None:
+        return [{
+            "type": "send_message",
+            "chat_id": chat_id,
+            "reply_to_message_id": reply_to,
+            "text": "本插件需要 external_http 权限和 allowed_hosts",
+        }]
+
+    response = await ctx.http.get("https://api.github.com/zen")
+    preview = response.text.strip().replace("\n", " ")[:120]
+    return [{
+        "type": "send_message",
+        "chat_id": chat_id,
+        "reply_to_message_id": reply_to,
+        "text": f"HTTP {response.status_code}: {preview}",
+    }]
 ```
+
+管理员命令兼容示例仍可以 `event.edit(...)` 更新命令消息，但公共群互动、按钮回调、Inline 或付款确认插件应返回标准 action，或通过 `ctx.messages` 生成标准 action。
 
 ## allowed_hosts 匹配规则
 

@@ -7,6 +7,20 @@
   "entry": "plugin.py",
   "permissions": ["send_message", "read_chat"],
   "category": "interactive",
+  "usage": "兼容桥示例：用于把历史 interaction_entries / on_interaction 插件迁移到标准事件信封。新插件优先参考 event_bus_demo。",
+  "event_subscriptions": [
+    {
+      "events": ["message", "callback_query", "payment_confirmed", "session_close"],
+      "source": ["interaction_bot", "external_payment_notice"],
+      "scope": "rule_bound"
+    }
+  ],
+  "capabilities": {
+    "telegram_native_raw": {
+      "enabled": false,
+      "reason": "兼容示例只读取标准事件信封，不需要原生 Telegram 对象。"
+    }
+  },
   "interaction_profile": "utility_trigger",
   "interaction_entries": [
     {
@@ -28,8 +42,7 @@
         "required_event_fields": ["type", "chat_id"]
       },
       "result_contract": {
-        "actions": ["send_message", "result", "end_session"],
-        "send_via": ["interaction_bot", "userbot_reply"]
+        "actions": ["send_message", "result", "end_session"]
       },
       "settlement": {
         "mode": "announce_only",
@@ -40,6 +53,13 @@
         "additionalProperties": false,
         "properties": {
           "message": {
+            "type": "string",
+            "title": "示例文案",
+            "deprecated": true,
+            "description": "历史字段名会与标准事件信封 payload.message 冲突，请改用 response_text。",
+            "default": "你好，交互 Bot"
+          },
+          "response_text": {
             "type": "string",
             "title": "示例文案",
             "default": "你好，交互 Bot"

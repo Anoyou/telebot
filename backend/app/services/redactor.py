@@ -22,6 +22,7 @@ SENSITIVE_KEYS = {
     "authorization",
     "credential",
     "credentials",
+    "cookie",
     "proxy_user",
     "proxy_pass",
     "session",
@@ -34,8 +35,12 @@ _URL_CREDENTIAL_RE = re.compile(
     r"((?:https?|socks5?|mtproxy)://)([^:/@\s]+):([^/@\s]+)@",
     re.IGNORECASE,
 )
-_BEARER_RE = re.compile(r"(Bearer\s+)[A-Za-z0-9._\-]{8,}", re.IGNORECASE)
+_AUTH_HEADER_RE = re.compile(r"((?:Bearer|Basic)\s+)[A-Za-z0-9._\-+/=]{8,}", re.IGNORECASE)
 _SK_TOKEN_RE = re.compile(r"\bsk-[A-Za-z0-9_\-]{8,}\b")
+_TELEGRAM_BOT_TOKEN_RE = re.compile(
+    r"((?:https?://)?api\.telegram\.org/bot)[^/\s\"']+",
+    re.IGNORECASE,
+)
 _KV_TOKEN_RE = re.compile(
     r"(?i)\b(api[_-]?key|access[_-]?token|token|password|secret)\b(\s*[:=]\s*)([^\s,;\"']{4,})"
 )
@@ -49,7 +54,8 @@ def is_sensitive_key(key: str) -> bool:
 
 def redact_text(text: str) -> str:
     out = _URL_CREDENTIAL_RE.sub(r"\1***:***@", text)
-    out = _BEARER_RE.sub(r"\1***", out)
+    out = _TELEGRAM_BOT_TOKEN_RE.sub(r"\1***", out)
+    out = _AUTH_HEADER_RE.sub(r"\1***", out)
     out = _SK_TOKEN_RE.sub(REDACTED, out)
     out = _KV_TOKEN_RE.sub(lambda m: f"{m.group(1)}{m.group(2)}{REDACTED}", out)
     return out

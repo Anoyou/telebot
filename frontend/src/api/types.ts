@@ -1,14 +1,25 @@
 // 与后端 schema 对齐的关键类型（手写版）。OpenAPI 生成的 schema.ts 后续替换。
 
+import type { PluginCapabilities, PluginEventSubscription } from "@/types/pluginContract";
+
 // ===================== 鉴权 =====================
 export interface LoginRequest {
   username: string;
   password: string;
   totp_code?: string | null;
+  otp_token?: string | null;
+  otp_code?: string | null;
+  recovery_code?: string | null;
 }
 export interface LoginResponse {
   ok: boolean;
   require_totp: boolean;
+  require_otp?: boolean;
+  otp_token?: string | null;
+  otp_delivery?: string | null;
+  otp_message?: string | null;
+  otp_ttl_seconds?: number | null;
+  recovery_available?: boolean;
 }
 export interface CurrentUser {
   id: number;
@@ -215,7 +226,9 @@ export interface AccountBotInteractionConfig {
   interaction_runtime_status?: "running" | "stopped";
   interaction_last_update_id?: number | null;
   interaction_last_error?: string | null;
+  interaction_debug?: AccountBotInteractionDebugSnapshot;
   trusted_bot_id?: number | null;
+  trusted_bot_ids?: number[];
   transfer_bot_id?: number | null;
   transfer_bot_token?: string | null;
   clear_transfer_bot_token?: boolean;
@@ -244,13 +257,28 @@ export interface AccountBotInteractionConfig {
   status_commands?: string[];
   query_commands?: string[];
   query_response_template?: string;
+  query_item_template?: string;
   query_empty_message?: string;
   disabled_message?: string | null;
   valid_seconds?: number | null;
   concurrency?: "chat" | "user" | "none";
   response_template: string;
   transfer_notice_template: string;
+  debit_notice_template: string;
   rules?: AccountBotInteractionRule[];
+}
+
+export interface AccountBotInteractionDebugSnapshot {
+  ts?: number | null;
+  stage?: string | null;
+  chat_id?: number | null;
+  message_id?: number | null;
+  update_id?: number | null;
+  payload?: Record<string, unknown>;
+  actions?: Record<string, unknown>[];
+  guarded_actions?: Record<string, unknown>[];
+  warnings?: Record<string, unknown>[];
+  error?: string | null;
 }
 
 export interface AccountBotInteractionSettlement {
@@ -272,6 +300,7 @@ export type AccountBotInteractionConfigUpdate = Pick<
   | "interaction_bot_token"
   | "clear_interaction_bot_token"
   | "trusted_bot_id"
+  | "trusted_bot_ids"
   | "transfer_bot_token"
   | "clear_transfer_bot_token"
   | "trigger_mode"
@@ -298,12 +327,14 @@ export type AccountBotInteractionConfigUpdate = Pick<
   | "status_commands"
   | "query_commands"
   | "query_response_template"
+  | "query_item_template"
   | "query_empty_message"
   | "disabled_message"
   | "valid_seconds"
   | "concurrency"
   | "response_template"
   | "transfer_notice_template"
+  | "debit_notice_template"
   | "rules"
 >;
 
@@ -438,7 +469,10 @@ export interface FeatureInteractionEntry {
   description?: string | null;
   interaction_profile?: "session_game" | "challenge_game" | "reward_pool" | "utility_trigger" | string | null;
   launch_mode?: "bridge" | "direct" | "hybrid" | string | null;
-  events?: string[];
+  dispatch_modes?: Array<"admin_command" | "public_keyword" | string>;
+  message_channels?: Partial<Record<"admin_command" | "public_keyword" | string, string | string[] | { prefer?: string[]; fallback?: boolean }>>;
+  money_channel?: "userbot_reply" | string | null;
+  events?: Array<"payment_confirmed" | "keyword" | "message" | "callback_query" | "session_close" | "all_messages" | string>;
   session_scope?: "chat" | "user" | "none" | string | null;
   participant_policy?: "open_race" | "solo_owner" | "paid_pool" | "notify_only" | string | null;
   preserve_command_trigger?: boolean | null;
@@ -462,10 +496,15 @@ export interface FeatureInfo {
   orphan?: boolean;
   signature_ok?: boolean | null;
   version?: string | null;
+  usage?: string | null;
   config_schema?: Record<string, unknown> | null;
+  config_actions?: Record<string, unknown>[];
   category?: FeatureCategory | string | null;
   interaction_profile?: "session_game" | "challenge_game" | "reward_pool" | "utility_trigger" | string | null;
   interaction_entries?: FeatureInteractionEntry[];
+  event_subscriptions?: PluginEventSubscription[];
+  capabilities?: PluginCapabilities;
+  permissions?: string[];
   experimental: boolean;
   update_available?: boolean;
   latest_version?: string | null;
@@ -716,7 +755,7 @@ export interface ForwardRuleConfig {
 }
 
 // ===== 自动复读 =====
-// 与后端 ``builtin/autorepeat/manifest.py:config_schema`` 对齐的 rule.config 结构
+// 与插件库 ``autorepeat`` 插件 manifest 的 config_schema 对齐的 rule.config 结构
 export interface AutorepeatRuleConfig {
   /** 必填：监控的群组 chat_id（Telethon marked ID 格式） */
   target_chat_id: number;
@@ -746,6 +785,15 @@ export interface RuntimeLogItem {
   detail?: Record<string, unknown> | null;
 }
 
+export interface SystemConsoleLogsResponse {
+  ok: boolean;
+  source: string;
+  services: string[];
+  tail: number;
+  lines: string[];
+  error?: string | null;
+}
+
 // 操作日志（Web 端写操作）
 export interface AuditLogItem {
   id: number;
@@ -756,19 +804,188 @@ export interface AuditLogItem {
   detail?: Record<string, unknown> | null;
 }
 
+export interface NativeRawMeta {
+  enabled?: boolean;
+  source?: string | null;
+  driver?: string | null;
+  object?: string | null;
+  stored_in_trace?: boolean;
+  size_bytes?: number;
+  reason_code?: string | null;
+  [key: string]: unknown;
+}
+
+export interface EventSpanItem {
+  id: number;
+  span_id: string;
+  trace_id: string;
+  parent_span_id?: string | null;
+  phase: string;
+  component?: string | null;
+  plugin_key?: string | null;
+  entry_key?: string | null;
+  status: string;
+  reason_code?: string | null;
+  message?: string | null;
+  detail?: Record<string, unknown> | null;
+  started_at: string;
+  ended_at?: string | null;
+  duration_ms?: number | null;
+}
+
+export interface EventActionItem {
+  id: number;
+  action_id: string;
+  trace_id: string;
+  plugin_key?: string | null;
+  action_type: string;
+  requested_send_via?: string | null;
+  actual_send_via?: string | null;
+  target_chat_id?: number | null;
+  target_message_id?: number | null;
+  status: string;
+  telegram_message_id?: number | null;
+  inline_result_count?: number | null;
+  error_code?: string | null;
+  error_message?: string | null;
+  detail?: Record<string, unknown> | null;
+  created_at: string;
+}
+
+export interface EventTraceSummary {
+  id: number;
+  trace_id: string;
+  account_id?: number | null;
+  source_channel?: string | null;
+  event_type: string;
+  chat_id?: number | null;
+  message_id?: number | null;
+  update_id?: number | null;
+  callback_query_id?: string | null;
+  sender_user_id?: number | null;
+  sender_name?: string | null;
+  chat_title?: string | null;
+  text_preview?: string | null;
+  inline_query?: string | null;
+  chosen_inline_result_id?: string | null;
+  chosen_inline_query?: string | null;
+  status: string;
+  started_at: string;
+  ended_at?: string | null;
+  duration_ms?: number | null;
+  native_raw_meta?: NativeRawMeta | null;
+  plugin_count: number;
+  plugin_keys: string[];
+  action_count: number;
+  error_count: number;
+}
+
+export interface EventProbeItem {
+  label: string;
+  path?: string;
+  value?: unknown;
+  note?: string;
+}
+
+export interface EventProbeSuggestion {
+  title: string;
+  reason?: string;
+  manifest?: Record<string, unknown>;
+  action?: Record<string, unknown>;
+  level?: string;
+  capability?: string;
+  stored_in_trace?: boolean;
+  reason_code?: string | null;
+}
+
+export interface EventProbeRoutingItem {
+  phase?: string;
+  plugin_key?: string | null;
+  entry_key?: string | null;
+  matched?: boolean;
+  status?: string;
+  reason_code?: string | null;
+  message?: string | null;
+  filters?: unknown;
+}
+
+export interface EventProbeReport {
+  version: number;
+  headline: string;
+  summary: Record<string, unknown>;
+  field_paths: EventProbeItem[];
+  message_facts: EventProbeItem[];
+  subscription_suggestions: EventProbeSuggestion[];
+  action_suggestions: EventProbeSuggestion[];
+  capability_hints: EventProbeSuggestion[];
+  routing: EventProbeRoutingItem[];
+  warnings: string[];
+}
+
+export interface EventTraceDetail extends EventTraceSummary {
+  raw_summary?: Record<string, unknown> | null;
+  payload_snapshot?: Record<string, unknown> | null;
+  probe_report?: EventProbeReport | null;
+  spans: EventSpanItem[];
+  actions: EventActionItem[];
+  related_runtime_logs: RuntimeLogItem[];
+}
+
+export type MessageFunelStage = "pass" | "skip" | "stuck" | "fail" | "none";
+export type MessageVerdict = "responded" | "no_response_normal" | "stuck" | "failed";
+
+export interface MessageFunel {
+  received: MessageFunelStage;
+  routed: MessageFunelStage;
+  ran: MessageFunelStage;
+  sent: MessageFunelStage;
+  verdict: MessageVerdict;
+  stuck_at?: "routed" | "ran" | "sent" | null;
+  reason_code?: string | null;
+  reason_text: string;
+  next_step: string;
+}
+
+export interface MessageFunelItem extends EventTraceSummary {
+  funel: MessageFunel;
+  verdict: MessageVerdict;
+  stuck_at?: "routed" | "ran" | "sent" | null;
+  reason_code?: string | null;
+  reason_text: string;
+  next_step: string;
+}
+
 // ===================== 系统设置 =====================
 export interface SystemSettings {
   command_prefix: string;
+  /** 开启时账号本人也必须带系统前缀；关闭后仅账号本人可裸命令触发 */
+  command_prefix_required?: boolean;
   kill_switch?: boolean;
+  /** 全局 AI 能力开关；关闭后不加载模型 provider，也不注入插件 ctx.ai */
+  ai_enabled?: boolean;
   sudo_enabled?: boolean;
   /** 群聊纯命令回声防误触检查前 N 条消息；0 = 关闭 */
   command_echo_guard_previous_messages?: number;
-  api_qps_total?: number;
   /** IANA 时区标识，如 "Asia/Shanghai"；默认 Asia/Shanghai */
   timezone?: string;
   remote_plugin_update_check?: {
     enabled: boolean;
     interval_minutes: number;
+  };
+  app_update_target?: {
+    remote: string;
+    branch: string;
+  };
+  login_security?: {
+    notify_otp_enabled: boolean;
+    notify_otp_failed_attempt_threshold: number;
+    notify_otp_fail_window_seconds: number;
+    notify_otp_ttl_seconds: number;
+    notify_otp_max_attempts: number;
+    totp_enabled: boolean;
+    totp_mode: "always" | "after_failures";
+    totp_failed_attempt_threshold: number;
+    recovery_code_ttl_seconds: number;
   };
   llm_limits?: {
     per_minute: number;
@@ -776,11 +993,22 @@ export interface SystemSettings {
     daily_tokens: number;
     premium_daily: number;
   };
+  payout_limits?: {
+    single_max: number;
+    daily_max: number;
+  };
   log_retention?: {
+    trace_enabled: boolean;
+    event_bus_delivery_enabled: boolean;
+    inline_updates_enabled: boolean;
     runtime_log_retention_days: number;
     runtime_log_max_message_chars: number;
     runtime_log_max_detail_chars: number;
     runtime_log_min_level: "debug" | "info" | "warn" | "error";
+    trace_retention_days: number;
+    trace_payload_snapshot_retention_days: number;
+    native_raw_persist_enabled: boolean;
+    native_raw_retention_days: number;
   };
 }
 
@@ -893,6 +1121,7 @@ export interface ResourceDashboard {
   host: HostResourceStatus;
   main_process: ProcessResourceStatus;
   project_total: ProcessResourceStatus;
+  app_uptime_seconds?: number | null;
   other_processes: ProcessResourceStatus[];
   containers: ContainerResourceStatus[];
   container_total: ProcessResourceStatus;
@@ -1054,7 +1283,7 @@ export interface AICommandConfig {
   /** 采样温度，0 更稳定，2 更发散；空表示不覆盖 provider 默认值 */
   temperature?: number;
   /** 推理模型的思考预算；当前主要用于 OpenAI Chat/Responses 协议 */
-  reasoning_effort?: "minimal" | "low" | "medium" | "high";
+  reasoning_effort?: "minimal" | "low" | "medium" | "high" | "xhigh";
   /** 单次 API 调用超时时间，单位秒 */
   timeout_seconds?: number;
   // ── 路由（Sprint2 #2 路由扩展）──
@@ -1121,6 +1350,20 @@ export type LLMProviderKind = "openai" | "anthropic" | "ollama";
  */
 export type LLMApiFormat = "chat_completions" | "responses" | "anthropic_messages";
 export type LLMWebSearchApiFormat = "auto" | LLMApiFormat;
+export type LLMProtocolProfile = "standard" | "claude_code_proxy";
+/**
+ * 客户端身份档案（0.57.0 阶段 A）：控制 UA 与身份相关的安全请求头，
+ * 与 protocol_profile（协议语义 / beta 头）相互独立。auto 按本次实际协议解析。
+ */
+export type LLMClientIdentityProfile =
+  | "auto"
+  | "minimal"
+  | "openai_sdk"
+  | "codex_cli"
+  | "codex_desktop"
+  | "claude_code"
+  | "claude_desktop"
+  | "grok_cli";
 
 /**
  * LLMProvider 下挂的一个候选模型条目（与后端 ProviderModel 对齐）。
@@ -1135,6 +1378,10 @@ export interface ProviderModel {
   enabled: boolean;
   custom: boolean;
   label?: string | null;
+  supports_tools?: boolean | null;
+  supports_images?: boolean | null;
+  supports_temperature?: boolean | null;
+  reasoning_efforts?: Array<"minimal" | "low" | "medium" | "high" | "xhigh"> | null;
 }
 
 /**
@@ -1177,8 +1424,12 @@ export interface LLMProviderOut {
   default_model: string;
   /** API 协议；老数据可能缺，前端按 chat_completions 兜底 */
   api_format?: LLMApiFormat | string;
+  /** Anthropic Messages 请求兼容档案；其他协议固定为 standard */
+  protocol_profile?: LLMProtocolProfile | string;
   /** 联网搜索时的协议覆盖；auto = OpenAI/chat_completions 在联网时临时走 responses */
   web_search_api_format?: LLMWebSearchApiFormat | string;
+  /** 客户端身份档案；auto 按本次实际协议解析。与 protocol_profile 相互独立 */
+  client_identity_profile?: LLMClientIdentityProfile | string;
   /** 模态；老数据可能缺，前端按 "text" 兜底 */
   modality?: LLMModality | string;
   /** 路由标签；老数据可能为空数组 */
@@ -1202,7 +1453,11 @@ export interface LLMProviderCreate {
   base_url?: string | null;
   default_model: string;
   api_format?: LLMApiFormat;
+  /** 仅在 api_format=anthropic_messages 时生效 */
+  protocol_profile?: LLMProtocolProfile;
   web_search_api_format?: LLMWebSearchApiFormat;
+  /** 客户端身份档案；auto 按本次实际协议解析。与 protocol_profile 相互独立 */
+  client_identity_profile?: LLMClientIdentityProfile;
   modality?: LLMModality;
   tags?: string[];
   cost_tier?: number;
@@ -1233,7 +1488,11 @@ export interface LLMProviderUpdate {
   base_url?: string | null;
   default_model?: string;
   api_format?: LLMApiFormat;
+  /** 仅在 api_format=anthropic_messages 时生效 */
+  protocol_profile?: LLMProtocolProfile;
   web_search_api_format?: LLMWebSearchApiFormat;
+  /** 客户端身份档案；auto 按本次实际协议解析。与 protocol_profile 相互独立 */
+  client_identity_profile?: LLMClientIdentityProfile;
   modality?: LLMModality;
   tags?: string[];
   cost_tier?: number;
@@ -1278,6 +1537,9 @@ export interface DetectProviderProtocolsRequest {
   proxy_id?: number | null;
   pid?: number | null;
   model?: string | null;
+  /** 阶段 B：可选自然提示词；不传用稳定默认 */
+  system_prompt?: string | null;
+  message?: string | null;
 }
 
 export interface ProtocolProbeResult {
@@ -1285,6 +1547,26 @@ export interface ProtocolProbeResult {
   status_code?: number | null;
   latency_ms: number;
   error?: string | null;
+  /** 阶段 B：本次探测所用客户端身份 */
+  client_identity_profile?: string | null;
+  /** 探测阶段：network / credentials / protocol / identity */
+  stage?: string | null;
+  /** 结构化错误分类 */
+  error_category?: string | null;
+  /** 脱敏修复建议 */
+  suggestion?: string | null;
+}
+
+/** 某协议下按身份顺序的单次身份尝试结果 */
+export interface ProtocolIdentityAttempt {
+  api_format: string;
+  client_identity_profile: string;
+  ok: boolean;
+  status_code?: number | null;
+  latency_ms: number;
+  error_category?: string | null;
+  error?: string | null;
+  suggestion?: string | null;
 }
 
 export interface DetectProviderProtocolsResponse {
@@ -1293,6 +1575,10 @@ export interface DetectProviderProtocolsResponse {
   anthropic_messages: ProtocolProbeResult;
   models: ProtocolProbeResult;
   recommended_api_format?: LLMApiFormat | string | null;
+  /** 阶段 B：推荐客户端身份 */
+  recommended_client_identity_profile?: LLMClientIdentityProfile | string | null;
+  /** 阶段 B：每协议身份尝试列表 */
+  identity_attempts?: ProtocolIdentityAttempt[];
   recommended_web_search_api_format: LLMWebSearchApiFormat | string;
   note?: string | null;
 }
@@ -1313,6 +1599,121 @@ export interface TestModelResponse {
   preview?: string | null;
   /** 失败时的错误消息（已脱敏） */
   error?: string | null;
+}
+
+export interface ChatTestTurn {
+  role: "user" | "assistant";
+  content: string;
+}
+
+export interface ChatTestModelsRequest {
+  models: string[];
+  message: string;
+  history?: ChatTestTurn[];
+  history_by_model?: Record<string, ChatTestTurn[]>;
+  system_prompt?: string;
+  max_tokens?: number;
+  timeout_seconds?: number;
+  api_format_override?: LLMApiFormat | null;
+  client_identity_profile_override?: LLMClientIdentityProfile | null;
+}
+
+export interface ChatTestModelResult {
+  ok: boolean;
+  requested_model: string;
+  model?: string | null;
+  latency_ms: number;
+  response?: string | null;
+  preview?: string | null;
+  input_tokens: number;
+  output_tokens: number;
+  empty_response: boolean;
+  error?: string | null;
+  client_identity_profile?: string | null;
+  effective_api_format?: string | null;
+  streaming?: boolean;
+  stream_fallback?: boolean;
+}
+
+export interface ChatTestModelsResponse {
+  provider_id: number;
+  provider_name: string;
+  results: ChatTestModelResult[];
+}
+
+// ===== 0.57.0 阶段 C：全量已启用模型测活 =====
+export interface FullLivenessPreviewRequest {
+  max_tokens?: number;
+  global_concurrency?: number;
+  only_provider_ids?: number[] | null;
+}
+
+export interface LivenessProviderPlan {
+  provider_id: number;
+  provider_name: string;
+  enabled_models: string[];
+  executable: boolean;
+  skipped_reason?: string | null;
+}
+
+export interface FullLivenessPreviewResponse {
+  provider_total: number;
+  executable_provider_total: number;
+  enabled_model_total: number;
+  task_total: number;
+  max_tokens: number;
+  max_output_tokens: number;
+  global_concurrency: number;
+  provider_concurrency: number;
+  needs_confirmation: boolean;
+  providers: LivenessProviderPlan[];
+}
+
+export interface FullLivenessRunRequest {
+  system_prompt?: string;
+  message?: string;
+  max_tokens?: number;
+  timeout_seconds?: number;
+  global_concurrency?: number;
+  confirm_large_run?: boolean;
+  only_provider_ids?: number[] | null;
+  only_models?: string[] | null;
+}
+
+export interface LivenessResultItem {
+  provider_id: number;
+  provider_name: string;
+  model_id: string;
+  status: string;
+  latency_ms: number;
+  input_tokens: number;
+  output_tokens: number;
+  preview?: string | null;
+  error?: string | null;
+  error_category?: string | null;
+  suggestion?: string | null;
+  client_identity_profile?: string | null;
+  effective_api_format?: string | null;
+  skipped: boolean;
+}
+
+export interface FullLivenessRunResponse {
+  run_id: string;
+  status: "queued" | "running" | "completed" | "cancelled";
+  task_total: number;
+  completed: number;
+  healthy: number;
+  failed: number;
+  skipped: number;
+  cancelled: number;
+  results: LivenessResultItem[];
+  error?: string | null;
+}
+
+export interface FullLivenessRunStartResponse {
+  run_id: string;
+  status: "queued" | "running";
+  task_total: number;
 }
 
 // ===== Sprint4 #2C =====
@@ -1357,13 +1758,16 @@ export interface NotifyBotOut {
   default_chat_id: number;
   enabled: boolean;
   has_token: boolean;
+  credential_source: "direct" | "account_bot";
+  source_account_id?: number | null;
   created_at: string;
   updated_at: string;
 }
 
 export interface NotifyBotCreate {
   name: string;
-  bot_token: string;
+  bot_token?: string | null;
+  source_account_id?: number | null;
   default_chat_id: number;
   enabled?: boolean;
 }
@@ -1374,6 +1778,7 @@ export interface NotifyBotUpdate {
   enabled?: boolean;
   bot_token?: string;
   clear_token?: boolean;
+  source_account_id?: number | null;
 }
 
 export interface NotifyBotTestRequest {
@@ -1401,17 +1806,24 @@ export interface BackendVersionInfo {
 // ===================== 检查更新 =====================
 export interface CheckUpdateResult {
   has_update: boolean;
+  /** false = 当前环境无法在进程内自动检查（容器内无 updater / 无工作树）；
+   *  此时 has_update 不代表真实结论，应展示"无法自动检查"。 */
+  can_check?: boolean | null;
   current_commit: string | null;
   remote_commit: string | null;
   ahead: number;
+  remote?: string | null;
+  branch?: string | null;
   changed_files: string[];
   runtime_mode?: string | null;
+  update_executor?: string | null;
   action_required?:
     | "none"
     | "docs_only"
     | "frontend"
     | "backend"
     | "mixed"
+    | "updater"
     | "full_update"
     | "manual"
     | "unsupported"
@@ -1420,8 +1832,10 @@ export interface CheckUpdateResult {
   plan_label?: string | null;
   plan_detail?: string | null;
   components?: string[] | null;
+  services?: string[] | null;
   requires_full_update?: boolean | null;
   requires_backup?: boolean | null;
+  requires_migration?: boolean | null;
   can_apply?: boolean | null;
   manual_command?: string | null;
   error: string | null;
@@ -1430,13 +1844,19 @@ export interface PullUpdateResult {
   success: boolean;
   new_commit: string | null;
   summary: string | null;
+  job_id?: string | null;
+  status?: string | null;
+  remote?: string | null;
+  branch?: string | null;
   runtime_mode?: string | null;
+  update_executor?: string | null;
   action_required?:
     | "none"
     | "docs_only"
     | "frontend"
     | "backend"
     | "mixed"
+    | "updater"
     | "full_update"
     | "manual"
     | "unsupported"
@@ -1445,8 +1865,10 @@ export interface PullUpdateResult {
   plan_label?: string | null;
   plan_detail?: string | null;
   components?: string[] | null;
+  services?: string[] | null;
   requires_full_update?: boolean | null;
   requires_backup?: boolean | null;
+  requires_migration?: boolean | null;
   can_apply?: boolean | null;
   manual_command?: string | null;
   error: string | null;
@@ -1454,4 +1876,62 @@ export interface PullUpdateResult {
 export interface RestartResult {
   success: boolean;
   error: string | null;
+}
+
+export interface UpdateJobStatus {
+  ok: boolean;
+  job_id: string;
+  status: "queued" | "running" | "succeeded" | "failed" | "unsupported" | "unknown" | string;
+  created_at?: number | null;
+  started_at?: number | null;
+  finished_at?: number | null;
+  returncode?: number | null;
+  remote?: string | null;
+  branch?: string | null;
+  new_commit?: string | null;
+  summary?: string | null;
+  error?: string | null;
+  progress?: number | null;
+  phase?: string | null;
+  detail?: string | null;
+  logs: string[];
+  plan?: Record<string, unknown> | null;
+}
+
+export interface UpdateTargetOptions {
+  ok: boolean;
+  remotes: string[];
+  branches: string[];
+  remote?: string | null;
+  error?: string | null;
+}
+
+// ═══════════════ 客户端身份 UA 版本配置（0.57.0 收口） ═══════════════
+export interface ClientIdentityVersionItem {
+  key: string;
+  label: string;
+  current: string;
+  default: string;
+  registry?: string | null;
+  detectable: boolean;
+}
+
+export interface ClientIdentityVersionsResponse {
+  items: ClientIdentityVersionItem[];
+}
+
+export interface ClientIdentityVersionDetectItem {
+  key: string;
+  current: string;
+  latest?: string | null;
+  up_to_date?: boolean | null;
+  error?: string | null;
+}
+
+export interface ClientIdentityVersionDetectResponse {
+  items: ClientIdentityVersionDetectItem[];
+}
+
+export interface ClientIdentityVersionsUpdateRequest {
+  overrides: Record<string, string>;
 }

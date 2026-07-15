@@ -13,7 +13,7 @@ services:
   postgres:
     image: postgres:16-alpine
     restart: unless-stopped
-    # synchronous_commit=off：单机自托管场景以小幅崩溃数据丢失换显著吞吐 + 内存
+    # 资金严谨 profile 默认 synchronous_commit=on；只有明确接受崩溃丢失窗口时才改 off。
     # huge_pages=off：1G 机器上几乎不会有 huge pages 配额，关掉避免日志噪声
     command:
       [
@@ -22,8 +22,8 @@ services:
         "-c", "effective_cache_size=${POSTGRES_EFFECTIVE_CACHE_SIZE:-96MB}",
         "-c", "work_mem=${POSTGRES_WORK_MEM:-2MB}",
         "-c", "maintenance_work_mem=${POSTGRES_MAINTENANCE_WORK_MEM:-16MB}",
-        "-c", "max_connections=${POSTGRES_MAX_CONNECTIONS:-20}",
-        "-c", "synchronous_commit=off",
+        "-c", "max_connections=${POSTGRES_MAX_CONNECTIONS:-30}",
+        "-c", "synchronous_commit=${POSTGRES_SYNCHRONOUS_COMMIT:-on}",
         "-c", "huge_pages=off",
       ]
     environment:
@@ -47,10 +47,11 @@ services:
     command:
       [
         "redis-server",
-        "--appendonly", "${REDIS_APPENDONLY:-no}",
+        "--appendonly", "${REDIS_APPENDONLY:-yes}",
+        "--appendfsync", "${REDIS_APPENDFSYNC:-everysec}",
         "--save", "${REDIS_SAVE:-}",
         "--maxmemory", "${REDIS_MAXMEMORY:-32mb}",
-        "--maxmemory-policy", "${REDIS_MAXMEMORY_POLICY:-allkeys-lru}",
+        "--maxmemory-policy", "${REDIS_MAXMEMORY_POLICY:-noeviction}",
       ]
     mem_limit: ${REDIS_MEM_LIMIT:-48m}
     mem_reservation: ${REDIS_MEM_RESERVATION:-32m}
@@ -87,6 +88,12 @@ services:
       # 生产容器内路径必须和 volumes 挂载点一致；覆盖旧 .env 中可能残留的 /plugins/installed。
       PLUGINS_INSTALLED_DIR: /app/plugins/installed
       PLUGIN_REPOS_CACHE_DIR: /app/data/plugin_repos
+      TELEPILOT_UPDATER_URL: http://updater:8765
+      TELEPILOT_UPDATER_TOKEN: ${UPDATER_TOKEN:?UPDATER_TOKEN required}
+      # Web 负责生成检查/更新请求，必须与 updater 使用同一远端和分支。
+      # 否则 Web 会回退 main，即使 updater 本身配置的是候选分支。
+      TELEPILOT_UPDATE_REMOTE: ${TELEPILOT_UPDATE_REMOTE:-origin}
+      TELEPILOT_UPDATE_BRANCH: ${TELEPILOT_UPDATE_BRANCH:-main}
       # #14：迁移只保留 command 里的那一次；应用启动期自动迁移关闭，避免重复执行
       AUTO_MIGRATE_ON_STARTUP: "false"
     mem_limit: ${WEB_MEM_LIMIT:-512m}
@@ -118,6 +125,34 @@ services:
     # ⚠ 必须 --workers 1：supervisor 在主进程内管子进程，多 worker 会重复拉起 worker 子进程
     # --limit-concurrency / --backlog：1C 机器上限制突发并发，避免请求堆积导致 OOM
     command: ["sh", "-c", "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 1 --loop asyncio --http h11 --no-access-log --limit-concurrency 64 --backlog 64"]
+
+  # ── Updater：内网自更新执行器，不对公网暴露端口 ────────────────
+  updater:
+    build:
+      context: .
+      dockerfile: deploy/updater/Dockerfile
+    restart: unless-stopped
+    environment:
+      TELEPILOT_WORKSPACE: /workspace
+      TELEPILOT_HOST_PROJECT_DIR: ${TELEPILOT_HOST_PROJECT_DIR:-.}
+      BACKUP_DIR: ${BACKUP_DIR:-/var/backups/telepilot}
+      TELEPILOT_UPDATE_REMOTE: ${TELEPILOT_UPDATE_REMOTE:-origin}
+      TELEPILOT_UPDATE_BRANCH: ${TELEPILOT_UPDATE_BRANCH:-main}
+      TELEPILOT_COMPOSE_PROJECT_NAME: ${COMPOSE_PROJECT_NAME:-}
+      UPDATER_TOKEN: ${UPDATER_TOKEN:?UPDATER_TOKEN required}
+    volumes:
+      # 只挂载到 compose 私有网络里的 updater。它通过宿主机 Docker socket
+      # 执行 prod-update，避免 Web 容器自身拥有 Docker 控制能力。
+      - ${TELEPILOT_HOST_PROJECT_DIR:-.}:/workspace
+      # updater 内的 backup.sh 与通过 Docker socket 启动的归档容器必须看到
+      # 同一个绝对路径，否则数据库 dump 与卷归档会落在不同文件系统。
+      - ${BACKUP_DIR:-/var/backups/telepilot}:${BACKUP_DIR:-/var/backups/telepilot}
+      - /var/run/docker.sock:/var/run/docker.sock
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8765/health"]
+      interval: 15s
+      timeout: 3s
+      retries: 5
 
   # ── Frontend：nginx 静态托管 + 反代后端 ──────────────────────
   frontend:

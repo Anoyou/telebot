@@ -49,6 +49,7 @@ def _create_rekey_tables(database_url: str) -> None:
     Table("notify_bot", metadata, Column("id", Integer, primary_key=True), Column("bot_token_enc", String))
     Table("web_user", metadata, Column("id", Integer, primary_key=True), Column("totp_secret_enc", String))
     Table("account_bot", metadata, Column("id", Integer, primary_key=True), Column("bot_token_enc", String))
+    Table("plugin_repo", metadata, Column("id", Integer, primary_key=True), Column("credential_enc", String))
     Table("system_setting", metadata, Column("key", String, primary_key=True), Column("value", JSON))
     metadata.create_all(engine)
     engine.dispose()
@@ -92,6 +93,10 @@ def test_rekey_database_dry_run_then_rotate(tmp_path: Path) -> None:
             {"id": 1, "bot_token_enc": _encrypt_text(old_key, "account-bot-token")},
         )
         conn.execute(
+            Table("plugin_repo", MetaData(), autoload_with=conn).insert(),
+            {"id": 1, "credential_enc": _encrypt_text(old_key, "github-token")},
+        )
+        conn.execute(
             Table("system_setting", MetaData(), autoload_with=conn).insert(),
             {
                 "key": "account_bot_transfer_notice:1",
@@ -102,10 +107,21 @@ def test_rekey_database_dry_run_then_rotate(tmp_path: Path) -> None:
                 },
             },
         )
+        conn.execute(
+            Table("system_setting", MetaData(), autoload_with=conn).insert(),
+            {
+                "key": "account_webhooks:1",
+                "value": {
+                    "token": "stale-legacy-webhook-token",
+                    "token_enc": _encrypt_text(old_key, "webhook-token"),
+                    "hooks": [{"key": "default", "enabled": True}],
+                },
+            },
+        )
 
     dry_run = rekey_database(old_key=old_key, new_key=new_key, database_url=database_url, dry_run=True)
-    assert dry_run.scanned == 10
-    assert dry_run.changed == 10
+    assert dry_run.scanned == 12
+    assert dry_run.changed == 12
 
     with engine.connect() as conn:
         proxy = Table("proxy", MetaData(), autoload_with=conn)
@@ -113,8 +129,8 @@ def test_rekey_database_dry_run_then_rotate(tmp_path: Path) -> None:
     assert _decrypt_text(old_key, token) == "proxy-pass"
 
     result = rekey_database(old_key=old_key, new_key=new_key, database_url=database_url)
-    assert result.scanned == 10
-    assert result.changed == 10
+    assert result.scanned == 12
+    assert result.changed == 12
 
     with engine.connect() as conn:
         account = Table("account", MetaData(), autoload_with=conn)
@@ -124,10 +140,50 @@ def test_rekey_database_dry_run_then_rotate(tmp_path: Path) -> None:
         assert _decrypt_bytes(new_key, row["session_enc"]) == b"session"
 
         settings = Table("system_setting", MetaData(), autoload_with=conn)
-        value = conn.execute(select(settings.c.value)).scalar_one()
+        value = conn.execute(
+            select(settings.c.value).where(settings.c.key == "account_bot_transfer_notice:1")
+        ).scalar_one()
         assert _decrypt_text(new_key, value["interaction_bot_token_enc"]) == "interaction-token"
         assert _decrypt_text(new_key, value["transfer_bot_token_enc"]) == "transfer-token"
+        webhook_value = conn.execute(
+            select(settings.c.value).where(settings.c.key == "account_webhooks:1")
+        ).scalar_one()
+        assert "token" not in webhook_value
+        assert _decrypt_text(new_key, webhook_value["token_enc"]) == "webhook-token"
 
+        plugin_repo = Table("plugin_repo", MetaData(), autoload_with=conn)
+        repo_token = conn.execute(select(plugin_repo.c.credential_enc)).scalar_one()
+        assert _decrypt_text(new_key, repo_token) == "github-token"
+
+    engine.dispose()
+
+
+def test_rekey_migrates_legacy_plaintext_webhook_token(tmp_path: Path) -> None:
+    old_key = _key()
+    new_key = _key()
+    database_url = _database_url(tmp_path)
+    _create_rekey_tables(database_url)
+
+    engine = create_engine(database_url, future=True)
+    with engine.begin() as conn:
+        settings = Table("system_setting", MetaData(), autoload_with=conn)
+        conn.execute(
+            settings.insert(),
+            {
+                "key": "account_webhooks:7",
+                "value": {"token": "legacy-webhook-token", "hooks": []},
+            },
+        )
+
+    result = rekey_database(old_key=old_key, new_key=new_key, database_url=database_url)
+    assert result.scanned == 1
+    assert result.changed == 1
+
+    with engine.connect() as conn:
+        settings = Table("system_setting", MetaData(), autoload_with=conn)
+        value = conn.execute(select(settings.c.value)).scalar_one()
+    assert "token" not in value
+    assert _decrypt_text(new_key, value["token_enc"]) == "legacy-webhook-token"
     engine.dispose()
 
 

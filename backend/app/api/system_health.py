@@ -14,29 +14,46 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import re
 import shlex
 import shutil
 import subprocess
 import time
+import urllib.error
+import urllib.request
 from collections import Counter
-from datetime import datetime
+from collections.abc import Callable
+from datetime import date, datetime
+from datetime import time as datetime_time
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, File, UploadFile
+from fastapi import APIRouter, Body, File, HTTPException, UploadFile
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import func, select, text
 
+from ..crypto import decrypt_str
 from ..db.base import AsyncSessionLocal
 from ..db.models.account import Account, Proxy
 from ..db.models.command import LLMProvider
+from ..db.models.system import SystemSetting
 from ..deps import CurrentUser
 from ..redis_client import get_redis
+from ..services import auth_service
+from ..settings import settings
+from ..util.update_plan import build_update_plan, classify_changed_files
+from ..util.update_target import (
+    normalize_update_branch,
+    normalize_update_remote,
+    normalize_update_target,
+)
 
 router = APIRouter(prefix="/api/system", tags=["system"])
+log = logging.getLogger(__name__)
+_APP_STARTED_AT = time.time()
 
 
 # ════════════════════════════════════════════════════════════
@@ -131,6 +148,9 @@ class WorkersStatus(BaseModel):
     """desired=running 且 alive=true 的数量。"""
     runtime_failing: int = 0
     """fail_count>0 的数量。"""
+    db_connection_estimate: int = 0
+    db_connection_budget: int = 0
+    db_capacity_warning: str | None = None
 
 
 class HealthOverview(BaseModel):
@@ -192,6 +212,7 @@ class ResourceDashboard(BaseModel):
     host: HostResource
     main_process: ProcessResource
     project_total: ProcessResource
+    app_uptime_seconds: int | None = None
     other_processes: list[ProcessResource] = Field(default_factory=list)
     containers: list[ContainerResource] = Field(default_factory=list)
     container_total: ProcessResource = Field(default_factory=ProcessResource)
@@ -368,6 +389,22 @@ async def _probe_workers() -> WorkersStatus:
         except Exception:
             # runtime 快照失败时不影响 DB 状态统计
             pass
+        db_connection_budget = max(1, int(os.environ.get("POSTGRES_MAX_CONNECTIONS", "30") or 30))
+        db_connection_estimate = (
+            max(1, int(settings.db_pool_size or 1))
+            + max(0, int(settings.db_max_overflow or 0))
+            + runtime_desired_running
+            * (
+                max(1, int(settings.db_pool_size_worker or 1))
+                + max(0, int(settings.db_max_overflow_worker or 0))
+            )
+        )
+        db_capacity_warning = None
+        if db_connection_estimate >= int(db_connection_budget * 0.8):
+            db_capacity_warning = (
+                f"预估 DB 连接峰值 {db_connection_estimate}/{db_connection_budget}，"
+                "已达容量预警线；增加账号前请先扩容或收紧连接池。"
+            )
         return WorkersStatus(
             total=total,
             by_status=by_status,
@@ -376,6 +413,9 @@ async def _probe_workers() -> WorkersStatus:
             runtime_desired_running=runtime_desired_running,
             runtime_desired_running_alive=runtime_desired_running_alive,
             runtime_failing=runtime_failing,
+            db_connection_estimate=db_connection_estimate,
+            db_connection_budget=db_connection_budget,
+            db_capacity_warning=db_capacity_warning,
         )
     except Exception:  # noqa: BLE001
         return WorkersStatus()
@@ -614,6 +654,16 @@ def _read_host_uptime_seconds() -> int | None:
         return max(0, int(float(first)))
     except Exception:
         return None
+
+
+def _read_app_uptime_seconds() -> int | None:
+    try:
+        import psutil  # type: ignore[import-not-found]
+
+        proc = psutil.Process(os.getpid())
+        return max(0, int(time.time() - float(proc.create_time())))
+    except Exception:
+        return max(0, int(time.time() - _APP_STARTED_AT))
 
 
 def _read_host_cpu_percent() -> float | None:
@@ -1070,6 +1120,7 @@ async def get_resource_dashboard(_user: CurrentUser) -> ResourceDashboard:
         host=host,
         main_process=main,
         project_total=project_total,
+        app_uptime_seconds=_read_app_uptime_seconds(),
         other_processes=other_processes[:8],
         containers=containers[:8],
         container_total=container_total,
@@ -1108,32 +1159,6 @@ RUNTIME_PROD_CONTAINER_WITH_UPDATER = "prod_container_with_updater"
 RUNTIME_PROD_CONTAINER_MANUAL = "prod_container_manual"
 RUNTIME_UNSUPPORTED = "unsupported"
 
-_DOC_SUFFIXES = (".md", ".rst", ".txt")
-_FULL_UPDATE_BASENAMES = {
-    ".dockerignore",
-    "docker-compose.yml",
-    "docker-compose.dev.yml",
-    "docker-compose.prod.yml",
-    "Dockerfile",
-    "Makefile",
-    ".npmrc",
-    "package.json",
-    "pyproject.toml",
-    "requirements.txt",
-    "poetry.lock",
-    "Pipfile.lock",
-    "package-lock.json",
-    "yarn.lock",
-    "pnpm-lock.yaml",
-}
-_FULL_UPDATE_PREFIXES = (
-    "deploy/",
-    "scripts/",
-    "scripts/deploy",
-    "scripts/prod",
-)
-
-
 def _run_git(*args: str, timeout: int = 30) -> tuple[str, str, int]:
     """同步执行 git 命令，返回 (stdout, stderr, returncode)。"""
     root = _git_root()
@@ -1152,6 +1177,21 @@ def _run_git(*args: str, timeout: int = 30) -> tuple[str, str, int]:
         return "", "git command timed out", 1
     except Exception as e:
         return "", str(e), 1
+
+
+def _default_update_remote_branch() -> tuple[str, str]:
+    remote = (os.getenv("TELEPILOT_UPDATE_REMOTE") or "origin").strip() or "origin"
+    env_branch = (os.getenv("TELEPILOT_UPDATE_BRANCH") or "").strip()
+    if env_branch:
+        return remote, env_branch
+    upstream_out, _, upstream_rc = _run_git("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}", timeout=5)
+    if upstream_rc == 0 and "/" in upstream_out:
+        upstream_remote, upstream_branch = upstream_out.split("/", 1)
+        return upstream_remote or remote, upstream_branch or "main"
+    branch_out, _, branch_rc = _run_git("rev-parse", "--abbrev-ref", "HEAD", timeout=5)
+    if branch_rc == 0 and branch_out and branch_out != "HEAD":
+        return remote, branch_out
+    return remote, "main"
 
 
 def _is_container_runtime() -> bool:
@@ -1182,10 +1222,83 @@ def _resolve_host_updater() -> str | None:
     return None
 
 
+def _resolve_http_updater() -> str | None:
+    """返回可用的内部 updater sidecar URL。"""
+
+    raw = (os.getenv("TELEPILOT_UPDATER_URL") or "").strip().rstrip("/")
+    if not raw:
+        return None
+    try:
+        req = urllib.request.Request(f"{raw}/health", method="GET")
+        with urllib.request.urlopen(req, timeout=0.8) as resp:  # noqa: S310 - internal configured URL
+            if 200 <= int(resp.status) < 300:
+                return raw
+    except Exception:
+        return None
+    return None
+
+
+def _updater_token() -> str:
+    return (os.getenv("TELEPILOT_UPDATER_TOKEN") or "").strip()
+
+
+def _updater_request(path: str, payload: dict[str, Any] | None = None, *, timeout: int = 30) -> dict[str, Any]:
+    url = _resolve_http_updater()
+    if not url:
+        raise RuntimeError("内部 updater 不可用")
+    body = json.dumps(payload or {}, ensure_ascii=False).encode("utf-8")
+    headers = {"Content-Type": "application/json"}
+    token = _updater_token()
+    if token:
+        headers["X-TelePilot-Updater-Token"] = token
+    req = urllib.request.Request(f"{url}{path}", data=body, headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 - internal configured URL
+            text = resp.read().decode("utf-8", errors="ignore")
+    except urllib.error.HTTPError as exc:
+        text = exc.read().decode("utf-8", errors="ignore")
+        try:
+            parsed = json.loads(text)
+        except Exception:
+            parsed = {"error": text or str(exc)}
+        if isinstance(parsed, dict):
+            parsed.setdefault("ok", False)
+            return parsed
+        return {"ok": False, "error": str(exc)}
+    parsed = json.loads(text) if text else {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _updater_get(path: str, *, timeout: int = 10) -> dict[str, Any]:
+    url = _resolve_http_updater()
+    if not url:
+        raise RuntimeError("内部 updater 不可用")
+    headers: dict[str, str] = {}
+    token = _updater_token()
+    if token:
+        headers["X-TelePilot-Updater-Token"] = token
+    req = urllib.request.Request(f"{url}{path}", headers=headers, method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 - internal configured URL
+            text = resp.read().decode("utf-8", errors="ignore")
+    except urllib.error.HTTPError as exc:
+        text = exc.read().decode("utf-8", errors="ignore")
+        try:
+            parsed = json.loads(text)
+        except Exception:
+            parsed = {"error": text or str(exc)}
+        if isinstance(parsed, dict):
+            parsed.setdefault("ok", False)
+            return parsed
+        return {"ok": False, "error": str(exc)}
+    parsed = json.loads(text) if text else {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
 def _detect_runtime_mode() -> tuple[str, str | None, Path | None]:
     root = _git_root()
     in_container = _is_container_runtime()
-    updater = _resolve_host_updater()
+    updater = _resolve_http_updater() or _resolve_host_updater()
 
     if not in_container and root and (root / "Makefile").exists():
         return RUNTIME_LOCAL_SOURCE, updater, root
@@ -1196,49 +1309,9 @@ def _detect_runtime_mode() -> tuple[str, str | None, Path | None]:
     return RUNTIME_UNSUPPORTED, updater, root
 
 
-def _normalize_changed_file(path: str) -> str:
-    return path.strip().lstrip("./")
-
-
-def _is_docs_file(path: str) -> bool:
-    normalized = _normalize_changed_file(path)
-    lowered = normalized.lower()
-    name = Path(normalized).name.lower()
-    if normalized in {"CHANGELOG.md", "docs/PLUGIN-DEV-GUIDE.md"}:
-        return False
-    return lowered.startswith("docs/") or lowered.startswith("readme") or name.endswith(_DOC_SUFFIXES)
-
-
-def _is_full_update_file(path: str) -> bool:
-    normalized = _normalize_changed_file(path)
-    name = Path(normalized).name
-    if name in _FULL_UPDATE_BASENAMES:
-        return True
-    return any(normalized.startswith(prefix) for prefix in _FULL_UPDATE_PREFIXES)
-
-
 def _classify_changed_files(changed_files: list[str]) -> tuple[list[str], bool, bool]:
-    files = [_normalize_changed_file(path) for path in changed_files if path.strip()]
-    if not files:
-        return ["none"], False, False
-
-    requires_full_update = any(_is_full_update_file(path) for path in files)
-    requires_backup = any(path.startswith("backend/alembic/versions/") for path in files)
-
-    if all(_is_docs_file(path) for path in files):
-        components = ["docs_only"]
-    else:
-        components: list[str] = []
-        if any(path.startswith("frontend/") or path in {"CHANGELOG.md", "docs/PLUGIN-DEV-GUIDE.md"} for path in files):
-            components.append("frontend")
-        if any(path.startswith("backend/") or path.startswith("plugins/") for path in files):
-            components.append("backend")
-        if not components:
-            components.append("docs_only")
-
-    if requires_full_update:
-        components = ["full_update", *[x for x in components if x != "full_update"]]
-    return components, requires_full_update, requires_backup
+    plan = classify_changed_files(changed_files)
+    return plan.components, plan.requires_full_update, plan.requires_backup
 
 
 def _manual_command_for_runtime(runtime_mode: str, updater: str | None) -> str | None:
@@ -1265,12 +1338,15 @@ def _action_required_for_plan(
         return "docs_only"
     has_backend = "backend" in components
     has_frontend = "frontend" in components
-    if has_backend and has_frontend:
+    has_updater = "updater" in components
+    if sum((has_backend, has_frontend, has_updater)) > 1:
         return "mixed"
     if has_backend:
         return "backend"
     if has_frontend:
         return "frontend"
+    if has_updater:
+        return "updater"
     return "full_update"
 
 
@@ -1278,19 +1354,27 @@ def _plan_text(
     runtime_mode: str,
     has_update: bool,
     components: list[str],
+    services: list[str],
     requires_full_update: bool,
     requires_backup: bool,
+    requires_migration: bool,
     can_apply: bool,
 ) -> tuple[str, str]:
     if not has_update:
-        return "已是最新版本", "当前代码与 origin/main 一致，无需更新。"
+        return "已是最新版本", "当前代码与目标分支一致，无需更新。"
 
     label = "检测到可更新变更"
     detail_parts: list[str] = []
     if components and components != ["none"]:
         detail_parts.append(f"变更分类：{', '.join(components)}")
+    if services:
+        detail_parts.append(f"仅切换服务：{', '.join(services)}；其余容器保持运行。")
+    elif components == ["docs_only"]:
+        detail_parts.append("不需要重建或重启运行服务。")
     if requires_backup:
-        detail_parts.append("包含数据库迁移，建议先备份数据库。")
+        detail_parts.append("包含数据库迁移，将先备份再切换 web。")
+    elif not requires_migration:
+        detail_parts.append("不执行数据库备份或迁移。")
     if requires_full_update:
         detail_parts.append("涉及部署/依赖关键文件，建议完整更新流程。")
 
@@ -1314,19 +1398,95 @@ def _plan_text(
     return label, " ".join(detail_parts)
 
 
+def _check_response_from_plan(
+    *,
+    runtime_mode: str,
+    updater: str | None,
+    remote: str,
+    branch: str,
+    plan: dict[str, Any],
+    can_apply: bool,
+    manual_command: str | None,
+) -> CheckUpdateResponse:
+    if not plan.get("ok", True):
+        return CheckUpdateResponse(
+            remote=remote,
+            branch=branch,
+            runtime_mode=runtime_mode,
+            update_executor=updater,
+            can_apply=can_apply,
+            manual_command=manual_command,
+            plan_label="更新检查失败",
+            plan_detail="执行远程更新检查失败，请查看错误信息。",
+            error=str(plan.get("error") or "更新检查失败"),
+        )
+    has_update = bool(plan.get("has_update"))
+    changed_files = [str(item) for item in plan.get("changed_files") or []]
+    components = [str(item) for item in plan.get("components") or ["none"]]
+    services = [str(item) for item in plan.get("services") or []]
+    requires_full_update = bool(plan.get("requires_full_update"))
+    requires_backup = bool(plan.get("requires_backup"))
+    requires_migration = bool(plan.get("requires_migration"))
+    action_required = _action_required_for_plan(
+        runtime_mode,
+        has_update,
+        components,
+        requires_full_update,
+    )
+    plan_label, plan_detail = _plan_text(
+        runtime_mode=runtime_mode,
+        has_update=has_update,
+        components=components,
+        services=services,
+        requires_full_update=requires_full_update,
+        requires_backup=requires_backup,
+        requires_migration=requires_migration,
+        can_apply=can_apply,
+    )
+    return CheckUpdateResponse(
+        has_update=has_update,
+        current_commit=str(plan.get("current_commit") or "") or None,
+        remote_commit=str(plan.get("remote_commit") or "") or None,
+        ahead=int(plan.get("ahead") or 0),
+        remote=remote,
+        branch=branch,
+        changed_files=changed_files,
+        runtime_mode=runtime_mode,
+        update_executor=updater,
+        action_required=action_required,
+        plan_label=plan_label,
+        plan_detail=plan_detail,
+        components=components,
+        services=services,
+        requires_full_update=requires_full_update,
+        requires_backup=requires_backup,
+        requires_migration=requires_migration,
+        can_apply=can_apply,
+        manual_command=manual_command,
+    )
+
+
 class CheckUpdateResponse(BaseModel):
     has_update: bool = False
+    can_check: bool = True
+    """False 表示当前环境无法在进程内自动比对远程差异（如容器内无 updater / 无工作树），
+    此时 ``has_update`` 不代表真实结论，前端应展示"无法自动检查"而不是"有更新/已最新"。"""
     current_commit: str | None = None
     remote_commit: str | None = None
     ahead: int = 0
+    remote: str = "origin"
+    branch: str = "main"
     runtime_mode: str = RUNTIME_UNSUPPORTED
+    update_executor: str | None = None
     action_required: str = "none"
     plan_label: str = ""
     plan_detail: str = ""
     changed_files: list[str] = Field(default_factory=list)
     components: list[str] = Field(default_factory=lambda: ["none"])
+    services: list[str] = Field(default_factory=list)
     requires_full_update: bool = False
     requires_backup: bool = False
+    requires_migration: bool = False
     can_apply: bool = False
     manual_command: str | None = None
     error: str | None = None
@@ -1336,14 +1496,21 @@ class PullUpdateResponse(BaseModel):
     success: bool = False
     new_commit: str | None = None
     summary: str | None = None
+    job_id: str | None = None
+    status: str | None = None
+    remote: str = "origin"
+    branch: str = "main"
     runtime_mode: str = RUNTIME_UNSUPPORTED
+    update_executor: str | None = None
     action_required: str = "none"
     plan_label: str = ""
     plan_detail: str = ""
     changed_files: list[str] = Field(default_factory=list)
     components: list[str] = Field(default_factory=lambda: ["none"])
+    services: list[str] = Field(default_factory=list)
     requires_full_update: bool = False
     requires_backup: bool = False
+    requires_migration: bool = False
     can_apply: bool = False
     manual_command: str | None = None
     error: str | None = None
@@ -1354,17 +1521,214 @@ class RestartResponse(BaseModel):
     error: str | None = None
 
 
+class UpdateRequest(BaseModel):
+    remote: str | None = None
+    branch: str | None = None
+    full: bool = False
+
+    @field_validator("remote")
+    @classmethod
+    def validate_remote(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return normalize_update_remote(value)
+
+    @field_validator("branch")
+    @classmethod
+    def validate_branch(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return normalize_update_branch(value)
+
+
+class UpdateJobStatusResponse(BaseModel):
+    ok: bool = False
+    job_id: str
+    status: str = "unknown"
+    created_at: int | None = None
+    started_at: int | None = None
+    finished_at: int | None = None
+    returncode: int | None = None
+    remote: str | None = None
+    branch: str | None = None
+    new_commit: str | None = None
+    summary: str | None = None
+    error: str | None = None
+    progress: int | None = None
+    phase: str | None = None
+    detail: str | None = None
+    logs: list[str] = Field(default_factory=list)
+    plan: dict[str, Any] | None = None
+
+
+class UpdateTargetOptionsResponse(BaseModel):
+    ok: bool = False
+    remotes: list[str] = Field(default_factory=list)
+    branches: list[str] = Field(default_factory=list)
+    remote: str | None = None
+    error: str | None = None
+
+
+async def _resolve_update_request(payload: UpdateRequest | None) -> tuple[str, str, bool]:
+    if not isinstance(payload, UpdateRequest):
+        payload = None
+    default_remote, default_branch = _default_update_remote_branch()
+    try:
+        defaults = normalize_update_target(
+            {"remote": default_remote, "branch": default_branch}
+        )
+    except ValueError:
+        log.warning("忽略环境或 Git upstream 中的非法更新目标，回退 origin/main")
+        defaults = {"remote": "origin", "branch": "main"}
+    default_remote = defaults["remote"]
+    default_branch = defaults["branch"]
+    try:
+        async with AsyncSessionLocal() as db:
+            row = await db.get(SystemSetting, "app_update_target")
+        if row is not None and isinstance(row.value, dict):
+            try:
+                saved = normalize_update_target(row.value)
+            except ValueError:
+                log.warning("忽略数据库中的非法 app_update_target，继续使用安全默认值")
+            else:
+                default_remote = saved["remote"]
+                default_branch = saved["branch"]
+    except Exception:  # noqa: BLE001
+        pass
+    candidate = payload or UpdateRequest()
+    target = normalize_update_target(
+        {
+            "remote": candidate.remote or default_remote,
+            "branch": candidate.branch or default_branch,
+        }
+    )
+    return target["remote"], target["branch"], bool(candidate.full)
+
+
+def _int_or_none(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+@router.get("/update-target-options", response_model=UpdateTargetOptionsResponse)
+async def get_update_target_options(
+    _user: CurrentUser,
+    remote: str | None = None,
+) -> UpdateTargetOptionsResponse:
+    """返回当前 Git 工作树可选的远端与远端分支。"""
+    default_remote, _, _ = await _resolve_update_request(None)
+    try:
+        selected_remote = UpdateRequest(remote=remote or default_remote).remote or default_remote
+    except ValueError as exc:
+        return UpdateTargetOptionsResponse(error=str(exc))
+
+    runtime_mode, updater, root = await asyncio.to_thread(_detect_runtime_mode)
+    if runtime_mode == RUNTIME_PROD_CONTAINER_WITH_UPDATER and updater:
+        result = await asyncio.to_thread(
+            _updater_request,
+            "/targets",
+            {"remote": selected_remote},
+            timeout=45,
+        )
+        return UpdateTargetOptionsResponse(
+            ok=bool(result.get("ok")),
+            remotes=[str(item) for item in result.get("remotes") or []],
+            branches=[str(item) for item in result.get("branches") or []],
+            remote=str(result.get("remote") or selected_remote),
+            error=str(result.get("error") or "") or None,
+        )
+
+    if runtime_mode == RUNTIME_LOCAL_SOURCE and root is not None:
+        def read_local_targets() -> UpdateTargetOptionsResponse:
+            remotes_proc = subprocess.run(
+                ["git", "remote"],
+                cwd=root,
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+            remotes = [item.strip() for item in remotes_proc.stdout.splitlines() if item.strip()]
+            selected = selected_remote if selected_remote in remotes else (remotes[0] if remotes else selected_remote)
+            heads_proc = subprocess.run(
+                ["git", "ls-remote", "--heads", selected],
+                cwd=root,
+                capture_output=True,
+                text=True,
+                timeout=45,
+                check=False,
+            )
+            branches = sorted(
+                {
+                    line.split("\t", 1)[-1].removeprefix("refs/heads/")
+                    for line in heads_proc.stdout.splitlines()
+                    if "refs/heads/" in line
+                },
+                key=lambda item: (item != "main", item),
+            )
+            return UpdateTargetOptionsResponse(
+                ok=remotes_proc.returncode == 0 and heads_proc.returncode == 0,
+                remotes=remotes,
+                branches=branches,
+                remote=selected,
+                error=(heads_proc.stderr.strip() or remotes_proc.stderr.strip() or None),
+            )
+
+        try:
+            return await asyncio.to_thread(read_local_targets)
+        except (OSError, subprocess.SubprocessError, ValueError) as exc:
+            return UpdateTargetOptionsResponse(
+                remotes=[selected_remote],
+                remote=selected_remote,
+                error=f"读取 Git 目标失败: {type(exc).__name__}: {exc}",
+            )
+
+    return UpdateTargetOptionsResponse(
+        remotes=[selected_remote],
+        remote=selected_remote,
+        error="当前运行环境无法读取 Git 远端列表",
+    )
+
+
 @router.post("/check-update", response_model=CheckUpdateResponse)
-async def check_update(_user: CurrentUser) -> CheckUpdateResponse:
-    """仅 git fetch + 对比本地/远程 commit，不拉取代码。"""
-    runtime_mode, updater, root = _detect_runtime_mode()
+async def check_update(
+    _user: CurrentUser,
+    payload: UpdateRequest | None = Body(default=None),
+) -> CheckUpdateResponse:
+    """仅检查远程更新，不拉取代码。"""
+    # _detect_runtime_mode 内含对 updater 的同步探活（urlopen 0.8s）与文件系统探测，
+    # 放到线程池执行，避免阻塞事件循环（尤其 update-jobs 每 2s 轮询时）。
+    runtime_mode, updater, root = await asyncio.to_thread(_detect_runtime_mode)
     can_apply = runtime_mode in {RUNTIME_LOCAL_SOURCE, RUNTIME_PROD_CONTAINER_WITH_UPDATER}
     manual_command = _manual_command_for_runtime(runtime_mode, updater)
+    remote, branch, _force_full = await _resolve_update_request(payload)
 
     try:
+        if runtime_mode == RUNTIME_PROD_CONTAINER_WITH_UPDATER and updater and updater.startswith(("http://", "https://")):
+            plan = await asyncio.to_thread(
+                _updater_request,
+                "/check",
+                {"remote": remote, "branch": branch},
+                timeout=120,
+            )
+            return _check_response_from_plan(
+                runtime_mode=runtime_mode,
+                updater=updater,
+                remote=remote,
+                branch=branch,
+                plan=plan,
+                can_apply=can_apply,
+                manual_command=manual_command,
+            )
+
         if runtime_mode == RUNTIME_LOCAL_SOURCE and root is None:
             return CheckUpdateResponse(
+                remote=remote,
+                branch=branch,
                 runtime_mode=runtime_mode,
+                update_executor=updater,
                 can_apply=can_apply,
                 manual_command=manual_command,
                 plan_label="环境检测失败",
@@ -1373,12 +1737,16 @@ async def check_update(_user: CurrentUser) -> CheckUpdateResponse:
             )
 
         if root:
+            remote_ref = f"refs/remotes/{remote}/{branch}"
             fetch_out, fetch_err, fetch_rc = await asyncio.to_thread(
-                _run_git, "fetch", "origin", "main:refs/remotes/origin/main", timeout=30
+                _run_git, "fetch", remote, f"+{branch}:{remote_ref}", timeout=30
             )
             if fetch_rc != 0:
                 return CheckUpdateResponse(
+                    remote=remote,
+                    branch=branch,
                     runtime_mode=runtime_mode,
+                    update_executor=updater,
                     can_apply=can_apply,
                     manual_command=manual_command,
                     plan_label="更新检查失败",
@@ -1391,7 +1759,10 @@ async def check_update(_user: CurrentUser) -> CheckUpdateResponse:
             )
             if head_rc != 0:
                 return CheckUpdateResponse(
+                    remote=remote,
+                    branch=branch,
                     runtime_mode=runtime_mode,
+                    update_executor=updater,
                     can_apply=can_apply,
                     manual_command=manual_command,
                     plan_label="更新检查失败",
@@ -1400,118 +1771,115 @@ async def check_update(_user: CurrentUser) -> CheckUpdateResponse:
                 )
 
             remote_out, _, remote_rc = await asyncio.to_thread(
-                _run_git, "rev-parse", "origin/main", timeout=10
+                _run_git, "rev-parse", remote_ref, timeout=10
             )
             if remote_rc != 0:
                 return CheckUpdateResponse(
+                    remote=remote,
+                    branch=branch,
                     runtime_mode=runtime_mode,
+                    update_executor=updater,
                     can_apply=can_apply,
                     manual_command=manual_command,
                     plan_label="更新检查失败",
-                    plan_detail="无法读取远程版本（仅检查 origin/main）。",
-                    error="无法获取远程 commit（仅检查 origin/main）",
+                    plan_detail=f"无法读取远程版本（{remote}/{branch}）。",
+                    error=f"无法获取远程 commit（{remote}/{branch}）",
                 )
 
-            current = head_out[:12]
-            remote = remote_out[:12]
             has_update = head_out != remote_out
-
-            # 计算本地落后远程多少个 commit；前端展示的是待拉取数量。
             behind_out, _, behind_rc = await asyncio.to_thread(
                 _run_git, "rev-list", "--count", f"{head_out}..{remote_out}", timeout=10
             )
             behind = int(behind_out) if not behind_rc else 0
-            changed_out, _, changed_rc = await asyncio.to_thread(
-                _run_git, "diff", "--name-only", "HEAD..origin/main", timeout=10
-            )
-            changed_files = (
-                changed_out.splitlines()[:80] if changed_rc == 0 and changed_out else []
-            )
-            components, requires_full_update, requires_backup = _classify_changed_files(
-                changed_files
-            )
+            update_plan = await asyncio.to_thread(build_update_plan, root, head_out, remote_out)
+            changed_files = update_plan.changed_files[:80]
+            components = update_plan.components
+            services = update_plan.services
+            requires_full_update = update_plan.requires_full_update
+            requires_backup = update_plan.requires_backup
             has_update = has_update and behind > 0
             if has_update and requires_full_update and runtime_mode == RUNTIME_LOCAL_SOURCE:
                 can_apply = False
                 manual_command = (
                     f"cd {shlex.quote(str(root))} && "
-                    "git pull --ff-only origin main && make install && make restart"
+                    f"git pull --ff-only {shlex.quote(remote)} {shlex.quote(branch)} && make install && make restart"
                 )
-            action_required = _action_required_for_plan(
-                runtime_mode,
-                has_update,
-                components,
-                requires_full_update,
-            )
+            action_required = _action_required_for_plan(runtime_mode, has_update, components, requires_full_update)
             plan_label, plan_detail = _plan_text(
                 runtime_mode=runtime_mode,
                 has_update=has_update,
                 components=components,
+                services=services,
                 requires_full_update=requires_full_update,
                 requires_backup=requires_backup,
+                requires_migration=update_plan.requires_migration,
                 can_apply=can_apply,
             )
             return CheckUpdateResponse(
                 has_update=has_update,
-                current_commit=current,
-                remote_commit=remote,
+                current_commit=head_out[:12],
+                remote_commit=remote_out[:12],
                 ahead=behind,
+                remote=remote,
+                branch=branch,
                 changed_files=changed_files,
                 runtime_mode=runtime_mode,
+                update_executor=updater,
                 action_required=action_required,
                 plan_label=plan_label,
                 plan_detail=plan_detail,
                 components=components,
+                services=services,
                 requires_full_update=requires_full_update,
                 requires_backup=requires_backup,
+                requires_migration=update_plan.requires_migration,
                 can_apply=can_apply,
                 manual_command=manual_command,
             )
 
-        # 非 Git 工作树环境（常见于容器镜像运行态）：返回运行计划，不报错。
-        components = ["full_update"]
-        requires_full_update = runtime_mode in {
-            RUNTIME_PROD_CONTAINER_MANUAL,
-            RUNTIME_PROD_CONTAINER_WITH_UPDATER,
-        }
-        has_update = runtime_mode in {
-            RUNTIME_PROD_CONTAINER_MANUAL,
-            RUNTIME_PROD_CONTAINER_WITH_UPDATER,
-        }
-        action_required = _action_required_for_plan(
-            runtime_mode,
-            has_update,
-            components,
-            requires_full_update,
-        )
-        plan_label, plan_detail = _plan_text(
-            runtime_mode=runtime_mode,
-            has_update=has_update,
-            components=components,
-            requires_full_update=requires_full_update,
-            requires_backup=False,
-            can_apply=can_apply,
-        )
+        # 走到这里说明：应用容器内没有 .git 工作树，也没有可查询的 http updater，
+        # 无法在本进程内真正比对远程差异。诚实返回"无法自动检查"，不再无条件谎报有更新。
+        if runtime_mode == RUNTIME_UNSUPPORTED:
+            return CheckUpdateResponse(
+                has_update=False,
+                can_check=False,
+                remote=remote,
+                branch=branch,
+                runtime_mode=runtime_mode,
+                update_executor=updater,
+                action_required="unsupported",
+                plan_label="环境不支持自动更新检查",
+                plan_detail="当前运行环境不支持自动更新检查，请人工执行部署流程。",
+                components=["none"],
+                requires_full_update=False,
+                requires_backup=False,
+                can_apply=can_apply,
+                manual_command=manual_command,
+                error="当前环境不支持自动更新检查，请人工执行部署流程。",
+            )
         return CheckUpdateResponse(
-            has_update=has_update,
+            has_update=False,
+            can_check=False,
+            remote=remote,
+            branch=branch,
             runtime_mode=runtime_mode,
-            action_required=action_required,
-            plan_label=plan_label,
-            plan_detail=plan_detail,
-            components=components,
-            requires_full_update=requires_full_update,
+            update_executor=updater,
+            action_required="manual",
+            plan_label="容器内无法自动检查更新",
+            plan_detail="当前运行于容器且无法在容器内比对 Git 远程差异；请在服务器部署目录执行下方更新命令。",
+            components=["none"],
+            requires_full_update=False,
             requires_backup=False,
             can_apply=can_apply,
             manual_command=manual_command,
-            error=(
-                None
-                if runtime_mode != RUNTIME_UNSUPPORTED
-                else "当前环境不支持自动更新检查，请人工执行部署流程。"
-            ),
+            error=None,
         )
     except Exception as e:  # noqa: BLE001
         return CheckUpdateResponse(
+            remote=remote,
+            branch=branch,
             runtime_mode=runtime_mode,
+            update_executor=updater,
             can_apply=can_apply,
             manual_command=manual_command,
             error=f"{type(e).__name__}: {str(e)[:200]}",
@@ -1519,17 +1887,61 @@ async def check_update(_user: CurrentUser) -> CheckUpdateResponse:
 
 
 @router.post("/pull-update", response_model=PullUpdateResponse)
-async def pull_update(_user: CurrentUser) -> PullUpdateResponse:
+async def pull_update(
+    _user: CurrentUser,
+    payload: UpdateRequest | None = Body(default=None),
+) -> PullUpdateResponse:
     """执行应用更新（保留历史路由名 /pull-update）。"""
-    runtime_mode, updater, _root = _detect_runtime_mode()
+    runtime_mode, updater, _root = await asyncio.to_thread(_detect_runtime_mode)
     manual_command = _manual_command_for_runtime(runtime_mode, updater)
     can_apply = runtime_mode in {RUNTIME_LOCAL_SOURCE, RUNTIME_PROD_CONTAINER_WITH_UPDATER}
+    remote, branch, force_full = await _resolve_update_request(payload)
 
     try:
+        if runtime_mode == RUNTIME_PROD_CONTAINER_WITH_UPDATER and updater and updater.startswith(("http://", "https://")):
+            result = await asyncio.to_thread(
+                _updater_request,
+                "/jobs",
+                {"remote": remote, "branch": branch, "full": force_full},
+                timeout=10,
+            )
+            if not result.get("ok"):
+                return PullUpdateResponse(
+                    success=False,
+                    remote=remote,
+                    branch=branch,
+                    runtime_mode=runtime_mode,
+                    update_executor=updater,
+                    action_required="full_update",
+                    can_apply=True,
+                    manual_command=manual_command,
+                    plan_label="更新任务启动失败",
+                    plan_detail="内部 updater 未能创建更新任务。",
+                    error=str(result.get("error") or "updater job create failed"),
+                )
+            return PullUpdateResponse(
+                success=True,
+                job_id=str(result.get("job_id") or ""),
+                status=str(result.get("status") or "queued"),
+                remote=remote,
+                branch=branch,
+                runtime_mode=runtime_mode,
+                update_executor=updater,
+                action_required="restart",
+                can_apply=True,
+                plan_label="更新任务已启动",
+                plan_detail="更新将在内部 updater 中执行，期间服务可能短暂重启；请观察任务日志。",
+                summary=f"job_id={result.get('job_id')}",
+                manual_command=manual_command,
+            )
+
         if runtime_mode == RUNTIME_LOCAL_SOURCE:
             if _git_root() is None:
                 return PullUpdateResponse(
+                    remote=remote,
+                    branch=branch,
                     runtime_mode=runtime_mode,
+                    update_executor=updater,
                     can_apply=can_apply,
                     manual_command=manual_command,
                     plan_label="环境检测失败",
@@ -1538,11 +1950,14 @@ async def pull_update(_user: CurrentUser) -> PullUpdateResponse:
                 )
 
             out, err, rc = await asyncio.to_thread(
-                _run_git, "pull", "--ff-only", "origin", "main", timeout=60
+                _run_git, "pull", "--ff-only", remote, branch, timeout=60
             )
             if rc != 0:
                 return PullUpdateResponse(
+                    remote=remote,
+                    branch=branch,
                     runtime_mode=runtime_mode,
+                    update_executor=updater,
                     can_apply=can_apply,
                     manual_command=manual_command,
                     plan_label="应用更新失败",
@@ -1572,7 +1987,10 @@ async def pull_update(_user: CurrentUser) -> PullUpdateResponse:
                 success=True,
                 new_commit=head_out[:12] if head_out else None,
                 summary=summary_out or None,
+                remote=remote,
+                branch=branch,
                 runtime_mode=runtime_mode,
+                update_executor=updater,
                 action_required="none",
                 plan_label="更新已应用",
                 plan_detail="已执行 git pull --ff-only，并触发后台 make restart。",
@@ -1582,15 +2000,19 @@ async def pull_update(_user: CurrentUser) -> PullUpdateResponse:
         if runtime_mode == RUNTIME_PROD_CONTAINER_WITH_UPDATER and updater:
             result = await asyncio.to_thread(
                 subprocess.run,
-                [updater],
+                [updater, "--full"] if force_full else [updater],
                 capture_output=True,
                 text=True,
                 timeout=180,
+                env={**os.environ, "TELEPILOT_UPDATE_REMOTE": remote, "TELEPILOT_UPDATE_BRANCH": branch},
             )
             merged = (result.stdout or "").strip() or (result.stderr or "").strip()
             if result.returncode != 0:
                 return PullUpdateResponse(
+                    remote=remote,
+                    branch=branch,
                     runtime_mode=runtime_mode,
+                    update_executor=updater,
                     action_required="full_update",
                     can_apply=True,
                     manual_command=manual_command,
@@ -1601,7 +2023,10 @@ async def pull_update(_user: CurrentUser) -> PullUpdateResponse:
                 )
             return PullUpdateResponse(
                 success=True,
+                remote=remote,
+                branch=branch,
                 runtime_mode=runtime_mode,
+                update_executor=updater,
                 can_apply=True,
                 plan_label="已触发宿主机更新器",
                 plan_detail="更新器已执行，具体重启/部署结果请查看宿主机日志。",
@@ -1612,7 +2037,10 @@ async def pull_update(_user: CurrentUser) -> PullUpdateResponse:
         if runtime_mode == RUNTIME_PROD_CONTAINER_MANUAL:
             return PullUpdateResponse(
                 success=False,
+                remote=remote,
+                branch=branch,
                 runtime_mode=runtime_mode,
+                update_executor=updater,
                 action_required="manual",
                 can_apply=False,
                 manual_command=manual_command,
@@ -1623,7 +2051,10 @@ async def pull_update(_user: CurrentUser) -> PullUpdateResponse:
 
         return PullUpdateResponse(
             success=False,
+            remote=remote,
+            branch=branch,
             runtime_mode=runtime_mode,
+            update_executor=updater,
             action_required="unsupported",
             can_apply=False,
             plan_label="环境不支持自动更新",
@@ -1632,18 +2063,59 @@ async def pull_update(_user: CurrentUser) -> PullUpdateResponse:
         )
     except Exception as e:  # noqa: BLE001
         return PullUpdateResponse(
+            remote=remote,
+            branch=branch,
             runtime_mode=runtime_mode,
+            update_executor=updater,
             can_apply=can_apply,
             manual_command=manual_command,
             error=f"{type(e).__name__}: {str(e)[:200]}",
         )
 
 
+@router.get("/update-jobs/{job_id}", response_model=UpdateJobStatusResponse)
+async def get_update_job(job_id: str, _user: CurrentUser) -> UpdateJobStatusResponse:
+    """读取内部 updater 任务状态。"""
+    runtime_mode, updater, _root = await asyncio.to_thread(_detect_runtime_mode)
+    if runtime_mode != RUNTIME_PROD_CONTAINER_WITH_UPDATER or not updater or not updater.startswith(("http://", "https://")):
+        return UpdateJobStatusResponse(ok=False, job_id=job_id, status="unsupported", error="内部 updater 不可用")
+    try:
+        result = await asyncio.to_thread(_updater_get, f"/jobs/{job_id}", timeout=10)
+    except Exception as exc:  # noqa: BLE001
+        return UpdateJobStatusResponse(ok=False, job_id=job_id, status="unknown", error=f"{type(exc).__name__}: {exc}")
+    if not result.get("ok"):
+        return UpdateJobStatusResponse(
+            ok=False,
+            job_id=job_id,
+            status=str(result.get("status") or "unknown"),
+            error=str(result.get("error") or "读取更新任务失败"),
+        )
+    return UpdateJobStatusResponse(
+        ok=True,
+        job_id=str(result.get("job_id") or job_id),
+        status=str(result.get("status") or "unknown"),
+        created_at=_int_or_none(result.get("created_at")),
+        started_at=_int_or_none(result.get("started_at")),
+        finished_at=_int_or_none(result.get("finished_at")),
+        returncode=_int_or_none(result.get("returncode")),
+        remote=str(result.get("remote") or "") or None,
+        branch=str(result.get("branch") or "") or None,
+        new_commit=str(result.get("new_commit") or "") or None,
+        summary=str(result.get("summary") or "") or None,
+        error=str(result.get("error") or "") or None,
+        progress=_int_or_none(result.get("progress")),
+        phase=str(result.get("phase") or "") or None,
+        detail=str(result.get("detail") or "") or None,
+        logs=[str(line) for line in result.get("logs") or []],
+        plan=result.get("plan") if isinstance(result.get("plan"), dict) else None,
+    )
+
+
 @router.post("/restart", response_model=RestartResponse)
 async def restart_app(_user: CurrentUser) -> RestartResponse:
     """触发应用重启。使用 subprocess detach 避免阻塞当前进程。"""
     try:
-        runtime_mode, updater, root = _detect_runtime_mode()
+        runtime_mode, updater, root = await asyncio.to_thread(_detect_runtime_mode)
         if runtime_mode == RUNTIME_LOCAL_SOURCE and root and (root / "Makefile").exists():
             subprocess.Popen(
                 ["make", "restart"],
@@ -1670,79 +2142,189 @@ async def restart_app(_user: CurrentUser) -> RestartResponse:
 # 配置备份与导出 / 导入
 # ════════════════════════════════════════════════════════════
 
-# 每个类别定义：ORM 模型、序列化时排除的敏感字段、标识字段（用于去重）
+# 配置包格式版本。V1 是 0.56.7 及更早的无版本 JSON；V2 增加依赖拓扑和 ID 映射。
+_CONFIG_BUNDLE_FORMAT = "telepilot-config"
+_CONFIG_BUNDLE_VERSION = 2
+
+# 每个类别定义：ORM 模型、敏感字段、自然标识、ID 映射与依赖关系。
 _EXPORT_DEFS: dict[str, dict[str, Any]] = {
     "system_settings": {
         "model": "SystemSetting",
         "exclude_fields": set(),
-        "id_fields": {"key"},
+        "id_fields": ("key",),
+        "pk_field": "key",
+    },
+    "proxies": {
+        "model": "Proxy",
+        "exclude_fields": {"password_enc"},
+        "id_fields": ("type", "host", "port", "username"),
+        "nullable_identity_fields": {"username"},
+        "pk_field": "id",
+    },
+    "device_profiles": {
+        "model": "DeviceProfile",
+        "exclude_fields": set(),
+        "id_fields": ("name",),
+        "pk_field": "id",
+    },
+    "feature_registry": {
+        "model": "Feature",
+        "exclude_fields": set(),
+        "id_fields": ("key",),
+        "pk_field": "key",
+    },
+    "plugin_global_configs": {
+        "model": "PluginGlobalConfig",
+        "exclude_fields": set(),
+        "id_fields": ("plugin_key",),
+        "dependencies": ("feature_registry",),
+        "references": {"plugin_key": "feature_registry"},
     },
     "command_templates": {
         "model": "CommandTemplate",
         "exclude_fields": set(),
-        "id_fields": {"name"},
+        "id_fields": ("name",),
+        "pk_field": "id",
+        "dependencies": ("llm_providers",),
     },
     "account_commands": {
         "model": "AccountCommandLink",
         "exclude_fields": set(),
-        "id_fields": {"account_id", "template_id"},
+        "id_fields": ("account_id", "template_id"),
+        "dependencies": ("account_settings", "command_templates"),
+        "references": {
+            "account_id": "account_settings",
+            "template_id": "command_templates",
+        },
     },
     "llm_providers": {
         "model": "LLMProvider",
         "exclude_fields": {"api_key_enc"},
-        "id_fields": {"name"},
+        "id_fields": ("name",),
+        "pk_field": "id",
+        "dependencies": ("proxies",),
+        "references": {"proxy_id": "proxies"},
     },
     "forward_rules": {
         "model": "Rule",
         "exclude_fields": set(),
         "filter": {"feature_key": "forward"},
-        "id_fields": {"account_id", "feature_key", "name"},
+        "id_fields": ("account_id", "feature_key", "name"),
+        "pk_field": "id",
+        "map_group": "rules",
+        "dependencies": ("account_settings",),
+        "references": {"account_id": "account_settings"},
     },
     "auto_reply_rules": {
         "model": "Rule",
         "exclude_fields": set(),
         "filter": {"feature_key": "auto_reply"},
-        "id_fields": {"account_id", "feature_key", "name"},
+        "id_fields": ("account_id", "feature_key", "name"),
+        "pk_field": "id",
+        "map_group": "rules",
+        "dependencies": ("account_settings",),
+        "references": {"account_id": "account_settings"},
     },
     "rate_limit_templates": {
         "model": "RateLimitTemplate",
         "exclude_fields": set(),
-        "id_fields": {"name"},
+        "id_fields": ("name",),
+        "pk_field": "id",
     },
     "rate_limit_rules": {
         "model": "RateLimitRule",
         "exclude_fields": set(),
-        "id_fields": {"scope", "scope_id", "action"},
+        "id_fields": ("scope", "scope_id", "action"),
+        "pk_field": "id",
+        "dependencies": (
+            "rate_limit_templates",
+            "account_settings",
+            "forward_rules",
+            "auto_reply_rules",
+        ),
     },
     "feature_config": {
         "model": "AccountFeature",
         "exclude_fields": set(),
-        "id_fields": {"account_id", "feature_key"},
+        "id_fields": ("account_id", "feature_key"),
+        "dependencies": ("account_settings", "feature_registry"),
+        "references": {
+            "account_id": "account_settings",
+            "feature_key": "feature_registry",
+        },
     },
     "account_settings": {
         "model": "Account",
         "exclude_fields": {"session_enc", "api_id_enc", "api_hash_enc", "phone"},
-        "id_fields": {"id"},
+        "id_fields": ("phone",),
+        "identity_candidates": (("phone",), ("tg_user_id",)),
+        "pk_field": "id",
+        "dependencies": ("rate_limit_templates", "proxies", "device_profiles"),
+        "references": {
+            "template_id": "rate_limit_templates",
+            "proxy_id": "proxies",
+            "device_profile_id": "device_profiles",
+        },
+    },
+    "humanize_configs": {
+        "model": "HumanizeConfig",
+        "exclude_fields": set(),
+        "id_fields": ("account_id",),
+        "dependencies": ("account_settings",),
+        "references": {"account_id": "account_settings"},
     },
     "ignored_peers": {
         "model": "IgnoredPeer",
         "exclude_fields": set(),
-        "id_fields": {"account_id", "peer_id"},
+        "id_fields": ("account_id", "peer_id"),
+        "pk_field": "id",
+        "dependencies": ("account_settings",),
+        "references": {"account_id": "account_settings"},
     },
     "notify_bots": {
         "model": "NotifyBot",
         "exclude_fields": {"bot_token_enc"},
-        "id_fields": {"name"},
+        "id_fields": ("name",),
+        "pk_field": "id",
     },
 }
 
+_IMPORT_TOPOLOGY = (
+    "system_settings",
+    "proxies",
+    "device_profiles",
+    "feature_registry",
+    "plugin_global_configs",
+    "rate_limit_templates",
+    "account_settings",
+    "humanize_configs",
+    "llm_providers",
+    "command_templates",
+    "forward_rules",
+    "auto_reply_rules",
+    "feature_config",
+    "ignored_peers",
+    "notify_bots",
+    "account_commands",
+    "rate_limit_rules",
+)
+
 # 敏感字段的完整集合（include_sensitive=true 时不排除）
 _ALL_SENSITIVE = {"session_enc", "api_key_enc", "api_id_enc", "api_hash_enc", "phone", "bot_token_enc", "password_enc"}
+_SENSITIVE_SYSTEM_SETTING_KEYS = {"auth_login_recovery_code"}
+_SENSITIVE_SYSTEM_SETTING_PREFIXES = (
+    "account_webhooks:",
+    "account_bot_transfer_notice:",
+    "account_bot:interaction_runtime_state:",
+    "account_bot:transfer_test_runtime_state:",
+)
 
 
 class ExportConfigRequest(BaseModel):
     categories: list[str] = Field(default_factory=list)
     include_sensitive: bool = False
+    password: str | None = None
+    totp_code: str | None = None
 
 
 def _row_to_dict(row: Any, exclude: set[str], include_sensitive: bool) -> dict[str, Any]:
@@ -1758,32 +2340,42 @@ def _row_to_dict(row: Any, exclude: set[str], include_sensitive: bool) -> dict[s
             elif isinstance(val, (bytes, bytearray)):
                 val = val.hex() if include_sensitive else None
             data[name] = val
-    return {k: v for k, v in data.items() if v is not None}
+    return data
 
 
-@router.post("/export-config")
-async def export_config(
-    _user: CurrentUser,
-    body: ExportConfigRequest,
-) -> JSONResponse:
-    """导出配置为 JSON 文件下载。"""
-    from .. import __version__
+def _system_setting_safe_for_export(key: Any) -> bool:
+    normalized = str(key or "").strip()
+    if normalized in _SENSITIVE_SYSTEM_SETTING_KEYS:
+        return False
+    return not any(normalized.startswith(prefix) for prefix in _SENSITIVE_SYSTEM_SETTING_PREFIXES)
+
+
+def _config_model_map() -> dict[str, Any]:
     from ..db.models import (
         Account,
         AccountCommandLink,
         AccountFeature,
         CommandTemplate,
+        Feature,
+        HumanizeConfig,
         IgnoredPeer,
         LLMProvider,
         NotifyBot,
+        PluginGlobalConfig,
+        Proxy,
         RateLimitRule,
         RateLimitTemplate,
         Rule,
     )
+    from ..db.models.account import DeviceProfile
     from ..db.models.system import SystemSetting
 
-    model_map = {
+    return {
         "SystemSetting": SystemSetting,
+        "Proxy": Proxy,
+        "DeviceProfile": DeviceProfile,
+        "Feature": Feature,
+        "PluginGlobalConfig": PluginGlobalConfig,
         "CommandTemplate": CommandTemplate,
         "AccountCommandLink": AccountCommandLink,
         "LLMProvider": LLMProvider,
@@ -1792,41 +2384,99 @@ async def export_config(
         "RateLimitRule": RateLimitRule,
         "AccountFeature": AccountFeature,
         "Account": Account,
+        "HumanizeConfig": HumanizeConfig,
         "IgnoredPeer": IgnoredPeer,
         "NotifyBot": NotifyBot,
     }
 
+
+def _expand_export_categories(categories: list[str]) -> list[str]:
+    wanted: set[str] = set()
+
+    def include(category: str) -> None:
+        if category in wanted or category not in _EXPORT_DEFS:
+            return
+        for dependency in _EXPORT_DEFS[category].get("dependencies", ()):
+            include(dependency)
+        wanted.add(category)
+
+    for category in categories:
+        include(category)
+    return [category for category in _IMPORT_TOPOLOGY if category in wanted]
+
+
+async def _build_export_payload(
+    *,
+    categories: list[str],
+    include_sensitive: bool,
+    session_factory: Callable[[], Any] | None = None,
+    model_map: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    from .. import __version__
+
+    selected = [category for category in categories if category in _EXPORT_DEFS]
+    included = _expand_export_categories(selected)
+    models = model_map or _config_model_map()
+    factory = session_factory or AsyncSessionLocal
     result: dict[str, Any] = {
         "_meta": {
+            "format": _CONFIG_BUNDLE_FORMAT,
+            "bundle_version": _CONFIG_BUNDLE_VERSION,
+            "app_version": __version__,
+            # 保留旧字段，方便旧版 UI 展示来源版本。
             "version": __version__,
             "exported_at": datetime.now().isoformat(),
-            "include_sensitive": body.include_sensitive,
+            "include_sensitive": include_sensitive,
+            "requested_categories": selected,
+            "included_categories": included,
+            "dependency_order": list(_IMPORT_TOPOLOGY),
         },
     }
+    async with factory() as db:
+        for category in included:
+            definition = _EXPORT_DEFS[category]
+            model_cls = models.get(definition["model"])
+            if model_cls is None:
+                continue
+            query = select(model_cls)
+            for key, value in (definition.get("filter") or {}).items():
+                query = query.where(getattr(model_cls, key) == value)
+            rows = (await db.execute(query)).scalars().all()
+            if model_cls.__name__ == "SystemSetting" and not include_sensitive:
+                rows = [
+                    row
+                    for row in rows
+                    if _system_setting_safe_for_export(getattr(row, "key", ""))
+                ]
+            exclude = set() if include_sensitive else definition["exclude_fields"]
+            result[category] = [
+                _row_to_dict(row, exclude, include_sensitive) for row in rows
+            ]
+    return result
 
-    for cat in body.categories:
-        defn = _EXPORT_DEFS.get(cat)
-        if not defn:
-            continue
-        model_cls = model_map.get(defn["model"])
-        if not model_cls:
-            continue
 
-        exclude = defn["exclude_fields"]
-        if body.include_sensitive:
-            exclude = set()
-
-        try:
-            async with AsyncSessionLocal() as db:
-                query = select(model_cls)
-                filt = defn.get("filter")
-                if filt:
-                    for k, v in filt.items():
-                        query = query.where(getattr(model_cls, k) == v)
-                rows = (await db.execute(query)).scalars().all()
-                result[cat] = [_row_to_dict(r, exclude, body.include_sensitive) for r in rows]
-        except Exception as e:  # noqa: BLE001
-            result[cat] = {"_error": f"{type(e).__name__}: {str(e)[:200]}"}
+@router.post("/export-config")
+async def export_config(
+    user: CurrentUser,
+    body: ExportConfigRequest,
+) -> JSONResponse:
+    """导出配置为 JSON 文件下载。"""
+    if body.include_sensitive:
+        if not body.password or not auth_service.verify_password(body.password, user.password_hash):
+            raise HTTPException(status_code=403, detail="敏感配置导出需要重新验证当前密码")
+        if user.totp_secret_enc:
+            if not body.totp_code or not auth_service.verify_totp(
+                decrypt_str(user.totp_secret_enc),
+                body.totp_code,
+            ):
+                raise HTTPException(status_code=403, detail="敏感配置导出需要有效的 TOTP 动态验证码")
+    try:
+        result = await _build_export_payload(
+            categories=body.categories,
+            include_sensitive=body.include_sensitive,
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail="导出配置失败，未生成不完整备份") from exc
 
     filename = f"telepilot-config-{datetime.now().strftime('%Y-%m-%d')}.json"
     return JSONResponse(
@@ -1840,6 +2490,340 @@ class ImportConfigResponse(BaseModel):
     imported: int = 0
     skipped: int = 0
     warnings: list[str] = Field(default_factory=list)
+    bundle_version: int = _CONFIG_BUNDLE_VERSION
+    affected_categories: list[str] = Field(default_factory=list)
+    affected_accounts: list[int] = Field(default_factory=list)
+    reloaded_accounts: list[int] = Field(default_factory=list)
+    restart_required: bool = False
+    id_mappings: dict[str, dict[str, Any]] = Field(default_factory=dict)
+
+
+class ConfigImportError(RuntimeError):
+    def __init__(self, message: str, *, imported: int = 0) -> None:
+        super().__init__(message)
+        self.imported = imported
+
+
+def _coerce_import_value(column: Any, value: Any) -> Any:
+    if value is None:
+        return None
+    try:
+        python_type = column.type.python_type
+    except (AttributeError, NotImplementedError):
+        return value
+    if python_type is bytes and isinstance(value, str):
+        return bytes.fromhex(value)
+    if python_type is datetime and isinstance(value, str):
+        return datetime.fromisoformat(value)
+    if python_type is date and isinstance(value, str):
+        return date.fromisoformat(value)
+    if python_type is datetime_time and isinstance(value, str):
+        return datetime_time.fromisoformat(value)
+    return value
+
+
+def _mapping_key(value: Any) -> str:
+    return str(value)
+
+
+def _lookup_mapping(
+    mappings: dict[str, dict[str, Any]],
+    category: str,
+    source_value: Any,
+) -> Any:
+    mapped = mappings.get(category, {}).get(_mapping_key(source_value))
+    if mapped is None:
+        raise ConfigImportError(
+            f"缺少依赖映射：{category} 的旧 ID {source_value}；请使用完整的 V2 配置包"
+        )
+    return mapped
+
+
+def _remap_command_config(
+    config: Any,
+    mappings: dict[str, dict[str, Any]],
+) -> Any:
+    if not isinstance(config, dict):
+        return config
+    remapped = dict(config)
+    provider_id = remapped.get("provider_id")
+    if provider_id is not None:
+        remapped["provider_id"] = _lookup_mapping(
+            mappings, "llm_providers", provider_id
+        )
+    fallback_ids = remapped.get("fallback_provider_ids")
+    if isinstance(fallback_ids, list):
+        remapped["fallback_provider_ids"] = [
+            _lookup_mapping(mappings, "llm_providers", value)
+            for value in fallback_ids
+        ]
+    return remapped
+
+
+def _remap_import_row(
+    category: str,
+    row: dict[str, Any],
+    mappings: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    definition = _EXPORT_DEFS[category]
+    remapped = dict(row)
+    for field, dependency in definition.get("references", {}).items():
+        value = remapped.get(field)
+        if value is not None:
+            remapped[field] = _lookup_mapping(mappings, dependency, value)
+    if category == "rate_limit_rules":
+        scope = str(remapped.get("scope") or "")
+        dependency = {
+            "template": "rate_limit_templates",
+            "account": "account_settings",
+            "rule": "rules",
+        }.get(scope)
+        if dependency and remapped.get("scope_id") is not None:
+            remapped["scope_id"] = _lookup_mapping(
+                mappings, dependency, remapped["scope_id"]
+            )
+    if category == "command_templates" and "config" in remapped:
+        remapped["config"] = _remap_command_config(remapped["config"], mappings)
+    return remapped
+
+
+async def _import_config_payload(
+    payload: dict[str, Any],
+    *,
+    session_factory: Callable[[], Any] | None = None,
+    model_map: dict[str, Any] | None = None,
+) -> ImportConfigResponse:
+    if not isinstance(payload, dict):
+        raise ConfigImportError("配置包根节点必须是 JSON object")
+    meta = payload.get("_meta") if isinstance(payload.get("_meta"), dict) else {}
+    bundle_format = meta.get("format")
+    if bundle_format not in (None, _CONFIG_BUNDLE_FORMAT):
+        raise ConfigImportError(f"不支持的配置包格式：{bundle_format}")
+    raw_version = meta.get("bundle_version", 1)
+    try:
+        bundle_version = int(raw_version)
+    except (TypeError, ValueError) as exc:
+        raise ConfigImportError("配置包版本不是整数") from exc
+    if bundle_version < 1 or bundle_version > _CONFIG_BUNDLE_VERSION:
+        raise ConfigImportError(f"不支持的配置包版本：{bundle_version}")
+    if bundle_version >= 2 and bundle_format != _CONFIG_BUNDLE_FORMAT:
+        raise ConfigImportError("V2 配置包缺少合法的 format 标识")
+    payload_categories = {key for key in payload if key != "_meta"}
+    unknown_categories = sorted(payload_categories - set(_EXPORT_DEFS))
+    if unknown_categories:
+        raise ConfigImportError(f"配置包包含未知类别：{', '.join(unknown_categories)}")
+    if not payload_categories:
+        raise ConfigImportError("配置包不包含任何可恢复类别")
+    declared_categories = meta.get("included_categories")
+    if isinstance(declared_categories, list):
+        missing_categories = sorted(
+            {str(value) for value in declared_categories} - payload_categories
+        )
+        if missing_categories:
+            raise ConfigImportError(
+                f"配置包内容不完整，缺少声明类别：{', '.join(missing_categories)}"
+            )
+
+    models = model_map or _config_model_map()
+    factory = session_factory or AsyncSessionLocal
+    mappings: dict[str, dict[str, Any]] = {}
+    imported = 0
+    skipped = 0
+    warnings: list[str] = []
+    affected_categories: set[str] = set()
+    affected_accounts: set[int] = set()
+    db = None
+
+    try:
+        async with factory() as db:
+            for category in _IMPORT_TOPOLOGY:
+                rows = payload.get(category)
+                if rows is None:
+                    continue
+                if not isinstance(rows, list):
+                    raise ConfigImportError(f"[{category}] 必须是数组")
+                definition = _EXPORT_DEFS[category]
+                model_cls = models.get(definition["model"])
+                if model_cls is None:
+                    raise ConfigImportError(f"[{category}] 当前运行版本缺少对应模型")
+                table_columns = {column.name: column for column in model_cls.__table__.columns}
+                category_map = mappings.setdefault(category, {})
+                map_group = definition.get("map_group")
+                group_map = mappings.setdefault(map_group, {}) if map_group else None
+
+                for source in rows:
+                    if not isinstance(source, dict):
+                        raise ConfigImportError(f"[{category}] 行必须是 object")
+                    source_pk = source.get(definition.get("pk_field", ""))
+                    remapped = _remap_import_row(category, source, mappings)
+                    filtered: dict[str, Any] = {}
+                    exclude = (
+                        set()
+                        if bool(meta.get("include_sensitive"))
+                        else definition["exclude_fields"]
+                    )
+                    for key, value in remapped.items():
+                        if key not in table_columns or key in exclude:
+                            continue
+                        if key in {"created_at", "updated_at", "added_at", "installed_at"}:
+                            continue
+                        if key == definition.get("pk_field") and key == "id":
+                            continue
+                        filtered[key] = _coerce_import_value(table_columns[key], value)
+
+                    if category == "system_settings" and filtered.get("key") == "app_update_target":
+                        try:
+                            filtered["value"] = normalize_update_target(filtered.get("value"))
+                        except ValueError as exc:
+                            raise ConfigImportError(
+                                f"[system_settings] app_update_target 非法：{exc}"
+                            ) from exc
+
+                    # 导入旧 / 跨版本备份时，未知的客户端身份档案降级为 auto（不拒绝整份备份）。
+                    if (
+                        category == "llm_providers"
+                        and "client_identity_profile" in filtered
+                    ):
+                        from ..db.models.command import (
+                            normalize_client_identity_profile,
+                        )
+
+                        original_identity = filtered["client_identity_profile"]
+                        normalized_identity = normalize_client_identity_profile(original_identity)
+                        if normalized_identity != original_identity:
+                            warnings.append(
+                                f"[llm_providers] 客户端身份档案 {original_identity!r} 未知，已降级为 auto"
+                            )
+                        filtered["client_identity_profile"] = normalized_identity
+
+                    identity: dict[str, Any] | None = None
+                    candidates = definition.get(
+                        "identity_candidates", (definition["id_fields"],)
+                    )
+                    nullable_identity_fields = definition.get(
+                        "nullable_identity_fields", set()
+                    )
+                    for candidate in candidates:
+                        if all(
+                            field in filtered
+                            and (
+                                filtered[field] is not None
+                                or field in nullable_identity_fields
+                            )
+                            for field in candidate
+                        ):
+                            identity = {field: filtered[field] for field in candidate}
+                            break
+                    if identity is None:
+                        raise ConfigImportError(
+                            f"[{category}] 缺少稳定标识字段："
+                            f"{', '.join(definition['id_fields'])}"
+                        )
+                    query = select(model_cls)
+                    for field, value in identity.items():
+                        query = query.where(getattr(model_cls, field) == value)
+                    existing = (await db.execute(query.limit(1))).scalar_one_or_none()
+                    if existing is not None:
+                        skipped += 1
+                        target_pk_field = definition.get("pk_field")
+                        if source_pk is not None and target_pk_field:
+                            target_pk = getattr(existing, target_pk_field)
+                            category_map[_mapping_key(source_pk)] = target_pk
+                            if group_map is not None:
+                                group_map[_mapping_key(source_pk)] = target_pk
+                        if hasattr(existing, "account_id"):
+                            affected_accounts.add(int(existing.account_id))
+                        continue
+
+                    new_row = model_cls(**filtered)
+                    db.add(new_row)
+                    await db.flush()
+                    imported += 1
+                    affected_categories.add(category)
+                    target_pk_field = definition.get("pk_field")
+                    if source_pk is not None and target_pk_field:
+                        target_pk = getattr(new_row, target_pk_field)
+                        category_map[_mapping_key(source_pk)] = target_pk
+                        if group_map is not None:
+                            group_map[_mapping_key(source_pk)] = target_pk
+                    if category == "account_settings":
+                        affected_accounts.add(int(new_row.id))
+                    elif hasattr(new_row, "account_id"):
+                        affected_accounts.add(int(new_row.account_id))
+
+            runtime_categories = {
+                "system_settings",
+                "llm_providers",
+                "command_templates",
+                "plugin_global_configs",
+                "rate_limit_templates",
+                "rate_limit_rules",
+            }
+            if affected_categories & runtime_categories and "Account" in models:
+                account_ids = (await db.execute(select(models["Account"].id))).scalars().all()
+                affected_accounts.update(int(account_id) for account_id in account_ids)
+            await db.commit()
+    except ConfigImportError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        if db is not None:
+            try:
+                await db.rollback()
+            except Exception:  # noqa: BLE001
+                pass
+        raise ConfigImportError(f"配置导入事务失败：{type(exc).__name__}: {exc}", imported=0) from exc
+
+    public_mappings = {
+        category: values
+        for category, values in mappings.items()
+        if category in _EXPORT_DEFS and values
+    }
+    return ImportConfigResponse(
+        imported=imported,
+        skipped=skipped,
+        warnings=warnings,
+        bundle_version=bundle_version,
+        affected_categories=[
+            category for category in _IMPORT_TOPOLOGY if category in affected_categories
+        ],
+        affected_accounts=sorted(affected_accounts),
+        id_mappings=public_mappings,
+    )
+
+
+async def _reload_imported_runtime(account_ids: list[int]) -> tuple[list[int], bool]:
+    if not account_ids:
+        return [], False
+    from ..worker.ipc import (
+        CMD_RELOAD_COMMANDS,
+        CMD_RELOAD_CONFIG,
+        CMD_RELOAD_IGNORED,
+        publish_cmd_with_ack,
+    )
+
+    try:
+        redis = get_redis()
+        semaphore = asyncio.Semaphore(4)
+
+        async def reload_one(account_id: int) -> tuple[int, bool]:
+            confirmed = True
+            async with semaphore:
+                for command in (
+                    CMD_RELOAD_CONFIG,
+                    CMD_RELOAD_COMMANDS,
+                    CMD_RELOAD_IGNORED,
+                ):
+                    confirmed = bool(
+                        await publish_cmd_with_ack(redis, account_id, command)
+                    ) and confirmed
+            return account_id, confirmed
+
+        results = await asyncio.gather(*(reload_one(value) for value in account_ids))
+    except Exception:  # noqa: BLE001
+        return [], True
+    reloaded = [account_id for account_id, confirmed in results if confirmed]
+    restart_required = any(not confirmed for _, confirmed in results)
+    return reloaded, restart_required
 
 
 @router.post("/import-config", response_model=ImportConfigResponse)
@@ -1850,109 +2834,34 @@ async def import_config(
     """从上传的 JSON 文件导入配置。冲突策略：同名/同 ID 跳过并记录。"""
     import json as _json
 
-    from ..db.models import (
-        Account,
-        AccountCommandLink,
-        AccountFeature,
-        CommandTemplate,
-        IgnoredPeer,
-        LLMProvider,
-        NotifyBot,
-        RateLimitRule,
-        RateLimitTemplate,
-        Rule,
-    )
-    from ..db.models.system import SystemSetting
-
-    model_map = {
-        "SystemSetting": SystemSetting,
-        "CommandTemplate": CommandTemplate,
-        "AccountCommandLink": AccountCommandLink,
-        "LLMProvider": LLMProvider,
-        "Rule": Rule,
-        "RateLimitTemplate": RateLimitTemplate,
-        "RateLimitRule": RateLimitRule,
-        "AccountFeature": AccountFeature,
-        "Account": Account,
-        "IgnoredPeer": IgnoredPeer,
-        "NotifyBot": NotifyBot,
-    }
-
     content = await file.read()
+    if len(content) > 10 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="配置包超过 10MB")
     try:
         data = _json.loads(content)
-    except Exception:
-        return ImportConfigResponse(warnings=["上传的文件不是合法的 JSON"])
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="上传的文件不是合法的 JSON") from exc
 
-    meta = data.pop("_meta", {})
-    imported = 0
-    skipped = 0
-    warnings: list[str] = []
+    try:
+        outcome = await _import_config_payload(data)
+    except ConfigImportError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
-    for cat, rows in data.items():
-        defn = _EXPORT_DEFS.get(cat)
-        if not defn or not isinstance(rows, list):
-            if isinstance(rows, dict) and "_error" in rows:
-                warnings.append(f"[{cat}] 导出时出错: {rows['_error']}")
-            continue
-
-        model_cls = model_map.get(defn["model"])
-        if not model_cls:
-            continue
-
-        id_fields = defn["id_fields"]
-        exclude = defn["exclude_fields"]
-        include_sensitive = meta.get("include_sensitive", False)
-        if include_sensitive:
-            exclude = set()
-
-        try:
-            async with AsyncSessionLocal() as db:
-                for row_data in rows:
-                    if not isinstance(row_data, dict):
-                        continue
-                    # 检查是否已存在（按 id_fields 判断冲突）
-                    exists_query = select(model_cls)
-                    for f in id_fields:
-                        if f in row_data:
-                            exists_query = exists_query.where(
-                                getattr(model_cls, f) == row_data[f]
-                            )
-                    existing = (await db.execute(exists_query.limit(1))).scalar_one_or_none()
-                    if existing is not None:
-                        skipped += 1
-                        continue
-
-                    # 过滤排除字段 + 不允许覆盖 id 等自动生成字段
-                    auto_fields = {"id", "created_at", "updated_at"}
-                    filtered = {
-                        k: v for k, v in row_data.items()
-                        if k not in exclude and k not in auto_fields
-                    }
-
-                    # hex 字符串转回 bytes（session_enc）
-                    for k, v in list(filtered.items()):
-                        col_type = getattr(model_cls.__table__.c, k, None)
-                        if col_type and hasattr(col_type.type, "python_type"):
-                            try:
-                                py_type = col_type.type.python_type
-                                if py_type is bytes and isinstance(v, str):
-                                    filtered[k] = bytes.fromhex(v)
-                            except Exception:
-                                pass
-
-                    try:
-                        new_row = model_cls(**filtered)
-                        db.add(new_row)
-                        imported += 1
-                    except Exception as exc:  # noqa: BLE001
-                        warnings.append(f"[{cat}] 插入失败: {str(exc)[:100]}")
-
-                await db.commit()
-        except Exception as exc:  # noqa: BLE001
-            warnings.append(f"[{cat}] 批量导入失败: {str(exc)[:200]}")
-
-    return ImportConfigResponse(imported=imported, skipped=skipped, warnings=warnings)
+    reloaded, restart_required = await _reload_imported_runtime(
+        outcome.affected_accounts
+    )
+    return outcome.model_copy(
+        update={
+            "reloaded_accounts": reloaded,
+            "restart_required": restart_required,
+            "warnings": outcome.warnings
+            + (
+                ["部分 Worker 未确认配置热重载，请重启应用后再继续操作"]
+                if restart_required
+                else []
+            ),
+        }
+    )
 
 
 __all__ = ["router"]

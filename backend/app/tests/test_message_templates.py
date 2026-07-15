@@ -245,3 +245,50 @@ async def test_test_send_rejects_invalid_html(monkeypatch) -> None:
     assert exc_info.value.detail["code"] == "MESSAGE_TEMPLATE_TEST_SEND_INVALID"
     get_bot_config.assert_not_awaited()
     send_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_test_send_records_trace_action(monkeypatch) -> None:
+    monkeypatch.setattr(
+        account_bot_service,
+        "list_bot_users",
+        AsyncMock(
+            return_value=[
+                SimpleNamespace(enabled=True, tg_user_id=12345, last_chat_id=12345),
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        account_bot_service,
+        "get_bot_config",
+        AsyncMock(return_value=SimpleNamespace(bot_token_enc="enc-token")),
+    )
+    monkeypatch.setattr(account_bot_service, "decrypt_bot_token", lambda _row: "bot-token")
+    monkeypatch.setattr(
+        account_bot_service,
+        "send_message",
+        AsyncMock(return_value={"message_id": 321}),
+    )
+    trace = SimpleNamespace(trace_id="evt_message_template_test")
+    record_action = AsyncMock()
+    finish_trace = AsyncMock()
+    monkeypatch.setattr(message_template_service, "start_trace", AsyncMock(return_value=trace))
+    monkeypatch.setattr(message_template_service, "record_action", record_action)
+    monkeypatch.setattr(message_template_service, "finish_trace", finish_trace)
+
+    result = await message_template_service.send_test_message(
+        AsyncMock(),
+        MessageTemplateTestSendRequest(
+            account_id=1,
+            target_chat_id=12345,
+            text="hello",
+            parse_mode="HTML",
+        ),
+    )
+
+    assert result.message_id == 321
+    record_action.assert_awaited_once()
+    assert record_action.await_args.args[0] is trace
+    assert record_action.await_args.args[1]["type"] == "send_message"
+    assert record_action.await_args.kwargs["actual_send_via"] == "account_bot"
+    finish_trace.assert_awaited_once_with(trace, message_template_service.TRACE_STATUS_OK)

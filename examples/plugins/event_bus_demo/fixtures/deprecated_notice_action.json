@@ -1,0 +1,19 @@
+{
+  "source": {
+    "type": "message",
+    "channel": "interaction_bot",
+    "account_id": 1,
+    "message_id": 66
+  },
+  "chat": {"id": -100100200300, "type": "supergroup"},
+  "message": {"chat_id": -100100200300, "message_id": 66, "text": "deprecated notice probe"},
+  "actor": {"user_id": 501, "display_name": "玩家 A"},
+  "sender": {"user_id": 501, "display_name": "玩家 A"},
+  "trigger": {"mode": "deprecated_notice_probe"},
+  "native_raw_meta": {"enabled": false, "reason_code": "native_raw_not_allowed"},
+  "expected_action": {
+    "type": "send_message",
+    "send_via": "bbot_notice",
+    "reason_code": "send_channel_deprecated"
+  }
+}

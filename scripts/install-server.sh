@@ -5,7 +5,7 @@
 # 目标：SSH 到一台干净的 Debian / Ubuntu VPS 后，一条命令完成：
 #   - 安装基础依赖与 Docker Compose v2
 #   - 拉取 TelePilot 仓库
-#   - 生成生产可用 .env（强随机 MASTER_KEY / JWT_SECRET / POSTGRES_PASSWORD）
+#   - 生成生产可用 .env（强随机 MASTER_KEY / JWT_SECRET / UPDATER_TOKEN / POSTGRES_PASSWORD）
 #   - 调用 make prod-up 启动 postgres / redis / web / frontend
 #
 # 可选环境变量：
@@ -325,9 +325,10 @@ create_env() {
   log "生成生产 .env"
   cp .env.example .env
 
-  local master_key jwt_secret pg_password pg_password_url
+  local master_key jwt_secret updater_token pg_password pg_password_url
   master_key="$(random_fernet_key)"
   jwt_secret="$(random_token)"
+  updater_token="$(random_token)"
   pg_password="$(random_password)"
   pg_password_url="$(
     python3 - "$pg_password" <<'PY'
@@ -337,12 +338,12 @@ print(quote(sys.argv[1], safe=""))
 PY
   )"
 
-  python3 - "$master_key" "$jwt_secret" "$pg_password" "$pg_password_url" "$WEB_PORT_PUBLISH" "$COOKIE_SECURE" <<'PY'
+  python3 - "$master_key" "$jwt_secret" "$updater_token" "$pg_password" "$pg_password_url" "$WEB_PORT_PUBLISH" "$COOKIE_SECURE" <<'PY'
 import pathlib
 import re
 import sys
 
-master_key, jwt_secret, pg_password, pg_password_url, web_port, cookie_secure = sys.argv[1:7]
+master_key, jwt_secret, updater_token, pg_password, pg_password_url, web_port, cookie_secure = sys.argv[1:8]
 p = pathlib.Path(".env")
 text = p.read_text()
 
@@ -357,6 +358,7 @@ def put(key: str, value: str) -> None:
 
 put("MASTER_KEY", master_key)
 put("JWT_SECRET", jwt_secret)
+put("UPDATER_TOKEN", updater_token)
 put("POSTGRES_PASSWORD", pg_password)
 put("DATABASE_URL", f"postgresql+asyncpg://telebot:{pg_password_url}@postgres:5432/telebot")
 put("COOKIE_SECURE", cookie_secure.lower())

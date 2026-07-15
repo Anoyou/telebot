@@ -5,12 +5,25 @@ import { useEffect, useState } from "react";
 import { flushSync } from "react-dom";
 import { Outlet, useLocation, useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
+import { MoreHorizontal } from "lucide-react";
 
-import { MOBILE_PRIMARY_NAV, MobileSidebar, Sidebar } from "./Sidebar";
+import {
+  MobileSidebar,
+  Sidebar,
+  mobileMoreNavForAIState,
+  mobilePrimaryNavForAIState,
+} from "./Sidebar";
 import { TopBar } from "./TopBar";
 import { GlobalAlertBar } from "./GlobalAlertBar";
 import { fetchMe } from "@/lib/auth";
+import { getSystemSettings } from "@/api/system";
 import { Spinner } from "@/components/ui/misc";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { cn } from "@/lib/utils";
 
 export function AppShell() {
@@ -19,6 +32,9 @@ export function AppShell() {
   const location = useLocation();
   const navigate = useNavigate();
   const [mobileActivePath, setMobileActivePath] = useState(location.pathname);
+  const pageTransitionKey = location.pathname === "/plugins" || location.pathname.startsWith("/plugins/")
+    ? "/plugins"
+    : location.pathname;
 
   useEffect(() => {
     setMobileActivePath(location.pathname);
@@ -29,6 +45,17 @@ export function AppShell() {
     queryKey: ["auth", "me"],
     queryFn: fetchMe,
   });
+  const settingsQ = useQuery({
+    queryKey: ["system", "settings"],
+    queryFn: getSystemSettings,
+    staleTime: 30_000,
+  });
+  const aiEnabled = settingsQ.data?.ai_enabled ?? true;
+  const mobileNavItems = mobilePrimaryNavForAIState(aiEnabled);
+  const mobileMoreNavItems = mobileMoreNavForAIState(aiEnabled);
+  const mobileMoreActive = mobileMoreNavItems.some((item) =>
+    isMobileNavActive(item.to, item.end, mobileActivePath),
+  );
 
   if (isLoading) {
     return (
@@ -55,8 +82,8 @@ export function AppShell() {
           className="
             app-main
             flex-1 overflow-auto
-            px-4 py-5 md:px-8 md:py-7 xl:px-10
-            pb-[calc(5.75rem+env(safe-area-inset-bottom))]
+            px-4 py-4 md:px-8 md:py-7 xl:px-10
+            pb-[calc(5.25rem+env(safe-area-inset-bottom))]
             sm:pb-[max(1rem,env(safe-area-inset-bottom))]
             pl-[max(1rem,env(safe-area-inset-left))]
             pr-[max(1rem,env(safe-area-inset-right))]
@@ -64,7 +91,7 @@ export function AppShell() {
           "
         >
           <div
-            key={location.pathname}
+            key={pageTransitionKey}
             className="min-h-full w-full animate-page-enter"
           >
             <Outlet />
@@ -72,16 +99,16 @@ export function AppShell() {
         </main>
         <nav
           className="
-            fixed inset-x-0 bottom-0 z-40 sm:hidden
-            border-t border-border/70 bg-card/92
-            pb-[env(safe-area-inset-bottom)]
-            pl-[env(safe-area-inset-left)]
-            pr-[env(safe-area-inset-right)]
-            shadow-[0_-12px_32px_hsl(220_20%_20%/0.08)]
+            pointer-events-none fixed inset-x-0 z-40 sm:hidden
+            bottom-[env(safe-area-inset-bottom)]
+            px-[max(0.75rem,env(safe-area-inset-left))]
           "
         >
-          <div className="liquid-bottom-nav mx-auto grid h-16 w-full max-w-md grid-cols-5 gap-1 px-2 py-1.5">
-            {MOBILE_PRIMARY_NAV.map((item) => {
+          <div
+            className="liquid-bottom-nav pointer-events-auto mx-auto grid h-[3.75rem] w-full max-w-sm gap-1 px-2 py-2"
+            style={{ gridTemplateColumns: `repeat(${mobileNavItems.length + 1}, minmax(0, 1fr))` }}
+          >
+            {mobileNavItems.map((item) => {
               const active = isMobileNavActive(item.to, item.end, mobileActivePath);
               const activate = () => {
                 flushSync(() => setMobileActivePath(item.to));
@@ -100,7 +127,7 @@ export function AppShell() {
                   aria-current={active ? "page" : undefined}
                   data-active={active ? "true" : undefined}
                   className={cn(
-                    "liquid-nav-item flex min-w-0 flex-col items-center justify-center gap-0.5 rounded-2xl text-[10px] font-semibold text-muted-foreground transition-none",
+                    "liquid-nav-item flex min-w-0 flex-col items-center justify-center gap-0.5 rounded-full text-[10px] font-semibold text-muted-foreground transition-none",
                     active && "liquid-nav-item-active",
                   )}
                   style={{
@@ -114,6 +141,51 @@ export function AppShell() {
                 </button>
               );
             })}
+            <DropdownMenu modal={false}>
+              <DropdownMenuTrigger asChild>
+                <button
+                  type="button"
+                  aria-label="更多导航"
+                  data-active={mobileMoreActive ? "true" : undefined}
+                  className={cn(
+                    "liquid-nav-item flex min-w-0 flex-col items-center justify-center gap-0.5 rounded-full text-[10px] font-semibold text-muted-foreground transition-none",
+                    mobileMoreActive && "liquid-nav-item-active",
+                  )}
+                  style={{
+                    WebkitTapHighlightColor: "transparent",
+                    backgroundColor: mobileMoreActive ? "hsl(var(--foreground))" : undefined,
+                    color: mobileMoreActive ? "hsl(var(--background))" : undefined,
+                  }}
+                >
+                  <MoreHorizontal className="h-4 w-4 shrink-0" />
+                  <span className="max-w-full truncate">更多</span>
+                </button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent
+                side="top"
+                align="end"
+                sideOffset={12}
+                collisionPadding={12}
+                className="mb-2 w-56 p-1.5"
+              >
+                {mobileMoreNavItems.map((item) => {
+                  const active = isMobileNavActive(item.to, item.end, mobileActivePath);
+                  return (
+                    <DropdownMenuItem
+                      key={item.to}
+                      onClick={() => {
+                        flushSync(() => setMobileActivePath(item.to));
+                        navigate(item.to);
+                      }}
+                      className={cn("min-h-11 gap-3 rounded-lg px-3 text-sm", active && "bg-accent text-accent-foreground")}
+                    >
+                      <item.icon className="h-4 w-4 shrink-0" />
+                      <span className="truncate">{item.label}</span>
+                    </DropdownMenuItem>
+                  );
+                })}
+              </DropdownMenuContent>
+            </DropdownMenu>
           </div>
         </nav>
       </div>

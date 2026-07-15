@@ -45,6 +45,24 @@ def test_auto_migrate_default_false() -> None:
     assert settings.auto_migrate_on_startup is False
 
 
+@pytest.mark.parametrize(
+    "key",
+    [
+        "account_webhooks:1",
+        "account_bot_transfer_notice:1",
+        "account_bot:interaction_runtime_state:1",
+        "account_bot:transfer_test_runtime_state:1",
+        "auth_login_recovery_code",
+    ],
+)
+def test_sensitive_system_settings_are_excluded_from_normal_export(key: str) -> None:
+    assert sh._system_setting_safe_for_export(key) is False
+
+
+def test_regular_system_settings_remain_exportable() -> None:
+    assert sh._system_setting_safe_for_export("command_prefix") is True
+
+
 # ════════════════════════════════════════════════════════════
 # 2) DB 探测
 # ════════════════════════════════════════════════════════════
@@ -275,6 +293,11 @@ async def test_probe_workers_aggregates_by_status() -> None:
             "app.worker.supervisor.get_worker_runtime_snapshot",
             return_value=runtime_rows,
         ),
+        patch.object(sh.settings, "db_pool_size", 2),
+        patch.object(sh.settings, "db_max_overflow", 0),
+        patch.object(sh.settings, "db_pool_size_worker", 1),
+        patch.object(sh.settings, "db_max_overflow_worker", 0),
+        patch.dict(sh.os.environ, {"POSTGRES_MAX_CONNECTIONS": "10"}),
     ):
         out = await _probe_workers()
 
@@ -285,6 +308,9 @@ async def test_probe_workers_aggregates_by_status() -> None:
     assert out.runtime_desired_running == 2
     assert out.runtime_desired_running_alive == 1
     assert out.runtime_failing == 1
+    assert out.db_connection_budget == 10
+    assert out.db_connection_estimate == 4
+    assert out.db_capacity_warning is None
 
 
 # ════════════════════════════════════════════════════════════
@@ -327,8 +353,8 @@ def test_run_git_without_worktree_returns_deploy_hint(monkeypatch) -> None:
     assert "git root not found" not in err
 
 
-def test_classify_changed_files_marks_full_update_and_backup() -> None:
-    """更新计划分类应识别 full_update 与 alembic 备份风险。"""
+def test_classify_changed_files_marks_service_update_and_backup() -> None:
+    """迁移与前端变化应保持服务级更新，只为迁移要求备份。"""
 
     components, requires_full_update, requires_backup = sh._classify_changed_files(
         [
@@ -338,10 +364,10 @@ def test_classify_changed_files_marks_full_update_and_backup() -> None:
         ]
     )
 
-    assert components[0] == "full_update"
+    assert components[0] == "migration"
     assert "backend" in components
     assert "frontend" in components
-    assert requires_full_update is True
+    assert requires_full_update is False
     assert requires_backup is True
 
 
@@ -369,16 +395,149 @@ def test_classify_changed_files_frontend_bundled_docs() -> None:
     assert requires_backup is False
 
 
-def test_classify_changed_files_makefile_requires_full_update() -> None:
-    """Makefile / 部署脚本变更应回退完整更新。"""
+def test_classify_changed_files_makefile_does_not_restart_runtime() -> None:
+    """Makefile / 安装脚本变化不应重启已运行的生产服务。"""
 
     components, requires_full_update, requires_backup = sh._classify_changed_files(
         ["Makefile", "scripts/bootstrap.sh"]
     )
 
-    assert components[0] == "full_update"
-    assert requires_full_update is True
+    assert components == ["docs_only"]
+    assert requires_full_update is False
     assert requires_backup is False
+
+
+def test_default_update_branch_prefers_env(monkeypatch) -> None:
+    """更新目标分支优先读环境变量，避免生产候选分支被写死到 main。"""
+
+    monkeypatch.setenv("TELEPILOT_UPDATE_REMOTE", "origin")
+    monkeypatch.setenv("TELEPILOT_UPDATE_BRANCH", "codex/0.33-interaction-framework")
+
+    assert sh._default_update_remote_branch() == ("origin", "codex/0.33-interaction-framework")
+
+
+@pytest.mark.asyncio
+async def test_resolve_update_request_ignores_invalid_saved_target(monkeypatch) -> None:
+    """历史脏数据不能绕过当前校验进入实际 Git 更新参数。"""
+
+    fake_session = AsyncMock()
+    fake_session.get = AsyncMock(
+        return_value=SimpleNamespace(
+            value={"remote": "--upload-pack=sh", "branch": "../main"},
+        )
+    )
+    fake_ctx = AsyncMock()
+    fake_ctx.__aenter__.return_value = fake_session
+    monkeypatch.setattr(sh, "_default_update_remote_branch", lambda: ("origin", "main"))
+    monkeypatch.setattr(sh, "AsyncSessionLocal", lambda: fake_ctx)
+
+    assert await sh._resolve_update_request(None) == ("origin", "main", False)
+
+
+@pytest.mark.asyncio
+async def test_check_update_uses_internal_updater(monkeypatch) -> None:
+    """生产容器内有 updater 时，检查更新应由 updater 读取宿主机工作树。"""
+
+    monkeypatch.setenv("TELEPILOT_UPDATE_BRANCH", "codex/update")
+    monkeypatch.setattr(
+        sh,
+        "_detect_runtime_mode",
+        lambda: (sh.RUNTIME_PROD_CONTAINER_WITH_UPDATER, "http://updater:8765", None),
+    )
+    monkeypatch.setattr(
+        sh,
+        "_updater_request",
+        lambda path, payload=None, timeout=30: {
+            "ok": True,
+            "has_update": True,
+            "current_commit": "aaaa1111aaaa",
+            "remote_commit": "bbbb2222bbbb",
+            "ahead": 2,
+            "changed_files": ["backend/app/api/system_health.py"],
+            "components": ["backend"],
+            "requires_full_update": False,
+            "requires_backup": False,
+        },
+    )
+
+    out = await sh.check_update(_user=None)  # type: ignore[arg-type]
+
+    assert out.has_update is True
+    assert out.branch == "codex/update"
+    assert out.runtime_mode == sh.RUNTIME_PROD_CONTAINER_WITH_UPDATER
+    assert out.action_required == "backend"
+    assert out.can_apply is True
+    assert out.can_check is True
+
+
+@pytest.mark.asyncio
+async def test_update_target_options_use_internal_updater(monkeypatch) -> None:
+    monkeypatch.setattr(
+        sh,
+        "_detect_runtime_mode",
+        lambda: (sh.RUNTIME_PROD_CONTAINER_WITH_UPDATER, "http://updater:8765", None),
+    )
+    monkeypatch.setattr(
+        sh,
+        "_updater_request",
+        lambda path, payload=None, timeout=30: {
+            "ok": True,
+            "remote": "origin",
+            "remotes": ["origin", "backup"],
+            "branches": ["main", "codex/update"],
+        },
+    )
+
+    out = await sh.get_update_target_options(_user=None, remote="origin")  # type: ignore[arg-type]
+
+    assert out.ok is True
+    assert out.remotes == ["origin", "backup"]
+    assert out.branches == ["main", "codex/update"]
+
+
+@pytest.mark.asyncio
+async def test_check_update_manual_container_reports_cannot_check(monkeypatch) -> None:
+    """容器内无 updater / 无工作树时应诚实返回"无法自动检查"，不再无条件谎报有更新。"""
+
+    monkeypatch.setenv("TELEPILOT_UPDATE_BRANCH", "main")
+    monkeypatch.setattr(
+        sh,
+        "_detect_runtime_mode",
+        lambda: (sh.RUNTIME_PROD_CONTAINER_MANUAL, None, None),
+    )
+
+    out = await sh.check_update(_user=None)  # type: ignore[arg-type]
+
+    assert out.runtime_mode == sh.RUNTIME_PROD_CONTAINER_MANUAL
+    assert out.has_update is False
+    assert out.can_check is False
+    assert out.action_required == "manual"
+    assert out.manual_command  # 保留"在宿主机执行"的命令提示
+    assert out.error is None
+
+
+@pytest.mark.asyncio
+async def test_pull_update_starts_internal_updater_job(monkeypatch) -> None:
+    """应用更新应创建后台 job，避免 HTTP 请求被 docker compose 重启打断。"""
+
+    monkeypatch.setenv("TELEPILOT_UPDATE_BRANCH", "codex/update")
+    monkeypatch.setattr(
+        sh,
+        "_detect_runtime_mode",
+        lambda: (sh.RUNTIME_PROD_CONTAINER_WITH_UPDATER, "http://updater:8765", None),
+    )
+    monkeypatch.setattr(
+        sh,
+        "_updater_request",
+        lambda path, payload=None, timeout=30: {"ok": True, "job_id": "job123", "status": "queued"},
+    )
+
+    out = await sh.pull_update(_user=None)  # type: ignore[arg-type]
+
+    assert out.success is True
+    assert out.job_id == "job123"
+    assert out.status == "queued"
+    assert out.branch == "codex/update"
 
 
 @pytest.mark.asyncio
@@ -448,6 +607,20 @@ def test_read_process_stats_falls_back_to_ps(monkeypatch) -> None:
     out = sh._read_process_stats([456])
 
     assert out == {456: (1.25, 64.0, None)}
+
+
+def test_read_app_uptime_seconds_uses_process_start(monkeypatch) -> None:
+    """项目运行时间应按当前 TelePilot 后端进程启动时间计算，而不是宿主机启动时间。"""
+
+    class _FakeProcess:
+        def create_time(self):
+            return 100.0
+
+    fake_psutil = SimpleNamespace(Process=lambda _pid: _FakeProcess())
+    monkeypatch.setitem(sys.modules, "psutil", fake_psutil)
+    monkeypatch.setattr(sh.time, "time", lambda: 166.8)
+
+    assert sh._read_app_uptime_seconds() == 66
 
 
 def test_sum_project_resource_includes_main_workers_and_children() -> None:

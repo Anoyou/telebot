@@ -10,6 +10,7 @@
 
 安全约束：
 - zip 体积上限 ``settings.plugin_zip_max_bytes``
+- zip 成员数、单文件大小、总解压大小与压缩比上限
 - 拒绝路径穿越（绝对路径、含 ``..`` 的成员）
 - 拒绝与 builtin feature key 冲突
 - 解压后任意单个成员失败都视作整体失败（解压前先校验完所有 names）
@@ -29,21 +30,27 @@ from pathlib import Path
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..db.models.feature import BUILTIN_FEATURES
+from ..db.models.feature import BUILTIN_FEATURES, AccountFeature, Feature
 from ..db.models.plugin import (
+    PLUGIN_SOURCE_OFFICIAL,
     PLUGIN_SOURCE_ZIP,
     PLUGIN_TRUST_COMMUNITY,
     PLUGIN_TRUST_VERIFIED,
     InstalledPlugin,
 )
+from ..db.models.plugin_global_config import PluginGlobalConfig
 from ..settings import settings
 from ..worker.plugins.manifest import Manifest
 from .remote_plugin_service import (
+    _attach_legacy_plugin_sqlite_links,
+    _relocate_legacy_plugin_sqlite,
     lint_plugin_metadata_files,
     upsert_installed_plugin,
 )
 
 log = logging.getLogger(__name__)
+# ``official`` 仅保留给旧安装记录的启停/卸载兼容；新推荐入口写入 repo。
+_PACKAGE_MANAGED_SOURCES = (PLUGIN_SOURCE_ZIP, PLUGIN_SOURCE_OFFICIAL)
 
 
 # ─────────────────────────────────────────────────────
@@ -116,7 +123,7 @@ def parse_zip(zip_bytes: bytes) -> ParsedPlugin:
 
         try:
             with zipfile.ZipFile(BytesIO(zip_bytes)) as zf:
-                # 1) 路径穿越校验：拒绝绝对路径与含 ".." 的成员
+                # 1) 在解压前完成结构与资源预算校验。
                 _validate_zip_members(zf)
                 zf.extractall(extract_dir)
         except zipfile.BadZipFile as exc:
@@ -166,8 +173,25 @@ def parse_zip(zip_bytes: bytes) -> ParsedPlugin:
 
 
 def _validate_zip_members(zf: zipfile.ZipFile) -> None:
-    """禁止绝对路径 / `..` 段，防止 zip slip。"""
-    for name in zf.namelist():
+    """在解压前拒绝路径穿越、加密成员和压缩炸弹。"""
+    members = zf.infolist()
+    max_members = max(1, int(settings.plugin_zip_max_members))
+    if len(members) > max_members:
+        raise InvalidZipStructure(
+            "ZIP_TOO_MANY_MEMBERS",
+            f"zip 成员数 {len(members)} 超出上限 {max_members}",
+        )
+
+    total_size = 0
+    max_member_size = max(1, int(settings.plugin_zip_max_member_bytes))
+    max_total_size = max(max_member_size, int(settings.plugin_zip_max_uncompressed_bytes))
+    max_ratio = max(1, int(settings.plugin_zip_max_compression_ratio))
+    seen: set[str] = set()
+    for info in members:
+        name = info.filename
+        if name in seen:
+            raise InvalidZipStructure("ZIP_DUPLICATE_MEMBER", f"zip 包含重复成员: {name!r}")
+        seen.add(name)
         # 拒绝绝对路径
         if name.startswith("/") or (len(name) >= 2 and name[1] == ":"):
             raise InvalidZipStructure(
@@ -179,6 +203,27 @@ def _validate_zip_members(zf: zipfile.ZipFile) -> None:
             raise InvalidZipStructure(
                 "ZIP_PATH_TRAVERSAL",
                 f"zip 不允许 .. 路径穿越: {name!r}",
+            )
+        if info.flag_bits & 0x1:
+            raise InvalidZipStructure("ZIP_ENCRYPTED_MEMBER", f"zip 不允许加密成员: {name!r}")
+        if info.is_dir():
+            continue
+        if info.file_size > max_member_size:
+            raise ZipTooLarge(
+                "ZIP_MEMBER_TOO_LARGE",
+                f"zip 成员 {name!r} 解压后超出 {max_member_size} bytes 上限",
+            )
+        total_size += int(info.file_size)
+        if total_size > max_total_size:
+            raise ZipTooLarge(
+                "ZIP_UNCOMPRESSED_TOO_LARGE",
+                f"zip 解压后总大小超出 {max_total_size} bytes 上限",
+            )
+        compressed_size = max(1, int(info.compress_size))
+        if info.file_size > 1024 and info.file_size / compressed_size > max_ratio:
+            raise ZipTooLarge(
+                "ZIP_COMPRESSION_RATIO_TOO_HIGH",
+                f"zip 成员 {name!r} 压缩比超过 {max_ratio}:1 上限",
             )
 
 
@@ -297,18 +342,36 @@ async def install_zip(
 ) -> InstalledPlugin:
     """完整的 zip 安装流程：解析 → 验签 → 落盘 → 写表。
 
-    存在同名 ``key`` 时视作"升级"：写库 UPDATE 同时覆盖目录；
-    保留旧的 ``enabled`` 状态，但若新签名失败强制 enabled=False（管理员需手动启用）。
+    验签策略随 ``settings.plugin_pubkey`` 分两路（与本地导入通道 ``install_local_plugin`` 对齐）：
+    - 配了公钥：强制验签，签名缺失或校验失败一律拒绝；通过则 ``signature_ok=True``（trust=verified）。
+    - 没配公钥：仅当 ``settings.plugin_allow_new_unsigned_plugins`` 为 True 才放行新未签名包，
+      记 ``signature_ok=None``（trust=community）；历史 NULL 插件加载策略由独立开关控制。
+
+    存在同名 ``key`` 时视作"升级"：写库 UPDATE 同时覆盖目录，保留旧的 ``enabled`` 状态。
     """
-    sig_ok = verify_signature(zip_bytes, signature, settings.plugin_pubkey or None)
-    # 安全要求：任何未签名/验签失败的包都不进入解压与 manifest 执行阶段。
-    if sig_ok is not True:
+    # 安全要求：任何被判为不可信的包都必须在解压 / 执行 manifest 之前拒绝。
+    pubkey = settings.plugin_pubkey or None
+    sig_ok = verify_signature(zip_bytes, signature, pubkey)
+    if pubkey is not None:
+        # 配了公钥 → 强制验签：缺签名(None) / 验签失败(False) 都拒。
+        if sig_ok is not True:
+            raise SignatureFailed(
+                "SIGNATURE_FAILED",
+                "插件签名缺失或校验失败，已拒绝安装",
+            )
+    elif not settings.plugin_allow_new_unsigned_plugins:
+        # 历史 NULL 插件兼容与新上传策略分离；新 ZIP 默认必须显式允许免签。
         raise SignatureFailed(
             "SIGNATURE_FAILED",
-            "插件签名缺失或校验失败，已拒绝安装",
+            "未配置插件公钥且未显式允许新未签名插件安装，已拒绝安装",
         )
+    # 走到这里：sig_ok 为 True（验签通过）或 None（免签放行）。
 
     parsed = parse_zip(zip_bytes)
+    staging: Path | None = None
+    backup: Path | None = None
+    final_dir: Path | None = None
+    swapped = False
     try:
         # 路径计算
         installed_root = settings.plugins_installed_path
@@ -325,14 +388,23 @@ async def install_zip(
         existing = await db.get(InstalledPlugin, parsed.manifest.key)
         was_enabled = bool(existing.enabled) if existing is not None else False
 
-        # 删除旧目录后把临时目录搬过去
-        if final_dir.exists():
-            shutil.rmtree(final_dir)
-        shutil.move(str(parsed.extract_dir), str(final_dir))
-        # parsed.extract_dir 已被 move 走，不必再 rmtree
+        staging = final_dir.with_name(f"{final_dir.name}.installing")
+        backup = final_dir.with_name(f"{final_dir.name}.bak-zip")
+        if staging.exists():
+            shutil.rmtree(staging, ignore_errors=True)
+        if backup.exists():
+            shutil.rmtree(backup, ignore_errors=True)
+        shutil.move(str(parsed.extract_dir), str(staging))
 
-        # 计算最终 enabled：sig_ok=False 时强制 false
-        final_enabled = was_enabled and (sig_ok is not False)
+        legacy_sqlite_names = _relocate_legacy_plugin_sqlite(final_dir, parsed.manifest.key)
+        if final_dir.exists():
+            final_dir.rename(backup)
+        staging.rename(final_dir)
+        swapped = True
+        _attach_legacy_plugin_sqlite_links(final_dir, parsed.manifest.key, legacy_sqlite_names)
+
+        # 升级保留旧 enabled；验签失败的包已在上面拒绝，走到这里只有验签通过或免签放行
+        final_enabled = was_enabled
 
         manifest_json = parsed.manifest.to_dict()
         lint_warnings = lint_plugin_metadata_files(final_dir)
@@ -352,20 +424,44 @@ async def install_zip(
             lint_warnings=lint_warnings,
         )
         await db.flush()
+        if backup.exists():
+            shutil.rmtree(backup, ignore_errors=True)
         return row
     except Exception:
-        # 任何失败都清理临时目录（如果还在）
+        if staging is not None and staging.exists():
+            shutil.rmtree(staging, ignore_errors=True)
+        if swapped and final_dir is not None and final_dir.exists():
+            shutil.rmtree(final_dir, ignore_errors=True)
+        if backup is not None and backup.exists() and final_dir is not None:
+            backup.rename(final_dir)
         if parsed.extract_dir.exists():
             shutil.rmtree(parsed.extract_dir, ignore_errors=True)
         raise
 
 
 async def uninstall(db: AsyncSession, key: str) -> bool:
-    """卸载指定 key：删表行 + 删目录。返回 True 表示真删了一行。"""
+    """卸载指定 key：删表行 + 删目录 + 清理功能矩阵残留。"""
     row = await db.get(InstalledPlugin, key)
-    if row is None or row.source != PLUGIN_SOURCE_ZIP:
+    if row is None or row.source not in _PACKAGE_MANAGED_SOURCES:
         return False
     target = Path(row.installed_path or settings.plugins_installed_path / key)
+
+    afs = (
+        await db.execute(
+            select(AccountFeature).where(AccountFeature.feature_key == key)
+        )
+    ).scalars().all()
+    for af in afs:
+        await db.delete(af)
+
+    global_config = await db.get(PluginGlobalConfig, key)
+    if global_config is not None:
+        await db.delete(global_config)
+
+    feat = await db.get(Feature, key)
+    if feat is not None and not bool(feat.is_builtin):
+        await db.delete(feat)
+
     await db.delete(row)
     await db.flush()
     # 删目录失败不阻塞 DB 提交（但写日志方便排查）
@@ -380,7 +476,7 @@ async def uninstall(db: AsyncSession, key: str) -> bool:
 async def set_enabled(db: AsyncSession, key: str, enabled: bool) -> InstalledPlugin:
     """设置 enabled 标志；调用方负责后续向 worker 广播 reload_config。"""
     row = await db.get(InstalledPlugin, key)
-    if row is None or row.source != PLUGIN_SOURCE_ZIP:
+    if row is None or row.source not in _PACKAGE_MANAGED_SOURCES:
         raise PluginInstallError("PLUGIN_NOT_FOUND", f"插件不存在: {key}")
     if enabled and row.signature_ok is False:
         # 签名失败时不允许直接 enable；前端要显式"我知道风险"再调，会先把 signature_ok 置 None
@@ -394,11 +490,11 @@ async def set_enabled(db: AsyncSession, key: str, enabled: bool) -> InstalledPlu
 
 
 async def list_installed(db: AsyncSession) -> list[InstalledPlugin]:
-    """列出所有已安装的第三方插件，按 key 字典序。"""
+    """列出 zip 与旧 official 安装包，按 key 字典序。"""
     rows = (
         await db.execute(
             select(InstalledPlugin)
-            .where(InstalledPlugin.source == PLUGIN_SOURCE_ZIP)
+            .where(InstalledPlugin.source.in_(_PACKAGE_MANAGED_SOURCES))
             .order_by(InstalledPlugin.key)
         )
     ).scalars().all()

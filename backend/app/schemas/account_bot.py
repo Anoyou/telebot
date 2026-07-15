@@ -8,9 +8,11 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from ..account_bot_defaults import (
+    DEFAULT_DEBIT_NOTICE_TEMPLATE,
     DEFAULT_INTERACTION_DISABLED_MESSAGE,
     DEFAULT_INTERACTION_QUERY_COMMANDS,
     DEFAULT_INTERACTION_QUERY_EMPTY_MESSAGE,
+    DEFAULT_INTERACTION_QUERY_ITEM_TEMPLATE,
     DEFAULT_INTERACTION_QUERY_RESPONSE_TEMPLATE,
     DEFAULT_INTERACTION_RESPONSE_TEMPLATE,
     DEFAULT_TRANSFER_NOTICE_TEMPLATE,
@@ -23,7 +25,7 @@ InteractionAmountMatchMode = Literal["eq", "gte"]
 InteractionConcurrency = Literal["chat", "user", "none"]
 InteractionParticipantPolicy = Literal["open_race", "solo_owner", "paid_pool", "notify_only"]
 InteractionEventType = Literal["payment_confirmed", "keyword", "message", "callback_query", "session_close"]
-InteractionSendVia = Literal["interaction_bot", "userbot_reply", "bbot_notice"]
+InteractionSendVia = Literal["interaction_bot", "userbot_reply"]
 
 
 class AccountBotInteractionEnvelopeSource(BaseModel):
@@ -85,10 +87,27 @@ class AccountBotInteractionAction(BaseModel):
     type: str = Field(max_length=64)
     text: str | None = Field(default=None, max_length=4000)
     send_via: InteractionSendVia | None = None
+    send_via_options: list[str] | None = None
+    channel: Any | None = None
+    channel_selector: Any | None = None
+    chat_id: int | None = None
     reply_to_message_id: int | None = None
     reply_markup: dict[str, Any] | None = None
     settlement: AccountBotInteractionSettlement | None = None
     data: dict[str, Any] = Field(default_factory=dict)
+
+
+class AccountBotInteractionDebugSnapshot(BaseModel):
+    ts: float | None = None
+    stage: str | None = None
+    chat_id: int | None = None
+    message_id: int | None = None
+    update_id: int | None = None
+    payload: dict[str, Any] = Field(default_factory=dict)
+    actions: list[dict[str, Any]] = Field(default_factory=list)
+    guarded_actions: list[dict[str, Any]] = Field(default_factory=list)
+    warnings: list[dict[str, Any]] = Field(default_factory=list)
+    error: str | None = None
 
 
 class AccountBotRemotePluginPolicy(BaseModel):
@@ -283,8 +302,12 @@ class AccountBotInteractionConfig(BaseModel):
     interaction_runtime_status: Literal["running", "stopped"] = "stopped"
     interaction_last_update_id: int | None = None
     interaction_last_error: str | None = None
+    polling_dlq_count: int = 0
+    interaction_debug: AccountBotInteractionDebugSnapshot = Field(default_factory=AccountBotInteractionDebugSnapshot)
     trusted_bot_id: int | None = None
+    trusted_bot_ids: list[int] = Field(default_factory=list, max_length=50)
     transfer_bot_id: int | None = None
+    reply_chain_verification_enabled: bool = True
     transfer_bot_token: str | None = Field(default=None, min_length=10, max_length=256)
     clear_transfer_bot_token: bool = False
     has_transfer_bot_token: bool = False
@@ -315,6 +338,10 @@ class AccountBotInteractionConfig(BaseModel):
         default=DEFAULT_INTERACTION_QUERY_RESPONSE_TEMPLATE,
         max_length=2000,
     )
+    query_item_template: str = Field(
+        default=DEFAULT_INTERACTION_QUERY_ITEM_TEMPLATE,
+        max_length=1000,
+    )
     query_empty_message: str = Field(
         default=DEFAULT_INTERACTION_QUERY_EMPTY_MESSAGE,
         max_length=500,
@@ -328,6 +355,10 @@ class AccountBotInteractionConfig(BaseModel):
     )
     transfer_notice_template: str = Field(
         default=DEFAULT_TRANSFER_NOTICE_TEMPLATE,
+        max_length=1000,
+    )
+    debit_notice_template: str = Field(
+        default=DEFAULT_DEBIT_NOTICE_TEMPLATE,
         max_length=1000,
     )
     rules: list[AccountBotInteractionRule] = Field(default_factory=list, max_length=20)
@@ -353,7 +384,7 @@ class AccountBotInteractionConfig(BaseModel):
             raise ValueError("不能包含换行")
         return value or None
 
-    @field_validator("trigger_text", "query_response_template", "query_empty_message", "response_template", "transfer_notice_template")
+    @field_validator("trigger_text", "query_response_template", "query_item_template", "query_empty_message", "response_template", "transfer_notice_template", "debit_notice_template")
     @classmethod
     def _trim_required_text(cls, v: str) -> str:
         value = str(v or "").strip()
@@ -378,6 +409,36 @@ class AccountBotInteractionConfig(BaseModel):
 
 
 AccountBotTransferNoticeConfig = AccountBotInteractionConfig
+
+
+class AccountBotInteractionCompositePluginConfig(BaseModel):
+    """单次复合保存中的一项账号级插件配置。"""
+
+    plugin_key: str = Field(min_length=1, max_length=128)
+    config: dict[str, Any] = Field(default_factory=dict)
+
+
+class AccountBotInteractionCompositeSaveRequest(BaseModel):
+    """交互 Bot 规则 + 相关插件配置的原子保存请求。"""
+
+    interaction: AccountBotInteractionConfig
+    plugin_configs: list[AccountBotInteractionCompositePluginConfig] = Field(
+        default_factory=list,
+        max_length=50,
+    )
+
+
+class AccountBotInteractionCompositePluginSummary(BaseModel):
+    plugin_key: str
+    config_keys: list[str] = Field(default_factory=list)
+    enabled: bool = False
+
+
+class AccountBotInteractionCompositeSaveResponse(BaseModel):
+    """复合保存结果：交互配置 + 各插件最终摘要。"""
+
+    interaction: AccountBotInteractionConfig
+    plugins: list[AccountBotInteractionCompositePluginSummary] = Field(default_factory=list)
 
 
 class AccountBotRuntimeResponse(BaseModel):

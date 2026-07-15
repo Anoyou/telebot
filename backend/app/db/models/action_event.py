@@ -1,0 +1,109 @@
+"""Structured action ledger for plugin/userbot delivery results."""
+
+from __future__ import annotations
+
+from datetime import datetime
+from typing import Any
+
+from sqlalchemy import JSON, BigInteger, DateTime, ForeignKey, Index, Integer, String, Text, func, text
+from sqlalchemy.orm import Mapped, mapped_column
+
+from ..base import Base
+
+ACTION_EVENT_STATUS_PENDING = "PENDING"
+ACTION_EVENT_STATUS_OK = "OK"
+ACTION_EVENT_STATUS_FAILED = "FAILED"
+ACTION_EVENT_STATUS_DRY_RUN = "DRY_RUN"
+ACTION_EVENT_STATUS_COMPENSATED = "COMPENSATED"
+ACTION_EVENT_STATUSES = {
+    ACTION_EVENT_STATUS_PENDING,
+    ACTION_EVENT_STATUS_OK,
+    ACTION_EVENT_STATUS_FAILED,
+    ACTION_EVENT_STATUS_DRY_RUN,
+    ACTION_EVENT_STATUS_COMPENSATED,
+}
+
+# 可计入资金台账的 payout 状态（与 ledger LEDGER_SUMMARY_STATUSES 对齐）。
+ACTION_EVENT_COUNTABLE_PAYOUT_STATUSES = frozenset(
+    {ACTION_EVENT_STATUS_OK, ACTION_EVENT_STATUS_COMPENSATED}
+)
+
+
+class ActionEvent(Base):
+    """Append-only action result event.
+
+    This is intentionally separate from ``EventAction``: traces describe the
+    request lifecycle, while this table is a structured action ledger consumed
+    by replay/debug/ledger surfaces.
+    """
+
+    __tablename__ = "action_event"
+
+    id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        primary_key=True,
+        autoincrement=True,
+    )
+    account_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("account.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    channel: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    session_key: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    plugin_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    entry_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    action_type: Mapped[str] = mapped_column(String(80), nullable=False)
+    params_summary: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    error_code: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    error_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Durable source identity for at-least-once inbound events (for example a
+    # Telegram update id). The account/channel namespace prevents cross-source
+    # collisions while allowing replay to return the original ledger row.
+    source_event_key: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    # 可索引幂等键：可计账 payout（OK/COMPENSATED）在 DB 层 partial unique（见 alembic 0038）。
+    payout_key: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    __table_args__ = (
+        Index("ix_action_event_account_created", "account_id", "created_at"),
+        Index("ix_action_event_plugin_created", "account_id", "plugin_key", "created_at"),
+        Index("ix_action_event_status_created", "status", "created_at"),
+        Index("ix_action_event_payout_key", "payout_key"),
+        Index("ix_action_event_source_event_key", "source_event_key"),
+        # Partial unique：同一账号内的 payout_key 在可计账状态下至多一行。
+        Index(
+            "uq_action_event_countable_payout_key",
+            "account_id",
+            "payout_key",
+            unique=True,
+            sqlite_where=text(
+                "payout_key IS NOT NULL AND action_type = 'payout' AND status IN ('OK', 'COMPENSATED')"
+            ),
+            postgresql_where=text(
+                "payout_key IS NOT NULL AND action_type = 'payout' AND status IN ('OK', 'COMPENSATED')"
+            ),
+        ),
+        Index(
+            "uq_action_event_account_channel_source",
+            "account_id",
+            "channel",
+            "source_event_key",
+            unique=True,
+            sqlite_where=text("source_event_key IS NOT NULL"),
+            postgresql_where=text("source_event_key IS NOT NULL"),
+        ),
+    )
+
+
+__all__ = [
+    "ACTION_EVENT_COUNTABLE_PAYOUT_STATUSES",
+    "ACTION_EVENT_STATUS_COMPENSATED",
+    "ACTION_EVENT_STATUS_DRY_RUN",
+    "ACTION_EVENT_STATUS_FAILED",
+    "ACTION_EVENT_STATUS_OK",
+    "ACTION_EVENT_STATUS_PENDING",
+    "ACTION_EVENT_STATUSES",
+    "ActionEvent",
+]

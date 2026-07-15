@@ -9,7 +9,7 @@
 #   make nuke        彻底清理（删数据 + venv + node_modules + .env）
 #   make help        全部命令清单
 
-.PHONY: help up down restart logs status nuke bootstrap \
+.PHONY: help up down restart logs status nuke bootstrap init-prod-env auth-recovery \
         dev-up dev-down dev-logs install migrate makemigration backend frontend \
         test lint codegen build prod-build prod-up prod-update prod-down backup clean
 
@@ -27,8 +27,10 @@ help:
 	@echo "  make logs be|fe|db 单独看某个组件日志"
 	@echo "  make status        四组件状态总览"
 	@echo "  make prod-up       一键生产部署（纯 docker compose 4 容器）"
+	@echo "  make init-prod-env 生成生产 .env（随机密钥 + 数据库密码）"
 	@echo "  make prod-update   增量更新生产栈（按变更重建必要服务）"
 	@echo "  make prod-down     停止生产栈"
+	@echo "  make auth-recovery 生成 Web 登录一次性恢复码（需本机/服务器执行）"
 	@echo "  make nuke          ⚠ 彻底清理（含数据库）"
 	@echo ""
 	@echo "════════════ 细粒度命令 ════════════"
@@ -72,6 +74,9 @@ status:
 bootstrap:
 	@./scripts/bootstrap.sh
 
+init-prod-env:
+	@./scripts/init-prod-env.sh
+
 prod-up:
 	@./scripts/prod-up.sh
 
@@ -80,6 +85,9 @@ prod-update:
 
 prod-down:
 	docker compose down
+
+auth-recovery:
+	cd backend && $(ACTIVATE) && python -m app.scripts.auth_recovery
 
 nuke:
 	@./scripts/nuke.sh
@@ -139,3 +147,21 @@ clean:
 	find . -name "__pycache__" -type d -prune -exec rm -rf {} +
 	rm -rf frontend/node_modules frontend/dist frontend/.vite
 	rm -rf .run logs
+
+# ════════════════════════════════════════════
+# 插件脚手架（tp_plugin CLI）
+#   make plugin-new name=my_game profile=session_game       生成骨架（profile 默认 session_game）
+#   make plugin-new name=my_game dry_run=1                   只打印将生成的文件，不落盘
+#   make plugin-check dir=plugins/local_imports/my_game      本地校验（manifest + 事件白名单）
+#   make plugin-register dir=plugins/local_imports/my_game   登记进 installed_plugin 台账
+# ════════════════════════════════════════════
+.PHONY: plugin-new plugin-register plugin-check
+
+plugin-new:
+	@backend/.venv/bin/python backend/scripts/tp_plugin.py new $(name) --profile $(or $(profile),session_game) $(if $(dir),--dir $(dir),) $(if $(dry_run),--dry-run,)
+
+plugin-check:
+	@backend/.venv/bin/python backend/scripts/tp_plugin.py check $(dir)
+
+plugin-register:
+	@backend/.venv/bin/python backend/scripts/tp_plugin.py register $(dir) $(if $(enable),--enable,)

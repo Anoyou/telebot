@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { useLocation, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { Pencil, Play, Plus, Trash2, Zap } from "lucide-react";
+import { History, Pencil, Play, Plus, Trash2, Zap } from "lucide-react";
 import { toast } from "sonner";
 
 import { getSystemSettings } from "@/api/system";
@@ -340,7 +340,7 @@ export function SchedulerConfig() {
                 定时任务调度器随 worker 初始化运行；是否执行由每条规则自己的启用状态控制。
               </CardDescription>
             </div>
-            <span className="rounded-full bg-emerald-50 px-3 py-1 text-xs font-medium text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300">
+            <span className="rounded-full bg-success/15 px-3 py-1 text-xs font-medium text-success">
               随 worker 启动
             </span>
           </div>
@@ -349,16 +349,24 @@ export function SchedulerConfig() {
 
       <Card>
         <CardHeader>
-          <div className="flex items-center justify-between">
+          <div className="flex items-center justify-between gap-3">
             <div>
               <CardTitle className="text-base">规则</CardTitle>
               <CardDescription>
                 支持 cron 定时 / once 单次 / interval 间隔，触发动作：发送消息 / 执行指令 / 调用 LLM
               </CardDescription>
             </div>
-            <Button onClick={openCreate}>
-              <Plus className="mr-1 h-4 w-4" /> 新建规则
-            </Button>
+            <div className="flex shrink-0 items-center gap-2">
+              <Button
+                variant="outline"
+                onClick={() => nav(`/logs?view=messages&source_channel=scheduler&event_type=scheduler_fire&account_id=${aid}`)}
+              >
+                <History className="mr-1 h-4 w-4" /> 运行历史
+              </Button>
+              <Button onClick={openCreate}>
+                <Plus className="mr-1 h-4 w-4" /> 新建规则
+              </Button>
+            </div>
           </div>
         </CardHeader>
         <CardContent>
@@ -443,7 +451,7 @@ export function SchedulerConfig() {
                             <Play className="mr-1 h-3.5 w-3.5" /> 试运行
                           </Button>
                           <Button size="sm" variant="ghost" onClick={() => openExec(r)}>
-                            <Zap className="mr-1 h-3.5 w-3.5" /> 执行
+                            <Zap className="mr-1 h-3.5 w-3.5" /> 立即运行一次
                           </Button>
                           <Button
                             size="sm"
@@ -811,7 +819,7 @@ export function SchedulerConfig() {
                   <b
                     className={
                       execResult.ok
-                        ? "text-emerald-600 dark:text-emerald-300"
+                        ? "text-success"
                         : "text-destructive"
                     }
                   >
@@ -866,7 +874,7 @@ function CronPreview({ preview, timezone }: { preview: CronPreviewResult; timezo
       className={[
         "mt-2 rounded-md border px-3 py-2 text-xs",
         preview.ok
-          ? "border-emerald-200 bg-emerald-50/60 text-emerald-900 dark:border-emerald-900/60 dark:bg-emerald-950/20 dark:text-emerald-200"
+          ? "border-success/25 bg-success/10 text-success"
           : "border-destructive/30 bg-destructive/5 text-destructive",
       ].join(" ")}
     >

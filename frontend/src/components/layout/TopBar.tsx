@@ -1,20 +1,15 @@
 // 顶栏：移动端汉堡按钮 + 副标题（仅 sm+ 显示）+ 系统健康灯 + 更新检查 + 紧急停用 + 登出
-// iOS PWA：背景色延伸到 safe-area-inset-top（与 black-translucent 状态栏配合），
+// iOS PWA：背景色延伸到 safe-area-inset-top，并随主题同步系统状态栏底色，
 // 内容区高度仍维持 56px。
 import { useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   Check,
-  ChevronDown,
-  LogOut,
   Menu,
   Monitor,
   Moon,
   PanelLeft,
   RefreshCw,
   Sun,
-  UserCircle,
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -22,10 +17,8 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { logout } from "@/lib/auth";
 import { useTheme, type Theme } from "@/lib/theme";
 import { cn } from "@/lib/utils";
 import { BrandLogo } from "@/components/BrandLogo";
@@ -46,17 +39,8 @@ export function TopBar({
   onSidebarToggle,
   sidebarCollapsed,
 }: TopBarProps) {
-  const nav = useNavigate();
-  const qc = useQueryClient();
   const [updateOpen, setUpdateOpen] = useState(false);
   const isStandalone = useStandaloneDisplayMode();
-  const mut = useMutation({
-    mutationFn: logout,
-    onSettled: () => {
-      qc.clear();
-      nav("/login", { replace: true });
-    },
-  });
 
   return (
     <header
@@ -70,30 +54,27 @@ export function TopBar({
       "
     >
       <div className="flex min-w-0 items-center gap-2">
-        {isStandalone ? (
-          <div className="flex min-w-0 items-center gap-2 md:hidden">
-            <BrandLogo className="h-9 w-9 rounded-xl" />
-            <div className="min-w-0">
-              <div className="truncate text-base font-semibold leading-none">TelePilot</div>
-              <div className="mt-0.5 truncate text-[11px] leading-none text-muted-foreground">
-                管理控制台
-              </div>
+        <div className="flex min-w-0 items-center gap-2 md:hidden">
+          <BrandLogo className="h-9 w-9 shrink-0 rounded-xl" />
+          <div className="min-w-0">
+            <div className="truncate text-base font-semibold leading-none">TelePilot</div>
+            <div className="mt-0.5 truncate text-[11px] leading-none text-muted-foreground">
+              管理控制台
             </div>
           </div>
-        ) : (
-          /* 移动端汉堡按钮，桌面隐藏；PWA 下由底栏承担导航 */
-          <Button
-            variant="outline"
-            size="sm"
-            className={cn(topbarActionClass(false), "md:hidden")}
-            onClick={onMenuClick}
-            aria-label="打开导航菜单"
-            title="打开导航菜单"
-          >
-            <Menu className="h-4 w-4" />
-            <span className="hidden text-xs sm:inline">菜单</span>
-          </Button>
-        )}
+          {!isStandalone ? (
+            <Button
+              variant="outline"
+              size="sm"
+              className={cn(topbarActionClass(false), "h-9 w-9 shrink-0 px-0")}
+              onClick={onMenuClick}
+              aria-label="打开导航菜单"
+              title="打开导航菜单"
+            >
+              <Menu className="h-4 w-4" />
+            </Button>
+          ) : null}
+        </div>
         <Button
           variant="outline"
           size="sm"
@@ -104,11 +85,7 @@ export function TopBar({
           title={sidebarCollapsed ? "展开侧边栏" : "收起侧边栏"}
         >
           <PanelLeft className="h-4 w-4" />
-          {isStandalone ? null : (
-            <span className="hidden text-xs sm:inline">
-              {sidebarCollapsed ? "展开侧栏" : "收起侧栏"}
-            </span>
-          )}
+          <span className="sr-only">{sidebarCollapsed ? "展开侧栏" : "收起侧栏"}</span>
         </Button>
       </div>
       <div className="flex shrink-0 items-center gap-1.5 sm:gap-2">
@@ -127,39 +104,7 @@ export function TopBar({
         <UpdateDialog open={updateOpen} onOpenChange={setUpdateOpen} />
         <ThemeSwitcher compact={isStandalone} />
         <KillSwitch compact={isStandalone} />
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <Button
-              variant="outline"
-              size="sm"
-              className={cn(
-                "h-10 rounded-full bg-card text-xs shadow-sm hover:bg-card hover:shadow-md",
-                isStandalone
-                  ? "w-10 px-0"
-                  : "w-10 px-0 sm:w-auto sm:max-w-[11rem] sm:gap-2 sm:px-1.5 sm:pr-2",
-              )}
-              aria-label={`当前用户：${username}`}
-              title={`当前用户：${username}`}
-            >
-              <span className="grid h-7 w-7 shrink-0 place-items-center rounded-full bg-primary/10 text-sm font-semibold text-primary">
-                {getInitial(username)}
-              </span>
-              {isStandalone ? null : (
-                <>
-                  <span className="hidden truncate text-xs font-medium sm:block">{username}</span>
-                  <ChevronDown className="hidden h-3.5 w-3.5 text-muted-foreground sm:block" />
-                </>
-              )}
-            </Button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="end">
-            <DropdownMenuItem disabled>已登录账号</DropdownMenuItem>
-            <DropdownMenuSeparator />
-            <DropdownMenuItem onSelect={() => mut.mutate()}>
-              <LogOut className="mr-2 h-4 w-4" /> 退出登录
-            </DropdownMenuItem>
-          </DropdownMenuContent>
-        </DropdownMenu>
+        <span className="sr-only">当前用户：{username}</span>
       </div>
     </header>
   );
@@ -167,7 +112,7 @@ export function TopBar({
 
 function topbarActionClass(compact: boolean) {
   return cn(
-    "h-10 rounded-full bg-card text-xs shadow-sm hover:bg-card hover:shadow-md",
+    "h-10 rounded-full border-0 bg-secondary text-xs shadow-none hover:bg-secondary-hover",
     compact ? "w-10 px-0" : "w-10 px-0 sm:w-auto sm:gap-2 sm:px-3",
   );
 }
@@ -245,10 +190,4 @@ function ThemeSwitcher({ compact = false }: { compact?: boolean }) {
       </DropdownMenuContent>
     </DropdownMenu>
   );
-}
-
-function getInitial(username: string) {
-  const trimmed = username.trim();
-  if (!trimmed) return <UserCircle className="h-4 w-4" />;
-  return trimmed.slice(0, 1).toUpperCase();
 }

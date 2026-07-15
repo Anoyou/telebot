@@ -31,7 +31,12 @@ const PluginsSchedulerPage = lazy(() => import("@/pages/Plugins").then(m => ({ d
 const PluginsAutoCommandWhitelistPage = lazy(() => import("@/pages/Plugins").then(m => ({ default: m.PluginsAutoCommandWhitelistPage })));
 const MessageTemplateLabPage = lazy(() => import("@/pages/Plugins").then(m => ({ default: m.MessageTemplateLabPage })));
 const PluginsManagePage = lazy(() => import("@/pages/Extensions").then(m => ({ default: m.Extensions })));
+const InteractionIndex = lazy(() => import("@/pages/Interaction/Index").then(m => ({ default: m.InteractionIndex })));
+const LedgerPage = lazy(() => import("@/pages/Ledger").then(m => ({ default: m.LedgerPage })));
+const DispatchDebugPage = lazy(() => import("@/pages/DispatchDebug").then(m => ({ default: m.DispatchDebugPage })));
+const WebhooksPage = lazy(() => import("@/pages/Webhooks").then(m => ({ default: m.WebhooksPage })));
 const AIIndex = lazy(() => import("@/pages/AI/Index").then(m => ({ default: m.AIIndex })));
+const AILivenessPage = lazy(() => import("@/pages/AI/Liveness").then(m => ({ default: m.LLMLivenessPage })));
 
 type AppErrorBoundaryState = { hasError: boolean };
 
@@ -219,6 +224,46 @@ export default function App() {
             element={
               <Suspense fallback={<PageFallback />}>
                 <PluginsManagePage />
+              </Suspense>
+            }
+          />
+          <Route
+            path="interaction"
+            element={
+              <Suspense fallback={<PageFallback />}>
+                <InteractionIndex />
+              </Suspense>
+            }
+          />
+          <Route
+            path="ledger"
+            element={
+              <Suspense fallback={<PageFallback />}>
+                <LedgerPage />
+              </Suspense>
+            }
+          />
+          <Route
+            path="dispatch-debug"
+            element={
+              <Suspense fallback={<PageFallback />}>
+                <DispatchDebugPage />
+              </Suspense>
+            }
+          />
+          <Route
+            path="webhooks"
+            element={
+              <Suspense fallback={<PageFallback />}>
+                <WebhooksPage />
+              </Suspense>
+            }
+          />
+          <Route
+            path="ai/liveness"
+            element={
+              <Suspense fallback={<PageFallback />}>
+                <AILivenessPage />
               </Suspense>
             }
           />

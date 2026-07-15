@@ -22,7 +22,9 @@ from app.worker.command import (
     _looks_like_command_name,
     _should_report_incoming_sudo_denial,
     make_command_handler,
+    register_plugin_command,
     set_command_context,
+    unregister_plugin_command,
 )
 from app.worker.commands.sudo_guard import (
     check_sudo_permission as guard_check_sudo_permission,
@@ -577,6 +579,98 @@ async def test_incoming_sudo_command_outside_self_chat_is_ignored():
     event.get_sender = AsyncMock(return_value=sender)
 
     await incoming_handler(event)
+    event.respond.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_incoming_normal_prefix_plugin_command_from_group_user_is_ignored():
+    """群组成员发系统前缀插件命令不应触发 userbot 命令链路。"""
+    captured = []
+
+    def fake_on(_event_type):
+        def deco(fn):
+            captured.append(fn)
+            return fn
+
+        return deco
+
+    plugin_handler = AsyncMock()
+    register_plugin_command("10d", plugin_handler, owner_plugin_key="ten_half", generation=1)
+    try:
+        client = MagicMock()
+        client.on = fake_on
+        make_command_handler(client, account_id=1, prefix="。")
+        incoming_handler = captured[0]
+
+        set_command_context(
+            CommandContext(
+                account_id=1,
+                templates={},
+                providers={},
+                command_prefix="。",
+                sudo_prefix=".",
+                sudo_enabled=False,
+                self_tg_user_id=999,
+                sudo_users={},
+            )
+        )
+
+        sender = MagicMock()
+        sender.id = 111
+        event = AsyncMock()
+        event.raw_text = "。10d 6789"
+        event.chat_id = -1002090852236
+        event.get_sender = AsyncMock(return_value=sender)
+
+        await incoming_handler(event)
+
+        plugin_handler.assert_not_awaited()
+        event.edit.assert_not_called()
+        event.respond.assert_not_called()
+    finally:
+        unregister_plugin_command("10d", owner_plugin_key="ten_half")
+
+
+@pytest.mark.asyncio
+async def test_incoming_normal_prefix_builtin_command_is_not_exposed_in_group():
+    """群组 incoming 系统前缀只接插件命令，不暴露内置管理命令。"""
+    captured = []
+
+    def fake_on(_event_type):
+        def deco(fn):
+            captured.append(fn)
+            return fn
+
+        return deco
+
+    client = MagicMock()
+    client.on = fake_on
+    make_command_handler(client, account_id=1, prefix="。")
+    incoming_handler = captured[0]
+
+    set_command_context(
+        CommandContext(
+            account_id=1,
+            templates={},
+            providers={},
+            command_prefix="。",
+            sudo_prefix=".",
+            sudo_enabled=False,
+            self_tg_user_id=999,
+            sudo_users={},
+        )
+    )
+
+    sender = MagicMock()
+    sender.id = 111
+    event = AsyncMock()
+    event.raw_text = "。status"
+    event.chat_id = -1002090852236
+    event.get_sender = AsyncMock(return_value=sender)
+
+    await incoming_handler(event)
+
+    event.edit.assert_not_called()
     event.respond.assert_not_called()
 
 

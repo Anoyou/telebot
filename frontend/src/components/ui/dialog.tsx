@@ -46,7 +46,7 @@ export const DialogContent = React.forwardRef<
         ref={setRef}
         tabIndex={tabIndex ?? -1}
         className={cn(
-          "fixed left-[50%] top-[50%] z-50 grid w-[calc(100vw-2rem)] max-w-lg translate-x-[-50%] translate-y-[-50%] gap-4 rounded-lg border border-border/70 bg-card p-4 shadow-xl data-[state=open]:animate-dialog-in sm:w-full sm:p-6",
+          "fixed left-[50%] top-[50%] z-50 grid w-[calc(100vw-2rem)] max-w-lg translate-x-[-50%] translate-y-[-50%] gap-4 rounded-2xl border border-border bg-card p-4 shadow-lg data-[state=open]:animate-dialog-in sm:w-full sm:p-6",
           className,
         )}
         onOpenAutoFocus={(event) => {

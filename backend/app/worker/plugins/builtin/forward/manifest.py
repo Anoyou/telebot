@@ -27,6 +27,7 @@ MANIFEST = Manifest(
     config_schema={
         "type": "object",
         "x-ui-mode": "rules",
+        "x-usage-guide": "消息转发通过规则触发：先新建规则，选择来源范围、匹配方式和目标 chat_id，再启用当前账号的功能总开关。它只处理 incoming 消息，本账号自己发送的消息不会被转发；规则保存后立即生效。",
         "additionalProperties": False,
         "required": ["target_chat_id", "mode"],
         "properties": {

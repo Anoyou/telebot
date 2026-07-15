@@ -17,9 +17,16 @@ from app.worker import inline_override as _io
 
 @pytest.fixture(autouse=True)
 def _disable_ai_refresh(monkeypatch):
+    from app.services import llm_account_budget
     from app.worker import runtime as worker_runtime
 
     monkeypatch.setattr(worker_runtime, "_refresh_command_context", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        llm_account_budget,
+        "acquire",
+        AsyncMock(return_value=llm_account_budget.LLMAccountBudgetTicket(1, 1, 512)),
+    )
+    monkeypatch.setattr(llm_account_budget, "settle", AsyncMock(return_value=None))
 
 # ── 静态 fixtures ──────────────────────────────────────────────
 

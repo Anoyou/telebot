@@ -2,31 +2,64 @@
 
 > 这是一页索引，不再承载完整正文。原来的开发指南已按主题拆分，代码层 API 仍叫 `Plugin` / `PluginContext`，产品文案统一称“插件”。
 
-> 路线决策保留在这里：TelePilot 0.x 默认采用 **Route A：受信/签名插件市场**。仅接收 TelePilot/Anoyou 审核过的插件源，安装包需要签名或可信来源记录，插件在同一 worker 进程内运行，通过 `Manifest.permissions`、`ctx.client`、`ctx.http`、`ctx.ai` 等 facade 收口能力。它适合 0.x 快速稳定迭代，重点放在插件 API、安装体验、权限声明、审计日志和回滚能力上。
+> 路线决策保留在这里：TelePilot 0.x 默认采用 **个人可信插件标准模式**。管理员安装并启用插件后，即视为信任该插件的业务逻辑；远程插件风险由管理员自行承担。平台不做公共插件市场式强沙箱，而是通过 `Manifest.permissions`、`ctx.client`、`ctx.http`、`ctx.ai`、`ctx.messages` 等 facade 收口常用能力，并保留频控、审计、急停、日志脱敏和 token/session 隔离。
 
-> **Route B：开放社区市场** 面向任意第三方上传或未经人工审核的插件，需要 subprocess/容器隔离、资源配额、文件系统/网络沙箱、供应链扫描和更完整的安全策略。它不属于 0.x 默认方案，若 1.0 之后开放社区市场，应作为独立 Epic 设计和验收。本文其余章节、示例、CI 和安全边界都按 Route A 编写。
+> 如果未来要开放“任意第三方上传、未经人工审核”的公共市场，需要另行设计 subprocess/容器隔离、资源配额、文件系统/网络沙箱和供应链扫描。它不属于当前 0.x 默认方案，本文其余章节、示例、CI 和安全边界都按个人可信插件标准模式编写。
 
 ## 目录
 
-- [概览](./PLUGIN-OVERVIEW.md)
-- [API 参考](./PLUGIN-API-REFERENCE.md)
+- [5 分钟 Quickstart](./PLUGIN-QUICKSTART.md)
+- [入站 Webhook Quickstart](./PLUGIN-WEBHOOK-QUICKSTART.md)
+- [插件开发铁律](./PLUGIN-RULES.md)
+- [完整 API 参考](./PLUGIN-API-REFERENCE.md)
+- [插件概览](./PLUGIN-OVERVIEW.md)
 - [HTTP facade](./PLUGIN-HTTP.md)
-- [安全边界](./PLUGIN-SAFETY.md)
-- [远程插件](./PLUGIN-REMOTE.md)
-- [速查表](./PLUGIN-CHEATSHEET.md)
 - [AI facade](./PLUGIN-AI.md)
+- [远程插件](./PLUGIN-REMOTE.md)
+- [安全边界](./PLUGIN-SAFETY.md)
+- [开发者工具链](./PLUGIN-DEVTOOLS.md)
+- [速查表](./PLUGIN-CHEATSHEET.md)
+
+## 当前插件链路速览
+
+消息链路统一后，互动插件默认按这一套模型理解：
+
+- 触发方式决定普通会话通道。带前缀命令开局，整段普通收发走 `userbot`；关键词、付款确认、按钮回调开局，整段普通收发走 `interaction_bot`。固定能力例外：`payout` 走 UserBot，Bot API 原生 `send_rich_message` 走 Interaction Bot。
+- 新玩法优先写成一个 `on_interaction(ctx, entry_key, payload)` 入口，在同一个入口里按 `tp_event.type` 或 `payload["source"]["type"]` 处理 `command`、`keyword`、`payment_confirmed`、`message`、`callback_query`、`session_expired`。
+- 单局状态优先写进 `session.data`，通过 `update_session` 持久化；不要再把游戏状态放进进程内全局字典、锁和自建超时任务。
+- 普通 JSON 状态优先使用 `ctx.storage`；确需 SQLite、缓存文件或索引文件时写入 `ctx.data_dir`。禁止把运行数据写到插件代码目录或 `Path(__file__).parent`，因为安装和更新会整体替换该目录。
+- 免费参与、按钮加入、互动游戏可按自身玩法保存完整业务状态；仅从后续发奖锚点角度，保存玩家 `tgid` 并通过 `payout.reply_to_user_id` 交给平台搜索近期发言即可。找不到锚点时平台默认提示，并允许插件用 `reply_anchor_missing_text` 自定义失败提示。
+- `ctx.messages.send/send_photo/edit/edit_caption/payout(...)` 和普通标准 action 默认按 `parse_mode="plain"` 发送；图片/文件 caption 更新用 `edit_caption`，不要把媒体消息交给 `edit_message` 猜类型。标题、任务列表、折叠详情、表格等 Telegram 原生结构改用 `ctx.messages.send_rich()`，并从 `html` / `markdown` / `blocks` 三选一。
+- userbot 会话没有原生 inline 按钮能力。平台会把按钮降级成“回复序号选择”的文本面板，并把命中的回复合成为 callback 事件回投插件；强依赖按钮的入口应配合 `keyword_only` / `default_trigger_modes` 关闭命令触发。
 
 ## 读法
 
-1. 先看 [概览](./PLUGIN-OVERVIEW.md) 理清插件、远程插件和运行时边界。
-2. 再看 [API 参考](./PLUGIN-API-REFERENCE.md) 找 `Plugin`、`PluginContext`、`Manifest`、指令、消息、Conversation、前端集成和完整示例。
-3. 需要外部网络能力时看 [HTTP facade](./PLUGIN-HTTP.md)，需要 AI 能力时看 [AI facade](./PLUGIN-AI.md)。
-4. 需要权限、前缀、消息发送、并发和清理约束时看 [安全边界](./PLUGIN-SAFETY.md)。
-5. 需要 Git 安装、`plugin.json`、Registry、发布检查时看 [远程插件](./PLUGIN-REMOTE.md)。
-6. 需要快速回忆字段名和常用模式时看 [速查表](./PLUGIN-CHEATSHEET.md)。
+1. 新人先看 [5 分钟 Quickstart](./PLUGIN-QUICKSTART.md)，复制 `hello_ping` 跑通最小 Event Bus + MessageOps 插件。
+2. 写真实插件前看 [插件开发铁律](./PLUGIN-RULES.md)，确认必须、禁止、推荐的边界。
+3. 查字段、facade、标准事件信封、MessageOps、Trace 和生命周期时看 [完整 API 参考](./PLUGIN-API-REFERENCE.md)。
+4. 需要理解个人可信插件标准模式、安装/启用/更新/卸载心智时看 [插件概览](./PLUGIN-OVERVIEW.md)。
+5. 需要外部网络能力时看 [HTTP facade](./PLUGIN-HTTP.md)，需要 AI 能力时看 [AI facade](./PLUGIN-AI.md)。
+6. 需要让 n8n、GitHub、监控或业务系统触发插件时看 [入站 Webhook Quickstart](./PLUGIN-WEBHOOK-QUICKSTART.md)。
+7. 需要 Git 安装、`plugin.json`、Registry、发布检查时看 [远程插件](./PLUGIN-REMOTE.md)。
+8. 需要权限、前缀、消息发送、并发和清理约束时看 [安全边界](./PLUGIN-SAFETY.md)。
+9. 从零开发、校验、登记、命中调试、dry-run 安全测试、录制回放回归时看 [开发者工具链](./PLUGIN-DEVTOOLS.md)。
+10. 需要快速回忆字段名和常用模式时看 [速查表](./PLUGIN-CHEATSHEET.md)。
+
+## 开发者工具链速览
+
+工具链说明统一收口到 [开发者工具链](./PLUGIN-DEVTOOLS.md)。推荐顺序是：
+
+1. 用 `tp_plugin new <name> --profile session_game|command|passthrough` 生成骨架。
+2. 写 `plugin.py`、`plugin.json` / `manifest.py` 的入口、权限、事件订阅和配置。
+3. 用 `tp_plugin check <dir>` 做 manifest、事件订阅和权限推导审计；它只报告问题，不自动改文件。
+4. 用 `tp_plugin register <dir>` 登记本地插件目录；外部目录与 `plugins/local_imports` 旧副本冲突时，确认后再加 `--force`。
+5. 在账号配置里打开 `{"dev_mode": {"dry_run": true}}`，先让发送和 payout 出口只记录、不真实投递。
+6. 用 `POST /api/dispatch/simulate` 贴账号和消息文本，看命中哪条规则、插件、入口及未命中原因。
+7. 需要完整链路 trace 时，优先用 manifest 的 `strict_trace` 常驻追踪资金/高风险插件；临时排查用 `POST /api/dispatch/router-debug-trace` 打开短 TTL router trace。
+8. 需要回归样本时，打开 `{"dev_mode": {"recording": true}}` 录入站信封 JSONL，再用 `tp_replay run <recording.jsonl>` 离线 dry-run 回放。
 
 ## 兼容说明
 
 - 旧章节锚点已经不再提供。
-- `docs/REMOTE-PLUGIN-GUIDE.md` 仍保留为兼容入口，但正文已指向新的远程插件文档。
 - `docs/PLUGIN-AI.md` 保持独立。
+- `interaction_trigger_modes`、`default_trigger_modes`、`callback_fast_ack` 是当前运行时入口契约；插件发布前应使用当前版本的示例校验脚本验证，不要按旧分支行为兼容。

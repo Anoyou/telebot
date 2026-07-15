@@ -26,13 +26,17 @@ import ast
 import asyncio
 import json
 import logging
+import os
 import re
 import shutil
+import sqlite3
 import tempfile
+import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote, urlparse
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 from sqlalchemy import select
@@ -44,6 +48,7 @@ from ..db.models.feature import FEATURE_STATE_DISABLED, AccountFeature, Feature
 from ..db.models.plugin import (
     PLUGIN_SOURCE_GIT,
     PLUGIN_SOURCE_LOCAL,
+    PLUGIN_SOURCE_OFFICIAL,
     PLUGIN_SOURCE_REPO,
     PLUGIN_TRUST_COMMUNITY,
     InstalledPlugin,
@@ -54,6 +59,9 @@ from ..worker.ipc import CMD_RELOAD_CONFIG, publish_cmd_with_ack
 
 # 直接复用现有 loader 的配置热更新路径；installed 插件在 loader 里按 DB 双开关按需加载
 from ..worker.plugins.loader import reload_account_config
+from .event_bus import SUPPORTED_FILTER_KEYS, VALID_EVENT_SCOPES, VALID_EVENT_SOURCES, VALID_EVENT_TYPES
+from .interaction.contracts import send_via_selector_options, unsupported_send_via_values
+from .redactor import redact_text
 
 log = logging.getLogger(__name__)
 
@@ -112,6 +120,52 @@ class InvalidSourceUrl(RemotePluginError):
     """source_url 不符合安全要求。"""
 
 
+@dataclass(frozen=True, slots=True)
+class GitSourceUrl:
+    """规范化后的 Git 拉取目标。
+
+    ``original_url`` 仍然可以原样存库；真正执行 git 时使用 ``clone_url``，
+    GitHub ``tree/<branch>`` 页面链接则额外带上 ``ref``。
+    """
+
+    clone_url: str
+    ref: str | None = None
+
+
+def normalize_git_source_url(url: str) -> GitSourceUrl:
+    """把用户可读的仓库 URL 规范化为可执行的 git clone 目标。
+
+    支持 GitHub 分支页：
+    ``https://github.com/user/repo/tree/feature/foo`` →
+    ``clone_url=https://github.com/user/repo.git`` + ``ref=feature/foo``。
+    """
+    raw = str(url or "").strip()
+    parsed = urlparse(raw)
+    if parsed.scheme.lower() == "https" and parsed.hostname in {"github.com", "www.github.com"}:
+        parts = [unquote(part) for part in parsed.path.strip("/").split("/") if part]
+        if len(parts) >= 3 and parts[2] == "tree":
+            if len(parts) < 4:
+                raise InvalidSourceUrl(
+                    "BAD_SOURCE_URL",
+                    "GitHub tree/<branch> 插件仓库链接缺少分支名。",
+                )
+            owner = parts[0].strip()
+            repo = parts[1].strip()
+            if repo.endswith(".git"):
+                repo = repo[:-4]
+            ref = "/".join(part.strip() for part in parts[3:] if part.strip())
+            if not owner or not repo or not ref:
+                raise InvalidSourceUrl(
+                    "BAD_SOURCE_URL",
+                    "GitHub tree/<branch> 插件仓库链接格式不正确。",
+                )
+            return GitSourceUrl(
+                clone_url=f"https://github.com/{owner}/{repo}.git",
+                ref=ref,
+            )
+    return GitSourceUrl(clone_url=raw)
+
+
 # ─────────────────────────────────────────────────────
 # 元数据模型（用于校验 plugin.json）
 # ─────────────────────────────────────────────────────
@@ -128,6 +182,7 @@ class PluginMetadataSchema(BaseModel):
 
     display_name: str = ""
     description: str = ""
+    usage: str | None = None
     author: str = ""
     version: str = "0.0.0"
     # entry 是可选的，默认为 plugin.py
@@ -135,12 +190,17 @@ class PluginMetadataSchema(BaseModel):
     # permissions 和 config_schema 是可选扩展字段
     permissions: list[str] = Field(default_factory=list)
     config_schema: dict[str, Any] | None = None
+    config_actions: list[dict[str, Any]] = Field(default_factory=list)
+    agent_tools: list[dict[str, Any]] = Field(default_factory=list)
     category: str | None = None
     interaction_profile: str | None = None
     interaction_entries: list[dict[str, Any]] = Field(default_factory=list)
+    event_subscriptions: list[dict[str, Any]] = Field(default_factory=list)
+    capabilities: dict[str, Any] | None = None
     min_telepilot_version: str | None = None
     # 0.15 rename 前的旧字段，继续作为兼容别名解析。
     min_telebot_version: str | None = None
+    tags: list[str] = Field(default_factory=list)
 
     @field_validator("name", "key")
     @classmethod
@@ -187,10 +247,39 @@ class PluginMetadataSchema(BaseModel):
             raise ValueError("category 只能是 interactive / automation / utility")
         return value
 
+    @field_validator("agent_tools")
+    @classmethod
+    def _validate_agent_tools(cls, value: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        seen: set[str] = set()
+        for index, raw in enumerate(value):
+            name = str(raw.get("name") or "").strip()
+            if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", name):
+                raise ValueError(f"agent_tools[{index}].name 格式无效")
+            if name in seen:
+                raise ValueError(f"agent_tools 工具名重复: {name}")
+            seen.add(name)
+            parameters = raw.get("parameters")
+            if not isinstance(parameters, dict) or parameters.get("type") != "object":
+                raise ValueError(f"agent_tools[{index}].parameters 必须是 type=object 的 JSON Schema")
+            if "read_only" in raw and not isinstance(raw.get("read_only"), bool):
+                raise ValueError(f"agent_tools[{index}].read_only 必须是布尔值")
+            if "strict" in raw and not isinstance(raw.get("strict"), bool):
+                raise ValueError(f"agent_tools[{index}].strict 必须是布尔值")
+        return value
+
     @model_validator(mode="after")
     def _fill_name_from_key(self) -> PluginMetadataSchema:
         if self.name is None and self.key is not None:
             self.name = self.key
+        if self.agent_tools:
+            agent_capability = (self.capabilities or {}).get("agent_tools")
+            enabled = agent_capability is True or (
+                isinstance(agent_capability, dict) and agent_capability.get("enabled") is True
+            )
+            if not enabled:
+                raise ValueError("声明 agent_tools 时必须启用 capabilities.agent_tools")
+            if "ai_agent" not in self.permissions:
+                raise ValueError("声明 agent_tools 时必须声明 permissions=['ai_agent']")
         return self
 
 
@@ -201,16 +290,22 @@ class PluginMetadata:
     name: str
     display_name: str = ""
     description: str = ""
+    usage: str | None = None
     author: str = ""
     version: str = "0.0.0"
     entry: str = "plugin.py"
     permissions: list[str] = field(default_factory=list)
     config_schema: dict[str, Any] | None = None
+    config_actions: list[dict[str, Any]] = field(default_factory=list)
+    agent_tools: list[dict[str, Any]] = field(default_factory=list)
     category: str | None = None
     interaction_profile: str | None = None
     interaction_entries: list[dict[str, Any]] = field(default_factory=list)
+    event_subscriptions: list[dict[str, Any]] = field(default_factory=list)
+    capabilities: dict[str, Any] | None = None
     min_telepilot_version: str | None = None
     min_telebot_version: str | None = None
+    tags: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -229,6 +324,7 @@ class RemotePluginView:
     name: str
     display_name: str
     description: str
+    usage: str | None
     author: str
     source_url: str
     version: str
@@ -237,6 +333,9 @@ class RemotePluginView:
     last_update_check_at: datetime | None
     last_update_check_error: str | None
     lint_warnings: list[str]
+    event_subscriptions: list[dict[str, Any]]
+    capabilities: dict[str, Any]
+    permissions: list[str]
     enabled: bool
     default_enabled: bool
     installed_at: datetime | None
@@ -305,6 +404,8 @@ def _set_remote_update_info(
 def _source_label_for_installed(row: InstalledPlugin) -> str:
     if row.source_label:
         return row.source_label
+    if row.source == PLUGIN_SOURCE_OFFICIAL:
+        return "Plugin Repo"
     if row.source == PLUGIN_SOURCE_REPO:
         return "Plugin Repo"
     if row.source == PLUGIN_SOURCE_LOCAL:
@@ -321,11 +422,18 @@ def remote_plugin_view_from_installed(row: InstalledPlugin) -> RemotePluginView:
 
     manifest = dict(row.manifest_json or {})
     info = _remote_info_from_manifest(manifest)
+    raw_permissions = manifest.get("permissions")
+    permissions = [
+        str(item)
+        for item in raw_permissions
+        if isinstance(item, str) and item.strip()
+    ] if isinstance(raw_permissions, list) else []
     return RemotePluginView(
         id=0,
         name=row.key,
         display_name=str(manifest.get("display_name") or row.key),
         description=str(manifest.get("description") or ""),
+        usage=str(manifest.get("usage") or "").strip() or None,
         author=str(manifest.get("author") or ""),
         source_url=str(row.source_url or ""),
         version=row.version,
@@ -334,6 +442,11 @@ def remote_plugin_view_from_installed(row: InstalledPlugin) -> RemotePluginView:
         last_update_check_at=_remote_info_datetime(info.get("last_update_check_at")),
         last_update_check_error=info.get("last_update_check_error"),
         lint_warnings=[item for item in (row.lint_warnings or []) if isinstance(item, str)],
+        event_subscriptions=[
+            item for item in manifest.get("event_subscriptions", []) if isinstance(item, dict)
+        ] if isinstance(manifest.get("event_subscriptions"), list) else [],
+        capabilities=dict(manifest.get("capabilities")) if isinstance(manifest.get("capabilities"), dict) else {},
+        permissions=permissions,
         enabled=bool(row.enabled),
         default_enabled=bool(info.get("default_enabled", False)),
         installed_at=row.installed_at,
@@ -344,12 +457,22 @@ def _feature_manifest_from_meta(meta: PluginMetadata) -> dict[str, Any] | None:
     manifest: dict[str, Any] = {}
     if meta.config_schema:
         manifest["config_schema"] = meta.config_schema
+    if meta.config_actions:
+        manifest["config_actions"] = [item for item in meta.config_actions if isinstance(item, dict)]
+    if meta.agent_tools:
+        manifest["agent_tools"] = [item for item in meta.agent_tools if isinstance(item, dict)]
+    if meta.usage:
+        manifest["usage"] = meta.usage
     if meta.category:
         manifest["category"] = meta.category
     if meta.interaction_profile:
         manifest["interaction_profile"] = meta.interaction_profile
     if meta.interaction_entries:
         manifest["interaction_entries"] = [item for item in meta.interaction_entries if isinstance(item, dict)]
+    if meta.event_subscriptions:
+        manifest["event_subscriptions"] = [item for item in meta.event_subscriptions if isinstance(item, dict)]
+    if isinstance(meta.capabilities, dict) and meta.capabilities:
+        manifest["capabilities"] = dict(meta.capabilities)
     if meta.permissions:
         manifest["permissions"] = list(meta.permissions)
     if meta.min_telepilot_version:
@@ -405,6 +528,168 @@ def _plugin_dir(name: str) -> Path:
     return target
 
 
+def _plugin_data_dir(name: str) -> Path:
+    """Return the update-safe persistent file directory for one plugin."""
+
+    _plugin_dir(name)  # Reuse the plugin-name and confinement validation.
+    data_root = (_installed_root() / "_data").resolve()
+    candidate = data_root / name
+    if candidate.is_symlink():
+        raise RemotePluginError("PLUGIN_DATA_CONFLICT", f"插件数据目录不得是符号链接: {name!r}")
+    target = candidate.resolve()
+    if target == data_root or data_root not in target.parents:
+        raise RemotePluginError("BAD_PLUGIN_NAME", f"插件数据目录越界: {name!r}")
+    target.mkdir(parents=True, exist_ok=True)
+    return target
+
+
+def _replace_with_symlink(path: Path, target: Path) -> None:
+    temporary = path.with_name(f".{path.name}.persist-link-{uuid.uuid4().hex}")
+    try:
+        temporary.symlink_to(target)
+        temporary.replace(path)
+    finally:
+        if temporary.is_symlink():
+            temporary.unlink()
+
+
+def _relocate_legacy_plugin_sqlite(install_path: Path, plugin_name: str) -> list[str]:
+    """Atomically redirect legacy SQLite paths without changing the live inode."""
+
+    if not install_path.is_dir():
+        return []
+    data_dir = _plugin_data_dir(plugin_name)
+    names: list[str] = []
+    for source in sorted(install_path.glob("*.sqlite3")):
+        target = data_dir / source.name
+        source_is_persistent_link = False
+        if source.is_symlink():
+            if source.resolve(strict=False) == target.resolve(strict=False) and target.is_file():
+                names.append(source.name)
+                source_is_persistent_link = True
+            else:
+                raise RemotePluginError(
+                    "PLUGIN_DATA_CONFLICT",
+                    f"插件 {plugin_name} 的旧数据库链接目标异常: {source.name}",
+                )
+        else:
+            if not source.is_file():
+                continue
+            names.append(source.name)
+        with sqlite3.connect(source, timeout=10.0, isolation_level=None) as migration_guard:
+            migration_guard.execute("PRAGMA busy_timeout = 10000")
+            migration_guard.execute("BEGIN IMMEDIATE")
+            try:
+                if not source_is_persistent_link:
+                    if target.exists():
+                        if not target.is_file() or not os.path.samefile(source, target):
+                            raise RemotePluginError(
+                                "PLUGIN_DATA_CONFLICT",
+                                f"插件 {plugin_name} 的持久化数据库与旧数据库冲突: {source.name}",
+                            )
+                    else:
+                        os.link(source, target)
+                for suffix in ("-wal", "-shm"):
+                    legacy_sidecar = install_path / f"{source.name}{suffix}"
+                    persistent_sidecar = data_dir / f"{source.name}{suffix}"
+                    if legacy_sidecar.is_symlink():
+                        if legacy_sidecar.resolve(strict=False) != persistent_sidecar.resolve(strict=False):
+                            raise RemotePluginError(
+                                "PLUGIN_DATA_CONFLICT",
+                                f"插件 {plugin_name} 的 SQLite 辅助文件链接异常: {legacy_sidecar.name}",
+                            )
+                        continue
+                    if legacy_sidecar.exists():
+                        if persistent_sidecar.exists():
+                            if not os.path.samefile(legacy_sidecar, persistent_sidecar):
+                                raise RemotePluginError(
+                                    "PLUGIN_DATA_CONFLICT",
+                                    f"插件 {plugin_name} 的 SQLite 辅助文件冲突: {legacy_sidecar.name}",
+                                )
+                        else:
+                            os.link(legacy_sidecar, persistent_sidecar)
+                    _replace_with_symlink(legacy_sidecar, persistent_sidecar)
+                if not source_is_persistent_link:
+                    _replace_with_symlink(source, target)
+                migration_guard.commit()
+            except Exception:
+                migration_guard.rollback()
+                raise
+    return names
+
+
+def _attach_legacy_plugin_sqlite_links(
+    install_path: Path,
+    plugin_name: str,
+    sqlite_names: list[str],
+) -> None:
+    """Keep legacy plugin code pointed at the migrated DB until worker reload completes."""
+
+    data_dir = _plugin_data_dir(plugin_name)
+    for name in sqlite_names:
+        target = data_dir / name
+        if not target.is_file():
+            continue
+        for suffix in ("", "-wal", "-shm"):
+            link = install_path / f"{name}{suffix}"
+            target_link = data_dir / f"{name}{suffix}"
+            if link.is_symlink() and link.resolve(strict=False) == target_link.resolve(strict=False):
+                continue
+            _replace_with_symlink(link, target_link)
+
+
+def _relocate_legacy_plugin_json(install_path: Path, plugin_name: str) -> list[str]:
+    """Move top-level runtime JSON files into the update-safe plugin data dir."""
+
+    if not install_path.is_dir():
+        return []
+    data_dir = _plugin_data_dir(plugin_name)
+    names: list[str] = []
+    for source in sorted(install_path.glob("*.json")):
+        if source.name == "plugin.json":
+            continue
+        target = data_dir / source.name
+        if source.is_symlink():
+            if source.resolve(strict=False) != target.resolve(strict=False) or not target.is_file():
+                raise RemotePluginError(
+                    "PLUGIN_DATA_CONFLICT",
+                    f"插件 {plugin_name} 的旧 JSON 链接目标异常: {source.name}",
+                )
+            names.append(source.name)
+            continue
+        if not source.is_file():
+            continue
+        names.append(source.name)
+        if target.exists():
+            if not target.is_file():
+                raise RemotePluginError(
+                    "PLUGIN_DATA_CONFLICT",
+                    f"插件 {plugin_name} 的持久化 JSON 路径不是文件: {source.name}",
+                )
+            continue
+        temporary = target.with_name(f".{target.name}.migrating-{uuid.uuid4().hex}")
+        try:
+            shutil.copy2(source, temporary)
+            temporary.replace(target)
+        finally:
+            temporary.unlink(missing_ok=True)
+    return names
+
+
+def _attach_legacy_plugin_json_links(
+    install_path: Path,
+    plugin_name: str,
+    json_names: list[str],
+) -> None:
+    """Keep old and new plugin code pointed at migrated runtime JSON files."""
+
+    data_dir = _plugin_data_dir(plugin_name)
+    for name in json_names:
+        target = data_dir / name
+        if target.is_file():
+            _replace_with_symlink(install_path / name, target)
+
+
 def _legacy_plugin_dir(name: str) -> Path:
     """旧版本在 backend/ 工作目录下运行时可能写到 backend/plugins/installed。"""
     backend_root = Path(__file__).resolve().parents[2]
@@ -434,7 +719,7 @@ def _validate_source_url(url: str) -> None:
     if not url or not url.strip():
         raise InvalidSourceUrl("BAD_SOURCE_URL", "source_url 不能为空")
 
-    url = url.strip()
+    url = normalize_git_source_url(url).clone_url
 
     # 解析 scheme
     if url.startswith("git+ssh://"):
@@ -471,10 +756,11 @@ def _validate_source_url(url: str) -> None:
 def _derive_name_from_url(url: str) -> str:
     """从 ``source_url`` 的最后一段推导插件名：
     - ``https://github.com/foo/bar.git`` → ``bar``
+    - ``https://github.com/foo/bar/tree/dev`` → ``bar``
     - ``git@github.com:foo/bar`` → ``bar``
     - ``./local/path`` → ``path``
     """
-    cleaned = url.rstrip("/").strip()
+    cleaned = normalize_git_source_url(url).clone_url.rstrip("/").strip()
     if cleaned.endswith(".git"):
         cleaned = cleaned[:-4]
     # 同时支持 ``/`` 与 ``:`` 作分隔（scp-like git URL）
@@ -486,7 +772,12 @@ def _derive_name_from_url(url: str) -> str:
     return last
 
 
-async def _run_git(*args: str, cwd: str | Path | None = None, timeout: float = 120.0) -> str:
+async def _run_git(
+    *args: str,
+    cwd: str | Path | None = None,
+    timeout: float = 120.0,
+    env: dict[str, str] | None = None,
+) -> str:
     """以子进程跑 ``git <args>``；失败抛 ``GitOperationFailed``。返回 stdout（已解码）。
 
     Args:
@@ -502,6 +793,7 @@ async def _run_git(*args: str, cwd: str | Path | None = None, timeout: float = 1
             "git",
             *args,
             cwd=str(cwd) if cwd else None,
+            env={**os.environ, **env} if env else None,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -524,15 +816,35 @@ async def _run_git(*args: str, cwd: str | Path | None = None, timeout: float = 1
         await proc.wait()
         raise GitOperationFailed(
             "GIT_TIMEOUT",
-            f"git {' '.join(args)} 超时（{timeout}s）",
+            f"git {redact_text(' '.join(args))} 超时（{timeout}s）",
         ) from None
     if proc.returncode != 0:
         msg = (stderr or b"").decode("utf-8", errors="replace").strip()
         raise GitOperationFailed(
             "GIT_FAILED",
-            f"git {' '.join(args)} 失败 (rc={proc.returncode}): {msg}",
+            f"git {redact_text(' '.join(args))} 失败 (rc={proc.returncode}): {redact_text(msg)}",
         )
     return (stdout or b"").decode("utf-8", errors="replace")
+
+
+async def _clone_git_source(
+    source_url: str,
+    target: Path,
+    *,
+    depth: int | None = 1,
+    timeout: float = 180.0,
+    env: dict[str, str] | None = None,
+) -> None:
+    """Clone 插件源；GitHub tree/<branch> 页面链接会转为仓库 URL + 分支。"""
+    _validate_source_url(source_url)
+    source = normalize_git_source_url(source_url)
+    args = ["clone"]
+    if depth is not None:
+        args.extend(["--depth", str(depth)])
+    if source.ref:
+        args.extend(["--branch", source.ref, "--single-branch"])
+    args.extend([source.clone_url, str(target)])
+    await _run_git(*args, timeout=timeout, env=env)
 
 
 # ─────────────────────────────────────────────────────
@@ -602,16 +914,22 @@ def _read_plugin_metadata(plugin_dir: Path, *, fallback_name: str) -> PluginMeta
         name=name,
         display_name=str(validated.display_name or ""),
         description=str(validated.description or ""),
+        usage=str(validated.usage or "").strip() or None,
         author=str(validated.author or ""),
         version=str(validated.version or "0.0.0"),
         entry=str(validated.entry or "plugin.py"),
         permissions=list(validated.permissions or []),
         config_schema=validated.config_schema,
+        config_actions=[item for item in validated.config_actions if isinstance(item, dict)],
+        agent_tools=[item for item in validated.agent_tools if isinstance(item, dict)],
         category=validated.category,
         interaction_profile=validated.interaction_profile,
         interaction_entries=[item for item in validated.interaction_entries if isinstance(item, dict)],
+        event_subscriptions=[item for item in validated.event_subscriptions if isinstance(item, dict)],
+        capabilities=dict(validated.capabilities) if isinstance(validated.capabilities, dict) else None,
         min_telepilot_version=validated.min_telepilot_version,
         min_telebot_version=validated.min_telebot_version,
+        tags=list(validated.tags or []),
     )
 
 
@@ -745,6 +1063,10 @@ def lint_plugin_metadata_files(plugin_dir: Path) -> list[str]:
     if pj.is_file():
         try:
             data = json.loads(pj.read_text(encoding="utf-8"))
+            if isinstance(data, dict) and not _plugin_declares_usage_guide(data):
+                warnings.append(
+                    "高级规范警告：插件未声明详细使用说明。请在 plugin.json 中提供 usage，或在 config_schema 中提供 usage_preview、x-usage-guide 或 x-usage-steps。"
+                )
             for path, text in _iter_json_strings(data):
                 warning = _warn_hardcoded_prefix("plugin.json", path, text)
                 if warning:
@@ -798,15 +1120,77 @@ def lint_plugin_metadata_files(plugin_dir: Path) -> list[str]:
                     result_contract = raw_entry.get("result_contract")
                     if isinstance(result_contract, dict):
                         send_via = result_contract.get("send_via")
-                        if isinstance(send_via, list) and send_via and any(
-                            str(item).strip() not in {"interaction_bot", "userbot_reply", "bbot_notice"}
-                            for item in send_via
+                        send_via_items = send_via if isinstance(send_via, list) else [send_via]
+                        if send_via is not None and (
+                            any(not send_via_selector_options(item) for item in send_via_items)
+                            or any(unsupported_send_via_values(item) for item in send_via_items)
                         ):
                             warnings.append(f"plugin.json interaction_entries[{idx}] result_contract.send_via 含有未支持值")
-                    else:
-                        warnings.append(f"plugin.json interaction_entries[{idx}] 建议声明 result_contract")
+                    raw_dispatch_modes = raw_entry.get("dispatch_modes")
+                    if isinstance(raw_dispatch_modes, list) and raw_dispatch_modes:
+                        unsupported = [
+                            str(item).strip()
+                            for item in raw_dispatch_modes
+                            if str(item).strip() not in {"admin_command", "public_keyword"}
+                        ]
+                        if unsupported:
+                            warnings.append(f"plugin.json interaction_entries[{idx}] dispatch_modes 含有未支持值")
                     if not raw_entry.get("interaction_profile"):
                         warnings.append(f"plugin.json interaction_entries[{idx}] 建议声明 interaction_profile")
+            subscriptions = data.get("event_subscriptions")
+            if isinstance(subscriptions, list) and subscriptions:
+                for idx, raw_subscription in enumerate(subscriptions, start=1):
+                    if not isinstance(raw_subscription, dict):
+                        warnings.append(f"plugin.json event_subscriptions[{idx}] 必须是对象")
+                        continue
+                    raw_events = raw_subscription.get("events")
+                    if not isinstance(raw_events, list) or not any(str(item or "").strip() in VALID_EVENT_TYPES for item in raw_events):
+                        warnings.append(f"plugin.json event_subscriptions[{idx}] events 必须声明有效事件")
+                    if isinstance(raw_events, list):
+                        unknown_events = sorted(
+                            {
+                                str(item or "").strip()
+                                for item in raw_events
+                                if str(item or "").strip() and str(item or "").strip() not in VALID_EVENT_TYPES
+                            }
+                        )
+                        if unknown_events:
+                            warnings.append(
+                                f"plugin.json event_subscriptions[{idx}] events 含未知类型: {', '.join(unknown_events)}，这些事件类型不会匹配任何当前支持的事件"
+                            )
+                    raw_sources = raw_subscription.get("source")
+                    if raw_sources is not None:
+                        source_items = raw_sources if isinstance(raw_sources, list) else [raw_sources]
+                        if any(str(item or "").strip() not in VALID_EVENT_SOURCES for item in source_items):
+                            warnings.append(f"plugin.json event_subscriptions[{idx}] source 含有未支持值")
+                    scope = str(raw_subscription.get("scope") or "all_allowed_chats").strip()
+                    if scope not in VALID_EVENT_SCOPES:
+                        warnings.append(f"plugin.json event_subscriptions[{idx}] scope 必须是 all_allowed_chats / owner_only / known_users / inline_all / rule_bound")
+                    filters = raw_subscription.get("filters")
+                    if isinstance(filters, dict):
+                        unknown = sorted(
+                            {
+                                str(key).strip()
+                                for key in filters
+                                if str(key).strip() and str(key).strip() not in SUPPORTED_FILTER_KEYS
+                            }
+                        )
+                        if unknown:
+                            warnings.append(
+                                f"plugin.json event_subscriptions[{idx}] filters 含未知 key: {', '.join(unknown)}，该过滤条件不会生效，订阅可能匹配到预期外的事件"
+                            )
+            capabilities = data.get("capabilities")
+            if isinstance(capabilities, dict):
+                native_raw = capabilities.get("telegram_native_raw")
+                if native_raw is not None:
+                    if not isinstance(native_raw, dict):
+                        warnings.append("plugin.json capabilities.telegram_native_raw 必须是对象")
+                    else:
+                        if native_raw.get("enabled") is True and not str(native_raw.get("reason") or "").strip():
+                            warnings.append("plugin.json capabilities.telegram_native_raw.enabled=true 时必须说明 reason")
+                        sources = native_raw.get("sources")
+                        if sources is not None and not isinstance(sources, list):
+                            warnings.append("plugin.json capabilities.telegram_native_raw.sources 必须是数组")
 
     # 去重并限制数量，避免一个坏模板刷屏。
     unique: list[str] = []
@@ -814,6 +1198,37 @@ def lint_plugin_metadata_files(plugin_dir: Path) -> list[str]:
         if item not in unique:
             unique.append(item)
     return unique[:10]
+
+
+def _plugin_declares_usage_guide(manifest: dict[str, Any]) -> bool:
+    if _has_usage_content(manifest.get("usage")):
+        return True
+    schema = manifest.get("config_schema")
+    if not isinstance(schema, dict):
+        return False
+    for key in ("x-usage-guide", "x-usage-instructions", "x-usage-steps", "x-help"):
+        if _has_usage_content(schema.get(key)):
+            return True
+    properties = schema.get("properties")
+    if not isinstance(properties, dict):
+        return False
+    for key in ("usage_preview", "usage_guide", "usage_instructions", "ai_usage_guide"):
+        field = properties.get(key)
+        if isinstance(field, dict) and (
+            _has_usage_content(field.get("default")) or _has_usage_content(field.get("description"))
+        ):
+            return True
+    return False
+
+
+def _has_usage_content(value: Any) -> bool:
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, list):
+        return any(_has_usage_content(item) for item in value)
+    if isinstance(value, dict):
+        return bool(value)
+    return False
 
 
 def _manifest_json_from_remote_meta(meta: PluginMetadata) -> dict[str, Any]:
@@ -826,18 +1241,30 @@ def _manifest_json_from_remote_meta(meta: PluginMetadata) -> dict[str, Any]:
         "entry": meta.entry,
         "permissions": list(meta.permissions),
     }
+    if meta.usage:
+        data["usage"] = meta.usage
     if meta.config_schema is not None:
         data["config_schema"] = meta.config_schema
+    if meta.config_actions:
+        data["config_actions"] = [item for item in meta.config_actions if isinstance(item, dict)]
+    if meta.agent_tools:
+        data["agent_tools"] = [item for item in meta.agent_tools if isinstance(item, dict)]
     if meta.category:
         data["category"] = meta.category
     if meta.interaction_profile:
         data["interaction_profile"] = meta.interaction_profile
     if meta.interaction_entries:
         data["interaction_entries"] = [item for item in meta.interaction_entries if isinstance(item, dict)]
+    if meta.event_subscriptions:
+        data["event_subscriptions"] = [item for item in meta.event_subscriptions if isinstance(item, dict)]
+    if isinstance(meta.capabilities, dict) and meta.capabilities:
+        data["capabilities"] = dict(meta.capabilities)
     if meta.min_telepilot_version:
         data["min_telepilot_version"] = meta.min_telepilot_version
     if meta.min_telebot_version:
         data["min_telebot_version"] = meta.min_telebot_version
+    if meta.tags:
+        data["tags"] = list(meta.tags)
     return data
 
 
@@ -918,12 +1345,25 @@ def _find_plugin_metadata_in_repo(repo_dir: Path, name: str) -> tuple[PluginMeta
     )
 
 
+async def _git_env_for_installed_source(
+    db: AsyncSession,
+    source_url: str,
+) -> dict[str, str] | None:
+    """复用插件仓库保存的私有仓库凭证。"""
+    if not source_url:
+        return None
+    from . import plugin_repo_service
+
+    return await plugin_repo_service.git_env_for_source_url(db, source_url)
+
+
 async def _copy_plugin_from_source_url(
     *,
     name: str,
     source_url: str,
     target: Path,
     replace_existing: bool,
+    git_env: dict[str, str] | None = None,
 ) -> None:
     """Clone ``source_url`` and copy plugin ``name`` into ``target``.
 
@@ -949,10 +1389,12 @@ async def _copy_plugin_from_source_url(
     target.parent.mkdir(parents=True, exist_ok=True)
 
     swapped = False
+    legacy_sqlite_names: list[str] = []
+    legacy_json_names: list[str] = []
     try:
         with tempfile.TemporaryDirectory(prefix="telepilot-plugin-update-") as tmp:
             repo_dir = Path(tmp) / "repo"
-            await _run_git("clone", "--depth", "1", source_url, str(repo_dir), timeout=180.0)
+            await _clone_git_source(source_url, repo_dir, timeout=180.0, env=git_env)
             _, source_dir = _find_plugin_metadata_in_repo(repo_dir, name)
             shutil.copytree(
                 source_dir,
@@ -967,10 +1409,14 @@ async def _copy_plugin_from_source_url(
                 )
             _validate_runtime_plugin_shape(staging, staged_meta)
 
+        legacy_sqlite_names = _relocate_legacy_plugin_sqlite(target, name)
+        legacy_json_names = _relocate_legacy_plugin_json(target, name)
         if replace_existing and target.exists():
             target.rename(backup)
         staging.rename(target)
         swapped = True
+        _attach_legacy_plugin_sqlite_links(target, name, legacy_sqlite_names)
+        _attach_legacy_plugin_json_links(target, name, legacy_json_names)
     except Exception:
         if staging.exists():
             shutil.rmtree(staging, ignore_errors=True)
@@ -1010,7 +1456,8 @@ async def check_remote_plugin_update(db: AsyncSession, row: InstalledPlugin) -> 
             source_url = str(row.source_url or "")
             if not source_url:
                 raise RemotePluginError("SOURCE_URL_MISSING", f"插件 {row.key} 缺少 source_url，无法检查更新")
-            await _run_git("clone", "--depth", "1", source_url, str(repo_dir), timeout=180.0)
+            git_env = await _git_env_for_installed_source(db, source_url)
+            await _clone_git_source(source_url, repo_dir, timeout=180.0, env=git_env)
             meta, plugin_dir = _find_plugin_metadata_in_repo(repo_dir, row.key)
             _set_remote_update_info(
                 row,
@@ -1024,7 +1471,7 @@ async def check_remote_plugin_update(db: AsyncSession, row: InstalledPlugin) -> 
             row,
             latest_version=row.version,
             update_available=False,
-            last_update_check_error=f"{type(exc).__name__}: {exc}",
+            last_update_check_error=redact_text(f"{type(exc).__name__}: {exc}"),
         )
     await db.flush()
     return row
@@ -1260,7 +1707,7 @@ async def install(
     renamed = False
     # 4. git clone 到 staging（带 timeout，防止挂起）
     try:
-        await _run_git("clone", "--depth", "1", source_url, str(staging), timeout=180.0)
+        await _clone_git_source(source_url, staging, timeout=180.0)
     except GitOperationFailed:
         # 失败时清理可能产生的部分目录
         if staging.exists():
@@ -1424,26 +1871,30 @@ async def update(db: AsyncSession, name: str) -> RemotePluginView:
         raise RemotePluginNotFound("PLUGIN_NOT_FOUND", f"插件不存在: {name}")
 
     target = Path(row.installed_path or _existing_plugin_dir(name))
+    source_url = str(row.source_url or "")
+    git_env = await _git_env_for_installed_source(db, source_url) if source_url else None
     restored_from_source = False
     if not target.exists():
         await _copy_plugin_from_source_url(
             name=name,
-            source_url=str(row.source_url or ""),
+            source_url=source_url,
             target=target,
             replace_existing=False,
+            git_env=git_env,
         )
         restored_from_source = True
 
     # git pull（带 timeout）。如果插件是从多插件仓库子目录复制安装的，
     # 安装目录没有 .git，此时临时 clone source_url 后按 plugin.json.name 定位子目录覆盖。
     if (target / ".git").exists():
-        await _run_git("pull", "--ff-only", cwd=target, timeout=60.0)
+        await _run_git("pull", "--ff-only", cwd=target, timeout=60.0, env=git_env)
     elif not restored_from_source:
         await _copy_plugin_from_source_url(
             name=name,
-            source_url=str(row.source_url or ""),
+            source_url=source_url,
             target=target,
             replace_existing=True,
+            git_env=git_env,
         )
 
     meta = _read_plugin_metadata(target, fallback_name=name)

@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1.7
 # 前端镜像：多阶段构建
 #   - builder：node22 alpine，corepack 启用 pnpm，执行 pnpm build
 #   - runtime：nginx alpine，托管 dist 静态资源 + 反代后端
@@ -9,15 +10,20 @@ WORKDIR /app
 # 启用 corepack，并固定 pnpm 10，避免服务器构建时漂到 pnpm 11 后忽略 onlyBuiltDependencies。
 RUN corepack enable && corepack prepare pnpm@10.23.0 --activate
 
-# 仅拷贝清单先装依赖，命中构建缓存
-COPY frontend/package.json frontend/pnpm-lock.yaml frontend/.npmrc ./
-RUN pnpm install --frozen-lockfile
+# 先按 lockfile 拉取依赖包。版本号变化只会重跑离线链接，不会重新下载依赖。
+COPY frontend/pnpm-lock.yaml frontend/.npmrc frontend/pnpm-workspace.yaml ./
+RUN --mount=type=cache,id=telepilot-pnpm,target=/pnpm/store \
+    pnpm config set store-dir /pnpm/store && pnpm fetch --frozen-lockfile
+COPY frontend/package.json ./
+RUN --mount=type=cache,id=telepilot-pnpm,target=/pnpm/store \
+    pnpm config set store-dir /pnpm/store && pnpm install --offline --frozen-lockfile
 
 # 拷贝其余源码、docs 与根更新日志（Sidebar 会通过 ?raw 读取 CHANGELOG.md）
 COPY frontend/ .
 COPY docs/ /docs/
 COPY CHANGELOG.md /CHANGELOG.md
-RUN pnpm build
+RUN --mount=type=cache,id=telepilot-tsbuild,target=/app/node_modules/.cache/tsbuild \
+    pnpm build
 
 
 FROM nginx:1.27-alpine AS runtime

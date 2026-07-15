@@ -4,7 +4,7 @@
 //   列表页：全表展示模板，name 徽章 type，编辑/删除按钮
 //   编辑对话框：根据 type 切不同子表单
 //   保存后后端会通知所有启用此模板的 worker 热加载
-import { forwardRef, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { forwardRef, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { ChevronDown, Loader2, Plus, Save, Trash2, Edit3 } from "lucide-react";
@@ -64,6 +64,7 @@ import type {
   LLMProviderOut,
 } from "@/api/types";
 import { getErrMsg } from "@/lib/api";
+import { cn } from "@/lib/utils";
 
 // 指令名仅允许 [a-zA-Z0-9_]，与后端正则对齐
 const NAME_RE = /^[a-zA-Z0-9_]{1,64}$/;
@@ -78,7 +79,19 @@ const TYPE_LABELS: Record<CommandTemplateType, string> = {
 
 type AiCapability = "routing" | "search" | "output" | "params";
 type AiCommandMode = "chat" | "search" | "image" | "video";
-type AiReasoningEffort = "" | "minimal" | "low" | "medium" | "high";
+type AiReasoningEffort = "" | "minimal" | "low" | "medium" | "high" | "xhigh";
+
+const AI_REASONING_OPTIONS: Array<{
+  value: AiReasoningEffort;
+  label: string;
+}> = [
+  { value: "", label: "自动" },
+  { value: "minimal", label: "极低" },
+  { value: "low", label: "低" },
+  { value: "medium", label: "中" },
+  { value: "high", label: "高" },
+  { value: "xhigh", label: "极高" },
+];
 
 const AI_MODE_DEFAULTS: Record<
   AiCommandMode,
@@ -190,6 +203,63 @@ function normalizeAiMode(value: unknown): AiCommandMode {
   return value === "search" || value === "image" || value === "video" ? value : "chat";
 }
 
+function ReasoningEffortSlider({
+  value,
+  onChange,
+}: {
+  value: AiReasoningEffort;
+  onChange: (value: AiReasoningEffort) => void;
+}) {
+  const selectedIndex = Math.max(
+    0,
+    AI_REASONING_OPTIONS.findIndex((option) => option.value === value),
+  );
+  const progress = (selectedIndex / (AI_REASONING_OPTIONS.length - 1)) * 100;
+  const selected = AI_REASONING_OPTIONS[selectedIndex];
+  const extreme = selected.value === "xhigh";
+  const thumbOffset = 1.25 - progress * 0.025;
+  const style = {
+    "--reasoning-progress": `${progress}%`,
+    "--reasoning-thumb-position": `calc(${progress}% + ${thumbOffset}rem)`,
+  } as CSSProperties;
+
+  return (
+    <div className={cn("reasoning-effort", extreme && "reasoning-effort-extreme")} style={style}>
+      <div className="reasoning-effort-track" aria-hidden="true">
+        <div className="reasoning-effort-fill" />
+        <div className="reasoning-effort-stops">
+          {AI_REASONING_OPTIONS.map((option, index) => (
+            <span
+              key={option.label}
+              className={cn("reasoning-effort-stop", index <= selectedIndex && "is-active")}
+            />
+          ))}
+        </div>
+        <div className="reasoning-effort-thumb" />
+        {extreme ? (
+          <div className="reasoning-effort-sparks">
+            {Array.from({ length: 9 }, (_, index) => <i key={index} />)}
+          </div>
+        ) : null}
+      </div>
+      <input
+        type="range"
+        min={0}
+        max={AI_REASONING_OPTIONS.length - 1}
+        step={1}
+        value={selectedIndex}
+        aria-label="推理强度"
+        aria-valuetext={`${selected.label}${selected.value ? `，${selected.value}` : "，使用提供商默认值"}`}
+        onChange={(event) => onChange(AI_REASONING_OPTIONS[Number(event.target.value)].value)}
+      />
+      <div className="reasoning-effort-caption">
+        <span className={cn("font-medium", extreme && "text-[hsl(270_92%_70%)]")}>{selected.label}</span>
+        <span>{selected.value || "使用提供商默认"}</span>
+      </div>
+    </div>
+  );
+}
+
 function applyAiModeDefaults(form: FormState, nextMode: AiCommandMode): Partial<FormState> {
   const currentDefaults = AI_MODE_DEFAULTS[form.ai_mode];
   const nextDefaults = AI_MODE_DEFAULTS[nextMode];
@@ -262,7 +332,8 @@ function formFromTemplate(t: CommandTemplateOut): FormState {
       cfg.reasoning_effort === "minimal" ||
         cfg.reasoning_effort === "low" ||
         cfg.reasoning_effort === "medium" ||
-        cfg.reasoning_effort === "high"
+        cfg.reasoning_effort === "high" ||
+        cfg.reasoning_effort === "xhigh"
         ? cfg.reasoning_effort
         : modeDefaults.reasoning_effort,
     ai_timeout_seconds:
@@ -462,10 +533,6 @@ export function CommandTemplates() {
     queryKey: ["cmd-tpl"],
     queryFn: listCommandTemplates,
   });
-  const providersQ = useQuery({
-    queryKey: ["llm-providers"],
-    queryFn: listLLMProviders,
-  });
   const accountsQ = useQuery({
     queryKey: ["accounts"],
     queryFn: listAccounts,
@@ -477,6 +544,13 @@ export function CommandTemplates() {
     queryFn: getSystemSettings,
   });
   const cmdPrefix = settingsQ.data?.command_prefix || ",";
+  const aiEnabled = settingsQ.data?.ai_enabled ?? true;
+  const providersQ = useQuery({
+    queryKey: ["llm-providers"],
+    queryFn: listLLMProviders,
+    enabled: !settingsQ.isLoading && aiEnabled,
+    retry: false,
+  });
   const providerIds = useMemo(
     () => new Set((providersQ.data || []).map((p) => p.id)),
     [providersQ.data],
@@ -538,6 +612,7 @@ export function CommandTemplates() {
       !!editId || shouldOpenNewAi || !!providerId || !!capability || !!returnTo;
 
     if (!hasConsumableQuery) return;
+    if (shouldOpenNewAi && settingsQ.isLoading) return;
     if (editId && !listQ.isSuccess) return;
 
     if (returnTo) {
@@ -563,11 +638,18 @@ export function CommandTemplates() {
         toast.error("未找到指定模板");
       }
     } else if (shouldOpenNewAi) {
-      setEditing({
-        ...EMPTY_FORM,
-        type: "ai",
-        ai_provider_id: providerId || EMPTY_FORM.ai_provider_id,
-      });
+      if (!aiEnabled) {
+        toast.error("AI 能力已关闭，请先到系统设置启用");
+        if (returnTo) {
+          nav(returnTo);
+        }
+      } else {
+        setEditing({
+          ...EMPTY_FORM,
+          type: "ai",
+          ai_provider_id: providerId || EMPTY_FORM.ai_provider_id,
+        });
+      }
     }
 
     const nextParams = new URLSearchParams(searchParams);
@@ -577,7 +659,7 @@ export function CommandTemplates() {
     nextParams.delete("aiCapability");
     nextParams.delete("returnTo");
     setSearchParams(nextParams, { replace: true });
-  }, [listQ.data, listQ.isSuccess, searchParams, setSearchParams]);
+  }, [aiEnabled, listQ.data, listQ.isSuccess, nav, searchParams, setSearchParams, settingsQ.isLoading]);
 
   const createMut = useMutation({
     mutationFn: (form: FormState) => {
@@ -726,8 +808,8 @@ export function CommandTemplates() {
           </div>
         </CardHeader>
         <CardContent>
-          {providerUnavailable ? (
-            <div className="mb-3 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+          {aiEnabled && providerUnavailable ? (
+            <div className="mb-3 rounded-md border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-warning">
               chat/search 类 AI 指令需要先添加模型提供商；image + codex_image 与 video + 插件后端可先使用插件配置。
               <Button
                 type="button"
@@ -763,7 +845,9 @@ export function CommandTemplates() {
               <Spinner className="text-primary" />
             </div>
           ) : visibleTemplates.length > 0 ? (
-            <Table>
+            <>
+            <div className="hidden overflow-x-auto md:block">
+            <Table className="min-w-[760px]">
               <TableHeader>
                 <TableRow>
                   <TableHead>指令</TableHead>
@@ -844,6 +928,80 @@ export function CommandTemplates() {
                 ))}
               </TableBody>
             </Table>
+            </div>
+            <div className="space-y-3 md:hidden">
+              {visibleTemplates.map((t) => {
+                const providerMissing =
+                  t.type === "ai" &&
+                  providersQ.isSuccess &&
+                  typeof t.config?.provider_id === "number" &&
+                  !providerIds.has(t.config.provider_id);
+                return (
+                  <div key={t.id} className="rounded-xl border border-border/70 bg-background/70 p-3">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="break-all font-mono text-sm font-semibold">{cmdPrefix}{t.name}</div>
+                        <div className="mt-1 text-xs leading-5 text-muted-foreground">
+                          {t.description || "未填写说明"}
+                        </div>
+                      </div>
+                      <div className="flex shrink-0 flex-col items-end gap-1.5">
+                        <Badge variant="secondary">{TYPE_LABELS[t.type] || t.type}</Badge>
+                        {providerMissing ? <Badge variant="destructive">模型缺失</Badge> : null}
+                      </div>
+                    </div>
+                    <div className="mt-3 rounded-lg border border-border/70 bg-muted/30 px-3 py-2">
+                      <div className="text-[11px] text-muted-foreground">别名</div>
+                      <div className="mt-1 flex flex-wrap gap-1">
+                        {(t.aliases || []).length === 0 ? (
+                          <span className="text-xs text-muted-foreground">无别名</span>
+                        ) : (
+                          (t.aliases || []).map((a) => (
+                            <Badge key={a} variant="outline" className="font-mono text-[11px]">
+                              {cmdPrefix}{a}
+                            </Badge>
+                          ))
+                        )}
+                      </div>
+                    </div>
+                    <div className="mt-3 grid grid-cols-3 gap-2">
+                      <Button variant="outline" size="sm" onClick={() => openEnableFlow(t)}>
+                        启用
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => {
+                          returnToRef.current = null;
+                          setFocusCapability(null);
+                          setEditing(formFromTemplate(t));
+                        }}
+                      >
+                        编辑
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="border-destructive/40 text-destructive hover:bg-destructive/10 hover:text-destructive"
+                        disabled={deleteMut.isPending}
+                        onClick={() => {
+                          if (
+                            confirm(
+                              `确认删除模板「${t.name}」？所有启用此模板的账号都会失去这个指令`,
+                            )
+                          ) {
+                            deleteMut.mutate(t.id);
+                          }
+                        }}
+                      >
+                        删除
+                      </Button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+            </>
           ) : (
             <p className="rounded-md border border-dashed py-8 text-center text-xs text-muted-foreground">
               {typeFilter ? "当前筛选下没有模板。" : "尚无模板。新建一个后即可在账号详情中勾选启用"}
@@ -867,6 +1025,13 @@ export function CommandTemplates() {
               }
               if (
                 editing.type === "ai" &&
+                !aiEnabled
+              ) {
+                toast.error("AI 能力已关闭，请先到系统设置启用");
+                return;
+              }
+              if (
+                editing.type === "ai" &&
                 providerUnavailable &&
                 !(editing.ai_mode === "image" && editing.ai_image_backend === "codex_image") &&
                 !(editing.ai_mode === "video" && editing.ai_video_backend === "plugin")
@@ -882,6 +1047,7 @@ export function CommandTemplates() {
             }}
             saving={createMut.isPending || updateMut.isPending}
             hasProviders={hasProviders}
+            aiEnabled={aiEnabled}
             providerUnavailable={providerUnavailable}
             onGoProviders={() => nav("/ai?tab=providers")}
           />
@@ -906,7 +1072,7 @@ export function CommandTemplates() {
                 ))}
               </Select>
             </div>
-            <DialogFooter>
+            <DialogFooter className="!flex !flex-row gap-2 sm:space-x-0 [&>*]:min-w-0 [&>*]:flex-1 sm:[&>*]:flex-none">
               <Button variant="outline" onClick={() => setEnableTargetTemplate(null)}>
                 取消
               </Button>
@@ -990,6 +1156,7 @@ function CommandEditDialog({
   onSave,
   saving,
   hasProviders,
+  aiEnabled,
   providerUnavailable,
   onGoProviders,
 }: {
@@ -1002,6 +1169,7 @@ function CommandEditDialog({
   onSave: () => void;
   saving: boolean;
   hasProviders: boolean;
+  aiEnabled: boolean;
   providerUnavailable: boolean;
   onGoProviders: () => void;
 }) {
@@ -1018,13 +1186,17 @@ function CommandEditDialog({
   const providersQ = useQuery({
     queryKey: ["llm-providers"],
     queryFn: listLLMProviders,
-    enabled: form.type === "ai",
+    enabled: aiEnabled && form.type === "ai",
+    retry: false,
   });
 
   // 切类型时清相邻字段，避免上次填的脏数据落到 config
   const typeOptions = useMemo(
-    () => Object.entries(TYPE_LABELS) as [CommandTemplateType, string][],
-    [],
+    () =>
+      (Object.entries(TYPE_LABELS) as [CommandTemplateType, string][]).filter(
+        ([type]) => aiEnabled || type !== "ai" || form.type === "ai",
+      ),
+    [aiEnabled, form.type],
   );
   const [openAiSections, setOpenAiSections] = useState<AiCapability[]>(() => {
     const defaults: AiCapability[] = [];
@@ -1071,15 +1243,15 @@ function CommandEditDialog({
 
   return (
     <Dialog open onOpenChange={(o) => !o && onCancel()}>
-      <DialogContent className="max-h-[85vh] max-w-2xl overflow-y-auto">
-        <DialogHeader>
+      <DialogContent className="dialog-center !flex w-[calc(100vw-1.5rem)] max-w-2xl flex-col gap-0 overflow-hidden p-0">
+        <DialogHeader className="shrink-0 border-b border-border/70 px-4 py-4 pr-12 sm:px-6">
           <DialogTitle>{isEdit ? "编辑" : "新建"} 自定义指令</DialogTitle>
           <DialogDescription>
             根据类型不同，下方表单会切到对应字段，*为必填项
           </DialogDescription>
         </DialogHeader>
 
-        <div className="space-y-4">
+        <div className="safe-scrollbar min-h-0 flex-1 touch-pan-y space-y-4 overflow-y-auto overscroll-contain px-4 py-4 sm:px-6">
           <div className="grid grid-cols-2 gap-3">
             <div className="space-y-1.5">
               <Label>指令 *</Label>
@@ -1107,8 +1279,12 @@ function CommandEditDialog({
                   </option>
                 ))}
               </Select>
-              {providerUnavailable ? (
-                <p className="text-xs text-amber-700">
+              {!aiEnabled ? (
+                <p className="text-xs text-muted-foreground">
+                  AI 能力已关闭，暂不提供 AI 类型；已有 AI 模板会保留。
+                </p>
+              ) : providerUnavailable ? (
+                <p className="text-xs text-warning">
                   chat/search 需要模型提供商；image 和 video 可先桥接账号插件。
                   <Button
                     type="button"
@@ -1518,21 +1694,10 @@ function CommandEditDialog({
                     </div>
                     <div className="space-y-1.5">
                       <Label>推理强度（reasoning_effort）</Label>
-                      <Select
+                      <ReasoningEffortSlider
                         value={form.ai_reasoning_effort}
-                        onChange={(e) =>
-                          setField(
-                            "ai_reasoning_effort",
-                            e.target.value as FormState["ai_reasoning_effort"],
-                          )
-                        }
-                      >
-                        <option value="">不下发</option>
-                        <option value="minimal">minimal · 极低</option>
-                        <option value="low">low · 低</option>
-                        <option value="medium">medium · 中</option>
-                        <option value="high">high · 高</option>
-                      </Select>
+                        onChange={(effort) => setField("ai_reasoning_effort", effort)}
+                      />
                       <p className="text-xs text-muted-foreground">
                         当前模式默认 {AI_MODE_DEFAULTS[form.ai_mode].reasoning_effort || "不下发"}；控制支持推理模型的思考预算，当前对 OpenAI Chat/Responses 协议下发。
                       </p>
@@ -1659,8 +1824,8 @@ function CommandEditDialog({
           )}
         </div>
 
-        <DialogFooter>
-          <Button variant="ghost" onClick={onCancel} disabled={saving}>
+        <DialogFooter className="!flex shrink-0 !flex-row gap-2 border-t border-border/70 px-4 py-3 sm:px-6 [&>*]:min-w-0 [&>*]:flex-1 sm:[&>*]:flex-none">
+          <Button variant="outline" onClick={onCancel} disabled={saving}>
             取消
           </Button>
           <Button onClick={onSave} disabled={saving}>

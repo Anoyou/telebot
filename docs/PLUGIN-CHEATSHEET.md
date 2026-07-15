@@ -1,56 +1,116 @@
 # TelePilot 插件速查表
 
-- 路线默认值：0.x 走 Route A，受信/签名插件同进程运行。
-- 产品文案统一叫“插件”，代码契约仍是 `Plugin` / `Manifest` / `PluginContext`。
-- 最小目录：`__init__.py`、`manifest.py`、`plugin.py`。
-- `__init__.py` 导出 `PLUGIN_CLASS` 和 `MANIFEST`。
-- `Manifest.key` 要和插件类 `key` 一致。
-- `permissions` 不写就不会注入对应能力。
-- `ctx.client` 是主运行入口；远程插件拿到的是受限 `SandboxClient`。
-- `ctx.http` 需要 `external_http` + `allowed_hosts`。
-- `ctx.ai` 需要 `ai_text`，细节见 `docs/PLUGIN-AI.md`。
-- `command` 只保存裸指令名，不保存前缀。
-- 帮助文案里用 `{prefix}`，不要硬编码 `,`。
-- `owner_only=False` 只开放 `on_message`，不开放普通用户管理指令。
-- `incoming` 和 `outgoing` 是唯一的消息方向值。
-- `on_command(ctx, cmd, args, event) -> bool`，返回 `True` 表示接管。
-- `on_message` 里别直接假设 `event.outgoing` 一定存在，先 `getattr`。
-- `on_interaction` 用于交互 Bot，按 `entry_key` 和 `payload["event"]["type"]` 分流。
-- `interaction_entries[].launch_mode` 必填：`bridge` 走交互 Bot，`direct` 走原命令/内部调用，`hybrid` 两边都支持。
-- 常见事件：`payment_confirmed`、`keyword`、`message`、`callback_query`、`session_close`。
-- 常见动作：`send_message`、`send_photo`、`send_file`、`end_session`。
-- `send_message.reply_markup` 可用于 inline keyboard；按钮点击会作为 `callback_query` 事件回到同一活跃会话。
-- `interaction_entries[].session_scope` 必填：群局写 `chat`，个人流程写 `user`，一次性动作写 `none`。
-- `interaction_entries[].events` 是事件白名单，别让插件自己猜会收到什么。
-- 交互 payload 优先看 `source`、`actor`、`source_actor`、`payment`、`player`、`reply_to`、`trigger`、`session` 信封；旧平铺字段只做兼容。
-- `source` 是事件类型和消息上下文，`source_actor` 是实际发消息的 Bot/用户，`actor` 是本次事件行为主体，`player` 是付费开局绑定玩家，`payment` 是到账证据。
-- 付费玩法必须以可信转账通知 Bot 的 `payment.status=confirmed` 作为到账依据；UserBot/回复上下文只用于补充付款玩家 `user_id`。
-- 独玩或按钮玩法声明 `participant_policy=solo_owner`，缺少 `player.user_id` 时平台会先要求付款人点击确认；抢答类玩法用 `open_race`。
-- 新交互入口名尽量别再用泛化的 `start_game`，用 `start_<plugin_key>` 更清楚；历史别名只在插件内部兼容。
-- `interaction_profile` 建议显式写：`session_game`、`challenge_game`、`reward_pool`、`utility_trigger`。
-- `session_policy` 写 TTL、重复触发、关闭条件；插件内部状态 key 要和 `session_scope` 对齐。
-- `payload_contract` 描述输入要求，`result_contract` 描述允许动作和 `send_via` 白名单。
-- `send_via` 只能用白名单值；默认只允许 `interaction_bot`。
-- 常见 `send_via`：`interaction_bot`、`userbot_reply`、`bbot_notice`。
-- `userbot_reply` 由账号 worker 的 userbot 代发，不是插件自由选择发送者。
-- `settlement` 只描述中奖/奖金/对账结果，交互 Bot 不直接执行钱相关动作。
-- `preserve_command_trigger=true` 是硬规则；加交互入口不能影响插件原有命令触发。
-- `command_fallback` 只能提示或受控回退，不能让普通 incoming 消息直接进入 `on_command`。
-- 规则 `concurrency=user` 只表示每用户 CD/每日上限，不等于插件会话也按用户。
-- 自动回复和交互 Bot 都只是触发器；业务逻辑放插件本体，UserBot 命令和 `on_interaction` 调同一份业务函数。
-- 长表单页要把“使用说明 → 功能总开关 → 配置”拆成三张卡。
-- 有保存字段的页面要放顶部冻结“配置操作”条。
-- 规则驱动页用 `rules`，单配置页用 `single`，平台能力用 `platform`。
-- 旧 `schema` 只保留给老插件兼容。
-- 远程插件要有 `plugin.json`、`manifest.py`、`plugin.py`、`__init__.py`。
-- `plugin.json` 只做静态安装元数据，不执行 Python。
-- 远程插件安装后还要看 `manifest.py` 的真实 `MANIFEST`。
-- 远程插件的 `version`、`category`、`interaction_entries` 要前后一致。
-- `plugin.json` 和 `manifest.py` 里的交互入口字段要同步，尤其 `launch_mode`、`events`、`session_scope`、`result_contract`。
-- 已接入的 installed 互动插件可跑 `python scripts/validate-installed-interaction-plugins.py` 做一次静态对齐检查。
-- 抢答/竞猜/抽奖要用锁和二次检查，避免重复发奖。
-- 超时任务、禁用、热重载、卸载都要清理状态。
-- 外部请求必须有 timeout。
-- 日志里不要放 token、session、完整路径或完整隐私消息。
-- 普通指令只由当前账号 outgoing 触发，不能直接让群成员触发管理命令。
-- 需要更多细节时，分别看概览、API、HTTP、安全和远程插件文档。
+先读 [插件开发铁律](./PLUGIN-RULES.md)，再用本页回忆字段名和常用模式。
+
+- 必须理解 TelePilot 插件按个人可信插件模式运行：管理员安装并启用后，视为信任插件业务逻辑；平台负责事件信封、MessageOps 代发、Trace、风险提示、急停和审计。
+- 最快命令插件可用简单模式 SDK：`from telepilot import plugin`，再写 `@plugin.command("ping")` 的单函数 `async def ping(ctx): await ctx.reply("pong")`；插件目录只需要 `__init__.py`，目录名就是插件 key。
+- 简单模式不写 `PLUGIN_CLASS` / `MANIFEST` 时，loader 会从装饰器合成隐式插件类和 Manifest；当前隐式权限是 `read_event` + `send_message`，命令默认是 owner-only 的账号命令。
+- 简单模式适合快速账号命令、小工具和内部玩法；需要 `plugin.json` 展示字段、`event_subscriptions`、`interaction_entries`、配置 schema、HTTP/AI 权限、按钮、Inline、付款或会话时，用显式 Manifest 模式。
+- 当前 `tp_plugin new` 没有 `--profile simple`；可选 profile 只有 `session_game`、`command`、`passthrough`。
+- 必须把新 Telegram 插件写成 Event Bus + Trace + MessageOps：`plugin.json` 写 `usage`、`event_subscriptions`、`capabilities`，插件只读标准事件信封，动作只通过 `ctx.messages` 或标准 action 返回。
+- 禁止把 `interaction_entries`、旧交互规则、旧平铺 payload、`notice` / `bbot_notice` / `notice_bot` 作为新插件模板；这些只用于迁移说明。
+- 显式 Manifest 模式必须保留最小目录：`plugin.json`、`manifest.py`、`plugin.py`、`__init__.py`。`plugin.json.name`、`MANIFEST.key`、插件类 `key` 必须一致。
+- 必须把 `usage` 写成插件中心可展示的使用说明；有 `config_schema` 时也可以补 `x-usage-guide` / `x-usage-steps`，但不要只靠口头说明。
+- 禁止用空 `usage` 绕过检查；缺失会触发高级规范警告，插件库维护插件和示例插件都必须完整声明。
+- `event_subscriptions[].events` 常用值：`message`、`command`、`callback_query`、`inline_query`、`chosen_inline_result`、`payment_confirmed`、`webhook`、`session_close`、`message_edited`、`session_expired`、`all_events`；`all_messages` 仍只等于 `message` / `command`。
+- `event_subscriptions[].source` 常用值：`userbot`、`interaction_bot`、`external_payment_notice`、`webhook`。
+- `event_subscriptions[].scope` 常用值：`all_allowed_chats`、`owner_only`、`known_users`、`rule_bound`、`inline_all`；Inline 插件必须显式用 `inline_all`。
+- `known_users` 只认平台 state 提供的真实集合，不会自动把当前 sender 算进去。
+- `filters` 常见键：`keywords`、`contains`、`callback_data`、`commands`、`rule_id`、`hook_key`、`hook_keys`；未知 key 会保留但会告 warning。
+- 严格来说只有 `telegram_direct_passthrough` 叫裸直通；Event Bus、会话入口、legacy hook 都是消息分发/会话路由。
+- `capabilities.telegram_native_raw` 是高风险能力声明；需要原生 Telegram 字段时写 `enabled=true`、`reason`、`sources`，并处理 `native_raw_meta.enabled=false` 的降级。
+- 标准事件信封优先读：`source`、`message`、`chat`、`sender`、`actor`、`source_actor`、`player`、`payment`、`reply_to`、`trigger`、`session`、`native_raw_meta`。
+- 新插件读取文本优先用 `payload["tp_event"]` 或 `event_from_interaction_payload(payload)`；不要用 `payload["text"]` / `payload["chat_id"]` / `payload.get("message")` 当主路径。
+- 互动玩法优先写成一个 `on_interaction(ctx, entry_key, payload)`，在同一个入口里处理 `command`、`keyword`、`payment_confirmed`、`message`、`callback_query`、`session_expired`。
+- 会话状态放进 `session.data`，状态变更返回 `update_session`；不要再靠进程内 dict/lock 才能续局。
+- `source` 描述事件类型和来源通道；`actor` 是当前行为主体；`sender` 是发出消息的人或 Bot；`source_actor` 可表示可信外部通知 Bot；`player` 是付款绑定玩家；`payment.status=confirmed` 才能作为到账依据。
+- `session.channel` 表示当前整段会话默认收发通道；普通发送动作不用手写 `send_via`，平台会继承会话通道。
+- 普通消息回复使用 `ctx.messages.send(...)` 或返回 `{"type": "send_message", ...}`；标题、任务列表、折叠详情、表格等原生格式使用 `ctx.messages.send_rich(html=...)` 或 `send_rich_message` action；图片题面可用 `ctx.messages.send_photo(..., save_message_id_key="round")`，后续用 `ctx.messages.edit_caption(message_id_key="round", caption="...")` 原地更新 caption。
+- `send_rich` 的 `html` / `markdown` / `blocks` 必须三选一，继续声明 `send_message` 权限；它固定走 Interaction Bot。UserBot/Telethon 没有原生 Rich Message 对等接口，显式 `userbot_reply` 会返回 `rich_message_requires_interaction_bot`，不会静默退化。
+- 按钮必须经 `send_message.reply_markup` 发出；按钮回调用 `answer_callback`，不要在插件里直接拼 Bot API。
+- userbot 会话没有原生按钮，平台会把按钮降级成文本编号，并把玩家回复合成为 callback；此时 `source.synthetic="text_button"`。
+- 免费参与、按钮加入、互动游戏可按自身玩法保存完整业务状态；如果只是为了后续发奖锚点，记录玩家 `tgid` 即可。发奖动作优先用 `payout`，也可走 `userbot_reply` 并携带 `reply_to_user_id`，平台会搜索该玩家近期发言作为回复锚点，插件不要自己遍历群消息。已有 `reply_to_message_id` 时优先用消息 id；找不到锚点时动作失败并写入日志，默认提示 `未找到对应用户（用户 ID）的近期消息。`，可用 `reply_anchor_missing_text` 自定义提示。
+- Inline 插件返回 `answer_inline_query`；选择结果进入 `chosen_inline_result`，用于记录选择、结算或后续状态。
+- 付款/发奖插件返回 `settlement` 或 userbot 受控动作；普通 Bot 只公告结果，不直接执行转账、催付或发奖。
+- 常见 action：`send_message`、`send_rich_message`、`send_photo`、`send_file`、`edit_message`、`edit_caption`、`delete_message`、`pin_message`、`answer_callback`、`answer_inline_query`、`payout`、`update_session`、`settlement`、`result`、`end_session`。
+- `send_via` 只在高级覆盖时使用 `interaction_bot`、`userbot_reply` 或 `auto`；旧 `notice` 值应返回迁移错误，不能静默执行。
+- 默认 `send_message` / `send_photo` / `send_file` 等动作按 `parse_mode="plain"` 发送；只有显式声明 `parse_mode="html"` 时才启用普通消息 HTML。`send_rich_message` 使用独立的 Rich HTML/Markdown/blocks 语法，动态 HTML 文案同样先转义再拼标签。
+- 强按钮玩法可通过 `interaction_trigger_modes=keyword_only` 关闭命令触发；manifest 可用 `default_trigger_modes` 提供默认值。
+- `callback_fast_ack=true` 适合耗时按钮入口；启用后晚到的 `answer_callback` 不再真正调用 Telegram ACK。
+- `ctx.http` 需要 `permissions=["external_http"]` 和 `allowed_hosts`。
+- `ctx.ai` 需要 `permissions=["ai_text"]`，复用平台 LLM Provider、fallback、预算和 usage 记录。
+- `ctx.client` 只保留给管理员命令和高级兼容场景；远程插件仍不能直接拿 token、session、Bot API client 或 live event。
+- `command` 只保存裸指令名，不保存前缀；schema/usage 模板用 `{prefix}`，运行时帮助与错误示例必须调用 `from app.worker.command import current_command_prefix`，使用 `current_command_prefix(fallback=",")`。不要从 `ctx.account_config` 读取系统前缀，也不要硬编码逗号。
+- `on_command(ctx, cmd, args, event) -> bool` 保留给账号主人/授权管理员命令；群友公开触发走 Event Bus 订阅。
+- `on_message` 是旧消息监听兼容 hook；新增 Telegram 交互优先写标准事件入口或 `on_interaction` 迁移桥。
+- 已有 `interaction_entries` 插件迁移时，要把入口事件映射到 `event_subscriptions`，把 `payload_contract/result_contract/settlement` 转成标准信封和标准 action。
+- `interaction_entries[].session_scope` 的迁移含义：群局映射为 `session.scope=chat`，个人流程映射为 `session.scope=user`，一次性动作映射为无持久 session。
+- 规则 `concurrency=user` 只是触发频控粒度，不等于插件会话 key。
+- 抢答、竞猜、抽奖要加锁和二次检查；禁用、热重载、超时和卸载都要清理状态。
+- 外部请求必须有 timeout；日志里不要写 token、session、完整原生 payload、隐私消息或完整文件路径。
+- 维护示例：新主模板看 `examples/plugins/event_bus_demo`；Webhook 看 `webhook_receiver`；HTTP 看 `with_http`；AI 看 `with_ai`；旧交互迁移看 `with_interaction`。
+- 迁移边界：平台功能不伪装成插件；插件库维护插件必须完整声明；示例插件只用于学习和 CI；用户安装插件可保留代码但启用/更新时要提示规范警告。
+- 验证示例：`backend/.venv/bin/python scripts/validate-plugin-examples.py`；检查已安装互动插件：`backend/.venv/bin/python scripts/validate-installed-interaction-plugins.py`。
+
+常见 `reason_code` 快查：
+
+| reason_code | 含义 |
+| --- | --- |
+| `matched` | 订阅命中 |
+| `subscription_not_matched` / `filter_not_matched` | 没有订阅命中 / 过滤条件未命中 |
+| `plugin_disabled` / `plugin_load_failed` / `plugin_runtime_error` | 插件未启用 / 加载失败 / 运行异常 |
+| `command_matched` / `command_not_matched` / `command_unauthorized` | 命令命中 / 未命中 / 权限不足 |
+| `event_bus_delivery_disabled` / `inline_disabled` | 运维开关关闭 Event Bus 投递 / Inline |
+| `native_raw_not_allowed` / `native_raw_skipped` | 未声明原生数据能力 / 本次未下发 |
+| `send_channel_deprecated` / `unsupported_send_via` | 使用旧 notice 通道 / 未支持通道 |
+| `rich_message_requires_interaction_bot` / `invalid_rich_message` | 原生 Rich Message 被要求走 UserBot / 内容结构非法 |
+| `already_acked` / `synthetic_callback` | fast-ack 已提前确认 / 文本按钮降级合成的 callback |
+| `action_limit_exceeded` | 动作数量超出平台限制，后续动作会被截断并写入可见告警 |
+| `bot_not_configured` / `bot_token_missing` / `userbot_offline` | Bot 未配置 / token 缺失 / UserBot 离线 |
+| `payout_failed` / `telegram_api_error` / `trace_write_failed` | 发奖动作失败 / Telegram API 失败 / Trace 写入降级 |
+
+最小单入口模板：
+
+```python
+from telepilot import plugin
+
+
+@plugin.command("ping")
+async def ping(ctx):
+    await ctx.reply("pong")
+```
+
+显式 Event Bus 单入口模板：
+
+```python
+async def on_interaction(self, ctx, entry_key, payload):
+    event = payload["tp_event"]
+
+    if event.type == "command":
+        return [{"type": "update_session", "data": {"answer": "42"}}]
+
+    if event.type == "message" and event.message.text == "42":
+        return [
+            {"type": "payout", "amount": 88, "reply_to_user_id": event.sender.user_id},
+            {"type": "end_session"},
+        ]
+
+    if event.type == "session_expired":
+        return [{"type": "send_message", "chat_id": event.message.chat_id, "text": "本局已超时"}]
+
+    return []
+```
+
+Rich Message 快速模板：
+
+```python
+await ctx.messages.send_rich(
+    html=(
+        "<h1>任务状态</h1>"
+        '<ul><li><input type="checkbox" checked>已完成</li></ul>'
+        "<details><summary>详情</summary><p>trace 已写入</p></details>"
+        "<table bordered><tr><th>项目</th><th>状态</th></tr>"
+        "<tr><td>Worker</td><td>正常</td></tr></table>"
+    )
+)
+```

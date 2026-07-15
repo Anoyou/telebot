@@ -3,7 +3,8 @@
 统一为 ``[账号 × feature]`` 下的 Rule 提供 CRUD + dry-run + 复制到其它账号。
 所有写操作完成后通过 IPC ``CMD_RELOAD_CONFIG`` 通知对应 worker 热加载。
 
-注意：当前 dry-run 仅对 ``auto_reply`` 实现真正的命中判断；其它 feature 返回不命中。
+注意：普通插件不再随 TelePilot 本体分发。插件 dry-run 优先调用已安装插件导出的
+``_dry_run_match``；未安装或未导出时返回明确提示，不从 builtin 路径兜底。
 """
 
 from __future__ import annotations
@@ -27,6 +28,7 @@ from ..db.models.feature import (
     FEATURE_SCHEDULER,
     Feature,
 )
+from ..db.models.plugin import PLUGIN_TRUST_ORPHAN, InstalledPlugin
 from ..db.models.rule import Rule
 from ..deps import CurrentUser, DBSession
 from ..redis_client import get_redis
@@ -40,6 +42,7 @@ from ..schemas.rule import (
 )
 from ..services import audit
 from ..services.redactor import redact_value
+from ..settings import settings
 from ..worker.ipc import CMD_RELOAD_CONFIG, cmd_channel, make_cmd, publish_cmd_with_ack
 
 log = logging.getLogger(__name__)
@@ -85,28 +88,45 @@ def _to_out(r: Rule) -> RuleOut:
     return out
 
 
-def _auto_reply_dry_run_match(*args):
-    from ..worker.plugins.builtin.auto_reply import _dry_run_match
-
-    return _dry_run_match(*args)
-
-
 def _forward_dry_run_match(*args):
     from ..worker.plugins.builtin.forward.plugin import _dry_run_match
 
     return _dry_run_match(*args)
 
 
-def _autorepeat_dry_run_match(*args):
-    from ..worker.plugins.builtin.autorepeat.plugin import _dry_run_match
+async def _installed_plugin_dry_run_match(db, feature_key: str, *args):
+    installed = await db.get(InstalledPlugin, feature_key)
+    if installed is None:
+        return False, f"{feature_key} 插件库插件未安装，无法执行 dry-run。"
+    if not bool(getattr(installed, "enabled", False)):
+        return False, f"{feature_key} 已安装但全局开关关闭，无法执行 dry-run。"
+    if str(getattr(installed, "trust_tier", "") or "") == PLUGIN_TRUST_ORPHAN:
+        return False, f"{feature_key} 安装记录为 orphan，无法执行 dry-run。"
+    signature_ok = getattr(installed, "signature_ok", None)
+    if signature_ok is False:
+        return False, f"{feature_key} 签名校验失败，无法执行 dry-run。"
+    if signature_ok is None and not bool(settings.plugin_allow_legacy_unsigned_plugins):
+        return False, f"{feature_key} 签名状态未知，当前策略不允许执行 dry-run。"
+    install_error = str(getattr(installed, "last_install_error", "") or "").strip()
+    if install_error:
+        return False, f"{feature_key} 安装失败：{install_error}"
 
-    return _dry_run_match(*args)
+    import sys
 
+    from ..worker.plugins.loader import _installed_module_name, _load_installed_plugin
 
-def _codex_image_dry_run_match(*args):
-    from ..worker.plugins.builtin.codex_image.plugin import _dry_run_match
+    loaded = _load_installed_plugin(feature_key)
+    if feature_key not in loaded:
+        return False, f"{feature_key} 插件库插件未安装或加载失败，无法执行 dry-run。"
 
-    return _dry_run_match(*args)
+    package_name = _installed_module_name(feature_key)
+    for module_name in (f"{package_name}.plugin", package_name):
+        module = sys.modules.get(module_name)
+        dry_run = getattr(module, "_dry_run_match", None)
+        if callable(dry_run):
+            return dry_run(*args)
+
+    return False, f"{feature_key} 插件未导出 _dry_run_match，无法执行 dry-run。"
 
 
 def _parse_scheduler_dt(raw: Any) -> datetime | None:
@@ -365,7 +385,7 @@ async def dry_run_rule(
 ) -> RuleDryRunResponse:
     """试运行：把 sample 消息喂给规则，返回是否命中 + 渲染输出。
 
-    - ``auto_reply``：完整匹配 + 渲染
+    - ``auto_reply``：调用已安装插件的 ``_dry_run_match`` 完成匹配 + 渲染
     - ``forward``：按 ``source_kind`` 判断是否进入转发流水线，输出 "would forward to ..." 描述
     - 其它 feature：当前返回 matched=False（未实现）
     """
@@ -375,7 +395,9 @@ async def dry_run_rule(
     if key == FEATURE_AUTO_REPLY:
         chat_type = payload.sample_chat_type or "private"
         cfg = rule.config or {}
-        matched, output = _auto_reply_dry_run_match(
+        matched, output = await _installed_plugin_dry_run_match(
+            db,
+            key,
             cfg,
             payload.sample_message,
             chat_type,
@@ -533,7 +555,9 @@ async def dry_run_rule(
     # ── autorepeat dry-run ──
     if key == FEATURE_AUTOREPEAT:
         cfg = rule.config or {}
-        matched, output = _autorepeat_dry_run_match(
+        matched, output = await _installed_plugin_dry_run_match(
+            db,
+            key,
             cfg,
             payload.sample_message,
             payload.sample_chat_id,
@@ -556,7 +580,9 @@ async def dry_run_rule(
     # ── codex_image dry-run ──
     if key == FEATURE_CODEX_IMAGE:
         cfg = rule.config or {}
-        matched, output = _codex_image_dry_run_match(
+        matched, output = await _installed_plugin_dry_run_match(
+            db,
+            key,
             cfg,
             payload.sample_message,
             payload.sample_chat_id,
@@ -568,7 +594,7 @@ async def dry_run_rule(
             {"step": "sample", "msg": f"提示词长度：{len(payload.sample_message)}"},
         ]
         if not matched:
-            logs.append({"step": "result", "msg": "未命中（缺 access_token）"})
+            logs.append({"step": "result", "msg": output or "未命中（缺 access_token）"})
         else:
             logs.append({"step": "result", "msg": "命中"})
         return RuleDryRunResponse(

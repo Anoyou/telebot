@@ -2,6 +2,8 @@ import { api } from "@/lib/api";
 import type { RemotePlugin, InstallRequest, AccountPluginAction, RemotePluginUpdateCheckResponse } from "@/types/remotePlugin";
 
 const BASE = "/api/remote-plugins";
+// git clone/pull 可能较慢；与 pluginRepo 对齐放宽到 120s。
+const REMOTE_PLUGIN_GIT_TIMEOUT_MS = 120_000;
 
 export async function fetchRemotePlugins(): Promise<RemotePlugin[]> {
   const { data } = await api.get<RemotePlugin[]>(BASE);
@@ -11,7 +13,9 @@ export async function fetchRemotePlugins(): Promise<RemotePlugin[]> {
 export async function installRemotePlugin(
   body: InstallRequest
 ): Promise<RemotePlugin> {
-  const { data } = await api.post<RemotePlugin>(`${BASE}/install`, body);
+  const { data } = await api.post<RemotePlugin>(`${BASE}/install`, body, {
+    timeout: REMOTE_PLUGIN_GIT_TIMEOUT_MS,
+  });
   return data;
 }
 
@@ -55,13 +59,19 @@ export async function disableRemotePluginForAccounts(
 
 export async function updateRemotePlugin(name: string): Promise<RemotePlugin> {
   const { data } = await api.post<RemotePlugin>(
-    `${BASE}/${encodeURIComponent(name)}/update`
+    `${BASE}/${encodeURIComponent(name)}/update`,
+    undefined,
+    { timeout: REMOTE_PLUGIN_GIT_TIMEOUT_MS },
   );
   return data;
 }
 
 export async function checkRemotePluginUpdates(): Promise<RemotePluginUpdateCheckResponse> {
-  const { data } = await api.post<RemotePluginUpdateCheckResponse>(`${BASE}/check-updates`);
+  const { data } = await api.post<RemotePluginUpdateCheckResponse>(
+    `${BASE}/check-updates`,
+    undefined,
+    { timeout: REMOTE_PLUGIN_GIT_TIMEOUT_MS },
+  );
   return data;
 }
 

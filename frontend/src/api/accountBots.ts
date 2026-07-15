@@ -59,6 +59,35 @@ export async function updateInteractionBotConfig(
   return data;
 }
 
+export type InteractionCompositePluginConfig = {
+  plugin_key: string;
+  config: Record<string, unknown>;
+};
+
+export type InteractionCompositeSaveResponse = {
+  interaction: AccountBotInteractionConfig;
+  plugins: Array<{
+    plugin_key: string;
+    config_keys: string[];
+    enabled: boolean;
+  }>;
+};
+
+/** 原子保存交互 Bot 配置 + 相关插件配置（波次二）。 */
+export async function saveInteractionBotComposite(
+  aid: number,
+  payload: {
+    interaction: AccountBotInteractionConfigUpdate;
+    plugin_configs: InteractionCompositePluginConfig[];
+  },
+): Promise<InteractionCompositeSaveResponse> {
+  const { data } = await api.put<InteractionCompositeSaveResponse>(
+    `/api/accounts/${aid}/interaction-bot/composite`,
+    payload,
+  );
+  return data;
+}
+
 export const getTransferNoticeConfig = getInteractionBotConfig;
 export const updateTransferNoticeConfig = updateInteractionBotConfig;
 

@@ -9,6 +9,9 @@
   "commands": ["ai_providers", "ai_complete"],
   "category": "utility",
   "permissions": ["ai_text", "edit_message"],
+  "usage": "安装后使用账号命令 ai_providers 查看可用 provider，使用 ai_complete 文本 调用平台统一 LLM facade。该示例不订阅 Telegram Event Bus。",
+  "event_subscriptions": [],
+  "capabilities": {},
   "config_schema": {
     "type": "object",
     "x-ui-mode": "single",

@@ -4,7 +4,7 @@
 - ``Plugin`` 是基类，所有内置 / 第三方插件继承它并通过 ``@register`` 注册到全局表。
 - 注册表存放的是 **类对象**（不是实例），每账号在 loader 里各自实例化一次，避免共享状态。
 - ``PluginContext`` 是给插件运行期使用的"上下文容器"：账号 id、配置、规则、Telethon
-      client、风控引擎、redis、日志写入器、平台调度器、安全 HTTP facade；
+      client、风控引擎、redis、持久化 storage、日志写入器、平台调度器、安全 HTTP facade；
       插件实现各 hook 时只需读它就够了。
 - 严格遵循 ``CONTRACTS.md`` 的"插件 Hook"段；所有 hook 默认实现为 no-op，子类按需重写。
 """
@@ -13,10 +13,13 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from pathlib import Path
 from typing import Any
 
 from telethon import TelegramClient, events
+
+from .manifest import Manifest
 
 
 def _clean_text(value: Any) -> str:
@@ -77,15 +80,19 @@ class PluginContext:
     字段：
       - ``account_id``：当前 worker 服务的账号 id
       - ``feature_key``：插件对应的 feature key（与 ``Plugin.key`` 一致）
-      - ``config``：``account_feature.config`` 中保存的 dict（可由 reload_config 热更新）
+      - ``config``：合并后的插件配置（schema defaults < global config < account config）
+      - ``account_config``：``account_feature.config`` 原始账号级配置（不含 schema/global 合并值）
       - ``rules``：该 [账号 × feature] 下所有 ``enabled=True`` 的 ``Rule``，按 priority 倒序
       - ``client``：Telethon 客户端（loader 注入）
       - ``engine``：风控引擎（C Agent 提供，支持 ``acquire`` 与各 ``on_*`` 回调）
       - ``redis``：异步 Redis 客户端
+      - ``storage``：按 [账号 × 插件] 隔离的持久化 key-value facade
+      - ``data_dir``：插件独享、更新插件代码时不会被覆盖的持久化文件目录
       - ``log``：写运行日志的协程；签名 ``async (level, message, **detail)``
       - ``scheduler``：平台调度器 facade，可在插件内注册 cron / interval / once 任务
       - ``http``：声明 ``external_http`` 和 ``allowed_hosts`` 后注入的安全 HTTP facade
-      - ``ai``：声明 ``ai_text`` 后注入的安全文本 LLM facade
+      - ``ai``：声明 ``ai_text`` 或独立 ``ai_agent`` 后注入的安全 LLM facade
+      - ``messages``：标准消息动作 facade；交互入口内为缓冲动作，后台任务/命令中为实时受控投递
 
     为避免循环 import，``rules`` / ``engine`` / ``redis`` 都用 ``Any`` 标注。
     """
@@ -93,16 +100,23 @@ class PluginContext:
     account_id: int
     feature_key: str
     config: dict[str, Any] = field(default_factory=dict)
+    account_config: dict[str, Any] = field(default_factory=dict)
     rules: list[Any] = field(default_factory=list)  # list[Rule] —— 这里用 Any 防循环引用
     client: TelegramClient | None = None
     engine: Any = None  # RateLimitEngine
     redis: Any = None  # redis.asyncio.Redis
+    storage: Any = None  # PluginStorage
+    data_dir: Path | None = None
     log: Callable[..., Awaitable[None]] | None = None
     scheduler: Any = None  # SchedulerFacade
     http: Any = None  # PluginHTTP
     ai: Any = None  # PluginAI
+    messages: Any = None
     generation: int = 0
     account_proxy_url: str | None = None
+    event: Any | None = None
+    args: list[str] = field(default_factory=list)
+    command: str = ""
 
     @asynccontextmanager
     async def conversation(self, peer: Any, timeout: float = 30.0) -> AsyncIterator[Any]:
@@ -120,6 +134,26 @@ class PluginContext:
             raise RuntimeError("PluginContext.client 未初始化")
         async with _conv(self.client, peer, timeout) as conv:
             yield conv
+
+    async def reply(self, text: Any, *args: Any, **kwargs: Any) -> Any:
+        """Reply to the current command event from simple-mode plugins."""
+
+        if self.event is not None:
+            reply = getattr(self.event, "reply", None)
+            if callable(reply):
+                return await reply(text, *args, **kwargs)
+            respond = getattr(self.event, "respond", None)
+            if callable(respond):
+                return await respond(text, *args, **kwargs)
+        if self.messages is not None:
+            chat_id = getattr(self.event, "chat_id", None) if self.event is not None else None
+            if chat_id is not None:
+                return await self.messages.send(chat_id=chat_id, text=text, **kwargs)
+        if self.client is not None and self.event is not None:
+            chat_id = getattr(self.event, "chat_id", None)
+            if chat_id is not None:
+                return await self.client.send_message(chat_id, text, *args, **kwargs)
+        raise RuntimeError("ctx.reply 需要命令事件或可发送消息的上下文")
 
 
 # ─────────────────────────────────────────────────────
@@ -179,6 +213,20 @@ class Plugin:
         ``on_message`` 语义。
         """
 
+    async def on_direct_message(
+        self,
+        ctx: PluginContext,
+        event: events.NewMessage.Event | events.MessageEdited.Event,
+    ) -> None:
+        """低延迟直通消息入口；默认 no-op。
+
+        这是高风险高级入口，只会在插件 manifest 显式声明
+        ``capabilities.telegram_direct_passthrough.enabled=true``，且账号级
+        ``AccountFeature.config.direct_passthrough.enabled=true`` 时启用。运行时会在
+        白名单/暂停检查后、Trace/Event Bus/legacy 包装前，把原始 Telethon event
+        交给插件；一旦命中直通插件，本条消息不会继续进入普通消息链路。
+        """
+
     async def on_command(
         self,
         ctx: PluginContext,
@@ -197,16 +245,59 @@ class Plugin:
     ) -> list[dict[str, Any]] | None:
         """交互 Bot 入口；返回平台标准动作列表，默认表示未实现。
 
-        平台会尽量提供统一信封：
-        - ``event``: 兼容旧版的扁平事件对象
-        - ``source`` / ``actor`` / ``reply_to`` / ``trigger`` / ``session``: 新版标准信封
-        - 旧字段如 ``event_type`` / ``message_text`` / ``sender_name`` / ``reply_to_text`` 继续保留
+        平台会提供标准事件信封：
+        - ``source`` / ``message`` / ``chat`` / ``sender`` / ``actor`` /
+          ``source_actor`` / ``player`` / ``payment`` / ``reply_to`` /
+          ``trigger`` / ``session`` / ``raw`` 是新插件主路径
+        - ``event`` 和 ``event_type`` / ``message_text`` / ``sender_name`` 等
+          平铺字段只作为历史兼容来源
 
         标准动作约定：
-        - ``send_message`` / ``send_photo`` / ``send_file``
-        - 可选 ``send_via``，默认由交互 Bot 发送；``userbot_reply`` 表示由账号 worker 的 userbot 代发
+        - ``send_message`` / ``send_rich_message`` / ``send_photo`` / ``send_file``
+        - ``edit_message`` 编辑纯文本消息；``edit_caption`` 编辑图片/文件 caption
+        - 普通发送动作默认继承会话通道；``send_via`` / ``channel`` /
+          ``channel_selector`` 只用于跨通道公告、管理提示和迁移兼容等高级覆盖
         - ``end_session`` / ``close_session`` / ``no_session`` / ``result``
         - 可选 ``settlement``，供平台记录和后续结算
+
+        新插件可优先使用 ``ctx.messages`` 生成受控消息动作，例如
+        ``await ctx.messages.send(chat_id=..., text="...")``；需要标题、任务列表、
+        折叠详情或表格时使用仅限 Interaction Bot 的
+        ``await ctx.messages.send_rich(html="...")``。
+        这些动作不会直接调用 Bot API 或 Telethon，而是随本 hook 的返回结果交给
+        平台统一校验、限流、审计和发送。
+        """
+        return None
+
+    async def on_event(
+        self,
+        ctx: PluginContext,
+        payload: dict[str, Any],
+    ) -> list[dict[str, Any]] | None:
+        """Event Bus 主入口；新插件优先实现这个 hook。
+
+        ``payload`` 是 TelePilot 标准事件信封。插件可直接返回标准 action，
+        或使用 ``ctx.messages`` 缓冲发送、编辑、删除、置顶、callback ACK、
+        inline answer 等动作，由平台统一执行和记录 Trace。
+        """
+        return None
+
+    async def on_config_action(
+        self,
+        ctx: PluginContext,
+        action_key: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """配置页动作入口；默认未实现。
+
+        插件可在 manifest/config_schema 中声明配置动作，由 TelePilot 配置页渲染按钮。
+        用户点击后平台会构造一个不带 Telegram client 的受控 ``PluginContext``，
+        注入当前表单配置、``ctx.http`` 和 ``ctx.ai`` 等安全 facade，然后调用此 hook。
+
+        返回值应是普通 dict，常用字段：
+        - ``config_patch``：要合并回当前表单的字段值，例如 ``{"rules": [...]}``
+        - ``message`` / ``toast``：给管理员展示的短反馈
+        - ``result``：可选的结构化结果，供更高级前端组件消费
         """
         return None
 
@@ -218,13 +309,124 @@ class Plugin:
 _REGISTRY: dict[str, type[Plugin]] = {}
 
 
+@dataclass(frozen=True)
+class SimpleCommandSpec:
+    """A command declared through the simple-mode SDK."""
+
+    name: str
+    handler: Callable[[PluginContext], Awaitable[Any]]
+    module_name: str
+
+
+_SIMPLE_COMMANDS: dict[str, list[SimpleCommandSpec]] = {}
+
+
+def _normalize_command_name(name: str) -> str:
+    command = str(name or "").strip().lstrip("/")
+    if not command:
+        raise ValueError("@plugin.command 需要非空命令名")
+    return command
+
+
+def register_simple_command(name: str, fn: Callable[[PluginContext], Awaitable[Any]]) -> Callable:
+    """Register a simple-mode command function for loader-time manifest inference."""
+
+    command = _normalize_command_name(name)
+    module_name = str(getattr(fn, "__module__", "") or "").strip()
+    if not module_name:
+        raise ValueError("@plugin.command 只能用于可导入模块中的函数")
+    specs = _SIMPLE_COMMANDS.setdefault(module_name, [])
+    specs[:] = [item for item in specs if item.name != command]
+    specs.append(SimpleCommandSpec(name=command, handler=fn, module_name=module_name))
+    return fn
+
+
+class PluginSDK:
+    """Public decorator namespace exposed as ``from telepilot import plugin``."""
+
+    def command(self, name: str) -> Callable[[Callable[[PluginContext], Awaitable[Any]]], Callable]:
+        """Declare a single-function userbot command plugin."""
+
+        def decorator(fn: Callable[[PluginContext], Awaitable[Any]]) -> Callable:
+            return register_simple_command(name, fn)
+
+        return decorator
+
+
+plugin = PluginSDK()
+
+
+def _simple_specs_for_module(module_name: str) -> list[SimpleCommandSpec]:
+    prefix = f"{module_name}."
+    specs: list[SimpleCommandSpec] = []
+    for spec_module, module_specs in _SIMPLE_COMMANDS.items():
+        if spec_module == module_name or spec_module.startswith(prefix):
+            specs.extend(module_specs)
+    return specs
+
+
+def clear_simple_commands_for_module(module_name: str) -> None:
+    """Drop simple-mode declarations owned by a plugin module before reload."""
+
+    prefix = f"{module_name}."
+    for spec_module in list(_SIMPLE_COMMANDS):
+        if spec_module == module_name or spec_module.startswith(prefix):
+            _SIMPLE_COMMANDS.pop(spec_module, None)
+
+
+def build_implicit_plugin(
+    *,
+    module_name: str,
+    plugin_key: str,
+    display_name: str | None = None,
+) -> tuple[type[Plugin], Manifest] | None:
+    """Build ``PLUGIN_CLASS`` and ``MANIFEST`` from simple-mode decorators."""
+
+    specs = _simple_specs_for_module(module_name)
+    if not specs:
+        return None
+    commands: dict[str, Callable[..., Awaitable[None]]] = {}
+
+    for spec in specs:
+        async def _run(_client, event, args, _account_id, ctx, *, _spec=spec):  # noqa: ANN001
+            call_ctx = replace(
+                ctx,
+                event=event,
+                args=list(args or []),
+                command=_spec.name,
+            )
+            await _spec.handler(call_ctx)
+
+        commands[spec.name] = _run
+
+    display = display_name or plugin_key.replace("_", " ").replace("-", " ").title()
+    cls = type(
+        f"{plugin_key.title().replace('_', '').replace('-', '')}SimplePlugin",
+        (Plugin,),
+        {
+            "key": plugin_key,
+            "display_name": display,
+            "commands": commands,
+            "owner_only": True,
+        },
+    )
+    manifest = Manifest(
+        key=plugin_key,
+        display_name=display,
+        description=f"{display} simple command plugin",
+        category="utility",
+        permissions=["read_event", "send_message"],
+    )
+    return cls, manifest
+
+
 def register(plugin_cls: type[Plugin]) -> type[Plugin]:
     """装饰器：把一个 ``Plugin`` 子类注册到全局表。
 
     用法：
         @register
-        class AutoReplyPlugin(Plugin):
-            key = "auto_reply"
+        class DemoPlugin(Plugin):
+            key = "demo"
             ...
     """
     if not getattr(plugin_cls, "key", ""):
@@ -247,7 +449,11 @@ __all__ = [
     "Plugin",
     "PluginContext",
     "all_plugins",
+    "build_implicit_plugin",
+    "clear_simple_commands_for_module",
     "get_plugin",
+    "plugin",
     "public_entity_display_name",
     "register",
+    "register_simple_command",
 ]

@@ -1,47 +1,423 @@
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock
+from datetime import UTC, datetime
+from types import SimpleNamespace
 
 import pytest
 
-from app.api.logs import list_audit_logs
+from app.api import logs as logs_api
+from app.api.logs import (
+    EventTraceSummary,
+    list_event_traces,
+    list_log_messages,
+    list_runtime_logs,
+    list_system_console_logs,
+)
+
+
+def _trace_row(**overrides):
+    data = {
+        "id": 1,
+        "trace_id": "evt_test",
+        "account_id": 1,
+        "source_channel": "interaction_bot",
+        "event_type": "message",
+        "chat_id": None,
+        "message_id": None,
+        "update_id": 11,
+        "callback_query_id": None,
+        "sender_user_id": 1001,
+        "sender_name": "Alice",
+        "text_preview": None,
+        "status": "ok",
+        "started_at": datetime(2026, 6, 29, tzinfo=UTC),
+        "ended_at": None,
+        "duration_ms": None,
+        "native_raw_meta": None,
+        "raw_summary": None,
+        "payload_snapshot": None,
+    }
+    data.update(overrides)
+    return SimpleNamespace(**data)
+
+
+def test_trace_summary_projects_inline_query_fields() -> None:
+    row = _trace_row(
+        event_type="inline_query",
+        text_preview="fallback query",
+        raw_summary={"query": "raw query"},
+        payload_snapshot={"inline_query": {"query": "payload query"}},
+    )
+
+    summary = EventTraceSummary.from_row(row)
+
+    assert summary.inline_query == "payload query"
+    assert summary.chosen_inline_result_id is None
+    assert summary.chosen_inline_query is None
+
+
+def test_trace_summary_projects_chosen_inline_result_fields() -> None:
+    row = _trace_row(
+        event_type="chosen_inline_result",
+        text_preview="fallback chosen query",
+        raw_summary={"query": "raw chosen query"},
+        payload_snapshot={"chosen_inline_result": {"result_id": "result-1", "query": "payload chosen query"}},
+    )
+
+    summary = EventTraceSummary.from_row(row)
+
+    assert summary.inline_query is None
+    assert summary.chosen_inline_result_id == "result-1"
+    assert summary.chosen_inline_query == "payload chosen query"
+
+
+def test_trace_summary_projects_chat_title() -> None:
+    row = _trace_row(payload_snapshot={"chat": {"id": -1001, "title": "测试群"}})
+
+    summary = EventTraceSummary.from_row(row)
+
+    assert summary.chat_title == "测试群"
+
+
+def test_system_console_search_accepts_post_only() -> None:
+    route = next(route for route in logs_api.router.routes if route.path == "/api/logs/system-console")
+
+    assert route.methods == {"POST"}
+
+
+class _EmptyScalarResult:
+    def scalar_one(self):
+        return 0
+
+    def scalars(self):
+        return self
+
+    def all(self):
+        return []
+
+
+class _CaptureDB:
+    def __init__(self) -> None:
+        self.statements: list[str] = []
+
+    async def execute(self, stmt):
+        self.statements.append(str(stmt))
+        return _EmptyScalarResult()
+
+
+class _ListScalarResult:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def scalars(self):
+        return self
+
+    def all(self):
+        return self._rows
+
+
+class _MessageDB:
+    def __init__(self, *, traces, spans, actions) -> None:
+        self.traces = traces
+        self.spans = spans
+        self.actions = actions
+        self.statements: list[str] = []
+
+    async def execute(self, stmt):
+        sql = str(stmt)
+        self.statements.append(sql)
+        if "FROM event_span" in sql:
+            return _ListScalarResult(self.spans)
+        if "FROM event_action" in sql:
+            return _ListScalarResult(self.actions)
+        return _ListScalarResult(self.traces)
 
 
 @pytest.mark.asyncio
-async def test_list_audit_logs_applies_action_filter() -> None:
-    fake_db = AsyncMock()
-    fake_result = MagicMock()
-    fake_result.scalars.return_value.all = MagicMock(return_value=[])
-    fake_db.execute = AsyncMock(return_value=fake_result)
+async def test_list_event_traces_filters_by_trace_and_reason_code() -> None:
+    db = _CaptureDB()
 
-    await list_audit_logs(
-        db=fake_db,
-        _user=None,  # type: ignore[arg-type]
-        action="account_bot.test",
-        limit=20,
+    rows = await list_event_traces(
+        db=db,
+        _user=object(),
+        trace_id="evt_test",
+        reason_code="send_channel_deprecated",
+        limit=100,
     )
 
-    stmt = fake_db.execute.await_args.args[0]
-    sql = str(stmt)
-    assert "audit_log.action" in sql
-    assert "LIMIT" in sql
+    assert rows == []
+    sql = "\n".join(db.statements)
+    assert "event_trace.trace_id" in sql
+    assert "event_span.reason_code" in sql
+    assert "event_action.error_code" in sql
 
 
 @pytest.mark.asyncio
-async def test_list_audit_logs_applies_keyword_filter() -> None:
-    fake_db = AsyncMock()
-    fake_result = MagicMock()
-    fake_result.scalars.return_value.all = MagicMock(return_value=[])
-    fake_db.execute = AsyncMock(return_value=fake_result)
+async def test_list_runtime_logs_filters_by_keyword() -> None:
+    db = _CaptureDB()
 
-    await list_audit_logs(
-        db=fake_db,
-        _user=None,  # type: ignore[arg-type]
-        keyword="restart",
-        limit=20,
+    rows = await list_runtime_logs(
+        db=db,
+        _user=object(),
+        account_id=None,
+        level=None,
+        plugin_key=None,
+        keyword="telegram_api_error",
+        source=None,
+        since=None,
+        limit=100,
     )
 
-    stmt = fake_db.execute.await_args.args[0]
-    sql = str(stmt)
-    assert "audit_log.action" in sql
-    assert "audit_log.target" in sql
+    assert rows == []
+    sql = "\n".join(db.statements)
+    assert "runtime_log.message" in sql
+    assert "runtime_log.level" in sql
+    assert "runtime_log.source" in sql
+    assert "runtime_log.detail" in sql
+
+
+@pytest.mark.asyncio
+async def test_system_console_logs_uses_updater_and_redacts(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: list[tuple[str, int]] = []
+
+    def fake_fetch(service: str, tail: int):
+        captured.append((service, tail))
+        return {
+            "ok": True,
+            "source": "docker_compose",
+            "services": [service],
+            "tail": tail,
+            "lines": ["web | token=abc12345 ready", "web | normal line"],
+        }
+
+    monkeypatch.setattr("app.api.logs._fetch_updater_console_logs", fake_fetch)
+
+    result = await list_system_console_logs(
+        _user=object(),
+        body=logs_api.SystemConsoleLogsRequest(service="web", tail=100),
+    )
+
+    assert result.ok is True
+    assert result.source == "docker_compose"
+    assert result.services == ["web"]
+    assert result.lines[0] == "web | token=*** ready"
+    assert captured == [("web", 100)]
+
+
+@pytest.mark.asyncio
+async def test_system_console_keyword_is_filtered_without_forwarding_to_updater(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: list[tuple[str, int]] = []
+
+    def fake_fetch(service: str, tail: int):
+        captured.append((service, tail))
+        return {
+            "ok": True,
+            "source": "docker_compose",
+            "services": [service],
+            "tail": tail,
+            "lines": ["web | alpha", "web | private needle", "web | omega"],
+        }
+
+    monkeypatch.setattr("app.api.logs._fetch_updater_console_logs", fake_fetch)
+
+    result = await list_system_console_logs(
+        _user=object(),
+        body=logs_api.SystemConsoleLogsRequest(service="web", keyword="needle", tail=100),
+    )
+
+    assert result.lines == ["web | private needle"]
+    assert captured == [("web", 100)]
+
+
+@pytest.mark.asyncio
+async def test_system_console_logs_falls_back_to_local_files(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    backend_log = tmp_path / "backend.log"
+    backend_log.write_text("line one\nline two\n", encoding="utf-8")
+
+    def fake_fetch(*_args, **_kwargs):
+        raise RuntimeError("updater down")
+
+    monkeypatch.setattr("app.api.logs._fetch_updater_console_logs", fake_fetch)
+    monkeypatch.setitem(logs_api._LOCAL_CONSOLE_FILES, "web", backend_log)
+
+    result = await list_system_console_logs(
+        _user=object(),
+        body=logs_api.SystemConsoleLogsRequest(service="web", keyword="two", tail=100),
+    )
+
+    assert result.ok is True
+    assert result.source == "local_files"
+    assert result.lines == ["web  | line two"]
+
+
+@pytest.mark.asyncio
+async def test_list_log_messages_batches_spans_actions_and_filters_verdict() -> None:
+    traces = [
+        _trace_row(
+            id=1,
+            trace_id="evt_ok",
+            text_preview="hello",
+            status="ok",
+            ended_at=datetime(2026, 6, 29, tzinfo=UTC),
+        ),
+        _trace_row(
+            id=2,
+            trace_id="evt_failed",
+            text_preview="pay",
+            status="ok",
+            ended_at=datetime(2026, 6, 29, tzinfo=UTC),
+        ),
+    ]
+    spans = [
+        SimpleNamespace(
+            id=1,
+            span_id="sp_1",
+            trace_id="evt_ok",
+            phase="route",
+            component="interaction_rule",
+            plugin_key=None,
+            entry_key=None,
+            status="ok",
+            reason_code="matched",
+            message=None,
+            detail=None,
+            started_at=datetime(2026, 6, 29, tzinfo=UTC),
+            ended_at=datetime(2026, 6, 29, tzinfo=UTC),
+            duration_ms=1,
+        ),
+        SimpleNamespace(
+            id=2,
+            span_id="sp_2",
+            trace_id="evt_failed",
+            phase="plugin_invoke",
+            component="interaction_module",
+            plugin_key="math10",
+            entry_key=None,
+            status="ok",
+            reason_code=None,
+            message=None,
+            detail=None,
+            started_at=datetime(2026, 6, 29, tzinfo=UTC),
+            ended_at=datetime(2026, 6, 29, tzinfo=UTC),
+            duration_ms=1,
+        ),
+    ]
+    actions = [
+        SimpleNamespace(
+            id=1,
+            action_id="act_1",
+            trace_id="evt_ok",
+            plugin_key="math10",
+            action_type="send_message",
+            status="ok",
+            error_code=None,
+            error_message=None,
+        ),
+        SimpleNamespace(
+            id=2,
+            action_id="act_2",
+            trace_id="evt_failed",
+            plugin_key="math10",
+            action_type="send_message",
+            status="failed",
+            error_code="telegram_api_error",
+            error_message="bad request",
+        ),
+    ]
+    db = _MessageDB(traces=traces, spans=spans, actions=actions)
+
+    rows = await list_log_messages(
+        db=db,
+        _user=object(),
+        account_id=None,
+        source_channel=None,
+        event_type=None,
+        chat_id=None,
+        message_id=None,
+        update_id=None,
+        sender_user_id=None,
+        plugin_key=None,
+        status=None,
+        trace_id=None,
+        reason_code=None,
+        verdict="failed",
+        keyword=None,
+        since=None,
+        until=None,
+        limit=100,
+    )
+
+    assert [row.trace_id for row in rows] == ["evt_failed"]
+    assert rows[0].verdict == "failed"
+    assert rows[0].plugin_keys == ["math10"]
+    assert rows[0].funel.sent == "fail"
+    sql = "\n".join(db.statements)
+    assert sql.count("FROM event_span") == 1
+    assert sql.count("FROM event_action") == 1
+
+
+class _PagedMessageDB(_MessageDB):
+    def __init__(self, *, trace_pages, spans, actions) -> None:
+        super().__init__(traces=[], spans=spans, actions=actions)
+        self.trace_pages = list(trace_pages)
+
+    async def execute(self, stmt):
+        sql = str(stmt)
+        self.statements.append(sql)
+        if "FROM event_span" in sql:
+            trace_ids = {span.trace_id for span in self.spans}
+            return _ListScalarResult([span for span in self.spans if span.trace_id in trace_ids])
+        if "FROM event_action" in sql:
+            trace_ids = {action.trace_id for action in self.actions}
+            return _ListScalarResult([action for action in self.actions if action.trace_id in trace_ids])
+        return _ListScalarResult(self.trace_pages.pop(0) if self.trace_pages else [])
+
+
+@pytest.mark.asyncio
+async def test_list_log_messages_verdict_scans_later_pages_until_match() -> None:
+    first_page = [
+        _trace_row(id=index, trace_id=f"evt_noise_{index}", status="ok", ended_at=datetime(2026, 6, 29, tzinfo=UTC))
+        for index in range(1, 4)
+    ]
+    target = _trace_row(
+        id=99,
+        trace_id="evt_deep_failed",
+        status="ok",
+        ended_at=datetime(2026, 6, 28, tzinfo=UTC),
+    )
+    failed_action = SimpleNamespace(
+        id=99,
+        action_id="act_deep",
+        trace_id="evt_deep_failed",
+        plugin_key="math10",
+        action_type="send_message",
+        status="failed",
+        error_code="telegram_api_error",
+        error_message="bad request",
+    )
+    db = _PagedMessageDB(trace_pages=[first_page, [target]], spans=[], actions=[failed_action])
+
+    rows = await list_log_messages(
+        db=db,
+        _user=object(),
+        account_id=None,
+        source_channel=None,
+        event_type=None,
+        chat_id=None,
+        message_id=None,
+        update_id=None,
+        sender_user_id=None,
+        plugin_key=None,
+        status=None,
+        trace_id=None,
+        reason_code=None,
+        verdict="failed",
+        keyword=None,
+        since=None,
+        until=None,
+        limit=1,
+    )
+
+    assert [row.trace_id for row in rows] == ["evt_deep_failed"]

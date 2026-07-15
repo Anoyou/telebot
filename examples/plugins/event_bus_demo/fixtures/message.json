@@ -1,0 +1,15 @@
+{
+  "source": {
+    "type": "message",
+    "channel": "interaction_bot",
+    "account_id": 1,
+    "message_id": 41
+  },
+  "chat": {"id": -100100200300, "type": "supergroup"},
+  "message": {"chat_id": -100100200300, "message_id": 41, "text": "hello event bus"},
+  "actor": {"user_id": 501, "display_name": "玩家 A"},
+  "sender": {"user_id": 501, "display_name": "玩家 A"},
+  "trigger": {"mode": "public_keyword", "keyword": "hello"},
+  "session": {"key": "chat:-100100200300:event_bus_demo", "scope": "chat", "active": true},
+  "native_raw_meta": {"enabled": false, "reason": "not_requested"}
+}

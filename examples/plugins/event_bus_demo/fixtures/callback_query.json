@@ -1,0 +1,16 @@
+{
+  "source": {
+    "type": "callback_query",
+    "channel": "interaction_bot",
+    "account_id": 1,
+    "callback_query_id": "cbq-1001",
+    "callback_data": "event_bus_demo:confirm"
+  },
+  "chat": {"id": -100100200300, "type": "supergroup"},
+  "message": {"chat_id": -100100200300, "message_id": 44, "text": "请选择"},
+  "actor": {"user_id": 501, "display_name": "玩家 A"},
+  "sender": {"user_id": 501, "display_name": "玩家 A"},
+  "trigger": {"rule_id": 12, "entry": "event_bus_demo"},
+  "session": {"key": "chat:-100100200300:event_bus_demo", "scope": "chat", "active": true},
+  "native_raw_meta": {"enabled": false, "reason": "plugin_not_declared_or_snapshot_disabled"}
+}

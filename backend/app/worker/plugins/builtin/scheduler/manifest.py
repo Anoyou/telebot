@@ -25,6 +25,7 @@ MANIFEST = Manifest(
     config_schema={
         "type": "object",
         "x-ui-mode": "platform",
+        "x-usage-guide": "定时任务在插件中心或定时任务页新建规则：选择 cron、once 或 interval 触发方式，再配置发送消息、运行指令或调用 AI。自动运行指令时必须经过自动指令白名单，规则保存后立即生效。",
         "additionalProperties": False,
         "properties": {
             "default_notify": {

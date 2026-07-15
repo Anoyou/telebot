@@ -70,7 +70,7 @@ curl -fsSL https://raw.githubusercontent.com/Anoyou/telebot/main/scripts/install
 
 ```bash
 cp .env.example .env
-# 修改 MASTER_KEY / JWT_SECRET / POSTGRES_PASSWORD / COOKIE_SECURE / WEB_PORT_PUBLISH
+# 修改 MASTER_KEY / JWT_SECRET / UPDATER_TOKEN / POSTGRES_PASSWORD / COOKIE_SECURE / WEB_PORT_PUBLISH
 make prod-up
 ```
 
@@ -81,9 +81,13 @@ COOKIE_SECURE=true
 TRUST_FORWARDED_FOR=true
 CORS_ORIGINS=https://telepilot.example.com
 WEB_PORT_PUBLISH=127.0.0.1:8080
+WEBHOOK_ALLOW_QUERY_TOKEN=false
+PLUGIN_ALLOW_NEW_UNSIGNED_PLUGINS=false
+PLUGIN_ALLOW_LEGACY_UNSIGNED_PLUGINS=true
 ```
 
 `WEB_PORT_PUBLISH=127.0.0.1:8080` 可以避免 nginx 前端容器直接裸露到公网，只让 Caddy 作为唯一外部入口。
+Webhook token 默认只允许通过请求头传递；新 ZIP 插件默认必须签名。历史未签名插件的兼容开关与新安装策略相互独立，不要为了加载旧插件打开新未签名安装入口。
 
 ## 4. Caddy 配置
 
@@ -154,22 +158,54 @@ make frontend
 
 ```bash
 cd /opt/telepilot
-make prod-update
+./deploy/backup.sh
+
+# 默认保留最近 7 个完整备份组；可在 .env 中调整
+# BACKUP_RETENTION_COUNT=7
+cp .env "/var/backups/telepilot/env-$(date +%Y%m%d-%H%M).bak"
+cp docker-compose.yml "/var/backups/telepilot/docker-compose-$(date +%Y%m%d-%H%M).yml.bak"
+TELEPILOT_UPDATE_BRANCH=main make prod-update
 ```
 
-`make prod-update` 会先检查远程变更，再按文件范围选择增量动作：仅后端变更时只重建
-`web`，仅前端变更时只重建 `frontend`，纯文档变更不重启服务；如果涉及 Dockerfile、
-Compose、依赖锁文件或部署脚本，会自动回退到完整 `make prod-up`。更新前如果工作区
-存在未提交改动会拒绝执行，避免覆盖服务器上的本地修改。
+`make prod-update` 会先检查远程变更，再生成服务级更新计划：仅后端变化时只切换
+`web`，仅前端变化时只切换 `frontend`，updater 在业务服务健康后最后独立切换，纯文档
+变化不重启服务。Dockerfile、依赖文件与 Compose 变化也会映射到具体服务；只有
+PostgreSQL / Redis 配置、卷结构或无法识别的基础设施变化才进入完整更新。没有 Alembic
+迁移时不会创建备份或处理数据库。更新前如果工作区存在未提交改动会拒绝执行，避免
+覆盖服务器上的本地修改。
+
+发布候选分支不要覆盖 `main`，用环境变量显式指定：
+
+```bash
+cd /opt/telepilot
+TELEPILOT_UPDATE_BRANCH=<release-candidate-branch> make prod-update
+```
 
 想先看本次会走哪条路径，可以执行：
 
 ```bash
 cd /opt/telepilot
-make prod-update PROD_UPDATE_ARGS=--dry-run
+TELEPILOT_UPDATE_BRANCH=<release-candidate-branch> make prod-update PROD_UPDATE_ARGS=--dry-run
 ```
 
-回滚到指定版本：
+### Web 面板自更新
+
+生产栈会启动一个仅 Docker 内网可访问的 `updater` 服务。它挂载项目目录和 Docker socket，由已登录的 Web 后端通过共享 token 发起更新任务，不对公网暴露端口。
+
+由于 updater 能控制宿主机 Docker，`UPDATER_TOKEN` 必须使用独立随机值，不能与 `JWT_SECRET` 复用；缺失时服务会直接拒绝启动。
+
+- 检查更新：读取当前分支或 `TELEPILOT_UPDATE_BRANCH`，执行 `git fetch` 并展示具体受影响服务、数据库迁移和备份要求。
+- 应用更新：后台执行 `scripts/prod-update.sh`，使用 `--no-deps` 只切换计划内的 `web` / `frontend` / `updater`；PostgreSQL / Redis 默认保持运行。
+- 任务日志：Web 面板轮询持久化的 updater job；updater 自更新时页面可能短暂无法轮询，但新进程启动后可继续读取任务结果。
+
+首次把 `updater` 服务部署到服务器仍需要一次宿主机操作；之后常规补丁不再依赖 SSH 登录。若部署目录不是当前 shell 的工作目录，可显式指定：
+
+```bash
+cd /opt/telepilot
+TELEPILOT_HOST_PROJECT_DIR=/opt/telepilot make prod-up
+```
+
+没有数据库迁移时，可回滚到指定版本：
 
 ```bash
 cd /opt/telepilot
@@ -177,7 +213,7 @@ git checkout <tag-or-commit>
 make prod-up
 ```
 
-`make prod-up` 会重新构建镜像、启动容器，并在 `web` 容器启动时执行 `alembic upgrade head`。
+`make prod-up` 会重新构建镜像、启动容器，并在 `web` 容器启动时执行 `alembic upgrade head`。包含迁移的更新会在拉取代码前自动运行备份；切回旧 commit 不会撤销 schema，必须用迁移前备份恢复数据库。恢复前确认 `.env` 中的 `MASTER_KEY` 与备份时一致，再按 `deploy/restore.sh` 恢复数据库、sessions 与插件卷。
 
 ## 7. 备份
 
@@ -189,7 +225,7 @@ make prod-up
 
 仓库已有脚本可参考：
 
-- [deploy/backup.sh](../deploy/backup.sh)
+- [deploy/backup.sh](../deploy/backup.sh)（输出数据库、三个业务卷归档及 SHA-256 校验文件）
 - [deploy/backup-keys.sh](../deploy/backup-keys.sh)
 - [deploy/restore.sh](../deploy/restore.sh)
 
@@ -197,12 +233,16 @@ make prod-up
 
 ## 8. 验收清单
 
-1. `docker compose ps` 中 `postgres` / `redis` / `web` / `frontend` 均为 running 或 healthy。
-2. `curl -I http://127.0.0.1:8080` 能返回前端响应。
-3. `https://telepilot.example.com` 可打开登录页。
-4. 浏览器 Cookie 带 `Secure`，确认 `COOKIE_SECURE=true` 生效。
-5. 服务器安全组只对公网开放 `80/tcp` 和 `443/tcp`，不要额外开放 `8000`。
-6. 登录后概览页资源占用能看到应用进程与服务器资源。
+1. `git rev-parse HEAD` 是本次目标 commit，`grep` 四处版本号一致。
+2. `docker compose ps` 中 `postgres` / `redis` / `web` / `frontend` 均为 running 或 healthy。
+3. `curl -fsS http://127.0.0.1:8000/healthz` 返回健康结果，确认 FastAPI 进程存活。
+4. `curl -fsS http://127.0.0.1:8000/readyz` 返回 `ok=true`，并确认 DB、Redis、Worker Supervisor、账号 Bot manager 和交互 Bot manager 均正常；生产流量与更新完成判定以此为准。
+5. `curl -I http://127.0.0.1:8080` 能返回前端响应。
+6. `docker compose logs --tail=100 web` 没有迁移、导入、路由或关键组件反复重试错误。
+7. `https://telepilot.example.com` 可打开登录页。
+8. 浏览器 Cookie 带 `Secure`，确认 `COOKIE_SECURE=true` 生效。
+9. 服务器安全组只对公网开放 `80/tcp` 和 `443/tcp`，不要额外开放 `8000`。
+10. 登录后确认概览、日志、交互、插件、设置页可打开。
 
 ## 9. 常见问题
 
@@ -214,6 +254,9 @@ A: 检查 `.env` 中 `CORS_ORIGINS` 是否和实际访问地址完全一致，�
 
 Q: PWA 安装后无法保持登录怎么办？
 A: 公网 HTTPS 部署必须设置 `COOKIE_SECURE=true`，并通过 `https://` 访问。
+
+Q: `/healthz` 正常但 Compose 仍显示 unhealthy 怎么办？
+A: `/healthz` 只检查进程存活。继续请求 `/readyz` 并查看 `checks` 字段；DB、Redis 或三个关键 runtime manager 任一未就绪都会返回 503。检查 `docker compose logs --tail=200 web`，等待自动重试恢复或先修复对应依赖。
 
 Q: 远程插件更新后重建容器，插件文件不见了怎么办？
 A: 确认 `docker-compose.yml` 里的 `plugins_installed` 和 `plugin_repos` volume 没有被改成容器临时目录。

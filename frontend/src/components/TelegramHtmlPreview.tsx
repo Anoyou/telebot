@@ -27,6 +27,11 @@ function sanitizeTelegramHtml(value: string): string {
     `<blockquote style="${BLOCKQUOTE_STYLE}">`,
   );
   html = html.replace(/&lt;\/blockquote&gt;/gi, "</blockquote>");
+  html = html.replace(
+    /<pre><code class="language-([^"]+)">/gi,
+    (_match, language: string) =>
+      `<pre><span class="telegram-code-language">${language}</span><code class="language-${language}">`,
+  );
 
   return html;
 }
@@ -52,7 +57,7 @@ export function TelegramHtmlPreview({
       </pre>
     ) : (
       <div
-        className="whitespace-pre-wrap break-words text-white [&_a]:text-white [&_code]:rounded [&_code]:bg-white/15 [&_code]:px-1 [&_code]:py-0.5 [&_pre]:rounded [&_pre]:bg-white/15 [&_pre]:p-2"
+        className="whitespace-pre-wrap break-words text-white [&_.telegram-code-language]:mb-1 [&_.telegram-code-language]:block [&_.telegram-code-language]:border-b [&_.telegram-code-language]:border-white/20 [&_.telegram-code-language]:pb-1 [&_.telegram-code-language]:text-[10px] [&_.telegram-code-language]:font-semibold [&_.telegram-code-language]:text-white/70 [&_a]:text-white [&_code]:rounded [&_code]:bg-white/15 [&_code]:px-1 [&_code]:py-0.5 [&_pre_code]:block [&_pre_code]:bg-transparent [&_pre_code]:p-0 [&_pre]:rounded [&_pre]:bg-white/15 [&_pre]:p-2"
         dangerouslySetInnerHTML={{ __html: sanitizeTelegramHtml(content) }}
       />
     );
@@ -157,7 +162,7 @@ function renderTelegramPreviewContent(
 
   return (
     <div
-      className="whitespace-pre-wrap break-words text-white [&_a]:text-white [&_code]:rounded [&_code]:bg-white/15 [&_code]:px-1 [&_code]:py-0.5 [&_pre]:rounded [&_pre]:bg-white/15 [&_pre]:p-2"
+      className="whitespace-pre-wrap break-words text-white [&_.telegram-code-language]:mb-1 [&_.telegram-code-language]:block [&_.telegram-code-language]:border-b [&_.telegram-code-language]:border-white/20 [&_.telegram-code-language]:pb-1 [&_.telegram-code-language]:text-[10px] [&_.telegram-code-language]:font-semibold [&_.telegram-code-language]:text-white/70 [&_a]:text-white [&_code]:rounded [&_code]:bg-white/15 [&_code]:px-1 [&_code]:py-0.5 [&_pre_code]:block [&_pre_code]:bg-transparent [&_pre_code]:p-0 [&_pre]:rounded [&_pre]:bg-white/15 [&_pre]:p-2"
       dangerouslySetInnerHTML={{ __html: sanitizeTelegramHtml(content) }}
     />
   );
@@ -180,7 +185,7 @@ export function TelegramHtmlContentPreview({
 
   return (
     <div
-      className="whitespace-pre-wrap break-words text-muted-foreground [&_code]:rounded [&_code]:bg-muted [&_code]:px-1 [&_code]:py-0.5 [&_pre]:rounded [&_pre]:bg-muted [&_pre]:p-2"
+      className="whitespace-pre-wrap break-words text-muted-foreground [&_.telegram-code-language]:mb-1 [&_.telegram-code-language]:block [&_.telegram-code-language]:border-b [&_.telegram-code-language]:border-border [&_.telegram-code-language]:pb-1 [&_.telegram-code-language]:text-[10px] [&_.telegram-code-language]:font-semibold [&_code]:rounded [&_code]:bg-muted [&_code]:px-1 [&_code]:py-0.5 [&_pre_code]:block [&_pre_code]:bg-transparent [&_pre_code]:p-0 [&_pre]:rounded [&_pre]:bg-muted [&_pre]:p-2"
       dangerouslySetInnerHTML={{ __html: sanitizeTelegramHtml(value) }}
     />
   );

@@ -17,6 +17,7 @@
     "noEmit": true,
     "jsx": "react-jsx",
     "strict": false,
+    "tsBuildInfoFile": "./node_modules/.cache/tsbuild/tsconfig.app.tsbuildinfo",
     "noUnusedLocals": false,
     "noUnusedParameters": false,
     "noFallthroughCasesInSwitch": true,

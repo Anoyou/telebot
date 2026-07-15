@@ -14,28 +14,119 @@ from __future__ import annotations
 
 import hashlib
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 
 from ..db.models.account import Account
 from ..db.models.feature import AccountFeature, Feature
+from ..db.models.plugin import InstalledPlugin
 from ..deps import CurrentUser, DBSession
 from ..schemas.feature import (
     AccountFeatureConfigUpdate,
+    AccountFeatureDirectPassthroughUpdate,
     AccountFeatureItem,
     AccountFeatureToggle,
     ConfigValidationResponse,
     FeatureMatrixResponse,
+    PluginConfigActionControlRequest,
+    PluginConfigActionJobResponse,
+    PluginConfigActionRequest,
+    PluginConfigActionResponse,
     PluginGlobalConfigResponse,
     PluginGlobalConfigUpdate,
 )
 from ..services import audit, feature_service
+from ..services.plugin_config_action_jobs import (
+    control_plugin_config_action_job,
+    create_plugin_config_action_job,
+    get_plugin_config_action_job,
+    job_response,
+    list_plugin_config_action_jobs,
+)
+from ..services.plugin_config_actions import (
+    PluginConfigActionError,
+    PluginConfigActionNotFound,
+    PluginConfigActionUnavailable,
+    run_plugin_config_action,
+)
 from ..services.redactor import is_sensitive_key, redact_value
+from ..worker.plugins.ai_facade import AIQuotaError, AIUnavailableError
+from ..worker.plugins.http_facade import PluginHTTPError
 
 router = APIRouter(tags=["features"])
 
 
 def _bad(code: str, message: str, status: int = 400) -> HTTPException:
     return HTTPException(status_code=status, detail={"code": code, "message": message})
+
+
+def _declares_direct_passthrough(manifest: object) -> bool:
+    if not isinstance(manifest, dict):
+        return False
+    capabilities = manifest.get("capabilities")
+    if not isinstance(capabilities, dict):
+        return False
+    raw = capabilities.get("telegram_direct_passthrough")
+    if raw is True:
+        return True
+    return isinstance(raw, dict) and raw.get("enabled") is True
+
+
+def _allow_account_direct_passthrough_config(
+    schema: dict[str, object],
+    manifest: object,
+) -> dict[str, object]:
+    """Expose the platform-owned account opt-in only to declaring plugins."""
+
+    if not _declares_direct_passthrough(manifest):
+        return schema
+    properties = schema.setdefault("properties", {})
+    if isinstance(properties, dict):
+        properties.setdefault(
+            "direct_passthrough",
+            {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "enabled": {"type": "boolean", "default": False},
+                },
+            },
+        )
+    return schema
+
+
+def _with_direct_passthrough_enabled(
+    config: dict[str, object] | None,
+    enabled: bool,
+) -> dict[str, object]:
+    """只替换平台开关，保留插件自身可能仍待迁移的历史配置。"""
+
+    merged = dict(config or {})
+    merged["direct_passthrough"] = {"enabled": enabled}
+    return merged
+
+
+def _account_config_schema(
+    manifest: object,
+    config: dict[str, object],
+) -> dict[str, object] | None:
+    """Build the account schema and protect the platform-owned direct opt-in."""
+
+    declares_direct = _declares_direct_passthrough(manifest)
+    if "direct_passthrough" in config and not declares_direct:
+        raise _bad(
+            "CONFIG_VALIDATION_ERROR",
+            "配置验证失败: direct_passthrough: 仅声明 telegram_direct_passthrough 的插件可使用此字段",
+        )
+
+    raw_schema = manifest.get("config_schema") if isinstance(manifest, dict) else None
+    if isinstance(raw_schema, dict):
+        scoped_schema = feature_service.config_schema_for_scope(raw_schema, "account")
+    elif declares_direct:
+        # A direct-only plugin still needs a schema for the platform-owned opt-in.
+        scoped_schema = {"type": "object", "properties": {}}
+    else:
+        return None
+    return _allow_account_direct_passthrough_config(scoped_schema, manifest)
 
 
 def _chatgpt_token_id(token: str) -> str:
@@ -82,7 +173,11 @@ def _chatgpt_token_entries(config: dict[str, object]) -> list[dict[str, str]]:
 
 
 def _sanitize_chatgpt_image_config(config: dict[str, object]) -> dict[str, object]:
-    entries = _chatgpt_token_entries(config)
+    from ..services.plugin_config_secrets import decrypt_config_secrets
+
+    # token_id 必须基于明文 token，而不是每次 rekey 都会变化的 Fernet 信封。
+    runtime_config = decrypt_config_secrets(config)
+    entries = _chatgpt_token_entries(runtime_config)
     rest = dict(config)
     rest["token"] = ""
     rest["tokens"] = []
@@ -99,9 +194,13 @@ def _sanitize_chatgpt_image_config(config: dict[str, object]) -> dict[str, objec
 
 
 def _sanitize_config(config: dict[str, object], key: str | None = None) -> dict[str, object]:
+    from ..services.plugin_config_secrets import mask_config_secrets
+
     if key == "chatgpt_image":
         return _sanitize_chatgpt_image_config(config)
-    return redact_value(config)
+    # 先遮罩加密信封/敏感键，再走通用 redactor。
+    masked = mask_config_secrets(dict(config or {}))
+    return redact_value(masked)
 
 
 def _preserve_existing_sensitive_values(
@@ -123,13 +222,40 @@ def _preserve_existing_sensitive_values(
     return merged
 
 
+def _preserve_existing_read_only_values(
+    existing: dict[str, object] | None,
+    incoming: dict[str, object],
+    manifest: object,
+) -> dict[str, object]:
+    """Keep server-owned read-only config fields across replacement-style saves."""
+
+    merged = dict(incoming)
+    existing_dict = dict(existing or {})
+    raw_schema = manifest.get("config_schema") if isinstance(manifest, dict) else None
+    properties = raw_schema.get("properties") if isinstance(raw_schema, dict) else None
+    if not isinstance(properties, dict):
+        return merged
+    for item_key, field in properties.items():
+        if (
+            isinstance(field, dict)
+            and field.get("readOnly") is True
+        ):
+            if item_key in existing_dict:
+                merged[str(item_key)] = existing_dict[item_key]
+            else:
+                merged.pop(str(item_key), None)
+    return merged
+
+
 def _preserve_chatgpt_image_tokens(
     existing: dict[str, object],
     incoming: dict[str, object],
 ) -> dict[str, object]:
     if "tokens" not in incoming or not isinstance(incoming.get("tokens"), list):
         return incoming
-    existing_entries = _chatgpt_token_entries(existing)
+    from ..services.plugin_config_secrets import decrypt_config_secrets
+
+    existing_entries = _chatgpt_token_entries(decrypt_config_secrets(existing))
     by_id = {_chatgpt_token_id(entry["token"]): entry["token"] for entry in existing_entries}
     by_mask = {_chatgpt_mask_token(entry["token"]): entry["token"] for entry in existing_entries}
     normalized: list[dict[str, str]] = []
@@ -235,11 +361,15 @@ async def patch_account_feature(
             key,
         )
         payload.config = _normalize_feature_config(key, payload.config)
-        config_schema = (feature.manifest or {}).get("config_schema")
-        if config_schema:
+        scoped_schema = _account_config_schema(feature.manifest, payload.config)
+        if scoped_schema is not None:
+            payload.config = feature_service.apply_required_config_defaults(
+                payload.config,
+                scoped_schema,
+            )
             validation = feature_service.validate_config_against_schema(
                 payload.config,
-                feature_service.config_schema_for_scope(config_schema, "account"),
+                scoped_schema,
             )
             if not validation.valid:
                 raise _bad(
@@ -294,17 +424,27 @@ async def update_account_feature_config(
 
     # 验证 JSON Schema
     existing = await db.get(AccountFeature, (aid, key))
+    existing_config = dict(existing.config or {}) if existing is not None else None
     payload.config = _preserve_existing_sensitive_values(
-        dict(existing.config or {}) if existing is not None else None,
+        existing_config,
         dict(payload.config),
         key,
     )
+    payload.config = _preserve_existing_read_only_values(
+        existing_config,
+        payload.config,
+        feature.manifest,
+    )
     payload.config = _normalize_feature_config(key, payload.config)
-    config_schema = (feature.manifest or {}).get("config_schema")
-    if config_schema:
+    scoped_schema = _account_config_schema(feature.manifest, payload.config)
+    if scoped_schema is not None:
+        payload.config = feature_service.apply_required_config_defaults(
+            payload.config,
+            scoped_schema,
+        )
         validation = feature_service.validate_config_against_schema(
             payload.config,
-            feature_service.config_schema_for_scope(config_schema, "account"),
+            scoped_schema,
         )
         if not validation.valid:
             raise _bad(
@@ -313,7 +453,11 @@ async def update_account_feature_config(
             )
 
     af = await feature_service.set_account_feature(
-        db, aid, key, enabled=True, config=payload.config
+        db,
+        aid,
+        key,
+        enabled=bool(existing.enabled) if existing is not None else False,
+        config=payload.config,
     )
     await audit.write(
         db,
@@ -329,6 +473,244 @@ async def update_account_feature_config(
         state=af.state,
         last_error=af.last_error,
         config=_sanitize_config(dict(af.config or {}), key),
+    )
+
+
+@router.patch(
+    "/api/accounts/{aid}/features/{key}/direct-passthrough",
+    response_model=AccountFeatureItem,
+)
+async def update_account_feature_direct_passthrough(
+    aid: int,
+    key: str,
+    payload: AccountFeatureDirectPassthroughUpdate,
+    db: DBSession,
+    user: CurrentUser,
+) -> AccountFeatureItem:
+    """独立更新裸直通开关，避免插件历史配置失效时无法紧急关闭。"""
+
+    if await db.get(Account, aid) is None:
+        raise _bad("ACCOUNT_NOT_FOUND", "账号不存在", 404)
+    await feature_service.seed_builtin_features(db)
+    feature = await db.get(Feature, key)
+    if feature is None:
+        raise _bad("FEATURE_NOT_FOUND", f"未注册的 feature: {key}", 404)
+    if not _declares_direct_passthrough(feature.manifest):
+        raise _bad(
+            "CONFIG_VALIDATION_ERROR",
+            "配置验证失败: direct_passthrough: 插件未声明 telegram_direct_passthrough",
+        )
+
+    existing = await db.get(AccountFeature, (aid, key))
+    config = _with_direct_passthrough_enabled(
+        dict(existing.config or {}) if existing is not None else None,
+        payload.enabled,
+    )
+    af = await feature_service.set_account_feature(
+        db,
+        aid,
+        key,
+        enabled=bool(existing.enabled) if existing is not None else False,
+        config=config,
+    )
+    await audit.write(
+        db,
+        user.id,
+        "feature.direct_passthrough.update",
+        target=f"account:{aid}/feature:{key}",
+        detail={"enabled": payload.enabled},
+    )
+    await db.commit()
+    return AccountFeatureItem(
+        feature_key=af.feature_key,
+        enabled=af.enabled,
+        state=af.state,
+        last_error=af.last_error,
+        config=_sanitize_config(dict(af.config or {}), key),
+    )
+
+
+@router.post(
+    "/api/accounts/{aid}/features/{key}/config/actions/{action_key}",
+    response_model=PluginConfigActionResponse,
+)
+async def run_account_feature_config_action(
+    aid: int,
+    key: str,
+    action_key: str,
+    payload: PluginConfigActionRequest,
+    db: DBSession,
+    user: CurrentUser,
+) -> PluginConfigActionResponse:
+    """运行插件声明的配置页动作。"""
+
+    account = await db.get(Account, aid)
+    if account is None:
+        raise _bad("ACCOUNT_NOT_FOUND", "账号不存在", 404)
+    await feature_service.seed_builtin_features(db)
+    feature = await db.get(Feature, key)
+    if feature is None:
+        raise _bad("FEATURE_NOT_FOUND", f"未注册的 feature: {key}", 404)
+    installed_plugin = await db.get(InstalledPlugin, key)
+
+    effective_config = await feature_service.get_effective_plugin_config(db, aid, key)
+    try:
+        result = await run_plugin_config_action(
+            db,
+            account=account,
+            feature=feature,
+            action_key=action_key,
+            effective_config=effective_config,
+            current_config=payload.config,
+            action_input=payload.input,
+            installed_plugin=installed_plugin,
+        )
+    except PluginConfigActionNotFound as exc:
+        raise _bad("CONFIG_ACTION_NOT_FOUND", str(exc), 404) from exc
+    except PluginConfigActionUnavailable as exc:
+        raise _bad("CONFIG_ACTION_UNAVAILABLE", str(exc), 400) from exc
+    except PluginHTTPError as exc:
+        raise _bad("CONFIG_ACTION_HTTP_REJECTED", str(exc), 400) from exc
+    except AIQuotaError as exc:
+        raise _bad("CONFIG_ACTION_AI_QUOTA", str(exc), 429) from exc
+    except AIUnavailableError as exc:
+        raise _bad("CONFIG_ACTION_AI_UNAVAILABLE", str(exc), 503) from exc
+    except PluginConfigActionError as exc:
+        raise _bad("CONFIG_ACTION_FAILED", str(exc), 400) from exc
+    except Exception as exc:
+        raise _bad("CONFIG_ACTION_FAILED", str(exc), 400) from exc
+
+    await audit.write(
+        db,
+        user.id,
+        "feature.config.action",
+        target=f"account:{aid}/feature:{key}",
+        detail={
+            "action_key": action_key,
+            "config_patch_keys": sorted((result.get("config_patch") or {}).keys()),
+        },
+    )
+    await db.commit()
+    return PluginConfigActionResponse(**result)
+
+
+@router.post(
+    "/api/accounts/{aid}/features/{key}/config/actions/{action_key}/jobs",
+    response_model=PluginConfigActionJobResponse,
+)
+async def start_account_feature_config_action_job(
+    aid: int,
+    key: str,
+    action_key: str,
+    payload: PluginConfigActionRequest,
+    db: DBSession,
+    user: CurrentUser,
+) -> PluginConfigActionJobResponse:
+    """启动插件声明的配置页后台动作。"""
+
+    account = await db.get(Account, aid)
+    if account is None:
+        raise _bad("ACCOUNT_NOT_FOUND", "账号不存在", 404)
+    await feature_service.seed_builtin_features(db)
+    feature = await db.get(Feature, key)
+    if feature is None:
+        raise _bad("FEATURE_NOT_FOUND", f"未注册的 feature: {key}", 404)
+    installed_plugin = await db.get(InstalledPlugin, key)
+
+    effective_config = await feature_service.get_effective_plugin_config(db, aid, key)
+    try:
+        job = await create_plugin_config_action_job(
+            db,
+            account=account,
+            feature=feature,
+            action_key=action_key,
+            effective_config=effective_config,
+            current_config=payload.config,
+            action_input=payload.input,
+            installed_plugin=installed_plugin,
+        )
+    except PluginConfigActionNotFound as exc:
+        raise _bad("CONFIG_ACTION_NOT_FOUND", str(exc), 404) from exc
+    except PluginConfigActionUnavailable as exc:
+        raise _bad("CONFIG_ACTION_ALREADY_RUNNING", str(exc), 409) from exc
+
+    await audit.write(
+        db,
+        user.id,
+        "feature.config.action.job.start",
+        target=f"account:{aid}/feature:{key}",
+        detail={"action_key": action_key, "job_id": job.job_id},
+    )
+    await db.commit()
+    return job_response(job, logs=[])
+
+
+@router.get(
+    "/api/plugin-config-action-jobs/{job_id}",
+    response_model=PluginConfigActionJobResponse,
+)
+async def get_config_action_job_status(
+    job_id: str,
+    db: DBSession,
+    _user: CurrentUser,
+) -> PluginConfigActionJobResponse:
+    """查询配置动作后台任务状态与过程日志。"""
+
+    response = await get_plugin_config_action_job(db, job_id)
+    if response is None:
+        raise _bad("CONFIG_ACTION_JOB_NOT_FOUND", "配置动作任务不存在", 404)
+    return response
+
+
+@router.post(
+    "/api/plugin-config-action-jobs/{job_id}/control",
+    response_model=PluginConfigActionJobResponse,
+)
+async def control_config_action_job(
+    job_id: str,
+    payload: PluginConfigActionControlRequest,
+    db: DBSession,
+    user: CurrentUser,
+) -> PluginConfigActionJobResponse:
+    """中断或终止配置动作后台任务。"""
+
+    response = await control_plugin_config_action_job(db, job_id, action=payload.action)
+    if response is None:
+        raise _bad("CONFIG_ACTION_JOB_NOT_FOUND", "配置动作任务不存在", 404)
+    await audit.write(
+        db,
+        user.id,
+        f"feature.config.action.job.{payload.action}",
+        target=f"plugin-config-action-job:{job_id}",
+        detail={"job_id": job_id, "action": payload.action},
+    )
+    await db.commit()
+    return response
+
+
+@router.get(
+    "/api/accounts/{aid}/features/{key}/config/action-jobs",
+    response_model=list[PluginConfigActionJobResponse],
+)
+async def list_account_feature_config_action_jobs(
+    aid: int,
+    key: str,
+    db: DBSession,
+    _user: CurrentUser,
+    limit: int = Query(10, ge=1, le=50),
+) -> list[PluginConfigActionJobResponse]:
+    """查询某账号某插件最近的配置动作任务，用于恢复后台窗口。"""
+
+    if await db.get(Account, aid) is None:
+        raise _bad("ACCOUNT_NOT_FOUND", "账号不存在", 404)
+    await feature_service.seed_builtin_features(db)
+    if await db.get(Feature, key) is None:
+        raise _bad("FEATURE_NOT_FOUND", f"未注册的 feature: {key}", 404)
+    return await list_plugin_config_action_jobs(
+        db,
+        account_id=aid,
+        plugin_key=key,
+        limit=limit,
     )
 
 

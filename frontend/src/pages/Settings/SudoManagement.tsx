@@ -28,6 +28,7 @@ import { getSystemSettings, patchSystemSettings } from "@/api/system";
 import type { SudoUserResponse } from "@/types/sudo";
 import { listAccounts } from "@/api/accounts";
 import { getErrMsg } from "@/lib/api";
+import { cn } from "@/lib/utils";
 
 const QK = ["sudo-users"] as const;
 
@@ -404,7 +405,7 @@ export function SudoManagement() {
             </div>
           </div>
 
-          <div className="space-y-3 rounded-md border bg-muted/20 p-3">
+          <div className="space-y-3 rounded-lg border bg-background/70 p-3 shadow-sm">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div>
                 <p className="text-sm font-medium">允许的指令 / 当前可用的 sudo 指令</p>
@@ -443,9 +444,9 @@ export function SudoManagement() {
               }
             />
 
-            <p className="text-xs text-muted-foreground">
+            <div className="rounded-md border border-dashed bg-muted/25 px-3 py-2 text-xs leading-5 text-muted-foreground">
               插件配置页里的自定义触发词不一定属于指令模板；若没有出现在这里，可以先到对应插件配置页确认触发词。
-            </p>
+            </div>
 
             {!form.allow_all_commands && selectedCommands.size > 0 && (
               <div className="flex flex-wrap gap-1.5 border-t pt-3">
@@ -581,19 +582,24 @@ function CommandCatalog({
       ) : items.length === 0 ? (
         <p className="text-xs text-muted-foreground">{emptyText}</p>
       ) : (
-        <div className="grid gap-2 md:grid-cols-2">
+        <div className="grid gap-2">
           {items.map((item) => (
             <div
               key={item.name}
-              className="rounded-md border bg-background p-2"
+              className={cn(
+                "grid gap-2 rounded-md border px-3 py-2 transition-colors md:grid-cols-[minmax(0,1fr)_minmax(16rem,1.4fr)] md:items-center",
+                selectedCommands.has(item.name)
+                  ? "border-primary/45 bg-primary/10"
+                  : "border-border/70 bg-muted/25",
+              )}
             >
-              <div className="flex flex-wrap items-center gap-1.5">
+              <div className="flex min-w-0 flex-wrap items-center gap-1.5">
                 <Button
                   type="button"
                   size="sm"
                   variant={selectedCommands.has(item.name) ? "default" : "outline"}
                   disabled={disabled}
-                  className="h-7 gap-1 px-2 font-mono text-xs"
+                  className="h-8 gap-1 rounded-full px-3 font-mono text-xs"
                   onClick={() => onToggle(item.name)}
                 >
                   {selectedCommands.has(item.name) && <Check className="h-3 w-3" />}
@@ -604,9 +610,9 @@ function CommandCatalog({
                     key={`${item.name}:${alias}`}
                     type="button"
                     size="sm"
-                    variant={selectedCommands.has(alias) ? "secondary" : "ghost"}
+                    variant={selectedCommands.has(alias) ? "secondary" : "outline"}
                     disabled={disabled}
-                    className="h-7 gap-1 px-2 font-mono text-xs text-muted-foreground"
+                    className="h-8 gap-1 rounded-full px-2.5 font-mono text-xs text-muted-foreground"
                     onClick={() => onToggle(alias)}
                   >
                     {selectedCommands.has(alias) && <Check className="h-3 w-3" />}
@@ -614,7 +620,7 @@ function CommandCatalog({
                   </Button>
                 ))}
               </div>
-              <p className="mt-1 line-clamp-2 text-xs text-muted-foreground">
+              <p className="min-w-0 text-xs leading-5 text-muted-foreground md:text-right">
                 {item.doc}
               </p>
             </div>

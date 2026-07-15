@@ -5,15 +5,21 @@ import type {
   AuditLogItem,
   BackendVersionInfo,
   CheckUpdateResult,
+  UpdateJobStatus,
+  UpdateTargetOptions,
+  EventTraceDetail,
+  EventTraceSummary,
   HealthOverview,
   HumanizeConfig,
   HumanizeUpdate,
+  MessageFunelItem,
   PullUpdateResult,
   ResourceDashboard,
   RateLimitRuleConfig,
   RestartResult,
   StrictRequest,
   RuntimeLogItem,
+  SystemConsoleLogsResponse,
   SystemSettings,
   TemplateOut,
 } from "@/api/types";
@@ -58,6 +64,7 @@ export interface RuntimeLogQuery {
   /** event = 消息事件；plugin = 插件内部日志；system = worker 启停 / 错误 */
   source?: "system" | "event" | "plugin" | string;
   plugin_key?: string;
+  keyword?: string;
   since?: string;
   limit?: number;
 }
@@ -67,6 +74,19 @@ export async function listRuntimeLogs(
   const { data } = await api.get<RuntimeLogItem[]>("/api/logs/runtime", {
     params: q,
   });
+  return data;
+}
+
+export interface SystemConsoleLogQuery {
+  service?: "all" | "web" | "frontend" | "postgres" | "redis" | "updater" | string;
+  keyword?: string;
+  tail?: number;
+}
+
+export async function listSystemConsoleLogs(
+  q: SystemConsoleLogQuery = {},
+): Promise<SystemConsoleLogsResponse> {
+  const { data } = await api.post<SystemConsoleLogsResponse>("/api/logs/system-console", q);
   return data;
 }
 
@@ -89,29 +109,70 @@ export async function listAuditLogs(
   return data;
 }
 
+export interface TraceQuery {
+  account_id?: number | string;
+  source_channel?: string;
+  event_type?: string;
+  chat_id?: number | string;
+  message_id?: number | string;
+  update_id?: number | string;
+  sender_user_id?: number | string;
+  plugin_key?: string;
+  status?: string;
+  trace_id?: string;
+  reason_code?: string;
+  keyword?: string;
+  since?: string;
+  until?: string;
+  limit?: number;
+}
+
+export interface MessageFunelQuery extends TraceQuery {
+  verdict?: "responded" | "no_response_normal" | "stuck" | "failed" | "";
+}
+
+export async function listEventTraces(
+  q: TraceQuery = {},
+): Promise<EventTraceSummary[]> {
+  const { data } = await api.get<EventTraceSummary[]>("/api/logs/trace/events", {
+    params: q,
+  });
+  return data;
+}
+
+export async function getMessageFunel(
+  q: MessageFunelQuery = {},
+): Promise<MessageFunelItem[]> {
+  const { data } = await api.get<MessageFunelItem[]>("/api/logs/messages", {
+    params: q,
+  });
+  return data;
+}
+
+export async function getEventTrace(traceId: string): Promise<EventTraceDetail> {
+  const { data } = await api.get<EventTraceDetail>(
+    `/api/logs/trace/events/${encodeURIComponent(traceId)}`,
+  );
+  return data;
+}
+
 // ===================== 系统设置 =====================
 export async function getSystemSettings(): Promise<SystemSettings> {
   const { data } = await api.get<SystemSettings>("/api/system/settings");
   return data;
 }
+export type SystemSettingsPatch = Partial<Omit<SystemSettings, "login_security">> & {
+  login_security?: Partial<NonNullable<SystemSettings["login_security"]>>;
+};
+
 export async function patchSystemSettings(
-  payload: Partial<SystemSettings>,
+  payload: SystemSettingsPatch,
 ): Promise<SystemSettings> {
   const { data } = await api.patch<SystemSettings>(
     "/api/system/settings",
     payload,
   );
   return data;
-}
-
-export async function getGlobalLimits(): Promise<{ api_qps_total: number }> {
-  const { data } = await api.get<{ api_qps_total: number }>(
-    "/api/system/global-limits",
-  );
-  return data;
-}
-export async function putGlobalLimits(api_qps_total: number): Promise<void> {
-  await api.put("/api/system/global-limits", { api_qps_total });
 }
 
 // ===================== 风控模板 =====================
@@ -164,12 +225,38 @@ export async function getResourceDashboard(): Promise<ResourceDashboard> {
 }
 
 // ===================== 检查更新 / 拉取 / 重启 =====================
-export async function checkUpdate(): Promise<CheckUpdateResult> {
-  const { data } = await api.post<CheckUpdateResult>("/api/system/check-update");
+// 全局 axios timeout 是 15s；检查/拉取会触发后端同步 git 操作，需 per-request 放宽。
+// 这里只覆盖这几个慢调用，不动 lib/api.ts 的全局默认。update-jobs 轮询保持默认 15s。
+export interface AppUpdateTarget {
+  remote?: string;
+  branch?: string;
+}
+
+export async function checkUpdate(target?: AppUpdateTarget): Promise<CheckUpdateResult> {
+  const { data } = await api.post<CheckUpdateResult>(
+    "/api/system/check-update",
+    target,
+    { timeout: 150_000 },
+  );
   return data;
 }
-export async function pullUpdate(): Promise<PullUpdateResult> {
-  const { data } = await api.post<PullUpdateResult>("/api/system/pull-update");
+export async function pullUpdate(target?: AppUpdateTarget): Promise<PullUpdateResult> {
+  const { data } = await api.post<PullUpdateResult>(
+    "/api/system/pull-update",
+    target,
+    { timeout: 60_000 },
+  );
+  return data;
+}
+export async function getUpdateJob(jobId: string): Promise<UpdateJobStatus> {
+  const { data } = await api.get<UpdateJobStatus>(`/api/system/update-jobs/${jobId}`);
+  return data;
+}
+export async function getUpdateTargetOptions(remote?: string): Promise<UpdateTargetOptions> {
+  const { data } = await api.get<UpdateTargetOptions>("/api/system/update-target-options", {
+    params: remote ? { remote } : undefined,
+    timeout: 60_000,
+  });
   return data;
 }
 export async function restartApp(): Promise<RestartResult> {

@@ -26,6 +26,16 @@ from app.db.base import AsyncSessionLocal
 from app.db.models.command import LLMProvider
 from app.db.models.feature import FEATURE_SCHEDULER
 from app.db.models.rule import Rule
+from app.db.models.system import SystemSetting
+from app.services.event_trace import (
+    TRACE_STATUS_FAILED,
+    TRACE_STATUS_OK,
+    TRACE_STATUS_SKIPPED,
+    finish_trace,
+    record_action,
+    start_trace,
+    trace_log_context,
+)
 from app.services.llm_client import LLMCallFailed, LLMError
 from app.services.llm_dto import LLMProviderDTO
 from app.services.llm_invoke import invoke as invoke_ai_runtime
@@ -63,6 +73,43 @@ LogWriter = Callable[..., Awaitable[None]]
 
 class SchedulerCommandBlockedError(RuntimeError):
     """scheduler 尝试触发不在白名单中的命令。"""
+
+
+def _scheduler_trace_context(ctx: PluginContext, *, action: dict[str, Any] | None = None) -> dict[str, Any]:
+    trace = getattr(ctx, "_scheduler_trace", None)
+    plugin_key = str(getattr(ctx, "feature_key", "") or FEATURE_SCHEDULER)
+    entry_key = str(getattr(ctx, "_scheduler_entry_key", "") or "").strip() or None
+    context = trace_log_context(trace, plugin_key=plugin_key, entry_key=entry_key)
+    if action is not None:
+        action.setdefault("context", context)
+    return context
+
+
+async def _scheduler_trace_enabled() -> bool:
+    try:
+        async with AsyncSessionLocal() as db:
+            row = await db.get(SystemSetting, "log_retention")
+        raw = row.value if row is not None and isinstance(row.value, dict) else {}
+        return bool(raw.get("trace_enabled", True))
+    except Exception:  # noqa: BLE001
+        log.debug("load scheduler trace switch failed, using default", exc_info=True)
+        return True
+
+
+async def _record_scheduler_action(
+    ctx: PluginContext,
+    action: dict[str, Any],
+    status: str,
+    **detail: Any,
+) -> None:
+    context = _scheduler_trace_context(ctx, action=action)
+    if not context.get("trace_id") and isinstance(action.get("context"), dict):
+        context = dict(action["context"])
+    if not context.get("trace_id"):
+        return
+    detail.setdefault("plugin_key", str(getattr(ctx, "feature_key", "") or FEATURE_SCHEDULER))
+    detail.setdefault("component", "scheduler")
+    await record_action(context, action, status, **detail)
 
 
 @dataclass
@@ -321,6 +368,31 @@ class SchedulerRuleExecutor:
             return False
 
         action_type = str(action.get("type") or "send_message").lower()
+        trace = None
+        if await _scheduler_trace_enabled():
+            trace = await start_trace(
+                {
+                    "event_type": "scheduler_fire",
+                    "source": {
+                        "type": "scheduler_fire",
+                        "channel": "scheduler",
+                        "account_id": ctx.account_id,
+                    },
+                    "message": {},
+                    "chat": {},
+                    "sender": {},
+                    "trigger": {
+                        "rule_id": rule_id,
+                        "action_type": action_type,
+                        "feature_key": getattr(ctx, "feature_key", FEATURE_SCHEDULER),
+                    },
+                    "raw": {"action": action},
+                }
+            )
+        previous_trace = getattr(ctx, "_scheduler_trace", None)
+        previous_entry_key = getattr(ctx, "_scheduler_entry_key", None)
+        ctx._scheduler_trace = trace
+        ctx._scheduler_entry_key = str(rule_id)
         try:
             if action_type == "send_message":
                 await self.action_send_message(ctx, action)
@@ -330,37 +402,64 @@ class SchedulerRuleExecutor:
                 await self.action_call_llm(ctx, action)
             else:
                 raise ValueError(f"unknown action.type={action_type}")
+            if trace is not None:
+                await finish_trace(trace, TRACE_STATUS_OK, rule_id=rule_id, action_type=action_type)
             return True
         except SchedulerCommandBlockedError as exc:
             cfg["last_error"] = str(exc)
             if ctx.log is not None:
                 await ctx.log("info", f"[scheduler] rule={rule_id} blocked: {exc}")
+            if trace is not None:
+                await finish_trace(trace, TRACE_STATUS_FAILED, rule_id=rule_id, action_type=action_type, error=str(exc))
             return False
         except Exception as exc:  # noqa: BLE001
             cfg["last_error"] = f"{type(exc).__name__}: {exc}"
             if ctx.log is not None:
                 await ctx.log("error", f"[scheduler] rule={rule_id} fire failed: {type(exc).__name__}: {exc}")
+            if trace is not None:
+                await finish_trace(
+                    trace,
+                    TRACE_STATUS_FAILED,
+                    rule_id=rule_id,
+                    action_type=action_type,
+                    error=f"{type(exc).__name__}: {exc}",
+                )
             return False
+        finally:
+            ctx._scheduler_trace = previous_trace
+            ctx._scheduler_entry_key = previous_entry_key
 
     async def action_send_message(self, ctx: PluginContext, action: dict[str, Any]) -> None:
         target = int(action["target_chat_id"])
         text = str(action.get("text") or "").strip()
         if not text:
             raise ValueError("send_message requires non-empty text")
-        msg = await self.send_with_ratelimit(ctx, target, text)
+        trace_action = {
+            "type": "send_message",
+            "send_via": "userbot_reply",
+            "chat_id": target,
+            "text": text,
+        }
+        msg = await self.send_with_ratelimit(ctx, target, text, action=trace_action)
         delete_after = _to_positive_int(action.get("delete_after"))
         if delete_after > 0 and msg is not None:
-            asyncio.create_task(self.delete_message_after(ctx, msg, delete_after))
+            asyncio.create_task(self.delete_message_after(ctx, msg, delete_after, action_context=_scheduler_trace_context(ctx)))
 
     async def action_run_command(self, ctx: PluginContext, action: dict[str, Any]) -> None:
         target = int(action.get("target_chat_id") or 0)
         command = str(action.get("command") or action.get("text") or "").strip()
         if not command:
             raise ValueError("run_command requires command/text")
-        msg = await self.send_with_ratelimit(ctx, target or "me", command)
+        trace_action = {
+            "type": "run_command",
+            "send_via": "userbot_reply",
+            "chat_id": target or None,
+            "text": command,
+        }
+        msg = await self.send_with_ratelimit(ctx, target or "me", command, action=trace_action)
         delete_after = _to_positive_int(action.get("delete_after"))
         if delete_after > 0 and msg is not None:
-            asyncio.create_task(self.delete_message_after(ctx, msg, delete_after))
+            asyncio.create_task(self.delete_message_after(ctx, msg, delete_after, action_context=_scheduler_trace_context(ctx)))
 
     async def action_call_llm(self, ctx: PluginContext, action: dict[str, Any]) -> None:
         provider_id = int(action["provider_id"])
@@ -402,16 +501,51 @@ class SchedulerRuleExecutor:
 
         text = (result.text or "").strip() or "(empty)"
         target = int(action["target_chat_id"])
-        msg = await self.send_with_ratelimit(ctx, target, text[:_MAX_MESSAGE_LEN])
+        trace_action = {
+            "type": "call_llm",
+            "send_via": "userbot_reply",
+            "chat_id": target,
+            "text": text[:_MAX_MESSAGE_LEN],
+        }
+        msg = await self.send_with_ratelimit(ctx, target, text[:_MAX_MESSAGE_LEN], action=trace_action)
         delete_after = _to_positive_int(action.get("delete_after"))
         if delete_after > 0 and msg is not None:
-            asyncio.create_task(self.delete_message_after(ctx, msg, delete_after))
+            asyncio.create_task(self.delete_message_after(ctx, msg, delete_after, action_context=_scheduler_trace_context(ctx)))
 
-    async def delete_message_after(self, ctx: PluginContext, msg: Any, seconds: int) -> None:
+    async def delete_message_after(
+        self,
+        ctx: PluginContext,
+        msg: Any,
+        seconds: int,
+        *,
+        action_context: dict[str, Any] | None = None,
+    ) -> None:
+        action = {
+            "type": "delete_message",
+            "send_via": "userbot_reply",
+            "chat_id": getattr(msg, "peer_id", None) or getattr(msg, "chat_id", None),
+            "message_id": getattr(msg, "id", None) or getattr(msg, "message_id", None),
+            "context": action_context or _scheduler_trace_context(ctx),
+        }
         try:
             await asyncio.sleep(seconds)
             await ctx.client.delete_messages(msg.peer_id, msg.id)
+            await _record_scheduler_action(
+                ctx,
+                action,
+                TRACE_STATUS_OK,
+                actual_send_via="userbot_reply",
+                result={"message_id": getattr(msg, "id", None) or getattr(msg, "message_id", None)},
+            )
         except Exception:  # noqa: BLE001
+            await _record_scheduler_action(
+                ctx,
+                action,
+                TRACE_STATUS_FAILED,
+                actual_send_via="userbot_reply",
+                error_code="telegram_api_error",
+                error_message=f"delete_message failed (msg_id={getattr(msg, 'id', '?')})",
+            )
             if ctx.log is not None:
                 await ctx.log("warn", f"[scheduler] delete_message failed (msg_id={getattr(msg, 'id', '?')})")
 
@@ -432,10 +566,29 @@ class SchedulerRuleExecutor:
             await db.commit()
 
     async def send_with_ratelimit(
-        self, ctx: PluginContext, peer: int | str, text: str
+        self,
+        ctx: PluginContext,
+        peer: int | str,
+        text: str,
+        *,
+        action: dict[str, Any] | None = None,
     ) -> Any | None:
+        trace_action = action or {
+            "type": "send_message",
+            "send_via": "userbot_reply",
+            "chat_id": peer if isinstance(peer, int) else None,
+            "text": text,
+        }
         allowed, command_key = should_allow_auto_command_text(text)
         if not allowed:
+            await _record_scheduler_action(
+                ctx,
+                trace_action,
+                TRACE_STATUS_FAILED,
+                actual_send_via="userbot_reply",
+                error_code="permission_denied",
+                error_message=f"auto command blocked by whitelist: {command_key}",
+            )
             raise SchedulerCommandBlockedError(
                 f"auto command blocked by whitelist: {command_key}"
             )
@@ -446,6 +599,14 @@ class SchedulerRuleExecutor:
             peer_id=peer_id,
         )
         if not decision.allowed:
+            await _record_scheduler_action(
+                ctx,
+                trace_action,
+                TRACE_STATUS_SKIPPED,
+                actual_send_via="userbot_reply",
+                error_code="rate_limited",
+                result={"outcome": decision.outcome},
+            )
             if ctx.log is not None:
                 await ctx.log("info", f"[scheduler] ratelimited drop outcome={decision.outcome}")
             return None
@@ -454,18 +615,57 @@ class SchedulerRuleExecutor:
 
         try:
             msg = await ctx.client.send_message(peer, text)
+            await _record_scheduler_action(
+                ctx,
+                trace_action,
+                TRACE_STATUS_OK,
+                actual_send_via="userbot_reply",
+                result={"message_id": getattr(msg, "id", None) or getattr(msg, "message_id", None)},
+            )
             return msg
         except Exception as exc:
             if not isinstance(exc, FloodWaitError) and not hasattr(exc, "seconds"):
+                await _record_scheduler_action(
+                    ctx,
+                    trace_action,
+                    TRACE_STATUS_FAILED,
+                    actual_send_via="userbot_reply",
+                    error_code="telegram_api_error",
+                    error=f"{type(exc).__name__}: {exc}",
+                )
                 raise
             await ctx.engine.on_flood_wait("send_message_group", exc)
             await asyncio.sleep(min(int(getattr(exc, "seconds", 0) or 0), 60))
             try:
                 msg = await ctx.client.send_message(peer, text)
+                await _record_scheduler_action(
+                    ctx,
+                    trace_action,
+                    TRACE_STATUS_OK,
+                    actual_send_via="userbot_reply",
+                    result={"message_id": getattr(msg, "id", None) or getattr(msg, "message_id", None)},
+                    retry_after_flood_wait=True,
+                )
                 return msg
             except Exception as retry_exc:
                 if not isinstance(retry_exc, FloodWaitError) and not hasattr(retry_exc, "seconds"):
+                    await _record_scheduler_action(
+                        ctx,
+                        trace_action,
+                        TRACE_STATUS_FAILED,
+                        actual_send_via="userbot_reply",
+                        error_code="telegram_api_error",
+                        error=f"{type(retry_exc).__name__}: {retry_exc}",
+                    )
                     raise
+                await _record_scheduler_action(
+                    ctx,
+                    trace_action,
+                    TRACE_STATUS_SKIPPED,
+                    actual_send_via="userbot_reply",
+                    error_code="rate_limited",
+                    error=f"{type(retry_exc).__name__}: {retry_exc}",
+                )
                 if ctx.log is not None:
                     await ctx.log("warn", "[scheduler] send_message still flood-waited after retry; drop once")
                 return None
@@ -784,6 +984,7 @@ class PlatformScheduler:
             return None
 
         async def ctx_log(level: str, message: str, **detail: Any) -> None:
+            detail.pop("plugin_key", None)
             await self._emit_log(
                 level,
                 message,

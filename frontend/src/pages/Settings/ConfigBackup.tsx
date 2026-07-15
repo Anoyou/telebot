@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AlertTriangle,
   Download,
@@ -13,6 +13,7 @@ import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
+import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { Select } from "@/components/ui/select";
 import {
@@ -42,7 +43,12 @@ interface CategoryDef {
 }
 
 const CATEGORIES: CategoryDef[] = [
-  { key: "system_settings", label: "系统设置", desc: "指令前缀等全局配置" },
+  {
+    key: "system_settings",
+    label: "系统设置",
+    desc: "指令前缀等全局配置；Webhook Token 和恢复码仅在开启敏感导出时包含",
+    sensitive: ["webhook_token", "recovery_code"],
+  },
   { key: "command_templates", label: "自定义指令模板", desc: "所有回复/转发/AI 指令模板" },
   { key: "account_commands", label: "账号-指令绑定", desc: "每个账号启用了哪些指令" },
   { key: "llm_providers", label: "模型提供商", desc: "AI 模型提供商配置", sensitive: ["api_key"] },
@@ -50,8 +56,18 @@ const CATEGORIES: CategoryDef[] = [
   { key: "auto_reply_rules", label: "自动回复规则", desc: "自动回复配置" },
   { key: "rate_limit_templates", label: "风控模板", desc: "限速规则模板" },
   { key: "rate_limit_rules", label: "风控规则", desc: "账号级限速配置" },
+  { key: "proxies", label: "代理配置", desc: "账号和模型提供商引用的代理", sensitive: ["password"] },
+  { key: "device_profiles", label: "设备配置", desc: "账号登录使用的设备伪装参数" },
+  { key: "feature_registry", label: "插件索引", desc: "插件配置依赖的功能登记信息" },
+  {
+    key: "plugin_global_configs",
+    label: "插件全局配置",
+    desc: "跨账号共享的插件配置",
+    sensitive: ["插件密钥"],
+  },
   { key: "feature_config", label: "插件功能配置", desc: "各账号的插件开关和配置" },
   { key: "account_settings", label: "账号设置", desc: "拟人化、标签等（不含登录信息）", sensitive: ["session", "api_id", "api_hash", "phone"] },
+  { key: "humanize_configs", label: "拟人化配置", desc: "每个账号的延迟、打字和活跃时段" },
   { key: "ignored_peers", label: "允许会话", desc: "自动回复/转发允许通过的会话白名单" },
   { key: "notify_bots", label: "通知 Bot", desc: "通知机器人配置", sensitive: ["bot_token"] },
 ];
@@ -64,13 +80,19 @@ const BUNDLE_ENTITY_LABEL: Record<string, string> = {
 };
 
 export function ConfigBackup() {
+  const queryClient = useQueryClient();
   const [searchParams] = useSearchParams();
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [includeSensitive, setIncludeSensitive] = useState(false);
+  const [sensitivePassword, setSensitivePassword] = useState("");
+  const [sensitiveTotp, setSensitiveTotp] = useState("");
   const [importResult, setImportResult] = useState<{
     imported: number;
     skipped: number;
     warnings: string[];
+    affected_accounts: number[];
+    reloaded_accounts: number[];
+    restart_required: boolean;
   } | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const bundleFileRef = useRef<HTMLInputElement>(null);
@@ -124,6 +146,8 @@ export function ConfigBackup() {
       const res = await api.post("/api/system/export-config", {
         categories: Array.from(selected),
         includeSensitive,
+        password: includeSensitive ? sensitivePassword : undefined,
+        totp_code: includeSensitive ? sensitiveTotp || undefined : undefined,
       }, { responseType: "blob" });
       // 从 Content-Disposition 提取文件名
       const disposition = res.headers["content-disposition"] || "";
@@ -139,7 +163,11 @@ export function ConfigBackup() {
       a.remove();
       URL.revokeObjectURL(url);
     },
-    onSuccess: () => toast.success("配置已导出"),
+    onSuccess: () => {
+      setSensitivePassword("");
+      setSensitiveTotp("");
+      toast.success("配置已导出");
+    },
     onError: (err) => toast.error(getErrMsg(err)),
   });
 
@@ -150,11 +178,36 @@ export function ConfigBackup() {
       const { data } = await api.post("/api/system/import-config", form, {
         headers: { "Content-Type": "multipart/form-data" },
       });
-      return data as { imported: number; skipped: number; warnings: string[] };
+      return data as {
+        imported: number;
+        skipped: number;
+        warnings: string[];
+        affected_accounts: number[];
+        reloaded_accounts: number[];
+        restart_required: boolean;
+      };
     },
-    onSuccess: (data) => {
+    onSuccess: async (data) => {
       setImportResult(data);
-      toast.success(`导入完成：${data.imported} 条成功，${data.skipped} 条跳过`);
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["system"] }),
+        queryClient.invalidateQueries({ queryKey: ["accounts"] }),
+        queryClient.invalidateQueries({ queryKey: ["account"] }),
+        queryClient.invalidateQueries({ queryKey: ["matrix"] }),
+        queryClient.invalidateQueries({ queryKey: ["llm-providers"] }),
+        queryClient.invalidateQueries({ queryKey: ["cmd-tpl"] }),
+        queryClient.invalidateQueries({ queryKey: ["rate-templates"] }),
+        queryClient.invalidateQueries({ queryKey: ["proxies"] }),
+        queryClient.invalidateQueries({ queryKey: ["device-profiles"] }),
+        queryClient.invalidateQueries({ queryKey: ["notify-bots"] }),
+      ]);
+      if (data.restart_required) {
+        toast.warning(
+          `导入已提交：${data.imported} 条成功；部分 Worker 未确认热重载，请重启应用`,
+        );
+      } else {
+        toast.success(`导入完成：${data.imported} 条成功，${data.skipped} 条跳过`);
+      }
     },
     onError: (err) => toast.error(getErrMsg(err)),
   });
@@ -293,7 +346,7 @@ export function ConfigBackup() {
                   <div className="flex items-center gap-1.5">
                     <span className="text-sm font-medium">{cat.label}</span>
                     {cat.sensitive && (
-                      <span className="rounded bg-amber-50 px-1 text-[10px] text-amber-600 dark:bg-amber-950/40 dark:text-amber-300">
+                      <span className="rounded bg-warning/15 px-1 text-[10px] text-warning">
                         含敏感数据
                       </span>
                     )}
@@ -319,15 +372,39 @@ export function ConfigBackup() {
           </div>
 
           {includeSensitive && (
-            <div className="flex items-start gap-2 rounded-md border px-3 py-2 text-xs alert-warning">
-              <AlertTriangle className="h-4 w-4 mt-0.5 shrink-0" />
-              <span>导出后请妥善保管文件。导入端需使用相同的 MASTER_KEY 才能解密敏感数据。</span>
+            <div className="space-y-3 rounded-md border px-3 py-3 alert-warning">
+              <div className="flex items-start gap-2 text-xs">
+                <AlertTriangle className="h-4 w-4 mt-0.5 shrink-0" />
+                <span>敏感导出需要重新验证。导出后请妥善保管文件，导入端需使用相同的 MASTER_KEY。</span>
+              </div>
+              <div className="grid gap-3 sm:grid-cols-2">
+                <div className="space-y-1.5">
+                  <Label htmlFor="sensitive-export-password">当前密码</Label>
+                  <Input
+                    id="sensitive-export-password"
+                    type="password"
+                    autoComplete="current-password"
+                    value={sensitivePassword}
+                    onChange={(event) => setSensitivePassword(event.target.value)}
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor="sensitive-export-totp">TOTP 动态码（已绑定时必填）</Label>
+                  <Input
+                    id="sensitive-export-totp"
+                    inputMode="numeric"
+                    autoComplete="one-time-code"
+                    value={sensitiveTotp}
+                    onChange={(event) => setSensitiveTotp(event.target.value.replace(/\D/g, "").slice(0, 6))}
+                  />
+                </div>
+              </div>
             </div>
           )}
 
           <Button
             onClick={() => exportMut.mutate()}
-            disabled={selected.size === 0 || exportMut.isPending}
+            disabled={selected.size === 0 || exportMut.isPending || (includeSensitive && !sensitivePassword)}
             className="gap-1.5"
           >
             <Download className="h-4 w-4" />
@@ -342,7 +419,8 @@ export function ConfigBackup() {
         <div className="space-y-3">
           <Label className="text-sm font-medium">导入配置</Label>
           <p className="text-xs text-muted-foreground">
-            上传之前导出的 JSON 文件。同名/同 ID 的配置项将被跳过。
+            上传之前导出的版本化 JSON 配置包。恢复会按依赖顺序在单个事务中完成，
+            同一自然标识的配置项将被跳过。
           </p>
 
           <input
@@ -367,7 +445,7 @@ export function ConfigBackup() {
           {importResult && (
             <div className="rounded-md border px-3 py-2 space-y-2">
               <div className="flex items-center gap-4 text-sm">
-                <span className="flex items-center gap-1 text-emerald-600 dark:text-emerald-300">
+                <span className="flex items-center gap-1 text-success">
                   <CheckCircle2 className="h-4 w-4" />
                   成功 {importResult.imported}
                 </span>
@@ -377,13 +455,25 @@ export function ConfigBackup() {
                 </span>
               </div>
               {importResult.warnings.length > 0 && (
-                <div className="space-y-1 text-xs text-amber-600 dark:text-amber-300">
+                <div className="space-y-1 text-xs text-warning">
                   {importResult.warnings.slice(0, 5).map((w, i) => (
                     <p key={i}>{w}</p>
                   ))}
                   {importResult.warnings.length > 5 && (
                     <p>... 还有 {importResult.warnings.length - 5} 条警告</p>
                   )}
+                </div>
+              )}
+              {importResult.affected_accounts.length > 0 && (
+                <p className="text-xs text-muted-foreground">
+                  已通知 {importResult.reloaded_accounts.length}/
+                  {importResult.affected_accounts.length} 个账号 Worker 刷新配置
+                </p>
+              )}
+              {importResult.restart_required && (
+                <div className="flex items-start gap-2 text-xs text-warning">
+                  <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+                  <span>部分运行时未确认刷新。请重启应用后再验证恢复结果。</span>
                 </div>
               )}
             </div>
@@ -469,7 +559,7 @@ export function ConfigBackup() {
             <div className="space-y-3 rounded-md border px-3 py-3">
               <div className="text-sm font-medium">预览结果：现在还没有写入，只是在告诉你会发生什么</div>
               <div className="flex flex-wrap gap-3 text-sm">
-                <span className="flex items-center gap-1 text-emerald-600 dark:text-emerald-300">
+                <span className="flex items-center gap-1 text-success">
                   <CheckCircle2 className="h-4 w-4" />
                   新增 {bundleResult.counts.add}
                 </span>
@@ -477,7 +567,7 @@ export function ConfigBackup() {
                   <XCircle className="h-4 w-4" />
                   跳过 {bundleResult.counts.skip}
                 </span>
-                <span className="flex items-center gap-1 text-red-600 dark:text-red-300">
+                <span className="flex items-center gap-1 text-destructive">
                   <AlertCircle className="h-4 w-4" />
                   冲突 {bundleResult.counts.conflict}
                 </span>
@@ -486,7 +576,7 @@ export function ConfigBackup() {
                 bundle 大小 {Math.round(bundleResult.size_bytes / 1024)} KB
               </div>
               {bundleResult.warnings.length > 0 && (
-                <div className="space-y-1 text-xs text-amber-600 dark:text-amber-300">
+                <div className="space-y-1 text-xs text-warning">
                   {bundleResult.warnings.map((w, i) => (
                     <p key={i}>{w}</p>
                   ))}
@@ -499,9 +589,9 @@ export function ConfigBackup() {
                     className={[
                       "rounded border px-2 py-1",
                       item.action === "conflict"
-                        ? "border-red-300 bg-red-50 text-red-800 dark:border-red-900 dark:bg-red-950/40 dark:text-red-200"
+                        ? "border-destructive/25 bg-destructive/10 text-destructive"
                         : item.action === "add"
-                          ? "border-emerald-300 bg-emerald-50 text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950/40 dark:text-emerald-200"
+                          ? "border-success/25 bg-success/10 text-success"
                           : "border-border text-muted-foreground",
                     ].join(" ")}
                   >

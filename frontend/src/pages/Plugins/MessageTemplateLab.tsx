@@ -923,8 +923,8 @@ export function MessageTemplateLabPage() {
   return (
     <PageShell className="pb-24">
       <div className="flex flex-wrap items-center gap-2">
-        <Button variant="ghost" size="sm" onClick={() => goBackOr(nav, "/plugins")}>
-          <ArrowLeft className="mr-1 h-4 w-4" /> 返回上一页
+        <Button variant="default" size="sm" className="gap-1.5 shadow-sm" onClick={() => goBackOr(nav, "/plugins")}>
+          <ArrowLeft className="h-4 w-4" /> 返回上一页
         </Button>
       </div>
 
@@ -1462,14 +1462,14 @@ export function MessageTemplateLabPage() {
               </Button>
 
               {testError ? (
-                <div className="flex items-start gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-800 dark:text-amber-200">
+                <div className="flex items-start gap-2 rounded-md border border-warning/30 bg-warning/10 px-3 py-2 text-sm text-warning">
                   <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
                   <span className="break-words">{testError}</span>
                 </div>
               ) : null}
 
               {testResult ? (
-                <div className="rounded-md border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-700 dark:text-emerald-300">
+                <div className="rounded-md border border-success/30 bg-success/10 px-3 py-2 text-sm text-success">
                   {testResult.message || `已发送 ${testResult.sent ?? 1} 条测试消息`}
                 </div>
               ) : null}

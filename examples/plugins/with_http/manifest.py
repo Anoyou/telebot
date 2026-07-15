@@ -10,6 +10,7 @@ MANIFEST = Manifest(
     version="0.1.0",
     author="examples",
     description="演示第三方模块通过 ctx.http 发起受控 HTTP 请求。",
+    usage="安装后使用账号命令 http_status 发起受控 HTTP 请求；URL 必须匹配 allowed_hosts。该示例不订阅 Telegram Event Bus。",
     category="utility",
     permissions=["external_http", "edit_message"],
     allowed_hosts=["api.github.com"],

@@ -1,0 +1,16 @@
+{
+  "source": {
+    "type": "chosen_inline_result",
+    "channel": "interaction_bot",
+    "account_id": 1
+  },
+  "chosen_inline_result": {
+    "result_id": "event-bus-demo",
+    "inline_message_id": "inline-message-1001",
+    "query": "demo"
+  },
+  "actor": {"user_id": 501, "display_name": "玩家 A"},
+  "sender": {"user_id": 501, "display_name": "玩家 A"},
+  "trigger": {"scope": "inline_all"},
+  "native_raw_meta": {"enabled": false, "reason": "snapshot_disabled"}
+}

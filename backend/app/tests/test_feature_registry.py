@@ -64,13 +64,22 @@ def test_lazy_registry_refresh_picks_latest_manifest(monkeypatch, tmp_path) -> N
     assert registry["alpha"] == "Alpha V2"
 
 
-def test_builtin_registry_includes_codex_image_as_experimental_builtin() -> None:
+def test_builtin_registry_excludes_optional_official_plugins() -> None:
     BUILTIN_FEATURES.refresh()
-    assert "codex_image" in set(BUILTIN_FEATURES.keys())
-    manifest = BUILTIN_FEATURES.manifest_for("codex_image")
-    assert manifest is not None
-    assert manifest.experimental is True
-    assert manifest.config_schema["x-ui-mode"] == "single"
+    keys = set(BUILTIN_FEATURES.keys())
+    assert "codex_image" not in keys
+    assert "chatgpt_image" not in keys
+    assert "game24" not in keys
+    assert "math10" not in keys
+    assert "auto_reply" not in keys
+    assert "autorepeat" not in keys
+
+
+def test_recommended_plugins_are_not_bundled_in_core() -> None:
+    builtin_root = Path(__file__).resolve().parents[1] / "worker" / "plugins" / "builtin"
+    for key in ("auto_reply", "autorepeat", "game24", "math10"):
+        assert not (builtin_root / key / "plugin.py").exists()
+        assert not (builtin_root / key / "manifest.py").exists()
 
 
 def test_builtin_registry_excludes_legacy_feature_keys() -> None:

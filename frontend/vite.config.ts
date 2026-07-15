@@ -33,8 +33,8 @@ export default defineConfig({
         scope: "/",
         display: "standalone",
         orientation: "portrait",
-        background_color: "#0b0f17",
-        theme_color: "#2563eb",
+        background_color: "#F2F0EC",
+        theme_color: "#F2F0EC",
         icons: [
           {
             src: "/pwa-192x192.png",
@@ -57,13 +57,25 @@ export default defineConfig({
         ],
       },
       workbox: {
-        // 不缓存后端 API：始终走网络
-        navigateFallback: "/index.html",
-        navigateFallbackDenylist: [/^\/api\//, /^\/openapi\.json$/],
-        globPatterns: ["**/*.{js,css,html,ico,png,svg,webp,woff,woff2}"],
+        // index.html 不进 precache（globPatterns 去掉 html），也不用 precache 做
+        // navigateFallback。导航改为 NetworkFirst，在线启动时先拿最新 HTML，避免旧 SW
+        // 继续提供过期的首帧主题和状态栏配置。注意：这只能保证页面拿到最新配置，不能
+        // 改写 iOS 已经固化在现有主屏 Web App 里的安装元数据。
+        navigateFallback: null,
+        globPatterns: ["**/*.{js,css,ico,png,svg,webp,woff,woff2}"],
         runtimeCaching: [
           {
-            // 静态资源：StaleWhileRevalidate
+            // HTML 导航：NetworkFirst，拿最新 index.html；断网回退最近一次缓存。
+            urlPattern: ({ request }) => request.mode === "navigate",
+            handler: "NetworkFirst",
+            options: {
+              cacheName: "html",
+              networkTimeoutSeconds: 3,
+              expiration: { maxEntries: 8 },
+            },
+          },
+          {
+            // 静态资源：StaleWhileRevalidate（带内容 hash，可长期缓存）
             urlPattern: ({ request }) =>
               ["style", "script", "worker", "image", "font"].includes(request.destination),
             handler: "StaleWhileRevalidate",

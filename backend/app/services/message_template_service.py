@@ -11,9 +11,11 @@ from fastapi import HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..account_bot_defaults import (
+    DEFAULT_DEBIT_NOTICE_TEMPLATE,
     DEFAULT_INTERACTION_RESPONSE_TEMPLATE,
     DEFAULT_TRANSFER_NOTICE_TEMPLATE,
 )
+from ..db.models.system import SystemSetting
 from ..schemas.message_template import (
     MessageTemplateCatalogGroup,
     MessageTemplateCatalogItem,
@@ -26,6 +28,14 @@ from ..schemas.message_template import (
     MessageTemplateValidationResult,
 )
 from . import account_bot_service, command_service, feature_service
+from .event_trace import (
+    TRACE_STATUS_FAILED,
+    TRACE_STATUS_OK,
+    finish_trace,
+    record_action,
+    start_trace,
+    trace_log_context,
+)
 from .llm_format import DEFAULT_TEMPLATE as DEFAULT_AI_OUTPUT_TEMPLATE
 from .llm_format import render_output
 
@@ -83,6 +93,15 @@ _DEFAULT_SAMPLE_VALUES: dict[str, Any] = {
     "error": "示例错误",
     "time": "12:00",
 }
+
+
+async def _trace_enabled(db: AsyncSession) -> bool:
+    try:
+        row = await db.get(SystemSetting, "log_retention")
+        raw = getattr(row, "value", None) if row is not None else None
+        return bool(raw.get("trace_enabled", True)) if isinstance(raw, dict) else True
+    except Exception:  # noqa: BLE001
+        return True
 
 _ALLOWED_HTML_TAGS: dict[str, set[str]] = {
     "a": {"href"},
@@ -269,6 +288,7 @@ def _parse_mode_for_field(field_schema: dict[str, Any], effective_config: dict[s
 
 def _system_catalog_items(config: dict[str, Any]) -> list[MessageTemplateCatalogItem]:
     transfer_template = str(config.get("transfer_notice_template") or DEFAULT_TRANSFER_NOTICE_TEMPLATE)
+    debit_template = str(config.get("debit_notice_template") or DEFAULT_DEBIT_NOTICE_TEMPLATE)
     response_template = str(config.get("response_template") or DEFAULT_INTERACTION_RESPONSE_TEMPLATE)
     transfer_sample = {
         "payer_name": _DEFAULT_SAMPLE_VALUES["payer_name"],
@@ -296,6 +316,17 @@ def _system_catalog_items(config: dict[str, Any]) -> list[MessageTemplateCatalog
             description="转账结果通知 Bot 发出的到账消息模板，默认带 language-转账成功 代码块标识。",
             template=transfer_template,
             sample_data=_sample_data_for_template(transfer_template, explicit=transfer_sample),
+            parse_mode=_DEFAULT_PARSE_MODE,
+        ),
+        MessageTemplateCatalogItem(
+            id="system.debit_notice_template",
+            group=_SYSTEM_GROUP,
+            feature_key=None,
+            field_key="debit_notice_template",
+            title="扣款测试通知模板",
+            description="测试通知 Bot 处理 -数字 扣款命令时发出的扣减消息模板，默认带 language-扣减成功 代码块标识。",
+            template=debit_template,
+            sample_data=_sample_data_for_template(debit_template, explicit=transfer_sample),
             parse_mode=_DEFAULT_PARSE_MODE,
         ),
         MessageTemplateCatalogItem(
@@ -552,6 +583,26 @@ async def send_test_message(
 
     bot_config = await account_bot_service.get_bot_config(db, payload.account_id, create=False)
     token = account_bot_service.decrypt_bot_token(bot_config)
+    trace = None
+    if await _trace_enabled(db):
+        trace = await start_trace(
+            {
+                "source": {
+                    "account_id": payload.account_id,
+                    "channel": "account_bot",
+                    "type": "message_template_test",
+                },
+                "chat": {"id": int(payload.target_chat_id), "type": "private"},
+                "message": {"chat_id": int(payload.target_chat_id), "text": payload.text},
+            }
+        )
+    action = {
+        "type": "send_message",
+        "send_via": "account_bot",
+        "chat_id": int(payload.target_chat_id),
+        "text": payload.text,
+        "context": trace_log_context(trace, plugin_key="message_template"),
+    }
     try:
         result = await account_bot_service.send_message(
             token,
@@ -560,11 +611,22 @@ async def send_test_message(
             parse_mode=parse_mode,
         )
     except Exception as exc:  # noqa: BLE001
+        await record_action(
+            trace,
+            action,
+            TRACE_STATUS_FAILED,
+            actual_send_via="account_bot",
+            error_code="telegram_api_error",
+            error=account_bot_service.sanitize_bot_error(exc, token=token),
+        )
+        await finish_trace(trace, TRACE_STATUS_FAILED)
         raise _bad(
             "MESSAGE_TEMPLATE_TEST_SEND_FAILED",
             account_bot_service.sanitize_bot_error(exc, token=token),
             status.HTTP_502_BAD_GATEWAY,
         ) from exc
+    await record_action(trace, action, TRACE_STATUS_OK, actual_send_via="account_bot", result=result)
+    await finish_trace(trace, TRACE_STATUS_OK)
 
     raw_message_id = result.get("message_id") if isinstance(result, dict) else None
     try:

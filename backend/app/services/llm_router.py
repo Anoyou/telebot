@@ -92,7 +92,11 @@ _MOD_MULTIMODAL = "multimodal"
 
 @dataclass
 class RoutingDecision:
-    """路由决策结果。"""
+    """路由决策结果。
+
+    0.57.0 阶段 D：升级为 Provider + 已启用模型级决策。新增字段全部带默认值，
+    旧调用方（只读 ``provider_id`` / ``reason`` / ``matched_tag``）保持兼容。
+    """
 
     provider_id: int
     """选中的 provider id。"""
@@ -102,6 +106,31 @@ class RoutingDecision:
 
     matched_tag: str | None = None
     """命中的 tag（若是规则路由）；分类器兜底时也会填这里。"""
+
+    # 阶段 D：模型级路由结果（None 表示交由 provider.default_model 决定）。
+    model: str | None = None
+    """选中的已启用模型 id；None 时上层回落到 provider.default_model。"""
+
+    api_format: str | None = None
+    """该 provider 本次实际协议（用于身份/协议重算）。"""
+
+    client_identity_profile: str | None = None
+    """该 provider 配置的客户端身份档案（脱敏摘要用）。"""
+
+    effective_client_identity_profile: str | None = None
+    """本次实际生效的身份档案（配置身份经协议兼容/证据校验后的解析结果）。"""
+
+    def summary(self) -> dict[str, Any]:
+        """脱敏路由摘要（可安全返回给插件 / 前端；不含 key / base_url / 代理）。"""
+        return {
+            "provider_id": self.provider_id,
+            "reason": self.reason,
+            "matched_tag": self.matched_tag,
+            "model": self.model,
+            "api_format": self.api_format,
+            "client_identity_profile": self.client_identity_profile,
+            "effective_client_identity_profile": self.effective_client_identity_profile,
+        }
 
 
 # ════════════════════════════════════════════════════════════
@@ -136,6 +165,78 @@ def _cost_tier(p: dict[str, Any]) -> int:
         return int(v) if v is not None else 2
     except (TypeError, ValueError):
         return 2
+
+
+def _enabled_models_of(p: dict[str, Any]) -> list[str]:
+    """严格返回 provider.models[].enabled == True 的模型 id（顺序保留）。"""
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in p.get("models") or []:
+        if not isinstance(item, dict):
+            continue
+        if not bool(item.get("enabled")):
+            continue
+        mid = str(item.get("id") or "").strip()
+        if not mid or mid in seen:
+            continue
+        seen.add(mid)
+        out.append(mid)
+    return out
+
+
+def _has_model_list(p: dict[str, Any]) -> bool:
+    """provider 是否声明了显式 models 清单（哪怕只有一条）。"""
+    return bool([m for m in (p.get("models") or []) if isinstance(m, dict) and str(m.get("id") or "").strip()])
+
+
+def _pick_model_for(p: dict[str, Any]) -> str | None:
+    """为选中的 provider 选一个已启用模型。
+
+    边界（阶段 F 收口 #5）：
+    - 有显式 models 清单且有 enabled：default_model∈enabled 优先，否则第一个 enabled。
+    - 有显式 models 清单但**全部禁用**：返回 None——该 provider 无可用模型，不得
+      回落 default_model（回落会绕过用户的启用开关）。
+    - **没有**显式 models 清单（老 provider）：向后兼容，回落 default_model。
+    """
+    enabled = _enabled_models_of(p)
+    default_model = str(p.get("default_model") or "").strip()
+    if enabled:
+        if default_model and default_model in enabled:
+            return default_model
+        return enabled[0]
+    if _has_model_list(p):
+        # 有清单但全禁用 → 不可用（None）。
+        return None
+    # 无清单：老配置，沿用 default_model。
+    return default_model or None
+
+
+def _finalize_decision(decision: RoutingDecision, providers: dict[int, dict[str, Any]]) -> RoutingDecision:
+    """在选定 provider 后补齐模型 / 协议 / 身份字段（阶段 D）。
+
+    每次（含 fallback 切换 provider）都基于该 provider 的最新配置重算，保证
+    模型级结果与协议、身份一致。
+    """
+    p = providers.get(int(decision.provider_id))
+    if p is None:
+        return decision
+    decision.model = _pick_model_for(p)
+    decision.api_format = str(p.get("api_format") or "") or None
+    decision.client_identity_profile = str(p.get("client_identity_profile") or "auto")
+    decision.effective_client_identity_profile = _resolve_effective_identity(
+        decision.client_identity_profile, decision.api_format
+    )
+    return decision
+
+
+def _resolve_effective_identity(profile: str | None, api_format: str | None) -> str | None:
+    """把配置身份解析为本次实际生效的身份档案名（脱敏摘要用，保存值/摘要/请求头一致）。"""
+    try:
+        from .llm_identity import resolve_identity
+
+        return resolve_identity(profile, api_format).profile
+    except Exception:  # noqa: BLE001 - 解析异常时退回配置值，不阻断路由
+        return profile
 
 
 def _select_by_tag(
@@ -283,12 +384,15 @@ async def _ask_classifier(
     classifier_provider: dict[str, Any],
     user_q: str,
     replied_text: str | None,
+    *,
+    account_id: int | None = None,
+    triggered_by_account_id: int | None = None,
+    source: str = "router",
 ) -> str | None:
     """调 classifier provider 返回一个 label；任何错误返回 None。"""
-    from .llm_client import LLMError, build_client
-
-    # 使用 LLMProviderDTO 替代手搓 fake ORM row
+    from .llm_client import LLMCallFailed, LLMError
     from .llm_dto import LLMProviderDTO
+    from .llm_invoke import invoke as invoke_llm
 
     dto = LLMProviderDTO(
         id=int(classifier_provider.get("id") or 0),
@@ -304,12 +408,18 @@ async def _ask_classifier(
     # 把"原文 + 问题"压成短摘要送进去；max_tokens=8 防滥调
     blob = (replied_text or "")[:300] + "\n---\n" + (user_q or "")[:200]
     try:
-        cli = build_client(
-            _dto_to_fake_row(dto),
-            proxy_url=dto.proxy_url,
+        result, _, _ = await invoke_llm(
+            dto,
+            {dto.id: dto},
+            _CLASSIFIER_SYSTEM,
+            blob,
+            max_tokens=8,
+            account_id=account_id,
+            triggered_by_account_id=triggered_by_account_id,
+            source=source,
+            matched_tag="router",
         )
-        result = await cli.complete(_CLASSIFIER_SYSTEM, blob, max_tokens=8)
-    except (LLMError, ValueError, Exception) as e:  # noqa: BLE001
+    except (LLMCallFailed, LLMError, ValueError, Exception) as e:  # noqa: BLE001
         log.debug("classifier call failed: %s", type(e).__name__)
         return None
 
@@ -318,23 +428,6 @@ async def _ask_classifier(
     if label in _CLASSIFIER_LABELS:
         return label
     return None
-
-
-def _dto_to_fake_row(dto) -> Any:
-    """将 LLMProviderDTO 转为临时 ORM 行（向后兼容）。"""
-    from ..db.models.command import LLMProvider as LLMProviderModel
-
-    return LLMProviderModel(
-        id=dto.id,
-        name=dto.name,
-        provider=dto.provider,
-        api_key_enc=dto.api_key_enc,
-        base_url=dto.base_url,
-        default_model=dto.default_model,
-        api_format=dto.api_format,
-        web_search_api_format=dto.web_search_api_format,
-    )
-
 
 # ════════════════════════════════════════════════════════════
 # 公共入口
@@ -349,6 +442,37 @@ async def pick_provider(
     *,
     classifier_provider_id: int | None = None,
     fallback_provider_id: int | None = None,
+    account_id: int | None = None,
+    triggered_by_account_id: int | None = None,
+) -> RoutingDecision:
+    """选 provider 并补齐模型 / 协议 / 身份（阶段 D 对外入口）。
+
+    在内部决策函数之上统一调用 ``_finalize_decision``，保证任何返回路径（规则 /
+    分类器 / fallback）都带上模型级结果，且切换 provider 后同步重算。
+    """
+    decision = await _pick_provider_impl(
+        user_q,
+        replied_text,
+        has_replied_photo,
+        providers,
+        classifier_provider_id=classifier_provider_id,
+        fallback_provider_id=fallback_provider_id,
+        account_id=account_id,
+        triggered_by_account_id=triggered_by_account_id,
+    )
+    return _finalize_decision(decision, providers)
+
+
+async def _pick_provider_impl(
+    user_q: str,
+    replied_text: str | None,
+    has_replied_photo: bool,
+    providers: dict[int, dict[str, Any]],
+    *,
+    classifier_provider_id: int | None = None,
+    fallback_provider_id: int | None = None,
+    account_id: int | None = None,
+    triggered_by_account_id: int | None = None,
 ) -> RoutingDecision:
     """根据消息内容挑一个 provider。
 
@@ -367,10 +491,12 @@ async def pick_provider(
     Raises:
         ValueError: 没有任何可用 provider（候选池空 / 全无 api_key）
     """
-    # 仅留有 api_key 的 provider（ollama 例外）
-    candidates = [p for p in providers.values() if _has_api_key(p)]
+    # 仅留有 api_key 且有可用模型的 provider（ollama 例外）。
+    # 阶段 F 收口 #5：候选必须能选出一个已启用模型（老配置无清单时回落 default_model），
+    # 有清单但全禁用的 provider 不参与路由。
+    candidates = [p for p in providers.values() if _has_api_key(p) and _pick_model_for(p)]
     if not candidates:
-        raise ValueError("没有任何可用 provider（候选池为空或全部未配 api_key）")
+        raise ValueError("没有任何可用 provider（候选池为空、全部未配 api_key、或无已启用模型）")
 
     # 1) 规则层
     rule = _rule_route(user_q, replied_text, has_replied_photo, candidates)
@@ -381,7 +507,14 @@ async def pick_provider(
     if classifier_provider_id is not None:
         cls_p = providers.get(int(classifier_provider_id))
         if cls_p is not None and _has_api_key(cls_p):
-            label = await _ask_classifier(cls_p, user_q, replied_text)
+            label = await _ask_classifier(
+                cls_p,
+                user_q,
+                replied_text,
+                account_id=account_id,
+                triggered_by_account_id=triggered_by_account_id,
+                source="router",
+            )
             if label:
                 p = _select_by_tag(candidates, label, prefer_cheap=(label != "reason"),
                                    prefer_premium=(label == "reason"))
@@ -392,10 +525,10 @@ async def pick_provider(
                         label,
                     )
 
-    # 3) fallback_provider_id
+    # 3) fallback_provider_id（同样要求有可用模型，避免绕过启用开关）
     if fallback_provider_id is not None:
         fp = providers.get(int(fallback_provider_id))
-        if fp is not None and _has_api_key(fp):
+        if fp is not None and _has_api_key(fp) and _pick_model_for(fp):
             return RoutingDecision(
                 int(fp["id"]),
                 "fallback (no rule/classifier match)",
@@ -408,7 +541,38 @@ async def pick_provider(
     return RoutingDecision(int(p["id"]), "fallback (first available)", None)
 
 
+async def preview_route(
+    user_q: str,
+    replied_text: str | None,
+    has_replied_photo: bool,
+    providers: dict[int, dict[str, Any]],
+    *,
+    classifier_provider_id: int | None = None,
+    fallback_provider_id: int | None = None,
+) -> dict[str, Any]:
+    """只做路由决策、不调用上游、不消耗 quota，返回脱敏摘要（阶段 D）。
+
+    注意：为保证"预览不消耗 quota / 不调用上游"，此处**禁用**分类器兜底
+    （分类器本身是一次真实 LLM 调用）。因此 ``classifier_provider_id`` 仅用于
+    在摘要里标注"实际执行时会启用分类器"，不会真正调用。
+    """
+    decision = await _pick_provider_impl(
+        user_q,
+        replied_text,
+        has_replied_photo,
+        providers,
+        classifier_provider_id=None,  # 预览绝不调用分类器（那会消耗 quota）
+        fallback_provider_id=fallback_provider_id,
+    )
+    decision = _finalize_decision(decision, providers)
+    summary = decision.summary()
+    summary["classifier_enabled"] = classifier_provider_id is not None
+    summary["preview_only"] = True
+    return summary
+
+
 __all__ = [
     "RoutingDecision",
     "pick_provider",
+    "preview_route",
 ]

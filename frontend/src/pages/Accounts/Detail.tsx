@@ -8,7 +8,6 @@ import {
   Bot,
   ChevronRight,
   Gauge,
-  Gamepad2,
   KeyRound,
   LayoutDashboard,
   Loader2,
@@ -94,18 +93,29 @@ function compareFeatureKey(a: FeatureInfo, b: FeatureInfo) {
   return a.key.localeCompare(b.key, "en", { sensitivity: "base" });
 }
 
+function featureSourceLabel(feature: Pick<FeatureInfo, "is_builtin" | "source_label">) {
+  if (feature.is_builtin) return "平台内置";
+  if (feature.source_label === "Official") return "历史推荐源";
+  return "第三方";
+}
+
 export function AccountDetail() {
   const params = useParams();
   const [searchParams] = useSearchParams();
   const tabParam = searchParams.get("tab") || "overview";
   const defaultTab = tabParam === "bot"
     ? "bot-management"
-    : ["overview", "commands", "features", "bot-management", "interaction-bot", "rate", "proxy", "ignored"].includes(tabParam)
+    : ["overview", "commands", "features", "bot-management", "rate", "proxy", "ignored"].includes(tabParam)
     ? tabParam
     : "overview";
   const aid = Number(params.aid);
   const nav = useNavigate();
   const qc = useQueryClient();
+
+  useEffect(() => {
+    if (!aid || tabParam !== "interaction-bot") return;
+    nav(`/interaction?aid=${aid}`, { replace: true });
+  }, [aid, nav, tabParam]);
 
   const detailQ = useQuery({
     queryKey: ["account", aid],
@@ -266,9 +276,6 @@ export function AccountDetail() {
             <TabsTrigger value="bot-management" className="shrink-0 gap-1.5">
               <MessageCircle className="h-4 w-4" /> 管理 Bot
             </TabsTrigger>
-            <TabsTrigger value="interaction-bot" className="shrink-0 gap-1.5">
-              <Gamepad2 className="h-4 w-4" /> 联动交互 Bot
-            </TabsTrigger>
             <TabsTrigger value="rate" className="shrink-0 gap-1.5">
               <Gauge className="h-4 w-4" /> 风控基础
             </TabsTrigger>
@@ -302,7 +309,7 @@ export function AccountDetail() {
                   <Button
                     size="sm"
                     variant="outline"
-                    className="border-amber-300 bg-amber-100 hover:bg-amber-200 dark:border-amber-800 dark:bg-amber-950/50 dark:hover:bg-amber-900/50"
+                    className="border-warning/50 bg-warning/15 hover:bg-warning/25"
                     disabled={restartWorkerMut.isPending}
                     onClick={() => restartWorkerMut.mutate()}
                   >
@@ -592,7 +599,7 @@ export function AccountDetail() {
                                   </TableCell>
                                   <TableCell>
                                     <Badge variant={f.is_builtin ? "secondary" : "outline"}>
-                                      {f.is_builtin ? "内置" : "第三方"}
+                                      {featureSourceLabel(f)}
                                     </Badge>
                                   </TableCell>
                                   <TableCell className="text-center">
@@ -638,11 +645,6 @@ export function AccountDetail() {
         {/* 账号绑定管理 Bot */}
         <TabsContent value="bot-management">
           <BotTab aid={aid} mode="management" />
-        </TabsContent>
-
-        {/* 联动交互 Bot */}
-        <TabsContent value="interaction-bot">
-          <BotTab aid={aid} mode="interaction" />
         </TabsContent>
 
         {/* 风控基础 */}

@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -24,6 +26,7 @@ from app.db.models.rate_limit import (
     POLICY_PAUSE,
     POLICY_QUEUE,
 )
+from app.worker.ratelimit import overrides as overrides_mod
 from app.worker.ratelimit.engine import (
     EffectiveLimits,
     RateLimitEngine,
@@ -49,6 +52,8 @@ class _FakeRedis:
         return [1, 0, 0]
 
     async def get(self, key: str):
+        if key.startswith("rlovr:"):
+            return self.kv.get(key, "1.0")
         return self.kv.get(key)
 
     async def set(self, key: str, val: str, ex: int = 0) -> bool:
@@ -92,6 +97,37 @@ def _engine(eff: EffectiveLimits, redis=None, opts: HumanizeOpts | None = None) 
         get_effective=_make_get_effective(eff),
         redis=redis or _FakeRedis(),
     )
+
+
+@pytest.mark.asyncio
+async def test_override_cache_miss_rehydrates_from_database(monkeypatch) -> None:
+    class _DB:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def scalar(self, _stmt):
+            return SimpleNamespace(
+                multiplier=0.5,
+                expires_at=datetime.now(UTC) + timedelta(minutes=5),
+            )
+
+    redis = _FakeRedis()
+    redis.kv.pop("rlovr:1:send_message_group", None)
+    original_get = redis.get
+
+    async def _missing_once(key: str):
+        if key.startswith("rlovr:") and key not in redis.kv:
+            return None
+        return await original_get(key)
+
+    redis.get = _missing_once  # type: ignore[method-assign]
+    monkeypatch.setattr(overrides_mod, "AsyncSessionLocal", lambda: _DB())
+
+    assert await overrides_mod.get_multiplier(redis, 1, "send_message_group") == 0.5
+    assert redis.kv["rlovr:1:send_message_group"] == "0.5"
 
 
 # ─────────────────────────────────────────────────────

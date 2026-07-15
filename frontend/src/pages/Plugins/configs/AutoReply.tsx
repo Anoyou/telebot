@@ -241,7 +241,7 @@ export function AutoReplyConfig() {
             自动指令白名单
           </CardTitle>
           <CardDescription>
-            如果回复内容是指令，例如“我要玩 24 点”命中后回复 {",24d 100"}，
+            如果回复内容是指令，例如“我要玩 24 点”命中后回复 {"命令前缀 + 24d 100"}，
             需要先把 <code>24d</code> 加入本账号白名单；普通成员仍不能直接触发插件指令。
           </CardDescription>
         </CardHeader>

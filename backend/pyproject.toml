@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "telepilot-backend"
-version = "0.32.0"
+version = "0.60.4"
 description = "TelePilot后端"
 requires-python = ">=3.12"
 license = {text = "MIT"}
@@ -29,7 +29,7 @@ dependencies = [
     "redis>=5.0.4",
 
     # Telegram 客户端：Telethon（活跃维护、类型注解完备）
-    "telethon>=1.43,<2.0.0",
+    "telethon>=1.44,<2.0.0",
     "Pillow>=10.0.0",
     "cryptg>=0.4.0",            # C 加速 AES-IGE（Telethon）
     "python-socks[asyncio]>=2.4.4",  # SOCKS5/HTTP/MTProxy 出口代理
@@ -59,8 +59,9 @@ dev = [
     "httpx>=0.27.0",
 ]
 
-[tool.setuptools]
-packages = ["app"]
+[tool.setuptools.packages.find]
+include = ["app", "app.*", "telepilot", "telepilot.*"]
+exclude = ["app.tests", "app.tests.*"]
 
 [tool.ruff]
 line-length = 110
@@ -70,6 +71,14 @@ target-version = "py312"
 select = ["E", "F", "I", "B", "UP"]
 # B008: FastAPI 用法 ``param: T = Query(...)`` 是官方推荐写法，不是真 bug
 ignore = ["E501", "B008"]
+
+[tool.ruff.lint.per-file-ignores]
+# 这些已发布迁移必须保持与 927bbf10 字节级一致，不能为 import 排序重写历史。
+"alembic/versions/0016_command_alias.py" = ["I001"]
+"alembic/versions/0017_sudo_user.py" = ["I001"]
+"alembic/versions/0020_llm_usage.py" = ["I001"]
+"alembic/versions/0023_account_bot_remote_plugin_policy.py" = ["I001"]
+"alembic/versions/0024_llm_provider_web_search_api_format.py" = ["I001"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

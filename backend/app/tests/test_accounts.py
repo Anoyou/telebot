@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -153,6 +154,83 @@ async def test_confirm_code_success_no_2fa():
     assert require_2fa is False
     assert pending.require_2fa is False
     fake_client.sign_in.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_confirm_code_claim_rejects_concurrent_duplicate() -> None:
+    """同一个 token 的验证码校验未结束时，第二个请求必须被原子拒绝。"""
+
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def slow_sign_in(**_kwargs) -> None:  # noqa: ANN003
+        started.set()
+        await release.wait()
+
+    fake_client = _make_fake_client()
+    fake_client.sign_in = AsyncMock(side_effect=slow_sign_in)
+    with patch.object(login_service, "TelegramClient", return_value=fake_client):
+        token = await login_service.start_login(
+            AsyncMock(),
+            api_id=1,
+            api_hash="h",
+            phone="+1",
+        )
+
+    first = asyncio.create_task(login_service.confirm_code(token, "12345"))
+    await started.wait()
+    with pytest.raises(login_service.HTTPException) as exc_info:
+        await login_service.confirm_code(token, "12345")
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail["code"] == "LOGIN_TOKEN_IN_USE"
+
+    release.set()
+    require_2fa, pending = await first
+    assert require_2fa is False
+    assert pending.claimed is True
+    assert fake_client.sign_in.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_confirm_code_unexpected_error_releases_claim() -> None:
+    """网络类未知异常不能永久锁死 token，用户应可重试。"""
+
+    fake_client = _make_fake_client()
+    fake_client.sign_in = AsyncMock(side_effect=ConnectionError("temporary"))
+    with patch.object(login_service, "TelegramClient", return_value=fake_client):
+        token = await login_service.start_login(
+            AsyncMock(),
+            api_id=1,
+            api_hash="h",
+            phone="+1",
+        )
+
+    with pytest.raises(ConnectionError):
+        await login_service.confirm_code(token, "12345")
+
+    assert login_service._PENDING[token].claimed is False
+
+
+@pytest.mark.asyncio
+async def test_finalize_failure_releases_claim_for_retry() -> None:
+    """落库前读取 Telegram 身份失败时，token 不应永久锁死。"""
+
+    fake_client = _make_fake_client()
+    fake_client.get_me = AsyncMock(side_effect=ConnectionError("temporary"))
+    pending = login_service._PendingLogin(
+        client=fake_client,
+        api_id=1,
+        api_hash="h",
+        phone="+1",
+        claimed=True,
+    )
+    token = "finalize-retry-token"
+    login_service._PENDING[token] = pending
+
+    with pytest.raises(ConnectionError):
+        await login_service.finalize(AsyncMock(), token, pending)
+
+    assert pending.claimed is False
 
 
 @pytest.mark.asyncio

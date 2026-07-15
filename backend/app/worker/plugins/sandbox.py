@@ -1,7 +1,7 @@
 """插件运行时沙箱（阶段 C，阶段 E 安全加固）。
 
-目标：限制第三方插件 (``installed`` source) 能调用的 Telethon API 范围；
-内置 builtin 插件直接拿到原 ``TelegramClient``，不走沙箱。
+目标：限制安装型插件 (``installed`` source，含远程/本地/插件库插件) 能调用的 Telethon API 范围；
+核心 builtin 兼容代码直接拿到原 ``TelegramClient``，不走沙箱。
 
 安全设计（阶段 E 修复）：
 - 移除 ``_ALWAYS_ALLOWED`` 中的 ``session``，防止第三方插件访问真实 session
@@ -23,6 +23,7 @@
 - ``read_chat``       : ``get_messages`` / ``get_chat`` / ``iter_messages``
 - ``resolve_entity``  : ``get_entity``
 - ``send_file``       : ``send_file``
+- ``forward_message`` : ``forward_messages``
 - ``join_chat``       : ``join_chat``
 - ``delete_message``  : ``delete_messages``
 - ``moderate_chat``   : ``ban_user`` / ``kick_user`` / ``mute_user`` / ``unban_user``
@@ -31,7 +32,7 @@
 - 仅拦截顶层 ``getattr``；插件取到方法后多次调用都不再过 check（性能权衡）
 - 私有属性（`_` 前缀）默认拒绝，避免拿到真实 client 内部对象绕过白名单
 - 调用方 (loader) 在 ``installed`` 源 plugin 启动时把 ``ctx.client`` 替成
-  ``SandboxClient(real, perms)``；``builtin`` 不变
+  ``SandboxClient(real, perms)``；核心 ``builtin`` 兼容代码不变
 """
 
 from __future__ import annotations
@@ -39,6 +40,8 @@ from __future__ import annotations
 import logging
 from datetime import timedelta
 from typing import Any
+
+from ..command import acquire_userbot_action_rate_limit
 
 log = logging.getLogger(__name__)
 
@@ -50,6 +53,7 @@ ALLOWED_API: dict[str, frozenset[str]] = {
     "read_chat": frozenset({"get_messages", "get_chat", "iter_messages"}),
     "resolve_entity": frozenset({"get_entity"}),
     "send_file": frozenset({"send_file"}),
+    "forward_message": frozenset({"forward_messages"}),
     "join_chat": frozenset({"join_chat"}),
     "delete_message": frozenset({"delete_messages"}),
     "moderate_chat": frozenset({"ban_user", "kick_user", "mute_user", "unban_user"}),
@@ -61,6 +65,7 @@ _NON_CLIENT_PERMISSIONS: frozenset[str] = frozenset(
         "external_http",
         "external_http_bypass_proxy",
         "ai_text",
+        "ai_agent",
         "ai_vision",
         "ai_image",
         "ai_stt",
@@ -142,9 +147,9 @@ _EVENT_BLOCKED_ATTRS: frozenset[str] = frozenset(
 )
 
 _EVENT_METHOD_TO_CLIENT_METHOD: dict[str, str] = {
-    "respond": "respond",
-    "reply": "reply",
-    "edit": "edit",
+    "respond": "send_message",
+    "reply": "send_message",
+    "edit": "edit_message",
     "delete": "delete_messages",
     "get_reply_message": "get_messages",
     "get_chat": "get_chat",
@@ -211,6 +216,36 @@ def _require_event_method(client: SandboxClient, plugin_key: str, event_method: 
         )
 
 
+def _event_chat_id(real: Any) -> Any:
+    message = getattr(real, "message", None)
+    return (
+        getattr(real, "chat_id", None)
+        or getattr(message, "chat_id", None)
+        or getattr(real, "peer_id", None)
+        or getattr(message, "peer_id", None)
+    )
+
+
+def _event_message_id(real: Any) -> Any:
+    message = getattr(real, "message", None)
+    return (
+        getattr(real, "id", None)
+        or getattr(real, "message_id", None)
+        or getattr(message, "id", None)
+        or getattr(message, "message_id", None)
+    )
+
+
+def _event_text_arg(args: tuple[Any, ...], kwargs: dict[str, Any]) -> tuple[Any, tuple[Any, ...]]:
+    if args:
+        return args[0], args[1:]
+    if "message" in kwargs:
+        return kwargs.pop("message"), ()
+    if "text" in kwargs:
+        return kwargs.pop("text"), ()
+    return None, ()
+
+
 class SandboxClient:
     """``TelegramClient`` 的最小化代理：只放行 manifest 声明的方法。
 
@@ -223,7 +258,7 @@ class SandboxClient:
 
     is_sandbox_client = True
     _is_sandboxed = True
-    __slots__ = ("_real", "_allowed", "_plugin_key", "_perms")
+    __slots__ = ("_real", "_allowed", "_plugin_key", "_perms", "_account_id", "_last_rate_limit_detail")
 
     def __init__(
         self,
@@ -231,12 +266,15 @@ class SandboxClient:
         perms: list[str] | None,
         *,
         plugin_key: str = "?",
+        account_id: int | None = None,
     ) -> None:
         self._real = real
         # frozenset 避免被插件 mutate
         self._allowed = resolve_permissions(perms)
         self._plugin_key = plugin_key
         self._perms = list(perms or [])
+        self._account_id = account_id
+        self._last_rate_limit_detail: dict[str, Any] | None = None
 
     @property
     def __class__(self):  # type: ignore[override]
@@ -302,6 +340,41 @@ class SandboxClient:
             f"插件 {plugin_key!r} 缺少权限调用 client.{name}; "
             f"请在 manifest.permissions 中声明对应能力（持有: {perms}）"
         )
+
+    async def send_message(self, chat_id: Any = None, message: Any = None, *args: Any, **kwargs: Any) -> Any:
+        """受控发送消息：权限校验后接入 UserBot 动作限速。"""
+
+        real = _require_allowed_method(self, "send_message")
+        if chat_id is None and "entity" in kwargs:
+            chat_id = kwargs.pop("entity")
+        text = message if message is not None else kwargs.pop("message", None)
+        object.__setattr__(self, "_last_rate_limit_detail", None)
+        allowed, detail = await acquire_userbot_action_rate_limit(
+            object.__getattribute__(self, "_account_id"),
+            "send_message",
+            chat_id,
+        )
+        if not allowed:
+            object.__setattr__(self, "_last_rate_limit_detail", detail)
+            return None
+        return await _maybe_await(real.send_message(chat_id, text, *args, **kwargs))
+
+    async def send_file(self, chat_id: Any = None, file: Any = None, *args: Any, **kwargs: Any) -> Any:
+        """受控发送文件：权限校验后接入 UserBot 动作限速。"""
+
+        real = _require_allowed_method(self, "send_file")
+        if chat_id is None and "entity" in kwargs:
+            chat_id = kwargs.pop("entity")
+        object.__setattr__(self, "_last_rate_limit_detail", None)
+        allowed, detail = await acquire_userbot_action_rate_limit(
+            object.__getattribute__(self, "_account_id"),
+            "send_file",
+            chat_id,
+        )
+        if not allowed:
+            object.__setattr__(self, "_last_rate_limit_detail", detail)
+            return None
+        return await _maybe_await(real.send_file(chat_id, file, *args, **kwargs))
 
     async def ban_user(
         self,
@@ -409,16 +482,39 @@ class SandboxEvent:
 
         if name in _EVENT_METHOD_TO_CLIENT_METHOD:
             _require_event_method(client, plugin_key, name)
-            method = getattr(real, name)
-            if not callable(method):
-                return method
-
             def _call(*args: Any, **kwargs: Any) -> Any:
-                result = method(*args, **kwargs)
-                if name not in _EVENT_READ_HELPERS:
-                    return result
+                if name == "respond":
+                    call_kwargs = dict(kwargs)
+                    chat_id = call_kwargs.pop("entity", None) or call_kwargs.pop("chat_id", None) or _event_chat_id(real)
+                    text, rest = _event_text_arg(args, call_kwargs)
+                    return client.send_message(chat_id, text, *rest, **call_kwargs)
+
+                if name == "reply":
+                    call_kwargs = dict(kwargs)
+                    chat_id = call_kwargs.pop("entity", None) or call_kwargs.pop("chat_id", None) or _event_chat_id(real)
+                    text, rest = _event_text_arg(args, call_kwargs)
+                    call_kwargs.setdefault("reply_to", _event_message_id(real))
+                    return client.send_message(chat_id, text, *rest, **call_kwargs)
+
+                if name == "edit":
+                    call_kwargs = dict(kwargs)
+                    entity = call_kwargs.pop("entity", None) or call_kwargs.pop("chat_id", None) or _event_chat_id(real)
+                    message_id = call_kwargs.pop("message_id", None) or call_kwargs.pop("message", None) or _event_message_id(real)
+                    text, rest = _event_text_arg(args, call_kwargs)
+                    return client.edit_message(entity, message_id, text, *rest, **call_kwargs)
+
+                if name == "delete":
+                    call_kwargs = dict(kwargs)
+                    entity = call_kwargs.pop("entity", None) or call_kwargs.pop("chat_id", None) or _event_chat_id(real)
+                    message_ids = call_kwargs.pop("message_ids", None) or call_kwargs.pop("message", None) or _event_message_id(real)
+                    return client.delete_messages(entity, message_ids, *args, **call_kwargs)
+
+                method = getattr(real, name)
+                if not callable(method):
+                    return method
 
                 async def _await_and_wrap() -> Any:
+                    result = method(*args, **kwargs)
                     value = await _maybe_await(result)
                     return _wrap_event_child(value, client, plugin_key)
 

@@ -37,14 +37,14 @@ curl -fsSL https://raw.githubusercontent.com/Anoyou/telebot/main/scripts/install
 
 ```bash
 cp .env.example .env
-# 修改 MASTER_KEY / JWT_SECRET / POSTGRES_PASSWORD / COOKIE_SECURE 等
+# 修改 MASTER_KEY / JWT_SECRET / UPDATER_TOKEN / POSTGRES_PASSWORD / COOKIE_SECURE 等
 make prod-up
 ```
 
 生产栈包含：
 
 - `postgres`：主数据存储
-- `redis`：IPC、限速和短生命周期数据
+- `redis`：IPC、限速和任务状态；生产默认 AOF everysec + noeviction，磁盘不足时应先扩容或清理，不能依赖逐出关键键
 - `web`：FastAPI + worker supervisor
 - `frontend`：nginx 静态前端 + 后端反代
 
@@ -61,7 +61,8 @@ docker compose logs -f web
 
 脚本：
 
-- `deploy/backup.sh`：备份数据库和 sessions volume
+- `deploy/backup.sh`：备份数据库、sessions、已安装插件和插件仓库缓存，并生成 SHA-256 校验文件
+- 默认写入 `/var/backups/telepilot`；`BACKUP_RETENTION_COUNT` 默认保留最近 7 个完整备份组，`BACKUP_RETENTION_DAYS` 继续作为最长保留天数。
 - `deploy/backup-keys.sh`：备份 `.env` 中关键密钥
 - `deploy/restore.sh`：恢复备份
 
@@ -69,18 +70,60 @@ docker compose logs -f web
 
 ## 升级与回滚
 
-升级：
+稳定版升级：
 
 ```bash
-git pull --ff-only
-make prod-up
+cd /opt/telepilot
+./deploy/backup.sh
+cp .env "/var/backups/telepilot/env-$(date +%Y%m%d-%H%M).bak"
+cp docker-compose.yml "/var/backups/telepilot/docker-compose-$(date +%Y%m%d-%H%M).yml.bak"
+TELEPILOT_UPDATE_BRANCH=main make prod-update
 ```
 
-回滚：
+测试发布候选分支时不要覆盖 `main`，必须显式指定分支：
 
 ```bash
+cd /opt/telepilot
+TELEPILOT_UPDATE_BRANCH=codex/0.33-interaction-framework make prod-update
+```
+
+### Web 面板自更新
+
+生产栈包含一个仅 Docker 内网可访问的 `updater` 服务。它挂载项目目录和 Docker socket，由已登录的 Web 面板“检查更新”弹窗触发：
+
+`UPDATER_TOKEN` 必须是独立随机密钥，不得与 `JWT_SECRET` 复用；缺失时 updater 会拒绝启动。
+
+- 检查更新：读取当前分支或 `TELEPILOT_UPDATE_BRANCH`，执行 `git fetch`，生成 `web` / `frontend` / `updater` 服务级更新计划；Compose 变化会比较到具体服务，不因文件本身变化直接升级为全栈更新。
+- 应用更新：后台执行 `scripts/prod-update.sh`，使用 `--no-deps` 只构建和切换计划内服务。普通版本号、依赖和业务代码变化不会重启 PostgreSQL / Redis；只有新增 Alembic 迁移时才自动备份。
+- updater 自更新：业务服务完成健康检查后，由独立 handoff 最后切换 updater，避免更新器重建自身导致任务中断。
+- 任务日志：Web 面板轮询 updater job，任务状态同时持久化到 Git 目录；updater 重启后仍可读取结果。
+
+`TELEPILOT_HOST_PROJECT_DIR` 必须是宿主机上的绝对部署路径。宿主机直接运行 Compose 时相对路径虽然可解析，但 updater 在容器内调用宿主 Docker daemon 时会把 `.` 解释为容器工作目录 `/workspace`。更新器会优先从自身 Compose 标签恢复真实宿主路径；无法恢复时拒绝更新，不会继续使用不确定的挂载目录。handoff 结果写入 `.git/telepilot-updater-handoff.log`，更新后仍反复提示部署未完成时，应同时检查该日志与 `.git/telepilot-deploy-pending`。
+
+首次把 `updater` 服务部署到服务器仍需要一次宿主机操作；之后常规补丁不再依赖 SSH 登录。若部署目录不是当前 shell 的工作目录，可显式指定：
+
+```bash
+cd /opt/telepilot
+TELEPILOT_HOST_PROJECT_DIR=/opt/telepilot make prod-up
+```
+
+部署后至少验收：
+
+```bash
+git rev-parse HEAD
+docker compose ps
+curl -fsS http://127.0.0.1:8000/healthz
+docker compose logs --tail=100 web
+```
+
+仅代码且不含迁移时可回滚：
+
+```bash
+cd /opt/telepilot
 git checkout <tag-or-commit>
 make prod-up
 ```
+
+如果更新执行了数据库迁移，切回旧代码并不能还原 schema，必须从迁移前备份恢复数据库。先确认 `.env` 里的 `MASTER_KEY` 与备份时一致，再执行 `deploy/restore.sh`；恢复脚本还可一并恢复插件卷。
 
 部分 Docker 默认值、数据库默认名和 volume 名仍保留 `telebot` 历史兼容命名，不影响对外产品名 TelePilot。
