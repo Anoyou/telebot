@@ -120,6 +120,7 @@ from ..ratelimit.humanize import HumanizeOpts, simulate_read, simulate_typing
 from .base import (
     Plugin,
     PluginContext,
+    PluginIdentityFacade,
     all_plugins,
     build_implicit_plugin,
     clear_simple_commands_for_module,
@@ -6700,6 +6701,7 @@ async def _activate(db, state: _AccountState, af: AccountFeature, redis: Any) ->
         http=plugin_http,
         ai=plugin_ai,
         messages=_LiveMessageOps(state, plugin_key=af.feature_key),
+        identities=PluginIdentityFacade(state.client) if state.client is not None else None,
         generation=state.generation,
         account_proxy_url=state.account_proxy_url,
     )

@@ -5094,7 +5094,7 @@ async def test_loader_injects_namespaced_plugin_storage(monkeypatch) -> None:
 async def test_ai_facade_requires_ai_text_or_ai_agent_permission(monkeypatch) -> None:
     """ctx.ai 只应给声明 ai_text/ai_agent 的插件，Agent 权限独立保留。"""
     from app.worker.plugins.ai_facade import PluginAI
-    from app.worker.plugins.base import _REGISTRY, register
+    from app.worker.plugins.base import _REGISTRY, PluginIdentityFacade, register
 
     @register
     class _TempAIPlugin(Plugin):
@@ -5161,6 +5161,10 @@ async def test_ai_facade_requires_ai_text_or_ai_agent_permission(monkeypatch) ->
         assert state.contexts["_test_ai_denied"].ai is None
         assert isinstance(state.contexts["_test_ai_agent"].ai, PluginAI)
         assert state.contexts["_test_ai_agent"].ai._allow_agent is True
+        assert all(
+            isinstance(state.contexts[key].identities, PluginIdentityFacade)
+            for key in ("_test_ai_allowed", "_test_ai_denied", "_test_ai_agent")
+        )
     finally:
         loader_mod._STATES.pop(1, None)
         _REGISTRY.pop("_test_ai_allowed", None)

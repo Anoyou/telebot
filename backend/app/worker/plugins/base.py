@@ -83,6 +83,54 @@ class PublicSenderIdentity:
     resolved: bool
 
 
+class PluginIdentityFacade:
+    """Resolve group-safe identities without exposing the raw Telegram client."""
+
+    __slots__ = ("_client",)
+
+    def __init__(self, client: Any) -> None:
+        object.__setattr__(self, "_client", client)
+
+    def __getattribute__(self, name: str) -> Any:
+        if name.startswith("_"):
+            raise PermissionError(f"禁止访问身份解析器私有属性 {name}")
+        return object.__getattribute__(self, name)
+
+    async def resolve(
+        self,
+        *,
+        chat_id: int,
+        user_id: int,
+        fallback_display_name: str = "",
+        unresolved_display_name: str = "匿名用户",
+        anonymous_admin_display_name: str = "匿名管理员",
+    ) -> PublicSenderIdentity:
+        return await _resolve_public_sender_identity(
+            object.__getattribute__(self, "_client"),
+            chat_id=chat_id,
+            user_id=user_id,
+            fallback_display_name=fallback_display_name,
+            unresolved_display_name=unresolved_display_name,
+            anonymous_admin_display_name=anonymous_admin_display_name,
+        )
+
+    async def resolve_many(
+        self,
+        *,
+        chat_id: int,
+        senders: Mapping[int, str],
+        unresolved_display_name: str = "匿名用户",
+        anonymous_admin_display_name: str = "匿名管理员",
+    ) -> dict[int, PublicSenderIdentity]:
+        return await _resolve_public_sender_identities(
+            object.__getattribute__(self, "_client"),
+            chat_id=chat_id,
+            senders=senders,
+            unresolved_display_name=unresolved_display_name,
+            anonymous_admin_display_name=anonymous_admin_display_name,
+        )
+
+
 async def resolve_public_sender_identity(
     ctx: PluginContext,
     *,
@@ -102,7 +150,35 @@ async def resolve_public_sender_identity(
     protected identity.
     """
 
-    client = getattr(ctx, "client", None)
+    identities = getattr(ctx, "identities", None)
+    resolve = getattr(identities, "resolve", None) if identities is not None else None
+    if callable(resolve):
+        return await resolve(
+            chat_id=chat_id,
+            user_id=user_id,
+            fallback_display_name=fallback_display_name,
+            unresolved_display_name=unresolved_display_name,
+            anonymous_admin_display_name=anonymous_admin_display_name,
+        )
+    return await _resolve_public_sender_identity(
+        getattr(ctx, "client", None),
+        chat_id=chat_id,
+        user_id=user_id,
+        fallback_display_name=fallback_display_name,
+        unresolved_display_name=unresolved_display_name,
+        anonymous_admin_display_name=anonymous_admin_display_name,
+    )
+
+
+async def _resolve_public_sender_identity(
+    client: Any,
+    *,
+    chat_id: int,
+    user_id: int,
+    fallback_display_name: str,
+    unresolved_display_name: str,
+    anonymous_admin_display_name: str,
+) -> PublicSenderIdentity:
     if client is None:
         return _unresolved_public_sender_identity(user_id, unresolved_display_name)
     try:
@@ -138,10 +214,35 @@ async def resolve_public_sender_identities(
 ) -> dict[int, PublicSenderIdentity]:
     """Batch variant that resolves one administrator directory per chat."""
 
+    identities = getattr(ctx, "identities", None)
+    resolve_many = getattr(identities, "resolve_many", None) if identities is not None else None
+    if callable(resolve_many):
+        return await resolve_many(
+            chat_id=chat_id,
+            senders=senders,
+            unresolved_display_name=unresolved_display_name,
+            anonymous_admin_display_name=anonymous_admin_display_name,
+        )
+    return await _resolve_public_sender_identities(
+        getattr(ctx, "client", None),
+        chat_id=chat_id,
+        senders=senders,
+        unresolved_display_name=unresolved_display_name,
+        anonymous_admin_display_name=anonymous_admin_display_name,
+    )
+
+
+async def _resolve_public_sender_identities(
+    client: Any,
+    *,
+    chat_id: int,
+    senders: Mapping[int, str],
+    unresolved_display_name: str,
+    anonymous_admin_display_name: str,
+) -> dict[int, PublicSenderIdentity]:
     clean_senders = {int(user_id): str(display_name or "") for user_id, display_name in senders.items()}
     if not clean_senders:
         return {}
-    client = getattr(ctx, "client", None)
     if client is None:
         return {
             user_id: _unresolved_public_sender_identity(user_id, unresolved_display_name)
@@ -296,6 +397,7 @@ class PluginContext:
       - ``http``：声明 ``external_http`` 和 ``allowed_hosts`` 后注入的安全 HTTP facade
       - ``ai``：声明 ``ai_text`` 或独立 ``ai_agent`` 后注入的安全 LLM facade
       - ``messages``：标准消息动作 facade；交互入口内为缓冲动作，后台任务/命令中为实时受控投递
+      - ``identities``：群内安全公开身份 facade；匿名管理员只返回标签，不暴露原始客户端
 
     为避免循环 import，``rules`` / ``engine`` / ``redis`` 都用 ``Any`` 标注。
     """
@@ -315,6 +417,7 @@ class PluginContext:
     http: Any = None  # PluginHTTP
     ai: Any = None  # PluginAI
     messages: Any = None
+    identities: Any = None  # PluginIdentityFacade
     generation: int = 0
     account_proxy_url: str | None = None
     event: Any | None = None

@@ -5,10 +5,13 @@ from types import SimpleNamespace
 
 from app.worker import runtime
 from app.worker.plugins.base import (
+    PluginContext,
+    PluginIdentityFacade,
     public_entity_display_name,
     resolve_public_sender_identities,
     resolve_public_sender_identity,
 )
+from app.worker.plugins.sandbox import SandboxClient
 from app.worker.runtime import _build_proxy_url
 
 
@@ -28,6 +31,73 @@ def test_public_entity_display_name_contact_without_username_falls_back_to_id() 
     entity = SimpleNamespace(id=42, first_name="我给他的备注", last_name="", username=None, contact=True)
 
     assert public_entity_display_name(entity) == "42"
+
+
+async def test_identity_facade_bypasses_plugin_sandbox_without_exposing_raw_client() -> None:
+    class RawClient:
+        def iter_participants(self, chat_id: int, *, filter: object):
+            async def stream():
+                yield SimpleNamespace(
+                    id=42,
+                    participant=SimpleNamespace(
+                        rank="匿名标签",
+                        admin_rights=SimpleNamespace(anonymous=True),
+                    ),
+                )
+                yield SimpleNamespace(
+                    id=43,
+                    participant=SimpleNamespace(
+                        rank="普通管理员标签",
+                        admin_rights=SimpleNamespace(anonymous=False),
+                    ),
+                )
+
+            return stream()
+
+    raw_client = RawClient()
+    facade = PluginIdentityFacade(raw_client)
+    ctx = PluginContext(
+        account_id=1,
+        feature_key="ai_redpacket",
+        client=SandboxClient(raw_client, ["read_chat"], plugin_key="ai_redpacket"),
+        identities=facade,
+    )
+
+    anonymous = await resolve_public_sender_identity(
+        ctx,
+        chat_id=-1001,
+        user_id=42,
+        fallback_display_name="匿名管理员真实姓名",
+    )
+    visible = await resolve_public_sender_identity(
+        ctx,
+        chat_id=-1001,
+        user_id=43,
+        fallback_display_name="非匿名管理员姓名",
+    )
+    settlement_names = await resolve_public_sender_identities(
+        ctx,
+        chat_id=-1001,
+        senders={
+            42: "匿名管理员真实姓名",
+            43: "非匿名管理员姓名",
+            44: "普通成员姓名",
+        },
+    )
+
+    assert anonymous.display_name == "匿名标签"
+    assert anonymous.is_anonymous_admin is True
+    assert visible.display_name == "非匿名管理员姓名"
+    assert visible.is_anonymous_admin is False
+    assert settlement_names[42].display_name == "匿名标签"
+    assert settlement_names[43].display_name == "非匿名管理员姓名"
+    assert settlement_names[44].display_name == "普通成员姓名"
+    try:
+        leaked_client = facade._client  # type: ignore[attr-defined]
+    except PermissionError:
+        pass
+    else:
+        raise AssertionError(f"identity facade exposed its raw client: {leaked_client!r}")
 
 
 async def test_resolve_public_sender_identity_uses_tag_only_for_anonymous_admin() -> None:
