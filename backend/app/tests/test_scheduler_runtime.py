@@ -14,6 +14,7 @@ from app.worker import runtime as worker_runtime
 from app.worker import scheduler_runtime
 from app.worker.command import CommandContext, set_command_context
 from app.worker.ipc import CMD_EXECUTE_RULE, IPCMessage
+from app.worker.plugins.update_barrier import begin_plugin_update
 from app.worker.scheduler_runtime import PlatformScheduler, SchedulerRuleExecutor, _croniter_next
 
 
@@ -134,6 +135,28 @@ async def test_unregister_owner_prevents_runtime_job(monkeypatch) -> None:
     assert removed == 1
     callback.assert_not_awaited()
     assert facade.list_jobs() == []
+
+
+@pytest.mark.asyncio
+async def test_plugin_update_barrier_prevents_stale_runtime_job(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr("app.worker.scheduler_runtime._get_system_tz", AsyncMock(return_value=None))
+    monkeypatch.setattr(scheduler_runtime.settings, "plugins_installed_dir", str(tmp_path))
+    begin_plugin_update(tmp_path, "ai_redpacket")
+
+    runtime = _runtime()
+    callback = AsyncMock()
+    runtime.for_plugin("ai_redpacket", generation=1).register(
+        "settlement",
+        {"kind": "interval", "interval_sec": 60},
+        callback,
+    )
+
+    await runtime.tick_runtime_jobs()
+
+    callback.assert_not_awaited()
+    jobs = runtime.list_runtime_jobs()
+    assert jobs[0]["fire_count"] == 0
+    assert "last_result" not in jobs[0]["config"]
 
 
 @pytest.mark.asyncio

@@ -725,6 +725,33 @@ def test_normalize_userbot_event_detects_raw_peer_channel_sender() -> None:
     assert event["raw"]["signature"] == "频道身份"
 
 
+def test_normalize_userbot_event_marks_same_peer_channel_as_anonymous_admin() -> None:
+    class _Message:
+        id = 13
+        chat_id = -100456
+        sender_id = -100456
+        text = "匿名发言"
+
+        def to_dict(self):
+            return {
+                "id": self.id,
+                "message": self.text,
+                "peer_id": {"_": "PeerChannel", "channel_id": 456},
+                "from_id": {"_": "PeerChannel", "channel_id": 456},
+                "post_author": "心里测试管理员",
+            }
+
+    event = normalize_userbot_event(1, SimpleNamespace(message=_Message()))
+
+    assert event["sender"]["user_id"] is None
+    assert event["sender"]["sender_type"] == "chat"
+    assert event["sender"]["display_name"] == "心里测试管理员"
+    assert event["sender"]["tag"] == "心里测试管理员"
+    assert event["sender"]["is_anonymous_admin"] is True
+    assert event["sender"]["sender_chat"]["id"] == -100456
+    assert event["sender"]["sender_chat"]["type"] == "channel"
+
+
 def test_match_subscription_owner_only_uses_account_owner() -> None:
     event = normalize_userbot_event(
         1,

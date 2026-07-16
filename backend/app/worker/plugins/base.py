@@ -183,13 +183,15 @@ async def _resolve_public_sender_identity(
         return _unresolved_public_sender_identity(user_id, unresolved_display_name)
     try:
         admins = await _anonymous_admin_participants(client, chat_id)
-        return _public_sender_identity_from_admins(
+        identity = _public_sender_identity_from_admins(
             user_id,
             fallback_display_name,
             admins,
             unresolved_display_name=unresolved_display_name,
             anonymous_admin_display_name=anonymous_admin_display_name,
         )
+        if identity is not None:
+            return identity
     except Exception:
         pass
     try:
@@ -250,7 +252,7 @@ async def _resolve_public_sender_identities(
         }
     try:
         admins = await _anonymous_admin_participants(client, chat_id)
-        return {
+        resolved = {
             user_id: _public_sender_identity_from_admins(
                 user_id,
                 display_name,
@@ -260,8 +262,16 @@ async def _resolve_public_sender_identities(
             )
             for user_id, display_name in clean_senders.items()
         }
+        if all(identity is not None for identity in resolved.values()):
+            return {user_id: identity for user_id, identity in resolved.items() if identity is not None}
+        clean_senders = {
+            user_id: clean_senders[user_id]
+            for user_id, identity in resolved.items()
+            if identity is None
+        }
+        confirmed = {user_id: identity for user_id, identity in resolved.items() if identity is not None}
     except Exception:
-        pass
+        confirmed = {}
 
     semaphore = asyncio.Semaphore(8)
 
@@ -279,11 +289,14 @@ async def _resolve_public_sender_identities(
                 identity = _unresolved_public_sender_identity(user_id, unresolved_display_name)
             return user_id, identity
 
-    return dict(
-        await asyncio.gather(
-            *(resolve(user_id, display_name) for user_id, display_name in clean_senders.items())
+    confirmed.update(
+        dict(
+            await asyncio.gather(
+                *(resolve(user_id, display_name) for user_id, display_name in clean_senders.items())
+            )
         )
     )
+    return confirmed
 
 
 async def _anonymous_admin_participants(client: Any, chat_id: int) -> dict[int, Any]:
@@ -307,9 +320,11 @@ def _public_sender_identity_from_admins(
     *,
     unresolved_display_name: str,
     anonymous_admin_display_name: str,
-) -> PublicSenderIdentity:
+) -> PublicSenderIdentity | None:
     if user_id not in admins:
-        return _resolved_public_sender_identity(user_id, fallback_display_name, None, False, anonymous_admin_display_name)
+        # Telegram may omit anonymous administrators from the directory. Absence
+        # is not proof that exposing a callback actor's real name is safe.
+        return None
     participant = admins[user_id]
     admin_rights = getattr(participant, "admin_rights", None)
     if admin_rights is None or not hasattr(admin_rights, "anonymous"):

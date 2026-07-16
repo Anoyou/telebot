@@ -35,6 +35,11 @@ def test_public_entity_display_name_contact_without_username_falls_back_to_id() 
 
 async def test_identity_facade_bypasses_plugin_sandbox_without_exposing_raw_client() -> None:
     class RawClient:
+        async def get_permissions(self, chat_id: int, user_id: int) -> SimpleNamespace:
+            assert chat_id == -1001
+            assert user_id == 44
+            return SimpleNamespace(anonymous=False, participant=SimpleNamespace(rank="普通成员标签"))
+
         def iter_participants(self, chat_id: int, *, filter: object):
             async def stream():
                 yield SimpleNamespace(
@@ -225,7 +230,7 @@ async def test_resolve_public_sender_identity_falls_back_to_admin_listing() -> N
     assert identity.resolved is True
 
 
-async def test_resolve_public_sender_identity_admin_listing_confirms_regular_member() -> None:
+async def test_resolve_public_sender_identity_admin_listing_absence_fails_closed() -> None:
     class Client:
         async def get_permissions(self, chat_id: int, user_id: int) -> SimpleNamespace:
             raise ValueError("input entity is not cached")
@@ -249,9 +254,77 @@ async def test_resolve_public_sender_identity_admin_listing_confirms_regular_mem
         fallback_display_name="普通成员姓名",
     )
 
-    assert identity.display_name == "普通成员姓名"
+    assert identity.display_name == "匿名用户"
     assert identity.is_anonymous_admin is False
     assert identity.tag is None
+    assert identity.resolved is False
+
+
+async def test_resolve_public_sender_identity_admin_listing_absence_checks_permissions() -> None:
+    class Client:
+        async def get_permissions(self, chat_id: int, user_id: int) -> SimpleNamespace:
+            assert (chat_id, user_id) == (-1001, 42)
+            return SimpleNamespace(
+                anonymous=False,
+                participant=SimpleNamespace(rank="普通成员标签"),
+            )
+
+        def iter_participants(self, chat_id: int, *, filter: object):
+            async def stream():
+                yield SimpleNamespace(
+                    id=99,
+                    participant=SimpleNamespace(
+                        rank="其他管理员",
+                        admin_rights=SimpleNamespace(anonymous=True),
+                    ),
+                )
+
+            return stream()
+
+    identity = await resolve_public_sender_identity(
+        SimpleNamespace(client=Client()),
+        chat_id=-1001,
+        user_id=42,
+        fallback_display_name="普通成员姓名",
+    )
+
+    assert identity.display_name == "普通成员姓名"
+    assert identity.is_anonymous_admin is False
+    assert identity.tag == "普通成员标签"
+    assert identity.resolved is True
+
+
+async def test_resolve_public_sender_identity_admin_listing_omission_preserves_anonymous_tag() -> None:
+    class Client:
+        async def get_permissions(self, chat_id: int, user_id: int) -> SimpleNamespace:
+            assert (chat_id, user_id) == (-1001, 42)
+            return SimpleNamespace(
+                anonymous=True,
+                participant=SimpleNamespace(rank="值班标签"),
+            )
+
+        def iter_participants(self, chat_id: int, *, filter: object):
+            async def stream():
+                yield SimpleNamespace(
+                    id=99,
+                    participant=SimpleNamespace(
+                        rank="其他管理员",
+                        admin_rights=SimpleNamespace(anonymous=False),
+                    ),
+                )
+
+            return stream()
+
+    identity = await resolve_public_sender_identity(
+        SimpleNamespace(client=Client()),
+        chat_id=-1001,
+        user_id=42,
+        fallback_display_name="不应公开的真实姓名",
+    )
+
+    assert identity.display_name == "值班标签"
+    assert identity.is_anonymous_admin is True
+    assert identity.tag == "值班标签"
     assert identity.resolved is True
 
 
@@ -259,6 +332,13 @@ async def test_resolve_public_sender_identities_reads_admin_listing_once() -> No
     calls = 0
 
     class Client:
+        async def get_permissions(self, chat_id: int, user_id: int) -> SimpleNamespace:
+            assert (chat_id, user_id) == (-1001, 77)
+            return SimpleNamespace(
+                anonymous=False,
+                participant=SimpleNamespace(rank="普通成员标签"),
+            )
+
         def iter_participants(self, chat_id: int, *, filter: object):
             async def stream():
                 nonlocal calls

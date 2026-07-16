@@ -59,6 +59,11 @@ from ..worker.ipc import CMD_RELOAD_CONFIG, publish_cmd_with_ack
 
 # 直接复用现有 loader 的配置热更新路径；installed 插件在 loader 里按 DB 双开关按需加载
 from ..worker.plugins.loader import reload_account_config
+from ..worker.plugins.update_barrier import (
+    begin_plugin_update,
+    clear_plugin_update,
+    plugin_update_active,
+)
 from .event_bus import SUPPORTED_FILTER_KEYS, VALID_EVENT_SCOPES, VALID_EVENT_SOURCES, VALID_EVENT_TYPES
 from .interaction.contracts import send_via_selector_options, unsupported_send_via_values
 from .redactor import redact_text
@@ -1411,6 +1416,8 @@ async def _copy_plugin_from_source_url(
 
         legacy_sqlite_names = _relocate_legacy_plugin_sqlite(target, name)
         legacy_json_names = _relocate_legacy_plugin_json(target, name)
+        if replace_existing:
+            begin_plugin_update(target.parent, name, target_version=staged_meta.version)
         if replace_existing and target.exists():
             target.rename(backup)
         staging.rename(target)
@@ -1418,6 +1425,8 @@ async def _copy_plugin_from_source_url(
         _attach_legacy_plugin_sqlite_links(target, name, legacy_sqlite_names)
         _attach_legacy_plugin_json_links(target, name, legacy_json_names)
     except Exception:
+        if replace_existing:
+            clear_plugin_update(target.parent, name)
         if staging.exists():
             shutil.rmtree(staging, ignore_errors=True)
         if replace_existing:
@@ -1540,37 +1549,55 @@ async def auto_update_check_loop() -> None:
 # ─────────────────────────────────────────────────────
 # 触发 worker 热加载
 # ─────────────────────────────────────────────────────
-async def _trigger_reload(db: AsyncSession, name: str) -> None:
+async def _trigger_reload(db: AsyncSession, name: str) -> list[int]:
     """通知 worker 重新加载该插件。
 
     两条路径并行：
     - 通过 Redis IPC ``CMD_RELOAD_CONFIG`` 广播到所有账号 worker
     - 直接调本进程的 ``reload_account_config``（在 worker 进程内才会有效，主进程为 no-op）
 
-    任何环节失败都吞掉——热加载失败不应阻塞 install/update 这条主流程；
-    DB 已经写好，下次 worker 启动时也会自动扫描到新插件。
+    返回未确认的账号；调用方仅在磁盘覆盖更新已经建立屏障时严格报错。
     """
-    aids: list[int] = []
     try:
-        rows = (await db.execute(select(Account.id))).scalars().all()
+        rows = (
+            await db.execute(
+                select(AccountFeature.account_id)
+                .where(AccountFeature.feature_key == name)
+                .distinct()
+            )
+        ).scalars().all()
         aids = [int(a) for a in rows]
-    except Exception:  # noqa: BLE001
-        log.exception("拉取 account 列表失败，跳过 reload 广播")
+    except Exception as exc:
+        log.exception("拉取插件重载目标账号失败 plugin=%s", name)
+        raise RemotePluginError(
+            "PLUGIN_RELOAD_TARGETS_FAILED",
+            f"插件 {name} 已写入磁盘，但无法确认需要重载的 worker；旧实例已被更新屏障阻止调用",
+        ) from exc
 
     # 1) Redis IPC 广播
+    unconfirmed: list[int] = []
     try:
         from ..redis_client import get_redis  # 延迟 import 防循环
 
         redis = get_redis()
         for aid in aids:
             try:
-                ok = await publish_cmd_with_ack(redis, aid, CMD_RELOAD_CONFIG, plugin_key=name)
+                ok = await publish_cmd_with_ack(
+                    redis,
+                    aid,
+                    CMD_RELOAD_CONFIG,
+                    timeout=15.0,
+                    plugin_key=name,
+                )
                 if not ok:
-                    log.debug("worker reload_config 未确认 aid=%s plugin=%s，将由周期 reconcile 收敛", aid, name)
+                    unconfirmed.append(aid)
+                    log.warning("worker reload_config 未确认 aid=%s plugin=%s", aid, name)
             except Exception:  # noqa: BLE001
-                log.debug("redis 广播 reload_config 失败 aid=%s", aid, exc_info=True)
+                unconfirmed.append(aid)
+                log.warning("redis 广播 reload_config 失败 aid=%s", aid, exc_info=True)
     except Exception:  # noqa: BLE001
-        log.debug("redis 不可用，跳过 IPC 广播", exc_info=True)
+        unconfirmed = list(aids)
+        log.warning("redis 不可用，无法确认插件重载", exc_info=True)
 
     # 2) 进程内直接调用（worker 进程才有效；主进程内 _STATES 为空，函数会早返回）
     for aid in aids:
@@ -1578,11 +1605,30 @@ async def _trigger_reload(db: AsyncSession, name: str) -> None:
             await reload_account_config(aid, {"plugin_key": name})
         except Exception:  # noqa: BLE001
             log.debug("inproc reload_config 失败 aid=%s name=%s", aid, name, exc_info=True)
+    return sorted(set(unconfirmed))
 
 
 async def trigger_reload(db: AsyncSession, name: str) -> None:
-    """提交事务后通知 worker 热加载远程插件。"""
-    await _trigger_reload(db, name)
+    """提交事务后通知 worker；更新屏障只在所有在线目标确认后解除。"""
+
+    root = _installed_root()
+    barrier_active = plugin_update_active(root, name)
+    try:
+        unconfirmed = await _trigger_reload(db, name)
+    except RemotePluginError:
+        if barrier_active:
+            raise
+        log.warning("插件重载目标查询失败 plugin=%s，将由周期 reconcile 收敛", name)
+        return
+    if unconfirmed:
+        if barrier_active:
+            raise RemotePluginError(
+                "PLUGIN_RELOAD_UNCONFIRMED",
+                f"插件 {name} 已写入磁盘，但账号 {', '.join(str(item) for item in unconfirmed)} 的 worker 未确认重载；旧实例已被更新屏障阻止调用",
+            )
+        log.warning("插件重载未获全部 worker 确认 plugin=%s accounts=%s", name, unconfirmed)
+        return
+    clear_plugin_update(root, name)
 
 
 async def _enable_for_all_accounts_if_unclaimed(db: AsyncSession, name: str) -> int:
@@ -1887,7 +1933,12 @@ async def update(db: AsyncSession, name: str) -> RemotePluginView:
     # git pull（带 timeout）。如果插件是从多插件仓库子目录复制安装的，
     # 安装目录没有 .git，此时临时 clone source_url 后按 plugin.json.name 定位子目录覆盖。
     if (target / ".git").exists():
-        await _run_git("pull", "--ff-only", cwd=target, timeout=60.0, env=git_env)
+        begin_plugin_update(target.parent, name)
+        try:
+            await _run_git("pull", "--ff-only", cwd=target, timeout=60.0, env=git_env)
+        except Exception:
+            clear_plugin_update(target.parent, name)
+            raise
     elif not restored_from_source:
         await _copy_plugin_from_source_url(
             name=name,

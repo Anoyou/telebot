@@ -39,8 +39,10 @@ from app.services.event_trace import (
 from app.services.llm_client import LLMCallFailed, LLMError
 from app.services.llm_dto import LLMProviderDTO
 from app.services.llm_invoke import invoke as invoke_ai_runtime
+from app.settings import settings
 from app.worker.command import should_allow_auto_command_text
 from app.worker.plugins.base import PluginContext
+from app.worker.plugins.update_barrier import plugin_update_in_progress
 
 log = logging.getLogger(__name__)
 
@@ -889,6 +891,8 @@ class PlatformScheduler:
         now = datetime.now(UTC)
         tz = await _get_system_tz()
         for key, job in list(self._jobs.items()):
+            if plugin_update_in_progress(settings.plugins_installed_path, job.owner, self.account_id):
+                continue
             cfg = job.config
             if cfg.get("enabled") is False:
                 continue

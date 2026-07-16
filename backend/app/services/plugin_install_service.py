@@ -41,6 +41,7 @@ from ..db.models.plugin import (
 from ..db.models.plugin_global_config import PluginGlobalConfig
 from ..settings import settings
 from ..worker.plugins.manifest import Manifest
+from ..worker.plugins.update_barrier import begin_plugin_update, clear_plugin_update
 from .remote_plugin_service import (
     _attach_legacy_plugin_sqlite_links,
     _relocate_legacy_plugin_sqlite,
@@ -397,6 +398,12 @@ async def install_zip(
         shutil.move(str(parsed.extract_dir), str(staging))
 
         legacy_sqlite_names = _relocate_legacy_plugin_sqlite(final_dir, parsed.manifest.key)
+        if existing is not None:
+            begin_plugin_update(
+                final_dir.parent,
+                parsed.manifest.key,
+                target_version=parsed.manifest.version,
+            )
         if final_dir.exists():
             final_dir.rename(backup)
         staging.rename(final_dir)
@@ -428,6 +435,8 @@ async def install_zip(
             shutil.rmtree(backup, ignore_errors=True)
         return row
     except Exception:
+        if final_dir is not None:
+            clear_plugin_update(final_dir.parent, parsed.manifest.key)
         if staging is not None and staging.exists():
             shutil.rmtree(staging, ignore_errors=True)
         if swapped and final_dir is not None and final_dir.exists():

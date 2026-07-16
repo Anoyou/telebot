@@ -20,6 +20,7 @@ from ..schemas.plugin_center import PluginCenterItem
 from ..services import audit
 from ..services import plugin_center_service as pcs
 from ..services import plugin_install_service as pis
+from ..services.remote_plugin_service import RemotePluginError, trigger_reload
 from ..worker.ipc import CMD_RELOAD_CONFIG, cmd_channel, make_cmd
 
 log = logging.getLogger(__name__)
@@ -138,7 +139,10 @@ async def upload_plugin_package(
         raise _map_install_error(exc) from exc
     await audit.write(db, user.id, "plugin.install_upload", target=f"plugin:{row.key}")
     await db.commit()
-    await _broadcast_reload_config(db)
+    try:
+        await trigger_reload(db, row.key)
+    except RemotePluginError as exc:
+        raise HTTPException(409, detail={"code": exc.code, "message": exc.message}) from exc
     return _to_out(row)
 
 

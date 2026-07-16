@@ -51,6 +51,7 @@ from ..schemas.plugin_repo import (
     PluginRepoPlugin,
 )
 from ..settings import settings
+from ..worker.plugins.update_barrier import begin_plugin_update, clear_plugin_update
 from .remote_plugin_service import (
     DuplicatePluginName,
     InvalidPluginMetadata,
@@ -756,6 +757,7 @@ async def _replace_installed_plugin_from_repo_dir(
 
         legacy_sqlite_names = _relocate_legacy_plugin_sqlite(install_path, final_name)
         legacy_json_names = _relocate_legacy_plugin_json(install_path, final_name)
+        begin_plugin_update(install_path.parent, final_name, target_version=staged_meta.version)
         if install_path.exists():
             install_path.rename(backup)
         staging.rename(install_path)
@@ -763,6 +765,7 @@ async def _replace_installed_plugin_from_repo_dir(
         _attach_legacy_plugin_sqlite_links(install_path, final_name, legacy_sqlite_names)
         _attach_legacy_plugin_json_links(install_path, final_name, legacy_json_names)
     except Exception as exc:
+        clear_plugin_update(install_path.parent, final_name)
         if staging.exists():
             shutil.rmtree(staging, ignore_errors=True)
         if swapped and install_path.exists():
@@ -1353,6 +1356,7 @@ async def install_official_plugin(
         if updating_existing:
             legacy_sqlite_names = _relocate_legacy_plugin_sqlite(install_path, final_name)
             legacy_json_names = _relocate_legacy_plugin_json(install_path, final_name)
+            begin_plugin_update(install_path.parent, final_name, target_version=staged_meta.version)
         if updating_existing and install_path.exists():
             install_path.rename(backup)
             backed_up = True
@@ -1361,6 +1365,8 @@ async def install_official_plugin(
         _attach_legacy_plugin_sqlite_links(install_path, final_name, legacy_sqlite_names)
         _attach_legacy_plugin_json_links(install_path, final_name, legacy_json_names)
     except Exception as exc:
+        if updating_existing:
+            clear_plugin_update(install_path.parent, final_name)
         if staging.exists():
             shutil.rmtree(staging, ignore_errors=True)
         if backed_up and backup.exists():
@@ -1436,6 +1442,8 @@ async def install_official_plugin(
                     )
         await db.flush()
     except Exception:
+        if updating_existing:
+            clear_plugin_update(install_path.parent, final_name)
         if staging.exists():
             shutil.rmtree(staging, ignore_errors=True)
         if updating_existing and backed_up and backup.exists():

@@ -114,6 +114,7 @@ TelePilot 按个人可信插件模式运行：管理员安装并启用插件后�
 - 远程插件发布时必须同步更新所有元数据入口的版本号：`plugin.json.version`、`manifest.py` 里的 `MANIFEST.version`、Registry 索引中的 `version`。
 - `plugin.json` 是安装/更新阶段的静态来源，`manifest.py` 是运行阶段的真实 Manifest。两者版本不一致时，市场展示、配置缓存和运行日志会很难排查。
 - 需要热更新验证的插件，建议在 `on_startup` 日志和主要业务消息中暴露版本，例如 `"[quiz] 已启动 v1.2.3，指令：quiz"`。
+- 平台覆盖更新安装型插件时会先建立跨进程更新屏障；新实例未加载成功前，旧实例的命令、事件交互和运行期定时任务都不会继续执行。新增平台安装/更新入口时必须复用该屏障和带 ACK 的 `trigger_reload()`，不得直接替换目录后只发无确认广播。
 - 发布说明里要写清最低 TelePilot 版本、权限、依赖库、是否需要 `send_file` / `delete_message` 等敏感能力；版本字段优先写 `min_telepilot_version`。
 
 #### 消息与交互

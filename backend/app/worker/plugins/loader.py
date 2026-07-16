@@ -131,6 +131,11 @@ from .events import attach_tp_event
 from .manifest import Manifest
 from .message_ops import BufferedMessageOps
 from .storage import PluginStorage
+from .update_barrier import (
+    acknowledge_plugin_update,
+    plugin_update_in_progress,
+    plugin_update_token,
+)
 
 log = logging.getLogger(__name__)
 
@@ -5062,6 +5067,8 @@ async def _invoke_plugin_with_resilience(
     *,
     deadline_at_ms: int | None = None,
 ) -> Any:
+    if plugin_update_in_progress(_installed_dir(), plugin_key, state.account_id):
+        raise RuntimeError(f"PLUGIN_UPDATE_IN_PROGRESS: {plugin_key}")
     now = time.monotonic()
     circuit = state.plugin_circuits.get(plugin_key)
     if circuit is not None and float(circuit.get("opened_until") or 0) > now:
@@ -6477,6 +6484,7 @@ async def _activate(db, state: _AccountState, af: AccountFeature, redis: Any) ->
         af: AccountFeature 行
         redis: Redis 客户端
     """
+    activation_update_id = plugin_update_token(_installed_dir(), af.feature_key)
     if af.feature_key == FEATURE_SCHEDULER:
         # scheduler 已是 worker 级平台基础能力，不再作为普通插件实例加载。
         # 保留 account_feature 行仅用于历史兼容和前端配置入口。
@@ -6779,6 +6787,13 @@ async def _activate(db, state: _AccountState, af: AccountFeature, redis: Any) ->
         installed_version=str(getattr(plugin_manifest, "version", "") or "") or None,
         last_load_error=None,
     )
+    if plugin_source == "installed":
+        acknowledge_plugin_update(
+            _installed_dir(),
+            af.feature_key,
+            state.account_id,
+            activation_update_id,
+        )
 
 
 def _entry_command_trigger(entry: dict[str, Any]) -> str | None:
@@ -7044,6 +7059,8 @@ def _wrap_cmd(fn, ctx: PluginContext):
     """把插件 ``commands`` 里登记的 5 参数 handler 包成命令分发期望的 4 参数签名。"""
 
     async def w(client, event, args, account_id):  # noqa: ANN001
+        if plugin_update_in_progress(_installed_dir(), ctx.feature_key, ctx.account_id):
+            raise RuntimeError(f"PLUGIN_UPDATE_IN_PROGRESS: {ctx.feature_key}")
         trace_id = str(getattr(event, "trace_id", "") or "").strip() or None
         base_client = ctx.client
         base_log = ctx.log

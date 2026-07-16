@@ -220,9 +220,21 @@ async def update_installed_plugins_from_repo(
     try:
         result = await svc.update_installed_plugins_from_repo(db, repo_id)
         await db.commit()
+        reload_errors: list[RemotePluginError] = []
         for item in result.items:
             if item.status == "updated":
-                await trigger_reload(db, item.name)
+                try:
+                    await trigger_reload(db, item.name)
+                except RemotePluginError as exc:
+                    reload_errors.append(exc)
+        if reload_errors:
+            affected = ", ".join(
+                item.name for item in result.items if item.status == "updated"
+            )
+            raise RemotePluginError(
+                "PLUGIN_BULK_RELOAD_UNCONFIRMED",
+                f"插件 {affected} 已写入磁盘，但部分 worker 未确认重载；相应旧实例已被更新屏障阻止调用",
+            )
         return result
     except PluginRepoNotFound as e:
         raise HTTPException(404, detail={"code": e.code, "message": e.message}) from e

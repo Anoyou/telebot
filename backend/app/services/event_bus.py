@@ -928,8 +928,8 @@ def _telethon_sender_ref(
     if sender_chat and (signature or _telethon_raw_sender_is_chat(data) or _object_is_chat_sender(sender_obj)):
         is_anonymous_admin = bool(
             signature
-            and sender_chat.get("type") == "supergroup"
             and _int_or_none(sender_chat.get("id")) == chat_id
+            and sender_chat.get("type") in {"supergroup", "channel"}
         )
         return {
             "user_id": None,
