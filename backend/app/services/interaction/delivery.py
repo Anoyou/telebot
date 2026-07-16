@@ -847,6 +847,10 @@ class InteractionDeliveryExecutor:
             return
         if reply_to_user_id is not None:
             payload["reply_to_user_id"] = reply_to_user_id
+        if action.get("reply_to_display_name") not in (None, ""):
+            payload["reply_to_display_name"] = str(action.get("reply_to_display_name"))
+        if "reply_to_username" in action:
+            payload["reply_to_username"] = str(action.get("reply_to_username") or "").strip() or None
         if reply_to_search_limit is not None:
             payload["reply_to_search_limit"] = reply_to_search_limit
         if action.get("reply_anchor_missing_text") not in (None, ""):

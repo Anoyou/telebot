@@ -22,6 +22,12 @@
 
 暂无已记录变更。
 
+## [0.60.10] — 2026-07-17 · patch（补丁版本） · payout 安全公开名透传修复
+
+### Fixed
+- Interaction Bot 执行插件 `payout` 时不再丢弃 `reply_to_display_name` 与 `reply_to_username`；安全公开名会完整进入 UserBot RPC、回复目标映射和后续模拟转账通知，匿名管理员可显示管理员标签而不是“匿名用户”。
+- 新增 payout 动作跨 Interaction Bot → UserBot 边界的字段透传回归测试，防止插件已解析出的匿名标签再次在平台中间层被裁剪。
+
 ## [0.60.9] — 2026-07-16 · patch（补丁版本） · 匿名发奖身份链路加固
 
 ### Fixed

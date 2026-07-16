@@ -1685,6 +1685,8 @@ async def test_interaction_delivery_routes_payout_via_worker(monkeypatch) -> Non
             "type": "payout",
             "amount": 88,
             "reply_to_user_id": 12345,
+            "reply_to_display_name": "匿名小尾巴测试",
+            "reply_to_username": None,
             "reply_to_search_limit": 20,
             "suppress_reply_anchor_missing_notice": True,
         }
@@ -1702,6 +1704,8 @@ async def test_interaction_delivery_routes_payout_via_worker(monkeypatch) -> Non
         "parse_mode": "plain",
         "payout_key": payload["payout_key"],
         "reply_to_user_id": 12345,
+        "reply_to_display_name": "匿名小尾巴测试",
+        "reply_to_username": None,
         "reply_to_search_limit": 20,
         "suppress_reply_anchor_missing_notice": True,
     }
