@@ -766,6 +766,8 @@ def _bot_message_payload(msg: dict[str, Any], *, chat: dict[str, Any]) -> dict[s
         "forward": _forward_summary(msg),
         "chat": _chat_ref(chat),
         "sender_chat": _chat_ref(msg.get("sender_chat")),
+        "sender_tag": _first_text(msg.get("sender_tag")),
+        "author_signature": _first_text(msg.get("author_signature")),
         "via_bot": _user_ref_or_none(msg.get("via_bot")),
     }
     for key, value in optional.items():
@@ -807,6 +809,8 @@ def _bot_raw_summary(
         "forward": _forward_summary(msg),
         "chat": _chat_ref(msg.get("chat")),
         "sender_chat": _chat_ref(msg.get("sender_chat")),
+        "sender_tag": _first_text(msg.get("sender_tag")),
+        "author_signature": _first_text(msg.get("author_signature")),
         "via_bot": _user_ref_or_none(msg.get("via_bot")),
         "thread_id": _int_or_none(msg.get("message_thread_id")),
         "edit_date": msg.get("edit_date"),
@@ -851,6 +855,8 @@ def _telethon_message_payload(
         "forward": _telethon_forward_summary(data),
         "chat": chat,
         "sender_chat": _chat_ref(data.get("sender_chat")) or sender_chat,
+        "sender_tag": _first_text(data.get("from_rank"), data.get("sender_tag")),
+        "author_signature": _first_text(data.get("post_author"), data.get("signature")),
         "via_bot": _user_ref_or_none(data.get("via_bot")),
     }
     for key, value in optional.items():
@@ -887,6 +893,7 @@ def _telethon_raw_summary(
         "chat": _chat_ref(data.get("chat")),
         "sender_chat": _chat_ref(data.get("sender_chat")) or sender_chat,
         "signature": str(data.get("post_author") or data.get("signature") or "") or None,
+        "sender_tag": _first_text(data.get("from_rank"), data.get("sender_tag")),
         "via_bot": _user_ref_or_none(data.get("via_bot")),
         "thread_id": _int_or_none(_nested(data, "reply_to", "reply_to_top_id")),
         "edit_date": data.get("edit_date"),
@@ -919,12 +926,19 @@ def _telethon_sender_ref(
         signature=signature,
     )
     if sender_chat and (signature or _telethon_raw_sender_is_chat(data) or _object_is_chat_sender(sender_obj)):
+        is_anonymous_admin = bool(
+            signature
+            and sender_chat.get("type") == "supergroup"
+            and _int_or_none(sender_chat.get("id")) == chat_id
+        )
         return {
             "user_id": None,
             "display_name": signature or sender_chat.get("title") or sender_chat.get("username") or str(sender_chat.get("id") or ""),
             "username": sender_chat.get("username"),
             "sender_type": "chat",
             "sender_chat": sender_chat,
+            "is_anonymous_admin": is_anonymous_admin,
+            "tag": signature,
         }
     sender = {"user_id": sender_id}
     display_name = _first_text(
@@ -937,6 +951,10 @@ def _telethon_sender_ref(
         sender["display_name"] = display_name
     if username:
         sender["username"] = username
+    tag = _first_text(getattr(message, "from_rank", None), data.get("from_rank"), data.get("sender_tag"))
+    if tag:
+        sender["tag"] = tag
+    sender["is_anonymous_admin"] = False
     if sender_chat:
         sender["sender_type"] = "user_via_chat"
         sender["sender_chat"] = sender_chat
@@ -1076,14 +1094,21 @@ def _bot_sender_ref(msg: dict[str, Any]) -> dict[str, Any]:
     sender_chat = _chat_ref(msg.get("sender_chat"))
     from_ref = _user_ref_or_none(msg.get("from"))
     if sender_chat and _sender_chat_is_message_author(msg):
+        tag = _first_text(msg.get("sender_tag"), msg.get("author_signature"))
         return {
             "user_id": None,
-            "display_name": sender_chat.get("title") or sender_chat.get("username") or str(sender_chat.get("id") or ""),
+            "display_name": tag or sender_chat.get("title") or sender_chat.get("username") or str(sender_chat.get("id") or ""),
             "username": sender_chat.get("username"),
             "sender_type": "chat",
             "sender_chat": sender_chat,
+            "is_anonymous_admin": True,
+            "tag": tag,
         }
     sender = from_ref or _user_ref(msg.get("from"))
+    tag = _first_text(msg.get("sender_tag"))
+    if tag:
+        sender["tag"] = tag
+    sender["is_anonymous_admin"] = False
     if sender_chat:
         sender["sender_type"] = "user_via_chat"
         sender["sender_chat"] = sender_chat

@@ -1321,6 +1321,38 @@ Contract Guard 不是公共插件市场式硬沙箱，而是个人可信插件�
 
 `payload_contract` 用来声明插件对上述信封的要求。平台和前端可以据此校验规则是否能保存，排障时也能判断是“事件没到”还是“字段不满足”。不要把敏感原文、Bot Token、完整付款通知文本写进信封；只传插件业务需要的结构化字段。
 
+#### 群内安全公开身份
+
+Telegram 按钮回调的 `payload.sender` 必须保留真实点击者，供权限校验、幂等、每日限制和发奖使用；但匿名管理员点击按钮时，这个对象同样包含真实姓名，因此不得直接用于群内文案。平台提供统一解析器：
+
+```python
+from app.worker.plugins.base import resolve_public_sender_identity
+
+identity = await resolve_public_sender_identity(
+    ctx,
+    chat_id=payload["chat"]["id"],
+    user_id=payload["sender"]["user_id"],
+    fallback_display_name=payload["sender"].get("display_name") or "",
+)
+
+# 只把 identity.display_name 写入公开消息。
+# user_id 仍使用 payload.sender.user_id 做业务校验。
+```
+
+结算、排行榜等多人名单使用 `resolve_public_sender_identities(ctx, chat_id=..., senders={user_id: name})` 批量解析；平台只读取一次管理员目录，避免逐人请求 Telegram。返回的名称解决的是身份泄露问题，不是 HTML/Markdown 转义，插件仍须按实际 `parse_mode` 转义后再发送。
+
+返回对象字段：
+
+| 字段 | 说明 |
+| --- | --- |
+| `user_id` | 真实 Telegram User ID，只用于业务校验，不等于可公开姓名 |
+| `display_name` | 可安全写入群消息的名称；匿名管理员为标签，无标签时为“匿名管理员” |
+| `is_anonymous_admin` | 当前成员是否开启匿名管理员身份 |
+| `tag` | Telegram 成员标签或管理员自定义头衔；普通成员存在标签时也不会覆盖 `display_name` |
+| `resolved` | 是否成功读取群成员权限；为 `false` 时 `display_name` 固定使用隐藏身份的回退值 |
+
+普通消息事件会同步投影 `sender.is_anonymous_admin` 与 `sender.tag`。匿名管理员消息的 `sender.user_id` 为 `null`，`sender.display_name` 已使用 `sender_tag` / `author_signature`；普通成员即使带 `sender_tag`，`sender.display_name` 仍是其姓名。插件不要用“是否存在标签”判断匿名状态，只能使用 `is_anonymous_admin`。
+
 付费触发有两个证据源：UserBot/回复上下文负责补充付款玩家身份，可信转账通知 Bot 负责证明到账成功。插件不得把普通 `+金额` 文本当作到账依据；只有 `source.type=payment_confirmed` 且 `payment.status=confirmed` 才表示平台已经通过转账通知完成金额、收款人和规则校验。如果转账通知只提供付款人名称，平台会把 `player.identity_confidence` 标为 `name_only`；`participant_policy=solo_owner` 或 `paid_pool` 的入口会先要求付款人点击确认来获得真实 `player.user_id`。
 
 入口可声明 `participant_policy` 来描述参与边界：

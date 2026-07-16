@@ -4,7 +4,11 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from app.worker import runtime
-from app.worker.plugins.base import public_entity_display_name
+from app.worker.plugins.base import (
+    public_entity_display_name,
+    resolve_public_sender_identities,
+    resolve_public_sender_identity,
+)
 from app.worker.runtime import _build_proxy_url
 
 
@@ -24,6 +28,192 @@ def test_public_entity_display_name_contact_without_username_falls_back_to_id() 
     entity = SimpleNamespace(id=42, first_name="我给他的备注", last_name="", username=None, contact=True)
 
     assert public_entity_display_name(entity) == "42"
+
+
+async def test_resolve_public_sender_identity_uses_tag_only_for_anonymous_admin() -> None:
+    class Client:
+        async def get_permissions(self, chat_id: int, user_id: int) -> SimpleNamespace:
+            assert (chat_id, user_id) == (-1001, 42)
+            return SimpleNamespace(
+                anonymous=True,
+                participant=SimpleNamespace(rank="值班管理员"),
+            )
+
+    identity = await resolve_public_sender_identity(
+        SimpleNamespace(client=Client()),
+        chat_id=-1001,
+        user_id=42,
+        fallback_display_name="真实姓名",
+    )
+
+    assert identity.user_id == 42
+    assert identity.display_name == "值班管理员"
+    assert identity.is_anonymous_admin is True
+    assert identity.tag == "值班管理员"
+    assert identity.resolved is True
+
+
+async def test_resolve_public_sender_identity_ignores_regular_member_tag() -> None:
+    class Client:
+        async def get_permissions(self, chat_id: int, user_id: int) -> SimpleNamespace:
+            return SimpleNamespace(
+                anonymous=False,
+                participant=SimpleNamespace(rank="普通成员标签"),
+            )
+
+    identity = await resolve_public_sender_identity(
+        SimpleNamespace(client=Client()),
+        chat_id=-1001,
+        user_id=42,
+        fallback_display_name="普通成员姓名",
+    )
+
+    assert identity.display_name == "普通成员姓名"
+    assert identity.is_anonymous_admin is False
+    assert identity.tag == "普通成员标签"
+    assert identity.resolved is True
+
+
+async def test_resolve_public_sender_identity_fails_closed() -> None:
+    class Client:
+        async def get_permissions(self, chat_id: int, user_id: int) -> SimpleNamespace:
+            raise RuntimeError("telegram unavailable")
+
+    identity = await resolve_public_sender_identity(
+        SimpleNamespace(client=Client()),
+        chat_id=-1001,
+        user_id=42,
+        fallback_display_name="不应公开的姓名",
+    )
+
+    assert identity.display_name == "匿名用户"
+    assert identity.is_anonymous_admin is False
+    assert identity.tag is None
+    assert identity.resolved is False
+
+
+async def test_resolve_public_sender_identity_without_anonymous_field_fails_closed() -> None:
+    class Client:
+        async def get_permissions(self, chat_id: int, user_id: int) -> SimpleNamespace:
+            return SimpleNamespace(participant=SimpleNamespace(rank="可能暴露身份的标签"))
+
+    identity = await resolve_public_sender_identity(
+        SimpleNamespace(client=Client()),
+        chat_id=-1001,
+        user_id=42,
+        fallback_display_name="不应公开的姓名",
+    )
+
+    assert identity.display_name == "匿名用户"
+    assert identity.resolved is False
+
+
+async def test_resolve_public_sender_identity_anonymous_admin_without_tag_uses_generic_label() -> None:
+    class Client:
+        async def get_permissions(self, chat_id: int, user_id: int) -> SimpleNamespace:
+            return SimpleNamespace(anonymous=True, participant=SimpleNamespace(rank=""))
+
+    identity = await resolve_public_sender_identity(
+        SimpleNamespace(client=Client()),
+        chat_id=-1001,
+        user_id=42,
+        fallback_display_name="真实姓名",
+    )
+
+    assert identity.display_name == "匿名管理员"
+    assert identity.is_anonymous_admin is True
+    assert identity.resolved is True
+
+
+async def test_resolve_public_sender_identity_falls_back_to_admin_listing() -> None:
+    class Client:
+        async def get_permissions(self, chat_id: int, user_id: int) -> SimpleNamespace:
+            raise ValueError("input entity is not cached")
+
+        def iter_participants(self, chat_id: int, *, filter: object):
+            async def stream():
+                yield SimpleNamespace(
+                    id=42,
+                    participant=SimpleNamespace(
+                        rank="匿名值班",
+                        admin_rights=SimpleNamespace(anonymous=True),
+                    ),
+                )
+
+            return stream()
+
+    identity = await resolve_public_sender_identity(
+        SimpleNamespace(client=Client()),
+        chat_id=-1001,
+        user_id=42,
+        fallback_display_name="真实姓名",
+    )
+
+    assert identity.display_name == "匿名值班"
+    assert identity.is_anonymous_admin is True
+    assert identity.tag == "匿名值班"
+    assert identity.resolved is True
+
+
+async def test_resolve_public_sender_identity_admin_listing_confirms_regular_member() -> None:
+    class Client:
+        async def get_permissions(self, chat_id: int, user_id: int) -> SimpleNamespace:
+            raise ValueError("input entity is not cached")
+
+        def iter_participants(self, chat_id: int, *, filter: object):
+            async def stream():
+                yield SimpleNamespace(
+                    id=99,
+                    participant=SimpleNamespace(
+                        rank="其他管理员",
+                        admin_rights=SimpleNamespace(anonymous=True),
+                    ),
+                )
+
+            return stream()
+
+    identity = await resolve_public_sender_identity(
+        SimpleNamespace(client=Client()),
+        chat_id=-1001,
+        user_id=42,
+        fallback_display_name="普通成员姓名",
+    )
+
+    assert identity.display_name == "普通成员姓名"
+    assert identity.is_anonymous_admin is False
+    assert identity.tag is None
+    assert identity.resolved is True
+
+
+async def test_resolve_public_sender_identities_reads_admin_listing_once() -> None:
+    calls = 0
+
+    class Client:
+        def iter_participants(self, chat_id: int, *, filter: object):
+            async def stream():
+                nonlocal calls
+                calls += 1
+                yield SimpleNamespace(
+                    id=42,
+                    participant=SimpleNamespace(
+                        rank="匿名管理员标签",
+                        admin_rights=SimpleNamespace(anonymous=True),
+                    ),
+                )
+
+            return stream()
+
+    identities = await resolve_public_sender_identities(
+        SimpleNamespace(client=Client()),
+        chat_id=-1001,
+        senders={42: "不应公开的姓名", 77: "普通成员姓名"},
+    )
+
+    assert calls == 1
+    assert identities[42].display_name == "匿名管理员标签"
+    assert identities[42].is_anonymous_admin is True
+    assert identities[77].display_name == "普通成员姓名"
+    assert identities[77].is_anonymous_admin is False
 
 
 def test_build_proxy_url_socks5_with_auth() -> None:

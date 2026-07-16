@@ -11,13 +11,15 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Awaitable, Callable
+import asyncio
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
 from telethon import TelegramClient, events
+from telethon.tl.types import ChannelParticipantsAdmins
 
 from .manifest import Manifest
 
@@ -68,6 +70,207 @@ def public_entity_display_name(
     if fallback_id not in (None, ""):
         return str(fallback_id)
     return default
+
+
+@dataclass(frozen=True)
+class PublicSenderIdentity:
+    """Identity-safe group display fields; callers must still escape markup."""
+
+    user_id: int
+    display_name: str
+    is_anonymous_admin: bool
+    tag: str | None
+    resolved: bool
+
+
+async def resolve_public_sender_identity(
+    ctx: PluginContext,
+    *,
+    chat_id: int,
+    user_id: int,
+    fallback_display_name: str = "",
+    unresolved_display_name: str = "匿名用户",
+    anonymous_admin_display_name: str = "匿名管理员",
+) -> PublicSenderIdentity:
+    """Resolve a callback actor without exposing anonymous administrators.
+
+    Callback queries always carry the real clicking user. Plugins may use that
+    id for authorization, idempotency and payout, but group-visible text should
+    use this helper. Member tags never replace ordinary users' names; an admin
+    tag replaces the name only while the member has anonymous mode enabled.
+    Lookup failures fail closed so a transient Telegram error cannot disclose a
+    protected identity.
+    """
+
+    client = getattr(ctx, "client", None)
+    if client is None:
+        return _unresolved_public_sender_identity(user_id, unresolved_display_name)
+    try:
+        admins = await _anonymous_admin_participants(client, chat_id)
+        return _public_sender_identity_from_admins(
+            user_id,
+            fallback_display_name,
+            admins,
+            unresolved_display_name=unresolved_display_name,
+            anonymous_admin_display_name=anonymous_admin_display_name,
+        )
+    except Exception:
+        pass
+    try:
+        return await _public_sender_identity_from_permissions(
+            client,
+            chat_id,
+            user_id,
+            fallback_display_name,
+            anonymous_admin_display_name=anonymous_admin_display_name,
+        )
+    except Exception:
+        return _unresolved_public_sender_identity(user_id, unresolved_display_name)
+
+
+async def resolve_public_sender_identities(
+    ctx: PluginContext,
+    *,
+    chat_id: int,
+    senders: Mapping[int, str],
+    unresolved_display_name: str = "匿名用户",
+    anonymous_admin_display_name: str = "匿名管理员",
+) -> dict[int, PublicSenderIdentity]:
+    """Batch variant that resolves one administrator directory per chat."""
+
+    clean_senders = {int(user_id): str(display_name or "") for user_id, display_name in senders.items()}
+    if not clean_senders:
+        return {}
+    client = getattr(ctx, "client", None)
+    if client is None:
+        return {
+            user_id: _unresolved_public_sender_identity(user_id, unresolved_display_name)
+            for user_id in clean_senders
+        }
+    try:
+        admins = await _anonymous_admin_participants(client, chat_id)
+        return {
+            user_id: _public_sender_identity_from_admins(
+                user_id,
+                display_name,
+                admins,
+                unresolved_display_name=unresolved_display_name,
+                anonymous_admin_display_name=anonymous_admin_display_name,
+            )
+            for user_id, display_name in clean_senders.items()
+        }
+    except Exception:
+        pass
+
+    semaphore = asyncio.Semaphore(8)
+
+    async def resolve(user_id: int, display_name: str) -> tuple[int, PublicSenderIdentity]:
+        async with semaphore:
+            try:
+                identity = await _public_sender_identity_from_permissions(
+                    client,
+                    chat_id,
+                    user_id,
+                    display_name,
+                    anonymous_admin_display_name=anonymous_admin_display_name,
+                )
+            except Exception:
+                identity = _unresolved_public_sender_identity(user_id, unresolved_display_name)
+            return user_id, identity
+
+    return dict(
+        await asyncio.gather(
+            *(resolve(user_id, display_name) for user_id, display_name in clean_senders.items())
+        )
+    )
+
+
+async def _anonymous_admin_participants(client: Any, chat_id: int) -> dict[int, Any]:
+    iter_participants = getattr(client, "iter_participants", None)
+    if not callable(iter_participants):
+        raise LookupError("administrator listing unavailable")
+    admins: dict[int, Any] = {}
+    async for entity in iter_participants(chat_id, filter=ChannelParticipantsAdmins()):
+        entity_id = int(getattr(entity, "id", 0) or 0)
+        if entity_id:
+            admins[entity_id] = getattr(entity, "participant", None)
+    if not admins:
+        raise LookupError("administrator listing is empty")
+    return admins
+
+
+def _public_sender_identity_from_admins(
+    user_id: int,
+    fallback_display_name: str,
+    admins: Mapping[int, Any],
+    *,
+    unresolved_display_name: str,
+    anonymous_admin_display_name: str,
+) -> PublicSenderIdentity:
+    if user_id not in admins:
+        return _resolved_public_sender_identity(user_id, fallback_display_name, None, False, anonymous_admin_display_name)
+    participant = admins[user_id]
+    admin_rights = getattr(participant, "admin_rights", None)
+    if admin_rights is None or not hasattr(admin_rights, "anonymous"):
+        return _unresolved_public_sender_identity(user_id, unresolved_display_name)
+    return _resolved_public_sender_identity(
+        user_id,
+        fallback_display_name,
+        participant,
+        bool(admin_rights.anonymous),
+        anonymous_admin_display_name,
+    )
+
+
+async def _public_sender_identity_from_permissions(
+    client: Any,
+    chat_id: int,
+    user_id: int,
+    fallback_display_name: str,
+    *,
+    anonymous_admin_display_name: str,
+) -> PublicSenderIdentity:
+    get_permissions = getattr(client, "get_permissions", None)
+    if not callable(get_permissions):
+        raise LookupError("member permissions unavailable")
+    permissions = await get_permissions(chat_id, user_id)
+    if permissions is None or not hasattr(permissions, "anonymous"):
+        raise LookupError("anonymous administrator state unavailable")
+    return _resolved_public_sender_identity(
+        user_id,
+        fallback_display_name,
+        getattr(permissions, "participant", None),
+        bool(permissions.anonymous),
+        anonymous_admin_display_name,
+    )
+
+
+def _resolved_public_sender_identity(
+    user_id: int,
+    fallback_display_name: str,
+    participant: Any,
+    is_anonymous_admin: bool,
+    anonymous_admin_display_name: str,
+) -> PublicSenderIdentity:
+    tag = _clean_text(getattr(participant, "rank", None)) or None
+    clean_fallback = _clean_text(fallback_display_name) or str(user_id)
+    return PublicSenderIdentity(
+        user_id=user_id,
+        display_name=(tag or anonymous_admin_display_name) if is_anonymous_admin else clean_fallback,
+        is_anonymous_admin=is_anonymous_admin,
+        tag=tag,
+        resolved=True,
+    )
+
+
+def _unresolved_public_sender_identity(user_id: int, display_name: str) -> PublicSenderIdentity:
+    return PublicSenderIdentity(
+        user_id=user_id,
+        display_name=display_name,
+        is_anonymous_admin=False,
+        tag=None,
+        resolved=False,
+    )
 
 
 # ─────────────────────────────────────────────────────

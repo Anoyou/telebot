@@ -286,11 +286,66 @@ def test_normalize_bot_update_projects_anonymous_admin_sender_chat() -> None:
     assert event["sender"]["sender_type"] == "chat"
     assert event["sender"]["sender_chat"]["id"] == -100123
     assert event["sender"]["display_name"] == "Demo Group"
+    assert event["sender"]["is_anonymous_admin"] is True
     assert event["message"]["sender_chat"]["id"] == -100123
     assert decisions[0].matched is True
     assert decisions[0].reason_code == "matched"
     assert decisions[1].matched is False
     assert decisions[1].reason_code == "scope_not_matched"
+
+
+def test_normalize_bot_update_uses_anonymous_admin_tag_without_exposing_fake_sender() -> None:
+    event = normalize_bot_update(
+        1,
+        {
+            "update_id": 45,
+            "message": {
+                "message_id": 11,
+                "text": "匿名消息",
+                "chat": {"id": -100123, "type": "supergroup", "title": "Demo Group"},
+                "from": {
+                    "id": 1087968824,
+                    "is_bot": True,
+                    "first_name": "GroupAnonymousBot",
+                    "username": "GroupAnonymousBot",
+                },
+                "sender_chat": {
+                    "id": -100123,
+                    "type": "supergroup",
+                    "title": "Demo Group",
+                },
+                "sender_tag": "值班管理员",
+                "author_signature": "旧版管理员标题",
+            },
+        },
+    )
+
+    assert event["sender"]["user_id"] is None
+    assert event["sender"]["display_name"] == "值班管理员"
+    assert event["sender"]["tag"] == "值班管理员"
+    assert event["sender"]["is_anonymous_admin"] is True
+    assert event["message"]["sender_tag"] == "值班管理员"
+    assert event["message"]["author_signature"] == "旧版管理员标题"
+
+
+def test_normalize_bot_update_keeps_regular_member_name_when_sender_tag_exists() -> None:
+    event = normalize_bot_update(
+        1,
+        {
+            "update_id": 46,
+            "message": {
+                "message_id": 12,
+                "text": "普通消息",
+                "chat": {"id": -100123, "type": "supergroup", "title": "Demo Group"},
+                "from": {"id": 1001, "first_name": "普通成员"},
+                "sender_tag": "普通成员标签",
+            },
+        },
+    )
+
+    assert event["sender"]["display_name"] == "普通成员"
+    assert event["sender"]["tag"] == "普通成员标签"
+    assert event["sender"]["is_anonymous_admin"] is False
 
 
 def test_match_subscription_accepts_inline_all_scope() -> None:
@@ -612,6 +667,8 @@ def test_normalize_userbot_event_projects_anonymous_admin_sender_chat() -> None:
     assert event["sender"]["user_id"] is None
     assert event["sender"]["sender_type"] == "chat"
     assert event["sender"]["display_name"] == "匿名管理员"
+    assert event["sender"]["is_anonymous_admin"] is True
+    assert event["sender"]["tag"] == "匿名管理员"
     assert event["sender"]["sender_chat"]["id"] == -100123
     assert event["sender"]["sender_chat"]["title"] == "Demo Group"
     assert event["sender"]["sender_chat"]["signature"] == "匿名管理员"
