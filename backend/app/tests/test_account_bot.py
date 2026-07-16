@@ -130,6 +130,20 @@ def _allow_interaction_claim(monkeypatch) -> AsyncMock:
     return claim
 
 
+def _mock_active_transfer_reply_member(monkeypatch) -> AsyncMock:
+    async def _get_chat_member(token: str, method: str, params: dict[str, Any]) -> dict[str, Any]:
+        assert token == "bbot-token"
+        assert method == "getChatMember"
+        return {
+            "status": "member",
+            "user": {"id": int(params["user_id"])},
+        }
+
+    call = AsyncMock(side_effect=_get_chat_member)
+    monkeypatch.setattr(account_bot_service, "call_bot_api", call)
+    return call
+
+
 @pytest.fixture(autouse=True)
 def _allow_transfer_notice_trigger_claims(request, monkeypatch) -> None:
     """转账路由测试默认隔离 Redis claim；故障语义由独立单测覆盖。"""
@@ -2552,7 +2566,13 @@ async def test_message_ops_can_mark_html_parse_mode() -> None:
 async def test_message_ops_can_buffer_payout() -> None:
     ops = BufferedMessageOps()
 
-    await ops.payout(amount=88, chat_id=-100, reply_to_user_id=12345)
+    await ops.payout(
+        amount=88,
+        chat_id=-100,
+        reply_to_user_id=12345,
+        reply_to_display_name="公开名称",
+        reply_to_username="public_name",
+    )
 
     assert ops.actions == [
         {
@@ -2562,6 +2582,8 @@ async def test_message_ops_can_buffer_payout() -> None:
             "parse_mode": "plain",
             "reply_to_message_id": None,
             "reply_to_user_id": 12345,
+            "reply_to_display_name": "公开名称",
+            "reply_to_username": "public_name",
         }
     ]
 
@@ -4534,11 +4556,13 @@ async def test_transfer_command_prefers_saved_public_receiver_name(monkeypatch) 
         reply_to_username="private_username",
     )
 
+    reply_target = await account_bot_runtime._resolve_transfer_command_reply_target(incoming)  # noqa: SLF001
     receiver = await account_bot_runtime._select_transfer_command_receiver(  # noqa: SLF001
         SimpleNamespace(),
         incoming,
         {"rules": []},
         101,
+        reply_target,
     )
 
     assert receiver == {
@@ -4546,6 +4570,145 @@ async def test_transfer_command_prefers_saved_public_receiver_name(monkeypatch) 
         "receiver_user_id": 8629045843,
         "receiver_username": None,
     }
+
+
+@pytest.mark.asyncio
+async def test_transfer_reply_target_uses_bot_title_when_mapping_has_not_arrived(monkeypatch) -> None:
+    redis = _MemoryRedis()
+    monkeypatch.setattr(account_bot_runtime, "get_redis", lambda: redis)
+    get_member = AsyncMock(
+        return_value={
+            "status": "creator",
+            "is_anonymous": True,
+            "custom_title": "匿名小尾巴测试",
+        }
+    )
+    monkeypatch.setattr(account_bot_service, "call_bot_api", get_member)
+    incoming = account_bot_runtime.Incoming(
+        account_id=1,
+        token="bbot-token",
+        update_id=1,
+        user_id=1682400007,
+        chat_id=-100123,
+        message_id=5001,
+        text="+101",
+        reply_to_user_id=8629045843,
+        reply_to_display_name="不应公开的真实姓名",
+        reply_to_username="private_username",
+    )
+
+    target = await account_bot_runtime._resolve_transfer_command_reply_target(incoming)  # noqa: SLF001
+
+    assert target == {
+        "user_id": 8629045843,
+        "display_name": "匿名小尾巴测试",
+        "username": None,
+        "source": "interaction_bot_anonymous_admin",
+    }
+    get_member.assert_awaited_once_with(
+        "bbot-token",
+        "getChatMember",
+        {"chat_id": -100123, "user_id": 8629045843},
+    )
+
+
+@pytest.mark.asyncio
+async def test_transfer_reply_target_uses_bot_lookup_when_redis_fails(monkeypatch) -> None:
+    class BrokenRedis(_MemoryRedis):
+        async def get(self, key: str):
+            raise RuntimeError("redis unavailable")
+
+    monkeypatch.setattr(account_bot_runtime, "get_redis", BrokenRedis)
+    monkeypatch.setattr(
+        account_bot_service,
+        "call_bot_api",
+        AsyncMock(
+            return_value={
+                "status": "administrator",
+                "is_anonymous": True,
+                "custom_title": "故障兜底标签",
+            }
+        ),
+    )
+    incoming = account_bot_runtime.Incoming(
+        account_id=1,
+        token="bbot-token",
+        update_id=1,
+        user_id=1682400007,
+        chat_id=-100123,
+        message_id=5002,
+        text="+101",
+        reply_to_user_id=8629045843,
+        reply_to_display_name="不应公开的真实姓名",
+    )
+
+    target = await account_bot_runtime._resolve_transfer_command_reply_target(incoming)  # noqa: SLF001
+
+    assert target["display_name"] == "故障兜底标签"
+    assert target["source"] == "interaction_bot_anonymous_admin"
+
+
+@pytest.mark.asyncio
+async def test_transfer_reply_target_keeps_regular_name_when_mapping_has_no_name(monkeypatch) -> None:
+    redis = _MemoryRedis()
+    await save_action_reply_target(
+        redis,
+        account_id=1,
+        chat_id=-100123,
+        message_id=5003,
+        reply_to_user_id=77,
+    )
+    monkeypatch.setattr(account_bot_runtime, "get_redis", lambda: redis)
+    monkeypatch.setattr(
+        account_bot_service,
+        "call_bot_api",
+        AsyncMock(return_value={"status": "member", "user": {"id": 77}}),
+    )
+    incoming = account_bot_runtime.Incoming(
+        account_id=1,
+        token="bbot-token",
+        update_id=1,
+        user_id=1682400007,
+        chat_id=-100123,
+        message_id=5003,
+        text="+88",
+        reply_to_user_id=77,
+        reply_to_display_name="普通用户",
+        reply_to_username="regular_user",
+    )
+
+    target = await account_bot_runtime._resolve_transfer_command_reply_target(incoming)  # noqa: SLF001
+
+    assert target["display_name"] == "普通用户"
+    assert target["username"] == "regular_user"
+    assert target["source"] == "interaction_bot_member"
+
+
+@pytest.mark.asyncio
+async def test_transfer_reply_target_fails_closed_when_bot_cannot_confirm_member(monkeypatch) -> None:
+    monkeypatch.setattr(account_bot_runtime, "get_redis", lambda: _MemoryRedis())
+    monkeypatch.setattr(
+        account_bot_service,
+        "call_bot_api",
+        AsyncMock(return_value={"status": "left", "user": {"id": 77}}),
+    )
+    incoming = account_bot_runtime.Incoming(
+        account_id=1,
+        token="bbot-token",
+        update_id=1,
+        user_id=1682400007,
+        chat_id=-100123,
+        message_id=5004,
+        text="+88",
+        reply_to_user_id=77,
+        reply_to_display_name="不应公开的姓名",
+    )
+
+    target = await account_bot_runtime._resolve_transfer_command_reply_target(incoming)  # noqa: SLF001
+
+    assert target["display_name"] == "匿名用户"
+    assert target["username"] is None
+    assert target["source"] == "privacy_fallback"
 
 
 @pytest.mark.asyncio
@@ -4603,6 +4766,70 @@ async def test_transfer_notice_renders_saved_anonymous_admin_title(monkeypatch) 
     assert send.await_count == 1
     notice = send.await_args.args[2]
     assert "收款人：匿名小尾巴测试" in notice
+    assert "不应公开的真实姓名" not in notice
+    assert "private_username" not in notice
+
+
+@pytest.mark.asyncio
+async def test_debit_notice_uses_verified_anonymous_admin_title(monkeypatch) -> None:
+    class _DB:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def get(self, model, *_args):  # noqa: ANN002
+            return None
+
+    send = AsyncMock(return_value={})
+    monkeypatch.setattr(account_bot_runtime, "AsyncSessionLocal", lambda: _DB())
+    monkeypatch.setattr(account_bot_runtime, "get_redis", lambda: _MemoryRedis())
+    monkeypatch.setattr(account_bot_service, "send_message", send)
+    monkeypatch.setattr(account_bot_service, "get_transfer_bot_token", AsyncMock(return_value="abot-token"))
+    monkeypatch.setattr(
+        account_bot_service,
+        "get_transfer_notice_config",
+        AsyncMock(return_value={"enabled": True, "chat_ids": [-100123]}),
+    )
+    monkeypatch.setattr(
+        account_bot_service,
+        "call_bot_api",
+        AsyncMock(
+            return_value={
+                "status": "creator",
+                "is_anonymous": True,
+                "custom_title": "匿名小尾巴测试",
+            }
+        ),
+    )
+
+    await account_bot_runtime._handle_transfer_test_update(  # noqa: SLF001
+        1,
+        "bbot-token",
+        {
+            "update_id": 8292,
+            "message": {
+                "message_id": 8292,
+                "text": "-101",
+                "from": {"id": 1682400007, "first_name": "收款方"},
+                "chat": {"id": -100123, "type": "supergroup"},
+                "reply_to_message": {
+                    "message_id": 8284,
+                    "from": {
+                        "id": 8629045843,
+                        "first_name": "不应公开的真实姓名",
+                        "username": "private_username",
+                    },
+                    "text": "1",
+                },
+            },
+        },
+    )
+
+    assert send.await_count == 1
+    notice = send.await_args.args[2]
+    assert "匿名小尾巴测试 扣减 101" in notice
     assert "不应公开的真实姓名" not in notice
     assert "private_username" not in notice
 
@@ -4674,6 +4901,64 @@ async def test_shared_userbot_action_saves_public_reply_target_name() -> None:
     assert saved is not None
     assert saved["reply_to_user_id"] == 8629045843
     assert saved["reply_to_display_name"] == "匿名小尾巴测试"
+
+
+@pytest.mark.asyncio
+async def test_shared_userbot_payout_saves_target_before_completing_ledger(monkeypatch) -> None:
+    redis = _MemoryRedis()
+    client = SimpleNamespace(send_message=AsyncMock(return_value=SimpleNamespace(id=4194)))
+    order: list[str] = []
+    monkeypatch.setattr(
+        userbot_actions.payout_compensation,
+        "claim_payout_delivery",
+        AsyncMock(
+            return_value=userbot_actions.payout_compensation.PayoutDeliveryClaim(
+                status="acquired",
+                row_id=1,
+                claim_token="claim-token",
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        userbot_actions.payout_compensation,
+        "complete_payout_delivery",
+        AsyncMock(side_effect=lambda *args, **kwargs: order.append("complete") or True),
+    )
+    monkeypatch.setattr(
+        userbot_actions,
+        "save_action_reply_target",
+        AsyncMock(side_effect=lambda *args, **kwargs: order.append("save")),
+    )
+
+    await userbot_actions.execute_userbot_interaction_action(
+        client,
+        {
+            "action_type": "payout",
+            "chat_id": -100123,
+            "amount": 101,
+            "text": "+101",
+            "reply_to_message_id": 4184,
+            "reply_to_user_id": 8629045843,
+            "reply_to_display_name": "匿名小尾巴测试",
+            "payout_key": "payout-order-test",
+        },
+        account_id=1,
+        redis=redis,
+        acquire_rate_limit=AsyncMock(),
+        check_payout_limit=AsyncMock(return_value=(True, None)),
+        find_recent_message_id=AsyncMock(),
+        render_button_fallback=lambda text, reply_markup: text,
+        recent_search_limit=lambda value: 200,
+        reply_anchor_missing_text=lambda payload, user_id: "",
+        parse_mode_of=lambda payload: "plain",
+        telethon_parse_mode=lambda parse_mode: None,
+        is_settlement_send=lambda payload: True,
+        simulate_humanize=AsyncMock(),
+        read_saved_message_id=AsyncMock(),
+        is_message_not_modified=lambda exc: False,
+    )
+
+    assert order == ["save", "complete"]
 
 
 @pytest.mark.asyncio
@@ -4757,6 +5042,8 @@ async def test_transfer_command_template_render_failure_falls_back_and_logs(
     template: str,
     error_type: str,
 ) -> None:
+    _mock_active_transfer_reply_member(monkeypatch)
+
     class _DB:
         async def __aenter__(self):
             return self
@@ -8980,6 +9267,8 @@ async def test_transfer_notice_from_unauthed_abot_sends_group_notice(monkeypatch
 
 @pytest.mark.asyncio
 async def test_reply_plus_amount_sends_transfer_notice_with_abot_token(monkeypatch) -> None:
+    _mock_active_transfer_reply_member(monkeypatch)
+
     class _DB:
         async def __aenter__(self):
             return self
@@ -9106,6 +9395,8 @@ async def test_plus_amount_falls_back_to_receiver_config_when_reply_missing(monk
 
 @pytest.mark.asyncio
 async def test_plus_amount_notice_ignores_rule_amount_threshold(monkeypatch) -> None:
+    _mock_active_transfer_reply_member(monkeypatch)
+
     class _DB:
         async def __aenter__(self):
             return self
@@ -9513,6 +9804,8 @@ async def test_reply_plus_amount_notice_ignores_rule_trigger_mode_and_state(
 
 @pytest.mark.asyncio
 async def test_reply_plus_amount_emits_test_notice_without_triggering_module(monkeypatch) -> None:
+    _mock_active_transfer_reply_member(monkeypatch)
+
     class _DB:
         async def __aenter__(self):
             return self
@@ -9649,6 +9942,8 @@ async def test_transfer_test_bot_ignores_plus_amount_to_configured_bots(monkeypa
 
 @pytest.mark.asyncio
 async def test_transfer_test_bot_only_emits_notice_without_starting_module(monkeypatch) -> None:
+    _mock_active_transfer_reply_member(monkeypatch)
+
     class _DB:
         async def __aenter__(self):
             return self
@@ -15689,6 +15984,8 @@ async def test_game24_winner_notice_replies_to_winning_answer(monkeypatch) -> No
 
 @pytest.mark.asyncio
 async def test_transfer_test_bot_accepts_plus_amount_from_account_user(monkeypatch) -> None:
+    _mock_active_transfer_reply_member(monkeypatch)
+
     class _DB:
         async def __aenter__(self):
             return self
@@ -15754,6 +16051,8 @@ async def test_transfer_test_bot_accepts_plus_amount_from_account_user(monkeypat
 
 @pytest.mark.asyncio
 async def test_transfer_test_bot_accepts_minus_amount_as_debit_notice(monkeypatch) -> None:
+    _mock_active_transfer_reply_member(monkeypatch)
+
     class _DB:
         async def __aenter__(self):
             return self

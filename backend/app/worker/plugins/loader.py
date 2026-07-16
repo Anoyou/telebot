@@ -2917,6 +2917,23 @@ async def _apply_userbot_payout_action(state: _AccountState, event: Any, action:
         "reply_to_user_id": reply_to_user_id,
         "payout_key": payout_key,
     }
+    try:
+        await _save_userbot_reply_target(
+            state,
+            target_chat_id=target_chat_id,
+            result=result,
+            reply_to_user_id=reply_to_user_id,
+            action=action,
+        )
+    except Exception as post_exc:  # noqa: BLE001
+        log.warning(
+            "payout post-send reply target save failed account=%s payout_key=%s error=%s",
+            state.account_id,
+            payout_key,
+            post_exc,
+            exc_info=True,
+        )
+        result["post_send_bookkeeping_failed"] = True
     marker_ok = await payout_compensation.complete_payout_delivery(
         payout_redis,
         payout_claim,
@@ -2942,13 +2959,6 @@ async def _apply_userbot_payout_action(state: _AccountState, event: Any, action:
         )
     try:
         await _save_action_message_id(state, action, result)
-        await _save_userbot_reply_target(
-            state,
-            target_chat_id=target_chat_id,
-            result=result,
-            reply_to_user_id=reply_to_user_id,
-            action=action,
-        )
         await record_action(
             action.get("context"),
             action,

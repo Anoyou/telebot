@@ -4860,12 +4860,7 @@ async def _is_account_user_sender(db: Any, account_id: int, user_id: int) -> boo
     return account_tg_user_id is not None and int(account_tg_user_id) == int(user_id)
 
 
-async def _select_transfer_command_receiver(
-    db: Any,
-    incoming: Incoming,
-    cfg: dict[str, Any],
-    amount: int,
-) -> dict[str, Any] | None:
+async def _resolve_transfer_command_reply_target(incoming: Incoming) -> dict[str, Any] | None:
     saved_target: dict[str, Any] | None = None
     if incoming.chat_id is not None and incoming.message_id is not None:
         saved_target = await read_action_reply_target(
@@ -4885,14 +4880,93 @@ async def _select_transfer_command_receiver(
         if isinstance(saved_target, dict)
         else ""
     )
-    if saved_user_id is not None:
-        reply_to_user_id = saved_user_id
-        reply_to_display_name = saved_display_name or "匿名用户"
-        reply_to_username = saved_username or None
-    else:
-        reply_to_user_id = incoming.reply_to_user_id
-        reply_to_display_name = incoming.reply_to_display_name
-        reply_to_username = incoming.reply_to_username
+    if saved_user_id is not None and saved_display_name:
+        return {
+            "user_id": saved_user_id,
+            "display_name": saved_display_name,
+            "username": saved_username or None,
+            "source": "action_reply_target",
+        }
+
+    target_user_id = saved_user_id if saved_user_id is not None else incoming.reply_to_user_id
+    if target_user_id is None:
+        display_name = str(incoming.reply_to_display_name or "").strip()
+        if not display_name:
+            return None
+        return {
+            "user_id": None,
+            "display_name": display_name,
+            "username": incoming.reply_to_username,
+            "source": "telegram_reply_sender_chat",
+        }
+
+    try:
+        member = await account_bot_service.call_bot_api(
+            incoming.token,
+            "getChatMember",
+            {"chat_id": incoming.chat_id, "user_id": target_user_id},
+        )
+    except Exception:  # noqa: BLE001
+        log.debug(
+            "transfer reply target member lookup failed aid=%s chat_id=%s user_id=%s",
+            incoming.account_id,
+            incoming.chat_id,
+            target_user_id,
+            exc_info=True,
+        )
+        member = None
+
+    status = str(member.get("status") or "").strip() if isinstance(member, dict) else ""
+    active = status in {"creator", "administrator", "member"} or (
+        status == "restricted" and bool(member.get("is_member"))
+    ) if isinstance(member, dict) else False
+    if active and status in {"creator", "administrator"}:
+        if "is_anonymous" not in member:
+            active = False
+        elif bool(member.get("is_anonymous")):
+            custom_title = str(member.get("custom_title") or "").strip()
+            return {
+                "user_id": target_user_id,
+                "display_name": custom_title or "匿名管理员",
+                "username": None,
+                "source": "interaction_bot_anonymous_admin",
+            }
+    if active:
+        same_reply_user = incoming.reply_to_user_id is not None and int(incoming.reply_to_user_id) == target_user_id
+        display_name = str(incoming.reply_to_display_name or "").strip() if same_reply_user else ""
+        username = str(incoming.reply_to_username or "").strip() if same_reply_user else ""
+        return {
+            "user_id": target_user_id,
+            "display_name": display_name or (f"@{username}" if username else str(target_user_id)),
+            "username": username or None,
+            "source": "interaction_bot_member",
+        }
+    return {
+        "user_id": target_user_id,
+        "display_name": "匿名用户",
+        "username": None,
+        "source": "privacy_fallback",
+    }
+
+
+async def _select_transfer_command_receiver(
+    db: Any,
+    incoming: Incoming,
+    cfg: dict[str, Any],
+    amount: int,
+    reply_target: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    reply_to_user_id = _int_or_none(reply_target.get("user_id")) if isinstance(reply_target, dict) else None
+    reply_to_display_name = (
+        str(reply_target.get("display_name") or "").strip()
+        if isinstance(reply_target, dict)
+        else ""
+    )
+    reply_to_username = (
+        str(reply_target.get("username") or "").strip()
+        if isinstance(reply_target, dict)
+        else ""
+    ) or None
     reply_target_is_configured_bot = False
     if reply_to_display_name:
         if _is_configured_bot_receiver_identity(
@@ -7564,13 +7638,13 @@ async def _try_handle_transfer_command(
     command_mode, amount = parsed_command
 
     log.info(
-        "transfer command candidate aid=%s chat_id=%s sender_id=%s mode=%s amount=%s reply_to=%s",
+        "transfer command candidate aid=%s chat_id=%s sender_id=%s mode=%s amount=%s reply_to_user_id=%s",
         incoming.account_id,
         incoming.chat_id,
         incoming.user_id,
         command_mode,
         amount,
-        incoming.reply_to_display_name,
+        incoming.reply_to_user_id,
     )
 
     if cfg is None:
@@ -7594,9 +7668,13 @@ async def _try_handle_transfer_command(
             amount,
         )
         return False
-    receiver_info = await _select_transfer_command_receiver(db, incoming, cfg, amount)
+    reply_target = await _resolve_transfer_command_reply_target(incoming)
+    receiver_info = await _select_transfer_command_receiver(db, incoming, cfg, amount, reply_target)
     if command_mode == "debit":
-        if not incoming.reply_to_display_name:
+        reply_target_name = str((reply_target or {}).get("display_name") or "").strip()
+        reply_target_user_id = _int_or_none((reply_target or {}).get("user_id"))
+        reply_target_username = str((reply_target or {}).get("username") or "").strip() or None
+        if not reply_target_name:
             log.info(
                 "transfer command skipped: debit target missing aid=%s incoming_chat=%s amount=%s",
                 incoming.account_id,
@@ -7606,15 +7684,15 @@ async def _try_handle_transfer_command(
             return False
         if _is_configured_bot_receiver_identity(
             cfg,
-            user_id=incoming.reply_to_user_id,
-            name=incoming.reply_to_display_name,
-            username=incoming.reply_to_username,
+            user_id=reply_target_user_id,
+            name=reply_target_name,
+            username=reply_target_username,
         ):
             log.info(
                 "transfer command skipped: debit target is configured bot aid=%s incoming_chat=%s target_user=%s",
                 incoming.account_id,
                 incoming.chat_id,
-                incoming.reply_to_user_id,
+                reply_target_user_id,
             )
             return False
         receiver_info = {
@@ -7646,8 +7724,8 @@ async def _try_handle_transfer_command(
         return True
 
     if command_mode == "debit":
-        payer = incoming.reply_to_display_name or str(incoming.reply_to_user_id or "")
-        payer_user_id = incoming.reply_to_user_id
+        payer = str((reply_target or {}).get("display_name") or "匿名用户")
+        payer_user_id = _int_or_none((reply_target or {}).get("user_id"))
         receiver = str(receiver_info["receiver_name"])
         receiver_user_id = _int_or_none(receiver_info.get("receiver_user_id"))
         raw_notice_template = str(cfg.get("debit_notice_template") or DEFAULT_DEBIT_NOTICE_TEMPLATE)

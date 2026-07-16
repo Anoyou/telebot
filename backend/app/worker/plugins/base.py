@@ -200,12 +200,27 @@ async def _resolve_public_sender_identity(
             anonymous_admin_display_name=anonymous_admin_display_name,
         )
         if identity is not None and identity.resolved:
-            return identity
+            return await _prefer_interaction_bot_identity(
+                identity,
+                bot_member_resolver,
+                chat_id,
+                user_id,
+                fallback_display_name,
+                anonymous_admin_display_name=anonymous_admin_display_name,
+            )
     except Exception:
         pass
     try:
-        return await _public_sender_identity_from_permissions(
+        identity = await _public_sender_identity_from_permissions(
             client,
+            chat_id,
+            user_id,
+            fallback_display_name,
+            anonymous_admin_display_name=anonymous_admin_display_name,
+        )
+        return await _prefer_interaction_bot_identity(
+            identity,
+            bot_member_resolver,
             chat_id,
             user_id,
             fallback_display_name,
@@ -281,6 +296,17 @@ async def _resolve_public_sender_identities(
             )
             for user_id, display_name in clean_senders.items()
         }
+        for user_id, identity in resolved.items():
+            if identity is None or not identity.resolved:
+                continue
+            resolved[user_id] = await _prefer_interaction_bot_identity(
+                identity,
+                bot_member_resolver,
+                chat_id,
+                user_id,
+                clean_senders[user_id],
+                anonymous_admin_display_name=anonymous_admin_display_name,
+            )
         if all(identity is not None and identity.resolved for identity in resolved.values()):
             return {user_id: identity for user_id, identity in resolved.items() if identity is not None}
         clean_senders = {
@@ -303,6 +329,14 @@ async def _resolve_public_sender_identities(
             try:
                 identity = await _public_sender_identity_from_permissions(
                     client,
+                    chat_id,
+                    user_id,
+                    display_name,
+                    anonymous_admin_display_name=anonymous_admin_display_name,
+                )
+                identity = await _prefer_interaction_bot_identity(
+                    identity,
+                    bot_member_resolver,
                     chat_id,
                     user_id,
                     display_name,
@@ -424,6 +458,33 @@ async def _public_sender_identity_from_bot_member(
         tag=tag,
         resolved=True,
     )
+
+
+async def _prefer_interaction_bot_identity(
+    identity: PublicSenderIdentity,
+    resolver: Callable[[int, int], Awaitable[Mapping[str, Any] | None]] | None,
+    chat_id: int,
+    user_id: int,
+    fallback_display_name: str,
+    *,
+    anonymous_admin_display_name: str,
+) -> PublicSenderIdentity:
+    if not identity.is_anonymous_admin or not callable(resolver):
+        return identity
+    try:
+        bot_identity = await _public_sender_identity_from_bot_member(
+            resolver,
+            chat_id,
+            user_id,
+            fallback_display_name,
+            anonymous_admin_display_name=anonymous_admin_display_name,
+        )
+    except Exception:
+        return identity
+    # 两个 Telegram 客户端对刚切换的匿名状态可能短暂不一致。只允许
+    # Interaction Bot 补全匿名标签，不能用其“非匿名”结果覆盖 UserBot
+    # 已确认的匿名身份，否则会把按钮回调里的真实姓名重新带回群消息。
+    return bot_identity if bot_identity.is_anonymous_admin else identity
 
 
 def _resolved_public_sender_identity(

@@ -200,27 +200,6 @@ async def execute_userbot_interaction_action(
             "reply_to_message_id": reply_to,
             "reply_to_user_id": reply_to_user_id,
         }
-        if action_type == "payout" and payout_claim is not None:
-            result["payout_key"] = _str_or_none(payload.get("payout_key"))
-            marker_ok = await payout_compensation.complete_payout_delivery(
-                payout_redis,
-                payout_claim,
-                account_id,
-                payload.get("payout_key"),
-                result.get("message_id"),
-                ledger_action=payload,
-                ledger_result=result,
-            )
-            if not marker_ok:
-                result["post_send_bookkeeping_failed"] = True
-                result["delivery_ambiguous"] = True
-                result["error_code"] = payout_compensation.ERROR_AMBIGUOUS_DELIVERY
-                await payout_compensation.mark_payout_delivery_ambiguous(
-                    payout_claim,
-                    "payout sent but durable completion failed",
-                )
-        elif action_type == "payout":
-            result["payout_key"] = _str_or_none(payload.get("payout_key"))
         try:
             await save_action_reply_target(
                 redis or get_redis(),
@@ -243,6 +222,27 @@ async def execute_userbot_interaction_action(
                 result["post_send_bookkeeping_failed"] = True
             else:
                 raise
+        if action_type == "payout" and payout_claim is not None:
+            result["payout_key"] = _str_or_none(payload.get("payout_key"))
+            marker_ok = await payout_compensation.complete_payout_delivery(
+                payout_redis,
+                payout_claim,
+                account_id,
+                payload.get("payout_key"),
+                result.get("message_id"),
+                ledger_action=payload,
+                ledger_result=result,
+            )
+            if not marker_ok:
+                result["post_send_bookkeeping_failed"] = True
+                result["delivery_ambiguous"] = True
+                result["error_code"] = payout_compensation.ERROR_AMBIGUOUS_DELIVERY
+                await payout_compensation.mark_payout_delivery_ambiguous(
+                    payout_claim,
+                    "payout sent but durable completion failed",
+                )
+        elif action_type == "payout":
+            result["payout_key"] = _str_or_none(payload.get("payout_key"))
         return result
 
     if action_type == "edit_message":

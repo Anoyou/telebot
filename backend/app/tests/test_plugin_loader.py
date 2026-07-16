@@ -2390,6 +2390,75 @@ async def test_userbot_payout_action_skips_humanize_when_sent(monkeypatch) -> No
 
 
 @pytest.mark.asyncio
+async def test_userbot_payout_saves_reply_target_before_completing_ledger(monkeypatch) -> None:
+    state = loader_mod._AccountState(account_id=71)
+    state.redis = _FakeRedis()
+    state.client = SimpleNamespace(send_message=AsyncMock(return_value=SimpleNamespace(id=511)))
+    state.engine = SimpleNamespace(
+        acquire=AsyncMock(return_value=SimpleNamespace(allowed=True, wait_seconds=0, outcome="ok")),
+    )
+    order: list[str] = []
+    monkeypatch.setattr(loader_mod, "record_action", AsyncMock())
+    monkeypatch.setattr(loader_mod.payout_limit, "check_and_consume", AsyncMock(return_value=(True, None)))
+    claim, complete, _release = _mock_payout_delivery(monkeypatch)
+    complete.side_effect = lambda *args, **kwargs: order.append("complete") or True
+    save_target = AsyncMock(side_effect=lambda *args, **kwargs: order.append("save"))
+    monkeypatch.setattr(loader_mod, "_save_userbot_reply_target", save_target)
+
+    ok = await loader_mod._apply_userbot_payout_action(
+        state,
+        SimpleNamespace(chat_id=-100777),
+        {
+            "type": "payout",
+            "amount": 8,
+            "chat_id": -100777,
+            "reply_to_message_id": 41,
+            "reply_to_user_id": 77,
+            "reply_to_display_name": "公开名称",
+        },
+    )
+
+    assert ok is True
+    assert order == ["save", "complete"]
+    claim.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_userbot_payout_completes_ledger_when_reply_target_save_fails(monkeypatch) -> None:
+    state = loader_mod._AccountState(account_id=71)
+    state.redis = _FakeRedis()
+    state.client = SimpleNamespace(send_message=AsyncMock(return_value=SimpleNamespace(id=512)))
+    state.engine = SimpleNamespace(
+        acquire=AsyncMock(return_value=SimpleNamespace(allowed=True, wait_seconds=0, outcome="ok")),
+    )
+    monkeypatch.setattr(loader_mod, "record_action", AsyncMock())
+    monkeypatch.setattr(loader_mod.payout_limit, "check_and_consume", AsyncMock(return_value=(True, None)))
+    claim, complete, _release = _mock_payout_delivery(monkeypatch)
+    monkeypatch.setattr(
+        loader_mod,
+        "_save_userbot_reply_target",
+        AsyncMock(side_effect=RuntimeError("reply target save failed")),
+    )
+
+    ok = await loader_mod._apply_userbot_payout_action(
+        state,
+        SimpleNamespace(chat_id=-100777),
+        {
+            "type": "payout",
+            "amount": 8,
+            "chat_id": -100777,
+            "reply_to_message_id": 41,
+            "reply_to_user_id": 77,
+            "reply_to_display_name": "公开名称",
+        },
+    )
+
+    assert ok is True
+    claim.assert_awaited_once()
+    complete.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_userbot_payout_action_floodwait_feeds_engine(monkeypatch) -> None:
     from telethon.errors import FloodWaitError
 

@@ -760,15 +760,28 @@ return [
 更推荐的新写法是直接返回 `payout`：
 
 ```python
+event = event_from_interaction_payload(payload)
+winner_user_id = event.sender.user_id
+identity = await resolve_public_sender_identity(
+    ctx,
+    chat_id=event.message.chat_id,
+    user_id=winner_user_id,
+    fallback_display_name=event.sender.display_name,
+)
+
 return [{
     "type": "payout",
     "chat_id": event.message.chat_id,
     "amount": 88,
     "reply_to_user_id": winner_user_id,
+    "reply_to_display_name": identity.display_name,
+    "reply_to_username": None if identity.is_anonymous_admin else event.sender.username,
     "reply_to_search_limit": 200,
     "reply_anchor_missing_text": "未找到对应用户（{user_id}）的近期消息，本次发奖需要人工补发。",
 }]
 ```
+
+`reply_to_display_name` 必须来自上文的 `resolve_public_sender_identity()` / `resolve_public_sender_identities()`，不能直接复制按钮回调中的姓名；匿名管理员应同时把 `reply_to_username` 设为 `None`。平台会在 UserBot 发奖消息发送后先保存这组安全公开身份，再完成 payout 账本，供后续转账通知复用。历史动作未提供公开名、映射尚未写入或 Redis 暂时不可用时，平台会再用 Interaction Bot 的官方 `getChatMember` 核验；无法确认时隐藏为“匿名用户”，不会回退回复消息里的真实姓名。
 
 `payout` 永远经 userbot 执行，并进入限速与 trace。它适合“发奖文案本身就是协议”的玩法，普通 Bot 不会代替它执行转账样动作。找不到 `reply_to_user_id` 对应的近期发言时，`payout` 同样会失败、写入日志，并发送默认或自定义的 `reply_anchor_missing_text` 提示。
 
@@ -1137,7 +1150,7 @@ class GuessNumberPlugin(Plugin):
 | `delete_message` | `message_id` | 删除对应 Bot 通道可操作的消息 |
 | `pin_message` | `message_id` | 置顶对应 Bot 通道可操作的消息 |
 | `answer_callback` | `callback_query_id`、`text`、`show_alert` | 回应 inline keyboard 按钮回调 |
-| `payout` | `amount`、`text`、`reply_to_message_id`、`reply_to_user_id`、`reply_to_search_limit`、`reply_anchor_missing_text` | UserBot 发奖动作；有消息 ID 时直接回复，否则可按用户 ID 查找近期发言作为锚点。超限拒（`error_code=payout_limit_exceeded`），瞬时失败自动进补偿队列重发，插件无需自己重试（见上文 payout 语义） |
+| `payout` | `amount`、`text`、`reply_to_message_id`、`reply_to_user_id`、`reply_to_display_name`、`reply_to_username`、`reply_to_search_limit`、`reply_anchor_missing_text` | UserBot 发奖动作；有消息 ID 时直接回复，否则可按用户 ID 查找近期发言作为锚点。公开名必须来自安全身份 facade，匿名管理员不传 username。超限拒（`error_code=payout_limit_exceeded`），瞬时失败自动进补偿队列重发，插件无需自己重试（见上文 payout 语义） |
 | `end_session` | 无 | 本次入口处理完成后不保留交互会话，适合彩票、红包等长期轮回插件 |
 
 通道原则是：**触发方式决定会话通道，插件默认不感知通道，框架负责路由和执行**。命令触发的普通会话收发走 userbot，关键词/付款/按钮触发的普通会话收发走交互 Bot。能力固定路由有两个例外：`payout`、收款确认和发奖等钱相关动作永远走 userbot；`send_rich_message` 永远走 Interaction Bot。其他动作只有在跨通道公告、特殊管理提示或迁移桥兼容时才显式写 `send_via`：

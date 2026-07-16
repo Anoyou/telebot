@@ -30,6 +30,8 @@ class BufferedMessageOps:
         parse_mode: Literal["html", "plain"] = "plain",
         reply_to_message_id: int | None = None,
         reply_to_user_id: int | None = None,
+        reply_to_display_name: str | None = None,
+        reply_to_username: str | None = None,
         reply_to_search_limit: int | None = None,
         reply_anchor_missing_text: str | None = None,
         reply_markup: dict[str, Any] | None = None,
@@ -46,6 +48,10 @@ class BufferedMessageOps:
         }
         if reply_to_user_id is not None:
             action["reply_to_user_id"] = reply_to_user_id
+        if reply_to_display_name:
+            action["reply_to_display_name"] = reply_to_display_name
+        if reply_to_username:
+            action["reply_to_username"] = reply_to_username
         if reply_to_search_limit is not None:
             action["reply_to_search_limit"] = reply_to_search_limit
         if reply_anchor_missing_text:
@@ -312,6 +318,8 @@ class BufferedMessageOps:
         parse_mode: Literal["html", "plain"] = "plain",
         reply_to_message_id: int | None = None,
         reply_to_user_id: int | None = None,
+        reply_to_display_name: str | None = None,
+        reply_to_username: str | None = None,
         reply_to_search_limit: int | None = None,
         reply_anchor_missing_text: str | None = None,
     ) -> dict[str, Any]:
@@ -326,6 +334,10 @@ class BufferedMessageOps:
             action["text"] = text
         if reply_to_user_id is not None:
             action["reply_to_user_id"] = reply_to_user_id
+        if reply_to_display_name:
+            action["reply_to_display_name"] = reply_to_display_name
+        if reply_to_username:
+            action["reply_to_username"] = reply_to_username
         if reply_to_search_limit is not None:
             action["reply_to_search_limit"] = reply_to_search_limit
         if reply_anchor_missing_text:

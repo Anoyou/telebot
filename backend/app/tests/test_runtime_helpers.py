@@ -298,6 +298,61 @@ async def test_resolve_public_sender_identity_anonymous_admin_without_tag_uses_g
     assert identity.resolved is True
 
 
+async def test_anonymous_admin_without_userbot_tag_is_enriched_by_interaction_bot() -> None:
+    class Client:
+        async def get_permissions(self, chat_id: int, user_id: int) -> SimpleNamespace:
+            return SimpleNamespace(anonymous=True, participant=SimpleNamespace(rank=""))
+
+    async def resolve_bot_member(chat_id: int, user_id: int) -> dict[str, object]:
+        return {
+            "status": "administrator",
+            "is_anonymous": True,
+            "custom_title": "交互 Bot 标签",
+        }
+
+    identity = await PluginIdentityFacade(
+        Client(),
+        bot_member_resolver=resolve_bot_member,
+    ).resolve(
+        chat_id=-1001,
+        user_id=42,
+        fallback_display_name="不应公开的真实姓名",
+    )
+
+    assert identity.display_name == "交互 Bot 标签"
+    assert identity.tag == "交互 Bot 标签"
+    assert identity.is_anonymous_admin is True
+
+
+async def test_anonymous_admin_is_not_declassified_by_stale_interaction_bot_state() -> None:
+    class Client:
+        async def get_permissions(self, chat_id: int, user_id: int) -> SimpleNamespace:
+            return SimpleNamespace(
+                anonymous=True,
+                participant=SimpleNamespace(rank="UserBot 匿名标签"),
+            )
+
+    async def resolve_bot_member(chat_id: int, user_id: int) -> dict[str, object]:
+        return {
+            "status": "administrator",
+            "is_anonymous": False,
+            "custom_title": "普通管理员标签",
+        }
+
+    identity = await PluginIdentityFacade(
+        Client(),
+        bot_member_resolver=resolve_bot_member,
+    ).resolve(
+        chat_id=-1001,
+        user_id=42,
+        fallback_display_name="不应公开的真实姓名",
+    )
+
+    assert identity.display_name == "UserBot 匿名标签"
+    assert identity.tag == "UserBot 匿名标签"
+    assert identity.is_anonymous_admin is True
+
+
 async def test_resolve_public_sender_identity_falls_back_to_admin_listing() -> None:
     class Client:
         async def get_permissions(self, chat_id: int, user_id: int) -> SimpleNamespace:
