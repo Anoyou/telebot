@@ -544,6 +544,44 @@ class FetchModelsPreviewResponse(BaseModel):
     ids: list[str]
 
 
+class QuickVerifyProviderRequest(BaseModel):
+    """用未落库凭据发起一次真实流式对话验证。"""
+
+    base_url: str
+    # 不在 Pydantic Field 上做长度拒绝，避免默认 422 把敏感 input 原样带回；
+    # 路由会在进入流式响应前用不含输入值的结构化错误拒绝超长 Key。
+    api_key: str | None = None
+    api_format: Literal[
+        "chat_completions", "responses", "anthropic_messages"
+    ] = LLM_API_FORMAT_CHAT_COMPLETIONS
+    model: str | None = Field(default=None, max_length=128)
+    system_prompt: str = Field(
+        default="你是一个自然、简洁的中文聊天助手。请像真实聊天一样直接回复用户，不要只返回 ping/pong。",
+        min_length=1,
+        max_length=2000,
+    )
+    message: str = Field(
+        default="你怎么又不行了？继续。",
+        min_length=1,
+        max_length=2000,
+    )
+    max_tokens: int = Field(default=400, ge=64, le=2000)
+    timeout_seconds: int = Field(default=90, ge=10, le=180)
+
+    @field_validator("base_url", "system_prompt", "message")
+    @classmethod
+    def _strip_quick_verify_required_text(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("字段不能只包含空白字符")
+        return stripped
+
+    @field_validator("api_key", "model")
+    @classmethod
+    def _strip_quick_verify_optional_text(cls, value: str | None) -> str | None:
+        return (value.strip() or None) if value is not None else None
+
+
 class DetectProviderProtocolsRequest(BaseModel):
     """``POST /api/commands/llm-providers/detect-protocols`` 入参。"""
 

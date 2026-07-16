@@ -26,6 +26,8 @@ import type {
   LLMProviderCreate,
   LLMProviderOut,
   LLMProviderUpdate,
+  QuickVerifyProviderRequest,
+  QuickVerifyProviderStreamEvent,
   TestModelRequest,
   TestModelResponse,
 } from "@/api/types";
@@ -278,6 +280,62 @@ export async function streamChatTestProviderModels(
     if (!streamFinished) {
       await reader.cancel().catch(() => undefined);
     }
+    reader.releaseLock();
+  }
+}
+
+/** 用未落库凭据发现模型并执行一次真实流式对话。 */
+export async function streamQuickVerifyProvider(
+  payload: QuickVerifyProviderRequest,
+  onEvent: (event: QuickVerifyProviderStreamEvent) => void,
+  opts?: { signal?: AbortSignal },
+): Promise<void> {
+  const response = await apiFetch(
+    "/api/commands/llm-providers/quick-verify/stream",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/x-ndjson" },
+      body: JSON.stringify(payload),
+      signal: opts?.signal,
+    },
+  );
+  if (!response.ok) {
+    let payloadError: unknown;
+    try {
+      payloadError = await response.json();
+    } catch {
+      payloadError = null;
+    }
+    throw new Error(streamErrorMessage(payloadError, `快速验证失败（HTTP ${response.status}）`));
+  }
+  if (!response.body) throw new Error("浏览器没有提供可读取的流式响应。");
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let terminalReceived = false;
+  let streamFinished = false;
+  let buffer = "";
+  const consumeLine = (line: string) => {
+    const trimmed = line.trim();
+    if (!trimmed) return;
+    const event = JSON.parse(trimmed) as QuickVerifyProviderStreamEvent;
+    if (event.type === "done" || event.type === "error") terminalReceived = true;
+    onEvent(event);
+  };
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      buffer += decoder.decode(value, { stream: !done });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() || "";
+      lines.forEach(consumeLine);
+      if (done) break;
+    }
+    if (buffer.trim()) consumeLine(buffer);
+    if (!terminalReceived) throw new Error("流式响应提前结束，没有返回最终验证状态。");
+    streamFinished = true;
+  } finally {
+    if (!streamFinished) await reader.cancel().catch(() => undefined);
     reader.releaseLock();
   }
 }

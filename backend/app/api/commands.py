@@ -54,6 +54,7 @@ from ..schemas.command import (
     LLMProviderUpdate,
     ProtocolIdentityAttempt,
     ProtocolProbeResult,
+    QuickVerifyProviderRequest,
     TestModelRequest,
     TestModelResponse,
 )
@@ -604,6 +605,48 @@ async def fetch_models_preview(
     )
     await db.commit()
     return FetchModelsPreviewResponse(fetched=len(new_ids), ids=new_ids)
+
+
+@router.post("/api/commands/llm-providers/quick-verify/stream")
+async def stream_quick_verify_provider(
+    payload: QuickVerifyProviderRequest,
+    db: DBSession,
+    _user: CurrentUser,
+) -> StreamingResponse:
+    """用临时凭据发现模型并发起真实对话，凭据不落库、不写审计。"""
+
+    await _require_ai_enabled(db)
+
+    from ..services import llm_quick_verify
+
+    if len(payload.base_url) > 255:
+        raise _llm_err("QUICK_VERIFY_BASE_URL", "Base URL 不能超过 255 字符", 422)
+    if len(payload.api_key or "") > 512:
+        raise _llm_err("QUICK_VERIFY_API_KEY", "API Key 不能超过 512 字符", 422)
+    try:
+        base_url = llm_quick_verify.normalize_quick_verify_base_url(payload.base_url)
+    except ValueError as exc:
+        raise _llm_err("QUICK_VERIFY_BASE_URL", str(exc), 422) from None
+
+    async def event_source():
+        async with llm_liveness.diagnostic_slot():
+            async for event in llm_quick_verify.quick_verify_events(
+                base_url=base_url,
+                api_key=payload.api_key or "",
+                api_format=payload.api_format,
+                model=payload.model,
+                system_prompt=payload.system_prompt,
+                message=payload.message,
+                max_tokens=payload.max_tokens,
+                timeout_seconds=payload.timeout_seconds,
+            ):
+                yield json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n"
+
+    return StreamingResponse(
+        event_source(),
+        media_type="application/x-ndjson",
+        headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
+    )
 
 
 @router.post(

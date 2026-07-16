@@ -8,7 +8,7 @@ import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { toast } from "sonner";
-import { Plus, Trash2, KeyRound, Edit3, Download, Loader2, CheckCircle2, XCircle, Star, ChevronDown, ChevronRight, Filter, X, Package, Save, MessageSquare } from "lucide-react";
+import { Plus, Trash2, KeyRound, Edit3, Download, Loader2, CheckCircle2, XCircle, Star, ChevronDown, ChevronRight, Filter, X, Package, Save, MessageSquare, Zap } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { CommandBadge } from "@/components/CommandBadge";
@@ -60,6 +60,7 @@ import type { ClientIdentityVersionDetectItem, ClientIdentityVersionItem, Detect
 import { getErrMsg } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { confirmDiscardChanges, useUnsavedChanges } from "@/lib/unsavedChanges";
+import { QuickVerifyProviderPanel } from "@/components/ai/QuickVerifyProviderPanel";
 
 // 各 provider 的默认 base_url 提示，仅作 placeholder
 const DEFAULT_BASE_URLS: Record<LLMProviderKind, string> = {
@@ -287,6 +288,7 @@ export function LLMProviders({
 
   const [editing, setEditing] = useState<FormState | null>(null);
   const [identityVersionsOpen, setIdentityVersionsOpen] = useState(false);
+  const [quickVerifyOpen, setQuickVerifyOpen] = useState(false);
 
   const visibleProviders = (listQ.data || []).filter((p) => {
     if (!isVisionFilter) return true;
@@ -444,7 +446,7 @@ export function LLMProviders({
                 />
               }
             />
-            <div className="flex flex-wrap items-center gap-2 rounded-md border border-primary/20 bg-primary/[0.04] p-2 shadow-sm">
+            <div className="grid grid-cols-2 items-center gap-2 rounded-md border border-primary/20 bg-primary/[0.04] p-2 shadow-sm sm:flex sm:flex-wrap">
               <Button
                 type="button"
                 size="sm"
@@ -453,6 +455,16 @@ export function LLMProviders({
                 onClick={() => navigate(`/ai/liveness?provider=${visibleProviders[0].id}`)}
               >
                 <MessageSquare className="mr-1 h-4 w-4" /> 对话测活
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                variant={quickVerifyOpen ? "default" : "tinted"}
+                className="min-w-0 shadow-sm sm:flex-none"
+                aria-expanded={quickVerifyOpen}
+                onClick={() => setQuickVerifyOpen((open) => !open)}
+              >
+                <Zap className="mr-1 h-4 w-4" /> 快速验证
               </Button>
               <Button
                 type="button"
@@ -467,6 +479,16 @@ export function LLMProviders({
                 <Plus className="mr-1 h-4 w-4" /> 新建
               </Button>
             </div>
+            {quickVerifyOpen ? (
+              <QuickVerifyProviderPanel
+                providers={listQ.data || []}
+                onClose={() => setQuickVerifyOpen(false)}
+                onImported={() => {
+                  qc.invalidateQueries({ queryKey: ["llm-providers"] });
+                  setQuickVerifyOpen(false);
+                }}
+              />
+            ) : null}
           </div>
         </CardHeader>
         <CardContent>

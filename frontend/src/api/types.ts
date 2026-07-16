@@ -1540,6 +1540,56 @@ export interface FetchModelsPreviewResponse {
   ids: string[];
 }
 
+export interface QuickVerifyProviderRequest {
+  base_url: string;
+  api_key?: string | null;
+  api_format: LLMApiFormat;
+  model?: string | null;
+  system_prompt?: string;
+  message?: string;
+  max_tokens?: number;
+  timeout_seconds?: number;
+}
+
+export interface QuickVerifyProviderResult {
+  ok: boolean;
+  model?: string | null;
+  requested_model?: string | null;
+  latency_ms?: number;
+  response?: string | null;
+  error?: string | null;
+  requires_model?: boolean;
+  models: string[];
+  api_format: LLMApiFormat;
+  streaming?: boolean;
+  stream_fallback?: boolean;
+  input_tokens?: number;
+  output_tokens?: number;
+  base_url?: string;
+  provider?: LLMProviderKind;
+  suggested_name?: string;
+}
+
+export type QuickVerifyProviderStreamEvent =
+  | {
+      type: "discovery";
+      model: string;
+      models: string[];
+      api_format: LLMApiFormat;
+    }
+  | {
+      type: "start";
+      model: string;
+      streaming: true;
+      api_format: LLMApiFormat;
+    }
+  | {
+      type: "delta";
+      model: string;
+      delta: string;
+    }
+  | ({ type: "done" | "error" } & QuickVerifyProviderResult);
+
 export interface DetectProviderProtocolsRequest {
   provider: LLMProviderKind;
   base_url?: string | null;
