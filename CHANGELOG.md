@@ -22,6 +22,16 @@
 
 暂无已记录变更。
 
+## [0.60.8] — 2026-07-16 · patch（补丁版本） · 匿名管理员标签与发奖隐私修复
+
+### Fixed
+- 群内安全身份 facade 在 UserBot 无法查询被 Telegram 隐藏的匿名管理员时，改用管理员 Interaction Bot 的官方 `getChatMember` 结果读取 `is_anonymous` 与 `custom_title`；非匿名管理员和普通成员仍显示公开姓名，不会被成员标签替换。
+- UserBot 直发与共享交互动作链路现在会把插件提供的安全公开名写入回复目标映射；模拟转账优先读取该映射，不再从 Telegram 回复消息重新取出匿名管理员真实姓名或用户名。
+- 旧发奖映射缺少安全公开名时统一显示“匿名用户”，避免升级窗口内的历史消息继续泄露身份。
+
+### Documentation
+- 插件 API 参考和开发指南补充匿名管理员解析前提：Interaction Bot 必须是目标群管理员，Telegram 才保证 `getChatMember` 可查询其他成员。
+
 ## [0.60.7] — 2026-07-16 · patch（补丁版本） · 插件更新与匿名身份安全修复
 
 ### Added

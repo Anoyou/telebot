@@ -167,6 +167,104 @@ async def test_resolve_public_sender_identity_fails_closed() -> None:
     assert identity.resolved is False
 
 
+async def test_resolve_public_sender_identity_uses_admin_interaction_bot_for_hidden_admin() -> None:
+    class UserNotParticipantError(Exception):
+        pass
+
+    class Client:
+        async def get_permissions(self, chat_id: int, user_id: int) -> SimpleNamespace:
+            raise UserNotParticipantError("anonymous administrator is hidden")
+
+    async def resolve_bot_member(chat_id: int, user_id: int) -> dict[str, object]:
+        assert (chat_id, user_id) == (-1001, 42)
+        return {
+            "status": "creator",
+            "is_anonymous": True,
+            "custom_title": "匿名小尾巴测试",
+        }
+
+    ctx = SimpleNamespace(
+        identities=PluginIdentityFacade(
+            Client(),
+            bot_member_resolver=resolve_bot_member,
+        )
+    )
+    identity = await resolve_public_sender_identity(
+        ctx,
+        chat_id=-1001,
+        user_id=42,
+        fallback_display_name="不应公开的真实姓名",
+    )
+
+    assert identity.display_name == "匿名小尾巴测试"
+    assert identity.is_anonymous_admin is True
+    assert identity.tag == "匿名小尾巴测试"
+    assert identity.resolved is True
+
+
+async def test_interaction_bot_member_lookup_does_not_replace_visible_admin_name_with_title() -> None:
+    class Client:
+        async def get_permissions(self, chat_id: int, user_id: int) -> SimpleNamespace:
+            raise LookupError("userbot lookup unavailable")
+
+    async def resolve_bot_member(chat_id: int, user_id: int) -> dict[str, object]:
+        return {
+            "status": "administrator",
+            "is_anonymous": False,
+            "custom_title": "普通管理员标签",
+        }
+
+    identity = await PluginIdentityFacade(
+        Client(),
+        bot_member_resolver=resolve_bot_member,
+    ).resolve(
+        chat_id=-1001,
+        user_id=42,
+        fallback_display_name="公开姓名",
+    )
+
+    assert identity.display_name == "公开姓名"
+    assert identity.is_anonymous_admin is False
+    assert identity.tag == "普通管理员标签"
+    assert identity.resolved is True
+
+
+async def test_batch_identity_lookup_uses_interaction_bot_for_hidden_admin() -> None:
+    class Client:
+        async def get_permissions(self, chat_id: int, user_id: int) -> SimpleNamespace:
+            raise LookupError("anonymous administrator is hidden")
+
+        def iter_participants(self, chat_id: int, *, filter: object):
+            async def stream():
+                yield SimpleNamespace(
+                    id=99,
+                    participant=SimpleNamespace(
+                        rank="其他管理员",
+                        admin_rights=SimpleNamespace(anonymous=False),
+                    ),
+                )
+
+            return stream()
+
+    async def resolve_bot_member(chat_id: int, user_id: int) -> dict[str, object]:
+        return {
+            "status": "administrator",
+            "is_anonymous": True,
+            "custom_title": "结算匿名标签",
+        }
+
+    identities = await PluginIdentityFacade(
+        Client(),
+        bot_member_resolver=resolve_bot_member,
+    ).resolve_many(
+        chat_id=-1001,
+        senders={42: "不应进入结算的真实姓名"},
+    )
+
+    assert identities[42].display_name == "结算匿名标签"
+    assert identities[42].is_anonymous_admin is True
+
+
 async def test_resolve_public_sender_identity_without_anonymous_field_fails_closed() -> None:
     class Client:
         async def get_permissions(self, chat_id: int, user_id: int) -> SimpleNamespace:

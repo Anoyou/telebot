@@ -2947,6 +2947,7 @@ async def _apply_userbot_payout_action(state: _AccountState, event: Any, action:
             target_chat_id=target_chat_id,
             result=result,
             reply_to_user_id=reply_to_user_id,
+            action=action,
         )
         await record_action(
             action.get("context"),
@@ -3135,6 +3136,7 @@ async def _apply_userbot_send_message_action(
                     target_chat_id=target_chat_id,
                     result=result,
                     reply_to_user_id=reply_to_user_id,
+                    action=action,
                 )
                 await record_action(
                     action.get("context"),
@@ -3973,6 +3975,31 @@ async def _interaction_bot_token_for_account(account_id: int) -> str | None:
         return None
 
 
+async def _interaction_bot_chat_member_for_account(
+    account_id: int,
+    chat_id: int,
+    user_id: int,
+) -> dict[str, Any] | None:
+    token = await _interaction_bot_token_for_account(account_id)
+    if not token:
+        return None
+    try:
+        return await account_bot_service.call_bot_api(
+            token,
+            "getChatMember",
+            {"chat_id": chat_id, "user_id": user_id},
+        )
+    except Exception:  # noqa: BLE001
+        log.debug(
+            "interaction bot member lookup failed account=%s chat_id=%s user_id=%s",
+            account_id,
+            chat_id,
+            user_id,
+            exc_info=True,
+        )
+        return None
+
+
 def _action_chat_id(action: dict[str, Any], event: Any) -> int | None:
     return _int_or_none(action.get("chat_id")) or _int_or_none(getattr(event, "chat_id", None))
 
@@ -4143,6 +4170,7 @@ async def _save_userbot_reply_target(
     target_chat_id: int | None,
     result: Any,
     reply_to_user_id: int | None,
+    action: dict[str, Any],
 ) -> None:
     if reply_to_user_id is None:
         return
@@ -4156,6 +4184,8 @@ async def _save_userbot_reply_target(
         chat_id=target_chat_id,
         message_id=msg_id,
         reply_to_user_id=reply_to_user_id,
+        reply_to_display_name=action.get("reply_to_display_name"),
+        reply_to_username=action.get("reply_to_username"),
     )
 
 
@@ -6709,7 +6739,18 @@ async def _activate(db, state: _AccountState, af: AccountFeature, redis: Any) ->
         http=plugin_http,
         ai=plugin_ai,
         messages=_LiveMessageOps(state, plugin_key=af.feature_key),
-        identities=PluginIdentityFacade(state.client) if state.client is not None else None,
+        identities=(
+            PluginIdentityFacade(
+                state.client,
+                bot_member_resolver=lambda chat_id, user_id: _interaction_bot_chat_member_for_account(
+                    state.account_id,
+                    chat_id,
+                    user_id,
+                ),
+            )
+            if state.client is not None
+            else None
+        ),
         generation=state.generation,
         account_proxy_url=state.account_proxy_url,
     )

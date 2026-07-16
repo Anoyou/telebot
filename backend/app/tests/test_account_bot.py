@@ -20,10 +20,12 @@ from app.db.models.log import RuntimeLog
 from app.schemas.account_bot import AccountBotConfigUpdate, AccountBotInteractionConfig, AccountBotTestRequest
 from app.services import account_bot_runtime, account_bot_service, audit
 from app.services.interaction import contracts as interaction_contracts
+from app.services.interaction import userbot_actions
 from app.services.interaction.delivery import (
     InteractionDeliveryExecutor,
     action_save_message_id_key,
     namespaced_action_save_message_id_key,
+    read_action_reply_target,
     save_action_reply_target,
 )
 from app.worker import runtime as worker_runtime
@@ -4504,6 +4506,174 @@ async def test_transfer_notice_reply_chain_break_falls_back_to_text_receiver(mon
     assert payload["payment"]["amount"] == 100
     assert payload["payment"]["receiver_display_name"] == "Owner"
     assert "reply_chain_verified" not in payload["raw"]["parsed"]
+
+
+@pytest.mark.asyncio
+async def test_transfer_command_prefers_saved_public_receiver_name(monkeypatch) -> None:
+    redis = _MemoryRedis()
+    await save_action_reply_target(
+        redis,
+        account_id=1,
+        chat_id=-100123,
+        message_id=4192,
+        reply_to_user_id=8629045843,
+        reply_to_display_name="匿名小尾巴测试",
+    )
+    monkeypatch.setattr(account_bot_runtime, "get_redis", lambda: redis)
+    incoming = account_bot_runtime.Incoming(
+        account_id=1,
+        token="bbot-token",
+        update_id=1,
+        user_id=1682400007,
+        chat_id=-100123,
+        message_id=4192,
+        text="+101",
+        display_name="付款方",
+        reply_to_user_id=8629045843,
+        reply_to_display_name="不应公开的真实姓名",
+        reply_to_username="private_username",
+    )
+
+    receiver = await account_bot_runtime._select_transfer_command_receiver(  # noqa: SLF001
+        SimpleNamespace(),
+        incoming,
+        {"rules": []},
+        101,
+    )
+
+    assert receiver == {
+        "receiver_name": "匿名小尾巴测试",
+        "receiver_user_id": 8629045843,
+        "receiver_username": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_transfer_notice_renders_saved_anonymous_admin_title(monkeypatch) -> None:
+    class _DB:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+    redis = _MemoryRedis()
+    await save_action_reply_target(
+        redis,
+        account_id=1,
+        chat_id=-100123,
+        message_id=8192,
+        reply_to_user_id=8629045843,
+        reply_to_display_name="匿名小尾巴测试",
+    )
+    send = AsyncMock(return_value={})
+    monkeypatch.setattr(account_bot_runtime, "AsyncSessionLocal", lambda: _DB())
+    monkeypatch.setattr(account_bot_runtime, "get_redis", lambda: redis)
+    monkeypatch.setattr(account_bot_service, "send_message", send)
+    monkeypatch.setattr(account_bot_service, "get_transfer_bot_token", AsyncMock(return_value="abot-token"))
+    monkeypatch.setattr(
+        account_bot_service,
+        "get_transfer_notice_config",
+        AsyncMock(return_value={"enabled": True, "chat_ids": [-100123]}),
+    )
+
+    await account_bot_runtime._handle_transfer_test_update(  # noqa: SLF001
+        1,
+        "bbot-token",
+        {
+            "update_id": 8192,
+            "message": {
+                "message_id": 8192,
+                "text": "+101",
+                "from": {"id": 1682400007, "first_name": "付款方"},
+                "chat": {"id": -100123, "type": "supergroup"},
+                "reply_to_message": {
+                    "message_id": 8184,
+                    "from": {
+                        "id": 8629045843,
+                        "first_name": "不应公开的真实姓名",
+                        "username": "private_username",
+                    },
+                    "text": "1",
+                },
+            },
+        },
+    )
+
+    assert send.await_count == 1
+    notice = send.await_args.args[2]
+    assert "收款人：匿名小尾巴测试" in notice
+    assert "不应公开的真实姓名" not in notice
+    assert "private_username" not in notice
+
+
+@pytest.mark.asyncio
+async def test_plugin_loader_saves_public_reply_target_name() -> None:
+    redis = _MemoryRedis()
+    state = SimpleNamespace(account_id=1, redis=redis)
+
+    await plugin_loader._save_userbot_reply_target(  # noqa: SLF001
+        state,
+        target_chat_id=-100123,
+        result={"message_id": 4192},
+        reply_to_user_id=8629045843,
+        action={
+            "reply_to_display_name": "匿名小尾巴测试",
+            "reply_to_username": None,
+        },
+    )
+
+    saved = await read_action_reply_target(
+        redis,
+        account_id=1,
+        chat_id=-100123,
+        message_id=4192,
+    )
+    assert saved is not None
+    assert saved["reply_to_user_id"] == 8629045843
+    assert saved["reply_to_display_name"] == "匿名小尾巴测试"
+
+
+@pytest.mark.asyncio
+async def test_shared_userbot_action_saves_public_reply_target_name() -> None:
+    redis = _MemoryRedis()
+    client = SimpleNamespace(send_message=AsyncMock(return_value=SimpleNamespace(id=4192)))
+
+    await userbot_actions.execute_userbot_interaction_action(
+        client,
+        {
+            "action_type": "send_message",
+            "chat_id": -100123,
+            "text": "+101",
+            "reply_to_message_id": 4184,
+            "reply_to_user_id": 8629045843,
+            "reply_to_display_name": "匿名小尾巴测试",
+        },
+        account_id=1,
+        redis=redis,
+        acquire_rate_limit=AsyncMock(),
+        check_payout_limit=AsyncMock(),
+        find_recent_message_id=AsyncMock(),
+        render_button_fallback=lambda text, reply_markup: text,
+        recent_search_limit=lambda value: 200,
+        reply_anchor_missing_text=lambda payload, user_id: "",
+        parse_mode_of=lambda payload: "plain",
+        telethon_parse_mode=lambda parse_mode: None,
+        is_settlement_send=lambda payload: True,
+        simulate_humanize=AsyncMock(),
+        read_saved_message_id=AsyncMock(),
+        is_message_not_modified=lambda exc: False,
+    )
+
+    saved = await read_action_reply_target(
+        redis,
+        account_id=1,
+        chat_id=-100123,
+        message_id=4192,
+    )
+    assert saved is not None
+    assert saved["reply_to_user_id"] == 8629045843
+    assert saved["reply_to_display_name"] == "匿名小尾巴测试"
 
 
 @pytest.mark.asyncio

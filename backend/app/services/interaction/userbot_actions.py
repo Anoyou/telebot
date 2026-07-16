@@ -228,6 +228,8 @@ async def execute_userbot_interaction_action(
                 chat_id=chat_id,
                 message_id=result.get("message_id"),
                 reply_to_user_id=reply_to_user_id,
+                reply_to_display_name=_str_or_none(payload.get("reply_to_display_name")),
+                reply_to_username=_str_or_none(payload.get("reply_to_username")),
             )
         except Exception as post_exc:  # noqa: BLE001
             if action_type == "payout":
@@ -355,6 +357,8 @@ async def execute_userbot_interaction_action(
             chat_id=chat_id,
             message_id=result.get("message_id"),
             reply_to_user_id=reply_to_user_id,
+            reply_to_display_name=_str_or_none(payload.get("reply_to_display_name")),
+            reply_to_username=_str_or_none(payload.get("reply_to_username")),
         )
         return result
 

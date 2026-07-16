@@ -86,10 +86,16 @@ class PublicSenderIdentity:
 class PluginIdentityFacade:
     """Resolve group-safe identities without exposing the raw Telegram client."""
 
-    __slots__ = ("_client",)
+    __slots__ = ("_bot_member_resolver", "_client")
 
-    def __init__(self, client: Any) -> None:
+    def __init__(
+        self,
+        client: Any,
+        *,
+        bot_member_resolver: Callable[[int, int], Awaitable[Mapping[str, Any] | None]] | None = None,
+    ) -> None:
         object.__setattr__(self, "_client", client)
+        object.__setattr__(self, "_bot_member_resolver", bot_member_resolver)
 
     def __getattribute__(self, name: str) -> Any:
         if name.startswith("_"):
@@ -107,6 +113,7 @@ class PluginIdentityFacade:
     ) -> PublicSenderIdentity:
         return await _resolve_public_sender_identity(
             object.__getattribute__(self, "_client"),
+            bot_member_resolver=object.__getattribute__(self, "_bot_member_resolver"),
             chat_id=chat_id,
             user_id=user_id,
             fallback_display_name=fallback_display_name,
@@ -124,6 +131,7 @@ class PluginIdentityFacade:
     ) -> dict[int, PublicSenderIdentity]:
         return await _resolve_public_sender_identities(
             object.__getattribute__(self, "_client"),
+            bot_member_resolver=object.__getattribute__(self, "_bot_member_resolver"),
             chat_id=chat_id,
             senders=senders,
             unresolved_display_name=unresolved_display_name,
@@ -173,6 +181,7 @@ async def resolve_public_sender_identity(
 async def _resolve_public_sender_identity(
     client: Any,
     *,
+    bot_member_resolver: Callable[[int, int], Awaitable[Mapping[str, Any] | None]] | None = None,
     chat_id: int,
     user_id: int,
     fallback_display_name: str,
@@ -190,7 +199,7 @@ async def _resolve_public_sender_identity(
             unresolved_display_name=unresolved_display_name,
             anonymous_admin_display_name=anonymous_admin_display_name,
         )
-        if identity is not None:
+        if identity is not None and identity.resolved:
             return identity
     except Exception:
         pass
@@ -203,7 +212,16 @@ async def _resolve_public_sender_identity(
             anonymous_admin_display_name=anonymous_admin_display_name,
         )
     except Exception:
-        return _unresolved_public_sender_identity(user_id, unresolved_display_name)
+        try:
+            return await _public_sender_identity_from_bot_member(
+                bot_member_resolver,
+                chat_id,
+                user_id,
+                fallback_display_name,
+                anonymous_admin_display_name=anonymous_admin_display_name,
+            )
+        except Exception:
+            return _unresolved_public_sender_identity(user_id, unresolved_display_name)
 
 
 async def resolve_public_sender_identities(
@@ -237,6 +255,7 @@ async def resolve_public_sender_identities(
 async def _resolve_public_sender_identities(
     client: Any,
     *,
+    bot_member_resolver: Callable[[int, int], Awaitable[Mapping[str, Any] | None]] | None = None,
     chat_id: int,
     senders: Mapping[int, str],
     unresolved_display_name: str,
@@ -262,14 +281,18 @@ async def _resolve_public_sender_identities(
             )
             for user_id, display_name in clean_senders.items()
         }
-        if all(identity is not None for identity in resolved.values()):
+        if all(identity is not None and identity.resolved for identity in resolved.values()):
             return {user_id: identity for user_id, identity in resolved.items() if identity is not None}
         clean_senders = {
             user_id: clean_senders[user_id]
             for user_id, identity in resolved.items()
-            if identity is None
+            if identity is None or not identity.resolved
         }
-        confirmed = {user_id: identity for user_id, identity in resolved.items() if identity is not None}
+        confirmed = {
+            user_id: identity
+            for user_id, identity in resolved.items()
+            if identity is not None and identity.resolved
+        }
     except Exception:
         confirmed = {}
 
@@ -286,7 +309,16 @@ async def _resolve_public_sender_identities(
                     anonymous_admin_display_name=anonymous_admin_display_name,
                 )
             except Exception:
-                identity = _unresolved_public_sender_identity(user_id, unresolved_display_name)
+                try:
+                    identity = await _public_sender_identity_from_bot_member(
+                        bot_member_resolver,
+                        chat_id,
+                        user_id,
+                        display_name,
+                        anonymous_admin_display_name=anonymous_admin_display_name,
+                    )
+                except Exception:
+                    identity = _unresolved_public_sender_identity(user_id, unresolved_display_name)
             return user_id, identity
 
     confirmed.update(
@@ -358,6 +390,39 @@ async def _public_sender_identity_from_permissions(
         getattr(permissions, "participant", None),
         bool(permissions.anonymous),
         anonymous_admin_display_name,
+    )
+
+
+async def _public_sender_identity_from_bot_member(
+    resolver: Callable[[int, int], Awaitable[Mapping[str, Any] | None]] | None,
+    chat_id: int,
+    user_id: int,
+    fallback_display_name: str,
+    *,
+    anonymous_admin_display_name: str,
+) -> PublicSenderIdentity:
+    if not callable(resolver):
+        raise LookupError("interaction bot member lookup unavailable")
+    member = await resolver(chat_id, user_id)
+    if not isinstance(member, Mapping):
+        raise LookupError("interaction bot member lookup failed")
+    status = _clean_text(member.get("status"))
+    active = status in {"creator", "administrator", "member"} or (
+        status == "restricted" and bool(member.get("is_member"))
+    )
+    if not active:
+        raise LookupError("interaction bot did not confirm an active member")
+    if status in {"creator", "administrator"} and "is_anonymous" not in member:
+        raise LookupError("interaction bot omitted anonymous administrator state")
+    is_anonymous_admin = status in {"creator", "administrator"} and bool(member.get("is_anonymous"))
+    tag = _clean_text(member.get("custom_title")) or None
+    clean_fallback = _clean_text(fallback_display_name) or str(user_id)
+    return PublicSenderIdentity(
+        user_id=user_id,
+        display_name=(tag or anonymous_admin_display_name) if is_anonymous_admin else clean_fallback,
+        is_anonymous_admin=is_anonymous_admin,
+        tag=tag,
+        resolved=True,
     )
 
 

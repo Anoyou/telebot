@@ -4866,27 +4866,54 @@ async def _select_transfer_command_receiver(
     cfg: dict[str, Any],
     amount: int,
 ) -> dict[str, Any] | None:
+    saved_target: dict[str, Any] | None = None
+    if incoming.chat_id is not None and incoming.message_id is not None:
+        saved_target = await read_action_reply_target(
+            get_redis(),
+            account_id=incoming.account_id,
+            chat_id=incoming.chat_id,
+            message_id=incoming.message_id,
+        )
+    saved_user_id = _int_or_none(saved_target.get("reply_to_user_id")) if isinstance(saved_target, dict) else None
+    saved_display_name = (
+        str(saved_target.get("reply_to_display_name") or "").strip()
+        if isinstance(saved_target, dict)
+        else ""
+    )
+    saved_username = (
+        str(saved_target.get("reply_to_username") or "").strip()
+        if isinstance(saved_target, dict)
+        else ""
+    )
+    if saved_user_id is not None:
+        reply_to_user_id = saved_user_id
+        reply_to_display_name = saved_display_name or "匿名用户"
+        reply_to_username = saved_username or None
+    else:
+        reply_to_user_id = incoming.reply_to_user_id
+        reply_to_display_name = incoming.reply_to_display_name
+        reply_to_username = incoming.reply_to_username
     reply_target_is_configured_bot = False
-    if incoming.reply_to_display_name:
+    if reply_to_display_name:
         if _is_configured_bot_receiver_identity(
             cfg,
-            user_id=incoming.reply_to_user_id,
-            name=incoming.reply_to_display_name,
-            username=incoming.reply_to_username,
+            user_id=reply_to_user_id,
+            name=reply_to_display_name,
+            username=reply_to_username,
         ):
             log.info(
                 "transfer command receiver uses rule because reply target is configured bot aid=%s chat_id=%s reply_to_user=%s reply_to_name=%r",
                 incoming.account_id,
                 incoming.chat_id,
-                incoming.reply_to_user_id,
-                incoming.reply_to_display_name,
+                reply_to_user_id,
+                reply_to_display_name,
             )
             reply_target_is_configured_bot = True
         else:
             return {
-                "receiver_name": incoming.reply_to_display_name,
-                "receiver_user_id": incoming.reply_to_user_id,
-                "receiver_username": incoming.reply_to_username,
+                "receiver_name": reply_to_display_name,
+                "receiver_user_id": reply_to_user_id,
+                "receiver_username": reply_to_username,
             }
     for rule in _interaction_rules(cfg):
         if not _rule_chat_matches(rule, incoming.chat_id or 0):
