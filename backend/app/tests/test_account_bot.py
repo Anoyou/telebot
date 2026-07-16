@@ -3209,6 +3209,63 @@ def test_account_bot_transfer_notice_reply_chain_verification_defaults_on() -> N
     assert cfg["reply_chain_verification_enabled"] is True
 
 
+def test_transfer_test_chat_ids_infer_all_enabled_rule_chats_for_legacy_config() -> None:
+    cfg = account_bot_service.normalize_transfer_notice_config(
+        {
+            "rules": [
+                {
+                    "id": "paid-a",
+                    "name": "付款 A",
+                    "enabled": True,
+                    "chat_ids": [-1001, -1002],
+                    "trigger_mode": "payment",
+                    "action": "notice",
+                },
+                {
+                    "id": "keyword-only",
+                    "name": "关键词",
+                    "enabled": True,
+                    "chat_ids": [-1003],
+                    "trigger_mode": "keyword",
+                    "module_start_keywords": ["开始"],
+                    "action": "notice",
+                },
+                {
+                    "id": "paid-b",
+                    "name": "付款 B",
+                    "enabled": True,
+                    "chat_ids": [-1002, -1004],
+                    "trigger_mode": "both",
+                    "module_start_keywords": ["继续"],
+                    "action": "notice",
+                },
+            ]
+        }
+    )
+
+    assert cfg["transfer_test_chat_ids"] == [-1001, -1002, -1003, -1004]
+
+
+def test_transfer_test_chat_ids_preserve_explicit_empty_scope() -> None:
+    cfg = account_bot_service.normalize_transfer_notice_config(
+        {
+            "transfer_test_chat_ids": [],
+            "rules": [
+                {
+                    "id": "paid",
+                    "name": "付款",
+                    "enabled": True,
+                    "chat_ids": [-1001],
+                    "trigger_mode": "payment",
+                    "action": "notice",
+                }
+            ],
+        }
+    )
+
+    assert cfg["transfer_test_chat_ids"] == []
+
+
 def test_account_bot_transfer_notice_config_upgrades_legacy_default_template() -> None:
     cfg = account_bot_service.normalize_transfer_notice_config(
         {"transfer_notice_template": LEGACY_TRANSFER_NOTICE_TEMPLATE}
@@ -4167,7 +4224,7 @@ async def test_transfer_notice_without_matching_rule_records_skipped_route_span(
     record_span.assert_awaited_once()
     assert record_span.await_args.args[1:3] == ("route", account_bot_runtime.TRACE_STATUS_SKIPPED)
     assert record_span.await_args.kwargs["component"] == "transfer_notice"
-    assert record_span.await_args.kwargs["reason_code"] == "filter_not_matched"
+    assert record_span.await_args.kwargs["reason_code"] == "transfer_rule_not_matched"
 
 
 @pytest.mark.asyncio
@@ -4427,7 +4484,7 @@ async def test_transfer_notice_reply_chain_blocks_forged_same_name_receiver(monk
     )
 
     assert run_entry.await_count == 0
-    assert any(call.kwargs.get("reason_code") == "filter_not_matched" for call in record_span.await_args_list)
+    assert any(call.kwargs.get("reason_code") == "transfer_rule_not_matched" for call in record_span.await_args_list)
 
 
 @pytest.mark.asyncio
@@ -5930,7 +5987,12 @@ async def test_handle_interaction_update_reads_transfer_config_once_for_matching
         async def __aexit__(self, exc_type, exc, tb):
             return None
 
-    cfg = {"enabled": True, "rules": [], "interaction_bot_id": 999}
+    cfg = {
+        "enabled": True,
+        "rules": [],
+        "interaction_bot_id": 999,
+        "transfer_test_chat_ids": [-100777],
+    }
     get_config = AsyncMock(return_value=cfg)
     payment_confirm = AsyncMock(return_value=False)
     transfer_command = AsyncMock(return_value=True)
@@ -16663,3 +16725,145 @@ async def test_notify_account_records_trace_action(monkeypatch) -> None:
         failed_count=0,
         target_count=1,
     )
+
+
+@pytest.mark.asyncio
+async def test_transfer_command_outside_test_scope_does_not_load_or_send_with_test_bot(monkeypatch) -> None:
+    incoming = account_bot_runtime.Incoming(
+        account_id=1,
+        token="interaction-token",
+        update_id=1,
+        user_id=100,
+        chat_id=-1001,
+        message_id=10,
+        text="+88",
+        display_name="玩家",
+    )
+    get_transfer_token = AsyncMock(return_value="test-token")
+    send = AsyncMock()
+    monkeypatch.setattr(account_bot_service, "get_transfer_bot_token", get_transfer_token)
+    monkeypatch.setattr(account_bot_service, "send_message", send)
+
+    handled = await account_bot_runtime._try_handle_transfer_command(
+        object(),
+        incoming,
+        {
+            "enabled": True,
+            "transfer_test_chat_ids": [-1002],
+            "rules": [],
+        },
+    )
+
+    assert handled is False
+    get_transfer_token.assert_not_awaited()
+    send.assert_not_awaited()
+
+
+def test_interaction_routing_uses_test_scope_independently_from_rule_scope() -> None:
+    cfg = account_bot_service.normalize_transfer_notice_config(
+        {
+            "enabled": True,
+            "interaction_bot_id": 999,
+            "transfer_test_chat_ids": [-1002],
+            "rules": [
+                {
+                    "id": "paid",
+                    "name": "付款",
+                    "enabled": True,
+                    "chat_ids": [-1001],
+                    "trigger_mode": "payment",
+                    "action": "notice",
+                }
+            ],
+        }
+    )
+    index = account_bot_runtime._build_interaction_routing_index(
+        cfg,
+        subscriptions=[],
+        active_session_chat_ids=set(),
+    )
+    rule_chat = account_bot_runtime.Incoming(
+        account_id=1,
+        token="interaction-token",
+        update_id=1,
+        user_id=100,
+        chat_id=-1001,
+        message_id=10,
+        text="+88",
+    )
+    test_chat = account_bot_runtime.Incoming(
+        account_id=1,
+        token="interaction-token",
+        update_id=2,
+        user_id=100,
+        chat_id=-1002,
+        message_id=11,
+        text="+88",
+    )
+
+    rule_routes = account_bot_runtime._classify_interaction_routes(rule_chat, index, event_bus_enabled=True)
+    test_routes = account_bot_runtime._classify_interaction_routes(test_chat, index, event_bus_enabled=True)
+
+    assert account_bot_runtime._ROUTE_TRANSFER_COMMAND not in rule_routes
+    assert account_bot_runtime._ROUTE_TRANSFER_COMMAND in test_routes
+
+
+@pytest.mark.asyncio
+async def test_known_missing_bot_chat_short_circuits_bot_api_request(monkeypatch) -> None:
+    token = "999999:missing-chat-cache-test"
+    chat_id = -1009001
+    account_bot_service._remember_bot_chat_membership(token, chat_id, "not_joined")
+    get_client = AsyncMock()
+    monkeypatch.setattr(account_bot_service, "get_bot_api_client", get_client)
+
+    with pytest.raises(account_bot_service.BotChatUnavailableError, match="跳过重复"):
+        await account_bot_service.call_bot_api(
+            token,
+            "sendMessage",
+            {"chat_id": chat_id, "text": "不会发送"},
+        )
+
+    get_client.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_direct_interaction_send_stops_when_bot_is_known_missing(monkeypatch) -> None:
+    token = "999999:direct-send-missing-chat"
+    chat_id = -1009003
+    account_bot_service._remember_bot_chat_membership(token, chat_id, "not_joined")
+    record_action = AsyncMock()
+    send = AsyncMock()
+    monkeypatch.setattr(account_bot_runtime, "record_action", record_action)
+    monkeypatch.setattr(account_bot_service, "send_message", send)
+    incoming = account_bot_runtime.Incoming(
+        account_id=1,
+        token=token,
+        update_id=1,
+        user_id=100,
+        chat_id=chat_id,
+        message_id=10,
+        text="开始",
+    )
+
+    with pytest.raises(account_bot_service.BotChatUnavailableError, match="未加入目标会话"):
+        await account_bot_runtime._send(incoming, "不会发送")
+
+    send.assert_not_awaited()
+    assert record_action.await_args.kwargs["error_code"] == "interaction_bot_not_in_chat"
+
+
+@pytest.mark.asyncio
+async def test_bot_chat_membership_inspection_marks_left_bot_as_not_joined(monkeypatch) -> None:
+    token = "999999:membership-inspection-test"
+    call_bot_api = AsyncMock(return_value={"status": "left"})
+    monkeypatch.setattr(account_bot_service, "call_bot_api", call_bot_api)
+
+    statuses = await account_bot_service.inspect_bot_chat_memberships(
+        token,
+        999999,
+        [-1009002],
+        force=True,
+    )
+
+    assert statuses == [{"chat_id": -1009002, "status": "not_joined", "detail": "left"}]
+    assert account_bot_service.bot_chat_is_known_unavailable(token, -1009002) is True

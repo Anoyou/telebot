@@ -40,6 +40,7 @@ NORMAL_NO_RESPONSE_REASON_CODES = {
     "scope_not_matched",
     "source_not_subscribed",
     "subscription_not_matched",
+    "transfer_rule_not_matched",
     "usage_limited",
     "usage_pending",
     "userbot_command_message",
@@ -78,6 +79,7 @@ REASON_LABELS: dict[str, str] = {
     "inline_query_answer_failed": "Inline 回答失败",
     "inline_query_id_missing": "Inline Query ID 缺失",
     "interaction_rule_owned": "交互规则归属账号不匹配",
+    "interaction_bot_not_in_chat": "交互 Bot 未加入目标会话",
     "manifest_invalid": "Manifest 不合法",
     "matched": "已命中",
     "media_payload_empty": "媒体内容为空",
@@ -105,6 +107,7 @@ REASON_LABELS: dict[str, str] = {
     "target_message_id_missing": "目标消息 ID 缺失",
     "telegram_api_error": "Telegram API 错误",
     "trace_write_failed": "Trace 写入降级",
+    "transfer_rule_not_matched": "转账规则未匹配",
     "unsupported_send_via": "发送通道不支持",
     "usage_limited": "用户次数或冷却限制",
     "usage_pending": "用户玩法处理中",
@@ -182,6 +185,12 @@ def build_message_funel(
     )
     if normal_skip_span is not None and not plugin_spans and not actions:
         reason_code = _text(_get(normal_skip_span, "reason_code")) or "subscription_not_matched"
+        if reason_code == "transfer_rule_not_matched":
+            reason_text = "转账通知已识别，但没有金额、收款人或群范围匹配的启用规则。"
+            next_step = "检查启用规则的监听群、金额条件和收款人条件；主动转出或派奖通知通常应保持跳过。"
+        else:
+            reason_text = f"这不是故障：没有插件关心这条消息，系统正常跳过。原因：{reason_display(reason_code)}"
+            next_step = "如果本来应该响应，检查关键词、事件类型、来源通道、会话范围和插件启用状态。"
         return MessageFunel(
             received="pass",
             routed="skip",
@@ -190,8 +199,8 @@ def build_message_funel(
             verdict="no_response_normal",
             stuck_at=None,
             reason_code=reason_code,
-            reason_text=f"这不是故障：没有插件关心这条消息，系统正常跳过。原因：{reason_display(reason_code)}",
-            next_step="如果本来应该响应，检查关键词、事件类型、来源通道、会话范围和插件启用状态。",
+            reason_text=reason_text,
+            next_step=next_step,
         )
 
     if _is_failed_status(trace_status):

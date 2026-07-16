@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import re
+import time
 from hmac import compare_digest
 from html import escape, unescape
 from html.parser import HTMLParser
@@ -73,6 +75,10 @@ _RICH_MESSAGE_MEDIA_BLOCK_TYPES = frozenset(
     {"animation", "audio", "photo", "video", "voice_note"}
 )
 TRANSFER_NOTICE_SETTING_PREFIX = "account_bot_transfer_notice:"
+BOT_CHAT_MEMBERSHIP_CACHE_TTL_SECONDS = 300.0
+BOT_CHAT_MEMBERSHIP_CACHE_MAX_ITEMS = 4096
+BOT_CHAT_MEMBERSHIP_INSPECTION_MAX_ITEMS = 50
+_BOT_CHAT_MEMBERSHIP_CACHE: dict[tuple[str, int], tuple[float, dict[str, Any]]] = {}
 VALID_TRIGGER_MODES = {"payment", "keyword", "both"}
 VALID_AMOUNT_MATCH_MODES = {"eq", "gte"}
 VALID_CONCURRENCY = {"chat", "user", "none"}
@@ -90,6 +96,151 @@ FALLBACK_CHAT_SESSION_MODULE_ENTRIES = {
     ("math10", "start_math10"),
     ("guess_number", "start_game"),
 }
+
+
+class BotChatUnavailableError(RuntimeError):
+    """Bot 已知无法访问目标会话，避免在缓存有效期内重复请求 Telegram。"""
+
+
+def _bot_token_fingerprint(token: str) -> str:
+    return hashlib.sha256(str(token).encode("utf-8")).hexdigest()
+
+
+def _bot_chat_membership_cache_key(token: str, chat_id: int) -> tuple[str, int]:
+    return _bot_token_fingerprint(token), int(chat_id)
+
+
+def _cached_bot_chat_membership(token: str, chat_id: int) -> dict[str, Any] | None:
+    key = _bot_chat_membership_cache_key(token, chat_id)
+    cached = _BOT_CHAT_MEMBERSHIP_CACHE.get(key)
+    if cached is None:
+        return None
+    cached_at, value = cached
+    if time.monotonic() - cached_at > BOT_CHAT_MEMBERSHIP_CACHE_TTL_SECONDS:
+        _BOT_CHAT_MEMBERSHIP_CACHE.pop(key, None)
+        return None
+    return dict(value)
+
+
+def _remember_bot_chat_membership(
+    token: str,
+    chat_id: int,
+    status: str,
+    *,
+    detail: str | None = None,
+) -> dict[str, Any]:
+    if len(_BOT_CHAT_MEMBERSHIP_CACHE) >= BOT_CHAT_MEMBERSHIP_CACHE_MAX_ITEMS:
+        cutoff = time.monotonic() - BOT_CHAT_MEMBERSHIP_CACHE_TTL_SECONDS
+        expired_keys = [key for key, (cached_at, _value) in _BOT_CHAT_MEMBERSHIP_CACHE.items() if cached_at < cutoff]
+        for key in expired_keys:
+            _BOT_CHAT_MEMBERSHIP_CACHE.pop(key, None)
+        if len(_BOT_CHAT_MEMBERSHIP_CACHE) >= BOT_CHAT_MEMBERSHIP_CACHE_MAX_ITEMS:
+            oldest_key = min(_BOT_CHAT_MEMBERSHIP_CACHE, key=lambda key: _BOT_CHAT_MEMBERSHIP_CACHE[key][0])
+            _BOT_CHAT_MEMBERSHIP_CACHE.pop(oldest_key, None)
+    normalized_status = status if status in {"joined", "not_joined", "unknown"} else "unknown"
+    value = {
+        "chat_id": int(chat_id),
+        "status": normalized_status,
+        "detail": str(detail or "").strip() or None,
+    }
+    _BOT_CHAT_MEMBERSHIP_CACHE[_bot_chat_membership_cache_key(token, chat_id)] = (
+        time.monotonic(),
+        value,
+    )
+    return dict(value)
+
+
+def bot_chat_is_known_unavailable(token: str, chat_id: int) -> bool:
+    cached = _cached_bot_chat_membership(token, chat_id)
+    return bool(cached and cached.get("status") == "not_joined")
+
+
+def bot_chat_error_code(exc: BaseException | str) -> str:
+    if isinstance(exc, BotChatUnavailableError) or _looks_like_bot_chat_unavailable_error(exc):
+        return "interaction_bot_not_in_chat"
+    return "telegram_api_error"
+
+
+def _looks_like_bot_chat_unavailable_error(value: Any) -> bool:
+    text = str(value or "").strip().casefold()
+    return any(
+        marker in text
+        for marker in (
+            "bot is not a member",
+            "bot was kicked",
+            "chat not found",
+            "kicked from the supergroup",
+        )
+    )
+
+
+def _bot_api_method_delivers_to_chat(method: str) -> bool:
+    normalized = str(method or "").strip()
+    return normalized.startswith(("send", "edit")) or normalized in {
+        "copyMessage",
+        "forwardMessage",
+        "deleteMessage",
+        "deleteMessages",
+        "pinChatMessage",
+        "unpinChatMessage",
+        "unpinAllChatMessages",
+    }
+
+
+async def inspect_bot_chat_memberships(
+    token: str,
+    bot_id: int,
+    chat_ids: list[int],
+    *,
+    force: bool = False,
+) -> list[dict[str, Any]]:
+    semaphore = asyncio.Semaphore(8)
+
+    async def inspect_one(chat_id: int) -> dict[str, Any]:
+        if not force:
+            cached = _cached_bot_chat_membership(token, chat_id)
+            if cached is not None:
+                return cached
+        try:
+            async with semaphore:
+                member = await call_bot_api(
+                    token,
+                    "getChatMember",
+                    {"chat_id": int(chat_id), "user_id": int(bot_id)},
+                    timeout=httpx.Timeout(10.0),
+                )
+        except Exception as exc:  # noqa: BLE001
+            detail = sanitize_bot_error(exc, token=token)
+            status = "not_joined" if _looks_like_bot_chat_unavailable_error(detail) else "unknown"
+            return _remember_bot_chat_membership(token, chat_id, status, detail=detail)
+        member_status = str(member.get("status") or "").strip()
+        joined = member_status in {"creator", "administrator", "member"} or (
+            member_status == "restricted" and bool(member.get("is_member"))
+        )
+        if joined:
+            return _remember_bot_chat_membership(token, chat_id, "joined")
+        if member_status in {"left", "kicked"} or (
+            member_status == "restricted" and not bool(member.get("is_member"))
+        ):
+            return _remember_bot_chat_membership(token, chat_id, "not_joined", detail=member_status)
+        return _remember_bot_chat_membership(
+            token,
+            chat_id,
+            "unknown",
+            detail=member_status or "Telegram 未返回成员状态",
+        )
+
+    normalized_chat_ids: list[int] = []
+    for raw_chat_id in chat_ids:
+        try:
+            chat_id = int(raw_chat_id)
+        except (TypeError, ValueError):
+            continue
+        if chat_id not in normalized_chat_ids:
+            normalized_chat_ids.append(chat_id)
+        if len(normalized_chat_ids) >= BOT_CHAT_MEMBERSHIP_INSPECTION_MAX_ITEMS:
+            break
+    return list(await asyncio.gather(*(inspect_one(chat_id) for chat_id in normalized_chat_ids)))
 FALLBACK_NO_PRIZE_MODULE_ENTRIES = {
     ("pt_promote", "promote_torrent"),
 }
@@ -221,6 +372,7 @@ def default_transfer_notice_config() -> dict[str, Any]:
         "enabled": False,
         "chat_id": None,
         "chat_ids": [],
+        "transfer_test_chat_ids": [],
         "interaction_bot_token_enc": None,
         "has_interaction_bot_token": False,
         "interaction_bot_username": None,
@@ -285,6 +437,7 @@ def normalize_debit_notice_template(value: Any) -> str:
 
 def normalize_transfer_notice_config(raw: Any) -> dict[str, Any]:
     base = default_transfer_notice_config()
+    has_explicit_transfer_test_chat_ids = isinstance(raw, dict) and "transfer_test_chat_ids" in raw
     if isinstance(raw, dict):
         for key in base:
             if key in raw:
@@ -328,6 +481,17 @@ def normalize_transfer_notice_config(raw: Any) -> dict[str, Any]:
         chat_ids.insert(0, int(base["chat_id"]))
     base["chat_ids"] = chat_ids
     base["chat_id"] = chat_ids[0] if chat_ids else None
+    transfer_test_chat_ids: list[int] = []
+    raw_transfer_test_chat_ids = base.get("transfer_test_chat_ids")
+    if isinstance(raw_transfer_test_chat_ids, list):
+        for raw_id in raw_transfer_test_chat_ids:
+            try:
+                chat_id = int(raw_id)
+            except (TypeError, ValueError):
+                continue
+            if chat_id not in transfer_test_chat_ids:
+                transfer_test_chat_ids.append(chat_id)
+    base["transfer_test_chat_ids"] = transfer_test_chat_ids
     if base.get("math_prize") is None or int(base["math_prize"]) <= 0:
         base["math_prize"] = 123
     action = str(base.get("action") or "notice").strip()
@@ -479,6 +643,22 @@ def normalize_transfer_notice_config(raw: Any) -> dict[str, Any]:
     base["concurrency"] = first_enabled.get("concurrency") or "chat"
     base["response_template"] = first_enabled.get("response_template") or base["response_template"]
     base["rules"] = rules
+    if not has_explicit_transfer_test_chat_ids:
+        inferred_transfer_test_chat_ids: list[int] = []
+        for rule in rules:
+            if not rule.get("enabled", True):
+                continue
+            raw_rule_chat_ids = rule.get("chat_ids")
+            if not isinstance(raw_rule_chat_ids, list):
+                continue
+            for raw_id in raw_rule_chat_ids:
+                try:
+                    chat_id = int(raw_id)
+                except (TypeError, ValueError):
+                    continue
+                if chat_id not in inferred_transfer_test_chat_ids:
+                    inferred_transfer_test_chat_ids.append(chat_id)
+        base["transfer_test_chat_ids"] = inferred_transfer_test_chat_ids
     return base
 
 
@@ -1171,7 +1351,56 @@ async def get_transfer_notice_config(db: AsyncSession, aid: int) -> dict[str, An
 
 
 async def get_interaction_bot_config(db: AsyncSession, aid: int) -> dict[str, Any]:
-    return await get_transfer_notice_config(db, aid)
+    data = await get_transfer_notice_config(db, aid)
+    row = await db.get(SystemSetting, transfer_notice_setting_key(aid))
+    stored = normalize_transfer_notice_config(row.value if row is not None else None)
+    interaction_chat_ids: list[int] = []
+    for raw_chat_id in stored.get("chat_ids") or []:
+        try:
+            chat_id = int(raw_chat_id)
+        except (TypeError, ValueError):
+            continue
+        if chat_id not in interaction_chat_ids:
+            interaction_chat_ids.append(chat_id)
+    for rule in stored.get("rules") or []:
+        if not isinstance(rule, dict) or not rule.get("enabled", True):
+            continue
+        for raw_chat_id in rule.get("chat_ids") or []:
+            try:
+                chat_id = int(raw_chat_id)
+            except (TypeError, ValueError):
+                continue
+            if chat_id not in interaction_chat_ids:
+                interaction_chat_ids.append(chat_id)
+
+    async def inspect(
+        token_enc: Any,
+        bot_id: Any,
+        chat_ids: list[int],
+    ) -> list[dict[str, Any]]:
+        if not token_enc or bot_id in (None, "") or not chat_ids:
+            return []
+        try:
+            token = decrypt_str(str(token_enc))
+        except ValueError:
+            return []
+        return await inspect_bot_chat_memberships(token, int(bot_id), chat_ids)
+
+    interaction_memberships, transfer_memberships = await asyncio.gather(
+        inspect(
+            stored.get("interaction_bot_token_enc"),
+            stored.get("interaction_bot_id"),
+            interaction_chat_ids,
+        ),
+        inspect(
+            stored.get("transfer_bot_token_enc"),
+            stored.get("transfer_bot_id"),
+            list(stored.get("transfer_test_chat_ids") or []),
+        ),
+    )
+    data["interaction_chat_memberships"] = interaction_memberships
+    data["transfer_test_chat_memberships"] = transfer_memberships
+    return data
 
 
 async def update_transfer_notice_config(
@@ -1233,10 +1462,12 @@ async def update_transfer_notice_config(
         "interaction_bot_id",
         "interaction_last_update_id",
         "interaction_last_error",
+        "interaction_chat_memberships",
         "transfer_bot_id",
         "transfer_bot_token",
         "clear_transfer_bot_token",
         "has_transfer_bot_token",
+        "transfer_test_chat_memberships",
     ):
         incoming.pop(transient_key, None)
     data = normalize_transfer_notice_config({**current, **incoming})
@@ -1492,14 +1723,28 @@ async def call_bot_api(
 ) -> dict[str, Any]:
     """调用 Bot API；只在这里拼接 token URL。"""
 
+    request_payload = payload or {}
+    raw_chat_id = request_payload.get("chat_id")
+    chat_id: int | None = None
+    try:
+        chat_id = int(raw_chat_id) if raw_chat_id not in (None, "") else None
+    except (TypeError, ValueError):
+        chat_id = None
+    delivers_to_chat = _bot_api_method_delivers_to_chat(method)
+    if delivers_to_chat and chat_id is not None and bot_chat_is_known_unavailable(token, chat_id):
+        raise BotChatUnavailableError("Bot 未加入目标会话，已跳过重复 Telegram 请求")
     url = f"{BOT_API_BASE}/bot{token}/{method}"
     client = await get_bot_api_client()
-    resp = await client.post(url, json=payload or {}, timeout=timeout or BOT_API_TIMEOUT)
+    resp = await client.post(url, json=request_payload, timeout=timeout or BOT_API_TIMEOUT)
     data = resp.json() if resp.content else {}
     if resp.status_code >= 400 or not data.get("ok", False):
         desc = data.get("description") or f"HTTP {resp.status_code}"
+        if chat_id is not None and _looks_like_bot_chat_unavailable_error(desc):
+            _remember_bot_chat_membership(token, chat_id, "not_joined", detail=str(desc))
         raise RuntimeError(desc)
     result = data.get("result")
+    if chat_id is not None and delivers_to_chat:
+        _remember_bot_chat_membership(token, chat_id, "joined")
     return result if isinstance(result, dict) else {"result": result}
 
 

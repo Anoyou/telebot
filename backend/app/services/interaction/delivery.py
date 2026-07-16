@@ -490,6 +490,20 @@ class InteractionDeliveryExecutor:
                 **self.log_context(self.incoming),
             )
             return False, {"error": "bot token unavailable", "error_code": "bot_token_missing"}
+        if send_via == "interaction_bot" and account_bot_service.bot_chat_is_known_unavailable(token, target_chat_id):
+            await self.write_log(
+                self.incoming,
+                "warn",
+                "interaction action skipped: interaction bot is not in target chat",
+                send_via=send_via,
+                chat_id=target_chat_id,
+                reason_code="interaction_bot_not_in_chat",
+                **self.log_context(self.incoming),
+            )
+            return False, {
+                "error": "交互 Bot 未加入目标会话，已跳过重复 Telegram 请求",
+                "error_code": "interaction_bot_not_in_chat",
+            }
         if send_via == "interaction_bot" and edit_message_id is not None:
             edit_action = {
                 "type": "edit_message",
@@ -559,7 +573,7 @@ class InteractionDeliveryExecutor:
                 error=str(exc),
                 **self.log_context(self.incoming),
             )
-            return False, {"error": str(exc), "error_code": "telegram_api_error"}
+            return False, {"error": str(exc), "error_code": account_bot_service.bot_chat_error_code(exc)}
         if send_via == "interaction_bot" and edit_message_id is not None:
             await self.delete_message(
                 edit_message_id,

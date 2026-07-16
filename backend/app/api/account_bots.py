@@ -263,7 +263,7 @@ async def update_account_bot_interaction(
 ) -> AccountBotInteractionConfig:
     """保存交互 Bot / 转账联动测试配置。"""
 
-    payload_data = payload.model_dump()
+    payload_data = payload.model_dump(exclude_unset=True)
     await _ensure_keyword_rules_have_interaction_bot_token(db, aid, payload_data)
     data = await interaction_bot_service.update_interaction_bot_config(
         db,
@@ -356,7 +356,7 @@ async def save_account_bot_interaction_composite(
     await account_bot_service.ensure_account(db, aid)
     await feature_service.seed_builtin_features(db)
 
-    interaction_payload = payload.interaction.model_dump()
+    interaction_payload = payload.interaction.model_dump(exclude_unset=True)
     await _ensure_keyword_rules_have_interaction_bot_token(db, aid, interaction_payload)
 
     prepared_plugins: list[tuple[str, dict[str, Any], bool]] = []

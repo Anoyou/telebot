@@ -205,6 +205,7 @@ const DEFAULT_INTERACTION_BOT: AccountBotInteractionConfig = {
   enabled: false,
   chat_id: null,
   chat_ids: [],
+  transfer_test_chat_ids: [],
   interaction_bot_token: null,
   clear_interaction_bot_token: false,
   has_interaction_bot_token: false,
@@ -214,6 +215,7 @@ const DEFAULT_INTERACTION_BOT: AccountBotInteractionConfig = {
   interaction_runtime_status: "stopped",
   interaction_last_update_id: null,
   interaction_last_error: null,
+  interaction_chat_memberships: [],
   interaction_debug: {
     payload: {},
     actions: [],
@@ -226,6 +228,7 @@ const DEFAULT_INTERACTION_BOT: AccountBotInteractionConfig = {
   transfer_bot_token: null,
   clear_transfer_bot_token: false,
   has_transfer_bot_token: false,
+  transfer_test_chat_memberships: [],
   trigger_mode: "payment",
   trigger_text: "转账成功",
   trigger_texts: ["转账成功"],
@@ -469,6 +472,49 @@ function AllowedPeerMultiSelect({
           账号详情页的允许会话
         </Link>{" "}
         添加后再回来选择。
+      </div>
+    </div>
+  );
+}
+
+function BotMembershipList({
+  title,
+  memberships,
+  peers,
+}: {
+  title: string;
+  memberships: NonNullable<AccountBotInteractionConfig["interaction_chat_memberships"]>;
+  peers: IgnoredPeer[];
+}) {
+  if (memberships.length === 0) return null;
+  const peersById = new Map(peers.map((peer) => [Number(peer.peer_id), peer]));
+  return (
+    <div className="nested-surface-item space-y-2 border bg-background px-3 py-2">
+      <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+        <span className="font-medium">{title}</span>
+        <span className="text-muted-foreground">缓存 5 分钟</span>
+      </div>
+      <div className="flex flex-wrap gap-1.5">
+        {memberships.map((membership) => {
+          const peer = peersById.get(membership.chat_id);
+          const label = peer ? allowedPeerDisplayName(peer) : String(membership.chat_id);
+          const statusLabel = membership.status === "joined"
+            ? "已加入"
+            : membership.status === "not_joined"
+              ? "未加入"
+              : "无法确认";
+          return (
+            <Badge
+              key={membership.chat_id}
+              variant={membership.status === "joined" ? "success" : membership.status === "not_joined" ? "destructive" : "outline"}
+              className="max-w-full gap-1.5"
+              title={membership.detail || `${label} · ${membership.chat_id}`}
+            >
+              <span className="max-w-[180px] truncate">{label}</span>
+              <span>{statusLabel}</span>
+            </Badge>
+          );
+        })}
       </div>
     </div>
   );
@@ -1918,6 +1964,7 @@ export function BotTab({
   const [clearInteractionBotToken, setClearInteractionBotToken] = useState(false);
   const [trustedBotIdsText, setTrustedBotIdsText] = useState("");
   const [transferBotToken, setTransferBotToken] = useState("");
+  const [transferTestChatIdsText, setTransferTestChatIdsText] = useState("");
   const [clearTransferBotToken, setClearTransferBotToken] = useState(false);
   const [transferNoticeTemplate, setTransferNoticeTemplate] = useState(DEFAULT_TRANSFER_NOTICE_TEMPLATE);
   const [debitNoticeTemplate, setDebitNoticeTemplate] = useState(DEFAULT_DEBIT_NOTICE_TEMPLATE);
@@ -1962,6 +2009,7 @@ export function BotTab({
         : [data.trusted_bot_id];
     setTrustedBotIdsText(trustedBotIds.map((id) => String(id)).join("\n"));
     setTransferBotToken("");
+    setTransferTestChatIdsText((data.transfer_test_chat_ids ?? []).map((id) => String(id)).join("\n"));
     setClearTransferBotToken(false);
     setTransferNoticeTemplate(data.transfer_notice_template || DEFAULT_TRANSFER_NOTICE_TEMPLATE);
     setDebitNoticeTemplate(data.debit_notice_template || DEFAULT_DEBIT_NOTICE_TEMPLATE);
@@ -2139,6 +2187,7 @@ export function BotTab({
     const existingInteractionBotToken = Boolean(interactionQ.data?.has_interaction_bot_token) && !clearInteractionBotToken;
     const nextInteractionBotToken = interactionBotToken.trim();
     const nextTransferBotToken = transferBotToken.trim();
+    const transferTestChatIds = parseIntLines(transferTestChatIdsText, "模拟测试群 Chat ID");
     const trustedBotIds = parseOptionalUserIds(trustedBotIdsText, "转账结果通知 Bot ID");
     const rules = interactionRules.map((rule, index) => ruleFromForm(rule, index, interactionEntries));
     const chatIds = uniqueIntValues(rules.flatMap((rule) => rule.chat_ids ?? []));
@@ -2152,10 +2201,14 @@ export function BotTab({
     if (transferEnabled && chatIds.length <= 0) {
       throw new Error("启用转账联动时至少需要在一条规则里填写监听群 Chat ID");
     }
+    if (transferTestChatIds.length > 20) {
+      throw new Error("模拟测试群最多选择 20 个");
+    }
     return {
       enabled: transferEnabled,
       chat_id: chatIds[0] ?? null,
       chat_ids: chatIds,
+      transfer_test_chat_ids: transferTestChatIds,
       interaction_bot_token: nextInteractionBotToken || null,
       clear_interaction_bot_token: clearInteractionBotToken,
       trusted_bot_id: trustedBotIds[0] ?? null,
@@ -2824,6 +2877,11 @@ export function BotTab({
                     />
                   </div>
                 </div>
+                <BotMembershipList
+                  title="监听群成员状态"
+                  memberships={interactionQ.data?.interaction_chat_memberships ?? []}
+                  peers={allowedPeersQ.data ?? []}
+                />
                 <div className="flex flex-col gap-2 sm:flex-row sm:justify-end">
                   <Button
                     type="button"
@@ -2899,6 +2957,27 @@ export function BotTab({
                         : "没有测试模拟 Token 时，系统只监听群里真实出现的转账结果通知。"}
                     </div>
                   </div>
+                  <div className="space-y-1.5">
+                    <Label>模拟测试群</Label>
+                    <AllowedPeerMultiSelect
+                      aid={aid}
+                      peers={allowedPeersQ.data ?? []}
+                      selectedText={transferTestChatIdsText}
+                      loading={allowedPeersQ.isLoading}
+                      onChange={(chatIds) => {
+                        markInteractionDirty();
+                        setTransferTestChatIdsText(chatIds);
+                      }}
+                    />
+                    <div className="text-xs leading-5 text-muted-foreground">
+                      只有这些群会响应 +金额、-金额模拟命令。旧配置首次读取时会沿用已有规则群，可在这里继续收窄。
+                    </div>
+                  </div>
+                  <BotMembershipList
+                    title="测试 Bot 群成员状态"
+                    memberships={interactionQ.data?.transfer_test_chat_memberships ?? []}
+                    peers={allowedPeersQ.data ?? []}
+                  />
                 </div>
                 <div className="flex flex-col gap-2 sm:flex-row sm:justify-end">
                   <Button

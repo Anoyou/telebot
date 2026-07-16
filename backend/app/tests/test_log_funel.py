@@ -94,6 +94,26 @@ def test_message_funel_no_response_normal_for_subscription_skip() -> None:
     assert "这不是故障" in funel.reason_text
 
 
+def test_message_funel_uses_transfer_rule_skip_copy() -> None:
+    funel = build_message_funel(
+        _trace(status="skipped"),
+        [
+            _span(
+                phase="route",
+                component="transfer_notice",
+                status="skipped",
+                reason_code="transfer_rule_not_matched",
+            ),
+        ],
+        [],
+    )
+
+    assert funel.verdict == "no_response_normal"
+    assert funel.reason_code == "transfer_rule_not_matched"
+    assert "转账通知已识别" in funel.reason_text
+    assert "没有插件关心" not in funel.reason_text
+
+
 def test_message_funel_stuck_after_plugin_invoke_without_completion() -> None:
     funel = build_message_funel(
         _trace(status="running", ended_at=None),

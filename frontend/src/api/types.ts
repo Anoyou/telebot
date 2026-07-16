@@ -217,6 +217,7 @@ export interface AccountBotInteractionConfig {
   enabled: boolean;
   chat_id?: number | null;
   chat_ids?: number[];
+  transfer_test_chat_ids?: number[];
   interaction_bot_token?: string | null;
   clear_interaction_bot_token?: boolean;
   has_interaction_bot_token?: boolean;
@@ -226,6 +227,7 @@ export interface AccountBotInteractionConfig {
   interaction_runtime_status?: "running" | "stopped";
   interaction_last_update_id?: number | null;
   interaction_last_error?: string | null;
+  interaction_chat_memberships?: AccountBotChatMembership[];
   interaction_debug?: AccountBotInteractionDebugSnapshot;
   trusted_bot_id?: number | null;
   trusted_bot_ids?: number[];
@@ -233,6 +235,7 @@ export interface AccountBotInteractionConfig {
   transfer_bot_token?: string | null;
   clear_transfer_bot_token?: boolean;
   has_transfer_bot_token?: boolean;
+  transfer_test_chat_memberships?: AccountBotChatMembership[];
   trigger_mode?: "payment" | "keyword" | "both";
   trigger_text: string;
   trigger_texts?: string[];
@@ -268,6 +271,12 @@ export interface AccountBotInteractionConfig {
   rules?: AccountBotInteractionRule[];
 }
 
+export interface AccountBotChatMembership {
+  chat_id: number;
+  status: "joined" | "not_joined" | "unknown";
+  detail?: string | null;
+}
+
 export interface AccountBotInteractionDebugSnapshot {
   ts?: number | null;
   stage?: string | null;
@@ -297,6 +306,7 @@ export type AccountBotInteractionConfigUpdate = Pick<
   | "enabled"
   | "chat_id"
   | "chat_ids"
+  | "transfer_test_chat_ids"
   | "interaction_bot_token"
   | "clear_interaction_bot_token"
   | "trusted_bot_id"

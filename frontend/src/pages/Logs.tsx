@@ -649,7 +649,7 @@ function VerdictSegment({ value, onChange }: { value: VerdictFilter; onChange: (
   const items: { value: VerdictFilter; label: string }[] = [
     { value: "", label: "全部" },
     { value: "responded", label: "已响应" },
-    { value: "no_response_normal", label: "未响应" },
+    { value: "no_response_normal", label: "正常跳过" },
     { value: "stuck", label: "卡住" },
     { value: "failed", label: "失败" },
   ];
@@ -1798,7 +1798,7 @@ function verdictMeta(verdict: MessageVerdict) {
       panelClass: "border-success/20 bg-success/10",
     },
     no_response_normal: {
-      label: "未响应正常",
+      label: "正常跳过",
       badgeVariant: "secondary" as const,
       icon: Circle,
       panelClass: "border-border bg-muted/40",

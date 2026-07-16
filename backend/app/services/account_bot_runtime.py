@@ -536,6 +536,11 @@ def _build_interaction_routing_index(
     keyword_candidates: list[str] = []
     payment_trigger_candidates: list[str] = []
     module_chat_ids: set[int] = set()
+    all_rules = _interaction_rules(cfg, include_disabled=True)
+    has_global_rule = any(
+        not isinstance(rule.get("chat_ids"), list) or not rule.get("chat_ids")
+        for rule in all_rules
+    )
     has_global_module_rule = False
     for command in _interaction_query_commands(cfg):
         keyword_candidates.append(command)
@@ -545,7 +550,7 @@ def _build_interaction_routing_index(
         keyword_candidates.extend(_rule_keyword_list(rule, "status_commands"))
         keyword_candidates.extend(_rule_keyword_list(rule, "module_start_keywords"))
         payment_trigger_candidates.extend(_rule_triggers(rule))
-    for rule in _interaction_rules(cfg, include_disabled=True):
+    for rule in all_rules:
         if str(rule.get("action") or "") != "module":
             continue
         raw_chat_ids = rule.get("chat_ids")
@@ -593,10 +598,12 @@ def _build_interaction_routing_index(
         keyword_candidates=_unique_text_tuple(keyword_candidates),
         payment_trigger_candidates=_unique_text_tuple(payment_trigger_candidates),
         module_chat_ids=frozenset(module_chat_ids),
+        has_global_rule=has_global_rule,
         has_global_module_rule=has_global_module_rule,
         active_session_chat_ids=active_chats,
         active_sessions_unknown=active_session_chat_ids is None,
         allowed_chat_ids=frozenset(_interaction_allowed_chat_ids(cfg)),
+        transfer_test_chat_ids=frozenset(_transfer_test_chat_ids(cfg)),
         event_bus_unknown=event_bus_unknown,
         event_bus_message_exact_texts=_unique_text_tuple(event_bus_message_exact_texts),
         event_bus_message_contains=_unique_text_tuple(event_bus_message_contains),
@@ -722,10 +729,23 @@ def _classify_interaction_routes(
         return routes
     if _routing_index_text_is_userbot_command_candidate(incoming):
         routes.append(_ROUTE_USERBOT_COMMAND)
-    if incoming.chat_id is not None and incoming.user_id is not None and _parse_transfer_command(incoming.text) is not None:
-        routes.append(_ROUTE_TRANSFER_COMMAND)
+    scope_matches = (
+        incoming.chat_id is None
+        or incoming.callback_id is not None
+        or index.has_global_rule
+        or _routing_index_chat_matches(incoming.chat_id, index.allowed_chat_ids)
+        or _routing_index_chat_matches(incoming.chat_id, index.active_session_chat_ids)
+    )
     if (
         incoming.chat_id is not None
+        and incoming.user_id is not None
+        and _routing_index_chat_matches(incoming.chat_id, index.transfer_test_chat_ids)
+        and _parse_transfer_command(incoming.text) is not None
+    ):
+        routes.append(_ROUTE_TRANSFER_COMMAND)
+    if (
+        scope_matches
+        and incoming.chat_id is not None
         and incoming.user_id is not None
         and incoming.user_id in index.trusted_sender_ids
         and (
@@ -734,13 +754,13 @@ def _classify_interaction_routes(
         )
     ):
         routes.append(_ROUTE_PAYMENT_NOTICE)
-    if event_bus_enabled and _routing_index_message_matches_event_bus(incoming, index):
+    if scope_matches and event_bus_enabled and _routing_index_message_matches_event_bus(incoming, index):
         routes.append(_ROUTE_EVENT_BUS)
     event_type = _incoming_event_type(incoming)
     text = str(incoming.text or "").strip()
-    if event_type == "message" and _routing_index_message_matches_keywords(text, index.keyword_candidates):
+    if scope_matches and event_type == "message" and _routing_index_message_matches_keywords(text, index.keyword_candidates):
         routes.append(_ROUTE_KEYWORD)
-    if incoming.chat_id is not None and index.enabled:
+    if scope_matches and incoming.chat_id is not None and index.enabled:
         if incoming.callback_id:
             if index.has_global_module_rule or _routing_index_chat_matches(incoming.chat_id, index.module_chat_ids):
                 routes.append(_ROUTE_SESSION_MESSAGE)
@@ -848,10 +868,12 @@ class InteractionRoutingIndex:
     keyword_candidates: tuple[str, ...]
     payment_trigger_candidates: tuple[str, ...]
     module_chat_ids: frozenset[int]
+    has_global_rule: bool
     has_global_module_rule: bool
     active_session_chat_ids: frozenset[int]
     active_sessions_unknown: bool
     allowed_chat_ids: frozenset[int]
+    transfer_test_chat_ids: frozenset[int]
     event_bus_unknown: bool
     event_bus_message_exact_texts: tuple[str, ...]
     event_bus_message_contains: tuple[str, ...]
@@ -5008,13 +5030,22 @@ async def _select_transfer_command_receiver(
 def _transfer_command_chat_is_monitored(incoming: Incoming, cfg: dict[str, Any]) -> bool:
     if incoming.chat_id is None:
         return False
-    if _interaction_chat_matches(cfg, incoming.chat_id):
-        return True
-    for rule in _interaction_rules(cfg):
-        if not _rule_chat_matches(rule, incoming.chat_id or 0):
-            continue
-        return True
-    return False
+    return int(incoming.chat_id) in set(_transfer_test_chat_ids(cfg))
+
+
+def _transfer_test_chat_ids(cfg: dict[str, Any]) -> list[int]:
+    out: list[int] = []
+    if "transfer_test_chat_ids" not in cfg:
+        normalized = account_bot_service.normalize_transfer_notice_config(cfg)
+        return [int(chat_id) for chat_id in normalized.get("transfer_test_chat_ids") or []]
+    raw_chat_ids = cfg.get("transfer_test_chat_ids")
+    if not isinstance(raw_chat_ids, list):
+        return out
+    for raw_chat_id in raw_chat_ids:
+        chat_id = _int_or_none(raw_chat_id)
+        if chat_id is not None and chat_id not in out:
+            out.append(chat_id)
+    return out
 
 
 def _is_configured_bot_user_id(cfg: dict[str, Any], user_id: int | None) -> bool:
@@ -5742,7 +5773,7 @@ def _interaction_allowed_chat_ids(cfg: dict[str, Any]) -> list[int]:
             chat_id = _int_or_none(raw)
             if chat_id is not None and chat_id not in ids:
                 ids.append(chat_id)
-    for rule in _interaction_rules(cfg):
+    for rule in _interaction_rules(cfg, include_disabled=True):
         raw_rule_chat_ids = rule.get("chat_ids")
         if not isinstance(raw_rule_chat_ids, list):
             continue
@@ -7927,7 +7958,7 @@ async def _try_handle_transfer_notice(
             "route",
             TRACE_STATUS_SKIPPED,
             component="transfer_notice",
-            reason_code="filter_not_matched",
+            reason_code="transfer_rule_not_matched",
             message="转账通知已解析，但没有规则匹配。",
             parsed_receiver=parsed.get("receiver_name"),
             parsed_amount=parsed.get("amount"),
@@ -9302,6 +9333,18 @@ async def _send(
         "reply_to_message_id": reply_to_message_id,
         "text": text,
     }
+    if account_bot_service.bot_chat_is_known_unavailable(incoming.token, incoming.chat_id):
+        error = "交互 Bot 未加入目标会话，已跳过重复 Telegram 请求"
+        await record_action(
+            trace_log_context(incoming.trace_id),
+            action,
+            TRACE_STATUS_SKIPPED,
+            actual_send_via="interaction_bot",
+            error_code="interaction_bot_not_in_chat",
+            reason_code="interaction_bot_not_in_chat",
+            error=error,
+        )
+        raise account_bot_service.BotChatUnavailableError(error)
     if edit and incoming.message_id is not None:
         if rich_html:
             rich_edit_action = {
@@ -9473,12 +9516,13 @@ async def _send(
         )
         return result
     except Exception as exc:
+        error_code = account_bot_service.bot_chat_error_code(exc)
         await record_action(
             trace_log_context(incoming.trace_id),
             send_action,
             TRACE_STATUS_FAILED,
             actual_send_via="interaction_bot",
-            error_code="telegram_api_error",
+            error_code=error_code,
             error=f"{type(exc).__name__}: {exc}",
         )
         await _emit_account_bot_action_tap(
@@ -9486,7 +9530,7 @@ async def _send(
             send_action,
             ACTION_EVENT_STATUS_FAILED,
             channel="interaction_bot",
-            error_code="telegram_api_error",
+            error_code=error_code,
             error=f"{type(exc).__name__}: {exc}",
         )
         raise

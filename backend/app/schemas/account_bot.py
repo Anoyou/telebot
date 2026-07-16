@@ -110,6 +110,12 @@ class AccountBotInteractionDebugSnapshot(BaseModel):
     error: str | None = None
 
 
+class AccountBotChatMembership(BaseModel):
+    chat_id: int
+    status: Literal["joined", "not_joined", "unknown"] = "unknown"
+    detail: str | None = None
+
+
 class AccountBotRemotePluginPolicy(BaseModel):
     enabled: bool = False
     install: bool = False
@@ -293,6 +299,7 @@ class AccountBotInteractionConfig(BaseModel):
     enabled: bool = False
     chat_id: int | None = None
     chat_ids: list[int] = Field(default_factory=list, max_length=20)
+    transfer_test_chat_ids: list[int] = Field(default_factory=list, max_length=20)
     interaction_bot_token: str | None = Field(default=None, min_length=10, max_length=256)
     clear_interaction_bot_token: bool = False
     has_interaction_bot_token: bool = False
@@ -302,6 +309,7 @@ class AccountBotInteractionConfig(BaseModel):
     interaction_runtime_status: Literal["running", "stopped"] = "stopped"
     interaction_last_update_id: int | None = None
     interaction_last_error: str | None = None
+    interaction_chat_memberships: list[AccountBotChatMembership] = Field(default_factory=list, max_length=50)
     polling_dlq_count: int = 0
     interaction_debug: AccountBotInteractionDebugSnapshot = Field(default_factory=AccountBotInteractionDebugSnapshot)
     trusted_bot_id: int | None = None
@@ -311,6 +319,7 @@ class AccountBotInteractionConfig(BaseModel):
     transfer_bot_token: str | None = Field(default=None, min_length=10, max_length=256)
     clear_transfer_bot_token: bool = False
     has_transfer_bot_token: bool = False
+    transfer_test_chat_memberships: list[AccountBotChatMembership] = Field(default_factory=list, max_length=50)
     trigger_mode: InteractionTriggerMode = "payment"
     trigger_text: str = Field(default="转账成功", max_length=64)
     trigger_texts: list[str] = Field(default_factory=lambda: ["转账成功"], max_length=20)
@@ -392,7 +401,7 @@ class AccountBotInteractionConfig(BaseModel):
             raise ValueError("不能为空")
         return value
 
-    @field_validator("chat_ids")
+    @field_validator("chat_ids", "transfer_test_chat_ids")
     @classmethod
     def _normalize_chat_ids(cls, v: list[int]) -> list[int]:
         return _normalize_chat_id_list(v)
