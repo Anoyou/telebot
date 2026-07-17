@@ -18,13 +18,24 @@ from ..schemas.system_agent import (
     SystemAgentConfigPatch,
     SystemAgentMessageCreate,
     SystemAgentMessageOut,
+    SystemAgentSecretInput,
+    SystemAgentSecretInputOut,
     SystemAgentSessionCreate,
     SystemAgentSessionOut,
     SystemAgentSessionUpdate,
 )
 from ..services.system_agent import get_system_agent_service
-from ..services.system_agent.actions import action_to_dict, get_action, list_actions, reject_action
+from ..services.system_agent.actions import (
+    action_to_dict,
+    decrypt_secret_payload,
+    encrypt_secret_payload,
+    get_action,
+    list_actions,
+    mark_expired_if_needed,
+    reject_action,
+)
 from ..services.system_agent.executor import get_action_executor
+from ..services.system_agent.registry import get_registry
 
 router = APIRouter(prefix="/api/system-agent", tags=["system-agent"])
 
@@ -310,4 +321,61 @@ async def retry_runtime_sync_action(
         error_code=result.get("error_code"),
         error_message=result.get("error_message"),
         action=SystemAgentActionOut(**action) if isinstance(action, dict) else None,
+    )
+
+
+@router.post("/actions/{action_id}/secret-input", response_model=SystemAgentSecretInputOut)
+async def secret_input_action(
+    action_id: str,
+    payload: SystemAgentSecretInput,
+    db: DBSession,
+    user: CurrentUser,
+) -> SystemAgentSecretInputOut:
+    """Web 内联卡片补填密钥；只接受工具注册表声明字段，响应不回显明文。"""
+
+    row = await get_action(db, action_id)
+    if row is None or (row.actor_user_id not in (None, user.id)):
+        raise _err("ACTION_NOT_FOUND", "操作不存在", 404)
+    row = await mark_expired_if_needed(db, row)
+    if row.status != "pending":
+        raise _err("INVALID_STATUS", "仅待确认操作可补填密钥", 400)
+
+    spec = get_registry().get(row.tool_name)
+    allowed = set(spec.secret_argument_names) if spec else set()
+    if not allowed:
+        raise _err("NO_SECRET_FIELDS", "该操作不接受密钥补填", 400)
+
+    incoming = payload.fields or {}
+    secrets: dict[str, Any] = decrypt_secret_payload(row.secret_payload_enc)
+    accepted: list[str] = []
+    for name, value in incoming.items():
+        if name not in allowed:
+            raise _err("FIELD_NOT_ALLOWED", f"字段 {name} 未在工具声明中", 400)
+        text = str(value or "").strip()
+        if not text:
+            continue
+        secrets[name] = text
+        accepted.append(name)
+
+    if not accepted:
+        raise _err("EMPTY_SECRET", "未提供有效密钥", 400)
+
+    row.secret_payload_enc = encrypt_secret_payload(secrets)
+    existing_fields = list(row.secret_fields or [])
+    for name in accepted:
+        if name not in existing_fields:
+            existing_fields.append(name)
+    row.secret_fields = existing_fields
+    # 普通 arguments 只标记 has_*，不写明文
+    args = dict(row.arguments or {})
+    for name in accepted:
+        args.pop(name, None)
+        args[f"has_{name}"] = True
+    row.arguments = args
+    await db.commit()
+    await db.refresh(row)
+    return SystemAgentSecretInputOut(
+        action_id=row.id,
+        has_secret=True,
+        secret_fields=list(row.secret_fields or []),
     )

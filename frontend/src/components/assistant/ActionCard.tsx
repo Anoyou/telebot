@@ -8,6 +8,7 @@ import {
   retrySystemAgentRuntimeSync,
   type SystemAgentAction,
 } from "@/api/systemAgent";
+import { SecretInput } from "@/components/assistant/SecretInput";
 import { Button } from "@/components/ui/button";
 import { getErrMsg } from "@/lib/api";
 import { cn } from "@/lib/utils";
@@ -108,6 +109,22 @@ export function ActionCard({
           配置已保存，运行时同步失败
           {action.runtime_sync_error ? `：${action.runtime_sync_error}` : ""}
         </div>
+      ) : null}
+
+      {pending && (action.secret_fields?.length || action.tool_name?.startsWith("providers.")) ? (
+        <SecretInput
+          actionId={action.id}
+          fieldNames={
+            action.secret_fields?.length
+              ? action.secret_fields
+              : action.tool_name?.startsWith("providers.")
+                ? ["api_key"]
+                : undefined
+          }
+          onDone={() => {
+            setAction((prev) => ({ ...prev, has_secret: true }));
+          }}
+        />
       ) : null}
 
       <div className="flex flex-wrap gap-2">

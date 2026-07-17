@@ -51,6 +51,7 @@ class SystemAgentRuntime:
         web_user_id: int | None = None,
         bot_tg_user_id: int | None = None,
         history_messages: list[SystemAgentMessage] | None = None,
+        chat_secrets: list[str] | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
         """执行一轮对话，逐条 yield NDJSON 事件。"""
 
@@ -114,6 +115,7 @@ class SystemAgentRuntime:
             account_id=session.account_id,
             web_user_id=web_user_id,
             bot_tg_user_id=bot_tg_user_id,
+            chat_secrets=list(chat_secrets or []),
         )
 
         event_queue: list[dict[str, Any]] = []
@@ -253,6 +255,7 @@ class SystemAgentRuntime:
         next_event: Callable[..., dict[str, Any]],
     ):
         from .actions import action_to_dict, create_pending_action
+        from .secrets import merge_secret_into_arguments
 
         async def _handler(arguments: dict[str, Any]) -> Any:
             if spec.preview_handler is None:
@@ -263,6 +266,15 @@ class SystemAgentRuntime:
                 }
             try:
                 args = dict(arguments or {})
+                # 阶段 3：把聊天中提取的密钥注入工具参数（仅内存）
+                chat_secrets = getattr(tool_ctx, "chat_secrets", None) or []
+                if spec.secret_argument_names and chat_secrets:
+                    public, secrets, _fields = merge_secret_into_arguments(
+                        args,
+                        secret_names=spec.secret_argument_names,
+                        chat_secrets=list(chat_secrets),
+                    )
+                    args = {**public, **secrets}
                 preview = await spec.preview_handler(tool_ctx, args)
                 if not isinstance(preview, dict):
                     preview = {"value": preview}

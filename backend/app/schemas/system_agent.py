@@ -111,3 +111,15 @@ class SystemAgentActionConfirmOut(BaseModel):
     error_message: str | None = None
     business_changed: bool | None = None
     action: SystemAgentActionOut | None = None
+
+
+class SystemAgentSecretInput(BaseModel):
+    """Web Action 卡片可选密钥补填。"""
+
+    fields: dict[str, str] = Field(default_factory=dict)
+
+
+class SystemAgentSecretInputOut(BaseModel):
+    action_id: str
+    has_secret: bool = True
+    secret_fields: list[str] = Field(default_factory=list)

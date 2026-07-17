@@ -28,6 +28,8 @@ class ToolContext:
     web_user_id: int | None = None
     bot_tg_user_id: int | None = None
     action: Any | None = None
+    # 阶段 3：当轮从用户消息提取的密钥明文（仅请求内存，不落库）
+    chat_secrets: list[str] | None = None
 
     def require_role(self, min_role: str) -> None:
         from .registry import role_at_least

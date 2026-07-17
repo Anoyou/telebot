@@ -1,7 +1,8 @@
-"""管理 Bot /agent 桥接。"""
+"""管理 Bot /agent 桥接与 Inline 确认。"""
 
 from __future__ import annotations
 
+from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -11,10 +12,16 @@ from app.services.system_agent import bot_bridge
 
 class _SendCapture:
     def __init__(self) -> None:
-        self.calls: list[tuple[str, bool]] = []
+        self.calls: list[dict[str, Any]] = []
 
-    async def __call__(self, msg: str, *, edit: bool = False) -> None:
-        self.calls.append((msg, edit))
+    async def __call__(
+        self,
+        msg: str,
+        *,
+        edit: bool = False,
+        reply_markup: dict[str, Any] | None = None,
+    ) -> None:
+        self.calls.append({"msg": msg, "edit": edit, "reply_markup": reply_markup})
 
 
 @pytest.mark.asyncio
@@ -32,10 +39,10 @@ async def test_agent_help_enters_mode_and_shows_usage() -> None:
             send=send,
         )
     assert send.calls
-    body = send.calls[0][0]
+    body = send.calls[0]["msg"]
     assert "系统助手" in body
     assert "/agent new" in body
-    assert "只读" in body
+    assert "Inline 确认" in body
 
 
 @pytest.mark.asyncio
@@ -51,7 +58,7 @@ async def test_agent_exit() -> None:
             send=send,
         )
     exit_mock.assert_awaited_once_with(1, 42)
-    assert "退出" in send.calls[0][0]
+    assert "退出" in send.calls[0]["msg"]
 
 
 @pytest.mark.asyncio
@@ -115,6 +122,184 @@ async def test_run_agent_query_edits_final_message(monkeypatch) -> None:
         send=send,
     )
     assert len(send.calls) >= 2
-    assert "处理中" in send.calls[0][0]
-    assert "12.5" in send.calls[-1][0]
-    assert send.calls[-1][1] is True  # edit final
+    assert "处理中" in send.calls[0]["msg"]
+    assert "12.5" in send.calls[-1]["msg"]
+    assert send.calls[-1]["edit"] is True
+
+
+@pytest.mark.asyncio
+async def test_run_agent_query_attaches_inline_confirm(monkeypatch) -> None:
+    send = _SendCapture()
+
+    class _Svc:
+        async def get_or_create_active_session(self, *a, **k):  # noqa: ANN001
+            return SimpleSession("sess-1")
+
+        async def get_session(self, *a, **k):  # noqa: ANN001
+            return SimpleSession("sess-1")
+
+        async def stream_message(self, *a, **k):  # noqa: ANN001
+            yield {
+                "type": "action_proposed",
+                "action": {
+                    "id": "act-1",
+                    "summary": "暂停账号 #1",
+                    "risk": "normal",
+                    "tool_name": "accounts.set_paused",
+                    "preview": {"note": "不会自动恢复"},
+                },
+            }
+            yield {"type": "assistant_message", "content": "请确认暂停操作"}
+            yield {"type": "done", "ok": True}
+
+    class SimpleSession:
+        def __init__(self, sid: str) -> None:
+            self.id = sid
+
+    class _DB:
+        async def __aenter__(self):
+            return AsyncMock()
+
+        async def __aexit__(self, *args):
+            return False
+
+    monkeypatch.setattr(bot_bridge, "AsyncSessionLocal", lambda: _DB())
+    monkeypatch.setattr(bot_bridge, "get_system_agent_service", lambda: _Svc())
+    monkeypatch.setattr(bot_bridge, "refresh_agent_mode", AsyncMock())
+    monkeypatch.setattr(
+        bot_bridge,
+        "store_agent_confirm_nonce",
+        AsyncMock(return_value="nonce-xyz"),
+    )
+
+    await bot_bridge.run_agent_query(
+        account_id=7,
+        tg_user_id=99,
+        role="admin",
+        text="暂停账号",
+        send=send,
+    )
+    final = send.calls[-1]
+    assert final["edit"] is True
+    assert "待确认" in final["msg"]
+    assert "暂停账号" in final["msg"]
+    markup = final["reply_markup"]
+    assert markup is not None
+    buttons = markup["inline_keyboard"][0]
+    assert any("confirm" in b["callback_data"] for b in buttons)
+    assert any("cancel" in b["callback_data"] for b in buttons)
+    assert all(b["callback_data"].startswith("ab:7:") for b in buttons)
+
+
+@pytest.mark.asyncio
+async def test_handle_agent_confirm_callback_success() -> None:
+    answers: list[tuple[str, bool]] = []
+    send = _SendCapture()
+
+    async def answer(text: str, show_alert: bool = False) -> None:
+        answers.append((text, show_alert))
+
+    with (
+        patch.object(
+            bot_bridge,
+            "read_agent_confirm_payload",
+            AsyncMock(
+                return_value={
+                    "account_id": 1,
+                    "tg_user_id": 2,
+                    "action": "agent",
+                    "action_id": "act-9",
+                }
+            ),
+        ),
+        patch.object(
+            bot_bridge,
+            "consume_agent_confirm_payload",
+            AsyncMock(
+                return_value={
+                    "account_id": 1,
+                    "tg_user_id": 2,
+                    "action": "agent",
+                    "action_id": "act-9",
+                }
+            ),
+        ),
+        patch.object(
+            bot_bridge,
+            "get_action_executor",
+            lambda: type(
+                "E",
+                (),
+                {
+                    "confirm": AsyncMock(
+                        return_value={
+                            "ok": True,
+                            "action": {"summary": "已暂停账号", "runtime_sync_status": "succeeded"},
+                        }
+                    )
+                },
+            )(),
+        ),
+    ):
+        await bot_bridge.handle_agent_confirm_callback(
+            account_id=1,
+            tg_user_id=2,
+            role="admin",
+            nonce="n1",
+            decide="confirm",
+            answer=answer,
+            send=send,
+        )
+    assert any("处理中" in a[0] for a in answers)
+    assert any("已确认并执行" in c["msg"] for c in send.calls)
+
+
+@pytest.mark.asyncio
+async def test_handle_agent_cancel_rejects_action() -> None:
+    send = _SendCapture()
+    answers: list[str] = []
+
+    async def answer(text: str, show_alert: bool = False) -> None:
+        answers.append(text)
+
+    reject_mock = AsyncMock()
+    get_action_mock = AsyncMock(return_value=object())
+
+    class _DB:
+        def __init__(self) -> None:
+            self.commit = AsyncMock()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+    with (
+        patch.object(
+            bot_bridge,
+            "consume_agent_confirm_payload",
+            AsyncMock(
+                return_value={
+                    "account_id": 1,
+                    "tg_user_id": 2,
+                    "action": "agent",
+                    "action_id": "act-x",
+                }
+            ),
+        ),
+        patch.object(bot_bridge, "AsyncSessionLocal", lambda: _DB()),
+        patch.object(bot_bridge, "get_action", get_action_mock),
+        patch.object(bot_bridge, "reject_action", reject_mock),
+    ):
+        await bot_bridge.handle_agent_confirm_callback(
+            account_id=1,
+            tg_user_id=2,
+            role="operator",
+            nonce="n2",
+            decide="cancel",
+            answer=answer,
+            send=send,
+        )
+    reject_mock.assert_awaited()
+    assert any("取消" in c["msg"] for c in send.calls)

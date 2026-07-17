@@ -2291,8 +2291,13 @@ async def _handle_update(aid: int, token: str, update: dict[str, Any]) -> None:
                     reason_code="agent_mode_text",
                 )
 
-                async def _agent_send(msg: str, *, edit: bool = False) -> None:
-                    await _send(incoming, msg, edit=edit)
+                async def _agent_send(
+                    msg: str,
+                    *,
+                    edit: bool = False,
+                    reply_markup: dict[str, Any] | None = None,
+                ) -> None:
+                    await _send(incoming, msg, edit=edit, reply_markup=reply_markup)
 
                 await system_agent_bot.run_agent_query(
                     account_id=incoming.account_id,
@@ -8356,8 +8361,13 @@ async def _handle_command(incoming: Incoming, role: str) -> None:
             return
         from .system_agent import bot_bridge as system_agent_bot
 
-        async def _agent_send(msg: str, *, edit: bool = False) -> None:
-            await _send(incoming, msg, edit=edit)
+        async def _agent_send(
+            msg: str,
+            *,
+            edit: bool = False,
+            reply_markup: dict[str, Any] | None = None,
+        ) -> None:
+            await _send(incoming, msg, edit=edit, reply_markup=reply_markup)
 
         await system_agent_bot.handle_agent_command(
             account_id=incoming.account_id,
@@ -8417,10 +8427,16 @@ async def _handle_callback(incoming: Incoming, role: str) -> None:
         elif action == "resume":
             await _resume_account(incoming, role, edit=True)
         elif action == "confirm":
-            await _confirm_action(incoming, role, resource, nonce)
+            if resource == "agent":
+                await _handle_agent_action_callback(incoming, role, nonce, decide="confirm")
+            else:
+                await _confirm_action(incoming, role, resource, nonce)
         elif action == "cancel":
-            await _answer_callback(incoming, text="已取消")
-            await _show_start(incoming, role, edit=True)
+            if resource == "agent":
+                await _handle_agent_action_callback(incoming, role, nonce, decide="cancel")
+            else:
+                await _answer_callback(incoming, text="已取消")
+                await _show_start(incoming, role, edit=True)
         else:
             await _answer_callback(incoming, text="按钮已过期")
     except PermissionError as exc:
@@ -8475,7 +8491,7 @@ async def _show_help(incoming: Incoming, role: str, *, edit: bool = False) -> No
         "  /plugins uninstall &lt;name&gt; 卸载远程插件\n"
         "/rules 查看规则，scheduler 规则可手动执行\n"
         "/logs 查看最近运行日志\n"
-        "/agent 系统助手（自然语言只读查询）\n"
+        "/agent 系统助手（自然语言查询与写操作确认）\n"
         "/pause /resume 暂停或恢复账号\n"
         "/restart 重启账号 worker（admin + 二次确认）\n\n"
         "<b>角色说明</b>\n"
@@ -8493,7 +8509,7 @@ async def _show_help(incoming: Incoming, role: str, *, edit: bool = False) -> No
         "<tr><td><code>/plugins</code></td><td>查看插件与高风险入口</td></tr>"
         "<tr><td><code>/rules</code></td><td>查看规则并执行 Scheduler</td></tr>"
         "<tr><td><code>/logs</code></td><td>查看最近运行日志</td></tr>"
-        "<tr><td><code>/agent</code></td><td>系统助手自然语言只读查询</td></tr>"
+        "<tr><td><code>/agent</code></td><td>系统助手自然语言查询与写操作确认</td></tr>"
         "<tr><td><code>/pause</code> / <code>/resume</code></td><td>暂停或恢复账号</td></tr>"
         "<tr><td><code>/restart</code></td><td>重启 Worker，需要二次确认</td></tr>"
         "</table>"
@@ -9109,6 +9125,42 @@ async def _resume_account(incoming: Incoming, role: str, *, edit: bool = False) 
     if incoming.callback_id:
         await _answer_callback(incoming, text="已恢复")
     await _send(incoming, "账号已恢复。", reply_markup=_main_keyboard(incoming.account_id), edit=edit)
+
+
+async def _handle_agent_action_callback(
+    incoming: Incoming,
+    role: str,
+    nonce: str | None,
+    *,
+    decide: str,
+) -> None:
+    """System Agent 写操作 Inline 确认/取消。"""
+
+    if incoming.user_id is None:
+        await _answer_callback(incoming, text="无法识别用户", show_alert=True)
+        return
+    from .system_agent import bot_bridge as system_agent_bot
+
+    async def _answer(text: str, show_alert: bool = False) -> None:
+        await _answer_callback(incoming, text=text, show_alert=show_alert)
+
+    async def _agent_send(
+        msg: str,
+        *,
+        edit: bool = False,
+        reply_markup: dict[str, Any] | None = None,
+    ) -> None:
+        await _send(incoming, msg, edit=edit, reply_markup=reply_markup)
+
+    await system_agent_bot.handle_agent_confirm_callback(
+        account_id=incoming.account_id,
+        tg_user_id=incoming.user_id,
+        role=role,
+        nonce=nonce,
+        decide=decide,
+        answer=_answer,
+        send=_agent_send,
+    )
 
 
 async def _request_confirm(

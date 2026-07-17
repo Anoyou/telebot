@@ -75,6 +75,12 @@ async def test_registry_includes_read_and_write_tools() -> None:
         "scheduler.delete",
         "scheduler.execute_now",
         "features.set_enabled",
+        "providers.save",
+        "providers.delete",
+        "providers.verify",
+        "commands.save",
+        "commands.delete",
+        "commands.set_enabled_for_accounts",
     }
     assert expected_read.issubset(names)
     assert expected_write.issubset(names)

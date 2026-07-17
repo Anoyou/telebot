@@ -25,9 +25,9 @@ from ...db.models.system_agent import (
 from .actions import clear_expired_secrets
 from .config import load_config, load_system_context_flags, save_config
 from .prompts import session_title_from_message
-from .redactor import redact_message_text
 from .registry import get_registry
 from .runtime import SystemAgentRuntime
+from .secrets import extract_plaintext_secrets, redact_known_secrets
 
 log = logging.getLogger(__name__)
 
@@ -60,8 +60,9 @@ class SystemAgentService:
             "ai_enabled": bool(flags["ai_enabled"]),
             "timezone": flags["timezone"],
             "tools": registry.capabilities(channel=channel, role=role),
-            "stage": 2,
+            "stage": 3,
             "write_tools_available": True,
+            "secret_chat_input": True,
         }
 
     # ── 会话 CRUD ─────────────────────────────────────────────────
@@ -257,8 +258,9 @@ class SystemAgentService:
             session.title = session_title_from_message(raw_text)
         session.updated_at = datetime.now(UTC)
 
-        # 用户消息：原始文本参与模型请求，落库前打码
-        redacted_user = redact_message_text(raw_text)
+        # 用户消息：原始文本参与模型请求；落库前替换已提取密钥并基础打码
+        chat_secrets = extract_plaintext_secrets(raw_text)
+        redacted_user = redact_known_secrets(raw_text, chat_secrets)
         user_msg = SystemAgentMessage(
             session_id=session.id,
             role=MESSAGE_ROLE_USER,
@@ -285,6 +287,7 @@ class SystemAgentService:
             web_user_id=web_user_id,
             bot_tg_user_id=bot_tg_user_id,
             history_messages=history_for_model,
+            chat_secrets=chat_secrets,
         ):
             et = event.get("type")
             if et == "assistant_message":
@@ -299,7 +302,7 @@ class SystemAgentService:
                 SystemAgentMessage(
                     session_id=session.id,
                     role=MESSAGE_ROLE_ASSISTANT,
-                    content={"text": redact_message_text(assistant_text)},
+                    content={"text": redact_known_secrets(assistant_text, chat_secrets)},
                     usage=usage,
                 )
             )

@@ -1,23 +1,35 @@
-"""管理 Bot `/agent` 与助手模式桥接。"""
+"""管理 Bot `/agent` 与助手模式桥接（含写操作 Inline 确认）。"""
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
+import secrets
 from typing import Any
 
 from ...db.base import AsyncSessionLocal
 from ...db.models.system_agent import CHANNEL_BOT, SESSION_STATUS_ACTIVE
 from ...redis_client import get_redis
+from .actions import get_action, reject_action
+from .executor import get_action_executor
 from .service import get_system_agent_service
 
 log = logging.getLogger(__name__)
 
 AGENT_MODE_TTL_SECONDS = 30 * 60
 AGENT_MODE_KEY = "system_agent:bot_mode:{account_id}:{tg_user_id}"
+AGENT_CONFIRM_PREFIX = "system_agent:bot_confirm:"
+AGENT_CONFIRM_TTL_SECONDS = 10 * 60  # 与 Action 默认 TTL 对齐
 
 
 def _mode_key(account_id: int, tg_user_id: int) -> str:
     return AGENT_MODE_KEY.format(account_id=int(account_id), tg_user_id=int(tg_user_id))
+
+
+def _confirm_redis_key(nonce: str) -> str:
+    digest = hashlib.sha256(nonce.encode("utf-8")).hexdigest()[:32]
+    return AGENT_CONFIRM_PREFIX + digest
 
 
 async def is_agent_mode(account_id: int, tg_user_id: int) -> bool:
@@ -56,6 +68,178 @@ async def exit_agent_mode(account_id: int, tg_user_id: int) -> None:
         pass
 
 
+def _html_escape(text: str) -> str:
+    return (
+        str(text or "")
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+    )
+
+
+def _agent_button(text: str, action: str, aid: int, nonce: str) -> dict[str, str]:
+    """复用 account_bot 的 ab: 回调协议：ab:{aid}:{action}:agent:{nonce}。"""
+
+    data = f"ab:{int(aid)}:{action}:agent:{nonce}"
+    return {"text": text, "callback_data": data[:64]}
+
+
+def _agent_confirm_keyboard(aid: int, nonce: str, *, dangerous: bool = False) -> dict[str, Any]:
+    confirm_label = "⚠️ 确认执行" if dangerous else "✅ 确认执行"
+    return {
+        "inline_keyboard": [
+            [
+                _agent_button(confirm_label, "confirm", aid, nonce),
+                _agent_button("❌ 取消", "cancel", aid, nonce),
+            ]
+        ]
+    }
+
+
+async def store_agent_confirm_nonce(
+    *,
+    account_id: int,
+    tg_user_id: int,
+    action_id: str,
+) -> str | None:
+    """写入 Redis 确认票据，返回 nonce；Redis 不可用时返回 None。"""
+
+    nonce = secrets.token_urlsafe(8)
+    payload = {
+        "account_id": int(account_id),
+        "tg_user_id": int(tg_user_id),
+        "action": "agent",
+        "action_id": action_id,
+    }
+    try:
+        redis = get_redis()
+        await redis.setex(
+            _confirm_redis_key(nonce),
+            AGENT_CONFIRM_TTL_SECONDS,
+            json.dumps(payload, ensure_ascii=False),
+        )
+        return nonce
+    except Exception:  # noqa: BLE001
+        log.warning("store agent confirm nonce failed", exc_info=True)
+        return None
+
+
+async def consume_agent_confirm_payload(nonce: str) -> dict[str, Any] | None:
+    try:
+        redis = get_redis()
+        key = _confirm_redis_key(nonce)
+        raw = await redis.get(key)
+        if not raw:
+            return None
+        await redis.delete(key)
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8", errors="replace")
+        data = json.loads(raw)
+        return data if isinstance(data, dict) else None
+    except Exception:  # noqa: BLE001
+        log.warning("consume agent confirm failed", exc_info=True)
+        return None
+
+
+async def read_agent_confirm_payload(nonce: str) -> dict[str, Any] | None:
+    try:
+        redis = get_redis()
+        raw = await redis.get(_confirm_redis_key(nonce))
+        if not raw:
+            return None
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8", errors="replace")
+        data = json.loads(raw)
+        return data if isinstance(data, dict) else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+async def handle_agent_confirm_callback(
+    *,
+    account_id: int,
+    tg_user_id: int,
+    role: str,
+    nonce: str | None,
+    decide: str,
+    answer: Any,
+    send: Any,
+) -> None:
+    """处理 Bot Inline 确认/取消（decide=confirm|cancel）。"""
+
+    if not nonce:
+        await answer("确认已过期", show_alert=True)
+        return
+
+    if decide == "cancel":
+        payload = await consume_agent_confirm_payload(nonce)
+        if not payload:
+            await answer("已取消或过期", show_alert=False)
+            await send("已取消操作。", edit=True)
+            return
+        if payload.get("account_id") != account_id or payload.get("tg_user_id") != tg_user_id:
+            await answer("只能由原用户操作", show_alert=True)
+            return
+        action_id = str(payload.get("action_id") or "")
+        if action_id:
+            async with AsyncSessionLocal() as db:
+                action = await get_action(db, action_id)
+                if action is not None:
+                    await reject_action(db, action)
+                    await db.commit()
+        await answer("已取消")
+        await send("已取消该助手操作，业务未变更。", edit=True)
+        return
+
+    # confirm
+    payload = await read_agent_confirm_payload(nonce)
+    if not payload:
+        await answer("确认已过期", show_alert=True)
+        return
+    if payload.get("account_id") != account_id or payload.get("tg_user_id") != tg_user_id:
+        await answer("只能由原用户确认", show_alert=True)
+        return
+    if payload.get("action") != "agent":
+        await answer("确认资源不匹配", show_alert=True)
+        return
+    # 先消费票据，防止重复点击再次进入执行
+    consumed = await consume_agent_confirm_payload(nonce)
+    if not consumed:
+        await answer("确认已过期", show_alert=True)
+        return
+
+    action_id = str(consumed.get("action_id") or "")
+    if not action_id:
+        await answer("缺少操作 ID", show_alert=True)
+        return
+
+    await answer("处理中…")
+    await send("⏳ 正在执行助手操作…", edit=True)
+
+    result = await get_action_executor().confirm(
+        action_id=action_id,
+        role=role or "viewer",
+        channel=CHANNEL_BOT,
+        bot_tg_user_id=tg_user_id,
+    )
+    action = result.get("action") if isinstance(result.get("action"), dict) else None
+    if result.get("ok"):
+        summary = (action or {}).get("summary") or action_id
+        sync = (action or {}).get("runtime_sync_status") or ""
+        extra = ""
+        if sync == "failed":
+            extra = "\n⚠️ 配置已保存，运行时同步失败；可到 Web /assistant 重新同步。"
+        already = "（已执行，未重复）" if result.get("already_final") else ""
+        await send(
+            f"✅ 已确认并执行{already}\n{_html_escape(str(summary))}{extra}",
+            edit=True,
+        )
+        return
+
+    err = result.get("error_message") or result.get("error_code") or "执行失败"
+    await send(f"❌ 执行失败：{_html_escape(str(err)[:400])}\n业务是否变化：否（失败路径）", edit=True)
+
+
 async def handle_agent_command(
     *,
     account_id: int,
@@ -68,10 +252,8 @@ async def handle_agent_command(
     """处理 `/agent` 及其子命令与自然语言任务。"""
 
     raw = (text or "").strip()
-    # 去掉命令本体
     parts = raw.split(maxsplit=1)
     head = (parts[0] if parts else "").lower()
-    # 支持 /agent@botname
     if head.startswith("/agent"):
         tail = parts[1].strip() if len(parts) > 1 else ""
     else:
@@ -90,7 +272,7 @@ async def handle_agent_command(
             "/agent clear — 删除当前会话\n"
             "/agent exit — 退出助手模式\n\n"
             "助手模式下可直接发送自然语言（既有斜杠命令仍优先）。\n"
-            "当前阶段为只读查询；写操作将在后续版本开放。"
+            "写操作会弹出 Inline 确认按钮，确认后才会落库。"
         )
         await send(msg, edit=edit)
         return
@@ -107,7 +289,6 @@ async def handle_agent_command(
         await enter_agent_mode(account_id, tg_user_id)
         async with AsyncSessionLocal() as db:
             svc = get_system_agent_service()
-            # 归档旧会话
             sessions = await svc.list_sessions(
                 db,
                 bot_tg_user_id=tg_user_id,
@@ -147,14 +328,12 @@ async def handle_agent_command(
         await send("已删除当前助手会话。", edit=edit)
         return
 
-    # 自然语言任务
     await enter_agent_mode(account_id, tg_user_id)
-    question = tail
     await run_agent_query(
         account_id=account_id,
         tg_user_id=tg_user_id,
         role=role,
-        text=question,
+        text=tail,
         send=send,
         edit=edit,
     )
@@ -169,13 +348,15 @@ async def run_agent_query(
     send: Any,
     edit: bool = False,
 ) -> None:
-    """执行一轮助手查询，尽量编辑原消息减少噪音。"""
+    """执行一轮助手查询；写工具附带 Inline 确认按钮。"""
 
     await refresh_agent_mode(account_id, tg_user_id)
     await send("⏳ 系统助手处理中…", edit=edit)
 
     assistant_text = ""
     error_text = ""
+    proposed_actions: list[dict[str, Any]] = []
+
     async with AsyncSessionLocal() as db:
         svc = get_system_agent_service()
         session = await svc.get_or_create_active_session(
@@ -185,7 +366,6 @@ async def run_agent_query(
             account_id=account_id,
         )
         await db.commit()
-        # 重新取会话避免 expire
         session = await svc.get_session(db, session.id, bot_tg_user_id=tg_user_id)
         assert session is not None
         try:
@@ -202,33 +382,81 @@ async def run_agent_query(
                     assistant_text = str(event.get("content") or "")
                 elif et == "error":
                     error_text = str(event.get("message") or "助手运行失败")
+                elif et == "action_proposed":
+                    action = event.get("action")
+                    if isinstance(action, dict):
+                        proposed_actions.append(action)
             await db.commit()
         except Exception as exc:  # noqa: BLE001
             await db.rollback()
             log.exception("bot agent query failed")
             error_text = str(exc)[:400]
 
-    if error_text and not assistant_text:
-        await send(f"❌ {error_text}", edit=True)
+    if error_text and not assistant_text and not proposed_actions:
+        await send(f"❌ {_html_escape(error_text)}", edit=True)
         return
-    body = assistant_text or "（无文本回复）"
-    # Telegram 消息长度限制
+
+    body = assistant_text or ""
+    if proposed_actions and not body:
+        body = "已生成待确认操作，请点击下方按钮确认或取消。"
+    elif proposed_actions:
+        body = body.rstrip() + "\n\n——\n已生成待确认操作，请点击下方按钮。"
+
     if len(body) > 3500:
         body = body[:3400] + "\n\n…（已截断，完整内容请到 Web /assistant 查看）"
-    # 简单 HTML 转义尖括号外的内容：_send 使用 HTML parse_mode
-    safe = (
-        body.replace("&", "&amp;")
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
-    )
-    await send(safe, edit=True)
+
+    safe = _html_escape(body) if body else "（无文本回复）"
+
+    # 单条 Action：主消息带 Inline 按钮；多条：逐条追加
+    if len(proposed_actions) == 1:
+        action = proposed_actions[0]
+        nonce = await store_agent_confirm_nonce(
+            account_id=account_id,
+            tg_user_id=tg_user_id,
+            action_id=str(action.get("id") or ""),
+        )
+        danger = str(action.get("risk") or "") == "dangerous"
+        summary = _html_escape(str(action.get("summary") or action.get("tool_name") or "操作"))
+        warning = ""
+        preview = action.get("preview") if isinstance(action.get("preview"), dict) else {}
+        if preview.get("warning"):
+            warning = f"\n⚠️ {_html_escape(str(preview.get('warning')))}"
+        elif preview.get("note"):
+            warning = f"\nℹ️ {_html_escape(str(preview.get('note')))}"
+        card = f"\n\n🧾 <b>待确认</b>\n{summary}{warning}"
+        markup = _agent_confirm_keyboard(account_id, nonce, dangerous=danger) if nonce else None
+        if not nonce:
+            card += "\n（Redis 不可用，请到 Web /assistant 确认）"
+        await send(safe + card, edit=True, reply_markup=markup)
+        return
+
+    await send(safe, edit=True, reply_markup=None)
+    for action in proposed_actions:
+        nonce = await store_agent_confirm_nonce(
+            account_id=account_id,
+            tg_user_id=tg_user_id,
+            action_id=str(action.get("id") or ""),
+        )
+        danger = str(action.get("risk") or "") == "dangerous"
+        summary = _html_escape(str(action.get("summary") or action.get("tool_name") or "操作"))
+        markup = _agent_confirm_keyboard(account_id, nonce, dangerous=danger) if nonce else None
+        extra = "" if nonce else "\n（Redis 不可用，请到 Web 确认）"
+        await send(
+            f"🧾 <b>待确认</b>\n{summary}{extra}",
+            edit=False,
+            reply_markup=markup,
+        )
 
 
 __all__ = [
+    "consume_agent_confirm_payload",
     "enter_agent_mode",
     "exit_agent_mode",
     "handle_agent_command",
+    "handle_agent_confirm_callback",
     "is_agent_mode",
+    "read_agent_confirm_payload",
     "refresh_agent_mode",
     "run_agent_query",
+    "store_agent_confirm_nonce",
 ]

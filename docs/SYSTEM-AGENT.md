@@ -9,11 +9,11 @@
 | 阶段 | 版本目标 | 状态 |
 | --- | --- | --- |
 | 1 | `0.64.0` Web + Bot 只读助手 | 已实现（本分支，待发版） |
-| 2 | `0.65.0` 核心写操作 + Action | 开发中（本分支） |
-| 3 | `0.66.0` Provider/指令写 + 密钥 | 未开始 |
+| 2 | `0.65.0` 核心写操作 + Action | 已实现（本分支，待发版） |
+| 3 | `0.66.0` Provider/指令写 + 密钥 | 开发中（本分支） |
 | 4 | 真实使用驱动扩展 | backlog |
 
-当前能力：只读查询 + 核心写操作预览确认（Rule/交互规则/Scheduler/账号启停/功能启停）。Provider/指令写与聊天密钥输入仍在阶段 3。
+当前能力：只读查询、核心写操作（Web 卡片 + Bot Inline 确认）、Provider/指令写工具骨架，以及聊天密钥抽取与 Action 密文暂存。
 
 ## 入口
 
@@ -90,8 +90,11 @@ Web /assistant  ──NDJSON──┐
 | `interaction.save_rule` / `set_enabled` / `delete_rule` | 交互规则写操作 |
 | `scheduler.save` / `set_enabled` / `delete` / `execute_now` | 定时任务写操作 |
 | `features.set_enabled` | 账号功能/插件启停 |
+| `providers.save` / `delete` / `verify` | Provider 创建更新删除与本地可调用性检查 |
+| `commands.save` / `delete` / `set_enabled_for_accounts` | 自定义指令与账号启用 |
 
 写工具只产生 `pending` Action，用户确认后由 `ActionExecutor` 统一事务执行。
+Web 用内联卡片确认；Bot 用 Inline 按钮（`ab:{aid}:confirm|cancel:agent:{nonce}`）。
 
 ## NDJSON 事件
 
