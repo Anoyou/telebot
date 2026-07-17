@@ -253,14 +253,14 @@ _CLIENT_VERSIONS: dict[str, str] = dict(_DEFAULT_CLIENT_VERSIONS)
 # 系统设置键：存放运维手动填写的 UA 版本覆盖（JSON: {version_key: version}）。
 CLIENT_IDENTITY_VERSIONS_SETTING_KEY = "llm_client_identity_versions"
 
-# 每个版本键的元数据：前端展示名 + 远端检测源。
-# ``registry`` 非空表示有公共只读源可查最新版本（检测按钮可用）；None 表示只能手动填
+# 每个版本键的元数据：前端展示名 + 只读检测源。
+# ``registry`` 非空表示可自动检测最新版本；None 表示只能手动填写。
 # （Codex Desktop 的核心版本与 app 构建号都没有公共 registry）。
 _VERSION_KEY_META: dict[str, dict[str, str | None]] = {
     "codex_cli": {"label": "Codex CLI", "registry": "npm:@openai/codex"},
     "claude_code": {"label": "Claude Code", "registry": "npm:@anthropic-ai/claude-code"},
     "openai_sdk": {"label": "OpenAI Python SDK", "registry": "pypi:openai"},
-    "grok_cli": {"label": "Grok CLI", "registry": None},
+    "grok_cli": {"label": "Grok CLI", "registry": "cli:grok-update-check"},
     "codex_desktop_core": {"label": "Codex Desktop · 核心版本", "registry": None},
     "codex_desktop_build": {"label": "Codex Desktop · app 构建号", "registry": None},
 }

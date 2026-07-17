@@ -318,7 +318,9 @@ class ProviderModel(BaseModel):
     supports_tools: bool | None = None
     supports_images: bool | None = None
     supports_temperature: bool | None = None
-    reasoning_efforts: list[Literal["minimal", "low", "medium", "high", "xhigh"]] | None = None
+    reasoning_efforts: list[
+        Literal["minimal", "low", "medium", "high", "xhigh", "max"]
+    ] | None = None
 
     @field_validator("id")
     @classmethod
@@ -554,7 +556,24 @@ class QuickVerifyProviderRequest(BaseModel):
     api_format: Literal[
         "chat_completions", "responses", "anthropic_messages"
     ] = LLM_API_FORMAT_CHAT_COMPLETIONS
+    protocol_profile: Literal["standard", "claude_code_proxy"] = (
+        LLM_PROTOCOL_PROFILE_STANDARD
+    )
+    client_identity_profile: Literal[
+        "auto",
+        "minimal",
+        "openai_sdk",
+        "codex_cli",
+        "codex_desktop",
+        "claude_code",
+        "claude_desktop",
+        "grok_cli",
+    ] = LLM_CLIENT_IDENTITY_AUTO
     model: str | None = Field(default=None, max_length=128)
+    reasoning_effort: Literal[
+        "minimal", "low", "medium", "high", "xhigh", "max"
+    ] | None = None
+    proxy_id: int | None = Field(default=None, ge=1)
     system_prompt: str = Field(
         default="你是一个自然、简洁的中文聊天助手。请像真实聊天一样直接回复用户，不要只返回 ping/pong。",
         min_length=1,
@@ -897,7 +916,7 @@ class ClientIdentityVersionItem(BaseModel):
     """采集时核对过的默认版本（覆盖缺失时回落值）。"""
 
     registry: str | None = None
-    """远端版本查询源标识（npm 包名 / pypi 包名）；None 表示无公共源、仅手动。"""
+    """版本检测源（npm / pypi / 只读 CLI）；None 表示仅手动。"""
 
     detectable: bool = False
     """是否支持"检测最新版本"按钮（有公共 registry 才为 True）。"""

@@ -11,13 +11,6 @@ import { CommandBadge } from "@/components/CommandBadge";
 
 export type OutputFormat = "html" | "markdown" | "plain";
 
-export interface OutputTemplatePreset {
-  key: string;
-  label: string;
-  tpl: string;
-  desc: string;
-}
-
 export interface OutputTemplatePlaceholder {
   insert: string;
   label: string;
@@ -42,32 +35,6 @@ export interface OutputTemplateConditionalBlock {
 // HTML 转义，模板自身的标签保留。
 export const PRESET_SIMPLE_TEMPLATE =
   "{answer}\n\n— {model} · in {in_tokens} / out {out_tokens}{?routing_note}  ·  {routing_note}{/?}";
-
-export const PRESET_QUOTE_TEMPLATE =
-  // 双 blockquote：一段是被回复消息（quoted，媒体类显示 emoji 占位），
-  // 一段是用户的问题（question）。任一为空就跳过对应段。
-  "{?quoted}<blockquote expandable>{quoted}</blockquote>\n{/?}" +
-  "{?question}<blockquote expandable>{question}</blockquote>\n{/?}" +
-  "<b>✨ AI 回答</b>\n" +
-  "{answer_first_2}" +
-  "{?answer_rest}\n<blockquote expandable>{answer_rest}</blockquote>{/?}\n\n" +
-  "━━━━━━━━━━━━━━━\n" +
-  "{model} · {provider}\n" +
-  "In: {in_tokens} | Out: {out_tokens} | Total: {total_tokens}" +
-  "{?routing_note}\n{routing_note}{/?}";
-
-export const PRESET_MINIMAL_TEMPLATE = "{answer}\n<code>{model}</code> · {total_tokens}t";
-
-// 翻译/简答风：不显示 quoted（即使 quote_replied=True 仅供模型上下文）
-// 适合 ,翻译 / ,简答 / ,润色 等指令
-export const PRESET_TRANSLATE_TEMPLATE = "{answer}\n\n<i>— {model}</i>";
-
-export const OUTPUT_TEMPLATE_PRESETS: OutputTemplatePreset[] = [
-  { key: "simple", label: "简洁（默认）", tpl: PRESET_SIMPLE_TEMPLATE, desc: "答案 + 一行 footer；任何模式下都好看" },
-  { key: "quote", label: "引用风", tpl: PRESET_QUOTE_TEMPLATE, desc: "alma 风；前 2 行 + 折叠剩余（HTML 模式）" },
-  { key: "minimal", label: "极简", tpl: PRESET_MINIMAL_TEMPLATE, desc: "答案 + 模型 + 总 tokens" },
-  { key: "translate", label: "翻译/简答风", tpl: PRESET_TRANSLATE_TEMPLATE, desc: "不显示被引用原文；适合 ,翻译 / ,简答 这类" },
-];
 
 // 占位符按钮元数据；与后端 PLACEHOLDER_META 同源
 export const OUTPUT_TEMPLATE_PLACEHOLDERS: OutputTemplatePlaceholder[] = [
@@ -227,11 +194,6 @@ export function OutputTemplateEditor({
     });
   };
 
-  // "应用预设"按钮处理：直接覆盖 textarea
-  const applyPreset = (tpl: string) => {
-    onTemplateChange(tpl);
-    queueMicrotask(() => textareaRef.current?.focus());
-  };
   const placeholderGroups = groupBy(OUTPUT_TEMPLATE_PLACEHOLDERS, (item) => item.group);
   const conditionalGroups = groupBy(OUTPUT_TEMPLATE_CONDITIONAL_BLOCKS, (item) => item.group);
 
@@ -240,8 +202,8 @@ export function OutputTemplateEditor({
       <div>
         <Label className="text-sm font-semibold">消息格式</Label>
         <p className="text-xs text-muted-foreground">
-          决定 <CommandBadge>{cmdPrefix}ai</CommandBadge> 调用后编辑回 TG 的消息长什么样。留空 = 用"简洁"预设。
-          支持的占位符见下方按钮，点击直接插入光标位置。
+          决定 <CommandBadge>{cmdPrefix}ai</CommandBadge> 调用后编辑回 TG 的消息长什么样。留空使用系统默认简洁格式。
+          可从下方选择占位符或条件块，插入到当前光标位置。
         </p>
       </div>
 
@@ -280,76 +242,59 @@ export function OutputTemplateEditor({
         </p>
       )}
 
-      {/* 预设 */}
-      <div className="space-y-1.5">
-        <Label className="text-xs">快捷预设（直接覆盖下方模板）</Label>
-        <div className="flex flex-wrap gap-1.5">
-          {OUTPUT_TEMPLATE_PRESETS.map((p) => (
-            <button
-              key={p.key}
-              type="button"
-              onClick={() => applyPreset(p.tpl)}
-              title={p.desc}
-              className="rounded-full border px-2.5 py-0.5 text-xs hover:bg-muted"
-            >
-              {p.label}
-            </button>
-          ))}
-          <button
-            type="button"
-            onClick={() => onTemplateChange("")}
-            title="清空：保存后将自动用'简洁'预设"
-            className="rounded-full border px-2.5 py-0.5 text-xs text-muted-foreground hover:bg-muted"
+      {/* 紧凑插入器：避免所有占位符和条件块同时铺满表单。 */}
+      <div className="grid gap-3 sm:grid-cols-2">
+        <div className="space-y-1.5">
+          <Label className="text-xs" htmlFor="output-placeholder-picker">插入占位符</Label>
+          <Select
+            id="output-placeholder-picker"
+            value=""
+            onChange={(event) => {
+              const item = OUTPUT_TEMPLATE_PLACEHOLDERS.find(
+                (placeholder) => placeholder.insert === event.target.value,
+              );
+              if (item) insertAtCursor(item.insert);
+            }}
           >
-            清空（用默认）
-          </button>
-        </div>
-      </div>
-
-      {/* 占位符按钮 */}
-      <div className="space-y-1.5">
-        <Label className="text-xs">占位符（点击插入光标位置）</Label>
-        <div className="space-y-2">
-          {placeholderGroups.map(([group, items]) => (
-            <div key={group} className="space-y-1">
-              <div className="text-[11px] font-medium text-muted-foreground">{group}</div>
-              <div className="flex flex-wrap gap-1">
-                {items.map((b) => (
-                  <button
-                    key={b.insert}
-                    type="button"
-                    onClick={() => insertAtCursor(b.insert)}
-                    title={`${b.insert} · ${b.desc}`}
-                    className="rounded border px-1.5 py-0.5 text-[11px] font-mono hover:bg-muted"
-                  >
-                    {b.label}
-                  </button>
+            <option value="">选择内容、模型、协议或统计字段</option>
+            {placeholderGroups.map(([group, items]) => (
+              <optgroup key={group} label={group}>
+                {items.map((item) => (
+                  <option key={item.insert} value={item.insert}>
+                    {item.label} · {item.insert} · {item.desc}
+                  </option>
                 ))}
-              </div>
-            </div>
-          ))}
+              </optgroup>
+            ))}
+          </Select>
         </div>
-        <Label className="text-xs">条件块（仅在条件为真时渲染括号内）</Label>
-        <div className="space-y-2">
-          {conditionalGroups.map(([group, items]) => (
-            <div key={group} className="space-y-1">
-              <div className="text-[11px] font-medium text-muted-foreground">{group}</div>
-              <div className="flex flex-wrap gap-1">
-                {items.map((b) => (
-                  <button
-                    key={`${group}-${b.label}`}
-                    type="button"
-                    onClick={() => insertAtCursor(b.snippet)}
-                    title={b.desc}
-                    className="rounded border px-1.5 py-0.5 text-[11px] font-mono hover:bg-muted"
-                  >
-                    {b.label}
-                  </button>
+        <div className="space-y-1.5">
+          <Label className="text-xs" htmlFor="output-condition-picker">插入条件块</Label>
+          <Select
+            id="output-condition-picker"
+            value=""
+            onChange={(event) => {
+              const item = OUTPUT_TEMPLATE_CONDITIONAL_BLOCKS.find(
+                (block) => block.snippet === event.target.value,
+              );
+              if (item) insertAtCursor(item.snippet);
+            }}
+          >
+            <option value="">仅在存在内容时显示一段模板</option>
+            {conditionalGroups.map(([group, items]) => (
+              <optgroup key={group} label={group}>
+                {items.map((item) => (
+                  <option key={`${group}-${item.label}`} value={item.snippet}>
+                    {item.label} · {item.desc}
+                  </option>
                 ))}
-              </div>
-            </div>
-          ))}
+              </optgroup>
+            ))}
+          </Select>
         </div>
+        <p className="text-xs leading-5 text-muted-foreground sm:col-span-2">
+          选择后会插入到模板光标位置；字段说明保留在选项内，不再长期占用整块页面。
+        </p>
       </div>
 
       {/* 模板 textarea */}
@@ -361,7 +306,7 @@ export function OutputTemplateEditor({
           rows={10}
           maxLength={4000}
           onChange={(e) => onTemplateChange(e.target.value)}
-          placeholder={"留空 = 用'简洁'预设。\n试试上面的预设按钮先填一个再改。"}
+          placeholder={"留空 = 使用系统默认简洁格式。\n也可以从上方选择占位符或条件块后继续编辑。"}
           className="font-mono text-xs"
         />
         <p className="text-xs text-muted-foreground">

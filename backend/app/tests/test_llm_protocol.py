@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from app.services.llm_dto import LLMProviderDTO
 from app.services.llm_protocol import (
     ApiFormat,
@@ -82,7 +84,7 @@ def test_protocol_capabilities_reject_unsupported_features() -> None:
 
     errors = capabilities_for_api_format("anthropic_messages").validation_errors(request)
 
-    assert errors == ["provider 不支持原生联网搜索", "provider 不支持 reasoning"]
+    assert errors == ["provider 不支持原生联网搜索"]
 
 
 def test_capability_validation_can_raise_structured_error() -> None:
@@ -161,19 +163,35 @@ def test_model_metadata_narrows_protocol_capabilities() -> None:
     ]
 
 
-def test_claude_code_profile_declares_reasoning_effort_capability() -> None:
+@pytest.mark.parametrize("protocol_profile", ["standard", "claude_code_proxy"])
+def test_anthropic_profiles_declare_reasoning_effort_capability(
+    protocol_profile: str,
+) -> None:
     provider = LLMProviderDTO(
         id=1,
-        name="Claude Code proxy",
+        name="Anthropic provider",
         provider="anthropic",
         api_format="anthropic_messages",
-        protocol_profile="claude_code_proxy",
-        default_model="claude",
+        protocol_profile=protocol_profile,
+        default_model="claude-sonnet-4-6",
     )
     request = ModelRequest(
-        model="claude",
+        model="claude-sonnet-4-6",
         messages=(Message.text(MessageRole.USER, "question"),),
-        reasoning_effort="xhigh",
+        reasoning_effort="high",
     )
 
-    assert provider.capabilities_for_model("claude").validation_errors(request) == []
+    assert provider.capabilities_for_model("claude-sonnet-4-6").validation_errors(request) == []
+
+
+def test_anthropic_max_effort_is_only_inferred_for_opus() -> None:
+    provider = LLMProviderDTO(
+        id=1,
+        name="Anthropic provider",
+        provider="anthropic",
+        api_format="anthropic_messages",
+        default_model="claude-opus-4-6",
+    )
+
+    assert "max" in provider.capabilities_for_model("claude-opus-4-6").reasoning_efforts
+    assert "max" not in provider.capabilities_for_model("claude-sonnet-4-6").reasoning_efforts

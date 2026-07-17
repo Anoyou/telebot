@@ -108,14 +108,121 @@ def test_codex_cli_ua_reflects_override() -> None:
 
 def test_version_key_metadata_detectability() -> None:
     meta = version_key_metadata()
-    # 有公共 registry 的三个键可检测
+    # npm / PyPI / 固定只读 CLI 检测源均可检测
     assert meta["codex_cli"]["registry"] == "npm:@openai/codex"
     assert meta["claude_code"]["registry"] == "npm:@anthropic-ai/claude-code"
     assert meta["openai_sdk"]["registry"] == "pypi:openai"
-    assert meta["grok_cli"]["registry"] is None
+    assert meta["grok_cli"]["registry"] == "cli:grok-update-check"
     # Codex Desktop 两段无公共 registry（仅手动）
     assert meta["codex_desktop_core"]["registry"] is None
     assert meta["codex_desktop_build"]["registry"] is None
+
+
+def test_parse_grok_update_check_prefers_remote_version() -> None:
+    output = "A new version of Grok Build is available: 0.2.101 -> 0.2.102 [stable]"
+    assert commands._parse_grok_update_check(output) == "0.2.102"
+    assert commands._parse_grok_update_check("Grok Build is up to date: 0.2.102") == "0.2.102"
+    assert commands._parse_grok_update_check(
+        '{"currentVersion":"0.2.101","latestVersion":"0.2.102","updateAvailable":true}'
+    ) == "0.2.102"
+
+
+@pytest.mark.asyncio
+async def test_detect_grok_cli_latest_uses_read_only_check_command(monkeypatch) -> None:
+    captured: list[tuple[str, ...]] = []
+
+    class _Process:
+        returncode = 0
+
+        async def communicate(self):  # noqa: ANN201
+            return b'{"currentVersion":"0.2.101","latestVersion":"0.2.102"}', None
+
+    async def _create(*args, **_kwargs):  # noqa: ANN002, ANN003, ANN202
+        captured.append(tuple(args))
+        return _Process()
+
+    monkeypatch.setattr(commands.asyncio, "create_subprocess_exec", _create)
+
+    latest, error = await commands._detect_registry_latest("cli:grok-update-check")
+
+    assert captured == [("grok", "update", "--check", "--json")]
+    assert latest == "0.2.102"
+    assert error is None
+
+
+@pytest.mark.asyncio
+async def test_detect_grok_cli_latest_falls_back_when_cli_missing(monkeypatch) -> None:
+    async def _missing(*_args, **_kwargs):  # noqa: ANN002, ANN003, ANN202
+        raise FileNotFoundError
+
+    fallback = AsyncMock(return_value=("0.2.102", None))
+    monkeypatch.setattr(commands.asyncio, "create_subprocess_exec", _missing)
+    monkeypatch.setattr(commands, "_detect_grok_stable_latest", fallback)
+
+    latest, error = await commands._detect_grok_cli_latest()
+
+    assert latest == "0.2.102"
+    assert error is None
+    fallback.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_detect_grok_stable_latest_reads_official_channel(monkeypatch) -> None:
+    requested: list[str] = []
+
+    class _Response:
+        status_code = 200
+        text = "0.2.102\n"
+
+    class _Client:
+        async def __aenter__(self):  # noqa: ANN204
+            return self
+
+        async def __aexit__(self, *args):  # noqa: ANN002, ANN003, ANN204
+            return False
+
+        async def get(self, url: str):  # noqa: ANN001, ANN201
+            requested.append(url)
+            return _Response()
+
+    monkeypatch.setattr(commands.httpx, "AsyncClient", lambda **_kwargs: _Client())
+
+    latest, error = await commands._detect_grok_stable_latest()
+
+    assert latest == "0.2.102"
+    assert error is None
+    assert requested == ["https://x.ai/cli/stable"]
+
+
+@pytest.mark.asyncio
+async def test_detect_grok_cli_latest_falls_back_after_timeout(monkeypatch) -> None:
+    state = {"killed": False, "waited": False}
+
+    class _Process:
+        returncode = None
+
+        async def communicate(self):  # noqa: ANN201
+            raise TimeoutError
+
+        def kill(self) -> None:
+            state["killed"] = True
+
+        async def wait(self) -> None:
+            state["waited"] = True
+
+    async def _create(*_args, **_kwargs):  # noqa: ANN002, ANN003, ANN202
+        return _Process()
+
+    fallback = AsyncMock(return_value=("0.2.102", None))
+    monkeypatch.setattr(commands.asyncio, "create_subprocess_exec", _create)
+    monkeypatch.setattr(commands, "_detect_grok_stable_latest", fallback)
+
+    latest, error = await commands._detect_grok_cli_latest()
+
+    assert latest == "0.2.102"
+    assert error is None
+    assert state == {"killed": True, "waited": True}
+    fallback.assert_awaited_once_with()
 
 
 def test_setting_key_is_stable() -> None:

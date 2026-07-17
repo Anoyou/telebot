@@ -258,6 +258,8 @@ CAPABILITIES_BY_API_FORMAT: dict[str, ProviderCapabilities] = {
         images=True,
         tools=True,
         streaming=True,
+        reasoning=True,
+        reasoning_efforts=frozenset({"low", "medium", "high", "max"}),
     ),
 }
 

@@ -195,18 +195,17 @@ class LLMProviderDTO:
     def capabilities_for_model(self, model: str):
         """Apply optional model metadata over protocol-level capabilities."""
 
-        from ..db.models.command import LLM_PROTOCOL_PROFILE_CLAUDE_CODE_PROXY
         from .llm_protocol import capabilities_for_api_format
 
         api_format = str(self.api_format or "chat_completions")
         capabilities = capabilities_for_api_format(api_format)
-        if (
-            api_format == "anthropic_messages"
-            and self.protocol_profile == LLM_PROTOCOL_PROFILE_CLAUDE_CODE_PROXY
-        ):
+        if api_format == "anthropic_messages":
+            default_efforts = {"low", "medium", "high"}
+            if "opus" in str(model or "").lower():
+                default_efforts.add("max")
             capabilities = capabilities.with_overrides(
                 reasoning=True,
-                reasoning_efforts=frozenset({"minimal", "low", "medium", "high", "xhigh"}),
+                reasoning_efforts=frozenset(default_efforts),
             )
         metadata = next(
             (
@@ -229,7 +228,10 @@ class LLMProviderDTO:
         efforts = metadata.get("reasoning_efforts")
         if isinstance(efforts, list):
             normalized = frozenset(
-                str(item) for item in efforts if str(item) in {"minimal", "low", "medium", "high", "xhigh"}
+                str(item)
+                for item in efforts
+                if str(item)
+                in {"minimal", "low", "medium", "high", "xhigh", "max"}
             )
             overrides["reasoning"] = bool(normalized)
             overrides["reasoning_efforts"] = normalized

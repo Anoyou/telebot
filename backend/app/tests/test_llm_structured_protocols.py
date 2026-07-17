@@ -125,8 +125,9 @@ async def test_chat_legacy_complete_accepts_array_content() -> None:
 
 
 @pytest.mark.asyncio
-async def test_anthropic_claude_code_profile_maps_reasoning_effort() -> None:
-    """Claude Code 协议档必须把 reasoning_effort 显式写入请求体。"""
+@pytest.mark.parametrize("protocol_profile", ["standard", "claude_code_proxy"])
+async def test_anthropic_profiles_map_reasoning_effort(protocol_profile: str) -> None:
+    """两种 Anthropic 协议档都必须把 effort 写入 output_config。"""
     sent_bodies: list[dict] = []
 
     class _StreamResponse:
@@ -166,8 +167,8 @@ async def test_anthropic_claude_code_profile_maps_reasoning_effort() -> None:
         result = await AnthropicClient(
             "sk",
             "https://api.anthropic.com/v1",
-            "claude",
-            protocol_profile="claude_code_proxy",
+            "claude-sonnet-4-6",
+            protocol_profile=protocol_profile,
         ).complete("system", "question", reasoning_effort="high")
 
     assert result.text == "ok"

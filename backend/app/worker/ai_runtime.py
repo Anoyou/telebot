@@ -132,7 +132,7 @@ def _optional_int(value: Any, *, min_value: int, max_value: int) -> int | None:
 
 def _optional_reasoning_effort(value: Any) -> str | None:
     effort = str(value or "").strip().lower()
-    return effort if effort in {"minimal", "low", "medium", "high", "xhigh"} else None
+    return effort if effort in {"minimal", "low", "medium", "high", "xhigh", "max"} else None
 
 
 @dataclass(slots=True)

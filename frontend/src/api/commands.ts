@@ -124,8 +124,7 @@ export async function fetchProviderModels(
   return data;
 }
 
-/** 用编辑表单当前值预览 fetch /models（不落库），让用户不必先保存即可拉模型列表。
- *  Anthropic 不支持，会拿到 422。 */
+/** 用编辑表单当前值预览 fetch /models（不落库），让用户不必先保存即可拉模型列表。 */
 export async function fetchProviderModelsPreview(
   payload: FetchModelsPreviewRequest,
 ): Promise<FetchModelsPreviewResponse> {

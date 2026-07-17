@@ -8,7 +8,7 @@ import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { toast } from "sonner";
-import { Plus, Trash2, KeyRound, Edit3, Download, Loader2, CheckCircle2, XCircle, Star, ChevronDown, ChevronRight, Filter, X, Package, Save, MessageSquare, Zap } from "lucide-react";
+import { ArrowLeft, Plus, Trash2, KeyRound, Edit3, Download, Loader2, CheckCircle2, XCircle, Star, ChevronDown, ChevronRight, Filter, X, Package, Save, MessageSquare } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { CommandBadge } from "@/components/CommandBadge";
@@ -60,7 +60,10 @@ import type { ClientIdentityVersionDetectItem, ClientIdentityVersionItem, Detect
 import { getErrMsg } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { confirmDiscardChanges, useUnsavedChanges } from "@/lib/unsavedChanges";
-import { QuickVerifyProviderPanel } from "@/components/ai/QuickVerifyProviderPanel";
+import {
+  ProviderCreateVerification,
+  type ProviderCreateStage,
+} from "@/components/ai/ProviderCreateVerification";
 
 // 各 provider 的默认 base_url 提示，仅作 placeholder
 const DEFAULT_BASE_URLS: Record<LLMProviderKind, string> = {
@@ -246,11 +249,11 @@ const EMPTY_FORM: FormState = {
   provider: "openai",
   api_key: "",
   base_url: "",
-  default_model: SUGGESTED_MODELS.openai,
-  api_format: "chat_completions",
+  default_model: "",
+  api_format: "responses",
   protocol_profile: "standard",
   web_search_api_format: "auto",
-  client_identity_profile: "auto",
+  client_identity_profile: "codex_cli",
   clearKey: false,
   modality: "text",
   tags: ["chat"],
@@ -268,7 +271,7 @@ export function LLMProviders({
   const qc = useQueryClient();
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
-  const didHandleCreateOnMount = useRef(false);
+  const didHandleCreateOnMount = useRef(openCreateOnMount);
   const providerFilter = searchParams.get("filter");
   const isVisionFilter = providerFilter === "modality:vision";
 
@@ -286,9 +289,10 @@ export function LLMProviders({
     (proxiesListQ.data || []).map((p) => [p.id, p]),
   );
 
-  const [editing, setEditing] = useState<FormState | null>(null);
+  const [editing, setEditing] = useState<FormState | null>(() =>
+    openCreateOnMount ? { ...EMPTY_FORM } : null,
+  );
   const [identityVersionsOpen, setIdentityVersionsOpen] = useState(false);
-  const [quickVerifyOpen, setQuickVerifyOpen] = useState(false);
 
   const visibleProviders = (listQ.data || []).filter((p) => {
     if (!isVisionFilter) return true;
@@ -301,15 +305,23 @@ export function LLMProviders({
     setSearchParams(next, { replace: true });
   };
 
+  const openCreate = () => {
+    const next = new URLSearchParams(searchParams);
+    next.set("newProvider", "1");
+    setSearchParams(next);
+  };
+
+  const closeCreate = () => {
+    setEditing(null);
+    if (searchParams.get("newProvider") !== "1") return;
+    const next = new URLSearchParams(searchParams);
+    next.delete("newProvider");
+    setSearchParams(next, { replace: true });
+  };
+
   useEffect(() => {
     const shouldOpenFromQuery = searchParams.get("newProvider") === "1";
     const shouldOpen = openCreateOnMount || shouldOpenFromQuery;
-
-    if (shouldOpenFromQuery) {
-      const next = new URLSearchParams(searchParams);
-      next.delete("newProvider");
-      setSearchParams(next, { replace: true });
-    }
 
     if (!shouldOpen || didHandleCreateOnMount.current) return;
 
@@ -341,7 +353,7 @@ export function LLMProviders({
     onSuccess: () => {
       toast.success("已新建模型提供商");
       qc.invalidateQueries({ queryKey: ["llm-providers"] });
-      setEditing(null);
+      closeCreate();
     },
     onError: (err) => toast.error(getErrMsg(err)),
   });
@@ -421,9 +433,42 @@ export function LLMProviders({
         enabled: !!m.enabled,
         custom: !!m.custom,
         label: m.label ?? null,
+        supports_tools: m.supports_tools ?? null,
+        supports_images: m.supports_images ?? null,
+        supports_temperature: m.supports_temperature ?? null,
+        reasoning_efforts: m.reasoning_efforts ?? null,
       })),
     });
   };
+
+  const saveEditing = () => {
+    if (!editing) return;
+    if (!editing.name.trim()) {
+      toast.error("名称必填");
+      return;
+    }
+    if (!editing.default_model.trim()) {
+      toast.error("默认模型必填");
+      return;
+    }
+    if (editing.id) {
+      updateMut.mutate(editing);
+    } else {
+      createMut.mutate(editing);
+    }
+  };
+
+  if (editing && !editing.id) {
+    return (
+      <ProviderEditDialog
+        form={editing}
+        onChange={setEditing}
+        onCancel={closeCreate}
+        onSave={saveEditing}
+        saving={createMut.isPending}
+      />
+    );
+  }
 
   return (
     <div className="space-y-6">
@@ -459,36 +504,16 @@ export function LLMProviders({
               <Button
                 type="button"
                 size="sm"
-                variant={quickVerifyOpen ? "default" : "tinted"}
-                className="min-w-0 shadow-sm sm:flex-none"
-                aria-expanded={quickVerifyOpen}
-                onClick={() => setQuickVerifyOpen((open) => !open)}
-              >
-                <Zap className="mr-1 h-4 w-4" /> 快速验证
-              </Button>
-              <Button
-                type="button"
-                size="sm"
                 variant="secondary"
                 className="min-w-0 flex-1 border border-border/80 shadow-sm sm:flex-none"
                 onClick={() => setIdentityVersionsOpen(true)}
               >
                 <KeyRound className="mr-1 h-4 w-4" />客户端身份版本
               </Button>
-              <Button size="sm" className="min-w-0 flex-1 sm:ml-auto sm:flex-none" onClick={() => setEditing({ ...EMPTY_FORM })}>
+              <Button size="sm" className="min-w-0 flex-1 sm:ml-auto sm:flex-none" onClick={openCreate}>
                 <Plus className="mr-1 h-4 w-4" /> 新建
               </Button>
             </div>
-            {quickVerifyOpen ? (
-              <QuickVerifyProviderPanel
-                providers={listQ.data || []}
-                onClose={() => setQuickVerifyOpen(false)}
-                onImported={() => {
-                  qc.invalidateQueries({ queryKey: ["llm-providers"] });
-                  setQuickVerifyOpen(false);
-                }}
-              />
-            ) : null}
           </div>
         </CardHeader>
         <CardContent>
@@ -655,26 +680,12 @@ export function LLMProviders({
         </CardContent>
       </Card>
 
-      {editing && (
+      {editing?.id && (
         <ProviderEditDialog
           form={editing}
           onChange={setEditing}
           onCancel={() => setEditing(null)}
-          onSave={() => {
-            if (!editing.name.trim()) {
-              toast.error("名称必填");
-              return;
-            }
-            if (!editing.default_model.trim()) {
-              toast.error("默认模型必填");
-              return;
-            }
-            if (editing.id) {
-              updateMut.mutate(editing);
-            } else {
-              createMut.mutate(editing);
-            }
-          }}
+          onSave={saveEditing}
           saving={createMut.isPending || updateMut.isPending}
         />
       )}
@@ -768,6 +779,427 @@ function MobileInfo({
   );
 }
 
+const CREATE_STAGE_COPY: Record<ProviderCreateStage, string> = {
+  empty: "待获取模型",
+  fetching: "正在获取模型",
+  select: "请选择模型",
+  selected: "可以开始验证",
+  verifying: "正在流式验证",
+  verified: "验证通过",
+};
+
+function inferredProviderName(baseUrl: string, model: string) {
+  const value = baseUrl.trim();
+  if (value) {
+    try {
+      const hostname = new URL(value).hostname.replace(/^api\./, "");
+      const brand = hostname.split(".")[0];
+      if (brand) return `${brand}-${model.split("-")[0] || "provider"}`.slice(0, 64);
+    } catch {
+      // 非标准 URL 留给模型名兜底。
+    }
+  }
+  return `${model.split("-").slice(0, 2).join("-") || "model"}-provider`.slice(0, 64);
+}
+
+function ProviderCreateWorkspace({
+  form,
+  onChange,
+  onCancel,
+  onSave,
+  saving,
+  verified,
+  onVerificationChange,
+  stage,
+  onStageChange,
+  proxies,
+  proxiesLoading,
+  protocolDetection,
+  detectingProtocol,
+  onDetectProtocol,
+  commandPrefix,
+}: {
+  form: FormState;
+  onChange: (form: FormState) => void;
+  onCancel: () => void;
+  onSave: () => void;
+  saving: boolean;
+  verified: boolean;
+  onVerificationChange: (verified: boolean) => void;
+  stage: ProviderCreateStage;
+  onStageChange: (stage: ProviderCreateStage) => void;
+  proxies: ProxyOut[];
+  proxiesLoading: boolean;
+  protocolDetection: DetectProviderProtocolsResponse | null;
+  detectingProtocol: boolean;
+  onDetectProtocol: () => void;
+  commandPrefix: string;
+}) {
+  const setField = <K extends keyof FormState>(key: K, value: FormState[K]) =>
+    onChange({ ...form, [key]: value });
+  const connectionLocked = stage === "fetching" || stage === "verifying" || saving;
+  const activeStep = verified ? 3 : form.models.length > 0 ? 2 : 1;
+  const defaultBaseUrl = DEFAULT_BASE_URLS[form.provider];
+  const endpoint = form.base_url.trim() || defaultBaseUrl;
+  const enabledModelCount = form.models.filter((model) => model.enabled).length;
+
+  const setApiFormat = (apiFormat: LLMApiFormat) => {
+    const provider: LLMProviderKind =
+      apiFormat === "anthropic_messages" ? "anthropic" : form.provider === "anthropic" ? "openai" : form.provider;
+    onChange({
+      ...form,
+      provider,
+      api_format: apiFormat,
+      protocol_profile: apiFormat === "anthropic_messages" ? form.protocol_profile : "standard",
+      client_identity_profile:
+        apiFormat === "responses"
+          ? "codex_cli"
+          : apiFormat === "anthropic_messages"
+            ? "claude_code"
+            : "openai_sdk",
+      default_model: "",
+      models: [],
+    });
+    onVerificationChange(false);
+  };
+
+  return (
+    <div className="mx-auto w-full max-w-7xl pb-6">
+      <header className="border-b pb-5">
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          className="-ml-2 mb-3 text-muted-foreground"
+          onClick={onCancel}
+        >
+          <ArrowLeft className="mr-1 h-4 w-4" /> 返回模型提供商
+        </Button>
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h1 className="text-xl font-semibold tracking-tight">新建模型提供商</h1>
+            <p className="mt-1 text-sm text-muted-foreground">
+              连接、选模型、验证，然后一次保存。
+            </p>
+          </div>
+          <MetaBadge tone={verified ? "success" : stage === "verifying" || stage === "fetching" ? "info" : "outline"}>
+            {verified ? "可保存" : CREATE_STAGE_COPY[stage]}
+          </MetaBadge>
+        </div>
+        <ol className="mt-5 grid grid-cols-3 gap-2" aria-label="创建步骤">
+          {[
+            { step: 1, label: "接入信息", compactLabel: "接入信息" },
+            { step: 2, label: "选择模型并验证", compactLabel: "模型与验证" },
+            { step: 3, label: "保存", compactLabel: "保存" },
+          ].map(({ step, label, compactLabel }) => {
+            const complete = step < activeStep || verified;
+            const active = step === activeStep;
+            return (
+              <li
+                key={step}
+                className={cn(
+                  "flex min-w-0 items-center gap-2 border-t-2 pt-2 text-xs",
+                  complete || active ? "border-primary text-foreground" : "border-border text-muted-foreground",
+                )}
+              >
+                <span
+                  className={cn(
+                    "grid h-5 w-5 shrink-0 place-items-center rounded-full border text-[10px]",
+                    complete && "border-primary bg-primary text-primary-foreground",
+                    active && !complete && "border-primary text-primary",
+                  )}
+                >
+                  {complete ? <CheckCircle2 className="h-3.5 w-3.5" /> : step}
+                </span>
+                <span className="min-w-0 leading-4">
+                  <span className="sm:hidden">{compactLabel}</span>
+                  <span className="hidden sm:inline">{label}</span>
+                </span>
+              </li>
+            );
+          })}
+        </ol>
+      </header>
+
+      <div className="mt-5 rounded-lg border bg-card p-3 lg:hidden" aria-label="当前配置摘要">
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
+          <span className="font-medium">当前配置</span>
+          <span className="text-muted-foreground">{form.api_format}</span>
+          <span className="text-muted-foreground">{form.client_identity_profile}</span>
+          <span className="max-w-full break-all font-mono">{form.default_model || "待选择模型"}</span>
+        </div>
+      </div>
+
+      <div className="mt-5 grid items-start gap-8 lg:grid-cols-[minmax(0,1fr)_260px]">
+        <main className="min-w-0">
+          <section className="pb-6" aria-labelledby="provider-connect-title">
+            <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <h2 id="provider-connect-title" className="text-base font-semibold">接入信息</h2>
+                <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                  填写真实接入参数，先读取模型列表，不会自动挑选模型发起请求。
+                </p>
+              </div>
+              <MetaBadge tone={stage === "verified" ? "success" : stage === "fetching" || stage === "verifying" ? "info" : "outline"}>
+                {CREATE_STAGE_COPY[stage]}
+              </MetaBadge>
+            </div>
+
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div className="space-y-1.5 sm:col-span-2">
+                <Label htmlFor="provider-create-base-url">Base URL</Label>
+                <Input
+                  id="provider-create-base-url"
+                  value={form.base_url}
+                  maxLength={255}
+                  disabled={connectionLocked}
+                  placeholder={defaultBaseUrl}
+                  onChange={(event) => setField("base_url", event.target.value)}
+                />
+                <p className="text-xs text-muted-foreground">留空使用当前服务类型的默认地址。</p>
+              </div>
+              <div className="space-y-1.5 sm:col-span-2">
+                <Label htmlFor="provider-create-api-key">API Key</Label>
+                <Input
+                  id="provider-create-api-key"
+                  type="password"
+                  value={form.api_key}
+                  maxLength={512}
+                  autoComplete="new-password"
+                  disabled={connectionLocked}
+                  placeholder="sk-..."
+                  onChange={(event) => setField("api_key", event.target.value)}
+                />
+                <p className="text-xs text-muted-foreground">API Key 仅在保存时加密落库，页面不会回显明文。</p>
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="provider-create-api-format">协议</Label>
+                <Select
+                  id="provider-create-api-format"
+                  value={form.api_format}
+                  disabled={connectionLocked}
+                  onChange={(event) => setApiFormat(event.target.value as LLMApiFormat)}
+                >
+                  {API_FORMAT_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>{option.label}</option>
+                  ))}
+                </Select>
+                <p className="text-xs leading-5 text-muted-foreground">
+                  {API_FORMAT_OPTIONS.find((option) => option.value === form.api_format)?.hint}
+                </p>
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="provider-create-client">客户端身份</Label>
+                <Select
+                  id="provider-create-client"
+                  value={form.client_identity_profile}
+                  disabled={connectionLocked}
+                  onChange={(event) => setField("client_identity_profile", event.target.value as LLMClientIdentityProfile)}
+                >
+                  {CLIENT_IDENTITY_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value} disabled={option.disabled}>{option.label}</option>
+                  ))}
+                </Select>
+                <p className="text-xs leading-5 text-muted-foreground">
+                  {CLIENT_IDENTITY_OPTIONS.find((option) => option.value === form.client_identity_profile)?.hint}
+                </p>
+              </div>
+            </div>
+
+            <div className="mt-4 flex flex-wrap items-center gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={detectingProtocol || connectionLocked || (!form.api_key.trim() && form.provider !== "ollama")}
+                onClick={onDetectProtocol}
+              >
+                {detectingProtocol ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : <Download className="mr-1 h-4 w-4" />}
+                自动检测协议
+              </Button>
+              <span className="text-xs text-muted-foreground">不确定兼容协议时再检测，默认使用 Responses + Codex CLI。</span>
+            </div>
+            {protocolDetection ? <div className="mt-3"><ProtocolDetectionPanel result={protocolDetection} /></div> : null}
+          </section>
+
+          <ProviderCreateVerification
+            providerKind={form.provider}
+            apiFormat={form.api_format}
+            protocolProfile={form.protocol_profile}
+            clientIdentityProfile={form.client_identity_profile}
+            baseUrl={form.base_url}
+            apiKey={form.api_key}
+            proxyId={form.proxy_id}
+            models={form.models}
+            onModelsChange={(models) => setField("models", models)}
+            onReset={() => onChange({ ...form, models: [], default_model: "" })}
+            onVerified={(model, models) =>
+              onChange({
+                ...form,
+                name: form.name.trim() || inferredProviderName(endpoint, model),
+                models,
+                default_model: model,
+              })
+            }
+            onVerificationChange={onVerificationChange}
+            onStageChange={onStageChange}
+          />
+
+          <section className="border-t py-6" aria-labelledby="provider-save-title">
+            <div className="mb-4">
+              <h2 id="provider-save-title" className="text-base font-semibold">保存信息</h2>
+              <p className="mt-1 text-xs leading-5 text-muted-foreground">验证通过后自动补全默认模型，并根据接入地址生成名称。</p>
+            </div>
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div className="space-y-1.5">
+                <Label htmlFor="provider-create-name">Provider 名称 *</Label>
+                <Input
+                  id="provider-create-name"
+                  value={form.name}
+                  maxLength={64}
+                  placeholder="验证后自动生成，也可以自行填写"
+                  onChange={(event) => setField("name", event.target.value)}
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="provider-create-default-model">默认模型</Label>
+                <Input
+                  id="provider-create-default-model"
+                  value={form.default_model || "验证后自动选择"}
+                  readOnly
+                  className="font-mono"
+                />
+              </div>
+            </div>
+          </section>
+
+          <details className="group border-t py-5">
+            <summary className="cursor-pointer list-none text-sm font-semibold [&::-webkit-details-marker]:hidden">
+              <span className="inline-flex items-center gap-2">
+                <ChevronRight className="h-4 w-4 transition-transform group-open:rotate-90" />
+                高级设置与路由策略（可选）
+              </span>
+              <span className="mt-1 block pl-6 text-xs font-normal leading-5 text-muted-foreground">
+                服务类型、联网协议、出口代理和自动路由标签，普通接入保持默认即可。
+              </span>
+            </summary>
+            <div className="mt-4 space-y-4 rounded-lg border bg-muted/20 p-4">
+              <div className="grid gap-4 sm:grid-cols-2">
+                <div className="space-y-1.5">
+                  <Label>服务类型</Label>
+                  <Select disabled={connectionLocked} value={form.provider} onChange={(event) => setField("provider", event.target.value as LLMProviderKind)}>
+                    <option value="openai">OpenAI 兼容服务</option>
+                    <option value="anthropic">Anthropic</option>
+                    <option value="ollama">Ollama 本地服务</option>
+                  </Select>
+                </div>
+                <div className="space-y-1.5">
+                  <Label>出口代理</Label>
+                  {proxiesLoading ? (
+                    <div className="flex h-10 items-center gap-2 rounded-md border px-3 text-xs text-muted-foreground"><Spinner className="text-primary" />加载中…</div>
+                  ) : (
+                    <Select disabled={connectionLocked} value={form.proxy_id} onChange={(event) => setField("proxy_id", event.target.value)}>
+                      <option value="">DIRECT，不走代理</option>
+                      {proxies.map((proxy) => (
+                        <option key={proxy.id} value={String(proxy.id)}>#{proxy.id} · {proxy.type} · {proxy.host}:{proxy.port}</option>
+                      ))}
+                    </Select>
+                  )}
+                </div>
+                <div className="space-y-1.5">
+                  <Label>联网搜索协议</Label>
+                  <Select value={form.web_search_api_format} onChange={(event) => setField("web_search_api_format", event.target.value as LLMWebSearchApiFormat)}>
+                    {WEB_SEARCH_API_FORMAT_OPTIONS.map((option) => (
+                      <option key={option.value} value={option.value}>{option.label}</option>
+                    ))}
+                  </Select>
+                </div>
+                <div className="space-y-1.5">
+                  <Label>模态</Label>
+                  <Select value={form.modality} onChange={(event) => setField("modality", event.target.value as LLMModality)}>
+                    {MODALITY_OPTIONS.map((option) => (
+                      <option key={option.value} value={option.value}>{option.label}</option>
+                    ))}
+                  </Select>
+                </div>
+                <div className="space-y-1.5">
+                  <Label>推理成本档</Label>
+                  <Select value={String(form.cost_tier)} onChange={(event) => setField("cost_tier", Number(event.target.value))}>
+                    {COST_TIER_OPTIONS.map((option) => (
+                      <option key={option.value} value={String(option.value)}>{option.label}</option>
+                    ))}
+                  </Select>
+                </div>
+                {form.api_format === "anthropic_messages" ? (
+                  <div className="space-y-1.5">
+                    <Label>Anthropic 请求兼容模式</Label>
+                    <Select disabled={connectionLocked} value={form.protocol_profile} onChange={(event) => setField("protocol_profile", event.target.value as LLMProtocolProfile)}>
+                      <option value="standard">标准 Anthropic API</option>
+                      <option value="claude_code_proxy">Claude Code 反代兼容</option>
+                    </Select>
+                  </div>
+                ) : null}
+              </div>
+              <div className="space-y-2">
+                <Label>自动路由标签</Label>
+                <div className="flex flex-wrap gap-1.5">
+                  {TAG_OPTIONS.map((option) => {
+                    const selected = form.tags.includes(option.value);
+                    return (
+                      <button
+                        key={option.value}
+                        type="button"
+                        title={option.hint}
+                        className={cn(
+                          "rounded-full border px-2.5 py-1 text-xs font-medium transition-colors",
+                          selected ? "border-primary bg-primary text-primary-foreground" : "border-border bg-background hover:bg-muted",
+                        )}
+                        onClick={() => setField("tags", selected ? form.tags.filter((tag) => tag !== option.value) : [...form.tags, option.value])}
+                      >
+                        {option.label}
+                      </button>
+                    );
+                  })}
+                </div>
+                <p className="text-xs leading-5 text-muted-foreground">
+                  只影响自动路由模式下的 {commandPrefix}ai 分配，fixed 模式不会读取这些标签。
+                </p>
+              </div>
+              <div className="space-y-1.5">
+                <Label>备注</Label>
+                <Textarea value={form.notes} rows={2} maxLength={500} placeholder="仅自己可见，不参与路由判断" onChange={(event) => setField("notes", event.target.value)} />
+              </div>
+            </div>
+          </details>
+
+          <div className="sticky bottom-0 z-10 -mx-3 mt-2 flex items-center justify-end gap-2 border-t bg-background/95 px-3 py-3 backdrop-blur sm:static sm:mx-0 sm:bg-transparent sm:px-0 sm:pt-5 sm:backdrop-blur-none">
+            <Button type="button" variant="outline" disabled={saving} onClick={onCancel}>取消</Button>
+            <Button type="button" disabled={saving || !verified || !form.name.trim()} onClick={onSave}>
+              {saving ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Save className="mr-2 h-4 w-4" />}
+              {!verified ? "先验证后保存" : "保存 Provider"}
+            </Button>
+          </div>
+        </main>
+
+        <aside className="sticky top-4 hidden space-y-4 rounded-lg border bg-card p-4 shadow-sm lg:block" aria-label="Provider 配置摘要">
+          <div>
+            <h2 className="text-sm font-semibold">即将创建</h2>
+            <p className="mt-1 text-xs text-muted-foreground">验证通过后自动补全。</p>
+          </div>
+          <dl className="space-y-3 text-xs">
+            <div><dt className="text-muted-foreground">接入地址</dt><dd className="mt-1 break-all font-mono">{endpoint}</dd></div>
+            <div><dt className="text-muted-foreground">实际协议</dt><dd className="mt-1 font-medium">{form.api_format}</dd></div>
+            <div><dt className="text-muted-foreground">客户端身份</dt><dd className="mt-1 font-medium">{form.client_identity_profile}</dd></div>
+            <div><dt className="text-muted-foreground">默认模型</dt><dd className="mt-1 break-all font-mono">{form.default_model || "待选择"}</dd></div>
+            <div><dt className="text-muted-foreground">启用模型</dt><dd className="mt-1 font-medium">{enabledModelCount} 个</dd></div>
+          </dl>
+          <p className="border-t pt-3 text-xs leading-5 text-muted-foreground">路由策略沿用安全默认值，不阻塞首次接入。</p>
+        </aside>
+      </div>
+    </div>
+  );
+}
+
 function ProviderEditDialog({
   form,
   onChange,
@@ -807,6 +1239,8 @@ function ProviderEditDialog({
   });
   const cmdPrefix = settingsQ.data?.command_prefix || ",";
   const [protocolDetection, setProtocolDetection] = useState<DetectProviderProtocolsResponse | null>(null);
+  const [createVerified, setCreateVerified] = useState(isEdit);
+  const [createStage, setCreateStage] = useState<ProviderCreateStage>("empty");
 
   const toggleTag = (tag: LLMTag) => {
     const has = form.tags.includes(tag);
@@ -829,6 +1263,13 @@ function ProviderEditDialog({
         const recommendedApiFormat = resp.recommended_api_format as LLMApiFormat;
         onChange({
           ...form,
+          provider: !isEdit
+            ? recommendedApiFormat === "anthropic_messages"
+              ? "anthropic"
+              : form.provider === "anthropic"
+                ? "openai"
+                : form.provider
+            : form.provider,
           api_format: recommendedApiFormat,
           protocol_profile:
             recommendedApiFormat === "anthropic_messages" ? form.protocol_profile : "standard",
@@ -836,6 +1277,7 @@ function ProviderEditDialog({
           client_identity_profile:
             (resp.recommended_client_identity_profile as LLMClientIdentityProfile) ||
             form.client_identity_profile,
+          ...(!isEdit ? { default_model: "", models: [] } : {}),
         });
         toast.success("已检测并填入推荐协议与客户端身份");
       } else {
@@ -845,17 +1287,96 @@ function ProviderEditDialog({
     onError: (err) => toast.error(getErrMsg(err)),
   });
 
+  if (!isEdit) {
+    return (
+      <ProviderCreateWorkspace
+        form={form}
+        onChange={onChange}
+        onCancel={requestCancel}
+        onSave={onSave}
+        saving={saving}
+        verified={createVerified}
+        onVerificationChange={setCreateVerified}
+        stage={createStage}
+        onStageChange={setCreateStage}
+        proxies={llmUsableProxies}
+        proxiesLoading={proxiesQ.isLoading}
+        protocolDetection={protocolDetection}
+        detectingProtocol={detectProtocolsMut.isPending}
+        onDetectProtocol={() => detectProtocolsMut.mutate()}
+        commandPrefix={cmdPrefix}
+      />
+    );
+  }
+
   return (
     <Dialog open onOpenChange={(o) => !o && requestCancel()}>
-      <DialogContent className="max-h-[85vh] max-w-2xl overflow-y-auto">
-        <DialogHeader>
-          <DialogTitle>{isEdit ? "编辑" : "新建"}模型提供商</DialogTitle>
+      <DialogContent
+        className={cn(
+          isEdit
+            ? "max-h-[90vh] max-w-3xl overflow-y-auto"
+            : "inset-0 left-0 top-0 h-dvh max-h-none w-screen max-w-none translate-x-0 translate-y-0 grid-rows-[auto_minmax(0,1fr)_auto] gap-0 overflow-hidden rounded-none border-0 p-0 [&>button.absolute]:hidden",
+        )}
+      >
+        <DialogHeader
+          className={cn(
+            !isEdit && "border-b bg-background px-4 py-4 sm:px-6",
+          )}
+        >
+          {!isEdit ? (
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="mb-2 w-fit px-0 text-muted-foreground hover:bg-transparent hover:text-foreground"
+              onClick={requestCancel}
+            >
+              <ArrowLeft className="mr-1 h-4 w-4" /> 返回模型提供商
+            </Button>
+          ) : null}
+          <div className={cn(!isEdit && "flex flex-wrap items-start justify-between gap-3")}>
+            <div>
+              <DialogTitle>{isEdit ? "编辑" : "新建"}模型提供商</DialogTitle>
+              {!isEdit ? (
+                <p className="mt-1 text-sm text-muted-foreground">
+                  连接、获取模型、选择档位并完成真实验证，然后一次保存。
+                </p>
+              ) : null}
+            </div>
+            {!isEdit ? <MetaBadge tone={createVerified ? "success" : "outline"}>{createVerified ? "可保存" : "草稿"}</MetaBadge> : null}
+          </div>
           <DialogDescription>
             API Key 加密落库；列表中只显示是否已配置，永远不回显明文。
           </DialogDescription>
+          {!isEdit ? (
+            <ol className="mt-3 grid grid-cols-3 gap-2" aria-label="创建步骤">
+              {[
+                ["1", "接入信息"],
+                ["2", "选择模型并验证"],
+                ["3", "保存"],
+              ].map(([number, label], index) => {
+                const active = createVerified ? index <= 2 : index === 0;
+                return (
+                  <li
+                    key={number}
+                    className={cn(
+                      "flex min-w-0 items-center gap-2 border-t-2 pt-2 text-xs text-muted-foreground",
+                      active && "border-primary text-foreground",
+                      !active && "border-border",
+                    )}
+                  >
+                    <span className={cn("grid h-5 w-5 shrink-0 place-items-center rounded-full border text-[10px]", active && "border-primary bg-primary text-primary-foreground")}>{number}</span>
+                    <span className="min-w-0 leading-4">{label}</span>
+                  </li>
+                );
+              })}
+            </ol>
+          ) : null}
         </DialogHeader>
 
-        <div className="space-y-4">
+        <div className={cn(isEdit ? "space-y-4" : "min-h-0 overflow-y-auto bg-muted/15 px-4 py-5 sm:px-6")}>
+          <div className={cn(!isEdit && "mx-auto grid w-full max-w-6xl items-start gap-6 lg:grid-cols-[minmax(0,1fr)_260px]")}>
+          <div className="space-y-4">
           <div className="space-y-1.5">
             <Label>名称 *</Label>
             <Input
@@ -873,18 +1394,11 @@ function ProviderEditDialog({
                 value={form.provider}
                 onChange={(e) => {
                   const p = e.target.value as LLMProviderKind;
-                  setField("provider", p);
-                  // 切提供商时给出建议默认模型 ID（若用户没改过）
-                  if (
-                    !form.default_model ||
-                    Object.values(SUGGESTED_MODELS).includes(form.default_model)
-                  ) {
-                    onChange({
-                      ...form,
-                      provider: p,
-                      default_model: SUGGESTED_MODELS[p],
-                    });
-                  }
+                  onChange({
+                    ...form,
+                    provider: p,
+                    ...(!isEdit ? { default_model: "", models: [] } : {}),
+                  });
                 }}
               >
                 <option value="openai">OpenAI（兼容协议）</option>
@@ -895,13 +1409,18 @@ function ProviderEditDialog({
             <div className="space-y-1.5">
               <Label>默认模型 ID *</Label>
               <Input
-                value={form.default_model}
+                value={form.default_model || (isEdit ? "" : "完成真实验证后自动填写")}
                 maxLength={64}
-                onChange={(e) => setField("default_model", e.target.value)}
+                readOnly={!isEdit}
+                onChange={(e) => {
+                  if (isEdit) setField("default_model", e.target.value);
+                }}
                 placeholder={SUGGESTED_MODELS[form.provider]}
               />
               <p className="text-xs text-muted-foreground">
-                自动路由 fallback 时用；可在下方"模型管理"区点 ✓ 直接设为此值
+                {isEdit
+                  ? "自动路由 fallback 时使用；可在模型管理区直接设置。"
+                  : "从模型列表选择并验证成功后自动设置，不需要手填。"}
               </p>
             </div>
           </div>
@@ -946,6 +1465,18 @@ function ProviderEditDialog({
                   api_format: apiFormat,
                   protocol_profile:
                     apiFormat === "anthropic_messages" ? form.protocol_profile : "standard",
+                  ...(!isEdit
+                    ? {
+                        client_identity_profile:
+                          apiFormat === "responses"
+                            ? "codex_cli"
+                            : apiFormat === "anthropic_messages"
+                              ? "claude_code"
+                              : "openai_sdk",
+                        default_model: "",
+                        models: [],
+                      }
+                    : {}),
                 });
               }}
             >
@@ -1072,15 +1603,76 @@ function ProviderEditDialog({
             </p>
           </div>
 
-          {/* ── 路由元数据区 ─────────────────────────── */}
-          <div className="rounded-md border bg-muted/30 p-3 space-y-3">
+          {/* 验证必须使用最终保存的出口，因此代理选择放在验证区之前。 */}
+          <div className="space-y-2 rounded-md border bg-muted/30 p-3">
             <div>
-              <Label className="text-sm font-semibold">路由元数据</Label>
+              <Label className="text-sm font-semibold">出口代理</Label>
               <p className="text-xs text-muted-foreground">
-                这些字段决定「自动路由」模式下，一条 <CommandBadge>{cmdPrefix}ai</CommandBadge> 指令的请求是否会被分配给本 provider。
-                只用 fixed 模式可以全留默认。
+                获取模型、真实验证和保存后的请求共用此出口；
+                <code>DIRECT</code> = 直连不走代理。 <span className="text-muted-foreground/80">
+                  代理库在「系统设置 → 代理」管理；mtproxy 不支持，已自动过滤。
+                </span>
               </p>
             </div>
+            {proxiesQ.isLoading ? (
+              <div className="flex h-10 items-center gap-2 rounded-md border px-3 text-xs text-muted-foreground">
+                <Spinner className="text-primary" /> 加载代理列表…
+              </div>
+            ) : (
+              <Select
+                value={form.proxy_id}
+                onChange={(e) => setField("proxy_id", e.target.value)}
+              >
+                <option value="">DIRECT — 不走代理（直连）</option>
+                {llmUsableProxies.map((p) => (
+                  <option key={p.id} value={String(p.id)}>
+                    #{p.id} · {p.type} · {p.host}:{p.port}
+                    {p.username ? ` (${p.username})` : ""}
+                  </option>
+                ))}
+              </Select>
+            )}
+            {!proxiesQ.isLoading &&
+              llmUsableProxies.length === 0 &&
+              form.proxy_id === "" && (
+                <p className="rounded-md border px-3 py-2 text-xs alert-warning">
+                  代理库为空。如果你在中国大陆访问 OpenAI / Anthropic，记得先到
+                  「系统设置 → 代理」添加一条 socks5 / http 代理，再回来选上。
+                </p>
+              )}
+          </div>
+
+          {!isEdit ? (
+            <ProviderCreateVerification
+              providerKind={form.provider}
+              apiFormat={form.api_format}
+              protocolProfile={form.protocol_profile}
+              clientIdentityProfile={form.client_identity_profile}
+              baseUrl={form.base_url}
+              apiKey={form.api_key}
+              proxyId={form.proxy_id}
+              models={form.models}
+              onModelsChange={(next) => setField("models", next)}
+              onReset={() => onChange({ ...form, models: [], default_model: "" })}
+              onVerified={(model, nextModels) =>
+                onChange({ ...form, models: nextModels, default_model: model })
+              }
+              onVerificationChange={setCreateVerified}
+            />
+          ) : null}
+
+          {/* ── 路由元数据区 ─────────────────────────── */}
+          <details className="rounded-md border bg-muted/30 p-3">
+            <summary className="cursor-pointer text-sm font-semibold">
+              高级设置与路由策略（可选）
+            </summary>
+            <div className="mt-3 space-y-3">
+              <div>
+              <p className="text-xs text-muted-foreground">
+                这些字段决定「自动路由」模式下，一条 <CommandBadge>{cmdPrefix}ai</CommandBadge> 指令的请求是否会被分配给本 provider。
+                普通接入或只用 fixed 模式可保持默认。
+              </p>
+              </div>
 
             <div className="grid grid-cols-2 gap-3">
               <div className="space-y-1.5">
@@ -1159,69 +1751,69 @@ function ProviderEditDialog({
                 仅给自己看；路由器不读这个字段。
               </p>
             </div>
-          </div>
+            </div>
+          </details>
 
           {/* ── 模型管理（Fetch + Toggle + 自定义 + 测试）──────── */}
-          <ProviderModelsSection
-            providerId={form.id ?? null}
-            models={form.models}
-            defaultModel={form.default_model}
-            onModelsChange={(next) => setField("models", next)}
-            onSetDefault={(id) => setField("default_model", id)}
-            providerKind={form.provider}
-            apiFormat={form.api_format}
-            baseUrl={form.base_url}
-            apiKey={form.api_key}
-            proxyId={form.proxy_id}
-          />
+          {isEdit ? (
+            <ProviderModelsSection
+              providerId={form.id ?? null}
+              models={form.models}
+              defaultModel={form.default_model}
+              onModelsChange={(next) => setField("models", next)}
+              onSetDefault={(id) => setField("default_model", id)}
+              providerKind={form.provider}
+              apiFormat={form.api_format}
+              baseUrl={form.base_url}
+              apiKey={form.api_key}
+              proxyId={form.proxy_id}
+            />
+          ) : null}
 
-          {/* ── 出口代理 ───────────────────────────── */}
-          <div className="rounded-md border bg-muted/30 p-3 space-y-2">
-            <div>
-              <Label className="text-sm font-semibold">出口代理</Label>
-              <p className="text-xs text-muted-foreground">
-                调 LLM API 的 HTTP 流量走哪个代理。各 provider 可独立选；
-                <code>DIRECT</code> = 直连不走代理。 <span className="text-muted-foreground/80">
-                  代理库在「系统设置 → 代理」管理；mtproxy 不支持，已自动过滤。
-                </span>
-              </p>
-            </div>
-            {proxiesQ.isLoading ? (
-              <div className="flex h-10 items-center gap-2 rounded-md border px-3 text-xs text-muted-foreground">
-                <Spinner className="text-primary" /> 加载代理列表…
+          </div>
+          {!isEdit ? (
+            <aside className="sticky top-0 hidden space-y-4 rounded-md border bg-card p-4 shadow-sm lg:block" aria-label="Provider 配置摘要">
+              <div>
+                <h3 className="text-sm font-semibold">即将创建</h3>
+                <p className="mt-1 text-xs text-muted-foreground">验证通过后自动补全。</p>
               </div>
-            ) : (
-              <Select
-                value={form.proxy_id}
-                onChange={(e) => setField("proxy_id", e.target.value)}
-              >
-                <option value="">DIRECT — 不走代理（直连）</option>
-                {llmUsableProxies.map((p) => (
-                  <option key={p.id} value={String(p.id)}>
-                    #{p.id} · {p.type} · {p.host}:{p.port}
-                    {p.username ? ` (${p.username})` : ""}
-                  </option>
-                ))}
-              </Select>
-            )}
-            {!proxiesQ.isLoading &&
-              llmUsableProxies.length === 0 &&
-              form.proxy_id === "" && (
-                <p className="rounded-md border px-3 py-2 text-xs alert-warning">
-                  代理库为空。如果你在中国大陆访问 OpenAI / Anthropic，记得先到
-                  「系统设置 → 代理」添加一条 socks5 / http 代理，再回来选上。
-                </p>
-              )}
+              <dl className="space-y-3 text-xs">
+                <div>
+                  <dt className="text-muted-foreground">接入地址</dt>
+                  <dd className="mt-1 break-all font-mono">{form.base_url.trim() || DEFAULT_BASE_URLS[form.provider]}</dd>
+                </div>
+                <div>
+                  <dt className="text-muted-foreground">实际协议</dt>
+                  <dd className="mt-1 font-medium">{form.api_format}</dd>
+                </div>
+                <div>
+                  <dt className="text-muted-foreground">客户端身份</dt>
+                  <dd className="mt-1 font-medium">{form.client_identity_profile}</dd>
+                </div>
+                <div>
+                  <dt className="text-muted-foreground">默认模型</dt>
+                  <dd className="mt-1 break-all font-mono">{form.default_model || "待选择"}</dd>
+                </div>
+                <div>
+                  <dt className="text-muted-foreground">启用模型</dt>
+                  <dd className="mt-1 font-medium">{form.models.filter((model) => model.enabled).length} 个</dd>
+                </div>
+              </dl>
+              <p className="border-t pt-3 text-xs leading-5 text-muted-foreground">
+                路由策略沿用安全默认值，不阻塞首次接入。
+              </p>
+            </aside>
+          ) : null}
           </div>
         </div>
 
-        <DialogFooter className="!flex !flex-row gap-2 sm:space-x-0 [&>*]:min-w-0 [&>*]:flex-1 sm:[&>*]:flex-none">
+        <DialogFooter className={cn("!flex !flex-row gap-2 sm:space-x-0 [&>*]:min-w-0 [&>*]:flex-1 sm:[&>*]:flex-none", !isEdit && "border-t bg-background px-4 py-3 sm:px-6")}>
           <Button variant="outline" onClick={requestCancel} disabled={saving}>
             取消
           </Button>
-          <Button onClick={onSave} disabled={saving}>
+          <Button onClick={onSave} disabled={saving || (!isEdit && !createVerified)}>
             {saving ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Save className="mr-2 h-4 w-4" />}
-            保存
+            {!isEdit && !createVerified ? "先验证后保存" : "保存"}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -1476,12 +2068,9 @@ function ProviderModelsSection({
     setCustomId("");
   };
 
-  // Fetch 按钮可用性：anthropic 不支持；新建模式下也允许（用户手填的 api_key 直接用）；
-  // 编辑模式下用户没改 api_key 时后端会回落到 DB 已存的——也允许。
+  // Fetch 按钮可用性：新建模式使用表单内 Key；编辑模式可回落到 DB 已存 Key。
   const fetchDisabledHint =
-    providerKind === "anthropic"
-      ? "Anthropic 不支持列出模型接口，请手动添加"
-      : !persisted && !apiKey.trim() && providerKind !== "ollama"
+    !persisted && !apiKey.trim() && providerKind !== "ollama"
         ? "新建模式下需先填 API Key 才能 Fetch；或先保存让后端用已存 key"
         : null;
 
@@ -1591,7 +2180,7 @@ function ProviderModelsSection({
           type="button"
           size="sm"
           variant="outline"
-          disabled={providerKind === "anthropic" || fetchMut.isPending || !!fetchDisabledHint}
+          disabled={fetchMut.isPending || !!fetchDisabledHint}
           onClick={() => fetchMut.mutate()}
           title={fetchDisabledHint || "用当前表单字段拉模型列表（不必先保存）"}
         >
@@ -1780,7 +2369,9 @@ function IdentityVersionsDialog({
                         <p className="truncate text-sm font-medium">{it.label}</p>
                         <p className="truncate text-xs text-muted-foreground">
                           默认 {it.default}
-                          {it.registry ? ` · 源 ${it.registry}` : " · 仅手动填写"}
+                          {it.registry
+                            ? ` · 源 ${it.registry === "cli:grok-update-check" ? "grok update --check / xAI stable" : it.registry}`
+                            : " · 仅手动填写"}
                         </p>
                       </div>
                       <Input

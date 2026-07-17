@@ -141,14 +141,20 @@ async def discover_models(
     base_url: str,
     api_key: str,
     api_format: str,
+    proxy_url: str | None = None,
     timeout_seconds: int,
 ) -> list[str]:
     timeout = httpx.Timeout(
         min(float(timeout_seconds), 20.0),
         connect=min(float(timeout_seconds), 8.0),
     )
+    client_kwargs: dict[str, object] = {"timeout": timeout}
+    if proxy_url:
+        client_kwargs["proxy"] = proxy_url
+    else:
+        client_kwargs["trust_env"] = False
     try:
-        async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
+        async with httpx.AsyncClient(**client_kwargs) as client:
             response = await client.get(
                 provider_models_endpoint(base_url, api_format),
                 headers=_discovery_headers(api_format, api_key),
@@ -220,7 +226,11 @@ async def quick_verify_events(
     base_url: str,
     api_key: str,
     api_format: str,
+    protocol_profile: str,
+    client_identity_profile: str,
+    proxy_url: str | None,
     model: str | None,
+    reasoning_effort: str | None,
     system_prompt: str,
     message: str,
     max_tokens: int,
@@ -237,6 +247,7 @@ async def quick_verify_events(
                 base_url=base_url,
                 api_key=api_key,
                 api_format=api_format,
+                proxy_url=proxy_url,
                 timeout_seconds=timeout_seconds,
             )
         except LLMError as exc:
@@ -295,12 +306,13 @@ async def quick_verify_events(
         name="quick-verify",
         provider=suggested_provider(api_format, base_url, api_key),
         api_format=api_format,
-        protocol_profile="standard",
-        client_identity_profile="auto",
+        protocol_profile=protocol_profile,
+        client_identity_profile=client_identity_profile,
         web_search_api_format="auto",
         base_url=base_url,
         default_model=selected_model,
         api_key_enc=encrypt_str(api_key) if api_key else None,
+        proxy_url=proxy_url,
     )
 
     try:
@@ -312,6 +324,7 @@ async def quick_verify_events(
                         system_prompt,
                         message,
                         max_tokens=max_tokens,
+                        reasoning_effort=reasoning_effort,
                         timeout_seconds=timeout_seconds,
                     ):
                         if chunk.model:
@@ -342,6 +355,7 @@ async def quick_verify_events(
                         system_prompt,
                         message,
                         max_tokens=max_tokens,
+                        reasoning_effort=reasoning_effort,
                         timeout_seconds=max(1, timeout_seconds - int(elapsed)),
                     )
                     if len(completed.text or "") > max_response_chars:

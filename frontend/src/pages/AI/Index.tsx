@@ -198,6 +198,14 @@ export function AIIndex() {
     setAccountPickerOpen(true);
   };
 
+  if (activeTab === "providers" && searchParams.get("newProvider") === "1") {
+    return (
+      <PageShell>
+        <LLMProviders openCreateOnMount />
+      </PageShell>
+    );
+  }
+
   if (activeTab === "providers") {
     return (
       <PageShell>

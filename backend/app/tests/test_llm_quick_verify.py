@@ -10,7 +10,7 @@ from fastapi import HTTPException
 
 from app.api import commands as commands_api
 from app.crypto import decrypt_str
-from app.schemas.command import QuickVerifyProviderRequest
+from app.schemas.command import FetchModelsPreviewRequest, QuickVerifyProviderRequest
 from app.services import llm_quick_verify
 from app.services.llm_client import LLMError, LLMResult, LLMStreamChunk
 
@@ -20,7 +20,11 @@ async def _collect_events(**overrides):
         "base_url": "https://api.example.test/v1",
         "api_key": "sk-quick-secret-12345678",
         "api_format": "responses",
+        "protocol_profile": "standard",
+        "client_identity_profile": "auto",
+        "proxy_url": None,
         "model": None,
+        "reasoning_effort": None,
         "system_prompt": "请直接回复。",
         "message": "你怎么又不行了？继续。",
         "max_tokens": 400,
@@ -90,6 +94,40 @@ async def test_quick_verify_explicit_model_skips_discovery(monkeypatch) -> None:
         "api_format": "responses",
     }
     assert events[-1]["ok"] is True
+
+
+@pytest.mark.asyncio
+async def test_quick_verify_passes_connection_identity_and_reasoning_to_real_request(
+    monkeypatch,
+) -> None:
+    captured = {}
+
+    class FakeClient:
+        async def stream_complete(self, _system, _message, **kwargs):
+            captured["kwargs"] = kwargs
+            yield LLMStreamChunk(delta="已回复", model="grok-reasoning")
+
+    def build_client(dto):
+        captured["identity"] = dto.client_identity_profile
+        captured["protocol"] = dto.protocol_profile
+        captured["proxy"] = dto.proxy_url
+        return FakeClient()
+
+    monkeypatch.setattr(llm_quick_verify, "build_client_from_dto", build_client)
+    events = await _collect_events(
+        model="grok-reasoning",
+        api_format="anthropic_messages",
+        protocol_profile="claude_code_proxy",
+        client_identity_profile="claude_code",
+        proxy_url="socks5://proxy.example:1080",
+        reasoning_effort="high",
+    )
+
+    assert events[-1]["ok"] is True
+    assert captured["identity"] == "claude_code"
+    assert captured["protocol"] == "claude_code_proxy"
+    assert captured["proxy"] == "socks5://proxy.example:1080"
+    assert captured["kwargs"]["reasoning_effort"] == "high"
 
 
 @pytest.mark.asyncio
@@ -251,10 +289,12 @@ def test_quick_verify_request_strips_values_and_rejects_blank_required_fields() 
         base_url="  https://api.example.test/v1  ",
         api_key="  sk-test  ",
         model="  gpt-5  ",
+        reasoning_effort="max",
     )
     assert payload.base_url == "https://api.example.test/v1"
     assert payload.api_key == "sk-test"
     assert payload.model == "gpt-5"
+    assert payload.reasoning_effort == "max"
 
     with pytest.raises(ValueError):
         QuickVerifyProviderRequest(base_url="   ")
@@ -317,6 +357,63 @@ async def test_quick_verify_discovery_uses_protocol_headers_and_ranks_chat_model
     assert models == ["claude-sonnet", "utility-model"]
 
 
+@pytest.mark.asyncio
+async def test_fetch_models_preview_direct_disables_env_proxy_and_bounds_results(
+    monkeypatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeResponse:
+        status_code = 200
+        text = ""
+
+        @staticmethod
+        def json():
+            return {
+                "data": [
+                    *({"id": f"model-{index}"} for index in range(205)),
+                    {"id": "model-0"},
+                    {"id": "x" * 129},
+                ]
+            }
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def get(self, _url, headers):
+            captured["headers"] = headers
+            return FakeResponse()
+
+    monkeypatch.setattr(commands_api, "_require_ai_enabled", AsyncMock(return_value=None))
+    monkeypatch.setattr(commands_api, "_resolve_proxy_url", AsyncMock(return_value=None))
+    monkeypatch.setattr(commands_api.httpx, "AsyncClient", FakeClient)
+    monkeypatch.setattr(commands_api.audit, "write", AsyncMock(return_value=None))
+    response = await commands_api.fetch_models_preview(
+        payload=FetchModelsPreviewRequest(
+            provider="openai",
+            api_format="responses",
+            base_url="https://api.example.test/v1",
+            api_key="sk-preview",
+        ),
+        db=AsyncMock(),
+        user=AsyncMock(id=1),
+    )
+
+    assert captured["trust_env"] is False
+    assert "proxy" not in captured
+    assert response.fetched == 200
+    assert len(response.ids) == 200
+    assert response.ids[0] == "model-0"
+    assert response.ids[-1] == "model-199"
+
+
 def test_quick_verify_rejects_credentials_embedded_in_base_url() -> None:
     with pytest.raises(ValueError, match="不能包含用户名或密码"):
         llm_quick_verify.normalize_quick_verify_base_url(
@@ -327,10 +424,14 @@ def test_quick_verify_rejects_credentials_embedded_in_base_url() -> None:
 @pytest.mark.asyncio
 async def test_quick_verify_route_returns_ndjson_without_audit(monkeypatch) -> None:
     monkeypatch.setattr(commands_api, "_require_ai_enabled", AsyncMock(return_value=None))
+    resolve_proxy = AsyncMock(return_value="socks5://proxy.example:1080")
+    monkeypatch.setattr(commands_api, "_resolve_proxy_url", resolve_proxy)
     audit_write = AsyncMock(side_effect=AssertionError("临时凭据验证不应写审计"))
     monkeypatch.setattr(commands_api.audit, "write", audit_write)
+    captured: dict[str, object] = {}
 
-    async def fake_events(**_kwargs):
+    async def fake_events(**kwargs):
+        captured.update(kwargs)
         yield {
             "type": "done",
             "ok": True,
@@ -343,6 +444,8 @@ async def test_quick_verify_route_returns_ndjson_without_audit(monkeypatch) -> N
         payload=QuickVerifyProviderRequest(
             base_url="https://api.example.test/v1",
             api_format="responses",
+            protocol_profile="claude_code_proxy",
+            proxy_id=7,
         ),
         db=AsyncMock(),
         _user=AsyncMock(),
@@ -353,6 +456,9 @@ async def test_quick_verify_route_returns_ndjson_without_audit(monkeypatch) -> N
 
     assert json.loads(body)["type"] == "done"
     assert response.headers["cache-control"] == "no-store"
+    resolve_proxy.assert_awaited_once()
+    assert captured["protocol_profile"] == "claude_code_proxy"
+    assert captured["proxy_url"] == "socks5://proxy.example:1080"
     audit_write.assert_not_awaited()
 
 

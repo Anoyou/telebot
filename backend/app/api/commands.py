@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time as _time
 from types import SimpleNamespace
 from typing import Any
@@ -526,13 +527,6 @@ async def fetch_models_preview(
     from ..crypto import decrypt_str
     from ..db.models.command import LLM_API_FORMAT_ANTHROPIC_MESSAGES
 
-    if payload.api_format == LLM_API_FORMAT_ANTHROPIC_MESSAGES:
-        raise _llm_err(
-            "FETCH_NOT_SUPPORTED",
-            "Anthropic Messages 协议没有列出模型接口；请去 docs.anthropic.com 查模型 ID 后手动添加",
-            422,
-        )
-
     # api_key：优先入参，否则回落到 DB 里已存的
     api_key = (payload.api_key or "").strip()
     if not api_key and payload.pid is not None:
@@ -544,16 +538,28 @@ async def fetch_models_preview(
             # pid 错也无所谓，继续走"无 key"路径让用户看到具体的 401
             api_key = ""
 
-    base_url = normalize_base_url(payload.base_url or "https://api.openai.com/v1")
+    default_base_urls = {
+        "openai": "https://api.openai.com/v1",
+        "anthropic": "https://api.anthropic.com/v1",
+        "ollama": "http://localhost:11434/v1",
+    }
+    base_url = normalize_base_url(
+        payload.base_url or default_base_urls[payload.provider]
+    )
     proxy_url = await _resolve_proxy_url(db, payload.proxy_id)
 
     headers = {"Accept": "application/json"}
-    if api_key:
+    if api_key and payload.api_format == LLM_API_FORMAT_ANTHROPIC_MESSAGES:
+        headers["x-api-key"] = api_key
+        headers["anthropic-version"] = "2023-06-01"
+    elif api_key:
         headers["Authorization"] = f"Bearer {api_key}"
 
     client_kwargs: dict[str, object] = {"timeout": httpx.Timeout(15.0, connect=8.0)}
     if proxy_url:
         client_kwargs["proxy"] = proxy_url
+    else:
+        client_kwargs["trust_env"] = False
 
     try:
         async with httpx.AsyncClient(**client_kwargs) as cli:
@@ -590,11 +596,15 @@ async def fetch_models_preview(
             f"响应缺 'data' 数组（实际顶层 keys: {list(data.keys())[:5] if isinstance(data, dict) else type(data).__name__}）",
         )
     new_ids: list[str] = []
+    seen_ids: set[str] = set()
     for it in items:
         if isinstance(it, dict) and isinstance(it.get("id"), str):
             mid = it["id"].strip()
-            if mid:
+            if mid and len(mid) <= 128 and mid not in seen_ids:
+                seen_ids.add(mid)
                 new_ids.append(mid)
+            if len(new_ids) >= 200:
+                break
 
     await audit.write(
         db,
@@ -627,6 +637,7 @@ async def stream_quick_verify_provider(
         base_url = llm_quick_verify.normalize_quick_verify_base_url(payload.base_url)
     except ValueError as exc:
         raise _llm_err("QUICK_VERIFY_BASE_URL", str(exc), 422) from None
+    proxy_url = await _resolve_proxy_url(db, payload.proxy_id)
 
     async def event_source():
         async with llm_liveness.diagnostic_slot():
@@ -634,7 +645,11 @@ async def stream_quick_verify_provider(
                 base_url=base_url,
                 api_key=payload.api_key or "",
                 api_format=payload.api_format,
+                protocol_profile=payload.protocol_profile,
+                client_identity_profile=payload.client_identity_profile,
+                proxy_url=proxy_url,
                 model=payload.model,
+                reasoning_effort=payload.reasoning_effort,
                 system_prompt=payload.system_prompt,
                 message=payload.message,
                 max_tokens=payload.max_tokens,
@@ -2104,14 +2119,17 @@ async def get_client_identity_versions(_user: CurrentUser) -> ClientIdentityVers
 
 
 async def _detect_registry_latest(registry: str) -> tuple[str | None, str | None]:
-    """向公共 registry 查询最新版本（只读，不装 CLI、不落库）。
+    """通过公共 registry 或本机只读 CLI 查询最新版本（不安装、不落库）。
 
-    返回 ``(latest, error)``。支持 ``npm:<pkg>`` 与 ``pypi:<pkg>``。
+    返回 ``(latest, error)``。支持 ``npm:<pkg>``、``pypi:<pkg>`` 与
+    ``cli:grok-update-check``。
     """
     try:
         kind, _, pkg = registry.partition(":")
         if not pkg:
             return None, "无效的检测源"
+        if kind == "cli" and pkg == "grok-update-check":
+            return await _detect_grok_cli_latest()
         async with httpx.AsyncClient(timeout=10.0) as client:
             if kind == "npm":
                 resp = await client.get(f"https://registry.npmjs.org/{pkg}/latest")
@@ -2126,6 +2144,96 @@ async def _detect_registry_latest(registry: str) -> tuple[str | None, str | None
         return None, f"未知检测源类型: {kind}"
     except Exception as exc:  # noqa: BLE001 - 网络异常降级为逐项 error，不抛 500
         return None, f"{type(exc).__name__}: {str(exc)[:80]}"
+
+
+_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+_SEMVER_RE = re.compile(r"(?<![\d.])(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)(?![\d.])")
+_GROK_STABLE_CHANNEL_URL = "https://x.ai/cli/stable"
+
+
+def _parse_grok_update_check(output: str) -> str | None:
+    """提取 ``grok update --check`` 输出中的远端最新版本。"""
+
+    cleaned = _ANSI_ESCAPE_RE.sub("", output or "")
+    try:
+        payload = json.loads(cleaned)
+    except (TypeError, json.JSONDecodeError):
+        payload = None
+    if isinstance(payload, dict):
+        latest = str(payload.get("latestVersion") or "").strip()
+        if _SEMVER_RE.fullmatch(latest):
+            return latest
+    arrow = re.search(
+        r"(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)\s*->\s*"
+        r"(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)",
+        cleaned,
+    )
+    if arrow:
+        return arrow.group(2)
+    versions = _SEMVER_RE.findall(cleaned)
+    return versions[-1] if versions else None
+
+
+async def _detect_grok_stable_latest() -> tuple[str | None, str | None]:
+    """读取 xAI 官方安装器使用的 stable 通道指针。"""
+
+    try:
+        async with httpx.AsyncClient(
+            timeout=10.0,
+            follow_redirects=True,
+            trust_env=False,
+        ) as client:
+            response = await client.get(_GROK_STABLE_CHANNEL_URL)
+    except httpx.HTTPError as exc:
+        return None, f"官方 stable 通道请求失败：{type(exc).__name__}"
+    if response.status_code != 200:
+        return None, f"官方 stable 通道返回 {response.status_code}"
+    latest = response.text.strip().splitlines()[0] if response.text.strip() else ""
+    if _SEMVER_RE.fullmatch(latest):
+        return latest, None
+    return None, "官方 stable 通道未返回可识别的版本号"
+
+
+async def _grok_detection_fallback(primary_error: str) -> tuple[str | None, str | None]:
+    latest, fallback_error = await _detect_grok_stable_latest()
+    if latest:
+        return latest, None
+    return None, f"{primary_error}；{fallback_error}"
+
+
+async def _detect_grok_cli_latest() -> tuple[str | None, str | None]:
+    """执行固定只读命令；无 CLI 时回退 xAI 官方 stable 通道。"""
+
+    try:
+        process = await asyncio.create_subprocess_exec(
+            "grok",
+            "update",
+            "--check",
+            "--json",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+    except FileNotFoundError:
+        return await _grok_detection_fallback("当前运行环境未安装 Grok CLI")
+    try:
+        async with asyncio.timeout(12):
+            stdout, _ = await process.communicate()
+    except TimeoutError:
+        process.kill()
+        await process.wait()
+        return await _grok_detection_fallback("grok update --check 超时")
+    output = stdout.decode("utf-8", errors="replace")
+    if process.returncode != 0:
+        detail = _ANSI_ESCAPE_RE.sub("", output).strip()[:120]
+        return await _grok_detection_fallback(
+            f"grok update --check 失败（{process.returncode}）：{detail or '无输出'}"
+        )
+    latest = _parse_grok_update_check(output)
+    if latest:
+        return latest, None
+    return await _grok_detection_fallback(
+        "grok update --check 未返回可识别的版本号"
+    )
 
 
 @router.post(

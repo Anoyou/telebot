@@ -1293,7 +1293,7 @@ export interface AICommandConfig {
   /** 采样温度，0 更稳定，2 更发散；空表示不覆盖 provider 默认值 */
   temperature?: number;
   /** 推理模型的思考预算；当前主要用于 OpenAI Chat/Responses 协议 */
-  reasoning_effort?: "minimal" | "low" | "medium" | "high" | "xhigh";
+  reasoning_effort?: "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
   /** 单次 API 调用超时时间，单位秒 */
   timeout_seconds?: number;
   // ── 路由（Sprint2 #2 路由扩展）──
@@ -1359,6 +1359,7 @@ export type LLMProviderKind = "openai" | "anthropic" | "ollama";
  * 切到对应 api_format 即可解决报 404 / "模型不支持" 一类问题。
  */
 export type LLMApiFormat = "chat_completions" | "responses" | "anthropic_messages";
+export type LLMReasoningEffort = "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 export type LLMWebSearchApiFormat = "auto" | LLMApiFormat;
 export type LLMProtocolProfile = "standard" | "claude_code_proxy";
 /**
@@ -1391,7 +1392,7 @@ export interface ProviderModel {
   supports_tools?: boolean | null;
   supports_images?: boolean | null;
   supports_temperature?: boolean | null;
-  reasoning_efforts?: Array<"minimal" | "low" | "medium" | "high" | "xhigh"> | null;
+  reasoning_efforts?: LLMReasoningEffort[] | null;
 }
 
 /**
@@ -1544,7 +1545,11 @@ export interface QuickVerifyProviderRequest {
   base_url: string;
   api_key?: string | null;
   api_format: LLMApiFormat;
+  protocol_profile?: LLMProtocolProfile;
+  client_identity_profile?: LLMClientIdentityProfile;
   model?: string | null;
+  reasoning_effort?: LLMReasoningEffort | null;
+  proxy_id?: number | null;
   system_prompt?: string;
   message?: string;
   max_tokens?: number;

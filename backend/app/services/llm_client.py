@@ -118,7 +118,7 @@ def _normalize_temperature(value: float | None) -> float | None:
 
 def _normalize_reasoning_effort(value: str | None) -> str | None:
     effort = (value or "").strip().lower()
-    return effort if effort in {"minimal", "low", "medium", "high", "xhigh"} else None
+    return effort if effort in {"minimal", "low", "medium", "high", "xhigh", "max"} else None
 
 
 @dataclass
@@ -1752,9 +1752,16 @@ class AnthropicClient(LLMClient):
             )
         if normalized is None:
             return
-        if self._protocol_profile != LLM_PROTOCOL_PROFILE_CLAUDE_CODE_PROXY:
+        if normalized not in {"low", "medium", "high", "max"}:
             raise LLMError(
-                "Anthropic standard profile 未声明 reasoning_effort 能力",
+                f"Anthropic 不支持 reasoning_effort={normalized}",
+                scope=LLMErrorScope.REQUEST_INVALID,
+            )
+        if normalized == "max" and any(
+            family in self._model.lower() for family in ("sonnet", "haiku")
+        ):
+            raise LLMError(
+                "Anthropic max 推理强度仅适用于 Opus 系列模型",
                 scope=LLMErrorScope.CAPABILITY_MISMATCH,
             )
         body["output_config"] = {"effort": normalized}

@@ -4,7 +4,7 @@
 //   列表页：全表展示模板，name 徽章 type，编辑/删除按钮
 //   编辑对话框：根据 type 切不同子表单
 //   保存后后端会通知所有启用此模板的 worker 热加载
-import { forwardRef, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import { forwardRef, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { ChevronDown, Loader2, Plus, Save, Trash2, Edit3 } from "lucide-react";
@@ -18,6 +18,11 @@ import { Select } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { Badge } from "@/components/ui/badge";
 import { OutputFormatFields } from "@/components/ai/OutputFormatFields";
+import {
+  ReasoningEffortSelect,
+  reasoningEffortsForModel,
+  type ReasoningEffortValue,
+} from "@/components/ai/ReasoningEffortSelect";
 import { RoutingFields } from "@/components/ai/RoutingFields";
 import { WebSearchFields } from "@/components/ai/WebSearchFields";
 import { CommandBadge } from "@/components/CommandBadge";
@@ -61,6 +66,7 @@ import { getSystemSettings, patchSystemSettings } from "@/api/system";
 import type {
   CommandTemplateOut,
   CommandTemplateType,
+  LLMApiFormat,
   LLMProviderOut,
 } from "@/api/types";
 import { getErrMsg } from "@/lib/api";
@@ -79,19 +85,7 @@ const TYPE_LABELS: Record<CommandTemplateType, string> = {
 
 type AiCapability = "routing" | "search" | "output" | "params";
 type AiCommandMode = "chat" | "search" | "image" | "video";
-type AiReasoningEffort = "" | "minimal" | "low" | "medium" | "high" | "xhigh";
-
-const AI_REASONING_OPTIONS: Array<{
-  value: AiReasoningEffort;
-  label: string;
-}> = [
-  { value: "", label: "自动" },
-  { value: "minimal", label: "极低" },
-  { value: "low", label: "低" },
-  { value: "medium", label: "中" },
-  { value: "high", label: "高" },
-  { value: "xhigh", label: "极高" },
-];
+type AiReasoningEffort = ReasoningEffortValue;
 
 const AI_MODE_DEFAULTS: Record<
   AiCommandMode,
@@ -203,63 +197,6 @@ function normalizeAiMode(value: unknown): AiCommandMode {
   return value === "search" || value === "image" || value === "video" ? value : "chat";
 }
 
-function ReasoningEffortSlider({
-  value,
-  onChange,
-}: {
-  value: AiReasoningEffort;
-  onChange: (value: AiReasoningEffort) => void;
-}) {
-  const selectedIndex = Math.max(
-    0,
-    AI_REASONING_OPTIONS.findIndex((option) => option.value === value),
-  );
-  const progress = (selectedIndex / (AI_REASONING_OPTIONS.length - 1)) * 100;
-  const selected = AI_REASONING_OPTIONS[selectedIndex];
-  const extreme = selected.value === "xhigh";
-  const thumbOffset = 1.25 - progress * 0.025;
-  const style = {
-    "--reasoning-progress": `${progress}%`,
-    "--reasoning-thumb-position": `calc(${progress}% + ${thumbOffset}rem)`,
-  } as CSSProperties;
-
-  return (
-    <div className={cn("reasoning-effort", extreme && "reasoning-effort-extreme")} style={style}>
-      <div className="reasoning-effort-track" aria-hidden="true">
-        <div className="reasoning-effort-fill" />
-        <div className="reasoning-effort-stops">
-          {AI_REASONING_OPTIONS.map((option, index) => (
-            <span
-              key={option.label}
-              className={cn("reasoning-effort-stop", index <= selectedIndex && "is-active")}
-            />
-          ))}
-        </div>
-        <div className="reasoning-effort-thumb" />
-        {extreme ? (
-          <div className="reasoning-effort-sparks">
-            {Array.from({ length: 9 }, (_, index) => <i key={index} />)}
-          </div>
-        ) : null}
-      </div>
-      <input
-        type="range"
-        min={0}
-        max={AI_REASONING_OPTIONS.length - 1}
-        step={1}
-        value={selectedIndex}
-        aria-label="推理强度"
-        aria-valuetext={`${selected.label}${selected.value ? `，${selected.value}` : "，使用提供商默认值"}`}
-        onChange={(event) => onChange(AI_REASONING_OPTIONS[Number(event.target.value)].value)}
-      />
-      <div className="reasoning-effort-caption">
-        <span className={cn("font-medium", extreme && "text-[hsl(270_92%_70%)]")}>{selected.label}</span>
-        <span>{selected.value || "使用提供商默认"}</span>
-      </div>
-    </div>
-  );
-}
-
 function applyAiModeDefaults(form: FormState, nextMode: AiCommandMode): Partial<FormState> {
   const currentDefaults = AI_MODE_DEFAULTS[form.ai_mode];
   const nextDefaults = AI_MODE_DEFAULTS[nextMode];
@@ -331,9 +268,10 @@ function formFromTemplate(t: CommandTemplateOut): FormState {
     ai_reasoning_effort:
       cfg.reasoning_effort === "minimal" ||
         cfg.reasoning_effort === "low" ||
-        cfg.reasoning_effort === "medium" ||
-        cfg.reasoning_effort === "high" ||
-        cfg.reasoning_effort === "xhigh"
+      cfg.reasoning_effort === "medium" ||
+      cfg.reasoning_effort === "high" ||
+      cfg.reasoning_effort === "xhigh" ||
+      cfg.reasoning_effort === "max"
         ? cfg.reasoning_effort
         : modeDefaults.reasoning_effort,
     ai_timeout_seconds:
@@ -1189,6 +1127,19 @@ function CommandEditDialog({
     enabled: aiEnabled && form.type === "ai",
     retry: false,
   });
+  const selectedReasoningProvider = useMemo(
+    () =>
+      (providersQ.data || []).find(
+        (provider) => String(provider.id) === form.ai_provider_id,
+      ) || null,
+    [form.ai_provider_id, providersQ.data],
+  );
+  const selectedReasoningModelId =
+    form.ai_model.trim() || selectedReasoningProvider?.default_model || "";
+  const selectedReasoningModel =
+    selectedReasoningProvider?.models?.find(
+      (model) => model.id === selectedReasoningModelId,
+    ) || null;
 
   // 切类型时清相邻字段，避免上次填的脏数据落到 config
   const typeOptions = useMemo(
@@ -1299,26 +1250,28 @@ function CommandEditDialog({
             </div>
           </div>
 
-          <div className="space-y-1.5">
-            <Label>说明（可选）</Label>
-            <Input
-              value={form.description}
-              maxLength={255}
-              placeholder={`便于 ${cmdPrefix}help 显示`}
-              onChange={(e) => setField("description", e.target.value)}
-            />
-          </div>
-          <div className="space-y-1.5">
-            <Label>别名 / 短指令（可选）</Label>
-            <Input
-              value={form.aliases_text}
-              maxLength={255}
-              placeholder="t, trans, tr"
-              onChange={(e) => setField("aliases_text", e.target.value)}
-            />
-            <p className="text-xs text-muted-foreground">
-              用逗号或空格分隔，规则同指令名；例如 <code>t, trans</code>
-            </p>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div className="space-y-1.5">
+              <Label>说明（可选）</Label>
+              <Input
+                value={form.description}
+                maxLength={255}
+                placeholder={`便于 ${cmdPrefix}help 显示`}
+                onChange={(e) => setField("description", e.target.value)}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label>别名 / 短指令（可选）</Label>
+              <Input
+                value={form.aliases_text}
+                maxLength={255}
+                placeholder="t, trans, tr"
+                onChange={(e) => setField("aliases_text", e.target.value)}
+              />
+              <p className="text-xs text-muted-foreground">
+                逗号或空格分隔，例如 <code>t, trans</code>
+              </p>
+            </div>
           </div>
 
           {/* 按 type 切不同子表单 */}
@@ -1582,7 +1535,27 @@ function CommandEditDialog({
                       }
                       const pid = v.slice(0, sep);
                       const model = v.slice(sep + 1);
-                      setFields({ ai_provider_id: pid, ai_model: model });
+                      const provider = (providersQ.data || []).find(
+                        (item) => String(item.id) === pid,
+                      );
+                      const modelId = model || provider?.default_model || "";
+                      const metadata = provider?.models?.find(
+                        (item) => item.id === modelId,
+                      );
+                      const capability = reasoningEffortsForModel({
+                        declared: metadata?.reasoning_efforts,
+                        apiFormat: (provider?.api_format as LLMApiFormat) || "responses",
+                        modelId,
+                      });
+                      const currentEffort = form.ai_reasoning_effort;
+                      setFields({
+                        ai_provider_id: pid,
+                        ai_model: model,
+                        ai_reasoning_effort:
+                          currentEffort && !capability.efforts.includes(currentEffort)
+                            ? ""
+                            : currentEffort,
+                      });
                     }}
                   />
                   <p className="text-xs text-muted-foreground">
@@ -1694,12 +1667,15 @@ function CommandEditDialog({
                     </div>
                     <div className="space-y-1.5">
                       <Label>推理强度（reasoning_effort）</Label>
-                      <ReasoningEffortSlider
+                      <ReasoningEffortSelect
                         value={form.ai_reasoning_effort}
                         onChange={(effort) => setField("ai_reasoning_effort", effort)}
+                        declaredEfforts={selectedReasoningModel?.reasoning_efforts}
+                        apiFormat={(selectedReasoningProvider?.api_format as LLMApiFormat) || "responses"}
+                        modelId={selectedReasoningModelId}
                       />
                       <p className="text-xs text-muted-foreground">
-                        当前模式默认 {AI_MODE_DEFAULTS[form.ai_mode].reasoning_effort || "不下发"}；控制支持推理模型的思考预算，当前对 OpenAI Chat/Responses 协议下发。
+                        当前模式建议 {AI_MODE_DEFAULTS[form.ai_mode].reasoning_effort || "Off"}；切换模型时会按该模型声明的档位过滤，不兼容值自动回到 Off。
                       </p>
                     </div>
                     <div className="space-y-1.5">
