@@ -1456,6 +1456,10 @@ export interface LLMProviderOut {
   created_at: string;
 }
 
+export interface LLMProviderApiKeyReveal {
+  api_key: string;
+}
+
 export interface LLMProviderCreate {
   name: string;
   provider: LLMProviderKind;
