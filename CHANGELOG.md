@@ -20,7 +20,8 @@
 
 ## [Unreleased]
 
-暂无已记录变更。
+### Added
+- **System Agent 阶段 1（只读助手，开发中）**：新增 `/assistant` Web 工作台与管理 Bot `/agent`，共用 System Agent Runtime、工具注册表与会话/消息持久化；固定 tools Provider 配置；NDJSON 对话流；约 19 个只读工具覆盖系统上下文、账号、交互规则、通用 Rule、Scheduler、Provider、指令、功能矩阵、日志与台账（「今日」按系统时区日界线）。
 
 ## [0.63.0] — 2026-07-17 · minor（次版本） · 新建 Provider 验证工作流
 

@@ -11,6 +11,7 @@ import {
   FileText,
   History,
   LayoutDashboard,
+  MessageCircle,
   Package,
   Power,
   PlusCircle,
@@ -548,6 +549,11 @@ function Subnav({
             icon={FileText}
             title="查看指令"
             to="/plugins/templates"
+          />
+          <AIActionCard
+            icon={MessageCircle}
+            title="配置系统助手"
+            to="/assistant"
           />
           <AIHelpMenu
             open={helpOpen}

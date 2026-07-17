@@ -1,0 +1,219 @@
+"""System Agent HTTP API：配置、会话、NDJSON 消息流。"""
+
+from __future__ import annotations
+
+import json
+from typing import Any
+
+from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import StreamingResponse
+
+from ..db.models.system_agent import CHANNEL_WEB, SESSION_STATUS_ACTIVE
+from ..deps import CurrentUser, DBSession
+from ..schemas.system_agent import (
+    SystemAgentCapabilitiesOut,
+    SystemAgentConfigOut,
+    SystemAgentConfigPatch,
+    SystemAgentMessageCreate,
+    SystemAgentMessageOut,
+    SystemAgentSessionCreate,
+    SystemAgentSessionOut,
+    SystemAgentSessionUpdate,
+)
+from ..services.system_agent import get_system_agent_service
+
+router = APIRouter(prefix="/api/system-agent", tags=["system-agent"])
+
+
+def _err(code: str, message: str, status: int = 400) -> HTTPException:
+    return HTTPException(status_code=status, detail={"code": code, "message": message})
+
+
+def _session_out(row: Any) -> SystemAgentSessionOut:
+    return SystemAgentSessionOut.model_validate(row)
+
+
+# ── 配置 ─────────────────────────────────────────────────────────
+@router.get("/config", response_model=SystemAgentConfigOut)
+async def get_config(db: DBSession, _user: CurrentUser) -> SystemAgentConfigOut:
+    svc = get_system_agent_service()
+    cfg = await svc.get_config(db)
+    return SystemAgentConfigOut(**cfg)
+
+
+@router.patch("/config", response_model=SystemAgentConfigOut)
+async def patch_config(
+    payload: SystemAgentConfigPatch,
+    db: DBSession,
+    _user: CurrentUser,
+) -> SystemAgentConfigOut:
+    svc = get_system_agent_service()
+    patch = payload.model_dump(exclude_unset=True)
+    cfg = await svc.update_config(db, patch)
+    await db.commit()
+    return SystemAgentConfigOut(**cfg)
+
+
+@router.get("/capabilities", response_model=SystemAgentCapabilitiesOut)
+async def get_capabilities(db: DBSession, _user: CurrentUser) -> SystemAgentCapabilitiesOut:
+    svc = get_system_agent_service()
+    data = await svc.get_capabilities(db, channel=CHANNEL_WEB, role="admin")
+    return SystemAgentCapabilitiesOut(**data)
+
+
+# ── 会话 ─────────────────────────────────────────────────────────
+@router.post("/sessions", response_model=SystemAgentSessionOut)
+async def create_session(
+    payload: SystemAgentSessionCreate,
+    db: DBSession,
+    user: CurrentUser,
+) -> SystemAgentSessionOut:
+    svc = get_system_agent_service()
+    session = await svc.create_session(
+        db,
+        channel=CHANNEL_WEB,
+        web_user_id=user.id,
+        account_id=payload.account_id,
+        title=payload.title,
+    )
+    await db.commit()
+    await db.refresh(session)
+    return _session_out(session)
+
+
+@router.get("/sessions", response_model=list[SystemAgentSessionOut])
+async def list_sessions(
+    db: DBSession,
+    user: CurrentUser,
+    status: str | None = Query(default=SESSION_STATUS_ACTIVE),
+    limit: int = Query(default=50, ge=1, le=200),
+) -> list[SystemAgentSessionOut]:
+    svc = get_system_agent_service()
+    rows = await svc.list_sessions(db, web_user_id=user.id, status=status, limit=limit)
+    return [_session_out(r) for r in rows]
+
+
+@router.get("/sessions/{session_id}", response_model=SystemAgentSessionOut)
+async def get_session(
+    session_id: str,
+    db: DBSession,
+    user: CurrentUser,
+) -> SystemAgentSessionOut:
+    svc = get_system_agent_service()
+    session = await svc.get_session(db, session_id, web_user_id=user.id)
+    if session is None:
+        raise _err("SESSION_NOT_FOUND", "会话不存在", 404)
+    return _session_out(session)
+
+
+@router.patch("/sessions/{session_id}", response_model=SystemAgentSessionOut)
+async def update_session(
+    session_id: str,
+    payload: SystemAgentSessionUpdate,
+    db: DBSession,
+    user: CurrentUser,
+) -> SystemAgentSessionOut:
+    svc = get_system_agent_service()
+    session = await svc.get_session(db, session_id, web_user_id=user.id)
+    if session is None:
+        raise _err("SESSION_NOT_FOUND", "会话不存在", 404)
+    try:
+        await svc.update_session(
+            db,
+            session,
+            title=payload.title,
+            status=payload.status,
+            account_id=payload.account_id if "account_id" in payload.model_fields_set else ...,
+        )
+    except ValueError as exc:
+        raise _err("INVALID_SESSION", str(exc)) from None
+    await db.commit()
+    await db.refresh(session)
+    return _session_out(session)
+
+
+@router.delete("/sessions/{session_id}")
+async def delete_session(
+    session_id: str,
+    db: DBSession,
+    user: CurrentUser,
+) -> dict[str, Any]:
+    svc = get_system_agent_service()
+    session = await svc.get_session(db, session_id, web_user_id=user.id)
+    if session is None:
+        raise _err("SESSION_NOT_FOUND", "会话不存在", 404)
+    await svc.delete_session(db, session)
+    await db.commit()
+    return {"ok": True, "deleted": session_id}
+
+
+@router.delete("/sessions")
+async def delete_all_sessions(db: DBSession, user: CurrentUser) -> dict[str, Any]:
+    svc = get_system_agent_service()
+    count = await svc.delete_all_sessions(db, web_user_id=user.id)
+    await db.commit()
+    return {"ok": True, "deleted": count}
+
+
+# ── 消息 ─────────────────────────────────────────────────────────
+@router.get("/sessions/{session_id}/messages", response_model=list[SystemAgentMessageOut])
+async def list_messages(
+    session_id: str,
+    db: DBSession,
+    user: CurrentUser,
+    limit: int = Query(default=100, ge=1, le=500),
+    before_id: int | None = Query(default=None),
+) -> list[SystemAgentMessageOut]:
+    svc = get_system_agent_service()
+    session = await svc.get_session(db, session_id, web_user_id=user.id)
+    if session is None:
+        raise _err("SESSION_NOT_FOUND", "会话不存在", 404)
+    rows = await svc.list_messages(db, session_id, limit=limit, before_id=before_id)
+    return [SystemAgentMessageOut.model_validate(r) for r in rows]
+
+
+@router.post("/sessions/{session_id}/messages/stream")
+async def stream_message(
+    session_id: str,
+    payload: SystemAgentMessageCreate,
+    db: DBSession,
+    user: CurrentUser,
+) -> StreamingResponse:
+    svc = get_system_agent_service()
+    session = await svc.get_session(db, session_id, web_user_id=user.id)
+    if session is None:
+        raise _err("SESSION_NOT_FOUND", "会话不存在", 404)
+
+    # 可选更新账号上下文
+    if payload.account_id is not None and session.account_id != payload.account_id:
+        await svc.update_session(db, session, account_id=payload.account_id)
+
+    async def event_source():
+        try:
+            async for event in svc.stream_message(
+                db,
+                session=session,
+                text=payload.content,
+                role="admin",
+                channel=CHANNEL_WEB,
+                web_user_id=user.id,
+            ):
+                yield json.dumps(event, ensure_ascii=False, default=str, separators=(",", ":")) + "\n"
+            await db.commit()
+        except Exception as exc:  # noqa: BLE001
+            await db.rollback()
+            err = {
+                "type": "error",
+                "code": "STREAM_FAILED",
+                "message": str(exc)[:500],
+                "session_id": session_id,
+            }
+            yield json.dumps(err, ensure_ascii=False, separators=(",", ":")) + "\n"
+            done = {"type": "done", "ok": False, "session_id": session_id}
+            yield json.dumps(done, ensure_ascii=False, separators=(",", ":")) + "\n"
+
+    return StreamingResponse(
+        event_source(),
+        media_type="application/x-ndjson",
+        headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
+    )

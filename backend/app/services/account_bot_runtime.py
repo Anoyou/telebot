@@ -2276,6 +2276,33 @@ async def _handle_update(aid: int, token: str, update: dict[str, Any]) -> None:
                 reason_code="command_not_matched",
             )
             return
+        # 系统助手模式：既有斜杠命令始终优先；非命令自由文本进入 Agent。
+        text_body = (incoming.text or "").strip()
+        is_slash = text_body.startswith("/")
+        if not is_slash and incoming.user_id is not None:
+            from .system_agent import bot_bridge as system_agent_bot
+
+            if await system_agent_bot.is_agent_mode(incoming.account_id, incoming.user_id):
+                await record_span(
+                    trace,
+                    "route",
+                    TRACE_STATUS_OK,
+                    component="account_bot_agent",
+                    reason_code="agent_mode_text",
+                )
+
+                async def _agent_send(msg: str, *, edit: bool = False) -> None:
+                    await _send(incoming, msg, edit=edit)
+
+                await system_agent_bot.run_agent_query(
+                    account_id=incoming.account_id,
+                    tg_user_id=incoming.user_id,
+                    role=role,
+                    text=text_body,
+                    send=_agent_send,
+                )
+                final_status = TRACE_STATUS_OK
+                return
         await record_span(
             trace,
             "route",
@@ -8305,27 +8332,45 @@ def _command_tail(text: str) -> str:
 
 async def _handle_command(incoming: Incoming, role: str) -> None:
     command = (incoming.text.split(maxsplit=1)[0] or "/start").lower()
-    if command.startswith("/start"):
+    # 兼容 /agent@BotName
+    command_base = command.split("@", 1)[0]
+    if command_base.startswith("/start"):
         await _show_start(incoming, role)
-    elif command.startswith("/help"):
+    elif command_base.startswith("/help"):
         await _show_help(incoming, role)
-    elif command.startswith("/status"):
+    elif command_base.startswith("/status"):
         await _show_status(incoming)
-    elif command.startswith("/features"):
+    elif command_base.startswith("/features"):
         await _show_features(incoming, role)
-    elif command.startswith("/commands"):
+    elif command_base.startswith("/commands"):
         await _show_commands(incoming, role)
-    elif command.startswith("/plugins"):
+    elif command_base.startswith("/plugins"):
         await _handle_plugins_command(incoming, role)
-    elif command.startswith("/rules"):
+    elif command_base.startswith("/rules"):
         await _show_rules(incoming, role)
-    elif command.startswith("/logs"):
+    elif command_base.startswith("/logs"):
         await _show_logs(incoming)
-    elif command.startswith("/pause"):
+    elif command_base.startswith("/agent"):
+        if incoming.user_id is None:
+            await _send(incoming, "无法识别 Telegram 用户。")
+            return
+        from .system_agent import bot_bridge as system_agent_bot
+
+        async def _agent_send(msg: str, *, edit: bool = False) -> None:
+            await _send(incoming, msg, edit=edit)
+
+        await system_agent_bot.handle_agent_command(
+            account_id=incoming.account_id,
+            tg_user_id=incoming.user_id,
+            role=role,
+            text=incoming.text or "",
+            send=_agent_send,
+        )
+    elif command_base.startswith("/pause"):
         await _pause_account(incoming, role)
-    elif command.startswith("/resume"):
+    elif command_base.startswith("/resume"):
         await _resume_account(incoming, role)
-    elif command.startswith("/restart"):
+    elif command_base.startswith("/restart"):
         await _request_confirm(incoming, role, "restart", "重启账号 worker")
     else:
         await _send(incoming, "未知命令。发送 /help 查看可用操作。", reply_markup=_main_keyboard(incoming.account_id))
@@ -8430,6 +8475,7 @@ async def _show_help(incoming: Incoming, role: str, *, edit: bool = False) -> No
         "  /plugins uninstall &lt;name&gt; 卸载远程插件\n"
         "/rules 查看规则，scheduler 规则可手动执行\n"
         "/logs 查看最近运行日志\n"
+        "/agent 系统助手（自然语言只读查询）\n"
         "/pause /resume 暂停或恢复账号\n"
         "/restart 重启账号 worker（admin + 二次确认）\n\n"
         "<b>角色说明</b>\n"
@@ -8447,6 +8493,7 @@ async def _show_help(incoming: Incoming, role: str, *, edit: bool = False) -> No
         "<tr><td><code>/plugins</code></td><td>查看插件与高风险入口</td></tr>"
         "<tr><td><code>/rules</code></td><td>查看规则并执行 Scheduler</td></tr>"
         "<tr><td><code>/logs</code></td><td>查看最近运行日志</td></tr>"
+        "<tr><td><code>/agent</code></td><td>系统助手自然语言只读查询</td></tr>"
         "<tr><td><code>/pause</code> / <code>/resume</code></td><td>暂停或恢复账号</td></tr>"
         "<tr><td><code>/restart</code></td><td>重启 Worker，需要二次确认</td></tr>"
         "</table>"

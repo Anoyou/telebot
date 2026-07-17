@@ -15,6 +15,7 @@ import {
   Cog,
   Github,
   Home,
+  MessageCircle,
   ScrollText,
   Sparkles,
   WalletCards,
@@ -43,6 +44,7 @@ interface NavItem {
 // 首页承载概览 + 账号操作，AI 能力收敛到插件中心。
 const NAV: NavItem[] = [
   { to: "/", label: "概览", icon: Home, end: true },
+  { to: "/assistant", label: "系统助手", icon: MessageCircle },
   { to: "/plugins", label: "插件", icon: Boxes },
   { to: "/ai", label: "AI", icon: Sparkles },
   { to: "/interaction", label: "交互", icon: Bot },
@@ -60,6 +62,7 @@ function navForAIState(aiEnabled: boolean): NavItem[] {
 export function mobilePrimaryNavForAIState(aiEnabled: boolean): NavItem[] {
   return navForAIState(aiEnabled).filter((item) =>
     item.to === "/" ||
+    item.to === "/assistant" ||
     item.to === "/plugins" ||
     item.to === "/interaction" ||
     item.to === "/ai",

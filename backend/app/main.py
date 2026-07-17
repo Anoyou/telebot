@@ -30,6 +30,7 @@ from .api import notify_bots as notify_bots_api
 from .api import proxies as proxies_api
 from .api import rate_limit as rate_limit_api
 from .api import sudo as sudo_api
+from .api import system_agent as system_agent_api
 from .api import webhooks as webhooks_api
 from .logging_redaction import install_sensitive_log_filter
 from .services import (
@@ -450,6 +451,7 @@ app.include_router(message_templates_api.router)  # 消息模板实验室
 app.include_router(dispatch_debug_api.router)  # WP4：命中调试器接口空桩
 app.include_router(ledger_api.router)  # WP5：资金台账接口空桩
 app.include_router(webhooks_api.router)  # WP7：入站 Webhook 接口空桩
+app.include_router(system_agent_api.router)  # System Agent：自然语言系统助手
 
 
 # ── 健康检查 ─────────────────────────────────────────────────────

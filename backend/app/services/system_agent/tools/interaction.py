@@ -1,0 +1,217 @@
+"""交互规则只读工具。"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from ....db.models.account import Account
+from ....redis_client import get_redis
+from ....services import account_bot_service
+from ....services.interaction import session_index
+from ..context import ToolContext
+from ..registry import ToolRegistry, ToolSpec
+from ._helpers import account_scope_filter, clamp_limit
+
+
+def _rule_public_view(rule: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": rule.get("id"),
+        "name": rule.get("name"),
+        "enabled": bool(rule.get("enabled", True)),
+        "trigger_mode": rule.get("trigger_mode"),
+        "trigger_texts": rule.get("trigger_texts") or [],
+        "chat_ids": rule.get("chat_ids") or [],
+        "amount": rule.get("amount"),
+        "amount_match_mode": rule.get("amount_match_mode"),
+        "receiver_user_id": rule.get("receiver_user_id"),
+        "receiver_text": rule.get("receiver_text"),
+        "concurrency": rule.get("concurrency"),
+        "valid_seconds": rule.get("valid_seconds"),
+        "action": rule.get("action"),
+        "module_key": rule.get("module_key"),
+        "module_action": rule.get("module_action"),
+        "module_start_keywords": rule.get("module_start_keywords") or [],
+        "open_commands": rule.get("open_commands") or [],
+        "close_commands": rule.get("close_commands") or [],
+        "status_commands": rule.get("status_commands") or [],
+        "pause_keywords": rule.get("pause_keywords") or rule.get("pause_texts") or [],
+        "end_keywords": rule.get("end_keywords") or rule.get("end_texts") or [],
+    }
+
+
+async def _load_rules(ctx: ToolContext, account_id: int) -> list[dict[str, Any]]:
+    account = await ctx.db.get(Account, account_id)
+    if account is None:
+        return []
+    try:
+        cfg = await account_bot_service.get_transfer_notice_config(ctx.db, account_id)
+    except Exception:  # noqa: BLE001
+        cfg = {}
+    rules_raw = cfg.get("rules") if isinstance(cfg, dict) else None
+    return account_bot_service.normalize_interaction_rules(rules_raw)
+
+
+async def list_rules(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
+    account_id = account_scope_filter(
+        args.get("account_id"),
+        context_account_id=ctx.account_id,
+        channel=ctx.channel,
+    )
+    if account_id is None:
+        return {"error": "account_id_required", "message": "请提供 account_id"}
+    rules = await _load_rules(ctx, account_id)
+    enabled_only = bool(args.get("enabled_only", False))
+    items = [_rule_public_view(r) for r in rules]
+    if enabled_only:
+        items = [r for r in items if r.get("enabled")]
+    return {
+        "account_id": account_id,
+        "count": len(items),
+        "note": "交互规则保存在账号级配置 JSON，不属于通用 Rule 表。",
+        "rules": items,
+    }
+
+
+async def get_rule(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
+    account_id = account_scope_filter(
+        args.get("account_id"),
+        context_account_id=ctx.account_id,
+        channel=ctx.channel,
+    )
+    rule_id = str(args.get("rule_id") or "").strip()
+    if account_id is None or not rule_id:
+        return {"error": "args_required", "message": "需要 account_id 与 rule_id"}
+    rules = await _load_rules(ctx, account_id)
+    for rule in rules:
+        if str(rule.get("id")) == rule_id:
+            return {
+                "account_id": account_id,
+                "rule": _rule_public_view(rule),
+                "note": "交互规则在账号级配置 JSON 中，触发/暂停/结束条件见返回字段。",
+            }
+    return {"error": "not_found", "message": f"交互规则 {rule_id} 不存在"}
+
+
+async def list_active_sessions(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
+    account_id = account_scope_filter(
+        args.get("account_id"),
+        context_account_id=ctx.account_id,
+        channel=ctx.channel,
+    )
+    if account_id is None:
+        return {"error": "account_id_required", "message": "请提供 account_id"}
+    limit = clamp_limit(args.get("limit"), default=20, maximum=100)
+    chat_id = args.get("chat_id")
+    try:
+        chat_id_int = int(chat_id) if chat_id not in (None, "") else None
+    except (TypeError, ValueError):
+        chat_id_int = None
+
+    sessions: list[dict[str, Any]] = []
+    try:
+        redis = get_redis()
+        prefix = session_index.SESSION_KEY_PREFIX
+        if chat_id_int is not None:
+            keys = await session_index.list_indexed_session_keys(
+                redis, account_id=account_id, chat_id=chat_id_int
+            )
+            key_list = list(keys or [])
+        else:
+            # 有限 SCAN
+            key_list = []
+            cursor = 0
+            pattern = f"{prefix}{account_id}:*"
+            while len(key_list) < limit:
+                cursor, batch = await redis.scan(cursor=cursor, match=pattern, count=50)
+                key_list.extend(batch or [])
+                if cursor == 0:
+                    break
+        for key in key_list[:limit]:
+            raw = await redis.get(key)
+            if not raw:
+                continue
+            if isinstance(raw, bytes):
+                raw = raw.decode("utf-8", errors="replace")
+            import json
+
+            try:
+                data = json.loads(raw) if isinstance(raw, str) else raw
+            except (TypeError, ValueError, json.JSONDecodeError):
+                data = {"raw": str(raw)[:200]}
+            if isinstance(data, dict):
+                sessions.append(
+                    {
+                        "session_key": key,
+                        "rule_id": data.get("rule_id"),
+                        "chat_id": data.get("chat_id"),
+                        "status": data.get("status") or data.get("state"),
+                        "user_id": data.get("user_id") or data.get("payer_user_id"),
+                        "started_at": data.get("started_at") or data.get("created_at"),
+                    }
+                )
+            else:
+                sessions.append({"session_key": key, "data": str(data)[:200]})
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "account_id": account_id,
+            "count": 0,
+            "sessions": [],
+            "warning": f"读取活跃会话失败：{str(exc)[:200]}",
+        }
+    return {"account_id": account_id, "count": len(sessions), "sessions": sessions}
+
+
+def register(registry: ToolRegistry) -> None:
+    registry.register(
+        ToolSpec(
+            name="interaction.list_rules",
+            description="列出账号的交互规则（账号级配置 JSON，非通用 Rule 表）。返回触发、启用状态等结构化字段。",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "account_id": {"type": "integer"},
+                    "enabled_only": {"type": "boolean"},
+                },
+                "additionalProperties": False,
+            },
+            read_only=True,
+            min_role="viewer",
+            read_handler=list_rules,
+        )
+    )
+    registry.register(
+        ToolSpec(
+            name="interaction.get_rule",
+            description="获取单条交互规则详情，含触发/暂停/结束条件与启用状态。",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "account_id": {"type": "integer"},
+                    "rule_id": {"type": "string"},
+                },
+                "required": ["rule_id"],
+                "additionalProperties": False,
+            },
+            read_only=True,
+            min_role="viewer",
+            read_handler=get_rule,
+        )
+    )
+    registry.register(
+        ToolSpec(
+            name="interaction.list_active_sessions",
+            description="列出账号当前活跃的交互会话（Redis），可按 chat_id 过滤。",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "account_id": {"type": "integer"},
+                    "chat_id": {"type": "integer"},
+                    "limit": {"type": "integer"},
+                },
+                "additionalProperties": False,
+            },
+            read_only=True,
+            min_role="viewer",
+            read_handler=list_active_sessions,
+        )
+    )
