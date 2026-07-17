@@ -8,12 +8,12 @@
 
 | 阶段 | 版本目标 | 状态 |
 | --- | --- | --- |
-| 1 | `0.64.0` Web + Bot 只读助手 | 开发中（本分支） |
-| 2 | `0.65.0` 核心写操作 + Action | 未开始 |
+| 1 | `0.64.0` Web + Bot 只读助手 | 已实现（本分支，待发版） |
+| 2 | `0.65.0` 核心写操作 + Action | 开发中（本分支） |
 | 3 | `0.66.0` Provider/指令写 + 密钥 | 未开始 |
 | 4 | 真实使用驱动扩展 | backlog |
 
-当前阶段：**只读**。写操作（创建/修改/删除/启停）会明确拒绝并提示使用现有页面。
+当前能力：只读查询 + 核心写操作预览确认（Rule/交互规则/Scheduler/账号启停/功能启停）。Provider/指令写与聊天密钥输入仍在阶段 3。
 
 ## 入口
 
@@ -64,12 +64,11 @@ Web /assistant  ──NDJSON──┐
 - 业务 service 不依赖 System Agent。
 - 查询必须走工具，禁止根据聊天记忆编造状态。
 
-## 数据表（阶段 1）
+## 数据表
 
 - `system_agent_session`：会话（web/bot、账号上下文、标题、状态）
 - `system_agent_message`：消息（user/assistant/tool/system_event，落库为打码内容）
-
-阶段 2 才会创建 `system_agent_action`。
+- `system_agent_action`：写操作预览与确认（pending → executing → executed/failed/rejected/expired）
 
 ## 已注册只读工具
 
@@ -86,6 +85,13 @@ Web /assistant  ──NDJSON──┐
 | `features.get_account_status` | 账号功能/插件启停矩阵 |
 | `logs.recent` / `search_errors` / `get_event_detail` | 运行日志（默认 20，最大 500） |
 | `ledger.summary` / `ledger.list` | 台账汇总与明细；「今日」按系统时区日界线 |
+| `accounts.set_paused` / `restart_worker` | 暂停恢复 / 重启 Worker（危险） |
+| `rules.save` / `set_enabled` / `delete` | 通用 Rule 写操作 |
+| `interaction.save_rule` / `set_enabled` / `delete_rule` | 交互规则写操作 |
+| `scheduler.save` / `set_enabled` / `delete` / `execute_now` | 定时任务写操作 |
+| `features.set_enabled` | 账号功能/插件启停 |
+
+写工具只产生 `pending` Action，用户确认后由 `ActionExecutor` 统一事务执行。
 
 ## NDJSON 事件
 
@@ -93,6 +99,7 @@ Web /assistant  ──NDJSON──┐
 
 - `run_started`
 - `tool_started` / `tool_finished`
+- `action_proposed`
 - `assistant_message`
 - `error`
 - `done`

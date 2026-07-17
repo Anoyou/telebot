@@ -1,13 +1,15 @@
 import { Bot, User, Wrench } from "lucide-react";
 
-import type { SystemAgentMessage } from "@/api/systemAgent";
+import type { SystemAgentAction, SystemAgentMessage } from "@/api/systemAgent";
+import { ActionCard } from "@/components/assistant/ActionCard";
 import { cn } from "@/lib/utils";
 
 export type LiveBubble = {
   id: string;
-  role: "user" | "assistant" | "tool" | "system";
+  role: "user" | "assistant" | "tool" | "system" | "action";
   text: string;
   pending?: boolean;
+  action?: SystemAgentAction;
 };
 
 function messageText(msg: SystemAgentMessage): string {
@@ -64,6 +66,7 @@ export function Conversation({
       {items.map((item) => {
         const isUser = item.role === "user";
         const isTool = item.role === "tool";
+        const isAction = item.role === "action" && item.action;
         return (
           <div
             key={item.id}
@@ -74,17 +77,23 @@ export function Conversation({
                 {isTool ? <Wrench className="h-3.5 w-3.5" /> : <Bot className="h-3.5 w-3.5" />}
               </div>
             ) : null}
-            <div
-              className={cn(
-                "max-w-[85%] whitespace-pre-wrap rounded-2xl px-3 py-2 text-sm leading-relaxed",
-                isUser && "bg-primary text-primary-foreground",
-                !isUser && !isTool && "bg-muted",
-                isTool && "border border-dashed bg-background text-xs text-muted-foreground",
-                item.pending && "opacity-70",
-              )}
-            >
-              {item.text || (item.pending ? "思考中…" : "")}
-            </div>
+            {isAction && item.action ? (
+              <div className="max-w-[85%] min-w-[16rem]">
+                <ActionCard action={item.action} />
+              </div>
+            ) : (
+              <div
+                className={cn(
+                  "max-w-[85%] whitespace-pre-wrap rounded-2xl px-3 py-2 text-sm leading-relaxed",
+                  isUser && "bg-primary text-primary-foreground",
+                  !isUser && !isTool && "bg-muted",
+                  isTool && "border border-dashed bg-background text-xs text-muted-foreground",
+                  item.pending && "opacity-70",
+                )}
+              >
+                {item.text || (item.pending ? "思考中…" : "")}
+              </div>
+            )}
             {isUser ? (
               <div className="mt-1 shrink-0 rounded-full bg-primary/10 p-1.5">
                 <User className="h-3.5 w-3.5" />

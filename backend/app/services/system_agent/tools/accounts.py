@@ -1,4 +1,4 @@
-"""账号只读工具。"""
+"""账号工具：列表/详情 + 暂停恢复/重启 Worker。"""
 
 from __future__ import annotations
 
@@ -6,7 +6,11 @@ from typing import Any
 
 from sqlalchemy import select
 
-from ....db.models.account import Account
+from ....db.models.account import (
+    ACCOUNT_STATUS_ACTIVE,
+    ACCOUNT_STATUS_PAUSED,
+    Account,
+)
 from ....db.models.feature import AccountFeature
 from ..context import ToolContext
 from ..registry import ToolRegistry, ToolSpec
@@ -77,6 +81,90 @@ async def get_account(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+async def set_paused_preview(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
+    account_id = account_scope_filter(
+        args.get("account_id"),
+        context_account_id=ctx.account_id,
+        channel=ctx.channel,
+    )
+    if account_id is None:
+        raise ValueError("请提供 account_id")
+    paused = bool(args.get("paused"))
+    row = await ctx.db.get(Account, account_id)
+    if row is None:
+        raise ValueError(f"账号 {account_id} 不存在")
+    return {
+        "summary": f"{'暂停' if paused else '恢复'}账号 #{account_id}",
+        "account_id": account_id,
+        "current_status": row.status,
+        "target_paused": paused,
+        "current_paused": str(row.status or "").lower() == "paused",
+        "warning": None if not paused else "暂停后 worker 将停止；不会自动恢复。",
+    }
+
+
+async def set_paused_execute(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
+    account_id = account_scope_filter(
+        args.get("account_id"),
+        context_account_id=ctx.account_id,
+        channel=ctx.channel,
+    )
+    if account_id is None:
+        raise ValueError("请提供 account_id")
+    paused = bool(args.get("paused"))
+    row = await ctx.db.get(Account, account_id)
+    if row is None:
+        raise ValueError(f"账号 {account_id} 不存在")
+    row.status = ACCOUNT_STATUS_PAUSED if paused else ACCOUNT_STATUS_ACTIVE
+    await ctx.db.flush()
+    return {
+        "account_id": account_id,
+        "status": row.status,
+        "paused": paused,
+        "business_changed": True,
+    }
+
+
+async def restart_worker_preview(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
+    account_id = account_scope_filter(
+        args.get("account_id"),
+        context_account_id=ctx.account_id,
+        channel=ctx.channel,
+    )
+    if account_id is None:
+        raise ValueError("请提供 account_id")
+    row = await ctx.db.get(Account, account_id)
+    if row is None:
+        raise ValueError(f"账号 {account_id} 不存在")
+    return {
+        "summary": f"重启账号 #{account_id} 的 Worker",
+        "account_id": account_id,
+        "current_status": row.status,
+        "warning": "危险操作：将停止并重新拉起 worker，短暂中断消息处理。",
+    }
+
+
+async def restart_worker_execute(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
+    account_id = account_scope_filter(
+        args.get("account_id"),
+        context_account_id=ctx.account_id,
+        channel=ctx.channel,
+    )
+    if account_id is None:
+        raise ValueError("请提供 account_id")
+    row = await ctx.db.get(Account, account_id)
+    if row is None:
+        raise ValueError(f"账号 {account_id} 不存在")
+    # 数据库无变更；运行时由 runtime_effects 处理
+    return {
+        "account_id": account_id,
+        "status": row.status,
+        "restart_requested": True,
+        "business_changed": False,
+        "note": "Worker 重启在事务提交后执行",
+    }
+
+
 def register(registry: ToolRegistry) -> None:
     registry.register(
         ToolSpec(
@@ -108,5 +196,44 @@ def register(registry: ToolRegistry) -> None:
             read_only=True,
             min_role="viewer",
             read_handler=get_account,
+        )
+    )
+    registry.register(
+        ToolSpec(
+            name="accounts.set_paused",
+            description="暂停或恢复账号。paused=true 暂停，false 恢复。不会自动定时恢复。",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "account_id": {"type": "integer"},
+                    "paused": {"type": "boolean"},
+                },
+                "required": ["paused"],
+                "additionalProperties": False,
+            },
+            read_only=False,
+            min_role="operator",
+            risk="normal",
+            preview_handler=set_paused_preview,
+            execute_handler=set_paused_execute,
+            # 实际 pause/resume 由执行器根据 arguments.paused 选择
+            runtime_effects=("pause_or_resume_worker",),
+        )
+    )
+    registry.register(
+        ToolSpec(
+            name="accounts.restart_worker",
+            description="重启账号 Worker（危险）。数据库状态不变，仅重启运行时。",
+            input_schema={
+                "type": "object",
+                "properties": {"account_id": {"type": "integer"}},
+                "additionalProperties": False,
+            },
+            read_only=False,
+            min_role="admin",
+            risk="dangerous",
+            preview_handler=restart_worker_preview,
+            execute_handler=restart_worker_execute,
+            runtime_effects=("restart_worker",),
         )
     )

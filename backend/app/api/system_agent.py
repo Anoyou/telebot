@@ -11,6 +11,8 @@ from fastapi.responses import StreamingResponse
 from ..db.models.system_agent import CHANNEL_WEB, SESSION_STATUS_ACTIVE
 from ..deps import CurrentUser, DBSession
 from ..schemas.system_agent import (
+    SystemAgentActionConfirmOut,
+    SystemAgentActionOut,
     SystemAgentCapabilitiesOut,
     SystemAgentConfigOut,
     SystemAgentConfigPatch,
@@ -21,6 +23,8 @@ from ..schemas.system_agent import (
     SystemAgentSessionUpdate,
 )
 from ..services.system_agent import get_system_agent_service
+from ..services.system_agent.actions import action_to_dict, get_action, list_actions, reject_action
+from ..services.system_agent.executor import get_action_executor
 
 router = APIRouter(prefix="/api/system-agent", tags=["system-agent"])
 
@@ -216,4 +220,94 @@ async def stream_message(
         event_source(),
         media_type="application/x-ndjson",
         headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
+    )
+
+
+# ── Action（阶段 2）──────────────────────────────────────────────
+@router.get("/actions", response_model=list[SystemAgentActionOut])
+async def list_system_agent_actions(
+    db: DBSession,
+    user: CurrentUser,
+    session_id: str | None = Query(default=None),
+    status: str | None = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=200),
+) -> list[SystemAgentActionOut]:
+    rows = await list_actions(
+        db,
+        session_id=session_id,
+        web_user_id=user.id,
+        status=status,
+        limit=limit,
+    )
+    return [SystemAgentActionOut(**action_to_dict(r)) for r in rows]
+
+
+@router.get("/actions/{action_id}", response_model=SystemAgentActionOut)
+async def get_system_agent_action(
+    action_id: str,
+    db: DBSession,
+    user: CurrentUser,
+) -> SystemAgentActionOut:
+    row = await get_action(db, action_id)
+    if row is None or (row.actor_user_id not in (None, user.id)):
+        raise _err("ACTION_NOT_FOUND", "操作不存在", 404)
+    return SystemAgentActionOut(**action_to_dict(row))
+
+
+@router.post("/actions/{action_id}/confirm", response_model=SystemAgentActionConfirmOut)
+async def confirm_system_agent_action(
+    action_id: str,
+    user: CurrentUser,
+) -> SystemAgentActionConfirmOut:
+    result = await get_action_executor().confirm(
+        action_id=action_id,
+        role="admin",
+        channel=CHANNEL_WEB,
+        web_user_id=user.id,
+    )
+    action = result.get("action")
+    return SystemAgentActionConfirmOut(
+        ok=bool(result.get("ok")),
+        already_final=bool(result.get("already_final")),
+        error_code=result.get("error_code"),
+        error_message=result.get("error_message"),
+        business_changed=result.get("business_changed"),
+        action=SystemAgentActionOut(**action) if isinstance(action, dict) else None,
+    )
+
+
+@router.post("/actions/{action_id}/reject", response_model=SystemAgentActionOut)
+async def reject_system_agent_action(
+    action_id: str,
+    db: DBSession,
+    user: CurrentUser,
+) -> SystemAgentActionOut:
+    row = await get_action(db, action_id)
+    if row is None or (row.actor_user_id not in (None, user.id)):
+        raise _err("ACTION_NOT_FOUND", "操作不存在", 404)
+    row = await reject_action(db, row)
+    await db.commit()
+    await db.refresh(row)
+    return SystemAgentActionOut(**action_to_dict(row))
+
+
+@router.post("/actions/{action_id}/retry-runtime-sync", response_model=SystemAgentActionConfirmOut)
+async def retry_runtime_sync_action(
+    action_id: str,
+    user: CurrentUser,
+) -> SystemAgentActionConfirmOut:
+    # 先校验所有权
+    from ..db.base import AsyncSessionLocal
+
+    async with AsyncSessionLocal() as db:
+        row = await get_action(db, action_id)
+        if row is None or (row.actor_user_id not in (None, user.id)):
+            raise _err("ACTION_NOT_FOUND", "操作不存在", 404)
+    result = await get_action_executor().retry_runtime_sync(action_id)
+    action = result.get("action")
+    return SystemAgentActionConfirmOut(
+        ok=bool(result.get("ok")),
+        error_code=result.get("error_code"),
+        error_message=result.get("error_message"),
+        action=SystemAgentActionOut(**action) if isinstance(action, dict) else None,
     )

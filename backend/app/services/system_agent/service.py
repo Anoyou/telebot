@@ -22,6 +22,7 @@ from ...db.models.system_agent import (
     SystemAgentMessage,
     SystemAgentSession,
 )
+from .actions import clear_expired_secrets
 from .config import load_config, load_system_context_flags, save_config
 from .prompts import session_title_from_message
 from .redactor import redact_message_text
@@ -59,8 +60,8 @@ class SystemAgentService:
             "ai_enabled": bool(flags["ai_enabled"]),
             "timezone": flags["timezone"],
             "tools": registry.capabilities(channel=channel, role=role),
-            "stage": 1,
-            "write_tools_available": False,
+            "stage": 2,
+            "write_tools_available": True,
         }
 
     # ── 会话 CRUD ─────────────────────────────────────────────────
@@ -246,6 +247,11 @@ class SystemAgentService:
                 "session_id": session.id,
             }
             return
+
+        try:
+            await clear_expired_secrets(db)
+        except Exception:  # noqa: BLE001
+            log.debug("clear expired action secrets failed", exc_info=True)
 
         if not session.title:
             session.title = session_title_from_message(raw_text)

@@ -1,0 +1,230 @@
+"""Rule / Scheduler CRUD service（供 System Agent 与 API 复用，仅 flush）。"""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime, timedelta
+from typing import Any
+from zoneinfo import ZoneInfo
+
+from croniter import croniter
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from ..db.models.account import Account
+from ..db.models.feature import BUILTIN_FEATURES, FEATURE_SCHEDULER, Feature
+from ..db.models.rule import Rule
+from ..db.models.system import SystemSetting
+
+
+class RuleServiceError(ValueError):
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
+
+
+async def ensure_account(db: AsyncSession, account_id: int) -> Account:
+    acc = await db.get(Account, int(account_id))
+    if acc is None:
+        raise RuleServiceError("ACCOUNT_NOT_FOUND", f"账号 {account_id} 不存在")
+    return acc
+
+
+async def ensure_feature(db: AsyncSession, feature_key: str) -> None:
+    if feature_key in BUILTIN_FEATURES:
+        return
+    if await db.get(Feature, feature_key) is None:
+        raise RuleServiceError("FEATURE_NOT_FOUND", f"未知 feature: {feature_key}")
+
+
+async def get_rule(db: AsyncSession, rule_id: int) -> Rule | None:
+    return await db.get(Rule, int(rule_id))
+
+
+async def list_rules(
+    db: AsyncSession,
+    *,
+    account_id: int | None = None,
+    feature_key: str | None = None,
+    enabled_only: bool = False,
+    limit: int = 100,
+) -> list[Rule]:
+    q = select(Rule).order_by(Rule.account_id.asc(), Rule.priority.asc(), Rule.id.asc()).limit(
+        max(1, min(limit, 500))
+    )
+    if account_id is not None:
+        q = q.where(Rule.account_id == int(account_id))
+    if feature_key:
+        q = q.where(Rule.feature_key == feature_key)
+    if enabled_only:
+        q = q.where(Rule.enabled.is_(True))
+    result = await db.execute(q)
+    return list(result.scalars().all())
+
+
+def _parse_scheduler_dt(raw: Any) -> datetime | None:
+    if raw in (None, ""):
+        return None
+    if isinstance(raw, datetime):
+        return raw if raw.tzinfo else raw.replace(tzinfo=UTC)
+    if isinstance(raw, (int, float)):
+        return datetime.fromtimestamp(float(raw), tz=UTC)
+    text = str(raw).strip().replace("Z", "+00:00")
+    try:
+        dt = datetime.fromisoformat(text)
+        return dt if dt.tzinfo else dt.replace(tzinfo=UTC)
+    except ValueError:
+        return None
+
+
+async def _system_tz(db: AsyncSession) -> ZoneInfo:
+    row = await db.get(SystemSetting, "timezone")
+    name = "UTC"
+    if row is not None and row.value is not None:
+        value = row.value
+        if isinstance(value, dict):
+            name = str(value.get("value") or value.get("timezone") or "UTC")
+        else:
+            name = str(value or "UTC")
+    try:
+        return ZoneInfo(name)
+    except Exception:  # noqa: BLE001
+        return ZoneInfo("UTC")
+
+
+async def normalize_scheduler_config(db: AsyncSession, config: dict[str, Any]) -> dict[str, Any]:
+    """与 api/rules 保存语义对齐的 next_fire 刷新。"""
+
+    cfg = dict(config or {})
+    kind = str(cfg.get("kind") or "cron").lower()
+    now = datetime.now(UTC)
+    tz = await _system_tz(db)
+
+    if kind == "once":
+        fire = _parse_scheduler_dt(cfg.get("fire_at") or cfg.get("run_at") or cfg.get("at"))
+        cfg["next_fire"] = fire.isoformat() if fire else None
+        return cfg
+
+    if kind == "interval":
+        try:
+            interval = int(cfg.get("interval_sec") or cfg.get("interval_seconds") or cfg.get("seconds") or 0)
+        except (TypeError, ValueError):
+            interval = 0
+        last_fire = _parse_scheduler_dt(cfg.get("last_fire") or cfg.get("last_run_at"))
+        if interval <= 0:
+            cfg["next_fire"] = None
+        elif last_fire is not None:
+            cfg["next_fire"] = (last_fire + timedelta(seconds=interval)).isoformat()
+        else:
+            cfg["next_fire"] = now.isoformat()
+        return cfg
+
+    expr = str(cfg.get("cron") or "").strip()
+    cfg["_last_cron"] = expr
+    cfg["_cron_seconds_mode"] = len(expr.split()) in (6, 7)
+    cfg["_cron_timezone"] = getattr(tz, "key", None) or "UTC"
+    cfg.pop("_config_dirty", None)
+    if not expr:
+        cfg["next_fire"] = None
+        return cfg
+    try:
+        local_now = now.astimezone(tz)
+        nxt = croniter(expr, local_now).get_next(datetime)
+        if nxt.tzinfo is None:
+            nxt = nxt.replace(tzinfo=tz)
+        cfg["next_fire"] = nxt.astimezone(UTC).isoformat()
+    except Exception:  # noqa: BLE001
+        cfg["next_fire"] = None
+    return cfg
+
+
+async def create_rule(
+    db: AsyncSession,
+    *,
+    account_id: int,
+    feature_key: str,
+    name: str,
+    enabled: bool = True,
+    priority: int = 100,
+    config: dict[str, Any] | None = None,
+) -> Rule:
+    if feature_key == "interaction":
+        raise RuleServiceError("WRONG_TOOL", "交互规则请使用 interaction.* 工具")
+    await ensure_account(db, account_id)
+    await ensure_feature(db, feature_key)
+    cfg = dict(config or {})
+    if feature_key == FEATURE_SCHEDULER:
+        cfg = await normalize_scheduler_config(db, cfg)
+    rule = Rule(
+        account_id=int(account_id),
+        feature_key=feature_key,
+        name=str(name or "").strip()[:128] or "未命名规则",
+        enabled=bool(enabled),
+        priority=int(priority),
+        config=cfg,
+    )
+    db.add(rule)
+    await db.flush()
+    return rule
+
+
+async def update_rule(
+    db: AsyncSession,
+    rule_id: int,
+    *,
+    fields: dict[str, Any],
+) -> Rule:
+    rule = await get_rule(db, rule_id)
+    if rule is None:
+        raise RuleServiceError("RULE_NOT_FOUND", f"规则 {rule_id} 不存在")
+    if rule.feature_key == "interaction":
+        raise RuleServiceError("WRONG_TOOL", "交互规则请使用 interaction.* 工具")
+
+    data = dict(fields or {})
+    if "name" in data and data["name"] is not None:
+        rule.name = str(data["name"]).strip()[:128] or rule.name
+    if "enabled" in data and data["enabled"] is not None:
+        rule.enabled = bool(data["enabled"])
+    if "priority" in data and data["priority"] is not None:
+        rule.priority = int(data["priority"])
+    if "config" in data and data["config"] is not None:
+        cfg = dict(data["config"])
+        if rule.feature_key == FEATURE_SCHEDULER:
+            cfg = await normalize_scheduler_config(db, cfg)
+        # 明确字段合并：若调用方只传部分 config，应自行合并后传入
+        rule.config = cfg
+    await db.flush()
+    return rule
+
+
+async def set_enabled(db: AsyncSession, rule_id: int, enabled: bool) -> Rule:
+    return await update_rule(db, rule_id, fields={"enabled": bool(enabled)})
+
+
+async def delete_rule(db: AsyncSession, rule_id: int) -> dict[str, Any]:
+    rule = await get_rule(db, rule_id)
+    if rule is None:
+        raise RuleServiceError("RULE_NOT_FOUND", f"规则 {rule_id} 不存在")
+    info = {
+        "id": rule.id,
+        "account_id": rule.account_id,
+        "feature_key": rule.feature_key,
+        "name": rule.name,
+    }
+    await db.delete(rule)
+    await db.flush()
+    return info
+
+
+__all__ = [
+    "RuleServiceError",
+    "create_rule",
+    "delete_rule",
+    "ensure_account",
+    "ensure_feature",
+    "get_rule",
+    "list_rules",
+    "normalize_scheduler_config",
+    "set_enabled",
+    "update_rule",
+]

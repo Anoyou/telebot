@@ -45,37 +45,42 @@ def test_registry_requires_handlers() -> None:
 
 
 @pytest.mark.asyncio
-async def test_stage1_registers_read_only_tools_only() -> None:
+async def test_registry_includes_read_and_write_tools() -> None:
     reset_registry_for_tests()
     reg = get_registry()
     tools = reg.list_all()
-    assert len(tools) >= 15
-    assert all(t.read_only for t in tools)
+    assert len(tools) >= 25
     names = {t.name for t in tools}
-    expected = {
+    expected_read = {
         "system.get_context",
         "system.get_health",
         "accounts.list",
         "accounts.get",
         "interaction.list_rules",
-        "interaction.get_rule",
-        "interaction.list_active_sessions",
         "rules.list",
-        "rules.get",
         "scheduler.list",
-        "scheduler.get",
-        "providers.list",
-        "commands.list",
-        "features.get_account_status",
-        "logs.recent",
-        "logs.search_errors",
-        "logs.get_event_detail",
         "ledger.summary",
-        "ledger.list",
     }
-    assert expected.issubset(names)
-    # 阶段 1 不得注册写工具
-    assert not any(n.endswith(".save") or n.endswith(".delete") for n in names)
+    expected_write = {
+        "accounts.set_paused",
+        "accounts.restart_worker",
+        "rules.save",
+        "rules.set_enabled",
+        "rules.delete",
+        "interaction.save_rule",
+        "interaction.set_enabled",
+        "interaction.delete_rule",
+        "scheduler.save",
+        "scheduler.set_enabled",
+        "scheduler.delete",
+        "scheduler.execute_now",
+        "features.set_enabled",
+    }
+    assert expected_read.issubset(names)
+    assert expected_write.issubset(names)
+    write_tools = [t for t in tools if not t.read_only]
+    assert write_tools
+    assert all(t.preview_handler and t.execute_handler for t in write_tools)
 
 
 def test_list_for_filters_role_and_channel() -> None:

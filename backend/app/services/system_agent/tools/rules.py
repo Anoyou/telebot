@@ -70,6 +70,125 @@ async def get_rule(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
     return {"rule": _rule_view(row)}
 
 
+async def save_preview(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
+    from ....services import rule_service
+
+    account_id = account_scope_filter(
+        args.get("account_id"),
+        context_account_id=ctx.account_id,
+        channel=ctx.channel,
+    )
+    rule_id = args.get("id") or args.get("rule_id")
+    feature_key = str(args.get("feature_key") or "").strip()
+    if rule_id not in (None, ""):
+        row = await ctx.db.get(Rule, int(rule_id))
+        if row is None:
+            raise ValueError(f"规则 {rule_id} 不存在")
+        if ctx.channel == "bot" and ctx.account_id is not None and row.account_id != ctx.account_id:
+            raise PermissionError("无权修改其他账号规则")
+        fields = {k: args[k] for k in ("name", "enabled", "priority", "config") if k in args}
+        return {
+            "summary": f"更新规则 #{row.id} {row.name}",
+            "mode": "update",
+            "current": _rule_view(row),
+            "target_fields": fields,
+            "account_id": row.account_id,
+        }
+    if account_id is None:
+        raise ValueError("创建规则需要 account_id")
+    if not feature_key or feature_key == "interaction":
+        raise ValueError("创建通用规则需要 feature_key，且不能为 interaction")
+    await rule_service.ensure_account(ctx.db, account_id)
+    await rule_service.ensure_feature(ctx.db, feature_key)
+    return {
+        "summary": f"创建 {feature_key} 规则到账号 #{account_id}",
+        "mode": "create",
+        "account_id": account_id,
+        "feature_key": feature_key,
+        "name": args.get("name") or "未命名规则",
+        "enabled": bool(args.get("enabled", True)),
+        "priority": int(args.get("priority") or 100),
+        "config": args.get("config") or {},
+    }
+
+
+async def save_execute(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
+    from ....services import rule_service
+
+    rule_id = args.get("id") or args.get("rule_id")
+    if rule_id not in (None, ""):
+        fields = {k: args[k] for k in ("name", "enabled", "priority", "config") if k in args}
+        row = await rule_service.update_rule(ctx.db, int(rule_id), fields=fields)
+        return {"mode": "update", "rule": _rule_view(row), "business_changed": True}
+
+    account_id = account_scope_filter(
+        args.get("account_id"),
+        context_account_id=ctx.account_id,
+        channel=ctx.channel,
+    )
+    if account_id is None:
+        raise ValueError("创建规则需要 account_id")
+    row = await rule_service.create_rule(
+        ctx.db,
+        account_id=account_id,
+        feature_key=str(args.get("feature_key") or ""),
+        name=str(args.get("name") or "未命名规则"),
+        enabled=bool(args.get("enabled", True)),
+        priority=int(args.get("priority") or 100),
+        config=args.get("config") if isinstance(args.get("config"), dict) else {},
+    )
+    return {"mode": "create", "rule": _rule_view(row), "business_changed": True}
+
+
+async def set_enabled_preview(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
+    rule_id = int(args.get("rule_id") or args.get("id"))
+    enabled = bool(args.get("enabled"))
+    row = await ctx.db.get(Rule, rule_id)
+    if row is None:
+        raise ValueError(f"规则 {rule_id} 不存在")
+    if ctx.channel == "bot" and ctx.account_id is not None and row.account_id != ctx.account_id:
+        raise PermissionError("无权修改其他账号规则")
+    return {
+        "summary": f"{'启用' if enabled else '禁用'}规则 #{rule_id} {row.name}",
+        "rule_id": rule_id,
+        "account_id": row.account_id,
+        "current_enabled": bool(row.enabled),
+        "target_enabled": enabled,
+        "note": "暂时禁用不会自动恢复。",
+    }
+
+
+async def set_enabled_execute(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
+    from ....services import rule_service
+
+    rule_id = int(args.get("rule_id") or args.get("id"))
+    enabled = bool(args.get("enabled"))
+    row = await rule_service.set_enabled(ctx.db, rule_id, enabled)
+    return {"rule": _rule_view(row), "business_changed": True}
+
+
+async def delete_preview(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
+    rule_id = int(args.get("rule_id") or args.get("id"))
+    row = await ctx.db.get(Rule, rule_id)
+    if row is None:
+        raise ValueError(f"规则 {rule_id} 不存在")
+    if ctx.channel == "bot" and ctx.account_id is not None and row.account_id != ctx.account_id:
+        raise PermissionError("无权删除其他账号规则")
+    return {
+        "summary": f"删除规则 #{rule_id} {row.name}",
+        "rule": _rule_view(row),
+        "warning": "危险操作：删除后不可恢复。",
+    }
+
+
+async def delete_execute(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
+    from ....services import rule_service
+
+    rule_id = int(args.get("rule_id") or args.get("id"))
+    info = await rule_service.delete_rule(ctx.db, rule_id)
+    return {**info, "business_changed": True}
+
+
 def register(registry: ToolRegistry) -> None:
     registry.register(
         ToolSpec(
@@ -103,5 +222,73 @@ def register(registry: ToolRegistry) -> None:
             read_only=True,
             min_role="viewer",
             read_handler=get_rule,
+        )
+    )
+    registry.register(
+        ToolSpec(
+            name="rules.save",
+            description="创建或更新通用 Rule。有 id/rule_id 时更新明确字段；否则创建（需 account_id + feature_key）。",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "id": {"type": "integer"},
+                    "rule_id": {"type": "integer"},
+                    "account_id": {"type": "integer"},
+                    "feature_key": {"type": "string"},
+                    "name": {"type": "string"},
+                    "enabled": {"type": "boolean"},
+                    "priority": {"type": "integer"},
+                    "config": {"type": "object"},
+                },
+                "additionalProperties": False,
+            },
+            read_only=False,
+            min_role="operator",
+            risk="normal",
+            preview_handler=save_preview,
+            execute_handler=save_execute,
+            runtime_effects=("reload_config",),
+        )
+    )
+    registry.register(
+        ToolSpec(
+            name="rules.set_enabled",
+            description="启用或禁用通用 Rule。禁用不会自动恢复。",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "rule_id": {"type": "integer"},
+                    "id": {"type": "integer"},
+                    "enabled": {"type": "boolean"},
+                },
+                "required": ["enabled"],
+                "additionalProperties": False,
+            },
+            read_only=False,
+            min_role="operator",
+            risk="normal",
+            preview_handler=set_enabled_preview,
+            execute_handler=set_enabled_execute,
+            runtime_effects=("reload_config",),
+        )
+    )
+    registry.register(
+        ToolSpec(
+            name="rules.delete",
+            description="删除通用 Rule（危险）。",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "rule_id": {"type": "integer"},
+                    "id": {"type": "integer"},
+                },
+                "additionalProperties": False,
+            },
+            read_only=False,
+            min_role="admin",
+            risk="dangerous",
+            preview_handler=delete_preview,
+            execute_handler=delete_execute,
+            runtime_effects=("reload_config",),
         )
     )

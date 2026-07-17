@@ -104,7 +104,7 @@ class SystemAgentRuntime:
         tool_specs = self.registry.list_for(
             channel=channel,
             role=role,
-            read_only_only=True,  # 阶段 1 仅只读
+            read_only_only=False,  # 阶段 2：只读 + 写（写工具只产生待确认 Action）
         )
         tool_ctx = ToolContext(
             db=db,
@@ -116,9 +116,16 @@ class SystemAgentRuntime:
             bot_tg_user_id=bot_tg_user_id,
         )
 
+        event_queue: list[dict[str, Any]] = []
+
         agent_tools: dict[str, AgentTool] = {}
         for spec in tool_specs:
-            handler = self._bind_read_handler(spec, tool_ctx)
+            if spec.read_only:
+                handler = self._bind_read_handler(spec, tool_ctx)
+                read_only = True
+            else:
+                handler = self._bind_write_handler(spec, tool_ctx, event_queue, next_event)
+                read_only = False
             agent_tools[spec.name] = AgentTool(
                 spec=LlmToolSpec(
                     name=spec.name,
@@ -127,7 +134,7 @@ class SystemAgentRuntime:
                     strict=False,
                 ),
                 handler=handler,
-                read_only=True,
+                read_only=read_only,
             )
 
         messages = self._build_messages(
@@ -148,8 +155,6 @@ class SystemAgentRuntime:
             max_total_tokens=int(cfg.get("session_token_limit") or 16_384),
             timeout_seconds=180.0,
         )
-
-        event_queue: list[dict[str, Any]] = []
 
         async def on_tool_start(call: ToolCall) -> None:
             event_queue.append(
@@ -232,6 +237,72 @@ class SystemAgentRuntime:
                 return {"error": "permission_denied", "message": str(exc)}
             except Exception as exc:  # noqa: BLE001
                 log.exception("tool %s failed", spec.name)
+                return {
+                    "error": type(exc).__name__,
+                    "message": str(exc)[:500],
+                    "business_changed": False,
+                }
+
+        return _handler
+
+    def _bind_write_handler(
+        self,
+        spec: Any,
+        tool_ctx: ToolContext,
+        event_queue: list[dict[str, Any]],
+        next_event: Callable[..., dict[str, Any]],
+    ):
+        from .actions import action_to_dict, create_pending_action
+
+        async def _handler(arguments: dict[str, Any]) -> Any:
+            if spec.preview_handler is None:
+                return {
+                    "error": "handler_missing",
+                    "message": f"写工具 {spec.name} 未实现 preview",
+                    "business_changed": False,
+                }
+            try:
+                args = dict(arguments or {})
+                preview = await spec.preview_handler(tool_ctx, args)
+                if not isinstance(preview, dict):
+                    preview = {"value": preview}
+                # 把 preview 中的 account_id 回填，便于运行时同步
+                if preview.get("account_id") is not None and args.get("account_id") is None:
+                    args["account_id"] = preview["account_id"]
+                summary = str(preview.get("summary") or spec.description)
+                action = await create_pending_action(
+                    tool_ctx.db,
+                    ctx=tool_ctx,
+                    spec=spec,
+                    arguments=args,
+                    preview=preview,
+                    summary=summary,
+                )
+                payload = {
+                    "status": "pending_confirmation",
+                    "action_id": action.id,
+                    "summary": action.summary,
+                    "risk": action.risk,
+                    "preview": action.preview,
+                    "expires_at": action.expires_at.isoformat() if action.expires_at else None,
+                    "business_changed": False,
+                    "message": "已生成待确认操作，需用户确认后才会执行；在确认前业务数据未变化。",
+                }
+                event_queue.append(
+                    next_event(
+                        "action_proposed",
+                        action=action_to_dict(action),
+                    )
+                )
+                return payload
+            except PermissionError as exc:
+                return {
+                    "error": "permission_denied",
+                    "message": str(exc),
+                    "business_changed": False,
+                }
+            except Exception as exc:  # noqa: BLE001
+                log.exception("write tool preview %s failed", spec.name)
                 return {
                     "error": type(exc).__name__,
                     "message": str(exc)[:500],

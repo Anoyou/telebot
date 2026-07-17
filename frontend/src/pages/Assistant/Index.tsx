@@ -13,6 +13,7 @@ import {
   listSystemAgentSessions,
   patchSystemAgentConfig,
   streamSystemAgentMessage,
+  type SystemAgentAction,
   type SystemAgentMessage,
 } from "@/api/systemAgent";
 import { listLLMProviders } from "@/api/commands";
@@ -171,6 +172,21 @@ export function AssistantIndex() {
               ];
             });
           }
+          if (event.type === "action_proposed" && event.action) {
+            const action = event.action as SystemAgentAction;
+            setLive((prev) => {
+              const withoutPending = prev.filter((b) => !b.pending);
+              return [
+                ...withoutPending,
+                {
+                  id: `action-${action.id}`,
+                  role: "action" as const,
+                  text: action.summary || action.tool_name,
+                  action,
+                },
+              ];
+            });
+          }
           if (event.type === "assistant_message") {
             assistantText = String(event.content || "");
             setLive((prev) => {
@@ -215,7 +231,7 @@ export function AssistantIndex() {
     <PageShell>
       <PageHeader
         title="系统助手"
-        description="用自然语言查询账号、交互规则、定时任务、日志与台账（阶段 1 只读）。"
+        description="用自然语言查询并操作系统能力；写操作需内联确认（阶段 2）。"
         icon={MessageCircle}
         actions={
           <div className="flex flex-wrap items-center gap-2">
@@ -297,7 +313,7 @@ export function AssistantIndex() {
             </label>
           </div>
           <p className="mt-2 text-xs text-muted-foreground">
-            仅允许声明支持 tools 的模型。阶段 1 为只读查询；未配置时助手会给出 AI 中心入口。
+            仅允许声明支持 tools 的模型。写操作会生成待确认卡片；未配置时助手会给出 AI 中心入口。
             {capsQ.data ? ` · 已注册 ${capsQ.data.tools.filter((t) => t.available).length} 个可用工具` : null}
           </p>
         </div>

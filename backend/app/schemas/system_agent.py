@@ -76,3 +76,38 @@ class SystemAgentMessageOut(BaseModel):
 class SystemAgentMessageCreate(BaseModel):
     content: str = Field(min_length=1, max_length=32_000)
     account_id: int | None = None
+
+
+class SystemAgentActionOut(BaseModel):
+    id: str
+    session_id: str | None = None
+    account_id: int | None = None
+    actor_user_id: int | None = None
+    actor_bot_user_id: int | None = None
+    channel: str
+    tool_name: str
+    arguments: dict[str, Any] = Field(default_factory=dict)
+    secret_fields: list[str] | None = None
+    has_secret: bool = False
+    summary: str = ""
+    preview: dict[str, Any] = Field(default_factory=dict)
+    risk: str = "normal"
+    status: str
+    result: dict[str, Any] | None = None
+    error_code: str | None = None
+    error_message: str | None = None
+    runtime_sync_status: str = "not_required"
+    runtime_sync_error: str | None = None
+    expires_at: datetime | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+    executed_at: datetime | None = None
+
+
+class SystemAgentActionConfirmOut(BaseModel):
+    ok: bool
+    already_final: bool = False
+    error_code: str | None = None
+    error_message: str | None = None
+    business_changed: bool | None = None
+    action: SystemAgentActionOut | None = None

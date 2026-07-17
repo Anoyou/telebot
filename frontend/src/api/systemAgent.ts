@@ -53,6 +53,30 @@ export interface SystemAgentMessage {
   created_at: string | null;
 }
 
+export interface SystemAgentAction {
+  id: string;
+  session_id?: string | null;
+  account_id?: number | null;
+  channel: string;
+  tool_name: string;
+  arguments?: Record<string, unknown>;
+  secret_fields?: string[] | null;
+  has_secret?: boolean;
+  summary: string;
+  preview: Record<string, unknown>;
+  risk: string;
+  status: string;
+  result?: Record<string, unknown> | null;
+  error_code?: string | null;
+  error_message?: string | null;
+  runtime_sync_status?: string;
+  runtime_sync_error?: string | null;
+  expires_at?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+  executed_at?: string | null;
+}
+
 export type SystemAgentStreamEvent = {
   type: string;
   run_id?: string;
@@ -70,6 +94,7 @@ export type SystemAgentStreamEvent = {
   usage?: Record<string, unknown>;
   ok?: boolean;
   hint?: { web_path?: string; message?: string };
+  action?: SystemAgentAction;
   [key: string]: unknown;
 };
 
@@ -143,6 +168,46 @@ function streamErrorMessage(value: unknown, fallback: string): string {
   if (error?.message && typeof error.message === "string") return error.message;
   if (typeof obj.detail === "string") return obj.detail;
   return fallback;
+}
+
+export async function listSystemAgentActions(params?: {
+  session_id?: string;
+  status?: string;
+  limit?: number;
+}): Promise<SystemAgentAction[]> {
+  const { data } = await api.get<SystemAgentAction[]>("/api/system-agent/actions", { params });
+  return data;
+}
+
+export async function getSystemAgentAction(actionId: string): Promise<SystemAgentAction> {
+  const { data } = await api.get<SystemAgentAction>(`/api/system-agent/actions/${actionId}`);
+  return data;
+}
+
+export async function confirmSystemAgentAction(actionId: string): Promise<{
+  ok: boolean;
+  already_final?: boolean;
+  error_code?: string | null;
+  error_message?: string | null;
+  action?: SystemAgentAction | null;
+}> {
+  const { data } = await api.post(`/api/system-agent/actions/${actionId}/confirm`);
+  return data;
+}
+
+export async function rejectSystemAgentAction(actionId: string): Promise<SystemAgentAction> {
+  const { data } = await api.post<SystemAgentAction>(`/api/system-agent/actions/${actionId}/reject`);
+  return data;
+}
+
+export async function retrySystemAgentRuntimeSync(actionId: string): Promise<{
+  ok: boolean;
+  error_code?: string | null;
+  error_message?: string | null;
+  action?: SystemAgentAction | null;
+}> {
+  const { data } = await api.post(`/api/system-agent/actions/${actionId}/retry-runtime-sync`);
+  return data;
 }
 
 /** 消费 NDJSON 对话流；任意分块边界安全。 */

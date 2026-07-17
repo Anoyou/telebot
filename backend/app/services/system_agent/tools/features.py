@@ -73,6 +73,64 @@ async def get_account_status(ctx: ToolContext, args: dict[str, Any]) -> dict[str
     }
 
 
+async def set_enabled_preview(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
+    account_id = account_scope_filter(
+        args.get("account_id"),
+        context_account_id=ctx.account_id,
+        channel=ctx.channel,
+    )
+    feature_key = str(args.get("feature_key") or args.get("key") or "").strip()
+    enabled = bool(args.get("enabled"))
+    if account_id is None or not feature_key:
+        raise ValueError("需要 account_id 与 feature_key")
+    feature = await ctx.db.get(Feature, feature_key)
+    ar = await ctx.db.execute(
+        select(AccountFeature).where(
+            AccountFeature.account_id == account_id,
+            AccountFeature.feature_key == feature_key,
+        )
+    )
+    af = ar.scalar_one_or_none()
+    return {
+        "summary": f"{'启用' if enabled else '禁用'}账号 #{account_id} 的功能 {feature_key}",
+        "account_id": account_id,
+        "feature_key": feature_key,
+        "feature_name": feature.display_name if feature else feature_key,
+        "current_enabled": bool(af.enabled) if af is not None else False,
+        "target_enabled": enabled,
+        "note": "账号级启停；不会自动恢复。",
+    }
+
+
+async def set_enabled_execute(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
+    from ....services import feature_service
+
+    account_id = account_scope_filter(
+        args.get("account_id"),
+        context_account_id=ctx.account_id,
+        channel=ctx.channel,
+    )
+    feature_key = str(args.get("feature_key") or args.get("key") or "").strip()
+    enabled = bool(args.get("enabled"))
+    if account_id is None or not feature_key:
+        raise ValueError("需要 account_id 与 feature_key")
+    af = await feature_service.set_account_feature(
+        ctx.db,
+        account_id,
+        feature_key,
+        enabled,
+        config=None,
+        notify=False,
+        commit=False,
+    )
+    return {
+        "account_id": account_id,
+        "feature_key": feature_key,
+        "enabled": bool(af.enabled),
+        "business_changed": True,
+    }
+
+
 def register(registry: ToolRegistry) -> None:
     registry.register(
         ToolSpec(
@@ -86,5 +144,28 @@ def register(registry: ToolRegistry) -> None:
             read_only=True,
             min_role="viewer",
             read_handler=get_account_status,
+        )
+    )
+    registry.register(
+        ToolSpec(
+            name="features.set_enabled",
+            description="启停账号级功能或插件（AccountFeature）。禁用不会自动恢复。",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "account_id": {"type": "integer"},
+                    "feature_key": {"type": "string"},
+                    "key": {"type": "string"},
+                    "enabled": {"type": "boolean"},
+                },
+                "required": ["enabled"],
+                "additionalProperties": False,
+            },
+            read_only=False,
+            min_role="operator",
+            risk="normal",
+            preview_handler=set_enabled_preview,
+            execute_handler=set_enabled_execute,
+            runtime_effects=("reload_config",),
         )
     )

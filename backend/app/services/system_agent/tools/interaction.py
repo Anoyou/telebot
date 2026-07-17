@@ -161,6 +161,144 @@ async def list_active_sessions(ctx: ToolContext, args: dict[str, Any]) -> dict[s
     return {"account_id": account_id, "count": len(sessions), "sessions": sessions}
 
 
+async def save_rule_preview(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
+    from ....services import interaction_rule_service
+
+    account_id = account_scope_filter(
+        args.get("account_id"),
+        context_account_id=ctx.account_id,
+        channel=ctx.channel,
+    )
+    if account_id is None:
+        raise ValueError("需要 account_id")
+    rule_id = str(args.get("id") or args.get("rule_id") or "").strip() or None
+    fields = {
+        k: args[k]
+        for k in args
+        if k not in {"account_id", "id", "rule_id"} and args[k] is not None
+    }
+    current = None
+    if rule_id:
+        current = await interaction_rule_service.get_rule(ctx.db, account_id, rule_id)
+        if current is None:
+            raise ValueError(f"交互规则 {rule_id} 不存在")
+    return {
+        "summary": (
+            f"更新交互规则 {rule_id}" if rule_id else f"创建交互规则到账号 #{account_id}"
+        ),
+        "mode": "update" if rule_id else "create",
+        "account_id": account_id,
+        "rule_id": rule_id,
+        "current": _rule_public_view(current) if current else None,
+        "target_fields": fields,
+        "note": "交互规则保存在账号配置 JSON，不属于通用 Rule 表。",
+    }
+
+
+async def save_rule_execute(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
+    from ....services import interaction_rule_service
+
+    account_id = account_scope_filter(
+        args.get("account_id"),
+        context_account_id=ctx.account_id,
+        channel=ctx.channel,
+    )
+    if account_id is None:
+        raise ValueError("需要 account_id")
+    rule_id = str(args.get("id") or args.get("rule_id") or "").strip() or None
+    fields = {
+        k: args[k]
+        for k in args
+        if k not in {"account_id", "id", "rule_id"}
+    }
+    rule = await interaction_rule_service.save_rule(
+        ctx.db, account_id, rule_id=rule_id, fields=fields
+    )
+    return {
+        "mode": "update" if rule_id else "create",
+        "rule": _rule_public_view(rule),
+        "business_changed": True,
+    }
+
+
+async def set_enabled_preview(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
+    from ....services import interaction_rule_service
+
+    account_id = account_scope_filter(
+        args.get("account_id"),
+        context_account_id=ctx.account_id,
+        channel=ctx.channel,
+    )
+    rule_id = str(args.get("rule_id") or args.get("id") or "").strip()
+    enabled = bool(args.get("enabled"))
+    if account_id is None or not rule_id:
+        raise ValueError("需要 account_id 与 rule_id")
+    current = await interaction_rule_service.get_rule(ctx.db, account_id, rule_id)
+    if current is None:
+        raise ValueError(f"交互规则 {rule_id} 不存在")
+    return {
+        "summary": f"{'启用' if enabled else '禁用'}交互规则 {rule_id}",
+        "account_id": account_id,
+        "rule_id": rule_id,
+        "current_enabled": bool(current.get("enabled", True)),
+        "target_enabled": enabled,
+        "note": "暂时禁用不会自动恢复。若用户要求“停两小时”，请明确告知需手动重新启用。",
+    }
+
+
+async def set_enabled_execute(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
+    from ....services import interaction_rule_service
+
+    account_id = account_scope_filter(
+        args.get("account_id"),
+        context_account_id=ctx.account_id,
+        channel=ctx.channel,
+    )
+    rule_id = str(args.get("rule_id") or args.get("id") or "").strip()
+    enabled = bool(args.get("enabled"))
+    if account_id is None or not rule_id:
+        raise ValueError("需要 account_id 与 rule_id")
+    rule = await interaction_rule_service.set_enabled(ctx.db, account_id, rule_id, enabled)
+    return {"rule": _rule_public_view(rule), "business_changed": True}
+
+
+async def delete_rule_preview(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
+    from ....services import interaction_rule_service
+
+    account_id = account_scope_filter(
+        args.get("account_id"),
+        context_account_id=ctx.account_id,
+        channel=ctx.channel,
+    )
+    rule_id = str(args.get("rule_id") or args.get("id") or "").strip()
+    if account_id is None or not rule_id:
+        raise ValueError("需要 account_id 与 rule_id")
+    current = await interaction_rule_service.get_rule(ctx.db, account_id, rule_id)
+    if current is None:
+        raise ValueError(f"交互规则 {rule_id} 不存在")
+    return {
+        "summary": f"删除交互规则 {rule_id}",
+        "account_id": account_id,
+        "rule": _rule_public_view(current),
+        "warning": "危险操作：删除后不可恢复。",
+    }
+
+
+async def delete_rule_execute(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
+    from ....services import interaction_rule_service
+
+    account_id = account_scope_filter(
+        args.get("account_id"),
+        context_account_id=ctx.account_id,
+        channel=ctx.channel,
+    )
+    rule_id = str(args.get("rule_id") or args.get("id") or "").strip()
+    if account_id is None or not rule_id:
+        raise ValueError("需要 account_id 与 rule_id")
+    info = await interaction_rule_service.delete_rule(ctx.db, account_id, rule_id)
+    return {**info, "business_changed": True}
+
+
 def register(registry: ToolRegistry) -> None:
     registry.register(
         ToolSpec(
@@ -213,5 +351,80 @@ def register(registry: ToolRegistry) -> None:
             read_only=True,
             min_role="viewer",
             read_handler=list_active_sessions,
+        )
+    )
+    registry.register(
+        ToolSpec(
+            name="interaction.save_rule",
+            description="创建或更新交互规则。有 rule_id 时只更新明确字段；无 ID 时创建。",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "account_id": {"type": "integer"},
+                    "id": {"type": "string"},
+                    "rule_id": {"type": "string"},
+                    "name": {"type": "string"},
+                    "enabled": {"type": "boolean"},
+                    "trigger_mode": {"type": "string"},
+                    "trigger_texts": {"type": "array", "items": {"type": "string"}},
+                    "chat_ids": {"type": "array", "items": {"type": "integer"}},
+                    "amount": {},
+                    "module_key": {"type": "string"},
+                    "module_action": {"type": "string"},
+                    "pause_keywords": {"type": "array", "items": {"type": "string"}},
+                    "end_keywords": {"type": "array", "items": {"type": "string"}},
+                },
+                "additionalProperties": True,
+            },
+            read_only=False,
+            min_role="operator",
+            risk="normal",
+            preview_handler=save_rule_preview,
+            execute_handler=save_rule_execute,
+            runtime_effects=("reload_config",),
+        )
+    )
+    registry.register(
+        ToolSpec(
+            name="interaction.set_enabled",
+            description="启用或禁用交互规则。禁用不会自动恢复。",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "account_id": {"type": "integer"},
+                    "rule_id": {"type": "string"},
+                    "id": {"type": "string"},
+                    "enabled": {"type": "boolean"},
+                },
+                "required": ["enabled"],
+                "additionalProperties": False,
+            },
+            read_only=False,
+            min_role="operator",
+            risk="normal",
+            preview_handler=set_enabled_preview,
+            execute_handler=set_enabled_execute,
+            runtime_effects=("reload_config",),
+        )
+    )
+    registry.register(
+        ToolSpec(
+            name="interaction.delete_rule",
+            description="删除交互规则（危险）。",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "account_id": {"type": "integer"},
+                    "rule_id": {"type": "string"},
+                    "id": {"type": "string"},
+                },
+                "additionalProperties": False,
+            },
+            read_only=False,
+            min_role="admin",
+            risk="dangerous",
+            preview_handler=delete_rule_preview,
+            execute_handler=delete_rule_execute,
+            runtime_effects=("reload_config",),
         )
     )

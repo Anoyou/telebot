@@ -164,6 +164,158 @@ async def get_scheduler(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any
     return {"item": _scheduler_view(row, tz), "timezone": tz}
 
 
+async def save_preview(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
+    account_id = account_scope_filter(
+        args.get("account_id"),
+        context_account_id=ctx.account_id,
+        channel=ctx.channel,
+    )
+    rule_id = args.get("id") or args.get("rule_id")
+    tz = await get_timezone_name(ctx.db)
+    if rule_id not in (None, ""):
+        row = await ctx.db.get(Rule, int(rule_id))
+        if row is None or row.feature_key != "scheduler":
+            raise ValueError(f"Scheduler 规则 {rule_id} 不存在")
+        if ctx.channel == "bot" and ctx.account_id is not None and row.account_id != ctx.account_id:
+            raise PermissionError("无权修改其他账号定时任务")
+        fields = {k: args[k] for k in ("name", "enabled", "priority", "config") if k in args}
+        return {
+            "summary": f"更新定时任务 #{row.id} {row.name}",
+            "mode": "update",
+            "current": _scheduler_view(row, tz),
+            "target_fields": fields,
+            "account_id": row.account_id,
+        }
+    if account_id is None:
+        raise ValueError("创建定时任务需要 account_id")
+    return {
+        "summary": f"创建定时任务到账号 #{account_id}",
+        "mode": "create",
+        "account_id": account_id,
+        "name": args.get("name") or "定时任务",
+        "enabled": bool(args.get("enabled", True)),
+        "config": args.get("config") or {},
+        "timezone": tz,
+    }
+
+
+async def save_execute(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
+    from ....services import rule_service
+
+    tz = await get_timezone_name(ctx.db)
+    rule_id = args.get("id") or args.get("rule_id")
+    if rule_id not in (None, ""):
+        fields = {k: args[k] for k in ("name", "enabled", "priority", "config") if k in args}
+        row = await rule_service.update_rule(ctx.db, int(rule_id), fields=fields)
+        return {"mode": "update", "item": _scheduler_view(row, tz), "business_changed": True}
+
+    account_id = account_scope_filter(
+        args.get("account_id"),
+        context_account_id=ctx.account_id,
+        channel=ctx.channel,
+    )
+    if account_id is None:
+        raise ValueError("创建定时任务需要 account_id")
+    row = await rule_service.create_rule(
+        ctx.db,
+        account_id=account_id,
+        feature_key="scheduler",
+        name=str(args.get("name") or "定时任务"),
+        enabled=bool(args.get("enabled", True)),
+        priority=int(args.get("priority") or 100),
+        config=args.get("config") if isinstance(args.get("config"), dict) else {},
+    )
+    return {"mode": "create", "item": _scheduler_view(row, tz), "business_changed": True}
+
+
+async def set_enabled_preview(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
+    rule_id = int(args.get("rule_id") or args.get("id"))
+    enabled = bool(args.get("enabled"))
+    row = await ctx.db.get(Rule, rule_id)
+    if row is None or row.feature_key != "scheduler":
+        raise ValueError(f"Scheduler 规则 {rule_id} 不存在")
+    if ctx.channel == "bot" and ctx.account_id is not None and row.account_id != ctx.account_id:
+        raise PermissionError("无权修改其他账号定时任务")
+    return {
+        "summary": f"{'启用' if enabled else '禁用'}定时任务 #{rule_id} {row.name}",
+        "rule_id": rule_id,
+        "account_id": row.account_id,
+        "current_enabled": bool(row.enabled),
+        "target_enabled": enabled,
+        "note": "禁用不会自动恢复。",
+    }
+
+
+async def set_enabled_execute(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
+    from ....services import rule_service
+
+    tz = await get_timezone_name(ctx.db)
+    rule_id = int(args.get("rule_id") or args.get("id"))
+    enabled = bool(args.get("enabled"))
+    row = await rule_service.set_enabled(ctx.db, rule_id, enabled)
+    return {"item": _scheduler_view(row, tz), "business_changed": True}
+
+
+async def delete_preview(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
+    rule_id = int(args.get("rule_id") or args.get("id"))
+    tz = await get_timezone_name(ctx.db)
+    row = await ctx.db.get(Rule, rule_id)
+    if row is None or row.feature_key != "scheduler":
+        raise ValueError(f"Scheduler 规则 {rule_id} 不存在")
+    if ctx.channel == "bot" and ctx.account_id is not None and row.account_id != ctx.account_id:
+        raise PermissionError("无权删除其他账号定时任务")
+    return {
+        "summary": f"删除定时任务 #{rule_id} {row.name}",
+        "item": _scheduler_view(row, tz),
+        "warning": "危险操作：删除后不可恢复。",
+    }
+
+
+async def delete_execute(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
+    from ....services import rule_service
+
+    rule_id = int(args.get("rule_id") or args.get("id"))
+    info = await rule_service.delete_rule(ctx.db, rule_id)
+    return {**info, "business_changed": True}
+
+
+async def execute_now_preview(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
+    rule_id = int(args.get("rule_id") or args.get("id"))
+    tz = await get_timezone_name(ctx.db)
+    row = await ctx.db.get(Rule, rule_id)
+    if row is None or row.feature_key != "scheduler":
+        raise ValueError(f"Scheduler 规则 {rule_id} 不存在")
+    if ctx.channel == "bot" and ctx.account_id is not None and row.account_id != ctx.account_id:
+        raise PermissionError("无权执行其他账号定时任务")
+    return {
+        "summary": f"立即执行定时任务 #{rule_id} {row.name}",
+        "item": _scheduler_view(row, tz),
+        "warning": "危险操作：将立即触发一次调度动作。",
+    }
+
+
+async def execute_now_execute(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
+    """标记立即执行请求；真实触发由 runtime_effects 或外部调度完成。"""
+
+    rule_id = int(args.get("rule_id") or args.get("id"))
+    row = await ctx.db.get(Rule, rule_id)
+    if row is None or row.feature_key != "scheduler":
+        raise ValueError(f"Scheduler 规则 {rule_id} 不存在")
+    # 在 config 上打标记供 runtime 消费；不直接调用外部
+    cfg = dict(row.config or {})
+    cfg["_agent_execute_now"] = True
+    cfg["_agent_execute_requested_at"] = datetime.now(UTC).isoformat()
+    row.config = cfg
+    await ctx.db.flush()
+    return {
+        "rule_id": rule_id,
+        "account_id": row.account_id,
+        "requested": True,
+        "business_changed": True,
+        "note": "已记录立即执行请求；运行时同步后生效",
+    }
+
+
 def register(registry: ToolRegistry) -> None:
     registry.register(
         ToolSpec(
@@ -198,5 +350,92 @@ def register(registry: ToolRegistry) -> None:
             read_only=True,
             min_role="viewer",
             read_handler=get_scheduler,
+        )
+    )
+    registry.register(
+        ToolSpec(
+            name="scheduler.save",
+            description="创建或更新 Scheduler 定时任务（标准 Rule feature_key=scheduler）。",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "id": {"type": "integer"},
+                    "rule_id": {"type": "integer"},
+                    "account_id": {"type": "integer"},
+                    "name": {"type": "string"},
+                    "enabled": {"type": "boolean"},
+                    "priority": {"type": "integer"},
+                    "config": {"type": "object"},
+                },
+                "additionalProperties": False,
+            },
+            read_only=False,
+            min_role="operator",
+            risk="normal",
+            preview_handler=save_preview,
+            execute_handler=save_execute,
+            runtime_effects=("reload_config",),
+        )
+    )
+    registry.register(
+        ToolSpec(
+            name="scheduler.set_enabled",
+            description="启用或禁用定时任务。禁用不会自动恢复。",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "rule_id": {"type": "integer"},
+                    "id": {"type": "integer"},
+                    "enabled": {"type": "boolean"},
+                },
+                "required": ["enabled"],
+                "additionalProperties": False,
+            },
+            read_only=False,
+            min_role="operator",
+            risk="normal",
+            preview_handler=set_enabled_preview,
+            execute_handler=set_enabled_execute,
+            runtime_effects=("reload_config",),
+        )
+    )
+    registry.register(
+        ToolSpec(
+            name="scheduler.delete",
+            description="删除定时任务（危险）。",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "rule_id": {"type": "integer"},
+                    "id": {"type": "integer"},
+                },
+                "additionalProperties": False,
+            },
+            read_only=False,
+            min_role="admin",
+            risk="dangerous",
+            preview_handler=delete_preview,
+            execute_handler=delete_execute,
+            runtime_effects=("reload_config",),
+        )
+    )
+    registry.register(
+        ToolSpec(
+            name="scheduler.execute_now",
+            description="立即执行一条定时任务（危险）。",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "rule_id": {"type": "integer"},
+                    "id": {"type": "integer"},
+                },
+                "additionalProperties": False,
+            },
+            read_only=False,
+            min_role="admin",
+            risk="dangerous",
+            preview_handler=execute_now_preview,
+            execute_handler=execute_now_execute,
+            runtime_effects=("reload_config",),
         )
     )
