@@ -251,8 +251,17 @@ class ActionExecutor:
                 action.error_message = None
                 await db.flush()
 
+                result: Any = None
+                result_for_comp: dict[str, Any] = {}
                 try:
                     result = await spec.execute_handler(ctx, arguments)
+                    # 立刻缓存，供后续任意失败路径做 FS 补偿（含 audit 失败）
+                    result_for_comp = result if isinstance(result, dict) else {}
+                    if action.arguments:
+                        arguments = {**arguments, **dict(action.arguments)}
+                    if result_for_comp.get("plugin_name"):
+                        arguments["plugin_name"] = result_for_comp["plugin_name"]
+
                     safe_result = summarize_tool_result(result, max_chars=4000)
                     if not isinstance(safe_result, dict):
                         safe_result = {"value": safe_result}
@@ -281,35 +290,39 @@ class ActionExecutor:
                         action.runtime_sync_status = RUNTIME_SYNC_PENDING
                     else:
                         action.runtime_sync_status = RUNTIME_SYNC_NOT_REQUIRED
-                    # 把 execute 可能写入的 arguments 同步回去（plugin_name 等）
-                    if action.arguments:
-                        arguments = {**arguments, **dict(action.arguments)}
                     try:
                         await db.commit()
                     except Exception as commit_exc:  # noqa: BLE001
                         log.exception("action commit failed id=%s", action_id)
                         await db.rollback()
-                        # 安装类工具可能已落盘：补偿清理，避免 DIR_EXISTS
                         await self._compensate_plugin_fs_after_failed_commit(
-                            tool_name, arguments, result if isinstance(result, dict) else {}
+                            tool_name, arguments, result_for_comp
                         )
                         await self._mark_failed(
                             action_id,
                             error_code="COMMIT_FAILED",
                             error_message=str(commit_exc)[:500],
                         )
-                        return {
-                            "ok": False,
-                            "error_code": "COMMIT_FAILED",
-                            "error_message": str(commit_exc)[:500],
-                            "business_changed": False,
-                        }
+                        async with AsyncSessionLocal() as db_fail:
+                            failed = await db_fail.get(SystemAgentAction, action_id)
+                            return {
+                                "ok": False,
+                                "error_code": "COMMIT_FAILED",
+                                "error_message": str(commit_exc)[:500],
+                                "business_changed": False,
+                                "action": action_to_dict(failed) if failed else None,
+                            }
                 except Exception as exc:  # noqa: BLE001
                     log.exception("action execute failed id=%s tool=%s", action.id, tool_name)
+                    # execute 可能已改磁盘；合并 action.arguments 再补偿
+                    try:
+                        if action.arguments:
+                            arguments = {**arguments, **dict(action.arguments)}
+                    except Exception:  # noqa: BLE001
+                        pass
                     await db.rollback()
-                    # execute 已改磁盘但事务回滚时补偿
                     await self._compensate_plugin_fs_after_failed_commit(
-                        tool_name, arguments, {}
+                        tool_name, arguments, result_for_comp
                     )
                     await self._mark_failed(
                         action_id,

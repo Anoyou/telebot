@@ -93,6 +93,22 @@ async def test_uninstall_execute_raises_when_not_deleted(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_delete_repo_raises_when_not_found(monkeypatch) -> None:
+    from app.services.system_agent.tools import plugin_repos
+
+    async def fake_delete(db, repo_id):  # noqa: ANN001
+        return False
+
+    monkeypatch.setattr(
+        "app.services.plugin_repo_service.delete_repo",
+        fake_delete,
+    )
+    ctx = ToolContext(db=AsyncMock(), channel="web", role="admin")
+    with pytest.raises(ValueError, match="不存在或已删除"):
+        await plugin_repos.delete_repo_execute(ctx, {"repo_id": 99})
+
+
+@pytest.mark.asyncio
 async def test_routing_set_mode_preview_requires_ai(monkeypatch) -> None:
     class _Tpl:
         id = 3

@@ -366,8 +366,10 @@ async def test_attach_secrets_to_pending_action_short_circuits() -> None:
         arguments = {"name": "p1"}
         summary = "创建 Provider"
         risk = "normal"
+        status = "pending"
         error_code = "PROVIDER_VERIFY_FAILED"
         error_message = "验证失败"
+        expires_at = None
 
     action = _Action()
 

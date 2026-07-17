@@ -374,6 +374,9 @@ async def secret_input_action(
         args.pop(name, None)
         args[f"has_{name}"] = True
     row.arguments = args
+    # 与 Bot 密钥写回一致：清除旧预检错误，避免卡片仍显示红字
+    row.error_code = None
+    row.error_message = None
     await db.commit()
     await db.refresh(row)
     return SystemAgentSecretInputOut(

@@ -141,7 +141,9 @@ async def delete_repo_execute(ctx: ToolContext, args: dict[str, Any]) -> dict[st
         ok = await svc.delete_repo(ctx.db, repo_id)
     except Exception as exc:  # noqa: BLE001
         raise ValueError(_err(exc)) from None
-    return {"id": repo_id, "deleted": bool(ok), "business_changed": bool(ok)}
+    if not ok:
+        raise ValueError(f"插件仓库 #{repo_id} 不存在或已删除")
+    return {"id": repo_id, "deleted": True, "business_changed": True}
 
 
 async def install_from_repo_preview(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:

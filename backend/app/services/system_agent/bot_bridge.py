@@ -20,6 +20,7 @@ from .actions import (
     encrypt_secret_payload,
     get_action,
     list_actions,
+    mark_expired_if_needed,
     reject_action,
 )
 from .executor import get_action_executor
@@ -319,6 +320,9 @@ async def try_attach_secrets_to_pending_action(
         target = None
         secret_names: tuple[str, ...] = ()
         for row in candidates:
+            row = await mark_expired_if_needed(db, row)
+            if row.status != ACTION_STATUS_PENDING:
+                continue
             spec = registry.get(row.tool_name)
             if spec is None or not spec.secret_argument_names:
                 continue
@@ -343,6 +347,7 @@ async def try_attach_secrets_to_pending_action(
                 target = row
                 secret_names = tuple(spec.secret_argument_names)
         if target is None or not secret_names:
+            await db.commit()  # 可能有过期标记
             return False
 
         secret_map: dict[str, Any] = decrypt_secret_payload(target.secret_payload_enc)
