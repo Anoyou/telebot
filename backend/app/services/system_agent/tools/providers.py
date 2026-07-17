@@ -114,39 +114,75 @@ async def save_preview(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]
     }
 
 
-async def save_execute(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
-    provider_id = args.get("id") or args.get("provider_id")
-    if provider_id not in (None, ""):
-        data: dict[str, Any] = {}
-        for key in (
-            "name",
-            "provider",
-            "base_url",
-            "default_model",
-            "api_format",
-            "api_key",
-            "modality",
-            "tags",
-            "cost_tier",
-            "notes",
-            "proxy_id",
-        ):
-            if key in args:
-                data[key] = args[key]
-        payload = LLMProviderUpdate(**data)
-        out = await command_service.update_provider(ctx.db, int(provider_id), payload)
-        return {"mode": "update", "provider": out.model_dump(), "business_changed": True}
+async def save_precheck(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
+    """保存前做真实上游验证；失败保持 pending 并清除密钥。"""
 
-    create = LLMProviderCreate(
-        name=str(args.get("name") or "").strip(),
-        provider=str(args.get("provider") or "openai"),  # type: ignore[arg-type]
-        api_key=args.get("api_key"),
-        base_url=args.get("base_url"),
-        default_model=str(args.get("default_model") or "").strip(),
-        api_format=args.get("api_format") or "chat_completions",
+    from ..provider_verify import resolve_provider_verify_args, run_quick_verify
+
+    resolved = await resolve_provider_verify_args(ctx.db, args)
+    # 更新且未提供新 Key、也未改连接参数时，跳过上游验证
+    provider_id = args.get("id") or args.get("provider_id")
+    touching_key = bool(args.get("api_key"))
+    touching_conn = any(k in args for k in ("base_url", "default_model", "api_format", "provider"))
+    if provider_id not in (None, "") and not touching_key and not touching_conn:
+        return {"skipped": True, "reason": "no_connection_change"}
+    return await run_quick_verify(
+        base_url=resolved.get("base_url"),
+        api_key=resolved.get("api_key"),
+        api_format=resolved.get("api_format"),
+        default_model=resolved.get("default_model"),
+        provider=resolved.get("provider"),
+        protocol_profile=str(resolved.get("protocol_profile") or "standard"),
+        client_identity_profile=str(resolved.get("client_identity_profile") or "auto"),
     )
-    out = await command_service.create_provider(ctx.db, create)
-    return {"mode": "create", "provider": out.model_dump(), "business_changed": True}
+
+
+async def save_execute(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
+    from fastapi import HTTPException
+
+    provider_id = args.get("id") or args.get("provider_id")
+    try:
+        if provider_id not in (None, ""):
+            data: dict[str, Any] = {}
+            for key in (
+                "name",
+                "provider",
+                "base_url",
+                "default_model",
+                "api_format",
+                "api_key",
+                "modality",
+                "tags",
+                "cost_tier",
+                "notes",
+                "proxy_id",
+            ):
+                if key in args:
+                    data[key] = args[key]
+            payload = LLMProviderUpdate(**data)
+            out = await command_service.update_provider(ctx.db, int(provider_id), payload)
+            dumped = out.model_dump() if hasattr(out, "model_dump") else dict(out)
+            # 永不返回 key
+            dumped.pop("api_key", None)
+            return {"mode": "update", "provider": dumped, "business_changed": True}
+
+        create = LLMProviderCreate(
+            name=str(args.get("name") or "").strip(),
+            provider=str(args.get("provider") or "openai"),  # type: ignore[arg-type]
+            api_key=args.get("api_key"),
+            base_url=args.get("base_url"),
+            default_model=str(args.get("default_model") or "").strip(),
+            api_format=args.get("api_format") or "chat_completions",
+        )
+        out = await command_service.create_provider(ctx.db, create)
+        dumped = out.model_dump() if hasattr(out, "model_dump") else dict(out)
+        dumped.pop("api_key", None)
+        return {"mode": "create", "provider": dumped, "business_changed": True}
+    except HTTPException as exc:
+        detail = exc.detail
+        if isinstance(detail, dict):
+            raise ValueError(str(detail.get("message") or detail.get("code") or exc)) from None
+        raise ValueError(str(detail or exc)) from None
 
 
 async def delete_preview(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
@@ -189,34 +225,33 @@ async def verify_preview(ctx: ToolContext, args: dict[str, Any]) -> dict[str, An
     }
 
 
+async def verify_precheck(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
+    """真实验证放在 precheck：失败保持 pending 并清密钥。"""
+
+    from ..provider_verify import resolve_provider_verify_args, run_quick_verify
+
+    resolved = await resolve_provider_verify_args(ctx.db, args)
+    result = await run_quick_verify(
+        base_url=resolved.get("base_url"),
+        api_key=resolved.get("api_key"),
+        api_format=resolved.get("api_format"),
+        default_model=resolved.get("default_model"),
+        provider=resolved.get("provider"),
+        protocol_profile=str(resolved.get("protocol_profile") or "standard"),
+        client_identity_profile=str(resolved.get("client_identity_profile") or "auto"),
+    )
+    return result
+
+
 async def verify_execute(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
-    """阶段 3 最小实现：检查可解析与 has_api_key；完整流式验证复用 quick_verify 可后续增强。"""
+    """precheck 已完成上游验证；execute 仅返回成功摘要（不落库）。"""
 
     provider_id = args.get("id") or args.get("provider_id")
-    if provider_id not in (None, ""):
-        row = await ctx.db.get(LLMProvider, int(provider_id))
-        if row is None:
-            raise ValueError(f"Provider #{provider_id} 不存在")
-        dto = LLMProviderDTO.from_orm_row(row)
-        if not dto.has_api_key and str(row.provider or "") != "ollama":
-            raise ValueError("Provider 缺少 API Key，请补填后重试")
-        tools_model = tools_model_for_dto(dto)
-        return {
-            "ok": True,
-            "provider_id": row.id,
-            "has_api_key": dto.has_api_key,
-            "tools_model": tools_model,
-            "business_changed": False,
-            "note": "已完成本地可调用性检查；完整上游对话验证请用 AI 中心快速验证。",
-        }
-    if not args.get("api_key") and str(args.get("provider") or "") != "ollama":
-        raise ValueError("验证需要 api_key")
     return {
         "ok": True,
-        "mode": "draft",
-        "has_api_key": bool(args.get("api_key")),
+        "provider_id": int(provider_id) if provider_id not in (None, "") else None,
         "business_changed": False,
-        "note": "草稿参数格式检查通过；完整上游验证请用 AI 中心。",
+        "note": "上游验证已通过，未修改任何 Provider 配置。",
     }
 
 
@@ -262,6 +297,7 @@ def register(registry: ToolRegistry) -> None:
             risk="normal",
             secret_argument_names=("api_key",),
             preview_handler=save_preview,
+            precheck_handler=save_precheck,
             execute_handler=save_execute,
         )
     )
@@ -305,6 +341,7 @@ def register(registry: ToolRegistry) -> None:
             risk="normal",
             secret_argument_names=("api_key",),
             preview_handler=verify_preview,
+            precheck_handler=verify_precheck,
             execute_handler=verify_execute,
         )
     )

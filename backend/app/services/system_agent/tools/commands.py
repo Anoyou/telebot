@@ -94,7 +94,25 @@ async def save_preview(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]
     }
 
 
+def _http_err_message(exc: Exception) -> str:
+    from fastapi import HTTPException
+
+    if isinstance(exc, HTTPException):
+        detail = exc.detail
+        if isinstance(detail, dict):
+            code = detail.get("code")
+            msg = detail.get("message") or detail.get("detail")
+            if code and msg:
+                return f"{code}: {msg}"
+            return str(msg or code or detail)
+        return str(detail or exc)
+    return str(exc)
+
+
 async def save_execute(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
+    from fastapi import HTTPException
+    from pydantic import ValidationError
+
     enable_accounts = args.get("enable_account_ids") or args.get("account_ids") or []
     if not isinstance(enable_accounts, list):
         enable_accounts = []
@@ -105,36 +123,39 @@ async def save_execute(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]
         except (TypeError, ValueError):
             continue
 
-    cmd_id = args.get("id") or args.get("template_id")
-    if cmd_id not in (None, ""):
-        data = {k: args[k] for k in ("name", "type", "description", "aliases", "config") if k in args}
-        payload = CommandTemplateUpdate(**data)
-        row = await command_service.update_template(ctx.db, int(cmd_id), payload)
+    try:
+        cmd_id = args.get("id") or args.get("template_id")
+        if cmd_id not in (None, ""):
+            data = {k: args[k] for k in ("name", "type", "description", "aliases", "config") if k in args}
+            payload = CommandTemplateUpdate(**data)
+            row = await command_service.update_template(ctx.db, int(cmd_id), payload)
+            for aid in account_ids:
+                await command_service.enable_for_account(ctx.db, aid, row.id)
+            return {
+                "mode": "update",
+                "command": _template_view(row, account_ids),
+                "enabled_account_ids": account_ids,
+                "business_changed": True,
+            }
+
+        create = CommandTemplateCreate(
+            name=str(args.get("name") or "").strip(),
+            type=str(args.get("type") or "ai"),  # type: ignore[arg-type]
+            description=args.get("description"),
+            aliases=list(args.get("aliases") or []),
+            config=args.get("config") if isinstance(args.get("config"), dict) else {},
+        )
+        row = await command_service.create_template(ctx.db, create)
         for aid in account_ids:
             await command_service.enable_for_account(ctx.db, aid, row.id)
         return {
-            "mode": "update",
+            "mode": "create",
             "command": _template_view(row, account_ids),
             "enabled_account_ids": account_ids,
             "business_changed": True,
         }
-
-    create = CommandTemplateCreate(
-        name=str(args.get("name") or "").strip(),
-        type=str(args.get("type") or "ai"),  # type: ignore[arg-type]
-        description=args.get("description"),
-        aliases=list(args.get("aliases") or []),
-        config=args.get("config") if isinstance(args.get("config"), dict) else {},
-    )
-    row = await command_service.create_template(ctx.db, create)
-    for aid in account_ids:
-        await command_service.enable_for_account(ctx.db, aid, row.id)
-    return {
-        "mode": "create",
-        "command": _template_view(row, account_ids),
-        "enabled_account_ids": account_ids,
-        "business_changed": True,
-    }
+    except (HTTPException, ValidationError) as exc:
+        raise ValueError(_http_err_message(exc)) from None
 
 
 async def delete_preview(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:

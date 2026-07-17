@@ -23,7 +23,7 @@
 ### Added
 - **System Agent 阶段 1（只读助手）**：新增 `/assistant` Web 工作台与管理 Bot `/agent`，共用 System Agent Runtime、工具注册表与会话/消息持久化；固定 tools Provider 配置；NDJSON 对话流；只读工具覆盖系统上下文、账号、交互规则、通用 Rule、Scheduler、Provider、指令、功能矩阵、日志与台账（「今日」按系统时区日界线）。
 - **System Agent 阶段 2（核心写操作）**：新增 `system_agent_action`、统一事务执行器与重复确认保护；写工具生成待确认 Action；Web 内联 Action 卡片（确认/拒绝/重新同步）；管理 Bot Inline 确认/取消；覆盖账号暂停恢复与 Worker 重启、通用 Rule、交互规则、Scheduler、功能启停。
-- **System Agent 阶段 3（Provider/指令与密钥，开发中）**：Provider 与自定义指令写工具；聊天密钥抽取与落库打码；Action Fernet 临时密文与 rekey 覆盖；Web 卡片可选密钥补填（`secret-input`）。
+- **System Agent 阶段 3（Provider/指令与密钥）**：Provider 与自定义指令写工具；聊天密钥抽取与落库打码；Action Fernet 临时密文与 rekey 覆盖；Web 卡片可选密钥补填；Provider 保存/验证接入真实 quick verify，验证失败保持 pending 并清除无效密钥；指令名称/别名冲突返回可读错误。
 - 模型提供商的新建与编辑表单为 API Key 增加显示/隐藏按钮；编辑已有 Provider 时，点击眼睛会通过独立鉴权接口按需解密已保存的 Key，响应禁止缓存并记录查看审计，列表和普通配置接口仍不返回明文。
 
 ## [0.63.0] — 2026-07-17 · minor（次版本） · 新建 Provider 验证工作流

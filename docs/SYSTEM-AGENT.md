@@ -10,10 +10,10 @@
 | --- | --- | --- |
 | 1 | `0.64.0` Web + Bot 只读助手 | 已实现（本分支，待发版） |
 | 2 | `0.65.0` 核心写操作 + Action | 已实现（本分支，待发版） |
-| 3 | `0.66.0` Provider/指令写 + 密钥 | 开发中（本分支） |
+| 3 | `0.66.0` Provider/指令写 + 密钥 | 已实现（本分支，待发版） |
 | 4 | 真实使用驱动扩展 | backlog |
 
-当前能力：只读查询、核心写操作（Web 卡片 + Bot Inline 确认）、Provider/指令写工具骨架，以及聊天密钥抽取与 Action 密文暂存。
+当前能力：只读查询、核心写操作（Web 卡片 + Bot Inline 确认）、Provider/指令写工具、聊天密钥抽取与 Action 密文暂存，以及 Provider 保存前真实 quick verify。
 
 ## 入口
 
@@ -121,18 +121,24 @@ Web 用内联卡片确认；Bot 用 Inline 按钮（`ab:{aid}:confirm|cancel:age
 
 助手模式标记在 Redis，TTL 30 分钟滚动刷新。既有斜杠命令（`/status`、`/rules` 等）始终优先。
 
-## 密钥与隐私（阶段 1）
+## 密钥与隐私（阶段 3）
 
-阶段 1 只读，不主动收集 API Key。落库消息仍走基础打码（`redactor`）。阶段 3 才会支持聊天粘贴 Key、Action 密文暂存与 rekey 覆盖。
+- Web / Bot 普通聊天允许粘贴 API Key；原始文本进入当次上游模型请求。
+- 落库前对用户消息、助手回复和工具摘要做密钥替换 + 基础打码。
+- 工具敏感参数移入 `secret_payload_enc`（Fernet），普通 `arguments` 仅 `has_api_key=true`。
+- 执行 / 拒绝 / 过期后清除密文；`rekey` 覆盖该字段。
+- Provider 保存/验证：真实 quick verify 失败时 Action **保持 pending**、清除无效密钥，允许重新输入。
+- 当轮未消费的 Key 不额外缓存；后续上下文只有掩码时必须要求用户重发。
 
 ## 故障语义（摘录）
 
 | 情况 | 用户可见 |
 | --- | --- |
 | 未启用 / 无 tools Provider | 明确错误 + AI 中心入口 |
-| 工具异常 | 说明业务未变化（只读） |
-| Redis 不可用 | Web 仍可用；Bot 助手模式可能不可用 |
-| NDJSON 中断 | 刷新后重读会话消息 |
+| 工具异常 | 说明业务是否变化 |
+| Provider 验证失败 | 保持待确认，清除无效密钥，要求重输 |
+| Redis 不可用 | Web 仍可用；Bot 助手模式/Inline 确认可能不可用 |
+| NDJSON 中断 | 刷新后重读会话消息与 Action |
 
 ## 扩展新工具
 

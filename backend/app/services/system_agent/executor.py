@@ -26,7 +26,7 @@ from ...services import audit
 from .actions import action_to_dict, decrypt_secret_payload, mark_expired_if_needed
 from .context import ToolContext
 from .redactor import summarize_tool_result
-from .registry import get_registry, role_at_least
+from .registry import ActionKeepPendingError, get_registry, role_at_least
 
 log = logging.getLogger(__name__)
 
@@ -110,10 +110,6 @@ class ActionExecutor:
                         "action": action_to_dict(action),
                     }
 
-                action.status = ACTION_STATUS_EXECUTING
-                action.updated_at = _now()
-                await db.flush()
-
                 secrets = decrypt_secret_payload(action.secret_payload_enc)
                 arguments = dict(action.arguments or {})
                 arguments.update(secrets)
@@ -136,6 +132,55 @@ class ActionExecutor:
                     ),
                     action=action,
                 )
+
+                # 事务外预检（Provider 上游验证等）：失败保持 pending、清除无效密钥
+                if spec.precheck_handler is not None:
+                    try:
+                        await spec.precheck_handler(ctx, arguments)
+                    except ActionKeepPendingError as exc:
+                        action.status = ACTION_STATUS_PENDING
+                        action.secret_payload_enc = None
+                        # 普通 arguments 去掉 has_* 误导（可选）
+                        args_pub = dict(action.arguments or {})
+                        for name in spec.secret_argument_names or ():
+                            args_pub.pop(name, None)
+                            args_pub.pop(f"has_{name}", None)
+                        action.arguments = args_pub
+                        action.secret_fields = None
+                        action.error_code = exc.code
+                        action.error_message = exc.message[:1000]
+                        action.updated_at = _now()
+                        await db.commit()
+                        return {
+                            "ok": False,
+                            "keep_pending": True,
+                            "error_code": exc.code,
+                            "error_message": exc.message,
+                            "business_changed": False,
+                            "action": action_to_dict(action),
+                        }
+                    except Exception as exc:  # noqa: BLE001
+                        log.exception("action precheck failed id=%s", action.id)
+                        action.status = ACTION_STATUS_PENDING
+                        action.secret_payload_enc = None
+                        action.error_code = type(exc).__name__
+                        action.error_message = str(exc)[:500]
+                        action.updated_at = _now()
+                        await db.commit()
+                        return {
+                            "ok": False,
+                            "keep_pending": True,
+                            "error_code": type(exc).__name__,
+                            "error_message": str(exc)[:500],
+                            "business_changed": False,
+                            "action": action_to_dict(action),
+                        }
+
+                action.status = ACTION_STATUS_EXECUTING
+                action.updated_at = _now()
+                action.error_code = None
+                action.error_message = None
+                await db.flush()
 
                 try:
                     result = await spec.execute_handler(ctx, arguments)

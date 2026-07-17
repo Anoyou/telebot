@@ -11,6 +11,17 @@ from .context import ToolContext
 ReadHandler = Callable[[ToolContext, dict[str, Any]], Awaitable[Any]]
 PreviewHandler = Callable[[ToolContext, dict[str, Any]], Awaitable[dict[str, Any]]]
 ExecuteHandler = Callable[[ToolContext, dict[str, Any]], Awaitable[Any]]
+# 事务外预检（如 Provider 上游验证）；失败可保持 Action pending
+PrecheckHandler = Callable[[ToolContext, dict[str, Any]], Awaitable[Any]]
+
+
+class ActionKeepPendingError(Exception):
+    """预检失败：清除无效密文、Action 保持 pending，允许重新输入。"""
+
+    def __init__(self, message: str, *, code: str = "PRECHECK_FAILED") -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
 
 ROLE_ORDER = {"viewer": 0, "operator": 1, "admin": 2}
 
@@ -33,6 +44,7 @@ class ToolSpec:
     read_handler: ReadHandler | None = None
     preview_handler: PreviewHandler | None = None
     execute_handler: ExecuteHandler | None = None
+    precheck_handler: PrecheckHandler | None = None
     secret_argument_names: tuple[str, ...] = ()
     runtime_effects: tuple[str, ...] = ()
     available: bool = True
@@ -145,6 +157,7 @@ def reset_registry_for_tests() -> None:
 
 
 __all__ = [
+    "ActionKeepPendingError",
     "ToolRegistry",
     "ToolSpec",
     "get_registry",

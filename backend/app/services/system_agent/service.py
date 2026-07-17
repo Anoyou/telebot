@@ -309,6 +309,19 @@ class SystemAgentService:
         for tev in tool_events:
             if tev.get("type") != "tool_finished":
                 continue
+            summary = tev.get("result_summary")
+            # 工具摘要落库前再对当轮已知密钥打码
+            if chat_secrets and isinstance(summary, str):
+                summary = redact_known_secrets(summary, chat_secrets)
+            elif chat_secrets and isinstance(summary, dict):
+                try:
+                    import json
+
+                    raw = json.dumps(summary, ensure_ascii=False, default=str)
+                    red = redact_known_secrets(raw, chat_secrets)
+                    summary = json.loads(red) if red.startswith("{") else {"preview": red}
+                except Exception:  # noqa: BLE001
+                    summary = {"preview": redact_known_secrets(str(summary), chat_secrets)}
             db.add(
                 SystemAgentMessage(
                     session_id=session.id,
@@ -317,7 +330,7 @@ class SystemAgentService:
                         "tool_name": tev.get("tool_name"),
                         "call_id": tev.get("call_id"),
                         "is_error": tev.get("is_error"),
-                        "result_summary": tev.get("result_summary"),
+                        "result_summary": summary,
                     },
                 )
             )
