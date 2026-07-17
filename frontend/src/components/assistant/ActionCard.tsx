@@ -122,7 +122,15 @@ export function ActionCard({
                 : undefined
           }
           onDone={() => {
-            setAction((prev) => ({ ...prev, has_secret: true }));
+            // 与后端 secret-input 一致：补 Key 后清旧预检错误
+            const next = {
+              ...action,
+              has_secret: true,
+              error_code: null,
+              error_message: null,
+            };
+            setAction(next);
+            onUpdated?.(next);
           }}
         />
       ) : null}
