@@ -33,6 +33,7 @@ from ..services.system_agent.actions import (
     list_actions,
     mark_expired_if_needed,
     reject_action,
+    web_owns_action,
 )
 from ..services.system_agent.executor import get_action_executor
 from ..services.system_agent.registry import get_registry
@@ -260,7 +261,7 @@ async def get_system_agent_action(
     user: CurrentUser,
 ) -> SystemAgentActionOut:
     row = await get_action(db, action_id)
-    if row is None or (row.actor_user_id not in (None, user.id)):
+    if row is None or not web_owns_action(row, user.id):
         raise _err("ACTION_NOT_FOUND", "操作不存在", 404)
     return SystemAgentActionOut(**action_to_dict(row))
 
@@ -280,6 +281,7 @@ async def confirm_system_agent_action(
     return SystemAgentActionConfirmOut(
         ok=bool(result.get("ok")),
         already_final=bool(result.get("already_final")),
+        keep_pending=bool(result.get("keep_pending")),
         error_code=result.get("error_code"),
         error_message=result.get("error_message"),
         business_changed=result.get("business_changed"),
@@ -294,7 +296,7 @@ async def reject_system_agent_action(
     user: CurrentUser,
 ) -> SystemAgentActionOut:
     row = await get_action(db, action_id)
-    if row is None or (row.actor_user_id not in (None, user.id)):
+    if row is None or not web_owns_action(row, user.id):
         raise _err("ACTION_NOT_FOUND", "操作不存在", 404)
     row = await reject_action(db, row)
     await db.commit()
@@ -312,7 +314,7 @@ async def retry_runtime_sync_action(
 
     async with AsyncSessionLocal() as db:
         row = await get_action(db, action_id)
-        if row is None or (row.actor_user_id not in (None, user.id)):
+        if row is None or not web_owns_action(row, user.id):
             raise _err("ACTION_NOT_FOUND", "操作不存在", 404)
     result = await get_action_executor().retry_runtime_sync(action_id)
     action = result.get("action")
@@ -334,7 +336,7 @@ async def secret_input_action(
     """Web 内联卡片补填密钥；只接受工具注册表声明字段，响应不回显明文。"""
 
     row = await get_action(db, action_id)
-    if row is None or (row.actor_user_id not in (None, user.id)):
+    if row is None or not web_owns_action(row, user.id):
         raise _err("ACTION_NOT_FOUND", "操作不存在", 404)
     row = await mark_expired_if_needed(db, row)
     if row.status != "pending":

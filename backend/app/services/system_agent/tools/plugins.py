@@ -172,7 +172,8 @@ async def uninstall_execute(ctx: ToolContext, args: dict[str, Any]) -> dict[str,
 
     name = str(args.get("name") or args.get("plugin_key") or "").strip()
     try:
-        ok = await svc.uninstall(ctx.db, name)
+        # 只改库；目录在 commit 后由 runtime_effects=plugin_fs_cleanup 删除
+        ok = await svc.uninstall(ctx.db, name, remove_files=False)
     except Exception as exc:  # noqa: BLE001
         raise ValueError(_err(exc)) from None
     if ctx.action is not None:
@@ -317,7 +318,7 @@ def register(registry: ToolRegistry) -> None:
             risk="dangerous",
             preview_handler=uninstall_preview,
             execute_handler=uninstall_execute,
-            runtime_effects=("plugin_reload",),
+            runtime_effects=("plugin_fs_cleanup", "plugin_reload"),
         )
     )
     registry.register(

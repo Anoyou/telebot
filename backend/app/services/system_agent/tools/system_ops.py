@@ -11,6 +11,12 @@ from ..context import ToolContext
 from ..registry import ToolRegistry, ToolSpec
 
 
+def _actor_user(ctx: ToolContext) -> Any:
+    from types import SimpleNamespace
+
+    return SimpleNamespace(id=ctx.web_user_id or 0)
+
+
 async def check_update(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
     from ....api import system_health as sh
     from ....api.system_health import UpdateRequest
@@ -20,8 +26,7 @@ async def check_update(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]
         branch=args.get("branch"),
         full=bool(args.get("force_full") or args.get("full") or False),
     )
-    # check_update 需要 CurrentUser；内部不依赖 user 字段，传伪对象
-    result = await sh.check_update(_user=object(), payload=payload)  # type: ignore[arg-type]
+    result = await sh.check_update(_user=_actor_user(ctx), payload=payload)  # type: ignore[arg-type]
     if hasattr(result, "model_dump"):
         data = result.model_dump()
     else:
@@ -52,7 +57,7 @@ async def apply_update_execute(ctx: ToolContext, args: dict[str, Any]) -> dict[s
         branch=args.get("branch"),
         full=bool(args.get("force_full") or args.get("full") or False),
     )
-    result = await sh.pull_update(_user=object(), payload=payload)  # type: ignore[arg-type]
+    result = await sh.pull_update(_user=_actor_user(ctx), payload=payload)  # type: ignore[arg-type]
     data = result.model_dump() if hasattr(result, "model_dump") else dict(result)  # type: ignore[arg-type]
     ok = bool(data.get("success"))
     return {
@@ -73,7 +78,7 @@ async def restart_preview(ctx: ToolContext, args: dict[str, Any]) -> dict[str, A
 async def restart_execute(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
     from ....api import system_health as sh
 
-    result = await sh.restart_app(_user=object())  # type: ignore[arg-type]
+    result = await sh.restart_app(_user=_actor_user(ctx))  # type: ignore[arg-type]
     data = result.model_dump() if hasattr(result, "model_dump") else dict(result)  # type: ignore[arg-type]
     ok = bool(data.get("success"))
     return {

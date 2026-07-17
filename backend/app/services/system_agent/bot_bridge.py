@@ -171,46 +171,42 @@ async def handle_agent_confirm_callback(
         await answer("确认已过期", show_alert=True)
         return
 
-    if decide == "cancel":
-        payload = await consume_agent_confirm_payload(nonce)
-        if not payload:
-            await answer("已取消或过期", show_alert=False)
-            await send("已取消操作。", edit=True)
-            return
-        if payload.get("account_id") != account_id or payload.get("tg_user_id") != tg_user_id:
-            await answer("只能由原用户操作", show_alert=True)
-            return
-        action_id = str(payload.get("action_id") or "")
-        if action_id:
-            async with AsyncSessionLocal() as db:
-                action = await get_action(db, action_id)
-                if action is not None:
-                    await reject_action(db, action)
-                    await db.commit()
-        await answer("已取消")
-        await send("已取消该助手操作，业务未变更。", edit=True)
-        return
-
-    # confirm
+    # 先读票据 → 校验身份 → 再消费（避免非本人点取消烧掉 nonce）
     payload = await read_agent_confirm_payload(nonce)
     if not payload:
         await answer("确认已过期", show_alert=True)
         return
     if payload.get("account_id") != account_id or payload.get("tg_user_id") != tg_user_id:
-        await answer("只能由原用户确认", show_alert=True)
+        await answer("只能由原用户操作", show_alert=True)
         return
     if payload.get("action") != "agent":
         await answer("确认资源不匹配", show_alert=True)
         return
-    # 先消费票据，防止重复点击再次进入执行
+
+    action_id = str(payload.get("action_id") or "")
+    if not action_id:
+        await answer("缺少操作 ID", show_alert=True)
+        return
+
+    if decide == "cancel":
+        consumed = await consume_agent_confirm_payload(nonce)
+        if not consumed:
+            await answer("已取消或过期", show_alert=False)
+            await send("已取消操作。", edit=True)
+            return
+        async with AsyncSessionLocal() as db:
+            action = await get_action(db, action_id)
+            if action is not None:
+                await reject_action(db, action)
+                await db.commit()
+        await answer("已取消")
+        await send("已取消该助手操作，业务未变更。", edit=True)
+        return
+
+    # confirm：先消费防双击，但 keep_pending 时重新发票据
     consumed = await consume_agent_confirm_payload(nonce)
     if not consumed:
         await answer("确认已过期", show_alert=True)
-        return
-
-    action_id = str(consumed.get("action_id") or "")
-    if not action_id:
-        await answer("缺少操作 ID", show_alert=True)
         return
 
     await answer("处理中…")
@@ -234,6 +230,29 @@ async def handle_agent_confirm_callback(
             f"✅ 已确认并执行{already}\n{_html_escape(str(summary))}{extra}",
             edit=True,
         )
+        return
+
+    # 验证失败等 keep_pending：重发 Inline 确认，允许重新贴 Key 后再确认
+    if result.get("keep_pending"):
+        err = result.get("error_message") or result.get("error_code") or "预检失败"
+        danger = str((action or {}).get("risk") or "") == "dangerous"
+        new_nonce = await store_agent_confirm_nonce(
+            account_id=account_id,
+            tg_user_id=tg_user_id,
+            action_id=action_id,
+        )
+        summary = _html_escape(str((action or {}).get("summary") or action_id))
+        body = (
+            f"❌ {_html_escape(str(err)[:400])}\n"
+            f"业务未变更，操作仍待确认：{summary}\n"
+            "请重新发送密钥（如需要）后再次点击确认。"
+        )
+        markup = (
+            _agent_confirm_keyboard(account_id, new_nonce, dangerous=danger) if new_nonce else None
+        )
+        if not new_nonce:
+            body += "\n（Redis 不可用，请到 Web /assistant 确认）"
+        await send(body, edit=True, reply_markup=markup)
         return
 
     err = result.get("error_message") or result.get("error_code") or "执行失败"

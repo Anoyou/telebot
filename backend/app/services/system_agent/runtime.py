@@ -290,6 +290,12 @@ class SystemAgentRuntime:
                     preview=preview,
                     summary=summary,
                 )
+                # 立即提交，使其他会话（Web 确认 / Bot 回调）能立刻读到 pending Action
+                try:
+                    await tool_ctx.db.commit()
+                except Exception:  # noqa: BLE001
+                    log.exception("commit pending action failed tool=%s", spec.name)
+                    raise
                 payload = {
                     "status": "pending_confirmation",
                     "action_id": action.id,

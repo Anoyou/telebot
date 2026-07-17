@@ -163,6 +163,41 @@ async def get_action(db: AsyncSession, action_id: str) -> SystemAgentAction | No
     return await db.get(SystemAgentAction, action_id)
 
 
+def web_owns_action(action: SystemAgentAction, web_user_id: int | None) -> bool:
+    """Web 渠道：必须精确匹配 actor_user_id（禁止 None 共享）。"""
+
+    if web_user_id is None:
+        return False
+    return action.actor_user_id is not None and int(action.actor_user_id) == int(web_user_id)
+
+
+def bot_owns_action(action: SystemAgentAction, bot_tg_user_id: int | None) -> bool:
+    """Bot 渠道：必须精确匹配 actor_bot_user_id。"""
+
+    if bot_tg_user_id is None:
+        return False
+    return (
+        action.actor_bot_user_id is not None
+        and int(action.actor_bot_user_id) == int(bot_tg_user_id)
+    )
+
+
+def clear_action_secrets(action: SystemAgentAction, secret_names: tuple[str, ...] = ()) -> None:
+    """清除密文与 has_* 标记（验证失败 / 过期 / 拒绝共用）。"""
+
+    action.secret_payload_enc = None
+    names = tuple(secret_names or ()) or tuple(action.secret_fields or ())
+    action.secret_fields = None
+    args = dict(action.arguments or {})
+    for name in names:
+        args.pop(name, None)
+        args.pop(f"has_{name}", None)
+    for key in list(args.keys()):
+        if str(key).startswith("has_"):
+            args.pop(key, None)
+    action.arguments = args
+
+
 async def list_actions(
     db: AsyncSession,
     *,
@@ -195,7 +230,7 @@ async def mark_expired_if_needed(db: AsyncSession, action: SystemAgentAction) ->
         expires = expires.replace(tzinfo=UTC)
     if expires is not None and expires <= _now():
         action.status = ACTION_STATUS_EXPIRED
-        action.secret_payload_enc = None
+        clear_action_secrets(action)
         action.error_code = "EXPIRED"
         action.error_message = "操作已过期，请重新发起"
         action.updated_at = _now()
@@ -208,7 +243,7 @@ async def reject_action(db: AsyncSession, action: SystemAgentAction) -> SystemAg
     if action.status != ACTION_STATUS_PENDING:
         return action
     action.status = ACTION_STATUS_REJECTED
-    action.secret_payload_enc = None
+    clear_action_secrets(action)
     action.updated_at = _now()
     await db.flush()
     return action
@@ -241,6 +276,8 @@ async def clear_expired_secrets(db: AsyncSession, *, limit: int = 100) -> int:
 __all__ = [
     "DEFAULT_ACTION_TTL",
     "action_to_dict",
+    "bot_owns_action",
+    "clear_action_secrets",
     "clear_expired_secrets",
     "create_pending_action",
     "decrypt_secret_payload",
@@ -250,4 +287,5 @@ __all__ = [
     "mark_expired_if_needed",
     "reject_action",
     "split_secret_arguments",
+    "web_owns_action",
 ]

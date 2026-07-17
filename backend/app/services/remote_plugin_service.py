@@ -1842,10 +1842,13 @@ async def install(
     return remote_plugin_view_from_installed(row)
 
 
-async def uninstall(db: AsyncSession, name: str) -> bool:
-    """卸载远程插件：删 installed_plugin 行 + 删插件目录 + 清理 Feature/AccountFeature 行。
+async def uninstall(db: AsyncSession, name: str, *, remove_files: bool = True) -> bool:
+    """卸载远程插件：删 installed_plugin 行 + 清理 Feature/AccountFeature 行。
 
     返回 ``True`` 表示真删了一行。``name`` 不存在时返回 ``False``，不抛异常。
+
+    ``remove_files=False`` 时只改库、不删目录，供事务型调用方在 **commit 之后**
+    再做文件系统清理，避免 DB 回滚后磁盘已空。
     """
     row = await db.get(InstalledPlugin, name)
     if row is None or row.source not in _REMOTE_INSTALL_SOURCES:
@@ -1870,13 +1873,14 @@ async def uninstall(db: AsyncSession, name: str) -> bool:
     await db.delete(row)
     await db.flush()
 
-    # 文件系统清理：失败仅记日志，不阻塞 DB
-    try:
-        target = _existing_plugin_dir(name)
-        if target.exists():
-            shutil.rmtree(target)
-    except Exception:  # noqa: BLE001
-        log.exception("卸载 %s 时删除目录失败", name)
+    # 文件系统清理：默认立即删除；事务调用方可推迟到 commit 后
+    if remove_files:
+        try:
+            target = _existing_plugin_dir(name)
+            if target.exists():
+                shutil.rmtree(target)
+        except Exception:  # noqa: BLE001
+            log.exception("卸载 %s 时删除目录失败", name)
 
     return True
 

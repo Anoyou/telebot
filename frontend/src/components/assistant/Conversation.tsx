@@ -30,9 +30,11 @@ function messageText(msg: SystemAgentMessage): string {
 export function Conversation({
   messages,
   live,
+  onActionUpdated,
 }: {
   messages: SystemAgentMessage[];
   live?: LiveBubble[];
+  onActionUpdated?: (action: SystemAgentAction) => void;
 }) {
   const items: LiveBubble[] = [
     ...messages.map(
@@ -79,7 +81,7 @@ export function Conversation({
             ) : null}
             {isAction && item.action ? (
               <div className="max-w-[85%] min-w-[16rem]">
-                <ActionCard action={item.action} />
+                <ActionCard action={item.action} onUpdated={onActionUpdated} />
               </div>
             ) : (
               <div

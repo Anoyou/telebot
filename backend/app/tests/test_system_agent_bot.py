@@ -264,6 +264,14 @@ async def test_handle_agent_cancel_rejects_action() -> None:
 
     reject_mock = AsyncMock()
     get_action_mock = AsyncMock(return_value=object())
+    consume_mock = AsyncMock(
+        return_value={
+            "account_id": 1,
+            "tg_user_id": 2,
+            "action": "agent",
+            "action_id": "act-x",
+        }
+    )
 
     class _DB:
         def __init__(self) -> None:
@@ -278,7 +286,7 @@ async def test_handle_agent_cancel_rejects_action() -> None:
     with (
         patch.object(
             bot_bridge,
-            "consume_agent_confirm_payload",
+            "read_agent_confirm_payload",
             AsyncMock(
                 return_value={
                     "account_id": 1,
@@ -288,6 +296,7 @@ async def test_handle_agent_cancel_rejects_action() -> None:
                 }
             ),
         ),
+        patch.object(bot_bridge, "consume_agent_confirm_payload", consume_mock),
         patch.object(bot_bridge, "AsyncSessionLocal", lambda: _DB()),
         patch.object(bot_bridge, "get_action", get_action_mock),
         patch.object(bot_bridge, "reject_action", reject_mock),
@@ -301,5 +310,110 @@ async def test_handle_agent_cancel_rejects_action() -> None:
             answer=answer,
             send=send,
         )
+    consume_mock.assert_awaited()
     reject_mock.assert_awaited()
     assert any("取消" in c["msg"] for c in send.calls)
+
+
+@pytest.mark.asyncio
+async def test_cancel_by_non_owner_does_not_consume_nonce() -> None:
+    send = _SendCapture()
+    answers: list[tuple[str, bool]] = []
+
+    async def answer(text: str, show_alert: bool = False) -> None:
+        answers.append((text, show_alert))
+
+    consume_mock = AsyncMock()
+    with (
+        patch.object(
+            bot_bridge,
+            "read_agent_confirm_payload",
+            AsyncMock(
+                return_value={
+                    "account_id": 1,
+                    "tg_user_id": 2,
+                    "action": "agent",
+                    "action_id": "act-x",
+                }
+            ),
+        ),
+        patch.object(bot_bridge, "consume_agent_confirm_payload", consume_mock),
+    ):
+        await bot_bridge.handle_agent_confirm_callback(
+            account_id=1,
+            tg_user_id=999,  # 非本人
+            role="admin",
+            nonce="n3",
+            decide="cancel",
+            answer=answer,
+            send=send,
+        )
+    consume_mock.assert_not_awaited()
+    assert any("原用户" in a[0] for a in answers)
+
+
+@pytest.mark.asyncio
+async def test_keep_pending_reissues_inline_keyboard() -> None:
+    send = _SendCapture()
+
+    async def answer(text: str, show_alert: bool = False) -> None:
+        return None
+
+    with (
+        patch.object(
+            bot_bridge,
+            "read_agent_confirm_payload",
+            AsyncMock(
+                return_value={
+                    "account_id": 1,
+                    "tg_user_id": 2,
+                    "action": "agent",
+                    "action_id": "act-k",
+                }
+            ),
+        ),
+        patch.object(
+            bot_bridge,
+            "consume_agent_confirm_payload",
+            AsyncMock(
+                return_value={
+                    "account_id": 1,
+                    "tg_user_id": 2,
+                    "action": "agent",
+                    "action_id": "act-k",
+                }
+            ),
+        ),
+        patch.object(
+            bot_bridge,
+            "get_action_executor",
+            lambda: type(
+                "E",
+                (),
+                {
+                    "confirm": AsyncMock(
+                        return_value={
+                            "ok": False,
+                            "keep_pending": True,
+                            "error_message": "验证失败：401",
+                            "action": {"id": "act-k", "summary": "创建 Provider", "risk": "normal"},
+                        }
+                    )
+                },
+            )(),
+        ),
+        patch.object(bot_bridge, "store_agent_confirm_nonce", AsyncMock(return_value="nonce-new")),
+    ):
+        await bot_bridge.handle_agent_confirm_callback(
+            account_id=1,
+            tg_user_id=2,
+            role="admin",
+            nonce="n-old",
+            decide="confirm",
+            answer=answer,
+            send=send,
+        )
+    final = send.calls[-1]
+    assert "验证失败" in final["msg"] or "仍待确认" in final["msg"]
+    assert final["reply_markup"] is not None
+    assert any("confirm" in b["callback_data"] for b in final["reply_markup"]["inline_keyboard"][0])

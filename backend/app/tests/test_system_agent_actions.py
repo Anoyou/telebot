@@ -20,10 +20,12 @@ from app.db.models.system_agent import (
     SystemAgentSession,
 )
 from app.services.system_agent.actions import (
+    bot_owns_action,
     create_pending_action,
     mark_expired_if_needed,
     reject_action,
     split_secret_arguments,
+    web_owns_action,
 )
 from app.services.system_agent.context import ToolContext
 from app.services.system_agent.executor import ActionExecutor
@@ -56,6 +58,39 @@ def test_split_secret_arguments() -> None:
     assert "api_key" not in public
     assert secrets == {"api_key": "sk-secret"}
     assert fields == ["api_key"]
+
+
+def test_ownership_strict() -> None:
+    bot_action = SystemAgentAction(
+        id="a",
+        channel=CHANNEL_WEB,
+        tool_name="x",
+        arguments={},
+        summary="s",
+        preview={},
+        status=ACTION_STATUS_PENDING,
+        actor_user_id=None,
+        actor_bot_user_id=42,
+        expires_at=datetime.now(UTC) + timedelta(minutes=5),
+    )
+    assert not web_owns_action(bot_action, 1)
+    assert bot_owns_action(bot_action, 42)
+    assert not bot_owns_action(bot_action, 99)
+
+    web_action = SystemAgentAction(
+        id="b",
+        channel=CHANNEL_WEB,
+        tool_name="x",
+        arguments={},
+        summary="s",
+        preview={},
+        status=ACTION_STATUS_PENDING,
+        actor_user_id=7,
+        actor_bot_user_id=None,
+        expires_at=datetime.now(UTC) + timedelta(minutes=5),
+    )
+    assert web_owns_action(web_action, 7)
+    assert not web_owns_action(web_action, 8)
 
 
 @pytest.mark.asyncio

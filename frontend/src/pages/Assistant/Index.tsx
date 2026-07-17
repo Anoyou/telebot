@@ -9,6 +9,7 @@ import {
   deleteSystemAgentSession,
   getSystemAgentCapabilities,
   getSystemAgentConfig,
+  listSystemAgentActions,
   listSystemAgentMessages,
   listSystemAgentSessions,
   patchSystemAgentConfig,
@@ -62,6 +63,13 @@ export function AssistantIndex() {
     queryKey: ["system-agent", "messages", activeId],
     queryFn: () => listSystemAgentMessages(activeId!, { limit: 100 }),
     enabled: !!activeId,
+  });
+  const pendingActionsQ = useQuery({
+    queryKey: ["system-agent", "actions", activeId, "pending"],
+    queryFn: () =>
+      listSystemAgentActions({ session_id: activeId!, status: "pending", limit: 50 }),
+    enabled: !!activeId,
+    refetchInterval: 15_000,
   });
 
   // 恢复最后一个 active 会话
@@ -218,14 +226,37 @@ export function AssistantIndex() {
       );
       await qc.invalidateQueries({ queryKey: ["system-agent", "messages", sessionId] });
       await qc.invalidateQueries({ queryKey: ["system-agent", "sessions"] });
+      await qc.invalidateQueries({ queryKey: ["system-agent", "actions", sessionId] });
+      // 流结束后清空临时气泡；pending Action 由 pendingActionsQ 持久渲染
       setLive([]);
     } catch (e) {
       toast.error(getErrMsg(e));
-      setLive((prev) => prev.filter((b) => b.role === "user"));
+      setLive((prev) => prev.filter((b) => b.role === "user" || b.role === "action"));
     } finally {
       setStreaming(false);
     }
   };
+
+  const pendingActionBubbles: LiveBubble[] = useMemo(() => {
+    const rows = pendingActionsQ.data || [];
+    // 流过程中 live 已有的 action 避免重复
+    const liveIds = new Set(
+      live.filter((b) => b.role === "action" && b.action).map((b) => b.action!.id),
+    );
+    return rows
+      .filter((a) => !liveIds.has(a.id))
+      .map((a) => ({
+        id: `pending-action-${a.id}`,
+        role: "action" as const,
+        text: a.summary || a.tool_name,
+        action: a,
+      }));
+  }, [pendingActionsQ.data, live]);
+
+  const conversationLive = useMemo(
+    () => [...live, ...pendingActionBubbles],
+    [live, pendingActionBubbles],
+  );
 
   return (
     <PageShell>
@@ -335,7 +366,13 @@ export function AssistantIndex() {
               <Spinner />
             </div>
           ) : (
-            <Conversation messages={messages} live={live} />
+            <Conversation
+              messages={messages}
+              live={conversationLive}
+              onActionUpdated={() => {
+                void qc.invalidateQueries({ queryKey: ["system-agent", "actions", activeId] });
+              }}
+            />
           )}
           <Composer disabled={streaming || configQ.isLoading} onSend={onSend} />
         </div>

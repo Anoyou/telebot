@@ -60,7 +60,7 @@ class SystemAgentService:
             "ai_enabled": bool(flags["ai_enabled"]),
             "timezone": flags["timezone"],
             "tools": registry.capabilities(channel=channel, role=role),
-            "stage": 3,
+            "stage": 4,
             "write_tools_available": True,
             "secret_chat_input": True,
         }

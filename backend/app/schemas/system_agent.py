@@ -107,6 +107,7 @@ class SystemAgentActionOut(BaseModel):
 class SystemAgentActionConfirmOut(BaseModel):
     ok: bool
     already_final: bool = False
+    keep_pending: bool = False
     error_code: str | None = None
     error_message: str | None = None
     business_changed: bool | None = None
