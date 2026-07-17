@@ -353,6 +353,66 @@ async def test_cancel_by_non_owner_does_not_consume_nonce() -> None:
 
 
 @pytest.mark.asyncio
+async def test_attach_secrets_to_pending_action_short_circuits() -> None:
+    send = _SendCapture()
+    key = "sk-abcdefghijklmnopqrstuvwxyz123456"
+
+    class _Action:
+        id = "act-secret"
+        account_id = 1
+        tool_name = "providers.save"
+        secret_payload_enc = None
+        secret_fields = None
+        arguments = {"name": "p1"}
+        summary = "创建 Provider"
+        risk = "normal"
+        error_code = "PROVIDER_VERIFY_FAILED"
+        error_message = "验证失败"
+
+    action = _Action()
+
+    class _DB:
+        def __init__(self) -> None:
+            self.commit = AsyncMock()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+    async def fake_list(*a, **k):  # noqa: ANN001
+        return [action]
+
+    class _Spec:
+        secret_argument_names = ("api_key",)
+
+    class _Reg:
+        def get(self, _name):  # noqa: ANN001
+            return _Spec()
+
+    with (
+        patch.object(bot_bridge, "AsyncSessionLocal", lambda: _DB()),
+        patch.object(bot_bridge, "list_actions", fake_list),
+        patch.object(bot_bridge, "get_registry", lambda: _Reg()),
+        patch.object(bot_bridge, "decrypt_secret_payload", lambda _t: {}),
+        patch.object(bot_bridge, "encrypt_secret_payload", lambda d: "enc"),
+        patch.object(bot_bridge, "store_agent_confirm_nonce", AsyncMock(return_value="n-re")),
+    ):
+        handled = await bot_bridge.try_attach_secrets_to_pending_action(
+            account_id=1,
+            tg_user_id=2,
+            text=key,
+            send=send,
+        )
+    assert handled is True
+    assert action.secret_payload_enc == "enc"
+    assert action.arguments.get("has_api_key") is True
+    assert send.calls
+    assert send.calls[-1]["reply_markup"] is not None
+
+
+@pytest.mark.asyncio
 async def test_keep_pending_reissues_inline_keyboard() -> None:
     send = _SendCapture()
 

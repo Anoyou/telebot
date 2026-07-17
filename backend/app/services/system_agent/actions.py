@@ -147,11 +147,8 @@ async def create_pending_action(
         preview=safe_preview,
         risk=spec.risk or RISK_NORMAL,
         status=ACTION_STATUS_PENDING,
-        runtime_sync_status=(
-            RUNTIME_SYNC_NOT_REQUIRED
-            if not spec.runtime_effects
-            else "pending"
-        ),
+        # 执行成功前不标 pending，避免未执行就显示「待同步」
+        runtime_sync_status=RUNTIME_SYNC_NOT_REQUIRED,
         expires_at=_now() + DEFAULT_ACTION_TTL,
     )
     db.add(action)
@@ -264,7 +261,7 @@ async def clear_expired_secrets(db: AsyncSession, *, limit: int = 100) -> int:
     rows = list(result.scalars().all())
     for row in rows:
         row.status = ACTION_STATUS_EXPIRED
-        row.secret_payload_enc = None
+        clear_action_secrets(row)
         row.error_code = "EXPIRED"
         row.error_message = "操作已过期"
         row.updated_at = now

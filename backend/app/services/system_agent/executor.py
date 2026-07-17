@@ -284,10 +284,33 @@ class ActionExecutor:
                     # 把 execute 可能写入的 arguments 同步回去（plugin_name 等）
                     if action.arguments:
                         arguments = {**arguments, **dict(action.arguments)}
-                    await db.commit()
+                    try:
+                        await db.commit()
+                    except Exception as commit_exc:  # noqa: BLE001
+                        log.exception("action commit failed id=%s", action_id)
+                        await db.rollback()
+                        # 安装类工具可能已落盘：补偿清理，避免 DIR_EXISTS
+                        await self._compensate_plugin_fs_after_failed_commit(
+                            tool_name, arguments, result if isinstance(result, dict) else {}
+                        )
+                        await self._mark_failed(
+                            action_id,
+                            error_code="COMMIT_FAILED",
+                            error_message=str(commit_exc)[:500],
+                        )
+                        return {
+                            "ok": False,
+                            "error_code": "COMMIT_FAILED",
+                            "error_message": str(commit_exc)[:500],
+                            "business_changed": False,
+                        }
                 except Exception as exc:  # noqa: BLE001
                     log.exception("action execute failed id=%s tool=%s", action.id, tool_name)
                     await db.rollback()
+                    # execute 已改磁盘但事务回滚时补偿
+                    await self._compensate_plugin_fs_after_failed_commit(
+                        tool_name, arguments, {}
+                    )
                     await self._mark_failed(
                         action_id,
                         error_code=type(exc).__name__,
@@ -359,6 +382,41 @@ class ActionExecutor:
             pass
         result = await db.execute(q)
         return result.scalar_one_or_none()
+
+    async def _compensate_plugin_fs_after_failed_commit(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any],
+        result: dict[str, Any],
+    ) -> None:
+        """插件安装类 execute 已落盘、但 Action 事务失败时删除孤儿目录。"""
+
+        install_tools = {
+            "plugins.install",
+            "plugin_repos.install_plugin",
+        }
+        if tool_name not in install_tools:
+            return
+        name = str(
+            result.get("plugin_name")
+            or arguments.get("plugin_name")
+            or arguments.get("name")
+            or arguments.get("plugin_key")
+            or ""
+        ).strip()
+        if not name:
+            return
+        try:
+            import shutil
+
+            from ...services.remote_plugin_service import _existing_plugin_dir
+
+            target = _existing_plugin_dir(name)
+            if target.exists():
+                shutil.rmtree(target, ignore_errors=True)
+                log.warning("compensated orphan plugin dir after failed commit name=%s", name)
+        except Exception:  # noqa: BLE001
+            log.exception("plugin FS compensation failed name=%s", name)
 
     async def _mark_failed(
         self,

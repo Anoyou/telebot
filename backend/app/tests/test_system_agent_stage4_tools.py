@@ -79,6 +79,20 @@ async def test_plugins_list_uses_service(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_uninstall_execute_raises_when_not_deleted(monkeypatch) -> None:
+    async def fake_uninstall(db, name, *, remove_files=True):  # noqa: ANN001
+        return False
+
+    monkeypatch.setattr(
+        "app.services.remote_plugin_service.uninstall",
+        fake_uninstall,
+    )
+    ctx = ToolContext(db=AsyncMock(), channel="web", role="admin")
+    with pytest.raises(ValueError, match="不可卸载"):
+        await plugins.uninstall_execute(ctx, {"name": "missing-plugin"})
+
+
+@pytest.mark.asyncio
 async def test_routing_set_mode_preview_requires_ai(monkeypatch) -> None:
     class _Tpl:
         id = 3

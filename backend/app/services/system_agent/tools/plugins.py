@@ -160,9 +160,11 @@ async def uninstall_preview(ctx: ToolContext, args: dict[str, Any]) -> dict[str,
     if not name:
         raise ValueError("需要 name")
     row = await svc.get_by_name(ctx.db, name)
+    if row is None:
+        raise ValueError(f"插件 {name} 不存在或不是可卸载的远程安装包")
     return {
         "summary": f"卸载远程插件 {name}",
-        "plugin": _plugin_view(row) if row else {"name": name},
+        "plugin": _plugin_view(row),
         "warning": "危险：删除安装记录、功能矩阵相关行与插件目录，不可恢复。",
     }
 
@@ -176,11 +178,14 @@ async def uninstall_execute(ctx: ToolContext, args: dict[str, Any]) -> dict[str,
         ok = await svc.uninstall(ctx.db, name, remove_files=False)
     except Exception as exc:  # noqa: BLE001
         raise ValueError(_err(exc)) from None
+    if not ok:
+        # 禁止标 executed 后误跑 plugin_fs_cleanup
+        raise ValueError(f"插件 {name} 不存在或不可卸载（仅远程安装包）")
     if ctx.action is not None:
         args_store = dict(ctx.action.arguments or {})
         args_store["plugin_name"] = name
         ctx.action.arguments = args_store
-    return {"name": name, "deleted": bool(ok), "business_changed": bool(ok)}
+    return {"name": name, "deleted": True, "business_changed": True}
 
 
 async def set_package_enabled_preview(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:

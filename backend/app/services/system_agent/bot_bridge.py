@@ -9,10 +9,22 @@ import secrets
 from typing import Any
 
 from ...db.base import AsyncSessionLocal
-from ...db.models.system_agent import CHANNEL_BOT, SESSION_STATUS_ACTIVE
+from ...db.models.system_agent import (
+    ACTION_STATUS_PENDING,
+    CHANNEL_BOT,
+    SESSION_STATUS_ACTIVE,
+)
 from ...redis_client import get_redis
-from .actions import get_action, reject_action
+from .actions import (
+    decrypt_secret_payload,
+    encrypt_secret_payload,
+    get_action,
+    list_actions,
+    reject_action,
+)
 from .executor import get_action_executor
+from .registry import get_registry
+from .secrets import extract_plaintext_secrets
 from .service import get_system_agent_service
 
 log = logging.getLogger(__name__)
@@ -245,7 +257,8 @@ async def handle_agent_confirm_callback(
         body = (
             f"❌ {_html_escape(str(err)[:400])}\n"
             f"业务未变更，操作仍待确认：{summary}\n"
-            "请重新发送密钥（如需要）后再次点击确认。"
+            "若需要密钥：请在本对话直接粘贴 API Key（单独发送即可），"
+            "系统会写入该操作后再点确认；不要依赖掩码。"
         )
         markup = (
             _agent_confirm_keyboard(account_id, new_nonce, dangerous=danger) if new_nonce else None
@@ -257,6 +270,124 @@ async def handle_agent_confirm_callback(
 
     err = result.get("error_message") or result.get("error_code") or "执行失败"
     await send(f"❌ 执行失败：{_html_escape(str(err)[:400])}\n业务是否变化：否（失败路径）", edit=True)
+
+
+def _text_is_mostly_secrets(text: str, secrets: list[str]) -> bool:
+    """判断消息是否主要是密钥重发（去掉密钥后几乎无内容）。"""
+
+    if not secrets:
+        return False
+    remainder = str(text or "")
+    for secret in secrets:
+        remainder = remainder.replace(secret, " ")
+    # 去掉常见提示词
+    for token in ("api_key", "api-key", "key", "token", "密钥", "是", ":", "=", "："):
+        remainder = remainder.replace(token, " ")
+        remainder = remainder.replace(token.upper(), " ")
+    cleaned = " ".join(remainder.split())
+    return len(cleaned) <= 8
+
+
+async def try_attach_secrets_to_pending_action(
+    *,
+    account_id: int,
+    tg_user_id: int,
+    text: str,
+    send: Any,
+) -> bool:
+    """若存在需要密钥的 pending Action，把聊天中的 Key 加密写回并重发确认键盘。
+
+    返回 True 表示已处理完毕、调用方不应再跑完整 Agent 轮次。
+    """
+
+    secrets = extract_plaintext_secrets(text)
+    if not secrets:
+        return False
+
+    async with AsyncSessionLocal() as db:
+        rows = await list_actions(
+            db,
+            bot_tg_user_id=tg_user_id,
+            status=ACTION_STATUS_PENDING,
+            limit=20,
+        )
+        # 优先本账号上下文（Bot 会话绑定 account）
+        candidates = [
+            r for r in rows if r.account_id is None or int(r.account_id) == int(account_id)
+        ]
+        registry = get_registry()
+        target = None
+        secret_names: tuple[str, ...] = ()
+        for row in candidates:
+            spec = registry.get(row.tool_name)
+            if spec is None or not spec.secret_argument_names:
+                continue
+            # 优先：已报缺 Key / 验证失败，或当前无密文
+            if (
+                not row.secret_payload_enc
+                or (row.error_code or "").upper()
+                in {
+                    "API_KEY_REQUIRED",
+                    "PROVIDER_VERIFY_FAILED",
+                    "API_KEY_DECRYPT_FAILED",
+                    "PRECHECK_FAILED",
+                }
+                or str(row.error_message or "").find("密钥") >= 0
+                or str(row.error_message or "").find("Key") >= 0
+                or str(row.error_message or "").find("api_key") >= 0
+            ):
+                target = row
+                secret_names = tuple(spec.secret_argument_names)
+                break
+            if target is None:
+                target = row
+                secret_names = tuple(spec.secret_argument_names)
+        if target is None or not secret_names:
+            return False
+
+        secret_map: dict[str, Any] = decrypt_secret_payload(target.secret_payload_enc)
+        for i, name in enumerate(secret_names):
+            if i < len(secrets):
+                secret_map[name] = secrets[i]
+        if not any(secret_map.get(n) for n in secret_names):
+            return False
+
+        target.secret_payload_enc = encrypt_secret_payload(secret_map)
+        target.secret_fields = [n for n in secret_names if secret_map.get(n)]
+        args = dict(target.arguments or {})
+        for name in secret_names:
+            if secret_map.get(name):
+                args.pop(name, None)
+                args[f"has_{name}"] = True
+        target.arguments = args
+        target.error_code = None
+        target.error_message = None
+        await db.commit()
+        action_id = target.id
+        summary = target.summary
+        danger = str(target.risk or "") == "dangerous"
+
+    # 仅当消息几乎全是密钥时短路；否则仍继续 Agent（用户可能边说边贴 Key）
+    only_secret = _text_is_mostly_secrets(text, secrets)
+    if not only_secret:
+        return False
+
+    nonce = await store_agent_confirm_nonce(
+        account_id=account_id,
+        tg_user_id=tg_user_id,
+        action_id=action_id,
+    )
+    safe_summary = _html_escape(str(summary or action_id))
+    body = (
+        f"🔑 已把密钥写入待确认操作，本地只保存加密版本：\n"
+        f"{safe_summary}\n"
+        "请再次点击确认执行（不会在回复中复述密钥）。"
+    )
+    markup = _agent_confirm_keyboard(account_id, nonce, dangerous=danger) if nonce else None
+    if not nonce:
+        body += "\n（Redis 不可用，请到 Web /assistant 确认）"
+    await send(body, edit=True, reply_markup=markup)
+    return True
 
 
 async def handle_agent_command(
@@ -370,6 +501,19 @@ async def run_agent_query(
     """执行一轮助手查询；写工具附带 Inline 确认按钮。"""
 
     await refresh_agent_mode(account_id, tg_user_id)
+
+    # keep_pending 后用户重发 Key：写回现有 Action，不新开一轮
+    try:
+        if await try_attach_secrets_to_pending_action(
+            account_id=account_id,
+            tg_user_id=tg_user_id,
+            text=text,
+            send=send,
+        ):
+            return
+    except Exception:  # noqa: BLE001
+        log.warning("attach secrets to pending action failed", exc_info=True)
+
     await send("⏳ 系统助手处理中…", edit=edit)
 
     assistant_text = ""
@@ -478,4 +622,5 @@ __all__ = [
     "refresh_agent_mode",
     "run_agent_query",
     "store_agent_confirm_nonce",
+    "try_attach_secrets_to_pending_action",
 ]
