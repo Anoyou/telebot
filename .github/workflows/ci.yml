@@ -55,6 +55,10 @@ jobs:
         working-directory: frontend
         run: pnpm install --frozen-lockfile
 
+      - name: Run frontend regression tests
+        working-directory: frontend
+        run: pnpm test
+
       - name: Build frontend
         working-directory: frontend
         run: pnpm build

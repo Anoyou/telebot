@@ -1,12 +1,13 @@
 {
   "name": "telepilot-frontend",
   "private": true,
-  "version": "0.64.0",
+  "version": "0.64.1",
   "packageManager": "pnpm@10.23.0",
   "type": "module",
   "license": "MIT",
   "scripts": {
     "dev": "vite",
+    "test": "node --experimental-strip-types --test src/lib/updateJobPersistence.test.ts",
     "typecheck": "tsc -b --pretty false",
     "build": "tsc -b && vite build",
     "preview": "vite preview",

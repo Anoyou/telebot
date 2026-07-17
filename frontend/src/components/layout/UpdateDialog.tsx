@@ -28,6 +28,12 @@ import type {
   UpdateJobStatus,
 } from "@/api/types";
 import { APP_VERSION, APP_VERSION_LABEL } from "@/lib/version";
+import {
+  clearActiveUpdateJob,
+  getUpdateJobRetryDelay,
+  loadActiveUpdateJob,
+  saveActiveUpdateJob,
+} from "@/lib/updateJobPersistence";
 import { checkFrontendUpdate } from "@/pwa";
 
 type UpdateActionRequired =
@@ -82,6 +88,14 @@ type FrontendUpdateState =
 interface UpdateDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
+}
+
+function getUpdateJobStorage() {
+  try {
+    return window.localStorage;
+  } catch {
+    return null;
+  }
 }
 
 function UpdateProgress({
@@ -274,7 +288,74 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
     }
   }, []);
 
-  // 打开时自动检查更新
+  const pollUpdateJob = useCallback((jobId: string, plan: UpdatePlanMeta) => {
+    const pollToken = jobPollTokenRef.current + 1;
+    jobPollTokenRef.current = pollToken;
+    let stopped = false;
+    let failures = 0;
+    const poll = async () => {
+      if (stopped || jobPollTokenRef.current !== pollToken) return;
+      try {
+        const job: UpdateJobStatus = await getUpdateJob(jobId);
+        if (!job.ok && ["unknown", "unsupported"].includes(job.status)) {
+          throw new Error(job.error || "暂时无法读取更新任务");
+        }
+        failures = 0;
+        const logs = job.logs || [];
+        if (job.status === "succeeded") {
+          stopped = true;
+          clearActiveUpdateJob(getUpdateJobStorage());
+          setStep({
+            kind: "pulled",
+            newCommit: job.new_commit ?? null,
+            summary: job.summary || "更新任务已完成。",
+            plan,
+          });
+          return;
+        }
+        if (job.status === "failed") {
+          stopped = true;
+          clearActiveUpdateJob(getUpdateJobStorage());
+          setStep({
+            kind: "pull_failed",
+            error: [job.error || "更新任务失败", ...logs.slice(-16)].join("\n"),
+            progress: job.progress ?? 0,
+            phase: job.phase || "更新失败",
+            detail: job.detail ?? null,
+          });
+          return;
+        }
+        setStep({
+          kind: "job_running",
+          jobId,
+          status: job.status || "running",
+          logs,
+          plan,
+          progress: job.progress ?? 0,
+          phase: job.phase || "更新中",
+          detail: job.detail ?? null,
+        });
+      } catch {
+        failures += 1;
+        setStep((current) => {
+          if (current?.kind !== "job_running" || current.jobId !== jobId) return current;
+          return {
+            ...current,
+            status: "reconnecting",
+            phase: "等待服务恢复",
+            detail: `更新期间服务暂时不可用，正在第 ${failures} 次重连；任务仍由 updater 后台执行。`,
+          };
+        });
+      }
+      if (!stopped && jobPollTokenRef.current === pollToken) {
+        const retryDelay = getUpdateJobRetryDelay(failures);
+        window.setTimeout(poll, retryDelay);
+      }
+    };
+    window.setTimeout(poll, 1_200);
+  }, []);
+
+  // 打开时优先恢复未完成任务，否则自动检查更新。
   const doCheck = useCallback(async (target: AppUpdateTarget) => {
     const checkToken = checkTokenRef.current + 1;
     checkTokenRef.current = checkToken;
@@ -312,20 +393,40 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
       const dialogGeneration = dialogGenerationRef.current + 1;
       dialogGenerationRef.current = dialogGeneration;
       setFrontendUpdateState("idle");
-      void (async () => {
-        try {
-          const settings = await getSystemSettings();
-          if (dialogGenerationRef.current !== dialogGeneration) return;
-          const target = settings.app_update_target ?? { remote: "origin", branch: "main" };
-          setUpdateRemote(target.remote || "origin");
-          setUpdateBranch(target.branch || "main");
-          void loadTargetOptions(target.remote || "origin", target.branch || "main");
-          await doCheck(target);
-        } catch {
-          if (dialogGenerationRef.current !== dialogGeneration) return;
-          await doCheck({ remote: "origin", branch: "main" });
-        }
-      })();
+      const activeJob = loadActiveUpdateJob<UpdatePlanMeta>(getUpdateJobStorage());
+      if (activeJob) {
+        const remote = activeJob.plan.remote || "origin";
+        const branch = activeJob.plan.branch || "main";
+        setUpdateRemote(remote);
+        setUpdateBranch(branch);
+        void loadTargetOptions(remote, branch);
+        setStep({
+          kind: "job_running",
+          jobId: activeJob.jobId,
+          status: "reconnecting",
+          logs: [],
+          plan: activeJob.plan,
+          progress: 0,
+          phase: "恢复更新任务",
+          detail: "正在重新连接 updater 并读取最新进度。",
+        });
+        pollUpdateJob(activeJob.jobId, activeJob.plan);
+      } else {
+        void (async () => {
+          try {
+            const settings = await getSystemSettings();
+            if (dialogGenerationRef.current !== dialogGeneration) return;
+            const target = settings.app_update_target ?? { remote: "origin", branch: "main" };
+            setUpdateRemote(target.remote || "origin");
+            setUpdateBranch(target.branch || "main");
+            void loadTargetOptions(target.remote || "origin", target.branch || "main");
+            await doCheck(target);
+          } catch {
+            if (dialogGenerationRef.current !== dialogGeneration) return;
+            await doCheck({ remote: "origin", branch: "main" });
+          }
+        })();
+      }
     } else {
       dialogGenerationRef.current += 1;
       setStep(null);
@@ -340,12 +441,16 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
       }
     }
     return () => {
+      dialogGenerationRef.current += 1;
+      jobPollTokenRef.current += 1;
+      checkTokenRef.current += 1;
+      targetOptionsTokenRef.current += 1;
       if (timerRef.current) {
         clearInterval(timerRef.current);
         timerRef.current = undefined;
       }
     };
-  }, [open, doCheck, loadTargetOptions]);
+  }, [open, doCheck, loadTargetOptions, pollUpdateJob]);
 
   const doPull = async () => {
     setStep({ kind: "pulling" });
@@ -359,6 +464,11 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
         const responsePlan = parsePlanMeta(res);
         const plan = activePlan && responsePlan.components.length === 0 ? activePlan : responsePlan;
         if (res.job_id) {
+          saveActiveUpdateJob(getUpdateJobStorage(), {
+            jobId: res.job_id,
+            plan,
+            savedAt: Date.now(),
+          });
           setStep({
             kind: "job_running",
             jobId: res.job_id,
@@ -406,68 +516,6 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
     } finally {
       setTargetSaving(false);
     }
-  };
-
-  const pollUpdateJob = (jobId: string, plan: UpdatePlanMeta) => {
-    const pollToken = jobPollTokenRef.current + 1;
-    jobPollTokenRef.current = pollToken;
-    let stopped = false;
-    let failures = 0;
-    const poll = async () => {
-      if (stopped || jobPollTokenRef.current !== pollToken) return;
-      try {
-        const job: UpdateJobStatus = await getUpdateJob(jobId);
-        failures = 0;
-        const logs = job.logs || [];
-        if (job.status === "succeeded") {
-          stopped = true;
-          setStep({
-            kind: "pulled",
-            newCommit: job.new_commit ?? null,
-            summary: job.summary || "更新任务已完成。",
-            plan,
-          });
-          return;
-        }
-        if (job.status === "failed") {
-          stopped = true;
-          setStep({
-            kind: "pull_failed",
-            error: [job.error || "更新任务失败", ...logs.slice(-16)].join("\n"),
-            progress: job.progress ?? 0,
-            phase: job.phase || "更新失败",
-            detail: job.detail ?? null,
-          });
-          return;
-        }
-        setStep({
-          kind: "job_running",
-          jobId,
-          status: job.status || "running",
-          logs,
-          plan,
-          progress: job.progress ?? 0,
-          phase: job.phase || "更新中",
-          detail: job.detail ?? null,
-        });
-      } catch (e) {
-        failures += 1;
-        if (failures >= 5) {
-          stopped = true;
-          setStep({
-            kind: "pulled",
-            newCommit: null,
-            summary: "更新任务已启动，服务可能正在重启；请稍后刷新页面重新检查版本。",
-            plan,
-          });
-          return;
-        }
-      }
-      if (!stopped && jobPollTokenRef.current === pollToken) {
-        window.setTimeout(poll, 2000);
-      }
-    };
-    window.setTimeout(poll, 1200);
   };
 
   const doRestart = async () => {
