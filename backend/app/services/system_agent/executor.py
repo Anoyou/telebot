@@ -6,9 +6,6 @@ import logging
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
-
 from ...db.base import AsyncSessionLocal
 from ...db.models.system_agent import (
     ACTION_STATUS_EXECUTED,
@@ -28,6 +25,7 @@ from .actions import (
     bot_owns_action,
     clear_action_secrets,
     decrypt_secret_payload,
+    lock_action,
     mark_expired_if_needed,
     web_owns_action,
 )
@@ -89,6 +87,20 @@ class ActionExecutor:
             registry = get_registry()
             spec = registry.get(action.tool_name)
             if spec is None or spec.execute_handler is None:
+                action = await lock_action(db, action_id)
+                if action is None:
+                    return {
+                        "ok": False,
+                        "error_code": "ACTION_NOT_FOUND",
+                        "error_message": "操作不存在",
+                    }
+                if action.status != ACTION_STATUS_PENDING:
+                    await db.commit()
+                    return {
+                        "ok": action.status == ACTION_STATUS_EXECUTED,
+                        "already_final": True,
+                        "action": action_to_dict(action),
+                    }
                 action.status = ACTION_STATUS_FAILED
                 action.error_code = "TOOL_MISSING"
                 action.error_message = f"工具 {action.tool_name} 不可用"
@@ -120,6 +132,7 @@ class ActionExecutor:
                 bot_tg_user_id if bot_tg_user_id is not None else action.actor_bot_user_id
             )
             secret_names = tuple(spec.secret_argument_names or ())
+            precheck_secret_token = action.secret_payload_enc
             tool_name = action.tool_name
             summary = action.summary
 
@@ -141,18 +154,22 @@ class ActionExecutor:
                     await spec.precheck_handler(pre_ctx, arguments)
                 except ActionKeepPendingError as exc:
                     async with AsyncSessionLocal() as db2:
-                        row = await db2.get(SystemAgentAction, action_id)
+                        row = await lock_action(db2, action_id)
                         if row is not None and row.status == ACTION_STATUS_PENDING:
-                            clear_action_secrets(row, secret_names)
-                            row.error_code = exc.code
-                            row.error_message = exc.message[:1000]
+                            if row.secret_payload_enc != precheck_secret_token:
+                                row.error_code = "PRECHECK_STALE"
+                                row.error_message = "密钥已在验证期间更新，请再次确认"
+                            else:
+                                clear_action_secrets(row, secret_names)
+                                row.error_code = exc.code
+                                row.error_message = exc.message[:1000]
                             row.updated_at = _now()
                             await db2.commit()
                             return {
                                 "ok": False,
                                 "keep_pending": True,
-                                "error_code": exc.code,
-                                "error_message": exc.message,
+                                "error_code": row.error_code,
+                                "error_message": row.error_message,
                                 "business_changed": False,
                                 "action": action_to_dict(row),
                             }
@@ -166,18 +183,22 @@ class ActionExecutor:
                 except Exception as exc:  # noqa: BLE001
                     log.exception("action precheck failed id=%s", action_id)
                     async with AsyncSessionLocal() as db2:
-                        row = await db2.get(SystemAgentAction, action_id)
+                        row = await lock_action(db2, action_id)
                         if row is not None and row.status == ACTION_STATUS_PENDING:
-                            clear_action_secrets(row, secret_names)
-                            row.error_code = type(exc).__name__
-                            row.error_message = str(exc)[:500]
+                            if row.secret_payload_enc != precheck_secret_token:
+                                row.error_code = "PRECHECK_STALE"
+                                row.error_message = "密钥已在验证期间更新，请再次确认"
+                            else:
+                                clear_action_secrets(row, secret_names)
+                                row.error_code = type(exc).__name__
+                                row.error_message = str(exc)[:500]
                             row.updated_at = _now()
                             await db2.commit()
                             return {
                                 "ok": False,
                                 "keep_pending": True,
-                                "error_code": type(exc).__name__,
-                                "error_message": str(exc)[:500],
+                                "error_code": row.error_code,
+                                "error_message": row.error_message,
                                 "business_changed": False,
                                 "action": action_to_dict(row),
                             }
@@ -192,7 +213,7 @@ class ActionExecutor:
         # ── 阶段 3：行锁 + 业务执行 ─────────────────────────────
         async with AsyncSessionLocal() as db:
             try:
-                action = await self._lock_action(db, action_id)
+                action = await lock_action(db, action_id)
                 if action is None:
                     return {
                         "ok": False,
@@ -219,6 +240,22 @@ class ActionExecutor:
                     return {
                         "ok": action.status == ACTION_STATUS_EXECUTED,
                         "already_final": True,
+                        "action": action_to_dict(action),
+                    }
+                if (
+                    spec.precheck_handler is not None
+                    and action.secret_payload_enc != precheck_secret_token
+                ):
+                    action.error_code = "PRECHECK_STALE"
+                    action.error_message = "密钥已在验证期间更新，请再次确认"
+                    action.updated_at = _now()
+                    await db.commit()
+                    return {
+                        "ok": False,
+                        "keep_pending": True,
+                        "error_code": action.error_code,
+                        "error_message": action.error_message,
+                        "business_changed": False,
                         "action": action_to_dict(action),
                     }
 
@@ -295,21 +332,31 @@ class ActionExecutor:
                     except Exception as commit_exc:  # noqa: BLE001
                         log.exception("action commit failed id=%s", action_id)
                         await db.rollback()
-                        await self._compensate_plugin_fs_after_failed_commit(
+                        compensation_error = await self._compensate_plugin_fs_after_failed_commit(
                             tool_name, arguments, result_for_comp
                         )
+                        error_code = (
+                            "COMMIT_FAILED_COMPENSATION_FAILED"
+                            if compensation_error
+                            else "COMMIT_FAILED"
+                        )
+                        error_message = str(commit_exc)[:500]
+                        if compensation_error:
+                            error_message = (
+                                f"{error_message}; 文件补偿失败: {compensation_error}"
+                            )[:500]
                         await self._mark_failed(
                             action_id,
-                            error_code="COMMIT_FAILED",
-                            error_message=str(commit_exc)[:500],
+                            error_code=error_code,
+                            error_message=error_message,
                         )
                         async with AsyncSessionLocal() as db_fail:
                             failed = await db_fail.get(SystemAgentAction, action_id)
                             return {
                                 "ok": False,
-                                "error_code": "COMMIT_FAILED",
-                                "error_message": str(commit_exc)[:500],
-                                "business_changed": False,
+                                "error_code": error_code,
+                                "error_message": error_message,
+                                "business_changed": None if compensation_error else False,
                                 "action": action_to_dict(failed) if failed else None,
                             }
                 except Exception as exc:  # noqa: BLE001
@@ -321,21 +368,28 @@ class ActionExecutor:
                     except Exception:  # noqa: BLE001
                         pass
                     await db.rollback()
-                    await self._compensate_plugin_fs_after_failed_commit(
+                    compensation_error = await self._compensate_plugin_fs_after_failed_commit(
                         tool_name, arguments, result_for_comp
                     )
+                    error_code = type(exc).__name__
+                    error_message = str(exc)[:500]
+                    if compensation_error:
+                        error_code = "EXECUTE_FAILED_COMPENSATION_FAILED"
+                        error_message = (
+                            f"{error_message}; 文件补偿失败: {compensation_error}"
+                        )[:500]
                     await self._mark_failed(
                         action_id,
-                        error_code=type(exc).__name__,
-                        error_message=str(exc)[:500],
+                        error_code=error_code,
+                        error_message=error_message,
                     )
                     async with AsyncSessionLocal() as db2:
                         failed = await db2.get(SystemAgentAction, action_id)
                         return {
                             "ok": False,
-                            "error_code": type(exc).__name__,
-                            "error_message": str(exc)[:500],
-                            "business_changed": False,
+                            "error_code": error_code,
+                            "error_message": error_message,
+                            "business_changed": None if compensation_error else False,
                             "action": action_to_dict(failed) if failed else None,
                         }
 
@@ -387,21 +441,12 @@ class ActionExecutor:
             final = await db2.get(SystemAgentAction, action_id)
             return {"ok": True, "action": action_to_dict(final) if final else None}
 
-    async def _lock_action(self, db: AsyncSession, action_id: str) -> SystemAgentAction | None:
-        q = select(SystemAgentAction).where(SystemAgentAction.id == action_id)
-        try:
-            q = q.with_for_update()
-        except Exception:  # noqa: BLE001
-            pass
-        result = await db.execute(q)
-        return result.scalar_one_or_none()
-
     async def _compensate_plugin_fs_after_failed_commit(
         self,
         tool_name: str,
         arguments: dict[str, Any],
         result: dict[str, Any],
-    ) -> None:
+    ) -> str | None:
         """插件安装类 execute 已落盘、但 Action 事务失败时删除孤儿目录。"""
 
         install_tools = {
@@ -409,7 +454,7 @@ class ActionExecutor:
             "plugin_repos.install_plugin",
         }
         if tool_name not in install_tools:
-            return
+            return None
         name = str(
             result.get("plugin_name")
             or arguments.get("plugin_name")
@@ -418,7 +463,7 @@ class ActionExecutor:
             or ""
         ).strip()
         if not name:
-            return
+            return "无法确定插件目录"
         try:
             import shutil
 
@@ -426,10 +471,14 @@ class ActionExecutor:
 
             target = _existing_plugin_dir(name)
             if target.exists():
-                shutil.rmtree(target, ignore_errors=True)
+                shutil.rmtree(target)
+                if target.exists():
+                    return f"目录仍存在: {target}"
                 log.warning("compensated orphan plugin dir after failed commit name=%s", name)
-        except Exception:  # noqa: BLE001
+            return None
+        except Exception as exc:  # noqa: BLE001
             log.exception("plugin FS compensation failed name=%s", name)
+            return f"{type(exc).__name__}: {str(exc)[:300]}"
 
     async def _mark_failed(
         self,
@@ -439,8 +488,10 @@ class ActionExecutor:
         error_message: str,
     ) -> None:
         async with AsyncSessionLocal() as db:
-            action = await db.get(SystemAgentAction, action_id)
+            action = await lock_action(db, action_id)
             if action is None:
+                return
+            if action.status not in {ACTION_STATUS_PENDING, ACTION_STATUS_EXECUTING}:
                 return
             action.status = ACTION_STATUS_FAILED
             action.error_code = error_code
@@ -563,6 +614,70 @@ class ActionExecutor:
                 await supervisor.start_worker(int(account_id))
             except Exception as exc:  # noqa: BLE001
                 raise RuntimeError(f"restart_worker failed: {exc}") from exc
+            return
+
+        if effect == "scheduler_execute_now":
+            rule_id = args.get("rule_id") or args.get("id")
+            if account_id is None or rule_id in (None, ""):
+                raise RuntimeError("scheduler_execute_now 缺少 account_id 或 rule_id")
+            from ...services import rule_service
+
+            await rule_service.execute_scheduler_rule_now(
+                int(account_id),
+                int(rule_id),
+            )
+            return
+
+        if effect == "system_apply_update":
+            from types import SimpleNamespace
+
+            from ...api import system_health as sh
+            from ...api.system_health import UpdateRequest
+
+            payload = UpdateRequest(
+                remote=args.get("remote"),
+                branch=args.get("branch"),
+                full=bool(args.get("force_full") or args.get("full") or False),
+            )
+            result = await sh.pull_update(
+                _user=SimpleNamespace(id=0),
+                payload=payload,
+            )
+            data = result.model_dump() if hasattr(result, "model_dump") else dict(result)
+            if not bool(data.get("success")):
+                raise RuntimeError(
+                    str(
+                        data.get("error")
+                        or data.get("manual_command")
+                        or "系统更新未成功启动"
+                    )
+                )
+            return
+
+        if effect == "system_restart":
+            from types import SimpleNamespace
+
+            from ...api import system_health as sh
+
+            result = await sh.restart_app(_user=SimpleNamespace(id=0))
+            data = result.model_dump() if hasattr(result, "model_dump") else dict(result)
+            if not bool(data.get("success")):
+                raise RuntimeError(str(data.get("error") or "系统重启未成功下发"))
+            return
+
+        if effect == "plugin_update":
+            plugin_name = str(
+                args.get("plugin_name") or args.get("name") or args.get("plugin_key") or ""
+            ).strip()
+            if not plugin_name:
+                raise RuntimeError("plugin_update 缺少 plugin_name")
+            from ...services import remote_plugin_service as rps
+
+            async with AsyncSessionLocal() as db:
+                await rps.update(db, plugin_name)
+                await db.commit()
+            async with AsyncSessionLocal() as db:
+                await rps.trigger_reload(db, plugin_name)
             return
 
         if effect == "plugin_reload":

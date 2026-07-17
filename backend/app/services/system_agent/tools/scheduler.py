@@ -289,30 +289,25 @@ async def execute_now_preview(ctx: ToolContext, args: dict[str, Any]) -> dict[st
         raise PermissionError("无权执行其他账号定时任务")
     return {
         "summary": f"立即执行定时任务 #{rule_id} {row.name}",
+        "account_id": row.account_id,
         "item": _scheduler_view(row, tz),
         "warning": "危险操作：将立即触发一次调度动作。",
     }
 
 
 async def execute_now_execute(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
-    """标记立即执行请求；真实触发由 runtime_effects 或外部调度完成。"""
+    """确认规则仍存在；真实执行在 Action 提交后的 runtime effect 完成。"""
 
     rule_id = int(args.get("rule_id") or args.get("id"))
     row = await ctx.db.get(Rule, rule_id)
     if row is None or row.feature_key != "scheduler":
         raise ValueError(f"Scheduler 规则 {rule_id} 不存在")
-    # 在 config 上打标记供 runtime 消费；不直接调用外部
-    cfg = dict(row.config or {})
-    cfg["_agent_execute_now"] = True
-    cfg["_agent_execute_requested_at"] = datetime.now(UTC).isoformat()
-    row.config = cfg
-    await ctx.db.flush()
     return {
         "rule_id": rule_id,
         "account_id": row.account_id,
         "requested": True,
-        "business_changed": True,
-        "note": "已记录立即执行请求；运行时同步后生效",
+        "business_changed": False,
+        "note": "Action 提交后将通过账号 Worker 立即执行",
     }
 
 
@@ -436,6 +431,6 @@ def register(registry: ToolRegistry) -> None:
             risk="dangerous",
             preview_handler=execute_now_preview,
             execute_handler=execute_now_execute,
-            runtime_effects=("reload_config",),
+            runtime_effects=("scheduler_execute_now",),
         )
     )

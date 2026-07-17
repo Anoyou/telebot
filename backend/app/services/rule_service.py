@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import secrets
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -14,6 +16,8 @@ from ..db.models.account import Account
 from ..db.models.feature import BUILTIN_FEATURES, FEATURE_SCHEDULER, Feature
 from ..db.models.rule import Rule
 from ..db.models.system import SystemSetting
+from ..redis_client import get_redis
+from ..worker.ipc import CMD_EXECUTE_RULE, IPCMessage, cmd_channel, make_cmd
 
 
 class RuleServiceError(ValueError):
@@ -216,10 +220,91 @@ async def delete_rule(db: AsyncSession, rule_id: int) -> dict[str, Any]:
     return info
 
 
+async def execute_scheduler_rule_now(
+    account_id: int,
+    rule_id: int,
+    *,
+    timeout_seconds: float = 15.0,
+) -> dict[str, Any]:
+    """通过 Worker IPC 立即执行 Scheduler 规则，并等待确定性结果。"""
+
+    try:
+        redis = get_redis()
+    except Exception as exc:  # noqa: BLE001
+        raise RuleServiceError("NO_REDIS", "Redis 不可用，无法连接账号 Worker") from exc
+
+    reply_channel = (
+        f"worker_reply:{int(account_id)}:exec_rule:{secrets.token_hex(8)}"
+    )
+    pubsub = redis.pubsub()
+    try:
+        await pubsub.subscribe(reply_channel)
+        subscribers = await redis.publish(
+            cmd_channel(int(account_id)),
+            make_cmd(
+                CMD_EXECUTE_RULE,
+                rule_id=int(rule_id),
+                reply_to=reply_channel,
+            ),
+        )
+        if int(subscribers or 0) <= 0:
+            raise RuleServiceError("WORKER_OFFLINE", "账号 Worker 未在线")
+
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + max(0.1, float(timeout_seconds))
+        while True:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                raise RuleServiceError(
+                    "WORKER_TIMEOUT",
+                    "Worker 响应超时，任务是否已执行未知",
+                )
+            try:
+                msg = await asyncio.wait_for(
+                    pubsub.get_message(
+                        ignore_subscribe_messages=True,
+                        timeout=remaining,
+                    ),
+                    timeout=remaining + 0.1,
+                )
+            except TimeoutError as exc:
+                raise RuleServiceError(
+                    "WORKER_TIMEOUT",
+                    "Worker 响应超时，任务是否已执行未知",
+                ) from exc
+            if not msg or msg.get("type") != "message":
+                continue
+            payload = IPCMessage.decode(msg["data"]).payload
+            if not bool(payload.get("ok")):
+                raise RuleServiceError(
+                    "EXECUTE_FAILED",
+                    str(payload.get("error") or "Scheduler 任务执行失败"),
+                )
+            return {
+                "ok": True,
+                "account_id": int(account_id),
+                "rule_id": int(rule_id),
+            }
+    finally:
+        try:
+            await pubsub.unsubscribe(reply_channel)
+        except Exception:  # noqa: BLE001
+            pass
+        close = getattr(pubsub, "aclose", None) or getattr(pubsub, "close", None)
+        if close is not None:
+            try:
+                result = close()
+                if hasattr(result, "__await__"):
+                    await result
+            except Exception:  # noqa: BLE001
+                pass
+
+
 __all__ = [
     "RuleServiceError",
     "create_rule",
     "delete_rule",
+    "execute_scheduler_rule_now",
     "ensure_account",
     "ensure_feature",
     "get_rule",

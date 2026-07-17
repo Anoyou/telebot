@@ -31,6 +31,7 @@ from ..services.system_agent.actions import (
     encrypt_secret_payload,
     get_action,
     list_actions,
+    lock_action,
     mark_expired_if_needed,
     reject_action,
     web_owns_action,
@@ -295,7 +296,7 @@ async def reject_system_agent_action(
     db: DBSession,
     user: CurrentUser,
 ) -> SystemAgentActionOut:
-    row = await get_action(db, action_id)
+    row = await lock_action(db, action_id)
     if row is None or not web_owns_action(row, user.id):
         raise _err("ACTION_NOT_FOUND", "操作不存在", 404)
     row = await reject_action(db, row)
@@ -335,7 +336,7 @@ async def secret_input_action(
 ) -> SystemAgentSecretInputOut:
     """Web 内联卡片补填密钥；只接受工具注册表声明字段，响应不回显明文。"""
 
-    row = await get_action(db, action_id)
+    row = await lock_action(db, action_id)
     if row is None or not web_owns_action(row, user.id):
         raise _err("ACTION_NOT_FOUND", "操作不存在", 404)
     row = await mark_expired_if_needed(db, row)

@@ -49,22 +49,13 @@ async def apply_update_preview(ctx: ToolContext, args: dict[str, Any]) -> dict[s
 
 
 async def apply_update_execute(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
-    from ....api import system_health as sh
-    from ....api.system_health import UpdateRequest
-
-    payload = UpdateRequest(
-        remote=args.get("remote"),
-        branch=args.get("branch"),
-        full=bool(args.get("force_full") or args.get("full") or False),
-    )
-    result = await sh.pull_update(_user=_actor_user(ctx), payload=payload)  # type: ignore[arg-type]
-    data = result.model_dump() if hasattr(result, "model_dump") else dict(result)  # type: ignore[arg-type]
-    ok = bool(data.get("success"))
     return {
-        "ok": ok,
-        "result": data,
-        "business_changed": ok,
-        "note": "外部更新结果可能无法完全确认；若 success=false 请查看 error/manual_command。",
+        "requested": True,
+        "remote": args.get("remote"),
+        "branch": args.get("branch"),
+        "force_full": bool(args.get("force_full") or args.get("full") or False),
+        "business_changed": False,
+        "note": "Action 提交后才会启动更新，避免重启中断确认事务。",
     }
 
 
@@ -76,16 +67,10 @@ async def restart_preview(ctx: ToolContext, args: dict[str, Any]) -> dict[str, A
 
 
 async def restart_execute(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
-    from ....api import system_health as sh
-
-    result = await sh.restart_app(_user=_actor_user(ctx))  # type: ignore[arg-type]
-    data = result.model_dump() if hasattr(result, "model_dump") else dict(result)  # type: ignore[arg-type]
-    ok = bool(data.get("success"))
     return {
-        "ok": ok,
-        "result": data,
+        "requested": True,
         "business_changed": False,
-        "note": "重启已下发或给出手工命令；结果可能 RESULT_UNKNOWN。",
+        "note": "Action 提交后才会下发重启；进程退出后结果可能保持 pending。",
     }
 
 
@@ -128,6 +113,7 @@ def register(registry: ToolRegistry) -> None:
             risk="dangerous",
             preview_handler=apply_update_preview,
             execute_handler=apply_update_execute,
+            runtime_effects=("system_apply_update",),
         )
     )
     registry.register(
@@ -140,5 +126,6 @@ def register(registry: ToolRegistry) -> None:
             risk="dangerous",
             preview_handler=restart_preview,
             execute_handler=restart_execute,
+            runtime_effects=("system_restart",),
         )
     )

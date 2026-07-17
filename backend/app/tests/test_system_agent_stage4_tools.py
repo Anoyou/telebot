@@ -8,7 +8,7 @@ import pytest
 
 from app.services.system_agent.context import ToolContext
 from app.services.system_agent.registry import get_registry, reset_registry_for_tests
-from app.services.system_agent.tools import plugins, routing
+from app.services.system_agent.tools import plugins, routing, scheduler
 
 
 @pytest.fixture(autouse=True)
@@ -51,6 +51,10 @@ def test_stage4_tools_registered() -> None:
         assert not spec.read_only
         assert spec.risk == "dangerous"
         assert spec.preview_handler and spec.execute_handler
+    assert reg.get("system.apply_update").runtime_effects == ("system_apply_update",)
+    assert reg.get("system.restart").runtime_effects == ("system_restart",)
+    assert reg.get("plugins.update").runtime_effects == ("plugin_update",)
+    assert reg.get("scheduler.execute_now").runtime_effects == ("scheduler_execute_now",)
 
 
 @pytest.mark.asyncio
@@ -76,6 +80,41 @@ async def test_plugins_list_uses_service(monkeypatch) -> None:
     out = await plugins.list_installed(ctx, {})
     assert out["count"] == 1
     assert out["plugins"][0]["name"] == "demo"
+
+
+@pytest.mark.asyncio
+async def test_plugin_update_defers_filesystem_change_until_runtime_sync(monkeypatch) -> None:
+    row = type("Plugin", (), {"name": "demo", "version": "1.0.0"})()
+    get_mock = AsyncMock(return_value=row)
+    update_mock = AsyncMock()
+    monkeypatch.setattr("app.services.remote_plugin_service.get_by_name", get_mock)
+    monkeypatch.setattr("app.services.remote_plugin_service.update", update_mock)
+    action = type("Action", (), {"arguments": {}})()
+    ctx = ToolContext(db=AsyncMock(), channel="web", role="admin", action=action)
+
+    out = await plugins.update_execute(ctx, {"name": "demo"})
+
+    assert out["requested"] is True
+    assert out["business_changed"] is False
+    update_mock.assert_not_awaited()
+    assert action.arguments["plugin_name"] == "demo"
+
+
+@pytest.mark.asyncio
+async def test_scheduler_execute_now_does_not_write_unused_config_marker() -> None:
+    row = type(
+        "Rule",
+        (),
+        {"id": 9, "feature_key": "scheduler", "account_id": 7, "config": {"cron": "0 1 * * *"}},
+    )()
+    db = AsyncMock()
+    db.get = AsyncMock(return_value=row)
+    ctx = ToolContext(db=db, channel="web", role="admin", account_id=7)
+
+    out = await scheduler.execute_now_execute(ctx, {"rule_id": 9})
+
+    assert out["requested"] is True
+    assert row.config == {"cron": "0 1 * * *"}
 
 
 @pytest.mark.asyncio

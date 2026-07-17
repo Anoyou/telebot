@@ -262,7 +262,7 @@ export function AssistantIndex() {
     <PageShell>
       <PageHeader
         title="系统助手"
-        description="用自然语言查询并操作系统能力；写操作需内联确认（阶段 2）。"
+        description="用自然语言查询并操作系统能力；写操作需内联确认。"
         icon={MessageCircle}
         actions={
           <div className="flex flex-wrap items-center gap-2">

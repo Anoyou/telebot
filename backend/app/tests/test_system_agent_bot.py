@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
@@ -263,7 +264,7 @@ async def test_handle_agent_cancel_rejects_action() -> None:
         answers.append(text)
 
     reject_mock = AsyncMock()
-    get_action_mock = AsyncMock(return_value=object())
+    lock_action_mock = AsyncMock(return_value=SimpleNamespace(actor_bot_user_id=2))
     consume_mock = AsyncMock(
         return_value={
             "account_id": 1,
@@ -298,7 +299,7 @@ async def test_handle_agent_cancel_rejects_action() -> None:
         ),
         patch.object(bot_bridge, "consume_agent_confirm_payload", consume_mock),
         patch.object(bot_bridge, "AsyncSessionLocal", lambda: _DB()),
-        patch.object(bot_bridge, "get_action", get_action_mock),
+        patch.object(bot_bridge, "lock_action", lock_action_mock),
         patch.object(bot_bridge, "reject_action", reject_mock),
     ):
         await bot_bridge.handle_agent_confirm_callback(
@@ -355,7 +356,8 @@ async def test_cancel_by_non_owner_does_not_consume_nonce() -> None:
 @pytest.mark.asyncio
 async def test_attach_secrets_to_pending_action_short_circuits() -> None:
     send = _SendCapture()
-    key = "sk-abcdefghijklmnopqrstuvwxyz123456"
+    # 不在内置 Provider 前缀表中的纯 Token，也应在已有待确认 Action 时绑定。
+    key = "ghp_abcdefghijklmnopqrstuvwxyz123456"
 
     class _Action:
         id = "act-secret"
@@ -370,6 +372,7 @@ async def test_attach_secrets_to_pending_action_short_circuits() -> None:
         error_code = "PROVIDER_VERIFY_FAILED"
         error_message = "验证失败"
         expires_at = None
+        actor_bot_user_id = 2
 
     action = _Action()
 
@@ -396,6 +399,7 @@ async def test_attach_secrets_to_pending_action_short_circuits() -> None:
     with (
         patch.object(bot_bridge, "AsyncSessionLocal", lambda: _DB()),
         patch.object(bot_bridge, "list_actions", fake_list),
+        patch.object(bot_bridge, "lock_action", AsyncMock(return_value=action)),
         patch.object(bot_bridge, "get_registry", lambda: _Reg()),
         patch.object(bot_bridge, "decrypt_secret_payload", lambda _t: {}),
         patch.object(bot_bridge, "encrypt_secret_payload", lambda d: "enc"),

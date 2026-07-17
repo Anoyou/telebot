@@ -160,6 +160,18 @@ async def get_action(db: AsyncSession, action_id: str) -> SystemAgentAction | No
     return await db.get(SystemAgentAction, action_id)
 
 
+async def lock_action(db: AsyncSession, action_id: str) -> SystemAgentAction | None:
+    """锁定 Action 行，供确认、拒绝和密钥补填共享同一状态机边界。"""
+
+    q = select(SystemAgentAction).where(SystemAgentAction.id == action_id)
+    try:
+        q = q.with_for_update()
+    except Exception:  # noqa: BLE001 - SQLite 测试环境不支持时退化为普通查询
+        pass
+    result = await db.execute(q)
+    return result.scalar_one_or_none()
+
+
 def web_owns_action(action: SystemAgentAction, web_user_id: int | None) -> bool:
     """Web 渠道：必须精确匹配 actor_user_id（禁止 None 共享）。"""
 
@@ -280,6 +292,7 @@ __all__ = [
     "decrypt_secret_payload",
     "encrypt_secret_payload",
     "get_action",
+    "lock_action",
     "list_actions",
     "mark_expired_if_needed",
     "reject_action",

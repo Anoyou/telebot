@@ -199,6 +199,46 @@ async def test_stream_message_persists_redacted_user_and_assistant(
 
 
 @pytest.mark.asyncio
+async def test_stream_message_commits_history_before_terminal_events(
+    agent_db, monkeypatch
+) -> None:
+    svc = SystemAgentService()
+
+    async def fake_stream(*_a, **_k):
+        yield {"type": "run_started", "run_id": "r1"}
+        yield {"type": "assistant_message", "content": "已完成", "usage": {}}
+        yield {"type": "done", "ok": True}
+
+    monkeypatch.setattr(svc.runtime, "stream_turn", fake_stream)
+
+    async with agent_db() as db:
+        session = await svc.create_session(db, channel=CHANNEL_WEB, web_user_id=1)
+        await db.commit()
+        stream = svc.stream_message(
+            db,
+            session=session,
+            text="断线后也要保留",
+            role="admin",
+            channel=CHANNEL_WEB,
+            web_user_id=1,
+        )
+
+        first = await anext(stream)
+        assert first["type"] == "run_started"
+        async with agent_db() as observer:
+            roles = [m.role for m in await svc.list_messages(observer, session.id)]
+            assert roles == [MESSAGE_ROLE_USER]
+
+        second = await anext(stream)
+        assert second["type"] == "assistant_message"
+        async with agent_db() as observer:
+            roles = [m.role for m in await svc.list_messages(observer, session.id)]
+            assert roles == [MESSAGE_ROLE_USER, "assistant"]
+
+        await stream.aclose()
+
+
+@pytest.mark.asyncio
 async def test_save_config_roundtrip(agent_db) -> None:
     async with agent_db() as db:
         saved = await save_config(

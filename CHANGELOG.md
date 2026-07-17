@@ -20,12 +20,21 @@
 
 ## [Unreleased]
 
+## [0.64.0] — 2026-07-18 · minor（次版本） · System Agent 自然语言工作台
+
 ### Added
 - **System Agent 阶段 1（只读助手）**：新增 `/assistant` Web 工作台与管理 Bot `/agent`，共用 System Agent Runtime、工具注册表与会话/消息持久化；固定 tools Provider 配置；NDJSON 对话流；只读工具覆盖系统上下文、账号、交互规则、通用 Rule、Scheduler、Provider、指令、功能矩阵、日志与台账（「今日」按系统时区日界线）。
 - **System Agent 阶段 2（核心写操作）**：新增 `system_agent_action`、统一事务执行器与重复确认保护；写工具生成待确认 Action；Web 内联 Action 卡片（确认/拒绝/重新同步）；管理 Bot Inline 确认/取消；覆盖账号暂停恢复与 Worker 重启、通用 Rule、交互规则、Scheduler、功能启停。
 - **System Agent 阶段 3（Provider/指令与密钥）**：Provider 与自定义指令写工具；聊天密钥抽取与落库打码；Action Fernet 临时密文与 rekey 覆盖；Web 卡片可选密钥补填；Provider 保存/验证接入真实 quick verify，验证失败保持 pending 并清除无效密钥；指令名称/别名冲突返回可读错误。
 - **System Agent 阶段 4（使用驱动扩展）**：远程插件安装/更新/卸载与安装包全局启停；插件远程仓库列表/添加/删除/从仓库或官方库安装；系统检查更新/应用更新/重启；AI 指令 auto/fixed 路由列表、预览与设置。
-- 模型提供商的新建与编辑表单为 API Key 增加显示/隐藏按钮；编辑已有 Provider 时，点击眼睛会通过独立鉴权接口按需解密已保存的 Key，响应禁止缓存并记录查看审计，列表和普通配置接口仍不返回明文。
+
+### Fixed
+- Action 的确认、拒绝、过期与密钥补填统一使用行锁和状态复检；Provider 预检期间若密钥发生变化，会保持待确认并要求再次确认，避免未验证的新密钥被直接写入。
+- Scheduler「立即执行」接入现有 Worker IPC 并等待真实结果，不再写入无人消费的临时配置标记。
+- 系统更新、系统重启与插件更新改为 Action 提交后的运行时副作用；失败会进入可重试的运行时同步状态，避免外部操作已经发生却把 Action 误报为业务未变化。
+- Web/Bot 对话先持久化用户消息，并在助手终态事件发给客户端前提交回复与工具摘要；连接中断后可从历史恢复已完成结果。
+- Bot 可将无固定 Provider 前缀的纯 Token 绑定到最近待确认密钥 Action；Redis 不可用时不再错误提示可在 Web 直接确认 Bot Action。
+- 补登记 `agent_mode_text` 事件原因码，恢复全量后端事件契约测试。
 
 ## [0.63.1] — 2026-07-18 · patch（补丁版本） · 模型提供商密钥按需查看
 

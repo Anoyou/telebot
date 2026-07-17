@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 import secrets
 from typing import Any
 
@@ -16,10 +17,11 @@ from ...db.models.system_agent import (
 )
 from ...redis_client import get_redis
 from .actions import (
+    bot_owns_action,
     decrypt_secret_payload,
     encrypt_secret_payload,
-    get_action,
     list_actions,
+    lock_action,
     mark_expired_if_needed,
     reject_action,
 )
@@ -34,6 +36,7 @@ AGENT_MODE_TTL_SECONDS = 30 * 60
 AGENT_MODE_KEY = "system_agent:bot_mode:{account_id}:{tg_user_id}"
 AGENT_CONFIRM_PREFIX = "system_agent:bot_confirm:"
 AGENT_CONFIRM_TTL_SECONDS = 10 * 60  # 与 Action 默认 TTL 对齐
+_PURE_SECRET_RE = re.compile(r"^[A-Za-z0-9._+/=:-]{12,512}$")
 
 
 def _mode_key(account_id: int, tg_user_id: int) -> str:
@@ -208,8 +211,8 @@ async def handle_agent_confirm_callback(
             await send("已取消操作。", edit=True)
             return
         async with AsyncSessionLocal() as db:
-            action = await get_action(db, action_id)
-            if action is not None:
+            action = await lock_action(db, action_id)
+            if action is not None and bot_owns_action(action, tg_user_id):
                 await reject_action(db, action)
                 await db.commit()
         await answer("已取消")
@@ -237,7 +240,7 @@ async def handle_agent_confirm_callback(
         sync = (action or {}).get("runtime_sync_status") or ""
         extra = ""
         if sync == "failed":
-            extra = "\n⚠️ 配置已保存，运行时同步失败；可到 Web /assistant 重新同步。"
+            extra = "\n⚠️ 配置已保存，运行时同步失败；请稍后重新发起，或到 Web 查看运行日志。"
         already = "（已执行，未重复）" if result.get("already_final") else ""
         await send(
             f"✅ 已确认并执行{already}\n{_html_escape(str(summary))}{extra}",
@@ -265,7 +268,7 @@ async def handle_agent_confirm_callback(
             _agent_confirm_keyboard(account_id, new_nonce, dangerous=danger) if new_nonce else None
         )
         if not new_nonce:
-            body += "\n（Redis 不可用，请到 Web /assistant 确认）"
+            body += "\n（Redis 不可用，请稍后重试，或到 Web /assistant 重新发起）"
         await send(body, edit=True, reply_markup=markup)
         return
 
@@ -301,8 +304,14 @@ async def try_attach_secrets_to_pending_action(
     返回 True 表示已处理完毕、调用方不应再跑完整 Agent 轮次。
     """
 
+    raw_secret = str(text or "").strip()
     secrets = extract_plaintext_secrets(text)
-    if not secrets:
+    pure_secret_candidate = (
+        not secrets
+        and bool(_PURE_SECRET_RE.fullmatch(raw_secret))
+        and not any(ch.isspace() for ch in raw_secret)
+    )
+    if not secrets and not pure_secret_candidate:
         return False
 
     async with AsyncSessionLocal() as db:
@@ -349,12 +358,25 @@ async def try_attach_secrets_to_pending_action(
         if target is None or not secret_names:
             await db.commit()  # 可能有过期标记
             return False
+        if not secrets and pure_secret_candidate:
+            secrets = [raw_secret]
 
-        secret_map: dict[str, Any] = decrypt_secret_payload(target.secret_payload_enc)
+        locked = await lock_action(db, target.id)
+        if locked is None or not bot_owns_action(locked, tg_user_id):
+            await db.rollback()
+            return False
+        locked = await mark_expired_if_needed(db, locked)
+        if locked.status != ACTION_STATUS_PENDING:
+            await db.commit()
+            return False
+        target = locked
+
+        secret_map = decrypt_secret_payload(target.secret_payload_enc)
         for i, name in enumerate(secret_names):
             if i < len(secrets):
                 secret_map[name] = secrets[i]
         if not any(secret_map.get(n) for n in secret_names):
+            await db.rollback()
             return False
 
         target.secret_payload_enc = encrypt_secret_payload(secret_map)
@@ -390,7 +412,7 @@ async def try_attach_secrets_to_pending_action(
     )
     markup = _agent_confirm_keyboard(account_id, nonce, dangerous=danger) if nonce else None
     if not nonce:
-        body += "\n（Redis 不可用，请到 Web /assistant 确认）"
+        body += "\n（Redis 不可用，请稍后重试，或到 Web /assistant 重新发起）"
     await send(body, edit=True, reply_markup=markup)
     return True
 
@@ -594,7 +616,7 @@ async def run_agent_query(
         card = f"\n\n🧾 <b>待确认</b>\n{summary}{warning}"
         markup = _agent_confirm_keyboard(account_id, nonce, dangerous=danger) if nonce else None
         if not nonce:
-            card += "\n（Redis 不可用，请到 Web /assistant 确认）"
+            card += "\n（Redis 不可用，请稍后重试，或到 Web /assistant 重新发起）"
         await send(safe + card, edit=True, reply_markup=markup)
         return
 
@@ -608,7 +630,7 @@ async def run_agent_query(
         danger = str(action.get("risk") or "") == "dangerous"
         summary = _html_escape(str(action.get("summary") or action.get("tool_name") or "操作"))
         markup = _agent_confirm_keyboard(account_id, nonce, dangerous=danger) if nonce else None
-        extra = "" if nonce else "\n（Redis 不可用，请到 Web 确认）"
+        extra = "" if nonce else "\n（Redis 不可用，请稍后重试，或到 Web 重新发起）"
         await send(
             f"🧾 <b>待确认</b>\n{summary}{extra}",
             edit=False,

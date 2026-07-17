@@ -274,9 +274,13 @@ class SystemAgentService:
         # 因此从 history 去掉最后一条 user，由 runtime 追加 raw_text。
         history_for_model = [m for m in history if m.id != user_msg.id]
 
+        # 用户消息先独立落库。即使浏览器断线或上游模型超时，刷新后仍能看到本轮输入。
+        await db.commit()
+
         assistant_text = ""
         usage: dict[str, Any] | None = None
         tool_events: list[dict[str, Any]] = []
+        buffered_events: list[dict[str, Any]] = []
 
         async for event in self.runtime.stream_turn(
             db,
@@ -295,7 +299,12 @@ class SystemAgentService:
                 usage = event.get("usage") if isinstance(event.get("usage"), dict) else None
             elif et in {"tool_started", "tool_finished"}:
                 tool_events.append(event)
-            yield event
+            # run_started 立即发给客户端；其余事件等消息落库成功后再发，
+            # 避免客户端收到最终答案后断线却无法从历史恢复。
+            if et == "run_started":
+                yield event
+            else:
+                buffered_events.append(event)
 
         if assistant_text:
             db.add(
@@ -336,6 +345,10 @@ class SystemAgentService:
             )
         session.updated_at = datetime.now(UTC)
         await db.flush()
+        await db.commit()
+
+        for event in buffered_events:
+            yield event
 
 
 _SERVICE: SystemAgentService | None = None

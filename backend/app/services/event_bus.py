@@ -68,6 +68,7 @@ EVENT_TRACE_STATUSES = {
 EVENT_REASON_CODES = {
     "account_not_matched",
     "already_acked",
+    "agent_mode_text",
     "account_bot_user_unauthorized",
     "action_failed",
     "action_limit_exceeded",

@@ -188,3 +188,43 @@ async def test_stream_message_ndjson(fake_svc) -> None:
     assert "assistant_message" in types
     assert "done" in types
     db.commit.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_secret_input_locks_action_before_writing(monkeypatch) -> None:
+    row = SimpleNamespace(
+        id="act-secret",
+        actor_user_id=7,
+        tool_name="providers.save",
+        status="pending",
+        expires_at=None,
+        secret_payload_enc=None,
+        secret_fields=None,
+        arguments={},
+        error_code="API_KEY_REQUIRED",
+        error_message="缺少 Key",
+    )
+    lock_mock = AsyncMock(return_value=row)
+    monkeypatch.setattr(api, "lock_action", lock_mock)
+    monkeypatch.setattr(
+        api,
+        "get_registry",
+        lambda: SimpleNamespace(
+            get=lambda _name: SimpleNamespace(secret_argument_names=("api_key",))
+        ),
+    )
+    monkeypatch.setattr(api, "encrypt_secret_payload", lambda _data: "encrypted")
+    db = AsyncMock()
+
+    out = await api.secret_input_action(
+        "act-secret",
+        api.SystemAgentSecretInput(fields={"api_key": "sk-new-secret-value"}),
+        db,
+        SimpleNamespace(id=7),
+    )
+
+    lock_mock.assert_awaited_once_with(db, "act-secret")
+    assert out.has_secret is True
+    assert row.secret_payload_enc == "encrypted"
+    assert row.error_code is None
+    db.commit.assert_awaited_once()

@@ -142,15 +142,20 @@ async def update_execute(ctx: ToolContext, args: dict[str, Any]) -> dict[str, An
     from ....services import remote_plugin_service as svc
 
     name = str(args.get("name") or args.get("plugin_key") or "").strip()
-    try:
-        row = await svc.update(ctx.db, name)
-    except Exception as exc:  # noqa: BLE001
-        raise ValueError(_err(exc)) from None
+    row = await svc.get_by_name(ctx.db, name)
+    if row is None:
+        raise ValueError(f"插件 {name} 不存在")
     if ctx.action is not None:
         args_store = dict(ctx.action.arguments or {})
         args_store["plugin_name"] = name
         ctx.action.arguments = args_store
-    return {"plugin": _plugin_view(row), "plugin_name": name, "business_changed": True}
+    return {
+        "plugin": _plugin_view(row),
+        "plugin_name": name,
+        "requested": True,
+        "business_changed": False,
+        "note": "Action 提交后执行插件更新与 Worker 重载。",
+    }
 
 
 async def uninstall_preview(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
@@ -303,7 +308,7 @@ def register(registry: ToolRegistry) -> None:
             risk="dangerous",
             preview_handler=update_preview,
             execute_handler=update_execute,
-            runtime_effects=("plugin_reload",),
+            runtime_effects=("plugin_update",),
         )
     )
     registry.register(

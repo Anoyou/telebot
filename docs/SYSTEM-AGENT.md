@@ -8,10 +8,10 @@
 
 | 阶段 | 版本目标 | 状态 |
 | --- | --- | --- |
-| 1 | `0.64.0` Web + Bot 只读助手 | 已实现（本分支，待发版） |
-| 2 | `0.65.0` 核心写操作 + Action | 已实现（本分支，待发版） |
-| 3 | `0.66.0` Provider/指令写 + 密钥 | 已实现（本分支，待发版） |
-| 4 | 真实使用驱动扩展 | 已接入首批：插件包/仓库、系统更新重启、auto 路由 |
+| 1 | `0.64.0` Web + Bot 只读助手 | 已实现 |
+| 2 | `0.64.0` 核心写操作 + Action | 已实现 |
+| 3 | `0.64.0` Provider/指令写 + 密钥 | 已实现 |
+| 4 | `0.64.0` 使用驱动扩展 | 已实现首批：插件包/仓库、系统更新重启、auto 路由 |
 
 当前能力：只读查询、核心写操作、Provider/指令与密钥、远程插件与仓库、系统更新/重启、AI 指令 auto 路由。
 
@@ -59,10 +59,12 @@ Web /assistant  ──NDJSON──┐
 
 硬规则：
 
-- 工具只调用现有 service，禁止任意 SQL/Shell/HTTP/文件。
+- 工具只调用允许列表内的现有 service；禁止万能 SQL/Shell/HTTP/文件工具。插件与系统运维只能走明确注册的危险工具并二次确认。
 - handler 禁止自建 `AsyncSessionLocal`、禁止 `commit/rollback`。
 - 业务 service 不依赖 System Agent。
 - 查询必须走工具，禁止根据聊天记忆编造状态。
+- 确认、拒绝和密钥补填共享 Action 行锁；预检期间密钥变化时保持 pending，必须再次确认。
+- 会触发文件、Worker 或系统进程的操作在 Action 提交后执行，失败记录为 `runtime_sync_status=failed` 并允许重试。
 
 ## 数据表
 
@@ -134,6 +136,8 @@ Web 用内联卡片确认；Bot 用 Inline 按钮（`ab:{aid}:confirm|cancel:age
 - 工具敏感参数移入 `secret_payload_enc`（Fernet），普通 `arguments` 仅 `has_api_key=true`。
 - 执行 / 拒绝 / 过期后清除密文；`rekey` 覆盖该字段。
 - Provider 保存/验证：真实 quick verify 失败时 Action **保持 pending**、清除无效密钥，允许重新输入。
+- Provider 预检期间若用户更新密钥，本次确认不会继续执行，需使用新密钥再次确认。
+- Bot 存在待确认密钥 Action 时，单独发送的纯 Token 会优先加密绑定到最近匹配的 Action。
 - 当轮未消费的 Key 不额外缓存；后续上下文只有掩码时必须要求用户重发。
 
 ## 故障语义（摘录）
@@ -145,6 +149,7 @@ Web 用内联卡片确认；Bot 用 Inline 按钮（`ab:{aid}:confirm|cancel:age
 | Provider 验证失败 | 保持待确认，清除无效密钥，要求重输 |
 | Redis 不可用 | Web 仍可用；Bot 助手模式/Inline 确认可能不可用 |
 | NDJSON 中断 | 刷新后重读会话消息与 Action |
+| 系统更新/重启中断连接 | Action 已先提交；刷新后以 Action 与运行时同步状态为准 |
 
 ## 扩展新工具
 
