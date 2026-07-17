@@ -11,9 +11,9 @@
 | 1 | `0.64.0` Web + Bot 只读助手 | 已实现（本分支，待发版） |
 | 2 | `0.65.0` 核心写操作 + Action | 已实现（本分支，待发版） |
 | 3 | `0.66.0` Provider/指令写 + 密钥 | 已实现（本分支，待发版） |
-| 4 | 真实使用驱动扩展 | backlog |
+| 4 | 真实使用驱动扩展 | 已接入首批：插件包/仓库、系统更新重启、auto 路由 |
 
-当前能力：只读查询、核心写操作（Web 卡片 + Bot Inline 确认）、Provider/指令写工具、聊天密钥抽取与 Action 密文暂存，以及 Provider 保存前真实 quick verify。
+当前能力：只读查询、核心写操作、Provider/指令与密钥、远程插件与仓库、系统更新/重启、AI 指令 auto 路由。
 
 ## 入口
 
@@ -92,6 +92,12 @@ Web /assistant  ──NDJSON──┐
 | `features.set_enabled` | 账号功能/插件启停 |
 | `providers.save` / `delete` / `verify` | Provider 创建更新删除与本地可调用性检查 |
 | `commands.save` / `delete` / `set_enabled_for_accounts` | 自定义指令与账号启用 |
+| `plugins.list_installed` / `get` / `check_updates` | 远程插件包查询 |
+| `plugins.install` / `update` / `uninstall` / `set_package_enabled` | 安装包装卸更新与全局启停（危险项需确认） |
+| `plugin_repos.list` / `list_plugins` / `list_official` | 远程/官方仓库浏览 |
+| `plugin_repos.create` / `delete` / `install_plugin` | 仓库维护与从仓库安装 |
+| `system.check_update` / `apply_update` / `restart` | 系统更新检查/应用/重启 |
+| `routing.list_ai_commands` / `preview` / `set_command_mode` | AI 指令 fixed/auto 路由 |
 
 写工具只产生 `pending` Action，用户确认后由 `ActionExecutor` 统一事务执行。
 Web 用内联卡片确认；Bot 用 Inline 按钮（`ab:{aid}:confirm|cancel:agent:{nonce}`）。

@@ -12,16 +12,35 @@ if TYPE_CHECKING:
 
 
 def register_all_tools(registry: ToolRegistry) -> None:
-    from . import accounts, commands, features, interaction, ledger, logs, providers, rules, scheduler, system
+    from . import (
+        accounts,
+        commands,
+        features,
+        interaction,
+        ledger,
+        logs,
+        plugin_repos,
+        plugins,
+        providers,
+        routing,
+        rules,
+        scheduler,
+        system,
+        system_ops,
+    )
 
     system.register(registry)
+    system_ops.register(registry)
     accounts.register(registry)
     interaction.register(registry)
     rules.register(registry)
     scheduler.register(registry)
     providers.register(registry)
     commands.register(registry)
+    routing.register(registry)
     features.register(registry)
+    plugins.register(registry)
+    plugin_repos.register(registry)
     logs.register(registry)
     ledger.register(registry)
 

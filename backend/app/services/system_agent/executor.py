@@ -411,6 +411,19 @@ class ActionExecutor:
                 raise RuntimeError(f"restart_worker failed: {exc}") from exc
             return
 
+        if effect == "plugin_reload":
+            plugin_name = str(
+                args.get("plugin_name") or args.get("name") or args.get("plugin_key") or ""
+            ).strip()
+            if not plugin_name:
+                return
+            from ...db.base import AsyncSessionLocal
+            from ...services import remote_plugin_service as rps
+
+            async with AsyncSessionLocal() as db:
+                await rps.trigger_reload(db, plugin_name)
+            return
+
         log.debug("unknown runtime effect %s action=%s", effect, action_id)
 
 
