@@ -6,7 +6,8 @@
 - ``/api/accounts/{aid}/commands``  账号 × 模板 启用关系
 
 安全红线：
-- LLM provider 任何 GET 接口都不返回明文 ``api_key``，只返 ``has_api_key:bool``
+- LLM provider 列表和普通配置接口不返回明文 ``api_key``，只返 ``has_api_key:bool``
+- 明文仅由单 Provider 专用鉴权接口按需返回，响应禁用缓存且记录审计事件
 - 模板内容不含敏感信息，可正常 audit；audit log 里会写命令名和类型，不写完整 config
 """
 
@@ -20,7 +21,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import httpx
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Response
 from fastapi.responses import StreamingResponse
 
 from ..deps import CurrentUser, DBSession
@@ -50,6 +51,7 @@ from ..schemas.command import (
     FullLivenessRunResponse,
     FullLivenessRunStartResponse,
     LivenessResultItem,
+    LLMProviderApiKeyReveal,
     LLMProviderCreate,
     LLMProviderOut,
     LLMProviderUpdate,
@@ -279,6 +281,50 @@ async def list_providers(db: DBSession, _user: CurrentUser) -> list[LLMProviderO
     """列出全部 LLM provider；不含明文 key。"""
     await _require_ai_enabled(db)
     return await command_service.list_providers(db)
+
+
+@router.get(
+    "/api/commands/llm-providers/{pid}/api-key",
+    response_model=LLMProviderApiKeyReveal,
+)
+async def reveal_provider_api_key(
+    pid: int,
+    response: Response,
+    db: DBSession,
+    user: CurrentUser,
+) -> LLMProviderApiKeyReveal:
+    """按需解密单个 Provider 的 API Key，不影响普通列表与配置响应。"""
+
+    await _require_ai_enabled(db)
+    row = await command_service.get_provider_row(db, pid)
+    if not row.api_key_enc:
+        raise _llm_err(
+            "LLM_PROVIDER_API_KEY_NOT_CONFIGURED",
+            "该模型提供商尚未配置 API Key",
+            409,
+        )
+    from ..crypto import decrypt_str
+
+    try:
+        api_key = decrypt_str(row.api_key_enc)
+    except Exception:  # noqa: BLE001
+        raise _llm_err(
+            "LLM_PROVIDER_API_KEY_DECRYPT_FAILED",
+            "API Key 解密失败，请重新填写并保存",
+            422,
+        ) from None
+
+    await audit.write(
+        db,
+        user.id,
+        "llm_provider.api_key_reveal",
+        target=f"llm_provider:{pid}",
+        detail={"name": row.name},
+    )
+    await db.commit()
+    response.headers["Cache-Control"] = "no-store, max-age=0"
+    response.headers["Pragma"] = "no-cache"
+    return LLMProviderApiKeyReveal(api_key=api_key)
 
 
 @router.post(

@@ -22,6 +22,7 @@
 
 ### Added
 - **System Agent 阶段 1（只读助手，开发中）**：新增 `/assistant` Web 工作台与管理 Bot `/agent`，共用 System Agent Runtime、工具注册表与会话/消息持久化；固定 tools Provider 配置；NDJSON 对话流；约 19 个只读工具覆盖系统上下文、账号、交互规则、通用 Rule、Scheduler、Provider、指令、功能矩阵、日志与台账（「今日」按系统时区日界线）。
+- 模型提供商的新建与编辑表单为 API Key 增加显示/隐藏按钮；编辑已有 Provider 时，点击眼睛会通过独立鉴权接口按需解密已保存的 Key，响应禁止缓存并记录查看审计，列表和普通配置接口仍不返回明文。
 
 ## [0.63.0] — 2026-07-17 · minor（次版本） · 新建 Provider 验证工作流
 

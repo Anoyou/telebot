@@ -504,6 +504,12 @@ class LLMProviderOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class LLMProviderApiKeyReveal(BaseModel):
+    """按需查看单个 Provider 的已保存 API Key；仅用于专用鉴权接口。"""
+
+    api_key: str
+
+
 class FetchModelsResponse(BaseModel):
     """``POST /api/commands/llm-providers/{pid}/fetch-models`` 出参。"""
 

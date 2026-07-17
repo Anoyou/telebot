@@ -1,6 +1,6 @@
 // 系统设置 → LLM Provider 管理
 // 用于"AI 类自定义指令"的大模型供应商凭据配置；API Key 在后端 Fernet 加密落库
-// 列表里只显示 has_api_key:✓/✗，永远不会回显明文 key（与后端约定）
+// 列表里只显示 has_api_key:✓/✗；编辑表单点击眼睛时才通过专用接口按需查看明文
 //
 // 路由元数据（modality / tags / cost_tier / notes）：决定"自动路由"模式下
 // 一条 ,ai 指令该把请求送给哪个 provider；详见 backend/services/llm_router.py
@@ -8,7 +8,7 @@ import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { toast } from "sonner";
-import { ArrowLeft, Plus, Trash2, KeyRound, Edit3, Download, Loader2, CheckCircle2, XCircle, Star, ChevronDown, ChevronRight, Filter, X, Package, Save, MessageSquare } from "lucide-react";
+import { ArrowLeft, Plus, Trash2, KeyRound, Edit3, Download, Loader2, CheckCircle2, XCircle, Star, ChevronDown, ChevronRight, Eye, EyeOff, Filter, X, Package, Save, MessageSquare } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { CommandBadge } from "@/components/CommandBadge";
@@ -51,6 +51,7 @@ import {
   getClientIdentityVersions,
   listLLMProviders,
   patchLLMProvider,
+  revealLLMProviderApiKey,
   testProviderModel,
   updateClientIdentityVersions,
 } from "@/api/commands";
@@ -262,6 +263,94 @@ const EMPTY_FORM: FormState = {
   proxy_id: "",
   models: [],
 };
+
+function ApiKeyInput({
+  id,
+  value,
+  disabled,
+  placeholder,
+  autoComplete,
+  hasStoredValue = false,
+  revealStoredValue,
+  onChange,
+}: {
+  id?: string;
+  value: string;
+  disabled?: boolean;
+  placeholder: string;
+  autoComplete: string;
+  hasStoredValue?: boolean;
+  revealStoredValue?: () => Promise<string>;
+  onChange: (value: string) => void;
+}) {
+  const [visible, setVisible] = useState(false);
+  const [revealedValue, setRevealedValue] = useState("");
+  const [revealing, setRevealing] = useState(false);
+  const displayValue = value || revealedValue;
+  const canReveal = !disabled && (Boolean(displayValue) || (hasStoredValue && Boolean(revealStoredValue)));
+
+  useEffect(() => {
+    if (!value) setVisible(false);
+  }, [value]);
+
+  useEffect(() => {
+    if (!disabled) return;
+    setRevealedValue("");
+    setVisible(false);
+  }, [disabled]);
+
+  const toggleVisibility = async () => {
+    if (visible) {
+      setVisible(false);
+      return;
+    }
+    if (displayValue) {
+      setVisible(true);
+      return;
+    }
+    if (!revealStoredValue) return;
+    setRevealing(true);
+    try {
+      const storedValue = await revealStoredValue();
+      setRevealedValue(storedValue);
+      setVisible(true);
+    } catch (error) {
+      toast.error(getErrMsg(error));
+    } finally {
+      setRevealing(false);
+    }
+  };
+
+  return (
+    <div className="relative">
+      <Input
+        id={id}
+        type={visible ? "text" : "password"}
+        value={displayValue}
+        maxLength={512}
+        autoComplete={autoComplete}
+        disabled={disabled}
+        placeholder={placeholder}
+        className="pr-10"
+        onChange={(event) => {
+          setRevealedValue("");
+          onChange(event.target.value);
+        }}
+      />
+      <button
+        type="button"
+        className="absolute right-1 top-1/2 grid h-7 w-7 -translate-y-1/2 place-items-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-35"
+        disabled={!canReveal || revealing}
+        aria-label={visible ? "隐藏 API Key" : "显示 API Key"}
+        aria-pressed={visible}
+        title={canReveal ? (visible ? "隐藏 API Key" : "显示 API Key") : "当前没有可查看的 API Key"}
+        onClick={() => void toggleVisibility()}
+      >
+        {revealing ? <Loader2 className="h-4 w-4 animate-spin" /> : visible ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+      </button>
+    </div>
+  );
+}
 
 export function LLMProviders({
   openCreateOnMount = false,
@@ -960,17 +1049,15 @@ function ProviderCreateWorkspace({
               </div>
               <div className="space-y-1.5 sm:col-span-2">
                 <Label htmlFor="provider-create-api-key">API Key</Label>
-                <Input
+                <ApiKeyInput
                   id="provider-create-api-key"
-                  type="password"
                   value={form.api_key}
-                  maxLength={512}
                   autoComplete="new-password"
                   disabled={connectionLocked}
                   placeholder="sk-..."
-                  onChange={(event) => setField("api_key", event.target.value)}
+                  onChange={(value) => setField("api_key", value)}
                 />
-                <p className="text-xs text-muted-foreground">API Key 仅在保存时加密落库，页面不会回显明文。</p>
+                <p className="text-xs text-muted-foreground">保存时加密落库；点击右侧眼睛可临时查看当前填写内容。</p>
               </div>
               <div className="space-y-1.5">
                 <Label htmlFor="provider-create-api-format">协议</Label>
@@ -1346,7 +1433,7 @@ function ProviderEditDialog({
             {!isEdit ? <MetaBadge tone={createVerified ? "success" : "outline"}>{createVerified ? "可保存" : "草稿"}</MetaBadge> : null}
           </div>
           <DialogDescription>
-            API Key 加密落库；列表中只显示是否已配置，永远不回显明文。
+            API Key 加密落库；列表只显示是否已配置，编辑时可点击眼睛按需查看。
           </DialogDescription>
           {!isEdit ? (
             <ol className="mt-3 grid grid-cols-3 gap-2" aria-label="创建步骤">
@@ -1570,14 +1657,18 @@ function ProviderEditDialog({
 
           <div className="space-y-1.5">
             <Label>API Key {isEdit ? "" : "*（建议）"}</Label>
-            <Input
-              type="password"
+            <ApiKeyInput
               value={form.api_key}
-              maxLength={512}
               autoComplete="off"
-              onChange={(e) => setField("api_key", e.target.value)}
+              onChange={(value) => setField("api_key", value)}
               placeholder={isEdit && form.hasApiKey && !form.api_key ? MASKED_SECRET_PLACEHOLDER : isEdit ? "留空 = 保持原 key 不变" : "sk-..."}
               disabled={form.clearKey}
+              hasStoredValue={isEdit && Boolean(form.hasApiKey)}
+              revealStoredValue={
+                isEdit && form.id
+                  ? async () => (await revealLLMProviderApiKey(form.id!)).api_key
+                  : undefined
+              }
             />
             {isEdit && (
               <div className="flex items-center gap-2 pt-1 text-xs">
@@ -1599,7 +1690,7 @@ function ProviderEditDialog({
               </div>
             )}
             <p className="text-xs text-muted-foreground">
-              Ollama 本地部署可不填。其它厂商请到对应控制台获取。
+              点击右侧眼睛可查看已保存或新填写的 Key。Ollama 本地部署可不填。
             </p>
           </div>
 

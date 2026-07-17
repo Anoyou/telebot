@@ -24,6 +24,7 @@ import type {
   FullLivenessRunStartResponse,
   FullLivenessRunResponse,
   LLMProviderCreate,
+  LLMProviderApiKeyReveal,
   LLMProviderOut,
   LLMProviderUpdate,
   QuickVerifyProviderRequest,
@@ -109,6 +110,15 @@ export async function patchLLMProvider(
 
 export async function deleteLLMProvider(id: number): Promise<void> {
   await api.delete(`/api/commands/llm-providers/${id}`);
+}
+
+export async function revealLLMProviderApiKey(
+  id: number,
+): Promise<LLMProviderApiKeyReveal> {
+  const { data } = await api.get<LLMProviderApiKeyReveal>(
+    `/api/commands/llm-providers/${id}/api-key`,
+  );
+  return data;
 }
 
 /** 调 GET {base_url}/models 拉模型列表，合并到 provider.models（保留已 enabled 状态）。
