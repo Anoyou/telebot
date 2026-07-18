@@ -31,7 +31,6 @@ from ..settings import settings
 from . import llm_account_budget
 from .llm_client import build_client_from_dto
 from .llm_protocol import (
-    ApiFormat,
     ImageContent,
     ModelRequest,
     ModelResponse,
@@ -44,6 +43,8 @@ log = logging.getLogger(__name__)
 
 # 最大重试次数（不含首次调用）
 _MAX_RETRIES = 3
+# 结构化 Agent 请求允许按调用方显式提升到 5 次，不改变其它调用的默认重试次数。
+_MAX_STRUCTURED_RETRIES = 5
 # 重试延迟基数（秒）
 _RETRY_BASE_DELAY = 1.0
 # 最大退避时间（秒）
@@ -82,6 +83,28 @@ class BudgetCheck:
     error: str | None = None
     scope: str | None = None
     ticket: llm_account_budget.LLMAccountBudgetTicket | None = None
+
+
+class ProviderSwitchRequired(RuntimeError):
+    """System Agent 已耗尽当前 Provider，需要用户确认跨 Provider。"""
+
+    def __init__(
+        self,
+        *,
+        provider_name: str,
+        candidates: list[dict[str, Any]],
+        last_error: Exception | None = None,
+    ) -> None:
+        self.provider_name = provider_name
+        self.candidates = candidates
+        self.last_error = last_error
+        target = candidates[0] if candidates else {}
+        target_name = str(target.get("provider_name") or "其它 Provider")
+        target_model = str(target.get("model") or "").strip()
+        target_label = f"{target_name}（{target_model}）" if target_model else target_name
+        super().__init__(
+            f"Provider「{provider_name}」内可用模型均未成功，是否改用 {target_label} 重试？"
+        )
 
 
 # 全局 usage 回调（可注入到 DB / Redis / 日志）
@@ -630,6 +653,7 @@ async def invoke_model_with_fallback(
     triggered_by_account_id: int | None = None,
     source: str | None = None,
     client_factory: Callable[..., Any | Awaitable[Any]] | None = None,
+    progress_callback: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None,
 ) -> tuple[ModelResponse, LLMProviderDTO, bool]:
     """Invoke a structured model request through existing budget and fallback gates."""
 
@@ -644,6 +668,15 @@ async def invoke_model_with_fallback(
     estimated_tokens = _estimate_structured_request_tokens(capped_request)
     last_error: Exception | None = None
     model_pinned = bool(capped_request.metadata.get("model_pinned", True))
+    confirm_provider_switch = bool(
+        capped_request.metadata.get("confirm_provider_switch", False)
+    )
+    allowed_cross_provider_ids = {
+        int(item)
+        for item in (capped_request.metadata.get("allowed_cross_provider_ids") or [])
+        if str(item).isdigit()
+    }
+    switch_from_provider_name = providers[0].name if providers else "当前 Provider"
     for index, provider in enumerate(providers):
         if index > 0 and provider.has_model_list() and not provider.enabled_model_ids():
             last_error = LLMError(
@@ -651,114 +684,155 @@ async def invoke_model_with_fallback(
                 scope=LLMErrorScope.CAPABILITY_MISMATCH,
             )
             continue
-        if model_pinned:
-            provider_model = capped_request.model
-        elif index == 0:
-            provider_model = capped_request.model or provider.pick_enabled_model()
-        else:
-            provider_model = _pick_compatible_model(provider, capped_request)
-        if not provider_model:
+        provider_models = _structured_model_candidates(
+            provider,
+            capped_request,
+            is_primary=index == 0,
+            model_pinned=model_pinned,
+        )
+        if not provider_models:
             last_error = LLMError(
                 f"provider {provider.name} 没有已启用模型",
                 scope=LLMErrorScope.CAPABILITY_MISMATCH,
             )
             continue
-        provider_request = replace(capped_request, model=provider_model)
-        capability_errors = provider.capabilities_for_model(provider_request.model).validation_errors(
-            provider_request
-        )
-        if capability_errors:
-            last_error = UnsupportedCapabilityError(
-                ApiFormat(provider.api_format or "chat_completions"),
-                tuple(capability_errors),
+        if index > 0 and confirm_provider_switch and provider.id not in allowed_cross_provider_ids:
+            candidates = _structured_provider_switch_candidates(
+                providers[index:],
+                capped_request,
+                model_pinned=model_pinned,
             )
-            log.info(
-                "[llm-runtime] 跳过不兼容 provider=%s reason=%s",
-                provider.name,
-                last_error,
-            )
-            continue
+            raise ProviderSwitchRequired(
+                provider_name=switch_from_provider_name,
+                candidates=candidates,
+                last_error=last_error,
+            ) from last_error
 
-        budget_check = await _check_budget(account_id, provider, estimated_tokens)
-        if budget_check.error:
-            last_error = LLMCallFailed(
-                budget_check.error,
-                provider_id=provider.id,
-                provider_name=provider.name,
-                error_type="budget_exceeded",
-            )
-            if budget_check.scope == "premium_daily" and index < len(providers) - 1:
-                continue
-            raise last_error
-
-        started = time.monotonic()
-        try:
-            response = await _invoke_model_with_retry(
-                provider,
-                provider_request,
-                client_factory=client_factory,
-            )
-            _ensure_model_response_product(response)
-            used_fallback = index > 0
-            await _emit_usage(
-                UsageRecord(
+        for provider_model in provider_models:
+            provider_request = replace(capped_request, model=provider_model)
+            budget_check = await _check_budget(account_id, provider, estimated_tokens)
+            if budget_check.error:
+                last_error = LLMCallFailed(
+                    budget_check.error,
                     provider_id=provider.id,
-                    account_id=account_id,
-                    triggered_by_account_id=triggered_by_account_id,
                     provider_name=provider.name,
-                    model=response.model,
-                    input_tokens=response.usage.input_tokens,
-                    output_tokens=response.usage.output_tokens,
-                    latency_ms=int((time.monotonic() - started) * 1000),
+                    error_type="budget_exceeded",
+                )
+                break
+
+            started = time.monotonic()
+            try:
+                response = await _invoke_model_with_retry(
+                    provider,
+                    provider_request,
+                    client_factory=client_factory,
+                    max_retries=max(
+                        0,
+                        min(
+                            int(provider_request.metadata.get("max_retries_per_model", _MAX_RETRIES)),
+                            _MAX_STRUCTURED_RETRIES,
+                        ),
+                    ),
+                    retry_delay_seconds=_structured_retry_delay(provider_request),
+                    progress_callback=progress_callback,
+                )
+                _ensure_model_response_product(response)
+                used_fallback = index > 0
+                await _emit_usage(
+                    UsageRecord(
+                        provider_id=provider.id,
+                        account_id=account_id,
+                        triggered_by_account_id=triggered_by_account_id,
+                        provider_name=provider.name,
+                        model=response.model,
+                        input_tokens=response.usage.input_tokens,
+                        output_tokens=response.usage.output_tokens,
+                        latency_ms=int((time.monotonic() - started) * 1000),
+                        success=True,
+                        source=source,
+                        used_fallback=used_fallback,
+                        fallback_chain=chain.get_provider_names(),
+                        request_preview=request_preview,
+                        response_preview=preview_text_for_usage(response.text),
+                    )
+                )
+                await llm_account_budget.settle(
+                    budget_check.ticket,
+                    actual_tokens=response.usage.total_tokens,
+                    actual_provider=provider,
                     success=True,
-                    source=source,
-                    used_fallback=used_fallback,
-                    fallback_chain=chain.get_provider_names(),
-                    request_preview=request_preview,
-                    response_preview=preview_text_for_usage(response.text),
                 )
-            )
-            await llm_account_budget.settle(
-                budget_check.ticket,
-                actual_tokens=response.usage.total_tokens,
-                actual_provider=provider,
-                success=True,
-            )
-            return response, provider, used_fallback
-        except Exception as exc:
-            last_error = exc
-            await llm_account_budget.settle(
-                budget_check.ticket,
-                actual_tokens=0,
-                actual_provider=None,
-                success=False,
-            )
-            if index < len(providers) - 1 and _should_try_next_provider(exc):
-                continue
-            await _emit_usage(
-                UsageRecord(
-                    provider_id=provider.id,
-                    account_id=account_id,
-                    triggered_by_account_id=triggered_by_account_id,
-                    provider_name=provider.name,
-                    model=provider_request.model,
-                    latency_ms=int((time.monotonic() - started) * 1000),
+                return response, provider, used_fallback
+            except Exception as exc:
+                last_error = exc
+                await _emit_structured_progress(
+                    progress_callback,
+                    {
+                        "type": "model_exhausted",
+                        "provider_id": provider.id,
+                        "provider_name": provider.name,
+                        "model": provider_request.model,
+                        "max_retries": max(
+                            0,
+                            min(
+                                int(
+                                    provider_request.metadata.get(
+                                        "max_retries_per_model", _MAX_RETRIES
+                                    )
+                                ),
+                                _MAX_STRUCTURED_RETRIES,
+                            ),
+                        ),
+                        "error_type": _classify_error(exc),
+                    },
+                )
+                await llm_account_budget.settle(
+                    budget_check.ticket,
+                    actual_tokens=0,
+                    actual_provider=None,
                     success=False,
-                    error_type=_classify_error(exc),
-                    source=source,
-                    used_fallback=index > 0,
-                    fallback_chain=chain.get_provider_names(),
-                    request_preview=request_preview,
                 )
-            )
+                await _emit_usage(
+                    UsageRecord(
+                        provider_id=provider.id,
+                        account_id=account_id,
+                        triggered_by_account_id=triggered_by_account_id,
+                        provider_name=provider.name,
+                        model=provider_request.model,
+                        latency_ms=int((time.monotonic() - started) * 1000),
+                        success=False,
+                        error_type=_classify_error(exc),
+                        source=source,
+                        used_fallback=index > 0,
+                        fallback_chain=chain.get_provider_names(),
+                        request_preview=request_preview,
+                    )
+                )
+                if _should_try_next_provider(exc):
+                    continue
+                raise LLMCallFailed(
+                    f"Provider「{provider.name}」调用失败: {type(exc).__name__}: {exc}",
+                    provider_id=provider.id,
+                    provider_name=provider.name,
+                    error_type=_classify_error(exc),
+                    retryable=False,
+                    scope=_error_scope(exc),
+                ) from exc
+
+        switch_from_provider_name = provider.name
+        if index < len(providers) - 1 and last_error is not None:
+            if _should_try_next_provider(last_error):
+                continue
+        if last_error is not None:
             raise LLMCallFailed(
-                f"所有 provider 都失败。最后错误: {type(exc).__name__}: {exc}",
+                f"Provider「{provider.name}」内模型均失败。最后错误: "
+                f"{type(last_error).__name__}: {last_error}",
                 provider_id=provider.id,
                 provider_name=provider.name,
-                error_type=_classify_error(exc),
+                error_type=_classify_error(last_error),
                 retryable=False,
-                scope=_error_scope(exc),
-            ) from exc
+                scope=_error_scope(last_error),
+            ) from last_error
 
     raise LLMCallFailed(
         f"所有 provider 均不兼容或调用失败: {last_error}",
@@ -784,12 +858,72 @@ def _pick_compatible_model(provider: LLMProviderDTO, request: ModelRequest) -> s
     return None
 
 
+def _structured_model_candidates(
+    provider: LLMProviderDTO,
+    request: ModelRequest,
+    *,
+    is_primary: bool,
+    model_pinned: bool,
+) -> list[str]:
+    """同 Provider 内按首选模型、默认模型、其它启用模型依次尝试。"""
+
+    if model_pinned:
+        raw_candidates = [str(request.model or "").strip()]
+    else:
+        enabled = provider.enabled_model_ids()
+        preferred = str(request.model or "").strip() if is_primary else ""
+        default_model = str(provider.default_model or "").strip()
+        raw_candidates = [preferred]
+        if default_model in enabled or (default_model and not provider.has_model_list()):
+            raw_candidates.append(default_model)
+        raw_candidates.extend(enabled)
+        if not any(raw_candidates):
+            picked = provider.pick_enabled_model()
+            raw_candidates = [picked or ""]
+
+    candidates: list[str] = []
+    for model in raw_candidates:
+        if not model or model in candidates:
+            continue
+        candidate_request = replace(request, model=model)
+        if not provider.capabilities_for_model(model).validation_errors(candidate_request):
+            candidates.append(model)
+    return candidates
+
+
+def _structured_provider_switch_candidates(
+    providers: list[LLMProviderDTO],
+    request: ModelRequest,
+    *,
+    model_pinned: bool,
+) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    for provider in providers:
+        models = _structured_model_candidates(
+            provider,
+            request,
+            is_primary=False,
+            model_pinned=model_pinned,
+        )
+        if models:
+            candidates.append(
+                {
+                    "provider_id": provider.id,
+                    "provider_name": provider.name,
+                    "model": models[0],
+                }
+            )
+    return candidates
+
+
 async def _invoke_model_with_retry(
     provider: LLMProviderDTO,
     request: ModelRequest,
     *,
     client_factory: Callable[..., Any | Awaitable[Any]] | None = None,
     max_retries: int = _MAX_RETRIES,
+    retry_delay_seconds: float | None = None,
+    progress_callback: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None,
 ) -> ModelResponse:
     provider.capabilities_for_model(request.model).validate(
         request,
@@ -797,6 +931,17 @@ async def _invoke_model_with_retry(
     )
     last_error: Exception | None = None
     for attempt in range(max_retries + 1):
+        await _emit_structured_progress(
+            progress_callback,
+            {
+                "type": "model_attempt",
+                "provider_id": provider.id,
+                "provider_name": provider.name,
+                "model": request.model,
+                "attempt": attempt + 1,
+                "max_retries": max_retries,
+            },
+        )
         try:
             builder = client_factory or build_client_from_dto
             client = builder(
@@ -811,8 +956,47 @@ async def _invoke_model_with_retry(
             last_error = exc
             if not _is_retryable_error(exc) or attempt >= max_retries:
                 raise
-            await asyncio.sleep(_compute_retry_delay(attempt + 1))
+            delay = (
+                retry_delay_seconds
+                if retry_delay_seconds is not None
+                else _compute_retry_delay(attempt + 1)
+            )
+            await _emit_structured_progress(
+                progress_callback,
+                {
+                    "type": "retry_scheduled",
+                    "provider_id": provider.id,
+                    "provider_name": provider.name,
+                    "model": request.model,
+                    "retry_number": attempt + 1,
+                    "max_retries": max_retries,
+                    "delay_seconds": delay,
+                    "error_type": _classify_error(exc),
+                },
+            )
+            await asyncio.sleep(delay)
     raise last_error or RuntimeError("结构化调用重试耗尽")
+
+
+def _structured_retry_delay(request: ModelRequest) -> float | None:
+    raw = request.metadata.get("retry_delay_seconds")
+    if raw is None:
+        return None
+    try:
+        return max(0.0, min(float(raw), _RETRY_MAX_DELAY))
+    except (TypeError, ValueError):
+        return None
+
+
+async def _emit_structured_progress(
+    callback: Callable[[dict[str, Any]], Awaitable[None] | None] | None,
+    event: dict[str, Any],
+) -> None:
+    if callback is None:
+        return
+    result = callback(event)
+    if inspect.isawaitable(result):
+        await result
 
 
 def _structured_request_preview(request: ModelRequest) -> str | None:
@@ -1051,6 +1235,7 @@ def build_fallback_chain(
 
 __all__ = [
     "FallbackChain",
+    "ProviderSwitchRequired",
     "UsageRecord",
     "build_fallback_chain",
     "call_with_fallback",

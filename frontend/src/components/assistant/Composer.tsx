@@ -1,5 +1,5 @@
 import { useState, type FormEvent, type KeyboardEvent } from "react";
-import { Send } from "lucide-react";
+import { Send, Square } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -7,10 +7,14 @@ import { Textarea } from "@/components/ui/textarea";
 export function Composer({
   disabled,
   onSend,
+  streaming,
+  onStop,
   placeholder,
 }: {
   disabled?: boolean;
   onSend: (text: string) => void | Promise<void>;
+  streaming?: boolean;
+  onStop?: () => void;
   placeholder?: string;
 }) {
   const [value, setValue] = useState("");
@@ -18,7 +22,7 @@ export function Composer({
 
   const submit = async () => {
     const text = value.trim();
-    if (!text || disabled || sending) return;
+    if (!text || disabled || sending || streaming) return;
     setSending(true);
     try {
       await onSend(text);
@@ -47,15 +51,28 @@ export function Composer({
           value={value}
           onChange={(e) => setValue(e.target.value)}
           onKeyDown={onKeyDown}
-          disabled={disabled || sending}
+          disabled={disabled || sending || streaming}
           placeholder={placeholder || "用自然语言查询系统状态…（Enter 发送，Shift+Enter 换行）"}
           rows={2}
           className="min-h-[2.75rem] resize-none"
         />
-        <Button type="submit" disabled={disabled || sending || !value.trim()} className="shrink-0">
-          <Send className="h-4 w-4" />
-          <span className="sr-only">发送</span>
-        </Button>
+        {streaming ? (
+          <Button
+            type="button"
+            variant="outline"
+            className="shrink-0"
+            onClick={onStop}
+            title="停止本轮请求"
+          >
+            <Square className="h-4 w-4 fill-current" />
+            <span className="sr-only">停止</span>
+          </Button>
+        ) : (
+          <Button type="submit" disabled={disabled || sending || !value.trim()} className="shrink-0">
+            <Send className="h-4 w-4" />
+            <span className="sr-only">发送</span>
+          </Button>
+        )}
       </div>
     </form>
   );

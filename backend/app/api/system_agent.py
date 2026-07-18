@@ -193,6 +193,8 @@ async def list_messages(
     session = await svc.get_session(db, session_id, web_user_id=user.id)
     if session is None:
         raise _err("SESSION_NOT_FOUND", "会话不存在", 404)
+    if await svc.reconcile_stale_messages(db, session_id):
+        await db.commit()
     rows = await svc.list_messages(db, session_id, limit=limit, before_id=before_id)
     return [SystemAgentMessageOut.model_validate(r) for r in rows]
 
@@ -275,6 +277,8 @@ async def retry_message(
                 channel=CHANNEL_WEB,
                 web_user_id=user.id,
                 retry_message=message,
+                fallback_provider_id=payload.fallback_provider_id,
+                approved_tools=payload.approved_tools,
             ):
                 yield json.dumps(event, ensure_ascii=False, default=str, separators=(",", ":")) + "\n"
             await db.commit()

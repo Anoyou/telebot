@@ -12,6 +12,8 @@ class SystemAgentConfigOut(BaseModel):
     enabled: bool = False
     provider_id: int | None = None
     model: str | None = None
+    fallback_provider_ids: list[int] = Field(default_factory=list)
+    require_tool_approval: bool = False
     max_steps: int = 8
     max_tool_calls: int = 24
     session_token_limit: int = 16_384
@@ -21,6 +23,8 @@ class SystemAgentConfigPatch(BaseModel):
     enabled: bool | None = None
     provider_id: int | None = None
     model: str | None = None
+    fallback_provider_ids: list[int] | None = None
+    require_tool_approval: bool | None = None
     max_steps: int | None = Field(default=None, ge=1, le=16)
     max_tool_calls: int | None = Field(default=None, ge=1, le=64)
     session_token_limit: int | None = Field(default=None, ge=1024, le=100_000)
@@ -30,6 +34,8 @@ class SystemAgentCapabilitiesOut(BaseModel):
     enabled: bool
     provider_id: int | None = None
     model: str | None = None
+    provider_name: str | None = None
+    resolved_model: str | None = None
     ai_enabled: bool = True
     timezone: str = "UTC"
     tools: list[dict[str, Any]] = Field(default_factory=list)
@@ -86,6 +92,8 @@ class SystemAgentMessageCreate(BaseModel):
 
 class SystemAgentMessageRetry(BaseModel):
     account_id: int | None = None
+    fallback_provider_id: int | None = Field(default=None, ge=1)
+    approved_tools: list[str] = Field(default_factory=list, max_length=64)
 
 
 class SystemAgentActionOut(BaseModel):

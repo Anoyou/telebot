@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
-import { Menu, MessageCircle, Settings2 } from "lucide-react";
+import { Cpu, Menu, MessageCircle, Server, Settings2 } from "lucide-react";
 import { toast } from "sonner";
 
 import {
@@ -21,6 +21,7 @@ import {
 } from "@/api/systemAgent";
 import { listLLMProviders } from "@/api/commands";
 import { listAccounts } from "@/api/accounts";
+import type { LLMProviderOut } from "@/api/types";
 import { Composer } from "@/components/assistant/Composer";
 import { Conversation, type LiveBubble } from "@/components/assistant/Conversation";
 import { SessionDrawer } from "@/components/assistant/SessionDrawer";
@@ -29,6 +30,18 @@ import { Button } from "@/components/ui/button";
 import { Select } from "@/components/ui/select";
 import { Spinner } from "@/components/ui/misc";
 import { getErrMsg } from "@/lib/api";
+
+function toolsModels(provider?: LLMProviderOut): string[] {
+  if (!provider) return [];
+  const models = provider.models || [];
+  const enabled = models
+    .filter((model) => model.enabled && model.supports_tools !== false)
+    .map((model) => model.id)
+    .filter(Boolean);
+  if (enabled.length > 0) return Array.from(new Set(enabled));
+  if (models.length === 0 && provider.default_model) return [provider.default_model];
+  return [];
+}
 
 export function AssistantIndex() {
   const qc = useQueryClient();
@@ -39,6 +52,11 @@ export function AssistantIndex() {
   const [streaming, setStreaming] = useState(false);
   const [retryingMessageId, setRetryingMessageId] = useState<number | null>(null);
   const [configOpen, setConfigOpen] = useState(false);
+  const [runtimeSelection, setRuntimeSelection] = useState<{
+    providerName: string;
+    model: string;
+  } | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
 
   const configQ = useQuery({
     queryKey: ["system-agent", "config"],
@@ -59,7 +77,6 @@ export function AssistantIndex() {
   const providersQ = useQuery({
     queryKey: ["llm-providers"],
     queryFn: listLLMProviders,
-    enabled: configOpen,
   });
 
   const messagesQ = useQuery({
@@ -83,6 +100,10 @@ export function AssistantIndex() {
       setAccountId(sessionsQ.data[0].account_id);
     }
   }, [sessionsQ.data, activeId]);
+
+  useEffect(() => {
+    setRuntimeSelection(null);
+  }, [activeId, configQ.data?.provider_id, configQ.data?.model]);
 
   const createMut = useMutation({
     mutationFn: () =>
@@ -116,22 +137,49 @@ export function AssistantIndex() {
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: ["system-agent"] });
       toast.success("助手配置已保存");
-      setConfigOpen(false);
     },
     onError: (e) => toast.error(getErrMsg(e)),
   });
 
   const enabled = configQ.data?.enabled ?? false;
-  const statusLabel = useMemo(() => {
-    if (configQ.isLoading) return "加载中";
-    if (!enabled) return "未启用";
-    if (configQ.data?.provider_id) {
-      return `Provider #${configQ.data.provider_id}${configQ.data.model ? ` · ${configQ.data.model}` : ""}`;
-    }
-    return "未配置模型";
-  }, [configQ.data, configQ.isLoading, enabled]);
-
   const messages: SystemAgentMessage[] = messagesQ.data || [];
+  const configuredProvider = useMemo(
+    () =>
+      (providersQ.data || []).find(
+        (provider) => provider.id === configQ.data?.provider_id,
+      ),
+    [configQ.data?.provider_id, providersQ.data],
+  );
+  const configuredToolsModels = useMemo(
+    () => toolsModels(configuredProvider),
+    [configuredProvider],
+  );
+  const latestMessageSelection = useMemo(() => {
+    const message = [...messages]
+      .reverse()
+      .find((item) => item.role === "assistant" && item.usage);
+    const providerName = message?.usage?.provider_name;
+    const model = message?.usage?.model;
+    if (typeof providerName !== "string" || typeof model !== "string") return null;
+    return { providerName, model };
+  }, [messages]);
+  const displayedSelection =
+    runtimeSelection ||
+    latestMessageSelection ||
+    (capsQ.data?.provider_name
+      ? {
+          providerName: capsQ.data.provider_name,
+          model: capsQ.data.resolved_model || configQ.data?.model || "未选择",
+        }
+      : configuredProvider
+        ? {
+            providerName: configuredProvider.name,
+            model:
+              configQ.data?.model ||
+              configuredToolsModels[0] ||
+              configuredProvider.default_model,
+          }
+        : null);
 
   const ensureSession = async (): Promise<string> => {
     if (activeId) return activeId;
@@ -143,7 +191,17 @@ export function AssistantIndex() {
     return session.id;
   };
 
-  const runTurn = async ({ text, retryMessageId }: { text?: string; retryMessageId?: number }) => {
+  const runTurn = async ({
+    text,
+    retryMessageId,
+    fallbackProviderId,
+    approvedTools,
+  }: {
+    text?: string;
+    retryMessageId?: number;
+    fallbackProviderId?: number;
+    approvedTools?: string[];
+  }) => {
     if (!enabled) {
       toast.error("请先在右上角开启系统助手并选择支持 tools 的 Provider");
       setConfigOpen(true);
@@ -151,34 +209,91 @@ export function AssistantIndex() {
     }
     setStreaming(true);
     setRetryingMessageId(retryMessageId ?? null);
+    const controller = new AbortController();
+    abortRef.current = controller;
+    const stoppedBubbleId = `live-stopped-${Date.now()}`;
     const userBubble: LiveBubble | null = text
       ? { id: `live-user-${Date.now()}`, role: "user", text }
       : null;
     const pending: LiveBubble = {
       id: `live-assistant-${Date.now()}`,
       role: "assistant",
-      text: "",
+      text: "正在理解你的需求…",
       pending: true,
     };
     setLive(userBubble ? [userBubble, pending] : [pending]);
+    let sessionId: string | null = null;
+    let stopped = false;
     try {
-      const sessionId = await ensureSession();
+      sessionId = await ensureSession();
       let assistantText = "";
+      const updatePendingText = (value: string) => {
+        setLive((prev) =>
+          prev.map((bubble) =>
+            bubble.role === "assistant" && bubble.pending
+              ? { ...bubble, text: value }
+              : bubble,
+          ),
+        );
+      };
+      const upsertToolProgress = (event: SystemAgentStreamEvent, finished: boolean) => {
+        const id = `tool-${event.call_id || event.seq}`;
+        setLive((prev) => {
+          const bubble: LiveBubble = {
+            id,
+            role: "tool",
+            text: `${finished ? (event.is_error ? "调用失败" : "调用完成") : "正在调用"} ${event.tool_name || "tool"}${finished ? "" : "…"}`,
+            pending: !finished,
+          };
+          const withoutCurrent = prev.filter((item) => item.id !== id);
+          const pendingBubbles = withoutCurrent.filter((item) => item.pending && item.role === "assistant");
+          const stableBubbles = withoutCurrent.filter(
+            (item) => !(item.pending && item.role === "assistant"),
+          );
+          return [...stableBubbles, bubble, ...pendingBubbles];
+        });
+      };
       const onEvent = (event: SystemAgentStreamEvent) => {
+          if (event.type === "model_attempt") {
+            const providerName = String(event.provider_name || "");
+            const model = String(event.model || "");
+            if (providerName && model) setRuntimeSelection({ providerName, model });
+            const attempt = Number(event.attempt || 1);
+            updatePendingText(
+              `正在调用 ${providerName || "Provider"} · ${model || "模型"}${attempt > 1 ? `（第 ${attempt} 次尝试）` : "…"}`,
+            );
+          }
+          if (event.type === "retry_scheduled") {
+            const retryNumber = Number(event.retry_number || 1);
+            const maxRetries = Number(event.max_retries || 5);
+            const delay = Number(event.delay_seconds || 3);
+            updatePendingText(
+              `${event.provider_name || "Provider"} · ${event.model || "模型"} 暂时失败，${delay} 秒后进行第 ${retryNumber}/${maxRetries} 次重试…`,
+            );
+          }
+          if (event.type === "model_exhausted") {
+            updatePendingText(
+              `${event.provider_name || "当前 Provider"} · ${event.model || "当前模型"} 未能完成，正在尝试同 Provider 的其它模型…`,
+            );
+          }
+          if (event.type === "provider_selected") {
+            const providerName = String(event.provider_name || "");
+            const model = String(event.model || "");
+            if (providerName && model) {
+              setRuntimeSelection({ providerName, model });
+              if (event.reason === "provider_fallback") {
+                toast.message(`已改用 ${providerName} · ${model}`);
+              } else if (event.reason === "model_fallback") {
+                updatePendingText(`已切换到 ${providerName} 的 ${model}，正在继续…`);
+              }
+            }
+          }
+          if (event.type === "tool_started") {
+            upsertToolProgress(event, false);
+            updatePendingText(`正在等待 ${event.tool_name || "工具"} 返回…`);
+          }
           if (event.type === "tool_finished") {
-            setLive((prev) => {
-              const tools = prev.filter((b) => b.role === "tool" || b.role === "user");
-              const rest = prev.filter((b) => b.role !== "tool" && b.role !== "user");
-              return [
-                ...tools.filter((b) => b.role === "user"),
-                {
-                  id: `tool-${event.call_id || event.seq}`,
-                  role: "tool" as const,
-                  text: `${event.tool_name || "tool"}${event.is_error ? " 失败" : " 完成"}`,
-                },
-                ...rest,
-              ];
-            });
+            upsertToolProgress(event, true);
           }
           if (event.type === "action_proposed" && event.action) {
             const action = event.action as SystemAgentAction;
@@ -197,6 +312,11 @@ export function AssistantIndex() {
           }
           if (event.type === "assistant_message") {
             assistantText = String(event.content || "");
+            const providerName = event.usage?.provider_name;
+            const model = event.usage?.model;
+            if (typeof providerName === "string" && typeof model === "string") {
+              setRuntimeSelection({ providerName, model });
+            }
             setLive((prev) => {
               const withoutPending = prev.filter((b) => !b.pending);
               return [
@@ -210,7 +330,14 @@ export function AssistantIndex() {
             });
           }
           if (event.type === "error") {
-            toast.error(event.message || "助手运行失败");
+            if (
+              event.code === "AGENT_PROVIDER_SWITCH_REQUIRED" ||
+              event.code === "AGENT_TOOL_APPROVAL_REQUIRED"
+            ) {
+              toast.message(event.message || "当前 Provider 内模型均不可用，请确认是否切换");
+            } else {
+              toast.error(event.message || "助手运行失败");
+            }
             if (event.hint?.web_path) {
               toast.message(event.hint.message || "请检查模型配置", {
                 action: {
@@ -225,31 +352,68 @@ export function AssistantIndex() {
       };
       const accountPayload = { account_id: accountId === "" ? null : Number(accountId) };
       if (retryMessageId != null) {
-        await retrySystemAgentMessage(sessionId, retryMessageId, accountPayload, onEvent);
+        await retrySystemAgentMessage(
+          sessionId,
+          retryMessageId,
+          {
+            ...accountPayload,
+            fallback_provider_id: fallbackProviderId ?? null,
+            approved_tools: approvedTools || [],
+          },
+          onEvent,
+          { signal: controller.signal },
+        );
       } else {
         await streamSystemAgentMessage(
           sessionId,
           { content: text || "", ...accountPayload },
           onEvent,
+          { signal: controller.signal },
         );
       }
-      await qc.invalidateQueries({ queryKey: ["system-agent", "messages", sessionId] });
-      await qc.invalidateQueries({ queryKey: ["system-agent", "sessions"] });
-      await qc.invalidateQueries({ queryKey: ["system-agent", "actions", sessionId] });
       // 流结束后清空临时气泡；pending Action 由 pendingActionsQ 持久渲染
       setLive([]);
     } catch (e) {
-      toast.error(getErrMsg(e));
-      setLive((prev) => prev.filter((b) => (text && b.role === "user") || b.role === "action"));
+      stopped = controller.signal.aborted || (e instanceof DOMException && e.name === "AbortError");
+      if (stopped) {
+        toast.message("已停止本轮请求");
+        setLive((prev) => [
+          ...prev.filter((bubble) => bubble.role === "action"),
+          { id: stoppedBubbleId, role: "assistant", text: "已停止本轮请求。" },
+        ]);
+      } else {
+        toast.error(getErrMsg(e));
+        setLive((prev) => prev.filter((b) => (text && b.role === "user") || b.role === "action"));
+      }
     } finally {
+      if (sessionId) {
+        await Promise.all([
+          qc.invalidateQueries({ queryKey: ["system-agent", "messages", sessionId] }),
+          qc.invalidateQueries({ queryKey: ["system-agent", "sessions"] }),
+          qc.invalidateQueries({ queryKey: ["system-agent", "actions", sessionId] }),
+        ]);
+      }
+      if (abortRef.current === controller) abortRef.current = null;
       setStreaming(false);
       setRetryingMessageId(null);
+      if (stopped && sessionId) {
+        window.setTimeout(() => {
+          void qc.invalidateQueries({ queryKey: ["system-agent", "messages", sessionId] });
+          setLive((prev) => prev.filter((bubble) => bubble.id !== stoppedBubbleId));
+        }, 1000);
+      }
     }
   };
 
   const onSend = async (text: string) => runTurn({ text });
 
-  const onRetryMessage = async (messageId: number) => runTurn({ retryMessageId: messageId });
+  const onRetryMessage = async (
+    messageId: number,
+    fallbackProviderId?: number,
+    approvedTools?: string[],
+  ) => runTurn({ retryMessageId: messageId, fallbackProviderId, approvedTools });
+
+  const onStop = () => abortRef.current?.abort();
 
   const pendingActionBubbles: LiveBubble[] = useMemo(() => {
     const rows = pendingActionsQ.data || [];
@@ -298,9 +462,26 @@ export function AssistantIndex() {
         }
       />
 
-      <div className="mb-3 flex flex-wrap items-center gap-3 text-sm text-muted-foreground">
+      <div className="mb-3 flex flex-wrap items-center gap-x-4 gap-y-2 text-sm text-muted-foreground">
         <span>
-          状态：<span className="text-foreground">{statusLabel}</span>
+          状态：
+          <span className="text-foreground">
+            {configQ.isLoading ? "加载中" : enabled ? (streaming ? "调用中" : "已启用") : "未启用"}
+          </span>
+        </span>
+        <span className="inline-flex min-w-0 items-center gap-1.5">
+          <Server className="h-3.5 w-3.5 shrink-0" />
+          Provider：
+          <span className="max-w-48 truncate text-foreground">
+            {displayedSelection?.providerName || "未配置"}
+          </span>
+        </span>
+        <span className="inline-flex min-w-0 items-center gap-1.5">
+          <Cpu className="h-3.5 w-3.5 shrink-0" />
+          模型：
+          <span className="max-w-64 truncate text-foreground">
+            {displayedSelection?.model || "未选择"}
+          </span>
         </span>
         <label className="flex items-center gap-2">
           <span>账号上下文</span>
@@ -336,26 +517,114 @@ export function AssistantIndex() {
               />
               启用系统助手
             </label>
+            <label className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                checked={!!configQ.data?.require_tool_approval}
+                disabled={saveConfigMut.isPending}
+                onChange={(e) =>
+                  saveConfigMut.mutate({ require_tool_approval: e.target.checked })
+                }
+              />
+              调用工具前需要批准
+            </label>
             <label className="flex flex-col gap-1">
               <span className="text-muted-foreground">固定 Provider</span>
               <Select
                 value={configQ.data?.provider_id != null ? String(configQ.data.provider_id) : ""}
                 onChange={(e) => {
                   const v = e.target.value;
+                  const provider = (providersQ.data || []).find(
+                    (item) => item.id === Number(v),
+                  );
                   saveConfigMut.mutate({
                     provider_id: v ? Number(v) : null,
+                    model: toolsModels(provider)[0] || null,
+                    fallback_provider_ids: (
+                      configQ.data?.fallback_provider_ids || []
+                    ).filter((id) => id !== Number(v)),
                     enabled: true,
                   });
                 }}
               >
                 <option value="">请选择</option>
                 {(providersQ.data || []).map((p) => (
-                  <option key={p.id} value={p.id}>
-                    #{p.id} {p.name}
+                  <option
+                    key={p.id}
+                    value={p.id}
+                    disabled={!p.has_api_key || toolsModels(p).length === 0}
+                  >
+                    {p.name}
+                    {!p.has_api_key
+                      ? "（缺少 Key）"
+                      : toolsModels(p).length === 0
+                        ? "（无 Tools 模型）"
+                        : ""}
                   </option>
                 ))}
               </Select>
             </label>
+            <label className="flex flex-col gap-1 sm:col-start-2">
+              <span className="text-muted-foreground">主模型</span>
+              <Select
+                value={configQ.data?.model || configuredToolsModels[0] || ""}
+                disabled={!configuredProvider || configuredToolsModels.length === 0}
+                onChange={(e) => saveConfigMut.mutate({ model: e.target.value || null })}
+              >
+                {configuredToolsModels.length === 0 ? (
+                  <option value="">没有可用的 Tools 模型</option>
+                ) : (
+                  configuredToolsModels.map((model) => (
+                    <option key={model} value={model}>
+                      {model}
+                    </option>
+                  ))
+                )}
+              </Select>
+            </label>
+          </div>
+          <div className="mt-4 border-t pt-3">
+            <div className="font-medium">跨 Provider fallback 范围</div>
+            <p className="mt-1 text-xs text-muted-foreground">
+              当前 Provider 会先静默尝试其它 Tools 模型；只有下列白名单 Provider 可在你确认后接管。
+            </p>
+            <div className="mt-2 grid gap-2 sm:grid-cols-2">
+              {(providersQ.data || [])
+                .filter((provider) => provider.id !== configQ.data?.provider_id)
+                .map((provider) => {
+                  const models = toolsModels(provider);
+                  const eligible = provider.has_api_key && models.length > 0;
+                  const checked = (configQ.data?.fallback_provider_ids || []).includes(
+                    provider.id,
+                  );
+                  return (
+                    <label
+                      key={provider.id}
+                      className="flex min-w-0 items-start gap-2 rounded-md border px-3 py-2"
+                    >
+                      <input
+                        type="checkbox"
+                        className="mt-0.5"
+                        checked={checked}
+                        disabled={!eligible || saveConfigMut.isPending}
+                        onChange={(event) => {
+                          const current = configQ.data?.fallback_provider_ids || [];
+                          const next = event.target.checked
+                            ? [...current, provider.id]
+                            : current.filter((id) => id !== provider.id);
+                          saveConfigMut.mutate({ fallback_provider_ids: next });
+                        }}
+                      />
+                      <span className="min-w-0">
+                        <span className="block truncate text-foreground">{provider.name}</span>
+                        <span className="block truncate text-xs text-muted-foreground">
+                          {eligible ? `${models.length} 个 Tools 模型` : "不可用于 Agent fallback"}
+                        </span>
+                      </span>
+                    </label>
+                  );
+                })}
+            </div>
           </div>
           <p className="mt-2 text-xs text-muted-foreground">
             仅允许声明支持 tools 的模型。写操作会生成待确认卡片；未配置时助手会给出 AI 中心入口。
@@ -390,7 +659,12 @@ export function AssistantIndex() {
               }}
             />
           )}
-          <Composer disabled={streaming || configQ.isLoading} onSend={onSend} />
+          <Composer
+            disabled={configQ.isLoading}
+            streaming={streaming}
+            onSend={onSend}
+            onStop={onStop}
+          />
         </div>
       </div>
     </PageShell>

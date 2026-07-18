@@ -1197,6 +1197,17 @@ async def test_openai_client_wraps_typed_error(
     assert exc_info.value.scope is expected_scope
 
 
+def test_upstream_failed_400_is_provider_local() -> None:
+    from app.services import llm_client
+
+    scope = llm_client._error_scope_for_http(
+        400,
+        '{"error":{"message":"Error from provider (Console): Upstream request failed"}}',
+    )
+
+    assert scope is LLMErrorScope.PROVIDER_LOCAL
+
+
 @pytest.mark.asyncio
 async def test_openai_client_classifies_policy_403_as_account_scope(monkeypatch) -> None:
     from app.services import llm_client

@@ -2684,6 +2684,15 @@ def _error_scope_for_http(status_code: int, body: str = "") -> LLMErrorScope:
         if any(
             word in normalized
             for word in (
+                "upstream request failed",
+                "upstream service failed",
+                "error from provider",
+            )
+        ):
+            return LLMErrorScope.PROVIDER_LOCAL
+        if any(
+            word in normalized
+            for word in (
                 "model_not_found",
                 "model not found",
                 "unknown model",

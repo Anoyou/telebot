@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 
@@ -15,6 +17,7 @@ from app.db.models.system_agent import (
     CHANNEL_WEB,
     MESSAGE_ROLE_USER,
     MESSAGE_RUN_FAILED,
+    MESSAGE_RUN_PENDING,
     MESSAGE_RUN_SUCCEEDED,
     SESSION_STATUS_ACTIVE,
     SESSION_STATUS_ARCHIVED,
@@ -23,9 +26,11 @@ from app.db.models.system_agent import (
 )
 from app.services.system_agent.config import (
     normalize_config,
+    resolve_agent_providers,
     resolve_fixed_provider,
     save_config,
     tools_model_for_dto,
+    tools_models_for_dto,
 )
 from app.services.system_agent.prompts import session_title_from_message
 from app.services.system_agent.service import SystemAgentService
@@ -52,12 +57,15 @@ def test_normalize_config_defaults_and_clamps() -> None:
     cfg = normalize_config(None)
     assert cfg["enabled"] is False
     assert cfg["provider_id"] is None
+    assert cfg["require_tool_approval"] is False
     assert cfg["max_steps"] >= 1
     over = normalize_config(
         {
             "enabled": 1,
             "provider_id": "12",
             "model": "  gpt-x  ",
+            "fallback_provider_ids": [12, "13", 13, 0, "bad"],
+            "require_tool_approval": True,
             "max_steps": 999,
             "max_tool_calls": 999,
             "session_token_limit": 10,
@@ -66,6 +74,8 @@ def test_normalize_config_defaults_and_clamps() -> None:
     assert over["enabled"] is True
     assert over["provider_id"] == 12
     assert over["model"] == "gpt-x"
+    assert over["fallback_provider_ids"] == [13]
+    assert over["require_tool_approval"] is True
     assert over["max_steps"] == 16
     assert over["max_tool_calls"] == 64
     assert over["session_token_limit"] == 1024
@@ -88,6 +98,7 @@ def test_tools_model_for_dto_requires_tools_support() -> None:
     assert tools_model_for_dto(dto, "m1") is None
     assert tools_model_for_dto(dto, "m2") == "m2"
     assert tools_model_for_dto(dto, "missing") is None
+    assert tools_models_for_dto(dto, "m2") == ["m2"]
 
 
 @pytest.mark.asyncio
@@ -98,6 +109,58 @@ async def test_resolve_fixed_provider_disabled(agent_db) -> None:
         dto, err = await resolve_fixed_provider(db)
         assert dto is None
         assert "未启用" in err
+
+
+@pytest.mark.asyncio
+async def test_resolve_agent_providers_uses_fallback_allowlist() -> None:
+    def row(provider_id: int, name: str, *, supports_tools: bool = True):
+        return SimpleNamespace(
+            id=provider_id,
+            name=name,
+            provider="openai",
+            api_format="responses",
+            base_url="https://example.invalid/v1",
+            default_model=f"model-{provider_id}",
+            api_key_enc="encrypted",
+            models=[
+                {
+                    "id": f"model-{provider_id}",
+                    "enabled": True,
+                    "supports_tools": supports_tools,
+                }
+            ],
+        )
+
+    rows = [
+        row(1, "primary"),
+        row(2, "allowed"),
+        row(3, "not-selected"),
+        row(4, "no-tools", supports_tools=False),
+    ]
+
+    class _Result:
+        def scalars(self):
+            return self
+
+        def all(self):
+            return rows
+
+    class _DB:
+        async def execute(self, _query):
+            return _Result()
+
+    resolved = await resolve_agent_providers(
+        _DB(),  # type: ignore[arg-type]
+        {
+            "enabled": True,
+            "provider_id": 1,
+            "model": "model-1",
+            "fallback_provider_ids": [2, 4],
+        },
+    )
+
+    assert not isinstance(resolved, str)
+    assert list(resolved.providers) == [1, 2]
 
 
 @pytest.mark.asyncio
@@ -339,6 +402,226 @@ async def test_failed_turn_is_marked_and_excluded_from_next_history(
         rows = await svc.list_messages(db, session.id)
         assert rows[-2].run_status == MESSAGE_RUN_SUCCEEDED
         assert session.memory_state["last_result"] == "第二轮成功"
+
+
+@pytest.mark.asyncio
+async def test_provider_switch_failure_is_persisted_for_confirmation(
+    agent_db, monkeypatch
+) -> None:
+    svc = SystemAgentService()
+
+    async def fake_stream(*_args, **_kwargs):
+        yield {
+            "type": "error",
+            "code": "AGENT_PROVIDER_SWITCH_REQUIRED",
+            "message": "是否切换 Provider？",
+            "provider_switch": {
+                "from_provider_name": "primary",
+                "candidates": [
+                    {"provider_id": 2, "provider_name": "fallback", "model": "model-b"}
+                ],
+            },
+        }
+        yield {"type": "done", "ok": False}
+
+    monkeypatch.setattr(svc.runtime, "stream_turn", fake_stream)
+
+    async with agent_db() as db:
+        session = await svc.create_session(db, channel=CHANNEL_WEB, web_user_id=1)
+        async for _event in svc.stream_message(
+            db,
+            session=session,
+            text="查询定时任务",
+            role="admin",
+            channel=CHANNEL_WEB,
+            web_user_id=1,
+        ):
+            pass
+
+        message = (await svc.list_messages(db, session.id))[0]
+        assert message.run_status == MESSAGE_RUN_FAILED
+        assert message.error_code == "AGENT_PROVIDER_SWITCH_REQUIRED"
+        assert message.usage == {
+            "provider_switch": {
+                "from_provider_name": "primary",
+                "candidates": [
+                    {"provider_id": 2, "provider_name": "fallback", "model": "model-b"}
+                ],
+            }
+        }
+
+
+@pytest.mark.asyncio
+async def test_tool_approval_failure_is_persisted_for_retry(
+    agent_db, monkeypatch
+) -> None:
+    svc = SystemAgentService()
+
+    async def fake_stream(*_args, **_kwargs):
+        yield {
+            "type": "error",
+            "code": "AGENT_TOOL_APPROVAL_REQUIRED",
+            "message": "本轮需要调用系统工具，请批准后继续。",
+            "tool_approval": {
+                "domains": ["scheduler"],
+                "tools": [
+                    {
+                        "name": "scheduler.list",
+                        "description": "查看定时任务",
+                        "read_only": True,
+                        "risk": "normal",
+                    }
+                ],
+            },
+        }
+        yield {"type": "done", "ok": False}
+
+    monkeypatch.setattr(svc.runtime, "stream_turn", fake_stream)
+
+    async with agent_db() as db:
+        session = await svc.create_session(db, channel=CHANNEL_WEB, web_user_id=1)
+        async for _event in svc.stream_message(
+            db,
+            session=session,
+            text="查询定时任务",
+            role="admin",
+            channel=CHANNEL_WEB,
+            web_user_id=1,
+        ):
+            pass
+
+        message = (await svc.list_messages(db, session.id))[0]
+        assert message.error_code == "AGENT_TOOL_APPROVAL_REQUIRED"
+        assert message.usage is not None
+        assert message.usage["tool_approval"]["tools"][0]["name"] == "scheduler.list"
+
+
+@pytest.mark.asyncio
+async def test_provider_switch_and_tool_approval_context_are_persisted_together(
+    agent_db, monkeypatch
+) -> None:
+    svc = SystemAgentService()
+
+    async def fake_stream(*_args, **_kwargs):
+        yield {
+            "type": "error",
+            "code": "AGENT_PROVIDER_SWITCH_REQUIRED",
+            "message": "是否切换 Provider？",
+            "provider_switch": {
+                "from_provider_name": "primary",
+                "candidates": [
+                    {"provider_id": 2, "provider_name": "fallback", "model": "model-b"}
+                ],
+            },
+            "tool_approval": {
+                "domains": ["scheduler"],
+                "tools": [
+                    {
+                        "name": "scheduler.list",
+                        "description": "查看定时任务",
+                        "read_only": True,
+                        "risk": "normal",
+                    }
+                ],
+            },
+        }
+        yield {"type": "done", "ok": False}
+
+    monkeypatch.setattr(svc.runtime, "stream_turn", fake_stream)
+
+    async with agent_db() as db:
+        session = await svc.create_session(db, channel=CHANNEL_WEB, web_user_id=1)
+        async for _event in svc.stream_message(
+            db,
+            session=session,
+            text="查询定时任务",
+            role="admin",
+            channel=CHANNEL_WEB,
+            web_user_id=1,
+        ):
+            pass
+
+        message = (await svc.list_messages(db, session.id))[0]
+        assert message.usage is not None
+        assert message.usage["provider_switch"]["candidates"][0]["provider_id"] == 2
+        assert message.usage["tool_approval"]["tools"][0]["name"] == "scheduler.list"
+
+
+@pytest.mark.asyncio
+async def test_cancelled_stream_marks_message_retryable(agent_db, monkeypatch) -> None:
+    svc = SystemAgentService()
+
+    async def cancelled_stream(*_args, **_kwargs):
+        yield {"type": "run_started", "run_id": "cancelled"}
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(svc.runtime, "stream_turn", cancelled_stream)
+
+    async with agent_db() as db:
+        session = await svc.create_session(db, channel=CHANNEL_WEB, web_user_id=1)
+        stream = svc.stream_message(
+            db,
+            session=session,
+            text="会被断开的请求",
+            role="admin",
+            channel=CHANNEL_WEB,
+            web_user_id=1,
+        )
+        assert (await anext(stream))["type"] == "run_started"
+        with pytest.raises(asyncio.CancelledError):
+            await anext(stream)
+
+    async with agent_db() as observer:
+        message = (await svc.list_messages(observer, session.id))[0]
+        assert message.run_status == MESSAGE_RUN_FAILED
+        assert message.error_code == "AGENT_STREAM_CANCELLED"
+
+
+@pytest.mark.asyncio
+async def test_reconcile_stale_pending_message(agent_db) -> None:
+    svc = SystemAgentService()
+    old = (datetime.now(UTC) - timedelta(minutes=20)).isoformat()
+
+    async with agent_db() as db:
+        session = await svc.create_session(db, channel=CHANNEL_WEB, web_user_id=1)
+        db.add(
+            SystemAgentMessage(
+                session_id=session.id,
+                role=MESSAGE_ROLE_USER,
+                content={"text": "旧请求"},
+                usage={"run_started_at": old},
+                run_status="pending",
+            )
+        )
+        await db.commit()
+        assert await svc.reconcile_stale_messages(db, session.id) == 1
+        await db.commit()
+        message = (await svc.list_messages(db, session.id))[0]
+        assert message.run_status == MESSAGE_RUN_FAILED
+        assert message.error_code == "AGENT_STREAM_INTERRUPTED"
+
+
+@pytest.mark.asyncio
+async def test_reconcile_keeps_pending_message_within_runtime_window(agent_db) -> None:
+    svc = SystemAgentService()
+    still_running = (datetime.now(UTC) - timedelta(minutes=10)).isoformat()
+
+    async with agent_db() as db:
+        session = await svc.create_session(db, channel=CHANNEL_WEB, web_user_id=1)
+        db.add(
+            SystemAgentMessage(
+                session_id=session.id,
+                role=MESSAGE_ROLE_USER,
+                content={"text": "仍在运行的长请求"},
+                usage={"run_started_at": still_running},
+                run_status="pending",
+            )
+        )
+        await db.commit()
+
+        assert await svc.reconcile_stale_messages(db, session.id) == 0
+        message = (await svc.list_messages(db, session.id))[0]
+        assert message.run_status == MESSAGE_RUN_PENDING
 
 
 @pytest.mark.asyncio

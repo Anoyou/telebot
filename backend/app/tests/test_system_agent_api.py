@@ -17,10 +17,13 @@ class _FakeSvc:
     def __init__(self) -> None:
         self.sessions: dict[str, Any] = {}
         self.messages: dict[str, list[Any]] = {}
+        self.last_stream_kwargs: dict[str, Any] = {}
         self.config = {
             "enabled": False,
             "provider_id": None,
             "model": None,
+            "fallback_provider_ids": [],
+            "require_tool_approval": False,
             "max_steps": 8,
             "max_tool_calls": 24,
             "session_token_limit": 16384,
@@ -90,6 +93,9 @@ class _FakeSvc:
     async def list_messages(self, _db, session_id, **kwargs):
         return self.messages.get(session_id, [])
 
+    async def reconcile_stale_messages(self, _db, _session_id):
+        return 0
+
     async def get_message(self, _db, message_id, *, session_id):
         return next(
             (
@@ -101,6 +107,7 @@ class _FakeSvc:
         )
 
     async def stream_message(self, _db, **kwargs):
+        self.last_stream_kwargs = dict(kwargs)
         yield {
             "type": "run_started",
             "run_id": "r1",
@@ -241,7 +248,10 @@ async def test_retry_failed_message_stream(fake_svc) -> None:
     response = await api.retry_message(
         "s1",
         9,
-        api.SystemAgentMessageRetry(),
+        api.SystemAgentMessageRetry(
+            fallback_provider_id=12,
+            approved_tools=["scheduler.list"],
+        ),
         db,
         user,
     )
@@ -253,6 +263,8 @@ async def test_retry_failed_message_stream(fake_svc) -> None:
 
     assert events[-1]["type"] == "done"
     assert events[-1]["ok"] is True
+    assert fake_svc.last_stream_kwargs["fallback_provider_id"] == 12
+    assert fake_svc.last_stream_kwargs["approved_tools"] == ["scheduler.list"]
 
 
 @pytest.mark.asyncio

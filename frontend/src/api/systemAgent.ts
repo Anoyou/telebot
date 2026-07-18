@@ -5,6 +5,8 @@ export interface SystemAgentConfig {
   enabled: boolean;
   provider_id: number | null;
   model: string | null;
+  fallback_provider_ids: number[];
+  require_tool_approval: boolean;
   max_steps: number;
   max_tool_calls: number;
   session_token_limit: number;
@@ -25,6 +27,8 @@ export interface SystemAgentCapabilities {
   enabled: boolean;
   provider_id: number | null;
   model: string | null;
+  provider_name?: string | null;
+  resolved_model?: string | null;
   ai_enabled: boolean;
   timezone: string;
   tools: SystemAgentCapability[];
@@ -57,6 +61,29 @@ export interface SystemAgentMessage {
   error_message?: string | null;
   retry_count?: number;
   created_at: string | null;
+}
+
+export interface SystemAgentProviderSwitchCandidate {
+  provider_id: number;
+  provider_name: string;
+  model: string;
+}
+
+export interface SystemAgentProviderSwitch {
+  from_provider_name?: string;
+  candidates: SystemAgentProviderSwitchCandidate[];
+}
+
+export interface SystemAgentToolApprovalItem {
+  name: string;
+  description: string;
+  read_only: boolean;
+  risk: string;
+}
+
+export interface SystemAgentToolApproval {
+  domains?: string[];
+  tools: SystemAgentToolApprovalItem[];
 }
 
 export interface SystemAgentAction {
@@ -100,6 +127,12 @@ export type SystemAgentStreamEvent = {
   usage?: Record<string, unknown>;
   ok?: boolean;
   hint?: { web_path?: string; message?: string };
+  provider_id?: number;
+  provider_name?: string;
+  model?: string;
+  reason?: string;
+  provider_switch?: SystemAgentProviderSwitch;
+  tool_approval?: SystemAgentToolApproval;
   action?: SystemAgentAction;
   [key: string]: unknown;
 };
@@ -238,7 +271,11 @@ export async function streamSystemAgentMessage(
 export async function retrySystemAgentMessage(
   sessionId: string,
   messageId: number,
-  payload: { account_id?: number | null },
+  payload: {
+    account_id?: number | null;
+    fallback_provider_id?: number | null;
+    approved_tools?: string[];
+  },
   onEvent: (event: SystemAgentStreamEvent) => void,
   opts?: { signal?: AbortSignal },
 ): Promise<void> {

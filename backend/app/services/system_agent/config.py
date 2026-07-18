@@ -19,6 +19,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "enabled": False,
     "provider_id": None,
     "model": None,
+    "fallback_provider_ids": [],
+    "require_tool_approval": False,
     "max_steps": AgentLimits.max_steps,
     "max_tool_calls": AgentLimits.max_tool_calls,
     "session_token_limit": 16_384,
@@ -37,12 +39,21 @@ def normalize_config(raw: Any) -> dict[str, Any]:
     if not isinstance(raw, dict):
         return base
     enabled = bool(raw.get("enabled", False))
+    require_tool_approval = bool(raw.get("require_tool_approval", False))
     provider_id = raw.get("provider_id")
     try:
         provider_id = int(provider_id) if provider_id not in (None, "") else None
     except (TypeError, ValueError):
         provider_id = None
     model = str(raw.get("model") or "").strip() or None
+    fallback_provider_ids: list[int] = []
+    for value in raw.get("fallback_provider_ids") or []:
+        try:
+            candidate = int(value)
+        except (TypeError, ValueError):
+            continue
+        if candidate > 0 and candidate != provider_id and candidate not in fallback_provider_ids:
+            fallback_provider_ids.append(candidate)
     try:
         max_steps = int(raw.get("max_steps") or DEFAULT_CONFIG["max_steps"])
     except (TypeError, ValueError):
@@ -61,6 +72,8 @@ def normalize_config(raw: Any) -> dict[str, Any]:
         "enabled": enabled,
         "provider_id": provider_id,
         "model": model,
+        "fallback_provider_ids": fallback_provider_ids[:16],
+        "require_tool_approval": require_tool_approval,
         "max_steps": max(1, min(max_steps, 16)),
         "max_tool_calls": max(1, min(max_tool_calls, 64)),
         "session_token_limit": max(1024, min(session_token_limit, 100_000)),
@@ -104,6 +117,27 @@ def tools_model_for_dto(dto: LLMProviderDTO, explicit: str | None = None) -> str
     return None
 
 
+def tools_models_for_dto(
+    dto: LLMProviderDTO,
+    explicit: str | None = None,
+) -> list[str]:
+    """返回同一 Provider 内可用于 Agent 的模型，首选模型排在最前。"""
+
+    preferred = tools_model_for_dto(dto, explicit)
+    candidates = list(dto.enabled_model_ids())
+    if not candidates and not dto.has_model_list():
+        default_model = str(dto.default_model or "").strip()
+        if default_model:
+            candidates = [default_model]
+    ordered = [preferred] if preferred else []
+    ordered.extend(model for model in candidates if model and model != preferred)
+    return [
+        model
+        for model in ordered
+        if dto.capabilities_for_model(model).tools
+    ]
+
+
 async def resolve_fixed_provider(
     db: AsyncSession,
     config: dict[str, Any] | None = None,
@@ -144,12 +178,15 @@ async def resolve_agent_providers(
             f"Provider「{dto.name}」没有可用的 tools 模型。"
             "请选择声明支持 tools 的已启用模型。"
         )
-    compatible = {
-        provider.id: provider
-        for provider in dtos.values()
-        if provider.has_api_key and tools_model_for_dto(provider) is not None
-    }
-    compatible[dto.id] = dto
+    compatible: dict[int, LLMProviderDTO] = {dto.id: dto}
+    for fallback_id in cfg.get("fallback_provider_ids") or []:
+        provider = dtos.get(int(fallback_id))
+        if (
+            provider is not None
+            and provider.has_api_key
+            and tools_model_for_dto(provider) is not None
+        ):
+            compatible[provider.id] = provider
     return ResolvedAgentProviders(primary=dto, model=model, providers=compatible)
 
 
@@ -194,4 +231,5 @@ __all__ = [
     "resolve_fixed_provider",
     "save_config",
     "tools_model_for_dto",
+    "tools_models_for_dto",
 ]

@@ -20,6 +20,23 @@
 
 ## [Unreleased]
 
+## [0.66.0] — 2026-07-18 · minor（次版本） · Agent 可控重试与工具批准
+
+### Added
+- System Agent 配置新增跨 Provider fallback 白名单；当前 Provider 内模型耗尽后，Web 失败卡片会列出下一个兼容候选，由用户确认后复用原消息切换重试。
+- System Agent 新增可选的 Web 工具调用前置批准开关，以及对话中的手动停止按钮。
+
+### Changed
+- System Agent fallback 改为先在同一 Provider 内静默尝试其它已启用 Tools 模型，再进入受控的跨 Provider 候选；状态栏直接显示 Provider 名称和当前模型。
+- Agent 同一模型遇到超时、网络错误、429 或 5xx 后固定每 3 秒重试，最多重试 5 次；对话流实时显示模型尝试、重试等待、模型切换和工具调用过程。
+
+### Fixed
+- 修复上游将自身故障包装为 `400 Upstream request failed` 时不触发 fallback、上游长时间重试时 NDJSON 无心跳、PWA 断线后消息永久停留 pending、长请求在运行窗口内被误判为中断，以及窄屏会话抽屉被顶部栏遮挡的问题。
+- 修复 System Agent 独立调用时可能未注册 LLM usage 持久化回调，导致 AI 页面「近期调用」漏记的问题。
+
+### Tests
+- 新增同模型固定重试、同 Provider 模型 fallback、跨 Provider 确认、工具批准、流式进度、手动中断、调用记录和失败状态恢复回归测试。
+
 ## [0.65.0] — 2026-07-18 · minor（次版本） · 现代 Agent 上下文与故障恢复
 
 ### Added

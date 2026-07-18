@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import delete, desc, select, update
@@ -27,7 +28,12 @@ from ...db.models.system_agent import (
     SystemAgentSession,
 )
 from .actions import clear_expired_secrets
-from .config import load_config, load_system_context_flags, save_config
+from .config import (
+    load_config,
+    load_system_context_flags,
+    resolve_agent_providers,
+    save_config,
+)
 from .memory import clear_session_memory, update_session_memory
 from .prompts import session_title_from_message
 from .registry import get_registry
@@ -35,6 +41,10 @@ from .runtime import SystemAgentRuntime
 from .secrets import extract_plaintext_secrets, redact_known_secrets
 
 log = logging.getLogger(__name__)
+
+# Runtime 单轮允许运行 10 分钟；失活回收必须留出路由与落库余量，
+# 避免历史页把仍在执行的长请求提前暴露为可重试状态。
+STALE_PENDING_AFTER = timedelta(minutes=15)
 
 
 class SystemAgentService:
@@ -58,10 +68,18 @@ class SystemAgentService:
         cfg = await load_config(db)
         flags = await load_system_context_flags(db)
         registry = get_registry()
+        resolved = await resolve_agent_providers(db, cfg)
+        provider_name = None
+        resolved_model = None
+        if not isinstance(resolved, str):
+            provider_name = resolved.primary.name
+            resolved_model = resolved.model
         return {
             "enabled": bool(cfg.get("enabled")),
             "provider_id": cfg.get("provider_id"),
             "model": cfg.get("model"),
+            "provider_name": provider_name,
+            "resolved_model": resolved_model,
             "ai_enabled": bool(flags["ai_enabled"]),
             "timezone": flags["timezone"],
             "tools": registry.capabilities(channel=channel, role=role),
@@ -206,6 +224,54 @@ class SystemAgentService:
         rows.reverse()
         return rows
 
+    async def reconcile_stale_messages(
+        self,
+        db: AsyncSession,
+        session_id: str,
+        *,
+        stale_after: timedelta = STALE_PENDING_AFTER,
+    ) -> int:
+        """把连接中断后遗留的 pending 消息恢复为可重试失败态。"""
+
+        rows = list(
+            (
+                await db.execute(
+                    select(SystemAgentMessage).where(
+                        SystemAgentMessage.session_id == session_id,
+                        SystemAgentMessage.role == MESSAGE_ROLE_USER,
+                        SystemAgentMessage.run_status == MESSAGE_RUN_PENDING,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        now = datetime.now(UTC)
+        changed = 0
+        for row in rows:
+            started_at = row.created_at
+            if isinstance(row.usage, dict):
+                raw_started = row.usage.get("run_started_at")
+                if isinstance(raw_started, str):
+                    try:
+                        started_at = datetime.fromisoformat(raw_started)
+                    except ValueError:
+                        pass
+            if started_at is None:
+                continue
+            if started_at.tzinfo is None:
+                started_at = started_at.replace(tzinfo=UTC)
+            if now - started_at < stale_after:
+                continue
+            row.run_status = MESSAGE_RUN_FAILED
+            row.error_code = "AGENT_STREAM_INTERRUPTED"
+            row.error_message = "连接中断，上一轮未完成，请重试本轮。"
+            row.usage = None
+            changed += 1
+        if changed:
+            await db.flush()
+        return changed
+
     async def get_message(
         self,
         db: AsyncSession,
@@ -257,7 +323,11 @@ class SystemAgentService:
         web_user_id: int | None = None,
         bot_tg_user_id: int | None = None,
         retry_message: SystemAgentMessage | None = None,
+        fallback_provider_id: int | None = None,
+        approved_tools: list[str] | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
+        await self.reconcile_stale_messages(db, session.id)
+        run_started_at = datetime.now(UTC).isoformat()
         if retry_message is not None:
             if retry_message.role != MESSAGE_ROLE_USER:
                 raise ValueError("只能重试用户消息")
@@ -295,6 +365,7 @@ class SystemAgentService:
                 session_id=session.id,
                 role=MESSAGE_ROLE_USER,
                 content={"text": redacted_user},
+                usage={"run_started_at": run_started_at},
                 run_status=MESSAGE_RUN_PENDING,
             )
             db.add(user_msg)
@@ -311,6 +382,7 @@ class SystemAgentService:
                     run_status=MESSAGE_RUN_PENDING,
                     error_code=None,
                     error_message=None,
+                    usage={"run_started_at": run_started_at},
                     retry_count=SystemAgentMessage.retry_count + 1,
                 )
             )
@@ -340,6 +412,8 @@ class SystemAgentService:
         error_code: str | None = None
         error_message: str | None = None
         route_domains: list[str] = []
+        failure_context: dict[str, Any] | None = None
+        cancelled = False
 
         done_received = False
         try:
@@ -353,6 +427,8 @@ class SystemAgentService:
                 bot_tg_user_id=bot_tg_user_id,
                 history_messages=history_for_model,
                 chat_secrets=chat_secrets,
+                fallback_provider_id=fallback_provider_id,
+                approved_tools=approved_tools,
             ):
                 et = event.get("type")
                 if et == "assistant_message":
@@ -365,15 +441,41 @@ class SystemAgentService:
                 elif et == "error":
                     error_code = str(event.get("code") or "AGENT_RUN_FAILED")[:64]
                     error_message = str(event.get("message") or "助手运行失败")[:1024]
+                    provider_switch = event.get("provider_switch")
+                    if isinstance(provider_switch, dict):
+                        failure_context = {
+                            **(failure_context or {}),
+                            "provider_switch": provider_switch,
+                        }
+                    tool_approval = event.get("tool_approval")
+                    if isinstance(tool_approval, dict):
+                        failure_context = {
+                            **(failure_context or {}),
+                            "tool_approval": tool_approval,
+                        }
                 elif et == "done":
                     done_received = True
                     done_ok = bool(event.get("ok"))
-                # run_started 立即发给客户端；其余事件等消息落库成功后再发，
+                # 运行状态立即发给客户端；业务结果等消息落库成功后再发，
                 # 避免客户端收到最终答案后断线却无法从历史恢复。
-                if et == "run_started":
+                if et in {
+                    "run_started",
+                    "provider_selected",
+                    "heartbeat",
+                    "model_attempt",
+                    "retry_scheduled",
+                    "model_exhausted",
+                    "tool_started",
+                }:
                     yield event
                 else:
                     buffered_events.append(event)
+        except asyncio.CancelledError:
+            cancelled = True
+            error_code = "AGENT_STREAM_CANCELLED"
+            error_message = "连接已中断，本轮未完成，请重试本轮。"
+            done_received = True
+            done_ok = False
         except Exception as exc:  # noqa: BLE001
             log.exception("system agent stream crashed session=%s", session.id)
             error_code = "AGENT_STREAM_FAILED"
@@ -460,6 +562,7 @@ class SystemAgentService:
             user_msg.run_status = MESSAGE_RUN_SUCCEEDED
             user_msg.error_code = None
             user_msg.error_message = None
+            user_msg.usage = None
             update_session_memory(
                 session,
                 user_text=redact_known_secrets(raw_text, chat_secrets),
@@ -474,9 +577,13 @@ class SystemAgentService:
                 error_message or "助手未能完成本轮请求，请稍后重试。",
                 chat_secrets,
             )[:1024]
+            user_msg.usage = failure_context
         session.updated_at = datetime.now(UTC)
         await db.flush()
         await db.commit()
+
+        if cancelled:
+            raise asyncio.CancelledError
 
         for event in buffered_events:
             yield event

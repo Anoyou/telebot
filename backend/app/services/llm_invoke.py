@@ -122,6 +122,7 @@ async def invoke_structured(
     fallback_provider_id: int | None = None,
     matched_tag: str | None = None,
     client_factory: Callable[..., Any | Awaitable[Any]] | None = None,
+    progress_callback: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None,
 ) -> tuple[ModelResponse, LLMProviderDTO, bool]:
     """Structured multi-turn/tool invocation through the standard runtime gates."""
 
@@ -138,6 +139,7 @@ async def invoke_structured(
         triggered_by_account_id=triggered_by_account_id,
         source=source,
         client_factory=client_factory,
+        progress_callback=progress_callback,
     )
 
 

@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import suppress
 from dataclasses import replace
 from typing import Any
 
@@ -23,6 +25,7 @@ from ..llm_dto import LLMProviderDTO
 from ..llm_invoke import invoke_structured
 from ..llm_protocol import MessageRole, ModelMessage, ModelRequest, ModelUsage, ToolCall, ToolResult
 from ..llm_protocol import ToolSpec as LlmToolSpec
+from ..llm_runtime import ProviderSwitchRequired
 from .config import load_system_context_flags, resolve_agent_providers
 from .context import ToolContext
 from .events import make_event
@@ -62,6 +65,8 @@ class SystemAgentRuntime:
         bot_tg_user_id: int | None = None,
         history_messages: list[SystemAgentMessage] | None = None,
         chat_secrets: list[str] | None = None,
+        fallback_provider_id: int | None = None,
+        approved_tools: list[str] | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
         """执行一轮对话，逐条 yield NDJSON 事件。"""
 
@@ -81,6 +86,10 @@ class SystemAgentRuntime:
 
         yield next_event("run_started", channel=channel, account_id=session.account_id)
 
+        from ..llm_usage_service import ensure_llm_usage_callback_registered
+
+        ensure_llm_usage_callback_registered()
+
         flags = await load_system_context_flags(db)
         cfg = flags["agent_config"]
         resolved = await resolve_agent_providers(db, cfg)
@@ -99,6 +108,42 @@ class SystemAgentRuntime:
         provider_dto = resolved.primary
         model = resolved.model
         providers = resolved.providers
+        yield next_event(
+            "provider_selected",
+            provider_id=provider_dto.id,
+            provider_name=provider_dto.name,
+            model=model,
+            reason="configured",
+        )
+
+        progress_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+
+        async def emit_model_progress(progress: dict[str, Any]) -> None:
+            payload = dict(progress)
+            event_type = str(payload.pop("type", "model_progress"))
+            await progress_queue.put(next_event(event_type, **payload))
+
+        async def wait_for_progress(task: asyncio.Task[Any]) -> tuple[str, Any]:
+            progress_task = asyncio.create_task(progress_queue.get())
+            try:
+                done, _pending = await asyncio.wait(
+                    {task, progress_task},
+                    timeout=10.0,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+            except BaseException:
+                progress_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await progress_task
+                raise
+            if progress_task in done:
+                return "event", progress_task.result()
+            progress_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await progress_task
+            if task in done:
+                return "done", task.result()
+            return "heartbeat", None
 
         from ... import __version__
 
@@ -122,15 +167,42 @@ class SystemAgentRuntime:
             role=role,
             read_only_only=False,  # 阶段 2：只读 + 写（写工具只产生待确认 Action）
         )
-        route = await self._resolve_tool_route(
-            provider_dto=provider_dto,
-            providers=providers,
-            model=model,
-            user_text=user_text,
-            memory_state=session.memory_state,
-            all_tool_specs=all_tool_specs,
-            account_id=session.account_id,
+        route_task = asyncio.create_task(
+            self._resolve_tool_route(
+                provider_dto=provider_dto,
+                providers=providers,
+                model=model,
+                user_text=user_text,
+                memory_state=session.memory_state,
+                all_tool_specs=all_tool_specs,
+                account_id=session.account_id,
+                fallback_provider_id=fallback_provider_id,
+                progress_callback=emit_model_progress,
+            )
         )
+        try:
+            while True:
+                state, value = await wait_for_progress(route_task)
+                if state == "event":
+                    yield value
+                    continue
+                if state == "heartbeat":
+                    yield next_event(
+                        "heartbeat",
+                        provider_id=provider_dto.id,
+                        provider_name=provider_dto.name,
+                        model=model,
+                    )
+                    continue
+                route = value
+                break
+        finally:
+            if not route_task.done():
+                route_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await route_task
+        while not progress_queue.empty():
+            yield progress_queue.get_nowait()
         tool_specs = select_tool_specs(all_tool_specs, route)
         yield next_event(
             "route_selected",
@@ -140,6 +212,38 @@ class SystemAgentRuntime:
             tool_count=len(tool_specs),
             available_tool_count=len(all_tool_specs),
         )
+        required_tool_names = {spec.name for spec in tool_specs}
+        approved_tool_names = {str(name) for name in (approved_tools or []) if str(name)}
+        tool_approval = (
+            {
+                "domains": list(route.domains),
+                "tools": [
+                    {
+                        "name": spec.name,
+                        "description": spec.description,
+                        "read_only": bool(spec.read_only),
+                        "risk": str(spec.risk),
+                    }
+                    for spec in tool_specs
+                ],
+            }
+            if required_tool_names
+            else None
+        )
+        if (
+            channel == "web"
+            and bool(cfg.get("require_tool_approval"))
+            and required_tool_names
+            and approved_tool_names != required_tool_names
+        ):
+            yield next_event(
+                "error",
+                code="AGENT_TOOL_APPROVAL_REQUIRED",
+                message="本轮需要调用系统工具，请批准后继续。",
+                tool_approval=tool_approval,
+            )
+            yield next_event("done", ok=False)
+            return
         tool_ctx = ToolContext(
             db=db,
             channel=channel,
@@ -151,7 +255,7 @@ class SystemAgentRuntime:
             chat_secrets=list(chat_secrets or []),
         )
 
-        event_queue: list[dict[str, Any]] = []
+        deferred_events: list[dict[str, Any]] = []
 
         agent_tools: dict[str, AgentTool] = {}
         for spec in tool_specs:
@@ -159,7 +263,7 @@ class SystemAgentRuntime:
                 handler = self._bind_read_handler(spec, tool_ctx)
                 read_only = True
             else:
-                handler = self._bind_write_handler(spec, tool_ctx, event_queue, next_event)
+                handler = self._bind_write_handler(spec, tool_ctx, deferred_events, next_event)
                 read_only = False
             agent_tools[spec.name] = AgentTool(
                 spec=LlmToolSpec(
@@ -183,17 +287,27 @@ class SystemAgentRuntime:
             messages=tuple(messages),
             tools=tuple(t.spec for t in agent_tools.values()),
             max_output_tokens=2048,
-            metadata={"model_pinned": False},
+            metadata={
+                "model_pinned": False,
+                "confirm_provider_switch": True,
+                "allowed_cross_provider_ids": (
+                    [fallback_provider_id] if fallback_provider_id is not None else []
+                ),
+                "max_retries_per_model": 5,
+                "retry_delay_seconds": 3.0,
+            },
         )
         limits = AgentLimits(
             max_steps=int(cfg.get("max_steps") or 8),
             max_tool_calls=int(cfg.get("max_tool_calls") or 24),
             max_total_tokens=int(cfg.get("session_token_limit") or 16_384),
-            timeout_seconds=180.0,
+            # 单模型最多 6 次请求，且同 Provider 还会继续尝试其它模型；
+            # 总时限需覆盖完整 fallback 链，用户可随时从 Web 手动停止。
+            timeout_seconds=600.0,
         )
 
         async def on_tool_start(call: ToolCall) -> None:
-            event_queue.append(
+            await progress_queue.put(
                 next_event(
                     "tool_started",
                     tool_name=call.name,
@@ -203,7 +317,7 @@ class SystemAgentRuntime:
             )
 
         async def on_tool_finish(call: ToolCall, result: ToolResult) -> None:
-            event_queue.append(
+            await progress_queue.put(
                 next_event(
                     "tool_finished",
                     tool_name=call.name,
@@ -232,23 +346,79 @@ class SystemAgentRuntime:
                 provider_request,
                 account_id=session.account_id,
                 source="system_agent",
+                fallback_provider_id=fallback_provider_id,
+                progress_callback=emit_model_progress,
             )
+            previous_provider = active_provider
+            previous_model = active_model
             last_used_provider = used
             used_fallback = used_fallback or fallback or used.id != provider_dto.id
             # 本轮内粘住最近一次成功的 Provider/模型，避免每个工具步骤都重新
             # 从已知不稳定的主 Provider 开始重试。
             active_provider = used
             active_model = response.model or provider_request.model
+            if used.id != previous_provider.id or active_model != previous_model:
+                await progress_queue.put(
+                    next_event(
+                        "provider_selected",
+                        provider_id=used.id,
+                        provider_name=used.name,
+                        model=active_model,
+                        reason=(
+                            "provider_fallback"
+                            if used.id != previous_provider.id
+                            else "model_fallback"
+                        ),
+                    )
+                )
             return response
 
-        try:
-            result = await run_agent(
+        agent_task = asyncio.create_task(
+            run_agent(
                 model_call,
                 request,
                 agent_tools,
                 limits=limits,
                 callbacks=callbacks,
             )
+        )
+        try:
+            while True:
+                state, value = await wait_for_progress(agent_task)
+                if state == "event":
+                    yield value
+                    continue
+                if state == "done":
+                    result = value
+                    break
+                yield next_event(
+                    "heartbeat",
+                    provider_id=active_provider.id,
+                    provider_name=active_provider.name,
+                    model=active_model,
+                )
+        except ProviderSwitchRequired as exc:
+            log.warning(
+                "system agent provider switch confirmation required session=%s provider=%s",
+                session.id,
+                exc.provider_name,
+            )
+            yield next_event(
+                "error",
+                code="AGENT_PROVIDER_SWITCH_REQUIRED",
+                message=str(exc)[:500],
+                provider_switch={
+                    "from_provider_name": exc.provider_name,
+                    "candidates": exc.candidates,
+                },
+                tool_approval=(
+                    tool_approval
+                    if channel == "web" and bool(cfg.get("require_tool_approval"))
+                    else None
+                ),
+            )
+            yield next_event("done", ok=False)
+            return
         except Exception as exc:  # noqa: BLE001
             log.exception("system agent run failed session=%s", session.id)
             yield next_event(
@@ -258,8 +428,15 @@ class SystemAgentRuntime:
             )
             yield next_event("done", ok=False)
             return
+        finally:
+            if not agent_task.done():
+                agent_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await agent_task
 
-        for ev in event_queue:
+        while not progress_queue.empty():
+            yield progress_queue.get_nowait()
+        for ev in deferred_events:
             yield ev
 
         assistant_text = result.text or ""
@@ -311,6 +488,8 @@ class SystemAgentRuntime:
         memory_state: dict[str, Any] | None,
         all_tool_specs: list[Any],
         account_id: int | None,
+        fallback_provider_id: int | None = None,
+        progress_callback: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None,
     ) -> ToolRoute:
         domains = available_domains(all_tool_specs)
         local = route_locally(user_text, available=domains, memory_state=memory_state)
@@ -340,10 +519,19 @@ class SystemAgentRuntime:
                         ),
                     ),
                     max_output_tokens=160,
-                    metadata={"model_pinned": False},
+                    metadata={
+                        "model_pinned": False,
+                        "confirm_provider_switch": True,
+                        "allowed_cross_provider_ids": (
+                            [fallback_provider_id] if fallback_provider_id is not None else []
+                        ),
+                        "max_retries_per_model": 5,
+                        "retry_delay_seconds": 3.0,
+                    },
                 ),
                 account_id=account_id,
                 source="system_agent_router",
+                progress_callback=progress_callback,
             )
             parsed = parse_model_route(response.text, available=domains)
             if parsed is not None:
