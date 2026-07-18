@@ -20,6 +20,16 @@
 
 ## [Unreleased]
 
+## [0.70.2] — 2026-07-19 · patch（补丁版本） · Agent 协议兼容与 Provider 故障恢复
+
+### Fixed
+- 修复 System Agent 使用 OpenAI Responses、Chat Completions 或 Anthropic 工具调用时，内部带点号的工具名被上游协议拒绝的问题；现在仅在协议边界使用稳定的合法别名，内部审批、日志和执行仍保留原工具名。
+- 修复 `grok_cli` 已在应用层开放但未加入 PostgreSQL 客户端身份检查约束，导致创建 Provider 在数据库 flush 阶段失败的问题。
+- 区分“工具调用能力不支持”和“能力探测时暂时不可用”：不支持的模型继续排除，临时网络故障的 fallback Provider 保留为待确认切换候选。
+
+### Tests
+- 增加工具名双向映射、Responses 历史工具调用、`grok_cli` 迁移和暂时不可用 fallback 候选的回归测试。
+
 ## [0.70.1] — 2026-07-19 · patch（补丁版本） · 管理 Bot 命令表格
 
 ### Changed

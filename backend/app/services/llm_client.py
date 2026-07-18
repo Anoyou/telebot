@@ -19,7 +19,7 @@ import base64
 import json
 import re
 from abc import ABC, abstractmethod
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
@@ -57,9 +57,12 @@ from .llm_protocol import (
     ToolResult,
     ToolSpec,
     capabilities_for_api_format,
+    from_wire_tool_name,
     normalize_base_url,
     provider_endpoint,
     stop_reason_from_provider,
+    to_wire_tool_name,
+    wire_tool_name_map,
 )
 
 # 默认调用超时；prompt 较长 / TG 端用户体验角度都不宜过长
@@ -293,12 +296,15 @@ def _tool_result_text(result: ToolResult) -> str:
     return json.dumps(result.content, ensure_ascii=False, separators=(",", ":"))
 
 
-def _tool_specs_openai(tools: tuple[ToolSpec, ...]) -> list[dict[str, Any]]:
+def _tool_specs_openai(
+    tools: tuple[ToolSpec, ...],
+    tool_names: Mapping[str, str],
+) -> list[dict[str, Any]]:
     return [
         {
             "type": "function",
             "function": {
-                "name": tool.name,
+                "name": to_wire_tool_name(tool.name, tool_names),
                 "description": tool.description,
                 "parameters": tool.parameters,
                 "strict": tool.strict,
@@ -308,21 +314,33 @@ def _tool_specs_openai(tools: tuple[ToolSpec, ...]) -> list[dict[str, Any]]:
     ]
 
 
-def _openai_tool_choice(choice: ToolChoiceMode | NamedToolChoice) -> object:
+def _openai_tool_choice(
+    choice: ToolChoiceMode | NamedToolChoice,
+    tool_names: Mapping[str, str],
+) -> object:
     if isinstance(choice, NamedToolChoice):
-        return {"type": "function", "function": {"name": choice.name}}
+        return {
+            "type": "function",
+            "function": {"name": to_wire_tool_name(choice.name, tool_names)},
+        }
     return choice.value
 
 
-def _responses_tool_choice(choice: ToolChoiceMode | NamedToolChoice) -> object:
+def _responses_tool_choice(
+    choice: ToolChoiceMode | NamedToolChoice,
+    tool_names: Mapping[str, str],
+) -> object:
     if isinstance(choice, NamedToolChoice):
-        return {"type": "function", "name": choice.name}
+        return {"type": "function", "name": to_wire_tool_name(choice.name, tool_names)}
     return choice.value
 
 
-def _anthropic_tool_choice(choice: ToolChoiceMode | NamedToolChoice) -> object:
+def _anthropic_tool_choice(
+    choice: ToolChoiceMode | NamedToolChoice,
+    tool_names: Mapping[str, str],
+) -> object:
     if isinstance(choice, NamedToolChoice):
-        return {"type": "tool", "name": choice.name}
+        return {"type": "tool", "name": to_wire_tool_name(choice.name, tool_names)}
     if choice is ToolChoiceMode.REQUIRED:
         return {"type": "any"}
     return {"type": choice.value}
@@ -340,7 +358,10 @@ def _openai_content_text(value: object) -> str:
     ).strip()
 
 
-def _chat_messages(messages: tuple[ModelMessage, ...]) -> list[dict[str, Any]]:
+def _chat_messages(
+    messages: tuple[ModelMessage, ...],
+    tool_names: Mapping[str, str],
+) -> list[dict[str, Any]]:
     output: list[dict[str, Any]] = []
     for message in messages:
         if message.role is MessageRole.TOOL:
@@ -349,7 +370,7 @@ def _chat_messages(messages: tuple[ModelMessage, ...]) -> list[dict[str, Any]]:
                     {
                         "role": "tool",
                         "tool_call_id": result.call_id,
-                        "name": result.name,
+                        "name": to_wire_tool_name(result.name, tool_names),
                         "content": _tool_result_text(result),
                     }
                 )
@@ -376,7 +397,7 @@ def _chat_messages(messages: tuple[ModelMessage, ...]) -> list[dict[str, Any]]:
                     "id": call.id,
                     "type": "function",
                     "function": {
-                        "name": call.name,
+                        "name": to_wire_tool_name(call.name, tool_names),
                         "arguments": json.dumps(call.arguments, ensure_ascii=False),
                     },
                 }
@@ -386,7 +407,10 @@ def _chat_messages(messages: tuple[ModelMessage, ...]) -> list[dict[str, Any]]:
     return output
 
 
-def _responses_input(messages: tuple[ModelMessage, ...]) -> list[dict[str, Any]]:
+def _responses_input(
+    messages: tuple[ModelMessage, ...],
+    tool_names: Mapping[str, str],
+) -> list[dict[str, Any]]:
     output: list[dict[str, Any]] = []
     for message in messages:
         if message.role is MessageRole.SYSTEM:
@@ -426,7 +450,7 @@ def _responses_input(messages: tuple[ModelMessage, ...]) -> list[dict[str, Any]]
             {
                 "type": "function_call",
                 "call_id": call.id,
-                "name": call.name,
+                "name": to_wire_tool_name(call.name, tool_names),
                 "arguments": json.dumps(call.arguments, ensure_ascii=False),
             }
             for call in message.tool_calls
@@ -442,7 +466,10 @@ def _system_instructions(messages: tuple[ModelMessage, ...]) -> str:
     )
 
 
-def _anthropic_messages(messages: tuple[ModelMessage, ...]) -> list[dict[str, Any]]:
+def _anthropic_messages(
+    messages: tuple[ModelMessage, ...],
+    tool_names: Mapping[str, str],
+) -> list[dict[str, Any]]:
     output: list[dict[str, Any]] = []
     for message in messages:
         if message.role is MessageRole.SYSTEM:
@@ -485,7 +512,7 @@ def _anthropic_messages(messages: tuple[ModelMessage, ...]) -> list[dict[str, An
                 {
                     "type": "tool_use",
                     "id": call.id,
-                    "name": call.name,
+                    "name": to_wire_tool_name(call.name, tool_names),
                     "input": call.arguments,
                 }
                 for call in message.tool_calls
@@ -497,6 +524,18 @@ def _anthropic_messages(messages: tuple[ModelMessage, ...]) -> list[dict[str, An
             }
         )
     return output
+
+
+def _request_tool_name_map(request: ModelRequest) -> dict[str, str]:
+    """Keep historical calls wire-compatible even on the no-tools final turn."""
+
+    names = [tool.name for tool in request.tools]
+    if isinstance(request.tool_choice, NamedToolChoice):
+        names.append(request.tool_choice.name)
+    for message in request.messages:
+        names.extend(call.name for call in message.tool_calls)
+        names.extend(result.name for result in message.tool_results)
+    return wire_tool_name_map(names)
 
 
 def _sniff_image_mime(data: bytes) -> str:
@@ -1296,18 +1335,19 @@ class OpenAIClient(LLMClient):
             request,
             LLM_API_FORMAT_CHAT_COMPLETIONS,
         )
+        tool_names = _request_tool_name_map(request)
         url = provider_endpoint(self._base_url, LLM_API_FORMAT_CHAT_COMPLETIONS)
         headers = _llm_headers(identity=self._identity)
         if self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"
         body: dict[str, Any] = {
             "model": request.model or self._model,
-            "messages": _chat_messages(request.messages),
+            "messages": _chat_messages(request.messages, tool_names),
             "max_tokens": request.max_output_tokens,
         }
         if request.tools:
-            body["tools"] = _tool_specs_openai(request.tools)
-            body["tool_choice"] = _openai_tool_choice(request.tool_choice)
+            body["tools"] = _tool_specs_openai(request.tools, tool_names)
+            body["tool_choice"] = _openai_tool_choice(request.tool_choice, tool_names)
         if request.temperature is not None:
             body["temperature"] = _normalize_temperature(request.temperature)
         if request.reasoning_effort:
@@ -1350,7 +1390,9 @@ class OpenAIClient(LLMClient):
         tool_calls = tuple(
             ToolCall(
                 id=str(item.get("id") or ""),
-                name=str((item.get("function") or {}).get("name") or ""),
+                name=from_wire_tool_name(
+                    str((item.get("function") or {}).get("name") or ""), tool_names
+                ),
                 arguments=_parse_tool_arguments((item.get("function") or {}).get("arguments")),
             )
             for item in message.get("tool_calls") or []
@@ -1771,24 +1813,25 @@ class AnthropicClient(LLMClient):
             request,
             LLM_API_FORMAT_ANTHROPIC_MESSAGES,
         )
+        tool_names = _request_tool_name_map(request)
         url = provider_endpoint(self._base_url, LLM_API_FORMAT_ANTHROPIC_MESSAGES)
         body: dict[str, Any] = {
             "model": request.model or self._model,
             "max_tokens": request.max_output_tokens,
             "system": _system_instructions(request.messages),
-            "messages": _anthropic_messages(request.messages),
+            "messages": _anthropic_messages(request.messages, tool_names),
             "stream": False,
         }
         if request.tools:
             body["tools"] = [
                 {
-                    "name": tool.name,
+                    "name": to_wire_tool_name(tool.name, tool_names),
                     "description": tool.description,
                     "input_schema": tool.parameters,
                 }
                 for tool in request.tools
             ]
-            body["tool_choice"] = _anthropic_tool_choice(request.tool_choice)
+            body["tool_choice"] = _anthropic_tool_choice(request.tool_choice, tool_names)
         if request.temperature is not None:
             body["temperature"] = min(1.0, _normalize_temperature(request.temperature) or 0.0)
         self._apply_reasoning_effort(body, request.reasoning_effort)
@@ -1833,7 +1876,7 @@ class AnthropicClient(LLMClient):
                     tool_calls.append(
                         ToolCall(
                             id=str(item.get("id") or ""),
-                            name=name,
+                            name=from_wire_tool_name(name, tool_names),
                             arguments=_parse_tool_arguments(item.get("input")),
                         )
                     )
@@ -2214,6 +2257,7 @@ class ResponsesClient(LLMClient):
             request,
             LLM_API_FORMAT_RESPONSES,
         )
+        tool_names = _request_tool_name_map(request)
         url = provider_endpoint(self._base_url, LLM_API_FORMAT_RESPONSES)
         headers = _llm_headers(identity=self._identity, accept="application/json")
         if self._api_key:
@@ -2221,7 +2265,7 @@ class ResponsesClient(LLMClient):
         body: dict[str, Any] = {
             "model": request.model or self._model,
             "instructions": _system_instructions(request.messages),
-            "input": _responses_input(request.messages),
+            "input": _responses_input(request.messages, tool_names),
             "max_output_tokens": request.max_output_tokens,
             "stream": False,
             "store": False,
@@ -2230,14 +2274,14 @@ class ResponsesClient(LLMClient):
             body["tools"] = [
                 {
                     "type": "function",
-                    "name": tool.name,
+                    "name": to_wire_tool_name(tool.name, tool_names),
                     "description": tool.description,
                     "parameters": tool.parameters,
                     "strict": tool.strict,
                 }
                 for tool in request.tools
             ]
-            body["tool_choice"] = _responses_tool_choice(request.tool_choice)
+            body["tool_choice"] = _responses_tool_choice(request.tool_choice, tool_names)
         if request.temperature is not None:
             body["temperature"] = _normalize_temperature(request.temperature)
         if request.reasoning_effort:
@@ -2288,7 +2332,7 @@ class ResponsesClient(LLMClient):
                     tool_calls.append(
                         ToolCall(
                             id=str(item.get("call_id") or item.get("id") or ""),
-                            name=name,
+                            name=from_wire_tool_name(name, tool_names),
                             arguments=_parse_tool_arguments(item.get("arguments")),
                         )
                     )

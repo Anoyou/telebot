@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+from dataclasses import replace
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -14,6 +16,7 @@ from app.services.llm_protocol import (
     ToolCall,
     ToolResult,
     ToolSpec,
+    wire_tool_name,
 )
 
 
@@ -29,7 +32,7 @@ class _Response:
         return self.payload
 
 
-def _request() -> ModelRequest:
+def _request(tool_name: str = "lookup") -> ModelRequest:
     return ModelRequest(
         model="model",
         messages=(
@@ -37,26 +40,28 @@ def _request() -> ModelRequest:
             ModelMessage.text(MessageRole.USER, "question"),
             ModelMessage(
                 role=MessageRole.ASSISTANT,
-                tool_calls=(ToolCall("call-1", "lookup", {"id": 1}),),
+                tool_calls=(ToolCall("call-1", tool_name, {"id": 1}),),
             ),
             ModelMessage(
                 role=MessageRole.TOOL,
-                tool_results=(ToolResult("call-1", "lookup", {"value": "one"}),),
+                tool_results=(ToolResult("call-1", tool_name, {"value": "one"}),),
             ),
         ),
         tools=(
             ToolSpec(
-                "lookup",
+                tool_name,
                 "Lookup",
                 {"type": "object", "properties": {"id": {"type": "integer"}}},
             ),
         ),
-        tool_choice=NamedToolChoice("lookup"),
+        tool_choice=NamedToolChoice(tool_name),
     )
 
 
 @pytest.mark.asyncio
 async def test_chat_adapter_round_trips_tool_calls() -> None:
+    internal_name = "interaction.list_rules"
+    wire_name = wire_tool_name(internal_name)
     fake = AsyncMock()
     fake.__aenter__.return_value = fake
     fake.post = AsyncMock(
@@ -71,7 +76,7 @@ async def test_chat_adapter_round_trips_tool_calls() -> None:
                             "tool_calls": [
                                 {
                                     "id": "call-2",
-                                    "function": {"name": "lookup", "arguments": '{"id":2}'},
+                                    "function": {"name": wire_name, "arguments": '{"id":2}'},
                                 }
                             ],
                         },
@@ -82,12 +87,19 @@ async def test_chat_adapter_round_trips_tool_calls() -> None:
         )
     )
     with patch("app.services.llm_client.httpx.AsyncClient", return_value=fake):
-        response = await OpenAIClient("sk", "https://api.example/v1/chat/completions", "model").invoke(_request())
+        response = await OpenAIClient("sk", "https://api.example/v1/chat/completions", "model").invoke(
+            _request(internal_name)
+        )
 
     body = fake.post.await_args.kwargs["json"]
     assert fake.post.await_args.args[0] == "https://api.example/v1/chat/completions"
     assert body["messages"][-1]["role"] == "tool"
-    assert body["tool_choice"]["function"]["name"] == "lookup"
+    assert body["tools"][0]["function"]["name"] == wire_name
+    assert re.fullmatch(r"[a-zA-Z0-9_-]+", wire_name)
+    assert body["tool_choice"]["function"]["name"] == wire_name
+    assert body["messages"][-2]["tool_calls"][0]["function"]["name"] == wire_name
+    assert body["messages"][-1]["name"] == wire_name
+    assert response.tool_calls[0].name == internal_name
     assert response.tool_calls[0].arguments == {"id": 2}
     assert response.stop_reason is StopReason.TOOL_CALLS
 
@@ -217,6 +229,8 @@ async def test_anthropic_complete_preserves_explicit_empty_refusal() -> None:
 
 @pytest.mark.asyncio
 async def test_responses_adapter_round_trips_function_call_output() -> None:
+    internal_name = "interaction.list_rules"
+    wire_name = wire_tool_name(internal_name)
     fake = AsyncMock()
     fake.__aenter__.return_value = fake
     fake.post = AsyncMock(
@@ -228,7 +242,7 @@ async def test_responses_adapter_round_trips_function_call_output() -> None:
                     {
                         "type": "function_call",
                         "call_id": "call-2",
-                        "name": "lookup",
+                        "name": wire_name,
                         "arguments": '{"id":2}',
                     }
                 ],
@@ -237,12 +251,54 @@ async def test_responses_adapter_round_trips_function_call_output() -> None:
         )
     )
     with patch("app.services.llm_client.httpx.AsyncClient", return_value=fake):
-        response = await ResponsesClient("sk", "https://api.example/v1/responses", "model").invoke(_request())
+        response = await ResponsesClient("sk", "https://api.example/v1/responses", "model").invoke(
+            _request(internal_name)
+        )
 
     body = fake.post.await_args.kwargs["json"]
     assert any(item.get("type") == "function_call_output" for item in body["input"])
+    assert body["tools"][0]["name"] == wire_name
+    assert re.fullmatch(r"[a-zA-Z0-9_-]+", wire_name)
+    assert body["tool_choice"]["name"] == wire_name
+    assert any(
+        item.get("type") == "function_call" and item.get("name") == wire_name
+        for item in body["input"]
+    )
     assert body["store"] is False
     assert response.tool_calls[0].id == "call-2"
+    assert response.tool_calls[0].name == internal_name
+
+
+@pytest.mark.asyncio
+async def test_responses_adapter_keeps_dotted_history_safe_on_no_tools_turn() -> None:
+    internal_name = "interaction.list_rules"
+    wire_name = wire_tool_name(internal_name)
+    fake = AsyncMock()
+    fake.__aenter__.return_value = fake
+    fake.post = AsyncMock(
+        return_value=_Response(
+            {
+                "model": "model",
+                "status": "completed",
+                "output": [{"type": "message", "content": [{"type": "output_text", "text": "done"}]}],
+                "usage": {"input_tokens": 4, "output_tokens": 2},
+            }
+        )
+    )
+    request = replace(_request(internal_name), tools=())
+
+    with patch("app.services.llm_client.httpx.AsyncClient", return_value=fake):
+        response = await ResponsesClient("sk", "https://api.example/v1/responses", "model").invoke(
+            request
+        )
+
+    body = fake.post.await_args.kwargs["json"]
+    assert "tools" not in body
+    assert any(
+        item.get("type") == "function_call" and item.get("name") == wire_name
+        for item in body["input"]
+    )
+    assert response.text == "done"
 
 
 @pytest.mark.asyncio
@@ -275,6 +331,8 @@ async def test_responses_adapter_preserves_explicit_refusal_as_legal_empty() -> 
 
 @pytest.mark.asyncio
 async def test_anthropic_adapter_uses_standard_headers_and_tool_blocks() -> None:
+    internal_name = "interaction.list_rules"
+    wire_name = wire_tool_name(internal_name)
     fake = AsyncMock()
     fake.__aenter__.return_value = fake
     fake.post = AsyncMock(
@@ -283,7 +341,7 @@ async def test_anthropic_adapter_uses_standard_headers_and_tool_blocks() -> None
                 "model": "claude",
                 "content": [
                     {"type": "text", "text": "checking"},
-                    {"type": "tool_use", "id": "call-2", "name": "lookup", "input": {"id": 2}},
+                    {"type": "tool_use", "id": "call-2", "name": wire_name, "input": {"id": 2}},
                 ],
                 "stop_reason": "tool_use",
                 "usage": {"input_tokens": 4, "output_tokens": 2},
@@ -291,12 +349,17 @@ async def test_anthropic_adapter_uses_standard_headers_and_tool_blocks() -> None
         )
     )
     with patch("app.services.llm_client.httpx.AsyncClient", return_value=fake):
-        response = await AnthropicClient("sk", "https://api.anthropic.com/v1/messages", "claude").invoke(_request())
+        response = await AnthropicClient("sk", "https://api.anthropic.com/v1/messages", "claude").invoke(
+            _request(internal_name)
+        )
 
     body = fake.post.await_args.kwargs["json"]
     headers = fake.post.await_args.kwargs["headers"]
     assert "anthropic-beta" not in headers
     assert body["messages"][-1]["content"][0]["type"] == "tool_result"
-    assert body["tool_choice"] == {"type": "tool", "name": "lookup"}
+    assert body["tools"][0]["name"] == wire_name
+    assert body["tool_choice"] == {"type": "tool", "name": wire_name}
+    assert body["messages"][-2]["content"][0]["name"] == wire_name
+    assert response.tool_calls[0].name == internal_name
     assert response.text == "checking"
     assert response.stop_reason is StopReason.TOOL_CALLS

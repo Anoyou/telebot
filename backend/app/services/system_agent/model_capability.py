@@ -164,6 +164,30 @@ def _dto_with_verified_models(
     return replace(provider, models=models)
 
 
+def _dto_with_unavailable_models(
+    provider: LLMProviderDTO,
+    unavailable_models: list[str],
+) -> LLMProviderDTO:
+    """保留暂时不可探测的 fallback 模型，但不把它伪装成已验证支持。
+
+    ``supports_tools=False`` 的显式配置仍会在 ``tools_models_for_dto`` 入口被
+    排除；缺省能力沿用协议级声明。该 DTO 只会作为跨 Provider 候选，真正调用前
+    仍受用户切换确认约束。
+    """
+
+    existing = {
+        str(item.get("id") or "").strip(): dict(item)
+        for item in provider.models
+        if isinstance(item, dict) and str(item.get("id") or "").strip()
+    }
+    models: list[dict[str, Any]] = []
+    for model in unavailable_models:
+        metadata = existing.get(model, {"id": model})
+        metadata["enabled"] = True
+        models.append(metadata)
+    return replace(provider, models=models)
+
+
 async def verify_resolved_agent_providers(
     db: AsyncSession,
     resolved: ResolvedAgentProviders,
@@ -230,6 +254,22 @@ async def verify_resolved_agent_providers(
             if results.get((provider.id, model), CapabilityProbeResult("unavailable", now)).supported
         ]
         if not models:
+            # fallback 的临时网络故障不等于不支持 tools。保留为待用户确认的
+            # Provider 切换候选；primary 仍必须有至少一个已验证模型。
+            unavailable_models = [
+                model
+                for model in tools_models_for_dto(provider, explicit)
+                if results.get(
+                    (provider.id, model),
+                    CapabilityProbeResult("unavailable", now),
+                ).status
+                == "unavailable"
+            ]
+            if provider.id != resolved.primary.id and unavailable_models:
+                verified[provider.id] = _dto_with_unavailable_models(
+                    provider,
+                    unavailable_models,
+                )
             continue
         verified[provider.id] = _dto_with_verified_models(provider, models)
         if provider.id == resolved.primary.id:

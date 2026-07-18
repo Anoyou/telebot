@@ -18,9 +18,12 @@ from app.services.llm_protocol import (
     build_endpoint,
     capabilities_for,
     capabilities_for_api_format,
+    from_wire_tool_name,
     normalize_base_url,
     provider_endpoint,
     stop_reason_from_provider,
+    wire_tool_name,
+    wire_tool_name_map,
 )
 
 
@@ -130,6 +133,15 @@ def test_stop_reason_normalization() -> None:
     assert stop_reason_from_provider("length") is StopReason.MAX_TOKENS
     assert stop_reason_from_provider("tool_use") is StopReason.TOOL_CALLS
     assert stop_reason_from_provider("incomplete") is StopReason.FAILED
+
+
+def test_wire_tool_names_preserve_valid_names_and_round_trip_dotted_names() -> None:
+    mapping = wire_tool_name_map(["lookup", "interaction.list_rules"])
+
+    assert mapping["lookup"] == "lookup"
+    assert mapping["interaction.list_rules"] == wire_tool_name("interaction.list_rules")
+    assert "." not in mapping["interaction.list_rules"]
+    assert from_wire_tool_name(mapping["interaction.list_rules"], mapping) == "interaction.list_rules"
 
 
 def test_model_metadata_narrows_protocol_capabilities() -> None:

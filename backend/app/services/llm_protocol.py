@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
@@ -93,6 +95,51 @@ class ToolSpec:
     description: str
     parameters: dict[str, Any]
     strict: bool = True
+
+
+# This conservative subset is accepted by all native tool protocols we support.
+# Internal registries can keep dotted names without inheriting wire constraints.
+_WIRE_TOOL_NAME_RE = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
+_WIRE_TOOL_PREFIX = "telepilot_"
+
+
+def wire_tool_name(name: str) -> str:
+    """Return a deterministic protocol-safe alias for an internal tool name."""
+
+    normalized = str(name).strip()
+    if _WIRE_TOOL_NAME_RE.fullmatch(normalized):
+        return normalized
+    digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:32]
+    return f"{_WIRE_TOOL_PREFIX}{digest}"
+
+
+def wire_tool_name_map(names: Iterable[str]) -> dict[str, str]:
+    """Build an internal-to-wire map and reject the practically impossible collision."""
+
+    mapping: dict[str, str] = {}
+    used: dict[str, str] = {}
+    for name in names:
+        internal = str(name).strip()
+        if not internal or internal in mapping:
+            continue
+        wire = wire_tool_name(internal)
+        previous = used.get(wire)
+        if previous is not None and previous != internal:
+            raise ValueError(f"tool wire name collision: {previous!r} and {internal!r}")
+        mapping[internal] = wire
+        used[wire] = internal
+    return mapping
+
+
+def to_wire_tool_name(name: str, mapping: Mapping[str, str]) -> str:
+    return mapping.get(name, name)
+
+
+def from_wire_tool_name(name: str, mapping: Mapping[str, str]) -> str:
+    for internal, wire in mapping.items():
+        if wire == name:
+            return internal
+    return name
 
 
 class ToolChoiceMode(StrEnum):
@@ -393,6 +440,10 @@ __all__ = [
     "provider_endpoint",
     "provider_models_endpoint",
     "stop_reason_from_provider",
+    "from_wire_tool_name",
+    "to_wire_tool_name",
+    "wire_tool_name",
+    "wire_tool_name_map",
 ]
 
 

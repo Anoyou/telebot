@@ -152,3 +152,58 @@ async def test_verify_rejects_unsupported_primary(setting_db, monkeypatch) -> No
     async with setting_db() as db:
         result = await model_capability.verify_resolved_agent_providers(db, resolved)
     assert result == "Provider「provider-1」的候选模型不支持 Agent 工具调用。"
+
+
+@pytest.mark.asyncio
+async def test_verify_keeps_temporarily_unavailable_fallback_candidate(
+    setting_db,
+    monkeypatch,
+) -> None:
+    primary = _provider(1, models=["primary"])
+    fallback = _provider(2, models=["fallback"])
+    fallback.models[0]["supports_tools"] = None
+    resolved = ResolvedAgentProviders(
+        primary=primary,
+        model="primary",
+        providers={1: primary, 2: fallback},
+    )
+
+    async def probe(provider, _model):  # noqa: ANN001
+        return model_capability.CapabilityProbeResult(
+            "supported" if provider.id == 1 else "unavailable",
+            datetime.now(UTC),
+            "LLMError" if provider.id == 2 else None,
+        )
+
+    monkeypatch.setattr(model_capability, "probe_model_tool_capability", probe)
+    async with setting_db() as db:
+        result = await model_capability.verify_resolved_agent_providers(db, resolved)
+
+    assert not isinstance(result, str)
+    assert result.primary.id == 1
+    assert result.providers[2].enabled_model_ids() == ["fallback"]
+    assert result.providers[2].models[0].get("supports_tools") is None
+
+
+@pytest.mark.asyncio
+async def test_verify_still_excludes_unsupported_fallback(setting_db, monkeypatch) -> None:
+    primary = _provider(1, models=["primary"])
+    fallback = _provider(2, models=["fallback"])
+    resolved = ResolvedAgentProviders(
+        primary=primary,
+        model="primary",
+        providers={1: primary, 2: fallback},
+    )
+
+    async def probe(provider, _model):  # noqa: ANN001
+        return model_capability.CapabilityProbeResult(
+            "supported" if provider.id == 1 else "unsupported",
+            datetime.now(UTC),
+        )
+
+    monkeypatch.setattr(model_capability, "probe_model_tool_capability", probe)
+    async with setting_db() as db:
+        result = await model_capability.verify_resolved_agent_providers(db, resolved)
+
+    assert not isinstance(result, str)
+    assert set(result.providers) == {1}

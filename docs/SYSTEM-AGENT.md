@@ -45,7 +45,7 @@
 
 - 默认关闭；需管理员显式启用。
 - 必须选择支持 tools 的固定 Provider/模型。声明只用于候选预筛选；模型首次进入 Agent 前还会接受一次真实的强制工具调用探测，只有返回指定工具及正确参数才会放行。
-- 工具能力探测结果保存在 `SystemSetting.system_agent_model_capability_cache`：支持结果缓存 7 天，明确不支持缓存 1 天，429/5xx/网络故障只按暂时不可用缓存 5 分钟，避免临时故障永久排除模型。
+- 工具能力探测结果保存在 `SystemSetting.system_agent_model_capability_cache`：支持结果缓存 7 天，明确不支持缓存 1 天，429/5xx/网络故障只按暂时不可用缓存 5 分钟。明确不支持的 fallback 会被排除；暂时不可用的 fallback 仍保留为待确认候选，避免一次网络故障把它永久从切换链路中移除。
 - 固定 Provider 作为首选；同一 Provider 内会先按首选模型、默认模型、其它已启用 Tools 模型静默 fallback。
 - 同一模型遇到超时、网络错误、429 或 5xx 后会固定间隔 3 秒重试 5 次；5 次均失败后才尝试同 Provider 的下一 Tools 模型。Web 可用输入框右侧的停止按钮中断当前请求和重试等待。
 - 跨 Provider 只使用 `fallback_provider_ids` 白名单中拥有 API Key 和 Tools 模型的候选；当前 Provider 内模型均失败时，Web 会先询问是否改用下一个候选，确认后才重试。
@@ -68,6 +68,7 @@ Web /assistant → Durable Run / 可续接事件 ──┐
 硬规则：
 
 - 工具只调用允许列表内的现有 service；禁止万能 SQL/Shell/HTTP/文件工具。插件与系统运维只能走明确注册的危险工具并二次确认。
+- 工具注册表使用可读的内部名称（如 `interaction.list_rules`）；Provider 适配器在协议边界映射为只含字母、数字、下划线或连字符的稳定别名，并在模型返回后回译。Action、审批、日志和权限判断从不使用协议别名。
 - handler 禁止自建 `AsyncSessionLocal`、禁止 `commit/rollback`。
 - 业务 service 不依赖 System Agent。
 - 查询必须走工具，禁止根据聊天记忆编造状态。
@@ -83,6 +84,8 @@ System Agent 使用三层上下文，避免每轮回放全部原始消息：
 3. **结构化工作记忆**：`memory_state` 保存最近工具领域、用户目标、结果、工具摘要与账号上下文，用于“把它停掉”“继续刚才那个”等指代请求。
 
 失败、超时和中断轮次不会写入摘要，也不会进入下一轮模型历史。服务端只在 `memory_state.failed_turn` 保存打码后的失败目标、消息 ID 与错误码，使“重试 / 再试一次 / 继续刚才的”能确定性复用原失败消息；失败的模型输出和工具输出仍不进入上下文。清空会话消息时同步清空摘要和结构化记忆。
+
+`system_agent_run_event` 是一次运行的持久事实记录；滚动摘要、短期历史和结构化工作记忆只是给下一次推理使用的上下文投影。裁剪或压缩上下文不会改写已经落库的模型重试、工具调用、Action 和终止事件，刷新后仍按事件游标恢复 UI。
 
 ### 工具渐进披露
 
