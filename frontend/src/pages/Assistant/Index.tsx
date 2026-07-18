@@ -17,6 +17,7 @@ import {
   streamSystemAgentMessage,
   type SystemAgentAction,
   type SystemAgentMessage,
+  type SystemAgentSession,
   type SystemAgentStreamEvent,
 } from "@/api/systemAgent";
 import { listLLMProviders } from "@/api/commands";
@@ -31,6 +32,7 @@ import { Select } from "@/components/ui/select";
 import { Spinner } from "@/components/ui/misc";
 import { getErrMsg } from "@/lib/api";
 import { systemAgentToolLabel } from "@/lib/systemAgentLabels";
+import { removeSessionAndChooseNext } from "./sessionState";
 
 function toolsModels(provider?: LLMProviderOut): string[] {
   if (!provider) return [];
@@ -123,9 +125,17 @@ export function AssistantIndex() {
   const deleteMut = useMutation({
     mutationFn: (id: string) => deleteSystemAgentSession(id),
     onSuccess: (_data, id) => {
+      const sessionQueryKey = ["system-agent", "sessions"];
+      const currentSessions = qc.getQueryData<SystemAgentSession[]>(sessionQueryKey) || [];
+      const nextState = removeSessionAndChooseNext(currentSessions, activeId, id);
+      qc.setQueryData(sessionQueryKey, nextState.sessions);
+      void qc.removeQueries({ queryKey: ["system-agent", "messages", id] });
+      void qc.removeQueries({ queryKey: ["system-agent", "actions", id] });
       void qc.invalidateQueries({ queryKey: ["system-agent", "sessions"] });
       if (activeId === id) {
-        setActiveId(null);
+        setActiveId(nextState.activeId);
+        const nextSession = nextState.sessions.find((session) => session.id === nextState.activeId);
+        setAccountId(nextSession?.account_id ?? "");
         setLive([]);
       }
       toast.success("会话已删除");
@@ -135,7 +145,8 @@ export function AssistantIndex() {
 
   const saveConfigMut = useMutation({
     mutationFn: patchSystemAgentConfig,
-    onSuccess: () => {
+    onSuccess: (config) => {
+      qc.setQueryData(["system-agent", "config"], config);
       void qc.invalidateQueries({ queryKey: ["system-agent"] });
       toast.success("助手配置已保存");
     },
@@ -181,6 +192,28 @@ export function AssistantIndex() {
               configuredProvider.default_model,
           }
         : null);
+
+  const selectableProviders = useMemo(
+    () => (providersQ.data || []).filter((provider) => provider.has_api_key && toolsModels(provider).length > 0),
+    [providersQ.data],
+  );
+  const selectorDisabled = streaming || saveConfigMut.isPending || providersQ.isLoading;
+  const configuredModel = configQ.data?.model || configuredToolsModels[0] || "";
+  const actualSelectionDiffers = Boolean(
+    displayedSelection &&
+      (displayedSelection.providerName !== configuredProvider?.name ||
+        displayedSelection.model !== configuredModel),
+  );
+
+  const selectProvider = (providerId: string) => {
+    const provider = (providersQ.data || []).find((item) => item.id === Number(providerId));
+    if (!provider) return;
+    saveConfigMut.mutate({
+      provider_id: provider.id,
+      model: toolsModels(provider)[0] || null,
+      enabled: true,
+    });
+  };
 
   const ensureSession = async (): Promise<string> => {
     if (activeId) return activeId;
@@ -478,22 +511,58 @@ export function AssistantIndex() {
             {configQ.isLoading ? "加载中" : enabled ? (streaming ? "调用中" : "已启用") : "未启用"}
           </span>
         </span>
-        <span className="inline-flex min-w-0 items-center gap-1.5">
+        <label className="inline-flex min-w-0 items-center gap-1.5">
           <Server className="h-3.5 w-3.5 shrink-0" />
-          Provider：
-          <span className="max-w-48 truncate text-foreground">
-            {displayedSelection?.providerName || "未配置"}
-          </span>
-        </span>
-        <span className="inline-flex min-w-0 items-center gap-1.5">
+          <span className="shrink-0 whitespace-nowrap">Provider</span>
+          <Select
+            aria-label="切换 Agent Provider"
+            value={configQ.data?.provider_id == null ? "" : String(configQ.data.provider_id)}
+            disabled={selectorDisabled}
+            onChange={(event) => selectProvider(event.target.value)}
+            className="h-8 w-44"
+          >
+            <option value="">未配置</option>
+            {(providersQ.data || []).map((provider) => {
+              const eligible = selectableProviders.some((item) => item.id === provider.id);
+              const unavailableLabel = !provider.has_api_key
+                ? "（缺少 Key）"
+                : "（无可用 Tools 模型）";
+              return (
+                <option key={provider.id} value={provider.id} disabled={!eligible}>
+                  {provider.name}{!eligible ? unavailableLabel : ""}
+                </option>
+              );
+            })}
+          </Select>
+        </label>
+        <label className="inline-flex min-w-0 items-center gap-1.5">
           <Cpu className="h-3.5 w-3.5 shrink-0" />
-          模型：
-          <span className="max-w-64 truncate text-foreground">
-            {displayedSelection?.model || "未选择"}
+          <span className="shrink-0 whitespace-nowrap">模型</span>
+          <Select
+            aria-label="切换 Agent 模型"
+            value={configQ.data?.model || configuredToolsModels[0] || ""}
+            disabled={selectorDisabled || configuredToolsModels.length === 0}
+            onChange={(event) => saveConfigMut.mutate({ model: event.target.value || null })}
+            className="h-8 max-w-64"
+          >
+            {configuredToolsModels.length === 0 ? (
+              <option value="">未选择</option>
+            ) : (
+              configuredToolsModels.map((model) => (
+                <option key={model} value={model}>
+                  {model}
+                </option>
+              ))
+            )}
+          </Select>
+        </label>
+        {(streaming || actualSelectionDiffers) && displayedSelection ? (
+          <span className="min-w-0 truncate text-xs text-muted-foreground">
+            实际调用：{displayedSelection.providerName} · {displayedSelection.model}
           </span>
-        </span>
+        ) : null}
         <label className="flex items-center gap-2">
-          <span>账号上下文</span>
+          <span className="shrink-0 whitespace-nowrap">账号上下文</span>
           <Select
             value={accountId === "" ? "" : String(accountId)}
             onChange={(e) => setAccountId(e.target.value ? Number(e.target.value) : "")}
@@ -576,7 +645,7 @@ export function AssistantIndex() {
             <label className="flex flex-col gap-1 sm:col-start-2">
               <span className="text-muted-foreground">主模型</span>
               <Select
-                value={configQ.data?.model || configuredToolsModels[0] || ""}
+                value={configuredModel}
                 disabled={!configuredProvider || configuredToolsModels.length === 0}
                 onChange={(e) => saveConfigMut.mutate({ model: e.target.value || null })}
               >
@@ -653,27 +722,39 @@ export function AssistantIndex() {
           onClose={() => setDrawerOpen(false)}
         />
         <div className="flex min-w-0 flex-1 flex-col">
-          {messagesQ.isLoading && activeId ? (
+          {!activeId ? (
+            <div className="flex flex-1 items-center justify-center p-6">
+              <div className="max-w-sm text-center">
+                <MessageCircle className="mx-auto h-10 w-10 text-muted-foreground/50" />
+                <p className="mt-3 text-sm text-muted-foreground">请选择一个会话，或新建一个 Agent 会话。</p>
+                <Button type="button" className="mt-4" onClick={() => createMut.mutate()} disabled={createMut.isPending}>
+                  新建会话
+                </Button>
+              </div>
+            </div>
+          ) : messagesQ.isLoading ? (
             <div className="flex flex-1 items-center justify-center">
               <Spinner />
             </div>
           ) : (
-            <Conversation
-              messages={messages}
-              live={conversationLive}
-              onRetryMessage={onRetryMessage}
-              retryingMessageId={retryingMessageId}
-              onActionUpdated={() => {
-                void qc.invalidateQueries({ queryKey: ["system-agent", "actions", activeId] });
-              }}
-            />
+            <>
+              <Conversation
+                messages={messages}
+                live={conversationLive}
+                onRetryMessage={onRetryMessage}
+                retryingMessageId={retryingMessageId}
+                onActionUpdated={() => {
+                  void qc.invalidateQueries({ queryKey: ["system-agent", "actions", activeId] });
+                }}
+              />
+              <Composer
+                disabled={configQ.isLoading}
+                streaming={streaming}
+                onSend={onSend}
+                onStop={onStop}
+              />
+            </>
           )}
-          <Composer
-            disabled={configQ.isLoading}
-            streaming={streaming}
-            onSend={onSend}
-            onStop={onStop}
-          />
         </div>
       </div>
     </PageShell>

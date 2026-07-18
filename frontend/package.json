@@ -7,7 +7,7 @@
   "license": "MIT",
   "scripts": {
     "dev": "vite",
-    "test": "node --experimental-strip-types --test src/lib/updateJobPersistence.test.ts",
+    "test": "node --experimental-strip-types --test src/lib/updateJobPersistence.test.ts src/pages/Assistant/sessionState.test.ts",
     "typecheck": "tsc -b --pretty false",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
