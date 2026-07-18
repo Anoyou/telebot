@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
@@ -50,6 +51,20 @@ def test_update_barrier_accepts_platform_test_and_internal_plugin_keys(tmp_path)
     assert plugin_update_in_progress(tmp_path, "_test_plugin", 1) is True
     acknowledge_plugin_update(tmp_path, "_test_plugin", 1, update_id)
     assert plugin_update_in_progress(tmp_path, "_test_plugin", 1) is False
+
+
+def test_remote_update_check_preserves_runtime_revision_timestamp() -> None:
+    revision = datetime(2026, 7, 18, 10, 0, tzinfo=UTC)
+
+    checked = remote_plugin_service._with_remote_info(
+        {"name": "demo", "_telepilot_remote": {"runtime_revision_at": revision.isoformat()}},
+        default_enabled=False,
+        latest_version="1.0.0",
+        update_available=False,
+        last_update_check_at=datetime(2026, 7, 18, 11, 0, tzinfo=UTC),
+    )
+
+    assert checked["_telepilot_remote"]["runtime_revision_at"] == revision.isoformat()
 
 
 async def test_update_barrier_blocks_command_and_interaction_factories(tmp_path, monkeypatch) -> None:

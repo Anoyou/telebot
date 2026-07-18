@@ -27,6 +27,7 @@ import re
 import shutil
 from base64 import b64encode
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -645,6 +646,7 @@ async def install_plugin_from_repo(
             default_enabled=default_enabled,
             latest_version=meta.version,
             update_available=False,
+            runtime_revision_at=datetime.now(UTC),
         )
 
         feat = (
@@ -811,6 +813,7 @@ async def _replace_installed_plugin_from_repo_dir(
         default_enabled=old_default_enabled,
         latest_version=meta.version,
         update_available=False,
+        runtime_revision_at=datetime.now(UTC),
     )
     row = await upsert_installed_plugin(
         db,
@@ -1161,6 +1164,7 @@ async def install_local_plugin(
             default_enabled=default_enabled,
             latest_version=meta.version,
             update_available=False,
+            runtime_revision_at=datetime.now(UTC),
         )
 
         feat = (

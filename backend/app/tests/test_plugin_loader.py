@@ -1422,11 +1422,49 @@ def test_installed_plugin_runtime_drift_detects_same_version_disk_update() -> No
     drift, reason = loader_mod._installed_plugin_runtime_drift(
         _LoadedPlugin,
         None,
-        SimpleNamespace(version="1.0.0", updated_at=datetime.fromtimestamp(1005.0, UTC)),
+        SimpleNamespace(
+            version="1.0.0",
+            updated_at=datetime.fromtimestamp(1005.0, UTC),
+            manifest_json={
+                "_telepilot_remote": {
+                    "runtime_revision_at": "1970-01-01T00:16:40.500000+00:00"
+                }
+            },
+        ),
     )
 
     assert drift is True
-    assert reason and "updated_at" in reason
+    assert reason and "runtime_revision_at" in reason
+
+
+def test_installed_plugin_runtime_drift_ignores_update_check_timestamp() -> None:
+    class _LoadedPlugin(Plugin):
+        key = "_test_update_check_only"
+        display_name = "更新检查时间测试"
+
+    _LoadedPlugin._manifest = Manifest(
+        key=_LoadedPlugin.key,
+        display_name="更新检查时间测试",
+        version="1.0.0",
+    )
+    _LoadedPlugin._loaded_at = 1000.0
+
+    drift, reason = loader_mod._installed_plugin_runtime_drift(
+        _LoadedPlugin,
+        None,
+        SimpleNamespace(
+            version="1.0.0",
+            updated_at=datetime.fromtimestamp(1005.0, UTC),
+            manifest_json={
+                "_telepilot_remote": {
+                    "last_update_check_at": "1970-01-01T00:16:45+00:00"
+                }
+            },
+        ),
+    )
+
+    assert drift is False
+    assert reason is None
 
 
 def test_manifest_min_telepilot_version_is_preferred() -> None:

@@ -9,6 +9,7 @@ import logging
 import re
 import secrets
 import time
+import unicodedata
 from dataclasses import asdict, dataclass, replace
 from typing import Any
 
@@ -932,6 +933,37 @@ def _button(text: str, action: str, resource: str = "_", *, aid: int, nonce: str
 
 def _keyboard(rows: list[list[dict[str, str]]]) -> dict[str, Any]:
     return {"inline_keyboard": rows}
+
+
+def _button_display_width(text: str) -> int:
+    return sum(
+        2 if unicodedata.east_asian_width(char) in {"W", "F", "A"} else 1
+        for char in str(text)
+    )
+
+
+def _pack_keyboard_buttons(buttons: list[dict[str, str]]) -> list[list[dict[str, str]]]:
+    """Pack short labels into three columns and medium labels into two."""
+
+    rows: list[list[dict[str, str]]] = []
+    current: list[dict[str, str]] = []
+    widths: list[int] = []
+    budgets = {1: 32, 2: 16, 3: 10}
+    for button in buttons:
+        width = _button_display_width(button.get("text", ""))
+        candidate_widths = [*widths, width]
+        candidate_count = len(candidate_widths)
+        if candidate_count > 3 or any(item > budgets[candidate_count] for item in candidate_widths):
+            if current:
+                rows.append(current)
+            current = [button]
+            widths = [width]
+        else:
+            current.append(button)
+            widths.append(width)
+    if current:
+        rows.append(current)
+    return rows
 
 
 def _main_keyboard(aid: int) -> dict[str, Any]:
@@ -8627,7 +8659,7 @@ async def _show_features(incoming: Incoming, role: str, *, edit: bool = False) -
     state = {af.feature_key: af for af in afs}
     lines = ["🧩 <b>账号功能</b>", "点击按钮可启停；复杂配置请用 GUI。", ""]
     rich_items: list[str] = []
-    rows: list[list[dict[str, str]]] = []
+    buttons: list[dict[str, str]] = []
     for feature in features[:_MAX_BUTTON_ROWS]:
         af = state.get(feature.key)
         enabled = bool(af and af.enabled)
@@ -8639,14 +8671,15 @@ async def _show_features(incoming: Incoming, role: str, *, edit: bool = False) -
             f'<li><input type="checkbox"{checked}>{display_name} <code>{feature_key}</code></li>'
         )
         if account_bot_service.role_allows(role, ACCOUNT_BOT_ROLE_OPERATOR):
-            rows.append([
+            buttons.append(
                 _button(
                     f"{'停用' if enabled else '启用'} {feature.display_name}"[:32],
                     "feature_toggle",
                     feature.key,
                     aid=incoming.account_id,
                 )
-            ])
+            )
+    rows = _pack_keyboard_buttons(buttons)
     rows.append([_button("返回主菜单", "view", "main", aid=incoming.account_id)])
     rich_html = (
         "<h1>🧩 账号功能</h1>"
@@ -8687,7 +8720,7 @@ async def _show_plugins(incoming: Incoming, role: str, *, edit: bool = False) ->
     ]
     rich_items: list[str] = []
     rich_remote_rows: list[str] = []
-    rows: list[list[dict[str, str]]] = []
+    buttons: list[dict[str, str]] = []
     for feature in features[:_MAX_BUTTON_ROWS]:
         af = state.get(feature.key)
         enabled = bool(af and af.enabled)
@@ -8704,14 +8737,14 @@ async def _show_plugins(incoming: Incoming, role: str, *, edit: bool = False) ->
             f"<code>{feature_key}</code></li>"
         )
         if account_bot_service.role_allows(role, ACCOUNT_BOT_ROLE_OPERATOR):
-            rows.append([
+            buttons.append(
                 _button(
                     f"{'停用' if enabled else '启用'} {feature.display_name}"[:32],
                     "feature_toggle",
                     feature.key,
                     aid=incoming.account_id,
                 )
-            ])
+            )
     if remotes:
         lines.append("")
         lines.append("<b>远程插件</b>")
@@ -8727,6 +8760,7 @@ async def _show_plugins(incoming: Incoming, role: str, *, edit: bool = False) ->
                 f"<tr><td>{remote_name}</td><td>v{remote_version}</td>"
                 f"<td>{'已启用' if row.enabled else '已停用'}</td></tr>"
             )
+    rows = _pack_keyboard_buttons(buttons)
     rows.append([_button("返回主菜单", "view", "main", aid=incoming.account_id)])
     rich_html = (
         "<h1>🧱 插件列表</h1>"
@@ -8815,7 +8849,7 @@ async def _show_commands(incoming: Incoming, role: str, *, edit: bool = False) -
         items = await command_service.list_for_account(db, incoming.account_id)
     lines = ["⌨️ <b>自定义命令模板</b>", "点击按钮可启停当前账号的模板。", ""]
     rich_items: list[str] = []
-    rows: list[list[dict[str, str]]] = []
+    buttons: list[dict[str, str]] = []
     for item in items[:_MAX_BUTTON_ROWS]:
         tpl = item.template
         command = (
@@ -8831,14 +8865,15 @@ async def _show_commands(incoming: Incoming, role: str, *, edit: bool = False) -
             f'<li><input type="checkbox"{checked}><code>{command}</code> · {template_type}</li>'
         )
         if account_bot_service.role_allows(role, ACCOUNT_BOT_ROLE_OPERATOR):
-            rows.append([
+            buttons.append(
                 _button(
                     f"{'停用' if item.enabled else '启用'} {cmd_prefix}{tpl.name}"[:32],
                     "command_toggle",
                     str(tpl.id),
                     aid=incoming.account_id,
                 )
-            ])
+            )
+    rows = _pack_keyboard_buttons(buttons)
     rows.append([_button("返回主菜单", "view", "main", aid=incoming.account_id)])
     rich_html = (
         "<h1>⌨️ 自定义命令模板</h1>"

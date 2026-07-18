@@ -1334,6 +1334,7 @@ class TestPluginRepoInstallFlow:
         assert updated.enabled is True
         assert updated.manifest_json["version"] == "1.2.0"
         assert updated.manifest_json["_telepilot_remote"]["default_enabled"] is True
+        assert updated.manifest_json["_telepilot_remote"]["runtime_revision_at"]
         assert "new_demo" not in db.installed_rows
         assert (tmp_path / "installed" / "update_demo" / "plugin.json").read_text(encoding="utf-8").find("1.2.0") >= 0
         migrated_db = tmp_path / "installed" / "_data" / "update_demo" / "runtime.sqlite3"
@@ -1400,6 +1401,7 @@ class TestPluginRepoInstallFlow:
         assert updated.manifest_json["version"] == "0.3.2"
         assert updated.manifest_json["_telepilot_remote"]["update_available"] is False
         assert updated.manifest_json["_telepilot_remote"]["latest_version"] == "0.3.2"
+        assert updated.manifest_json["_telepilot_remote"]["runtime_revision_at"]
 
     @pytest.mark.asyncio
     async def test_repo_update_link_failure_rolls_back_and_retry_keeps_database(

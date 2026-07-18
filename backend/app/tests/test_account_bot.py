@@ -756,6 +756,22 @@ def test_account_bot_callback_data_parser() -> None:
     assert account_bot_runtime._parse_callback("bad:12:confirm:restart") is None
 
 
+def test_account_bot_keyboard_packs_by_display_width() -> None:
+    buttons = [
+        {"text": "启用 A", "callback_data": "a"},
+        {"text": "启用 B", "callback_data": "b"},
+        {"text": "启用 C", "callback_data": "c"},
+        {"text": "启用 一个较长的插件", "callback_data": "d"},
+    ]
+
+    rows = account_bot_runtime._pack_keyboard_buttons(buttons)
+
+    assert [[button["text"] for button in row] for row in rows] == [
+        ["启用 A", "启用 B", "启用 C"],
+        ["启用 一个较长的插件"],
+    ]
+
+
 def test_account_bot_error_sanitizer_masks_token() -> None:
     token = "123456:secret-token"
     text = account_bot_service.sanitize_bot_error(

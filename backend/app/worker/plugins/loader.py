@@ -4788,6 +4788,13 @@ def _timestamp_or_none(value: Any) -> float | None:
         return None
     if isinstance(value, (int, float)):
         return float(value)
+    if isinstance(value, str):
+        try:
+            from datetime import datetime
+
+            return float(datetime.fromisoformat(value).timestamp())
+        except ValueError:
+            return None
     timestamp = getattr(value, "timestamp", None)
     if callable(timestamp):
         try:
@@ -4820,9 +4827,25 @@ def _installed_plugin_runtime_drift(
     loaded_at = _timestamp_or_none(getattr(cls, "_loaded_at", None) if cls is not None else None)
     if loaded_at is None and inst is not None:
         loaded_at = _timestamp_or_none(getattr(type(inst), "_loaded_at", None))
-    updated_at = _timestamp_or_none(getattr(installed_plugin, "updated_at", None))
-    if loaded_at is not None and updated_at is not None and updated_at > loaded_at + 1.0:
-        return True, f"updated_at {updated_at:.3f} > loaded_at {loaded_at:.3f}"
+    manifest_json = getattr(installed_plugin, "manifest_json", None)
+    remote_info = (
+        manifest_json.get("_telepilot_remote")
+        if isinstance(manifest_json, dict)
+        else None
+    )
+    runtime_revision_at = _timestamp_or_none(
+        remote_info.get("runtime_revision_at")
+        if isinstance(remote_info, dict)
+        else None
+    )
+    if (
+        loaded_at is not None
+        and runtime_revision_at is not None
+        and runtime_revision_at > loaded_at
+    ):
+        return True, (
+            f"runtime_revision_at {runtime_revision_at:.3f} > loaded_at {loaded_at:.3f}"
+        )
     return False, None
 
 

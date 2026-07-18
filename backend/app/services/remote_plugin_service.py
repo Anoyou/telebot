@@ -372,14 +372,19 @@ def _with_remote_info(
     update_available: bool,
     last_update_check_at: datetime | None = None,
     last_update_check_error: str | None = None,
+    runtime_revision_at: datetime | None = None,
 ) -> dict[str, Any]:
     data = dict(manifest_json)
+    previous = _remote_info_from_manifest(data)
+    if runtime_revision_at is None:
+        runtime_revision_at = _remote_info_datetime(previous.get("runtime_revision_at"))
     data[_REMOTE_INFO_KEY] = {
         "default_enabled": bool(default_enabled),
         "latest_version": latest_version,
         "update_available": bool(update_available),
         "last_update_check_at": last_update_check_at.isoformat() if last_update_check_at else None,
         "last_update_check_error": last_update_check_error,
+        "runtime_revision_at": runtime_revision_at.isoformat() if runtime_revision_at else None,
     }
     return data
 
@@ -1792,6 +1797,7 @@ async def install(
             default_enabled=default_enabled,
             latest_version=meta.version,
             update_available=False,
+            runtime_revision_at=datetime.now(UTC),
         )
         row = await upsert_installed_plugin(
             db,
@@ -1978,6 +1984,7 @@ async def update(db: AsyncSession, name: str) -> RemotePluginView:
         update_available=False,
         last_update_check_at=datetime.now(UTC),
         last_update_check_error=None,
+        runtime_revision_at=datetime.now(UTC),
     )
     row = await upsert_installed_plugin(
         db,

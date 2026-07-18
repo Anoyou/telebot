@@ -22,6 +22,7 @@ import logging
 import shutil
 from collections.abc import Iterable
 from copy import deepcopy
+from datetime import UTC, datetime
 from typing import Any
 
 from jsonschema import Draft7Validator
@@ -287,7 +288,7 @@ async def _migrate_optional_builtin_features(
             PLUGIN_SOURCE_REPO,
             PLUGIN_TRUST_COMMUNITY,
         )
-        from . import plugin_repo_service
+        from . import plugin_repo_service, remote_plugin_service
         from .remote_plugin_service import upsert_installed_plugin
     except Exception:  # noqa: BLE001
         log.warning("加载官方插件迁移工具失败，跳过本轮收敛", exc_info=True)
@@ -355,25 +356,16 @@ async def _migrate_optional_builtin_features(
             )
             continue
 
-        try:
-            plugin_dir = official_source.plugin_dir
-            meta = official_source.meta
-            manifest_json = plugin_repo_service._manifest_json_for_official_source(official_source)
-            feature_manifest = plugin_repo_service._feature_manifest_from_manifest_json(manifest_json)
-            lint_warnings = plugin_repo_service.lint_plugin_metadata_files(plugin_dir)
-        except Exception:  # noqa: BLE001
-            log.warning("迁移历史 builtin 插件 %s 到 official 失败", key, exc_info=True)
-            continue
-
-        if not (plugin_repo_service._plugin_dir(key)).exists():
+        target = plugin_repo_service._plugin_dir(key)
+        installed = await db.get(InstalledPlugin, key)
+        if not target.exists():
             try:
-                target = plugin_repo_service._plugin_dir(key)
                 staging = target.parent / f"{target.name}.installing"
                 if staging.exists():
                     shutil.rmtree(staging, ignore_errors=True)
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copytree(
-                    plugin_dir,
+                    official_source.plugin_dir,
                     staging,
                     ignore=shutil.ignore_patterns(".git", ".gitignore", "__pycache__"),
                 )
@@ -381,6 +373,36 @@ async def _migrate_optional_builtin_features(
             except Exception:  # noqa: BLE001
                 log.warning("复制插件库插件 %s 到 installed 失败", key, exc_info=True)
                 continue
+
+        try:
+            meta = plugin_repo_service._read_plugin_metadata(target, fallback_name=key)
+            base_manifest = plugin_repo_service._manifest_json_from_remote_meta(meta)
+            base_manifest["source_url"] = official_source.source_url
+            current_info = remote_plugin_service._remote_info_from_manifest(
+                installed.manifest_json if installed is not None else None
+            )
+            current_revision = remote_plugin_service._remote_info_datetime(
+                current_info.get("runtime_revision_at")
+            )
+            manifest_json = remote_plugin_service._with_remote_info(
+                base_manifest,
+                default_enabled=bool(current_info.get("default_enabled", False)),
+                latest_version=official_source.meta.version,
+                update_available=(
+                    plugin_repo_service._version_tuple(official_source.meta.version)
+                    > plugin_repo_service._version_tuple(meta.version)
+                ),
+                last_update_check_at=remote_plugin_service._remote_info_datetime(
+                    current_info.get("last_update_check_at")
+                ),
+                last_update_check_error=current_info.get("last_update_check_error"),
+                runtime_revision_at=current_revision or datetime.now(UTC),
+            )
+            feature_manifest = plugin_repo_service._feature_manifest_from_manifest_json(manifest_json)
+            lint_warnings = plugin_repo_service.lint_plugin_metadata_files(target)
+        except Exception:  # noqa: BLE001
+            log.warning("读取已安装插件 %s 元数据失败", key, exc_info=True)
+            continue
 
         if feature.is_builtin:
             feature.is_builtin = False
@@ -397,7 +419,6 @@ async def _migrate_optional_builtin_features(
             feature.manifest = feature_manifest
             changed = True
 
-        installed = await db.get(InstalledPlugin, key)
         was_enabled = bool(getattr(installed, "enabled", False)) if installed is not None else bool(
             any(row.feature_key == key and row.enabled for row in account_feature_rows)
         )
@@ -406,7 +427,7 @@ async def _migrate_optional_builtin_features(
             key=key,
             source=PLUGIN_SOURCE_REPO,
             source_url=official_source.source_url,
-            installed_path=str(plugin_repo_service._plugin_dir(key)),
+            installed_path=str(target),
             version=version,
             manifest_json=manifest_json,
             enabled=was_enabled,
