@@ -27,9 +27,11 @@ if TYPE_CHECKING:
     from .llm_client import LLMResult
     from .llm_dto import LLMProviderDTO
 
+from ..db.models.command import default_api_format_for
 from ..settings import settings
 from . import llm_account_budget
 from .llm_client import build_client_from_dto
+from .llm_identity import resolve_identity
 from .llm_protocol import (
     ImageContent,
     ModelRequest,
@@ -64,6 +66,7 @@ class UsageRecord:
     triggered_by_account_id: int | None = None
     provider_name: str | None = None
     model: str | None = None
+    client_identity_profile: str | None = None
     input_tokens: int = 0
     output_tokens: int = 0
     latency_ms: int = 0
@@ -132,6 +135,27 @@ async def _emit_usage(record: UsageRecord) -> None:
         except Exception:
             # 不应因 usage 记录失败影响主流程
             log.exception("usage callback 失败")
+
+
+def resolve_usage_client_identity_profile(
+    provider: LLMProviderDTO,
+    *,
+    effective_api_format: str | None = None,
+    configured_identity_profile: str | None = None,
+) -> str:
+    """解析某次调用实际发送的客户端身份档案。"""
+
+    api_format = (
+        effective_api_format
+        or provider.api_format
+        or default_api_format_for(provider.provider)
+    )
+    configured = (
+        configured_identity_profile
+        if configured_identity_profile is not None
+        else provider.client_identity_profile
+    )
+    return resolve_identity(configured, api_format).profile
 
 
 def preview_text_for_usage(value: Any, *, limit: int = _USAGE_PREVIEW_CHARS) -> str | None:
@@ -210,6 +234,13 @@ def _classify_error(exc: Exception) -> str:
     if isinstance(exc, LLMCallFailed):
         return exc.error_type or "unknown"
     if isinstance(exc, LLMError):
+        status_code = getattr(exc, "status_code", None)
+        if status_code == 429:
+            return "rate_limit"
+        if isinstance(status_code, int) and 500 <= status_code < 600:
+            return "server_error"
+        if status_code in {401, 403}:
+            return "auth"
         msg = str(exc).lower()
         if "timeout" in msg:
             return "timeout"
@@ -408,6 +439,7 @@ async def call_with_fallback(
     # 隐私控制
     log_prompt_preview: bool = False,  # 设为 True 时只记录前 100 字符
     client_factory: Callable[..., Any | Awaitable[Any]] | None = None,
+    client_identity_resolver: Callable[[LLMProviderDTO, str | None], str] | None = None,
     account_id: int | None = None,
     triggered_by_account_id: int | None = None,
     source: str | None = None,
@@ -474,6 +506,11 @@ async def call_with_fallback(
             )
             continue
         model = effective_model or provider_dto.default_model
+        client_identity_profile = (
+            client_identity_resolver(provider_dto, model)
+            if client_identity_resolver is not None
+            else resolve_usage_client_identity_profile(provider_dto)
+        )
         capability_errors = _legacy_capability_errors(
             provider_dto,
             model=model,
@@ -510,6 +547,7 @@ async def call_with_fallback(
                     triggered_by_account_id=triggered_by_account_id,
                     provider_name=provider_dto.name,
                     model=model,
+                    client_identity_profile=client_identity_profile,
                     success=False,
                     error_type="budget_exceeded",
                     source=source,
@@ -560,6 +598,7 @@ async def call_with_fallback(
                 triggered_by_account_id=triggered_by_account_id,
                 provider_name=provider_dto.name,
                 model=result.model,
+                client_identity_profile=client_identity_profile,
                 input_tokens=result.input_tokens,
                 output_tokens=result.output_tokens,
                 latency_ms=latency_ms,
@@ -618,6 +657,7 @@ async def call_with_fallback(
                     triggered_by_account_id=triggered_by_account_id,
                     provider_name=provider_dto.name,
                     model=model,
+                    client_identity_profile=client_identity_profile,
                     latency_ms=latency_ms,
                     success=False,
                     error_type=error_type,
@@ -710,6 +750,7 @@ async def invoke_model_with_fallback(
 
         for provider_model in provider_models:
             provider_request = replace(capped_request, model=provider_model)
+            client_identity_profile = resolve_usage_client_identity_profile(provider)
             budget_check = await _check_budget(account_id, provider, estimated_tokens)
             if budget_check.error:
                 last_error = LLMCallFailed(
@@ -745,6 +786,7 @@ async def invoke_model_with_fallback(
                         triggered_by_account_id=triggered_by_account_id,
                         provider_name=provider.name,
                         model=response.model,
+                        client_identity_profile=client_identity_profile,
                         input_tokens=response.usage.input_tokens,
                         output_tokens=response.usage.output_tokens,
                         latency_ms=int((time.monotonic() - started) * 1000),
@@ -799,6 +841,7 @@ async def invoke_model_with_fallback(
                         triggered_by_account_id=triggered_by_account_id,
                         provider_name=provider.name,
                         model=provider_request.model,
+                        client_identity_profile=client_identity_profile,
                         latency_ms=int((time.monotonic() - started) * 1000),
                         success=False,
                         error_type=_classify_error(exc),
@@ -806,6 +849,9 @@ async def invoke_model_with_fallback(
                         used_fallback=index > 0,
                         fallback_chain=chain.get_provider_names(),
                         request_preview=request_preview,
+                        response_preview=preview_text_for_usage(
+                            f"{type(exc).__name__}: {exc}"
+                        ),
                     )
                 )
                 if _should_try_next_provider(exc):

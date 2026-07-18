@@ -47,6 +47,14 @@ log = logging.getLogger(__name__)
 EventSink = Callable[[dict[str, Any]], Awaitable[None] | None]
 
 
+class ToolApprovalRequired(RuntimeError):
+    """模型已选择具体工具，但 Web 用户尚未批准执行。"""
+
+    def __init__(self, tool_names: tuple[str, ...]) -> None:
+        self.tool_names = tool_names
+        super().__init__("已理解你的需求，准备调用系统能力，请批准后继续。")
+
+
 class SystemAgentRuntime:
     """封装 Provider 解析、工具过滤、run_agent 与事件发射。"""
 
@@ -212,10 +220,18 @@ class SystemAgentRuntime:
             tool_count=len(tool_specs),
             available_tool_count=len(all_tool_specs),
         )
-        required_tool_names = {spec.name for spec in tool_specs}
         approved_tool_names = {str(name) for name in (approved_tools or []) if str(name)}
-        tool_approval = (
-            {
+        tool_specs_by_name = {spec.name: spec for spec in tool_specs}
+
+        def tool_approval_payload(tool_names: tuple[str, ...] | set[str]) -> dict[str, Any] | None:
+            selected_specs = [
+                tool_specs_by_name[name]
+                for name in tool_names
+                if name in tool_specs_by_name
+            ]
+            if not selected_specs:
+                return None
+            return {
                 "domains": list(route.domains),
                 "tools": [
                     {
@@ -224,26 +240,10 @@ class SystemAgentRuntime:
                         "read_only": bool(spec.read_only),
                         "risk": str(spec.risk),
                     }
-                    for spec in tool_specs
+                    for spec in selected_specs
                 ],
             }
-            if required_tool_names
-            else None
-        )
-        if (
-            channel == "web"
-            and bool(cfg.get("require_tool_approval"))
-            and required_tool_names
-            and approved_tool_names != required_tool_names
-        ):
-            yield next_event(
-                "error",
-                code="AGENT_TOOL_APPROVAL_REQUIRED",
-                message="本轮需要调用系统工具，请批准后继续。",
-                tool_approval=tool_approval,
-            )
-            yield next_event("done", ok=False)
-            return
+
         tool_ctx = ToolContext(
             db=db,
             channel=channel,
@@ -306,21 +306,43 @@ class SystemAgentRuntime:
             timeout_seconds=600.0,
         )
 
+        async def on_tool_batch(calls: tuple[ToolCall, ...]) -> None:
+            if channel != "web" or not bool(cfg.get("require_tool_approval")):
+                return
+            requested_names = tuple(
+                dict.fromkeys(call.name for call in calls if call.name in tool_specs_by_name)
+            )
+            if set(requested_names).issubset(approved_tool_names):
+                return
+            combined_names = tuple(
+                dict.fromkeys(
+                    [
+                        *(name for name in approved_tools or [] if name in tool_specs_by_name),
+                        *requested_names,
+                    ]
+                )
+            )
+            raise ToolApprovalRequired(combined_names)
+
         async def on_tool_start(call: ToolCall) -> None:
+            spec = tool_specs_by_name.get(call.name)
             await progress_queue.put(
                 next_event(
                     "tool_started",
                     tool_name=call.name,
+                    tool_description=spec.description if spec else call.name,
                     call_id=call.id,
                     arguments_summary=summarize_tool_result(call.arguments, max_chars=800),
                 )
             )
 
         async def on_tool_finish(call: ToolCall, result: ToolResult) -> None:
+            spec = tool_specs_by_name.get(call.name)
             await progress_queue.put(
                 next_event(
                     "tool_finished",
                     tool_name=call.name,
+                    tool_description=spec.description if spec else call.name,
                     call_id=call.id,
                     is_error=bool(result.is_error),
                     result_summary=summarize_tool_result(result.content, max_chars=1200),
@@ -328,6 +350,7 @@ class SystemAgentRuntime:
             )
 
         callbacks = AgentCallbacks(
+            on_tool_batch=on_tool_batch,
             on_tool_start=on_tool_start,
             on_tool_finish=on_tool_finish,
         )
@@ -397,6 +420,20 @@ class SystemAgentRuntime:
                     provider_name=active_provider.name,
                     model=active_model,
                 )
+        except ToolApprovalRequired as exc:
+            log.info(
+                "system agent tool approval required session=%s tools=%s",
+                session.id,
+                ",".join(exc.tool_names),
+            )
+            yield next_event(
+                "error",
+                code="AGENT_TOOL_APPROVAL_REQUIRED",
+                message=str(exc),
+                tool_approval=tool_approval_payload(exc.tool_names),
+            )
+            yield next_event("done", ok=False)
+            return
         except ProviderSwitchRequired as exc:
             log.warning(
                 "system agent provider switch confirmation required session=%s provider=%s",
@@ -412,8 +449,10 @@ class SystemAgentRuntime:
                     "candidates": exc.candidates,
                 },
                 tool_approval=(
-                    tool_approval
-                    if channel == "web" and bool(cfg.get("require_tool_approval"))
+                    tool_approval_payload(approved_tool_names)
+                    if channel == "web"
+                    and bool(cfg.get("require_tool_approval"))
+                    and approved_tool_names
                     else None
                 ),
             )

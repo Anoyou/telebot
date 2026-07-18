@@ -48,6 +48,7 @@ class AgentLimits:
 class AgentCallbacks:
     on_step: Callable[[int], Awaitable[None]] | None = None
     on_usage: Callable[[ModelUsage], Awaitable[None]] | None = None
+    on_tool_batch: Callable[[tuple[ToolCall, ...]], Awaitable[None]] | None = None
     on_tool_start: Callable[[ToolCall], Awaitable[None]] | None = None
     on_tool_finish: Callable[[ToolCall, ToolResult], Awaitable[None]] | None = None
 
@@ -268,6 +269,11 @@ async def run_agent(
                 )
             else:
                 executable.append(tool_call)
+        allowed_batch = tuple(call for call in executable if call.name in tools)
+        if allowed_batch:
+            # 批准、审计等前置门禁必须在整批工具开始执行前完成，
+            # 避免并行只读工具或混合工具产生部分执行。
+            await _notify(callbacks.on_tool_batch, allowed_batch)
         executed_results = await _execute_selected_calls(executable, tools, callbacks)
         ordered = {
             result.call_id: result for result in (*executed_results, *blocked_results)

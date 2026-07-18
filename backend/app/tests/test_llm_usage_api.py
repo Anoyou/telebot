@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from types import SimpleNamespace
 
 import pytest
 
-from app.api.llm_usage import list_plugin_llm_usage_summary, reset_recent_llm_usage
+from app.api.llm_usage import LLMUsageItem, list_plugin_llm_usage_summary, reset_recent_llm_usage
 
 
 @dataclass
@@ -81,3 +82,28 @@ async def test_reset_recent_llm_usage_deletes_rows_and_commits() -> None:
 
     assert resp.deleted == 7
     assert db.committed is True
+
+
+def test_llm_usage_item_exposes_recorded_client_identity() -> None:
+    row = SimpleNamespace(
+        id=1,
+        account_id=2,
+        provider_id=3,
+        provider_name="公开 Provider",
+        model="model-a",
+        client_identity_profile="codex_cli",
+        source="system_agent",
+        input_tokens=10,
+        output_tokens=4,
+        latency_ms=120,
+        success=True,
+        error_type=None,
+        used_fallback=False,
+        request_preview=None,
+        response_preview=None,
+        created_at=datetime(2026, 7, 18, tzinfo=UTC),
+    )
+
+    item = LLMUsageItem.from_row(row)
+
+    assert item.client_identity_profile == "codex_cli"

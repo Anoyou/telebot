@@ -22,7 +22,11 @@ def _registry() -> ToolRegistry:
         registry.register(
             ToolSpec(
                 name=name,
-                description=name,
+                description=(
+                    "读取最近运行日志。"
+                    if name == "logs.recent"
+                    else "列出定时任务。"
+                ),
                 input_schema={"type": "object", "properties": {}},
                 read_handler=read_handler,
             )
@@ -333,11 +337,15 @@ async def test_runtime_requires_and_accepts_web_tool_approval(monkeypatch) -> No
     )
     run_calls = 0
 
-    async def run(_model_call, request, _tools, **_kwargs):  # noqa: ANN001
+    async def run(_model_call, request, _tools, *, callbacks, **_kwargs):  # noqa: ANN001
         nonlocal run_calls
         run_calls += 1
         assert request.metadata["max_retries_per_model"] == 5
         assert request.metadata["retry_delay_seconds"] == 3.0
+        assert callbacks.on_tool_batch is not None
+        await callbacks.on_tool_batch(
+            (ToolCall(id="call-1", name="scheduler.list", arguments={}),)
+        )
         return AgentResult(
             text="ok",
             model=request.model,
@@ -365,7 +373,8 @@ async def test_runtime_requires_and_accepts_web_tool_approval(monkeypatch) -> No
     assert [tool["name"] for tool in error["tool_approval"]["tools"]] == [
         "scheduler.list"
     ]
-    assert run_calls == 0
+    assert error["tool_approval"]["tools"][0]["description"] == "列出定时任务。"
+    assert run_calls == 1
 
     approved = [
         event
@@ -378,7 +387,7 @@ async def test_runtime_requires_and_accepts_web_tool_approval(monkeypatch) -> No
             approved_tools=["scheduler.list"],
         )
     ]
-    assert run_calls == 1
+    assert run_calls == 2
     assert approved[-1]["type"] == "done"
     assert approved[-1]["ok"] is True
 

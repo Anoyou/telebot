@@ -23,6 +23,7 @@ class LLMUsageItem(BaseModel):
     provider_id: int | None
     provider_name: str | None
     model: str | None
+    client_identity_profile: str | None
     source: str | None
     input_tokens: int
     output_tokens: int
@@ -42,6 +43,7 @@ class LLMUsageItem(BaseModel):
             provider_id=row.provider_id,
             provider_name=row.provider_name,
             model=row.model,
+            client_identity_profile=row.client_identity_profile,
             source=row.source,
             input_tokens=int(row.input_tokens or 0),
             output_tokens=int(row.output_tokens or 0),

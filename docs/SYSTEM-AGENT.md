@@ -48,7 +48,7 @@
 - 固定 Provider 作为首选；同一 Provider 内会先按首选模型、默认模型、其它已启用 Tools 模型静默 fallback。
 - 同一模型遇到超时、网络错误、429 或 5xx 后会固定间隔 3 秒重试 5 次；5 次均失败后才尝试同 Provider 的下一 Tools 模型。Web 可用输入框右侧的停止按钮中断当前请求和重试等待。
 - 跨 Provider 只使用 `fallback_provider_ids` 白名单中拥有 API Key 和 Tools 模型的候选；当前 Provider 内模型均失败时，Web 会先询问是否改用下一个候选，确认后才重试。
-- `require_tool_approval=true` 时，Web 会在正式 Agent 调用前列出本轮路由到的工具；只有批准完整工具清单后才继续。该开关当前不阻断管理 Bot，Bot 写操作仍由 Action 二次确认保护。
+- `require_tool_approval=true` 时，Web 会先让模型理解需求；只有模型实际产出工具调用时，才用中文能力名称列出本批待执行工具。批准门禁位于整批 handler 执行之前，普通回答无需批准。该开关当前不阻断管理 Bot，Bot 写操作仍由 Action 二次确认保护。
 - 上游把自身故障包装成 `400 Upstream request failed` 时按 Provider 故障处理；普通参数错误 400 仍直接失败，不会把错误请求扩散到其它 Provider。
 - 某个备用 Provider 在本轮成功后，后续 Agent 步骤优先沿用它，避免反复撞击已知不稳定的主 Provider。
 - 无可用 tools 模型时，Web/Bot 均提示到 AI 中心配置。
@@ -183,7 +183,7 @@ System Agent 在自己的运行入口注册 LLM usage 持久化回调，路由�
 | --- | --- |
 | 未启用 / 无 tools Provider | 明确错误 + AI 中心入口 |
 | 首选 Provider 返回 429/5xx/超时 | 当前模型每 3 秒重试一次，共 5 次；随后尝试同 Provider 的其它 Tools 模型，跨 Provider 前要求确认 |
-| Web 开启工具前置批准 | 保存本轮工具清单并显示批准按钮；未批准前不把工具定义交给正式 Agent |
+| Web 开启工具前置批准 | 模型先理解需求并选择具体工具；有真实工具调用时才显示中文批准项，批准前不执行任何 handler |
 | 当前 Provider 内所有 Tools 模型失败 | 返回候选 Provider；Web 用户确认后用原消息重试，不重复写入历史 |
 | 工具异常 | 说明业务是否变化 |
 | Provider 验证失败 | 保持待确认，清除无效密钥，要求重输 |

@@ -363,6 +363,7 @@ def test_usage_record_fields() -> None:
         triggered_by_account_id=123,
         provider_name="test-provider",
         model="gpt-4o",
+        client_identity_profile="openai_sdk",
         input_tokens=100,
         output_tokens=50,
         latency_ms=1500,
@@ -374,6 +375,7 @@ def test_usage_record_fields() -> None:
     assert record.triggered_by_account_id == 123
     assert record.provider_name == "test-provider"
     assert record.model == "gpt-4o"
+    assert record.client_identity_profile == "openai_sdk"
     assert record.input_tokens == 100
     assert record.output_tokens == 50
     assert record.success is True
@@ -406,6 +408,7 @@ async def test_llm_usage_persist_writes_triggered_by_account_id(monkeypatch) -> 
         provider_id=42,
         provider_name="test-provider",
         model="gpt-4o",
+        client_identity_profile="openai_sdk",
         input_tokens=10,
         output_tokens=5,
         success=True,
@@ -437,6 +440,7 @@ async def test_llm_usage_persist_writes_triggered_by_account_id(monkeypatch) -> 
 
     assert len(captured_rows) == 1
     assert captured_rows[0].triggered_by_account_id == 123
+    assert captured_rows[0].client_identity_profile == "openai_sdk"
     assert captured_rows[0].request_preview == "system: hello"
     assert captured_rows[0].response_preview == "world"
 
@@ -1208,6 +1212,16 @@ def test_upstream_failed_400_is_provider_local() -> None:
     assert scope is LLMErrorScope.PROVIDER_LOCAL
 
 
+def test_error_classifier_prefers_http_status_code() -> None:
+    from app.services import llm_runtime as _rt
+
+    assert (
+        _rt._classify_error(LLMError("upstream unavailable", status_code=503))
+        == "server_error"
+    )
+    assert _rt._classify_error(LLMError("busy", status_code=429)) == "rate_limit"
+
+
 @pytest.mark.asyncio
 async def test_openai_client_classifies_policy_403_as_account_scope(monkeypatch) -> None:
     from app.services import llm_client
@@ -1559,6 +1573,71 @@ async def test_call_with_fallback_records_latency(monkeypatch) -> None:
     assert len(captured) == 1
     assert captured[0].success is True
     assert captured[0].latency_ms >= 10
+
+
+def test_usage_identity_resolves_auto_from_effective_protocol() -> None:
+    """Usage 保存实际协议解析后的身份，不保存 Provider 的 auto 配置值。"""
+    from app.services import llm_runtime as _rt
+
+    provider = LLMProviderDTO(
+        id=1,
+        name="primary",
+        provider="openai",
+        default_model="gpt-4o",
+        api_format="chat_completions",
+        client_identity_profile="auto",
+        api_key_enc="sk-test",
+    )
+
+    assert _rt.resolve_usage_client_identity_profile(provider) == "openai_sdk"
+    assert (
+        _rt.resolve_usage_client_identity_profile(
+            provider,
+            effective_api_format="responses",
+        )
+        == "codex_cli"
+    )
+
+
+@pytest.mark.asyncio
+async def test_web_search_usage_records_identity_for_overridden_protocol(monkeypatch) -> None:
+    """联网调用切到 Responses 时，usage 应记录 Codex CLI 而非原 Chat 身份。"""
+    from app.services import llm_invoke
+    from app.services import llm_runtime as _rt
+    from app.services.llm_client import LLMResult
+
+    captured: list[UsageRecord] = []
+
+    async def _capture(record: UsageRecord) -> None:
+        captured.append(record)
+
+    async def _complete(*args, **kwargs):
+        return LLMResult(text="ok", model="gpt-4o", input_tokens=1, output_tokens=1)
+
+    monkeypatch.setattr(_rt, "_emit_usage", _capture)
+    monkeypatch.setattr(_rt, "_call_with_retry", _complete)
+
+    provider = LLMProviderDTO(
+        id=1,
+        name="primary",
+        provider="openai",
+        default_model="gpt-4o",
+        api_format="chat_completions",
+        web_search_api_format="auto",
+        client_identity_profile="auto",
+        api_key_enc="sk-test",
+    )
+
+    await llm_invoke.invoke(
+        provider,
+        {provider.id: provider},
+        "sys",
+        "user",
+        web_search=True,
+    )
+
+    assert len(captured) == 1
+    assert captured[0].client_identity_profile == "codex_cli"
 
 
 __all__ = []

@@ -511,10 +511,10 @@ async def test_agent_retries_same_model_five_times_before_same_provider_fallback
             attempts.append(request.model)
             if request.model == "model-a":
                 raise LLMError(
-                    "429 upstream busy",
+                    "upstream unavailable",
                     retryable=True,
                     scope=LLMErrorScope.PROVIDER_LOCAL,
-                    status_code=429,
+                    status_code=503,
                 )
             return ModelResponse(
                 model=request.model,
@@ -534,7 +534,8 @@ async def test_agent_retries_same_model_five_times_before_same_provider_fallback
         "_check_budget",
         AsyncMock(return_value=llm_runtime.BudgetCheck()),
     )
-    monkeypatch.setattr(llm_runtime, "_emit_usage", AsyncMock())
+    emit_usage = AsyncMock()
+    monkeypatch.setattr(llm_runtime, "_emit_usage", emit_usage)
     monkeypatch.setattr(llm_account_budget, "settle", AsyncMock())
 
     response, used_provider, used_fallback = await llm_runtime.invoke_model_with_fallback(
@@ -573,6 +574,10 @@ async def test_agent_retries_same_model_five_times_before_same_provider_fallback
     ]
     exhausted = [event for event in progress if event["type"] == "model_exhausted"]
     assert [event["model"] for event in exhausted] == ["model-a"]
+    usage_records = [call.args[0] for call in emit_usage.await_args_list]
+    failed_record = next(record for record in usage_records if not record.success)
+    assert failed_record.error_type == "server_error"
+    assert failed_record.response_preview == "LLMError: upstream unavailable"
 
 
 @pytest.mark.asyncio

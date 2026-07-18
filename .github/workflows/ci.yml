@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, Agent-beta]
   pull_request:
     branches: [main]
 
@@ -94,4 +94,28 @@ jobs:
           if f"## [{version}]" not in changelog and "## [Unreleased]" not in changelog:
               raise SystemExit(f"CHANGELOG.md 缺少版本 {version} 或 Unreleased 段")
           print(f"version sync ok: {version}")
+          PY
+
+      - name: Prevent non-main release version bumps
+        if: github.event_name == 'push' && github.ref_name != 'main'
+        run: |
+          git fetch origin main --depth=1
+          python - <<'PY'
+          import re
+          import subprocess
+          from pathlib import Path
+
+          current_text = Path("backend/app/__init__.py").read_text()
+          current = re.search(r'__version__ = "([^"]+)"', current_text).group(1)
+          main_text = subprocess.check_output(
+              ["git", "show", "origin/main:backend/app/__init__.py"],
+              text=True,
+          )
+          main = re.search(r'__version__ = "([^"]+)"', main_text).group(1)
+          if current != main:
+              raise SystemExit(
+                  f"非 main 分支不得独立发布版本：当前 {current}，main {main}。"
+                  "请先合入 main，再由 main 统一迭代版本。"
+              )
+          print(f"non-main version guard ok: {current}")
           PY

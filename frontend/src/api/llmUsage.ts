@@ -6,6 +6,7 @@ export interface LLMUsageRecord {
   provider_id: number | null;
   provider_name?: string | null;
   model: string | null;
+  client_identity_profile?: string | null;
   source?: string | null;
   input_tokens: number;
   output_tokens: number;

@@ -173,13 +173,14 @@ export function RecentUsageContent() {
         ) : (
           <>
           <div className="hidden overflow-x-auto md:block">
-            <Table className="min-w-[900px]">
+            <Table className="min-w-[1040px]">
               <TableHeader>
                 <TableRow>
                   <TableHead>时间</TableHead>
                   <TableHead>来源</TableHead>
                   <TableHead>模型提供商</TableHead>
                   <TableHead>模型</TableHead>
+                  <TableHead>客户端</TableHead>
                   <TableHead>Token</TableHead>
                   <TableHead>耗时</TableHead>
                   <TableHead>结果</TableHead>
@@ -199,19 +200,21 @@ export function RecentUsageContent() {
                         onClick={() => setExpandedId((current) => (current === r.id ? null : r.id))}
                       >
                         <TableCell className="text-xs text-muted-foreground">{new Date(r.created_at).toLocaleString()}</TableCell>
-                        <TableCell>
+                        <TableCell title={r.source || undefined}>
                           <div className="font-medium">{usageSourceLabel(r.source)}</div>
-                          <div className="font-mono text-[11px] text-muted-foreground">{r.source || "-"}</div>
                         </TableCell>
                         <TableCell>{r.provider_name || (r.provider_id ? `#${r.provider_id}` : "-")}</TableCell>
                         <TableCell className="font-mono text-xs">{r.model || "-"}</TableCell>
+                        <TableCell>{clientIdentityLabel(r.client_identity_profile)}</TableCell>
                         <TableCell>{tokens}</TableCell>
                         <TableCell>{r.latency_ms != null ? `${r.latency_ms}ms` : "-"}</TableCell>
                         <TableCell>
                           <MetaBadge tone={r.success ? "success" : "warn"}>{r.success ? "成功" : "失败"}</MetaBadge>
                         </TableCell>
                         <TableCell>{r.used_fallback ? "已使用" : "-"}</TableCell>
-                        <TableCell className="font-mono text-xs">{r.error_type || "-"}</TableCell>
+                        <TableCell className="text-xs" title={r.error_type || undefined}>
+                          {usageErrorLabel(r.error_type)}
+                        </TableCell>
                         <TableCell className="text-right">
                           <Button
                             type="button"
@@ -230,7 +233,7 @@ export function RecentUsageContent() {
                       </TableRow>
                       {expanded ? (
                         <TableRow>
-                          <TableCell colSpan={10} className="bg-muted/25 p-0">
+                          <TableCell colSpan={11} className="bg-muted/25 p-0">
                             <UsageDetailPanel record={r} />
                           </TableCell>
                         </TableRow>
@@ -292,8 +295,9 @@ function UsageRecordCard({
         </div>
         <div className="mt-3 flex items-center justify-between gap-2">
           <div className="flex flex-wrap gap-1.5">
+            <MetaBadge tone="info">客户端 {clientIdentityLabel(record.client_identity_profile)}</MetaBadge>
             {record.used_fallback ? <MetaBadge tone="outline">已 Fallback</MetaBadge> : null}
-            {record.error_type ? <MetaBadge tone="warn">{record.error_type}</MetaBadge> : null}
+            {record.error_type ? <MetaBadge tone="warn">{usageErrorLabel(record.error_type)}</MetaBadge> : null}
           </div>
           <span className="inline-flex shrink-0 items-center rounded-full border border-primary/30 bg-primary/10 px-2.5 py-1 text-xs font-medium text-primary">
             {expanded ? "收起详情" : "查看详情"}
@@ -313,10 +317,11 @@ function UsageRecordCard({
 function UsageDetailPanel({ record }: { record: LLMUsageRecord }) {
   return (
     <div className="space-y-3 md:p-4">
-      <div className="grid gap-2 text-xs sm:grid-cols-2 lg:grid-cols-4">
+      <div className="grid gap-2 text-xs sm:grid-cols-2 xl:grid-cols-5">
         <InfoCell label="调用来源" value={usageSourceLabel(record.source)} />
         <InfoCell label="账号" value={record.account_id == null ? "-" : `#${record.account_id}`} />
         <InfoCell label="模型提供商" value={record.provider_name || (record.provider_id ? `#${record.provider_id}` : "-")} />
+        <InfoCell label="客户端" value={clientIdentityLabel(record.client_identity_profile)} />
         <InfoCell label="Token" value={`${record.input_tokens || 0} 输入 / ${record.output_tokens || 0} 输出`} />
       </div>
       <div className="grid gap-3 lg:grid-cols-2">
@@ -382,16 +387,58 @@ function PreviewBlock({
 function llmErrorPreview(record: LLMUsageRecord): string | null {
   const errorType = record.error_type?.trim();
   if (!errorType) return null;
-  return `错误类型：${errorType}`;
+  return `错误类型：${usageErrorLabel(errorType)}`;
 }
 
 function usageSourceLabel(source?: string | null): string {
   const value = source || "";
+  const labels: Record<string, string> = {
+    system_agent: "系统助手",
+    system_agent_router: "系统助手意图路由",
+    "diagnostic:protocol_detection": "协议检测",
+    "diagnostic:chat-test": "模型对话测试",
+    "diagnostic:test-model": "模型快速测试",
+    "diagnostic:full-liveness": "模型完整检测",
+    scheduler: "定时任务",
+    system: "系统",
+  };
+  if (labels[value]) return labels[value];
   if (value.startsWith("plugin:")) return `插件 ${value.slice("plugin:".length)}`;
   if (value.startsWith("command:")) return `AI 指令 ${value.slice("command:".length)}`;
-  if (value === "scheduler") return "定时任务";
-  if (value === "system") return "系统";
   return value || "未知来源";
+}
+
+function clientIdentityLabel(profile?: string | null): string {
+  const value = profile?.trim() || "";
+  const labels: Record<string, string> = {
+    auto: "自动选择",
+    minimal: "最小身份",
+    openai_sdk: "OpenAI SDK",
+    codex_cli: "Codex CLI",
+    codex_desktop: "Codex Desktop",
+    claude_code: "Claude Code",
+    claude_desktop: "Claude Desktop",
+    grok_cli: "Grok CLI",
+  };
+  return labels[value] || value || "未记录";
+}
+
+function usageErrorLabel(errorType?: string | null): string {
+  const value = errorType?.trim() || "";
+  const labels: Record<string, string> = {
+    auth: "鉴权失败",
+    budget_exceeded: "额度不足",
+    cancelled: "调用已取消",
+    consumer_closed: "连接已关闭",
+    llmerror: "模型调用错误",
+    network: "网络错误",
+    rate_limit: "请求过多",
+    server_error: "上游服务错误",
+    timeout: "请求超时",
+    unknown: "未知错误",
+    valueerror: "响应格式错误",
+  };
+  return labels[value] || value || "-";
 }
 
 async function copyPreview(text: string, title: string) {
