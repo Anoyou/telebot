@@ -16888,6 +16888,48 @@ async def test_account_bot_rich_features_use_native_task_list(monkeypatch) -> No
 
 
 @pytest.mark.asyncio
+async def test_account_bot_rich_commands_use_status_table(monkeypatch) -> None:
+    incoming = account_bot_runtime.Incoming(
+        account_id=7,
+        token="bot-token",
+        update_id=1,
+        user_id=2,
+        chat_id=12345,
+        message_id=99,
+        text="/commands",
+    )
+    send = AsyncMock()
+    monkeypatch.setattr(account_bot_runtime, "_send", send)
+    monkeypatch.setattr(account_bot_runtime, "_load_command_prefix", AsyncMock(return_value=","))
+    monkeypatch.setattr(
+        account_bot_runtime.command_service,
+        "list_for_account",
+        AsyncMock(
+            return_value=[
+                SimpleNamespace(
+                    enabled=True,
+                    template=SimpleNamespace(id=1, name="ask", type="reply_text"),
+                ),
+                SimpleNamespace(
+                    enabled=False,
+                    template=SimpleNamespace(id=2, name="draw", type="run_plugin"),
+                ),
+            ]
+        ),
+    )
+
+    await account_bot_runtime._show_commands(incoming, "admin")
+
+    rich_html = send.await_args.kwargs["rich_html"]
+    assert "<table bordered striped>" in rich_html
+    assert "<tr><th>命令</th><th>类型</th><th>状态</th></tr>" in rich_html
+    assert "<code>,ask</code>" in rich_html
+    assert "<td>reply_text</td><td>已启用</td>" in rich_html
+    assert "<td>run_plugin</td><td>已停用</td>" in rich_html
+    assert "<ul>" not in rich_html
+
+
+@pytest.mark.asyncio
 async def test_notify_account_records_trace_action(monkeypatch) -> None:
     class _Session:
         async def __aenter__(self):

@@ -8848,7 +8848,7 @@ async def _show_commands(incoming: Incoming, role: str, *, edit: bool = False) -
         cmd_prefix = await _load_command_prefix(db)
         items = await command_service.list_for_account(db, incoming.account_id)
     lines = ["⌨️ <b>自定义命令模板</b>", "点击按钮可启停当前账号的模板。", ""]
-    rich_items: list[str] = []
+    rich_rows: list[str] = []
     buttons: list[dict[str, str]] = []
     for item in items[:_MAX_BUTTON_ROWS]:
         tpl = item.template
@@ -8860,9 +8860,10 @@ async def _show_commands(incoming: Incoming, role: str, *, edit: bool = False) -
         lines.append(
             f"{'✅' if item.enabled else '⬜️'} <code>{command}</code> · {template_type}"
         )
-        checked = " checked" if item.enabled else ""
-        rich_items.append(
-            f'<li><input type="checkbox"{checked}><code>{command}</code> · {template_type}</li>'
+        command_status = "已启用" if item.enabled else "已停用"
+        rich_rows.append(
+            f"<tr><td><code>{command}</code></td>"
+            f"<td>{template_type}</td><td>{command_status}</td></tr>"
         )
         if account_bot_service.role_allows(role, ACCOUNT_BOT_ROLE_OPERATOR):
             buttons.append(
@@ -8878,7 +8879,10 @@ async def _show_commands(incoming: Incoming, role: str, *, edit: bool = False) -
     rich_html = (
         "<h1>⌨️ 自定义命令模板</h1>"
         "<p>点击下方按钮可启停当前账号的模板。</p>"
-        f"<ul>{''.join(rich_items)}</ul>"
+        "<table bordered striped>"
+        "<tr><th>命令</th><th>类型</th><th>状态</th></tr>"
+        f"{''.join(rich_rows)}"
+        "</table>"
     )
     await _send(
         incoming,
