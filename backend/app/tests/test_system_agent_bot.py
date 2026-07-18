@@ -129,6 +129,52 @@ async def test_run_agent_query_edits_final_message(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("draft_error", [None, RuntimeError("draft unavailable")])
+async def test_run_agent_query_draft_never_blocks_final_delivery(monkeypatch, draft_error) -> None:  # noqa: ANN001
+    send = _SendCapture()
+    draft = AsyncMock(side_effect=draft_error)
+
+    class _Svc:
+        async def get_or_create_active_session(self, *a, **k):  # noqa: ANN001
+            return SimpleSession("sess-draft")
+
+        async def get_session(self, *a, **k):  # noqa: ANN001
+            return SimpleSession("sess-draft")
+
+        async def stream_message(self, *a, **k):  # noqa: ANN001
+            yield {"type": "assistant_message", "content": "最终答案"}
+            yield {"type": "done", "ok": True}
+
+    class SimpleSession:
+        def __init__(self, sid: str) -> None:
+            self.id = sid
+
+    class _DB:
+        async def __aenter__(self):
+            return AsyncMock()
+
+        async def __aexit__(self, *args):
+            return False
+
+    monkeypatch.setattr(bot_bridge, "AsyncSessionLocal", lambda: _DB())
+    monkeypatch.setattr(bot_bridge, "get_system_agent_service", lambda: _Svc())
+    monkeypatch.setattr(bot_bridge, "refresh_agent_mode", AsyncMock())
+
+    await bot_bridge.run_agent_query(
+        account_id=1,
+        tg_user_id=2,
+        role="admin",
+        text="生成答案",
+        send=send,
+        draft=draft,
+    )
+
+    draft.assert_awaited_once_with("")
+    assert "最终答案" in send.calls[-1]["msg"]
+    assert send.calls[-1]["edit"] is (draft_error is not None)
+
+
+@pytest.mark.asyncio
 async def test_run_agent_query_attaches_inline_confirm(monkeypatch) -> None:
     send = _SendCapture()
 

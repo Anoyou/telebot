@@ -2422,6 +2422,39 @@ async def test_interaction_delivery_executor_sends_native_rich_message(monkeypat
 
 
 @pytest.mark.asyncio
+async def test_interaction_delivery_rejects_userbot_rich_buttons_even_without_guard() -> None:
+    incoming = account_bot_runtime.Incoming(
+        account_id=1,
+        token="123:token",
+        update_id=10,
+        user_id=None,
+        chat_id=-100,
+        message_id=30,
+        text="",
+    )
+    run_worker_action = AsyncMock()
+    executor = InteractionDeliveryExecutor(
+        incoming=incoming,
+        write_log=AsyncMock(),
+        run_worker_action=run_worker_action,
+        log_context=account_bot_runtime._interaction_log_context,
+        trace_context=account_bot_runtime._interaction_trace_context,
+    )
+
+    ok, result = await executor.edit_rich_message(
+        {"html": "<h1>更新</h1>"},
+        chat_id=-100,
+        message_id=30,
+        send_via="userbot_reply",
+        reply_markup={"inline_keyboard": []},
+    )
+
+    assert ok is False
+    assert result["error_code"] == "rich_message_reply_markup_unsupported"
+    run_worker_action.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_message_ops_buffers_standard_actions() -> None:
     ops = BufferedMessageOps()
 
@@ -2522,6 +2555,21 @@ async def test_message_ops_buffers_rich_message_edit_for_interaction_bot() -> No
             "reply_markup": {"inline_keyboard": []},
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_message_ops_rich_message_uses_userbot_only_when_explicit() -> None:
+    ops = BufferedMessageOps()
+
+    await ops.send_rich(channel="userbot_reply", chat_id=-100, markdown="# 状态")
+    await ops.edit_rich(
+        channel="userbot_reply",
+        chat_id=-100,
+        message_id=41,
+        html="<h1>已更新</h1>",
+    )
+
+    assert [action["send_via"] for action in ops.actions] == ["userbot_reply", "userbot_reply"]
 
 
 @pytest.mark.asyncio
@@ -2816,7 +2864,7 @@ async def test_rich_message_defaults_to_interaction_bot_in_userbot_session() -> 
 
 
 @pytest.mark.asyncio
-async def test_rich_message_rejects_userbot_only_channel() -> None:
+async def test_rich_message_accepts_explicit_userbot_channel() -> None:
     write_log = AsyncMock()
 
     guarded = await interaction_contracts.guard_interaction_actions(
@@ -2833,8 +2881,76 @@ async def test_rich_message_rejects_userbot_only_channel() -> None:
         session_channel="userbot_reply",
     )
 
+    assert guarded == [
+        {
+            "type": "send_rich_message",
+            "send_via": "userbot_reply",
+            "rich_message": {"html": "<h1>状态</h1>"},
+        }
+    ]
+    write_log.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_rich_message_auto_does_not_implicitly_fallback_to_userbot() -> None:
+    guarded = await interaction_contracts.guard_interaction_actions(
+        rule={},
+        actions=[
+            {
+                "type": "send_rich_message",
+                "send_via": "auto",
+                "rich_message": {"html": "<h1>状态</h1>"},
+            }
+        ],
+        resolve_entry_manifest=lambda *_args: None,
+        write_log=AsyncMock(),
+        session_channel="userbot_reply",
+    )
+
+    assert guarded[0]["send_via"] == "interaction_bot"
+    assert guarded[0].get("send_via_options") is None
+
+
+@pytest.mark.asyncio
+async def test_userbot_rich_message_reply_markup_fails_instead_of_being_stripped() -> None:
+    write_log = AsyncMock()
+    guarded = await interaction_contracts.guard_interaction_actions(
+        rule={},
+        actions=[
+            {
+                "type": "send_rich_message",
+                "send_via": "userbot_reply",
+                "rich_message": {"html": "<h1>状态</h1>"},
+                "reply_markup": {"inline_keyboard": []},
+            }
+        ],
+        resolve_entry_manifest=lambda *_args: None,
+        write_log=write_log,
+        session_channel="userbot_reply",
+    )
+
     assert guarded == []
-    assert write_log.await_args.kwargs["reason_code"] == "rich_message_requires_interaction_bot"
+    assert write_log.await_args.kwargs["reason_code"] == "rich_message_reply_markup_unsupported"
+
+
+@pytest.mark.asyncio
+async def test_rich_message_reply_markup_narrows_explicit_fallback_to_bot() -> None:
+    guarded = await interaction_contracts.guard_interaction_actions(
+        rule={},
+        actions=[
+            {
+                "type": "send_rich_message",
+                "send_via": ["userbot_reply", "interaction_bot"],
+                "rich_message": {"html": "<h1>状态</h1>"},
+                "reply_markup": {"inline_keyboard": []},
+            }
+        ],
+        resolve_entry_manifest=lambda *_args: None,
+        write_log=AsyncMock(),
+        session_channel="userbot_reply",
+    )
+
+    assert guarded[0]["send_via"] == "interaction_bot"
 
 
 @pytest.mark.asyncio

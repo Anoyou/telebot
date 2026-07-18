@@ -14,7 +14,7 @@
 | userbot 命令会话 | UserBot 前缀命令进入标准事件信封 | 普通收发默认 userbot | 适合管理员命令和账号身份动作；按钮会降级成文本编号 |
 | interaction bot 规则会话 | 关键词、付款确认、按钮回调进入标准事件信封 | 普通收发默认 interaction bot | 适合高频群内互动、按钮、题面和会话提示 |
 
-固定路由例外有两类：`payout`、收付款、发奖永远由 userbot 执行；Bot API 原生 `send_rich_message` 永远由 interaction bot 执行。Event Bus、Trace、MessageOps 只是标准会话链路的内部契约，不是第四种模式。
+固定路由例外有两类：`payout`、收付款、发奖永远由 userbot 执行；`send_rich_message` 默认由 interaction bot 执行，只有显式选择 `userbot_reply` 才进入 Layer 228 Userbot 路径。Event Bus、Trace、MessageOps 只是标准会话链路的内部契约，不是第四种模式。
 
 ### 指令前缀（command_prefix）
 
@@ -60,7 +60,7 @@ TelePilot 按个人可信插件模式运行：管理员安装并启用插件后�
 
 - 会话通道由触发方式决定。命令开局默认走 userbot，关键词/付款/按钮开局默认走 interaction bot；普通发送动作应继承 `session.channel`，不要每条消息手动改通道。
 - `payout`、收付款、发奖永远经 userbot 执行，并进入 `RateLimitEngine`、trace 和失败回写。插件不要把 Bot 公告伪装成转账，也不要把发奖逻辑拆成“先发普通消息，再等旧文案协议补发”。
-- `send_rich_message` 是 Telegram Bot API 原生能力，固定经 Interaction Bot 执行。UserBot/Telethon 没有对等发送接口；显式请求 `userbot_reply` 必须以 `rich_message_requires_interaction_bot` 失败，禁止静默转成普通 HTML 或纯文本。
+- `send_rich_message` 默认经 Interaction Bot 执行。显式请求 `userbot_reply` 时使用 Telethon Layer 228，并要求 Premium 与 `rich_message_posting`；当前支持 HTML、Markdown 和可无损转换的纯文本 blocks，复杂/媒体 blocks、media、Bot `reply_markup` 必须明确失败，禁止静默转成普通 HTML 或纯文本。
 - TelePilot 自有的账号 Bot 控制页与系统告警可以在同一个 Bot 内从 Rich Message 回退到旧 HTML，以兼容 Bot API 暂不支持或格式拒绝；插件 `send_rich_message` 不继承这个内部兼容策略。
 - userbot 会话没有原生 inline 按钮能力。平台会把按钮降级成文本编号，并把玩家回复合成为 callback 事件；这意味着强按钮玩法最好默认 `keyword_only`，避免命令开局落到不适合的通道。
 
@@ -235,7 +235,7 @@ TelePilot 按个人可信插件模式运行：管理员安装并启用插件后�
 
 | 场景 | 标准会话主路径 | 旧 hook 兼容边界 |
 |------|--------------|------------------|
-| 普通消息/关键词 | 返回 `send_message` / `send_photo` / `send_file`，默认省略 `send_via` 并继承会话通道；原生结构化内容返回 `send_rich_message` 并固定走 Interaction Bot；媒体题面可保存 `save_message_id_key` 后用 `edit_caption` 原地更新 caption | `on_message` 的 `event.reply(...)` / `event.respond(...)` 仅用于历史内置或迁移桥 |
+| 普通消息/关键词 | 返回 `send_message` / `send_photo` / `send_file`，默认省略 `send_via` 并继承会话通道；原生结构化内容返回 `send_rich_message`，默认走 Interaction Bot，显式 Userbot 仅限受支持的 HTML、Markdown 或纯文本 blocks；媒体题面可保存 `save_message_id_key` 后用 `edit_caption` 原地更新 caption | `on_message` 的 `event.reply(...)` / `event.respond(...)` 仅用于历史内置或迁移桥 |
 | 管理员命令 | `command` 事件进入 Event Bus 后返回 action；需要编辑原指令时声明 `edit_message` | `on_command` 的 `event.edit(...)` 可保留；另发消息时不要绕过 MessageOps 记录 |
 | 按钮回调 | 返回 `answer_callback`，再按需返回 `send_message` / `edit_message` / `edit_caption` | 不直接拼 Bot API，不假设 incoming message 可编辑 |
 | Inline Query | 返回 `answer_inline_query`；选择结果用 `chosen_inline_result` 记录 | 旧 hook 没有统一 trace，不作为新插件入口 |

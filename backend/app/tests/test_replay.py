@@ -46,6 +46,23 @@ def _fake_envelope(account_id: int = 7) -> dict:
     }
 
 
+def test_replay_userbot_event_preserves_rich_message_metadata() -> None:
+    envelope = _fake_envelope()
+    envelope["message"].update(
+        {
+            "text": "富文本 fallback",
+            "text_source": "rich_message_fallback",
+            "rich_message": {"blocks": [{"type": "paragraph", "text": "富文本 fallback"}]},
+        }
+    )
+
+    event = replay_mod._userbot_event_from_envelope(envelope)  # noqa: SLF001
+
+    assert event.raw_text == "富文本 fallback"
+    assert event.message.text_source == "rich_message_fallback"
+    assert event.message.rich_message == envelope["message"]["rich_message"]
+
+
 class _FakeScalarResult:
     def __init__(self, rows: list[Any]) -> None:
         self._rows = rows

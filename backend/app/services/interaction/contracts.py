@@ -9,7 +9,7 @@ from ..event_bus import EVENT_REASON_CODES
 
 INTERACTION_SEND_VIA = {"interaction_bot", "userbot_reply"}
 INTERACTION_BUTTON_CHANNELS = {"interaction_bot"}
-INTERACTION_RICH_MESSAGE_CHANNELS = {"interaction_bot"}
+INTERACTION_RICH_MESSAGE_CHANNELS = {"interaction_bot", "userbot_reply"}
 TRUSTED_DEFAULT_SEND_VIA = ("interaction_bot", "userbot_reply")
 DEPRECATED_SEND_VIA = {"notice", "bbot_notice", "notice_bot"}
 SEND_CHANNEL_DEPRECATED_REASON_CODE = "send_channel_deprecated"
@@ -290,12 +290,14 @@ async def guard_interaction_actions(
                 rich_channels = [
                     item for item in send_via_options if item in INTERACTION_RICH_MESSAGE_CHANNELS
                 ]
+                if not _selector_explicitly_requests_userbot(requested_raw):
+                    rich_channels = [item for item in rich_channels if item != "userbot_reply"]
                 if not rich_channels:
                     await write_log(
                         "warn",
-                        "interaction rich message requires Interaction Bot",
+                        "interaction rich message has no supported send channel",
                         guard_level="failed",
-                        reason_code="rich_message_requires_interaction_bot",
+                        reason_code="unsupported_send_via",
                         action_type=action_type,
                         send_via=send_via_options,
                         **context,
@@ -304,7 +306,7 @@ async def guard_interaction_actions(
                 if rich_channels != send_via_options:
                     await write_log(
                         "info",
-                        "interaction rich message send_via narrowed to Interaction Bot",
+                        "interaction rich message send_via narrowed to supported channels",
                         action_type=action_type,
                         send_via=send_via_options,
                         narrowed_send_via=rich_channels,
@@ -325,7 +327,27 @@ async def guard_interaction_actions(
                     **context,
                 )
             if "reply_markup" in action:
-                preserve_userbot_markup = normalized_session_channel == "userbot_reply" and "userbot_reply" in send_via_options
+                if (
+                    (action_type == "send_rich_message" or is_rich_edit)
+                    and "userbot_reply" in send_via_options
+                    and "interaction_bot" not in send_via_options
+                ):
+                    await write_log(
+                        "warn",
+                        "interaction Userbot Rich Message does not support reply_markup",
+                        guard_level="failed",
+                        reason_code="rich_message_reply_markup_unsupported",
+                        action_type=action_type,
+                        send_via=send_via_options,
+                        **context,
+                    )
+                    continue
+                preserve_userbot_markup = (
+                    action_type != "send_rich_message"
+                    and not is_rich_edit
+                    and normalized_session_channel == "userbot_reply"
+                    and "userbot_reply" in send_via_options
+                )
                 button_channels = [item for item in send_via_options if item in INTERACTION_BUTTON_CHANNELS]
                 if preserve_userbot_markup:
                     pass
@@ -364,6 +386,22 @@ def _entry_result_contract(
     entry = resolve_entry_manifest(module_key, entry_key)
     contract = entry.get("result_contract") if isinstance(entry, dict) else None
     return dict(contract) if isinstance(contract, dict) else {}
+
+
+def _selector_explicitly_requests_userbot(selector: Any) -> bool:
+    if isinstance(selector, dict):
+        raw = (
+            selector.get("prefer")
+            or selector.get("channels")
+            or selector.get("send_via")
+            or selector.get("channel")
+        )
+        return _selector_explicitly_requests_userbot(raw)
+    if isinstance(selector, str):
+        return selector.strip().lower() in {"userbot", "userbot_reply"}
+    if isinstance(selector, (list, tuple, set)):
+        return any(_selector_explicitly_requests_userbot(item) for item in selector)
+    return False
 
 
 __all__ = [

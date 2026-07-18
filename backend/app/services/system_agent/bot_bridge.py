@@ -424,6 +424,7 @@ async def handle_agent_command(
     role: str,
     text: str,
     send: Any,
+    draft: Any | None = None,
     edit: bool = False,
 ) -> None:
     """处理 `/agent` 及其子命令与自然语言任务。"""
@@ -512,6 +513,7 @@ async def handle_agent_command(
         role=role,
         text=tail,
         send=send,
+        draft=draft,
         edit=edit,
     )
 
@@ -523,6 +525,7 @@ async def run_agent_query(
     role: str,
     text: str,
     send: Any,
+    draft: Any | None = None,
     edit: bool = False,
 ) -> None:
     """执行一轮助手查询；写工具附带 Inline 确认按钮。"""
@@ -541,7 +544,15 @@ async def run_agent_query(
     except Exception:  # noqa: BLE001
         log.warning("attach secrets to pending action failed", exc_info=True)
 
-    await send("⏳ 系统助手处理中…", edit=edit)
+    draft_active = False
+    if draft is not None:
+        try:
+            await draft("")
+            draft_active = True
+        except Exception:  # noqa: BLE001
+            log.debug("system agent bot draft unavailable; using persistent placeholder", exc_info=True)
+    if not draft_active:
+        await send("⏳ 系统助手处理中…", edit=edit)
 
     assistant_text = ""
     error_text = ""
@@ -583,7 +594,7 @@ async def run_agent_query(
             error_text = str(exc)[:400]
 
     if error_text and not assistant_text and not proposed_actions:
-        await send(f"❌ {_html_escape(error_text)}", edit=True)
+        await send(f"❌ {_html_escape(error_text)}", edit=not draft_active)
         return
 
     body = assistant_text or ""
@@ -617,10 +628,10 @@ async def run_agent_query(
         markup = _agent_confirm_keyboard(account_id, nonce, dangerous=danger) if nonce else None
         if not nonce:
             card += "\n（Redis 不可用，请稍后重试，或到 Web /assistant 重新发起）"
-        await send(safe + card, edit=True, reply_markup=markup)
+        await send(safe + card, edit=not draft_active, reply_markup=markup)
         return
 
-    await send(safe, edit=True, reply_markup=None)
+    await send(safe, edit=not draft_active, reply_markup=None)
     for action in proposed_actions:
         nonce = await store_agent_confirm_nonce(
             account_id=account_id,

@@ -36,6 +36,8 @@ class MessageRef:
     edited: bool = False
     reply_to_message_id: int | None = None
     reply_to_text: str | None = None
+    rich_message: dict[str, Any] | None = None
+    text_source: str = "message"
 
 
 @dataclass(slots=True)
@@ -121,6 +123,8 @@ def event_from_interaction_payload(payload: dict[str, Any]) -> TelePilotEvent:
             message_raw.get("reply_to_message_id") or reply_to.get("message_id") or data.get("reply_to_message_id")
         ),
         reply_to_text=str(reply_to.get("text") or data.get("reply_to_text") or "") or None,
+        rich_message=_dict_or_none(message_raw.get("rich_message")),
+        text_source=str(message_raw.get("text_source") or "message"),
     )
     sender = _actor_from_payload(sender_raw, data)
     actor = _actor_from_payload(actor_raw, data)

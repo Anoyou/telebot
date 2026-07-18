@@ -663,11 +663,30 @@ class InteractionDeliveryExecutor:
             return False, {}
         if message_id is None:
             return False, {"error": "message_id missing"}
-        if send_via != "interaction_bot":
-            return False, {
-                "error": "edit_rich_message only supports interaction_bot",
-                "error_code": "rich_message_requires_interaction_bot",
+        if send_via == "userbot_reply":
+            if reply_markup is not None:
+                return False, {
+                    "error": "Userbot Rich Message does not support reply_markup",
+                    "error_code": "rich_message_reply_markup_unsupported",
+                }
+            payload = {
+                "action_type": "edit_message",
+                "chat_id": target_chat_id,
+                "message_id": message_id,
+                "rich_message": rich_message,
             }
+            ok, error, result = await self.run_worker_action(self.incoming, payload=payload)
+            if not ok:
+                error_code = _result_error_code(result, _worker_action_error_code(error))
+                return False, _userbot_action_failure_result(
+                    payload,
+                    error=error,
+                    error_code=error_code,
+                    result=result,
+                )
+            return True, result
+        if send_via != "interaction_bot":
+            return False, {"error": f"unsupported send_via: {send_via}", "error_code": "unsupported_send_via"}
         token = await self._resolve_token(send_via)
         if not token:
             return False, {"error": "bot token unavailable", "error_code": "bot_token_missing"}
@@ -1201,7 +1220,40 @@ class InteractionDeliveryExecutor:
         ok = False
         for send_via in send_via_options:
             used_send_via = send_via
+            if send_via == "userbot_reply":
+                if reply_markup is not None:
+                    last_result = {
+                        "error": "Userbot Rich Message does not support reply_markup",
+                        "error_code": "rich_message_reply_markup_unsupported",
+                    }
+                    continue
+                payload = {
+                    "action_type": "send_rich_message",
+                    "chat_id": target_chat_id,
+                    "rich_message": rich_message,
+                    "reply_to_message_id": reply_to_message_id,
+                }
+                worker_ok, worker_error, worker_result = await self.run_worker_action(
+                    self.incoming,
+                    payload=payload,
+                )
+                if worker_ok:
+                    last_result = worker_result
+                    ok = True
+                    break
+                error_code = _result_error_code(worker_result, _worker_action_error_code(worker_error))
+                last_result = _userbot_action_failure_result(
+                    payload,
+                    error=worker_error,
+                    error_code=error_code,
+                    result=worker_result,
+                )
+                continue
             if send_via != "interaction_bot":
+                last_result = {
+                    "error": f"unsupported send_via: {send_via}",
+                    "error_code": "unsupported_send_via",
+                }
                 continue
             token = await self._resolve_token(send_via)
             if not token:

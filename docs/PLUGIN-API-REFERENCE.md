@@ -630,6 +630,7 @@ curl -X POST "https://<telepilot-host>/api/webhooks/{account_id}/{hook_key}" \
 
 - `payload["tp_event"]`：进程内调用时已挂好的 `TelePilotEvent` 投影对象；跨 IPC 路径平台会重建同形对象。
 - `message.entities` / `message.media` / `message.date`：统一消息摘要，编辑消息和媒体消息也走同一套字段。
+- `message.rich_message` / `message.text_source`：Userbot 收到 Layer 228 Rich Message 时保留规范化 blocks；普通文本为空时，`message.text` 使用纯文本 fallback，并标记 `text_source="rich_message_fallback"`。
 - `chat.title` / `chat.username`：群标题、username 等可直接读取，不必回头翻 `native_raw`。
 - `session.channel` / `session.expires_at` / `session.data`：当前会话通道、超时点和持久化状态。
 - `source.synthetic`：平台合成事件来源，例如 userbot 文本按钮降级后的 `text_button`。
@@ -709,7 +710,7 @@ return [{
 }]
 ```
 
-Rich Message 是 Telegram Bot API 10.2 的 Bot 专属能力。TelePilot 始终通过 `interaction_bot` 执行：即使当前是 UserBot 命令会话，省略通道也会切到 Interaction Bot；显式指定 `userbot_reply` 会以 `rich_message_requires_interaction_bot` 拒绝，不做静默降级。Telegram 的原生限制为 32768 个 UTF-8 字符、500 个结构块、16 层嵌套、50 个媒体附件、表格最多 20 列；TelePilot 会先做结构和 JSON 安全检查，最终格式解析仍以 [Telegram Rich Message 文档](https://core.telegram.org/bots/api#rich-message-formatting-options) 为准。
+Rich Message 默认通过 `interaction_bot` 执行：即使当前是 UserBot 命令会话，省略通道也会切到 Interaction Bot。显式指定 `userbot_reply` 时使用 Telethon Layer 228；主号必须具备 Telegram Premium 且 Telegram app config 的 `rich_message_posting` 可用，当前接受 HTML、Markdown 和可无损转换的纯文本 blocks，不支持媒体型/复杂 blocks、media 或 Bot `reply_markup`。两条路径都不做静默降级。Telegram 原生限制包括 32768 文本单位、500 个结构块、16 层嵌套、50 个媒体附件和表格最多 20 列；TelePilot 的 Userbot 适配按 32768 UTF-8 bytes 检查，Bot 通道保持 32768 字符计量。最终格式解析仍以 [Telegram Rich Message 文档](https://core.telegram.org/bots/api#rich-message-formatting-options) 为准。
 
 插件 action 的失败语义保持严格，不会自动改成普通消息。只有 TelePilot 自己拥有的账号 Bot 移动控制页和系统告警采用“同一个 Bot 先发 Rich Message，Bot API 拒绝时回退原有 HTML”的兼容策略；这个内部回退不会切换到 UserBot，也不会改变插件 action 的契约。
 
@@ -868,7 +869,7 @@ userbot 会话里的 `reply_markup` 不会直接丢掉：
 | `contract_warning` / `contract_failed` | 插件越声明调用被告警放行，或请求客观不可执行能力 |
 | `action_limit_exceeded` | 插件返回的动作超出平台允许数量，后续动作被截断并写入可见告警 |
 | `send_channel_deprecated` / `unsupported_send_via` | 请求旧 `notice` 通道或未知通道 |
-| `rich_message_requires_interaction_bot` / `invalid_rich_message` | 原生 Rich Message 被要求走 UserBot，或内容结构未通过校验 |
+| `premium_required` / `rich_message_posting_disabled` / `rich_message_capability_unknown` / `rich_message_blocks_unsupported` / `rich_message_media_unsupported` / `invalid_rich_message` | Userbot Rich Message 能力不足或无法确认、输入超出当前适配范围、内容结构未通过校验 |
 | `bot_not_configured` / `bot_token_missing` / `userbot_offline` | 交互 Bot 未配置、Bot token 缺失或 UserBot 离线 |
 | `settlement_requires_userbot` / `telegram_api_error` | 普通 Bot 请求钱相关能力，或 Telegram API 返回失败 |
 | `trace_write_failed` | Trace 写库失败，平台已降级写入旧 runtime log |
@@ -1139,13 +1140,13 @@ class GuessNumberPlugin(Plugin):
 | `send_message` | `save_message_id_key` | 可选；发送成功后把本次 Telegram `message_id` 按 key 保存 2 小时，供后续编辑、删除或替换使用 |
 | `send_message` | `replace_saved_message_id_key` | 可选；发送新消息并保存新 `message_id` 后，读取该 key 原来的消息 ID 并删除旧消息，适合“只保留最新一条”的滚动通知 |
 | `send_rich_message` | `rich_message` | Telegram 原生 Rich Message；对象中必须且只能提供 `html`、`markdown`、`blocks` 之一，可表达标题、任务列表、表格、折叠详情、公式和媒体块 |
-| `send_rich_message` | `reply_to_message_id`、`reply_markup`、`save_message_id_key`、`pin` | 可选；回复、按钮、保存消息 ID 和发送后置顶均由 Interaction Bot 执行 |
-| `send_rich_message` | `send_via` | 可省略，平台固定选择 `interaction_bot`；显式只选 `userbot_reply` 会以 `rich_message_requires_interaction_bot` 拒绝 |
+| `send_rich_message` | `reply_to_message_id`、`reply_markup`、`save_message_id_key`、`pin` | 可选；Userbot 路径支持回复，但 `reply_markup` 仅由 Interaction Bot 执行 |
+| `send_rich_message` | `send_via` | 可省略，平台默认选择 `interaction_bot`；显式 `userbot_reply` 使用 Layer 228，并受 Premium/能力与格式限制 |
 | `send_photo` / `send_file` | `photo_base64` / `file_base64` | 按动作通道发送图片/文件字节；交互 Bot 下 `send_photo` 走 `sendPhoto`，`send_file` 走 `sendDocument` |
 | `send_photo` / `send_file` | `filename`、`caption`、`reply_to_message_id` | 可选，文件名、说明文字、回复目标 |
 | `send_photo` / `send_file` | `save_message_id_key` | 可选；媒体发送成功后把 Telegram `message_id` 按 key 保存 2 小时，供后续 `edit_caption`、删除或替换使用 |
 | `edit_message` | `message_id`、`text` | 编辑纯文本消息；不用于编辑媒体 caption |
-| `edit_message` | `message_id`、`rich_message` | 使用官方 `editMessageText.rich_message` 编辑 Rich Message；`rich_message` 必须且只能提供 `html`、`markdown`、`blocks` 之一，固定由 Interaction Bot 执行 |
+| `edit_message` | `message_id`、`rich_message` | 编辑 Rich Message；默认由 Interaction Bot 执行，显式 Userbot 支持 HTML、Markdown 和纯文本 blocks，并受 Premium 与 `rich_message_posting` 门禁 |
 | `edit_caption` | `message_id` / `message_id_key`、`caption` | 编辑图片或文件消息的 caption；`message_id_key` 会读取同账号命名空间下由 `save_message_id_key` 保存的消息 ID |
 | `edit_caption` | `parse_mode`、`reply_markup` | 可选；`parse_mode="html"` 时按 HTML 发送，`reply_markup` 只由 `interaction_bot` 原生承接 |
 | `delete_message` | `message_id` | 删除对应 Bot 通道可操作的消息 |
@@ -1154,7 +1155,7 @@ class GuessNumberPlugin(Plugin):
 | `payout` | `amount`、`text`、`reply_to_message_id`、`reply_to_user_id`、`reply_to_display_name`、`reply_to_username`、`reply_to_search_limit`、`reply_anchor_missing_text` | UserBot 发奖动作；有消息 ID 时直接回复，否则可按用户 ID 查找近期发言作为锚点。公开名必须来自安全身份 facade，匿名管理员不传 username。超限拒（`error_code=payout_limit_exceeded`），瞬时失败自动进补偿队列重发，插件无需自己重试（见上文 payout 语义） |
 | `end_session` | 无 | 本次入口处理完成后不保留交互会话，适合彩票、红包等长期轮回插件 |
 
-通道原则是：**触发方式决定会话通道，插件默认不感知通道，框架负责路由和执行**。命令触发的普通会话收发走 userbot，关键词/付款/按钮触发的普通会话收发走交互 Bot。能力固定路由有两个例外：`payout`、收款确认和发奖等钱相关动作永远走 userbot；`send_rich_message` 永远走 Interaction Bot。其他动作只有在跨通道公告、特殊管理提示或迁移桥兼容时才显式写 `send_via`：
+通道原则是：**触发方式决定会话通道，插件默认不感知通道，框架负责路由和执行**。命令触发的普通会话收发走 userbot，关键词/付款/按钮触发的普通会话收发走交互 Bot。能力固定路由有两个例外：`payout`、收款确认和发奖等钱相关动作永远走 userbot；`send_rich_message` 默认走 Interaction Bot，只有明确指定时才走 Layer 228 Userbot。其他动作只有在跨通道公告、特殊管理提示或迁移桥兼容时才显式写 `send_via`：
 
 | send_via | 含义 | 约束 |
 | --- | --- | --- |
@@ -1209,8 +1210,8 @@ Contract Guard 不是公共插件市场式硬沙箱，而是个人可信插件�
 | `send_via` 同时包含受控通道和旧 `notice` / `bbot_notice` / `notice_bot` | 整个动作记录 `guard_level=failed`，返回 `send_channel_deprecated`，不做自动改写 |
 | `send_via` 只包含未知值 | 记录 `guard_level=failed`，返回不可执行失败和迁移提示 |
 | `send_via` 同时包含受控通道和非旧未知值 | 记录 `guard_level=warning`，保留可执行受控通道并继续执行 |
-| `send_rich_message` 未指定通道或使用 `auto` | 固定或收窄到 `interaction_bot`；不会交给 UserBot |
-| `send_rich_message` 只指定 `userbot_reply` | 记录 `guard_level=failed`，返回 `rich_message_requires_interaction_bot` |
+| `send_rich_message` 未指定通道或使用 `auto` | 默认选择 `interaction_bot`，保持既有行为 |
+| `send_rich_message` 只指定 `userbot_reply` | 使用 Layer 228 Userbot；能力或格式不满足时返回稳定错误码，不降级 |
 | 交互 Bot token 缺失、UserBot worker 离线、Telegram API 失败 | 返回客观能力失败，不伪装成功 |
 
 #### 标准事件信封
@@ -1322,7 +1323,7 @@ Contract Guard 不是公共插件市场式硬沙箱，而是个人可信插件�
 | 字段 | 说明 |
 | --- | --- |
 | `source` | 事件来源、事件类型、update/message/callback 基础索引；`source.type` 是插件分流主字段 |
-| `message` | 当前消息文本、消息 ID、回复目标、实体和媒体摘要 |
+| `message` | 当前消息文本、消息 ID、回复目标、实体、媒体和可选 Rich Message 摘要；`text_source` 标记文本来源 |
 | `chat` | 当前会话 ID、类型、标题和 username；标题可能为空 |
 | `sender` | Telegram 实际发送者；转账触发时通常是外部转账通知 Bot |
 | `source_actor` | 实际发来本条 Telegram 消息的 Bot/用户。转账触发时通常是可信转账通知 Bot，不应当作玩家 |

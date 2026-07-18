@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -408,42 +409,118 @@ async def test_run_interaction_userbot_action_payout_uses_rate_limit_and_parse_m
 
 
 @pytest.mark.asyncio
-async def test_run_interaction_userbot_action_rejects_native_rich_message() -> None:
+async def test_run_interaction_userbot_action_sends_native_rich_message(monkeypatch) -> None:
+    from app.services import userbot_rich_message
     from app.worker import runtime as runtime_mod
 
-    with pytest.raises(ValueError, match="rich_message_requires_interaction_bot") as exc_info:
-        await runtime_mod._run_interaction_userbot_action(
-            AsyncMock(),
-            {
-                "action_type": "send_rich_message",
-                "chat_id": -100333,
-                "rich_message": {"html": "<h1>状态</h1>"},
-            },
-        )
-    assert (
-        runtime_mod._interaction_action_error_code(str(exc_info.value))
-        == "rich_message_requires_interaction_bot"
+    send_rich = AsyncMock(return_value={"message_id": 45, "chat_id": -100333})
+    monkeypatch.setattr(userbot_rich_message, "send_rich_message", send_rich)
+
+    result = await runtime_mod._run_interaction_userbot_action(
+        AsyncMock(),
+        {
+            "action_type": "send_rich_message",
+            "chat_id": -100333,
+            "rich_message": {"html": "<h1>状态</h1>"},
+        },
     )
+    assert result["message_id"] == 45
+    send_rich.assert_awaited_once()
 
 
 @pytest.mark.asyncio
-async def test_run_interaction_userbot_action_rejects_native_rich_message_edit() -> None:
+async def test_run_interaction_userbot_action_edits_native_rich_message(monkeypatch) -> None:
+    from app.services import userbot_rich_message
     from app.worker import runtime as runtime_mod
 
-    with pytest.raises(ValueError, match="rich_message_requires_interaction_bot") as exc_info:
-        await runtime_mod._run_interaction_userbot_action(
-            AsyncMock(),
-            {
-                "action_type": "edit_message",
-                "chat_id": -100333,
-                "message_id": 44,
-                "rich_message": {"html": "<h1>更新</h1>"},
-            },
-        )
-    assert (
-        runtime_mod._interaction_action_error_code(str(exc_info.value))
-        == "rich_message_requires_interaction_bot"
+    edit_rich = AsyncMock(return_value={"message_id": 44, "chat_id": -100333})
+    monkeypatch.setattr(userbot_rich_message, "edit_rich_message", edit_rich)
+
+    result = await runtime_mod._run_interaction_userbot_action(
+        AsyncMock(),
+        {
+            "action_type": "edit_message",
+            "chat_id": -100333,
+            "message_id": 44,
+            "rich_message": {"html": "<h1>更新</h1>"},
+        },
     )
+    assert result["message_id"] == 44
+    edit_rich.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_deadline_proxy_executes_real_raw_rich_message_request(monkeypatch) -> None:
+    from telethon.tl import functions, types
+
+    from app.worker import runtime as runtime_mod
+
+    class _RawClient:
+        def __init__(self) -> None:
+            self.requests: list[object] = []
+            self.get_me_calls = 0
+
+        async def get_me(self):  # noqa: ANN201
+            self.get_me_calls += 1
+            return SimpleNamespace(premium=True)
+
+        async def get_input_entity(self, _peer):  # noqa: ANN001, ANN201
+            return types.InputPeerChat(chat_id=333)
+
+        async def __call__(self, request):  # noqa: ANN001, ANN201
+            self.requests.append(request)
+            if isinstance(request, functions.help.GetAppConfigRequest):
+                return types.help.AppConfig(
+                    hash=1,
+                    config=types.JsonObject(
+                        [
+                            types.JsonObjectValue(
+                                key="rich_message_posting",
+                                value=types.JsonBool(True),
+                            )
+                        ]
+                    ),
+                )
+            return SimpleNamespace(id=901)
+
+    async def _allow(**_kwargs):  # noqa: ANN003
+        return None
+
+    monkeypatch.setattr(runtime_mod, "_acquire_interaction_userbot_rate_limit", _allow)
+    client = _RawClient()
+    proxy = runtime_mod._DeadlineClientProxy(
+        client,
+        IPCMessage(CMD_RUN_INTERACTION_ACTION, {"deadline_at_ms": int(time.time() * 1000) + 10_000}),
+    )
+
+    result = await runtime_mod._run_interaction_userbot_action(
+        proxy,
+        {
+            "action_type": "send_rich_message",
+            "chat_id": -100333,
+            "rich_message": {"html": "<h1>状态</h1>"},
+        },
+    )
+    second_result = await runtime_mod._run_interaction_userbot_action(
+        runtime_mod._DeadlineClientProxy(
+            client,
+            IPCMessage(
+                CMD_RUN_INTERACTION_ACTION,
+                {"deadline_at_ms": int(time.time() * 1000) + 10_000},
+            ),
+        ),
+        {
+            "action_type": "send_rich_message",
+            "chat_id": -100333,
+            "rich_message": {"html": "<h1>第二条</h1>"},
+        },
+    )
+
+    assert result["message_id"] == 901
+    assert second_result["message_id"] == 901
+    assert client.get_me_calls == 1
+    assert sum(isinstance(request, functions.help.GetAppConfigRequest) for request in client.requests) == 1
+    assert sum(isinstance(request, functions.messages.SendMessageRequest) for request in client.requests) == 2
 
 
 @pytest.mark.asyncio

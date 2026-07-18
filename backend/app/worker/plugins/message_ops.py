@@ -72,6 +72,7 @@ class BufferedMessageOps:
     async def send_rich(
         self,
         *,
+        channel: MessageChannelSelector | None = None,
         chat_id: int | None = None,
         html: str | None = None,
         markdown: str | None = None,
@@ -84,7 +85,7 @@ class BufferedMessageOps:
         save_message_id_key: str | None = None,
         pin: bool = False,
     ) -> dict[str, Any]:
-        """Buffer a native Bot API rich message for the Interaction Bot only."""
+        """Buffer an official Rich Message; Interaction Bot remains the default."""
 
         selected = sum(value not in (None, "", []) for value in (html, markdown, blocks))
         if selected != 1:
@@ -104,11 +105,14 @@ class BufferedMessageOps:
             rich_message["skip_entity_detection"] = bool(skip_entity_detection)
         action: dict[str, Any] = {
             "type": "send_rich_message",
-            "send_via": "interaction_bot",
             "chat_id": chat_id,
             "rich_message": rich_message,
             "reply_to_message_id": reply_to_message_id,
         }
+        if channel is None:
+            action["send_via"] = "interaction_bot"
+        else:
+            _apply_channel(action, channel)
         if reply_markup is not None:
             action["reply_markup"] = dict(reply_markup)
         if save_message_id_key:
@@ -211,6 +215,7 @@ class BufferedMessageOps:
     async def edit_rich(
         self,
         *,
+        channel: MessageChannelSelector | None = None,
         chat_id: int | None = None,
         message_id: int,
         html: str | None = None,
@@ -221,7 +226,7 @@ class BufferedMessageOps:
         skip_entity_detection: bool | None = None,
         reply_markup: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Buffer an official Rich Message edit for the Interaction Bot."""
+        """Buffer an official Rich Message edit; Interaction Bot remains the default."""
 
         selected = sum(value not in (None, "", []) for value in (html, markdown, blocks))
         if selected != 1:
@@ -241,11 +246,14 @@ class BufferedMessageOps:
             rich_message["skip_entity_detection"] = bool(skip_entity_detection)
         action: dict[str, Any] = {
             "type": "edit_message",
-            "send_via": "interaction_bot",
             "chat_id": chat_id,
             "message_id": message_id,
             "rich_message": rich_message,
         }
+        if channel is None:
+            action["send_via"] = "interaction_bot"
+        else:
+            _apply_channel(action, channel)
         if reply_markup is not None:
             action["reply_markup"] = dict(reply_markup)
         self.actions.append(action)

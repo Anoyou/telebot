@@ -31,7 +31,7 @@
 8. 禁止用空 `usage`、空权限或模糊能力声明绕过规范警告。
 9. 禁止在普通会话消息里把 `send_via` 当必填样板；大多数动作应该继承 `session.channel`。
 10. 禁止在需要 `show_alert` 晚提示的按钮入口上开启 `callback_fast_ack`。
-11. 禁止要求 UserBot 发送 `send_rich_message`，或在失败后静默降级成普通 HTML/纯文本；原生 Rich Message 固定走 Interaction Bot。
+11. `send_rich_message` 默认走 Interaction Bot；只有明确接受 Premium/能力门禁和 HTML/Markdown 限制时才显式选择 UserBot，任何失败都禁止静默降级成普通 HTML/纯文本。
 
 ## 推荐
 

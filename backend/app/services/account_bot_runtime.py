@@ -2299,12 +2299,24 @@ async def _handle_update(aid: int, token: str, update: dict[str, Any]) -> None:
                 ) -> None:
                     await _send(incoming, msg, edit=edit, reply_markup=reply_markup)
 
+                async def _agent_draft(text: str) -> None:
+                    if incoming.chat_id is None or incoming.chat_id <= 0:
+                        raise ValueError("Bot API Draft 仅支持私聊")
+                    draft_id = int(incoming.message_id or incoming.update_id or 1)
+                    await account_bot_service.send_message_draft(
+                        incoming.token,
+                        incoming.chat_id,
+                        draft_id,
+                        text,
+                    )
+
                 await system_agent_bot.run_agent_query(
                     account_id=incoming.account_id,
                     tg_user_id=incoming.user_id,
                     role=role,
                     text=text_body,
                     send=_agent_send,
+                    draft=_agent_draft,
                 )
                 final_status = TRACE_STATUS_OK
                 return
@@ -8369,12 +8381,24 @@ async def _handle_command(incoming: Incoming, role: str) -> None:
         ) -> None:
             await _send(incoming, msg, edit=edit, reply_markup=reply_markup)
 
+        async def _agent_draft(text: str) -> None:
+            if incoming.chat_id is None or incoming.chat_id <= 0:
+                raise ValueError("Bot API Draft 仅支持私聊")
+            draft_id = int(incoming.message_id or incoming.update_id or 1)
+            await account_bot_service.send_message_draft(
+                incoming.token,
+                incoming.chat_id,
+                draft_id,
+                text,
+            )
+
         await system_agent_bot.handle_agent_command(
             account_id=incoming.account_id,
             tg_user_id=incoming.user_id,
             role=role,
             text=incoming.text or "",
             send=_agent_send,
+            draft=_agent_draft,
         )
     elif command_base.startswith("/pause"):
         await _pause_account(incoming, role)

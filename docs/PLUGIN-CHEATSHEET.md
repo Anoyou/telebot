@@ -26,7 +26,7 @@
 - `source` 描述事件类型和来源通道；`actor` 是当前行为主体；`sender` 是发出消息的人或 Bot；`source_actor` 可表示可信外部通知 Bot；`player` 是付款绑定玩家；`payment.status=confirmed` 才能作为到账依据。
 - `session.channel` 表示当前整段会话默认收发通道；普通发送动作不用手写 `send_via`，平台会继承会话通道。
 - 普通消息回复使用 `ctx.messages.send(...)` 或返回 `{"type": "send_message", ...}`；标题、任务列表、折叠详情、表格等原生格式使用 `ctx.messages.send_rich(html=...)` 或 `send_rich_message` action；图片题面可用 `ctx.messages.send_photo(..., save_message_id_key="round")`，后续用 `ctx.messages.edit_caption(message_id_key="round", caption="...")` 原地更新 caption。
-- `send_rich` 的 `html` / `markdown` / `blocks` 必须三选一，继续声明 `send_message` 权限；它固定走 Interaction Bot。UserBot/Telethon 没有原生 Rich Message 对等接口，显式 `userbot_reply` 会返回 `rich_message_requires_interaction_bot`，不会静默退化。
+- `send_rich` 的 `html` / `markdown` / `blocks` 必须三选一，继续声明 `send_message` 权限；默认走 Interaction Bot。显式 `userbot_reply` 使用 Layer 228，支持 HTML、Markdown 和纯文本 blocks，并要求 Premium 与 `rich_message_posting`；复杂/媒体 blocks 失败时不会静默退化。
 - 按钮必须经 `send_message.reply_markup` 发出；按钮回调用 `answer_callback`，不要在插件里直接拼 Bot API。
 - userbot 会话没有原生按钮，平台会把按钮降级成文本编号，并把玩家回复合成为 callback；此时 `source.synthetic="text_button"`。
 - 免费参与、按钮加入、互动游戏可按自身玩法保存完整业务状态；如果只是为了后续发奖锚点，记录玩家 `tgid` 即可。发奖动作优先用 `payout`，也可走 `userbot_reply` 并携带 `reply_to_user_id`，平台会搜索该玩家近期发言作为回复锚点，插件不要自己遍历群消息。已有 `reply_to_message_id` 时优先用消息 id；找不到锚点时动作失败并写入日志，默认提示 `未找到对应用户（用户 ID）的近期消息。`，可用 `reply_anchor_missing_text` 自定义提示。
@@ -63,7 +63,7 @@
 | `event_bus_delivery_disabled` / `inline_disabled` | 运维开关关闭 Event Bus 投递 / Inline |
 | `native_raw_not_allowed` / `native_raw_skipped` | 未声明原生数据能力 / 本次未下发 |
 | `send_channel_deprecated` / `unsupported_send_via` | 使用旧 notice 通道 / 未支持通道 |
-| `rich_message_requires_interaction_bot` / `invalid_rich_message` | 原生 Rich Message 被要求走 UserBot / 内容结构非法 |
+| `premium_required` / `rich_message_posting_disabled` / `rich_message_blocks_unsupported` / `rich_message_media_unsupported` / `invalid_rich_message` | Userbot Rich Message 能力不足、输入超出当前适配范围或结构非法 |
 | `already_acked` / `synthetic_callback` | fast-ack 已提前确认 / 文本按钮降级合成的 callback |
 | `action_limit_exceeded` | 动作数量超出平台限制，后续动作会被截断并写入可见告警 |
 | `bot_not_configured` / `bot_token_missing` / `userbot_offline` | Bot 未配置 / token 缺失 / UserBot 离线 |

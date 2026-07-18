@@ -20,6 +20,22 @@
 
 ## [Unreleased]
 
+## [0.69.0] — 2026-07-18 · minor（次版本） · Telegram 内容引擎与流式草稿
+
+### Added
+- Telethon 固定到 Telegram Layer 228 协议提交，新增 Layer、Rich Message 类型、发送/编辑/草稿字段与原始序列化契约检查。
+- Userbot 支持显式发送和编辑原生 Rich Message，覆盖 HTML、Markdown、可无损转换的纯文本 blocks、回复定位、Premium 与 `rich_message_posting` 能力探测，并提供稳定错误码；复杂/媒体 blocks、media 与 Bot 按钮保持明确拒绝，不做普通文本降级。
+- 新增 provider-neutral `InputRichMessage`、UTF-16 安全 `FormattedText`/实体模型、规范化 `RichText`/`RichBlock`，以及 Bot API 与 Telethon 共用的 `ReplyParameters` 构建器。
+- Interaction Bot 新增 `sendMessageDraft`、`sendRichMessageDraft` 封装；System Agent 私聊优先使用 30 秒临时 Draft 展示生成状态，Draft 失败自动回到原有最终消息链路。实验性 Userbot Rich Draft 默认关闭。
+
+### Changed
+- `send_rich_message` 与 Rich Message 编辑继续默认走 Interaction Bot，仅在插件显式指定 `userbot_reply` 时启用 Layer 228 Userbot 能力。
+- Userbot 入站 Rich Message 在 Event Bus、Trace 与 Replay 中保留规范化结构；普通文本为空时生成纯文本 fallback，并通过 `message.text_source` 标记来源。
+- Worker 启动日志新增 Telethon 版本和 Telegram Layer，便于直接确认实际协议运行时。
+
+### Tests
+- 新增 Layer 228、Userbot Rich Message 能力与 raw 请求、UTF-16 实体往返、RichText/RichBlock、ReplyParameters、Bot/Userbot Draft、Event Bus/Replay 和三执行体通道 parity 回归测试。
+
 ## [0.67.3] — 2026-07-18 · patch（补丁版本） · Agent 会话与模型切换修复
 
 ### Changed

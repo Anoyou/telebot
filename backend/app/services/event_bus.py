@@ -12,6 +12,8 @@ import inspect
 from dataclasses import dataclass, field
 from typing import Any
 
+from .telegram_text import parse_rich_message
+
 VALID_EVENT_SOURCES = {"userbot", "interaction_bot", "external_payment_notice", "webhook"}
 VALID_EVENT_TYPES = {
     "all_events",
@@ -85,6 +87,7 @@ EVENT_REASON_CODES = {
     "session_expired",
     "rate_limited",
     "rich_message_requires_interaction_bot",
+    "rich_message_reply_markup_unsupported",
     "invalid_rich_message",
     "callback_query",
     "command_matched",
@@ -294,12 +297,19 @@ def normalize_userbot_event(account_id: int, event: Any, *, command_meta: dict[s
     """Normalize a Telethon-like userbot event without exposing the live object."""
 
     message = getattr(event, "message", event)
+    native_raw = _safe_to_dict(message) or {}
+    rich_message, rich_fallback = _telethon_rich_message_summary(
+        getattr(message, "rich_message", None) or native_raw.get("rich_message")
+    )
     text = str(getattr(message, "text", None) or getattr(message, "message", None) or "")
+    text_source = "message"
+    if not text and rich_fallback:
+        text = rich_fallback
+        text_source = "rich_message_fallback"
     chat_id = _int_or_none(getattr(message, "chat_id", None) or getattr(event, "chat_id", None))
     sender_id = _int_or_none(getattr(message, "sender_id", None) or getattr(event, "sender_id", None))
     message_id = _int_or_none(getattr(message, "id", None) or getattr(event, "id", None))
     event_type = "command" if command_meta else "message"
-    native_raw = _safe_to_dict(message)
     chat = _telethon_chat_ref(native_raw, message=message, event=event, chat_id=chat_id)
     sender = _telethon_sender_ref(
         raw=native_raw,
@@ -315,6 +325,8 @@ def normalize_userbot_event(account_id: int, event: Any, *, command_meta: dict[s
         text=text,
         chat=chat,
         sender_chat=sender.get("sender_chat") if isinstance(sender.get("sender_chat"), dict) else None,
+        rich_message=rich_message,
+        text_source=text_source,
     )
     return _event(
         account_id=account_id,
@@ -331,6 +343,8 @@ def normalize_userbot_event(account_id: int, event: Any, *, command_meta: dict[s
             event_type=event_type,
             text=text,
             sender_chat=sender.get("sender_chat") if isinstance(sender.get("sender_chat"), dict) else None,
+            rich_message=rich_message,
+            text_source=text_source,
         ),
         native_raw=native_raw,
     )
@@ -831,6 +845,8 @@ def _telethon_message_payload(
     text: str,
     chat: dict[str, Any] | None = None,
     sender_chat: dict[str, Any] | None = None,
+    rich_message: dict[str, Any] | None = None,
+    text_source: str = "message",
 ) -> dict[str, Any]:
     data = raw if isinstance(raw, dict) else {}
     reply_to = data.get("reply_to") if isinstance(data.get("reply_to"), dict) else {}
@@ -838,6 +854,7 @@ def _telethon_message_payload(
         "chat_id": chat_id,
         "message_id": message_id,
         "text": text,
+        "text_source": text_source,
         "reply_to_message_id": _int_or_none(
             reply_to.get("reply_to_msg_id")
             or reply_to.get("reply_to_top_id")
@@ -861,6 +878,7 @@ def _telethon_message_payload(
         "sender_tag": _first_text(data.get("from_rank"), data.get("sender_tag")),
         "author_signature": _first_text(data.get("post_author"), data.get("signature")),
         "via_bot": _user_ref_or_none(data.get("via_bot")),
+        "rich_message": rich_message,
     }
     for key, value in optional.items():
         if value not in (None, "", [], {}):
@@ -883,11 +901,15 @@ def _telethon_raw_summary(
     event_type: str,
     text: str,
     sender_chat: dict[str, Any] | None = None,
+    rich_message: dict[str, Any] | None = None,
+    text_source: str = "message",
 ) -> dict[str, Any]:
     data = raw if isinstance(raw, dict) else {}
     summary = {
         "event_type": event_type,
         "text": text,
+        "text_source": text_source,
+        "rich_message": rich_message,
         "date": data.get("date"),
         "entities": _entity_summary(data.get("entities")),
         "media": _native_media_summary(data.get("media")),
@@ -903,6 +925,19 @@ def _telethon_raw_summary(
         "service": str(data.get("_") or "") or None,
     }
     return {key: value for key, value in summary.items() if value not in (None, "", [], {})}
+
+
+def _telethon_rich_message_summary(raw: Any) -> tuple[dict[str, Any] | None, str]:
+    if raw is None:
+        return None, ""
+    data = _safe_to_dict(raw) if not isinstance(raw, dict) else dict(raw)
+    if not data:
+        return None, ""
+    try:
+        parsed = parse_rich_message(data)
+        return parsed.to_dict(), parsed.to_plain_text()
+    except (TypeError, ValueError):
+        return data, ""
 
 
 def _telethon_sender_ref(

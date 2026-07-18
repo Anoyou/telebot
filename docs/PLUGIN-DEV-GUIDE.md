@@ -24,13 +24,13 @@
 
 消息链路统一后，互动插件默认按这一套模型理解：
 
-- 触发方式决定普通会话通道。带前缀命令开局，整段普通收发走 `userbot`；关键词、付款确认、按钮回调开局，整段普通收发走 `interaction_bot`。固定能力例外：`payout` 走 UserBot，Bot API 原生 `send_rich_message` 走 Interaction Bot。
+- 触发方式决定普通会话通道。带前缀命令开局，整段普通收发走 `userbot`；关键词、付款确认、按钮回调开局，整段普通收发走 `interaction_bot`。固定能力例外：`payout` 走 UserBot，`send_rich_message` 默认走 Interaction Bot，显式 `userbot_reply` 才使用 Layer 228。
 - 新玩法优先写成一个 `on_interaction(ctx, entry_key, payload)` 入口，在同一个入口里按 `tp_event.type` 或 `payload["source"]["type"]` 处理 `command`、`keyword`、`payment_confirmed`、`message`、`callback_query`、`session_expired`。
 - 单局状态优先写进 `session.data`，通过 `update_session` 持久化；不要再把游戏状态放进进程内全局字典、锁和自建超时任务。
 - 普通 JSON 状态优先使用 `ctx.storage`；确需 SQLite、缓存文件或索引文件时写入 `ctx.data_dir`。禁止把运行数据写到插件代码目录或 `Path(__file__).parent`，因为安装和更新会整体替换该目录。
 - 免费参与、按钮加入、互动游戏可按自身玩法保存完整业务状态；仅从后续发奖锚点角度，保存玩家 `tgid` 并通过 `payout.reply_to_user_id` 交给平台即可。平台优先读取 UserBot 按账号、群、真实消息发送者保存的近期锚点，缓存缺失时再精确搜索并最多扫描 5000 条历史消息。发奖同时传公开名时，`payout.reply_to_display_name` 必须来自安全身份 facade，匿名管理员不得传 `reply_to_username`。匿名管理员和频道身份不会建立真实用户锚点；找不到锚点时平台默认提示，并允许插件用 `reply_anchor_missing_text` 自定义失败提示。
 - 按钮回调的 `payload.sender` 是实际点击账号，不能直接把其中的姓名写回群消息；群内公开姓名必须调用 `resolve_public_sender_identity()`。匿名管理员只显示管理员标签，普通成员标签不会覆盖姓名，查询失败时平台会隐藏姓名。精确解析匿名管理员的 `custom_title` 要求 Interaction Bot 已在目标群中提升为管理员；否则 Telegram 不保证 `getChatMember` 能查询其他成员。
-- `ctx.messages.send/send_photo/edit/edit_rich/edit_caption/payout(...)` 和普通标准 action 默认按 `parse_mode="plain"` 发送；图片/文件 caption 更新用 `edit_caption`，不要把媒体消息交给 `edit_message` 猜类型。标题、任务列表、折叠详情、表格等 Telegram 原生结构改用 `ctx.messages.send_rich()` 或 `ctx.messages.edit_rich()`，并从 `html` / `markdown` / `blocks` 三选一。Rich Message 编辑固定由 Interaction Bot 执行，UserBot 会拒绝该动作。
+- `ctx.messages.send/send_photo/edit/edit_rich/edit_caption/payout(...)` 和普通标准 action 默认按 `parse_mode="plain"` 发送；图片/文件 caption 更新用 `edit_caption`，不要把媒体消息交给 `edit_message` 猜类型。标题、任务列表、折叠详情、表格等 Telegram 原生结构改用 `ctx.messages.send_rich()` 或 `ctx.messages.edit_rich()`，并从 `html` / `markdown` / `blocks` 三选一。Rich Message 默认由 Interaction Bot 发送/编辑；显式 Userbot 支持 HTML、Markdown 和可无损转换的纯文本 blocks，并要求 Premium 与能力开关。
 - userbot 会话没有原生 inline 按钮能力。平台会把按钮降级成“回复序号选择”的文本面板，并把命中的回复合成为 callback 事件回投插件；强依赖按钮的入口应配合 `keyword_only` / `default_trigger_modes` 关闭命令触发。
 
 ## 读法

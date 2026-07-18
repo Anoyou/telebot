@@ -354,6 +354,8 @@ class _ReplayUserbotEvent:
         self.message = SimpleNamespace(
             text=self.text,
             message=self.text,
+            rich_message=message.get("rich_message"),
+            text_source=str(message.get("text_source") or "message"),
             chat_id=self.chat_id,
             sender_id=self.sender_id,
             id=self.id,

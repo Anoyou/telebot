@@ -14,7 +14,7 @@ from io import BytesIO
 from typing import Any
 
 from ...redis_client import get_redis
-from .. import payout_compensation
+from .. import payout_compensation, userbot_rich_message
 from ..payout_limit import PayoutLimitExceeded
 from .action_core import CANONICAL_ACTION_TYPES, ActionKind, classify_action
 from .delivery import save_action_reply_target
@@ -90,9 +90,6 @@ async def execute_userbot_interaction_action(
         ActionKind.UNSUPPORTED,
     }:
         raise ValueError(f"不支持的交互动作: {action_type}")
-    if kind == ActionKind.SEND_RICH_MESSAGE:
-        raise ValueError("rich_message_requires_interaction_bot")
-
     try:
         chat_id = int(payload["chat_id"])
     except (KeyError, TypeError, ValueError) as exc:
@@ -245,9 +242,69 @@ async def execute_userbot_interaction_action(
             result["payout_key"] = _str_or_none(payload.get("payout_key"))
         return result
 
+    if kind == ActionKind.SEND_RICH_MESSAGE:
+        rich_message = payload.get("rich_message")
+        if not isinstance(rich_message, dict):
+            raise ValueError("invalid_rich_message: rich_message 必须是对象")
+        if payload.get("reply_markup") is not None:
+            raise ValueError("rich_message_reply_markup_unsupported")
+        await acquire_rate_limit(
+            redis=redis,
+            account_id=account_id,
+            engine=engine,
+            action_type=action_type,
+            chat_id=chat_id,
+        )
+        if not is_settlement_send(payload):
+            await simulate_humanize(client, chat_id, engine)
+        try:
+            result = await userbot_rich_message.send_rich_message(
+                client,
+                chat_id,
+                rich_message,
+                reply_to_message_id=reply_to,
+            )
+        except userbot_rich_message.UserbotRichMessageError as exc:
+            raise ValueError(f"{exc.code}: {exc.message}") from exc
+        try:
+            await save_action_reply_target(
+                redis or get_redis(),
+                account_id=account_id,
+                chat_id=chat_id,
+                message_id=result.get("message_id"),
+                reply_to_user_id=reply_to_user_id,
+                reply_to_display_name=_str_or_none(payload.get("reply_to_display_name")),
+                reply_to_username=_str_or_none(payload.get("reply_to_username")),
+            )
+        except Exception:  # noqa: BLE001
+            log.warning("rich message reply target save failed account=%s", account_id, exc_info=True)
+            result["post_send_bookkeeping_failed"] = True
+        return result
+
     if action_type == "edit_message":
         if isinstance(payload.get("rich_message"), dict):
-            raise ValueError("rich_message_requires_interaction_bot")
+            if payload.get("reply_markup") is not None:
+                raise ValueError("rich_message_reply_markup_unsupported")
+            try:
+                message_id = int(payload["message_id"])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ValueError("缺少 message_id") from exc
+            await acquire_rate_limit(
+                redis=redis,
+                account_id=account_id,
+                engine=engine,
+                action_type=action_type,
+                chat_id=chat_id,
+            )
+            try:
+                return await userbot_rich_message.edit_rich_message(
+                    client,
+                    chat_id,
+                    message_id,
+                    payload["rich_message"],
+                )
+            except userbot_rich_message.UserbotRichMessageError as exc:
+                raise ValueError(f"{exc.code}: {exc.message}") from exc
         text = str(payload.get("text") or "").strip()
         if not text:
             raise ValueError("缺少 text")

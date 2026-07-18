@@ -30,7 +30,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from app.services import account_bot_runtime, account_bot_service
+from app.services import account_bot_runtime, account_bot_service, userbot_rich_message
 from app.services import payout_limit as payout_limit_mod
 from app.services.event_trace import TRACE_STATUS_FAILED, TRACE_STATUS_OK, TRACE_STATUS_SKIPPED
 from app.services.interaction import delivery as delivery_mod
@@ -218,6 +218,20 @@ PARITY_MATRIX: list[ParityCase] = [
         (TRACE_STATUS_OK, None, "interaction_bot"),
         (TRACE_STATUS_OK, None, "interaction_bot"),
         covers="send_rich_message",
+    ),
+    _row(
+        "send_rich_message_userbot_ok",
+        [
+            {
+                "type": "send_rich_message",
+                "send_via": "userbot_reply",
+                "rich_message": {"html": "<h1>状态</h1>"},
+                "chat_id": CHAT,
+            }
+        ],
+        "send_rich_message",
+        (TRACE_STATUS_OK, None, "userbot_reply"),
+        (TRACE_STATUS_OK, None, "userbot_reply"),
     ),
     _row(
         "send_photo_userbot_ok",
@@ -497,6 +511,11 @@ async def _drive_worker(monkeypatch: pytest.MonkeyPatch, case: ParityCase) -> Ex
         "send_rich_message",
         AsyncMock(return_value={"message_id": 103, "chat_id": CHAT}),
     )
+    monkeypatch.setattr(
+        userbot_rich_message,
+        "send_rich_message",
+        AsyncMock(return_value={"message_id": 104, "chat_id": CHAT}),
+    )
     _mock_payout_delivery(monkeypatch)
 
     mem = _MemRedis()
@@ -544,6 +563,11 @@ async def _drive_bot(monkeypatch: pytest.MonkeyPatch, case: ParityCase) -> Expec
         account_bot_service,
         "send_rich_message",
         AsyncMock(return_value={"message_id": 103, "chat_id": CHAT}),
+    )
+    monkeypatch.setattr(
+        userbot_rich_message,
+        "send_rich_message",
+        AsyncMock(return_value={"message_id": 104, "chat_id": CHAT}),
     )
     # E3 通过 from-import 绑定 _check_payout_limit，必须在 worker_runtime 命名空间打桩。
     monkeypatch.setattr(worker_runtime, "_check_payout_limit", AsyncMock(return_value=(True, None)))

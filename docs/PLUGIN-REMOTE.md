@@ -8,7 +8,7 @@
 | userbot 命令会话 | UserBot 前缀命令触发，进入标准事件信封 | 后续收发默认都走 userbot | 管理员命令、账号身份动作、需要沿用当前账号上下文的流程 |
 | interaction bot 规则会话 | 关键词、付款确认、按钮回调触发，进入标准事件信封 | 后续收发默认都走 interaction bot | 高频群内互动、按钮、题面、普通会话提示 |
 
-能力固定路由有两个例外：`payout`、收付款、发奖永远由 userbot 执行；Bot API 原生 `send_rich_message` 永远由 interaction bot 执行。两者都不会为了迁就当前会话通道而静默降级。
+能力固定路由有两个例外：`payout`、收付款、发奖永远由 userbot 执行；`send_rich_message` 默认由 interaction bot 执行，只有插件显式指定 `userbot_reply` 才使用 Layer 228 Userbot 能力。两者都不会为了迁就当前会话通道而静默降级。
 
 Event Bus、Trace、MessageOps 是标准链路的内部契约：Event Bus 负责把标准事件投递给插件，Trace 负责记录匹配、执行和失败原因，MessageOps/action 负责把插件输出交给平台路由和审计。它们服务于 userbot 命令会话和 interaction bot 规则会话，不是第四种运行模式。新插件不再以 `interaction_entries`、旧交互规则、旧平铺 payload 或 `notice` 通道作为主路径；这些内容只用于迁移旧插件。
 
@@ -386,7 +386,7 @@ async def on_event(self, ctx: PluginContext, payload: dict[str, Any]) -> list[di
     return []
 ```
 
-`send_rich()` 的 `html`、`markdown`、`blocks` 三选一。它固定生成 `send_via="interaction_bot"`；直接返回 `send_rich_message` action 时省略通道也会得到相同行为。UserBot/Telethon 当前没有 `sendRichMessage` 对等接口，显式指定 `userbot_reply` 会返回 `rich_message_requires_interaction_bot`，不会转成普通文本。详见 [API 参考的 Rich Message 说明](./PLUGIN-API-REFERENCE.md#原生-rich-message)。
+`send_rich()` 的 `html`、`markdown`、`blocks` 三选一。省略 `channel` 时仍生成 `send_via="interaction_bot"`。显式指定 `channel="userbot_reply"` 时使用 Telethon Layer 228，支持 HTML、Markdown 和可无损转换的纯文本 blocks，要求主号具备 Telegram Premium 且 `rich_message_posting` 可用；复杂/媒体 blocks、media 和按钮不会降级成普通文本。详见 [API 参考的 Rich Message 说明](./PLUGIN-API-REFERENCE.md#原生-rich-message)。
 
 示例代码见 `examples/plugins/event_bus_demo`，fixtures 覆盖 message、command、callback、inline、chosen inline 和 payment。
 
@@ -433,7 +433,7 @@ backend/.venv/bin/python scripts/validate-installed-interaction-plugins.py
 - [ ] `capabilities` 已声明；需要原生字段时写明 `telegram_native_raw.reason` 和 `sources`。
 - [ ] 插件只读取标准事件信封，不依赖旧平铺 payload。
 - [ ] 所有发送、编辑、按钮 ACK、Inline answer、结算都走 MessageOps/action。
-- [ ] 原生 Rich Message 使用 `send_rich_message`，复用 `send_message` 权限，并确认账号已配置 Interaction Bot；不要要求 UserBot 发送或静默降级。
+- [ ] 原生 Rich Message 使用 `send_rich_message` 并复用 `send_message` 权限；默认确认 Interaction Bot 可用，显式 Userbot 模式还要确认 Premium 与 `rich_message_posting`，禁止静默降级。
 - [ ] `answer_inline_query` 插件同时处理 `chosen_inline_result` 或明确忽略。
 - [ ] 付款插件使用 `payment.status=confirmed` 与 `settlement`，普通 Bot 不执行转账。
 - [ ] 旧 `interaction_entries` 只出现在迁移桥或兼容说明里。

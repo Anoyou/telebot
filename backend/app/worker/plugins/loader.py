@@ -70,6 +70,7 @@ from ...services import (
     payout_compensation,
     payout_limit,
     recent_message_anchor,
+    userbot_rich_message,
 )
 from ...services.action_tap import (
     ACTION_EVENT_STATUS_DRY_RUN,
@@ -3244,8 +3245,8 @@ async def _apply_userbot_send_rich_message_action(
 
     reply_to = _int_or_none(action.get("reply_to_message_id"))
     reply_markup = action.get("reply_markup") if isinstance(action.get("reply_markup"), dict) else None
-    last_code = "rich_message_requires_interaction_bot"
-    last_error = "send_rich_message only supports interaction_bot"
+    last_code = "unsupported_send_via"
+    last_error = "no supported send_via"
     last_result = _userbot_action_failure_result(
         action,
         target_chat_id=target_chat_id,
@@ -3254,6 +3255,101 @@ async def _apply_userbot_send_rich_message_action(
         reply_to_message_id=reply_to,
     )
     for send_via in options:
+        if send_via == "userbot_reply":
+            if reply_markup is not None:
+                last_code = "rich_message_reply_markup_unsupported"
+                last_error = "Userbot Rich Message does not support reply_markup"
+                last_result = _userbot_action_failure_result(
+                    action,
+                    target_chat_id=target_chat_id,
+                    error_code=last_code,
+                    error=last_error,
+                    reply_to_message_id=reply_to,
+                )
+                continue
+            if state.client is None:
+                last_code = "userbot_offline"
+                last_error = "userbot client unavailable"
+                last_result = _userbot_action_failure_result(
+                    action,
+                    target_chat_id=target_chat_id,
+                    error_code=last_code,
+                    error=last_error,
+                    reply_to_message_id=reply_to,
+                )
+                continue
+            try:
+                reply_to, reply_to_user_id = await _resolve_userbot_reply_to_message_id(
+                    state,
+                    action,
+                    target_chat_id,
+                )
+            except ValueError as exc:
+                reply_to_user_id = _int_or_none(action.get("reply_to_user_id"))
+                last_code = "reply_anchor_missing"
+                last_error = str(exc)
+                last_result = _userbot_action_failure_result(
+                    action,
+                    target_chat_id=target_chat_id,
+                    error_code=last_code,
+                    error=last_error,
+                    reply_to_message_id=reply_to,
+                    reply_to_user_id=reply_to_user_id,
+                )
+                continue
+            if not await _acquire_userbot_action_rate_limit(
+                state,
+                action,
+                action_type="send_rich_message",
+                target_chat_id=target_chat_id,
+            ):
+                return False
+            try:
+                result = await userbot_rich_message.send_rich_message(
+                    state.client,
+                    target_chat_id,
+                    rich_message,
+                    reply_to_message_id=reply_to,
+                )
+                result["reply_to_user_id"] = reply_to_user_id
+                await _save_action_message_id(state, action, result)
+                await _save_userbot_reply_target(
+                    state,
+                    target_chat_id=target_chat_id,
+                    result=result,
+                    reply_to_user_id=reply_to_user_id,
+                    action=action,
+                )
+                await record_action(
+                    action.get("context"),
+                    action,
+                    TRACE_STATUS_OK,
+                    actual_send_via="userbot_reply",
+                    result=result,
+                )
+                await _emit_userbot_action_tap(
+                    state,
+                    action,
+                    ACTION_EVENT_STATUS_OK,
+                    channel="userbot_reply",
+                    result=result,
+                )
+                return True
+            except userbot_rich_message.UserbotRichMessageError as exc:
+                last_code = exc.code
+                last_error = exc.message
+            except Exception as exc:  # noqa: BLE001
+                last_code = "telegram_api_error"
+                last_error = f"{type(exc).__name__}: {exc}"
+            last_result = _userbot_action_failure_result(
+                action,
+                target_chat_id=target_chat_id,
+                error_code=last_code,
+                error=last_error,
+                reply_to_message_id=reply_to,
+                reply_to_user_id=reply_to_user_id,
+            )
+            continue
         if send_via != "interaction_bot":
             continue
         token = await _interaction_bot_token_for_account(state.account_id)
@@ -3362,9 +3458,51 @@ async def _apply_userbot_edit_message_action(state: _AccountState, event: Any, a
             )
             return True
         reply_markup = action.get("reply_markup") if isinstance(action.get("reply_markup"), dict) else None
-        last_code = "rich_message_requires_interaction_bot"
-        last_error = "edit_rich_message only supports interaction_bot"
+        last_code = "unsupported_send_via"
+        last_error = "no supported send_via"
         for send_via in action_send_via_options(action):
+            if send_via == "userbot_reply":
+                if reply_markup is not None:
+                    last_code = "rich_message_reply_markup_unsupported"
+                    last_error = "Userbot Rich Message does not support reply_markup"
+                    continue
+                if state.client is None:
+                    last_code = "userbot_offline"
+                    last_error = "userbot client unavailable"
+                    continue
+                if not await _acquire_userbot_action_rate_limit(
+                    state,
+                    action,
+                    action_type="edit_message",
+                    target_chat_id=target_chat_id,
+                ):
+                    return False
+                try:
+                    result = await userbot_rich_message.edit_rich_message(
+                        state.client,
+                        target_chat_id,
+                        message_id,
+                        rich_message,
+                    )
+                    await record_action(
+                        action.get("context"),
+                        action,
+                        TRACE_STATUS_OK,
+                        actual_send_via="userbot_reply",
+                        result=result,
+                    )
+                    await _emit_userbot_action_tap(
+                        state,
+                        action,
+                        ACTION_EVENT_STATUS_OK,
+                        channel="userbot_reply",
+                        result=result,
+                    )
+                    return True
+                except userbot_rich_message.UserbotRichMessageError as exc:
+                    last_code = exc.code
+                    last_error = exc.message
+                    continue
             if send_via != "interaction_bot":
                 continue
             token = await _interaction_bot_token_for_account(state.account_id)

@@ -124,7 +124,7 @@ class _AmbiguousPayoutProbeError(RuntimeError):
 
 
 def _interaction_userbot_rate_limit_action(action_type: str, chat_id: int | None) -> str:
-    if action_type in {"send_message", "payout"}:
+    if action_type in {"send_message", "send_rich_message", "payout"}:
         return "send_message_private" if chat_id is not None and chat_id > 0 else "send_message_group"
     if action_type in {"edit_message", "edit_caption"}:
         return "edit_message"
@@ -443,6 +443,17 @@ def _is_message_not_modified_error(exc: BaseException) -> bool:
 async def run_worker(account_id: int) -> None:
     """worker 主协程；返回即代表退出（supervisor 决定是否重启）。"""
     redis = get_redis()
+    try:
+        import telethon
+        from telethon.tl import alltlobjects
+
+        log.info(
+            "Telegram 协议运行时已加载 telethon=%s layer=%s",
+            telethon.__version__,
+            alltlobjects.LAYER,
+        )
+    except Exception:  # noqa: BLE001
+        log.warning("无法读取 Telegram 协议运行时版本", exc_info=True)
     try:
         from ..services.llm_usage_service import ensure_llm_usage_callback_registered
 
@@ -1136,6 +1147,10 @@ class _DeadlineClientProxy:
         self._client = client
         self._cmd = cmd
 
+    @property
+    def _rich_message_capability_cache_key(self) -> Any:
+        return self._client
+
     def __getattr__(self, name: str) -> Any:
         target = getattr(self._client, name)
         if name not in self._SIDE_EFFECT_METHODS or not callable(target):
@@ -1147,6 +1162,11 @@ class _DeadlineClientProxy:
             return await target(*args, **kwargs)
 
         return _guarded
+
+    async def __call__(self, request: Any) -> Any:
+        if _rpc_deadline_expired(self._cmd):
+            raise TimeoutError("rpc deadline exceeded before Telegram side effect")
+        return await self._client(request)
 
 
 async def _handle_fetch_avatar_command(redis: Any, client: Any, account_id: int, cmd: IPCMessage) -> bool:
@@ -1389,6 +1409,21 @@ def _interaction_action_error_code(error: Any) -> str:
     text = str(error or "").strip().lower()
     if not text:
         return "action_failed"
+    rich_message_codes = (
+        "telethon_layer_too_old",
+        "rich_message_not_supported",
+        "premium_required",
+        "rich_message_posting_disabled",
+        "rich_message_media_unsupported",
+        "rich_message_blocks_unsupported",
+        "rich_message_capability_unknown",
+        "rich_message_reply_markup_unsupported",
+        "invalid_rich_message",
+        "telegram_api_error",
+    )
+    for code in rich_message_codes:
+        if text.startswith(code):
+            return code
     if "rich_message_requires_interaction_bot" in text:
         return "rich_message_requires_interaction_bot"
     if "invalid_rich_message" in text:

@@ -165,6 +165,33 @@ def test_normalize_bot_update_projects_inline_query() -> None:
     assert event["native_raw_meta"]["enabled"] is False
 
 
+def test_normalize_userbot_event_preserves_rich_message_and_uses_text_fallback() -> None:
+    rich_message = {
+        "blocks": [
+            {"_": "PageBlockHeading2", "text": {"_": "TextPlain", "text": "巡检"}},
+            {"_": "PageBlockParagraph", "text": {"_": "TextBold", "text": {"_": "TextPlain", "text": "正常"}}},
+        ],
+        "photos": [],
+        "documents": [],
+    }
+    message = SimpleNamespace(
+        text="",
+        message="",
+        rich_message=rich_message,
+        chat_id=-100,
+        sender_id=42,
+        id=9,
+        to_dict=lambda: {"id": 9, "rich_message": rich_message},
+    )
+
+    event = normalize_userbot_event(1, SimpleNamespace(message=message))
+
+    assert event["message"]["text"] == "巡检\n正常"
+    assert event["message"]["text_source"] == "rich_message_fallback"
+    assert event["message"]["rich_message"]["blocks"][0]["type"] == "heading"
+    assert event["raw"]["rich_message"] == event["message"]["rich_message"]
+
+
 def test_normalize_bot_update_projects_developer_message_summary() -> None:
     event = normalize_bot_update(
         1,
