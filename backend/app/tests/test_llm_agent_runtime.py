@@ -14,6 +14,7 @@ from app.services.llm_protocol import (
     ModelResponse,
     ModelUsage,
     TextContent,
+    ToolSpec,
 )
 
 
@@ -129,6 +130,75 @@ async def test_structured_fallback_uses_each_provider_default_when_model_is_not_
     assert used_provider.id == fallback.id
     assert used_fallback is True
     assert models == ["primary-model", "fallback-model"]
+
+
+@pytest.mark.asyncio
+async def test_structured_fallback_selects_enabled_tools_model(monkeypatch) -> None:
+    primary = LLMProviderDTO(
+        id=1,
+        name="primary",
+        provider="openai",
+        api_format="responses",
+        default_model="primary-model",
+    )
+    fallback = LLMProviderDTO(
+        id=2,
+        name="fallback",
+        provider="openai",
+        api_format="responses",
+        default_model="fallback-no-tools",
+        models=[
+            {
+                "id": "fallback-no-tools",
+                "enabled": True,
+                "supports_tools": False,
+            },
+            {
+                "id": "fallback-tools",
+                "enabled": True,
+                "supports_tools": True,
+            },
+        ],
+    )
+    invoked: list[tuple[int, str]] = []
+
+    async def invoke(provider, request, **_kwargs):  # noqa: ANN001
+        invoked.append((provider.id, request.model))
+        if provider.id == primary.id:
+            from app.services.llm_client import LLMError
+
+            raise LLMError("temporary", retryable=True)
+        return ModelResponse(
+            model=request.model,
+            content=(TextContent("ok"),),
+            usage=ModelUsage(input_tokens=1, output_tokens=1),
+        )
+
+    monkeypatch.setattr(llm_runtime, "_invoke_model_with_retry", invoke)
+    monkeypatch.setattr(llm_runtime, "_check_budget", AsyncMock(return_value=llm_runtime.BudgetCheck()))
+    monkeypatch.setattr(llm_runtime, "_emit_usage", AsyncMock())
+    monkeypatch.setattr(llm_account_budget, "settle", AsyncMock())
+
+    response, used_provider, used_fallback = await llm_runtime.invoke_model_with_fallback(
+        llm_runtime.FallbackChain(primary, [fallback]),
+        ModelRequest(
+            model=primary.default_model,
+            messages=(ModelMessage.text(MessageRole.USER, "question"),),
+            tools=(
+                ToolSpec(
+                    name="logs_recent",
+                    description="logs",
+                    parameters={"type": "object", "properties": {}},
+                ),
+            ),
+            metadata={"model_pinned": False},
+        ),
+    )
+
+    assert response.text == "ok"
+    assert used_provider.id == fallback.id
+    assert used_fallback is True
+    assert invoked == [(primary.id, "primary-model"), (fallback.id, "fallback-tools")]
 
 
 @pytest.mark.asyncio

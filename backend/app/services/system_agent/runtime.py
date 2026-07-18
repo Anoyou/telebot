@@ -6,6 +6,7 @@ import json
 import logging
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
+from dataclasses import replace
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -22,12 +23,21 @@ from ..llm_dto import LLMProviderDTO
 from ..llm_invoke import invoke_structured
 from ..llm_protocol import MessageRole, ModelMessage, ModelRequest, ModelUsage, ToolCall, ToolResult
 from ..llm_protocol import ToolSpec as LlmToolSpec
-from .config import load_system_context_flags, resolve_fixed_provider
+from .config import load_system_context_flags, resolve_agent_providers
 from .context import ToolContext
 from .events import make_event
+from .memory import memory_context
 from .prompts import build_system_prompt, provider_setup_hint
 from .redactor import summarize_tool_result
 from .registry import ToolRegistry, get_registry
+from .tool_routing import (
+    ToolRoute,
+    available_domains,
+    parse_model_route,
+    route_locally,
+    router_system_prompt,
+    select_tool_specs,
+)
 
 log = logging.getLogger(__name__)
 
@@ -73,9 +83,9 @@ class SystemAgentRuntime:
 
         flags = await load_system_context_flags(db)
         cfg = flags["agent_config"]
-        resolved = await resolve_fixed_provider(db, cfg)
-        if resolved[0] is None:
-            err = str(resolved[1])
+        resolved = await resolve_agent_providers(db, cfg)
+        if isinstance(resolved, str):
+            err = resolved
             hint = provider_setup_hint()
             yield next_event(
                 "error",
@@ -86,8 +96,9 @@ class SystemAgentRuntime:
             yield next_event("done", ok=False)
             return
 
-        provider_dto, model = resolved  # type: ignore[misc]
-        assert isinstance(provider_dto, LLMProviderDTO)
+        provider_dto = resolved.primary
+        model = resolved.model
+        providers = resolved.providers
 
         from ... import __version__
 
@@ -102,10 +113,32 @@ class SystemAgentRuntime:
             command_prefix=str(flags["command_prefix"]),
         )
 
-        tool_specs = self.registry.list_for(
+        memory_block = memory_context(session)
+        if memory_block:
+            system_prompt = f"{system_prompt}\n\n{memory_block}"
+
+        all_tool_specs = self.registry.list_for(
             channel=channel,
             role=role,
             read_only_only=False,  # 阶段 2：只读 + 写（写工具只产生待确认 Action）
+        )
+        route = await self._resolve_tool_route(
+            provider_dto=provider_dto,
+            providers=providers,
+            model=model,
+            user_text=user_text,
+            memory_state=session.memory_state,
+            all_tool_specs=all_tool_specs,
+            account_id=session.account_id,
+        )
+        tool_specs = select_tool_specs(all_tool_specs, route)
+        yield next_event(
+            "route_selected",
+            domains=list(route.domains),
+            route_source=route.source,
+            route_reason=route.reason,
+            tool_count=len(tool_specs),
+            available_tool_count=len(all_tool_specs),
         )
         tool_ctx = ToolContext(
             db=db,
@@ -150,6 +183,7 @@ class SystemAgentRuntime:
             messages=tuple(messages),
             tools=tuple(t.spec for t in agent_tools.values()),
             max_output_tokens=2048,
+            metadata={"model_pinned": False},
         )
         limits = AgentLimits(
             max_steps=int(cfg.get("max_steps") or 8),
@@ -184,14 +218,27 @@ class SystemAgentRuntime:
             on_tool_finish=on_tool_finish,
         )
 
+        active_provider = provider_dto
+        active_model = model
+        last_used_provider = provider_dto
+        used_fallback = False
+
         async def model_call(current: ModelRequest):
-            response, _used, _fb = await invoke_structured(
-                provider_dto,
-                {provider_dto.id: provider_dto},
-                current,
+            nonlocal active_model, active_provider, last_used_provider, used_fallback
+            provider_request = replace(current, model=active_model)
+            response, used, fallback = await invoke_structured(
+                active_provider,
+                providers,
+                provider_request,
                 account_id=session.account_id,
                 source="system_agent",
             )
+            last_used_provider = used
+            used_fallback = used_fallback or fallback or used.id != provider_dto.id
+            # 本轮内粘住最近一次成功的 Provider/模型，避免每个工具步骤都重新
+            # 从已知不稳定的主 Provider 开始重试。
+            active_provider = used
+            active_model = response.model or provider_request.model
             return response
 
         try:
@@ -216,18 +263,25 @@ class SystemAgentRuntime:
             yield ev
 
         assistant_text = result.text or ""
-        usage_payload = _usage_payload(result.usage, provider_dto, model)
+        usage_payload = _usage_payload(result.usage, last_used_provider, result.model)
+        usage_payload["used_fallback"] = used_fallback
+        usage_payload["route_domains"] = list(route.domains)
+        usage_payload["tool_count"] = len(tool_specs)
 
         yield next_event(
             "assistant_message",
             content=assistant_text,
             usage=usage_payload,
         )
-        yield next_event("done", ok=True, steps=result.steps, tool_calls=result.tool_calls)
-
-        # 落库由 service 层在消费完流后统一处理；这里把结果挂在最后 done 上由 service 读取。
-        # 为了让 service 能拿到文本，把私有字段塞进 done 事件（前端可忽略未知字段）。
-        # 实际上 service 会缓存最后 assistant_message。
+        yield next_event(
+            "done",
+            ok=True,
+            steps=result.steps,
+            tool_calls=result.tool_calls,
+            route_domains=list(route.domains),
+            tool_count=len(tool_specs),
+            used_fallback=used_fallback,
+        )
 
     def _bind_read_handler(self, spec: Any, tool_ctx: ToolContext):
         async def _handler(arguments: dict[str, Any]) -> Any:
@@ -246,6 +300,66 @@ class SystemAgentRuntime:
                 }
 
         return _handler
+
+    async def _resolve_tool_route(
+        self,
+        *,
+        provider_dto: LLMProviderDTO,
+        providers: dict[int, LLMProviderDTO],
+        model: str,
+        user_text: str,
+        memory_state: dict[str, Any] | None,
+        all_tool_specs: list[Any],
+        account_id: int | None,
+    ) -> ToolRoute:
+        domains = available_domains(all_tool_specs)
+        local = route_locally(user_text, available=domains, memory_state=memory_state)
+        if local is not None:
+            return local
+        try:
+            state_hint = ""
+            if isinstance(memory_state, dict) and memory_state:
+                state_hint = json.dumps(
+                    {
+                        "last_domains": memory_state.get("last_domains"),
+                        "last_user_goal": memory_state.get("last_user_goal"),
+                    },
+                    ensure_ascii=False,
+                    default=str,
+                )
+            response, _used, _fallback = await invoke_structured(
+                provider_dto,
+                providers,
+                ModelRequest(
+                    model=model,
+                    messages=(
+                        ModelMessage.text(MessageRole.SYSTEM, router_system_prompt(domains)),
+                        ModelMessage.text(
+                            MessageRole.USER,
+                            f"当前请求：{user_text}\n最近状态：{state_hint or '无'}",
+                        ),
+                    ),
+                    max_output_tokens=160,
+                    metadata={"model_pinned": False},
+                ),
+                account_id=account_id,
+                source="system_agent_router",
+            )
+            parsed = parse_model_route(response.text, available=domains)
+            if parsed is not None:
+                return parsed
+        except Exception:  # noqa: BLE001
+            log.warning("system agent tool router failed; using safe fallback", exc_info=True)
+        previous = []
+        if isinstance(memory_state, dict):
+            previous = [
+                str(item)
+                for item in (memory_state.get("last_domains") or [])
+                if str(item) in domains
+            ]
+        if previous:
+            return ToolRoute(tuple(previous[:3]), "fallback", "router_failed_use_memory")
+        return ToolRoute((), "fallback", "router_failed_direct_answer")
 
     def _bind_write_handler(
         self,

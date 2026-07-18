@@ -656,7 +656,7 @@ async def invoke_model_with_fallback(
         elif index == 0:
             provider_model = capped_request.model or provider.pick_enabled_model()
         else:
-            provider_model = provider.pick_enabled_model()
+            provider_model = _pick_compatible_model(provider, capped_request)
         if not provider_model:
             last_error = LLMError(
                 f"provider {provider.name} 没有已启用模型",
@@ -765,6 +765,23 @@ async def invoke_model_with_fallback(
         error_type="exhausted",
         scope=_error_scope(last_error) if last_error else LLMErrorScope.UNKNOWN,
     )
+
+
+def _pick_compatible_model(provider: LLMProviderDTO, request: ModelRequest) -> str | None:
+    """为 fallback 选择真正兼容当前请求的已启用模型。"""
+
+    candidates = provider.enabled_model_ids()
+    if not candidates:
+        fallback = provider.pick_enabled_model()
+        candidates = [fallback] if fallback else []
+    default_model = str(provider.default_model or "").strip()
+    if default_model in candidates:
+        candidates = [default_model, *(item for item in candidates if item != default_model)]
+    for model in candidates:
+        candidate_request = replace(request, model=model)
+        if not provider.capabilities_for_model(model).validation_errors(candidate_request):
+            return model
+    return None
 
 
 async def _invoke_model_with_retry(

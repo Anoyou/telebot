@@ -90,6 +90,16 @@ class _FakeSvc:
     async def list_messages(self, _db, session_id, **kwargs):
         return self.messages.get(session_id, [])
 
+    async def get_message(self, _db, message_id, *, session_id):
+        return next(
+            (
+                message
+                for message in self.messages.get(session_id, [])
+                if message.id == message_id
+            ),
+            None,
+        )
+
     async def stream_message(self, _db, **kwargs):
         yield {
             "type": "run_started",
@@ -188,6 +198,82 @@ async def test_stream_message_ndjson(fake_svc) -> None:
     assert "assistant_message" in types
     assert "done" in types
     db.commit.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_stream_exception_does_not_expose_raw_error(fake_svc, monkeypatch) -> None:
+    async def broken_stream(*_args, **_kwargs):
+        if False:
+            yield {}
+        raise RuntimeError("database failed with sk-sensitive-secret-value")
+
+    monkeypatch.setattr(fake_svc, "stream_message", broken_stream)
+    db = AsyncMock()
+    user = SimpleNamespace(id=7)
+    await api.create_session(api.SystemAgentSessionCreate(), db, user)
+
+    response = await api.stream_message(
+        "s1",
+        api.SystemAgentMessageCreate(content="你好"),
+        db,
+        user,
+    )
+    chunks = [
+        chunk if isinstance(chunk, str) else chunk.decode()
+        async for chunk in response.body_iterator
+    ]
+    body = "".join(chunks)
+
+    assert "sk-sensitive-secret-value" not in body
+    assert "STREAM_FAILED" in body
+    assert "RuntimeError" in body
+
+
+@pytest.mark.asyncio
+async def test_retry_failed_message_stream(fake_svc) -> None:
+    db = AsyncMock()
+    user = SimpleNamespace(id=7)
+    await api.create_session(api.SystemAgentSessionCreate(), db, user)
+    fake_svc.messages["s1"] = [
+        SimpleNamespace(id=9, session_id="s1", role="user", run_status="failed")
+    ]
+
+    response = await api.retry_message(
+        "s1",
+        9,
+        api.SystemAgentMessageRetry(),
+        db,
+        user,
+    )
+    chunks = [
+        chunk if isinstance(chunk, str) else chunk.decode()
+        async for chunk in response.body_iterator
+    ]
+    events = [json.loads(line) for line in "".join(chunks).splitlines() if line]
+
+    assert events[-1]["type"] == "done"
+    assert events[-1]["ok"] is True
+
+
+@pytest.mark.asyncio
+async def test_retry_rejects_non_failed_message(fake_svc) -> None:
+    db = AsyncMock()
+    user = SimpleNamespace(id=7)
+    await api.create_session(api.SystemAgentSessionCreate(), db, user)
+    fake_svc.messages["s1"] = [
+        SimpleNamespace(id=10, session_id="s1", role="user", run_status="succeeded")
+    ]
+
+    with pytest.raises(HTTPException) as exc_info:
+        await api.retry_message(
+            "s1",
+            10,
+            api.SystemAgentMessageRetry(),
+            db,
+            user,
+        )
+
+    assert exc_info.value.status_code == 409
 
 
 @pytest.mark.asyncio

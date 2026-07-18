@@ -3,12 +3,18 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
 
-from ..db.models.system_agent import CHANNEL_WEB, SESSION_STATUS_ACTIVE
+from ..db.models.system_agent import (
+    CHANNEL_WEB,
+    MESSAGE_ROLE_USER,
+    MESSAGE_RUN_FAILED,
+    SESSION_STATUS_ACTIVE,
+)
 from ..deps import CurrentUser, DBSession
 from ..schemas.system_agent import (
     SystemAgentActionConfirmOut,
@@ -18,6 +24,7 @@ from ..schemas.system_agent import (
     SystemAgentConfigPatch,
     SystemAgentMessageCreate,
     SystemAgentMessageOut,
+    SystemAgentMessageRetry,
     SystemAgentSecretInput,
     SystemAgentSecretInputOut,
     SystemAgentSessionCreate,
@@ -40,6 +47,7 @@ from ..services.system_agent.executor import get_action_executor
 from ..services.system_agent.registry import get_registry
 
 router = APIRouter(prefix="/api/system-agent", tags=["system-agent"])
+log = logging.getLogger(__name__)
 
 
 def _err(code: str, message: str, status: int = 400) -> HTTPException:
@@ -219,15 +227,72 @@ async def stream_message(
             await db.commit()
         except Exception as exc:  # noqa: BLE001
             await db.rollback()
+            log.exception("system agent web stream failed session=%s", session_id)
             err = {
                 "type": "error",
                 "code": "STREAM_FAILED",
-                "message": str(exc)[:500],
+                "message": f"助手流处理失败（{type(exc).__name__}），请刷新后重试。",
                 "session_id": session_id,
             }
             yield json.dumps(err, ensure_ascii=False, separators=(",", ":")) + "\n"
             done = {"type": "done", "ok": False, "session_id": session_id}
             yield json.dumps(done, ensure_ascii=False, separators=(",", ":")) + "\n"
+
+    return StreamingResponse(
+        event_source(),
+        media_type="application/x-ndjson",
+        headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
+    )
+
+
+@router.post("/sessions/{session_id}/messages/{message_id}/retry/stream")
+async def retry_message(
+    session_id: str,
+    message_id: int,
+    payload: SystemAgentMessageRetry,
+    db: DBSession,
+    user: CurrentUser,
+) -> StreamingResponse:
+    svc = get_system_agent_service()
+    session = await svc.get_session(db, session_id, web_user_id=user.id)
+    if session is None:
+        raise _err("SESSION_NOT_FOUND", "会话不存在", 404)
+    message = await svc.get_message(db, message_id, session_id=session_id)
+    if message is None or message.role != MESSAGE_ROLE_USER:
+        raise _err("MESSAGE_NOT_FOUND", "可重试消息不存在", 404)
+    if message.run_status != MESSAGE_RUN_FAILED:
+        raise _err("MESSAGE_NOT_RETRYABLE", "只有失败消息可以重试", 409)
+    if payload.account_id is not None and session.account_id != payload.account_id:
+        await svc.update_session(db, session, account_id=payload.account_id)
+
+    async def event_source():
+        try:
+            async for event in svc.stream_message(
+                db,
+                session=session,
+                text="",
+                role="admin",
+                channel=CHANNEL_WEB,
+                web_user_id=user.id,
+                retry_message=message,
+            ):
+                yield json.dumps(event, ensure_ascii=False, default=str, separators=(",", ":")) + "\n"
+            await db.commit()
+        except Exception as exc:  # noqa: BLE001
+            await db.rollback()
+            log.exception("system agent web retry stream failed session=%s", session_id)
+            err = {
+                "type": "error",
+                "code": "STREAM_FAILED",
+                "message": f"助手重试失败（{type(exc).__name__}），请刷新会话后重试。",
+                "session_id": session_id,
+            }
+            yield json.dumps(err, ensure_ascii=False, separators=(",", ":")) + "\n"
+            yield json.dumps(
+                {"type": "done", "ok": False, "session_id": session_id},
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ) + "\n"
 
     return StreamingResponse(
         event_source(),

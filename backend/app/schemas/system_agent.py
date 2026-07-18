@@ -56,6 +56,8 @@ class SystemAgentSessionOut(BaseModel):
     channel: str
     title: str | None = None
     status: str
+    memory_summary: str = ""
+    memory_state: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime | None = None
     updated_at: datetime | None = None
 
@@ -68,6 +70,10 @@ class SystemAgentMessageOut(BaseModel):
     role: str
     content: dict[str, Any]
     usage: dict[str, Any] | None = None
+    run_status: str = "completed"
+    error_code: str | None = None
+    error_message: str | None = None
+    retry_count: int = 0
     created_at: datetime | None = None
 
     model_config = ConfigDict(from_attributes=True)
@@ -75,6 +81,10 @@ class SystemAgentMessageOut(BaseModel):
 
 class SystemAgentMessageCreate(BaseModel):
     content: str = Field(min_length=1, max_length=32_000)
+    account_id: int | None = None
+
+
+class SystemAgentMessageRetry(BaseModel):
     account_id: int | None = None
 
 

@@ -8,7 +8,7 @@ from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import delete, desc, select
+from sqlalchemy import delete, desc, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...db.models.system_agent import (
@@ -17,6 +17,10 @@ from ...db.models.system_agent import (
     MESSAGE_ROLE_ASSISTANT,
     MESSAGE_ROLE_TOOL,
     MESSAGE_ROLE_USER,
+    MESSAGE_RUN_COMPLETED,
+    MESSAGE_RUN_FAILED,
+    MESSAGE_RUN_PENDING,
+    MESSAGE_RUN_SUCCEEDED,
     SESSION_STATUS_ACTIVE,
     SESSION_STATUS_ARCHIVED,
     SystemAgentMessage,
@@ -24,6 +28,7 @@ from ...db.models.system_agent import (
 )
 from .actions import clear_expired_secrets
 from .config import load_config, load_system_context_flags, save_config
+from .memory import clear_session_memory, update_session_memory
 from .prompts import session_title_from_message
 from .registry import get_registry
 from .runtime import SystemAgentRuntime
@@ -176,6 +181,7 @@ class SystemAgentService:
             delete(SystemAgentMessage).where(SystemAgentMessage.session_id == session.id)
         )
         session.updated_at = datetime.now(UTC)
+        clear_session_memory(session)
         await db.flush()
         return int(result.rowcount or 0)
 
@@ -199,6 +205,18 @@ class SystemAgentService:
         rows = list(result.scalars().all())
         rows.reverse()
         return rows
+
+    async def get_message(
+        self,
+        db: AsyncSession,
+        message_id: int,
+        *,
+        session_id: str,
+    ) -> SystemAgentMessage | None:
+        row = await db.get(SystemAgentMessage, int(message_id))
+        if row is None or row.session_id != session_id:
+            return None
+        return row
 
     async def get_or_create_active_session(
         self,
@@ -238,8 +256,17 @@ class SystemAgentService:
         channel: str,
         web_user_id: int | None = None,
         bot_tg_user_id: int | None = None,
+        retry_message: SystemAgentMessage | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
-        raw_text = str(text or "").strip()
+        if retry_message is not None:
+            if retry_message.role != MESSAGE_ROLE_USER:
+                raise ValueError("只能重试用户消息")
+            if retry_message.run_status != MESSAGE_RUN_FAILED:
+                raise ValueError("只有失败消息可以重试")
+            content = retry_message.content if isinstance(retry_message.content, dict) else {}
+            raw_text = str(content.get("text") or "").strip()
+        else:
+            raw_text = str(text or "").strip()
         if not raw_text:
             yield {
                 "type": "error",
@@ -254,25 +281,52 @@ class SystemAgentService:
         except Exception:  # noqa: BLE001
             log.debug("clear expired action secrets failed", exc_info=True)
 
+        chat_secrets = [] if retry_message is not None else extract_plaintext_secrets(raw_text)
         if not session.title:
-            session.title = session_title_from_message(raw_text)
+            session.title = session_title_from_message(
+                redact_known_secrets(raw_text, chat_secrets)
+            )
         session.updated_at = datetime.now(UTC)
 
-        # 用户消息：原始文本参与模型请求；落库前替换已提取密钥并基础打码
-        chat_secrets = extract_plaintext_secrets(raw_text)
-        redacted_user = redact_known_secrets(raw_text, chat_secrets)
-        user_msg = SystemAgentMessage(
-            session_id=session.id,
-            role=MESSAGE_ROLE_USER,
-            content={"text": redacted_user},
-        )
-        db.add(user_msg)
+        # 新消息先落库；重试则复用原消息，避免重复污染历史。
+        if retry_message is None:
+            redacted_user = redact_known_secrets(raw_text, chat_secrets)
+            user_msg = SystemAgentMessage(
+                session_id=session.id,
+                role=MESSAGE_ROLE_USER,
+                content={"text": redacted_user},
+                run_status=MESSAGE_RUN_PENDING,
+            )
+            db.add(user_msg)
+        else:
+            user_msg = retry_message
+            claim = await db.execute(
+                update(SystemAgentMessage)
+                .where(
+                    SystemAgentMessage.id == user_msg.id,
+                    SystemAgentMessage.session_id == session.id,
+                    SystemAgentMessage.run_status == MESSAGE_RUN_FAILED,
+                )
+                .values(
+                    run_status=MESSAGE_RUN_PENDING,
+                    error_code=None,
+                    error_message=None,
+                    retry_count=SystemAgentMessage.retry_count + 1,
+                )
+            )
+            if int(claim.rowcount or 0) != 1:
+                raise ValueError("本轮已被重试或状态已变化，请刷新会话")
+            await db.refresh(user_msg)
         await db.flush()
 
-        history = await self.list_messages(db, session.id, limit=40)
+        history = await self.list_messages(db, session.id, limit=32)
         # 历史最后一条是刚写入的打码用户消息；模型当次请求使用原始文本，
         # 因此从 history 去掉最后一条 user，由 runtime 追加 raw_text。
-        history_for_model = [m for m in history if m.id != user_msg.id]
+        history_for_model = [
+            message
+            for message in history
+            if message.id != user_msg.id and _message_available_to_context(message)
+        ][-8:]
 
         # 用户消息先独立落库。即使浏览器断线或上游模型超时，刷新后仍能看到本轮输入。
         await db.commit()
@@ -280,39 +334,94 @@ class SystemAgentService:
         assistant_text = ""
         usage: dict[str, Any] | None = None
         tool_events: list[dict[str, Any]] = []
+        memory_tool_events: list[dict[str, Any]] = []
         buffered_events: list[dict[str, Any]] = []
+        done_ok = False
+        error_code: str | None = None
+        error_message: str | None = None
+        route_domains: list[str] = []
 
-        async for event in self.runtime.stream_turn(
-            db,
-            session=session,
-            user_text=raw_text,
-            role=role,
-            channel=channel,
-            web_user_id=web_user_id,
-            bot_tg_user_id=bot_tg_user_id,
-            history_messages=history_for_model,
-            chat_secrets=chat_secrets,
-        ):
-            et = event.get("type")
-            if et == "assistant_message":
-                assistant_text = str(event.get("content") or "")
-                usage = event.get("usage") if isinstance(event.get("usage"), dict) else None
-            elif et in {"tool_started", "tool_finished"}:
-                tool_events.append(event)
-            # run_started 立即发给客户端；其余事件等消息落库成功后再发，
-            # 避免客户端收到最终答案后断线却无法从历史恢复。
-            if et == "run_started":
-                yield event
-            else:
-                buffered_events.append(event)
+        done_received = False
+        try:
+            async for event in self.runtime.stream_turn(
+                db,
+                session=session,
+                user_text=raw_text,
+                role=role,
+                channel=channel,
+                web_user_id=web_user_id,
+                bot_tg_user_id=bot_tg_user_id,
+                history_messages=history_for_model,
+                chat_secrets=chat_secrets,
+            ):
+                et = event.get("type")
+                if et == "assistant_message":
+                    assistant_text = str(event.get("content") or "")
+                    usage = event.get("usage") if isinstance(event.get("usage"), dict) else None
+                elif et in {"tool_started", "tool_finished"}:
+                    tool_events.append(event)
+                elif et == "route_selected":
+                    route_domains = [str(item) for item in (event.get("domains") or [])][:3]
+                elif et == "error":
+                    error_code = str(event.get("code") or "AGENT_RUN_FAILED")[:64]
+                    error_message = str(event.get("message") or "助手运行失败")[:1024]
+                elif et == "done":
+                    done_received = True
+                    done_ok = bool(event.get("ok"))
+                # run_started 立即发给客户端；其余事件等消息落库成功后再发，
+                # 避免客户端收到最终答案后断线却无法从历史恢复。
+                if et == "run_started":
+                    yield event
+                else:
+                    buffered_events.append(event)
+        except Exception as exc:  # noqa: BLE001
+            log.exception("system agent stream crashed session=%s", session.id)
+            error_code = "AGENT_STREAM_FAILED"
+            error_message = f"助手运行异常（{type(exc).__name__}），请重试本轮。"
+            buffered_events.extend(
+                [
+                    {
+                        "type": "error",
+                        "code": error_code,
+                        "message": error_message,
+                        "session_id": session.id,
+                    },
+                    {"type": "done", "ok": False, "session_id": session.id},
+                ]
+            )
+            done_received = True
+            done_ok = False
 
-        if assistant_text:
+        if not done_received:
+            error_code = error_code or "AGENT_STREAM_INCOMPLETE"
+            error_message = error_message or "助手响应提前结束，请重试本轮。"
+            buffered_events.extend(
+                [
+                    {
+                        "type": "error",
+                        "code": error_code,
+                        "message": error_message,
+                        "session_id": session.id,
+                    },
+                    {"type": "done", "ok": False, "session_id": session.id},
+                ]
+            )
+            done_ok = False
+
+        if not done_ok:
+            # 失败轮次不持久化助手答案，也不应把未提交的最终答案发给客户端。
+            buffered_events = [
+                event for event in buffered_events if event.get("type") != "assistant_message"
+            ]
+
+        if assistant_text and done_ok:
             db.add(
                 SystemAgentMessage(
                     session_id=session.id,
                     role=MESSAGE_ROLE_ASSISTANT,
                     content={"text": redact_known_secrets(assistant_text, chat_secrets)},
                     usage=usage,
+                    run_status=MESSAGE_RUN_COMPLETED,
                 )
             )
         for tev in tool_events:
@@ -341,14 +450,40 @@ class SystemAgentService:
                         "is_error": tev.get("is_error"),
                         "result_summary": summary,
                     },
+                    run_status=MESSAGE_RUN_COMPLETED if done_ok else MESSAGE_RUN_FAILED,
                 )
             )
+            memory_event = dict(tev)
+            memory_event["result_summary"] = summary
+            memory_tool_events.append(memory_event)
+        if assistant_text and done_ok:
+            user_msg.run_status = MESSAGE_RUN_SUCCEEDED
+            user_msg.error_code = None
+            user_msg.error_message = None
+            update_session_memory(
+                session,
+                user_text=redact_known_secrets(raw_text, chat_secrets),
+                assistant_text=redact_known_secrets(assistant_text, chat_secrets),
+                domains=route_domains,
+                tool_events=memory_tool_events,
+            )
+        else:
+            user_msg.run_status = MESSAGE_RUN_FAILED
+            user_msg.error_code = error_code or "AGENT_RUN_FAILED"
+            user_msg.error_message = redact_known_secrets(
+                error_message or "助手未能完成本轮请求，请稍后重试。",
+                chat_secrets,
+            )[:1024]
         session.updated_at = datetime.now(UTC)
         await db.flush()
         await db.commit()
 
         for event in buffered_events:
             yield event
+
+
+def _message_available_to_context(message: SystemAgentMessage) -> bool:
+    return message.run_status in {MESSAGE_RUN_COMPLETED, MESSAGE_RUN_SUCCEEDED}
 
 
 _SERVICE: SystemAgentService | None = None

@@ -43,7 +43,8 @@
 
 - 默认关闭；需管理员显式启用。
 - 必须选择**真实声明支持 tools** 的固定 Provider/模型。
-- 固定 Provider 不可用时直接失败，不自动切换其他 Provider。
+- 固定 Provider 作为首选；遇到 429、5xx、超时或 Provider 本地故障时，会在其它已配置且支持 tools 的 Provider 中自动 fallback，最多追加 2 个候选。
+- fallback 会为目标 Provider 重新选择兼容当前请求的已启用模型；某个备用 Provider 在本轮成功后，后续 Agent 步骤优先沿用它，避免反复撞击已知不稳定的主 Provider。
 - 无可用 tools 模型时，Web/Bot 均提示到 AI 中心配置。
 
 ## 架构要点
@@ -52,7 +53,7 @@
 Web /assistant  ──NDJSON──┐
                           ├── SystemAgentService → Runtime → ToolRegistry
 管理 Bot /agent ──────────┘                              │
-                                                    只读 handlers
+                                              按领域渐进披露工具
                                                          │
                                                    现有业务 service
 ```
@@ -66,10 +67,28 @@ Web /assistant  ──NDJSON──┐
 - 确认、拒绝和密钥补填共享 Action 行锁；预检期间密钥变化时保持 pending，必须再次确认。
 - 会触发文件、Worker 或系统进程的操作在 Action 提交后执行，失败记录为 `runtime_sync_status=failed` 并允许重试。
 
+### 上下文与记忆
+
+System Agent 使用三层上下文，避免每轮回放全部原始消息：
+
+1. **短期上下文**：仅携带最近 8 条成功/已完成消息，并继续受会话 token 预算约束。
+2. **滚动摘要**：`memory_summary` 只吸收移出短期窗口的旧成功轮次，避免与最近原始消息重复发送，并控制在有限长度内。
+3. **结构化工作记忆**：`memory_state` 保存最近工具领域、用户目标、结果、工具摘要与账号上下文，用于“把它停掉”“继续刚才那个”等指代请求。
+
+失败、超时和中断轮次不会写入摘要，也不会进入下一轮模型历史。清空会话消息时同步清空摘要和结构化记忆。
+
+### 工具渐进披露
+
+- 工具按前缀划分为账号、交互规则、Scheduler、日志、台账、Provider、插件、系统运维等领域。
+- 常见中文/英文请求先本地关键词路由；普通问答、帮助和闲聊发送 **0 个工具定义**。
+- 本地无法判断且存在操作意图时，使用轻量模型路由器，最多选择 3 个领域。
+- 模型路由失败时优先复用结构化记忆中的最近领域，否则安全降级为不带工具的直接回答。
+- 主 Agent 只接收所选领域的工具 Schema，不再每轮固定携带全部已注册工具。
+
 ## 数据表
 
-- `system_agent_session`：会话（web/bot、账号上下文、标题、状态）
-- `system_agent_message`：消息（user/assistant/tool/system_event，落库为打码内容）
+- `system_agent_session`：会话（web/bot、账号上下文、标题、状态、滚动摘要、结构化工作记忆）
+- `system_agent_message`：消息（user/assistant/tool/system_event，落库为打码内容；包含运行状态、错误码、错误信息与重试次数）
 - `system_agent_action`：写操作预览与确认（pending → executing → executed/failed/rejected/expired）
 
 ## 已注册只读工具
@@ -109,6 +128,7 @@ Web 用内联卡片确认；Bot 用 Inline 按钮（`ab:{aid}:confirm|cancel:age
 `POST /api/system-agent/sessions/{id}/messages/stream` 返回 `application/x-ndjson`：
 
 - `run_started`
+- `route_selected`（所选领域、来源、工具数量）
 - `tool_started` / `tool_finished`
 - `action_proposed`
 - `assistant_message`
@@ -116,6 +136,12 @@ Web 用内联卡片确认；Bot 用 Inline 按钮（`ab:{aid}:confirm|cancel:age
 - `done`
 
 连接中断后通过会话消息 API 读取最终状态，不依赖重放旧流。
+
+失败用户消息会显示错误原因与「重试本轮」按钮。重试接口为：
+
+`POST /api/system-agent/sessions/{session_id}/messages/{message_id}/retry/stream`
+
+重试复用原用户消息，不新增重复历史；同一消息的 `retry_count` 递增。若原消息含 API Key，落库内容已打码，重试时模型会要求重新发送或在 Action 卡片补填，不能恢复旧明文。
 
 ## Bot 命令
 
@@ -131,7 +157,7 @@ Web 用内联卡片确认；Bot 用 Inline 按钮（`ab:{aid}:confirm|cancel:age
 
 ## 密钥与隐私（阶段 3）
 
-- Web / Bot 普通聊天允许粘贴 API Key；原始文本进入当次上游模型请求。
+- Web / Bot 普通聊天允许粘贴 API Key；原始文本进入当轮实际调用的上游模型请求，首选 Provider 故障时也可能发送给 fallback Provider。
 - 落库前对用户消息、助手回复和工具摘要做密钥替换 + 基础打码。
 - 工具敏感参数移入 `secret_payload_enc`（Fernet），普通 `arguments` 仅 `has_api_key=true`。
 - 执行 / 拒绝 / 过期后清除密文；`rekey` 覆盖该字段。
@@ -145,10 +171,12 @@ Web 用内联卡片确认；Bot 用 Inline 按钮（`ab:{aid}:confirm|cancel:age
 | 情况 | 用户可见 |
 | --- | --- |
 | 未启用 / 无 tools Provider | 明确错误 + AI 中心入口 |
+| 首选 Provider 返回 429/5xx/超时 | Provider 内部重试后自动切换兼容候选；本轮后续步骤沿用最近成功 Provider |
 | 工具异常 | 说明业务是否变化 |
 | Provider 验证失败 | 保持待确认，清除无效密钥，要求重输 |
 | Redis 不可用 | Web 仍可用；Bot 助手模式/Inline 确认可能不可用 |
 | NDJSON 中断 | 刷新后重读会话消息与 Action |
+| Agent 本轮失败 | 消息标记 failed，不进入后续上下文；Web 可直接重试原轮 |
 | 系统更新/重启中断连接 | Action 已先提交；刷新后以 Action 与运行时同步状态为准 |
 
 ## 扩展新工具

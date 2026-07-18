@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
 from sqlalchemy import select
@@ -22,6 +23,13 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "max_tool_calls": AgentLimits.max_tool_calls,
     "session_token_limit": 16_384,
 }
+
+
+@dataclass(frozen=True)
+class ResolvedAgentProviders:
+    primary: LLMProviderDTO
+    model: str
+    providers: dict[int, LLMProviderDTO]
 
 
 def normalize_config(raw: Any) -> dict[str, Any]:
@@ -105,25 +113,44 @@ async def resolve_fixed_provider(
     返回 ``(dto, model)`` 或 ``(None, error_message)``。
     """
 
+    resolved = await resolve_agent_providers(db, config)
+    if isinstance(resolved, str):
+        return None, resolved
+    return resolved.primary, resolved.model
+
+
+async def resolve_agent_providers(
+    db: AsyncSession,
+    config: dict[str, Any] | None = None,
+) -> ResolvedAgentProviders | str:
+    """解析主 Provider，并加载可用于 tools fallback 的候选。"""
+
     cfg = config or await load_config(db)
     if not cfg.get("enabled"):
-        return None, "系统助手未启用，请在配置中开启。"
+        return "系统助手未启用，请在配置中开启。"
     provider_id = cfg.get("provider_id")
     if not provider_id:
-        return None, "未配置系统助手固定 Provider，请到 AI 中心选择支持 tools 的模型。"
-    row = await db.get(LLMProvider, int(provider_id))
-    if row is None:
-        return None, f"配置的 Provider #{provider_id} 不存在。"
-    dto = LLMProviderDTO.from_orm_row(row)
+        return "未配置系统助手固定 Provider，请到 AI 中心选择支持 tools 的模型。"
+    rows = list((await db.execute(select(LLMProvider).order_by(LLMProvider.id))).scalars().all())
+    dtos = {int(row.id): LLMProviderDTO.from_orm_row(row) for row in rows}
+    dto = dtos.get(int(provider_id))
+    if dto is None:
+        return f"配置的 Provider #{provider_id} 不存在。"
     if not dto.has_api_key:
-        return None, f"Provider「{dto.name}」缺少 API Key。"
+        return f"Provider「{dto.name}」缺少 API Key。"
     model = tools_model_for_dto(dto, cfg.get("model"))
     if model is None:
-        return None, (
+        return (
             f"Provider「{dto.name}」没有可用的 tools 模型。"
             "请选择声明支持 tools 的已启用模型。"
         )
-    return dto, model
+    compatible = {
+        provider.id: provider
+        for provider in dtos.values()
+        if provider.has_api_key and tools_model_for_dto(provider) is not None
+    }
+    compatible[dto.id] = dto
+    return ResolvedAgentProviders(primary=dto, model=model, providers=compatible)
 
 
 async def load_system_context_flags(db: AsyncSession) -> dict[str, Any]:
@@ -159,9 +186,11 @@ async def load_system_context_flags(db: AsyncSession) -> dict[str, Any]:
 __all__ = [
     "CONFIG_KEY",
     "DEFAULT_CONFIG",
+    "ResolvedAgentProviders",
     "load_config",
     "load_system_context_flags",
     "normalize_config",
+    "resolve_agent_providers",
     "resolve_fixed_provider",
     "save_config",
     "tools_model_for_dto",

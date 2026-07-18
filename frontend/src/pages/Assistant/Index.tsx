@@ -13,9 +13,11 @@ import {
   listSystemAgentMessages,
   listSystemAgentSessions,
   patchSystemAgentConfig,
+  retrySystemAgentMessage,
   streamSystemAgentMessage,
   type SystemAgentAction,
   type SystemAgentMessage,
+  type SystemAgentStreamEvent,
 } from "@/api/systemAgent";
 import { listLLMProviders } from "@/api/commands";
 import { listAccounts } from "@/api/accounts";
@@ -35,6 +37,7 @@ export function AssistantIndex() {
   const [accountId, setAccountId] = useState<number | "">("");
   const [live, setLive] = useState<LiveBubble[]>([]);
   const [streaming, setStreaming] = useState(false);
+  const [retryingMessageId, setRetryingMessageId] = useState<number | null>(null);
   const [configOpen, setConfigOpen] = useState(false);
 
   const configQ = useQuery({
@@ -140,31 +143,28 @@ export function AssistantIndex() {
     return session.id;
   };
 
-  const onSend = async (text: string) => {
+  const runTurn = async ({ text, retryMessageId }: { text?: string; retryMessageId?: number }) => {
     if (!enabled) {
       toast.error("请先在右上角开启系统助手并选择支持 tools 的 Provider");
       setConfigOpen(true);
       return;
     }
     setStreaming(true);
-    const userBubble: LiveBubble = { id: `live-user-${Date.now()}`, role: "user", text };
+    setRetryingMessageId(retryMessageId ?? null);
+    const userBubble: LiveBubble | null = text
+      ? { id: `live-user-${Date.now()}`, role: "user", text }
+      : null;
     const pending: LiveBubble = {
       id: `live-assistant-${Date.now()}`,
       role: "assistant",
       text: "",
       pending: true,
     };
-    setLive([userBubble, pending]);
+    setLive(userBubble ? [userBubble, pending] : [pending]);
     try {
       const sessionId = await ensureSession();
       let assistantText = "";
-      await streamSystemAgentMessage(
-        sessionId,
-        {
-          content: text,
-          account_id: accountId === "" ? null : Number(accountId),
-        },
-        (event) => {
+      const onEvent = (event: SystemAgentStreamEvent) => {
           if (event.type === "tool_finished") {
             setLive((prev) => {
               const tools = prev.filter((b) => b.role === "tool" || b.role === "user");
@@ -222,8 +222,17 @@ export function AssistantIndex() {
               });
             }
           }
-        },
-      );
+      };
+      const accountPayload = { account_id: accountId === "" ? null : Number(accountId) };
+      if (retryMessageId != null) {
+        await retrySystemAgentMessage(sessionId, retryMessageId, accountPayload, onEvent);
+      } else {
+        await streamSystemAgentMessage(
+          sessionId,
+          { content: text || "", ...accountPayload },
+          onEvent,
+        );
+      }
       await qc.invalidateQueries({ queryKey: ["system-agent", "messages", sessionId] });
       await qc.invalidateQueries({ queryKey: ["system-agent", "sessions"] });
       await qc.invalidateQueries({ queryKey: ["system-agent", "actions", sessionId] });
@@ -231,11 +240,16 @@ export function AssistantIndex() {
       setLive([]);
     } catch (e) {
       toast.error(getErrMsg(e));
-      setLive((prev) => prev.filter((b) => b.role === "user" || b.role === "action"));
+      setLive((prev) => prev.filter((b) => (text && b.role === "user") || b.role === "action"));
     } finally {
       setStreaming(false);
+      setRetryingMessageId(null);
     }
   };
+
+  const onSend = async (text: string) => runTurn({ text });
+
+  const onRetryMessage = async (messageId: number) => runTurn({ retryMessageId: messageId });
 
   const pendingActionBubbles: LiveBubble[] = useMemo(() => {
     const rows = pendingActionsQ.data || [];
@@ -369,6 +383,8 @@ export function AssistantIndex() {
             <Conversation
               messages={messages}
               live={conversationLive}
+              onRetryMessage={onRetryMessage}
+              retryingMessageId={retryingMessageId}
               onActionUpdated={() => {
                 void qc.invalidateQueries({ queryKey: ["system-agent", "actions", activeId] });
               }}

@@ -1,7 +1,8 @@
-import { Bot, User, Wrench } from "lucide-react";
+import { AlertCircle, Bot, RotateCcw, User, Wrench } from "lucide-react";
 
 import type { SystemAgentAction, SystemAgentMessage } from "@/api/systemAgent";
 import { ActionCard } from "@/components/assistant/ActionCard";
+import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
 export type LiveBubble = {
@@ -10,6 +11,10 @@ export type LiveBubble = {
   text: string;
   pending?: boolean;
   action?: SystemAgentAction;
+  messageId?: number;
+  runStatus?: string;
+  errorMessage?: string | null;
+  retryCount?: number;
 };
 
 function messageText(msg: SystemAgentMessage): string {
@@ -31,10 +36,14 @@ export function Conversation({
   messages,
   live,
   onActionUpdated,
+  onRetryMessage,
+  retryingMessageId,
 }: {
   messages: SystemAgentMessage[];
   live?: LiveBubble[];
   onActionUpdated?: (action: SystemAgentAction) => void;
+  onRetryMessage?: (messageId: number) => void;
+  retryingMessageId?: number | null;
 }) {
   const items: LiveBubble[] = [
     ...messages.map(
@@ -44,6 +53,10 @@ export function Conversation({
           ? m.role
           : "system") as LiveBubble["role"],
         text: messageText(m),
+        messageId: m.id,
+        runStatus: m.run_status,
+        errorMessage: m.error_message,
+        retryCount: m.retry_count,
       }),
     ),
     ...(live || []),
@@ -69,6 +82,7 @@ export function Conversation({
         const isUser = item.role === "user";
         const isTool = item.role === "tool";
         const isAction = item.role === "action" && item.action;
+        const isFailedUser = isUser && item.runStatus === "failed" && item.messageId != null;
         return (
           <div
             key={item.id}
@@ -84,16 +98,38 @@ export function Conversation({
                 <ActionCard action={item.action} onUpdated={onActionUpdated} />
               </div>
             ) : (
-              <div
-                className={cn(
-                  "max-w-[85%] whitespace-pre-wrap rounded-2xl px-3 py-2 text-sm leading-relaxed",
-                  isUser && "bg-primary text-primary-foreground",
-                  !isUser && !isTool && "bg-muted",
-                  isTool && "border border-dashed bg-background text-xs text-muted-foreground",
-                  item.pending && "opacity-70",
-                )}
-              >
-                {item.text || (item.pending ? "思考中…" : "")}
+              <div className={cn("flex min-w-0 max-w-[85%] flex-col gap-1", isUser && "items-end")}>
+                <div
+                  className={cn(
+                    "max-w-full break-words whitespace-pre-wrap rounded-2xl px-3 py-2 text-sm leading-relaxed",
+                    isUser && "bg-primary text-primary-foreground",
+                    !isUser && !isTool && "bg-muted",
+                    isTool && "border border-dashed bg-background text-xs text-muted-foreground",
+                    item.pending && "opacity-70",
+                  )}
+                >
+                  {item.text || (item.pending ? "思考中…" : "")}
+                </div>
+                {isFailedUser ? (
+                  <div className="flex max-w-full flex-col items-stretch gap-2 rounded-lg border border-destructive/30 bg-destructive/5 px-2.5 py-2 text-xs text-destructive sm:flex-row sm:items-start">
+                    <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                    <div className="min-w-0 flex-1">
+                      <p className="break-words">{item.errorMessage || "本轮执行失败"}</p>
+                      {item.retryCount ? <p className="mt-1 opacity-70">已重试 {item.retryCount} 次</p> : null}
+                    </div>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="h-7 shrink-0 self-end px-2 text-xs text-foreground sm:self-auto"
+                      disabled={retryingMessageId != null}
+                      onClick={() => onRetryMessage?.(item.messageId!)}
+                    >
+                      <RotateCcw className={cn("mr-1 h-3 w-3", retryingMessageId === item.messageId && "animate-spin")} />
+                      {retryingMessageId === item.messageId ? "重试中" : "重试本轮"}
+                    </Button>
+                  </div>
+                ) : null}
               </div>
             )}
             {isUser ? (

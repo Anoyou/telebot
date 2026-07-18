@@ -32,6 +32,17 @@ MESSAGE_ROLES = {
     MESSAGE_ROLE_SYSTEM_EVENT,
 }
 
+MESSAGE_RUN_PENDING = "pending"
+MESSAGE_RUN_SUCCEEDED = "succeeded"
+MESSAGE_RUN_FAILED = "failed"
+MESSAGE_RUN_COMPLETED = "completed"
+MESSAGE_RUN_STATUSES = {
+    MESSAGE_RUN_PENDING,
+    MESSAGE_RUN_SUCCEEDED,
+    MESSAGE_RUN_FAILED,
+    MESSAGE_RUN_COMPLETED,
+}
+
 ACTION_STATUS_PENDING = "pending"
 ACTION_STATUS_EXECUTING = "executing"
 ACTION_STATUS_EXECUTED = "executed"
@@ -81,6 +92,18 @@ class SystemAgentSession(Base):
         default=SESSION_STATUS_ACTIVE,
         server_default=SESSION_STATUS_ACTIVE,
     )
+    memory_summary: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        default="",
+        server_default="",
+    )
+    memory_state: Mapped[dict[str, Any]] = mapped_column(
+        JSON,
+        nullable=False,
+        default=dict,
+        server_default="{}",
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
@@ -119,6 +142,20 @@ class SystemAgentMessage(Base):
     role: Mapped[str] = mapped_column(String(32), nullable=False)
     content: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
     usage: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    run_status: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default=MESSAGE_RUN_COMPLETED,
+        server_default=MESSAGE_RUN_COMPLETED,
+    )
+    error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    retry_count: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default="0",
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
@@ -209,6 +246,11 @@ __all__ = [
     "MESSAGE_ROLE_TOOL",
     "MESSAGE_ROLE_USER",
     "MESSAGE_ROLES",
+    "MESSAGE_RUN_COMPLETED",
+    "MESSAGE_RUN_FAILED",
+    "MESSAGE_RUN_PENDING",
+    "MESSAGE_RUN_STATUSES",
+    "MESSAGE_RUN_SUCCEEDED",
     "RISK_DANGEROUS",
     "RISK_NORMAL",
     "RUNTIME_SYNC_FAILED",

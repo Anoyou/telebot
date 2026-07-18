@@ -40,6 +40,8 @@ export interface SystemAgentSession {
   channel: string;
   title: string | null;
   status: string;
+  memory_summary?: string;
+  memory_state?: Record<string, unknown>;
   created_at: string | null;
   updated_at: string | null;
 }
@@ -50,6 +52,10 @@ export interface SystemAgentMessage {
   role: string;
   content: Record<string, unknown>;
   usage?: Record<string, unknown> | null;
+  run_status?: "pending" | "succeeded" | "failed" | "completed" | string;
+  error_code?: string | null;
+  error_message?: string | null;
+  retry_count?: number;
   created_at: string | null;
 }
 
@@ -165,8 +171,12 @@ function streamErrorMessage(value: unknown, fallback: string): string {
   if (!value || typeof value !== "object") return fallback;
   const obj = value as Record<string, unknown>;
   const error = obj.error as Record<string, unknown> | undefined;
+  const detail = obj.detail as Record<string, unknown> | string | undefined;
   if (error?.message && typeof error.message === "string") return error.message;
-  if (typeof obj.detail === "string") return obj.detail;
+  if (detail && typeof detail === "object" && typeof detail.message === "string") {
+    return detail.message;
+  }
+  if (typeof detail === "string") return detail;
   return fallback;
 }
 
@@ -217,7 +227,36 @@ export async function streamSystemAgentMessage(
   onEvent: (event: SystemAgentStreamEvent) => void,
   opts?: { signal?: AbortSignal },
 ): Promise<void> {
-  const response = await apiFetch(`/api/system-agent/sessions/${sessionId}/messages/stream`, {
+  return streamSystemAgentRequest(
+    `/api/system-agent/sessions/${sessionId}/messages/stream`,
+    payload,
+    onEvent,
+    opts,
+  );
+}
+
+export async function retrySystemAgentMessage(
+  sessionId: string,
+  messageId: number,
+  payload: { account_id?: number | null },
+  onEvent: (event: SystemAgentStreamEvent) => void,
+  opts?: { signal?: AbortSignal },
+): Promise<void> {
+  return streamSystemAgentRequest(
+    `/api/system-agent/sessions/${sessionId}/messages/${messageId}/retry/stream`,
+    payload,
+    onEvent,
+    opts,
+  );
+}
+
+async function streamSystemAgentRequest(
+  path: string,
+  payload: Record<string, unknown>,
+  onEvent: (event: SystemAgentStreamEvent) => void,
+  opts?: { signal?: AbortSignal },
+): Promise<void> {
+  const response = await apiFetch(path, {
     method: "POST",
     headers: { "Content-Type": "application/json", Accept: "application/x-ndjson" },
     body: JSON.stringify(payload),
@@ -236,14 +275,14 @@ export async function streamSystemAgentMessage(
 
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
-  let terminalReceived = false;
+  let doneReceived = false;
   let streamFinished = false;
   let buffer = "";
   const consumeLine = (line: string) => {
     const trimmed = line.trim();
     if (!trimmed) return;
     const event = JSON.parse(trimmed) as SystemAgentStreamEvent;
-    if (event.type === "done" || event.type === "error") terminalReceived = true;
+    if (event.type === "done") doneReceived = true;
     onEvent(event);
   };
   try {
@@ -256,7 +295,7 @@ export async function streamSystemAgentMessage(
       if (done) break;
     }
     if (buffer.trim()) consumeLine(buffer);
-    if (!terminalReceived) throw new Error("流式响应提前结束，没有返回最终状态。");
+    if (!doneReceived) throw new Error("流式响应提前结束，没有返回最终状态。");
     streamFinished = true;
   } finally {
     if (!streamFinished) await reader.cancel().catch(() => undefined);

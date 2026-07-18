@@ -14,6 +14,8 @@ from app.db.models.system_agent import (
     CHANNEL_BOT,
     CHANNEL_WEB,
     MESSAGE_ROLE_USER,
+    MESSAGE_RUN_FAILED,
+    MESSAGE_RUN_SUCCEEDED,
     SESSION_STATUS_ACTIVE,
     SESSION_STATUS_ARCHIVED,
     SystemAgentMessage,
@@ -150,12 +152,16 @@ async def test_get_or_create_and_clear_messages(agent_db) -> None:
                 content={"text": "hello"},
             )
         )
+        session.memory_summary = "old summary"
+        session.memory_state = {"last_domains": ["logs"]}
         await db.flush()
         msgs = await svc.list_messages(db, session.id)
         assert len(msgs) == 1
         deleted = await svc.clear_messages(db, session)
         assert deleted == 1
         assert await svc.list_messages(db, session.id) == []
+        assert session.memory_summary == ""
+        assert session.memory_state == {}
 
 
 @pytest.mark.asyncio
@@ -199,6 +205,49 @@ async def test_stream_message_persists_redacted_user_and_assistant(
 
 
 @pytest.mark.asyncio
+async def test_successful_turn_redacts_secret_from_persistent_memory(
+    agent_db, monkeypatch
+) -> None:
+    svc = SystemAgentService()
+    secret = "sk-abcdefghijklmnopqrstuvwxyz123456"
+
+    async def fake_stream(*_args, **_kwargs):
+        yield {"type": "route_selected", "domains": ["providers"]}
+        yield {
+            "type": "tool_finished",
+            "tool_name": "providers.save",
+            "call_id": "c-secret",
+            "is_error": False,
+            "result_summary": {"echo": secret},
+        }
+        yield {
+            "type": "assistant_message",
+            "content": f"已处理 {secret}",
+            "usage": {},
+        }
+        yield {"type": "done", "ok": True}
+
+    monkeypatch.setattr(svc.runtime, "stream_turn", fake_stream)
+
+    async with agent_db() as db:
+        session = await svc.create_session(db, channel=CHANNEL_WEB, web_user_id=1)
+        async for _event in svc.stream_message(
+            db,
+            session=session,
+            text=f"添加 Provider，key={secret}",
+            role="admin",
+            channel=CHANNEL_WEB,
+            web_user_id=1,
+        ):
+            pass
+
+        assert secret not in session.memory_summary
+        assert secret not in str(session.memory_state)
+        assert "REDACTED" in str(session.memory_state)
+        assert secret not in str(session.title)
+
+
+@pytest.mark.asyncio
 async def test_stream_message_commits_history_before_terminal_events(
     agent_db, monkeypatch
 ) -> None:
@@ -236,6 +285,205 @@ async def test_stream_message_commits_history_before_terminal_events(
             assert roles == [MESSAGE_ROLE_USER, "assistant"]
 
         await stream.aclose()
+
+
+@pytest.mark.asyncio
+async def test_failed_turn_is_marked_and_excluded_from_next_history(
+    agent_db, monkeypatch
+) -> None:
+    svc = SystemAgentService()
+    histories: list[list[SystemAgentMessage]] = []
+    call_count = 0
+
+    async def fake_stream(*_args, **kwargs):
+        nonlocal call_count
+        histories.append(list(kwargs.get("history_messages") or []))
+        call_count += 1
+        if call_count == 1:
+            yield {"type": "error", "code": "UPSTREAM_503", "message": "上游暂时不可用"}
+            yield {"type": "done", "ok": False}
+            return
+        yield {"type": "assistant_message", "content": "第二轮成功", "usage": {}}
+        yield {"type": "done", "ok": True}
+
+    monkeypatch.setattr(svc.runtime, "stream_turn", fake_stream)
+
+    async with agent_db() as db:
+        session = await svc.create_session(db, channel=CHANNEL_WEB, web_user_id=1)
+        async for _event in svc.stream_message(
+            db,
+            session=session,
+            text="第一轮失败",
+            role="admin",
+            channel=CHANNEL_WEB,
+            web_user_id=1,
+        ):
+            pass
+
+        first_messages = await svc.list_messages(db, session.id)
+        assert len(first_messages) == 1
+        assert first_messages[0].run_status == MESSAGE_RUN_FAILED
+        assert first_messages[0].error_code == "UPSTREAM_503"
+
+        async for _event in svc.stream_message(
+            db,
+            session=session,
+            text="第二轮",
+            role="admin",
+            channel=CHANNEL_WEB,
+            web_user_id=1,
+        ):
+            pass
+
+        assert histories == [[], []]
+        rows = await svc.list_messages(db, session.id)
+        assert rows[-2].run_status == MESSAGE_RUN_SUCCEEDED
+        assert session.memory_state["last_result"] == "第二轮成功"
+
+
+@pytest.mark.asyncio
+async def test_retry_reuses_failed_user_message(agent_db, monkeypatch) -> None:
+    svc = SystemAgentService()
+
+    async def fail_stream(*_args, **_kwargs):
+        yield {"type": "error", "code": "TIMEOUT", "message": "超时"}
+        yield {"type": "done", "ok": False}
+
+    monkeypatch.setattr(svc.runtime, "stream_turn", fail_stream)
+
+    async with agent_db() as db:
+        session = await svc.create_session(db, channel=CHANNEL_WEB, web_user_id=1)
+        async for _event in svc.stream_message(
+            db,
+            session=session,
+            text="查询日志",
+            role="admin",
+            channel=CHANNEL_WEB,
+            web_user_id=1,
+        ):
+            pass
+        failed = (await svc.list_messages(db, session.id))[0]
+        original_id = failed.id
+
+        async def success_stream(*_args, **_kwargs):
+            yield {"type": "route_selected", "domains": ["logs"]}
+            yield {"type": "assistant_message", "content": "已恢复", "usage": {}}
+            yield {"type": "done", "ok": True}
+
+        monkeypatch.setattr(svc.runtime, "stream_turn", success_stream)
+        async for _event in svc.stream_message(
+            db,
+            session=session,
+            text="",
+            role="admin",
+            channel=CHANNEL_WEB,
+            web_user_id=1,
+            retry_message=failed,
+        ):
+            pass
+
+        rows = await svc.list_messages(db, session.id)
+        users = [row for row in rows if row.role == MESSAGE_ROLE_USER]
+        assert len(users) == 1
+        assert users[0].id == original_id
+        assert users[0].run_status == MESSAGE_RUN_SUCCEEDED
+        assert users[0].retry_count == 1
+        assert users[0].error_message is None
+
+
+@pytest.mark.asyncio
+async def test_stale_concurrent_retry_cannot_execute_twice(agent_db, monkeypatch) -> None:
+    svc = SystemAgentService()
+
+    async def success_stream(*_args, **_kwargs):
+        yield {"type": "assistant_message", "content": "完成", "usage": {}}
+        yield {"type": "done", "ok": True}
+
+    monkeypatch.setattr(svc.runtime, "stream_turn", success_stream)
+
+    async with agent_db() as setup_db:
+        session = await svc.create_session(
+            setup_db,
+            channel=CHANNEL_WEB,
+            web_user_id=1,
+        )
+        message = SystemAgentMessage(
+            session_id=session.id,
+            role=MESSAGE_ROLE_USER,
+            content={"text": "只允许重试一次"},
+            run_status=MESSAGE_RUN_FAILED,
+        )
+        setup_db.add(message)
+        await setup_db.commit()
+        session_id = session.id
+        message_id = message.id
+
+    async with agent_db() as first_db, agent_db() as stale_db:
+        first_session = await first_db.get(SystemAgentSession, session_id)
+        first_message = await first_db.get(SystemAgentMessage, message_id)
+        stale_session = await stale_db.get(SystemAgentSession, session_id)
+        stale_message = await stale_db.get(SystemAgentMessage, message_id)
+        assert first_session is not None and first_message is not None
+        assert stale_session is not None and stale_message is not None
+
+        async for _event in svc.stream_message(
+            first_db,
+            session=first_session,
+            text="",
+            role="admin",
+            channel=CHANNEL_WEB,
+            web_user_id=1,
+            retry_message=first_message,
+        ):
+            pass
+
+        with pytest.raises(ValueError, match="已被重试|状态已变化"):
+            async for _event in svc.stream_message(
+                stale_db,
+                session=stale_session,
+                text="",
+                role="admin",
+                channel=CHANNEL_WEB,
+                web_user_id=1,
+                retry_message=stale_message,
+            ):
+                pass
+
+
+@pytest.mark.asyncio
+async def test_unexpected_stream_crash_becomes_retryable_failed_turn(
+    agent_db, monkeypatch
+) -> None:
+    svc = SystemAgentService()
+
+    async def crash_stream(*_args, **_kwargs):
+        yield {"type": "run_started", "run_id": "r-crash"}
+        yield {"type": "assistant_message", "content": "未提交的答案", "usage": {}}
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(svc.runtime, "stream_turn", crash_stream)
+
+    async with agent_db() as db:
+        session = await svc.create_session(db, channel=CHANNEL_WEB, web_user_id=1)
+        events = [
+            event
+            async for event in svc.stream_message(
+                db,
+                session=session,
+                text="会崩溃的一轮",
+                role="admin",
+                channel=CHANNEL_WEB,
+                web_user_id=1,
+            )
+        ]
+
+        assert events[0]["type"] == "run_started"
+        assert all(event.get("type") != "assistant_message" for event in events)
+        assert any(event.get("code") == "AGENT_STREAM_FAILED" for event in events)
+        assert events[-1] == {"type": "done", "ok": False, "session_id": session.id}
+        row = (await svc.list_messages(db, session.id))[0]
+        assert row.run_status == MESSAGE_RUN_FAILED
+        assert row.error_code == "AGENT_STREAM_FAILED"
 
 
 @pytest.mark.asyncio
