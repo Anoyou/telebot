@@ -246,6 +246,8 @@ async def execute_userbot_interaction_action(
         return result
 
     if action_type == "edit_message":
+        if isinstance(payload.get("rich_message"), dict):
+            raise ValueError("rich_message_requires_interaction_bot")
         text = str(payload.get("text") or "").strip()
         if not text:
             raise ValueError("缺少 text")

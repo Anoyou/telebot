@@ -20,6 +20,15 @@
 
 ## [Unreleased]
 
+## [0.67.1] — 2026-07-18 · patch（补丁版本） · Rich Message 编辑
+
+### Added
+- MessageOps 新增 `edit_rich()`，标准 `edit_message` action 支持 `rich_message` 字段，调用 Telegram 官方 `editMessageText.rich_message` 编辑结构化富文本。
+- Rich Message 编辑固定走 Interaction Bot；UserBot action 和 `userbot_reply` 显式拒绝，避免误把 Bot API 结构发送给 Telethon。
+
+### Tests
+- 增加 Rich Message 编辑的通道约束、执行路径和官方 Bot API payload 回归覆盖。
+
 ## [0.67.0] — 2026-07-18 · minor（次版本） · UserBot 发奖锚点缓存
 
 ### Added

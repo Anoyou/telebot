@@ -3333,6 +3333,91 @@ async def _apply_userbot_send_rich_message_action(
 
 
 async def _apply_userbot_edit_message_action(state: _AccountState, event: Any, action: dict[str, Any]) -> bool:
+    rich_message = action.get("rich_message")
+    if isinstance(rich_message, dict):
+        target_chat_id = _action_chat_id(action, event)
+        message_id = _int_or_none(action.get("message_id") or action.get("edit_message_id"))
+        if target_chat_id is None or message_id is None:
+            await record_action(
+                action.get("context"),
+                action,
+                TRACE_STATUS_FAILED,
+                error_code="target_message_id_missing",
+                error="target chat_id or message_id missing",
+            )
+            return False
+        if _action_dev_mode_dry_run_enabled(state, action):
+            options = action_send_via_options(action)
+            await _record_userbot_dry_run(
+                state,
+                action,
+                channel=options[0] if options else "interaction_bot",
+                result={
+                    "dry_run": True,
+                    "chat_id": target_chat_id,
+                    "message_id": message_id,
+                    "rich_message": rich_message,
+                    "send_via_options": options,
+                },
+            )
+            return True
+        reply_markup = action.get("reply_markup") if isinstance(action.get("reply_markup"), dict) else None
+        last_code = "rich_message_requires_interaction_bot"
+        last_error = "edit_rich_message only supports interaction_bot"
+        for send_via in action_send_via_options(action):
+            if send_via != "interaction_bot":
+                continue
+            token = await _interaction_bot_token_for_account(state.account_id)
+            if not token:
+                last_code = "bot_token_missing"
+                last_error = "interaction bot token unavailable"
+                continue
+            try:
+                result = await account_bot_service.edit_rich_message(
+                    token,
+                    target_chat_id,
+                    message_id,
+                    rich_message,
+                    reply_markup=reply_markup,
+                )
+                await record_action(
+                    action.get("context"),
+                    action,
+                    TRACE_STATUS_OK,
+                    actual_send_via="interaction_bot",
+                    result=result,
+                )
+                await _emit_userbot_action_tap(
+                    state,
+                    action,
+                    ACTION_EVENT_STATUS_OK,
+                    channel="interaction_bot",
+                    result=result,
+                )
+                return True
+            except ValueError as exc:
+                last_code = "invalid_rich_message"
+                last_error = str(exc)
+                break
+            except Exception as exc:  # noqa: BLE001
+                last_code = "telegram_api_error"
+                last_error = f"{type(exc).__name__}: {exc}"
+        await record_action(
+            action.get("context"),
+            action,
+            TRACE_STATUS_FAILED,
+            error_code=last_code,
+            error=last_error,
+        )
+        await _emit_userbot_action_tap(
+            state,
+            action,
+            ACTION_EVENT_STATUS_FAILED,
+            channel=action_send_via_options(action)[0] if action_send_via_options(action) else None,
+            error_code=last_code,
+            error=last_error,
+        )
+        return False
     text = str(action.get("text") or "").strip()
     if not text:
         await record_action(action.get("context"), action, TRACE_STATUS_FAILED, error_code="empty_message_text", error="edit_message text is empty")
@@ -7760,7 +7845,8 @@ def _normalize_interaction_action(
     action["type"] = action_type
     if action_type in _INTERACTION_SEND_ACTIONS or action_type in _INTERACTION_CONTROL_ACTIONS:
         send_via_options = action_send_via_options(action)
-        if action_type == "send_rich_message" and not has_explicit_send_via:
+        is_rich_edit = action_type == "edit_message" and isinstance(action.get("rich_message"), dict)
+        if (action_type == "send_rich_message" or is_rich_edit) and not has_explicit_send_via:
             send_via_options = ["interaction_bot"]
         elif not has_explicit_send_via and default_send_via:
             send_via_options = list(default_send_via)

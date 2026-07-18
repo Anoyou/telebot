@@ -208,6 +208,49 @@ class BufferedMessageOps:
         self.actions.append(action)
         return action
 
+    async def edit_rich(
+        self,
+        *,
+        chat_id: int | None = None,
+        message_id: int,
+        html: str | None = None,
+        markdown: str | None = None,
+        blocks: list[dict[str, Any]] | None = None,
+        media: list[dict[str, Any]] | None = None,
+        is_rtl: bool | None = None,
+        skip_entity_detection: bool | None = None,
+        reply_markup: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Buffer an official Rich Message edit for the Interaction Bot."""
+
+        selected = sum(value not in (None, "", []) for value in (html, markdown, blocks))
+        if selected != 1:
+            raise ValueError("edit_rich 必须且只能提供 html、markdown、blocks 其中一个")
+        rich_message: dict[str, Any] = {}
+        if html not in (None, ""):
+            rich_message["html"] = html
+        if markdown not in (None, ""):
+            rich_message["markdown"] = markdown
+        if blocks not in (None, []):
+            rich_message["blocks"] = blocks
+        if media is not None:
+            rich_message["media"] = media
+        if is_rtl is not None:
+            rich_message["is_rtl"] = bool(is_rtl)
+        if skip_entity_detection is not None:
+            rich_message["skip_entity_detection"] = bool(skip_entity_detection)
+        action: dict[str, Any] = {
+            "type": "edit_message",
+            "send_via": "interaction_bot",
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "rich_message": rich_message,
+        }
+        if reply_markup is not None:
+            action["reply_markup"] = dict(reply_markup)
+        self.actions.append(action)
+        return action
+
     async def edit_caption(
         self,
         *,

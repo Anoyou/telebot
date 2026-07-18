@@ -1145,6 +1145,7 @@ class GuessNumberPlugin(Plugin):
 | `send_photo` / `send_file` | `filename`、`caption`、`reply_to_message_id` | 可选，文件名、说明文字、回复目标 |
 | `send_photo` / `send_file` | `save_message_id_key` | 可选；媒体发送成功后把 Telegram `message_id` 按 key 保存 2 小时，供后续 `edit_caption`、删除或替换使用 |
 | `edit_message` | `message_id`、`text` | 编辑纯文本消息；不用于编辑媒体 caption |
+| `edit_message` | `message_id`、`rich_message` | 使用官方 `editMessageText.rich_message` 编辑 Rich Message；`rich_message` 必须且只能提供 `html`、`markdown`、`blocks` 之一，固定由 Interaction Bot 执行 |
 | `edit_caption` | `message_id` / `message_id_key`、`caption` | 编辑图片或文件消息的 caption；`message_id_key` 会读取同账号命名空间下由 `save_message_id_key` 保存的消息 ID |
 | `edit_caption` | `parse_mode`、`reply_markup` | 可选；`parse_mode="html"` 时按 HTML 发送，`reply_markup` 只由 `interaction_bot` 原生承接 |
 | `delete_message` | `message_id` | 删除对应 Bot 通道可操作的消息 |

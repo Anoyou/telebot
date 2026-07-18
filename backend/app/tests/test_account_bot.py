@@ -2500,6 +2500,31 @@ async def test_message_ops_buffers_native_rich_message_for_interaction_bot() -> 
 
 
 @pytest.mark.asyncio
+async def test_message_ops_buffers_rich_message_edit_for_interaction_bot() -> None:
+    ops = BufferedMessageOps()
+
+    await ops.edit_rich(
+        chat_id=-100,
+        message_id=41,
+        html="<h1>已更新</h1><details><summary>详情</summary>内容</details>",
+        reply_markup={"inline_keyboard": []},
+    )
+
+    assert ops.actions == [
+        {
+            "type": "edit_message",
+            "send_via": "interaction_bot",
+            "chat_id": -100,
+            "message_id": 41,
+            "rich_message": {
+                "html": "<h1>已更新</h1><details><summary>详情</summary>内容</details>"
+            },
+            "reply_markup": {"inline_keyboard": []},
+        }
+    ]
+
+
+@pytest.mark.asyncio
 async def test_message_ops_rich_message_requires_exactly_one_content_format() -> None:
     ops = BufferedMessageOps()
 
@@ -15453,6 +15478,40 @@ async def test_interaction_action_edit_message_records_dedicated_action(monkeypa
     )
 
     edit.assert_awaited_once_with("bbot-token", -100123, 77, "已更新", reply_markup=None)
+    assert record_action.await_args.args[1]["type"] == "edit_message"
+    assert record_action.await_args.args[2] == account_bot_runtime.TRACE_STATUS_OK
+
+
+@pytest.mark.asyncio
+async def test_interaction_action_edit_message_uses_rich_message_api(monkeypatch) -> None:
+    edit_rich = AsyncMock(return_value={"message_id": 77})
+    record_action = AsyncMock()
+    monkeypatch.setattr(account_bot_service, "edit_rich_message", edit_rich)
+    monkeypatch.setattr("app.services.interaction.delivery.record_action", record_action)
+    incoming = account_bot_runtime.Incoming(
+        account_id=1,
+        token="bbot-token",
+        update_id=1,
+        user_id=456,
+        chat_id=-100123,
+        message_id=10,
+        text="",
+        trace_id="evt_edit_rich",
+    )
+    rich_message = {"html": "<h1>已更新</h1><details><summary>详情</summary>内容</details>"}
+
+    await account_bot_runtime._apply_interaction_actions(
+        incoming,
+        [{"type": "edit_message", "rich_message": rich_message, "message_id": 77}],
+    )
+
+    edit_rich.assert_awaited_once_with(
+        "bbot-token",
+        -100123,
+        77,
+        rich_message,
+        reply_markup=None,
+    )
     assert record_action.await_args.args[1]["type"] == "edit_message"
     assert record_action.await_args.args[2] == account_bot_runtime.TRACE_STATUS_OK
 

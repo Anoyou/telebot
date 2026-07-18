@@ -228,12 +228,13 @@ async def guard_interaction_actions(
             "pin_message",
         }:
             requested_raw = action_send_via_raw_selector(action)
+            is_rich_edit = action_type == "edit_message" and isinstance(action.get("rich_message"), dict)
             requested_send_via = (
                 action_send_via_options(action)
                 if explicit_selector
                 else [
                     "interaction_bot"
-                    if action_type == "send_rich_message"
+                    if action_type == "send_rich_message" or is_rich_edit
                     else normalized_session_channel
                 ]
             )
@@ -285,7 +286,7 @@ async def guard_interaction_actions(
                 )
                 continue
             send_via_options = list(requested_send_via)
-            if action_type == "send_rich_message":
+            if action_type == "send_rich_message" or is_rich_edit:
                 rich_channels = [
                     item for item in send_via_options if item in INTERACTION_RICH_MESSAGE_CHANNELS
                 ]

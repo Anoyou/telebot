@@ -649,6 +649,50 @@ class InteractionDeliveryExecutor:
             )
             return False, {"error": str(exc), "error_code": "telegram_api_error"}
 
+    async def edit_rich_message(
+        self,
+        rich_message: dict[str, Any],
+        *,
+        chat_id: int | None = None,
+        message_id: int | None,
+        send_via: str,
+        reply_markup: dict[str, Any] | None = None,
+    ) -> tuple[bool, dict[str, Any]]:
+        target_chat_id = self._target_chat_id(chat_id)
+        if target_chat_id is None:
+            return False, {}
+        if message_id is None:
+            return False, {"error": "message_id missing"}
+        if send_via != "interaction_bot":
+            return False, {
+                "error": "edit_rich_message only supports interaction_bot",
+                "error_code": "rich_message_requires_interaction_bot",
+            }
+        token = await self._resolve_token(send_via)
+        if not token:
+            return False, {"error": "bot token unavailable", "error_code": "bot_token_missing"}
+        try:
+            result = await account_bot_service.edit_rich_message(
+                token,
+                target_chat_id,
+                message_id,
+                rich_message,
+                reply_markup=reply_markup,
+            )
+            return True, result
+        except ValueError as exc:
+            return False, {"error": str(exc), "error_code": "invalid_rich_message"}
+        except Exception as exc:  # noqa: BLE001
+            await self.write_log(
+                self.incoming,
+                "warn",
+                "interaction action edit rich message failed",
+                send_via=send_via,
+                error=str(exc),
+                **self.log_context(self.incoming),
+            )
+            return False, {"error": str(exc), "error_code": "telegram_api_error"}
+
     async def edit_caption(
         self,
         caption: str,
@@ -1388,8 +1432,10 @@ class InteractionDeliveryExecutor:
         parse_mode: str,
         reply_markup: dict[str, Any] | None,
     ) -> None:
+        rich_message = action.get("rich_message")
+        is_rich_edit = isinstance(rich_message, dict)
         text = str(action.get("text") or "").strip()
-        if not text:
+        if not is_rich_edit and not text:
             await record_action(
                 action.get("context"),
                 action,
@@ -1415,6 +1461,7 @@ class InteractionDeliveryExecutor:
                 "chat_id": self._target_chat_id(chat_id),
                 "message_id": message_id,
                 "text": text,
+                "rich_message": rich_message if is_rich_edit else None,
                 "send_via_options": action_send_via_options(action),
             }
             await self._record_dry_run(
@@ -1423,14 +1470,23 @@ class InteractionDeliveryExecutor:
                 result=dry_result,
             )
             return
-        ok, result, used_send_via = await self._try_edit_message_options(
-            text,
-            chat_id=chat_id,
-            message_id=message_id,
-            send_via_options=action_send_via_options(action),
-            parse_mode=parse_mode,
-            reply_markup=reply_markup,
-        )
+        if is_rich_edit:
+            ok, result, used_send_via = await self._try_edit_rich_message_options(
+                rich_message,
+                chat_id=chat_id,
+                message_id=message_id,
+                send_via_options=action_send_via_options(action),
+                reply_markup=reply_markup,
+            )
+        else:
+            ok, result, used_send_via = await self._try_edit_message_options(
+                text,
+                chat_id=chat_id,
+                message_id=message_id,
+                send_via_options=action_send_via_options(action),
+                parse_mode=parse_mode,
+                reply_markup=reply_markup,
+            )
         await record_action(
             action.get("context"),
             action,
@@ -1973,6 +2029,30 @@ class InteractionDeliveryExecutor:
                 message_id=message_id,
                 send_via=send_via,
                 parse_mode=parse_mode,
+                reply_markup=reply_markup,
+            )
+            if ok:
+                return True, result, send_via
+            last_result = result
+            await self._log_send_via_fallback(send_via, result)
+        return False, last_result, send_via_options[0] if send_via_options else "interaction_bot"
+
+    async def _try_edit_rich_message_options(
+        self,
+        rich_message: dict[str, Any],
+        *,
+        chat_id: int | None,
+        message_id: int,
+        send_via_options: list[str],
+        reply_markup: dict[str, Any] | None,
+    ) -> tuple[bool, dict[str, Any], str]:
+        last_result: dict[str, Any] = {}
+        for send_via in send_via_options:
+            ok, result = await self.edit_rich_message(
+                rich_message,
+                chat_id=chat_id,
+                message_id=message_id,
+                send_via=send_via,
                 reply_markup=reply_markup,
             )
             if ok:
