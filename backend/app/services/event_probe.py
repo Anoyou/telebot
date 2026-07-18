@@ -235,7 +235,7 @@ def _action_suggestions(
                     "send_via": "userbot_reply",
                     "chat_id": chat_id,
                     "reply_to_user_id": sender_user_id or "<payload.sender.user_id>",
-                    "reply_to_search_limit": 200,
+                    "reply_to_search_limit": 5000,
                     "text": "+<奖励金额>",
                 },
             }

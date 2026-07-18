@@ -64,7 +64,13 @@ from ...db.models.plugin_global_config import PluginGlobalConfig
 from ...db.models.rule import Rule
 from ...db.models.system import SystemSetting
 from ...redis_client import get_redis
-from ...services import account_bot_service, interaction_bot_service, payout_compensation, payout_limit
+from ...services import (
+    account_bot_service,
+    interaction_bot_service,
+    payout_compensation,
+    payout_limit,
+    recent_message_anchor,
+)
 from ...services.action_tap import (
     ACTION_EVENT_STATUS_DRY_RUN,
     ACTION_EVENT_STATUS_FAILED,
@@ -140,8 +146,8 @@ from .update_barrier import (
 log = logging.getLogger(__name__)
 
 _INTERACTION_RULE_OWNED_REASON_CODE = "interaction_rule_owned"
-_RECENT_USER_MESSAGE_SEARCH_LIMIT = 200
-_RECENT_USER_MESSAGE_SEARCH_LIMIT_MAX = 500
+_RECENT_USER_MESSAGE_SEARCH_LIMIT = recent_message_anchor.DEFAULT_SEARCH_LIMIT
+_RECENT_USER_MESSAGE_SEARCH_LIMIT_MAX = recent_message_anchor.MAX_SEARCH_LIMIT
 _DEFAULT_REPLY_ANCHOR_MISSING_TEXT = "未找到对应用户（{user_id}）的近期消息。"
 
 
@@ -4024,22 +4030,7 @@ def _int_or_none(value: Any) -> int | None:
 
 
 def _recent_user_message_search_limit(raw: Any) -> int:
-    value = _int_or_none(raw)
-    if value is None:
-        value = _RECENT_USER_MESSAGE_SEARCH_LIMIT
-    return max(1, min(_RECENT_USER_MESSAGE_SEARCH_LIMIT_MAX, value))
-
-
-def _telegram_message_id(msg: Any) -> int | None:
-    return _int_or_none(getattr(msg, "id", None) or getattr(msg, "message_id", None))
-
-
-def _telegram_message_sender_id(msg: Any) -> int | None:
-    sender_id = _int_or_none(getattr(msg, "sender_id", None))
-    if sender_id is not None:
-        return sender_id
-    from_id = getattr(msg, "from_id", None)
-    return _int_or_none(getattr(from_id, "user_id", None) or getattr(from_id, "channel_id", None))
+    return recent_message_anchor.normalize_search_limit(raw)
 
 
 async def _find_recent_message_id_for_user(
@@ -4048,35 +4039,17 @@ async def _find_recent_message_id_for_user(
     user_id: int,
     *,
     limit: int,
+    redis: Any | None = None,
+    account_id: int | None = None,
 ) -> int | None:
-    try:
-        async for msg in client.iter_messages(chat_id, from_user=user_id, limit=limit):
-            msg_id = _telegram_message_id(msg)
-            if msg_id is not None:
-                return msg_id
-    except Exception:  # noqa: BLE001
-        log.debug(
-            "recent participant message search via from_user failed chat=%s user=%s",
-            chat_id,
-            user_id,
-            exc_info=True,
-        )
-
-    try:
-        async for msg in client.iter_messages(chat_id, limit=limit):
-            if _telegram_message_sender_id(msg) != user_id:
-                continue
-            msg_id = _telegram_message_id(msg)
-            if msg_id is not None:
-                return msg_id
-    except Exception:  # noqa: BLE001
-        log.debug(
-            "recent participant message fallback search failed chat=%s user=%s",
-            chat_id,
-            user_id,
-            exc_info=True,
-        )
-    return None
+    return await recent_message_anchor.find_recent_message_id_for_user(
+        client,
+        chat_id,
+        user_id,
+        limit=limit,
+        redis=redis,
+        account_id=account_id,
+    )
 
 
 def _reply_anchor_missing_text(action: dict[str, Any], reply_to_user_id: int | None) -> str:
@@ -4145,6 +4118,8 @@ async def _resolve_userbot_reply_to_message_id(
             target_chat_id,
             reply_to_user_id,
             limit=_recent_user_message_search_limit(action.get("reply_to_search_limit")),
+            redis=state.redis,
+            account_id=state.account_id,
         )
         if reply_to is None:
             raise ValueError(f"找不到用户 {reply_to_user_id} 在当前群的近期消息，无法定位发奖回复目标")

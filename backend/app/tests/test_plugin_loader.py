@@ -2799,14 +2799,14 @@ async def test_userbot_payout_action_sends_notice_when_reply_anchor_missing(monk
     assert record_action.await_args.kwargs["result"]["chat_id"] == -100456
     assert record_action.await_args.kwargs["result"]["amount"] == 12
     assert record_action.await_args.kwargs["result"]["reply_to_user_id"] == 12345
-    assert record_action.await_args.kwargs["result"]["reply_to_search_limit"] == 200
+    assert record_action.await_args.kwargs["result"]["reply_to_search_limit"] == 5000
     assert record_action.await_args.kwargs["result"]["reply_anchor_missing"] is True
     log_payload = json.loads(state.redis.list_pushes[-1][1])
     assert log_payload["message"] == "userbot payout action failed"
     assert log_payload["detail"]["chat_id"] == -100456
     assert log_payload["detail"]["amount"] == 12
     assert log_payload["detail"]["reply_to_user_id"] == 12345
-    assert log_payload["detail"]["reply_to_search_limit"] == 200
+    assert log_payload["detail"]["reply_to_search_limit"] == 5000
     assert log_payload["detail"]["error_code"] == "reply_anchor_missing"
     assert log_payload["detail"]["reply_anchor_missing"] is True
 

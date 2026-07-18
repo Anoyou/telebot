@@ -11,6 +11,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from telethon.tl.types import PeerUser
 
 from app.account_bot_defaults import DEFAULT_TRANSFER_NOTICE_TEMPLATE, LEGACY_TRANSFER_NOTICE_TEMPLATE
 from app.api import account_bots
@@ -507,8 +508,8 @@ async def test_userbot_interaction_action_falls_back_to_sender_scan_for_reply_an
                 if kwargs.get("from_user") is not None:
                     raise RuntimeError("entity lookup failed")
                 if chat_id == -100:
-                    yield SimpleNamespace(id=80, sender_id=222, text="别人")
-                    yield SimpleNamespace(id=79, sender_id=111, text="历史发言")
+                    yield SimpleNamespace(id=80, sender_id=222, from_id=PeerUser(222), text="别人")
+                    yield SimpleNamespace(id=79, sender_id=111, from_id=PeerUser(111), text="历史发言")
 
             return _gen()
 
@@ -3209,7 +3210,7 @@ def test_account_bot_transfer_notice_reply_chain_verification_defaults_on() -> N
     assert cfg["reply_chain_verification_enabled"] is True
 
 
-def test_transfer_test_chat_ids_infer_all_enabled_rule_chats_for_legacy_config() -> None:
+def test_transfer_test_chat_ids_default_empty_for_legacy_config() -> None:
     cfg = account_bot_service.normalize_transfer_notice_config(
         {
             "rules": [
@@ -3243,7 +3244,7 @@ def test_transfer_test_chat_ids_infer_all_enabled_rule_chats_for_legacy_config()
         }
     )
 
-    assert cfg["transfer_test_chat_ids"] == [-1001, -1002, -1003, -1004]
+    assert cfg["transfer_test_chat_ids"] == []
 
 
 def test_transfer_test_chat_ids_preserve_explicit_empty_scope() -> None:
@@ -4798,7 +4799,13 @@ async def test_transfer_notice_renders_saved_anonymous_admin_title(monkeypatch) 
     monkeypatch.setattr(
         account_bot_service,
         "get_transfer_notice_config",
-        AsyncMock(return_value={"enabled": True, "chat_ids": [-100123]}),
+        AsyncMock(
+            return_value={
+                "enabled": True,
+                "chat_ids": [-100123],
+                "transfer_test_chat_ids": [-100123],
+            }
+        ),
     )
 
     await account_bot_runtime._handle_transfer_test_update(  # noqa: SLF001
@@ -4851,7 +4858,13 @@ async def test_debit_notice_uses_verified_anonymous_admin_title(monkeypatch) -> 
     monkeypatch.setattr(
         account_bot_service,
         "get_transfer_notice_config",
-        AsyncMock(return_value={"enabled": True, "chat_ids": [-100123]}),
+        AsyncMock(
+            return_value={
+                "enabled": True,
+                "chat_ids": [-100123],
+                "transfer_test_chat_ids": [-100123],
+            }
+        ),
     )
     monkeypatch.setattr(
         account_bot_service,
@@ -5125,6 +5138,7 @@ async def test_transfer_command_template_render_failure_falls_back_and_logs(
             return_value={
                 "enabled": True,
                 "chat_ids": [-100123],
+                "transfer_test_chat_ids": [-100123],
                 "transfer_notice_template": template,
             }
         ),
@@ -9298,6 +9312,7 @@ async def test_transfer_notice_from_unauthed_abot_sends_group_notice(monkeypatch
             return_value={
                 "enabled": True,
                 "chat_id": -100123,
+                "transfer_test_chat_ids": [-100123],
                 "trusted_bot_id": 456,
                 "trigger_text": "转账成功",
                 "receiver_text": "我的TG名",
@@ -9358,6 +9373,7 @@ async def test_reply_plus_amount_sends_transfer_notice_with_abot_token(monkeypat
             return_value={
                 "enabled": True,
                 "chat_id": -100123,
+                "transfer_test_chat_ids": [-100123],
                 "trusted_bot_id": 456,
                 "trigger_text": "转账成功",
                 "receiver_text": None,
@@ -9425,6 +9441,7 @@ async def test_plus_amount_falls_back_to_receiver_config_when_reply_missing(monk
             return_value={
                 "enabled": True,
                 "chat_id": -100123,
+                "transfer_test_chat_ids": [-100123],
                 "trusted_bot_id": 456,
                 "trigger_text": "模拟到账",
                 "receiver_text": "BBB",
@@ -9485,6 +9502,7 @@ async def test_plus_amount_notice_ignores_rule_amount_threshold(monkeypatch) -> 
             return_value={
                 "enabled": True,
                 "chat_ids": [-100123],
+                "transfer_test_chat_ids": [-100123],
                 "trusted_bot_id": 456,
                 "transfer_notice_template": "转账成功\n{payer_name} 射出 {amount}\n{receiver_name} 接收 {amount}",
                 "rules": [
@@ -9583,6 +9601,7 @@ async def test_interaction_bot_plus_amount_uses_default_receiver_only_without_co
         AsyncMock(
             return_value={
                 "enabled": True,
+                "transfer_test_chat_ids": [-100123],
                 "interaction_bot_id": 8875144459,
                 "trusted_bot_id": 456,
                 "transfer_bot_id": 456,
@@ -9678,6 +9697,7 @@ async def test_interaction_bot_plus_amount_logs_test_notice_send_failure_without
         AsyncMock(
             return_value={
                 "enabled": True,
+                "transfer_test_chat_ids": [-100123],
                 "interaction_bot_id": 8875144459,
                 "trusted_bot_id": 6920251805,
                 "transfer_bot_id": 8980553289,
@@ -9842,7 +9862,14 @@ async def test_reply_plus_amount_notice_ignores_rule_trigger_mode_and_state(
     monkeypatch.setattr(
         account_bot_service,
         "get_transfer_notice_config",
-        AsyncMock(return_value={"enabled": True, "trusted_bot_id": 456, "rules": [rule]}),
+        AsyncMock(
+            return_value={
+                "enabled": True,
+                "transfer_test_chat_ids": [-100123],
+                "trusted_bot_id": 456,
+                "rules": [rule],
+            }
+        ),
     )
 
     await account_bot_runtime._handle_transfer_test_update(
@@ -9900,6 +9927,7 @@ async def test_reply_plus_amount_emits_test_notice_without_triggering_module(mon
         AsyncMock(
             return_value={
                 "enabled": True,
+                "transfer_test_chat_ids": [-100123],
                 "trusted_bot_id": 456,
                 "rules": [
                     {
@@ -10046,6 +10074,7 @@ async def test_transfer_test_bot_only_emits_notice_without_starting_module(monke
         AsyncMock(
             return_value={
                 "enabled": True,
+                "transfer_test_chat_ids": [-100123],
                 "trusted_bot_id": 8980553289,
                 "rules": [
                     {
@@ -16078,6 +16107,7 @@ async def test_transfer_test_bot_accepts_plus_amount_from_account_user(monkeypat
             return_value={
                 "enabled": True,
                 "chat_ids": [-100123],
+                "transfer_test_chat_ids": [-100123],
                 "trusted_bot_id": 456,
                 "trigger_texts": ["转账成功"],
                 "receiver_text": None,
@@ -16145,6 +16175,7 @@ async def test_transfer_test_bot_accepts_minus_amount_as_debit_notice(monkeypatc
             return_value={
                 "enabled": True,
                 "chat_ids": [-100123],
+                "transfer_test_chat_ids": [-100123],
                 "trusted_bot_id": 456,
                 "trigger_texts": ["转账成功", "扣减成功"],
                 "receiver_text": None,
@@ -16755,6 +16786,48 @@ async def test_transfer_command_outside_test_scope_does_not_load_or_send_with_te
     )
 
     assert handled is False
+    get_transfer_token.assert_not_awaited()
+    send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_legacy_rule_chat_does_not_implicitly_enable_transfer_test_bot(monkeypatch) -> None:
+    incoming = account_bot_runtime.Incoming(
+        account_id=1,
+        token="interaction-token",
+        update_id=1,
+        user_id=100,
+        chat_id=-1001,
+        message_id=10,
+        text="+88",
+        display_name="玩家",
+    )
+    get_transfer_token = AsyncMock(return_value="test-token")
+    send = AsyncMock()
+    monkeypatch.setattr(account_bot_service, "get_transfer_bot_token", get_transfer_token)
+    monkeypatch.setattr(account_bot_service, "send_message", send)
+    cfg = account_bot_service.normalize_transfer_notice_config(
+        {
+            "enabled": True,
+            "trusted_bot_ids": [6920251805],
+            "transfer_bot_token_enc": "encrypted-test-token",
+            "rules": [
+                {
+                    "id": "paid",
+                    "name": "真实转账",
+                    "enabled": True,
+                    "chat_ids": [-1001],
+                    "trigger_mode": "payment",
+                    "action": "notice",
+                }
+            ],
+        }
+    )
+
+    handled = await account_bot_runtime._try_handle_transfer_command(object(), incoming, cfg)
+
+    assert handled is False
+    assert cfg["transfer_test_chat_ids"] == []
     get_transfer_token.assert_not_awaited()
     send.assert_not_awaited()
 

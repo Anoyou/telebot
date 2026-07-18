@@ -17,6 +17,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import select, update
+from telethon import events
 from telethon.errors import (
     AuthKeyUnregisteredError,
     FloodWaitError,
@@ -40,7 +41,7 @@ from ..db.models.payout_compensation import (
 from ..db.models.system import SystemSetting
 from ..logging_redaction import install_sensitive_log_filter
 from ..redis_client import get_redis
-from ..services import payout_compensation
+from ..services import payout_compensation, recent_message_anchor
 from ..services.action_tap import emit_compensated_payout_event
 from ..services.ai_feature import is_ai_enabled
 from ..services.event_trace import (
@@ -101,8 +102,8 @@ log = logging.getLogger(__name__)
 
 _CONFIG_RECONCILE_SECONDS = max(30, int(app_settings.worker_reconcile_seconds or 180))
 _USERBOT_SESSION_EXPIRE_SCAN_SECONDS = 15
-_RECENT_USER_MESSAGE_SEARCH_LIMIT = 200
-_RECENT_USER_MESSAGE_SEARCH_LIMIT_MAX = 500
+_RECENT_USER_MESSAGE_SEARCH_LIMIT = recent_message_anchor.DEFAULT_SEARCH_LIMIT
+_RECENT_USER_MESSAGE_SEARCH_LIMIT_MAX = recent_message_anchor.MAX_SEARCH_LIMIT
 _DEFAULT_REPLY_ANCHOR_MISSING_TEXT = "未找到对应用户（{user_id}）的近期消息。"
 _PAYOUT_COMPENSATION_LEASE_SECONDS = 120
 _PAYOUT_COMPENSATION_AMBIGUOUS_PROBE_PAGE_SIZE = 100
@@ -295,22 +296,11 @@ def _render_interaction_userbot_button_fallback(
 
 
 def _recent_user_message_search_limit(raw: Any) -> int:
-    value = _int_or_none(raw)
-    if value is None:
-        value = _RECENT_USER_MESSAGE_SEARCH_LIMIT
-    return max(1, min(_RECENT_USER_MESSAGE_SEARCH_LIMIT_MAX, value))
+    return recent_message_anchor.normalize_search_limit(raw)
 
 
 def _telegram_message_id(msg: Any) -> int | None:
     return _int_or_none(getattr(msg, "id", None) or getattr(msg, "message_id", None))
-
-
-def _telegram_message_sender_id(msg: Any) -> int | None:
-    sender_id = _int_or_none(getattr(msg, "sender_id", None))
-    if sender_id is not None:
-        return sender_id
-    from_id = getattr(msg, "from_id", None)
-    return _int_or_none(getattr(from_id, "user_id", None) or getattr(from_id, "channel_id", None))
 
 
 async def _find_recent_message_id_for_user(
@@ -319,42 +309,23 @@ async def _find_recent_message_id_for_user(
     user_id: int,
     *,
     limit: int,
+    redis: Any | None = None,
+    account_id: int | None = None,
 ) -> int | None:
-    """查找参与者近期消息，让 userbot 发奖时能回复到真实玩家消息。
+    return await recent_message_anchor.find_recent_message_id_for_user(
+        client,
+        chat_id,
+        user_id,
+        limit=limit,
+        redis=redis,
+        account_id=account_id,
+    )
 
-    主路径沿用参考搜索插件的思路，但搜索条件从关键词改成 Telegram
-    sender。部分 peer/驱动可能解析不了 ``from_user``，因此保留扫描近期消息
-    并本地比对 sender_id 的兜底路径。
-    """
 
-    try:
-        async for msg in client.iter_messages(chat_id, from_user=user_id, limit=limit):
-            msg_id = _telegram_message_id(msg)
-            if msg_id is not None:
-                return msg_id
-    except Exception:  # noqa: BLE001
-        log.debug(
-            "recent participant message search via from_user failed chat=%s user=%s",
-            chat_id,
-            user_id,
-            exc_info=True,
-        )
-
-    try:
-        async for msg in client.iter_messages(chat_id, limit=limit):
-            if _telegram_message_sender_id(msg) != user_id:
-                continue
-            msg_id = _telegram_message_id(msg)
-            if msg_id is not None:
-                return msg_id
-    except Exception:  # noqa: BLE001
-        log.debug(
-            "recent participant message fallback search failed chat=%s user=%s",
-            chat_id,
-            user_id,
-            exc_info=True,
-        )
-    return None
+def _install_recent_message_anchor_handler(client: Any, account_id: int, redis: Any) -> None:
+    @client.on(events.NewMessage(incoming=True))
+    async def _cache_recent_message_anchor(event: Any) -> None:
+        await recent_message_anchor.cache_incoming_user_message(redis, account_id, event)
 
 
 def _reply_anchor_missing_text(payload: dict[str, Any], reply_to_user_id: int | None) -> str:
@@ -419,6 +390,22 @@ async def _run_interaction_userbot_action(
 
     from ..services.interaction.userbot_actions import execute_userbot_interaction_action
 
+    async def _find_with_cache(
+        finder_client: Any,
+        chat_id: int,
+        user_id: int,
+        *,
+        limit: int,
+    ) -> int | None:
+        return await _find_recent_message_id_for_user(
+            finder_client,
+            chat_id,
+            user_id,
+            limit=limit,
+            redis=redis,
+            account_id=account_id,
+        )
+
     return await execute_userbot_interaction_action(
         client,
         payload,
@@ -427,7 +414,7 @@ async def _run_interaction_userbot_action(
         redis=redis,
         acquire_rate_limit=_acquire_interaction_userbot_rate_limit,
         check_payout_limit=_check_payout_limit,
-        find_recent_message_id=_find_recent_message_id_for_user,
+        find_recent_message_id=_find_with_cache,
         render_button_fallback=_render_interaction_userbot_button_fallback,
         recent_search_limit=_recent_user_message_search_limit,
         reply_anchor_missing_text=_reply_anchor_missing_text,
@@ -494,6 +481,7 @@ async def run_worker(account_id: int) -> None:
             detail={"error": str(exc)},
         )
         return
+    _install_recent_message_anchor_handler(client, account_id, redis)
     make_command_handler(client, account_id)
 
     # 初始化命令派发上下文（含模板 + LLM provider 字典；由 IPC reload_commands 热更新）

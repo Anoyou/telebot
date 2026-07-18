@@ -437,7 +437,6 @@ def normalize_debit_notice_template(value: Any) -> str:
 
 def normalize_transfer_notice_config(raw: Any) -> dict[str, Any]:
     base = default_transfer_notice_config()
-    has_explicit_transfer_test_chat_ids = isinstance(raw, dict) and "transfer_test_chat_ids" in raw
     if isinstance(raw, dict):
         for key in base:
             if key in raw:
@@ -643,22 +642,6 @@ def normalize_transfer_notice_config(raw: Any) -> dict[str, Any]:
     base["concurrency"] = first_enabled.get("concurrency") or "chat"
     base["response_template"] = first_enabled.get("response_template") or base["response_template"]
     base["rules"] = rules
-    if not has_explicit_transfer_test_chat_ids:
-        inferred_transfer_test_chat_ids: list[int] = []
-        for rule in rules:
-            if not rule.get("enabled", True):
-                continue
-            raw_rule_chat_ids = rule.get("chat_ids")
-            if not isinstance(raw_rule_chat_ids, list):
-                continue
-            for raw_id in raw_rule_chat_ids:
-                try:
-                    chat_id = int(raw_id)
-                except (TypeError, ValueError):
-                    continue
-                if chat_id not in inferred_transfer_test_chat_ids:
-                    inferred_transfer_test_chat_ids.append(chat_id)
-        base["transfer_test_chat_ids"] = inferred_transfer_test_chat_ids
     return base
 
 

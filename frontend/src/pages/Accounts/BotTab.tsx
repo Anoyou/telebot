@@ -2970,7 +2970,7 @@ export function BotTab({
                       }}
                     />
                     <div className="text-xs leading-5 text-muted-foreground">
-                      只有这些群会响应 +金额、-金额模拟命令。旧配置首次读取时会沿用已有规则群，可在这里继续收窄。
+                      只有明确选择的群会响应 +金额、-金额模拟命令；真实转账规则群不会自动启用测试 Bot。
                     </div>
                   </div>
                   <BotMembershipList
