@@ -93,6 +93,10 @@ async def _patch_runtime_config(  # noqa: ANN001
 
     monkeypatch.setattr(runtime_module, "load_system_context_flags", load_flags)
     monkeypatch.setattr(runtime_module, "resolve_agent_providers", resolve)
+    async def verify(_db, resolved):  # noqa: ANN001
+        return resolved
+
+    monkeypatch.setattr(runtime_module, "verify_resolved_agent_providers", verify)
 
 
 @pytest.mark.asyncio
@@ -193,6 +197,9 @@ async def test_runtime_general_help_sends_zero_tool_definitions(monkeypatch) -> 
 
     route = next(event for event in events if event["type"] == "route_selected")
     assert route["tool_count"] == 0
+    capability = next(event for event in events if event["type"] == "model_capability_check")
+    assert capability["provider_name"] == primary.name
+    assert capability["model"] == primary.default_model
 
 
 @pytest.mark.asyncio

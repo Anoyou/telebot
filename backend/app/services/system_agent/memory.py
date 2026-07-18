@@ -21,6 +21,8 @@ def memory_context(session: SystemAgentSession) -> str:
     if summary:
         parts.append(f"会话摘要：\n{summary}")
     if state:
+        # recent_turns 只用于服务端压缩。failed_turn 仅包含打码后的用户目标、
+        # 消息 ID 和错误码，可用于理解“刚才失败的任务”，不包含失败输出。
         visible_state = {key: value for key, value in state.items() if key != "recent_turns"}
         parts.append(
             "结构化状态："

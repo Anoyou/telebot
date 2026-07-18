@@ -124,11 +124,51 @@ class _FakeSvc:
         yield {"type": "done", "ok": True, "run_id": "r1", "session_id": kwargs["session"].id, "seq": 3}
 
 
+class _FakeRunManager:
+    def __init__(self) -> None:
+        self.last_start_kwargs: dict[str, Any] = {}
+        self.broken_stream = False
+
+    async def start_run(self, **kwargs):
+        self.last_start_kwargs = dict(kwargs)
+        return SimpleNamespace(
+            id="durable-r1",
+            session_id=kwargs["session_id"],
+            web_user_id=kwargs["web_user_id"],
+            user_message_id=kwargs.get("retry_message_id") or 101,
+            client_request_id=kwargs["client_request_id"],
+            kind="retry" if kwargs.get("retry_message_id") else "message",
+            status="running",
+            last_seq=0,
+            cancel_requested=False,
+            error_code=None,
+            error_message=None,
+            started_at=None,
+            finished_at=None,
+            created_at=None,
+            updated_at=None,
+        )
+
+    async def stream_events(self, run_id, *, after_seq=0):
+        if self.broken_stream:
+            raise RuntimeError("database failed with sk-sensitive-secret-value")
+        yield {"type": "run_started", "run_id": run_id, "session_id": "s1", "seq": after_seq + 1}
+        yield {"type": "assistant_message", "content": "ok", "run_id": run_id, "session_id": "s1", "seq": after_seq + 2}
+        yield {"type": "done", "ok": True, "run_id": run_id, "session_id": "s1", "seq": after_seq + 3}
+
+
 @pytest.fixture
 def fake_svc(monkeypatch):
     svc = _FakeSvc()
     monkeypatch.setattr(api, "get_system_agent_service", lambda: svc)
     return svc
+
+
+@pytest.fixture
+def fake_run_manager(monkeypatch):
+    manager = _FakeRunManager()
+    monkeypatch.setattr(api, "get_system_agent_run_manager", lambda: manager)
+    return manager
 
 
 @pytest.mark.asyncio
@@ -182,7 +222,7 @@ async def test_capabilities_stage1(fake_svc) -> None:
 
 
 @pytest.mark.asyncio
-async def test_stream_message_ndjson(fake_svc) -> None:
+async def test_stream_message_ndjson(fake_svc, fake_run_manager) -> None:
     db = AsyncMock()
     user = SimpleNamespace(id=7)
     await api.create_session(api.SystemAgentSessionCreate(), db, user)
@@ -208,13 +248,33 @@ async def test_stream_message_ndjson(fake_svc) -> None:
 
 
 @pytest.mark.asyncio
-async def test_stream_exception_does_not_expose_raw_error(fake_svc, monkeypatch) -> None:
-    async def broken_stream(*_args, **_kwargs):
-        if False:
-            yield {}
-        raise RuntimeError("database failed with sk-sensitive-secret-value")
+async def test_start_durable_run_returns_run_and_message_identity(
+    fake_svc,
+    fake_run_manager,
+) -> None:
+    db = AsyncMock()
+    user = SimpleNamespace(id=7)
+    await api.create_session(api.SystemAgentSessionCreate(), db, user)
 
-    monkeypatch.setattr(fake_svc, "stream_message", broken_stream)
+    out = await api.start_system_agent_run(
+        "s1",
+        api.SystemAgentRunCreate(
+            content="交互里有哪些规则？",
+            client_request_id="request-api-1",
+        ),
+        db,
+        user,
+    )
+
+    assert out.id == "durable-r1"
+    assert out.run_id == "durable-r1"
+    assert out.user_message_id == 101
+    assert fake_run_manager.last_start_kwargs["text"] == "交互里有哪些规则？"
+
+
+@pytest.mark.asyncio
+async def test_stream_exception_does_not_expose_raw_error(fake_svc, fake_run_manager) -> None:
+    fake_run_manager.broken_stream = True
     db = AsyncMock()
     user = SimpleNamespace(id=7)
     await api.create_session(api.SystemAgentSessionCreate(), db, user)
@@ -232,12 +292,12 @@ async def test_stream_exception_does_not_expose_raw_error(fake_svc, monkeypatch)
     body = "".join(chunks)
 
     assert "sk-sensitive-secret-value" not in body
-    assert "STREAM_FAILED" in body
+    assert "RUN_STREAM_FAILED" in body
     assert "RuntimeError" in body
 
 
 @pytest.mark.asyncio
-async def test_retry_failed_message_stream(fake_svc) -> None:
+async def test_retry_failed_message_stream(fake_svc, fake_run_manager) -> None:
     db = AsyncMock()
     user = SimpleNamespace(id=7)
     await api.create_session(api.SystemAgentSessionCreate(), db, user)
@@ -263,8 +323,8 @@ async def test_retry_failed_message_stream(fake_svc) -> None:
 
     assert events[-1]["type"] == "done"
     assert events[-1]["ok"] is True
-    assert fake_svc.last_stream_kwargs["fallback_provider_id"] == 12
-    assert fake_svc.last_stream_kwargs["approved_tools"] == ["scheduler.list"]
+    assert fake_run_manager.last_start_kwargs["fallback_provider_id"] == 12
+    assert fake_run_manager.last_start_kwargs["approved_tools"] == ["scheduler.list"]
 
 
 @pytest.mark.asyncio

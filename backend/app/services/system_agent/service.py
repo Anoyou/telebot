@@ -39,6 +39,12 @@ from .prompts import session_title_from_message
 from .registry import get_registry
 from .runtime import SystemAgentRuntime
 from .secrets import extract_plaintext_secrets, redact_known_secrets
+from .turn_context import (
+    clear_failed_turn,
+    failed_turn_state,
+    is_retry_reference,
+    remember_failed_turn,
+)
 
 log = logging.getLogger(__name__)
 
@@ -236,16 +242,19 @@ class SystemAgentService:
         rows = list(
             (
                 await db.execute(
-                    select(SystemAgentMessage).where(
+                    select(SystemAgentMessage)
+                    .where(
                         SystemAgentMessage.session_id == session_id,
                         SystemAgentMessage.role == MESSAGE_ROLE_USER,
                         SystemAgentMessage.run_status == MESSAGE_RUN_PENDING,
                     )
+                    .order_by(SystemAgentMessage.id)
                 )
             )
             .scalars()
             .all()
         )
+        session = await db.get(SystemAgentSession, session_id)
         now = datetime.now(UTC)
         changed = 0
         for row in rows:
@@ -267,6 +276,14 @@ class SystemAgentService:
             row.error_code = "AGENT_STREAM_INTERRUPTED"
             row.error_message = "连接中断，上一轮未完成，请重试本轮。"
             row.usage = None
+            if session is not None:
+                content = row.content if isinstance(row.content, dict) else {}
+                remember_failed_turn(
+                    session,
+                    message_id=row.id,
+                    user_goal=str(content.get("text") or ""),
+                    error_code=row.error_code,
+                )
             changed += 1
         if changed:
             await db.flush()
@@ -327,6 +344,9 @@ class SystemAgentService:
         approved_tools: list[str] | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
         await self.reconcile_stale_messages(db, session.id)
+        incoming_text = str(text or "").strip()
+        if retry_message is None and is_retry_reference(incoming_text):
+            retry_message = await self._resolve_failed_retry_message(db, session)
         run_started_at = datetime.now(UTC).isoformat()
         if retry_message is not None:
             if retry_message.role != MESSAGE_ROLE_USER:
@@ -336,7 +356,7 @@ class SystemAgentService:
             content = retry_message.content if isinstance(retry_message.content, dict) else {}
             raw_text = str(content.get("text") or "").strip()
         else:
-            raw_text = str(text or "").strip()
+            raw_text = incoming_text
         if not raw_text:
             yield {
                 "type": "error",
@@ -461,6 +481,8 @@ class SystemAgentService:
                 if et in {
                     "run_started",
                     "provider_selected",
+                    "skill_selected",
+                    "model_capability_check",
                     "heartbeat",
                     "model_attempt",
                     "retry_scheduled",
@@ -570,6 +592,8 @@ class SystemAgentService:
                 domains=route_domains,
                 tool_events=memory_tool_events,
             )
+            if retry_message is not None:
+                clear_failed_turn(session, message_id=user_msg.id)
         else:
             user_msg.run_status = MESSAGE_RUN_FAILED
             user_msg.error_code = error_code or "AGENT_RUN_FAILED"
@@ -578,6 +602,13 @@ class SystemAgentService:
                 chat_secrets,
             )[:1024]
             user_msg.usage = failure_context
+            content = user_msg.content if isinstance(user_msg.content, dict) else {}
+            remember_failed_turn(
+                session,
+                message_id=user_msg.id,
+                user_goal=str(content.get("text") or ""),
+                error_code=user_msg.error_code,
+            )
         session.updated_at = datetime.now(UTC)
         await db.flush()
         await db.commit()
@@ -587,6 +618,51 @@ class SystemAgentService:
 
         for event in buffered_events:
             yield event
+
+    async def _resolve_failed_retry_message(
+        self,
+        db: AsyncSession,
+        session: SystemAgentSession,
+    ) -> SystemAgentMessage | None:
+        anchor = failed_turn_state(session)
+        if anchor is not None:
+            row = await self.get_message(
+                db,
+                anchor["message_id"],
+                session_id=session.id,
+            )
+            if (
+                row is not None
+                and row.role == MESSAGE_ROLE_USER
+                and row.run_status == MESSAGE_RUN_FAILED
+            ):
+                return row
+            if row is None or row.run_status != MESSAGE_RUN_PENDING:
+                clear_failed_turn(session, message_id=anchor["message_id"])
+            return None
+
+        # 兼容升级前已经失败、但尚未写入结构化锚点的会话。
+        result = await db.execute(
+            select(SystemAgentMessage)
+            .where(
+                SystemAgentMessage.session_id == session.id,
+                SystemAgentMessage.role == MESSAGE_ROLE_USER,
+                SystemAgentMessage.run_status == MESSAGE_RUN_FAILED,
+            )
+            .order_by(desc(SystemAgentMessage.id))
+            .limit(1)
+        )
+        row = result.scalar_one_or_none()
+        if row is None:
+            return None
+        content = row.content if isinstance(row.content, dict) else {}
+        remember_failed_turn(
+            session,
+            message_id=row.id,
+            user_goal=str(content.get("text") or ""),
+            error_code=str(row.error_code or "AGENT_RUN_FAILED"),
+        )
+        return row
 
 
 def _message_available_to_context(message: SystemAgentMessage) -> bool:

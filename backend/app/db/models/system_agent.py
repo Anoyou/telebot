@@ -8,7 +8,19 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import JSON, BigInteger, DateTime, ForeignKey, Index, Integer, String, Text, func
+from sqlalchemy import (
+    JSON,
+    BigInteger,
+    Boolean,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from ..base import Base
@@ -42,6 +54,21 @@ MESSAGE_RUN_STATUSES = {
     MESSAGE_RUN_FAILED,
     MESSAGE_RUN_COMPLETED,
 }
+
+AGENT_RUN_QUEUED = "queued"
+AGENT_RUN_RUNNING = "running"
+AGENT_RUN_SUCCEEDED = "succeeded"
+AGENT_RUN_FAILED = "failed"
+AGENT_RUN_CANCELLED = "cancelled"
+AGENT_RUN_TERMINAL_STATUSES = {
+    AGENT_RUN_SUCCEEDED,
+    AGENT_RUN_FAILED,
+    AGENT_RUN_CANCELLED,
+}
+AGENT_RUN_ACTIVE_STATUSES = {AGENT_RUN_QUEUED, AGENT_RUN_RUNNING}
+
+AGENT_RUN_KIND_MESSAGE = "message"
+AGENT_RUN_KIND_RETRY = "retry"
 
 ACTION_STATUS_PENDING = "pending"
 ACTION_STATUS_EXECUTING = "executing"
@@ -167,6 +194,105 @@ class SystemAgentMessage(Base):
     )
 
 
+class SystemAgentRun(Base):
+    """Web Agent 的持久运行句柄；原始输入仍只由消息服务负责脱敏落库。"""
+
+    __tablename__ = "system_agent_run"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    session_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("system_agent_session.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    web_user_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        ForeignKey("web_user.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    user_message_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        ForeignKey("system_agent_message.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    client_request_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    request_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default=AGENT_RUN_QUEUED,
+        server_default=AGENT_RUN_QUEUED,
+    )
+    last_seq: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default="0",
+    )
+    cancel_requested: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default="0",
+    )
+    error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "session_id",
+            "client_request_id",
+            name="uq_system_agent_run_session_request",
+        ),
+        Index("ix_system_agent_run_session_created", "session_id", "created_at"),
+        Index("ix_system_agent_run_user_status", "web_user_id", "status"),
+        Index("ix_system_agent_run_status_updated", "status", "updated_at"),
+    )
+
+
+class SystemAgentRunEvent(Base):
+    """可按单调序号重放的 Agent 运行事件。"""
+
+    __tablename__ = "system_agent_run_event"
+
+    id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        primary_key=True,
+        autoincrement=True,
+    )
+    run_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("system_agent_run.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    seq: Mapped[int] = mapped_column(Integer, nullable=False)
+    event: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+    __table_args__ = (
+        UniqueConstraint("run_id", "seq", name="uq_system_agent_run_event_seq"),
+        Index("ix_system_agent_run_event_run_seq", "run_id", "seq"),
+    )
+
+
 class SystemAgentAction(Base):
     """写操作预览与确认记录。"""
 
@@ -231,6 +357,15 @@ class SystemAgentAction(Base):
 
 
 __all__ = [
+    "AGENT_RUN_ACTIVE_STATUSES",
+    "AGENT_RUN_CANCELLED",
+    "AGENT_RUN_FAILED",
+    "AGENT_RUN_KIND_MESSAGE",
+    "AGENT_RUN_KIND_RETRY",
+    "AGENT_RUN_QUEUED",
+    "AGENT_RUN_RUNNING",
+    "AGENT_RUN_SUCCEEDED",
+    "AGENT_RUN_TERMINAL_STATUSES",
     "ACTION_STATUS_EXECUTED",
     "ACTION_STATUS_EXECUTING",
     "ACTION_STATUS_EXPIRED",
@@ -262,5 +397,7 @@ __all__ = [
     "SESSION_STATUSES",
     "SystemAgentAction",
     "SystemAgentMessage",
+    "SystemAgentRun",
+    "SystemAgentRunEvent",
     "SystemAgentSession",
 ]

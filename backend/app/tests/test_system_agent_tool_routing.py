@@ -74,3 +74,28 @@ def test_model_route_rejects_unknown_only_selection() -> None:
     )
 
     assert route is None
+
+
+def test_provider_and_command_request_keeps_both_routed_domains() -> None:
+    route = route_locally(
+        "列出 Provider 和自定义指令",
+        available={"providers", "commands", "routing", "logs"},
+    )
+
+    assert route is not None
+    assert route.domains == ("commands", "providers")
+
+
+def test_log_diagnostics_does_not_expose_unrelated_tools() -> None:
+    specs = [
+        _spec("logs.recent"),
+        _spec("system.get_health"),
+        _spec("providers.list"),
+    ]
+    route = route_locally(
+        "看看最近错误日志",
+        available={"logs", "system", "providers"},
+    )
+
+    assert route is not None
+    assert [item.name for item in select_tool_specs(specs, route)] == ["logs.recent"]

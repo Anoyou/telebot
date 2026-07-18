@@ -137,6 +137,25 @@ export type SystemAgentStreamEvent = {
   [key: string]: unknown;
 };
 
+export interface SystemAgentRun {
+  id: string;
+  run_id: string;
+  session_id: string;
+  web_user_id: number | null;
+  user_message_id: number | null;
+  client_request_id: string;
+  kind: "message" | "retry" | string;
+  status: "queued" | "running" | "succeeded" | "failed" | "cancelled" | string;
+  last_seq: number;
+  cancel_requested: boolean;
+  error_code?: string | null;
+  error_message?: string | null;
+  started_at?: string | null;
+  finished_at?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
 export async function getSystemAgentConfig(): Promise<SystemAgentConfig> {
   const { data } = await api.get<SystemAgentConfig>("/api/system-agent/config");
   return data;
@@ -198,6 +217,63 @@ export async function listSystemAgentMessages(
     { params },
   );
   return data;
+}
+
+export async function startSystemAgentRun(
+  sessionId: string,
+  payload: {
+    content: string;
+    account_id?: number | null;
+    client_request_id: string;
+  },
+): Promise<SystemAgentRun> {
+  const { data } = await api.post<SystemAgentRun>(
+    `/api/system-agent/sessions/${sessionId}/runs`,
+    payload,
+  );
+  return data;
+}
+
+export async function startSystemAgentRetryRun(
+  sessionId: string,
+  messageId: number,
+  payload: {
+    account_id?: number | null;
+    fallback_provider_id?: number | null;
+    approved_tools?: string[];
+    client_request_id: string;
+  },
+): Promise<SystemAgentRun> {
+  const { data } = await api.post<SystemAgentRun>(
+    `/api/system-agent/sessions/${sessionId}/messages/${messageId}/retry/runs`,
+    payload,
+  );
+  return data;
+}
+
+export async function getSystemAgentRun(runId: string): Promise<SystemAgentRun> {
+  const { data } = await api.get<SystemAgentRun>(`/api/system-agent/runs/${runId}`);
+  return data;
+}
+
+export async function cancelSystemAgentRun(runId: string): Promise<SystemAgentRun> {
+  const { data } = await api.post<SystemAgentRun>(`/api/system-agent/runs/${runId}/cancel`);
+  return data;
+}
+
+export async function streamSystemAgentRun(
+  runId: string,
+  afterSeq: number,
+  onEvent: (event: SystemAgentStreamEvent) => void,
+  opts?: { signal?: AbortSignal },
+): Promise<void> {
+  const params = new URLSearchParams({ after_seq: String(Math.max(0, afterSeq)) });
+  const response = await apiFetch(`/api/system-agent/runs/${runId}/stream?${params}`, {
+    method: "GET",
+    headers: { Accept: "application/x-ndjson" },
+    signal: opts?.signal,
+  });
+  return consumeSystemAgentStream(response, onEvent);
 }
 
 function streamErrorMessage(value: unknown, fallback: string): string {
@@ -299,6 +375,13 @@ async function streamSystemAgentRequest(
     body: JSON.stringify(payload),
     signal: opts?.signal,
   });
+  return consumeSystemAgentStream(response, onEvent);
+}
+
+async function consumeSystemAgentStream(
+  response: Response,
+  onEvent: (event: SystemAgentStreamEvent) => void,
+): Promise<void> {
   if (!response.ok) {
     let payloadError: unknown;
     try {

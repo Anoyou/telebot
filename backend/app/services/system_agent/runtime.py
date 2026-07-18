@@ -30,9 +30,11 @@ from .config import load_system_context_flags, resolve_agent_providers
 from .context import ToolContext
 from .events import make_event
 from .memory import memory_context
+from .model_capability import verify_resolved_agent_providers
 from .prompts import build_system_prompt, provider_setup_hint
 from .redactor import summarize_tool_result
 from .registry import ToolRegistry, get_registry
+from .skills import SkillRegistry, get_skill_registry
 from .tool_routing import (
     ToolRoute,
     available_domains,
@@ -58,8 +60,13 @@ class ToolApprovalRequired(RuntimeError):
 class SystemAgentRuntime:
     """封装 Provider 解析、工具过滤、run_agent 与事件发射。"""
 
-    def __init__(self, registry: ToolRegistry | None = None) -> None:
+    def __init__(
+        self,
+        registry: ToolRegistry | None = None,
+        skill_registry: SkillRegistry | None = None,
+    ) -> None:
         self.registry = registry or get_registry()
+        self.skill_registry = skill_registry or get_skill_registry()
 
     async def stream_turn(
         self,
@@ -112,6 +119,41 @@ class SystemAgentRuntime:
             )
             yield next_event("done", ok=False)
             return
+
+        yield next_event(
+            "model_capability_check",
+            provider_id=resolved.primary.id,
+            provider_name=resolved.primary.name,
+            model=resolved.model,
+        )
+        verify_task = asyncio.create_task(verify_resolved_agent_providers(db, resolved))
+        try:
+            while not verify_task.done():
+                done, _pending = await asyncio.wait({verify_task}, timeout=10.0)
+                if verify_task not in done:
+                    yield next_event(
+                        "heartbeat",
+                        stage="model_capability_check",
+                        provider_id=resolved.primary.id,
+                        provider_name=resolved.primary.name,
+                        model=resolved.model,
+                    )
+            verified = await verify_task
+        finally:
+            if not verify_task.done():
+                verify_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await verify_task
+        if isinstance(verified, str):
+            yield next_event(
+                "error",
+                code="MODEL_TOOLS_UNAVAILABLE",
+                message=verified,
+                hint="请在 AI 中心选择真正支持结构化工具调用的模型。",
+            )
+            yield next_event("done", ok=False)
+            return
+        resolved = verified
 
         provider_dto = resolved.primary
         model = resolved.model
@@ -211,7 +253,9 @@ class SystemAgentRuntime:
                     await route_task
         while not progress_queue.empty():
             yield progress_queue.get_nowait()
-        tool_specs = select_tool_specs(all_tool_specs, route)
+        routed_tool_specs = select_tool_specs(all_tool_specs, route)
+        selected_skills = self.skill_registry.select(route)
+        tool_specs = self.skill_registry.narrow_tools(routed_tool_specs, selected_skills)
         yield next_event(
             "route_selected",
             domains=list(route.domains),
@@ -220,6 +264,20 @@ class SystemAgentRuntime:
             tool_count=len(tool_specs),
             available_tool_count=len(all_tool_specs),
         )
+        if selected_skills:
+            skill_names = [skill.name for skill in selected_skills]
+            yield next_event(
+                "skill_selected",
+                skills=skill_names,
+                skill_names=skill_names,
+                understanding_summary=self.skill_registry.understanding_summary(
+                    selected_skills
+                ),
+                tool_count=len(tool_specs),
+            )
+            skill_prompt = self.skill_registry.render_prompt(selected_skills)
+            if skill_prompt:
+                system_prompt = f"{system_prompt}\n\n{skill_prompt}"
         approved_tool_names = {str(name) for name in (approved_tools or []) if str(name)}
         tool_specs_by_name = {spec.name: spec for spec in tool_specs}
 

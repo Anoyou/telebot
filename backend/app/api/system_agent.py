@@ -4,16 +4,19 @@ from __future__ import annotations
 
 import json
 import logging
+import uuid
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
+from sqlalchemy import select
 
 from ..db.models.system_agent import (
     CHANNEL_WEB,
     MESSAGE_ROLE_USER,
     MESSAGE_RUN_FAILED,
     SESSION_STATUS_ACTIVE,
+    SystemAgentRun,
 )
 from ..deps import CurrentUser, DBSession
 from ..schemas.system_agent import (
@@ -25,6 +28,10 @@ from ..schemas.system_agent import (
     SystemAgentMessageCreate,
     SystemAgentMessageOut,
     SystemAgentMessageRetry,
+    SystemAgentRetryRunCreate,
+    SystemAgentRunCreate,
+    SystemAgentRunEventOut,
+    SystemAgentRunOut,
     SystemAgentSecretInput,
     SystemAgentSecretInputOut,
     SystemAgentSessionCreate,
@@ -45,6 +52,11 @@ from ..services.system_agent.actions import (
 )
 from ..services.system_agent.executor import get_action_executor
 from ..services.system_agent.registry import get_registry
+from ..services.system_agent.run_manager import (
+    RunConflictError,
+    RunNotFoundError,
+    get_system_agent_run_manager,
+)
 
 router = APIRouter(prefix="/api/system-agent", tags=["system-agent"])
 log = logging.getLogger(__name__)
@@ -56,6 +68,53 @@ def _err(code: str, message: str, status: int = 400) -> HTTPException:
 
 def _session_out(row: Any) -> SystemAgentSessionOut:
     return SystemAgentSessionOut.model_validate(row)
+
+
+def _run_out(row: Any) -> SystemAgentRunOut:
+    return SystemAgentRunOut.model_validate(row)
+
+
+async def _owned_run(db: DBSession, run_id: str, web_user_id: int) -> SystemAgentRun:
+    result = await db.execute(
+        select(SystemAgentRun).where(
+            SystemAgentRun.id == run_id,
+            SystemAgentRun.web_user_id == web_user_id,
+        )
+    )
+    row = result.scalar_one_or_none()
+    if row is None:
+        raise _err("RUN_NOT_FOUND", "助手运行不存在", 404)
+    return row
+
+
+def _run_stream_response(run_id: str, *, after_seq: int = 0) -> StreamingResponse:
+    manager = get_system_agent_run_manager()
+
+    async def event_source():
+        try:
+            async for event in manager.stream_events(run_id, after_seq=after_seq):
+                yield json.dumps(
+                    event,
+                    ensure_ascii=False,
+                    default=str,
+                    separators=(",", ":"),
+                ) + "\n"
+        except Exception as exc:  # noqa: BLE001
+            # 订阅失败不能取消仍在执行的后台 run；客户端未收到 done 时会按游标重连。
+            log.exception("system agent run subscription failed run=%s", run_id)
+            err = {
+                "type": "error",
+                "code": "RUN_STREAM_FAILED",
+                "message": f"助手进度连接失败（{type(exc).__name__}），正在等待重连。",
+                "run_id": run_id,
+            }
+            yield json.dumps(err, ensure_ascii=False, separators=(",", ":")) + "\n"
+
+    return StreamingResponse(
+        event_source(),
+        media_type="application/x-ndjson",
+        headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
+    )
 
 
 # ── 配置 ─────────────────────────────────────────────────────────
@@ -215,36 +274,17 @@ async def stream_message(
     if payload.account_id is not None and session.account_id != payload.account_id:
         await svc.update_session(db, session, account_id=payload.account_id)
 
-    async def event_source():
-        try:
-            async for event in svc.stream_message(
-                db,
-                session=session,
-                text=payload.content,
-                role="admin",
-                channel=CHANNEL_WEB,
-                web_user_id=user.id,
-            ):
-                yield json.dumps(event, ensure_ascii=False, default=str, separators=(",", ":")) + "\n"
-            await db.commit()
-        except Exception as exc:  # noqa: BLE001
-            await db.rollback()
-            log.exception("system agent web stream failed session=%s", session_id)
-            err = {
-                "type": "error",
-                "code": "STREAM_FAILED",
-                "message": f"助手流处理失败（{type(exc).__name__}），请刷新后重试。",
-                "session_id": session_id,
-            }
-            yield json.dumps(err, ensure_ascii=False, separators=(",", ":")) + "\n"
-            done = {"type": "done", "ok": False, "session_id": session_id}
-            yield json.dumps(done, ensure_ascii=False, separators=(",", ":")) + "\n"
-
-    return StreamingResponse(
-        event_source(),
-        media_type="application/x-ndjson",
-        headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
-    )
+    await db.commit()
+    try:
+        run = await get_system_agent_run_manager().start_run(
+            session_id=session_id,
+            web_user_id=user.id,
+            client_request_id=str(uuid.uuid4()),
+            text=payload.content,
+        )
+    except RunConflictError as exc:
+        raise _err("RUN_CONFLICT", str(exc), 409) from None
+    return _run_stream_response(run.id)
 
 
 @router.post("/sessions/{session_id}/messages/{message_id}/retry/stream")
@@ -267,42 +307,154 @@ async def retry_message(
     if payload.account_id is not None and session.account_id != payload.account_id:
         await svc.update_session(db, session, account_id=payload.account_id)
 
-    async def event_source():
-        try:
-            async for event in svc.stream_message(
-                db,
-                session=session,
-                text="",
-                role="admin",
-                channel=CHANNEL_WEB,
-                web_user_id=user.id,
-                retry_message=message,
-                fallback_provider_id=payload.fallback_provider_id,
-                approved_tools=payload.approved_tools,
-            ):
-                yield json.dumps(event, ensure_ascii=False, default=str, separators=(",", ":")) + "\n"
-            await db.commit()
-        except Exception as exc:  # noqa: BLE001
-            await db.rollback()
-            log.exception("system agent web retry stream failed session=%s", session_id)
-            err = {
-                "type": "error",
-                "code": "STREAM_FAILED",
-                "message": f"助手重试失败（{type(exc).__name__}），请刷新会话后重试。",
-                "session_id": session_id,
-            }
-            yield json.dumps(err, ensure_ascii=False, separators=(",", ":")) + "\n"
-            yield json.dumps(
-                {"type": "done", "ok": False, "session_id": session_id},
-                ensure_ascii=False,
-                separators=(",", ":"),
-            ) + "\n"
+    await db.commit()
+    try:
+        run = await get_system_agent_run_manager().start_run(
+            session_id=session_id,
+            web_user_id=user.id,
+            client_request_id=str(uuid.uuid4()),
+            text="",
+            retry_message_id=message.id,
+            fallback_provider_id=payload.fallback_provider_id,
+            approved_tools=payload.approved_tools,
+        )
+    except RunConflictError as exc:
+        raise _err("RUN_CONFLICT", str(exc), 409) from None
+    return _run_stream_response(run.id)
 
-    return StreamingResponse(
-        event_source(),
-        media_type="application/x-ndjson",
-        headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
+
+# ── Durable Run ──────────────────────────────────────────────────
+@router.post(
+    "/sessions/{session_id}/runs",
+    response_model=SystemAgentRunOut,
+    status_code=202,
+)
+async def start_system_agent_run(
+    session_id: str,
+    payload: SystemAgentRunCreate,
+    db: DBSession,
+    user: CurrentUser,
+) -> SystemAgentRunOut:
+    svc = get_system_agent_service()
+    session = await svc.get_session(db, session_id, web_user_id=user.id)
+    if session is None:
+        raise _err("SESSION_NOT_FOUND", "会话不存在", 404)
+    if payload.account_id is not None and session.account_id != payload.account_id:
+        await svc.update_session(db, session, account_id=payload.account_id)
+    await db.commit()
+    try:
+        row = await get_system_agent_run_manager().start_run(
+            session_id=session_id,
+            web_user_id=user.id,
+            client_request_id=payload.client_request_id,
+            text=payload.content,
+        )
+    except RunConflictError as exc:
+        raise _err("RUN_CONFLICT", str(exc), 409) from None
+    return _run_out(row)
+
+
+@router.post(
+    "/sessions/{session_id}/messages/{message_id}/retry/runs",
+    response_model=SystemAgentRunOut,
+    status_code=202,
+)
+async def start_system_agent_retry_run(
+    session_id: str,
+    message_id: int,
+    payload: SystemAgentRetryRunCreate,
+    db: DBSession,
+    user: CurrentUser,
+) -> SystemAgentRunOut:
+    svc = get_system_agent_service()
+    session = await svc.get_session(db, session_id, web_user_id=user.id)
+    if session is None:
+        raise _err("SESSION_NOT_FOUND", "会话不存在", 404)
+    message = await svc.get_message(db, message_id, session_id=session_id)
+    if message is None or message.role != MESSAGE_ROLE_USER:
+        raise _err("MESSAGE_NOT_FOUND", "可重试消息不存在", 404)
+    if message.run_status != MESSAGE_RUN_FAILED:
+        raise _err("MESSAGE_NOT_RETRYABLE", "只有失败消息可以重试", 409)
+    if payload.account_id is not None and session.account_id != payload.account_id:
+        await svc.update_session(db, session, account_id=payload.account_id)
+    await db.commit()
+    try:
+        row = await get_system_agent_run_manager().start_run(
+            session_id=session_id,
+            web_user_id=user.id,
+            client_request_id=payload.client_request_id,
+            text="",
+            retry_message_id=message.id,
+            fallback_provider_id=payload.fallback_provider_id,
+            approved_tools=payload.approved_tools,
+        )
+    except RunConflictError as exc:
+        raise _err("RUN_CONFLICT", str(exc), 409) from None
+    return _run_out(row)
+
+
+@router.get("/runs/{run_id}", response_model=SystemAgentRunOut)
+async def get_system_agent_run(
+    run_id: str,
+    db: DBSession,
+    user: CurrentUser,
+) -> SystemAgentRunOut:
+    await _owned_run(db, run_id, user.id)
+    try:
+        row = await get_system_agent_run_manager().get_run(run_id)
+    except RunNotFoundError:
+        raise _err("RUN_NOT_FOUND", "助手运行不存在", 404) from None
+    return _run_out(row)
+
+
+@router.get("/runs/{run_id}/events", response_model=list[SystemAgentRunEventOut])
+async def list_system_agent_run_events(
+    run_id: str,
+    db: DBSession,
+    user: CurrentUser,
+    after_seq: int = Query(default=0, ge=0),
+    limit: int = Query(default=500, ge=1, le=1000),
+) -> list[SystemAgentRunEventOut]:
+    await _owned_run(db, run_id, user.id)
+    rows = await get_system_agent_run_manager().list_events(
+        run_id,
+        after_seq=after_seq,
+        limit=limit,
     )
+    return [
+        SystemAgentRunEventOut(
+            run_id=row.run_id,
+            seq=row.seq,
+            event=dict(row.event or {}),
+            created_at=row.created_at,
+        )
+        for row in rows
+    ]
+
+
+@router.get("/runs/{run_id}/stream")
+async def stream_system_agent_run(
+    run_id: str,
+    db: DBSession,
+    user: CurrentUser,
+    after_seq: int = Query(default=0, ge=0),
+) -> StreamingResponse:
+    await _owned_run(db, run_id, user.id)
+    return _run_stream_response(run_id, after_seq=after_seq)
+
+
+@router.post("/runs/{run_id}/cancel", response_model=SystemAgentRunOut)
+async def cancel_system_agent_run(
+    run_id: str,
+    db: DBSession,
+    user: CurrentUser,
+) -> SystemAgentRunOut:
+    await _owned_run(db, run_id, user.id)
+    try:
+        row = await get_system_agent_run_manager().cancel_run(run_id)
+    except RunNotFoundError:
+        raise _err("RUN_NOT_FOUND", "助手运行不存在", 404) from None
+    return _run_out(row)
 
 
 # ── Action（阶段 2）──────────────────────────────────────────────

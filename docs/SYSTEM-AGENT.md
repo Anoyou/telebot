@@ -44,7 +44,8 @@
 规则：
 
 - 默认关闭；需管理员显式启用。
-- 必须选择**真实声明支持 tools** 的固定 Provider/模型。
+- 必须选择支持 tools 的固定 Provider/模型。声明只用于候选预筛选；模型首次进入 Agent 前还会接受一次真实的强制工具调用探测，只有返回指定工具及正确参数才会放行。
+- 工具能力探测结果保存在 `SystemSetting.system_agent_model_capability_cache`：支持结果缓存 7 天，明确不支持缓存 1 天，429/5xx/网络故障只按暂时不可用缓存 5 分钟，避免临时故障永久排除模型。
 - 固定 Provider 作为首选；同一 Provider 内会先按首选模型、默认模型、其它已启用 Tools 模型静默 fallback。
 - 同一模型遇到超时、网络错误、429 或 5xx 后会固定间隔 3 秒重试 5 次；5 次均失败后才尝试同 Provider 的下一 Tools 模型。Web 可用输入框右侧的停止按钮中断当前请求和重试等待。
 - 跨 Provider 只使用 `fallback_provider_ids` 白名单中拥有 API Key 和 Tools 模型的候选；当前 Provider 内模型均失败时，Web 会先询问是否改用下一个候选，确认后才重试。
@@ -56,12 +57,12 @@
 ## 架构要点
 
 ```text
-Web /assistant  ──NDJSON──┐
-                          ├── SystemAgentService → Runtime → ToolRegistry
-管理 Bot /agent ──────────┘                              │
-                                              按领域渐进披露工具
-                                                         │
-                                                   现有业务 service
+Web /assistant → Durable Run / 可续接事件 ──┐
+                                            ├→ Turn Resolver → Skill Router
+管理 Bot /agent → SystemAgentService ───────┘                 │
+                                                   Runtime（最多 8 个工具）
+                                                              │
+                                                   ToolRegistry → 现有业务 service
 ```
 
 硬规则：
@@ -81,7 +82,7 @@ System Agent 使用三层上下文，避免每轮回放全部原始消息：
 2. **滚动摘要**：`memory_summary` 只吸收移出短期窗口的旧成功轮次，避免与最近原始消息重复发送，并控制在有限长度内。
 3. **结构化工作记忆**：`memory_state` 保存最近工具领域、用户目标、结果、工具摘要与账号上下文，用于“把它停掉”“继续刚才那个”等指代请求。
 
-失败、超时和中断轮次不会写入摘要，也不会进入下一轮模型历史。清空会话消息时同步清空摘要和结构化记忆。
+失败、超时和中断轮次不会写入摘要，也不会进入下一轮模型历史。服务端只在 `memory_state.failed_turn` 保存打码后的失败目标、消息 ID 与错误码，使“重试 / 再试一次 / 继续刚才的”能确定性复用原失败消息；失败的模型输出和工具输出仍不进入上下文。清空会话消息时同步清空摘要和结构化记忆。
 
 ### 工具渐进披露
 
@@ -90,11 +91,14 @@ System Agent 使用三层上下文，避免每轮回放全部原始消息：
 - 本地无法判断且存在操作意图时，使用轻量模型路由器，最多选择 3 个领域。
 - 模型路由失败时优先复用结构化记忆中的最近领域，否则安全降级为不带工具的直接回答。
 - 主 Agent 只接收所选领域的工具 Schema，不再每轮固定携带全部已注册工具。
+- 内置领域技能为 `interaction`、`scheduler`、`ai-config`、`plugins`、`diagnostics`。每轮最多加载 2 个技能、暴露 8 个工具；技能只补充处理流程和澄清规则，不能扩大 ToolRoute 权限，也不复制工具 Schema 或业务校验。
 
 ## 数据表
 
 - `system_agent_session`：会话（web/bot、账号上下文、标题、状态、滚动摘要、结构化工作记忆）
 - `system_agent_message`：消息（user/assistant/tool/system_event，落库为打码内容；包含运行状态、错误码、错误信息与重试次数）
+- `system_agent_run`：Web 后台运行句柄、幂等请求标识、终态与取消状态
+- `system_agent_run_event`：按 Run 单调序号持久化的 NDJSON 事件，可从游标续接
 - `system_agent_action`：写操作预览与确认（pending → executing → executed/failed/rejected/expired）
 
 ## 已注册只读工具
@@ -135,16 +139,20 @@ Web 用内联卡片确认；Bot 用 Inline 按钮（`ab:{aid}:confirm|cancel:age
 
 - `run_started`
 - `provider_selected`（当前 Provider 名称、模型与 configured/model_fallback/provider_fallback 原因）
+- `model_capability_check`（首次使用或缓存过期时验证模型的真实工具调用能力）
 - `model_attempt` / `retry_scheduled` / `model_exhausted`（当前模型尝试、固定间隔重试和模型耗尽）
 - `heartbeat`（等待上游期间每 10 秒保持 NDJSON 连接并报告当前 Provider/模型）
 - `route_selected`（所选领域、来源、工具数量）
+- `skill_selected`（本轮加载的领域技能、理解摘要与工具数量）
 - `tool_started` / `tool_finished`
 - `action_proposed`
 - `assistant_message`
 - `error`
 - `done`
 
-连接中断后通过会话消息 API 读取最终状态，不依赖重放旧流。Web 会实时展示当前 Provider/模型、重试进度和“正在调用某工具”，不再只显示笼统的“思考中”。
+Web 首先通过 `POST /api/system-agent/sessions/{session_id}/runs` 创建持久 Run，再通过 `GET /api/system-agent/runs/{run_id}/stream?after_seq=N` 订阅事件；重试使用 `POST /api/system-agent/sessions/{session_id}/messages/{message_id}/retry/runs`。刷新、切换会话或 PWA 暂时离线不会取消后台执行，前端会保存 Run ID 和最后游标并自动补收缺失事件；`POST /api/system-agent/runs/{run_id}/cancel` 才会明确终止。
+
+旧的 `messages/stream` 与 `retry/stream` 接口继续兼容，但内部同样创建持久 Run。Web 会实时展示理解到的领域技能、当前 Provider/模型、重试进度和“正在调用某工具”，不再只显示笼统的“思考中”。
 
 失败用户消息会显示错误原因与「重试本轮」按钮；需要跨 Provider 或工具批准时，会显示对应确认按钮。重试接口为：
 
@@ -188,9 +196,10 @@ System Agent 在自己的运行入口注册 LLM usage 持久化回调，路由�
 | 工具异常 | 说明业务是否变化 |
 | Provider 验证失败 | 保持待确认，清除无效密钥，要求重输 |
 | Redis 不可用 | Web 仍可用；Bot 助手模式/Inline 确认可能不可用 |
-| NDJSON 中断 | 刷新后重读会话消息与 Action |
+| NDJSON 中断 | 后台 Run 继续执行；Web 按最后事件游标自动重连并补收 |
 | Agent 本轮失败 | 消息标记 failed，不进入后续上下文；Web 可直接重试原轮 |
-| PWA 切后台或网络断开 | 服务端把本轮标记为可重试失败；超过 15 分钟的历史 pending 会自动修复，避免误回收仍在 10 分钟运行窗口内的请求 |
+| 用户发送“重试 / 继续刚才的” | 有失败锚点时原子复用最近失败用户消息，不新增重复消息；没有锚点时按普通消息处理 |
+| PWA 切后台或网络断开 | Run 与订阅连接解耦，恢复页面后自动续接；只有服务进程重启才会把未完成 Run 标记为可重试失败 |
 | 系统更新/重启中断连接 | Action 已先提交；刷新后以 Action 与运行时同步状态为准 |
 
 ## 扩展新工具

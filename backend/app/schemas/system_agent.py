@@ -96,6 +96,42 @@ class SystemAgentMessageRetry(BaseModel):
     approved_tools: list[str] = Field(default_factory=list, max_length=64)
 
 
+class SystemAgentRunCreate(SystemAgentMessageCreate):
+    client_request_id: str = Field(min_length=8, max_length=64)
+
+
+class SystemAgentRetryRunCreate(SystemAgentMessageRetry):
+    client_request_id: str = Field(min_length=8, max_length=64)
+
+
+class SystemAgentRunOut(BaseModel):
+    id: str
+    run_id: str = Field(validation_alias="id")
+    session_id: str
+    web_user_id: int | None = None
+    user_message_id: int | None = None
+    client_request_id: str
+    kind: str
+    status: str
+    last_seq: int = 0
+    cancel_requested: bool = False
+    error_code: str | None = None
+    error_message: str | None = None
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class SystemAgentRunEventOut(BaseModel):
+    run_id: str
+    seq: int
+    event: dict[str, Any]
+    created_at: datetime | None = None
+
+
 class SystemAgentActionOut(BaseModel):
     id: str
     session_id: str | None = None
