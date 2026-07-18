@@ -8,6 +8,7 @@ import type {
 } from "@/api/systemAgent";
 import { ActionCard } from "@/components/assistant/ActionCard";
 import { Button } from "@/components/ui/button";
+import { systemAgentToolLabel } from "@/lib/systemAgentLabels";
 import { cn } from "@/lib/utils";
 
 export type LiveBubble = {
@@ -37,6 +38,10 @@ function messageText(msg: SystemAgentMessage): string {
     }
   }
   return "";
+}
+
+function approvalToolLabel(tool: SystemAgentToolApproval["tools"][number]): string {
+  return systemAgentToolLabel(tool.description);
 }
 
 export function Conversation({
@@ -138,7 +143,7 @@ export function Conversation({
                       <p className="break-words">{item.errorMessage || "本轮执行失败"}</p>
                       {approvalTools.length ? (
                         <p className="mt-1 break-words text-foreground/75">
-                          将开放：{approvalTools.map((tool) => tool.name).join("、")}
+                          准备调用：{approvalTools.map(approvalToolLabel).join("、")}
                         </p>
                       ) : null}
                       {item.retryCount ? <p className="mt-1 opacity-70">已重试 {item.retryCount} 次</p> : null}
@@ -149,7 +154,7 @@ export function Conversation({
                           type="button"
                           size="sm"
                           className="h-7 max-w-48 px-2 text-xs"
-                          title={`批准调用：${approvalTools.map((tool) => tool.name).join("、")}`}
+                          title={`批准调用：${approvalTools.map(approvalToolLabel).join("、")}`}
                           disabled={retryingMessageId != null}
                           onClick={() =>
                             onRetryMessage?.(

@@ -122,6 +122,45 @@ async def test_agent_parallelizes_read_only_tools_and_emits_callbacks() -> None:
 
 
 @pytest.mark.asyncio
+async def test_agent_checks_entire_tool_batch_before_any_handler_starts() -> None:
+    left = ToolSpec("left", "left", {"type": "object"})
+    right = ToolSpec("right", "right", {"type": "object"})
+    executions: list[str] = []
+    requested: list[tuple[str, ...]] = []
+
+    async def model_call(_request: ModelRequest) -> ModelResponse:
+        return ModelResponse(
+            model="m",
+            tool_calls=(
+                ToolCall("1", "left", {}),
+                ToolCall("2", "right", {}),
+            ),
+        )
+
+    async def handler(arguments: dict) -> str:
+        executions.append(str(arguments))
+        return "unexpected"
+
+    async def reject_batch(calls: tuple[ToolCall, ...]) -> None:
+        requested.append(tuple(call.name for call in calls))
+        raise PermissionError("approval required")
+
+    with pytest.raises(PermissionError, match="approval required"):
+        await run_agent(
+            model_call,
+            _request(left, right),
+            {
+                "left": AgentTool(left, handler, read_only=True),
+                "right": AgentTool(right, handler, read_only=True),
+            },
+            callbacks=AgentCallbacks(on_tool_batch=reject_batch),
+        )
+
+    assert requested == [("left", "right")]
+    assert executions == []
+
+
+@pytest.mark.asyncio
 async def test_agent_repeated_call_is_blocked_without_reexecution() -> None:
     spec = ToolSpec("lookup", "lookup", {"type": "object"})
     executions = 0

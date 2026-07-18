@@ -24,6 +24,7 @@ async def _persist_usage(record: UsageRecord) -> None:
                     provider_id=record.provider_id,
                     provider_name=record.provider_name,
                     model=record.model,
+                    client_identity_profile=record.client_identity_profile,
                     source=record.source,
                     input_tokens=int(record.input_tokens or 0),
                     output_tokens=int(record.output_tokens or 0),

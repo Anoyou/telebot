@@ -90,6 +90,21 @@ async def invoke(
             kwargs["api_format_override"] = api_format_override
         return llm_client.build_client(provider_dto, **kwargs)
 
+    def _resolve_runtime_client_identity(
+        provider_dto: LLMProviderDTO,
+        model: str | None,
+    ) -> str:
+        api_format_override = _api_format_for_call(
+            provider_dto,
+            web_search=web_search,
+            native_image=native_image,
+            override_model=model,
+        )
+        return llm_runtime.resolve_usage_client_identity_profile(
+            provider_dto,
+            effective_api_format=api_format_override,
+        )
+
     return await call_with_fallback(
         chain,
         system,
@@ -105,6 +120,7 @@ async def invoke(
         timeout_seconds=timeout_seconds,
         native_image=native_image,
         client_factory=_build_runtime_client,
+        client_identity_resolver=_resolve_runtime_client_identity,
         account_id=account_id,
         triggered_by_account_id=triggered_by_account_id,
         source=source,
@@ -268,6 +284,7 @@ async def _emit_transcribe_usage(
             triggered_by_account_id=triggered_by_account_id,
             provider_name=provider.name,
             model=model or provider.default_model,
+            client_identity_profile=llm_runtime.resolve_usage_client_identity_profile(provider),
             input_tokens=max(0, int(input_tokens or 0)),
             output_tokens=max(0, int(output_tokens or 0)),
             latency_ms=max(0, int((time.monotonic() - started) * 1000)),

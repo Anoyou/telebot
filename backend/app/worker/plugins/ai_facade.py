@@ -940,6 +940,7 @@ async def _emit_stream_usage(
             account_id=account_id,
             provider_name=provider.name,
             model=model or provider.default_model,
+            client_identity_profile=llm_runtime.resolve_usage_client_identity_profile(provider),
             input_tokens=max(0, int(input_tokens or 0)),
             output_tokens=max(0, int(output_tokens or 0)),
             latency_ms=max(0, int((time.monotonic() - started_at) * 1000)),

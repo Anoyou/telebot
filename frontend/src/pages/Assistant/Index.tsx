@@ -30,6 +30,7 @@ import { Button } from "@/components/ui/button";
 import { Select } from "@/components/ui/select";
 import { Spinner } from "@/components/ui/misc";
 import { getErrMsg } from "@/lib/api";
+import { systemAgentToolLabel } from "@/lib/systemAgentLabels";
 
 function toolsModels(provider?: LLMProviderOut): string[] {
   if (!provider) return [];
@@ -238,11 +239,15 @@ export function AssistantIndex() {
       };
       const upsertToolProgress = (event: SystemAgentStreamEvent, finished: boolean) => {
         const id = `tool-${event.call_id || event.seq}`;
+        const toolLabel = systemAgentToolLabel(
+          String(event.tool_description || ""),
+          String(event.tool_name || "系统能力"),
+        );
         setLive((prev) => {
           const bubble: LiveBubble = {
             id,
             role: "tool",
-            text: `${finished ? (event.is_error ? "调用失败" : "调用完成") : "正在调用"} ${event.tool_name || "tool"}${finished ? "" : "…"}`,
+            text: `${finished ? (event.is_error ? "调用失败" : "调用完成") : "正在调用"} ${toolLabel}${finished ? "" : "…"}`,
             pending: !finished,
           };
           const withoutCurrent = prev.filter((item) => item.id !== id);
@@ -290,7 +295,11 @@ export function AssistantIndex() {
           }
           if (event.type === "tool_started") {
             upsertToolProgress(event, false);
-            updatePendingText(`正在等待 ${event.tool_name || "工具"} 返回…`);
+            const toolLabel = systemAgentToolLabel(
+              String(event.tool_description || ""),
+              String(event.tool_name || "系统能力"),
+            );
+            updatePendingText(`正在等待 ${toolLabel} 返回…`);
           }
           if (event.type === "tool_finished") {
             upsertToolProgress(event, true);

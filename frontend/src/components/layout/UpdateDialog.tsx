@@ -27,14 +27,13 @@ import type {
   PullUpdateResult,
   UpdateJobStatus,
 } from "@/api/types";
-import { APP_VERSION, APP_VERSION_LABEL } from "@/lib/version";
+import { APP_VERSION_LABEL } from "@/lib/version";
 import {
   clearActiveUpdateJob,
   getUpdateJobRetryDelay,
   loadActiveUpdateJob,
   saveActiveUpdateJob,
 } from "@/lib/updateJobPersistence";
-import { checkFrontendUpdate } from "@/pwa";
 
 type UpdateActionRequired =
   | "none"
@@ -76,14 +75,6 @@ type Step =
   | { kind: "pull_failed"; error: string; progress?: number; phase?: string; detail?: string | null }
   | { kind: "check_failed"; error: string }
   | { kind: "restarting"; countdown: number };
-
-type FrontendUpdateState =
-  | "idle"
-  | "checking"
-  | "updating"
-  | "up_to_date"
-  | "unsupported"
-  | "error";
 
 interface UpdateDialogProps {
   open: boolean;
@@ -136,7 +127,6 @@ function UpdateProgress({
 
 export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
   const [step, setStep] = useState<Step | null>(null);
-  const [frontendUpdateState, setFrontendUpdateState] = useState<FrontendUpdateState>("idle");
   const [updateRemote, setUpdateRemote] = useState("origin");
   const [updateBranch, setUpdateBranch] = useState("main");
   const [remoteOptions, setRemoteOptions] = useState(["origin"]);
@@ -216,45 +206,6 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
       return "需要在服务器执行更新";
     }
     return "发现新版本可用";
-  };
-
-  const getFrontendUpdateMessage = () => {
-    switch (frontendUpdateState) {
-      case "up_to_date":
-        return "已是最新版本";
-      case "updating":
-        return "发现新前端资源，浏览器正在安装；完成后页面会自动刷新";
-      case "unsupported":
-        return "当前页面尚未由 PWA 接管，开发模式或首次加载时无法检查";
-      case "error":
-        return "检查失败，请稍后重试";
-      default:
-        return null;
-    }
-  };
-
-  const getFrontendUpdateMessageClassName = () => {
-    switch (frontendUpdateState) {
-      case "up_to_date":
-        return "text-success";
-      case "updating":
-      case "unsupported":
-        return "text-warning";
-      case "error":
-        return "text-destructive";
-      default:
-        return "text-muted-foreground";
-    }
-  };
-
-  const doCheckFrontendUpdate = async () => {
-    setFrontendUpdateState("checking");
-    try {
-      const result = await checkFrontendUpdate();
-      setFrontendUpdateState(result);
-    } catch {
-      setFrontendUpdateState("error");
-    }
   };
 
   const loadTargetOptions = useCallback(async (remote: string, preferredBranch?: string) => {
@@ -392,7 +343,6 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
     if (open) {
       const dialogGeneration = dialogGenerationRef.current + 1;
       dialogGenerationRef.current = dialogGeneration;
-      setFrontendUpdateState("idle");
       const activeJob = loadActiveUpdateJob<UpdatePlanMeta>(getUpdateJobStorage());
       if (activeJob) {
         const remote = activeJob.plan.remote || "origin";
@@ -430,7 +380,6 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
     } else {
       dialogGenerationRef.current += 1;
       setStep(null);
-      setFrontendUpdateState("idle");
       setErrorCopied(false);
       jobPollTokenRef.current += 1;
       checkTokenRef.current += 1;
@@ -574,9 +523,6 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
     step?.kind === "pulled" ||
     step?.kind === "pull_failed" ||
     step?.kind === "check_failed";
-  const frontendUpdateMessage = getFrontendUpdateMessage();
-  const isCheckingFrontendUpdate = frontendUpdateState === "checking";
-
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="dialog-center siri-glow-soft !flex max-h-[calc(100dvh-1.5rem)] w-[calc(100vw-1.5rem)] max-w-md flex-col overflow-hidden border-primary/45 shadow-2xl shadow-primary/10 ring-1 ring-primary/35">
@@ -605,7 +551,7 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
           </div>
 
           <div className="mb-4 rounded-md border bg-background px-3 py-3">
-            <div className="grid min-w-0 gap-3 sm:grid-cols-[100px_minmax(0,1fr)]">
+            <div className="grid min-w-0 grid-cols-[100px_minmax(0,1fr)] gap-3">
               <div className="min-w-0 space-y-1.5">
                 <Label htmlFor="app-update-remote">Git 远端</Label>
                 <Select
@@ -864,34 +810,6 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
             </div>
           )}
 
-          <div className="mt-4 rounded-md border bg-background px-3 py-3 text-sm">
-            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-              <div className="min-w-0">
-                <p className="font-medium">前端资源</p>
-                <p className="mt-1 text-xs text-muted-foreground">
-                  当前前端版本 <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-foreground">v{APP_VERSION}</code>
-                </p>
-              </div>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => void doCheckFrontendUpdate()}
-                disabled={isCheckingFrontendUpdate || frontendUpdateState === "updating"}
-              >
-                {isCheckingFrontendUpdate ? (
-                  <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
-                ) : (
-                  <RefreshCw className="mr-1 h-3.5 w-3.5" />
-                )}
-                {isCheckingFrontendUpdate ? "检查中..." : "检查前端更新"}
-              </Button>
-            </div>
-            {frontendUpdateMessage && (
-              <p className={`mt-3 text-xs ${getFrontendUpdateMessageClassName()}`}>
-                {frontendUpdateMessage}
-              </p>
-            )}
-          </div>
         </div>
 
         {/* 按钮区 */}

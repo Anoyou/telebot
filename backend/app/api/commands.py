@@ -94,6 +94,8 @@ async def _emit_llm_diagnostic_usage(
     model: str | None,
     result=None,
     error: Exception | None = None,
+    api_format_override: str | None = None,
+    identity_override: str | None = None,
 ) -> None:
     """Record diagnostic LLM probes without reserving account budget.
 
@@ -102,7 +104,9 @@ async def _emit_llm_diagnostic_usage(
     be visible in usage with a diagnostic source for cost/risk review.
     """
 
+    from ..db.models.command import default_api_format_for
     from ..services import llm_runtime
+    from ..services.llm_identity import resolve_identity
     from ..services.llm_runtime import (
         UsageRecord,
         preview_text_for_usage,
@@ -116,11 +120,21 @@ async def _emit_llm_diagnostic_usage(
         pass
 
     success = error is None
+    effective_api_format = (
+        api_format_override
+        or getattr(provider_row, "api_format", None)
+        or default_api_format_for(getattr(provider_row, "provider", "openai"))
+    )
+    client_identity_profile = resolve_identity(
+        identity_override or getattr(provider_row, "client_identity_profile", None),
+        effective_api_format,
+    ).profile
     await llm_runtime._emit_usage(
         UsageRecord(
             provider_id=getattr(provider_row, "id", None),
             provider_name=getattr(provider_row, "name", None),
             model=model or getattr(provider_row, "default_model", None),
+            client_identity_profile=client_identity_profile,
             input_tokens=int(getattr(result, "input_tokens", 0) or 0),
             output_tokens=int(getattr(result, "output_tokens", 0) or 0),
             latency_ms=max(0, int((_time.monotonic() - started) * 1000)),
@@ -774,6 +788,8 @@ async def detect_provider_protocols(
                 model=model,
                 result=None if not result.ok else SimpleNamespace(text=None),
                 error=None if result.ok else ValueError(result.error or result.error_category or api_format),
+                api_format_override=api_format if api_format != "models" else "chat_completions",
+                identity_override=result.client_identity_profile or "minimal",
             )
         except Exception:  # noqa: BLE001 - 诊断记录不得改变探测结论
             pass
@@ -1411,6 +1427,8 @@ async def chat_test_models(
             await _emit_llm_diagnostic_usage(
                 provider_row=row,
                 source="diagnostic:chat-test",
+                api_format_override=payload.api_format_override,
+                identity_override=payload.client_identity_profile_override,
                 started=started,
                 system=payload.system_prompt,
                 user_prompt=user_prompt,
@@ -1438,6 +1456,8 @@ async def chat_test_models(
                     _emit_llm_diagnostic_usage(
                         provider_row=row,
                         source="diagnostic:chat-test",
+                        api_format_override=payload.api_format_override,
+                        identity_override=payload.client_identity_profile_override,
                         started=started,
                         system=payload.system_prompt,
                         user_prompt=user_prompt,
@@ -1453,6 +1473,8 @@ async def chat_test_models(
             await _emit_llm_diagnostic_usage(
                 provider_row=row,
                 source="diagnostic:chat-test",
+                api_format_override=payload.api_format_override,
+                identity_override=payload.client_identity_profile_override,
                 started=started,
                 system=payload.system_prompt,
                 user_prompt=user_prompt,
@@ -1471,6 +1493,8 @@ async def chat_test_models(
             await _emit_llm_diagnostic_usage(
                 provider_row=row,
                 source="diagnostic:chat-test",
+                api_format_override=payload.api_format_override,
+                identity_override=payload.client_identity_profile_override,
                 started=started,
                 system=payload.system_prompt,
                 user_prompt=user_prompt,
@@ -1637,6 +1661,8 @@ async def stream_chat_test_models(
                 await _emit_llm_diagnostic_usage(
                     provider_row=row,
                     source="diagnostic:chat-test",
+                    api_format_override=payload.api_format_override,
+                    identity_override=payload.client_identity_profile_override,
                     started=started,
                     system=payload.system_prompt,
                     user_prompt=user_prompt,
@@ -1678,6 +1704,8 @@ async def stream_chat_test_models(
                         _emit_llm_diagnostic_usage(
                             provider_row=row,
                             source="diagnostic:chat-test",
+                            api_format_override=payload.api_format_override,
+                            identity_override=payload.client_identity_profile_override,
                             started=started,
                             system=payload.system_prompt,
                             user_prompt=user_prompt,
@@ -1694,6 +1722,8 @@ async def stream_chat_test_models(
                 await _emit_llm_diagnostic_usage(
                     provider_row=row,
                     source="diagnostic:chat-test",
+                    api_format_override=payload.api_format_override,
+                    identity_override=payload.client_identity_profile_override,
                     started=started,
                     system=payload.system_prompt,
                     user_prompt=user_prompt,
@@ -1723,6 +1753,8 @@ async def stream_chat_test_models(
                 await _emit_llm_diagnostic_usage(
                     provider_row=row,
                     source="diagnostic:chat-test",
+                    api_format_override=payload.api_format_override,
+                    identity_override=payload.client_identity_profile_override,
                     started=started,
                     system=payload.system_prompt,
                     user_prompt=user_prompt,
