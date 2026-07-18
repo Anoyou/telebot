@@ -1,4 +1,6 @@
 import { AlertCircle, Bot, RotateCcw, ShieldCheck, User, Wrench } from "lucide-react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 
 import type {
   SystemAgentAction,
@@ -10,6 +12,7 @@ import { ActionCard } from "@/components/assistant/ActionCard";
 import { Button } from "@/components/ui/button";
 import { systemAgentToolLabel } from "@/lib/systemAgentLabels";
 import { cn } from "@/lib/utils";
+import { visibleConversationMessages } from "./conversationState";
 
 export type LiveBubble = {
   id: string;
@@ -44,6 +47,53 @@ function approvalToolLabel(tool: SystemAgentToolApproval["tools"][number]): stri
   return systemAgentToolLabel(tool.description);
 }
 
+function AssistantMarkdown({ text }: { text: string }) {
+  return (
+    <ReactMarkdown
+      remarkPlugins={[remarkGfm]}
+      components={{
+        p: ({ children }) => <p className="my-1 first:mt-0 last:mb-0">{children}</p>,
+        ul: ({ children }) => <ul className="my-1 list-disc space-y-0.5 pl-5">{children}</ul>,
+        ol: ({ children }) => <ol className="my-1 list-decimal space-y-0.5 pl-5">{children}</ol>,
+        h1: ({ children }) => <h1 className="my-2 text-base font-semibold">{children}</h1>,
+        h2: ({ children }) => <h2 className="my-2 text-sm font-semibold">{children}</h2>,
+        h3: ({ children }) => <h3 className="my-1.5 text-sm font-medium">{children}</h3>,
+        blockquote: ({ children }) => (
+          <blockquote className="my-2 border-l-2 border-border pl-3 text-muted-foreground">
+            {children}
+          </blockquote>
+        ),
+        a: ({ children, ...props }) => (
+          <a {...props} target="_blank" rel="noreferrer">
+            {children}
+          </a>
+        ),
+        table: ({ children }) => (
+          <div className="my-2 max-w-full overflow-x-auto">
+            <table className="min-w-full border-collapse text-left text-xs">{children}</table>
+          </div>
+        ),
+        th: ({ children }) => (
+          <th className="border border-border bg-muted px-2 py-1 font-medium">{children}</th>
+        ),
+        td: ({ children }) => <td className="border border-border px-2 py-1 align-top">{children}</td>,
+        pre: ({ children }) => (
+          <pre className="my-2 max-w-full overflow-x-auto rounded-md bg-background/80 p-2 text-xs">
+            {children}
+          </pre>
+        ),
+        code: ({ className, children, ...props }) => (
+          <code className={cn("rounded bg-background/70 px-1 py-0.5 text-xs", className)} {...props}>
+            {children}
+          </code>
+        ),
+      }}
+    >
+      {text}
+    </ReactMarkdown>
+  );
+}
+
 export function Conversation({
   messages,
   live,
@@ -62,7 +112,7 @@ export function Conversation({
   retryingMessageId?: number | null;
 }) {
   const items: LiveBubble[] = [
-    ...messages.map(
+    ...visibleConversationMessages(messages).map(
       (m): LiveBubble => ({
         id: `m-${m.id}`,
         role: (m.role === "user" || m.role === "assistant" || m.role === "tool"
@@ -127,14 +177,19 @@ export function Conversation({
               <div className={cn("flex min-w-0 max-w-[85%] flex-col gap-1", isUser && "items-end")}>
                 <div
                   className={cn(
-                    "max-w-full break-words whitespace-pre-wrap rounded-2xl px-3 py-2 text-sm leading-relaxed",
+                    "max-w-full break-words rounded-2xl px-3 py-2 text-sm leading-relaxed",
                     isUser && "bg-primary text-primary-foreground",
                     !isUser && !isTool && "bg-muted",
                     isTool && "border border-dashed bg-background text-xs text-muted-foreground",
+                    (isUser || isTool) && "whitespace-pre-wrap",
                     item.pending && "opacity-70",
                   )}
                 >
-                  {item.text || (item.pending ? "思考中…" : "")}
+                  {item.text ? (
+                    !isUser && !isTool ? <AssistantMarkdown text={item.text} /> : item.text
+                  ) : item.pending ? (
+                    "思考中…"
+                  ) : null}
                 </div>
                 {isFailedUser ? (
                   <div className="flex max-w-full flex-col items-stretch gap-2 rounded-lg border border-destructive/30 bg-destructive/5 px-2.5 py-2 text-xs text-destructive sm:flex-row sm:items-start">
