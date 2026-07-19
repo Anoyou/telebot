@@ -113,6 +113,20 @@ _MAX_BUTTON_ROWS = 24
 _REMOTE_POLICY_HINT = "该功能默认关闭，请管理员在 Web 控制台启用后重试（高风险操作，仍需二次确认）。"
 _RUNTIME_NOTIFY_DEDUPE_TTL_SECONDS = 180
 _RUNTIME_NOTIFY_DEDUPE_PREFIX = "account_bot:runtime_notify:"
+_RUNTIME_NOTIFY_STABLE_DETAIL_KEYS = (
+    "payout_key",
+    "error_code",
+    "action_type",
+    "plugin_key",
+    "entry_key",
+    "update_id",
+    "rule_id",
+    "feature_key",
+    "user_id",
+    "chat_id",
+    "message_id",
+    "红包ID",
+)
 _INTERACTION_RULE_STATE_PREFIX = "account_bot:interaction_rule_state:"
 _INTERACTION_TRIGGER_DEDUPE_PREFIX = "account_bot:interaction_trigger:"
 _INTERACTION_SESSION_PREFIX = "account_bot:interaction_session:"
@@ -1426,10 +1440,13 @@ async def notify_runtime_log(row: RuntimeLog) -> None:
 
     if row.account_id is None or row.level not in {LEVEL_ERROR, LEVEL_WARN}:
         return
+    if _runtime_log_notification_skip_reason(row):
+        return
     source = account_bot_service.html_text(row.source or "worker")
     message = account_bot_service.html_text(row.message)
+    detail_identity = _runtime_log_dedupe_identity(row)
     digest = hashlib.sha256(
-        f"{int(row.account_id)}|{row.level}|{row.source or 'worker'}|{row.message}".encode()
+        f"{int(row.account_id)}|{row.level}|{row.source or 'worker'}|{row.message}|{detail_identity}".encode()
     ).hexdigest()
     dedupe_key = f"{_RUNTIME_NOTIFY_DEDUPE_PREFIX}{int(row.account_id)}:{digest}"
     redis = get_redis()
@@ -1456,6 +1473,54 @@ async def notify_runtime_log(row: RuntimeLog) -> None:
             f"<details open><summary>告警详情</summary><p>{message}</p></details>"
         ),
     )
+
+
+def _runtime_log_detail(row: RuntimeLog) -> dict[str, Any]:
+    detail = row.detail
+    return dict(detail) if isinstance(detail, dict) else {}
+
+
+def _runtime_log_notification_skip_reason(row: RuntimeLog) -> str | None:
+    """Return a reason for suppressing known intermediate/noise notifications.
+
+    The RuntimeLog row remains queryable in the logs UI.  Only the account Bot
+    notification is suppressed here, and terminal financial/plugin failures are
+    deliberately left untouched.
+    """
+
+    message = str(row.message or "").strip()
+    detail = _runtime_log_detail(row)
+    error = str(detail.get("error") or "").lower()
+    if message == "interaction answer_callback failed; continue remaining actions":
+        if any(marker in error for marker in ("query is too old", "response timeout expired", "query id is invalid")):
+            return "expired_callback_ack"
+    if message == "转账测试通知 Bot 无法向当前群发送模拟通知，已等待真实转账结果通知。":
+        return "transfer_test_notice_fallback"
+    if message.startswith("run_interaction_entry 失败: TimeoutError"):
+        return "interaction_entry_retry_in_progress"
+    if "payout delivery already in progress" in message.lower() or "payout delivery already in progress" in error:
+        return "duplicate_payout_claim"
+    if message == "interaction payout failed":
+        if "worker 调用超时" in error or "终态未知" in error:
+            return "payout_compensation_pending"
+    if message.startswith("run_interaction_action 失败:"):
+        if "payout delivery already in progress" in error:
+            return "duplicate_payout_claim"
+        if "rpc deadline exceeded before telegram side effect" in error:
+            return "payout_compensation_pending"
+    return None
+
+
+def _runtime_log_dedupe_identity(row: RuntimeLog) -> str:
+    """Include stable business identity without poisoning dedupe with trace IDs."""
+
+    detail = _runtime_log_detail(row)
+    stable = {
+        key: detail[key]
+        for key in _RUNTIME_NOTIFY_STABLE_DETAIL_KEYS
+        if detail.get(key) not in (None, "")
+    }
+    return json.dumps(stable, ensure_ascii=False, sort_keys=True, default=str)
 
 
 def _interaction_runtime_state_setting_key(aid: int) -> str:

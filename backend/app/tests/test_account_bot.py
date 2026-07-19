@@ -16782,6 +16782,77 @@ async def test_notify_runtime_log_deduplicates_same_error(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("message", "detail"),
+    [
+        (
+            "interaction answer_callback failed; continue remaining actions",
+            {"error": "Bad Request: query is too old and response timeout expired"},
+        ),
+        ("run_interaction_entry 失败: TimeoutError:", {}),
+        (
+            "interaction payout failed",
+            {"error": "worker 调用超时，终态未知", "payout_key": "pay-1"},
+        ),
+        (
+            "run_interaction_action 失败: RuntimeError: payout delivery already in progress",
+            {"error": "RuntimeError: payout delivery already in progress", "payout_key": "pay-1"},
+        ),
+        ("转账测试通知 Bot 无法向当前群发送模拟通知，已等待真实转账结果通知。", {}),
+    ],
+)
+async def test_notify_runtime_log_suppresses_known_intermediate_noise(
+    monkeypatch,
+    message: str,
+    detail: dict[str, Any],
+) -> None:
+    notify = AsyncMock(return_value=1)
+    get_redis = AsyncMock(side_effect=AssertionError("噪声告警不应触碰 Redis 去重"))
+    monkeypatch.setattr(account_bot_runtime, "notify_account", notify)
+    monkeypatch.setattr(account_bot_runtime, "get_redis", get_redis)
+
+    await account_bot_runtime.notify_runtime_log(
+        RuntimeLog(account_id=7, level="warn", source="event", message=message, detail=detail)
+    )
+
+    notify.assert_not_awaited()
+    get_redis.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_notify_runtime_log_dedupe_keeps_distinct_payouts(monkeypatch) -> None:
+    class _Redis:
+        def __init__(self) -> None:
+            self.keys: set[str] = set()
+
+        async def set(self, key: str, _value: str, *, ex: int, nx: bool) -> bool | None:
+            assert ex == account_bot_runtime._RUNTIME_NOTIFY_DEDUPE_TTL_SECONDS
+            assert nx is True
+            if key in self.keys:
+                return None
+            self.keys.add(key)
+            return True
+
+    redis = _Redis()
+    notify = AsyncMock(return_value=1)
+    monkeypatch.setattr(account_bot_runtime, "get_redis", lambda: redis)
+    monkeypatch.setattr(account_bot_runtime, "notify_account", notify)
+
+    for payout_key in ("pay-727", "pay-3929"):
+        await account_bot_runtime.notify_runtime_log(
+            RuntimeLog(
+                account_id=7,
+                level="error",
+                source="event",
+                message="payout 补偿已放弃。",
+                detail={"payout_key": payout_key, "error_code": "ambiguous_delivery"},
+            )
+        )
+
+    assert notify.await_count == 2
+
+
+@pytest.mark.asyncio
 async def test_account_bot_send_prefers_rich_and_falls_back_to_html(monkeypatch) -> None:
     incoming = account_bot_runtime.Incoming(
         account_id=7,
