@@ -5231,6 +5231,46 @@ async def test_loader_injects_namespaced_plugin_storage(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_userbot_entity_retry_prefers_user_id_lookup() -> None:
+    entity = SimpleNamespace(id=42, first_name="公开姓名")
+    client = SimpleNamespace(get_entity=AsyncMock(return_value=entity))
+
+    resolved = await loader_mod._userbot_entity_for_account(
+        client,
+        _FakeRedis(),
+        1,
+        -1001,
+        42,
+    )
+
+    assert resolved is entity
+    client.get_entity.assert_awaited_once_with(42)
+
+
+@pytest.mark.asyncio
+async def test_userbot_entity_retry_recovers_from_recent_message_anchor() -> None:
+    entity = SimpleNamespace(id=42, first_name="公开姓名")
+    message = SimpleNamespace(sender_id=42, sender=entity)
+    client = SimpleNamespace(
+        get_entity=AsyncMock(side_effect=ValueError("input entity is not cached")),
+        get_messages=AsyncMock(return_value=message),
+    )
+    redis = _FakeRedis()
+    redis.values["tp:recent-user-message:1:-1001:42"] = "88"
+
+    resolved = await loader_mod._userbot_entity_for_account(
+        client,
+        redis,
+        1,
+        -1001,
+        42,
+    )
+
+    assert resolved is entity
+    client.get_messages.assert_awaited_once_with(-1001, ids=88)
+
+
+@pytest.mark.asyncio
 async def test_ai_facade_requires_ai_text_or_ai_agent_permission(monkeypatch) -> None:
     """ctx.ai 只应给声明 ai_text/ai_agent 的插件，Agent 权限独立保留。"""
     from app.worker.plugins.ai_facade import PluginAI

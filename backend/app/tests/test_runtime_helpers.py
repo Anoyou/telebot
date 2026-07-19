@@ -16,7 +16,7 @@ from app.worker.runtime import _build_proxy_url
 
 
 def test_public_entity_display_name_keeps_non_contact_public_name() -> None:
-    entity = SimpleNamespace(id=42, first_name="公开名", last_name="尾名", username=None, contact=False)
+    entity = SimpleNamespace(id=42, first_name="公开名", last_name="尾名", username="public_user", contact=False)
 
     assert public_entity_display_name(entity) == "公开名 尾名"
 
@@ -146,6 +146,101 @@ async def test_resolve_public_sender_identity_ignores_regular_member_tag() -> No
     assert identity.display_name == "普通成员姓名"
     assert identity.is_anonymous_admin is False
     assert identity.tag == "普通成员标签"
+    assert identity.resolved is True
+
+
+async def test_resolve_public_sender_identity_retries_with_userbot_entity() -> None:
+    calls: list[object] = []
+    entity = SimpleNamespace(id=42, first_name="普通成员姓名", username="ordinary_user")
+
+    class Client:
+        async def get_permissions(self, chat_id: int, user: object) -> SimpleNamespace:
+            calls.append(user)
+            if isinstance(user, int):
+                raise ValueError("input entity is not cached")
+            assert user is entity
+            return SimpleNamespace(
+                anonymous=False,
+                participant=SimpleNamespace(rank="普通成员标签"),
+            )
+
+    async def resolve_entity(chat_id: int, user_id: int) -> object:
+        assert (chat_id, user_id) == (-1001, 42)
+        return entity
+
+    identity = await PluginIdentityFacade(
+        Client(),
+        user_entity_resolver=resolve_entity,
+    ).resolve(
+        chat_id=-1001,
+        user_id=42,
+        fallback_display_name="匿名用户",
+    )
+
+    assert calls == [42, entity]
+    assert identity.display_name == "普通成员姓名"
+    assert identity.is_anonymous_admin is False
+    assert identity.resolved is True
+
+
+async def test_resolve_public_sender_identity_entity_retry_keeps_anonymous_admin_safe() -> None:
+    entity = SimpleNamespace(id=42, first_name="匿名管理员真实姓名")
+
+    class Client:
+        async def get_permissions(self, chat_id: int, user: object) -> SimpleNamespace:
+            if isinstance(user, int):
+                raise ValueError("input entity is not cached")
+            return SimpleNamespace(
+                anonymous=True,
+                participant=SimpleNamespace(rank="匿名管理员标签"),
+            )
+
+    async def resolve_entity(chat_id: int, user_id: int) -> object:
+        assert (chat_id, user_id) == (-1001, 42)
+        return entity
+
+    identity = await PluginIdentityFacade(
+        Client(),
+        user_entity_resolver=resolve_entity,
+    ).resolve(
+        chat_id=-1001,
+        user_id=42,
+        fallback_display_name="匿名管理员真实姓名",
+    )
+
+    assert identity.display_name == "匿名管理员标签"
+    assert identity.is_anonymous_admin is True
+    assert identity.tag == "匿名管理员标签"
+
+
+async def test_resolve_public_sender_identity_refreshes_saved_anonymous_user_name() -> None:
+    entity = SimpleNamespace(
+        id=42,
+        first_name="恢复后的",
+        last_name="公开姓名",
+        username="public_user",
+        contact=False,
+    )
+
+    class Client:
+        async def get_permissions(self, chat_id: int, user: object) -> SimpleNamespace:
+            return SimpleNamespace(anonymous=False, participant=SimpleNamespace(rank=""))
+
+    async def resolve_entity(chat_id: int, user_id: int) -> object:
+        assert (chat_id, user_id) == (-1001, 42)
+        return entity
+
+    identity = await PluginIdentityFacade(
+        Client(),
+        user_entity_resolver=resolve_entity,
+    ).resolve(
+        chat_id=-1001,
+        user_id=42,
+        fallback_display_name="匿名用户",
+    )
+
+    assert identity.display_name == "恢复后的 公开姓名"
+    assert identity.is_anonymous_admin is False
     assert identity.resolved is True
 
 

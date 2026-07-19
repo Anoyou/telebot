@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
@@ -22,6 +23,8 @@ from telethon import TelegramClient, events
 from telethon.tl.types import ChannelParticipantsAdmins
 
 from .manifest import Manifest
+
+log = logging.getLogger(__name__)
 
 
 def _clean_text(value: Any) -> str:
@@ -47,10 +50,6 @@ def public_entity_display_name(
         if title:
             return title
 
-        username = _clean_text(getattr(entity, "username", None)).lstrip("@")
-        if username:
-            return f"@{username}" if include_at else username
-
         entity_id = getattr(entity, "id", None)
         is_contact = bool(getattr(entity, "contact", False))
         if not is_contact:
@@ -64,6 +63,11 @@ def public_entity_display_name(
             )
             if name:
                 return name
+
+        username = _clean_text(getattr(entity, "username", None)).lstrip("@")
+        if username:
+            return f"@{username}" if include_at else username
+
         if entity_id not in (None, ""):
             return str(entity_id)
 
@@ -86,16 +90,18 @@ class PublicSenderIdentity:
 class PluginIdentityFacade:
     """Resolve group-safe identities without exposing the raw Telegram client."""
 
-    __slots__ = ("_bot_member_resolver", "_client")
+    __slots__ = ("_bot_member_resolver", "_client", "_user_entity_resolver")
 
     def __init__(
         self,
         client: Any,
         *,
         bot_member_resolver: Callable[[int, int], Awaitable[Mapping[str, Any] | None]] | None = None,
+        user_entity_resolver: Callable[[int, int], Awaitable[Any | None]] | None = None,
     ) -> None:
         object.__setattr__(self, "_client", client)
         object.__setattr__(self, "_bot_member_resolver", bot_member_resolver)
+        object.__setattr__(self, "_user_entity_resolver", user_entity_resolver)
 
     def __getattribute__(self, name: str) -> Any:
         if name.startswith("_"):
@@ -114,6 +120,7 @@ class PluginIdentityFacade:
         return await _resolve_public_sender_identity(
             object.__getattribute__(self, "_client"),
             bot_member_resolver=object.__getattribute__(self, "_bot_member_resolver"),
+            user_entity_resolver=object.__getattribute__(self, "_user_entity_resolver"),
             chat_id=chat_id,
             user_id=user_id,
             fallback_display_name=fallback_display_name,
@@ -132,6 +139,7 @@ class PluginIdentityFacade:
         return await _resolve_public_sender_identities(
             object.__getattribute__(self, "_client"),
             bot_member_resolver=object.__getattribute__(self, "_bot_member_resolver"),
+            user_entity_resolver=object.__getattribute__(self, "_user_entity_resolver"),
             chat_id=chat_id,
             senders=senders,
             unresolved_display_name=unresolved_display_name,
@@ -182,6 +190,7 @@ async def _resolve_public_sender_identity(
     client: Any,
     *,
     bot_member_resolver: Callable[[int, int], Awaitable[Mapping[str, Any] | None]] | None = None,
+    user_entity_resolver: Callable[[int, int], Awaitable[Any | None]] | None = None,
     chat_id: int,
     user_id: int,
     fallback_display_name: str,
@@ -208,8 +217,13 @@ async def _resolve_public_sender_identity(
                 fallback_display_name,
                 anonymous_admin_display_name=anonymous_admin_display_name,
             )
-    except Exception:
-        pass
+    except Exception as exc:
+        log.debug(
+            "public identity admin listing failed chat=%s user=%s error=%s",
+            chat_id,
+            user_id,
+            type(exc).__name__,
+        )
     try:
         identity = await _public_sender_identity_from_permissions(
             client,
@@ -217,6 +231,7 @@ async def _resolve_public_sender_identity(
             user_id,
             fallback_display_name,
             anonymous_admin_display_name=anonymous_admin_display_name,
+            user_entity_resolver=user_entity_resolver,
         )
         return await _prefer_interaction_bot_identity(
             identity,
@@ -226,7 +241,13 @@ async def _resolve_public_sender_identity(
             fallback_display_name,
             anonymous_admin_display_name=anonymous_admin_display_name,
         )
-    except Exception:
+    except Exception as exc:
+        log.debug(
+            "public identity UserBot permissions failed chat=%s user=%s error=%s",
+            chat_id,
+            user_id,
+            type(exc).__name__,
+        )
         try:
             return await _public_sender_identity_from_bot_member(
                 bot_member_resolver,
@@ -235,7 +256,13 @@ async def _resolve_public_sender_identity(
                 fallback_display_name,
                 anonymous_admin_display_name=anonymous_admin_display_name,
             )
-        except Exception:
+        except Exception as bot_exc:
+            log.debug(
+                "public identity Interaction Bot fallback failed chat=%s user=%s error=%s",
+                chat_id,
+                user_id,
+                type(bot_exc).__name__,
+            )
             return _unresolved_public_sender_identity(user_id, unresolved_display_name)
 
 
@@ -271,6 +298,7 @@ async def _resolve_public_sender_identities(
     client: Any,
     *,
     bot_member_resolver: Callable[[int, int], Awaitable[Mapping[str, Any] | None]] | None = None,
+    user_entity_resolver: Callable[[int, int], Awaitable[Any | None]] | None = None,
     chat_id: int,
     senders: Mapping[int, str],
     unresolved_display_name: str,
@@ -319,7 +347,12 @@ async def _resolve_public_sender_identities(
             for user_id, identity in resolved.items()
             if identity is not None and identity.resolved
         }
-    except Exception:
+    except Exception as exc:
+        log.debug(
+            "public identities admin listing failed chat=%s error=%s",
+            chat_id,
+            type(exc).__name__,
+        )
         confirmed = {}
 
     semaphore = asyncio.Semaphore(8)
@@ -333,6 +366,7 @@ async def _resolve_public_sender_identities(
                     user_id,
                     display_name,
                     anonymous_admin_display_name=anonymous_admin_display_name,
+                    user_entity_resolver=user_entity_resolver,
                 )
                 identity = await _prefer_interaction_bot_identity(
                     identity,
@@ -342,7 +376,13 @@ async def _resolve_public_sender_identities(
                     display_name,
                     anonymous_admin_display_name=anonymous_admin_display_name,
                 )
-            except Exception:
+            except Exception as exc:
+                log.debug(
+                    "public identity UserBot permissions failed chat=%s user=%s error=%s",
+                    chat_id,
+                    user_id,
+                    type(exc).__name__,
+                )
                 try:
                     identity = await _public_sender_identity_from_bot_member(
                         bot_member_resolver,
@@ -351,7 +391,13 @@ async def _resolve_public_sender_identities(
                         display_name,
                         anonymous_admin_display_name=anonymous_admin_display_name,
                     )
-                except Exception:
+                except Exception as bot_exc:
+                    log.debug(
+                        "public identity Interaction Bot fallback failed chat=%s user=%s error=%s",
+                        chat_id,
+                        user_id,
+                        type(bot_exc).__name__,
+                    )
                     identity = _unresolved_public_sender_identity(user_id, unresolved_display_name)
             return user_id, identity
 
@@ -411,20 +457,76 @@ async def _public_sender_identity_from_permissions(
     fallback_display_name: str,
     *,
     anonymous_admin_display_name: str,
+    user_entity_resolver: Callable[[int, int], Awaitable[Any | None]] | None = None,
 ) -> PublicSenderIdentity:
     get_permissions = getattr(client, "get_permissions", None)
     if not callable(get_permissions):
         raise LookupError("member permissions unavailable")
-    permissions = await get_permissions(chat_id, user_id)
+    resolved_user_entity: Any | None = None
+    try:
+        permissions = await get_permissions(chat_id, user_id)
+    except Exception as first_exc:
+        if not callable(user_entity_resolver):
+            raise
+        resolved_user_entity = await user_entity_resolver(chat_id, user_id)
+        if resolved_user_entity is None:
+            raise
+        try:
+            permissions = await get_permissions(chat_id, resolved_user_entity)
+        except Exception:
+            log.debug(
+                "public identity UserBot entity retry failed chat=%s user=%s error=%s",
+                chat_id,
+                user_id,
+                type(first_exc).__name__,
+            )
+            raise
+        log.debug("public identity UserBot entity retry succeeded chat=%s user=%s", chat_id, user_id)
     if permissions is None or not hasattr(permissions, "anonymous"):
         raise LookupError("anonymous administrator state unavailable")
-    return _resolved_public_sender_identity(
+    if resolved_user_entity is None and _display_name_needs_user_entity(fallback_display_name, user_id):
+        if callable(user_entity_resolver):
+            try:
+                resolved_user_entity = await user_entity_resolver(chat_id, user_id)
+            except Exception:  # noqa: BLE001
+                log.debug(
+                    "public identity display-name refresh failed chat=%s user=%s",
+                    chat_id,
+                    user_id,
+                    exc_info=True,
+                )
+    display_name = _regular_public_display_name(
         user_id,
         fallback_display_name,
+        resolved_user_entity,
+    )
+    return _resolved_public_sender_identity(
+        user_id,
+        display_name,
         getattr(permissions, "participant", None),
         bool(permissions.anonymous),
         anonymous_admin_display_name,
     )
+
+
+def _display_name_needs_user_entity(display_name: str, user_id: int) -> bool:
+    clean = _clean_text(display_name)
+    return clean in {
+        "",
+        "匿名用户",
+        "未知用户",
+        "用户",
+        str(user_id),
+        f"用户{user_id}",
+    }
+
+
+def _regular_public_display_name(user_id: int, fallback_display_name: str, entity: Any | None) -> str:
+    if not _display_name_needs_user_entity(fallback_display_name, user_id):
+        return _clean_text(fallback_display_name)
+    if entity is None:
+        return _clean_text(fallback_display_name) or str(user_id)
+    return public_entity_display_name(entity, fallback_id=user_id)
 
 
 async def _public_sender_identity_from_bot_member(

@@ -4239,6 +4239,69 @@ async def _interaction_bot_chat_member_for_account(
         return None
 
 
+async def _userbot_entity_for_account(
+    client: Any,
+    redis: Any | None,
+    account_id: int,
+    chat_id: int,
+    user_id: int,
+) -> Any | None:
+    """按 user_id 重新解析 UserBot 实体，避免权限查询依赖旧缓存。"""
+
+    get_entity = getattr(client, "get_entity", None)
+    if callable(get_entity):
+        try:
+            entity = await get_entity(int(user_id))
+            if int(getattr(entity, "id", 0) or 0) == int(user_id):
+                return entity
+        except Exception:  # noqa: BLE001
+            log.debug(
+                "UserBot entity retry by user_id failed account=%s chat_id=%s user_id=%s",
+                account_id,
+                chat_id,
+                user_id,
+                exc_info=True,
+            )
+
+    anchor_id = await recent_message_anchor.read_cached_message_id(
+        redis,
+        account_id,
+        chat_id,
+        user_id,
+    )
+    get_messages = getattr(client, "get_messages", None)
+    if anchor_id is None or not callable(get_messages):
+        return None
+    try:
+        message = await get_messages(chat_id, ids=anchor_id)
+        if isinstance(message, list):
+            message = message[0] if message else None
+        if message is None or int(getattr(message, "sender_id", 0) or 0) != int(user_id):
+            return None
+        sender = getattr(message, "sender", None)
+        get_sender = getattr(message, "get_sender", None)
+        if sender is None and callable(get_sender):
+            sender = await get_sender()
+        if int(getattr(sender, "id", 0) or 0) != int(user_id):
+            return None
+        log.debug(
+            "UserBot entity retry recovered from recent message account=%s chat_id=%s user_id=%s",
+            account_id,
+            chat_id,
+            user_id,
+        )
+        return sender
+    except Exception:  # noqa: BLE001
+        log.debug(
+            "UserBot entity retry from recent message failed account=%s chat_id=%s user_id=%s",
+            account_id,
+            chat_id,
+            user_id,
+            exc_info=True,
+        )
+        return None
+
+
 def _action_chat_id(action: dict[str, Any], event: Any) -> int | None:
     return _int_or_none(action.get("chat_id")) or _int_or_none(getattr(event, "chat_id", None))
 
@@ -6990,6 +7053,13 @@ async def _activate(db, state: _AccountState, af: AccountFeature, redis: Any) ->
             PluginIdentityFacade(
                 state.client,
                 bot_member_resolver=lambda chat_id, user_id: _interaction_bot_chat_member_for_account(
+                    state.account_id,
+                    chat_id,
+                    user_id,
+                ),
+                user_entity_resolver=lambda chat_id, user_id: _userbot_entity_for_account(
+                    state.client,
+                    state.redis,
                     state.account_id,
                     chat_id,
                     user_id,
