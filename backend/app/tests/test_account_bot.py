@@ -331,7 +331,7 @@ async def test_userbot_interaction_action_resolves_reply_to_user_recent_message(
                 if chat_id != -100:
                     return
                 if kwargs.get("from_user") == 111:
-                    yield SimpleNamespace(id=77, sender_id=111, text="我参加")
+                    yield SimpleNamespace(id=77, sender_id=111, from_id=PeerUser(111), text="我参加")
 
             return _gen()
 

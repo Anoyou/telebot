@@ -20,6 +20,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from telethon.tl.types import PeerUser
 
 from app.db.models.feature import (
     FEATURE_FORWARD,
@@ -2742,7 +2743,7 @@ async def test_userbot_payout_action_resolves_reply_to_user_recent_message(monke
         def iter_messages(self, chat_id, **kwargs):  # noqa: ANN001, ANN003
             async def _gen():
                 if chat_id == -100456 and kwargs.get("from_user") == 12345:
-                    yield SimpleNamespace(id=66, sender_id=12345)
+                    yield SimpleNamespace(id=66, sender_id=12345, from_id=PeerUser(12345))
 
             return _gen()
 
@@ -2837,14 +2838,14 @@ async def test_userbot_payout_action_sends_notice_when_reply_anchor_missing(monk
     assert record_action.await_args.kwargs["result"]["chat_id"] == -100456
     assert record_action.await_args.kwargs["result"]["amount"] == 12
     assert record_action.await_args.kwargs["result"]["reply_to_user_id"] == 12345
-    assert record_action.await_args.kwargs["result"]["reply_to_search_limit"] == 5000
+    assert record_action.await_args.kwargs["result"]["reply_to_search_limit"] == 2000
     assert record_action.await_args.kwargs["result"]["reply_anchor_missing"] is True
     log_payload = json.loads(state.redis.list_pushes[-1][1])
     assert log_payload["message"] == "userbot payout action failed"
     assert log_payload["detail"]["chat_id"] == -100456
     assert log_payload["detail"]["amount"] == 12
     assert log_payload["detail"]["reply_to_user_id"] == 12345
-    assert log_payload["detail"]["reply_to_search_limit"] == 5000
+    assert log_payload["detail"]["reply_to_search_limit"] == 2000
     assert log_payload["detail"]["error_code"] == "reply_anchor_missing"
     assert log_payload["detail"]["reply_anchor_missing"] is True
 
@@ -2858,7 +2859,7 @@ async def test_userbot_send_message_action_resolves_reply_to_user_recent_message
         def iter_messages(self, chat_id, **kwargs):  # noqa: ANN001, ANN003
             async def _gen():
                 if chat_id == -100789 and kwargs.get("from_user") == 222:
-                    yield SimpleNamespace(id=70, sender_id=222)
+                    yield SimpleNamespace(id=70, sender_id=222, from_id=PeerUser(222))
 
             return _gen()
 
@@ -5250,7 +5251,7 @@ async def test_userbot_entity_retry_prefers_user_id_lookup() -> None:
 @pytest.mark.asyncio
 async def test_userbot_entity_retry_recovers_from_recent_message_anchor() -> None:
     entity = SimpleNamespace(id=42, first_name="公开姓名")
-    message = SimpleNamespace(sender_id=42, sender=entity)
+    message = SimpleNamespace(sender_id=42, from_id=PeerUser(42), sender=entity)
     client = SimpleNamespace(
         get_entity=AsyncMock(side_effect=ValueError("input entity is not cached")),
         get_messages=AsyncMock(return_value=message),
@@ -5267,6 +5268,41 @@ async def test_userbot_entity_retry_recovers_from_recent_message_anchor() -> Non
     )
 
     assert resolved is entity
+    client.get_messages.assert_awaited_once_with(-1001, ids=88)
+
+
+@pytest.mark.asyncio
+async def test_userbot_entity_retry_scans_recent_history_without_cache() -> None:
+    entity = SimpleNamespace(id=42, first_name="公开姓名")
+    calls: list[dict[str, int]] = []
+
+    class Client:
+        get_entity = AsyncMock(side_effect=ValueError("input entity is not cached"))
+        get_messages = AsyncMock(
+            return_value=SimpleNamespace(sender_id=42, from_id=PeerUser(42), sender=entity)
+        )
+
+        def iter_messages(self, _chat_id, **kwargs):  # noqa: ANN001, ANN003
+            calls.append(dict(kwargs))
+
+            async def messages():
+                if kwargs.get("from_user") is not None:
+                    raise ValueError("input entity is not cached")
+                yield SimpleNamespace(id=88, from_id=PeerUser(42))
+
+            return messages()
+
+    client = Client()
+    resolved = await loader_mod._userbot_entity_for_account(
+        client,
+        _FakeRedis(),
+        1,
+        -1001,
+        42,
+    )
+
+    assert resolved is entity
+    assert calls == [{"from_user": 42, "limit": 2000}, {"limit": 2000}]
     client.get_messages.assert_awaited_once_with(-1001, ids=88)
 
 

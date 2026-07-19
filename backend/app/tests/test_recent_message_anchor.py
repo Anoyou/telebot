@@ -86,7 +86,7 @@ async def test_cached_anchor_wins_without_telegram_history_request() -> None:
         _Client(),
         -1001,
         123,
-        limit=5000,
+        limit=2000,
         redis=redis,
         account_id=7,
     )
@@ -95,7 +95,7 @@ async def test_cached_anchor_wins_without_telegram_history_request() -> None:
 
 
 @pytest.mark.asyncio
-async def test_exact_search_failure_falls_back_to_5000_strict_peer_user_messages() -> None:
+async def test_exact_search_failure_falls_back_to_2000_strict_peer_user_messages() -> None:
     calls: list[dict[str, int]] = []
 
     class _Client:
@@ -118,10 +118,34 @@ async def test_exact_search_failure_falls_back_to_5000_strict_peer_user_messages
     )
 
     assert found == 89
-    assert calls == [{"from_user": 123, "limit": 5000}, {"limit": 5000}]
+    assert calls == [{"from_user": 123, "limit": 2000}, {"limit": 2000}]
 
 
-def test_search_limit_defaults_and_caps_at_5000() -> None:
-    assert recent_message_anchor.normalize_search_limit(None) == 5000
-    assert recent_message_anchor.normalize_search_limit(9000) == 5000
+@pytest.mark.asyncio
+async def test_exact_search_does_not_accept_channel_identity_as_user_anchor() -> None:
+    calls: list[dict[str, int]] = []
+
+    class _Client:
+        def iter_messages(self, _chat_id, **kwargs):  # noqa: ANN001, ANN003
+            calls.append(dict(kwargs))
+
+            async def _messages():
+                yield SimpleNamespace(id=90, sender_id=123, from_id=PeerChannel(1001))
+
+            return _messages()
+
+    found = await recent_message_anchor.find_recent_message_id_for_user(
+        _Client(),
+        -1001,
+        123,
+        limit=2000,
+    )
+
+    assert found is None
+    assert calls == [{"from_user": 123, "limit": 2000}, {"limit": 2000}]
+
+
+def test_search_limit_defaults_and_caps_at_2000() -> None:
+    assert recent_message_anchor.normalize_search_limit(None) == 2000
+    assert recent_message_anchor.normalize_search_limit(9000) == 2000
     assert recent_message_anchor.normalize_search_limit(40) == 40

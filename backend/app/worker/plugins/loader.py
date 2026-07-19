@@ -47,6 +47,7 @@ from typing import Any
 from sqlalchemy import select, update
 from telethon import TelegramClient, events
 from telethon.errors import FloodWaitError, PeerFloodError
+from telethon.tl.types import PeerUser
 
 from ... import __version__ as TELEPILOT_VERSION
 from ...db.base import AsyncSessionLocal
@@ -4263,20 +4264,30 @@ async def _userbot_entity_for_account(
                 exc_info=True,
             )
 
-    anchor_id = await recent_message_anchor.read_cached_message_id(
-        redis,
-        account_id,
+    get_messages = getattr(client, "get_messages", None)
+    if not callable(get_messages):
+        return None
+    message_id = await recent_message_anchor.find_recent_message_id_for_user(
+        client,
         chat_id,
         user_id,
+        limit=recent_message_anchor.DEFAULT_SEARCH_LIMIT,
+        redis=redis,
+        account_id=account_id,
     )
-    get_messages = getattr(client, "get_messages", None)
-    if anchor_id is None or not callable(get_messages):
+    if message_id is None:
         return None
     try:
-        message = await get_messages(chat_id, ids=anchor_id)
+        message = await get_messages(chat_id, ids=message_id)
         if isinstance(message, list):
             message = message[0] if message else None
-        if message is None or int(getattr(message, "sender_id", 0) or 0) != int(user_id):
+        from_id = getattr(message, "from_id", None)
+        if (
+            message is None
+            or not isinstance(from_id, PeerUser)
+            or int(getattr(from_id, "user_id", 0) or 0) != int(user_id)
+            or int(getattr(message, "sender_id", 0) or 0) != int(user_id)
+        ):
             return None
         sender = getattr(message, "sender", None)
         get_sender = getattr(message, "get_sender", None)

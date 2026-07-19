@@ -742,7 +742,7 @@ return [
         "send_via": "userbot_reply",
         "chat_id": event.message.chat_id,
         "reply_to_user_id": winner_user_id,
-        "reply_to_search_limit": 5000,
+        "reply_to_search_limit": 2000,
         "reply_anchor_missing_text": "未找到对应用户（{user_id}）的近期消息，本次发奖需要人工补发。",
         "text": "+88",
         "settlement": {
@@ -756,7 +756,7 @@ return [
 ]
 ```
 
-平台会先读取账号 UserBot 在当前群为该真实用户保存的近期消息锚点，缓存未命中时再使用 Telegram `from_user` 精确搜索，最后最多扫描 5000 条近期消息；找到后把 `+88` 回复到那条消息。缓存键按账号、群和用户隔离，只接受 Telegram 消息自身的 `PeerUser`，匿名管理员、频道身份和按钮 callback 不会反向生成真实用户锚点。若插件已经有明确的 `reply_to_message_id`，平台优先使用它；若只给了 `settlement.winner_user_id` 而没写 `reply_to_user_id`，平台也会尝试用赢家 user id 作为回复锚点。找不到近期消息时，本次 `userbot_reply` 会失败并记录 action 错误，避免把发奖消息误发成普通群消息；平台默认会在群里提示 `未找到对应用户（用户 ID）的近期消息。`，插件可通过 `reply_anchor_missing_text` 自定义失败提示，提示文案支持 `{user_id}` 占位符，并沿用当前 action 的 `parse_mode`。例如在 HTML 模式中使用 `<code>/command</code>`，Telegram 会将命令显示为可点击复制的代码文本。
+平台会先读取账号 UserBot 在当前群为该真实用户保存的近期消息锚点，缓存未命中时再使用 Telegram `from_user` 精确搜索，最后最多扫描 2000 条近期消息；找到后把 `+88` 回复到那条消息。缓存键按账号、群和用户隔离，只接受 Telegram 消息自身的 `PeerUser`，匿名管理员、频道身份和按钮 callback 不会反向生成真实用户锚点。若插件已经有明确的 `reply_to_message_id`，平台优先使用它；若只给了 `settlement.winner_user_id` 而没写 `reply_to_user_id`，平台也会尝试用赢家 user id 作为回复锚点。找不到近期消息时，本次 `userbot_reply` 会失败并记录 action 错误，避免把发奖消息误发成普通群消息；平台默认会在群里提示 `未找到对应用户（用户 ID）的近期消息。`，插件可通过 `reply_anchor_missing_text` 自定义失败提示，提示文案支持 `{user_id}` 占位符，并沿用当前 action 的 `parse_mode`。例如在 HTML 模式中使用 `<code>/command</code>`，Telegram 会将命令显示为可点击复制的代码文本。
 
 更推荐的新写法是直接返回 `payout`：
 
@@ -777,7 +777,7 @@ return [{
     "reply_to_user_id": winner_user_id,
     "reply_to_display_name": identity.display_name,
     "reply_to_username": None if identity.is_anonymous_admin else event.sender.username,
-    "reply_to_search_limit": 5000,
+    "reply_to_search_limit": 2000,
     "reply_anchor_missing_text": "未找到对应用户（{user_id}）的近期消息，本次发奖需要人工补发。",
 }]
 ```

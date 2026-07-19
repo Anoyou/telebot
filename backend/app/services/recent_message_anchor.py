@@ -13,8 +13,8 @@ from telethon.tl.types import PeerUser
 
 log = logging.getLogger(__name__)
 
-DEFAULT_SEARCH_LIMIT = 5000
-MAX_SEARCH_LIMIT = 5000
+DEFAULT_SEARCH_LIMIT = 2000
+MAX_SEARCH_LIMIT = 2000
 ANCHOR_TTL_SECONDS = 7 * 24 * 60 * 60
 
 
@@ -122,7 +122,7 @@ async def find_recent_message_id_for_user(
     redis: Any | None = None,
     account_id: int | None = None,
 ) -> int | None:
-    """缓存优先，其次 Telegram 精确搜索，最后扫描最近 5000 条。"""
+    """缓存优先，其次 Telegram 精确搜索，最后扫描最近 2000 条。"""
 
     cached = await read_cached_message_id(redis, account_id, chat_id, user_id)
     if cached is not None:
@@ -130,6 +130,8 @@ async def find_recent_message_id_for_user(
 
     try:
         async for message in client.iter_messages(chat_id, from_user=user_id, limit=limit):
+            if _genuine_message_user_id(message) != user_id:
+                continue
             message_id = _message_id(message)
             if message_id is not None:
                 return message_id
