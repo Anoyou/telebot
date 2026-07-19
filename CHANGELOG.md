@@ -20,6 +20,14 @@
 
 ## [Unreleased]
 
+## [0.70.5] — 2026-07-19 · patch（补丁版本） · 后台富文本结算修复
+
+### Fixed
+- 修复常驻插件后台消息 facade 缺少 `send_rich` 的问题，定时结算、提醒和周榜等富文本后台消息现在会进入统一投递链路并正确保存消息 ID。
+
+### Tests
+- 增加后台 Rich Message facade 回归测试，防止定时任务在调用 Telegram 前因方法缺失而重复失败。
+
 ## [0.70.4] — 2026-07-19 · patch（补丁版本） · Telegram Agent 交互修复
 
 ### Fixed

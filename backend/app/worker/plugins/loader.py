@@ -5438,6 +5438,22 @@ class _LiveMessageOps:
         await self.apply([action])
         return action
 
+    async def send_rich(self, **kwargs: Any) -> dict[str, Any]:
+        """Send a Rich Message from a resident/background plugin context.
+
+        ``BufferedMessageOps`` owns action construction for both interaction
+        handlers and scheduled jobs.  The live facade must expose the same
+        operation so background tasks do not fail before reaching the shared
+        delivery executor.
+        """
+
+        from .message_ops import BufferedMessageOps
+
+        buffered = BufferedMessageOps()
+        action = await buffered.send_rich(**kwargs)
+        await self.apply([action])
+        return action
+
     async def edit(self, **kwargs: Any) -> dict[str, Any]:
         from .message_ops import BufferedMessageOps
 

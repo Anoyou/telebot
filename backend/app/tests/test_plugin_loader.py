@@ -4179,6 +4179,39 @@ async def test_live_message_ops_defaults_to_userbot_reply(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_live_message_ops_supports_background_rich_message(monkeypatch) -> None:
+    state = loader_mod._AccountState(181)
+    state.redis = _FakeRedis()
+    apply_actions = AsyncMock(return_value=False)
+    monkeypatch.setattr(loader_mod, "_apply_userbot_event_bus_actions", apply_actions)
+
+    messages = loader_mod._LiveMessageOps(state, plugin_key="_test_background_rich")
+
+    action = await messages.send_rich(
+        channel="interaction_bot",
+        chat_id=-100123,
+        html="<h1>结算</h1>",
+        save_message_id_key="settlement:round-1",
+    )
+
+    assert action == {
+        "type": "send_rich_message",
+        "send_via": "interaction_bot",
+        "chat_id": -100123,
+        "rich_message": {"html": "<h1>结算</h1>"},
+        "reply_to_message_id": None,
+        "save_message_id_key": "settlement:round-1",
+    }
+    assert apply_actions.await_args.kwargs["actions"] == [
+        {
+            **action,
+            "context": {"plugin_key": "_test_background_rich"},
+        }
+    ]
+    assert messages.actions == []
+
+
+@pytest.mark.asyncio
 async def test_plugin_command_uses_call_scoped_context() -> None:
     state = loader_mod._AccountState(19)
     state.redis = _FakeRedis()
