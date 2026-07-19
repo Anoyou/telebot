@@ -16828,6 +16828,74 @@ async def test_account_bot_send_prefers_rich_and_falls_back_to_html(monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_account_bot_agent_send_uses_rich_markdown(monkeypatch) -> None:
+    incoming = account_bot_runtime.Incoming(
+        account_id=7,
+        token="bot-token",
+        update_id=1,
+        user_id=2,
+        chat_id=12345,
+        message_id=99,
+        text="今日收入",
+    )
+    send_rich = AsyncMock(return_value={"message_id": 188})
+    send_message = AsyncMock()
+    monkeypatch.setattr(account_bot_service, "send_rich_message", send_rich)
+    monkeypatch.setattr(account_bot_service, "send_message", send_message)
+    monkeypatch.setattr(account_bot_runtime, "record_action", AsyncMock())
+    monkeypatch.setattr(account_bot_runtime, "_emit_account_bot_action_tap", AsyncMock())
+
+    result = await account_bot_runtime._send(
+        incoming,
+        "<b>今日台账</b>\n<pre>类型  金额</pre>",
+        rich_markdown="## 今日台账\n\n| 类型 | 金额 |\n| --- | ---: |\n| 收入 | 12.5 |",
+    )
+
+    assert result == {"message_id": 188}
+    send_rich.assert_awaited_once_with(
+        "bot-token",
+        12345,
+        {"markdown": "## 今日台账\n\n| 类型 | 金额 |\n| --- | ---: |\n| 收入 | 12.5 |"},
+        reply_markup=None,
+        reply_to_message_id=None,
+    )
+    send_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_account_bot_agent_edit_targets_placeholder_message(monkeypatch) -> None:
+    incoming = account_bot_runtime.Incoming(
+        account_id=7,
+        token="bot-token",
+        update_id=1,
+        user_id=2,
+        chat_id=12345,
+        message_id=99,
+        text="今日收入",
+    )
+    edit_message = AsyncMock(return_value={"message_id": 188})
+    monkeypatch.setattr(account_bot_service, "edit_message", edit_message)
+    monkeypatch.setattr(account_bot_runtime, "record_action", AsyncMock())
+    monkeypatch.setattr(account_bot_runtime, "_emit_account_bot_action_tap", AsyncMock())
+
+    result = await account_bot_runtime._send(
+        incoming,
+        "最终答案",
+        edit=True,
+        edit_message_id=188,
+    )
+
+    assert result == {"message_id": 188}
+    edit_message.assert_awaited_once_with(
+        "bot-token",
+        12345,
+        188,
+        "最终答案",
+        reply_markup=None,
+    )
+
+
+@pytest.mark.asyncio
 async def test_account_bot_rich_help_uses_table_and_details(monkeypatch) -> None:
     incoming = account_bot_runtime.Incoming(
         account_id=7,

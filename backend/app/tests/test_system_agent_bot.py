@@ -20,9 +20,20 @@ class _SendCapture:
         msg: str,
         *,
         edit: bool = False,
+        edit_message_id: int | None = None,
         reply_markup: dict[str, Any] | None = None,
-    ) -> None:
-        self.calls.append({"msg": msg, "edit": edit, "reply_markup": reply_markup})
+        rich_markdown: str | None = None,
+    ) -> dict[str, int]:
+        self.calls.append(
+            {
+                "msg": msg,
+                "edit": edit,
+                "edit_message_id": edit_message_id,
+                "reply_markup": reply_markup,
+                "rich_markdown": rich_markdown,
+            }
+        )
+        return {"message_id": 100 + len(self.calls)}
 
 
 @pytest.mark.asyncio
@@ -123,7 +134,7 @@ async def test_run_agent_query_edits_final_message(monkeypatch) -> None:
         send=send,
     )
     assert len(send.calls) >= 2
-    assert "处理中" in send.calls[0]["msg"]
+    assert "正在理解你的需求" in send.calls[0]["msg"]
     assert "12.5" in send.calls[-1]["msg"]
     assert send.calls[-1]["edit"] is True
 
@@ -142,6 +153,23 @@ async def test_run_agent_query_draft_never_blocks_final_delivery(monkeypatch, dr
             return SimpleSession("sess-draft")
 
         async def stream_message(self, *a, **k):  # noqa: ANN001
+            yield {
+                "type": "model_capability_check",
+                "provider_name": "演示 Provider",
+                "model": "demo-model",
+            }
+            yield {
+                "type": "model_attempt",
+                "provider_name": "演示 Provider",
+                "model": "demo-model",
+                "attempt": 1,
+                "max_retries": 5,
+            }
+            yield {
+                "type": "tool_started",
+                "tool_name": "ledger.daily_summary",
+                "tool_description": "查询今日资金台账",
+            }
             yield {"type": "assistant_message", "content": "最终答案"}
             yield {"type": "done", "ok": True}
 
@@ -169,9 +197,62 @@ async def test_run_agent_query_draft_never_blocks_final_delivery(monkeypatch, dr
         draft=draft,
     )
 
-    draft.assert_awaited_once_with("")
+    assert draft.await_args_list[0].args == ("⏳ 系统助手正在理解你的需求…",)
+    assert all(call.args[0] for call in draft.await_args_list)
+    if draft_error is None:
+        assert any("演示 Provider" in call.args[0] for call in draft.await_args_list)
+        assert any("查询今日资金台账" in call.args[0] for call in draft.await_args_list)
     assert "最终答案" in send.calls[-1]["msg"]
     assert send.calls[-1]["edit"] is (draft_error is not None)
+    assert send.calls[-1]["edit_message_id"] == (101 if draft_error is not None else None)
+
+
+@pytest.mark.asyncio
+async def test_run_agent_query_prefers_rich_markdown_and_has_readable_html_fallback(monkeypatch) -> None:
+    send = _SendCapture()
+
+    class _Svc:
+        async def get_or_create_active_session(self, *a, **k):  # noqa: ANN001
+            return SimpleSession("sess-markdown")
+
+        async def get_session(self, *a, **k):  # noqa: ANN001
+            return SimpleSession("sess-markdown")
+
+        async def stream_message(self, *a, **k):  # noqa: ANN001
+            yield {
+                "type": "assistant_message",
+                "content": "## 今日台账\n\n| 类型 | 金额 |\n| --- | ---: |\n| 收入 | **12.5** |",
+            }
+            yield {"type": "done", "ok": True}
+
+    class SimpleSession:
+        def __init__(self, sid: str) -> None:
+            self.id = sid
+
+    class _DB:
+        async def __aenter__(self):
+            return AsyncMock()
+
+        async def __aexit__(self, *args):
+            return False
+
+    monkeypatch.setattr(bot_bridge, "AsyncSessionLocal", lambda: _DB())
+    monkeypatch.setattr(bot_bridge, "get_system_agent_service", lambda: _Svc())
+    monkeypatch.setattr(bot_bridge, "refresh_agent_mode", AsyncMock())
+
+    await bot_bridge.run_agent_query(
+        account_id=1,
+        tg_user_id=2,
+        role="admin",
+        text="今日收入",
+        send=send,
+    )
+
+    final = send.calls[-1]
+    assert final["rich_markdown"].startswith("## 今日台账")
+    assert "<b>今日台账</b>" in final["msg"]
+    assert "<pre>" in final["msg"]
+    assert "| --- |" not in final["msg"]
 
 
 @pytest.mark.asyncio

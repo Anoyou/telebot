@@ -2327,9 +2327,18 @@ async def _handle_update(aid: int, token: str, update: dict[str, Any]) -> None:
                     msg: str,
                     *,
                     edit: bool = False,
+                    edit_message_id: int | None = None,
                     reply_markup: dict[str, Any] | None = None,
-                ) -> None:
-                    await _send(incoming, msg, edit=edit, reply_markup=reply_markup)
+                    rich_markdown: str | None = None,
+                ) -> dict[str, Any] | None:
+                    return await _send(
+                        incoming,
+                        msg,
+                        edit=edit,
+                        edit_message_id=edit_message_id,
+                        reply_markup=reply_markup,
+                        rich_markdown=rich_markdown,
+                    )
 
                 async def _agent_draft(text: str) -> None:
                     if incoming.chat_id is None or incoming.chat_id <= 0:
@@ -8409,9 +8418,18 @@ async def _handle_command(incoming: Incoming, role: str) -> None:
             msg: str,
             *,
             edit: bool = False,
+            edit_message_id: int | None = None,
             reply_markup: dict[str, Any] | None = None,
-        ) -> None:
-            await _send(incoming, msg, edit=edit, reply_markup=reply_markup)
+            rich_markdown: str | None = None,
+        ) -> dict[str, Any] | None:
+            return await _send(
+                incoming,
+                msg,
+                edit=edit,
+                edit_message_id=edit_message_id,
+                reply_markup=reply_markup,
+                rich_markdown=rich_markdown,
+            )
 
         async def _agent_draft(text: str) -> None:
             if incoming.chat_id is None or incoming.chat_id <= 0:
@@ -9481,17 +9499,23 @@ async def _send(
     text: str,
     *,
     rich_html: str | None = None,
+    rich_markdown: str | None = None,
     reply_markup: dict[str, Any] | None = None,
     reply_to_message_id: int | None = None,
     edit: bool = False,
+    edit_message_id: int | None = None,
 ) -> dict[str, Any] | None:
     if incoming.chat_id is None:
         return None
+    if rich_html and rich_markdown:
+        raise ValueError("rich_html 与 rich_markdown 不能同时提供")
+    target_message_id = edit_message_id if edit_message_id is not None else incoming.message_id
+    rich_message = {"markdown": rich_markdown} if rich_markdown else ({"html": rich_html} if rich_html else None)
     action = {
-        "type": "edit_message" if edit and incoming.message_id is not None else "send_message",
+        "type": "edit_message" if edit and target_message_id is not None else "send_message",
         "send_via": "interaction_bot",
         "chat_id": incoming.chat_id,
-        "message_id": incoming.message_id if edit and incoming.message_id is not None else None,
+        "message_id": target_message_id if edit and target_message_id is not None else None,
         "reply_to_message_id": reply_to_message_id,
         "text": text,
     }
@@ -9507,21 +9531,21 @@ async def _send(
             error=error,
         )
         raise account_bot_service.BotChatUnavailableError(error)
-    if edit and incoming.message_id is not None:
-        if rich_html:
+    if edit and target_message_id is not None:
+        if rich_message:
             rich_edit_action = {
                 "type": "edit_message",
                 "send_via": "interaction_bot",
                 "chat_id": incoming.chat_id,
-                "message_id": incoming.message_id,
-                "rich_message": {"html": rich_html},
+                "message_id": target_message_id,
+                "rich_message": rich_message,
             }
             try:
                 result = await account_bot_service.edit_rich_message(
                     incoming.token,
                     incoming.chat_id,
-                    incoming.message_id,
-                    {"html": rich_html},
+                    target_message_id,
+                    rich_message,
                     reply_markup=reply_markup,
                 )
                 await record_action(
@@ -9561,7 +9585,7 @@ async def _send(
             result = await account_bot_service.edit_message(
                 incoming.token,
                 incoming.chat_id,
-                incoming.message_id,
+                target_message_id,
                 text,
                 reply_markup=reply_markup,
             )
@@ -9605,19 +9629,19 @@ async def _send(
         "reply_to_message_id": reply_to_message_id,
         "text": text,
     }
-    if rich_html:
+    if rich_message:
         rich_send_action = {
             "type": "send_rich_message",
             "send_via": "interaction_bot",
             "chat_id": incoming.chat_id,
             "reply_to_message_id": reply_to_message_id,
-            "rich_message": {"html": rich_html},
+            "rich_message": rich_message,
         }
         try:
             result = await account_bot_service.send_rich_message(
                 incoming.token,
                 incoming.chat_id,
-                {"html": rich_html},
+                rich_message,
                 reply_markup=reply_markup,
                 reply_to_message_id=reply_to_message_id,
             )

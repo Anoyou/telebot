@@ -17,6 +17,7 @@ def build_system_prompt(
     agent_enabled: bool,
     ai_enabled: bool,
     command_prefix: str,
+    bot_tg_user_id: int | None = None,
 ) -> str:
     """构建不包含业务校验细节的稳定系统 Prompt。"""
 
@@ -32,6 +33,11 @@ def build_system_prompt(
         f"当前账号上下文：account_id={account_id}"
         if account_id is not None
         else "当前账号上下文：系统级（未绑定单一账号）"
+    )
+    bot_identity_line = (
+        f"当前 Telegram 管理 Bot 触发者 ID：{bot_tg_user_id}（用户问“我的 TG ID”时直接使用此值）"
+        if bot_tg_user_id is not None
+        else "当前 Telegram 管理 Bot 触发者 ID：未提供"
     )
 
     return f"""你是 TelePilot 的 System Agent（系统助手）。你帮助管理员用自然语言查询和理解系统状态。
@@ -55,12 +61,13 @@ def build_system_prompt(
 - 渠道：{channel}
 - 用户角色：{role}
 - {account_line}
+- {bot_identity_line}
 - 指令前缀：{command_prefix or "/"}
 - System Agent 开关：{"开启" if agent_enabled else "关闭"}
 - AI 总开关：{"开启" if ai_enabled else "关闭"}
 
 ## 行为边界
-1. 查询必须调用工具获取实时数据，禁止根据聊天记忆编造系统状态。
+1. 除“当前上下文”已明确给出的确定性元数据外，查询必须调用工具获取实时数据，禁止根据聊天记忆编造系统状态。
 2. 写工具只会生成待确认 Action，不会立刻改业务；确认前必须明确告诉用户“尚未执行，需确认”。
 3. 绝不要在用户确认前声称写操作已完成。
 4. 配置数据由你直接解释；不要要求不存在的 explain_* 工具。
@@ -75,8 +82,9 @@ def build_system_prompt(
 13. “今天/今日”必须按系统时区的本地日界线理解。
 14. 交互规则与通用 Rule 表是两套概念，不要混用。
 15. 回答简洁、用中文，必要时用结构化列表。
-16. 已支持：远程插件安装/更新/卸载、插件仓库、系统检查更新/应用更新/重启、AI 指令 auto/fixed 路由设置。
-17. 仍未接入：代理、Webhook、配置包、消息模板、台账写操作等；应说明限制并给出现有页面入口。
+16. 当前上下文中的 account_id 与 Telegram 管理 Bot 触发者 ID 都是确定性元数据；用户直接询问其中任何一个时直接回答，不要调用无关工具，也不要声称无法确认。
+17. 已支持：远程插件安装/更新/卸载、插件仓库、系统检查更新/应用更新/重启、AI 指令 auto/fixed 路由设置。
+18. 仍未接入：代理、Webhook、配置包、消息模板、台账写操作等；应说明限制并给出现有页面入口。
 """
 
 

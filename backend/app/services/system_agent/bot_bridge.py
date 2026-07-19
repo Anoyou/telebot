@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import html
 import json
 import logging
 import re
@@ -37,6 +38,10 @@ AGENT_MODE_KEY = "system_agent:bot_mode:{account_id}:{tg_user_id}"
 AGENT_CONFIRM_PREFIX = "system_agent:bot_confirm:"
 AGENT_CONFIRM_TTL_SECONDS = 10 * 60  # 与 Action 默认 TTL 对齐
 _PURE_SECRET_RE = re.compile(r"^[A-Za-z0-9._+/=:-]{12,512}$")
+_MARKDOWN_TABLE_SEPARATOR_RE = re.compile(
+    r"^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$"
+)
+_MARKDOWN_LINK_RE = re.compile(r"\[([^\]\n]+)\]\((https?://[^\s)]+)\)")
 
 
 def _mode_key(account_id: int, tg_user_id: int) -> str:
@@ -91,6 +96,163 @@ def _html_escape(text: str) -> str:
         .replace("<", "&lt;")
         .replace(">", "&gt;")
     )
+
+
+def _markdown_inline_to_telegram_html(text: str) -> str:
+    """Convert the small inline Markdown subset supported by Agent replies."""
+
+    tokens: list[str] = []
+
+    def store(value: str) -> str:
+        tokens.append(value)
+        return f"\x00{len(tokens) - 1}\x00"
+
+    escaped = html.escape(str(text or ""), quote=False)
+    escaped = re.sub(
+        r"`([^`\n]+)`",
+        lambda match: store(f"<code>{match.group(1)}</code>"),
+        escaped,
+    )
+    escaped = _MARKDOWN_LINK_RE.sub(
+        lambda match: store(
+            f'<a href="{html.escape(html.unescape(match.group(2)), quote=True)}">'
+            f"{_markdown_inline_to_telegram_html(html.unescape(match.group(1)))}</a>"
+        ),
+        escaped,
+    )
+    escaped = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", escaped)
+    escaped = re.sub(r"__(.+?)__", r"<b>\1</b>", escaped)
+    escaped = re.sub(r"~~(.+?)~~", r"<s>\1</s>", escaped)
+    escaped = re.sub(r"(?<!\*)\*([^*\n]+)\*(?!\*)", r"<i>\1</i>", escaped)
+    for index, value in enumerate(tokens):
+        escaped = escaped.replace(f"\x00{index}\x00", value)
+    return escaped
+
+
+def _markdown_table_cells(line: str) -> list[str]:
+    value = str(line or "").strip()
+    if value.startswith("|"):
+        value = value[1:]
+    if value.endswith("|"):
+        value = value[:-1]
+    return [cell.strip() for cell in value.split("|")]
+
+
+def _markdown_table_to_pre(lines: list[str]) -> str:
+    rows = [_markdown_table_cells(line) for line in lines]
+    if not rows:
+        return ""
+    width = max(len(row) for row in rows)
+    normalized = [row + [""] * (width - len(row)) for row in rows]
+    plain_rows = [
+        [
+            re.sub(r"(?:\*\*|__|~~|`)", "", re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", cell))
+            for cell in row
+        ]
+        for row in normalized
+    ]
+    widths = [min(30, max(2, *(len(row[index]) for row in plain_rows))) for index in range(width)]
+
+    def render(row: list[str]) -> str:
+        return "  ".join(value[: widths[index]].ljust(widths[index]) for index, value in enumerate(row)).rstrip()
+
+    output = [render(plain_rows[0]), "  ".join("-" * item for item in widths)]
+    output.extend(render(row) for row in plain_rows[1:])
+    return f"<pre>{html.escape(chr(10).join(output), quote=False)}</pre>"
+
+
+def _markdown_to_telegram_html(markdown: str) -> str:
+    """Build a safe Bot API HTML fallback for a GFM-style Agent response."""
+
+    lines = str(markdown or "").replace("\r\n", "\n").split("\n")
+    output: list[str] = []
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        stripped = line.strip()
+        if stripped.startswith("```"):
+            language = stripped[3:].strip()
+            code: list[str] = []
+            index += 1
+            while index < len(lines) and not lines[index].strip().startswith("```"):
+                code.append(lines[index])
+                index += 1
+            language_attr = ""
+            if re.fullmatch(r"[A-Za-z0-9_+-]{1,32}", language):
+                language_attr = f' class="language-{language}"'
+            output.append(
+                f"<pre><code{language_attr}>{html.escape(chr(10).join(code), quote=False)}</code></pre>"
+            )
+        elif index + 1 < len(lines) and "|" in line and _MARKDOWN_TABLE_SEPARATOR_RE.fullmatch(lines[index + 1]):
+            table_lines = [line]
+            index += 2
+            while index < len(lines) and "|" in lines[index] and lines[index].strip():
+                table_lines.append(lines[index])
+                index += 1
+            output.append(_markdown_table_to_pre(table_lines))
+            continue
+        elif not stripped:
+            output.append("")
+        elif re.fullmatch(r"[-*_]{3,}", stripped):
+            output.append("────────")
+        elif match := re.match(r"^#{1,6}\s+(.+)$", stripped):
+            output.append(f"<b>{_markdown_inline_to_telegram_html(match.group(1))}</b>")
+        elif match := re.match(r"^\s*[-+*]\s+(.+)$", line):
+            output.append(f"• {_markdown_inline_to_telegram_html(match.group(1))}")
+        elif match := re.match(r"^\s*(\d+)[.)]\s+(.+)$", line):
+            output.append(f"{match.group(1)}. {_markdown_inline_to_telegram_html(match.group(2))}")
+        elif match := re.match(r"^\s*>\s?(.*)$", line):
+            output.append(f"<blockquote>{_markdown_inline_to_telegram_html(match.group(1))}</blockquote>")
+        else:
+            output.append(_markdown_inline_to_telegram_html(line))
+        index += 1
+    return "\n".join(output).strip()
+
+
+def _agent_progress_text(event: dict[str, Any]) -> str:
+    """Translate durable Agent events into a compact Telegram draft status."""
+
+    event_type = str(event.get("type") or "")
+    provider = _html_escape(str(event.get("provider_name") or "当前提供商"))
+    model = _html_escape(str(event.get("model") or "默认模型"))
+    target = f"{provider} / <code>{model}</code>"
+    if event_type == "model_capability_check":
+        return f"🔎 正在检查 {target} 的工具调用能力…"
+    if event_type == "provider_selected":
+        reason = str(event.get("reason") or "")
+        if reason == "model_fallback":
+            return f"🔄 已切换到同一提供商的备用模型 {target}…"
+        if reason == "provider_fallback":
+            return f"🔁 正在切换到备用提供商 {target}…"
+        return f"🤖 已选择 {target}，正在理解你的需求…"
+    if event_type == "skill_selected":
+        summary = str(event.get("understanding_summary") or "").strip()
+        if summary:
+            return f"🧭 已理解需求：{_html_escape(summary[:180])}"
+        return "🧭 已理解需求，正在准备所需能力…"
+    if event_type == "model_attempt":
+        attempt = max(1, int(event.get("attempt") or 1))
+        max_retries = max(0, int(event.get("max_retries") or 0))
+        if attempt > 1:
+            return f"🔄 正在重试 {target}（第 {attempt - 1}/{max_retries} 次）…"
+        return f"🤖 {target} 正在思考并规划…"
+    if event_type == "retry_scheduled":
+        retry_number = max(1, int(event.get("retry_number") or 1))
+        max_retries = max(retry_number, int(event.get("max_retries") or retry_number))
+        delay = max(0.0, float(event.get("delay_seconds") or 0))
+        delay_text = str(int(delay)) if delay.is_integer() else f"{delay:.1f}"
+        return f"⏱️ {target} 暂时失败，{delay_text} 秒后进行第 {retry_number}/{max_retries} 次重试…"
+    if event_type == "model_exhausted":
+        return f"⚠️ {target} 重试已用尽，正在寻找可用的备用模型…"
+    if event_type in {"tool_started", "tool_finished"}:
+        description = str(event.get("tool_description") or event.get("tool_name") or "系统工具")
+        description = _html_escape(description[:180])
+        if event_type == "tool_started":
+            return f"🛠️ 正在调用：{description}…"
+        if event.get("is_error"):
+            return f"⚠️ 调用失败：{description}，正在判断下一步…"
+        return f"✅ 已完成：{description}，正在整理结果…"
+    return ""
 
 
 def _agent_button(text: str, action: str, aid: int, nonce: str) -> dict[str, str]:
@@ -545,14 +707,30 @@ async def run_agent_query(
         log.warning("attach secrets to pending action failed", exc_info=True)
 
     draft_active = False
+    last_draft_text = ""
+
+    async def update_draft(value: str) -> None:
+        nonlocal last_draft_text
+        if not draft_active or draft is None or not value or value == last_draft_text:
+            return
+        try:
+            await draft(value)
+            last_draft_text = value
+        except Exception:  # noqa: BLE001
+            log.debug("system agent bot draft update failed", exc_info=True)
+
     if draft is not None:
         try:
-            await draft("")
+            last_draft_text = "⏳ 系统助手正在理解你的需求…"
+            await draft(last_draft_text)
             draft_active = True
         except Exception:  # noqa: BLE001
             log.debug("system agent bot draft unavailable; using persistent placeholder", exc_info=True)
+    placeholder_message_id: int | None = None
     if not draft_active:
-        await send("⏳ 系统助手处理中…", edit=edit)
+        placeholder = await send("⏳ 系统助手正在理解你的需求…", edit=edit)
+        if isinstance(placeholder, dict) and placeholder.get("message_id") is not None:
+            placeholder_message_id = int(placeholder["message_id"])
 
     assistant_text = ""
     error_text = ""
@@ -581,12 +759,15 @@ async def run_agent_query(
                 et = event.get("type")
                 if et == "assistant_message":
                     assistant_text = str(event.get("content") or "")
+                    await update_draft(_markdown_to_telegram_html(assistant_text))
                 elif et == "error":
                     error_text = str(event.get("message") or "助手运行失败")
                 elif et == "action_proposed":
                     action = event.get("action")
                     if isinstance(action, dict):
                         proposed_actions.append(action)
+                else:
+                    await update_draft(_agent_progress_text(event))
             await db.commit()
         except Exception as exc:  # noqa: BLE001
             await db.rollback()
@@ -594,7 +775,11 @@ async def run_agent_query(
             error_text = str(exc)[:400]
 
     if error_text and not assistant_text and not proposed_actions:
-        await send(f"❌ {_html_escape(error_text)}", edit=not draft_active)
+        await send(
+            f"❌ {_html_escape(error_text)}",
+            edit=not draft_active and placeholder_message_id is not None,
+            edit_message_id=placeholder_message_id,
+        )
         return
 
     body = assistant_text or ""
@@ -606,7 +791,7 @@ async def run_agent_query(
     if len(body) > 3500:
         body = body[:3400] + "\n\n…（已截断，完整内容请到 Web /assistant 查看）"
 
-    safe = _html_escape(body) if body else "（无文本回复）"
+    safe = _markdown_to_telegram_html(body) if body else "（无文本回复）"
 
     # 单条 Action：主消息带 Inline 按钮；多条：逐条追加
     if len(proposed_actions) == 1:
@@ -617,21 +802,39 @@ async def run_agent_query(
             action_id=str(action.get("id") or ""),
         )
         danger = str(action.get("risk") or "") == "dangerous"
-        summary = _html_escape(str(action.get("summary") or action.get("tool_name") or "操作"))
+        raw_summary = str(action.get("summary") or action.get("tool_name") or "操作")
+        summary = _html_escape(raw_summary)
         warning = ""
+        rich_warning = ""
         preview = action.get("preview") if isinstance(action.get("preview"), dict) else {}
         if preview.get("warning"):
             warning = f"\n⚠️ {_html_escape(str(preview.get('warning')))}"
+            rich_warning = f"\n⚠️ {preview.get('warning')}"
         elif preview.get("note"):
             warning = f"\nℹ️ {_html_escape(str(preview.get('note')))}"
+            rich_warning = f"\nℹ️ {preview.get('note')}"
         card = f"\n\n🧾 <b>待确认</b>\n{summary}{warning}"
+        rich_card = f"\n\n🧾 **待确认**\n{raw_summary}{rich_warning}"
         markup = _agent_confirm_keyboard(account_id, nonce, dangerous=danger) if nonce else None
         if not nonce:
             card += "\n（Redis 不可用，请稍后重试，或到 Web /assistant 重新发起）"
-        await send(safe + card, edit=not draft_active, reply_markup=markup)
+            rich_card += "\n（Redis 不可用，请稍后重试，或到 Web /assistant 重新发起）"
+        await send(
+            safe + card,
+            edit=not draft_active and placeholder_message_id is not None,
+            edit_message_id=placeholder_message_id,
+            reply_markup=markup,
+            rich_markdown=body + rich_card,
+        )
         return
 
-    await send(safe, edit=not draft_active, reply_markup=None)
+    await send(
+        safe,
+        edit=not draft_active and placeholder_message_id is not None,
+        edit_message_id=placeholder_message_id,
+        reply_markup=None,
+        rich_markdown=body or None,
+    )
     for action in proposed_actions:
         nonce = await store_agent_confirm_nonce(
             account_id=account_id,

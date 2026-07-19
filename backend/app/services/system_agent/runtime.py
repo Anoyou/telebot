@@ -202,6 +202,7 @@ class SystemAgentRuntime:
             channel=channel,
             role=role,
             account_id=session.account_id,
+            bot_tg_user_id=bot_tg_user_id,
             version=__version__,
             agent_enabled=bool(cfg.get("enabled")),
             ai_enabled=bool(flags["ai_enabled"]),

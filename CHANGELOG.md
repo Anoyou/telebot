@@ -20,6 +20,17 @@
 
 ## [Unreleased]
 
+## [0.70.4] — 2026-07-19 · patch（补丁版本） · Telegram Agent 交互修复
+
+### Fixed
+- Telegram Agent 不再先创建空白 Draft 气泡；模型检查、重试、备用模型切换和工具调用等关键过程会更新到非空进度 Draft。
+- Agent 最终回复优先使用 Telegram Rich Markdown 渲染，普通 Bot API 回退会转换为安全 HTML，表格、标题、列表、代码和链接不再显示为原始 Markdown。
+- Draft 不可用时会准确编辑刚发送的进度占位消息，不再误编辑用户消息或遗留额外的“处理中”气泡。
+- Bot 会话将 Telegram 触发者 ID 注入 Agent 确定性上下文；询问“我的 TG ID”或当前账号 ID 时可直接回答，不再调用无关工具后误报无法确认。
+
+### Tests
+- 增加 Draft 非空与进度更新、Rich Markdown/HTML 回退、占位消息编辑目标和 Bot 身份上下文回归测试。
+
 ## [0.70.3] — 2026-07-19 · patch（补丁版本） · Agent 对话渲染修复
 
 ### Fixed

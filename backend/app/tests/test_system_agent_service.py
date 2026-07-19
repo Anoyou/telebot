@@ -32,7 +32,7 @@ from app.services.system_agent.config import (
     tools_model_for_dto,
     tools_models_for_dto,
 )
-from app.services.system_agent.prompts import session_title_from_message
+from app.services.system_agent.prompts import build_system_prompt, session_title_from_message
 from app.services.system_agent.service import SystemAgentService
 
 
@@ -85,6 +85,23 @@ def test_session_title_from_message() -> None:
     assert session_title_from_message("  交互里\n有哪些规则？  ") == "交互里 有哪些规则？"
     assert len(session_title_from_message("a" * 100)) == 30
     assert session_title_from_message("") == "新对话"
+
+
+def test_system_prompt_includes_bot_identity_context() -> None:
+    prompt = build_system_prompt(
+        timezone_name="Asia/Shanghai",
+        channel=CHANNEL_BOT,
+        role="admin",
+        account_id=1,
+        bot_tg_user_id=1682400007,
+        version="0.70.4",
+        agent_enabled=True,
+        ai_enabled=True,
+        command_prefix="/",
+    )
+    assert "account_id=1" in prompt
+    assert "Telegram 管理 Bot 触发者 ID：1682400007" in prompt
+    assert "直接回答" in prompt
 
 
 def test_tools_model_for_dto_requires_tools_support() -> None:
