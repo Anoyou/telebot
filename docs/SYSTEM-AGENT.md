@@ -1,6 +1,6 @@
 # System Agent（系统助手）
 
-平台级自然语言助手：通过 Web `/assistant` 与管理 Bot `/agent` 查询 TelePilot 已有能力。
+平台级自然语言助手：通过 Web 悬浮助手与管理 Bot `/agent` 查询 TelePilot 已有能力。
 
 计划与阶段定义见 `docs/Plan/Agent-Plan.md`。本文描述**当前已落地**的能力与运维边界。
 
@@ -19,9 +19,9 @@
 
 | 渠道 | 路径/命令 |
 | --- | --- |
-| Web | 侧边栏「系统助手」→ `/assistant` |
+| Web | 任意工作台页面右下角「系统助手」悬浮球 |
 | 管理 Bot | `/agent`、`/agent <问题>`、助手模式下的自由文本 |
-| 配置 | `/assistant` 右上角「配置」；AI 中心提供「配置系统助手」链接 |
+| 配置 | 悬浮助手面板中的「配置」；AI 中心提供「配置系统助手」快捷入口 |
 | API | `/api/system-agent/*` |
 
 ## 配置
@@ -57,7 +57,7 @@
 ## 架构要点
 
 ```text
-Web /assistant → Durable Run / 可续接事件 ──┐
+Web 悬浮助手 → Durable Run / 可续接事件 ──┐
                                             ├→ Turn Resolver → Skill Router
 管理 Bot /agent → SystemAgentService ───────┘                 │
                                                    Runtime（最多 8 个工具）

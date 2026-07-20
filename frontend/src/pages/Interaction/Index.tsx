@@ -22,7 +22,7 @@ import { PageHeader, PageShell } from "@/components/layout/PageScaffold";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Spinner } from "@/components/ui/misc";
+import { Skeleton } from "@/components/ui/misc";
 import { Select } from "@/components/ui/select";
 import { SignalPill } from "@/components/ui/status";
 import { BotTab } from "@/pages/Accounts/BotTab";
@@ -112,8 +112,17 @@ export function InteractionIndex() {
           title="交互中心"
           description="正在读取账号与交互 Bot 配置。"
         />
-        <div className="flex h-36 items-center justify-center rounded-lg border bg-card">
-          <Spinner className="text-primary" />
+        <div role="status" aria-label="交互中心加载中" className="space-y-4 rounded-lg border bg-card p-4">
+          <div className="flex items-center justify-between gap-3">
+            <div className="space-y-2"><Skeleton className="h-5 w-36" /><Skeleton className="h-3 w-64" /></div>
+            <Skeleton className="h-9 w-24 rounded-md" />
+          </div>
+          <div className="grid gap-3 sm:grid-cols-3">
+            {[0, 1, 2].map((item) => <Skeleton key={item} className="h-20 rounded-lg" />)}
+          </div>
+          <div className="space-y-3 border-t pt-4">
+            {[0, 1, 2].map((item) => <div key={item} className="flex items-center gap-3"><Skeleton className="h-9 w-9 rounded-full" /><Skeleton className="h-4 flex-1" /><Skeleton className="h-8 w-20 rounded-md" /></div>)}
+          </div>
         </div>
       </PageShell>
     );

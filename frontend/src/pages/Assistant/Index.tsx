@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
-import { Cpu, Menu, MessageCircle, Server, Settings2 } from "lucide-react";
+import { Menu, MessageCircle, Minimize2, Server, Settings2 } from "lucide-react";
 import { toast } from "sonner";
 
 import {
@@ -28,12 +28,13 @@ import { listLLMProviders } from "@/api/commands";
 import { listAccounts } from "@/api/accounts";
 import type { LLMProviderOut } from "@/api/types";
 import { Composer } from "@/components/assistant/Composer";
+import { useAssistantDock } from "@/components/assistant/AssistantDock";
 import { Conversation, type LiveBubble } from "@/components/assistant/Conversation";
 import { SessionDrawer } from "@/components/assistant/SessionDrawer";
 import { PageHeader, PageShell } from "@/components/layout/PageScaffold";
 import { Button } from "@/components/ui/button";
 import { Select } from "@/components/ui/select";
-import { Spinner } from "@/components/ui/misc";
+import { Skeleton } from "@/components/ui/misc";
 import { getErrMsg } from "@/lib/api";
 import { systemAgentToolLabel } from "@/lib/systemAgentLabels";
 import { removeSessionAndChooseNext } from "./sessionState";
@@ -104,6 +105,11 @@ function toolsModels(provider?: LLMProviderOut): string[] {
 
 export function AssistantIndex() {
   const qc = useQueryClient();
+  const {
+    collapsed: assistantCollapsed,
+    setCollapsed: setAssistantCollapsed,
+    setStreaming: setDockStreaming,
+  } = useAssistantDock();
   const [activeId, setActiveId] = useState<string | null>(null);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [accountId, setAccountId] = useState<number | "">("");
@@ -117,6 +123,10 @@ export function AssistantIndex() {
     model: string;
   } | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+
+  useEffect(() => {
+    setDockStreaming(streaming);
+  }, [setDockStreaming, streaming]);
 
   useEffect(
     () => () => {
@@ -156,7 +166,7 @@ export function AssistantIndex() {
     queryFn: () =>
       listSystemAgentActions({ session_id: activeId!, status: "pending", limit: 50 }),
     enabled: !!activeId,
-    refetchInterval: 15_000,
+    refetchInterval: assistantCollapsed && !streaming ? false : 15_000,
   });
 
   // 恢复最后一个 active 会话
@@ -648,42 +658,70 @@ export function AssistantIndex() {
         title="系统助手"
         description="用自然语言查询并操作系统能力；写操作需内联确认。"
         icon={MessageCircle}
-        actions={
-          <div className="flex flex-wrap items-center gap-2">
+        actions={(
+          <Button
+            type="button"
+            variant="outline"
+            size="icon"
+            className="h-9 w-9"
+            onClick={() => setAssistantCollapsed(true)}
+            aria-label="收起到悬浮助手"
+            title="收起到悬浮助手"
+          >
+            <Minimize2 className="h-4 w-4" />
+          </Button>
+        )}
+      />
+
+      <div className="mb-3 rounded-lg border border-border/70 bg-muted/20 p-2.5">
+        <div className="flex items-center justify-between gap-2">
+          <div className="flex min-w-0 items-center gap-2">
+            <span className="min-w-0 truncate text-xs text-muted-foreground">
+              状态：
+              <span className="font-medium text-foreground">
+                {configQ.isLoading ? "加载中" : enabled ? (streaming ? "调用中" : "已启用") : "未启用"}
+              </span>
+            </span>
+            <Link to="/ai?tab=providers" className="shrink-0 text-xs text-primary hover:underline">
+              配置模型提供商
+            </Link>
+          </div>
+          <div className="flex shrink-0 items-center gap-1.5">
             <Button
               type="button"
               variant="outline"
               size="sm"
-              className="md:hidden"
+              className="h-8 px-2.5 md:hidden"
               onClick={() => setDrawerOpen(true)}
             >
               <Menu className="h-4 w-4" />
               会话
             </Button>
-            <Button type="button" variant="outline" size="sm" onClick={() => setConfigOpen((v) => !v)}>
-              <Settings2 className="mr-1 h-4 w-4" />
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="h-8 px-2.5"
+              onClick={() => setConfigOpen((v) => !v)}
+              aria-expanded={configOpen}
+            >
+              <Settings2 className="h-4 w-4" />
               配置
             </Button>
           </div>
-        }
-      />
-
-      <div className="mb-3 flex flex-wrap items-center gap-x-4 gap-y-2 text-sm text-muted-foreground">
-        <span>
-          状态：
-          <span className="text-foreground">
-            {configQ.isLoading ? "加载中" : enabled ? (streaming ? "调用中" : "已启用") : "未启用"}
-          </span>
-        </span>
-        <label className="inline-flex min-w-0 items-center gap-1.5">
-          <Server className="h-3.5 w-3.5 shrink-0" />
-          <span className="shrink-0 whitespace-nowrap">Provider</span>
+        </div>
+        <div className="mt-2 grid grid-cols-2 gap-2 sm:flex sm:flex-wrap sm:items-center">
+          <label className="min-w-0 sm:flex sm:items-center sm:gap-1.5">
+            <span className="mb-1 flex items-center gap-1 text-[11px] text-muted-foreground sm:mb-0 sm:shrink-0 sm:text-sm">
+              <Server className="h-3.5 w-3.5 shrink-0" />
+              Provider
+            </span>
           <Select
             aria-label="切换 Agent Provider"
             value={configQ.data?.provider_id == null ? "" : String(configQ.data.provider_id)}
             disabled={selectorDisabled}
             onChange={(event) => selectProvider(event.target.value)}
-            className="h-8 w-44"
+            className="h-8 w-full min-w-0 text-xs sm:w-44"
           >
             <option value="">未配置</option>
             {(providersQ.data || []).map((provider) => {
@@ -698,39 +736,13 @@ export function AssistantIndex() {
               );
             })}
           </Select>
-        </label>
-        <label className="inline-flex min-w-0 items-center gap-1.5">
-          <Cpu className="h-3.5 w-3.5 shrink-0" />
-          <span className="shrink-0 whitespace-nowrap">模型</span>
-          <Select
-            aria-label="切换 Agent 模型"
-            value={configQ.data?.model || configuredToolsModels[0] || ""}
-            disabled={selectorDisabled || configuredToolsModels.length === 0}
-            onChange={(event) => saveConfigMut.mutate({ model: event.target.value || null })}
-            className="h-8 max-w-64"
-          >
-            {configuredToolsModels.length === 0 ? (
-              <option value="">未选择</option>
-            ) : (
-              configuredToolsModels.map((model) => (
-                <option key={model} value={model}>
-                  {model}
-                </option>
-              ))
-            )}
-          </Select>
-        </label>
-        {(streaming || actualSelectionDiffers) && displayedSelection ? (
-          <span className="min-w-0 truncate text-xs text-muted-foreground">
-            实际调用：{displayedSelection.providerName} · {displayedSelection.model}
-          </span>
-        ) : null}
-        <label className="flex items-center gap-2">
-          <span className="shrink-0 whitespace-nowrap">账号上下文</span>
+          </label>
+          <label className="min-w-0 sm:flex sm:items-center sm:gap-1.5">
+            <span className="mb-1 block text-[11px] text-muted-foreground sm:mb-0 sm:shrink-0 sm:text-sm">账号上下文</span>
           <Select
             value={accountId === "" ? "" : String(accountId)}
             onChange={(e) => setAccountId(e.target.value ? Number(e.target.value) : "")}
-            className="h-8 w-44"
+            className="h-8 w-full min-w-0 text-xs sm:w-44"
           >
             <option value="">系统级</option>
             {(accountsQ.data || []).map((a) => (
@@ -739,10 +751,13 @@ export function AssistantIndex() {
               </option>
             ))}
           </Select>
-        </label>
-        <Link to="/ai?tab=providers" className="text-primary hover:underline">
-          配置模型提供商
-        </Link>
+          </label>
+          {(streaming || actualSelectionDiffers) && displayedSelection ? (
+            <span className="col-span-2 min-w-0 truncate text-xs text-muted-foreground sm:col-span-1">
+              实际调用：{displayedSelection.providerName} · {displayedSelection.model}
+            </span>
+          ) : null}
+        </div>
       </div>
 
       {configOpen ? (
@@ -904,8 +919,14 @@ export function AssistantIndex() {
               </div>
             </div>
           ) : messagesQ.isLoading ? (
-            <div className="flex flex-1 items-center justify-center">
-              <Spinner />
+            <div role="status" aria-label="会话消息加载中" className="flex flex-1 flex-col gap-5 overflow-hidden p-4">
+              <div className="flex items-end gap-3"><Skeleton className="h-12 w-3/5 rounded-2xl" /></div>
+              <div className="flex items-end justify-end gap-3"><Skeleton className="h-10 w-2/5 rounded-2xl" /></div>
+              <div className="flex items-end gap-3"><Skeleton className="h-20 w-4/5 rounded-2xl" /></div>
+              <div className="mt-auto space-y-2 rounded-xl border p-2">
+                <Skeleton className="h-16 w-full rounded-lg" />
+                <div className="flex justify-end"><Skeleton className="h-8 w-8 rounded-md" /></div>
+              </div>
             </div>
           ) : (
             <>
@@ -923,6 +944,10 @@ export function AssistantIndex() {
                 streaming={streaming}
                 onSend={onSend}
                 onStop={onStop}
+                modelOptions={configuredToolsModels}
+                modelValue={configQ.data?.model || configuredToolsModels[0] || ""}
+                onModelChange={(model) => saveConfigMut.mutate({ model: model || null })}
+                modelDisabled={selectorDisabled || configuredToolsModels.length === 0}
               />
             </>
           )}

@@ -430,7 +430,7 @@ async def handle_agent_confirm_callback(
             _agent_confirm_keyboard(account_id, new_nonce, dangerous=danger) if new_nonce else None
         )
         if not new_nonce:
-            body += "\n（Redis 不可用，请稍后重试，或到 Web /assistant 重新发起）"
+            body += "\n（Redis 不可用，请稍后重试，或到 Web 悬浮助手重新发起）"
         await send(body, edit=True, reply_markup=markup)
         return
 
@@ -574,7 +574,7 @@ async def try_attach_secrets_to_pending_action(
     )
     markup = _agent_confirm_keyboard(account_id, nonce, dangerous=danger) if nonce else None
     if not nonce:
-        body += "\n（Redis 不可用，请稍后重试，或到 Web /assistant 重新发起）"
+        body += "\n（Redis 不可用，请稍后重试，或到 Web 悬浮助手重新发起）"
     await send(body, edit=True, reply_markup=markup)
     return True
 
@@ -789,7 +789,7 @@ async def run_agent_query(
         body = body.rstrip() + "\n\n——\n已生成待确认操作，请点击下方按钮。"
 
     if len(body) > 3500:
-        body = body[:3400] + "\n\n…（已截断，完整内容请到 Web /assistant 查看）"
+        body = body[:3400] + "\n\n…（已截断，完整内容请到 Web 悬浮助手查看）"
 
     safe = _markdown_to_telegram_html(body) if body else "（无文本回复）"
 
@@ -817,8 +817,8 @@ async def run_agent_query(
         rich_card = f"\n\n🧾 **待确认**\n{raw_summary}{rich_warning}"
         markup = _agent_confirm_keyboard(account_id, nonce, dangerous=danger) if nonce else None
         if not nonce:
-            card += "\n（Redis 不可用，请稍后重试，或到 Web /assistant 重新发起）"
-            rich_card += "\n（Redis 不可用，请稍后重试，或到 Web /assistant 重新发起）"
+            card += "\n（Redis 不可用，请稍后重试，或到 Web 悬浮助手重新发起）"
+            rich_card += "\n（Redis 不可用，请稍后重试，或到 Web 悬浮助手重新发起）"
         await send(
             safe + card,
             edit=not draft_active and placeholder_message_id is not None,

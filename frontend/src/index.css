@@ -198,6 +198,38 @@
     border-radius: max(0px, calc(var(--nested-outer-radius) - var(--nested-inset)));
   }
 
+  /* 统一骨架底色和流光。动画只移动伪元素，不影响真实布局尺寸。 */
+  .skeleton-shimmer {
+    position: relative;
+    isolation: isolate;
+    overflow: hidden;
+    background-color: hsl(var(--muted) / 0.9);
+  }
+
+  .skeleton-shimmer::after {
+    position: absolute;
+    inset: 0;
+    z-index: 0;
+    content: "";
+    background: linear-gradient(
+      105deg,
+      transparent 28%,
+      hsl(var(--card) / 0.34) 46%,
+      hsl(var(--card) / 0.58) 52%,
+      hsl(var(--card) / 0.34) 58%,
+      transparent 76%
+    );
+    transform: translateX(-100%);
+    animation: skeleton-shimmer 2.1s ease-in-out infinite;
+    will-change: transform;
+  }
+
+  @keyframes skeleton-shimmer {
+    to {
+      transform: translateX(100%);
+    }
+  }
+
   /* 跑马灯边框裁进控件自身圆角，避免弹窗圆角外侧露出直角彩边。 */
   .siri-glow {
     position: relative;
@@ -334,7 +366,7 @@
        在 3x 屏含小数的 safe-area-inset 交界处被 WebKit 拼出 0.5px 发丝缝。 */
 
   /* 顶栏不额外做 translateZ / isolation 提升，避免和 .app-main 的滚动层在
-     小数 safe-area 边界处拼出发丝缝。移动端玻璃材质仍由顶栏自身覆盖安全区。 */
+     小数 safe-area 边界处拼出发丝缝。移动端顶栏与状态栏共用 --app-chrome 实色。 */
   .app-topbar {
     position: relative;
     /* 盖在 .app-main 之上：.app-main 是 overflow:auto 独立合成层，其顶边压在顶栏
@@ -352,12 +384,12 @@
   @media (max-width: 767px) {
     .app-topbar {
       border-bottom: 1px solid hsl(var(--foreground) / 0.08);
-      background: hsl(var(--card) / 0.48);
-      -webkit-backdrop-filter: blur(28px) saturate(1.7);
-      backdrop-filter: blur(28px) saturate(1.7);
-      box-shadow:
-        0 6px 20px hsl(0 0% 0% / 0.08),
-        inset 0 1px 0 hsl(0 0% 100% / 0.1);
+      /* iOS 状态栏使用 --app-chrome 实色。顶栏也使用同一实色，避免
+         半透明 card 在刘海安全区与系统状态栏之间形成明显的色带。 */
+      background: hsl(var(--app-chrome));
+      -webkit-backdrop-filter: none;
+      backdrop-filter: none;
+      box-shadow: none;
     }
   }
 
@@ -445,6 +477,71 @@
       inset 0 1px 0 hsl(0 0% 100% / 0.14);
   }
 
+  .mobile-scroll-edge {
+    display: flex;
+    height: 1.75rem;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+    pointer-events: none;
+  }
+
+  .mobile-scroll-edge[data-edge="top"] {
+    margin-top: -0.25rem;
+    margin-bottom: 0.25rem;
+  }
+
+  .mobile-scroll-edge[data-edge="bottom"] {
+    margin-top: 0.75rem;
+    margin-bottom: -0.25rem;
+  }
+
+  .mobile-scroll-edge-label {
+    display: inline-flex;
+    min-width: 0;
+    max-width: 100%;
+    align-items: center;
+    gap: 0.4rem;
+    border: 1px solid hsl(var(--border) / 0.7);
+    border-radius: 999px;
+    background: hsl(var(--card) / 0.72);
+    padding: 0.2rem 0.65rem;
+    color: hsl(var(--muted-foreground));
+    font-size: 10px;
+    line-height: 1;
+    letter-spacing: 0;
+    opacity: 0;
+    transform: translateY(4px);
+    transition: opacity 160ms ease-out, transform 160ms ease-out;
+  }
+
+  .mobile-scroll-edge[data-edge="bottom"] .mobile-scroll-edge-label {
+    transform: translateY(-4px);
+  }
+
+  .mobile-scroll-edge[data-visible="true"] .mobile-scroll-edge-label {
+    opacity: 0.78;
+    transform: translateY(0);
+  }
+
+  .mobile-scroll-edge-separator {
+    width: 1px;
+    height: 0.65rem;
+    flex: none;
+    background: hsl(var(--border-strong));
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .mobile-scroll-edge-label {
+      transition: none;
+    }
+
+    .skeleton-shimmer::after {
+      animation: none;
+      opacity: 0;
+    }
+  }
+
   /* 玻璃模糊不可用时（旧 WebView）退回近实心，避免文字透底看不清 */
   @supports not ((-webkit-backdrop-filter: blur(1px)) or (backdrop-filter: blur(1px))) {
     .liquid-bottom-nav {
@@ -453,7 +550,7 @@
 
     @media (max-width: 767px) {
       .app-topbar {
-        background: hsl(var(--card) / 0.98);
+        background: hsl(var(--app-chrome));
       }
     }
   }

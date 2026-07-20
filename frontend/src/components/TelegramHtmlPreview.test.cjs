@@ -47,6 +47,8 @@ test("renders Telegram Rich HTML blocks and inline formatting", () => {
   assert.match(rendered, /<details class="telegram-details" open>/);
   assert.match(rendered, /Telegram 时间 1647531900/);
   assert.match(rendered, /class="telegram-math"/);
+  assert.doesNotMatch(rendered, /<\/p>\s+<ul>/);
+  assert.doesNotMatch(rendered, /<\/ul>\s+<div class="telegram-table-scroll">/);
 });
 
 test("keeps expandable quotes and both Telegram spoiler syntaxes interactive", () => {

@@ -26,7 +26,6 @@ import { Button } from "@/components/ui/button";
 import {
   MeterBar,
   SectionHeader,
-  SignalPill,
   ToneRailCard,
   type VisualTone,
   toneClasses,
@@ -100,20 +99,6 @@ export function Dashboard() {
   return (
     <PageShell className="md:space-y-6">
       <DashboardHero
-        activeAccounts={activeAccounts}
-        totalAccounts={accounts.length}
-        readyProviders={readyProviders}
-        totalProviders={providers.length}
-        workerValue={workerValue}
-        providerValue={providerValue}
-        accountsLoading={accountsQ.isLoading}
-        providersLoading={providersQ.isLoading}
-        accountsError={accountsQ.isError}
-        providersError={providersQ.isError}
-        logErrorCount={resourceQ.data?.logs.last_5m_error ?? 0}
-        logWarnCount={resourceQ.data?.logs.last_5m_warn ?? 0}
-        logsLoading={resourceQ.isLoading}
-        logsError={resourceQ.isError}
         guideActive={guideActive}
         onGuideToggle={() => setGuideActive(!guideActive)}
       />
@@ -205,68 +190,17 @@ export function Dashboard() {
 }
 
 function DashboardHero({
-  activeAccounts,
-  totalAccounts,
-  readyProviders,
-  totalProviders,
-  workerValue,
-  providerValue,
-  accountsLoading,
-  providersLoading,
-  accountsError,
-  providersError,
-  logErrorCount,
-  logWarnCount,
-  logsLoading,
-  logsError,
   guideActive,
   onGuideToggle,
 }: {
-  activeAccounts: number;
-  totalAccounts: number;
-  readyProviders: number;
-  totalProviders: number;
-  workerValue: string;
-  providerValue: string;
-  accountsLoading: boolean;
-  providersLoading: boolean;
-  accountsError: boolean;
-  providersError: boolean;
-  logErrorCount: number;
-  logWarnCount: number;
-  logsLoading: boolean;
-  logsError: boolean;
   guideActive: boolean;
   onGuideToggle: () => void;
 }) {
-  const accountTone = accountsError ? "danger" : overviewTone(activeAccounts, totalAccounts, accountsLoading);
-  const providerTone = providersError ? "danger" : overviewTone(readyProviders, totalProviders, providersLoading);
-  const logStatusTone: VisualTone = logsError
-    ? "danger"
-    : logsLoading
-    ? "neutral"
-    : logErrorCount > 0
-      ? "danger"
-      : logWarnCount > 0
-        ? "warn"
-        : "success";
-
   return (
     <PageHeader
       icon={LayoutDashboard}
       title="概览"
       description="集中查看 TelePilot 的账号、插件、AI 和资源运行情况；优先暴露需要处理的信号。"
-      signals={
-        <>
-          <SignalPill tone={accountTone} label="账号运行" value={workerValue} />
-          <SignalPill tone={providerTone} label="模型就绪" value={providerValue} />
-          <SignalPill
-            tone={logStatusTone}
-            label="日志信号"
-            value={logsError ? "读取失败" : logsLoading ? "采样中" : `${logErrorCount} 错误 / ${logWarnCount} 警告`}
-          />
-        </>
-      }
       actions={
         <>
           <Button

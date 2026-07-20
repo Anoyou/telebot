@@ -37,7 +37,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { MetaBadge } from "@/components/ui/meta-badge";
 import { Select } from "@/components/ui/select";
-import { Spinner } from "@/components/ui/misc";
+import { Skeleton } from "@/components/ui/misc";
 import { Textarea } from "@/components/ui/textarea";
 import { getErrMsg } from "@/lib/api";
 import { cn } from "@/lib/utils";
@@ -869,7 +869,42 @@ export function LLMLivenessPage() {
   };
 
   if (providersQ.isLoading) {
-    return <div className="flex h-56 items-center justify-center"><Spinner className="text-primary" /></div>;
+    return (
+      <PageShell>
+        <PageHeader
+          icon={Activity}
+          title="模型测活"
+          description="正在读取 Provider、模型能力和最近的对话测活状态。"
+        />
+        <div role="status" aria-label="模型测活加载中" className="space-y-4">
+          <div className="flex gap-2">
+            <Skeleton className="h-9 w-28 rounded-md" />
+            <Skeleton className="h-9 w-32 rounded-md" />
+          </div>
+          <div className="grid gap-4 xl:grid-cols-[280px_minmax(0,1fr)] 2xl:grid-cols-[280px_minmax(0,1fr)_280px]">
+            <div className="hidden space-y-4 rounded-lg border p-4 xl:block">
+              <Skeleton className="h-5 w-24" />
+              <Skeleton className="h-9 w-full rounded-md" />
+              {[0, 1, 2, 3].map((item) => <Skeleton key={item} className="h-8 w-full rounded-md" />)}
+            </div>
+            <div className="flex min-h-[560px] flex-col overflow-hidden rounded-lg border bg-card">
+              <div className="flex items-center gap-3 border-b p-4">
+                <Skeleton className="h-8 w-8 shrink-0 rounded-full" />
+                <div className="flex-1 space-y-2"><Skeleton className="h-4 w-36" /><Skeleton className="h-3 w-48" /></div>
+              </div>
+              <div className="flex flex-1 items-center justify-center p-6">
+                <div className="w-full max-w-sm space-y-3"><Skeleton className="mx-auto h-12 w-12 rounded-lg" /><Skeleton className="mx-auto h-5 w-4/5" /><Skeleton className="mx-auto h-3 w-full" /></div>
+              </div>
+              <div className="space-y-2 border-t p-3"><Skeleton className="h-16 w-full rounded-lg" /><div className="flex justify-between"><Skeleton className="h-3 w-32" /><Skeleton className="h-3 w-24" /></div></div>
+            </div>
+            <div className="hidden space-y-4 rounded-lg border p-4 2xl:block">
+              <Skeleton className="h-5 w-24" />
+              {[0, 1, 2].map((item) => <div key={item} className="space-y-2"><Skeleton className="h-3 w-20" /><Skeleton className="h-9 w-full rounded-md" /></div>)}
+            </div>
+          </div>
+        </div>
+      </PageShell>
+    );
   }
 
   if (providersQ.isError) {
@@ -1180,19 +1215,19 @@ export function LLMLivenessPage() {
             type="button"
             variant="outline"
             size="sm"
-            className="absolute left-0 top-1/2 z-20 -translate-y-1/2 rounded-l-none border-l-0 bg-card pl-2 pr-3 shadow-md xl:hidden"
+            className="absolute left-0 top-1/2 z-20 h-11 -translate-y-1/2 rounded-l-none rounded-r-2xl border-l-0 border-primary/45 bg-card/95 pl-2.5 pr-4 font-semibold text-foreground shadow-lg shadow-black/15 ring-1 ring-primary/15 hover:bg-accent xl:hidden"
             onClick={() => { setSettingsOpen(false); setScopeOpen(true); }}
           >
-            <ChevronRight className="mr-1 h-4 w-4" />测试范围
+            <ChevronRight className="mr-1 h-4 w-4 text-primary" />测试范围
           </Button>
           <Button
             type="button"
             variant="outline"
             size="sm"
-            className="absolute right-0 top-1/2 z-20 -translate-y-1/2 rounded-r-none border-r-0 bg-card pl-3 pr-2 shadow-md 2xl:hidden"
+            className="absolute right-0 top-1/2 z-20 h-11 -translate-y-1/2 rounded-l-2xl rounded-r-none border-r-0 border-primary/45 bg-card/95 pl-4 pr-2.5 font-semibold text-foreground shadow-lg shadow-black/15 ring-1 ring-primary/15 hover:bg-accent 2xl:hidden"
             onClick={() => { setScopeOpen(false); setSettingsOpen(true); }}
           >
-            请求设置<ChevronLeft className="ml-1 h-4 w-4" />
+            请求设置<ChevronLeft className="ml-1 h-4 w-4 text-primary" />
           </Button>
           {scopeOpen ? (
             <button

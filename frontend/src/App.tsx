@@ -6,7 +6,8 @@ import { RequireAuth } from "@/components/layout/RequireAuth";
 
 import { Login } from "@/pages/Login";
 import { Dashboard } from "@/pages/Dashboard";
-import { Spinner } from "@/components/ui/misc";
+import { Skeleton } from "@/components/ui/misc";
+import { PageShell } from "@/components/layout/PageScaffold";
 
 // 把不影响首屏的页面拆成 lazy chunk：
 //   - 用户最常进入的是 Dashboard 与账号列表，这些保持 eager；
@@ -37,15 +38,41 @@ const DispatchDebugPage = lazy(() => import("@/pages/DispatchDebug").then(m => (
 const WebhooksPage = lazy(() => import("@/pages/Webhooks").then(m => ({ default: m.WebhooksPage })));
 const AIIndex = lazy(() => import("@/pages/AI/Index").then(m => ({ default: m.AIIndex })));
 const AILivenessPage = lazy(() => import("@/pages/AI/Liveness").then(m => ({ default: m.LLMLivenessPage })));
-const AssistantIndex = lazy(() => import("@/pages/Assistant/Index").then(m => ({ default: m.AssistantIndex })));
 
 type AppErrorBoundaryState = { hasError: boolean };
 
 function PageFallback() {
   return (
-    <div className="flex h-[40vh] items-center justify-center">
-      <Spinner className="text-primary" />
-    </div>
+    <PageShell>
+      <div role="status" aria-label="页面加载中" className="space-y-5">
+        <div className="flex items-center gap-3">
+          <Skeleton className="h-10 w-10 shrink-0 rounded-lg" />
+          <div className="min-w-0 flex-1 space-y-2">
+            <Skeleton className="h-5 w-32" />
+            <Skeleton className="h-3 w-[min(24rem,78%)]" />
+          </div>
+        </div>
+        <div className="flex gap-2">
+          <Skeleton className="h-9 w-24 rounded-md" />
+          <Skeleton className="h-9 w-32 rounded-md" />
+          <Skeleton className="hidden h-9 w-24 rounded-md sm:block" />
+        </div>
+        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+          {[0, 1, 2].map((item) => (
+            <div key={item} className="space-y-3 rounded-lg border border-border/70 p-4">
+              <div className="flex items-center gap-3">
+                <Skeleton className="h-9 w-9 shrink-0 rounded-full" />
+                <div className="min-w-0 flex-1 space-y-2">
+                  <Skeleton className="h-4 w-1/2" />
+                  <Skeleton className="h-3 w-3/4" />
+                </div>
+              </div>
+              <Skeleton className="h-20 rounded-md" />
+            </div>
+          ))}
+        </div>
+      </div>
+    </PageShell>
   );
 }
 
@@ -233,14 +260,6 @@ export default function App() {
             element={
               <Suspense fallback={<PageFallback />}>
                 <InteractionIndex />
-              </Suspense>
-            }
-          />
-          <Route
-            path="assistant"
-            element={
-              <Suspense fallback={<PageFallback />}>
-                <AssistantIndex />
               </Suspense>
             }
           />

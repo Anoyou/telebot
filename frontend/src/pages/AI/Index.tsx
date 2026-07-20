@@ -13,6 +13,7 @@ import {
   LayoutDashboard,
   MessageCircle,
   Package,
+  Pencil,
   Power,
   PlusCircle,
   Sparkles,
@@ -30,7 +31,7 @@ import { getErrMsg } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
-import { Spinner } from "@/components/ui/misc";
+import { Skeleton } from "@/components/ui/misc";
 import { MetaBadge } from "@/components/ui/meta-badge";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
@@ -40,6 +41,7 @@ import { Glossary } from "@/components/ai/Glossary";
 import { HowItWorks } from "@/components/ai/HowItWorks";
 import { RecommendedSetup } from "@/components/ai/RecommendedSetup";
 import { PageHeader, PageShell } from "@/components/layout/PageScaffold";
+import { useAssistantDock } from "@/components/assistant/AssistantDock";
 import { LLMProviders } from "@/pages/AI/LLMProviders";
 import { RecentUsageContent } from "@/pages/AI/_components/RecentUsage";
 
@@ -68,6 +70,7 @@ function commandModeLabel(template: CommandTemplateOut) {
 }
 
 export function AIIndex() {
+  const { setCollapsed: setAssistantCollapsed } = useAssistantDock();
   const [searchParams, setSearchParams] = useSearchParams();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
@@ -138,9 +141,43 @@ export function AIIndex() {
   const loading = settingsQ.isLoading || templatesQ.isLoading || (aiEnabled && providersQ.isLoading);
   if (loading) {
     return (
-      <div className="flex h-40 items-center justify-center">
-        <Spinner className="text-primary" />
-      </div>
+      <PageShell>
+        <AIHeader />
+        <div role="status" aria-label="AI 中心加载中" className="space-y-3">
+          <div className="flex gap-1.5 overflow-hidden">
+            <Skeleton className="h-9 w-20 shrink-0 rounded-md" />
+            <Skeleton className="h-9 w-28 shrink-0 rounded-md" />
+            <Skeleton className="h-9 w-24 shrink-0 rounded-md" />
+          </div>
+          <div className="flex gap-1.5 overflow-hidden">
+            {[0, 1, 2].map((item) => (
+              <Skeleton key={item} className="h-8 w-28 shrink-0 rounded-md" />
+            ))}
+          </div>
+          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+            {[0, 1, 2, 3].map((item) => (
+              <div key={item} className="space-y-3 rounded-lg border border-border/70 p-4">
+                <div className="flex items-center justify-between gap-2">
+                  <Skeleton className="h-3 w-20" />
+                  <Skeleton className="h-6 w-12 rounded-full" />
+                </div>
+                <Skeleton className="h-7 w-24" />
+                <Skeleton className="h-3 w-32" />
+              </div>
+            ))}
+          </div>
+          <div className="space-y-3 rounded-lg border border-border/70 p-4">
+            <Skeleton className="h-5 w-36" />
+            {[0, 1, 2].map((item) => (
+              <div key={item} className="flex items-center gap-3 border-t border-border/60 pt-3">
+                <Skeleton className="h-8 w-8 shrink-0 rounded-md" />
+                <Skeleton className="h-4 w-1/3" />
+                <Skeleton className="ml-auto h-4 w-20" />
+              </div>
+            ))}
+          </div>
+        </div>
+      </PageShell>
     );
   }
 
@@ -216,6 +253,7 @@ export function AIIndex() {
           helpOpen={helpOpen}
           onHelpOpenChange={setHelpMenuOpen}
           cmdPrefix={cmdPrefix}
+          onOpenAssistant={() => setAssistantCollapsed(false)}
         />
         <div className="rounded-md border bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
           已配置 {providerCount} 个模型提供商，其中 {readyCount} 个可调用。联网搜索需要 api_format=responses 的 OpenAI provider。
@@ -234,6 +272,7 @@ export function AIIndex() {
           helpOpen={helpOpen}
           onHelpOpenChange={setHelpMenuOpen}
           cmdPrefix={cmdPrefix}
+          onOpenAssistant={() => setAssistantCollapsed(false)}
         />
         <RecentUsageContent />
       </PageShell>
@@ -248,6 +287,7 @@ export function AIIndex() {
         helpOpen={helpOpen}
         onHelpOpenChange={setHelpMenuOpen}
         cmdPrefix={cmdPrefix}
+        onOpenAssistant={() => setAssistantCollapsed(false)}
       />
       <div className="flex justify-end">
         <Button
@@ -409,14 +449,14 @@ export function AIIndex() {
       </Dialog>
 
       <Card>
-        <CardHeader>
+        <CardHeader className="p-4 pb-3 sm:p-5 sm:pb-3">
           <SectionHeader
             icon={FileText}
             title="你的 AI 指令"
             description="展示 type=ai 的指令模板；编辑会带 returnTo=/ai 回到总览。"
           />
         </CardHeader>
-        <CardContent>
+        <CardContent className="px-3 pb-3 pt-0 sm:px-5 sm:pb-5">
           {aiTemplates.length === 0 ? (
             <div className="rounded-md border border-dashed py-8 text-center">
               <p className="text-sm text-muted-foreground">还没有 AI 指令模板。</p>
@@ -472,7 +512,7 @@ export function AIIndex() {
                 </TableBody>
               </Table>
             </div>
-            <div className="space-y-3 md:hidden">
+            <div className="space-y-2 md:hidden">
               {aiTemplates.map((template) => {
                 const provider = providerById.get(Number(template.config?.provider_id));
                 const modelText =
@@ -512,11 +552,13 @@ function Subnav({
   helpOpen,
   onHelpOpenChange,
   cmdPrefix,
+  onOpenAssistant,
 }: {
   activeTab: AITab;
   helpOpen: boolean;
   onHelpOpenChange: (open: boolean) => void;
   cmdPrefix: string;
+  onOpenAssistant: () => void;
 }) {
   const navigate = useNavigate();
   return (
@@ -544,7 +586,7 @@ function Subnav({
         </TabsList>
       </Tabs>
       <div className="-mx-1 px-1 pb-1">
-        <div className="grid grid-cols-2 gap-2 sm:inline-flex sm:flex-wrap">
+        <div className="grid grid-cols-3 gap-1.5 sm:inline-flex sm:flex-wrap sm:gap-2">
           <AIActionCard
             icon={FileText}
             title="查看指令"
@@ -553,13 +595,13 @@ function Subnav({
           <AIActionCard
             icon={MessageCircle}
             title="配置系统助手"
-            to="/assistant"
+            onClick={onOpenAssistant}
           />
           <AIHelpMenu
             open={helpOpen}
             onOpenChange={onHelpOpenChange}
             cmdPrefix={cmdPrefix}
-            triggerClassName="h-8 min-w-0 justify-center gap-1.5 rounded-md border-border/70 bg-background/65 px-2.5 text-left hover:border-primary/30 hover:bg-primary/5 sm:w-auto"
+            triggerClassName="h-8 min-w-0 justify-center gap-1 rounded-md border-border/70 bg-background/65 px-2 text-left hover:border-primary/30 hover:bg-primary/5 sm:w-auto sm:gap-1.5 sm:px-2.5"
           />
         </div>
       </div>
@@ -571,22 +613,31 @@ function AIActionCard({
   icon: Icon,
   title,
   to,
+  onClick,
 }: {
   icon: LucideIcon;
   title: string;
-  to: string;
+  to?: string;
+  onClick?: () => void;
 }) {
-  return (
-    <Link
-      to={to}
-      className="flex h-8 min-w-0 items-center justify-center gap-1.5 rounded-md border border-border/70 bg-background/65 px-2.5 text-left text-sm transition hover:border-primary/30 hover:bg-primary/5 sm:w-auto"
-    >
+  const className = "flex h-8 min-w-0 items-center justify-center gap-1 rounded-md border border-border/70 bg-background/65 px-2 text-left text-sm transition-colors hover:border-primary/30 hover:bg-primary/5 sm:w-auto sm:gap-1.5 sm:px-2.5";
+  const content = (
       <span className="grid h-5 w-5 shrink-0 place-items-center rounded-md border border-border/70 bg-muted/60 text-primary">
         <Icon className="h-3.5 w-3.5" />
       </span>
-      <span className="min-w-0">
-        <span className="block truncate text-xs font-semibold">{title}</span>
-      </span>
+  );
+  if (onClick) {
+    return (
+      <button type="button" onClick={onClick} className={className}>
+        {content}
+        <span className="min-w-0"><span className="block truncate text-xs font-semibold">{title}</span></span>
+      </button>
+    );
+  }
+  return (
+    <Link to={to || "#"} className={className}>
+      {content}
+      <span className="min-w-0"><span className="block truncate text-xs font-semibold">{title}</span></span>
     </Link>
   );
 }
@@ -646,25 +697,38 @@ function AICommandCard({
   cmdPrefix: string;
 }) {
   return (
-    <div className="rounded-xl border border-border/70 bg-background/70 p-3">
-      <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0">
-          <div className="break-all font-mono text-sm font-semibold">{cmdPrefix}{template.name}</div>
-          <div className="mt-1 text-xs leading-5 text-muted-foreground">{template.description || "未填写说明"}</div>
+    <div className="rounded-lg border border-border/70 bg-background/70 px-3 py-2.5">
+      <div className="flex min-w-0 items-center gap-2">
+        <div className="min-w-0 flex-1">
+          <div className="flex min-w-0 items-center gap-2">
+            <div className="min-w-0 flex-1 truncate font-mono text-sm font-semibold" title={`${cmdPrefix}${template.name}`}>
+              {cmdPrefix}{template.name}
+            </div>
+            <MetaBadge
+              className="shrink-0"
+              tone={template.config?.routing_mode === "auto" ? "success" : "neutral"}
+            >
+              {commandModeLabel(template)}
+            </MetaBadge>
+          </div>
+          {template.description ? (
+            <div className="mt-1 line-clamp-1 text-xs text-muted-foreground">{template.description}</div>
+          ) : null}
+          <div className="mt-1.5 flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
+            <span className="shrink-0">模型</span>
+            <span className="min-w-0 truncate font-medium text-foreground">{modelText}</span>
+          </div>
         </div>
-        <MetaBadge tone={template.config?.routing_mode === "auto" ? "success" : "neutral"}>
-          {commandModeLabel(template)}
-        </MetaBadge>
+        <Button asChild variant="ghost" size="icon" className="h-10 w-10 shrink-0">
+          <Link
+            to={`/plugins/templates?edit=${template.id}&returnTo=${encodeURIComponent("/ai")}`}
+            aria-label={`编辑 ${cmdPrefix}${template.name}`}
+            title="编辑指令"
+          >
+            <Pencil className="h-4 w-4" />
+          </Link>
+        </Button>
       </div>
-      <div className="mt-3 rounded-lg border border-border/70 bg-muted/30 px-3 py-2">
-        <div className="text-[11px] text-muted-foreground">模型</div>
-        <div className="mt-1 break-words text-sm font-medium">{modelText}</div>
-      </div>
-      <Button asChild variant="outline" size="sm" className="mt-3 w-full">
-        <Link to={`/plugins/templates?edit=${template.id}&returnTo=${encodeURIComponent("/ai")}`}>
-          编辑
-        </Link>
-      </Button>
     </div>
   );
 }

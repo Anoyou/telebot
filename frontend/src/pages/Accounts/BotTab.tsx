@@ -3021,16 +3021,20 @@ export function BotTab({
                   先在左侧挑规则，再到右侧按触发、启动内容、奖励限制配置当前规则。
                 </div>
               </div>
-              <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto sm:justify-end">
-                <label className="nested-surface-item flex min-w-0 flex-1 items-center justify-between gap-3 border bg-background px-3 py-2 sm:flex-none">
+              <div className="flex w-full items-stretch gap-2 sm:w-auto sm:justify-end">
+                <label className="nested-surface-item flex min-w-0 flex-1 items-center justify-between gap-2 border bg-background px-3 py-1.5 sm:flex-none sm:py-2">
                   <span className="min-w-0">
-                    <span className="flex items-center gap-2 text-sm font-medium">
-                      交互功能总开关
-                      <Badge variant={transferEnabled ? "secondary" : "outline"}>
+                    <span className="flex min-w-0 items-center gap-2 text-sm font-medium">
+                      <span className="truncate sm:hidden">交互总开关</span>
+                      <span className="hidden whitespace-nowrap sm:inline">交互功能总开关</span>
+                      <Badge
+                        className="hidden shrink-0 min-[400px]:inline-flex"
+                        variant={transferEnabled ? "secondary" : "outline"}
+                      >
                         {transferEnabled ? "已开启" : "已关闭"}
                       </Badge>
                     </span>
-                    <span className="mt-0.5 block text-xs leading-5 text-muted-foreground">
+                    <span className="mt-0.5 hidden text-xs leading-5 text-muted-foreground sm:block">
                       关闭后停用全部规则和交互 Bot，已有配置会保留。
                     </span>
                   </span>
@@ -3046,7 +3050,7 @@ export function BotTab({
                 <Button
                   type="button"
                   variant="outline"
-                  className="flex-1 sm:flex-none sm:min-w-[116px]"
+                  className="h-auto min-h-10 shrink-0 px-3 sm:min-w-[116px]"
                   onClick={addInteractionRule}
                 >
                   <Plus className="mr-1 h-4 w-4" />

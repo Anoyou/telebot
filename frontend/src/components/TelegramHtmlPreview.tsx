@@ -272,7 +272,7 @@ export function sanitizeTelegramHtml(value: string): string {
   const html = restoreTelegramEntities(escapeHtml(value));
   const expandableBlockquotes: boolean[] = [];
   const spoilerSpans: boolean[] = [];
-  return html.replace(
+  const sanitized = html.replace(
     /&lt;(\/?)\s*([a-z][a-z0-9-]*)([\s\S]*?)&gt;/gi,
     (_match, slash: string, rawTag: string, rawAttrs: string) => {
       const tag = rawTag.toLowerCase();
@@ -295,6 +295,11 @@ export function sanitizeTelegramHtml(value: string): string {
       }
       return richTag(tag, attrs, closing);
     },
+  );
+  const structuralTag = "(?:h[1-6]|p|ul|ol|li|pre|blockquote|aside|details|summary|table|thead|tbody|tr|th|td|footer|figure|figcaption|caption|div|hr)";
+  return sanitized.replace(
+    new RegExp(`>\\s+(?=<\\/?${structuralTag}(?:\\s|>))`, "gi"),
+    ">",
   );
 }
 
