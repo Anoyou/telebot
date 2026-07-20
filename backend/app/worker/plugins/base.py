@@ -131,6 +131,7 @@ class PublicSenderIdentity:
     is_anonymous_admin: bool
     tag: str | None
     resolved: bool
+    is_admin: bool = False
 
 
 class PluginIdentityFacade:
@@ -493,6 +494,7 @@ def _public_sender_identity_from_admins(
         participant,
         bool(admin_rights.anonymous),
         anonymous_admin_display_name,
+        is_admin=True,
     )
 
 
@@ -552,6 +554,7 @@ async def _public_sender_identity_from_permissions(
         getattr(permissions, "participant", None),
         bool(permissions.anonymous),
         anonymous_admin_display_name,
+        is_admin=_permissions_confirm_admin(permissions),
     )
 
 
@@ -607,6 +610,7 @@ async def _public_sender_identity_from_bot_member(
         is_anonymous_admin=is_anonymous_admin,
         tag=tag,
         resolved=True,
+        is_admin=status in {"creator", "administrator"},
     )
 
 
@@ -643,6 +647,8 @@ def _resolved_public_sender_identity(
     participant: Any,
     is_anonymous_admin: bool,
     anonymous_admin_display_name: str,
+    *,
+    is_admin: bool = False,
 ) -> PublicSenderIdentity:
     tag = sanitize_public_display_name(getattr(participant, "rank", None), fallback="") or None
     clean_fallback = sanitize_public_display_name(fallback_display_name, fallback=str(user_id))
@@ -654,6 +660,7 @@ def _resolved_public_sender_identity(
         is_anonymous_admin=is_anonymous_admin,
         tag=tag,
         resolved=True,
+        is_admin=is_admin,
     )
 
 
@@ -664,7 +671,24 @@ def _unresolved_public_sender_identity(user_id: int, display_name: str) -> Publi
         is_anonymous_admin=False,
         tag=None,
         resolved=False,
+        is_admin=False,
     )
+
+
+def _permissions_confirm_admin(permissions: Any) -> bool:
+    if bool(getattr(permissions, "anonymous", False)):
+        return True
+    if bool(getattr(permissions, "is_admin", False)) or bool(
+        getattr(permissions, "is_creator", False)
+    ):
+        return True
+    participant = getattr(permissions, "participant", None)
+    if participant is None:
+        return False
+    if getattr(participant, "admin_rights", None) is not None:
+        return True
+    participant_type = participant.__class__.__name__.lower()
+    return "admin" in participant_type or "creator" in participant_type
 
 
 # ─────────────────────────────────────────────────────

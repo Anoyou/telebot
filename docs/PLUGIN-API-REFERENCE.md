@@ -239,7 +239,7 @@ if attempts is not None and attempts > 5:
 | `ctx.ai` | `await ctx.ai.complete(system="...", user="...")` | 文本 LLM facade；第三方插件需声明 `ai_text` |
 | `ctx.ai` | `await ctx.ai.run_agent(..., handlers={...})` | 有界工具调用；第三方插件需声明独立 `ai_agent` 与工具双白名单 |
 | `ctx.messages` | `await ctx.messages.send(...)` / `send_photo(...)` / `edit_caption(...)` / `answer_callback(...)` | 交互入口消息操作 facade；只生成平台标准动作，由 TelePilot 统一代发、审计和执行 |
-| `ctx.identities` | 通常通过 `resolve_public_sender_identity(ctx, ...)` 间接使用 | 平台注入的群内安全身份 facade；通过内部 UserBot 和管理员 Interaction Bot 核验匿名状态，只返回标签、公开名和状态，不向插件开放成员目录 |
+| `ctx.identities` | 通常通过 `resolve_public_sender_identity(ctx, ...)` 间接使用 | 平台注入的群内安全身份 facade；通过内部 UserBot 和管理员 Interaction Bot 核验匿名状态，只返回标签、公开名、管理员状态和解析状态，不向插件开放成员目录 |
 | `ctx.conversation(...)` | `async with ctx.conversation(peer)` | 与目标 peer 建立会话 |
 
 ### 4.3 权限边界与禁止事项
@@ -1360,6 +1360,8 @@ safe_label = sanitize_public_display_name(raw_label, limit=10)
 
 结算、排行榜等多人名单使用 `resolve_public_sender_identities(ctx, chat_id=..., senders={user_id: name})` 批量解析；平台通过 `ctx.identities` 先使用不受插件沙箱影响的内部 UserBot 读取管理员目录和成员权限。Telegram 会把开启匿名模式的管理员从成员目录隐藏，此时平台会再使用 Interaction Bot 的官方 `getChatMember` 查询 `is_anonymous` 与 `custom_title`。Interaction Bot 必须是目标群管理员，Telegram 才保证能查询其他成员；未满足该前提或查询失败时平台会隐藏姓名，而不会回退按钮回调中的真实姓名。平台不会把 Bot Token、原始客户端或成员列表交给插件。
 
+身份解析结果不做应用层缓存：每次调用都会重新读取当前群管理员目录和成员权限，需要 Interaction Bot 兜底时也会实时请求 `getChatMember`。近期消息锚点只缓存可重新校验的 `message_id`，不会缓存姓名、username、管理员状态或标签。
+
 身份解析返回的名称已统一调用 `sanitize_public_display_name()`：移除 Unicode 控制符、零宽格式符、各类空白与不可见填充字符，并限制为最多 10 个字符；清洗后为空时使用“匿名用户”。这只解决公开姓名安全，不是 HTML/Markdown 转义，插件仍须按实际 `parse_mode` 转义后再发送。精确显示匿名管理员标签的部署前提是：账号已配置 Interaction Bot，且该 Bot 已加入对应群并提升为管理员；其他管理权限可按业务需要最小化授予。
 
 返回对象字段：
@@ -1369,6 +1371,7 @@ safe_label = sanitize_public_display_name(raw_label, limit=10)
 | `user_id` | 真实 Telegram User ID，只用于业务校验，不等于可公开姓名 |
 | `display_name` | 可安全写入群消息的名称；已过滤不可见字符并限制为 10 个字符，匿名管理员为清洗后的标签，无标签时为“匿名管理员” |
 | `is_anonymous_admin` | 当前成员是否开启匿名管理员身份 |
+| `is_admin` | 当前成员是否为本群管理员；由成员权限、管理员目录或 Interaction Bot 状态确认，不能通过是否存在标签推断 |
 | `tag` | Telegram 成员标签或管理员自定义头衔；普通成员存在标签时也不会覆盖 `display_name` |
 | `resolved` | 是否成功读取群成员权限；为 `false` 时 `display_name` 固定使用隐藏身份的回退值 |
 

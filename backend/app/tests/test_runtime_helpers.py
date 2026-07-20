@@ -136,6 +136,7 @@ async def test_resolve_public_sender_identity_uses_tag_only_for_anonymous_admin(
     assert identity.user_id == 42
     assert identity.display_name == "值班管理员"
     assert identity.is_anonymous_admin is True
+    assert identity.is_admin is True
     assert identity.tag == "值班管理员"
     assert identity.resolved is True
 
@@ -157,8 +158,68 @@ async def test_resolve_public_sender_identity_ignores_regular_member_tag() -> No
 
     assert identity.display_name == "普通成员姓名"
     assert identity.is_anonymous_admin is False
+    assert identity.is_admin is False
     assert identity.tag == "普通成员标签"
     assert identity.resolved is True
+
+
+async def test_resolve_public_sender_identity_marks_visible_userbot_admin() -> None:
+    class Client:
+        async def get_permissions(self, chat_id: int, user_id: int) -> SimpleNamespace:
+            return SimpleNamespace(
+                anonymous=False,
+                is_admin=True,
+                is_creator=False,
+                participant=SimpleNamespace(rank="公开管理员标签"),
+            )
+
+    identity = await resolve_public_sender_identity(
+        SimpleNamespace(client=Client()),
+        chat_id=-1001,
+        user_id=42,
+        fallback_display_name="公开管理员姓名",
+    )
+
+    assert identity.display_name == "公开管理员姓名"
+    assert identity.is_anonymous_admin is False
+    assert identity.is_admin is True
+    assert identity.tag == "公开管理员标签"
+    assert identity.resolved is True
+
+
+async def test_resolve_public_sender_identity_does_not_cache_member_status() -> None:
+    calls = 0
+
+    class Client:
+        async def get_permissions(self, chat_id: int, user_id: int) -> SimpleNamespace:
+            nonlocal calls
+            calls += 1
+            return SimpleNamespace(
+                anonymous=False,
+                is_admin=calls == 2,
+                is_creator=False,
+                participant=SimpleNamespace(rank="实时标签" if calls == 2 else ""),
+            )
+
+    ctx = SimpleNamespace(client=Client())
+    first = await resolve_public_sender_identity(
+        ctx,
+        chat_id=-1001,
+        user_id=42,
+        fallback_display_name="实时姓名",
+    )
+    second = await resolve_public_sender_identity(
+        ctx,
+        chat_id=-1001,
+        user_id=42,
+        fallback_display_name="实时姓名",
+    )
+
+    assert calls == 2
+    assert first.is_admin is False
+    assert first.tag is None
+    assert second.is_admin is True
+    assert second.tag == "实时标签"
 
 
 async def test_resolve_public_sender_identity_sanitizes_public_name_and_anonymous_tag() -> None:
@@ -363,6 +424,7 @@ async def test_interaction_bot_member_lookup_does_not_replace_visible_admin_name
 
     assert identity.display_name == "公开姓名"
     assert identity.is_anonymous_admin is False
+    assert identity.is_admin is True
     assert identity.tag == "普通管理员标签"
     assert identity.resolved is True
 
@@ -416,6 +478,7 @@ async def test_resolve_public_sender_identity_without_anonymous_field_fails_clos
     )
 
     assert identity.display_name == "匿名用户"
+    assert identity.is_admin is False
     assert identity.resolved is False
 
 
