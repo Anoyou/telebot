@@ -1339,10 +1339,10 @@ Contract Guard 不是公共插件市场式硬沙箱，而是个人可信插件�
 
 #### 群内安全公开身份
 
-Telegram 按钮回调的 `payload.sender` 必须保留真实点击者，供权限校验、幂等、每日限制和发奖使用；但匿名管理员点击按钮时，这个对象同样包含真实姓名，因此不得直接用于群内文案。平台提供统一解析器：
+Telegram 按钮回调的 `payload.sender` 必须保留真实点击者，供权限校验、幂等、每日限制和发奖使用；但匿名管理员点击按钮时，这个对象同样包含真实姓名，因此不得直接用于群内文案。平台提供统一身份解析器和姓名清洗函数：
 
 ```python
-from app.worker.plugins.base import resolve_public_sender_identity
+from app.worker.plugins.base import resolve_public_sender_identity, sanitize_public_display_name
 
 identity = await resolve_public_sender_identity(
     ctx,
@@ -1353,18 +1353,21 @@ identity = await resolve_public_sender_identity(
 
 # 只把 identity.display_name 写入公开消息。
 # user_id 仍使用 payload.sender.user_id 做业务校验。
+
+# 已有一个不经过身份解析的公开标签时，也必须先清洗。
+safe_label = sanitize_public_display_name(raw_label, limit=10)
 ```
 
 结算、排行榜等多人名单使用 `resolve_public_sender_identities(ctx, chat_id=..., senders={user_id: name})` 批量解析；平台通过 `ctx.identities` 先使用不受插件沙箱影响的内部 UserBot 读取管理员目录和成员权限。Telegram 会把开启匿名模式的管理员从成员目录隐藏，此时平台会再使用 Interaction Bot 的官方 `getChatMember` 查询 `is_anonymous` 与 `custom_title`。Interaction Bot 必须是目标群管理员，Telegram 才保证能查询其他成员；未满足该前提或查询失败时平台会隐藏姓名，而不会回退按钮回调中的真实姓名。平台不会把 Bot Token、原始客户端或成员列表交给插件。
 
-身份解析返回的名称解决的是身份泄露问题，不是 HTML/Markdown 转义，插件仍须按实际 `parse_mode` 转义后再发送。精确显示匿名管理员标签的部署前提是：账号已配置 Interaction Bot，且该 Bot 已加入对应群并提升为管理员；其他管理权限可按业务需要最小化授予。
+身份解析返回的名称已统一调用 `sanitize_public_display_name()`：移除 Unicode 控制符、零宽格式符、各类空白与不可见填充字符，并限制为最多 10 个字符；清洗后为空时使用“匿名用户”。这只解决公开姓名安全，不是 HTML/Markdown 转义，插件仍须按实际 `parse_mode` 转义后再发送。精确显示匿名管理员标签的部署前提是：账号已配置 Interaction Bot，且该 Bot 已加入对应群并提升为管理员；其他管理权限可按业务需要最小化授予。
 
 返回对象字段：
 
 | 字段 | 说明 |
 | --- | --- |
 | `user_id` | 真实 Telegram User ID，只用于业务校验，不等于可公开姓名 |
-| `display_name` | 可安全写入群消息的名称；匿名管理员为标签，无标签时为“匿名管理员” |
+| `display_name` | 可安全写入群消息的名称；已过滤不可见字符并限制为 10 个字符，匿名管理员为清洗后的标签，无标签时为“匿名管理员” |
 | `is_anonymous_admin` | 当前成员是否开启匿名管理员身份 |
 | `tag` | Telegram 成员标签或管理员自定义头衔；普通成员存在标签时也不会覆盖 `display_name` |
 | `resolved` | 是否成功读取群成员权限；为 `false` 时 `display_name` 固定使用隐藏身份的回退值 |

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import unicodedata
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
@@ -25,6 +26,50 @@ from telethon.tl.types import ChannelParticipantsAdmins
 from .manifest import Manifest
 
 log = logging.getLogger(__name__)
+
+_INVISIBLE_DISPLAY_NAME_CODEPOINTS = {
+    0x034F,  # combining grapheme joiner
+    0x115F,  # Hangul choseong filler
+    0x1160,  # Hangul jungseong filler
+    0x17B4,  # Khmer vowel inherent aq
+    0x17B5,  # Khmer vowel inherent aa
+    0x2800,  # braille pattern blank
+    0x3164,  # Hangul filler
+    0xFFA0,  # halfwidth Hangul filler
+}
+
+
+def sanitize_public_display_name(
+    value: Any,
+    *,
+    limit: int | None = 10,
+    fallback: str = "匿名用户",
+) -> str:
+    """清洗可公开展示的 Telegram 姓名，并限制其长度。
+
+    Telegram 姓名可能包含零宽字符、Unicode 格式控制符、非标准空白字形
+    或未分配字符。这些字符既可能骗过长度限制，也可能让群消息看起来像
+    空白或隐藏文本。公开身份统一在这里清洗，插件不应各自实现一套规则。
+    """
+
+    visible: list[str] = []
+    for char in str(value or ""):
+        codepoint = ord(char)
+        category = unicodedata.category(char)
+        if (
+            char.isspace()
+            or category in {"Cc", "Cf", "Cs", "Cn", "Zl", "Zp", "Zs"}
+            or codepoint in _INVISIBLE_DISPLAY_NAME_CODEPOINTS
+            or 0x180B <= codepoint <= 0x180F
+            or 0xFE00 <= codepoint <= 0xFE0F
+            or 0xE0100 <= codepoint <= 0xE01EF
+        ):
+            continue
+        visible.append(char)
+    cleaned = "".join(visible)
+    if limit is not None:
+        cleaned = cleaned[: max(0, int(limit))]
+    return cleaned or fallback
 
 
 def _clean_text(value: Any) -> str:
@@ -45,35 +90,36 @@ def public_entity_display_name(
     numeric id instead of rendering that local-only name.
     """
 
+    result = ""
     if entity is not None:
         title = _clean_text(getattr(entity, "title", None))
         if title:
-            return title
+            result = title
 
-        entity_id = getattr(entity, "id", None)
-        is_contact = bool(getattr(entity, "contact", False))
-        if not is_contact:
-            name = " ".join(
-                part
-                for part in (
-                    _clean_text(getattr(entity, "first_name", None)),
-                    _clean_text(getattr(entity, "last_name", None)),
+        if not result:
+            entity_id = getattr(entity, "id", None)
+            is_contact = bool(getattr(entity, "contact", False))
+            if not is_contact:
+                result = " ".join(
+                    part
+                    for part in (
+                        _clean_text(getattr(entity, "first_name", None)),
+                        _clean_text(getattr(entity, "last_name", None)),
+                    )
+                    if part
                 )
-                if part
-            )
-            if name:
-                return name
 
-        username = _clean_text(getattr(entity, "username", None)).lstrip("@")
-        if username:
-            return f"@{username}" if include_at else username
+            if not result:
+                username = _clean_text(getattr(entity, "username", None)).lstrip("@")
+                if username:
+                    result = f"@{username}" if include_at else username
 
-        if entity_id not in (None, ""):
-            return str(entity_id)
+            if not result and entity_id not in (None, ""):
+                result = str(entity_id)
 
-    if fallback_id not in (None, ""):
-        return str(fallback_id)
-    return default
+    if not result:
+        result = str(fallback_id) if fallback_id not in (None, "") else default
+    return sanitize_public_display_name(result, limit=None, fallback=default)
 
 
 @dataclass(frozen=True)
@@ -510,7 +556,7 @@ async def _public_sender_identity_from_permissions(
 
 
 def _display_name_needs_user_entity(display_name: str, user_id: int) -> bool:
-    clean = _clean_text(display_name)
+    clean = sanitize_public_display_name(display_name, limit=None, fallback="")
     return clean in {
         "",
         "匿名用户",
@@ -523,9 +569,9 @@ def _display_name_needs_user_entity(display_name: str, user_id: int) -> bool:
 
 def _regular_public_display_name(user_id: int, fallback_display_name: str, entity: Any | None) -> str:
     if not _display_name_needs_user_entity(fallback_display_name, user_id):
-        return _clean_text(fallback_display_name)
+        return sanitize_public_display_name(fallback_display_name, fallback=str(user_id))
     if entity is None:
-        return _clean_text(fallback_display_name) or str(user_id)
+        return sanitize_public_display_name(fallback_display_name, fallback=str(user_id))
     return public_entity_display_name(entity, fallback_id=user_id)
 
 
@@ -551,11 +597,13 @@ async def _public_sender_identity_from_bot_member(
     if status in {"creator", "administrator"} and "is_anonymous" not in member:
         raise LookupError("interaction bot omitted anonymous administrator state")
     is_anonymous_admin = status in {"creator", "administrator"} and bool(member.get("is_anonymous"))
-    tag = _clean_text(member.get("custom_title")) or None
-    clean_fallback = _clean_text(fallback_display_name) or str(user_id)
+    tag = sanitize_public_display_name(member.get("custom_title"), fallback="") or None
+    clean_fallback = sanitize_public_display_name(fallback_display_name, fallback=str(user_id))
     return PublicSenderIdentity(
         user_id=user_id,
-        display_name=(tag or anonymous_admin_display_name) if is_anonymous_admin else clean_fallback,
+        display_name=(tag or sanitize_public_display_name(anonymous_admin_display_name))
+        if is_anonymous_admin
+        else clean_fallback,
         is_anonymous_admin=is_anonymous_admin,
         tag=tag,
         resolved=True,
@@ -596,11 +644,13 @@ def _resolved_public_sender_identity(
     is_anonymous_admin: bool,
     anonymous_admin_display_name: str,
 ) -> PublicSenderIdentity:
-    tag = _clean_text(getattr(participant, "rank", None)) or None
-    clean_fallback = _clean_text(fallback_display_name) or str(user_id)
+    tag = sanitize_public_display_name(getattr(participant, "rank", None), fallback="") or None
+    clean_fallback = sanitize_public_display_name(fallback_display_name, fallback=str(user_id))
     return PublicSenderIdentity(
         user_id=user_id,
-        display_name=(tag or anonymous_admin_display_name) if is_anonymous_admin else clean_fallback,
+        display_name=(tag or sanitize_public_display_name(anonymous_admin_display_name))
+        if is_anonymous_admin
+        else clean_fallback,
         is_anonymous_admin=is_anonymous_admin,
         tag=tag,
         resolved=True,
@@ -610,7 +660,7 @@ def _resolved_public_sender_identity(
 def _unresolved_public_sender_identity(user_id: int, display_name: str) -> PublicSenderIdentity:
     return PublicSenderIdentity(
         user_id=user_id,
-        display_name=display_name,
+        display_name=sanitize_public_display_name(display_name),
         is_anonymous_admin=False,
         tag=None,
         resolved=False,
@@ -1003,6 +1053,7 @@ __all__ = [
     "get_plugin",
     "plugin",
     "public_entity_display_name",
+    "sanitize_public_display_name",
     "register",
     "register_simple_command",
 ]

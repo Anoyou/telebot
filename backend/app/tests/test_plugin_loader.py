@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, call
 
 import pytest
 from telethon.tl.types import PeerUser
@@ -5268,7 +5268,7 @@ async def test_userbot_entity_retry_recovers_from_recent_message_anchor() -> Non
     )
 
     assert resolved is entity
-    client.get_messages.assert_awaited_once_with(-1001, ids=88)
+    assert client.get_messages.await_args_list == [call(-1001, ids=88), call(-1001, ids=88)]
 
 
 @pytest.mark.asyncio

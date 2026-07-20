@@ -10,6 +10,7 @@ from app.worker.plugins.base import (
     public_entity_display_name,
     resolve_public_sender_identities,
     resolve_public_sender_identity,
+    sanitize_public_display_name,
 )
 from app.worker.plugins.sandbox import SandboxClient
 from app.worker.runtime import _build_proxy_url
@@ -18,7 +19,18 @@ from app.worker.runtime import _build_proxy_url
 def test_public_entity_display_name_keeps_non_contact_public_name() -> None:
     entity = SimpleNamespace(id=42, first_name="公开名", last_name="尾名", username="public_user", contact=False)
 
-    assert public_entity_display_name(entity) == "公开名 尾名"
+    assert public_entity_display_name(entity) == "公开名尾名"
+
+
+def test_sanitize_public_display_name_removes_unicode_invisible_characters() -> None:
+    raw = "\u206a\u200c\u200f\u206a \u206a\u200c\u200f\u206a人"
+
+    assert sanitize_public_display_name(raw) == "人"
+    assert sanitize_public_display_name("\u2800\u3164\uffa0") == "匿名用户"
+
+
+def test_sanitize_public_display_name_removes_whitespace_and_limits_to_ten_characters() -> None:
+    assert sanitize_public_display_name(" 张\u00a0三\u3000\t长名字ABCDEFGHIJK") == "张三长名字ABCDE"
 
 
 def test_public_entity_display_name_hides_contact_remark_name() -> None:
@@ -149,6 +161,37 @@ async def test_resolve_public_sender_identity_ignores_regular_member_tag() -> No
     assert identity.resolved is True
 
 
+async def test_resolve_public_sender_identity_sanitizes_public_name_and_anonymous_tag() -> None:
+    class Client:
+        async def get_permissions(self, chat_id: int, user_id: int) -> SimpleNamespace:
+            return SimpleNamespace(
+                anonymous=user_id == 43,
+                participant=SimpleNamespace(
+                    rank="\u206a 匿名\u200c管理员标签ABCDEFGHIJK" if user_id == 43 else "普通成员标签"
+                ),
+            )
+
+    ctx = SimpleNamespace(client=Client())
+    visible = await resolve_public_sender_identity(
+        ctx,
+        chat_id=-1001,
+        user_id=42,
+        fallback_display_name="\u206a 张\u00a0三\u200c ",
+    )
+    anonymous = await resolve_public_sender_identity(
+        ctx,
+        chat_id=-1001,
+        user_id=43,
+        fallback_display_name="不应公开的真实姓名",
+    )
+
+    assert visible.display_name == "张三"
+    assert visible.is_anonymous_admin is False
+    assert anonymous.display_name == "匿名管理员标签ABC"
+    assert anonymous.tag == "匿名管理员标签ABC"
+    assert anonymous.is_anonymous_admin is True
+
+
 async def test_resolve_public_sender_identity_retries_with_userbot_entity() -> None:
     calls: list[object] = []
     entity = SimpleNamespace(id=42, first_name="普通成员姓名", username="ordinary_user")
@@ -239,7 +282,7 @@ async def test_resolve_public_sender_identity_refreshes_saved_anonymous_user_nam
         fallback_display_name="匿名用户",
     )
 
-    assert identity.display_name == "恢复后的 公开姓名"
+    assert identity.display_name == "恢复后的公开姓名"
     assert identity.is_anonymous_admin is False
     assert identity.resolved is True
 
@@ -414,8 +457,8 @@ async def test_anonymous_admin_without_userbot_tag_is_enriched_by_interaction_bo
         fallback_display_name="不应公开的真实姓名",
     )
 
-    assert identity.display_name == "交互 Bot 标签"
-    assert identity.tag == "交互 Bot 标签"
+    assert identity.display_name == "交互Bot标签"
+    assert identity.tag == "交互Bot标签"
     assert identity.is_anonymous_admin is True
 
 
@@ -443,8 +486,8 @@ async def test_anonymous_admin_is_not_declassified_by_stale_interaction_bot_stat
         fallback_display_name="不应公开的真实姓名",
     )
 
-    assert identity.display_name == "UserBot 匿名标签"
-    assert identity.tag == "UserBot 匿名标签"
+    assert identity.display_name == "UserBot匿名标"
+    assert identity.tag == "UserBot匿名标"
     assert identity.is_anonymous_admin is True
 
 

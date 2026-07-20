@@ -102,6 +102,62 @@ async def read_cached_message_id(
     return message_id if message_id is not None and message_id > 0 else None
 
 
+async def _delete_cached_message_id(
+    redis: Any | None,
+    account_id: Any,
+    chat_id: Any,
+    user_id: Any,
+) -> None:
+    if redis is None:
+        return
+    key = anchor_key(account_id, chat_id, user_id)
+    delete = getattr(redis, "delete", None)
+    if key is None or not callable(delete):
+        return
+    try:
+        await delete(key)
+    except Exception:  # noqa: BLE001
+        log.debug("delete stale recent user message anchor failed key=%s", key, exc_info=True)
+
+
+async def _cache_message_id(
+    redis: Any | None,
+    account_id: Any,
+    chat_id: Any,
+    user_id: Any,
+    message_id: int,
+) -> None:
+    if redis is None:
+        return
+    key = anchor_key(account_id, chat_id, user_id)
+    set_value = getattr(redis, "set", None)
+    if key is None or not callable(set_value):
+        return
+    try:
+        await set_value(key, str(message_id), ex=ANCHOR_TTL_SECONDS)
+    except Exception:  # noqa: BLE001
+        log.debug("cache recent user message anchor from search failed key=%s", key, exc_info=True)
+
+
+async def _get_message_by_id(client: Any, chat_id: int, message_id: int) -> Any | None:
+    get_messages = getattr(client, "get_messages", None)
+    if not callable(get_messages):
+        return None
+    try:
+        message = await get_messages(chat_id, ids=message_id)
+    except Exception:  # noqa: BLE001
+        log.debug(
+            "read recent user message anchor target failed chat=%s message=%s",
+            chat_id,
+            message_id,
+            exc_info=True,
+        )
+        return None
+    if isinstance(message, list):
+        return message[0] if message else None
+    return message
+
+
 def _message_id(message: Any) -> int | None:
     return _int_or_none(getattr(message, "id", None) or getattr(message, "message_id", None))
 
@@ -126,7 +182,10 @@ async def find_recent_message_id_for_user(
 
     cached = await read_cached_message_id(redis, account_id, chat_id, user_id)
     if cached is not None:
-        return cached
+        cached_message = await _get_message_by_id(client, chat_id, cached)
+        if _genuine_message_user_id(cached_message) == user_id:
+            return cached
+        await _delete_cached_message_id(redis, account_id, chat_id, user_id)
 
     try:
         async for message in client.iter_messages(chat_id, from_user=user_id, limit=limit):
@@ -134,6 +193,7 @@ async def find_recent_message_id_for_user(
                 continue
             message_id = _message_id(message)
             if message_id is not None:
+                await _cache_message_id(redis, account_id, chat_id, user_id, message_id)
                 return message_id
     except Exception:  # noqa: BLE001
         log.debug(
@@ -149,6 +209,7 @@ async def find_recent_message_id_for_user(
                 continue
             message_id = _message_id(message)
             if message_id is not None:
+                await _cache_message_id(redis, account_id, chat_id, user_id, message_id)
                 return message_id
     except Exception:  # noqa: BLE001
         log.debug(

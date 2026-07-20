@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from telethon.tl.types import PeerChannel, PeerUser
@@ -20,6 +21,14 @@ class _Redis:
         self.data[key] = value
         self.set_calls.append((key, value, ex))
         return True
+
+    async def delete(self, *keys: str):
+        removed = 0
+        for key in keys:
+            if key in self.data:
+                removed += 1
+                del self.data[key]
+        return removed
 
 
 def _event(*, from_id, sender_id: int, chat_id: int = -1001, message_id: int = 55):  # noqa: ANN001
@@ -79,8 +88,46 @@ async def test_cached_anchor_wins_without_telegram_history_request() -> None:
     redis.data[key] = "88"
 
     class _Client:
+        get_messages = AsyncMock(
+            return_value=SimpleNamespace(id=88, sender_id=123, from_id=PeerUser(123))
+        )
+
         def iter_messages(self, *_args, **_kwargs):
             raise AssertionError("命中缓存时不应扫描 Telegram 历史")
+
+    client = _Client()
+    found = await recent_message_anchor.find_recent_message_id_for_user(
+        client,
+        -1001,
+        123,
+        limit=2000,
+        redis=redis,
+        account_id=7,
+    )
+
+    assert found == 88
+    client.get_messages.assert_awaited_once_with(-1001, ids=88)
+
+
+@pytest.mark.asyncio
+async def test_stale_cached_anchor_is_deleted_before_history_search() -> None:
+    redis = _Redis()
+    key = recent_message_anchor.anchor_key(7, -1001, 123)
+    assert key is not None
+    redis.data[key] = "88"
+    calls: list[dict[str, int]] = []
+
+    class _Client:
+        get_messages = AsyncMock(return_value=None)
+
+        def iter_messages(self, _chat_id, **kwargs):  # noqa: ANN001, ANN003
+            calls.append(dict(kwargs))
+
+            async def _messages():
+                if kwargs.get("from_user") is not None:
+                    yield SimpleNamespace(id=77, sender_id=123, from_id=PeerUser(123))
+
+            return _messages()
 
     found = await recent_message_anchor.find_recent_message_id_for_user(
         _Client(),
@@ -91,7 +138,9 @@ async def test_cached_anchor_wins_without_telegram_history_request() -> None:
         account_id=7,
     )
 
-    assert found == 88
+    assert found == 77
+    assert calls == [{"from_user": 123, "limit": 2000}]
+    assert redis.data[key] == "77"
 
 
 @pytest.mark.asyncio
