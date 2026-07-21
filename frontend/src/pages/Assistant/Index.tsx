@@ -511,8 +511,8 @@ export function AssistantIndex() {
       if (!doneReceived) return;
       forgetRun(sessionId, runId);
       setActiveRun((current) => (current?.runId === runId ? null : current));
-      if (abortRef.current === controller) setLive([]);
       await refreshRunData(sessionId);
+      if (abortRef.current === controller) setLive([]);
     } finally {
       if (abortRef.current === controller) {
         abortRef.current = null;
@@ -662,13 +662,17 @@ export function AssistantIndex() {
           <Button
             type="button"
             variant="outline"
-            size="icon"
-            className="h-9 w-9"
+            size="sm"
+            className="h-10 rounded-full border-primary/35 bg-card/95 px-3 text-foreground shadow-md shadow-black/10 hover:bg-muted"
             onClick={() => setAssistantCollapsed(true)}
-            aria-label="收起到悬浮助手"
-            title="收起到悬浮助手"
+            aria-label="收起系统助手"
+            title="收起为悬浮助手"
           >
-            <Minimize2 className="h-4 w-4" />
+            <span className="grid h-6 w-6 place-items-center rounded-full bg-primary/15 text-primary">
+              <MessageCircle className="h-3.5 w-3.5" />
+            </span>
+            <span>收起助手</span>
+            <Minimize2 className="h-3.5 w-3.5 text-muted-foreground" />
           </Button>
         )}
       />

@@ -531,7 +531,7 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
     step?.kind === "check_failed";
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="dialog-center siri-glow-soft !flex max-h-[calc(100dvh-1.5rem)] w-[calc(100vw-1.5rem)] max-w-md flex-col overflow-hidden border-primary/45 shadow-2xl shadow-primary/10 ring-1 ring-primary/35">
+      <DialogContent className="dialog-center siri-glow-soft !flex h-[min(34rem,calc(100dvh-1.5rem))] w-[calc(100vw-1.5rem)] max-w-md flex-col overflow-hidden border-primary/45 shadow-2xl shadow-primary/10 ring-1 ring-primary/35">
         <DialogHeader className="shrink-0 pr-6">
           <DialogTitle>检查更新</DialogTitle>
           <DialogDescription>
@@ -550,7 +550,7 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
         </DialogHeader>
 
         {/* 内容区 */}
-        <div className="min-h-0 flex-1 overflow-y-auto pr-1">
+        <div className="update-dialog-body min-h-0 flex-1 overflow-y-scroll pr-1">
           <div className="mb-3 flex items-center justify-between gap-3 rounded-md border border-primary/20 bg-primary/5 px-3 py-2 text-xs">
             <span className="text-muted-foreground">当前应用版本</span>
             <code className="rounded bg-background px-2 py-1 font-mono text-foreground">{APP_VERSION_LABEL}</code>
