@@ -1,4 +1,5 @@
 import type { Page, Route } from "@playwright/test";
+import { APP_VERSION } from "../../src/lib/version";
 
 const emptyResourceDashboard = {
   host: {
@@ -92,7 +93,7 @@ function jsonResponse(pathname: string): unknown | undefined {
   if (pathname === "/api/plugins/installed-overview" || pathname === "/api/plugins/installed-packages") return [];
   if (pathname === "/api/remote-plugins") return [];
   if (pathname === "/api/system/network") return { online: true };
-  if (pathname === "/api/system/version") return { version: "0.71.0" };
+  if (pathname === "/api/system/version") return { version: APP_VERSION };
   if (pathname === "/api/system/kill-switch") return { enabled: false };
   if (pathname === "/api/system/health-overview") return {
     db: { ok: true }, redis: { ok: true }, alembic: { ok: true, pending: [] },
