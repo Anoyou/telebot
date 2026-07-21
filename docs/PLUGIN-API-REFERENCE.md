@@ -14,6 +14,8 @@
 
 唯一例外：`payout`、收付款、发奖永远由 userbot 执行，不随会话通道切到 interaction bot。
 
+可选字段 `requires_platform_capabilities` 可写在 Manifest、interaction entry 或 event subscription 上，声明对 `ai` / `interaction_bot` / `webhooks` 等平台模块的依赖。旧插件未声明时继续加载；平台在路由层裁剪不可用入口，并在 `FeatureInfo.runtime_availability` 中返回 `ready` / `partial` / `paused` / `transitioning`。详见 [平台能力热插拔](./PLATFORM-CAPABILITIES.md)。
+
 Event Bus、Trace、MessageOps 是标准链路内部契约，不是第四种模式。userbot 命令会话和 interaction bot 规则会话都使用标准事件信封，并通过 `ctx.messages` / 标准 action 输出：
 
 ```python

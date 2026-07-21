@@ -20,6 +20,26 @@
 
 ## [Unreleased]
 
+### Added
+
+- 新增平台能力热插拔：统一管理 AI、Interaction Bot、入站 Webhook、资金台账与命中调试五个可选模块，支持不重启热关闭/热启动。
+- 新增 `GET/PATCH /api/system/capabilities`，持久化 `desired_enabled` + `generation`，运行时状态在进程内存中收敛；复用现有 `CMD_RELOAD_CONFIG` 与周期 reconcile。
+- 插件 `FeatureInfo` 新增 `runtime_availability`、`available_channels`、`blocked_entries`、`blocked_reason_code`；Manifest 支持 `requires_platform_capabilities`。
+- 前端系统设置增加“平台能力”区域；侧边栏与移动端导航按能力集合统一过滤；直达已关闭模块显示“模块已暂停”。
+- 新增 `docs/PLATFORM-CAPABILITIES.md` 说明模块边界、缓存 fail-closed 与关闭语义。
+
+### Changed
+
+- 系统设置 `ai_enabled` 兼容委托到平台能力服务（继续保留读写字段）。
+- 入站 Webhook 关闭时最前层 404 且 fail-closed（不访问 DB/不读 body）；worker 侧 `CMD_WEBHOOK_DELIVER` 同步拒绝。
+- 台账模块关闭只冻结查询与操作面，ActionEvent 与补偿主账继续写入。
+- Interaction Bot 模块关闭只停止交互/测试 Bot manager，管理 Bot 与 userbot 不受影响。
+
+### Tests
+
+- 新增 `test_platform_capabilities.py`（默认值、缓存、幂等/并发 generation、失败 runtime、订阅裁剪、reload payload、交互 stop 保留 expire）。
+- 扩展系统设置 AI 兼容委托、Webhook fail-closed、台账关闭不挡 ActionEvent 写入、前端导航能力过滤单测。
+
 ## [0.72.0-beta.1] — 2026-07-22 · minor（次版本预发布） · 前端体验系统优化
 
 ### Added

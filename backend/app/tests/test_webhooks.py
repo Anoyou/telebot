@@ -87,6 +87,19 @@ def _allow_webhook_ingress(monkeypatch: pytest.MonkeyPatch):
     )
 
 
+@pytest.fixture(autouse=True)
+def _enable_webhooks_capability():
+    """公开 webhook 投递依赖进程内能力缓存；测试默认开启。"""
+
+    from app.services import platform_capabilities as platform_caps
+
+    platform_caps._reset_for_tests()
+    platform_caps._DESIRED["webhooks"] = True
+    platform_caps._CACHE_READY = True
+    yield
+    platform_caps._reset_for_tests()
+
+
 @asynccontextmanager
 async def _client(db: _FakeDB):
     previous = dict(app.dependency_overrides)
@@ -184,6 +197,36 @@ async def test_ingress_limit_rejects_before_database_access(
 
     assert response.status_code == 429
     assert db.get_calls == []
+
+
+@pytest.mark.asyncio
+async def test_deliver_webhook_module_disabled_is_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """关闭 webhooks 模块后，最前层 404：不访问 DB、不限流、不投递。"""
+
+    from app.services import platform_capabilities as platform_caps
+
+    platform_caps._DESIRED["webhooks"] = False
+    platform_caps._CACHE_READY = True
+    db = _FakeDB(token="good-token")
+    publish = AsyncMock()
+    ingress = AsyncMock()
+    monkeypatch.setattr(webhooks_api, "publish_cmd_with_ack", publish)
+    monkeypatch.setattr(webhooks_api, "_enforce_webhook_ingress_rate_limit", ingress)
+
+    async with _client(db) as client:
+        response = await client.post(
+            "/api/webhooks/1/default",
+            headers=_headers("good-token"),
+            json={"event": "demo"},
+        )
+
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "WEBHOOK_MODULE_DISABLED"
+    assert db.get_calls == []
+    ingress.assert_not_awaited()
+    publish.assert_not_awaited()
 
 
 @pytest.mark.asyncio

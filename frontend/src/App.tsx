@@ -1,5 +1,6 @@
-import React, { Suspense, lazy } from "react";
-import { Navigate, Route, Routes, useLocation } from "react-router-dom";
+import React, { Suspense, lazy, type ReactNode } from "react";
+import { Link, Navigate, Route, Routes, useLocation } from "react-router-dom";
+import { useQuery } from "@tanstack/react-query";
 
 import { AppShell } from "@/components/layout/AppShell";
 import { RequireAuth } from "@/components/layout/RequireAuth";
@@ -8,6 +9,12 @@ import { Login } from "@/pages/Login";
 import { Dashboard } from "@/pages/Dashboard";
 import { Skeleton } from "@/components/ui/misc";
 import { PageShell } from "@/components/layout/PageScaffold";
+import { getPlatformCapabilities, getSystemSettings } from "@/api/system";
+import type { PlatformModuleKey } from "@/api/types";
+import {
+  capabilityEnabledMap,
+  moduleLabel,
+} from "@/lib/navigation";
 
 // 把不影响首屏的页面拆成 lazy chunk：
 //   - 用户最常进入的是 Dashboard 与账号列表，这些保持 eager；
@@ -85,6 +92,53 @@ function AIProvidersRedirect() {
   }
   targetParams.delete("new");
   return <Navigate to={`/ai?${targetParams.toString()}`} replace />;
+}
+
+/** 直达已关闭模块时保留 URL，显示暂停页而不是白屏。 */
+function CapabilityGate({
+  moduleKey,
+  children,
+}: {
+  moduleKey: PlatformModuleKey;
+  children: ReactNode;
+}) {
+  const settingsQ = useQuery({
+    queryKey: ["system", "settings"],
+    queryFn: getSystemSettings,
+    staleTime: 30_000,
+  });
+  const capsQ = useQuery({
+    queryKey: ["system", "capabilities"],
+    queryFn: getPlatformCapabilities,
+    staleTime: 15_000,
+  });
+  const enabled = capabilityEnabledMap(capsQ.data, settingsQ.data?.ai_enabled ?? true);
+  if (capsQ.isLoading && settingsQ.isLoading) {
+    return <PageFallback />;
+  }
+  if (enabled[moduleKey] === false) {
+    const label = moduleLabel(moduleKey);
+    return (
+      <PageShell>
+        <div className="mx-auto flex max-w-lg flex-col items-start gap-4 rounded-lg border bg-card p-6 shadow-sm">
+          <div>
+            <h1 className="text-lg font-semibold">模块已暂停</h1>
+            <p className="mt-2 text-sm leading-6 text-muted-foreground">
+              {label} 平台能力当前已关闭。配置、Token 与历史数据均保留；重新启用后即可继续使用。
+              页面地址保持不变，便于书签与深链接。
+            </p>
+          </div>
+          <Link
+            to="/settings?tab=platform"
+            className="rounded-md bg-primary px-4 py-2 text-sm text-primary-foreground"
+          >
+            前往平台能力设置
+          </Link>
+        </div>
+      </PageShell>
+    );
+  }
+  return <>{children}</>;
 }
 
 export class AppErrorBoundary extends React.Component<
@@ -259,7 +313,9 @@ export default function App() {
             path="interaction"
             element={
               <Suspense fallback={<PageFallback />}>
-                <InteractionIndex />
+                <CapabilityGate moduleKey="interaction_bot">
+                  <InteractionIndex />
+                </CapabilityGate>
               </Suspense>
             }
           />
@@ -267,7 +323,9 @@ export default function App() {
             path="ledger"
             element={
               <Suspense fallback={<PageFallback />}>
-                <LedgerPage />
+                <CapabilityGate moduleKey="ledger">
+                  <LedgerPage />
+                </CapabilityGate>
               </Suspense>
             }
           />
@@ -275,7 +333,9 @@ export default function App() {
             path="dispatch-debug"
             element={
               <Suspense fallback={<PageFallback />}>
-                <DispatchDebugPage />
+                <CapabilityGate moduleKey="dispatch_debug">
+                  <DispatchDebugPage />
+                </CapabilityGate>
               </Suspense>
             }
           />
@@ -283,7 +343,9 @@ export default function App() {
             path="webhooks"
             element={
               <Suspense fallback={<PageFallback />}>
-                <WebhooksPage />
+                <CapabilityGate moduleKey="webhooks">
+                  <WebhooksPage />
+                </CapabilityGate>
               </Suspense>
             }
           />
@@ -291,7 +353,9 @@ export default function App() {
             path="ai/liveness"
             element={
               <Suspense fallback={<PageFallback />}>
-                <AILivenessPage />
+                <CapabilityGate moduleKey="ai">
+                  <AILivenessPage />
+                </CapabilityGate>
               </Suspense>
             }
           />
@@ -315,7 +379,9 @@ export default function App() {
             path="ai"
             element={
               <Suspense fallback={<PageFallback />}>
-                <AIIndex />
+                <CapabilityGate moduleKey="ai">
+                  <AIIndex />
+                </CapabilityGate>
               </Suspense>
             }
           />

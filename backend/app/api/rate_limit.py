@@ -53,6 +53,7 @@ from ..schemas.rate_limit import (
 )
 from ..services import audit as audit_svc
 from ..services import auth_login_security, event_trace
+from ..services import platform_capabilities as platform_caps
 from ..services import rate_limit_service as svc
 from ..services.ai_feature import AI_ENABLED_SETTING_KEY, normalize_ai_enabled
 from ..util.update_target import normalize_update_branch, normalize_update_remote
@@ -557,19 +558,25 @@ async def post_kill_switch(payload: KillSwitchRequest, db: DBSession, user: Curr
     from ..services import account_bot_runtime, interaction_bot_runtime
     from ..worker import supervisor
 
-    operations = (
-        (
+    if enabled:
+        operations = (
             supervisor.stop_running_workers(),
             account_bot_runtime.stop_account_bot_manager(),
             interaction_bot_runtime.stop_interaction_bot_manager(),
         )
-        if enabled
-        else (
+    else:
+        # 总闸恢复时仍尊重平台能力：Interaction 模块关闭则不重启交互 manager。
+        interaction_ops: list[Any] = []
+        try:
+            if platform_caps.is_module_enabled_cached("interaction_bot", fail_closed=False):
+                interaction_ops.append(interaction_bot_runtime.start_interaction_bot_manager())
+        except Exception:  # noqa: BLE001
+            interaction_ops.append(interaction_bot_runtime.start_interaction_bot_manager())
+        operations = (
             supervisor.start_active_workers(),
             account_bot_runtime.start_account_bot_manager(),
-            interaction_bot_runtime.start_interaction_bot_manager(),
+            *interaction_ops,
         )
-    )
     results = await asyncio.gather(*operations, return_exceptions=True)
     failures = [
         f"{type(result).__name__}: {result}"
@@ -627,7 +634,14 @@ async def get_system_settings(db: DBSession, _user: CurrentUser) -> dict[str, An
             "branch": os.getenv("TELEPILOT_UPDATE_BRANCH", "main"),
         },
     )
-    ai_enabled_val = await _get_setting(db, AI_ENABLED_SETTING_KEY, {"enabled": True})
+    # AI 开关委托平台能力服务（保留 settings 兼容字段）。
+    try:
+        if not platform_caps.get_snapshot().cache_ready:
+            await platform_caps.refresh_cache_from_db(db)
+        ai_enabled = platform_caps.is_ai_enabled_cached(fail_closed=False)
+    except Exception:  # noqa: BLE001
+        ai_enabled_val = await _get_setting(db, AI_ENABLED_SETTING_KEY, {"enabled": True})
+        ai_enabled = normalize_ai_enabled(ai_enabled_val)
     llm_val = await _get_setting(db, "llm_limits", {})
     payout_val = await _get_setting(db, "payout_limits", {})
     log_val = await _get_setting(db, "log_retention", {})
@@ -674,7 +688,7 @@ async def get_system_settings(db: DBSession, _user: CurrentUser) -> dict[str, An
             if isinstance(prefix_required_val, dict)
             else bool(prefix_required_val)
         ),
-        "ai_enabled": normalize_ai_enabled(ai_enabled_val),
+        "ai_enabled": ai_enabled,
         "command_echo_guard_previous_messages": _normalize_command_echo_guard_limit(echo_guard_source),
         "login_security": auth_login_security.login_security_config_to_dict(login_security),
         "llm_limits": {
@@ -806,10 +820,12 @@ async def patch_system_settings(
             raise _bad("invalid_timezone", f"无效时区：{tz}")
         await _set_setting(db, "timezone", {"value": tz or "Asia/Shanghai"})
     if payload.ai_enabled is not None:
-        enabled = bool(payload.ai_enabled)
-        await _set_setting(db, AI_ENABLED_SETTING_KEY, {"enabled": enabled})
-        await _audit(db, user.id, "set_ai_enabled", target="system", detail={"enabled": enabled})
-        await _broadcast_reload()
+        # 兼容委托：写入 generation、本地状态机与 CMD_RELOAD_CONFIG 均由平台能力服务处理。
+        await platform_caps.set_ai_enabled_compat(
+            db,
+            bool(payload.ai_enabled),
+            user_id=user.id,
+        )
     if payload.sudo_enabled is not None:
         enabled = bool(payload.sudo_enabled)
         await _set_setting(db, "sudo_enabled", {"enabled": enabled})

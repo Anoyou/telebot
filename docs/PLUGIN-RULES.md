@@ -18,6 +18,7 @@
 12. AI 能力必须声明 `permissions=["ai_text"]`，并通过 `ctx.ai` 使用平台 Provider、fallback 和预算。
 13. 插件启停、禁用、热重载、超时和卸载时，必须清理 handler、session、scheduler job、asyncio task、临时消息、临时文件和游戏状态。
 14. 日志必须脱敏，不得写入 token、session、完整原生 payload、隐私消息或完整敏感文件路径。
+15. 可选：声明 `requires_platform_capabilities`（如 `ai` / `interaction_bot` / `webhooks`）。平台能力关闭时只裁剪依赖入口，不得把 Interaction 专属能力静默降级成错误的 userbot 行为。见 [平台能力](./PLATFORM-CAPABILITIES.md)。
 
 ## 禁止
 

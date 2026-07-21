@@ -11,9 +11,15 @@ from fastapi import APIRouter, Query
 from pydantic import BaseModel, Field
 
 from ..deps import CurrentUser, DBSession
-from ..services import ledger_service, stats_service
+from ..services import ledger_service, platform_capabilities, stats_service
 
 router = APIRouter(prefix="/api/ledger", tags=["ledger"])
+
+
+async def _require_ledger_module(db: DBSession) -> None:
+    """台账操作面门禁；不停止 ActionEvent / 补偿主账写入。"""
+
+    await platform_capabilities.require_module_enabled(db, "ledger")
 
 
 class LedgerEntryOut(BaseModel):
@@ -225,6 +231,7 @@ async def list_ledger_entries(
     status: str | None = Query(default=None),
     limit: int = Query(default=100, ge=1, le=500),
 ) -> LedgerEntriesResponse:
+    await _require_ledger_module(db)
     entries = await ledger_service.list_ledger_entries(
         db,
         _filters(
@@ -259,6 +266,7 @@ async def get_ledger_summary(
     amount_max: Decimal | None = Query(default=None),
     status: str | None = Query(default=None),
 ) -> LedgerSummaryOut:
+    await _require_ledger_module(db)
     summary = await ledger_service.summarize_ledger(
         db,
         _filters(
@@ -288,6 +296,7 @@ async def get_operational_stats(
     chat_id: int | None = Query(default=None),
     plugin_key: str | None = Query(default=None),
 ) -> OperationalStatsOut:
+    await _require_ledger_module(db)
     stats = await stats_service.summarize_operational_stats(
         db,
         _stats_filters(
@@ -310,6 +319,7 @@ async def list_compensations(
     plugin_key: str | None = Query(default=None),
     limit: int = Query(default=100, ge=1, le=500),
 ) -> LedgerCompensationsResponse:
+    await _require_ledger_module(db)
     rows = await ledger_service.list_compensations(
         db,
         account_id=account_id,
@@ -327,6 +337,7 @@ async def mark_compensation_manual_paid(
     db: DBSession,
     user: CurrentUser,
 ) -> LedgerCompensationOut:
+    await _require_ledger_module(db)
     row = await ledger_service.mark_compensation_manual_paid(
         db,
         compensation_id,
@@ -343,6 +354,7 @@ async def reset_ledger(
     db: DBSession,
     user: CurrentUser,
 ) -> LedgerResetOut:
+    await _require_ledger_module(db)
     result = await ledger_service.reset_ledger_data(db, user_id=user.id)
     await db.commit()
     return LedgerResetOut(**asdict(result))

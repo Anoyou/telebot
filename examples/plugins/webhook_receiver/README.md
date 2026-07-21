@@ -18,6 +18,8 @@ curl -X POST 'https://<telepilot-host>/api/webhooks/<account_id>/default' \
 
 接口返回 `202` 表示账号 Worker 已确认接收。插件是否命中、消息是否成功发送，请到「日志」或 Trace 中查看。
 
+若系统关闭了入站 Webhook 平台能力，公开 URL 会直接 `404`，Hook Token 与配置仍保留，重新开启后无需重建。
+
 ## 目录
 
 ```text

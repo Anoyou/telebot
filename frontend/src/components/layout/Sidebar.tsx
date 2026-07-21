@@ -29,7 +29,12 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { cn } from "@/lib/utils";
 import { APP_VERSION_LABEL } from "@/lib/version";
-import { getSystemSettings } from "@/api/system";
+import { getPlatformCapabilities, getSystemSettings } from "@/api/system";
+import {
+  capabilityEnabledMap,
+  filterNavByCapabilities,
+  type CapabilityEnabledMap,
+} from "@/lib/navigation";
 import changelogRaw from "../../../../CHANGELOG.md?raw";
 
 interface NavItem {
@@ -53,12 +58,17 @@ const NAV: NavItem[] = [
   { to: "/settings", label: "系统", icon: Cog },
 ];
 
+/** @deprecated 使用 navForCapabilities；保留兼容导出 */
 function navForAIState(aiEnabled: boolean): NavItem[] {
-  return NAV.filter((item) => aiEnabled || item.to !== "/ai");
+  return filterNavByCapabilities(NAV, { ai: aiEnabled });
 }
 
-export function mobilePrimaryNavForAIState(aiEnabled: boolean): NavItem[] {
-  return navForAIState(aiEnabled).filter((item) =>
+export function navForCapabilities(enabled: CapabilityEnabledMap): NavItem[] {
+  return filterNavByCapabilities(NAV, enabled);
+}
+
+export function mobilePrimaryNavForCapabilities(enabled: CapabilityEnabledMap): NavItem[] {
+  return navForCapabilities(enabled).filter((item) =>
     item.to === "/" ||
     item.to === "/plugins" ||
     item.to === "/interaction" ||
@@ -66,10 +76,23 @@ export function mobilePrimaryNavForAIState(aiEnabled: boolean): NavItem[] {
   );
 }
 
-export function mobileMoreNavForAIState(aiEnabled: boolean): NavItem[] {
-  const primary = new Set(mobilePrimaryNavForAIState(aiEnabled).map((item) => item.to));
-  return navForAIState(aiEnabled).filter((item) => !primary.has(item.to));
+export function mobileMoreNavForCapabilities(enabled: CapabilityEnabledMap): NavItem[] {
+  const primary = new Set(mobilePrimaryNavForCapabilities(enabled).map((item) => item.to));
+  return navForCapabilities(enabled).filter((item) => !primary.has(item.to));
 }
+
+/** @deprecated 兼容旧调用 */
+export function mobilePrimaryNavForAIState(aiEnabled: boolean): NavItem[] {
+  return mobilePrimaryNavForCapabilities({ ai: aiEnabled });
+}
+
+/** @deprecated 兼容旧调用 */
+export function mobileMoreNavForAIState(aiEnabled: boolean): NavItem[] {
+  return mobileMoreNavForCapabilities({ ai: aiEnabled });
+}
+
+// 避免 unused 警告：仍可能被外部测试引用
+void navForAIState;
 
 function NavList({
   collapsed = false,
@@ -83,7 +106,13 @@ function NavList({
     queryFn: getSystemSettings,
     staleTime: 30_000,
   });
-  const navItems = navForAIState(settingsQ.data?.ai_enabled ?? true);
+  const capsQ = useQuery({
+    queryKey: ["system", "capabilities"],
+    queryFn: getPlatformCapabilities,
+    staleTime: 15_000,
+  });
+  const enabled = capabilityEnabledMap(capsQ.data, settingsQ.data?.ai_enabled ?? true);
+  const navItems = navForCapabilities(enabled);
 
   return (
     <nav className="flex-1 space-y-1.5 overflow-y-auto px-4 py-3 text-sm">

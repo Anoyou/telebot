@@ -15,6 +15,7 @@
 - [插件概览](./PLUGIN-OVERVIEW.md)
 - [HTTP facade](./PLUGIN-HTTP.md)
 - [AI facade](./PLUGIN-AI.md)
+- [平台能力热插拔](./PLATFORM-CAPABILITIES.md)
 - [远程插件](./PLUGIN-REMOTE.md)
 - [安全边界](./PLUGIN-SAFETY.md)
 - [开发者工具链](./PLUGIN-DEVTOOLS.md)

@@ -1188,6 +1188,17 @@ async def sync_account_bot(aid: int) -> None:
 async def start_interaction_bot_manager() -> int:
     """启动所有已启用的交互 Bot polling task。"""
 
+    try:
+        from . import platform_capabilities as platform_caps
+
+        if not platform_caps.is_module_enabled_cached("interaction_bot", fail_closed=False):
+            # 缓存未就绪时 fail_closed=False 默认 true；若已加载且关闭则跳过。
+            if platform_caps.get_snapshot().cache_ready:
+                log.info("interaction_bot 平台模块已关闭，跳过 interaction bot manager 启动")
+                return 0
+    except Exception:  # noqa: BLE001
+        pass
+
     async with AsyncSessionLocal() as db:
         kill_row = await db.get(SystemSetting, "kill_switch")
         kill_value = kill_row.value if kill_row is not None else None
@@ -1220,17 +1231,19 @@ async def start_interaction_bot_manager() -> int:
 
 
 async def stop_interaction_bot_manager() -> None:
-    """停止所有交互 Bot polling task。"""
+    """停止交互 Bot / 测试 Bot polling。
+
+    冻结边界：
+    - 只停交互 polling 与测试 Bot，**不**停止管理 Bot（account_bot_manager）。
+    - **保留**会话过期任务：已有会话按原始过期时间处理，不因模块关闭而中断 expire drain。
+    - 不触碰 payout / 补偿 / ActionEvent（这些在 userbot worker 与独立补偿链路）。
+    """
 
     async with _TASK_LOCK:
-        tasks = (
-            list(_INTERACTION_TASKS.values())
-            + list(_TRANSFER_TEST_TASKS.values())
-            + list(_INTERACTION_SESSION_EXPIRE_TASKS.values())
-        )
+        tasks = list(_INTERACTION_TASKS.values()) + list(_TRANSFER_TEST_TASKS.values())
         _INTERACTION_TASKS.clear()
         _TRANSFER_TEST_TASKS.clear()
-        _INTERACTION_SESSION_EXPIRE_TASKS.clear()
+        # 有意保留 _INTERACTION_SESSION_EXPIRE_TASKS
     for task in tasks:
         task.cancel()
     if tasks:
@@ -1244,8 +1257,43 @@ def is_interaction_bot_running(aid: int) -> bool:
     return bool(task and not task.done())
 
 
+def count_interaction_bot_tasks() -> int:
+    """当前交互 Bot / 测试 Bot / 会话过期任务数量（资源摘要用）。"""
+
+    return (
+        len(_INTERACTION_TASKS)
+        + len(_TRANSFER_TEST_TASKS)
+        + len(_INTERACTION_SESSION_EXPIRE_TASKS)
+    )
+
+
+def is_interaction_bot_manager_running() -> bool:
+    """是否有任一交互相关 polling / expire task。"""
+
+    return count_interaction_bot_tasks() > 0
+
+
 async def restart_interaction_bot(aid: int) -> None:
     """重启单个交互 Bot polling task。"""
+
+    try:
+        from . import platform_capabilities as platform_caps
+
+        if (
+            platform_caps.get_snapshot().cache_ready
+            and not platform_caps.is_module_enabled_cached("interaction_bot", fail_closed=False)
+        ):
+            # 模块关闭时确保旧 task 被停掉，不再重新拉起。
+            async with _TASK_LOCK:
+                old = _INTERACTION_TASKS.pop(aid, None)
+                old_transfer = _TRANSFER_TEST_TASKS.pop(aid, None)
+                old_expire = _INTERACTION_SESSION_EXPIRE_TASKS.pop(aid, None)
+            for task in (old, old_transfer, old_expire):
+                if task is not None:
+                    task.cancel()
+            return
+    except Exception:  # noqa: BLE001
+        pass
 
     async with _TASK_LOCK:
         old = _INTERACTION_TASKS.pop(aid, None)
@@ -2466,6 +2514,18 @@ async def _handle_update(aid: int, token: str, update: dict[str, Any]) -> None:
 
 
 async def _handle_interaction_update(aid: int, token: str, update: dict[str, Any]) -> None:
+    # 平台能力关闭后，即使遗留 polling task 仍在，也不再处理新更新。
+    try:
+        from . import platform_capabilities as platform_caps
+
+        if (
+            platform_caps.get_snapshot().cache_ready
+            and not platform_caps.is_module_enabled_cached("interaction_bot", fail_closed=False)
+        ):
+            return
+    except Exception:  # noqa: BLE001
+        pass
+
     incoming = _extract_incoming(aid, token, update)
     if incoming is None:
         return

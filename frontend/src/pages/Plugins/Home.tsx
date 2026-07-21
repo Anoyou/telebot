@@ -849,6 +849,24 @@ function FeatureZone({
                         <FeatureCapabilityBadge show={usesAI} tone="warn" title="插件会调用 TelePilot 的 AI 能力">
                           AI 调用
                         </FeatureCapabilityBadge>
+                        <FeatureCapabilityBadge
+                          show={Boolean(f.runtime_availability && f.runtime_availability !== "ready")}
+                          tone={f.runtime_availability === "paused" ? "danger" : "warn"}
+                          title={
+                            f.runtime_availability === "partial" &&
+                            (f.available_channels || []).includes("userbot")
+                              ? "部分平台能力已关闭；userbot 入口仍可用"
+                              : f.blocked_reason_code || "平台能力限制"
+                          }
+                        >
+                          {f.runtime_availability === "partial"
+                            ? "部分可用"
+                            : f.runtime_availability === "paused"
+                              ? "已暂停"
+                              : f.runtime_availability === "transitioning"
+                                ? "等待热加载"
+                                : "能力受限"}
+                        </FeatureCapabilityBadge>
                       </div>
                     </div>
                     {f.last_update_check_error ? (

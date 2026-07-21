@@ -9,6 +9,7 @@
 - `event_subscriptions` 声明 Event Bus 投递范围。
 - `on_interaction()` 返回结构化 `result` / `settlement`。
 - 示例参数使用 `response_text`；历史 `message` 配置字段会与标准信封 `payload["message"]` 冲突，只保留迁移兼容。
+- Interaction Bot 平台能力关闭时，仅 interaction 通道入口暂停；userbot 命令入口可继续。可选声明 `requires_platform_capabilities=["interaction_bot"]`。
 
 ## 结构
 

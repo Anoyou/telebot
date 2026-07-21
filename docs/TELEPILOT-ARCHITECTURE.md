@@ -39,6 +39,18 @@
 
 PluginContext 的可用字段、禁止事项与最小示例见 `docs/PLUGIN-API-REFERENCE.md` 和 `docs/PLUGIN-SAFETY.md`。
 
+## 4.1 平台能力热插拔
+
+AI、Interaction Bot、入站 Webhook、资金台账操作面与命中调试是可选平台模块，可在不重启服务的情况下热关闭 / 热启动。`userbot`、插件加载器、Action/审计/结算/补偿属于平台内核，不纳入普通模块关闭范围。
+
+- 持久化：`SystemSetting` 中的 `desired_enabled` + `generation`（无新迁移；缺失默认开启）。
+- 运行时：主进程与 worker 进程内缓存；公开入口 fail-closed。
+- 热切换：复用 `CMD_RELOAD_CONFIG` 与约 180 秒周期 reconcile，不新增独立能力 IPC。
+- Interaction 模块只管理交互 Bot manager；管理 Bot（Account Bot Manager）不受影响。
+- 台账关闭只冻结查询与操作面，不停止 ActionEvent 与补偿主账。
+
+完整说明见 `docs/PLATFORM-CAPABILITIES.md`。
+
 ## 5. 非目标说明
 
 本文仅解释现有架构图，不引入新的运行时模型，不修改权限模型、schema、

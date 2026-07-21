@@ -29,12 +29,18 @@ class FeatureInfo(BaseModel):
     event_subscriptions: list[dict[str, Any]] = Field(default_factory=list)
     capabilities: dict[str, Any] = Field(default_factory=dict)
     permissions: list[str] = Field(default_factory=list)
+    requires_platform_capabilities: list[str] = Field(default_factory=list)
     experimental: bool = False
     update_available: bool = False
     latest_version: str | None = None
     last_update_check_at: Any | None = None
     last_update_check_error: str | None = None
     lint_warnings: list[str] = []
+    # 平台能力热插拔：运行时入口可用性（纯新增字段，旧前端可忽略）
+    runtime_availability: str | None = None  # ready | partial | paused | transitioning
+    available_channels: list[str] = Field(default_factory=list)
+    blocked_entries: list[dict[str, Any]] = Field(default_factory=list)
+    blocked_reason_code: str | None = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -62,6 +68,7 @@ class FeatureInfo(BaseModel):
                 "event_subscriptions",
                 "capabilities",
                 "permissions",
+                "requires_platform_capabilities",
                 "experimental",
                 "x-experimental",
             ):
@@ -108,6 +115,12 @@ class FeatureInfo(BaseModel):
         capabilities = raw_capabilities if isinstance(raw_capabilities, dict) else {}
         raw_permissions = manifest.get("permissions")
         permissions = raw_permissions if isinstance(raw_permissions, list) else []
+        raw_requires_caps = manifest.get("requires_platform_capabilities")
+        requires_platform_capabilities = (
+            [str(item) for item in raw_requires_caps if isinstance(item, str) and item.strip()]
+            if isinstance(raw_requires_caps, list)
+            else []
+        )
         raw_lint_warnings = (
             getattr(installed_plugin, "lint_warnings", None)
             if installed_plugin is not None
@@ -130,6 +143,34 @@ class FeatureInfo(BaseModel):
             else None
         )
         display_name = raw_display_name.strip() if isinstance(raw_display_name, str) else ""
+        interaction_entries = [item for item in entries if isinstance(item, dict)]
+        event_subscription_items = [
+            item for item in event_subscriptions if isinstance(item, dict)
+        ]
+        permission_items = [
+            str(item) for item in permissions if isinstance(item, str) and item.strip()
+        ]
+        runtime_meta: dict[str, Any] = {}
+        try:
+            from ..services.platform_capabilities import evaluate_plugin_runtime_availability
+
+            runtime_meta = evaluate_plugin_runtime_availability(
+                permissions=permission_items,
+                capabilities=dict(capabilities) if isinstance(capabilities, dict) else {},
+                interaction_entries=interaction_entries,
+                event_subscriptions=event_subscription_items,
+                requires_platform_capabilities=requires_platform_capabilities,
+                preserve_command_trigger=bool(
+                    manifest.get("preserve_command_trigger", True)
+                ),
+            )
+        except Exception:  # noqa: BLE001
+            runtime_meta = {
+                "runtime_availability": "ready",
+                "available_channels": ["userbot"],
+                "blocked_entries": [],
+                "blocked_reason_code": None,
+            }
         return cls(
             key=f.key,
             display_name=display_name or f.display_name,
@@ -148,10 +189,11 @@ class FeatureInfo(BaseModel):
             config_actions=[item for item in config_actions if isinstance(item, dict)],
             category=category,
             interaction_profile=interaction_profile,
-            interaction_entries=[item for item in entries if isinstance(item, dict)],
-            event_subscriptions=[item for item in event_subscriptions if isinstance(item, dict)],
+            interaction_entries=interaction_entries,
+            event_subscriptions=event_subscription_items,
             capabilities=dict(capabilities),
-            permissions=[str(item) for item in permissions if isinstance(item, str) and item.strip()],
+            permissions=permission_items,
+            requires_platform_capabilities=requires_platform_capabilities,
             experimental=bool(
                 manifest.get("x-experimental") or manifest.get("experimental")
             ),
@@ -166,6 +208,10 @@ class FeatureInfo(BaseModel):
                 "last_update_check_error", getattr(remote_plugin, "last_update_check_error", None)
             ),
             lint_warnings=[item for item in lint_warnings if isinstance(item, str)],
+            runtime_availability=runtime_meta.get("runtime_availability"),
+            available_channels=list(runtime_meta.get("available_channels") or []),
+            blocked_entries=list(runtime_meta.get("blocked_entries") or []),
+            blocked_reason_code=runtime_meta.get("blocked_reason_code"),
         )
 
 
