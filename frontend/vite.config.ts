@@ -3,10 +3,14 @@ import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import { VitePWA } from "vite-plugin-pwa";
 import { fileURLToPath, URL } from "node:url";
+import { visualizer } from "rollup-plugin-visualizer";
 
 export default defineConfig({
   plugins: [
     react(),
+    ...(process.env.ANALYZE === "1"
+      ? [visualizer({ filename: "../docs/frontend/baseline/build-report.html", template: "treemap", gzipSize: true, brotliSize: true, open: false })]
+      : []),
     VitePWA({
       // 自动更新：新 SW 安装好后下次启动自动激活；前端再监听 needRefresh 提示用户刷新
       registerType: "autoUpdate",
@@ -113,7 +117,8 @@ export default defineConfig({
       output: {
         manualChunks: {
           echarts: ["echarts/core", "echarts/charts", "echarts/components", "echarts/renderers"],
-          markdown: ["react-markdown", "remark-gfm", "rehype-highlight", "highlight.js"],
+          "markdown-core": ["react-markdown", "remark-gfm"],
+          "markdown-highlight": ["rehype-highlight", "highlight.js"],
           radix: [
             "@radix-ui/react-dialog",
             "@radix-ui/react-dropdown-menu",

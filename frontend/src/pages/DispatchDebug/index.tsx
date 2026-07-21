@@ -5,8 +5,7 @@ import {
   Bug,
   CheckCircle2,
   ListTree,
-  Loader2,
-  RefreshCw,
+    RefreshCw,
   Route,
   Search,
   XCircle,
@@ -551,14 +550,13 @@ export function DispatchDebugPage() {
                 <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
                   <Button
                     type="submit"
-                    disabled={simulateMut.isPending || selectedAid === null || !text.trim()}
+                    loading={simulateMut.isPending}
+                    disabled={selectedAid === null || !text.trim()}
                     className="w-full active:scale-95 sm:w-auto"
                   >
-                    {simulateMut.isPending ? (
-                      <Loader2 className="mr-1 h-4 w-4 animate-spin" />
-                    ) : (
+                    {!simulateMut.isPending ? (
                       <Route className="mr-1 h-4 w-4" />
-                    )}
+                    ) : null}
                     模拟命中
                   </Button>
                   <Button

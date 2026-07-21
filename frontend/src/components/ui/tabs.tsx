@@ -23,16 +23,32 @@ TabsList.displayName = "TabsList";
 export const TabsTrigger = React.forwardRef<
   React.ElementRef<typeof TabsPrimitive.Trigger>,
   React.ComponentPropsWithoutRef<typeof TabsPrimitive.Trigger>
->(({ className, ...props }, ref) => (
-  <TabsPrimitive.Trigger
-    ref={ref}
-    className={cn(
-      "liquid-tab-trigger inline-flex h-8 min-w-[5.5rem] shrink-0 items-center justify-center whitespace-nowrap rounded-[7px] px-3 py-1.5 text-[13px] font-semibold ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/25 disabled:pointer-events-none disabled:opacity-50 data-[state=active]:text-foreground sm:min-w-0",
-      className,
-    )}
-    {...props}
-  />
-));
+>(({ className, ...props }, ref) => {
+  const localRef = React.useRef<React.ElementRef<typeof TabsPrimitive.Trigger> | null>(null);
+
+  React.useEffect(() => {
+    const trigger = localRef.current;
+    const controls = trigger?.getAttribute("aria-controls");
+    if (controls && !document.getElementById(controls)) {
+      trigger.removeAttribute("aria-controls");
+    }
+  });
+
+  return (
+    <TabsPrimitive.Trigger
+      ref={(node) => {
+        localRef.current = node;
+        if (typeof ref === "function") ref(node);
+        else if (ref) ref.current = node;
+      }}
+      className={cn(
+        "liquid-tab-trigger inline-flex h-8 min-w-[5.5rem] shrink-0 items-center justify-center whitespace-nowrap rounded-[7px] px-3 py-1.5 text-[13px] font-semibold ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/25 disabled:pointer-events-none disabled:opacity-50 data-[state=active]:text-foreground sm:min-w-0",
+        className,
+      )}
+      {...props}
+    />
+  );
+});
 TabsTrigger.displayName = "TabsTrigger";
 
 export const TabsContent = React.forwardRef<

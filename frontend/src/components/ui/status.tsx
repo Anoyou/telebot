@@ -10,6 +10,16 @@ import {
 import { cn } from "@/lib/utils";
 
 export type VisualTone = "primary" | "success" | "warn" | "danger" | "info" | "neutral";
+export type StatusToneDomain = "account" | "health" | "network";
+
+export function statusTone(domain: StatusToneDomain, status: string): VisualTone {
+  const maps: Record<StatusToneDomain, Record<string, VisualTone>> = {
+    account: { active: "success", paused: "neutral", floodwait: "warn", dead: "danger", login_required: "warn" },
+    health: { ok: "success", warn: "warn", err: "danger", loading: "neutral" },
+    network: { online: "success", error: "warn", loading: "neutral" },
+  };
+  return maps[domain][status] ?? "neutral";
+}
 
 type ToneClasses = {
   rail: string;
@@ -132,6 +142,7 @@ export function ToneRailCard({
   tone = "neutral",
   railTone,
   className,
+  titleClassName,
   valueClassName,
 }: {
   icon: ComponentType<{ className?: string }>;
@@ -141,6 +152,7 @@ export function ToneRailCard({
   tone?: VisualTone;
   railTone?: VisualTone;
   className?: string;
+  titleClassName?: string;
   valueClassName?: string;
 }) {
   const toneClass = toneClasses(tone);
@@ -155,7 +167,7 @@ export function ToneRailCard({
       <div className={cn("absolute inset-x-0 top-0 h-1", railClass)} />
       <CardHeader className="flex-row items-start justify-between space-y-0">
         <div className="min-w-0">
-          <CardTitle className="inline-flex max-w-full items-center gap-2 truncate">
+          <CardTitle className={cn("inline-flex max-w-full items-center gap-2 truncate", titleClassName)}>
             <span className={cn("grid h-7 w-7 shrink-0 place-items-center rounded-lg", toneClass.iconWrap)}>
               <Icon className={cn("h-4 w-4", toneClass.icon)} />
             </span>

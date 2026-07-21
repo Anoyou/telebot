@@ -19,8 +19,7 @@ import {
   ChevronRight,
   Copy,
   GripVertical,
-  Loader2,
-  Pencil,
+    Pencil,
   Plus,
   Save,
   Trash2,
@@ -251,8 +250,8 @@ export function ConfigDialog({
         </div>
         <DialogFooter className="!flex !flex-row gap-2 sm:space-x-0 [&>*]:min-w-0 [&>*]:flex-1 sm:[&>*]:flex-none">
           <Button variant="outline" onClick={requestClose} disabled={saving}>取消</Button>
-          <Button onClick={handleSave} disabled={saving}>
-            {saving ? <Spinner className="mr-2 h-4 w-4" /> : <Save className="mr-2 h-4 w-4" />}
+          <Button onClick={handleSave} loading={saving}>
+            {!saving ? <Save className="mr-2 h-4 w-4" /> : null}
             {saving ? "保存中…" : "保存"}
           </Button>
         </DialogFooter>
@@ -1626,8 +1625,8 @@ function ConfigActionButton({
 
   if (inputFields.length === 0) {
     return (
-      <Button type="button" variant="outline" size="sm" disabled={running} onClick={() => run({})}>
-        {running ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : <Wand className="mr-1 h-4 w-4" />}
+      <Button type="button" variant="outline" size="sm" loading={running} onClick={() => run({})}>
+        {!running ? <Wand className="mr-1 h-4 w-4" /> : null}
         {buttonLabel}
       </Button>
     );
@@ -1635,8 +1634,8 @@ function ConfigActionButton({
 
   return (
     <>
-      <Button type="button" variant="outline" size="sm" disabled={running} onClick={() => setOpen(true)}>
-        {running ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : <Wand className="mr-1 h-4 w-4" />}
+      <Button type="button" variant="outline" size="sm" loading={running} onClick={() => setOpen(true)}>
+        {!running ? <Wand className="mr-1 h-4 w-4" /> : null}
         {buttonLabel}
       </Button>
       <Dialog open={open} onOpenChange={setOpen}>
@@ -1659,8 +1658,8 @@ function ConfigActionButton({
           </div>
           <DialogFooter className="!flex !flex-row gap-2 sm:space-x-0 [&>*]:min-w-0 [&>*]:flex-1 sm:[&>*]:flex-none">
             <Button type="button" variant="outline" disabled={running} onClick={() => setOpen(false)}>取消</Button>
-            <Button type="button" disabled={running} onClick={() => run(inputValues)}>
-              {running ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Wand className="mr-2 h-4 w-4" />}
+            <Button type="button" loading={running} onClick={() => run(inputValues)}>
+              {!running ? <Wand className="mr-2 h-4 w-4" /> : null}
               {running ? "处理中…" : submitLabel}
             </Button>
           </DialogFooter>

@@ -5,10 +5,8 @@ import {
   Activity,
   ArrowLeft,
   ChevronDown,
-  ChevronLeft,
   ChevronRight,
   Filter,
-  Loader2,
   LockKeyhole,
   MessageSquare,
   RotateCcw,
@@ -33,11 +31,13 @@ import type {
 } from "@/api/types";
 import { PageHeader, PageShell } from "@/components/layout/PageScaffold";
 import { Button } from "@/components/ui/button";
+import { EmptyState } from "@/components/feedback/EmptyState";
+import { ErrorState } from "@/components/feedback/ErrorState";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { MetaBadge } from "@/components/ui/meta-badge";
 import { Select } from "@/components/ui/select";
-import { Skeleton } from "@/components/ui/misc";
+import { Skeleton, Spinner } from "@/components/ui/misc";
 import { Textarea } from "@/components/ui/textarea";
 import { getErrMsg } from "@/lib/api";
 import { cn } from "@/lib/utils";
@@ -331,7 +331,7 @@ function ChatResponseBranch({
           </div>
         ) : (
           <div className="mt-3 flex items-center gap-2 text-sm text-muted-foreground">
-            <Loader2 className="h-4 w-4 animate-spin text-primary" />
+            <Spinner className="h-4 w-4 animate-spin text-primary" />
             正在等待上游返回首段内容
           </div>
         )
@@ -887,7 +887,7 @@ export function LLMLivenessPage() {
               <Skeleton className="h-9 w-full rounded-md" />
               {[0, 1, 2, 3].map((item) => <Skeleton key={item} className="h-8 w-full rounded-md" />)}
             </div>
-            <div className="flex min-h-[560px] flex-col overflow-hidden rounded-lg border bg-card">
+            <div className="flex min-h-[420px] flex-col overflow-hidden rounded-lg border bg-card">
               <div className="flex items-center gap-3 border-b p-4">
                 <Skeleton className="h-8 w-8 shrink-0 rounded-full" />
                 <div className="flex-1 space-y-2"><Skeleton className="h-4 w-36" /><Skeleton className="h-3 w-48" /></div>
@@ -916,6 +916,7 @@ export function LLMLivenessPage() {
           description="无法加载模型提供商，请返回供应商页面检查配置。"
           actions={<Button asChild variant="outline"><Link to="/ai?tab=providers">返回模型提供商</Link></Button>}
         />
+        <ErrorState error={providersQ.error} onRetry={() => void providersQ.refetch()} />
       </PageShell>
     );
   }
@@ -928,6 +929,12 @@ export function LLMLivenessPage() {
           title="模型测活"
           description="至少配置一个 LLM Provider 后才能发起真实对话测活。"
           actions={<Button asChild><Link to="/ai?tab=providers">配置模型提供商</Link></Button>}
+        />
+        <EmptyState
+          icon={Activity}
+          title="暂无可测活的模型提供商"
+          description="先添加 Provider 并启用至少一个模型，再回来发起真实对话测活。"
+          action={<Button asChild size="touch"><Link to="/ai?tab=providers">配置模型提供商</Link></Button>}
         />
       </PageShell>
     );
@@ -1049,7 +1056,7 @@ export function LLMLivenessPage() {
               ) : null}
             </label>
           )) : (
-            <div className="px-3 py-8 text-center text-xs text-muted-foreground">没有匹配的模型。</div>
+            <EmptyState className="min-h-0 rounded-none border-0 px-3" size="sm" title="没有匹配的模型" />
           )}
         </div>
       </div>
@@ -1211,24 +1218,6 @@ export function LLMLivenessPage() {
         />
       ) : (
         <div className="relative grid min-h-0 gap-4 xl:grid-cols-[280px_minmax(0,1fr)] 2xl:grid-cols-[280px_minmax(0,1fr)_280px]">
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            className="absolute left-0 top-1/2 z-20 h-11 -translate-y-1/2 rounded-l-none rounded-r-2xl border-l-0 border-primary/45 bg-card/95 pl-2.5 pr-4 font-semibold text-foreground shadow-lg shadow-black/15 ring-1 ring-primary/15 hover:bg-accent xl:hidden"
-            onClick={() => { setSettingsOpen(false); setScopeOpen(true); }}
-          >
-            <ChevronRight className="mr-1 h-4 w-4 text-primary" />测试范围
-          </Button>
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            className="absolute right-0 top-1/2 z-20 h-11 -translate-y-1/2 rounded-l-2xl rounded-r-none border-r-0 border-primary/45 bg-card/95 pl-4 pr-2.5 font-semibold text-foreground shadow-lg shadow-black/15 ring-1 ring-primary/15 hover:bg-accent 2xl:hidden"
-            onClick={() => { setScopeOpen(false); setSettingsOpen(true); }}
-          >
-            请求设置<ChevronLeft className="ml-1 h-4 w-4 text-primary" />
-          </Button>
           {scopeOpen ? (
             <button
               type="button"
@@ -1249,7 +1238,7 @@ export function LLMLivenessPage() {
             {scopePanel}
           </aside>
 
-          <section className="flex h-[calc(100dvh-15rem)] min-h-[560px] min-w-0 flex-col overflow-hidden rounded-lg border bg-card shadow-sm xl:min-h-[650px]">
+          <section className="flex h-[calc(100dvh-12rem)] min-h-[420px] min-w-0 flex-col overflow-hidden rounded-lg border bg-card shadow-sm xl:min-h-[650px]">
             <header className="flex flex-wrap items-center justify-between gap-3 border-b px-4 py-3">
               <div className="min-w-0">
                 <div className="flex flex-wrap items-center gap-2">
@@ -1261,15 +1250,40 @@ export function LLMLivenessPage() {
                   {selectedModels.length} 个模型并行回复，结果按模型身份逐条展示。
                 </div>
               </div>
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                disabled={busy || rounds.length === 0}
-                onClick={resetConversation}
-              >
-                <RotateCcw className="mr-1 h-4 w-4" />清空对话
-              </Button>
+              <div className="flex shrink-0 items-center gap-1">
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  className="h-8 w-8 p-0 xl:hidden"
+                  aria-label="打开测试范围"
+                  title="打开测试范围"
+                  onClick={() => { setSettingsOpen(false); setScopeOpen(true); }}
+                >
+                  <Filter className="h-4 w-4" />
+                </Button>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  className="h-8 w-8 p-0 2xl:hidden"
+                  aria-label="打开请求设置"
+                  title="打开请求设置"
+                  onClick={() => { setScopeOpen(false); setSettingsOpen(true); }}
+                >
+                  <SlidersHorizontal className="h-4 w-4" />
+                </Button>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  className="h-8 px-2"
+                  disabled={busy || rounds.length === 0}
+                  onClick={resetConversation}
+                >
+                  <RotateCcw className="mr-1 h-4 w-4" />清空对话
+                </Button>
+              </div>
             </header>
 
             <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto bg-muted/15 px-4 py-5 sm:px-6">

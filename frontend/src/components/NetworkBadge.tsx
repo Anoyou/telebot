@@ -1,8 +1,10 @@
 // 网络环境徽章：显示当前后端进程出口 IP 的国家/地区，hover 看详情
 import { useQuery, useQueryClient, useMutation } from "@tanstack/react-query";
-import { Globe2, Loader2, RefreshCw, AlertTriangle } from "lucide-react";
+import { Globe2, RefreshCw, AlertTriangle } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import { Spinner } from "@/components/ui/misc";
+import { statusTone, toneClasses } from "@/components/ui/status";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -39,6 +41,7 @@ export function NetworkBadge() {
   const data = q.data;
   const flag = flagOf(data?.country);
   const hasError = !!data?.error || (!q.isLoading && !data?.ip);
+  const tone = toneClasses(statusTone("network", q.isLoading ? "loading" : hasError ? "error" : "online"));
 
   return (
     <DropdownMenu>
@@ -50,16 +53,16 @@ export function NetworkBadge() {
           title="主进程出口（账号自带代理时不算这里）"
         >
           {q.isLoading ? (
-            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            <Spinner size="sm" className={tone.icon} />
           ) : hasError ? (
-            <AlertTriangle className="h-3.5 w-3.5 text-warning" />
+            <AlertTriangle className={cn("h-3.5 w-3.5", tone.icon)} />
           ) : (
             <span className="text-base leading-none">{flag}</span>
           )}
           <span
             className={cn(
               "font-mono",
-              hasError && "text-warning",
+              hasError && tone.icon,
             )}
           >
             {q.isLoading

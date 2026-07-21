@@ -5,8 +5,7 @@ import {
   CheckCircle2,
   Copy,
   KeyRound,
-  Loader2,
-  RefreshCw,
+    RefreshCw,
   RotateCcw,
   ShieldCheck,
   TerminalSquare,
@@ -332,7 +331,7 @@ export function WebhooksPage() {
                         type="button"
                         variant="outline"
                         size="sm"
-                        disabled={resetMut.isPending}
+                        loading={resetMut.isPending}
                         onClick={() => {
                           if (window.confirm("确定重置该账号 Webhook token？旧 token 会立即失效。")) {
                             resetMut.mutate();
@@ -340,11 +339,9 @@ export function WebhooksPage() {
                         }}
                         className="w-full active:scale-95 sm:w-auto"
                       >
-                        {resetMut.isPending ? (
-                          <Loader2 className="mr-1 h-4 w-4 animate-spin" />
-                        ) : (
+                        {!resetMut.isPending ? (
                           <RotateCcw className="mr-1 h-4 w-4" />
-                        )}
+                        ) : null}
                         重置
                       </Button>
                     </div>

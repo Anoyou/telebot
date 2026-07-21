@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { CheckCircle2, Download, Loader2, Plus, Send, Square } from "lucide-react";
+import { CheckCircle2, Download, Plus, Send, Square } from "lucide-react";
 
 import {
   fetchProviderModelsPreview,
@@ -15,6 +15,7 @@ import type {
   QuickVerifyProviderStreamEvent,
 } from "@/api/types";
 import { Button } from "@/components/ui/button";
+import { Spinner } from "@/components/ui/misc";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { MetaBadge } from "@/components/ui/meta-badge";
@@ -305,8 +306,8 @@ export function ProviderCreateVerification({
             先获取模型，手动选择验证目标和推理强度；验证通过后才允许保存 Provider。
           </p>
         </div>
-        <Button type="button" size="sm" variant="outline" disabled={fetching || status === "running"} onClick={() => void fetchModels()}>
-          {fetching ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : <Download className="mr-1 h-4 w-4" />}
+        <Button type="button" size="sm" variant="outline" loading={fetching} disabled={status === "running"} onClick={() => void fetchModels()}>
+          {!fetching ? <Download className="mr-1 h-4 w-4" /> : null}
           {models.length > 0 ? "重新获取模型" : "获取模型列表"}
         </Button>
       </div>
@@ -424,7 +425,7 @@ export function ProviderCreateVerification({
               </div>
               <div className="max-w-[92%] rounded-xl rounded-bl-sm bg-muted px-3 py-2 text-sm leading-6 sm:max-w-[80%]">
                 {reply ? <p className="whitespace-pre-wrap break-words">{reply}</p> : status === "running" ? (
-                  <span className="inline-flex items-center gap-2 text-muted-foreground"><Loader2 className="h-4 w-4 animate-spin" />等待模型回复</span>
+                  <span className="inline-flex items-center gap-2 text-muted-foreground"><Spinner className="h-4 w-4 animate-spin" />等待模型回复</span>
                 ) : <span className="text-muted-foreground">模型没有返回可显示的内容。</span>}
               </div>
             </>

@@ -42,6 +42,9 @@ import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { MetaBadge } from "@/components/ui/meta-badge";
 import { Spinner } from "@/components/ui/misc";
+import { ResponsiveList } from "@/components/data/ResponsiveList";
+import { EmptyState } from "@/components/feedback/EmptyState";
+import { ErrorState } from "@/components/feedback/ErrorState";
 import { Select } from "@/components/ui/select";
 import { SectionHeader, SignalPill, ToneRailCard } from "@/components/ui/status";
 import type { VisualTone } from "@/components/ui/status";
@@ -169,8 +172,8 @@ export function LedgerPage() {
               <RefreshCw className="mr-2 h-4 w-4" />
               刷新
             </Button>
-            <Button type="button" variant="destructive" onClick={handleReset} disabled={resetMut.isPending}>
-              {resetMut.isPending ? <Spinner className="mr-2" /> : <Trash2 className="mr-2 h-4 w-4" />}
+            <Button type="button" variant="destructive" onClick={handleReset} loading={resetMut.isPending}>
+              {!resetMut.isPending ? <Trash2 className="mr-2 h-4 w-4" /> : null}
               重置数据
             </Button>
           </>
@@ -196,17 +199,7 @@ export function LedgerPage() {
         onReset={() => setFilters(DEFAULT_FILTERS)}
       />
 
-      {error ? (
-        <Card>
-          <CardHeader>
-            <SectionHeader
-              icon={AlertTriangle}
-              title="读取失败"
-              description={getErrMsg(error)}
-            />
-          </CardHeader>
-        </Card>
-      ) : null}
+      {error ? <ErrorState error={getErrMsg(error)} onRetry={refreshAll} /> : null}
 
       <div className="grid gap-6 xl:grid-cols-[minmax(0,1.7fr)_minmax(320px,0.8fr)]">
         <TrendPanel summary={summary} loading={isLoading} />
@@ -321,11 +314,11 @@ function OperationalTrend({ stats }: { stats: OperationalStats }) {
       </CardHeader>
       <CardContent>
         {xAxis.length === 0 ? (
-          <EmptyState text="暂无运营动作" />
+          <EmptyState title="暂无运营动作" />
         ) : (
           <div className="space-y-4">
             <LineTrend xAxis={xAxis} series={series} height={260} />
-            <div className="grid grid-cols-3 gap-3 border-t border-border/70 pt-3">
+            <div className="grid grid-cols-3 gap-3 border-t border-border/70 pt-3 max-sm:gap-1.5">
               <TrendValue label="开局" value={totals.started} tone="primary" />
               <TrendValue label="派奖成功" value={totals.succeeded} tone="success" />
               <TrendValue label="派奖失败" value={totals.failed} tone="danger" />
@@ -353,8 +346,8 @@ function TrendValue({
   }[tone];
   return (
     <div className="min-w-0 text-center">
-      <div className="truncate text-xs text-muted-foreground">{label}</div>
-      <div className={cn("mt-1 font-mono text-lg font-bold tabular-nums", toneClass)}>
+      <div className="truncate text-xs text-muted-foreground max-sm:text-[11px]">{label}</div>
+      <div className={cn("mt-1 font-mono text-lg font-bold tabular-nums max-sm:text-sm", toneClass)}>
         {formatInteger(value)}
       </div>
     </div>
@@ -394,7 +387,7 @@ function SourceMatrixPanel({ stats }: { stats: OperationalStats }) {
 
 function SummaryTiles({ summary }: { summary: LedgerSummary }) {
   return (
-    <div className="grid grid-cols-3 gap-2 md:gap-3">
+    <div className="grid grid-cols-1 gap-2 sm:grid-cols-3 md:gap-3">
       <ToneRailCard
         icon={ArrowDownLeft}
         title="入账"
@@ -563,7 +556,7 @@ function TrendPanel({ summary, loading }: { summary?: LedgerSummary; loading: bo
         {loading ? (
           <LoadingState />
         ) : xAxis.length === 0 ? (
-          <EmptyState text="暂无流水" />
+          <EmptyState title="暂无流水" />
         ) : (
           <LineTrend xAxis={xAxis} series={series} height={260} />
         )}
@@ -581,7 +574,7 @@ function ChatSummaryPanel({ summary }: { summary?: LedgerSummary }) {
       </CardHeader>
       <CardContent>
         {rows.length === 0 ? (
-          <EmptyState text="暂无群汇总" />
+          <EmptyState title="暂无群汇总" />
         ) : (
           <div className="space-y-2">
             {rows.map((item) => (
@@ -614,7 +607,7 @@ function RecipientSummaryPanel({ summary }: { summary?: LedgerSummary }) {
       </CardHeader>
       <CardContent>
         {rows.length === 0 ? (
-          <EmptyState text="暂无收款方身份记录" />
+          <EmptyState title="暂无收款方身份记录" />
         ) : (
           <div className="space-y-2">
             {rows.map((item) => (
@@ -666,8 +659,10 @@ function LedgerTable({
         {loading ? (
           <LoadingState />
         ) : entries.length === 0 ? (
-          <EmptyState text="暂无流水" />
+          <EmptyState title="暂无流水" />
         ) : (
+          <>
+          <div className="hidden md:block overflow-x-auto">
           <Table className="min-w-[1260px]">
             <TableHeader>
               <TableRow>
@@ -730,6 +725,31 @@ function LedgerTable({
               })}
             </TableBody>
           </Table>
+          </div>
+          <div className="md:hidden">
+            <ResponsiveList
+              data={entries}
+              rowKey={(entry) => `${entry.source}:${entry.source_id}`}
+              columns={[
+                { key: "time", header: "时间", priority: 0, render: (entry) => <div className="text-xs text-muted-foreground">{formatDateTime(entry.created_at)}</div> },
+                { key: "amount", header: "金额", priority: 0, render: (entry) => {
+                  const posted = isPostedLedgerStatus(entry.status);
+                  return <div className={cn("font-mono text-sm font-semibold tabular-nums", posted ? amountToneClass(entry.signed_amount) : "text-muted-foreground")}>{posted ? formatSignedAmount(entry) : `未计账 · ${formatAmount(entry.amount)}`}</div>;
+                } },
+                { key: "direction", header: "方向", priority: 1, render: (entry) => <DirectionBadge direction={entry.direction} posted={isPostedLedgerStatus(entry.status)} /> },
+                { key: "account", header: "账号", priority: 1, render: (entry) => <><div className="truncate text-sm">{accountLabel(entry.account_id)}</div><div className="font-mono text-[11px] text-muted-foreground">#{entry.account_id}</div></> },
+                { key: "chat", header: "群", priority: 1, render: (entry) => <><div className="truncate text-sm">{entry.chat_title || "-"}</div><div className="font-mono text-[11px] text-muted-foreground">{entry.chat_id ?? "-"}</div></> },
+                { key: "status", header: "状态", priority: 1, render: (entry) => <StatusBadge status={entry.status} /> },
+                { key: "recipient", header: "收款方", priority: 2, render: (entry) => <><div className="text-sm">{recipientDisplayName(entry)}</div><div className="font-mono text-[11px] text-muted-foreground">{entry.receiver_user_id != null ? `UID ${entry.receiver_user_id}` : "UID -"}</div></> },
+                { key: "plugin", header: "插件", priority: 2, render: (entry) => <><div className="font-mono text-xs">{entry.plugin_key || "-"}</div><div className="break-all font-mono text-[11px] text-muted-foreground">{entry.entry_key || "-"}</div></> },
+                { key: "channel", header: "通道", priority: 2, render: (entry) => <div className="font-mono text-xs">{entry.channel || "-"}</div> },
+                { key: "error", header: "错误", priority: 2, render: (entry) => <div className="font-mono text-xs">{entry.error_code || "-"}</div> },
+                { key: "key", header: "流水键", priority: 2, render: (entry) => <div className="break-all font-mono text-xs">{entry.payout_key || `#${entry.source_id}`}</div> },
+              ]}
+              empty={<EmptyState title="暂无流水" />}
+            />
+          </div>
+          </>
         )}
       </CardContent>
     </Card>
@@ -765,8 +785,10 @@ function CompensationTable({
         {loading ? (
           <LoadingState />
         ) : items.length === 0 ? (
-          <EmptyState text="暂无待补付事项" />
+          <EmptyState title="暂无待补付事项" />
         ) : (
+          <>
+          <div className="hidden md:block overflow-x-auto">
           <Table className="min-w-[1240px]">
             <TableHeader>
               <TableRow>
@@ -825,10 +847,11 @@ function CompensationTable({
                         type="button"
                         size="sm"
                         variant="outline"
+                        loading={rowPending}
                         disabled={pending}
                         onClick={() => onManualPaid(item)}
                       >
-                        {rowPending ? <Spinner className="mr-2" /> : <CheckCircle2 className="mr-2 h-4 w-4" />}
+                        {!rowPending ? <CheckCircle2 className="mr-2 h-4 w-4" /> : null}
                         核销
                       </Button>
                     </TableCell>
@@ -837,6 +860,28 @@ function CompensationTable({
               })}
             </TableBody>
           </Table>
+          </div>
+          <div className="md:hidden">
+            <ResponsiveList
+              data={items}
+              rowKey={(item) => item.id}
+              columns={[
+                { key: "time", header: "创建时间", priority: 0, render: (item) => <div className="text-xs text-muted-foreground">{formatDateTime(item.created_at)}</div> },
+                { key: "amount", header: "金额", priority: 0, render: (item) => <div className="font-mono text-sm font-semibold tabular-nums text-warning">{formatAmount(item.amount)}</div> },
+                { key: "status", header: "状态", priority: 1, render: (item) => <CompensationStatusBadge status={item.status} ambiguous={item.ambiguous} /> },
+                { key: "account", header: "账号", priority: 1, render: (item) => <><div className="truncate text-sm">{accountLabel(item.account_id)}</div><div className="font-mono text-[11px] text-muted-foreground">#{item.account_id}</div></> },
+                { key: "chat", header: "群", priority: 1, render: (item) => <><div className="truncate text-sm">{item.chat_title || "-"}</div><div className="font-mono text-[11px] text-muted-foreground">{item.chat_id}</div></> },
+                { key: "receiver", header: "收款方", priority: 2, render: (item) => <><div className="text-sm">{item.receiver_name || item.receiver_user_id || "-"}</div><div className="font-mono text-[11px] text-muted-foreground">{item.receiver_user_id != null ? `UID ${item.receiver_user_id}` : "UID -"}</div></> },
+                { key: "plugin", header: "插件", priority: 2, render: (item) => <><div className="font-mono text-xs">{item.plugin_key || "-"}</div><div className="break-all font-mono text-[11px] text-muted-foreground">{item.entry_key || "-"}</div></> },
+                { key: "retry", header: "重试", priority: 2, render: (item) => <div className="font-mono text-xs">{item.retry_count}</div> },
+                { key: "error", header: "错误", priority: 2, render: (item) => <div className="font-mono text-xs">{item.error_code_last || item.error_code_first || item.error_last || "-"}</div> },
+                { key: "key", header: "键", priority: 2, render: (item) => <div className="break-all font-mono text-xs">{item.payout_key}</div> },
+                { key: "action", header: "操作", priority: 2, render: (item) => { const rowPending = pending && pendingId === item.id; return <Button type="button" size="sm" variant="outline" loading={rowPending} disabled={pending} onClick={() => onManualPaid(item)}>{!rowPending ? <CheckCircle2 className="mr-2 h-4 w-4" /> : null}核销</Button>; } },
+              ]}
+              empty={<EmptyState title="暂无待补付事项" />}
+            />
+          </div>
+          </>
         )}
       </CardContent>
     </Card>
@@ -901,14 +946,6 @@ function LoadingState() {
     <div className="flex h-36 items-center justify-center text-muted-foreground">
       <Spinner className="mr-2" />
       加载中
-    </div>
-  );
-}
-
-function EmptyState({ text }: { text: string }) {
-  return (
-    <div className="rounded-lg border border-dashed py-10 text-center text-sm text-muted-foreground">
-      {text}
     </div>
   );
 }

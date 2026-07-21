@@ -3,6 +3,7 @@ import * as React from "react";
 import { Slot } from "@radix-ui/react-slot";
 import { cva, type VariantProps } from "class-variance-authority";
 import { cn } from "@/lib/utils";
+import { Spinner } from "@/components/ui/misc";
 
 const buttonVariants = cva(
   "inline-flex items-center justify-center gap-1.5 whitespace-nowrap rounded-md text-[13px] font-semibold transition-all focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/45 disabled:pointer-events-none disabled:opacity-45 active:scale-[0.975]",
@@ -25,6 +26,7 @@ const buttonVariants = cva(
         default: "h-[34px] px-4",
         sm: "h-8 rounded-[7px] px-3 text-xs",
         lg: "h-10 rounded-[9px] px-5 text-sm",
+        touch: "h-11 rounded-[9px] px-5 text-sm",
         icon: "h-[34px] w-[34px]",
       },
     },
@@ -35,21 +37,45 @@ const buttonVariants = cva(
   },
 );
 
-export interface ButtonProps
-  extends React.ButtonHTMLAttributes<HTMLButtonElement>,
-    VariantProps<typeof buttonVariants> {
-  asChild?: boolean;
-}
+type ButtonBaseProps = React.ButtonHTMLAttributes<HTMLButtonElement> & VariantProps<typeof buttonVariants>;
+
+export type ButtonProps =
+  | (ButtonBaseProps & {
+      asChild?: false;
+      loading?: boolean;
+      loadingText?: React.ReactNode;
+    })
+  | (Omit<ButtonBaseProps, "disabled"> & {
+      asChild: true;
+      disabled?: never;
+      loading?: never;
+      loadingText?: never;
+    });
 
 export const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
-  ({ className, variant, size, asChild = false, ...props }, ref) => {
-    const Comp = asChild ? Slot : "button";
+  ({ className, variant, size, asChild = false, loading = false, loadingText, disabled, children, ...props }, ref) => {
+    if (asChild) {
+      return (
+        <Slot
+          ref={ref}
+          className={cn(buttonVariants({ variant, size, className }))}
+          {...props}
+        >
+          {children}
+        </Slot>
+      );
+    }
     return (
-      <Comp
+      <button
         ref={ref}
         className={cn(buttonVariants({ variant, size, className }))}
+        aria-busy={loading || undefined}
+        disabled={disabled || loading}
         {...props}
-      />
+      >
+        {loading ? <Spinner size="sm" /> : null}
+        {loading && loadingText ? loadingText : children}
+      </button>
     );
   },
 );

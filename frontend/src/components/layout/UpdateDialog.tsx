@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Loader2, RefreshCw, RotateCcw, CheckCircle2, AlertCircle, Copy } from "lucide-react";
+import { RefreshCw, RotateCcw, CheckCircle2, AlertCircle, Copy } from "lucide-react";
+import { Spinner } from "@/components/ui/misc";
 
 import {
   Dialog,
@@ -587,10 +588,11 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
                 type="button"
                 size="sm"
                 className="shrink-0"
+                loading={targetSaving || targetsLoading}
                 onClick={() => void saveTargetAndCheck()}
                 disabled={targetsLoading || targetSaving || step?.kind === "checking" || step?.kind === "pulling" || step?.kind === "job_running"}
               >
-                {targetSaving || targetsLoading ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="mr-1 h-3.5 w-3.5" />}
+                {!targetSaving && !targetsLoading ? <RefreshCw className="mr-1 h-3.5 w-3.5" /> : null}
                 {targetsLoading ? "读取分支" : "保存并检查"}
               </Button>
             </div>
@@ -598,7 +600,7 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
 
           {step?.kind === "checking" && (
             <div className="flex items-center gap-3 text-muted-foreground">
-              <Loader2 className="h-5 w-5 animate-spin" />
+              <Spinner size="lg" />
               <span className="text-sm">正在检查目标分支...</span>
             </div>
           )}
@@ -713,7 +715,7 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
           {step?.kind === "pulling" && (
             <div className="space-y-3">
               <div className="flex items-center gap-3 text-muted-foreground">
-                <Loader2 className="h-5 w-5 animate-spin" />
+                <Spinner size="lg" />
                 <span className="text-sm">正在创建更新任务...</span>
               </div>
               <UpdateProgress progress={2} phase="准备更新" detail="提交目标远端与分支" />
@@ -723,7 +725,7 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
           {step?.kind === "job_running" && (
             <div className="space-y-3 text-sm">
               <div className="flex items-center gap-3 text-muted-foreground">
-                <Loader2 className="h-5 w-5 animate-spin" />
+                <Spinner size="lg" />
                 <span>任务 {step.jobId} · {step.status}</span>
               </div>
               <UpdateProgress progress={step.progress} phase={step.phase} detail={step.detail} />
@@ -803,7 +805,7 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
 
           {step?.kind === "restarting" && (
             <div className="flex items-center gap-3 text-muted-foreground">
-              <Loader2 className="h-5 w-5 animate-spin" />
+              <Spinner size="lg" />
               <span className="text-sm">
                 正在重启，{step.countdown} 秒后自动刷新页面...
               </span>

@@ -7,7 +7,7 @@
 import { forwardRef, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { ChevronDown, Loader2, Plus, Save, Trash2, Edit3 } from "lucide-react";
+import { ChevronDown, Plus, Save, Trash2, Edit3 } from "lucide-react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 
 import { Button } from "@/components/ui/button";
@@ -1804,8 +1804,8 @@ function CommandEditDialog({
           <Button variant="outline" onClick={onCancel} disabled={saving}>
             取消
           </Button>
-          <Button onClick={onSave} disabled={saving}>
-            {saving ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Save className="mr-2 h-4 w-4" />}
+          <Button onClick={onSave} loading={saving}>
+            {!saving ? <Save className="mr-2 h-4 w-4" /> : null}
             保存
           </Button>
         </DialogFooter>

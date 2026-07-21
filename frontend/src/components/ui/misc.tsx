@@ -18,11 +18,19 @@ export function Skeleton({ className }: { className?: string }) {
   );
 }
 
-export function Spinner({ className }: { className?: string }) {
+const spinnerSizes = {
+  sm: "h-3.5 w-3.5",
+  md: "h-4 w-4",
+  lg: "h-6 w-6",
+} as const;
+
+export function Spinner({ className, size = "md" }: { className?: string; size?: keyof typeof spinnerSizes }) {
   return (
-    <div
+    <span
+      aria-hidden="true"
       className={cn(
-        "h-4 w-4 animate-spin rounded-full border-2 border-current border-t-transparent",
+        "inline-block shrink-0 animate-spin rounded-full border-2 border-current border-t-transparent motion-reduce:animate-none",
+        spinnerSizes[size],
         className,
       )}
     />

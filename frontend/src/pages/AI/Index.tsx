@@ -309,6 +309,7 @@ export function AIIndex() {
           value={`${readyCount}/${providerCount}`}
           description={providerCount > 0 ? "已可调用 / 总数" : "先添加一个模型提供商"}
           tone={readyCount > 0 ? "success" : "warn"}
+          titleClassName="gap-1.5 text-sm sm:gap-2 sm:text-base"
           valueClassName="truncate text-xl font-bold tracking-tight sm:text-2xl"
         />
         <ToneRailCard
@@ -317,6 +318,7 @@ export function AIIndex() {
           value={aiTemplates.length}
           description={aiTemplates.length > 0 ? "type=ai 模板" : "创建第一条 AI 指令模板"}
           tone={aiTemplates.length > 0 ? "primary" : "warn"}
+          titleClassName="gap-1.5 text-sm sm:gap-2 sm:text-base"
           valueClassName="truncate text-xl font-bold tracking-tight sm:text-2xl"
         />
         <button
@@ -375,6 +377,8 @@ export function AIIndex() {
                 className="h-8 w-8"
                 onClick={() => setQuickStartOpen((v) => !v)}
                 aria-expanded={quickStartOpen}
+                aria-label={quickStartOpen ? "收起快速上手" : "展开快速上手"}
+                title={quickStartOpen ? "收起快速上手" : "展开快速上手"}
               >
                 {quickStartOpen ? (
                   <ChevronDown className="h-4 w-4 text-muted-foreground" />

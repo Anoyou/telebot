@@ -10,7 +10,6 @@ import {
   Eye,
   FlaskConical,
   Layers3,
-  Loader2,
   Plus,
   RefreshCw,
   Send,
@@ -969,7 +968,7 @@ export function MessageTemplateLabPage() {
                 className="w-full sm:w-auto"
               >
               {renderMut.isPending ? (
-                <Loader2 className="mr-1 h-4 w-4 animate-spin" />
+                <Spinner className="mr-1" />
               ) : (
                 <RefreshCw className="mr-1 h-4 w-4" />
               )}
@@ -986,7 +985,7 @@ export function MessageTemplateLabPage() {
               icon={Layers3}
               title="模板目录"
               description={selectedAccount ? `当前账号：${selectedAccount.name}` : "请选择账号"}
-              meta={catalogQ.isFetching ? <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" /> : null}
+              meta={catalogQ.isFetching ? <Spinner className="text-muted-foreground" /> : null}
               actions={catalog.groups.length > 0 ? (
                 <div className="flex gap-1.5">
                   <Button size="sm" variant="ghost" className="h-7 px-2 text-xs" onClick={expandAllGroups}>
@@ -1286,7 +1285,7 @@ export function MessageTemplateLabPage() {
                 icon={Eye}
                 title="Telegram HTML 预览"
                 description={renderResult ? "后端渲染结果" : "等待后端 render"}
-                meta={renderMut.isPending ? <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" /> : null}
+                meta={renderMut.isPending ? <Spinner className="text-muted-foreground" /> : null}
               />
             </CardHeader>
             <CardContent className="space-y-3">
@@ -1454,7 +1453,7 @@ export function MessageTemplateLabPage() {
                 }
               >
                 {testMut.isPending ? (
-                  <Loader2 className="mr-1 h-4 w-4 animate-spin" />
+                  <Spinner className="mr-1" />
                 ) : (
                   <Send className="mr-1 h-4 w-4" />
                 )}

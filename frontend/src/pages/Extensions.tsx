@@ -39,7 +39,6 @@ import { toast } from "sonner";
 import ReactMarkdown from "react-markdown";
 import type { Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
-import rehypeHighlight from "rehype-highlight";
 import "highlight.js/styles/github.css";
 import aiGuideMd from "../../../docs/PLUGIN-AI.md?raw";
 import apiReferenceMd from "../../../docs/PLUGIN-API-REFERENCE.md?raw";
@@ -80,6 +79,7 @@ import {
 } from "@/components/ui/table";
 import { MetaBadge } from "@/components/ui/meta-badge";
 import { Spinner } from "@/components/ui/misc";
+import { EmptyState } from "@/components/feedback/EmptyState";
 import { SectionHeader, SignalPill } from "@/components/ui/status";
 import { cn, formatDateTime } from "@/lib/utils";
 import { getErrMsg } from "@/lib/api";
@@ -804,14 +804,13 @@ function LocalPluginImportCard() {
                   </div>
                   <Button
                     size="sm"
-                    disabled={installLocalMut.isPending || p.installed}
+                    loading={installLocalMut.isPending}
+                    disabled={p.installed}
                     onClick={() => installLocalMut.mutate(p.name)}
                   >
-                    {installLocalMut.isPending ? (
-                      <Spinner className="mr-2 h-4 w-4" />
-                    ) : (
+                    {!installLocalMut.isPending ? (
                       <Download className="mr-2 h-4 w-4" />
-                    )}
+                    ) : null}
                     {p.installed ? "已导入" : "导入"}
                   </Button>
                 </div>
@@ -857,10 +856,11 @@ function LocalPluginImportCard() {
             <Button
               type="button"
               className="shrink-0"
-              disabled={!zipFile || uploadMut.isPending}
+              loading={uploadMut.isPending}
+              disabled={!zipFile}
               onClick={() => uploadMut.mutate()}
             >
-              {uploadMut.isPending ? <Spinner className="mr-2 h-4 w-4" /> : <Upload className="mr-2 h-4 w-4" />}
+              {!uploadMut.isPending ? <Upload className="mr-2 h-4 w-4" /> : null}
               上传安装
             </Button>
           </div>
@@ -920,15 +920,16 @@ function RemoteUpdateSettingsCard() {
       </CardHeader>
       <CardContent className="grid gap-3 md:grid-cols-2 md:items-end xl:grid-cols-[minmax(140px,180px)_minmax(180px,1fr)_auto]">
         <div className="flex min-w-0 items-center gap-3 rounded-md border px-3 py-2">
-          <Switch checked={enabled} onCheckedChange={setEnabled} />
+          <Switch aria-label="自动检查" checked={enabled} onCheckedChange={setEnabled} />
           <div className="min-w-0">
             <div className="whitespace-nowrap text-sm font-medium">自动检查</div>
             <div className="text-xs text-muted-foreground">{enabled ? "已开启" : "已关闭"}</div>
           </div>
         </div>
         <div className="min-w-0 space-y-1.5">
-          <Label>检查间隔（分钟）</Label>
+          <Label htmlFor="remote-plugin-check-interval">检查间隔（分钟）</Label>
           <Input
+            id="remote-plugin-check-interval"
             inputMode="numeric"
             value={interval}
             onChange={(e) => setInterval(e.target.value.replace(/[^0-9]/g, ""))}
@@ -937,12 +938,12 @@ function RemoteUpdateSettingsCard() {
           <div className="text-xs text-muted-foreground">最小 30，最大 10080</div>
         </div>
         <div className="flex gap-2 md:col-span-2 md:justify-end xl:col-span-1">
-          <Button onClick={() => saveMut.mutate()} disabled={saveMut.isPending}>
-            {saveMut.isPending ? <Spinner className="mr-2 h-4 w-4" /> : <Save className="mr-2 h-4 w-4" />}
+          <Button onClick={() => saveMut.mutate()} loading={saveMut.isPending}>
+            {!saveMut.isPending ? <Save className="mr-2 h-4 w-4" /> : null}
             保存
           </Button>
-          <Button variant="outline" onClick={() => checkMut.mutate()} disabled={checkMut.isPending}>
-            {checkMut.isPending ? <Spinner className="mr-2 h-4 w-4" /> : <RefreshCw className="mr-2 h-4 w-4" />}
+          <Button variant="outline" onClick={() => checkMut.mutate()} loading={checkMut.isPending}>
+            {!checkMut.isPending ? <RefreshCw className="mr-2 h-4 w-4" /> : null}
             立即检查
           </Button>
         </div>
@@ -1056,14 +1057,12 @@ function OfficialPluginsCard() {
                         size="sm"
                         className="shrink-0"
                         variant={plugin.installed ? "outline" : "default"}
-                        disabled={installOfficialMut.isPending}
+                        loading={installOfficialMut.isPending}
                         onClick={() => installOfficialMut.mutate(plugin.name)}
                       >
-                        {installOfficialMut.isPending ? (
-                          <Spinner className="mr-2 h-4 w-4" />
-                        ) : (
+                        {!installOfficialMut.isPending ? (
                           <Download className="mr-2 h-4 w-4" />
-                        )}
+                        ) : null}
                         {plugin.installed ? "更新" : "安装"}
                       </Button>
                     ) : null}
@@ -1285,17 +1284,13 @@ function RemoteInstallCard() {
           />
           <Button
             onClick={() => addRepoMut.mutate()}
-            disabled={!addUrl.trim() || addRepoMut.isPending}
+            loading={addRepoMut.isPending}
+            loadingText="添加中…"
+            disabled={!addUrl.trim()}
             className="shrink-0 md:justify-self-start xl:justify-self-auto"
           >
-            {addRepoMut.isPending ? (
-              <><Spinner className="mr-2 h-4 w-4" /> 添加中…</>
-            ) : (
-              <>
-                <Plus className="mr-2 h-4 w-4" />
-                添加仓库
-              </>
-            )}
+            <Plus className="mr-2 h-4 w-4" />
+            添加仓库
           </Button>
           <p className="text-xs text-muted-foreground md:col-span-2 xl:col-span-4">
             私有 GitHub 仓库请填写 fine-grained token，至少授予对应仓库 Contents 读取权限。Token 会加密保存且不会回显。
@@ -1304,7 +1299,7 @@ function RemoteInstallCard() {
 
         {/* 仓库列表 */}
         {repos.length === 0 ? (
-          <p className="py-4 text-center text-sm text-muted-foreground">暂无已保存的仓库</p>
+          <EmptyState title="暂无已保存的仓库" size="sm" />
         ) : (
           <div className="space-y-2">
             {repos.map((repo) => {
@@ -1600,9 +1595,10 @@ function RemoteInstallCard() {
                   bulkUpdateRepoMut.mutate(pendingBulkUpdate.repoId);
                   setPendingBulkUpdate(null);
                 }}
-                disabled={!pendingBulkUpdate || bulkUpdateRepoMut.isPending}
+                loading={bulkUpdateRepoMut.isPending}
+                disabled={!pendingBulkUpdate}
               >
-                {bulkUpdateRepoMut.isPending ? <Spinner className="mr-2 h-4 w-4" /> : <RefreshCw className="mr-2 h-4 w-4" />}
+                {!bulkUpdateRepoMut.isPending ? <RefreshCw className="mr-2 h-4 w-4" /> : null}
                 确认更新
               </Button>
             </DialogFooter>
@@ -1775,7 +1771,7 @@ function InstalledPluginsSection() {
         {isLoading ? (
           <div className="flex h-24 items-center justify-center"><Spinner className="text-primary" /></div>
         ) : builtin.length === 0 && installedOverview.length === 0 ? (
-          <p className="py-8 text-center text-sm text-muted-foreground">暂无已安装插件</p>
+          <EmptyState title="暂无已安装插件" />
         ) : (
           <>
           <div className="hidden overflow-x-auto md:block">
@@ -2646,6 +2642,7 @@ function DevGuideTab() {
   );
   const docs = useMemo(() => [completeDoc, ...DEV_DOCS], [completeDoc]);
   const [activeDocId, setActiveDocId] = useState<DevDocId>("all");
+  const [highlightPlugin, setHighlightPlugin] = useState<typeof import("rehype-highlight").default | null>(null);
   const contentRef = useRef<HTMLDivElement | null>(null);
   const activeDoc = docs.find((doc) => doc.id === activeDocId) ?? completeDoc;
   const ActiveIcon = activeDoc.icon;
@@ -2684,6 +2681,18 @@ function DevGuideTab() {
   useEffect(() => {
     contentRef.current?.scrollTo({ top: 0 });
   }, [activeDocId]);
+
+  useEffect(() => {
+    let active = true;
+    void import("rehype-highlight")
+      .then((module) => {
+        if (active) setHighlightPlugin(() => module.default);
+      })
+      .catch(() => {
+        if (active) setHighlightPlugin(null);
+      });
+    return () => { active = false; };
+  }, []);
 
   return (
     <Card className="overflow-hidden">
@@ -2806,7 +2815,7 @@ function DevGuideTab() {
               <article className="prose prose-sm prose-pwa-safe max-w-none dark:prose-invert">
                 <ReactMarkdown
                   remarkPlugins={[remarkGfm]}
-                  rehypePlugins={[rehypeHighlight]}
+                  rehypePlugins={highlightPlugin ? [highlightPlugin] : []}
                   components={markdownComponents}
                 >
                   {activeDoc.markdown}

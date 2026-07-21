@@ -11,7 +11,6 @@ import {
   ChevronRight,
   Copy,
   KeyRound,
-  Loader2,
   Plus,
   RefreshCw,
   Save,
@@ -1678,7 +1677,7 @@ function InteractionRuleEditor({
                     <Select
                       value={entryProfileTab}
                       onChange={(e) => setEntryProfileTab(e.target.value)}
-                      className="w-full sm:w-[180px]"
+                      className="min-w-0 w-full sm:w-auto"
                     >
                       <option value="all">全部类型</option>
                       {availableProfileGroups.map((group) => (
@@ -2541,8 +2540,10 @@ export function BotTab({
       <div className="grid gap-4 2xl:grid-cols-[minmax(0,1.2fr)_minmax(320px,0.8fr)]">
         <Card>
           <CardHeader>
-            <CardTitle className="flex items-center gap-2 text-base">
-              <Bot className="h-4 w-4" /> 管理 Bot 配置
+            <CardTitle className="flex flex-wrap items-center gap-2 text-base leading-5">
+              <span className="inline-flex shrink-0 items-center gap-2">
+                <Bot className="h-4 w-4" /> 管理 Bot 配置
+              </span>
               <Badge variant="destructive" className="ml-1">
                 危险操作需 Telegram 内二次确认
               </Badge>
@@ -2672,13 +2673,12 @@ export function BotTab({
                 <Button
                   variant="outline"
                   onClick={() => testMut.mutate()}
-                  disabled={testMut.isPending || !bot?.has_token}
+                  loading={testMut.isPending}
+                  disabled={!bot?.has_token}
                 >
-                  {testMut.isPending ? (
-                    <Loader2 className="mr-1 h-4 w-4 animate-spin" />
-                  ) : (
+                  {!testMut.isPending ? (
                     <Send className="mr-1 h-4 w-4" />
-                  )}
+                  ) : null}
                   测试发送
                 </Button>
                 <Button
@@ -2689,12 +2689,10 @@ export function BotTab({
                   <RefreshCw className="mr-1 h-4 w-4" />
                   重启 runtime
                 </Button>
-                <Button onClick={() => saveMut.mutate()} disabled={saveMut.isPending}>
-                  {saveMut.isPending ? (
-                    <Loader2 className="mr-1 h-4 w-4 animate-spin" />
-                  ) : (
+                <Button onClick={() => saveMut.mutate()} loading={saveMut.isPending}>
+                  {!saveMut.isPending ? (
                     <Save className="mr-1 h-4 w-4" />
-                  )}
+                  ) : null}
                   保存管理 Bot
                 </Button>
               </div>
@@ -2718,7 +2716,11 @@ export function BotTab({
                 </div>
               ))}
             </div>
-            <pre className="nested-surface-item overflow-x-auto bg-muted px-3 py-2 text-xs leading-5">
+            <pre
+              className="nested-surface-item overflow-x-auto bg-muted px-3 py-2 text-xs leading-5"
+              tabIndex={0}
+              aria-label="管理 Bot 帮助指令"
+            >
               {HELP_PREVIEW}
             </pre>
           </CardContent>
@@ -2735,15 +2737,12 @@ export function BotTab({
             size="sm"
             className="pointer-events-auto h-10 rounded-full px-4 shadow-lg shadow-black/15"
             onClick={() => saveTransferMut.mutate()}
+            loading={saveTransferMut.isPending}
             disabled={isInteractionConfigSaveDisabled}
             title="保存规则"
             aria-label="保存规则"
           >
-            {saveTransferMut.isPending ? (
-              <Loader2 className="mr-1 h-4 w-4 animate-spin" />
-            ) : (
-              <Save className="mr-1 h-4 w-4" />
-            )}
+            {!saveTransferMut.isPending ? <Save className="mr-1 h-4 w-4" /> : null}
             保存规则
           </Button>
         </div>,
@@ -2886,21 +2885,20 @@ export function BotTab({
                   <Button
                     type="button"
                     variant="outline"
-                    className="sm:min-w-[132px]"
+                    className="max-sm:flex-1 sm:min-w-[132px]"
                     onClick={() => saveInteractionBotMut.mutate()}
-                    disabled={saveInteractionBotMut.isPending || !interactionQ.data}
+                    loading={saveInteractionBotMut.isPending}
+                    disabled={!interactionQ.data}
                   >
-                    {saveInteractionBotMut.isPending ? (
-                      <Loader2 className="mr-1 h-4 w-4 animate-spin" />
-                    ) : (
+                    {!saveInteractionBotMut.isPending ? (
                       <Save className="mr-1 h-4 w-4" />
-                    )}
+                    ) : null}
                     保存交互 Bot
                   </Button>
                   <Button
                     type="button"
                     variant="destructive"
-                    className="sm:min-w-[132px]"
+                    className="max-sm:flex-1 sm:min-w-[132px]"
                     onClick={() => clearInteractionBotMut.mutate()}
                     disabled={clearInteractionBotMut.isPending || !interactionQ.data}
                   >
@@ -2983,21 +2981,20 @@ export function BotTab({
                   <Button
                     type="button"
                     variant="outline"
-                    className="sm:min-w-[132px]"
+                    className="max-sm:flex-1 sm:min-w-[132px]"
                     onClick={() => saveTransferResultBotMut.mutate()}
-                    disabled={saveTransferResultBotMut.isPending || !interactionQ.data}
+                    loading={saveTransferResultBotMut.isPending}
+                    disabled={!interactionQ.data}
                   >
-                    {saveTransferResultBotMut.isPending ? (
-                      <Loader2 className="mr-1 h-4 w-4 animate-spin" />
-                    ) : (
+                    {!saveTransferResultBotMut.isPending ? (
                       <Save className="mr-1 h-4 w-4" />
-                    )}
+                    ) : null}
                     保存通知 Bot
                   </Button>
                   <Button
                     type="button"
                     variant="outline"
-                    className="sm:min-w-[132px]"
+                    className="max-sm:flex-1 sm:min-w-[132px]"
                     onClick={() => clearTransferResultBotMut.mutate()}
                     disabled={clearTransferResultBotMut.isPending || !interactionQ.data}
                   >
@@ -3526,8 +3523,9 @@ export function BotTab({
               />
             </div>
             <div className="space-y-1.5">
-              <Label>角色</Label>
+              <Label htmlFor="new-account-bot-user-role">角色</Label>
               <Select
+                id="new-account-bot-user-role"
                 value={newUser.role}
                 onChange={(e) =>
                   setNewUser((v) => ({ ...v, role: e.target.value as AccountBotRole }))

@@ -5,8 +5,7 @@ import {
   AlertTriangle,
   ArrowLeft,
   ClipboardPaste,
-  Loader2,
-  Plus,
+    Plus,
   Save,
   Trash2,
 } from "lucide-react";
@@ -943,8 +942,8 @@ export function ChatGPTImageConfigPage() {
                     : "当前配置已同步。"}
               </div>
             </div>
-            <Button onClick={handleSave} disabled={saveMut.isPending || !dirty}>
-              {saveMut.isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Save className="mr-2 h-4 w-4" />}
+            <Button onClick={handleSave} loading={saveMut.isPending} disabled={!dirty}>
+              {!saveMut.isPending ? <Save className="mr-2 h-4 w-4" /> : null}
               保存配置
             </Button>
           </div>

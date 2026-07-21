@@ -15,8 +15,7 @@ import {
   ChevronRight,
   CheckCircle2,
   Clock3,
-  Loader2,
-  MessageSquare,
+    MessageSquare,
   Minus,
   Pause,
   RotateCcw,
@@ -694,7 +693,7 @@ export function GenericPluginConfigPage() {
                   disabled={saveMut.isPending || !dirty}
                 >
                   {saveMut.isPending ? (
-                    <Loader2 className="h-4 w-4 shrink-0 animate-spin" />
+                    <Spinner className="h-4 w-4 shrink-0 animate-spin" />
                   ) : (
                     <Save className="h-4 w-4 shrink-0" />
                   )}
@@ -780,7 +779,7 @@ function RecentConfigActionJobCard({
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="min-w-0">
             <CardTitle className="flex min-w-0 items-center gap-2 text-base">
-              {terminal ? jobStatusIcon(job.status) : <Loader2 className="h-4 w-4 shrink-0 animate-spin text-primary" />}
+              {terminal ? jobStatusIcon(job.status) : <Spinner className="h-4 w-4 shrink-0 animate-spin text-primary" />}
               <span className="truncate">最近配置动作：{title}</span>
             </CardTitle>
             <CardDescription className="mt-1">
@@ -872,7 +871,7 @@ function ConfigActionJobWindow({
           onClick={onRestore}
         >
           <span className="flex min-w-0 items-center gap-2">
-            {terminal ? jobStatusIcon(status) : <Loader2 className="h-4 w-4 shrink-0 animate-spin text-primary" />}
+            {terminal ? jobStatusIcon(status) : <Spinner className="h-4 w-4 shrink-0 animate-spin text-primary" />}
             <span className="min-w-0 truncate text-sm font-medium">{title}</span>
           </span>
           <span className="shrink-0 text-xs text-muted-foreground">{statusText}</span>
@@ -909,7 +908,7 @@ function ConfigActionJobWindow({
           <ConfigActionExecutionDetails job={job} logs={logs} />
           {loading && !terminal ? (
             <div className="flex items-center gap-2 px-1 text-xs text-muted-foreground">
-              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              <Spinner className="h-3.5 w-3.5 animate-spin" />
               正在刷新进度
             </div>
           ) : null}
@@ -926,7 +925,7 @@ function ConfigActionJobWindow({
             {!terminal ? (
               <>
                 <Button type="button" variant="outline" size="sm" disabled={controlling} onClick={onPause}>
-                  {controlling ? <Loader2 className="h-4 w-4 animate-spin" /> : <Pause className="h-4 w-4" />}
+                  {controlling ? <Spinner className="h-4 w-4 animate-spin" /> : <Pause className="h-4 w-4" />}
                   中断
                 </Button>
                 <Button type="button" variant="destructive" size="sm" disabled={controlling} onClick={onCancel}>
@@ -1030,7 +1029,7 @@ function ConfigActionResultPanel({
               </div>
               {view.tone === "running" && !view.assistantMessage ? (
                 <div className="flex items-center gap-2 text-muted-foreground">
-                  <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />
+                  <Spinner className="h-3.5 w-3.5 animate-spin text-primary" />
                   正在等待模型返回
                 </div>
               ) : (
@@ -1116,7 +1115,7 @@ function ConfigActionChatLine({
   return (
     <div className="flex gap-2">
       <div className="mt-1 flex h-7 w-7 shrink-0 items-center justify-center rounded-md border bg-background">
-        {active ? <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" /> : logLevelIcon(level)}
+        {active ? <Spinner className="h-3.5 w-3.5 animate-spin text-primary" /> : logLevelIcon(level)}
       </div>
       <div className="min-w-0 flex-1 rounded-md border bg-background px-3 py-2">
         <div className="break-words text-sm leading-5">{message || "状态更新"}</div>
@@ -1182,7 +1181,7 @@ function logLevelIcon(level: string) {
 }
 
 function resultToneIcon(tone: ConfigActionResultTone) {
-  if (tone === "running") return <Loader2 className="h-4 w-4 animate-spin text-primary" />;
+  if (tone === "running") return <Spinner className="h-4 w-4 animate-spin text-primary" />;
   if (tone === "success") return <CheckCircle2 className="h-4 w-4 text-success" />;
   if (tone === "warning") return <AlertTriangle className="h-4 w-4 text-warning" />;
   return <XCircle className="h-4 w-4 text-destructive" />;

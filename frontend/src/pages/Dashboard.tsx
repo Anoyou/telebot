@@ -296,21 +296,12 @@ function AccountWorkerPanel({
 
   return (
     <div>
-      {compact ? (
-        <DialogHeader className="border-b bg-card px-4 py-4 pr-12">
-          <DialogTitle className="text-base">账号 Worker</DialogTitle>
-          <DialogDescription>
-            所有 Telegram 账号的运行状态、出网信息和快捷入口。
-          </DialogDescription>
-        </DialogHeader>
-      ) : (
-        <div className="border-b bg-primary/5 px-4 py-3">
-          <div className="text-base font-semibold">账号 Worker</div>
-          <div className="mt-1 text-sm text-muted-foreground">
-            所有 Telegram 账号的运行状态、出网信息和快捷入口。
-          </div>
-        </div>
-      )}
+      <DialogHeader className={cn("border-b px-4 pr-12", compact ? "bg-card py-4" : "bg-primary/5 py-3")}>
+        <DialogTitle className="text-base">账号 Worker</DialogTitle>
+        <DialogDescription>
+          所有 Telegram 账号的运行状态、出网信息和快捷入口。
+        </DialogDescription>
+      </DialogHeader>
       <div className={cn("p-4", className)}>
         {isLoading ? (
           <div className="flex h-36 items-center justify-center">

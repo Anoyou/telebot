@@ -11,6 +11,9 @@
     "typecheck": "tsc -b --pretty false",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
+    "test:visual": "START_SERVER=1 playwright test tests/visual",
+    "test:visual:update": "START_SERVER=1 UPDATE_VISUAL_BASELINES=1 playwright test tests/visual",
+    "test:a11y": "START_SERVER=1 playwright test tests/a11y",
     "codegen": "openapi-typescript http://localhost:8000/openapi.json -o src/api/schema.ts"
   },
   "dependencies": {
@@ -40,6 +43,8 @@
     "zod": "^3.23.0"
   },
   "devDependencies": {
+    "@axe-core/playwright": "^4.12.1",
+    "@playwright/test": "^1.61.1",
     "@tailwindcss/typography": "^0.5.19",
     "@types/node": "^22.0.0",
     "@types/react": "^18.3.0",
@@ -47,7 +52,10 @@
     "@vitejs/plugin-react": "^4.3.0",
     "autoprefixer": "^10.4.0",
     "openapi-typescript": "^7.0.0",
+    "pixelmatch": "^7.2.0",
+    "pngjs": "^7.0.0",
     "postcss": "^8.4.0",
+    "rollup-plugin-visualizer": "^7.0.1",
     "tailwindcss": "^3.4.0",
     "typescript": "^5.5.0",
     "vite": "^5.4.0",

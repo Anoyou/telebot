@@ -1,5 +1,5 @@
 import { ReactNode } from "react";
-import { Loader2, Save } from "lucide-react";
+import { Save } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -100,8 +100,8 @@ export function RuleEditDialogShell({
           <Button variant="outline" onClick={() => onOpenChange(false)}>
             取消
           </Button>
-          <Button onClick={onSave} disabled={saving}>
-            {saving ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Save className="mr-2 h-4 w-4" />}
+          <Button onClick={onSave} loading={saving}>
+            {!saving ? <Save className="mr-2 h-4 w-4" /> : null}
             {saving ? "保存中…" : "保存"}
           </Button>
         </DialogFooter>

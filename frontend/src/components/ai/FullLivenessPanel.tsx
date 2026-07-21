@@ -5,7 +5,6 @@ import {
   ChevronLeft,
   ChevronRight,
   Filter,
-  Loader2,
   X,
 } from "lucide-react";
 import { toast } from "sonner";
@@ -704,7 +703,7 @@ export function FullLivenessPanel({
         </div>
       </aside>
 
-      <div className="flex h-[calc(100dvh-15rem)] min-h-[560px] min-w-0 flex-col overflow-hidden rounded-lg border bg-card shadow-sm xl:min-h-[650px]">
+      <div className="flex h-[calc(100dvh-12rem)] min-h-[420px] min-w-0 flex-col overflow-hidden rounded-lg border bg-card shadow-sm xl:min-h-[650px]">
         <div className="border-b px-3 py-2">
           <div className="text-sm font-medium">多 Provider 并发巡检</div>
           <div className="mt-0.5 text-xs text-muted-foreground">
@@ -907,19 +906,18 @@ export function FullLivenessPanel({
             <Button
               type="button"
               variant="outline"
-              disabled={cancelling}
+              loading={cancelling}
               onClick={() => void stopRun()}
             >
-              {cancelling ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : null}
               {cancelPendingStart ? "等待任务编号后停止" : cancelling ? "停止中…" : "停止"}
             </Button>
           ) : null}
           <Button
             type="button"
             onClick={requestRun}
+            loading={running}
             disabled={running || selectedProviderIds.length === 0 || !preview || preview.task_total === 0 || !message.trim() || !systemPrompt.trim()}
           >
-            {running ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : null}
             {running ? "测活中…" : "开始全量测活"}
           </Button>
         </div>
@@ -1019,9 +1017,9 @@ export function FullLivenessPanel({
           variant="outline"
           className="mt-4 w-full"
           onClick={refreshPreview}
+          loading={previewMut.isPending}
           disabled={previewMut.isPending || running || selectedProviderIds.length === 0 || !message.trim() || !systemPrompt.trim()}
         >
-          {previewMut.isPending ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : null}
           刷新所选模型范围
         </Button>
       </aside>

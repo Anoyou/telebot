@@ -8,16 +8,22 @@ import { useQuery } from "@tanstack/react-query";
 import { Badge } from "@/components/ui/badge";
 import { api } from "@/lib/api";
 import type { AccountStatus } from "@/api/types";
+import { statusTone, type VisualTone } from "@/components/ui/status";
 
 const MAP: Record<
   AccountStatus,
-  { text: string; variant: "success" | "warn" | "destructive" | "secondary" }
+  { text: string }
 > = {
-  active: { text: "运行中", variant: "success" },
-  paused: { text: "已暂停", variant: "secondary" },
-  floodwait: { text: "FloodWait", variant: "warn" },
-  dead: { text: "异常", variant: "destructive" },
-  login_required: { text: "待重登", variant: "warn" },
+  active: { text: "运行中" },
+  paused: { text: "已暂停" },
+  floodwait: { text: "FloodWait" },
+  dead: { text: "异常" },
+  login_required: { text: "待重登" },
+};
+
+const toneVariant: Record<VisualTone, "success" | "warn" | "destructive" | "secondary"> = {
+  primary: "secondary", success: "success", warn: "warn", danger: "destructive",
+  info: "secondary", neutral: "secondary",
 };
 
 interface KillSwitchState {
@@ -47,6 +53,6 @@ export function AccountStatusBadge({ status }: { status: AccountStatus }) {
     );
   }
 
-  const cfg = MAP[status] ?? { text: status, variant: "secondary" as const };
-  return <Badge variant={cfg.variant}>{cfg.text}</Badge>;
+  const cfg = MAP[status] ?? { text: status };
+  return <Badge variant={toneVariant[statusTone("account", status)]}>{cfg.text}</Badge>;
 }

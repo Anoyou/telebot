@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { KeyRound, Loader2 } from "lucide-react";
+import { KeyRound } from "lucide-react";
 import { toast } from "sonner";
 
 import { api } from "@/lib/api";
@@ -63,8 +63,7 @@ export function SecretInput({
           onChange={(e) => setValues((prev) => ({ ...prev, [name]: e.target.value }))}
         />
       ))}
-      <Button type="button" size="sm" variant="outline" disabled={busy} onClick={() => void submit()}>
-        {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+      <Button type="button" size="sm" variant="outline" loading={busy} onClick={() => void submit()}>
         保存密钥
       </Button>
     </div>

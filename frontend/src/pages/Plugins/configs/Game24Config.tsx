@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Loader2, Save } from "lucide-react";
+import { ArrowLeft, Save } from "lucide-react";
 import { toast } from "sonner";
 
 import { listAccountFeatures, toggleAccountFeature } from "@/api/accounts";
@@ -263,12 +263,10 @@ export function Game24ConfigPage() {
               </div>
             </div>
             <div className="flex items-center gap-4">
-              <Button disabled={!dirty || saveMut.isPending} onClick={handleSave}>
-                {saveMut.isPending ? (
-                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                ) : (
+              <Button disabled={!dirty} loading={saveMut.isPending} onClick={handleSave}>
+                {!saveMut.isPending ? (
                   <Save className="mr-2 h-4 w-4" />
-                )}
+                ) : null}
                 保存配置
               </Button>
               <Button type="button" variant="ghost" disabled={!dirty || saveMut.isPending} onClick={resetForm} className="px-0">

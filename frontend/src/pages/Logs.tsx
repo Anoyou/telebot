@@ -52,6 +52,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Spinner } from "@/components/ui/misc";
+import { EmptyState } from "@/components/feedback/EmptyState";
 import { Select } from "@/components/ui/select";
 import { SectionHeader, SignalPill } from "@/components/ui/status";
 import { Switch } from "@/components/ui/switch";
@@ -326,8 +327,8 @@ export function Logs() {
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="grid grid-cols-1 gap-3 md:grid-cols-[minmax(0,1fr)_140px] xl:grid-cols-[180px_140px_minmax(0,1fr)] 2xl:grid-cols-[180px_140px_minmax(340px,1fr)_minmax(260px,0.8fr)]">
-            <Field label="账号">
-              <Select value={accountId} onChange={(event) => setAccountId(event.target.value)}>
+            <Field label="账号" controlId="message-log-account-filter">
+              <Select id="message-log-account-filter" value={accountId} onChange={(event) => setAccountId(event.target.value)}>
                 <option value="">全部账号</option>
                 {accountsQ.data?.map((account) => (
                   <option key={account.id} value={account.id}>
@@ -336,8 +337,8 @@ export function Logs() {
                 ))}
               </Select>
             </Field>
-            <Field label="时间">
-              <Select value={timeRange} onChange={(event) => setTimeRange(event.target.value as TimeRange)}>
+            <Field label="时间" controlId="message-log-time-filter">
+              <Select id="message-log-time-filter" value={timeRange} onChange={(event) => setTimeRange(event.target.value as TimeRange)}>
                 {Object.entries(TIME_RANGE_LABELS).map(([value, label]) => (
                   <option key={value} value={value}>{label}</option>
                 ))}
@@ -1407,10 +1408,20 @@ function NativeRawSummary({ meta }: { meta?: EventTraceSummary["native_raw_meta"
   );
 }
 
-function Field({ label, children, className }: { label: string; children: ReactNode; className?: string }) {
+function Field({
+  label,
+  children,
+  className,
+  controlId,
+}: {
+  label: string;
+  children: ReactNode;
+  className?: string;
+  controlId?: string;
+}) {
   return (
     <div className={cn("min-w-0 space-y-1.5", className)}>
-      <Label>{label}</Label>
+      <Label htmlFor={controlId}>{label}</Label>
       {children}
     </div>
   );
@@ -1520,7 +1531,7 @@ function ErrorHint({ text, error }: { text: string; error: unknown }) {
 }
 
 function EmptyHint({ text }: { text: string }) {
-  return <p className="py-8 text-center text-sm text-muted-foreground">{text}</p>;
+  return <EmptyState title={text} size="sm" />;
 }
 
 function HighlightedMessage({ text, keyword }: { text: string; keyword: string }) {

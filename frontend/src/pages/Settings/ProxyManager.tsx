@@ -398,13 +398,11 @@ export function ProxyManager() {
                           <Button
                             size="sm"
                             onClick={() => saveEdit(p)}
-                            disabled={updateMut.isPending}
+                            loading={updateMut.isPending}
                           >
-                            {updateMut.isPending ? (
-                              <Loader2 className="mr-1 h-4 w-4 animate-spin" />
-                            ) : (
+                            {!updateMut.isPending ? (
                               <Check className="mr-1 h-4 w-4" />
-                            )}
+                            ) : null}
                             保存
                           </Button>
                           <Button size="sm" variant="outline" onClick={cancelEdit}>
@@ -451,13 +449,11 @@ export function ProxyManager() {
                           variant="ghost"
                           size="sm"
                           onClick={() => handleTest(p)}
-                          disabled={isLoading}
+                          loading={isLoading}
                         >
-                          {isLoading ? (
-                            <Loader2 className="h-4 w-4 animate-spin" />
-                          ) : (
+                          {!isLoading ? (
                             <Activity className="h-4 w-4" />
-                          )}
+                          ) : null}
                           <span className="ml-1">测试</span>
                         </Button>
                         <Button
@@ -524,7 +520,7 @@ function UsageBlock({ proxyId }: { proxyId: number }) {
   if (usageQ.isLoading) {
     return (
       <div className="mt-1 flex h-8 items-center justify-center text-xs text-muted-foreground">
-        <Loader2 className="mr-1 h-3 w-3 animate-spin" />
+        <Spinner className="mr-1" size="sm" />
         加载中…
       </div>
     );

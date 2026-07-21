@@ -8,7 +8,7 @@ import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { toast } from "sonner";
-import { ArrowLeft, Plus, Trash2, KeyRound, Edit3, Download, Loader2, CheckCircle2, XCircle, Star, ChevronDown, ChevronRight, Eye, EyeOff, Filter, X, Package, Save, MessageSquare } from "lucide-react";
+import { ArrowLeft, Plus, Trash2, KeyRound, Edit3, Download, CheckCircle2, XCircle, Star, ChevronDown, ChevronRight, Eye, EyeOff, Filter, X, Package, Save, MessageSquare } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { CommandBadge } from "@/components/CommandBadge";
@@ -346,7 +346,7 @@ function ApiKeyInput({
         title={canReveal ? (visible ? "隐藏 API Key" : "显示 API Key") : "当前没有可查看的 API Key"}
         onClick={() => void toggleVisibility()}
       >
-        {revealing ? <Loader2 className="h-4 w-4 animate-spin" /> : visible ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+        {revealing ? <Spinner /> : visible ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
       </button>
     </div>
   );
@@ -975,7 +975,7 @@ function ProviderCreateWorkspace({
             {verified ? "可保存" : CREATE_STAGE_COPY[stage]}
           </MetaBadge>
         </div>
-        <ol className="mt-5 grid grid-cols-3 gap-2" aria-label="创建步骤">
+        <ol className="mt-5 grid grid-cols-1 gap-2 sm:grid-cols-3" aria-label="创建步骤">
           {[
             { step: 1, label: "接入信息", compactLabel: "接入信息" },
             { step: 2, label: "选择模型并验证", compactLabel: "模型与验证" },
@@ -1098,10 +1098,11 @@ function ProviderCreateWorkspace({
                 type="button"
                 variant="outline"
                 size="sm"
-                disabled={detectingProtocol || connectionLocked || (!form.api_key.trim() && form.provider !== "ollama")}
+                loading={detectingProtocol}
+                disabled={connectionLocked || (!form.api_key.trim() && form.provider !== "ollama")}
                 onClick={onDetectProtocol}
               >
-                {detectingProtocol ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : <Download className="mr-1 h-4 w-4" />}
+                {!detectingProtocol ? <Download className="mr-1 h-4 w-4" /> : null}
                 自动检测协议
               </Button>
               <span className="text-xs text-muted-foreground">不确定兼容协议时再检测，默认使用 Responses + Codex CLI。</span>
@@ -1261,8 +1262,8 @@ function ProviderCreateWorkspace({
 
           <div className="sticky bottom-0 z-10 -mx-3 mt-2 flex items-center justify-end gap-2 border-t bg-background/95 px-3 py-3 backdrop-blur sm:static sm:mx-0 sm:bg-transparent sm:px-0 sm:pt-5 sm:backdrop-blur-none">
             <Button type="button" variant="outline" disabled={saving} onClick={onCancel}>取消</Button>
-            <Button type="button" disabled={saving || !verified || !form.name.trim()} onClick={onSave}>
-              {saving ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Save className="mr-2 h-4 w-4" />}
+            <Button type="button" loading={saving} disabled={!verified || !form.name.trim()} onClick={onSave}>
+              {!saving ? <Save className="mr-2 h-4 w-4" /> : null}
               {!verified ? "先验证后保存" : "保存 Provider"}
             </Button>
           </div>
@@ -1436,7 +1437,7 @@ function ProviderEditDialog({
             API Key 加密落库；列表只显示是否已配置，编辑时可点击眼睛按需查看。
           </DialogDescription>
           {!isEdit ? (
-            <ol className="mt-3 grid grid-cols-3 gap-2" aria-label="创建步骤">
+            <ol className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-3" aria-label="创建步骤">
               {[
                 ["1", "接入信息"],
                 ["2", "选择模型并验证"],
@@ -1532,14 +1533,13 @@ function ProviderEditDialog({
                 type="button"
                 variant="outline"
                 size="sm"
-                disabled={detectProtocolsMut.isPending || (!isEdit && !form.api_key.trim() && form.provider !== "ollama")}
+                loading={detectProtocolsMut.isPending}
+                disabled={!isEdit && !form.api_key.trim() && form.provider !== "ollama"}
                 onClick={() => detectProtocolsMut.mutate()}
               >
-                {detectProtocolsMut.isPending ? (
-                  <Loader2 className="mr-1 h-4 w-4 animate-spin" />
-                ) : (
+                {!detectProtocolsMut.isPending ? (
                   <Download className="mr-1 h-4 w-4" />
-                )}
+                ) : null}
                 检测协议
               </Button>
             </div>
@@ -1902,8 +1902,8 @@ function ProviderEditDialog({
           <Button variant="outline" onClick={requestCancel} disabled={saving}>
             取消
           </Button>
-          <Button onClick={onSave} disabled={saving || (!isEdit && !createVerified)}>
-            {saving ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Save className="mr-2 h-4 w-4" />}
+          <Button onClick={onSave} loading={saving} disabled={!isEdit && !createVerified}>
+            {!saving ? <Save className="mr-2 h-4 w-4" /> : null}
             {!isEdit && !createVerified ? "先验证后保存" : "保存"}
           </Button>
         </DialogFooter>
@@ -2223,15 +2223,12 @@ function ProviderModelsSection({
           type="button"
           size="sm"
           variant="ghost"
-          disabled={!persisted || testingId !== null}
+          loading={testingId === m.id}
+          disabled={!persisted || (testingId !== null && testingId !== m.id)}
           onClick={() => onTest(m.id)}
           title={persisted ? "测试连通性 + 延时" : "先保存 provider 再测"}
         >
-          {testingId === m.id ? (
-            <Loader2 className="h-3.5 w-3.5 animate-spin" />
-          ) : (
-            "测试"
-          )}
+          测试
         </Button>
         {/* 槽位 3：删除 */}
         <Button
@@ -2271,15 +2268,14 @@ function ProviderModelsSection({
           type="button"
           size="sm"
           variant="outline"
-          disabled={fetchMut.isPending || !!fetchDisabledHint}
+          loading={fetchMut.isPending}
+          disabled={!!fetchDisabledHint}
           onClick={() => fetchMut.mutate()}
           title={fetchDisabledHint || "用当前表单字段拉模型列表（不必先保存）"}
         >
-          {fetchMut.isPending ? (
-            <Loader2 className="mr-1 h-4 w-4 animate-spin" />
-          ) : (
+          {!fetchMut.isPending ? (
             <Download className="mr-1 h-4 w-4" />
-          )}
+          ) : null}
           Fetch 模型列表
         </Button>
       </div>
@@ -2447,7 +2443,7 @@ function IdentityVersionsDialog({
           {error ? <p className="break-words text-sm text-destructive">{error}</p> : null}
           {loading ? (
             <p className="text-sm text-muted-foreground">
-              <Loader2 className="mr-1 inline h-4 w-4 animate-spin" /> 加载中…
+              <Spinner className="mr-1" /> 加载中…
             </p>
           ) : (
             <div className="space-y-3">
@@ -2502,12 +2498,10 @@ function IdentityVersionsDialog({
           )}
         </div>
         <DialogFooter>
-          <Button type="button" variant="outline" onClick={() => void detect()} disabled={detecting || loading}>
-            {detecting ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : null}
+          <Button type="button" variant="outline" onClick={() => void detect()} loading={detecting} disabled={loading}>
             检测最新版本
           </Button>
-          <Button type="button" onClick={() => void save()} disabled={saving || loading}>
-            {saving ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : null}
+          <Button type="button" onClick={() => void save()} loading={saving} disabled={loading}>
             保存
           </Button>
         </DialogFooter>

@@ -11,9 +11,10 @@
 //
 // click：从顶部展开系统状态浮层。
 import { useQuery } from "@tanstack/react-query";
-import { AlertTriangle, CheckCircle2, Loader2 } from "lucide-react";
+import { AlertTriangle, CheckCircle2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import { Spinner } from "@/components/ui/misc";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -23,6 +24,7 @@ import { SystemHealthCard } from "@/components/SystemHealthCard";
 import { getHealthOverview } from "@/api/system";
 import type { HealthOverview } from "@/api/types";
 import { cn } from "@/lib/utils";
+import { statusTone, toneClasses } from "@/components/ui/status";
 
 type Tone = "ok" | "warn" | "err" | "loading";
 
@@ -93,12 +95,7 @@ export function HealthDot({ compact = false }: { compact?: boolean }) {
     ? "warn"
     : aggregateTone(q.data);
 
-  const cls = {
-    ok: "bg-success",
-    warn: "bg-warning",
-    err: "bg-destructive",
-    loading: "bg-muted-foreground/40",
-  }[tone];
+  const cls = cn(toneClasses(statusTone("health", tone)).dot, tone === "loading" && "opacity-40");
 
   const label = {
     ok: "全部正常",
@@ -123,7 +120,7 @@ export function HealthDot({ compact = false }: { compact?: boolean }) {
           aria-label={`系统状态：${label}`}
         >
           {tone === "loading" ? (
-            <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
+            <Spinner className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
           ) : (
             <span
               className={cn("inline-block h-2.5 w-2.5 rounded-full", cls)}

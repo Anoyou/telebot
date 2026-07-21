@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { AlertTriangle, Check, Loader2, RefreshCw, X } from "lucide-react";
+import { AlertTriangle, Check, RefreshCw, X } from "lucide-react";
 import { toast } from "sonner";
 
 import {
@@ -21,7 +21,8 @@ export function ActionCard({
   onUpdated?: (action: SystemAgentAction) => void;
 }) {
   const [action, setAction] = useState(initial);
-  const [busy, setBusy] = useState(false);
+  const [busyAction, setBusyAction] = useState<"confirm" | "reject" | "retry" | null>(null);
+  const busy = busyAction !== null;
   const pending = action.status === "pending";
   const dangerous = action.risk === "dangerous";
   const syncFailed = action.runtime_sync_status === "failed";
@@ -32,7 +33,7 @@ export function ActionCard({
   };
 
   const onConfirm = async () => {
-    setBusy(true);
+    setBusyAction("confirm");
     try {
       const res = await confirmSystemAgentAction(action.id);
       if (res.action) apply(res.action);
@@ -44,12 +45,12 @@ export function ActionCard({
     } catch (e) {
       toast.error(getErrMsg(e));
     } finally {
-      setBusy(false);
+      setBusyAction(null);
     }
   };
 
   const onReject = async () => {
-    setBusy(true);
+    setBusyAction("reject");
     try {
       const next = await rejectSystemAgentAction(action.id);
       apply(next);
@@ -57,12 +58,12 @@ export function ActionCard({
     } catch (e) {
       toast.error(getErrMsg(e));
     } finally {
-      setBusy(false);
+      setBusyAction(null);
     }
   };
 
   const onRetrySync = async () => {
-    setBusy(true);
+    setBusyAction("retry");
     try {
       const res = await retrySystemAgentRuntimeSync(action.id);
       if (res.action) apply(res.action);
@@ -71,7 +72,7 @@ export function ActionCard({
     } catch (e) {
       toast.error(getErrMsg(e));
     } finally {
-      setBusy(false);
+      setBusyAction(null);
     }
   };
 
@@ -142,21 +143,22 @@ export function ActionCard({
               type="button"
               size="sm"
               variant={dangerous ? "destructive" : "default"}
+              loading={busyAction === "confirm"}
               disabled={busy}
               onClick={() => void onConfirm()}
             >
-              {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Check className="h-3.5 w-3.5" />}
+              {busyAction !== "confirm" ? <Check className="h-3.5 w-3.5" /> : null}
               确认执行
             </Button>
-            <Button type="button" size="sm" variant="outline" disabled={busy} onClick={() => void onReject()}>
-              <X className="h-3.5 w-3.5" />
+            <Button type="button" size="sm" variant="outline" loading={busyAction === "reject"} disabled={busy} onClick={() => void onReject()}>
+              {busyAction !== "reject" ? <X className="h-3.5 w-3.5" /> : null}
               拒绝
             </Button>
           </>
         ) : null}
         {syncFailed ? (
-          <Button type="button" size="sm" variant="outline" disabled={busy} onClick={() => void onRetrySync()}>
-            <RefreshCw className="h-3.5 w-3.5" />
+          <Button type="button" size="sm" variant="outline" loading={busyAction === "retry"} disabled={busy} onClick={() => void onRetrySync()}>
+            {busyAction !== "retry" ? <RefreshCw className="h-3.5 w-3.5" /> : null}
             重新同步
           </Button>
         ) : null}

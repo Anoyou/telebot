@@ -7,10 +7,11 @@
 //  - footer 可由调用方覆盖，用于列表页放置启停 / 删除等操作
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
-import { AtSign, Globe2, Hash, Loader2, Network, RefreshCw } from "lucide-react";
+import { AtSign, Globe2, Hash, Network, RefreshCw } from "lucide-react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
+import { Spinner } from "@/components/ui/misc";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { AccountAvatar } from "@/components/AccountAvatar";
 import { AccountStatusBadge } from "@/components/AccountStatusBadge";
@@ -240,7 +241,7 @@ function ProxyRow({ proxy }: { proxy?: ProxySummary | null }) {
           title={hasProbe ? "重新探测真实出口" : "测一下真实出口（IP / 国家）"}
         >
           {probeMut.isPending ? (
-            <Loader2 className="h-3 w-3 animate-spin" />
+            <Spinner className="h-3 w-3 animate-spin" />
           ) : (
             <RefreshCw className="h-3 w-3" />
           )}

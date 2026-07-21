@@ -7,7 +7,6 @@ import {
   ChevronDown,
   Cog,
   Download,
-  Loader2,
   Save,
   ShieldCheck,
   SlidersHorizontal,
@@ -345,21 +344,6 @@ export function SettingsIndex() {
             icon={Sparkles}
             title="猜你想要？"
             description="常用入口和当前设置风险放在一起，先处理最可能要做的事。"
-            meta={
-              <div className="flex flex-wrap items-center justify-end gap-1.5">
-                <SignalPill tone="primary" label="当前标签" value={tab} />
-                <SignalPill
-                  tone={(accountsQ.data?.length ?? 0) > 0 ? "success" : "warn"}
-                  label="账号数"
-                  value={accountsQ.data?.length ?? 0}
-                />
-                <SignalPill
-                  tone={killQ.data?.enabled ? "danger" : "success"}
-                  label="总闸"
-                  value={killQ.data?.enabled ? "已开启" : "已关闭"}
-                />
-              </div>
-            }
           />
         </CardHeader>
         <CardContent className="grid grid-cols-3 gap-2 lg:flex lg:items-center">
@@ -478,9 +462,9 @@ export function SettingsIndex() {
                       : undefined
                   }
                   onClick={() => prefix && savePrefix.mutate()}
-                  disabled={savePrefix.isPending}
+                  loading={savePrefix.isPending}
                 >
-                  {savePrefix.isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Save className="mr-2 h-4 w-4" />}
+                  {!savePrefix.isPending ? <Save className="mr-2 h-4 w-4" /> : null}
                   保存
                 </Button>
               </div>
@@ -664,8 +648,8 @@ export function SettingsIndex() {
                     当前浏览器时区：<b>{Intl.DateTimeFormat().resolvedOptions().timeZone}</b>
                   </p>
                 </div>
-                <Button onClick={() => saveTimezone.mutate()} disabled={saveTimezone.isPending}>
-                  {saveTimezone.isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Save className="mr-2 h-4 w-4" />}
+                <Button onClick={() => saveTimezone.mutate()} loading={saveTimezone.isPending}>
+                  {!saveTimezone.isPending ? <Save className="mr-2 h-4 w-4" /> : null}
                   保存
                 </Button>
               </div>
@@ -839,8 +823,8 @@ export function SettingsIndex() {
                 </div>
               </div>
               <div className="mt-3">
-                <Button onClick={() => saveLogRetention.mutate()} disabled={saveLogRetention.isPending}>
-                  {saveLogRetention.isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Save className="mr-2 h-4 w-4" />}
+                <Button onClick={() => saveLogRetention.mutate()} loading={saveLogRetention.isPending}>
+                  {!saveLogRetention.isPending ? <Save className="mr-2 h-4 w-4" /> : null}
                   保存
                 </Button>
               </div>
@@ -921,8 +905,8 @@ export function SettingsIndex() {
                 </div>
               </div>
 
-              <Button onClick={() => saveRiskBudget.mutate()} disabled={saveRiskBudget.isPending}>
-                {saveRiskBudget.isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Save className="mr-2 h-4 w-4" />}
+              <Button onClick={() => saveRiskBudget.mutate()} loading={saveRiskBudget.isPending}>
+                {!saveRiskBudget.isPending ? <Save className="mr-2 h-4 w-4" /> : null}
                 保存风控与预算
               </Button>
             </CardContent>

@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Check, Pencil, Plus, Save, Trash2, X } from "lucide-react";
+import { Check, ChevronDown, ChevronUp, Pencil, Plus, Save, Trash2, X } from "lucide-react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -107,6 +107,7 @@ export function SudoManagement() {
 
   const [form, setForm] = useState<FormState>(EMPTY_FORM);
   const [editingId, setEditingId] = useState<number | null>(null);
+  const [addFormOpen, setAddFormOpen] = useState(false);
   const selectedAccountId = useMemo(() => {
     const id = Number(form.account_id);
     return Number.isInteger(id) && id > 0 ? id : null;
@@ -162,6 +163,7 @@ export function SudoManagement() {
     onSuccess: () => {
       toast.success("已创建 Sudo 用户");
       setForm(EMPTY_FORM);
+      setAddFormOpen(false);
       qc.invalidateQueries({ queryKey: QK });
     },
     onError: (err) => toast.error(getErrMsg(err)),
@@ -185,6 +187,7 @@ export function SudoManagement() {
       toast.success("已更新");
       setEditingId(null);
       setForm(EMPTY_FORM);
+      setAddFormOpen(false);
       qc.invalidateQueries({ queryKey: QK });
     },
     onError: (err) => toast.error(getErrMsg(err)),
@@ -209,6 +212,7 @@ export function SudoManagement() {
 
   const startEdit = (user: SudoUserResponse) => {
     setEditingId(user.id);
+    setAddFormOpen(true);
     setForm({
       account_id: String(user.account_id),
       tg_user_id: String(user.tg_user_id),
@@ -223,6 +227,7 @@ export function SudoManagement() {
   const cancelEdit = () => {
     setEditingId(null);
     setForm(EMPTY_FORM);
+    setAddFormOpen(false);
   };
 
   const toggleAllowedCommand = (command: string) => {
@@ -304,10 +309,42 @@ export function SudoManagement() {
         </div>
 
         {/* 创建/编辑表单 */}
+        {!addFormOpen ? (
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="w-full justify-between sm:w-auto"
+            onClick={() => setAddFormOpen(true)}
+          >
+            <span className="inline-flex items-center">
+              <Plus className="mr-1 h-4 w-4" />
+              添加 Sudo 用户
+            </span>
+            <ChevronDown className="ml-3 h-4 w-4 text-muted-foreground" />
+          </Button>
+        ) : (
         <div className="space-y-4 rounded-lg border p-4">
-          <h3 className="text-sm font-semibold">
-            {editingId ? "编辑 Sudo 用户" : "添加 Sudo 用户"}
-          </h3>
+          <div className="flex items-center justify-between gap-3">
+            <h3 className="text-sm font-semibold">
+              {editingId ? "编辑 Sudo 用户" : "添加 Sudo 用户"}
+            </h3>
+            {!editingId && (
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="h-8 px-2 text-muted-foreground"
+                onClick={() => {
+                  setForm(EMPTY_FORM);
+                  setAddFormOpen(false);
+                }}
+              >
+                <ChevronUp className="mr-1 h-4 w-4" />
+                收起
+              </Button>
+            )}
+          </div>
 
           <div className="grid gap-4 sm:grid-cols-2">
             <div className="space-y-1.5">
@@ -495,6 +532,7 @@ export function SudoManagement() {
             )}
           </div>
         </div>
+        )}
 
         {/* 列表 */}
         <div className="space-y-2">

@@ -14,6 +14,7 @@ import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
 import { CommandBadge } from "@/components/CommandBadge";
+import { EmptyState } from "@/components/feedback/EmptyState";
 import { Spinner } from "@/components/ui/misc";
 import { AccountSummaryCard } from "@/components/AccountSummaryCard";
 import { SectionHeader, SignalPill } from "@/components/ui/status";
@@ -255,12 +256,19 @@ export function AccountManagementPanel({
           ))}
         </div>
       ) : (
-        <p className="rounded-lg border bg-card py-12 text-center text-sm text-muted-foreground">
-          尚未绑定账号，
-          <Link to="/accounts/new" className="text-primary hover:underline">
-            立即新增
-          </Link>
-        </p>
+        <EmptyState
+          icon={Plus}
+          title="尚未绑定账号"
+          description="新增 Telegram 账号后即可配置 worker、指令和插件能力。"
+          action={(
+            <Button asChild size="touch">
+              <Link to="/accounts/new">
+                <Plus className="h-4 w-4" />
+                新增账号
+              </Link>
+            </Button>
+          )}
+        />
       )}
     </div>
   );

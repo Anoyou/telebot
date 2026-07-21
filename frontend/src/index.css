@@ -16,7 +16,7 @@
     --popover: 45 29% 97%;
     --popover-foreground: 36 8% 12%;
 
-    --primary: 22 87% 45%;
+    --primary: 22 87% 41%;
     --primary-hover: 22 88% 40%;
     --primary-foreground: 0 0% 100%;
 
@@ -25,17 +25,17 @@
     --secondary-foreground: 36 8% 12%;
 
     --muted: 40 22% 92%;
-    --muted-foreground: 38 5% 41%;
+    --muted-foreground: 38 5% 39%;
     --faint-foreground: 39 8% 64%;
 
     --accent: 42 16% 88%;
     --accent-foreground: 36 8% 12%;
 
     --success: 146 65% 34%;
-    --warning: 37 91% 38%;
+    --warning: 37 91% 30%;
     --info: 212 90% 44%;
-    --destructive: 4 71% 50%;
-    --destructive-hover: 4 75% 44%;
+    --destructive: 4 71% 42%;
+    --destructive-hover: 4 75% 38%;
     --destructive-foreground: 0 0% 100%;
 
     --border: 38 11% 86%;

@@ -14,6 +14,8 @@ keys-backup-*.age
 
 # 运行时数据：账号头像 / 第三方插件 / 缓存
 data/
+!frontend/src/components/data/
+!frontend/src/components/data/ResponsiveList.tsx
 data/recordings/
 backend/data/
 backend/plugins/
@@ -35,6 +37,8 @@ htmlcov/
 # Node
 node_modules/
 dist/
+test-results/
+playwright-report/
 dev-dist/
 build/
 .parcel-cache/

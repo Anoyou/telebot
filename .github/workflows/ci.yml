@@ -63,6 +63,37 @@ jobs:
         working-directory: frontend
         run: pnpm build
 
+  frontend-browser:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install pnpm
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.23.0 --activate
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile
+
+      - name: Install pinned Playwright Chromium
+        working-directory: frontend
+        run: pnpm exec playwright install chromium
+
+      - name: Run accessibility tests
+        working-directory: frontend
+        run: pnpm test:a11y
+
+      - name: Run visual regression tests
+        working-directory: frontend
+        run: pnpm test:visual
+
   version-sync:
     runs-on: ubuntu-latest
     steps:

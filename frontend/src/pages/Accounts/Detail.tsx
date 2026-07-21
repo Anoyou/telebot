@@ -10,8 +10,7 @@ import {
   Gauge,
   KeyRound,
   LayoutDashboard,
-  Loader2,
-  MessageCircle,
+    MessageCircle,
   Network,
   Power,
   Save,
@@ -310,12 +309,9 @@ export function AccountDetail() {
                     size="sm"
                     variant="outline"
                     className="border-warning/50 bg-warning/15 hover:bg-warning/25"
-                    disabled={restartWorkerMut.isPending}
+                    loading={restartWorkerMut.isPending}
                     onClick={() => restartWorkerMut.mutate()}
                   >
-                    {restartWorkerMut.isPending ? (
-                      <Loader2 className="mr-1 h-3 w-3 animate-spin" />
-                    ) : null}
                     重启 worker 同步
                   </Button>
                 </div>
@@ -939,23 +935,20 @@ function ProxyTab({
             <Button
               variant="outline"
               onClick={handleTest}
-              disabled={!selected || testing}
+              loading={testing}
+              disabled={!selected}
             >
-              {testing ? (
-                <Loader2 className="h-4 w-4 animate-spin" />
-              ) : (
+              {!testing ? (
                 <Activity className="h-4 w-4" />
-              )}
+              ) : null}
               <span className="ml-1">测试</span>
             </Button>
             <Button
               onClick={() => saveMut.mutate()}
-              disabled={
-                saveMut.isPending ||
-                (selected ? Number(selected) : null) === currentProxyId
-              }
+              loading={saveMut.isPending}
+              disabled={(selected ? Number(selected) : null) === currentProxyId}
             >
-              {saveMut.isPending ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : <Save className="mr-1 h-4 w-4" />}
+              {!saveMut.isPending ? <Save className="mr-1 h-4 w-4" /> : null}
               保存
             </Button>
           </div>
@@ -1059,12 +1052,10 @@ function DeviceProfileTab({
             </Select>
             <Button
               onClick={() => saveMut.mutate()}
-              disabled={
-                saveMut.isPending ||
-                (selected ? Number(selected) : null) === currentProfileId
-              }
+              loading={saveMut.isPending}
+              disabled={(selected ? Number(selected) : null) === currentProfileId}
             >
-              {saveMut.isPending ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : <Save className="mr-1 h-4 w-4" />}
+              {!saveMut.isPending ? <Save className="mr-1 h-4 w-4" /> : null}
               保存
             </Button>
           </div>
@@ -1375,18 +1366,16 @@ function HumanizePanel({ aid }: { aid: number }) {
             <div className="flex items-center gap-2 pt-1">
               <Button
                 size="sm"
+                loading={saveMut.isPending}
                 disabled={
                   !dirty ||
-                  saveMut.isPending ||
                   draft.typing_min_ms > draft.typing_max_ms
                 }
                 onClick={() => saveMut.mutate(draft)}
               >
-                {saveMut.isPending ? (
-                  <Loader2 className="mr-1 h-4 w-4 animate-spin" />
-                ) : (
+                {!saveMut.isPending ? (
                   <Save className="mr-1 h-4 w-4" />
-                )}
+                ) : null}
                 保存
               </Button>
               {dirty ? (

@@ -1,7 +1,7 @@
 // 顶栏：移动端汉堡按钮 + 副标题（仅 sm+ 显示）+ 系统健康灯 + 更新检查 + 紧急停用 + 登出
 // iOS PWA：背景色延伸到 safe-area-inset-top，并随主题同步系统状态栏底色，
 // 内容区高度仍维持 56px。
-import { useEffect, useState } from "react";
+import { Component, lazy, Suspense, useEffect, useState, type ErrorInfo, type ReactNode } from "react";
 import {
   Check,
   Menu,
@@ -13,6 +13,14 @@ import {
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import { ErrorState } from "@/components/feedback/ErrorState";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -24,7 +32,9 @@ import { cn } from "@/lib/utils";
 import { BrandLogo } from "@/components/BrandLogo";
 import { HealthDot } from "@/components/HealthDot";
 import { KillSwitch } from "./KillSwitch";
-import { UpdateDialog } from "./UpdateDialog";
+import { Skeleton } from "@/components/ui/misc";
+
+const UpdateDialog = lazy(() => import("./UpdateDialog").then((module) => ({ default: module.UpdateDialog })));
 
 interface TopBarProps {
   username: string;
@@ -101,12 +111,73 @@ export function TopBar({
           <RefreshCw className="h-4 w-4" />
           {isStandalone ? null : <span className="hidden text-xs sm:inline">检查更新</span>}
         </Button>
-        <UpdateDialog open={updateOpen} onOpenChange={setUpdateOpen} />
+        {updateOpen ? (
+          <UpdateDialogErrorBoundary onClose={() => setUpdateOpen(false)}>
+            <Suspense fallback={<UpdateDialogFallback onClose={() => setUpdateOpen(false)} />}>
+              <UpdateDialog open={updateOpen} onOpenChange={setUpdateOpen} />
+            </Suspense>
+          </UpdateDialogErrorBoundary>
+        ) : null}
         <ThemeSwitcher compact={isStandalone} />
         <KillSwitch compact={isStandalone} />
         <span className="sr-only">当前用户：{username}</span>
       </div>
     </header>
+  );
+}
+
+class UpdateDialogErrorBoundary extends Component<
+  { children: ReactNode; onClose: () => void },
+  { error: unknown }
+> {
+  state: { error: unknown } = { error: null };
+
+  static getDerivedStateFromError(error: unknown) {
+    return { error };
+  }
+
+  componentDidCatch(error: unknown, info: ErrorInfo) {
+    console.error("Update dialog chunk failed:", error, info);
+  }
+
+  render() {
+    if (!this.state.error) return this.props.children;
+    return (
+      <Dialog open onOpenChange={(open) => { if (!open) this.props.onClose(); }}>
+        <DialogContent className="dialog-center w-[calc(100vw-1.5rem)] max-w-md">
+          <DialogHeader className="pr-6">
+            <DialogTitle>检查更新</DialogTitle>
+            <DialogDescription>更新面板暂时无法载入，控制台其他功能不受影响。</DialogDescription>
+          </DialogHeader>
+          <ErrorState
+            className="min-h-28 border-0 bg-transparent py-4"
+            title="更新面板载入失败"
+            error="可能是网络中断或部署后资源已更新，请刷新页面后重试。"
+          />
+        </DialogContent>
+      </Dialog>
+    );
+  }
+}
+
+function UpdateDialogFallback({ onClose }: { onClose: () => void }) {
+  return (
+    <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}>
+      <DialogContent className="dialog-center !flex max-h-[calc(100dvh-1.5rem)] w-[calc(100vw-1.5rem)] max-w-md flex-col overflow-hidden">
+        <DialogHeader className="shrink-0 pr-6">
+          <DialogTitle>检查更新</DialogTitle>
+          <DialogDescription>正在载入更新信息。</DialogDescription>
+        </DialogHeader>
+        <div role="status" aria-label="更新信息加载中" className="space-y-4">
+          <Skeleton className="h-10 w-full" />
+          <div className="grid grid-cols-[100px_minmax(0,1fr)] gap-3">
+            <Skeleton className="h-16 w-full" />
+            <Skeleton className="h-16 w-full" />
+          </div>
+          <Skeleton className="h-24 w-full" />
+        </div>
+      </DialogContent>
+    </Dialog>
   );
 }
 

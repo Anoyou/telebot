@@ -20,6 +20,29 @@
 
 ## [Unreleased]
 
+### Added
+
+- 新增 Playwright 视觉基线脚手架、固定 API fixture、axe 无障碍扫描与构建体积分析报告；测试环境会阻断全部非 GET API，避免误写真实数据。
+- 新增通用 `ResponsiveList`、`EmptyState`、`ErrorState`，并为按钮补充统一提交中状态和 44px 主操作触控档位。
+
+### Changed
+
+- 资金台账在窄屏改为可展开卡片流，桌面继续保留完整表格；测活对话、模型创建向导与 Bot 配置操作针对移动端收紧高度和宽度。
+- 插件文档代码高亮改为动态加载，首屏不再预载约 54 KiB gzip 的 markdown 高亮依赖。
+- 设置页移除重复状态信号，Sudo 用户新增表单默认折叠，模型测活侧栏入口收进标题栏。
+- 统一页面骨架、加载中按钮、空状态、错误状态和账号、网络、健康状态色；补齐移动端 KPI 标题与 Bot 风险标题的窄屏排版。
+
+### Fixed
+
+- 修复 `asChild` 按钮进入加载态时向 Radix Slot 传入多个子节点导致页面崩溃的问题，并为更新弹窗增加局部加载骨架与错误边界。
+- 补齐筛选下拉、开关、纯图标按钮和横向滚动区的可访问名称与键盘焦点，调整亮色状态色对比度。
+
+### Tests
+
+- 前端视觉与无障碍脚手架覆盖 Dashboard、Accounts、BotTab、Ledger、Logs、Extensions、AI 与 LLMProviders 三档视口。
+- CI 使用固定 macOS runner 与 Playwright 锁定 Chromium 执行视觉和 axe 门禁，并固定中文区域与上海时区以减少截图环境漂移。
+- 48 项视觉比较、24 项 axe 扫描、11 项前端单测、类型检查与生产构建全部通过。
+
 ## [0.71.0] — 2026-07-21 · minor（次版本） · 悬浮系统助手与移动端工作台优化
 
 ### Added
