@@ -65,8 +65,8 @@ export function KillSwitch({ compact = false }: { compact?: boolean }) {
         variant="outline"
         size="sm"
         className={cn(
-          "h-10 rounded-full bg-card text-xs font-semibold shadow-sm hover:bg-card hover:shadow-md",
-          compact ? "w-10 px-0" : "w-10 px-0 sm:w-auto sm:gap-2 sm:px-3",
+          "h-7 rounded-full bg-card text-[11px] font-semibold shadow-sm hover:bg-card hover:shadow-md",
+          compact ? "w-7 px-0" : "w-7 px-0 sm:w-auto sm:gap-1.5 sm:px-2.5",
           enabled
             ? "border-destructive/30 bg-destructive/10 text-destructive hover:bg-destructive/[0.18]"
             : "border-destructive/30 text-destructive hover:border-destructive/50 hover:bg-destructive/10",
@@ -77,12 +77,12 @@ export function KillSwitch({ compact = false }: { compact?: boolean }) {
       >
         {enabled ? (
           <>
-            <ShieldCheck className="h-4 w-4" />
+            <ShieldCheck className="h-3.5 w-3.5" />
             {compact ? null : <span className="hidden sm:inline">恢复运行</span>}
           </>
         ) : (
           <>
-            <ShieldAlert className="h-4 w-4" />
+            <ShieldAlert className="h-3.5 w-3.5" />
             {compact ? null : <span className="hidden sm:inline">紧急停用</span>}
           </>
         )}

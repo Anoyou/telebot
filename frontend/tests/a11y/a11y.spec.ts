@@ -3,7 +3,7 @@ import AxeBuilder from "@axe-core/playwright";
 import { installApiFixture } from "../visual/fixtures";
 
 const pages = [
-  ["dashboard", "/"],
+  ["dashboard", "/overview"],
   ["accounts", "/?accounts=1"],
   ["ledger", "/ledger"],
   ["logs", "/logs"],

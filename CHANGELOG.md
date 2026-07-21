@@ -20,6 +20,8 @@
 
 ## [Unreleased]
 
+## [0.72.0-beta.2] — 2026-07-22 · minor（次版本预发布） · 平台能力与前端体验收口
+
 ### Added
 
 - 新增平台能力热插拔：统一管理 AI、Interaction Bot、入站 Webhook、资金台账与命中调试五个可选模块，支持不重启热关闭/热启动。
@@ -29,6 +31,12 @@
 - 新增 `docs/PLATFORM-CAPABILITIES.md` 说明模块边界、缓存 fail-closed 与关闭语义。
 
 ### Changed
+
+- 登录与根路径默认进入插件中心；概览改挂 `/overview` 并降权，减少「很少看首页」时的固定请求税。
+- 侧栏更新日志改为按需懒加载（不再把 `react-markdown` / CHANGELOG 绑进壳层冷路径）。
+- 交互中心 `BotTab`、AI「模型提供商」页改为路由内 lazy，避免进页即拖整包重依赖。
+- 账号详情按 tab 拉取 features / rate-limit；日志默认关闭 5 秒自动刷新。
+- 概览在 AI 关闭时不请求提供商列表；资源占用刷新间隔 15s → 30s。
 
 - 系统设置 `ai_enabled` 兼容委托到平台能力服务（继续保留读写字段）。
 - 入站 Webhook 关闭时最前层 404 且 fail-closed（不访问 DB/不读 body）；worker 侧 `CMD_WEBHOOK_DELIVER` 同步拒绝。

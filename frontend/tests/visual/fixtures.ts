@@ -39,6 +39,20 @@ const emptyLedgerStats = {
   source_matrix: [],
 };
 
+const platformCapabilitiesFixture = {
+  modules: [],
+  channels: [],
+  worker_convergence: {
+    notified: 0,
+    acked: 0,
+    pending: 0,
+    offline_or_timeout: 0,
+    notes: [],
+  },
+  cache_ready: true,
+  updated_at: "2026-07-21T00:00:00Z",
+};
+
 const accountFixture = {
   id: 1,
   phone: "+8613800000000",
@@ -127,6 +141,7 @@ function jsonResponse(pathname: string): unknown | undefined {
   if (pathname === "/api/commands/llm-providers") return [];
   if (pathname === "/api/system/resource-dashboard") return emptyResourceDashboard;
   if (pathname === "/api/system/settings") return { timezone: "Asia/Shanghai", login_security: {} };
+  if (pathname === "/api/system/capabilities") return platformCapabilitiesFixture;
   if (pathname === "/api/feature-matrix") return { features: [] };
   if (pathname === "/api/ledger") return { items: [ledgerEntryFixture] };
   if (pathname === "/api/ledger/summary") return emptyLedgerSummary;
@@ -136,6 +151,7 @@ function jsonResponse(pathname: string): unknown | undefined {
   if (pathname === "/api/logs/trace/events/" || pathname.startsWith("/api/logs/trace/events/")) return { events: [] };
   if (pathname === "/api/commands/templates" || pathname === "/api/commands/builtin") return [];
   if (pathname === "/api/llm/usage/recent") return [];
+  if (pathname === "/api/llm/usage/plugins/summary") return { items: [] };
   if (pathname === "/api/commands/ai/enablement-summary") return { total_accounts: 0, enabled_accounts: 0, ai_templates: 0 };
   if (pathname === "/api/proxies") return [];
   if (pathname === "/api/plugin-repos" || pathname === "/api/plugin-repos/local/plugins" || pathname === "/api/plugin-repos/official/plugins") return [];

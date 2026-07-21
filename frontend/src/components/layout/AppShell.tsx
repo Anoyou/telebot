@@ -145,7 +145,7 @@ export function AppShell() {
   if (isLoading) {
     return (
       <div role="status" aria-label="工作台加载中" className="flex h-[100dvh] flex-col bg-background">
-        <div className="flex h-14 items-center gap-3 border-b px-4 sm:px-6">
+        <div className="flex h-12 items-center gap-3 border-b px-4 sm:px-6">
           <Skeleton className="h-8 w-8 rounded-lg" />
           <Skeleton className="h-4 w-28" />
           <Skeleton className="ml-auto h-8 w-20 rounded-md" />

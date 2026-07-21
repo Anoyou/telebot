@@ -125,7 +125,7 @@ export function AccountDetail() {
   const featuresQ = useQuery({
     queryKey: ["account", aid, "features"],
     queryFn: () => listAccountFeatures(aid),
-    enabled: !!aid,
+    enabled: !!aid && (defaultTab === "overview" || defaultTab === "features"),
   });
 
   // 动态获取已注册功能列表（替代硬编码 FEATURE_KEYS）
@@ -133,12 +133,13 @@ export function AccountDetail() {
     queryKey: ["matrix"],
     queryFn: getFeatureMatrix,
     select: (data) => data.features,
+    enabled: defaultTab === "overview" || defaultTab === "features",
   });
 
   const rateQ = useQuery({
     queryKey: ["account", aid, "rate-limit"],
     queryFn: () => getAccountRateLimit(aid),
-    enabled: !!aid,
+    enabled: !!aid && defaultTab === "rate",
   });
 
   // ===================== 操作 mutations =====================

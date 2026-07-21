@@ -48,7 +48,7 @@ import { PageHeader, PageShell } from "@/components/layout/PageScaffold";
 import { Spinner } from "@/components/ui/misc";
 import { listAccounts } from "@/api/accounts";
 import { listLLMProviders } from "@/api/commands";
-import { getResourceDashboard } from "@/api/system";
+import { getResourceDashboard, getSystemSettings } from "@/api/system";
 import type { ResourceDashboard } from "@/api/types";
 import { cn } from "@/lib/utils";
 
@@ -57,6 +57,12 @@ export function Dashboard() {
   const [searchParams, setSearchParams] = useSearchParams();
   const accountsOpen = searchParams.get("accounts") === "1";
   const guideActive = searchParams.get("guide") === "1";
+  const settingsQ = useQuery({
+    queryKey: ["system", "settings"],
+    queryFn: getSystemSettings,
+    staleTime: 30_000,
+  });
+  const aiEnabled = settingsQ.data?.ai_enabled ?? true;
   const accountsQ = useQuery({
     queryKey: ["accounts"],
     queryFn: listAccounts,
@@ -64,11 +70,13 @@ export function Dashboard() {
   const providersQ = useQuery({
     queryKey: ["llm-providers"],
     queryFn: listLLMProviders,
+    enabled: !settingsQ.isLoading && aiEnabled,
+    retry: false,
   });
   const resourceQ = useQuery({
     queryKey: ["system", "resource-dashboard"],
     queryFn: getResourceDashboard,
-    refetchInterval: 15_000,
+    refetchInterval: 30_000,
     refetchIntervalInBackground: false,
     refetchOnWindowFocus: true,
   });
@@ -87,7 +95,13 @@ export function Dashboard() {
     (provider) => provider.has_api_key || provider.provider === "ollama",
   ).length;
   const workerValue = accountsQ.isError ? "读取失败" : accountsQ.isLoading ? "-" : `${activeAccounts}/${accounts.length}`;
-  const providerValue = providersQ.isError ? "读取失败" : providersQ.isLoading ? "-" : `${readyProviders}/${providers.length}`;
+  const providerValue = !aiEnabled
+    ? "已关闭"
+    : providersQ.isError
+      ? "读取失败"
+      : providersQ.isLoading
+        ? "-"
+        : `${readyProviders}/${providers.length}`;
   const logValue = resourceQ.data
     ? `${resourceQ.data.logs.last_5m_total}`
     : resourceQ.isError
@@ -153,10 +167,22 @@ export function Dashboard() {
           icon={Sparkles}
           title="AI"
           value={providerValue}
-          description={providersQ.isError ? "模型提供商读取失败，点击后重试" : "可调用模型 / 已配置模型"}
-          tone={providersQ.isError ? "danger" : overviewTone(readyProviders, providers.length, providersQ.isLoading)}
+          description={
+            !aiEnabled
+              ? "平台 AI 能力已关闭"
+              : providersQ.isError
+                ? "模型提供商读取失败，点击后重试"
+                : "可调用模型 / 已配置模型"
+          }
+          tone={
+            !aiEnabled
+              ? "neutral"
+              : providersQ.isError
+                ? "danger"
+                : overviewTone(readyProviders, providers.length, providersQ.isLoading)
+          }
           railTone="info"
-          to="/ai?tab=providers"
+          to={aiEnabled ? "/ai?tab=providers" : "/settings?tab=platform"}
         />
         <OverviewTile
           icon={Boxes}
@@ -545,7 +571,7 @@ function ResourceUsageCard({
           description="上方是 TelePilot 应用占用；下方是宿主机/服务器整体资源。"
           meta={data?.host.sampled_at ? (
             <span className="shrink-0 text-xs text-muted-foreground">
-              自动每 15 秒刷新
+              自动每 30 秒刷新
             </span>
           ) : null}
         />
@@ -616,7 +642,7 @@ function ResourceSamplingPanel({ data }: { data: ResourceDashboard }) {
 
   return (
     <div className="grid gap-3 md:grid-cols-3">
-      <ResourceMeta label="资源采样" value={sampledLabel} hint="自动每 15 秒刷新" />
+      <ResourceMeta label="资源采样" value={sampledLabel} hint="自动每 30 秒刷新" />
       <ResourceMeta label="宿主机运行时间" value={hostUptimeLabel} hint="服务器开机后累计" />
       <ResourceMeta label="项目运行时间" value={appUptimeLabel} hint="当前 TelePilot 后端进程" />
     </div>

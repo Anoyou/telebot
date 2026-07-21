@@ -2,12 +2,10 @@
 //  - <Sidebar> 桌面端（≥md）常驻显示
 //  - <MobileSidebar> 移动端通过抽屉模式呈现（Radix Dialog 实现，左侧滑入）
 // 两者共享 NavList，移动端点击导航后自动关闭抽屉。
-import { useState } from "react";
+import { lazy, Suspense, useState } from "react";
 import { NavLink } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
 import {
   Boxes,
   Bot,
@@ -27,6 +25,7 @@ import {
   DropdownMenuContent,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+// DropdownMenuContent kept for Suspense fallback shell
 import { cn } from "@/lib/utils";
 import { APP_VERSION_LABEL } from "@/lib/version";
 import { getPlatformCapabilities, getSystemSettings } from "@/api/system";
@@ -35,7 +34,7 @@ import {
   filterNavByCapabilities,
   type CapabilityEnabledMap,
 } from "@/lib/navigation";
-import changelogRaw from "../../../../CHANGELOG.md?raw";
+const ChangelogMenu = lazy(() => import("./ChangelogMenu"));
 
 interface NavItem {
   to: string;
@@ -44,13 +43,12 @@ interface NavItem {
   end?: boolean;
 }
 
-// 顶层导航条目；
-// 首页承载概览 + 账号操作，AI 能力收敛到插件中心。
+// 顶层导航条目。默认落地页是插件中心；概览降权到 /overview。
 const NAV: NavItem[] = [
-  { to: "/", label: "概览", icon: Home, end: true },
   { to: "/plugins", label: "插件", icon: Boxes },
   { to: "/ai", label: "AI", icon: Sparkles },
   { to: "/interaction", label: "交互", icon: Bot },
+  { to: "/overview", label: "概览", icon: Home },
   { to: "/ledger", label: "资金台账", icon: WalletCards },
   { to: "/webhooks", label: "入站 Webhook", icon: Webhook },
   { to: "/dispatch-debug", label: "命中调试", icon: Bug },
@@ -69,10 +67,10 @@ export function navForCapabilities(enabled: CapabilityEnabledMap): NavItem[] {
 
 export function mobilePrimaryNavForCapabilities(enabled: CapabilityEnabledMap): NavItem[] {
   return navForCapabilities(enabled).filter((item) =>
-    item.to === "/" ||
     item.to === "/plugins" ||
     item.to === "/interaction" ||
-    item.to === "/ai",
+    item.to === "/ai" ||
+    item.to === "/overview",
   );
 }
 
@@ -204,66 +202,26 @@ function SidebarBody({
               {collapsed ? APP_VERSION_LABEL.replace(/^v/i, "") : APP_VERSION_LABEL}
             </button>
           </DropdownMenuTrigger>
-          <ChangelogMenu />
+          {changelogOpen ? (
+            <Suspense
+              fallback={
+                <DropdownMenuContent
+                  side="right"
+                  align="end"
+                  sideOffset={10}
+                  className="w-[min(28rem,calc(100vw-2rem))] p-4 text-sm text-muted-foreground"
+                >
+                  正在加载更新日志…
+                </DropdownMenuContent>
+              }
+            >
+              <ChangelogMenu />
+            </Suspense>
+          ) : null}
         </DropdownMenu>
       </div>
     </>
   );
-}
-
-function ChangelogMenu() {
-  const sections = extractRecentChangelogSections(changelogRaw, 4);
-  return (
-    <DropdownMenuContent
-      side="right"
-      align="end"
-      sideOffset={10}
-      className="max-h-[min(72vh,34rem)] w-[min(28rem,calc(100vw-2rem))] p-0"
-      style={{ overflowY: "auto" }}
-    >
-      <div className="border-b px-4 py-3">
-        <div className="text-base font-semibold">更新日志</div>
-        <div className="mt-1 text-sm text-muted-foreground">
-          最近版本的主要变化，完整记录见仓库 CHANGELOG.md。
-        </div>
-      </div>
-      <div className="space-y-5 p-4">
-        {sections.length > 0 ? (
-          sections.map((sec) => (
-            <div key={sec.title}>
-              <div className="text-sm font-semibold">{sec.title}</div>
-              <article className="prose prose-sm mt-2 max-w-none text-sm text-muted-foreground dark:prose-invert">
-                <ReactMarkdown remarkPlugins={[remarkGfm]}>{sec.body}</ReactMarkdown>
-              </article>
-            </div>
-          ))
-        ) : (
-          <p className="text-sm text-muted-foreground">未解析到更新日志内容，请检查 CHANGELOG.md。</p>
-        )}
-      </div>
-    </DropdownMenuContent>
-  );
-}
-
-function extractRecentChangelogSections(md: string, limit: number): Array<{ title: string; body: string }> {
-  const lines = md.split(/\r?\n/);
-  const starts: Array<{ idx: number; title: string }> = [];
-  for (let i = 0; i < lines.length; i += 1) {
-    const m = lines[i].match(/^##\s+\[(.+?)\].*$/);
-    if (!m) continue;
-    const title = lines[i].replace(/^##\s+/, "").trim();
-    if (m[1].toLowerCase() === "unreleased") continue;
-    starts.push({ idx: i, title });
-  }
-  const out: Array<{ title: string; body: string }> = [];
-  for (let i = 0; i < starts.length && out.length < limit; i += 1) {
-    const begin = starts[i].idx + 1;
-    const end = i + 1 < starts.length ? starts[i + 1].idx : lines.length;
-    const body = lines.slice(begin, end).join("\n").trim();
-    if (!body) continue;
-    out.push({ title: starts[i].title, body });
-  }
-  return out;
 }
 
 // 桌面常驻侧栏：< md 隐藏，由 MobileSidebar 接管

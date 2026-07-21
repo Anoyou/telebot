@@ -185,9 +185,10 @@ export default function App() {
       <Route path="/login" element={<Login />} />
       <Route element={<RequireAuth />}>
         <Route element={<AppShell />}>
-          <Route index element={<Dashboard />} />
+          <Route index element={<Navigate to="/plugins" replace />} />
+          <Route path="overview" element={<Dashboard />} />
           <Route path="accounts">
-            <Route index element={<Navigate to="/?accounts=1" replace />} />
+            <Route index element={<Navigate to="/overview?accounts=1" replace />} />
             <Route
               path="new"
               element={
@@ -422,7 +423,7 @@ export default function App() {
             element={<Navigate to="/ai?tab=usage" replace />}
           />
           <Route path="ai/*" element={<Navigate to="/ai" replace />} />
-          <Route path="*" element={<Navigate to="/" replace />} />
+          <Route path="*" element={<Navigate to="/plugins" replace />} />
         </Route>
       </Route>
     </Routes>

@@ -127,7 +127,7 @@ jobs:
           print(f"version sync ok: {version}")
           PY
 
-      - name: Prevent non-main release version bumps
+      - name: Prevent non-main stable release version bumps
         if: github.event_name == 'push' && github.ref_name != 'main'
         run: |
           git fetch origin main --depth=1
@@ -143,10 +143,12 @@ jobs:
               text=True,
           )
           main = re.search(r'__version__ = "([^"]+)"', main_text).group(1)
-          if current != main:
+          prerelease = re.fullmatch(r"\d+\.\d+\.\d+-(?:alpha|beta|rc)\.\d+", current)
+          if current != main and not prerelease:
               raise SystemExit(
-                  f"非 main 分支不得独立发布版本：当前 {current}，main {main}。"
-                  "请先合入 main，再由 main 统一迭代版本。"
+                  f"非 main 分支不得独立发布正式版本：当前 {current}，main {main}。"
+                  "请先合入 main，再由 main 统一迭代正式版本；开发分支仅允许 alpha/beta/rc 预发布版本。"
               )
-          print(f"non-main version guard ok: {current}")
+          channel = "预发布" if prerelease else "与 main 一致"
+          print(f"non-main version guard ok: {current} ({channel})")
           PY

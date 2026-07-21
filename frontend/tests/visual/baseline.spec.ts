@@ -7,7 +7,7 @@ import { applyVisualMasks } from "./masks";
 import { screenshotDiffRatio } from "./compare";
 
 const pages = [
-  ["dashboard", "/"],
+  ["dashboard", "/overview"],
   ["accounts", "/?accounts=1"],
   ["ledger", "/ledger"],
   ["logs", "/logs"],

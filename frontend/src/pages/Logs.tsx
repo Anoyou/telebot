@@ -146,7 +146,8 @@ export function Logs() {
   const [customSince, setCustomSince] = useState(() => searchParams.get("since") || "");
   const [customUntil, setCustomUntil] = useState(() => searchParams.get("until") || "");
   const [showFilters, setShowFilters] = useState(false);
-  const [autoRefresh, setAutoRefresh] = useState(true);
+  // 默认关闭自动刷新：进入日志页不再每 5 秒打一轮请求
+  const [autoRefresh, setAutoRefresh] = useState(false);
   const [pluginKey, setPluginKey] = useState(() => searchParams.get("plugin_key") || "");
   const [eventType, setEventType] = useState(() => searchParams.get("event_type") || "");
   const [sourceChannel, setSourceChannel] = useState(() => searchParams.get("source_channel") || "");

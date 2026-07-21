@@ -105,7 +105,9 @@ export function SignalPill({
       )}
     >
       <span className={cn("h-1.5 w-1.5 shrink-0 rounded-full", toneClass.dot)} />
-      <span className="shrink-0 text-muted-foreground">{label}</span>
+      <span className={cn("shrink-0", tone === "warn" ? "text-foreground/80" : "text-muted-foreground")}>
+        {label}
+      </span>
       <span className="min-w-0 truncate font-semibold text-foreground">{value}</span>
     </div>
   );

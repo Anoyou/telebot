@@ -1,4 +1,4 @@
-import { useEffect, useMemo } from "react";
+import { lazy, Suspense, useEffect, useMemo } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -25,7 +25,9 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/misc";
 import { Select } from "@/components/ui/select";
 import { SignalPill } from "@/components/ui/status";
-import { BotTab } from "@/pages/Accounts/BotTab";
+const BotTab = lazy(() =>
+  import("@/pages/Accounts/BotTab").then((module) => ({ default: module.BotTab })),
+);
 
 function accountOptionLabel(account: AccountSummary): string {
   const name = account.display_name?.trim();
@@ -277,7 +279,19 @@ export function InteractionIndex() {
               </div>
             </CardHeader>
             <CardContent className="p-3 sm:p-4">
-              {selectedAid !== null ? <BotTab aid={selectedAid} mode="interaction" /> : null}
+              {selectedAid !== null ? (
+                <Suspense
+                  fallback={
+                    <div role="status" aria-label="交互配置加载中" className="space-y-3">
+                      <Skeleton className="h-10 w-full rounded-md" />
+                      <Skeleton className="h-28 w-full rounded-lg" />
+                      <Skeleton className="h-40 w-full rounded-lg" />
+                    </div>
+                  }
+                >
+                  <BotTab aid={selectedAid} mode="interaction" />
+                </Suspense>
+              ) : null}
             </CardContent>
           </Card>}
         </>

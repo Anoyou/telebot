@@ -73,7 +73,7 @@ export function SessionDrawer({
       <aside className="hidden w-64 shrink-0 border-r bg-card/40 md:block">{body}</aside>
       {/* 移动抽屉 */}
       {open ? (
-        <div className="fixed bottom-[calc(4.75rem+env(safe-area-inset-bottom))] left-0 right-0 top-[calc(5rem+env(safe-area-inset-top))] z-[69] md:hidden">
+        <div className="fixed bottom-[calc(4.75rem+env(safe-area-inset-bottom))] left-0 right-0 top-[calc(3.25rem+env(safe-area-inset-top))] z-[69] md:hidden">
           <button
             type="button"
             className="absolute inset-0 bg-black/40"

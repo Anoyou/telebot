@@ -62,7 +62,7 @@ test("capability navigation hides disabled module routes", () => {
   const map = capabilityEnabledMap(sampleCaps({ ai: false, ledger: false }));
   const nav = filterNavByCapabilities(
     [
-      { to: "/" },
+      { to: "/overview" },
       { to: "/ai" },
       { to: "/ai/liveness" },
       { to: "/ledger" },
@@ -73,7 +73,7 @@ test("capability navigation hides disabled module routes", () => {
   );
   assert.deepEqual(
     nav.map((n) => n.to),
-    ["/", "/plugins", "/settings"],
+    ["/overview", "/plugins", "/settings"],
   );
 });
 

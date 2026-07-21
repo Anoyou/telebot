@@ -1,5 +1,6 @@
 import { expect, test } from "@playwright/test";
 
+import { APP_VERSION } from "../../src/lib/version";
 import { installApiFixture, installProviderFixture } from "./fixtures";
 
 test.describe("移动端交互细节", () => {
@@ -65,7 +66,7 @@ test.describe("移动端交互细节", () => {
     test.skip(testInfo.project.name !== "mobile", "仅移动视口");
     const fixture = await installApiFixture(page);
 
-    await page.goto("/", { waitUntil: "networkidle" });
+    await page.goto("/plugins", { waitUntil: "networkidle" });
     await page.getByRole("button", { name: "检查更新" }).click();
     const dialog = page.getByRole("dialog", { name: "检查更新" });
     await expect(dialog).toBeVisible();
@@ -75,7 +76,7 @@ test.describe("移动端交互细节", () => {
     const resolvedHeight = await dialog.evaluate((element) => Math.round(element.getBoundingClientRect().height));
     expect(Math.abs(resolvedHeight - checkingHeight)).toBeLessThanOrEqual(1);
     await expect(details).not.toHaveAttribute("open", "");
-    await expect(details.locator("summary")).toContainText("v0.72.0-beta.1 → v0.72.0-beta.2");
+    await expect(details.locator("summary")).toContainText(`v${APP_VERSION} → v0.72.0-beta.2`);
     await expect(details.getByText("当前提交: aaaa1111aaaa")).toBeHidden();
     await details.locator("summary").click();
     await expect(details).toHaveAttribute("open", "");

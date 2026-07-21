@@ -1,4 +1,4 @@
-import { type ReactNode, useEffect, useState } from "react";
+import { type ReactNode, lazy, Suspense, useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import {
@@ -42,7 +42,19 @@ import { HowItWorks } from "@/components/ai/HowItWorks";
 import { RecommendedSetup } from "@/components/ai/RecommendedSetup";
 import { PageHeader, PageShell } from "@/components/layout/PageScaffold";
 import { useAssistantDock } from "@/components/assistant/AssistantDock";
-import { LLMProviders } from "@/pages/AI/LLMProviders";
+const LLMProviders = lazy(() =>
+  import("@/pages/AI/LLMProviders").then((module) => ({ default: module.LLMProviders })),
+);
+
+function LLMProvidersFallback() {
+  return (
+    <div role="status" aria-label="模型提供商加载中" className="space-y-3">
+      <Skeleton className="h-10 w-full rounded-md" />
+      <Skeleton className="h-32 w-full rounded-lg" />
+      <Skeleton className="h-48 w-full rounded-lg" />
+    </div>
+  );
+}
 import { RecentUsageContent } from "@/pages/AI/_components/RecentUsage";
 
 type AITab = "overview" | "providers" | "usage";
@@ -239,7 +251,9 @@ export function AIIndex() {
   if (activeTab === "providers" && searchParams.get("newProvider") === "1") {
     return (
       <PageShell>
-        <LLMProviders openCreateOnMount />
+        <Suspense fallback={<LLMProvidersFallback />}>
+          <LLMProviders openCreateOnMount />
+        </Suspense>
       </PageShell>
     );
   }
@@ -258,7 +272,9 @@ export function AIIndex() {
         <div className="rounded-md border bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
           已配置 {providerCount} 个模型提供商，其中 {readyCount} 个可调用。联网搜索需要 api_format=responses 的 OpenAI provider。
         </div>
-        <LLMProviders />
+        <Suspense fallback={<LLMProvidersFallback />}>
+          <LLMProviders />
+        </Suspense>
       </PageShell>
     );
   }

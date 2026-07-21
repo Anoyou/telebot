@@ -78,7 +78,7 @@ export function Login() {
         return;
       }
       toast.success("登录成功");
-      nav("/", { replace: true });
+      nav("/plugins", { replace: true });
     },
     onError: (err) => {
       const code = getErrCode(err);
@@ -114,7 +114,7 @@ export function Login() {
         return;
       }
       toast.success("注册并登录成功");
-      nav("/", { replace: true });
+      nav("/plugins", { replace: true });
     },
     onError: (err) => toast.error(getErrMsg(err)),
   });
