@@ -130,6 +130,14 @@ def _run(args: list[str], *, timeout: int = 60, env: dict[str, str] | None = Non
         return "", f"{type(exc).__name__}: {exc}", 1
 
 
+def _version_at_ref(ref: str) -> str | None:
+    out, _, rc = _run(["git", "show", f"{ref}:backend/app/__init__.py"], timeout=10)
+    if rc != 0:
+        return None
+    match = re.search(r'^__version__\s*=\s*["\']([^"\']+)["\']', out, re.MULTILINE)
+    return match.group(1).strip() if match else None
+
+
 def _int_query(value: str | None, default: int, minimum: int, maximum: int) -> int:
     try:
         parsed = int(str(value or "").strip())
@@ -448,6 +456,8 @@ def _check_plan(remote: str, branch: str) -> dict[str, Any]:
         "ok": True,
         "remote": remote,
         "branch": branch,
+        "current_version": _version_at_ref(current_out),
+        "target_version": _version_at_ref(target_out),
         "current_commit": current_out[:12],
         "remote_commit": target_out[:12],
         "has_update": (current_out != target_out and behind > 0) or deployment_pending,

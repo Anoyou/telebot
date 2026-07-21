@@ -72,8 +72,57 @@ const ledgerCompensationFixture = {
   updated_at: "2026-07-21T08:01:00Z",
 };
 
+export const providerFixtures = [
+  {
+    id: 2,
+    name: "Grok",
+    provider: "anthropic",
+    has_api_key: true,
+    base_url: "https://example.invalid/v1",
+    default_model: "grok-4.20-fast",
+    api_format: "anthropic_messages",
+    protocol_profile: "standard",
+    web_search_api_format: "auto",
+    client_identity_profile: "claude_code",
+    modality: "text",
+    tags: ["chat", "reason", "translate", "vision"],
+    cost_tier: 2,
+    notes: null,
+    proxy_id: null,
+    models: [
+      { id: "grok-4.20-fast", enabled: true, custom: false, label: null },
+      { id: "grok-4.20", enabled: true, custom: false, label: null },
+      { id: "grok-4-fast", enabled: true, custom: false, label: null },
+    ],
+  },
+  {
+    id: 1,
+    name: "猫羽",
+    provider: "openai",
+    has_api_key: true,
+    base_url: "https://example.invalid/v1",
+    default_model: "deepseek-chat",
+    api_format: "responses",
+    protocol_profile: "standard",
+    web_search_api_format: "auto",
+    client_identity_profile: "codex_cli",
+    modality: "text",
+    tags: ["chat"],
+    cost_tier: 2,
+    notes: null,
+    proxy_id: null,
+    models: [
+      { id: "deepseek-chat", enabled: true, custom: false, label: null },
+      { id: "deepseek-reasoner", enabled: true, custom: false, label: null },
+      { id: "deepseek-lite", enabled: false, custom: false, label: null },
+      { id: "deepseek-coder", enabled: false, custom: false, label: null },
+    ],
+  },
+] as const;
+
 function jsonResponse(pathname: string): unknown | undefined {
   if (pathname === "/api/auth/me") return { id: 1, username: "visual-test", has_totp: false };
+  if (pathname === "/api/auth/csrf") return { csrf_token: "visual-test-csrf" };
   if (pathname === "/api/accounts") return [accountFixture];
   if (pathname === "/api/commands/llm-providers") return [];
   if (pathname === "/api/system/resource-dashboard") return emptyResourceDashboard;
@@ -94,6 +143,15 @@ function jsonResponse(pathname: string): unknown | undefined {
   if (pathname === "/api/remote-plugins") return [];
   if (pathname === "/api/system/network") return { online: true };
   if (pathname === "/api/system/version") return { version: APP_VERSION };
+  if (pathname === "/api/system/update-target-options") return { ok: true, remotes: ["origin"], branches: ["main"], remote: "origin" };
+  if (pathname === "/api/system/check-update") return {
+    has_update: true, can_check: true,
+    current_version: APP_VERSION, target_version: "0.72.0-beta.2",
+    current_commit: "aaaa1111aaaa", remote_commit: "bbbb2222bbbb", ahead: 2,
+    remote: "origin", branch: "main", changed_files: ["frontend/src/App.tsx"],
+    runtime_mode: "local_source", action_required: "frontend", plan_label: "仅需更新前端",
+    plan_detail: "更新前端资源后重启服务。", components: ["frontend"], services: ["frontend"], can_apply: true,
+  };
   if (pathname === "/api/system/kill-switch") return { enabled: false };
   if (pathname === "/api/system/health-overview") return {
     db: { ok: true }, redis: { ok: true }, alembic: { ok: true, pending: [] },
@@ -120,6 +178,11 @@ export async function installApiFixture(page: Page): Promise<{ assertClean: () =
       await route.continue();
       return;
     }
+    if (request.method() === "POST" && pathname === "/api/system/check-update") {
+      const response = jsonResponse(pathname);
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(response) });
+      return;
+    }
     if (request.method() !== "GET") {
       unexpected.push(`${request.method()} ${pathname}`);
       await route.abort("blockedbyclient");
@@ -142,4 +205,10 @@ export async function installApiFixture(page: Page): Promise<{ assertClean: () =
       if (unexpected.length) throw new Error(`视觉基线触发了未声明 API 请求: ${unexpected.join(", ")}`);
     },
   };
+}
+
+export async function installProviderFixture(page: Page): Promise<void> {
+  await page.route("**/api/commands/llm-providers", async (route: Route) => {
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(providerFixtures) });
+  });
 }

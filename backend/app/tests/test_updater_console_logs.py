@@ -341,6 +341,8 @@ def test_update_plan_retries_commit_with_pending_deployment(monkeypatch, tmp_pat
             return "targetcommit", "", 0
         if args == ["git", "rev-parse", "--git-path", "telepilot-deploy-pending"]:
             return ".git/telepilot-deploy-pending", "", 0
+        if args == ["git", "show", "targetcommit:backend/app/__init__.py"]:
+            return '__version__ = "0.72.0-beta.2"', "", 0
         if args[:3] == ["git", "rev-list", "--count"]:
             return "0", "", 0
         if args[:2] == ["python", "backend/app/util/update_plan.py"]:
@@ -362,3 +364,5 @@ def test_update_plan_retries_commit_with_pending_deployment(monkeypatch, tmp_pat
     assert result["has_update"] is True
     assert result["deployment_pending"] is True
     assert result["deploy_from_commit"] == "oldcommit"
+    assert result["current_version"] == "0.72.0-beta.2"
+    assert result["target_version"] == "0.72.0-beta.2"

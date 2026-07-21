@@ -450,6 +450,8 @@ async def test_check_update_uses_internal_updater(monkeypatch) -> None:
         lambda path, payload=None, timeout=30: {
             "ok": True,
             "has_update": True,
+            "current_version": "0.72.0-beta.1",
+            "target_version": "0.72.0-beta.2",
             "current_commit": "aaaa1111aaaa",
             "remote_commit": "bbbb2222bbbb",
             "ahead": 2,
@@ -463,6 +465,8 @@ async def test_check_update_uses_internal_updater(monkeypatch) -> None:
     out = await sh.check_update(_user=None)  # type: ignore[arg-type]
 
     assert out.has_update is True
+    assert out.current_version == "0.72.0-beta.1"
+    assert out.target_version == "0.72.0-beta.2"
     assert out.branch == "codex/update"
     assert out.runtime_mode == sh.RUNTIME_PROD_CONTAINER_WITH_UPDATER
     assert out.action_required == "backend"

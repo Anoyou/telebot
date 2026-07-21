@@ -35,6 +35,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import func, select, text
 
+from .. import __version__
 from ..crypto import decrypt_str
 from ..db.base import AsyncSessionLocal
 from ..db.models.account import Account, Proxy
@@ -80,7 +81,7 @@ class VersionInfo(BaseModel):
 @router.get("/version", response_model=VersionInfo)
 async def get_version() -> VersionInfo:
     """返回后端版本号（无鉴权）。"""
-    from .. import APP_STAGE, __version__
+    from .. import APP_STAGE
 
     return VersionInfo(version=__version__, stage=APP_STAGE)
 
@@ -1179,6 +1180,15 @@ def _run_git(*args: str, timeout: int = 30) -> tuple[str, str, int]:
         return "", str(e), 1
 
 
+def _version_at_git_ref(ref: str) -> str | None:
+    """从指定 Git ref 的后端版本源读取应用版本。"""
+    out, _, rc = _run_git("show", f"{ref}:backend/app/__init__.py", timeout=10)
+    if rc != 0:
+        return None
+    match = re.search(r'^__version__\s*=\s*["\']([^"\']+)["\']', out, re.MULTILINE)
+    return match.group(1).strip() if match else None
+
+
 def _default_update_remote_branch() -> tuple[str, str]:
     remote = (os.getenv("TELEPILOT_UPDATE_REMOTE") or "origin").strip() or "origin"
     env_branch = (os.getenv("TELEPILOT_UPDATE_BRANCH") or "").strip()
@@ -1445,6 +1455,8 @@ def _check_response_from_plan(
     )
     return CheckUpdateResponse(
         has_update=has_update,
+        current_version=str(plan.get("current_version") or "") or None,
+        target_version=str(plan.get("target_version") or "") or None,
         current_commit=str(plan.get("current_commit") or "") or None,
         remote_commit=str(plan.get("remote_commit") or "") or None,
         ahead=int(plan.get("ahead") or 0),
@@ -1473,6 +1485,8 @@ class CheckUpdateResponse(BaseModel):
     此时 ``has_update`` 不代表真实结论，前端应展示"无法自动检查"而不是"有更新/已最新"。"""
     current_commit: str | None = None
     remote_commit: str | None = None
+    current_version: str | None = None
+    target_version: str | None = None
     ahead: int = 0
     remote: str = "origin"
     branch: str = "main"
@@ -1817,6 +1831,8 @@ async def check_update(
             )
             return CheckUpdateResponse(
                 has_update=has_update,
+                current_version=_version_at_git_ref(head_out) or __version__,
+                target_version=_version_at_git_ref(remote_out),
                 current_commit=head_out[:12],
                 remote_commit=remote_out[:12],
                 ahead=behind,

@@ -8,7 +8,7 @@ import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { toast } from "sonner";
-import { ArrowLeft, Plus, Trash2, KeyRound, Edit3, Download, CheckCircle2, XCircle, Star, ChevronDown, ChevronRight, Eye, EyeOff, Filter, X, Package, Save, MessageSquare } from "lucide-react";
+import { ArrowLeft, Plus, Trash2, KeyRound, Edit3, Download, CheckCircle2, XCircle, Star, ChevronDown, ChevronRight, Eye, EyeOff, Filter, X, Package, Save, MessageSquare, ArrowUpDown } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { CommandBadge } from "@/components/CommandBadge";
@@ -382,10 +382,20 @@ export function LLMProviders({
     openCreateOnMount ? { ...EMPTY_FORM } : null,
   );
   const [identityVersionsOpen, setIdentityVersionsOpen] = useState(false);
+  const [providerSort, setProviderSort] = useState<"default" | "name" | "models">("default");
 
-  const visibleProviders = (listQ.data || []).filter((p) => {
+  const filteredProviders = (listQ.data || []).filter((p) => {
     if (!isVisionFilter) return true;
     return p.modality === "vision" || p.modality === "multimodal";
+  });
+  const visibleProviders = [...filteredProviders].sort((left, right) => {
+    if (providerSort === "name") return left.name.localeCompare(right.name, "zh-CN");
+    if (providerSort === "models") {
+      const enabledLeft = (left.models || []).filter((model) => model.enabled).length;
+      const enabledRight = (right.models || []).filter((model) => model.enabled).length;
+      return enabledRight - enabledLeft || left.name.localeCompare(right.name, "zh-CN");
+    }
+    return left.id - right.id;
   });
 
   const clearProviderFilter = () => {
@@ -606,6 +616,17 @@ export function LLMProviders({
           </div>
         </CardHeader>
         <CardContent>
+          {visibleProviders.length > 1 ? (
+            <div className="mb-3 flex items-center justify-end gap-2">
+              <ArrowUpDown className="h-3.5 w-3.5 text-muted-foreground" />
+              <Label htmlFor="provider-sort" className="text-xs text-muted-foreground">排序</Label>
+              <Select id="provider-sort" value={providerSort} onChange={(event) => setProviderSort(event.target.value as typeof providerSort)} className="h-9 w-auto min-w-32 text-xs">
+                <option value="default">创建顺序</option>
+                <option value="name">名称</option>
+                <option value="models">启用模型数</option>
+              </Select>
+            </div>
+          ) : null}
           {isVisionFilter ? (
             <div className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded-md border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
               <span className="inline-flex items-center gap-1.5">
@@ -799,7 +820,7 @@ function ProviderMobileCard({
   const enabledModels = (provider.models || []).filter((m) => m.enabled);
   const proxy = provider.proxy_id != null ? proxyById.get(provider.proxy_id) : null;
   return (
-    <div className="rounded-xl border border-border/70 bg-background/70 p-3">
+    <div data-provider-card className="rounded-xl border border-border/70 bg-background/70 p-3">
       <div className="space-y-2">
         <div className="min-w-0 break-words text-sm font-semibold">{provider.name}</div>
         <div className="flex flex-wrap gap-1.5">
@@ -927,10 +948,35 @@ function ProviderCreateWorkspace({
   const setField = <K extends keyof FormState>(key: K, value: FormState[K]) =>
     onChange({ ...form, [key]: value });
   const connectionLocked = stage === "fetching" || stage === "verifying" || saving;
-  const activeStep = verified ? 3 : form.models.length > 0 ? 2 : 1;
+  const [activeStep, setActiveStep] = useState(1);
+  const connectSectionRef = useRef<HTMLElement>(null);
+  const verifySectionRef = useRef<HTMLDivElement>(null);
+  const saveSectionRef = useRef<HTMLElement>(null);
   const defaultBaseUrl = DEFAULT_BASE_URLS[form.provider];
   const endpoint = form.base_url.trim() || defaultBaseUrl;
   const enabledModelCount = form.models.filter((model) => model.enabled).length;
+
+  useEffect(() => {
+    const root = document.querySelector<HTMLElement>("[data-app-main]");
+    const sections = [connectSectionRef.current, verifySectionRef.current, saveSectionRef.current]
+      .filter((section): section is HTMLElement => Boolean(section));
+    if (!root || sections.length !== 3) return;
+    const updateStepFromScroll = () => {
+      const anchor = root.getBoundingClientRect().top + Math.min(160, root.clientHeight * 0.28);
+      let nextStep = 1;
+      sections.forEach((section, index) => {
+        if (section.getBoundingClientRect().top <= anchor) nextStep = index + 1;
+      });
+      setActiveStep(nextStep);
+    };
+    root.addEventListener("scroll", updateStepFromScroll, { passive: true });
+    window.addEventListener("resize", updateStepFromScroll);
+    updateStepFromScroll();
+    return () => {
+      root.removeEventListener("scroll", updateStepFromScroll);
+      window.removeEventListener("resize", updateStepFromScroll);
+    };
+  }, []);
 
   const setApiFormat = (apiFormat: LLMApiFormat) => {
     const provider: LLMProviderKind =
@@ -954,7 +1000,7 @@ function ProviderCreateWorkspace({
 
   return (
     <div className="mx-auto w-full max-w-7xl pb-6">
-      <header className="border-b pb-5">
+      <header className="pb-3">
         <Button
           type="button"
           variant="ghost"
@@ -975,7 +1021,8 @@ function ProviderCreateWorkspace({
             {verified ? "可保存" : CREATE_STAGE_COPY[stage]}
           </MetaBadge>
         </div>
-        <ol className="mt-5 grid grid-cols-1 gap-2 sm:grid-cols-3" aria-label="创建步骤">
+      </header>
+      <ol className="sticky top-0 z-20 grid grid-cols-3 gap-1 rounded-lg border bg-background/95 p-1.5 shadow-sm backdrop-blur" aria-label="创建步骤">
           {[
             { step: 1, label: "接入信息", compactLabel: "接入信息" },
             { step: 2, label: "选择模型并验证", compactLabel: "模型与验证" },
@@ -987,15 +1034,15 @@ function ProviderCreateWorkspace({
               <li
                 key={step}
                 className={cn(
-                  "flex min-w-0 items-center gap-2 border-t-2 pt-2 text-xs",
-                  complete || active ? "border-primary text-foreground" : "border-border text-muted-foreground",
+                  "flex min-w-0 items-center justify-center gap-1.5 rounded-md px-1.5 py-2 text-[11px] transition-colors sm:text-xs",
+                  active ? "bg-primary text-primary-foreground" : complete ? "bg-primary/10 text-foreground" : "text-muted-foreground",
                 )}
               >
                 <span
                   className={cn(
                     "grid h-5 w-5 shrink-0 place-items-center rounded-full border text-[10px]",
-                    complete && "border-primary bg-primary text-primary-foreground",
-                    active && !complete && "border-primary text-primary",
+                    complete && !active && "border-primary bg-primary text-primary-foreground",
+                    active && "border-primary-foreground/60 text-primary-foreground",
                   )}
                 >
                   {complete ? <CheckCircle2 className="h-3.5 w-3.5" /> : step}
@@ -1007,8 +1054,7 @@ function ProviderCreateWorkspace({
               </li>
             );
           })}
-        </ol>
-      </header>
+      </ol>
 
       <div className="mt-5 rounded-lg border bg-card p-3 lg:hidden" aria-label="当前配置摘要">
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
@@ -1021,7 +1067,7 @@ function ProviderCreateWorkspace({
 
       <div className="mt-5 grid items-start gap-8 lg:grid-cols-[minmax(0,1fr)_260px]">
         <main className="min-w-0">
-          <section className="pb-6" aria-labelledby="provider-connect-title">
+          <section ref={connectSectionRef} className="pb-6" aria-labelledby="provider-connect-title">
             <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
               <div>
                 <h2 id="provider-connect-title" className="text-base font-semibold">接入信息</h2>
@@ -1110,33 +1156,35 @@ function ProviderCreateWorkspace({
             {protocolDetection ? <div className="mt-3"><ProtocolDetectionPanel result={protocolDetection} /></div> : null}
           </section>
 
-          <ProviderCreateVerification
-            providerKind={form.provider}
-            apiFormat={form.api_format}
-            protocolProfile={form.protocol_profile}
-            clientIdentityProfile={form.client_identity_profile}
-            baseUrl={form.base_url}
-            apiKey={form.api_key}
-            proxyId={form.proxy_id}
-            models={form.models}
-            onModelsChange={(models) => setField("models", models)}
-            onReset={() => onChange({ ...form, models: [], default_model: "" })}
-            onVerified={(model, models) =>
-              onChange({
-                ...form,
-                name: form.name.trim() || inferredProviderName(endpoint, model),
-                models,
-                default_model: model,
-              })
-            }
-            onVerificationChange={onVerificationChange}
-            onStageChange={onStageChange}
-          />
+          <div ref={verifySectionRef}>
+            <ProviderCreateVerification
+              providerKind={form.provider}
+              apiFormat={form.api_format}
+              protocolProfile={form.protocol_profile}
+              clientIdentityProfile={form.client_identity_profile}
+              baseUrl={form.base_url}
+              apiKey={form.api_key}
+              proxyId={form.proxy_id}
+              models={form.models}
+              onModelsChange={(models) => setField("models", models)}
+              onReset={() => onChange({ ...form, models: [], default_model: "" })}
+              onVerified={(model, models) =>
+                onChange({
+                  ...form,
+                  name: form.name.trim() || inferredProviderName(endpoint, model),
+                  models,
+                  default_model: model,
+                })
+              }
+              onVerificationChange={onVerificationChange}
+              onStageChange={onStageChange}
+            />
+          </div>
 
-          <section className="border-t py-6" aria-labelledby="provider-save-title">
+          <section ref={saveSectionRef} className="border-t py-6" aria-labelledby="provider-save-title">
             <div className="mb-4">
               <h2 id="provider-save-title" className="text-base font-semibold">保存信息</h2>
-              <p className="mt-1 text-xs leading-5 text-muted-foreground">验证通过后自动补全默认模型，并根据接入地址生成名称。</p>
+              <p className="mt-1 text-xs leading-5 text-muted-foreground">验证通过会自动补全；验证未通过也可手动填写名称和默认模型后保存。</p>
             </div>
             <div className="grid gap-4 sm:grid-cols-2">
               <div className="space-y-1.5">
@@ -1153,9 +1201,10 @@ function ProviderCreateWorkspace({
                 <Label htmlFor="provider-create-default-model">默认模型</Label>
                 <Input
                   id="provider-create-default-model"
-                  value={form.default_model || "验证后自动选择"}
-                  readOnly
+                  value={form.default_model}
+                  placeholder="例如 gpt-5.6-sol"
                   className="font-mono"
+                  onChange={(event) => setField("default_model", event.target.value)}
                 />
               </div>
             </div>
@@ -1261,10 +1310,19 @@ function ProviderCreateWorkspace({
           </details>
 
           <div className="sticky bottom-0 z-10 -mx-3 mt-2 flex items-center justify-end gap-2 border-t bg-background/95 px-3 py-3 backdrop-blur sm:static sm:mx-0 sm:bg-transparent sm:px-0 sm:pt-5 sm:backdrop-blur-none">
+            {!verified ? <span className="mr-auto hidden text-xs text-warning sm:inline">尚未通过真实验证，保存后请尽快测活。</span> : null}
             <Button type="button" variant="outline" disabled={saving} onClick={onCancel}>取消</Button>
-            <Button type="button" loading={saving} disabled={!verified || !form.name.trim()} onClick={onSave}>
+            <Button
+              type="button"
+              loading={saving}
+              disabled={!form.name.trim() || !form.default_model.trim()}
+              onClick={() => {
+                if (!verified && !window.confirm("当前 Provider 尚未通过真实模型验证。仍要保存吗？保存后建议立即进入模型测活确认可用性。")) return;
+                onSave();
+              }}
+            >
               {!saving ? <Save className="mr-2 h-4 w-4" /> : null}
-              {!verified ? "先验证后保存" : "保存 Provider"}
+              保存 Provider
             </Button>
           </div>
         </main>

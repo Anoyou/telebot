@@ -1880,6 +1880,8 @@ export interface CheckUpdateResult {
   can_check?: boolean | null;
   current_commit: string | null;
   remote_commit: string | null;
+  current_version?: string | null;
+  target_version?: string | null;
   ahead: number;
   remote?: string | null;
   branch?: string | null;

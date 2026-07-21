@@ -38,6 +38,8 @@ export function AppShell() {
   const [mobileScrollEdge, setMobileScrollEdge] = useState<MobileScrollEdge>(null);
   const mainRef = useRef<HTMLElement>(null);
   const hasScrolledMainRef = useRef(false);
+  const mobileScrollEdgeRef = useRef<MobileScrollEdge>(null);
+  const mobileScrollEdgeTimerRef = useRef<number | null>(null);
   const location = useLocation();
   const navigate = useNavigate();
   const [mobileActivePath, setMobileActivePath] = useState(location.pathname);
@@ -48,7 +50,12 @@ export function AppShell() {
   useEffect(() => {
     setMobileActivePath(location.pathname);
     setMobileScrollEdge(null);
+    mobileScrollEdgeRef.current = null;
     hasScrolledMainRef.current = false;
+    if (mobileScrollEdgeTimerRef.current != null) {
+      window.clearTimeout(mobileScrollEdgeTimerRef.current);
+      mobileScrollEdgeTimerRef.current = null;
+    }
   }, [location.pathname]);
 
   // 主体框架内顺手取一次当前用户用于顶栏展示
@@ -65,6 +72,19 @@ export function AppShell() {
   useEffect(() => {
     const main = mainRef.current;
     if (isLoading || !main) return;
+
+    const revealMobileScrollEdge = (edge: Exclude<MobileScrollEdge, null>) => {
+      mobileScrollEdgeRef.current = edge;
+      setMobileScrollEdge(edge);
+      if (mobileScrollEdgeTimerRef.current != null) {
+        window.clearTimeout(mobileScrollEdgeTimerRef.current);
+      }
+      mobileScrollEdgeTimerRef.current = window.setTimeout(() => {
+        mobileScrollEdgeRef.current = null;
+        setMobileScrollEdge(null);
+        mobileScrollEdgeTimerRef.current = null;
+      }, 900);
+    };
 
     const updateMobileScrollEdge = () => {
       if (!window.matchMedia("(max-width: 639px)").matches) {
@@ -87,10 +107,11 @@ export function AppShell() {
       }
 
       if (main.scrollTop <= 2) {
-        setMobileScrollEdge("top");
+        if (mobileScrollEdgeRef.current !== "top") revealMobileScrollEdge("top");
       } else if (main.scrollTop >= maxScrollTop - 2) {
-        setMobileScrollEdge("bottom");
+        if (mobileScrollEdgeRef.current !== "bottom") revealMobileScrollEdge("bottom");
       } else {
+        mobileScrollEdgeRef.current = null;
         setMobileScrollEdge(null);
       }
     };
@@ -101,6 +122,10 @@ export function AppShell() {
     return () => {
       main.removeEventListener("scroll", updateMobileScrollEdge);
       window.removeEventListener("resize", updateMobileScrollEdge);
+      if (mobileScrollEdgeTimerRef.current != null) {
+        window.clearTimeout(mobileScrollEdgeTimerRef.current);
+        mobileScrollEdgeTimerRef.current = null;
+      }
     };
   }, [isLoading]);
 

@@ -303,7 +303,7 @@ export function ProviderCreateVerification({
         <div className="min-w-0">
           <h2 className="text-base font-semibold">模型与真实验证</h2>
           <p className="mt-1 text-xs leading-5 text-muted-foreground">
-            先获取模型，手动选择验证目标和推理强度；验证通过后才允许保存 Provider。
+            先获取模型，手动选择验证目标和推理强度；验证失败时仍可保存，但会在提交前提醒风险。
           </p>
         </div>
         <Button type="button" size="sm" variant="outline" loading={fetching} disabled={status === "running"} onClick={() => void fetchModels()}>

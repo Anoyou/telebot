@@ -30,6 +30,7 @@ import type {
   ProviderModel,
 } from "@/api/types";
 import { PageHeader, PageShell } from "@/components/layout/PageScaffold";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/feedback/EmptyState";
 import { ErrorState } from "@/components/feedback/ErrorState";
@@ -1182,26 +1183,16 @@ export function LLMLivenessPage() {
       />
 
       <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border bg-card p-2 shadow-sm">
-        <div className="flex rounded-md bg-muted/50 p-1">
-          <Button
-            type="button"
-            size="sm"
-            variant={mode === "conversation" ? "secondary" : "ghost"}
-            disabled={modeSwitchBusy}
-            onClick={() => setMode("conversation")}
-          >
-            <MessageSquare className="mr-1 h-4 w-4" />Provider 多模型对话
-          </Button>
-          <Button
-            type="button"
-            size="sm"
-            variant={mode === "all" ? "secondary" : "ghost"}
-            disabled={modeSwitchBusy}
-            onClick={() => setMode("all")}
-          >
-            <Activity className="mr-1 h-4 w-4" />全部 Provider 巡检
-          </Button>
-        </div>
+        <Tabs value={mode} onValueChange={(value) => !modeSwitchBusy && setMode(value as "conversation" | "all")}>
+          <TabsList className="grid h-auto w-full grid-cols-2 sm:w-auto">
+            <TabsTrigger value="conversation" disabled={modeSwitchBusy} className="gap-1.5 px-3 py-2 text-xs sm:text-sm">
+              <MessageSquare className="h-4 w-4" />Provider 多模型对话
+            </TabsTrigger>
+            <TabsTrigger value="all" disabled={modeSwitchBusy} className="gap-1.5 px-3 py-2 text-xs sm:text-sm">
+              <Activity className="h-4 w-4" />全部 Provider 巡检
+            </TabsTrigger>
+          </TabsList>
+        </Tabs>
         <div className="text-xs text-muted-foreground">
           {mode === "conversation" ? "连续对话按模型分别保留上下文" : "所有已启用模型接收同一条无历史测试语"}
         </div>
@@ -1253,25 +1244,25 @@ export function LLMLivenessPage() {
               <div className="flex shrink-0 items-center gap-1">
                 <Button
                   type="button"
-                  variant="ghost"
+                  variant="outline"
                   size="sm"
-                  className="h-8 w-8 p-0 xl:hidden"
+                  className="h-8 gap-1.5 px-2 text-xs xl:hidden"
                   aria-label="打开测试范围"
                   title="打开测试范围"
                   onClick={() => { setSettingsOpen(false); setScopeOpen(true); }}
                 >
-                  <Filter className="h-4 w-4" />
+                  <Filter className="h-4 w-4" />范围
                 </Button>
                 <Button
                   type="button"
-                  variant="ghost"
+                  variant="outline"
                   size="sm"
-                  className="h-8 w-8 p-0 2xl:hidden"
+                  className="h-8 gap-1.5 px-2 text-xs 2xl:hidden"
                   aria-label="打开请求设置"
                   title="打开请求设置"
                   onClick={() => { setScopeOpen(false); setSettingsOpen(true); }}
                 >
-                  <SlidersHorizontal className="h-4 w-4" />
+                  <SlidersHorizontal className="h-4 w-4" />设置
                 </Button>
                 <Button
                   type="button"
