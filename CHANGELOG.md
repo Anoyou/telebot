@@ -20,6 +20,8 @@
 
 ## [Unreleased]
 
+## [0.71.1] — 2026-07-22 · patch（补丁版本） · 前端质量与 Telegram 公开姓名修复
+
 ### Added
 
 - 新增 Playwright 视觉基线脚手架、固定 API fixture、axe 无障碍扫描与构建体积分析报告；测试环境会阻断全部非 GET API，避免误写真实数据。
@@ -36,12 +38,15 @@
 
 - 修复 `asChild` 按钮进入加载态时向 Radix Slot 传入多个子节点导致页面崩溃的问题，并为更新弹窗增加局部加载骨架与错误边界。
 - 补齐筛选下拉、开关、纯图标按钮和横向滚动区的可访问名称与键盘焦点，调整亮色状态色对比度。
+- 群成员公开身份解析改为优先读取 Interaction Bot `getChatMember.user` 中的当前姓名，避免 UserBot 已保存联系人时把本地联系人备注误当成 Telegram 公开姓名。
+- UserBot 与 Interaction Bot 的匿名管理员状态短暂不一致时，只允许身份向匿名方向收紧，避免公开姓名修复削弱匿名身份保护。
 
 ### Tests
 
 - 前端视觉与无障碍脚手架覆盖 Dashboard、Accounts、BotTab、Ledger、Logs、Extensions、AI 与 LLMProviders 三档视口。
 - CI 使用固定 macOS runner 与 Playwright 锁定 Chromium 执行视觉和 axe 门禁，并固定中文区域与上海时区以减少截图环境漂移。
 - 48 项视觉比较、24 项 axe 扫描、11 项前端单测、类型检查与生产构建全部通过。
+- 增加联系人备注、Interaction Bot 当前公开姓名和双客户端匿名状态不一致的回归测试。
 
 ## [0.71.0] — 2026-07-21 · minor（次版本） · 悬浮系统助手与移动端工作台优化
 

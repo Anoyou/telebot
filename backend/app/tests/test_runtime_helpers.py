@@ -411,6 +411,7 @@ async def test_interaction_bot_member_lookup_does_not_replace_visible_admin_name
             "status": "administrator",
             "is_anonymous": False,
             "custom_title": "普通管理员标签",
+            "user": {"id": 42, "first_name": "当前", "last_name": "公开姓名"},
         }
 
     identity = await PluginIdentityFacade(
@@ -422,11 +423,68 @@ async def test_interaction_bot_member_lookup_does_not_replace_visible_admin_name
         fallback_display_name="公开姓名",
     )
 
-    assert identity.display_name == "公开姓名"
+    assert identity.display_name == "当前公开姓名"
     assert identity.is_anonymous_admin is False
     assert identity.is_admin is True
     assert identity.tag == "普通管理员标签"
     assert identity.resolved is True
+
+
+async def test_interaction_bot_public_name_replaces_userbot_contact_remark() -> None:
+    class Client:
+        async def get_permissions(self, chat_id: int, user_id: int) -> SimpleNamespace:
+            return SimpleNamespace(anonymous=False, participant=SimpleNamespace(rank=""))
+
+    async def resolve_bot_member(chat_id: int, user_id: int) -> dict[str, object]:
+        assert (chat_id, user_id) == (-1001, 42)
+        return {
+            "status": "member",
+            "user": {
+                "id": 42,
+                "first_name": "用户当前",
+                "last_name": "真实姓名",
+                "username": "public_user",
+            },
+        }
+
+    identity = await PluginIdentityFacade(
+        Client(),
+        bot_member_resolver=resolve_bot_member,
+    ).resolve(
+        chat_id=-1001,
+        user_id=42,
+        fallback_display_name="UserBot联系人备注",
+    )
+
+    assert identity.display_name == "用户当前真实姓名"
+    assert identity.is_anonymous_admin is False
+    assert identity.resolved is True
+
+
+async def test_interaction_bot_anonymous_state_hides_userbot_visible_identity() -> None:
+    class Client:
+        async def get_permissions(self, chat_id: int, user_id: int) -> SimpleNamespace:
+            return SimpleNamespace(anonymous=False, participant=SimpleNamespace(rank=""))
+
+    async def resolve_bot_member(chat_id: int, user_id: int) -> dict[str, object]:
+        return {
+            "status": "administrator",
+            "is_anonymous": True,
+            "custom_title": "匿名值班",
+            "user": {"id": 42, "first_name": "不应公开"},
+        }
+
+    identity = await PluginIdentityFacade(
+        Client(),
+        bot_member_resolver=resolve_bot_member,
+    ).resolve(
+        chat_id=-1001,
+        user_id=42,
+        fallback_display_name="不应公开的联系人备注",
+    )
+
+    assert identity.display_name == "匿名值班"
+    assert identity.is_anonymous_admin is True
 
 
 async def test_batch_identity_lookup_uses_interaction_bot_for_hidden_admin() -> None:

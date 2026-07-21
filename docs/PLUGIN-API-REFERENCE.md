@@ -1362,7 +1362,7 @@ safe_label = sanitize_public_display_name(raw_label, limit=10)
 
 身份解析结果不做应用层缓存：每次调用都会重新读取当前群管理员目录和成员权限，需要 Interaction Bot 兜底时也会实时请求 `getChatMember`。近期消息锚点只缓存可重新校验的 `message_id`，不会缓存姓名、username、管理员状态或标签。
 
-身份解析返回的名称已统一调用 `sanitize_public_display_name()`：移除 Unicode 控制符、零宽格式符、各类空白与不可见填充字符，并限制为最多 10 个字符；清洗后为空时使用“匿名用户”。这只解决公开姓名安全，不是 HTML/Markdown 转义，插件仍须按实际 `parse_mode` 转义后再发送。精确显示匿名管理员标签的部署前提是：账号已配置 Interaction Bot，且该 Bot 已加入对应群并提升为管理员；其他管理权限可按业务需要最小化授予。
+身份解析返回的名称已统一调用 `sanitize_public_display_name()`：移除 Unicode 控制符、零宽格式符、各类空白与不可见填充字符，并限制为最多 10 个字符；清洗后为空时使用“匿名用户”。普通成员的 `display_name` 优先读取 Interaction Bot `getChatMember.user` 中的当前公开姓名，不会把 UserBot 的本地联系人备注当成公开姓名。这只解决公开姓名安全，不是 HTML/Markdown 转义，插件仍须按实际 `parse_mode` 转义后再发送。精确读取当前公开姓名和匿名管理员标签的部署前提是：账号已配置 Interaction Bot，且该 Bot 已加入对应群并提升为管理员；其他管理权限可按业务需要最小化授予。
 
 返回对象字段：
 

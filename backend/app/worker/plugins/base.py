@@ -601,7 +601,7 @@ async def _public_sender_identity_from_bot_member(
         raise LookupError("interaction bot omitted anonymous administrator state")
     is_anonymous_admin = status in {"creator", "administrator"} and bool(member.get("is_anonymous"))
     tag = sanitize_public_display_name(member.get("custom_title"), fallback="") or None
-    clean_fallback = sanitize_public_display_name(fallback_display_name, fallback=str(user_id))
+    clean_fallback = _bot_member_public_display_name(member, fallback_display_name, user_id)
     return PublicSenderIdentity(
         user_id=user_id,
         display_name=(tag or sanitize_public_display_name(anonymous_admin_display_name))
@@ -614,6 +614,26 @@ async def _public_sender_identity_from_bot_member(
     )
 
 
+def _bot_member_public_display_name(
+    member: Mapping[str, Any],
+    fallback_display_name: str,
+    user_id: int,
+) -> str:
+    user = member.get("user")
+    if isinstance(user, Mapping) and int(user.get("id") or 0) == user_id:
+        public_name = " ".join(
+            part
+            for part in (
+                _clean_text(user.get("first_name")),
+                _clean_text(user.get("last_name")),
+            )
+            if part
+        )
+        if public_name:
+            return sanitize_public_display_name(public_name, fallback=str(user_id))
+    return sanitize_public_display_name(fallback_display_name, fallback=str(user_id))
+
+
 async def _prefer_interaction_bot_identity(
     identity: PublicSenderIdentity,
     resolver: Callable[[int, int], Awaitable[Mapping[str, Any] | None]] | None,
@@ -623,7 +643,7 @@ async def _prefer_interaction_bot_identity(
     *,
     anonymous_admin_display_name: str,
 ) -> PublicSenderIdentity:
-    if not identity.is_anonymous_admin or not callable(resolver):
+    if not callable(resolver):
         return identity
     try:
         bot_identity = await _public_sender_identity_from_bot_member(
@@ -635,10 +655,12 @@ async def _prefer_interaction_bot_identity(
         )
     except Exception:
         return identity
-    # 两个 Telegram 客户端对刚切换的匿名状态可能短暂不一致。只允许
-    # Interaction Bot 补全匿名标签，不能用其“非匿名”结果覆盖 UserBot
-    # 已确认的匿名身份，否则会把按钮回调里的真实姓名重新带回群消息。
-    return bot_identity if bot_identity.is_anonymous_admin else identity
+    # 两个 Telegram 客户端对刚切换的匿名状态可能短暂不一致。任一侧确认
+    # 匿名时都不能降级为公开身份；双方均确认公开时，Interaction Bot 看到
+    # 的名字不受 UserBot 联系人备注影响，可作为当前公开姓名。
+    if identity.is_anonymous_admin and not bot_identity.is_anonymous_admin:
+        return identity
+    return bot_identity
 
 
 def _resolved_public_sender_identity(
