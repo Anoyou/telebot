@@ -2573,6 +2573,7 @@ def make_command_handler(client: TelegramClient, account_id: int, prefix: str | 
         pattern = re.compile(rf"^{re.escape(p)}(\S+)(?:\s+(.*))?$", re.S)
         m = pattern.match(text)
         help_prefix = p
+        bare_command = False
         if m:
             cmd = m.group(1)
             args_raw = (m.group(2) or "").strip()
@@ -2590,7 +2591,8 @@ def make_command_handler(client: TelegramClient, account_id: int, prefix: str | 
             if not _has_userbot_command_target(cmd, args_raw):
                 return
             help_prefix = ""
-        if await should_skip_outgoing_command_echo(client, event, text, args_raw):
+            bare_command = True
+        if not bare_command and await should_skip_outgoing_command_echo(client, event, text, args_raw):
             log.info(
                 "跳过疑似抽奖/接龙回声命令 account=%s chat_id=%s command=%s",
                 account_id,
