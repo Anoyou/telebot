@@ -10,9 +10,9 @@ from typing import Any
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from ..deps import CurrentUser
+from ..deps import CurrentUser, DBSession
 from ..redis_client import get_redis
-from ..services import account_bot_runtime
+from ..services import account_bot_runtime, platform_capabilities
 from ..worker.ipc import (
     CMD_DISPATCH_SIMULATE,
     EVT_ACK,
@@ -99,8 +99,17 @@ async def _publish_dispatch_simulation(redis: Any, payload: DispatchSimulateRequ
                     await ret
 
 
+async def _require_dispatch_debug(db: DBSession) -> None:
+    await platform_capabilities.require_module_enabled(db, "dispatch_debug")
+
+
 @router.post("/simulate")
-async def simulate_dispatch(payload: DispatchSimulateRequest, _user: CurrentUser) -> dict[str, Any]:
+async def simulate_dispatch(
+    payload: DispatchSimulateRequest,
+    db: DBSession,
+    _user: CurrentUser,
+) -> dict[str, Any]:
+    await _require_dispatch_debug(db)
     redis = get_redis()
     trace = await _publish_dispatch_simulation(redis, payload)
     if trace is None:
@@ -115,7 +124,12 @@ async def simulate_dispatch(payload: DispatchSimulateRequest, _user: CurrentUser
 
 
 @router.post("/router-debug-trace")
-async def enable_router_debug_trace(payload: RouterDebugTraceRequest, _user: CurrentUser) -> dict[str, Any]:
+async def enable_router_debug_trace(
+    payload: RouterDebugTraceRequest,
+    db: DBSession,
+    _user: CurrentUser,
+) -> dict[str, Any]:
+    await _require_dispatch_debug(db)
     return await account_bot_runtime.set_router_debug_trace(
         payload.account_id,
         plugin_key=payload.plugin_key,
@@ -127,12 +141,14 @@ async def enable_router_debug_trace(payload: RouterDebugTraceRequest, _user: Cur
 @router.get("/router-delivery-stats")
 async def get_router_delivery_stats(
     _user: CurrentUser,
+    db: DBSession,
     account_id: int | None = None,
     channel: str | None = None,
     plugin_key: str | None = None,
     chat_id: int | None = None,
     limit: int = 50,
 ) -> dict[str, Any]:
+    await _require_dispatch_debug(db)
     return account_bot_runtime.get_router_delivery_stats_summary(
         account_id=account_id,
         channel=channel,

@@ -27,6 +27,7 @@ from .api import logs as logs_api
 from .api import message_templates as message_templates_api
 from .api import network as network_api
 from .api import notify_bots as notify_bots_api
+from .api import platform_capabilities as platform_capabilities_api
 from .api import proxies as proxies_api
 from .api import rate_limit as rate_limit_api
 from .api import sudo as sudo_api
@@ -38,6 +39,7 @@ from .services import (
     event_trace,
     interaction_bot_runtime,
     notify_service,
+    platform_capabilities,
     plugin_config_action_jobs,
     remote_plugin_service,
 )
@@ -188,6 +190,12 @@ async def lifespan(app: FastAPI):
     except Exception:  # noqa: BLE001
         logging.exception("刷新 Trace 写入配置失败，使用默认配置继续启动")
 
+    # 启动期预加载平台能力缓存。Webhook 等公开入口只读缓存，失败按 fail-closed。
+    try:
+        await platform_capabilities.bootstrap_from_db()
+    except Exception:  # noqa: BLE001
+        logging.exception("预加载平台能力缓存失败；公开入口将 fail-closed 直至缓存就绪")
+
     # 启动期加载客户端身份 UA 版本覆盖（system_setting）。失败不阻塞启动。
     try:
         from .services import llm_identity
@@ -252,19 +260,36 @@ async def lifespan(app: FastAPI):
         )
 
     # 2-F: 高频群互动使用独立交互 Bot runtime，避免和管理 Bot 生命周期混在一起。
-    if not await _start_runtime_component(
-        "interaction_bot_manager",
-        interaction_bot_runtime.start_interaction_bot_manager,
-    ):
-        retry_tasks.append(
-            asyncio.create_task(
-                _retry_runtime_component(
-                    "interaction_bot_manager",
-                    interaction_bot_runtime.start_interaction_bot_manager,
-                ),
-                name="retry-interaction-bot-manager",
+    # Interaction Bot 模块关闭时不启动 manager（管理 Bot 仍由 account_bot_manager 负责）。
+    interaction_desired = platform_capabilities.is_module_enabled_cached(
+        "interaction_bot",
+        fail_closed=False,
+    )
+    if interaction_desired:
+        if not await _start_runtime_component(
+            "interaction_bot_manager",
+            interaction_bot_runtime.start_interaction_bot_manager,
+        ):
+            retry_tasks.append(
+                asyncio.create_task(
+                    _retry_runtime_component(
+                        "interaction_bot_manager",
+                        interaction_bot_runtime.start_interaction_bot_manager,
+                    ),
+                    name="retry-interaction-bot-manager",
+                )
             )
-        )
+    else:
+        _RUNTIME_COMPONENTS["interaction_bot_manager"] = True
+        try:
+            await platform_capabilities.mark_runtime_ready_if_starting("interaction_bot")
+        except Exception:  # noqa: BLE001
+            logging.exception("标记 interaction_bot 为 stopped 失败")
+
+    try:
+        await platform_capabilities.reconcile_runtime_after_startup()
+    except Exception:  # noqa: BLE001
+        logging.exception("平台能力 runtime 启动收敛失败")
 
     try:
         yield
@@ -452,6 +477,7 @@ app.include_router(dispatch_debug_api.router)  # WP4：命中调试器接口空�
 app.include_router(ledger_api.router)  # WP5：资金台账接口空桩
 app.include_router(webhooks_api.router)  # WP7：入站 Webhook 接口空桩
 app.include_router(system_agent_api.router)  # System Agent：自然语言系统助手
+app.include_router(platform_capabilities_api.router)  # 平台能力热插拔
 
 
 # ── 健康检查 ─────────────────────────────────────────────────────

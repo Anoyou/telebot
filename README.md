@@ -223,6 +223,7 @@ backend/.venv/bin/python scripts/validate-installed-interaction-plugins.py
 | 插件字段、事件、action 和生命周期 | [插件 API 参考](docs/PLUGIN-API-REFERENCE.md) |
 | 外部系统通过 HTTP 触发插件 | [入站 Webhook Quickstart](docs/PLUGIN-WEBHOOK-QUICKSTART.md) |
 | 插件 HTTP 与 AI 能力 | [HTTP facade](docs/PLUGIN-HTTP.md) / [AI facade](docs/PLUGIN-AI.md) |
+| 平台能力热插拔（AI / 交互 / Webhook / 台账 / 调试） | [平台能力](docs/PLATFORM-CAPABILITIES.md) |
 | 远程插件仓库与发布 | [远程插件](docs/PLUGIN-REMOTE.md) |
 | 版本变化 | [CHANGELOG](CHANGELOG.md) |
 | 参与开发 | [CONTRIBUTING](CONTRIBUTING.md) / [Agent Playbooks](docs/AGENT-PLAYBOOKS.md) |

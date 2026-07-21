@@ -12,6 +12,10 @@ TelePilot 0.x 阶段只保留一个默认插件模式：**个人可信插件标�
 
 如果未来要开放“任意第三方上传、未经人工审核”的公共市场，需要另行设计 subprocess/容器隔离、资源配额、文件系统/网络沙箱和供应链扫描。它不属于当前 0.x 默认方案；本文当前所有示例、CI 和安全边界都按个人可信插件标准模式编写。
 
+### 平台能力依赖（可选）
+
+插件可在 Manifest / 入口 / event subscription 上声明 `requires_platform_capabilities`（如 `ai`、`interaction_bot`、`webhooks`）。旧插件未声明时继续加载；平台按能力开关裁剪不可用入口，多通道插件不会被整体误停。详见 [平台能力热插拔](PLATFORM-CAPABILITIES.md)。
+
 ---
 
 ## 1. 快速开始

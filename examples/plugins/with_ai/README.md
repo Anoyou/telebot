@@ -11,6 +11,7 @@
 - 运行时只通过 `ctx.ai` 调用文本 AI，不直接 import 后端私有 LLM runtime。
 - `ctx.ai.list_providers()` 只返回脱敏 provider 元数据，不包含 API Key、base URL 或代理 URL。
 - `ctx.ai.complete()` 推荐优先使用 `provider_tag` 选择用途标签；`tag` / `tags` 仅作为旧写法兼容别名保留且已 deprecated。
+- 系统 AI 平台能力关闭时不会注入 `ctx.ai`；可选声明 `requires_platform_capabilities=["ai"]`。
 
 ## 使用
 

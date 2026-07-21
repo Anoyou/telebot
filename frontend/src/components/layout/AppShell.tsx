@@ -10,14 +10,15 @@ import { MoreHorizontal } from "lucide-react";
 import {
   MobileSidebar,
   Sidebar,
-  mobileMoreNavForAIState,
-  mobilePrimaryNavForAIState,
+  mobileMoreNavForCapabilities,
+  mobilePrimaryNavForCapabilities,
 } from "./Sidebar";
 import { TopBar } from "./TopBar";
 import { GlobalAlertBar } from "./GlobalAlertBar";
 import { AssistantDockProvider, useAssistantDock } from "@/components/assistant/AssistantDock";
 import { fetchMe } from "@/lib/auth";
-import { getSystemSettings } from "@/api/system";
+import { getPlatformCapabilities, getSystemSettings } from "@/api/system";
+import { capabilityEnabledMap } from "@/lib/navigation";
 import { Skeleton } from "@/components/ui/misc";
 import {
   DropdownMenu,
@@ -67,6 +68,11 @@ export function AppShell() {
     queryKey: ["system", "settings"],
     queryFn: getSystemSettings,
     staleTime: 30_000,
+  });
+  const capsQ = useQuery({
+    queryKey: ["system", "capabilities"],
+    queryFn: getPlatformCapabilities,
+    staleTime: 15_000,
   });
 
   useEffect(() => {
@@ -129,9 +135,9 @@ export function AppShell() {
     };
   }, [isLoading]);
 
-  const aiEnabled = settingsQ.data?.ai_enabled ?? true;
-  const mobileNavItems = mobilePrimaryNavForAIState(aiEnabled);
-  const mobileMoreNavItems = mobileMoreNavForAIState(aiEnabled);
+  const enabled = capabilityEnabledMap(capsQ.data, settingsQ.data?.ai_enabled ?? true);
+  const mobileNavItems = mobilePrimaryNavForCapabilities(enabled);
+  const mobileMoreNavItems = mobileMoreNavForCapabilities(enabled);
   const mobileMoreActive = mobileMoreNavItems.some((item) =>
     isMobileNavActive(item.to, item.end, mobileActivePath),
   );

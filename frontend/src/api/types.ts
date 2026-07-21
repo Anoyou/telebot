@@ -515,12 +515,18 @@ export interface FeatureInfo {
   event_subscriptions?: PluginEventSubscription[];
   capabilities?: PluginCapabilities;
   permissions?: string[];
+  requires_platform_capabilities?: string[];
   experimental: boolean;
   update_available?: boolean;
   latest_version?: string | null;
   last_update_check_at?: string | null;
   last_update_check_error?: string | null;
   lint_warnings?: string[];
+  /** 平台能力热插拔：ready | partial | paused | transitioning */
+  runtime_availability?: "ready" | "partial" | "paused" | "transitioning" | string | null;
+  available_channels?: string[];
+  blocked_entries?: Array<Record<string, unknown>>;
+  blocked_reason_code?: string | null;
 }
 export interface AccountFeatureItem {
   feature_key: string;
@@ -963,6 +969,67 @@ export interface MessageFunelItem extends EventTraceSummary {
   reason_code?: string | null;
   reason_text: string;
   next_step: string;
+}
+
+// ===================== 平台能力热插拔 =====================
+export type PlatformModuleKey =
+  | "ai"
+  | "interaction_bot"
+  | "webhooks"
+  | "ledger"
+  | "dispatch_debug";
+
+export type PlatformRuntimeState =
+  | "starting"
+  | "ready"
+  | "quiescing"
+  | "stopped"
+  | "failed";
+
+export interface PlatformCapabilityModule {
+  key: PlatformModuleKey | string;
+  label: string;
+  desired_enabled: boolean;
+  generation: number;
+  runtime_state: PlatformRuntimeState | string;
+  last_error?: string | null;
+  last_transition_at?: string | null;
+  resource_summary?: Record<string, unknown>;
+}
+
+export interface PlatformCapabilityChannel {
+  key: string;
+  label: string;
+  fixed: boolean;
+  managed_by?: PlatformModuleKey | string | null;
+  available: boolean;
+  reason_code?: string | null;
+  reason_text?: string | null;
+}
+
+export interface PlatformWorkerConvergence {
+  total_accounts: number;
+  notified: number;
+  acked: number;
+  pending: number;
+  offline_or_timeout: number;
+  last_broadcast_at?: string | null;
+  notes?: string[];
+}
+
+export interface PlatformCapabilities {
+  modules: PlatformCapabilityModule[];
+  channels: PlatformCapabilityChannel[];
+  worker_convergence: PlatformWorkerConvergence;
+  cache_ready: boolean;
+  updated_at?: string | null;
+}
+
+export interface PlatformCapabilityPatchResult {
+  module: PlatformCapabilityModule;
+  worker_convergence: PlatformWorkerConvergence;
+  ok: boolean;
+  message?: string | null;
 }
 
 // ===================== 系统设置 =====================

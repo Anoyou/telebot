@@ -828,9 +828,24 @@ async def _listen_cmd(
                             ack_error = "kill switch / account pause is active"
                         else:
                             try:
-                                from .plugins.loader import dispatch_webhook_event  # type: ignore
+                                from ..services.platform_capabilities import (  # type: ignore
+                                    is_module_enabled_cached,
+                                    refresh_cache_from_db,
+                                )
 
-                                await dispatch_webhook_event(account_id, cmd.payload, redis=redis)
+                                # 关闭瞬间竞态：worker 侧再次检查能力缓存。
+                                if not is_module_enabled_cached("webhooks", fail_closed=True):
+                                    try:
+                                        await refresh_cache_from_db()
+                                    except Exception:  # noqa: BLE001
+                                        pass
+                                if not is_module_enabled_cached("webhooks", fail_closed=True):
+                                    ack_ok = False
+                                    ack_error = "webhooks module disabled"
+                                else:
+                                    from .plugins.loader import dispatch_webhook_event  # type: ignore
+
+                                    await dispatch_webhook_event(account_id, cmd.payload, redis=redis)
                             except Exception as e:  # noqa: BLE001
                                 ack_ok = False
                                 ack_error = f"{type(e).__name__}: {e}"

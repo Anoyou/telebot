@@ -620,6 +620,24 @@ def _event_bus_subscriptions_from_state(state: _AccountState) -> list[Any]:
         raw_subscriptions = getattr(manifest, "event_subscriptions", None)
         if not isinstance(raw_subscriptions, list):
             continue
+        # 插件级硬依赖：requires_platform_capabilities 未满足则整插件订阅不投递
+        plugin_requires = list(getattr(manifest, "requires_platform_capabilities", None) or [])
+        if plugin_requires:
+            try:
+                from ...services.platform_capabilities import is_module_enabled_cached
+
+                blocked = False
+                for req in plugin_requires:
+                    key = str(req or "").strip()
+                    if not key:
+                        continue
+                    if not is_module_enabled_cached(key, fail_closed=(key == "webhooks")):  # type: ignore[arg-type]
+                        blocked = True
+                        break
+                if blocked:
+                    continue
+            except Exception:  # noqa: BLE001
+                pass
         for raw in raw_subscriptions:
             if isinstance(raw, dict):
                 subscriptions.append(
@@ -628,7 +646,13 @@ def _event_bus_subscriptions_from_state(state: _AccountState) -> list[Any]:
                         plugin_key=plugin_key,
                     )
                 )
-    return subscriptions
+    # 按通道/入口级 requires 与模块开关裁剪
+    try:
+        from ...services.platform_capabilities import filter_runtime_event_subscriptions
+
+        return filter_runtime_event_subscriptions(subscriptions)
+    except Exception:  # noqa: BLE001
+        return subscriptions
 
 
 def _event_bus_state_for_userbot_dispatch(state: _AccountState) -> dict[str, Any]:
@@ -899,6 +923,25 @@ async def dispatch_webhook_event(
     redis: Any | None = None,
 ) -> dict[str, Any]:
     """Deliver a normalized inbound webhook to plugins that subscribe to webhook events."""
+
+    # 副作用前再次检查：关闭瞬间竞态或旧 generation 命令不得继续投递。
+    try:
+        from ...services.platform_capabilities import (
+            is_module_enabled_cached,
+            refresh_cache_from_db,
+        )
+
+        if not is_module_enabled_cached("webhooks", fail_closed=True):
+            try:
+                await refresh_cache_from_db()
+            except Exception:  # noqa: BLE001
+                pass
+        if not is_module_enabled_cached("webhooks", fail_closed=True):
+            raise RuntimeError("webhooks module disabled")
+    except RuntimeError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError("webhooks module disabled") from exc
 
     state = _STATES.get(account_id)
     if state is None:
@@ -7605,6 +7648,7 @@ async def reload_account_config(account_id: int, payload: dict | None = None) ->
     - builtin / installed 插件都在 ``_activate`` 中按需加载，避免每次热更新导入全部实现
     - 已实例化的 feature：刷新 ``ctx.config`` / ``ctx.rules``；若该 feature 已被禁用则 shutdown
     - 数据库新增的 enabled feature：调 ``_activate`` 加载
+    - 平台能力切换（``source=platform_capabilities``）复用本路径刷新能力快照与插件入口
 
     任何异常都吞掉，热更新失败不应让 worker 崩溃。
     """
@@ -7613,6 +7657,15 @@ async def reload_account_config(account_id: int, payload: dict | None = None) ->
         return
     next_generation = state.generation + 1
     redis = state.redis or get_redis()
+
+    # 刷新平台能力进程内快照（AI / interaction / webhook 等）。
+    # 周期 reconcile 与 platform_capabilities 热切换都走这里最终收敛。
+    try:
+        from ...services import platform_capabilities as platform_caps
+
+        await platform_caps.refresh_cache_from_db()
+    except Exception:  # noqa: BLE001
+        log.debug("reload_account_config 刷新平台能力缓存失败 account=%s", account_id, exc_info=True)
 
     # 同步全局开关：让 reload_config 也能让 incoming-message 可见性日志即时生效
     state.log_incoming_messages = await _load_log_incoming_messages_setting()
@@ -7813,6 +7866,36 @@ async def reload_account_config(account_id: int, payload: dict | None = None) ->
                 state.scheduler.for_plugin(fkey, state.generation)
                 if state.scheduler is not None else None
             )
+            # 平台 AI 能力热切换：关闭时卸载 ctx.ai，开启时按权限补回。
+            try:
+                from ...services.ai_feature import is_ai_enabled
+                from ...services.platform_capabilities import get_snapshot, is_ai_enabled_cached
+
+                snap = get_snapshot()
+                ai_on = (
+                    is_ai_enabled_cached(fail_closed=False)
+                    if snap.cache_ready
+                    else await is_ai_enabled(db)
+                )
+                manifest = getattr(cls, "_manifest", None)
+                perms = set(getattr(manifest, "permissions", None) or [])
+                if not ai_on:
+                    ctx.ai = None
+                elif ctx.ai is None and perms & {"ai_text", "ai_agent"}:
+                    from .ai_facade import PluginAI
+
+                    ctx.ai = PluginAI(
+                        account_id=state.account_id,
+                        plugin_key=fkey,
+                        allow_agent="ai_agent" in perms,
+                        manifest=(
+                            manifest.to_dict()
+                            if manifest is not None and hasattr(manifest, "to_dict")
+                            else {}
+                        ),
+                    )
+            except Exception:  # noqa: BLE001
+                log.debug("同步 ctx.ai 能力状态失败 feature=%s", fkey, exc_info=True)
 
         # 2) 处理新增的 enabled feature
         afs = (

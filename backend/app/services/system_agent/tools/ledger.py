@@ -28,7 +28,23 @@ def _entry_view(entry: Any) -> dict[str, Any]:
     }
 
 
+async def _require_ledger_module(ctx: ToolContext) -> dict[str, Any] | None:
+    from ....services import platform_capabilities as platform_caps
+
+    enabled = await platform_caps.is_module_enabled(ctx.db, "ledger")
+    if enabled:
+        return None
+    return {
+        "error": "platform_module_disabled",
+        "module": "ledger",
+        "message": "资金台账模块已暂停，查询与操作面不可用；ActionEvent 与补偿主账仍继续写入。",
+    }
+
+
 async def summary(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
+    blocked = await _require_ledger_module(ctx)
+    if blocked is not None:
+        return blocked
     account_id = account_scope_filter(
         args.get("account_id"),
         context_account_id=ctx.account_id,
@@ -72,6 +88,9 @@ async def summary(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
 
 
 async def list_entries(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
+    blocked = await _require_ledger_module(ctx)
+    if blocked is not None:
+        return blocked
     account_id = account_scope_filter(
         args.get("account_id"),
         context_account_id=ctx.account_id,

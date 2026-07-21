@@ -16,6 +16,10 @@
 
 固定路由例外有两类：`payout`、收付款、发奖永远由 userbot 执行；`send_rich_message` 默认由 interaction bot 执行，只有显式选择 `userbot_reply` 才进入 Layer 228 Userbot 路径。Event Bus、Trace、MessageOps 只是标准会话链路的内部契约，不是第四种模式。
 
+### 平台能力开关
+
+AI、Interaction Bot、入站 Webhook 等是可选平台模块，可热关闭。关闭 Interaction 时只停交互 Bot manager，**不**停止管理 Bot、userbot 与资金结算补偿。关闭台账只冻结查询操作面，ActionEvent 继续写入。详情见 [平台能力热插拔](./PLATFORM-CAPABILITIES.md)。
+
 ### 指令前缀（command_prefix）
 
 - 所有 Telegram 指令必须有明确前缀（如 `,` 或自定义）

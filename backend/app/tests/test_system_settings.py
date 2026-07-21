@@ -78,10 +78,30 @@ async def test_system_settings_log_retention_switches_roundtrip(monkeypatch) -> 
 
 @pytest.mark.asyncio
 async def test_system_settings_ai_enabled_hotplug_roundtrip(monkeypatch) -> None:
+    from app.services import platform_capabilities as platform_caps
+
+    platform_caps._reset_for_tests()
     db = _FakeSettingsDB()
+    await platform_caps.bootstrap_from_db(db)  # type: ignore[arg-type]
     monkeypatch.setattr(rate_limit, "_audit", AsyncMock())
-    broadcast = AsyncMock()
-    monkeypatch.setattr(rate_limit, "_broadcast_reload", broadcast)
+    monkeypatch.setattr(rate_limit, "_broadcast_reload", AsyncMock())
+    monkeypatch.setattr(
+        platform_caps,
+        "_broadcast_reload_config",
+        AsyncMock(
+            return_value={
+                "total_accounts": 0,
+                "notified": 0,
+                "acked": 0,
+                "pending": 0,
+                "offline_or_timeout": 0,
+                "last_broadcast_at": None,
+                "notes": [],
+            }
+        ),
+    )
+    monkeypatch.setattr(platform_caps, "_apply_local_transition", AsyncMock())
+    monkeypatch.setattr("app.services.audit.write", AsyncMock())
 
     result = await rate_limit.patch_system_settings(
         rate_limit._SettingsPatch(ai_enabled=False),
@@ -89,9 +109,10 @@ async def test_system_settings_ai_enabled_hotplug_roundtrip(monkeypatch) -> None
         SimpleNamespace(id=1),
     )
 
-    assert db.rows["ai_enabled"].value == {"enabled": False}
+    assert db.rows["ai_enabled"].value == {"enabled": False, "generation": 1}
     assert result["ai_enabled"] is False
-    broadcast.assert_awaited_once()
+    assert platform_caps.is_ai_enabled_cached(fail_closed=False) is False
+    platform_caps._reset_for_tests()
 
 
 @pytest.mark.asyncio

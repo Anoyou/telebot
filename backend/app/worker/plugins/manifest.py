@@ -49,6 +49,9 @@ class Manifest:
     usage: str = ""
     # 依赖其它插件的 key（先加载它们再加载本插件；阶段 A 暂不强制校验）
     requires_features: list[str] = field(default_factory=list)
+    # 声明依赖的平台能力模块（ai / interaction_bot / webhooks / ledger / dispatch_debug）。
+    # 旧插件未声明时继续加载；运行时由平台裁剪不可用入口。
+    requires_platform_capabilities: list[str] = field(default_factory=list)
     # rule.config 的 JSON Schema，可选；前端编辑器据此渲染
     config_schema: dict[str, Any] | None = None
     # 配置页动作声明；也可放在 config_schema["x-config-actions"] 里。
@@ -99,6 +102,7 @@ class Manifest:
             "description": self.description,
             "usage": self.usage,
             "requires_features": list(self.requires_features),
+            "requires_platform_capabilities": list(self.requires_platform_capabilities),
             "config_schema": self.config_schema,
             "config_actions": list(self.config_actions),
             "agent_tools": list(self.agent_tools),

@@ -517,6 +517,55 @@ async def test_manual_paid_compensation_rejects_second_conditional_update(
 
 
 @pytest.mark.asyncio
+@pytest.mark.asyncio
+async def test_ledger_module_disabled_blocks_api_but_action_events_still_write(
+    ledger_session_factory,
+    monkeypatch,
+) -> None:
+    """台账模块关闭只冻查询面；ActionEvent 主账写入不受影响。"""
+
+    from types import SimpleNamespace
+
+    from fastapi import HTTPException
+
+    from app.api import ledger as ledger_api
+    from app.services import platform_capabilities as platform_caps
+
+    platform_caps._reset_for_tests()
+    platform_caps._DESIRED["ledger"] = False
+    platform_caps._CACHE_READY = True
+    platform_caps._GENERATIONS["ledger"] = 1
+
+    async def _disabled(db, module_key, **kwargs):  # noqa: ANN001
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "PLATFORM_MODULE_DISABLED", "module": module_key},
+        )
+
+    monkeypatch.setattr(platform_caps, "require_module_enabled", _disabled)
+
+    async with ledger_session_factory() as db:
+        with pytest.raises(HTTPException) as exc:
+            await ledger_api.list_ledger_entries(db, SimpleNamespace(id=1))  # type: ignore[arg-type]
+        assert exc.value.status_code == 409
+        assert exc.value.detail["code"] == "PLATFORM_MODULE_DISABLED"
+
+    # 主账写入路径（service / ORM）不经 API 门禁
+    now = datetime.now(UTC)
+    await _insert_action_event(
+        ledger_session_factory,
+        action_type="payout",
+        params_summary={"type": "payout", "amount": "12", "chat_id": -1001},
+        created_at=now,
+    )
+    async with ledger_session_factory() as db:
+        rows = (await db.execute(select(ActionEvent))).scalars().all()
+    assert len(rows) == 1
+    assert rows[0].action_type == "payout"
+    platform_caps._reset_for_tests()
+
+
+@pytest.mark.asyncio
 async def test_reset_ledger_data_removes_financial_and_operational_rows_only(
     ledger_session_factory,
     monkeypatch,

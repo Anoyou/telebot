@@ -42,11 +42,15 @@ import { PageHeader, PageShell } from "@/components/layout/PageScaffold";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { SectionHeader, SignalPill } from "@/components/ui/status";
 import {
+  getPlatformCapabilities,
   getSystemSettings,
+  patchPlatformCapability,
   patchSystemSettings,
 } from "@/api/system";
+import type { PlatformModuleKey } from "@/api/types";
 import { listAccounts } from "@/api/accounts";
 import { getErrMsg, api } from "@/lib/api";
+import { moduleLabel, runtimeStateLabel } from "@/lib/navigation";
 import { NotifyBots } from "./NotifyBots";
 import { DeviceProfileManager } from "./DeviceProfileManager";
 import { ProxyManager } from "./ProxyManager";
@@ -255,14 +259,30 @@ export function SettingsIndex() {
     onError: (err) => toast.error(getErrMsg(err)),
   });
 
-  const saveAIEnabled = useMutation({
-    mutationFn: (enabled: boolean) => patchSystemSettings({ ai_enabled: enabled }),
+  const capsQ = useQuery({
+    queryKey: ["system", "capabilities"],
+    queryFn: getPlatformCapabilities,
+    staleTime: 10_000,
+  });
+
+  const saveCapability = useMutation({
+    mutationFn: ({ key, enabled }: { key: PlatformModuleKey | string; enabled: boolean }) =>
+      patchPlatformCapability(key, enabled),
     onSuccess: (data) => {
-      setAiEnabled(data.ai_enabled ?? true);
-      toast.success((data.ai_enabled ?? true) ? "AI 能力已启用，worker 将热加载" : "AI 能力已关闭，worker 将卸载模型能力");
+      const label = data.module.label || moduleLabel(data.module.key);
+      toast.success(
+        data.message
+          || (data.module.desired_enabled
+            ? `${label} 已启用，正在热加载`
+            : `${label} 已关闭，运行时将收敛为暂停`),
+      );
+      qc.invalidateQueries({ queryKey: ["system", "capabilities"] });
       qc.invalidateQueries({ queryKey: ["system", "settings"] });
-      qc.invalidateQueries({ queryKey: ["llm-providers"] });
-      qc.invalidateQueries({ queryKey: ["llm-usage"] });
+      if (data.module.key === "ai") {
+        setAiEnabled(data.module.desired_enabled);
+        qc.invalidateQueries({ queryKey: ["llm-providers"] });
+        qc.invalidateQueries({ queryKey: ["llm-usage"] });
+      }
     },
     onError: (err) => toast.error(getErrMsg(err)),
   });
@@ -539,31 +559,85 @@ export function SettingsIndex() {
 
           <Card>
             <CardHeader>
-              <CardTitle className="text-base">AI 能力包</CardTitle>
+              <CardTitle className="text-base">平台能力</CardTitle>
               <CardDescription>
-                热插拔启用模型提供商、AI 指令和插件 ctx.ai。关闭后 worker 不加载 LLM provider，也不会解密模型代理配置。
+                可选平台模块热关闭 / 热启动。关闭只暂停入口与运行时资源，不删除配置、Token、规则或资金数据。
+                userbot、审计、结算与补偿属于平台内核，不受这些开关影响。
               </CardDescription>
             </CardHeader>
-            <CardContent>
-              <div className="flex flex-col gap-3 rounded-md border border-border/70 bg-muted/20 p-3 sm:flex-row sm:items-center sm:justify-between">
-                <div>
-                  <div className="text-sm font-medium">当前：{aiEnabled ? "已启用" : "已关闭"}</div>
-                  <p className="mt-1 max-w-2xl text-xs leading-5 text-muted-foreground">
-                    已有 AI 模板会保留，关闭期间不会调用模型；声明 ai_text 权限的插件不会拿到 ctx.ai。
-                  </p>
-                </div>
-                <Switch
-                  checked={aiEnabled}
-                  disabled={saveAIEnabled.isPending}
-                  onCheckedChange={(checked) => {
-                    if (!checked && !confirm("关闭 AI 能力后，AI 指令和依赖 ctx.ai 的插件会立即停止调用模型。确认关闭？")) {
-                      return;
-                    }
-                    setAiEnabled(checked);
-                    saveAIEnabled.mutate(checked);
-                  }}
-                />
-              </div>
+            <CardContent className="space-y-3">
+              {(capsQ.data?.modules ?? [
+                {
+                  key: "ai",
+                  label: "AI",
+                  desired_enabled: aiEnabled,
+                  generation: 0,
+                  runtime_state: aiEnabled ? "ready" : "stopped",
+                },
+              ]).map((mod) => {
+                const pending =
+                  saveCapability.isPending &&
+                  saveCapability.variables?.key === mod.key;
+                return (
+                  <div
+                    key={mod.key}
+                    className="flex flex-col gap-3 rounded-md border border-border/70 bg-muted/20 p-3 sm:flex-row sm:items-center sm:justify-between"
+                  >
+                    <div className="min-w-0 space-y-1">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="text-sm font-medium">{mod.label}</span>
+                        <SignalPill
+                          tone={
+                            mod.desired_enabled
+                              ? mod.runtime_state === "ready"
+                                ? "success"
+                                : "warn"
+                              : "neutral"
+                          }
+                          label="状态"
+                          value={runtimeStateLabel(String(mod.runtime_state))}
+                        />
+                        <span className="text-[11px] text-muted-foreground">
+                          gen {mod.generation}
+                        </span>
+                      </div>
+                      <p className="text-xs leading-5 text-muted-foreground">
+                        {mod.key === "ai" &&
+                          "模型 Provider、AI 指令与插件 ctx.ai。关闭后 worker 不加载密钥与代理。"}
+                        {mod.key === "interaction_bot" &&
+                          "交互 Bot / 测试 Bot 与 interaction_bot 通道。管理 Bot 与 userbot 不受影响。"}
+                        {mod.key === "webhooks" &&
+                          "公开入站 Webhook 投递。关闭后外部 URL 立即 404，配置与 Token 保留。"}
+                        {mod.key === "ledger" &&
+                          "台账查询与操作面。ActionEvent 与派奖补偿主账继续写入。"}
+                        {mod.key === "dispatch_debug" &&
+                          "命中模拟与 router debug trace。普通日志与基础 Event Trace 不受影响。"}
+                      </p>
+                      {mod.last_error ? (
+                        <p className="text-xs text-destructive">{mod.last_error}</p>
+                      ) : null}
+                    </div>
+                    <Switch
+                      checked={Boolean(mod.desired_enabled)}
+                      disabled={pending || capsQ.isLoading}
+                      onCheckedChange={(checked) =>
+                        saveCapability.mutate({ key: mod.key, enabled: checked })
+                      }
+                      aria-label={`切换 ${mod.label}`}
+                    />
+                  </div>
+                );
+              })}
+              {capsQ.data?.worker_convergence ? (
+                <p className="text-[11px] leading-5 text-muted-foreground">
+                  Worker 收敛：确认 {capsQ.data.worker_convergence.acked}/
+                  {capsQ.data.worker_convergence.total_accounts}
+                  {capsQ.data.worker_convergence.offline_or_timeout > 0
+                    ? `，${capsQ.data.worker_convergence.offline_or_timeout} 个将由周期 reconcile 收敛`
+                    : ""}
+                  。
+                </p>
+              ) : null}
             </CardContent>
           </Card>
 

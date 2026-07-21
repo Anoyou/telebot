@@ -51,6 +51,34 @@ async def _load_rules(ctx: ToolContext, account_id: int) -> list[dict[str, Any]]
     return account_bot_service.normalize_interaction_rules(rules_raw)
 
 
+async def _interaction_module_note(ctx: ToolContext) -> dict[str, Any]:
+    """只读工具可继续；附带模块状态。写操作由 _require_interaction_module 拦截。"""
+
+    from ....services import platform_capabilities as platform_caps
+
+    enabled = await platform_caps.is_module_enabled(ctx.db, "interaction_bot")
+    return {
+        "interaction_bot_module_enabled": enabled,
+        "module_note": (
+            None
+            if enabled
+            else "Interaction Bot 平台能力已暂停：polling 与 interaction 通道不可用；"
+            "规则配置与历史会话记录保留，管理 Bot / userbot 不受影响。"
+        ),
+    }
+
+
+async def _require_interaction_module(ctx: ToolContext) -> None:
+    from ....services import platform_capabilities as platform_caps
+
+    enabled = await platform_caps.is_module_enabled(ctx.db, "interaction_bot")
+    if not enabled:
+        raise ValueError(
+            "Interaction Bot 平台能力已暂停，无法修改交互规则或依赖交互通道的配置。"
+            "请先在系统设置的平台能力中重新启用。"
+        )
+
+
 async def list_rules(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
     account_id = account_scope_filter(
         args.get("account_id"),
@@ -64,11 +92,13 @@ async def list_rules(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
     items = [_rule_public_view(r) for r in rules]
     if enabled_only:
         items = [r for r in items if r.get("enabled")]
+    module_meta = await _interaction_module_note(ctx)
     return {
         "account_id": account_id,
         "count": len(items),
         "note": "交互规则保存在账号级配置 JSON，不属于通用 Rule 表。",
         "rules": items,
+        **module_meta,
     }
 
 
@@ -162,6 +192,7 @@ async def list_active_sessions(ctx: ToolContext, args: dict[str, Any]) -> dict[s
 
 
 async def save_rule_preview(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
+    await _require_interaction_module(ctx)
     from ....services import interaction_rule_service
 
     account_id = account_scope_filter(
@@ -196,6 +227,7 @@ async def save_rule_preview(ctx: ToolContext, args: dict[str, Any]) -> dict[str,
 
 
 async def save_rule_execute(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
+    await _require_interaction_module(ctx)
     from ....services import interaction_rule_service
 
     account_id = account_scope_filter(
@@ -222,6 +254,7 @@ async def save_rule_execute(ctx: ToolContext, args: dict[str, Any]) -> dict[str,
 
 
 async def set_enabled_preview(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
+    await _require_interaction_module(ctx)
     from ....services import interaction_rule_service
 
     account_id = account_scope_filter(
@@ -247,6 +280,7 @@ async def set_enabled_preview(ctx: ToolContext, args: dict[str, Any]) -> dict[st
 
 
 async def set_enabled_execute(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
+    await _require_interaction_module(ctx)
     from ....services import interaction_rule_service
 
     account_id = account_scope_filter(
@@ -263,6 +297,7 @@ async def set_enabled_execute(ctx: ToolContext, args: dict[str, Any]) -> dict[st
 
 
 async def delete_rule_preview(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
+    await _require_interaction_module(ctx)
     from ....services import interaction_rule_service
 
     account_id = account_scope_filter(
@@ -285,6 +320,7 @@ async def delete_rule_preview(ctx: ToolContext, args: dict[str, Any]) -> dict[st
 
 
 async def delete_rule_execute(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
+    await _require_interaction_module(ctx)
     from ....services import interaction_rule_service
 
     account_id = account_scope_filter(
