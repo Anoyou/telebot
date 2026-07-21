@@ -11,8 +11,10 @@ test.describe("移动端交互细节", () => {
     await page.goto("/ledger", { waitUntil: "networkidle" });
     const main = page.locator("[data-app-main]");
     const topEdge = page.locator('[data-edge="top"]');
+    const topLabel = topEdge.locator(".mobile-scroll-edge-label");
     const initialHeight = await topEdge.evaluate((element) => element.getBoundingClientRect().height);
     expect(initialHeight).toBe(0);
+    await expect(topLabel).toHaveCSS("border-top-width", "0px");
 
     await main.evaluate((element) => { element.scrollTop = 180; });
     await main.evaluate((element) => { element.scrollTop = 0; });
@@ -65,8 +67,13 @@ test.describe("移动端交互细节", () => {
 
     await page.goto("/", { waitUntil: "networkidle" });
     await page.getByRole("button", { name: "检查更新" }).click();
+    const dialog = page.getByRole("dialog", { name: "检查更新" });
+    await expect(dialog).toBeVisible();
+    const checkingHeight = await dialog.evaluate((element) => Math.round(element.getBoundingClientRect().height));
     const details = page.locator("details").filter({ hasText: "更新详情" });
     await expect(details).toBeVisible();
+    const resolvedHeight = await dialog.evaluate((element) => Math.round(element.getBoundingClientRect().height));
+    expect(Math.abs(resolvedHeight - checkingHeight)).toBeLessThanOrEqual(1);
     await expect(details).not.toHaveAttribute("open", "");
     await expect(details.locator("summary")).toContainText("v0.72.0-beta.1 → v0.72.0-beta.2");
     await expect(details.getByText("当前提交: aaaa1111aaaa")).toBeHidden();
