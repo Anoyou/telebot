@@ -20,6 +20,20 @@
 
 ## [Unreleased]
 
+## [0.71.3] — 2026-07-22 · patch（补丁版本） · UserBot 姓名解析模式
+
+### Added
+
+- 插件公开身份 facade 新增 `resolve_userbot()`，只使用账号 UserBot 的群权限与用户实体查询，不依赖 Interaction Bot 覆盖范围。
+
+### Fixed
+
+- UserBot 专用模式允许返回 UserBot 实际看到的联系人姓名，同时继续隐藏匿名管理员真实身份。
+
+### Tests
+
+- 新增 UserBot 联系人姓名、禁止 Bot API 调用和匿名管理员保护回归测试。
+
 ## [0.71.2] — 2026-07-22 · patch（补丁版本） · 无前缀插件命令修复
 
 ### Fixed

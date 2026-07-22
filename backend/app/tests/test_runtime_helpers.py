@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 from app.worker import runtime
 from app.worker.plugins.base import (
@@ -459,6 +460,54 @@ async def test_interaction_bot_public_name_replaces_userbot_contact_remark() -> 
     assert identity.display_name == "用户当前真实姓名"
     assert identity.is_anonymous_admin is False
     assert identity.resolved is True
+
+
+async def test_userbot_only_identity_keeps_contact_name_without_calling_bot() -> None:
+    class Client:
+        async def get_permissions(self, chat_id: int, user_id: int) -> SimpleNamespace:
+            return SimpleNamespace(anonymous=False, participant=SimpleNamespace(rank=""))
+
+    async def resolve_entity(chat_id: int, user_id: int) -> object:
+        return SimpleNamespace(
+            id=user_id,
+            first_name="联系人原始姓名",
+            last_name="",
+            username=None,
+            contact=True,
+        )
+
+    bot_lookup = AsyncMock(side_effect=AssertionError("UserBot-only lookup must not call Bot API"))
+    identity = await PluginIdentityFacade(
+        Client(),
+        bot_member_resolver=bot_lookup,
+        user_entity_resolver=resolve_entity,
+    ).resolve_userbot(
+        chat_id=-1001,
+        user_id=42,
+    )
+
+    assert identity.display_name == "联系人原始姓名"
+    assert identity.is_anonymous_admin is False
+    assert identity.resolved is True
+    bot_lookup.assert_not_awaited()
+
+
+async def test_userbot_only_identity_still_hides_anonymous_admin_name() -> None:
+    class Client:
+        async def get_permissions(self, chat_id: int, user_id: int) -> SimpleNamespace:
+            return SimpleNamespace(
+                anonymous=True,
+                participant=SimpleNamespace(rank="匿名值班"),
+            )
+
+    identity = await PluginIdentityFacade(Client()).resolve_userbot(
+        chat_id=-1001,
+        user_id=42,
+        fallback_display_name="不应公开的 UserBot 姓名",
+    )
+
+    assert identity.display_name == "匿名值班"
+    assert identity.is_anonymous_admin is True
 
 
 async def test_interaction_bot_anonymous_state_hides_userbot_visible_identity() -> None:
