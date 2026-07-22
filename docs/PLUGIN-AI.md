@@ -52,6 +52,25 @@ async def on_event(self, ctx, payload):
 
 `complete()` / `run_agent()` 返回值带 `routing` 脱敏摘要（`mode` / `provider_id` / `provider_name` / `matched_tag` / `model` / `api_format` / `client_identity_profile` / `used_fallback`）。插件**不能**指定 UA、客户端身份、API Key、Base URL、代理、内部分类器或全局 fallback 策略——这些由平台统一决定，路由摘要也绝不含密钥 / Base URL / 代理。`run_agent()` 会预先排除没有已启用模型的 provider（无法支撑 tools 调用）。
 
+## 原生文本流
+
+需要边生成边处理时使用 `ctx.ai.stream_complete()`；每次迭代只会返回 Provider 原生流中真实抵达的文本 delta，不会把完整结果拆字模拟：
+
+```python
+parts = []
+async for delta in ctx.ai.stream_complete(
+    system="你是一个简洁助手。",
+    user="总结这段内容",
+    provider_tag="chat",
+    max_tokens=512,
+    timeout_seconds=30,
+):
+    parts.append(delta)
+answer = "".join(parts)
+```
+
+该窄接口支持 Chat Completions、Responses 与 Anthropic Messages。流开始后不会中途切 Provider；消费者取消、超时或上游中断会按已发起的请求保守结算预算和插件 quota。若上游接受了 `stream=true` 却返回普通 JSON，迭代器会把真实完整文本作为一个块交给插件，不会拆字，也不会再发起第二次请求。消费者必须遍历到自然结束，提前 `break` 或关闭迭代器会按中断调用结算。
+
 ## 有界 Agent 与工具调用
 
 Agent 工具采用双白名单：插件 manifest 先声明工具名称和参数 Schema，宿主代码调用 `run_agent()` 时还必须传入同名 handler。只有两侧同时存在的工具才会暴露给模型，插件不能用模型返回的任意名称调用 Python 函数。
@@ -134,6 +153,7 @@ result = await ctx.ai.run_agent(
 - 任一限制设为 `0` 表示不限制。
 - 超限时，插件会收到 `AIQuotaError`；平台同时写入一条 `LLMUsage(success=False, error_type="plugin_quota_exceeded")`，可在 Usage 页排查。
 - Redis 不可用时会降级为 DB 检查，但并发预扣保护会暂时关闭；生产环境建议保留 Redis 可用性监控。
+- DB 降级统计会同时聚合 `plugin:{key}` 与 `plugin:{key}:*` usage，因此 `run_agent()` 和普通文本调用共享同一插件额度，不会因 source 子类型漏计。
 - token 估算是软上限：当前按 UTF-8 字节数 `// 4` 粗估，中文场景通常会偏低 1.5-2x，并发尖峰也可能瞬时越限。
 - 跨午夜的请求按 acquire 当时所属的自然日记账，软上限场景误差可接受。
 

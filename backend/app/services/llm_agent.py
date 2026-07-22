@@ -7,7 +7,7 @@ import hashlib
 import json
 import re
 import time
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass, replace
 from typing import Any
 
@@ -16,6 +16,7 @@ from .llm_protocol import (
     ModelMessage,
     ModelRequest,
     ModelResponse,
+    ModelStreamEvent,
     ModelUsage,
     StopReason,
     ToolCall,
@@ -25,6 +26,7 @@ from .llm_protocol import (
 
 ToolHandler = Callable[[dict[str, Any]], Awaitable[Any]]
 ModelCall = Callable[[ModelRequest], Awaitable[ModelResponse]]
+StreamModelCall = Callable[[ModelRequest], AsyncIterator[ModelStreamEvent]]
 
 
 @dataclass(frozen=True)
@@ -51,6 +53,8 @@ class AgentCallbacks:
     on_tool_batch: Callable[[tuple[ToolCall, ...]], Awaitable[None]] | None = None
     on_tool_start: Callable[[ToolCall], Awaitable[None]] | None = None
     on_tool_finish: Callable[[ToolCall, ToolResult], Awaitable[None]] | None = None
+    on_text_delta: Callable[[str], Awaitable[None]] | None = None
+    on_text_reset: Callable[[], Awaitable[None]] | None = None
 
 
 @dataclass(frozen=True)
@@ -184,6 +188,7 @@ async def run_agent(
     *,
     limits: AgentLimits | None = None,
     callbacks: AgentCallbacks | None = None,
+    stream_model_call: StreamModelCall | None = None,
 ) -> AgentResult:
     """Run a bounded tool loop; only explicitly supplied tools are executable."""
 
@@ -212,7 +217,18 @@ async def run_agent(
         if remaining <= 0:
             raise TimeoutError("Agent 会话已超时")
         async with asyncio.timeout(remaining):
-            return await model_call(current)
+            if stream_model_call is None:
+                return await model_call(current)
+            terminal: ModelResponse | None = None
+            async for event in stream_model_call(current):
+                if event.delta:
+                    await _notify(callbacks.on_text_delta, event.delta)
+                if event.response is not None:
+                    terminal = event.response
+                    break
+            if terminal is None:
+                raise RuntimeError("模型流式调用没有返回最终响应")
+            return terminal
 
     for step in range(1, limits.max_steps + 1):
         await _notify(callbacks.on_step, step)
@@ -239,6 +255,9 @@ async def run_agent(
                 tool_calls=tool_call_count,
                 stop_reason=response.stop_reason,
             )
+
+        # 对工具调用前可能已抵达的自然语言草稿只作临时预览。确认本轮要
+        await _notify(callbacks.on_text_reset)
 
         remaining_calls = limits.max_tool_calls - tool_call_count
         selected = list(response.tool_calls[: min(limits.max_calls_per_turn, remaining_calls)])

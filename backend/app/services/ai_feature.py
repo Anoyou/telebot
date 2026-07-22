@@ -33,7 +33,7 @@ async def is_ai_enabled(db: Any | None = None, *, default: bool = True) -> bool:
 
         snap = caps.get_snapshot()
         if snap.cache_ready:
-            return caps.is_ai_enabled_cached(fail_closed=False)
+            return caps.is_ai_enabled_cached(fail_closed=True)
     except Exception:  # noqa: BLE001
         pass
 

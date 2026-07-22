@@ -1,5 +1,6 @@
 // 自定义命令 + LLM Provider API 包装（Sprint2 #2）
 import { api, apiFetch } from "@/lib/api";
+import { NdjsonDecoder } from "@/lib/ndjsonStream";
 import type {
   AccountCommandItem,
   AICommandEnablementSummary,
@@ -204,6 +205,7 @@ export type ChatTestStreamEvent =
       requested_model: string;
       delta: string;
       model?: string | null;
+      stream_fallback?: boolean;
     }
   | {
       type: "done" | "error";
@@ -257,14 +259,10 @@ export async function streamChatTestProviderModels(
   if (!response.body) throw new Error("浏览器没有提供可读取的流式响应。");
 
   const reader = response.body.getReader();
-  const decoder = new TextDecoder();
+  const decoder = new NdjsonDecoder<ChatTestStreamEvent>();
   const completedModels = new Set<string>();
   let streamFinished = false;
-  let buffer = "";
-  const consumeLine = (line: string) => {
-    const trimmed = line.trim();
-    if (!trimmed) return;
-    const event = JSON.parse(trimmed) as ChatTestStreamEvent;
+  const consumeEvent = (event: ChatTestStreamEvent) => {
     if (event.type === "done" || event.type === "error") {
       completedModels.add(event.requested_model);
     }
@@ -273,13 +271,10 @@ export async function streamChatTestProviderModels(
   try {
     while (true) {
       const { done, value } = await reader.read();
-      buffer += decoder.decode(value, { stream: !done });
-      const lines = buffer.split("\n");
-      buffer = lines.pop() || "";
-      lines.forEach(consumeLine);
+      decoder.push(value).forEach(consumeEvent);
       if (done) break;
     }
-    if (buffer.trim()) consumeLine(buffer);
+    decoder.finish().forEach(consumeEvent);
     const incompleteModels = payload.models.filter((model) => !completedModels.has(model));
     if (incompleteModels.length > 0) {
       throw new Error(`流式响应提前结束，${incompleteModels.length} 个模型没有返回最终状态。`);
@@ -320,27 +315,20 @@ export async function streamQuickVerifyProvider(
   if (!response.body) throw new Error("浏览器没有提供可读取的流式响应。");
 
   const reader = response.body.getReader();
-  const decoder = new TextDecoder();
+  const decoder = new NdjsonDecoder<QuickVerifyProviderStreamEvent>();
   let terminalReceived = false;
   let streamFinished = false;
-  let buffer = "";
-  const consumeLine = (line: string) => {
-    const trimmed = line.trim();
-    if (!trimmed) return;
-    const event = JSON.parse(trimmed) as QuickVerifyProviderStreamEvent;
+  const consumeEvent = (event: QuickVerifyProviderStreamEvent) => {
     if (event.type === "done" || event.type === "error") terminalReceived = true;
     onEvent(event);
   };
   try {
     while (true) {
       const { done, value } = await reader.read();
-      buffer += decoder.decode(value, { stream: !done });
-      const lines = buffer.split("\n");
-      buffer = lines.pop() || "";
-      lines.forEach(consumeLine);
+      decoder.push(value).forEach(consumeEvent);
       if (done) break;
     }
-    if (buffer.trim()) consumeLine(buffer);
+    decoder.finish().forEach(consumeEvent);
     if (!terminalReceived) throw new Error("流式响应提前结束，没有返回最终验证状态。");
     streamFinished = true;
   } finally {

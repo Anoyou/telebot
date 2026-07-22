@@ -195,11 +195,16 @@ async def bootstrap_from_db(db: AsyncSession | None = None) -> CapabilitySnapsho
 
     global _CACHE_READY
     async with _CACHE_LOCK:
+        # 读取期间先撤销 ready，避免上一次快照或半读取快照在冷启动失败时
+        # 被受控入口继续当作可用状态消费。
+        _CACHE_READY = False
         if db is not None:
-            await _load_desired_from_db(db)
+            desired, generations = await _load_desired_from_db(db)
         else:
             async with AsyncSessionLocal() as session:
-                await _load_desired_from_db(session)
+                desired, generations = await _load_desired_from_db(session)
+        _DESIRED.update(desired)
+        _GENERATIONS.update(generations)
         _apply_startup_runtime()
         _CACHE_READY = True
         return get_snapshot()
@@ -210,21 +215,29 @@ async def refresh_cache_from_db(db: AsyncSession | None = None) -> CapabilitySna
 
     global _CACHE_READY
     async with _CACHE_LOCK:
+        _CACHE_READY = False
         if db is not None:
-            await _load_desired_from_db(db)
+            desired, generations = await _load_desired_from_db(db)
         else:
             async with AsyncSessionLocal() as session:
-                await _load_desired_from_db(session)
+                desired, generations = await _load_desired_from_db(session)
+        _DESIRED.update(desired)
+        _GENERATIONS.update(generations)
         _CACHE_READY = True
         return get_snapshot()
 
 
-async def _load_desired_from_db(db: AsyncSession) -> None:
+async def _load_desired_from_db(
+    db: AsyncSession,
+) -> tuple[dict[ModuleKey, bool], dict[ModuleKey, int]]:
+    desired: dict[ModuleKey, bool] = {}
+    generations: dict[ModuleKey, int] = {}
     for module_key, meta in MODULE_DEFS.items():
         row = await db.get(SystemSetting, meta["setting_key"])
         normalized = normalize_capability_setting(row.value if row is not None else None)
-        _DESIRED[module_key] = bool(normalized["enabled"])
-        _GENERATIONS[module_key] = int(normalized["generation"])
+        desired[module_key] = bool(normalized["enabled"])
+        generations[module_key] = int(normalized["generation"])
+    return desired, generations
 
 
 def _apply_startup_runtime() -> None:
@@ -549,6 +562,17 @@ async def _broadcast_reload_config(
         "enabled": enabled,
         "platform_capabilities": True,
     }
+
+    def ack_matches_generation(ack_payload: dict[str, Any]) -> bool:
+        loaded_generation = ack_payload.get("loaded_generation")
+        return (
+            ack_payload.get("module_key") == module_key
+            and isinstance(loaded_generation, int)
+            and not isinstance(loaded_generation, bool)
+            and loaded_generation >= generation
+            and ack_payload.get("loaded_enabled") is enabled
+        )
+
     for aid in account_ids:
         notified += 1
         try:
@@ -557,6 +581,7 @@ async def _broadcast_reload_config(
                 aid,
                 CMD_RELOAD_CONFIG,
                 timeout=3.0,
+                ack_validator=ack_matches_generation,
                 **payload,
             )
             if ok:
@@ -655,11 +680,11 @@ def build_status_payload() -> dict[str, Any]:
             }
         )
 
-    ai_on = is_module_enabled_cached("ai", fail_closed=False) if snap.cache_ready else True
-    interaction_on = is_module_enabled_cached("interaction_bot", fail_closed=False) if snap.cache_ready else True
+    ai_on = is_module_enabled_cached("ai", fail_closed=True) if snap.cache_ready else False
+    interaction_on = is_module_enabled_cached("interaction_bot", fail_closed=True) if snap.cache_ready else False
     webhooks_on = is_module_enabled_cached("webhooks", fail_closed=True) if snap.cache_ready else False
     if not snap.cache_ready:
-        webhooks_on = True  # 列表展示默认值；公开投递仍 fail-closed
+        webhooks_on = False
 
     channels = [
         {
@@ -685,10 +710,10 @@ def build_status_payload() -> dict[str, Any]:
             "label": "Webhook",
             "fixed": True,
             "managed_by": "webhooks",
-            "available": bool(webhooks_on) if snap.cache_ready else True,
-            "reason_code": None if (webhooks_on if snap.cache_ready else True) else "channel_disabled",
+            "available": bool(webhooks_on),
+            "reason_code": None if webhooks_on else "capability_unavailable" if not snap.cache_ready else "channel_disabled",
             "reason_text": None
-            if (webhooks_on if snap.cache_ready else True)
+            if webhooks_on
             else "入站 Webhook 模块已暂停",
         },
     ]

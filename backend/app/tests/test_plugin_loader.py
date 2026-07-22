@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, call
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from telethon.tl.types import PeerUser
@@ -5268,26 +5268,21 @@ async def test_userbot_entity_retry_recovers_from_recent_message_anchor() -> Non
     )
 
     assert resolved is entity
-    assert client.get_messages.await_args_list == [call(-1001, ids=88), call(-1001, ids=88)]
+    client.get_messages.assert_awaited_once_with(-1001, ids=88)
 
 
 @pytest.mark.asyncio
-async def test_userbot_entity_retry_scans_recent_history_without_cache() -> None:
-    entity = SimpleNamespace(id=42, first_name="公开姓名")
+async def test_userbot_entity_retry_does_not_scan_history_without_cache() -> None:
     calls: list[dict[str, int]] = []
 
     class Client:
         get_entity = AsyncMock(side_effect=ValueError("input entity is not cached"))
-        get_messages = AsyncMock(
-            return_value=SimpleNamespace(sender_id=42, from_id=PeerUser(42), sender=entity)
-        )
+        get_messages = AsyncMock()
 
         def iter_messages(self, _chat_id, **kwargs):  # noqa: ANN001, ANN003
             calls.append(dict(kwargs))
 
             async def messages():
-                if kwargs.get("from_user") is not None:
-                    raise ValueError("input entity is not cached")
                 yield SimpleNamespace(id=88, from_id=PeerUser(42))
 
             return messages()
@@ -5301,9 +5296,9 @@ async def test_userbot_entity_retry_scans_recent_history_without_cache() -> None
         42,
     )
 
-    assert resolved is entity
-    assert calls == [{"from_user": 42, "limit": 2000}, {"limit": 2000}]
-    client.get_messages.assert_awaited_once_with(-1001, ids=88)
+    assert resolved is None
+    assert calls == []
+    client.get_messages.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -5379,6 +5374,10 @@ async def test_ai_facade_requires_ai_text_or_ai_agent_permission(monkeypatch) ->
         assert state.contexts["_test_ai_agent"].ai._allow_agent is True
         assert all(
             isinstance(state.contexts[key].identities, PluginIdentityFacade)
+            for key in ("_test_ai_allowed", "_test_ai_denied", "_test_ai_agent")
+        )
+        assert all(
+            object.__getattribute__(state.contexts[key].identities, "_bot_member_resolver") is None
             for key in ("_test_ai_allowed", "_test_ai_denied", "_test_ai_agent")
         )
     finally:

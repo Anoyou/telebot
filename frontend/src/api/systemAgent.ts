@@ -1,5 +1,6 @@
 /** System Agent API client. */
 import { api, apiFetch } from "@/lib/api";
+import { NdjsonDecoder } from "@/lib/ndjsonStream";
 
 export interface SystemAgentConfig {
   enabled: boolean;
@@ -117,6 +118,7 @@ export type SystemAgentStreamEvent = {
   seq?: number;
   ts?: string;
   content?: string;
+  delta?: string;
   message?: string;
   code?: string;
   tool_name?: string;
@@ -134,6 +136,7 @@ export type SystemAgentStreamEvent = {
   provider_switch?: SystemAgentProviderSwitch;
   tool_approval?: SystemAgentToolApproval;
   action?: SystemAgentAction;
+  stream_fallback?: boolean;
   [key: string]: unknown;
 };
 
@@ -394,27 +397,20 @@ async function consumeSystemAgentStream(
   if (!response.body) throw new Error("浏览器没有提供可读取的流式响应。");
 
   const reader = response.body.getReader();
-  const decoder = new TextDecoder();
+  const decoder = new NdjsonDecoder<SystemAgentStreamEvent>();
   let doneReceived = false;
   let streamFinished = false;
-  let buffer = "";
-  const consumeLine = (line: string) => {
-    const trimmed = line.trim();
-    if (!trimmed) return;
-    const event = JSON.parse(trimmed) as SystemAgentStreamEvent;
+  const consumeEvent = (event: SystemAgentStreamEvent) => {
     if (event.type === "done") doneReceived = true;
     onEvent(event);
   };
   try {
     while (true) {
       const { done, value } = await reader.read();
-      buffer += decoder.decode(value, { stream: !done });
-      const lines = buffer.split("\n");
-      buffer = lines.pop() || "";
-      lines.forEach(consumeLine);
+      decoder.push(value).forEach(consumeEvent);
       if (done) break;
     }
-    if (buffer.trim()) consumeLine(buffer);
+    decoder.finish().forEach(consumeEvent);
     if (!doneReceived) throw new Error("流式响应提前结束，没有返回最终状态。");
     streamFinished = true;
   } finally {

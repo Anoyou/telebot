@@ -733,6 +733,7 @@ async def run_agent_query(
             placeholder_message_id = int(placeholder["message_id"])
 
     assistant_text = ""
+    streamed_assistant_text = ""
     error_text = ""
     proposed_actions: list[dict[str, Any]] = []
 
@@ -757,7 +758,12 @@ async def run_agent_query(
                 bot_tg_user_id=tg_user_id,
             ):
                 et = event.get("type")
-                if et == "assistant_message":
+                if et == "assistant_delta_reset":
+                    streamed_assistant_text = ""
+                elif et == "assistant_delta":
+                    streamed_assistant_text += str(event.get("delta") or "")
+                    await update_draft(_markdown_to_telegram_html(streamed_assistant_text))
+                elif et == "assistant_message":
                     assistant_text = str(event.get("content") or "")
                     await update_draft(_markdown_to_telegram_html(assistant_text))
                 elif et == "error":

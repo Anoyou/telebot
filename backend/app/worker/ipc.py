@@ -117,6 +117,7 @@ async def publish_cmd_with_ack(
     type_: str,
     *,
     timeout: float = 2.0,
+    ack_validator: Any | None = None,
     **payload: Any,
 ) -> bool:
     """发布 worker 指令并等待可选 ACK。
@@ -144,7 +145,9 @@ async def publish_cmd_with_ack(
                 continue
             ack = IPCMessage.decode(msg["data"])
             if ack.type == EVT_ACK and ack.payload.get("cmd_id") == cmd_id:
-                return bool(ack.payload.get("ok", False))
+                if not bool(ack.payload.get("ok", False)):
+                    return False
+                return bool(ack_validator(ack.payload)) if ack_validator is not None else True
         return False
     except TimeoutError:
         return False

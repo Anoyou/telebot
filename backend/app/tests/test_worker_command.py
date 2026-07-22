@@ -24,6 +24,7 @@ from app.worker.command import (
 )
 from app.worker.ipc import (
     CMD_PING,
+    CMD_RELOAD_CONFIG,
     CMD_RUN_INTERACTION_ACTION,
     CMD_RUN_INTERACTION_ENTRY,
     CMD_STOP,
@@ -185,6 +186,48 @@ async def test_worker_rpc_does_not_block_ping(monkeypatch):
             lambda ch, item: ch == "rpc-reply" and item.type == EVT_ACK and item.payload.get("cmd_id") == "rpc-1",
         )
         assert ack_msg.payload["ok"] is True
+    finally:
+        await redis.send_cmd(make_cmd(CMD_STOP))
+        await asyncio.wait_for(listener, timeout=1)
+
+
+@pytest.mark.asyncio
+async def test_platform_capability_reload_failure_returns_negative_ack(monkeypatch) -> None:
+    from app.worker import runtime as runtime_mod
+    from app.worker.plugins import loader as loader_mod
+
+    monkeypatch.setattr(
+        loader_mod,
+        "reload_account_config",
+        AsyncMock(side_effect=RuntimeError("平台能力缓存刷新失败")),
+    )
+    redis = _FakeCmdRedis()
+    client = AsyncMock()
+    paused = asyncio.Event()
+    paused.set()
+    listener = asyncio.create_task(runtime_mod._listen_cmd(redis, client, 104, paused))
+    try:
+        await redis.send_cmd(
+            make_cmd(
+                CMD_RELOAD_CONFIG,
+                reply_to="reload-ack",
+                cmd_id="reload-1",
+                source="platform_capabilities",
+                module_key="ai",
+                generation=4,
+                enabled=False,
+            )
+        )
+        _, ack = await _wait_for_publish(
+            redis,
+            lambda ch, item: (
+                ch == "reload-ack"
+                and item.type == EVT_ACK
+                and item.payload.get("cmd_id") == "reload-1"
+            ),
+        )
+        assert ack.payload["ok"] is False
+        assert "平台能力缓存刷新失败" in ack.payload["error"]
     finally:
         await redis.send_cmd(make_cmd(CMD_STOP))
         await asyncio.wait_for(listener, timeout=1)

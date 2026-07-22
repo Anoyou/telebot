@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
+import pytest
 
 from app.worker import runtime
 from app.worker.plugins.base import (
@@ -346,6 +349,54 @@ async def test_resolve_public_sender_identity_refreshes_saved_anonymous_user_nam
     assert identity.display_name == "恢复后的公开姓名"
     assert identity.is_anonymous_admin is False
     assert identity.resolved is True
+
+
+async def test_userbot_only_identity_keeps_contact_name_without_calling_bot() -> None:
+    class Client:
+        async def get_permissions(self, chat_id: int, user_id: int) -> SimpleNamespace:
+            return SimpleNamespace(anonymous=False, participant=SimpleNamespace(rank=""))
+
+    async def resolve_entity(chat_id: int, user_id: int) -> object:
+        return SimpleNamespace(
+            id=user_id,
+            first_name="联系人原始姓名",
+            last_name="",
+            username=None,
+            contact=True,
+        )
+
+    bot_lookup = AsyncMock(side_effect=AssertionError("UserBot-only lookup must not call Bot API"))
+    identity = await PluginIdentityFacade(
+        Client(),
+        bot_member_resolver=bot_lookup,
+        user_entity_resolver=resolve_entity,
+    ).resolve_userbot(
+        chat_id=-1001,
+        user_id=42,
+    )
+
+    assert identity.display_name == "联系人原始姓名"
+    assert identity.is_anonymous_admin is False
+    assert identity.resolved is True
+    bot_lookup.assert_not_awaited()
+
+
+async def test_userbot_only_identity_still_hides_anonymous_admin_name() -> None:
+    class Client:
+        async def get_permissions(self, chat_id: int, user_id: int) -> SimpleNamespace:
+            return SimpleNamespace(
+                anonymous=True,
+                participant=SimpleNamespace(rank="匿名值班"),
+            )
+
+    identity = await PluginIdentityFacade(Client()).resolve_userbot(
+        chat_id=-1001,
+        user_id=42,
+        fallback_display_name="不应公开的 UserBot 姓名",
+    )
+
+    assert identity.display_name == "匿名值班"
+    assert identity.is_anonymous_admin is True
 
 
 async def test_resolve_public_sender_identity_fails_closed() -> None:
@@ -769,3 +820,21 @@ def test_worker_main_installs_sensitive_log_filter_after_logging_setup(monkeypat
     assert [item[0] for item in calls] == ["logging", "redaction", "run"]
     assert calls[0][1]["format"] == "%(asctime)s [worker:7] %(levelname)s %(message)s"
     assert calls[2][1] is worker_result
+
+
+@pytest.mark.asyncio
+async def test_worker_capability_bootstrap_failure_is_fail_closed(monkeypatch) -> None:
+    from app.services import platform_capabilities
+
+    redis = object()
+    log_call = AsyncMock()
+    monkeypatch.setattr(runtime, "_log", log_call)
+    monkeypatch.setattr(
+        platform_capabilities,
+        "bootstrap_from_db",
+        AsyncMock(side_effect=RuntimeError("db unavailable")),
+    )
+
+    assert await runtime._bootstrap_platform_capabilities(7, redis) is False
+    log_call.assert_awaited_once()
+    assert "fail-closed" in log_call.await_args.args[3]

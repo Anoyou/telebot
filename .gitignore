@@ -72,6 +72,4 @@ archive/
 # 开发计划与审查文档（仅本地保留）
 agent-plans/
 REVIEW-PROMPT.md
-docs/REMOTE-PLUGIN-DEV-PLAN.md
-docs/PLUGIN-CONFIG-DESIGN.md
 frontend/docs-ref/

@@ -951,6 +951,9 @@ async def test_anthropic_proxy_profile_adds_only_explicit_compatibility_headers(
                 "event: message_delta",
                 'data: {"delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}',
                 "",
+                "event: message_stop",
+                'data: {"type":"message_stop"}',
+                "",
             )
             yield ("\n".join(lines) + "\n").encode()
 
@@ -1419,7 +1422,7 @@ async def test_responses_client_parses_sse_completed_response() -> None:
 
 @pytest.mark.asyncio
 async def test_responses_client_parses_sse_text_delta_without_completed_body() -> None:
-    """半兼容反代如果只给文本增量，也应折叠成 output_text。"""
+    """Responses 文本增量必须由 response.completed 正式收尾。"""
     from app.services.llm_client import ResponsesClient
 
     cli = ResponsesClient(api_key="sk", base_url="https://codex.example.com/v1", model="gpt-5.5")
@@ -1437,6 +1440,9 @@ async def test_responses_client_parses_sse_text_delta_without_completed_body() -
             "event: response.output_text.done\n"
             'data: {"type":"response.output_text.done","text":"hello world"}\n'
             "\n"
+            "event: response.completed\n"
+            'data: {"type":"response.completed","response":{"model":"gpt-5.5","status":"completed"}}\n'
+            "\n"
         )
 
         @staticmethod
@@ -1453,6 +1459,37 @@ async def test_responses_client_parses_sse_text_delta_without_completed_body() -
     assert result.model == "gpt-5.5"
     assert result.input_tokens == 0
     assert result.output_tokens == 0
+
+
+@pytest.mark.asyncio
+async def test_responses_client_rejects_sse_without_completed_terminal() -> None:
+    """Responses SSE 自然 EOF 不能因 output_text.done 或 status=completed 被接受。"""
+    from app.services.llm_client import LLMError, ResponsesClient
+
+    class _Resp:
+        status_code = 200
+        headers = {"content-type": "text/event-stream"}
+        text = (
+            "event: response.created\n"
+            'data: {"type":"response.created","response":{"status":"completed"}}\n'
+            "\n"
+            "event: response.output_text.done\n"
+            'data: {"type":"response.output_text.done","text":"截断"}\n'
+            "\n"
+        )
+
+        @staticmethod
+        def json():
+            raise json.JSONDecodeError("Expecting value", "", 0)
+
+    fake = AsyncMock()
+    fake.__aenter__.return_value = fake
+    fake.post = AsyncMock(return_value=_Resp())
+    with patch("app.services.llm_client.httpx.AsyncClient", return_value=fake):
+        with pytest.raises(LLMError, match="缺少 response.completed"):
+            await ResponsesClient(
+                api_key="sk", base_url="https://codex.example.com/v1", model="gpt-5.5"
+            ).complete("sys", "user")
 
 
 @pytest.mark.asyncio
@@ -2455,6 +2492,125 @@ async def test_stream_chat_test_models_falls_back_to_complete(monkeypatch) -> No
     assert result["response"] == "完整回复"
     assert result["streaming"] is False
     assert result["stream_fallback"] is True
+
+
+@pytest.mark.asyncio
+async def test_stream_chat_test_models_does_not_repeat_completed_json_fallback(
+    monkeypatch,
+) -> None:
+    """上游在流式请求中直接返回完整 JSON 时，测活不能再发第二次请求。"""
+    from app.api import commands as cmds_api
+    from app.services import llm_client
+    from app.services.llm_client import LLMStreamChunk
+
+    row = LLMProvider(
+        id=1,
+        name="JSON fallback",
+        provider="openai",
+        api_key_enc=None,
+        base_url="https://api.example.com/v1",
+        default_model="json-model",
+        api_format="responses",
+        created_at=datetime.now(UTC),
+    )
+
+    class _FakeClient:
+        complete_calls = 0
+
+        async def stream_complete(self, *_args, **_kwargs):
+            yield LLMStreamChunk(
+                delta="同一次请求的完整回复",
+                model="json-real",
+                stream_fallback=True,
+            )
+            yield LLMStreamChunk(
+                model="json-real",
+                input_tokens=5,
+                output_tokens=2,
+                done=True,
+                stream_fallback=True,
+            )
+
+        async def complete(self, *_args, **_kwargs):
+            self.complete_calls += 1
+            raise AssertionError("完整 JSON 已消费，不应再次请求上游")
+
+    client = _FakeClient()
+    monkeypatch.setattr(
+        cmds_api.command_service,
+        "get_provider_row",
+        AsyncMock(return_value=row),
+    )
+    monkeypatch.setattr(cmds_api, "_resolve_proxy_url", AsyncMock(return_value=None))
+    monkeypatch.setattr(llm_client, "build_client", lambda *_args, **_kwargs: client)
+    _capture_llm_usage(monkeypatch)
+
+    response = await cmds_api.stream_chat_test_models(
+        pid=1,
+        payload=ChatTestModelsRequest(models=["json-model"], message="测一下"),
+        db=AsyncMock(),
+        _user=AsyncMock(),
+    )
+    body = ""
+    async for chunk in response.body_iterator:
+        body += chunk.decode() if isinstance(chunk, bytes) else chunk
+    events = [json.loads(line) for line in body.splitlines() if line]
+    delta = next(event for event in events if event["type"] == "delta")
+    assert delta["stream_fallback"] is True
+    result = next(event["result"] for event in events if event["type"] == "done")
+
+    assert result["response"] == "同一次请求的完整回复"
+    assert result["streaming"] is False
+    assert result["stream_fallback"] is True
+    assert client.complete_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_stream_chat_test_models_rejects_stream_without_done(monkeypatch) -> None:
+    from app.api import commands as cmds_api
+    from app.services import llm_client
+    from app.services.llm_client import LLMStreamChunk
+
+    row = LLMProvider(
+        id=1,
+        name="Broken stream",
+        provider="openai",
+        api_key_enc=None,
+        base_url="https://api.example.com/v1",
+        default_model="broken",
+        api_format="responses",
+        created_at=datetime.now(UTC),
+    )
+
+    class _FakeClient:
+        async def stream_complete(self, *_args, **_kwargs):
+            yield LLMStreamChunk(delta="partial", model="broken")
+
+    monkeypatch.setattr(
+        cmds_api.command_service,
+        "get_provider_row",
+        AsyncMock(return_value=row),
+    )
+    monkeypatch.setattr(cmds_api, "_resolve_proxy_url", AsyncMock(return_value=None))
+    monkeypatch.setattr(llm_client, "build_client", lambda *_args, **_kwargs: _FakeClient())
+    _capture_llm_usage(monkeypatch)
+
+    response = await cmds_api.stream_chat_test_models(
+        pid=1,
+        payload=ChatTestModelsRequest(models=["broken"], message="测一下"),
+        db=AsyncMock(),
+        _user=AsyncMock(),
+    )
+    body = ""
+    async for chunk in response.body_iterator:
+        body += chunk.decode() if isinstance(chunk, bytes) else chunk
+    result = next(
+        event["result"]
+        for event in (json.loads(line) for line in body.splitlines() if line)
+        if event["type"] == "error"
+    )
+
+    assert "最终状态" in result["error"]
 
 
 @pytest.mark.asyncio

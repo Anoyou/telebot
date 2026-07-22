@@ -1663,6 +1663,7 @@ export type QuickVerifyProviderStreamEvent =
       type: "delta";
       model: string;
       delta: string;
+      stream_fallback?: boolean;
     }
   | ({ type: "done" | "error" } & QuickVerifyProviderResult);
 

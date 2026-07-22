@@ -568,10 +568,13 @@ async def post_kill_switch(payload: KillSwitchRequest, db: DBSession, user: Curr
         # 总闸恢复时仍尊重平台能力：Interaction 模块关闭则不重启交互 manager。
         interaction_ops: list[Any] = []
         try:
-            if platform_caps.is_module_enabled_cached("interaction_bot", fail_closed=False):
+            if not platform_caps.get_snapshot().cache_ready:
+                await platform_caps.refresh_cache_from_db(db)
+            if platform_caps.is_module_enabled_cached("interaction_bot", fail_closed=True):
                 interaction_ops.append(interaction_bot_runtime.start_interaction_bot_manager())
         except Exception:  # noqa: BLE001
-            interaction_ops.append(interaction_bot_runtime.start_interaction_bot_manager())
+            # 能力状态未知时不启动受控 manager，等待下一次显式恢复/重试。
+            pass
         operations = (
             supervisor.start_active_workers(),
             account_bot_runtime.start_account_bot_manager(),
@@ -638,7 +641,7 @@ async def get_system_settings(db: DBSession, _user: CurrentUser) -> dict[str, An
     try:
         if not platform_caps.get_snapshot().cache_ready:
             await platform_caps.refresh_cache_from_db(db)
-        ai_enabled = platform_caps.is_ai_enabled_cached(fail_closed=False)
+        ai_enabled = platform_caps.is_ai_enabled_cached(fail_closed=True)
     except Exception:  # noqa: BLE001
         ai_enabled_val = await _get_setting(db, AI_ENABLED_SETTING_KEY, {"enabled": True})
         ai_enabled = normalize_ai_enabled(ai_enabled_val)

@@ -19,7 +19,7 @@ from app.db.models.account import Account
 from app.db.models.account_bot import AccountBot
 from app.db.models.log import RuntimeLog
 from app.schemas.account_bot import AccountBotConfigUpdate, AccountBotInteractionConfig, AccountBotTestRequest
-from app.services import account_bot_runtime, account_bot_service, audit
+from app.services import account_bot_runtime, account_bot_service, audit, platform_capabilities
 from app.services.interaction import contracts as interaction_contracts
 from app.services.interaction import userbot_actions
 from app.services.interaction.delivery import (
@@ -154,6 +154,16 @@ def _allow_transfer_notice_trigger_claims(request, monkeypatch) -> None:
             "_claim_interaction_trigger",
             AsyncMock(return_value=True),
         )
+
+
+@pytest.fixture(autouse=True)
+def _enable_platform_capabilities_for_interaction_tests() -> None:
+    """账号 Bot 历史用例默认模拟已成功完成主进程能力缓存 bootstrap。"""
+
+    platform_capabilities._reset_for_tests()
+    platform_capabilities._CACHE_READY = True
+    yield
+    platform_capabilities._reset_for_tests()
 
 
 @pytest.mark.asyncio

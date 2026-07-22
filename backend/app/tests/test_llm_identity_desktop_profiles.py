@@ -1,6 +1,6 @@
 """阶段 F：Desktop 档案证据门槛契约测试。
 
-约束（docs/LLM-CLIENT-IDENTITY-ROUTING-PLAN.md 阶段 F）：
+约束：客户端身份档案必须只影响协议要求的 headers，不改变请求正文和 Provider 路由语义。
 - 只有存在真实捕获 / 上游开源实现 / 可复核证据时，Desktop 档案才能标 verified、可选。
 - 无证据的档案必须保持不可选、不参与探测，请求时回落到本次协议的 auto 默认身份，
   且**绝不**发送任何模拟 UA / 身份头。

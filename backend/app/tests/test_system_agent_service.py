@@ -311,20 +311,25 @@ async def test_successful_turn_redacts_secret_from_persistent_memory(
 
     async with agent_db() as db:
         session = await svc.create_session(db, channel=CHANNEL_WEB, web_user_id=1)
-        async for _event in svc.stream_message(
-            db,
-            session=session,
-            text=f"添加 Provider，key={secret}",
-            role="admin",
-            channel=CHANNEL_WEB,
-            web_user_id=1,
-        ):
-            pass
+        events = [
+            event
+            async for event in svc.stream_message(
+                db,
+                session=session,
+                text=f"添加 Provider，key={secret}",
+                role="admin",
+                channel=CHANNEL_WEB,
+                web_user_id=1,
+            )
+        ]
 
         assert secret not in session.memory_summary
         assert secret not in str(session.memory_state)
         assert "REDACTED" in str(session.memory_state)
         assert secret not in str(session.title)
+        assistant = next(event for event in events if event.get("type") == "assistant_message")
+        assert secret not in assistant["content"]
+        assert "REDACTED" in assistant["content"]
 
 
 @pytest.mark.asyncio

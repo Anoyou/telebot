@@ -54,6 +54,17 @@ def test_redactor_preserves_non_secret_token_counters() -> None:
     assert out["accessToken"] == "***"
 
 
+def test_redactor_masks_common_provider_api_keys() -> None:
+    values = (
+        "xai-abcdefghijklmnopqrstuvwxyz123456",
+        "gsk_abcdefghijklmnopqrstuvwxyz123456",
+        "AIzaabcdefghijklmnopqrstuvwxyz123456",
+    )
+
+    for value in values:
+        assert value not in redact_text(f"provider key: {value}")
+
+
 def test_log_filter_redacts_telegram_bot_url_args() -> None:
     record = logging.LogRecord(
         name="httpx",

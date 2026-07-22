@@ -49,7 +49,7 @@ jobs:
       - name: Install pnpm
         run: |
           corepack enable
-          corepack prepare pnpm@9.15.9 --activate
+          corepack prepare pnpm@10.23.0 --activate
 
       - name: Install frontend dependencies
         working-directory: frontend

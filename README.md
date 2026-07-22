@@ -3,7 +3,7 @@
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-3.12+-3776ab.svg)](backend/pyproject.toml)
 [![React](https://img.shields.io/badge/React-18-61dafb.svg)](frontend/package.json)
-[![Version](https://img.shields.io/badge/version-0.57.8-f97316.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.72.0--beta.3-f97316.svg)](CHANGELOG.md)
 [![Status](https://img.shields.io/badge/status-alpha-orange.svg)](#项目状态)
 
 自托管的 Telegram 多账号 UserBot 控制台。
@@ -55,6 +55,7 @@ TelePilot 把多个 Telegram 账号、插件、交互 Bot、AI 路由、资金�
 | 插件 | 支持官方插件库、本地插件、ZIP 安装、按账号启停、热重载、权限声明、配置页面和版本检查 |
 | 群互动 | 独立 Interaction Bot manager 承接关键词、按钮、付款确认和群会话；管理命令与资金动作仍由 UserBot 执行 |
 | AI | 支持 OpenAI 兼容接口、Anthropic Messages 协议和 Ollama 兼容接口，包含模型级路由、Provider tag、协议诊断、测活、usage 和预算 |
+| 系统助手 | 全局悬浮工作区与管理 Bot `/agent`，支持可恢复运行、原生模型增量、工具审批和写操作确认 |
 | 资金 | Action ledger、payout 限额、持久化幂等、失败补偿、ambiguous 人工核对和按账号查询 |
 | 可观测性 | Runtime/Audit 日志、Trace、action event、消息路由漏斗、reason code、系统健康和资源状态 |
 | 开发工具 | 插件脚手架、静态权限推导、dry-run、命中调试、录制回放、Webhook 和分级 Trace |
@@ -224,6 +225,7 @@ backend/.venv/bin/python scripts/validate-installed-interaction-plugins.py
 | 外部系统通过 HTTP 触发插件 | [入站 Webhook Quickstart](docs/PLUGIN-WEBHOOK-QUICKSTART.md) |
 | 插件 HTTP 与 AI 能力 | [HTTP facade](docs/PLUGIN-HTTP.md) / [AI facade](docs/PLUGIN-AI.md) |
 | 平台能力热插拔（AI / 交互 / Webhook / 台账 / 调试） | [平台能力](docs/PLATFORM-CAPABILITIES.md) |
+| 系统助手、持久运行和真实流式事件 | [系统助手](docs/SYSTEM-AGENT.md) |
 | 远程插件仓库与发布 | [远程插件](docs/PLUGIN-REMOTE.md) |
 | 版本变化 | [CHANGELOG](CHANGELOG.md) |
 | 参与开发 | [CONTRIBUTING](CONTRIBUTING.md) / [Agent Playbooks](docs/AGENT-PLAYBOOKS.md) |
@@ -237,7 +239,7 @@ backend/.venv/bin/python scripts/validate-installed-interaction-plugins.py
 
 ## 项目状态
 
-当前源码版本：`0.57.8`。
+当前源码版本以 `backend/app/__init__.py`、`backend/pyproject.toml`、`frontend/package.json` 与 `frontend/src/lib/version.ts` 为准；发布历史见 [CHANGELOG](CHANGELOG.md)。
 
 项目处于 Alpha 阶段，主要面向自托管和个人可信环境。接口、页面和插件契约仍可能调整；升级前请阅读 [CHANGELOG](CHANGELOG.md) 并完成备份。较大的功能改动建议先开 issue 对齐方向。
 

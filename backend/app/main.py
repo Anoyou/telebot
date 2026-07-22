@@ -98,6 +98,26 @@ async def _retry_runtime_component(
         delay = min(delay * 2, 30.0)
 
 
+async def _start_interaction_bot_component() -> object:
+    """缓存就绪后才允许启动 Interaction Bot；DB 恢复后可由重试器收敛。"""
+
+    snapshot = platform_capabilities.get_snapshot()
+    if not snapshot.cache_ready:
+        await platform_capabilities.bootstrap_from_db()
+        snapshot = platform_capabilities.get_snapshot()
+    if not snapshot.cache_ready:
+        raise RuntimeError("平台能力缓存未就绪")
+    if not platform_capabilities.is_module_enabled_cached(
+        "interaction_bot",
+        fail_closed=True,
+    ):
+        await platform_capabilities.mark_runtime_ready_if_starting("interaction_bot")
+        return 0
+    result = await interaction_bot_runtime.start_interaction_bot_manager()
+    await platform_capabilities.mark_runtime_ready_if_starting("interaction_bot")
+    return result
+
+
 def _is_container_env() -> bool:
     """粗粒度判断当前是否运行在容器环境。"""
     return Path("/.dockerenv").exists()
@@ -261,30 +281,19 @@ async def lifespan(app: FastAPI):
 
     # 2-F: 高频群互动使用独立交互 Bot runtime，避免和管理 Bot 生命周期混在一起。
     # Interaction Bot 模块关闭时不启动 manager（管理 Bot 仍由 account_bot_manager 负责）。
-    interaction_desired = platform_capabilities.is_module_enabled_cached(
-        "interaction_bot",
-        fail_closed=False,
-    )
-    if interaction_desired:
-        if not await _start_runtime_component(
-            "interaction_bot_manager",
-            interaction_bot_runtime.start_interaction_bot_manager,
-        ):
-            retry_tasks.append(
-                asyncio.create_task(
-                    _retry_runtime_component(
-                        "interaction_bot_manager",
-                        interaction_bot_runtime.start_interaction_bot_manager,
-                    ),
-                    name="retry-interaction-bot-manager",
-                )
+    if not await _start_runtime_component(
+        "interaction_bot_manager",
+        _start_interaction_bot_component,
+    ):
+        retry_tasks.append(
+            asyncio.create_task(
+                _retry_runtime_component(
+                    "interaction_bot_manager",
+                    _start_interaction_bot_component,
+                ),
+                name="retry-interaction-bot-manager",
             )
-    else:
-        _RUNTIME_COMPONENTS["interaction_bot_manager"] = True
-        try:
-            await platform_capabilities.mark_runtime_ready_if_starting("interaction_bot")
-        except Exception:  # noqa: BLE001
-            logging.exception("标记 interaction_bot 为 stopped 失败")
+        )
 
     try:
         await platform_capabilities.reconcile_runtime_after_startup()

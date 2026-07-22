@@ -71,15 +71,17 @@ async def patch_platform_capability(
     offline = int(worker.get("offline_or_timeout") or 0)
     message = None
     ok = True
-    if offline > 0:
+    if result.get("runtime_state") == "failed":
+        ok = False
+        message = result.get("last_error") or "本地运行时切换失败"
+        if offline > 0:
+            message = f"{message}；另有 {offline} 个 worker 未即时确认。"
+    elif offline > 0:
         ok = True  # 目标状态已保存；部分 worker 将由周期 reconcile 收敛
         message = (
             f"目标状态已保存（generation={result['generation']}），"
             f"{offline} 个 worker 未即时确认，将由周期 reconcile 或重启收敛。"
         )
-    elif result.get("runtime_state") == "failed":
-        ok = False
-        message = result.get("last_error") or "本地运行时切换失败"
     return CapabilityModulePatchOut(
         module=CapabilityModuleState.model_validate(module),
         worker_convergence=CapabilityWorkerConvergence.model_validate(worker),

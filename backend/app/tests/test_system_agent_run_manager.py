@@ -223,6 +223,38 @@ async def test_persisted_events_redact_turn_secrets(run_db) -> None:
 
 
 @pytest.mark.asyncio
+async def test_persisted_delta_events_redact_unknown_provider_secret(run_db) -> None:
+    secret = "gsk_abcdefghijklmnopqrstuvwxyz123456"
+
+    class _DeltaService(_ControlledService):
+        async def stream_message(self, db, **kwargs):
+            async for event in super().stream_message(db, **kwargs):
+                if event["type"] == "assistant_message":
+                    yield {"type": "assistant_delta", "delta": f"模型输出 {secret}"}
+                yield event
+
+    service = _DeltaService(response="已完成")
+    manager = SystemAgentRunManager(
+        session_factory=run_db,
+        service_factory=lambda: service,
+        poll_interval=0.01,
+    )
+    run = await manager.start_run(
+        session_id="session-1",
+        web_user_id=7,
+        client_request_id="request-delta-redaction",
+        text="检查输出",
+    )
+    service.release.set()
+    await _wait_for_status(manager, run.id, AGENT_RUN_SUCCEEDED)
+    events = await manager.list_events(run.id)
+    persisted = json.dumps([row.event for row in events], ensure_ascii=False)
+
+    assert secret not in persisted
+    assert "[REDACTED]" in persisted
+
+
+@pytest.mark.asyncio
 async def test_lazy_reconcile_marks_previous_process_runs_retryable(run_db) -> None:
     async with run_db() as db:
         db.add(

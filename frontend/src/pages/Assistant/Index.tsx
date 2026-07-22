@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import { Menu, MessageCircle, Minimize2, Server, Settings2 } from "lucide-react";
@@ -35,6 +35,7 @@ import { PageHeader, PageShell } from "@/components/layout/PageScaffold";
 import { Button } from "@/components/ui/button";
 import { Select } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/misc";
+import { useStreamingText } from "@/hooks/useStreamingText";
 import { getErrMsg } from "@/lib/api";
 import { systemAgentToolLabel } from "@/lib/systemAgentLabels";
 import { removeSessionAndChooseNext } from "./sessionState";
@@ -122,7 +123,16 @@ export function AssistantIndex() {
     providerName: string;
     model: string;
   } | null>(null);
+  const [streamNotice, setStreamNotice] = useState("");
   const abortRef = useRef<AbortController | null>(null);
+  const streamingBubbleCreatedRef = useRef(false);
+  const liveText = useStreamingText();
+
+  const clearLiveStreamingState = useCallback(() => {
+    streamingBubbleCreatedRef.current = false;
+    liveText.clear();
+    setStreamNotice("");
+  }, [liveText.clear]);
 
   useEffect(() => {
     setDockStreaming(streaming);
@@ -180,6 +190,7 @@ export function AssistantIndex() {
 
   useEffect(() => {
     setRuntimeSelection(null);
+    clearLiveStreamingState();
   }, [activeId, configQ.data?.provider_id, configQ.data?.model]);
 
   const createMut = useMutation({
@@ -191,6 +202,7 @@ export function AssistantIndex() {
       void qc.invalidateQueries({ queryKey: ["system-agent", "sessions"] });
       abortRef.current?.abort();
       abortRef.current = null;
+      clearLiveStreamingState();
       setStreaming(false);
       setActiveId(session.id);
       setLive([]);
@@ -217,6 +229,7 @@ export function AssistantIndex() {
       if (activeId === id) {
         abortRef.current?.abort();
         abortRef.current = null;
+        clearLiveStreamingState();
         setStreaming(false);
         setActiveId(nextState.activeId);
         const nextSession = nextState.sessions.find((session) => session.id === nextState.activeId);
@@ -318,6 +331,47 @@ export function AssistantIndex() {
     );
   };
 
+  const showStreamingReply = (value: string, options?: { fallback?: boolean }) => {
+    setLive((prev) => {
+      const pending = prev.find((bubble) => bubble.role === "assistant" && bubble.pending);
+      const assistant = prev.find((bubble) => bubble.id === "live-assistant-stream");
+      const nextBubble: LiveBubble = {
+        id: "live-assistant-stream",
+        role: "assistant",
+        text: value,
+        streaming: true,
+        streamFallback: options?.fallback,
+      };
+      const rest = prev.filter(
+        (bubble) => bubble.id !== "live-assistant-stream" && bubble !== pending,
+      );
+      return [...rest, assistant ? { ...assistant, ...nextBubble } : nextBubble];
+    });
+  };
+
+  const appendStreamingDelta = (delta: string) => {
+    liveText.append(delta);
+    if (!streamingBubbleCreatedRef.current) {
+      streamingBubbleCreatedRef.current = true;
+      showStreamingReply(liveText.textRef.current);
+    }
+  };
+
+  const resetStreamingReply = () => {
+    clearLiveStreamingState();
+    setLive((prev) => prev.filter((bubble) => bubble.id !== "live-assistant-stream"));
+  };
+
+  useEffect(() => {
+    const current = liveText.text;
+    if (!current || !streamingBubbleCreatedRef.current) return;
+    setLive((prev) =>
+      prev.map((bubble) =>
+        bubble.id === "live-assistant-stream" ? { ...bubble, text: current } : bubble,
+      ),
+    );
+  }, [liveText.text]);
+
   const upsertToolProgress = (event: SystemAgentStreamEvent, finished: boolean) => {
     const id = `tool-${event.call_id || event.seq}`;
     const toolLabel = systemAgentToolLabel(
@@ -395,6 +449,13 @@ export function AssistantIndex() {
       updatePendingText(`正在等待 ${toolLabel} 返回…`);
     }
     if (event.type === "tool_finished") upsertToolProgress(event, true);
+    if (event.type === "assistant_delta_reset") {
+      resetStreamingReply();
+    }
+    if (event.type === "assistant_delta") {
+      setStreamNotice("");
+      appendStreamingDelta(String(event.delta || ""));
+    }
     if (event.type === "action_proposed" && event.action) {
       const action = event.action as SystemAgentAction;
       setLive((prev) => [
@@ -413,17 +474,21 @@ export function AssistantIndex() {
       if (typeof providerName === "string" && typeof model === "string") {
         setRuntimeSelection({ providerName, model });
       }
+      liveText.syncSnapshot(String(event.content || ""));
+      streamingBubbleCreatedRef.current = false;
       setLive((prev) => [
-        ...prev.filter((bubble) => !bubble.pending),
+        ...prev.filter((bubble) => !bubble.pending && bubble.id !== "live-assistant-stream"),
         {
           id: "live-assistant-final",
           role: "assistant",
           text: String(event.content || ""),
+          streamFallback: Boolean(event.stream_fallback || event.usage?.stream_fallback),
         },
       ]);
     }
     if (event.type === "error") {
       if (event.code === "RUN_STREAM_FAILED") {
+        setStreamNotice("进度连接中断，正在恢复…");
         updatePendingText("进度连接中断，正在恢复…");
       } else if (
         event.code === "AGENT_PROVIDER_SWITCH_REQUIRED" ||
@@ -443,6 +508,9 @@ export function AssistantIndex() {
           },
         });
       }
+    }
+    if (event.type === "done") {
+      setStreamNotice("");
     }
   };
 
@@ -472,12 +540,12 @@ export function AssistantIndex() {
             cursor,
             (event) => {
               const seq = Number(event.seq || 0);
-              if (seq > cursor) {
-                cursor = seq;
-                const next = { runId, lastSeq: cursor };
-                rememberRun(sessionId, next);
-                setActiveRun(next);
-              }
+              // durable stream 重连时可能重放游标边界事件，不重复追加文本。
+              if (seq > 0 && seq <= cursor) return;
+              if (seq > cursor) cursor = seq;
+              const next = { runId, lastSeq: cursor };
+              rememberRun(sessionId, next);
+              setActiveRun(next);
               handleRunEvent(event);
               if (event.type === "error" && event.code === "RUN_STREAM_FAILED") {
                 streamFailed = true;
@@ -497,11 +565,19 @@ export function AssistantIndex() {
         } catch (error) {
           if (controller.signal.aborted) throw error;
           const snapshot = await getSystemAgentRun(runId).catch(() => null);
+          if (!snapshot) {
+            forgetRun(sessionId, runId);
+            setActiveRun((current) => (current?.runId === runId ? null : current));
+            setStreamNotice("本轮进度已失效，请重新发送消息。");
+            setStreaming(false);
+            return;
+          }
           if (snapshot && terminalRun(snapshot)) {
             // 终态事件也在同一事件表中；继续按游标读取，直到真正收到 done。
             cursor = Math.min(cursor, Math.max(0, snapshot.last_seq - 1));
           }
           reconnectAttempt += 1;
+          setStreamNotice("进度连接中断，正在恢复…");
           updatePendingText("进度连接中断，正在恢复…");
           await new Promise((resolve) =>
             window.setTimeout(resolve, Math.min(2000, 250 * reconnectAttempt)),
@@ -512,12 +588,17 @@ export function AssistantIndex() {
       forgetRun(sessionId, runId);
       setActiveRun((current) => (current?.runId === runId ? null : current));
       await refreshRunData(sessionId);
-      if (abortRef.current === controller) setLive([]);
+      if (abortRef.current === controller) {
+        streamingBubbleCreatedRef.current = false;
+        liveText.clear();
+        setLive([]);
+      }
     } finally {
       if (abortRef.current === controller) {
         abortRef.current = null;
         setStreaming(false);
         setRetryingMessageId(null);
+        setStreamNotice("");
       }
     }
   };
@@ -533,6 +614,7 @@ export function AssistantIndex() {
     fallbackProviderId?: number;
     approvedTools?: string[];
   }) => {
+    if (streaming || abortRef.current) return;
     if (!enabled) {
       toast.error("请先在右上角开启系统助手并选择支持 tools 的 Provider");
       setConfigOpen(true);
@@ -551,6 +633,7 @@ export function AssistantIndex() {
       text: "正在理解你的需求…",
       pending: true,
     };
+    resetStreamingReply();
     setLive(userBubble ? [userBubble, pending] : [pending]);
     try {
       const sessionId = await ensureSession();
@@ -574,6 +657,7 @@ export function AssistantIndex() {
     } catch (error) {
       if (!controller.signal.aborted) {
         toast.error(getErrMsg(error));
+        clearLiveStreamingState();
         setLive((prev) => prev.filter((bubble) => bubble.role === "user" || bubble.role === "action"));
       }
       if (abortRef.current === controller) {
@@ -618,7 +702,8 @@ export function AssistantIndex() {
         pending: true,
       },
     ]);
-    void followRun(activeId, saved.runId, Math.max(0, saved.lastSeq - 1), controller).catch(
+    clearLiveStreamingState();
+    void followRun(activeId, saved.runId, 0, controller).catch(
       (error) => {
         if (!controller.signal.aborted) toast.error(getErrMsg(error));
       },
@@ -901,6 +986,7 @@ export function AssistantIndex() {
           onSelect={(id) => {
             abortRef.current?.abort();
             abortRef.current = null;
+            clearLiveStreamingState();
             setStreaming(false);
             setRetryingMessageId(null);
             setLive([]);
@@ -939,10 +1025,16 @@ export function AssistantIndex() {
                 live={conversationLive}
                 onRetryMessage={onRetryMessage}
                 retryingMessageId={retryingMessageId}
+                busy={streaming}
                 onActionUpdated={() => {
                   void qc.invalidateQueries({ queryKey: ["system-agent", "actions", activeId] });
                 }}
               />
+              {streamNotice ? (
+                <div role="status" aria-live="polite" className="mx-auto w-full max-w-3xl px-4 pb-2 text-xs text-muted-foreground">
+                  {streamNotice}
+                </div>
+              ) : null}
               <Composer
                 disabled={configQ.isLoading}
                 streaming={streaming}

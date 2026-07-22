@@ -179,6 +179,23 @@
 }
 
 @layer utilities {
+  .streaming-caret {
+    animation: streaming-caret 0.9s steps(1, end) infinite;
+  }
+
+  @keyframes streaming-caret {
+    50% {
+      opacity: 0;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .streaming-caret {
+      animation: none;
+      opacity: 1;
+    }
+  }
+
   .nested-surface {
     --nested-outer-radius: var(--radius);
     --nested-inset: 0.75rem;

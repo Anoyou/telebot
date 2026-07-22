@@ -82,7 +82,9 @@ PATCH /api/system/capabilities/{module_key}
 
 **不新增** `CMD_RELOAD_CAPABILITIES`。复用 `CMD_RELOAD_CONFIG`、`publish_cmd_with_ack()` 与 `reload_account_config`。
 
-Worker 离线或 ACK 超时不能伪装成完全成功；DB 目标状态保留，周期 reconcile 与 worker 启动加载负责最终收敛。
+Worker 离线或 ACK 超时不能伪装成完全成功；ACK 必须回传实际加载的模块 generation 与开关值，只有达到本次请求 generation 才计为已收敛。DB 目标状态保留，周期 reconcile 与 worker 启动加载负责最终收敛。
+
+Worker 在注册插件、命令 handler 或 scheduler 前必须先从 DB 初始化能力快照；主进程 Interaction Bot manager 与遗留 polling handler 也只在缓存就绪且模块开启时工作。读取或刷新失败一律 fail-closed，由 supervisor/主进程重试器等待 DB 恢复后重新收敛，不使用默认开启值抢跑。
 
 ## API
 
@@ -198,4 +200,3 @@ Worker 离线或 ACK 超时不能伪装成完全成功；DB 目标状态保留�
 - `backend/app/services/platform_capabilities.py`
 - `backend/app/api/platform_capabilities.py`
 - `backend/app/schemas/platform_capabilities.py`
-- 计划：`docs/PLATFORM-CAPABILITIES-HOTPLUG-PLAN.md`

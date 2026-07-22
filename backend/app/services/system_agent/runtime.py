@@ -22,7 +22,7 @@ from ...db.models.system_agent import (
 )
 from ..llm_agent import AgentCallbacks, AgentLimits, AgentTool, run_agent
 from ..llm_dto import LLMProviderDTO
-from ..llm_invoke import invoke_structured
+from ..llm_invoke import invoke_structured, stream_structured
 from ..llm_protocol import MessageRole, ModelMessage, ModelRequest, ModelUsage, ToolCall, ToolResult
 from ..llm_protocol import ToolSpec as LlmToolSpec
 from ..llm_runtime import ProviderSwitchRequired
@@ -32,7 +32,7 @@ from .events import make_event
 from .memory import memory_context
 from .model_capability import verify_resolved_agent_providers
 from .prompts import build_system_prompt, provider_setup_hint
-from .redactor import summarize_tool_result
+from .redactor import StreamingMessageRedactor, summarize_tool_result
 from .registry import ToolRegistry, get_registry
 from .skills import SkillRegistry, get_skill_registry
 from .tool_routing import (
@@ -167,6 +167,7 @@ class SystemAgentRuntime:
         )
 
         progress_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+        streaming_redactor = StreamingMessageRedactor(secrets=list(chat_secrets or []))
 
         async def emit_model_progress(progress: dict[str, Any]) -> None:
             payload = dict(progress)
@@ -408,16 +409,37 @@ class SystemAgentRuntime:
                 )
             )
 
+        async def on_text_delta(delta: str) -> None:
+            safe_delta = streaming_redactor.push(delta)
+            if not safe_delta:
+                return
+            await progress_queue.put(
+                next_event(
+                    "assistant_delta",
+                    delta=safe_delta,
+                )
+            )
+
+        async def on_text_reset() -> None:
+            # 原生 tool calling 允许模型在 tool_use 前发送少量自然语言。它
+            # 不是本轮最终答案，因此客户端必须清除暂显内容，避免和完成后的
+            # 最终回复拼在一起。
+            streaming_redactor.reset()
+            await progress_queue.put(next_event("assistant_delta_reset"))
+
         callbacks = AgentCallbacks(
             on_tool_batch=on_tool_batch,
             on_tool_start=on_tool_start,
             on_tool_finish=on_tool_finish,
+            on_text_delta=on_text_delta,
+            on_text_reset=on_text_reset,
         )
 
         active_provider = provider_dto
         active_model = model
         last_used_provider = provider_dto
         used_fallback = False
+        current_stream_fallback = False
 
         async def model_call(current: ModelRequest):
             nonlocal active_model, active_provider, last_used_provider, used_fallback
@@ -455,6 +477,43 @@ class SystemAgentRuntime:
                 )
             return response
 
+        async def stream_model_call(current: ModelRequest):
+            nonlocal active_model, active_provider, last_used_provider, used_fallback
+            nonlocal current_stream_fallback
+            provider_request = replace(current, model=active_model)
+            async for stream_event, used, fallback in stream_structured(
+                active_provider,
+                providers,
+                provider_request,
+                account_id=session.account_id,
+                source="system_agent",
+                fallback_provider_id=fallback_provider_id,
+                progress_callback=emit_model_progress,
+            ):
+                previous_provider = active_provider
+                previous_model = active_model
+                last_used_provider = used
+                used_fallback = used_fallback or fallback or used.id != provider_dto.id
+                active_provider = used
+                if stream_event.response is not None:
+                    active_model = stream_event.response.model or provider_request.model
+                    current_stream_fallback = bool(stream_event.response.stream_fallback)
+                if used.id != previous_provider.id or active_model != previous_model:
+                    await progress_queue.put(
+                        next_event(
+                            "provider_selected",
+                            provider_id=used.id,
+                            provider_name=used.name,
+                            model=active_model,
+                            reason=(
+                                "provider_fallback"
+                                if used.id != previous_provider.id
+                                else "model_fallback"
+                            ),
+                        )
+                    )
+                yield stream_event
+
         agent_task = asyncio.create_task(
             run_agent(
                 model_call,
@@ -462,6 +521,7 @@ class SystemAgentRuntime:
                 agent_tools,
                 limits=limits,
                 callbacks=callbacks,
+                stream_model_call=stream_model_call,
             )
         )
         try:
@@ -534,12 +594,16 @@ class SystemAgentRuntime:
 
         while not progress_queue.empty():
             yield progress_queue.get_nowait()
+        trailing_delta = streaming_redactor.finish()
+        if trailing_delta:
+            yield next_event("assistant_delta", delta=trailing_delta)
         for ev in deferred_events:
             yield ev
 
         assistant_text = result.text or ""
         usage_payload = _usage_payload(result.usage, last_used_provider, result.model)
         usage_payload["used_fallback"] = used_fallback
+        usage_payload["stream_fallback"] = current_stream_fallback
         usage_payload["route_domains"] = list(route.domains)
         usage_payload["tool_count"] = len(tool_specs)
 

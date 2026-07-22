@@ -214,12 +214,31 @@ class ModelResponse:
     stop_reason: StopReason = StopReason.UNKNOWN
     provider_status: str | None = None
     sources: tuple[dict[str, str], ...] = ()
+    # ``True`` means the caller requested streaming but the upstream returned a
+    # completed response instead.  It is intentionally separate from
+    # ``stop_reason`` so UI surfaces can be honest about a non-incremental
+    # fallback without changing the business result.
+    stream_fallback: bool = False
 
     @property
     def text(self) -> str:
         return "\n".join(
             block.text for block in self.content if isinstance(block, TextContent)
         ).strip()
+
+
+@dataclass(frozen=True)
+class ModelStreamEvent:
+    """One real upstream stream event for a structured model request.
+
+    ``delta`` is emitted only for text actually received from the provider.
+    The terminal event carries the authoritative structured response, including
+    tool calls and usage.  Callers must not synthesize deltas from that final
+    response.
+    """
+
+    delta: str = ""
+    response: ModelResponse | None = None
 
 
 @dataclass(frozen=True)
@@ -421,6 +440,7 @@ __all__ = [
     "ModelMessage",
     "ModelRequest",
     "ModelResponse",
+    "ModelStreamEvent",
     "ModelUsage",
     "ProviderCapabilities",
     "StopReason",

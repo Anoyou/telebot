@@ -20,6 +20,41 @@
 
 ## [Unreleased]
 
+## [0.72.0-beta.3] — 2026-07-22 · minor（次版本预发布） · 真实流式输出与运行时安全收口
+
+### Added
+
+- 系统助手完整接入 OpenAI Chat Completions、OpenAI Responses 与 Anthropic Messages 原生文本增量；Web 悬浮助手与管理 Bot Draft 直接消费上游真实 delta，工具调用参数可跨 SSE 事件安全拼接。
+- 新增统一 `StreamingText` 与 NDJSON 增量解析器，Provider 新建验证、多模型测活和系统助手共享真实流式等待、光标、完整响应标识与任意 UTF-8/网络分块处理。
+
+### Changed
+
+- 系统助手持久 Run 新增 `assistant_delta` 与 `assistant_delta_reset` 事件；工具调用前的临时自然语言草稿会撤销，最终 `assistant_message` 继续作为重连对账和历史持久化的权威全文。
+- 上游忽略 `stream=true` 并返回普通 JSON 时明确标记“完整响应”，不再伪装增量；已经展示部分文本后若上游中断，本轮不自动重试或切 Provider，避免重复和矛盾内容。
+- 前端按动画帧合并已经抵达的网络 delta，减少高频 React 渲染但不模拟打字机；持久事件按序号去重，重连不会重复追加文本。
+- 三种协议的消费者均要求收到协议终态：Chat Completions 的 `[DONE]` 或 `finish_reason`、Anthropic 的 `message_stop`、Responses 的 `response.completed`；自然 EOF、`failed` 与 `cancelled` 终态一律拒绝作为成功。
+- 结构化调用与结构化流保留预算拒绝 scope；仅 `premium_daily` 会继续尝试更便宜 Provider，账号级请求数、token 与预算服务不可用仍终止整条链。
+- 平台能力 worker reload 的 ACK 现在携带并校验实际加载的 generation/开关值；worker 与 Interaction Bot 冷启动若无法读取能力快照会 fail-closed，等待重试后再激活受控入口。
+
+### Fixed
+
+- 修复 AI 红包等按钮 callback 在 UserBot 实体缓存未命中时同步扫描群历史，触发 Telegram flood wait 并导致 callback 过期的问题；身份核验只使用 UserBot 实体与可校验的近期消息锚点，不再依赖 Interaction Bot 查询。
+- 修复 Anthropic 工具调用的空 `input` 起始块会与后续 `input_json_delta` 拼成非法 JSON，导致流式工具参数无法解析的问题。
+- 修复系统助手同一动画帧连续收到多个增量时同步累加器可能覆盖前一分块，以及部分流中断后预算被当作未调用释放的问题。
+- 修复最终累计快照整段替换已渲染文本造成的视觉跳变，并在系统助手切换、恢复、完成或失败时清理旧流状态；长回复只在用户仍接近底部时自动跟随，不抢主动上滑位置。
+- 修复 Provider 快速验证和多模型测活收到同一次请求的完整 JSON 后再次调用 `complete()`，避免重复计费；Responses 普通 JSON 的失败/取消状态也不会被误当作可展示结果。
+- 流式持久事件增加跨分块敏感信息缓冲脱敏，避免 API Key、Authorization 或 Telegram Bot Token 被拆成多个 delta 后逐段泄露。
+- 修复模型输出的 `xai-`、`gsk_`、`AIza` 等未知 Provider Key 在流结束时仍可能进入 Durable Run、Web 或 Telegram Draft 的问题。
+- 修复 Redis 不可用时插件 Agent 使用 `plugin:{key}:agent` usage 未计入 DB quota，以及 Interaction 本地切换失败会被离线 worker 提示遮蔽的问题。
+
+### Docs
+
+- 更新系统助手、架构、插件 AI facade、插件 API 与 README，使入口、真实流事件、完整响应回退、重连和预算语义与当前代码一致；移除已完成的实施计划和历史审查稿。
+
+### Tests
+
+- 新增三协议真实 delta、工具参数分片、终态 usage/stop reason、普通 JSON 回退、Agent 草稿 reset、部分流中断不重试、NDJSON 任意字节边界和前端增量累积回归测试。
+
 ## [0.72.0-beta.2] — 2026-07-22 · minor（次版本预发布） · 平台能力与前端体验收口
 
 ### Added

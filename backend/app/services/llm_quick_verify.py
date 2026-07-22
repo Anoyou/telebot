@@ -300,6 +300,8 @@ async def quick_verify_events(
     response_chars = 0
     streaming = True
     stream_fallback = False
+    fallback_response_consumed = False
+    stream_terminal_received = False
     max_response_chars = max(16_384, max_tokens * 16)
     dto = LLMProviderDTO(
         id=0,
@@ -333,6 +335,15 @@ async def quick_verify_events(
                             input_tokens = int(chunk.input_tokens)
                         if chunk.output_tokens is not None:
                             output_tokens = int(chunk.output_tokens)
+                        if chunk.done:
+                            stream_terminal_received = True
+                        if getattr(chunk, "stream_fallback", False):
+                            # Provider returned one completed JSON response while
+                            # the request asked for SSE.  Keep the single real
+                            # response, but report that it was not incremental.
+                            streaming = False
+                            stream_fallback = True
+                            fallback_response_consumed = True
                         if chunk.delta:
                             text_parts.append(chunk.delta)
                             response_chars += len(chunk.delta)
@@ -342,13 +353,16 @@ async def quick_verify_events(
                                 "type": "delta",
                                 "model": actual_model or selected_model,
                                 "delta": chunk.delta,
+                                "stream_fallback": bool(
+                                    getattr(chunk, "stream_fallback", False)
+                                ),
                             }
                 except (LLMError, NotImplementedError) as exc:
                     if any(part.strip() for part in text_parts) or not _stream_can_fallback(exc):
                         raise
                     stream_fallback = True
 
-                if stream_fallback:
+                if stream_fallback and not fallback_response_consumed:
                     streaming = False
                     elapsed = time.monotonic() - started
                     completed = await client.complete(
@@ -364,6 +378,11 @@ async def quick_verify_events(
                     actual_model = completed.model or actual_model
                     input_tokens = int(completed.input_tokens or 0)
                     output_tokens = int(completed.output_tokens or 0)
+                elif not stream_terminal_received:
+                    raise LLMError(
+                        "模型流式响应提前结束，没有返回最终状态。",
+                        retryable=True,
+                    )
         except TimeoutError:
             raise LLMError("快速验证超过总超时时间。", retryable=True) from None
 

@@ -17,6 +17,7 @@ from app.services.llm_protocol import (
     ModelMessage,
     ModelRequest,
     ModelResponse,
+    ModelStreamEvent,
     ModelUsage,
     StopReason,
     TextContent,
@@ -70,6 +71,92 @@ async def test_agent_executes_tool_then_returns_answer() -> None:
     assert result.text == "done"
     assert result.tool_calls == 1
     assert result.usage.total_tokens == 8
+
+
+@pytest.mark.asyncio
+async def test_agent_streams_real_deltas_and_reconciles_final_text() -> None:
+    deltas: list[str] = []
+
+    async def model_call(_request: ModelRequest) -> ModelResponse:
+        raise AssertionError("configured stream path must be used")
+
+    async def stream_model_call(_request: ModelRequest):
+        yield ModelStreamEvent(delta="真")
+        yield ModelStreamEvent(delta="流")
+        yield ModelStreamEvent(
+            response=ModelResponse(
+                model="m",
+                content=(TextContent("真流"),),
+                usage=ModelUsage(input_tokens=2, output_tokens=2),
+                stop_reason=StopReason.COMPLETED,
+            )
+        )
+
+    result = await run_agent(
+        model_call,
+        _request(),
+        {},
+        stream_model_call=stream_model_call,
+        callbacks=AgentCallbacks(on_text_delta=lambda delta: _append(deltas, delta)),
+    )
+
+    assert deltas == ["真", "流"]
+    assert result.text == "真流"
+    assert result.usage.total_tokens == 4
+
+
+@pytest.mark.asyncio
+async def test_agent_resets_tool_preface_before_streaming_final_answer() -> None:
+    spec = ToolSpec("lookup", "lookup", {"type": "object", "properties": {}})
+    events: list[str] = []
+    calls = 0
+
+    async def model_call(_request: ModelRequest) -> ModelResponse:
+        raise AssertionError("configured stream path must be used")
+
+    async def stream_model_call(_request: ModelRequest):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            yield ModelStreamEvent(delta="我先查询")
+            yield ModelStreamEvent(
+                response=ModelResponse(
+                    model="m",
+                    content=(TextContent("我先查询"),),
+                    tool_calls=(ToolCall("call-1", "lookup", {}),),
+                    stop_reason=StopReason.TOOL_CALLS,
+                )
+            )
+            return
+        yield ModelStreamEvent(delta="最终答案")
+        yield ModelStreamEvent(
+            response=ModelResponse(
+                model="m",
+                content=(TextContent("最终答案"),),
+                stop_reason=StopReason.COMPLETED,
+            )
+        )
+
+    async def lookup(_arguments: dict) -> str:
+        return "ok"
+
+    result = await run_agent(
+        model_call,
+        _request(spec),
+        {"lookup": AgentTool(spec, lookup)},
+        stream_model_call=stream_model_call,
+        callbacks=AgentCallbacks(
+            on_text_delta=lambda delta: _append(events, delta),
+            on_text_reset=lambda: _append(events, "<reset>"),
+        ),
+    )
+
+    assert events == ["我先查询", "<reset>", "最终答案"]
+    assert result.text == "最终答案"
+
+
+async def _append(target: list[str], value: str) -> None:
+    target.append(value)
 
 
 @pytest.mark.asyncio

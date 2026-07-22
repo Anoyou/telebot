@@ -452,8 +452,13 @@ class SystemAgentService:
             ):
                 et = event.get("type")
                 if et == "assistant_message":
-                    assistant_text = str(event.get("content") or "")
+                    assistant_text = redact_known_secrets(
+                        str(event.get("content") or ""), chat_secrets
+                    )
+                    event["content"] = assistant_text
                     usage = event.get("usage") if isinstance(event.get("usage"), dict) else None
+                    if usage is not None and usage.get("stream_fallback"):
+                        event["stream_fallback"] = True
                 elif et in {"tool_started", "tool_finished"}:
                     tool_events.append(event)
                 elif et == "route_selected":
@@ -488,6 +493,9 @@ class SystemAgentService:
                     "retry_scheduled",
                     "model_exhausted",
                     "tool_started",
+                    "tool_finished",
+                    "assistant_delta",
+                    "assistant_delta_reset",
                 }:
                     yield event
                 else:

@@ -440,6 +440,26 @@ def _is_message_not_modified_error(exc: BaseException) -> bool:
     return "message is not modified" in str(exc).lower()
 
 
+async def _bootstrap_platform_capabilities(account_id: int, redis: Any) -> bool:
+    """Worker 冷启动能力门禁；失败时禁止注册任何受控运行时入口。"""
+
+    try:
+        from ..services import platform_capabilities
+
+        snapshot = await platform_capabilities.bootstrap_from_db()
+        if not snapshot.cache_ready:
+            raise RuntimeError("平台能力缓存未就绪")
+    except Exception as exc:  # noqa: BLE001
+        await _log(
+            redis,
+            account_id,
+            "error",
+            f"平台能力缓存初始化失败，worker 已按 fail-closed 停止启动: {type(exc).__name__}: {exc}",
+        )
+        return False
+    return True
+
+
 async def run_worker(account_id: int) -> None:
     """worker 主协程；返回即代表退出（supervisor 决定是否重启）。"""
     redis = get_redis()
@@ -474,6 +494,11 @@ async def run_worker(account_id: int) -> None:
         # 解析设备伪装：账号绑定 → 系统默认 → 硬编码兜底
         from ..services.device_profile import resolve_for_account
         device_profile = await resolve_for_account(db, account)
+
+    # 所有插件、命令 handler 与 scheduler 都依赖平台能力快照。冷启动读取失败时
+    # 直接退出并交给 supervisor 重试，避免任何受控入口以默认值 fail-open。
+    if not await _bootstrap_platform_capabilities(account_id, redis):
+        return
 
     # paused.is_set() == True  → 正常运行
     # paused.is_set() == False → 主动动作被暂停（被动接收照常）
@@ -750,7 +775,14 @@ async def _listen_cmd(
                         except Exception as e:  # noqa: BLE001
                             ack_ok = False
                             ack_error = f"{type(e).__name__}: {e}"
-                        await _log(redis, account_id, "info", "reload_config 完成")
+                            await _log(
+                                redis,
+                                account_id,
+                                "error",
+                                f"reload_config 失败: {type(e).__name__}: {e}",
+                            )
+                        else:
+                            await _log(redis, account_id, "info", "reload_config 完成")
                     elif cmd.type == CMD_RELOAD_PLUGIN:
                         try:
                             from .plugins.loader import reload_plugin  # type: ignore
@@ -859,7 +891,32 @@ async def _listen_cmd(
                         )
                         if not handled:
                             continue
-                    await _ack_cmd(redis, cmd, ok=ack_ok, error=ack_error)
+                    ack_payload: dict[str, Any] | None = None
+                    if (
+                        ack_ok
+                        and cmd.type == CMD_RELOAD_CONFIG
+                        and cmd.payload.get("source") == "platform_capabilities"
+                    ):
+                        try:
+                            from ..services import platform_capabilities as platform_caps
+
+                            module_key = cmd.payload.get("module_key")
+                            if isinstance(module_key, str) and module_key in platform_caps.MODULE_DEFS:
+                                snapshot = platform_caps.get_snapshot()
+                                ack_payload = {
+                                    "module_key": module_key,
+                                    "loaded_generation": snapshot.generation(module_key),
+                                    "loaded_enabled": snapshot.is_enabled(module_key),
+                                }
+                        except Exception:  # noqa: BLE001
+                            ack_payload = None
+                    await _ack_cmd(
+                        redis,
+                        cmd,
+                        ok=ack_ok,
+                        error=ack_error,
+                        payload=ack_payload,
+                    )
             finally:
                 try:
                     await pubsub.unsubscribe(cmd_channel(account_id))
@@ -2170,7 +2227,14 @@ def _interaction_userbot_engine(account_id: int) -> Any | None:
         return None
 
 
-async def _ack_cmd(redis, cmd: IPCMessage, *, ok: bool, error: str | None = None) -> None:
+async def _ack_cmd(
+    redis,
+    cmd: IPCMessage,
+    *,
+    ok: bool,
+    error: str | None = None,
+    payload: dict[str, Any] | None = None,
+) -> None:
     """向主进程回 ACK；没有 reply_to 的旧调用保持 fire-and-forget。"""
     reply_to = cmd.payload.get("reply_to")
     cmd_id = cmd.payload.get("cmd_id")
@@ -2179,7 +2243,14 @@ async def _ack_cmd(redis, cmd: IPCMessage, *, ok: bool, error: str | None = None
     try:
         await redis.publish(
             reply_to,
-            make_event(EVT_ACK, cmd_id=cmd_id, cmd_type=cmd.type, ok=ok, error=error),
+            make_event(
+                EVT_ACK,
+                cmd_id=cmd_id,
+                cmd_type=cmd.type,
+                ok=ok,
+                error=error,
+                **dict(payload or {}),
+            ),
         )
     except Exception:  # noqa: BLE001
         pass

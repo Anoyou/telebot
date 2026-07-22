@@ -1,7 +1,7 @@
-# Contributing to Telebot
+# Contributing to TelePilot
 
 > 个人项目 + 单租户 self-hosted 定位。fork 自由用，PR 暂缓接大改。
-> 提 PR 前先看完本文档（**5 分钟**）+ [agent-plans/README.md §1 跨会话约定](agent-plans/README.md)。
+> 提 PR 前先看完本文档（**5 分钟**）和 [docs/AGENT-PLAYBOOKS.md](docs/AGENT-PLAYBOOKS.md)。
 
 ---
 
@@ -32,7 +32,7 @@
 ### 前置
 
 - Python 3.12+
-- Node 20+ / pnpm 9+
+- Node 20+ / pnpm 10.23.0+
 - Docker（OrbStack / Docker Desktop 都行）
 - macOS / Linux（Windows 没测过）
 
@@ -55,13 +55,13 @@ make up
 # 3. 浏览器开 http://localhost:5173 → 注册第一个超管账号
 ```
 
-改完代码后**永远 `make restart`**——见 [agent-plans/README.md §4.1](agent-plans/README.md)。`make backend` 带的 `--reload` 不能正确处理 worker 子进程，会让你以为代码没生效（项目历史上踩过两次坑）。
+改完代码后建议使用 `make restart`；涉及 worker 的改动不要只依赖后端热重载，以免旧子进程继续运行。
 
 ### 跑测试 / Lint / Build
 
 ```bash
 cd backend && pytest -q && ruff check .
-cd frontend && pnpm run build
+cd frontend && pnpm run typecheck && pnpm test && pnpm run build
 ```
 
 提 PR 前这三条**必须**全绿，CI 也会跑同样的检查。
@@ -91,8 +91,8 @@ git checkout -b feat/my-thing upstream/main
 
 # 3. 写代码 + 跑测试
 
-# 4. commit
-git commit -m "feat(scheduler): support seconds-level interval"
+# 4. commit，提交说明使用中文
+git commit -m "修复：补齐流式响应终态校验"
 
 # 5. push 到自己 fork
 git push origin feat/my-thing
@@ -119,25 +119,25 @@ git push origin feat/my-thing
 - 不引入新 state library（用 TanStack Query + useState 就够）
 - 改 `frontend/src/api/types.ts` **只追加**自己的块，不改他人块
 
-### 提交信息（Conventional Commits）
+### 提交信息
 
 ```
-feat:     新功能
-fix:      bug 修复
-docs:     文档
-refactor: 重构（不改外部行为）
-test:     测试
-chore:    构建 / CI / 杂项
-perf:     性能优化
+新增：系统助手接入原生流式输出
+修复：流式响应提前结束时拒绝伪成功
+文档：同步插件 AI facade 契约
+重构：提取协议适配器（不改外部行为）
+测试：补充 Responses 失败终态回归
+维护：更新 CI 与开发依赖
+性能：合并同一动画帧内的增量渲染
 ```
 
-写 scope 更清晰：`feat(scheduler): support seconds-level interval`
+主题必须使用中文，并尽量说明实际影响。例如：`修复（调度器）：支持秒级间隔并补齐边界校验`。
 
 ---
 
 ## 数据库迁移（**最容易翻车的部分**）
 
-历史上分叉过两次（0003 / 0012），见 `agent-plans/README.md §7`。规矩：
+历史迁移分叉信息以 `backend/alembic/versions/` 和当前 `alembic heads` 输出为准。规矩：
 
 ```bash
 # 写迁移前先看当前 head
@@ -164,7 +164,7 @@ PR 模板里有专门的迁移自查项 —— **每条都勾上**才合并。
 
 - 后端新功能：至少 1 个 pytest 用例覆盖 happy path
 - 修 bug：先写一个失败的测试（reproduce），再修代码让它过
-- 前端：build 不报错就行（暂未引入 UI 测试）
+- 前端：至少执行 typecheck、单测和生产构建；涉及页面状态时再执行 `test:a11y` 与 `test:visual`
 - 安全相关：必须有正面 + 反面用例（如改密码：旧密码错该拒、新密码弱该拒、改成功后旧 token 失效）
 
 ---

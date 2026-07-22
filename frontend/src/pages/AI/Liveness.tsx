@@ -43,6 +43,8 @@ import { Textarea } from "@/components/ui/textarea";
 import { getErrMsg } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { FullLivenessPanel } from "@/components/ai/FullLivenessPanel";
+import { StreamingText } from "@/components/ai/StreamingText";
+import { useStreamingText } from "@/hooks/useStreamingText";
 
 const DEFAULT_MESSAGE = "你怎么又不行啦？";
 const DEFAULT_SYSTEM_PROMPT =
@@ -220,6 +222,10 @@ function ChatResponseBranch({
     identity: LLMClientIdentityProfile,
   ) => Promise<void>;
 }) {
+  const streamed = useStreamingText(String(result.response || ""));
+  useEffect(() => {
+    streamed.syncSnapshot(String(result.response || ""));
+  }, [result.response]);
   const [expanded, setExpanded] = useState(result.pending || result.ok);
   const [showOverrides, setShowOverrides] = useState(false);
   const [apiFormat, setApiFormat] = useState<LLMApiFormat>(
@@ -326,10 +332,12 @@ function ChatResponseBranch({
 
       {expanded && result.pending ? (
         result.response ? (
-          <div className="mt-3 whitespace-pre-wrap break-words text-sm leading-7 text-foreground">
-            {result.response}
-            <span className="ml-0.5 inline-block h-4 w-0.5 translate-y-0.5 animate-pulse bg-primary" aria-hidden="true" />
-          </div>
+          <StreamingText
+            text={streamed.text}
+            active={Boolean(result.streaming)}
+            fallback={Boolean(result.stream_fallback)}
+            className="mt-3 text-sm leading-7 text-foreground"
+          />
         ) : (
           <div className="mt-3 flex items-center gap-2 text-sm text-muted-foreground">
             <Spinner className="h-4 w-4 animate-spin text-primary" />
@@ -337,9 +345,11 @@ function ChatResponseBranch({
           </div>
         )
       ) : expanded && result.ok && result.response ? (
-        <div className="mt-3 whitespace-pre-wrap break-words text-sm leading-7 text-foreground">
-          {result.response}
-        </div>
+        <StreamingText
+          text={streamed.text}
+          fallback={Boolean(result.stream_fallback)}
+          className="mt-3 text-sm leading-7 text-foreground"
+        />
       ) : expanded && !result.ok ? (
         <>
           {result.response ? (
@@ -727,7 +737,8 @@ export function LLMLivenessPage() {
             updateRoundResult(roundId, modelId, (current) => ({
               ...current,
               pending: true,
-              streaming: true,
+              streaming: !event.stream_fallback,
+              stream_fallback: Boolean(event.stream_fallback),
               model: event.model || current.model,
               response: `${current.response || ""}${event.delta}`,
             }));
@@ -825,7 +836,8 @@ export function LLMLivenessPage() {
             updateRoundResult(roundId, modelId, (current) => ({
               ...current,
               pending: true,
-              streaming: true,
+              streaming: !event.stream_fallback,
+              stream_fallback: Boolean(event.stream_fallback),
               model: event.model || current.model,
               response: `${current.response || ""}${event.delta}`,
             }));

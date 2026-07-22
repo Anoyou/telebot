@@ -1,3 +1,4 @@
+import { useEffect, useRef } from "react";
 import { AlertCircle, Bot, RotateCcw, ShieldCheck, User, Wrench } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -9,6 +10,7 @@ import type {
   SystemAgentToolApproval,
 } from "@/api/systemAgent";
 import { ActionCard } from "@/components/assistant/ActionCard";
+import { StreamingText } from "@/components/ai/StreamingText";
 import { Button } from "@/components/ui/button";
 import { systemAgentToolLabel } from "@/lib/systemAgentLabels";
 import { cn } from "@/lib/utils";
@@ -19,6 +21,8 @@ export type LiveBubble = {
   role: "user" | "assistant" | "tool" | "system" | "action";
   text: string;
   pending?: boolean;
+  streaming?: boolean;
+  streamFallback?: boolean;
   action?: SystemAgentAction;
   messageId?: number;
   runStatus?: string;
@@ -69,14 +73,22 @@ function AssistantMarkdown({ text }: { text: string }) {
           </a>
         ),
         table: ({ children }) => (
-          <div className="my-2 max-w-full overflow-x-auto">
-            <table className="min-w-full border-collapse text-left text-xs">{children}</table>
+          <div className="my-2 max-w-full overflow-x-auto overscroll-x-contain">
+            <table className="w-max min-w-full table-auto border-collapse text-left text-xs">
+              {children}
+            </table>
           </div>
         ),
         th: ({ children }) => (
-          <th className="border border-border bg-muted px-2 py-1 font-medium">{children}</th>
+          <th className="whitespace-nowrap border border-border bg-muted px-2 py-1 font-medium">
+            {children}
+          </th>
         ),
-        td: ({ children }) => <td className="border border-border px-2 py-1 align-top">{children}</td>,
+        td: ({ children }) => (
+          <td className="whitespace-nowrap border border-border px-2 py-1 align-top">
+            {children}
+          </td>
+        ),
         pre: ({ children }) => (
           <pre className="my-2 max-w-full overflow-x-auto rounded-md bg-background/80 p-2 text-xs">
             {children}
@@ -100,6 +112,7 @@ export function Conversation({
   onActionUpdated,
   onRetryMessage,
   retryingMessageId,
+  busy = false,
 }: {
   messages: SystemAgentMessage[];
   live?: LiveBubble[];
@@ -110,7 +123,11 @@ export function Conversation({
     approvedTools?: string[],
   ) => void;
   retryingMessageId?: number | null;
+  busy?: boolean;
 }) {
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const followStreamRef = useRef(true);
+  const lastLiveUserIdRef = useRef<string | null>(null);
   const items: LiveBubble[] = [
     ...visibleConversationMessages(messages).map(
       (m): LiveBubble => ({
@@ -131,10 +148,26 @@ export function Conversation({
           m.usage?.tool_approval && typeof m.usage.tool_approval === "object"
             ? (m.usage.tool_approval as unknown as SystemAgentToolApproval)
             : undefined,
+        streamFallback: Boolean(m.usage?.stream_fallback),
       }),
     ),
     ...(live || []),
   ].filter((item) => item.text || item.pending);
+  const liveTail = (live || []).at(-1);
+  const latestLiveUserId = [...(live || [])].reverse().find((item) => item.role === "user")?.id;
+
+  useEffect(() => {
+    if (latestLiveUserId && latestLiveUserId !== lastLiveUserIdRef.current) {
+      followStreamRef.current = true;
+    }
+    lastLiveUserIdRef.current = latestLiveUserId || null;
+  }, [latestLiveUserId]);
+
+  useEffect(() => {
+    const node = scrollRef.current;
+    if (!node || !followStreamRef.current) return;
+    node.scrollTop = node.scrollHeight;
+  }, [items.length, liveTail?.text]);
 
   if (items.length === 0) {
     return (
@@ -151,7 +184,14 @@ export function Conversation({
   }
 
   return (
-    <div className="mx-auto flex w-full max-w-3xl flex-1 flex-col gap-3 overflow-y-auto p-4">
+    <div
+      ref={scrollRef}
+      className="mx-auto flex w-full max-w-3xl flex-1 flex-col gap-3 overflow-y-auto p-4"
+      onScroll={(event) => {
+        const node = event.currentTarget;
+        followStreamRef.current = node.scrollHeight - node.scrollTop - node.clientHeight < 72;
+      }}
+    >
       {items.map((item) => {
         const isUser = item.role === "user";
         const isTool = item.role === "tool";
@@ -186,7 +226,25 @@ export function Conversation({
                   )}
                 >
                   {item.text ? (
-                    !isUser && !isTool ? <AssistantMarkdown text={item.text} /> : item.text
+                    !isUser && !isTool ? (
+                      item.streaming ? (
+                        <StreamingText
+                          text={item.text}
+                          active
+                          fallback={item.streamFallback}
+                          className="leading-relaxed"
+                        />
+                      ) : (
+                        <>
+                          {item.streamFallback ? (
+                            <span className="mb-2 inline-flex rounded-full border px-2 py-0.5 text-[10px] font-normal text-foreground">
+                              完整响应
+                            </span>
+                          ) : null}
+                          <AssistantMarkdown text={item.text} />
+                        </>
+                      )
+                    ) : item.text
                   ) : item.pending ? (
                     "思考中…"
                   ) : null}
@@ -210,7 +268,7 @@ export function Conversation({
                           size="sm"
                           className="h-7 max-w-48 px-2 text-xs"
                           title={`批准调用：${approvalTools.map(approvalToolLabel).join("、")}`}
-                          disabled={retryingMessageId != null}
+                          disabled={busy || retryingMessageId != null}
                           onClick={() =>
                             onRetryMessage?.(
                               item.messageId!,
@@ -231,7 +289,7 @@ export function Conversation({
                           size="sm"
                           className="h-7 max-w-48 px-2 text-xs"
                           title={`改用 ${switchCandidate.provider_name} · ${switchCandidate.model}`}
-                          disabled={retryingMessageId != null}
+                          disabled={busy || retryingMessageId != null}
                           onClick={() =>
                             onRetryMessage?.(
                               item.messageId!,
@@ -249,7 +307,7 @@ export function Conversation({
                           variant="outline"
                           size="sm"
                           className="h-7 px-2 text-xs text-foreground"
-                          disabled={retryingMessageId != null}
+                          disabled={busy || retryingMessageId != null}
                           onClick={() => onRetryMessage?.(item.messageId!)}
                         >
                           <RotateCcw className={cn("mr-1 h-3 w-3", retryingMessageId === item.messageId && "animate-spin")} />

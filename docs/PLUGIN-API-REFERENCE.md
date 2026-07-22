@@ -152,6 +152,7 @@ class PluginContext:
 - `ctx.http`：声明 `permissions=["external_http"]` 且填写 `allowed_hosts` 后注入。它限制协议、域名、超时、响应大小，并在发起请求前阻断 localhost/内网/链路本地地址。默认走账号代理；只有 Manifest 的 `http={"allow_direct": true}` 且账号配置请求 direct 时才允许直连。
 - `ctx.ai`：声明 `permissions=["ai_text"]` 后注入。它复用 TelePilot 的 LLM Provider 池、fallback 链、账号级预算和 usage 记录；插件只能拿到脱敏 provider 元数据，不能读取 `api_key_enc`、`base_url` 或代理 URL。
 - `ctx.ai.complete()` 推荐用 `provider_tag` 按用途选择 provider；`tag` / `tags` 是兼容别名且已 deprecated，新插件不要依赖它们作为主要入口。可选 `route="fixed"|"tag"|"auto"` 显式声明路由模式（留空时按旧参数推断，向后兼容）；返回结果的 `routing` 字段是脱敏路由摘要（模式 / provider / 生效模型 / 命中 tag / 协议 / 身份 / 是否 fallback），不含 key、base_url、代理或内部分类器细节。插件不能指定 UA、身份、密钥、代理、内部分类器或全局 fallback。
+- `ctx.ai.stream_complete()` 返回 Provider 原生文本 delta 的异步迭代器，支持 Chat Completions、Responses 与 Anthropic Messages；不拆分完整响应、不在已输出部分文本后切 Provider。上游忽略 `stream=true` 而返回普通 JSON 时，同一次请求的完整文本作为一个块产出，不会再次调用模型。调用方必须消费到迭代器自然结束；取消、提前关闭、超时或异常按已发起调用保守结算。需要跨 Provider 的完整响应 fallback 时使用 `complete()`。
 - `ctx.ai.run_agent()` 需要独立 `ai_agent` 权限，并同时要求 `capabilities.agent_tools.enabled=true`、manifest `agent_tools[]` 声明和调用方传入同名 handler。平台限制轮数、工具数、重复调用、token 与总超时；只读工具可并行，副作用工具串行。同样支持 `route="fixed"|"tag"|"auto"`，且 Agent 路由会预先排除没有已启用模型的 provider（无法支撑 tools 调用）。
 - `ctx.ai.list_providers()` 可用于展示当前账号可见的脱敏 provider 摘要；更完整的 AI facade 说明见 `docs/PLUGIN-AI.md`。
 
@@ -1360,11 +1361,11 @@ identity = await resolve_public_sender_identity(
 safe_label = sanitize_public_display_name(raw_label, limit=10)
 ```
 
-结算、排行榜等多人名单使用 `resolve_public_sender_identities(ctx, chat_id=..., senders={user_id: name})` 批量解析；平台通过 `ctx.identities` 先使用不受插件沙箱影响的内部 UserBot 读取管理员目录和成员权限。Telegram 会把开启匿名模式的管理员从成员目录隐藏，此时平台会再使用 Interaction Bot 的官方 `getChatMember` 查询 `is_anonymous` 与 `custom_title`。Interaction Bot 必须是目标群管理员，Telegram 才保证能查询其他成员；未满足该前提或查询失败时平台会隐藏姓名，而不会回退按钮回调中的真实姓名。平台不会把 Bot Token、原始客户端或成员列表交给插件。
+结算、排行榜等多人名单使用 `resolve_public_sender_identities(ctx, chat_id=..., senders={user_id: name})` 批量解析；平台通过 `ctx.identities` 使用不受插件沙箱影响的内部 UserBot 读取管理员目录和成员权限，不依赖 Interaction Bot 的 `getChatMember`。身份无法由 UserBot 确认时平台会隐藏姓名，而不会回退按钮回调中的真实姓名。平台不会把 Bot Token、原始客户端或成员列表交给插件。
 
-身份解析结果不做应用层缓存：每次调用都会重新读取当前群管理员目录和成员权限，需要 Interaction Bot 兜底时也会实时请求 `getChatMember`。近期消息锚点只缓存可重新校验的 `message_id`，不会缓存姓名、username、管理员状态或标签。
+身份解析结果不做应用层缓存：每次调用都会重新读取当前群管理员目录和成员权限。UserBot 实体恢复只使用本地实体缓存或 Redis 中可重新校验的近期消息 `message_id`；缓存未命中时不会在按钮 callback 内扫描群历史。近期消息锚点不会缓存姓名、username、管理员状态或标签。
 
-身份解析返回的名称已统一调用 `sanitize_public_display_name()`：移除 Unicode 控制符、零宽格式符、各类空白与不可见填充字符，并限制为最多 10 个字符；清洗后为空时使用“匿名用户”。这只解决公开姓名安全，不是 HTML/Markdown 转义，插件仍须按实际 `parse_mode` 转义后再发送。精确显示匿名管理员标签的部署前提是：账号已配置 Interaction Bot，且该 Bot 已加入对应群并提升为管理员；其他管理权限可按业务需要最小化授予。
+身份解析返回的名称已统一调用 `sanitize_public_display_name()`：移除 Unicode 控制符、零宽格式符、各类空白与不可见填充字符，并限制为最多 10 个字符；清洗后为空时使用“匿名用户”。这只解决公开姓名安全，不是 HTML/Markdown 转义，插件仍须按实际 `parse_mode` 转义后再发送。匿名管理员若无法由 UserBot 安全确认，会按 fail-closed 结果隐藏姓名。
 
 返回对象字段：
 
@@ -1373,7 +1374,7 @@ safe_label = sanitize_public_display_name(raw_label, limit=10)
 | `user_id` | 真实 Telegram User ID，只用于业务校验，不等于可公开姓名 |
 | `display_name` | 可安全写入群消息的名称；已过滤不可见字符并限制为 10 个字符，匿名管理员为清洗后的标签，无标签时为“匿名管理员” |
 | `is_anonymous_admin` | 当前成员是否开启匿名管理员身份 |
-| `is_admin` | 当前成员是否为本群管理员；由成员权限、管理员目录或 Interaction Bot 状态确认，不能通过是否存在标签推断 |
+| `is_admin` | 当前成员是否为本群管理员；由 UserBot 成员权限或管理员目录确认，不能通过是否存在标签推断 |
 | `tag` | Telegram 成员标签或管理员自定义头衔；普通成员存在标签时也不会覆盖 `display_name` |
 | `resolved` | 是否成功读取群成员权限；为 `false` 时 `display_name` 固定使用隐藏身份的回退值 |
 

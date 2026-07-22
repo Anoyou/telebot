@@ -13,6 +13,7 @@ from app.api import platform_capabilities as caps_api
 from app.api import rate_limit
 from app.db.models.system import SystemSetting
 from app.services import platform_capabilities as caps
+from app.worker import ipc
 
 
 class _FakeSettingsDB:
@@ -58,6 +59,68 @@ async def test_bootstrap_defaults_all_enabled() -> None:
     for key in caps.ALL_MODULE_KEYS:
         assert snap.is_enabled(key) is True
         assert snap.generation(key) == 0
+
+
+@pytest.mark.asyncio
+async def test_refresh_failure_invalidates_previous_ready_snapshot() -> None:
+    class _FailingDB(_FakeSettingsDB):
+        async def get(self, model, key):  # noqa: ANN001
+            if key == "webhooks_enabled":
+                raise RuntimeError("db unavailable")
+            return await super().get(model, key)
+
+    await caps.bootstrap_from_db(_FakeSettingsDB())  # type: ignore[arg-type]
+    assert caps.get_snapshot().cache_ready is True
+
+    with pytest.raises(RuntimeError, match="db unavailable"):
+        await caps.refresh_cache_from_db(_FailingDB())  # type: ignore[arg-type]
+
+    assert caps.get_snapshot().cache_ready is False
+    assert caps.is_module_enabled_cached("interaction_bot", fail_closed=True) is False
+
+
+@pytest.mark.asyncio
+async def test_publish_cmd_ack_validator_rejects_stale_generation() -> None:
+    class _PubSub:
+        async def subscribe(self, _channel):
+            return None
+
+        async def get_message(self, **_kwargs):
+            return {
+                "data": ipc.make_event(
+                    ipc.EVT_ACK,
+                    cmd_id=self.cmd_id,
+                    cmd_type=ipc.CMD_RELOAD_CONFIG,
+                    ok=True,
+                    loaded_generation=2,
+                )
+            }
+
+        async def unsubscribe(self, _channel):
+            return None
+
+        async def close(self):
+            return None
+
+    class _Redis:
+        def __init__(self) -> None:
+            self.subscription = _PubSub()
+
+        def pubsub(self):
+            return self.subscription
+
+        async def publish(self, _channel, raw):
+            message = ipc.IPCMessage.decode(raw)
+            self.subscription.cmd_id = message.payload["cmd_id"]
+
+    result = await ipc.publish_cmd_with_ack(
+        _Redis(),
+        1,
+        ipc.CMD_RELOAD_CONFIG,
+        ack_validator=lambda payload: payload.get("loaded_generation") >= 3,
+    )
+
+    assert result is False
 
 
 @pytest.mark.asyncio
@@ -200,6 +263,53 @@ async def test_capabilities_api_roundtrip(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_capabilities_api_local_failure_is_not_hidden_by_offline_workers(monkeypatch) -> None:
+    from app.schemas.platform_capabilities import CapabilityModulePatch
+
+    set_enabled = AsyncMock(
+        return_value={
+            "module_key": "interaction_bot",
+            "desired_enabled": True,
+            "generation": 4,
+            "runtime_state": "failed",
+            "last_error": "manager down",
+            "worker_convergence": {
+                "total_accounts": 1,
+                "notified": 1,
+                "acked": 0,
+                "pending": 1,
+                "offline_or_timeout": 1,
+                "last_broadcast_at": None,
+                "notes": [],
+            },
+            "changed": True,
+        }
+    )
+    monkeypatch.setattr(caps, "set_module_enabled", set_enabled)
+    monkeypatch.setattr(
+        caps,
+        "build_status_payload",
+        lambda: {
+            "modules": [],
+            "worker_convergence": {},
+            "fixed_channels": [],
+            "cache_ready": True,
+        },
+    )
+
+    out = await caps_api.patch_platform_capability(
+        "interaction_bot",
+        CapabilityModulePatch(enabled=True),
+        _FakeSettingsDB(),  # type: ignore[arg-type]
+        SimpleNamespace(id=1),
+    )
+
+    assert out.ok is False
+    assert "manager down" in str(out.message)
+    assert "1 个 worker" in str(out.message)
+
+
+@pytest.mark.asyncio
 async def test_plugin_runtime_partial_when_interaction_disabled() -> None:
     db = _FakeSettingsDB({"interaction_bot_enabled": {"enabled": False, "generation": 1}})
     await caps.bootstrap_from_db(db)  # type: ignore[arg-type]
@@ -272,6 +382,25 @@ async def test_filter_runtime_subscriptions_by_channel_and_requires() -> None:
     assert "userbot" in sources
     assert "interaction_bot" not in sources
     assert "webhook" in sources
+
+
+def test_loader_subscription_filter_is_fail_closed_when_capability_filter_errors(monkeypatch) -> None:
+    from app.worker.plugins import loader as loader_mod
+
+    manifest = SimpleNamespace(
+        event_subscriptions=[{"source": ["interaction_bot"], "events": ["message"]}],
+        requires_platform_capabilities=[],
+    )
+    monkeypatch.setattr(
+        "app.services.platform_capabilities.filter_runtime_event_subscriptions",
+        lambda _subscriptions: (_ for _ in ()).throw(RuntimeError("cache unavailable")),
+    )
+
+    class _Plugin:
+        _manifest = manifest
+
+    state = SimpleNamespace(instances={"demo": _Plugin()})
+    assert loader_mod._event_bus_subscriptions_from_state(state) == []
 
 
 @pytest.mark.asyncio
@@ -396,6 +525,39 @@ async def test_stop_interaction_keeps_session_expire_tasks() -> None:
 
 
 @pytest.mark.asyncio
+async def test_interaction_capability_bootstrap_failure_is_fail_closed(monkeypatch) -> None:
+    from app.services import account_bot_runtime as abr
+
+    monkeypatch.setattr(
+        caps,
+        "bootstrap_from_db",
+        AsyncMock(side_effect=RuntimeError("db unavailable")),
+    )
+
+    assert await abr._interaction_bot_capability_enabled() is False
+
+
+@pytest.mark.asyncio
+async def test_interaction_manager_does_not_query_runtime_config_when_capability_unavailable(
+    monkeypatch,
+) -> None:
+    from app.services import account_bot_runtime as abr
+
+    monkeypatch.setattr(abr, "_interaction_bot_capability_enabled", AsyncMock(return_value=False))
+
+    class _UnexpectedSession:
+        async def __aenter__(self):
+            raise AssertionError("能力不可用时不应查询 Interaction Bot 配置")
+
+        async def __aexit__(self, *args):
+            return False
+
+    monkeypatch.setattr(abr, "AsyncSessionLocal", lambda: _UnexpectedSession())
+
+    assert await abr.start_interaction_bot_manager() == 0
+
+
+@pytest.mark.asyncio
 async def test_is_event_source_delivery_respects_modules() -> None:
     db = _FakeSettingsDB(
         {
@@ -442,6 +604,9 @@ async def test_reload_config_payload_source_platform_capabilities_refresh(monkey
         scheduler=None,
     )
     loader_mod._STATES[1] = state  # type: ignore[assignment]
+    caps._CACHE_READY = True
+    caps._DESIRED["ai"] = False
+    caps._GENERATIONS["ai"] = 3
     refresh = AsyncMock(return_value=caps.get_snapshot())
     monkeypatch.setattr(caps, "refresh_cache_from_db", refresh)
     monkeypatch.setattr(loader_mod, "_load_log_incoming_messages_setting", AsyncMock(return_value=False))
@@ -475,5 +640,60 @@ async def test_reload_config_payload_source_platform_capabilities_refresh(monkey
             },
         )
         refresh.assert_awaited()
+    finally:
+        loader_mod._STATES.pop(1, None)
+
+
+@pytest.mark.asyncio
+async def test_platform_reload_refresh_failure_is_not_acknowledged(monkeypatch) -> None:
+    """能力控制面刷新失败必须向 IPC 抛错，不能 ACK 成功。"""
+
+    from app.worker.plugins import loader as loader_mod
+
+    state = SimpleNamespace(generation=1, redis=None)
+    loader_mod._STATES[1] = state  # type: ignore[assignment]
+    monkeypatch.setattr(
+        caps,
+        "refresh_cache_from_db",
+        AsyncMock(side_effect=RuntimeError("db unavailable")),
+    )
+
+    try:
+        with pytest.raises(RuntimeError, match="平台能力缓存刷新失败"):
+            await loader_mod.reload_account_config(
+                1,
+                {
+                    "source": "platform_capabilities",
+                    "module_key": "ai",
+                    "generation": 4,
+                    "enabled": False,
+                },
+            )
+    finally:
+        loader_mod._STATES.pop(1, None)
+
+
+@pytest.mark.asyncio
+async def test_platform_reload_rejects_stale_generation(monkeypatch) -> None:
+    from app.worker.plugins import loader as loader_mod
+
+    caps._CACHE_READY = True
+    caps._DESIRED["ai"] = False
+    caps._GENERATIONS["ai"] = 3
+    state = SimpleNamespace(generation=1, redis=None)
+    loader_mod._STATES[1] = state  # type: ignore[assignment]
+    monkeypatch.setattr(caps, "refresh_cache_from_db", AsyncMock(return_value=caps.get_snapshot()))
+
+    try:
+        with pytest.raises(RuntimeError, match="未收敛"):
+            await loader_mod.reload_account_config(
+                1,
+                {
+                    "source": "platform_capabilities",
+                    "module_key": "ai",
+                    "generation": 4,
+                    "enabled": False,
+                },
+            )
     finally:
         loader_mod._STATES.pop(1, None)

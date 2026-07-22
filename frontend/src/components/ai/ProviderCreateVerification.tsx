@@ -15,7 +15,6 @@ import type {
   QuickVerifyProviderStreamEvent,
 } from "@/api/types";
 import { Button } from "@/components/ui/button";
-import { Spinner } from "@/components/ui/misc";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { MetaBadge } from "@/components/ui/meta-badge";
@@ -26,6 +25,8 @@ import {
   ReasoningEffortSelect,
   type ReasoningEffortValue,
 } from "@/components/ai/ReasoningEffortSelect";
+import { StreamingText } from "@/components/ai/StreamingText";
+import { useStreamingText } from "@/hooks/useStreamingText";
 
 const DEFAULT_MESSAGE = "你怎么又不行了？继续。";
 const DEFAULT_SYSTEM_PROMPT =
@@ -82,9 +83,10 @@ export function ProviderCreateVerification({
   const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffortValue>("");
   const [message, setMessage] = useState(DEFAULT_MESSAGE);
   const [status, setStatus] = useState<VerifyStatus>("idle");
-  const [reply, setReply] = useState("");
   const [error, setError] = useState("");
   const [result, setResult] = useState<QuickVerifyProviderResult | null>(null);
+  const [streamFallback, setStreamFallback] = useState(false);
+  const liveReply = useStreamingText();
   const abortRef = useRef<AbortController | null>(null);
   const fingerprint = [
     providerKind,
@@ -123,9 +125,10 @@ export function ProviderCreateVerification({
     setModelFilter("");
     setReasoningEffort("");
     setStatus("idle");
-    setReply("");
+    liveReply.clear();
     setError("");
     setResult(null);
+    setStreamFallback(false);
     onReset();
     onVerificationChange(false);
   }, [fingerprint]);
@@ -145,9 +148,10 @@ export function ProviderCreateVerification({
   const resetVerification = () => {
     if (status === "running") abortRef.current?.abort();
     setStatus("idle");
-    setReply("");
+    liveReply.clear();
     setError("");
     setResult(null);
+    setStreamFallback(false);
     onVerificationChange(false);
   };
 
@@ -229,9 +233,10 @@ export function ProviderCreateVerification({
     const controller = new AbortController();
     abortRef.current = controller;
     setStatus("running");
-    setReply("");
+    liveReply.clear();
     setError("");
     setResult(null);
+    setStreamFallback(false);
     onVerificationChange(false);
     try {
       await streamQuickVerifyProvider(
@@ -251,12 +256,14 @@ export function ProviderCreateVerification({
         },
         (event: QuickVerifyProviderStreamEvent) => {
           if (event.type === "delta") {
-            setReply((current) => current + event.delta);
+            liveReply.append(event.delta);
+            if (event.stream_fallback) setStreamFallback(true);
             return;
           }
           if (event.type === "done") {
             setResult(event);
-            setReply(event.response || "");
+            setStreamFallback(Boolean(event.stream_fallback));
+            liveReply.syncSnapshot(event.response || "");
             setStatus("success");
             const nextModels = models.map((model) => {
               if (model.id !== selectedModel) return model;
@@ -277,7 +284,8 @@ export function ProviderCreateVerification({
           }
           if (event.type === "error") {
             setResult(event);
-            setReply(event.response || "");
+            setStreamFallback(Boolean(event.stream_fallback));
+            liveReply.syncSnapshot(event.response || "");
             setError(event.error || "模型验证失败。");
             setStatus("error");
           }
@@ -413,19 +421,30 @@ export function ProviderCreateVerification({
           <span className="text-xs font-semibold">真实对话</span>
           {selectedModel ? <MetaBadge mono tone="outline">{selectedModel}</MetaBadge> : null}
           {reasoningEffort ? <MetaBadge mono>{reasoningEffort}</MetaBadge> : <MetaBadge>自动</MetaBadge>}
-          {status === "running" ? <MetaBadge tone="info">流式接收中</MetaBadge> : null}
+          {status === "running" && !streamFallback ? (
+            <MetaBadge tone="info">流式接收中</MetaBadge>
+          ) : null}
+          {status === "running" && streamFallback ? (
+            <MetaBadge tone="outline">完整响应</MetaBadge>
+          ) : null}
           {status === "success" ? <MetaBadge tone="success">验证可用</MetaBadge> : null}
           {result?.latency_ms != null ? <MetaBadge>{result.latency_ms} ms</MetaBadge> : null}
         </div>
         <div className="min-h-24 space-y-3 p-3">
-          {status !== "idle" || reply || error ? (
+          {status !== "idle" || liveReply.text || error ? (
             <>
               <div className="ml-auto max-w-[88%] rounded-xl rounded-br-sm bg-primary px-3 py-2 text-sm leading-6 text-primary-foreground sm:max-w-[72%]">
                 {message.trim()}
               </div>
               <div className="max-w-[92%] rounded-xl rounded-bl-sm bg-muted px-3 py-2 text-sm leading-6 sm:max-w-[80%]">
-                {reply ? <p className="whitespace-pre-wrap break-words">{reply}</p> : status === "running" ? (
-                  <span className="inline-flex items-center gap-2 text-muted-foreground"><Spinner className="h-4 w-4 animate-spin" />等待模型回复</span>
+                {liveReply.text ? (
+                  <StreamingText
+                    text={liveReply.text}
+                    active={status === "running"}
+                    fallback={streamFallback}
+                  />
+                ) : status === "running" ? (
+                  <StreamingText text="" active waitingLabel="正在等待上游返回首段内容" />
                 ) : <span className="text-muted-foreground">模型没有返回可显示的内容。</span>}
               </div>
             </>

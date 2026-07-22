@@ -9,7 +9,7 @@ export default defineConfig({
   plugins: [
     react(),
     ...(process.env.ANALYZE === "1"
-      ? [visualizer({ filename: "../docs/frontend/baseline/build-report.html", template: "treemap", gzipSize: true, brotliSize: true, open: false })]
+      ? [visualizer({ filename: "dist/build-report.html", template: "treemap", gzipSize: true, brotliSize: true, open: false })]
       : []),
     VitePWA({
       // 自动更新：新 SW 安装好后下次启动自动激活；前端再监听 needRefresh 提示用户刷新

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import replace
 from unittest.mock import AsyncMock, patch
@@ -30,6 +31,48 @@ class _Response:
 
     def json(self) -> dict:
         return self.payload
+
+
+class _StreamingResponse:
+    status_code = 200
+    text = ""
+
+    def __init__(self, chunks: list[bytes], *, content_type: str = "text/event-stream") -> None:
+        self.headers = {"content-type": content_type}
+        self._chunks = chunks
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_args):
+        return False
+
+    async def aiter_bytes(self):
+        for chunk in self._chunks:
+            yield chunk
+
+
+class _StreamingClient:
+    def __init__(self, response: _StreamingResponse) -> None:
+        self.response = response
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_args):
+        return False
+
+    def stream(self, *_args, **_kwargs):
+        return self.response
+
+
+def _sse_chunks(*events: dict | str) -> list[bytes]:
+    raw = "".join(
+        f"data: {event if isinstance(event, str) else json.dumps(event)}\n\n"
+        for event in events
+    ).encode()
+    # 刻意打散到 JSON、UTF-8 和行边界之外，验证底层按字节安全重组。
+    return [raw[:11], raw[11:37], raw[37:73], raw[73:]]
 
 
 def _request(tool_name: str = "lookup") -> ModelRequest:
@@ -159,8 +202,11 @@ async def test_anthropic_profiles_map_reasoning_effort(protocol_profile: str) ->
                 'event: content_block_delta',
                 'data: {"delta":{"type":"text_delta","text":"ok"}}',
                 '',
-                'event: message_delta',
-                'data: {"delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}',
+                    'event: message_delta',
+                    'data: {"delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}',
+                    '',
+                    'event: message_stop',
+                    'data: {"type":"message_stop"}',
             )
             yield ("\n".join(lines) + "\n").encode()
 
@@ -205,6 +251,9 @@ async def test_anthropic_complete_preserves_explicit_empty_refusal() -> None:
                 "",
                 "event: message_delta",
                 'data: {"delta":{"stop_reason":"refusal"},"usage":{"output_tokens":0}}',
+                "",
+                "event: message_stop",
+                'data: {"type":"message_stop"}',
             )
             yield ("\n".join(lines) + "\n").encode()
 
@@ -363,3 +412,503 @@ async def test_anthropic_adapter_uses_standard_headers_and_tool_blocks() -> None
     assert response.tool_calls[0].name == internal_name
     assert response.text == "checking"
     assert response.stop_reason is StopReason.TOOL_CALLS
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_invoke_emits_real_deltas_and_joins_tool_arguments() -> None:
+    internal_name = "interaction.list_rules"
+    wire_name = wire_tool_name(internal_name)
+    response = _StreamingResponse(
+        _sse_chunks(
+            {
+                "model": "model-live",
+                "choices": [{"delta": {"content": "你"}, "finish_reason": None}],
+            },
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "content": "好",
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "call-live",
+                                    "function": {"name": wire_name, "arguments": '{"id":'},
+                                }
+                            ],
+                        },
+                        "finish_reason": None,
+                    }
+                ]
+            },
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {"index": 0, "function": {"arguments": "2}"}}
+                            ]
+                        },
+                        "finish_reason": "tool_calls",
+                    }
+                ],
+                "usage": {"prompt_tokens": 4, "completion_tokens": 3},
+            },
+            "[DONE]",
+        )
+    )
+    with patch(
+        "app.services.llm_client.httpx.AsyncClient",
+        return_value=_StreamingClient(response),
+    ):
+        events = [
+            event
+            async for event in OpenAIClient(
+                "sk", "https://api.example/v1", "model"
+            ).stream_invoke(_request(internal_name))
+        ]
+
+    assert [event.delta for event in events if event.delta] == ["你", "好"]
+    terminal = events[-1].response
+    assert terminal is not None
+    assert terminal.text == "你好"
+    assert terminal.model == "model-live"
+    assert terminal.usage.total_tokens == 7
+    assert terminal.tool_calls == (
+        ToolCall("call-live", internal_name, {"id": 2}),
+    )
+    assert terminal.stop_reason is StopReason.TOOL_CALLS
+    assert terminal.stream_fallback is False
+
+
+@pytest.mark.asyncio
+async def test_anthropic_stream_invoke_emits_real_deltas_and_joins_tool_input() -> None:
+    internal_name = "interaction.list_rules"
+    wire_name = wire_tool_name(internal_name)
+    events_payload = [
+        {"type": "message_start", "message": {"model": "claude-live", "usage": {"input_tokens": 4}}},
+        {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "你"}},
+        {
+            "type": "content_block_start",
+            "index": 1,
+            "content_block": {"type": "tool_use", "id": "call-live", "name": wire_name},
+        },
+        {"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": '{"id":'}},
+        {"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": "2}"}},
+        {"type": "message_delta", "delta": {"stop_reason": "tool_use"}, "usage": {"output_tokens": 3}},
+        {"type": "message_stop"},
+    ]
+    response = _StreamingResponse(_sse_chunks(*events_payload))
+    with patch(
+        "app.services.llm_client.httpx.AsyncClient",
+        return_value=_StreamingClient(response),
+    ):
+        events = [
+            event
+            async for event in AnthropicClient(
+                "sk", "https://api.anthropic.com/v1", "claude"
+            ).stream_invoke(_request(internal_name))
+        ]
+
+    assert [event.delta for event in events if event.delta] == ["你"]
+    terminal = events[-1].response
+    assert terminal is not None
+    assert terminal.text == "你"
+    assert terminal.model == "claude-live"
+    assert terminal.usage.total_tokens == 7
+    assert terminal.tool_calls == (
+        ToolCall("call-live", internal_name, {"id": 2}),
+    )
+    assert terminal.stop_reason is StopReason.TOOL_CALLS
+
+
+@pytest.mark.asyncio
+async def test_responses_stream_preserves_split_function_arguments_on_done() -> None:
+    internal_name = "interaction.list_rules"
+    wire_name = wire_tool_name(internal_name)
+    response = _StreamingResponse(
+        _sse_chunks(
+            {"type": "response.created", "response": {"model": "responses-live", "status": "in_progress"}},
+            {"type": "response.output_text.delta", "delta": "你"},
+            {
+                "type": "response.output_item.added",
+                "item": {"type": "function_call", "call_id": "call-live", "name": wire_name},
+            },
+            {"type": "response.function_call_arguments.delta", "call_id": "call-live", "delta": '{"id":'},
+            {"type": "response.function_call_arguments.delta", "call_id": "call-live", "delta": "2}"},
+            {
+                "type": "response.output_item.done",
+                "item": {"type": "function_call", "call_id": "call-live", "name": wire_name},
+            },
+            {
+                "type": "response.completed",
+                "response": {
+                    "model": "responses-live",
+                    "status": "completed",
+                    "usage": {"input_tokens": 4, "output_tokens": 3},
+                },
+            },
+        )
+    )
+    with patch(
+        "app.services.llm_client.httpx.AsyncClient",
+        return_value=_StreamingClient(response),
+    ):
+        events = [
+            event
+            async for event in ResponsesClient(
+                "sk", "https://api.example/v1", "model"
+            ).stream_invoke(_request(internal_name))
+        ]
+
+    assert [event.delta for event in events if event.delta] == ["你"]
+    terminal = events[-1].response
+    assert terminal is not None
+    assert terminal.text == "你"
+    assert terminal.usage.total_tokens == 7
+    assert terminal.tool_calls == (
+        ToolCall("call-live", internal_name, {"id": 2}),
+    )
+    assert terminal.stop_reason is StopReason.TOOL_CALLS
+
+
+@pytest.mark.asyncio
+async def test_responses_stream_maps_item_id_arguments_to_call_id() -> None:
+    internal_name = "interaction.list_rules"
+    wire_name = wire_tool_name(internal_name)
+    response = _StreamingResponse(
+        _sse_chunks(
+            {"type": "response.output_item.added", "item": {"type": "function_call", "id": "fc_1", "call_id": "call_1", "name": wire_name}},
+            {"type": "response.function_call_arguments.delta", "item_id": "fc_1", "delta": '{"id": 2}'},
+            {"type": "response.output_item.done", "item": {"type": "function_call", "id": "fc_1", "call_id": "call_1", "name": wire_name}},
+            {"type": "response.completed", "response": {"model": "model", "status": "completed", "usage": {"input_tokens": 1, "output_tokens": 1}}},
+        )
+    )
+    with patch("app.services.llm_client.httpx.AsyncClient", return_value=_StreamingClient(response)):
+        events = [event async for event in ResponsesClient("sk", "https://api.example/v1", "model").stream_invoke(_request(internal_name))]
+
+    terminal = events[-1].response
+    assert terminal is not None
+    assert terminal.tool_calls == (ToolCall("call_1", internal_name, {"id": 2}),)
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_preserves_refusal_as_terminal_reason() -> None:
+    response = _StreamingResponse(
+        _sse_chunks(
+            {"choices": [{"delta": {"refusal": "不能回答"}}]},
+            {"choices": [{"delta": {}, "finish_reason": "stop"}]},
+            "[DONE]",
+        )
+    )
+    with patch("app.services.llm_client.httpx.AsyncClient", return_value=_StreamingClient(response)):
+        events = [event async for event in OpenAIClient("sk", "https://api.example/v1", "model").stream_invoke(_request())]
+
+    terminal = events[-1].response
+    assert terminal is not None
+    assert terminal.stop_reason is StopReason.REFUSAL
+
+
+@pytest.mark.asyncio
+async def test_chat_structured_stream_without_usage_still_finishes() -> None:
+    response = _StreamingResponse(
+        _sse_chunks(
+            {"choices": [{"delta": {"content": "ok"}}]},
+            {"choices": [{"delta": {}, "finish_reason": "stop"}]},
+            "[DONE]",
+        )
+    )
+    with patch("app.services.llm_client.httpx.AsyncClient", return_value=_StreamingClient(response)):
+        events = [event async for event in OpenAIClient("sk", "https://api.example/v1", "model").stream_invoke(_request())]
+
+    terminal = events[-1].response
+    assert terminal is not None
+    assert terminal.text == "ok"
+    assert terminal.stop_reason is StopReason.COMPLETED
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("client", "payload"),
+    [
+        (
+            OpenAIClient("sk", "https://api.example/v1", "model"),
+            {
+                "model": "model",
+                "choices": [{"finish_reason": "stop", "message": {"content": "完整"}}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+            },
+        ),
+        (
+            AnthropicClient("sk", "https://api.anthropic.com/v1", "model"),
+            {
+                "model": "model",
+                "content": [{"type": "text", "text": "完整"}],
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+            },
+        ),
+        (
+            ResponsesClient("sk", "https://api.example/v1", "model"),
+            {
+                "model": "model",
+                "status": "completed",
+                "output_text": "完整",
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+            },
+        ),
+    ],
+)
+async def test_structured_stream_json_fallback_does_not_fabricate_delta(
+    client,
+    payload: dict,
+) -> None:
+    response = _StreamingResponse(
+        [json.dumps(payload, ensure_ascii=False).encode()],
+        content_type="application/json",
+    )
+    with patch(
+        "app.services.llm_client.httpx.AsyncClient",
+        return_value=_StreamingClient(response),
+    ):
+        events = [event async for event in client.stream_invoke(_request())]
+
+    assert [event.delta for event in events] == [""]
+    assert events[0].response is not None
+    assert events[0].response.text == "完整"
+    assert events[0].response.stream_fallback is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("structured", [False, True])
+async def test_responses_json_stream_fallback_rejects_failed_status(
+    structured: bool,
+) -> None:
+    """忽略 stream=true 的 Responses 上游仍不能把失败 JSON 当成功结果。"""
+
+    payload = {
+        "model": "model",
+        "status": "failed",
+        "error": {"message": "upstream failed"},
+        "output_text": "不应展示",
+    }
+    response = _StreamingResponse(
+        [json.dumps(payload, ensure_ascii=False).encode()],
+        content_type="application/json",
+    )
+    client = ResponsesClient("sk", "https://api.example/v1", "model")
+    with patch(
+        "app.services.llm_client.httpx.AsyncClient",
+        return_value=_StreamingClient(response),
+    ):
+        with pytest.raises(Exception, match="状态异常"):
+            if structured:
+                _ = [event async for event in client.stream_invoke(_request())]
+            else:
+                _ = [chunk async for chunk in client.stream_complete("sys", "user")]
+
+
+@pytest.mark.asyncio
+async def test_json_stream_fallback_redacts_provider_error_secret() -> None:
+    secret = "sk-sensitive-json-error"
+    payload = {"error": {"message": f"invalid credential {secret}"}}
+    response = _StreamingResponse(
+        [json.dumps(payload).encode()],
+        content_type="application/json",
+    )
+    client = OpenAIClient(secret, "https://api.example/v1", "model")
+    with patch(
+        "app.services.llm_client.httpx.AsyncClient",
+        return_value=_StreamingClient(response),
+    ):
+        with pytest.raises(Exception) as caught:
+            _ = [chunk async for chunk in client.stream_complete("sys", "user")]
+
+    message = str(caught.value)
+    assert secret not in message
+    assert "<redacted>" in message
+
+
+@pytest.mark.asyncio
+async def test_responses_json_stream_fallback_rejects_non_token_incomplete() -> None:
+    payload = {
+        "model": "model",
+        "status": "incomplete",
+        "incomplete_details": {"reason": "server_error"},
+        "output_text": "不应展示",
+    }
+    response = _StreamingResponse(
+        [json.dumps(payload).encode()],
+        content_type="application/json",
+    )
+    client = ResponsesClient("sk", "https://api.example/v1", "model")
+    with patch("app.services.llm_client.httpx.AsyncClient", return_value=_StreamingClient(response)):
+        with pytest.raises(Exception, match="状态异常"):
+            _ = [chunk async for chunk in client.stream_complete("sys", "user")]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("client", "payload", "message"),
+    [
+        (
+            OpenAIClient("sk", "https://api.example/v1", "model"),
+            {
+                "model": "model",
+                "choices": [
+                    {"finish_reason": "failed", "message": {"content": "不应展示"}}
+                ],
+            },
+            "OpenAI 返回结束状态异常",
+        ),
+        (
+            AnthropicClient("sk", "https://api.anthropic.com/v1", "model"),
+            {
+                "model": "model",
+                "content": [{"type": "text", "text": "不应展示"}],
+                "stop_reason": "cancelled",
+            },
+            "Anthropic 返回结束状态异常",
+        ),
+    ],
+)
+async def test_json_stream_fallback_rejects_protocol_failure_terminal(
+    client,
+    payload: dict,
+    message: str,
+) -> None:
+    response = _StreamingResponse(
+        [json.dumps(payload, ensure_ascii=False).encode()],
+        content_type="application/json",
+    )
+    with patch(
+        "app.services.llm_client.httpx.AsyncClient",
+        return_value=_StreamingClient(response),
+    ):
+        with pytest.raises(Exception, match=message):
+            _ = [event async for event in client.stream_invoke(_request())]
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_complete_accepts_done_without_finish_reason() -> None:
+    """Chat Completions 的 [DONE] 本身就是合法终态。"""
+    response = _StreamingResponse(
+        _sse_chunks(
+            {"choices": [{"delta": {"content": "ok"}, "finish_reason": None}]},
+            "[DONE]",
+        )
+    )
+    with patch("app.services.llm_client.httpx.AsyncClient", return_value=_StreamingClient(response)):
+        chunks = [
+            chunk
+            async for chunk in OpenAIClient("sk", "https://api.example/v1", "model").stream_complete(
+                "sys", "user"
+            )
+        ]
+    assert [chunk.delta for chunk in chunks if chunk.delta] == ["ok"]
+    assert chunks[-1].done is True
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_complete_rejects_natural_eof_without_terminal() -> None:
+    response = _StreamingResponse(
+        _sse_chunks({"choices": [{"delta": {"content": "partial"}, "finish_reason": None}]})
+    )
+    with patch("app.services.llm_client.httpx.AsyncClient", return_value=_StreamingClient(response)):
+        with pytest.raises(Exception, match="缺少 finish_reason"):
+            _ = [
+                chunk
+                async for chunk in OpenAIClient("sk", "https://api.example/v1", "model").stream_complete(
+                    "sys", "user"
+                )
+            ]
+
+
+@pytest.mark.asyncio
+async def test_anthropic_stream_complete_rejects_natural_eof_without_message_stop() -> None:
+    response = _StreamingResponse(
+        _sse_chunks(
+            {"type": "message_start", "message": {"model": "claude"}},
+            {"type": "content_block_delta", "delta": {"type": "text_delta", "text": "partial"}},
+        )
+    )
+    with patch("app.services.llm_client.httpx.AsyncClient", return_value=_StreamingClient(response)):
+        with pytest.raises(Exception, match="缺少 message_stop"):
+            _ = [
+                chunk
+                async for chunk in AnthropicClient(
+                    "sk", "https://api.anthropic.com/v1", "model"
+                ).stream_complete("sys", "user")
+            ]
+
+
+@pytest.mark.asyncio
+async def test_responses_stream_complete_rejects_natural_eof_without_completed() -> None:
+    response = _StreamingResponse(
+        _sse_chunks(
+            {"type": "response.created", "response": {"model": "model", "status": "in_progress"}},
+            {"type": "response.output_text.delta", "delta": "partial"},
+        )
+    )
+    with patch("app.services.llm_client.httpx.AsyncClient", return_value=_StreamingClient(response)):
+        with pytest.raises(Exception, match="缺少 response.completed"):
+            _ = [
+                chunk
+                async for chunk in ResponsesClient(
+                    "sk", "https://api.example/v1", "model"
+                ).stream_complete("sys", "user")
+            ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("structured", [False, True])
+async def test_responses_stream_rejects_completed_status_on_nonterminal_event(
+    structured: bool,
+) -> None:
+    """只有 response.completed 事件能宣告终态，普通事件里的 status 不能代替。"""
+
+    response = _StreamingResponse(
+        _sse_chunks(
+            {
+                "type": "response.created",
+                "response": {
+                    "model": "model",
+                    "status": "completed",
+                    "output_text": "尚未收到协议终态",
+                },
+            },
+        )
+    )
+    client = ResponsesClient("sk", "https://api.example/v1", "model")
+    with patch("app.services.llm_client.httpx.AsyncClient", return_value=_StreamingClient(response)):
+        with pytest.raises(Exception, match="缺少 response.completed"):
+            if structured:
+                _ = [event async for event in client.stream_invoke(_request())]
+            else:
+                _ = [chunk async for chunk in client.stream_complete("sys", "user")]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("structured", [False, True])
+async def test_responses_completed_event_rejects_failed_response_status(
+    structured: bool,
+) -> None:
+    response = _StreamingResponse(
+        _sse_chunks(
+            {
+                "type": "response.completed",
+                "response": {
+                    "model": "model",
+                    "status": "failed",
+                    "error": {"message": "upstream failed"},
+                },
+            },
+        )
+    )
+    client = ResponsesClient("sk", "https://api.example/v1", "model")
+    with patch("app.services.llm_client.httpx.AsyncClient", return_value=_StreamingClient(response)):
+        with pytest.raises(Exception, match="状态异常"):
+            if structured:
+                _ = [event async for event in client.stream_invoke(_request())]
+            else:
+                _ = [chunk async for chunk in client.stream_complete("sys", "user")]

@@ -75,6 +75,16 @@ async def test_kill_switch_disabled_starts_active_workers(monkeypatch: pytest.Mo
     monkeypatch.setattr(account_bot_runtime, "stop_account_bot_manager", stop_account_bot)
     monkeypatch.setattr(account_bot_runtime, "start_account_bot_manager", start_account_bot)
     monkeypatch.setattr(rate_limit, "get_redis", lambda: SimpleNamespace(publish=publish))
+    monkeypatch.setattr(
+        rate_limit.platform_caps,
+        "get_snapshot",
+        lambda: SimpleNamespace(cache_ready=True),
+    )
+    monkeypatch.setattr(
+        rate_limit.platform_caps,
+        "is_module_enabled_cached",
+        lambda *_args, **_kwargs: True,
+    )
 
     result = await rate_limit.post_kill_switch(
         KillSwitchRequest(enabled=False),

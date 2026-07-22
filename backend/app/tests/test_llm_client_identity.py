@@ -235,6 +235,9 @@ async def test_anthropic_client_sends_claude_code_identity_and_no_telepilot() ->
                 "",
                 "event: message_delta",
                 'data: {"delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}',
+                "",
+                "event: message_stop",
+                'data: {"type":"message_stop"}',
             )
             yield ("\n".join(lines) + "\n").encode()
 
@@ -287,6 +290,9 @@ async def test_anthropic_claude_code_proxy_keeps_beta_independent_of_identity() 
                 "",
                 "event: message_delta",
                 'data: {"delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}',
+                "",
+                "event: message_stop",
+                'data: {"type":"message_stop"}',
             )
             yield ("\n".join(lines) + "\n").encode()
 

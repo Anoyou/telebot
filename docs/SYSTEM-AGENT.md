@@ -2,18 +2,11 @@
 
 平台级自然语言助手：通过 Web 悬浮助手与管理 Bot `/agent` 查询 TelePilot 已有能力。
 
-计划与阶段定义见 `docs/Plan/Agent-Plan.md`。本文描述**当前已落地**的能力与运维边界。
+本文只描述**当前已落地**的能力、数据流与运维边界；历史实施计划已清理，代码和本文共同作为维护依据。
 
-## 阶段状态
+## 当前能力
 
-| 阶段 | 版本目标 | 状态 |
-| --- | --- | --- |
-| 1 | `0.64.0` Web + Bot 只读助手 | 已实现 |
-| 2 | `0.64.0` 核心写操作 + Action | 已实现 |
-| 3 | `0.64.0` Provider/指令写 + 密钥 | 已实现 |
-| 4 | `0.64.0` 使用驱动扩展 | 已实现首批：插件包/仓库、系统更新重启、auto 路由 |
-
-当前能力：只读查询、核心写操作、Provider/指令与密钥、远程插件与仓库、系统更新/重启、AI 指令 auto 路由。
+系统助手已覆盖只读查询、核心写操作与 Action 确认、Provider/指令与密钥、远程插件与仓库、系统更新/重启、AI 指令 auto 路由，并通过三种 Provider 原生 SSE 向 Web 与管理 Bot 提供真实增量。版本历史和阶段归属只记录在 `CHANGELOG.md`，本文不再绑定过期版本目标。
 
 ## 入口
 
@@ -62,6 +55,7 @@ Web 悬浮助手 → Durable Run / 可续接事件 ──┐
 管理 Bot /agent → SystemAgentService ───────┘                 │
                                                    Runtime（最多 8 个工具）
                                                               │
+                          原生 LLM SSE → assistant_delta ─────┤
                                                    ToolRegistry → 现有业务 service
 ```
 
@@ -149,6 +143,8 @@ Web 用内联卡片确认；Bot 用 Inline 按钮（`ab:{aid}:confirm|cancel:age
 - `skill_selected`（本轮加载的领域技能、理解摘要与工具数量）
 - `tool_started` / `tool_finished`
 - `action_proposed`
+- `assistant_delta`：上游模型真实返回的文本增量；不会把完整响应拆字模拟流式
+- `assistant_delta_reset`：模型确认工具调用后，撤销工具前的临时自然语言草稿
 - `assistant_message`
 - `error`
 - `done`
@@ -156,6 +152,14 @@ Web 用内联卡片确认；Bot 用 Inline 按钮（`ab:{aid}:confirm|cancel:age
 Web 首先通过 `POST /api/system-agent/sessions/{session_id}/runs` 创建持久 Run，再通过 `GET /api/system-agent/runs/{run_id}/stream?after_seq=N` 订阅事件；重试使用 `POST /api/system-agent/sessions/{session_id}/messages/{message_id}/retry/runs`。刷新、切换会话或 PWA 暂时离线不会取消后台执行，前端会保存 Run ID 和最后游标并自动补收缺失事件；`POST /api/system-agent/runs/{run_id}/cancel` 才会明确终止。
 
 旧的 `messages/stream` 与 `retry/stream` 接口继续兼容，但内部同样创建持久 Run。Web 会实时展示理解到的领域技能、当前 Provider/模型、重试进度和“正在调用某工具”，不再只显示笼统的“思考中”。
+
+`assistant_message` 始终是最终权威全文，用于持久化和重连对账。OpenAI Chat Completions、OpenAI Responses 与 Anthropic Messages 均直接消费上游 SSE；工具参数允许跨多个 SSE 事件拼接。若兼容上游忽略 `stream=true` 并返回普通 JSON，只发送最终 `assistant_message`，同时在 usage 和 UI 标记“完整响应”，绝不伪造 delta。已经向客户端发送任何文本后若上游中断，本轮立即失败，不自动换模型或 Provider，避免把两次回答拼接成一条。
+
+预算门禁在结构化调用与流式调用中使用同一 scope 语义：高价 Provider 的 `premium_daily` 到限时允许在尚未输出文本前继续尝试更便宜 Provider；账号级请求数、每日 token 或预算后端不可用属于整条请求的终止条件。上游没有返回 usage 时按请求预估值保守结算；已输出部分文本、取消或异常终止同样不会按“未调用”释放费用。
+
+每个 `assistant_delta` 在进入 Durable Run 前先经过跨分块缓冲脱敏，覆盖已知聊天密钥、Authorization、Telegram Bot Token 及常见 `sk-`、`xai-`、`gsk_`、`AIza` Provider Key。最终 `assistant_message`、工具摘要和错误事件仍会再次做完整对象脱敏，防止增量路径和历史路径语义分叉。
+
+前端使用共享 NDJSON 增量解析器处理任意网络分块和 UTF-8 边界，并以 `requestAnimationFrame` 合并已经抵达的 delta，降低渲染频率；这只是批量提交 React 状态，不是打字机效果。Run 事件按 `seq` 去重，重连不会重复追加文本。
 
 失败用户消息会显示错误原因与「重试本轮」按钮；需要跨 Provider 或工具批准时，会显示对应确认按钮。重试接口为：
 
@@ -200,6 +204,8 @@ System Agent 在自己的运行入口注册 LLM usage 持久化回调，路由�
 | Provider 验证失败 | 保持待确认，清除无效密钥，要求重输 |
 | Redis 不可用 | Web 仍可用；Bot 助手模式/Inline 确认可能不可用 |
 | NDJSON 中断 | 后台 Run 继续执行；Web 按最后事件游标自动重连并补收 |
+| 上游返回普通 JSON | 完整结果照常展示并标记“完整响应”，不模拟增量 |
+| 已显示部分文本后上游中断 | 立即失败且保守结算预算，不重试或切 Provider，避免重复内容 |
 | Agent 本轮失败 | 消息标记 failed，不进入后续上下文；Web 可直接重试原轮 |
 | 用户发送“重试 / 继续刚才的” | 有失败锚点时原子复用最近失败用户消息，不新增重复消息；没有锚点时按普通消息处理 |
 | PWA 切后台或网络断开 | Run 与订阅连接解耦，恢复页面后自动续接；只有服务进程重启才会把未完成 Run 标记为可重试失败 |

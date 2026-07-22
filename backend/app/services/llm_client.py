@@ -20,7 +20,7 @@ import json
 import re
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from typing import Any
 
@@ -48,6 +48,7 @@ from .llm_protocol import (
     ModelMessage,
     ModelRequest,
     ModelResponse,
+    ModelStreamEvent,
     ModelUsage,
     NamedToolChoice,
     StopReason,
@@ -73,6 +74,9 @@ _LOCAL_TIMEOUT = httpx.Timeout(180.0, connect=10.0)
 # 换行时无限缓存。8000 output tokens 的正常文本通常远低于这些上限。
 _STREAM_SSE_LINE_LIMIT_BYTES = 1_048_576
 _STREAM_SSE_TOTAL_LIMIT_BYTES = 8 * 1_048_576
+_RESPONSES_ALLOWED_INCOMPLETE_REASONS = frozenset(
+    {"max_output_tokens", "max_tokens", "content_filter", "safety"}
+)
 
 
 def _llm_headers(
@@ -149,6 +153,10 @@ class LLMStreamChunk:
     input_tokens: int | None = None
     output_tokens: int | None = None
     done: bool = False
+    # Upstream accepted the streaming request but returned one completed JSON
+    # response.  Callers surface this as an honest non-incremental fallback and
+    # must not issue a second request or split the text into pretend deltas.
+    stream_fallback: bool = False
 
 
 def _completed_json_as_stream_result(
@@ -156,12 +164,42 @@ def _completed_json_as_stream_result(
     *,
     api_format: str,
     default_model: str,
+    api_key: str | None = None,
 ) -> LLMResult:
     """解析忽略 ``stream=true`` 而返回的普通 JSON，避免再次请求上游。"""
 
     if not isinstance(data, dict):
         raise LLMError("上游流式请求返回的 JSON 不是对象")
+    status = str(data.get("status") or "").lower()
+    incomplete_reason: str | None = None
+    if api_format == LLM_API_FORMAT_RESPONSES:
+        incomplete = data.get("incomplete_details") or {}
+        incomplete_reason = (
+            str(incomplete.get("reason") or "")
+            if isinstance(incomplete, dict)
+            else None
+        )
+        if status in {"failed", "cancelled"} or (
+            status == "incomplete"
+            and incomplete_reason not in _RESPONSES_ALLOWED_INCOMPLETE_REASONS
+        ):
+            detail = data.get("error") or data.get("incomplete_details") or status
+            raise LLMError(
+                _safe_error_message(
+                    f"Responses 返回状态异常: {status}: {str(detail)[:200]}",
+                    api_key,
+                )
+            )
+    if data.get("error"):
+        raise LLMError(
+            _safe_error_message(
+                f"上游流式请求返回错误: {str(data['error'])[:200]}",
+                api_key,
+            )
+        )
     text = ""
+    stop_reason = StopReason.UNKNOWN
+    provider_status: str | None = None
     usage = data.get("usage") or {}
     if not isinstance(usage, dict):
         usage = {}
@@ -171,6 +209,16 @@ def _completed_json_as_stream_result(
             choice = choices[0] if isinstance(choices, list) and choices else {}
             message = choice.get("message") if isinstance(choice, dict) else {}
             text = _openai_content_text(message.get("content")) if isinstance(message, dict) else ""
+            refusal = message.get("refusal") if isinstance(message, dict) else None
+            finish_reason = choice.get("finish_reason") if isinstance(choice, dict) else None
+            stop_reason = (
+                StopReason.REFUSAL
+                if isinstance(refusal, str) and refusal.strip()
+                else stop_reason_from_provider(finish_reason)
+            )
+            provider_status = (
+                "refusal" if stop_reason is StopReason.REFUSAL else str(finish_reason or "") or None
+            )
             input_tokens = int(usage.get("prompt_tokens") or 0)
             output_tokens = int(usage.get("completion_tokens") or 0)
         elif api_format == LLM_API_FORMAT_ANTHROPIC_MESSAGES:
@@ -181,6 +229,8 @@ def _completed_json_as_stream_result(
             )
             input_tokens = int(usage.get("input_tokens") or 0)
             output_tokens = int(usage.get("output_tokens") or 0)
+            provider_status = str(data.get("stop_reason") or "") or None
+            stop_reason = stop_reason_from_provider(provider_status)
         else:
             if isinstance(data.get("output_text"), str):
                 text = str(data["output_text"])
@@ -194,6 +244,14 @@ def _completed_json_as_stream_result(
                 )
             input_tokens = int(usage.get("input_tokens") or 0)
             output_tokens = int(usage.get("output_tokens") or 0)
+            provider_status = str(incomplete_reason or status or "") or None
+            stop_reason = (
+                StopReason.CONTENT_FILTER
+                if incomplete_reason in {"content_filter", "safety"}
+                else StopReason.MAX_TOKENS
+                if incomplete_reason in {"max_output_tokens", "max_tokens"}
+                else stop_reason_from_provider(provider_status)
+            )
     except (TypeError, ValueError):
         raise LLMError("上游流式请求返回的 usage 字段格式无效") from None
     return LLMResult(
@@ -201,6 +259,8 @@ def _completed_json_as_stream_result(
         model=str(data.get("model") or default_model),
         input_tokens=input_tokens,
         output_tokens=output_tokens,
+        stop_reason=stop_reason,
+        provider_status=provider_status,
     )
 
 
@@ -538,6 +598,215 @@ def _request_tool_name_map(request: ModelRequest) -> dict[str, str]:
     return wire_tool_name_map(names)
 
 
+def _stream_openai_text(value: object) -> str:
+    """Read an OpenAI-compatible delta without stripping meaningful spaces."""
+
+    if isinstance(value, str):
+        return value
+    if not isinstance(value, list):
+        return ""
+    return "".join(
+        str(item.get("text") or "")
+        for item in value
+        if isinstance(item, dict) and item.get("type") in {"text", "output_text"}
+    )
+
+
+def _openai_structured_response(
+    data: dict[str, Any],
+    *,
+    request: ModelRequest,
+    tool_names: Mapping[str, str],
+    stream_fallback: bool = False,
+) -> ModelResponse:
+    """Normalize a Chat Completions payload for both JSON and SSE terminals."""
+
+    choices = data.get("choices") or []
+    if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+        raise LLMError("OpenAI 返回结构异常: 缺少 choices[0]")
+    choice = choices[0]
+    message = choice.get("message") or {}
+    if not isinstance(message, dict):
+        raise LLMError("OpenAI 返回结构异常: message 不是对象")
+    tool_calls = tuple(
+        ToolCall(
+            id=str(item.get("id") or ""),
+            name=from_wire_tool_name(
+                str((item.get("function") or {}).get("name") or ""), tool_names
+            ),
+            arguments=_parse_tool_arguments((item.get("function") or {}).get("arguments")),
+        )
+        for item in message.get("tool_calls") or []
+        if isinstance(item, dict) and str((item.get("function") or {}).get("name") or "")
+    )
+    usage = data.get("usage") or {}
+    if not isinstance(usage, dict):
+        usage = {}
+    finish_reason = choice.get("finish_reason")
+    refusal = message.get("refusal")
+    normalized_finish_reason = stop_reason_from_provider(finish_reason)
+    if normalized_finish_reason in {StopReason.FAILED, StopReason.CANCELLED}:
+        raise LLMError(f"OpenAI 返回结束状态异常: {str(finish_reason)[:200]}")
+    return ModelResponse(
+        model=str(data.get("model") or request.model),
+        content=(TextContent(_openai_content_text(message.get("content"))),)
+        if _openai_content_text(message.get("content"))
+        else (),
+        tool_calls=tool_calls,
+        usage=ModelUsage(
+            input_tokens=int(usage.get("prompt_tokens") or 0),
+            output_tokens=int(usage.get("completion_tokens") or 0),
+            reasoning_tokens=int(
+                (usage.get("completion_tokens_details") or {}).get("reasoning_tokens") or 0
+            ),
+        ),
+        stop_reason=(
+            StopReason.REFUSAL
+            if isinstance(refusal, str) and refusal.strip()
+            else StopReason.TOOL_CALLS
+            if tool_calls
+            else normalized_finish_reason
+        ),
+        provider_status=(
+            "refusal"
+            if isinstance(refusal, str) and refusal.strip()
+            else str(finish_reason)
+            if finish_reason
+            else None
+        ),
+        stream_fallback=stream_fallback,
+    )
+
+
+def _anthropic_structured_response(
+    data: dict[str, Any],
+    *,
+    request: ModelRequest,
+    tool_names: Mapping[str, str],
+    stream_fallback: bool = False,
+) -> ModelResponse:
+    """Normalize an Anthropic Messages payload for both JSON and SSE terminals."""
+
+    content: list[TextContent] = []
+    tool_calls: list[ToolCall] = []
+    for item in data.get("content") or []:
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") == "text" and isinstance(item.get("text"), str):
+            content.append(TextContent(item["text"]))
+        elif item.get("type") == "tool_use":
+            name = str(item.get("name") or "").strip()
+            if name:
+                tool_calls.append(
+                    ToolCall(
+                        id=str(item.get("id") or ""),
+                        name=from_wire_tool_name(name, tool_names),
+                        arguments=_parse_tool_arguments(item.get("input")),
+                    )
+                )
+    usage = data.get("usage") or {}
+    if not isinstance(usage, dict):
+        usage = {}
+    stop_reason = data.get("stop_reason")
+    normalized_stop_reason = stop_reason_from_provider(stop_reason)
+    if normalized_stop_reason in {StopReason.FAILED, StopReason.CANCELLED}:
+        raise LLMError(f"Anthropic 返回结束状态异常: {str(stop_reason)[:200]}")
+    return ModelResponse(
+        model=str(data.get("model") or request.model),
+        content=tuple(content),
+        tool_calls=tuple(tool_calls),
+        usage=ModelUsage(
+            input_tokens=int(usage.get("input_tokens") or 0),
+            output_tokens=int(usage.get("output_tokens") or 0),
+            cache_read_tokens=int(usage.get("cache_read_input_tokens") or 0),
+            cache_write_tokens=int(usage.get("cache_creation_input_tokens") or 0),
+        ),
+        stop_reason=(StopReason.TOOL_CALLS if tool_calls else normalized_stop_reason),
+        provider_status=str(stop_reason) if stop_reason else None,
+        stream_fallback=stream_fallback,
+    )
+
+
+def _responses_structured_response(
+    data: dict[str, Any],
+    *,
+    request: ModelRequest,
+    tool_names: Mapping[str, str],
+    stream_fallback: bool = False,
+    api_key: str | None = None,
+) -> ModelResponse:
+    """Normalize a Responses payload for both JSON and SSE terminals."""
+
+    status = str(data.get("status") or "").lower()
+    incomplete = data.get("incomplete_details") or {}
+    incomplete_reason = incomplete.get("reason") if isinstance(incomplete, dict) else None
+    if status in {"failed", "cancelled"} or (
+        status == "incomplete"
+        and incomplete_reason not in _RESPONSES_ALLOWED_INCOMPLETE_REASONS
+    ):
+        detail = data.get("error") or data.get("incomplete_details") or status
+        raise LLMError(
+            _safe_error_message(
+                f"Responses 返回状态异常: {status}: {str(detail)[:200]}",
+                api_key,
+            )
+        )
+    text_parts: list[str] = []
+    tool_calls: list[ToolCall] = []
+    has_refusal = False
+    for item in data.get("output") or []:
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") == "function_call":
+            name = str(item.get("name") or "").strip()
+            if name:
+                tool_calls.append(
+                    ToolCall(
+                        id=str(item.get("call_id") or item.get("id") or ""),
+                        name=from_wire_tool_name(name, tool_names),
+                        arguments=_parse_tool_arguments(item.get("arguments")),
+                    )
+                )
+        for content in item.get("content") or []:
+            if not isinstance(content, dict):
+                continue
+            if content.get("type") == "refusal" and content.get("refusal"):
+                has_refusal = True
+            if isinstance(content.get("text"), str):
+                text_parts.append(content["text"])
+    if not text_parts and isinstance(data.get("output_text"), str):
+        text_parts.append(data["output_text"])
+    usage = data.get("usage") or {}
+    if not isinstance(usage, dict):
+        usage = {}
+    details = usage.get("output_tokens_details") or {}
+    if not isinstance(details, dict):
+        details = {}
+    provider_reason = incomplete_reason or status
+    return ModelResponse(
+        model=str(data.get("model") or request.model),
+        content=(TextContent("".join(text_parts)),) if text_parts else (),
+        tool_calls=tuple(tool_calls),
+        usage=ModelUsage(
+            input_tokens=int(usage.get("input_tokens") or 0),
+            output_tokens=int(usage.get("output_tokens") or 0),
+            reasoning_tokens=int(details.get("reasoning_tokens") or 0),
+        ),
+        stop_reason=(
+            StopReason.REFUSAL
+            if has_refusal
+            else StopReason.MAX_TOKENS
+            if incomplete_reason in {"max_output_tokens", "max_tokens"}
+            else StopReason.TOOL_CALLS
+            if tool_calls
+            else stop_reason_from_provider(provider_reason)
+        ),
+        provider_status=str(provider_reason) if provider_reason else None,
+        sources=tuple(_extract_response_sources(data)),
+        stream_fallback=stream_fallback,
+    )
+
+
 def _sniff_image_mime(data: bytes) -> str:
     """根据 magic bytes 判断图片 MIME 类型。
 
@@ -737,7 +1006,6 @@ def _parse_responses_sse(text: str) -> dict[str, Any]:
 
     delta_parts: list[str] = []
     done_text = ""
-    last_response: dict[str, Any] | None = None
     error_payload: Any = None
 
     def text_from_stream() -> str:
@@ -771,8 +1039,9 @@ def _parse_responses_sse(text: str) -> dict[str, Any]:
 
         response = payload.get("response")
         if isinstance(response, dict):
-            last_response = response
-            if payload_type == "response.completed" or response.get("status") == "completed":
+            # Responses 的状态字段描述资源状态，不能替代协议定义的终态事件。
+            # 只有 response.completed 才表示整个 SSE 响应已完成。
+            if payload_type == "response.completed":
                 return with_stream_text(response)
 
         if payload_type == "response.output_text.delta" and isinstance(payload.get("delta"), str):
@@ -780,15 +1049,9 @@ def _parse_responses_sse(text: str) -> dict[str, Any]:
         elif payload_type == "response.output_text.done" and isinstance(payload.get("text"), str):
             done_text = payload["text"]
 
-    if last_response and last_response.get("status") not in {"failed", "cancelled"}:
-        image_data, image_urls, output_text = _extract_response_image_outputs(last_response)
-        if output_text or image_data or image_urls:
-            return last_response
-    if delta_parts or done_text:
-        return {"output_text": text_from_stream()}
     if error_payload is not None:
         raise ValueError(f"error event: {str(error_payload)[:200]}")
-    raise ValueError("缺少 response.completed 或 output_text 增量事件")
+    raise ValueError("缺少 response.completed 终态")
 
 
 def _decode_responses_payload(prefix: str, resp: Any, api_key: str | None) -> dict[str, Any]:
@@ -941,6 +1204,23 @@ class LLMClient(ABC):
             reasoning_effort=request.reasoning_effort,
         )
         return _model_response_from_result(result)
+
+    async def stream_invoke(
+        self,
+        request: ModelRequest,
+    ) -> AsyncIterator[ModelStreamEvent]:
+        """Stream a structured request without fabricating text deltas.
+
+        Concrete protocol clients override this to expose text received from the
+        upstream transport.  The base implementation deliberately returns one
+        terminal fallback event instead of splitting a completed response into
+        pretend tokens.
+        """
+
+        response = await self.invoke(replace(request, stream=False))
+        yield ModelStreamEvent(
+            response=replace(response, stream_fallback=True),
+        )
 
     async def stream_complete(
         self,
@@ -1225,6 +1505,7 @@ class OpenAIClient(LLMClient):
         input_tokens = 0
         output_tokens = 0
         final_sent = False
+        finish_received = False
         try:
             async with httpx.AsyncClient(**client_kwargs) as cli:
                 async with cli.stream("POST", url, headers=headers, json=body) as resp:
@@ -1253,14 +1534,20 @@ class OpenAIClient(LLMClient):
                             payload,
                             api_format=LLM_API_FORMAT_CHAT_COMPLETIONS,
                             default_model=self._model,
+                            api_key=self._api_key,
                         )
                         if result.text:
-                            yield LLMStreamChunk(delta=result.text, model=result.model)
+                            yield LLMStreamChunk(
+                                delta=result.text,
+                                model=result.model,
+                                stream_fallback=True,
+                            )
                         yield LLMStreamChunk(
                             model=result.model,
                             input_tokens=result.input_tokens,
                             output_tokens=result.output_tokens,
                             done=True,
+                            stream_fallback=True,
                         )
                         return
 
@@ -1307,7 +1594,8 @@ class OpenAIClient(LLMClient):
                             text = _openai_content_text(delta.get("content"))
                             if text:
                                 yield LLMStreamChunk(delta=text, model=model_name)
-                        if choice.get("finish_reason") and not final_sent:
+                        if choice.get("finish_reason") is not None:
+                            finish_received = True
                             # usage 可能位于 finish chunk 或其后的独立 chunk；继续读到
                             # [DONE]，若反代不发送 [DONE] 则在流结束后统一收尾。
                             continue
@@ -1322,12 +1610,18 @@ class OpenAIClient(LLMClient):
                 retryable=True,
             ) from None
 
-        if not final_sent:
+        if not final_sent and finish_received:
             yield LLMStreamChunk(
                 model=model_name,
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
                 done=True,
+            )
+            return
+        if not final_sent:
+            raise LLMError(
+                "OpenAI streaming 响应提前结束，缺少 finish_reason 或 [DONE] 终态",
+                retryable=True,
             )
 
     async def invoke(self, request: ModelRequest) -> ModelResponse:
@@ -1380,42 +1674,203 @@ class OpenAIClient(LLMClient):
             data = resp.json()
         except json.JSONDecodeError as exc:
             raise LLMError(f"OpenAI 返回非 JSON: {exc}") from None
-        choices = data.get("choices") or []
-        if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
-            raise LLMError("OpenAI 返回结构异常: 缺少 choices[0]")
-        choice = choices[0]
-        message = choice.get("message") or {}
-        if not isinstance(message, dict):
-            raise LLMError("OpenAI 返回结构异常: message 不是对象")
-        tool_calls = tuple(
-            ToolCall(
-                id=str(item.get("id") or ""),
-                name=from_wire_tool_name(
-                    str((item.get("function") or {}).get("name") or ""), tool_names
-                ),
-                arguments=_parse_tool_arguments((item.get("function") or {}).get("arguments")),
+        return _openai_structured_response(data, request=request, tool_names=tool_names)
+
+    async def stream_invoke(
+        self,
+        request: ModelRequest,
+    ) -> AsyncIterator[ModelStreamEvent]:
+        """Expose real Chat Completions deltas while preserving native tools."""
+
+        capabilities_for_api_format(LLM_API_FORMAT_CHAT_COMPLETIONS).validate(
+            replace(request, stream=True),
+            LLM_API_FORMAT_CHAT_COMPLETIONS,
+        )
+        tool_names = _request_tool_name_map(request)
+        url = provider_endpoint(self._base_url, LLM_API_FORMAT_CHAT_COMPLETIONS)
+        headers = _llm_headers(identity=self._identity, accept="text/event-stream")
+        if self._api_key:
+            headers["Authorization"] = f"Bearer {self._api_key}"
+        body: dict[str, Any] = {
+            "model": request.model or self._model,
+            "messages": _chat_messages(request.messages, tool_names),
+            "max_tokens": request.max_output_tokens,
+            "stream": True,
+        }
+        if request.tools:
+            body["tools"] = _tool_specs_openai(request.tools, tool_names)
+            body["tool_choice"] = _openai_tool_choice(request.tool_choice, tool_names)
+        if request.temperature is not None:
+            body["temperature"] = _normalize_temperature(request.temperature)
+        if request.reasoning_effort:
+            body["reasoning_effort"] = _normalize_reasoning_effort(request.reasoning_effort)
+
+        client_kwargs: dict[str, object] = {"timeout": _timeout_for_call(self._base_url, None)}
+        if self._proxy_url:
+            client_kwargs["proxy"] = self._proxy_url
+        else:
+            client_kwargs["trust_env"] = False
+
+        model_name = request.model or self._model
+        input_tokens = 0
+        output_tokens = 0
+        finish_reason: object = None
+        finish_received = False
+        text_parts: list[str] = []
+        refusal_parts: list[str] = []
+        tool_parts: dict[int, dict[str, Any]] = {}
+        terminal_sent = False
+
+        def terminal_response(*, stream_fallback: bool = False) -> ModelResponse:
+            calls: list[dict[str, Any]] = []
+            for index in sorted(tool_parts):
+                item = tool_parts[index]
+                function = item.get("function") if isinstance(item.get("function"), dict) else {}
+                calls.append(
+                    {
+                        "id": item.get("id") or "",
+                        "function": {
+                            "name": function.get("name") or "",
+                            "arguments": function.get("arguments") or "{}",
+                        },
+                    }
+                )
+            return _openai_structured_response(
+                {
+                    "model": model_name,
+                    "choices": [
+                        {
+                            "finish_reason": finish_reason,
+                            "message": {
+                                "content": "".join(text_parts),
+                                "refusal": "".join(refusal_parts) or None,
+                                "tool_calls": calls,
+                            },
+                        }
+                    ],
+                    "usage": {
+                        "prompt_tokens": input_tokens,
+                        "completion_tokens": output_tokens,
+                    },
+                },
+                request=request,
+                tool_names=tool_names,
+                stream_fallback=stream_fallback,
             )
-            for item in message.get("tool_calls") or []
-            if isinstance(item, dict) and str((item.get("function") or {}).get("name") or "")
-        )
-        usage = data.get("usage") or {}
-        finish_reason = choice.get("finish_reason")
-        return ModelResponse(
-            model=str(data.get("model") or request.model or self._model),
-            content=(TextContent(_openai_content_text(message.get("content"))),)
-            if _openai_content_text(message.get("content"))
-            else (),
-            tool_calls=tool_calls,
-            usage=ModelUsage(
-                input_tokens=int(usage.get("prompt_tokens") or 0),
-                output_tokens=int(usage.get("completion_tokens") or 0),
-                reasoning_tokens=int(
-                    (usage.get("completion_tokens_details") or {}).get("reasoning_tokens") or 0
-                ),
-            ),
-            stop_reason=stop_reason_from_provider(finish_reason),
-            provider_status=str(finish_reason) if finish_reason else None,
-        )
+
+        try:
+            async with httpx.AsyncClient(**client_kwargs) as cli:
+                async with cli.stream("POST", url, headers=headers, json=body) as resp:
+                    if resp.status_code >= 400:
+                        error_body = ""
+                        async for chunk in resp.aiter_text():
+                            error_body += chunk
+                            if len(error_body) > 500:
+                                break
+                        raise LLMError(
+                            _safe_error_message(
+                                f"OpenAI streaming 接口返回 {resp.status_code}: "
+                                f"{error_body[:200]}{_hint_for_status(resp.status_code)}",
+                                self._api_key,
+                            ),
+                            retryable=_is_retryable_status(resp.status_code),
+                            scope=_error_scope_for_http(resp.status_code, error_body),
+                            status_code=resp.status_code,
+                        )
+                    content_type = str(getattr(resp, "headers", {}).get("content-type") or "")
+                    if "json" in content_type.lower():
+                        payload = await _read_limited_stream_json(resp)
+                        if not isinstance(payload, dict):
+                            raise LLMError("OpenAI streaming 返回的 JSON 不是对象")
+                        yield ModelStreamEvent(
+                            response=_openai_structured_response(
+                                payload,
+                                request=request,
+                                tool_names=tool_names,
+                                stream_fallback=True,
+                            )
+                        )
+                        return
+
+                    async for line in _iter_limited_sse_lines(resp):
+                        line = line.strip()
+                        if not line or line.startswith(":") or not line.startswith("data:"):
+                            continue
+                        raw = line.removeprefix("data:").strip()
+                        if raw == "[DONE]":
+                            terminal_sent = True
+                            yield ModelStreamEvent(response=terminal_response())
+                            return
+                        try:
+                            payload = json.loads(raw)
+                        except json.JSONDecodeError:
+                            continue
+                        if not isinstance(payload, dict):
+                            continue
+                        if payload.get("error"):
+                            raise LLMError(
+                                _safe_error_message(
+                                    f"OpenAI streaming 返回错误事件: {str(payload['error'])[:200]}",
+                                    self._api_key,
+                                )
+                            )
+                        model_name = str(payload.get("model") or model_name)
+                        usage = payload.get("usage") or {}
+                        if isinstance(usage, dict):
+                            input_tokens = int(usage.get("prompt_tokens") or input_tokens or 0)
+                            output_tokens = int(usage.get("completion_tokens") or output_tokens or 0)
+                        choices = payload.get("choices") or []
+                        if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+                            continue
+                        choice = choices[0]
+                        delta = choice.get("delta") or {}
+                        if isinstance(delta, dict):
+                            text = _stream_openai_text(delta.get("content"))
+                            if text:
+                                text_parts.append(text)
+                                yield ModelStreamEvent(delta=text)
+                            refusal = delta.get("refusal")
+                            if isinstance(refusal, str) and refusal:
+                                refusal_parts.append(refusal)
+                            raw_calls = delta.get("tool_calls") or []
+                            for raw_call in raw_calls if isinstance(raw_calls, list) else []:
+                                if not isinstance(raw_call, dict):
+                                    continue
+                                try:
+                                    index = int(raw_call.get("index") or 0)
+                                except (TypeError, ValueError):
+                                    raise LLMError("OpenAI streaming tool_call index 格式无效") from None
+                                current = tool_parts.setdefault(index, {"function": {}})
+                                if raw_call.get("id"):
+                                    current["id"] = str(raw_call["id"])
+                                function = raw_call.get("function") or {}
+                                if isinstance(function, dict):
+                                    current_function = current.setdefault("function", {})
+                                    if function.get("name"):
+                                        current_function["name"] = str(function["name"])
+                                    if isinstance(function.get("arguments"), str):
+                                        current_function["arguments"] = (
+                                            str(current_function.get("arguments") or "")
+                                            + function["arguments"]
+                                        )
+                        if choice.get("finish_reason") is not None:
+                            finish_reason = choice.get("finish_reason")
+                            finish_received = True
+        except LLMError:
+            raise
+        except httpx.HTTPError as exc:
+            raise LLMError(
+                _safe_error_message(_describe_http_error(exc, self._base_url), self._api_key),
+                retryable=True,
+            ) from None
+
+        if not terminal_sent:
+            if not finish_received:
+                raise LLMError(
+                    "OpenAI streaming 响应提前结束，缺少 finish_reason 或 [DONE] 终态",
+                    retryable=True,
+                )
+            yield ModelStreamEvent(response=terminal_response())
 
     async def transcribe(self, audio: bytes, model: str) -> str:
         """OpenAI / 兼容厂商的 ``POST /audio/transcriptions``（Whisper 协议）。
@@ -1689,6 +2144,7 @@ class AnthropicClient(LLMClient):
         input_tokens = 0
         output_tokens = 0
         provider_stop_reason: str | None = None
+        message_stop_received = False
 
         try:
             async with httpx.AsyncClient(**client_kwargs) as cli:
@@ -1713,31 +2169,32 @@ class AnthropicClient(LLMClient):
                     current_event = ""
                     async for line in _iter_limited_sse_lines(resp):
                         line = line.rstrip("\r\n")
-                        if line.startswith("event: "):
-                            current_event = line[7:].strip()
+                        if line.startswith("event:"):
+                            current_event = line.removeprefix("event:").strip()
                             continue
-                        if line.startswith("data: "):
-                            raw = line[6:]
+                        if line.startswith("data:"):
+                            raw = line.removeprefix("data:").strip()
                             try:
                                 payload = json.loads(raw)
                             except json.JSONDecodeError:
                                 continue
-                            if current_event == "message_start":
+                            event_type = str(payload.get("type") or current_event or "")
+                            if event_type == "message_start":
                                 msg = payload.get("message") or {}
                                 model_name = str(msg.get("model", self._model))
                                 usage = msg.get("usage") or {}
                                 input_tokens = int(usage.get("input_tokens") or 0)
-                            elif current_event == "content_block_delta":
+                            elif event_type == "content_block_delta":
                                 delta = payload.get("delta") or {}
                                 if delta.get("type") == "text_delta":
                                     text_parts.append(delta.get("text", ""))
-                            elif current_event == "message_delta":
+                            elif event_type == "message_delta":
                                 delta = payload.get("delta") or {}
                                 if isinstance(delta, dict) and delta.get("stop_reason"):
                                     provider_stop_reason = str(delta["stop_reason"])
                                 usage = payload.get("usage") or {}
                                 output_tokens = int(usage.get("output_tokens") or 0)
-                            elif current_event == "error":
+                            elif event_type == "error":
                                 error = payload.get("error") or payload
                                 raise LLMError(
                                     _safe_error_message(
@@ -1745,7 +2202,10 @@ class AnthropicClient(LLMClient):
                                         self._api_key,
                                     )
                                 )
-                            # message_stop / content_block_start / content_block_stop → 忽略
+                            elif event_type == "message_stop":
+                                message_stop_received = True
+                                break
+                            # content_block_start / content_block_stop → 忽略
                             continue
                         # 空行 = 事件分隔符（SSE 规范）
                         if not line:
@@ -1760,6 +2220,12 @@ class AnthropicClient(LLMClient):
                 ),
                 retryable=True,
             ) from None
+
+        if not message_stop_received:
+            raise LLMError(
+                "Anthropic streaming 响应提前结束，缺少 message_stop 终态",
+                retryable=True,
+            )
 
         text = "".join(text_parts).strip()
         resolved_stop_reason = stop_reason_from_provider(provider_stop_reason)
@@ -1863,38 +2329,236 @@ class AnthropicClient(LLMClient):
             data = resp.json()
         except json.JSONDecodeError as exc:
             raise LLMError(f"Anthropic 返回非 JSON: {exc}") from None
-        content: list[TextContent] = []
-        tool_calls: list[ToolCall] = []
-        for item in data.get("content") or []:
-            if not isinstance(item, dict):
-                continue
-            if item.get("type") == "text" and isinstance(item.get("text"), str):
-                content.append(TextContent(item["text"]))
-            elif item.get("type") == "tool_use":
-                name = str(item.get("name") or "").strip()
-                if name:
-                    tool_calls.append(
-                        ToolCall(
-                            id=str(item.get("id") or ""),
-                            name=from_wire_tool_name(name, tool_names),
-                            arguments=_parse_tool_arguments(item.get("input")),
-                        )
-                    )
-        usage = data.get("usage") or {}
-        stop_reason = data.get("stop_reason")
-        return ModelResponse(
-            model=str(data.get("model") or request.model or self._model),
-            content=tuple(content),
-            tool_calls=tuple(tool_calls),
-            usage=ModelUsage(
-                input_tokens=int(usage.get("input_tokens") or 0),
-                output_tokens=int(usage.get("output_tokens") or 0),
-                cache_read_tokens=int(usage.get("cache_read_input_tokens") or 0),
-                cache_write_tokens=int(usage.get("cache_creation_input_tokens") or 0),
-            ),
-            stop_reason=stop_reason_from_provider(stop_reason),
-            provider_status=str(stop_reason) if stop_reason else None,
+        return _anthropic_structured_response(data, request=request, tool_names=tool_names)
+
+    async def stream_invoke(
+        self,
+        request: ModelRequest,
+    ) -> AsyncIterator[ModelStreamEvent]:
+        """Expose real Anthropic Messages deltas while preserving tool blocks."""
+
+        capabilities_for_api_format(LLM_API_FORMAT_ANTHROPIC_MESSAGES).validate(
+            replace(request, stream=True),
+            LLM_API_FORMAT_ANTHROPIC_MESSAGES,
         )
+        tool_names = _request_tool_name_map(request)
+        url = provider_endpoint(self._base_url, LLM_API_FORMAT_ANTHROPIC_MESSAGES)
+        body: dict[str, Any] = {
+            "model": request.model or self._model,
+            "max_tokens": request.max_output_tokens,
+            "system": _system_instructions(request.messages),
+            "messages": _anthropic_messages(request.messages, tool_names),
+            "stream": True,
+        }
+        if request.tools:
+            body["tools"] = [
+                {
+                    "name": to_wire_tool_name(tool.name, tool_names),
+                    "description": tool.description,
+                    "input_schema": tool.parameters,
+                }
+                for tool in request.tools
+            ]
+            body["tool_choice"] = _anthropic_tool_choice(request.tool_choice, tool_names)
+        if request.temperature is not None:
+            body["temperature"] = min(1.0, _normalize_temperature(request.temperature) or 0.0)
+        self._apply_reasoning_effort(body, request.reasoning_effort)
+
+        client_kwargs: dict[str, object] = {"timeout": _timeout_for_call(self._base_url, None)}
+        if self._proxy_url:
+            client_kwargs["proxy"] = self._proxy_url
+        else:
+            client_kwargs["trust_env"] = False
+
+        model_name = request.model or self._model
+        input_tokens = 0
+        output_tokens = 0
+        cache_read_tokens = 0
+        cache_write_tokens = 0
+        provider_stop_reason: str | None = None
+        text_parts: list[str] = []
+        content_blocks: dict[int, dict[str, Any]] = {}
+        terminal_sent = False
+
+        def terminal_response(*, stream_fallback: bool = False) -> ModelResponse:
+            content: list[dict[str, Any]] = []
+            for index in sorted(content_blocks):
+                block = content_blocks[index]
+                if block.get("type") == "tool_use":
+                    raw_input = str(block.get("input_json") or "")
+                    try:
+                        parsed_input = json.loads(raw_input) if raw_input else {}
+                    except json.JSONDecodeError:
+                        parsed_input = {"_raw": raw_input}
+                    content.append(
+                        {
+                            "type": "tool_use",
+                            "id": block.get("id") or "",
+                            "name": block.get("name") or "",
+                            "input": parsed_input,
+                        }
+                    )
+            if text_parts:
+                content.insert(0, {"type": "text", "text": "".join(text_parts)})
+            return _anthropic_structured_response(
+                {
+                    "model": model_name,
+                    "content": content,
+                    "stop_reason": provider_stop_reason,
+                    "usage": {
+                        "input_tokens": input_tokens,
+                        "output_tokens": output_tokens,
+                        "cache_read_input_tokens": cache_read_tokens,
+                        "cache_creation_input_tokens": cache_write_tokens,
+                    },
+                },
+                request=request,
+                tool_names=tool_names,
+                stream_fallback=stream_fallback,
+            )
+
+        try:
+            async with httpx.AsyncClient(**client_kwargs) as cli:
+                async with cli.stream("POST", url, headers=self._headers(), json=body) as resp:
+                    if resp.status_code >= 400:
+                        error_body = ""
+                        async for chunk in resp.aiter_text():
+                            error_body += chunk
+                            if len(error_body) > 500:
+                                break
+                        raise LLMError(
+                            _safe_error_message(
+                                f"Anthropic streaming 接口返回 {resp.status_code}: "
+                                f"{error_body[:200]}{_hint_for_status(resp.status_code)}",
+                                self._api_key,
+                            ),
+                            retryable=_is_retryable_status(resp.status_code),
+                            scope=_error_scope_for_http(resp.status_code, error_body),
+                            status_code=resp.status_code,
+                        )
+                    content_type = str(getattr(resp, "headers", {}).get("content-type") or "")
+                    if "json" in content_type.lower():
+                        payload = await _read_limited_stream_json(resp)
+                        if not isinstance(payload, dict):
+                            raise LLMError("Anthropic streaming 返回的 JSON 不是对象")
+                        yield ModelStreamEvent(
+                            response=_anthropic_structured_response(
+                                payload,
+                                request=request,
+                                tool_names=tool_names,
+                                stream_fallback=True,
+                            )
+                        )
+                        return
+
+                    current_event = ""
+                    async for line in _iter_limited_sse_lines(resp):
+                        line = line.rstrip("\r\n")
+                        if line.startswith("event:"):
+                            current_event = line.removeprefix("event:").strip()
+                            continue
+                        if line.startswith("data:"):
+                            raw = line.removeprefix("data:").strip()
+                            if not raw:
+                                continue
+                            try:
+                                payload = json.loads(raw)
+                            except json.JSONDecodeError:
+                                continue
+                            if not isinstance(payload, dict):
+                                continue
+                            event_type = str(payload.get("type") or current_event or "")
+                            if event_type == "error":
+                                error = payload.get("error") or payload
+                                raise LLMError(
+                                    _safe_error_message(
+                                        f"Anthropic streaming 返回错误事件: {str(error)[:200]}",
+                                        self._api_key,
+                                    )
+                                )
+                            if event_type == "message_start":
+                                message = payload.get("message") or {}
+                                if isinstance(message, dict):
+                                    model_name = str(message.get("model") or model_name)
+                                    usage = message.get("usage") or {}
+                                    if isinstance(usage, dict):
+                                        input_tokens = int(usage.get("input_tokens") or 0)
+                                        cache_read_tokens = int(
+                                            usage.get("cache_read_input_tokens") or 0
+                                        )
+                                        cache_write_tokens = int(
+                                            usage.get("cache_creation_input_tokens") or 0
+                                        )
+                            elif event_type == "content_block_start":
+                                try:
+                                    index = int(payload.get("index") or 0)
+                                except (TypeError, ValueError):
+                                    raise LLMError("Anthropic streaming content block index 格式无效") from None
+                                block = payload.get("content_block") or {}
+                                if isinstance(block, dict) and block.get("type") == "tool_use":
+                                    content_blocks[index] = {
+                                        "type": "tool_use",
+                                        "id": str(block.get("id") or ""),
+                                        "name": str(block.get("name") or ""),
+                                        # Anthropic 的 start.input 通常是空对象，后续
+                                        # input_json_delta 才给完整 JSON；空对象不能先
+                                        # 写成 "{}"，否则会与真实分片拼成非法 JSON。
+                                        "input_json": (
+                                            json.dumps(block.get("input"), ensure_ascii=False)
+                                            if block.get("input")
+                                            else ""
+                                        ),
+                                    }
+                            elif event_type == "content_block_delta":
+                                try:
+                                    index = int(payload.get("index") or 0)
+                                except (TypeError, ValueError):
+                                    raise LLMError("Anthropic streaming content block index 格式无效") from None
+                                delta = payload.get("delta") or {}
+                                if not isinstance(delta, dict):
+                                    continue
+                                if delta.get("type") == "text_delta":
+                                    text = delta.get("text")
+                                    if isinstance(text, str) and text:
+                                        text_parts.append(text)
+                                        yield ModelStreamEvent(delta=text)
+                                elif delta.get("type") == "input_json_delta":
+                                    block = content_blocks.setdefault(
+                                        index,
+                                        {"type": "tool_use", "id": "", "name": "", "input_json": ""},
+                                    )
+                                    partial_json = delta.get("partial_json")
+                                    if isinstance(partial_json, str):
+                                        block["input_json"] = (
+                                            str(block.get("input_json") or "") + partial_json
+                                        )
+                            elif event_type == "message_delta":
+                                delta = payload.get("delta") or {}
+                                if isinstance(delta, dict) and delta.get("stop_reason"):
+                                    provider_stop_reason = str(delta["stop_reason"])
+                                usage = payload.get("usage") or {}
+                                if isinstance(usage, dict):
+                                    output_tokens = int(usage.get("output_tokens") or output_tokens or 0)
+                            elif event_type == "message_stop":
+                                terminal_sent = True
+                                yield ModelStreamEvent(response=terminal_response())
+                                return
+                            continue
+                        if not line:
+                            current_event = ""
+        except LLMError:
+            raise
+        except httpx.HTTPError as exc:
+            raise LLMError(
+                _safe_error_message(_describe_http_error(exc, self._base_url), self._api_key),
+                retryable=True,
+            ) from None
+
+        if not terminal_sent:
+            raise LLMError(
+                "Anthropic streaming 响应提前结束，缺少 message_stop 终态",
+                retryable=True,
+            )
 
     async def stream_complete(
         self,
@@ -1982,46 +2646,53 @@ class AnthropicClient(LLMClient):
                             payload,
                             api_format=LLM_API_FORMAT_ANTHROPIC_MESSAGES,
                             default_model=self._model,
+                            api_key=self._api_key,
                         )
                         if result.text:
-                            yield LLMStreamChunk(delta=result.text, model=result.model)
+                            yield LLMStreamChunk(
+                                delta=result.text,
+                                model=result.model,
+                                stream_fallback=True,
+                            )
                         yield LLMStreamChunk(
                             model=result.model,
                             input_tokens=result.input_tokens,
                             output_tokens=result.output_tokens,
                             done=True,
+                            stream_fallback=True,
                         )
                         return
 
                     current_event = ""
                     async for line in _iter_limited_sse_lines(resp):
                         line = line.rstrip("\r\n")
-                        if line.startswith("event: "):
-                            current_event = line[7:].strip()
+                        if line.startswith("event:"):
+                            current_event = line.removeprefix("event:").strip()
                             continue
-                        if line.startswith("data: "):
-                            raw = line[6:]
+                        if line.startswith("data:"):
+                            raw = line.removeprefix("data:").strip()
                             if raw == "[DONE]":
                                 continue
                             try:
                                 payload = json.loads(raw)
                             except json.JSONDecodeError:
                                 continue
-                            if current_event == "message_start":
+                            event_type = str(payload.get("type") or current_event or "")
+                            if event_type == "message_start":
                                 msg = payload.get("message") or {}
                                 model_name = str(msg.get("model", self._model))
                                 usage = msg.get("usage") or {}
                                 input_tokens = int(usage.get("input_tokens") or 0)
-                            elif current_event == "content_block_delta":
+                            elif event_type == "content_block_delta":
                                 delta = payload.get("delta") or {}
                                 if delta.get("type") == "text_delta":
                                     text = delta.get("text")
                                     if isinstance(text, str) and text:
                                         yield LLMStreamChunk(delta=text, model=model_name)
-                            elif current_event == "message_delta":
+                            elif event_type == "message_delta":
                                 usage = payload.get("usage") or {}
                                 output_tokens = int(usage.get("output_tokens") or 0)
-                            elif current_event == "error":
+                            elif event_type == "error":
                                 error = payload.get("error") or payload
                                 raise LLMError(
                                     _safe_error_message(
@@ -2029,7 +2700,7 @@ class AnthropicClient(LLMClient):
                                         self._api_key,
                                     )
                                 )
-                            elif current_event == "message_stop":
+                            elif event_type == "message_stop":
                                 final_sent = True
                                 yield LLMStreamChunk(
                                     model=model_name,
@@ -2053,11 +2724,9 @@ class AnthropicClient(LLMClient):
             ) from None
 
         if not final_sent:
-            yield LLMStreamChunk(
-                model=model_name,
-                input_tokens=input_tokens,
-                output_tokens=output_tokens,
-                done=True,
+            raise LLMError(
+                "Anthropic streaming 响应提前结束，缺少 message_stop 终态",
+                retryable=True,
             )
 
 
@@ -2317,60 +2986,264 @@ class ResponsesClient(LLMClient):
                 status_code=resp.status_code,
             )
         data = _decode_responses_payload("Responses", resp, self._api_key)
-        status = str(data.get("status") or "")
-        if status in {"failed", "cancelled"}:
-            raise LLMError(f"Responses 返回状态异常: {status}")
-        text_parts: list[str] = []
-        tool_calls: list[ToolCall] = []
-        has_refusal = False
-        for item in data.get("output") or []:
-            if not isinstance(item, dict):
-                continue
-            if item.get("type") == "function_call":
-                name = str(item.get("name") or "").strip()
-                if name:
-                    tool_calls.append(
-                        ToolCall(
-                            id=str(item.get("call_id") or item.get("id") or ""),
-                            name=from_wire_tool_name(name, tool_names),
-                            arguments=_parse_tool_arguments(item.get("arguments")),
-                        )
-                    )
-            for content in item.get("content") or []:
-                if not isinstance(content, dict):
-                    continue
-                if content.get("type") == "refusal" and content.get("refusal"):
-                    has_refusal = True
-                if isinstance(content.get("text"), str):
-                    text_parts.append(content["text"])
-        if not text_parts and isinstance(data.get("output_text"), str):
-            text_parts.append(data["output_text"])
-        usage = data.get("usage") or {}
-        details = usage.get("output_tokens_details") or {}
-        incomplete = data.get("incomplete_details") or {}
-        incomplete_reason = incomplete.get("reason") if isinstance(incomplete, dict) else None
-        provider_reason = incomplete_reason or status
-        return ModelResponse(
-            model=str(data.get("model") or request.model or self._model),
-            content=(TextContent("".join(text_parts).strip()),) if text_parts else (),
-            tool_calls=tuple(tool_calls),
-            usage=ModelUsage(
-                input_tokens=int(usage.get("input_tokens") or 0),
-                output_tokens=int(usage.get("output_tokens") or 0),
-                reasoning_tokens=int(details.get("reasoning_tokens") or 0),
-            ),
-            stop_reason=(
-                StopReason.REFUSAL
-                if has_refusal
-                else StopReason.MAX_TOKENS
-                if incomplete_reason in {"max_output_tokens", "max_tokens"}
-                else StopReason.TOOL_CALLS
-                if tool_calls
-                else stop_reason_from_provider(provider_reason)
-            ),
-            provider_status=str(provider_reason) if provider_reason else None,
-            sources=tuple(_extract_response_sources(data)),
+        return _responses_structured_response(
+            data, request=request, tool_names=tool_names, api_key=self._api_key
         )
+
+    async def stream_invoke(
+        self,
+        request: ModelRequest,
+    ) -> AsyncIterator[ModelStreamEvent]:
+        """Expose real Responses API deltas while preserving function calls."""
+
+        capabilities_for_api_format(LLM_API_FORMAT_RESPONSES).validate(
+            replace(request, stream=True),
+            LLM_API_FORMAT_RESPONSES,
+        )
+        tool_names = _request_tool_name_map(request)
+        url = provider_endpoint(self._base_url, LLM_API_FORMAT_RESPONSES)
+        headers = _llm_headers(identity=self._identity, accept="text/event-stream")
+        if self._api_key:
+            headers["Authorization"] = f"Bearer {self._api_key}"
+        body: dict[str, Any] = {
+            "model": request.model or self._model,
+            "instructions": _system_instructions(request.messages),
+            "input": _responses_input(request.messages, tool_names),
+            "max_output_tokens": request.max_output_tokens,
+            "stream": True,
+            "store": False,
+        }
+        if request.tools:
+            body["tools"] = [
+                {
+                    "type": "function",
+                    "name": to_wire_tool_name(tool.name, tool_names),
+                    "description": tool.description,
+                    "parameters": tool.parameters,
+                    "strict": tool.strict,
+                }
+                for tool in request.tools
+            ]
+            body["tool_choice"] = _responses_tool_choice(request.tool_choice, tool_names)
+        if request.temperature is not None:
+            body["temperature"] = _normalize_temperature(request.temperature)
+        if request.reasoning_effort:
+            body["reasoning"] = {"effort": _normalize_reasoning_effort(request.reasoning_effort)}
+
+        client_kwargs: dict[str, object] = {"timeout": _timeout_for_call(self._base_url, None)}
+        if self._proxy_url:
+            client_kwargs["proxy"] = self._proxy_url
+        else:
+            client_kwargs["trust_env"] = False
+
+        model_name = request.model or self._model
+        text_parts: list[str] = []
+        function_calls: dict[str, dict[str, Any]] = {}
+        function_call_aliases: dict[str, str] = {}
+        last_response: dict[str, Any] | None = None
+        terminal_sent = False
+
+        def terminal_response(*, stream_fallback: bool = False) -> ModelResponse:
+            if last_response is not None:
+                response = dict(last_response)
+                if text_parts and not response.get("output_text"):
+                    response["output_text"] = "".join(text_parts)
+                if function_calls:
+                    existing_output = response.get("output")
+                    merged_output = list(existing_output) if isinstance(existing_output, list) else []
+                    seen_keys: set[str] = set()
+                    for item in merged_output:
+                        if not isinstance(item, dict) or item.get("type") != "function_call":
+                            continue
+                        aliases = (
+                            str(item.get("id") or ""),
+                            str(item.get("call_id") or ""),
+                        )
+                        key = next(
+                            (function_call_aliases.get(alias, alias) for alias in aliases if alias),
+                            "",
+                        )
+                        current = function_calls.get(key)
+                        if current is not None:
+                            if not item.get("arguments"):
+                                item["arguments"] = current.get("arguments") or ""
+                            if not item.get("name"):
+                                item["name"] = current.get("name") or ""
+                            seen_keys.add(key)
+                    merged_output.extend(
+                        item for key, item in function_calls.items() if key not in seen_keys
+                    )
+                    response["output"] = merged_output
+            else:
+                response = {
+                    "model": model_name,
+                    "status": "completed",
+                    "output_text": "".join(text_parts),
+                    "output": list(function_calls.values()),
+                }
+            return _responses_structured_response(
+                response,
+                request=request,
+                tool_names=tool_names,
+                stream_fallback=stream_fallback,
+                api_key=self._api_key,
+            )
+
+        try:
+            async with httpx.AsyncClient(**client_kwargs) as cli:
+                async with cli.stream("POST", url, headers=headers, json=body) as resp:
+                    if resp.status_code >= 400:
+                        error_body = ""
+                        async for chunk in resp.aiter_text():
+                            error_body += chunk
+                            if len(error_body) > 500:
+                                break
+                        raise LLMError(
+                            _safe_error_message(
+                                f"Responses streaming 接口返回 {resp.status_code}: "
+                                f"{error_body[:200]}{_hint_for_status(resp.status_code)}",
+                                self._api_key,
+                            ),
+                            retryable=_is_retryable_status(resp.status_code),
+                            scope=_error_scope_for_http(resp.status_code, error_body),
+                            status_code=resp.status_code,
+                        )
+                    content_type = str(getattr(resp, "headers", {}).get("content-type") or "")
+                    if "json" in content_type.lower():
+                        payload = await _read_limited_stream_json(resp)
+                        if not isinstance(payload, dict):
+                            raise LLMError("Responses streaming 返回的 JSON 不是对象")
+                        yield ModelStreamEvent(
+                            response=_responses_structured_response(
+                                payload,
+                                request=request,
+                                tool_names=tool_names,
+                                stream_fallback=True,
+                                api_key=self._api_key,
+                            )
+                        )
+                        return
+
+                    current_event = ""
+                    async for line in _iter_limited_sse_lines(resp):
+                        line = line.rstrip("\r\n")
+                        if line.startswith("event:"):
+                            current_event = line.removeprefix("event:").strip()
+                            continue
+                        if line.startswith("data:"):
+                            raw = line.removeprefix("data:").strip()
+                            if not raw or raw == "[DONE]":
+                                continue
+                            try:
+                                payload = json.loads(raw)
+                            except json.JSONDecodeError:
+                                continue
+                            if not isinstance(payload, dict):
+                                continue
+                            event_type = str(payload.get("type") or current_event or "")
+                            if event_type in {"error", "response.error"}:
+                                error = payload.get("error") or payload
+                                raise LLMError(
+                                    _safe_error_message(
+                                        f"Responses streaming 返回错误事件: {str(error)[:200]}",
+                                        self._api_key,
+                                    )
+                                )
+                            response = payload.get("response")
+                            if isinstance(response, dict):
+                                last_response = response
+                                model_name = str(response.get("model") or model_name)
+                                status = str(response.get("status") or "").lower()
+                                incomplete = response.get("incomplete_details") or {}
+                                incomplete_reason = (
+                                    str(incomplete.get("reason") or "")
+                                    if isinstance(incomplete, dict)
+                                    else ""
+                                )
+                                if status in {"failed", "cancelled"} or (
+                                    status == "incomplete"
+                                    and incomplete_reason not in _RESPONSES_ALLOWED_INCOMPLETE_REASONS
+                                ):
+                                    raise LLMError(
+                                        _safe_error_message(
+                                            f"Responses streaming 结束状态异常: {status}: {str(incomplete or response.get('error') or '')[:200]}",
+                                            self._api_key,
+                                        )
+                                    )
+                                if event_type == "response.completed":
+                                    terminal_sent = True
+                                    yield ModelStreamEvent(response=terminal_response())
+                                    return
+                            if event_type == "response.output_text.delta":
+                                delta = payload.get("delta")
+                                if isinstance(delta, str) and delta:
+                                    text_parts.append(delta)
+                                    yield ModelStreamEvent(delta=delta)
+                            elif event_type in {
+                                "response.output_item.added",
+                                "response.output_item.done",
+                            }:
+                                item = payload.get("item")
+                                if isinstance(item, dict) and item.get("type") == "function_call":
+                                    item_id = str(item.get("id") or "")
+                                    call_id = str(item.get("call_id") or "")
+                                    key = item_id or call_id
+                                    if key:
+                                        if item_id:
+                                            function_call_aliases[item_id] = key
+                                        if call_id:
+                                            function_call_aliases[call_id] = key
+                                        current = function_calls.get(key)
+                                        next_item = dict(item)
+                                        # done 事件有的实现会带完整 arguments，有的会
+                                        # 省略；仅在省略时保留前面真实收到的分片。
+                                        if current is not None and not isinstance(
+                                            next_item.get("arguments"), str
+                                        ):
+                                            next_item["arguments"] = str(
+                                                current.get("arguments") or ""
+                                            )
+                                        if current is not None and not next_item.get("name"):
+                                            next_item["name"] = current.get("name") or ""
+                                        function_calls[key] = next_item
+                            elif event_type == "response.function_call_arguments.delta":
+                                raw_key = str(
+                                    payload.get("item_id") or payload.get("call_id") or ""
+                                )
+                                key = function_call_aliases.get(raw_key, raw_key)
+                                if key:
+                                    if payload.get("item_id"):
+                                        function_call_aliases[str(payload["item_id"])] = key
+                                    if payload.get("call_id"):
+                                        function_call_aliases[str(payload["call_id"])] = key
+                                    item = function_calls.setdefault(
+                                        key,
+                                        {
+                                            "type": "function_call",
+                                            "call_id": str(payload.get("call_id") or ""),
+                                            "name": str(payload.get("name") or ""),
+                                            "arguments": "",
+                                        },
+                                    )
+                                    delta = payload.get("delta")
+                                    if isinstance(delta, str):
+                                        item["arguments"] = str(item.get("arguments") or "") + delta
+                            continue
+                        if not line:
+                            current_event = ""
+        except LLMError:
+            raise
+        except httpx.HTTPError as exc:
+            raise LLMError(
+                _safe_error_message(_describe_http_error(exc, self._base_url), self._api_key),
+                retryable=True,
+            ) from None
+
+        if not terminal_sent:
+            raise LLMError(
+                "Responses streaming 响应提前结束，缺少 response.completed 终态",
+                retryable=True,
+            )
 
     async def stream_complete(
         self,
@@ -2455,14 +3328,20 @@ class ResponsesClient(LLMClient):
                             payload,
                             api_format=LLM_API_FORMAT_RESPONSES,
                             default_model=self._model,
+                            api_key=self._api_key,
                         )
                         if result.text:
-                            yield LLMStreamChunk(delta=result.text, model=result.model)
+                            yield LLMStreamChunk(
+                                delta=result.text,
+                                model=result.model,
+                                stream_fallback=True,
+                            )
                         yield LLMStreamChunk(
                             model=result.model,
                             input_tokens=result.input_tokens,
                             output_tokens=result.output_tokens,
                             done=True,
+                            stream_fallback=True,
                         )
                         return
 
@@ -2498,7 +3377,14 @@ class ResponsesClient(LLMClient):
                                 input_tokens = int(usage.get("input_tokens") or input_tokens or 0)
                                 output_tokens = int(usage.get("output_tokens") or output_tokens or 0)
                                 status = str(response.get("status") or "")
-                                if payload_type == "response.completed" or status == "completed":
+                                if status in {"failed", "cancelled"}:
+                                    raise LLMError(
+                                        _safe_error_message(
+                                            f"Responses streaming 结束状态异常: {status}",
+                                            self._api_key,
+                                        )
+                                    )
+                                if payload_type == "response.completed":
                                     final_sent = True
                                     yield LLMStreamChunk(
                                         model=model_name,
@@ -2507,13 +3393,6 @@ class ResponsesClient(LLMClient):
                                         done=True,
                                     )
                                     return
-                                if status in {"failed", "cancelled"}:
-                                    raise LLMError(
-                                        _safe_error_message(
-                                            f"Responses streaming 结束状态异常: {status}",
-                                            self._api_key,
-                                        )
-                                    )
                             if payload_type == "response.output_text.delta":
                                 delta = payload.get("delta")
                                 if isinstance(delta, str) and delta:
@@ -2538,11 +3417,9 @@ class ResponsesClient(LLMClient):
             ) from None
 
         if not final_sent:
-            yield LLMStreamChunk(
-                model=model_name,
-                input_tokens=input_tokens,
-                output_tokens=output_tokens,
-                done=True,
+            raise LLMError(
+                "Responses streaming 响应提前结束，缺少 response.completed 终态",
+                retryable=True,
             )
 
     async def transcribe(self, audio: bytes, model: str) -> str:
@@ -2665,6 +3542,10 @@ class LLMErrorScope(StrEnum):
     CAPABILITY_MISMATCH = "capability_mismatch"
     REQUEST_INVALID = "request_invalid"
     ACCOUNT_POLICY = "account_policy"
+    # Premium-provider daily budget is provider-local for fallback purposes:
+    # the request may continue on a cheaper provider, while account-wide
+    # request/token budgets remain terminal.
+    PREMIUM_DAILY = "premium_daily"
     UNKNOWN = "unknown"
 
 

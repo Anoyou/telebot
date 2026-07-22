@@ -631,13 +631,14 @@ def _event_bus_subscriptions_from_state(state: _AccountState) -> list[Any]:
                     key = str(req or "").strip()
                     if not key:
                         continue
-                    if not is_module_enabled_cached(key, fail_closed=(key == "webhooks")):  # type: ignore[arg-type]
+                    if not is_module_enabled_cached(key, fail_closed=True):  # type: ignore[arg-type]
                         blocked = True
                         break
                 if blocked:
                     continue
             except Exception:  # noqa: BLE001
-                pass
+                # 能力状态无法确认时，声明硬依赖的插件不得进入订阅集合。
+                continue
         for raw in raw_subscriptions:
             if isinstance(raw, dict):
                 subscriptions.append(
@@ -652,7 +653,9 @@ def _event_bus_subscriptions_from_state(state: _AccountState) -> list[Any]:
 
         return filter_runtime_event_subscriptions(subscriptions)
     except Exception:  # noqa: BLE001
-        return subscriptions
+        # 过滤器本身依赖平台能力快照。未知状态不能回退为全部订阅，
+        # 否则关闭的 Interaction/Webhook 入口会在异常窗口重新放行。
+        return []
 
 
 def _event_bus_state_for_userbot_dispatch(state: _AccountState) -> dict[str, Any]:
@@ -4258,31 +4261,6 @@ async def _interaction_bot_token_for_account(account_id: int) -> str | None:
         return None
 
 
-async def _interaction_bot_chat_member_for_account(
-    account_id: int,
-    chat_id: int,
-    user_id: int,
-) -> dict[str, Any] | None:
-    token = await _interaction_bot_token_for_account(account_id)
-    if not token:
-        return None
-    try:
-        return await account_bot_service.call_bot_api(
-            token,
-            "getChatMember",
-            {"chat_id": chat_id, "user_id": user_id},
-        )
-    except Exception:  # noqa: BLE001
-        log.debug(
-            "interaction bot member lookup failed account=%s chat_id=%s user_id=%s",
-            account_id,
-            chat_id,
-            user_id,
-            exc_info=True,
-        )
-        return None
-
-
 async def _userbot_entity_for_account(
     client: Any,
     redis: Any | None,
@@ -4310,13 +4288,11 @@ async def _userbot_entity_for_account(
     get_messages = getattr(client, "get_messages", None)
     if not callable(get_messages):
         return None
-    message_id = await recent_message_anchor.find_recent_message_id_for_user(
-        client,
+    message_id = await recent_message_anchor.read_cached_message_id(
+        redis,
+        account_id,
         chat_id,
         user_id,
-        limit=recent_message_anchor.DEFAULT_SEARCH_LIMIT,
-        redis=redis,
-        account_id=account_id,
     )
     if message_id is None:
         return None
@@ -7106,11 +7082,6 @@ async def _activate(db, state: _AccountState, af: AccountFeature, redis: Any) ->
         identities=(
             PluginIdentityFacade(
                 state.client,
-                bot_member_resolver=lambda chat_id, user_id: _interaction_bot_chat_member_for_account(
-                    state.account_id,
-                    chat_id,
-                    user_id,
-                ),
                 user_entity_resolver=lambda chat_id, user_id: _userbot_entity_for_account(
                     state.client,
                     state.redis,
@@ -7650,10 +7621,13 @@ async def reload_account_config(account_id: int, payload: dict | None = None) ->
     - 数据库新增的 enabled feature：调 ``_activate`` 加载
     - 平台能力切换（``source=platform_capabilities``）复用本路径刷新能力快照与插件入口
 
-    任何异常都吞掉，热更新失败不应让 worker 崩溃。
+    普通热更新尽量局部降级；平台能力控制面刷新失败或 generation 不一致时必须
+    向调用方抛错，让 IPC 返回失败 ACK，不能把未收敛状态报告为成功。
     """
     state = _STATES.get(account_id)
     if state is None:
+        if isinstance(payload, dict) and payload.get("source") == "platform_capabilities":
+            raise RuntimeError("账号插件运行态未就绪，平台能力 reload 未收敛")
         return
     next_generation = state.generation + 1
     redis = state.redis or get_redis()
@@ -7663,9 +7637,34 @@ async def reload_account_config(account_id: int, payload: dict | None = None) ->
     try:
         from ...services import platform_capabilities as platform_caps
 
-        await platform_caps.refresh_cache_from_db()
-    except Exception:  # noqa: BLE001
+        capability_snapshot = await platform_caps.refresh_cache_from_db()
+    except Exception as exc:  # noqa: BLE001
         log.debug("reload_account_config 刷新平台能力缓存失败 account=%s", account_id, exc_info=True)
+        if isinstance(payload, dict) and payload.get("source") == "platform_capabilities":
+            raise RuntimeError("平台能力缓存刷新失败") from exc
+    else:
+        if isinstance(payload, dict) and payload.get("source") == "platform_capabilities":
+            module_key = payload.get("module_key")
+            expected_generation = payload.get("generation")
+            expected_enabled = payload.get("enabled")
+            if not isinstance(module_key, str) or module_key not in platform_caps.MODULE_DEFS:
+                raise RuntimeError("平台能力 reload 缺少有效 module_key")
+            if isinstance(expected_generation, bool) or not isinstance(expected_generation, int):
+                raise RuntimeError("平台能力 reload 缺少有效 generation")
+            if not isinstance(expected_enabled, bool):
+                raise RuntimeError("平台能力 reload 缺少有效 enabled")
+            actual_generation = capability_snapshot.generation(module_key)
+            actual_enabled = capability_snapshot.is_enabled(module_key)
+            if (
+                not capability_snapshot.cache_ready
+                or actual_generation < expected_generation
+                or actual_enabled != expected_enabled
+            ):
+                raise RuntimeError(
+                    "平台能力 reload 未收敛："
+                    f"module={module_key} expected_generation={expected_generation} "
+                    f"actual_generation={actual_generation}"
+                )
 
     # 同步全局开关：让 reload_config 也能让 incoming-message 可见性日志即时生效
     state.log_incoming_messages = await _load_log_incoming_messages_setting()
@@ -7868,14 +7867,13 @@ async def reload_account_config(account_id: int, payload: dict | None = None) ->
             )
             # 平台 AI 能力热切换：关闭时卸载 ctx.ai，开启时按权限补回。
             try:
-                from ...services.ai_feature import is_ai_enabled
                 from ...services.platform_capabilities import get_snapshot, is_ai_enabled_cached
 
                 snap = get_snapshot()
                 ai_on = (
-                    is_ai_enabled_cached(fail_closed=False)
+                    is_ai_enabled_cached(fail_closed=True)
                     if snap.cache_ready
-                    else await is_ai_enabled(db)
+                    else False
                 )
                 manifest = getattr(cls, "_manifest", None)
                 perms = set(getattr(manifest, "permissions", None) or [])

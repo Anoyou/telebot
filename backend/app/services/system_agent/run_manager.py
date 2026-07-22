@@ -638,7 +638,10 @@ def _redact_event(source: dict[str, Any], known_secrets: tuple[str, ...]) -> dic
         if isinstance(item, list):
             return [replace_known(child) for child in item]
         if isinstance(item, str):
-            return redact_known_secrets(item, list(known_secrets))
+            return redact_known_secrets(item, list(known_secrets)).replace(
+                "***",
+                "[REDACTED]",
+            )
         return item
 
     redacted = replace_known(value)

@@ -36,7 +36,12 @@ _URL_CREDENTIAL_RE = re.compile(
     re.IGNORECASE,
 )
 _AUTH_HEADER_RE = re.compile(r"((?:Bearer|Basic)\s+)[A-Za-z0-9._\-+/=]{8,}", re.IGNORECASE)
-_SK_TOKEN_RE = re.compile(r"\bsk-[A-Za-z0-9_\-]{8,}\b")
+_PROVIDER_TOKEN_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\bsk-[A-Za-z0-9_\-]{8,}\b", re.IGNORECASE),
+    re.compile(r"\bxai-[A-Za-z0-9_\-]{8,}\b", re.IGNORECASE),
+    re.compile(r"\bgsk_[A-Za-z0-9_\-]{8,}\b", re.IGNORECASE),
+    re.compile(r"\bAIza[0-9A-Za-z_\-]{20,}\b"),
+)
 _TELEGRAM_BOT_TOKEN_RE = re.compile(
     r"((?:https?://)?api\.telegram\.org/bot)[^/\s\"']+",
     re.IGNORECASE,
@@ -56,7 +61,8 @@ def redact_text(text: str) -> str:
     out = _URL_CREDENTIAL_RE.sub(r"\1***:***@", text)
     out = _TELEGRAM_BOT_TOKEN_RE.sub(r"\1***", out)
     out = _AUTH_HEADER_RE.sub(r"\1***", out)
-    out = _SK_TOKEN_RE.sub(REDACTED, out)
+    for pattern in _PROVIDER_TOKEN_PATTERNS:
+        out = pattern.sub(REDACTED, out)
     out = _KV_TOKEN_RE.sub(lambda m: f"{m.group(1)}{m.group(2)}{REDACTED}", out)
     return out
 

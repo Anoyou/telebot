@@ -511,6 +511,7 @@ class PluginAI:
         started_at = time.monotonic()
         estimated_tokens = 0
         provider_call_started = False
+        stream_terminal_received = False
 
         async def settle_interrupted(error_type: str) -> None:
             """Conservatively charge a stream once provider execution started."""
@@ -572,6 +573,7 @@ class PluginAI:
                     timeout_seconds=clamped_timeout,
                 ):
                     if getattr(chunk, "done", False):
+                        stream_terminal_received = True
                         final_input_tokens = int(getattr(chunk, "input_tokens", None) or 0)
                         final_output_tokens = int(getattr(chunk, "output_tokens", None) or 0)
                         final_model = str(getattr(chunk, "model", None) or final_model or "")
@@ -584,6 +586,8 @@ class PluginAI:
                             response_preview_parts.append(kept)
                             response_preview_chars += len(kept)
                         yield delta
+            if not stream_terminal_received:
+                raise LLMError("模型流式响应提前结束，没有返回最终状态。", retryable=True)
             actual_tokens = final_input_tokens + final_output_tokens
             if actual_tokens <= 0 and quota_ticket is not None:
                 actual_tokens = int(quota_ticket.estimated_tokens or 0)
