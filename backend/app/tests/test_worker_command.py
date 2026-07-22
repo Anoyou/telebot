@@ -1165,6 +1165,55 @@ async def test_outgoing_bare_plugin_command_runs_when_prefix_not_required():
 
 
 @pytest.mark.asyncio
+async def test_outgoing_bare_hyphenated_plugin_command_bypasses_echo_guard():
+    """关闭前缀后，裸插件命令即使与近期消息同文也应按管理员命令执行。"""
+    from app.worker import command as wcmd
+    from app.worker.command import make_command_handler
+
+    captured = {}
+
+    def fake_on(_event_type):
+        def deco(fn):
+            captured["fn"] = fn
+            return fn
+
+        return deco
+
+    class Client:
+        on = staticmethod(fake_on)
+
+        async def iter_messages(self, chat_id, *, limit, max_id):
+            yield SimpleNamespace(raw_text="airp-7", sender_id=10001, out=False)
+
+    plugin_handler = AsyncMock()
+    wcmd.register_plugin_command("airp-7", plugin_handler, owner_plugin_key="ai_redpacket", generation=1)
+    try:
+        make_command_handler(Client(), account_id=1, prefix="。")
+        set_command_context(
+            CommandContext(
+                account_id=1,
+                templates={},
+                providers={},
+                command_prefix="。",
+                command_prefix_required=False,
+                self_tg_user_id=42,
+            )
+        )
+
+        event = AsyncMock()
+        event.raw_text = "airp-7"
+        event.chat_id = -100123
+        event.id = 50
+        event.is_private = False
+        await captured["fn"](event)
+
+        plugin_handler.assert_awaited_once()
+        assert plugin_handler.await_args.args[2] == []
+    finally:
+        wcmd.unregister_plugin_command("airp-7", owner_plugin_key="ai_redpacket")
+
+
+@pytest.mark.asyncio
 async def test_handler_falls_back_when_ctx_missing():
     """ctx 为空时（worker 启动早期）handler 应用闭包 fallback prefix 工作。"""
     from app.worker import command as wcmd

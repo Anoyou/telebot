@@ -2068,6 +2068,8 @@ function renderTemplateSample(
     total_amount: "150000",
     question_count: "40",
     redpacket_id: "a1b2c3d4e5f6",
+    packets: "- a1b2c3d4e5f6 · 领取进度 12/40\n- f6e5d4c3b2a1 · 领取进度 8/40",
+    packet_count: "2",
     date: "2026-07-14",
     daily_limit: "1",
     retry_count: "1",

@@ -242,7 +242,7 @@ if attempts is not None and attempts > 5:
 | `ctx.ai` | `await ctx.ai.complete(system="...", user="...")` | 文本 LLM facade；第三方插件需声明 `ai_text` |
 | `ctx.ai` | `await ctx.ai.run_agent(..., handlers={...})` | 有界工具调用；第三方插件需声明独立 `ai_agent` 与工具双白名单 |
 | `ctx.messages` | `await ctx.messages.send(...)` / `send_photo(...)` / `edit_caption(...)` / `answer_callback(...)` | 交互入口消息操作 facade；只生成平台标准动作，由 TelePilot 统一代发、审计和执行 |
-| `ctx.identities` | 通常通过 `resolve_public_sender_identity(ctx, ...)` 间接使用 | 平台注入的群内安全身份 facade；通过内部 UserBot 和管理员 Interaction Bot 核验匿名状态，只返回标签、公开名、管理员状态和解析状态，不向插件开放成员目录 |
+| `ctx.identities` | 通常通过 `resolve_public_sender_identity(ctx, ...)` 间接使用；UserBot 专用场景可调用 `resolve_userbot(...)` | 平台注入的群内安全身份 facade；只返回标签、姓名、管理员状态和解析状态，不向插件开放成员目录 |
 | `ctx.conversation(...)` | `async with ctx.conversation(peer)` | 与目标 peer 建立会话 |
 
 ### 4.3 权限边界与禁止事项
@@ -1366,6 +1366,18 @@ safe_label = sanitize_public_display_name(raw_label, limit=10)
 身份解析结果不做应用层缓存：每次调用都会重新读取当前群管理员目录和成员权限。UserBot 实体恢复只使用本地实体缓存或 Redis 中可重新校验的近期消息 `message_id`；缓存未命中时不会在按钮 callback 内扫描群历史。近期消息锚点不会缓存姓名、username、管理员状态或标签。
 
 身份解析返回的名称已统一调用 `sanitize_public_display_name()`：移除 Unicode 控制符、零宽格式符、各类空白与不可见填充字符，并限制为最多 10 个字符；清洗后为空时使用“匿名用户”。这只解决公开姓名安全，不是 HTML/Markdown 转义，插件仍须按实际 `parse_mode` 转义后再发送。匿名管理员若无法由 UserBot 安全确认，会按 fail-closed 结果隐藏姓名。
+
+明确要求锁定账号 UserBot 自身视角时，可直接调用专用 facade：
+
+```python
+identity = await ctx.identities.resolve_userbot(
+    chat_id=chat_id,
+    user_id=user_id,
+    fallback_display_name=name_from_userbot_message,
+)
+```
+
+`resolve_userbot()` 不调用 Interaction Bot；姓名以 UserBot 实体和传入的 UserBot 消息姓名为准，因此会保留该账号保存的联系人姓名。它仍会读取 UserBot 群权限并隐藏匿名管理员。
 
 返回对象字段：
 

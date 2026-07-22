@@ -26,6 +26,7 @@
 
 - 系统助手完整接入 OpenAI Chat Completions、OpenAI Responses 与 Anthropic Messages 原生文本增量；Web 悬浮助手与管理 Bot Draft 直接消费上游真实 delta，工具调用参数可跨 SSE 事件安全拼接。
 - 新增统一 `StreamingText` 与 NDJSON 增量解析器，Provider 新建验证、多模型测活和系统助手共享真实流式等待、光标、完整响应标识与任意 UTF-8/网络分块处理。
+- 插件身份 facade 新增 `resolve_userbot()`，明确提供不调用 Interaction Bot 的 UserBot 专用姓名与匿名管理员核验入口。
 
 ### Changed
 
@@ -39,6 +40,7 @@
 ### Fixed
 
 - 修复 AI 红包等按钮 callback 在 UserBot 实体缓存未命中时同步扫描群历史，触发 Telegram flood wait 并导致 callback 过期的问题；身份核验只使用 UserBot 实体与可校验的近期消息锚点，不再依赖 Interaction Bot 查询。
+- 修复关闭系统命令前缀后，`airp-7` 等裸插件命令可能被近期同文消息的回声保护误拦截的问题。
 - 修复 Anthropic 工具调用的空 `input` 起始块会与后续 `input_json_delta` 拼成非法 JSON，导致流式工具参数无法解析的问题。
 - 修复系统助手同一动画帧连续收到多个增量时同步累加器可能覆盖前一分块，以及部分流中断后预算被当作未调用释放的问题。
 - 修复最终累计快照整段替换已渲染文本造成的视觉跳变，并在系统助手切换、恢复、完成或失败时清理旧流状态；长回复只在用户仍接近底部时自动跟随，不抢主动上滑位置。
@@ -112,6 +114,58 @@
 - 前端视觉与无障碍脚手架覆盖 Dashboard、Accounts、BotTab、Ledger、Logs、Extensions、AI 与 LLMProviders 三档视口。
 - CI 使用固定 macOS runner 与 Playwright 锁定 Chromium 执行视觉和 axe 门禁，并固定中文区域与上海时区以减少截图环境漂移。
 - 48 项视觉比较、24 项 axe 扫描、11 项前端单测、类型检查与生产构建全部通过。
+
+## [0.71.3] — 2026-07-22 · patch（补丁版本） · UserBot 姓名解析模式
+
+### Added
+
+- 插件公开身份 facade 新增 `resolve_userbot()`，只使用账号 UserBot 的群权限与用户实体查询，不依赖 Interaction Bot 覆盖范围。
+
+### Fixed
+
+- UserBot 专用模式允许返回 UserBot 实际看到的联系人姓名，同时继续隐藏匿名管理员真实身份。
+
+### Tests
+
+- 新增 UserBot 联系人姓名、禁止 Bot API 调用和匿名管理员保护回归测试。
+
+## [0.71.2] — 2026-07-22 · patch（补丁版本） · 无前缀插件命令修复
+
+### Fixed
+
+- 关闭系统命令前缀后，已注册的裸命令不再经过“纯命令回声防误触”扫描，修复 `airp-7` 等无参数命令因近期存在同文消息而被误拦的问题；带前缀命令原有的抽奖/接龙回声保护保持不变。
+
+### Tests
+
+- 新增带连字符的裸插件命令回归测试，覆盖近期消息中存在相同文本时仍能正常派发。
+
+## [0.71.1] — 2026-07-22 · patch（补丁版本） · 前端质量与 Telegram 公开姓名修复
+
+### Added
+
+- 新增 Playwright 视觉基线脚手架、固定 API fixture、axe 无障碍扫描与构建体积分析报告；测试环境会阻断全部非 GET API，避免误写真实数据。
+- 新增通用 `ResponsiveList`、`EmptyState`、`ErrorState`，并为按钮补充统一提交中状态和 44px 主操作触控档位。
+
+### Changed
+
+- 资金台账在窄屏改为可展开卡片流，桌面继续保留完整表格；测活对话、模型创建向导与 Bot 配置操作针对移动端收紧高度和宽度。
+- 插件文档代码高亮改为动态加载，首屏不再预载约 54 KiB gzip 的 markdown 高亮依赖。
+- 设置页移除重复状态信号，Sudo 用户新增表单默认折叠，模型测活侧栏入口收进标题栏。
+- 统一页面骨架、加载中按钮、空状态、错误状态和账号、网络、健康状态色；补齐移动端 KPI 标题与 Bot 风险标题的窄屏排版。
+
+### Fixed
+
+- 修复 `asChild` 按钮进入加载态时向 Radix Slot 传入多个子节点导致页面崩溃的问题，并为更新弹窗增加局部加载骨架与错误边界。
+- 补齐筛选下拉、开关、纯图标按钮和横向滚动区的可访问名称与键盘焦点，调整亮色状态色对比度。
+- 群成员公开身份解析改为优先读取 Interaction Bot `getChatMember.user` 中的当前姓名，避免 UserBot 已保存联系人时把本地联系人备注误当成 Telegram 公开姓名。
+- UserBot 与 Interaction Bot 的匿名管理员状态短暂不一致时，只允许身份向匿名方向收紧，避免公开姓名修复削弱匿名身份保护。
+
+### Tests
+
+- 前端视觉与无障碍脚手架覆盖 Dashboard、Accounts、BotTab、Ledger、Logs、Extensions、AI 与 LLMProviders 三档视口。
+- CI 使用固定 macOS runner 与 Playwright 锁定 Chromium 执行视觉和 axe 门禁，并固定中文区域与上海时区以减少截图环境漂移。
+- 48 项视觉比较、24 项 axe 扫描、11 项前端单测、类型检查与生产构建全部通过。
+- 增加联系人备注、Interaction Bot 当前公开姓名和双客户端匿名状态不一致的回归测试。
 
 ## [0.71.0] — 2026-07-21 · minor（次版本） · 悬浮系统助手与移动端工作台优化
 
