@@ -175,6 +175,27 @@ class PluginIdentityFacade:
             anonymous_admin_display_name=anonymous_admin_display_name,
         )
 
+    async def resolve_userbot(
+        self,
+        *,
+        chat_id: int,
+        user_id: int,
+        fallback_display_name: str = "",
+        unresolved_display_name: str = "匿名用户",
+        anonymous_admin_display_name: str = "匿名管理员",
+    ) -> PublicSenderIdentity:
+        """Resolve the identity exclusively through the account UserBot."""
+
+        return await _resolve_userbot_sender_identity(
+            object.__getattribute__(self, "_client"),
+            user_entity_resolver=object.__getattribute__(self, "_user_entity_resolver"),
+            chat_id=chat_id,
+            user_id=user_id,
+            fallback_display_name=fallback_display_name,
+            unresolved_display_name=unresolved_display_name,
+            anonymous_admin_display_name=anonymous_admin_display_name,
+        )
+
     async def resolve_many(
         self,
         *,
@@ -231,6 +252,38 @@ async def resolve_public_sender_identity(
         unresolved_display_name=unresolved_display_name,
         anonymous_admin_display_name=anonymous_admin_display_name,
     )
+
+
+async def _resolve_userbot_sender_identity(
+    client: Any,
+    *,
+    user_entity_resolver: Callable[[int, int], Awaitable[Any | None]] | None = None,
+    chat_id: int,
+    user_id: int,
+    fallback_display_name: str,
+    unresolved_display_name: str,
+    anonymous_admin_display_name: str,
+) -> PublicSenderIdentity:
+    if client is None:
+        return _unresolved_public_sender_identity(user_id, unresolved_display_name)
+    try:
+        return await _public_sender_identity_from_permissions(
+            client,
+            chat_id,
+            user_id,
+            fallback_display_name,
+            anonymous_admin_display_name=anonymous_admin_display_name,
+            user_entity_resolver=user_entity_resolver,
+            use_userbot_contact_name=True,
+        )
+    except Exception as exc:
+        log.debug(
+            "UserBot-only public identity lookup failed chat=%s user=%s error=%s",
+            chat_id,
+            user_id,
+            type(exc).__name__,
+        )
+        return _unresolved_public_sender_identity(user_id, unresolved_display_name)
 
 
 async def _resolve_public_sender_identity(
@@ -506,6 +559,7 @@ async def _public_sender_identity_from_permissions(
     *,
     anonymous_admin_display_name: str,
     user_entity_resolver: Callable[[int, int], Awaitable[Any | None]] | None = None,
+    use_userbot_contact_name: bool = False,
 ) -> PublicSenderIdentity:
     get_permissions = getattr(client, "get_permissions", None)
     if not callable(get_permissions):
@@ -543,10 +597,10 @@ async def _public_sender_identity_from_permissions(
                     user_id,
                     exc_info=True,
                 )
-    display_name = _regular_public_display_name(
-        user_id,
-        fallback_display_name,
-        resolved_user_entity,
+    display_name = (
+        _userbot_public_display_name(user_id, fallback_display_name, resolved_user_entity)
+        if use_userbot_contact_name
+        else _regular_public_display_name(user_id, fallback_display_name, resolved_user_entity)
     )
     return _resolved_public_sender_identity(
         user_id,
@@ -575,6 +629,23 @@ def _regular_public_display_name(user_id: int, fallback_display_name: str, entit
         return sanitize_public_display_name(fallback_display_name, fallback=str(user_id))
     if entity is None:
         return sanitize_public_display_name(fallback_display_name, fallback=str(user_id))
+    return public_entity_display_name(entity, fallback_id=user_id)
+
+
+def _userbot_public_display_name(user_id: int, fallback_display_name: str, entity: Any | None) -> str:
+    if not _display_name_needs_user_entity(fallback_display_name, user_id):
+        return sanitize_public_display_name(fallback_display_name, fallback=str(user_id))
+    if entity is not None:
+        userbot_name = " ".join(
+            part
+            for part in (
+                _clean_text(getattr(entity, "first_name", None)),
+                _clean_text(getattr(entity, "last_name", None)),
+            )
+            if part
+        )
+        if userbot_name:
+            return sanitize_public_display_name(userbot_name, fallback=str(user_id))
     return public_entity_display_name(entity, fallback_id=user_id)
 
 
