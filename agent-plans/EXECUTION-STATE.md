@@ -18,7 +18,7 @@
 - [x] WP5 本轮模型选择（不改全局） — done `97594050` + `c2677986`
 - [x] WP6 无气泡 + RunTrace + ModelRunMeta — done `c2677986`
 - [x] WP7 ModelPicker 能力徽标 — done `c2677986`
-- [x] WP8 测活复用与快速单测 — done（本批）
+- [x] WP8 测活复用与快速单测 — done `dd9b25a7`
   - 统一九态词表 `livenessStatus.ts`（正常/降级/失败/超时/限流/协议不匹配/缺少能力/跳过/未知）
   - 对话测活与全量测活结果行复用 `ModelRunMeta`；不接 Durable Run、不写 Agent 会话
   - 测活页能力筛选 lite（Tools / Vision）；`?provider=&model=` 快速深链
@@ -27,7 +27,7 @@
 ### 轮次 3：运行时健康与冷却
 
 - [x] WP9 健康状态记录 — done `97594050`
-- [x] WP10 健康状态消费 — done `97594050` + `c2677986` + 本批
+- [x] WP10 健康状态消费 — done `97594050` + `c2677986` + `dd9b25a7`
   - Agent fallback 排序；ModelPicker 冷却徽标
   - 测活页 `RuntimeHealthBar` + `GET /api/commands/llm-providers/runtime-health` 只读
 
