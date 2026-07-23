@@ -170,6 +170,7 @@ def build_preview(
     max_tokens: int = DEFAULT_FULL_MAX_TOKENS,
     global_concurrency: int = DEFAULT_GLOBAL_CONCURRENCY,
     provider_concurrency: int = DEFAULT_PROVIDER_CONCURRENCY,
+    models_by_provider: dict[int, list[str]] | None = None,
 ) -> LivenessPreview:
     """基于最新 Provider 行生成权威执行预览。"""
     plans: list[ProviderPlan] = []
@@ -177,6 +178,9 @@ def build_preview(
     executable_total = 0
     for row in provider_rows:
         models = enabled_models_of(row)
+        if models_by_provider is not None:
+            selected = set(models_by_provider.get(int(row.id), []))
+            models = [model for model in models if model in selected]
         enabled_total += len(models)
         plan = ProviderPlan(
             provider_id=int(row.id),

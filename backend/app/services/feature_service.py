@@ -52,6 +52,7 @@ from ..worker.ipc import CMD_RELOAD_CONFIG, publish_cmd_with_ack
 from .account_bot_service import normalize_interaction_entry_manifest
 
 log = logging.getLogger(__name__)
+_WARNED_ORPHAN_PLUGIN_KEYS: set[str] = set()
 _OPTIONAL_OFFICIAL_PLUGIN_KEYS: frozenset[str] = frozenset(
     {
         "auto_reply",
@@ -554,10 +555,15 @@ async def _seed_local_installed_features(
                     changed = True
                 except Exception:  # noqa: BLE001
                     log.warning("清理孤立 installed 模块 feature 行失败: %s", key, exc_info=True)
-            log.warning(
-                "跳过孤立 installed 模块 %s：磁盘存在 plugin.json，但没有安装记录",
-                key,
-            )
+            if key not in _WARNED_ORPHAN_PLUGIN_KEYS:
+                _WARNED_ORPHAN_PLUGIN_KEYS.add(key)
+                log.warning(
+                    "跳过孤立 installed 模块 %s：磁盘存在 plugin.json，但没有安装记录；"
+                    "该目录不会被加载，请在确认无用后手动清理或重新安装插件",
+                    key,
+                )
+            else:
+                log.debug("继续跳过孤立 installed 模块 %s", key)
             continue
         manifest: dict[str, Any] = {}
         if cfg_schema:

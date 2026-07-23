@@ -56,6 +56,19 @@ export function livenessStatusLabel(key: LivenessStatusKey): string {
   return LIVENESS_STATUS_LABEL[key] || LIVENESS_STATUS_LABEL.unknown;
 }
 
+export function extractHttpStatusCode(
+  statusCode?: number | null,
+  error?: string | null,
+): number | null {
+  if (typeof statusCode === "number" && statusCode >= 100 && statusCode <= 599) {
+    return statusCode;
+  }
+  const match = String(error || "").match(
+    /(?:HTTP(?:\/\d(?:\.\d)?)?|接口返回|status(?:_code)?\s*[=:]?)\s*([1-5]\d{2})\b/i,
+  );
+  return match ? Number(match[1]) : null;
+}
+
 /** 从错误文案/分类推断状态 */
 export function classifyErrorText(error?: string | null, errorCategory?: string | null): LivenessStatusKey {
   const cat = String(errorCategory || "").toLowerCase();

@@ -172,6 +172,42 @@ async def test_start_is_idempotent_and_cancel_is_idempotent(run_db) -> None:
 
 
 @pytest.mark.asyncio
+async def test_list_runs_filters_by_owner_and_status(run_db) -> None:
+    async with run_db() as db:
+        await db.execute(text("INSERT INTO web_user (id) VALUES (8)"))
+        db.add_all(
+            [
+                SystemAgentRun(
+                    id="listed-failed",
+                    session_id="session-1",
+                    web_user_id=7,
+                    client_request_id="request-listed-failed",
+                    request_hash="2" * 64,
+                    kind="message",
+                    status=AGENT_RUN_FAILED,
+                    created_at=datetime.now(UTC),
+                ),
+                SystemAgentRun(
+                    id="listed-other-user",
+                    session_id="session-1",
+                    web_user_id=8,
+                    client_request_id="request-listed-other-user",
+                    request_hash="3" * 64,
+                    kind="message",
+                    status=AGENT_RUN_FAILED,
+                    created_at=datetime.now(UTC),
+                ),
+            ]
+        )
+        await db.commit()
+
+    manager = SystemAgentRunManager(session_factory=run_db, poll_interval=0.01)
+    rows = await manager.list_runs(web_user_id=7, status=AGENT_RUN_FAILED)
+
+    assert [row.id for row in rows] == ["listed-failed"]
+
+
+@pytest.mark.asyncio
 async def test_different_request_is_rejected_while_session_run_is_active(run_db) -> None:
     service = _ControlledService()
     manager = SystemAgentRunManager(

@@ -154,7 +154,10 @@ async def test_full_liveness_preview_forwards_provider_scope(monkeypatch) -> Non
     monkeypatch.setattr(commands_api.llm_liveness, "build_preview", lambda *_a, **_k: _Preview())
 
     out = await commands_api.full_liveness_preview(
-        payload=FullLivenessPreviewRequest(only_provider_ids=[7, 11]),
+        payload=FullLivenessPreviewRequest(
+            only_provider_ids=[7, 11],
+            models_by_provider={7: ["model-a"]},
+        ),
         db=AsyncMock(),
         _user=AsyncMock(),
     )
@@ -2334,7 +2337,7 @@ async def test_chat_test_models_endpoint_llm_error(monkeypatch) -> None:
 
         async def complete(self, *_args, **_kwargs):
             if self.model == "bad-model":
-                raise LLMError("OpenAI 接口返回 404: Model not found")
+                raise LLMError("OpenAI 接口返回 404: Model not found", status_code=404)
             return LLMResult(text="好的", model=self.model, input_tokens=1, output_tokens=1)
 
     def _build_client(_provider, **kwargs):
@@ -2355,6 +2358,7 @@ async def test_chat_test_models_endpoint_llm_error(monkeypatch) -> None:
     assert by_model["ok-model"].ok is True
     assert by_model["bad-model"].ok is False
     assert "404" in (by_model["bad-model"].error or "")
+    assert by_model["bad-model"].status_code == 404
     assert by_model["ok-model"].effective_api_format == "responses"
     assert by_model["ok-model"].client_identity_profile == "grok_cli"
     assert by_model["bad-model"].effective_api_format == "responses"

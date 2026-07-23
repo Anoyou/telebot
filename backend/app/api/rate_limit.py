@@ -22,7 +22,7 @@ from datetime import time as dtime
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 
 from ..db.models.account import Account
@@ -649,6 +649,7 @@ async def get_system_settings(db: DBSession, _user: CurrentUser) -> dict[str, An
     payout_val = await _get_setting(db, "payout_limits", {})
     log_val = await _get_setting(db, "log_retention", {})
     login_security_val = await _get_setting(db, "login_security", {})
+    ui_preferences_val = await _get_setting(db, "ui_preferences", {})
     sudo_val = await _get_setting(db, "sudo_enabled", {"enabled": False})
     prefix_required_val = await _get_setting(db, "command_prefix_required", {"enabled": True})
     echo_guard_val = await _get_setting(db, "command_echo_guard_previous_messages", None)
@@ -667,6 +668,7 @@ async def get_system_settings(db: DBSession, _user: CurrentUser) -> dict[str, An
     login_security = auth_login_security.normalize_login_security_config(
         login_security_val if isinstance(login_security_val, dict) else {}
     )
+    ui_preferences = ui_preferences_val if isinstance(ui_preferences_val, dict) else {}
     remote_update = remote_update_val if isinstance(remote_update_val, dict) else {}
     app_update_target = app_update_target_val if isinstance(app_update_target_val, dict) else {}
     try:
@@ -734,6 +736,18 @@ async def get_system_settings(db: DBSession, _user: CurrentUser) -> dict[str, An
                 0, int(log_retention.get("native_raw_retention_days", 1) or 0)
             ),
         },
+        "ui_preferences": {
+            "sidebar_order": [
+                str(item) for item in ui_preferences.get("sidebar_order", []) if isinstance(item, str)
+            ],
+            "mobile_nav_order": [
+                str(item) for item in ui_preferences.get("mobile_nav_order", []) if isinstance(item, str)
+            ],
+            "provider_order": [
+                int(item) for item in ui_preferences.get("provider_order", [])
+                if isinstance(item, int) and not isinstance(item, bool) and item > 0
+            ],
+        },
     }
 
 
@@ -785,6 +799,12 @@ class _LoginSecurityPatch(BaseModel):
     recovery_code_ttl_seconds: int | None = None
 
 
+class _UIPreferencesPatch(BaseModel):
+    sidebar_order: list[str] | None = Field(default=None, max_length=9)
+    mobile_nav_order: list[str] | None = Field(default=None, max_length=4)
+    provider_order: list[int] | None = Field(default=None, max_length=2048)
+
+
 class _SettingsPatch(BaseModel):
     """前端只会传子集；未传字段保持不变。"""
 
@@ -800,6 +820,7 @@ class _SettingsPatch(BaseModel):
     llm_limits: _LLMLimitsPatch | None = None
     payout_limits: _PayoutLimitsPatch | None = None
     log_retention: _LogRetentionPatch | None = None
+    ui_preferences: _UIPreferencesPatch | None = None
 
 
 @router.patch("/api/system/settings")
@@ -816,6 +837,34 @@ async def patch_system_settings(
         await _audit(db, user.id, "set_command_prefix", target="system", detail={"value": prefix})
         # 让所有 worker 热加载新前缀
         await _broadcast_reload()
+    if payload.ui_preferences is not None:
+        allowed_routes = {
+            "/plugins", "/ai", "/interaction", "/overview", "/ledger",
+            "/webhooks", "/dispatch-debug", "/logs", "/settings",
+        }
+        current_raw = await _get_setting(db, "ui_preferences", {})
+        next_preferences = current_raw.copy() if isinstance(current_raw, dict) else {}
+        data = payload.ui_preferences.model_dump(exclude_unset=True)
+        for key in ("sidebar_order", "mobile_nav_order"):
+            if key not in data or data[key] is None:
+                continue
+            values = [str(item) for item in data[key]]
+            if len(values) != len(set(values)) or any(item not in allowed_routes for item in values):
+                raise _bad("invalid_ui_preferences", f"{key} 包含重复或未知页面")
+            next_preferences[key] = values
+        if data.get("provider_order") is not None:
+            values = [int(item) for item in data["provider_order"]]
+            if any(item <= 0 for item in values) or len(values) != len(set(values)):
+                raise _bad("invalid_ui_preferences", "provider_order 包含重复或无效 ID")
+            next_preferences["provider_order"] = values
+        await _set_setting(db, "ui_preferences", next_preferences)
+        await _audit(
+            db,
+            user.id,
+            "set_ui_preferences",
+            target="system",
+            detail={"fields": sorted(data)},
+        )
     if payload.timezone is not None:
         tz = payload.timezone.strip()
         # 校验：空字符串会回到默认上海时区，非空必须是合法 IANA 时区。

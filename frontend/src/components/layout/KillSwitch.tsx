@@ -65,8 +65,8 @@ export function KillSwitch({ compact = false }: { compact?: boolean }) {
         variant="outline"
         size="sm"
         className={cn(
-          "h-7 rounded-full bg-card text-[11px] font-semibold shadow-sm hover:bg-card hover:shadow-md",
-          compact ? "w-7 px-0" : "w-7 px-0 sm:w-auto sm:gap-1.5 sm:px-2.5",
+          "rounded-full bg-card text-[11px] font-semibold shadow-sm hover:bg-card hover:shadow-md active:scale-95 motion-reduce:transform-none",
+          compact ? "h-9 w-9 px-0" : "h-7 w-7 px-0 sm:w-auto sm:gap-1.5 sm:px-2.5",
           enabled
             ? "border-destructive/30 bg-destructive/10 text-destructive hover:bg-destructive/[0.18]"
             : "border-destructive/30 text-destructive hover:border-destructive/50 hover:bg-destructive/10",

@@ -164,8 +164,9 @@ export async function getSystemSettings(): Promise<SystemSettings> {
   const { data } = await api.get<SystemSettings>("/api/system/settings");
   return data;
 }
-export type SystemSettingsPatch = Partial<Omit<SystemSettings, "login_security">> & {
+export type SystemSettingsPatch = Partial<Omit<SystemSettings, "login_security" | "ui_preferences">> & {
   login_security?: Partial<NonNullable<SystemSettings["login_security"]>>;
+  ui_preferences?: Partial<NonNullable<SystemSettings["ui_preferences"]>>;
 };
 
 export async function patchSystemSettings(

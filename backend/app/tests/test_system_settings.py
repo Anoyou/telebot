@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import HTTPException
+from pydantic import ValidationError
 
 from app.api import rate_limit
 from app.db.models.system import SystemSetting
@@ -131,6 +132,64 @@ async def test_system_settings_command_prefix_required_roundtrip(monkeypatch) ->
     assert db.rows["command_prefix_required"].value == {"enabled": False}
     assert result["command_prefix_required"] is False
     broadcast.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_system_settings_ui_preferences_roundtrip(monkeypatch) -> None:
+    db = _FakeSettingsDB()
+    audit = AsyncMock()
+    monkeypatch.setattr(rate_limit, "_audit", audit)
+
+    result = await rate_limit.patch_system_settings(
+        rate_limit._SettingsPatch(
+            ui_preferences=rate_limit._UIPreferencesPatch(
+                sidebar_order=["/ai", "/plugins", "/settings"],
+                mobile_nav_order=["/ai", "/plugins", "/overview", "/interaction"],
+                provider_order=[9, 3, 12],
+            )
+        ),
+        db,  # type: ignore[arg-type]
+        SimpleNamespace(id=1),
+    )
+
+    assert result["ui_preferences"] == {
+        "sidebar_order": ["/ai", "/plugins", "/settings"],
+        "mobile_nav_order": ["/ai", "/plugins", "/overview", "/interaction"],
+        "provider_order": [9, 3, 12],
+    }
+    assert db.rows["ui_preferences"].value == result["ui_preferences"]
+    audit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_system_settings_ui_preferences_rejects_unknown_or_duplicate_entries(monkeypatch) -> None:
+    db = _FakeSettingsDB()
+    monkeypatch.setattr(rate_limit, "_audit", AsyncMock())
+
+    with pytest.raises(HTTPException) as exc_info:
+        await rate_limit.patch_system_settings(
+            rate_limit._SettingsPatch(
+                ui_preferences=rate_limit._UIPreferencesPatch(
+                    sidebar_order=["/plugins", "/not-a-page"],
+                )
+            ),
+            db,  # type: ignore[arg-type]
+            SimpleNamespace(id=1),
+        )
+    assert exc_info.value.status_code == 400
+
+    with pytest.raises(ValidationError):
+        rate_limit._UIPreferencesPatch(provider_order=list(range(1, 2050)))
+
+    with pytest.raises(HTTPException) as exc_info:
+        await rate_limit.patch_system_settings(
+            rate_limit._SettingsPatch(
+                ui_preferences=rate_limit._UIPreferencesPatch(provider_order=[4, 4]),
+            ),
+            db,  # type: ignore[arg-type]
+            SimpleNamespace(id=1),
+        )
+    assert exc_info.value.status_code == 400
 
 
 @pytest.mark.asyncio

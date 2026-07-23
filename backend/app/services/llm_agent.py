@@ -69,7 +69,16 @@ class AgentResult:
 
 
 class AgentLimitError(RuntimeError):
-    pass
+    def __init__(
+        self,
+        message: str,
+        *,
+        used_tokens: int | None = None,
+        limit_tokens: int | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.used_tokens = used_tokens
+        self.limit_tokens = limit_tokens
 
 
 _TOOL_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
@@ -211,7 +220,10 @@ async def run_agent(
     # 限额用「增量口径」：每步只计 output + 相对上一步 input 的增长，
     # 不重复计 system/记忆/工具 Schema 每步重发的前缀。usage/_sum_usage 仍全量累计（AI 页面口径不变）。
     limit_budget_used = 0
-    previous_step_input = 0
+    # 首次请求的 input 是进入本轮前已经存在的 system prompt、工具定义与历史上下文，
+    # 它决定模型上下文窗口，但不应重复消耗“本轮新增工作预算”。后续步骤只计 input
+    # 相对这个基线的增长（工具结果等）以及每一步真实 output。
+    previous_step_input: int | None = None
     fingerprints: dict[str, int] = {}
     tool_call_count = 0
     started = time.monotonic()
@@ -223,11 +235,16 @@ async def run_agent(
             return
         step_input = int(step_usage.input_tokens or 0)
         step_output = int(step_usage.output_tokens or 0)
-        incremental = step_output + max(0, step_input - previous_step_input)
+        incremental_input = 0 if previous_step_input is None else max(0, step_input - previous_step_input)
+        incremental = step_output + incremental_input
         limit_budget_used += incremental
         previous_step_input = step_input
         if limit_budget_used > limits.max_total_tokens:
-            raise AgentLimitError("Agent 会话 token 总量超过限制")
+            raise AgentLimitError(
+                f"Agent 本轮 token 预算超过限制（已用 {limit_budget_used:,} / 上限 {limits.max_total_tokens:,}）",
+                used_tokens=limit_budget_used,
+                limit_tokens=limits.max_total_tokens,
+            )
 
     async def call(current: ModelRequest) -> ModelResponse:
         remaining = limits.timeout_seconds - (time.monotonic() - started)

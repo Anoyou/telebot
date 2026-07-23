@@ -346,7 +346,7 @@ export function AIIndex() {
             icon={History}
             title="近期调用情况"
             value={usageSummary ? `${usageSummary.request_count} 次 / 失败 ${usageSummary.failed_count}` : "暂无"}
-            description={usageSummary ? `Fallback ${usageSummary.fallback_count} 次 · 点开查看详情` : "触发调用后展示摘要"}
+            description={usageSummary ? `总 Token ${usageSummary.total_tokens} · 点开查看详情` : "触发调用后展示摘要"}
             tone={(usageSummary?.failed_count ?? 0) > 0 ? "warn" : "neutral"}
             className="h-full border-primary/50 bg-primary/5 shadow-sm transition-colors hover:border-primary hover:bg-primary/10"
             valueClassName="break-words text-xl font-bold tracking-tight sm:text-2xl"
@@ -370,7 +370,7 @@ export function AIIndex() {
             />
             <div className="text-xs text-muted-foreground">
               {usageSummary
-                ? `平均耗时 ${usageSummary.avg_latency_ms}ms`
+                ? `${usageSummary.success_count} 次成功 / ${usageSummary.request_count} 次请求`
                 : usageQ.isError
                   ? "调用摘要暂不可用"
                   : "触发调用后展示摘要"}
@@ -380,12 +380,13 @@ export function AIIndex() {
       </div>
 
       <Card>
-        <div className="px-4 pb-1 pt-3">
-          <SectionHeader
-            icon={Sparkles}
-            title="快速上手"
-            description="按顺序完成后，你的 Telegram 账号就能用 AI 指令回复消息。"
-            actions={
+        <div className="flex min-h-12 items-center gap-2 px-4 py-2.5">
+          <Sparkles className="h-4 w-4 shrink-0 text-primary" />
+          <div className="min-w-0 flex-1 truncate text-sm">
+            <span className="font-semibold">快速上手</span>
+            <span className="ml-2 text-xs text-muted-foreground">完成 3 步即可使用 AI 指令</span>
+          </div>
+          <div className="shrink-0">
               <Button
                 type="button"
                 variant="ghost"
@@ -402,8 +403,7 @@ export function AIIndex() {
                   <ChevronRight className="h-4 w-4 text-muted-foreground" />
                 )}
               </Button>
-            }
-          />
+          </div>
         </div>
         {quickStartOpen ? (
           <CardContent className="grid gap-3 pt-0 lg:grid-cols-3">

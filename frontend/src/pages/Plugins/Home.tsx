@@ -45,6 +45,7 @@ import {
 import { Select } from "@/components/ui/select";
 import { pluginUsageGuideWarning, splitPluginWarnings } from "@/lib/plugin-config-contract";
 import { isPlatformFeature } from "@/lib/plugin-modes";
+import { cn } from "@/lib/utils";
 import {
   compactUsageText,
   pluginContractRiskWarnings,
@@ -386,7 +387,7 @@ export function PluginsHome() {
 
       <PluginWorkspaceHeader activeTab="home" selectedAid={selectedAid} guideActive={guideActive} />
 
-      <Card>
+      <Card className="hidden md:block">
         <CardContent className="space-y-4 !pt-5">
           {(settingsQ.data?.ai_enabled ?? false) ? (
             <div className="rounded-lg border px-4 py-3">
@@ -762,6 +763,7 @@ function FeatureZone({
   pluginUsageByKey: Map<string, PluginLLMUsageSummaryItem>;
 }) {
   const nav = useNavigate();
+  const [mobileExpandedKeys, setMobileExpandedKeys] = useState<Set<string>>(() => new Set());
 
   return (
     <Card>
@@ -820,6 +822,7 @@ function FeatureZone({
                 source: "plugins",
               });
               const canConfigure = Boolean(path);
+              const mobileExpanded = mobileExpandedKeys.has(f.key);
               return (
                 <div
                   key={f.key}
@@ -830,10 +833,23 @@ function FeatureZone({
                   <div className="min-w-0">
                     <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
                       <div className="min-w-0">
-                        <div className="break-words text-sm font-medium leading-5" title={f.display_name}>
-                          {f.display_name}
-                        </div>
-                        <div className="break-all font-mono text-xs leading-5 text-muted-foreground">{f.key}</div>
+                        <button
+                          type="button"
+                          className="flex min-w-0 items-center gap-1.5 text-left sm:pointer-events-none"
+                          aria-expanded={mobileExpanded}
+                          onClick={() => setMobileExpandedKeys((current) => {
+                            const next = new Set(current);
+                            if (next.has(f.key)) next.delete(f.key);
+                            else next.add(f.key);
+                            return next;
+                          })}
+                        >
+                          <span className="break-words text-sm font-medium leading-5" title={f.display_name}>
+                            {f.display_name}
+                          </span>
+                          <ChevronDown className={cn("h-4 w-4 shrink-0 text-muted-foreground transition-transform sm:hidden", mobileExpanded && "rotate-180")} />
+                        </button>
+                        <div className="hidden break-all font-mono text-xs leading-5 text-muted-foreground sm:block">{f.key}</div>
                       </div>
                       <div className="flex shrink-0 flex-wrap gap-1.5 sm:justify-end">
                         <FeatureCapabilityBadge show={Boolean(f.interaction_entries?.length)} tone="info">
@@ -867,13 +883,24 @@ function FeatureZone({
                                 ? "等待热加载"
                                 : "能力受限"}
                         </FeatureCapabilityBadge>
+                        {canConfigure ? (
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            className="min-h-11 sm:hidden"
+                            onClick={() => path && nav(path)}
+                          >
+                            配置
+                          </Button>
+                        ) : null}
                       </div>
                     </div>
                     {f.last_update_check_error ? (
-                      <div className="mt-1 text-xs text-destructive">
+                      <div className={cn("mt-1 text-xs text-destructive", mobileExpanded ? "block" : "hidden", "sm:block")}>
                         更新检查失败：{f.last_update_check_error}
                       </div>
                     ) : null}
+                    <div className={cn(mobileExpanded ? "block" : "hidden", "sm:block")}>
                     {status === "failed" ? (
                       <div className="mt-1 rounded-md border border-destructive/30 bg-destructive/10 px-2 py-1 text-xs leading-5 text-destructive">
                         <div>加载异常{lastError ? `：${lastError}` : "：后端未返回错误详情"}</div>
@@ -981,8 +1008,9 @@ function FeatureZone({
                         </Button>
                       ) : null}
                     </div>
+                    </div>
                   </div>
-                  <ModuleLintWarnings warnings={lintWarnings} />
+                  <div className={cn(mobileExpanded ? "block" : "hidden", "sm:block")}><ModuleLintWarnings warnings={lintWarnings} /></div>
                 </div>
               );
             })}

@@ -14,6 +14,7 @@ import {
   Github,
   Home,
   History,
+  MessageCircle,
   ScrollText,
   Sparkles,
   WalletCards,
@@ -21,6 +22,7 @@ import {
   X,
 } from "lucide-react";
 import { BrandLogo } from "@/components/BrandLogo";
+import { useAssistantDock } from "@/components/assistant/AssistantDock";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -37,7 +39,7 @@ import {
 } from "@/lib/navigation";
 const ChangelogMenu = lazy(() => import("./ChangelogMenu"));
 
-interface NavItem {
+export interface NavItem {
   to: string;
   label: string;
   icon: React.ComponentType<{ className?: string }>;
@@ -45,7 +47,7 @@ interface NavItem {
 }
 
 // 顶层导航条目。默认落地页是插件中心；概览降权到 /overview。
-const NAV: NavItem[] = [
+export const NAV: NavItem[] = [
   { to: "/plugins", label: "插件", icon: Boxes },
   { to: "/ai", label: "AI", icon: Sparkles },
   { to: "/interaction", label: "交互", icon: Bot },
@@ -66,18 +68,31 @@ export function navForCapabilities(enabled: CapabilityEnabledMap): NavItem[] {
   return filterNavByCapabilities(NAV, enabled);
 }
 
-export function mobilePrimaryNavForCapabilities(enabled: CapabilityEnabledMap): NavItem[] {
-  return navForCapabilities(enabled).filter((item) =>
+export function orderNavItems(items: NavItem[], preferredOrder?: string[]): NavItem[] {
+  if (!preferredOrder?.length) return items;
+  const positions = new Map(preferredOrder.map((path, index) => [path, index]));
+  return [...items].sort((left, right) => {
+    const leftIndex = positions.get(left.to);
+    const rightIndex = positions.get(right.to);
+    if (leftIndex == null && rightIndex == null) return 0;
+    if (leftIndex == null) return 1;
+    if (rightIndex == null) return -1;
+    return leftIndex - rightIndex;
+  });
+}
+
+export function mobilePrimaryNavForCapabilities(enabled: CapabilityEnabledMap, preferredOrder?: string[]): NavItem[] {
+  return orderNavItems(navForCapabilities(enabled).filter((item) =>
     item.to === "/plugins" ||
     item.to === "/interaction" ||
     item.to === "/ai" ||
     item.to === "/overview",
-  );
+  ), preferredOrder);
 }
 
-export function mobileMoreNavForCapabilities(enabled: CapabilityEnabledMap): NavItem[] {
-  const primary = new Set(mobilePrimaryNavForCapabilities(enabled).map((item) => item.to));
-  return navForCapabilities(enabled).filter((item) => !primary.has(item.to));
+export function mobileMoreNavForCapabilities(enabled: CapabilityEnabledMap, preferredOrder?: string[]): NavItem[] {
+  const primary = new Set(mobilePrimaryNavForCapabilities(enabled, preferredOrder).map((item) => item.to));
+  return orderNavItems(navForCapabilities(enabled).filter((item) => !primary.has(item.to)), preferredOrder);
 }
 
 /** @deprecated 兼容旧调用 */
@@ -111,7 +126,10 @@ function NavList({
     staleTime: 15_000,
   });
   const enabled = capabilityEnabledMap(capsQ.data, settingsQ.data?.ai_enabled ?? true);
-  const navItems = navForCapabilities(enabled);
+  const navItems = orderNavItems(
+    navForCapabilities(enabled),
+    settingsQ.data?.ui_preferences?.sidebar_order,
+  );
 
   return (
     <nav className="flex-1 space-y-1.5 overflow-y-auto px-4 py-3 text-sm">
@@ -149,6 +167,7 @@ function SidebarBody({
   onNavigate?: () => void;
 }) {
   const [changelogOpen, setChangelogOpen] = useState(false);
+  const { collapsed: assistantCollapsed, setCollapsed: setAssistantCollapsed, streaming: assistantStreaming } = useAssistantDock();
 
   return (
     <>
@@ -173,6 +192,29 @@ function SidebarBody({
         </div>
       </div>
       <NavList collapsed={collapsed} onNavigate={onNavigate} />
+      {!mobile ? (
+        <div className={cn("shrink-0 px-4 pb-2", collapsed && "px-3")}>
+          <button
+            type="button"
+            data-assistant-sidebar-button
+            onClick={() => setAssistantCollapsed(!assistantCollapsed)}
+            aria-pressed={!assistantCollapsed}
+            className={cn(
+              "liquid-sidebar-link flex h-11 w-full items-center gap-3 rounded-lg border border-primary/20 bg-primary/5 px-3 text-left font-semibold text-primary active:scale-[0.98] motion-reduce:transform-none",
+              collapsed && "justify-center px-0",
+              !assistantCollapsed && "border-primary/40 bg-primary/10",
+            )}
+            aria-label={assistantCollapsed ? "打开系统助手" : "关闭系统助手"}
+            title={assistantCollapsed ? "打开系统助手" : "关闭系统助手"}
+          >
+            <span className="relative shrink-0">
+              <MessageCircle className="h-5 w-5" />
+              {assistantStreaming ? <span className="absolute -right-1 -top-1 h-2.5 w-2.5 animate-pulse rounded-full border-2 border-background bg-success motion-reduce:animate-none" /> : null}
+            </span>
+            <span className={cn("truncate", collapsed && "sr-only")}>系统助手</span>
+          </button>
+        </div>
+      ) : null}
       <div
         className={cn(
           "liquid-sidebar-footer shrink-0 space-y-2 px-4 py-5 text-sm text-muted-foreground",

@@ -98,7 +98,7 @@ export function TopBar({
           <span className="sr-only">{sidebarCollapsed ? "展开侧栏" : "收起侧栏"}</span>
         </Button>
       </div>
-      <div className="flex shrink-0 items-center gap-1 sm:gap-1.5">
+      <div className={cn("flex shrink-0 items-center", isStandalone ? "gap-2" : "gap-1 sm:gap-1.5")}>
         <HealthDot compact={isStandalone} />
         <Button
           variant="outline"
@@ -183,8 +183,8 @@ function UpdateDialogFallback({ onClose }: { onClose: () => void }) {
 
 function topbarActionClass(compact: boolean) {
   return cn(
-    "h-7 rounded-full border-0 bg-secondary text-[11px] shadow-none hover:bg-secondary-hover",
-    compact ? "w-7 px-0" : "w-7 px-0 sm:w-auto sm:gap-1.5 sm:px-2.5",
+    "rounded-full border-0 bg-secondary text-[11px] shadow-none hover:bg-secondary-hover active:scale-95 motion-reduce:transform-none",
+    compact ? "h-9 w-9 px-0" : "h-7 w-7 px-0 sm:w-auto sm:gap-1.5 sm:px-2.5",
   );
 }
 

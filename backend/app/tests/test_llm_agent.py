@@ -285,13 +285,37 @@ async def test_agent_enforces_session_token_limit() -> None:
             usage=ModelUsage(input_tokens=10, output_tokens=10),
         )
 
-    with pytest.raises(AgentLimitError):
+    with pytest.raises(AgentLimitError, match="已用 10 / 上限 5") as exc_info:
         await run_agent(
             model_call,
             _request(),
             {},
             limits=AgentLimits(max_total_tokens=5),
         )
+    assert exc_info.value.used_tokens == 10
+    assert exc_info.value.limit_tokens == 5
+
+
+@pytest.mark.asyncio
+async def test_agent_token_limit_does_not_charge_existing_context_again() -> None:
+    """新一轮首个请求的历史/system/tools 基线不应再次吃掉本轮新增预算。"""
+
+    async def model_call(_request: ModelRequest) -> ModelResponse:
+        return ModelResponse(
+            model="m",
+            content=(TextContent("ok"),),
+            usage=ModelUsage(input_tokens=20_000, output_tokens=200),
+        )
+
+    result = await run_agent(
+        model_call,
+        _request(),
+        {},
+        limits=AgentLimits(max_total_tokens=16_384),
+    )
+
+    assert result.text == "ok"
+    assert result.usage.total_tokens == 20_200
 
 
 @pytest.mark.asyncio

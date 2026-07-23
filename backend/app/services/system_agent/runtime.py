@@ -645,7 +645,7 @@ class SystemAgentRuntime:
                     model=active_model,
                 )
         except ToolApprovalRequired as exc:
-            log.info(
+            log.debug(
                 "system agent tool approval required session=%s tools=%s",
                 session.id,
                 ",".join(exc.tool_names),

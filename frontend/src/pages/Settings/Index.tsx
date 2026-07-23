@@ -58,6 +58,7 @@ import { RateTemplates } from "./RateTemplates";
 import { SudoManagement } from "./SudoManagement";
 import { UserAccount } from "./UserAccount";
 import { ConfigBackup } from "./ConfigBackup";
+import { NavigationPreferences } from "./NavigationPreferences";
 
 interface KillSwitchState {
   enabled: boolean;
@@ -439,7 +440,7 @@ export function SettingsIndex() {
             <ShieldCheck className="h-4 w-4" /> 用户与管理
           </TabsTrigger>
           <TabsTrigger value="platform" className="gap-1.5">
-            <SlidersHorizontal className="h-4 w-4" /> 前缀与通知
+            <SlidersHorizontal className="h-4 w-4" /> 能力与通知
           </TabsTrigger>
           <TabsTrigger value="proxy-identity" className="gap-1.5">
             <Waypoints className="h-4 w-4" /> 代理与标识
@@ -458,6 +459,23 @@ export function SettingsIndex() {
         </TabsContent>
 
         <TabsContent value="platform" className="space-y-6">
+          <NavigationPreferences settings={settingsQ.data} />
+
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">自动化工具</CardTitle>
+              <CardDescription>定时执行与自动指令安全范围属于系统自动化，不再占用插件中心的主导航。</CardDescription>
+            </CardHeader>
+            <CardContent className="grid gap-2 sm:grid-cols-2">
+              <Button asChild variant="outline" className="justify-start">
+                <Link to="/plugins/scheduler">管理定时任务</Link>
+              </Button>
+              <Button asChild variant="outline" className="justify-start">
+                <Link to="/plugins/auto-command-whitelist">自动指令白名单</Link>
+              </Button>
+            </CardContent>
+          </Card>
+
           <Card className={guideActive && currentStep === 1 ? "siri-glow-soft" : undefined}>
             <CardHeader>
               <CardTitle className="text-base">指令前缀</CardTitle>

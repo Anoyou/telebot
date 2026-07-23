@@ -39,7 +39,7 @@ from ..db.models.payout_compensation import (
     PayoutCompensation,
 )
 from ..db.models.system import SystemSetting
-from ..logging_redaction import install_sensitive_log_filter
+from ..logging_redaction import configure_dependency_log_levels, install_sensitive_log_filter
 from ..redis_client import get_redis
 from ..services import payout_compensation, recent_message_anchor
 from ..services.action_tap import emit_compensated_payout_event
@@ -2703,4 +2703,5 @@ def worker_main(account_id: int) -> None:
         format=f"%(asctime)s [worker:{account_id}] %(levelname)s %(message)s",
     )
     install_sensitive_log_filter()
+    configure_dependency_log_levels()
     asyncio.run(run_worker(account_id))

@@ -8,7 +8,7 @@ import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { toast } from "sonner";
-import { ArrowLeft, Plus, Trash2, KeyRound, Edit3, Download, CheckCircle2, XCircle, Star, ChevronDown, ChevronRight, Eye, EyeOff, Filter, X, Package, Save, MessageSquare, ArrowUpDown } from "lucide-react";
+import { ArrowLeft, Plus, Trash2, KeyRound, Edit3, Download, CheckCircle2, XCircle, Star, ChevronDown, ChevronRight, Eye, EyeOff, Filter, X, Package, Save, MessageSquare, ArrowUpDown, GripVertical } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { CommandBadge } from "@/components/CommandBadge";
@@ -56,7 +56,7 @@ import {
   updateClientIdentityVersions,
 } from "@/api/commands";
 import { listProxies } from "@/api/proxies";
-import { getSystemSettings } from "@/api/system";
+import { getSystemSettings, patchSystemSettings } from "@/api/system";
 import type { ClientIdentityVersionDetectItem, ClientIdentityVersionItem, DetectProviderProtocolsResponse, LLMApiFormat, LLMClientIdentityProfile, LLMModality, LLMProtocolProfile, LLMProviderKind, LLMProviderOut, LLMTag, LLMWebSearchApiFormat, ProviderModel, ProtocolProbeResult, ProxyOut } from "@/api/types";
 import { getErrMsg } from "@/lib/api";
 import { cn } from "@/lib/utils";
@@ -382,7 +382,25 @@ export function LLMProviders({
     openCreateOnMount ? { ...EMPTY_FORM } : null,
   );
   const [identityVersionsOpen, setIdentityVersionsOpen] = useState(false);
-  const [providerSort, setProviderSort] = useState<"default" | "name" | "models">("default");
+  const settingsQ = useQuery({
+    queryKey: ["system", "settings"],
+    queryFn: getSystemSettings,
+  });
+  const [providerSort, setProviderSort] = useState<"custom" | "name" | "models">("custom");
+  const [editingProviderOrder, setEditingProviderOrder] = useState(false);
+  const [providerOrder, setProviderOrder] = useState<number[]>([]);
+  const [draggingProviderId, setDraggingProviderId] = useState<number | null>(null);
+  const providerDragRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    if (editingProviderOrder) return;
+    const ids = (listQ.data ?? []).map((provider) => provider.id);
+    const stored = settingsQ.data?.ui_preferences?.provider_order ?? [];
+    setProviderOrder([
+      ...stored.filter((id) => ids.includes(id)),
+      ...ids.filter((id) => !stored.includes(id)),
+    ]);
+  }, [editingProviderOrder, listQ.data, settingsQ.data?.ui_preferences?.provider_order]);
 
   const filteredProviders = (listQ.data || []).filter((p) => {
     if (!isVisionFilter) return true;
@@ -395,7 +413,40 @@ export function LLMProviders({
       const enabledRight = (right.models || []).filter((model) => model.enabled).length;
       return enabledRight - enabledLeft || left.name.localeCompare(right.name, "zh-CN");
     }
-    return left.id - right.id;
+    const leftIndex = providerOrder.indexOf(left.id);
+    const rightIndex = providerOrder.indexOf(right.id);
+    if (leftIndex < 0 && rightIndex < 0) return left.id - right.id;
+    if (leftIndex < 0) return 1;
+    if (rightIndex < 0) return -1;
+    return leftIndex - rightIndex;
+  });
+
+  const reorderProvider = (sourceId: number, targetId: number) => {
+    if (sourceId === targetId) return;
+    setProviderOrder((current) => {
+      const ids = (listQ.data ?? []).map((provider) => provider.id);
+      const next = [...current.filter((id) => ids.includes(id)), ...ids.filter((id) => !current.includes(id))];
+      const sourceIndex = next.indexOf(sourceId);
+      const targetIndex = next.indexOf(targetId);
+      if (sourceIndex < 0 || targetIndex < 0) return current;
+      next.splice(sourceIndex, 1);
+      next.splice(targetIndex, 0, sourceId);
+      return next;
+    });
+  };
+  const saveProviderOrder = useMutation({
+    mutationFn: () => patchSystemSettings({
+      ui_preferences: {
+        provider_order: providerOrder,
+      },
+    }),
+    onSuccess: () => {
+      toast.success("Provider 自定义顺序已保存");
+      setEditingProviderOrder(false);
+      setProviderSort("custom");
+      void qc.invalidateQueries({ queryKey: ["system", "settings"] });
+    },
+    onError: (error) => toast.error(getErrMsg(error)),
   });
 
   const clearProviderFilter = () => {
@@ -452,6 +503,7 @@ export function LLMProviders({
     onSuccess: () => {
       toast.success("已新建模型提供商");
       qc.invalidateQueries({ queryKey: ["llm-providers"] });
+      qc.invalidateQueries({ queryKey: ["system-agent", "capabilities"] });
       closeCreate();
     },
     onError: (err) => toast.error(getErrMsg(err)),
@@ -488,6 +540,7 @@ export function LLMProviders({
     onSuccess: () => {
       toast.success("已保存");
       qc.invalidateQueries({ queryKey: ["llm-providers"] });
+      qc.invalidateQueries({ queryKey: ["system-agent", "capabilities"] });
       setEditing(null);
     },
     onError: (err) => toast.error(getErrMsg(err)),
@@ -498,6 +551,7 @@ export function LLMProviders({
     onSuccess: () => {
       toast.success("已删除");
       qc.invalidateQueries({ queryKey: ["llm-providers"] });
+      qc.invalidateQueries({ queryKey: ["system-agent", "capabilities"] });
     },
     onError: (err) => toast.error(getErrMsg(err)),
   });
@@ -609,24 +663,38 @@ export function LLMProviders({
               >
                 <KeyRound className="mr-1 h-4 w-4" />客户端身份版本
               </Button>
-              <Button size="sm" className="min-w-0 flex-1 sm:ml-auto sm:flex-none" onClick={openCreate}>
-                <Plus className="mr-1 h-4 w-4" /> 新建
-              </Button>
             </div>
           </div>
         </CardHeader>
         <CardContent>
-          {visibleProviders.length > 1 ? (
-            <div className="mb-3 flex items-center justify-end gap-2">
+          <div className="mb-3 flex flex-wrap items-center justify-end gap-2">
+            {visibleProviders.length > 1 ? (
+              <>
               <ArrowUpDown className="h-3.5 w-3.5 text-muted-foreground" />
               <Label htmlFor="provider-sort" className="text-xs text-muted-foreground">排序</Label>
-              <Select id="provider-sort" value={providerSort} onChange={(event) => setProviderSort(event.target.value as typeof providerSort)} className="h-9 w-auto min-w-32 text-xs">
-                <option value="default">创建顺序</option>
+              <Select id="provider-sort" value={providerSort} disabled={editingProviderOrder} onChange={(event) => setProviderSort(event.target.value as typeof providerSort)} className="h-11 w-auto min-w-32 text-xs sm:h-9">
+                <option value="custom">自定义顺序</option>
                 <option value="name">名称</option>
                 <option value="models">启用模型数</option>
               </Select>
-            </div>
-          ) : null}
+              {editingProviderOrder ? (
+                <>
+                  <Button type="button" size="sm" variant="outline" className="min-h-11 sm:min-h-9" onClick={() => setEditingProviderOrder(false)}>取消</Button>
+                  <Button type="button" size="sm" className="min-h-11 sm:min-h-9" loading={saveProviderOrder.isPending} onClick={() => saveProviderOrder.mutate()}>
+                    {!saveProviderOrder.isPending ? <Save className="mr-1 h-4 w-4" /> : null}保存排序
+                  </Button>
+                </>
+              ) : (
+                <Button type="button" size="sm" variant="outline" className="min-h-11 sm:min-h-9" onClick={() => { setProviderSort("custom"); setEditingProviderOrder(true); }}>
+                  <GripVertical className="mr-1 h-4 w-4" />编辑排序
+                </Button>
+              )}
+              </>
+            ) : null}
+            <Button size="sm" className="min-h-11 sm:min-h-9" disabled={editingProviderOrder} onClick={openCreate}>
+              <Plus className="mr-1 h-4 w-4" /> 新建
+            </Button>
+          </div>
           {isVisionFilter ? (
             <div className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded-md border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
               <span className="inline-flex items-center gap-1.5">
@@ -642,6 +710,55 @@ export function LLMProviders({
           {listQ.isLoading ? (
             <div className="flex h-20 items-center justify-center">
               <Spinner className="text-primary" />
+            </div>
+          ) : editingProviderOrder && visibleProviders.length > 0 ? (
+            <div className="space-y-2" aria-label="Provider 自定义排序">
+              {visibleProviders.map((provider) => (
+                <div
+                  key={provider.id}
+                  data-provider-sort-id={provider.id}
+                  className={cn(
+                    "flex min-h-14 items-center gap-3 rounded-lg border bg-background px-3 py-2",
+                    draggingProviderId === provider.id && "border-primary/50 bg-primary/5 opacity-70",
+                  )}
+                >
+                  <button
+                    type="button"
+                    className="grid h-11 w-11 shrink-0 touch-none place-items-center rounded-md text-muted-foreground active:scale-95 active:bg-muted motion-reduce:transform-none"
+                    aria-label={`拖动 ${provider.name} 排序`}
+                    onPointerDown={(event) => {
+                      event.preventDefault();
+                      event.currentTarget.setPointerCapture(event.pointerId);
+                      providerDragRef.current = provider.id;
+                      setDraggingProviderId(provider.id);
+                    }}
+                    onPointerMove={(event) => {
+                      const sourceId = providerDragRef.current;
+                      if (sourceId == null) return;
+                      const target = document.elementFromPoint(event.clientX, event.clientY)?.closest<HTMLElement>("[data-provider-sort-id]");
+                      const targetId = Number(target?.dataset.providerSortId);
+                      if (Number.isInteger(targetId)) reorderProvider(sourceId, targetId);
+                    }}
+                    onPointerUp={(event) => {
+                      if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+                      providerDragRef.current = null;
+                      setDraggingProviderId(null);
+                    }}
+                    onPointerCancel={() => {
+                      providerDragRef.current = null;
+                      setDraggingProviderId(null);
+                    }}
+                  >
+                    <GripVertical className="h-5 w-5" />
+                  </button>
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate text-sm font-semibold">{provider.name}</div>
+                    <div className="truncate font-mono text-xs text-muted-foreground">{provider.default_model}</div>
+                  </div>
+                  <MetaBadge>{(provider.models || []).filter((model) => model.enabled).length} 个模型</MetaBadge>
+                </div>
+              ))}
+              <p className="text-xs text-muted-foreground">按住左侧手柄拖动卡片，完成后点击“保存排序”。</p>
             </div>
           ) : visibleProviders.length > 0 ? (
             <>
@@ -2525,8 +2642,11 @@ function IdentityVersionsDialog({
                     <div className="flex flex-wrap items-center justify-between gap-2">
                       <div className="min-w-0">
                         <p className="truncate text-sm font-medium">{it.label}</p>
-                        <p className="truncate text-xs text-muted-foreground">
-                          默认 {it.default}
+                        <p className="break-words text-xs text-muted-foreground">
+                          当前默认 {(drafts[it.key] || it.current).trim() || it.current}
+                          {(drafts[it.key] || it.current).trim() !== it.default.trim()
+                            ? ` · 内置基线 ${it.default}`
+                            : ""}
                           {it.registry
                             ? ` · 源 ${it.registry === "cli:grok-update-check" ? "grok update --check / xAI stable" : it.registry}`
                             : " · 仅手动填写"}

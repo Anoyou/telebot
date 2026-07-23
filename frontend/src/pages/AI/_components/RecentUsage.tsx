@@ -19,6 +19,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 export function RecentUsageContent() {
   const queryClient = useQueryClient();
   const [expandedId, setExpandedId] = useState<number | null>(null);
+  const [statusFilter, setStatusFilter] = useState<"all" | "success" | "failed">("all");
   const providersQ = useQuery({
     queryKey: ["llm-providers"],
     queryFn: listLLMProviders,
@@ -106,6 +107,15 @@ export function RecentUsageContent() {
   const usage = usageQ.data;
   const rows = usage?.items || [];
   const summary = usage?.summary;
+  const filteredRows = rows.filter((record) => {
+    if (statusFilter === "success") return record.success;
+    if (statusFilter === "failed") return !record.success;
+    return true;
+  });
+  const toggleStatusFilter = (next: "success" | "failed") => {
+    setExpandedId(null);
+    setStatusFilter((current) => current === next ? "all" : next);
+  };
 
   return (
     <Card>
@@ -133,14 +143,26 @@ export function RecentUsageContent() {
         {summary && (
           <div className="space-y-3">
             <div className="grid grid-cols-2 gap-2 sm:flex sm:flex-wrap">
-              <SignalPill tone="primary" label="请求数" value={summary.request_count} />
-              <SignalPill tone="success" label="成功" value={summary.success_count} />
-              <SignalPill tone={summary.failed_count > 0 ? "warn" : "neutral"} label="失败" value={summary.failed_count} />
-              <SignalPill tone="neutral" label="Fallback" value={summary.fallback_count} />
               <SignalPill tone="neutral" label="总 Token" value={summary.total_tokens} />
-              <SignalPill tone="primary" label="平均耗时" value={`${summary.avg_latency_ms}ms`} />
+              <SignalPill tone="primary" label="请求数" value={summary.request_count} />
+              <button
+                type="button"
+                aria-pressed={statusFilter === "success"}
+                onClick={() => toggleStatusFilter("success")}
+                className={cn("rounded-full text-left active:scale-95 motion-reduce:transform-none", statusFilter === "success" && "ring-2 ring-success ring-offset-2 ring-offset-background")}
+              >
+                <SignalPill tone="success" label="成功" value={summary.success_count} />
+              </button>
+              <button
+                type="button"
+                aria-pressed={statusFilter === "failed"}
+                onClick={() => toggleStatusFilter("failed")}
+                className={cn("rounded-full text-left active:scale-95 motion-reduce:transform-none", statusFilter === "failed" && "ring-2 ring-warning ring-offset-2 ring-offset-background")}
+              >
+                <SignalPill tone={summary.failed_count > 0 ? "warn" : "neutral"} label="失败" value={summary.failed_count} />
+              </button>
             </div>
-            <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+            <div className="grid gap-2 sm:grid-cols-2">
               <ToneRailCard
                 icon={History}
                 title="成功率"
@@ -155,20 +177,18 @@ export function RecentUsageContent() {
                 description={<MeterBar value={summary.request_count > 0 ? (summary.failed_count / summary.request_count) * 100 : 0} tone={summary.failed_count > 0 ? "warn" : "neutral"} className="mt-2" />}
                 tone={summary.failed_count > 0 ? "warn" : "neutral"}
               />
-              <ToneRailCard
-                icon={History}
-                title="Fallback 占比"
-                value={`${summary.request_count > 0 ? Math.round((summary.fallback_count / summary.request_count) * 100) : 0}%`}
-                description={<MeterBar value={summary.request_count > 0 ? (summary.fallback_count / summary.request_count) * 100 : 0} tone="primary" className="mt-2" />}
-                tone="primary"
-              />
             </div>
+            {statusFilter !== "all" ? (
+              <div className="text-xs text-muted-foreground">
+                当前仅显示{statusFilter === "success" ? "成功" : "失败"}记录，再点一次指标可取消筛选。
+              </div>
+            ) : null}
           </div>
         )}
 
-        {rows.length === 0 ? (
+        {filteredRows.length === 0 ? (
           <p className="rounded-md border border-dashed py-8 text-center text-sm text-muted-foreground">
-            暂无调用记录。触发一次 AI 指令后再回来查看。
+            {rows.length === 0 ? "暂无调用记录。触发一次 AI 指令后再回来查看。" : "当前筛选下没有调用记录。"}
           </p>
         ) : (
           <>
@@ -190,7 +210,7 @@ export function RecentUsageContent() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {rows.map((r) => {
+                {filteredRows.map((r) => {
                   const tokens = (r.input_tokens || 0) + (r.output_tokens || 0);
                   const expanded = expandedId === r.id;
                   return (
@@ -245,7 +265,7 @@ export function RecentUsageContent() {
             </Table>
           </div>
           <div className="space-y-3 md:hidden">
-            {rows.map((r) => (
+            {filteredRows.map((r) => (
               <UsageRecordCard
                 key={r.id}
                 record={r}
@@ -272,7 +292,7 @@ function UsageRecordCard({
 }) {
   const tokens = (record.input_tokens || 0) + (record.output_tokens || 0);
   return (
-    <div className="rounded-xl border border-border/70 bg-background/70 p-3">
+    <div data-usage-record className="rounded-xl border border-border/70 bg-background/70 p-3">
       <button type="button" className="block w-full text-left" onClick={onToggle}>
         <div className="flex min-w-0 items-start justify-between gap-3">
           <div className="min-w-0">

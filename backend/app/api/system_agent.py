@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import uuid
+from datetime import datetime
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
@@ -414,6 +415,27 @@ async def retry_message(
 
 
 # ── Durable Run ──────────────────────────────────────────────────
+@router.get("/runs", response_model=list[SystemAgentRunOut])
+async def list_system_agent_runs(
+    user: CurrentUser,
+    status: str | None = Query(
+        default=None,
+        pattern="^(queued|running|succeeded|failed|cancelled)$",
+    ),
+    since: datetime | None = Query(default=None),
+    until: datetime | None = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=500),
+) -> list[SystemAgentRunOut]:
+    rows = await get_system_agent_run_manager().list_runs(
+        web_user_id=user.id,
+        status=status,
+        since=since,
+        until=until,
+        limit=limit,
+    )
+    return [_run_out(row) for row in rows]
+
+
 @router.post(
     "/sessions/{session_id}/runs",
     response_model=SystemAgentRunOut,

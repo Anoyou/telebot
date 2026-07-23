@@ -203,7 +203,7 @@ export function Conversation({
   return (
     <div
       ref={scrollRef}
-      className="mx-auto flex w-full max-w-3xl flex-1 flex-col gap-3 overflow-y-auto p-4"
+      className="mx-auto flex w-full max-w-3xl flex-1 flex-col gap-3 overflow-y-auto p-4 xl:max-w-5xl 2xl:max-w-6xl"
       onScroll={(event) => {
         const node = event.currentTarget;
         followStreamRef.current = node.scrollHeight - node.scrollTop - node.clientHeight < 72;
@@ -214,6 +214,8 @@ export function Conversation({
         const isTool = item.role === "tool";
         const isAction = item.role === "action" && item.action;
         const isFailedUser = isUser && item.runStatus === "failed" && item.messageId != null;
+        const failedRunId =
+          isFailedUser && typeof item.usage?.run_id === "string" ? item.usage.run_id : null;
         const switchCandidate = item.providerSwitch?.candidates?.[0];
         const approvalTools = item.toolApproval?.tools || [];
         return (
@@ -254,7 +256,7 @@ export function Conversation({
                     "max-w-full break-words text-sm leading-relaxed",
                     isUser && "rounded-2xl bg-primary px-3 py-2 text-primary-foreground",
                     // 助手回答：无气泡正文（DEEIX / restyle）
-                    !isUser && !isTool && "min-w-0 max-w-[min(75ch,100%)] py-0.5 text-foreground",
+                    !isUser && !isTool && "min-w-0 max-w-[min(75ch,100%)] py-0.5 text-foreground xl:max-w-[min(96ch,100%)] 2xl:max-w-[min(112ch,100%)]",
                     isTool && "rounded-2xl border border-dashed bg-background px-3 py-2 text-xs text-muted-foreground",
                     (isUser || isTool) && "whitespace-pre-wrap",
                     item.pending && "opacity-70",
@@ -309,6 +311,14 @@ export function Conversation({
                         </p>
                       ) : null}
                       {item.retryCount ? <p className="mt-1 opacity-70">已重试 {item.retryCount} 次</p> : null}
+                      {failedRunId ? (
+                        <RunTrace
+                          runId={failedRunId}
+                          failed
+                          defaultOpen={false}
+                          className="mt-1.5 text-foreground"
+                        />
+                      ) : null}
                     </div>
                     <div className="flex shrink-0 justify-end gap-1.5 self-end sm:self-auto">
                       {approvalTools.length ? (

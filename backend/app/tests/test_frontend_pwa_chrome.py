@@ -52,3 +52,9 @@ def test_ios_pwa_chrome_bootstrap_matches_csp_and_status_bar_mode() -> None:
         hashlib.sha256(script_match.group("content").encode()).digest()
     ).decode()
     assert f"sha256-{digest}" in nginx
+
+
+def test_frontend_nginx_disables_routine_access_log_noise() -> None:
+    nginx = NGINX_CONF.read_text(encoding="utf-8")
+
+    assert "access_log off;" in nginx

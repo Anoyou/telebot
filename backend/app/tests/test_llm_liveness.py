@@ -62,6 +62,21 @@ def test_preview_ollama_needs_no_key() -> None:
     assert preview.task_total == 1
 
 
+def test_preview_respects_provider_specific_model_scope() -> None:
+    rows = [
+        _Row(1, "p1", [_model("shared", True), _model("one", True)]),
+        _Row(2, "p2", [_model("shared", True), _model("two", True)]),
+    ]
+
+    preview = lv.build_preview(
+        rows,
+        models_by_provider={1: ["shared"], 2: ["two"]},
+    )
+
+    assert preview.task_total == 2
+    assert [plan.enabled_models for plan in preview.provider_plans] == [["shared"], ["two"]]
+
+
 def test_preview_max_output_tokens_cost_estimate() -> None:
     rows = [_Row(1, "p", [_model("a", True), _model("b", True)])]
     preview = lv.build_preview(rows, max_tokens=100)

@@ -26,6 +26,7 @@ export function PluginWorkspaceNav({
       : "/plugins/auto-command-whitelist",
     manage: "/plugins/manage?tab=plugins",
   };
+  const contextualTabs = new Set<PluginWorkspaceTab>(["templates", "scheduler", "whitelist"]);
 
   return (
     <div className="flex flex-wrap items-center justify-center gap-2 sm:justify-start">
@@ -42,18 +43,14 @@ export function PluginWorkspaceNav({
             <Boxes className="h-4 w-4" />
             插件中心
           </TabsTrigger>
-          <TabsTrigger value="templates" className={`gap-1.5 ${guideActive ? "siri-glow" : ""}`}>
-            <FileText className="h-4 w-4" />
-            指令模板
-          </TabsTrigger>
-          <TabsTrigger value="scheduler" className="gap-1.5">
-            <CalendarClock className="h-4 w-4" />
-            定时任务
-          </TabsTrigger>
-          <TabsTrigger value="whitelist" className="gap-1.5">
-            <ShieldCheck className="h-4 w-4" />
-            自动指令白名单
-          </TabsTrigger>
+          {contextualTabs.has(activeTab) ? (
+            <TabsTrigger value={activeTab} className={`gap-1.5 ${guideActive ? "siri-glow" : ""}`}>
+              {activeTab === "templates" ? <FileText className="h-4 w-4" /> : null}
+              {activeTab === "scheduler" ? <CalendarClock className="h-4 w-4" /> : null}
+              {activeTab === "whitelist" ? <ShieldCheck className="h-4 w-4" /> : null}
+              {activeTab === "templates" ? "指令模板" : activeTab === "scheduler" ? "定时任务" : "自动指令白名单"}
+            </TabsTrigger>
+          ) : null}
           <TabsTrigger value="manage" className={`gap-1.5 ${guideActive ? "siri-glow" : ""}`}>
             <PackagePlus className="h-4 w-4" />
             插件管理

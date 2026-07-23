@@ -870,14 +870,15 @@ def test_worker_main_installs_sensitive_log_filter_after_logging_setup(monkeypat
 
     monkeypatch.setattr(runtime.logging, "basicConfig", lambda **kwargs: calls.append(("logging", kwargs)))
     monkeypatch.setattr(runtime, "install_sensitive_log_filter", lambda: calls.append(("redaction", None)))
+    monkeypatch.setattr(runtime, "configure_dependency_log_levels", lambda: calls.append(("dependency_levels", None)))
     monkeypatch.setattr(runtime, "run_worker", lambda account_id: worker_result)
     monkeypatch.setattr(runtime.asyncio, "run", lambda value: calls.append(("run", value)))
 
     runtime.worker_main(7)
 
-    assert [item[0] for item in calls] == ["logging", "redaction", "run"]
+    assert [item[0] for item in calls] == ["logging", "redaction", "dependency_levels", "run"]
     assert calls[0][1]["format"] == "%(asctime)s [worker:7] %(levelname)s %(message)s"
-    assert calls[2][1] is worker_result
+    assert calls[3][1] is worker_result
 
 
 @pytest.mark.asyncio

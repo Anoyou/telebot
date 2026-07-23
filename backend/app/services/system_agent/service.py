@@ -691,7 +691,10 @@ class SystemAgentService:
                 error_message or "助手未能完成本轮请求，请稍后重试。",
                 chat_secrets,
             )[:1024]
-            user_msg.usage = failure_context
+            failure_usage = dict(failure_context or {})
+            if run_id:
+                failure_usage["run_id"] = str(run_id)
+            user_msg.usage = failure_usage or None
             content = user_msg.content if isinstance(user_msg.content, dict) else {}
             remember_failed_turn(
                 session,

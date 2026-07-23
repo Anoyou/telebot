@@ -13,7 +13,7 @@ from app.api.features import (
     _sanitize_config,
 )
 from app.api.logs import RuntimeLogItem, list_audit_logs
-from app.logging_redaction import SensitiveDataLogFilter
+from app.logging_redaction import SensitiveDataLogFilter, configure_dependency_log_levels
 from app.services import audit
 from app.services.redactor import redact_text, redact_value
 
@@ -79,6 +79,18 @@ def test_log_filter_redacts_telegram_bot_url_args() -> None:
     rendered = record.getMessage()
     assert "123456:secret-token" not in rendered
     assert "https://api.telegram.org/bot***/getUpdates" in rendered
+
+
+def test_dependency_http_request_logs_default_to_warning() -> None:
+    previous_httpx = logging.getLogger("httpx").level
+    previous_httpcore = logging.getLogger("httpcore").level
+    try:
+        configure_dependency_log_levels()
+        assert logging.getLogger("httpx").level == logging.WARNING
+        assert logging.getLogger("httpcore").level == logging.WARNING
+    finally:
+        logging.getLogger("httpx").setLevel(previous_httpx)
+        logging.getLogger("httpcore").setLevel(previous_httpcore)
 
 
 @pytest.mark.asyncio

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
-import { Menu, MessageCircle, Minimize2, Server, Settings2 } from "lucide-react";
+import { Menu, MessageCircle, Server, Settings2 } from "lucide-react";
 import { toast } from "sonner";
 
 import {
@@ -40,6 +40,8 @@ import { SessionDrawer } from "@/components/assistant/SessionDrawer";
 import { PageHeader, PageShell } from "@/components/layout/PageScaffold";
 import { Button } from "@/components/ui/button";
 import { Select } from "@/components/ui/select";
+import { Input } from "@/components/ui/input";
+import { Switch } from "@/components/ui/switch";
 import { Skeleton } from "@/components/ui/misc";
 import { useStreamingText } from "@/hooks/useStreamingText";
 import { getErrMsg } from "@/lib/api";
@@ -120,7 +122,6 @@ export function AssistantIndex() {
   const qc = useQueryClient();
   const {
     collapsed: assistantCollapsed,
-    setCollapsed: setAssistantCollapsed,
     setStreaming: setDockStreaming,
   } = useAssistantDock();
   const [activeId, setActiveId] = useState<string | null>(null);
@@ -167,6 +168,7 @@ export function AssistantIndex() {
   const capsQ = useQuery({
     queryKey: ["system-agent", "capabilities"],
     queryFn: getSystemAgentCapabilities,
+    refetchOnMount: "always",
   });
   const sessionsQ = useQuery({
     queryKey: ["system-agent", "sessions"],
@@ -179,6 +181,7 @@ export function AssistantIndex() {
   const providersQ = useQuery({
     queryKey: ["llm-providers"],
     queryFn: listLLMProviders,
+    refetchOnMount: "always",
   });
   const memoryQ = useQuery({
     queryKey: ["system-agent", "user-memory"],
@@ -883,23 +886,6 @@ export function AssistantIndex() {
         title="系统助手"
         description="用自然语言查询并操作系统能力；写操作需内联确认。"
         icon={MessageCircle}
-        actions={(
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            className="h-10 rounded-full border-primary/35 bg-card/95 px-3 text-foreground shadow-md shadow-black/10 hover:bg-muted"
-            onClick={() => setAssistantCollapsed(true)}
-            aria-label="收起系统助手"
-            title="收起为悬浮助手"
-          >
-            <span className="grid h-6 w-6 place-items-center rounded-full bg-primary/15 text-primary">
-              <MessageCircle className="h-3.5 w-3.5" />
-            </span>
-            <span>收起助手</span>
-            <Minimize2 className="h-3.5 w-3.5 text-muted-foreground" />
-          </Button>
-        )}
       />
 
       <div className="mb-3 rounded-lg border border-border/70 bg-muted/20 p-2.5">
@@ -993,27 +979,24 @@ export function AssistantIndex() {
         <div className="mb-3 rounded-lg border bg-card p-4 text-sm">
           <div className="mb-3 font-medium">系统助手模型</div>
           <div className="grid gap-3 sm:grid-cols-2">
-            <label className="flex items-center gap-2">
-              <input
-                type="checkbox"
+            <div className="flex min-h-11 items-center justify-between gap-3 rounded-md border px-3 py-2">
+              <span>启用系统助手</span>
+              <Switch
                 checked={!!configQ.data?.enabled}
-                onChange={(e) =>
-                  saveConfigMut.mutate({ enabled: e.target.checked })
-                }
+                disabled={saveConfigMut.isPending}
+                onCheckedChange={(checked) => saveConfigMut.mutate({ enabled: checked })}
+                aria-label="启用系统助手"
               />
-              启用系统助手
-            </label>
-            <label className="flex items-center gap-2">
-              <input
-                type="checkbox"
+            </div>
+            <div className="flex min-h-11 items-center justify-between gap-3 rounded-md border px-3 py-2">
+              <span>调用工具前需要批准</span>
+              <Switch
                 checked={!!configQ.data?.require_tool_approval}
                 disabled={saveConfigMut.isPending}
-                onChange={(e) =>
-                  saveConfigMut.mutate({ require_tool_approval: e.target.checked })
-                }
+                onCheckedChange={(checked) => saveConfigMut.mutate({ require_tool_approval: checked })}
+                aria-label="调用工具前需要批准"
               />
-              调用工具前需要批准
-            </label>
+            </div>
             <label className="flex flex-col gap-1">
               <span className="text-muted-foreground">固定 Provider</span>
               <Select
@@ -1068,6 +1051,27 @@ export function AssistantIndex() {
                 )}
               </Select>
             </label>
+            <label className="flex flex-col gap-1 sm:col-span-2">
+              <span className="text-muted-foreground">本轮 token 预算</span>
+              <Input
+                key={configQ.data?.session_token_limit ?? 16_384}
+                type="number"
+                min={1024}
+                max={100000}
+                step={1024}
+                defaultValue={configQ.data?.session_token_limit ?? 16_384}
+                disabled={saveConfigMut.isPending}
+                onBlur={(event) => {
+                  const next = Math.max(1024, Math.min(100000, Number(event.target.value) || 16_384));
+                  if (next !== configQ.data?.session_token_limit) {
+                    saveConfigMut.mutate({ session_token_limit: next });
+                  }
+                }}
+              />
+              <span className="text-xs text-muted-foreground">
+                只限制本轮新增输出和工具结果增长；历史上下文不会在新问题里重复计费。
+              </span>
+            </label>
           </div>
           <div className="mt-4 border-t pt-3">
             <div className="font-medium">跨 Provider fallback 范围</div>
@@ -1084,30 +1088,29 @@ export function AssistantIndex() {
                     provider.id,
                   );
                   return (
-                    <label
+                    <div
                       key={provider.id}
-                      className="flex min-w-0 items-start gap-2 rounded-md border px-3 py-2"
+                      className="flex min-w-0 items-center justify-between gap-3 rounded-md border px-3 py-2"
                     >
-                      <input
-                        type="checkbox"
-                        className="mt-0.5"
-                        checked={checked}
-                        disabled={!eligible || saveConfigMut.isPending}
-                        onChange={(event) => {
-                          const current = configQ.data?.fallback_provider_ids || [];
-                          const next = event.target.checked
-                            ? [...current, provider.id]
-                            : current.filter((id) => id !== provider.id);
-                          saveConfigMut.mutate({ fallback_provider_ids: next });
-                        }}
-                      />
                       <span className="min-w-0">
                         <span className="block truncate text-foreground">{provider.name}</span>
                         <span className="block truncate text-xs text-muted-foreground">
                           {eligible ? `${models.length} 个 Tools 模型` : "不可用于 Agent fallback"}
                         </span>
                       </span>
-                    </label>
+                      <Switch
+                        checked={checked}
+                        disabled={!eligible || saveConfigMut.isPending}
+                        onCheckedChange={(nextChecked) => {
+                          const current = configQ.data?.fallback_provider_ids || [];
+                          const next = nextChecked
+                            ? [...current, provider.id]
+                            : current.filter((id) => id !== provider.id);
+                          saveConfigMut.mutate({ fallback_provider_ids: next });
+                        }}
+                        aria-label={`${provider.name} fallback`}
+                      />
+                    </div>
                   );
                 })}
             </div>
@@ -1149,17 +1152,16 @@ export function AssistantIndex() {
                     key={item.id}
                     className="flex flex-wrap items-center gap-2 rounded-md border px-3 py-2"
                   >
-                    <label className="flex items-center gap-1.5 text-xs">
-                      <input
-                        type="checkbox"
+                    <div className="flex items-center gap-1.5 text-xs">
+                      <Switch
+                        className="scale-90"
                         checked={item.enabled}
                         disabled={patchMemoryMut.isPending}
-                        onChange={(e) =>
-                          patchMemoryMut.mutate({ id: item.id, enabled: e.target.checked })
-                        }
+                        onCheckedChange={(checked) => patchMemoryMut.mutate({ id: item.id, enabled: checked })}
+                        aria-label={`切换记忆：${item.content}`}
                       />
                       启用
-                    </label>
+                    </div>
                     <span className="min-w-0 flex-1 text-sm">{item.content}</span>
                     <Button
                       type="button"
@@ -1251,7 +1253,7 @@ export function AssistantIndex() {
                 }}
               />
               {streamNotice ? (
-                <div role="status" aria-live="polite" className="mx-auto w-full max-w-3xl px-4 pb-2 text-xs text-muted-foreground">
+                <div role="status" aria-live="polite" className="mx-auto w-full max-w-3xl px-4 pb-2 text-xs text-muted-foreground xl:max-w-5xl 2xl:max-w-6xl">
                   {streamNotice}
                 </div>
               ) : null}

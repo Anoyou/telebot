@@ -211,6 +211,16 @@ export async function listSystemAgentRunEvents(
   })) as SystemAgentStreamEvent[];
 }
 
+export async function listSystemAgentRuns(params?: {
+  status?: string;
+  since?: string;
+  until?: string;
+  limit?: number;
+}): Promise<SystemAgentRun[]> {
+  const { data } = await api.get<SystemAgentRun[]>("/api/system-agent/runs", { params });
+  return data;
+}
+
 export interface SystemAgentUserMemory {
   id: number;
   scope_type: string;

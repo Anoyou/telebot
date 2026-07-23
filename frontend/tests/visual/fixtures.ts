@@ -142,6 +142,18 @@ function jsonResponse(pathname: string): unknown | undefined {
   if (pathname === "/api/commands/llm-providers/runtime-health") return [];
   if (pathname === "/api/system/resource-dashboard") return emptyResourceDashboard;
   if (pathname === "/api/system/settings") return { timezone: "Asia/Shanghai", login_security: {} };
+  if (pathname === "/api/system-agent/config") return {
+    enabled: false, provider_id: null, model: null, fallback_provider_ids: [],
+    require_tool_approval: false, max_steps: 8, max_tool_calls: 24,
+    session_token_limit: 16_384,
+  };
+  if (pathname === "/api/system-agent/capabilities") return {
+    enabled: false, provider_id: null, model: null, provider_name: null,
+    resolved_model: null, ai_enabled: true, timezone: "Asia/Shanghai",
+    tools: [], stage: 1, write_tools_available: false, model_matrix: [],
+  };
+  if (pathname === "/api/system-agent/sessions") return [];
+  if (pathname === "/api/system-agent/runs") return [];
   if (pathname === "/api/system/capabilities") return platformCapabilitiesFixture;
   if (pathname === "/api/feature-matrix") return { features: [] };
   if (pathname === "/api/ledger") return { items: [ledgerEntryFixture] };

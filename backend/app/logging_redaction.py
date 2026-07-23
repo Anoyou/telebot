@@ -27,6 +27,13 @@ def install_sensitive_log_filter() -> None:
             handler.addFilter(SensitiveDataLogFilter())
 
 
+def configure_dependency_log_levels() -> None:
+    """Keep routine HTTP client traffic out of production console logs."""
+
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+
+
 def _redact_log_args(args: Any) -> Any:
     if isinstance(args, dict):
         return {key: _redact_log_arg(value) for key, value in args.items()}
@@ -47,4 +54,8 @@ def _redact_log_arg(value: Any) -> Any:
     return redact_text(str(value))
 
 
-__all__ = ["SensitiveDataLogFilter", "install_sensitive_log_filter"]
+__all__ = [
+    "SensitiveDataLogFilter",
+    "configure_dependency_log_levels",
+    "install_sensitive_log_filter",
+]

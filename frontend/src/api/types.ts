@@ -1087,6 +1087,12 @@ export interface SystemSettings {
     native_raw_persist_enabled: boolean;
     native_raw_retention_days: number;
   };
+  /** 控制台界面偏好；保存在服务端，PWA/浏览器间共享。 */
+  ui_preferences?: {
+    sidebar_order: string[];
+    mobile_nav_order: string[];
+    provider_order: number[];
+  };
 }
 
 // ===================== 系统健康概览（Dashboard 用）=====================
@@ -1766,6 +1772,7 @@ export interface ChatTestModelResult {
   output_tokens: number;
   empty_response: boolean;
   error?: string | null;
+  status_code?: number | null;
   client_identity_profile?: string | null;
   effective_api_format?: string | null;
   streaming?: boolean;
@@ -1783,6 +1790,7 @@ export interface FullLivenessPreviewRequest {
   max_tokens?: number;
   global_concurrency?: number;
   only_provider_ids?: number[] | null;
+  models_by_provider?: Record<number, string[]> | null;
 }
 
 export interface LivenessProviderPlan {
@@ -1815,6 +1823,7 @@ export interface FullLivenessRunRequest {
   confirm_large_run?: boolean;
   only_provider_ids?: number[] | null;
   only_models?: string[] | null;
+  models_by_provider?: Record<number, string[]> | null;
 }
 
 export interface LivenessResultItem {
@@ -1827,6 +1836,7 @@ export interface LivenessResultItem {
   output_tokens: number;
   preview?: string | null;
   error?: string | null;
+  status_code?: number | null;
   error_category?: string | null;
   suggestion?: string | null;
   client_identity_profile?: string | null;

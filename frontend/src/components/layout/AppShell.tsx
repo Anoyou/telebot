@@ -5,7 +5,7 @@ import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import { Outlet, useLocation, useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { MoreHorizontal } from "lucide-react";
+import { History, MessageCircle, MoreHorizontal } from "lucide-react";
 
 import {
   MobileSidebar,
@@ -26,15 +26,18 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
 import { APP_VERSION_LABEL } from "@/lib/version";
 
 const AssistantIndex = lazy(() => import("@/pages/Assistant/Index").then((module) => ({ default: module.AssistantIndex })));
+const ChangelogMenu = lazy(() => import("./ChangelogMenu"));
 
 type MobileScrollEdge = "top" | "bottom" | null;
 
 export function AppShell() {
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  const [mobileChangelogOpen, setMobileChangelogOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [mobileScrollEdge, setMobileScrollEdge] = useState<MobileScrollEdge>(null);
   const mainRef = useRef<HTMLElement>(null);
@@ -136,8 +139,9 @@ export function AppShell() {
   }, [isLoading]);
 
   const enabled = capabilityEnabledMap(capsQ.data, settingsQ.data?.ai_enabled ?? true);
-  const mobileNavItems = mobilePrimaryNavForCapabilities(enabled);
-  const mobileMoreNavItems = mobileMoreNavForCapabilities(enabled);
+  const mobilePreferredOrder = settingsQ.data?.ui_preferences?.mobile_nav_order;
+  const mobileNavItems = mobilePrimaryNavForCapabilities(enabled, mobilePreferredOrder);
+  const mobileMoreNavItems = mobileMoreNavForCapabilities(enabled, mobilePreferredOrder);
   const mobileMoreActive = mobileMoreNavItems.some((item) =>
     isMobileNavActive(item.to, item.end, mobileActivePath),
   );
@@ -159,6 +163,7 @@ export function AppShell() {
   }
 
   return (
+    <AssistantDockProvider>
     <div className="app-frame flex h-[100dvh] w-full overflow-hidden bg-background">
       <Sidebar collapsed={sidebarCollapsed} />
       <MobileSidebar open={mobileNavOpen} onOpenChange={setMobileNavOpen} />
@@ -171,7 +176,6 @@ export function AppShell() {
         />
         {/* kill switch 开启时显示全局红色横幅；关闭时不渲染 */}
         <GlobalAlertBar />
-        <AssistantDockProvider>
           <div className="relative flex min-h-0 flex-1 flex-col">
             <main
               ref={mainRef}
@@ -205,10 +209,11 @@ export function AppShell() {
               px-[max(0.75rem,env(safe-area-inset-left))]
             "
           >
-            <div
-              className="liquid-bottom-nav pointer-events-auto mx-auto grid h-[3.75rem] w-full max-w-sm gap-1 px-2 py-2"
-              style={{ gridTemplateColumns: `repeat(${mobileNavItems.length + 1}, minmax(0, 1fr))` }}
-            >
+            <div className="pointer-events-auto mx-auto flex h-[3.75rem] w-full max-w-[23rem] gap-2">
+              <div
+                className="liquid-bottom-nav grid min-w-0 flex-1 gap-0.5 px-1.5 py-2"
+                style={{ gridTemplateColumns: `repeat(${mobileNavItems.length + 1}, minmax(0, 1fr))` }}
+              >
               {mobileNavItems.map((item) => {
               const active = isMobileNavActive(item.to, item.end, mobileActivePath);
               const activate = () => {
@@ -285,13 +290,53 @@ export function AppShell() {
                     </DropdownMenuItem>
                   );
                 })}
+                <DropdownMenuItem
+                  onSelect={() => setMobileChangelogOpen(true)}
+                  className="min-h-11 gap-3 rounded-lg px-3 text-sm"
+                >
+                  <History className="h-4 w-4 shrink-0" />
+                  <span className="min-w-0 flex-1 truncate">更新日志</span>
+                  <span className="text-xs text-muted-foreground">{APP_VERSION_LABEL}</span>
+                </DropdownMenuItem>
               </DropdownMenuContent>
               </DropdownMenu>
+              </div>
+              <MobileAssistantButton />
             </div>
           </nav>
-        </AssistantDockProvider>
+          <Dialog open={mobileChangelogOpen} onOpenChange={setMobileChangelogOpen}>
+            <DialogContent className="max-h-[calc(100dvh-2rem-env(safe-area-inset-top)-env(safe-area-inset-bottom))] w-[calc(100vw-1.5rem)] max-w-lg overflow-y-auto p-0">
+              <DialogTitle className="sr-only">更新日志</DialogTitle>
+              <Suspense fallback={<div className="p-4 text-sm text-muted-foreground">正在加载更新日志…</div>}>
+                <ChangelogMenu />
+              </Suspense>
+            </DialogContent>
+          </Dialog>
       </div>
     </div>
+    </AssistantDockProvider>
+  );
+}
+
+function MobileAssistantButton() {
+  const { collapsed, setCollapsed, streaming } = useAssistantDock();
+  return (
+    <button
+      type="button"
+      data-assistant-mobile-button
+      aria-label={collapsed ? "打开系统助手" : "关闭系统助手"}
+      aria-pressed={!collapsed}
+      onClick={() => setCollapsed(!collapsed)}
+      className={cn(
+        "liquid-bottom-nav grid h-[3.75rem] w-[3.75rem] shrink-0 place-items-center rounded-full text-primary active:scale-95 motion-reduce:transform-none",
+        !collapsed && "bg-foreground text-background",
+      )}
+    >
+      <span className="relative">
+        <MessageCircle className="h-5 w-5" />
+        {streaming ? <span className="absolute -right-1 -top-1 h-2.5 w-2.5 animate-pulse rounded-full border-2 border-card bg-success motion-reduce:animate-none" /> : null}
+      </span>
+    </button>
   );
 }
 

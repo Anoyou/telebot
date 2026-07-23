@@ -782,6 +782,7 @@ class ChatTestModelResult(BaseModel):
     output_tokens: int = 0
     empty_response: bool = False
     error: str | None = None
+    status_code: int | None = None
     client_identity_profile: str | None = None
     effective_api_format: str | None = None
     streaming: bool = False
@@ -799,12 +800,49 @@ class ChatTestModelsResponse(BaseModel):
 
 
 # ── 阶段 C：全量已启用模型测活 ────────────────────────────────
+def _normalize_liveness_model_scope(
+    value: dict[int, list[str]] | None,
+) -> dict[int, list[str]] | None:
+    if value is None:
+        return None
+    normalized: dict[int, list[str]] = {}
+    total = 0
+    for raw_provider_id, raw_models in value.items():
+        provider_id = int(raw_provider_id)
+        if provider_id <= 0:
+            raise ValueError("Provider ID 必须为正整数")
+        if len(raw_models) > 500:
+            raise ValueError("单个 Provider 最多选择 500 个模型")
+        models: list[str] = []
+        seen: set[str] = set()
+        for raw_model in raw_models:
+            model = str(raw_model or "").strip()
+            if not model or len(model) > 256 or model in seen:
+                continue
+            seen.add(model)
+            models.append(model)
+        total += len(models)
+        if total > 2_000:
+            raise ValueError("单次巡检最多选择 2000 个模型")
+        normalized[provider_id] = models
+    return normalized
+
+
 class FullLivenessPreviewRequest(BaseModel):
     """``POST /api/commands/llm-providers/liveness/preview`` 入参。"""
 
     max_tokens: int = Field(default=256, ge=64, le=8000)
     global_concurrency: int = Field(default=8)
     only_provider_ids: list[int] | None = Field(default=None, max_length=200)
+    models_by_provider: dict[int, list[str]] | None = Field(default=None, max_length=200)
+
+    @field_validator("models_by_provider")
+    @classmethod
+    def _validate_models_by_provider(
+        cls,
+        value: dict[int, list[str]] | None,
+    ) -> dict[int, list[str]] | None:
+        return _normalize_liveness_model_scope(value)
 
 
 class LivenessProviderPlan(BaseModel):
@@ -857,7 +895,15 @@ class FullLivenessRunRequest(BaseModel):
     # 范围过滤（失败重测 / 只测某 Provider / 只测新启用模型）。
     only_provider_ids: list[int] | None = Field(default=None, max_length=200)
     only_models: list[str] | None = Field(default=None, max_length=500)
+    models_by_provider: dict[int, list[str]] | None = Field(default=None, max_length=200)
 
+    @field_validator("models_by_provider")
+    @classmethod
+    def _validate_models_by_provider(
+        cls,
+        value: dict[int, list[str]] | None,
+    ) -> dict[int, list[str]] | None:
+        return _normalize_liveness_model_scope(value)
 
 class LivenessResultItem(BaseModel):
     """单个测活任务结果（已脱敏）。"""
@@ -871,6 +917,7 @@ class LivenessResultItem(BaseModel):
     output_tokens: int = 0
     preview: str | None = None
     error: str | None = None
+    status_code: int | None = None
     error_category: str | None = None
     suggestion: str | None = None
     client_identity_profile: str | None = None

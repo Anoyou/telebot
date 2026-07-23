@@ -30,6 +30,10 @@ function formatElapsed(ms: number | null): string | null {
   return ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${ms}ms`;
 }
 
+function formatTokens(value: number | null): string {
+  return value == null ? "–" : value.toLocaleString("zh-CN");
+}
+
 /**
  * 模型执行信息行（Agent 回答下方 / 测活结果复用）。
  * 不显示费用。
@@ -83,39 +87,58 @@ export function ModelRunMeta({
 
   if (!bits.length) return null;
 
+  if (compact) {
+    return (
+      <div className={cn("text-[11px] leading-4 text-muted-foreground tabular-nums", className)}>
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+          {bits.map((bit) => <span key={bit}>{bit}</span>)}
+          {usedFallback ? <span className="rounded border border-warning/40 px-1 text-warning">fallback</span> : null}
+          {streamFallback ? <span className="rounded border px-1">完整响应</span> : null}
+          {selectionMode === "pinned" ? <span className="rounded border px-1">本轮固定</span> : null}
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div
       className={cn(
-        "space-y-0.5 text-[11px] leading-4 text-muted-foreground tabular-nums",
+        "w-full max-w-full space-y-1.5 rounded-lg border border-border/60 bg-muted/20 px-2.5 py-2 text-[11px] leading-4 text-muted-foreground tabular-nums sm:w-auto sm:rounded-none sm:border-0 sm:bg-transparent sm:px-0 sm:py-0",
         className,
       )}
     >
-      <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
-        {bits.map((bit) => (
-          <span
-            key={bit}
-            className={cn(usedFallback && mismatch && bit === summary && "font-medium text-warning")}
-          >
-            {bit}
+      <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+        {summary ? (
+          <span className={cn("min-w-0 break-all font-medium text-foreground/80", usedFallback && mismatch && "text-warning")}>
+            {summary}
           </span>
-        ))}
-        {usedFallback ? (
-          <span className="rounded border border-warning/40 px-1 text-warning">fallback</span>
         ) : null}
+        <span className="flex-1" />
+        {usedFallback ? <span className="rounded border border-warning/40 px-1 text-warning">fallback</span> : null}
         {streamFallback ? <span className="rounded border px-1">完整响应</span> : null}
-        {selectionMode === "pinned" ? (
-          <span className="rounded border px-1">本轮固定</span>
+        {selectionMode === "pinned" ? <span className="rounded border px-1">本轮固定</span> : null}
+      </div>
+      <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1">
+        {input != null || output != null ? (
+          <span className="inline-flex flex-wrap items-center gap-x-2">
+            <span>输入 {formatTokens(input)}</span>
+            <span>输出 {formatTokens(output)}</span>
+          </span>
         ) : null}
+        {tools != null ? <span>工具 {tools}</span> : null}
+        {retries != null && retries > 0 ? <span>重试 {retries}</span> : null}
+        {elapsedLabel ? <span>{elapsedLabel}</span> : null}
+        {apiFormat ? <span className="rounded bg-muted px-1.5 py-0.5">{apiFormat}</span> : null}
       </div>
       {usedFallback && requested && reported && requested !== reported ? (
-        <div className="space-y-0.5 text-[10px] text-muted-foreground">
+        <div className="space-y-0.5 border-t border-border/50 pt-1.5 text-[10px] text-muted-foreground sm:border-0 sm:pt-0">
           <div>原模型：{requested}</div>
           <div>实际使用：{reported}</div>
           <div>原因：主模型不可用或已切换</div>
         </div>
       ) : null}
       {mismatch && !usedFallback ? (
-        <div className="text-[10px] text-muted-foreground">
+        <div className="break-words border-t border-border/50 pt-1.5 text-[10px] text-muted-foreground sm:border-0 sm:pt-0">
           本轮请求 {expectedLabel}；上游返回模型标识 {reported}
         </div>
       ) : null}

@@ -519,6 +519,34 @@ async def test_tool_approval_failure_is_persisted_for_retry(
 
 
 @pytest.mark.asyncio
+async def test_failed_turn_persists_durable_run_id(agent_db, monkeypatch) -> None:
+    svc = SystemAgentService()
+
+    async def fake_stream(*_args, **_kwargs):
+        yield {"type": "error", "code": "UPSTREAM_FAILED", "message": "上游失败"}
+        yield {"type": "done", "ok": False}
+
+    monkeypatch.setattr(svc.runtime, "stream_turn", fake_stream)
+
+    async with agent_db() as db:
+        session = await svc.create_session(db, channel=CHANNEL_WEB, web_user_id=1)
+        async for _event in svc.stream_message(
+            db,
+            session=session,
+            text="测试失败轨迹",
+            role="admin",
+            channel=CHANNEL_WEB,
+            web_user_id=1,
+            run_id="durable-failed-run",
+        ):
+            pass
+
+        message = (await svc.list_messages(db, session.id))[0]
+        assert message.run_status == MESSAGE_RUN_FAILED
+        assert message.usage == {"run_id": "durable-failed-run"}
+
+
+@pytest.mark.asyncio
 async def test_provider_switch_and_tool_approval_context_are_persisted_together(
     agent_db, monkeypatch
 ) -> None:

@@ -5,6 +5,7 @@ import {
   classifyChatResult,
   classifyErrorText,
   classifyFullLivenessStatus,
+  extractHttpStatusCode,
   livenessResultToUsage,
   livenessStatusLabel,
 } from "./livenessStatus.ts";
@@ -33,6 +34,13 @@ test("全量测活 status 映射到九态词表", () => {
   assert.equal(classifyFullLivenessStatus("cancelled", { skipped: true }), "skipped");
   assert.equal(livenessStatusLabel("normal"), "正常");
   assert.equal(livenessStatusLabel("degraded"), "降级");
+});
+
+test("extracts structured and legacy HTTP status codes", () => {
+  assert.equal(extractHttpStatusCode(429, "ignored 503"), 429);
+  assert.equal(extractHttpStatusCode(null, "Responses streaming 接口返回 503"), 503);
+  assert.equal(extractHttpStatusCode(null, "模型 gpt-404 暂不可用"), null);
+  assert.equal(extractHttpStatusCode(null, "网络连接失败"), null);
 });
 
 test("错误文案分类", () => {

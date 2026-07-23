@@ -65,7 +65,7 @@ export function Composer({
 
   return (
     <form onSubmit={onSubmit} className="border-t bg-background/80 p-2 backdrop-blur sm:p-3">
-      <div className="relative mx-auto max-w-3xl rounded-xl border border-border/80 bg-input-bg/70 p-2 shadow-sm focus-within:border-primary/50 focus-within:ring-2 focus-within:ring-ring/15">
+      <div className="relative mx-auto max-w-3xl rounded-xl border border-border/80 bg-input-bg/70 p-2 shadow-sm focus-within:border-primary/50 focus-within:ring-2 focus-within:ring-ring/15 xl:max-w-5xl 2xl:max-w-6xl">
         <Textarea
           value={value}
           onChange={(e) => setValue(e.target.value)}

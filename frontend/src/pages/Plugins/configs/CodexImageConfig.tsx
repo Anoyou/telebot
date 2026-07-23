@@ -665,28 +665,28 @@ export function CodexImageConfigPage() {
           </div>
 
           <div className="grid gap-3 sm:grid-cols-2">
-            <label className="flex items-center gap-2 rounded-md border px-3 py-2 text-sm">
-              <input
-                type="checkbox"
+            <div className="flex items-center justify-between gap-3 rounded-md border px-3 py-2 text-sm">
+              <span>完成后删除指令消息</span>
+              <Switch
                 checked={deleteCommandMessage}
-                onChange={(e) => {
-                  setDeleteCommandMessage(e.target.checked);
+                onCheckedChange={(checked) => {
+                  setDeleteCommandMessage(checked);
                   setDirty(true);
                 }}
+                aria-label="完成后删除指令消息"
               />
-              完成后删除指令消息
-            </label>
-            <label className="flex items-center gap-2 rounded-md border px-3 py-2 text-sm">
-              <input
-                type="checkbox"
+            </div>
+            <div className="flex items-center justify-between gap-3 rounded-md border px-3 py-2 text-sm">
+              <span>显示修订提示词</span>
+              <Switch
                 checked={showRevisedPrompt}
-                onChange={(e) => {
-                  setShowRevisedPrompt(e.target.checked);
+                onCheckedChange={(checked) => {
+                  setShowRevisedPrompt(checked);
                   setDirty(true);
                 }}
+                aria-label="显示修订提示词"
               />
-              显示修订提示词
-            </label>
+            </div>
           </div>
 
           <div className="space-y-1.5">

@@ -33,7 +33,7 @@ from .api import rate_limit as rate_limit_api
 from .api import sudo as sudo_api
 from .api import system_agent as system_agent_api
 from .api import webhooks as webhooks_api
-from .logging_redaction import install_sensitive_log_filter
+from .logging_redaction import configure_dependency_log_levels, install_sensitive_log_filter
 from .services import (
     account_bot_runtime,
     event_trace,
@@ -48,6 +48,7 @@ from .settings import settings
 
 logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO))
 install_sensitive_log_filter()
+configure_dependency_log_levels()
 
 # Postgres advisory lock key（固定值，避免不同进程 key 漂移）
 _MIGRATION_ADVISORY_LOCK_KEY = 730140129

@@ -1486,6 +1486,7 @@ async def chat_test_models(
                 requested_model=model_id,
                 latency_ms=elapsed_ms,
                 error=str(exc),
+                status_code=exc.status_code,
                 **transport_metadata,
             )
         except Exception as exc:  # noqa: BLE001
@@ -1753,6 +1754,7 @@ async def stream_chat_test_models(
                     latency_ms=elapsed_ms,
                     response="".join(text_parts).strip() or None,
                     error=str(exc),
+                    status_code=exc.status_code,
                     streaming=streaming,
                     stream_fallback=stream_fallback,
                     **transport_metadata,
@@ -1872,6 +1874,7 @@ async def full_liveness_preview(
         rows,
         max_tokens=payload.max_tokens,
         global_concurrency=payload.global_concurrency,
+        models_by_provider=payload.models_by_provider,
     )
     data = preview.to_dict()
     return FullLivenessPreviewResponse(**data)
@@ -1889,6 +1892,7 @@ def _liveness_result_items(raw: list[dict[str, Any]]) -> list[LivenessResultItem
             output_tokens=int(r.get("output_tokens") or 0),
             preview=r.get("preview"),
             error=r.get("error"),
+            status_code=r.get("status_code"),
             error_category=r.get("error_category"),
             suggestion=r.get("suggestion"),
             client_identity_profile=r.get("client_identity_profile"),
@@ -1963,6 +1967,7 @@ async def full_liveness_run(
         rows,
         max_tokens=payload.max_tokens,
         global_concurrency=payload.global_concurrency,
+        models_by_provider=payload.models_by_provider,
     )
     tasks = llm_liveness.build_task_pool(preview)
     if payload.only_models:
@@ -2082,6 +2087,7 @@ async def full_liveness_run(
                 {
                     "latency_ms": elapsed_ms,
                     "error": llm_liveness.diag.redact(str(exc)),
+                    "status_code": exc.status_code,
                     "error_category": status,
                     "suggestion": llm_liveness.diag.suggestion_for(status),
                     **transport_metadata,

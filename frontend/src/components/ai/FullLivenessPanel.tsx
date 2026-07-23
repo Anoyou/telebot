@@ -2,9 +2,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation } from "@tanstack/react-query";
 import {
   ChevronDown,
-  ChevronLeft,
   ChevronRight,
   Filter,
+  SlidersHorizontal,
   X,
 } from "lucide-react";
 import { toast } from "sonner";
@@ -33,6 +33,7 @@ import {
 import { getErrMsg } from "@/lib/api";
 import {
   classifyFullLivenessStatus,
+  extractHttpStatusCode,
   livenessResultToUsage,
   livenessStatusLabel as sharedStatusLabel,
   livenessStatusTone as sharedStatusTone,
@@ -59,6 +60,7 @@ type FullLivenessPersistedState = {
   preview: FullLivenessPreviewResponse | null;
   result: FullLivenessRunResponse | null;
   selectedProviderIds?: number[];
+  selectedModelsByProvider?: Record<number, string[]>;
   activeRunId?: string | null;
   previewInputKey?: string | null;
 };
@@ -80,6 +82,15 @@ function readFullLivenessState(): FullLivenessPersistedState {
       selectedProviderIds: Array.isArray(parsed.selectedProviderIds)
         ? parsed.selectedProviderIds.filter((value): value is number => typeof value === "number")
         : undefined,
+      selectedModelsByProvider:
+        parsed.selectedModelsByProvider && typeof parsed.selectedModelsByProvider === "object"
+          ? Object.fromEntries(
+              Object.entries(parsed.selectedModelsByProvider).map(([providerId, models]) => [
+                Number(providerId),
+                Array.isArray(models) ? models.filter((model): model is string => typeof model === "string") : [],
+              ]),
+            )
+          : undefined,
       activeRunId: activeRunId || null,
       previewInputKey: typeof parsed.previewInputKey === "string" ? parsed.previewInputKey : null,
     };
@@ -152,6 +163,19 @@ function livenessIdentityLabel(value?: string | null): string {
   return CLIENT_IDENTITY_LABELS[value || ""] || value || "未知客户端";
 }
 
+function enabledModelIds(provider: LLMProviderOut): string[] {
+  return (provider.models || []).filter((model) => model.enabled).map((model) => model.id);
+}
+
+function resultStatusText(item: FullLivenessRunResponse["results"][number]): string {
+  const statusCode = extractHttpStatusCode(item.status_code, item.error);
+  return [
+    livenessStatusLabel(item.status),
+    statusCode,
+    item.latency_ms ? `${item.latency_ms}ms` : null,
+  ].filter(Boolean).join(" · ");
+}
+
 interface FullLivenessPanelProps {
   providers: LLMProviderOut[];
   systemPrompt: string;
@@ -178,13 +202,16 @@ export function FullLivenessPanel({
   const [selectedProviderIds, setSelectedProviderIds] = useState<number[]>(
     retainedState.selectedProviderIds ?? providers.map((provider) => provider.id),
   );
+  const [selectedModelsByProvider, setSelectedModelsByProvider] = useState<Record<number, string[]>>(
+    retainedState.selectedModelsByProvider
+      ?? Object.fromEntries(providers.map((provider) => [provider.id, enabledModelIds(provider)])),
+  );
   const [providerQuery, setProviderQuery] = useState("");
   const [scopeOpen, setScopeOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [previewExpanded, setPreviewExpanded] = useState(true);
   const [resultExpanded, setResultExpanded] = useState(true);
   const [resultFilter, setResultFilter] = useState<LivenessResultFilter>("all");
-  const [collapsedPreviewProviders, setCollapsedPreviewProviders] = useState<Record<number, boolean>>({});
+  const [expandedScopeProviders, setExpandedScopeProviders] = useState<Record<number, boolean>>({});
   const [collapsedResultProviders, setCollapsedResultProviders] = useState<Record<number, boolean>>({});
   const [activeRunId, setActiveRunId] = useState<string | null>(retainedState.activeRunId || null);
   const [previewInputKey, setPreviewInputKey] = useState<string | null>(retainedState.previewInputKey || null);
@@ -210,10 +237,7 @@ export function FullLivenessPanel({
       .filter((provider) => selectedIds.includes(provider.id))
       .map((provider) => ({
         providerId: provider.id,
-        models: (provider.models || [])
-          .filter((model) => model.enabled)
-          .map((model) => model.id)
-          .sort(),
+        models: [...(selectedModelsByProvider[provider.id] || [])].sort(),
       }))
       .sort((a, b) => a.providerId - b.providerId);
     return JSON.stringify({
@@ -222,7 +246,7 @@ export function FullLivenessPanel({
       maxTokens,
       globalConcurrency,
     });
-  }, [globalConcurrency, maxTokens, providers, selectedProviderIds]);
+  }, [globalConcurrency, maxTokens, providers, selectedModelsByProvider, selectedProviderIds]);
   const currentPreviewInputKeyRef = useRef(currentPreviewInputKey);
   currentPreviewInputKeyRef.current = currentPreviewInputKey;
 
@@ -303,15 +327,32 @@ export function FullLivenessPanel({
       preview,
       result,
       selectedProviderIds,
+      selectedModelsByProvider,
       activeRunId,
       previewInputKey,
     });
-  }, [activeRunId, preview, previewInputKey, result, selectedProviderIds]);
+  }, [activeRunId, preview, previewInputKey, result, selectedModelsByProvider, selectedProviderIds]);
 
   useEffect(() => {
     const validIds = new Set(providers.map((provider) => provider.id));
     setSelectedProviderIds((current) => current.filter((id) => validIds.has(id)));
+    setSelectedModelsByProvider((current) => Object.fromEntries(
+      providers.map((provider) => {
+        const enabled = enabledModelIds(provider);
+        const existing = current[provider.id];
+        return [
+          provider.id,
+          existing == null ? enabled : existing.filter((model) => enabled.includes(model)),
+        ];
+      }),
+    ));
   }, [providers]);
+
+  useEffect(() => {
+    setSelectedProviderIds((current) => current.filter(
+      (providerId) => (selectedModelsByProvider[providerId] || []).length > 0,
+    ));
+  }, [selectedModelsByProvider]);
 
   useEffect(() => {
     if (!preview || previewInputKey === currentPreviewInputKey) return;
@@ -331,17 +372,16 @@ export function FullLivenessPanel({
   }, []);
 
   const previewMut = useMutation({
-    mutationFn: (variables: { inputKey: string; providerIds: number[] }) => fullLivenessPreview({
+    mutationFn: (variables: { inputKey: string; providerIds: number[]; modelsByProvider: Record<number, string[]> }) => fullLivenessPreview({
       max_tokens: maxTokens,
       global_concurrency: globalConcurrency,
       only_provider_ids: variables.providerIds,
+      models_by_provider: variables.modelsByProvider,
     }),
     onSuccess: (resp, variables) => {
       if (variables.inputKey !== currentPreviewInputKeyRef.current) return;
       setPreview(resp);
       setPreviewInputKey(variables.inputKey);
-      setPreviewExpanded(true);
-      setCollapsedPreviewProviders({});
     },
     onError: (err) => toast.error(getErrMsg(err)),
   });
@@ -356,6 +396,7 @@ export function FullLivenessPanel({
         global_concurrency: globalConcurrency,
         confirm_large_run: variables.confirmLargeRun,
         only_provider_ids: selectedProviderIds,
+        models_by_provider: selectedModelsByProvider,
       });
       if (mountedRef.current && !cancelRequestedRef.current) return response;
 
@@ -456,11 +497,33 @@ export function FullLivenessPanel({
   }, [providerQuery, providers]);
   const selectedModelCount = providers
     .filter((provider) => selectedProviderIds.includes(provider.id))
-    .reduce((count, provider) => count + (provider.models || []).filter((model) => model.enabled).length, 0);
+    .reduce((count, provider) => count + (selectedModelsByProvider[provider.id]?.length || 0), 0);
 
   const setProviderSelection = (next: number[]) => {
     if (running) return;
-    setSelectedProviderIds([...new Set(next)]);
+    const selected = [...new Set(next)];
+    setSelectedProviderIds(selected);
+    setSelectedModelsByProvider((current) => Object.fromEntries(
+      providers.map((provider) => [
+        provider.id,
+        selected.includes(provider.id)
+          ? current[provider.id]?.length
+            ? current[provider.id]
+            : enabledModelIds(provider)
+          : [],
+      ]),
+    ));
+    setPreview(null);
+    setPreviewInputKey(null);
+    setConfirmationOpen(false);
+  };
+
+  const selectAllProviders = () => {
+    if (running) return;
+    setSelectedProviderIds(providers.filter((provider) => enabledModelIds(provider).length > 0).map((provider) => provider.id));
+    setSelectedModelsByProvider(Object.fromEntries(
+      providers.map((provider) => [provider.id, enabledModelIds(provider)]),
+    ));
     setPreview(null);
     setPreviewInputKey(null);
     setConfirmationOpen(false);
@@ -474,10 +537,30 @@ export function FullLivenessPanel({
     );
   };
 
+  const toggleModel = (providerId: number, modelId: string) => {
+    if (running) return;
+    const current = selectedModelsByProvider[providerId] || [];
+    const next = current.includes(modelId)
+      ? current.filter((model) => model !== modelId)
+      : [...current, modelId];
+    setSelectedModelsByProvider((value) => ({ ...value, [providerId]: next }));
+    setSelectedProviderIds((value) => (
+      next.length > 0
+        ? [...new Set([...value, providerId])]
+        : value.filter((id) => id !== providerId)
+    ));
+    setPreview(null);
+    setPreviewInputKey(null);
+    setConfirmationOpen(false);
+  };
+
   const refreshPreview = () => {
     previewMut.mutate({
       inputKey: currentPreviewInputKey,
       providerIds: [...selectedProviderIds],
+      modelsByProvider: Object.fromEntries(
+        selectedProviderIds.map((providerId) => [providerId, selectedModelsByProvider[providerId] || []]),
+      ),
     });
   };
 
@@ -574,36 +657,17 @@ export function FullLivenessPanel({
 
   return (
     <div className="relative grid min-h-0 flex-1 gap-4 overflow-hidden xl:grid-cols-[280px_minmax(0,1fr)] 2xl:grid-cols-[280px_minmax(0,1fr)_280px]">
-      <Button
-        type="button"
-        variant="outline"
-        size="sm"
-        className="absolute left-0 top-1/2 z-20 -translate-y-1/2 rounded-l-none border-l-0 bg-card pl-2 pr-3 shadow-md xl:hidden"
-        onClick={() => { setSettingsOpen(false); setScopeOpen(true); }}
-      >
-        <ChevronRight className="mr-1 h-4 w-4" />Provider 范围
-      </Button>
-      <Button
-        type="button"
-        variant="outline"
-        size="sm"
-        className="absolute right-0 top-1/2 z-20 -translate-y-1/2 rounded-r-none border-r-0 bg-card pl-3 pr-2 shadow-md 2xl:hidden"
-        onClick={() => { setScopeOpen(false); setSettingsOpen(true); }}
-      >
-        请求设置<ChevronLeft className="ml-1 h-4 w-4" />
-      </Button>
-
       {scopeOpen ? (
         <button
           type="button"
-          className="fixed inset-0 z-[69] bg-black/60 xl:hidden"
+          className="fixed inset-0 z-[69] bg-black/30 xl:hidden"
           aria-label="关闭 Provider 范围"
           onClick={() => setScopeOpen(false)}
         />
       ) : null}
       <aside
         className={cn(
-          "fixed bottom-[calc(4.75rem+env(safe-area-inset-bottom))] left-0 top-[calc(5rem+env(safe-area-inset-top))] z-[70] w-[min(320px,90vw)] overflow-y-auto border-r bg-card p-4 shadow-lg transition-transform duration-200 sm:bottom-0 xl:static xl:z-auto xl:w-auto xl:translate-x-0 xl:rounded-lg xl:border xl:shadow-sm",
+          "fixed bottom-[calc(4.75rem+env(safe-area-inset-bottom))] left-0 top-[calc(5rem+env(safe-area-inset-top))] z-[70] w-[min(320px,90vw)] overflow-y-auto border-r bg-card p-4 shadow-md transition-transform duration-200 sm:bottom-0 xl:static xl:z-auto xl:w-auto xl:translate-x-0 xl:rounded-lg xl:border xl:shadow-sm",
           scopeOpen
             ? "visible translate-x-0"
             : "invisible -translate-x-full xl:visible xl:translate-x-0",
@@ -648,7 +712,7 @@ export function FullLivenessPanel({
             size="sm"
             className="h-7 px-2 text-xs"
             disabled={running}
-            onClick={() => setProviderSelection(providers.map((provider) => provider.id))}
+            onClick={selectAllProviders}
           >
             全选
           </Button>
@@ -665,110 +729,97 @@ export function FullLivenessPanel({
         </div>
         <div className="mt-2 max-h-[62vh] space-y-1 overflow-y-auto rounded-md border bg-background p-1 xl:max-h-[560px]">
           {visibleProviders.map((provider) => {
-            const enabledCount = (provider.models || []).filter((model) => model.enabled).length;
+            const enabledModels = (provider.models || []).filter((model) => model.enabled);
+            const selectedModels = selectedModelsByProvider[provider.id] || [];
+            const expanded = expandedScopeProviders[provider.id] === true;
+            const selected = selectedProviderIds.includes(provider.id) && selectedModels.length > 0;
             return (
-              <label
-                key={provider.id}
-                className={cn(
-                  "flex min-h-11 items-center gap-2 rounded px-2 py-1.5 text-xs",
-                  running ? "cursor-not-allowed opacity-70" : "cursor-pointer hover:bg-muted/60",
-                )}
-              >
-                <input
-                  type="checkbox"
-                  checked={selectedProviderIds.includes(provider.id)}
-                  disabled={running}
-                  onChange={() => toggleProvider(provider.id)}
-                />
-                <span className="min-w-0 flex-1">
-                  <span className="block truncate font-medium">{provider.name}</span>
-                  <span className="mt-0.5 block truncate font-mono text-[10px] text-muted-foreground">{provider.provider}</span>
-                </span>
-                <span className="shrink-0 text-[10px] tabular-nums text-muted-foreground">{enabledCount} 模型</span>
-              </label>
+              <div key={provider.id} className="overflow-hidden rounded border bg-card">
+                <div className="flex min-h-11 items-center gap-2 px-2 py-1.5 text-xs">
+                  <input
+                    type="checkbox"
+                    checked={selected}
+                    disabled={running || enabledModels.length === 0}
+                    aria-label={`${provider.name} 参与巡检`}
+                    onChange={() => toggleProvider(provider.id)}
+                  />
+                  <button
+                    type="button"
+                    className="flex min-w-0 flex-1 items-center gap-2 rounded text-left hover:text-foreground disabled:cursor-not-allowed"
+                    disabled={enabledModels.length === 0}
+                    onClick={() => setExpandedScopeProviders((current) => ({ ...current, [provider.id]: !expanded }))}
+                    aria-expanded={expanded}
+                  >
+                    {expanded ? <ChevronDown className="h-3.5 w-3.5 shrink-0" /> : <ChevronRight className="h-3.5 w-3.5 shrink-0" />}
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate font-medium">{provider.name}</span>
+                      <span className="mt-0.5 block truncate font-mono text-[10px] text-muted-foreground">{provider.provider}</span>
+                    </span>
+                    <span className="shrink-0 text-[10px] tabular-nums text-muted-foreground">
+                      {selectedModels.length}/{enabledModels.length}
+                    </span>
+                  </button>
+                </div>
+                {expanded ? (
+                  <div className="space-y-1 border-t bg-muted/20 p-1.5">
+                    {enabledModels.map((model) => (
+                      <label key={model.id} className="flex min-h-9 items-center gap-2 rounded px-2 py-1 hover:bg-background">
+                        <input
+                          type="checkbox"
+                          checked={selectedModels.includes(model.id)}
+                          disabled={running}
+                          onChange={() => toggleModel(provider.id, model.id)}
+                        />
+                        <span className="min-w-0 flex-1 break-all font-mono text-[10px]">{model.id}</span>
+                      </label>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
             );
           })}
         </div>
       </aside>
 
       <div className="flex h-[calc(100dvh-12rem)] min-h-[420px] min-w-0 flex-col overflow-hidden rounded-lg border bg-card shadow-sm xl:min-h-[650px]">
-        <div className="border-b px-3 py-2">
-          <div className="text-sm font-medium">多 Provider 并发巡检</div>
-          <div className="mt-0.5 text-xs text-muted-foreground">
-            已选择 {selectedProviderIds.length} 个 Provider、{selectedModelCount} 个已启用模型。
+        <div className="flex flex-wrap items-start justify-between gap-3 border-b px-3 py-2">
+          <div className="min-w-0">
+            <div className="text-sm font-medium">多 Provider 并发巡检</div>
+            <div className="mt-0.5 text-xs text-muted-foreground">
+              已选择 {selectedProviderIds.length} 个 Provider、{selectedModelCount} 个模型。
+            </div>
+            <div className="mt-1 truncate text-xs text-muted-foreground" title={message}>
+              测活词：{message || "未填写"}
+            </div>
           </div>
-          <div className="mt-1 truncate text-xs text-muted-foreground" title={message}>
-            测活词：{message || "未填写"}
+          <div className="flex shrink-0 items-center gap-1">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="h-8 gap-1.5 px-2 text-xs xl:hidden"
+              onClick={() => { setSettingsOpen(false); setScopeOpen(true); }}
+            >
+              <Filter className="h-4 w-4" />范围
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="h-8 gap-1.5 px-2 text-xs 2xl:hidden"
+              onClick={() => { setScopeOpen(false); setSettingsOpen(true); }}
+            >
+              <SlidersHorizontal className="h-4 w-4" />设置
+            </Button>
           </div>
           {pollingError && activeRunId ? (
-            <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[11px] text-amber-600 dark:text-amber-400">
+            <div className="w-full flex flex-wrap items-center gap-1.5 text-[11px] text-amber-600 dark:text-amber-400">
               <span>状态读取失败，后台任务仍受控。</span>
               {pollRetryDelayMs ? <span>将在 {Math.ceil(pollRetryDelayMs / 1000)} 秒内重试。</span> : null}
             </div>
           ) : null}
         </div>
         <div className="min-h-0 flex-1 space-y-3 overflow-y-auto bg-muted/20 p-3 text-xs">
-          {preview ? (
-            <section className="overflow-hidden rounded-md border bg-background">
-              <button
-                type="button"
-                className="flex min-h-10 w-full items-center justify-between gap-3 px-3 py-2 text-left hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-inset focus-visible:ring-ring/35"
-                onClick={() => setPreviewExpanded((value) => !value)}
-                aria-expanded={previewExpanded}
-              >
-                <span className="flex min-w-0 items-center gap-2">
-                  {previewExpanded ? <ChevronDown className="h-4 w-4 shrink-0" /> : <ChevronRight className="h-4 w-4 shrink-0" />}
-                  <span className="font-medium">模型范围</span>
-                </span>
-                <span className="flex flex-wrap justify-end gap-1.5">
-                  <MetaBadge>Provider {preview.executable_provider_total}/{preview.provider_total}</MetaBadge>
-                  <MetaBadge>任务 {preview.task_total}</MetaBadge>
-                  <MetaBadge mono>~{preview.max_output_tokens} tok</MetaBadge>
-                  {preview.needs_confirmation ? <MetaBadge tone="warn">任务较多</MetaBadge> : null}
-                </span>
-              </button>
-              {previewExpanded ? (
-                <div className="divide-y border-t">
-                  {preview.providers.map((provider) => {
-                    const collapsed = collapsedPreviewProviders[provider.provider_id] === true;
-                    return (
-                      <div key={provider.provider_id}>
-                        <button
-                          type="button"
-                          className="flex min-h-10 w-full items-center justify-between gap-3 px-3 py-2 text-left hover:bg-muted/30 focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-inset focus-visible:ring-ring/30"
-                          onClick={() => setCollapsedPreviewProviders((current) => ({
-                            ...current,
-                            [provider.provider_id]: !collapsed,
-                          }))}
-                          aria-expanded={!collapsed}
-                        >
-                          <span className="flex min-w-0 items-center gap-2">
-                            {collapsed ? <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground" /> : <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />}
-                            <span className="truncate font-medium">{provider.provider_name}</span>
-                          </span>
-                          {provider.executable ? (
-                            <MetaBadge tone="success">{provider.enabled_models.length} 个模型</MetaBadge>
-                          ) : (
-                            <MetaBadge tone="warn">{livenessStatusLabel(provider.skipped_reason || "no_enabled_models")}</MetaBadge>
-                          )}
-                        </button>
-                        {!collapsed && provider.enabled_models.length > 0 ? (
-                          <div className="flex flex-wrap gap-1.5 bg-muted/20 px-3 pb-3 pt-1">
-                            {provider.enabled_models.map((model) => <MetaBadge key={model} mono>{model}</MetaBadge>)}
-                          </div>
-                        ) : null}
-                      </div>
-                    );
-                  })}
-                </div>
-              ) : null}
-            </section>
-          ) : (
-            <div className="flex min-h-48 items-center justify-center rounded-md border border-dashed bg-background px-4 text-center text-sm text-muted-foreground">
-              点击“刷新模型范围”查看每个 Provider 的已启用模型。
-            </div>
-          )}
-
           {result ? (
             <section className="overflow-hidden rounded-md border bg-background">
               <button
@@ -813,13 +864,13 @@ export function FullLivenessPanel({
                   </div>
                   {result.error ? <div className="border-b px-3 py-2 break-words text-amber-600 dark:text-amber-400">{result.error}</div> : null}
                   {groupedResults.length > 0 ? (
-                    <div className="divide-y">
+                    <div className="space-y-3 bg-muted/20 p-3">
                       {groupedResults.map((group) => {
                         const collapsed = collapsedResultProviders[group.providerId] === true;
                         const allProviderResults = result.results.filter((item) => item.provider_id === group.providerId);
                         const healthyCount = allProviderResults.filter((item) => item.status === "healthy").length;
                         return (
-                          <div key={group.providerId}>
+                          <div key={group.providerId} className="overflow-hidden rounded-lg border bg-background shadow-sm">
                             <button
                               type="button"
                               className="flex min-h-11 w-full items-center justify-between gap-3 px-3 py-2 text-left hover:bg-muted/30 focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-inset focus-visible:ring-ring/30"
@@ -875,7 +926,7 @@ export function FullLivenessPanel({
                                         ) : null}
                                       </div>
                                       <MetaBadge mono tone={livenessStatusTone(item.status)}>
-                                        {livenessStatusLabel(item.status)}{item.latency_ms ? ` · ${item.latency_ms}ms` : ""}
+                                        {resultStatusText(item)}
                                       </MetaBadge>
                                     </div>
                                     {item.preview ? <div className="mt-2 whitespace-pre-wrap break-words text-muted-foreground">{item.preview}</div> : null}
@@ -899,7 +950,11 @@ export function FullLivenessPanel({
                 </div>
               ) : null}
             </section>
-          ) : null}
+          ) : (
+            <div className="flex min-h-48 items-center justify-center rounded-md border border-dashed bg-background px-4 text-center text-sm text-muted-foreground">
+              选择参与巡检的 Provider 与模型，刷新后即可开始。
+            </div>
+          )}
         </div>
         <div className="flex justify-end gap-2 border-t p-3">
           {running ? (
@@ -926,14 +981,14 @@ export function FullLivenessPanel({
       {settingsOpen ? (
         <button
           type="button"
-          className="fixed inset-0 z-[69] bg-black/60 2xl:hidden"
+          className="fixed inset-0 z-[69] bg-black/30 2xl:hidden"
           aria-label="关闭请求设置"
           onClick={() => setSettingsOpen(false)}
         />
       ) : null}
       <aside
         className={cn(
-          "fixed bottom-[calc(4.75rem+env(safe-area-inset-bottom))] right-0 top-[calc(5rem+env(safe-area-inset-top))] z-[70] w-[min(320px,90vw)] overflow-y-auto border-l bg-card p-4 shadow-lg transition-transform duration-200 sm:bottom-0 2xl:static 2xl:z-auto 2xl:w-auto 2xl:translate-x-0 2xl:rounded-lg 2xl:border 2xl:shadow-sm",
+          "fixed bottom-[calc(4.75rem+env(safe-area-inset-bottom))] right-0 top-[calc(5rem+env(safe-area-inset-top))] z-[70] w-[min(320px,90vw)] overflow-y-auto border-l bg-card p-4 shadow-md transition-transform duration-200 sm:bottom-0 2xl:static 2xl:z-auto 2xl:w-auto 2xl:translate-x-0 2xl:rounded-lg 2xl:border 2xl:shadow-sm",
           settingsOpen
             ? "visible translate-x-0"
             : "invisible translate-x-full 2xl:visible 2xl:translate-x-0",

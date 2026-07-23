@@ -48,6 +48,7 @@ import { useStreamingText } from "@/hooks/useStreamingText";
 import { getErrMsg } from "@/lib/api";
 import {
   classifyChatResult,
+  extractHttpStatusCode,
   livenessResultToUsage,
   livenessStatusLabel,
   livenessStatusTone,
@@ -269,6 +270,7 @@ function ChatResponseBranch({
 
   const statusKey = classifyChatResult(result);
   const statusTone = livenessStatusTone(statusKey);
+  const httpStatus = extractHttpStatusCode(result.status_code, result.error);
   const statusLabel =
     statusKey === "pending"
       ? result.streaming
@@ -302,6 +304,15 @@ function ChatResponseBranch({
               {result.requested_model}
             </span>
             <MetaBadge tone={statusTone}>{statusLabel}</MetaBadge>
+            {httpStatus ? (
+              <MetaBadge
+                mono
+                tone={httpStatus === 429 ? "warn" : "danger"}
+                title={`HTTP 状态码 ${httpStatus}`}
+              >
+                {httpStatus}
+              </MetaBadge>
+            ) : null}
           </div>
           {usage ? (
             <ModelRunMeta
@@ -1314,14 +1325,14 @@ export function LLMLivenessPage() {
           {scopeOpen ? (
             <button
               type="button"
-              className="fixed inset-0 z-[69] bg-black/60 xl:hidden"
+              className="fixed inset-0 z-[69] bg-black/30 xl:hidden"
               aria-label="关闭测试范围"
               onClick={() => setScopeOpen(false)}
             />
           ) : null}
           <aside
             className={cn(
-              "fixed bottom-[calc(4.75rem+env(safe-area-inset-bottom))] left-0 top-[calc(5rem+env(safe-area-inset-top))] z-[70] w-[min(320px,90vw)] overflow-y-auto border-r bg-card p-4 shadow-lg transition-transform duration-200 sm:bottom-0 xl:static xl:z-auto xl:w-auto xl:translate-x-0 xl:rounded-lg xl:border xl:shadow-sm",
+              "fixed bottom-[calc(4.75rem+env(safe-area-inset-bottom))] left-0 top-[calc(5rem+env(safe-area-inset-top))] z-[70] w-[min(320px,90vw)] overflow-y-auto border-r bg-card p-4 shadow-md transition-transform duration-200 sm:bottom-0 xl:static xl:z-auto xl:w-auto xl:translate-x-0 xl:rounded-lg xl:border xl:shadow-sm",
               scopeOpen
                 ? "visible translate-x-0"
                 : "invisible -translate-x-full xl:visible xl:translate-x-0",
@@ -1479,14 +1490,14 @@ export function LLMLivenessPage() {
           {settingsOpen ? (
             <button
               type="button"
-              className="fixed inset-0 z-[69] bg-black/60 2xl:hidden"
+              className="fixed inset-0 z-[69] bg-black/30 2xl:hidden"
               aria-label="关闭请求设置"
               onClick={() => setSettingsOpen(false)}
             />
           ) : null}
           <aside
             className={cn(
-              "fixed bottom-[calc(4.75rem+env(safe-area-inset-bottom))] right-0 top-[calc(5rem+env(safe-area-inset-top))] z-[70] w-[min(320px,90vw)] overflow-y-auto border-l bg-card p-4 shadow-lg transition-transform duration-200 sm:bottom-0 2xl:static 2xl:z-auto 2xl:w-auto 2xl:translate-x-0 2xl:rounded-lg 2xl:border 2xl:shadow-sm",
+              "fixed bottom-[calc(4.75rem+env(safe-area-inset-bottom))] right-0 top-[calc(5rem+env(safe-area-inset-top))] z-[70] w-[min(320px,90vw)] overflow-y-auto border-l bg-card p-4 shadow-md transition-transform duration-200 sm:bottom-0 2xl:static 2xl:z-auto 2xl:w-auto 2xl:translate-x-0 2xl:rounded-lg 2xl:border 2xl:shadow-sm",
               settingsOpen
                 ? "visible translate-x-0"
                 : "invisible translate-x-full 2xl:visible 2xl:translate-x-0",

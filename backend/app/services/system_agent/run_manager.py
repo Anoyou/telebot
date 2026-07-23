@@ -244,6 +244,34 @@ class SystemAgentRunManager:
                 raise RunNotFoundError(run_id)
             return row
 
+    async def list_runs(
+        self,
+        *,
+        web_user_id: int,
+        status: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
+        limit: int = 100,
+    ) -> list[SystemAgentRun]:
+        """List one web user's durable Agent runs, newest first."""
+
+        await self.ensure_ready()
+        conditions = [SystemAgentRun.web_user_id == web_user_id]
+        if status:
+            conditions.append(SystemAgentRun.status == status)
+        if since is not None:
+            conditions.append(SystemAgentRun.created_at >= since)
+        if until is not None:
+            conditions.append(SystemAgentRun.created_at <= until)
+        async with self._session_factory() as db:
+            result = await db.execute(
+                select(SystemAgentRun)
+                .where(*conditions)
+                .order_by(desc(SystemAgentRun.created_at), desc(SystemAgentRun.id))
+                .limit(max(1, min(int(limit), 500)))
+            )
+            return list(result.scalars())
+
     async def list_events(
         self,
         run_id: str,

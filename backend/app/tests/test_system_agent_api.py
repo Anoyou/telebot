@@ -156,6 +156,16 @@ class _FakeRunManager:
         yield {"type": "assistant_message", "content": "ok", "run_id": run_id, "session_id": "s1", "seq": after_seq + 2}
         yield {"type": "done", "ok": True, "run_id": run_id, "session_id": "s1", "seq": after_seq + 3}
 
+    async def list_runs(self, **kwargs):
+        self.last_list_kwargs = dict(kwargs)
+        return [
+            await self.start_run(
+                session_id="s1",
+                web_user_id=kwargs["web_user_id"],
+                client_request_id="request-listed-1",
+            )
+        ]
+
 
 @pytest.fixture
 def fake_svc(monkeypatch):
@@ -270,6 +280,28 @@ async def test_start_durable_run_returns_run_and_message_identity(
     assert out.run_id == "durable-r1"
     assert out.user_message_id == 101
     assert fake_run_manager.last_start_kwargs["text"] == "交互里有哪些规则？"
+
+
+@pytest.mark.asyncio
+async def test_list_durable_runs_is_scoped_to_current_user(fake_run_manager) -> None:
+    user = SimpleNamespace(id=7)
+
+    rows = await api.list_system_agent_runs(
+        user,
+        status="failed",
+        since=None,
+        until=None,
+        limit=25,
+    )
+
+    assert [row.run_id for row in rows] == ["durable-r1"]
+    assert fake_run_manager.last_list_kwargs == {
+        "web_user_id": 7,
+        "status": "failed",
+        "since": None,
+        "until": None,
+        "limit": 25,
+    }
 
 
 @pytest.mark.asyncio
