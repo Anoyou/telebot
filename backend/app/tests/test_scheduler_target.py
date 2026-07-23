@@ -31,16 +31,28 @@ def test_normalize_scheduler_target_accepts_ids_and_username(raw, expected) -> N
 
 @pytest.mark.parametrize(
     "raw",
-    [None, "", 0, "qingbaobu", "https://t.me/qingbaobu", "@bad name", "@abc"],
+    [
+        None,
+        "",
+        0,
+        "qingbaobu",
+        "https://t.me/qingbaobu",
+        "@bad name",
+        "@abc",
+        9_223_372_036_854_775_808,
+        "9223372036854775808",
+        "9" * 4301,
+    ],
 )
 def test_normalize_scheduler_target_rejects_invalid_values(raw) -> None:
     with pytest.raises(SchedulerTargetError):
         normalize_scheduler_target(raw)
 
 
-def test_normalize_scheduler_action_target_keeps_run_command_self_default() -> None:
+@pytest.mark.parametrize("target", [0, "0", "+0", "-0"])
+def test_normalize_scheduler_action_target_keeps_run_command_self_default(target) -> None:
     cfg = normalize_scheduler_action_target(
-        {"action": {"type": "run_command", "target_chat_id": 0, "command": ",help"}}
+        {"action": {"type": "run_command", "target_chat_id": target, "command": ",help"}}
     )
 
     assert "target_chat_id" not in cfg["action"]
@@ -52,6 +64,39 @@ def test_normalize_scheduler_action_target_normalizes_required_target() -> None:
     )
 
     assert cfg["action"]["target_chat_id"] == "@qingbaobu"
+
+
+def test_normalize_scheduler_action_target_keeps_matching_resolved_target() -> None:
+    cfg = normalize_scheduler_action_target(
+        {
+            "action": {
+                "type": "send_message",
+                "target_chat_id": "@qingbaobu",
+                "target_chat_id_resolved": 8395686237,
+                "target_chat_resolved_ref": "@qingbaobu",
+            }
+        }
+    )
+
+    assert cfg["action"]["target_chat_id_resolved"] == 8395686237
+
+
+def test_normalize_scheduler_action_target_drops_stale_resolved_target() -> None:
+    cfg = normalize_scheduler_action_target(
+        {
+            "_target_retry_at": "2026-07-24T00:00:00+00:00",
+            "action": {
+                "type": "send_message",
+                "target_chat_id": "@newtarget",
+                "target_chat_id_resolved": 8395686237,
+                "target_chat_resolved_ref": "@oldtarget",
+            },
+        }
+    )
+
+    assert "target_chat_id_resolved" not in cfg["action"]
+    assert "target_chat_resolved_ref" not in cfg["action"]
+    assert "_target_retry_at" not in cfg
 
 
 @pytest.mark.asyncio

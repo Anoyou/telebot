@@ -20,6 +20,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Scheduler 规则目标支持 Telegram 数字 ID 与标准 `@username`，保存、复制和配置导入统一校验。
+
+### Fixed
+
+- Scheduler 首次解析用户名后固定稳定 peer ID，解析失败按 Telegram 异常分类并退避，避免被拒命令外呼及 `call_llm` 重复产生模型费用。
+
 ## [0.71.3] — 2026-07-22 · patch（补丁版本） · UserBot 姓名解析模式
 
 ### Added

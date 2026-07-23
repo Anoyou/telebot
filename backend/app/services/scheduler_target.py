@@ -7,6 +7,11 @@ from typing import Any
 
 _INTEGER_RE = re.compile(r"^[+-]?\d+$")
 _USERNAME_RE = re.compile(r"^@[A-Za-z][A-Za-z0-9_]{4,31}$")
+_MAX_TELEGRAM_ID_DIGITS = 20
+_MIN_TELEGRAM_ID = -(2**53 - 1)
+_MAX_TELEGRAM_ID = 2**53 - 1
+RESOLVED_TARGET_ID_KEY = "target_chat_id_resolved"
+RESOLVED_TARGET_REF_KEY = "target_chat_resolved_ref"
 
 
 class SchedulerTargetError(ValueError):
@@ -23,6 +28,8 @@ def normalize_scheduler_target(value: Any, *, required: bool = True) -> int | st
             if required:
                 raise SchedulerTargetError("目标聊天必填，请填写非零数字 ID 或 @username")
             return None
+        if not _MIN_TELEGRAM_ID <= value <= _MAX_TELEGRAM_ID:
+            raise SchedulerTargetError("目标聊天数字 ID 超出 Telegram 支持范围")
         return value
 
     if value is None:
@@ -37,11 +44,19 @@ def normalize_scheduler_target(value: Any, *, required: bool = True) -> int | st
         return None
 
     if _INTEGER_RE.fullmatch(raw):
-        target_id = int(raw)
+        digits = raw.lstrip("+-")
+        if len(digits) > _MAX_TELEGRAM_ID_DIGITS:
+            raise SchedulerTargetError("目标聊天数字 ID 超出 Telegram 支持范围")
+        try:
+            target_id = int(raw)
+        except ValueError as exc:
+            raise SchedulerTargetError("目标聊天数字 ID 无效") from exc
         if target_id == 0:
             if required:
                 raise SchedulerTargetError("目标聊天必填，请填写非零数字 ID 或 @username")
             return None
+        if not _MIN_TELEGRAM_ID <= target_id <= _MAX_TELEGRAM_ID:
+            raise SchedulerTargetError("目标聊天数字 ID 超出 Telegram 支持范围")
         return target_id
 
     if _USERNAME_RE.fullmatch(raw):
@@ -76,5 +91,19 @@ def normalize_scheduler_action_target(config: dict[str, Any]) -> dict[str, Any]:
         else:
             action["target_chat_id"] = target
 
+    target = action.get("target_chat_id")
+    resolved_ref = action.get(RESOLVED_TARGET_REF_KEY)
+    resolved_id = action.get(RESOLVED_TARGET_ID_KEY)
+    if (
+        not isinstance(target, str)
+        or resolved_ref != target
+        or isinstance(resolved_id, bool)
+        or not isinstance(resolved_id, int)
+        or resolved_id == 0
+    ):
+        action.pop(RESOLVED_TARGET_ID_KEY, None)
+        action.pop(RESOLVED_TARGET_REF_KEY, None)
+
     cfg["action"] = action
+    cfg.pop("_target_retry_at", None)
     return cfg
