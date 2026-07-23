@@ -130,6 +130,27 @@ def register_usage_callback(cb: Callable[[UsageRecord], Coroutine[Any, Any, None
 
 async def _emit_usage(record: UsageRecord) -> None:
     """将 usage 记录发送到所有注册的回调。"""
+    # 运行时健康：真实业务调用写入；测活等 source 前缀由 provider_health 过滤
+    try:
+        from . import provider_health
+
+        if record.provider_id is None:
+            pass
+        elif record.success:
+            provider_health.record_success(
+                int(record.provider_id),
+                str(record.model or ""),
+                source=record.source,
+            )
+        else:
+            provider_health.record_failure(
+                int(record.provider_id),
+                str(record.model or ""),
+                record.error_type or "failed",
+                source=record.source,
+            )
+    except Exception:  # noqa: BLE001
+        log.debug("provider health record failed", exc_info=True)
     for cb in _usage_callbacks:
         try:
             await cb(record)

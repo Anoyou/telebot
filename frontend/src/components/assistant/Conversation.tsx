@@ -10,6 +10,7 @@ import type {
   SystemAgentToolApproval,
 } from "@/api/systemAgent";
 import { ActionCard } from "@/components/assistant/ActionCard";
+import { ResponseMeta } from "@/components/assistant/ResponseMeta";
 import { StreamingText } from "@/components/ai/StreamingText";
 import { Button } from "@/components/ui/button";
 import { systemAgentToolLabel } from "@/lib/systemAgentLabels";
@@ -124,6 +125,7 @@ export function Conversation({
   onRetryMessage,
   retryingMessageId,
   busy = false,
+  expectedSelection = null,
 }: {
   messages: SystemAgentMessage[];
   live?: LiveBubble[];
@@ -135,6 +137,8 @@ export function Conversation({
   ) => void;
   retryingMessageId?: number | null;
   busy?: boolean;
+  /** 本轮希望使用的模型（与实际 meta 对照） */
+  expectedSelection?: { providerName?: string; model?: string } | null;
 }) {
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const followStreamRef = useRef(true);
@@ -160,10 +164,11 @@ export function Conversation({
             ? (m.usage.tool_approval as unknown as SystemAgentToolApproval)
             : undefined,
         streamFallback: Boolean(m.usage?.stream_fallback),
+        usage: (m.usage as Record<string, unknown> | null | undefined) ?? null,
       }),
     ),
     ...(live || []),
-  ].filter((item) => item.text || item.pending);
+  ].filter((item) => item.text || item.pending || item.usage);
   const liveTail = (live || []).at(-1);
   const latestLiveUserId = [...(live || [])].reverse().find((item) => item.role === "user")?.id;
 
@@ -261,6 +266,20 @@ export function Conversation({
                     "思考中…"
                   ) : null}
                 </div>
+                {!isUser && !isTool && !item.streaming && !item.pending ? (
+                  <ResponseMeta
+                    usage={
+                      item.usage ||
+                      (item.messageId != null
+                        ? (messages.find((m) => m.id === item.messageId)?.usage as Record<
+                            string,
+                            unknown
+                          > | null)
+                        : null)
+                    }
+                    expected={expectedSelection}
+                  />
+                ) : null}
                 {isFailedUser ? (
                   <div className="flex max-w-full flex-col items-stretch gap-2 rounded-lg border border-destructive/30 bg-destructive/5 px-2.5 py-2 text-xs text-destructive sm:flex-row sm:items-start">
                     <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />

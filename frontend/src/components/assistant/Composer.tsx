@@ -15,6 +15,8 @@ export function Composer({
   modelValue = "",
   onModelChange,
   modelDisabled,
+  modelOptionMeta,
+  expectedLabel,
 }: {
   disabled?: boolean;
   onSend: (text: string) => void | Promise<void>;
@@ -25,6 +27,10 @@ export function Composer({
   modelValue?: string;
   onModelChange?: (model: string) => void;
   modelDisabled?: boolean;
+  /** 模型徽标文案，如 Tools / Vision / 实测✓ / 冷却中 */
+  modelOptionMeta?: Record<string, string>;
+  /** 本轮希望使用说明 */
+  expectedLabel?: string;
 }) {
   const [value, setValue] = useState("");
   const [sending, setSending] = useState(false);
@@ -66,19 +72,27 @@ export function Composer({
           className="min-h-[4.5rem] resize-none border-0 bg-transparent px-1 pb-10 pt-1 shadow-none focus-visible:border-transparent focus-visible:ring-0"
         />
         <div className="absolute inset-x-2 bottom-2 flex items-center justify-end gap-1.5">
+          {expectedLabel ? (
+            <span className="mr-auto hidden max-w-[40%] truncate text-[10px] text-muted-foreground sm:inline">
+              本轮希望使用：{expectedLabel}
+            </span>
+          ) : null}
           {modelOptions.length > 0 ? (
             <Select
               aria-label="切换 Agent 模型"
               value={modelValue || modelOptions[0] || ""}
               disabled={modelDisabled || streaming}
               onChange={(event) => onModelChange?.(event.target.value)}
-              className="h-8 min-w-0 w-[min(14rem,62%)] border-border/60 bg-background/80 px-2 text-xs"
+              className="h-8 min-w-0 w-[min(16rem,68%)] border-border/60 bg-background/80 px-2 text-xs"
             >
-              {modelOptions.map((model) => (
-                <option key={model} value={model}>
-                  {model}
-                </option>
-              ))}
+              {modelOptions.map((model) => {
+                const meta = modelOptionMeta?.[model];
+                return (
+                  <option key={model} value={model} disabled={meta?.includes("不可用")}>
+                    {meta ? `${model} · ${meta}` : model}
+                  </option>
+                );
+              })}
             </Select>
           ) : null}
           {streaming ? (

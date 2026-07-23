@@ -24,6 +24,24 @@ export interface SystemAgentCapability {
   unavailable_reason?: string | null;
 }
 
+export interface SystemAgentModelMatrixItem {
+  provider_id: number;
+  provider_name: string;
+  model: string;
+  enabled?: boolean;
+  declared_supports_tools?: boolean | null;
+  declared_supports_images?: boolean | null;
+  declared_reasoning_efforts?: unknown;
+  probed_supports_tools?: boolean | null;
+  probed_status?: string | null;
+  health?: {
+    state?: string;
+    cooldown_remaining_seconds?: number;
+    last_error_class?: string | null;
+    last_error_message?: string | null;
+  };
+}
+
 export interface SystemAgentCapabilities {
   enabled: boolean;
   provider_id: number | null;
@@ -35,6 +53,7 @@ export interface SystemAgentCapabilities {
   tools: SystemAgentCapability[];
   stage: number;
   write_tools_available: boolean;
+  model_matrix?: SystemAgentModelMatrixItem[];
 }
 
 export interface SystemAgentSession {
@@ -174,6 +193,22 @@ export async function patchSystemAgentConfig(
 export async function getSystemAgentCapabilities(): Promise<SystemAgentCapabilities> {
   const { data } = await api.get<SystemAgentCapabilities>("/api/system-agent/capabilities");
   return data;
+}
+
+export async function listSystemAgentRunEvents(
+  runId: string,
+  afterSeq = 0,
+): Promise<SystemAgentStreamEvent[]> {
+  const { data } = await api.get<Array<{ run_id: string; seq: number; event: Record<string, unknown> }>>(
+    `/api/system-agent/runs/${runId}/events`,
+    { params: { after_seq: afterSeq } },
+  );
+  return (data || []).map((row) => ({
+    ...(row.event || {}),
+    type: String(row.event?.type || ""),
+    run_id: row.run_id,
+    seq: row.seq,
+  })) as SystemAgentStreamEvent[];
 }
 
 export interface SystemAgentUserMemory {

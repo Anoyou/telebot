@@ -344,6 +344,7 @@ class SystemAgentRunManager:
                     retry_message=retry_message,
                     fallback_provider_id=request.fallback_provider_id,
                     approved_tools=list(request.approved_tools),
+                    run_id=run_id,
                 )
                 while True:
                     try:

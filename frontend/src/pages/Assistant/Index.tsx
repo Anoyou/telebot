@@ -1164,6 +1164,14 @@ export function AssistantIndex() {
                 onRetryMessage={onRetryMessage}
                 retryingMessageId={retryingMessageId}
                 busy={streaming}
+                expectedSelection={
+                  configuredProvider
+                    ? {
+                        providerName: configuredProvider.name,
+                        model: configuredModel || undefined,
+                      }
+                    : null
+                }
                 onActionUpdated={() => {
                   void qc.invalidateQueries({ queryKey: ["system-agent", "actions", activeId] });
                 }}
@@ -1182,6 +1190,33 @@ export function AssistantIndex() {
                 modelValue={configQ.data?.model || configuredToolsModels[0] || ""}
                 onModelChange={(model) => saveConfigMut.mutate({ model: model || null })}
                 modelDisabled={selectorDisabled || configuredToolsModels.length === 0}
+                expectedLabel={
+                  configuredProvider
+                    ? `${configuredProvider.name} · ${configuredModel || "未选模型"}`
+                    : undefined
+                }
+                modelOptionMeta={Object.fromEntries(
+                  (capsQ.data?.model_matrix || [])
+                    .filter(
+                      (row) =>
+                        configuredProvider &&
+                        row.provider_id === configuredProvider.id &&
+                        configuredToolsModels.includes(row.model),
+                    )
+                    .map((row) => {
+                      const badges: string[] = [];
+                      if (row.declared_supports_tools === true) badges.push("声明Tools");
+                      if (row.declared_supports_tools === false) badges.push("无Tools");
+                      if (row.declared_supports_images === true) badges.push("Vision");
+                      if (row.probed_supports_tools === true) badges.push("实测✓");
+                      if (row.probed_status === "unsupported") badges.push("实测×");
+                      if (row.health?.state === "cooling") {
+                        badges.push(`冷却${row.health.cooldown_remaining_seconds ?? "?"}s`);
+                      }
+                      if (row.declared_supports_tools === false) badges.push("不可用");
+                      return [row.model, badges.join(" ")];
+                    }),
+                )}
               />
             </>
           )}

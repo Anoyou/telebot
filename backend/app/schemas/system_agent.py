@@ -64,6 +64,7 @@ class SystemAgentCapabilitiesOut(BaseModel):
     tools: list[dict[str, Any]] = Field(default_factory=list)
     stage: int = 1
     write_tools_available: bool = False
+    model_matrix: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class SystemAgentSessionCreate(BaseModel):

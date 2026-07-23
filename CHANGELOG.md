@@ -24,19 +24,24 @@
 
 - System Agent token 限额改为增量计费（output + input 增长），避免 system/记忆前缀每步重发误杀会话；AI 页面 usage 全量累计不变。
 - 会话摘要上限按 CJK 收紧，并按「用户目标」条目边界丢弃最旧条，避免半条记录。
+- 助手流式回答统一 Markdown 渲染与 CSS 光标；完成时同气泡 id 翻转，消除整泡闪动；delta_reset 过渡语并入状态行。
 
 ### Changed
 
 - 会话摘要过长时后台 LLM 压缩为状态式描述（失败静默降级）；日志/交互外部文本加「仅数据」标记防间接注入；无 CJK 且无领域关键词的英文请求改交模型路由。
 - 重试指代扩充「再来一次 / 重跑 / retry / try again」等精确匹配。
+- 助手回答改为无气泡正文排版；回答下增加 meta 行（实际模型/tokens/工具/耗时/fallback）与可懒加载执行轨迹。
+- 模型选择器展示声明/实测能力与冷却徽标；本轮希望使用 vs 实际使用不一致时高亮。
 
 ### Added
 
 - 跨会话长期偏好记忆：表 `system_agent_user_memory`、工具 `memory.*`（写操作 Action 确认）、API `/api/system-agent/memory`、Web 助手配置「长期记忆」面板；system prompt 注入 enabled 偏好。
+- Provider+model 运行时健康（healthy/cooling + 冷却封顶 10 分钟）；真实 LLM 调用写入，测活不写入；capabilities 透传 model_matrix。
+- 助手消息 usage 增写 `run_id` / `elapsed_ms`（零迁移）。
 
 ### Tests
 
-- 补充 token 增量限额、记忆条目裁剪、外部内容标记、路由 golden set（≥40 条）与长期记忆 CRUD/密钥拒绝单测。
+- 补充 token 增量限额、记忆条目裁剪、外部内容标记、路由 golden set（≥40 条）、长期记忆 CRUD/密钥拒绝、provider 健康与流式 Markdown 围栏单测。
 
 ## [0.72.0-beta.3] — 2026-07-22 · minor（次版本预发布） · 真实流式输出与运行时安全收口
 

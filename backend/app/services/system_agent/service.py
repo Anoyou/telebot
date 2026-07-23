@@ -82,6 +82,49 @@ class SystemAgentService:
         if not isinstance(resolved, str):
             provider_name = resolved.primary.name
             resolved_model = resolved.model
+        # 模型能力矩阵：声明字段 + 实测缓存 + 运行时健康
+        model_matrix: list[dict[str, Any]] = []
+        try:
+            from sqlalchemy import select as sa_select
+
+            from ...db.models.command import LLMProvider
+            from ...db.models.system import SystemSetting as SS
+            from ..provider_health import get_health
+
+            cache_row = await db.get(SS, "system_agent_model_capability_cache")
+            cap_cache = cache_row.value if cache_row and isinstance(cache_row.value, dict) else {}
+            result = await db.execute(sa_select(LLMProvider).order_by(LLMProvider.id.asc()))
+            for prov in result.scalars().all():
+                models = list(prov.models or []) if isinstance(prov.models, list) else []
+                for item in models:
+                    if not isinstance(item, dict):
+                        continue
+                    mid = str(item.get("id") or "").strip()
+                    if not mid:
+                        continue
+                    cache_key = f"{prov.id}:{mid}"
+                    probe = cap_cache.get(cache_key) if isinstance(cap_cache, dict) else None
+                    health = get_health(int(prov.id), mid)
+                    model_matrix.append(
+                        {
+                            "provider_id": prov.id,
+                            "provider_name": prov.name,
+                            "model": mid,
+                            "enabled": bool(item.get("enabled", True)),
+                            "declared_supports_tools": item.get("supports_tools"),
+                            "declared_supports_images": item.get("supports_images"),
+                            "declared_reasoning_efforts": item.get("reasoning_efforts"),
+                            "probed_supports_tools": (
+                                probe.get("supports_tools") if isinstance(probe, dict) else None
+                            ),
+                            "probed_status": probe.get("status") if isinstance(probe, dict) else None,
+                            "health": health,
+                        }
+                    )
+        except Exception:  # noqa: BLE001
+            log.debug("build model matrix failed", exc_info=True)
+            model_matrix = []
+
         return {
             "enabled": bool(cfg.get("enabled")),
             "provider_id": cfg.get("provider_id"),
@@ -94,6 +137,7 @@ class SystemAgentService:
             "stage": 4,
             "write_tools_available": True,
             "secret_chat_input": True,
+            "model_matrix": model_matrix,
         }
 
     # ── 会话 CRUD ─────────────────────────────────────────────────
@@ -344,6 +388,7 @@ class SystemAgentService:
         retry_message: SystemAgentMessage | None = None,
         fallback_provider_id: int | None = None,
         approved_tools: list[str] | None = None,
+        run_id: str | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
         await self.reconcile_stale_messages(db, session.id)
         incoming_text = str(text or "").strip()
@@ -549,12 +594,38 @@ class SystemAgentService:
             ]
 
         if assistant_text and done_ok:
+            usage_payload = dict(usage or {})
+            # 关联 Durable Run + 耗时（零迁移，写进既有 usage JSON）
+            if run_id:
+                usage_payload["run_id"] = str(run_id)
+            started_raw = None
+            if isinstance(user_msg.usage, dict):
+                started_raw = user_msg.usage.get("run_started_at")
+            if started_raw:
+                try:
+                    started_dt = datetime.fromisoformat(str(started_raw).replace("Z", "+00:00"))
+                    if started_dt.tzinfo is None:
+                        started_dt = started_dt.replace(tzinfo=UTC)
+                    usage_payload["elapsed_ms"] = max(
+                        0,
+                        int((datetime.now(UTC) - started_dt).total_seconds() * 1000),
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+            if int(getattr(user_msg, "retry_count", 0) or 0) > 0:
+                usage_payload["retry_count"] = int(user_msg.retry_count)
+            usage = usage_payload
+            for event in buffered_events:
+                if event.get("type") == "assistant_message":
+                    event["usage"] = usage_payload
+                    if usage_payload.get("stream_fallback"):
+                        event["stream_fallback"] = True
             db.add(
                 SystemAgentMessage(
                     session_id=session.id,
                     role=MESSAGE_ROLE_ASSISTANT,
                     content={"text": redact_known_secrets(assistant_text, chat_secrets)},
-                    usage=usage,
+                    usage=usage_payload,
                     run_status=MESSAGE_RUN_COMPLETED,
                 )
             )
