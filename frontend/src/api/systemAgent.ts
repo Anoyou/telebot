@@ -293,12 +293,18 @@ export async function listSystemAgentMessages(
   return data;
 }
 
+/** 本轮模型选择：auto 走全局配置；pinned 固定 provider+model（不改全局） */
+export type SystemAgentModelSelection =
+  | { mode: "auto" }
+  | { mode: "pinned"; provider_id: number; model: string };
+
 export async function startSystemAgentRun(
   sessionId: string,
   payload: {
     content: string;
     account_id?: number | null;
     client_request_id: string;
+    model_selection?: SystemAgentModelSelection | null;
   },
 ): Promise<SystemAgentRun> {
   const { data } = await api.post<SystemAgentRun>(
@@ -316,6 +322,7 @@ export async function startSystemAgentRetryRun(
     fallback_provider_id?: number | null;
     approved_tools?: string[];
     client_request_id: string;
+    model_selection?: SystemAgentModelSelection | null;
   },
 ): Promise<SystemAgentRun> {
   const { data } = await api.post<SystemAgentRun>(

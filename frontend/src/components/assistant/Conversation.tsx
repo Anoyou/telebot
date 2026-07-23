@@ -10,7 +10,8 @@ import type {
   SystemAgentToolApproval,
 } from "@/api/systemAgent";
 import { ActionCard } from "@/components/assistant/ActionCard";
-import { ResponseMeta } from "@/components/assistant/ResponseMeta";
+import { ModelRunMeta } from "@/components/ai/ModelRunMeta";
+import { RunTrace } from "@/components/assistant/RunTrace";
 import { StreamingText } from "@/components/ai/StreamingText";
 import { Button } from "@/components/ui/button";
 import { systemAgentToolLabel } from "@/lib/systemAgentLabels";
@@ -231,12 +232,29 @@ export function Conversation({
               </div>
             ) : (
               <div className={cn("flex min-w-0 max-w-[85%] flex-col gap-1", isUser && "items-end")}>
+                {!isUser && !isTool
+                  ? (() => {
+                      const usage =
+                        item.usage ||
+                        (item.messageId != null
+                          ? (messages.find((m) => m.id === item.messageId)?.usage as Record<
+                              string,
+                              unknown
+                            > | null)
+                          : null);
+                      const runId =
+                        usage && typeof usage.run_id === "string" ? usage.run_id : null;
+                      return runId && !item.streaming && !item.pending ? (
+                        <RunTrace runId={runId} defaultOpen={false} className="mb-0.5" />
+                      ) : null;
+                    })()
+                  : null}
                 <div
                   className={cn(
                     "max-w-full break-words text-sm leading-relaxed",
                     isUser && "rounded-2xl bg-primary px-3 py-2 text-primary-foreground",
                     // 助手回答：无气泡正文（DEEIX / restyle）
-                    !isUser && !isTool && "min-w-0 max-w-full py-0.5 text-foreground",
+                    !isUser && !isTool && "min-w-0 max-w-[min(75ch,100%)] py-0.5 text-foreground",
                     isTool && "rounded-2xl border border-dashed bg-background px-3 py-2 text-xs text-muted-foreground",
                     (isUser || isTool) && "whitespace-pre-wrap",
                     item.pending && "opacity-70",
@@ -267,7 +285,7 @@ export function Conversation({
                   ) : null}
                 </div>
                 {!isUser && !isTool && !item.streaming && !item.pending ? (
-                  <ResponseMeta
+                  <ModelRunMeta
                     usage={
                       item.usage ||
                       (item.messageId != null

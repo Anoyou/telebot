@@ -1,8 +1,12 @@
 import { useState, type FormEvent, type KeyboardEvent } from "react";
 import { Send, Square } from "lucide-react";
 
+import {
+  ModelPicker,
+  type ModelPickerItem,
+  type ModelPickerValue,
+} from "@/components/ai/ModelPicker";
 import { Button } from "@/components/ui/button";
-import { Select } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 
 export function Composer({
@@ -11,11 +15,11 @@ export function Composer({
   streaming,
   onStop,
   placeholder,
-  modelOptions = [],
-  modelValue = "",
-  onModelChange,
+  modelItems = [],
+  modelSelection,
+  onModelSelectionChange,
+  onSetDefaultModel,
   modelDisabled,
-  modelOptionMeta,
   expectedLabel,
 }: {
   disabled?: boolean;
@@ -23,12 +27,12 @@ export function Composer({
   streaming?: boolean;
   onStop?: () => void;
   placeholder?: string;
-  modelOptions?: string[];
-  modelValue?: string;
-  onModelChange?: (model: string) => void;
+  /** 全量可选模型（按 Provider 分组） */
+  modelItems?: ModelPickerItem[];
+  modelSelection?: ModelPickerValue;
+  onModelSelectionChange?: (next: ModelPickerValue) => void;
+  onSetDefaultModel?: (providerId: number, model: string) => void;
   modelDisabled?: boolean;
-  /** 模型徽标文案，如 Tools / Vision / 实测✓ / 冷却中 */
-  modelOptionMeta?: Record<string, string>;
   /** 本轮希望使用说明 */
   expectedLabel?: string;
 }) {
@@ -73,27 +77,19 @@ export function Composer({
         />
         <div className="absolute inset-x-2 bottom-2 flex items-center justify-end gap-1.5">
           {expectedLabel ? (
-            <span className="mr-auto hidden max-w-[40%] truncate text-[10px] text-muted-foreground sm:inline">
-              本轮希望使用：{expectedLabel}
+            <span className="mr-auto hidden max-w-[32%] truncate text-[10px] text-muted-foreground sm:inline">
+              本轮：{expectedLabel}
             </span>
           ) : null}
-          {modelOptions.length > 0 ? (
-            <Select
-              aria-label="切换 Agent 模型"
-              value={modelValue || modelOptions[0] || ""}
+          {modelItems.length > 0 && modelSelection && onModelSelectionChange ? (
+            <ModelPicker
+              items={modelItems}
+              value={modelSelection}
+              onChange={onModelSelectionChange}
+              onSetDefault={onSetDefaultModel}
+              showSetDefault={Boolean(onSetDefaultModel)}
               disabled={modelDisabled || streaming}
-              onChange={(event) => onModelChange?.(event.target.value)}
-              className="h-8 min-w-0 w-[min(16rem,68%)] border-border/60 bg-background/80 px-2 text-xs"
-            >
-              {modelOptions.map((model) => {
-                const meta = modelOptionMeta?.[model];
-                return (
-                  <option key={model} value={model} disabled={meta?.includes("不可用")}>
-                    {meta ? `${model} · ${meta}` : model}
-                  </option>
-                );
-              })}
-            </Select>
+            />
           ) : null}
           {streaming ? (
             <Button

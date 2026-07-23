@@ -32,6 +32,7 @@ import {
 import { listLLMProviders } from "@/api/commands";
 import { listAccounts } from "@/api/accounts";
 import type { LLMProviderOut } from "@/api/types";
+import { matrixToPickerItems, type ModelPickerValue } from "@/components/ai/ModelPicker";
 import { Composer } from "@/components/assistant/Composer";
 import { useAssistantDock } from "@/components/assistant/AssistantDock";
 import { Conversation, type LiveBubble } from "@/components/assistant/Conversation";
@@ -44,6 +45,12 @@ import { useStreamingText } from "@/hooks/useStreamingText";
 import { getErrMsg } from "@/lib/api";
 import { systemAgentToolLabel } from "@/lib/systemAgentLabels";
 import { removeSessionAndChooseNext } from "./sessionState";
+import {
+  loadSessionModelSelection,
+  saveSessionModelSelection,
+  toApiModelSelection,
+  type SessionModelSelection,
+} from "./sessionModelSelection";
 
 const ACTIVE_RUNS_KEY = "telepilot.system-agent.active-runs.v1";
 
@@ -130,6 +137,8 @@ export function AssistantIndex() {
     model: string;
   } | null>(null);
   const [streamNotice, setStreamNotice] = useState("");
+  /** 本轮模型选择：仅会话本地，默认自动路由 */
+  const [sessionModel, setSessionModel] = useState<SessionModelSelection>({ mode: "auto" });
   const abortRef = useRef<AbortController | null>(null);
   const streamingBubbleCreatedRef = useRef(false);
   const liveText = useStreamingText();
@@ -340,9 +349,57 @@ export function AssistantIndex() {
         displayedSelection.model !== configuredModel),
   );
 
+  const modelPickerItems = useMemo(
+    () => matrixToPickerItems(capsQ.data?.model_matrix || [], { requireTools: true }),
+    [capsQ.data?.model_matrix],
+  );
+
+  const pickerValue: ModelPickerValue =
+    sessionModel.mode === "pinned"
+      ? { mode: "pinned", providerId: sessionModel.providerId, model: sessionModel.model }
+      : { mode: "auto" };
+
+  const expectedSelectionLabel = useMemo(() => {
+    if (sessionModel.mode === "pinned") {
+      const name =
+        modelPickerItems.find(
+          (item) =>
+            item.providerId === sessionModel.providerId && item.model === sessionModel.model,
+        )?.providerName || `Provider #${sessionModel.providerId}`;
+      return `${name} · ${sessionModel.model}`;
+    }
+    if (configuredProvider) {
+      return `自动 · ${configuredProvider.name} · ${configuredModel || "未选模型"}`;
+    }
+    return "自动路由";
+  }, [sessionModel, modelPickerItems, configuredProvider, configuredModel]);
+
+  // 切换会话时恢复 localStorage 中的本轮选择
+  useEffect(() => {
+    setSessionModel(loadSessionModelSelection(activeId));
+  }, [activeId]);
+
+  const onSessionModelChange = (next: ModelPickerValue) => {
+    const selection: SessionModelSelection =
+      next.mode === "pinned"
+        ? { mode: "pinned", providerId: next.providerId, model: next.model }
+        : { mode: "auto" };
+    setSessionModel(selection);
+    if (activeId) saveSessionModelSelection(activeId, selection);
+  };
+
+  const onSetDefaultModel = (providerId: number, model: string) => {
+    saveConfigMut.mutate({
+      provider_id: providerId,
+      model: model || null,
+      enabled: true,
+    });
+  };
+
   const selectProvider = (providerId: string) => {
     const provider = (providersQ.data || []).find((item) => item.id === Number(providerId));
     if (!provider) return;
+    // 顶部配置区：显式改全局默认 Provider
     saveConfigMut.mutate({
       provider_id: provider.id,
       model: toolsModels(provider)[0] || null,
@@ -713,18 +770,25 @@ export function AssistantIndex() {
     setLive(userBubble ? [userBubble, pending] : [pending]);
     try {
       const sessionId = await ensureSession();
+      if (activeId !== sessionId) {
+        // 新建会话：把当前选择绑到新 session key
+        saveSessionModelSelection(sessionId, sessionModel);
+      }
       const accountPayload = { account_id: accountId === "" ? null : Number(accountId) };
+      const model_selection = toApiModelSelection(sessionModel);
       const run = retryMessageId != null
         ? await startSystemAgentRetryRun(sessionId, retryMessageId, {
             ...accountPayload,
             fallback_provider_id: fallbackProviderId ?? null,
             approved_tools: approvedTools || [],
             client_request_id: requestId(),
+            model_selection,
           })
         : await startSystemAgentRun(sessionId, {
             content: text || "",
             ...accountPayload,
             client_request_id: requestId(),
+            model_selection,
           });
       const saved = { runId: run.id, lastSeq: 0 };
       rememberRun(sessionId, saved);
@@ -1165,12 +1229,22 @@ export function AssistantIndex() {
                 retryingMessageId={retryingMessageId}
                 busy={streaming}
                 expectedSelection={
-                  configuredProvider
+                  sessionModel.mode === "pinned"
                     ? {
-                        providerName: configuredProvider.name,
-                        model: configuredModel || undefined,
+                        providerName:
+                          modelPickerItems.find(
+                            (item) =>
+                              item.providerId === sessionModel.providerId &&
+                              item.model === sessionModel.model,
+                          )?.providerName || undefined,
+                        model: sessionModel.model,
                       }
-                    : null
+                    : configuredProvider
+                      ? {
+                          providerName: configuredProvider.name,
+                          model: configuredModel || undefined,
+                        }
+                      : null
                 }
                 onActionUpdated={() => {
                   void qc.invalidateQueries({ queryKey: ["system-agent", "actions", activeId] });
@@ -1186,37 +1260,12 @@ export function AssistantIndex() {
                 streaming={streaming}
                 onSend={onSend}
                 onStop={onStop}
-                modelOptions={configuredToolsModels}
-                modelValue={configQ.data?.model || configuredToolsModels[0] || ""}
-                onModelChange={(model) => saveConfigMut.mutate({ model: model || null })}
-                modelDisabled={selectorDisabled || configuredToolsModels.length === 0}
-                expectedLabel={
-                  configuredProvider
-                    ? `${configuredProvider.name} · ${configuredModel || "未选模型"}`
-                    : undefined
-                }
-                modelOptionMeta={Object.fromEntries(
-                  (capsQ.data?.model_matrix || [])
-                    .filter(
-                      (row) =>
-                        configuredProvider &&
-                        row.provider_id === configuredProvider.id &&
-                        configuredToolsModels.includes(row.model),
-                    )
-                    .map((row) => {
-                      const badges: string[] = [];
-                      if (row.declared_supports_tools === true) badges.push("声明Tools");
-                      if (row.declared_supports_tools === false) badges.push("无Tools");
-                      if (row.declared_supports_images === true) badges.push("Vision");
-                      if (row.probed_supports_tools === true) badges.push("实测✓");
-                      if (row.probed_status === "unsupported") badges.push("实测×");
-                      if (row.health?.state === "cooling") {
-                        badges.push(`冷却${row.health.cooldown_remaining_seconds ?? "?"}s`);
-                      }
-                      if (row.declared_supports_tools === false) badges.push("不可用");
-                      return [row.model, badges.join(" ")];
-                    }),
-                )}
+                modelItems={modelPickerItems}
+                modelSelection={pickerValue}
+                onModelSelectionChange={onSessionModelChange}
+                onSetDefaultModel={onSetDefaultModel}
+                modelDisabled={selectorDisabled || modelPickerItems.length === 0}
+                expectedLabel={expectedSelectionLabel}
               />
             </>
           )}
