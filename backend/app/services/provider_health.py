@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
@@ -25,6 +25,7 @@ class ErrorClass(str, Enum):
     TRANSIENT = "transient"  # 超时/连接/5xx → 计入冷却
     RATE_LIMIT = "rate_limit"  # 429 → 短冷却
     CREDENTIAL = "credential"  # 401/403 → 不计冷却
+    CAPABILITY = "capability"  # 能力不支持/参数错误 → 不算健康故障
     OTHER = "other"
 
 
@@ -67,6 +68,7 @@ def _key(provider_id: int, model: str) -> str:
 
 def classify_error(exc: BaseException | str | None) -> ErrorClass:
     text = str(exc or "").lower()
+    scope = str(getattr(exc, "scope", "") or "").lower()
     code = getattr(exc, "status_code", None) or getattr(exc, "status", None)
     try:
         code_i = int(code) if code is not None else None
@@ -76,6 +78,24 @@ def classify_error(exc: BaseException | str | None) -> ErrorClass:
         return ErrorClass.CREDENTIAL
     if code_i == 429 or "rate limit" in text or "too many requests" in text:
         return ErrorClass.RATE_LIMIT
+    # 能力不支持 / 参数错误：记录但不算健康故障
+    if scope in {"capability_mismatch", "request_invalid"} or any(
+        token in text
+        for token in (
+            "capability_mismatch",
+            "request_invalid",
+            "unsupported",
+            "not support",
+            "does not support",
+            "invalid parameter",
+            "invalid_request",
+            "unknown parameter",
+            "tools are not supported",
+            "function calling",
+            "missing required",
+        )
+    ):
+        return ErrorClass.CAPABILITY
     if code_i is not None and code_i >= 500:
         return ErrorClass.TRANSIENT
     if any(
@@ -97,7 +117,7 @@ def classify_error(exc: BaseException | str | None) -> ErrorClass:
 def _cooldown_seconds(failures: int, error_class: ErrorClass) -> int:
     if error_class == ErrorClass.RATE_LIMIT:
         return min(_MAX_COOLDOWN_SECONDS, 30)
-    if error_class == ErrorClass.CREDENTIAL:
+    if error_class in {ErrorClass.CREDENTIAL, ErrorClass.CAPABILITY}:
         return 0
     # 指数退避：15 * 2^(n-1)，封顶 600
     exp = max(0, failures - 1)
@@ -138,6 +158,13 @@ def record_failure(
     rec.last_failure_at = now
     rec.last_error_class = error_class.value
     rec.last_error_message = str(exc or "")[:300]
+    if error_class == ErrorClass.CAPABILITY:
+        # 能力/参数问题：不算健康故障，不累计冷却
+        rec.last_error_class = error_class.value
+        rec.last_error_message = str(exc or "")[:300]
+        _records[key] = rec
+        _mirror_to_redis(key, rec)
+        return
     if error_class == ErrorClass.CREDENTIAL:
         # 凭据问题：标记但不进冷却
         rec.consecutive_failures = rec.consecutive_failures + 1

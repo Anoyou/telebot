@@ -82,11 +82,14 @@ class SystemAgentRuntime:
         chat_secrets: list[str] | None = None,
         fallback_provider_id: int | None = None,
         approved_tools: list[str] | None = None,
+        model_selection: dict[str, Any] | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
         """执行一轮对话，逐条 yield NDJSON 事件。"""
 
         run_id = str(uuid.uuid4())
         seq = 0
+        selection = _normalize_model_selection(model_selection)
+        selection_mode = str(selection.get("mode") or "auto")
 
         def next_event(event_type: str, **payload: Any) -> dict[str, Any]:
             nonlocal seq
@@ -119,6 +122,20 @@ class SystemAgentRuntime:
             )
             yield next_event("done", ok=False)
             return
+
+        # pinned：覆盖主选（校验失败直接拒绝，不入静默换模型）
+        if selection_mode == "pinned":
+            pin_result = await _apply_pinned_selection(db, resolved, selection)
+            if isinstance(pin_result, str):
+                yield next_event(
+                    "error",
+                    code="MODEL_SELECTION_INVALID",
+                    message=pin_result,
+                    hint="请选择有 Key 且支持 Tools 的模型，或改回自动路由。",
+                )
+                yield next_event("done", ok=False)
+                return
+            resolved = pin_result
 
         yield next_event(
             "model_capability_check",
@@ -158,12 +175,36 @@ class SystemAgentRuntime:
         provider_dto = resolved.primary
         model = resolved.model
         providers = resolved.providers
+        requested_provider = provider_dto
+        requested_model = model
+        # 健康排序：cooling 排后但不摘除；主选不变，仅影响 fallback 候选相对顺序
+        try:
+            from ..provider_health import sort_provider_candidates
+            from .config import tools_model_for_dto
+
+            cand = [
+                (pid, tools_model_for_dto(providers[pid]) or providers[pid].default_model or model)
+                for pid in providers
+                if pid != provider_dto.id
+            ]
+            ordered = sort_provider_candidates(cand)
+            reordered: dict[int, Any] = {provider_dto.id: provider_dto}
+            for pid, _model in ordered:
+                if pid in providers:
+                    reordered[pid] = providers[pid]
+            for pid, dto in providers.items():
+                if pid not in reordered:
+                    reordered[pid] = dto
+            providers = reordered
+        except Exception:  # noqa: BLE001
+            pass
         yield next_event(
             "provider_selected",
             provider_id=provider_dto.id,
             provider_name=provider_dto.name,
             model=model,
-            reason="configured",
+            reason="pinned" if selection_mode == "pinned" else "configured",
+            selection_mode=selection_mode,
         )
 
         progress_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
@@ -361,16 +402,19 @@ class SystemAgentRuntime:
             user_text=user_text,
             token_budget=int(cfg.get("session_token_limit") or 16_384),
         )
+        # pinned：同模型内重试照旧，耗尽后走确认链路，不静默换模型
         request = ModelRequest(
             model=model,
             messages=tuple(messages),
             tools=tuple(t.spec for t in agent_tools.values()),
             max_output_tokens=2048,
             metadata={
-                "model_pinned": False,
+                "model_pinned": selection_mode == "pinned",
                 "confirm_provider_switch": True,
                 "allowed_cross_provider_ids": (
-                    [fallback_provider_id] if fallback_provider_id is not None else []
+                    [fallback_provider_id]
+                    if fallback_provider_id is not None and selection_mode != "pinned"
+                    else []
                 ),
                 "max_retries_per_model": 5,
                 "retry_delay_seconds": 3.0,
@@ -620,11 +664,19 @@ class SystemAgentRuntime:
             yield ev
 
         assistant_text = result.text or ""
-        usage_payload = _usage_payload(result.usage, last_used_provider, result.model)
-        usage_payload["used_fallback"] = used_fallback
-        usage_payload["stream_fallback"] = current_stream_fallback
-        usage_payload["route_domains"] = list(route.domains)
-        usage_payload["tool_count"] = len(tool_specs)
+        usage_payload = _usage_payload(
+            result.usage,
+            last_used_provider,
+            result.model,
+            requested_provider=requested_provider,
+            requested_model=requested_model,
+            selection_mode=selection_mode,
+            tool_calls=int(result.tool_calls or 0),
+            available_tools=len(tool_specs),
+            used_fallback=used_fallback,
+            stream_fallback=current_stream_fallback,
+            route_domains=list(route.domains),
+        )
 
         yield next_event(
             "assistant_message",
@@ -636,6 +688,7 @@ class SystemAgentRuntime:
             ok=True,
             steps=result.steps,
             tool_calls=result.tool_calls,
+            available_tools=len(tool_specs),
             route_domains=list(route.domains),
             tool_count=len(tool_specs),
             used_fallback=used_fallback,
@@ -869,15 +922,87 @@ def _message_text(msg: SystemAgentMessage) -> str:
     return ""
 
 
-def _usage_payload(usage: ModelUsage, provider: LLMProviderDTO, model: str) -> dict[str, Any]:
+def _usage_payload(
+    usage: ModelUsage,
+    provider: LLMProviderDTO,
+    model: str,
+    *,
+    requested_provider: LLMProviderDTO | None = None,
+    requested_model: str | None = None,
+    selection_mode: str = "auto",
+    tool_calls: int = 0,
+    available_tools: int = 0,
+    used_fallback: bool = False,
+    stream_fallback: bool = False,
+    route_domains: list[str] | None = None,
+) -> dict[str, Any]:
+    """usage schema_version=2：实际调用数与暴露工具数分拆。"""
+
+    req_p = requested_provider or provider
+    req_m = (requested_model or model or "").strip() or model
     return {
+        "schema_version": 2,
         "provider_id": provider.id,
         "provider_name": provider.name,
         "model": model,
+        "api_format": str(getattr(provider, "api_format", None) or "chat_completions"),
+        "requested_provider_id": req_p.id,
+        "requested_provider_name": req_p.name,
+        "requested_model": req_m,
+        "selection_mode": selection_mode if selection_mode in {"auto", "pinned"} else "auto",
         "input_tokens": usage.input_tokens,
         "output_tokens": usage.output_tokens,
         "total_tokens": usage.total_tokens,
+        "tool_calls": int(tool_calls),
+        "available_tools": int(available_tools),
+        # 兼容旧前端：仍写入 tool_count=暴露数一个版本
+        "tool_count": int(available_tools),
+        "used_fallback": bool(used_fallback),
+        "stream_fallback": bool(stream_fallback),
+        "route_domains": list(route_domains or []),
     }
+
+
+def _normalize_model_selection(raw: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        return {"mode": "auto"}
+    mode = str(raw.get("mode") or "auto").strip().lower()
+    if mode != "pinned":
+        return {"mode": "auto"}
+    try:
+        provider_id = int(raw.get("provider_id"))
+    except (TypeError, ValueError):
+        return {"mode": "auto"}
+    model = str(raw.get("model") or "").strip()
+    if not model:
+        return {"mode": "auto"}
+    return {"mode": "pinned", "provider_id": provider_id, "model": model}
+
+
+async def _apply_pinned_selection(
+    db: AsyncSession,
+    resolved: Any,
+    selection: dict[str, Any],
+) -> Any | str:
+    """将 pinned 选择应用到 ResolvedAgentProviders；失败返回错误文案。"""
+
+    from ...db.models.command import LLMProvider
+    from ..llm_dto import LLMProviderDTO
+    from .config import ResolvedAgentProviders, tools_model_for_dto
+
+    provider_id = int(selection["provider_id"])
+    model = str(selection["model"])
+    row = await db.get(LLMProvider, provider_id)
+    if row is None:
+        return f"指定的 Provider #{provider_id} 不存在"
+    dto = LLMProviderDTO.from_orm_row(row)
+    if not dto.has_api_key:
+        return f"Provider「{dto.name}」缺少 API Key"
+    if not tools_model_for_dto(dto, model):
+        return f"模型「{model}」不可用或不支持 Tools"
+    providers = dict(getattr(resolved, "providers", {}) or {})
+    providers[dto.id] = dto
+    return ResolvedAgentProviders(primary=dto, model=model, providers=providers)
 
 
 __all__ = ["SystemAgentRuntime"]

@@ -389,6 +389,7 @@ class SystemAgentService:
         fallback_provider_id: int | None = None,
         approved_tools: list[str] | None = None,
         run_id: str | None = None,
+        model_selection: dict[str, Any] | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
         await self.reconcile_stale_messages(db, session.id)
         incoming_text = str(text or "").strip()
@@ -496,6 +497,7 @@ class SystemAgentService:
                 chat_secrets=chat_secrets,
                 fallback_provider_id=fallback_provider_id,
                 approved_tools=approved_tools,
+                model_selection=model_selection,
             ):
                 et = event.get("type")
                 if et == "assistant_message":

@@ -59,6 +59,7 @@ class _RunRequest:
     approved_tools: tuple[str, ...] = ()
     chat_secrets: tuple[str, ...] = ()
     after_message_id: int = 0
+    model_selection: dict | None = None
 
 
 class _RunCancelled(Exception):
@@ -113,17 +114,20 @@ class SystemAgentRunManager:
         retry_message_id: int | None = None,
         fallback_provider_id: int | None = None,
         approved_tools: list[str] | None = None,
+        model_selection: dict | None = None,
     ) -> SystemAgentRun:
         await self.ensure_ready()
         kind = AGENT_RUN_KIND_RETRY if retry_message_id is not None else AGENT_RUN_KIND_MESSAGE
         approved = tuple(str(item) for item in (approved_tools or []))
         after_message_id = 0
+        selection = dict(model_selection) if isinstance(model_selection, dict) else None
         request_hash = _request_hash(
             kind=kind,
             text=text,
             retry_message_id=retry_message_id,
             fallback_provider_id=fallback_provider_id,
             approved_tools=approved,
+            model_selection=selection,
         )
 
         async with self._session_factory() as db:
@@ -212,6 +216,7 @@ class SystemAgentRunManager:
             approved_tools=approved,
             chat_secrets=tuple(extract_plaintext_secrets(text)),
             after_message_id=after_message_id,
+            model_selection=selection,
         )
         cancel_event = asyncio.Event()
         self._cancel_events[row.id] = cancel_event
@@ -345,6 +350,7 @@ class SystemAgentRunManager:
                     fallback_provider_id=request.fallback_provider_id,
                     approved_tools=list(request.approved_tools),
                     run_id=run_id,
+                    model_selection=request.model_selection,
                 )
                 while True:
                     try:
@@ -614,6 +620,7 @@ def _request_hash(
     retry_message_id: int | None,
     fallback_provider_id: int | None,
     approved_tools: tuple[str, ...],
+    model_selection: dict | None = None,
 ) -> str:
     payload = json.dumps(
         {
@@ -622,6 +629,7 @@ def _request_hash(
             "retry_message_id": retry_message_id,
             "fallback_provider_id": fallback_provider_id,
             "approved_tools": sorted(approved_tools),
+            "model_selection": model_selection or {"mode": "auto"},
         },
         ensure_ascii=False,
         sort_keys=True,

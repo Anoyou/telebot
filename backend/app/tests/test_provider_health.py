@@ -11,6 +11,16 @@ def test_classify_error_categories() -> None:
     assert ph.classify_error("timeout waiting") == ph.ErrorClass.TRANSIENT
     assert ph.classify_error("HTTP 429 rate limit") == ph.ErrorClass.RATE_LIMIT
     assert ph.classify_error("unauthorized 401") == ph.ErrorClass.CREDENTIAL
+    assert ph.classify_error("tools are not supported") == ph.ErrorClass.CAPABILITY
+    assert ph.classify_error("invalid parameter temperature") == ph.ErrorClass.CAPABILITY
+
+
+def test_capability_errors_do_not_cool() -> None:
+    ph.record_failure(9, "cap-model", "does not support tools")
+    h = ph.get_health(9, "cap-model")
+    assert h["last_error_class"] == "capability"
+    assert h["state"] == "healthy"
+    assert h["consecutive_failures"] == 0
 
 
 def test_cooldown_backoff_and_cap() -> None:

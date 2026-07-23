@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class SystemAgentConfigOut(BaseModel):
@@ -109,15 +109,34 @@ class SystemAgentMessageOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class SystemAgentModelSelection(BaseModel):
+    """本轮模型选择：auto 用全局配置；pinned 固定 provider+model，失败不静默换模型。"""
+
+    mode: str = Field(default="auto", pattern="^(auto|pinned)$")
+    provider_id: int | None = Field(default=None, ge=1)
+    model: str | None = Field(default=None, max_length=128)
+
+    @model_validator(mode="after")
+    def _pinned_requires_target(self) -> SystemAgentModelSelection:
+        if self.mode == "pinned" and (
+            self.provider_id is None or not str(self.model or "").strip()
+        ):
+            raise ValueError("pinned 模式必须同时提供 provider_id 与 model")
+        return self
+
+
 class SystemAgentMessageCreate(BaseModel):
     content: str = Field(min_length=1, max_length=32_000)
     account_id: int | None = None
+    model_selection: SystemAgentModelSelection | None = None
 
 
 class SystemAgentMessageRetry(BaseModel):
     account_id: int | None = None
     fallback_provider_id: int | None = Field(default=None, ge=1)
     approved_tools: list[str] = Field(default_factory=list, max_length=64)
+    # 缺省：重试保留原始请求 selection（由调用方传入）；未传则 auto
+    model_selection: SystemAgentModelSelection | None = None
 
 
 class SystemAgentRunCreate(SystemAgentMessageCreate):

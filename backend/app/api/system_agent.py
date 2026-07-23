@@ -365,6 +365,9 @@ async def stream_message(
             web_user_id=user.id,
             client_request_id=str(uuid.uuid4()),
             text=payload.content,
+            model_selection=(
+                payload.model_selection.model_dump() if payload.model_selection else None
+            ),
         )
     except RunConflictError as exc:
         raise _err("RUN_CONFLICT", str(exc), 409) from None
@@ -401,6 +404,9 @@ async def retry_message(
             retry_message_id=message.id,
             fallback_provider_id=payload.fallback_provider_id,
             approved_tools=payload.approved_tools,
+            model_selection=(
+                payload.model_selection.model_dump() if payload.model_selection else None
+            ),
         )
     except RunConflictError as exc:
         raise _err("RUN_CONFLICT", str(exc), 409) from None
@@ -432,6 +438,9 @@ async def start_system_agent_run(
             web_user_id=user.id,
             client_request_id=payload.client_request_id,
             text=payload.content,
+            model_selection=(
+                payload.model_selection.model_dump() if payload.model_selection else None
+            ),
         )
     except RunConflictError as exc:
         raise _err("RUN_CONFLICT", str(exc), 409) from None
@@ -471,6 +480,9 @@ async def start_system_agent_retry_run(
             retry_message_id=message.id,
             fallback_provider_id=payload.fallback_provider_id,
             approved_tools=payload.approved_tools,
+            model_selection=(
+                payload.model_selection.model_dump() if payload.model_selection else None
+            ),
         )
     except RunConflictError as exc:
         raise _err("RUN_CONFLICT", str(exc), 409) from None

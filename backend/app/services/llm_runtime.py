@@ -1630,6 +1630,20 @@ def build_fallback_chain(
         others.sort(key=lambda p: p.cost_tier)
         fallbacks.extend(others[:2])  # 最多再加 2 个通用 fallback
 
+    # 4. 运行时健康：cooling 排后不摘除（全 cooling 时保持相对顺序）
+    if fallbacks:
+        try:
+            from .provider_health import sort_provider_candidates
+
+            model_hint = primary.default_model or ""
+            keyed = [(p.id, p.default_model or model_hint) for p in fallbacks]
+            order = {
+                pid: idx for idx, (pid, _model) in enumerate(sort_provider_candidates(keyed))
+            }
+            fallbacks.sort(key=lambda p: order.get(p.id, 999))
+        except Exception:  # noqa: BLE001
+            pass
+
     return FallbackChain(primary=primary, fallbacks=fallbacks)
 
 
