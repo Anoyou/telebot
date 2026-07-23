@@ -179,6 +179,35 @@
 }
 
 @layer utilities {
+  /* 流式 Markdown 光标：挂在最后一个块元素上，重排时不丢 */
+  .streaming-md > :last-child {
+    position: relative;
+  }
+
+  .streaming-md > :last-child::after {
+    content: "";
+    display: inline-block;
+    width: 2px;
+    height: 1.05em;
+    margin-left: 0.15em;
+    vertical-align: -0.12em;
+    background: hsl(var(--primary));
+    animation: streaming-caret-blink 1s steps(1) infinite;
+  }
+
+  @keyframes streaming-caret-blink {
+    50% {
+      opacity: 0;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .streaming-md > :last-child::after {
+      animation: none;
+      opacity: 0.85;
+    }
+  }
+
   .streaming-caret {
     animation: streaming-caret 0.9s steps(1, end) infinite;
   }

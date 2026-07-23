@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { memo, useEffect, useRef } from "react";
 import { AlertCircle, Bot, RotateCcw, ShieldCheck, User, Wrench } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -14,7 +14,7 @@ import { StreamingText } from "@/components/ai/StreamingText";
 import { Button } from "@/components/ui/button";
 import { systemAgentToolLabel } from "@/lib/systemAgentLabels";
 import { cn } from "@/lib/utils";
-import { visibleConversationMessages } from "./conversationState";
+import { stabilizeStreamingMarkdown, visibleConversationMessages } from "./conversationState";
 
 export type LiveBubble = {
   id: string;
@@ -30,6 +30,8 @@ export type LiveBubble = {
   retryCount?: number;
   providerSwitch?: SystemAgentProviderSwitch;
   toolApproval?: SystemAgentToolApproval;
+  /** 最终回答的 usage 元数据（tokens、run_id 等） */
+  usage?: Record<string, unknown> | null;
 };
 
 function messageText(msg: SystemAgentMessage): string {
@@ -51,60 +53,69 @@ function approvalToolLabel(tool: SystemAgentToolApproval["tools"][number]): stri
   return systemAgentToolLabel(tool.description);
 }
 
-function AssistantMarkdown({ text }: { text: string }) {
+export const AssistantMarkdown = memo(function AssistantMarkdown({
+  text,
+  streaming = false,
+}: {
+  text: string;
+  streaming?: boolean;
+}) {
+  const source = streaming ? stabilizeStreamingMarkdown(text) : text;
   return (
-    <ReactMarkdown
-      remarkPlugins={[remarkGfm]}
-      components={{
-        p: ({ children }) => <p className="my-1 first:mt-0 last:mb-0">{children}</p>,
-        ul: ({ children }) => <ul className="my-1 list-disc space-y-0.5 pl-5">{children}</ul>,
-        ol: ({ children }) => <ol className="my-1 list-decimal space-y-0.5 pl-5">{children}</ol>,
-        h1: ({ children }) => <h1 className="my-2 text-base font-semibold">{children}</h1>,
-        h2: ({ children }) => <h2 className="my-2 text-sm font-semibold">{children}</h2>,
-        h3: ({ children }) => <h3 className="my-1.5 text-sm font-medium">{children}</h3>,
-        blockquote: ({ children }) => (
-          <blockquote className="my-2 border-l-2 border-border pl-3 text-muted-foreground">
-            {children}
-          </blockquote>
-        ),
-        a: ({ children, ...props }) => (
-          <a {...props} target="_blank" rel="noreferrer">
-            {children}
-          </a>
-        ),
-        table: ({ children }) => (
-          <div className="my-2 max-w-full overflow-x-auto overscroll-x-contain">
-            <table className="w-max min-w-full table-auto border-collapse text-left text-xs">
+    <div className={cn("assistant-md prose-pwa-safe max-w-none text-sm leading-relaxed", streaming && "streaming-md")}>
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        components={{
+          p: ({ children }) => <p className="my-1 first:mt-0 last:mb-0">{children}</p>,
+          ul: ({ children }) => <ul className="my-1 list-disc space-y-0.5 pl-5">{children}</ul>,
+          ol: ({ children }) => <ol className="my-1 list-decimal space-y-0.5 pl-5">{children}</ol>,
+          h1: ({ children }) => <h1 className="my-2 text-base font-semibold">{children}</h1>,
+          h2: ({ children }) => <h2 className="my-2 text-sm font-semibold">{children}</h2>,
+          h3: ({ children }) => <h3 className="my-1.5 text-sm font-medium">{children}</h3>,
+          blockquote: ({ children }) => (
+            <blockquote className="my-2 border-l-2 border-border pl-3 text-muted-foreground">
               {children}
-            </table>
-          </div>
-        ),
-        th: ({ children }) => (
-          <th className="whitespace-nowrap border border-border bg-muted px-2 py-1 font-medium">
-            {children}
-          </th>
-        ),
-        td: ({ children }) => (
-          <td className="whitespace-nowrap border border-border px-2 py-1 align-top">
-            {children}
-          </td>
-        ),
-        pre: ({ children }) => (
-          <pre className="my-2 max-w-full overflow-x-auto rounded-md bg-background/80 p-2 text-xs">
-            {children}
-          </pre>
-        ),
-        code: ({ className, children, ...props }) => (
-          <code className={cn("rounded bg-background/70 px-1 py-0.5 text-xs", className)} {...props}>
-            {children}
-          </code>
-        ),
-      }}
-    >
-      {text}
-    </ReactMarkdown>
+            </blockquote>
+          ),
+          a: ({ children, ...props }) => (
+            <a {...props} target="_blank" rel="noreferrer">
+              {children}
+            </a>
+          ),
+          table: ({ children }) => (
+            <div className="my-2 max-w-full overflow-x-auto overscroll-x-contain">
+              <table className="w-max min-w-full table-auto border-collapse text-left text-xs">
+                {children}
+              </table>
+            </div>
+          ),
+          th: ({ children }) => (
+            <th className="whitespace-nowrap border border-border bg-muted px-2 py-1 font-medium">
+              {children}
+            </th>
+          ),
+          td: ({ children }) => (
+            <td className="whitespace-nowrap border border-border px-2 py-1 align-top">
+              {children}
+            </td>
+          ),
+          pre: ({ children }) => (
+            <pre className="my-2 max-w-full overflow-x-auto rounded-md bg-background/80 p-2 text-xs">
+              {children}
+            </pre>
+          ),
+          code: ({ className, children, ...props }) => (
+            <code className={cn("rounded bg-background/70 px-1 py-0.5 text-xs", className)} {...props}>
+              {children}
+            </code>
+          ),
+        }}
+      >
+        {source}
+      </ReactMarkdown>
+    </div>
   );
-}
+});
 
 export function Conversation({
   messages,
@@ -217,34 +228,35 @@ export function Conversation({
               <div className={cn("flex min-w-0 max-w-[85%] flex-col gap-1", isUser && "items-end")}>
                 <div
                   className={cn(
-                    "max-w-full break-words rounded-2xl px-3 py-2 text-sm leading-relaxed",
-                    isUser && "bg-primary text-primary-foreground",
-                    !isUser && !isTool && "bg-muted",
-                    isTool && "border border-dashed bg-background text-xs text-muted-foreground",
+                    "max-w-full break-words text-sm leading-relaxed",
+                    isUser && "rounded-2xl bg-primary px-3 py-2 text-primary-foreground",
+                    // 助手回答：无气泡正文（DEEIX / restyle）
+                    !isUser && !isTool && "min-w-0 max-w-full py-0.5 text-foreground",
+                    isTool && "rounded-2xl border border-dashed bg-background px-3 py-2 text-xs text-muted-foreground",
                     (isUser || isTool) && "whitespace-pre-wrap",
                     item.pending && "opacity-70",
                   )}
                 >
-                  {item.text ? (
-                    !isUser && !isTool ? (
-                      item.streaming ? (
-                        <StreamingText
-                          text={item.text}
-                          active
-                          fallback={item.streamFallback}
-                          className="leading-relaxed"
-                        />
-                      ) : (
-                        <>
-                          {item.streamFallback ? (
-                            <span className="mb-2 inline-flex rounded-full border px-2 py-0.5 text-[10px] font-normal text-foreground">
-                              完整响应
-                            </span>
-                          ) : null}
-                          <AssistantMarkdown text={item.text} />
-                        </>
-                      )
-                    ) : item.text
+                  {!isUser && !isTool ? (
+                    item.text.trim() ? (
+                      <>
+                        {item.streamFallback ? (
+                          <span className="mb-2 inline-flex rounded-full border px-2 py-0.5 text-[10px] font-normal text-foreground">
+                            完整响应
+                          </span>
+                        ) : null}
+                        {item.streaming ? (
+                          <span className="sr-only" role="status" aria-live="polite">
+                            正在接收回复
+                          </span>
+                        ) : null}
+                        <AssistantMarkdown text={item.text} streaming={Boolean(item.streaming)} />
+                      </>
+                    ) : item.streaming || item.pending ? (
+                      <StreamingText text="" active waitingLabel="正在等待上游返回首段内容" />
+                    ) : null
+                  ) : item.text ? (
+                    item.text
                   ) : item.pending ? (
                     "思考中…"
                   ) : null}

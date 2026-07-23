@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { visibleConversationMessages } from "./conversationState.ts";
+import { stabilizeStreamingMarkdown, visibleConversationMessages } from "./conversationState.ts";
 
 test("历史工具结果不作为第二条聊天消息渲染", () => {
   const messages = [
@@ -14,4 +14,12 @@ test("历史工具结果不作为第二条聊天消息渲染", () => {
     visibleConversationMessages(messages).map((message) => message.id),
     [1, 2],
   );
+});
+
+test("流式 Markdown 未闭合围栏会补临时闭合", () => {
+  const open = "前言\n```js\nconst x = 1\n";
+  const closed = stabilizeStreamingMarkdown(open);
+  assert.equal((closed.match(/^```/gm) || []).length % 2, 0);
+  assert.ok(closed.endsWith("```"));
+  assert.equal(stabilizeStreamingMarkdown("```js\ncode\n```"), "```js\ncode\n```");
 });

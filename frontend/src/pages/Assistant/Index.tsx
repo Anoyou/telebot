@@ -395,8 +395,22 @@ export function AssistantIndex() {
   };
 
   const resetStreamingReply = () => {
+    // 过渡语不整泡删除：截断并入状态行，流式气泡清空复用
+    const preview = liveText.textRef.current.trim().slice(0, 60);
+    if (preview) {
+      updatePendingText(`已理解：${preview}${liveText.textRef.current.trim().length > 60 ? "…" : ""}，正在调用工具`);
+    } else {
+      updatePendingText("已理解你的需求，正在调用工具…");
+    }
     clearLiveStreamingState();
-    setLive((prev) => prev.filter((bubble) => bubble.id !== "live-assistant-stream"));
+    streamingBubbleCreatedRef.current = false;
+    setLive((prev) =>
+      prev.map((bubble) =>
+        bubble.id === "live-assistant-stream"
+          ? { ...bubble, text: "", streaming: true, streamFallback: false }
+          : bubble,
+      ),
+    );
   };
 
   useEffect(() => {
@@ -511,17 +525,42 @@ export function AssistantIndex() {
       if (typeof providerName === "string" && typeof model === "string") {
         setRuntimeSelection({ providerName, model });
       }
-      liveText.syncSnapshot(String(event.content || ""));
+      const finalText = String(event.content || "");
+      liveText.syncSnapshot(finalText);
       streamingBubbleCreatedRef.current = false;
-      setLive((prev) => [
-        ...prev.filter((bubble) => !bubble.pending && bubble.id !== "live-assistant-stream"),
-        {
-          id: "live-assistant-final",
-          role: "assistant",
-          text: String(event.content || ""),
-          streamFallback: Boolean(event.stream_fallback || event.usage?.stream_fallback),
-        },
-      ]);
+      const usage =
+        event.usage && typeof event.usage === "object"
+          ? (event.usage as Record<string, unknown>)
+          : null;
+      // 同 id 翻转 streaming，避免 remount 闪动
+      setLive((prev) => {
+        const withoutPending = prev.filter((bubble) => !bubble.pending);
+        const hasStream = withoutPending.some((b) => b.id === "live-assistant-stream");
+        if (hasStream) {
+          return withoutPending.map((bubble) =>
+            bubble.id === "live-assistant-stream"
+              ? {
+                  ...bubble,
+                  text: finalText,
+                  streaming: false,
+                  streamFallback: Boolean(event.stream_fallback || usage?.stream_fallback),
+                  usage,
+                }
+              : bubble,
+          );
+        }
+        return [
+          ...withoutPending,
+          {
+            id: "live-assistant-stream",
+            role: "assistant" as const,
+            text: finalText,
+            streaming: false,
+            streamFallback: Boolean(event.stream_fallback || usage?.stream_fallback),
+            usage,
+          },
+        ];
+      });
     }
     if (event.type === "error") {
       if (event.code === "RUN_STREAM_FAILED") {
