@@ -42,6 +42,10 @@ from ..schemas.rule import (
 )
 from ..services import audit
 from ..services.redactor import redact_value
+from ..services.scheduler_target import (
+    SchedulerTargetError,
+    normalize_scheduler_action_target,
+)
 from ..settings import settings
 from ..worker.ipc import CMD_RELOAD_CONFIG, cmd_channel, make_cmd, publish_cmd_with_ack
 
@@ -192,7 +196,10 @@ async def _normalize_scheduler_config_for_save(
     config: dict[str, Any],
 ) -> dict[str, Any]:
     """保存时刷新调度运行态，避免前端带回旧 next_fire。"""
-    cfg = dict(config or {})
+    try:
+        cfg = normalize_scheduler_action_target(config)
+    except SchedulerTargetError as exc:
+        raise _bad("INVALID_SCHEDULER_TARGET", str(exc)) from exc
     kind = str(cfg.get("kind") or "cron").lower()
     now = datetime.now(UTC)
     tz = await _get_system_tz(db)

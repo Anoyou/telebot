@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock
 from zoneinfo import ZoneInfo
 
 import pytest
+from telethon.tl.types import InputPeerUser
 
 from app.services.llm_client import LLMResult
 from app.services.llm_dto import LLMProviderDTO
@@ -270,7 +271,15 @@ async def test_action_call_llm_uses_shared_service_invoke(monkeypatch) -> None:
     )
     monkeypatch.setattr("app.worker.scheduler_runtime.invoke_ai_runtime", invoke_mock)
 
-    ctx = SimpleNamespace(account_id=42, log=AsyncMock())
+    ctx = SimpleNamespace(
+        account_id=42,
+        engine=SimpleNamespace(
+            acquire=AsyncMock(
+                return_value=SimpleNamespace(allowed=True, wait_seconds=0)
+            )
+        ),
+        log=AsyncMock(),
+    )
     action = {
         "provider_id": 7,
         "prompt": "hello",
@@ -322,6 +331,212 @@ async def test_scheduler_send_message_records_trace_action(monkeypatch) -> None:
     assert record_action.await_args.args[1]["type"] == "send_message"
     assert record_action.await_args.args[2] == scheduler_runtime.TRACE_STATUS_OK
     finish_trace.assert_awaited_once_with(trace, scheduler_runtime.TRACE_STATUS_OK, rule_id=9, action_type="send_message")
+
+
+@pytest.mark.asyncio
+async def test_scheduler_send_message_resolves_username_for_send_and_ratelimit(monkeypatch) -> None:
+    executor = SchedulerRuleExecutor()
+    record_action = AsyncMock()
+    monkeypatch.setattr(scheduler_runtime, "_record_scheduler_action", record_action)
+    entity = InputPeerUser(user_id=8395686237, access_hash=123456)
+    engine = SimpleNamespace(
+        acquire=AsyncMock(return_value=SimpleNamespace(allowed=True, wait_seconds=0))
+    )
+    client = SimpleNamespace(
+        get_input_entity=AsyncMock(return_value=entity),
+        send_message=AsyncMock(return_value=SimpleNamespace(id=88)),
+    )
+    ctx = SimpleNamespace(
+        account_id=42,
+        feature_key="scheduler",
+        engine=engine,
+        client=client,
+        log=AsyncMock(),
+    )
+
+    await executor.send_with_ratelimit(
+        ctx,
+        "@qingbaobu",
+        "hello",
+        action={"type": "send_message", "send_via": "userbot_reply", "text": "hello"},
+    )
+
+    client.get_input_entity.assert_awaited_once_with("@qingbaobu")
+    client.send_message.assert_awaited_once_with(entity, "hello")
+    assert engine.acquire.await_args.kwargs["peer_id"] is None
+    trace_action = record_action.await_args.args[1]
+    assert trace_action["chat_id"] == 8395686237
+    assert trace_action["target_ref"] == "@qingbaobu"
+
+
+@pytest.mark.asyncio
+async def test_scheduler_send_message_reports_username_resolution_failure(monkeypatch) -> None:
+    executor = SchedulerRuleExecutor()
+    record_action = AsyncMock()
+    monkeypatch.setattr(scheduler_runtime, "_record_scheduler_action", record_action)
+    ctx = SimpleNamespace(
+        account_id=42,
+        feature_key="scheduler",
+        engine=SimpleNamespace(
+            acquire=AsyncMock(
+                return_value=SimpleNamespace(allowed=True, wait_seconds=0)
+            )
+        ),
+        client=SimpleNamespace(
+            get_input_entity=AsyncMock(side_effect=ValueError("not found")),
+            send_message=AsyncMock(),
+        ),
+        log=AsyncMock(),
+    )
+
+    with pytest.raises(
+        scheduler_runtime.SchedulerTargetResolutionError,
+        match="无法解析目标 @missingbot",
+    ):
+        await executor.send_with_ratelimit(ctx, "@missingbot", "hello")
+
+    ctx.engine.acquire.assert_awaited_once()
+    ctx.client.send_message.assert_not_awaited()
+    assert record_action.await_args.kwargs["error_code"] == "telegram_entity_not_found"
+
+
+@pytest.mark.asyncio
+async def test_scheduler_pins_resolved_username_to_stable_peer_id(monkeypatch) -> None:
+    executor = SchedulerRuleExecutor()
+    monkeypatch.setattr(scheduler_runtime, "_record_scheduler_action", AsyncMock())
+    entity = InputPeerUser(user_id=8395686237, access_hash=123456)
+    action = {
+        "type": "send_message",
+        "target_chat_id": "@qingbaobu",
+        "text": "hello",
+    }
+    ctx = SimpleNamespace(
+        account_id=42,
+        feature_key="scheduler",
+        engine=SimpleNamespace(
+            acquire=AsyncMock(
+                return_value=SimpleNamespace(allowed=True, wait_seconds=0)
+            )
+        ),
+        client=SimpleNamespace(
+            get_input_entity=AsyncMock(return_value=entity),
+            send_message=AsyncMock(return_value=SimpleNamespace(id=88)),
+        ),
+        log=AsyncMock(),
+    )
+
+    await executor.action_send_message(ctx, action)
+    await executor.action_send_message(ctx, action)
+
+    ctx.client.get_input_entity.assert_awaited_once_with("@qingbaobu")
+    assert ctx.client.send_message.await_args_list[0].args[0] == entity
+    assert ctx.client.send_message.await_args_list[1].args[0] == 8395686237
+    assert action["target_chat_id_resolved"] == 8395686237
+    assert action["target_chat_resolved_ref"] == "@qingbaobu"
+
+
+@pytest.mark.asyncio
+async def test_scheduler_checks_command_permission_before_username_resolution(monkeypatch) -> None:
+    executor = SchedulerRuleExecutor()
+    monkeypatch.setattr(scheduler_runtime, "_record_scheduler_action", AsyncMock())
+    monkeypatch.setattr(
+        scheduler_runtime,
+        "should_allow_auto_command_text",
+        lambda _text: (False, "blocked"),
+    )
+    ctx = SimpleNamespace(
+        account_id=42,
+        feature_key="scheduler",
+        engine=SimpleNamespace(acquire=AsyncMock()),
+        client=SimpleNamespace(
+            get_input_entity=AsyncMock(),
+            send_message=AsyncMock(),
+        ),
+        log=AsyncMock(),
+    )
+
+    with pytest.raises(scheduler_runtime.SchedulerCommandBlockedError):
+        await executor.send_with_ratelimit(ctx, "@qingbaobu", ",blocked")
+
+    ctx.client.get_input_entity.assert_not_awaited()
+    ctx.engine.acquire.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_scheduler_username_floodwait_updates_engine_and_backoff(monkeypatch) -> None:
+    executor = SchedulerRuleExecutor()
+    monkeypatch.setattr(scheduler_runtime, "_record_scheduler_action", AsyncMock())
+    monkeypatch.setattr(
+        scheduler_runtime,
+        "_scheduler_trace_enabled",
+        AsyncMock(return_value=False),
+    )
+    flood_wait = scheduler_runtime.FloodWaitError(request=None, capture=90)
+    ctx = SimpleNamespace(
+        account_id=42,
+        feature_key="scheduler",
+        engine=SimpleNamespace(
+            acquire=AsyncMock(
+                return_value=SimpleNamespace(allowed=True, wait_seconds=0)
+            ),
+            on_flood_wait=AsyncMock(),
+        ),
+        client=SimpleNamespace(
+            get_input_entity=AsyncMock(side_effect=flood_wait),
+            send_message=AsyncMock(),
+        ),
+        log=AsyncMock(),
+    )
+    cfg = {
+        "action": {
+            "type": "send_message",
+            "target_chat_id": "@qingbaobu",
+            "text": "hello",
+        }
+    }
+
+    assert await executor.fire(ctx, 9, cfg) is False
+    assert await executor.fire(ctx, 9, cfg) is False
+
+    ctx.client.get_input_entity.assert_awaited_once()
+    ctx.engine.on_flood_wait.assert_awaited_once_with("send_message_group", flood_wait)
+    ctx.engine.acquire.assert_awaited_once()
+    assert cfg["_target_retry_at"]
+
+
+@pytest.mark.asyncio
+async def test_scheduler_call_llm_resolves_target_before_model_cost(monkeypatch) -> None:
+    executor = SchedulerRuleExecutor()
+    invoke_mock = AsyncMock()
+    monkeypatch.setattr(scheduler_runtime, "invoke_ai_runtime", invoke_mock)
+    monkeypatch.setattr(scheduler_runtime, "_record_scheduler_action", AsyncMock())
+    ctx = SimpleNamespace(
+        account_id=42,
+        feature_key="scheduler",
+        engine=SimpleNamespace(
+            acquire=AsyncMock(
+                return_value=SimpleNamespace(allowed=True, wait_seconds=0)
+            ),
+            on_flood_wait=AsyncMock(),
+        ),
+        client=SimpleNamespace(
+            get_input_entity=AsyncMock(side_effect=ValueError("not found")),
+            send_message=AsyncMock(),
+        ),
+        log=AsyncMock(),
+    )
+
+    with pytest.raises(scheduler_runtime.SchedulerTargetNotFoundError):
+        await executor.action_call_llm(
+            ctx,
+            {
+                "provider_id": 7,
+                "prompt": "hello",
+                "target_chat_id": "@missingbot",
+            },
+        )
+
+    invoke_mock.assert_not_awaited()
 
 
 @pytest.mark.asyncio
