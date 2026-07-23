@@ -139,6 +139,7 @@ function jsonResponse(pathname: string): unknown | undefined {
   if (pathname === "/api/auth/csrf") return { csrf_token: "visual-test-csrf" };
   if (pathname === "/api/accounts") return [accountFixture];
   if (pathname === "/api/commands/llm-providers") return [];
+  if (pathname === "/api/commands/llm-providers/runtime-health") return [];
   if (pathname === "/api/system/resource-dashboard") return emptyResourceDashboard;
   if (pathname === "/api/system/settings") return { timezone: "Asia/Shanghai", login_security: {} };
   if (pathname === "/api/system/capabilities") return platformCapabilitiesFixture;

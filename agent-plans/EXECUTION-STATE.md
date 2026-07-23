@@ -41,4 +41,7 @@
 ## 备注
 
 - **PLAN-conversation-deeix v2 全部 WP 已完成**（WP1–10）。
-- 下一批建议：整批 UI 手验（流式/fallback/审批/测活/失败重试）→ `test:visual`/`test:a11y` 视需要更新基线 → 合入 `main`（版本号仅发布时 bump）。
+- **2026-07-23 验收通过**（commit `836f0279` 含验收 lint 修复）：ruff 清零、后端 2315 passed、前端 typecheck+test 绿、a11y 24 passed（0 critical/serious）、diff-check 干净；WP1-10 关键实现逐点抽查属实。遗留两项见下。
+- 遗留 1：`provider_health._mirror_to_redis` 是空桩（检测到 async 客户端即返回），健康状态实际仅进程内；`HealthState.UNCERTAIN` 定义了但永远不会产生。跨进程共享需后续实现或删桩明示。
+- 遗留 2：`test:visual` 未跑——本轮 UI 大改，基线需人工过目后用 `pnpm --dir frontend test:visual:update` 更新，不宜盲更。
+- 下一批建议：整批 UI 手验（流式/fallback/审批/测活/失败重试）→ 更新视觉基线 → 合入 `main`（版本号仅发布时 bump）。
