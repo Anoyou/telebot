@@ -942,7 +942,7 @@ export function CommandTemplates() {
             </>
           ) : (
             <p className="rounded-md border border-dashed py-8 text-center text-xs text-muted-foreground">
-              {typeFilter ? "当前筛选下没有模板。" : "尚无模板。新建一个后即可在账号详情中勾选启用"}
+              {typeFilter ? "当前筛选下没有模板。" : "尚无模板。新建一个后即可在账号详情中开启"}
             </p>
           )}
         </CardContent>

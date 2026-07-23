@@ -372,8 +372,10 @@ function AssistantSurface() {
       aria-label="系统助手"
       aria-hidden={collapsed}
       className={cn(
-        "absolute inset-0 z-30 overflow-y-auto bg-background px-4 py-4 pb-[calc(5.25rem+env(safe-area-inset-bottom))] transition-[opacity,visibility] duration-150 md:px-8 md:py-7 xl:px-10",
-        collapsed ? "invisible pointer-events-none opacity-0" : "visible opacity-100",
+        "absolute inset-0 z-30 origin-bottom overflow-y-auto bg-background px-4 py-4 pb-[calc(5.25rem+env(safe-area-inset-bottom))] transition-[opacity,transform,visibility] duration-200 ease-out will-change-[opacity,transform] motion-reduce:transform-none motion-reduce:transition-none md:px-8 md:py-7 xl:px-10",
+        collapsed
+          ? "invisible pointer-events-none translate-y-2 scale-[0.99] opacity-0"
+          : "visible translate-y-0 scale-100 opacity-100",
       )}
     >
       <Suspense fallback={<AssistantSurfaceSkeleton />}>

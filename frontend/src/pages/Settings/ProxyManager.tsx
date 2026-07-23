@@ -26,6 +26,7 @@ import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select } from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
 import { Spinner } from "@/components/ui/misc";
 import { SectionHeader, SignalPill } from "@/components/ui/status";
 import {
@@ -382,18 +383,17 @@ export function ProxyManager() {
                         </div>
                       </div>
                       <div className="flex flex-wrap items-center justify-between gap-2">
-                        <label className="flex items-center gap-2 text-xs text-muted-foreground">
-                          <input
-                            type="checkbox"
+                        <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                          <Switch
                             checked={editDraft.clear_password}
-                            onChange={(e) =>
+                            onCheckedChange={(checked) =>
                               setEditDraft((v) =>
-                                v ? { ...v, clear_password: e.target.checked, password: "" } : v,
+                                v ? { ...v, clear_password: checked, password: "" } : v,
                               )
                             }
                           />
                           清空已保存密码
-                        </label>
+                        </div>
                         <div className="flex items-center gap-1">
                           <Button
                             size="sm"

@@ -14,7 +14,7 @@ import {
   Github,
   Home,
   History,
-  MessageCircle,
+  BotMessageSquare,
   ScrollText,
   Sparkles,
   WalletCards,
@@ -210,7 +210,7 @@ function SidebarBody({
             title={assistantCollapsed ? "打开系统助手" : "关闭系统助手"}
           >
             <span className="relative shrink-0">
-              <MessageCircle className="h-5 w-5" />
+              <BotMessageSquare className="h-5 w-5" />
               {assistantStreaming ? <span className="absolute -right-1 -top-1 h-2.5 w-2.5 animate-pulse rounded-full border-2 border-background bg-success motion-reduce:animate-none" /> : null}
             </span>
             <span className={cn("truncate", collapsed && "sr-only")}>系统助手</span>

@@ -21,6 +21,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { MetaBadge } from "@/components/ui/meta-badge";
 import { Select } from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import {
   Dialog,
@@ -554,43 +555,48 @@ export function FullLivenessPanel({
     setConfirmationOpen(false);
   };
 
-  const refreshPreview = () => {
-    previewMut.mutate({
-      inputKey: currentPreviewInputKey,
-      providerIds: [...selectedProviderIds],
-      modelsByProvider: Object.fromEntries(
-        selectedProviderIds.map((providerId) => [providerId, selectedModelsByProvider[providerId] || []]),
-      ),
-    });
-  };
-
-  const beginRun = () => {
-    if (!preview || previewInputKey !== currentPreviewInputKey) {
+  const beginRun = (targetPreview = preview, targetInputKey = previewInputKey) => {
+    if (!targetPreview || targetInputKey !== currentPreviewInputKey) {
       setConfirmationOpen(false);
       setPreview(null);
       setPreviewInputKey(null);
-      toast.error("巡检范围或请求设置已经变化，请重新刷新模型范围。");
+      toast.error("巡检范围或请求设置已经变化，请重新开始测活。");
       return;
     }
     cancelRequestedRef.current = false;
     setCancelPendingStart(false);
     setConfirmationOpen(false);
     onBusyChange(true);
-    runMut.mutate({ confirmLargeRun: preview.needs_confirmation });
+    runMut.mutate({ confirmLargeRun: targetPreview.needs_confirmation });
   };
 
-  const requestRun = () => {
-    if (!preview || previewInputKey !== currentPreviewInputKey) {
-      setPreview(null);
-      setPreviewInputKey(null);
-      toast.error("请先刷新当前模型范围。");
+  const requestRun = async () => {
+    const inputKey = currentPreviewInputKey;
+    const providerIds = [...selectedProviderIds];
+    const modelsByProvider = Object.fromEntries(
+      providerIds.map((providerId) => [providerId, selectedModelsByProvider[providerId] || []]),
+    );
+    let refreshed: FullLivenessPreviewResponse;
+    try {
+      refreshed = await previewMut.mutateAsync({ inputKey, providerIds, modelsByProvider });
+    } catch {
       return;
     }
-    if (preview.needs_confirmation) {
+    if (inputKey !== currentPreviewInputKeyRef.current) {
+      toast.error("刷新期间巡检范围发生变化，请重新开始。");
+      return;
+    }
+    setPreview(refreshed);
+    setPreviewInputKey(inputKey);
+    if (refreshed.task_total === 0) {
+      toast.error("当前所选范围没有可测活模型。");
+      return;
+    }
+    if (refreshed.needs_confirmation) {
       setConfirmationOpen(true);
       return;
     }
-    beginRun();
+    beginRun(refreshed, inputKey);
   };
 
   const stopRun = async () => {
@@ -677,7 +683,7 @@ export function FullLivenessPanel({
         <div className="flex items-start justify-between gap-3 border-b pb-3">
           <div>
             <div className="text-sm font-semibold">Provider 范围</div>
-            <div className="mt-1 text-xs text-muted-foreground">勾选多个 LLM Provider 并发测活。</div>
+            <div className="mt-1 text-xs text-muted-foreground">开启多个 LLM Provider 并发测活。</div>
           </div>
           <Button
             type="button"
@@ -736,12 +742,11 @@ export function FullLivenessPanel({
             return (
               <div key={provider.id} className="overflow-hidden rounded border bg-card">
                 <div className="flex min-h-11 items-center gap-2 px-2 py-1.5 text-xs">
-                  <input
-                    type="checkbox"
+                  <Switch
                     checked={selected}
                     disabled={running || enabledModels.length === 0}
                     aria-label={`${provider.name} 参与巡检`}
-                    onChange={() => toggleProvider(provider.id)}
+                    onCheckedChange={() => toggleProvider(provider.id)}
                   />
                   <button
                     type="button"
@@ -763,15 +768,16 @@ export function FullLivenessPanel({
                 {expanded ? (
                   <div className="space-y-1 border-t bg-muted/20 p-1.5">
                     {enabledModels.map((model) => (
-                      <label key={model.id} className="flex min-h-9 items-center gap-2 rounded px-2 py-1 hover:bg-background">
-                        <input
-                          type="checkbox"
+                      <div key={model.id} className="flex min-h-9 items-center gap-2 rounded px-2 py-1 hover:bg-background">
+                        <Switch
                           checked={selectedModels.includes(model.id)}
                           disabled={running}
-                          onChange={() => toggleModel(provider.id, model.id)}
+                          aria-label={`${provider.name} 的 ${model.id} 参与巡检`}
+                          onCheckedChange={() => toggleModel(provider.id, model.id)}
+                          className="scale-90"
                         />
                         <span className="min-w-0 flex-1 break-all font-mono text-[10px]">{model.id}</span>
-                      </label>
+                      </div>
                     ))}
                   </div>
                 ) : null}
@@ -967,7 +973,7 @@ export function FullLivenessPanel({
             </section>
           ) : (
             <div className="flex min-h-48 items-center justify-center rounded-md border border-dashed bg-background px-4 text-center text-sm text-muted-foreground">
-              选择参与巡检的 Provider 与模型，刷新后即可开始。
+              选择参与巡检的 Provider 与模型，然后开始全量测活。
             </div>
           )}
         </div>
@@ -984,11 +990,11 @@ export function FullLivenessPanel({
           ) : null}
           <Button
             type="button"
-            onClick={requestRun}
-            loading={running}
-            disabled={running || selectedProviderIds.length === 0 || !preview || preview.task_total === 0 || !message.trim() || !systemPrompt.trim()}
+            onClick={() => void requestRun()}
+            loading={running || previewMut.isPending}
+            disabled={running || previewMut.isPending || selectedProviderIds.length === 0 || !message.trim() || !systemPrompt.trim()}
           >
-            {running ? "测活中…" : "开始全量测活"}
+            {running ? "测活中…" : previewMut.isPending ? "刷新范围…" : "开始全量测活"}
           </Button>
         </div>
       </div>
@@ -1082,16 +1088,6 @@ export function FullLivenessPanel({
             disabled={running}
           />
         </div>
-        <Button
-          type="button"
-          variant="outline"
-          className="mt-4 w-full"
-          onClick={refreshPreview}
-          loading={previewMut.isPending}
-          disabled={previewMut.isPending || running || selectedProviderIds.length === 0 || !message.trim() || !systemPrompt.trim()}
-        >
-          刷新所选模型范围
-        </Button>
       </aside>
 
       <Dialog open={confirmationOpen} onOpenChange={setConfirmationOpen}>
@@ -1109,7 +1105,7 @@ export function FullLivenessPanel({
             <Button type="button" variant="outline" onClick={() => setConfirmationOpen(false)}>
               取消
             </Button>
-            <Button type="button" onClick={beginRun}>
+            <Button type="button" onClick={() => beginRun()}>
               确认并开始
             </Button>
           </DialogFooter>

@@ -332,15 +332,15 @@ export function ConfigBackup() {
 
           <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
             {CATEGORIES.map((cat) => (
-              <label
+              <div
                 key={cat.key}
                 className="flex items-start gap-2 rounded-md border px-3 py-2 cursor-pointer hover:bg-muted/50 transition-colors"
               >
-                <input
-                  type="checkbox"
+                <Switch
                   checked={selected.has(cat.key)}
-                  onChange={() => toggleCategory(cat.key)}
-                  className="mt-0.5"
+                  onCheckedChange={() => toggleCategory(cat.key)}
+                  aria-label={`${cat.label} 参与导出`}
+                  className="mt-0.5 scale-90"
                 />
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-1.5">
@@ -353,7 +353,7 @@ export function ConfigBackup() {
                   </div>
                   <p className="text-xs text-muted-foreground">{cat.desc}</p>
                 </div>
-              </label>
+              </div>
             ))}
           </div>
 

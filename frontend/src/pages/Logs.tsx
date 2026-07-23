@@ -1,10 +1,11 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { isAxiosError } from "axios";
 import { toast } from "sonner";
 import {
   AlertTriangle,
+  ArrowDown,
   Bot,
   CheckCircle2,
   ChevronDown,
@@ -68,6 +69,8 @@ type VerdictFilter = "" | MessageVerdict;
 type RuntimeLevelFilter = "" | "debug" | "info" | "warn" | "warning" | "error";
 type RuntimeSourceFilter = "" | "system" | "event" | "plugin";
 type AgentStatusFilter = "" | "queued" | "running" | "succeeded" | "failed" | "cancelled";
+type ConsoleLogLevel = "debug" | "info" | "warn" | "error";
+type ConsoleLevelFilter = "all" | ConsoleLogLevel;
 type TimelineItem =
   | { kind: "span"; ts: string; span: EventSpanItem }
   | { kind: "action"; ts: string; action: EventActionItem };
@@ -551,7 +554,7 @@ export function Logs() {
                   onClick={() => copySystemConsoleLogs(systemConsoleQ.data, timezone)}
                 >
                   <Copy className="mr-1.5 h-4 w-4" />
-                  复制当前结果
+                  复制已加载日志
                 </Button>
               </Field>
             </div>
@@ -851,6 +854,37 @@ function SystemConsoleStream({
 }) {
   const lines = data?.lines ?? [];
   const services = data?.services?.length ? data.services.map(systemConsoleServiceLabel) : [systemConsoleServiceLabel(service)];
+  const [levelFilter, setLevelFilter] = useState<ConsoleLevelFilter>("all");
+  const [followLatest, setFollowLatest] = useState(true);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const parsedLines = useMemo(
+    () => lines.map((line) => parseSystemConsoleLine(line, timezone)),
+    [lines, timezone],
+  );
+  const levelCounts = useMemo(
+    () => parsedLines.reduce(
+      (counts, line) => ({ ...counts, [line.level]: counts[line.level] + 1 }),
+      { debug: 0, info: 0, warn: 0, error: 0 },
+    ),
+    [parsedLines],
+  );
+  const records = useMemo(
+    () => groupSystemConsoleLines(
+      levelFilter === "all" ? parsedLines : parsedLines.filter((line) => line.level === levelFilter),
+    ),
+    [levelFilter, parsedLines],
+  );
+  const visibleLineCount = records.reduce((count, record) => count + record.lines.length, 0);
+
+  useEffect(() => {
+    if (!followLatest) return;
+    const frame = window.requestAnimationFrame(() => {
+      const node = scrollRef.current;
+      if (node) node.scrollTop = node.scrollHeight;
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [followLatest, lines.length, levelFilter]);
+
   return (
     <Card>
       <CardHeader>
@@ -882,15 +916,67 @@ function SystemConsoleStream({
           <ErrorHint text="系统控制台暂不可用" error={data.error || "当前环境没有暴露系统级日志源"} />
         ) : lines.length ? (
           <div className="overflow-hidden rounded-lg border border-zinc-800 bg-zinc-950 text-zinc-100 shadow-inner">
-            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-white/10 px-3 py-2 text-xs text-zinc-400">
-              <span className="min-w-0 break-all font-mono">$ docker compose logs --tail={data?.tail ?? 300} {service === "all" ? "" : service}</span>
-              <span>{lines.length} 行</span>
+            <div className="space-y-2 border-b border-white/10 px-3 py-2.5">
+              <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-zinc-400">
+                <span className="min-w-0 break-all font-mono">$ docker compose logs --tail={data?.tail ?? 300} {service === "all" ? "" : service}</span>
+                <span>{visibleLineCount}/{lines.length} 行</span>
+              </div>
+              <div className="flex max-w-full gap-1 overflow-x-auto pb-0.5" role="group" aria-label="控制台日志等级">
+                {([
+                  ["all", "全部", lines.length],
+                  ["debug", "DEBUG", levelCounts.debug],
+                  ["info", "INFO", levelCounts.info],
+                  ["warn", "WARNING", levelCounts.warn],
+                  ["error", "ERROR", levelCounts.error],
+                ] as const).map(([value, label, count]) => (
+                  <button
+                    key={value}
+                    type="button"
+                    aria-pressed={levelFilter === value}
+                    onClick={() => setLevelFilter(value)}
+                    className={cn(
+                      "shrink-0 rounded-md border border-white/10 px-2 py-1 font-mono text-[10px] text-zinc-400 transition-colors hover:bg-white/10 hover:text-zinc-100",
+                      levelFilter === value && "border-white/20 bg-white/10 text-zinc-100",
+                      value === "info" && levelFilter === value && "text-lime-300",
+                      value === "warn" && levelFilter === value && "text-amber-300",
+                      value === "error" && levelFilter === value && "text-red-300",
+                      value === "debug" && levelFilter === value && "text-violet-300",
+                    )}
+                  >
+                    {label} <span className="opacity-60">{count}</span>
+                  </button>
+                ))}
+              </div>
             </div>
-            <pre className="max-h-[640px] overflow-auto p-3 font-mono text-[11px] leading-5 whitespace-pre-wrap break-words">
-              {lines.map((line, index) => (
-                <SystemConsoleLine key={`${index}-${line.slice(0, 32)}`} line={line} keyword={keyword} timezone={timezone} />
-              ))}
-            </pre>
+            <div className="relative">
+              <div
+                ref={scrollRef}
+                className="max-h-[640px] space-y-2 overflow-auto p-3 font-mono text-[11px] leading-5"
+                onScroll={(event) => {
+                  const node = event.currentTarget;
+                  setFollowLatest(node.scrollHeight - node.scrollTop - node.clientHeight < 40);
+                }}
+              >
+                {records.map((record, index) => (
+                  <SystemConsoleRecord key={`${record.key}-${index}`} record={record} keyword={keyword} />
+                ))}
+              </div>
+              {!followLatest ? (
+                <Button
+                  type="button"
+                  size="sm"
+                  className="absolute bottom-3 right-3 h-8 rounded-full px-3 text-xs shadow-lg"
+                  onClick={() => {
+                    const node = scrollRef.current;
+                    if (node) node.scrollTo({ top: node.scrollHeight, behavior: "smooth" });
+                    setFollowLatest(true);
+                  }}
+                >
+                  <ArrowDown className="mr-1 h-3.5 w-3.5" />
+                  查看最新
+                </Button>
+              ) : null}
+            </div>
           </div>
         ) : (
           <EmptyHint text="当前条件下没有系统控制台日志" />
@@ -900,23 +986,69 @@ function SystemConsoleStream({
   );
 }
 
-function SystemConsoleLine({ line, keyword, timezone }: { line: string; keyword: string; timezone?: string }) {
-  const level = consoleLineLevel(line);
-  const displayLine = formatSystemConsoleLine(line, timezone);
+type ParsedSystemConsoleLine = {
+  raw: string;
+  service: string;
+  timestamp: string;
+  timeKey: string;
+  inlineTime: string;
+  level: ConsoleLogLevel;
+  body: string;
+};
+
+type SystemConsoleRecordData = {
+  key: string;
+  service: string;
+  timestamp: string;
+  level: ConsoleLogLevel;
+  lines: ParsedSystemConsoleLine[];
+};
+
+function SystemConsoleRecord({ record, keyword }: { record: SystemConsoleRecordData; keyword: string }) {
+  const levelLabel = consoleLevelLabel(record.level);
   return (
-    <span
-      className={cn(
-        "my-0.5 block min-h-5 border-l-2 py-0.5 pl-2",
-        level === "error" && "border-destructive bg-destructive/10 text-red-300",
-        level === "warn" && "border-warning bg-warning/10 text-amber-200",
-        level === "debug" && "border-violet-400 bg-violet-400/10 text-violet-200",
-        level === "info" && "border-info/70 bg-info/5 text-zinc-100",
-      )}
-      data-console-level={level}
-      title={displayLine === line ? undefined : `原始时间：${line}`}
-    >
-      <HighlightedMessage text={displayLine || " "} keyword={keyword} />
-    </span>
+    <div className="grid min-w-0 gap-1.5 sm:grid-cols-[9.5rem_minmax(0,1fr)] sm:gap-3">
+      <div className="hidden pt-2 tabular-nums text-violet-300 sm:block">{record.timestamp || "无时间"}</div>
+      <div
+        className={cn(
+          "relative min-w-0 overflow-hidden rounded-xl border border-white/10 bg-zinc-900/55 py-2 pl-4 pr-3",
+          record.level === "error" && "border-red-400/25 bg-red-500/5",
+          record.level === "warn" && "border-amber-400/20 bg-amber-500/5",
+        )}
+        data-console-level={record.level}
+      >
+        <span className={cn(
+          "absolute inset-y-2 left-2 w-1 rounded-full bg-zinc-500",
+          record.level === "debug" && "bg-violet-400",
+          record.level === "info" && "bg-lime-500",
+          record.level === "warn" && "bg-amber-400",
+          record.level === "error" && "bg-red-400",
+        )} />
+        <div className="mb-1 flex flex-wrap items-center gap-2 pl-1 text-[10px] sm:hidden">
+          <span className="tabular-nums text-violet-300">{record.timestamp || "无时间"}</span>
+          {record.service ? <span className="text-zinc-500">{record.service}</span> : null}
+        </div>
+        <div className="space-y-0.5 pl-1">
+          {record.lines.map((line, index) => (
+            <div key={`${index}-${line.raw.slice(0, 24)}`} className="grid min-w-0 grid-cols-[4.6rem_minmax(0,1fr)] gap-2" title={`原始日志：${line.raw}`}>
+              <span className={cn(
+                "font-semibold",
+                line.level === "debug" && "text-violet-300",
+                line.level === "info" && "text-lime-400",
+                line.level === "warn" && "text-amber-300",
+                line.level === "error" && "text-red-300",
+              )}>
+                {levelLabel}:
+              </span>
+              <span className="min-w-0 whitespace-pre-wrap break-words text-zinc-300">
+                <span className="mr-2 tabular-nums text-zinc-500">{line.inlineTime}</span>
+                <HighlightedMessage text={line.body || " "} keyword={keyword} />
+              </span>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -1999,13 +2131,13 @@ async function copySystemConsoleLogs(data?: SystemConsoleLogsResponse, timezone?
 
 const DOCKER_ISO_TIMESTAMP_RE = /\b(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d+))?Z\b/;
 
-function formatSystemConsoleLine(line: string, timezone?: string): string {
-  const match = DOCKER_ISO_TIMESTAMP_RE.exec(line);
-  if (!match) return line;
+function formatSystemConsoleTimestamp(rawTimestamp: string, timezone?: string): string {
+  const match = DOCKER_ISO_TIMESTAMP_RE.exec(rawTimestamp);
+  if (!match) return rawTimestamp;
   const millis = (match[2] || "").slice(0, 3).padEnd(3, "0");
   const normalized = `${match[1]}.${millis}Z`;
   const date = new Date(normalized);
-  if (Number.isNaN(date.getTime())) return line;
+  if (Number.isNaN(date.getTime())) return rawTimestamp;
   try {
     const local = date.toLocaleString("zh-CN", {
       timeZone: timezone || "Asia/Shanghai",
@@ -2017,10 +2149,56 @@ function formatSystemConsoleLine(line: string, timezone?: string): string {
       second: "2-digit",
       hour12: false,
     }).replaceAll("/", "-");
-    return line.replace(match[0], `${local}.${millis}`);
+    return `${local}.${millis}`;
   } catch {
-    return line;
+    return rawTimestamp;
   }
+}
+
+function formatSystemConsoleLine(line: string, timezone?: string): string {
+  const match = DOCKER_ISO_TIMESTAMP_RE.exec(line);
+  return match ? line.replace(match[0], formatSystemConsoleTimestamp(match[0], timezone)) : line;
+}
+
+function parseSystemConsoleLine(line: string, timezone?: string): ParsedSystemConsoleLine {
+  const level = consoleLineLevel(line);
+  const serviceMatch = /^([^|]+?)\s*\|\s*/.exec(line);
+  const service = serviceMatch?.[1]?.trim() || "";
+  const withoutService = serviceMatch ? line.slice(serviceMatch[0].length) : line;
+  const timestampMatch = DOCKER_ISO_TIMESTAMP_RE.exec(withoutService);
+  const timestamp = timestampMatch ? formatSystemConsoleTimestamp(timestampMatch[0], timezone) : "";
+  const bodyWithLevel = (timestampMatch
+    ? withoutService.replace(timestampMatch[0], "")
+    : withoutService).trim();
+  const body = bodyWithLevel.replace(/^(DEBUG|INFO|WARNING|WARN|ERROR|CRITICAL|FATAL)\s*:\s*/i, "");
+  return {
+    raw: line,
+    service,
+    timestamp,
+    timeKey: timestamp.replace(/\.\d{3}$/, ""),
+    inlineTime: timestamp.split(" ").at(-1) || "--:--:--",
+    level,
+    body,
+  };
+}
+
+function groupSystemConsoleLines(lines: ParsedSystemConsoleLine[]): SystemConsoleRecordData[] {
+  const records: SystemConsoleRecordData[] = [];
+  for (const line of lines) {
+    const previous = records.at(-1);
+    if (previous && previous.level === line.level && previous.service === line.service && previous.key === `${line.timeKey}|${line.service}|${line.level}`) {
+      previous.lines.push(line);
+      continue;
+    }
+    records.push({
+      key: `${line.timeKey}|${line.service}|${line.level}`,
+      service: line.service,
+      timestamp: line.timeKey,
+      level: line.level,
+      lines: [line],
+    });
+  }
+  return records;
 }
 
 async function copyText(text: string, message: string) {
@@ -2064,6 +2242,11 @@ function consoleLineLevel(line: string): "debug" | "info" | "warn" | "error" {
   if (/(warn|warning|retry|timeout)/i.test(lowered)) return "warn";
   if (/(debug|verbose)/i.test(lowered)) return "debug";
   return "info";
+}
+
+function consoleLevelLabel(level: ConsoleLogLevel): string {
+  if (level === "warn") return "WARNING";
+  return level.toUpperCase();
 }
 
 function verdictMeta(verdict: MessageVerdict) {

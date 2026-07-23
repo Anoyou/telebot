@@ -429,7 +429,7 @@ export function AIIndex() {
               desc={
                 totalAccountCount > 0
                   ? `已有 ${enabledAccountCount}/${totalAccountCount} 个账号启用了至少一条 AI 指令。`
-                  : "还没有账号；创建账号后到账号详情的指令 tab 勾选模板。"
+                  : "还没有账号；创建账号后到账号详情的指令 Tab 开启模板。"
               }
               done={enabledAccountCount > 0}
               action="去启用"
@@ -445,7 +445,7 @@ export function AIIndex() {
           <DialogHeader>
             <DialogTitle>选择要启用 AI 指令的账号</DialogTitle>
             <DialogDescription>
-              将跳转到账号详情的指令 Tab，你可以在那里勾选要启用的 AI 指令模板。
+              将跳转到账号详情的指令 Tab，你可以在那里开启需要的 AI 指令模板。
             </DialogDescription>
           </DialogHeader>
           <div className="grid gap-2">

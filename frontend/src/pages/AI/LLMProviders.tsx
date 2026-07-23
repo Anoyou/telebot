@@ -1847,21 +1847,20 @@ function ProviderEditDialog({
             />
             {isEdit && (
               <div className="flex items-center gap-2 pt-1 text-xs">
-                <input
+                <Switch
                   id="clearKey"
-                  type="checkbox"
                   checked={form.clearKey}
-                  onChange={(e) =>
+                  onCheckedChange={(checked) =>
                     onChange({
                       ...form,
-                      clearKey: e.target.checked,
-                      api_key: e.target.checked ? "" : form.api_key,
+                      clearKey: checked,
+                      api_key: checked ? "" : form.api_key,
                     })
                   }
                 />
-                <label htmlFor="clearKey" className="cursor-pointer text-muted-foreground">
-                  勾选 = 清空已存的 api_key（提交后该 provider 标记为未配置）
-                </label>
+                <span className="text-muted-foreground">
+                  开启后清空已存的 api_key（提交后该 Provider 标记为未配置）
+                </span>
               </div>
             )}
             <p className="text-xs text-muted-foreground">
@@ -2509,7 +2508,7 @@ function ProviderModelsSection({
             </div>
           ) : (
             <p className="rounded-md border border-dashed py-3 text-center text-xs text-muted-foreground">
-              当前没有启用任何模型。展开下方未启用列表勾选 / 或在上面 Fetch + 自定义添加
+              当前没有启用任何模型。展开下方未启用列表开启模型，或在上面 Fetch 后自定义添加
             </p>
           )}
 

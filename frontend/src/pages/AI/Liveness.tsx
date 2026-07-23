@@ -42,6 +42,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { MetaBadge } from "@/components/ui/meta-badge";
 import { Select } from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
 import { Skeleton, Spinner } from "@/components/ui/misc";
 import { Textarea } from "@/components/ui/textarea";
 import { useStreamingText } from "@/hooks/useStreamingText";
@@ -1141,18 +1142,19 @@ export function LLMLivenessPage() {
         </div>
         <div className="max-h-[48vh] space-y-1 overflow-y-auto rounded-md border bg-background p-1 xl:max-h-[520px]">
           {visibleModels.length > 0 ? visibleModels.map((model) => (
-            <label
+            <div
               key={model.id}
               className={cn(
                 "flex min-h-10 items-center gap-2 rounded px-2 py-1.5 text-xs",
                 modelsLocked || busy ? "cursor-not-allowed opacity-70" : "cursor-pointer hover:bg-muted/60",
               )}
             >
-              <input
-                type="checkbox"
+              <Switch
                 checked={selectedModels.includes(model.id)}
                 disabled={modelsLocked || busy}
-                onChange={() => toggleModel(model.id)}
+                aria-label={`${model.id} 参与多模型测活`}
+                onCheckedChange={() => toggleModel(model.id)}
+                className="scale-90"
               />
               <span className="min-w-0 flex-1 break-all font-mono">{model.id}</span>
               {model.id === selectedProvider.default_model ? <MetaBadge tone="success">默认</MetaBadge> : null}
@@ -1166,7 +1168,7 @@ export function LLMLivenessPage() {
               {!modelsLocked && !busy && selectedModels.length === 1 && selectedModels[0] === model.id ? (
                 <MetaBadge tone="info">快速</MetaBadge>
               ) : null}
-            </label>
+            </div>
           )) : (
             <EmptyState className="min-h-0 rounded-none border-0 px-3" size="sm" title="没有匹配的模型" />
           )}
@@ -1276,7 +1278,7 @@ export function LLMLivenessPage() {
         title="模型测活"
         description={mode === "conversation"
           ? "在同一个 LLM Provider 内向多个模型发送真实对话，比较模型回复、实际协议、客户端身份与上游耗时。"
-          : "勾选多个 LLM Provider，对其已启用模型发送同一条真实测试语并并发比较结果。"}
+          : "开启多个 LLM Provider，对其已启用模型发送同一条真实测试语并并发比较结果。"}
         signals={
           mode === "conversation" ? (
             <>

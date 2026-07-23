@@ -111,7 +111,11 @@ test.describe("移动端交互细节", () => {
     await expect(page.locator('[data-console-level="warn"]')).toHaveCount(1);
     await expect(page.locator('[data-console-level="error"]')).toHaveCount(1);
     await expect(page.locator('[data-console-level="debug"]')).toHaveCount(1);
-    await expect(page.getByText(/2026-07-24.*05:42:58\.931/)).toBeVisible();
+    await expect(page.locator("span").filter({ hasText: /^2026-07-24 05:42:58$/ })).toBeVisible();
+    await expect(page.getByText("05:42:58.931", { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: /DEBUG 1/ }).click();
+    await expect(page.locator('[data-console-level="debug"]')).toHaveCount(1);
+    await expect(page.locator('[data-console-level="info"]')).toHaveCount(0);
     fixture.assertClean();
   });
 
@@ -177,6 +181,8 @@ test.describe("移动端交互细节", () => {
     await page.getByRole("button", { name: "范围", exact: true }).click();
     const scope = page.getByLabel("全局巡检 Provider 范围");
     await expect(scope).toBeVisible();
+    await expect(scope.getByRole("switch")).not.toHaveCount(0);
+    await expect(scope.locator('input[type="checkbox"]')).toHaveCount(0);
     await scope.getByRole("button", { name: /Grok/ }).click();
     await expect(scope.getByText("grok-4.20-fast", { exact: true })).toBeVisible();
 
@@ -185,11 +191,14 @@ test.describe("移动端交互细节", () => {
     await scope.getByRole("button", { name: "关闭 Provider 范围" }).click();
     await page.getByRole("button", { name: "设置", exact: true }).click();
     await expect(page.getByLabel("全局巡检请求设置")).toBeVisible();
+    await expect(page.getByRole("button", { name: "刷新所选模型范围" })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "开始全量测活" })).toBeEnabled();
     fixture.assertClean();
   });
 
   test("PWA 底栏使用独立圆形助手入口并替代悬浮标签", async ({ page }, testInfo) => {
     test.skip(testInfo.project.name !== "mobile", "仅移动视口");
+    await page.emulateMedia({ reducedMotion: "no-preference" });
     const fixture = await installApiFixture(page);
     await page.goto("/overview", { waitUntil: "networkidle" });
 
@@ -203,7 +212,14 @@ test.describe("移动端交互细节", () => {
     await expect(assistantButton).toContainText("助手");
     await expect(page.locator("[data-assistant-tip]")).toBeHidden();
     await assistantButton.click();
-    await expect(page.locator("[data-assistant-surface]")).toBeVisible();
+    const assistantSurface = page.locator("[data-assistant-surface]");
+    await expect(assistantSurface).toBeVisible();
+    const motion = await assistantSurface.evaluate((element) => {
+      const style = getComputedStyle(element);
+      return { duration: style.transitionDuration, property: style.transitionProperty };
+    });
+    expect(motion.duration).not.toBe("0s");
+    expect(motion.property).toContain("transform");
     fixture.assertClean();
   });
 
@@ -265,6 +281,24 @@ test.describe("移动端交互细节", () => {
     await expect(page.locator("[data-assistant-sidebar-button]")).toBeVisible();
     await expect(page.locator("[data-assistant-mobile-button]")).toBeHidden();
     await expect(page.locator("[data-assistant-tip]")).toHaveCount(0);
+    fixture.assertClean();
+  });
+
+  test("概览资源标题与首排卡片保持稳定间距", async ({ page }, testInfo) => {
+    test.skip(testInfo.project.name !== "desktop", "仅桌面视口");
+    const fixture = await installApiFixture(page);
+    await page.goto("/overview", { waitUntil: "networkidle" });
+    const card = page.locator("[data-resource-usage-card]");
+    const sampling = page.locator("[data-resource-sampling-panel]");
+    await expect(card).toBeVisible();
+    await expect(sampling).toBeVisible();
+    const gap = await sampling.evaluate((element) => {
+      const card = element.closest("[data-resource-usage-card]");
+      const header = card?.querySelector(":scope > div:first-child");
+      if (!header) return -1;
+      return Math.round(element.getBoundingClientRect().top - header.getBoundingClientRect().bottom);
+    });
+    expect(gap).toBeGreaterThanOrEqual(16);
     fixture.assertClean();
   });
 

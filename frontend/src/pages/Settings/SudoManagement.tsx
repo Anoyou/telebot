@@ -503,7 +503,7 @@ export function SudoManagement() {
           </div>
 
           <p className="text-xs text-muted-foreground">
-            需要同时配置对话范围和指令范围；勾选“允许所有”才会授予全部权限。
+            需要同时配置对话范围和指令范围；开启“允许所有”才会授予全部权限。
           </p>
 
           <div className="flex gap-2">

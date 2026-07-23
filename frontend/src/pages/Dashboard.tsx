@@ -563,7 +563,7 @@ function ResourceUsageCard({
   error: unknown;
 }) {
   return (
-    <Card>
+    <Card data-resource-usage-card>
       <CardHeader className="border-b border-border/70 pb-4">
         <SectionHeader
           icon={Activity}
@@ -576,7 +576,7 @@ function ResourceUsageCard({
           ) : null}
         />
       </CardHeader>
-      <CardContent className="space-y-4">
+      <CardContent className="space-y-4 pt-5">
         {isLoading ? (
           <div className="flex h-24 items-center justify-center">
             <Spinner className="text-primary" />
@@ -641,7 +641,7 @@ function ResourceSamplingPanel({ data }: { data: ResourceDashboard }) {
   const appUptimeLabel = formatUptime(data.app_uptime_seconds) ?? "-";
 
   return (
-    <div className="grid gap-3 md:grid-cols-3">
+    <div className="grid gap-3 md:grid-cols-3" data-resource-sampling-panel>
       <ResourceMeta label="资源采样" value={sampledLabel} hint="自动每 30 秒刷新" />
       <ResourceMeta label="宿主机运行时间" value={hostUptimeLabel} hint="服务器开机后累计" />
       <ResourceMeta label="项目运行时间" value={appUptimeLabel} hint="当前 TelePilot 后端进程" />
