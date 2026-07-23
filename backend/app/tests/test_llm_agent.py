@@ -322,6 +322,97 @@ async def test_agent_enforces_token_limit_on_forced_final_summary() -> None:
             limits=AgentLimits(max_steps=1, max_total_tokens=5),
         )
 
+
+@pytest.mark.asyncio
+async def test_agent_token_limit_uses_incremental_input_not_full_resend() -> None:
+    """每步重发前缀时 input 全额很大，但增量口径只计增长+输出，不应误杀。"""
+    step = 0
+    usages_reported: list[ModelUsage] = []
+    spec = ToolSpec("lookup", "lookup", {"type": "object", "properties": {}})
+
+    async def handler(_arguments: dict) -> str:
+        return "ok"
+
+    async def model_call(request: ModelRequest) -> ModelResponse:
+        nonlocal step
+        step += 1
+        # 3 步工具循环：每步 input 6k（前缀重发）、output 0.5k
+        if step <= 2:
+            return ModelResponse(
+                model="m",
+                tool_calls=(ToolCall(f"call-{step}", "lookup", {}),),
+                usage=ModelUsage(input_tokens=6_000, output_tokens=500),
+            )
+        return ModelResponse(
+            model="m",
+            content=(TextContent("done"),),
+            usage=ModelUsage(input_tokens=6_000, output_tokens=500),
+        )
+
+    async def on_usage(usage: ModelUsage) -> None:
+        usages_reported.append(usage)
+
+    result = await run_agent(
+        model_call,
+        _request(spec),
+        {"lookup": AgentTool(spec, handler)},
+        limits=AgentLimits(max_steps=5, max_total_tokens=16_384),
+        callbacks=AgentCallbacks(on_usage=on_usage),
+    )
+    assert result.text == "done"
+    assert step == 3
+    # 全量累计仍上报：3 * (6000+500) = 19500（AI 页面口径不变）
+    assert usages_reported[-1].total_tokens == 19_500
+    # 若按旧口径 total 累计会在第 3 步前就超 16384；增量口径能跑完
+
+
+@pytest.mark.asyncio
+async def test_agent_token_limit_incremental_still_blocks_real_overuse() -> None:
+    """输出持续累积真实超限时仍应抛 AgentLimitError。"""
+    calls = 0
+
+    async def model_call(_request: ModelRequest) -> ModelResponse:
+        nonlocal calls
+        calls += 1
+        # 每步 input 稳定 100，output 3000 → 增量约 3000/步，3 步后必超 5000
+        return ModelResponse(
+            model="m",
+            content=(TextContent("x" * 10),) if calls >= 3 else (),
+            tool_calls=(ToolCall(f"c{calls}", "lookup", {}),) if calls < 3 else (),
+            usage=ModelUsage(input_tokens=100, output_tokens=3_000),
+        )
+
+    async def handler(_arguments: dict) -> str:
+        return "ok"
+
+    spec = ToolSpec("lookup", "lookup", {"type": "object", "properties": {}})
+    with pytest.raises(AgentLimitError):
+        await run_agent(
+            model_call,
+            _request(spec),
+            {"lookup": AgentTool(spec, handler)},
+            limits=AgentLimits(max_steps=5, max_total_tokens=5_000),
+        )
+
+
+@pytest.mark.asyncio
+async def test_agent_token_limit_skips_zero_usage_steps() -> None:
+    async def model_call(_request: ModelRequest) -> ModelResponse:
+        return ModelResponse(
+            model="m",
+            content=(TextContent("ok"),),
+            usage=ModelUsage(),
+        )
+
+    result = await run_agent(
+        model_call,
+        _request(),
+        {},
+        limits=AgentLimits(max_total_tokens=1),
+    )
+    assert result.text == "ok"
+
+
 def test_manifest_tools_require_capability_and_registered_handler() -> None:
     async def handler(_arguments: dict) -> str:
         return "ok"

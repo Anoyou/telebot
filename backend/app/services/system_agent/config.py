@@ -23,6 +23,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "require_tool_approval": False,
     "max_steps": AgentLimits.max_steps,
     "max_tool_calls": AgentLimits.max_tool_calls,
+    # 单轮上下文增长 + 输出预算（增量口径，见 llm_agent.run_agent）
     "session_token_limit": 16_384,
 }
 
