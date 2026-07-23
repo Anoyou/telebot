@@ -333,14 +333,24 @@ def _fetch_updater_console_logs(service: str, tail: int) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
+def _is_console_noise_line(line: str) -> bool:
+    lowered = line.lower()
+    is_updater_health = "[updater]" in lowered and '"get /health http/' in lowered
+    is_internal_healthz = "127.0.0.1" in lowered and '"get /healthz http/' in lowered
+    if not (is_updater_health or is_internal_healthz):
+        return False
+    return any(f" {status} " in lowered for status in range(200, 300))
+
+
 def _filter_console_payload(payload: dict[str, Any], keyword: str | None) -> dict[str, Any]:
-    q = (keyword or "").strip().lower()
-    if not q:
-        return payload
     raw_lines = payload.get("lines")
     if not isinstance(raw_lines, list):
         return payload
-    return {**payload, "lines": [line for line in raw_lines if q in str(line).lower()]}
+    lines = [line for line in raw_lines if not _is_console_noise_line(str(line))]
+    q = (keyword or "").strip().lower()
+    if q:
+        lines = [line for line in lines if q in str(line).lower()]
+    return {**payload, "lines": lines}
 
 
 def _tail_file(path: Path, max_lines: int) -> list[str]:

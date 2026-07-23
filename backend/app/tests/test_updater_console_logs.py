@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
+from unittest.mock import patch
 
 
 def _load_updater_module():
@@ -244,6 +245,20 @@ def test_console_logs_filters_internal_health_checks(monkeypatch) -> None:
 
     assert result["ok"] is True
     assert result["lines"] == ["web-1      | INFO:app.worker:真实业务日志"]
+
+
+def test_updater_handler_silences_only_successful_health_requests() -> None:
+    updater = _load_updater_module()
+    handler = object.__new__(updater.Handler)
+    handler.path = "/health"
+    handler.client_address = ("127.0.0.1", 8765)
+
+    with patch("builtins.print") as mocked_print:
+        updater.Handler.log_message(handler, '"GET /health HTTP/1.1" %s -', "200")
+        mocked_print.assert_not_called()
+
+        updater.Handler.log_message(handler, '"GET /health HTTP/1.1" %s -', "503")
+        mocked_print.assert_called_once()
 
 
 def test_console_logs_falls_back_to_labeled_containers_when_project_is_wrong(monkeypatch) -> None:

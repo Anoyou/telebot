@@ -112,7 +112,7 @@ export function ModelPicker({
         }}
         className={cn(
           "h-8 min-w-0 max-w-full rounded-md border border-border/60 bg-background/80 px-2 text-xs",
-          "w-[min(18rem,72vw)] disabled:opacity-50",
+          "w-full flex-1 sm:w-[min(18rem,72vw)] sm:flex-none disabled:opacity-50",
         )}
       >
         <option value="auto">自动路由</option>

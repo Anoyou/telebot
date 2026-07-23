@@ -712,7 +712,15 @@ class Handler(BaseHTTPRequestHandler):
         _json_response(self, 404, {"ok": False, "error": "not found"})
 
     def log_message(self, fmt: str, *args: Any) -> None:
-        print(f"[updater] {self.address_string()} {fmt % args}", flush=True)
+        message = fmt % args
+        # Docker 每 15 秒探测一次 /health。成功探测不是可行动日志，直接在
+        # 生产源头静默；失败状态仍由默认日志路径保留，便于排障。
+        if self.path.split("?", 1)[0] == "/health" and message.startswith('"GET /health HTTP/'):
+            status_match = re.search(r'HTTP/[^\"]+"\s+(\d{3})\b', message)
+            status = int(status_match.group(1)) if status_match else 0
+            if 200 <= status < 300:
+                return
+        print(f"[updater] {self.address_string()} {message}", flush=True)
 
 
 def main() -> None:

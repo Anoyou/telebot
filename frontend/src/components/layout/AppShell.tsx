@@ -328,14 +328,15 @@ function MobileAssistantButton() {
       aria-pressed={!collapsed}
       onClick={() => setCollapsed(!collapsed)}
       className={cn(
-        "liquid-bottom-nav grid h-[3.75rem] w-[3.75rem] shrink-0 place-items-center rounded-full text-primary active:scale-95 motion-reduce:transform-none",
-        !collapsed && "bg-foreground text-background",
+        "assistant-nav-orb liquid-bottom-nav relative grid h-[3.75rem] w-[3.75rem] shrink-0 content-center place-items-center rounded-full text-primary active:scale-95 motion-reduce:transform-none",
+        !collapsed && "assistant-nav-orb-active border-primary/60 bg-primary/15 text-primary",
       )}
     >
-      <span className="relative">
+      <span className="relative grid place-items-center">
         <BotMessageSquare className="h-5 w-5" />
         {streaming ? <span className="absolute -right-1 -top-1 h-2.5 w-2.5 animate-pulse rounded-full border-2 border-card bg-success motion-reduce:animate-none" /> : null}
       </span>
+      <span className="mt-0.5 text-[10px] font-semibold leading-none">助手</span>
     </button>
   );
 }

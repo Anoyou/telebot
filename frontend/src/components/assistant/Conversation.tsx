@@ -2,7 +2,7 @@ import { memo, useEffect, useRef } from "react";
 import { AlertCircle, Bot, RotateCcw, ShieldCheck, User, Wrench } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import rehypeRaw from "rehype-raw";
-import rehypeSanitize from "rehype-sanitize";
+import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
 import remarkGfm from "remark-gfm";
 
 import type {
@@ -20,9 +20,83 @@ import { systemAgentToolLabel } from "@/lib/systemAgentLabels";
 import { cn } from "@/lib/utils";
 import { stabilizeStreamingMarkdown, visibleConversationMessages } from "./conversationState";
 
-/** Markdown + 安全 HTML：先解析原始 HTML，再消毒（剥离 script/on* 等）。 */
+const SAFE_TEXT_COLORS: Record<string, string> = {
+  red: "assistant-html-text-red",
+  blue: "assistant-html-text-blue",
+  green: "assistant-html-text-green",
+  yellow: "assistant-html-text-yellow",
+  purple: "assistant-html-text-purple",
+  gray: "assistant-html-text-gray",
+  grey: "assistant-html-text-gray",
+};
+const SAFE_LABELS: Record<string, string> = {
+  success: "assistant-html-label-success",
+  warn: "assistant-html-label-warn",
+  warning: "assistant-html-label-warn",
+  danger: "assistant-html-label-danger",
+  info: "assistant-html-label-info",
+  neutral: "assistant-html-label-neutral",
+};
+const ASSISTANT_HTML_CLASSES = [...new Set([...Object.values(SAFE_TEXT_COLORS), ...Object.values(SAFE_LABELS)])];
+
+type AssistantHtmlNode = {
+  type?: string;
+  tagName?: string;
+  properties?: Record<string, unknown>;
+  children?: AssistantHtmlNode[];
+};
+
+/** 只把有限颜色与标签语义映射为项目 class，任意 style/class 仍会被删除。 */
+function rehypeAssistantSafeStyles() {
+  return (tree: AssistantHtmlNode) => {
+    const visit = (node: AssistantHtmlNode) => {
+      if (node.type === "element") {
+        const properties = node.properties || (node.properties = {});
+        const rawClass = Array.isArray(properties.className)
+          ? properties.className.map(String)
+          : typeof properties.className === "string"
+            ? properties.className.split(/\s+/)
+            : [];
+        const rawLabel = String(properties.dataLabel || properties["data-label"] || "").toLowerCase();
+        const colorAttr = String(properties.color || "").toLowerCase();
+        const style = String(properties.style || "");
+        const styleColor = /^\s*color\s*:\s*(red|blue|green|yellow|purple|gr(?:a|e)y)\s*;?\s*$/i.exec(style)?.[1]?.toLowerCase();
+        const requestedColor = SAFE_TEXT_COLORS[colorAttr] || (styleColor ? SAFE_TEXT_COLORS[styleColor] : undefined);
+        const requestedLabel = SAFE_LABELS[rawLabel]
+          || rawClass.map((item) => SAFE_LABELS[item.replace(/^label-/, "").toLowerCase()]).find(Boolean);
+        const safeClasses = [requestedColor, requestedLabel, ...rawClass.filter((item) => ASSISTANT_HTML_CLASSES.includes(item))].filter(Boolean);
+        if (safeClasses.length) properties.className = [...new Set(safeClasses)];
+        else delete properties.className;
+        delete properties.style;
+        delete properties.color;
+        delete properties.dataLabel;
+        delete properties["data-label"];
+        if (node.tagName === "font") node.tagName = "span";
+      }
+      node.children?.forEach(visit);
+    };
+    visit(tree);
+  };
+}
+
+const ASSISTANT_SANITIZE_SCHEMA = {
+  ...defaultSchema,
+  attributes: {
+    ...defaultSchema.attributes,
+    span: [
+      ...(defaultSchema.attributes?.span || []),
+      ["className", ...ASSISTANT_HTML_CLASSES],
+    ],
+  },
+};
+const ASSISTANT_SANITIZE_PLUGIN: [typeof rehypeSanitize, typeof ASSISTANT_SANITIZE_SCHEMA] = [
+  rehypeSanitize,
+  ASSISTANT_SANITIZE_SCHEMA,
+];
+
+/** Markdown + 安全 HTML：先解析原始 HTML，映射有限样式，再消毒。 */
 const ASSISTANT_REMARK_PLUGINS = [remarkGfm];
-const ASSISTANT_REHYPE_PLUGINS = [rehypeRaw, rehypeSanitize];
+const ASSISTANT_REHYPE_PLUGINS = [rehypeRaw, rehypeAssistantSafeStyles, ASSISTANT_SANITIZE_PLUGIN];
 
 export type LiveBubble = {
   id: string;
@@ -231,7 +305,7 @@ export function Conversation({
             className={cn("flex gap-2", isUser ? "justify-end" : "justify-start")}
           >
             {!isUser ? (
-              <div className="mt-1 shrink-0 rounded-full bg-muted p-1.5">
+              <div className="mt-1 grid h-7 w-7 shrink-0 self-start place-items-center rounded-full bg-muted">
                 {isTool ? <Wrench className="h-3.5 w-3.5" /> : <Bot className="h-3.5 w-3.5" />}
               </div>
             ) : null}
@@ -263,7 +337,7 @@ export function Conversation({
                     "max-w-full break-words text-sm leading-relaxed",
                     isUser && "rounded-2xl bg-primary px-3 py-2 text-primary-foreground",
                     // 助手回答：无气泡正文（DEEIX / restyle）
-                    !isUser && !isTool && "min-w-0 max-w-[min(75ch,100%)] py-0.5 text-foreground xl:max-w-[min(96ch,100%)] 2xl:max-w-[min(112ch,100%)]",
+                    !isUser && !isTool && "min-w-0 max-w-[min(75ch,100%)] border-l-2 border-primary/35 py-0.5 pl-3 text-foreground xl:max-w-[min(96ch,100%)] 2xl:max-w-[min(112ch,100%)]",
                     isTool && "rounded-2xl border border-dashed bg-background px-3 py-2 text-xs text-muted-foreground",
                     (isUser || isTool) && "whitespace-pre-wrap",
                     item.pending && "opacity-70",
@@ -386,7 +460,7 @@ export function Conversation({
               </div>
             )}
             {isUser ? (
-              <div className="mt-1 shrink-0 rounded-full bg-primary/10 p-1.5">
+              <div className="mt-1 grid h-7 w-7 shrink-0 self-start place-items-center rounded-full bg-primary/10">
                 <User className="h-3.5 w-3.5" />
               </div>
             ) : null}

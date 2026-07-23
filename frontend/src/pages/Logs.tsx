@@ -548,7 +548,7 @@ export function Logs() {
                   type="button"
                   variant="outline"
                   className="w-full justify-start"
-                  onClick={() => copySystemConsoleLogs(systemConsoleQ.data)}
+                  onClick={() => copySystemConsoleLogs(systemConsoleQ.data, timezone)}
                 >
                   <Copy className="mr-1.5 h-4 w-4" />
                   复制当前结果
@@ -697,6 +697,7 @@ export function Logs() {
           error={systemConsoleQ.error}
           service={consoleService}
           keyword={keyword}
+          timezone={timezone}
         />
       ) : (
         <RuntimeEventStream
@@ -839,12 +840,14 @@ function SystemConsoleStream({
   error,
   service,
   keyword,
+  timezone,
 }: {
   data?: SystemConsoleLogsResponse;
   loading: boolean;
   error?: unknown;
   service: string;
   keyword: string;
+  timezone?: string;
 }) {
   const lines = data?.lines ?? [];
   const services = data?.services?.length ? data.services.map(systemConsoleServiceLabel) : [systemConsoleServiceLabel(service)];
@@ -885,7 +888,7 @@ function SystemConsoleStream({
             </div>
             <pre className="max-h-[640px] overflow-auto p-3 font-mono text-[11px] leading-5 whitespace-pre-wrap break-words">
               {lines.map((line, index) => (
-                <SystemConsoleLine key={`${index}-${line.slice(0, 32)}`} line={line} keyword={keyword} />
+                <SystemConsoleLine key={`${index}-${line.slice(0, 32)}`} line={line} keyword={keyword} timezone={timezone} />
               ))}
             </pre>
           </div>
@@ -897,11 +900,22 @@ function SystemConsoleStream({
   );
 }
 
-function SystemConsoleLine({ line, keyword }: { line: string; keyword: string }) {
-  const tone = consoleLineTone(line);
+function SystemConsoleLine({ line, keyword, timezone }: { line: string; keyword: string; timezone?: string }) {
+  const level = consoleLineLevel(line);
+  const displayLine = formatSystemConsoleLine(line, timezone);
   return (
-    <span className={cn("block min-h-5", tone)}>
-      <HighlightedMessage text={line || " "} keyword={keyword} />
+    <span
+      className={cn(
+        "my-0.5 block min-h-5 border-l-2 py-0.5 pl-2",
+        level === "error" && "border-destructive bg-destructive/10 text-red-300",
+        level === "warn" && "border-warning bg-warning/10 text-amber-200",
+        level === "debug" && "border-violet-400 bg-violet-400/10 text-violet-200",
+        level === "info" && "border-info/70 bg-info/5 text-zinc-100",
+      )}
+      data-console-level={level}
+      title={displayLine === line ? undefined : `原始时间：${line}`}
+    >
+      <HighlightedMessage text={displayLine || " "} keyword={keyword} />
     </span>
   );
 }
@@ -977,7 +991,7 @@ function AgentRunStream({
                     {run.error_message ? <div className="mt-0.5 break-words">{run.error_message}</div> : null}
                   </div>
                 ) : null}
-                <RunTrace runId={run.id} running={run.status === "running"} defaultOpen={false} className="mt-2" />
+                <RunTrace runId={run.id} running={run.status === "running"} defaultOpen={false} mode="diagnostic" timezone={timezone} className="mt-2" />
               </div>
             );
           })
@@ -1974,13 +1988,39 @@ async function copyRuntimeLog(log: RuntimeLogItem, timezone?: string) {
   await copyText(formatRuntimeLog(log, timezone), "已复制该条日志");
 }
 
-async function copySystemConsoleLogs(data?: SystemConsoleLogsResponse) {
+async function copySystemConsoleLogs(data?: SystemConsoleLogsResponse, timezone?: string) {
   const lines = data?.lines ?? [];
   if (!lines.length) {
     toast.info("当前没有可复制的系统控制台日志");
     return;
   }
-  await copyText(lines.join("\n"), `已复制 ${lines.length} 行系统控制台日志`);
+  await copyText(lines.map((line) => formatSystemConsoleLine(line, timezone)).join("\n"), `已复制 ${lines.length} 行系统控制台日志`);
+}
+
+const DOCKER_ISO_TIMESTAMP_RE = /\b(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d+))?Z\b/;
+
+function formatSystemConsoleLine(line: string, timezone?: string): string {
+  const match = DOCKER_ISO_TIMESTAMP_RE.exec(line);
+  if (!match) return line;
+  const millis = (match[2] || "").slice(0, 3).padEnd(3, "0");
+  const normalized = `${match[1]}.${millis}Z`;
+  const date = new Date(normalized);
+  if (Number.isNaN(date.getTime())) return line;
+  try {
+    const local = date.toLocaleString("zh-CN", {
+      timeZone: timezone || "Asia/Shanghai",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: false,
+    }).replaceAll("/", "-");
+    return line.replace(match[0], `${local}.${millis}`);
+  } catch {
+    return line;
+  }
 }
 
 async function copyText(text: string, message: string) {
@@ -2018,12 +2058,12 @@ function systemConsoleSourceLabel(source?: string | null): string {
   return source || "系统";
 }
 
-function consoleLineTone(line: string): string {
+function consoleLineLevel(line: string): "debug" | "info" | "warn" | "error" {
   const lowered = line.toLowerCase();
-  if (/(error|exception|traceback|failed|fatal|\bpanic\b)/i.test(lowered)) return "text-destructive";
-  if (/(warn|warning|retry|timeout)/i.test(lowered)) return "text-warning";
-  if (/(debug|verbose)/i.test(lowered)) return "text-info";
-  return "text-zinc-100";
+  if (/(error|exception|traceback|failed|fatal|\bpanic\b)/i.test(lowered)) return "error";
+  if (/(warn|warning|retry|timeout)/i.test(lowered)) return "warn";
+  if (/(debug|verbose)/i.test(lowered)) return "debug";
+  return "info";
 }
 
 function verdictMeta(verdict: MessageVerdict) {

@@ -15,6 +15,24 @@ from app.api.logs import (
 )
 
 
+def test_system_console_filter_removes_only_successful_internal_health_noise() -> None:
+    payload = {
+        "ok": True,
+        "lines": [
+            'updater-1 | 2026-07-23T21:42:58Z [updater] 127.0.0.1 "GET /health HTTP/1.1" 200 -',
+            'updater-1 | 2026-07-23T21:43:13Z [updater] 127.0.0.1 "GET /health HTTP/1.1" 503 -',
+            "web-1 | ERROR:app.services.system_agent.runtime:真实错误",
+        ],
+    }
+
+    result = logs_api._filter_console_payload(payload, None)
+
+    assert result["lines"] == [
+        'updater-1 | 2026-07-23T21:43:13Z [updater] 127.0.0.1 "GET /health HTTP/1.1" 503 -',
+        "web-1 | ERROR:app.services.system_agent.runtime:真实错误",
+    ]
+
+
 def _trace_row(**overrides):
     data = {
         "id": 1,

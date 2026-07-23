@@ -85,6 +85,36 @@ test.describe("移动端交互细节", () => {
     fixture.assertClean();
   });
 
+  test("系统控制台按日志等级显示警示竖条并转换时区", async ({ page }, testInfo) => {
+    test.skip(testInfo.project.name !== "mobile", "仅移动视口");
+    const fixture = await installApiFixture(page);
+    await page.route("**/api/logs/system-console", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          ok: true,
+          source: "docker_compose",
+          services: ["web"],
+          tail: 100,
+          lines: [
+            "web-1 | 2026-07-23T21:42:58.931730331Z INFO:app:启动完成",
+            "web-1 | 2026-07-23T21:42:59Z WARNING:app:需要关注",
+            "web-1 | 2026-07-23T21:43:00Z ERROR:app:运行失败",
+            "web-1 | 2026-07-23T21:43:01Z DEBUG:app:诊断信息",
+          ],
+        }),
+      });
+    });
+    await page.goto("/logs?view=console", { waitUntil: "networkidle" });
+    await expect(page.locator('[data-console-level="info"]')).toHaveCount(1);
+    await expect(page.locator('[data-console-level="warn"]')).toHaveCount(1);
+    await expect(page.locator('[data-console-level="error"]')).toHaveCount(1);
+    await expect(page.locator('[data-console-level="debug"]')).toHaveCount(1);
+    await expect(page.getByText(/2026-07-24.*05:42:58\.931/)).toBeVisible();
+    fixture.assertClean();
+  });
+
   test("Provider 创建步骤保持单行置顶并随滚动更新", async ({ page }, testInfo) => {
     test.skip(testInfo.project.name !== "mobile", "仅移动视口");
     const fixture = await installApiFixture(page);
@@ -170,6 +200,7 @@ test.describe("移动端交互细节", () => {
       return { width: Math.round(rect.width), height: Math.round(rect.height) };
     });
     expect(shape.width).toBe(shape.height);
+    await expect(assistantButton).toContainText("助手");
     await expect(page.locator("[data-assistant-tip]")).toBeHidden();
     await assistantButton.click();
     await expect(page.locator("[data-assistant-surface]")).toBeVisible();
@@ -207,9 +238,23 @@ test.describe("移动端交互细节", () => {
     await page.goto("/plugins", { waitUntil: "networkidle" });
     await expect(page.getByText("AI 插件入口")).toBeHidden();
     await expect(page.getByText("这段插件说明在移动端默认不展示，展开卡片后才显示。")).toBeHidden();
-    await expect(page.getByRole("button", { name: "配置" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "配置" })).toBeHidden();
     await page.getByRole("button", { name: "随机福利" }).click();
     await expect(page.getByText("这段插件说明在移动端默认不展示，展开卡片后才显示。")).toBeVisible();
+    await expect(page.getByRole("button", { name: "配置" })).toBeVisible();
+    fixture.assertClean();
+  });
+
+  test("中间宽度可从导航抽屉进入系统助手", async ({ page }) => {
+    const fixture = await installApiFixture(page);
+    await page.setViewportSize({ width: 758, height: 1100 });
+    await page.goto("/ai", { waitUntil: "networkidle" });
+    await expect(page.locator("[data-assistant-mobile-button]")).toBeHidden();
+    await page.getByRole("button", { name: "打开导航菜单" }).click();
+    const assistantEntry = page.getByRole("dialog", { name: "导航菜单" }).locator("[data-assistant-sidebar-button]");
+    await expect(assistantEntry).toBeVisible();
+    await assistantEntry.click();
+    await expect(page.locator("[data-assistant-surface]")).toBeVisible();
     fixture.assertClean();
   });
 

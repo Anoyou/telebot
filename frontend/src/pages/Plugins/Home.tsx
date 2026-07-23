@@ -883,16 +883,6 @@ function FeatureZone({
                                 ? "等待热加载"
                                 : "能力受限"}
                         </FeatureCapabilityBadge>
-                        {canConfigure ? (
-                          <Button
-                            size="sm"
-                            variant="outline"
-                            className="min-h-11 sm:hidden"
-                            onClick={() => path && nav(path)}
-                          >
-                            配置
-                          </Button>
-                        ) : null}
                       </div>
                     </div>
                     {f.last_update_check_error ? (

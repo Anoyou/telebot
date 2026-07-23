@@ -192,12 +192,14 @@ function SidebarBody({
         </div>
       </div>
       <NavList collapsed={collapsed} onNavigate={onNavigate} />
-      {!mobile ? (
-        <div className={cn("shrink-0 px-4 pb-2", collapsed && "px-3")}>
+      <div className={cn("shrink-0 px-4 pb-2", collapsed && "px-3", mobile && "hidden sm:block")}>
           <button
             type="button"
             data-assistant-sidebar-button
-            onClick={() => setAssistantCollapsed(!assistantCollapsed)}
+            onClick={() => {
+              setAssistantCollapsed(!assistantCollapsed);
+              onNavigate?.();
+            }}
             aria-pressed={!assistantCollapsed}
             className={cn(
               "liquid-sidebar-link flex h-11 w-full items-center gap-3 rounded-lg border border-primary/20 bg-primary/5 px-3 text-left font-semibold text-primary active:scale-[0.98] motion-reduce:transform-none",
@@ -214,7 +216,6 @@ function SidebarBody({
             <span className={cn("truncate", collapsed && "sr-only")}>系统助手</span>
           </button>
         </div>
-      ) : null}
       <div
         className={cn(
           "liquid-sidebar-footer shrink-0 space-y-2 px-4 py-5 text-sm text-muted-foreground",

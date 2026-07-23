@@ -496,9 +496,7 @@ export function GenericPluginConfigPage() {
           ) : (
             <CollapsibleUsageContent resetKey={`${featureKey}:${usageGuide.customText}`}>
               <div className="space-y-3 rounded-md border bg-muted/20 p-3 text-xs text-muted-foreground">
-                <div className="whitespace-pre-wrap leading-relaxed text-foreground">
-                  {usageGuide.customText}
-                </div>
+                <UsageGuideBody text={usageGuide.customText} />
                 {usageGuide.commandExamples.length > 0 ? (
                   <div>
                     <div className="mb-1 font-medium text-foreground">插件声明的指令参考</div>
@@ -1458,6 +1456,30 @@ interface UsageGuide {
   notes: string[];
   missing: boolean;
   warning: string;
+}
+
+function UsageGuideBody({ text }: { text: string }) {
+  const blocks = text
+    .replace(/\s+(命令[：:])/g, "\n$1")
+    .split(/\n+|(?<=[。；])\s*/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+  return (
+    <div className="space-y-2 text-foreground">
+      {blocks.map((block, index) => {
+        const commandLike = /^命令[：:]|^[。，,.!！/][a-z\d_-]+/i.test(block);
+        return commandLike ? (
+          <div key={`${index}-${block}`} className="overflow-x-auto rounded-md border border-border/70 bg-background px-3 py-2 font-mono text-[11px] leading-5">
+            {block}
+          </div>
+        ) : (
+          <p key={`${index}-${block}`} className="leading-6 text-foreground/90">
+            {block}
+          </p>
+        );
+      })}
+    </div>
+  );
 }
 
 function buildUsageGuide({

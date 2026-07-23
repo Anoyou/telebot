@@ -202,7 +202,7 @@ export async function listSystemAgentRunEvents(
   runId: string,
   afterSeq = 0,
 ): Promise<SystemAgentStreamEvent[]> {
-  const { data } = await api.get<Array<{ run_id: string; seq: number; event: Record<string, unknown> }>>(
+  const { data } = await api.get<Array<{ run_id: string; seq: number; event: Record<string, unknown>; created_at?: string | null }>>(
     `/api/system-agent/runs/${runId}/events`,
     { params: { after_seq: afterSeq } },
   );
@@ -211,6 +211,7 @@ export async function listSystemAgentRunEvents(
     type: String(row.event?.type || ""),
     run_id: row.run_id,
     seq: row.seq,
+    created_at: row.created_at ?? null,
   })) as SystemAgentStreamEvent[];
 }
 

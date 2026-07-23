@@ -10,7 +10,24 @@ import {
 } from "@/components/assistant/runTraceState";
 import { Skeleton } from "@/components/ui/misc";
 import { systemAgentToolLabel } from "@/lib/systemAgentLabels";
-import { cn } from "@/lib/utils";
+import { cn, formatDateTime } from "@/lib/utils";
+
+function diagnosticFacts(event: TraceEvent): string[] {
+  const facts: string[] = [];
+  const add = (label: string, value: unknown) => {
+    if (value === undefined || value === null || value === "") return;
+    facts.push(`${label}=${typeof value === "object" ? JSON.stringify(value) : String(value)}`);
+  };
+  add("Provider", event.provider_name);
+  add("model", event.model);
+  add("attempt", event.attempt);
+  add("retry", event.retry_number);
+  add("tool", event.tool_name);
+  add("call_id", event.call_id);
+  add("code", event.code);
+  add("usage", event.usage);
+  return facts;
+}
 
 function labelEvent(event: TraceEvent): string {
   const type = String(event.type || "");
@@ -59,6 +76,8 @@ export function RunTrace({
   failed,
   className,
   defaultOpen,
+  mode = "compact",
+  timezone,
 }: {
   runId?: string | null;
   /** 当前流式轮次的实时事件（可选） */
@@ -67,6 +86,8 @@ export function RunTrace({
   failed?: boolean;
   className?: string;
   defaultOpen?: boolean;
+  mode?: "compact" | "diagnostic";
+  timezone?: string;
 }) {
   const [open, setOpen] = useState(Boolean(defaultOpen ?? (running || failed)));
 
@@ -88,7 +109,10 @@ export function RunTrace({
     return (q.data || []) as TraceEvent[];
   }, [liveEvents, q.data]);
 
-  const visible = useMemo(() => filterTraceEvents(events), [events]);
+  const visible = useMemo(
+    () => (mode === "diagnostic" ? events : filterTraceEvents(events)),
+    [events, mode],
+  );
   const summary = useMemo(() => summarizeTraceEvents(events), [events]);
 
   if (!runId && !liveEvents?.length) return null;
@@ -126,13 +150,35 @@ export function RunTrace({
             暂无轨迹事件
           </div>
         ) : (
-          <ol className="max-h-48 space-y-1 overflow-y-auto rounded-md border bg-muted/20 px-2 py-1.5">
+          <ol className={cn(
+            "space-y-1 overflow-y-auto rounded-md border bg-muted/20 px-2 py-1.5",
+            mode === "diagnostic" ? "max-h-[32rem]" : "max-h-48",
+          )}>
             {visible.map((event, index) => (
-              <li key={`${event.seq ?? index}-${event.type}`} className="text-[11px] leading-4">
-                <span className="tabular-nums text-muted-foreground/80">
-                  {typeof event.seq === "number" ? `#${event.seq} ` : ""}
-                </span>
-                {labelEvent(event)}
+              <li key={`${event.seq ?? index}-${event.type}`} className={cn("text-[11px] leading-4", mode === "diagnostic" && "border-b border-border/50 py-1.5 last:border-0")}>
+                <div className="flex min-w-0 flex-wrap items-baseline gap-x-1.5">
+                  {mode === "diagnostic" && event.created_at ? (
+                    <span className="shrink-0 tabular-nums text-muted-foreground/80">
+                      {formatDateTime(String(event.created_at), timezone)}
+                    </span>
+                  ) : null}
+                  <span className="tabular-nums text-muted-foreground/80">
+                    {typeof event.seq === "number" ? `#${event.seq}` : ""}
+                  </span>
+                  {mode === "diagnostic" ? <code className="text-[10px] text-info">{String(event.type || "event")}</code> : null}
+                  <span>{labelEvent(event)}</span>
+                </div>
+                {mode === "diagnostic" && diagnosticFacts(event).length ? (
+                  <div className="mt-1 break-all font-mono text-[10px] text-muted-foreground">
+                    {diagnosticFacts(event).join(" · ")}
+                  </div>
+                ) : null}
+                {mode === "diagnostic" ? (
+                  <details className="mt-1 text-muted-foreground">
+                    <summary className="cursor-pointer select-none text-[10px] hover:text-foreground">原始事件 JSON</summary>
+                    <pre className="mt-1 max-h-56 overflow-auto whitespace-pre-wrap break-all rounded bg-background/80 p-2 text-[10px] leading-4 text-foreground">{JSON.stringify(event, null, 2)}</pre>
+                  </details>
+                ) : null}
               </li>
             ))}
           </ol>
