@@ -3,8 +3,11 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from app.services.system_agent.memory import (
+    ENTRY_ANCHOR,
+    MAX_MEMORY_SUMMARY_CHARS,
     clear_session_memory,
     memory_context,
+    trim_summary_to_limit,
     update_session_memory,
 )
 
@@ -62,3 +65,46 @@ def test_clear_session_memory_resets_summary_and_state() -> None:
     assert session.memory_summary == ""
     assert session.memory_state == {}
     assert memory_context(session) == ""
+
+
+def test_trim_summary_drops_oldest_entries_not_half_lines() -> None:
+    pad = "详" * 200
+    entries = [
+        f"{ENTRY_ANCHOR}旧目标 {i} {pad}\n  处理结果：旧结果 {i} {pad}"
+        for i in range(12)
+    ]
+    bloated = "\n".join(entries)
+    assert len(bloated) > MAX_MEMORY_SUMMARY_CHARS
+    trimmed = trim_summary_to_limit(bloated)
+    assert len(trimmed) <= MAX_MEMORY_SUMMARY_CHARS
+    assert "旧目标 0" not in trimmed
+    assert "旧目标 11" in trimmed
+    # 所有条目起点都是完整锚点
+    for chunk in trimmed.split(ENTRY_ANCHOR)[1:]:
+        assert chunk.strip()
+        assert "处理结果" in chunk
+
+
+def test_trim_summary_heals_legacy_half_prefix_on_update() -> None:
+    """历史硬砍产生的半条前缀会在下次更新时作为独立条目被优先丢掉。"""
+    pad = "字" * 100
+    session = SimpleNamespace(
+        memory_summary="半截残留文本没有锚点 " + pad + "\n"
+        + "\n".join(
+            f"{ENTRY_ANCHOR}目标{i} {pad}\n  处理结果：结果{i} {pad}" for i in range(20)
+        ),
+        memory_state={"recent_turns": [{"goal": f"g{i}", "result": f"r{i}"} for i in range(4)]},
+        account_id=None,
+    )
+    # 再压一轮以触发 compact
+    for index in range(2):
+        update_session_memory(
+            session,
+            user_text=f"新目标 {index}",
+            assistant_text=f"新结果 {index}",
+            domains=["logs"],
+            tool_events=[],
+        )
+    assert "半截残留" not in (session.memory_summary or "")
+    assert len(session.memory_summary or "") <= MAX_MEMORY_SUMMARY_CHARS
+    assert int(session.memory_state.get("summary_rev") or 0) >= 1
