@@ -100,6 +100,18 @@ BUILTIN_SKILLS: tuple[SkillSpec, ...] = (
         required_context=("插件 key", "仓库", "账号"),
     ),
     SkillSpec(
+        name="product",
+        description="查询 TelePilot 产品更新日志和界面入口。",
+        domains=("product",),
+        allowed_tools=("product.get_changelog",),
+        instructions=(
+            "‘更新日志’、‘版本更新’指产品发布说明，不是运行时日志。",
+            "回答时同时给出最近版本变化和桌面端/移动端入口。",
+        ),
+        examples=("看看更新日志", "这版更新了什么", "移动端在哪里看版本更新"),
+        required_context=("版本范围（可省略，默认最近 4 个版本）",),
+    ),
+    SkillSpec(
         name="diagnostics",
         description="读取日志、错误事件和系统健康信息并定位运行问题。",
         domains=("logs", "system"),

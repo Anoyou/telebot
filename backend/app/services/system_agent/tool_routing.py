@@ -20,6 +20,7 @@ DOMAIN_CATALOG: dict[str, tuple[str, tuple[str, ...]]] = {
     "memory": ("长期偏好记忆的查询与保存", ("记住", "偏好", "长期记忆", "别再问", "remember", "preference")),
     "plugin_repos": ("插件仓库、官方库与从仓库安装", ("插件仓库", "仓库", "repository", "repo")),
     "plugins": ("已安装插件、检查更新、安装卸载与全局启停", ("插件", "plugin", "扩展")),
+    "product": ("TelePilot 产品版本、更新日志与界面入口", ("更新日志", "版本日志", "changelog", "最近更新")),
     "providers": ("模型 Provider 的列表、保存、验证与删除", ("provider", "提供商", "模型服务", "api key", "密钥")),
     "routing": ("AI 指令的 auto/fixed 路由", ("路由", "routing", "auto", "fixed")),
     "rules": ("通用 Rule 的查询、保存、启停与删除", ("规则", "rule")),
@@ -57,6 +58,7 @@ _GENERAL_HELP_HINTS = (
     "帮助",
     "help",
 )
+_PRODUCT_HELP_HINTS = ("更新日志", "版本日志", "changelog", "最近更新", "这版更新", "更新了什么")
 
 
 @dataclass(frozen=True)
@@ -87,6 +89,9 @@ def route_locally(
     normalized = re.sub(r"\s+", "", str(text or "").lower())
     if any(hint in normalized for hint in _GENERAL_HELP_HINTS):
         return ToolRoute((), "local", "general_help")
+
+    if "product" in available and any(hint in normalized for hint in _PRODUCT_HELP_HINTS):
+        return ToolRoute(("product",), "local", "product_changelog")
 
     matched: list[str] = []
     for domain, (_description, keywords) in DOMAIN_CATALOG.items():

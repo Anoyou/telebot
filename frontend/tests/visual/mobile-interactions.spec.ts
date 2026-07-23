@@ -24,6 +24,44 @@ test.describe("移动端交互细节", () => {
     fixture.assertClean();
   });
 
+  test("侧栏明确展示更新日志入口并可打开内容", async ({ page }, testInfo) => {
+    test.skip(testInfo.project.name !== "mobile", "仅移动视口");
+    const fixture = await installApiFixture(page);
+    await page.goto("/ledger", { waitUntil: "networkidle" });
+
+    await page.getByRole("button", { name: "打开导航菜单" }).click();
+    const changelogButton = page.getByRole("button", { name: "更新日志" });
+    await expect(changelogButton).toBeVisible();
+    await expect(changelogButton).toContainText("更新日志");
+    await expect(changelogButton).toContainText(`v${APP_VERSION}`);
+    const bounds = await changelogButton.evaluate((element) => {
+      const rect = element.getBoundingClientRect();
+      return { left: rect.left, right: rect.right, viewport: document.documentElement.clientWidth };
+    });
+    expect(bounds.left).toBeGreaterThanOrEqual(0);
+    expect(bounds.right).toBeLessThanOrEqual(bounds.viewport);
+
+    await changelogButton.click();
+    await expect(page.getByText("最近版本的主要变化，完整记录见仓库 CHANGELOG.md。"))
+      .toBeVisible();
+    const menuBounds = await page.getByRole("menu").evaluate((element) => {
+      const rect = element.getBoundingClientRect();
+      return {
+        top: rect.top,
+        left: rect.left,
+        right: rect.right,
+        bottom: rect.bottom,
+        viewportWidth: document.documentElement.clientWidth,
+        viewportHeight: document.documentElement.clientHeight,
+      };
+    });
+    expect(menuBounds.top).toBeGreaterThanOrEqual(0);
+    expect(menuBounds.left).toBeGreaterThanOrEqual(0);
+    expect(menuBounds.right).toBeLessThanOrEqual(menuBounds.viewportWidth);
+    expect(menuBounds.bottom).toBeLessThanOrEqual(menuBounds.viewportHeight);
+    fixture.assertClean();
+  });
+
   test("Provider 创建步骤保持单行置顶并随滚动更新", async ({ page }, testInfo) => {
     test.skip(testInfo.project.name !== "mobile", "仅移动视口");
     const fixture = await installApiFixture(page);

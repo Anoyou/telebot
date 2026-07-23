@@ -153,6 +153,9 @@ def classify_changed_files(
         if path in _FRONTEND_BUNDLED_FILES or path.startswith("frontend/"):
             components.add("frontend")
             services.add("frontend")
+            if path == "CHANGELOG.md":
+                components.add("backend")
+                services.add("web")
             continue
 
         if path.startswith(_BACKEND_TEST_PREFIXES):

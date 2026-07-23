@@ -22,6 +22,7 @@ def register_all_tools(registry: ToolRegistry) -> None:
         memory,
         plugin_repos,
         plugins,
+        product,
         providers,
         routing,
         rules,
@@ -41,6 +42,7 @@ def register_all_tools(registry: ToolRegistry) -> None:
     routing.register(registry)
     features.register(registry)
     plugins.register(registry)
+    product.register(registry)
     plugin_repos.register(registry)
     logs.register(registry)
     ledger.register(registry)

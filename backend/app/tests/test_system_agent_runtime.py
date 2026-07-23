@@ -6,7 +6,14 @@ import pytest
 
 from app.services.llm_agent import AgentResult
 from app.services.llm_dto import LLMProviderDTO
-from app.services.llm_protocol import ModelResponse, ModelUsage, StopReason, TextContent, ToolCall
+from app.services.llm_protocol import (
+    ModelResponse,
+    ModelStreamEvent,
+    ModelUsage,
+    StopReason,
+    TextContent,
+    ToolCall,
+)
 from app.services.system_agent import runtime as runtime_module
 from app.services.system_agent.config import ResolvedAgentProviders
 from app.services.system_agent.registry import ToolRegistry, ToolSpec
@@ -162,6 +169,140 @@ async def test_runtime_exposes_only_routed_domain_and_sticks_to_fallback(monkeyp
     assert route["tool_count"] == 1
     done = next(event for event in events if event["type"] == "done")
     assert done["used_fallback"] is True
+
+
+@pytest.mark.asyncio
+async def test_runtime_does_not_reuse_upstream_model_alias(monkeypatch) -> None:
+    primary, fallback = _providers()
+    await _patch_runtime_config(monkeypatch, primary, fallback)
+    calls: list[str] = []
+
+    async def invoke(provider, _providers, request, **kwargs):  # noqa: ANN001
+        calls.append(request.model)
+        progress = kwargs["progress_callback"]
+        await progress(
+            {
+                "type": "model_attempt",
+                "provider_id": provider.id,
+                "provider_name": provider.name,
+                "model": request.model,
+                "attempt": 1,
+                "max_retries": 5,
+            }
+        )
+        return (
+            ModelResponse(
+                model="upstream-backend-alias",
+                content=(TextContent("done"),),
+                usage=ModelUsage(input_tokens=1, output_tokens=1),
+            ),
+            provider,
+            False,
+        )
+
+    async def run(model_call, request, _tools, **_kwargs):  # noqa: ANN001
+        await model_call(request)
+        second = await model_call(request)
+        return AgentResult(
+            text=second.text,
+            model=second.model,
+            messages=request.messages,
+            usage=ModelUsage(input_tokens=2, output_tokens=2),
+            steps=2,
+            tool_calls=1,
+            stop_reason=StopReason.COMPLETED,
+        )
+
+    monkeypatch.setattr(runtime_module, "invoke_structured", invoke)
+    monkeypatch.setattr(runtime_module, "run_agent", run)
+
+    events = [
+        event
+        async for event in SystemAgentRuntime(_registry()).stream_turn(
+            None,  # type: ignore[arg-type]
+            session=_session(),  # type: ignore[arg-type]
+            user_text="帮我看看定时任务",
+            role="admin",
+            channel="web",
+        )
+    ]
+
+    assert calls == [primary.default_model, primary.default_model]
+    usage = next(event for event in events if event["type"] == "assistant_message")["usage"]
+    assert usage["requested_model"] == primary.default_model
+    assert usage["model"] == "upstream-backend-alias"
+    assert not any(
+        event.get("type") == "provider_selected"
+        and event.get("reason") == "model_fallback"
+        for event in events
+    )
+
+
+@pytest.mark.asyncio
+async def test_stream_runtime_does_not_reuse_upstream_model_alias(monkeypatch) -> None:
+    primary, fallback = _providers()
+    await _patch_runtime_config(monkeypatch, primary, fallback)
+    calls: list[str] = []
+
+    async def stream(provider, _providers, request, **kwargs):  # noqa: ANN001
+        calls.append(request.model)
+        await kwargs["progress_callback"](
+            {
+                "type": "model_attempt",
+                "provider_id": provider.id,
+                "provider_name": provider.name,
+                "model": request.model,
+                "attempt": 1,
+                "max_retries": 5,
+            }
+        )
+        yield (
+            ModelStreamEvent(
+                response=ModelResponse(
+                    model="upstream-stream-alias",
+                    content=(TextContent("done"),),
+                    usage=ModelUsage(input_tokens=1, output_tokens=1),
+                )
+            ),
+            provider,
+            False,
+        )
+
+    async def run(_model_call, request, _tools, *, stream_model_call, **_kwargs):  # noqa: ANN001
+        responses = []
+        for _ in range(2):
+            async for event in stream_model_call(request):
+                if event.response is not None:
+                    responses.append(event.response)
+        second = responses[-1]
+        return AgentResult(
+            text=second.text,
+            model=second.model,
+            messages=request.messages,
+            usage=ModelUsage(input_tokens=2, output_tokens=2),
+            steps=2,
+            tool_calls=1,
+            stop_reason=StopReason.COMPLETED,
+        )
+
+    monkeypatch.setattr(runtime_module, "stream_structured", stream)
+    monkeypatch.setattr(runtime_module, "run_agent", run)
+
+    events = [
+        event
+        async for event in SystemAgentRuntime(_registry()).stream_turn(
+            None,  # type: ignore[arg-type]
+            session=_session(),  # type: ignore[arg-type]
+            user_text="帮我看看定时任务",
+            role="admin",
+            channel="web",
+        )
+    ]
+
+    assert calls == [primary.default_model, primary.default_model]
+    usage = next(event for event in events if event["type"] == "assistant_message")["usage"]
+    assert usage["requested_model"] == primary.default_model
+    assert usage["model"] == "upstream-stream-alias"
 
 
 @pytest.mark.asyncio

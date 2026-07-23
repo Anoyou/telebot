@@ -26,7 +26,13 @@ from ..llm_invoke import invoke_structured, stream_structured
 from ..llm_protocol import MessageRole, ModelMessage, ModelRequest, ModelUsage, ToolCall, ToolResult
 from ..llm_protocol import ToolSpec as LlmToolSpec
 from ..llm_runtime import ProviderSwitchRequired
-from .config import load_system_context_flags, resolve_agent_providers
+from .config import (
+    load_system_context_flags,
+    resolve_agent_providers,
+)
+from .config import (
+    tools_model_for_dto as request_tools_model_for_dto,
+)
 from .context import ToolContext
 from .events import make_event
 from .memory import memory_context
@@ -210,9 +216,19 @@ class SystemAgentRuntime:
         progress_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
         streaming_redactor = StreamingMessageRedactor(secrets=list(chat_secrets or []))
 
+        attempted_models: dict[int, str] = {}
+
         async def emit_model_progress(progress: dict[str, Any]) -> None:
             payload = dict(progress)
             event_type = str(payload.pop("type", "model_progress"))
+            if event_type == "model_attempt":
+                try:
+                    attempted_provider_id = int(payload.get("provider_id"))
+                except (TypeError, ValueError):
+                    attempted_provider_id = 0
+                attempted_model = str(payload.get("model") or "").strip()
+                if attempted_provider_id > 0 and attempted_model:
+                    attempted_models[attempted_provider_id] = attempted_model
             await progress_queue.put(next_event(event_type, **payload))
 
         async def wait_for_progress(task: asyncio.Task[Any]) -> tuple[str, Any]:
@@ -504,6 +520,23 @@ class SystemAgentRuntime:
         used_fallback = False
         current_stream_fallback = False
 
+        def successful_request_model(
+            used: LLMProviderDTO,
+            *,
+            previous_provider: LLMProviderDTO,
+            previous_model: str,
+        ) -> str:
+            attempted = attempted_models.get(used.id)
+            if attempted:
+                return attempted
+            if used.id == previous_provider.id:
+                return previous_model
+            return (
+                request_tools_model_for_dto(used)
+                or str(used.default_model or "").strip()
+                or previous_model
+            )
+
         async def model_call(current: ModelRequest):
             nonlocal active_model, active_provider, last_used_provider, used_fallback
             provider_request = replace(current, model=active_model)
@@ -520,10 +553,15 @@ class SystemAgentRuntime:
             previous_model = active_model
             last_used_provider = used
             used_fallback = used_fallback or fallback or used.id != provider_dto.id
-            # 本轮内粘住最近一次成功的 Provider/模型，避免每个工具步骤都重新
-            # 从已知不稳定的主 Provider 开始重试。
+            # 本轮内粘住最近一次成功的 Provider 与请求模型，避免每个工具步骤
+            # 都重新从已知不稳定的主 Provider 开始重试。response.model 只是上游
+            # 回报标识，代理可能返回不可请求的后端别名，不能写回下一轮请求。
             active_provider = used
-            active_model = response.model or provider_request.model
+            active_model = successful_request_model(
+                used,
+                previous_provider=previous_provider,
+                previous_model=previous_model,
+            )
             if used.id != previous_provider.id or active_model != previous_model:
                 await progress_queue.put(
                     next_event(
@@ -559,7 +597,11 @@ class SystemAgentRuntime:
                 used_fallback = used_fallback or fallback or used.id != provider_dto.id
                 active_provider = used
                 if stream_event.response is not None:
-                    active_model = stream_event.response.model or provider_request.model
+                    active_model = successful_request_model(
+                        used,
+                        previous_provider=previous_provider,
+                        previous_model=previous_model,
+                    )
                     current_stream_fallback = bool(stream_event.response.stream_fallback)
                 if used.id != previous_provider.id or active_model != previous_model:
                     await progress_queue.put(

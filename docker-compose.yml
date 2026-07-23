@@ -66,8 +66,8 @@ services:
   # ── Web：FastAPI + supervisor，主进程内拉起每账号 worker 子进程 ─
   web:
     build:
-      context: ./backend
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: backend/Dockerfile
     restart: unless-stopped
     # init: true 让 PID 1 是 docker-init/tini，自动回收 multiprocessing.spawn 出来的
     # worker 子进程僵尸；之前依赖 supervisor 的 atexit/signal hook 兜底，遇到

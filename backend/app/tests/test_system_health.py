@@ -390,7 +390,7 @@ def test_classify_changed_files_frontend_bundled_docs() -> None:
         ["docs/PLUGIN-DEV-GUIDE.md", "CHANGELOG.md"]
     )
 
-    assert components == ["frontend"]
+    assert components == ["backend", "frontend"]
     assert requires_full_update is False
     assert requires_backup is False
 

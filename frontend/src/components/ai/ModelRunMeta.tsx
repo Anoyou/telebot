@@ -61,14 +61,17 @@ export function ModelRunMeta({
   const selectionMode = str(usage.selection_mode);
   const reqProvider = str(usage.requested_provider_name);
   const reqModel = str(usage.requested_model);
-  const actual = [provider, model].filter(Boolean).join(" · ");
+  const reported = [provider, model].filter(Boolean).join(" · ");
   const requested = [reqProvider, reqModel].filter(Boolean).join(" · ");
+  const summaryModel =
+    !usedFallback && reqModel && (!reqProvider || reqProvider === provider) ? reqModel : model;
+  const summary = [provider || reqProvider, summaryModel].filter(Boolean).join(" · ");
   const expectedLabel = [expected?.providerName, expected?.model].filter(Boolean).join(" · ");
   const mismatch =
-    Boolean(expectedLabel) && Boolean(actual) && expectedLabel !== actual;
+    Boolean(expectedLabel) && Boolean(reported) && expectedLabel !== reported;
 
   const bits: string[] = [];
-  if (actual) bits.push(actual);
+  if (summary) bits.push(summary);
   if (input != null || output != null) {
     bits.push(`in ${input ?? "–"} / out ${output ?? "–"}`);
   }
@@ -91,7 +94,7 @@ export function ModelRunMeta({
         {bits.map((bit) => (
           <span
             key={bit}
-            className={cn(mismatch && bit === actual && "font-medium text-warning")}
+            className={cn(usedFallback && mismatch && bit === summary && "font-medium text-warning")}
           >
             {bit}
           </span>
@@ -104,16 +107,16 @@ export function ModelRunMeta({
           <span className="rounded border px-1">本轮固定</span>
         ) : null}
       </div>
-      {usedFallback && requested && actual && requested !== actual ? (
+      {usedFallback && requested && reported && requested !== reported ? (
         <div className="space-y-0.5 text-[10px] text-muted-foreground">
           <div>原模型：{requested}</div>
-          <div>实际使用：{actual}</div>
+          <div>实际使用：{reported}</div>
           <div>原因：主模型不可用或已切换</div>
         </div>
       ) : null}
       {mismatch && !usedFallback ? (
         <div className="text-[10px] text-muted-foreground">
-          本轮希望使用 {expectedLabel}；实际使用 {actual}
+          本轮请求 {expectedLabel}；上游返回模型标识 {reported}
         </div>
       ) : null}
     </div>

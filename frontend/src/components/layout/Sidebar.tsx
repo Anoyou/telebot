@@ -13,6 +13,7 @@ import {
   Cog,
   Github,
   Home,
+  History,
   ScrollText,
   Sparkles,
   WalletCards,
@@ -140,9 +141,11 @@ function NavList({
 
 function SidebarBody({
   collapsed = false,
+  mobile = false,
   onNavigate,
 }: {
   collapsed?: boolean;
+  mobile?: boolean;
   onNavigate?: () => void;
 }) {
   const [changelogOpen, setChangelogOpen] = useState(false);
@@ -195,28 +198,38 @@ function SidebarBody({
             <button
               type="button"
               className={cn(
-                "truncate rounded-lg px-3 py-2 text-left text-xs font-medium text-muted-foreground transition hover:bg-accent hover:text-foreground",
-                collapsed && "px-0 text-center",
+                "liquid-sidebar-link flex h-11 w-full items-center gap-3 rounded-lg px-3 text-left text-muted-foreground transition hover:text-accent-foreground",
+                collapsed && "justify-center px-0",
               )}
+              aria-label="更新日志"
+              title="更新日志"
             >
-              {collapsed ? APP_VERSION_LABEL.replace(/^v/i, "") : APP_VERSION_LABEL}
+              <History className="h-5 w-5 shrink-0" />
+              <span className={cn("min-w-0 flex-1 truncate text-sm", collapsed && "sr-only")}>
+                更新日志
+              </span>
+              <span className={cn("shrink-0 text-xs font-medium", collapsed && "sr-only")}>
+                {APP_VERSION_LABEL}
+              </span>
             </button>
           </DropdownMenuTrigger>
           {changelogOpen ? (
-            <Suspense
-              fallback={
-                <DropdownMenuContent
-                  side="right"
-                  align="end"
-                  sideOffset={10}
-                  className="w-[min(28rem,calc(100vw-2rem))] p-4 text-sm text-muted-foreground"
-                >
-                  正在加载更新日志…
-                </DropdownMenuContent>
-              }
+            <DropdownMenuContent
+              side={mobile ? "top" : "right"}
+              align={mobile ? "start" : "end"}
+              sideOffset={10}
+              collisionPadding={16}
+              className="max-h-[min(72vh,34rem)] w-[min(28rem,calc(100vw-2rem))] p-0"
+              style={{ overflowY: "auto" }}
             >
-              <ChangelogMenu />
-            </Suspense>
+              <Suspense
+                fallback={
+                  <div className="p-4 text-sm text-muted-foreground">正在加载更新日志…</div>
+                }
+              >
+                <ChangelogMenu />
+              </Suspense>
+            </DropdownMenuContent>
           ) : null}
         </DropdownMenu>
       </div>
@@ -272,7 +285,7 @@ export function MobileSidebar({ open, onOpenChange }: MobileSidebarProps) {
           >
             <X className="h-4 w-4" />
           </DialogPrimitive.Close>
-          <SidebarBody onNavigate={() => onOpenChange(false)} />
+          <SidebarBody mobile onNavigate={() => onOpenChange(false)} />
         </DialogPrimitive.Content>
       </DialogPrimitive.Portal>
     </DialogPrimitive.Root>

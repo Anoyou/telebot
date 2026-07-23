@@ -30,6 +30,15 @@ def test_general_question_uses_no_tools() -> None:
     assert route == ToolRoute((), "local", "general_help")
 
 
+def test_changelog_request_uses_product_domain() -> None:
+    route = route_locally(
+        "看看更新日志",
+        available={"logs", "system", "product"},
+    )
+
+    assert route == ToolRoute(("product",), "local", "product_changelog")
+
+
 def test_scheduler_request_only_exposes_scheduler_tools() -> None:
     specs = [_spec("scheduler.list"), _spec("logs.recent"), _spec("rules.list")]
     route = route_locally(

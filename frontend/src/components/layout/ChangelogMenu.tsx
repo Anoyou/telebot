@@ -3,7 +3,6 @@ import { useMemo } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
-import { DropdownMenuContent } from "@/components/ui/dropdown-menu";
 import changelogRaw from "../../../../CHANGELOG.md?raw";
 
 function extractRecentChangelogSections(
@@ -33,13 +32,7 @@ function extractRecentChangelogSections(
 export default function ChangelogMenu() {
   const sections = useMemo(() => extractRecentChangelogSections(changelogRaw, 4), []);
   return (
-    <DropdownMenuContent
-      side="right"
-      align="end"
-      sideOffset={10}
-      className="max-h-[min(72vh,34rem)] w-[min(28rem,calc(100vw-2rem))] p-0"
-      style={{ overflowY: "auto" }}
-    >
+    <>
       <div className="border-b px-4 py-3">
         <div className="text-base font-semibold">更新日志</div>
         <div className="mt-1 text-sm text-muted-foreground">
@@ -60,6 +53,6 @@ export default function ChangelogMenu() {
           <p className="text-sm text-muted-foreground">未解析到更新日志内容，请检查 CHANGELOG.md。</p>
         )}
       </div>
-    </DropdownMenuContent>
+    </>
   );
 }

@@ -10,6 +10,7 @@ import pytest
 
 from app.services.system_agent.context import ToolContext
 from app.services.system_agent.tools import ledger as ledger_tools
+from app.services.system_agent.tools import product as product_tools
 from app.services.system_agent.tools import rules as rules_tools
 from app.services.system_agent.tools import system as system_tools
 from app.services.system_agent.tools._helpers import (
@@ -120,3 +121,21 @@ async def test_system_get_context_shape(monkeypatch) -> None:
     assert result["timezone"] == "UTC"
     assert result["system_agent"]["enabled"] is True
     assert "version" in result
+
+
+@pytest.mark.asyncio
+async def test_product_get_changelog_reads_recent_sections(monkeypatch, tmp_path) -> None:
+    changelog = tmp_path / "CHANGELOG.md"
+    changelog.write_text(
+        "## [Unreleased]\n\n## [1.2.0]\n\n### Added\n\n- 新功能\n\n"
+        "## [1.1.0]\n\n### Fixed\n\n- 修复问题\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(product_tools, "_find_changelog", lambda: changelog)
+    ctx = ToolContext(db=AsyncMock(), channel="web", role="viewer")
+
+    result = await product_tools.get_changelog(ctx, {"limit": 2})
+
+    assert result["available"] is True
+    assert [item["title"] for item in result["sections"]] == ["[1.2.0]", "[1.1.0]"]
+    assert "左上角菜单" in result["mobile_path"]

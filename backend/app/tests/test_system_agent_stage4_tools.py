@@ -33,6 +33,7 @@ def test_stage4_tools_registered() -> None:
         "system.check_update",
         "system.apply_update",
         "system.restart",
+        "product.get_changelog",
         "routing.list_ai_commands",
         "routing.preview",
         "routing.set_command_mode",
