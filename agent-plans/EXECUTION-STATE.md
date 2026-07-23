@@ -15,30 +15,21 @@
 ### 轮次 2：模型执行工作台（一个功能批次审查）
 
 - [x] WP4 usage v2 与统计口径修正 — done `97594050`
-  - `schema_version: 2`；`tool_calls` / `available_tools` 分拆；`requested_*` / `selection_mode` / `api_format`
-  - 旧键 `tool_count` 仍写入=暴露数；前端 `ModelRunMeta` 读实际 `tool_calls`
-  - `run_id` / `elapsed_ms` / `retry_count` 由 service 落库时 enrich
 - [x] WP5 本轮模型选择（不改全局） — done `97594050` + `c2677986`
-  - 后端：三入口透传 `model_selection`；pinned 校验；`model_pinned` 元数据；失败不静默换模型
-  - 前端：`sessionModelSelection` localStorage；Composer `ModelPicker` 默认自动路由；「设为默认」才 patch 全局
 - [x] WP6 无气泡 + RunTrace + ModelRunMeta — done `c2677986`
-  - `ModelRunMeta.tsx`；`runTraceState.ts` 摘要 reducer；轨迹在正文上方、meta 在正文下方
-  - 运行中默认展开 / 完成收起 / 失败保持展开；历史按 `run_id` 懒加载
 - [x] WP7 ModelPicker 能力徽标 — done `c2677986`
-  - `components/ai/ModelPicker.tsx`：Provider 分组、声明/实测分标、灰显不可用、健康槽位
-  - 接 `capabilities.model_matrix`
-- [ ] WP8 测活复用（可选） — **deferred**（不阻塞轮次 2 验收）
+- [x] WP8 测活复用与快速单测 — done（本批）
+  - 统一九态词表 `livenessStatus.ts`（正常/降级/失败/超时/限流/协议不匹配/缺少能力/跳过/未知）
+  - 对话测活与全量测活结果行复用 `ModelRunMeta`；不接 Durable Run、不写 Agent 会话
+  - 测活页能力筛选 lite（Tools / Vision）；`?provider=&model=` 快速深链
+  - Provider 模型列表「对话」入口跳转测活并预选模型；保留原「测试」连通性
 
 ### 轮次 3：运行时健康与冷却
 
 - [x] WP9 健康状态记录 — done `97594050`
-  - 能力不支持/参数错误 → `capability` 类不计故障不冷却
-  - 401/403 凭据标记不冷却；429 短冷却；超时/5xx 指数退避封顶 10min
-  - 测活 source 跳过；单测覆盖
-- [x] WP10 健康状态消费 — done `97594050` + `c2677986`
-  - `build_fallback_chain` 与 Agent runtime 对 fallback 候选 `sort_provider_candidates`
-  - ModelPicker 冷却徽标；matrix health 槽位已用
-  - 测活页「运行时健康」只读栏：仍可后续补强（不阻塞）
+- [x] WP10 健康状态消费 — done `97594050` + `c2677986` + 本批
+  - Agent fallback 排序；ModelPicker 冷却徽标
+  - 测活页 `RuntimeHealthBar` + `GET /api/commands/llm-providers/runtime-health` 只读
 
 ## 已完成计划（历史）
 
@@ -49,6 +40,5 @@
 
 ## 备注
 
-- 2026-07-23 PLAN 升 v2：轮次 2 重编号为 WP4–8，轮次 3 为 WP9–10；本文件已按 v2 重写清单。
-- **v1 实施（`7b500b2e`/`efa12878`）不等于 v2 完成**——轮次 1 对齐；轮次 2/3 已在本轮补齐（WP8 可选延后）。
-- 下一批建议：可选 WP8 测活复用 ModelRunMeta；测活页运行时健康只读栏；整批审查后合入 main。
+- **PLAN-conversation-deeix v2 全部 WP 已完成**（WP1–10）。
+- 下一批建议：整批 UI 手验（流式/fallback/审批/测活/失败重试）→ `test:visual`/`test:a11y` 视需要更新基线 → 合入 `main`（版本号仅发布时 bump）。

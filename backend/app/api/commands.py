@@ -1843,6 +1843,17 @@ async def _load_liveness_provider_rows(
     return list((await db.execute(query)).scalars().all())
 
 
+@router.get("/api/commands/llm-providers/runtime-health")
+async def list_provider_runtime_health(_user: CurrentUser) -> list[dict[str, Any]]:
+    """运行时健康只读视图（进程内存真相源；测活不写入）。
+
+    供测活页只读栏展示 degraded/冷却，不改变任何生产状态。
+    """
+    from ..services.provider_health import list_health
+
+    return list_health()
+
+
 @router.post(
     "/api/commands/llm-providers/liveness/preview",
     response_model=FullLivenessPreviewResponse,

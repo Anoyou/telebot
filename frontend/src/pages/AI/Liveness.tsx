@@ -29,6 +29,10 @@ import type {
   LLMProviderOut,
   ProviderModel,
 } from "@/api/types";
+import { ModelRunMeta } from "@/components/ai/ModelRunMeta";
+import { FullLivenessPanel } from "@/components/ai/FullLivenessPanel";
+import { RuntimeHealthBar } from "@/components/ai/RuntimeHealthBar";
+import { StreamingText } from "@/components/ai/StreamingText";
 import { PageHeader, PageShell } from "@/components/layout/PageScaffold";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
@@ -40,11 +44,15 @@ import { MetaBadge } from "@/components/ui/meta-badge";
 import { Select } from "@/components/ui/select";
 import { Skeleton, Spinner } from "@/components/ui/misc";
 import { Textarea } from "@/components/ui/textarea";
-import { getErrMsg } from "@/lib/api";
-import { cn } from "@/lib/utils";
-import { FullLivenessPanel } from "@/components/ai/FullLivenessPanel";
-import { StreamingText } from "@/components/ai/StreamingText";
 import { useStreamingText } from "@/hooks/useStreamingText";
+import { getErrMsg } from "@/lib/api";
+import {
+  classifyChatResult,
+  livenessResultToUsage,
+  livenessStatusLabel,
+  livenessStatusTone,
+} from "@/lib/livenessStatus";
+import { cn } from "@/lib/utils";
 
 const DEFAULT_MESSAGE = "你怎么又不行啦？";
 const DEFAULT_SYSTEM_PROMPT =
@@ -168,14 +176,23 @@ function providerModels(provider: LLMProviderOut | null): ProviderModel[] {
   if (!provider) return [];
   const seen = new Set<string>();
   const items: ProviderModel[] = [];
-  const add = (id: string, enabled = true, custom = false, label: string | null = null) => {
+  const add = (
+    id: string,
+    enabled = true,
+    custom = false,
+    label: string | null = null,
+    extra?: Partial<ProviderModel>,
+  ) => {
     const modelId = String(id || "").trim();
     if (!modelId || seen.has(modelId)) return;
     seen.add(modelId);
-    items.push({ id: modelId, enabled, custom, label });
+    items.push({ id: modelId, enabled, custom, label, ...extra });
   };
   for (const item of provider.models || []) {
-    add(item.id, !!item.enabled, !!item.custom, item.label ?? null);
+    add(item.id, !!item.enabled, !!item.custom, item.label ?? null, {
+      supports_tools: item.supports_tools,
+      supports_images: item.supports_images,
+    });
   }
   add(provider.default_model, true, false, "默认模型");
   return items.sort((a, b) => Number(b.enabled) - Number(a.enabled) || a.id.localeCompare(b.id));
@@ -250,14 +267,25 @@ function ChatResponseBranch({
     }
   }, [result.pending, result.effective_api_format, result.client_identity_profile]);
 
-  const statusTone = result.pending ? undefined : result.ok ? "success" : "danger";
-  const statusLabel = result.pending
-    ? result.streaming ? "流式回复中" : "请求中"
-    : result.ok
-      ? "正常"
-      : result.empty_response
-        ? "空返回"
-        : "失败";
+  const statusKey = classifyChatResult(result);
+  const statusTone = livenessStatusTone(statusKey);
+  const statusLabel =
+    statusKey === "pending"
+      ? result.streaming
+        ? "流式回复中"
+        : livenessStatusLabel("pending")
+      : livenessStatusLabel(statusKey);
+  const usage = !result.pending
+    ? livenessResultToUsage({
+        requested_model: result.requested_model,
+        model: result.model,
+        input_tokens: result.input_tokens,
+        output_tokens: result.output_tokens,
+        latency_ms: result.latency_ms,
+        effective_api_format: result.effective_api_format,
+        stream_fallback: result.stream_fallback,
+      })
+    : null;
 
   return (
     <article className="py-4 first:pt-2 [&+article]:border-t">
@@ -275,15 +303,18 @@ function ChatResponseBranch({
             </span>
             <MetaBadge tone={statusTone}>{statusLabel}</MetaBadge>
           </div>
-          <div className="mt-1 flex flex-wrap gap-x-2 gap-y-1 text-[11px] text-muted-foreground">
-            {!result.pending ? <span className="tabular-nums">{result.latency_ms} ms</span> : null}
-            {result.model ? <span>实际模型 {result.model}</span> : null}
-            {result.input_tokens || result.output_tokens ? (
-              <span className="tabular-nums">
-                {result.input_tokens}/{result.output_tokens} tok
-              </span>
-            ) : null}
-          </div>
+          {usage ? (
+            <ModelRunMeta
+              className="mt-1"
+              compact
+              usage={usage}
+              expected={
+                result.requested_model
+                  ? { model: result.requested_model }
+                  : null
+              }
+            />
+          ) : null}
         </div>
         {!result.pending ? (
           expanded
@@ -434,6 +465,8 @@ export function LLMLivenessPage() {
     canRestoreConversation ? retainedConversation.selectedModels : [],
   );
   const [modelQuery, setModelQuery] = useState("");
+  /** lite 能力筛选：仅收窄可选模型，不改批量逻辑 */
+  const [capFilter, setCapFilter] = useState<"all" | "tools" | "vision">("all");
   const [message, setMessage] = useState(
     canRestoreConversation ? retainedConversation.message : DEFAULT_MESSAGE,
   );
@@ -487,9 +520,27 @@ export function LLMLivenessPage() {
     persistConversationNow(latestConversationRef.current);
   }, [persistConversationNow]);
 
-  const visibleModels = modelChoices.filter((model) =>
-    model.id.toLowerCase().includes(modelQuery.trim().toLowerCase()),
-  );
+  const visibleModels = modelChoices.filter((model) => {
+    if (!model.id.toLowerCase().includes(modelQuery.trim().toLowerCase())) return false;
+    if (capFilter === "tools" && model.supports_tools === false) return false;
+    if (capFilter === "vision" && model.supports_images !== true) return false;
+    return true;
+  });
+
+  // 深链：?models=a,b 或 ?model=x 预选模型（快速单测入口）
+  useEffect(() => {
+    if (modelsLocked || !selectedProvider) return;
+    const modelsParam = searchParams.get("models") || searchParams.get("model");
+    if (!modelsParam) return;
+    const wanted = modelsParam
+      .split(",")
+      .map((item) => item.trim())
+      .filter(Boolean);
+    if (!wanted.length) return;
+    const available = new Set(modelChoices.map((item) => item.id));
+    const next = wanted.filter((id) => available.has(id)).slice(0, MAX_CHAT_MODELS);
+    if (next.length) setSelectedModels(next);
+  }, [selectedProvider?.id, modelChoices, modelsLocked, searchParams]);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -1044,6 +1095,38 @@ export function LLMLivenessPage() {
           >
             清空
           </Button>
+          <Button
+            type="button"
+            variant={capFilter === "all" ? "secondary" : "ghost"}
+            size="sm"
+            className="h-7 px-2 text-xs"
+            disabled={modelsLocked || busy}
+            onClick={() => setCapFilter("all")}
+          >
+            全部能力
+          </Button>
+          <Button
+            type="button"
+            variant={capFilter === "tools" ? "secondary" : "ghost"}
+            size="sm"
+            className="h-7 px-2 text-xs"
+            disabled={modelsLocked || busy}
+            onClick={() => setCapFilter("tools")}
+            title="仅显示声明支持 Tools 的模型"
+          >
+            Tools
+          </Button>
+          <Button
+            type="button"
+            variant={capFilter === "vision" ? "secondary" : "ghost"}
+            size="sm"
+            className="h-7 px-2 text-xs"
+            disabled={modelsLocked || busy}
+            onClick={() => setCapFilter("vision")}
+            title="仅显示声明支持 Vision 的模型"
+          >
+            Vision
+          </Button>
         </div>
         <div className="max-h-[48vh] space-y-1 overflow-y-auto rounded-md border bg-background p-1 xl:max-h-[520px]">
           {visibleModels.length > 0 ? visibleModels.map((model) => (
@@ -1062,10 +1145,15 @@ export function LLMLivenessPage() {
               />
               <span className="min-w-0 flex-1 break-all font-mono">{model.id}</span>
               {model.id === selectedProvider.default_model ? <MetaBadge tone="success">默认</MetaBadge> : null}
+              {model.supports_tools === true ? <MetaBadge tone="outline">Tools</MetaBadge> : null}
+              {model.supports_images === true ? <MetaBadge tone="outline">Vision</MetaBadge> : null}
               {model.enabled ? (
                 <span className="shrink-0 rounded bg-emerald-500/10 px-1.5 py-0.5 text-[9px] font-medium text-emerald-700 dark:text-emerald-300">
                   已被启用
                 </span>
+              ) : null}
+              {!modelsLocked && !busy && selectedModels.length === 1 && selectedModels[0] === model.id ? (
+                <MetaBadge tone="info">快速</MetaBadge>
               ) : null}
             </label>
           )) : (
@@ -1193,6 +1281,8 @@ export function LLMLivenessPage() {
           )
         }
       />
+
+      <RuntimeHealthBar />
 
       <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border bg-card p-2 shadow-sm">
         <Tabs value={mode} onValueChange={(value) => !modeSwitchBusy && setMode(value as "conversation" | "all")}>

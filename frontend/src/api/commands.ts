@@ -337,6 +337,25 @@ export async function streamQuickVerifyProvider(
   }
 }
 
+export interface ProviderRuntimeHealth {
+  provider_id: number;
+  model: string;
+  state: string;
+  consecutive_failures?: number;
+  last_error_class?: string | null;
+  last_error_message?: string | null;
+  cooldown_remaining_seconds?: number;
+  cooldown_until?: number | null;
+}
+
+/** 运行时健康只读（Agent 业务调用写入；测活不改写）。 */
+export async function listProviderRuntimeHealth(): Promise<ProviderRuntimeHealth[]> {
+  const { data } = await api.get<ProviderRuntimeHealth[]>(
+    "/api/commands/llm-providers/runtime-health",
+  );
+  return data;
+}
+
 /** 全量已启用模型测活执行预览（只读，不调用上游、不消耗 quota）。 */
 export async function fullLivenessPreview(
   payload: FullLivenessPreviewRequest,

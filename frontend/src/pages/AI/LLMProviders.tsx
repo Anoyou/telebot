@@ -6,7 +6,7 @@
 // 一条 ,ai 指令该把请求送给哪个 provider；详见 backend/services/llm_router.py
 import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useNavigate, useSearchParams } from "react-router-dom";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { toast } from "sonner";
 import { ArrowLeft, Plus, Trash2, KeyRound, Edit3, Download, CheckCircle2, XCircle, Star, ChevronDown, ChevronRight, Eye, EyeOff, Filter, X, Package, Save, MessageSquare, ArrowUpDown } from "lucide-react";
 
@@ -2276,7 +2276,7 @@ function ProviderModelsSection({
             <Star className="h-3.5 w-3.5" />
           </Button>
         )}
-        {/* 槽位 2：测试 */}
+        {/* 槽位 2：连通性测试 + 对话测活深链 */}
         <Button
           type="button"
           size="sm"
@@ -2288,6 +2288,19 @@ function ProviderModelsSection({
         >
           测试
         </Button>
+        {persisted && providerId != null ? (
+          <Button
+            type="button"
+            size="sm"
+            variant="ghost"
+            asChild
+            title="打开对话测活并预选此模型"
+          >
+            <Link to={`/ai/liveness?provider=${providerId}&model=${encodeURIComponent(m.id)}`}>
+              对话
+            </Link>
+          </Button>
+        ) : null}
         {/* 槽位 3：删除 */}
         <Button
           type="button"

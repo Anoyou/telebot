@@ -15,6 +15,7 @@ import type {
   FullLivenessRunResponse,
   LLMProviderOut,
 } from "@/api/types";
+import { ModelRunMeta } from "@/components/ai/ModelRunMeta";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -30,6 +31,12 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { getErrMsg } from "@/lib/api";
+import {
+  classifyFullLivenessStatus,
+  livenessResultToUsage,
+  livenessStatusLabel as sharedStatusLabel,
+  livenessStatusTone as sharedStatusTone,
+} from "@/lib/livenessStatus";
 import { cn } from "@/lib/utils";
 
 const DEFAULT_CHAT_TEST_SYSTEM_PROMPT =
@@ -116,32 +123,13 @@ function responseStatus(error: unknown): number | null {
   const response = (error as { response?: { status?: unknown } }).response;
   return typeof response?.status === "number" ? response.status : null;
 }
-function livenessStatusTone(status: string): "success" | "warn" | "danger" | "neutral" {
-  if (status === "healthy") return "success";
-  if (status === "cancelled" || status === "skipped_disabled") return "neutral";
-  if (["auth_failed", "client_rejected", "protocol_rejected", "model_missing", "config_error"].includes(status)) return "danger";
-  return "warn";
+
+function livenessStatusTone(status: string): "success" | "warn" | "danger" | "neutral" | "info" | undefined {
+  return sharedStatusTone(classifyFullLivenessStatus(status));
 }
 
-const LIVENESS_STATUS_LABEL: Record<string, string> = {
-  healthy: "正常",
-  empty_response: "空响应",
-  rate_limited: "限流(429)",
-  auth_failed: "鉴权失败(401)",
-  client_rejected: "身份被拒",
-  protocol_rejected: "协议不符",
-  model_missing: "模型缺失",
-  timeout: "超时",
-  upstream_error: "上游错误",
-  config_error: "配置缺失",
-  cancelled: "已取消",
-  network_error: "网络异常",
-  skipped_provider_missing: "Provider 缺失",
-  no_enabled_models: "无启用模型",
-};
-
 function livenessStatusLabel(status: string): string {
-  return LIVENESS_STATUS_LABEL[status] ?? status;
+  return sharedStatusLabel(classifyFullLivenessStatus(status));
 }
 
 type LivenessResultFilter = "all" | "healthy" | "failed" | "skipped" | "cancelled";
@@ -869,10 +857,22 @@ export function FullLivenessPanel({
                                           {item.skipped && !item.effective_api_format && !item.client_identity_profile ? (
                                             <MetaBadge>未发起请求</MetaBadge>
                                           ) : null}
-                                          {item.input_tokens || item.output_tokens ? (
-                                            <MetaBadge mono>{item.input_tokens}/{item.output_tokens} tok</MetaBadge>
-                                          ) : null}
                                         </div>
+                                        {!item.skipped ? (
+                                          <ModelRunMeta
+                                            className="mt-1.5"
+                                            compact
+                                            usage={livenessResultToUsage({
+                                              requested_model: item.model_id,
+                                              model: item.model_id,
+                                              provider_name: item.provider_name,
+                                              input_tokens: item.input_tokens,
+                                              output_tokens: item.output_tokens,
+                                              latency_ms: item.latency_ms,
+                                              effective_api_format: item.effective_api_format,
+                                            })}
+                                          />
+                                        ) : null}
                                       </div>
                                       <MetaBadge mono tone={livenessStatusTone(item.status)}>
                                         {livenessStatusLabel(item.status)}{item.latency_ms ? ` · ${item.latency_ms}ms` : ""}
