@@ -27,6 +27,7 @@
 ### Fixed
 
 - Scheduler 首次解析用户名后固定稳定 peer ID，解析失败按 Telegram 异常分类并退避，避免被拒命令外呼及 `call_llm` 重复产生模型费用。
+- 修复前端 CI 的 Rollup 类型来源冲突，并让浏览器测试的后端版本 fixture 跟随当前应用版本。
 
 ## [0.71.3] — 2026-07-22 · patch（补丁版本） · UserBot 姓名解析模式
 

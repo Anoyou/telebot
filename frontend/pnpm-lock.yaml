@@ -117,9 +117,12 @@ importers:
       postcss:
         specifier: ^8.4.0
         version: 8.5.13
+      rollup:
+        specifier: ^4.60.2
+        version: 4.60.2
       rollup-plugin-visualizer:
         specifier: ^7.0.1
-        version: 7.0.1(rollup@2.80.0)
+        version: 7.0.1(rollup@4.60.2)
       tailwindcss:
         specifier: ^3.4.0
         version: 3.4.19
@@ -6317,14 +6320,14 @@ snapshots:
 
   reusify@1.1.0: {}
 
-  rollup-plugin-visualizer@7.0.1(rollup@2.80.0):
+  rollup-plugin-visualizer@7.0.1(rollup@4.60.2):
     dependencies:
       open: 11.0.0
       picomatch: 4.0.4
       source-map: 0.7.6
       yargs: 18.0.0
     optionalDependencies:
-      rollup: 2.80.0
+      rollup: 4.60.2
 
   rollup@2.80.0:
     optionalDependencies:
