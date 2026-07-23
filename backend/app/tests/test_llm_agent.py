@@ -297,6 +297,55 @@ async def test_agent_enforces_session_token_limit() -> None:
 
 
 @pytest.mark.asyncio
+async def test_agent_allows_unlimited_token_budget() -> None:
+    async def model_call(_request: ModelRequest) -> ModelResponse:
+        return ModelResponse(
+            model="m",
+            content=(TextContent("large"),),
+            usage=ModelUsage(input_tokens=50_000, output_tokens=50_000),
+        )
+
+    result = await run_agent(
+        model_call,
+        _request(),
+        {},
+        limits=AgentLimits(max_total_tokens=0),
+    )
+
+    assert result.text == "large"
+    assert result.usage.total_tokens == 100_000
+
+
+@pytest.mark.asyncio
+async def test_agent_resume_tool_calls_does_not_rerun_initial_model_choice() -> None:
+    spec = ToolSpec("lookup", "lookup", {"type": "object", "properties": {}})
+    model_calls = 0
+    executed_args: list[dict] = []
+
+    async def handler(arguments: dict) -> str:
+        executed_args.append(arguments)
+        return "found"
+
+    async def model_call(request: ModelRequest) -> ModelResponse:
+        nonlocal model_calls
+        model_calls += 1
+        assert request.messages[-1].role == MessageRole.TOOL
+        return ModelResponse(model="m", content=(TextContent("done"),))
+
+    result = await run_agent(
+        model_call,
+        _request(spec),
+        {"lookup": AgentTool(spec, handler)},
+        limits=AgentLimits(max_steps=3),
+        resume_tool_calls=(ToolCall("call-approved", "lookup", {"q": "saved"}),),
+    )
+
+    assert result.text == "done"
+    assert model_calls == 1
+    assert executed_args == [{"q": "saved"}]
+
+
+@pytest.mark.asyncio
 async def test_agent_token_limit_does_not_charge_existing_context_again() -> None:
     """新一轮首个请求的历史/system/tools 基线不应再次吃掉本轮新增预算。"""
 

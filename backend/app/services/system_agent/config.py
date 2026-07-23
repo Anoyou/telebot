@@ -64,8 +64,11 @@ def normalize_config(raw: Any) -> dict[str, Any]:
     except (TypeError, ValueError):
         max_tool_calls = DEFAULT_CONFIG["max_tool_calls"]
     try:
+        raw_session_token_limit = raw.get("session_token_limit")
         session_token_limit = int(
-            raw.get("session_token_limit") or DEFAULT_CONFIG["session_token_limit"]
+            raw_session_token_limit
+            if raw_session_token_limit is not None
+            else DEFAULT_CONFIG["session_token_limit"]
         )
     except (TypeError, ValueError):
         session_token_limit = DEFAULT_CONFIG["session_token_limit"]
@@ -77,7 +80,7 @@ def normalize_config(raw: Any) -> dict[str, Any]:
         "require_tool_approval": require_tool_approval,
         "max_steps": max(1, min(max_steps, 16)),
         "max_tool_calls": max(1, min(max_tool_calls, 64)),
-        "session_token_limit": max(1024, min(session_token_limit, 100_000)),
+        "session_token_limit": 0 if session_token_limit <= 0 else max(1024, session_token_limit),
     }
 
 
@@ -132,11 +135,7 @@ def tools_models_for_dto(
             candidates = [default_model]
     ordered = [preferred] if preferred else []
     ordered.extend(model for model in candidates if model and model != preferred)
-    return [
-        model
-        for model in ordered
-        if dto.capabilities_for_model(model).tools
-    ]
+    return [model for model in ordered if dto.capabilities_for_model(model).tools]
 
 
 async def resolve_fixed_provider(
@@ -175,18 +174,11 @@ async def resolve_agent_providers(
         return f"Provider「{dto.name}」缺少 API Key。"
     model = tools_model_for_dto(dto, cfg.get("model"))
     if model is None:
-        return (
-            f"Provider「{dto.name}」没有可用的 tools 模型。"
-            "请选择声明支持 tools 的已启用模型。"
-        )
+        return f"Provider「{dto.name}」没有可用的 tools 模型。请选择声明支持 tools 的已启用模型。"
     compatible: dict[int, LLMProviderDTO] = {dto.id: dto}
     for fallback_id in cfg.get("fallback_provider_ids") or []:
         provider = dtos.get(int(fallback_id))
-        if (
-            provider is not None
-            and provider.has_api_key
-            and tools_model_for_dto(provider) is not None
-        ):
+        if provider is not None and provider.has_api_key and tools_model_for_dto(provider) is not None:
             compatible[provider.id] = provider
     return ResolvedAgentProviders(primary=dto, model=model, providers=compatible)
 

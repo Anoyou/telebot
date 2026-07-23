@@ -99,10 +99,13 @@ export interface SystemAgentToolApprovalItem {
   description: string;
   read_only: boolean;
   risk: string;
+  call_id?: string;
+  arguments?: Record<string, unknown>;
 }
 
 export interface SystemAgentToolApproval {
   domains?: string[];
+  calls?: Array<{ call_id: string; name: string; arguments?: Record<string, unknown> }>;
   tools: SystemAgentToolApprovalItem[];
 }
 

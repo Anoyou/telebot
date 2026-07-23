@@ -825,7 +825,8 @@ async def test_chat_stream_complete_rejects_natural_eof_without_terminal() -> No
 
 
 @pytest.mark.asyncio
-async def test_anthropic_stream_complete_rejects_natural_eof_without_message_stop() -> None:
+async def test_anthropic_stream_complete_accepts_text_without_message_stop_as_fallback() -> None:
+    """部分 Anthropic 兼容网关会在正文后直接 EOF，应保留回复并标记降级。"""
     response = _StreamingResponse(
         _sse_chunks(
             {"type": "message_start", "message": {"model": "claude"}},
@@ -833,13 +834,16 @@ async def test_anthropic_stream_complete_rejects_natural_eof_without_message_sto
         )
     )
     with patch("app.services.llm_client.httpx.AsyncClient", return_value=_StreamingClient(response)):
-        with pytest.raises(Exception, match="缺少 message_stop"):
-            _ = [
-                chunk
-                async for chunk in AnthropicClient(
-                    "sk", "https://api.anthropic.com/v1", "model"
-                ).stream_complete("sys", "user")
-            ]
+        chunks = [
+            chunk
+            async for chunk in AnthropicClient(
+                "sk", "https://api.anthropic.com/v1", "model"
+            ).stream_complete("sys", "user")
+        ]
+
+    assert [chunk.delta for chunk in chunks if chunk.delta] == ["partial"]
+    assert chunks[-1].done is True
+    assert chunks[-1].stream_fallback is True
 
 
 @pytest.mark.asyncio

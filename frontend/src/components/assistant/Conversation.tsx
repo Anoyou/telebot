@@ -1,6 +1,8 @@
 import { memo, useEffect, useRef } from "react";
 import { AlertCircle, Bot, RotateCcw, ShieldCheck, User, Wrench } from "lucide-react";
 import ReactMarkdown from "react-markdown";
+import rehypeRaw from "rehype-raw";
+import rehypeSanitize from "rehype-sanitize";
 import remarkGfm from "remark-gfm";
 
 import type {
@@ -17,6 +19,10 @@ import { Button } from "@/components/ui/button";
 import { systemAgentToolLabel } from "@/lib/systemAgentLabels";
 import { cn } from "@/lib/utils";
 import { stabilizeStreamingMarkdown, visibleConversationMessages } from "./conversationState";
+
+/** Markdown + 安全 HTML：先解析原始 HTML，再消毒（剥离 script/on* 等）。 */
+const ASSISTANT_REMARK_PLUGINS = [remarkGfm];
+const ASSISTANT_REHYPE_PLUGINS = [rehypeRaw, rehypeSanitize];
 
 export type LiveBubble = {
   id: string;
@@ -66,7 +72,8 @@ export const AssistantMarkdown = memo(function AssistantMarkdown({
   return (
     <div className={cn("assistant-md prose-pwa-safe max-w-none text-sm leading-relaxed", streaming && "streaming-md")}>
       <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
+        remarkPlugins={ASSISTANT_REMARK_PLUGINS}
+        rehypePlugins={ASSISTANT_REHYPE_PLUGINS}
         components={{
           p: ({ children }) => <p className="my-1 first:mt-0 last:mb-0">{children}</p>,
           ul: ({ children }) => <ul className="my-1 list-disc space-y-0.5 pl-5">{children}</ul>,
@@ -339,7 +346,7 @@ export function Conversation({
                           <ShieldCheck className="mr-1 h-3 w-3" />
                           {switchCandidate
                             ? `批准并改用 ${switchCandidate.provider_name}`
-                            : "批准调用"}
+                            : "批准并继续"}
                         </Button>
                       ) : null}
                       {switchCandidate && !approvalTools.length ? (

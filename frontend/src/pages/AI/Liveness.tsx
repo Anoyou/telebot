@@ -1325,14 +1325,14 @@ export function LLMLivenessPage() {
           {scopeOpen ? (
             <button
               type="button"
-              className="fixed inset-0 z-[69] bg-black/30 xl:hidden"
+              className="fixed inset-0 z-[69] bg-black/20 xl:hidden"
               aria-label="关闭测试范围"
               onClick={() => setScopeOpen(false)}
             />
           ) : null}
           <aside
             className={cn(
-              "fixed bottom-[calc(4.75rem+env(safe-area-inset-bottom))] left-0 top-[calc(5rem+env(safe-area-inset-top))] z-[70] w-[min(320px,90vw)] overflow-y-auto border-r bg-card p-4 shadow-md transition-transform duration-200 sm:bottom-0 xl:static xl:z-auto xl:w-auto xl:translate-x-0 xl:rounded-lg xl:border xl:shadow-sm",
+              "fixed bottom-[calc(4.75rem+env(safe-area-inset-bottom))] left-0 top-[calc(5rem+env(safe-area-inset-top))] z-[70] w-[min(320px,88vw)] overflow-y-auto rounded-r-2xl border-r border-border/70 bg-card p-4 shadow-[0_6px_18px_rgba(15,23,42,0.10)] transition-transform duration-200 sm:bottom-0 xl:static xl:z-auto xl:w-auto xl:translate-x-0 xl:rounded-lg xl:border xl:shadow-sm",
               scopeOpen
                 ? "visible translate-x-0"
                 : "invisible -translate-x-full xl:visible xl:translate-x-0",
@@ -1452,7 +1452,7 @@ export function LLMLivenessPage() {
                     </span>
                   ))}
                 </div>
-                <div className="flex items-end gap-2 rounded-lg border bg-background p-2 shadow-sm focus-within:ring-[3px] focus-within:ring-ring/20">
+                <div className="flex min-w-0 items-end gap-2 rounded-lg border bg-background p-2 shadow-sm focus-within:ring-[3px] focus-within:ring-ring/20">
                   <Textarea
                     value={message}
                     rows={2}
@@ -1466,7 +1466,7 @@ export function LLMLivenessPage() {
                       }
                     }}
                     placeholder="输入测试消息，Enter 发送"
-                    className="min-h-12 resize-none border-0 bg-transparent shadow-none focus-visible:ring-0"
+                    className="min-h-12 flex-1 resize-none border-0 bg-transparent shadow-none focus-visible:ring-0"
                   />
                   <Button
                     type="button"
@@ -1490,14 +1490,14 @@ export function LLMLivenessPage() {
           {settingsOpen ? (
             <button
               type="button"
-              className="fixed inset-0 z-[69] bg-black/30 2xl:hidden"
+              className="fixed inset-0 z-[69] bg-black/20 2xl:hidden"
               aria-label="关闭请求设置"
               onClick={() => setSettingsOpen(false)}
             />
           ) : null}
           <aside
             className={cn(
-              "fixed bottom-[calc(4.75rem+env(safe-area-inset-bottom))] right-0 top-[calc(5rem+env(safe-area-inset-top))] z-[70] w-[min(320px,90vw)] overflow-y-auto border-l bg-card p-4 shadow-md transition-transform duration-200 sm:bottom-0 2xl:static 2xl:z-auto 2xl:w-auto 2xl:translate-x-0 2xl:rounded-lg 2xl:border 2xl:shadow-sm",
+              "fixed bottom-[calc(4.75rem+env(safe-area-inset-bottom))] right-0 top-[calc(5rem+env(safe-area-inset-top))] z-[70] w-[min(320px,88vw)] overflow-y-auto rounded-l-2xl border-l border-border/70 bg-card p-4 shadow-[0_6px_18px_rgba(15,23,42,0.10)] transition-transform duration-200 sm:bottom-0 2xl:static 2xl:z-auto 2xl:w-auto 2xl:translate-x-0 2xl:rounded-lg 2xl:border 2xl:shadow-sm",
               settingsOpen
                 ? "visible translate-x-0"
                 : "invisible translate-x-full 2xl:visible 2xl:translate-x-0",

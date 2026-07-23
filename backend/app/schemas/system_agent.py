@@ -50,7 +50,7 @@ class SystemAgentConfigPatch(BaseModel):
     require_tool_approval: bool | None = None
     max_steps: int | None = Field(default=None, ge=1, le=16)
     max_tool_calls: int | None = Field(default=None, ge=1, le=64)
-    session_token_limit: int | None = Field(default=None, ge=1024, le=100_000)
+    session_token_limit: int | None = Field(default=None, ge=0)
 
 
 class SystemAgentCapabilitiesOut(BaseModel):
@@ -118,9 +118,7 @@ class SystemAgentModelSelection(BaseModel):
 
     @model_validator(mode="after")
     def _pinned_requires_target(self) -> SystemAgentModelSelection:
-        if self.mode == "pinned" and (
-            self.provider_id is None or not str(self.model or "").strip()
-        ):
+        if self.mode == "pinned" and (self.provider_id is None or not str(self.model or "").strip()):
             raise ValueError("pinned 模式必须同时提供 provider_id 与 model")
         return self
 

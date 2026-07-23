@@ -80,6 +80,9 @@ def test_normalize_config_defaults_and_clamps() -> None:
     assert over["max_tool_calls"] == 64
     assert over["session_token_limit"] == 1024
 
+    unlimited = normalize_config({"session_token_limit": 0})
+    assert unlimited["session_token_limit"] == 0
+
 
 def test_session_title_from_message() -> None:
     assert session_title_from_message("  交互里\n有哪些规则？  ") == "交互里 有哪些规则？"
@@ -217,12 +220,8 @@ async def test_bot_session_requires_account(agent_db) -> None:
 async def test_get_or_create_and_clear_messages(agent_db) -> None:
     svc = SystemAgentService()
     async with agent_db() as db:
-        session = await svc.get_or_create_active_session(
-            db, channel=CHANNEL_WEB, web_user_id=7
-        )
-        again = await svc.get_or_create_active_session(
-            db, channel=CHANNEL_WEB, web_user_id=7
-        )
+        session = await svc.get_or_create_active_session(db, channel=CHANNEL_WEB, web_user_id=7)
+        again = await svc.get_or_create_active_session(db, channel=CHANNEL_WEB, web_user_id=7)
         assert session.id == again.id
 
         db.add(
@@ -245,9 +244,7 @@ async def test_get_or_create_and_clear_messages(agent_db) -> None:
 
 
 @pytest.mark.asyncio
-async def test_stream_message_persists_redacted_user_and_assistant(
-    agent_db, monkeypatch
-) -> None:
+async def test_stream_message_persists_redacted_user_and_assistant(agent_db, monkeypatch) -> None:
     svc = SystemAgentService()
 
     async def fake_stream(*_a, **_k):
@@ -256,7 +253,13 @@ async def test_stream_message_persists_redacted_user_and_assistant(
             "content": "查询完成",
             "usage": {"total_tokens": 3},
         }
-        yield {"type": "tool_finished", "tool_name": "system.get_context", "call_id": "c1", "is_error": False, "result_summary": {"ok": True}}
+        yield {
+            "type": "tool_finished",
+            "tool_name": "system.get_context",
+            "call_id": "c1",
+            "is_error": False,
+            "result_summary": {"ok": True},
+        }
         yield {"type": "done", "ok": True}
 
     monkeypatch.setattr(svc.runtime, "stream_turn", fake_stream)
@@ -285,9 +288,7 @@ async def test_stream_message_persists_redacted_user_and_assistant(
 
 
 @pytest.mark.asyncio
-async def test_successful_turn_redacts_secret_from_persistent_memory(
-    agent_db, monkeypatch
-) -> None:
+async def test_successful_turn_redacts_secret_from_persistent_memory(agent_db, monkeypatch) -> None:
     svc = SystemAgentService()
     secret = "sk-abcdefghijklmnopqrstuvwxyz123456"
 
@@ -333,9 +334,7 @@ async def test_successful_turn_redacts_secret_from_persistent_memory(
 
 
 @pytest.mark.asyncio
-async def test_stream_message_commits_history_before_terminal_events(
-    agent_db, monkeypatch
-) -> None:
+async def test_stream_message_commits_history_before_terminal_events(agent_db, monkeypatch) -> None:
     svc = SystemAgentService()
 
     async def fake_stream(*_a, **_k):
@@ -373,9 +372,7 @@ async def test_stream_message_commits_history_before_terminal_events(
 
 
 @pytest.mark.asyncio
-async def test_failed_turn_is_marked_and_excluded_from_next_history(
-    agent_db, monkeypatch
-) -> None:
+async def test_failed_turn_is_marked_and_excluded_from_next_history(agent_db, monkeypatch) -> None:
     svc = SystemAgentService()
     histories: list[list[SystemAgentMessage]] = []
     call_count = 0
@@ -427,9 +424,7 @@ async def test_failed_turn_is_marked_and_excluded_from_next_history(
 
 
 @pytest.mark.asyncio
-async def test_provider_switch_failure_is_persisted_for_confirmation(
-    agent_db, monkeypatch
-) -> None:
+async def test_provider_switch_failure_is_persisted_for_confirmation(agent_db, monkeypatch) -> None:
     svc = SystemAgentService()
 
     async def fake_stream(*_args, **_kwargs):
@@ -439,9 +434,7 @@ async def test_provider_switch_failure_is_persisted_for_confirmation(
             "message": "是否切换 Provider？",
             "provider_switch": {
                 "from_provider_name": "primary",
-                "candidates": [
-                    {"provider_id": 2, "provider_name": "fallback", "model": "model-b"}
-                ],
+                "candidates": [{"provider_id": 2, "provider_name": "fallback", "model": "model-b"}],
             },
         }
         yield {"type": "done", "ok": False}
@@ -466,17 +459,13 @@ async def test_provider_switch_failure_is_persisted_for_confirmation(
         assert message.usage == {
             "provider_switch": {
                 "from_provider_name": "primary",
-                "candidates": [
-                    {"provider_id": 2, "provider_name": "fallback", "model": "model-b"}
-                ],
+                "candidates": [{"provider_id": 2, "provider_name": "fallback", "model": "model-b"}],
             }
         }
 
 
 @pytest.mark.asyncio
-async def test_tool_approval_failure_is_persisted_for_retry(
-    agent_db, monkeypatch
-) -> None:
+async def test_tool_approval_failure_is_persisted_for_retry(agent_db, monkeypatch) -> None:
     svc = SystemAgentService()
 
     async def fake_stream(*_args, **_kwargs):
@@ -559,9 +548,7 @@ async def test_provider_switch_and_tool_approval_context_are_persisted_together(
             "message": "是否切换 Provider？",
             "provider_switch": {
                 "from_provider_name": "primary",
-                "candidates": [
-                    {"provider_id": 2, "provider_name": "fallback", "model": "model-b"}
-                ],
+                "candidates": [{"provider_id": 2, "provider_name": "fallback", "model": "model-b"}],
             },
             "tool_approval": {
                 "domains": ["scheduler"],
@@ -730,9 +717,7 @@ async def test_retry_reuses_failed_user_message(agent_db, monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_retry_reference_reuses_latest_failed_goal_and_clears_anchor(
-    agent_db, monkeypatch
-) -> None:
+async def test_retry_reference_reuses_latest_failed_goal_and_clears_anchor(agent_db, monkeypatch) -> None:
     svc = SystemAgentService()
     runtime_goals: list[str] = []
     call_count = 0
@@ -792,9 +777,7 @@ async def test_retry_reference_reuses_latest_failed_goal_and_clears_anchor(
 
 
 @pytest.mark.asyncio
-async def test_retry_reference_without_failure_is_a_normal_message(
-    agent_db, monkeypatch
-) -> None:
+async def test_retry_reference_without_failure_is_a_normal_message(agent_db, monkeypatch) -> None:
     svc = SystemAgentService()
     runtime_goals: list[str] = []
 
@@ -817,20 +800,14 @@ async def test_retry_reference_without_failure_is_a_normal_message(
         ):
             pass
 
-        users = [
-            row
-            for row in await svc.list_messages(db, session.id)
-            if row.role == MESSAGE_ROLE_USER
-        ]
+        users = [row for row in await svc.list_messages(db, session.id) if row.role == MESSAGE_ROLE_USER]
         assert runtime_goals == ["重试"]
         assert len(users) == 1
         assert users[0].retry_count == 0
 
 
 @pytest.mark.asyncio
-async def test_failed_secret_goal_anchor_and_retry_stay_redacted(
-    agent_db, monkeypatch
-) -> None:
+async def test_failed_secret_goal_anchor_and_retry_stay_redacted(agent_db, monkeypatch) -> None:
     svc = SystemAgentService()
     secret = "sk-abcdefghijklmnopqrstuvwxyz123456"
     runtime_goals: list[str] = []
@@ -931,9 +908,7 @@ async def test_stale_concurrent_retry_cannot_execute_twice(agent_db, monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_unexpected_stream_crash_becomes_retryable_failed_turn(
-    agent_db, monkeypatch
-) -> None:
+async def test_unexpected_stream_crash_becomes_retryable_failed_turn(agent_db, monkeypatch) -> None:
     svc = SystemAgentService()
 
     async def crash_stream(*_args, **_kwargs):

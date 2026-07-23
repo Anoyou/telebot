@@ -151,7 +151,7 @@ test.describe("移动端交互细节", () => {
     await expect(scope.getByText("grok-4.20-fast", { exact: true })).toBeVisible();
 
     const overlay = page.getByRole("button", { name: "关闭 Provider 范围" }).first();
-    await expect(overlay).toHaveCSS("background-color", "rgba(0, 0, 0, 0.3)");
+    await expect(overlay).toHaveCSS("background-color", "rgba(0, 0, 0, 0.2)");
     await scope.getByRole("button", { name: "关闭 Provider 范围" }).click();
     await page.getByRole("button", { name: "设置", exact: true }).click();
     await expect(page.getByLabel("全局巡检请求设置")).toBeVisible();

@@ -1056,20 +1056,21 @@ export function AssistantIndex() {
               <Input
                 key={configQ.data?.session_token_limit ?? 16_384}
                 type="number"
-                min={1024}
-                max={100000}
+                min={0}
                 step={1024}
                 defaultValue={configQ.data?.session_token_limit ?? 16_384}
+                placeholder="0 表示无上限"
                 disabled={saveConfigMut.isPending}
                 onBlur={(event) => {
-                  const next = Math.max(1024, Math.min(100000, Number(event.target.value) || 16_384));
+                  const raw = Number(event.target.value);
+                  const next = raw <= 0 || Number.isNaN(raw) ? 0 : Math.max(1024, Math.floor(raw));
                   if (next !== configQ.data?.session_token_limit) {
                     saveConfigMut.mutate({ session_token_limit: next });
                   }
                 }}
               />
               <span className="text-xs text-muted-foreground">
-                只限制本轮新增输出和工具结果增长；历史上下文不会在新问题里重复计费。
+                填 0 表示无上限；非 0 时只限制本轮新增输出和工具结果增长。
               </span>
             </label>
           </div>

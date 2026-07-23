@@ -174,14 +174,9 @@ def _completed_json_as_stream_result(
     incomplete_reason: str | None = None
     if api_format == LLM_API_FORMAT_RESPONSES:
         incomplete = data.get("incomplete_details") or {}
-        incomplete_reason = (
-            str(incomplete.get("reason") or "")
-            if isinstance(incomplete, dict)
-            else None
-        )
+        incomplete_reason = str(incomplete.get("reason") or "") if isinstance(incomplete, dict) else None
         if status in {"failed", "cancelled"} or (
-            status == "incomplete"
-            and incomplete_reason not in _RESPONSES_ALLOWED_INCOMPLETE_REASONS
+            status == "incomplete" and incomplete_reason not in _RESPONSES_ALLOWED_INCOMPLETE_REASONS
         ):
             detail = data.get("error") or data.get("incomplete_details") or status
             raise LLMError(
@@ -631,9 +626,7 @@ def _openai_structured_response(
     tool_calls = tuple(
         ToolCall(
             id=str(item.get("id") or ""),
-            name=from_wire_tool_name(
-                str((item.get("function") or {}).get("name") or ""), tool_names
-            ),
+            name=from_wire_tool_name(str((item.get("function") or {}).get("name") or ""), tool_names),
             arguments=_parse_tool_arguments((item.get("function") or {}).get("arguments")),
         )
         for item in message.get("tool_calls") or []
@@ -656,9 +649,7 @@ def _openai_structured_response(
         usage=ModelUsage(
             input_tokens=int(usage.get("prompt_tokens") or 0),
             output_tokens=int(usage.get("completion_tokens") or 0),
-            reasoning_tokens=int(
-                (usage.get("completion_tokens_details") or {}).get("reasoning_tokens") or 0
-            ),
+            reasoning_tokens=int((usage.get("completion_tokens_details") or {}).get("reasoning_tokens") or 0),
         ),
         stop_reason=(
             StopReason.REFUSAL
@@ -741,8 +732,7 @@ def _responses_structured_response(
     incomplete = data.get("incomplete_details") or {}
     incomplete_reason = incomplete.get("reason") if isinstance(incomplete, dict) else None
     if status in {"failed", "cancelled"} or (
-        status == "incomplete"
-        and incomplete_reason not in _RESPONSES_ALLOWED_INCOMPLETE_REASONS
+        status == "incomplete" and incomplete_reason not in _RESPONSES_ALLOWED_INCOMPLETE_REASONS
     ):
         detail = data.get("error") or data.get("incomplete_details") or status
         raise LLMError(
@@ -2221,14 +2211,24 @@ class AnthropicClient(LLMClient):
                 retryable=True,
             ) from None
 
+        text = "".join(text_parts).strip()
+        resolved_stop_reason = stop_reason_from_provider(provider_stop_reason)
+        if not message_stop_received and text:
+            provider_stop_reason = provider_stop_reason or "missing_message_stop"
+            resolved_stop_reason = stop_reason_from_provider(provider_stop_reason)
+            return LLMResult(
+                text=text,
+                model=model_name,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                stop_reason=resolved_stop_reason,
+                provider_status=provider_stop_reason,
+            )
         if not message_stop_received:
             raise LLMError(
                 "Anthropic streaming 响应提前结束，缺少 message_stop 终态",
                 retryable=True,
             )
-
-        text = "".join(text_parts).strip()
-        resolved_stop_reason = stop_reason_from_provider(provider_stop_reason)
         if not text and resolved_stop_reason not in {
             StopReason.REFUSAL,
             StopReason.CONTENT_FILTER,
@@ -2265,9 +2265,7 @@ class AnthropicClient(LLMClient):
                 f"Anthropic 不支持 reasoning_effort={normalized}",
                 scope=LLMErrorScope.REQUEST_INVALID,
             )
-        if normalized == "max" and any(
-            family in self._model.lower() for family in ("sonnet", "haiku")
-        ):
+        if normalized == "max" and any(family in self._model.lower() for family in ("sonnet", "haiku")):
             raise LLMError(
                 "Anthropic max 推理强度仅适用于 Opus 系列模型",
                 scope=LLMErrorScope.CAPABILITY_MISMATCH,
@@ -2483,9 +2481,7 @@ class AnthropicClient(LLMClient):
                                     usage = message.get("usage") or {}
                                     if isinstance(usage, dict):
                                         input_tokens = int(usage.get("input_tokens") or 0)
-                                        cache_read_tokens = int(
-                                            usage.get("cache_read_input_tokens") or 0
-                                        )
+                                        cache_read_tokens = int(usage.get("cache_read_input_tokens") or 0)
                                         cache_write_tokens = int(
                                             usage.get("cache_creation_input_tokens") or 0
                                         )
@@ -2493,7 +2489,9 @@ class AnthropicClient(LLMClient):
                                 try:
                                     index = int(payload.get("index") or 0)
                                 except (TypeError, ValueError):
-                                    raise LLMError("Anthropic streaming content block index 格式无效") from None
+                                    raise LLMError(
+                                        "Anthropic streaming content block index 格式无效"
+                                    ) from None
                                 block = payload.get("content_block") or {}
                                 if isinstance(block, dict) and block.get("type") == "tool_use":
                                     content_blocks[index] = {
@@ -2513,7 +2511,9 @@ class AnthropicClient(LLMClient):
                                 try:
                                     index = int(payload.get("index") or 0)
                                 except (TypeError, ValueError):
-                                    raise LLMError("Anthropic streaming content block index 格式无效") from None
+                                    raise LLMError(
+                                        "Anthropic streaming content block index 格式无效"
+                                    ) from None
                                 delta = payload.get("delta") or {}
                                 if not isinstance(delta, dict):
                                     continue
@@ -2554,6 +2554,10 @@ class AnthropicClient(LLMClient):
                 retryable=True,
             ) from None
 
+        if not terminal_sent and text_parts and not content_blocks:
+            provider_stop_reason = provider_stop_reason or "missing_message_stop"
+            yield ModelStreamEvent(response=terminal_response(stream_fallback=True))
+            return
         if not terminal_sent:
             raise LLMError(
                 "Anthropic streaming 响应提前结束，缺少 message_stop 终态",
@@ -2618,6 +2622,7 @@ class AnthropicClient(LLMClient):
         input_tokens = 0
         output_tokens = 0
         final_sent = False
+        text_parts: list[str] = []
 
         try:
             async with httpx.AsyncClient(**client_kwargs) as cli:
@@ -2688,6 +2693,7 @@ class AnthropicClient(LLMClient):
                                 if delta.get("type") == "text_delta":
                                     text = delta.get("text")
                                     if isinstance(text, str) and text:
+                                        text_parts.append(text)
                                         yield LLMStreamChunk(delta=text, model=model_name)
                             elif event_type == "message_delta":
                                 usage = payload.get("usage") or {}
@@ -2723,6 +2729,15 @@ class AnthropicClient(LLMClient):
                 retryable=True,
             ) from None
 
+        if not final_sent and text_parts:
+            yield LLMStreamChunk(
+                model=model_name,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                done=True,
+                stream_fallback=True,
+            )
+            return
         if not final_sent:
             raise LLMError(
                 "Anthropic streaming 响应提前结束，缺少 message_stop 终态",
@@ -3070,9 +3085,7 @@ class ResponsesClient(LLMClient):
                             if not item.get("name"):
                                 item["name"] = current.get("name") or ""
                             seen_keys.add(key)
-                    merged_output.extend(
-                        item for key, item in function_calls.items() if key not in seen_keys
-                    )
+                    merged_output.extend(item for key, item in function_calls.items() if key not in seen_keys)
                     response["output"] = merged_output
             else:
                 response = {
@@ -3200,16 +3213,12 @@ class ResponsesClient(LLMClient):
                                         if current is not None and not isinstance(
                                             next_item.get("arguments"), str
                                         ):
-                                            next_item["arguments"] = str(
-                                                current.get("arguments") or ""
-                                            )
+                                            next_item["arguments"] = str(current.get("arguments") or "")
                                         if current is not None and not next_item.get("name"):
                                             next_item["name"] = current.get("name") or ""
                                         function_calls[key] = next_item
                             elif event_type == "response.function_call_arguments.delta":
-                                raw_key = str(
-                                    payload.get("item_id") or payload.get("call_id") or ""
-                                )
+                                raw_key = str(payload.get("item_id") or payload.get("call_id") or "")
                                 key = function_call_aliases.get(raw_key, raw_key)
                                 if key:
                                     if payload.get("item_id"):

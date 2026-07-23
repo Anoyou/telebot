@@ -29,11 +29,7 @@ def _registry() -> ToolRegistry:
         registry.register(
             ToolSpec(
                 name=name,
-                description=(
-                    "读取最近运行日志。"
-                    if name == "logs.recent"
-                    else "列出定时任务。"
-                ),
+                description=("读取最近运行日志。" if name == "logs.recent" else "列出定时任务。"),
                 input_schema={"type": "object", "properties": {}},
                 read_handler=read_handler,
             )
@@ -100,6 +96,7 @@ async def _patch_runtime_config(  # noqa: ANN001
 
     monkeypatch.setattr(runtime_module, "load_system_context_flags", load_flags)
     monkeypatch.setattr(runtime_module, "resolve_agent_providers", resolve)
+
     async def verify(_db, resolved):  # noqa: ANN001
         return resolved
 
@@ -232,8 +229,7 @@ async def test_runtime_does_not_reuse_upstream_model_alias(monkeypatch) -> None:
     assert usage["requested_model"] == primary.default_model
     assert usage["model"] == "upstream-backend-alias"
     assert not any(
-        event.get("type") == "provider_selected"
-        and event.get("reason") == "model_fallback"
+        event.get("type") == "provider_selected" and event.get("reason") == "model_fallback"
         for event in events
     )
 
@@ -491,9 +487,7 @@ async def test_runtime_requires_and_accepts_web_tool_approval(monkeypatch) -> No
         assert request.metadata["max_retries_per_model"] == 5
         assert request.metadata["retry_delay_seconds"] == 3.0
         assert callbacks.on_tool_batch is not None
-        await callbacks.on_tool_batch(
-            (ToolCall(id="call-1", name="scheduler.list", arguments={}),)
-        )
+        await callbacks.on_tool_batch((ToolCall(id="call-1", name="scheduler.list", arguments={"limit": 5}),))
         return AgentResult(
             text="ok",
             model=request.model,
@@ -518,10 +512,13 @@ async def test_runtime_requires_and_accepts_web_tool_approval(monkeypatch) -> No
 
     error = next(event for event in blocked if event["type"] == "error")
     assert error["code"] == "AGENT_TOOL_APPROVAL_REQUIRED"
-    assert [tool["name"] for tool in error["tool_approval"]["tools"]] == [
-        "scheduler.list"
-    ]
+    assert [tool["name"] for tool in error["tool_approval"]["tools"]] == ["scheduler.list"]
     assert error["tool_approval"]["tools"][0]["description"] == "列出定时任务。"
+    assert error["tool_approval"]["tools"][0]["call_id"] == "call-1"
+    assert error["tool_approval"]["tools"][0]["arguments"] == {"limit": 5}
+    assert error["tool_approval"]["calls"] == [
+        {"call_id": "call-1", "name": "scheduler.list", "arguments": {"limit": 5}}
+    ]
     assert run_calls == 1
 
     approved = [
@@ -548,9 +545,7 @@ async def test_runtime_streams_tool_started_before_agent_finishes(monkeypatch) -
 
     async def run(_model_call, request, _tools, *, callbacks, **_kwargs):  # noqa: ANN001
         assert callbacks.on_tool_start is not None
-        await callbacks.on_tool_start(
-            ToolCall(id="call-1", name="scheduler.list", arguments={})
-        )
+        await callbacks.on_tool_start(ToolCall(id="call-1", name="scheduler.list", arguments={}))
         await release.wait()
         return AgentResult(
             text="ok",
@@ -633,11 +628,7 @@ async def test_model_router_only_allows_confirmed_cross_provider(monkeypatch) ->
         return (
             ModelResponse(
                 model=request.model,
-                content=(
-                    TextContent(
-                        '{"needs_tools":true,"domains":["scheduler"],"reason":"lookup"}'
-                    ),
-                ),
+                content=(TextContent('{"needs_tools":true,"domains":["scheduler"],"reason":"lookup"}'),),
                 usage=ModelUsage(input_tokens=1, output_tokens=1),
             ),
             primary,

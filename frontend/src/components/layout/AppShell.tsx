@@ -5,7 +5,7 @@ import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import { Outlet, useLocation, useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { History, MessageCircle, MoreHorizontal } from "lucide-react";
+import { BotMessageSquare, History, MoreHorizontal } from "lucide-react";
 
 import {
   MobileSidebar,
@@ -333,7 +333,7 @@ function MobileAssistantButton() {
       )}
     >
       <span className="relative">
-        <MessageCircle className="h-5 w-5" />
+        <BotMessageSquare className="h-5 w-5" />
         {streaming ? <span className="absolute -right-1 -top-1 h-2.5 w-2.5 animate-pulse rounded-full border-2 border-card bg-success motion-reduce:animate-none" /> : null}
       </span>
     </button>

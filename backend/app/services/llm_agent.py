@@ -42,6 +42,7 @@ class AgentLimits:
     max_tool_calls: int = 24
     max_calls_per_turn: int = 8
     max_same_call: int = 3
+    # 0 表示不限制本轮 token 预算
     max_total_tokens: int = 50_000
     timeout_seconds: float = 180.0
 
@@ -198,19 +199,27 @@ async def run_agent(
     limits: AgentLimits | None = None,
     callbacks: AgentCallbacks | None = None,
     stream_model_call: StreamModelCall | None = None,
+    resume_tool_calls: tuple[ToolCall, ...] | None = None,
 ) -> AgentResult:
-    """Run a bounded tool loop; only explicitly supplied tools are executable."""
+    """Run a bounded tool loop; only explicitly supplied tools are executable.
+
+    ``resume_tool_calls`` 用于工具批准后从待执行工具继续，而不是重跑首轮模型决策。
+    """
 
     limits = limits or AgentLimits()
     callbacks = callbacks or AgentCallbacks()
-    if min(
-        limits.max_steps,
-        limits.max_tool_calls,
-        limits.max_calls_per_turn,
-        limits.max_same_call,
-        limits.max_total_tokens,
-    ) <= 0:
+    if (
+        min(
+            limits.max_steps,
+            limits.max_tool_calls,
+            limits.max_calls_per_turn,
+            limits.max_same_call,
+        )
+        <= 0
+    ):
         raise ValueError("agent limits must be positive")
+    if limits.max_total_tokens < 0:
+        raise ValueError("agent token budget must be >= 0 (0 means unlimited)")
     declared = {tool.name for tool in request.tools}
     if declared != set(tools):
         raise ValueError("ModelRequest.tools 必须与可执行工具白名单完全一致")
@@ -239,7 +248,7 @@ async def run_agent(
         incremental = step_output + incremental_input
         limit_budget_used += incremental
         previous_step_input = step_input
-        if limit_budget_used > limits.max_total_tokens:
+        if limits.max_total_tokens > 0 and limit_budget_used > limits.max_total_tokens:
             raise AgentLimitError(
                 f"Agent 本轮 token 预算超过限制（已用 {limit_budget_used:,} / 上限 {limits.max_total_tokens:,}）",
                 used_tokens=limit_budget_used,
@@ -264,12 +273,23 @@ async def run_agent(
                 raise RuntimeError("模型流式调用没有返回最终响应")
             return terminal
 
+    resumed_once = False
     for step in range(1, limits.max_steps + 1):
         await _notify(callbacks.on_step, step)
-        response = await call(replace(request, messages=tuple(messages), stream=False))
-        usage = _sum_usage(usage, response.usage)
-        await _notify(callbacks.on_usage, usage)
-        _apply_limit_budget(response.usage)
+        if resume_tool_calls and not resumed_once and step == 1:
+            resumed_once = True
+            response = ModelResponse(
+                model=request.model,
+                content=(),
+                tool_calls=tuple(resume_tool_calls),
+                usage=ModelUsage(),
+                stop_reason=StopReason.TOOL_CALLS,
+            )
+        else:
+            response = await call(replace(request, messages=tuple(messages), stream=False))
+            usage = _sum_usage(usage, response.usage)
+            await _notify(callbacks.on_usage, usage)
+            _apply_limit_budget(response.usage)
         if not response.tool_calls:
             if not response.text:
                 raise RuntimeError("模型既未返回文本，也未调用工具")
@@ -327,9 +347,7 @@ async def run_agent(
             # 避免并行只读工具或混合工具产生部分执行。
             await _notify(callbacks.on_tool_batch, allowed_batch)
         executed_results = await _execute_selected_calls(executable, tools, callbacks)
-        ordered = {
-            result.call_id: result for result in (*executed_results, *blocked_results)
-        }
+        ordered = {result.call_id: result for result in (*executed_results, *blocked_results)}
         messages.append(
             ModelMessage(
                 role=MessageRole.TOOL,

@@ -58,8 +58,10 @@ EventSink = Callable[[dict[str, Any]], Awaitable[None] | None]
 class ToolApprovalRequired(RuntimeError):
     """模型已选择具体工具，但 Web 用户尚未批准执行。"""
 
-    def __init__(self, tool_names: tuple[str, ...]) -> None:
+    def __init__(self, tool_calls: tuple[ToolCall, ...]) -> None:
+        tool_names = tuple(dict.fromkeys(call.name for call in tool_calls))
         self.tool_names = tool_names
+        self.tool_calls = tool_calls
         super().__init__("已理解你的需求，准备调用系统能力，请批准后继续。")
 
 
@@ -88,6 +90,7 @@ class SystemAgentRuntime:
         chat_secrets: list[str] | None = None,
         fallback_provider_id: int | None = None,
         approved_tools: list[str] | None = None,
+        approved_tool_calls: list[dict[str, Any]] | None = None,
         model_selection: dict[str, Any] | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
         """执行一轮对话，逐条 yield NDJSON 事件。"""
@@ -348,9 +351,7 @@ class SystemAgentRuntime:
                 "skill_selected",
                 skills=skill_names,
                 skill_names=skill_names,
-                understanding_summary=self.skill_registry.understanding_summary(
-                    selected_skills
-                ),
+                understanding_summary=self.skill_registry.understanding_summary(selected_skills),
                 tool_count=len(tool_specs),
             )
             skill_prompt = self.skill_registry.render_prompt(selected_skills)
@@ -359,26 +360,53 @@ class SystemAgentRuntime:
         approved_tool_names = {str(name) for name in (approved_tools or []) if str(name)}
         tool_specs_by_name = {spec.name: spec for spec in tool_specs}
 
-        def tool_approval_payload(tool_names: tuple[str, ...] | set[str]) -> dict[str, Any] | None:
-            selected_specs = [
-                tool_specs_by_name[name]
-                for name in tool_names
-                if name in tool_specs_by_name
-            ]
+        def tool_approval_payload(
+            tool_names: tuple[str, ...] | set[str],
+            tool_calls: tuple[ToolCall, ...] = (),
+        ) -> dict[str, Any] | None:
+            selected_specs = [tool_specs_by_name[name] for name in tool_names if name in tool_specs_by_name]
             if not selected_specs:
                 return None
+            calls_by_name = {call.name: call for call in tool_calls}
             return {
                 "domains": list(route.domains),
+                "calls": [
+                    {
+                        "call_id": call.id,
+                        "name": call.name,
+                        "arguments": call.arguments,
+                    }
+                    for call in tool_calls
+                    if call.name in tool_specs_by_name
+                ],
                 "tools": [
                     {
                         "name": spec.name,
                         "description": spec.description,
                         "read_only": bool(spec.read_only),
                         "risk": str(spec.risk),
+                        **(
+                            {
+                                "call_id": calls_by_name[spec.name].id,
+                                "arguments": calls_by_name[spec.name].arguments,
+                            }
+                            if spec.name in calls_by_name
+                            else {}
+                        ),
                     }
                     for spec in selected_specs
                 ],
             }
+
+        resume_tool_calls = tuple(
+            ToolCall(
+                id=str(item.get("call_id") or item.get("id") or f"approved-{idx}"),
+                name=str(item.get("name") or ""),
+                arguments=item.get("arguments") if isinstance(item.get("arguments"), dict) else {},
+            )
+            for idx, item in enumerate(approved_tool_calls or [], start=1)
+            if isinstance(item, dict) and str(item.get("name") or "") in approved_tool_names
+        )
 
         tool_ctx = ToolContext(
             db=db,
@@ -416,7 +444,9 @@ class SystemAgentRuntime:
             system_prompt=system_prompt,
             history=history_messages or [],
             user_text=user_text,
-            token_budget=int(cfg.get("session_token_limit") or 16_384),
+            token_budget=int(
+                cfg.get("session_token_limit") if cfg.get("session_token_limit") is not None else 16_384
+            ),
         )
         # pinned：同模型内重试照旧，耗尽后走确认链路，不静默换模型
         request = ModelRequest(
@@ -439,7 +469,9 @@ class SystemAgentRuntime:
         limits = AgentLimits(
             max_steps=int(cfg.get("max_steps") or 8),
             max_tool_calls=int(cfg.get("max_tool_calls") or 24),
-            max_total_tokens=int(cfg.get("session_token_limit") or 16_384),
+            max_total_tokens=int(
+                cfg.get("session_token_limit") if cfg.get("session_token_limit") is not None else 16_384
+            ),
             # 单模型最多 6 次请求，且同 Provider 还会继续尝试其它模型；
             # 总时限需覆盖完整 fallback 链，用户可随时从 Web 手动停止。
             timeout_seconds=600.0,
@@ -453,15 +485,7 @@ class SystemAgentRuntime:
             )
             if set(requested_names).issubset(approved_tool_names):
                 return
-            combined_names = tuple(
-                dict.fromkeys(
-                    [
-                        *(name for name in approved_tools or [] if name in tool_specs_by_name),
-                        *requested_names,
-                    ]
-                )
-            )
-            raise ToolApprovalRequired(combined_names)
+            raise ToolApprovalRequired(tuple(call for call in calls if call.name in requested_names))
 
         async def on_tool_start(call: ToolCall) -> None:
             spec = tool_specs_by_name.get(call.name)
@@ -532,9 +556,7 @@ class SystemAgentRuntime:
             if used.id == previous_provider.id:
                 return previous_model
             return (
-                request_tools_model_for_dto(used)
-                or str(used.default_model or "").strip()
-                or previous_model
+                request_tools_model_for_dto(used) or str(used.default_model or "").strip() or previous_model
             )
 
         async def model_call(current: ModelRequest):
@@ -569,11 +591,7 @@ class SystemAgentRuntime:
                         provider_id=used.id,
                         provider_name=used.name,
                         model=active_model,
-                        reason=(
-                            "provider_fallback"
-                            if used.id != previous_provider.id
-                            else "model_fallback"
-                        ),
+                        reason=("provider_fallback" if used.id != previous_provider.id else "model_fallback"),
                     )
                 )
             return response
@@ -611,9 +629,7 @@ class SystemAgentRuntime:
                             provider_name=used.name,
                             model=active_model,
                             reason=(
-                                "provider_fallback"
-                                if used.id != previous_provider.id
-                                else "model_fallback"
+                                "provider_fallback" if used.id != previous_provider.id else "model_fallback"
                             ),
                         )
                     )
@@ -627,6 +643,7 @@ class SystemAgentRuntime:
                 limits=limits,
                 callbacks=callbacks,
                 stream_model_call=stream_model_call,
+                resume_tool_calls=resume_tool_calls or None,
             )
         )
         try:
@@ -654,7 +671,7 @@ class SystemAgentRuntime:
                 "error",
                 code="AGENT_TOOL_APPROVAL_REQUIRED",
                 message=str(exc),
-                tool_approval=tool_approval_payload(exc.tool_names),
+                tool_approval=tool_approval_payload(exc.tool_names, exc.tool_calls),
             )
             yield next_event("done", ok=False)
             return
@@ -674,9 +691,7 @@ class SystemAgentRuntime:
                 },
                 tool_approval=(
                     tool_approval_payload(approved_tool_names)
-                    if channel == "web"
-                    and bool(cfg.get("require_tool_approval"))
-                    and approved_tool_names
+                    if channel == "web" and bool(cfg.get("require_tool_approval")) and approved_tool_names
                     else None
                 ),
             )
@@ -817,9 +832,7 @@ class SystemAgentRuntime:
         previous = []
         if isinstance(memory_state, dict):
             previous = [
-                str(item)
-                for item in (memory_state.get("last_domains") or [])
-                if str(item) in domains
+                str(item) for item in (memory_state.get("last_domains") or []) if str(item) in domains
             ]
         if previous:
             return ToolRoute(tuple(previous[:3]), "fallback", "router_failed_use_memory")
@@ -916,8 +929,8 @@ class SystemAgentRuntime:
         token_budget: int,
     ) -> list[ModelMessage]:
         messages: list[ModelMessage] = [ModelMessage.text(MessageRole.SYSTEM, system_prompt)]
-        # 粗略按字符预算滑窗：约 4 字符 ~ 1 token
-        budget_chars = max(1000, token_budget * 3)
+        # 粗略按字符预算滑窗：约 4 字符 ~ 1 token。0 表示不裁剪历史窗口。
+        budget_chars = None if token_budget <= 0 else max(1000, token_budget * 3)
         selected: list[ModelMessage] = []
         used = 0
         for msg in reversed(history):
@@ -928,7 +941,7 @@ class SystemAgentRuntime:
             if role is None:
                 continue
             cost = len(text)
-            if used + cost > budget_chars and selected:
+            if budget_chars is not None and used + cost > budget_chars and selected:
                 break
             selected.append(ModelMessage.text(role, text))
             used += cost

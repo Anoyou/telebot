@@ -54,6 +54,36 @@ log = logging.getLogger(__name__)
 STALE_PENDING_AFTER = timedelta(minutes=15)
 
 
+def _approved_tool_calls_from_retry(
+    retry_message: SystemAgentMessage | None,
+    approved_tools: list[str] | None,
+) -> list[dict[str, Any]]:
+    if retry_message is None or not approved_tools:
+        return []
+    usage = retry_message.usage if isinstance(retry_message.usage, dict) else {}
+    approval = usage.get("tool_approval") if isinstance(usage, dict) else None
+    if not isinstance(approval, dict):
+        return []
+    approved = {str(name) for name in approved_tools if str(name)}
+    calls: list[dict[str, Any]] = []
+    raw_calls = approval.get("calls") or approval.get("tools") or []
+    for item in raw_calls:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "")
+        if name not in approved or not item.get("call_id"):
+            continue
+        args = item.get("arguments")
+        calls.append(
+            {
+                "call_id": str(item.get("call_id")),
+                "name": name,
+                "arguments": args if isinstance(args, dict) else {},
+            }
+        )
+    return calls
+
+
 class SystemAgentService:
     def __init__(self) -> None:
         self.runtime = SystemAgentRuntime()
@@ -177,8 +207,10 @@ class SystemAgentService:
         status: str | None = SESSION_STATUS_ACTIVE,
         limit: int = 50,
     ) -> list[SystemAgentSession]:
-        q = select(SystemAgentSession).order_by(desc(SystemAgentSession.updated_at)).limit(
-            max(1, min(limit, 200))
+        q = (
+            select(SystemAgentSession)
+            .order_by(desc(SystemAgentSession.updated_at))
+            .limit(max(1, min(limit, 200)))
         )
         if web_user_id is not None:
             q = q.where(SystemAgentSession.web_user_id == web_user_id)
@@ -420,11 +452,10 @@ class SystemAgentService:
 
         chat_secrets = [] if retry_message is not None else extract_plaintext_secrets(raw_text)
         if not session.title:
-            session.title = session_title_from_message(
-                redact_known_secrets(raw_text, chat_secrets)
-            )
+            session.title = session_title_from_message(redact_known_secrets(raw_text, chat_secrets))
         session.updated_at = datetime.now(UTC)
 
+        approved_tool_calls: list[dict[str, Any]] = []
         # 新消息先落库；重试则复用原消息，避免重复污染历史。
         if retry_message is None:
             redacted_user = redact_known_secrets(raw_text, chat_secrets)
@@ -438,6 +469,7 @@ class SystemAgentService:
             db.add(user_msg)
         else:
             user_msg = retry_message
+            approved_tool_calls = _approved_tool_calls_from_retry(retry_message, approved_tools)
             claim = await db.execute(
                 update(SystemAgentMessage)
                 .where(
@@ -496,13 +528,12 @@ class SystemAgentService:
                 chat_secrets=chat_secrets,
                 fallback_provider_id=fallback_provider_id,
                 approved_tools=approved_tools,
+                approved_tool_calls=approved_tool_calls,
                 model_selection=model_selection,
             ):
                 et = event.get("type")
                 if et == "assistant_message":
-                    assistant_text = redact_known_secrets(
-                        str(event.get("content") or ""), chat_secrets
-                    )
+                    assistant_text = redact_known_secrets(str(event.get("content") or ""), chat_secrets)
                     event["content"] = assistant_text
                     usage = event.get("usage") if isinstance(event.get("usage"), dict) else None
                     if usage is not None and usage.get("stream_fallback"):
@@ -590,9 +621,7 @@ class SystemAgentService:
 
         if not done_ok:
             # 失败轮次不持久化助手答案，也不应把未提交的最终答案发给客户端。
-            buffered_events = [
-                event for event in buffered_events if event.get("type") != "assistant_message"
-            ]
+            buffered_events = [event for event in buffered_events if event.get("type") != "assistant_message"]
 
         if assistant_text and done_ok:
             usage_payload = dict(usage or {})
@@ -724,11 +753,7 @@ class SystemAgentService:
                 anchor["message_id"],
                 session_id=session.id,
             )
-            if (
-                row is not None
-                and row.role == MESSAGE_ROLE_USER
-                and row.run_status == MESSAGE_RUN_FAILED
-            ):
+            if row is not None and row.role == MESSAGE_ROLE_USER and row.run_status == MESSAGE_RUN_FAILED:
                 return row
             if row is None or row.run_status != MESSAGE_RUN_PENDING:
                 clear_failed_turn(session, message_id=anchor["message_id"])
