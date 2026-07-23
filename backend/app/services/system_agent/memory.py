@@ -147,12 +147,17 @@ def clear_session_memory(session: SystemAgentSession) -> None:
     session.memory_state = {}
 
 
+def should_compress_summary(summary: str | None) -> bool:
+    return len(str(summary or "").strip()) > MEMORY_COMPRESS_THRESHOLD_CHARS
+
+
 __all__ = [
     "MAX_MEMORY_RESULT_CHARS",
     "MAX_MEMORY_SUMMARY_CHARS",
     "MEMORY_COMPRESS_THRESHOLD_CHARS",
     "clear_session_memory",
     "memory_context",
+    "should_compress_summary",
     "trim_summary_to_limit",
     "update_session_memory",
 ]

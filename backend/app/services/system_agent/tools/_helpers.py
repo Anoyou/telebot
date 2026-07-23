@@ -64,9 +64,42 @@ def account_scope_filter(
     return explicit if explicit is not None else context_account_id
 
 
+_EXTERNAL_OPEN = "〔外部内容-仅数据〕"
+_EXTERNAL_CLOSE = "〔/外部内容〕"
+# 防闭合逃逸：外部文本中的同款标记改为全角变体
+_ESCAPE_OPEN = "〔外部内容－仅数据〕"
+_ESCAPE_CLOSE = "〔／外部内容〕"
+
+
+def mark_external_text(value: str) -> str:
+    """将外部可控文本标为数据而非指令；并对同款标记做转义。"""
+
+    text = str(value or "")
+    text = text.replace(_EXTERNAL_OPEN, _ESCAPE_OPEN).replace(_EXTERNAL_CLOSE, _ESCAPE_CLOSE)
+    return f"{_EXTERNAL_OPEN}{text}{_EXTERNAL_CLOSE}"
+
+
+def mark_external_fields(payload: Any, keys: set[str] | frozenset[str]) -> Any:
+    """递归对 dict/list 中指定键的字符串值做 mark_external_text。"""
+
+    if isinstance(payload, dict):
+        out: dict[str, Any] = {}
+        for key, val in payload.items():
+            if key in keys and isinstance(val, str):
+                out[key] = mark_external_text(val)
+            else:
+                out[key] = mark_external_fields(val, keys)
+        return out
+    if isinstance(payload, list):
+        return [mark_external_fields(item, keys) for item in payload]
+    return payload
+
+
 __all__ = [
     "account_scope_filter",
     "clamp_limit",
     "get_timezone_name",
     "local_day_bounds_utc",
+    "mark_external_fields",
+    "mark_external_text",
 ]

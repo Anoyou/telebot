@@ -11,7 +11,7 @@ from ....db.models.log import RuntimeLog
 from ....services.redactor import redact_text, redact_value
 from ..context import ToolContext
 from ..registry import ToolRegistry, ToolSpec
-from ._helpers import account_scope_filter, clamp_limit
+from ._helpers import account_scope_filter, clamp_limit, mark_external_fields, mark_external_text
 
 
 def _parse_dt(value: Any) -> datetime | None:
@@ -28,14 +28,20 @@ def _parse_dt(value: Any) -> datetime | None:
 
 
 def _runtime_view(row: RuntimeLog) -> dict[str, Any]:
+    message = redact_text(row.message or "")
+    detail = redact_value(row.detail) if row.detail else None
+    if isinstance(detail, str):
+        detail = mark_external_text(detail)
+    elif isinstance(detail, dict):
+        detail = mark_external_fields(detail, {"message", "detail", "text", "body", "error"})
     return {
         "id": row.id,
         "ts": row.ts.isoformat() if row.ts else None,
         "account_id": row.account_id,
         "level": row.level,
         "source": row.source,
-        "message": redact_text(row.message or ""),
-        "detail": redact_value(row.detail) if row.detail else None,
+        "message": mark_external_text(message),
+        "detail": detail,
     }
 
 
@@ -128,7 +134,11 @@ async def get_event_detail(ctx: ToolContext, args: dict[str, Any]) -> dict[str, 
                     "action_type": row.action_type,
                     "status": row.status,
                     "error_code": row.error_code,
-                    "error_summary": redact_text(row.error_summary or "") if row.error_summary else None,
+                    "error_summary": (
+                        mark_external_text(redact_text(row.error_summary or ""))
+                        if row.error_summary
+                        else None
+                    ),
                     "params_summary": redact_value(row.params_summary or {}),
                     "created_at": row.created_at.isoformat() if row.created_at else None,
                 },

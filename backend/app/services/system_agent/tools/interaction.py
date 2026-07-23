@@ -123,6 +123,8 @@ async def get_rule(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
 
 
 async def list_active_sessions(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
+    from ._helpers import mark_external_fields, mark_external_text
+
     account_id = account_scope_filter(
         args.get("account_id"),
         context_account_id=ctx.account_id,
@@ -169,18 +171,23 @@ async def list_active_sessions(ctx: ToolContext, args: dict[str, Any]) -> dict[s
             except (TypeError, ValueError, json.JSONDecodeError):
                 data = {"raw": str(raw)[:200]}
             if isinstance(data, dict):
+                safe = mark_external_fields(
+                    data,
+                    {"text", "message", "last_message", "prompt", "label", "title", "note", "error"},
+                )
                 sessions.append(
                     {
                         "session_key": key,
-                        "rule_id": data.get("rule_id"),
-                        "chat_id": data.get("chat_id"),
-                        "status": data.get("status") or data.get("state"),
-                        "user_id": data.get("user_id") or data.get("payer_user_id"),
-                        "started_at": data.get("started_at") or data.get("created_at"),
+                        "rule_id": safe.get("rule_id"),
+                        "chat_id": safe.get("chat_id"),
+                        "status": safe.get("status") or safe.get("state"),
+                        "user_id": safe.get("user_id") or safe.get("payer_user_id"),
+                        "started_at": safe.get("started_at") or safe.get("created_at"),
+                        "text": safe.get("text") or safe.get("message") or safe.get("last_message"),
                     }
                 )
             else:
-                sessions.append({"session_key": key, "data": str(data)[:200]})
+                sessions.append({"session_key": key, "data": mark_external_text(str(data)[:200])})
     except Exception as exc:  # noqa: BLE001
         return {
             "account_id": account_id,

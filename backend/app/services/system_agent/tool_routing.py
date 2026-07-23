@@ -73,6 +73,10 @@ def available_domains(specs: Iterable[ToolSpec]) -> set[str]:
     return {tool_domain(spec) for spec in specs}
 
 
+def _contains_cjk(text: str) -> bool:
+    return any("\u4e00" <= ch <= "\u9fff" for ch in text)
+
+
 def route_locally(
     text: str,
     *,
@@ -107,6 +111,9 @@ def route_locally(
         return ToolRoute(tuple(previous[:3]), "memory", "reference_to_previous_domain")
 
     if any(hint in normalized for hint in _ACTION_HINTS):
+        return None
+    # 无 CJK 且无领域关键词：交给模型路由，避免英文请求被误判为「无需实时数据」
+    if not _contains_cjk(str(text or "")):
         return None
     return ToolRoute((), "local", "no_live_system_data_needed")
 

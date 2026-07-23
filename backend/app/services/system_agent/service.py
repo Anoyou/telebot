@@ -35,6 +35,8 @@ from .config import (
     save_config,
 )
 from .memory import clear_session_memory, update_session_memory
+from .memory import should_compress_summary
+from .memory_compress import schedule_summary_compression
 from .prompts import session_title_from_message
 from .registry import get_registry
 from .runtime import SystemAgentRuntime
@@ -600,6 +602,14 @@ class SystemAgentService:
                 domains=route_domains,
                 tool_events=memory_tool_events,
             )
+            # 主链路不阻塞：摘要过长时后台 LLM 压缩（失败静默降级为条目裁剪结果）
+            try:
+                state = session.memory_state if isinstance(session.memory_state, dict) else {}
+                rev = int(state.get("summary_rev") or 0)
+                if should_compress_summary(session.memory_summary):
+                    schedule_summary_compression(int(session.id), summary_rev=rev)
+            except Exception:  # noqa: BLE001
+                log.debug("schedule summary compression failed", exc_info=True)
             if retry_message is not None:
                 clear_failed_turn(session, message_id=user_msg.id)
         else:
