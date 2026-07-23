@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from base64 import b64decode
 from types import SimpleNamespace
@@ -172,6 +173,70 @@ async def test_ensure_repo_cached_refreshes_github_tree_branch_cache(tmp_path, m
 
 
 @pytest.mark.asyncio
+async def test_ensure_repo_cached_serializes_git_for_same_cache(tmp_path, monkeypatch) -> None:
+    url = "https://github.com/example/plugins/tree/main"
+    target = tmp_path / "cache" / "repo"
+    (target / ".git").mkdir(parents=True)
+    active = 0
+    max_active = 0
+
+    monkeypatch.setattr(svc, "_cache_dir_for", lambda _url: target)
+    svc._REPO_CACHE_LOCKS.clear()
+
+    async def _run_git_serialized(*_args, **_kwargs):
+        nonlocal active, max_active
+        active += 1
+        max_active = max(max_active, active)
+        await asyncio.sleep(0.01)
+        active -= 1
+        return "refs/remotes/origin/main"
+
+    monkeypatch.setattr(svc, "_run_git", _run_git_serialized)
+
+    await asyncio.gather(
+        svc._ensure_repo_cached(url, force_refresh=True),
+        svc._ensure_repo_cached(url, force_refresh=True),
+    )
+
+    assert max_active == 1
+
+
+@pytest.mark.asyncio
+async def test_repo_lock_covers_cache_consumer_until_scan_finishes(tmp_path, monkeypatch) -> None:
+    url = "https://github.com/example/plugins/tree/main"
+    row = SimpleNamespace(url=url)
+    active = 0
+    max_active = 0
+
+    svc._REPO_CACHE_LOCKS.clear()
+    monkeypatch.setattr(svc, "_cache_dir_for", lambda _url: tmp_path / "cache")
+    monkeypatch.setattr(svc, "_get_repo", lambda _db, _repo_id: asyncio.sleep(0, result=row))
+    monkeypatch.setattr(svc, "_repo_credential", lambda _row: None)
+    monkeypatch.setattr(
+        svc,
+        "_ensure_repo_cached_unlocked",
+        lambda *_args, **_kwargs: asyncio.sleep(0, result=tmp_path / "cache"),
+    )
+
+    async def _consume(_db, _row, _repo_dir):
+        nonlocal active, max_active
+        active += 1
+        max_active = max(max_active, active)
+        await asyncio.sleep(0.01)
+        active -= 1
+        return []
+
+    monkeypatch.setattr(svc, "_list_plugins_in_cached_repo", _consume)
+
+    await asyncio.gather(
+        svc.list_plugins_in_repo(object(), 1, force_refresh=True),
+        svc.list_plugins_in_repo(object(), 1, force_refresh=True),
+    )
+
+    assert max_active == 1
+
+
+@pytest.mark.asyncio
 async def test_remote_official_sources_only_include_official_tag(tmp_path, monkeypatch) -> None:
     repo = tmp_path / "official-repo"
     _write_repo_plugin(repo, "codex_image", version="1.1.0", tags=["official", "image"])
@@ -188,6 +253,29 @@ async def test_remote_official_sources_only_include_official_tag(tmp_path, monke
     assert [item.meta.name for item in sources] == ["codex_image"]
     assert sources[0].source_url == "https://github.com/example/official.git"
     assert sources[0].remote is True
+
+
+@pytest.mark.asyncio
+async def test_official_source_snapshot_survives_cache_refresh(tmp_path, monkeypatch) -> None:
+    repo = tmp_path / "official-repo"
+    _write_repo_plugin(repo, "game24", version="1.2.0", tags=["official"])
+    plugin_dir = repo / "game24"
+
+    async def _remote_root(*, force_refresh: bool = False):
+        return repo
+
+    monkeypatch.setattr(svc, "_official_remote_plugin_root", _remote_root)
+    monkeypatch.setattr(svc, "_official_plugin_repo_url", lambda: "https://github.com/example/official.git")
+    svc._REPO_CACHE_LOCKS.clear()
+
+    async with svc.official_plugin_source_snapshot("game24") as source:
+        manifest = json.loads((plugin_dir / "plugin.json").read_text(encoding="utf-8"))
+        manifest["version"] = "9.9.9"
+        (plugin_dir / "plugin.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+        copied = svc._read_plugin_metadata(source.plugin_dir, fallback_name="game24")
+
+    assert copied.version == "1.2.0"
 
 
 @pytest.mark.asyncio
@@ -226,7 +314,10 @@ async def test_run_git_redacts_private_token_in_errors(monkeypatch) -> None:
         returncode = 128
 
         async def communicate(self):
-            return b"", b"fatal: Authentication failed for https://x-access-token:ghp_secret123@github.com/private/repo.git"
+            return (
+                b"",
+                b"fatal: Authentication failed for https://x-access-token:ghp_secret123@github.com/private/repo.git",
+            )
 
     async def _fake_exec(*_args, **_kwargs):
         return _FakeProc()

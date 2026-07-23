@@ -34,9 +34,9 @@ const GenericPluginConfigPage = lazy(() => import("@/pages/Plugins/configs/Gener
 const Logs = lazy(() => import("@/pages/Logs").then(m => ({ default: m.Logs })));
 const SettingsIndex = lazy(() => import("@/pages/Settings/Index").then(m => ({ default: m.SettingsIndex })));
 const PluginsHome = lazy(() => import("@/pages/Plugins").then(m => ({ default: m.PluginsHome })));
-const PluginsTemplatesPage = lazy(() => import("@/pages/Plugins").then(m => ({ default: m.PluginsTemplatesPage })));
-const PluginsSchedulerPage = lazy(() => import("@/pages/Plugins").then(m => ({ default: m.PluginsSchedulerPage })));
-const PluginsAutoCommandWhitelistPage = lazy(() => import("@/pages/Plugins").then(m => ({ default: m.PluginsAutoCommandWhitelistPage })));
+const OperationsTemplatesPage = lazy(() => import("@/pages/Operations/Templates").then(m => ({ default: m.OperationsTemplatesPage })));
+const OperationsSchedulerPage = lazy(() => import("@/pages/Operations/Scheduler").then(m => ({ default: m.OperationsSchedulerPage })));
+const OperationsAutoCommandWhitelistPage = lazy(() => import("@/pages/Operations/AutoCommandWhitelist").then(m => ({ default: m.OperationsAutoCommandWhitelistPage })));
 const MessageTemplateLabPage = lazy(() => import("@/pages/Plugins").then(m => ({ default: m.MessageTemplateLabPage })));
 const PluginsManagePage = lazy(() => import("@/pages/Extensions").then(m => ({ default: m.Extensions })));
 const InteractionIndex = lazy(() => import("@/pages/Interaction/Index").then(m => ({ default: m.InteractionIndex })));
@@ -79,6 +79,23 @@ function PageFallback() {
           ))}
         </div>
       </div>
+    </PageShell>
+  );
+}
+
+function RemovedOperationsRoute() {
+  return (
+    <PageShell>
+      <section className="mx-auto flex min-h-[45vh] max-w-lg flex-col items-center justify-center text-center">
+        <p className="font-mono text-sm text-muted-foreground">404</p>
+        <h1 className="mt-2 text-2xl font-semibold">页面已移除</h1>
+        <p className="mt-2 text-sm leading-6 text-muted-foreground">
+          旧插件路径不再提供页面或兼容跳转，请从新的一级工作台进入。
+        </p>
+        <Link className="mt-5 rounded-md bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground" to="/operations/templates">
+          打开指令与任务
+        </Link>
+      </section>
     </PageShell>
   );
 }
@@ -270,27 +287,28 @@ export default function App() {
               </Suspense>
             }
           />
+          <Route path="operations" element={<Navigate to="/operations/templates" replace />} />
           <Route
-            path="plugins/templates"
+            path="operations/templates"
             element={
               <Suspense fallback={<PageFallback />}>
-                <PluginsTemplatesPage />
+                <OperationsTemplatesPage />
               </Suspense>
             }
           />
           <Route
-            path="plugins/scheduler"
+            path="operations/scheduler"
             element={
               <Suspense fallback={<PageFallback />}>
-                <PluginsSchedulerPage />
+                <OperationsSchedulerPage />
               </Suspense>
             }
           />
           <Route
-            path="plugins/auto-command-whitelist"
+            path="operations/auto-command-whitelist"
             element={
               <Suspense fallback={<PageFallback />}>
-                <PluginsAutoCommandWhitelistPage />
+                <OperationsAutoCommandWhitelistPage />
               </Suspense>
             }
           />
@@ -392,15 +410,15 @@ export default function App() {
           />
           <Route
             path="ai/chat"
-            element={<Navigate to="/plugins/templates?type=ai" replace />}
+            element={<Navigate to="/operations/templates?type=ai" replace />}
           />
           <Route
             path="ai/routing"
-            element={<Navigate to="/plugins/templates?aiCapability=routing" replace />}
+            element={<Navigate to="/operations/templates?aiCapability=routing" replace />}
           />
           <Route
             path="ai/search"
-            element={<Navigate to="/plugins/templates?aiCapability=search" replace />}
+            element={<Navigate to="/operations/templates?aiCapability=search" replace />}
           />
           <Route
             path="ai/vision"
@@ -412,7 +430,7 @@ export default function App() {
           />
           <Route
             path="ai/output"
-            element={<Navigate to="/plugins/templates?aiCapability=output" replace />}
+            element={<Navigate to="/operations/templates?aiCapability=output" replace />}
           />
           <Route
             path="ai/help"
@@ -423,6 +441,9 @@ export default function App() {
             element={<Navigate to="/ai?tab=usage" replace />}
           />
           <Route path="ai/*" element={<Navigate to="/ai" replace />} />
+          <Route path="plugins/templates" element={<RemovedOperationsRoute />} />
+          <Route path="plugins/scheduler" element={<RemovedOperationsRoute />} />
+          <Route path="plugins/auto-command-whitelist" element={<RemovedOperationsRoute />} />
           <Route path="*" element={<Navigate to="/plugins" replace />} />
         </Route>
       </Route>

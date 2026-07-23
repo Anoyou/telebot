@@ -34,7 +34,7 @@ export function AssistantDockProvider({ children }: { children: ReactNode }) {
     if (next) {
       window.requestAnimationFrame(() => {
         const triggers = Array.from(document.querySelectorAll<HTMLButtonElement>(
-          "[data-assistant-mobile-button], [data-assistant-sidebar-button]",
+          "[data-assistant-mobile-button], [data-assistant-desktop-pet]",
         ));
         triggers.find((button) => button.offsetParent !== null)?.focus({ preventScroll: true });
       });

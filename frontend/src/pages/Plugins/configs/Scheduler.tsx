@@ -331,7 +331,7 @@ export function SchedulerConfig() {
       <RulePageHeader
         title={`定时任务 · 账号 #${aid}`}
         backLabel={fromAccountRoute ? accountBackTarget.backLabel : "返回定时任务"}
-        backHref={fromAccountRoute ? accountBackTarget.backHref : "/plugins/scheduler"}
+        backHref={fromAccountRoute ? accountBackTarget.backHref : "/operations/scheduler"}
       />
 
       <RuleInfoBox>

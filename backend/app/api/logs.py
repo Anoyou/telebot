@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 from collections import deque
 from datetime import datetime
 from pathlib import Path
@@ -335,9 +336,27 @@ def _fetch_updater_console_logs(service: str, tail: int) -> dict[str, Any]:
 
 def _is_console_noise_line(line: str) -> bool:
     lowered = line.lower()
-    is_updater_health = "[updater]" in lowered and '"get /health http/' in lowered
+    is_alembic_info = ("info:" in lowered or "info  [" in lowered) and "alembic.runtime." in lowered
+    if is_alembic_info and any(
+        marker in lowered
+        for marker in (
+            "context impl postgresqlimpl",
+            "will assume transactional ddl",
+            "setup plugin alembic.autogenerate",
+        )
+    ):
+        return True
+    if re.search(r"\[worker:\d+\]\s+info\s+got difference for channel \d+ updates", lowered):
+        return True
+    if "info:httpx:http request:" in lowered:
+        return bool(re.search(r'"http/[^\"]+\s+2\d\d(?:\s+[^\"]+)?"', lowered))
+    is_updater_poll = "[updater]" in lowered and (
+        '"get /health http/' in lowered
+        or '"get /console-logs?' in lowered
+        or bool(re.search(r'"get /jobs/[^ ]+ http/', lowered))
+    )
     is_internal_healthz = "127.0.0.1" in lowered and '"get /healthz http/' in lowered
-    if not (is_updater_health or is_internal_healthz):
+    if not (is_updater_poll or is_internal_healthz):
         return False
     return any(f" {status} " in lowered for status in range(200, 300))
 
@@ -391,11 +410,17 @@ def _read_local_console_logs(service: str, tail: int, keyword: str | None) -> Sy
     )
 
 
-def _system_console_response(payload: dict[str, Any], *, service: str, tail: int) -> SystemConsoleLogsResponse:
+def _system_console_response(
+    payload: dict[str, Any], *, service: str, tail: int
+) -> SystemConsoleLogsResponse:
     raw_lines = payload.get("lines")
     lines = [redact_text(str(line)) for line in raw_lines] if isinstance(raw_lines, list) else []
     raw_services = payload.get("services")
-    services = [str(item) for item in raw_services] if isinstance(raw_services, list) else ([service] if service != "all" else [])
+    services = (
+        [str(item) for item in raw_services]
+        if isinstance(raw_services, list)
+        else ([service] if service != "all" else [])
+    )
     return SystemConsoleLogsResponse(
         ok=bool(payload.get("ok")),
         source=str(payload.get("source") or "updater"),
@@ -503,7 +528,9 @@ async def _trace_summaries_with_counts(db: DBSession, rows: list[EventTrace]) ->
         summary.plugin_keys = sorted(plugin_keys.get(summary.trace_id, []))
         summary.plugin_count = plugin_counts.get(summary.trace_id, 0)
         summary.action_count = action_counts.get(summary.trace_id, 0)
-        summary.error_count = span_error_counts.get(summary.trace_id, 0) + action_error_counts.get(summary.trace_id, 0)
+        summary.error_count = span_error_counts.get(summary.trace_id, 0) + action_error_counts.get(
+            summary.trace_id, 0
+        )
     return summaries
 
 
@@ -580,9 +607,7 @@ def _event_trace_stmt(
         )
     if plugin_key:
         stmt = stmt.where(
-            EventTrace.trace_id.in_(
-                select(EventSpan.trace_id).where(EventSpan.plugin_key == plugin_key)
-            )
+            EventTrace.trace_id.in_(select(EventSpan.trace_id).where(EventSpan.plugin_key == plugin_key))
         )
     return stmt
 
@@ -594,19 +619,27 @@ async def _span_action_groups(
     if not trace_ids:
         return {}, {}
     span_rows = (
-        await db.execute(
-            select(EventSpan)
-            .where(EventSpan.trace_id.in_(trace_ids))
-            .order_by(EventSpan.trace_id, EventSpan.started_at, EventSpan.id)
+        (
+            await db.execute(
+                select(EventSpan)
+                .where(EventSpan.trace_id.in_(trace_ids))
+                .order_by(EventSpan.trace_id, EventSpan.started_at, EventSpan.id)
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     action_rows = (
-        await db.execute(
-            select(EventAction)
-            .where(EventAction.trace_id.in_(trace_ids))
-            .order_by(EventAction.trace_id, EventAction.created_at, EventAction.id)
+        (
+            await db.execute(
+                select(EventAction)
+                .where(EventAction.trace_id.in_(trace_ids))
+                .order_by(EventAction.trace_id, EventAction.created_at, EventAction.id)
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     spans_by_trace: dict[str, list[EventSpan]] = {trace_id: [] for trace_id in trace_ids}
     actions_by_trace: dict[str, list[EventAction]] = {trace_id: [] for trace_id in trace_ids}
     for span in span_rows:
@@ -825,23 +858,39 @@ async def get_event_trace(
     if row is None:
         raise HTTPException(status_code=404, detail="trace 不存在")
     spans = (
-        await db.execute(
-            select(EventSpan).where(EventSpan.trace_id == trace_id).order_by(EventSpan.started_at, EventSpan.id)
+        (
+            await db.execute(
+                select(EventSpan)
+                .where(EventSpan.trace_id == trace_id)
+                .order_by(EventSpan.started_at, EventSpan.id)
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     actions = (
-        await db.execute(
-            select(EventAction).where(EventAction.trace_id == trace_id).order_by(EventAction.created_at, EventAction.id)
+        (
+            await db.execute(
+                select(EventAction)
+                .where(EventAction.trace_id == trace_id)
+                .order_by(EventAction.created_at, EventAction.id)
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     logs = (
-        await db.execute(
-            select(RuntimeLog)
-            .where(RuntimeLog.detail["trace_id"].as_string() == trace_id)
-            .order_by(RuntimeLog.ts.desc())
-            .limit(50)
+        (
+            await db.execute(
+                select(RuntimeLog)
+                .where(RuntimeLog.detail["trace_id"].as_string() == trace_id)
+                .order_by(RuntimeLog.ts.desc())
+                .limit(50)
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     summary = EventTraceSummary.from_row(row)
     plugin_keys = sorted({item.plugin_key for item in spans if item.plugin_key})
     summary.plugin_keys = plugin_keys

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
-import { Menu, MessageCircle, Server, Settings2 } from "lucide-react";
+import { ChevronDown, Menu, MessageCircle, Server, Settings2 } from "lucide-react";
 import { toast } from "sonner";
 
 import {
@@ -132,6 +132,7 @@ export function AssistantIndex() {
   const [retryingMessageId, setRetryingMessageId] = useState<number | null>(null);
   const [activeRun, setActiveRun] = useState<StoredRun | null>(null);
   const [configOpen, setConfigOpen] = useState(false);
+  const [mobileHeaderExpanded, setMobileHeaderExpanded] = useState(false);
   const [memoryDraft, setMemoryDraft] = useState("");
   const [runtimeSelection, setRuntimeSelection] = useState<{
     providerName: string;
@@ -881,14 +882,34 @@ export function AssistantIndex() {
   );
 
   return (
-    <PageShell>
-      <PageHeader
-        title="系统助手"
-        description="用自然语言查询并操作系统能力；写操作需内联确认。"
-        icon={MessageCircle}
-      />
+    <PageShell className="flex h-full min-h-0 flex-col gap-3 space-y-0">
+      <div className="hidden shrink-0 sm:block">
+        <PageHeader
+          title="系统助手"
+          description="用自然语言查询并操作系统能力；写操作需内联确认。"
+          icon={MessageCircle}
+        />
+      </div>
 
-      <div className="mb-3 rounded-lg border border-border/70 bg-muted/20 p-2.5">
+      <div className="shrink-0 overflow-hidden rounded-lg border border-border/70 bg-muted/20 sm:overflow-visible sm:p-2.5">
+        <button
+          type="button"
+          data-assistant-mobile-summary
+          className="flex h-12 w-full items-center gap-2 px-3 text-left sm:hidden"
+          aria-expanded={mobileHeaderExpanded}
+          onClick={() => setMobileHeaderExpanded((value) => !value)}
+        >
+          <span className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-primary/10 text-primary">
+            <MessageCircle className="h-4 w-4" />
+          </span>
+          <span className="shrink-0 text-sm font-semibold">系统助手</span>
+          <span className="min-w-0 truncate text-[11px] text-muted-foreground">
+            {configQ.isLoading ? "加载中" : enabled ? (streaming ? "调用中" : "已启用") : "未启用"}
+          </span>
+          <span className="ml-auto shrink-0 text-[11px] text-primary">展开后可配置</span>
+          <ChevronDown className={`h-4 w-4 shrink-0 text-muted-foreground transition-transform ${mobileHeaderExpanded ? "rotate-180" : ""}`} />
+        </button>
+        <div data-assistant-mobile-settings className={`${mobileHeaderExpanded ? "block" : "hidden"} border-t p-2.5 sm:block sm:border-t-0 sm:p-0`}>
         <div className="flex items-center justify-between gap-2">
           <div className="flex min-w-0 items-center gap-2">
             <span className="min-w-0 truncate text-xs text-muted-foreground">
@@ -973,10 +994,11 @@ export function AssistantIndex() {
             </span>
           ) : null}
         </div>
+        </div>
       </div>
 
       {configOpen ? (
-        <div className="mb-3 rounded-lg border bg-card p-4 text-sm">
+        <div data-assistant-config-panel className={`${mobileHeaderExpanded ? "block" : "hidden"} -mt-3 min-h-32 max-h-[min(38dvh,24rem)] shrink overflow-y-auto rounded-b-lg border border-t-0 bg-card p-4 text-sm overscroll-contain sm:mt-0 sm:block sm:rounded-lg sm:border-t`}>
           <div className="mb-3 font-medium">系统助手模型</div>
           <div className="grid gap-3 sm:grid-cols-2">
             <div className="flex min-h-11 items-center justify-between gap-3 rounded-md border px-3 py-2">
@@ -1184,7 +1206,7 @@ export function AssistantIndex() {
         </div>
       ) : null}
 
-      <div className="flex min-h-[60vh] overflow-hidden rounded-xl border bg-card">
+      <div data-assistant-chat-window className="flex min-h-[min(20rem,40dvh)] flex-1 overflow-hidden rounded-xl border bg-card sm:min-h-[min(22rem,48dvh)]">
         <SessionDrawer
           sessions={sessionsQ.data || []}
           activeId={activeId}

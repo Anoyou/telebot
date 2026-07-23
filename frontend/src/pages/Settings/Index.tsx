@@ -372,7 +372,7 @@ export function SettingsIndex() {
             <Link to="/ai?tab=providers">添加模型</Link>
           </Button>
           <Button asChild variant="outline" size="sm" className="min-w-0 px-2">
-            <Link to="/plugins/templates">添加指令</Link>
+            <Link to="/operations/templates">添加指令</Link>
           </Button>
           <Button
             variant="outline"
@@ -460,21 +460,6 @@ export function SettingsIndex() {
 
         <TabsContent value="platform" className="space-y-6">
           <NavigationPreferences settings={settingsQ.data} />
-
-          <Card>
-            <CardHeader>
-              <CardTitle className="text-base">自动化工具</CardTitle>
-              <CardDescription>定时执行与自动指令安全范围属于系统自动化，不再占用插件中心的主导航。</CardDescription>
-            </CardHeader>
-            <CardContent className="grid gap-2 sm:grid-cols-2">
-              <Button asChild variant="outline" className="justify-start">
-                <Link to="/plugins/scheduler">管理定时任务</Link>
-              </Button>
-              <Button asChild variant="outline" className="justify-start">
-                <Link to="/plugins/auto-command-whitelist">自动指令白名单</Link>
-              </Button>
-            </CardContent>
-          </Card>
 
           <Card className={guideActive && currentStep === 1 ? "siri-glow-soft" : undefined}>
             <CardHeader>

@@ -5,7 +5,7 @@ import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import { Outlet, useLocation, useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { BotMessageSquare, History, MoreHorizontal } from "lucide-react";
+import { History, MoreHorizontal } from "lucide-react";
 
 import {
   MobileSidebar,
@@ -16,6 +16,7 @@ import {
 import { TopBar } from "./TopBar";
 import { GlobalAlertBar } from "./GlobalAlertBar";
 import { AssistantDockProvider, useAssistantDock } from "@/components/assistant/AssistantDock";
+import { AssistantPet, AssistantRobot } from "@/components/assistant/AssistantPet";
 import { fetchMe } from "@/lib/auth";
 import { getPlatformCapabilities, getSystemSettings } from "@/api/system";
 import { capabilityEnabledMap } from "@/lib/navigation";
@@ -167,6 +168,7 @@ export function AppShell() {
     <div className="app-frame flex h-[100dvh] w-full overflow-hidden bg-background">
       <Sidebar collapsed={sidebarCollapsed} />
       <MobileSidebar open={mobileNavOpen} onOpenChange={setMobileNavOpen} />
+      <AssistantPet />
       <div className="app-workspace flex min-w-0 flex-1 flex-col overflow-hidden">
         <TopBar
           username={data?.username ?? "未知用户"}
@@ -333,7 +335,7 @@ function MobileAssistantButton() {
       )}
     >
       <span className="relative grid place-items-center">
-        <BotMessageSquare className="h-5 w-5" />
+        <AssistantRobot compact streaming={streaming} />
         {streaming ? <span className="absolute -right-1 -top-1 h-2.5 w-2.5 animate-pulse rounded-full border-2 border-card bg-success motion-reduce:animate-none" /> : null}
       </span>
       <span className="mt-0.5 text-[10px] font-semibold leading-none">助手</span>
@@ -372,7 +374,7 @@ function AssistantSurface() {
       aria-label="系统助手"
       aria-hidden={collapsed}
       className={cn(
-        "absolute inset-0 z-30 origin-bottom overflow-y-auto bg-background px-4 py-4 pb-[calc(5.25rem+env(safe-area-inset-bottom))] transition-[opacity,transform,visibility] duration-200 ease-out will-change-[opacity,transform] motion-reduce:transform-none motion-reduce:transition-none md:px-8 md:py-7 xl:px-10",
+        "absolute inset-0 z-30 origin-bottom overflow-hidden bg-background px-4 py-4 pb-[calc(5.25rem+env(safe-area-inset-bottom))] transition-[opacity,transform,visibility] duration-200 ease-out will-change-[opacity,transform] motion-reduce:transform-none motion-reduce:transition-none sm:pb-7 md:px-8 md:py-7 xl:px-10",
         collapsed
           ? "invisible pointer-events-none translate-y-2 scale-[0.99] opacity-0"
           : "visible translate-y-0 scale-100 opacity-100",

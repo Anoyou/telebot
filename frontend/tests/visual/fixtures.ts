@@ -154,6 +154,7 @@ function jsonResponse(pathname: string): unknown | undefined {
   };
   if (pathname === "/api/system-agent/sessions") return [];
   if (pathname === "/api/system-agent/runs") return [];
+  if (pathname === "/api/system-agent/memory") return [];
   if (pathname === "/api/system/capabilities") return platformCapabilitiesFixture;
   if (pathname === "/api/feature-matrix") return { features: [] };
   if (pathname === "/api/ledger") return { items: [ledgerEntryFixture] };
@@ -178,6 +179,7 @@ function jsonResponse(pathname: string): unknown | undefined {
     current_version: APP_VERSION, target_version: "0.72.0-beta.2",
     current_commit: "aaaa1111aaaa", remote_commit: "bbbb2222bbbb", ahead: 2,
     remote: "origin", branch: "main", changed_files: ["frontend/src/App.tsx"],
+    commit_titles: ["优化更新弹窗的信息层级", "修复系统控制台噪声过滤"],
     runtime_mode: "local_source", action_required: "frontend", plan_label: "仅需更新前端",
     plan_detail: "更新前端资源后重启服务。", components: ["frontend"], services: ["frontend"], can_apply: true,
   };

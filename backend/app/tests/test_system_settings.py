@@ -15,8 +15,7 @@ from app.db.models.system import SystemSetting
 class _FakeSettingsDB:
     def __init__(self, initial: dict[str, Any] | None = None) -> None:
         self.rows: dict[str, SystemSetting] = {
-            key: SystemSetting(key=key, value=value)
-            for key, value in (initial or {}).items()
+            key: SystemSetting(key=key, value=value) for key, value in (initial or {}).items()
         }
         self.commits = 0
 
@@ -33,21 +32,23 @@ class _FakeSettingsDB:
 
 @pytest.mark.asyncio
 async def test_system_settings_log_retention_switches_roundtrip(monkeypatch) -> None:
-    db = _FakeSettingsDB({
-        "log_retention": {
-            "trace_enabled": True,
-            "event_bus_delivery_enabled": True,
-            "inline_updates_enabled": True,
-            "runtime_log_retention_days": 30,
-            "runtime_log_max_message_chars": 2000,
-            "runtime_log_max_detail_chars": 8000,
-            "runtime_log_min_level": "info",
-            "trace_retention_days": 30,
-            "trace_payload_snapshot_retention_days": 7,
-            "native_raw_persist_enabled": False,
-            "native_raw_retention_days": 1,
+    db = _FakeSettingsDB(
+        {
+            "log_retention": {
+                "trace_enabled": True,
+                "event_bus_delivery_enabled": True,
+                "inline_updates_enabled": True,
+                "runtime_log_retention_days": 30,
+                "runtime_log_max_message_chars": 2000,
+                "runtime_log_max_detail_chars": 8000,
+                "runtime_log_min_level": "info",
+                "trace_retention_days": 30,
+                "trace_payload_snapshot_retention_days": 7,
+                "native_raw_persist_enabled": False,
+                "native_raw_retention_days": 1,
+            }
         }
-    })
+    )
     monkeypatch.setattr(rate_limit, "_audit", AsyncMock())
     monkeypatch.setattr(rate_limit, "_broadcast_reload", AsyncMock())
     monkeypatch.setattr("app.worker.supervisor.invalidate_log_retention_cache", lambda: None)
@@ -143,7 +144,7 @@ async def test_system_settings_ui_preferences_roundtrip(monkeypatch) -> None:
     result = await rate_limit.patch_system_settings(
         rate_limit._SettingsPatch(
             ui_preferences=rate_limit._UIPreferencesPatch(
-                sidebar_order=["/ai", "/plugins", "/settings"],
+                sidebar_order=["/ai", "/operations", "/plugins", "/settings"],
                 mobile_nav_order=["/ai", "/plugins", "/overview", "/interaction"],
                 provider_order=[9, 3, 12],
             )
@@ -153,7 +154,7 @@ async def test_system_settings_ui_preferences_roundtrip(monkeypatch) -> None:
     )
 
     assert result["ui_preferences"] == {
-        "sidebar_order": ["/ai", "/plugins", "/settings"],
+        "sidebar_order": ["/ai", "/operations", "/plugins", "/settings"],
         "mobile_nav_order": ["/ai", "/plugins", "/overview", "/interaction"],
         "provider_order": [9, 3, 12],
     }
@@ -222,9 +223,7 @@ async def test_system_settings_app_update_target_rejects_invalid_branch(monkeypa
 
     with pytest.raises(HTTPException) as exc_info:
         await rate_limit.patch_system_settings(
-            rate_limit._SettingsPatch(
-                app_update_target=rate_limit._AppUpdateTargetPatch(branch="../main")
-            ),
+            rate_limit._SettingsPatch(app_update_target=rate_limit._AppUpdateTargetPatch(branch="../main")),
             db,  # type: ignore[arg-type]
             SimpleNamespace(id=1),
         )

@@ -261,26 +261,149 @@ test.describe("移动端交互细节", () => {
     fixture.assertClean();
   });
 
-  test("中间宽度可从导航抽屉进入系统助手", async ({ page }) => {
+  test("中间宽度可从贴边机器人进入系统助手", async ({ page }) => {
     const fixture = await installApiFixture(page);
     await page.setViewportSize({ width: 758, height: 1100 });
     await page.goto("/ai", { waitUntil: "networkidle" });
     await expect(page.locator("[data-assistant-mobile-button]")).toBeHidden();
-    await page.getByRole("button", { name: "打开导航菜单" }).click();
-    const assistantEntry = page.getByRole("dialog", { name: "导航菜单" }).locator("[data-assistant-sidebar-button]");
+    const assistantEntry = page.locator("[data-assistant-desktop-pet]");
     await expect(assistantEntry).toBeVisible();
     await assistantEntry.click();
     await expect(page.locator("[data-assistant-surface]")).toBeVisible();
     fixture.assertClean();
   });
 
-  test("桌面端使用侧边栏固定助手入口", async ({ page }, testInfo) => {
+  test("桌面端使用可拖动贴边机器人入口", async ({ page }, testInfo) => {
     test.skip(testInfo.project.name !== "desktop", "仅桌面视口");
     const fixture = await installApiFixture(page);
     await page.goto("/overview", { waitUntil: "networkidle" });
-    await expect(page.locator("[data-assistant-sidebar-button]")).toBeVisible();
+    const assistantPet = page.locator("[data-assistant-desktop-pet]");
+    await expect(assistantPet).toBeVisible();
+    await expect(assistantPet).toHaveAttribute("data-docked", "right");
+    await expect(assistantPet.locator(".assistant-pet-head")).toBeVisible();
+    const petBox = await assistantPet.boundingBox();
+    expect(petBox).not.toBeNull();
+    await page.mouse.move((petBox?.x || 0) + 10, (petBox?.y || 0) + 24);
+    await page.mouse.down();
+    await page.mouse.move(1040, 360, { steps: 8 });
+    await page.mouse.up();
+    await expect(assistantPet).toHaveAttribute("data-docked", "false");
+    await expect(assistantPet).toHaveAttribute("data-docked", "right", { timeout: 3_000 });
     await expect(page.locator("[data-assistant-mobile-button]")).toBeHidden();
     await expect(page.locator("[data-assistant-tip]")).toHaveCount(0);
+    fixture.assertClean();
+  });
+
+  test("系统助手输入框固定在可视底部且仅消息区滚动", async ({ page }, testInfo) => {
+    test.skip(testInfo.project.name === "tablet", "桌面与 PWA 各验证一次");
+    const fixture = await installApiFixture(page);
+    const session = {
+      id: "visual-session",
+      web_user_id: 1,
+      bot_tg_user_id: null,
+      account_id: null,
+      channel: "web",
+      title: "固定输入框验证",
+      status: "active",
+      created_at: "2026-07-24T00:00:00Z",
+      updated_at: "2026-07-24T00:00:00Z",
+    };
+    await page.route("**/api/system-agent/sessions?**", async (route) => {
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify([session]) });
+    });
+    await page.route("**/api/system-agent/sessions/visual-session/messages?**", async (route) => {
+      const messages = Array.from({ length: 30 }, (_, index) => ({
+        id: index + 1,
+        session_id: session.id,
+        role: index % 2 ? "assistant" : "user",
+        content: { text: `第 ${index + 1} 条用于撑开消息列表的测试内容。` },
+        run_status: "succeeded",
+        created_at: "2026-07-24T00:00:00Z",
+      }));
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(messages) });
+    });
+    await page.route("**/api/system-agent/actions?**", async (route) => {
+      await route.fulfill({ status: 200, contentType: "application/json", body: "[]" });
+    });
+
+    await page.goto("/ai", { waitUntil: "networkidle" });
+    const trigger = testInfo.project.name === "mobile"
+      ? page.locator("[data-assistant-mobile-button]")
+      : page.locator("[data-assistant-desktop-pet]");
+    await trigger.click();
+    const surface = page.locator("[data-assistant-surface]");
+    const composer = page.locator("[data-assistant-composer]");
+    const mobileSummary = surface.locator("[data-assistant-mobile-summary]");
+    const mobileSettings = surface.locator("[data-assistant-mobile-settings]");
+    if (testInfo.project.name === "mobile") {
+      await expect(surface.getByRole("heading", { name: "系统助手" })).toBeHidden();
+      await expect(mobileSummary).toBeVisible();
+      await expect(mobileSummary).toHaveAttribute("aria-expanded", "false");
+      await expect(mobileSettings).toBeHidden();
+      await mobileSummary.click();
+      await expect(mobileSettings).toBeVisible();
+      await mobileSettings.getByRole("button", { name: "配置" }).click();
+      await expect(surface.locator("[data-assistant-config-panel]")).toBeVisible();
+    } else {
+      await expect(surface.getByRole("heading", { name: "系统助手" })).toBeVisible();
+      await expect(mobileSummary).toBeHidden();
+      await expect(mobileSettings).toBeVisible();
+    }
+    const conversation = surface.locator(".overflow-y-auto").filter({ hasText: "第 30 条用于撑开消息列表的测试内容。" });
+    await expect(composer).toBeVisible();
+    await expect(conversation).toBeVisible();
+    const before = await composer.boundingBox();
+    await conversation.evaluate((element) => { element.scrollTop = element.scrollHeight; });
+    const after = await composer.boundingBox();
+    expect(Math.round(after?.y || 0)).toBe(Math.round(before?.y || 0));
+    const surfaceBox = await surface.boundingBox();
+    const chatBox = await surface.locator("[data-assistant-chat-window]").boundingBox();
+    expect(chatBox?.height || 0).toBeGreaterThan(testInfo.project.name === "mobile" ? 310 : 340);
+    expect((surfaceBox?.y || 0) + (surfaceBox?.height || 0) - ((after?.y || 0) + (after?.height || 0))).toBeGreaterThan(15);
+    fixture.assertClean();
+  });
+
+  test("指令与任务使用独立一级页面且旧插件路径已移除", async ({ page }, testInfo) => {
+    test.skip(testInfo.project.name !== "desktop", "仅桌面视口");
+    const fixture = await installApiFixture(page);
+    await page.goto("/operations/templates", { waitUntil: "networkidle" });
+    await expect(page.getByRole("heading", { name: "指令与任务" })).toBeVisible();
+    await expect(page.getByRole("tab", { name: "自定义指令" })).toBeVisible();
+    await expect(page.getByRole("tab", { name: "定时任务" })).toBeVisible();
+    await expect(page.getByRole("tab", { name: "自动指令白名单" })).toBeVisible();
+    await expect(page.getByText("插件中心", { exact: true })).toHaveCount(0);
+    await expect(page.locator('[data-sidebar-sort-path="/operations"]')).toContainText("指令与任务");
+
+    await page.goto("/plugins/templates", { waitUntil: "networkidle" });
+    await expect(page).toHaveURL(/\/plugins\/templates$/);
+    await expect(page.getByRole("heading", { name: "页面已移除" })).toBeVisible();
+    await page.goto("/ai", { waitUntil: "networkidle" });
+    await expect(page.getByRole("button", { name: "配置系统助手" })).toHaveCount(0);
+    fixture.assertClean();
+  });
+
+  test("桌面侧边栏可直接拖动并自动保存顺序", async ({ page }, testInfo) => {
+    test.skip(testInfo.project.name !== "desktop", "仅桌面视口");
+    let savedOrder: string[] | null = null;
+    const fixture = await installApiFixture(page);
+    await page.route("**/api/system/settings", async (route) => {
+      if (route.request().method() !== "PATCH") {
+        await route.fallback();
+        return;
+      }
+      const payload = route.request().postDataJSON() as { ui_preferences?: { sidebar_order?: string[] } };
+      savedOrder = payload.ui_preferences?.sidebar_order ?? null;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ timezone: "Asia/Shanghai", login_security: {}, ui_preferences: { sidebar_order: savedOrder } }),
+      });
+    });
+    await page.goto("/overview", { waitUntil: "networkidle" });
+    const overview = page.locator('[data-sidebar-sort-path="/overview"]');
+    const plugins = page.locator('[data-sidebar-sort-path="/plugins"]');
+    await overview.dragTo(plugins);
+    await expect.poll(() => savedOrder?.[0]).toBe("/overview");
     fixture.assertClean();
   });
 
@@ -332,7 +455,7 @@ test.describe("移动端交互细节", () => {
     fixture.assertClean();
   });
 
-  test("更新详情默认折叠并展示当前与目标版本", async ({ page }, testInfo) => {
+  test("部署详情与更新内容默认折叠并展示版本摘要", async ({ page }, testInfo) => {
     test.skip(testInfo.project.name !== "mobile", "仅移动视口");
     const fixture = await installApiFixture(page);
 
@@ -341,7 +464,7 @@ test.describe("移动端交互细节", () => {
     const dialog = page.getByRole("dialog", { name: "检查更新" });
     await expect(dialog).toBeVisible();
     const checkingHeight = await dialog.evaluate((element) => Math.round(element.getBoundingClientRect().height));
-    const details = page.locator("details").filter({ hasText: "更新详情" });
+    const details = page.locator("details").filter({ hasText: "部署详情" });
     await expect(details).toBeVisible();
     const resolvedHeight = await dialog.evaluate((element) => Math.round(element.getBoundingClientRect().height));
     expect(Math.abs(resolvedHeight - checkingHeight)).toBeLessThanOrEqual(1);
@@ -351,6 +474,10 @@ test.describe("移动端交互细节", () => {
     await details.locator("summary").click();
     await expect(details).toHaveAttribute("open", "");
     await expect(details.getByText("当前提交: aaaa1111aaaa")).toBeVisible();
+    const releaseNotes = page.locator("details").filter({ hasText: "查看更新内容" });
+    await expect(releaseNotes).not.toHaveAttribute("open", "");
+    await releaseNotes.locator("summary").click();
+    await expect(releaseNotes.getByText("优化更新弹窗的信息层级")).toBeVisible();
     fixture.assertClean();
   });
 });

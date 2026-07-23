@@ -1966,6 +1966,7 @@ export interface CheckUpdateResult {
   remote?: string | null;
   branch?: string | null;
   changed_files: string[];
+  commit_titles?: string[];
   runtime_mode?: string | null;
   update_executor?: string | null;
   action_required?:

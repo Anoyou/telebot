@@ -8,6 +8,7 @@
 - 顶层 GET endpoint 的 timeout 兜底（任一子探测卡住不应让整个接口失败）
 - ``auto_migrate_on_startup`` settings 字段默认 False
 """
+
 from __future__ import annotations
 
 import sys
@@ -139,9 +140,7 @@ async def test_probe_redis_falsy_pong() -> None:
 
 @pytest.mark.asyncio
 async def test_probe_redis_exception() -> None:
-    with patch(
-        "app.api.system_health.get_redis", side_effect=ConnectionError("conn")
-    ):
+    with patch("app.api.system_health.get_redis", side_effect=ConnectionError("conn")):
         out = await _probe_redis()
     assert out.ok is False
     assert out.error and "ConnectionError" in out.error
@@ -275,9 +274,7 @@ async def test_probe_workers_aggregates_by_status() -> None:
     fake_session = AsyncMock()
     fake_result = MagicMock()
     # group_by 返回 [(status, count), ...]
-    fake_result.all = MagicMock(
-        return_value=[("active", 3), ("paused", 1), ("login_required", 1)]
-    )
+    fake_result.all = MagicMock(return_value=[("active", 3), ("paused", 1), ("login_required", 1)])
     fake_session.execute = AsyncMock(return_value=fake_result)
 
     fake_ctx = AsyncMock()
@@ -456,6 +453,7 @@ async def test_check_update_uses_internal_updater(monkeypatch) -> None:
             "remote_commit": "bbbb2222bbbb",
             "ahead": 2,
             "changed_files": ["backend/app/api/system_health.py"],
+            "commit_titles": ["修复更新检查"],
             "components": ["backend"],
             "requires_full_update": False,
             "requires_backup": False,
@@ -472,6 +470,7 @@ async def test_check_update_uses_internal_updater(monkeypatch) -> None:
     assert out.action_required == "backend"
     assert out.can_apply is True
     assert out.can_check is True
+    assert out.commit_titles == ["修复更新检查"]
 
 
 @pytest.mark.asyncio

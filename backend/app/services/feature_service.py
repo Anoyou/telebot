@@ -356,6 +356,7 @@ async def _migrate_optional_builtin_features(
                 key,
             )
             continue
+        official_source_url = official_source.source_url
 
         target = plugin_repo_service._plugin_dir(key)
         installed = await db.get(InstalledPlugin, key)
@@ -365,10 +366,9 @@ async def _migrate_optional_builtin_features(
                 if staging.exists():
                     shutil.rmtree(staging, ignore_errors=True)
                 target.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copytree(
-                    official_source.plugin_dir,
+                official_source_url = await plugin_repo_service.copy_official_plugin_source(
+                    key,
                     staging,
-                    ignore=shutil.ignore_patterns(".git", ".gitignore", "__pycache__"),
                 )
                 staging.rename(target)
             except Exception:  # noqa: BLE001
@@ -378,7 +378,7 @@ async def _migrate_optional_builtin_features(
         try:
             meta = plugin_repo_service._read_plugin_metadata(target, fallback_name=key)
             base_manifest = plugin_repo_service._manifest_json_from_remote_meta(meta)
-            base_manifest["source_url"] = official_source.source_url
+            base_manifest["source_url"] = official_source_url
             current_info = remote_plugin_service._remote_info_from_manifest(
                 installed.manifest_json if installed is not None else None
             )

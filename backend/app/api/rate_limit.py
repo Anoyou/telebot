@@ -126,7 +126,9 @@ async def create_template(payload: TemplateCreate, db: DBSession, user: CurrentU
 
 
 @router.patch("/api/rate-templates/{tpl_id}", response_model=TemplateOut)
-async def patch_template(tpl_id: int, payload: TemplateCreate, db: DBSession, user: CurrentUser) -> TemplateOut:
+async def patch_template(
+    tpl_id: int, payload: TemplateCreate, db: DBSession, user: CurrentUser
+) -> TemplateOut:
     tpl = await svc.update_template(db, tpl_id, name=payload.name, is_default=payload.is_default)
     if tpl is None:
         raise _bad("not_found", "模板不存在", 404)
@@ -315,7 +317,9 @@ async def get_usage(
         limit = getattr(eff, bucket_field, None)
         used = await buckets.usage(aid, action, win_key)
         pct = (used / limit * 100) if limit else 0.0
-        out.append(UsageBucket(action=action, used=float(used), limit=limit, pct=round(pct, 2), warn=pct >= 80))
+        out.append(
+            UsageBucket(action=action, used=float(used), limit=limit, pct=round(pct, 2), warn=pct >= 80)
+        )
 
     actives = await list_active(db, aid)
     overrides = [
@@ -582,9 +586,7 @@ async def post_kill_switch(payload: KillSwitchRequest, db: DBSession, user: Curr
         )
     results = await asyncio.gather(*operations, return_exceptions=True)
     failures = [
-        f"{type(result).__name__}: {result}"
-        for result in results
-        if isinstance(result, BaseException)
+        f"{type(result).__name__}: {result}" for result in results if isinstance(result, BaseException)
     ]
 
     # 全局广播给其它监听者 / 多进程场景；失败也必须反馈，不能伪装成全局已收敛。
@@ -619,6 +621,7 @@ async def get_system_settings(db: DBSession, _user: CurrentUser) -> dict[str, An
     elif prefix_val is None:
         # 回落到 .env 默认
         from ..settings import settings as app_settings
+
         prefix = app_settings.command_prefix
     else:
         prefix = str(prefix_val)
@@ -687,7 +690,9 @@ async def get_system_settings(db: DBSession, _user: CurrentUser) -> dict[str, An
             "remote": str(app_update_target.get("remote") or "origin"),
             "branch": str(app_update_target.get("branch") or "main"),
         },
-        "sudo_enabled": bool(sudo_val.get("enabled", False)) if isinstance(sudo_val, dict) else bool(sudo_val),
+        "sudo_enabled": bool(sudo_val.get("enabled", False))
+        if isinstance(sudo_val, dict)
+        else bool(sudo_val),
         "command_prefix_required": (
             bool(prefix_required_val.get("enabled", True))
             if isinstance(prefix_required_val, dict)
@@ -725,16 +730,12 @@ async def get_system_settings(db: DBSession, _user: CurrentUser) -> dict[str, An
                 in {"debug", "info", "warn", "error"}
                 else "info"
             ),
-            "trace_retention_days": max(
-                0, int(log_retention.get("trace_retention_days", 30) or 0)
-            ),
+            "trace_retention_days": max(0, int(log_retention.get("trace_retention_days", 30) or 0)),
             "trace_payload_snapshot_retention_days": max(
                 0, int(log_retention.get("trace_payload_snapshot_retention_days", 7) or 0)
             ),
             "native_raw_persist_enabled": bool(log_retention.get("native_raw_persist_enabled", False)),
-            "native_raw_retention_days": max(
-                0, int(log_retention.get("native_raw_retention_days", 1) or 0)
-            ),
+            "native_raw_retention_days": max(0, int(log_retention.get("native_raw_retention_days", 1) or 0)),
         },
         "ui_preferences": {
             "sidebar_order": [
@@ -744,7 +745,8 @@ async def get_system_settings(db: DBSession, _user: CurrentUser) -> dict[str, An
                 str(item) for item in ui_preferences.get("mobile_nav_order", []) if isinstance(item, str)
             ],
             "provider_order": [
-                int(item) for item in ui_preferences.get("provider_order", [])
+                int(item)
+                for item in ui_preferences.get("provider_order", [])
                 if isinstance(item, int) and not isinstance(item, bool) and item > 0
             ],
         },
@@ -800,7 +802,7 @@ class _LoginSecurityPatch(BaseModel):
 
 
 class _UIPreferencesPatch(BaseModel):
-    sidebar_order: list[str] | None = Field(default=None, max_length=9)
+    sidebar_order: list[str] | None = Field(default=None, max_length=10)
     mobile_nav_order: list[str] | None = Field(default=None, max_length=4)
     provider_order: list[int] | None = Field(default=None, max_length=2048)
 
@@ -824,9 +826,7 @@ class _SettingsPatch(BaseModel):
 
 
 @router.patch("/api/system/settings")
-async def patch_system_settings(
-    payload: _SettingsPatch, db: DBSession, user: CurrentUser
-) -> dict[str, Any]:
+async def patch_system_settings(payload: _SettingsPatch, db: DBSession, user: CurrentUser) -> dict[str, Any]:
     if payload.command_prefix is not None:
         prefix = payload.command_prefix.strip()
         if not prefix:
@@ -839,8 +839,16 @@ async def patch_system_settings(
         await _broadcast_reload()
     if payload.ui_preferences is not None:
         allowed_routes = {
-            "/plugins", "/ai", "/interaction", "/overview", "/ledger",
-            "/webhooks", "/dispatch-debug", "/logs", "/settings",
+            "/plugins",
+            "/ai",
+            "/interaction",
+            "/operations",
+            "/overview",
+            "/ledger",
+            "/webhooks",
+            "/dispatch-debug",
+            "/logs",
+            "/settings",
         }
         current_raw = await _get_setting(db, "ui_preferences", {})
         next_preferences = current_raw.copy() if isinstance(current_raw, dict) else {}
@@ -942,9 +950,7 @@ async def patch_system_settings(
         current = current if isinstance(current, dict) else {}
         enabled = bool(current.get("enabled", True)) if raw.enabled is None else bool(raw.enabled)
         interval_source = (
-            current.get("interval_minutes", 360)
-            if raw.interval_minutes is None
-            else raw.interval_minutes
+            current.get("interval_minutes", 360) if raw.interval_minutes is None else raw.interval_minutes
         )
         interval = max(30, min(10080, int(interval_source or 360)))
         await _set_setting(
@@ -1042,9 +1048,7 @@ async def patch_system_settings(
             "trace_enabled": bool(current.get("trace_enabled", True)),
             "event_bus_delivery_enabled": bool(current.get("event_bus_delivery_enabled", True)),
             "inline_updates_enabled": bool(current.get("inline_updates_enabled", True)),
-            "runtime_log_retention_days": max(
-                0, int(current.get("runtime_log_retention_days", 30) or 0)
-            ),
+            "runtime_log_retention_days": max(0, int(current.get("runtime_log_retention_days", 30) or 0)),
             "runtime_log_max_message_chars": max(
                 200, int(current.get("runtime_log_max_message_chars", 2000) or 2000)
             ),
@@ -1057,18 +1061,19 @@ async def patch_system_settings(
                 in {"debug", "info", "warn", "error"}
                 else "info"
             ),
-            "trace_retention_days": max(
-                0, int(current.get("trace_retention_days", 30) or 0)
-            ),
+            "trace_retention_days": max(0, int(current.get("trace_retention_days", 30) or 0)),
             "trace_payload_snapshot_retention_days": max(
                 0, int(current.get("trace_payload_snapshot_retention_days", 7) or 0)
             ),
             "native_raw_persist_enabled": bool(current.get("native_raw_persist_enabled", False)),
-            "native_raw_retention_days": max(
-                0, int(current.get("native_raw_retention_days", 1) or 0)
-            ),
+            "native_raw_retention_days": max(0, int(current.get("native_raw_retention_days", 1) or 0)),
         }
-        bool_keys = {"trace_enabled", "event_bus_delivery_enabled", "inline_updates_enabled", "native_raw_persist_enabled"}
+        bool_keys = {
+            "trace_enabled",
+            "event_bus_delivery_enabled",
+            "inline_updates_enabled",
+            "native_raw_persist_enabled",
+        }
         bounds = {
             "runtime_log_retention_days": (0, 3650),
             "runtime_log_max_message_chars": (200, 20000),

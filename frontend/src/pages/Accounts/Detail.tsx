@@ -527,7 +527,7 @@ export function AccountDetail() {
                                     size="sm"
                                     variant="outline"
                                     className="h-9 px-3"
-                                    onClick={() => nav(`/plugins/scheduler?aid=${aid}`)}
+                                    onClick={() => nav(`/operations/scheduler?aid=${aid}`)}
                                   >
                                     配置 →
                                   </Button>
@@ -772,7 +772,7 @@ function AccountCommandsTab({ aid }: { aid: number }) {
               这里决定当前账号能不能使用全局指令模板。开启后 worker 会热加载，直接在 Telegram 内用对应指令触发。
             </CardDescription>
           </div>
-          <Button size="sm" variant="outline" onClick={() => nav("/plugins/templates")}>
+          <Button size="sm" variant="outline" onClick={() => nav("/operations/templates")}>
             管理模板库
           </Button>
         </div>
@@ -849,7 +849,7 @@ function AccountCommandsTab({ aid }: { aid: number }) {
           <div className="rounded-md border border-dashed px-4 py-8 text-center text-sm text-muted-foreground">
             还没有任何自定义指令模板。先去模板库新建一条，再回到这里给当前账号启用。
             <div className="mt-3">
-              <Button size="sm" onClick={() => nav("/plugins/templates")}>
+              <Button size="sm" onClick={() => nav("/operations/templates")}>
                 新建指令模板
               </Button>
             </div>

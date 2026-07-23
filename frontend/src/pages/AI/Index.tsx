@@ -11,7 +11,6 @@ import {
   FileText,
   History,
   LayoutDashboard,
-  MessageCircle,
   Package,
   Pencil,
   Power,
@@ -41,7 +40,6 @@ import { Glossary } from "@/components/ai/Glossary";
 import { HowItWorks } from "@/components/ai/HowItWorks";
 import { RecommendedSetup } from "@/components/ai/RecommendedSetup";
 import { PageHeader, PageShell } from "@/components/layout/PageScaffold";
-import { useAssistantDock } from "@/components/assistant/AssistantDock";
 const LLMProviders = lazy(() =>
   import("@/pages/AI/LLMProviders").then((module) => ({ default: module.LLMProviders })),
 );
@@ -82,7 +80,6 @@ function commandModeLabel(template: CommandTemplateOut) {
 }
 
 export function AIIndex() {
-  const { setCollapsed: setAssistantCollapsed } = useAssistantDock();
   const [searchParams, setSearchParams] = useSearchParams();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
@@ -267,7 +264,6 @@ export function AIIndex() {
           helpOpen={helpOpen}
           onHelpOpenChange={setHelpMenuOpen}
           cmdPrefix={cmdPrefix}
-          onOpenAssistant={() => setAssistantCollapsed(false)}
         />
         <div className="rounded-md border bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
           已配置 {providerCount} 个模型提供商，其中 {readyCount} 个可调用。联网搜索需要 api_format=responses 的 OpenAI provider。
@@ -288,7 +284,6 @@ export function AIIndex() {
           helpOpen={helpOpen}
           onHelpOpenChange={setHelpMenuOpen}
           cmdPrefix={cmdPrefix}
-          onOpenAssistant={() => setAssistantCollapsed(false)}
         />
         <RecentUsageContent />
       </PageShell>
@@ -303,7 +298,6 @@ export function AIIndex() {
         helpOpen={helpOpen}
         onHelpOpenChange={setHelpMenuOpen}
         cmdPrefix={cmdPrefix}
-        onOpenAssistant={() => setAssistantCollapsed(false)}
       />
       <div className="flex justify-end">
         <Button
@@ -421,7 +415,7 @@ export function AIIndex() {
               desc={<>建议先建 <CommandBadge>{cmdPrefix}ai</CommandBadge>，绑定默认模型或开启 auto 路由。</>}
               done={aiTemplates.length > 0}
               action="去创建"
-              href="/plugins/templates?new=ai&returnTo=/ai"
+              href="/operations/templates?new=ai&returnTo=/ai"
             />
             <SetupStep
               no="3"
@@ -481,7 +475,7 @@ export function AIIndex() {
             <div className="rounded-md border border-dashed py-8 text-center">
               <p className="text-sm text-muted-foreground">还没有 AI 指令模板。</p>
               <Button asChild className="mt-3" size="sm">
-                <Link to="/plugins/templates?new=ai&returnTo=/ai">
+                <Link to="/operations/templates?new=ai&returnTo=/ai">
                   <PlusCircle className="mr-1 h-4 w-4" />
                   创建 AI 指令
                 </Link>
@@ -521,7 +515,7 @@ export function AIIndex() {
                         </TableCell>
                         <TableCell>
                           <Button asChild variant="outline" size="sm">
-                            <Link to={`/plugins/templates?edit=${template.id}&returnTo=${encodeURIComponent("/ai")}`}>
+                            <Link to={`/operations/templates?edit=${template.id}&returnTo=${encodeURIComponent("/ai")}`}>
                               编辑
                             </Link>
                           </Button>
@@ -572,13 +566,11 @@ function Subnav({
   helpOpen,
   onHelpOpenChange,
   cmdPrefix,
-  onOpenAssistant,
 }: {
   activeTab: AITab;
   helpOpen: boolean;
   onHelpOpenChange: (open: boolean) => void;
   cmdPrefix: string;
-  onOpenAssistant: () => void;
 }) {
   const navigate = useNavigate();
   return (
@@ -606,16 +598,11 @@ function Subnav({
         </TabsList>
       </Tabs>
       <div className="-mx-1 px-1 pb-1">
-        <div className="grid grid-cols-3 gap-1.5 sm:inline-flex sm:flex-wrap sm:gap-2">
+        <div className="grid grid-cols-2 gap-1.5 sm:inline-flex sm:flex-wrap sm:gap-2">
           <AIActionCard
             icon={FileText}
             title="查看指令"
-            to="/plugins/templates"
-          />
-          <AIActionCard
-            icon={MessageCircle}
-            title="配置系统助手"
-            onClick={onOpenAssistant}
+            to="/operations/templates"
           />
           <AIHelpMenu
             open={helpOpen}
@@ -741,7 +728,7 @@ function AICommandCard({
         </div>
         <Button asChild variant="ghost" size="icon" className="h-10 w-10 shrink-0">
           <Link
-            to={`/plugins/templates?edit=${template.id}&returnTo=${encodeURIComponent("/ai")}`}
+            to={`/operations/templates?edit=${template.id}&returnTo=${encodeURIComponent("/ai")}`}
             aria-label={`编辑 ${cmdPrefix}${template.name}`}
             title="编辑指令"
           >

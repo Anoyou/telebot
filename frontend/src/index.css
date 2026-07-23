@@ -688,6 +688,280 @@
     .assistant-nav-orb-active::before { animation: none; opacity: 0.75; }
   }
 
+  /* TelePilot 系统助手机械信使。桌面态沿视口边缘探头，拖动时完整出现；
+     只使用 transform / opacity，避免拖动与吸附触发布局重排。 */
+  .assistant-pet {
+    --assistant-pet-eye-x: 0px;
+    --assistant-pet-eye-y: 0px;
+    --assistant-pet-tilt: 0deg;
+    border: 0;
+    border-radius: 14px;
+    background: transparent;
+    color: hsl(var(--foreground));
+    filter: drop-shadow(0 7px 10px hsl(0 0% 0% / 0.18));
+    cursor: grab;
+    transition-property: transform, filter;
+    transition-duration: 560ms, 180ms;
+    transition-timing-function: cubic-bezier(0.16, 1, 0.3, 1), ease-out;
+  }
+
+  .assistant-pet:focus-visible {
+    outline: 0;
+    filter: drop-shadow(0 0 0.35rem hsl(var(--primary) / 0.52)) drop-shadow(0 8px 14px hsl(0 0% 0% / 0.2));
+  }
+
+  .assistant-pet-dragging {
+    cursor: grabbing;
+    transition: none;
+    filter: drop-shadow(0 12px 16px hsl(0 0% 0% / 0.24));
+  }
+
+  .assistant-pet-robot-frame {
+    position: relative;
+    display: block;
+    width: 68px;
+    height: 76px;
+  }
+
+  .assistant-pet-robot-frame-compact {
+    width: 31px;
+    height: 35px;
+  }
+
+  .assistant-pet-robot-frame-compact .assistant-pet-robot {
+    transform: scale(0.46);
+    transform-origin: left top;
+  }
+
+  .assistant-pet-robot {
+    position: absolute;
+    inset: 0;
+    display: block;
+    width: 68px;
+    height: 76px;
+    transform: rotate(var(--assistant-pet-tilt));
+    transform-origin: 50% 62%;
+    transition-property: transform, opacity;
+    transition-duration: 320ms;
+    transition-timing-function: cubic-bezier(0.16, 1, 0.3, 1);
+  }
+
+  .assistant-pet-antenna {
+    position: absolute;
+    left: 31px;
+    top: 0;
+    width: 6px;
+    height: 15px;
+    border-radius: 999px;
+    background: hsl(var(--foreground) / 0.84);
+    transform-origin: 50% 100%;
+    animation: assistant-pet-antenna 3.8s ease-in-out infinite;
+  }
+
+  .assistant-pet-antenna > span {
+    position: absolute;
+    left: -2px;
+    top: -1px;
+    width: 10px;
+    height: 10px;
+    border-radius: 999px;
+    background: hsl(var(--primary));
+    box-shadow: 0 0 0 3px hsl(var(--primary) / 0.14);
+  }
+
+  .assistant-pet-head {
+    position: absolute;
+    left: 7px;
+    top: 11px;
+    width: 54px;
+    height: 39px;
+    border-radius: 17px 17px 14px 14px;
+    background: hsl(var(--card));
+    box-shadow:
+      inset 0 0 0 1px hsl(var(--foreground) / 0.16),
+      inset 0 -5px 8px hsl(var(--foreground) / 0.055),
+      var(--shadow-sm);
+    transition: transform 320ms cubic-bezier(0.16, 1, 0.3, 1);
+  }
+
+  .assistant-pet-ear {
+    position: absolute;
+    top: 12px;
+    width: 6px;
+    height: 15px;
+    border-radius: 4px;
+    background: hsl(var(--primary));
+    opacity: 0.82;
+  }
+
+  .assistant-pet-ear-left { left: -4px; }
+  .assistant-pet-ear-right { right: -4px; }
+
+  .assistant-pet-face {
+    position: absolute;
+    inset: 7px 8px 8px;
+    overflow: hidden;
+    border-radius: 11px;
+    background: hsl(var(--foreground));
+    box-shadow: inset 0 1px 3px hsl(0 0% 0% / 0.5);
+  }
+
+  .assistant-pet-eye {
+    position: absolute;
+    top: 9px;
+    width: 7px;
+    height: 8px;
+    border-radius: 999px;
+    background: hsl(var(--primary-foreground));
+    box-shadow: 0 0 5px hsl(var(--primary) / 0.5);
+    transform: translate(var(--assistant-pet-eye-x), var(--assistant-pet-eye-y));
+    transition: transform 90ms linear;
+    animation: assistant-pet-blink 5.6s linear infinite;
+  }
+
+  .assistant-pet-eye-left { left: 8px; }
+  .assistant-pet-eye-right { right: 8px; }
+
+  .assistant-pet-mouth {
+    position: absolute;
+    left: 50%;
+    bottom: 6px;
+    width: 11px;
+    height: 5px;
+    border-bottom: 2px solid hsl(var(--primary));
+    border-radius: 0 0 999px 999px;
+    transform: translateX(-50%);
+  }
+
+  .assistant-pet-body {
+    position: absolute;
+    left: 19px;
+    top: 47px;
+    width: 30px;
+    height: 23px;
+    border-radius: 9px 9px 12px 12px;
+    background: hsl(var(--card));
+    box-shadow: inset 0 0 0 1px hsl(var(--foreground) / 0.15), var(--shadow-sm);
+    transition: opacity 180ms ease-out, transform 260ms cubic-bezier(0.16, 1, 0.3, 1);
+  }
+
+  .assistant-pet-core {
+    position: absolute;
+    left: 50%;
+    top: 5px;
+    display: grid;
+    width: 15px;
+    height: 15px;
+    place-items: center;
+    border-radius: 6px;
+    background: hsl(var(--primary));
+    color: hsl(var(--primary-foreground));
+    transform: translateX(-50%);
+    box-shadow: 0 0 0 3px hsl(var(--primary) / 0.12);
+  }
+
+  .assistant-pet-core svg { width: 8px; height: 8px; stroke-width: 2.2; }
+
+  .assistant-pet-core-streaming {
+    animation: assistant-pet-core 1.35s ease-in-out infinite;
+  }
+
+  .assistant-pet-arm,
+  .assistant-pet-foot {
+    position: absolute;
+    display: block;
+    background: hsl(var(--foreground) / 0.72);
+    transition: opacity 160ms ease-out, transform 260ms cubic-bezier(0.16, 1, 0.3, 1);
+  }
+
+  .assistant-pet-arm {
+    top: 50px;
+    width: 6px;
+    height: 18px;
+    border-radius: 999px;
+  }
+
+  .assistant-pet-arm-left { left: 13px; transform: rotate(12deg); }
+  .assistant-pet-arm-right { right: 13px; transform: rotate(-12deg); }
+  .assistant-pet-foot { top: 68px; width: 12px; height: 6px; border-radius: 999px; }
+  .assistant-pet-foot-left { left: 19px; }
+  .assistant-pet-foot-right { right: 19px; }
+
+  .assistant-pet[data-docked="left"]:not(.assistant-pet-awake) .assistant-pet-head {
+    transform: translateX(6px) rotate(2deg);
+  }
+
+  .assistant-pet[data-docked="right"]:not(.assistant-pet-awake) .assistant-pet-head {
+    transform: translateX(-6px) rotate(-2deg);
+  }
+
+  .assistant-pet[data-docked]:not([data-docked="false"]):not(.assistant-pet-awake) :where(.assistant-pet-body, .assistant-pet-arm, .assistant-pet-foot) {
+    opacity: 0;
+    transform: translateY(-7px) scale(0.76);
+  }
+
+  .assistant-pet[data-docked]:not([data-docked="false"]):not(.assistant-pet-awake) .assistant-pet-antenna {
+    opacity: 0.82;
+  }
+
+  @media (hover: hover) and (pointer: fine) {
+    .assistant-pet:hover .assistant-pet-robot {
+      transform: rotate(var(--assistant-pet-tilt)) translateY(-2px);
+    }
+  }
+
+  .assistant-pet-live-dot {
+    position: absolute;
+    right: 4px;
+    top: 7px;
+    width: 10px;
+    height: 10px;
+    border: 2px solid hsl(var(--background));
+    border-radius: 999px;
+    background: hsl(var(--success));
+    animation: assistant-pet-live 1.2s ease-in-out infinite;
+  }
+
+  @keyframes assistant-pet-antenna {
+    0%, 82%, 100% { transform: rotate(0deg); }
+    88% { transform: rotate(-7deg); }
+    94% { transform: rotate(6deg); }
+  }
+
+  @keyframes assistant-pet-blink {
+    0%, 46%, 49%, 100% { scale: 1 1; }
+    47%, 48% { scale: 1 0.12; }
+  }
+
+  @keyframes assistant-pet-core {
+    0%, 100% { opacity: 0.72; transform: translateX(-50%) scale(0.92); }
+    50% { opacity: 1; transform: translateX(-50%) scale(1.08); }
+  }
+
+  @keyframes assistant-pet-live {
+    0%, 100% { opacity: 0.55; transform: scale(0.88); }
+    50% { opacity: 1; transform: scale(1); }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .assistant-pet,
+    .assistant-pet-robot,
+    .assistant-pet-head,
+    .assistant-pet-eye,
+    .assistant-pet-body,
+    .assistant-pet-arm,
+    .assistant-pet-foot {
+      transition: none;
+    }
+
+    .assistant-pet-antenna,
+    .assistant-pet-eye,
+    .assistant-pet-core-streaming,
+    .assistant-pet-live-dot {
+      animation: none;
+    }
+  }
+
   .prose-pwa-safe {
     max-width: 100%;
   }

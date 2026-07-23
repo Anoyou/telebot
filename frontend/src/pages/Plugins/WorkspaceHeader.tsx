@@ -9,7 +9,7 @@ import { isPlatformFeature } from "@/lib/plugin-modes";
 
 import { PluginWorkspaceNav } from "./WorkspaceNav";
 
-type PluginWorkspaceTab = "home" | "templates" | "scheduler" | "whitelist" | "manage";
+type PluginWorkspaceTab = "home" | "manage";
 
 type PluginWorkspaceHeaderProps = {
   activeTab: PluginWorkspaceTab;
@@ -49,7 +49,7 @@ export function PluginWorkspaceHeader({
           </>
         )}
       />
-      <PluginWorkspaceNav activeTab={activeTab} selectedAid={selectedAid} guideActive={guideActive} />
+      <PluginWorkspaceNav activeTab={activeTab} guideActive={guideActive} />
     </>
   );
 }

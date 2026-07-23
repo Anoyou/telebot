@@ -1145,7 +1145,7 @@ export function LLMLivenessPage() {
             <div
               key={model.id}
               className={cn(
-                "flex min-h-10 items-center gap-2 rounded px-2 py-1.5 text-xs",
+                "flex min-h-10 items-start gap-2 rounded px-2 py-1.5 text-xs",
                 modelsLocked || busy ? "cursor-not-allowed opacity-70" : "cursor-pointer hover:bg-muted/60",
               )}
             >
@@ -1154,20 +1154,24 @@ export function LLMLivenessPage() {
                 disabled={modelsLocked || busy}
                 aria-label={`${model.id} 参与多模型测活`}
                 onCheckedChange={() => toggleModel(model.id)}
-                className="scale-90"
+                className="mt-0.5 shrink-0 scale-90"
               />
-              <span className="min-w-0 flex-1 break-all font-mono">{model.id}</span>
-              {model.id === selectedProvider.default_model ? <MetaBadge tone="success">默认</MetaBadge> : null}
-              {model.supports_tools === true ? <MetaBadge tone="outline">Tools</MetaBadge> : null}
-              {model.supports_images === true ? <MetaBadge tone="outline">Vision</MetaBadge> : null}
-              {model.enabled ? (
-                <span className="shrink-0 rounded bg-emerald-500/10 px-1.5 py-0.5 text-[9px] font-medium text-emerald-700 dark:text-emerald-300">
-                  已被启用
-                </span>
-              ) : null}
-              {!modelsLocked && !busy && selectedModels.length === 1 && selectedModels[0] === model.id ? (
-                <MetaBadge tone="info">快速</MetaBadge>
-              ) : null}
+              <div className="min-w-0 flex-1">
+                <span className="block truncate font-mono" title={model.id}>{model.id}</span>
+                <div className="mt-1 flex min-w-0 flex-wrap items-center gap-1">
+                  {model.id === selectedProvider.default_model ? <MetaBadge tone="success">默认</MetaBadge> : null}
+                  {model.supports_tools === true ? <MetaBadge tone="outline">Tools</MetaBadge> : null}
+                  {model.supports_images === true ? <MetaBadge tone="outline">Vision</MetaBadge> : null}
+                  {model.enabled ? (
+                    <span className="shrink-0 rounded bg-emerald-500/10 px-1.5 py-0.5 text-[9px] font-medium text-emerald-700 dark:text-emerald-300">
+                      已被启用
+                    </span>
+                  ) : null}
+                  {!modelsLocked && !busy && selectedModels.length === 1 && selectedModels[0] === model.id ? (
+                    <MetaBadge tone="info">快速</MetaBadge>
+                  ) : null}
+                </div>
+              </div>
             </div>
           )) : (
             <EmptyState className="min-h-0 rounded-none border-0 px-3" size="sm" title="没有匹配的模型" />

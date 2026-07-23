@@ -2,9 +2,9 @@
 //  - <Sidebar> 桌面端（≥md）常驻显示
 //  - <MobileSidebar> 移动端通过抽屉模式呈现（Radix Dialog 实现，左侧滑入）
 // 两者共享 NavList，移动端点击导航后自动关闭抽屉。
-import { lazy, Suspense, useState } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
 import { NavLink } from "react-router-dom";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
 import {
   Boxes,
@@ -12,17 +12,18 @@ import {
   Bug,
   Cog,
   Github,
+  GripVertical,
   Home,
   History,
-  BotMessageSquare,
+  ListTodo,
   ScrollText,
   Sparkles,
   WalletCards,
   Webhook,
   X,
 } from "lucide-react";
+import { toast } from "sonner";
 import { BrandLogo } from "@/components/BrandLogo";
-import { useAssistantDock } from "@/components/assistant/AssistantDock";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -31,7 +32,8 @@ import {
 // DropdownMenuContent kept for Suspense fallback shell
 import { cn } from "@/lib/utils";
 import { APP_VERSION_LABEL } from "@/lib/version";
-import { getPlatformCapabilities, getSystemSettings } from "@/api/system";
+import { getPlatformCapabilities, getSystemSettings, patchSystemSettings } from "@/api/system";
+import { getErrMsg } from "@/lib/api";
 import {
   capabilityEnabledMap,
   filterNavByCapabilities,
@@ -51,6 +53,7 @@ export const NAV: NavItem[] = [
   { to: "/plugins", label: "插件", icon: Boxes },
   { to: "/ai", label: "AI", icon: Sparkles },
   { to: "/interaction", label: "交互", icon: Bot },
+  { to: "/operations", label: "指令与任务", icon: ListTodo },
   { to: "/overview", label: "概览", icon: Home },
   { to: "/ledger", label: "资金台账", icon: WalletCards },
   { to: "/webhooks", label: "入站 Webhook", icon: Webhook },
@@ -111,10 +114,15 @@ void navForAIState;
 function NavList({
   collapsed = false,
   onNavigate,
+  reorderable = false,
 }: {
   collapsed?: boolean;
   onNavigate?: () => void;
+  reorderable?: boolean;
 }) {
+  const queryClient = useQueryClient();
+  const [draggedPath, setDraggedPath] = useState<string | null>(null);
+  const [draftOrder, setDraftOrder] = useState<string[] | null>(null);
   const settingsQ = useQuery({
     queryKey: ["system", "settings"],
     queryFn: getSystemSettings,
@@ -126,32 +134,88 @@ function NavList({
     staleTime: 15_000,
   });
   const enabled = capabilityEnabledMap(capsQ.data, settingsQ.data?.ai_enabled ?? true);
+  const savedOrder = settingsQ.data?.ui_preferences?.sidebar_order;
+  const preferredOrder = draftOrder ?? savedOrder;
+  const fullNavItems = orderNavItems(NAV, preferredOrder);
   const navItems = orderNavItems(
     navForCapabilities(enabled),
-    settingsQ.data?.ui_preferences?.sidebar_order,
+    preferredOrder,
   );
+  const saveOrder = useMutation({
+    scope: { id: "sidebar-order" },
+    mutationFn: (next: string[]) => patchSystemSettings({
+      ui_preferences: { sidebar_order: next },
+    }),
+    onSuccess: (_settings, savedOrder) => {
+      setDraftOrder((current) => current?.join("|") === savedOrder.join("|") ? null : current);
+      void queryClient.invalidateQueries({ queryKey: ["system", "settings"] });
+    },
+    onError: (error, failedOrder) => {
+      setDraftOrder((current) => current?.join("|") === failedOrder.join("|") ? null : current);
+      toast.error(`侧边栏顺序保存失败：${getErrMsg(error)}`);
+    },
+  });
+
+  useEffect(() => {
+    setDraftOrder(null);
+  }, [savedOrder?.join("|")]);
+
+  const placeBefore = (path: string, targetPath: string) => {
+    if (path === targetPath) return;
+    const current = fullNavItems.map((item) => item.to);
+    const next = current.filter((item) => item !== path);
+    const targetIndex = next.indexOf(targetPath);
+    next.splice(targetIndex < 0 ? next.length : targetIndex, 0, path);
+    setDraftOrder(next);
+    saveOrder.mutate(next);
+  };
 
   return (
     <nav className="flex-1 space-y-1.5 overflow-y-auto px-4 py-3 text-sm">
       {navItems.map((item) => (
-        <NavLink
+        <div
           key={item.to}
-          to={item.to}
-          end={item.end}
-          onClick={onNavigate}
-          aria-label={collapsed ? item.label : undefined}
-          title={collapsed ? item.label : undefined}
-          className={({ isActive }) =>
-            cn(
-              "liquid-sidebar-link flex h-11 items-center gap-3 rounded-lg px-3 text-muted-foreground transition-all hover:text-accent-foreground",
-              collapsed && "justify-center px-0",
-              isActive && "liquid-sidebar-link-active text-accent-foreground",
-            )
-          }
+          className={cn("relative", draggedPath === item.to && "opacity-45")}
+          draggable={reorderable && !collapsed}
+          data-sidebar-sort-path={item.to}
+          onDragStart={(event) => {
+            setDraggedPath(item.to);
+            event.dataTransfer.effectAllowed = "move";
+            event.dataTransfer.setData("text/plain", item.to);
+          }}
+          onDragEnd={() => setDraggedPath(null)}
+          onDragOver={(event) => {
+            if (reorderable && draggedPath) event.preventDefault();
+          }}
+          onDrop={(event) => {
+            event.preventDefault();
+            const source = draggedPath || event.dataTransfer.getData("text/plain");
+            if (source) placeBefore(source, item.to);
+            setDraggedPath(null);
+          }}
         >
-          <item.icon className="h-5 w-5 shrink-0" />
-          <span className={cn("truncate", collapsed && "sr-only")}>{item.label}</span>
-        </NavLink>
+          {reorderable && !collapsed ? (
+            <GripVertical className="pointer-events-none absolute left-1.5 top-1/2 z-10 h-4 w-4 -translate-y-1/2 text-muted-foreground/55" />
+          ) : null}
+          <NavLink
+            to={item.to}
+            end={item.end}
+            onClick={onNavigate}
+            aria-label={collapsed ? item.label : undefined}
+            title={collapsed ? item.label : undefined}
+            className={({ isActive }) =>
+              cn(
+                "liquid-sidebar-link flex h-11 items-center gap-3 rounded-lg px-3 text-muted-foreground transition-all hover:text-accent-foreground",
+                reorderable && !collapsed && "pl-7",
+                collapsed && "justify-center px-0",
+                isActive && "liquid-sidebar-link-active text-accent-foreground",
+              )
+            }
+          >
+            <item.icon className="h-5 w-5 shrink-0" />
+            <span className={cn("truncate", collapsed && "sr-only")}>{item.label}</span>
+          </NavLink>
+        </div>
       ))}
     </nav>
   );
@@ -167,7 +231,6 @@ function SidebarBody({
   onNavigate?: () => void;
 }) {
   const [changelogOpen, setChangelogOpen] = useState(false);
-  const { collapsed: assistantCollapsed, setCollapsed: setAssistantCollapsed, streaming: assistantStreaming } = useAssistantDock();
 
   return (
     <>
@@ -191,31 +254,7 @@ function SidebarBody({
           </div>
         </div>
       </div>
-      <NavList collapsed={collapsed} onNavigate={onNavigate} />
-      <div className={cn("shrink-0 px-4 pb-2", collapsed && "px-3", mobile && "hidden sm:block")}>
-          <button
-            type="button"
-            data-assistant-sidebar-button
-            onClick={() => {
-              setAssistantCollapsed(!assistantCollapsed);
-              onNavigate?.();
-            }}
-            aria-pressed={!assistantCollapsed}
-            className={cn(
-              "liquid-sidebar-link flex h-11 w-full items-center gap-3 rounded-lg border border-primary/20 bg-primary/5 px-3 text-left font-semibold text-primary active:scale-[0.98] motion-reduce:transform-none",
-              collapsed && "justify-center px-0",
-              !assistantCollapsed && "border-primary/40 bg-primary/10",
-            )}
-            aria-label={assistantCollapsed ? "打开系统助手" : "关闭系统助手"}
-            title={assistantCollapsed ? "打开系统助手" : "关闭系统助手"}
-          >
-            <span className="relative shrink-0">
-              <BotMessageSquare className="h-5 w-5" />
-              {assistantStreaming ? <span className="absolute -right-1 -top-1 h-2.5 w-2.5 animate-pulse rounded-full border-2 border-background bg-success motion-reduce:animate-none" /> : null}
-            </span>
-            <span className={cn("truncate", collapsed && "sr-only")}>系统助手</span>
-          </button>
-        </div>
+      <NavList collapsed={collapsed} onNavigate={onNavigate} reorderable={!mobile} />
       <div
         className={cn(
           "liquid-sidebar-footer shrink-0 space-y-2 px-4 py-5 text-sm text-muted-foreground",

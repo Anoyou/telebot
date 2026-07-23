@@ -69,7 +69,7 @@ type Step =
   | { kind: "checking" }
   | { kind: "up_to_date"; commit: string }
   | { kind: "cannot_check"; plan: UpdatePlanMeta }
-  | { kind: "has_update"; current: string; remote: string; currentVersion: string; targetVersion: string; ahead: number; changedFiles: string[]; plan: UpdatePlanMeta }
+  | { kind: "has_update"; current: string; remote: string; currentVersion: string; targetVersion: string; ahead: number; changedFiles: string[]; commitTitles: string[]; plan: UpdatePlanMeta }
   | { kind: "pulling" }
   | { kind: "job_running"; jobId: string; status: string; logs: string[]; plan: UpdatePlanMeta; progress: number; phase: string; detail: string | null }
   | { kind: "pulled"; newCommit: string | null; summary: string | null; plan: UpdatePlanMeta }
@@ -136,6 +136,7 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
   const [targetSaving, setTargetSaving] = useState(false);
   const [errorCopied, setErrorCopied] = useState(false);
   const [planExpanded, setPlanExpanded] = useState(false);
+  const [releaseNotesExpanded, setReleaseNotesExpanded] = useState(false);
   const timerRef = useRef<ReturnType<typeof setInterval>>();
   const jobPollTokenRef = useRef(0);
   const checkTokenRef = useRef(0);
@@ -331,6 +332,7 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
           targetVersion: res.target_version || "未知",
           ahead: res.ahead,
           changedFiles: res.changed_files ?? [],
+          commitTitles: res.commit_titles ?? [],
           plan: parsePlanMeta(res),
         });
       }
@@ -385,6 +387,7 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
       dialogGenerationRef.current += 1;
       setStep(null);
       setPlanExpanded(false);
+      setReleaseNotesExpanded(false);
       setErrorCopied(false);
       jobPollTokenRef.current += 1;
       checkTokenRef.current += 1;
@@ -457,6 +460,7 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
     }
     setTargetSaving(true);
     setPlanExpanded(false);
+    setReleaseNotesExpanded(false);
     try {
       const settings = await patchSystemSettings({ app_update_target: { remote, branch } });
       const saved = settings.app_update_target ?? { remote, branch };
@@ -660,7 +664,7 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
               >
                 <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-3 px-3 py-2 [&::-webkit-details-marker]:hidden">
                   <span className="min-w-0">
-                    <span className="block text-xs font-semibold text-foreground">更新详情</span>
+                    <span className="block text-xs font-semibold text-foreground">部署详情</span>
                     <span className="mt-0.5 block text-[11px] text-muted-foreground">
                       v{step.currentVersion} → v{step.targetVersion} · {step.ahead > 0 ? `${step.ahead} 个新 commit` : "部署待完成"}
                     </span>
@@ -731,6 +735,39 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
                   </div>
                 </div>
               )}
+              <details
+                className="group rounded-md border border-primary/20 bg-primary/[0.035]"
+                open={releaseNotesExpanded}
+                onToggle={(event) => setReleaseNotesExpanded(event.currentTarget.open)}
+              >
+                <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-3 px-3 py-2 [&::-webkit-details-marker]:hidden">
+                  <span className="min-w-0">
+                    <span className="block text-xs font-semibold text-foreground">查看更新内容</span>
+                    <span className="mt-0.5 block text-[11px] text-muted-foreground">
+                      v{step.currentVersion} → v{step.targetVersion}
+                    </span>
+                  </span>
+                  <ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground transition-transform group-open:rotate-180" />
+                </summary>
+                <div className="border-t border-primary/15 px-3 py-3">
+                  {step.commitTitles.length > 0 ? (
+                    <ol className="space-y-2">
+                      {step.commitTitles.map((title, index) => (
+                        <li key={`${index}-${title}`} className="grid grid-cols-[1.25rem_minmax(0,1fr)] gap-1.5 text-xs leading-relaxed">
+                          <span className="font-mono tabular-nums text-muted-foreground">{index + 1}.</span>
+                          <span className="text-foreground">{title}</span>
+                        </li>
+                      ))}
+                    </ol>
+                  ) : step.changedFiles.length > 0 ? (
+                    <div className="space-y-1 font-mono text-xs text-muted-foreground">
+                      {step.changedFiles.slice(0, 20).map((file) => <p key={file} className="break-all">{file}</p>)}
+                    </div>
+                  ) : (
+                    <p className="text-xs text-muted-foreground">远程版本未提供更新摘要，可展开部署详情查看版本信息。</p>
+                  )}
+                </div>
+              </details>
             </div>
           )}
 
