@@ -25,6 +25,7 @@ from ..schemas.config_bundle import (
     ConfigBundleSourceAccount,
 )
 from .redactor import redact_value
+from .scheduler_target import SchedulerTargetError, normalize_scheduler_action_target
 
 MAX_BUNDLE_BYTES = 1_048_576
 
@@ -529,6 +530,14 @@ async def apply_bundle_confirm(
                 conflicts += 1
                 warnings.append(f"missing rule payload: {key}")
                 continue
+            rule_config = dict(src_rule.config or {})
+            if src_rule.feature_key == "scheduler":
+                try:
+                    rule_config = normalize_scheduler_action_target(rule_config)
+                except SchedulerTargetError as exc:
+                    conflicts += 1
+                    warnings.append(f"invalid scheduler target in {key}: {exc}")
+                    continue
             await db.execute(
                 delete(Rule).where(
                     Rule.account_id == account_id,
@@ -543,7 +552,7 @@ async def apply_bundle_confirm(
                     name=src_rule.name,
                     enabled=src_rule.enabled,
                     priority=src_rule.priority,
-                    config=dict(src_rule.config or {}),
+                    config=rule_config,
                 )
             )
             imported += 1

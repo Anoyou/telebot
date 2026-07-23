@@ -18,6 +18,10 @@ from ..db.models.rule import Rule
 from ..db.models.system import SystemSetting
 from ..redis_client import get_redis
 from ..worker.ipc import CMD_EXECUTE_RULE, IPCMessage, cmd_channel, make_cmd
+from .scheduler_target import (
+    SchedulerTargetError,
+    normalize_scheduler_action_target,
+)
 
 
 class RuleServiceError(ValueError):
@@ -99,7 +103,10 @@ async def _system_tz(db: AsyncSession) -> ZoneInfo:
 async def normalize_scheduler_config(db: AsyncSession, config: dict[str, Any]) -> dict[str, Any]:
     """与 api/rules 保存语义对齐的 next_fire 刷新。"""
 
-    cfg = dict(config or {})
+    try:
+        cfg = normalize_scheduler_action_target(config)
+    except SchedulerTargetError as exc:
+        raise RuleServiceError("INVALID_SCHEDULER_TARGET", str(exc)) from exc
     kind = str(cfg.get("kind") or "cron").lower()
     now = datetime.now(UTC)
     tz = await _system_tz(db)

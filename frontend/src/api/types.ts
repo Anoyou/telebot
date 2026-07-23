@@ -1859,7 +1859,9 @@ export type SchedulerActionType = "send_message" | "run_command" | "call_llm";
 
 export interface SchedulerActionConfig {
   type: SchedulerActionType;
-  target_chat_id?: number;
+  target_chat_id?: number | string;
+  target_chat_id_resolved?: number;
+  target_chat_resolved_ref?: string;
   text?: string;
   command?: string;
   provider_id?: number;

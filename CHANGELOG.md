@@ -20,10 +20,27 @@
 
 ## [Unreleased]
 
+## [0.73.0-beta.1] — 2026-07-24 · minor（次版本预发布） · Agent 模型标识与产品信息完善
+
 ### Fixed
 
 - 修复上游返回模型别名被错误写回 System Agent 下一轮请求的问题，避免 `grok-4.5-build-free` 等不可请求别名触发 404 和重复重试；运行信息区分请求模型与上游回报标识。
 - 新增产品更新日志查询工具，Agent 可以回答版本变更和桌面端、移动端入口；移动端侧栏改为显示明确的“更新日志”按钮。
+
+## [0.72.0] — 2026-07-24 · minor（次版本） · Scheduler Telegram 用户名目标
+
+### Added
+
+- Scheduler 规则目标支持 Telegram 数字 ID 与标准 `@username`，保存、复制和配置导入统一校验。
+
+### Fixed
+
+- Scheduler 首次解析用户名后固定稳定 peer ID，解析失败按 Telegram 异常分类并退避，避免被拒命令外呼及 `call_llm` 重复产生模型费用。
+- 修复前端 CI 的 Rollup 类型来源冲突，并让浏览器测试的后端版本 fixture 跟随当前应用版本。
+
+### Tests
+
+- 新增 Scheduler 目标规范化、用户名解析固定、异常退避、前端输入和配置导入回归测试；后端全量 `2235 passed`，前端单测、类型检查、axe 和视觉测试在本地通过。
 
 ## [0.72.0-beta.4] — 2026-07-23 · minor（次版本预发布） · Agent 对话工作台、长期记忆与运行时健康
 
@@ -145,7 +162,6 @@
 - 前端视觉与无障碍脚手架覆盖 Dashboard、Accounts、BotTab、Ledger、Logs、Extensions、AI 与 LLMProviders 三档视口。
 - CI 使用固定 macOS runner 与 Playwright 锁定 Chromium 执行视觉和 axe 门禁，并固定中文区域与上海时区以减少截图环境漂移。
 - 48 项视觉比较、24 项 axe 扫描、11 项前端单测、类型检查与生产构建全部通过。
-
 ## [0.71.3] — 2026-07-22 · patch（补丁版本） · UserBot 姓名解析模式
 
 ### Added
