@@ -19,6 +19,29 @@ class SystemAgentConfigOut(BaseModel):
     session_token_limit: int = 16_384
 
 
+class SystemAgentUserMemoryOut(BaseModel):
+    id: int
+    scope_type: str
+    scope_id: int
+    content: str
+    source: str
+    enabled: bool
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class SystemAgentUserMemoryCreate(BaseModel):
+    content: str = Field(min_length=1, max_length=200)
+    enabled: bool = True
+
+
+class SystemAgentUserMemoryPatch(BaseModel):
+    content: str | None = Field(default=None, min_length=1, max_length=200)
+    enabled: bool | None = None
+
+
 class SystemAgentConfigPatch(BaseModel):
     enabled: bool | None = None
     provider_id: int | None = None

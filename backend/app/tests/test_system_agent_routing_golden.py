@@ -45,7 +45,7 @@ def test_golden_routes_match_expectations() -> None:
         domains = {
             "ledger", "logs", "accounts", "interaction", "system_ops", "providers",
             "plugins", "plugin_repos", "scheduler", "features", "commands", "routing",
-            "rules", "system",
+            "rules", "system", "memory",
         }
         if expect in domains:
             if got != expect:

@@ -20,6 +20,9 @@ from ..db.models.system_agent import (
 )
 from ..deps import CurrentUser, DBSession
 from ..schemas.system_agent import (
+    SystemAgentUserMemoryCreate,
+    SystemAgentUserMemoryOut,
+    SystemAgentUserMemoryPatch,
     SystemAgentActionConfirmOut,
     SystemAgentActionOut,
     SystemAgentCapabilitiesOut,
@@ -143,6 +146,87 @@ async def get_capabilities(db: DBSession, _user: CurrentUser) -> SystemAgentCapa
     svc = get_system_agent_service()
     data = await svc.get_capabilities(db, channel=CHANNEL_WEB, role="admin")
     return SystemAgentCapabilitiesOut(**data)
+
+
+# ── 长期记忆 ─────────────────────────────────────────────────────
+@router.get("/memory", response_model=list[SystemAgentUserMemoryOut])
+async def list_user_memory(db: DBSession, user: CurrentUser) -> list[SystemAgentUserMemoryOut]:
+    from ..services.system_agent.user_memory import list_memories, memory_to_dict
+
+    rows = await list_memories(db, scope_type="web_user", scope_id=int(user.id))
+    return [SystemAgentUserMemoryOut(**memory_to_dict(r)) for r in rows]
+
+
+@router.post("/memory", response_model=SystemAgentUserMemoryOut)
+async def create_user_memory(
+    payload: SystemAgentUserMemoryCreate,
+    db: DBSession,
+    user: CurrentUser,
+) -> SystemAgentUserMemoryOut:
+    from ..services.system_agent.user_memory import create_memory, memory_to_dict
+
+    try:
+        row = await create_memory(
+            db,
+            scope_type="web_user",
+            scope_id=int(user.id),
+            content=payload.content,
+            source="user_set",
+            enabled=payload.enabled,
+        )
+    except ValueError as exc:
+        raise _err("MEMORY_INVALID", str(exc)) from exc
+    await db.commit()
+    await db.refresh(row)
+    return SystemAgentUserMemoryOut(**memory_to_dict(row))
+
+
+@router.patch("/memory/{memory_id}", response_model=SystemAgentUserMemoryOut)
+async def patch_user_memory(
+    memory_id: int,
+    payload: SystemAgentUserMemoryPatch,
+    db: DBSession,
+    user: CurrentUser,
+) -> SystemAgentUserMemoryOut:
+    from ..services.system_agent.user_memory import memory_to_dict, update_memory
+
+    try:
+        row = await update_memory(
+            db,
+            memory_id=memory_id,
+            scope_type="web_user",
+            scope_id=int(user.id),
+            content=payload.content,
+            enabled=payload.enabled,
+        )
+    except LookupError as exc:
+        raise _err("MEMORY_NOT_FOUND", str(exc), status=404) from exc
+    except ValueError as exc:
+        raise _err("MEMORY_INVALID", str(exc)) from exc
+    await db.commit()
+    await db.refresh(row)
+    return SystemAgentUserMemoryOut(**memory_to_dict(row))
+
+
+@router.delete("/memory/{memory_id}")
+async def delete_user_memory(
+    memory_id: int,
+    db: DBSession,
+    user: CurrentUser,
+) -> dict[str, Any]:
+    from ..services.system_agent.user_memory import delete_memory
+
+    try:
+        await delete_memory(
+            db,
+            memory_id=memory_id,
+            scope_type="web_user",
+            scope_id=int(user.id),
+        )
+    except LookupError as exc:
+        raise _err("MEMORY_NOT_FOUND", str(exc), status=404) from exc
+    await db.commit()
+    return {"ok": True, "id": memory_id}
 
 
 # ── 会话 ─────────────────────────────────────────────────────────

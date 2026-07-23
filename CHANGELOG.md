@@ -20,6 +20,24 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- System Agent token 限额改为增量计费（output + input 增长），避免 system/记忆前缀每步重发误杀会话；AI 页面 usage 全量累计不变。
+- 会话摘要上限按 CJK 收紧，并按「用户目标」条目边界丢弃最旧条，避免半条记录。
+
+### Changed
+
+- 会话摘要过长时后台 LLM 压缩为状态式描述（失败静默降级）；日志/交互外部文本加「仅数据」标记防间接注入；无 CJK 且无领域关键词的英文请求改交模型路由。
+- 重试指代扩充「再来一次 / 重跑 / retry / try again」等精确匹配。
+
+### Added
+
+- 跨会话长期偏好记忆：表 `system_agent_user_memory`、工具 `memory.*`（写操作 Action 确认）、API `/api/system-agent/memory`、Web 助手配置「长期记忆」面板；system prompt 注入 enabled 偏好。
+
+### Tests
+
+- 补充 token 增量限额、记忆条目裁剪、外部内容标记、路由 golden set（≥40 条）与长期记忆 CRUD/密钥拒绝单测。
+
 ## [0.72.0-beta.3] — 2026-07-22 · minor（次版本预发布） · 真实流式输出与运行时安全收口
 
 ### Added

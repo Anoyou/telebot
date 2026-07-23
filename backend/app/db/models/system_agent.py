@@ -356,6 +356,39 @@ class SystemAgentAction(Base):
     )
 
 
+
+class SystemAgentUserMemory(Base):
+    """跨会话长期偏好（用户可见、可编辑）。"""
+
+    __tablename__ = "system_agent_user_memory"
+
+    id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        primary_key=True,
+        autoincrement=True,
+    )
+    scope_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    scope_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    content: Mapped[str] = mapped_column(String(200), nullable=False)
+    source: Mapped[str] = mapped_column(String(32), nullable=False, default="user_set")
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="1")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    __table_args__ = (
+        Index("ix_system_agent_user_memory_scope", "scope_type", "scope_id"),
+        Index("ix_system_agent_user_memory_scope_enabled", "scope_type", "scope_id", "enabled"),
+    )
+
 __all__ = [
     "AGENT_RUN_ACTIVE_STATUSES",
     "AGENT_RUN_CANCELLED",
@@ -400,4 +433,5 @@ __all__ = [
     "SystemAgentRun",
     "SystemAgentRunEvent",
     "SystemAgentSession",
+    "SystemAgentUserMemory",
 ]

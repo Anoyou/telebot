@@ -14,7 +14,11 @@ import {
   listSystemAgentActions,
   listSystemAgentMessages,
   listSystemAgentSessions,
+  createSystemAgentUserMemory,
+  deleteSystemAgentUserMemory,
+  listSystemAgentUserMemory,
   patchSystemAgentConfig,
+  patchSystemAgentUserMemory,
   startSystemAgentRetryRun,
   startSystemAgentRun,
   streamSystemAgentRun,
@@ -23,6 +27,7 @@ import {
   type SystemAgentRun,
   type SystemAgentSession,
   type SystemAgentStreamEvent,
+  type SystemAgentUserMemory,
 } from "@/api/systemAgent";
 import { listLLMProviders } from "@/api/commands";
 import { listAccounts } from "@/api/accounts";
@@ -119,6 +124,7 @@ export function AssistantIndex() {
   const [retryingMessageId, setRetryingMessageId] = useState<number | null>(null);
   const [activeRun, setActiveRun] = useState<StoredRun | null>(null);
   const [configOpen, setConfigOpen] = useState(false);
+  const [memoryDraft, setMemoryDraft] = useState("");
   const [runtimeSelection, setRuntimeSelection] = useState<{
     providerName: string;
     model: string;
@@ -164,6 +170,11 @@ export function AssistantIndex() {
   const providersQ = useQuery({
     queryKey: ["llm-providers"],
     queryFn: listLLMProviders,
+  });
+  const memoryQ = useQuery({
+    queryKey: ["system-agent", "user-memory"],
+    queryFn: listSystemAgentUserMemory,
+    enabled: configOpen,
   });
 
   const messagesQ = useQuery({
@@ -249,6 +260,32 @@ export function AssistantIndex() {
       toast.success("助手配置已保存");
     },
     onError: (e) => toast.error(getErrMsg(e)),
+  });
+
+  const createMemoryMut = useMutation({
+    mutationFn: (content: string) => createSystemAgentUserMemory({ content }),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["system-agent", "user-memory"] });
+      setMemoryDraft("");
+      toast.success("已添加长期记忆");
+    },
+    onError: (err) => toast.error(getErrMsg(err)),
+  });
+  const patchMemoryMut = useMutation({
+    mutationFn: (vars: { id: number; content?: string; enabled?: boolean }) =>
+      patchSystemAgentUserMemory(vars.id, { content: vars.content, enabled: vars.enabled }),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["system-agent", "user-memory"] });
+    },
+    onError: (err) => toast.error(getErrMsg(err)),
+  });
+  const deleteMemoryMut = useMutation({
+    mutationFn: (id: number) => deleteSystemAgentUserMemory(id),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["system-agent", "user-memory"] });
+      toast.success("已删除记忆");
+    },
+    onError: (err) => toast.error(getErrMsg(err)),
   });
 
   const enabled = configQ.data?.enabled ?? false;
@@ -976,6 +1013,68 @@ export function AssistantIndex() {
             仅允许声明支持 tools 的模型。写操作会生成待确认卡片；未配置时助手会给出 AI 中心入口。
             {capsQ.data ? ` · 已注册 ${capsQ.data.tools.filter((t) => t.available).length} 个可用工具` : null}
           </p>
+          <div className="mt-4 border-t pt-3">
+            <div className="font-medium">长期记忆</div>
+            <p className="mt-1 text-xs text-muted-foreground">
+              跨会话保留的偏好（最多 20 条）。也可对助手说「记住…」经确认后写入。
+            </p>
+            <div className="mt-2 flex flex-col gap-2 sm:flex-row">
+              <input
+                className="min-w-0 flex-1 rounded-md border bg-background px-3 py-2 text-sm"
+                placeholder="例如：回复请尽量简短"
+                value={memoryDraft}
+                maxLength={200}
+                onChange={(e) => setMemoryDraft(e.target.value)}
+              />
+              <Button
+                type="button"
+                size="sm"
+                disabled={!memoryDraft.trim() || createMemoryMut.isPending}
+                onClick={() => createMemoryMut.mutate(memoryDraft.trim())}
+              >
+                添加
+              </Button>
+            </div>
+            <div className="mt-3 space-y-2">
+              {memoryQ.isLoading ? (
+                <Skeleton className="h-10 w-full" />
+              ) : (memoryQ.data || []).length === 0 ? (
+                <p className="text-xs text-muted-foreground">暂无长期记忆</p>
+              ) : (
+                (memoryQ.data as SystemAgentUserMemory[]).map((item) => (
+                  <div
+                    key={item.id}
+                    className="flex flex-wrap items-center gap-2 rounded-md border px-3 py-2"
+                  >
+                    <label className="flex items-center gap-1.5 text-xs">
+                      <input
+                        type="checkbox"
+                        checked={item.enabled}
+                        disabled={patchMemoryMut.isPending}
+                        onChange={(e) =>
+                          patchMemoryMut.mutate({ id: item.id, enabled: e.target.checked })
+                        }
+                      />
+                      启用
+                    </label>
+                    <span className="min-w-0 flex-1 text-sm">{item.content}</span>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      className="h-7 text-destructive"
+                      disabled={deleteMemoryMut.isPending}
+                      onClick={() => {
+                        if (confirm("确认删除这条记忆？")) deleteMemoryMut.mutate(item.id);
+                      }}
+                    >
+                      删除
+                    </Button>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
         </div>
       ) : null}
 

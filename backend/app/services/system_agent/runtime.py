@@ -210,6 +210,25 @@ class SystemAgentRuntime:
             command_prefix=str(flags["command_prefix"]),
         )
 
+        # 长期偏好：会话记忆块之前注入
+        try:
+            from .user_memory import prompt_block_for_scope
+
+            if channel == "bot" and bot_tg_user_id is not None:
+                long_term = await prompt_block_for_scope(
+                    db, scope_type="bot_user", scope_id=int(bot_tg_user_id)
+                )
+            elif channel == "web" and session.web_user_id is not None:
+                long_term = await prompt_block_for_scope(
+                    db, scope_type="web_user", scope_id=int(session.web_user_id)
+                )
+            else:
+                long_term = ""
+            if long_term:
+                system_prompt = f"{system_prompt}\n\n{long_term}"
+        except Exception:  # noqa: BLE001
+            log.debug("load long-term memory failed", exc_info=True)
+
         memory_block = memory_context(session)
         if memory_block:
             system_prompt = f"{system_prompt}\n\n{memory_block}"

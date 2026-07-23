@@ -17,6 +17,7 @@ DOMAIN_CATALOG: dict[str, tuple[str, tuple[str, ...]]] = {
     "interaction": ("交互 Bot 规则、触发条件、暂停与启停", ("交互", "interaction", "触发", "暂停规则")),
     "ledger": ("资金台账、收入、支出与余额", ("台账", "收入", "支出", "余额", "资金", "账目", "ledger")),
     "logs": ("运行日志、错误、事件与诊断", ("日志", "报错", "错误", "异常", "trace", "log")),
+    "memory": ("长期偏好记忆的查询与保存", ("记住", "偏好", "长期记忆", "别再问", "remember", "preference")),
     "plugin_repos": ("插件仓库、官方库与从仓库安装", ("插件仓库", "仓库", "repository", "repo")),
     "plugins": ("已安装插件、检查更新、安装卸载与全局启停", ("插件", "plugin", "扩展")),
     "providers": ("模型 Provider 的列表、保存、验证与删除", ("provider", "提供商", "模型服务", "api key", "密钥")),

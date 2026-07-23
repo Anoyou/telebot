@@ -176,6 +176,42 @@ export async function getSystemAgentCapabilities(): Promise<SystemAgentCapabilit
   return data;
 }
 
+export interface SystemAgentUserMemory {
+  id: number;
+  scope_type: string;
+  scope_id: number;
+  content: string;
+  source: string;
+  enabled: boolean;
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
+export async function listSystemAgentUserMemory(): Promise<SystemAgentUserMemory[]> {
+  const { data } = await api.get<SystemAgentUserMemory[]>("/api/system-agent/memory");
+  return data;
+}
+
+export async function createSystemAgentUserMemory(payload: {
+  content: string;
+  enabled?: boolean;
+}): Promise<SystemAgentUserMemory> {
+  const { data } = await api.post<SystemAgentUserMemory>("/api/system-agent/memory", payload);
+  return data;
+}
+
+export async function patchSystemAgentUserMemory(
+  id: number,
+  payload: { content?: string; enabled?: boolean },
+): Promise<SystemAgentUserMemory> {
+  const { data } = await api.patch<SystemAgentUserMemory>(`/api/system-agent/memory/${id}`, payload);
+  return data;
+}
+
+export async function deleteSystemAgentUserMemory(id: number): Promise<void> {
+  await api.delete(`/api/system-agent/memory/${id}`);
+}
+
 export async function listSystemAgentSessions(
   params?: { status?: string; limit?: number },
 ): Promise<SystemAgentSession[]> {

@@ -19,6 +19,7 @@ def register_all_tools(registry: ToolRegistry) -> None:
         interaction,
         ledger,
         logs,
+        memory,
         plugin_repos,
         plugins,
         providers,
@@ -43,6 +44,7 @@ def register_all_tools(registry: ToolRegistry) -> None:
     plugin_repos.register(registry)
     logs.register(registry)
     ledger.register(registry)
+    memory.register(registry)
 
 
 __all__ = ["register_all_tools"]
