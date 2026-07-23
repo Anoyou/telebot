@@ -11,7 +11,6 @@ from ..user_memory import (
     delete_memory,
     list_memories,
     memory_to_dict,
-    update_memory,
 )
 
 

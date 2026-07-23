@@ -6,14 +6,12 @@ import asyncio
 import logging
 from typing import Any
 
-from sqlalchemy import select
-
 from ...db.base import AsyncSessionLocal
 from ...db.models.system_agent import SystemAgentSession
 from ..llm_invoke import invoke_structured
 from ..llm_protocol import MessageRole, ModelMessage, ModelRequest
 from .config import load_config, resolve_agent_providers
-from .memory import MEMORY_COMPRESS_THRESHOLD_CHARS, should_compress_summary, trim_summary_to_limit
+from .memory import should_compress_summary, trim_summary_to_limit
 from .secrets import redact_known_secrets
 
 log = logging.getLogger(__name__)

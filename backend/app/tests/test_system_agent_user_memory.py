@@ -3,7 +3,6 @@ from __future__ import annotations
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from app.db.base import Base
 from app.db.models.system_agent import SystemAgentUserMemory
 from app.services.system_agent.user_memory import (
     MAX_ITEMS_PER_SCOPE,

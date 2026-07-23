@@ -20,9 +20,6 @@ from ..db.models.system_agent import (
 )
 from ..deps import CurrentUser, DBSession
 from ..schemas.system_agent import (
-    SystemAgentUserMemoryCreate,
-    SystemAgentUserMemoryOut,
-    SystemAgentUserMemoryPatch,
     SystemAgentActionConfirmOut,
     SystemAgentActionOut,
     SystemAgentCapabilitiesOut,
@@ -40,6 +37,9 @@ from ..schemas.system_agent import (
     SystemAgentSessionCreate,
     SystemAgentSessionOut,
     SystemAgentSessionUpdate,
+    SystemAgentUserMemoryCreate,
+    SystemAgentUserMemoryOut,
+    SystemAgentUserMemoryPatch,
 )
 from ..services.system_agent import get_system_agent_service
 from ..services.system_agent.actions import (

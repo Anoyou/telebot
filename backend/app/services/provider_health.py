@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 log = logging.getLogger(__name__)
@@ -15,13 +15,13 @@ _BASE_COOLDOWN_SECONDS = 15
 _REDIS_KEY = "telepilot:provider_health:v1"
 
 
-class HealthState(str, Enum):
+class HealthState(StrEnum):
     HEALTHY = "healthy"
     COOLING = "cooling"
     UNCERTAIN = "uncertain"  # Redis 不可用时的呈现，不阻断请求
 
 
-class ErrorClass(str, Enum):
+class ErrorClass(StrEnum):
     TRANSIENT = "transient"  # 超时/连接/5xx → 计入冷却
     RATE_LIMIT = "rate_limit"  # 429 → 短冷却
     CREDENTIAL = "credential"  # 401/403 → 不计冷却

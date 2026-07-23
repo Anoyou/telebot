@@ -34,8 +34,7 @@ from .config import (
     resolve_agent_providers,
     save_config,
 )
-from .memory import clear_session_memory, update_session_memory
-from .memory import should_compress_summary
+from .memory import clear_session_memory, should_compress_summary, update_session_memory
 from .memory_compress import schedule_summary_compression
 from .prompts import session_title_from_message
 from .registry import get_registry
