@@ -20,6 +20,7 @@ from zoneinfo import ZoneInfo
 
 from croniter import CroniterBadCronError, croniter
 from sqlalchemy import select
+from telethon import utils as telethon_utils
 from telethon.errors import FloodWaitError
 
 from app.db.base import AsyncSessionLocal
@@ -39,6 +40,10 @@ from app.services.event_trace import (
 from app.services.llm_client import LLMCallFailed, LLMError
 from app.services.llm_dto import LLMProviderDTO
 from app.services.llm_invoke import invoke as invoke_ai_runtime
+from app.services.scheduler_target import (
+    SchedulerTargetError,
+    normalize_scheduler_target,
+)
 from app.settings import settings
 from app.worker.command import should_allow_auto_command_text
 from app.worker.plugins.base import PluginContext
@@ -75,6 +80,10 @@ LogWriter = Callable[..., Awaitable[None]]
 
 class SchedulerCommandBlockedError(RuntimeError):
     """scheduler 尝试触发不在白名单中的命令。"""
+
+
+class SchedulerTargetResolutionError(ValueError):
+    """Telegram 无法把 scheduler 的 @username 解析为实体。"""
 
 
 def _scheduler_trace_context(ctx: PluginContext, *, action: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -432,14 +441,14 @@ class SchedulerRuleExecutor:
             ctx._scheduler_entry_key = previous_entry_key
 
     async def action_send_message(self, ctx: PluginContext, action: dict[str, Any]) -> None:
-        target = int(action["target_chat_id"])
+        target = action["target_chat_id"]
         text = str(action.get("text") or "").strip()
         if not text:
             raise ValueError("send_message requires non-empty text")
         trace_action = {
             "type": "send_message",
             "send_via": "userbot_reply",
-            "chat_id": target,
+            "chat_id": target if isinstance(target, int) else None,
             "text": text,
         }
         msg = await self.send_with_ratelimit(ctx, target, text, action=trace_action)
@@ -448,14 +457,14 @@ class SchedulerRuleExecutor:
             asyncio.create_task(self.delete_message_after(ctx, msg, delete_after, action_context=_scheduler_trace_context(ctx)))
 
     async def action_run_command(self, ctx: PluginContext, action: dict[str, Any]) -> None:
-        target = int(action.get("target_chat_id") or 0)
+        target = action.get("target_chat_id")
         command = str(action.get("command") or action.get("text") or "").strip()
         if not command:
             raise ValueError("run_command requires command/text")
         trace_action = {
             "type": "run_command",
             "send_via": "userbot_reply",
-            "chat_id": target or None,
+            "chat_id": target if isinstance(target, int) and target != 0 else None,
             "text": command,
         }
         msg = await self.send_with_ratelimit(ctx, target or "me", command, action=trace_action)
@@ -502,11 +511,11 @@ class SchedulerRuleExecutor:
             raise
 
         text = (result.text or "").strip() or "(empty)"
-        target = int(action["target_chat_id"])
+        target = action["target_chat_id"]
         trace_action = {
             "type": "call_llm",
             "send_via": "userbot_reply",
-            "chat_id": target,
+            "chat_id": target if isinstance(target, int) else None,
             "text": text[:_MAX_MESSAGE_LEN],
         }
         msg = await self.send_with_ratelimit(ctx, target, text[:_MAX_MESSAGE_LEN], action=trace_action)
@@ -581,6 +590,33 @@ class SchedulerRuleExecutor:
             "chat_id": peer if isinstance(peer, int) else None,
             "text": text,
         }
+        try:
+            send_peer, peer_id, target_ref = await self.resolve_send_peer(ctx, peer)
+        except SchedulerTargetError as exc:
+            await _record_scheduler_action(
+                ctx,
+                trace_action,
+                TRACE_STATUS_FAILED,
+                actual_send_via="userbot_reply",
+                error_code="invalid_target",
+                error_message=str(exc),
+            )
+            raise
+        except SchedulerTargetResolutionError as exc:
+            await _record_scheduler_action(
+                ctx,
+                trace_action,
+                TRACE_STATUS_FAILED,
+                actual_send_via="userbot_reply",
+                error_code="telegram_entity_not_found",
+                error_message=str(exc),
+            )
+            raise
+        if peer_id is not None:
+            trace_action["chat_id"] = peer_id
+        if target_ref is not None:
+            trace_action["target_ref"] = target_ref
+
         allowed, command_key = should_allow_auto_command_text(text)
         if not allowed:
             await _record_scheduler_action(
@@ -594,7 +630,6 @@ class SchedulerRuleExecutor:
             raise SchedulerCommandBlockedError(
                 f"auto command blocked by whitelist: {command_key}"
             )
-        peer_id = int(peer) if isinstance(peer, int) else None
         decision = await ctx.engine.acquire(
             ctx.account_id,
             "send_message_group",
@@ -616,7 +651,7 @@ class SchedulerRuleExecutor:
             await asyncio.sleep(float(decision.wait_seconds))
 
         try:
-            msg = await ctx.client.send_message(peer, text)
+            msg = await ctx.client.send_message(send_peer, text)
             await _record_scheduler_action(
                 ctx,
                 trace_action,
@@ -639,7 +674,7 @@ class SchedulerRuleExecutor:
             await ctx.engine.on_flood_wait("send_message_group", exc)
             await asyncio.sleep(min(int(getattr(exc, "seconds", 0) or 0), 60))
             try:
-                msg = await ctx.client.send_message(peer, text)
+                msg = await ctx.client.send_message(send_peer, text)
                 await _record_scheduler_action(
                     ctx,
                     trace_action,
@@ -672,6 +707,34 @@ class SchedulerRuleExecutor:
                     await ctx.log("warn", "[scheduler] send_message still flood-waited after retry; drop once")
                 return None
 
+    async def resolve_send_peer(
+        self,
+        ctx: PluginContext,
+        peer: int | str,
+    ) -> tuple[Any, int | None, str | None]:
+        """解析 scheduler 发送目标，并返回发送实体、限流 ID 和原始引用。"""
+        if peer == "me":
+            return "me", None, None
+
+        target = normalize_scheduler_target(peer, required=True)
+        if isinstance(target, int):
+            return target, target, None
+
+        try:
+            entity = await ctx.client.get_input_entity(target)
+        except Exception as exc:  # noqa: BLE001
+            raise SchedulerTargetResolutionError(
+                f"无法解析目标 {target}；请检查用户名是否正确，以及当前 Telegram 账号是否可访问该用户或机器人"
+            ) from exc
+
+        try:
+            peer_id = int(telethon_utils.get_peer_id(entity))
+        except Exception as exc:  # noqa: BLE001
+            raise SchedulerTargetResolutionError(
+                f"目标 {target} 已找到，但无法取得可发送的 Telegram 实体"
+            ) from exc
+        return entity, peer_id, target
+
     # 旧测试和外部历史调用仍可能访问下划线方法；保留别名，真正实现走平台方法。
     _tick_once = tick_rules_once
     _resolve_due = resolve_due
@@ -688,6 +751,7 @@ class SchedulerRuleExecutor:
     _get_provider_rows = get_provider_rows
     _persist_rule_config = persist_rule_config
     _send_with_ratelimit = send_with_ratelimit
+    _resolve_send_peer = resolve_send_peer
 
 
 class SchedulerFacade:

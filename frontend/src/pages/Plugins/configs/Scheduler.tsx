@@ -44,6 +44,7 @@ import {
 } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
 import { getErrMsg } from "@/lib/api";
+import { normalizeSchedulerTarget } from "@/lib/schedulerTarget";
 import { formatDateTime } from "@/lib/utils";
 import { DryRunDetail } from "@/components/DryRunDetail";
 import { featureConfigBackTarget } from "@/pages/Plugins/_shared/featureConfig";
@@ -64,7 +65,7 @@ function defaultConfig(commandPrefix = ","): SchedulerRuleConfig {
     enabled: true,
     action: {
       type: "send_message",
-      target_chat_id: 0,
+      target_chat_id: "",
       text: "tick",
       command: `${commandPrefix}help`,
       provider_id: 0,
@@ -93,7 +94,15 @@ function configForSave(config: SchedulerRuleConfig): Record<string, unknown> {
   delete rest._cron_seconds_mode;
   delete rest._cron_timezone;
   delete rest._config_dirty;
-  return rest;
+  const action = { ...config.action };
+  const targetRequired = ["send_message", "call_llm"].includes(action.type);
+  const target = normalizeSchedulerTarget(action.target_chat_id, targetRequired);
+  if (target === undefined) {
+    delete action.target_chat_id;
+  } else {
+    action.target_chat_id = target;
+  }
+  return { ...rest, action };
 }
 
 interface FormState {
@@ -184,11 +193,11 @@ export function SchedulerConfig() {
       toast.error("action.type 必填");
       return;
     }
-    if (
-      ["send_message", "call_llm"].includes(cfg.action.type) &&
-      !cfg.action.target_chat_id
-    ) {
-      toast.error("target_chat_id 必填");
+    let saveConfig: Record<string, unknown>;
+    try {
+      saveConfig = configForSave(cfg);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "目标聊天格式无效");
       return;
     }
     if (cfg.action.type === "send_message" && !(cfg.action.text || "").trim()) {
@@ -223,7 +232,7 @@ export function SchedulerConfig() {
         name: form.name.trim(),
         enabled: form.enabled,
         priority: form.priority,
-        config: configForSave(form.config),
+        config: saveConfig,
       },
       onSuccess: () => setEditOpen(false),
     });
@@ -585,10 +594,11 @@ export function SchedulerConfig() {
 
           {form.config.action.type === "send_message" ||
           form.config.action.type === "call_llm" ? (
-            <Field label="目标聊天 ID">
+            <Field label="目标聊天（数字 ID 或 @username）">
               <Input
-                type="number"
-                value={form.config.action.target_chat_id || 0}
+                type="text"
+                placeholder="8395686237、-1001234567890 或 @qingbaobu"
+                value={form.config.action.target_chat_id ?? ""}
                 onChange={(e) =>
                   setForm((s) => ({
                     ...s,
@@ -596,7 +606,7 @@ export function SchedulerConfig() {
                       ...s.config,
                       action: {
                         ...s.config.action,
-                        target_chat_id: Number(e.target.value || 0),
+                        target_chat_id: e.target.value,
                       },
                     },
                   }))

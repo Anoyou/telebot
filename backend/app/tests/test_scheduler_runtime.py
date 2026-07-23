@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock
 from zoneinfo import ZoneInfo
 
 import pytest
+from telethon.tl.types import InputPeerUser
 
 from app.services.llm_client import LLMResult
 from app.services.llm_dto import LLMProviderDTO
@@ -322,6 +323,69 @@ async def test_scheduler_send_message_records_trace_action(monkeypatch) -> None:
     assert record_action.await_args.args[1]["type"] == "send_message"
     assert record_action.await_args.args[2] == scheduler_runtime.TRACE_STATUS_OK
     finish_trace.assert_awaited_once_with(trace, scheduler_runtime.TRACE_STATUS_OK, rule_id=9, action_type="send_message")
+
+
+@pytest.mark.asyncio
+async def test_scheduler_send_message_resolves_username_for_send_and_ratelimit(monkeypatch) -> None:
+    executor = SchedulerRuleExecutor()
+    record_action = AsyncMock()
+    monkeypatch.setattr(scheduler_runtime, "_record_scheduler_action", record_action)
+    entity = InputPeerUser(user_id=8395686237, access_hash=123456)
+    engine = SimpleNamespace(
+        acquire=AsyncMock(return_value=SimpleNamespace(allowed=True, wait_seconds=0))
+    )
+    client = SimpleNamespace(
+        get_input_entity=AsyncMock(return_value=entity),
+        send_message=AsyncMock(return_value=SimpleNamespace(id=88)),
+    )
+    ctx = SimpleNamespace(
+        account_id=42,
+        feature_key="scheduler",
+        engine=engine,
+        client=client,
+        log=AsyncMock(),
+    )
+
+    await executor.send_with_ratelimit(
+        ctx,
+        "@qingbaobu",
+        "hello",
+        action={"type": "send_message", "send_via": "userbot_reply", "text": "hello"},
+    )
+
+    client.get_input_entity.assert_awaited_once_with("@qingbaobu")
+    client.send_message.assert_awaited_once_with(entity, "hello")
+    assert engine.acquire.await_args.kwargs["peer_id"] == 8395686237
+    trace_action = record_action.await_args.args[1]
+    assert trace_action["chat_id"] == 8395686237
+    assert trace_action["target_ref"] == "@qingbaobu"
+
+
+@pytest.mark.asyncio
+async def test_scheduler_send_message_reports_username_resolution_failure(monkeypatch) -> None:
+    executor = SchedulerRuleExecutor()
+    record_action = AsyncMock()
+    monkeypatch.setattr(scheduler_runtime, "_record_scheduler_action", record_action)
+    ctx = SimpleNamespace(
+        account_id=42,
+        feature_key="scheduler",
+        engine=SimpleNamespace(acquire=AsyncMock()),
+        client=SimpleNamespace(
+            get_input_entity=AsyncMock(side_effect=ValueError("not found")),
+            send_message=AsyncMock(),
+        ),
+        log=AsyncMock(),
+    )
+
+    with pytest.raises(
+        scheduler_runtime.SchedulerTargetResolutionError,
+        match="无法解析目标 @missingbot",
+    ):
+        await executor.send_with_ratelimit(ctx, "@missingbot", "hello")
+
+    ctx.engine.acquire.assert_not_awaited()
+    ctx.client.send_message.assert_not_awaited()
+    assert record_action.await_args.kwargs["error_code"] == "telegram_entity_not_found"
 
 
 @pytest.mark.asyncio

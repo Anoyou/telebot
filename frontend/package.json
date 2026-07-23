@@ -7,7 +7,7 @@
   "license": "MIT",
   "scripts": {
     "dev": "vite",
-    "test": "node --experimental-strip-types --test src/lib/updateJobPersistence.test.ts src/pages/Assistant/sessionState.test.ts src/components/assistant/conversationState.test.ts src/components/TelegramHtmlPreview.test.cjs",
+    "test": "node --experimental-strip-types --test src/lib/updateJobPersistence.test.ts src/lib/schedulerTarget.test.ts src/pages/Assistant/sessionState.test.ts src/components/assistant/conversationState.test.ts src/components/TelegramHtmlPreview.test.cjs",
     "typecheck": "tsc -b --pretty false",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
