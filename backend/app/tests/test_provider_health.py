@@ -55,6 +55,22 @@ def test_liveness_source_skipped() -> None:
     assert h["state"] == "healthy"
 
 
+def test_diagnostic_sources_skipped() -> None:
+    """chat-test / full-liveness 等 diagnostic 源不得污染生产健康。"""
+    for source in (
+        "diagnostic:chat-test",
+        "diagnostic:full-liveness",
+        "diagnostic:test-model",
+        "diagnostic:protocol_detection",
+    ):
+        ph.reset_for_tests()
+        ph.record_failure(5, "diag", "timeout", source=source)
+        ph.record_success(5, "diag", source=source)
+        h = ph.get_health(5, "diag")
+        assert h["state"] == "healthy"
+        assert h["consecutive_failures"] == 0
+
+
 def test_sort_puts_cooling_last() -> None:
     ph.record_failure(1, "a", "timeout")
     ordered = ph.sort_provider_candidates([(1, "a"), (2, "b")])

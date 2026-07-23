@@ -124,10 +124,21 @@ def _cooldown_seconds(failures: int, error_class: ErrorClass) -> int:
     return min(_MAX_COOLDOWN_SECONDS, _BASE_COOLDOWN_SECONDS * (2**exp))
 
 
+def _skip_health_source(source: str | None) -> bool:
+    """测活/诊断/记忆压缩等不得写入生产健康。"""
+
+    if not source:
+        return False
+    text = str(source)
+    if text.startswith("liveness") or text.startswith("diagnostic:"):
+        return True
+    if text in {"system_agent_memory"}:
+        return True
+    return False
+
+
 def record_success(provider_id: int, model: str, *, source: str | None = None) -> None:
-    if source and str(source).startswith("liveness"):
-        return  # 测活不写生产健康
-    if source == "system_agent_memory":
+    if _skip_health_source(source):
         return
     key = _key(provider_id, model)
     rec = _records.get(key) or HealthRecord(provider_id=int(provider_id), model=str(model or ""))
@@ -147,9 +158,7 @@ def record_failure(
     *,
     source: str | None = None,
 ) -> None:
-    if source and str(source).startswith("liveness"):
-        return
-    if source == "system_agent_memory":
+    if _skip_health_source(source):
         return
     error_class = classify_error(exc)
     key = _key(provider_id, model)
@@ -223,7 +232,8 @@ def _mirror_to_redis(key: str, rec: HealthRecord) -> None:
         if r is None:
             return
         # 当前项目 redis 客户端为 async，跳过同步镜像
-        if hasattr(r, "execute_command") or hasattr(getattr(r, "hset", None), "__call__"):
+        # 当前项目 redis 为 async 客户端：同步路径无法 await，直接跳过
+        if hasattr(r, "execute_command") or callable(getattr(r, "hset", None)):
             return
     except Exception:  # noqa: BLE001
         log.debug("provider health redis mirror skipped", exc_info=True)
