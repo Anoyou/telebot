@@ -456,6 +456,10 @@ class SystemAgentService:
         session.updated_at = datetime.now(UTC)
 
         approved_tool_calls: list[dict[str, Any]] = []
+        requested_approved_tools = {
+            str(name) for name in (approved_tools or []) if str(name)
+        }
+        effective_approved_tools: set[str] = set()
         # 新消息先落库；重试则复用原消息，避免重复污染历史。
         if retry_message is None:
             redacted_user = redact_known_secrets(raw_text, chat_secrets)
@@ -469,6 +473,27 @@ class SystemAgentService:
             db.add(user_msg)
         else:
             user_msg = retry_message
+            previous_usage = user_msg.usage if isinstance(user_msg.usage, dict) else {}
+            previous_approved = previous_usage.get("approved_tools")
+            if isinstance(previous_approved, list):
+                effective_approved_tools.update(
+                    str(name) for name in previous_approved if str(name)
+                )
+            pending_approval = previous_usage.get("tool_approval")
+            pending_tools = pending_approval.get("tools") if isinstance(pending_approval, dict) else []
+            pending_tool_names = {
+                str(item.get("name"))
+                for item in pending_tools
+                if isinstance(item, dict) and str(item.get("name") or "")
+            }
+            unexpected_approvals = requested_approved_tools - pending_tool_names
+            if unexpected_approvals:
+                raise ValueError(
+                    "批准工具不在当前待确认列表："
+                    + "、".join(sorted(unexpected_approvals))
+                )
+            effective_approved_tools.update(requested_approved_tools)
+            approved_tools = sorted(effective_approved_tools)
             approved_tool_calls = _approved_tool_calls_from_retry(retry_message, approved_tools)
             claim = await db.execute(
                 update(SystemAgentMessage)
@@ -721,6 +746,8 @@ class SystemAgentService:
                 chat_secrets,
             )[:1024]
             failure_usage = dict(failure_context or {})
+            if effective_approved_tools:
+                failure_usage["approved_tools"] = sorted(effective_approved_tools)
             if run_id:
                 failure_usage["run_id"] = str(run_id)
             user_msg.usage = failure_usage or None

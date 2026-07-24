@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
-import { ChevronDown, Menu, MessageCircle, Server, Settings2 } from "lucide-react";
+import { ChevronDown, MessageCircle, Server, Settings2 } from "lucide-react";
 import { toast } from "sonner";
 
 import {
@@ -123,6 +123,7 @@ export function AssistantIndex() {
   const {
     collapsed: assistantCollapsed,
     setStreaming: setDockStreaming,
+    notifyCompletion,
   } = useAssistantDock();
   const [activeId, setActiveId] = useState<string | null>(null);
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -174,6 +175,8 @@ export function AssistantIndex() {
   const sessionsQ = useQuery({
     queryKey: ["system-agent", "sessions"],
     queryFn: () => listSystemAgentSessions({ status: "active", limit: 50 }),
+    refetchInterval: assistantCollapsed ? false : 3_000,
+    refetchOnWindowFocus: "always",
   });
   const accountsQ = useQuery({
     queryKey: ["accounts"],
@@ -194,6 +197,8 @@ export function AssistantIndex() {
     queryKey: ["system-agent", "messages", activeId],
     queryFn: () => listSystemAgentMessages(activeId!, { limit: 100 }),
     enabled: !!activeId,
+    refetchInterval: assistantCollapsed || streaming ? false : 3_000,
+    refetchOnWindowFocus: "always",
   });
   const pendingActionsQ = useQuery({
     queryKey: ["system-agent", "actions", activeId, "pending"],
@@ -667,6 +672,7 @@ export function AssistantIndex() {
   ) => {
     let cursor = Math.max(0, initialSeq);
     let doneReceived = false;
+    let doneOk = false;
     let reconnectAttempt = 0;
     try {
       while (!controller.signal.aborted && !doneReceived) {
@@ -687,7 +693,10 @@ export function AssistantIndex() {
               if (event.type === "error" && event.code === "RUN_STREAM_FAILED") {
                 streamFailed = true;
               }
-              if (event.type === "done") doneReceived = true;
+              if (event.type === "done") {
+                doneReceived = true;
+                doneOk = event.ok === true;
+              }
             },
             { signal: controller.signal },
           );
@@ -725,6 +734,7 @@ export function AssistantIndex() {
       forgetRun(sessionId, runId);
       setActiveRun((current) => (current?.runId === runId ? null : current));
       await refreshRunData(sessionId);
+      if (doneOk) notifyCompletion();
       if (abortRef.current === controller) {
         streamingBubbleCreatedRef.current = false;
         liveText.clear();
@@ -927,16 +937,6 @@ export function AssistantIndex() {
               type="button"
               variant="outline"
               size="sm"
-              className="h-8 px-2.5 md:hidden"
-              onClick={() => setDrawerOpen(true)}
-            >
-              <Menu className="h-4 w-4" />
-              会话
-            </Button>
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
               className="h-8 px-2.5"
               onClick={() => setConfigOpen((v) => !v)}
               aria-expanded={configOpen}
@@ -998,7 +998,17 @@ export function AssistantIndex() {
       </div>
 
       {configOpen ? (
-        <div data-assistant-config-panel className={`${mobileHeaderExpanded ? "block" : "hidden"} -mt-3 min-h-32 max-h-36 shrink overflow-y-auto rounded-b-lg border border-t-0 bg-card p-4 text-sm overscroll-contain sm:mt-0 sm:block sm:max-h-96 sm:rounded-lg sm:border-t`}>
+        <>
+        <button
+          type="button"
+          className="fixed inset-0 z-[69] bg-black/20 animate-in fade-in duration-200 sm:hidden"
+          aria-label="关闭助手配置"
+          onClick={() => setConfigOpen(false)}
+        />
+        <div
+          data-assistant-config-panel
+          className="fixed bottom-[calc(4.75rem+env(safe-area-inset-bottom))] right-0 top-[calc(5rem+env(safe-area-inset-top))] z-[70] w-[min(320px,88vw)] animate-in overflow-y-auto overscroll-contain rounded-l-2xl border-l border-border/70 bg-card p-4 text-sm shadow-[0_6px_18px_rgba(15,23,42,0.10)] slide-in-from-right-3 duration-200 sm:static sm:z-auto sm:mt-0 sm:max-h-96 sm:w-auto sm:shrink sm:rounded-lg sm:border sm:shadow-none sm:animate-none"
+        >
           <div className="mb-3 flex items-center justify-between gap-3">
             <div className="font-medium">系统助手模型</div>
             <Button type="button" size="sm" variant="ghost" className="h-7 px-2 text-xs sm:hidden" onClick={() => setConfigOpen(false)}>
@@ -1209,6 +1219,7 @@ export function AssistantIndex() {
             </div>
           </div>
         </div>
+        </>
       ) : null}
 
       <div data-assistant-chat-window className="flex min-h-[min(20rem,40dvh)] flex-1 overflow-hidden rounded-xl border bg-card sm:min-h-[min(22rem,48dvh)]">
@@ -1296,6 +1307,7 @@ export function AssistantIndex() {
                 onSetDefaultModel={onSetDefaultModel}
                 modelDisabled={selectorDisabled || modelPickerItems.length === 0}
                 expectedLabel={expectedSelectionLabel}
+                onOpenSessions={() => setDrawerOpen(true)}
               />
             </>
           )}

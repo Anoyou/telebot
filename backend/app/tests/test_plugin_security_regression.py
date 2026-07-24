@@ -1251,7 +1251,7 @@ class TestPluginRepoInstallFlow:
         async def _cached(_url: str, **_kwargs):
             return repo_dir
 
-        monkeypatch.setattr(repo_svc, "_ensure_repo_cached", _cached)
+        monkeypatch.setattr(repo_svc, "_ensure_repo_cached_unlocked", _cached)
         db = _FakePluginRepoDB(PluginRepo(id=1, url="https://example.com/repo.git", name="Repo"))
 
         row = await repo_svc.install_plugin_from_repo(db, 1, "repo_demo", default_enabled=True)
@@ -1292,7 +1292,7 @@ class TestPluginRepoInstallFlow:
         async def _cached(_url: str, **_kwargs):
             return repo_dir
 
-        monkeypatch.setattr(repo_svc, "_ensure_repo_cached", _cached)
+        monkeypatch.setattr(repo_svc, "_ensure_repo_cached_unlocked", _cached)
         db = _FakePluginRepoDB(PluginRepo(id=1, url="https://example.com/repo.git", name="Repo"))
         db.installed_rows["update_demo"] = InstalledPlugin(
             key="update_demo",
@@ -1368,7 +1368,7 @@ class TestPluginRepoInstallFlow:
         async def _cached(_url: str, **_kwargs):
             return repo_dir
 
-        monkeypatch.setattr(repo_svc, "_ensure_repo_cached", _cached)
+        monkeypatch.setattr(repo_svc, "_ensure_repo_cached_unlocked", _cached)
         db = _FakePluginRepoDB(PluginRepo(id=1, url="https://example.com/repo.git", name="Repo"))
         db.installed_rows["ten_half"] = InstalledPlugin(
             key="ten_half",
@@ -1422,7 +1422,7 @@ class TestPluginRepoInstallFlow:
         async def _cached(_url: str, **_kwargs):
             return repo_dir
 
-        monkeypatch.setattr(repo_svc, "_ensure_repo_cached", _cached)
+        monkeypatch.setattr(repo_svc, "_ensure_repo_cached_unlocked", _cached)
         db = _FakePluginRepoDB(PluginRepo(id=1, url="https://example.com/repo.git", name="Repo"))
         db.installed_rows["retry_demo"] = InstalledPlugin(
             key="retry_demo",

@@ -108,6 +108,7 @@ export type LiveBubble = {
   action?: SystemAgentAction;
   messageId?: number;
   runStatus?: string;
+  errorCode?: string | null;
   errorMessage?: string | null;
   retryCount?: number;
   providerSwitch?: SystemAgentProviderSwitch;
@@ -235,6 +236,7 @@ export function Conversation({
         text: messageText(m),
         messageId: m.id,
         runStatus: m.run_status,
+        errorCode: m.error_code,
         errorMessage: m.error_message,
         retryCount: m.retry_count,
         providerSwitch:
@@ -284,7 +286,7 @@ export function Conversation({
   return (
     <div
       ref={scrollRef}
-      className="mx-auto flex w-full max-w-3xl flex-1 flex-col gap-3 overflow-y-auto p-4 xl:max-w-5xl 2xl:max-w-6xl"
+      className="mx-auto flex w-full max-w-3xl flex-1 flex-col gap-3 overflow-y-auto p-4 pb-20 sm:pb-4 xl:max-w-5xl 2xl:max-w-6xl"
       onScroll={(event) => {
         const node = event.currentTarget;
         followStreamRef.current = node.scrollHeight - node.scrollTop - node.clientHeight < 72;
@@ -295,6 +297,7 @@ export function Conversation({
         const isTool = item.role === "tool";
         const isAction = item.role === "action" && item.action;
         const isFailedUser = isUser && item.runStatus === "failed" && item.messageId != null;
+        const isApprovalRequired = isFailedUser && item.errorCode === "AGENT_TOOL_APPROVAL_REQUIRED";
         const failedRunId =
           isFailedUser && typeof item.usage?.run_id === "string" ? item.usage.run_id : null;
         const switchCandidate = item.providerSwitch?.candidates?.[0];
@@ -382,10 +385,21 @@ export function Conversation({
                   />
                 ) : null}
                 {isFailedUser ? (
-                  <div className="flex max-w-full flex-col items-stretch gap-2 rounded-lg border border-destructive/30 bg-destructive/5 px-2.5 py-2 text-xs text-destructive sm:flex-row sm:items-start">
-                    <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                  <div className={cn(
+                    "flex max-w-full flex-col items-stretch gap-2 rounded-lg border px-2.5 py-2 text-xs sm:flex-row sm:items-start",
+                    isApprovalRequired
+                      ? "border-warning/35 bg-warning/5 text-warning"
+                      : "border-destructive/30 bg-destructive/5 text-destructive",
+                  )}>
+                    {isApprovalRequired
+                      ? <ShieldCheck className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                      : <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />}
                     <div className="min-w-0 flex-1">
-                      <p className="break-words">{item.errorMessage || "本轮执行失败"}</p>
+                      <p className="break-words">
+                        {isApprovalRequired
+                          ? "已暂停，批准后将从当前工具步骤继续。"
+                          : item.errorMessage || "本轮执行失败"}
+                      </p>
                       {approvalTools.length ? (
                         <p className="mt-1 break-words text-foreground/75">
                           准备调用：{approvalTools.map(approvalToolLabel).join("、")}
@@ -406,19 +420,24 @@ export function Conversation({
                         <Button
                           type="button"
                           size="sm"
-                          className="h-7 max-w-48 px-2 text-xs"
+                          className="h-9 min-w-24 max-w-48 touch-manipulation px-3 text-xs sm:h-7 sm:min-w-0 sm:px-2"
                           title={`批准调用：${approvalTools.map(approvalToolLabel).join("、")}`}
                           disabled={busy || retryingMessageId != null}
-                          onClick={() =>
-                            onRetryMessage?.(
+                          aria-live="polite"
+                          onClick={() => {
+                            void onRetryMessage?.(
                               item.messageId!,
                               switchCandidate?.provider_id,
                               approvalTools.map((tool) => tool.name),
-                            )
-                          }
+                            );
+                          }}
                         >
-                          <ShieldCheck className="mr-1 h-3 w-3" />
-                          {switchCandidate
+                          {retryingMessageId === item.messageId
+                            ? <RotateCcw className="mr-1 h-3 w-3 animate-spin" />
+                            : <ShieldCheck className="mr-1 h-3 w-3" />}
+                          {retryingMessageId === item.messageId
+                            ? "继续中"
+                            : switchCandidate
                             ? `批准并改用 ${switchCandidate.provider_name}`
                             : "批准并继续"}
                         </Button>

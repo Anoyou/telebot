@@ -70,17 +70,17 @@ export function SessionDrawer({
   return (
     <>
       {/* 桌面侧栏 */}
-      <aside className="hidden w-64 shrink-0 border-r bg-card/40 md:block">{body}</aside>
+      <aside data-assistant-session-anchor className="hidden w-64 shrink-0 border-r bg-card/40 md:block">{body}</aside>
       {/* 移动抽屉 */}
       {open ? (
         <div className="fixed bottom-[calc(4.75rem+env(safe-area-inset-bottom))] left-0 right-0 top-[calc(3.25rem+env(safe-area-inset-top))] z-[69] md:hidden">
           <button
             type="button"
-            className="absolute inset-0 bg-black/40"
+            className="absolute inset-0 bg-black/20 animate-in fade-in duration-200"
             aria-label="关闭会话列表"
             onClick={onClose}
           />
-          <div className="absolute inset-y-0 left-0 z-[70] w-[min(80vw,18rem)] bg-background shadow-xl">
+          <div className="absolute inset-y-0 left-0 z-[70] w-[min(80vw,18rem)] animate-in rounded-r-2xl border-r border-border/70 bg-card shadow-[0_6px_18px_rgba(15,23,42,0.10)] slide-in-from-left-3 duration-200">
             {body}
           </div>
         </div>

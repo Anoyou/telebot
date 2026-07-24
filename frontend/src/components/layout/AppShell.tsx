@@ -50,7 +50,9 @@ export function AppShell() {
   const [mobileActivePath, setMobileActivePath] = useState(location.pathname);
   const pageTransitionKey = location.pathname === "/plugins" || location.pathname.startsWith("/plugins/")
     ? "/plugins"
-    : location.pathname;
+    : location.pathname === "/operations" || location.pathname.startsWith("/operations/")
+      ? "/operations"
+      : location.pathname;
 
   useEffect(() => {
     setMobileActivePath(location.pathname);
@@ -196,6 +198,8 @@ export function AppShell() {
               <MobileScrollEdgeLabel edge="top" visible={mobileScrollEdge === "top"} />
               <div
                 key={pageTransitionKey}
+                data-page-transition-shell
+                data-page-transition-key={pageTransitionKey}
                 className="min-h-full w-full animate-page-enter"
               >
                 <Outlet />
@@ -323,7 +327,44 @@ export function AppShell() {
 }
 
 function MobileAssistantButton() {
-  const { collapsed, setCollapsed, streaming } = useAssistantDock();
+  const { collapsed, setCollapsed, streaming, completionSignal } = useAssistantDock();
+  const [mobileVisible, setMobileVisible] = useState(() => (
+    typeof window !== "undefined" && window.matchMedia("(max-width: 639px)").matches
+  ));
+  const [notice, setNotice] = useState<"idle" | "complete" | null>(null);
+  const completionRef = useRef(completionSignal);
+
+  useEffect(() => {
+    const media = window.matchMedia("(max-width: 639px)");
+    const update = () => setMobileVisible(media.matches);
+    update();
+    media.addEventListener("change", update);
+    return () => media.removeEventListener("change", update);
+  }, []);
+
+  useEffect(() => {
+    if (completionSignal === completionRef.current) return;
+    completionRef.current = completionSignal;
+    if (!mobileVisible) return;
+    setNotice("complete");
+    const timer = window.setTimeout(() => setNotice(null), 3_600);
+    return () => window.clearTimeout(timer);
+  }, [completionSignal, mobileVisible]);
+
+  useEffect(() => {
+    if (!mobileVisible || !collapsed || streaming || notice) return;
+    const timer = window.setTimeout(() => {
+      setNotice("idle");
+    }, 24_000 + Math.random() * 18_000);
+    return () => window.clearTimeout(timer);
+  }, [collapsed, mobileVisible, notice, streaming]);
+
+  useEffect(() => {
+    if (notice !== "idle") return;
+    const timer = window.setTimeout(() => setNotice(null), 3_800);
+    return () => window.clearTimeout(timer);
+  }, [notice]);
+
   return (
     <button
       type="button"
@@ -334,10 +375,17 @@ function MobileAssistantButton() {
       className={cn(
         "assistant-nav-orb liquid-bottom-nav relative grid h-[3.75rem] w-[3.75rem] shrink-0 content-center place-items-center rounded-full text-primary active:scale-95 motion-reduce:transform-none",
         !collapsed && "assistant-nav-orb-active border-primary/60 bg-primary/15 text-primary",
+        notice === "idle" && "assistant-nav-orb-idle-nudge",
+        notice === "complete" && "assistant-nav-orb-complete",
       )}
     >
+      {notice ? (
+        <span aria-hidden="true" data-assistant-mobile-notice={notice} className="assistant-nav-orb-notice">
+          {notice === "complete" ? "完成啦" : "我在"}
+        </span>
+      ) : null}
       <span className="relative grid place-items-center">
-        <AssistantRobot compact streaming={streaming} active={!collapsed} />
+        <AssistantRobot compact streaming={streaming} active={!collapsed} celebrating={notice === "complete"} />
       </span>
       <span className="mt-0.5 text-[10px] font-semibold leading-none">助手</span>
     </button>

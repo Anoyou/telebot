@@ -5,7 +5,7 @@
 //   编辑对话框：根据 type 切不同子表单
 //   保存后后端会通知所有启用此模板的 worker 热加载
 import { forwardRef, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { ChevronDown, Plus, Save, Trash2, Edit3 } from "lucide-react";
 import { useNavigate, useSearchParams } from "react-router-dom";
@@ -56,6 +56,9 @@ import {
 import {
   createCommandTemplate,
   deleteCommandTemplate,
+  disableAccountCommand,
+  enableAccountCommand,
+  listAccountCommands,
   listBuiltinCommands,
   listCommandTemplates,
   listLLMProviders,
@@ -64,6 +67,7 @@ import {
 import { listAccounts } from "@/api/accounts";
 import { getSystemSettings, patchSystemSettings } from "@/api/system";
 import type {
+  AccountCommandItem,
   CommandTemplateOut,
   CommandTemplateType,
   LLMApiFormat,
@@ -505,7 +509,6 @@ export function CommandTemplates() {
 
   const [editing, setEditing] = useState<FormState | null>(null);
   const [enableTargetTemplate, setEnableTargetTemplate] = useState<CommandTemplateOut | null>(null);
-  const [targetAid, setTargetAid] = useState("");
   const [focusCapability, setFocusCapability] = useState<AiCapability | null>(null);
   const returnToRef = useRef<string | null>(null);
 
@@ -523,14 +526,32 @@ export function CommandTemplates() {
   }, []);
 
   const openEnableFlow = (tpl: CommandTemplateOut) => {
-    const accounts = accountsQ.data ?? [];
-    if (accounts.length === 1) {
-      nav(`/accounts/${accounts[0].id}?tab=commands`);
-      return;
-    }
     setEnableTargetTemplate(tpl);
-    setTargetAid(accounts[0]?.id ? String(accounts[0].id) : "");
   };
+
+  const accountCommandQueries = useQueries({
+    queries: (accountsQ.data ?? []).map((account) => ({
+      queryKey: ["account", account.id, "commands"],
+      queryFn: () => listAccountCommands(account.id),
+      enabled: enableTargetTemplate !== null,
+    })),
+  });
+
+  const accountCommandToggleMut = useMutation({
+    mutationFn: async ({ aid, templateId, enabled }: { aid: number; templateId: number; enabled: boolean }) => {
+      if (enabled) await enableAccountCommand(aid, templateId);
+      else await disableAccountCommand(aid, templateId);
+    },
+    onSuccess: (_data, variables) => {
+      qc.setQueryData<AccountCommandItem[]>(["account", variables.aid, "commands"], (current) =>
+        current?.map((item) => item.template.id === variables.templateId
+          ? { ...item, enabled: variables.enabled }
+          : item),
+      );
+      toast.success(variables.enabled ? "已为该账号启用指令" : "已为该账号停用指令");
+    },
+    onError: (error) => toast.error(getErrMsg(error)),
+  });
 
   useEffect(() => {
     const editId = searchParams.get("edit");
@@ -729,8 +750,9 @@ export function CommandTemplates() {
           <div className="flex items-start justify-between gap-3">
             <div>
               <CardTitle className="text-base">自定义指令模板</CardTitle>
-              <CardDescription>
-                全局模板库，每条 = 一个 <CommandBadge>{cmdPrefix}name</CommandBadge> 指令的"配方"。账号详情 → 自定义指令页签选择是否启用
+              <CardDescription className="space-y-1">
+                <span className="block font-medium text-foreground">作用：定义能做什么</span>
+                <span className="block">全局模板库，每条 = 一个 <CommandBadge>{cmdPrefix}name</CommandBadge> 指令的"配方"。</span>
               </CardDescription>
             </div>
             <Button
@@ -995,35 +1017,45 @@ export function CommandTemplates() {
             <DialogHeader>
               <DialogTitle>选择要启用的账号</DialogTitle>
               <DialogDescription>
-                将跳转到账号详情的“自定义指令”页签，快捷启用模板
-                {enableTargetTemplate ? `「${enableTargetTemplate.name}」` : ""}。
+                直接设置模板{enableTargetTemplate ? `「${enableTargetTemplate.name}」` : ""}在各账号的启用状态，保存后 worker 会热加载。
               </DialogDescription>
             </DialogHeader>
-            <div className="space-y-2">
-              <Label>目标账号</Label>
-              <Select value={targetAid} onChange={(e) => setTargetAid(e.target.value)}>
-                <option value="">-- 选择账号 --</option>
-                {(accountsQ.data ?? []).map((a) => (
-                  <option key={a.id} value={a.id}>
-                    {a.display_name || a.phone || `#${a.id}`}
-                  </option>
-                ))}
-              </Select>
+            <div className="max-h-[min(55dvh,28rem)] space-y-2 overflow-y-auto pr-1">
+              {accountsQ.isLoading ? (
+                <div className="flex h-24 items-center justify-center"><Spinner className="text-primary" /></div>
+              ) : (accountsQ.data ?? []).length > 0 ? (
+                (accountsQ.data ?? []).map((account, index) => {
+                  const commandQ = accountCommandQueries[index];
+                  const command = commandQ.data?.find((item) => item.template.id === enableTargetTemplate?.id);
+                  const accountLabel = account.display_name || account.phone || `账号 #${account.id}`;
+                  return (
+                    <div key={account.id} className="flex min-h-12 items-center justify-between gap-3 rounded-lg border bg-background px-3 py-2">
+                      <div className="min-w-0">
+                        <div className="truncate text-sm font-medium">{accountLabel}</div>
+                        <div className="text-xs text-muted-foreground">账号 #{account.id}</div>
+                      </div>
+                      {commandQ.isError ? (
+                        <Button type="button" size="sm" variant="ghost" onClick={() => void commandQ.refetch()}>重试</Button>
+                      ) : (
+                        <Switch
+                          checked={command?.enabled ?? false}
+                          disabled={commandQ.isLoading || accountCommandToggleMut.isPending || !command}
+                          aria-label={`${accountLabel}启用${enableTargetTemplate?.name || "当前指令"}`}
+                          onCheckedChange={(enabled) => {
+                            if (!enableTargetTemplate) return;
+                            accountCommandToggleMut.mutate({ aid: account.id, templateId: enableTargetTemplate.id, enabled });
+                          }}
+                        />
+                      )}
+                    </div>
+                  );
+                })
+              ) : (
+                <div className="rounded-lg border border-dashed px-4 py-8 text-center text-sm text-muted-foreground">暂无可用账号，请先绑定账号。</div>
+              )}
             </div>
             <DialogFooter className="!flex !flex-row gap-2 sm:space-x-0 [&>*]:min-w-0 [&>*]:flex-1 sm:[&>*]:flex-none">
-              <Button variant="outline" onClick={() => setEnableTargetTemplate(null)}>
-                取消
-              </Button>
-              <Button
-                disabled={!targetAid}
-                onClick={() => {
-                  if (!targetAid) return;
-                  nav(`/accounts/${targetAid}?tab=commands`);
-                  setEnableTargetTemplate(null);
-                }}
-              >
-                前往启用
-              </Button>
+              <Button onClick={() => setEnableTargetTemplate(null)}>完成</Button>
             </DialogFooter>
           </DialogContent>
         </Dialog>
@@ -1035,20 +1067,28 @@ export function CommandTemplates() {
 // ── 内置指令面板（只读） ──────────────────────────────────────────
 // 让用户起自定义模板名时知道哪些已被占用；防撞名（API 校验也会拒）。
 function BuiltinCommandsPanel({ cmdPrefix }: { cmdPrefix: string }) {
+  const [expanded, setExpanded] = useState(false);
   const builtinQ = useQuery({
     queryKey: ["cmd-builtin"],
     queryFn: listBuiltinCommands,
+    enabled: expanded,
   });
 
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle className="text-base">内置指令（只读）</CardTitle>
-        <CardDescription>
-          系统注册在 worker 里的指令；自定义模板的 name/aliases 不能与此重复
-        </CardDescription>
-      </CardHeader>
-      <CardContent>
+    <Card className="overflow-hidden">
+      <button
+        type="button"
+        className="flex w-full items-center justify-between gap-3 p-5 text-left hover:bg-muted/25"
+        aria-expanded={expanded}
+        onClick={() => setExpanded((value) => !value)}
+      >
+        <span className="min-w-0">
+          <span className="block text-base font-semibold">内置指令（只读）</span>
+          <span className="mt-1 block text-sm text-muted-foreground">系统注册在 worker 里的指令；自定义模板的 name/aliases 不能与此重复</span>
+        </span>
+        <ChevronDown className={`h-4 w-4 shrink-0 text-muted-foreground transition-transform ${expanded ? "rotate-180" : ""}`} />
+      </button>
+      {expanded ? <CardContent className="border-t pt-5">
         {builtinQ.isLoading ? (
           <div className="flex h-16 items-center justify-center">
             <Spinner className="text-primary" />
@@ -1079,7 +1119,7 @@ function BuiltinCommandsPanel({ cmdPrefix }: { cmdPrefix: string }) {
         ) : (
           <p className="text-xs text-muted-foreground">未读取到内置指令</p>
         )}
-      </CardContent>
+      </CardContent> : null}
     </Card>
   );
 }

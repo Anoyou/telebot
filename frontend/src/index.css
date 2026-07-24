@@ -680,13 +680,71 @@
     animation: assistant-orb-breathe 2.4s ease-in-out infinite;
   }
 
+  .assistant-nav-orb-notice {
+    position: absolute;
+    right: 74%;
+    top: -8px;
+    z-index: 5;
+    width: max-content;
+    border: 1px solid hsl(var(--border) / 0.82);
+    border-radius: 10px 10px 3px 10px;
+    background: hsl(var(--popover) / 0.96);
+    padding: 4px 7px;
+    color: hsl(var(--popover-foreground));
+    box-shadow: 0 5px 14px hsl(0 0% 0% / 0.14);
+    font-size: 10px;
+    font-weight: 700;
+    line-height: 1;
+    pointer-events: none;
+    animation: assistant-pet-notice-in 280ms cubic-bezier(0.16, 1, 0.3, 1) both;
+  }
+
+  .assistant-nav-orb-notice[data-assistant-mobile-notice="complete"] {
+    border-color: hsl(var(--primary) / 0.45);
+    background: hsl(var(--primary));
+    color: hsl(var(--primary-foreground));
+  }
+
+  .assistant-nav-orb-idle-nudge {
+    animation: assistant-orb-nudge 900ms ease-in-out 2;
+  }
+
+  .assistant-nav-orb-complete {
+    animation: assistant-orb-complete-hop 720ms ease-in-out 3;
+  }
+
+  .assistant-nav-orb-complete::after {
+    content: "";
+    position: absolute;
+    inset: -5px;
+    border: 2px solid hsl(var(--primary) / 0.72);
+    border-radius: 9999px;
+    pointer-events: none;
+    animation: assistant-pet-complete-ring 900ms cubic-bezier(0.16, 1, 0.3, 1) 2;
+  }
+
   @keyframes assistant-orb-breathe {
     0%, 100% { opacity: 0.45; transform: scale(0.96); }
     50% { opacity: 0.95; transform: scale(1.03); }
   }
 
+  @keyframes assistant-orb-nudge {
+    0%, 100% { transform: rotate(0deg) scale(1); }
+    35% { transform: rotate(-4deg) scale(1.03); }
+    70% { transform: rotate(4deg) scale(1.03); }
+  }
+
+  @keyframes assistant-orb-complete-hop {
+    0%, 100% { transform: translateY(0) scale(1); }
+    45% { transform: translateY(-5px) scale(1.04); }
+  }
+
   @media (prefers-reduced-motion: reduce) {
     .assistant-nav-orb-active::before { animation: none; opacity: 0.75; }
+    .assistant-nav-orb-idle-nudge,
+    .assistant-nav-orb-complete,
+    .assistant-nav-orb-complete::after,
+    .assistant-nav-orb-notice { animation: none; }
   }
 
   /* 助手展开后把主导航让位给对话，并让机器人停在输入框上沿附近。 */
@@ -730,6 +788,77 @@
     cursor: grabbing;
     transition: none;
     filter: drop-shadow(0 12px 16px hsl(var(--primary) / 0.22)) drop-shadow(0 10px 14px hsl(0 0% 0% / 0.22));
+  }
+
+  .assistant-pet-notice {
+    position: absolute;
+    right: calc(100% - 9px);
+    top: 7px;
+    z-index: 8;
+    width: max-content;
+    max-width: 10rem;
+    border: 1px solid hsl(var(--border) / 0.82);
+    border-radius: 12px 12px 4px 12px;
+    background: hsl(var(--popover) / 0.96);
+    padding: 6px 9px;
+    color: hsl(var(--popover-foreground));
+    box-shadow: 0 7px 18px hsl(0 0% 0% / 0.14);
+    font-size: 11px;
+    font-weight: 600;
+    line-height: 1.2;
+    pointer-events: none;
+    animation: assistant-pet-notice-in 320ms cubic-bezier(0.16, 1, 0.3, 1) both;
+  }
+
+  .assistant-pet[data-side="left"] .assistant-pet-notice {
+    right: auto;
+    left: calc(100% - 9px);
+    border-radius: 12px 12px 12px 4px;
+  }
+
+  .assistant-pet-notice[data-assistant-pet-notice="complete"] {
+    border-color: hsl(var(--primary) / 0.42);
+    background: hsl(var(--primary));
+    color: hsl(var(--primary-foreground));
+    box-shadow: 0 7px 22px hsl(var(--primary) / 0.3);
+  }
+
+  .assistant-pet-complete::after {
+    content: "";
+    position: absolute;
+    left: 5px;
+    top: 8px;
+    z-index: -1;
+    width: 58px;
+    height: 58px;
+    border: 2px solid hsl(var(--primary) / 0.72);
+    border-radius: 999px;
+    pointer-events: none;
+    animation: assistant-pet-complete-ring 900ms cubic-bezier(0.16, 1, 0.3, 1) 2;
+  }
+
+  .assistant-pet-complete .assistant-pet-head {
+    animation: assistant-pet-celebrate-head 680ms ease-in-out 3;
+  }
+
+  .assistant-pet-complete .assistant-pet-arm-left {
+    animation: assistant-pet-celebrate-arm-left 520ms ease-in-out 4;
+  }
+
+  .assistant-pet-complete .assistant-pet-arm-right {
+    animation: assistant-pet-celebrate-arm-right 520ms ease-in-out 4;
+  }
+
+  .assistant-pet-robot[data-agent-pet-intent="complete"] .assistant-pet-head {
+    animation: assistant-pet-celebrate-head 680ms ease-in-out 3;
+  }
+
+  .assistant-pet-robot[data-agent-pet-intent="complete"] .assistant-pet-arm-left {
+    animation: assistant-pet-celebrate-arm-left 520ms ease-in-out 4;
+  }
+
+  .assistant-pet-robot[data-agent-pet-intent="complete"] .assistant-pet-arm-right {
+    animation: assistant-pet-celebrate-arm-right 520ms ease-in-out 4;
   }
 
   .assistant-pet-robot-frame {
@@ -1202,6 +1331,32 @@
     94% { transform: rotate(6deg); }
   }
 
+  @keyframes assistant-pet-notice-in {
+    0% { opacity: 0; transform: translateY(4px) scale(0.9); }
+    100% { opacity: 1; transform: translateY(0) scale(1); }
+  }
+
+  @keyframes assistant-pet-complete-ring {
+    0% { opacity: 0.8; transform: scale(0.72); }
+    100% { opacity: 0; transform: scale(1.45); }
+  }
+
+  @keyframes assistant-pet-celebrate-head {
+    0%, 100% { translate: 0 0; rotate: 0deg; }
+    35% { translate: 0 -5px; rotate: -4deg; }
+    70% { translate: 0 -2px; rotate: 4deg; }
+  }
+
+  @keyframes assistant-pet-celebrate-arm-left {
+    0%, 100% { transform: rotate(14deg); }
+    50% { transform: translateY(-5px) rotate(-42deg); }
+  }
+
+  @keyframes assistant-pet-celebrate-arm-right {
+    0%, 100% { transform: rotate(-14deg); }
+    50% { transform: translateY(-5px) rotate(42deg); }
+  }
+
   @keyframes assistant-pet-antenna-work {
     0%, 100% { transform: rotate(-18deg); }
     25% { transform: rotate(20deg); }
@@ -1288,6 +1443,15 @@
     .assistant-pet-neck,
     .assistant-pet-shadow {
       transition: none;
+    }
+
+    .assistant-pet-notice {
+      animation: none;
+    }
+
+    .assistant-pet-complete::after {
+      animation: none;
+      opacity: 0.65;
     }
 
     .assistant-pet-antenna,

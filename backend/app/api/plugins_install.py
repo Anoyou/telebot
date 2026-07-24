@@ -6,6 +6,7 @@ import base64
 import binascii
 import logging
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
@@ -21,6 +22,7 @@ from ..services import audit
 from ..services import plugin_center_service as pcs
 from ..services import plugin_install_service as pis
 from ..services.remote_plugin_service import RemotePluginError, trigger_reload
+from ..settings import settings
 from ..worker.ipc import CMD_RELOAD_CONFIG, cmd_channel, make_cmd
 
 log = logging.getLogger(__name__)
@@ -39,6 +41,14 @@ class PluginInstallOut(BaseModel):
     manifest: dict[str, Any] | None = None
     installed_at: datetime | None = None
     updated_at: datetime | None = None
+
+
+class PluginChangelogOut(BaseModel):
+    key: str
+    available: bool
+    content: str = ""
+    truncated: bool = False
+    message: str | None = None
 
 
 def _to_out(row: InstalledPlugin) -> PluginInstallOut:
@@ -121,6 +131,43 @@ async def list_installed_overview(
     db: DBSession, _user: CurrentUser
 ) -> list[PluginCenterItem]:
     return await pcs.list_installed_plugins_overview(db)
+
+
+@router.get("/api/plugins/install/{key}/changelog", response_model=PluginChangelogOut)
+async def get_installed_plugin_changelog(
+    key: str, db: DBSession, _user: CurrentUser
+) -> PluginChangelogOut:
+    row = await db.get(InstalledPlugin, key)
+    if row is None:
+        raise _bad("PLUGIN_NOT_FOUND", f"插件不存在: {key}", 404)
+
+    installed_root = settings.plugins_installed_path.resolve()
+    plugin_root = Path(row.installed_path or installed_root / key).resolve()
+    if not plugin_root.is_relative_to(installed_root):
+        raise _bad("PLUGIN_PATH_INVALID", "插件安装路径不在受管目录内", 409)
+
+    changelog_path = (plugin_root / "CHANGELOG.md").resolve()
+    if not changelog_path.is_relative_to(plugin_root):
+        raise _bad("PLUGIN_CHANGELOG_PATH_INVALID", "插件更新日志路径越界", 409)
+    if not changelog_path.is_file():
+        return PluginChangelogOut(
+            key=key,
+            available=False,
+            message="该插件未提供 CHANGELOG.md。",
+        )
+
+    max_bytes = 256 * 1024
+    with changelog_path.open("rb") as changelog_file:
+        raw = changelog_file.read(max_bytes + 1)
+    truncated = len(raw) > max_bytes
+    content = raw[:max_bytes].decode("utf-8", errors="replace")
+    return PluginChangelogOut(
+        key=key,
+        available=True,
+        content=content,
+        truncated=truncated,
+        message="更新日志过长，仅显示前 256 KiB。" if truncated else None,
+    )
 
 
 @router.post("/api/plugins/install/upload", response_model=PluginInstallOut)

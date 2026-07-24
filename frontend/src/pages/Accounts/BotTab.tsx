@@ -54,6 +54,7 @@ import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { SignalPill } from "@/components/ui/status";
+import { useAssistantDock } from "@/components/assistant/AssistantDock";
 import {
   Table,
   TableBody,
@@ -1951,6 +1952,7 @@ export function BotTab({
   aid: number;
   mode?: "management" | "interaction";
 }) {
+  const { collapsed: assistantCollapsed } = useAssistantDock();
   const qc = useQueryClient();
   const [enabled, setEnabled] = useState(false);
   const [token, setToken] = useState("");
@@ -2729,7 +2731,7 @@ export function BotTab({
     </div>
   );
 
-  const floatingInteractionSaveButton = mode === "interaction" && typeof document !== "undefined"
+  const floatingInteractionSaveButton = mode === "interaction" && assistantCollapsed && typeof document !== "undefined"
     ? createPortal(
         <div className="pointer-events-none fixed bottom-[calc(5rem+env(safe-area-inset-bottom))] right-4 z-[55] flex justify-end sm:bottom-6 sm:right-8">
           <Button

@@ -35,6 +35,16 @@ const PET_TOP_GUTTER = 92;
 const PET_BOTTOM_GUTTER = 24;
 const PET_SNAP_DELAY = 1_800;
 const PET_STORAGE_KEY = "telepilot:assistant-pet:v1";
+const IDLE_BUBBLE_MIN_DELAY = 24_000;
+const IDLE_BUBBLE_DELAY_RANGE = 18_000;
+const IDLE_BUBBLE_VISIBLE_MS = 3_800;
+
+type PetNotice = {
+  text: string;
+  tone: "idle" | "complete";
+};
+
+const IDLE_NOTICES = ["我在这儿", "随时可以叫我", "需要我帮忙吗？"] as const;
 
 function clamp(value: number, min: number, max: number) {
   return Math.min(Math.max(value, min), max);
@@ -69,16 +79,18 @@ export function AssistantRobot({
   compact = false,
   streaming = false,
   active = false,
+  celebrating = false,
 }: {
   compact?: boolean;
   streaming?: boolean;
   active?: boolean;
+  celebrating?: boolean;
 }) {
   return (
     <span className={cn("assistant-pet-robot-frame", compact && "assistant-pet-robot-frame-compact")} aria-hidden="true">
       <span
         className="assistant-pet-robot"
-        data-agent-pet-intent={streaming ? "working" : active ? "awake" : "idle"}
+        data-agent-pet-intent={celebrating ? "complete" : streaming ? "working" : active ? "awake" : "idle"}
       >
         <span className="assistant-pet-shadow" />
         <span className="assistant-pet-antenna"><span /></span>
@@ -111,13 +123,19 @@ export function AssistantRobot({
 }
 
 export function AssistantPet() {
-  const { collapsed, setCollapsed, streaming } = useAssistantDock();
+  const { collapsed, setCollapsed, streaming, completionSignal } = useAssistantDock();
+  const [desktopVisible, setDesktopVisible] = useState(() => (
+    typeof window !== "undefined" && window.matchMedia("(min-width: 640px)").matches
+  ));
   const [position, setPosition] = useState<PetPosition | null>(null);
   const [dragging, setDragging] = useState(false);
   const [docked, setDocked] = useState(true);
+  const [notice, setNotice] = useState<PetNotice | null>(null);
   const buttonRef = useRef<HTMLButtonElement>(null);
   const dragRef = useRef<DragState | null>(null);
   const snapTimerRef = useRef<number | null>(null);
+  const completionTimerRef = useRef<number | null>(null);
+  const completionSignalRef = useRef(completionSignal);
   const suppressClickRef = useRef(false);
 
   const clearSnapTimer = useCallback(() => {
@@ -155,10 +173,28 @@ export function AssistantPet() {
     snapTimerRef.current = window.setTimeout(() => snapToNearestEdge(), delay);
   }, [clearSnapTimer, snapToNearestEdge]);
 
+  const clearCompletionTimer = useCallback(() => {
+    if (completionTimerRef.current != null) {
+      window.clearTimeout(completionTimerRef.current);
+      completionTimerRef.current = null;
+    }
+  }, []);
+
   useEffect(() => {
     setPosition(initialPosition());
-    return clearSnapTimer;
-  }, [clearSnapTimer]);
+    return () => {
+      clearSnapTimer();
+      clearCompletionTimer();
+    };
+  }, [clearCompletionTimer, clearSnapTimer]);
+
+  useEffect(() => {
+    const media = window.matchMedia("(min-width: 640px)");
+    const update = () => setDesktopVisible(media.matches);
+    update();
+    media.addEventListener("change", update);
+    return () => media.removeEventListener("change", update);
+  }, []);
 
   useEffect(() => {
     const handleResize = () => {
@@ -177,15 +213,75 @@ export function AssistantPet() {
   }, [docked]);
 
   useEffect(() => {
-    if (!position) return;
+    if (!position || !desktopVisible) return;
     clearSnapTimer();
     if (!collapsed) {
+      setNotice(null);
       setDocked(false);
-      setPosition((current) => current ? { ...current, x: emergedX(current.side) } : current);
-      return;
+      const moveToSessionList = () => {
+        const anchor = document.querySelector<HTMLElement>("[data-assistant-session-anchor]");
+        const rect = anchor?.getBoundingClientRect();
+        setPosition((current) => {
+          if (!current) return current;
+          if (!rect || rect.width <= 0 || rect.height <= 0) {
+            return { ...current, x: emergedX(current.side) };
+          }
+          return {
+            x: clamp(rect.right - PET_WIDTH / 2, 8, window.innerWidth - PET_WIDTH - 8),
+            y: clamp(rect.top + Math.min(150, rect.height * 0.28), PET_TOP_GUTTER, window.innerHeight - PET_HEIGHT - PET_BOTTOM_GUTTER),
+            side: "left",
+          };
+        });
+      };
+      const timers = [0, 120, 320, 640, 1_000].map((delay) => window.setTimeout(moveToSessionList, delay));
+      return () => timers.forEach((timer) => window.clearTimeout(timer));
     }
     scheduleSnap(900);
-  }, [collapsed]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [collapsed, desktopVisible]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (!desktopVisible || !collapsed || !docked || dragging || streaming) return;
+    let disposed = false;
+    let bubbleTimer: number | null = null;
+    let hideTimer: number | null = null;
+
+    const scheduleBubble = () => {
+      const delay = IDLE_BUBBLE_MIN_DELAY + Math.random() * IDLE_BUBBLE_DELAY_RANGE;
+      bubbleTimer = window.setTimeout(() => {
+        const text = IDLE_NOTICES[Math.floor(Math.random() * IDLE_NOTICES.length)] || IDLE_NOTICES[0];
+        setNotice({ text, tone: "idle" });
+        hideTimer = window.setTimeout(() => {
+          setNotice((current) => current?.tone === "idle" ? null : current);
+          if (!disposed) scheduleBubble();
+        }, IDLE_BUBBLE_VISIBLE_MS);
+      }, delay);
+    };
+
+    scheduleBubble();
+    return () => {
+      disposed = true;
+      if (bubbleTimer != null) window.clearTimeout(bubbleTimer);
+      if (hideTimer != null) window.clearTimeout(hideTimer);
+      setNotice((current) => current?.tone === "idle" ? null : current);
+    };
+  }, [collapsed, desktopVisible, docked, dragging, streaming]);
+
+  useEffect(() => {
+    if (completionSignal === completionSignalRef.current) return;
+    completionSignalRef.current = completionSignal;
+    if (!desktopVisible || !collapsed || !position) return;
+
+    clearCompletionTimer();
+    clearSnapTimer();
+    setDocked(false);
+    setNotice({ text: "任务完成啦", tone: "complete" });
+    setPosition((current) => current ? { ...current, x: emergedX(current.side) } : current);
+    completionTimerRef.current = window.setTimeout(() => {
+      setNotice((current) => current?.tone === "complete" ? null : current);
+      snapToNearestEdge();
+      completionTimerRef.current = null;
+    }, 3_600);
+  }, [clearCompletionTimer, clearSnapTimer, collapsed, completionSignal, desktopVisible, position, snapToNearestEdge]);
 
   useEffect(() => {
     let frame = 0;
@@ -247,7 +343,7 @@ export function AssistantPet() {
     suppressClickRef.current = drag.moved;
     dragRef.current = null;
     setDragging(false);
-    if (drag.moved) scheduleSnap();
+    if (drag.moved && collapsed) scheduleSnap();
   };
 
   const cancelDrag = (event: ReactPointerEvent<HTMLButtonElement>) => {
@@ -259,7 +355,7 @@ export function AssistantPet() {
     suppressClickRef.current = false;
     dragRef.current = null;
     setDragging(false);
-    scheduleSnap(240);
+    if (collapsed) scheduleSnap(240);
   };
 
   if (!position) return null;
@@ -270,6 +366,7 @@ export function AssistantPet() {
       type="button"
       data-assistant-desktop-pet
       data-docked={docked ? position.side : "false"}
+      data-side={position.side}
       data-dragging={dragging ? "true" : undefined}
       aria-label={collapsed ? "打开系统助手" : "关闭系统助手"}
       aria-pressed={!collapsed}
@@ -290,12 +387,22 @@ export function AssistantPet() {
         dragging && "assistant-pet-dragging",
         !collapsed && "assistant-pet-awake",
         streaming && "assistant-pet-streaming",
+        notice?.tone === "complete" && "assistant-pet-complete",
       )}
       style={{
         transform: `translate3d(${position.x}px, ${position.y}px, 0)`,
       } as CSSProperties}
     >
-      <AssistantRobot streaming={streaming} active={!collapsed} />
+      {notice ? (
+        <span
+          aria-hidden="true"
+          data-assistant-pet-notice={notice.tone}
+          className="assistant-pet-notice"
+        >
+          {notice.text}
+        </span>
+      ) : null}
+      <AssistantRobot streaming={streaming} active={!collapsed} celebrating={notice?.tone === "complete"} />
     </button>
   );
 }

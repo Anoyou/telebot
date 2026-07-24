@@ -60,6 +60,7 @@ import { featureConfigPath } from "./_shared/featureConfig";
 import { PluginWorkspaceHeader } from "./WorkspaceHeader";
 
 type ModuleCategory = "direct_passthrough" | "interactive" | "automation" | "utility";
+type ModuleCategoryFilter = "all" | ModuleCategory;
 const CATEGORY_META: Record<ModuleCategory, { title: string; hint: string; icon: ComponentType<{ className?: string }> }> = {
   direct_passthrough: {
     title: "裸直通",
@@ -197,6 +198,7 @@ export function PluginsHome() {
   const [selectedAid, setSelectedAid] = useState<number | null>(null);
   const [guideExpanded, setGuideExpanded] = useState(false);
   const [aiPanelExpanded, setAiPanelExpanded] = useState(false);
+  const [selectedCategory, setSelectedCategory] = useState<ModuleCategoryFilter>("all");
   const guideActive = searchParams.get("guide") === "1";
   const [bannerVisible, setBannerVisible] = useState(() => {
     if (typeof window === "undefined") return false;
@@ -309,6 +311,12 @@ export function PluginsHome() {
 
     return zones;
   }, [pluginFeatures]);
+  const visibleCategoryFeatures = selectedCategory === "all"
+    ? pluginFeatures
+    : grouped[selectedCategory];
+  const visibleCategoryMeta = selectedCategory === "all"
+    ? { title: "全部已安装插件", hint: "默认展示当前已安装的全部插件，可从分类栏进一步筛选。", icon: Package2 }
+    : CATEGORY_META[selectedCategory];
 
   if (matrixQ.isLoading) {
     return (
@@ -489,7 +497,7 @@ export function PluginsHome() {
           <SectionHeader
             icon={Package2}
             title="账号插件启用详情与配置"
-            description="先选择要配置的账号，再查看每类插件在该账号上的启用状态与配置入口。"
+            description="先选择账号，再像软件商店一样按分类浏览当前已安装插件。"
             meta={(
               <SignalPill
                 tone="neutral"
@@ -547,22 +555,51 @@ export function PluginsHome() {
               </Button>
             </div>
           ) : null}
-          <div className="grid gap-4 lg:grid-cols-2">
-            {(Object.keys(CATEGORY_META) as ModuleCategory[]).map((category) => (
-              <FeatureZone
-                key={category}
-                icon={CATEGORY_META[category].icon}
-                title={CATEGORY_META[category].title}
-                hint={CATEGORY_META[category].hint}
-                features={grouped[category]}
-                selectedAccountId={selectedAccount?.id}
-                selectedFeatures={selectedAccount?.features ?? {}}
-                selectedFeatureEnabled={selectedAccount?.feature_enabled ?? {}}
-                accountFeatureByKey={accountFeatureByKey}
-                installByKey={installByKey}
-                pluginUsageByKey={pluginUsageByKey}
-              />
-            ))}
+          <div className="grid min-w-0 gap-4 lg:grid-cols-[13rem_minmax(0,1fr)] lg:items-start">
+            <nav
+              aria-label="插件分类"
+              className="horizontal-scroll-touch flex gap-2 overflow-x-auto pb-1 lg:sticky lg:top-3 lg:flex-col lg:overflow-visible lg:pb-0"
+            >
+              {(["all", ...Object.keys(CATEGORY_META)] as ModuleCategoryFilter[]).map((category) => {
+                const meta = category === "all"
+                  ? { title: "全部", hint: "所有已安装插件", icon: Package2 }
+                  : CATEGORY_META[category];
+                const Icon = meta.icon;
+                const count = category === "all" ? pluginFeatures.length : grouped[category].length;
+                const active = selectedCategory === category;
+                return (
+                  <button
+                    key={category}
+                    type="button"
+                    data-plugin-category-filter={category}
+                    className={cn(
+                      "flex min-w-[9rem] shrink-0 items-center gap-2 rounded-lg border px-3 py-2.5 text-left transition-colors lg:min-w-0 lg:w-full",
+                      active
+                        ? "border-primary/35 bg-primary/10 text-primary"
+                        : "border-border/70 bg-background hover:bg-muted/40",
+                    )}
+                    aria-current={active ? "page" : undefined}
+                    onClick={() => setSelectedCategory(category)}
+                  >
+                    <Icon className="h-4 w-4 shrink-0" />
+                    <span className="min-w-0 flex-1 truncate text-sm font-medium">{meta.title}</span>
+                    <span className="shrink-0 rounded-full bg-muted px-2 py-0.5 text-[11px] tabular-nums text-muted-foreground">{count}</span>
+                  </button>
+                );
+              })}
+            </nav>
+            <FeatureZone
+              icon={visibleCategoryMeta.icon}
+              title={visibleCategoryMeta.title}
+              hint={visibleCategoryMeta.hint}
+              features={visibleCategoryFeatures}
+              selectedAccountId={selectedAccount?.id}
+              selectedFeatures={selectedAccount?.features ?? {}}
+              selectedFeatureEnabled={selectedAccount?.feature_enabled ?? {}}
+              accountFeatureByKey={accountFeatureByKey}
+              installByKey={installByKey}
+              pluginUsageByKey={pluginUsageByKey}
+            />
           </div>
         </CardContent>
       </Card>
@@ -783,7 +820,7 @@ function FeatureZone({
         {features.length === 0 ? (
           <p className="text-sm text-muted-foreground">暂无内容</p>
         ) : (
-          <div className="space-y-2">
+          <div className="grid gap-3 xl:grid-cols-2">
             {features.map((f) => {
               const directPassthrough = pluginSupportsDirectPassthrough(f.capabilities);
               const status = selectedFeatures[f.key] ?? "disabled";
@@ -826,6 +863,8 @@ function FeatureZone({
               return (
                 <div
                   key={f.key}
+                  data-plugin-card
+                  data-plugin-key={f.key}
                   className={`rounded-md border p-3 ${
                     status === "failed" ? "border-destructive/40 bg-destructive/5" : ""
                   }`}

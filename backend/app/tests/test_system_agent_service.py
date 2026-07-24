@@ -508,6 +508,134 @@ async def test_tool_approval_failure_is_persisted_for_retry(agent_db, monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_tool_approvals_accumulate_across_retries(agent_db, monkeypatch) -> None:
+    svc = SystemAgentService()
+    attempts: list[list[str]] = []
+
+    async def fake_stream(*_args, **kwargs):
+        approved = sorted(kwargs.get("approved_tools") or [])
+        attempts.append(approved)
+        if not approved:
+            yield {
+                "type": "error",
+                "code": "AGENT_TOOL_APPROVAL_REQUIRED",
+                "message": "请批准读取日志",
+                "tool_approval": {
+                    "domains": ["logs"],
+                    "calls": [{"call_id": "call-1", "name": "logs.recent", "arguments": {}}],
+                    "tools": [{"call_id": "call-1", "name": "logs.recent", "arguments": {}}],
+                },
+            }
+            yield {"type": "done", "ok": False}
+            return
+        if approved == ["logs.recent"]:
+            yield {
+                "type": "error",
+                "code": "AGENT_TOOL_APPROVAL_REQUIRED",
+                "message": "请批准搜索日志",
+                "tool_approval": {
+                    "domains": ["logs"],
+                    "calls": [{"call_id": "call-2", "name": "logs.search_errors", "arguments": {}}],
+                    "tools": [{"call_id": "call-2", "name": "logs.search_errors", "arguments": {}}],
+                },
+            }
+            yield {"type": "done", "ok": False}
+            return
+        yield {"type": "assistant_message", "content": "处理完成", "usage": {}}
+        yield {"type": "done", "ok": True}
+
+    monkeypatch.setattr(svc.runtime, "stream_turn", fake_stream)
+
+    async with agent_db() as db:
+        session = await svc.create_session(db, channel=CHANNEL_WEB, web_user_id=1)
+        async for _event in svc.stream_message(
+            db,
+            session=session,
+            text="排查日志",
+            role="admin",
+            channel=CHANNEL_WEB,
+            web_user_id=1,
+        ):
+            pass
+
+        message = (await svc.list_messages(db, session.id))[0]
+        async for _event in svc.stream_message(
+            db,
+            session=session,
+            text="",
+            role="admin",
+            channel=CHANNEL_WEB,
+            web_user_id=1,
+            retry_message=message,
+            approved_tools=["logs.recent"],
+        ):
+            pass
+
+        message = (await svc.list_messages(db, session.id))[0]
+        assert message.usage["approved_tools"] == ["logs.recent"]
+        async for _event in svc.stream_message(
+            db,
+            session=session,
+            text="",
+            role="admin",
+            channel=CHANNEL_WEB,
+            web_user_id=1,
+            retry_message=message,
+            approved_tools=["logs.search_errors"],
+        ):
+            pass
+
+        message = (await svc.list_messages(db, session.id))[0]
+        assert message.run_status == MESSAGE_RUN_SUCCEEDED
+        assert attempts == [[], ["logs.recent"], ["logs.recent", "logs.search_errors"]]
+
+
+@pytest.mark.asyncio
+async def test_tool_approval_retry_rejects_tools_outside_pending_set(agent_db, monkeypatch) -> None:
+    svc = SystemAgentService()
+
+    async def fake_stream(*_args, **_kwargs):
+        yield {
+            "type": "error",
+            "code": "AGENT_TOOL_APPROVAL_REQUIRED",
+            "message": "请批准读取日志",
+            "tool_approval": {
+                "domains": ["logs"],
+                "tools": [{"name": "logs.recent", "description": "读取日志"}],
+            },
+        }
+        yield {"type": "done", "ok": False}
+
+    monkeypatch.setattr(svc.runtime, "stream_turn", fake_stream)
+
+    async with agent_db() as db:
+        session = await svc.create_session(db, channel=CHANNEL_WEB, web_user_id=1)
+        async for _event in svc.stream_message(
+            db,
+            session=session,
+            text="读取日志",
+            role="admin",
+            channel=CHANNEL_WEB,
+            web_user_id=1,
+        ):
+            pass
+
+        message = (await svc.list_messages(db, session.id))[0]
+        with pytest.raises(ValueError, match="批准工具不在当前待确认列表"):
+            async for _event in svc.stream_message(
+                db,
+                session=session,
+                text="",
+                role="admin",
+                channel=CHANNEL_WEB,
+                web_user_id=1,
+                retry_message=message,
+                approved_tools=["settings.update"],
+            ):
+                pass
+
+
+@pytest.mark.asyncio
 async def test_failed_turn_persists_durable_run_id(agent_db, monkeypatch) -> None:
     svc = SystemAgentService()
 

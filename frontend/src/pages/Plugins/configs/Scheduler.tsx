@@ -242,6 +242,40 @@ export function SchedulerConfig() {
   const [dryRule, setDryRule] = useState<RuleOut | null>(null);
   const [dryResult, setDryResult] = useState<RuleDryRunResponse | null>(null);
 
+  const accountSelector = (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-base">选择账号</CardTitle>
+        <CardDescription className="space-y-1">
+          <span className="block font-medium text-foreground">作用：定义何时执行</span>
+          <span className="block">定时任务按账号隔离运行，每个账号独立维护规则。</span>
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        {accountsQ.isLoading ? (
+          <div className="flex h-20 items-center justify-center">
+            <Spinner className="text-primary" />
+          </div>
+        ) : accountsQ.data && accountsQ.data.length > 0 ? (
+          <Select
+            value={aid ? String(aid) : ""}
+            onChange={(event) => setSearchParams({ aid: event.target.value })}
+            className="w-full sm:w-80"
+          >
+            <option value="" disabled>请选择账号</option>
+            {accountsQ.data.map((account) => (
+              <option key={account.id} value={account.id}>
+                {account.display_name || account.phone || `账号 #${account.id}`}
+              </option>
+            ))}
+          </Select>
+        ) : (
+          <p className="text-sm text-muted-foreground">暂无可用账号，请先绑定账号。</p>
+        )}
+      </CardContent>
+    </Card>
+  );
+
   function openDryRun(rule: RuleOut) {
     setDryRule(rule);
     setDryResult(null);
@@ -285,54 +319,20 @@ export function SchedulerConfig() {
   if (!aid) {
     return (
       <div className="space-y-6">
-        <div>
-          <h1 className="text-2xl font-semibold tracking-tight">定时任务</h1>
-          <p className="text-sm text-muted-foreground">
-            选择账号后管理该账号的定时任务规则。
-          </p>
-        </div>
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-base">选择账号</CardTitle>
-            <CardDescription>
-              定时任务按账号隔离运行，每个账号独立维护规则。
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
-            {accountsQ.isLoading ? (
-              <div className="flex h-20 items-center justify-center">
-                <Spinner className="text-primary" />
-              </div>
-            ) : accountsQ.data && accountsQ.data.length > 0 ? (
-              <div className="flex flex-wrap gap-2">
-                {accountsQ.data.map((a) => (
-                  <Button
-                    key={a.id}
-                    variant="outline"
-                    onClick={() => setSearchParams({ aid: String(a.id) })}
-                  >
-                    {a.display_name || a.phone || `账号 #${a.id}`}
-                  </Button>
-                ))}
-              </div>
-            ) : (
-              <p className="text-sm text-muted-foreground">
-                暂无可用账号，请先绑定账号。
-              </p>
-            )}
-          </CardContent>
-        </Card>
+        {accountSelector}
       </div>
     );
   }
 
   return (
     <div className="space-y-6">
-      <RulePageHeader
-        title={`定时任务 · 账号 #${aid}`}
-        backLabel={fromAccountRoute ? accountBackTarget.backLabel : "返回定时任务"}
-        backHref={fromAccountRoute ? accountBackTarget.backHref : "/operations/scheduler"}
-      />
+      {fromAccountRoute ? (
+        <RulePageHeader
+          title={`定时任务 · 账号 #${aid}`}
+          backLabel={accountBackTarget.backLabel}
+          backHref={accountBackTarget.backHref}
+        />
+      ) : accountSelector}
 
       <RuleInfoBox>
         <li>定时任务按账号隔离运行，每个账号独立维护规则。</li>

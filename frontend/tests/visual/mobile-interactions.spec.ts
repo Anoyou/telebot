@@ -1,7 +1,7 @@
 import { expect, test } from "@playwright/test";
 
 import { APP_VERSION } from "../../src/lib/version";
-import { installApiFixture, installProviderFixture } from "./fixtures";
+import { installApiFixture, installProviderFixture, providerFixtures } from "./fixtures";
 
 test.describe("移动端交互细节", () => {
   test.skip(({ browserName }) => browserName !== "chromium", "只在 Chromium 项目运行");
@@ -18,6 +18,8 @@ test.describe("移动端交互细节", () => {
     await expect(topLabel).toHaveCSS("border-top-width", "0px");
 
     await main.evaluate((element) => { element.scrollTop = 180; });
+    await expect.poll(() => main.evaluate((element) => element.scrollTop)).toBeGreaterThan(8);
+    await page.waitForTimeout(50);
     await main.evaluate((element) => { element.scrollTop = 0; });
     await expect(topEdge).toHaveAttribute("data-visible", "true");
     await expect(topEdge).toHaveAttribute("data-visible", "false", { timeout: 2_000 });
@@ -269,6 +271,96 @@ test.describe("移动端交互细节", () => {
     fixture.assertClean();
   });
 
+  test("插件中心使用分类栏并默认平铺全部已安装插件", async ({ page }) => {
+    const fixture = await installApiFixture(page);
+    await page.route("**/api/feature-matrix", async (route) => {
+      const features = [
+        { key: "game_demo", display_name: "互动示例", is_builtin: false, source_type: "remote", version: "1.0.0", usage: "互动插件", category: "interactive", experimental: false },
+        { key: "auto_demo", display_name: "自动化示例", is_builtin: false, source_type: "remote", version: "1.0.0", usage: "自动化插件", category: "automation", experimental: false },
+        { key: "tool_demo", display_name: "工具示例", is_builtin: false, source_type: "remote", version: "1.0.0", usage: "工具插件", category: "utility", experimental: false },
+      ];
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          accounts: [{ id: 1, name: "视觉测试账号", features: { game_demo: "active", auto_demo: "active", tool_demo: "active" }, feature_enabled: { game_demo: true, auto_demo: true, tool_demo: true } }],
+          features,
+        }),
+      });
+    });
+    await page.goto("/plugins", { waitUntil: "networkidle" });
+    await expect(page.locator('[data-plugin-category-filter="all"]')).toHaveAttribute("aria-current", "page");
+    await expect(page.locator("[data-plugin-card]")).toHaveCount(3);
+    await page.locator('[data-plugin-category-filter="interactive"]').click();
+    await expect(page.locator("[data-plugin-card]")).toHaveCount(1);
+    await expect(page.locator('[data-plugin-key="game_demo"]')).toBeVisible();
+    await expect(page.locator('[data-plugin-key="auto_demo"]')).toHaveCount(0);
+    fixture.assertClean();
+  });
+
+  test("插件管理默认折叠配置并在详情中快捷启停账号和查看日志", async ({ page }) => {
+    const fixture = await installApiFixture(page);
+    const plugin = {
+      key: "demo_plugin",
+      display_name: "示例插件",
+      source: "repo",
+      source_url: "https://github.com/example/plugins/tree/main/demo_plugin",
+      source_label: "telebot-plugins",
+      version: "1.2.3",
+      global_enabled: true,
+      signature_ok: true,
+      trust_tier: "community",
+      lint_warnings: [],
+      update: { update_available: false, latest_version: null, last_update_check_at: "2026-07-24T00:00:00Z", last_update_check_error: null },
+      accounts: [{ account_id: 1, account_name: "视觉测试账号", enabled: false, state: "disabled", load_status: null, last_error: null, last_load_error: null, last_trace: { trace_id: "evt_demo", account_id: 1, status: "ok", event_type: "message", source_channel: "userbot", started_at: "2026-07-24T00:00:00Z" } }],
+      recent_load_error: null,
+      recent_trace: { trace_id: "evt_demo", account_id: 1, status: "ok", event_type: "message", source_channel: "userbot", started_at: "2026-07-24T00:00:00Z" },
+    };
+    await page.route("**/api/plugins/installed-overview", async (route) => {
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify([plugin]) });
+    });
+    await page.route("**/api/plugin-repos", async (route) => {
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify([{ id: 1, name: "telebot-plugins", url: "https://github.com/example/plugins", description: "", auth_type: "none", has_credentials: false, added_at: null, updated_at: null }]) });
+    });
+    await page.route("**/api/plugins/install/demo_plugin/changelog", async (route) => {
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ key: "demo_plugin", available: false, content: "", truncated: false, message: "该插件未提供 CHANGELOG.md。" }) });
+    });
+    let toggleRequested = false;
+    await page.route("**/api/accounts/1/features/demo_plugin", async (route) => {
+      toggleRequested = true;
+      await route.fulfill({ status: 200, contentType: "application/json", body: "{}" });
+    });
+
+    await page.goto("/plugins/manage?tab=plugins", { waitUntil: "networkidle" });
+    await expect(page.getByRole("button", { name: "展开配置" })).toHaveAttribute("aria-expanded", "false");
+    await expect(page.getByRole("button", { name: "展开添加仓库" })).toHaveAttribute("aria-expanded", "false");
+    const savedRepo = page.getByText("telebot-plugins", { exact: true });
+    await expect(savedRepo).toHaveCount(1);
+    const installedTrigger = page.getByRole("button", { name: "展开已安装插件" });
+    await expect(installedTrigger).toHaveAttribute("aria-expanded", "false");
+    await installedTrigger.click();
+    await page.getByRole("button", { name: "详情" }).click();
+    const dialog = page.getByRole("dialog", { name: "示例插件" });
+    await expect(dialog).toBeVisible();
+    await expect(dialog.getByText("来源库", { exact: true })).toBeVisible();
+    await expect(dialog.getByText("当前版本", { exact: true })).toBeVisible();
+    await expect(dialog.getByText("更新状态", { exact: true })).toBeVisible();
+    const accountSwitch = dialog.getByRole("switch", { name: "视觉测试账号启用当前插件" });
+    await accountSwitch.click();
+    await expect.poll(() => toggleRequested).toBe(true);
+    await dialog.getByRole("button", { name: "更新日志" }).click();
+    await expect(dialog.getByText("该插件未提供 CHANGELOG.md。", { exact: true })).toBeVisible();
+
+    const footerButtons = ["查看最近 trace", "去插件中心", "关闭"];
+    const detailFooter = dialog.locator("[data-plugin-detail-footer]");
+    const tops = await Promise.all(footerButtons.map(async (name) => {
+      const box = await detailFooter.getByRole("button", { name, exact: true }).boundingBox();
+      return Math.round(box?.y || 0);
+    }));
+    expect(new Set(tops).size).toBe(1);
+    fixture.assertClean();
+  });
+
   test("中间宽度可从贴边机器人进入系统助手", async ({ page }) => {
     const fixture = await installApiFixture(page);
     await page.setViewportSize({ width: 758, height: 1100 });
@@ -299,8 +391,55 @@ test.describe("移动端交互细节", () => {
     await expect(assistantPet).toHaveAttribute("data-docked", "right", { timeout: 3_000 });
     await expect(assistantPet.locator(".assistant-pet-arm-left")).toHaveCSS("animation-name", "assistant-pet-arm-left");
     await expect(assistantPet.locator(".assistant-pet-foot-right")).toHaveCSS("animation-name", "assistant-pet-foot-right");
+    await assistantPet.click();
+    const sessionAnchor = page.locator("[data-assistant-session-anchor]");
+    await expect(sessionAnchor).toBeVisible();
+    await expect(assistantPet).toHaveAttribute("data-docked", "false");
+    await page.waitForTimeout(2_100);
+    await expect(assistantPet).toHaveAttribute("data-docked", "false");
+    const activePetBox = await assistantPet.boundingBox();
+    const sessionAnchorBox = await sessionAnchor.boundingBox();
+    expect(Math.abs((activePetBox?.x || 0) - ((sessionAnchorBox?.x || 0) + (sessionAnchorBox?.width || 0) - 34))).toBeLessThanOrEqual(3);
     await expect(page.locator("[data-assistant-mobile-button]")).toBeHidden();
     await expect(page.locator("[data-assistant-tip]")).toHaveCount(0);
+    fixture.assertClean();
+  });
+
+  test("PWA 助手会实时发现其它设备新建的会话", async ({ page }, testInfo) => {
+    test.skip(testInfo.project.name !== "mobile", "仅 PWA 视口");
+    const fixture = await installApiFixture(page);
+    const sessionRows = [{
+      id: "session-local",
+      web_user_id: 1,
+      bot_tg_user_id: null,
+      account_id: null,
+      channel: "web",
+      title: "当前会话",
+      status: "active",
+      created_at: "2026-07-24T00:00:00Z",
+      updated_at: "2026-07-24T00:00:00Z",
+    }];
+    await page.route("**/api/system-agent/sessions?**", async (route) => {
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(sessionRows) });
+    });
+    await page.route("**/api/system-agent/sessions/session-local/messages?**", async (route) => {
+      await route.fulfill({ status: 200, contentType: "application/json", body: "[]" });
+    });
+    await page.route("**/api/system-agent/actions?**", async (route) => {
+      await route.fulfill({ status: 200, contentType: "application/json", body: "[]" });
+    });
+
+    await page.goto("/ai", { waitUntil: "networkidle" });
+    await page.locator("[data-assistant-mobile-button]").click();
+    await page.locator("[data-assistant-composer]").getByRole("button", { name: "打开会话列表" }).click();
+    sessionRows.push({
+      ...sessionRows[0],
+      id: "session-remote",
+      title: "远端新会话",
+      created_at: "2026-07-24T00:01:00Z",
+      updated_at: "2026-07-24T00:01:00Z",
+    });
+    await expect(page.getByRole("button", { name: "远端新会话" })).toBeVisible({ timeout: 5_000 });
     fixture.assertClean();
   });
 
@@ -330,10 +469,75 @@ test.describe("移动端交互细节", () => {
         run_status: "succeeded",
         created_at: "2026-07-24T00:00:00Z",
       }));
+      messages.push({
+        id: 31,
+        session_id: session.id,
+        role: "user",
+        content: { text: "请继续排查日志" },
+        run_status: "failed",
+        error_message: "已理解你的需求，准备调用系统能力，请批准后继续。",
+        retry_count: 0,
+        usage: {
+          tool_approval: {
+            domains: ["logs"],
+            tools: [{ name: "logs.recent", description: "获取最近运行日志", read_only: true, risk: "normal" }],
+          },
+        },
+        created_at: "2026-07-24T00:00:01Z",
+      } as (typeof messages)[number]);
       await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(messages) });
     });
     await page.route("**/api/system-agent/actions?**", async (route) => {
       await route.fulfill({ status: 200, contentType: "application/json", body: "[]" });
+    });
+    await page.route("**/api/commands/llm-providers", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify([{ ...providerFixtures[0], models: [{ id: "grok-4.20-fast", enabled: true, supports_tools: true }] }]),
+      });
+    });
+    await page.route("**/api/system-agent/config", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          enabled: true,
+          provider_id: 2,
+          model: "grok-4.20-fast",
+          fallback_provider_ids: [],
+          require_tool_approval: false,
+          max_steps: 8,
+          max_tool_calls: 24,
+          session_token_limit: 16_384,
+        }),
+      });
+    });
+    await page.route("**/api/system-agent/capabilities", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          enabled: true,
+          provider_id: 2,
+          model: "grok-4.20-fast",
+          provider_name: "Grok",
+          resolved_model: "grok-4.20-fast",
+          ai_enabled: true,
+          timezone: "Asia/Shanghai",
+          tools: [],
+          stage: 1,
+          write_tools_available: false,
+          model_matrix: [{
+            provider_id: 2,
+            provider_name: "Grok",
+            model: "grok-4.20-fast",
+            declared_supports_tools: true,
+            probed_supports_tools: true,
+            probed_status: "supported",
+          }],
+        }),
+      });
     });
 
     await page.goto("/ai", { waitUntil: "networkidle" });
@@ -345,6 +549,7 @@ test.describe("移动端交互细节", () => {
     const composer = page.locator("[data-assistant-composer]");
     const mobileSummary = surface.locator("[data-assistant-mobile-summary]");
     const mobileSettings = surface.locator("[data-assistant-mobile-settings]");
+    const conversation = surface.locator(".overflow-y-auto").filter({ hasText: "第 30 条用于撑开消息列表的测试内容。" });
     if (testInfo.project.name === "mobile") {
       await expect(surface.getByRole("heading", { name: "系统助手" })).toBeHidden();
       await expect(mobileSummary).toBeVisible();
@@ -361,15 +566,48 @@ test.describe("移动端交互细节", () => {
       await mobileSummary.click();
       await expect(mobileSettings).toBeVisible();
       await mobileSettings.getByRole("button", { name: "配置" }).click();
-      await expect(surface.locator("[data-assistant-config-panel]")).toBeVisible();
+      const configPanel = surface.locator("[data-assistant-config-panel]");
+      await expect(configPanel).toBeVisible();
       await expect(mobileSettings).toBeHidden();
-      await expect(surface.getByRole("button", { name: "收起配置" })).toBeVisible();
+      await page.waitForTimeout(250);
+      const configPanelBox = await configPanel.boundingBox();
+      const viewportWidth = await page.evaluate(() => window.innerWidth);
+      expect(Math.round((configPanelBox?.x || 0) + (configPanelBox?.width || 0))).toBe(viewportWidth);
+      await surface.getByRole("button", { name: "收起配置" }).click();
+      await expect(configPanel).toBeHidden();
     } else {
       await expect(surface.getByRole("heading", { name: "系统助手" })).toBeVisible();
       await expect(mobileSummary).toBeHidden();
       await expect(mobileSettings).toBeVisible();
     }
-    const conversation = surface.locator(".overflow-y-auto").filter({ hasText: "第 30 条用于撑开消息列表的测试内容。" });
+    if (testInfo.project.name === "mobile") {
+      const sessionButton = composer.getByRole("button", { name: "打开会话列表" });
+      const modelPicker = composer.getByRole("combobox", { name: "本轮模型" });
+      await expect(sessionButton).toBeVisible();
+      await expect(modelPicker).toBeVisible();
+      const sessionButtonBox = await sessionButton.boundingBox();
+      const modelPickerBox = await modelPicker.boundingBox();
+      expect(modelPickerBox?.width || 0).toBeLessThanOrEqual(200);
+      expect(sessionButtonBox?.x || 0).toBeLessThan(modelPickerBox?.x || 0);
+      await sessionButton.click();
+      const closeSessionDrawer = page.getByRole("button", { name: "关闭会话列表" });
+      await expect(closeSessionDrawer).toBeVisible();
+      const closeDrawerBox = await closeSessionDrawer.boundingBox();
+      await closeSessionDrawer.click({ position: { x: (closeDrawerBox?.width || 430) - 12, y: 60 } });
+      const approvalButton = conversation.getByRole("button", { name: "批准并继续" });
+      await conversation.evaluate((element) => { element.scrollTop = element.scrollHeight; });
+      await expect(approvalButton).toBeVisible();
+      const approvalBox = await approvalButton.boundingBox();
+      const assistantOrbBox = await trigger.boundingBox();
+      expect(approvalBox?.height || 0).toBeGreaterThanOrEqual(36);
+      const overlapsOrb = !(
+        (approvalBox?.x || 0) + (approvalBox?.width || 0) <= (assistantOrbBox?.x || 0)
+        || (assistantOrbBox?.x || 0) + (assistantOrbBox?.width || 0) <= (approvalBox?.x || 0)
+        || (approvalBox?.y || 0) + (approvalBox?.height || 0) <= (assistantOrbBox?.y || 0)
+        || (assistantOrbBox?.y || 0) + (assistantOrbBox?.height || 0) <= (approvalBox?.y || 0)
+      );
+      expect(overlapsOrb).toBe(false);
+    }
     await expect(composer).toBeVisible();
     await expect(conversation).toBeVisible();
     const before = await composer.boundingBox();
@@ -383,22 +621,94 @@ test.describe("移动端交互细节", () => {
     fixture.assertClean();
   });
 
-  test("指令与任务使用独立一级页面且旧插件路径已移除", async ({ page }, testInfo) => {
-    test.skip(testInfo.project.name !== "desktop", "仅桌面视口");
+  test("指令与任务使用独立一级页面且旧插件路径已移除", async ({ page }) => {
     const fixture = await installApiFixture(page);
     await page.goto("/operations/templates", { waitUntil: "networkidle" });
     await expect(page.getByRole("heading", { name: "指令与任务" })).toBeVisible();
     await expect(page.getByRole("tab", { name: "自定义指令" })).toBeVisible();
     await expect(page.getByRole("tab", { name: "定时任务" })).toBeVisible();
     await expect(page.getByRole("tab", { name: "自动指令白名单" })).toBeVisible();
+    await expect(page.getByRole("button", { name: /内置指令（只读）/ })).toHaveAttribute("aria-expanded", "false");
+    await expect(page.getByText("作用：定义能做什么", { exact: true })).toBeVisible();
     await expect(page.getByText("插件中心", { exact: true })).toHaveCount(0);
     await expect(page.locator('[data-sidebar-sort-path="/operations"]')).toContainText("指令与任务");
+
+    const workspaceShell = page.locator("[data-page-transition-shell]");
+    await expect(workspaceShell).toHaveAttribute("data-page-transition-key", "/operations");
+    await workspaceShell.evaluate((element) => element.setAttribute("data-runtime-marker", "stable"));
+
+    await page.getByRole("tab", { name: "定时任务" }).click();
+    await expect(page).toHaveURL(/\/operations\/scheduler$/);
+    await expect(workspaceShell).toHaveAttribute("data-runtime-marker", "stable");
+    await expect(page.getByText("作用：定义何时执行", { exact: true })).toBeVisible();
+    await expect(page.getByRole("combobox")).toBeVisible();
+
+    await page.getByRole("tab", { name: "自动指令白名单" }).click();
+    await expect(page).toHaveURL(/\/operations\/auto-command-whitelist$/);
+    await expect(workspaceShell).toHaveAttribute("data-runtime-marker", "stable");
+    await expect(page.getByText("作用：定义哪些指令允许被自动执行", { exact: true })).toBeVisible();
+    await expect(page.getByLabel("页面加载中")).toHaveCount(0);
 
     await page.goto("/plugins/templates", { waitUntil: "networkidle" });
     await expect(page).toHaveURL(/\/plugins\/templates$/);
     await expect(page.getByRole("heading", { name: "页面已移除" })).toBeVisible();
     await page.goto("/ai", { waitUntil: "networkidle" });
     await expect(page.getByRole("button", { name: "配置系统助手" })).toHaveCount(0);
+    fixture.assertClean();
+  });
+
+  test("自定义指令可在当前页按账号切换启用状态", async ({ page }) => {
+    const fixture = await installApiFixture(page);
+    const template = {
+      id: 21,
+      name: "hello",
+      type: "reply_text",
+      config: { text: "你好" },
+      description: "测试指令",
+      aliases: [],
+      created_at: "2026-07-24T00:00:00Z",
+    };
+    let toggleMethod = "";
+    await page.route("**/api/commands/templates", async (route) => {
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify([template]) });
+    });
+    await page.route("**/api/accounts/1/commands", async (route) => {
+      if (route.request().method() === "GET") {
+        await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify([{ template, enabled: false }]) });
+        return;
+      }
+      toggleMethod = route.request().method();
+      await route.fulfill({ status: 204, body: "" });
+    });
+    await page.route("**/api/accounts/1/commands/21", async (route) => {
+      toggleMethod = route.request().method();
+      await route.fulfill({ status: 204, body: "" });
+    });
+
+    await page.goto("/operations/templates", { waitUntil: "networkidle" });
+    await page.getByRole("button", { name: "启用", exact: true }).click();
+    const dialog = page.getByRole("dialog", { name: "选择要启用的账号" });
+    await expect(dialog).toBeVisible();
+    const accountSwitch = dialog.getByRole("switch", { name: "视觉测试账号启用hello" });
+    await expect(accountSwitch).toBeEnabled();
+    await accountSwitch.click();
+    await expect.poll(() => toggleMethod).toBe("POST");
+    await expect(page).toHaveURL(/\/operations\/templates$/);
+    await expect(dialog).toBeVisible();
+    fixture.assertClean();
+  });
+
+  test("打开系统助手时隐藏交互页悬浮保存按钮", async ({ page }, testInfo) => {
+    const fixture = await installApiFixture(page);
+    await page.goto("/interaction?aid=1", { waitUntil: "networkidle" });
+    const saveButton = page.getByRole("button", { name: "保存规则" });
+    await expect(saveButton).toBeVisible();
+    const assistantTrigger = testInfo.project.name === "mobile"
+      ? page.locator("[data-assistant-mobile-button]")
+      : page.locator("[data-assistant-desktop-pet]");
+    await assistantTrigger.click();
+    await expect(page.locator("[data-assistant-surface]")).toBeVisible();
+    await expect(saveButton).toBeHidden();
     fixture.assertClean();
   });
 

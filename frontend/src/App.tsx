@@ -34,9 +34,7 @@ const GenericPluginConfigPage = lazy(() => import("@/pages/Plugins/configs/Gener
 const Logs = lazy(() => import("@/pages/Logs").then(m => ({ default: m.Logs })));
 const SettingsIndex = lazy(() => import("@/pages/Settings/Index").then(m => ({ default: m.SettingsIndex })));
 const PluginsHome = lazy(() => import("@/pages/Plugins").then(m => ({ default: m.PluginsHome })));
-const OperationsTemplatesPage = lazy(() => import("@/pages/Operations/Templates").then(m => ({ default: m.OperationsTemplatesPage })));
-const OperationsSchedulerPage = lazy(() => import("@/pages/Operations/Scheduler").then(m => ({ default: m.OperationsSchedulerPage })));
-const OperationsAutoCommandWhitelistPage = lazy(() => import("@/pages/Operations/AutoCommandWhitelist").then(m => ({ default: m.OperationsAutoCommandWhitelistPage })));
+const OperationsWorkspaceRoutes = lazy(() => import("@/pages/Operations/Index").then(m => ({ default: m.OperationsWorkspaceRoutes })));
 const MessageTemplateLabPage = lazy(() => import("@/pages/Plugins").then(m => ({ default: m.MessageTemplateLabPage })));
 const PluginsManagePage = lazy(() => import("@/pages/Extensions").then(m => ({ default: m.Extensions })));
 const InteractionIndex = lazy(() => import("@/pages/Interaction/Index").then(m => ({ default: m.InteractionIndex })));
@@ -287,28 +285,11 @@ export default function App() {
               </Suspense>
             }
           />
-          <Route path="operations" element={<Navigate to="/operations/templates" replace />} />
           <Route
-            path="operations/templates"
+            path="operations/*"
             element={
               <Suspense fallback={<PageFallback />}>
-                <OperationsTemplatesPage />
-              </Suspense>
-            }
-          />
-          <Route
-            path="operations/scheduler"
-            element={
-              <Suspense fallback={<PageFallback />}>
-                <OperationsSchedulerPage />
-              </Suspense>
-            }
-          />
-          <Route
-            path="operations/auto-command-whitelist"
-            element={
-              <Suspense fallback={<PageFallback />}>
-                <OperationsAutoCommandWhitelistPage />
+                <OperationsWorkspaceRoutes />
               </Suspense>
             }
           />

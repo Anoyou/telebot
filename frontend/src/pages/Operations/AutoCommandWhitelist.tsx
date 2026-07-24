@@ -54,13 +54,23 @@ export function OperationsAutoCommandWhitelistPage() {
       <Card>
         <CardHeader>
           <CardTitle className="text-base">选择账号</CardTitle>
-          <CardDescription>白名单是账号级安全边界，只填写指令 key，不带系统指令前缀。</CardDescription>
+          <CardDescription className="space-y-1">
+            <span className="block font-medium text-foreground">作用：定义哪些指令允许被自动执行</span>
+            <span className="block">白名单是账号级安全边界，只填写指令 key，不带系统指令前缀。</span>
+          </CardDescription>
         </CardHeader>
         <CardContent>
           {accountsQ.isLoading ? (
             <div className="flex h-20 items-center justify-center"><Spinner className="text-primary" /></div>
           ) : accountsQ.data?.length ? (
-            <Select value={aid ? String(aid) : ""} onChange={(event) => setSearchParams({ aid: event.target.value })} className="w-full sm:w-80">
+            <Select
+              value={aid ? String(aid) : ""}
+              onChange={(event) => {
+                setDirty(false);
+                setSearchParams({ aid: event.target.value });
+              }}
+              className="w-full sm:w-80"
+            >
               <option value="" disabled>请选择账号</option>
               {accountsQ.data.map((account) => (
                 <option key={account.id} value={account.id}>{account.display_name || account.phone || `账号 #${account.id}`}</option>

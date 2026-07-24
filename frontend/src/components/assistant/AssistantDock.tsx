@@ -14,8 +14,10 @@ type AssistantDockValue = {
   collapsed: boolean;
   mounted: boolean;
   streaming: boolean;
+  completionSignal: number;
   setCollapsed: (collapsed: boolean) => void;
   setStreaming: (streaming: boolean) => void;
+  notifyCompletion: () => void;
 };
 
 const AssistantDockContext = createContext<AssistantDockValue | null>(null);
@@ -25,6 +27,7 @@ export function AssistantDockProvider({ children }: { children: ReactNode }) {
   const [collapsed, setCollapsedState] = useState(true);
   const [mounted, setMounted] = useState(false);
   const [streaming, setStreaming] = useState(false);
+  const [completionSignal, setCompletionSignal] = useState(0);
   const locationKeyRef = useRef(`${location.pathname}${location.search}${location.hash}`);
   const setCollapsed = useCallback((next: boolean) => {
     if (!next) {
@@ -40,6 +43,9 @@ export function AssistantDockProvider({ children }: { children: ReactNode }) {
       });
     }
   }, []);
+  const notifyCompletion = useCallback(() => {
+    setCompletionSignal((value) => value + 1);
+  }, []);
 
   useEffect(() => {
     const locationKey = `${location.pathname}${location.search}${location.hash}`;
@@ -49,8 +55,16 @@ export function AssistantDockProvider({ children }: { children: ReactNode }) {
   }, [collapsed, location.hash, location.pathname, location.search, setCollapsed]);
 
   const value = useMemo(
-    () => ({ collapsed, mounted, streaming, setCollapsed, setStreaming }),
-    [collapsed, mounted, setCollapsed, streaming],
+    () => ({
+      collapsed,
+      mounted,
+      streaming,
+      completionSignal,
+      setCollapsed,
+      setStreaming,
+      notifyCompletion,
+    }),
+    [collapsed, completionSignal, mounted, notifyCompletion, setCollapsed, streaming],
   );
 
   return (

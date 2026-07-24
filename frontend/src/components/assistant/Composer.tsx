@@ -1,5 +1,5 @@
 import { useState, type FormEvent, type KeyboardEvent } from "react";
-import { Send, Square } from "lucide-react";
+import { Menu, Send, Square } from "lucide-react";
 
 import {
   ModelPicker,
@@ -8,6 +8,7 @@ import {
 } from "@/components/ai/ModelPicker";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
+import { cn } from "@/lib/utils";
 
 export function Composer({
   disabled,
@@ -21,6 +22,7 @@ export function Composer({
   onSetDefaultModel,
   modelDisabled,
   expectedLabel,
+  onOpenSessions,
 }: {
   disabled?: boolean;
   onSend: (text: string) => void | Promise<void>;
@@ -35,6 +37,7 @@ export function Composer({
   modelDisabled?: boolean;
   /** 本轮希望使用说明 */
   expectedLabel?: string;
+  onOpenSessions?: () => void;
 }) {
   const [value, setValue] = useState("");
   const [sending, setSending] = useState(false);
@@ -80,8 +83,21 @@ export function Composer({
           className="min-h-[4.5rem] resize-none border-0 bg-transparent px-1 py-1 shadow-none focus-visible:border-transparent focus-visible:ring-0"
         />
         <div className="mt-1 flex min-w-0 items-end justify-end gap-1.5 border-t border-border/40 pt-2">
+          {onOpenSessions ? (
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="mr-auto h-8 shrink-0 gap-1 px-2 text-xs md:hidden"
+              onClick={onOpenSessions}
+              aria-label="打开会话列表"
+            >
+              <Menu className="h-3.5 w-3.5" />
+              会话
+            </Button>
+          ) : null}
           {expectedLabel ? (
-            <span className="mr-auto hidden max-w-[32%] truncate self-center text-[10px] text-muted-foreground sm:inline">
+            <span className={cn("hidden max-w-[32%] truncate self-center text-[10px] text-muted-foreground md:inline", onOpenSessions ? "md:mr-auto" : "mr-auto")}>
               本轮：{expectedLabel}
             </span>
           ) : null}
@@ -93,7 +109,8 @@ export function Composer({
               onSetDefault={onSetDefaultModel}
               showSetDefault={Boolean(onSetDefaultModel)}
               disabled={modelDisabled || streaming}
-              className="min-w-0 flex-1 justify-end sm:flex-none"
+              compact
+              className="min-w-0 justify-end"
             />
           ) : null}
           {streaming ? (
