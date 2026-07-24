@@ -1562,6 +1562,8 @@ class UpdateJobStatusResponse(BaseModel):
     detail: str | None = None
     logs: list[str] = Field(default_factory=list)
     plan: dict[str, Any] | None = None
+    # WP-U1：各阶段耗时（phase + duration_ms）
+    step_timings: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class UpdateTargetOptionsResponse(BaseModel):
@@ -2140,6 +2142,11 @@ async def get_update_job(job_id: str, _user: CurrentUser) -> UpdateJobStatusResp
         detail=str(result.get("detail") or "") or None,
         logs=[str(line) for line in result.get("logs") or []],
         plan=result.get("plan") if isinstance(result.get("plan"), dict) else None,
+        step_timings=[
+            item
+            for item in (result.get("step_timings") or [])
+            if isinstance(item, dict)
+        ],
     )
 
 

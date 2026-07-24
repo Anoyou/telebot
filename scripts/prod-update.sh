@@ -298,23 +298,43 @@ else
   if (( ${#services[@]} > 0 )); then
     emit_progress 30 "构建镜像" "增量重建 ${services[*]}"
     log "增量重建服务：${services[*]}"
+    # WP-U2：确认按 classify_changed_files 裁剪后的服务列表重建，不整栈 up
+    log "更新计划服务集合：${PLAN_SERVICES[*]:-none}"
     docker compose up -d --build --no-deps "${services[@]}"
     emit_progress 78 "健康检查" "等待新容器 ready"
   fi
 
+  # WP-U2：web / frontend 同时变更时并行等待健康，缩短串行阻塞
+  health_pids=()
+  health_names=()
   if (( NEEDS_BACKEND == 1 )); then
-    wait_compose_healthy docker-compose.yml web 120 || {
-      docker compose logs --tail=80 web >&2
-      exit 1
-    }
+    (
+      wait_compose_healthy docker-compose.yml web 120 || {
+        docker compose logs --tail=80 web >&2
+        exit 1
+      }
+    ) &
+    health_pids+=("$!")
+    health_names+=("web")
   fi
-
   if (( NEEDS_FRONTEND == 1 )); then
-    wait_compose_healthy docker-compose.yml frontend 60 || {
-      docker compose logs --tail=80 frontend >&2
-      exit 1
-    }
+    (
+      wait_compose_healthy docker-compose.yml frontend 60 || {
+        docker compose logs --tail=80 frontend >&2
+        exit 1
+      }
+    ) &
+    health_pids+=("$!")
+    health_names+=("frontend")
   fi
+  health_failed=0
+  for i in "${!health_pids[@]}"; do
+    if ! wait "${health_pids[$i]}"; then
+      err "健康检查失败：${health_names[$i]}"
+      health_failed=1
+    fi
+  done
+  (( health_failed == 0 )) || exit 1
 
   emit_progress 92 "服务就绪" "受影响服务已通过健康检查"
 

@@ -71,7 +71,17 @@ type Step =
   | { kind: "cannot_check"; plan: UpdatePlanMeta }
   | { kind: "has_update"; current: string; remote: string; currentVersion: string; targetVersion: string; ahead: number; changedFiles: string[]; commitTitles: string[]; plan: UpdatePlanMeta }
   | { kind: "pulling" }
-  | { kind: "job_running"; jobId: string; status: string; logs: string[]; plan: UpdatePlanMeta; progress: number; phase: string; detail: string | null }
+  | {
+      kind: "job_running";
+      jobId: string;
+      status: string;
+      logs: string[];
+      plan: UpdatePlanMeta;
+      progress: number;
+      phase: string;
+      detail: string | null;
+      stepTimings?: Array<{ phase?: string; duration_ms?: number; detail?: string }>;
+    }
   | { kind: "pulled"; newCommit: string | null; summary: string | null; plan: UpdatePlanMeta }
   | { kind: "pull_failed"; error: string; progress?: number; phase?: string; detail?: string | null }
   | { kind: "check_failed"; error: string }
@@ -288,6 +298,7 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
           progress: job.progress ?? 0,
           phase: job.phase || "更新中",
           detail: job.detail ?? null,
+          stepTimings: Array.isArray(job.step_timings) ? job.step_timings : [],
         });
       } catch {
         failures += 1;
@@ -788,6 +799,29 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
                 <span>任务 {step.jobId} · {step.status}</span>
               </div>
               <UpdateProgress progress={step.progress} phase={step.phase} detail={step.detail} />
+              {step.stepTimings && step.stepTimings.length > 0 ? (
+                <div className="rounded-md border bg-background px-3 py-2">
+                  <p className="mb-1.5 text-xs text-muted-foreground">各步耗时</p>
+                  <ul className="space-y-1 text-xs tabular-nums">
+                    {step.stepTimings.map((item, index) => {
+                      const ms = Number(item.duration_ms || 0);
+                      const label =
+                        ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${ms}ms`;
+                      return (
+                        <li
+                          key={`${item.phase || "step"}-${index}`}
+                          className="flex items-center justify-between gap-3"
+                        >
+                          <span className="min-w-0 truncate text-foreground/85">
+                            {item.phase || "步骤"}
+                          </span>
+                          <span className="shrink-0 text-muted-foreground">{label}</span>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                </div>
+              ) : null}
               <div className="rounded-md border bg-background px-3 py-2">
                 <p className="mb-1 text-xs text-muted-foreground">
                   {(step.plan.remote || "origin")}/{step.plan.branch || "main"} · 最近日志

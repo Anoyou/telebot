@@ -604,9 +604,65 @@ def _persist_job(job_id: str, job: dict[str, Any]) -> None:
 def _set_job(job_id: str, **updates: Any) -> None:
     with _jobs_lock:
         job = _jobs.setdefault(job_id, {"job_id": job_id, "logs": []})
+        # WP-U1：阶段切换时累计各步耗时，供前端进度展示
+        now = time.time()
+        new_phase = updates.get("phase")
+        old_phase = job.get("phase")
+        if (
+            new_phase is not None
+            and str(new_phase) != str(old_phase or "")
+        ):
+            phase_started = float(
+                job.get("_phase_started_at") or job.get("started_at") or now
+            )
+            steps = list(job.get("step_timings") or [])
+            if old_phase:
+                duration_ms = max(0, int((now - phase_started) * 1000))
+                steps.append(
+                    {
+                        "phase": str(old_phase),
+                        "duration_ms": duration_ms,
+                        "detail": str(job.get("detail") or ""),
+                    }
+                )
+                job["step_timings"] = steps[-40:]
+                _append_job_log_unlocked(
+                    job,
+                    f"[step] {old_phase} 用时 {duration_ms}ms",
+                )
+            job["_phase_started_at"] = now
         job.update(updates)
+        if updates.get("status") in {"succeeded", "failed"} and job.get("phase"):
+            # 收尾最后一步
+            phase_started = float(
+                job.get("_phase_started_at") or job.get("started_at") or now
+            )
+            steps = list(job.get("step_timings") or [])
+            last_phase = str(job.get("phase") or "")
+            if last_phase and (
+                not steps or str(steps[-1].get("phase") or "") != last_phase
+            ):
+                duration_ms = max(0, int((now - phase_started) * 1000))
+                steps.append(
+                    {
+                        "phase": last_phase,
+                        "duration_ms": duration_ms,
+                        "detail": str(job.get("detail") or ""),
+                    }
+                )
+                job["step_timings"] = steps[-40:]
+                _append_job_log_unlocked(
+                    job,
+                    f"[step] {last_phase} 用时 {duration_ms}ms",
+                )
         snapshot = dict(job)
     _persist_job(job_id, snapshot)
+
+
+def _append_job_log_unlocked(job: dict[str, Any], line: str) -> None:
+    logs = list(job.get("logs") or [])
+    logs.append(line.rstrip())
+    job["logs"] = logs[-MAX_LOG_LINES:]
 
 
 def _append_job_log(job_id: str, line: str) -> None:
