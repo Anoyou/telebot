@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import suppress
@@ -99,6 +100,32 @@ class SystemAgentRuntime:
         seq = 0
         selection = _normalize_model_selection(model_selection)
         selection_mode = str(selection.get("mode") or "auto")
+        turn_t0 = time.perf_counter()
+        # 阶段计时（WP-L1）：verify/route 为分段耗时；first_token/total 从 turn 起点算。
+        stage_timings: dict[str, int | None] = {
+            "verify_ms": None,
+            "route_ms": None,
+            "first_token_ms": None,
+            "total_ms": None,
+        }
+
+        def elapsed_ms() -> int:
+            return max(0, int((time.perf_counter() - turn_t0) * 1000))
+
+        def finalize_stage_timings(*, ok: bool) -> dict[str, int | None]:
+            stage_timings["total_ms"] = elapsed_ms()
+            log.info(
+                "system agent stage_timings session=%s run_id=%s ok=%s "
+                "verify_ms=%s route_ms=%s first_token_ms=%s total_ms=%s",
+                session.id,
+                run_id,
+                ok,
+                stage_timings.get("verify_ms"),
+                stage_timings.get("route_ms"),
+                stage_timings.get("first_token_ms"),
+                stage_timings.get("total_ms"),
+            )
+            return dict(stage_timings)
 
         def next_event(event_type: str, **payload: Any) -> dict[str, Any]:
             nonlocal seq
@@ -152,6 +179,7 @@ class SystemAgentRuntime:
             provider_name=resolved.primary.name,
             model=resolved.model,
         )
+        verify_t0 = time.perf_counter()
         verify_task = asyncio.create_task(verify_resolved_agent_providers(db, resolved))
         try:
             while not verify_task.done():
@@ -166,18 +194,22 @@ class SystemAgentRuntime:
                     )
             verified = await verify_task
         finally:
+            stage_timings["verify_ms"] = max(
+                0, int((time.perf_counter() - verify_t0) * 1000)
+            )
             if not verify_task.done():
                 verify_task.cancel()
                 with suppress(asyncio.CancelledError):
                     await verify_task
         if isinstance(verified, str):
+            timings = finalize_stage_timings(ok=False)
             yield next_event(
                 "error",
                 code="MODEL_TOOLS_UNAVAILABLE",
                 message=verified,
                 hint="请在 AI 中心选择真正支持结构化工具调用的模型。",
             )
-            yield next_event("done", ok=False)
+            yield next_event("done", ok=False, stage_timings=timings)
             return
         resolved = verified
 
@@ -298,6 +330,7 @@ class SystemAgentRuntime:
             role=role,
             read_only_only=False,  # 阶段 2：只读 + 写（写工具只产生待确认 Action）
         )
+        route_t0 = time.perf_counter()
         route_task = asyncio.create_task(
             self._resolve_tool_route(
                 provider_dto=provider_dto,
@@ -328,6 +361,9 @@ class SystemAgentRuntime:
                 route = value
                 break
         finally:
+            stage_timings["route_ms"] = max(
+                0, int((time.perf_counter() - route_t0) * 1000)
+            )
             if not route_task.done():
                 route_task.cancel()
                 with suppress(asyncio.CancelledError):
@@ -516,6 +552,8 @@ class SystemAgentRuntime:
             safe_delta = streaming_redactor.push(delta)
             if not safe_delta:
                 return
+            if stage_timings["first_token_ms"] is None:
+                stage_timings["first_token_ms"] = elapsed_ms()
             await progress_queue.put(
                 next_event(
                     "assistant_delta",
@@ -667,13 +705,14 @@ class SystemAgentRuntime:
                 session.id,
                 ",".join(exc.tool_names),
             )
+            timings = finalize_stage_timings(ok=False)
             yield next_event(
                 "error",
                 code="AGENT_TOOL_APPROVAL_REQUIRED",
                 message=str(exc),
                 tool_approval=tool_approval_payload(exc.tool_names, exc.tool_calls),
             )
-            yield next_event("done", ok=False)
+            yield next_event("done", ok=False, stage_timings=timings)
             return
         except ProviderSwitchRequired as exc:
             log.warning(
@@ -681,6 +720,7 @@ class SystemAgentRuntime:
                 session.id,
                 exc.provider_name,
             )
+            timings = finalize_stage_timings(ok=False)
             yield next_event(
                 "error",
                 code="AGENT_PROVIDER_SWITCH_REQUIRED",
@@ -695,16 +735,17 @@ class SystemAgentRuntime:
                     else None
                 ),
             )
-            yield next_event("done", ok=False)
+            yield next_event("done", ok=False, stage_timings=timings)
             return
         except Exception as exc:  # noqa: BLE001
             log.exception("system agent run failed session=%s", session.id)
+            timings = finalize_stage_timings(ok=False)
             yield next_event(
                 "error",
                 code="AGENT_RUN_FAILED",
                 message=str(exc)[:500],
             )
-            yield next_event("done", ok=False)
+            yield next_event("done", ok=False, stage_timings=timings)
             return
         finally:
             if not agent_task.done():
@@ -716,11 +757,14 @@ class SystemAgentRuntime:
             yield progress_queue.get_nowait()
         trailing_delta = streaming_redactor.finish()
         if trailing_delta:
+            if stage_timings["first_token_ms"] is None:
+                stage_timings["first_token_ms"] = elapsed_ms()
             yield next_event("assistant_delta", delta=trailing_delta)
         for ev in deferred_events:
             yield ev
 
         assistant_text = result.text or ""
+        timings = finalize_stage_timings(ok=True)
         usage_payload = _usage_payload(
             result.usage,
             last_used_provider,
@@ -733,6 +777,8 @@ class SystemAgentRuntime:
             used_fallback=used_fallback,
             stream_fallback=current_stream_fallback,
             route_domains=list(route.domains),
+            stage_timings=timings,
+            elapsed_ms=timings.get("total_ms"),
         )
 
         yield next_event(
@@ -749,6 +795,7 @@ class SystemAgentRuntime:
             route_domains=list(route.domains),
             tool_count=len(tool_specs),
             used_fallback=used_fallback,
+            stage_timings=timings,
         )
 
     def _bind_read_handler(self, spec: Any, tool_ctx: ToolContext):
@@ -990,12 +1037,14 @@ def _usage_payload(
     used_fallback: bool = False,
     stream_fallback: bool = False,
     route_domains: list[str] | None = None,
+    stage_timings: dict[str, Any] | None = None,
+    elapsed_ms: int | None = None,
 ) -> dict[str, Any]:
-    """usage schema_version=2：实际调用数与暴露工具数分拆。"""
+    """usage schema_version=2：实际调用数与暴露工具数分拆；含 stage_timings。"""
 
     req_p = requested_provider or provider
     req_m = (requested_model or model or "").strip() or model
-    return {
+    payload: dict[str, Any] = {
         "schema_version": 2,
         "provider_id": provider.id,
         "provider_name": provider.name,
@@ -1016,6 +1065,27 @@ def _usage_payload(
         "stream_fallback": bool(stream_fallback),
         "route_domains": list(route_domains or []),
     }
+    if isinstance(stage_timings, dict) and stage_timings:
+        # 只保留已知键的非负整数 / null
+        cleaned: dict[str, int | None] = {}
+        for key in ("verify_ms", "route_ms", "first_token_ms", "total_ms"):
+            raw = stage_timings.get(key)
+            if raw is None:
+                cleaned[key] = None
+                continue
+            try:
+                cleaned[key] = max(0, int(raw))
+            except (TypeError, ValueError):
+                cleaned[key] = None
+        payload["stage_timings"] = cleaned
+        if elapsed_ms is None and cleaned.get("total_ms") is not None:
+            elapsed_ms = cleaned["total_ms"]
+    if elapsed_ms is not None:
+        try:
+            payload["elapsed_ms"] = max(0, int(elapsed_ms))
+        except (TypeError, ValueError):
+            pass
+    return payload
 
 
 def _normalize_model_selection(raw: dict[str, Any] | None) -> dict[str, Any]:

@@ -26,6 +26,21 @@ function diagnosticFacts(event: TraceEvent): string[] {
   add("call_id", event.call_id);
   add("code", event.code);
   add("usage", event.usage);
+  const timings =
+    event.stage_timings && typeof event.stage_timings === "object"
+      ? (event.stage_timings as Record<string, unknown>)
+      : event.usage &&
+          typeof event.usage === "object" &&
+          (event.usage as Record<string, unknown>).stage_timings &&
+          typeof (event.usage as Record<string, unknown>).stage_timings === "object"
+        ? ((event.usage as Record<string, unknown>).stage_timings as Record<string, unknown>)
+        : null;
+  if (timings) {
+    for (const key of ["verify_ms", "route_ms", "first_token_ms", "total_ms"] as const) {
+      const value = timings[key];
+      if (value != null && value !== "") add(key, value);
+    }
+  }
   return facts;
 }
 
@@ -54,12 +69,29 @@ function labelEvent(event: TraceEvent): string {
       return `模型耗尽 · ${event.provider_name || "?"} · ${event.model || "?"}`;
     case "assistant_delta_reset":
       return "清空流式草稿（准备调工具）";
-    case "assistant_message":
-      return "最终回答已生成";
+    case "assistant_message": {
+      const usage =
+        event.usage && typeof event.usage === "object"
+          ? (event.usage as Record<string, unknown>)
+          : null;
+      const timings =
+        usage?.stage_timings && typeof usage.stage_timings === "object"
+          ? (usage.stage_timings as Record<string, unknown>)
+          : null;
+      const total = timings?.total_ms;
+      return total != null && total !== "" ? `最终回答已生成 · ${total}ms` : "最终回答已生成";
+    }
     case "error":
       return `错误 · ${event.code || ""} ${event.message || ""}`.trim();
-    case "done":
-      return event.ok ? "完成" : "结束（未成功）";
+    case "done": {
+      const timings =
+        event.stage_timings && typeof event.stage_timings === "object"
+          ? (event.stage_timings as Record<string, unknown>)
+          : null;
+      const total = timings?.total_ms;
+      const base = event.ok ? "完成" : "结束（未成功）";
+      return total != null && total !== "" ? `${base} · ${total}ms` : base;
+    }
     default:
       return type || "事件";
   }

@@ -34,6 +34,22 @@ function formatTokens(value: number | null): string {
   return value == null ? "–" : value.toLocaleString("zh-CN");
 }
 
+/** 从 usage.stage_timings 抽出探测/路由/首 token 耗时标签。 */
+export function formatStageTimings(usage: ModelRunMetaUsage): string[] {
+  if (!usage || typeof usage !== "object") return [];
+  const raw = usage.stage_timings;
+  if (!raw || typeof raw !== "object") return [];
+  const stages = raw as Record<string, unknown>;
+  const bits: string[] = [];
+  const verify = num(stages.verify_ms);
+  const route = num(stages.route_ms);
+  const first = num(stages.first_token_ms);
+  if (verify != null) bits.push(`探测 ${formatElapsed(verify)}`);
+  if (route != null) bits.push(`路由 ${formatElapsed(route)}`);
+  if (first != null) bits.push(`首 token ${formatElapsed(first)}`);
+  return bits.filter((bit): bit is string => Boolean(bit));
+}
+
 /**
  * 模型执行信息行（Agent 回答下方 / 测活结果复用）。
  * 不显示费用。
@@ -74,6 +90,7 @@ export function ModelRunMeta({
   const mismatch =
     Boolean(expectedLabel) && Boolean(reported) && expectedLabel !== reported;
 
+  const stageBits = formatStageTimings(usage);
   const bits: string[] = [];
   if (summary) bits.push(summary);
   if (input != null || output != null) {
@@ -85,7 +102,7 @@ export function ModelRunMeta({
   if (elapsedLabel) bits.push(elapsedLabel);
   if (apiFormat && !compact) bits.push(apiFormat);
 
-  if (!bits.length) return null;
+  if (!bits.length && !stageBits.length) return null;
 
   if (compact) {
     return (
@@ -96,6 +113,11 @@ export function ModelRunMeta({
           {streamFallback ? <span className="rounded border px-1">完整响应</span> : null}
           {selectionMode === "pinned" ? <span className="rounded border px-1">本轮固定</span> : null}
         </div>
+        {stageBits.length ? (
+          <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 opacity-90">
+            {stageBits.map((bit) => <span key={bit}>{bit}</span>)}
+          </div>
+        ) : null}
       </div>
     );
   }
@@ -130,6 +152,13 @@ export function ModelRunMeta({
         {elapsedLabel ? <span>{elapsedLabel}</span> : null}
         {apiFormat ? <span className="rounded bg-muted px-1.5 py-0.5">{apiFormat}</span> : null}
       </div>
+      {stageBits.length ? (
+        <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1 border-t border-border/50 pt-1.5 text-[10px] sm:border-0 sm:pt-0">
+          {stageBits.map((bit) => (
+            <span key={bit}>{bit}</span>
+          ))}
+        </div>
+      ) : null}
       {usedFallback && requested && reported && requested !== reported ? (
         <div className="space-y-0.5 border-t border-border/50 pt-1.5 text-[10px] text-muted-foreground sm:border-0 sm:pt-0">
           <div>原模型：{requested}</div>

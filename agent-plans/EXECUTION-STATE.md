@@ -1,12 +1,33 @@
 # EXECUTION-STATE（进度真相源）
 
-> 当前计划：`agent-plans/PLAN-conversation-deeix.md` **v2**
+> 当前计划：`agent-plans/PLAN-agent-latency-and-ops.md` **v3**
 > 纪律：每 WP 完成即更新本文件；新会话恢复从本文件开始。
 > 状态：`pending` → `in_progress` → `done`（附 commit 哈希）/ `blocked` / `partial`（附缺口）
 
-## 当前计划：对话体验修复与 DEEIX 吸收 v2
+## 当前计划：Agent 延迟优化 / 定时任务 / 更新提速 v3
 
-### 轮次 1：流式渲染修复轮（纯前端）
+### 轮次 L：延迟与词表
+
+- [ ] WP-L1 阶段计时 stage_timings（先测量） — in_progress
+- [ ] WP-L2 路由调用提速（1 次重试 + 8s 预算 + 与探测并行） — pending
+- [ ] WP-L3 词表扩容 + golden set ≥20 条（项目自身问法/英文） — pending
+- [ ] WP-L4 探测不阻塞（按已知状态放行 + 后台刷新） — pending
+
+### 轮次 T：定时 Agent 任务
+
+- [ ] WP-T1 scheduler `agent_prompt` 类型（只读工具集 + 写操作永远 pending） — pending
+- [ ] WP-T2 异常日志巡检预设模板 — pending
+
+### 轮次 U：更新提速
+
+- [ ] WP-U1 更新作业分步计时 — pending
+- [ ] WP-U2 按测量结果优化 top 1-2 项 — pending
+
+## 已完成计划（历史）
+
+### 对话体验修复与 DEEIX 吸收（PLAN-conversation-deeix v2，2026-07-23 完成并验收）
+
+#### 轮次 1：流式渲染修复轮（纯前端）
 
 - [x] WP1 统一流式/最终 Markdown 渲染器（光标 CSS 伪元素 + 围栏补闭合） — done `7b500b2e`
 - [x] WP2 气泡复用去闪动（`live-assistant-stream` 同 id 翻转） — done `7b500b2e`
@@ -31,14 +52,14 @@
   - Agent fallback 排序；ModelPicker 冷却徽标
   - 测活页 `RuntimeHealthBar` + `GET /api/commands/llm-providers/runtime-health` 只读
 
-## 已完成计划（历史）
-
-### System Agent 强化（PLAN-system-agent-hardening.md，2026-07-23）
+### System Agent 强化（PLAN-system-agent-hardening.md，2026-07-23 完成）
 
 - [x] WP1–WP7 全部完成（`e17bb057`…`1870ff05`）
 - 部署：`alembic upgrade head` → 0048 `system_agent_user_memory`
 
 ## 备注
+
+- **2026-07-24 v3 计划创建**：延迟链前置事实已核实写入 PLAN 头部（探测 TTL、路由 5×3s 重试、更新增量分类现状），worker 勿重复调查。
 
 - **PLAN-conversation-deeix v2 全部 WP 已完成**（WP1–10）。
 - **2026-07-23 验收通过**（commit `836f0279` 含验收 lint 修复）：ruff 清零、后端 2315 passed、前端 typecheck+test 绿、a11y 24 passed（0 critical/serious）、diff-check 干净；WP1-10 关键实现逐点抽查属实。遗留两项见下。

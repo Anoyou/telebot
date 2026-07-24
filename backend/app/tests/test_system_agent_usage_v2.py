@@ -36,6 +36,13 @@ def test_usage_payload_schema_v2_splits_tool_counts() -> None:
         used_fallback=True,
         stream_fallback=False,
         route_domains=["logs"],
+        stage_timings={
+            "verify_ms": 12,
+            "route_ms": 3,
+            "first_token_ms": 840,
+            "total_ms": 2100,
+            "noise": "drop",
+        },
     )
     assert payload["schema_version"] == 2
     assert payload["tool_calls"] == 3
@@ -48,6 +55,31 @@ def test_usage_payload_schema_v2_splits_tool_counts() -> None:
     assert payload["api_format"] == "responses"
     assert payload["used_fallback"] is True
     assert payload["route_domains"] == ["logs"]
+    assert payload["stage_timings"] == {
+        "verify_ms": 12,
+        "route_ms": 3,
+        "first_token_ms": 840,
+        "total_ms": 2100,
+    }
+    assert payload["elapsed_ms"] == 2100
+
+
+def test_usage_payload_stage_timings_nulls_and_elapsed_override() -> None:
+    usage = ModelUsage(input_tokens=1, output_tokens=1, total_tokens=2)
+    payload = _usage_payload(
+        usage,
+        _provider(),  # type: ignore[arg-type]
+        "m1",
+        stage_timings={"verify_ms": 0, "route_ms": None, "first_token_ms": "bad", "total_ms": 9},
+        elapsed_ms=99,
+    )
+    assert payload["stage_timings"] == {
+        "verify_ms": 0,
+        "route_ms": None,
+        "first_token_ms": None,
+        "total_ms": 9,
+    }
+    assert payload["elapsed_ms"] == 99
 
 
 def test_normalize_model_selection() -> None:
