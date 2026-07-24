@@ -440,6 +440,8 @@ class SchedulerRuleExecutor:
                 await self.action_run_command(ctx, action)
             elif action_type == "call_llm":
                 await self.action_call_llm(ctx, action)
+            elif action_type == "agent_prompt":
+                await self.action_agent_prompt(ctx, action)
             else:
                 raise ValueError(f"unknown action.type={action_type}")
             if trace is not None:
@@ -598,6 +600,95 @@ class SchedulerRuleExecutor:
         delete_after = _to_positive_int(action.get("delete_after"))
         if delete_after > 0 and msg is not None:
             asyncio.create_task(self.delete_message_after(ctx, msg, delete_after, action_context=_scheduler_trace_context(ctx)))
+
+    async def action_agent_prompt(self, ctx: PluginContext, action: dict[str, Any]) -> None:
+        """无人值守跑一轮只读 System Agent，结果推送到目标会话。
+
+        写工具不暴露；失败只报告不重试。限额沿用 system_agent_config。
+        """
+
+        prompt = str(action.get("prompt") or "").strip()
+        if not prompt:
+            raise ValueError("agent_prompt requires prompt")
+
+        target = action.get("target_chat_id")
+        if target is None or target == "":
+            raise ValueError("agent_prompt requires target_chat_id（管理 Bot / 汇报会话）")
+
+        from app.db.models.system_agent import CHANNEL_BOT, SESSION_STATUS_ARCHIVED
+        from app.services.system_agent.service import SystemAgentService
+
+        trace_action = {
+            "type": "agent_prompt",
+            "send_via": "userbot_reply",
+            "chat_id": target if isinstance(target, int) else None,
+        }
+        prepared_peer = await self.reserve_send_peer(
+            ctx,
+            target,
+            trace_action=trace_action,
+            config_action=action,
+        )
+        if prepared_peer is None:
+            return
+
+        account_id = _to_positive_int(action.get("account_id")) or int(ctx.account_id)
+        svc = SystemAgentService()
+        answer = ""
+        error_message = ""
+        async with AsyncSessionLocal() as db:
+            session = await svc.create_session(
+                db,
+                channel=CHANNEL_BOT,
+                account_id=account_id,
+                bot_tg_user_id=None,
+                title=f"定时 Agent · {prompt[:40]}",
+            )
+            try:
+                async for event in svc.runtime.stream_turn(
+                    db,
+                    session=session,
+                    user_text=prompt,
+                    role="admin",
+                    channel="bot",
+                    history_messages=[],
+                    read_only_only=True,
+                ):
+                    et = str(event.get("type") or "")
+                    if et == "assistant_message":
+                        answer = str(event.get("content") or "").strip()
+                    elif et == "error":
+                        error_message = str(
+                            event.get("message") or event.get("code") or "agent failed"
+                        )
+            except Exception as exc:  # noqa: BLE001
+                error_message = f"{type(exc).__name__}: {exc}"
+            session.status = SESSION_STATUS_ARCHIVED
+            await db.commit()
+
+        if error_message and not answer:
+            text = f"【定时 Agent 失败】\n{error_message}"[:_MAX_MESSAGE_LEN]
+        else:
+            header = "【定时 Agent 报告】\n"
+            text = (header + (answer or "(empty)"))[:_MAX_MESSAGE_LEN]
+        trace_action["text"] = text
+        msg = await self.send_with_ratelimit(
+            ctx,
+            target,
+            text,
+            action=trace_action,
+            config_action=action,
+            prepared_peer=prepared_peer,
+        )
+        delete_after = _to_positive_int(action.get("delete_after"))
+        if delete_after > 0 and msg is not None:
+            asyncio.create_task(
+                self.delete_message_after(
+                    ctx, msg, delete_after, action_context=_scheduler_trace_context(ctx)
+                )
+            )
+        if error_message and not answer:
+            raise RuntimeError(error_message)
 
     async def delete_message_after(
         self,

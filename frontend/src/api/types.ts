@@ -1865,7 +1865,11 @@ export interface FullLivenessRunStartResponse {
 
 // ===== Sprint4 #2C =====
 export type SchedulerKind = "cron" | "once" | "interval";
-export type SchedulerActionType = "send_message" | "run_command" | "call_llm";
+export type SchedulerActionType =
+  | "send_message"
+  | "run_command"
+  | "call_llm"
+  | "agent_prompt";
 
 export interface SchedulerActionConfig {
   type: SchedulerActionType;
@@ -1879,6 +1883,8 @@ export interface SchedulerActionConfig {
   prompt?: string;
   system_prompt?: string;
   max_tokens?: number;
+  /** agent_prompt：可选覆盖账号上下文；缺省用规则所属账号 */
+  account_id?: number | null;
   /** 触发后多少秒自动删除发送的消息，0 或留空 = 不删除，上限 3600 */
   delete_after?: number | null;
 }
@@ -2048,6 +2054,8 @@ export interface UpdateJobStatus {
   detail?: string | null;
   logs: string[];
   plan?: Record<string, unknown> | null;
+  /** 更新各阶段耗时（WP-U1） */
+  step_timings?: Array<{ phase?: string; duration_ms?: number; detail?: string }> | null;
 }
 
 export interface UpdateTargetOptions {
