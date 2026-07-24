@@ -1,7 +1,7 @@
 // 应用主框架：左侧 Sidebar（桌面）/ MobileSidebar（移动）+ 顶部 TopBar + 内容 outlet
 // 高度用 100dvh：iOS Safari 浏览器模式下避免 100vh 把内容塞到地址栏后面；
 //                PWA 全屏模式下行为与 100vh 一致。
-import { lazy, Suspense, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import { Outlet, useLocation, useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
@@ -165,6 +165,15 @@ export function AppShell() {
     );
   }
 
+  const scrollMainToTop = useCallback(() => {
+    const main = mainRef.current;
+    if (!main) return;
+    const reduceMotion =
+      typeof window !== "undefined" &&
+      window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+    main.scrollTo({ top: 0, behavior: reduceMotion ? "auto" : "smooth" });
+  }, []);
+
   return (
     <AssistantDockProvider>
     <div className="app-frame flex h-[100dvh] w-full overflow-hidden bg-background">
@@ -177,6 +186,7 @@ export function AppShell() {
           onMenuClick={() => setMobileNavOpen(true)}
           onSidebarToggle={() => setSidebarCollapsed((value) => !value)}
           sidebarCollapsed={sidebarCollapsed}
+          onScrollToTop={scrollMainToTop}
         />
         {/* kill switch 开启时显示全局红色横幅；关闭时不渲染 */}
         <GlobalAlertBar />

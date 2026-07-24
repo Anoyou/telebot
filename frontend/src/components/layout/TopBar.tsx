@@ -41,6 +41,15 @@ interface TopBarProps {
   onMenuClick: () => void;
   onSidebarToggle: () => void;
   sidebarCollapsed: boolean;
+  /** 点顶栏空白/品牌区时滚回主内容顶部（替代 iOS 状态栏回顶） */
+  onScrollToTop?: () => void;
+}
+
+function isTopbarInteractiveTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof Element)) return false;
+  return Boolean(
+    target.closest("button, a, input, select, textarea, [role='button'], [data-no-scroll-top]"),
+  );
 }
 
 export function TopBar({
@@ -48,6 +57,7 @@ export function TopBar({
   onMenuClick,
   onSidebarToggle,
   sidebarCollapsed,
+  onScrollToTop,
 }: TopBarProps) {
   const [updateOpen, setUpdateOpen] = useState(false);
   const isStandalone = useStandaloneDisplayMode();
@@ -62,16 +72,32 @@ export function TopBar({
         pr-[max(0.75rem,env(safe-area-inset-right))]
         md:px-6 xl:px-8
       "
+      onClick={(event) => {
+        // 点顶栏非按钮区域（含安全区/标题旁空白）回顶；按钮自己处理点击
+        if (!onScrollToTop || isTopbarInteractiveTarget(event.target)) return;
+        onScrollToTop();
+      }}
     >
       <div className="flex min-w-0 items-center gap-1.5">
         <div className="flex min-w-0 items-center gap-1.5 md:hidden">
-          <BrandLogo className="h-6 w-6 shrink-0 rounded-lg" />
-          <div className="min-w-0">
-            <div className="truncate text-sm font-semibold leading-none">TelePilot</div>
-            <div className="mt-0.5 truncate text-[10px] leading-none text-muted-foreground">
-              管理控制台
+          <button
+            type="button"
+            className="flex min-w-0 max-w-full items-center gap-1.5 rounded-md text-left outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            onClick={(event) => {
+              event.stopPropagation();
+              onScrollToTop?.();
+            }}
+            aria-label="回到页面顶部"
+            title="回到顶部"
+          >
+            <BrandLogo className="h-6 w-6 shrink-0 rounded-lg" />
+            <div className="min-w-0">
+              <div className="truncate text-sm font-semibold leading-none">TelePilot</div>
+              <div className="mt-0.5 truncate text-[10px] leading-none text-muted-foreground">
+                管理控制台
+              </div>
             </div>
-          </div>
+          </button>
           {!isStandalone ? (
             <Button
               variant="outline"

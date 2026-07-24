@@ -18,26 +18,14 @@ import { StreamingText } from "@/components/ai/StreamingText";
 import { Button } from "@/components/ui/button";
 import { systemAgentToolLabel } from "@/lib/systemAgentLabels";
 import { cn } from "@/lib/utils";
-import { stabilizeStreamingMarkdown, visibleConversationMessages } from "./conversationState";
-
-const SAFE_TEXT_COLORS: Record<string, string> = {
-  red: "assistant-html-text-red",
-  blue: "assistant-html-text-blue",
-  green: "assistant-html-text-green",
-  yellow: "assistant-html-text-yellow",
-  purple: "assistant-html-text-purple",
-  gray: "assistant-html-text-gray",
-  grey: "assistant-html-text-gray",
-};
-const SAFE_LABELS: Record<string, string> = {
-  success: "assistant-html-label-success",
-  warn: "assistant-html-label-warn",
-  warning: "assistant-html-label-warn",
-  danger: "assistant-html-label-danger",
-  info: "assistant-html-label-info",
-  neutral: "assistant-html-label-neutral",
-};
-const ASSISTANT_HTML_CLASSES = [...new Set([...Object.values(SAFE_TEXT_COLORS), ...Object.values(SAFE_LABELS)])];
+import {
+  ASSISTANT_HTML_CLASSES,
+  extractStyleColor,
+  resolveAssistantTextColor,
+  SAFE_LABELS,
+  stabilizeStreamingMarkdown,
+  visibleConversationMessages,
+} from "./conversationState";
 
 type AssistantHtmlNode = {
   type?: string;
@@ -46,7 +34,7 @@ type AssistantHtmlNode = {
   children?: AssistantHtmlNode[];
 };
 
-/** 只把有限颜色与标签语义映射为项目 class，任意 style/class 仍会被删除。 */
+/** 把有限颜色与标签语义映射为 class / 安全 color style，再清掉任意 style。 */
 function rehypeAssistantSafeStyles() {
   return (tree: AssistantHtmlNode) => {
     const visit = (node: AssistantHtmlNode) => {
@@ -58,16 +46,24 @@ function rehypeAssistantSafeStyles() {
             ? properties.className.split(/\s+/)
             : [];
         const rawLabel = String(properties.dataLabel || properties["data-label"] || "").toLowerCase();
-        const colorAttr = String(properties.color || "").toLowerCase();
-        const style = String(properties.style || "");
-        const styleColor = /^\s*color\s*:\s*(red|blue|green|yellow|purple|gr(?:a|e)y)\s*;?\s*$/i.exec(style)?.[1]?.toLowerCase();
-        const requestedColor = SAFE_TEXT_COLORS[colorAttr] || (styleColor ? SAFE_TEXT_COLORS[styleColor] : undefined);
+        const colorAttr = String(properties.color || "").trim();
+        const styleColor = extractStyleColor(String(properties.style || ""));
+        const fromAttr = resolveAssistantTextColor(colorAttr);
+        const fromStyle = styleColor ? resolveAssistantTextColor(styleColor) : {};
+        // 属性 color 优先，其次 style 里的 color
+        const colorClass = fromAttr.className || fromStyle.className;
+        const colorStyle = fromAttr.style || fromStyle.style;
         const requestedLabel = SAFE_LABELS[rawLabel]
           || rawClass.map((item) => SAFE_LABELS[item.replace(/^label-/, "").toLowerCase()]).find(Boolean);
-        const safeClasses = [requestedColor, requestedLabel, ...rawClass.filter((item) => ASSISTANT_HTML_CLASSES.includes(item))].filter(Boolean);
+        const safeClasses = [
+          colorClass,
+          requestedLabel,
+          ...rawClass.filter((item) => ASSISTANT_HTML_CLASSES.includes(item)),
+        ].filter(Boolean) as string[];
         if (safeClasses.length) properties.className = [...new Set(safeClasses)];
         else delete properties.className;
-        delete properties.style;
+        if (colorStyle) properties.style = colorStyle;
+        else delete properties.style;
         delete properties.color;
         delete properties.dataLabel;
         delete properties["data-label"];
@@ -83,9 +79,17 @@ const ASSISTANT_SANITIZE_SCHEMA = {
   ...defaultSchema,
   attributes: {
     ...defaultSchema.attributes,
+    // 允许命名色 class；style 仅保留我们写入的 color: #hex / rgb()
     span: [
       ...(defaultSchema.attributes?.span || []),
       ["className", ...ASSISTANT_HTML_CLASSES],
+      "style",
+    ],
+    font: [
+      ...(defaultSchema.attributes?.font || []),
+      ["className", ...ASSISTANT_HTML_CLASSES],
+      "style",
+      "color",
     ],
   },
 };

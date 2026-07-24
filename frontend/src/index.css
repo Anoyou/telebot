@@ -102,8 +102,9 @@
 @layer base {
   html {
     width: 100%;
-    min-height: 100%;
-    overflow-x: hidden;
+    height: 100%;
+    overflow: hidden; /* 禁止 document 橡皮筋，避免整壳（含顶栏）被一起拽动 */
+    overscroll-behavior: none;
     background-color: hsl(var(--app-chrome));
     -webkit-text-size-adjust: 100%;
     text-size-adjust: 100%;
@@ -113,8 +114,11 @@
   body,
   #root {
     width: 100%;
+    height: 100%;
     min-height: 100dvh;
-    overflow-x: hidden;
+    max-height: 100dvh;
+    overflow: hidden; /* 滚动只允许发生在 .app-main 等业务容器内 */
+    overscroll-behavior: none;
     background-color: hsl(var(--app-chrome));
   }
 
@@ -400,10 +404,21 @@
     z-index: 1;
     margin-top: -1px;
     scrollbar-gutter: stable;
+    /* 主内容区橡皮筋不要链式传到 workspace/顶栏；卡顿时更明显 */
+    overscroll-behavior-y: contain;
+    -webkit-overflow-scrolling: touch;
   }
 
   .app-frame {
     position: relative;
+    /* 锁死整壳，避免 iOS 把 frame 当可拖视口 */
+    overflow: hidden;
+    overscroll-behavior: none;
+    touch-action: manipulation;
+  }
+
+  .app-workspace {
+    overscroll-behavior: none;
   }
 
   /* 不再用 position:fixed 覆盖层填充顶部/底部安全区：
@@ -426,6 +441,14 @@
     box-shadow: none;
     -webkit-backdrop-filter: none;
     backdrop-filter: none;
+    /* 点顶栏空白回顶时给出可点暗示（不影响按钮） */
+    cursor: pointer;
+  }
+
+  .app-topbar button,
+  .app-topbar a,
+  .app-topbar [role="button"] {
+    cursor: pointer;
   }
 
   @media (max-width: 767px) {
@@ -1499,12 +1522,26 @@
     word-break: break-word;
   }
 
-  .assistant-html-text-red { color: hsl(var(--destructive)); }
-  .assistant-html-text-blue { color: hsl(var(--info)); }
-  .assistant-html-text-green { color: hsl(var(--success)); }
-  .assistant-html-text-yellow { color: hsl(var(--warning)); }
-  .assistant-html-text-purple { color: hsl(var(--primary)); }
+  /* 助手 HTML 命名色：固定色值，避免 purple 误绑主题橙 primary */
+  .assistant-html-text-red { color: #e74c3c; }
+  .assistant-html-text-blue { color: #3498db; }
+  .assistant-html-text-green { color: #2ecc71; }
+  .assistant-html-text-yellow { color: #f1c40f; }
+  .assistant-html-text-purple { color: #9b59b6; }
   .assistant-html-text-gray { color: hsl(var(--muted-foreground)); }
+  .assistant-html-text-orange { color: #e67e22; }
+  .assistant-html-text-gold { color: #d4a017; }
+  .assistant-html-text-pink { color: #e84393; }
+  .assistant-html-text-cyan { color: #00bcd4; }
+  .assistant-html-text-teal { color: #009688; }
+  .assistant-html-text-magenta { color: #c2185b; }
+  .assistant-html-text-indigo { color: #5c6bc0; }
+  .assistant-html-text-brown { color: #8d6e63; }
+  .assistant-html-text-black { color: #212121; }
+  .assistant-html-text-white {
+    color: #f5f5f5;
+    text-shadow: 0 0 1px hsl(0 0% 0% / 0.45);
+  }
 
   .assistant-html-label-success,
   .assistant-html-label-warn,
