@@ -264,10 +264,13 @@ test.describe("移动端交互细节", () => {
     await page.goto("/plugins", { waitUntil: "networkidle" });
     await expect(page.getByText("AI 插件入口")).toBeHidden();
     await expect(page.getByText("这段插件说明在移动端默认不展示，展开卡片后才显示。")).toBeHidden();
-    await expect(page.getByRole("button", { name: "配置" })).toBeHidden();
-    await page.getByRole("button", { name: "随机福利" }).click();
+    const pluginCard = page.locator('[data-plugin-key="random_benefit"]');
+    await expect(pluginCard.locator("[data-plugin-version]")).toHaveText("v1.0.0");
+    await expect(pluginCard.locator("[data-plugin-version]")).toBeVisible();
+    await expect(pluginCard.getByRole("button", { name: "配置 随机福利" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "配置", exact: true })).toHaveCount(0);
+    await page.getByRole("button", { name: "随机福利", exact: true }).click();
     await expect(page.getByText("这段插件说明在移动端默认不展示，展开卡片后才显示。")).toBeVisible();
-    await expect(page.getByRole("button", { name: "配置" })).toBeVisible();
     fixture.assertClean();
   });
 
@@ -290,6 +293,9 @@ test.describe("移动端交互细节", () => {
     });
     await page.goto("/plugins", { waitUntil: "networkidle" });
     await expect(page.locator('[data-plugin-category-filter="all"]')).toHaveAttribute("aria-current", "page");
+    const allCategory = page.locator('[data-plugin-category-filter="all"]');
+    const allBox = await allCategory.boundingBox();
+    expect(allBox?.width || 999).toBeLessThan(150);
     await expect(page.locator("[data-plugin-card]")).toHaveCount(3);
     await page.locator('[data-plugin-category-filter="interactive"]').click();
     await expect(page.locator("[data-plugin-card]")).toHaveCount(1);
@@ -332,6 +338,12 @@ test.describe("移动端交互细节", () => {
     });
 
     await page.goto("/plugins/manage?tab=plugins", { waitUntil: "networkidle" });
+    const installToolsGroup = page.locator("[data-install-tools-group]");
+    await expect(installToolsGroup).toBeVisible();
+    const installToolsTrigger = installToolsGroup.getByRole("button", { name: "展开可配置" });
+    await expect(installToolsTrigger).toHaveAttribute("aria-expanded", "false");
+    await expect(page.getByRole("button", { name: "展开配置" })).toHaveCount(0);
+    await installToolsTrigger.click();
     await expect(page.getByRole("button", { name: "展开配置" })).toHaveAttribute("aria-expanded", "false");
     await expect(page.getByRole("button", { name: "展开添加仓库" })).toHaveAttribute("aria-expanded", "false");
     const savedRepo = page.getByText("telebot-plugins", { exact: true });

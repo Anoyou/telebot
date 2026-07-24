@@ -12,6 +12,7 @@ import {
   Package2,
   Package,
   PackagePlus,
+  Pencil,
   Settings2,
   Sparkles,
   Zap,
@@ -573,7 +574,7 @@ export function PluginsHome() {
                     type="button"
                     data-plugin-category-filter={category}
                     className={cn(
-                      "flex min-w-[9rem] shrink-0 items-center gap-2 rounded-lg border px-3 py-2.5 text-left transition-colors lg:min-w-0 lg:w-full",
+                      "flex min-w-0 shrink-0 items-center gap-1.5 rounded-lg border px-2.5 py-2 text-left transition-colors lg:w-full",
                       active
                         ? "border-primary/35 bg-primary/10 text-primary"
                         : "border-border/70 bg-background hover:bg-muted/40",
@@ -583,7 +584,7 @@ export function PluginsHome() {
                   >
                     <Icon className="h-4 w-4 shrink-0" />
                     <span className="min-w-0 flex-1 truncate text-sm font-medium">{meta.title}</span>
-                    <span className="shrink-0 rounded-full bg-muted px-2 py-0.5 text-[11px] tabular-nums text-muted-foreground">{count}</span>
+                    <span className="shrink-0 rounded-full bg-muted px-1.5 py-0.5 text-[10px] tabular-nums text-muted-foreground">{count}</span>
                   </button>
                 );
               })}
@@ -865,32 +866,45 @@ function FeatureZone({
                   key={f.key}
                   data-plugin-card
                   data-plugin-key={f.key}
-                  className={`rounded-md border p-3 ${
-                    status === "failed" ? "border-destructive/40 bg-destructive/5" : ""
-                  }`}
+                  className={cn(
+                    "relative rounded-md border p-3",
+                    status === "failed" ? "border-destructive/40 bg-destructive/5" : "",
+                    canConfigure ? "pr-12 sm:pr-3" : "",
+                  )}
                 >
                   <div className="min-w-0">
                     <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
                       <div className="min-w-0">
-                        <button
-                          type="button"
-                          className="flex min-w-0 items-center gap-1.5 text-left sm:pointer-events-none"
-                          aria-expanded={mobileExpanded}
-                          onClick={() => setMobileExpandedKeys((current) => {
-                            const next = new Set(current);
-                            if (next.has(f.key)) next.delete(f.key);
-                            else next.add(f.key);
-                            return next;
-                          })}
-                        >
-                          <span className="break-words text-sm font-medium leading-5" title={f.display_name}>
-                            {f.display_name}
-                          </span>
-                          <ChevronDown className={cn("h-4 w-4 shrink-0 text-muted-foreground transition-transform sm:hidden", mobileExpanded && "rotate-180")} />
-                        </button>
+                        <div className="flex min-w-0 items-center gap-1.5">
+                          <button
+                            type="button"
+                            className="flex min-w-0 items-center gap-1.5 text-left sm:pointer-events-none"
+                            aria-expanded={mobileExpanded}
+                            onClick={() => setMobileExpandedKeys((current) => {
+                              const next = new Set(current);
+                              if (next.has(f.key)) next.delete(f.key);
+                              else next.add(f.key);
+                              return next;
+                            })}
+                          >
+                            <span className="break-words text-sm font-medium leading-5" title={f.display_name}>
+                              {f.display_name}
+                            </span>
+                            <ChevronDown className={cn("h-4 w-4 shrink-0 text-muted-foreground transition-transform sm:hidden", mobileExpanded && "rotate-180")} />
+                          </button>
+                          <MetaBadge
+                            mono
+                            tone="outline"
+                            className="h-6 shrink-0 justify-center px-1.5 text-[10px]"
+                            title={moduleVersionLabel(f.version)}
+                            data-plugin-version
+                          >
+                            {moduleVersionLabel(f.version)}
+                          </MetaBadge>
+                        </div>
                         <div className="hidden break-all font-mono text-xs leading-5 text-muted-foreground sm:block">{f.key}</div>
                       </div>
-                      <div className="flex shrink-0 flex-wrap gap-1.5 sm:justify-end">
+                      <div className="flex min-w-0 flex-wrap gap-1.5 pr-8 sm:justify-end sm:pr-0">
                         <FeatureCapabilityBadge show={Boolean(f.interaction_entries?.length)} tone="info">
                           可交互
                         </FeatureCapabilityBadge>
@@ -1007,14 +1021,6 @@ function FeatureZone({
                           {trustBadge.label}
                         </MetaBadge>
                         <MetaBadge
-                          mono
-                          tone="outline"
-                          className="h-7 shrink-0 justify-center px-2 text-[10px]"
-                          title={moduleVersionLabel(f.version)}
-                        >
-                          {moduleVersionLabel(f.version)}
-                        </MetaBadge>
-                        <MetaBadge
                           tone={!enabled ? "neutral" : status === "failed" ? "danger" : "success"}
                           className="h-7 shrink-0 justify-center px-2 text-[10px]"
                           title={`开关：${enabled ? "已启用" : "未启用"}；运行状态：${runtimeLabel}${lastError ? `；最近错误：${lastError}` : ""}`}
@@ -1026,7 +1032,7 @@ function FeatureZone({
                         <Button
                           size="sm"
                           variant="outline"
-                          className="justify-self-end"
+                          className="hidden justify-self-end sm:inline-flex"
                           onClick={() => {
                             if (path) {
                               nav(path);
@@ -1039,6 +1045,23 @@ function FeatureZone({
                     </div>
                     </div>
                   </div>
+                  {canConfigure ? (
+                    <Button
+                      type="button"
+                      size="icon"
+                      variant="outline"
+                      className="absolute bottom-2.5 right-2.5 h-8 w-8 sm:hidden"
+                      aria-label={`配置 ${f.display_name}`}
+                      title="配置"
+                      onClick={() => {
+                        if (path) {
+                          nav(path);
+                        }
+                      }}
+                    >
+                      <Pencil className="h-3.5 w-3.5" />
+                    </Button>
+                  ) : null}
                   <div className={cn(mobileExpanded ? "block" : "hidden", "sm:block")}><ModuleLintWarnings warnings={lintWarnings} /></div>
                 </div>
               );

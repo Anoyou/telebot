@@ -711,12 +711,55 @@ function PluginInstallGuide({
 function PluginsManagementTab() {
   return (
     <div className="space-y-6">
-      <RemoteUpdateSettingsCard />
-      <LocalPluginImportCard />
-      <OfficialPluginsCard />
+      <InstallToolsGroup />
       <RemoteInstallCard />
       <InstalledPluginsSection />
     </div>
+  );
+}
+
+function InstallToolsGroup() {
+  const [mobileExpanded, setMobileExpanded] = useState(false);
+
+  return (
+    <>
+      <Card className="sm:hidden" data-install-tools-group>
+        <CardHeader className="pb-3">
+          <SectionHeader
+            icon={Puzzle}
+            title="安装与检查"
+            description="远程更新检查、本地导入与推荐插件默认折叠；展开后可配置。"
+            meta={<SignalPill tone="neutral" label="工具" value={3} className="h-8" />}
+            actions={(
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                className="h-8 gap-1.5"
+                onClick={() => setMobileExpanded((value) => !value)}
+                aria-expanded={mobileExpanded}
+                aria-controls="install-tools-group-content"
+              >
+                <ChevronDown className={cn("h-4 w-4 transition-transform", mobileExpanded && "rotate-180")} />
+                {mobileExpanded ? "收起" : "展开可配置"}
+              </Button>
+            )}
+          />
+        </CardHeader>
+        {mobileExpanded ? (
+          <CardContent id="install-tools-group-content" className="space-y-4">
+            <RemoteUpdateSettingsCard />
+            <LocalPluginImportCard />
+            <OfficialPluginsCard />
+          </CardContent>
+        ) : null}
+      </Card>
+      <div className="hidden space-y-6 sm:block">
+        <RemoteUpdateSettingsCard />
+        <LocalPluginImportCard />
+        <OfficialPluginsCard />
+      </div>
+    </>
   );
 }
 

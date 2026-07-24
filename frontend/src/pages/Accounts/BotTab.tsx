@@ -372,22 +372,27 @@ function AllowedPeerMultiSelect({
   selectedText,
   loading,
   onChange,
+  emptyMeansAll = true,
+  emptyAllLabel = "未指定会话时匹配全部",
 }: {
   aid: number;
   peers: IgnoredPeer[];
   selectedText: string;
   loading: boolean;
   onChange: (value: string) => void;
+  emptyMeansAll?: boolean;
+  emptyAllLabel?: string;
 }) {
-  const selected = new Set(chatIdTextItems(selectedText));
+  const selectedItems = chatIdTextItems(selectedText);
+  const selected = new Set(selectedItems);
   const knownPeerIds = new Set(peers.map((peer) => String(peer.peer_id)));
-  const unknownSelected = chatIdTextItems(selectedText).filter((id) => !knownPeerIds.has(id));
+  const unknownSelected = selectedItems.filter((id) => !knownPeerIds.has(id));
   const removeSelectedId = (id: string) => {
-    onChange(chatIdTextItems(selectedText).filter((item) => item !== id).join("\n"));
+    onChange(selectedItems.filter((item) => item !== id).join("\n"));
   };
   const togglePeer = (peer: IgnoredPeer) => {
     const id = String(peer.peer_id);
-    const next = chatIdTextItems(selectedText);
+    const next = [...selectedItems];
     const existingIndex = next.indexOf(id);
     if (existingIndex >= 0) {
       next.splice(existingIndex, 1);
@@ -406,51 +411,66 @@ function AllowedPeerMultiSelect({
     );
   }
 
-  if (peers.length === 0) {
-    return (
-      <div className="nested-surface-item border border-dashed bg-background px-3 py-2 text-xs leading-5 text-muted-foreground">
-        暂无已允许会话。没有找到想选择的会话时，请先去{" "}
-        <Link to={`/accounts/${aid}?tab=ignored`} className="font-medium text-primary hover:underline">
-          账号详情页的允许会话
-        </Link>{" "}
-        添加。
-      </div>
-    );
-  }
-
   return (
     <div className="space-y-1.5">
       <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
-        <span>从已允许会话选择</span>
-        <span>{selected.size} 个已选</span>
+        <span>{peers.length > 0 ? "从已允许会话选择" : "监听会话范围"}</span>
+        <span>
+          {selectedItems.length > 0
+            ? `${selectedItems.length} 个已选`
+            : emptyMeansAll
+              ? "全部会话"
+              : "未选择"}
+        </span>
       </div>
-      <div className="nested-surface nested-surface-inset-2 flex max-h-24 flex-wrap gap-1.5 overflow-y-auto border bg-background">
-        {peers.map((peer) => {
-          const id = String(peer.peer_id);
-          const active = selected.has(id);
-          return (
-            <button
-              key={peer.id}
-              type="button"
-              className={cn(
-                "nested-surface-item min-w-0 max-w-full border px-2 py-1.5 text-left text-xs transition-colors",
-                active
-                  ? "border-primary bg-primary/10 text-primary"
-                  : "border-border bg-muted/30 text-muted-foreground [@media(hover:hover)]:hover:border-primary/40 [@media(hover:hover)]:hover:text-foreground",
-              )}
-              title={`${allowedPeerDisplayName(peer)} · ${id}`}
-              onClick={() => togglePeer(peer)}
-            >
-              <span className="block max-w-[210px] truncate font-medium">
-                {allowedPeerDisplayName(peer)}
-              </span>
-              <span className="mt-0.5 block font-mono text-[11px] opacity-75">
-                {peerKindLabel(String(peer.peer_kind))} · {id}
-              </span>
-            </button>
-          );
-        })}
-      </div>
+
+      {peers.length === 0 ? (
+        <div className="nested-surface-item border border-dashed bg-background px-3 py-2 text-xs leading-5 text-muted-foreground">
+          {emptyMeansAll ? (
+            <>
+              允许会话列表为空，按白名单语义<span className="font-medium text-foreground">允许全部会话</span>。
+              规则监听群留空同样表示匹配全部；需要收窄时再手填 Chat ID，或先去{" "}
+            </>
+          ) : (
+            <>
+              暂无已允许会话可点选。可先手填 Chat ID，或去{" "}
+            </>
+          )}
+          <Link to={`/accounts/${aid}?tab=ignored`} className="font-medium text-primary hover:underline">
+            账号详情页的允许会话
+          </Link>
+          {emptyMeansAll ? " 添加快捷选项。" : " 添加。"}
+        </div>
+      ) : (
+        <div className="nested-surface nested-surface-inset-2 flex max-h-24 flex-wrap gap-1.5 overflow-y-auto border bg-background">
+          {peers.map((peer) => {
+            const id = String(peer.peer_id);
+            const active = selected.has(id);
+            return (
+              <button
+                key={peer.id}
+                type="button"
+                className={cn(
+                  "nested-surface-item min-w-0 max-w-full border px-2 py-1.5 text-left text-xs transition-colors",
+                  active
+                    ? "border-primary bg-primary/10 text-primary"
+                    : "border-border bg-muted/30 text-muted-foreground [@media(hover:hover)]:hover:border-primary/40 [@media(hover:hover)]:hover:text-foreground",
+                )}
+                title={`${allowedPeerDisplayName(peer)} · ${id}`}
+                onClick={() => togglePeer(peer)}
+              >
+                <span className="block max-w-[210px] truncate font-medium">
+                  {allowedPeerDisplayName(peer)}
+                </span>
+                <span className="mt-0.5 block font-mono text-[11px] opacity-75">
+                  {peerKindLabel(String(peer.peer_kind))} · {id}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+
       {unknownSelected.length > 0 ? (
         <div className="nested-surface-item flex flex-wrap gap-1.5 border border-warning/30 bg-warning/10 px-2 py-1.5 text-xs text-warning">
           {unknownSelected.map((id) => (
@@ -466,12 +486,29 @@ function AllowedPeerMultiSelect({
           ))}
         </div>
       ) : null}
+
+      <div className="space-y-1.5">
+        <Label className="text-xs text-muted-foreground">手动填写 Chat ID（可选，一行一个）</Label>
+        <Textarea
+          rows={2}
+          className="min-h-[56px] resize-y py-2 font-mono text-xs leading-5"
+          placeholder={emptyMeansAll ? "留空 = 全部会话；例如：\n-1001234567890" : "例如：\n-1001234567890"}
+          value={selectedText}
+          onChange={(event) => onChange(event.target.value)}
+        />
+      </div>
+
       <div className="text-xs leading-5 text-muted-foreground">
-        没有找到想选择的会话？去{" "}
-        <Link to={`/accounts/${aid}?tab=ignored`} className="font-medium text-primary hover:underline">
-          账号详情页的允许会话
-        </Link>{" "}
-        添加后再回来选择。
+        {emptyMeansAll ? `${emptyAllLabel}。` : null}
+        {peers.length > 0 ? (
+          <>
+            {" "}没有找到想选择的会话时，可手填 Chat ID，或去{" "}
+            <Link to={`/accounts/${aid}?tab=ignored`} className="font-medium text-primary hover:underline">
+              账号详情页的允许会话
+            </Link>{" "}
+            添加快捷选项。
+          </>
+        ) : null}
       </div>
     </div>
   );
@@ -1431,7 +1468,7 @@ function InteractionRuleEditor({
           <div className="nested-surface-item border bg-background px-3 py-2">
             <div className="text-xs text-muted-foreground">监听群</div>
             <div className="mt-1 text-sm font-medium">
-              {ruleChatCount > 0 ? `${ruleChatCount} 个群` : "未填写"}
+              {ruleChatCount > 0 ? `${ruleChatCount} 个群` : "全部会话"}
             </div>
           </div>
           <div className="nested-surface-item border bg-background px-3 py-2">
@@ -1452,7 +1489,7 @@ function InteractionRuleEditor({
       <RuleEditorSection
         step="1"
         title="触发"
-        description="先决定交互 Bot 在哪些群里监听，以及群友用转账还是关键词触发。"
+        description="先决定交互 Bot 在哪些群里监听（留空=全部会话），以及群友用转账还是关键词触发。"
       >
         <div className="grid gap-3 lg:grid-cols-[minmax(240px,1fr)_168px_180px]">
           <div className="space-y-1.5">
@@ -1474,8 +1511,8 @@ function InteractionRuleEditor({
               {triggerModeOptions}
             </Select>
             <div className="flex flex-wrap gap-1.5 text-xs text-muted-foreground">
-              <Badge variant={ruleChatCount > 0 ? "secondary" : "destructive"}>
-                {ruleChatCount > 0 ? `${ruleChatCount} 个群` : "缺少群"}
+              <Badge variant={ruleChatCount > 0 ? "secondary" : "outline"}>
+                {ruleChatCount > 0 ? `${ruleChatCount} 个群` : "全部会话"}
               </Badge>
               {showsPaymentFields ? (
                 <Badge variant={hasPaidThreshold ? "secondary" : "outline"}>
@@ -2197,10 +2234,7 @@ export function BotTab({
     }
     const firstRule = rules.find((rule) => rule.enabled) ?? rules[0];
     if (transferEnabled && !existingInteractionBotToken && !nextInteractionBotToken) {
-      throw new Error("启用转账联动时必须填写交互 Bot Token");
-    }
-    if (transferEnabled && chatIds.length <= 0) {
-      throw new Error("启用转账联动时至少需要在一条规则里填写监听群 Chat ID");
+      throw new Error("启用交互总开关时必须填写交互 Bot Token");
     }
     if (transferTestChatIds.length > 20) {
       throw new Error("模拟测试群最多选择 20 个");
@@ -2503,10 +2537,9 @@ export function BotTab({
   const users = usersQ.data ?? [];
   const hasInteractionToken = Boolean(interactionQ.data?.has_interaction_bot_token) && !clearInteractionBotToken;
   const hasTransferToken = Boolean(interactionQ.data?.has_transfer_bot_token) && !clearTransferBotToken;
-  const hasRuleChatIds = interactionRules.some((rule) => rule.chatIds.trim());
-  const transferReady =
-    hasRuleChatIds
-    && (hasInteractionToken || Boolean(interactionBotToken.trim()));
+  // 规则 chat_ids 为空表示匹配全部会话；允许会话列表为空也是白名单“允许全部”。
+  // 保存不应被“未点选已允许会话”卡住。总开关开启时仍需要交互 Bot Token。
+  const transferReady = hasInteractionToken || Boolean(interactionBotToken.trim());
   const isInteractionConfigSaveDisabled =
     saveTransferMut.isPending || !interactionQ.data || (transferEnabled && !transferReady);
   const selectedInteractionRuleIndex = interactionRules.findIndex((rule) => rule.id === selectedInteractionRuleId);
@@ -2964,13 +2997,14 @@ export function BotTab({
                       peers={allowedPeersQ.data ?? []}
                       selectedText={transferTestChatIdsText}
                       loading={allowedPeersQ.isLoading}
+                      emptyMeansAll={false}
                       onChange={(chatIds) => {
                         markInteractionDirty();
                         setTransferTestChatIdsText(chatIds);
                       }}
                     />
                     <div className="text-xs leading-5 text-muted-foreground">
-                      只有明确选择的群会响应 +金额、-金额模拟命令；真实转账规则群不会自动启用测试 Bot。
+                      只有明确选择的群会响应 +金额、-金额模拟命令；留空不会启用任何测试群。真实转账规则群不会自动启用测试 Bot。
                     </div>
                   </div>
                   <BotMembershipList
@@ -3252,7 +3286,7 @@ export function BotTab({
                                 </Badge>
                               </div>
                               <div className="mt-1 flex min-w-0 flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground">
-                                <span className="whitespace-nowrap">群 {chatCount > 0 ? chatCount : "未填"}</span>
+                                <span className="whitespace-nowrap">群 {chatCount > 0 ? chatCount : "全部"}</span>
                                 <span className="whitespace-nowrap">关键词 {keywordCount}</span>
                                 <span className="min-w-0 truncate">{sessionSummary}</span>
                               </div>
