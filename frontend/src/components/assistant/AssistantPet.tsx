@@ -65,30 +65,47 @@ function initialPosition(): PetPosition {
   }
 }
 
-export function AssistantRobot({ compact = false, streaming = false }: { compact?: boolean; streaming?: boolean }) {
+export function AssistantRobot({
+  compact = false,
+  streaming = false,
+  active = false,
+}: {
+  compact?: boolean;
+  streaming?: boolean;
+  active?: boolean;
+}) {
   return (
     <span className={cn("assistant-pet-robot-frame", compact && "assistant-pet-robot-frame-compact")} aria-hidden="true">
-    <span className="assistant-pet-robot">
-      <span className="assistant-pet-antenna"><span /></span>
-      <span className="assistant-pet-head">
-        <span className="assistant-pet-ear assistant-pet-ear-left" />
-        <span className="assistant-pet-ear assistant-pet-ear-right" />
-        <span className="assistant-pet-face">
-          <span className="assistant-pet-eye assistant-pet-eye-left" />
-          <span className="assistant-pet-eye assistant-pet-eye-right" />
-          <span className="assistant-pet-mouth" />
+      <span
+        className="assistant-pet-robot"
+        data-agent-pet-intent={streaming ? "working" : active ? "awake" : "idle"}
+      >
+        <span className="assistant-pet-shadow" />
+        <span className="assistant-pet-antenna"><span /></span>
+        <span className="assistant-pet-head">
+          <span className="assistant-pet-ear assistant-pet-ear-left" />
+          <span className="assistant-pet-ear assistant-pet-ear-right" />
+          <span className="assistant-pet-face">
+            <span className="assistant-pet-eye assistant-pet-eye-left" />
+            <span className="assistant-pet-eye assistant-pet-eye-right" />
+            <span className="assistant-pet-mouth" />
+          </span>
+        </span>
+        <span className="assistant-pet-neck" />
+        <span className="assistant-pet-body">
+          <span className={cn("assistant-pet-core", streaming && "assistant-pet-core-streaming")}>
+            <Send />
+          </span>
+        </span>
+        <span className="assistant-pet-arm assistant-pet-arm-left" />
+        <span className="assistant-pet-arm assistant-pet-arm-right" />
+        <span className="assistant-pet-foot assistant-pet-foot-left">
+          <span className="assistant-pet-plume" />
+        </span>
+        <span className="assistant-pet-foot assistant-pet-foot-right">
+          <span className="assistant-pet-plume" />
         </span>
       </span>
-      <span className="assistant-pet-body">
-        <span className={cn("assistant-pet-core", streaming && "assistant-pet-core-streaming")}>
-          <Send />
-        </span>
-      </span>
-      <span className="assistant-pet-arm assistant-pet-arm-left" />
-      <span className="assistant-pet-arm assistant-pet-arm-right" />
-      <span className="assistant-pet-foot assistant-pet-foot-left" />
-      <span className="assistant-pet-foot assistant-pet-foot-right" />
-    </span>
     </span>
   );
 }
@@ -278,8 +295,7 @@ export function AssistantPet() {
         transform: `translate3d(${position.x}px, ${position.y}px, 0)`,
       } as CSSProperties}
     >
-      <AssistantRobot streaming={streaming} />
-      {streaming ? <span className="assistant-pet-live-dot" /> : null}
+      <AssistantRobot streaming={streaming} active={!collapsed} />
     </button>
   );
 }

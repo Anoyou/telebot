@@ -4,6 +4,7 @@ import {
   ChevronDown,
   ChevronRight,
   Filter,
+  RotateCcw,
   SlidersHorizontal,
   X,
 } from "lucide-react";
@@ -630,6 +631,22 @@ export function FullLivenessPanel({
     }
   };
 
+  const clearResults = () => {
+    if (running) return;
+    setResult(null);
+    setResultExpanded(true);
+    setResultFilter("all");
+    setCollapsedResultProviders({});
+    writeFullLivenessState({
+      preview,
+      result: null,
+      selectedProviderIds,
+      selectedModelsByProvider,
+      activeRunId: null,
+      previewInputKey,
+    });
+  };
+
   const filteredResults = result?.results.filter((item) => (
     resultFilter === "all" || livenessResultCategory(item) === resultFilter
   )) ?? [];
@@ -816,6 +833,17 @@ export function FullLivenessPanel({
               onClick={() => { setScopeOpen(false); setSettingsOpen(true); }}
             >
               <SlidersHorizontal className="h-4 w-4" />设置
+            </Button>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="h-8 px-2 text-xs"
+              disabled={running || !result}
+              title="清空本次巡检结果"
+              onClick={clearResults}
+            >
+              <RotateCcw className="mr-1 h-3.5 w-3.5" />清空对话
             </Button>
           </div>
           {pollingError && activeRunId ? (

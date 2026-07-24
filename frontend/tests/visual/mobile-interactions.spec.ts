@@ -149,10 +149,17 @@ test.describe("移动端交互细节", () => {
       const sortRect = element.getBoundingClientRect();
       const button = Array.from(document.querySelectorAll("button")).find((item) => item.textContent?.includes("新建"));
       const createRect = button?.getBoundingClientRect();
-      return { sortRight: sortRect.right, createLeft: createRect?.left ?? 0 };
+      return {
+        sortRight: sortRect.right,
+        sortTop: sortRect.top,
+        createLeft: createRect?.left ?? 0,
+        createTop: createRect?.top ?? 0,
+      };
     });
     expect(controls.createLeft).toBeGreaterThanOrEqual(controls.sortRight);
+    expect(Math.round(controls.createTop)).toBe(Math.round(controls.sortTop));
     await expect(createButton).toBeVisible();
+    await expect(page.getByRole("button", { name: "模型测活" })).toBeVisible();
     await sort.selectOption("models");
     const providerCards = page.locator("[data-provider-card]");
     await expect(providerCards).toHaveCount(2);
@@ -192,6 +199,7 @@ test.describe("移动端交互细节", () => {
     await page.getByRole("button", { name: "设置", exact: true }).click();
     await expect(page.getByLabel("全局巡检请求设置")).toBeVisible();
     await expect(page.getByRole("button", { name: "刷新所选模型范围" })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "清空对话" })).toBeDisabled();
     await expect(page.getByRole("button", { name: "开始全量测活" })).toBeEnabled();
     fixture.assertClean();
   });
@@ -289,6 +297,8 @@ test.describe("移动端交互细节", () => {
     await page.mouse.up();
     await expect(assistantPet).toHaveAttribute("data-docked", "false");
     await expect(assistantPet).toHaveAttribute("data-docked", "right", { timeout: 3_000 });
+    await expect(assistantPet.locator(".assistant-pet-arm-left")).toHaveCSS("animation-name", "assistant-pet-arm-left");
+    await expect(assistantPet.locator(".assistant-pet-foot-right")).toHaveCSS("animation-name", "assistant-pet-foot-right");
     await expect(page.locator("[data-assistant-mobile-button]")).toBeHidden();
     await expect(page.locator("[data-assistant-tip]")).toHaveCount(0);
     fixture.assertClean();
@@ -340,10 +350,20 @@ test.describe("移动端交互细节", () => {
       await expect(mobileSummary).toBeVisible();
       await expect(mobileSummary).toHaveAttribute("aria-expanded", "false");
       await expect(mobileSettings).toBeHidden();
+      await expect(page.locator("[data-mobile-navigation-dock]")).toBeHidden();
+      await expect(trigger.locator('[data-agent-pet-intent="awake"]')).toBeVisible();
+      await expect(composer).toBeVisible();
+      const triggerBox = await trigger.boundingBox();
+      const initialComposerBox = await composer.boundingBox();
+      const triggerGap = (initialComposerBox?.y || 0) - ((triggerBox?.y || 0) + (triggerBox?.height || 0));
+      expect(triggerGap).toBeGreaterThanOrEqual(4);
+      expect(triggerGap).toBeLessThanOrEqual(24);
       await mobileSummary.click();
       await expect(mobileSettings).toBeVisible();
       await mobileSettings.getByRole("button", { name: "配置" }).click();
       await expect(surface.locator("[data-assistant-config-panel]")).toBeVisible();
+      await expect(mobileSettings).toBeHidden();
+      await expect(surface.getByRole("button", { name: "收起配置" })).toBeVisible();
     } else {
       await expect(surface.getByRole("heading", { name: "系统助手" })).toBeVisible();
       await expect(mobileSummary).toBeHidden();
@@ -379,6 +399,14 @@ test.describe("移动端交互细节", () => {
     await expect(page.getByRole("heading", { name: "页面已移除" })).toBeVisible();
     await page.goto("/ai", { waitUntil: "networkidle" });
     await expect(page.getByRole("button", { name: "配置系统助手" })).toHaveCount(0);
+    fixture.assertClean();
+  });
+
+  test("主滚动区预留滚动条槽位避免子页面切换跳动", async ({ page }, testInfo) => {
+    test.skip(testInfo.project.name !== "mobile", "仅移动视口");
+    const fixture = await installApiFixture(page);
+    await page.goto("/operations/templates", { waitUntil: "networkidle" });
+    await expect(page.locator("[data-app-main]")).toHaveCSS("scrollbar-gutter", "stable");
     fixture.assertClean();
   });
 

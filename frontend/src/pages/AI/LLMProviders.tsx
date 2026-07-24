@@ -8,7 +8,7 @@ import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { toast } from "sonner";
-import { ArrowLeft, Plus, Trash2, KeyRound, Edit3, Download, CheckCircle2, XCircle, Star, ChevronDown, ChevronRight, Eye, EyeOff, Filter, X, Package, Save, MessageSquare, ArrowUpDown, GripVertical } from "lucide-react";
+import { ArrowLeft, Plus, Trash2, KeyRound, Edit3, Download, CheckCircle2, XCircle, Star, ChevronDown, ChevronRight, Eye, EyeOff, Filter, X, Package, Save, Activity, ArrowUpDown, GripVertical } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { CommandBadge } from "@/components/CommandBadge";
@@ -652,7 +652,7 @@ export function LLMProviders({
                 disabled={visibleProviders.length === 0}
                 onClick={() => navigate(`/ai/liveness?provider=${visibleProviders[0].id}`)}
               >
-                <MessageSquare className="mr-1 h-4 w-4" /> 对话测活
+                <Activity className="mr-1 h-4 w-4" /> 模型测活
               </Button>
               <Button
                 type="button"
@@ -667,31 +667,31 @@ export function LLMProviders({
           </div>
         </CardHeader>
         <CardContent>
-          <div className="mb-3 flex flex-wrap items-center justify-end gap-2">
+          <div className="mb-3 flex flex-nowrap items-center justify-end gap-1.5 sm:gap-2">
             {visibleProviders.length > 1 ? (
               <>
-              <ArrowUpDown className="h-3.5 w-3.5 text-muted-foreground" />
-              <Label htmlFor="provider-sort" className="text-xs text-muted-foreground">排序</Label>
-              <Select id="provider-sort" value={providerSort} disabled={editingProviderOrder} onChange={(event) => setProviderSort(event.target.value as typeof providerSort)} className="h-11 w-auto min-w-32 text-xs sm:h-9">
+              <ArrowUpDown className="hidden h-3.5 w-3.5 shrink-0 text-muted-foreground sm:block" />
+              <Label htmlFor="provider-sort" className="shrink-0 text-xs text-muted-foreground">排序</Label>
+              <Select id="provider-sort" value={providerSort} disabled={editingProviderOrder} onChange={(event) => setProviderSort(event.target.value as typeof providerSort)} className="h-11 min-w-0 flex-1 text-xs sm:h-9 sm:w-auto sm:min-w-32 sm:flex-none">
                 <option value="custom">自定义顺序</option>
                 <option value="name">名称</option>
                 <option value="models">启用模型数</option>
               </Select>
               {editingProviderOrder ? (
                 <>
-                  <Button type="button" size="sm" variant="outline" className="min-h-11 sm:min-h-9" onClick={() => setEditingProviderOrder(false)}>取消</Button>
-                  <Button type="button" size="sm" className="min-h-11 sm:min-h-9" loading={saveProviderOrder.isPending} onClick={() => saveProviderOrder.mutate()}>
+                  <Button type="button" size="sm" variant="outline" className="min-h-11 shrink-0 px-2 text-xs sm:min-h-9" onClick={() => setEditingProviderOrder(false)}>取消</Button>
+                  <Button type="button" size="sm" className="min-h-11 shrink-0 px-2 text-xs sm:min-h-9" loading={saveProviderOrder.isPending} onClick={() => saveProviderOrder.mutate()}>
                     {!saveProviderOrder.isPending ? <Save className="mr-1 h-4 w-4" /> : null}保存排序
                   </Button>
                 </>
               ) : (
-                <Button type="button" size="sm" variant="outline" className="min-h-11 sm:min-h-9" onClick={() => { setProviderSort("custom"); setEditingProviderOrder(true); }}>
+                <Button type="button" size="sm" variant="outline" className="min-h-11 shrink-0 px-2 text-xs sm:min-h-9" onClick={() => { setProviderSort("custom"); setEditingProviderOrder(true); }}>
                   <GripVertical className="mr-1 h-4 w-4" />编辑排序
                 </Button>
               )}
               </>
             ) : null}
-            <Button size="sm" className="min-h-11 sm:min-h-9" disabled={editingProviderOrder} onClick={openCreate}>
+            <Button size="sm" className="min-h-11 shrink-0 px-2 text-xs sm:min-h-9" disabled={editingProviderOrder} onClick={openCreate}>
               <Plus className="mr-1 h-4 w-4" /> 新建
             </Button>
           </div>
@@ -2392,7 +2392,7 @@ function ProviderModelsSection({
             <Star className="h-3.5 w-3.5" />
           </Button>
         )}
-        {/* 槽位 2：连通性测试 + 对话测活深链 */}
+        {/* 槽位 2：连通性测试 + 模型测活深链 */}
         <Button
           type="button"
           size="sm"
@@ -2410,7 +2410,7 @@ function ProviderModelsSection({
             size="sm"
             variant="ghost"
             asChild
-            title="打开对话测活并预选此模型"
+            title="打开模型测活并预选此模型"
           >
             <Link to={`/ai/liveness?provider=${providerId}&model=${encodeURIComponent(m.id)}`}>
               对话

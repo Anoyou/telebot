@@ -205,14 +205,16 @@ export function AppShell() {
             <AssistantSurface />
           </div>
           <nav
+            data-mobile-bottom-dock
             className="
-              pointer-events-none fixed inset-x-0 z-40 sm:hidden
+              mobile-bottom-dock pointer-events-none fixed inset-x-0 z-40 sm:hidden
               bottom-[env(safe-area-inset-bottom)]
               px-[max(0.75rem,env(safe-area-inset-left))]
             "
           >
             <div className="pointer-events-auto mx-auto flex h-[3.75rem] w-full max-w-[23rem] gap-2">
               <div
+                data-mobile-navigation-dock
                 className="liquid-bottom-nav grid min-w-0 flex-1 gap-0.5 px-1.5 py-2"
                 style={{ gridTemplateColumns: `repeat(${mobileNavItems.length + 1}, minmax(0, 1fr))` }}
               >
@@ -335,8 +337,7 @@ function MobileAssistantButton() {
       )}
     >
       <span className="relative grid place-items-center">
-        <AssistantRobot compact streaming={streaming} />
-        {streaming ? <span className="absolute -right-1 -top-1 h-2.5 w-2.5 animate-pulse rounded-full border-2 border-card bg-success motion-reduce:animate-none" /> : null}
+        <AssistantRobot compact streaming={streaming} active={!collapsed} />
       </span>
       <span className="mt-0.5 text-[10px] font-semibold leading-none">助手</span>
     </button>
@@ -374,7 +375,10 @@ function AssistantSurface() {
       aria-label="系统助手"
       aria-hidden={collapsed}
       className={cn(
-        "absolute inset-0 z-30 origin-bottom overflow-hidden bg-background px-4 py-4 pb-[calc(5.25rem+env(safe-area-inset-bottom))] transition-[opacity,transform,visibility] duration-200 ease-out will-change-[opacity,transform] motion-reduce:transform-none motion-reduce:transition-none sm:pb-7 md:px-8 md:py-7 xl:px-10",
+        "absolute inset-0 z-30 origin-bottom overflow-hidden bg-background px-4 py-4 transition-[opacity,transform,visibility] duration-200 ease-out will-change-[opacity,transform] motion-reduce:transform-none motion-reduce:transition-none sm:pb-7 md:px-8 md:py-7 xl:px-10",
+        collapsed
+          ? "pb-[calc(5.25rem+env(safe-area-inset-bottom))]"
+          : "pb-[max(1rem,env(safe-area-inset-bottom))]",
         collapsed
           ? "invisible pointer-events-none translate-y-2 scale-[0.99] opacity-0"
           : "visible translate-y-0 scale-100 opacity-100",

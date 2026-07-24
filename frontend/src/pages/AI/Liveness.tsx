@@ -1167,9 +1167,6 @@ export function LLMLivenessPage() {
                       已被启用
                     </span>
                   ) : null}
-                  {!modelsLocked && !busy && selectedModels.length === 1 && selectedModels[0] === model.id ? (
-                    <MetaBadge tone="info">快速</MetaBadge>
-                  ) : null}
                 </div>
               </div>
             </div>

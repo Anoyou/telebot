@@ -909,7 +909,7 @@ export function AssistantIndex() {
           <span className="ml-auto shrink-0 text-[11px] text-primary">展开后可配置</span>
           <ChevronDown className={`h-4 w-4 shrink-0 text-muted-foreground transition-transform ${mobileHeaderExpanded ? "rotate-180" : ""}`} />
         </button>
-        <div data-assistant-mobile-settings className={`${mobileHeaderExpanded ? "block" : "hidden"} border-t p-2.5 sm:block sm:border-t-0 sm:p-0`}>
+        <div data-assistant-mobile-settings className={`${mobileHeaderExpanded && !configOpen ? "block" : "hidden"} border-t p-2.5 sm:block sm:border-t-0 sm:p-0`}>
         <div className="flex items-center justify-between gap-2">
           <div className="flex min-w-0 items-center gap-2">
             <span className="min-w-0 truncate text-xs text-muted-foreground">
@@ -998,8 +998,13 @@ export function AssistantIndex() {
       </div>
 
       {configOpen ? (
-        <div data-assistant-config-panel className={`${mobileHeaderExpanded ? "block" : "hidden"} -mt-3 min-h-32 max-h-[min(38dvh,24rem)] shrink overflow-y-auto rounded-b-lg border border-t-0 bg-card p-4 text-sm overscroll-contain sm:mt-0 sm:block sm:rounded-lg sm:border-t`}>
-          <div className="mb-3 font-medium">系统助手模型</div>
+        <div data-assistant-config-panel className={`${mobileHeaderExpanded ? "block" : "hidden"} -mt-3 min-h-32 max-h-36 shrink overflow-y-auto rounded-b-lg border border-t-0 bg-card p-4 text-sm overscroll-contain sm:mt-0 sm:block sm:max-h-96 sm:rounded-lg sm:border-t`}>
+          <div className="mb-3 flex items-center justify-between gap-3">
+            <div className="font-medium">系统助手模型</div>
+            <Button type="button" size="sm" variant="ghost" className="h-7 px-2 text-xs sm:hidden" onClick={() => setConfigOpen(false)}>
+              收起配置
+            </Button>
+          </div>
           <div className="grid gap-3 sm:grid-cols-2">
             <div className="flex min-h-11 items-center justify-between gap-3 rounded-md border px-3 py-2">
               <span>启用系统助手</span>
