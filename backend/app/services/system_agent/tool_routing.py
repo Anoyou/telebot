@@ -11,22 +11,109 @@ from typing import Any
 from .registry import ToolSpec
 
 DOMAIN_CATALOG: dict[str, tuple[str, tuple[str, ...]]] = {
-    "accounts": ("Telegram 账号、暂停恢复、Worker 重启", ("账号", "account", "worker", "登录号")),
-    "commands": ("自定义指令、命令模板与账号启用范围", ("指令", "命令", "command", "模板")),
-    "features": ("账号功能、插件功能启停与状态", ("功能", "feature", "能力开关")),
-    "interaction": ("交互 Bot 规则、触发条件、暂停与启停", ("交互", "interaction", "触发", "暂停规则")),
-    "ledger": ("资金台账、收入、支出与余额", ("台账", "收入", "支出", "余额", "资金", "账目", "ledger")),
-    "logs": ("运行日志、错误、事件与诊断", ("日志", "报错", "错误", "异常", "trace", "log")),
-    "memory": ("长期偏好记忆的查询与保存", ("记住", "偏好", "长期记忆", "别再问", "remember", "preference")),
-    "plugin_repos": ("插件仓库、官方库与从仓库安装", ("插件仓库", "仓库", "repository", "repo")),
-    "plugins": ("已安装插件、检查更新、安装卸载与全局启停", ("插件", "plugin", "扩展")),
-    "product": ("TelePilot 产品版本、更新日志与界面入口", ("更新日志", "版本日志", "changelog", "最近更新")),
-    "providers": ("模型 Provider 的列表、保存、验证与删除", ("provider", "提供商", "模型服务", "api key", "密钥")),
-    "routing": ("AI 指令的 auto/fixed 路由", ("路由", "routing", "auto", "fixed")),
-    "rules": ("通用 Rule 的查询、保存、启停与删除", ("规则", "rule")),
-    "scheduler": ("定时任务、计划、立即执行与启停", ("定时", "计划任务", "scheduler", "cron", "几点执行")),
-    "system": ("系统版本、健康状态、运行上下文与网络信息", ("系统状态", "健康", "版本", "时区", "上下文", "health")),
-    "system_ops": ("系统检查更新、应用更新与重启", ("系统更新", "在线更新", "检查更新", "重启系统", "重启应用")),
+    "accounts": (
+        "Telegram 账号、暂停恢复、Worker 重启",
+        (
+            "账号", "account", "accounts", "worker", "登录号", "userbot",
+            "暂停账号", "恢复账号", "重启worker", "restart worker",
+        ),
+    ),
+    "commands": (
+        "自定义指令、命令模板与账号启用范围",
+        ("指令", "命令", "command", "commands", "模板", "command template", "自定义指令"),
+    ),
+    "features": (
+        "账号功能、插件功能启停与状态",
+        ("功能", "feature", "features", "能力开关", "功能开关", "enable feature"),
+    ),
+    "interaction": (
+        "交互 Bot 规则、触发条件、暂停与启停",
+        (
+            "交互", "interaction", "触发", "暂停规则", "交互规则", "interaction bot",
+            "关键词规则", "按钮规则",
+        ),
+    ),
+    "ledger": (
+        "资金台账、收入、支出与余额",
+        (
+            "台账", "收入", "支出", "余额", "资金", "账目", "ledger", "payout",
+            "balance", "income", "expense", "今日收入",
+        ),
+    ),
+    "logs": (
+        "运行日志、错误、事件与诊断",
+        (
+            "日志", "报错", "错误", "异常", "trace", "log", "logs", "error", "errors",
+            "exception", "最近有什么报错", "失败任务", "runtime log", "诊断",
+        ),
+    ),
+    "memory": (
+        "长期偏好记忆的查询与保存",
+        (
+            "记住", "偏好", "长期记忆", "别再问", "remember", "preference", "preferences",
+            "memory", "记忆", "我的偏好",
+        ),
+    ),
+    "plugin_repos": (
+        "插件仓库、官方库与从仓库安装",
+        (
+            "插件仓库", "仓库", "repository", "repo", "plugin repo", "官方库",
+            "remote plugin",
+        ),
+    ),
+    "plugins": (
+        "已安装插件、检查更新、安装卸载与全局启停",
+        (
+            "插件", "plugin", "plugins", "扩展", "extension", "已安装插件",
+            "卸载插件", "安装插件", "plugin update",
+        ),
+    ),
+    "product": (
+        "TelePilot 产品版本、更新日志与界面入口",
+        (
+            "更新日志", "版本日志", "changelog", "最近更新", "release notes",
+            "这版更新", "更新了什么", "界面入口",
+        ),
+    ),
+    "providers": (
+        "模型 Provider 的列表、保存、验证与删除",
+        (
+            "provider", "providers", "提供商", "模型服务", "api key", "密钥",
+            "模型健康", "测活", "冷却", "fallback", "模型状态", "provider 状态",
+            "liveness", "cooldown", "runtime health", "模型提供商",
+        ),
+    ),
+    "routing": (
+        "AI 指令的 auto/fixed 路由",
+        ("路由", "routing", "auto", "fixed", "指令路由", "route mode"),
+    ),
+    "rules": (
+        "通用 Rule 的查询、保存、启停与删除",
+        ("规则", "rule", "rules", "通用规则"),
+    ),
+    "scheduler": (
+        "定时任务、计划、立即执行与启停",
+        (
+            "定时", "计划任务", "scheduler", "cron", "几点执行", "定时任务",
+            "schedule", "interval", "每日任务",
+        ),
+    ),
+    "system": (
+        "系统版本、健康状态、运行上下文与网络信息",
+        (
+            "系统状态", "健康", "版本", "时区", "上下文", "health", "system status",
+            "version", "timezone", "系统信息", "你是谁", "你能做什么", "有哪些工具",
+            "权限", "配置助手", "agent 配置", "助手配置", "what can you do",
+            "who are you", "your tools", "your permissions",
+        ),
+    ),
+    "system_ops": (
+        "系统检查更新、应用更新与重启",
+        (
+            "系统更新", "在线更新", "检查更新", "重启系统", "重启应用", "升级",
+            "update", "upgrade", "restart system", "apply update", "检查升级",
+        ),
+    ),
 }
 
 _ACTION_HINTS = (
@@ -46,8 +133,16 @@ _ACTION_HINTS = (
     "恢复",
     "执行",
     "重启",
+    "list",
+    "show",
+    "check",
+    "create",
+    "delete",
+    "enable",
+    "disable",
+    "restart",
 )
-_REFERENCE_HINTS = ("它", "这个", "这条", "刚才", "上一个", "那个", "继续")
+_REFERENCE_HINTS = ("它", "这个", "这条", "刚才", "上一个", "那个", "继续", "it", "that", "again")
 _GENERAL_HELP_HINTS = (
     "怎么使用agent",
     "怎么用agent",
@@ -55,11 +150,26 @@ _GENERAL_HELP_HINTS = (
     "怎么使用你",
     "怎么用你",
     "你能做什么",
+    "你有哪些能力",
+    "有哪些工具",
+    "你的权限",
+    "你是谁",
     "帮助",
     "help",
+    "what can you do",
+    "who are you",
+    "your tools",
+    "your capabilities",
 )
-_PRODUCT_HELP_HINTS = ("更新日志", "版本日志", "changelog", "最近更新", "这版更新", "更新了什么")
-
+_PRODUCT_HELP_HINTS = (
+    "更新日志",
+    "版本日志",
+    "changelog",
+    "最近更新",
+    "这版更新",
+    "更新了什么",
+    "release notes",
+)
 
 @dataclass(frozen=True)
 class ToolRoute:
@@ -87,10 +197,12 @@ def route_locally(
     memory_state: dict[str, Any] | None = None,
 ) -> ToolRoute | None:
     normalized = re.sub(r"\s+", "", str(text or "").lower())
-    if any(hint in normalized for hint in _GENERAL_HELP_HINTS):
+    if any(re.sub(r"\s+", "", hint.lower()) in normalized for hint in _GENERAL_HELP_HINTS):
         return ToolRoute((), "local", "general_help")
 
-    if "product" in available and any(hint in normalized for hint in _PRODUCT_HELP_HINTS):
+    if "product" in available and any(
+        re.sub(r"\s+", "", hint.lower()) in normalized for hint in _PRODUCT_HELP_HINTS
+    ):
         return ToolRoute(("product",), "local", "product_changelog")
 
     matched: list[str] = []
@@ -102,11 +214,17 @@ def route_locally(
 
     if "interaction" in matched and "规则" in normalized and "通用" not in normalized:
         matched = [domain for domain in matched if domain != "rules"]
-    if "plugin_repos" in matched and "plugins" in matched and "插件仓库" in normalized:
+    if "plugin_repos" in matched and "plugins" in matched and (
+        "插件仓库" in normalized or "pluginrepo" in normalized or "repository" in normalized
+    ):
         matched = [domain for domain in matched if domain != "plugins"]
+    # feature + account 同现时优先 features（账号级功能开关）
+    if "features" in matched and "accounts" in matched and (
+        "feature" in normalized or "功能" in normalized
+    ):
+        matched = [domain for domain in matched if domain != "accounts"] or matched
     if matched:
         return ToolRoute(tuple(dict.fromkeys(matched[:3])), "local", "keyword_match")
-
     state = memory_state if isinstance(memory_state, dict) else {}
     previous = [
         str(item)

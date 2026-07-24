@@ -93,8 +93,12 @@ class SystemAgentRuntime:
         approved_tools: list[str] | None = None,
         approved_tool_calls: list[dict[str, Any]] | None = None,
         model_selection: dict[str, Any] | None = None,
+        read_only_only: bool = False,
     ) -> AsyncIterator[dict[str, Any]]:
-        """执行一轮对话，逐条 yield NDJSON 事件。"""
+        """执行一轮对话，逐条 yield NDJSON 事件。
+
+        ``read_only_only=True``：无人值守轮（如定时 Agent）只暴露只读工具。
+        """
 
         run_id = str(uuid.uuid4())
         seq = 0
@@ -179,78 +183,9 @@ class SystemAgentRuntime:
             provider_name=resolved.primary.name,
             model=resolved.model,
         )
-        verify_t0 = time.perf_counter()
-        verify_task = asyncio.create_task(verify_resolved_agent_providers(db, resolved))
-        try:
-            while not verify_task.done():
-                done, _pending = await asyncio.wait({verify_task}, timeout=10.0)
-                if verify_task not in done:
-                    yield next_event(
-                        "heartbeat",
-                        stage="model_capability_check",
-                        provider_id=resolved.primary.id,
-                        provider_name=resolved.primary.name,
-                        model=resolved.model,
-                    )
-            verified = await verify_task
-        finally:
-            stage_timings["verify_ms"] = max(
-                0, int((time.perf_counter() - verify_t0) * 1000)
-            )
-            if not verify_task.done():
-                verify_task.cancel()
-                with suppress(asyncio.CancelledError):
-                    await verify_task
-        if isinstance(verified, str):
-            timings = finalize_stage_timings(ok=False)
-            yield next_event(
-                "error",
-                code="MODEL_TOOLS_UNAVAILABLE",
-                message=verified,
-                hint="请在 AI 中心选择真正支持结构化工具调用的模型。",
-            )
-            yield next_event("done", ok=False, stage_timings=timings)
-            return
-        resolved = verified
-
-        provider_dto = resolved.primary
-        model = resolved.model
-        providers = resolved.providers
-        requested_provider = provider_dto
-        requested_model = model
-        # 健康排序：cooling 排后但不摘除；主选不变，仅影响 fallback 候选相对顺序
-        try:
-            from ..provider_health import sort_provider_candidates
-            from .config import tools_model_for_dto
-
-            cand = [
-                (pid, tools_model_for_dto(providers[pid]) or providers[pid].default_model or model)
-                for pid in providers
-                if pid != provider_dto.id
-            ]
-            ordered = sort_provider_candidates(cand)
-            reordered: dict[int, Any] = {provider_dto.id: provider_dto}
-            for pid, _model in ordered:
-                if pid in providers:
-                    reordered[pid] = providers[pid]
-            for pid, dto in providers.items():
-                if pid not in reordered:
-                    reordered[pid] = dto
-            providers = reordered
-        except Exception:  # noqa: BLE001
-            pass
-        yield next_event(
-            "provider_selected",
-            provider_id=provider_dto.id,
-            provider_name=provider_dto.name,
-            model=model,
-            reason="pinned" if selection_mode == "pinned" else "configured",
-            selection_mode=selection_mode,
-        )
 
         progress_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
         streaming_redactor = StreamingMessageRedactor(secrets=list(chat_secrets or []))
-
         attempted_models: dict[int, str] = {}
 
         async def emit_model_progress(progress: dict[str, Any]) -> None:
@@ -328,48 +263,119 @@ class SystemAgentRuntime:
         all_tool_specs = self.registry.list_for(
             channel=channel,
             role=role,
-            read_only_only=False,  # 阶段 2：只读 + 写（写工具只产生待确认 Action）
+            read_only_only=bool(read_only_only),
         )
-        route_t0 = time.perf_counter()
-        route_task = asyncio.create_task(
-            self._resolve_tool_route(
-                provider_dto=provider_dto,
-                providers=providers,
-                model=model,
-                user_text=user_text,
-                memory_state=session.memory_state,
-                all_tool_specs=all_tool_specs,
-                account_id=session.account_id,
-                fallback_provider_id=fallback_provider_id,
-                progress_callback=emit_model_progress,
-            )
-        )
+
+        # WP-L2：能力探测与工具路由并行；路由用预校验 primary（失败走兜底）
+        pre_provider = resolved.primary
+        pre_model = resolved.model
+        pre_providers = resolved.providers
+
+        async def _timed_verify() -> Any:
+            t0 = time.perf_counter()
+            try:
+                return await verify_resolved_agent_providers(
+                    db, resolved, non_blocking=True
+                )
+            finally:
+                stage_timings["verify_ms"] = max(
+                    0, int((time.perf_counter() - t0) * 1000)
+                )
+
+        async def _timed_route() -> ToolRoute:
+            t0 = time.perf_counter()
+            try:
+                return await self._resolve_tool_route(
+                    provider_dto=pre_provider,
+                    providers=pre_providers,
+                    model=pre_model,
+                    user_text=user_text,
+                    memory_state=session.memory_state,
+                    all_tool_specs=all_tool_specs,
+                    account_id=session.account_id,
+                    fallback_provider_id=fallback_provider_id,
+                    progress_callback=emit_model_progress,
+                )
+            finally:
+                stage_timings["route_ms"] = max(
+                    0, int((time.perf_counter() - t0) * 1000)
+                )
+
+        async def _verify_and_route() -> tuple[Any, ToolRoute]:
+            return await asyncio.gather(_timed_verify(), _timed_route())
+
+        parallel_task = asyncio.create_task(_verify_and_route())
         try:
             while True:
-                state, value = await wait_for_progress(route_task)
+                state, value = await wait_for_progress(parallel_task)
                 if state == "event":
                     yield value
                     continue
                 if state == "heartbeat":
                     yield next_event(
                         "heartbeat",
-                        provider_id=provider_dto.id,
-                        provider_name=provider_dto.name,
-                        model=model,
+                        stage="verify_and_route",
+                        provider_id=pre_provider.id,
+                        provider_name=pre_provider.name,
+                        model=pre_model,
                     )
                     continue
-                route = value
+                verified, route = value
                 break
         finally:
-            stage_timings["route_ms"] = max(
-                0, int((time.perf_counter() - route_t0) * 1000)
-            )
-            if not route_task.done():
-                route_task.cancel()
+            if not parallel_task.done():
+                parallel_task.cancel()
                 with suppress(asyncio.CancelledError):
-                    await route_task
+                    await parallel_task
         while not progress_queue.empty():
             yield progress_queue.get_nowait()
+
+        if isinstance(verified, str):
+            timings = finalize_stage_timings(ok=False)
+            yield next_event(
+                "error",
+                code="MODEL_TOOLS_UNAVAILABLE",
+                message=verified,
+                hint="请在 AI 中心选择真正支持结构化工具调用的模型。",
+            )
+            yield next_event("done", ok=False, stage_timings=timings)
+            return
+        resolved = verified
+
+        provider_dto = resolved.primary
+        model = resolved.model
+        providers = resolved.providers
+        requested_provider = provider_dto
+        requested_model = model
+        # 健康排序：cooling 排后但不摘除；主选不变，仅影响 fallback 候选相对顺序
+        try:
+            from ..provider_health import sort_provider_candidates
+            from .config import tools_model_for_dto
+
+            cand = [
+                (pid, tools_model_for_dto(providers[pid]) or providers[pid].default_model or model)
+                for pid in providers
+                if pid != provider_dto.id
+            ]
+            ordered = sort_provider_candidates(cand)
+            reordered: dict[int, Any] = {provider_dto.id: provider_dto}
+            for pid, _model in ordered:
+                if pid in providers:
+                    reordered[pid] = providers[pid]
+            for pid, dto in providers.items():
+                if pid not in reordered:
+                    reordered[pid] = dto
+            providers = reordered
+        except Exception:  # noqa: BLE001
+            pass
+        yield next_event(
+            "provider_selected",
+            provider_id=provider_dto.id,
+            provider_name=provider_dto.name,
+            model=model,
+            reason="pinned" if selection_mode == "pinned" else "configured",
+            selection_mode=selection_mode,
+        )
         routed_tool_specs = select_tool_specs(all_tool_specs, route)
         selected_skills = self.skill_registry.select(route)
         tool_specs = self.skill_registry.narrow_tools(routed_tool_specs, selected_skills)
@@ -844,36 +850,40 @@ class SystemAgentRuntime:
                     ensure_ascii=False,
                     default=str,
                 )
-            response, _used, _fallback = await invoke_structured(
-                provider_dto,
-                providers,
-                ModelRequest(
-                    model=model,
-                    messages=(
-                        ModelMessage.text(MessageRole.SYSTEM, router_system_prompt(domains)),
-                        ModelMessage.text(
-                            MessageRole.USER,
-                            f"当前请求：{user_text}\n最近状态：{state_hint or '无'}",
+            # WP-L2：路由是提示不是答案——1 次尝试、无等待、8s 硬预算
+            async with asyncio.timeout(8):
+                response, _used, _fallback = await invoke_structured(
+                    provider_dto,
+                    providers,
+                    ModelRequest(
+                        model=model,
+                        messages=(
+                            ModelMessage.text(MessageRole.SYSTEM, router_system_prompt(domains)),
+                            ModelMessage.text(
+                                MessageRole.USER,
+                                f"当前请求：{user_text}\n最近状态：{state_hint or '无'}",
+                            ),
                         ),
+                        max_output_tokens=160,
+                        metadata={
+                            "model_pinned": False,
+                            "confirm_provider_switch": True,
+                            "allowed_cross_provider_ids": (
+                                [fallback_provider_id] if fallback_provider_id is not None else []
+                            ),
+                            "max_retries_per_model": 1,
+                            "retry_delay_seconds": 0.0,
+                        },
                     ),
-                    max_output_tokens=160,
-                    metadata={
-                        "model_pinned": False,
-                        "confirm_provider_switch": True,
-                        "allowed_cross_provider_ids": (
-                            [fallback_provider_id] if fallback_provider_id is not None else []
-                        ),
-                        "max_retries_per_model": 5,
-                        "retry_delay_seconds": 3.0,
-                    },
-                ),
-                account_id=account_id,
-                source="system_agent_router",
-                progress_callback=progress_callback,
-            )
+                    account_id=account_id,
+                    source="system_agent_router",
+                    progress_callback=progress_callback,
+                )
             parsed = parse_model_route(response.text, available=domains)
             if parsed is not None:
                 return parsed
+        except TimeoutError:
+            log.warning("system agent tool router timed out; using safe fallback")
         except Exception:  # noqa: BLE001
             log.warning("system agent tool router failed; using safe fallback", exc_info=True)
         previous = []

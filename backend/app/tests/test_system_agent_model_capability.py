@@ -207,3 +207,34 @@ async def test_verify_still_excludes_unsupported_fallback(setting_db, monkeypatc
 
     assert not isinstance(result, str)
     assert set(result.providers) == {1}
+
+
+@pytest.mark.asyncio
+async def test_verify_non_blocking_skips_probe_and_schedules_refresh(
+    setting_db,
+    monkeypatch,
+) -> None:
+    primary = _provider(1, models=["m1"])
+    resolved = ResolvedAgentProviders(primary=primary, model="m1", providers={1: primary})
+    calls: list[tuple[int, str]] = []
+    scheduled: list[list[tuple[int, str]]] = []
+
+    async def probe(provider, model):  # noqa: ANN001
+        calls.append((provider.id, model))
+        return model_capability.CapabilityProbeResult("supported", datetime.now(UTC))
+
+    def schedule(items):  # noqa: ANN001
+        scheduled.append([(p.id, m) for p, m, _s in items])
+
+    monkeypatch.setattr(model_capability, "probe_model_tool_capability", probe)
+    monkeypatch.setattr(model_capability, "schedule_capability_refresh", schedule)
+
+    async with setting_db() as db:
+        result = await model_capability.verify_resolved_agent_providers(
+            db, resolved, non_blocking=True
+        )
+
+    assert not isinstance(result, str)
+    assert result.model == "m1"
+    assert calls == []  # 请求路径不探测
+    assert scheduled and scheduled[0] == [(1, "m1")]

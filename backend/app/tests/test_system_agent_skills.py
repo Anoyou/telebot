@@ -32,7 +32,7 @@ def _skill_registry() -> SkillRegistry:
     return SkillRegistry(BUILTIN_SKILLS)
 
 
-async def _accept_provider_capabilities(_db, resolved):  # noqa: ANN001
+async def _accept_provider_capabilities(_db, resolved, **_kwargs):  # noqa: ANN001
     return resolved
 
 

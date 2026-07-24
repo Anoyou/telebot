@@ -97,7 +97,7 @@ async def _patch_runtime_config(  # noqa: ANN001
     monkeypatch.setattr(runtime_module, "load_system_context_flags", load_flags)
     monkeypatch.setattr(runtime_module, "resolve_agent_providers", resolve)
 
-    async def verify(_db, resolved):  # noqa: ANN001
+    async def verify(_db, resolved, **_kwargs):  # noqa: ANN001
         return resolved
 
     monkeypatch.setattr(runtime_module, "verify_resolved_agent_providers", verify)
