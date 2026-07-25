@@ -217,11 +217,7 @@ def _completed_json_as_stream_result(
             input_tokens = int(usage.get("prompt_tokens") or 0)
             output_tokens = int(usage.get("completion_tokens") or 0)
         elif api_format == LLM_API_FORMAT_ANTHROPIC_MESSAGES:
-            text = "".join(
-                str(item.get("text") or "")
-                for item in data.get("content") or []
-                if isinstance(item, dict) and item.get("type") == "text"
-            )
+            text = "".join(_anthropic_content_text_pieces(data.get("content")))
             input_tokens = int(usage.get("input_tokens") or 0)
             output_tokens = int(usage.get("output_tokens") or 0)
             provider_status = str(data.get("stop_reason") or "") or None
@@ -674,6 +670,50 @@ def _openai_structured_response(
     )
 
 
+def _anthropic_delta_text_piece(delta: Any) -> str | None:
+    """Extract visible text from an Anthropic content_block_delta payload.
+
+    DeepSeek V4 / Claude extended-thinking 兼容流常只推 ``thinking_delta``，
+    没有 ``text_delta``。测活与闲聊若只认 text_delta 会误报空内容。
+    """
+
+    if not isinstance(delta, dict):
+        return None
+    delta_type = str(delta.get("type") or "")
+    if delta_type == "text_delta":
+        text = delta.get("text")
+        return text if isinstance(text, str) and text else None
+    if delta_type == "thinking_delta":
+        # Anthropic: {"type":"thinking_delta","thinking":"..."}
+        # 部分兼容站也用 text 字段
+        for key in ("thinking", "text"):
+            value = delta.get(key)
+            if isinstance(value, str) and value:
+                return value
+    return None
+
+
+def _anthropic_content_text_pieces(items: Any) -> list[str]:
+    """Collect assistant-visible text from Anthropic message content blocks."""
+
+    parts: list[str] = []
+    if not isinstance(items, list):
+        return parts
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        item_type = str(item.get("type") or "")
+        if item_type == "text" and isinstance(item.get("text"), str) and item["text"]:
+            parts.append(str(item["text"]))
+        elif item_type == "thinking":
+            thinking = item.get("thinking")
+            if isinstance(thinking, str) and thinking.strip():
+                parts.append(thinking)
+            elif isinstance(item.get("text"), str) and item["text"].strip():
+                parts.append(str(item["text"]))
+    return parts
+
+
 def _anthropic_structured_response(
     data: dict[str, Any],
     *,
@@ -685,11 +725,19 @@ def _anthropic_structured_response(
 
     content: list[TextContent] = []
     tool_calls: list[ToolCall] = []
+    thinking_fallback: list[str] = []
     for item in data.get("content") or []:
         if not isinstance(item, dict):
             continue
         if item.get("type") == "text" and isinstance(item.get("text"), str):
-            content.append(TextContent(item["text"]))
+            if item["text"]:
+                content.append(TextContent(item["text"]))
+        elif item.get("type") == "thinking":
+            thinking = item.get("thinking")
+            if isinstance(thinking, str) and thinking.strip():
+                thinking_fallback.append(thinking)
+            elif isinstance(item.get("text"), str) and item["text"].strip():
+                thinking_fallback.append(str(item["text"]))
         elif item.get("type") == "tool_use":
             name = str(item.get("name") or "").strip()
             if name:
@@ -700,6 +748,9 @@ def _anthropic_structured_response(
                         arguments=_parse_tool_arguments(item.get("input")),
                     )
                 )
+    # 仅有 thinking、没有 text 时（DeepSeek 推理模型常见）：用 thinking 兜底为正文
+    if not content and thinking_fallback:
+        content.append(TextContent("".join(thinking_fallback)))
     usage = data.get("usage") or {}
     if not isinstance(usage, dict):
         usage = {}
@@ -2179,10 +2230,20 @@ class AnthropicClient(LLMClient):
                                 model_name = str(msg.get("model", self._model))
                                 usage = msg.get("usage") or {}
                                 input_tokens = int(usage.get("input_tokens") or 0)
+                            elif event_type == "content_block_start":
+                                # 部分兼容站在 start 块里带初始 thinking/text
+                                block = payload.get("content_block") or {}
+                                if isinstance(block, dict):
+                                    for key in ("text", "thinking"):
+                                        value = block.get(key)
+                                        if isinstance(value, str) and value:
+                                            text_parts.append(value)
+                                            break
                             elif event_type == "content_block_delta":
                                 delta = payload.get("delta") or {}
-                                if delta.get("type") == "text_delta":
-                                    text_parts.append(delta.get("text", ""))
+                                piece = _anthropic_delta_text_piece(delta)
+                                if piece:
+                                    text_parts.append(piece)
                             elif event_type == "message_delta":
                                 delta = payload.get("delta") or {}
                                 if isinstance(delta, dict) and delta.get("stop_reason"):
@@ -2200,7 +2261,7 @@ class AnthropicClient(LLMClient):
                             elif event_type == "message_stop":
                                 message_stop_received = True
                                 break
-                            # content_block_start / content_block_stop → 忽略
+                            # content_block_stop → 忽略
                             continue
                         # 空行 = 事件分隔符（SSE 规范）
                         if not line:
@@ -2239,7 +2300,7 @@ class AnthropicClient(LLMClient):
             StopReason.CONTENT_FILTER,
         }:
             raise LLMError(
-                "Anthropic 返回空内容（SSE 流中未收到 text_delta 事件）",
+                "Anthropic 返回空内容（SSE 流中未收到 text_delta/thinking_delta 事件）",
                 scope=LLMErrorScope.PROVIDER_LOCAL,
             )
 
@@ -2512,6 +2573,16 @@ class AnthropicClient(LLMClient):
                                             else ""
                                         ),
                                     }
+                                elif isinstance(block, dict) and block.get("type") in {
+                                    "text",
+                                    "thinking",
+                                }:
+                                    for key in ("text", "thinking"):
+                                        value = block.get(key)
+                                        if isinstance(value, str) and value:
+                                            text_parts.append(value)
+                                            yield ModelStreamEvent(delta=value)
+                                            break
                             elif event_type == "content_block_delta":
                                 try:
                                     index = int(payload.get("index") or 0)
@@ -2522,11 +2593,10 @@ class AnthropicClient(LLMClient):
                                 delta = payload.get("delta") or {}
                                 if not isinstance(delta, dict):
                                     continue
-                                if delta.get("type") == "text_delta":
-                                    text = delta.get("text")
-                                    if isinstance(text, str) and text:
-                                        text_parts.append(text)
-                                        yield ModelStreamEvent(delta=text)
+                                piece = _anthropic_delta_text_piece(delta)
+                                if piece:
+                                    text_parts.append(piece)
+                                    yield ModelStreamEvent(delta=piece)
                                 elif delta.get("type") == "input_json_delta":
                                     block = content_blocks.setdefault(
                                         index,
@@ -2693,13 +2763,21 @@ class AnthropicClient(LLMClient):
                                 model_name = str(msg.get("model", self._model))
                                 usage = msg.get("usage") or {}
                                 input_tokens = int(usage.get("input_tokens") or 0)
+                            elif event_type == "content_block_start":
+                                block = payload.get("content_block") or {}
+                                if isinstance(block, dict):
+                                    for key in ("text", "thinking"):
+                                        value = block.get(key)
+                                        if isinstance(value, str) and value:
+                                            text_parts.append(value)
+                                            yield LLMStreamChunk(delta=value, model=model_name)
+                                            break
                             elif event_type == "content_block_delta":
                                 delta = payload.get("delta") or {}
-                                if delta.get("type") == "text_delta":
-                                    text = delta.get("text")
-                                    if isinstance(text, str) and text:
-                                        text_parts.append(text)
-                                        yield LLMStreamChunk(delta=text, model=model_name)
+                                piece = _anthropic_delta_text_piece(delta)
+                                if piece:
+                                    text_parts.append(piece)
+                                    yield LLMStreamChunk(delta=piece, model=model_name)
                             elif event_type == "message_delta":
                                 usage = payload.get("usage") or {}
                                 output_tokens = int(usage.get("output_tokens") or 0)

@@ -234,6 +234,113 @@ async def test_anthropic_profiles_map_reasoning_effort(protocol_profile: str) ->
 
 
 @pytest.mark.asyncio
+async def test_anthropic_complete_accepts_thinking_delta_without_text_delta() -> None:
+    """DeepSeek V4 等推理模型在 Anthropic 兼容流上可能只推 thinking_delta。"""
+
+    class _StreamResponse:
+        status_code = 200
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def aiter_bytes(self):
+            lines = (
+                "event: message_start",
+                'data: {"type":"message_start","message":{"model":"deepseek-v4-pro","usage":{"input_tokens":3}}}',
+                "",
+                "event: content_block_start",
+                'data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}',
+                "",
+                "event: content_block_delta",
+                'data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"先想一下："}}',
+                "",
+                "event: content_block_delta",
+                'data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"答案是 42"}}',
+                "",
+                "event: message_delta",
+                'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":8}}',
+                "",
+                "event: message_stop",
+                'data: {"type":"message_stop"}',
+            )
+            yield ("\n".join(lines) + "\n").encode()
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        def stream(self, method, url, **kwargs):
+            return _StreamResponse()
+
+    with patch("app.services.llm_client.httpx.AsyncClient", return_value=_Client()):
+        result = await AnthropicClient(
+            "sk",
+            "https://api.deepseek.com/anthropic",
+            "deepseek-v4-pro",
+        ).complete("system", "1+1?")
+
+    assert "42" in result.text
+    assert result.model == "deepseek-v4-pro"
+
+
+@pytest.mark.asyncio
+async def test_anthropic_stream_complete_yields_thinking_deltas() -> None:
+    class _StreamResponse:
+        status_code = 200
+        headers = {"content-type": "text/event-stream"}
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def aiter_bytes(self):
+            lines = (
+                "event: message_start",
+                'data: {"type":"message_start","message":{"model":"deepseek-v4-pro","usage":{"input_tokens":1}}}',
+                "",
+                "event: content_block_delta",
+                'data: {"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"你好"}}',
+                "",
+                "event: message_delta",
+                'data: {"type":"message_delta","usage":{"output_tokens":2}}',
+                "",
+                "event: message_stop",
+                'data: {"type":"message_stop"}',
+            )
+            yield ("\n".join(lines) + "\n").encode()
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        def stream(self, method, url, **kwargs):
+            return _StreamResponse()
+
+    chunks: list[str] = []
+    with patch("app.services.llm_client.httpx.AsyncClient", return_value=_Client()):
+        async for chunk in AnthropicClient(
+            "sk",
+            "https://api.deepseek.com/anthropic",
+            "deepseek-v4-pro",
+        ).stream_complete("system", "hi"):
+            if chunk.delta:
+                chunks.append(chunk.delta)
+
+    assert "".join(chunks) == "你好"
+
+
+@pytest.mark.asyncio
 async def test_anthropic_complete_preserves_explicit_empty_refusal() -> None:
     class _StreamResponse:
         status_code = 200
