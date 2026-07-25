@@ -20,6 +20,13 @@
 
 ## [Unreleased]
 
+## [0.73.0-beta.15] - 2026-07-25 · patch（补丁版本预发布） · 插件取消置顶权限
+
+### Fixed
+
+- 插件沙箱的 `delete_message` 能力补充 `unpin_message`，允许安装型插件通过 UserBot 取消指定消息置顶。
+- 插件客户端代理为取消置顶补齐 Action Trace，成功、失败和 dry-run 都能在日志中心追踪。
+
 ## [0.73.0-beta.14] - 2026-07-25 · patch（补丁版本预发布） · 裸直通二次开关语义与优先展示
 
 ### Changed

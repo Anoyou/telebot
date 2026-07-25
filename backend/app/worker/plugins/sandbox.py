@@ -25,7 +25,7 @@
 - ``send_file``       : ``send_file``
 - ``forward_message`` : ``forward_messages``
 - ``join_chat``       : ``join_chat``
-- ``delete_message``  : ``delete_messages``
+- ``delete_message``  : ``delete_messages`` / ``unpin_message``
 - ``moderate_chat``   : ``ban_user`` / ``kick_user`` / ``mute_user`` / ``unban_user``
 
 约束：
@@ -55,7 +55,7 @@ ALLOWED_API: dict[str, frozenset[str]] = {
     "send_file": frozenset({"send_file"}),
     "forward_message": frozenset({"forward_messages"}),
     "join_chat": frozenset({"join_chat"}),
-    "delete_message": frozenset({"delete_messages"}),
+    "delete_message": frozenset({"delete_messages", "unpin_message"}),
     "moderate_chat": frozenset({"ban_user", "kick_user", "mute_user", "unban_user"}),
 }
 

@@ -501,6 +501,39 @@ class TestSandboxClientSecurity:
         sandbox = SandboxClient(FakeClient(), ["forward_message"], plugin_key="demo")
         assert callable(sandbox.forward_messages)
 
+    @pytest.mark.asyncio
+    async def test_sandbox_unpin_message_requires_delete_permission_and_records_trace(self, monkeypatch):
+        """取消置顶属于消息清理能力，并且必须留下 event_action。"""
+        from app.worker.plugins import loader as plugin_loader
+        from app.worker.plugins.sandbox import SandboxClient
+
+        class FakeClient:
+            async def unpin_message(self, entity, message, **kwargs):
+                return SimpleNamespace(id=message, chat_id=entity)
+
+        denied = SandboxClient(FakeClient(), [], plugin_key="demo")
+        with pytest.raises(PermissionError):
+            _ = denied.unpin_message
+
+        record_action = AsyncMock()
+        monkeypatch.setattr(plugin_loader, "record_action", record_action)
+        allowed = SandboxClient(FakeClient(), ["delete_message"], plugin_key="demo")
+        traced = plugin_loader._trace_plugin_client(
+            allowed,
+            "evt_unpin",
+            plugin_key="demo",
+            component="sandbox_unpin_test",
+        )
+
+        await traced.unpin_message(-100123, 456)
+
+        record_action.assert_awaited_once()
+        assert record_action.await_args.args[1]["type"] == "unpin_message"
+        assert record_action.await_args.args[1]["chat_id"] == -100123
+        assert record_action.await_args.args[1]["message_id"] == 456
+        assert record_action.await_args.args[2] == plugin_loader.TRACE_STATUS_OK
+        assert record_action.await_args.kwargs["actual_send_via"] == "userbot_reply"
+
     def test_sandbox_blocks_undelared_attrs(self):
         """未声明的属性访问必须被拒绝。"""
         sandbox = self._make_sandbox()

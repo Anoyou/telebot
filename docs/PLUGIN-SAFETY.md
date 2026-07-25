@@ -37,7 +37,7 @@ Manifest 中的 `permissions` 字段声明插件需要的能力：
 | `resolve_entity` | `get_entity` | 解析用户名、频道、群等实体 |
 | `send_file` | `send_file` | 发送图片或文件 |
 | `join_chat` | `join_chat` | 加入聊天 |
-| `delete_message` | `delete_messages` | 删除消息；高风险，必须有明确用户开关 |
+| `delete_message` | `delete_messages` / `unpin_message` | 删除消息或取消指定消息置顶；高风险，必须有明确用户开关 |
 | `moderate_chat` | `ban_user` / `kick_user` / `mute_user` / `unban_user` | 受控成员管理；高危权限，不开放 raw MTProto |
 | `external_http` | `ctx.http.get` / `ctx.http.post` | 安全 HTTP facade；必须同时声明 `allowed_hosts` |
 | `external_http_bypass_proxy` | direct 网络出口 | 预留高危权限；当前直连还必须通过 Manifest `http.allow_direct` 和账号配置共同开启 |

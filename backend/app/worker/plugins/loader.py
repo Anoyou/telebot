@@ -452,6 +452,41 @@ class _TracePluginClient:
             )
             raise
 
+    async def unpin_message(self, entity: Any, message: Any, *args: Any, **kwargs: Any) -> Any:
+        action = self._action("unpin_message", chat_id=entity, message_id=message)
+        if self._dry_run_enabled():
+            result = {
+                "dry_run": True,
+                "chat_id": _int_or_none(entity),
+                "message_id": _int_or_none(message),
+            }
+            await self._record(
+                action,
+                TRACE_STATUS_OK,
+                actual_send_via="userbot_reply",
+                result=result,
+                _tap_status=ACTION_EVENT_STATUS_DRY_RUN,
+            )
+            return self._dry_run_object(action)
+        try:
+            result = await self._client.unpin_message(entity, message, *args, **kwargs)
+            await self._record(
+                action,
+                TRACE_STATUS_OK,
+                actual_send_via="userbot_reply",
+                result=_trace_client_result(result),
+            )
+            return result
+        except Exception as exc:  # noqa: BLE001
+            await self._record(
+                action,
+                TRACE_STATUS_FAILED,
+                actual_send_via="userbot_reply",
+                error_code="telegram_api_error",
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            raise
+
     def _action(
         self,
         action_type: str,
