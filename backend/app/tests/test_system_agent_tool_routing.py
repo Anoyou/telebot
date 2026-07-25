@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from app.services.system_agent.registry import ToolSpec
 from app.services.system_agent.tool_routing import (
     ToolRoute,
@@ -108,3 +110,28 @@ def test_log_diagnostics_does_not_expose_unrelated_tools() -> None:
 
     assert route is not None
     assert [item.name for item in select_tool_specs(specs, route)] == ["logs.recent"]
+
+
+def test_log_root_cause_route_adds_source_domain() -> None:
+    route = route_locally(
+        "查一下错误日志，定位为什么调用失败",
+        available={"logs", "source", "providers"},
+    )
+
+    assert route is not None
+    assert route.domains == ("logs", "source")
+
+
+@pytest.mark.parametrize(
+    "text",
+    (
+        "联网查一下 DeepSeek 官方文档",
+        "总结这个链接 https://example.com/docs",
+        "read url https://example.com/docs",
+    ),
+)
+def test_web_requests_route_to_web_domain(text: str) -> None:
+    route = route_locally(text, available={"web", "logs", "source"})
+
+    assert route is not None
+    assert route.domains == ("web",)

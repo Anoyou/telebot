@@ -60,6 +60,10 @@ async def test_registry_includes_read_and_write_tools() -> None:
         "rules.list",
         "scheduler.list",
         "ledger.summary",
+        "source.search",
+        "source.read",
+        "web.search",
+        "web.read",
     }
     expected_write = {
         "accounts.set_paused",

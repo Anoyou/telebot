@@ -198,9 +198,13 @@ export function rankAccountDirectPassthroughPlugins(
  */
 export function formatDirectPassthroughRankLabel(
   rank: number | null | undefined,
-  *,
-  secondaryEnabled: boolean,
-  totalEnabled?: number,
+  {
+    secondaryEnabled,
+    totalEnabled,
+  }: {
+    secondaryEnabled: boolean;
+    totalEnabled?: number;
+  },
 ): string {
   if (!secondaryEnabled) return "直通未开";
   if (rank == null || rank < 1) return "待排序";
@@ -212,8 +216,7 @@ export function formatDirectPassthroughRankLabel(
 
 export function formatDirectPassthroughRankTitle(
   rank: number | null | undefined,
-  *,
-  secondaryEnabled: boolean,
+  { secondaryEnabled }: { secondaryEnabled: boolean },
 ): string {
   if (!secondaryEnabled) {
     return "账号二次开关关闭时不参与直通调度；开启后可在配置页调整调用顺序";

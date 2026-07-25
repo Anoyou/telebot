@@ -144,6 +144,21 @@ def test_incremental_script_uses_compose_health_without_localhost_frontend_probe
     assert "@@TELEPILOT_PROGRESS@@" in script
 
 
+def test_incremental_script_syncs_backend_files_with_image_rollback() -> None:
+    repo_root = Path(__file__).resolve().parents[3]
+    script = (repo_root / "scripts" / "prod-update.sh").read_text(encoding="utf-8")
+
+    assert 'git archive "$NEW_COMMIT"' in script
+    assert 'python -m compileall -q "$stage/backend/app"' in script
+    assert "new_image_id=\"$(docker commit" in script
+    assert '--message "TelePilot 文件同步' in script
+    assert '--change "CMD $image_cmd"' in script
+    assert "自定义 ENTRYPOINT" in script
+    assert "rollback_web_runtime_image" in script
+    assert 'docker image tag "$WEB_SYNC_OLD_IMAGE_ID" "$WEB_SYNC_IMAGE_REF"' in script
+    assert "文件级同步服务：web（无需执行 docker build）" in script
+
+
 def test_runtime_dockerfiles_preserve_incremental_build_caches() -> None:
     repo_root = Path(__file__).resolve().parents[3]
     frontend_dockerfile = (repo_root / "frontend" / "Dockerfile").read_text(encoding="utf-8")

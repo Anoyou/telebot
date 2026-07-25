@@ -1991,6 +1991,8 @@ export interface CheckUpdateResult {
   plan_detail?: string | null;
   components?: string[] | null;
   services?: string[] | null;
+  file_sync_services?: string[] | null;
+  rebuild_services?: string[] | null;
   requires_full_update?: boolean | null;
   requires_backup?: boolean | null;
   requires_migration?: boolean | null;
@@ -2024,6 +2026,8 @@ export interface PullUpdateResult {
   plan_detail?: string | null;
   components?: string[] | null;
   services?: string[] | null;
+  file_sync_services?: string[] | null;
+  rebuild_services?: string[] | null;
   requires_full_update?: boolean | null;
   requires_backup?: boolean | null;
   requires_migration?: boolean | null;

@@ -66,7 +66,7 @@ export default defineConfig({
         // 继续提供过期的首帧主题和状态栏配置。注意：这只能保证页面拿到最新配置，不能
         // 改写 iOS 已经固化在现有主屏 Web App 里的安装元数据。
         navigateFallback: null,
-        globPatterns: ["**/*.{js,css,ico,png,svg,webp,woff,woff2}"],
+        globPatterns: ["**/*.{js,css,md,ico,png,svg,webp,woff,woff2}"],
         runtimeCaching: [
           {
             // HTML 导航：NetworkFirst，拿最新 index.html；断网回退最近一次缓存。

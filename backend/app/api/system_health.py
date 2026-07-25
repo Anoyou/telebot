@@ -1345,6 +1345,8 @@ def _plan_text(
     has_update: bool,
     components: list[str],
     services: list[str],
+    file_sync_services: list[str],
+    rebuild_services: list[str],
     requires_full_update: bool,
     requires_backup: bool,
     requires_migration: bool,
@@ -1357,7 +1359,14 @@ def _plan_text(
     detail_parts: list[str] = []
     if components and components != ["none"]:
         detail_parts.append(f"变更分类：{', '.join(components)}")
-    if services:
+    if file_sync_services:
+        detail_parts.append(
+            f"直接同步目标 commit 文件并重启：{', '.join(file_sync_services)}。"
+        )
+    if rebuild_services:
+        detail_parts.append(f"需要编译或镜像构建：{', '.join(rebuild_services)}。")
+    if services and not file_sync_services and not rebuild_services:
+        # 兼容尚未提供动作分类的旧 updater。
         detail_parts.append(f"仅切换服务：{', '.join(services)}；其余容器保持运行。")
     elif components == ["docs_only"]:
         detail_parts.append("不需要重建或重启运行服务。")
@@ -1421,6 +1430,8 @@ def _check_response_from_plan(
     ][:30]
     components = [str(item) for item in plan.get("components") or ["none"]]
     services = [str(item) for item in plan.get("services") or []]
+    file_sync_services = [str(item) for item in plan.get("file_sync_services") or []]
+    rebuild_services = [str(item) for item in plan.get("rebuild_services") or []]
     requires_full_update = bool(plan.get("requires_full_update"))
     requires_backup = bool(plan.get("requires_backup"))
     requires_migration = bool(plan.get("requires_migration"))
@@ -1435,6 +1446,8 @@ def _check_response_from_plan(
         has_update=has_update,
         components=components,
         services=services,
+        file_sync_services=file_sync_services,
+        rebuild_services=rebuild_services,
         requires_full_update=requires_full_update,
         requires_backup=requires_backup,
         requires_migration=requires_migration,
@@ -1458,6 +1471,8 @@ def _check_response_from_plan(
         plan_detail=plan_detail,
         components=components,
         services=services,
+        file_sync_services=file_sync_services,
+        rebuild_services=rebuild_services,
         requires_full_update=requires_full_update,
         requires_backup=requires_backup,
         requires_migration=requires_migration,
@@ -1487,6 +1502,8 @@ class CheckUpdateResponse(BaseModel):
     commit_titles: list[str] = Field(default_factory=list)
     components: list[str] = Field(default_factory=lambda: ["none"])
     services: list[str] = Field(default_factory=list)
+    file_sync_services: list[str] = Field(default_factory=list)
+    rebuild_services: list[str] = Field(default_factory=list)
     requires_full_update: bool = False
     requires_backup: bool = False
     requires_migration: bool = False
@@ -1511,6 +1528,8 @@ class PullUpdateResponse(BaseModel):
     changed_files: list[str] = Field(default_factory=list)
     components: list[str] = Field(default_factory=lambda: ["none"])
     services: list[str] = Field(default_factory=list)
+    file_sync_services: list[str] = Field(default_factory=list)
+    rebuild_services: list[str] = Field(default_factory=list)
     requires_full_update: bool = False
     requires_backup: bool = False
     requires_migration: bool = False
@@ -1818,6 +1837,8 @@ async def check_update(
             )
             components = update_plan.components
             services = update_plan.services
+            file_sync_services = update_plan.file_sync_services
+            rebuild_services = update_plan.rebuild_services
             requires_full_update = update_plan.requires_full_update
             requires_backup = update_plan.requires_backup
             has_update = has_update and behind > 0
@@ -1835,6 +1856,8 @@ async def check_update(
                 has_update=has_update,
                 components=components,
                 services=services,
+                file_sync_services=file_sync_services,
+                rebuild_services=rebuild_services,
                 requires_full_update=requires_full_update,
                 requires_backup=requires_backup,
                 requires_migration=update_plan.requires_migration,
@@ -1858,6 +1881,8 @@ async def check_update(
                 plan_detail=plan_detail,
                 components=components,
                 services=services,
+                file_sync_services=file_sync_services,
+                rebuild_services=rebuild_services,
                 requires_full_update=requires_full_update,
                 requires_backup=requires_backup,
                 requires_migration=update_plan.requires_migration,

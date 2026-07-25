@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useSearchParams } from "react-router-dom";
-import { ChevronDown, MessageCircle, Server, Settings2 } from "lucide-react";
+import { ChevronDown, MessageCircle, Server, Settings2, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
 import {
@@ -34,6 +34,7 @@ import { listAccounts } from "@/api/accounts";
 import type { LLMProviderOut } from "@/api/types";
 import { matrixToPickerItems, type ModelPickerValue } from "@/components/ai/ModelPicker";
 import { Composer } from "@/components/assistant/Composer";
+import { AgentMark } from "@/components/assistant/AgentMark";
 import { useAssistantDock } from "@/components/assistant/AssistantDock";
 import { Conversation, type LiveBubble } from "@/components/assistant/Conversation";
 import {
@@ -132,6 +133,7 @@ export function AssistantIndex() {
   const [activeId, setActiveId] = useState<string | null>(null);
   const [originFilter, setOriginFilter] = useState<SessionOriginFilter>("all");
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const [sessionSidebarCollapsed, setSessionSidebarCollapsed] = useState(false);
   const [accountId, setAccountId] = useState<number | "">("");
   const [live, setLive] = useState<LiveBubble[]>([]);
   const [streaming, setStreaming] = useState(false);
@@ -926,7 +928,7 @@ export function AssistantIndex() {
         <PageHeader
           title="系统助手"
           description="用自然语言查询并操作系统能力；写操作需内联确认。"
-          icon={MessageCircle}
+          icon={AgentMark}
         />
       </div>
 
@@ -939,7 +941,7 @@ export function AssistantIndex() {
           onClick={() => setMobileHeaderExpanded((value) => !value)}
         >
           <span className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-primary/10 text-primary">
-            <MessageCircle className="h-4 w-4" />
+            <AgentMark className="h-4 w-4" />
           </span>
           <span className="shrink-0 text-sm font-semibold">系统助手</span>
           <span className="min-w-0 truncate text-[11px] text-muted-foreground">
@@ -1252,31 +1254,40 @@ export function AssistantIndex() {
                 (memoryQ.data as SystemAgentUserMemory[]).map((item) => (
                   <div
                     key={item.id}
-                    className="flex flex-wrap items-center gap-2 rounded-md border px-3 py-2"
+                    className="rounded-md border border-border/70 bg-background/45 px-3 py-2.5"
                   >
-                    <div className="flex items-center gap-1.5 text-xs">
-                      <Switch
-                        className="scale-90"
-                        checked={item.enabled}
-                        disabled={patchMemoryMut.isPending}
-                        onCheckedChange={(checked) => patchMemoryMut.mutate({ id: item.id, enabled: checked })}
-                        aria-label={`切换记忆：${item.content}`}
-                      />
-                      启用
+                    <p className="whitespace-pre-wrap break-words text-sm leading-6 text-foreground">
+                      {item.content}
+                    </p>
+                    <div className="mt-2 flex min-h-8 items-center justify-between gap-3 border-t border-border/45 pt-2">
+                      <div className="flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
+                        <Switch
+                          className="scale-90"
+                          checked={item.enabled}
+                          disabled={patchMemoryMut.isPending}
+                          onCheckedChange={(checked) => patchMemoryMut.mutate({ id: item.id, enabled: checked })}
+                          aria-label={`切换记忆：${item.content}`}
+                        />
+                        <span>{item.enabled ? "已启用" : "已停用"}</span>
+                        <span className="truncate text-[10px] text-muted-foreground/65">
+                          {item.source === "agent_learned" ? "助手记录" : "手动添加"}
+                        </span>
+                      </div>
+                      <Button
+                        type="button"
+                        size="icon"
+                        variant="ghost"
+                        className="h-7 w-7 shrink-0 text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
+                        disabled={deleteMemoryMut.isPending}
+                        onClick={() => {
+                          if (confirm("确认删除这条记忆？")) deleteMemoryMut.mutate(item.id);
+                        }}
+                        aria-label="删除长期记忆"
+                        title="删除长期记忆"
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </Button>
                     </div>
-                    <span className="min-w-0 flex-1 text-sm">{item.content}</span>
-                    <Button
-                      type="button"
-                      size="sm"
-                      variant="outline"
-                      className="h-7 text-destructive"
-                      disabled={deleteMemoryMut.isPending}
-                      onClick={() => {
-                        if (confirm("确认删除这条记忆？")) deleteMemoryMut.mutate(item.id);
-                      }}
-                    >
-                      删除
-                    </Button>
                   </div>
                 ))
               )}
@@ -1305,6 +1316,8 @@ export function AssistantIndex() {
           onDelete={(id) => deleteMut.mutate(id)}
           open={drawerOpen}
           onClose={() => setDrawerOpen(false)}
+          desktopCollapsed={sessionSidebarCollapsed}
+          onDesktopCollapse={() => setSessionSidebarCollapsed(true)}
         />
         <div className="flex min-w-0 flex-1 flex-col">
           {!activeId ? (
@@ -1373,7 +1386,14 @@ export function AssistantIndex() {
                 onSetDefaultModel={onSetDefaultModel}
                 modelDisabled={selectorDisabled || modelPickerItems.length === 0}
                 expectedLabel={expectedSelectionLabel}
-                onOpenSessions={() => setDrawerOpen(true)}
+                onOpenSessions={() => {
+                  if (window.matchMedia("(min-width: 768px)").matches) {
+                    setSessionSidebarCollapsed(false);
+                    return;
+                  }
+                  setDrawerOpen(true);
+                }}
+                showSessionButtonOnDesktop={sessionSidebarCollapsed}
               />
             </>
           )}

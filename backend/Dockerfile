@@ -42,6 +42,9 @@ COPY --from=builder /usr/local/bin /usr/local/bin
 # 拷贝完整后端源码（含 alembic 迁移脚本、app/ 等）及 Agent 读取的发布日志。
 COPY backend/ /app
 COPY CHANGELOG.md /app/CHANGELOG.md
+# System Agent 只读源码诊断使用。仅复制前端源码与构建配置，不复制依赖和产物。
+COPY frontend/src /app/source/frontend/src
+COPY frontend/package.json frontend/tsconfig.json frontend/tsconfig.app.json frontend/vite.config.ts /app/source/frontend/
 
 # 关闭 pyc 写盘 + 立即刷新 stdout，便于 docker logs 实时查看
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1

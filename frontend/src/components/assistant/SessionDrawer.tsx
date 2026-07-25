@@ -1,4 +1,4 @@
-import { MessageSquarePlus, Trash2 } from "lucide-react";
+import { MessageSquarePlus, PanelLeftClose, Trash2 } from "lucide-react";
 
 import type { SystemAgentSession } from "@/api/systemAgent";
 import { Button } from "@/components/ui/button";
@@ -14,6 +14,8 @@ export function SessionDrawer({
   onDelete,
   open,
   onClose,
+  desktopCollapsed = false,
+  onDesktopCollapse,
   originFilter = "all",
   onOriginFilterChange,
 }: {
@@ -24,6 +26,8 @@ export function SessionDrawer({
   onDelete: (id: string) => void;
   open?: boolean;
   onClose?: () => void;
+  desktopCollapsed?: boolean;
+  onDesktopCollapse?: () => void;
   originFilter?: SessionOriginFilter;
   onOriginFilterChange?: (value: SessionOriginFilter) => void;
 }) {
@@ -34,12 +38,27 @@ export function SessionDrawer({
 
   const body = (
     <div className="flex h-full flex-col">
-      <div className="flex items-center justify-between border-b px-3 py-3">
+      <div className="flex items-center justify-between gap-2 border-b px-3 py-3">
         <div className="text-sm font-medium">会话</div>
-        <Button type="button" size="sm" variant="outline" onClick={onCreate}>
-          <MessageSquarePlus className="mr-1 h-4 w-4" />
-          新建
-        </Button>
+        <div className="flex items-center gap-1">
+          {onDesktopCollapse ? (
+            <Button
+              type="button"
+              size="icon"
+              variant="ghost"
+              className="hidden h-8 w-8 md:inline-flex"
+              onClick={onDesktopCollapse}
+              aria-label="收起会话列表"
+              title="收起会话列表"
+            >
+              <PanelLeftClose className="h-4 w-4" />
+            </Button>
+          ) : null}
+          <Button type="button" size="sm" variant="outline" onClick={onCreate}>
+            <MessageSquarePlus className="mr-1 h-4 w-4" />
+            新建
+          </Button>
+        </div>
       </div>
       {onOriginFilterChange ? (
         <div className="flex gap-1 border-b px-2 py-2">
@@ -111,7 +130,15 @@ export function SessionDrawer({
   return (
     <>
       {/* 桌面侧栏 */}
-      <aside data-assistant-session-anchor className="hidden w-64 shrink-0 border-r bg-card/40 md:block">{body}</aside>
+      <aside
+        data-assistant-session-anchor
+        className={cn(
+          "hidden w-64 shrink-0 border-r bg-card/40",
+          desktopCollapsed ? "md:hidden" : "md:block",
+        )}
+      >
+        {body}
+      </aside>
       {/* 移动抽屉 */}
       {open ? (
         <div className="fixed bottom-[calc(4.75rem+env(safe-area-inset-bottom))] left-0 right-0 top-[calc(3.25rem+env(safe-area-inset-top))] z-[69] md:hidden">

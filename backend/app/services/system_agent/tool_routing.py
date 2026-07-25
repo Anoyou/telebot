@@ -50,6 +50,21 @@ DOMAIN_CATALOG: dict[str, tuple[str, tuple[str, ...]]] = {
             "exception", "最近有什么报错", "失败任务", "runtime log", "诊断",
         ),
     ),
+    "source": (
+        "部署源码的只读搜索与按行查看",
+        (
+            "源码", "代码", "实现", "函数", "文件", "调用链", "source", "source code",
+            "code path", "stack trace", "堆栈", "根因", "debug",
+        ),
+    ),
+    "web": (
+        "公开互联网搜索与来源检索",
+        (
+            "联网", "互联网", "网页搜索", "网上搜索", "搜索网络", "官网", "官方文档",
+            "最新资料", "读取网页", "总结网页", "总结链接", "网址", "url", "http://", "https://",
+            "web search", "internet search", "search online", "online docs", "read url",
+        ),
+    ),
     "memory": (
         "长期偏好记忆的查询与保存",
         (
@@ -254,6 +269,17 @@ def route_locally(
         "feature" in normalized or "功能" in normalized
     ):
         matched = [domain for domain in matched if domain != "accounts"] or matched
+    # 日志排障应允许模型从运行证据继续追到部署源码，而不要求用户再补一句“看代码”。
+    diagnostic_intent = (
+        "排障", "排查", "定位", "根因", "为什么", "原因", "debug", "diagnos",
+    )
+    if (
+        "logs" in matched
+        and "source" in available
+        and any(token in normalized for token in diagnostic_intent)
+        and "source" not in matched
+    ):
+        matched.append("source")
     if matched:
         return ToolRoute(tuple(dict.fromkeys(matched[:3])), "local", "keyword_match")
     state = memory_state if isinstance(memory_state, dict) else {}

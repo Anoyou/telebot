@@ -93,8 +93,8 @@ TELEPILOT_UPDATE_BRANCH=codex/0.33-interaction-framework make prod-update
 
 `UPDATER_TOKEN` 必须是独立随机密钥，不得与 `JWT_SECRET` 复用；缺失时 updater 会拒绝启动。
 
-- 检查更新：读取当前分支或 `TELEPILOT_UPDATE_BRANCH`，执行 `git fetch`，生成 `web` / `frontend` / `updater` 服务级更新计划；Compose 变化会比较到具体服务，不因文件本身变化直接升级为全栈更新。
-- 应用更新：后台执行 `scripts/prod-update.sh`，使用 `--no-deps` 只构建和切换计划内服务。普通版本号、依赖和业务代码变化不会重启 PostgreSQL / Redis；只有新增 Alembic 迁移时才自动备份。
+- 检查更新：读取当前分支或 `TELEPILOT_UPDATE_BRANCH`，执行 `git fetch`，生成 `web` / `frontend` / `updater` 服务级更新计划，并明确区分“直接文件同步”和“镜像构建”；Compose 变化会比较到具体服务，不因文件本身变化直接升级为全栈更新。
+- 应用更新：后台执行 `scripts/prod-update.sh`。纯后端源码从目标 commit 归档后写入临时容器，通过编译校验再生成轻量补丁镜像并重启 `web`；前端 TypeScript 仍需编译，依赖、Dockerfile、Compose 与 updater 变化才重建对应镜像。普通更新不会重启 PostgreSQL / Redis；只有新增 Alembic 迁移时才自动备份，健康失败会恢复旧 web 镜像。
 - updater 自更新：业务服务完成健康检查后，由独立 handoff 最后切换 updater，避免更新器重建自身导致任务中断。
 - 任务日志：Web 面板轮询 updater job，任务状态同时持久化到 Git 目录；updater 重启后仍可读取结果。
 

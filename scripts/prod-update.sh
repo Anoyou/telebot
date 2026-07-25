@@ -23,6 +23,10 @@ FORCE_FULL=0
 OLD_COMMIT=""
 HEAD_ALREADY_UPDATED=0
 HANDOFF_SCHEDULED=0
+PATCH_CONTAINER=""
+WEB_SYNC_OLD_IMAGE_ID=""
+WEB_SYNC_IMAGE_REF=""
+WEB_SYNC_ACTIVE=0
 RUNNING_UPDATER_TOKEN="${UPDATER_TOKEN:-}"
 PROGRESS_PREFIX="@@TELEPILOT_PROGRESS@@"
 
@@ -64,6 +68,13 @@ while [[ $# -gt 0 ]]; do
 done
 
 on_error() {
+  if [[ -n "$PATCH_CONTAINER" ]]; then
+    docker rm -f "$PATCH_CONTAINER" >/dev/null 2>&1 || true
+    PATCH_CONTAINER=""
+  fi
+  if (( WEB_SYNC_ACTIVE == 1 )); then
+    rollback_web_runtime_image || true
+  fi
   err "增量更新失败"
   if [[ -n "$OLD_COMMIT" ]]; then
     warn "当前更新前 commit：$OLD_COMMIT"
@@ -126,23 +137,31 @@ plan_value() {
   PLAN_JSON="$PLAN_JSON" PLAN_KEY="$key" python3 - <<'PY'
 import json
 import os
+import sys
 
 value = json.loads(os.environ["PLAN_JSON"]).get(os.environ["PLAN_KEY"])
 if isinstance(value, list):
-    print("\n".join(str(item) for item in value))
+    if value:
+        sys.stdout.write("\n".join(str(item) for item in value) + "\n")
 elif isinstance(value, bool):
     print("1" if value else "0")
-else:
-    print(value or "")
+elif value is not None:
+    print(value)
 PY
 }
 
 mapfile -t CHANGED_FILES < <(plan_value changed_files)
 mapfile -t PLAN_COMPONENTS < <(plan_value components)
 mapfile -t PLAN_SERVICES < <(plan_value services)
+mapfile -t PLAN_FILE_SYNC_SERVICES < <(plan_value file_sync_services)
+mapfile -t PLAN_REBUILD_SERVICES < <(plan_value rebuild_services)
 NEEDS_BACKEND=0
 NEEDS_FRONTEND=0
 NEEDS_UPDATER=0
+NEEDS_BACKEND_SYNC=0
+NEEDS_BACKEND_REBUILD=0
+NEEDS_FRONTEND_REBUILD=0
+NEEDS_UPDATER_REBUILD=0
 NEEDS_FULL="$(plan_value requires_full_update)"
 REQUIRES_BACKUP="$(plan_value requires_backup)"
 REQUIRES_MIGRATION="$(plan_value requires_migration)"
@@ -152,6 +171,20 @@ for service in "${PLAN_SERVICES[@]}"; do
   [[ "$service" == "frontend" ]] && NEEDS_FRONTEND=1
   [[ "$service" == "updater" ]] && NEEDS_UPDATER=1
 done
+for service in "${PLAN_FILE_SYNC_SERVICES[@]}"; do
+  [[ "$service" == "web" ]] && NEEDS_BACKEND_SYNC=1
+done
+for service in "${PLAN_REBUILD_SERVICES[@]}"; do
+  [[ "$service" == "web" ]] && NEEDS_BACKEND_REBUILD=1
+  [[ "$service" == "frontend" ]] && NEEDS_FRONTEND_REBUILD=1
+  [[ "$service" == "updater" ]] && NEEDS_UPDATER_REBUILD=1
+done
+# 兼容旧更新计划：新脚本若读取到尚未提供动作字段的 JSON，保守地按原方式重建。
+if (( ${#PLAN_SERVICES[@]} > 0 && ${#PLAN_FILE_SYNC_SERVICES[@]} == 0 && ${#PLAN_REBUILD_SERVICES[@]} == 0 )); then
+  NEEDS_BACKEND_REBUILD=$NEEDS_BACKEND
+  NEEDS_FRONTEND_REBUILD=$NEEDS_FRONTEND
+  NEEDS_UPDATER_REBUILD=$NEEDS_UPDATER
+fi
 if [[ "$(plan_value components)" == "docs_only" ]]; then
   DOCS_ONLY=1
 fi
@@ -178,6 +211,12 @@ elif (( DOCS_ONLY == 1 )); then
   ok "分类结果：仅文档/说明变更，无需重建服务"
 else
   ok "分类结果：服务级增量更新 ${PLAN_SERVICES[*]}"
+  if (( ${#PLAN_FILE_SYNC_SERVICES[@]} > 0 )); then
+    log "文件同步后重启：${PLAN_FILE_SYNC_SERVICES[*]}"
+  fi
+  if (( ${#PLAN_REBUILD_SERVICES[@]} > 0 )); then
+    log "需要镜像构建：${PLAN_REBUILD_SERVICES[*]}"
+  fi
   if (( ${#PLAN_COMPONENTS[@]} > 0 )); then
     log "影响组件：${PLAN_COMPONENTS[*]}"
   fi
@@ -233,6 +272,98 @@ compose_project_name() {
     project="$(basename "$ROOT_DIR" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9_-')"
   fi
   printf '%s' "${project:-telepilot}"
+}
+
+rollback_web_runtime_image() {
+  if (( WEB_SYNC_ACTIVE == 0 )); then
+    return 0
+  fi
+  warn "web 文件同步未完成，恢复更新前镜像"
+  if ! docker image tag "$WEB_SYNC_OLD_IMAGE_ID" "$WEB_SYNC_IMAGE_REF"; then
+    err "无法恢复旧 web 镜像标签：$WEB_SYNC_IMAGE_REF"
+    return 1
+  fi
+  if ! docker compose up -d --no-deps --force-recreate web; then
+    err "旧 web 镜像已恢复，但容器重建失败"
+    return 1
+  fi
+  WEB_SYNC_ACTIVE=0
+  if ! wait_compose_healthy docker-compose.yml web 120; then
+    docker compose logs --tail=80 web >&2 || true
+    err "恢复后的 web 未通过健康检查"
+    return 1
+  fi
+  warn "web 已回到更新前镜像；仓库保留在目标 commit，后续可直接重试"
+}
+
+sync_web_runtime_image() {
+  local web_id image_ref old_image_id image_cmd image_entrypoint project stage new_image_id
+  web_id="$(docker compose ps -q web 2>/dev/null || true)"
+  [[ -n "$web_id" ]] || {
+    err "web 容器不存在，不能执行文件同步快速更新"
+    return 1
+  }
+  image_ref="$(docker inspect --format '{{.Config.Image}}' "$web_id")"
+  old_image_id="$(docker inspect --format '{{.Image}}' "$web_id")"
+  if [[ -z "$image_ref" || "$image_ref" == sha256:* || "$image_ref" == *@* ]]; then
+    err "web 当前镜像没有可安全覆盖的本地标签，拒绝文件同步：${image_ref:-unknown}"
+    return 1
+  fi
+  docker image inspect "$image_ref" >/dev/null
+  image_cmd="$(docker image inspect --format '{{json .Config.Cmd}}' "$image_ref")"
+  image_entrypoint="$(docker image inspect --format '{{json .Config.Entrypoint}}' "$image_ref")"
+  [[ "$image_cmd" == "null" ]] && image_cmd="[]"
+  if [[ "$image_entrypoint" != "null" && "$image_entrypoint" != "[]" ]]; then
+    err "web 基础镜像设置了自定义 ENTRYPOINT，无法安全生成文件补丁镜像"
+    return 1
+  fi
+
+  project="$(compose_project_name)"
+  PATCH_CONTAINER="${project}-web-patch-${NEW_COMMIT:0:12}-$$"
+  stage="/tmp/telepilot-runtime-${NEW_COMMIT:0:12}"
+  docker create --name "$PATCH_CONTAINER" "$image_ref" \
+    python -c 'import time; time.sleep(600)' >/dev/null
+  docker start "$PATCH_CONTAINER" >/dev/null
+  docker exec "$PATCH_CONTAINER" mkdir -p "$stage"
+
+  # 只从目标 commit 归档受控的运行时目录，既覆盖新增/修改文件，也通过整目录
+  # 替换清除已删除文件；不会把服务器工作区中的 ignored/untracked 文件带进镜像。
+  git archive "$NEW_COMMIT" \
+    backend/app backend/alembic backend/alembic.ini backend/pyproject.toml CHANGELOG.md \
+    frontend/src frontend/package.json frontend/tsconfig.json \
+    frontend/tsconfig.app.json frontend/vite.config.ts \
+    | docker cp - "$PATCH_CONTAINER:$stage"
+  docker exec "$PATCH_CONTAINER" python -m compileall -q "$stage/backend/app"
+  docker exec "$PATCH_CONTAINER" sh -c '
+    set -eu
+    stage="$1"
+    rm -rf /app/app /app/alembic /app/source/frontend
+    rm -f /app/alembic.ini /app/pyproject.toml /app/CHANGELOG.md /app/.telepilot-runtime-commit
+    mkdir -p /app/source
+    mv "$stage/backend/app" /app/app
+    mv "$stage/backend/alembic" /app/alembic
+    mv "$stage/backend/alembic.ini" /app/alembic.ini
+    mv "$stage/backend/pyproject.toml" /app/pyproject.toml
+    mv "$stage/CHANGELOG.md" /app/CHANGELOG.md
+    mv "$stage/frontend" /app/source/frontend
+  ' sh "$stage"
+  printf '%s\n' "$NEW_COMMIT" \
+    | docker exec -i "$PATCH_CONTAINER" sh -c 'cat > /app/.telepilot-runtime-commit'
+
+  WEB_SYNC_OLD_IMAGE_ID="$old_image_id"
+  WEB_SYNC_IMAGE_REF="$image_ref"
+  new_image_id="$(docker commit \
+    --message "TelePilot 文件同步 ${OLD_COMMIT:0:12} -> ${NEW_COMMIT:0:12}" \
+    --change "CMD $image_cmd" \
+    "$PATCH_CONTAINER" "$image_ref")"
+  WEB_SYNC_ACTIVE=1
+  docker rm -f "$PATCH_CONTAINER" >/dev/null
+  PATCH_CONTAINER=""
+  log "web 运行文件已生成补丁镜像：${new_image_id:0:19}"
+  if ! docker compose up -d --no-deps --force-recreate web; then
+    rollback_web_runtime_image || true
+    return 1
+  fi
 }
 
 schedule_updater_handoff() {
@@ -291,18 +422,29 @@ if (( NEEDS_FULL == 1 )); then
 elif (( DOCS_ONLY == 1 )); then
   ok "无需重建服务，更新完成"
 else
-  services=()
-  (( NEEDS_BACKEND == 1 )) && services+=("web")
-  (( NEEDS_FRONTEND == 1 )) && services+=("frontend")
+  rebuild_services=()
+  (( NEEDS_BACKEND_REBUILD == 1 )) && rebuild_services+=("web")
+  (( NEEDS_FRONTEND_REBUILD == 1 )) && rebuild_services+=("frontend")
 
-  if (( ${#services[@]} > 0 )); then
-    emit_progress 30 "构建镜像" "增量重建 ${services[*]}"
-    log "增量重建服务：${services[*]}"
+  if (( ${#rebuild_services[@]} > 0 )); then
+    if (( NEEDS_FRONTEND_REBUILD == 1 && NEEDS_BACKEND_REBUILD == 0 )); then
+      emit_progress 30 "编译前端" "编译并切换 frontend"
+    else
+      emit_progress 30 "构建镜像" "增量重建 ${rebuild_services[*]}"
+    fi
+    log "增量重建服务：${rebuild_services[*]}"
     # WP-U2：确认按 classify_changed_files 裁剪后的服务列表重建，不整栈 up
     log "更新计划服务集合：${PLAN_SERVICES[*]:-none}"
-    docker compose up -d --build --no-deps "${services[@]}"
-    emit_progress 78 "健康检查" "等待新容器 ready"
+    docker compose up -d --build --no-deps "${rebuild_services[@]}"
   fi
+
+  if (( NEEDS_BACKEND_SYNC == 1 )); then
+    emit_progress 60 "同步运行文件" "覆盖目标 commit 的后端与诊断源码并重启 web"
+    log "文件级同步服务：web（无需执行 docker build）"
+    sync_web_runtime_image
+  fi
+
+  emit_progress 78 "健康检查" "等待新容器 ready"
 
   # WP-U2：web / frontend 同时变更时并行等待健康，缩短串行阻塞
   health_pids=()
@@ -334,7 +476,10 @@ else
       health_failed=1
     fi
   done
-  (( health_failed == 0 )) || exit 1
+  if (( health_failed != 0 )); then
+    rollback_web_runtime_image || true
+    false
+  fi
 
   emit_progress 92 "服务就绪" "受影响服务已通过健康检查"
 
@@ -347,6 +492,7 @@ else
   ok "增量更新完成"
 fi
 
+WEB_SYNC_ACTIVE=0
 if (( HANDOFF_SCHEDULED == 0 )); then
   rm -f "$PENDING_FILE"
 fi

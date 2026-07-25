@@ -23,6 +23,7 @@ export function Composer({
   modelDisabled,
   expectedLabel,
   onOpenSessions,
+  showSessionButtonOnDesktop = false,
 }: {
   disabled?: boolean;
   onSend: (text: string) => void | Promise<void>;
@@ -38,6 +39,7 @@ export function Composer({
   /** 本轮希望使用说明 */
   expectedLabel?: string;
   onOpenSessions?: () => void;
+  showSessionButtonOnDesktop?: boolean;
 }) {
   const [value, setValue] = useState("");
   const [sending, setSending] = useState(false);
@@ -88,7 +90,10 @@ export function Composer({
               type="button"
               variant="outline"
               size="sm"
-              className="mr-auto h-8 shrink-0 gap-1 px-2 text-xs md:hidden"
+              className={cn(
+                "mr-auto h-8 shrink-0 gap-1 px-2 text-xs",
+                showSessionButtonOnDesktop ? "inline-flex" : "md:hidden",
+              )}
               onClick={onOpenSessions}
               aria-label="打开会话列表"
             >

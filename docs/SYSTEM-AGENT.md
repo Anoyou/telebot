@@ -96,7 +96,7 @@ System Agent 使用四层上下文，避免每轮回放全部原始消息：
 - 本地无法判断且存在操作意图时，使用轻量模型路由器，最多选择 3 个领域。
 - 模型路由失败时优先复用结构化记忆中的最近领域，否则安全降级为不带工具的直接回答。
 - 主 Agent 只接收所选领域的工具 Schema，不再每轮固定携带全部已注册工具。
-- 内置领域技能为 `interaction`、`scheduler`、`ai-config`、`plugins`、`diagnostics`。每轮最多加载 2 个技能、暴露 8 个工具；技能只补充处理流程和澄清规则，不能扩大 ToolRoute 权限，也不复制工具 Schema 或业务校验。
+- 内置领域技能为 `interaction`、`scheduler`、`ai-config`、`plugins`、`diagnostics`、`web-research`。每轮最多加载 2 个技能、暴露 8 个工具；技能只补充处理流程和澄清规则，不能扩大 ToolRoute 权限，也不复制工具 Schema 或业务校验。
 
 ## 数据表
 
@@ -121,6 +121,8 @@ System Agent 使用四层上下文，避免每轮回放全部原始消息：
 | `commands.list` | 自定义指令与启用账号 |
 | `features.get_account_status` | 账号功能/插件启停矩阵 |
 | `logs.recent` / `search_errors` / `get_event_detail` | 运行日志（默认 20，最大 500） |
+| `source.search` / `source.read` | 管理员只读检索部署源码并按行查看；拒绝敏感目录、路径越界、执行和写入 |
+| `web.search` / `web.read` | 搜索公开互联网，或读取指定公开 URL 并提取文本正文 |
 | `ledger.summary` / `ledger.list` | 台账汇总与明细；「今日」按系统时区日界线 |
 | `accounts.set_paused` / `restart_worker` | 暂停恢复 / 重启 Worker（危险） |
 | `rules.save` / `set_enabled` / `delete` | 通用 Rule 写操作 |
@@ -138,6 +140,17 @@ System Agent 使用四层上下文，避免每轮回放全部原始消息：
 
 写工具只产生 `pending` Action，用户确认后由 `ActionExecutor` 统一事务执行。
 Web 用内联卡片确认；Bot 用 Inline 按钮（`ab:{aid}:confirm|cancel:agent:{nonce}`）。
+
+诊断请求可按“日志 → 错误事件 → 源码搜索 → 按行读取”的顺序定位代码级根因。
+源码工具只对管理员开放，只能读取当前部署包中的 `backend`、`frontend` 和已安装插件源码白名单；
+`.env`、运行日志、会话、数据目录、依赖、构建产物及路径穿越均拒绝。System Agent 没有源码写入或任意命令执行工具，只能给出修复方案。
+
+联网搜索通过独立的 `web.search` 工具访问固定 DuckDuckGo HTML 搜索出口，与当前聊天 Provider 是否原生支持 Web Search 解耦。
+`web.search` 不接受 URL 参数，也不打开结果页面；查询最多 240 字符、单次最多 10 条结果、12 秒超时，并限制响应体积。
+标题、摘要和 URL 均按外部数据标记；疑似包含 API Key、Token 等敏感信息的查询会在外发前拒绝。
+`web.read` 可读取用户指定的公开 HTTP/HTTPS URL；每次请求与重定向都会校验域名解析，并把实际连接固定到已验证的公网 IP，拒绝本机、内网、保留地址、用户凭据、非文本内容和超过 1 MiB 的响应。
+在透明代理返回 `198.18.0.0/15` Fake-IP 时，只通过固定 DoH bootstrap IP 并保留正确 Host/SNI 复核真实公网地址，不会直接放行保留网段，也不依赖本机 DNS 先解析 DoH 域名。
+Agent 回答时必须给出来源，并区分搜索摘要、已读取正文、推断与已验证事实。
 
 ## NDJSON 事件
 

@@ -12,6 +12,7 @@ import json
 import os
 import subprocess
 import tempfile
+import tomllib
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -36,6 +37,12 @@ _NO_RUNTIME_FILES = {
     "scripts/prod-up.sh",
 }
 _FRONTEND_BUNDLED_FILES = {"CHANGELOG.md", "docs/PLUGIN-DEV-GUIDE.md"}
+_FRONTEND_SOURCE_MIRROR_FILES = {
+    "frontend/package.json",
+    "frontend/tsconfig.app.json",
+    "frontend/tsconfig.json",
+    "frontend/vite.config.ts",
+}
 _UPDATER_FILES = {
     "backend/app/util/update_plan.py",
     "deploy/updater/Dockerfile",
@@ -52,6 +59,8 @@ class UpdatePlan:
     changed_files: list[str]
     components: list[str]
     services: list[str]
+    file_sync_services: list[str]
+    rebuild_services: list[str]
     requires_full_update: bool
     requires_backup: bool
     requires_migration: bool
@@ -90,13 +99,16 @@ def classify_changed_files(
     *,
     compose_changed_services: set[str] | None = None,
     compose_inspection_failed: bool = False,
+    backend_dependencies_changed: bool | None = None,
 ) -> UpdatePlan:
     files = [_normalize(path) for path in changed_files if path.strip()]
     if not files:
-        return UpdatePlan([], ["none"], [], False, False, False, [], [])
+        return UpdatePlan([], ["none"], [], [], [], False, False, False, [], [])
 
     components: set[str] = set()
     services: set[str] = set()
+    file_sync_services: set[str] = set()
+    rebuild_services: set[str] = set()
     reasons: list[str] = []
     requires_full_update = compose_inspection_failed
     requires_migration = any(path.startswith("backend/alembic/versions/") for path in files)
@@ -105,6 +117,16 @@ def classify_changed_files(
     if compose_inspection_failed:
         components.add("full_update")
         reasons.append("无法比较 Compose 服务配置，转入完整更新")
+
+    def require_file_sync(service: str) -> None:
+        services.add(service)
+        if service not in rebuild_services:
+            file_sync_services.add(service)
+
+    def require_rebuild(service: str) -> None:
+        services.add(service)
+        rebuild_services.add(service)
+        file_sync_services.discard(service)
 
     for path in files:
         if path == "docker-compose.yml":
@@ -120,30 +142,42 @@ def classify_changed_files(
                 components.add("infrastructure")
                 reasons.append("PostgreSQL、Redis 或未知 Compose 服务配置发生变化")
             for service in compose_changed_services & {"web", "frontend", "updater"}:
-                services.add(service)
+                require_rebuild(service)
                 components.add("backend" if service == "web" else service)
             continue
 
         if path == "backend/app/util/update_plan.py":
             components.update({"backend", "updater"})
-            services.update({"web", "updater"})
+            require_file_sync("web")
+            require_rebuild("updater")
             continue
         if path in _UPDATER_FILES:
             components.add("updater")
-            services.add("updater")
+            require_rebuild("updater")
             continue
 
         if path == ".dockerignore":
             components.update({"frontend", "updater"})
-            services.update({"frontend", "updater"})
+            require_rebuild("frontend")
+            require_rebuild("updater")
             continue
         if path == "backend/.dockerignore":
             components.add("backend")
-            services.add("web")
+            require_rebuild("web")
             continue
         if path == "frontend/.dockerignore":
             components.add("frontend")
-            services.add("frontend")
+            require_rebuild("frontend")
+            continue
+
+        if path == "backend/pyproject.toml":
+            components.add("backend")
+            if backend_dependencies_changed is False:
+                require_file_sync("web")
+            else:
+                # 直接分类时缺少新旧内容，默认按依赖变化处理；build_update_plan
+                # 会解析 project.dependencies，把纯版本号变化降为文件同步。
+                require_rebuild("web")
             continue
 
         if path.startswith("deploy/") or path.startswith("scripts/"):
@@ -152,17 +186,33 @@ def classify_changed_files(
 
         if path in _FRONTEND_BUNDLED_FILES or path.startswith("frontend/"):
             components.add("frontend")
-            services.add("frontend")
+            require_rebuild("frontend")
+            if (
+                path == "CHANGELOG.md"
+                or path in _FRONTEND_SOURCE_MIRROR_FILES
+                or path.startswith("frontend/src/")
+            ):
+                # System Agent 的只读源码镜像位于 web 镜像中，前端源码变化时
+                # 同步该快照，避免线上诊断读取到上一版代码。
+                components.add("backend")
+                require_file_sync("web")
             if path == "CHANGELOG.md":
                 components.add("backend")
-                services.add("web")
             continue
 
         if path.startswith(_BACKEND_TEST_PREFIXES):
             continue
+        if (
+            path.startswith("backend/app/")
+            or path.startswith("backend/alembic/")
+            or path == "backend/alembic.ini"
+        ):
+            components.add("backend")
+            require_file_sync("web")
+            continue
         if path.startswith("backend/") or path.startswith("plugins/"):
             components.add("backend")
-            services.add("web")
+            require_rebuild("web")
             continue
 
         if _is_docs_file(path):
@@ -190,6 +240,8 @@ def classify_changed_files(
             ("full_update", "infrastructure", "migration", "backend", "frontend", "updater", "docs_only"),
         ),
         services=_ordered(services, ("web", "frontend", "updater")),
+        file_sync_services=_ordered(file_sync_services, ("web", "frontend", "updater")),
+        rebuild_services=_ordered(rebuild_services, ("web", "frontend", "updater")),
         requires_full_update=requires_full_update,
         requires_backup=requires_backup,
         requires_migration=requires_migration,
@@ -219,6 +271,18 @@ def _git_show(root: Path, revision: str, path: str) -> str:
     if result.returncode != 0:
         raise RuntimeError(result.stderr.strip() or f"无法读取 {revision}:{path}")
     return result.stdout
+
+
+def _backend_dependencies_changed(root: Path, old_revision: str, new_revision: str) -> bool:
+    try:
+        old_data = tomllib.loads(_git_show(root, old_revision, "backend/pyproject.toml"))
+        new_data = tomllib.loads(_git_show(root, new_revision, "backend/pyproject.toml"))
+        old_dependencies = (old_data.get("project") or {}).get("dependencies") or []
+        new_dependencies = (new_data.get("project") or {}).get("dependencies") or []
+        return old_dependencies != new_dependencies
+    except (AttributeError, RuntimeError, tomllib.TOMLDecodeError):
+        # 解析或读取失败时不能假设依赖层可复用。
+        return True
 
 
 def _compose_config(root: Path, revision: str) -> dict[str, Any]:
@@ -285,10 +349,17 @@ def build_update_plan(root: Path, old_revision: str, new_revision: str) -> Updat
         except (OSError, RuntimeError, json.JSONDecodeError):
             compose_failed = True
 
+    backend_dependencies_changed: bool | None = None
+    if "backend/pyproject.toml" in changed_files:
+        backend_dependencies_changed = _backend_dependencies_changed(
+            root, old_revision, new_revision
+        )
+
     return classify_changed_files(
         changed_files,
         compose_changed_services=compose_services,
         compose_inspection_failed=compose_failed,
+        backend_dependencies_changed=backend_dependencies_changed,
     )
 
 

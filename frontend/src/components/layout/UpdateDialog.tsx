@@ -55,6 +55,8 @@ interface UpdatePlanMeta {
   planDetail: string | null;
   components: string[];
   services: string[];
+  fileSyncServices: string[];
+  rebuildServices: string[];
   requiresFullUpdate: boolean;
   requiresBackup: boolean;
   requiresMigration: boolean;
@@ -164,6 +166,8 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
     planDetail: res.plan_detail ?? null,
     components: res.components ?? [],
     services: res.services ?? [],
+    fileSyncServices: res.file_sync_services ?? [],
+    rebuildServices: res.rebuild_services ?? [],
     requiresFullUpdate: Boolean(res.requires_full_update),
     requiresBackup: Boolean(res.requires_backup),
     requiresMigration: Boolean(res.requires_migration),
@@ -189,6 +193,9 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
         return "重启使更新生效";
       case "backend":
         if (plan.runtimeMode === "local_source") return "拉取并重启使更新生效";
+        if (plan.fileSyncServices.includes("web") && !plan.rebuildServices.includes("web")) {
+          return "同步文件并重启后端";
+        }
         return "增量重建并重启后端";
       case "frontend":
         if (plan.runtimeMode === "local_source") return "拉取并重启使更新生效";
@@ -198,7 +205,9 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
         return "执行完整更新";
       case "mixed":
         if (plan.runtimeMode === "local_source") return "拉取并重启使更新生效";
-        return "执行增量更新";
+        return plan.fileSyncServices.length > 0 && plan.rebuildServices.length > 0
+          ? "执行混合增量更新"
+          : "执行增量更新";
       case "updater":
         return "更新在线更新器";
       case "docs_only":
@@ -716,6 +725,12 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
               {step.plan.services.length > 0 && planExpanded && (
                 <div className="rounded-md border border-success/30 bg-success/10 px-3 py-2 text-xs space-y-1">
                   <p>本次仅切换：{step.plan.services.join("、")}</p>
+                  {step.plan.fileSyncServices.length > 0 && (
+                    <p>直接同步文件并重启：{step.plan.fileSyncServices.join("、")}</p>
+                  )}
+                  {step.plan.rebuildServices.length > 0 && (
+                    <p>需要编译或镜像构建：{step.plan.rebuildServices.join("、")}</p>
+                  )}
                   {!step.plan.requiresMigration && <p>PostgreSQL / Redis 保持运行，不备份、不迁移。</p>}
                 </div>
               )}

@@ -455,6 +455,9 @@ async def test_check_update_uses_internal_updater(monkeypatch) -> None:
             "changed_files": ["backend/app/api/system_health.py"],
             "commit_titles": ["修复更新检查"],
             "components": ["backend"],
+            "services": ["web"],
+            "file_sync_services": ["web"],
+            "rebuild_services": [],
             "requires_full_update": False,
             "requires_backup": False,
         },
@@ -471,6 +474,9 @@ async def test_check_update_uses_internal_updater(monkeypatch) -> None:
     assert out.can_apply is True
     assert out.can_check is True
     assert out.commit_titles == ["修复更新检查"]
+    assert out.file_sync_services == ["web"]
+    assert out.rebuild_services == []
+    assert "直接同步目标 commit 文件并重启：web" in out.plan_detail
 
 
 @pytest.mark.asyncio

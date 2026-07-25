@@ -27,8 +27,10 @@ def register_all_tools(registry: ToolRegistry) -> None:
         routing,
         rules,
         scheduler,
+        source,
         system,
         system_ops,
+        web,
     )
 
     system.register(registry)
@@ -45,6 +47,8 @@ def register_all_tools(registry: ToolRegistry) -> None:
     product.register(registry)
     plugin_repos.register(registry)
     logs.register(registry)
+    source.register(registry)
+    web.register(registry)
     ledger.register(registry)
     memory.register(registry)
     # 插件工具插槽：从磁盘扫描已安装插件的 expose:system_agent 声明

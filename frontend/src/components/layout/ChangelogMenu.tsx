@@ -1,9 +1,10 @@
-// 更新日志面板：仅在用户打开版本号菜单时加载，避免壳层冷路径同步打包 markdown / CHANGELOG。
-import { useMemo } from "react";
+// 更新日志面板：仅在用户打开版本号菜单时读取独立静态资源，避免把完整
+// CHANGELOG 作为 JavaScript 字符串参与 Rollup 解析和压缩。
+import { useEffect, useMemo, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
-import changelogRaw from "../../../../CHANGELOG.md?raw";
+import changelogUrl from "../../../../CHANGELOG.md?url";
 
 function extractRecentChangelogSections(
   md: string,
@@ -30,7 +31,25 @@ function extractRecentChangelogSections(
 }
 
 export default function ChangelogMenu() {
-  const sections = useMemo(() => extractRecentChangelogSections(changelogRaw, 4), []);
+  const [changelogRaw, setChangelogRaw] = useState("");
+  const [loadFailed, setLoadFailed] = useState(false);
+  useEffect(() => {
+    const controller = new AbortController();
+    fetch(changelogUrl, { signal: controller.signal })
+      .then((response) => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.text();
+      })
+      .then(setChangelogRaw)
+      .catch((error: unknown) => {
+        if ((error as { name?: string })?.name !== "AbortError") setLoadFailed(true);
+      });
+    return () => controller.abort();
+  }, []);
+  const sections = useMemo(
+    () => extractRecentChangelogSections(changelogRaw, 4),
+    [changelogRaw],
+  );
   return (
     <>
       <div className="border-b px-4 py-3">
@@ -49,8 +68,10 @@ export default function ChangelogMenu() {
               </article>
             </div>
           ))
-        ) : (
+        ) : loadFailed ? (
           <p className="text-sm text-muted-foreground">未解析到更新日志内容，请检查 CHANGELOG.md。</p>
+        ) : (
+          <p className="text-sm text-muted-foreground">正在读取更新日志…</p>
         )}
       </div>
     </>

@@ -44,6 +44,7 @@ async def _accept_provider_capabilities(_db, resolved, **_kwargs):  # noqa: ANN0
         ("列出 Provider 和自定义指令", {"providers", "commands"}, "ai-config"),
         ("检查已安装插件更新", {"plugins", "plugin_repos"}, "plugins"),
         ("看看最近错误日志", {"logs", "system"}, "diagnostics"),
+        ("联网查一下官方文档", {"web", "logs"}, "web-research"),
     ],
 )
 def test_builtin_skill_selected_for_domain_request(
@@ -66,6 +67,7 @@ def test_builtin_skill_metadata_and_tools_stay_concise() -> None:
         "ai-config",
         "plugins",
         "diagnostics",
+        "web-research",
     }
     for skill in registry.list_all():
         assert skill.description

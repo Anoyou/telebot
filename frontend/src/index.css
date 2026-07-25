@@ -783,6 +783,12 @@
     display: none;
   }
 
+  /* 配置抽屉占满可用高度时隐藏底部助手浮钮，避免遮挡长记忆和工具列表。 */
+  .app-frame:has([data-assistant-config-panel]) .mobile-bottom-dock {
+    opacity: 0;
+    pointer-events: none;
+  }
+
   /* TelePilot 系统助手机械信使（v2 · 项目橙）。
      桌面态沿视口边缘探头，拖动时完整出现；只使用 transform / opacity。 */
   .assistant-pet {

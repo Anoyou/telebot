@@ -18,6 +18,8 @@ def test_version_bumps_are_service_scoped() -> None:
 
     assert plan.components == ["backend", "frontend"]
     assert plan.services == ["web", "frontend"]
+    assert plan.file_sync_services == []
+    assert plan.rebuild_services == ["web", "frontend"]
     assert plan.requires_full_update is False
     assert plan.requires_backup is False
 
@@ -27,6 +29,8 @@ def test_backup_script_change_does_not_rebuild_runtime_services() -> None:
 
     assert plan.components == ["docs_only"]
     assert plan.services == []
+    assert plan.file_sync_services == []
+    assert plan.rebuild_services == []
     assert plan.requires_full_update is False
 
 
@@ -38,6 +42,8 @@ def test_compose_change_only_rebuilds_changed_application_service() -> None:
 
     assert plan.components == ["updater"]
     assert plan.services == ["updater"]
+    assert plan.file_sync_services == []
+    assert plan.rebuild_services == ["updater"]
     assert plan.requires_full_update is False
 
 
@@ -57,6 +63,8 @@ def test_migration_requires_backup_without_restarting_database_service() -> None
 
     assert plan.components == ["migration", "backend"]
     assert plan.services == ["web"]
+    assert plan.file_sync_services == ["web"]
+    assert plan.rebuild_services == []
     assert plan.requires_backup is True
     assert plan.requires_migration is True
     assert plan.requires_full_update is False
@@ -73,6 +81,8 @@ def test_updater_control_files_only_rebuild_updater() -> None:
 
     assert plan.components == ["backend", "updater"]
     assert plan.services == ["web", "updater"]
+    assert plan.file_sync_services == ["web"]
+    assert plan.rebuild_services == ["updater"]
     assert plan.requires_full_update is False
 
 
@@ -82,6 +92,73 @@ def test_unknown_runtime_file_fails_closed() -> None:
     assert plan.components == ["full_update"]
     assert plan.requires_full_update is True
     assert plan.reasons == ["无法确定运行影响范围：runtime-new-format.toml"]
+
+
+def test_backend_source_change_uses_file_sync_without_image_rebuild() -> None:
+    plan = classify_changed_files(
+        [
+            "backend/app/services/system_agent/tools/web.py",
+            "backend/app/main.py",
+        ]
+    )
+
+    assert plan.components == ["backend"]
+    assert plan.services == ["web"]
+    assert plan.file_sync_services == ["web"]
+    assert plan.rebuild_services == []
+
+
+def test_backend_dependency_change_still_rebuilds_web_image() -> None:
+    plan = classify_changed_files(["backend/pyproject.toml"])
+
+    assert plan.components == ["backend"]
+    assert plan.services == ["web"]
+    assert plan.file_sync_services == []
+    assert plan.rebuild_services == ["web"]
+
+
+def test_build_plan_treats_version_only_pyproject_change_as_file_sync(tmp_path: Path) -> None:
+    root = tmp_path / "repo"
+    (root / "backend").mkdir(parents=True)
+    subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=root, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=root, check=True)
+    pyproject = root / "backend/pyproject.toml"
+    pyproject.write_text(
+        '[project]\nversion = "1.0.0"\ndependencies = ["fastapi>=1"]\n',
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "add", "."], cwd=root, check=True)
+    subprocess.run(["git", "commit", "-qm", "old"], cwd=root, check=True)
+    old = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=root, check=True, capture_output=True, text=True
+    ).stdout.strip()
+
+    pyproject.write_text(
+        '[project]\nversion = "1.0.1"\ndependencies = ["fastapi>=1"]\n',
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "add", "."], cwd=root, check=True)
+    subprocess.run(["git", "commit", "-qm", "new"], cwd=root, check=True)
+    new = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=root, check=True, capture_output=True, text=True
+    ).stdout.strip()
+
+    plan = build_update_plan(root, old, new)
+
+    assert plan.file_sync_services == ["web"]
+    assert plan.rebuild_services == []
+
+
+def test_frontend_source_rebuilds_frontend_and_refreshes_agent_source_snapshot() -> None:
+    plan = classify_changed_files(
+        ["frontend/src/pages/Assistant/Index.tsx", "frontend/vite.config.ts"]
+    )
+
+    assert plan.components == ["backend", "frontend"]
+    assert plan.services == ["web", "frontend"]
+    assert plan.file_sync_services == ["web"]
+    assert plan.rebuild_services == ["frontend"]
 
 
 def test_dotfile_and_unicode_docs_are_not_misclassified_as_runtime(tmp_path: Path) -> None:

@@ -564,6 +564,8 @@ def _check_plan(remote: str, branch: str) -> dict[str, Any]:
         "commit_titles": commit_titles,
         "components": update_plan.get("components") or ["none"],
         "services": update_plan.get("services") or [],
+        "file_sync_services": update_plan.get("file_sync_services") or [],
+        "rebuild_services": update_plan.get("rebuild_services") or [],
         "requires_full_update": bool(update_plan.get("requires_full_update")),
         "requires_backup": bool(update_plan.get("requires_backup")),
         "requires_migration": bool(update_plan.get("requires_migration")),
