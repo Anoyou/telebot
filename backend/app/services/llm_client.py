@@ -203,7 +203,11 @@ def _completed_json_as_stream_result(
             choices = data.get("choices") or []
             choice = choices[0] if isinstance(choices, list) and choices else {}
             message = choice.get("message") if isinstance(choice, dict) else {}
-            text = _openai_content_text(message.get("content")) if isinstance(message, dict) else ""
+            text = (
+                _openai_message_visible_text(message)
+                if isinstance(message, dict)
+                else ""
+            )
             refusal = message.get("refusal") if isinstance(message, dict) else None
             finish_reason = choice.get("finish_reason") if isinstance(choice, dict) else None
             stop_reason = (
@@ -608,6 +612,38 @@ def _stream_openai_text(value: object) -> str:
     )
 
 
+def _openai_reasoning_text(value: object) -> str:
+    """Extract reasoning/thinking text from OpenAI-compatible message fields.
+
+    Kimi K3 / 智谱 GLM 等在 Chat Completions 中用 ``reasoning_content`` 承载思考过程，
+    最终答案在 ``content``。仅读 content 时，若答案尚未落盘会误判为空。
+    """
+
+    if isinstance(value, str):
+        return value
+    if not isinstance(value, list):
+        return ""
+    return "".join(
+        str(item.get("text") or item.get("thinking") or "")
+        for item in value
+        if isinstance(item, dict)
+        and item.get("type") in {"text", "output_text", "thinking", "reasoning"}
+    )
+
+
+def _openai_message_visible_text(message: Mapping[str, Any] | dict[str, Any]) -> str:
+    """Prefer final ``content``; fall back to ``reasoning_content`` when content is empty."""
+
+    content = _openai_content_text(message.get("content")).strip()
+    if content:
+        return content
+    for key in ("reasoning_content", "reasoning", "thinking"):
+        piece = _openai_reasoning_text(message.get(key)).strip()
+        if piece:
+            return piece
+    return ""
+
+
 def _openai_structured_response(
     data: dict[str, Any],
     *,
@@ -641,11 +677,10 @@ def _openai_structured_response(
     normalized_finish_reason = stop_reason_from_provider(finish_reason)
     if normalized_finish_reason in {StopReason.FAILED, StopReason.CANCELLED}:
         raise LLMError(f"OpenAI 返回结束状态异常: {str(finish_reason)[:200]}")
+    visible = _openai_message_visible_text(message)
     return ModelResponse(
         model=str(data.get("model") or request.model),
-        content=(TextContent(_openai_content_text(message.get("content"))),)
-        if _openai_content_text(message.get("content"))
-        else (),
+        content=(TextContent(visible),) if visible else (),
         tool_calls=tool_calls,
         usage=ModelUsage(
             input_tokens=int(usage.get("prompt_tokens") or 0),
@@ -1431,10 +1466,12 @@ class OpenAIClient(LLMClient):
         except json.JSONDecodeError as exc:
             raise LLMError(f"OpenAI 返回非 JSON: {exc}") from None
 
-        # 标准 OpenAI 形态：choices[0].message.content
+        # 标准 OpenAI 形态：choices[0].message.content（Kimi/智谱可带 reasoning_content）
         try:
             message = data["choices"][0]["message"]
-            text = _openai_content_text(message.get("content"))
+            if not isinstance(message, dict):
+                raise TypeError("message is not an object")
+            text = _openai_message_visible_text(message)
         except (AttributeError, KeyError, IndexError, TypeError) as exc:
             raise LLMError(f"OpenAI 返回结构异常: {exc}") from None
 
@@ -1552,6 +1589,7 @@ class OpenAIClient(LLMClient):
         output_tokens = 0
         final_sent = False
         finish_received = False
+        saw_content = False
         try:
             async with httpx.AsyncClient(**client_kwargs) as cli:
                 async with cli.stream("POST", url, headers=headers, json=body) as resp:
@@ -1637,9 +1675,17 @@ class OpenAIClient(LLMClient):
                             continue
                         delta = choice.get("delta") or {}
                         if isinstance(delta, dict):
-                            text = _openai_content_text(delta.get("content"))
+                            text = _stream_openai_text(delta.get("content"))
                             if text:
+                                saw_content = True
                                 yield LLMStreamChunk(delta=text, model=model_name)
+                            reasoning = _openai_reasoning_text(
+                                delta.get("reasoning_content")
+                                if delta.get("reasoning_content") is not None
+                                else delta.get("reasoning")
+                            )
+                            if reasoning and not saw_content:
+                                yield LLMStreamChunk(delta=reasoning, model=model_name)
                         if choice.get("finish_reason") is not None:
                             finish_received = True
                             # usage 可能位于 finish chunk 或其后的独立 chunk；继续读到
@@ -1763,6 +1809,7 @@ class OpenAIClient(LLMClient):
         finish_reason: object = None
         finish_received = False
         text_parts: list[str] = []
+        reasoning_parts: list[str] = []
         refusal_parts: list[str] = []
         tool_parts: dict[int, dict[str, Any]] = {}
         terminal_sent = False
@@ -1781,6 +1828,8 @@ class OpenAIClient(LLMClient):
                         },
                     }
                 )
+            content_text = "".join(text_parts)
+            reasoning_text = "".join(reasoning_parts)
             return _openai_structured_response(
                 {
                     "model": model_name,
@@ -1788,7 +1837,8 @@ class OpenAIClient(LLMClient):
                         {
                             "finish_reason": finish_reason,
                             "message": {
-                                "content": "".join(text_parts),
+                                "content": content_text,
+                                "reasoning_content": reasoning_text or None,
                                 "refusal": "".join(refusal_parts) or None,
                                 "tool_calls": calls,
                             },
@@ -1875,6 +1925,18 @@ class OpenAIClient(LLMClient):
                             if text:
                                 text_parts.append(text)
                                 yield ModelStreamEvent(delta=text)
+                            # Kimi / 智谱 / DeepSeek reasoner：推理增量
+                            reasoning = _openai_reasoning_text(
+                                delta.get("reasoning_content")
+                                if delta.get("reasoning_content") is not None
+                                else delta.get("reasoning")
+                            )
+                            if reasoning:
+                                reasoning_parts.append(reasoning)
+                                # 尚无正文时先把推理流给 UI，避免长时间无输出；
+                                # 正文开始后不再把推理混进主增量。
+                                if not text_parts:
+                                    yield ModelStreamEvent(delta=reasoning)
                             refusal = delta.get("refusal")
                             if isinstance(refusal, str) and refusal:
                                 refusal_parts.append(refusal)

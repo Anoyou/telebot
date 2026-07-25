@@ -234,6 +234,104 @@ async def test_anthropic_profiles_map_reasoning_effort(protocol_profile: str) ->
 
 
 @pytest.mark.asyncio
+async def test_openai_complete_uses_reasoning_content_when_content_empty() -> None:
+    """Kimi K3 / 智谱等：正文可能在 reasoning_content，content 为空。"""
+
+    class _Response:
+        status_code = 200
+        text = ""
+        headers: dict[str, str] = {}
+
+        def json(self) -> dict:
+            return {
+                "model": "kimi-k3",
+                "choices": [
+                    {
+                        "finish_reason": "stop",
+                        "message": {
+                            "role": "assistant",
+                            "content": "",
+                            "reasoning_content": "先算一下：1+1=2。",
+                        },
+                    }
+                ],
+                "usage": {"prompt_tokens": 3, "completion_tokens": 8},
+            }
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def post(self, *args, **kwargs):
+            return _Response()
+
+    with patch("app.services.llm_client.httpx.AsyncClient", return_value=_Client()):
+        result = await OpenAIClient(
+            "sk",
+            "https://api.moonshot.cn/v1",
+            "kimi-k3",
+        ).complete("system", "1+1?")
+
+    assert "1+1=2" in result.text
+
+
+@pytest.mark.asyncio
+async def test_openai_stream_invoke_yields_reasoning_before_content() -> None:
+    class _StreamResponse:
+        status_code = 200
+        headers = {"content-type": "text/event-stream"}
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def aiter_bytes(self):
+            lines = (
+                'data: {"model":"glm-5","choices":[{"delta":{"reasoning_content":"思考中…"}}]}',
+                "",
+                'data: {"model":"glm-5","choices":[{"delta":{"content":"你好"}}]}',
+                "",
+                'data: {"model":"glm-5","choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":3}}',
+                "",
+                "data: [DONE]",
+                "",
+            )
+            yield ("\n".join(lines) + "\n").encode()
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        def stream(self, method, url, **kwargs):
+            return _StreamResponse()
+
+    deltas: list[str] = []
+    with patch("app.services.llm_client.httpx.AsyncClient", return_value=_Client()):
+        async for event in OpenAIClient(
+            "sk",
+            "https://open.bigmodel.cn/api/paas/v4",
+            "glm-5",
+        ).stream_invoke(
+            ModelRequest(
+                model="glm-5",
+                messages=(ModelMessage.text(MessageRole.USER, "hi"),),
+            )
+        ):
+            if event.delta:
+                deltas.append(event.delta)
+
+    assert deltas == ["思考中…", "你好"]
+
+
+@pytest.mark.asyncio
 async def test_anthropic_complete_accepts_thinking_delta_without_text_delta() -> None:
     """DeepSeek V4 等推理模型在 Anthropic 兼容流上可能只推 thinking_delta。"""
 
