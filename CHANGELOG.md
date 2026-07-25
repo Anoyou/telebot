@@ -20,6 +20,32 @@
 
 ## [Unreleased]
 
+## [0.73.0-beta.11] - 2026-07-25 · patch（补丁版本预发布） · Bot 修复、定时轨迹、收件箱与模型兼容
+
+### Fixed
+
+- Bot 助手 draft 与最终消息双气泡：完整正文不再写入 draft，发送前 `clear_draft` 清空 ephemeral 草稿。
+- Bot 写操作角色过滤无声失败改为有声提示；`/agent` 状态展示角色、读/写工具数与 Redis 确认票据可用性。
+- System Agent 工具能力探测误杀 DeepSeek 等兼容站：strict 兼容、输出预算提高、主模型 unsupported 强制重测、缓存版本 bump。
+- Anthropic 流兼容 `thinking_delta`（DeepSeek V4 / Claude thinking），避免「未收到 text_delta」空内容误报。
+- OpenAI Chat Completions 兼容 `reasoning_content`（Kimi K3 / 智谱 GLM 思考模式）。
+- Responses 协议：reasoning 摘要兜底；中转误回 Chat Completions 形态时自动整形。
+
+### Added
+
+- 定时 `agent_prompt` 落完整会话（`origin=scheduled`）与 Durable Run，Bot 汇报附 `/assistant?session=` 深链；会话列表可按 origin 筛选。
+- Agent 可通过 `scheduler.save` 自建 `agent_prompt` 定时任务（prompt/cron/report_channel）；定时会话内防套娃。
+- 待确认收件箱：侧栏 pending 角标、`/assistant/inbox` 单条确认/拒绝与批量拒绝；Bot `/agent pending`。
+- 插件工具插槽（第一期只读）：manifest `expose: ["system_agent"]` 动态注册，IPC 调 worker handler；能力矩阵标注插件来源；`lottery_plus.list_recent_rounds` 参考实现与文档。
+
+### Changed
+
+- 会话模型新增 `origin` 字段（迁移 `0049`）；定时会话不进入 active 复用池。
+
+### Tests
+
+- 补充 Bot draft/角色提示、定时会话、scheduler agent_prompt、插件插槽、模型协议（thinking / reasoning_content / Responses）相关回归测试。
+
 ## [0.73.0-beta.10] - 2026-07-25 · patch（补丁版本预发布） · 助手 HTML 配色与 PWA 滚动体验
 
 ### Added
