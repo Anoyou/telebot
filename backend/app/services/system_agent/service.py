@@ -22,6 +22,8 @@ from ...db.models.system_agent import (
     MESSAGE_RUN_FAILED,
     MESSAGE_RUN_PENDING,
     MESSAGE_RUN_SUCCEEDED,
+    SESSION_ORIGIN_INTERACTIVE,
+    SESSION_ORIGINS,
     SESSION_STATUS_ACTIVE,
     SESSION_STATUS_ARCHIVED,
     SystemAgentMessage,
@@ -179,11 +181,15 @@ class SystemAgentService:
         bot_tg_user_id: int | None = None,
         account_id: int | None = None,
         title: str | None = None,
+        origin: str | None = None,
     ) -> SystemAgentSession:
         if channel not in {CHANNEL_WEB, CHANNEL_BOT}:
             raise ValueError(f"invalid channel: {channel}")
         if channel == CHANNEL_BOT and account_id is None:
             raise ValueError("Bot 会话必须绑定 account_id")
+        origin_value = str(origin or SESSION_ORIGIN_INTERACTIVE)
+        if origin_value not in SESSION_ORIGINS:
+            raise ValueError(f"invalid origin: {origin_value}")
         session = SystemAgentSession(
             id=str(uuid.uuid4()),
             web_user_id=web_user_id,
@@ -191,6 +197,7 @@ class SystemAgentService:
             account_id=account_id,
             channel=channel,
             title=title,
+            origin=origin_value,
             status=SESSION_STATUS_ACTIVE,
         )
         db.add(session)
@@ -205,6 +212,7 @@ class SystemAgentService:
         bot_tg_user_id: int | None = None,
         account_id: int | None = None,
         status: str | None = SESSION_STATUS_ACTIVE,
+        origin: str | None = None,
         limit: int = 50,
     ) -> list[SystemAgentSession]:
         q = (
@@ -220,6 +228,8 @@ class SystemAgentService:
             q = q.where(SystemAgentSession.account_id == account_id)
         if status:
             q = q.where(SystemAgentSession.status == status)
+        if origin:
+            q = q.where(SystemAgentSession.origin == origin)
         result = await db.execute(q)
         return list(result.scalars().all())
 
@@ -387,12 +397,14 @@ class SystemAgentService:
         bot_tg_user_id: int | None = None,
         account_id: int | None = None,
     ) -> SystemAgentSession:
+        # 定时会话不进入复用池：只复用 interactive 活跃会话
         sessions = await self.list_sessions(
             db,
             web_user_id=web_user_id,
             bot_tg_user_id=bot_tg_user_id,
             account_id=account_id if channel == CHANNEL_BOT else None,
             status=SESSION_STATUS_ACTIVE,
+            origin=SESSION_ORIGIN_INTERACTIVE,
             limit=1,
         )
         if sessions:
@@ -403,6 +415,7 @@ class SystemAgentService:
             web_user_id=web_user_id,
             bot_tg_user_id=bot_tg_user_id,
             account_id=account_id,
+            origin=SESSION_ORIGIN_INTERACTIVE,
         )
 
     # ── 对话 ──────────────────────────────────────────────────────
@@ -421,6 +434,7 @@ class SystemAgentService:
         approved_tools: list[str] | None = None,
         run_id: str | None = None,
         model_selection: dict[str, Any] | None = None,
+        read_only_only: bool = False,
     ) -> AsyncIterator[dict[str, Any]]:
         await self.reconcile_stale_messages(db, session.id)
         incoming_text = str(text or "").strip()
@@ -555,6 +569,7 @@ class SystemAgentService:
                 approved_tools=approved_tools,
                 approved_tool_calls=approved_tool_calls,
                 model_selection=model_selection,
+                read_only_only=read_only_only,
             ):
                 et = event.get("type")
                 if et == "assistant_message":

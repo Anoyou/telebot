@@ -85,6 +85,7 @@ class SystemAgentSessionOut(BaseModel):
     account_id: int | None = None
     channel: str
     title: str | None = None
+    origin: str = "interactive"
     status: str
     memory_summary: str = ""
     memory_state: dict[str, Any] = Field(default_factory=dict)

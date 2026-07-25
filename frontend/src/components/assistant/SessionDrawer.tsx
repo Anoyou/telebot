@@ -4,6 +4,8 @@ import type { SystemAgentSession } from "@/api/systemAgent";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
+export type SessionOriginFilter = "all" | "interactive" | "scheduled";
+
 export function SessionDrawer({
   sessions,
   activeId,
@@ -12,6 +14,8 @@ export function SessionDrawer({
   onDelete,
   open,
   onClose,
+  originFilter = "all",
+  onOriginFilterChange,
 }: {
   sessions: SystemAgentSession[];
   activeId: string | null;
@@ -20,7 +24,14 @@ export function SessionDrawer({
   onDelete: (id: string) => void;
   open?: boolean;
   onClose?: () => void;
+  originFilter?: SessionOriginFilter;
+  onOriginFilterChange?: (value: SessionOriginFilter) => void;
 }) {
+  const filtered =
+    originFilter === "all"
+      ? sessions
+      : sessions.filter((s) => (s.origin || "interactive") === originFilter);
+
   const body = (
     <div className="flex h-full flex-col">
       <div className="flex items-center justify-between border-b px-3 py-3">
@@ -30,11 +41,36 @@ export function SessionDrawer({
           新建
         </Button>
       </div>
+      {onOriginFilterChange ? (
+        <div className="flex gap-1 border-b px-2 py-2">
+          {(
+            [
+              ["all", "全部"],
+              ["interactive", "对话"],
+              ["scheduled", "定时"],
+            ] as const
+          ).map(([value, label]) => (
+            <button
+              key={value}
+              type="button"
+              className={cn(
+                "rounded-md px-2 py-1 text-xs",
+                originFilter === value
+                  ? "bg-primary/15 text-primary"
+                  : "text-muted-foreground hover:bg-muted/60",
+              )}
+              onClick={() => onOriginFilterChange(value)}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      ) : null}
       <div className="flex-1 space-y-1 overflow-y-auto p-2">
-        {sessions.length === 0 ? (
+        {filtered.length === 0 ? (
           <p className="px-2 py-6 text-center text-sm text-muted-foreground">暂无会话</p>
         ) : (
-          sessions.map((s) => (
+          filtered.map((s) => (
             <div
               key={s.id}
               className={cn(
@@ -50,7 +86,12 @@ export function SessionDrawer({
                   onClose?.();
                 }}
               >
-                {s.title || "未命名对话"}
+                <span className="truncate">{s.title || "未命名对话"}</span>
+                {s.origin === "scheduled" ? (
+                  <span className="ml-1 inline-block shrink-0 rounded bg-amber-500/15 px-1 text-[10px] text-amber-700 dark:text-amber-300">
+                    定时
+                  </span>
+                ) : null}
               </button>
               <button
                 type="button"

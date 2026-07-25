@@ -51,6 +51,14 @@ export function AssistantDockProvider({ children }: { children: ReactNode }) {
     const locationKey = `${location.pathname}${location.search}${location.hash}`;
     if (locationKey === locationKeyRef.current) return;
     locationKeyRef.current = locationKey;
+    const params = new URLSearchParams(location.search);
+    const deepSession = params.get("session");
+    // 深链 /assistant?session=…：打开悬浮助手，不因路由切换而收起
+    if (location.pathname === "/assistant" || deepSession) {
+      setMounted(true);
+      setCollapsedState(false);
+      return;
+    }
     if (!collapsed) setCollapsed(true);
   }, [collapsed, location.hash, location.pathname, location.search, setCollapsed]);
 

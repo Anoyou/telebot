@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import { ChevronDown, MessageCircle, Server, Settings2 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -36,7 +36,10 @@ import { matrixToPickerItems, type ModelPickerValue } from "@/components/ai/Mode
 import { Composer } from "@/components/assistant/Composer";
 import { useAssistantDock } from "@/components/assistant/AssistantDock";
 import { Conversation, type LiveBubble } from "@/components/assistant/Conversation";
-import { SessionDrawer } from "@/components/assistant/SessionDrawer";
+import {
+  SessionDrawer,
+  type SessionOriginFilter,
+} from "@/components/assistant/SessionDrawer";
 import { PageHeader, PageShell } from "@/components/layout/PageScaffold";
 import { Button } from "@/components/ui/button";
 import { Select } from "@/components/ui/select";
@@ -120,12 +123,14 @@ function toolsModels(provider?: LLMProviderOut): string[] {
 
 export function AssistantIndex() {
   const qc = useQueryClient();
+  const [searchParams, setSearchParams] = useSearchParams();
   const {
     collapsed: assistantCollapsed,
     setStreaming: setDockStreaming,
     notifyCompletion,
   } = useAssistantDock();
   const [activeId, setActiveId] = useState<string | null>(null);
+  const [originFilter, setOriginFilter] = useState<SessionOriginFilter>("all");
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [accountId, setAccountId] = useState<number | "">("");
   const [live, setLive] = useState<LiveBubble[]>([]);
@@ -207,6 +212,30 @@ export function AssistantIndex() {
     enabled: !!activeId,
     refetchInterval: assistantCollapsed && !streaming ? false : 15_000,
   });
+
+  // 深链 /assistant?session=… 优先打开指定会话
+  useEffect(() => {
+    const deepSession = searchParams.get("session");
+    if (!deepSession) return;
+    setActiveId(deepSession);
+    // 消费一次 query，避免刷新后反复抢焦点；保留 path 便于分享
+    const next = new URLSearchParams(searchParams);
+    next.delete("session");
+    setSearchParams(next, { replace: true });
+  }, [searchParams, setSearchParams]);
+
+  // 深链/选中会话后同步账号与 origin 筛选
+  useEffect(() => {
+    if (!activeId || !sessionsQ.data?.length) return;
+    const match = sessionsQ.data.find((s) => s.id === activeId);
+    if (!match) return;
+    if (match.account_id != null) {
+      setAccountId(match.account_id);
+    }
+    if (match.origin === "scheduled") {
+      setOriginFilter((prev) => (prev === "all" ? "scheduled" : prev));
+    }
+  }, [activeId, sessionsQ.data]);
 
   // 恢复最后一个 active 会话
   useEffect(() => {
@@ -1226,6 +1255,8 @@ export function AssistantIndex() {
         <SessionDrawer
           sessions={sessionsQ.data || []}
           activeId={activeId}
+          originFilter={originFilter}
+          onOriginFilterChange={setOriginFilter}
           onSelect={(id) => {
             abortRef.current?.abort();
             abortRef.current = null;

@@ -60,6 +60,7 @@ class _RunRequest:
     chat_secrets: tuple[str, ...] = ()
     after_message_id: int = 0
     model_selection: dict | None = None
+    read_only_only: bool = False
 
 
 class _RunCancelled(Exception):
@@ -115,6 +116,7 @@ class SystemAgentRunManager:
         fallback_provider_id: int | None = None,
         approved_tools: list[str] | None = None,
         model_selection: dict | None = None,
+        read_only_only: bool = False,
     ) -> SystemAgentRun:
         await self.ensure_ready()
         kind = AGENT_RUN_KIND_RETRY if retry_message_id is not None else AGENT_RUN_KIND_MESSAGE
@@ -217,6 +219,7 @@ class SystemAgentRunManager:
             chat_secrets=tuple(extract_plaintext_secrets(text)),
             after_message_id=after_message_id,
             model_selection=selection,
+            read_only_only=bool(read_only_only),
         )
         cancel_event = asyncio.Event()
         self._cancel_events[row.id] = cancel_event
@@ -379,6 +382,7 @@ class SystemAgentRunManager:
                     approved_tools=list(request.approved_tools),
                     run_id=run_id,
                     model_selection=request.model_selection,
+                    read_only_only=request.read_only_only,
                 )
                 while True:
                     try:

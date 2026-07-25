@@ -441,7 +441,13 @@ class SchedulerRuleExecutor:
             elif action_type == "call_llm":
                 await self.action_call_llm(ctx, action)
             elif action_type == "agent_prompt":
-                await self.action_agent_prompt(ctx, action)
+                enriched = dict(action)
+                enriched["_rule_id"] = rule_id
+                async with AsyncSessionLocal() as db:
+                    rule_row = await db.get(Rule, rule_id)
+                    if rule_row is not None and rule_row.name:
+                        enriched["_rule_name"] = str(rule_row.name)
+                await self.action_agent_prompt(ctx, enriched)
             else:
                 raise ValueError(f"unknown action.type={action_type}")
             if trace is not None:
@@ -602,10 +608,12 @@ class SchedulerRuleExecutor:
             asyncio.create_task(self.delete_message_after(ctx, msg, delete_after, action_context=_scheduler_trace_context(ctx)))
 
     async def action_agent_prompt(self, ctx: PluginContext, action: dict[str, Any]) -> None:
-        """无人值守跑一轮只读 System Agent，结果推送到目标会话。
+        """无人值守跑一轮只读 System Agent，落完整会话/Run 轨迹并推送到目标会话。
 
         写工具不暴露；失败只报告不重试。限额沿用 system_agent_config。
         """
+
+        import uuid
 
         prompt = str(action.get("prompt") or "").strip()
         if not prompt:
@@ -615,7 +623,12 @@ class SchedulerRuleExecutor:
         if target is None or target == "":
             raise ValueError("agent_prompt requires target_chat_id（管理 Bot / 汇报会话）")
 
-        from app.db.models.system_agent import CHANNEL_BOT, SESSION_STATUS_ARCHIVED
+        from app.db.models.system_agent import (
+            CHANNEL_WEB,
+            SESSION_ORIGIN_SCHEDULED,
+        )
+        from app.db.models.user import WebUser
+        from app.services.system_agent.run_manager import get_system_agent_run_manager
         from app.services.system_agent.service import SystemAgentService
 
         trace_action = {
@@ -633,45 +646,71 @@ class SchedulerRuleExecutor:
             return
 
         account_id = _to_positive_int(action.get("account_id")) or int(ctx.account_id)
+        task_name = str(action.get("_rule_name") or action.get("name") or "定时巡检").strip() or "定时巡检"
+        task_name = task_name[:28]
+        now_label = datetime.now(UTC).strftime("%m-%d %H:%M")
+        title = f"定时 · {task_name} · {now_label}"[:64]
+
         svc = SystemAgentService()
         answer = ""
         error_message = ""
+        session_id = ""
+        web_user_id: int | None = None
+
         async with AsyncSessionLocal() as db:
+            web_user = (
+                await db.execute(select(WebUser).order_by(WebUser.id.asc()).limit(1))
+            ).scalar_one_or_none()
+            if web_user is None:
+                raise ValueError("agent_prompt 需要至少一个 Web 用户以落会话轨迹")
+            web_user_id = int(web_user.id)
             session = await svc.create_session(
                 db,
-                channel=CHANNEL_BOT,
+                channel=CHANNEL_WEB,
+                web_user_id=web_user_id,
                 account_id=account_id,
-                bot_tg_user_id=None,
-                title=f"定时 Agent · {prompt[:40]}",
+                title=title,
+                origin=SESSION_ORIGIN_SCHEDULED,
             )
-            try:
-                async for event in svc.runtime.stream_turn(
-                    db,
-                    session=session,
-                    user_text=prompt,
-                    role="admin",
-                    channel="bot",
-                    history_messages=[],
-                    read_only_only=True,
-                ):
-                    et = str(event.get("type") or "")
-                    if et == "assistant_message":
-                        answer = str(event.get("content") or "").strip()
-                    elif et == "error":
-                        error_message = str(
-                            event.get("message") or event.get("code") or "agent failed"
-                        )
-            except Exception as exc:  # noqa: BLE001
-                error_message = f"{type(exc).__name__}: {exc}"
-            session.status = SESSION_STATUS_ARCHIVED
             await db.commit()
+            session_id = session.id
 
+        manager = get_system_agent_run_manager()
+        try:
+            run = await manager.start_run(
+                session_id=session_id,
+                web_user_id=web_user_id,
+                client_request_id=f"scheduler:{account_id}:{action.get('_rule_id') or 0}:{uuid.uuid4().hex[:12]}",
+                text=prompt,
+                read_only_only=True,
+            )
+            async for event in manager.stream_events(run.id):
+                et = str(event.get("type") or "")
+                if et == "assistant_message":
+                    answer = str(event.get("content") or "").strip()
+                elif et == "error":
+                    error_message = str(
+                        event.get("message") or event.get("code") or "agent failed"
+                    )
+        except Exception as exc:  # noqa: BLE001
+            error_message = f"{type(exc).__name__}: {exc}"
+
+        deep_link = f"/assistant?session={session_id}"
         if error_message and not answer:
-            text = f"【定时 Agent 失败】\n{error_message}"[:_MAX_MESSAGE_LEN]
+            text = (
+                f"【定时 Agent 失败】\n{error_message}\n\n查看执行轨迹：{deep_link}"
+            )[:_MAX_MESSAGE_LEN]
         else:
             header = "【定时 Agent 报告】\n"
-            text = (header + (answer or "(empty)"))[:_MAX_MESSAGE_LEN]
+            footer = f"\n\n查看执行轨迹：{deep_link}"
+            body = answer or "(empty)"
+            budget = _MAX_MESSAGE_LEN - len(header) - len(footer)
+            if budget < 40:
+                text = (header + body)[:_MAX_MESSAGE_LEN]
+            else:
+                text = header + body[:budget] + footer
         trace_action["text"] = text
+        trace_action["session_id"] = session_id
         msg = await self.send_with_ratelimit(
             ctx,
             target,

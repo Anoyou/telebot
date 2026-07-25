@@ -376,6 +376,16 @@ export default function App() {
             }
           />
           <Route
+            path="assistant"
+            element={
+              <Suspense fallback={<PageFallback />}>
+                <CapabilityGate moduleKey="ai">
+                  <AIIndex />
+                </CapabilityGate>
+              </Suspense>
+            }
+          />
+          <Route
             path="ai"
             element={
               <Suspense fallback={<PageFallback />}>

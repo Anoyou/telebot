@@ -255,10 +255,17 @@ async def list_sessions(
     db: DBSession,
     user: CurrentUser,
     status: str | None = Query(default=SESSION_STATUS_ACTIVE),
+    origin: str | None = Query(default=None, description="interactive | scheduled；缺省返回全部"),
     limit: int = Query(default=50, ge=1, le=200),
 ) -> list[SystemAgentSessionOut]:
     svc = get_system_agent_service()
-    rows = await svc.list_sessions(db, web_user_id=user.id, status=status, limit=limit)
+    rows = await svc.list_sessions(
+        db,
+        web_user_id=user.id,
+        status=status,
+        origin=origin,
+        limit=limit,
+    )
     return [_session_out(r) for r in rows]
 
 

@@ -33,6 +33,10 @@ CHANNEL_WEB = "web"
 CHANNEL_BOT = "bot"
 CHANNELS = {CHANNEL_WEB, CHANNEL_BOT}
 
+SESSION_ORIGIN_INTERACTIVE = "interactive"
+SESSION_ORIGIN_SCHEDULED = "scheduled"
+SESSION_ORIGINS = {SESSION_ORIGIN_INTERACTIVE, SESSION_ORIGIN_SCHEDULED}
+
 MESSAGE_ROLE_USER = "user"
 MESSAGE_ROLE_ASSISTANT = "assistant"
 MESSAGE_ROLE_TOOL = "tool"
@@ -113,6 +117,12 @@ class SystemAgentSession(Base):
     )
     channel: Mapped[str] = mapped_column(String(16), nullable=False)
     title: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    origin: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default=SESSION_ORIGIN_INTERACTIVE,
+        server_default=SESSION_ORIGIN_INTERACTIVE,
+    )
     status: Mapped[str] = mapped_column(
         String(16),
         nullable=False,
@@ -148,6 +158,7 @@ class SystemAgentSession(Base):
         Index("ix_system_agent_session_bot_user_updated", "bot_tg_user_id", "updated_at"),
         Index("ix_system_agent_session_account_updated", "account_id", "updated_at"),
         Index("ix_system_agent_session_status", "status"),
+        Index("ix_system_agent_session_origin", "origin"),
     )
 
 
@@ -425,6 +436,9 @@ __all__ = [
     "RUNTIME_SYNC_NOT_REQUIRED",
     "RUNTIME_SYNC_PENDING",
     "RUNTIME_SYNC_SUCCEEDED",
+    "SESSION_ORIGIN_INTERACTIVE",
+    "SESSION_ORIGIN_SCHEDULED",
+    "SESSION_ORIGINS",
     "SESSION_STATUS_ACTIVE",
     "SESSION_STATUS_ARCHIVED",
     "SESSION_STATUSES",

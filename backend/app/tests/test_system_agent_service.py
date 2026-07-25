@@ -19,6 +19,8 @@ from app.db.models.system_agent import (
     MESSAGE_RUN_FAILED,
     MESSAGE_RUN_PENDING,
     MESSAGE_RUN_SUCCEEDED,
+    SESSION_ORIGIN_INTERACTIVE,
+    SESSION_ORIGIN_SCHEDULED,
     SESSION_STATUS_ACTIVE,
     SESSION_STATUS_ARCHIVED,
     SystemAgentMessage,
@@ -214,6 +216,31 @@ async def test_bot_session_requires_account(agent_db) -> None:
     async with agent_db() as db:
         with pytest.raises(ValueError, match="account_id"):
             await svc.create_session(db, channel=CHANNEL_BOT, bot_tg_user_id=99)
+
+
+@pytest.mark.asyncio
+async def test_scheduled_session_not_reused_by_get_or_create(agent_db) -> None:
+    """定时会话不进入 get_or_create_active_session 复用池。"""
+    svc = SystemAgentService()
+    async with agent_db() as db:
+        scheduled = await svc.create_session(
+            db,
+            channel=CHANNEL_WEB,
+            web_user_id=9,
+            title="定时 · 巡检 · 07-25 09:00",
+            origin=SESSION_ORIGIN_SCHEDULED,
+        )
+        await db.commit()
+        assert scheduled.origin == SESSION_ORIGIN_SCHEDULED
+
+        listed = await svc.list_sessions(db, web_user_id=9, origin=SESSION_ORIGIN_SCHEDULED)
+        assert [r.id for r in listed] == [scheduled.id]
+
+        interactive = await svc.get_or_create_active_session(
+            db, channel=CHANNEL_WEB, web_user_id=9
+        )
+        assert interactive.id != scheduled.id
+        assert interactive.origin == SESSION_ORIGIN_INTERACTIVE
 
 
 @pytest.mark.asyncio

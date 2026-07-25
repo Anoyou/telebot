@@ -63,6 +63,8 @@ export interface SystemAgentSession {
   account_id: number | null;
   channel: string;
   title: string | null;
+  /** interactive = 对话；scheduled = 定时任务落轨迹 */
+  origin?: "interactive" | "scheduled" | string;
   status: string;
   memory_summary?: string;
   memory_state?: Record<string, unknown>;
@@ -262,7 +264,7 @@ export async function deleteSystemAgentUserMemory(id: number): Promise<void> {
 }
 
 export async function listSystemAgentSessions(
-  params?: { status?: string; limit?: number },
+  params?: { status?: string; origin?: string; limit?: number },
 ): Promise<SystemAgentSession[]> {
   const { data } = await api.get<SystemAgentSession[]>("/api/system-agent/sessions", { params });
   return data;
