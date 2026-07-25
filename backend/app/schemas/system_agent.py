@@ -198,6 +198,9 @@ class SystemAgentActionOut(BaseModel):
     created_at: datetime | None = None
     updated_at: datetime | None = None
     executed_at: datetime | None = None
+    # 收件箱展示：来源会话
+    session_title: str | None = None
+    session_origin: str | None = None
 
 
 class SystemAgentActionConfirmOut(BaseModel):

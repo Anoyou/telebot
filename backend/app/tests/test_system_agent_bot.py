@@ -108,6 +108,59 @@ async def test_agent_status_shows_viewer_write_limitation() -> None:
 
 
 @pytest.mark.asyncio
+async def test_agent_pending_lists_actions_with_buttons(monkeypatch) -> None:
+    send = _SendCapture()
+
+    class FakeAction:
+        def __init__(self) -> None:
+            self.id = "act-pending-1"
+            self.account_id = 1
+            self.risk = "normal"
+            self.summary = "暂停规则 #3"
+            self.tool_name = "rules.set_enabled"
+            self.status = "pending"
+            self.expires_at = None
+
+    class _DB:
+        async def __aenter__(self):
+            return AsyncMock()
+
+        async def __aexit__(self, *args):
+            return False
+
+    monkeypatch.setattr(bot_bridge, "AsyncSessionLocal", lambda: _DB())
+    monkeypatch.setattr(bot_bridge, "enter_agent_mode", AsyncMock(return_value=True))
+    monkeypatch.setattr(
+        bot_bridge,
+        "list_actions",
+        AsyncMock(return_value=[FakeAction()]),
+    )
+    monkeypatch.setattr(
+        bot_bridge,
+        "mark_expired_if_needed",
+        AsyncMock(side_effect=lambda db, row: row),
+    )
+    monkeypatch.setattr(
+        bot_bridge,
+        "store_agent_confirm_nonce",
+        AsyncMock(return_value="nonce-p1"),
+    )
+
+    await bot_bridge.handle_agent_command(
+        account_id=1,
+        tg_user_id=42,
+        role="admin",
+        text="/agent pending",
+        send=send,
+    )
+    assert any("待确认操作" in c["msg"] for c in send.calls)
+    card = send.calls[-1]
+    assert "暂停规则" in card["msg"]
+    assert card["reply_markup"] is not None
+    assert any("confirm" in b["callback_data"] for b in card["reply_markup"]["inline_keyboard"][0])
+
+
+@pytest.mark.asyncio
 async def test_agent_exit() -> None:
     send = _SendCapture()
     exit_mock = AsyncMock()

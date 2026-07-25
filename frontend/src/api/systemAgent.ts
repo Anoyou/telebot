@@ -133,6 +133,8 @@ export interface SystemAgentAction {
   created_at?: string | null;
   updated_at?: string | null;
   executed_at?: string | null;
+  session_title?: string | null;
+  session_origin?: string | null;
 }
 
 export type SystemAgentStreamEvent = {

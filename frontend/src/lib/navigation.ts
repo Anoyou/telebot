@@ -13,6 +13,7 @@ export function goBackOr(nav: NavigateFunction, fallback: To) {
 /** 路由路径 → 依赖的平台能力模块；无映射则始终显示。 */
 export const ROUTE_CAPABILITY_MODULE: Record<string, PlatformModuleKey> = {
   "/ai": "ai",
+  "/assistant": "ai",
   "/interaction": "interaction_bot",
   "/webhooks": "webhooks",
   "/ledger": "ledger",

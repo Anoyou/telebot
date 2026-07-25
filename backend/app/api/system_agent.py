@@ -18,6 +18,7 @@ from ..db.models.system_agent import (
     MESSAGE_RUN_FAILED,
     SESSION_STATUS_ACTIVE,
     SystemAgentRun,
+    SystemAgentSession,
 )
 from ..deps import CurrentUser, DBSession
 from ..schemas.system_agent import (
@@ -598,7 +599,24 @@ async def list_system_agent_actions(
         status=status,
         limit=limit,
     )
-    return [SystemAgentActionOut(**action_to_dict(r)) for r in rows]
+    session_ids = {r.session_id for r in rows if r.session_id}
+    session_meta: dict[str, Any] = {}
+    if session_ids:
+        result = await db.execute(
+            select(SystemAgentSession).where(SystemAgentSession.id.in_(session_ids))
+        )
+        for sess in result.scalars().all():
+            session_meta[sess.id] = {
+                "session_title": sess.title,
+                "session_origin": getattr(sess, "origin", None) or "interactive",
+            }
+    out: list[SystemAgentActionOut] = []
+    for row in rows:
+        payload = action_to_dict(row)
+        meta = session_meta.get(str(row.session_id or ""), {})
+        payload.update(meta)
+        out.append(SystemAgentActionOut(**payload))
+    return out
 
 
 @router.get("/actions/{action_id}", response_model=SystemAgentActionOut)

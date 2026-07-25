@@ -15,6 +15,7 @@ import {
   GripVertical,
   Home,
   History,
+  Inbox,
   ListTodo,
   ScrollText,
   Sparkles,
@@ -33,6 +34,7 @@ import {
 import { cn } from "@/lib/utils";
 import { APP_VERSION_LABEL } from "@/lib/version";
 import { getPlatformCapabilities, getSystemSettings, patchSystemSettings } from "@/api/system";
+import { listSystemAgentActions } from "@/api/systemAgent";
 import { getErrMsg } from "@/lib/api";
 import {
   capabilityEnabledMap,
@@ -46,12 +48,15 @@ export interface NavItem {
   label: string;
   icon: React.ComponentType<{ className?: string }>;
   end?: boolean;
+  /** 角标查询 key；由 NavList 拉取 pending 数 */
+  badgeKey?: "pending-actions";
 }
 
 // 顶层导航条目。默认落地页是插件中心；概览降权到 /overview。
 export const NAV: NavItem[] = [
   { to: "/plugins", label: "插件", icon: Boxes },
   { to: "/ai", label: "AI", icon: Sparkles },
+  { to: "/assistant/inbox", label: "待确认", icon: Inbox, badgeKey: "pending-actions" },
   { to: "/interaction", label: "交互", icon: Bot },
   { to: "/operations", label: "指令与任务", icon: ListTodo },
   { to: "/overview", label: "概览", icon: Home },
@@ -133,6 +138,13 @@ function NavList({
     queryFn: getPlatformCapabilities,
     staleTime: 15_000,
   });
+  const pendingActionsQ = useQuery({
+    queryKey: ["system-agent", "actions", "pending-badge"],
+    queryFn: () => listSystemAgentActions({ status: "pending", limit: 50 }),
+    refetchInterval: 30_000,
+    staleTime: 10_000,
+  });
+  const pendingCount = pendingActionsQ.data?.length ?? 0;
   const enabled = capabilityEnabledMap(capsQ.data, settingsQ.data?.ai_enabled ?? true);
   const savedOrder = settingsQ.data?.ui_preferences?.sidebar_order;
   const preferredOrder = draftOrder ?? savedOrder;
@@ -201,11 +213,17 @@ function NavList({
             to={item.to}
             end={item.end}
             onClick={onNavigate}
-            aria-label={collapsed ? item.label : undefined}
+            aria-label={
+              collapsed
+                ? item.badgeKey === "pending-actions" && pendingCount > 0
+                  ? `${item.label}（${pendingCount}）`
+                  : item.label
+                : undefined
+            }
             title={collapsed ? item.label : undefined}
             className={({ isActive }) =>
               cn(
-                "liquid-sidebar-link flex h-11 items-center gap-3 rounded-lg px-3 text-muted-foreground transition-all hover:text-accent-foreground",
+                "liquid-sidebar-link relative flex h-11 items-center gap-3 rounded-lg px-3 text-muted-foreground transition-all hover:text-accent-foreground",
                 reorderable && !collapsed && "pl-7",
                 collapsed && "justify-center px-0",
                 isActive && "liquid-sidebar-link-active text-accent-foreground",
@@ -214,6 +232,16 @@ function NavList({
           >
             <item.icon className="h-5 w-5 shrink-0" />
             <span className={cn("truncate", collapsed && "sr-only")}>{item.label}</span>
+            {item.badgeKey === "pending-actions" && pendingCount > 0 ? (
+              <span
+                className={cn(
+                  "inline-flex min-w-[1.15rem] items-center justify-center rounded-full bg-destructive px-1 text-[10px] font-medium leading-4 text-destructive-foreground",
+                  collapsed ? "absolute right-1 top-1" : "ml-auto",
+                )}
+              >
+                {pendingCount > 99 ? "99+" : pendingCount}
+              </span>
+            ) : null}
           </NavLink>
         </div>
       ))}

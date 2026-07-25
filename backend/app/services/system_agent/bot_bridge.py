@@ -636,6 +636,64 @@ async def try_attach_secrets_to_pending_action(
     return True
 
 
+async def _send_pending_actions(
+    *,
+    account_id: int,
+    tg_user_id: int,
+    send: Any,
+    edit: bool = False,
+) -> None:
+    """列出当前 Bot 用户的待确认 Action，并附 Inline 确认按钮。"""
+
+    async with AsyncSessionLocal() as db:
+        rows = await list_actions(
+            db,
+            bot_tg_user_id=tg_user_id,
+            status=ACTION_STATUS_PENDING,
+            limit=15,
+        )
+        # 过期标记
+        kept: list[Any] = []
+        for row in rows:
+            # 仅本账号相关或未绑定账号的
+            if row.account_id is not None and int(row.account_id) != int(account_id):
+                continue
+            row = await mark_expired_if_needed(db, row)
+            if row.status == ACTION_STATUS_PENDING:
+                kept.append(row)
+        await db.commit()
+
+    if not kept:
+        await send("当前没有待确认操作。", edit=edit)
+        return
+
+    await send(
+        f"🧾 待确认操作 <b>{len(kept)}</b> 条（最多展示 15 条）：",
+        edit=edit,
+    )
+    for action in kept:
+        danger = str(action.risk or "") == "dangerous"
+        summary = _html_escape(str(action.summary or action.tool_name or "操作"))
+        expires = ""
+        if action.expires_at is not None:
+            try:
+                expires = f"\n⏳ 过期：{_html_escape(action.expires_at.isoformat())}"
+            except Exception:  # noqa: BLE001
+                expires = ""
+        nonce = await store_agent_confirm_nonce(
+            account_id=account_id,
+            tg_user_id=tg_user_id,
+            action_id=str(action.id),
+        )
+        markup = _agent_confirm_keyboard(account_id, nonce, dangerous=danger) if nonce else None
+        extra = "" if nonce else "\n（Redis 不可用，请到 Web 收件箱处理）"
+        await send(
+            f"🧾 <b>待确认</b>\n{summary}{expires}{extra}",
+            edit=False,
+            reply_markup=markup,
+        )
+
+
 async def handle_agent_command(
     *,
     account_id: int,
@@ -672,6 +730,7 @@ async def handle_agent_command(
             f"助手模式：{'已开启' if ok or active else 'Redis 不可用，仅 /agent 单次任务可用'}\n\n"
             "用法：\n"
             "/agent &lt;问题&gt; — 直接提问\n"
+            "/agent pending — 列出待确认操作\n"
             "/agent new — 新建会话\n"
             "/agent clear — 删除当前会话\n"
             "/agent exit — 退出助手模式\n\n"
@@ -692,6 +751,16 @@ async def handle_agent_command(
     if verb == "exit":
         await exit_agent_mode(account_id, tg_user_id)
         await send("已退出系统助手模式。历史会话仍保留。", edit=edit)
+        return
+
+    if verb == "pending":
+        await enter_agent_mode(account_id, tg_user_id)
+        await _send_pending_actions(
+            account_id=account_id,
+            tg_user_id=tg_user_id,
+            send=send,
+            edit=edit,
+        )
         return
 
     if verb == "new":

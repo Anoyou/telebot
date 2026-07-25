@@ -43,6 +43,9 @@ const DispatchDebugPage = lazy(() => import("@/pages/DispatchDebug").then(m => (
 const WebhooksPage = lazy(() => import("@/pages/Webhooks").then(m => ({ default: m.WebhooksPage })));
 const AIIndex = lazy(() => import("@/pages/AI/Index").then(m => ({ default: m.AIIndex })));
 const AILivenessPage = lazy(() => import("@/pages/AI/Liveness").then(m => ({ default: m.LLMLivenessPage })));
+const ActionsInboxPage = lazy(() =>
+  import("@/pages/Assistant/ActionsInbox").then((m) => ({ default: m.ActionsInboxPage })),
+);
 
 type AppErrorBoundaryState = { hasError: boolean };
 
@@ -381,6 +384,16 @@ export default function App() {
               <Suspense fallback={<PageFallback />}>
                 <CapabilityGate moduleKey="ai">
                   <AIIndex />
+                </CapabilityGate>
+              </Suspense>
+            }
+          />
+          <Route
+            path="assistant/inbox"
+            element={
+              <Suspense fallback={<PageFallback />}>
+                <CapabilityGate moduleKey="ai">
+                  <ActionsInboxPage />
                 </CapabilityGate>
               </Suspense>
             }
