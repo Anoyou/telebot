@@ -198,13 +198,101 @@ async def test_run_agent_query_draft_never_blocks_final_delivery(monkeypatch, dr
     )
 
     assert draft.await_args_list[0].args == ("⏳ 系统助手正在理解你的需求…",)
-    assert all(call.args[0] for call in draft.await_args_list)
     if draft_error is None:
-        assert any("演示 Provider" in call.args[0] for call in draft.await_args_list)
-        assert any("查询今日资金台账" in call.args[0] for call in draft.await_args_list)
+        draft_texts = [call.args[0] for call in draft.await_args_list]
+        assert any("演示 Provider" in t for t in draft_texts)
+        assert any("查询今日资金台账" in t for t in draft_texts)
+        # 最终正文不进 draft；发出真实消息前清空 draft
+        assert "最终答案" not in "".join(draft_texts)
+        assert draft_texts[-1] == ""
     assert "最终答案" in send.calls[-1]["msg"]
     assert send.calls[-1]["edit"] is (draft_error is not None)
     assert send.calls[-1]["edit_message_id"] == (101 if draft_error is not None else None)
+
+
+@pytest.mark.asyncio
+async def test_run_agent_query_clears_draft_before_final_and_error(monkeypatch) -> None:
+    """assistant_message 不推进 draft；final/error 前 clear_draft('')。"""
+    send = _SendCapture()
+    draft_calls: list[str] = []
+
+    async def _draft(value: str) -> None:
+        draft_calls.append(value)
+
+    class _Svc:
+        async def get_or_create_active_session(self, *a, **k):  # noqa: ANN001
+            return SimpleSession("sess-clear")
+
+        async def get_session(self, *a, **k):  # noqa: ANN001
+            return SimpleSession("sess-clear")
+
+        async def stream_message(self, *a, **k):  # noqa: ANN001
+            yield {"type": "assistant_delta", "delta": "流式"}
+            yield {"type": "assistant_delta", "delta": "片段"}
+            yield {"type": "assistant_message", "content": "完整最终正文"}
+            yield {"type": "done", "ok": True}
+
+    class SimpleSession:
+        def __init__(self, sid: str) -> None:
+            self.id = sid
+
+    class _DB:
+        async def __aenter__(self):
+            return AsyncMock()
+
+        async def __aexit__(self, *args):
+            return False
+
+    monkeypatch.setattr(bot_bridge, "AsyncSessionLocal", lambda: _DB())
+    monkeypatch.setattr(bot_bridge, "get_system_agent_service", lambda: _Svc())
+    monkeypatch.setattr(bot_bridge, "refresh_agent_mode", AsyncMock())
+
+    await bot_bridge.run_agent_query(
+        account_id=1,
+        tg_user_id=2,
+        role="admin",
+        text="生成答案",
+        send=send,
+        draft=_draft,
+    )
+
+    assert draft_calls[0] == "⏳ 系统助手正在理解你的需求…"
+    assert any("流式" in t for t in draft_calls)
+    # 完整正文只出现在真实消息，不出现在 draft
+    assert not any("完整最终正文" in t for t in draft_calls)
+    assert draft_calls[-1] == ""
+    assert "完整最终正文" in send.calls[-1]["msg"]
+    assert send.calls[-1]["edit"] is False
+
+    # error 分支同样先 clear
+    send2 = _SendCapture()
+    draft_calls2: list[str] = []
+
+    async def _draft2(value: str) -> None:
+        draft_calls2.append(value)
+
+    class _ErrSvc:
+        async def get_or_create_active_session(self, *a, **k):  # noqa: ANN001
+            return SimpleSession("sess-err")
+
+        async def get_session(self, *a, **k):  # noqa: ANN001
+            return SimpleSession("sess-err")
+
+        async def stream_message(self, *a, **k):  # noqa: ANN001
+            yield {"type": "error", "message": "模型挂了"}
+            yield {"type": "done", "ok": False}
+
+    monkeypatch.setattr(bot_bridge, "get_system_agent_service", lambda: _ErrSvc())
+    await bot_bridge.run_agent_query(
+        account_id=1,
+        tg_user_id=2,
+        role="admin",
+        text="失败",
+        send=send2,
+        draft=_draft2,
+    )
+    assert draft_calls2[-1] == ""
+    assert "模型挂了" in send2.calls[-1]["msg"]
 
 
 @pytest.mark.asyncio

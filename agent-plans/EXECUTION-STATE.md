@@ -1,29 +1,47 @@
 # EXECUTION-STATE（进度真相源）
 
-> 当前计划：`agent-plans/PLAN-agent-latency-and-ops.md` **v3**
+> 当前计划：`agent-plans/PLAN-agent-slots-bot-fixes.md` **v4**
 > 纪律：每 WP 完成即更新本文件；新会话恢复从本文件开始。
 > 状态：`pending` → `in_progress` → `done`（附 commit 哈希）/ `blocked` / `partial`（附缺口）
 
-## 当前计划：Agent 延迟优化 / 定时任务 / 更新提速 v3
+## 当前计划：Bot 交互修复 / 插件工具插槽 / OpenWorker 三点 v4
 
-### 轮次 L：延迟与词表
+### 轮次 F：Bot 修复轮（先行，独立可发布）
 
-- [ ] WP-L1 阶段计时 stage_timings（先测量） — in_progress
-- [ ] WP-L2 路由调用提速（1 次重试 + 8s 预算 + 与探测并行） — pending
-- [ ] WP-L3 词表扩容 + golden set ≥20 条（项目自身问法/英文） — pending
-- [ ] WP-L4 探测不阻塞（按已知状态放行 + 后台刷新） — pending
+- [x] WP-F1 draft 重复消息修复（final 不进 draft + clear_draft 专用路径） — done（待 commit）
+- [ ] WP-F2 审批可见性（角色过滤有声提示 + /agent 状态 + 日志留痕） — pending
+
+### 轮次 O：OpenWorker 三点
+
+- [ ] WP-O1 定时运行落完整轨迹（origin=scheduled 会话 + Run + Web 深链） — pending
+- [ ] WP-O2 Agent 自建自动化（scheduler.save 暴露 agent_prompt + 防套娃） — pending
+- [ ] WP-O3 待确认收件箱（侧栏角标 + 列表页 + /agent pending） — pending
+
+### 轮次 X：插件工具插槽（第一期只读）
+
+- [ ] WP-X1 manifest expose → 动态注册 + IPC 执行 + 安全四件套 — pending
+- [ ] WP-X2 前端来源徽标 + 文档 + 示例插件 + golden set — pending
+
+## 已完成计划（历史）
+
+### Agent 延迟优化 / 定时任务 / 更新提速（PLAN-agent-latency-and-ops v3，2026-07 完成）
+
+#### 轮次 L：延迟与词表
+
+- [x] WP-L1 阶段计时 stage_timings（先测量） — done `57303157`
+- [x] WP-L2 路由调用提速（1 次重试 + 8s 预算 + 与探测并行） — done `5c0d367b`
+- [x] WP-L3 词表扩容 + golden set ≥20 条（项目自身问法/英文） — done `5c0d367b`
+- [x] WP-L4 探测不阻塞（按已知状态放行 + 后台刷新） — done `5c0d367b`
 
 ### 轮次 T：定时 Agent 任务
 
-- [ ] WP-T1 scheduler `agent_prompt` 类型（只读工具集 + 写操作永远 pending） — pending
-- [ ] WP-T2 异常日志巡检预设模板 — pending
+- [x] WP-T1 scheduler `agent_prompt` 类型（只读工具集 + 写操作永远 pending） — done `4002a221`
+- [x] WP-T2 异常日志巡检预设模板 — done `4002a221`
 
 ### 轮次 U：更新提速
 
-- [ ] WP-U1 更新作业分步计时 — pending
-- [ ] WP-U2 按测量结果优化 top 1-2 项 — pending
-
-## 已完成计划（历史）
+- [x] WP-U1 更新作业分步计时 — done `f5a70bb5`
+- [x] WP-U2 按测量结果优化 top 1-2 项 — done `f5a70bb5`
 
 ### 对话体验修复与 DEEIX 吸收（PLAN-conversation-deeix v2，2026-07-23 完成并验收）
 
@@ -59,7 +77,7 @@
 
 ## 备注
 
-- **2026-07-24 v3 计划创建**：延迟链前置事实已核实写入 PLAN 头部（探测 TTL、路由 5×3s 重试、更新增量分类现状），worker 勿重复调查。
+- **2026-07-25 v4 计划创建**：Bot draft 重复/按钮可见性根因、审批两层语义、插件插槽与 OpenWorker 三点设计已核实写入 PLAN 头部，worker 勿重复调查。
 
 - **PLAN-conversation-deeix v2 全部 WP 已完成**（WP1–10）。
 - **2026-07-23 验收通过**（commit `836f0279` 含验收 lint 修复）：ruff 清零、后端 2315 passed、前端 typecheck+test 绿、a11y 24 passed（0 critical/serious）、diff-check 干净；WP1-10 关键实现逐点抽查属实。遗留两项见下。

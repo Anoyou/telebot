@@ -710,6 +710,7 @@ async def run_agent_query(
     last_draft_text = ""
 
     async def update_draft(value: str) -> None:
+        """进度/流式片段更新 draft；空串被守卫拦住，清空请走 clear_draft。"""
         nonlocal last_draft_text
         if not draft_active or draft is None or not value or value == last_draft_text:
             return
@@ -718,6 +719,17 @@ async def run_agent_query(
             last_draft_text = value
         except Exception:  # noqa: BLE001
             log.debug("system agent bot draft update failed", exc_info=True)
+
+    async def clear_draft() -> None:
+        """最终消息发出前清空 ephemeral draft，避免与真实消息并存。"""
+        nonlocal last_draft_text
+        if not draft_active or draft is None:
+            return
+        try:
+            await draft("")
+            last_draft_text = ""
+        except Exception:  # noqa: BLE001
+            log.debug("system agent bot draft clear failed", exc_info=True)
 
     if draft is not None:
         try:
@@ -761,11 +773,12 @@ async def run_agent_query(
                 if et == "assistant_delta_reset":
                     streamed_assistant_text = ""
                 elif et == "assistant_delta":
+                    # 流式过程只推进 draft；最终正文只走真实消息，避免 draft 与 final 双气泡
                     streamed_assistant_text += str(event.get("delta") or "")
                     await update_draft(_markdown_to_telegram_html(streamed_assistant_text))
                 elif et == "assistant_message":
+                    # 完整正文不进 draft：随后会 send 真实消息，若再 update_draft 会与 final 并存
                     assistant_text = str(event.get("content") or "")
-                    await update_draft(_markdown_to_telegram_html(assistant_text))
                 elif et == "error":
                     error_text = str(event.get("message") or "助手运行失败")
                 elif et == "action_proposed":
@@ -781,6 +794,7 @@ async def run_agent_query(
             error_text = str(exc)[:400]
 
     if error_text and not assistant_text and not proposed_actions:
+        await clear_draft()
         await send(
             f"❌ {_html_escape(error_text)}",
             edit=not draft_active and placeholder_message_id is not None,
@@ -825,6 +839,7 @@ async def run_agent_query(
         if not nonce:
             card += "\n（Redis 不可用，请稍后重试，或到 Web 悬浮助手重新发起）"
             rich_card += "\n（Redis 不可用，请稍后重试，或到 Web 悬浮助手重新发起）"
+        await clear_draft()
         await send(
             safe + card,
             edit=not draft_active and placeholder_message_id is not None,
@@ -834,6 +849,7 @@ async def run_agent_query(
         )
         return
 
+    await clear_draft()
     await send(
         safe,
         edit=not draft_active and placeholder_message_id is not None,
