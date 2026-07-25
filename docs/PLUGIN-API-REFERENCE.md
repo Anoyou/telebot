@@ -291,7 +291,30 @@ if attempts is not None and attempts > 5:
 | `event_subscriptions` | list | 标准链路订阅声明，描述插件想从 Event Bus 接收哪些事件 |
 | `capabilities` | dict | 高风险能力声明，例如 `telegram_native_raw` |
 | `agent_tools` | list | Agent 工具名、说明、object JSON Schema、`read_only` 与 `strict`；必须配合 `ai_agent` 权限和 `capabilities.agent_tools` |
+| `agent_keywords` | list | 可选；暴露给系统助手时的路由关键词（最多 6 个） |
 | `strict_trace` | bool | 是否要求路由投递层常驻全链路 trace；默认 `false`，资金类 / `payout` 插件建议开启 |
+
+### 暴露工具给系统助手（System Agent）
+
+插件自用的 `ctx.ai.run_agent()` 与系统助手工具注册表是两套路径。若希望**系统助手**也能调用插件工具，在对应 `agent_tools[]` 条目上增加：
+
+```json
+"expose": ["system_agent"]
+```
+
+约束（第一期）：
+
+1. **只读**：`read_only` 必须为 `true`（或缺省）。写语义条目会被拒绝暴露，并在安装/刷新时写警告日志。
+2. **命名**：系统助手侧工具名为 `plugin_{plugin_key}.{tool_name}`，例如 `plugin_lottery_plus.list_recent_rounds`。
+3. **数量**：每个插件最多暴露 5 个工具。
+4. **执行**：主进程经 worker IPC 调用；worker 侧需提供 handler：
+   - 插件实例方法 `system_agent_{tool_name}(arguments, ctx)`，或
+   - `system_agent_tool(name, arguments, ctx)`，或
+   - `register_system_agent_tool_handler(plugin_key, name, handler)` 显式注册。
+5. **安全**：调用前校验账号已启用该插件（`AccountFeature`）；结果文本经 `mark_external_text` 防注入；超时 10s 返回结构化错误且 `business_changed=false`。
+6. **权限**：仍需 `permissions` 含 `ai_agent`，且 `capabilities.agent_tools.enabled=true`。
+
+参考实现：`lottery_plus` 的只读工具 `list_recent_rounds`（近期开奖轮次摘要）。
 
 ### 完整示例
 

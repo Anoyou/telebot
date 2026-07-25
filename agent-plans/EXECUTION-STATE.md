@@ -15,12 +15,12 @@
 
 - [x] WP-O1 定时运行落完整轨迹（origin=scheduled 会话 + Run + Web 深链） — done `12158aa0`
 - [x] WP-O2 Agent 自建自动化（scheduler.save 暴露 agent_prompt + 防套娃） — done `354114f3`
-- [x] WP-O3 待确认收件箱（侧栏角标 + 列表页 + /agent pending） — done（待 commit）
+- [x] WP-O3 待确认收件箱（侧栏角标 + 列表页 + /agent pending） — done `2fdae86a`
 
 ### 轮次 X：插件工具插槽（第一期只读）
 
-- [ ] WP-X1 manifest expose → 动态注册 + IPC 执行 + 安全四件套 — pending
-- [ ] WP-X2 前端来源徽标 + 文档 + 示例插件 + golden set — pending
+- [x] WP-X1 manifest expose → 动态注册 + IPC 执行 + 安全四件套 — done `0c9e728f`
+- [x] WP-X2 前端来源徽标 + 文档 + 示例插件 + golden set — done `df907abc`
 
 ## 已完成计划（历史）
 

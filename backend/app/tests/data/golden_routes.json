@@ -306,5 +306,25 @@
   {
     "text": "ledger balance today",
     "expect": "ledger"
+  },
+  {
+    "text": "查一下彩票最近开奖",
+    "expect": "plugin_lottery_plus"
+  },
+  {
+    "text": "lottery 最近几期结果",
+    "expect": "plugin_lottery_plus"
+  },
+  {
+    "text": "开奖历史摘要",
+    "expect": "plugin_lottery_plus"
+  },
+  {
+    "text": "奖池最近轮次",
+    "expect": "plugin_lottery_plus"
+  },
+  {
+    "text": "list recent lottery rounds",
+    "expect": "plugin_lottery_plus"
   }
 ]

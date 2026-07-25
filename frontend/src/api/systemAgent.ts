@@ -22,6 +22,9 @@ export interface SystemAgentCapability {
   channels: string[];
   available: boolean;
   unavailable_reason?: string | null;
+  /** builtin | plugin */
+  source?: string | null;
+  plugin_key?: string | null;
 }
 
 export interface SystemAgentModelMatrixItem {

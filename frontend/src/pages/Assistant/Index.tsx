@@ -1186,6 +1186,41 @@ export function AssistantIndex() {
             仅允许声明支持 tools 的模型。写操作会生成待确认卡片；未配置时助手会给出 AI 中心入口。
             {capsQ.data ? ` · 已注册 ${capsQ.data.tools.filter((t) => t.available).length} 个可用工具` : null}
           </p>
+          {capsQ.data?.tools?.length ? (
+            <div className="mt-4 border-t pt-3">
+              <div className="font-medium">能力矩阵 · 工具来源</div>
+              <p className="mt-1 text-xs text-muted-foreground">
+                插件贡献的工具带「插件」徽标；第一期仅只读暴露。
+              </p>
+              <ul className="mt-2 max-h-48 space-y-1 overflow-y-auto text-xs">
+                {capsQ.data.tools
+                  .filter((t) => t.available)
+                  .slice(0, 80)
+                  .map((tool) => (
+                    <li
+                      key={tool.name}
+                      className="flex flex-wrap items-center gap-1.5 rounded border border-border/60 px-2 py-1"
+                    >
+                      {tool.source === "plugin" ? (
+                        <span className="rounded bg-violet-500/15 px-1 py-0.5 text-[10px] text-violet-700 dark:text-violet-300">
+                          插件{tool.plugin_key ? ` · ${tool.plugin_key}` : ""}
+                        </span>
+                      ) : (
+                        <span className="rounded bg-muted px-1 py-0.5 text-[10px] text-muted-foreground">
+                          内置
+                        </span>
+                      )}
+                      <code className="text-[11px]">{tool.name}</code>
+                      {tool.read_only ? (
+                        <span className="text-[10px] text-muted-foreground">只读</span>
+                      ) : (
+                        <span className="text-[10px] text-amber-700 dark:text-amber-300">写</span>
+                      )}
+                    </li>
+                  ))}
+              </ul>
+            </div>
+          ) : null}
           <div className="mt-4 border-t pt-3">
             <div className="font-medium">长期记忆</div>
             <p className="mt-1 text-xs text-muted-foreground">

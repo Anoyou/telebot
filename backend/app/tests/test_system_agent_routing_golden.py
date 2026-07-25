@@ -5,17 +5,34 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from app.services.system_agent.tool_routing import DOMAIN_CATALOG, route_locally
+from app.services.system_agent.tool_routing import (
+    domain_catalog,
+    register_dynamic_domain,
+    route_locally,
+)
 from app.services.system_agent.turn_context import is_retry_reference
 
 _GOLDEN = Path(__file__).resolve().parent / "data" / "golden_routes.json"
-_AVAILABLE = set(DOMAIN_CATALOG.keys())
+
+
+def _ensure_plugin_sample_domain() -> set[str]:
+    # 插件插槽样例域（与 lottery_plus 参考实现一致）；每测前重注册，避免被其它用例覆盖
+    register_dynamic_domain(
+        "plugin_lottery_plus",
+        "彩票开奖与期次摘要",
+        ("彩票", "开奖", "lottery", "奖池", "下注", "期号", "rounds"),
+    )
+    return set(domain_catalog().keys())
 
 
 def _classify(text: str) -> str:
     if is_retry_reference(text):
         return "reference_or_retry"
-    route = route_locally(text, available=_AVAILABLE, memory_state={"last_domains": ["logs"]})
+    route = route_locally(
+        text,
+        available=_ensure_plugin_sample_domain(),
+        memory_state={"last_domains": ["logs"]},
+    )
     if route is None:
         return "model_route"
     if route.reason == "general_help":
@@ -45,7 +62,7 @@ def test_golden_routes_match_expectations() -> None:
         domains = {
             "ledger", "logs", "accounts", "interaction", "system_ops", "providers",
             "plugins", "plugin_repos", "scheduler", "features", "commands", "routing",
-            "rules", "system", "memory",
+            "rules", "system", "memory", "product", "plugin_lottery_plus",
         }
         if expect in domains:
             if got != expect:
