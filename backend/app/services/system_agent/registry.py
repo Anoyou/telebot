@@ -77,6 +77,11 @@ class ToolRegistry:
     def get(self, name: str) -> ToolSpec | None:
         return self._tools.get(name)
 
+    def unregister(self, name: str) -> bool:
+        """移除动态工具；不存在时返回 False。"""
+
+        return self._tools.pop(str(name), None) is not None
+
     def list_all(self) -> list[ToolSpec]:
         return list(self._tools.values())
 
@@ -113,6 +118,13 @@ class ToolRegistry:
                 and role_at_least(role, spec.min_role)
                 and spec.available
             )
+            source = "builtin"
+            plugin_key: str | None = None
+            if spec.name.startswith("plugin_") and "." in spec.name:
+                source = "plugin"
+                # plugin_{key}.{tool}
+                rest = spec.name[len("plugin_") :]
+                plugin_key = rest.split(".", 1)[0]
             items.append(
                 {
                     "name": spec.name,
@@ -122,6 +134,8 @@ class ToolRegistry:
                     "risk": spec.risk,
                     "channels": list(spec.channels),
                     "available": allowed,
+                    "source": source,
+                    "plugin_key": plugin_key,
                     "unavailable_reason": None
                     if allowed
                     else (

@@ -47,6 +47,15 @@ def register_all_tools(registry: ToolRegistry) -> None:
     logs.register(registry)
     ledger.register(registry)
     memory.register(registry)
+    # 插件工具插槽：从磁盘扫描已安装插件的 expose:system_agent 声明
+    try:
+        from ..plugin_tools import register_plugin_tools_from_disk
+
+        register_plugin_tools_from_disk(registry)
+    except Exception:  # noqa: BLE001
+        import logging
+
+        logging.getLogger(__name__).debug("register plugin tools from disk failed", exc_info=True)
 
 
 __all__ = ["register_all_tools"]

@@ -10,6 +10,9 @@ from typing import Any
 
 from .registry import ToolSpec
 
+# 插件动态域（plugin_<key>）运行时追加，不写入此常量本体
+_DYNAMIC_DOMAIN_CATALOG: dict[str, tuple[str, tuple[str, ...]]] = {}
+
 DOMAIN_CATALOG: dict[str, tuple[str, tuple[str, ...]]] = {
     "accounts": (
         "Telegram 账号、暂停恢复、Worker 重启",
@@ -186,6 +189,34 @@ def available_domains(specs: Iterable[ToolSpec]) -> set[str]:
     return {tool_domain(spec) for spec in specs}
 
 
+def domain_catalog() -> dict[str, tuple[str, tuple[str, ...]]]:
+    """内置域 + 动态插件域的合并视图。"""
+
+    merged = dict(DOMAIN_CATALOG)
+    merged.update(_DYNAMIC_DOMAIN_CATALOG)
+    return merged
+
+
+def register_dynamic_domain(
+    domain: str,
+    description: str,
+    keywords: tuple[str, ...] | list[str],
+) -> None:
+    key = str(domain or "").strip()
+    if not key:
+        return
+    kw = tuple(str(item).strip() for item in keywords if str(item).strip())[:12]
+    _DYNAMIC_DOMAIN_CATALOG[key] = (str(description or key)[:200], kw or (key,))
+
+
+def unregister_dynamic_domains(domains: Iterable[str] | None = None) -> None:
+    if domains is None:
+        _DYNAMIC_DOMAIN_CATALOG.clear()
+        return
+    for domain in domains:
+        _DYNAMIC_DOMAIN_CATALOG.pop(str(domain), None)
+
+
 def _contains_cjk(text: str) -> bool:
     return any("\u4e00" <= ch <= "\u9fff" for ch in text)
 
@@ -206,7 +237,7 @@ def route_locally(
         return ToolRoute(("product",), "local", "product_changelog")
 
     matched: list[str] = []
-    for domain, (_description, keywords) in DOMAIN_CATALOG.items():
+    for domain, (_description, keywords) in domain_catalog().items():
         if domain not in available:
             continue
         if any(keyword.replace(" ", "").lower() in normalized for keyword in keywords):
@@ -243,8 +274,9 @@ def route_locally(
 
 
 def router_system_prompt(available: set[str]) -> str:
+    catalog_map = domain_catalog()
     catalog = [
-        {"domain": domain, "description": DOMAIN_CATALOG.get(domain, (domain, ()))[0]}
+        {"domain": domain, "description": catalog_map.get(domain, (domain, ()))[0]}
         for domain in sorted(available)
     ]
     return (
@@ -294,9 +326,12 @@ __all__ = [
     "DOMAIN_CATALOG",
     "ToolRoute",
     "available_domains",
+    "domain_catalog",
     "parse_model_route",
+    "register_dynamic_domain",
     "route_locally",
     "router_system_prompt",
+    "unregister_dynamic_domains",
     "select_tool_specs",
     "tool_domain",
 ]

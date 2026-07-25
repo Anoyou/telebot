@@ -62,6 +62,7 @@ from .command import (
     set_command_context,
 )
 from .ipc import (
+    CMD_AGENT_PLUGIN_TOOL,
     CMD_DISPATCH_SIMULATE,
     CMD_EXECUTE_RULE,
     CMD_FETCH_AVATAR,
@@ -113,6 +114,7 @@ _BACKGROUND_RPC_COMMAND_TYPES = {
     CMD_EXECUTE_RULE,
     CMD_RUN_INTERACTION_ENTRY,
     CMD_RUN_INTERACTION_ACTION,
+    CMD_AGENT_PLUGIN_TOOL,
 }
 _RPC_MAX_CONCURRENCY = 4
 _RPC_QUEUE_CAPACITY = 32
@@ -1205,6 +1207,12 @@ async def _handle_rpc_command(
             return False, True, None
         await _handle_run_interaction_action_command(redis, client, account_id, cmd, reply_to)
         return True, True, None
+    if cmd.type == CMD_AGENT_PLUGIN_TOOL:
+        reply_to = _valid_reply_to(cmd)
+        if reply_to is None:
+            return False, True, None
+        await _handle_agent_plugin_tool_command(redis, account_id, cmd, reply_to)
+        return True, True, None
     return False, True, None
 
 
@@ -1312,6 +1320,61 @@ async def _handle_execute_rule_command(
         await _log(redis, account_id, "warn", f"execute_rule 失败: {result_error}")
     try:
         await _publish_rpc_payload(redis, cmd, {"ok": result_ok, "error": result_error})
+    except Exception:  # noqa: BLE001
+        pass
+
+
+async def _handle_agent_plugin_tool_command(
+    redis: Any,
+    account_id: int,
+    cmd: IPCMessage,
+    reply_to: str,
+) -> None:
+    """System Agent 调用插件只读 agent_tools。"""
+
+    cmd.payload.setdefault("reply_to", reply_to)
+    plugin_key = str(cmd.payload.get("plugin_key") or "").strip()
+    tool_name = str(cmd.payload.get("tool_name") or "").strip()
+    arguments = cmd.payload.get("arguments")
+    if not isinstance(arguments, dict):
+        arguments = {}
+    result_ok = False
+    result_error: str | None = None
+    result_message: str | None = None
+    result_body: Any = None
+    try:
+        from .plugins.system_agent_tools import invoke_system_agent_tool
+
+        result_body = await invoke_system_agent_tool(
+            plugin_key=plugin_key,
+            tool_name=tool_name,
+            arguments=arguments,
+            plugin_context=None,
+        )
+        result_ok = True
+    except LookupError as exc:
+        result_error = "not_found"
+        result_message = str(exc)
+    except Exception as exc:  # noqa: BLE001
+        result_error = type(exc).__name__
+        result_message = str(exc)[:500]
+        await _log(
+            redis,
+            account_id,
+            "warn",
+            f"agent_plugin_tool 失败 plugin={plugin_key} tool={tool_name}: {result_error}: {result_message}",
+        )
+    try:
+        await _publish_rpc_payload(
+            redis,
+            cmd,
+            {
+                "ok": result_ok,
+                "error": result_error,
+                "message": result_message,
+                "result": result_body,
+            },
+        )
     except Exception:  # noqa: BLE001
         pass
 

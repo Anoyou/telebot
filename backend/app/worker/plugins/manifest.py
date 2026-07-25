@@ -58,6 +58,8 @@ class Manifest:
     config_actions: list[dict[str, Any]] = field(default_factory=list)
     # 声明性 Agent 工具；执行 handler 仍必须由宿主显式注册。
     agent_tools: list[dict[str, Any]] = field(default_factory=list)
+    # System Agent 路由关键词（可选，上限由宿主裁剪）
+    agent_keywords: list[str] = field(default_factory=list)
     # 模块身份分类：interactive（互动娱乐）/ automation（自动化）/ utility（工具能力）
     category: str = "utility"
     # 可由交互 Bot 启动的入口声明；未声明则默认不出现在交互 Bot 模块列表里
@@ -106,6 +108,7 @@ class Manifest:
             "config_schema": self.config_schema,
             "config_actions": list(self.config_actions),
             "agent_tools": list(self.agent_tools),
+            "agent_keywords": list(self.agent_keywords),
             "category": self.category,
             "interaction_entries": list(self.interaction_entries),
             "event_subscriptions": list(self.event_subscriptions),

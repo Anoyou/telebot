@@ -145,6 +145,13 @@ async def patch_config(
 
 @router.get("/capabilities", response_model=SystemAgentCapabilitiesOut)
 async def get_capabilities(db: DBSession, _user: CurrentUser) -> SystemAgentCapabilitiesOut:
+    # 刷新插件工具插槽（安装/启停后能力矩阵立即可见）
+    try:
+        from ..services.system_agent.plugin_tools import refresh_plugin_system_agent_tools
+
+        await refresh_plugin_system_agent_tools(db)
+    except Exception:  # noqa: BLE001
+        log.debug("refresh plugin system_agent tools failed", exc_info=True)
     svc = get_system_agent_service()
     data = await svc.get_capabilities(db, channel=CHANNEL_WEB, role="admin")
     return SystemAgentCapabilitiesOut(**data)

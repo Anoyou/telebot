@@ -7105,6 +7105,12 @@ async def _activate(db, state: _AccountState, af: AccountFeature, redis: Any) ->
 
     try:
         await inst.on_startup(ctx)
+        try:
+            from .system_agent_tools import bind_plugin_instance
+
+            bind_plugin_instance(af.feature_key, inst)
+        except Exception:  # noqa: BLE001
+            log.debug("bind system_agent tools failed feature=%s", af.feature_key, exc_info=True)
     except Exception as exc:  # noqa: BLE001
         if state.scheduler is not None:
             state.scheduler.unregister_owner(af.feature_key)
@@ -7762,6 +7768,12 @@ async def reload_account_config(account_id: int, payload: dict | None = None) ->
                     except Exception:  # noqa: BLE001
                         log.exception("on_shutdown 失败 feature=%s", fkey)
 
+                try:
+                    from .system_agent_tools import unbind_plugin_instance
+
+                    unbind_plugin_instance(fkey)
+                except Exception:  # noqa: BLE001
+                    pass
                 state.instances.pop(fkey, None)
                 state.contexts.pop(fkey, None)
                 if af is not None and not af.enabled:
@@ -7830,6 +7842,12 @@ async def reload_account_config(account_id: int, payload: dict | None = None) ->
                     await inst.on_shutdown(ctx)
                 except Exception:  # noqa: BLE001
                     log.exception("配置解密失败后 on_shutdown 失败 feature=%s", fkey)
+                try:
+                    from .system_agent_tools import unbind_plugin_instance
+
+                    unbind_plugin_instance(fkey)
+                except Exception:  # noqa: BLE001
+                    pass
                 state.instances.pop(fkey, None)
                 state.contexts.pop(fkey, None)
                 await _record_plugin_config_decryption_failure(
@@ -7852,6 +7870,12 @@ async def reload_account_config(account_id: int, payload: dict | None = None) ->
                     await inst.on_shutdown(ctx)
                 except Exception:  # noqa: BLE001
                     log.exception("命令配置变化后 on_shutdown 失败 feature=%s", fkey)
+                try:
+                    from .system_agent_tools import unbind_plugin_instance
+
+                    unbind_plugin_instance(fkey)
+                except Exception:  # noqa: BLE001
+                    pass
                 state.instances.pop(fkey, None)
                 state.contexts.pop(fkey, None)
                 await _activate(db, state, af, redis)
