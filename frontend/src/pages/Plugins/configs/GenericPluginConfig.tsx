@@ -81,6 +81,9 @@ import { pluginUsageGuideWarning } from "@/lib/plugin-config-contract";
 import {
   accountDirectPassthroughConfig,
   accountDirectPassthroughPriority,
+  formatDirectPassthroughRankLabel,
+  formatDirectPassthroughRankTitle,
+  rankAccountDirectPassthroughPlugins,
   pluginContractRiskWarnings,
   pluginEventSubscriptionLabels,
   pluginOperationalCapabilityLabels,
@@ -193,7 +196,27 @@ export function GenericPluginConfigPage() {
   const supportsDirectPassthrough = pluginSupportsDirectPassthrough(feature?.capabilities);
   const directPassthroughCfg = directPassthroughConfig(accountConfig);
   const directPassthroughEnabled = directPassthroughCfg.enabled === true;
-  const directPassthroughExclusive = directPassthroughCfg.exclusive === true;
+  const directRankByKey = useMemo(() => {
+    if (!supportsDirectPassthrough || !featuresQ.data) return new Map<string, number>();
+    return rankAccountDirectPassthroughPlugins(
+      featuresQ.data.map((item) => ({
+        key: item.feature_key,
+        config: (item.config ?? {}) as Record<string, unknown>,
+      })),
+    );
+  }, [featuresQ.data, supportsDirectPassthrough]);
+  // supportsDirectPassthrough 依赖 feature；下面变量在 feature 加载后才稳定
+  const directRank = directPassthroughEnabled
+    ? (directRankByKey.get(featureKey) ?? null)
+    : null;
+  const directRankTotal = directRankByKey.size;
+  const directRankLabel = formatDirectPassthroughRankLabel(directRank, {
+    secondaryEnabled: directPassthroughEnabled,
+    totalEnabled: directPassthroughEnabled ? directRankTotal : undefined,
+  });
+  const directRankTitle = formatDirectPassthroughRankTitle(directRank, {
+    secondaryEnabled: directPassthroughEnabled,
+  });
   const commandPrefix = settingsQ.data?.command_prefix || ",";
   const llmProvidersQ = useQuery({
     queryKey: ["llm-providers"],
@@ -338,13 +361,15 @@ export function GenericPluginConfigPage() {
   });
 
   const directPassthroughMut = useMutation({
-    mutationFn: (payload: { enabled?: boolean; exclusive?: boolean }) =>
+    mutationFn: (payload: { enabled?: boolean }) =>
       updateAccountFeatureDirectPassthrough(aid, featureKey, payload),
     onSuccess: (_data, payload) => {
       if (payload.enabled !== undefined) {
-        toast.success(payload.enabled ? "裸直通已为当前账号开启" : "裸直通已为当前账号关闭");
-      } else if (payload.exclusive !== undefined) {
-        toast.success(payload.exclusive ? "已开启独占消费" : "已关闭独占消费，需插件声明 consume");
+        toast.success(
+          payload.enabled
+            ? "裸直通已开启：成功处理后将截断普通链路"
+            : "裸直通已关闭",
+        );
       }
       qc.invalidateQueries({ queryKey: ["account", aid, "features"] });
       qc.invalidateQueries({ queryKey: ["matrix"] });
@@ -398,7 +423,7 @@ export function GenericPluginConfigPage() {
       );
     },
     onSuccess: () => {
-      toast.success("直通优先级已保存");
+      toast.success("直通调用顺序已保存");
       setPriorityOpen(false);
       qc.invalidateQueries({ queryKey: ["account", aid, "features"] });
       qc.invalidateQueries({ queryKey: ["matrix"] });
@@ -551,13 +576,9 @@ export function GenericPluginConfigPage() {
             {supportsDirectPassthrough ? (
               <Badge
                 variant={directPassthroughEnabled ? "default" : "outline"}
-                title={
-                  directPassthroughEnabled
-                    ? `当前账号直通优先级 ${directPassthroughPriority(accountConfig)}（数值越小越优先）`
-                    : `已配置优先级 ${directPassthroughPriority(accountConfig)}；二次开关关闭时不参与调度`
-                }
+                title={directRankTitle}
               >
-                优先级 {directPassthroughPriority(accountConfig)}
+                {directRankLabel}
               </Badge>
             ) : null}
           </div>
@@ -641,9 +662,9 @@ export function GenericPluginConfigPage() {
                 {supportsDirectPassthrough ? (
                   <Badge
                     variant={directPassthroughEnabled ? "secondary" : "outline"}
-                    title="数值越小直通调度越优先；在下方二次开关旁可调整排序"
+                    title={directRankTitle}
                   >
-                    优先级 {directPassthroughPriority(accountConfig)}
+                    {directRankLabel}
                   </Badge>
                 ) : null}
                 <span>运行状态：{featureRuntimeText(accountFeature)}</span>
@@ -679,15 +700,17 @@ export function GenericPluginConfigPage() {
                   <Badge variant="outline">二次开关</Badge>
                   <Badge
                     variant={directPassthroughEnabled ? "secondary" : "outline"}
-                    title="数值越小越优先；开启直通后可点「调整优先级」排序"
+                    title={directRankTitle}
                   >
-                    优先级 {directPassthroughPriority(accountConfig)}
+                    {directRankLabel}
                   </Badge>
                 </div>
                 <p className="mt-1 text-xs leading-5 text-muted-foreground">
-                  开启后，该插件可在标准 Event Bus 之前接收当前账号的原始消息。
-                  插件须声明消费（返回 True）才会截断普通链路；失败可回退。
+                  开启后，该插件可在标准 Event Bus 之前接收原始消息；
+                  <strong className="font-medium text-foreground">调用成功即独占消费</strong>
+                  （截断普通链路与更后调用的直通）。调用失败可回退。
                   关闭只停用低延时直通，不影响标准 Event Bus、指令或交互入口。
+                  多个直通同时开启时，用下方「调整调用顺序」决定谁先处理。
                 </p>
                 {!accountFeature?.enabled ? (
                   <p className="mt-1 text-xs text-warning">请先开启上方功能总开关。</p>
@@ -705,42 +728,20 @@ export function GenericPluginConfigPage() {
               />
             </div>
             {directPassthroughEnabled ? (
-              <div className="flex flex-col gap-3 rounded-md border border-border/70 bg-muted/20 px-3 py-3">
-                <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                  <div className="min-w-0">
-                    <div className="text-sm font-medium">独占消费</div>
-                    <p className="mt-1 text-xs leading-5 text-muted-foreground">
-                      开启后：本插件成功调用即截断普通链路（兼容旧插件不返回值）。
-                      关闭时须插件返回 True / {"{consume: true}"} 才消费。
-                    </p>
-                  </div>
-                  <Switch
-                    checked={
-                      directPassthroughMut.isPending
-                      && directPassthroughMut.variables?.exclusive !== undefined
-                        ? Boolean(directPassthroughMut.variables.exclusive)
-                        : directPassthroughExclusive
-                    }
-                    disabled={directPassthroughMut.isPending}
-                    onCheckedChange={(exclusive) => directPassthroughMut.mutate({ exclusive })}
-                    aria-label="直通独占消费"
-                  />
-                </div>
-                <div className="flex flex-wrap items-center gap-2 border-t border-border/60 pt-3">
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    className="h-8 gap-1.5"
-                    onClick={openPriorityDialog}
-                  >
-                    <ListOrdered className="h-3.5 w-3.5" />
-                    调整优先级
-                  </Button>
-                  <span className="text-xs text-muted-foreground">
-                    对当前账号所有已开启直通的插件排序，自上而下优先
-                  </span>
-                </div>
+              <div className="flex flex-wrap items-center gap-2 rounded-md border border-border/70 bg-muted/20 px-3 py-3">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="h-8 gap-1.5"
+                  onClick={openPriorityDialog}
+                >
+                  <ListOrdered className="h-3.5 w-3.5" />
+                  调整调用顺序
+                </Button>
+                <span className="text-xs text-muted-foreground">
+                  对当前账号所有已开启直通的插件排序；越靠上越先调用
+                </span>
               </div>
             ) : null}
           </CardContent>
@@ -750,13 +751,13 @@ export function GenericPluginConfigPage() {
       <Dialog open={priorityOpen} onOpenChange={setPriorityOpen}>
         <DialogContent className="max-w-md">
           <DialogHeader>
-            <DialogTitle>直通插件优先级</DialogTitle>
+            <DialogTitle>直通调用顺序</DialogTitle>
             <DialogDescription>
-              列表顺序自上而下为调用优先级。声明消费后会停止更低优先级插件并截断普通链路。
+              自上而下依次尝试。越靠上越先调用；某个成功后不会再调下面的插件，也不会进普通链路。
             </DialogDescription>
           </DialogHeader>
           {priorityDraft.length === 0 ? (
-            <p className="text-sm text-muted-foreground">当前账号没有其它已开启的直通插件。</p>
+            <p className="text-sm text-muted-foreground">当前账号没有已开启的直通插件。</p>
           ) : (
             <ul className="max-h-72 space-y-2 overflow-y-auto">
               {priorityDraft.map((row, index) => (
@@ -764,8 +765,8 @@ export function GenericPluginConfigPage() {
                   key={row.key}
                   className="flex items-center gap-2 rounded-md border border-border/70 bg-card px-2 py-2"
                 >
-                  <span className="w-6 shrink-0 text-center text-xs font-medium text-muted-foreground">
-                    {index + 1}
+                  <span className="w-14 shrink-0 text-center text-xs font-medium text-muted-foreground">
+                    第{index + 1}优先
                   </span>
                   <div className="min-w-0 flex-1">
                     <div className="truncate text-sm font-medium">{row.name}</div>
@@ -811,7 +812,7 @@ export function GenericPluginConfigPage() {
               disabled={priorityDraft.length === 0 || savePriorityMut.isPending}
               onClick={() => savePriorityMut.mutate()}
             >
-              {savePriorityMut.isPending ? "保存中…" : "保存顺序"}
+              {savePriorityMut.isPending ? "保存中…" : "保存调用顺序"}
             </Button>
           </DialogFooter>
         </DialogContent>

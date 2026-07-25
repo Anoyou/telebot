@@ -58,11 +58,11 @@ export async function updateAccountFeatureConfig(
   await api.patch(`/api/accounts/${aid}/features/${pluginKey}/config`, { config });
 }
 
-/** 独立更新账号级裸直通配置（开关 / 独占 / 优先级），不重交插件其它历史配置。 */
+/** 独立更新账号级裸直通配置（二次开关 / 优先级），不重交插件其它历史配置。 */
 export async function updateAccountFeatureDirectPassthrough(
   aid: number,
   pluginKey: string,
-  payload: { enabled?: boolean; exclusive?: boolean; priority?: number },
+  payload: { enabled?: boolean; priority?: number },
 ): Promise<void> {
   await api.patch(`/api/accounts/${aid}/features/${pluginKey}/direct-passthrough`, payload);
 }

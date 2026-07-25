@@ -1603,15 +1603,22 @@ def _plugin_direct_passthrough_priority(ctx: PluginContext | None) -> int:
 
 
 def _plugin_direct_passthrough_exclusive(ctx: PluginContext | None) -> bool:
-    return _direct_passthrough_account_cfg(ctx).get("exclusive") is True
+    """二次开关开启即独占消费。
+
+    账号级 ``direct_passthrough.enabled=true`` 表示本插件走直通通道；
+    成功调用后默认截断普通链路（与「独占消费」语义合并，不再单独开关）。
+    历史配置里的 ``exclusive`` 字段忽略，避免双开关语义分裂。
+    """
+
+    return _plugin_direct_passthrough_enabled(ctx)
 
 
 def _coerce_direct_passthrough_consume(result: Any, *, exclusive: bool) -> bool:
     """直通是否消费本条消息。
 
-    - exclusive=True：成功调用后强制截断（兼容旧插件不返回值）
-    - 否则必须显式声明：True / {"consume": true}
-    - False / None / 其它 → 不消费，可回退普通链路
+    - 二次开关开启（exclusive=True）：成功调用即截断（不依赖返回值）
+    - 否则（理论上不会走到，仅保留兼容）：须 True / {"consume": true}
+    - 异常不会进入本函数 → 失败可回退普通链路
     """
 
     if exclusive:

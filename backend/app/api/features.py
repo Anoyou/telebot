@@ -88,17 +88,16 @@ def _allow_account_direct_passthrough_config(
                 "type": "object",
                 "additionalProperties": False,
                 "properties": {
-                    "enabled": {"type": "boolean", "default": False},
+                    "enabled": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "账号二次开关：开启即直通，且调用成功后独占消费",
+                    },
                     "priority": {
                         "type": "integer",
                         "minimum": 0,
                         "default": 1000,
                         "description": "数值越小优先级越高；同值按插件 key 稳定排序",
-                    },
-                    "exclusive": {
-                        "type": "boolean",
-                        "default": False,
-                        "description": "成功调用后强制截断普通链路（不依赖返回值声明消费）",
                     },
                 },
             },
@@ -110,7 +109,6 @@ def _merge_direct_passthrough_config(
     config: dict[str, object] | None,
     *,
     enabled: bool | None = None,
-    exclusive: bool | None = None,
     priority: int | None = None,
 ) -> dict[str, object]:
     """合并平台直通字段，保留插件其它历史配置与未改动的直通子字段。"""
@@ -120,12 +118,12 @@ def _merge_direct_passthrough_config(
     block: dict[str, object] = dict(current) if isinstance(current, dict) else {}
     if enabled is not None:
         block["enabled"] = bool(enabled)
-    if exclusive is not None:
-        block["exclusive"] = bool(exclusive)
     if priority is not None:
         block["priority"] = max(0, int(priority))
     if "enabled" not in block:
         block["enabled"] = False
+    # 独占已与二次开关合并；清理历史 exclusive 字段避免双语义
+    block.pop("exclusive", None)
     merged["direct_passthrough"] = block
     return merged
 
@@ -134,7 +132,7 @@ def _with_direct_passthrough_enabled(
     config: dict[str, object] | None,
     enabled: bool,
 ) -> dict[str, object]:
-    """兼容旧调用：只改 enabled，保留 priority/exclusive。"""
+    """兼容旧调用：只改 enabled，保留 priority。"""
 
     return _merge_direct_passthrough_config(config, enabled=enabled)
 
@@ -539,7 +537,6 @@ async def update_account_feature_direct_passthrough(
     config = _merge_direct_passthrough_config(
         dict(existing.config or {}) if existing is not None else None,
         enabled=payload.enabled,
-        exclusive=payload.exclusive,
         priority=payload.priority,
     )
     af = await feature_service.set_account_feature(
@@ -556,7 +553,6 @@ async def update_account_feature_direct_passthrough(
         target=f"account:{aid}/feature:{key}",
         detail={
             "enabled": payload.enabled,
-            "exclusive": payload.exclusive,
             "priority": payload.priority,
         },
     )

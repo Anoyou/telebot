@@ -160,8 +160,8 @@ export function accountDirectPassthroughEnabled(
 }
 
 /**
- * 裸直通调度优先级：数值越小越优先；未配置时默认 1000。
- * 用于卡片标签与排序展示。
+ * 裸直通调度权重：数值越小越优先；未配置时默认 1000。
+ * 仅用于内部排序，UI 请用「第 N 优先」展示（见 rank helpers）。
  */
 export function accountDirectPassthroughPriority(
   config?: Record<string, unknown> | null,
@@ -169,6 +169,60 @@ export function accountDirectPassthroughPriority(
   const raw = accountDirectPassthroughConfig(config).priority;
   const n = typeof raw === "number" ? raw : Number(raw);
   return Number.isFinite(n) && n >= 0 ? Math.floor(n) : 1000;
+}
+
+/** 账号下已开二次开关的直通插件 → 1-based 名次（1 最高优先）。 */
+export function rankAccountDirectPassthroughPlugins(
+  items: Array<{ key: string; config?: Record<string, unknown> | null }>,
+): Map<string, number> {
+  const enabled = items
+    .filter((item) => accountDirectPassthroughEnabled(item.config))
+    .map((item) => ({
+      key: item.key,
+      priority: accountDirectPassthroughPriority(item.config),
+    }))
+    .sort((a, b) => a.priority - b.priority || a.key.localeCompare(b.key));
+
+  const ranks = new Map<string, number>();
+  enabled.forEach((item, index) => {
+    ranks.set(item.key, index + 1);
+  });
+  return ranks;
+}
+
+/**
+ * 用户可读的直通优先标签。
+ * - 二次开关关：直通未开
+ * - 开着：第1优先 / 第2优先…（相对本账号已开直通的插件）
+ * - 开着但未进排序表：待排序
+ */
+export function formatDirectPassthroughRankLabel(
+  rank: number | null | undefined,
+  *,
+  secondaryEnabled: boolean,
+  totalEnabled?: number,
+): string {
+  if (!secondaryEnabled) return "直通未开";
+  if (rank == null || rank < 1) return "待排序";
+  if (totalEnabled != null && totalEnabled > 0) {
+    return `第${rank}优先 · 共${totalEnabled}个`;
+  }
+  return `第${rank}优先`;
+}
+
+export function formatDirectPassthroughRankTitle(
+  rank: number | null | undefined,
+  *,
+  secondaryEnabled: boolean,
+): string {
+  if (!secondaryEnabled) {
+    return "账号二次开关关闭时不参与直通调度；开启后可在配置页调整调用顺序";
+  }
+  if (rank == null || rank < 1) {
+    return "已开启直通，可在配置页「调整优先级」设定调用顺序";
+  }
+  if (rank === 1) return "本账号已开直通插件中最先调用";
+  return `本账号已开直通插件中第 ${rank} 个调用；更前的插件成功后不会轮到本插件`;
 }
 
 export function pluginContractRiskWarnings(input: {

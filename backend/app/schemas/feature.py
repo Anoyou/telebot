@@ -227,16 +227,18 @@ class AccountFeatureConfigUpdate(BaseModel):
 
 
 class AccountFeatureDirectPassthroughUpdate(BaseModel):
-    """仅更新平台拥有的账号级裸直通配置（开关 / 独占 / 优先级）。"""
+    """仅更新平台拥有的账号级裸直通配置（二次开关 / 优先级）。
+
+    二次开关开启 = 直通能力 + 调用成功后独占消费；不再单独提供 exclusive。
+    """
 
     enabled: bool | None = None
-    exclusive: bool | None = None
     priority: int | None = Field(default=None, ge=0)
 
     @model_validator(mode="after")
     def _require_at_least_one_field(self) -> AccountFeatureDirectPassthroughUpdate:
-        if self.enabled is None and self.exclusive is None and self.priority is None:
-            raise ValueError("至少提供 enabled / exclusive / priority 之一")
+        if self.enabled is None and self.priority is None:
+            raise ValueError("至少提供 enabled / priority 之一")
         return self
 
 

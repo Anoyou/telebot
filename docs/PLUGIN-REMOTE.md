@@ -189,35 +189,33 @@ if not native_raw_meta.get("enabled"):
 {
   "direct_passthrough": {
     "enabled": true,
-    "priority": 0,
-    "exclusive": false
+    "priority": 0
   }
 }
 ```
 
-- `priority`：数值越小越优先；账号配置页可打开「调整优先级」对已开启直通的插件拖排（自上而下 = 高优先）。
-- `exclusive`：成功调用后强制截断普通链路（兼容旧插件不返回值）；默认 `false`，需插件**声明式消费**。
+- `enabled`（账号二次开关）：开启即获得直通能力；**调用成功即独占消费**（截断普通链路与更低优先级直通）。不再单独提供「独占消费」开关。
+- `priority`：数值越小越优先；账号配置页可打开「调整优先级」对已开启直通的插件排序（自上而下 = 高优先）。
 
 仅声明能力不会启用直通；账号只启用插件本身也不会启用直通。运行时仍保留账号启用、installed 插件授权和 worker 暂停急停；通过这些外层检查后，worker 会在 userbot 标准链路、incoming 白名单、Trace、Event Bus 订阅匹配、legacy `on_message` 包装之前，按优先级顺序调用：
 
 ```python
 async def on_direct_message(self, ctx, event) -> bool | None:
     if not match(event):
-        return None  # 未命中：不消费，可回退
+        return None  # 未处理：若 hook 正常返回，二次开关开启时仍会截断普通链路
     await handle(event)
-    return True  # 声明消费：截断普通链路
+    return True  # 推荐：语义上表示已处理
 ```
 
 `event` 是 live Telethon event，不是标准事件信封。
 
-**声明式消费 + 失败可回退**：
+**二次开关 = 直通通道 + 成功后独占消费；失败可回退**：
 
-| 返回 / 结果 | 是否截断普通链路 |
+| 结果 | 是否截断普通链路 |
 | --- | --- |
-| `True` 或 `{"consume": true}` | 是，并停止更低优先级直通 |
-| `False` / `None` / 默认 | 否，继续其它直通或普通链路 |
-| 抛异常 | 否（失败可回退） |
-| 账号 `exclusive=true` 且调用成功 | 是 |
+| 二次开关开启且 hook **成功返回**（含 `None` / `True`） | 是，并停止更低优先级直通 |
+| hook **抛异常** | 否（失败可回退，可试其它直通或普通链路） |
+| 二次开关关闭 | 不进直通 |
 
 直通 hook 的发送、编辑、点击等行为不会自动生成标准 MessageOps 审计等价物；插件作者必须自行承担幂等、异常、限流和审计缺失的风险。
 

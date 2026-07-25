@@ -3800,7 +3800,7 @@ async def test_direct_passthrough_broadcasts_before_incoming_guards(monkeypatch)
         owner_only = False
 
         async def on_direct_message(self, ctx: PluginContext, event: Any) -> None:
-            # 未声明消费：仅窥探，消息应继续到下一个直通与/或普通链路
+            # 二次开关开启 = 成功即独占；返回 None 也会截断
             calls.append((self.key, str(getattr(event, "raw_text", ""))))
             return None
 
@@ -3898,18 +3898,17 @@ async def test_direct_passthrough_broadcasts_before_incoming_guards(monkeypatch)
         incoming_dispatch = captured[-1]
         await incoming_dispatch(_Event())
 
-        # 均未声明消费：仍会按优先级调用全部直通，但不会截断普通链路
+        # 二次开关 = 独占：高优先（key 序 a 先于 b）成功后截断，不再调 b / 普通链路
         assert calls == [
             ("_test_direct_broadcast_a", "keyword owned by interaction bot"),
-            ("_test_direct_broadcast_b", "keyword owned by interaction bot"),
         ]
-        # 未消费 → 进入 incoming 白名单等普通链路
-        loader_mod._record_recent_peer.assert_awaited()
+        loader_mod._record_recent_peer.assert_not_awaited()
+        interaction_owned.assert_not_awaited()
         loader_mod.start_trace.assert_awaited()
-        assert sum(1 for call in record_span.await_args_list if call.args[1] == "route") == 2
-        assert sum(1 for call in record_span.await_args_list if call.args[1] == "plugin_invoke") == 2
-        assert loader_mod.finish_trace.await_args.kwargs.get("consumed") is False
-        assert loader_mod.finish_trace.await_args.kwargs["invoked_count"] == 2
+        assert sum(1 for call in record_span.await_args_list if call.args[1] == "route") == 1
+        assert sum(1 for call in record_span.await_args_list if call.args[1] == "plugin_invoke") == 1
+        assert loader_mod.finish_trace.await_args.kwargs.get("consumed") is True
+        assert loader_mod.finish_trace.await_args.kwargs["invoked_count"] == 1
     finally:
         loader_mod._STATES.pop(15, None)
         _REGISTRY.pop("_test_direct_broadcast_a", None)
@@ -4145,8 +4144,8 @@ async def test_direct_passthrough_priority_and_declarative_consume(monkeypatch) 
 
 
 @pytest.mark.asyncio
-async def test_direct_passthrough_exclusive_consumes_without_return(monkeypatch) -> None:
-    """exclusive=true 时成功调用即截断，即使 handler 返回 None。"""
+async def test_direct_passthrough_secondary_switch_consumes_without_return(monkeypatch) -> None:
+    """二次开关开启 = 成功调用即独占截断，即使 handler 返回 None。"""
     from app.worker.plugins.base import _REGISTRY, register
 
     legacy: list[str] = []
@@ -4169,7 +4168,7 @@ async def test_direct_passthrough_exclusive_consumes_without_return(monkeypatch)
         capabilities={
             "telegram_direct_passthrough": {
                 "enabled": True,
-                "reason": "exclusive test",
+                "reason": "secondary switch exclusive test",
                 "sources": ["userbot"],
                 "directions": ["incoming"],
             }
@@ -4197,7 +4196,8 @@ async def test_direct_passthrough_exclusive_consumes_without_return(monkeypatch)
                 account_id=18,
                 feature_key="_test_direct_exclusive",
                 enabled=True,
-                config={"direct_passthrough": {"enabled": True, "exclusive": True}},
+                # 仅 enabled，无 exclusive 字段
+                config={"direct_passthrough": {"enabled": True}},
             )
         ],
         rules=[],
