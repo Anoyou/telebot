@@ -98,7 +98,14 @@ export function ModelPicker({
       : `${value.providerId}::${value.model}`;
 
   return (
-    <div className={cn("flex min-w-0 flex-wrap items-center gap-1.5", className)}>
+    <div
+      className={cn(
+        "flex min-w-0 items-center gap-1.5",
+        // 紧凑工具栏禁止换行，避免「设为默认」把选择框挤到上一行
+        compact ? "flex-nowrap" : "flex-wrap",
+        className,
+      )}
+    >
       <select
         aria-label="本轮模型"
         disabled={disabled}
@@ -114,10 +121,11 @@ export function ModelPicker({
           onChange({ mode: "pinned", providerId: Number(pid), model });
         }}
         className={cn(
-          "h-8 min-w-0 max-w-full rounded-md border border-border/60 bg-background/80 px-2 text-xs",
+          "h-8 min-w-0 max-w-full rounded-md border border-border/60 bg-background/80 text-xs",
           compact
-            ? "w-[min(12rem,50vw)] flex-none sm:w-[13rem]"
-            : "w-full flex-1 sm:w-[min(18rem,72vw)] sm:flex-none",
+            ? // 再收一档：给「设为默认」和发送按钮留位，避免窄屏换行上顶
+              "w-[min(8.75rem,34vw)] flex-none px-1.5 sm:w-[10rem] sm:px-2"
+            : "w-full flex-1 px-2 sm:w-[min(18rem,72vw)] sm:flex-none",
           "disabled:opacity-50",
         )}
       >
@@ -149,7 +157,10 @@ export function ModelPicker({
         <button
           type="button"
           disabled={disabled}
-          className="h-8 shrink-0 rounded-md border border-border/60 px-2 text-[11px] text-muted-foreground hover:bg-muted/40 disabled:opacity-50"
+          className={cn(
+            "h-8 shrink-0 rounded-md border border-border/60 text-muted-foreground hover:bg-muted/40 disabled:opacity-50",
+            compact ? "px-1.5 text-[10px] leading-none" : "px-2 text-[11px]",
+          )}
           onClick={() => onSetDefault(value.providerId, value.model)}
           title="将当前选择写入全局默认配置"
         >

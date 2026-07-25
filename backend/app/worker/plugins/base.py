@@ -933,15 +933,24 @@ class Plugin:
         self,
         ctx: PluginContext,
         event: events.NewMessage.Event | events.MessageEdited.Event,
-    ) -> None:
-        """低延迟直通消息入口；默认 no-op。
+    ) -> bool | dict[str, Any] | None:
+        """低延迟直通消息入口；默认 no-op，返回 None 表示不消费。
 
         这是高风险高级入口，只会在插件 manifest 显式声明
         ``capabilities.telegram_direct_passthrough.enabled=true``，且账号级
         ``AccountFeature.config.direct_passthrough.enabled=true`` 时启用。运行时会在
         白名单/暂停检查后、Trace/Event Bus/legacy 包装前，把原始 Telethon event
-        交给插件；一旦命中直通插件，本条消息不会继续进入普通消息链路。
+        按 ``direct_passthrough.priority`` 顺序交给插件。
+
+        **声明式消费**（返回值）：
+        - ``True`` 或 ``{"consume": True}``：确认消费，截断普通链路与更低优先级直通
+        - ``False`` / ``None`` / 不返回：未消费，可继续其它直通或回退普通链路
+        - 抛异常：视为失败，**不消费**，可回退
+
+        账号配置 ``direct_passthrough.exclusive=true`` 时，成功调用即强制消费
+        （兼容旧插件不返回值的独占场景）。
         """
+        return None
 
     async def on_command(
         self,

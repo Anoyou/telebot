@@ -142,6 +142,35 @@ export function pluginSupportsDirectPassthrough(capabilities?: PluginCapabilitie
   return (value as Record<string, unknown>).enabled === true;
 }
 
+/** 账号级 `config.direct_passthrough` 子对象。 */
+export function accountDirectPassthroughConfig(
+  config?: Record<string, unknown> | null,
+): Record<string, unknown> {
+  const raw = config?.direct_passthrough;
+  return raw && typeof raw === "object" && !Array.isArray(raw)
+    ? (raw as Record<string, unknown>)
+    : {};
+}
+
+/** 账号是否已二次开启裸直通。 */
+export function accountDirectPassthroughEnabled(
+  config?: Record<string, unknown> | null,
+): boolean {
+  return accountDirectPassthroughConfig(config).enabled === true;
+}
+
+/**
+ * 裸直通调度优先级：数值越小越优先；未配置时默认 1000。
+ * 用于卡片标签与排序展示。
+ */
+export function accountDirectPassthroughPriority(
+  config?: Record<string, unknown> | null,
+): number {
+  const raw = accountDirectPassthroughConfig(config).priority;
+  const n = typeof raw === "number" ? raw : Number(raw);
+  return Number.isFinite(n) && n >= 0 ? Math.floor(n) : 1000;
+}
+
 export function pluginContractRiskWarnings(input: {
   capabilities?: PluginCapabilities | null;
   event_subscriptions?: PluginEventSubscription[] | null;

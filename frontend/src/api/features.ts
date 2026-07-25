@@ -58,13 +58,21 @@ export async function updateAccountFeatureConfig(
   await api.patch(`/api/accounts/${aid}/features/${pluginKey}/config`, { config });
 }
 
-/** 独立更新账号级裸直通开关，不重交插件的其它历史配置。 */
+/** 独立更新账号级裸直通配置（开关 / 独占 / 优先级），不重交插件其它历史配置。 */
 export async function updateAccountFeatureDirectPassthrough(
   aid: number,
   pluginKey: string,
-  enabled: boolean,
+  payload: { enabled?: boolean; exclusive?: boolean; priority?: number },
 ): Promise<void> {
-  await api.patch(`/api/accounts/${aid}/features/${pluginKey}/direct-passthrough`, { enabled });
+  await api.patch(`/api/accounts/${aid}/features/${pluginKey}/direct-passthrough`, payload);
+}
+
+/** 账号下已开启裸直通的插件按列表顺序写入 priority（自上而下 = 高优先）。 */
+export async function reorderAccountDirectPassthrough(
+  aid: number,
+  order: string[],
+): Promise<void> {
+  await api.put(`/api/accounts/${aid}/direct-passthrough/order`, { order });
 }
 
 /** 验证配置是否符合 schema */

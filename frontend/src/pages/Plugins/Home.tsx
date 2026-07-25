@@ -53,6 +53,8 @@ import {
   pluginEventSubscriptionLabels,
   pluginHasHighRiskContract,
   pluginOperationalCapabilityLabels,
+  accountDirectPassthroughEnabled,
+  accountDirectPassthroughPriority,
   pluginSupportsDirectPassthrough,
   pluginUsesAI,
 } from "@/types/pluginContract";
@@ -828,6 +830,11 @@ function FeatureZone({
               const enabled = selectedFeatureEnabled[f.key] ?? status !== "disabled";
               const runtimeLabel = moduleRuntimeLabel(status, enabled);
               const accountFeature = accountFeatureByKey.get(f.key);
+              const accountConfig = (accountFeature?.config ?? {}) as Record<string, unknown>;
+              const directPassthroughOn = directPassthrough && accountDirectPassthroughEnabled(accountConfig);
+              const directPriority = directPassthrough
+                ? accountDirectPassthroughPriority(accountConfig)
+                : null;
               const pluginUsage = pluginUsageByKey.get(f.key);
               const lastError = accountFeature?.last_error?.trim();
               const usageWarning = pluginUsageGuideWarning(f);
@@ -911,9 +918,24 @@ function FeatureZone({
                         <FeatureCapabilityBadge
                           show={directPassthrough}
                           tone="warn"
-                          title="低延时能力，安装后还需在账号配置中二次开启才会生效"
+                          title={
+                            directPassthroughOn
+                              ? "账号已二次开启裸直通；数值越小调度越优先"
+                              : "低延时能力，安装后还需在账号配置中二次开启才会生效"
+                          }
                         >
-                          裸直通 · 二次开启
+                          {directPassthroughOn ? "裸直通 · 已开启" : "裸直通 · 二次开启"}
+                        </FeatureCapabilityBadge>
+                        <FeatureCapabilityBadge
+                          show={directPassthrough && directPriority !== null}
+                          tone={directPassthroughOn ? "info" : "outline"}
+                          title={
+                            directPassthroughOn
+                              ? `当前账号直通优先级 ${directPriority}（数值越小越优先）`
+                              : `已配置优先级 ${directPriority}；二次开关关闭时不参与调度`
+                          }
+                        >
+                          优先级 {directPriority}
                         </FeatureCapabilityBadge>
                         <FeatureCapabilityBadge show={usesAI} tone="warn" title="插件会调用 TelePilot 的 AI 能力">
                           AI 调用

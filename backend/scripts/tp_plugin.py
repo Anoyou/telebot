@@ -670,7 +670,9 @@ def _plugin_py_passthrough(name: str) -> str:
 演示高风险的"低延时直通"入口 ``on_direct_message``。只有 manifest 声明
 ``capabilities.telegram_direct_passthrough.enabled=true``，且账号侧
 ``AccountFeature.config.direct_passthrough.enabled=true`` 时才会启用。
-命中直通后本条消息不再进入普通消息链路，务必谨慎使用。
+
+返回 ``True`` 表示声明消费（截断普通链路）；未命中关键词返回 ``None`` 以便
+其它直通插件或普通链路继续处理。失败抛异常也不会永久吃掉消息。
 
 回复仍走平台受控投递 ``ctx.messages``，不直接调用 Telethon，以便统一限流与审计。
 """
@@ -699,18 +701,19 @@ class {cls}(Plugin):
         self._keyword = str(cfg.get("keyword") or "ping").strip() or "ping"
         self._reply = str(cfg.get("reply") or "pong").strip() or "pong"
 
-    async def on_direct_message(self, ctx: PluginContext, event: Any) -> None:
+    async def on_direct_message(self, ctx: PluginContext, event: Any) -> bool | None:
         text = str(getattr(event, "raw_text", "") or "").strip()
         if self._keyword not in text:
-            return
+            return None  # 未命中：不消费
         chat_id = getattr(event, "chat_id", None)
         if chat_id is None or ctx.messages is None:
-            return
+            return None
         await ctx.messages.send(
             chat_id=chat_id,
             text=self._reply,
             reply_to_message_id=getattr(event, "id", None),
         )
+        return True  # 已处理：声明消费
 
 
 PLUGIN_CLASS = {cls}

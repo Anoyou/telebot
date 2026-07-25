@@ -1181,7 +1181,7 @@ def _evaluate_direct_passthrough_stage(
         )
     for plugin_key, inst in list(state.instances.items()):
         ctx = state.contexts.get(plugin_key)
-        detail = {"plugin_key": plugin_key}
+        detail: dict[str, Any] = {"plugin_key": plugin_key}
         if ctx is None or ctx.generation != state.generation:
             detail.update({"matched": False, "reason_code": "plugin_load_failed"})
         elif not _plugin_direct_passthrough_enabled(ctx):
@@ -1193,14 +1193,24 @@ def _evaluate_direct_passthrough_stage(
         elif getattr(inst, "owner_only", True) and not _owner_gate_allows(state, direction=direction, sender_id=sender_id):
             detail.update({"matched": False, "reason_code": "permission_denied"})
         else:
-            detail.update({"matched": True, "reason_code": "matched"})
+            detail.update(
+                {
+                    "matched": True,
+                    "reason_code": "matched",
+                    "priority": _plugin_direct_passthrough_priority(ctx),
+                    "exclusive": _plugin_direct_passthrough_exclusive(ctx),
+                }
+            )
         candidates.append(detail)
-    matches = [item for item in candidates if item.get("matched")]
+    matches = sorted(
+        [item for item in candidates if item.get("matched")],
+        key=lambda item: (int(item.get("priority") or 1000), str(item.get("plugin_key") or "")),
+    )
     return _dispatch_stage(
         "direct_passthrough",
         bool(matches),
         "matched" if matches else "filter_not_matched",
-        "直通插件命中。" if matches else "没有插件通过直通声明、账号配置和权限检查。",
+        "直通插件命中（按 priority 升序）。" if matches else "没有插件通过直通声明、账号配置和权限检查。",
         matches=matches,
         candidates=candidates,
     )
@@ -1571,13 +1581,45 @@ def _plugin_declares_direct_passthrough(
     return True
 
 
-def _plugin_direct_passthrough_enabled(ctx: PluginContext | None) -> bool:
+def _direct_passthrough_account_cfg(ctx: PluginContext | None) -> dict[str, Any]:
     if ctx is None or ctx.generation <= 0:
-        return False
+        return {}
     cfg = ctx.account_config if isinstance(ctx.account_config, dict) else {}
     raw = cfg.get("direct_passthrough")
-    if isinstance(raw, dict):
-        return raw.get("enabled") is True
+    return dict(raw) if isinstance(raw, dict) else {}
+
+
+def _plugin_direct_passthrough_enabled(ctx: PluginContext | None) -> bool:
+    return _direct_passthrough_account_cfg(ctx).get("enabled") is True
+
+
+def _plugin_direct_passthrough_priority(ctx: PluginContext | None) -> int:
+    raw = _direct_passthrough_account_cfg(ctx).get("priority")
+    try:
+        value = int(raw)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 1000
+    return max(0, value)
+
+
+def _plugin_direct_passthrough_exclusive(ctx: PluginContext | None) -> bool:
+    return _direct_passthrough_account_cfg(ctx).get("exclusive") is True
+
+
+def _coerce_direct_passthrough_consume(result: Any, *, exclusive: bool) -> bool:
+    """直通是否消费本条消息。
+
+    - exclusive=True：成功调用后强制截断（兼容旧插件不返回值）
+    - 否则必须显式声明：True / {"consume": true}
+    - False / None / 其它 → 不消费，可回退普通链路
+    """
+
+    if exclusive:
+        return True
+    if result is True:
+        return True
+    if isinstance(result, dict) and result.get("consume") is True:
+        return True
     return False
 
 
@@ -1695,14 +1737,14 @@ async def _dispatch_userbot_direct_passthrough(
     event_label: str,
     redis: Any,
 ) -> bool:
-    """Dispatch raw Telethon events to explicitly opted-in low-latency plugins."""
+    """按优先级调用直通插件；仅声明消费（或独占策略）时截断普通链路。
 
-    invoked = False
-    invoked_count = 0
-    failed_count = 0
-    trace = None
-    trace_started = False
+    返回 True 表示本条消息已被直通消费，调用方应跳过 Event Bus / legacy。
+    返回 False 表示未消费，应继续普通链路（含失败可回退）。
+    """
+
     handler_name = "on_direct_message"
+    candidates: list[tuple[int, str, Plugin, PluginContext, Any]] = []
     for plugin_key, inst in list(state.instances.items()):
         ctx = state.contexts.get(plugin_key)
         if ctx is None or ctx.generation != state.generation:
@@ -1723,8 +1765,20 @@ async def _dispatch_userbot_direct_passthrough(
             allowed = await _event_allowed_for_owner_only(state, event)
             if not allowed:
                 continue
-        invoked = True
-        invoked_count += 1
+        priority = _plugin_direct_passthrough_priority(ctx)
+        candidates.append((priority, plugin_key, inst, ctx, handler))
+
+    # 数值越小越优先；同优先级按 plugin_key 稳定排序
+    candidates.sort(key=lambda item: (item[0], item[1]))
+
+    invoked_count = 0
+    failed_count = 0
+    consumed = False
+    consumer_key: str | None = None
+    trace = None
+    trace_started = False
+
+    for priority, plugin_key, _inst, ctx, handler in candidates:
         if not trace_started:
             trace = await _start_userbot_direct_passthrough_trace(
                 state,
@@ -1732,6 +1786,8 @@ async def _dispatch_userbot_direct_passthrough(
                 event_label=event_label,
             )
             trace_started = True
+        invoked_count += 1
+        exclusive = _plugin_direct_passthrough_exclusive(ctx)
         await record_span(
             trace,
             "route",
@@ -1739,8 +1795,13 @@ async def _dispatch_userbot_direct_passthrough(
             component="userbot_direct_passthrough",
             plugin_key=plugin_key,
             reason_code="matched",
-            message="插件启用直通模式，原始 Telethon event 将直接下放给 on_direct_message。",
+            message=(
+                f"直通插件匹配（priority={priority}"
+                f"{', exclusive' if exclusive else ''}），调用 on_direct_message。"
+            ),
             direction=event_label,
+            priority=priority,
+            exclusive=exclusive,
         )
         started = time.monotonic()
         # 直通也做调用级 ctx 隔离：复制一个独立 messages facade，避免并发直通事件
@@ -1783,11 +1844,12 @@ async def _dispatch_userbot_direct_passthrough(
         else:
             call_ctx = replace(ctx, client=call_client, log=call_log)
         try:
-            await _invoke_plugin_with_resilience(
+            result = await _invoke_plugin_with_resilience(
                 state,
                 plugin_key,
                 lambda _handler=handler, _ctx=call_ctx, _event=event: _handler(_ctx, _event),
             )
+            should_consume = _coerce_direct_passthrough_consume(result, exclusive=exclusive)
             await record_span(
                 trace,
                 "plugin_invoke",
@@ -1796,6 +1858,8 @@ async def _dispatch_userbot_direct_passthrough(
                 plugin_key=plugin_key,
                 direction=event_label,
                 duration_ms=int((time.monotonic() - started) * 1000),
+                consume=should_consume,
+                exclusive=exclusive,
             )
             await update_plugin_runtime_status(
                 account_id=state.account_id,
@@ -1803,7 +1867,12 @@ async def _dispatch_userbot_direct_passthrough(
                 last_invocation_status=TRACE_STATUS_OK,
                 last_trace_id=getattr(trace, "trace_id", None),
             )
+            if should_consume:
+                consumed = True
+                consumer_key = plugin_key
+                break
         except Exception as exc:  # noqa: BLE001
+            # 失败可回退：本插件不消费，继续尝试更低优先级直通，最终可进普通链路
             failed_count += 1
             await record_span(
                 trace,
@@ -1815,6 +1884,7 @@ async def _dispatch_userbot_direct_passthrough(
                 reason_code="plugin_runtime_error",
                 error=f"{type(exc).__name__}: {exc}",
                 duration_ms=int((time.monotonic() - started) * 1000),
+                consume=False,
             )
             await update_plugin_runtime_status(
                 account_id=state.account_id,
@@ -1828,7 +1898,8 @@ async def _dispatch_userbot_direct_passthrough(
                 "error",
                 (
                     f"插件 {plugin_key} 处理直通 {event_label} 消息时出错："
-                    f"{type(exc).__name__}: {exc}。本条消息不会继续进入普通消息链路。"
+                    f"{type(exc).__name__}: {exc}。"
+                    "未声明消费，本条消息将继续尝试其它直通插件或回退普通链路。"
                 ),
                 source="plugin",
                 plugin_key=plugin_key,
@@ -1840,16 +1911,20 @@ async def _dispatch_userbot_direct_passthrough(
                 traceback=traceback.format_exc(limit=8),
                 **trace_log_context(trace),
             )
-    if invoked:
+
+    if trace_started:
+        # 已声明消费 → 成功；未消费但有失败 → 失败态（消息仍可回退普通链路）
+        status = TRACE_STATUS_OK if consumed or not failed_count else TRACE_STATUS_FAILED
         await finish_trace(
             trace,
-            TRACE_STATUS_FAILED if failed_count else TRACE_STATUS_OK,
+            status,
             invoked_count=invoked_count,
             failed_count=failed_count,
             direction=event_label,
-            consumed=True,
+            consumed=consumed,
+            consumer_plugin_key=consumer_key,
         )
-    return invoked
+    return consumed
 
 
 def _userbot_native_raw_meta(native_raw: Any, *, enabled: bool) -> dict[str, Any]:

@@ -3663,9 +3663,10 @@ async def test_direct_passthrough_consumes_raw_event_before_event_bus(monkeypatc
         display_name = "直通启用测试"
         owner_only = False
 
-        async def on_direct_message(self, ctx: PluginContext, event: Any) -> None:
+        async def on_direct_message(self, ctx: PluginContext, event: Any) -> bool:
             direct_events.append(event)
             await ctx.client.send_message(event.chat_id, "direct reply")
+            return True  # 声明消费
 
         async def on_message(self, ctx: PluginContext, event: Any) -> None:
             legacy_calls.append(str(getattr(event, "raw_text", "")))
@@ -3799,7 +3800,9 @@ async def test_direct_passthrough_broadcasts_before_incoming_guards(monkeypatch)
         owner_only = False
 
         async def on_direct_message(self, ctx: PluginContext, event: Any) -> None:
+            # 未声明消费：仅窥探，消息应继续到下一个直通与/或普通链路
             calls.append((self.key, str(getattr(event, "raw_text", ""))))
+            return None
 
     @register
     class _DirectBroadcastB(Plugin):
@@ -3809,6 +3812,7 @@ async def test_direct_passthrough_broadcasts_before_incoming_guards(monkeypatch)
 
         async def on_direct_message(self, ctx: PluginContext, event: Any) -> None:
             calls.append((self.key, str(getattr(event, "raw_text", ""))))
+            return None
 
     for cls in (_DirectBroadcastA, _DirectBroadcastB):
         cls._manifest = Manifest(
@@ -3894,17 +3898,17 @@ async def test_direct_passthrough_broadcasts_before_incoming_guards(monkeypatch)
         incoming_dispatch = captured[-1]
         await incoming_dispatch(_Event())
 
+        # 均未声明消费：仍会按优先级调用全部直通，但不会截断普通链路
         assert calls == [
             ("_test_direct_broadcast_a", "keyword owned by interaction bot"),
             ("_test_direct_broadcast_b", "keyword owned by interaction bot"),
         ]
-        loader_mod._record_recent_peer.assert_not_awaited()
-        interaction_owned.assert_not_awaited()
-        loader_mod.start_trace.assert_awaited_once()
+        # 未消费 → 进入 incoming 白名单等普通链路
+        loader_mod._record_recent_peer.assert_awaited()
+        loader_mod.start_trace.assert_awaited()
         assert sum(1 for call in record_span.await_args_list if call.args[1] == "route") == 2
         assert sum(1 for call in record_span.await_args_list if call.args[1] == "plugin_invoke") == 2
-        loader_mod.finish_trace.assert_awaited_once()
-        assert loader_mod.finish_trace.await_args.args[:2] == (trace, loader_mod.TRACE_STATUS_OK)
+        assert loader_mod.finish_trace.await_args.kwargs.get("consumed") is False
         assert loader_mod.finish_trace.await_args.kwargs["invoked_count"] == 2
     finally:
         loader_mod._STATES.pop(15, None)
@@ -4004,9 +4008,12 @@ async def test_direct_passthrough_records_failed_trace(monkeypatch) -> None:
             and call.kwargs.get("reason_code") == "plugin_runtime_error"
             for call in record_span.await_args_list
         )
-        finish_trace.assert_awaited_once()
-        assert finish_trace.await_args.args[:2] == (trace, loader_mod.TRACE_STATUS_FAILED)
-        assert finish_trace.await_args.kwargs["consumed"] is True
+        # 失败可回退：直通 trace 标记未消费
+        assert any(
+            call.args[:2] == (trace, loader_mod.TRACE_STATUS_FAILED)
+            and call.kwargs.get("consumed") is False
+            for call in finish_trace.await_args_list
+        )
         assert any(
             call.kwargs.get("plugin_key") == "_test_direct_failing"
             and call.kwargs.get("last_invocation_status") == loader_mod.TRACE_STATUS_FAILED
@@ -4016,6 +4023,219 @@ async def test_direct_passthrough_records_failed_trace(monkeypatch) -> None:
     finally:
         loader_mod._STATES.pop(16, None)
         _REGISTRY.pop("_test_direct_failing", None)
+
+
+@pytest.mark.asyncio
+async def test_direct_passthrough_priority_and_declarative_consume(monkeypatch) -> None:
+    """优先级低的先调用；声明消费后截断，更低优先级不再调用。"""
+    from app.worker.plugins.base import _REGISTRY, register
+
+    order: list[str] = []
+    legacy: list[str] = []
+
+    @register
+    class _High(Plugin):
+        key = "_test_direct_prio_high"
+        display_name = "高优先"
+        owner_only = False
+
+        async def on_direct_message(self, ctx: PluginContext, event: Any) -> bool:
+            order.append(self.key)
+            return True
+
+        async def on_message(self, ctx: PluginContext, event: Any) -> None:
+            legacy.append(self.key)
+
+    @register
+    class _Low(Plugin):
+        key = "_test_direct_prio_low"
+        display_name = "低优先"
+        owner_only = False
+
+        async def on_direct_message(self, ctx: PluginContext, event: Any) -> bool:
+            order.append(self.key)
+            return True
+
+        async def on_message(self, ctx: PluginContext, event: Any) -> None:
+            legacy.append(self.key)
+
+    for cls in (_High, _Low):
+        cls._manifest = Manifest(
+            key=cls.key,
+            display_name=cls.display_name,
+            capabilities={
+                "telegram_direct_passthrough": {
+                    "enabled": True,
+                    "reason": "priority test",
+                    "sources": ["userbot"],
+                    "directions": ["incoming"],
+                }
+            },
+        )
+
+    class _Event:
+        raw_text = "prio"
+        text = "prio"
+        chat_id = -4004
+        sender_id = 7
+        id = 1
+        is_private = False
+        is_group = True
+        is_channel = False
+
+        async def get_chat(self):
+            return None
+
+    fake_db = _FakeDB(
+        accounts={17: _FakeAcc(id=17)},
+        humanize={17: None},
+        afs=[
+            _FakeAF(
+                account_id=17,
+                feature_key="_test_direct_prio_low",
+                enabled=True,
+                config={"direct_passthrough": {"enabled": True, "priority": 50}},
+            ),
+            _FakeAF(
+                account_id=17,
+                feature_key="_test_direct_prio_high",
+                enabled=True,
+                config={"direct_passthrough": {"enabled": True, "priority": 0}},
+            ),
+        ],
+        rules=[],
+    )
+    monkeypatch.setattr(loader_mod, "AsyncSessionLocal", lambda: _fake_session_factory(fake_db))
+    monkeypatch.setattr(loader_mod, "_load_log_incoming_messages_setting", AsyncMock(return_value=False))
+    monkeypatch.setattr(
+        loader_mod,
+        "_load_event_framework_flags",
+        AsyncMock(return_value={"trace_enabled": True, "event_bus_delivery_enabled": True}),
+    )
+    monkeypatch.setattr(loader_mod, "start_trace", AsyncMock(return_value=SimpleNamespace(trace_id="t17")))
+    monkeypatch.setattr(loader_mod, "record_span", AsyncMock())
+    finish_trace = AsyncMock()
+    monkeypatch.setattr(loader_mod, "finish_trace", finish_trace)
+    monkeypatch.setattr(loader_mod, "update_plugin_runtime_status", AsyncMock())
+
+    captured: list[Any] = []
+
+    def _on(_filter):
+        def _wrap(fn):
+            captured.append(fn)
+            return fn
+
+        return _wrap
+
+    client = MagicMock()
+    client.on = _on
+    paused = asyncio.Event()
+    paused.set()
+    try:
+        await load_plugins_for_account(client, account_id=17, paused=paused, redis=_FakeRedis())
+        await captured[-1](_Event())
+        assert order == ["_test_direct_prio_high"]  # 高优先声明消费后不再调低优先
+        assert legacy == []
+        assert finish_trace.await_args.kwargs.get("consumed") is True
+        assert finish_trace.await_args.kwargs.get("consumer_plugin_key") == "_test_direct_prio_high"
+    finally:
+        loader_mod._STATES.pop(17, None)
+        _REGISTRY.pop("_test_direct_prio_high", None)
+        _REGISTRY.pop("_test_direct_prio_low", None)
+
+
+@pytest.mark.asyncio
+async def test_direct_passthrough_exclusive_consumes_without_return(monkeypatch) -> None:
+    """exclusive=true 时成功调用即截断，即使 handler 返回 None。"""
+    from app.worker.plugins.base import _REGISTRY, register
+
+    legacy: list[str] = []
+
+    @register
+    class _Exclusive(Plugin):
+        key = "_test_direct_exclusive"
+        display_name = "独占"
+        owner_only = False
+
+        async def on_direct_message(self, ctx: PluginContext, event: Any) -> None:
+            return None
+
+        async def on_message(self, ctx: PluginContext, event: Any) -> None:
+            legacy.append("legacy")
+
+    _Exclusive._manifest = Manifest(
+        key="_test_direct_exclusive",
+        display_name="独占",
+        capabilities={
+            "telegram_direct_passthrough": {
+                "enabled": True,
+                "reason": "exclusive test",
+                "sources": ["userbot"],
+                "directions": ["incoming"],
+            }
+        },
+    )
+
+    class _Event:
+        raw_text = "x"
+        text = "x"
+        chat_id = -5005
+        sender_id = 1
+        id = 2
+        is_private = False
+        is_group = True
+        is_channel = False
+
+        async def get_chat(self):
+            return None
+
+    fake_db = _FakeDB(
+        accounts={18: _FakeAcc(id=18)},
+        humanize={18: None},
+        afs=[
+            _FakeAF(
+                account_id=18,
+                feature_key="_test_direct_exclusive",
+                enabled=True,
+                config={"direct_passthrough": {"enabled": True, "exclusive": True}},
+            )
+        ],
+        rules=[],
+    )
+    monkeypatch.setattr(loader_mod, "AsyncSessionLocal", lambda: _fake_session_factory(fake_db))
+    monkeypatch.setattr(loader_mod, "_load_log_incoming_messages_setting", AsyncMock(return_value=False))
+    monkeypatch.setattr(
+        loader_mod,
+        "_load_event_framework_flags",
+        AsyncMock(return_value={"trace_enabled": True, "event_bus_delivery_enabled": True}),
+    )
+    monkeypatch.setattr(loader_mod, "start_trace", AsyncMock(return_value=SimpleNamespace(trace_id="t18")))
+    monkeypatch.setattr(loader_mod, "record_span", AsyncMock())
+    finish_trace = AsyncMock()
+    monkeypatch.setattr(loader_mod, "finish_trace", finish_trace)
+    monkeypatch.setattr(loader_mod, "update_plugin_runtime_status", AsyncMock())
+
+    captured: list[Any] = []
+
+    def _on(_filter):
+        def _wrap(fn):
+            captured.append(fn)
+            return fn
+
+        return _wrap
+
+    client = MagicMock()
+    client.on = _on
+    paused = asyncio.Event()
+    paused.set()
+    try:
+        await load_plugins_for_account(client, account_id=18, paused=paused, redis=_FakeRedis())
+        await captured[-1](_Event())
+        assert legacy == []
+        assert finish_trace.await_args.kwargs.get("consumed") is True
+    finally:
+        loader_mod._STATES.pop(18, None)
+        _REGISTRY.pop("_test_direct_exclusive", None)
 
 
 def test_userbot_native_raw_boolean_true_is_not_explicit_capability() -> None:

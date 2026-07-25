@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 if TYPE_CHECKING:
     from ..db.models.feature import Feature
@@ -227,8 +227,23 @@ class AccountFeatureConfigUpdate(BaseModel):
 
 
 class AccountFeatureDirectPassthroughUpdate(BaseModel):
-    """仅更新平台拥有的账号级裸直通开关。"""
-    enabled: bool
+    """仅更新平台拥有的账号级裸直通配置（开关 / 独占 / 优先级）。"""
+
+    enabled: bool | None = None
+    exclusive: bool | None = None
+    priority: int | None = Field(default=None, ge=0)
+
+    @model_validator(mode="after")
+    def _require_at_least_one_field(self) -> AccountFeatureDirectPassthroughUpdate:
+        if self.enabled is None and self.exclusive is None and self.priority is None:
+            raise ValueError("至少提供 enabled / exclusive / priority 之一")
+        return self
+
+
+class AccountDirectPassthroughOrderUpdate(BaseModel):
+    """账号下已开启裸直通的插件优先级排序（自上而下 = 高优先）。"""
+
+    order: list[str] = Field(min_length=1)
 
 
 class AccountFeatureItem(BaseModel):
