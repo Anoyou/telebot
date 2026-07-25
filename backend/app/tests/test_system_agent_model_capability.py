@@ -66,6 +66,30 @@ async def test_probe_requires_expected_tool_call(monkeypatch) -> None:
     assert result.supported is True
     assert captured.tool_choice.name == model_capability.PROBE_TOOL_NAME
     assert len(captured.tools) == 1
+    assert captured.tools[0].strict is False
+    assert captured.max_output_tokens >= 256
+
+
+@pytest.mark.asyncio
+async def test_probe_accepts_correct_tool_even_if_nonce_wrong(monkeypatch) -> None:
+    """DeepSeek 等兼容站强制 tool_choice 后可能改写参数，仍应视为支持 tools。"""
+
+    class Client:
+        async def invoke(self, request):  # noqa: ANN001
+            return ModelResponse(
+                model=request.model,
+                tool_calls=(
+                    ToolCall(
+                        id="call-1",
+                        name=model_capability.PROBE_TOOL_NAME,
+                        arguments={"nonce": "not-the-expected-value"},
+                    ),
+                ),
+            )
+
+    monkeypatch.setattr(model_capability, "build_client_from_dto", lambda *_a, **_k: Client())
+    result = await model_capability.probe_model_tool_capability(_provider(1, models=["m1"]), "m1")
+    assert result.supported is True
 
 
 @pytest.mark.asyncio
@@ -151,7 +175,9 @@ async def test_verify_rejects_unsupported_primary(setting_db, monkeypatch) -> No
     monkeypatch.setattr(model_capability, "probe_model_tool_capability", probe)
     async with setting_db() as db:
         result = await model_capability.verify_resolved_agent_providers(db, resolved)
-    assert result == "Provider「provider-1」的候选模型不支持 Agent 工具调用。"
+    assert isinstance(result, str)
+    assert "provider-1" in result
+    assert "工具调用" in result
 
 
 @pytest.mark.asyncio

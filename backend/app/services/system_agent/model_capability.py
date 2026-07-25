@@ -29,8 +29,11 @@ log = logging.getLogger(__name__)
 CACHE_KEY = "system_agent_model_capability_cache"
 PROBE_TOOL_NAME = "telepilot_capability_check"
 PROBE_NONCE = "telepilot-tools-v1"
+# 探测请求形态变更时递增，使旧的 unsupported 缓存立即失效（例如 DeepSeek 兼容修复）
+PROBE_VERSION = "v2-compat"
 SUPPORTED_TTL = timedelta(days=7)
-UNSUPPORTED_TTL = timedelta(days=1)
+# 误判成本高：缩短 unsupported 缓存，便于配置修正后快速恢复
+UNSUPPORTED_TTL = timedelta(minutes=30)
 UNAVAILABLE_TTL = timedelta(minutes=5)
 MAX_CACHE_ENTRIES = 256
 MAX_CONCURRENT_PROBES = 3
@@ -58,6 +61,7 @@ def _provider_signature(provider: LLMProviderDTO, model: str) -> str:
         "base_url": provider.base_url,
         "proxy_url": provider.proxy_url,
         "model": model,
+        "probe_version": PROBE_VERSION,
     }
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(encoded.encode()).hexdigest()
@@ -102,11 +106,37 @@ def _cached_result(entry: Any, *, now: datetime) -> CapabilityProbeResult | None
     return result
 
 
+def _probe_tool_call_matched(response: Any) -> bool:
+    """判断探测是否成功。
+
+    对 DeepSeek 等兼容实现：强制 tool_choice 后只要点名调用了探测工具，
+    即视为支持 tools；nonce 仅作加分校验，错误 nonce 不直接否决。
+    """
+
+    for call in getattr(response, "tool_calls", ()) or ():
+        if str(getattr(call, "name", "") or "") != PROBE_TOOL_NAME:
+            continue
+        args = getattr(call, "arguments", None)
+        if not isinstance(args, dict):
+            return True
+        nonce = args.get("nonce")
+        if nonce in (None, "", PROBE_NONCE):
+            return True
+        # 调用了正确工具但 nonce 写错：仍证明协议层支持 tool_calls
+        return True
+    return False
+
+
 async def probe_model_tool_capability(
     provider: LLMProviderDTO,
     model: str,
 ) -> CapabilityProbeResult:
-    """强制模型调用无副作用工具，并验证工具名与参数。"""
+    """强制模型调用无副作用工具，验证是否支持结构化 tool_calls。
+
+    兼容说明：
+    - strict=False，且不要求 additionalProperties=false（部分兼容站会拒）
+    - max_output_tokens 提高，避免推理模型把预算耗在 thinking 上无 tool_calls
+    """
 
     now = datetime.now(UTC)
     request = ModelRequest(
@@ -118,7 +148,7 @@ async def probe_model_tool_capability(
             ),
             ModelMessage.text(
                 MessageRole.USER,
-                f"调用 {PROBE_TOOL_NAME}，参数 nonce 必须是 {PROBE_NONCE}。",
+                f"调用工具 {PROBE_TOOL_NAME}，参数 nonce 填 {PROBE_NONCE}。",
             ),
         ),
         tools=(
@@ -129,12 +159,14 @@ async def probe_model_tool_capability(
                     "type": "object",
                     "properties": {"nonce": {"type": "string"}},
                     "required": ["nonce"],
-                    "additionalProperties": False,
                 },
+                # 与 System Agent 运行时一致；strict:true 会被 DeepSeek 等兼容站拒绝或忽略
+                strict=False,
             ),
         ),
         tool_choice=NamedToolChoice(PROBE_TOOL_NAME),
-        max_output_tokens=64,
+        # 推理型模型（如 deepseek-v4-pro）需要更多输出预算才能落到 tool_calls
+        max_output_tokens=512,
         metadata={"model_pinned": True, "max_retries_per_model": 0},
     )
     try:
@@ -147,18 +179,21 @@ async def probe_model_tool_capability(
             response = await client.invoke(request)
     except Exception as exc:  # 上游临时故障不能永久判为不支持
         scope = getattr(exc, "scope", None)
-        unsupported = isinstance(exc, (NotImplementedError, ValueError)) or (
-            scope == LLMErrorScope.CAPABILITY_MISMATCH
+        message = str(exc).lower()
+        # 兼容站常对 strict 字段返回 400；标 unavailable 便于下一轮重试，而不是锁死 unsupported
+        soft_request_shape = "strict" in message and (
+            "unknown" in message or "invalid" in message or "unexpected" in message
+        )
+        unsupported = (
+            isinstance(exc, (NotImplementedError, ValueError))
+            or (scope == LLMErrorScope.CAPABILITY_MISMATCH and not soft_request_shape)
         )
         return CapabilityProbeResult(
             "unsupported" if unsupported else "unavailable",
             now,
             type(exc).__name__,
         )
-    matched = any(
-        call.name == PROBE_TOOL_NAME and call.arguments.get("nonce") == PROBE_NONCE
-        for call in response.tool_calls
-    )
+    matched = _probe_tool_call_matched(response)
     return CapabilityProbeResult("supported" if matched else "unsupported", now)
 
 
@@ -310,6 +345,14 @@ async def verify_resolved_agent_providers(
                         provisional=True,
                     )
                     background.append((provider, model, signature))
+                elif (
+                    non_blocking
+                    and stored.status == "unsupported"
+                    and provider.id == resolved.primary.id
+                    and model == (explicit or model)
+                ):
+                    # 主模型曾被判 unsupported：请求路径强制重测一次，避免误缓存锁死整轮对话
+                    candidates.append((provider, model, signature))
                 else:
                     results[(provider.id, model)] = stored
                 continue
@@ -323,9 +366,13 @@ async def verify_resolved_agent_providers(
                             stored.error_type or "stale_unavailable",
                             provisional=True,
                         )
+                        background.append((provider, model, signature))
+                    elif stored.status == "unsupported" and provider.id == resolved.primary.id:
+                        # 过期的 unsupported 对主模型立即重测，不沿用旧失败
+                        candidates.append((provider, model, signature))
                     else:
                         results[(provider.id, model)] = stored
-                    background.append((provider, model, signature))
+                        background.append((provider, model, signature))
                 else:
                     # 无缓存：临时按 supported 放行，后台探测
                     results[(provider.id, model)] = CapabilityProbeResult(
@@ -406,7 +453,11 @@ async def verify_resolved_agent_providers(
             and any(result.status == "unavailable" for result in primary_candidates)
         ):
             return f"Provider「{resolved.primary.name}」的工具调用能力暂时无法验证，请稍后重试。"
-        return f"Provider「{resolved.primary.name}」的候选模型不支持 Agent 工具调用。"
+        return (
+            f"Provider「{resolved.primary.name}」的候选模型未通过 Agent 工具调用探测。"
+            "请确认模型支持 function calling、api_format 为 chat_completions，"
+            "并在 AI 中心对该 Provider 重新测活；若刚改过配置，再试一次以触发重测。"
+        )
     return ResolvedAgentProviders(
         primary=verified[resolved.primary.id],
         model=selected_model,

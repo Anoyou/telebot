@@ -355,18 +355,23 @@ def _tool_specs_openai(
     tools: tuple[ToolSpec, ...],
     tool_names: Mapping[str, str],
 ) -> list[dict[str, Any]]:
-    return [
-        {
-            "type": "function",
-            "function": {
-                "name": to_wire_tool_name(tool.name, tool_names),
-                "description": tool.description,
-                "parameters": tool.parameters,
-                "strict": tool.strict,
-            },
+    """Build OpenAI-compatible tool specs.
+
+    Only emit ``strict`` when True. Many OpenAI-compatible providers (DeepSeek,
+    relays) reject or mishandle ``strict: true`` / unknown fields.
+    """
+
+    payload: list[dict[str, Any]] = []
+    for tool in tools:
+        function: dict[str, Any] = {
+            "name": to_wire_tool_name(tool.name, tool_names),
+            "description": tool.description,
+            "parameters": tool.parameters,
         }
-        for tool in tools
-    ]
+        if tool.strict:
+            function["strict"] = True
+        payload.append({"type": "function", "function": function})
+    return payload
 
 
 def _openai_tool_choice(
@@ -2955,16 +2960,17 @@ class ResponsesClient(LLMClient):
             "store": False,
         }
         if request.tools:
-            body["tools"] = [
-                {
+            body["tools"] = []
+            for tool in request.tools:
+                item: dict[str, Any] = {
                     "type": "function",
                     "name": to_wire_tool_name(tool.name, tool_names),
                     "description": tool.description,
                     "parameters": tool.parameters,
-                    "strict": tool.strict,
                 }
-                for tool in request.tools
-            ]
+                if tool.strict:
+                    item["strict"] = True
+                body["tools"].append(item)
             body["tool_choice"] = _responses_tool_choice(request.tool_choice, tool_names)
         if request.temperature is not None:
             body["temperature"] = _normalize_temperature(request.temperature)
@@ -3029,16 +3035,17 @@ class ResponsesClient(LLMClient):
             "store": False,
         }
         if request.tools:
-            body["tools"] = [
-                {
+            body["tools"] = []
+            for tool in request.tools:
+                item: dict[str, Any] = {
                     "type": "function",
                     "name": to_wire_tool_name(tool.name, tool_names),
                     "description": tool.description,
                     "parameters": tool.parameters,
-                    "strict": tool.strict,
                 }
-                for tool in request.tools
-            ]
+                if tool.strict:
+                    item["strict"] = True
+                body["tools"].append(item)
             body["tool_choice"] = _responses_tool_choice(request.tool_choice, tool_names)
         if request.temperature is not None:
             body["temperature"] = _normalize_temperature(request.temperature)
