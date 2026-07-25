@@ -45,6 +45,7 @@ from .skills import SkillRegistry, get_skill_registry
 from .tool_routing import (
     ToolRoute,
     available_domains,
+    has_explicit_web_intent,
     parse_model_route,
     route_locally,
     router_system_prompt,
@@ -186,6 +187,7 @@ class SystemAgentRuntime:
 
         progress_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
         streaming_redactor = StreamingMessageRedactor(secrets=list(chat_secrets or []))
+        reasoning_redactor = StreamingMessageRedactor(secrets=list(chat_secrets or []))
         attempted_models: dict[int, str] = {}
 
         async def emit_model_progress(progress: dict[str, Any]) -> None:
@@ -567,6 +569,17 @@ class SystemAgentRuntime:
                 )
             )
 
+        async def on_reasoning_delta(delta: str) -> None:
+            safe_delta = reasoning_redactor.push(delta)
+            if not safe_delta:
+                return
+            await progress_queue.put(
+                next_event(
+                    "assistant_reasoning_delta",
+                    delta=safe_delta,
+                )
+            )
+
         async def on_text_reset() -> None:
             # 原生 tool calling 允许模型在 tool_use 前发送少量自然语言。它
             # 不是本轮最终答案，因此客户端必须清除暂显内容，避免和完成后的
@@ -579,6 +592,7 @@ class SystemAgentRuntime:
             on_tool_start=on_tool_start,
             on_tool_finish=on_tool_finish,
             on_text_delta=on_text_delta,
+            on_reasoning_delta=on_reasoning_delta,
             on_text_reset=on_text_reset,
         )
 
@@ -766,6 +780,9 @@ class SystemAgentRuntime:
             if stage_timings["first_token_ms"] is None:
                 stage_timings["first_token_ms"] = elapsed_ms()
             yield next_event("assistant_delta", delta=trailing_delta)
+        trailing_reasoning_delta = reasoning_redactor.finish()
+        if trailing_reasoning_delta:
+            yield next_event("assistant_reasoning_delta", delta=trailing_reasoning_delta)
         for ev in deferred_events:
             yield ev
 
@@ -790,6 +807,7 @@ class SystemAgentRuntime:
         yield next_event(
             "assistant_message",
             content=assistant_text,
+            reasoning=result.reasoning_content or "",
             usage=usage_payload,
         )
         yield next_event(
@@ -893,6 +911,12 @@ class SystemAgentRuntime:
             ]
         if previous:
             return ToolRoute(tuple(previous[:3]), "fallback", "router_failed_use_memory")
+        if "web" in domains and has_explicit_web_intent(user_text):
+            return ToolRoute(
+                ("web",),
+                "fallback",
+                "router_failed_explicit_web_intent",
+            )
         return ToolRoute((), "fallback", "router_failed_direct_answer")
 
     def _bind_write_handler(

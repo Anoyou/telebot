@@ -542,6 +542,7 @@ class SystemAgentService:
         await db.commit()
 
         assistant_text = ""
+        assistant_reasoning = ""
         usage: dict[str, Any] | None = None
         tool_events: list[dict[str, Any]] = []
         memory_tool_events: list[dict[str, Any]] = []
@@ -575,6 +576,11 @@ class SystemAgentService:
                 if et == "assistant_message":
                     assistant_text = redact_known_secrets(str(event.get("content") or ""), chat_secrets)
                     event["content"] = assistant_text
+                    assistant_reasoning = redact_known_secrets(
+                        str(event.get("reasoning") or ""),
+                        chat_secrets,
+                    )
+                    event["reasoning"] = assistant_reasoning
                     usage = event.get("usage") if isinstance(event.get("usage"), dict) else None
                     if usage is not None and usage.get("stream_fallback"):
                         event["stream_fallback"] = True
@@ -614,6 +620,7 @@ class SystemAgentService:
                     "tool_started",
                     "tool_finished",
                     "assistant_delta",
+                    "assistant_reasoning_delta",
                     "assistant_delta_reset",
                 }:
                     yield event
@@ -694,7 +701,10 @@ class SystemAgentService:
                 SystemAgentMessage(
                     session_id=session.id,
                     role=MESSAGE_ROLE_ASSISTANT,
-                    content={"text": redact_known_secrets(assistant_text, chat_secrets)},
+                    content={
+                        "text": redact_known_secrets(assistant_text, chat_secrets),
+                        **({"reasoning": assistant_reasoning} if assistant_reasoning else {}),
+                    },
                     usage=usage_payload,
                     run_status=MESSAGE_RUN_COMPLETED,
                 )

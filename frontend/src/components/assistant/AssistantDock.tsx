@@ -9,6 +9,7 @@ import {
   type ReactNode,
 } from "react";
 import { useLocation } from "react-router-dom";
+import { shouldOpenAssistantDock } from "./assistantDockState";
 
 type AssistantDockValue = {
   collapsed: boolean;
@@ -24,8 +25,9 @@ const AssistantDockContext = createContext<AssistantDockValue | null>(null);
 
 export function AssistantDockProvider({ children }: { children: ReactNode }) {
   const location = useLocation();
-  const [collapsed, setCollapsedState] = useState(true);
-  const [mounted, setMounted] = useState(false);
+  const initiallyOpen = shouldOpenAssistantDock(location.pathname, location.search);
+  const [collapsed, setCollapsedState] = useState(!initiallyOpen);
+  const [mounted, setMounted] = useState(initiallyOpen);
   const [streaming, setStreaming] = useState(false);
   const [completionSignal, setCompletionSignal] = useState(0);
   const locationKeyRef = useRef(`${location.pathname}${location.search}${location.hash}`);
@@ -51,10 +53,8 @@ export function AssistantDockProvider({ children }: { children: ReactNode }) {
     const locationKey = `${location.pathname}${location.search}${location.hash}`;
     if (locationKey === locationKeyRef.current) return;
     locationKeyRef.current = locationKey;
-    const params = new URLSearchParams(location.search);
-    const deepSession = params.get("session");
     // 深链 /assistant?session=…：打开悬浮助手，不因路由切换而收起
-    if (location.pathname === "/assistant" || deepSession) {
+    if (shouldOpenAssistantDock(location.pathname, location.search)) {
       setMounted(true);
       setCollapsedState(false);
       return;

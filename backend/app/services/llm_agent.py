@@ -55,6 +55,7 @@ class AgentCallbacks:
     on_tool_start: Callable[[ToolCall], Awaitable[None]] | None = None
     on_tool_finish: Callable[[ToolCall, ToolResult], Awaitable[None]] | None = None
     on_text_delta: Callable[[str], Awaitable[None]] | None = None
+    on_reasoning_delta: Callable[[str], Awaitable[None]] | None = None
     on_text_reset: Callable[[], Awaitable[None]] | None = None
 
 
@@ -67,6 +68,7 @@ class AgentResult:
     steps: int
     tool_calls: int
     stop_reason: StopReason
+    reasoning_content: str | None = None
 
 
 class AgentLimitError(RuntimeError):
@@ -235,6 +237,7 @@ async def run_agent(
     previous_step_input: int | None = None
     fingerprints: dict[str, int] = {}
     tool_call_count = 0
+    reasoning_parts: list[str] = []
     started = time.monotonic()
 
     def _apply_limit_budget(step_usage: ModelUsage) -> None:
@@ -266,6 +269,8 @@ async def run_agent(
             async for event in stream_model_call(current):
                 if event.delta:
                     await _notify(callbacks.on_text_delta, event.delta)
+                if event.reasoning_delta:
+                    await _notify(callbacks.on_reasoning_delta, event.reasoning_delta)
                 if event.response is not None:
                     terminal = event.response
                     break
@@ -287,6 +292,8 @@ async def run_agent(
             )
         else:
             response = await call(replace(request, messages=tuple(messages), stream=False))
+            if response.reasoning_content:
+                reasoning_parts.append(response.reasoning_content)
             usage = _sum_usage(usage, response.usage)
             await _notify(callbacks.on_usage, usage)
             _apply_limit_budget(response.usage)
@@ -308,6 +315,7 @@ async def run_agent(
                 steps=step,
                 tool_calls=tool_call_count,
                 stop_reason=response.stop_reason,
+                reasoning_content="\n\n".join(reasoning_parts) or None,
             )
 
         # 对工具调用前可能已抵达的自然语言草稿只作临时预览。确认本轮要
@@ -371,6 +379,8 @@ async def run_agent(
             stream=False,
         )
     )
+    if final_response.reasoning_content:
+        reasoning_parts.append(final_response.reasoning_content)
     usage = _sum_usage(usage, final_response.usage)
     await _notify(callbacks.on_usage, usage)
     _apply_limit_budget(final_response.usage)
@@ -386,6 +396,7 @@ async def run_agent(
         steps=limits.max_steps,
         tool_calls=tool_call_count,
         stop_reason=final_response.stop_reason,
+        reasoning_content="\n\n".join(reasoning_parts) or None,
     )
 
 

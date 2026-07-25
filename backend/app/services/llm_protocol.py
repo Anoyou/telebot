@@ -244,6 +244,9 @@ class ModelStreamEvent:
     """
 
     delta: str = ""
+    # Provider-native reasoning/thinking stream, kept separate from visible
+    # answer text so callers can expose it as an optional detail.
+    reasoning_delta: str = ""
     response: ModelResponse | None = None
 
 

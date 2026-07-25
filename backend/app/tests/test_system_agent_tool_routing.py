@@ -128,6 +128,10 @@ def test_log_root_cause_route_adds_source_domain() -> None:
         "联网查一下 DeepSeek 官方文档",
         "总结这个链接 https://example.com/docs",
         "read url https://example.com/docs",
+        "查一下 Sam Altman 最近发文",
+        "看看 OpenAI 官推最新推文",
+        "搜索 Anthropic 最近的 X 动态",
+        "find the latest tweets from DeepSeek",
     ),
 )
 def test_web_requests_route_to_web_domain(text: str) -> None:

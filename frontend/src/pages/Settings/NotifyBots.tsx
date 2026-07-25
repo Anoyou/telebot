@@ -27,7 +27,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Spinner } from "@/components/ui/misc";
 import { Select } from "@/components/ui/select";
-import { SectionHeader, SignalPill } from "@/components/ui/status";
+import { SignalPill } from "@/components/ui/status";
 import { Switch } from "@/components/ui/switch";
 import { getErrMsg } from "@/lib/api";
 
@@ -168,17 +168,22 @@ export function NotifyBots() {
   return (
     <Card>
       <CardHeader>
-        <SectionHeader
-          title="通知 Bot"
-          description="单向发送系统通知，不接收命令。可使用独立 Token，也可以安全引用某个账号的管理 Bot。"
-          meta={
+        <div className="flex min-w-0 items-start justify-between gap-2">
+          <div className="min-w-0 flex-1">
+            <div className="text-base font-semibold tracking-tight">通知 Bot</div>
+            <div className="mt-1 text-sm leading-5 text-muted-foreground">
+              单向发送系统通知，不接收命令。可使用独立 Token，也可以安全引用某个账号的管理 Bot。
+            </div>
+          </div>
+          <div className="shrink-0">
             <SignalPill
               tone={(listQ.data?.length ?? 0) > 0 ? "success" : "neutral"}
               label="通知路由"
               value={`${listQ.data?.length ?? 0} 条`}
+              className="h-8 px-2 sm:px-3"
             />
-          }
-        />
+          </div>
+        </div>
       </CardHeader>
       <CardContent className="space-y-5">
         <section className="nested-surface grid gap-3 border md:grid-cols-3">
@@ -234,7 +239,7 @@ export function NotifyBots() {
           </div>
 
           <div className="nested-surface-item space-y-3 border px-3 py-3">
-            <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
               <div>
                 <div className="flex items-center gap-2 text-sm font-medium">
                   <Link2 className="h-4 w-4" /> 引用账号管理 Bot
@@ -243,16 +248,6 @@ export function NotifyBots() {
                   开启后直接读取所选账号已加密保存的管理 Bot Token，不复制凭据，也不会启动第二个 polling。
                 </div>
               </div>
-              <Switch
-                checked={form.use_management_bot}
-                onCheckedChange={(checked) =>
-                  setForm((p) => ({
-                    ...p,
-                    use_management_bot: checked,
-                    bot_token: checked ? "" : p.bot_token,
-                  }))
-                }
-              />
             </div>
 
             {form.use_management_bot ? (
@@ -286,23 +281,35 @@ export function NotifyBots() {
                 />
               </div>
             )}
+            <div className="flex justify-end border-t pt-3">
+              <Switch
+                checked={form.use_management_bot}
+                aria-label="引用账号管理 Bot"
+                onCheckedChange={(checked) =>
+                  setForm((p) => ({
+                    ...p,
+                    use_management_bot: checked,
+                    bot_token: checked ? "" : p.bot_token,
+                  }))
+                }
+              />
+            </div>
           </div>
 
           <div className="flex flex-wrap items-center gap-3 border-t pt-4">
-            <label className="flex items-center gap-2 text-sm">
-              <Switch
-                checked={form.enabled}
-                onCheckedChange={(v) => setForm((p) => ({ ...p, enabled: v }))}
-              />
-              创建后立即启用
-            </label>
             <Button
-              className="ml-auto"
               onClick={() => createMut.mutate()}
               disabled={!canCreate || createMut.isPending}
             >
               新建通知路由
             </Button>
+            <label className="ml-auto flex items-center gap-2 text-sm">
+              创建后立即启用
+              <Switch
+                checked={form.enabled}
+                onCheckedChange={(v) => setForm((p) => ({ ...p, enabled: v }))}
+              />
+            </label>
           </div>
         </section>
 
@@ -334,10 +341,6 @@ export function NotifyBots() {
                     </div>
                   </div>
                   <div className="flex flex-wrap items-center gap-2">
-                    <Switch
-                      checked={row.enabled}
-                      onCheckedChange={(v) => toggleMut.mutate({ id: row.id, enabled: v })}
-                    />
                     <Button
                       variant="secondary"
                       onClick={() => testMut.mutate(row.id)}
@@ -363,6 +366,12 @@ export function NotifyBots() {
                     >
                       删除
                     </Button>
+                    <Switch
+                      className="ml-auto"
+                      checked={row.enabled}
+                      aria-label={`切换通知路由 ${row.name}`}
+                      onCheckedChange={(v) => toggleMut.mutate({ id: row.id, enabled: v })}
+                    />
                   </div>
                 </div>
               </div>

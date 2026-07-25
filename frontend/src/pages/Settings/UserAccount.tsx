@@ -510,7 +510,7 @@ export function UserAccount() {
                 {loginSecurity?.notify_otp_enabled ? "关闭" : "开启"}
               </Button>
             </div>
-            <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
+            <div className="mt-4 grid grid-cols-2 gap-3 lg:grid-cols-5">
               <div className="space-y-1.5">
                 <Label>失败阈值</Label>
                 <Input

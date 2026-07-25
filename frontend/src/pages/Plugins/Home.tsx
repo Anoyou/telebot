@@ -326,7 +326,7 @@ export function PluginsHome() {
   if (matrixQ.isLoading) {
     return (
       <PageShell>
-        <PluginWorkspaceHeader activeTab="home" selectedAid={selectedAid} guideActive={guideActive} />
+        <PluginWorkspaceHeader activeTab="home" guideActive={guideActive} />
         <div className="flex h-[40vh] items-center justify-center">
           <Spinner className="text-primary" />
         </div>
@@ -398,7 +398,7 @@ export function PluginsHome() {
         </Card>
       ) : null}
 
-      <PluginWorkspaceHeader activeTab="home" selectedAid={selectedAid} guideActive={guideActive} />
+      <PluginWorkspaceHeader activeTab="home" guideActive={guideActive} />
 
       <Card className="hidden md:block">
         <CardContent className="space-y-4 !pt-5">
@@ -891,9 +891,18 @@ function FeatureZone({
                     canConfigure ? "pr-12 sm:pr-3" : "",
                   )}
                 >
+                  <MetaBadge
+                    mono
+                    tone="outline"
+                    className="absolute right-3 top-3 h-6 max-w-20 justify-center px-1.5 text-[10px]"
+                    title={moduleVersionLabel(f.version)}
+                    data-plugin-version
+                  >
+                    {moduleVersionLabel(f.version)}
+                  </MetaBadge>
                   <div className="min-w-0">
                     <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
-                      <div className="min-w-0">
+                      <div className="min-w-0 pr-16">
                         <div className="flex min-w-0 items-center gap-1.5">
                           <button
                             type="button"
@@ -911,19 +920,10 @@ function FeatureZone({
                             </span>
                             <ChevronDown className={cn("h-4 w-4 shrink-0 text-muted-foreground transition-transform sm:hidden", mobileExpanded && "rotate-180")} />
                           </button>
-                          <MetaBadge
-                            mono
-                            tone="outline"
-                            className="h-6 shrink-0 justify-center px-1.5 text-[10px]"
-                            title={moduleVersionLabel(f.version)}
-                            data-plugin-version
-                          >
-                            {moduleVersionLabel(f.version)}
-                          </MetaBadge>
                         </div>
                         <div className="hidden break-all font-mono text-xs leading-5 text-muted-foreground sm:block">{f.key}</div>
                       </div>
-                      <div className="flex min-w-0 flex-wrap gap-1.5 pr-8 sm:justify-end sm:pr-0">
+                      <div className="flex min-w-0 flex-wrap gap-1.5 pr-8 sm:justify-end sm:pr-14">
                         <FeatureCapabilityBadge show={Boolean(f.interaction_entries?.length)} tone="info">
                           可交互
                         </FeatureCapabilityBadge>

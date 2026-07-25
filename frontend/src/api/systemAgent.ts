@@ -147,6 +147,7 @@ export type SystemAgentStreamEvent = {
   seq?: number;
   ts?: string;
   content?: string;
+  reasoning?: string;
   delta?: string;
   message?: string;
   code?: string;

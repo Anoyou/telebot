@@ -1073,6 +1073,7 @@ def _responses_structured_response(
         provider_status=str(provider_reason) if provider_reason else None,
         sources=tuple(_extract_response_sources(data)),
         stream_fallback=stream_fallback,
+        reasoning_content="".join(reasoning_parts) or None,
     )
 
 
@@ -2140,10 +2141,7 @@ class OpenAIClient(LLMClient):
                             )
                             if reasoning:
                                 reasoning_parts.append(reasoning)
-                                # 尚无正文时先把推理流给 UI，避免长时间无输出；
-                                # 正文开始后不再把推理混进主增量。
-                                if not text_parts:
-                                    yield ModelStreamEvent(delta=reasoning)
+                                yield ModelStreamEvent(reasoning_delta=reasoning)
                             refusal = delta.get("refusal")
                             if isinstance(refusal, str) and refusal:
                                 refusal_parts.append(refusal)
@@ -2871,7 +2869,7 @@ class AnthropicClient(LLMClient):
                                         )
                                     if value:
                                         thinking_parts.append(value)
-                                        yield ModelStreamEvent(delta=value)
+                                        yield ModelStreamEvent(reasoning_delta=value)
                                 elif isinstance(block, dict) and block.get("type") == "text":
                                     block_kinds[index] = "text"
                                     value = block.get("text")
@@ -2910,7 +2908,7 @@ class AnthropicClient(LLMClient):
                                         piece = _anthropic_delta_text_piece(delta)
                                     if piece:
                                         thinking_parts.append(piece)
-                                        yield ModelStreamEvent(delta=piece)
+                                        yield ModelStreamEvent(reasoning_delta=piece)
                                 else:
                                     piece = _anthropic_delta_text_piece(delta)
                                     if piece:
@@ -3586,8 +3584,7 @@ class ResponsesClient(LLMClient):
                                 delta = payload.get("delta")
                                 if isinstance(delta, str) and delta:
                                     reasoning_parts.append(delta)
-                                    if not text_parts:
-                                        yield ModelStreamEvent(delta=delta)
+                                    yield ModelStreamEvent(reasoning_delta=delta)
                             elif event_type in {
                                 "response.output_item.added",
                                 "response.output_item.done",

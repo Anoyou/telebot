@@ -366,7 +366,12 @@ async def test_stream_message_commits_history_before_terminal_events(agent_db, m
 
     async def fake_stream(*_a, **_k):
         yield {"type": "run_started", "run_id": "r1"}
-        yield {"type": "assistant_message", "content": "已完成", "usage": {}}
+        yield {
+            "type": "assistant_message",
+            "content": "已完成",
+            "reasoning": "先检查状态再汇总",
+            "usage": {},
+        }
         yield {"type": "done", "ok": True}
 
     monkeypatch.setattr(svc.runtime, "stream_turn", fake_stream)
@@ -392,8 +397,10 @@ async def test_stream_message_commits_history_before_terminal_events(agent_db, m
         second = await anext(stream)
         assert second["type"] == "assistant_message"
         async with agent_db() as observer:
-            roles = [m.role for m in await svc.list_messages(observer, session.id)]
+            saved_messages = await svc.list_messages(observer, session.id)
+            roles = [m.role for m in saved_messages]
             assert roles == [MESSAGE_ROLE_USER, "assistant"]
+            assert saved_messages[-1].content["reasoning"] == "先检查状态再汇总"
 
         await stream.aclose()
 

@@ -360,7 +360,7 @@ export function Logs() {
           />
         </CardHeader>
         <CardContent className="space-y-4">
-          <div className="grid grid-cols-1 gap-3 md:grid-cols-[minmax(0,1fr)_140px] xl:grid-cols-[180px_140px_minmax(0,1fr)] 2xl:grid-cols-[180px_140px_minmax(340px,1fr)_minmax(260px,0.8fr)]">
+          <div className="grid grid-cols-2 gap-3 md:grid-cols-[minmax(0,1fr)_140px] xl:grid-cols-[180px_140px_minmax(0,1fr)] 2xl:grid-cols-[180px_140px_minmax(340px,1fr)_minmax(260px,0.8fr)]">
             <Field label="账号" controlId="message-log-account-filter">
               <Select id="message-log-account-filter" value={accountId} onChange={(event) => setAccountId(event.target.value)}>
                 <option value="">全部账号</option>
@@ -378,10 +378,10 @@ export function Logs() {
                 ))}
               </Select>
             </Field>
-            <Field label="结果" className="md:col-span-2 xl:col-span-1">
+            <Field label="结果" className="col-span-2 md:col-span-2 xl:col-span-1">
               <VerdictSegment value={verdict} onChange={setVerdict} />
             </Field>
-            <Field label="搜索" className="md:col-span-2 xl:col-span-3 2xl:col-span-1">
+            <Field label="搜索" className="col-span-2 md:col-span-2 xl:col-span-3 2xl:col-span-1">
               <SearchBox value={keyword} onChange={setKeyword} />
             </Field>
           </div>
@@ -398,7 +398,7 @@ export function Logs() {
           ) : null}
 
           {showFilters ? (
-            <div className="grid grid-cols-1 gap-3 border-t pt-4 sm:grid-cols-2 xl:grid-cols-4">
+            <div className="grid grid-cols-2 gap-3 border-t pt-4 min-[560px]:grid-cols-3 xl:grid-cols-4">
               <Field label="插件">
                 <PluginSelect value={pluginKey} onChange={setPluginKey} options={pluginOptions} />
               </Field>
@@ -468,7 +468,7 @@ export function Logs() {
             />
           </CardHeader>
           <CardContent className="space-y-4">
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
+            <div className="grid grid-cols-2 gap-3 min-[560px]:grid-cols-3 xl:grid-cols-4">
               <Field label="状态">
                 <Select value={agentStatus} onChange={(event) => setAgentStatus(parseAgentStatus(event.target.value))}>
                   <option value="">全部状态</option>
@@ -522,7 +522,7 @@ export function Logs() {
             />
           </CardHeader>
           <CardContent className="space-y-4">
-            <div className="grid grid-cols-1 gap-3 md:grid-cols-[220px_160px_minmax(240px,1fr)_160px_180px]">
+            <div className="grid grid-cols-2 gap-3 min-[560px]:grid-cols-3 md:grid-cols-[220px_160px_minmax(240px,1fr)_160px_180px]">
               <Field label="服务">
                 <Select value={consoleService} onChange={(event) => setConsoleService(parseConsoleService(event.target.value))}>
                   {SYSTEM_CONSOLE_SERVICE_OPTIONS.map((item) => (
@@ -580,7 +580,7 @@ export function Logs() {
             />
           </CardHeader>
           <CardContent className="space-y-4">
-            <div className="grid grid-cols-1 gap-3 md:grid-cols-[minmax(0,1fr)_160px_160px_minmax(240px,1fr)]">
+            <div className="grid grid-cols-2 gap-3 min-[560px]:grid-cols-3 md:grid-cols-[minmax(0,1fr)_160px_160px_minmax(240px,1fr)]">
               <Field label="账号">
                 <Select value={accountId} onChange={(event) => setAccountId(event.target.value)}>
                   <option value="">全部账号</option>
@@ -612,7 +612,7 @@ export function Logs() {
               </Field>
             </div>
 
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
+            <div className="grid grid-cols-2 gap-3 min-[560px]:grid-cols-3 xl:grid-cols-4">
               <Field label="时间">
                 <Select value={timeRange} onChange={(event) => setTimeRange(event.target.value as TimeRange)}>
                   {Object.entries(TIME_RANGE_LABELS).map(([value, label]) => (
@@ -658,7 +658,7 @@ export function Logs() {
             ) : null}
 
             {showFilters ? (
-              <div className="grid grid-cols-1 gap-3 border-t pt-4 sm:grid-cols-2 xl:grid-cols-4">
+              <div className="grid grid-cols-2 gap-3 border-t pt-4 min-[560px]:grid-cols-3 xl:grid-cols-4">
                 <Field label="插件">
                   <PluginSelect value={pluginKey} onChange={setPluginKey} options={pluginOptions} />
                 </Field>

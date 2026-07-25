@@ -968,22 +968,25 @@ export function LLMProviders({
       <Card>
         <CardHeader>
           <div className="min-w-0 space-y-4">
-            <SectionHeader
-              icon={Package}
-              title="模型提供商"
-              description={
-                <>
+            <div className="flex min-w-0 items-start justify-between gap-2">
+              <div className="min-w-0 flex-1">
+                <div className="flex min-w-0 items-center gap-2">
+                  <Package className="h-4 w-4 shrink-0 text-primary" />
+                  <div className="min-w-0 truncate text-base font-semibold tracking-tight">模型提供商</div>
+                </div>
+                <div className="mt-1 text-sm leading-5 text-muted-foreground">
                   每行对应一组供应商凭据。编辑 Provider 可拉取模型列表，并选择参与路由的模型。
-                </>
-              }
-              meta={
+                </div>
+              </div>
+              <div className="shrink-0">
                 <SignalPill
                   tone={visibleProviders.length > 0 ? "primary" : "warn"}
                   label="可见 Provider"
                   value={`${visibleProviders.length}`}
+                  className="h-8 px-2 sm:px-3"
                 />
-              }
-            />
+              </div>
+            </div>
             <div className="grid grid-cols-2 items-center gap-2 rounded-md border border-primary/20 bg-primary/[0.04] p-2 shadow-sm sm:flex sm:flex-wrap">
               <Button
                 type="button"
@@ -2619,11 +2622,11 @@ function IdentityVersionsDialog({
             </div>
           )}
         </div>
-        <DialogFooter>
-          <Button type="button" variant="outline" onClick={() => void detect()} loading={detecting} disabled={loading}>
+        <DialogFooter className="!grid grid-cols-2 gap-2 sm:!flex">
+          <Button className="w-full sm:w-auto" type="button" variant="outline" onClick={() => void detect()} loading={detecting} disabled={loading}>
             检测最新版本
           </Button>
-          <Button type="button" onClick={() => void save()} loading={saving} disabled={loading}>
+          <Button className="w-full sm:w-auto" type="button" onClick={() => void save()} loading={saving} disabled={loading}>
             保存
           </Button>
         </DialogFooter>

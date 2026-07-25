@@ -147,17 +147,21 @@ export function AssistantIndex() {
     model: string;
   } | null>(null);
   const [streamNotice, setStreamNotice] = useState("");
+  const [composerValue, setComposerValue] = useState("");
+  const [composerFocusKey, setComposerFocusKey] = useState(0);
   /** 本轮模型选择：仅会话本地，默认自动路由 */
   const [sessionModel, setSessionModel] = useState<SessionModelSelection>({ mode: "auto" });
   const abortRef = useRef<AbortController | null>(null);
   const streamingBubbleCreatedRef = useRef(false);
   const liveText = useStreamingText();
+  const liveReasoning = useStreamingText();
 
   const clearLiveStreamingState = useCallback(() => {
     streamingBubbleCreatedRef.current = false;
     liveText.clear();
+    liveReasoning.clear();
     setStreamNotice("");
-  }, [liveText.clear]);
+  }, [liveReasoning.clear, liveText.clear]);
 
   useEffect(() => {
     setDockStreaming(streaming);
@@ -185,6 +189,10 @@ export function AssistantIndex() {
     refetchInterval: assistantCollapsed ? false : 3_000,
     refetchOnWindowFocus: "always",
   });
+  const sessionOptions = useMemo(
+    () => (Array.isArray(sessionsQ.data) ? sessionsQ.data : []),
+    [sessionsQ.data],
+  );
   const accountsQ = useQuery({
     queryKey: ["accounts"],
     queryFn: listAccounts,
@@ -194,6 +202,7 @@ export function AssistantIndex() {
     queryFn: listLLMProviders,
     refetchOnMount: "always",
   });
+  const accountOptions = Array.isArray(accountsQ.data) ? accountsQ.data : [];
   const memoryQ = useQuery({
     queryKey: ["system-agent", "user-memory"],
     queryFn: listSystemAgentUserMemory,
@@ -228,8 +237,8 @@ export function AssistantIndex() {
 
   // 深链/选中会话后同步账号与 origin 筛选
   useEffect(() => {
-    if (!activeId || !sessionsQ.data?.length) return;
-    const match = sessionsQ.data.find((s) => s.id === activeId);
+    if (!activeId || !sessionOptions.length) return;
+    const match = sessionOptions.find((s) => s.id === activeId);
     if (!match) return;
     if (match.account_id != null) {
       setAccountId(match.account_id);
@@ -237,16 +246,16 @@ export function AssistantIndex() {
     if (match.origin === "scheduled") {
       setOriginFilter((prev) => (prev === "all" ? "scheduled" : prev));
     }
-  }, [activeId, sessionsQ.data]);
+  }, [activeId, sessionOptions]);
 
   // 恢复最后一个 active 会话
   useEffect(() => {
-    if (activeId || !sessionsQ.data?.length) return;
-    setActiveId(sessionsQ.data[0].id);
-    if (sessionsQ.data[0].account_id != null) {
-      setAccountId(sessionsQ.data[0].account_id);
+    if (activeId || !sessionOptions.length) return;
+    setActiveId(sessionOptions[0].id);
+    if (sessionOptions[0].account_id != null) {
+      setAccountId(sessionOptions[0].account_id);
     }
-  }, [sessionsQ.data, activeId]);
+  }, [sessionOptions, activeId]);
 
   useEffect(() => {
     setRuntimeSelection(null);
@@ -473,6 +482,7 @@ export function AssistantIndex() {
         id: "live-assistant-stream",
         role: "assistant",
         text: value,
+        reasoning: liveReasoning.textRef.current,
         streaming: true,
         streamFallback: options?.fallback,
       };
@@ -491,6 +501,14 @@ export function AssistantIndex() {
     }
   };
 
+  const appendReasoningDelta = (delta: string) => {
+    liveReasoning.append(delta);
+    if (!streamingBubbleCreatedRef.current) {
+      streamingBubbleCreatedRef.current = true;
+      showStreamingReply(liveText.textRef.current);
+    }
+  };
+
   const resetStreamingReply = () => {
     // 过渡语不整泡删除：截断并入状态行，流式气泡清空复用
     const preview = liveText.textRef.current.trim().slice(0, 60);
@@ -499,7 +517,8 @@ export function AssistantIndex() {
     } else {
       updatePendingText("已理解你的需求，正在调用工具…");
     }
-    clearLiveStreamingState();
+    liveText.clear();
+    setStreamNotice("");
     streamingBubbleCreatedRef.current = false;
     setLive((prev) =>
       prev.map((bubble) =>
@@ -519,6 +538,16 @@ export function AssistantIndex() {
       ),
     );
   }, [liveText.text]);
+
+  useEffect(() => {
+    const current = liveReasoning.text;
+    if (!current || !streamingBubbleCreatedRef.current) return;
+    setLive((prev) =>
+      prev.map((bubble) =>
+        bubble.id === "live-assistant-stream" ? { ...bubble, reasoning: current } : bubble,
+      ),
+    );
+  }, [liveReasoning.text]);
 
   const upsertToolProgress = (event: SystemAgentStreamEvent, finished: boolean) => {
     const id = `tool-${event.call_id || event.seq}`;
@@ -604,6 +633,10 @@ export function AssistantIndex() {
       setStreamNotice("");
       appendStreamingDelta(String(event.delta || ""));
     }
+    if (event.type === "assistant_reasoning_delta") {
+      setStreamNotice("");
+      appendReasoningDelta(String(event.delta || ""));
+    }
     if (event.type === "action_proposed" && event.action) {
       const action = event.action as SystemAgentAction;
       setLive((prev) => [
@@ -623,7 +656,9 @@ export function AssistantIndex() {
         setRuntimeSelection({ providerName, model });
       }
       const finalText = String(event.content || "");
+      const finalReasoning = String(event.reasoning || "");
       liveText.syncSnapshot(finalText);
+      liveReasoning.syncSnapshot(finalReasoning);
       streamingBubbleCreatedRef.current = false;
       const usage =
         event.usage && typeof event.usage === "object"
@@ -639,6 +674,8 @@ export function AssistantIndex() {
               ? {
                   ...bubble,
                   text: finalText,
+                  reasoning: finalReasoning,
+                  createdAt: typeof event.ts === "string" ? event.ts : new Date().toISOString(),
                   streaming: false,
                   streamFallback: Boolean(event.stream_fallback || usage?.stream_fallback),
                   usage,
@@ -652,6 +689,8 @@ export function AssistantIndex() {
             id: "live-assistant-stream",
             role: "assistant" as const,
             text: finalText,
+            reasoning: finalReasoning,
+            createdAt: typeof event.ts === "string" ? event.ts : new Date().toISOString(),
             streaming: false,
             streamFallback: Boolean(event.stream_fallback || usage?.stream_fallback),
             usage,
@@ -768,7 +807,7 @@ export function AssistantIndex() {
       if (doneOk) notifyCompletion();
       if (abortRef.current === controller) {
         streamingBubbleCreatedRef.current = false;
-        liveText.clear();
+        clearLiveStreamingState();
         setLive([]);
       }
     } finally {
@@ -803,15 +842,16 @@ export function AssistantIndex() {
     const controller = new AbortController();
     abortRef.current = controller;
     const userBubble: LiveBubble | null = text
-      ? { id: `live-user-${Date.now()}`, role: "user", text }
+      ? { id: `live-user-${Date.now()}`, role: "user", text, createdAt: new Date().toISOString() }
       : null;
     const pending: LiveBubble = {
       id: `live-assistant-${Date.now()}`,
       role: "assistant",
       text: "正在理解你的需求…",
       pending: true,
+      createdAt: new Date().toISOString(),
     };
-    resetStreamingReply();
+    clearLiveStreamingState();
     setLive(userBubble ? [userBubble, pending] : [pending]);
     try {
       const sessionId = await ensureSession();
@@ -854,6 +894,14 @@ export function AssistantIndex() {
   };
 
   const onSend = async (text: string) => runTurn({ text });
+
+  const onEditMessage = (text: string) => {
+    setComposerValue(text);
+    setComposerFocusKey((value) => value + 1);
+    toast.message("原消息已回填，修改后发送会创建一条新消息");
+  };
+
+  const onRegenerateMessage = async (text: string) => runTurn({ text });
 
   const onRetryMessage = async (
     messageId: number,
@@ -1012,7 +1060,7 @@ export function AssistantIndex() {
             className="h-8 w-full min-w-0 text-xs sm:w-44"
           >
             <option value="">系统级</option>
-            {(accountsQ.data || []).map((a) => (
+            {accountOptions.map((a) => (
               <option key={a.id} value={a.id}>
                 #{a.id} {a.display_name || a.phone || a.tg_username || ""}
               </option>
@@ -1299,7 +1347,7 @@ export function AssistantIndex() {
 
       <div data-assistant-chat-window className="flex min-h-[min(20rem,40dvh)] flex-1 overflow-hidden rounded-xl border bg-card sm:min-h-[min(22rem,48dvh)]">
         <SessionDrawer
-          sessions={sessionsQ.data || []}
+          sessions={sessionOptions}
           activeId={activeId}
           originFilter={originFilter}
           onOriginFilterChange={setOriginFilter}
@@ -1346,6 +1394,8 @@ export function AssistantIndex() {
                 messages={messages}
                 live={conversationLive}
                 onRetryMessage={onRetryMessage}
+                onEditMessage={onEditMessage}
+                onRegenerateMessage={onRegenerateMessage}
                 retryingMessageId={retryingMessageId}
                 busy={streaming}
                 expectedSelection={
@@ -1379,6 +1429,9 @@ export function AssistantIndex() {
                 disabled={configQ.isLoading}
                 streaming={streaming}
                 onSend={onSend}
+                value={composerValue}
+                onValueChange={setComposerValue}
+                focusRequestKey={composerFocusKey}
                 onStop={onStop}
                 modelItems={modelPickerItems}
                 modelSelection={pickerValue}

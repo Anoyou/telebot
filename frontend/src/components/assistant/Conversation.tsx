@@ -1,9 +1,20 @@
 import { memo, useEffect, useRef } from "react";
-import { AlertCircle, Bot, RotateCcw, ShieldCheck, User, Wrench } from "lucide-react";
+import {
+  AlertCircle,
+  Bot,
+  BrainCircuit,
+  Copy,
+  Pencil,
+  RotateCcw,
+  ShieldCheck,
+  User,
+  Wrench,
+} from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import rehypeRaw from "rehype-raw";
 import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
 import remarkGfm from "remark-gfm";
+import { toast } from "sonner";
 
 import type {
   SystemAgentAction,
@@ -17,7 +28,7 @@ import { RunTrace } from "@/components/assistant/RunTrace";
 import { StreamingText } from "@/components/ai/StreamingText";
 import { Button } from "@/components/ui/button";
 import { systemAgentToolLabel } from "@/lib/systemAgentLabels";
-import { cn } from "@/lib/utils";
+import { cn, formatDateTime } from "@/lib/utils";
 import {
   ASSISTANT_HTML_CLASSES,
   extractStyleColor,
@@ -106,6 +117,8 @@ export type LiveBubble = {
   id: string;
   role: "user" | "assistant" | "tool" | "system" | "action";
   text: string;
+  reasoning?: string;
+  createdAt?: string | null;
   pending?: boolean;
   streaming?: boolean;
   streamFallback?: boolean;
@@ -134,6 +147,26 @@ function messageText(msg: SystemAgentMessage): string {
     }
   }
   return "";
+}
+
+function messageReasoning(msg: SystemAgentMessage): string {
+  const value = msg.content?.reasoning;
+  return typeof value === "string" ? value : "";
+}
+
+async function copyAssistantReply(text: string): Promise<void> {
+  try {
+    await navigator.clipboard.writeText(text);
+    toast.success("回答已复制");
+  } catch {
+    toast.error("复制失败，请检查浏览器剪贴板权限");
+  }
+}
+
+function chinaTimestamp(value?: string | null): string | null {
+  if (!value) return null;
+  const formatted = formatDateTime(value, "Asia/Shanghai");
+  return formatted === "-" ? null : `${formatted} · 北京时间`;
 }
 
 function approvalToolLabel(tool: SystemAgentToolApproval["tools"][number]): string {
@@ -210,6 +243,8 @@ export function Conversation({
   live,
   onActionUpdated,
   onRetryMessage,
+  onEditMessage,
+  onRegenerateMessage,
   retryingMessageId,
   busy = false,
   expectedSelection = null,
@@ -222,6 +257,8 @@ export function Conversation({
     fallbackProviderId?: number,
     approvedTools?: string[],
   ) => void;
+  onEditMessage?: (text: string) => void;
+  onRegenerateMessage?: (text: string) => void;
   retryingMessageId?: number | null;
   busy?: boolean;
   /** 本轮希望使用的模型（与实际 meta 对照） */
@@ -238,6 +275,8 @@ export function Conversation({
           ? m.role
           : "system") as LiveBubble["role"],
         text: messageText(m),
+        reasoning: messageReasoning(m),
+        createdAt: m.created_at,
         messageId: m.id,
         runStatus: m.run_status,
         errorCode: m.error_code,
@@ -296,7 +335,7 @@ export function Conversation({
         followStreamRef.current = node.scrollHeight - node.scrollTop - node.clientHeight < 72;
       }}
     >
-      {items.map((item) => {
+      {items.map((item, itemIndex) => {
         const isUser = item.role === "user";
         const isTool = item.role === "tool";
         const isAction = item.role === "action" && item.action;
@@ -306,6 +345,14 @@ export function Conversation({
           isFailedUser && typeof item.usage?.run_id === "string" ? item.usage.run_id : null;
         const switchCandidate = item.providerSwitch?.candidates?.[0];
         const approvalTools = item.toolApproval?.tools || [];
+        const sourceUser = [...items.slice(0, itemIndex)]
+          .reverse()
+          .find((candidate) => candidate.role === "user" && candidate.text.trim());
+        const visibleReasoning =
+          item.reasoning?.trim() && item.reasoning.trim() !== item.text.trim()
+            ? item.reasoning.trim()
+            : "";
+        const timestamp = chinaTimestamp(item.createdAt);
         return (
           <div
             key={item.id}
@@ -339,6 +386,20 @@ export function Conversation({
                       ) : null;
                     })()
                   : null}
+                {!isUser && !isTool && visibleReasoning ? (
+                  <details className="group w-full max-w-[min(75ch,100%)] rounded-md border border-border/60 bg-muted/20 text-xs text-muted-foreground xl:max-w-[min(96ch,100%)] 2xl:max-w-[min(112ch,100%)]">
+                    <summary className="flex min-h-9 cursor-pointer list-none items-center gap-2 px-2.5 py-1.5 font-medium text-foreground/75 marker:hidden">
+                      <BrainCircuit className="h-3.5 w-3.5 shrink-0 text-primary/75" />
+                      <span>思考过程</span>
+                      {item.streaming ? <span className="text-[10px] font-normal text-muted-foreground">生成中</span> : null}
+                      <span className="ml-auto text-[10px] font-normal text-muted-foreground group-open:hidden">展开</span>
+                      <span className="ml-auto hidden text-[10px] font-normal text-muted-foreground group-open:inline">收起</span>
+                    </summary>
+                    <div className="max-h-72 overflow-y-auto border-t border-border/50 px-3 py-2 text-foreground/75">
+                      <AssistantMarkdown text={visibleReasoning} streaming={Boolean(item.streaming)} />
+                    </div>
+                  </details>
+                ) : null}
                 <div
                   className={cn(
                     "max-w-full break-words text-sm leading-relaxed",
@@ -387,6 +448,48 @@ export function Conversation({
                     }
                     expected={expectedSelection}
                   />
+                ) : null}
+                {!isUser && !isTool && !item.streaming && !item.pending && item.text.trim() ? (
+                  <div className="flex min-h-8 w-full max-w-[min(75ch,100%)] items-center gap-1 border-t border-border/45 pt-1 text-[10px] text-muted-foreground xl:max-w-[min(96ch,100%)] 2xl:max-w-[min(112ch,100%)]">
+                    {timestamp ? <time dateTime={item.createdAt || undefined} className="mr-auto tabular-nums">{timestamp}</time> : <span className="mr-auto" />}
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      className="h-8 w-8 text-muted-foreground"
+                      title="复制回答"
+                      aria-label="复制回答"
+                      onClick={() => void copyAssistantReply(item.text)}
+                    >
+                      <Copy className="h-3.5 w-3.5" />
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      className="h-8 w-8 text-muted-foreground"
+                      title="使用当前选择的模型重新生成"
+                      aria-label="使用当前选择的模型重新生成"
+                      disabled={busy || !sourceUser || !onRegenerateMessage}
+                      onClick={() => sourceUser && onRegenerateMessage?.(sourceUser.text)}
+                    >
+                      <RotateCcw className="h-3.5 w-3.5" />
+                    </Button>
+                  </div>
+                ) : null}
+                {isUser && item.messageId != null && item.text.trim() && onEditMessage ? (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    className="h-8 w-8 text-muted-foreground"
+                    title="编辑后作为新消息发送"
+                    aria-label="编辑后作为新消息发送"
+                    disabled={busy}
+                    onClick={() => onEditMessage(item.text)}
+                  >
+                    <Pencil className="h-3.5 w-3.5" />
+                  </Button>
                 ) : null}
                 {isFailedUser ? (
                   <div className={cn(

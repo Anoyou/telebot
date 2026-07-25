@@ -146,6 +146,8 @@ export function ToneRailCard({
   className,
   titleClassName,
   valueClassName,
+  actions,
+  actionsPlacement = "header",
 }: {
   icon: ComponentType<{ className?: string }>;
   title: ReactNode;
@@ -156,6 +158,8 @@ export function ToneRailCard({
   className?: string;
   titleClassName?: string;
   valueClassName?: string;
+  actions?: ReactNode;
+  actionsPlacement?: "header" | "footer";
 }) {
   const toneClass = toneClasses(tone);
   const railClass = toneClasses(railTone ?? tone).rail;
@@ -167,7 +171,7 @@ export function ToneRailCard({
       )}
     >
       <div className={cn("absolute inset-x-0 top-0 h-1", railClass)} />
-      <CardHeader className="flex-row items-start justify-between space-y-0">
+      <CardHeader className="flex-row items-start justify-between gap-2 space-y-0">
         <div className="min-w-0">
           <CardTitle className={cn("inline-flex max-w-full items-center gap-2 truncate", titleClassName)}>
             <span className={cn("grid h-7 w-7 shrink-0 place-items-center rounded-lg", toneClass.iconWrap)}>
@@ -181,8 +185,11 @@ export function ToneRailCard({
             </CardDescription>
           ) : null}
         </div>
+        {actions && actionsPlacement === "header" ? (
+          <div className="flex shrink-0 items-center gap-1">{actions}</div>
+        ) : null}
       </CardHeader>
-      <CardFooter className="pt-0">
+      <CardFooter className={cn("pt-0", actionsPlacement === "footer" && "justify-between gap-2")}>
         <div
           className={cn(
             "min-w-0",
@@ -191,6 +198,9 @@ export function ToneRailCard({
         >
           {value}
         </div>
+        {actions && actionsPlacement === "footer" ? (
+          <div className="flex shrink-0 items-center gap-1">{actions}</div>
+        ) : null}
       </CardFooter>
     </Card>
   );

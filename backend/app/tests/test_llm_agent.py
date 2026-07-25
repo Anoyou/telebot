@@ -76,11 +76,13 @@ async def test_agent_executes_tool_then_returns_answer() -> None:
 @pytest.mark.asyncio
 async def test_agent_streams_real_deltas_and_reconciles_final_text() -> None:
     deltas: list[str] = []
+    reasoning_deltas: list[str] = []
 
     async def model_call(_request: ModelRequest) -> ModelResponse:
         raise AssertionError("configured stream path must be used")
 
     async def stream_model_call(_request: ModelRequest):
+        yield ModelStreamEvent(reasoning_delta="先分析")
         yield ModelStreamEvent(delta="真")
         yield ModelStreamEvent(delta="流")
         yield ModelStreamEvent(
@@ -89,6 +91,7 @@ async def test_agent_streams_real_deltas_and_reconciles_final_text() -> None:
                 content=(TextContent("真流"),),
                 usage=ModelUsage(input_tokens=2, output_tokens=2),
                 stop_reason=StopReason.COMPLETED,
+                reasoning_content="先分析",
             )
         )
 
@@ -97,11 +100,16 @@ async def test_agent_streams_real_deltas_and_reconciles_final_text() -> None:
         _request(),
         {},
         stream_model_call=stream_model_call,
-        callbacks=AgentCallbacks(on_text_delta=lambda delta: _append(deltas, delta)),
+        callbacks=AgentCallbacks(
+            on_text_delta=lambda delta: _append(deltas, delta),
+            on_reasoning_delta=lambda delta: _append(reasoning_deltas, delta),
+        ),
     )
 
     assert deltas == ["真", "流"]
+    assert reasoning_deltas == ["先分析"]
     assert result.text == "真流"
+    assert result.reasoning_content == "先分析"
     assert result.usage.total_tokens == 4
 
 

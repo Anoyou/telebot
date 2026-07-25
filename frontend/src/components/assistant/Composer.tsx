@@ -1,4 +1,4 @@
-import { useState, type FormEvent, type KeyboardEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
 import { Menu, Send, Square } from "lucide-react";
 
 import {
@@ -9,6 +9,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
+import { composerEnterAction } from "./composerState";
 
 export function Composer({
   disabled,
@@ -24,6 +25,9 @@ export function Composer({
   expectedLabel,
   onOpenSessions,
   showSessionButtonOnDesktop = false,
+  value: controlledValue,
+  onValueChange,
+  focusRequestKey = 0,
 }: {
   disabled?: boolean;
   onSend: (text: string) => void | Promise<void>;
@@ -40,9 +44,37 @@ export function Composer({
   expectedLabel?: string;
   onOpenSessions?: () => void;
   showSessionButtonOnDesktop?: boolean;
+  value?: string;
+  onValueChange?: (value: string) => void;
+  focusRequestKey?: number;
 }) {
-  const [value, setValue] = useState("");
+  const [internalValue, setInternalValue] = useState("");
   const [sending, setSending] = useState(false);
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const composingRef = useRef(false);
+  const suppressNextEnterRef = useRef(false);
+  const suppressTimerRef = useRef<number | null>(null);
+  const value = controlledValue ?? internalValue;
+
+  const updateValue = (next: string) => {
+    if (controlledValue === undefined) setInternalValue(next);
+    onValueChange?.(next);
+  };
+
+  useEffect(() => {
+    if (!focusRequestKey) return;
+    const node = textareaRef.current;
+    if (!node) return;
+    node.focus();
+    node.setSelectionRange(node.value.length, node.value.length);
+  }, [focusRequestKey]);
+
+  useEffect(
+    () => () => {
+      if (suppressTimerRef.current != null) window.clearTimeout(suppressTimerRef.current);
+    },
+    [],
+  );
 
   const submit = async () => {
     const text = value.trim();
@@ -50,7 +82,7 @@ export function Composer({
     setSending(true);
     try {
       await onSend(text);
-      setValue("");
+      updateValue("");
     } finally {
       setSending(false);
     }
@@ -62,7 +94,19 @@ export function Composer({
   };
 
   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === "Enter" && !e.shiftKey) {
+    const action = composerEnterAction({
+      key: e.key,
+      shiftKey: e.shiftKey,
+      nativeComposing: e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229,
+      compositionActive: composingRef.current,
+      suppressAfterComposition: suppressNextEnterRef.current,
+    });
+    if (action === "suppress") {
+      suppressNextEnterRef.current = false;
+      e.preventDefault();
+      return;
+    }
+    if (action === "submit") {
       e.preventDefault();
       void submit();
     }
@@ -76,9 +120,23 @@ export function Composer({
     >
       <div className="mx-auto max-w-3xl rounded-xl border border-border/80 bg-input-bg/70 p-2 shadow-sm focus-within:border-primary/50 focus-within:ring-2 focus-within:ring-ring/15 xl:max-w-5xl 2xl:max-w-6xl">
         <Textarea
+          ref={textareaRef}
           value={value}
-          onChange={(e) => setValue(e.target.value)}
+          onChange={(e) => updateValue(e.target.value)}
           onKeyDown={onKeyDown}
+          onCompositionStart={() => {
+            composingRef.current = true;
+            suppressNextEnterRef.current = false;
+          }}
+          onCompositionEnd={() => {
+            composingRef.current = false;
+            suppressNextEnterRef.current = true;
+            if (suppressTimerRef.current != null) window.clearTimeout(suppressTimerRef.current);
+            suppressTimerRef.current = window.setTimeout(() => {
+              suppressNextEnterRef.current = false;
+              suppressTimerRef.current = null;
+            }, 0);
+          }}
           disabled={disabled || sending || streaming}
           placeholder={placeholder || "用自然语言查询系统状态…（Enter 发送，Shift+Enter 换行）"}
           rows={2}

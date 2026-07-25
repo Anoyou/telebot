@@ -584,11 +584,16 @@ export function SettingsIndex() {
                 return (
                   <div
                     key={mod.key}
-                    className="flex flex-col gap-3 rounded-md border border-border/70 bg-muted/20 p-3 sm:flex-row sm:items-center sm:justify-between"
+                    className="flex min-h-32 flex-col gap-3 rounded-md border border-border/70 bg-muted/20 p-3"
                   >
-                    <div className="min-w-0 space-y-1">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <span className="text-sm font-medium">{mod.label}</span>
+                    <div className="min-w-0 flex-1 space-y-1">
+                      <div className="flex min-w-0 items-start justify-between gap-2">
+                        <div className="flex min-w-0 flex-wrap items-center gap-2">
+                          <span className="text-sm font-medium">{mod.label}</span>
+                          <span className="text-[11px] text-muted-foreground">
+                            gen {mod.generation}
+                          </span>
+                        </div>
                         <SignalPill
                           tone={
                             mod.desired_enabled
@@ -599,10 +604,8 @@ export function SettingsIndex() {
                           }
                           label="状态"
                           value={runtimeStateLabel(String(mod.runtime_state))}
+                          className="h-8 shrink-0 px-2"
                         />
-                        <span className="text-[11px] text-muted-foreground">
-                          gen {mod.generation}
-                        </span>
                       </div>
                       <p className="text-xs leading-5 text-muted-foreground">
                         {mod.key === "ai" &&
@@ -620,14 +623,16 @@ export function SettingsIndex() {
                         <p className="text-xs text-destructive">{mod.last_error}</p>
                       ) : null}
                     </div>
-                    <Switch
-                      checked={Boolean(mod.desired_enabled)}
-                      disabled={pending || capsQ.isLoading}
-                      onCheckedChange={(checked) =>
-                        saveCapability.mutate({ key: mod.key, enabled: checked })
-                      }
-                      aria-label={`切换 ${mod.label}`}
-                    />
+                    <div className="flex justify-end">
+                      <Switch
+                        checked={Boolean(mod.desired_enabled)}
+                        disabled={pending || capsQ.isLoading}
+                        onCheckedChange={(checked) =>
+                          saveCapability.mutate({ key: mod.key, enabled: checked })
+                        }
+                        aria-label={`切换 ${mod.label}`}
+                      />
+                    </div>
                   </div>
                 );
               })}

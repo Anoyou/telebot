@@ -62,6 +62,7 @@ DOMAIN_CATALOG: dict[str, tuple[str, tuple[str, ...]]] = {
         (
             "联网", "互联网", "网页搜索", "网上搜索", "搜索网络", "官网", "官方文档",
             "最新资料", "读取网页", "总结网页", "总结链接", "网址", "url", "http://", "https://",
+            "最近发文", "最新发文", "推文", "官推", "公开动态", "x 动态", "twitter", "tweet",
             "web search", "internet search", "search online", "online docs", "read url",
         ),
     ),
@@ -236,6 +237,27 @@ def _contains_cjk(text: str) -> bool:
     return any("\u4e00" <= ch <= "\u9fff" for ch in text)
 
 
+def has_explicit_web_intent(text: str) -> bool:
+    """识别路由模型失败时仍不能丢弃的明确公开信息检索意图。"""
+
+    normalized = re.sub(r"\s+", "", str(text or "").lower())
+    recency_hints = ("最近", "最新", "近期", "latest", "recent")
+    public_activity_hints = (
+        "发文",
+        "发布了什么",
+        "说了什么",
+        "公开动态",
+        "x动态",
+        "推文",
+        "官推",
+        "twitter",
+        "tweet",
+    )
+    return any(hint in normalized for hint in recency_hints) and any(
+        hint in normalized for hint in public_activity_hints
+    )
+
+
 def route_locally(
     text: str,
     *,
@@ -353,6 +375,7 @@ __all__ = [
     "ToolRoute",
     "available_domains",
     "domain_catalog",
+    "has_explicit_web_intent",
     "parse_model_route",
     "register_dynamic_domain",
     "route_locally",

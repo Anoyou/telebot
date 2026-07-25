@@ -651,3 +651,39 @@ async def test_model_router_only_allows_confirmed_cross_provider(monkeypatch) ->
     assert route.domains == ("scheduler",)
     assert captured_metadata[0]["confirm_provider_switch"] is True
     assert captured_metadata[0]["allowed_cross_provider_ids"] == [fallback.id]
+
+
+@pytest.mark.asyncio
+async def test_model_router_timeout_keeps_explicit_web_intent(monkeypatch) -> None:
+    primary, fallback = _providers()
+
+    async def invoke(*_args, **_kwargs):  # noqa: ANN001
+        raise TimeoutError("router timeout")
+
+    async def read_handler(_ctx, _args):  # noqa: ANN001
+        return {}
+
+    monkeypatch.setattr(runtime_module, "invoke_structured", invoke)
+    web_spec = ToolSpec(
+        name="web.search",
+        description="搜索公开互联网。",
+        input_schema={"type": "object", "properties": {}},
+        read_handler=read_handler,
+    )
+
+    route = await SystemAgentRuntime()._resolve_tool_route(
+        provider_dto=primary,
+        providers={primary.id: primary, fallback.id: fallback},
+        model=primary.default_model,
+        user_text="查一下 Sam Altman 最近说了什么",
+        memory_state={},
+        all_tool_specs=[web_spec],
+        account_id=None,
+        fallback_provider_id=fallback.id,
+    )
+
+    assert route == runtime_module.ToolRoute(
+        ("web",),
+        "fallback",
+        "router_failed_explicit_web_intent",
+    )

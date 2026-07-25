@@ -299,19 +299,6 @@ export function AIIndex() {
         onHelpOpenChange={setHelpMenuOpen}
         cmdPrefix={cmdPrefix}
       />
-      <div className="flex justify-end">
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          className="border-destructive/40 text-destructive hover:bg-destructive/10 hover:text-destructive"
-          disabled={resetUsageMut.isPending || !usageSummary || usageSummary.request_count === 0}
-          onClick={handleResetUsage}
-        >
-          <Trash2 className="mr-1 h-4 w-4" />
-          清空调用统计
-        </Button>
-      </div>
       <div className="grid grid-cols-2 gap-3 xl:grid-cols-4">
         <ToneRailCard
           icon={Package}
@@ -331,21 +318,36 @@ export function AIIndex() {
           titleClassName="gap-1.5 text-sm sm:gap-2 sm:text-base"
           valueClassName="truncate text-xl font-bold tracking-tight sm:text-2xl"
         />
-        <button
-          type="button"
-          className="block h-full min-w-0 appearance-none rounded-lg border-0 bg-transparent p-0 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
-          onClick={() => navigate("/ai?tab=usage")}
-        >
+        <div className="min-w-0">
           <ToneRailCard
             icon={History}
-            title="近期调用情况"
+            title={(
+              <Link className="hover:text-primary hover:underline" to="/ai?tab=usage">
+                近期调用情况
+              </Link>
+            )}
             value={usageSummary ? `${usageSummary.request_count} 次 / 失败 ${usageSummary.failed_count}` : "暂无"}
             description={usageSummary ? `总 Token ${usageSummary.total_tokens} · 点开查看详情` : "触发调用后展示摘要"}
             tone={(usageSummary?.failed_count ?? 0) > 0 ? "warn" : "neutral"}
             className="h-full border-primary/50 bg-primary/5 shadow-sm transition-colors hover:border-primary hover:bg-primary/10"
             valueClassName="break-words text-xl font-bold tracking-tight sm:text-2xl"
+            actionsPlacement="footer"
+            actions={(
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                className="h-8 w-8 text-destructive hover:bg-destructive/10 hover:text-destructive"
+                disabled={resetUsageMut.isPending || !usageSummary || usageSummary.request_count === 0}
+                aria-label="清空调用统计"
+                title="清空调用统计"
+                onClick={handleResetUsage}
+              >
+                <Trash2 className="h-4 w-4" />
+              </Button>
+            )}
           />
-        </button>
+        </div>
         <Card className="border-t-4 border-t-emerald-500/90">
           <CardContent className="space-y-2 p-4">
             <div className="text-sm font-medium">调用成功率</div>

@@ -483,6 +483,7 @@ async def test_openai_stream_invoke_yields_reasoning_before_content() -> None:
             return _StreamResponse()
 
     deltas: list[str] = []
+    reasoning_deltas: list[str] = []
     with patch("app.services.llm_client.httpx.AsyncClient", return_value=_Client()):
         async for event in OpenAIClient(
             "sk",
@@ -496,8 +497,11 @@ async def test_openai_stream_invoke_yields_reasoning_before_content() -> None:
         ):
             if event.delta:
                 deltas.append(event.delta)
+            if event.reasoning_delta:
+                reasoning_deltas.append(event.reasoning_delta)
 
-    assert deltas == ["思考中…", "你好"]
+    assert deltas == ["你好"]
+    assert reasoning_deltas == ["思考中…"]
 
 
 @pytest.mark.asyncio

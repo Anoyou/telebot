@@ -99,8 +99,8 @@ export function ModelRunMeta({
   if (tools != null) bits.push(`工具 ${tools}`);
   if (retries != null && retries > 0) bits.push(`重试 ${retries}`);
   const elapsedLabel = formatElapsed(elapsed);
-  if (elapsedLabel) bits.push(elapsedLabel);
-  if (apiFormat && !compact) bits.push(apiFormat);
+  if (elapsedLabel) bits.push(`总耗时 ${elapsedLabel}`);
+  if (apiFormat && compact) bits.push(apiFormat);
 
   if (!bits.length && !stageBits.length) return null;
 
@@ -135,6 +135,7 @@ export function ModelRunMeta({
             {summary}
           </span>
         ) : null}
+        {apiFormat ? <span className="rounded bg-muted px-1.5 py-0.5">{apiFormat}</span> : null}
         <span className="flex-1" />
         {usedFallback ? <span className="rounded border border-warning/40 px-1 text-warning">fallback</span> : null}
         {streamFallback ? <span className="rounded border px-1">完整响应</span> : null}
@@ -149,8 +150,7 @@ export function ModelRunMeta({
         ) : null}
         {tools != null ? <span>工具 {tools}</span> : null}
         {retries != null && retries > 0 ? <span>重试 {retries}</span> : null}
-        {elapsedLabel ? <span>{elapsedLabel}</span> : null}
-        {apiFormat ? <span className="rounded bg-muted px-1.5 py-0.5">{apiFormat}</span> : null}
+        {elapsedLabel ? <span>总耗时 {elapsedLabel}</span> : null}
       </div>
       {stageBits.length ? (
         <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1 border-t border-border/50 pt-1.5 text-[10px] sm:border-0 sm:pt-0">
