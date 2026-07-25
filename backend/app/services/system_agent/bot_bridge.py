@@ -42,6 +42,13 @@ _MARKDOWN_TABLE_SEPARATOR_RE = re.compile(
     r"^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$"
 )
 _MARKDOWN_LINK_RE = re.compile(r"\[([^\]\n]+)\]\((https?://[^\s)]+)\)")
+# 用户文本命中写意图时，若角色过滤掉了写工具且本轮无 proposed_actions，追加有声提示
+_WRITE_INTENT_RE = re.compile(
+    r"(停用|启用|暂停|恢复|删除|移除|创建|新建|修改|更新|设置|保存|取消|添加|绑定|解绑|"
+    r"配置|写入|执行|确认|驳回|拒绝|通过|审批|重启|关闭|打开|切换|迁移|导入|导出|"
+    r"pause|resume|delete|create|update|set|save|disable|enable|bind|reject|approve)",
+    re.IGNORECASE,
+)
 
 
 def _mode_key(account_id: int, tg_user_id: int) -> str:
@@ -253,6 +260,56 @@ def _agent_progress_text(event: dict[str, Any]) -> str:
             return f"⚠️ 调用失败：{description}，正在判断下一步…"
         return f"✅ 已完成：{description}，正在整理结果…"
     return ""
+
+
+def _tool_visibility(*, channel: str, role: str) -> dict[str, Any]:
+    """比对角色过滤前后的工具可见性（bot_bridge 侧有声提示 / 状态输出用）。"""
+
+    registry = get_registry()
+    visible = registry.list_for(channel=channel, role=role or "viewer")
+    full = registry.list_for(channel=channel, role="admin")
+    write_visible = [t for t in visible if not t.read_only]
+    write_full = [t for t in full if not t.read_only]
+    read_visible = [t for t in visible if t.read_only]
+    write_hidden = [t for t in write_full if t.name not in {s.name for s in write_visible}]
+    return {
+        "role": str(role or "viewer"),
+        "read_count": len(read_visible),
+        "write_count": len(write_visible),
+        "write_tools_visible": len(write_visible) > 0,
+        "write_tools_hidden_by_role": len(write_hidden) > 0,
+        "total_visible": len(visible),
+    }
+
+
+def _write_intent_hint(*, role: str, text: str, proposed_actions: list[dict[str, Any]]) -> str:
+    """角色过滤导致写工具不可见时，把无声失败改成有声提示（纯文本，交由 markdown→HTML 统一转义）。"""
+
+    if proposed_actions:
+        return ""
+    if not _WRITE_INTENT_RE.search(str(text or "")):
+        return ""
+    vis = _tool_visibility(channel=CHANNEL_BOT, role=role)
+    if not vis["write_tools_hidden_by_role"]:
+        return ""
+    role_label = str(vis["role"])
+    return (
+        f"\n\nℹ️ 当前角色 {role_label} 无权发起写操作（需 operator 及以上），"
+        "请在管理 Bot 用户绑定中调整。"
+    )
+
+
+async def _redis_nonce_available() -> bool:
+    """探测 Redis 是否可用于 Inline 确认 nonce。"""
+
+    try:
+        redis = get_redis()
+        probe_key = AGENT_CONFIRM_PREFIX + "probe"
+        await redis.set(probe_key, "1", ex=5)
+        await redis.delete(probe_key)
+        return True
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def _agent_button(text: str, action: str, aid: int, nonce: str) -> dict[str, str]:
@@ -602,9 +659,16 @@ async def handle_agent_command(
     if not tail or tail.lower() in {"help", "status", "?"}:
         active = await is_agent_mode(account_id, tg_user_id)
         ok = await enter_agent_mode(account_id, tg_user_id)
+        vis = _tool_visibility(channel=CHANNEL_BOT, role=role)
+        redis_ok = await _redis_nonce_available()
+        role_label = _html_escape(str(vis["role"]))
         msg = (
             "🤖 <b>系统助手</b>\n"
             f"账号：<code>{account_id}</code>\n"
+            f"当前角色：<code>{role_label}</code>\n"
+            f"可用工具：读 {vis['read_count']} / 写 {vis['write_count']}"
+            f"（合计 {vis['total_visible']}）\n"
+            f"Redis 确认票据：{'可用' if redis_ok else '不可用（写操作无 Inline 按钮）'}\n"
             f"助手模式：{'已开启' if ok or active else 'Redis 不可用，仅 /agent 单次任务可用'}\n\n"
             "用法：\n"
             "/agent &lt;问题&gt; — 直接提问\n"
@@ -614,6 +678,11 @@ async def handle_agent_command(
             "助手模式下可直接发送自然语言（既有斜杠命令仍优先）。\n"
             "写操作会弹出 Inline 确认按钮，确认后才会落库。"
         )
+        if not vis["write_tools_visible"]:
+            msg += (
+                f"\n\nℹ️ 当前角色 {role_label} 看不到写工具；"
+                "需要 operator 及以上才能发起写操作确认。"
+            )
         await send(msg, edit=edit)
         return
 
@@ -802,11 +871,25 @@ async def run_agent_query(
         )
         return
 
+    vis = _tool_visibility(channel=CHANNEL_BOT, role=role)
+    log.info(
+        "bot agent query done account=%s tg_user=%s role=%s write_tools_visible=%s proposed_actions=%s",
+        account_id,
+        tg_user_id,
+        vis["role"],
+        vis["write_tools_visible"],
+        len(proposed_actions),
+    )
+
     body = assistant_text or ""
     if proposed_actions and not body:
         body = "已生成待确认操作，请点击下方按钮确认或取消。"
     elif proposed_actions:
         body = body.rstrip() + "\n\n——\n已生成待确认操作，请点击下方按钮。"
+
+    role_hint = _write_intent_hint(role=role, text=text, proposed_actions=proposed_actions)
+    if role_hint:
+        body = (body.rstrip() if body else "") + role_hint
 
     if len(body) > 3500:
         body = body[:3400] + "\n\n…（已截断，完整内容请到 Web 悬浮助手查看）"

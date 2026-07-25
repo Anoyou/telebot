@@ -42,6 +42,19 @@ async def test_agent_help_enters_mode_and_shows_usage() -> None:
     with (
         patch.object(bot_bridge, "enter_agent_mode", AsyncMock(return_value=True)),
         patch.object(bot_bridge, "is_agent_mode", AsyncMock(return_value=False)),
+        patch.object(bot_bridge, "_redis_nonce_available", AsyncMock(return_value=True)),
+        patch.object(
+            bot_bridge,
+            "_tool_visibility",
+            return_value={
+                "role": "admin",
+                "read_count": 10,
+                "write_count": 5,
+                "write_tools_visible": True,
+                "write_tools_hidden_by_role": False,
+                "total_visible": 15,
+            },
+        ),
     ):
         await bot_bridge.handle_agent_command(
             account_id=1,
@@ -55,6 +68,43 @@ async def test_agent_help_enters_mode_and_shows_usage() -> None:
     assert "系统助手" in body
     assert "/agent new" in body
     assert "Inline 确认" in body
+    assert "当前角色" in body
+    assert "可用工具" in body
+    assert "Redis 确认票据" in body
+
+
+@pytest.mark.asyncio
+async def test_agent_status_shows_viewer_write_limitation() -> None:
+    send = _SendCapture()
+    with (
+        patch.object(bot_bridge, "enter_agent_mode", AsyncMock(return_value=True)),
+        patch.object(bot_bridge, "is_agent_mode", AsyncMock(return_value=True)),
+        patch.object(bot_bridge, "_redis_nonce_available", AsyncMock(return_value=False)),
+        patch.object(
+            bot_bridge,
+            "_tool_visibility",
+            return_value={
+                "role": "viewer",
+                "read_count": 8,
+                "write_count": 0,
+                "write_tools_visible": False,
+                "write_tools_hidden_by_role": True,
+                "total_visible": 8,
+            },
+        ),
+    ):
+        await bot_bridge.handle_agent_command(
+            account_id=1,
+            tg_user_id=42,
+            role="viewer",
+            text="/agent status",
+            send=send,
+        )
+    body = send.calls[0]["msg"]
+    assert "viewer" in body
+    assert "写 0" in body
+    assert "不可用" in body
+    assert "看不到写工具" in body
 
 
 @pytest.mark.asyncio
@@ -341,6 +391,62 @@ async def test_run_agent_query_prefers_rich_markdown_and_has_readable_html_fallb
     assert "<b>今日台账</b>" in final["msg"]
     assert "<pre>" in final["msg"]
     assert "| --- |" not in final["msg"]
+
+
+@pytest.mark.asyncio
+async def test_run_agent_query_viewer_write_intent_gets_role_hint(monkeypatch) -> None:
+    """viewer 发写意图且无 proposed_actions 时，回复末尾追加角色无权提示。"""
+    send = _SendCapture()
+
+    class _Svc:
+        async def get_or_create_active_session(self, *a, **k):  # noqa: ANN001
+            return SimpleSession("sess-viewer")
+
+        async def get_session(self, *a, **k):  # noqa: ANN001
+            return SimpleSession("sess-viewer")
+
+        async def stream_message(self, *a, **k):  # noqa: ANN001
+            yield {"type": "assistant_message", "content": "我来看看这条规则。"}
+            yield {"type": "done", "ok": True}
+
+    class SimpleSession:
+        def __init__(self, sid: str) -> None:
+            self.id = sid
+
+    class _DB:
+        async def __aenter__(self):
+            return AsyncMock()
+
+        async def __aexit__(self, *args):
+            return False
+
+    monkeypatch.setattr(bot_bridge, "AsyncSessionLocal", lambda: _DB())
+    monkeypatch.setattr(bot_bridge, "get_system_agent_service", lambda: _Svc())
+    monkeypatch.setattr(bot_bridge, "refresh_agent_mode", AsyncMock())
+    monkeypatch.setattr(
+        bot_bridge,
+        "_tool_visibility",
+        lambda **k: {
+            "role": "viewer",
+            "read_count": 8,
+            "write_count": 0,
+            "write_tools_visible": False,
+            "write_tools_hidden_by_role": True,
+            "total_visible": 8,
+        },
+    )
+
+    await bot_bridge.run_agent_query(
+        account_id=1,
+        tg_user_id=2,
+        role="viewer",
+        text="帮我停用这条规则",
+        send=send,
+    )
+    final = send.calls[-1]["msg"]
+    assert "我来看看这条规则" in final
+    assert "无权发起写操作" in final
+    assert "viewer" in final
 
 
 @pytest.mark.asyncio

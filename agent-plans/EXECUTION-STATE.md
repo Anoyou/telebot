@@ -8,8 +8,8 @@
 
 ### 轮次 F：Bot 修复轮（先行，独立可发布）
 
-- [x] WP-F1 draft 重复消息修复（final 不进 draft + clear_draft 专用路径） — done（待 commit）
-- [ ] WP-F2 审批可见性（角色过滤有声提示 + /agent 状态 + 日志留痕） — pending
+- [x] WP-F1 draft 重复消息修复（final 不进 draft + clear_draft 专用路径） — done `162f74b7`
+- [x] WP-F2 审批可见性（角色过滤有声提示 + /agent 状态 + 日志留痕） — done（待 commit）
 
 ### 轮次 O：OpenWorker 三点
 
