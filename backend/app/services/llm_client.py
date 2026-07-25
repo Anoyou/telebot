@@ -809,6 +809,118 @@ def _anthropic_structured_response(
     )
 
 
+def _coerce_chat_completions_to_responses(data: dict[str, Any]) -> dict[str, Any]:
+    """If a gateway returns Chat Completions JSON for a Responses request, reshape it.
+
+    智谱 / Kimi / 部分中转站官方主推 ``/chat/completions``；若用户误选
+    ``api_format=responses`` 或网关混用形态，尽量从 ``choices`` 救回正文与工具调用。
+    """
+
+    if not isinstance(data, dict):
+        return data
+    if isinstance(data.get("output"), list) or str(data.get("object") or "") == "response":
+        return data
+    choices = data.get("choices")
+    if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+        return data
+    message = choices[0].get("message") if isinstance(choices[0].get("message"), dict) else {}
+    visible = _openai_message_visible_text(message)
+    reasoning = ""
+    for key in ("reasoning_content", "reasoning", "thinking"):
+        reasoning = _openai_reasoning_text(message.get(key)).strip()
+        if reasoning:
+            break
+    output: list[dict[str, Any]] = []
+    if reasoning and not visible:
+        output.append(
+            {
+                "type": "reasoning",
+                "summary": [{"type": "summary_text", "text": reasoning}],
+            }
+        )
+    if visible or reasoning:
+        output.append(
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "output_text",
+                        "text": visible or reasoning,
+                    }
+                ],
+            }
+        )
+    for item in message.get("tool_calls") or []:
+        if not isinstance(item, dict):
+            continue
+        function = item.get("function") if isinstance(item.get("function"), dict) else {}
+        name = str(function.get("name") or "").strip()
+        if not name:
+            continue
+        args = function.get("arguments")
+        output.append(
+            {
+                "type": "function_call",
+                "id": str(item.get("id") or ""),
+                "call_id": str(item.get("id") or ""),
+                "name": name,
+                "arguments": args if isinstance(args, str) else json.dumps(args or {}, ensure_ascii=False),
+            }
+        )
+    usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
+    return {
+        "id": data.get("id"),
+        "object": "response",
+        "status": "completed",
+        "model": data.get("model"),
+        "output": output,
+        "output_text": visible or reasoning or "",
+        "usage": {
+            "input_tokens": int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0),
+            "output_tokens": int(usage.get("completion_tokens") or usage.get("output_tokens") or 0),
+            "output_tokens_details": usage.get("completion_tokens_details")
+            if isinstance(usage.get("completion_tokens_details"), dict)
+            else {},
+        },
+    }
+
+
+def _responses_reasoning_text_from_item(item: Mapping[str, Any]) -> str:
+    """Extract reasoning/summary text from a Responses output item."""
+
+    parts: list[str] = []
+    item_type = str(item.get("type") or "")
+    if item_type == "reasoning":
+        for summary in item.get("summary") or []:
+            if isinstance(summary, dict):
+                text = summary.get("text")
+                if isinstance(text, str) and text:
+                    parts.append(text)
+        for content in item.get("content") or []:
+            if not isinstance(content, dict):
+                continue
+            if str(content.get("type") or "") in {
+                "summary_text",
+                "reasoning_text",
+                "text",
+                "output_text",
+            }:
+                text = content.get("text")
+                if isinstance(text, str) and text:
+                    parts.append(text)
+    # 部分中转把思考塞进 message.content 的非 output_text 类型
+    if item_type in {"message", "output_message"}:
+        for content in item.get("content") or []:
+            if not isinstance(content, dict):
+                continue
+            if str(content.get("type") or "") in {"reasoning", "thinking", "reasoning_text"}:
+                text = content.get("text") or content.get("thinking")
+                if isinstance(text, str) and text:
+                    parts.append(text)
+    return "".join(parts)
+
+
 def _responses_structured_response(
     data: dict[str, Any],
     *,
@@ -819,6 +931,7 @@ def _responses_structured_response(
 ) -> ModelResponse:
     """Normalize a Responses payload for both JSON and SSE terminals."""
 
+    data = _coerce_chat_completions_to_responses(data if isinstance(data, dict) else {})
     status = str(data.get("status") or "").lower()
     incomplete = data.get("incomplete_details") or {}
     incomplete_reason = incomplete.get("reason") if isinstance(incomplete, dict) else None
@@ -833,6 +946,7 @@ def _responses_structured_response(
             )
         )
     text_parts: list[str] = []
+    reasoning_parts: list[str] = []
     tool_calls: list[ToolCall] = []
     has_refusal = False
     for item in data.get("output") or []:
@@ -848,15 +962,33 @@ def _responses_structured_response(
                         arguments=_parse_tool_arguments(item.get("arguments")),
                     )
                 )
+            continue
+        if item.get("type") == "reasoning":
+            piece = _responses_reasoning_text_from_item(item)
+            if piece:
+                reasoning_parts.append(piece)
+            continue
         for content in item.get("content") or []:
             if not isinstance(content, dict):
                 continue
-            if content.get("type") == "refusal" and content.get("refusal"):
+            content_type = str(content.get("type") or "")
+            if content_type == "refusal" and content.get("refusal"):
                 has_refusal = True
-            if isinstance(content.get("text"), str):
+            if content_type in {"output_text", "text"} and isinstance(content.get("text"), str):
+                if content["text"]:
+                    text_parts.append(content["text"])
+            elif content_type in {"reasoning", "thinking", "reasoning_text", "summary_text"}:
+                text = content.get("text") or content.get("thinking")
+                if isinstance(text, str) and text:
+                    reasoning_parts.append(text)
+            elif isinstance(content.get("text"), str) and content["text"]:
+                # 未知 type 但带 text：保守收下
                 text_parts.append(content["text"])
-    if not text_parts and isinstance(data.get("output_text"), str):
-        text_parts.append(data["output_text"])
+    if not text_parts and isinstance(data.get("output_text"), str) and data["output_text"]:
+        text_parts.append(str(data["output_text"]))
+    # 仅有 reasoning 无正文时兜底（中转站 / 推理模型常见）
+    if not text_parts and reasoning_parts:
+        text_parts.extend(reasoning_parts)
     usage = data.get("usage") or {}
     if not isinstance(usage, dict):
         usage = {}
@@ -1129,6 +1261,13 @@ def _parse_responses_sse(text: str) -> dict[str, Any]:
             delta_parts.append(payload["delta"])
         elif payload_type == "response.output_text.done" and isinstance(payload.get("text"), str):
             done_text = payload["text"]
+        elif payload_type in {
+            "response.reasoning_summary_text.delta",
+            "response.reasoning_text.delta",
+        } and isinstance(payload.get("delta"), str):
+            # 仅在尚无正文增量时用 reasoning 兜底拼流
+            if not delta_parts and not done_text:
+                delta_parts.append(payload["delta"])
 
     if error_payload is not None:
         raise ValueError(f"error event: {str(error_payload)[:200]}")
@@ -3000,85 +3139,30 @@ class ResponsesClient(LLMClient):
             )
 
         data = _decode_responses_payload("Responses", resp, self._api_key)
-
-        # 解析 output：兼容多种形态
-        # 形态 1：data["output_text"] = "..."（部分实现的便利字段）
-        # 形态 2：data["output"] = [{"type":"message","content":[{"type":"output_text","text":"..."}]}]
-        text = ""
-        has_refusal = False
-        ot = data.get("output_text")
-        if isinstance(ot, str):
-            text = ot
-        else:
-            output_list = data.get("output") or []
-            text_parts: list[str] = []
-            for item in output_list if isinstance(output_list, list) else []:
-                if not isinstance(item, dict):
-                    continue
-                content = item.get("content") or []
-                if isinstance(content, list):
-                    for c in content:
-                        if not isinstance(c, dict):
-                            continue
-                        if c.get("type") == "refusal" and c.get("refusal"):
-                            has_refusal = True
-                        t = c.get("text")
-                        # type 通常是 output_text；保险起见全收
-                        if isinstance(t, str):
-                            text_parts.append(t)
-            text = "".join(text_parts)
-
-        status = str(data.get("status") or "")
-        if status in {"failed", "cancelled"}:
-            detail = data.get("error") or data.get("incomplete_details") or status
-            raise LLMError(
-                _safe_error_message(
-                    f"Responses 返回状态异常: {status}: {str(detail)[:200]}",
-                    self._api_key,
-                )
-            )
-        tool_calls: list[ToolCall] = []
-        output_list = data.get("output") or []
-        for item in output_list if isinstance(output_list, list) else []:
-            if not isinstance(item, dict) or item.get("type") != "function_call":
-                continue
-            raw_arguments = item.get("arguments")
-            try:
-                arguments = json.loads(raw_arguments) if isinstance(raw_arguments, str) else raw_arguments
-            except json.JSONDecodeError:
-                arguments = {"_raw": raw_arguments}
-            if not isinstance(arguments, dict):
-                arguments = {"value": arguments}
-            name = str(item.get("name") or "").strip()
-            if name:
-                tool_calls.append(
-                    ToolCall(
-                        id=str(item.get("call_id") or item.get("id") or ""),
-                        name=name,
-                        arguments=arguments,
-                    )
-                )
-
-        incomplete = data.get("incomplete_details") or {}
-        incomplete_reason = incomplete.get("reason") if isinstance(incomplete, dict) else None
-        provider_reason = incomplete_reason or status
-        # usage：input_tokens / output_tokens
-        usage = data.get("usage") or {}
-        return LLMResult(
-            text=text.strip(),
-            model=str(data.get("model", self._model)),
-            input_tokens=int(usage.get("input_tokens") or 0),
-            output_tokens=int(usage.get("output_tokens") or 0),
-            sources=_extract_response_sources(data),
-            tool_calls=tool_calls,
-            stop_reason=(
-                StopReason.REFUSAL
-                if has_refusal
-                else StopReason.MAX_TOKENS
-                if incomplete_reason in {"max_output_tokens", "max_tokens"}
-                else stop_reason_from_provider(provider_reason)
+        # 统一走 structured 归一化：支持 reasoning 兜底、Chat Completions 误回包整形
+        request = ModelRequest(
+            model=self._model,
+            messages=(
+                ModelMessage.text(MessageRole.SYSTEM, system),
+                ModelMessage.text(MessageRole.USER, user),
             ),
-            provider_status=str(provider_reason) if provider_reason else None,
+            max_output_tokens=max_tokens,
+        )
+        normalized = _responses_structured_response(
+            data if isinstance(data, dict) else {},
+            request=request,
+            tool_names={},
+            api_key=self._api_key,
+        )
+        return LLMResult(
+            text=normalized.text,
+            model=str(normalized.model or self._model),
+            input_tokens=int(normalized.usage.input_tokens or 0),
+            output_tokens=int(normalized.usage.output_tokens or 0),
+            sources=list(normalized.sources or ()),
+            tool_calls=list(normalized.tool_calls or ()),
+            stop_reason=normalized.stop_reason,
+            provider_status=normalized.provider_status,
         )
 
     async def invoke(self, request: ModelRequest) -> ModelResponse:
@@ -3200,6 +3284,7 @@ class ResponsesClient(LLMClient):
 
         model_name = request.model or self._model
         text_parts: list[str] = []
+        reasoning_parts: list[str] = []
         function_calls: dict[str, dict[str, Any]] = {}
         function_call_aliases: dict[str, str] = {}
         last_response: dict[str, Any] | None = None
@@ -3208,8 +3293,9 @@ class ResponsesClient(LLMClient):
         def terminal_response(*, stream_fallback: bool = False) -> ModelResponse:
             if last_response is not None:
                 response = dict(last_response)
-                if text_parts and not response.get("output_text"):
-                    response["output_text"] = "".join(text_parts)
+                visible = "".join(text_parts) or "".join(reasoning_parts)
+                if visible and not response.get("output_text"):
+                    response["output_text"] = visible
                 if function_calls:
                     existing_output = response.get("output")
                     merged_output = list(existing_output) if isinstance(existing_output, list) else []
@@ -3238,7 +3324,7 @@ class ResponsesClient(LLMClient):
                 response = {
                     "model": model_name,
                     "status": "completed",
-                    "output_text": "".join(text_parts),
+                    "output_text": "".join(text_parts) or "".join(reasoning_parts),
                     "output": list(function_calls.values()),
                 }
             return _responses_structured_response(
@@ -3273,6 +3359,8 @@ class ResponsesClient(LLMClient):
                         payload = await _read_limited_stream_json(resp)
                         if not isinstance(payload, dict):
                             raise LLMError("Responses streaming 返回的 JSON 不是对象")
+                        # 中转若回 Chat Completions 形态，先整形再解析
+                        payload = _coerce_chat_completions_to_responses(payload)
                         yield ModelStreamEvent(
                             response=_responses_structured_response(
                                 payload,
@@ -3299,6 +3387,15 @@ class ResponsesClient(LLMClient):
                             except json.JSONDecodeError:
                                 continue
                             if not isinstance(payload, dict):
+                                continue
+                            # 极少数网关把 chat SSE 塞进 responses 流
+                            if payload.get("choices") and not payload.get("type"):
+                                coerced = _coerce_chat_completions_to_responses(payload)
+                                visible = str(coerced.get("output_text") or "")
+                                if visible and not text_parts:
+                                    text_parts.append(visible)
+                                    yield ModelStreamEvent(delta=visible)
+                                last_response = coerced
                                 continue
                             event_type = str(payload.get("type") or current_event or "")
                             if event_type in {"error", "response.error"}:
@@ -3339,6 +3436,15 @@ class ResponsesClient(LLMClient):
                                 if isinstance(delta, str) and delta:
                                     text_parts.append(delta)
                                     yield ModelStreamEvent(delta=delta)
+                            elif event_type in {
+                                "response.reasoning_summary_text.delta",
+                                "response.reasoning_text.delta",
+                            }:
+                                delta = payload.get("delta")
+                                if isinstance(delta, str) and delta:
+                                    reasoning_parts.append(delta)
+                                    if not text_parts:
+                                        yield ModelStreamEvent(delta=delta)
                             elif event_type in {
                                 "response.output_item.added",
                                 "response.output_item.done",

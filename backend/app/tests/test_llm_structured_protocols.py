@@ -234,6 +234,95 @@ async def test_anthropic_profiles_map_reasoning_effort(protocol_profile: str) ->
 
 
 @pytest.mark.asyncio
+async def test_responses_accepts_reasoning_summary_without_output_text() -> None:
+    """Responses 仅有 reasoning 项时，应兜底为可见正文。"""
+
+    class _Response:
+        status_code = 200
+        text = ""
+        headers = {"content-type": "application/json"}
+
+        def json(self) -> dict:
+            return {
+                "id": "resp_1",
+                "object": "response",
+                "status": "completed",
+                "model": "proxy-reasoner",
+                "output": [
+                    {
+                        "type": "reasoning",
+                        "summary": [{"type": "summary_text", "text": "先分析再回答：答案是 7。"}],
+                    }
+                ],
+                "usage": {"input_tokens": 2, "output_tokens": 5},
+            }
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def post(self, *args, **kwargs):
+            return _Response()
+
+    with patch("app.services.llm_client.httpx.AsyncClient", return_value=_Client()):
+        result = await ResponsesClient(
+            "sk",
+            "https://example.invalid/v1",
+            "proxy-reasoner",
+        ).complete("system", "3+4?")
+
+    assert "7" in result.text
+
+
+@pytest.mark.asyncio
+async def test_responses_coerces_chat_completions_payload() -> None:
+    """中转误回 Chat Completions 形态时，Responses 客户端仍应解出正文。"""
+
+    class _Response:
+        status_code = 200
+        text = ""
+        headers = {"content-type": "application/json"}
+
+        def json(self) -> dict:
+            return {
+                "model": "kimi-k3",
+                "choices": [
+                    {
+                        "finish_reason": "stop",
+                        "message": {
+                            "role": "assistant",
+                            "content": "",
+                            "reasoning_content": "因为 2+2=4。",
+                        },
+                    }
+                ],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 4},
+            }
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def post(self, *args, **kwargs):
+            return _Response()
+
+    with patch("app.services.llm_client.httpx.AsyncClient", return_value=_Client()):
+        result = await ResponsesClient(
+            "sk",
+            "https://api.moonshot.cn/v1",
+            "kimi-k3",
+        ).complete("system", "2+2?")
+
+    assert "4" in result.text
+
+
+@pytest.mark.asyncio
 async def test_openai_complete_uses_reasoning_content_when_content_empty() -> None:
     """Kimi K3 / 智谱等：正文可能在 reasoning_content，content 为空。"""
 
