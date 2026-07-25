@@ -13,8 +13,8 @@
 
 ### 轮次 O：OpenWorker 三点
 
-- [ ] WP-O1 定时运行落完整轨迹（origin=scheduled 会话 + Run + Web 深链） — pending
-- [ ] WP-O2 Agent 自建自动化（scheduler.save 暴露 agent_prompt + 防套娃） — pending
+- [x] WP-O1 定时运行落完整轨迹（origin=scheduled 会话 + Run + Web 深链） — done `12158aa0`
+- [x] WP-O2 Agent 自建自动化（scheduler.save 暴露 agent_prompt + 防套娃） — done（待 commit）
 - [ ] WP-O3 待确认收件箱（侧栏角标 + 列表页 + /agent pending） — pending
 
 ### 轮次 X：插件工具插槽（第一期只读）

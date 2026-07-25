@@ -118,6 +118,25 @@ def _scheduler_view(row: Rule, timezone_name: str) -> dict[str, Any]:
             )
             if k in cfg
         },
+        "action": (
+            {
+                "type": (cfg.get("action") or {}).get("type")
+                if isinstance(cfg.get("action"), dict)
+                else None,
+                "prompt": (
+                    (cfg.get("action") or {}).get("prompt")
+                    if isinstance(cfg.get("action"), dict)
+                    else None
+                ),
+                "target_chat_id": (
+                    (cfg.get("action") or {}).get("target_chat_id")
+                    if isinstance(cfg.get("action"), dict)
+                    else None
+                ),
+            }
+            if isinstance(cfg.get("action"), dict)
+            else None
+        ),
     }
 
 
@@ -164,7 +183,123 @@ async def get_scheduler(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any
     return {"item": _scheduler_view(row, tz), "timezone": tz}
 
 
+def _normalize_scheduler_save_args(args: dict[str, Any]) -> dict[str, Any]:
+    """把 agent_prompt 便捷字段折叠进 config.action，兼容裸 config 写入。"""
+
+    out = dict(args)
+    config = dict(out.get("config") or {}) if isinstance(out.get("config"), dict) else {}
+    action = dict(config.get("action") or {}) if isinstance(config.get("action"), dict) else {}
+
+    action_type = str(
+        out.get("action_type") or action.get("type") or config.get("action_type") or ""
+    ).strip().lower()
+    prompt = out.get("prompt")
+    if prompt is None and isinstance(action.get("prompt"), str):
+        prompt = action.get("prompt")
+    cron = out.get("cron")
+    if cron is None:
+        cron = config.get("cron")
+    report_channel = out.get("report_channel")
+    if report_channel is None:
+        report_channel = out.get("target_chat_id")
+    if report_channel is None:
+        report_channel = action.get("target_chat_id")
+
+    if action_type == "agent_prompt" or prompt not in (None, ""):
+        action_type = "agent_prompt"
+        action["type"] = "agent_prompt"
+        if prompt not in (None, ""):
+            action["prompt"] = str(prompt).strip()
+        if report_channel not in (None, ""):
+            action["target_chat_id"] = report_channel
+        config["action"] = action
+        if cron not in (None, ""):
+            config["cron"] = str(cron).strip()
+            config.setdefault("kind", "cron")
+        out["config"] = config
+        out["action_type"] = "agent_prompt"
+    elif action_type:
+        action["type"] = action_type
+        config["action"] = action
+        if cron not in (None, ""):
+            config["cron"] = str(cron).strip()
+            config.setdefault("kind", "cron")
+        out["config"] = config
+        out["action_type"] = action_type
+    elif config:
+        out["config"] = config
+
+    return out
+
+
+def _agent_prompt_schedule_label(config: dict[str, Any]) -> str:
+    kind = str(config.get("kind") or "cron").lower()
+    if kind == "interval":
+        seconds = config.get("interval_seconds") or config.get("seconds") or config.get("interval_sec")
+        try:
+            sec = int(seconds or 0)
+        except (TypeError, ValueError):
+            sec = 0
+        if sec > 0:
+            if sec % 3600 == 0:
+                return f"每 {sec // 3600} 小时"
+            if sec % 60 == 0:
+                return f"每 {sec // 60} 分钟"
+            return f"每 {sec} 秒"
+        return "按间隔"
+    if kind == "once":
+        return "单次"
+    cron = str(config.get("cron") or "").strip()
+    parts = cron.split()
+    # 5 字段：min hour dom mon dow；6 字段：sec min hour dom mon dow
+    if len(parts) == 5:
+        minute, hour, dom, mon, dow = parts
+        if dom == mon == dow == "*" and hour.isdigit() and minute.isdigit():
+            return f"每天 {int(hour):02d}:{int(minute):02d}"
+    elif len(parts) == 6:
+        _sec, minute, hour, dom, mon, dow = parts
+        if dom == mon == dow == "*" and hour.isdigit() and minute.isdigit():
+            return f"每天 {int(hour):02d}:{int(minute):02d}"
+    if cron:
+        return f"cron {cron}"
+    return "按计划"
+
+
+def _reject_nested_agent_prompt(ctx: ToolContext, config: dict[str, Any]) -> None:
+    """防套娃：定时会话内禁止再创建 agent_prompt 定时任务。"""
+
+    from ....db.models.system_agent import SESSION_ORIGIN_SCHEDULED
+
+    action = config.get("action") if isinstance(config.get("action"), dict) else {}
+    action_type = str(action.get("type") or "").strip().lower()
+    if action_type != "agent_prompt":
+        return
+    origin = getattr(ctx.session, "origin", None) if ctx.session is not None else None
+    if origin == SESSION_ORIGIN_SCHEDULED:
+        raise ValueError(
+            "定时任务会话内不能再创建 agent_prompt 定时任务（防套娃）。"
+            "请在 Web 对话或 Bot 助手中创建。"
+        )
+
+
+def _agent_prompt_preview_summary(*, name: str, config: dict[str, Any], mode: str) -> str:
+    action = config.get("action") if isinstance(config.get("action"), dict) else {}
+    prompt = str(action.get("prompt") or "").strip()
+    prompt_snip = prompt[:40] + ("…" if len(prompt) > 40 else "")
+    schedule = _agent_prompt_schedule_label(config)
+    target = action.get("target_chat_id")
+    target_text = f" → 汇报会话 {target}" if target not in (None, "") else ""
+    verb = "更新" if mode == "update" else "创建"
+    base = f"将{verb}定时 Agent 任务：{schedule}"
+    if prompt_snip:
+        base += f" {prompt_snip}"
+    elif name:
+        base += f" {name}"
+    return base + target_text
+
+
 async def save_preview(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
+    args = _normalize_scheduler_save_args(args)
     account_id = account_scope_filter(
         args.get("account_id"),
         context_account_id=ctx.account_id,
@@ -172,6 +307,11 @@ async def save_preview(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]
     )
     rule_id = args.get("id") or args.get("rule_id")
     tz = await get_timezone_name(ctx.db)
+    config = args.get("config") if isinstance(args.get("config"), dict) else {}
+    _reject_nested_agent_prompt(ctx, config)
+    action = config.get("action") if isinstance(config.get("action"), dict) else {}
+    is_agent_prompt = str(action.get("type") or "").lower() == "agent_prompt"
+
     if rule_id not in (None, ""):
         row = await ctx.db.get(Rule, int(rule_id))
         if row is None or row.feature_key != "scheduler":
@@ -179,8 +319,16 @@ async def save_preview(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]
         if ctx.channel == "bot" and ctx.account_id is not None and row.account_id != ctx.account_id:
             raise PermissionError("无权修改其他账号定时任务")
         fields = {k: args[k] for k in ("name", "enabled", "priority", "config") if k in args}
+        if is_agent_prompt:
+            summary = _agent_prompt_preview_summary(
+                name=str(args.get("name") or row.name or ""),
+                config=config or (row.config if isinstance(row.config, dict) else {}),
+                mode="update",
+            )
+        else:
+            summary = f"更新定时任务 #{row.id} {row.name}"
         return {
-            "summary": f"更新定时任务 #{row.id} {row.name}",
+            "summary": summary,
             "mode": "update",
             "current": _scheduler_view(row, tz),
             "target_fields": fields,
@@ -188,19 +336,32 @@ async def save_preview(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]
         }
     if account_id is None:
         raise ValueError("创建定时任务需要 account_id")
+    name = str(args.get("name") or ("定时 Agent 巡检" if is_agent_prompt else "定时任务"))
+    if is_agent_prompt:
+        if not str(action.get("prompt") or "").strip():
+            raise ValueError("agent_prompt 任务需要 prompt")
+        if action.get("target_chat_id") in (None, ""):
+            raise ValueError("agent_prompt 任务需要 report_channel / target_chat_id（汇报会话）")
+        summary = _agent_prompt_preview_summary(name=name, config=config, mode="create")
+    else:
+        summary = f"创建定时任务到账号 #{account_id}"
     return {
-        "summary": f"创建定时任务到账号 #{account_id}",
+        "summary": summary,
         "mode": "create",
         "account_id": account_id,
-        "name": args.get("name") or "定时任务",
+        "name": name,
         "enabled": bool(args.get("enabled", True)),
-        "config": args.get("config") or {},
+        "config": config,
         "timezone": tz,
     }
 
 
 async def save_execute(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
     from ....services import rule_service
+
+    args = _normalize_scheduler_save_args(args)
+    config = args.get("config") if isinstance(args.get("config"), dict) else {}
+    _reject_nested_agent_prompt(ctx, config)
 
     tz = await get_timezone_name(ctx.db)
     rule_id = args.get("id") or args.get("rule_id")
@@ -216,14 +377,17 @@ async def save_execute(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]
     )
     if account_id is None:
         raise ValueError("创建定时任务需要 account_id")
+    action = config.get("action") if isinstance(config.get("action"), dict) else {}
+    is_agent_prompt = str(action.get("type") or "").lower() == "agent_prompt"
+    default_name = "定时 Agent 巡检" if is_agent_prompt else "定时任务"
     row = await rule_service.create_rule(
         ctx.db,
         account_id=account_id,
         feature_key="scheduler",
-        name=str(args.get("name") or "定时任务"),
+        name=str(args.get("name") or default_name),
         enabled=bool(args.get("enabled", True)),
         priority=int(args.get("priority") or 100),
-        config=args.get("config") if isinstance(args.get("config"), dict) else {},
+        config=config,
     )
     return {"mode": "create", "item": _scheduler_view(row, tz), "business_changed": True}
 
@@ -350,7 +514,11 @@ def register(registry: ToolRegistry) -> None:
     registry.register(
         ToolSpec(
             name="scheduler.save",
-            description="创建或更新 Scheduler 定时任务（标准 Rule feature_key=scheduler）。",
+            description=(
+                "创建或更新 Scheduler 定时任务（Rule feature_key=scheduler）。"
+                "可创建 agent_prompt 类型：按 cron 无人值守跑只读系统助手并把报告推到汇报会话。"
+                "便捷字段：action_type=agent_prompt、prompt、cron、report_channel。"
+            ),
             input_schema={
                 "type": "object",
                 "properties": {
@@ -360,7 +528,28 @@ def register(registry: ToolRegistry) -> None:
                     "name": {"type": "string"},
                     "enabled": {"type": "boolean"},
                     "priority": {"type": "integer"},
-                    "config": {"type": "object"},
+                    "config": {
+                        "type": "object",
+                        "description": "完整 scheduler 配置；也可只用下方便捷字段生成",
+                    },
+                    "action_type": {
+                        "type": "string",
+                        "description": "动作类型，如 agent_prompt / send_message / run_command / call_llm",
+                    },
+                    "prompt": {
+                        "type": "string",
+                        "description": "agent_prompt 专用：定时交给系统助手的提示词",
+                    },
+                    "cron": {
+                        "type": "string",
+                        "description": "cron 表达式，如 0 9 * * *（每天 09:00）",
+                    },
+                    "report_channel": {
+                        "description": "agent_prompt 汇报目标（chat_id 或 @username），同 target_chat_id",
+                    },
+                    "target_chat_id": {
+                        "description": "汇报/发送目标会话，兼容 report_channel",
+                    },
                 },
                 "additionalProperties": False,
             },
