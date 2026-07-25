@@ -463,6 +463,13 @@ def _chat_messages(
                 }
                 for call in message.tool_calls
             ]
+        # DeepSeek 思考+工具：有 tool_calls 的 assistant 轮必须回传 reasoning_content
+        if (
+            message.role is MessageRole.ASSISTANT
+            and isinstance(message.reasoning_content, str)
+            and message.reasoning_content
+        ):
+            item["reasoning_content"] = message.reasoning_content
         output.append(item)
     return output
 
@@ -551,6 +558,13 @@ def _anthropic_messages(
             )
             continue
         content: list[dict[str, Any]] = []
+        # DeepSeek Anthropic：工具轮次需回传 thinking 块，否则后续请求 400
+        if (
+            message.role is MessageRole.ASSISTANT
+            and isinstance(message.reasoning_content, str)
+            and message.reasoning_content
+        ):
+            content.append({"type": "thinking", "thinking": message.reasoning_content})
         for block in message.content:
             if isinstance(block, TextContent) and block.text:
                 content.append({"type": "text", "text": block.text})
@@ -631,17 +645,49 @@ def _openai_reasoning_text(value: object) -> str:
     )
 
 
-def _openai_message_visible_text(message: Mapping[str, Any] | dict[str, Any]) -> str:
-    """Prefer final ``content``; fall back to ``reasoning_content`` when content is empty."""
+def _openai_message_reasoning_text(message: Mapping[str, Any] | dict[str, Any]) -> str:
+    """Extract provider-native chain-of-thought fields (DeepSeek / Kimi / 智谱)."""
 
-    content = _openai_content_text(message.get("content")).strip()
-    if content:
-        return content
     for key in ("reasoning_content", "reasoning", "thinking"):
         piece = _openai_reasoning_text(message.get(key)).strip()
         if piece:
             return piece
     return ""
+
+
+def _openai_message_visible_text(message: Mapping[str, Any] | dict[str, Any]) -> str:
+    """Prefer final ``content``; fall back to ``reasoning_content`` when content is empty.
+
+    当同时存在 tool_calls 时不把 reasoning 折叠进正文——工具轮需要单独回传
+    ``reasoning_content`` 字段，折叠会丢失协议语义。
+    """
+
+    content = _openai_content_text(message.get("content")).strip()
+    if content:
+        return content
+    has_tool_calls = bool(message.get("tool_calls"))
+    if has_tool_calls:
+        return ""
+    return _openai_message_reasoning_text(message)
+
+
+def _request_thinking_mode(request: ModelRequest) -> str | None:
+    """Optional DeepSeek-style thinking switch from request metadata.
+
+    Values: ``enabled`` / ``disabled``. Unknown providers that reject the field
+    should not receive it — callers only set this for compatible hosts.
+    """
+
+    raw = (request.metadata or {}).get("thinking")
+    if raw in {"enabled", "disabled"}:
+        return str(raw)
+    return None
+
+
+def _apply_thinking_control(body: dict[str, Any], request: ModelRequest) -> None:
+    mode = _request_thinking_mode(request)
+    if mode is not None:
+        body["thinking"] = {"type": mode}
 
 
 def _openai_structured_response(
@@ -677,6 +723,7 @@ def _openai_structured_response(
     normalized_finish_reason = stop_reason_from_provider(finish_reason)
     if normalized_finish_reason in {StopReason.FAILED, StopReason.CANCELLED}:
         raise LLMError(f"OpenAI 返回结束状态异常: {str(finish_reason)[:200]}")
+    reasoning = _openai_message_reasoning_text(message) or None
     visible = _openai_message_visible_text(message)
     return ModelResponse(
         model=str(data.get("model") or request.model),
@@ -702,6 +749,7 @@ def _openai_structured_response(
             else None
         ),
         stream_fallback=stream_fallback,
+        reasoning_content=reasoning,
     )
 
 
@@ -760,7 +808,7 @@ def _anthropic_structured_response(
 
     content: list[TextContent] = []
     tool_calls: list[ToolCall] = []
-    thinking_fallback: list[str] = []
+    thinking_parts: list[str] = []
     for item in data.get("content") or []:
         if not isinstance(item, dict):
             continue
@@ -770,9 +818,9 @@ def _anthropic_structured_response(
         elif item.get("type") == "thinking":
             thinking = item.get("thinking")
             if isinstance(thinking, str) and thinking.strip():
-                thinking_fallback.append(thinking)
+                thinking_parts.append(thinking)
             elif isinstance(item.get("text"), str) and item["text"].strip():
-                thinking_fallback.append(str(item["text"]))
+                thinking_parts.append(str(item["text"]))
         elif item.get("type") == "tool_use":
             name = str(item.get("name") or "").strip()
             if name:
@@ -783,9 +831,11 @@ def _anthropic_structured_response(
                         arguments=_parse_tool_arguments(item.get("input")),
                     )
                 )
-    # 仅有 thinking、没有 text 时（DeepSeek 推理模型常见）：用 thinking 兜底为正文
-    if not content and thinking_fallback:
-        content.append(TextContent("".join(thinking_fallback)))
+    reasoning = "".join(thinking_parts) if thinking_parts else None
+    # 仅有 thinking、没有 text 且无 tool 时：用 thinking 兜底为正文（闲聊/测活）
+    # 有 tool_use 时保留 reasoning 独立字段，供后续轮次回传
+    if not content and thinking_parts and not tool_calls:
+        content.append(TextContent("".join(thinking_parts)))
     usage = data.get("usage") or {}
     if not isinstance(usage, dict):
         usage = {}
@@ -806,6 +856,7 @@ def _anthropic_structured_response(
         stop_reason=(StopReason.TOOL_CALLS if tool_calls else normalized_stop_reason),
         provider_status=str(stop_reason) if stop_reason else None,
         stream_fallback=stream_fallback,
+        reasoning_content=reasoning,
     )
 
 
@@ -1877,6 +1928,7 @@ class OpenAIClient(LLMClient):
             body["temperature"] = _normalize_temperature(request.temperature)
         if request.reasoning_effort:
             body["reasoning_effort"] = _normalize_reasoning_effort(request.reasoning_effort)
+        _apply_thinking_control(body, request)
 
         client_kwargs: dict[str, object] = {"timeout": _timeout_for_call(self._base_url, None)}
         if self._proxy_url:
@@ -1935,6 +1987,7 @@ class OpenAIClient(LLMClient):
             body["temperature"] = _normalize_temperature(request.temperature)
         if request.reasoning_effort:
             body["reasoning_effort"] = _normalize_reasoning_effort(request.reasoning_effort)
+        _apply_thinking_control(body, request)
 
         client_kwargs: dict[str, object] = {"timeout": _timeout_for_call(self._base_url, None)}
         if self._proxy_url:
@@ -2566,6 +2619,7 @@ class AnthropicClient(LLMClient):
         if request.temperature is not None:
             body["temperature"] = min(1.0, _normalize_temperature(request.temperature) or 0.0)
         self._apply_reasoning_effort(body, request.reasoning_effort)
+        _apply_thinking_control(body, request)
 
         client_kwargs: dict[str, object] = {"timeout": _timeout_for_call(self._base_url, None)}
         if self._proxy_url:
@@ -2628,6 +2682,7 @@ class AnthropicClient(LLMClient):
         if request.temperature is not None:
             body["temperature"] = min(1.0, _normalize_temperature(request.temperature) or 0.0)
         self._apply_reasoning_effort(body, request.reasoning_effort)
+        _apply_thinking_control(body, request)
 
         client_kwargs: dict[str, object] = {"timeout": _timeout_for_call(self._base_url, None)}
         if self._proxy_url:
@@ -2642,11 +2697,18 @@ class AnthropicClient(LLMClient):
         cache_write_tokens = 0
         provider_stop_reason: str | None = None
         text_parts: list[str] = []
+        thinking_parts: list[str] = []
+        # index → "text" | "thinking" | "tool_use"，用于 delta 分流
+        block_kinds: dict[int, str] = {}
         content_blocks: dict[int, dict[str, Any]] = {}
         terminal_sent = False
 
         def terminal_response(*, stream_fallback: bool = False) -> ModelResponse:
             content: list[dict[str, Any]] = []
+            if thinking_parts:
+                content.append({"type": "thinking", "thinking": "".join(thinking_parts)})
+            if text_parts:
+                content.append({"type": "text", "text": "".join(text_parts)})
             for index in sorted(content_blocks):
                 block = content_blocks[index]
                 if block.get("type") == "tool_use":
@@ -2663,8 +2725,6 @@ class AnthropicClient(LLMClient):
                             "input": parsed_input,
                         }
                     )
-            if text_parts:
-                content.insert(0, {"type": "text", "text": "".join(text_parts)})
             return _anthropic_structured_response(
                 {
                     "model": model_name,
@@ -2761,6 +2821,7 @@ class AnthropicClient(LLMClient):
                                     ) from None
                                 block = payload.get("content_block") or {}
                                 if isinstance(block, dict) and block.get("type") == "tool_use":
+                                    block_kinds[index] = "tool_use"
                                     content_blocks[index] = {
                                         "type": "tool_use",
                                         "id": str(block.get("id") or ""),
@@ -2774,16 +2835,20 @@ class AnthropicClient(LLMClient):
                                             else ""
                                         ),
                                     }
-                                elif isinstance(block, dict) and block.get("type") in {
-                                    "text",
-                                    "thinking",
-                                }:
-                                    for key in ("text", "thinking"):
-                                        value = block.get(key)
-                                        if isinstance(value, str) and value:
-                                            text_parts.append(value)
-                                            yield ModelStreamEvent(delta=value)
-                                            break
+                                elif isinstance(block, dict) and block.get("type") == "thinking":
+                                    block_kinds[index] = "thinking"
+                                    value = block.get("thinking")
+                                    if not isinstance(value, str) or not value:
+                                        value = block.get("text") if isinstance(block.get("text"), str) else ""
+                                    if value:
+                                        thinking_parts.append(value)
+                                        yield ModelStreamEvent(delta=value)
+                                elif isinstance(block, dict) and block.get("type") == "text":
+                                    block_kinds[index] = "text"
+                                    value = block.get("text")
+                                    if isinstance(value, str) and value:
+                                        text_parts.append(value)
+                                        yield ModelStreamEvent(delta=value)
                             elif event_type == "content_block_delta":
                                 try:
                                     index = int(payload.get("index") or 0)
@@ -2794,11 +2859,8 @@ class AnthropicClient(LLMClient):
                                 delta = payload.get("delta") or {}
                                 if not isinstance(delta, dict):
                                     continue
-                                piece = _anthropic_delta_text_piece(delta)
-                                if piece:
-                                    text_parts.append(piece)
-                                    yield ModelStreamEvent(delta=piece)
-                                elif delta.get("type") == "input_json_delta":
+                                delta_type = str(delta.get("type") or "")
+                                if delta_type == "input_json_delta":
                                     block = content_blocks.setdefault(
                                         index,
                                         {"type": "tool_use", "id": "", "name": "", "input_json": ""},
@@ -2808,6 +2870,23 @@ class AnthropicClient(LLMClient):
                                         block["input_json"] = (
                                             str(block.get("input_json") or "") + partial_json
                                         )
+                                elif delta_type == "thinking_delta" or block_kinds.get(index) == "thinking":
+                                    piece = None
+                                    for key in ("thinking", "text"):
+                                        value = delta.get(key)
+                                        if isinstance(value, str) and value:
+                                            piece = value
+                                            break
+                                    if piece is None:
+                                        piece = _anthropic_delta_text_piece(delta)
+                                    if piece:
+                                        thinking_parts.append(piece)
+                                        yield ModelStreamEvent(delta=piece)
+                                else:
+                                    piece = _anthropic_delta_text_piece(delta)
+                                    if piece:
+                                        text_parts.append(piece)
+                                        yield ModelStreamEvent(delta=piece)
                             elif event_type == "message_delta":
                                 delta = payload.get("delta") or {}
                                 if isinstance(delta, dict) and delta.get("stop_reason"):
@@ -2830,7 +2909,7 @@ class AnthropicClient(LLMClient):
                 retryable=True,
             ) from None
 
-        if not terminal_sent and text_parts and not content_blocks:
+        if not terminal_sent and (text_parts or thinking_parts) and not content_blocks:
             provider_stop_reason = provider_stop_reason or "missing_message_stop"
             yield ModelStreamEvent(response=terminal_response(stream_fallback=True))
             return

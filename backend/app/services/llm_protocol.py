@@ -78,6 +78,9 @@ class ModelMessage:
     content: tuple[ContentBlock, ...] = ()
     tool_calls: tuple[ToolCall, ...] = ()
     tool_results: tuple[ToolResult, ...] = ()
+    # DeepSeek 等思考模型在 tool 轮次必须回传 reasoning_content / thinking 块，
+    # 否则后续请求会 400。仅 assistant 消息使用。
+    reasoning_content: str | None = None
 
     @classmethod
     def text(cls, role: MessageRole, value: str) -> ModelMessage:
@@ -219,6 +222,9 @@ class ModelResponse:
     # ``stop_reason`` so UI surfaces can be honest about a non-incremental
     # fallback without changing the business result.
     stream_fallback: bool = False
+    # Provider-native chain-of-thought (DeepSeek reasoning_content / Anthropic thinking)。
+    # 与 content 分离，便于工具轮完整回传；text 属性仍只暴露最终可见正文。
+    reasoning_content: str | None = None
 
     @property
     def text(self) -> str:

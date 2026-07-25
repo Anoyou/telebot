@@ -297,6 +297,7 @@ async def run_agent(
                 ModelMessage(
                     role=MessageRole.ASSISTANT,
                     content=response.content,
+                    reasoning_content=response.reasoning_content,
                 )
             )
             return AgentResult(
@@ -321,6 +322,8 @@ async def run_agent(
                 role=MessageRole.ASSISTANT,
                 content=response.content,
                 tool_calls=tuple(selected),
+                # DeepSeek 思考+工具：后续轮次必须回传本轮 reasoning_content
+                reasoning_content=response.reasoning_content,
             )
         )
 

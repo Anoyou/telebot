@@ -20,6 +20,8 @@ from ..llm_protocol import (
     ModelMessage,
     ModelRequest,
     NamedToolChoice,
+    StopReason,
+    ToolChoiceMode,
     ToolSpec,
 )
 from .config import ResolvedAgentProviders, tools_models_for_dto
@@ -30,13 +32,23 @@ CACHE_KEY = "system_agent_model_capability_cache"
 PROBE_TOOL_NAME = "telepilot_capability_check"
 PROBE_NONCE = "telepilot-tools-v1"
 # 探测请求形态变更时递增，使旧的 unsupported 缓存立即失效（例如 DeepSeek 兼容修复）
-PROBE_VERSION = "v2-compat"
+PROBE_VERSION = "v4-thinking-off"
 SUPPORTED_TTL = timedelta(days=7)
 # 误判成本高：缩短 unsupported 缓存，便于配置修正后快速恢复
 UNSUPPORTED_TTL = timedelta(minutes=30)
 UNAVAILABLE_TTL = timedelta(minutes=5)
 MAX_CACHE_ENTRIES = 256
 MAX_CONCURRENT_PROBES = 3
+
+
+def _provider_supports_thinking_control(provider: LLMProviderDTO) -> bool:
+    """DeepSeek V4 默认 thinking=enabled，探测时需显式关闭以免占满 max_tokens。"""
+
+    haystack = " ".join(
+        str(part or "")
+        for part in (provider.provider, provider.name, provider.base_url)
+    ).lower()
+    return "deepseek" in haystack
 
 
 @dataclass(frozen=True)
@@ -109,8 +121,8 @@ def _cached_result(entry: Any, *, now: datetime) -> CapabilityProbeResult | None
 def _probe_tool_call_matched(response: Any) -> bool:
     """判断探测是否成功。
 
-    对 DeepSeek 等兼容实现：强制 tool_choice 后只要点名调用了探测工具，
-    即视为支持 tools；nonce 仅作加分校验，错误 nonce 不直接否决。
+    只要点名调用了探测工具，即视为支持 tools；nonce 仅作加分校验，
+    错误 nonce 不直接否决（DeepSeek 等兼容实现可能改写参数）。
     """
 
     for call in getattr(response, "tool_calls", ()) or ():
@@ -127,19 +139,51 @@ def _probe_tool_call_matched(response: Any) -> bool:
     return False
 
 
-async def probe_model_tool_capability(
-    provider: LLMProviderDTO,
+def _is_thinking_tool_choice_rejected(exc: BaseException) -> bool:
+    """DeepSeek 思考模式拒绝强制 tool_choice（named/required）。"""
+
+    message = str(exc).lower()
+    if "tool_choice" not in message:
+        return False
+    return any(
+        token in message
+        for token in (
+            "thinking mode",
+            "thinking",
+            "does not support",
+            "not support",
+            "unsupported",
+        )
+    )
+
+
+def _is_soft_request_shape_error(exc: BaseException) -> bool:
+    """请求形态兼容问题：应标 unavailable 或换形态重试，不要锁死 unsupported。"""
+
+    message = str(exc).lower()
+    if _is_thinking_tool_choice_rejected(exc):
+        return True
+    # strict / thinking 等扩展字段被兼容站拒绝
+    if any(token in message for token in ("strict", "thinking")) and any(
+        token in message
+        for token in ("unknown", "invalid", "unexpected", "extra", "not support", "unsupported")
+    ):
+        return True
+    return False
+
+
+def _build_probe_request(
     model: str,
-) -> CapabilityProbeResult:
-    """强制模型调用无副作用工具，验证是否支持结构化 tool_calls。
-
-    兼容说明：
-    - strict=False，且不要求 additionalProperties=false（部分兼容站会拒）
-    - max_output_tokens 提高，避免推理模型把预算耗在 thinking 上无 tool_calls
-    """
-
-    now = datetime.now(UTC)
-    request = ModelRequest(
+    tool_choice: Any,
+    *,
+    provider: LLMProviderDTO | None = None,
+) -> ModelRequest:
+    metadata: dict[str, Any] = {"model_pinned": True, "max_retries_per_model": 0}
+    # DeepSeek 官方：thinking 默认 enabled，且思考模式可能拒绝强制 tool_choice。
+    # 探测只验证 tools 协议，显式关闭思考更稳、更省预算。
+    if provider is not None and _provider_supports_thinking_control(provider):
+        metadata["thinking"] = "disabled"
+    return ModelRequest(
         model=model,
         messages=(
             ModelMessage.text(
@@ -164,10 +208,47 @@ async def probe_model_tool_capability(
                 strict=False,
             ),
         ),
-        tool_choice=NamedToolChoice(PROBE_TOOL_NAME),
-        # 推理型模型（如 deepseek-v4-pro）需要更多输出预算才能落到 tool_calls
-        max_output_tokens=512,
-        metadata={"model_pinned": True, "max_retries_per_model": 0},
+        tool_choice=tool_choice,
+        # 未关 thinking 时推理模型需要更多预算；关 thinking 后 1024 足够
+        max_output_tokens=1024,
+        metadata=metadata,
+    )
+
+
+def _classify_probe_exception(exc: BaseException) -> CapabilityProbeResult:
+    now = datetime.now(UTC)
+    scope = getattr(exc, "scope", None)
+    soft = _is_soft_request_shape_error(exc)
+    unsupported = (
+        isinstance(exc, (NotImplementedError, ValueError))
+        or (scope == LLMErrorScope.CAPABILITY_MISMATCH and not soft)
+    )
+    return CapabilityProbeResult(
+        "unsupported" if unsupported else "unavailable",
+        now,
+        type(exc).__name__,
+    )
+
+
+async def probe_model_tool_capability(
+    provider: LLMProviderDTO,
+    model: str,
+) -> CapabilityProbeResult:
+    """探测模型是否支持结构化 tool_calls。
+
+    兼容说明：
+    - strict=False，且不要求 additionalProperties=false（部分兼容站会拒）
+    - DeepSeek：探测请求带 ``thinking: disabled``，避免默认思考占满预算 / 拒强制 tool_choice
+    - 仍先尝试强制 tool_choice；若上游返回
+      "Thinking mode does not support this tool_choice"，再降级 auto 重试
+    - 若响应 length 截断且无 tool_calls，标 unavailable 便于重试
+    """
+
+    now = datetime.now(UTC)
+    # 强制点名更能证明协议能力；思考模式不支持时降级 auto（Agent 运行时也是 auto）
+    choice_sequence: tuple[Any, ...] = (
+        NamedToolChoice(PROBE_TOOL_NAME),
+        ToolChoiceMode.AUTO,
     )
     try:
         client = build_client_from_dto(
@@ -175,26 +256,51 @@ async def probe_model_tool_capability(
             override_model=model,
             proxy_url=provider.proxy_url,
         )
-        async with asyncio.timeout(45):
-            response = await client.invoke(request)
-    except Exception as exc:  # 上游临时故障不能永久判为不支持
-        scope = getattr(exc, "scope", None)
-        message = str(exc).lower()
-        # 兼容站常对 strict 字段返回 400；标 unavailable 便于下一轮重试，而不是锁死 unsupported
-        soft_request_shape = "strict" in message and (
-            "unknown" in message or "invalid" in message or "unexpected" in message
-        )
-        unsupported = (
-            isinstance(exc, (NotImplementedError, ValueError))
-            or (scope == LLMErrorScope.CAPABILITY_MISMATCH and not soft_request_shape)
-        )
-        return CapabilityProbeResult(
-            "unsupported" if unsupported else "unavailable",
-            now,
-            type(exc).__name__,
-        )
-    matched = _probe_tool_call_matched(response)
-    return CapabilityProbeResult("supported" if matched else "unsupported", now)
+    except Exception as exc:  # 客户端构造失败
+        return _classify_probe_exception(exc)
+
+    last_error: BaseException | None = None
+    saw_thinking_reject = False
+    for index, tool_choice in enumerate(choice_sequence):
+        request = _build_probe_request(model, tool_choice, provider=provider)
+        try:
+            async with asyncio.timeout(45):
+                response = await client.invoke(request)
+        except Exception as exc:  # 上游临时故障或请求形态不兼容
+            last_error = exc
+            if (
+                index + 1 < len(choice_sequence)
+                and _is_thinking_tool_choice_rejected(exc)
+            ):
+                saw_thinking_reject = True
+                log.info(
+                    "system agent capability probe fallback to auto tool_choice "
+                    "provider_id=%s model=%s reason=%s",
+                    provider.id,
+                    model,
+                    type(exc).__name__,
+                )
+                continue
+            return _classify_probe_exception(exc)
+
+        if _probe_tool_call_matched(response):
+            return CapabilityProbeResult("supported", now)
+        # 思维链占满 max_tokens：临时不可用，避免误锁 unsupported
+        if getattr(response, "stop_reason", None) == StopReason.MAX_TOKENS:
+            if index + 1 < len(choice_sequence):
+                continue
+            return CapabilityProbeResult("unavailable", now, "max_tokens_before_tools")
+        # 强制 tool_choice 被静默忽略时，再给 auto 一次机会
+        if index + 1 < len(choice_sequence):
+            continue
+        return CapabilityProbeResult("unsupported", now)
+
+    if last_error is not None:
+        # 强制+auto 都因思考模式 tool_choice 失败：标 unavailable，避免永久锁死
+        if saw_thinking_reject and _is_thinking_tool_choice_rejected(last_error):
+            return CapabilityProbeResult("unavailable", now, type(last_error).__name__)
+        return _classify_probe_exception(last_error)
+    return CapabilityProbeResult("unsupported", now)
 
 
 def _dto_with_verified_models(
@@ -455,8 +561,9 @@ async def verify_resolved_agent_providers(
             return f"Provider「{resolved.primary.name}」的工具调用能力暂时无法验证，请稍后重试。"
         return (
             f"Provider「{resolved.primary.name}」的候选模型未通过 Agent 工具调用探测。"
-            "请确认模型支持 function calling、api_format 为 chat_completions，"
-            "并在 AI 中心对该 Provider 重新测活；若刚改过配置，再试一次以触发重测。"
+            "请确认模型支持 function calling / tool use；"
+            "DeepSeek 思考模式需能在 tool_choice=auto 下返回 tool_calls。"
+            "可在 AI 中心对该 Provider 重新测活；若刚改过配置，再试一次以触发重测。"
         )
     return ResolvedAgentProviders(
         primary=verified[resolved.primary.id],

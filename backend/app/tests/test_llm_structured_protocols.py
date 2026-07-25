@@ -148,6 +148,86 @@ async def test_chat_adapter_round_trips_tool_calls() -> None:
 
 
 @pytest.mark.asyncio
+async def test_chat_adapter_sends_thinking_control_and_keeps_reasoning_with_tools() -> None:
+    """DeepSeek：thinking 开关透传；tool 轮保留 reasoning_content 不折叠进正文。"""
+
+    wire_name = wire_tool_name("telepilot_capability_check")
+    fake = AsyncMock()
+    fake.__aenter__.return_value = fake
+    fake.post = AsyncMock(
+        return_value=_Response(
+            {
+                "model": "deepseek-v4-pro",
+                "choices": [
+                    {
+                        "finish_reason": "tool_calls",
+                        "message": {
+                            "content": None,
+                            "reasoning_content": "先调用探测工具",
+                            "tool_calls": [
+                                {
+                                    "id": "call-1",
+                                    "function": {
+                                        "name": wire_name,
+                                        "arguments": '{"nonce":"telepilot-tools-v1"}',
+                                    },
+                                }
+                            ],
+                        },
+                    }
+                ],
+                "usage": {"prompt_tokens": 4, "completion_tokens": 8},
+            }
+        )
+    )
+    request = ModelRequest(
+        model="deepseek-v4-pro",
+        messages=(ModelMessage.text(MessageRole.USER, "probe"),),
+        tools=(
+            ToolSpec(
+                "telepilot_capability_check",
+                "probe",
+                {"type": "object", "properties": {"nonce": {"type": "string"}}},
+                strict=False,
+            ),
+        ),
+        tool_choice=NamedToolChoice("telepilot_capability_check"),
+        metadata={"thinking": "disabled"},
+    )
+    with patch("app.services.llm_client.httpx.AsyncClient", return_value=fake):
+        response = await OpenAIClient(
+            "sk", "https://api.deepseek.com", "deepseek-v4-pro"
+        ).invoke(request)
+
+    body = fake.post.await_args.kwargs["json"]
+    assert body["thinking"] == {"type": "disabled"}
+    assert response.reasoning_content == "先调用探测工具"
+    assert response.text == ""
+    assert response.tool_calls[0].name == "telepilot_capability_check"
+
+
+@pytest.mark.asyncio
+async def test_chat_messages_round_trip_reasoning_content_on_tool_turn() -> None:
+    from app.services.llm_client import _chat_messages
+
+    messages = (
+        ModelMessage(
+            role=MessageRole.ASSISTANT,
+            content=(),
+            tool_calls=(ToolCall("c1", "lookup", {"id": 1}),),
+            reasoning_content="need lookup",
+        ),
+        ModelMessage(
+            role=MessageRole.TOOL,
+            tool_results=(ToolResult("c1", "lookup", {"ok": True}),),
+        ),
+    )
+    payload = _chat_messages(messages, {"lookup": "lookup"})
+    assert payload[0]["reasoning_content"] == "need lookup"
+    assert payload[0]["tool_calls"][0]["function"]["name"] == "lookup"
+
+
+@pytest.mark.asyncio
 async def test_chat_legacy_complete_accepts_array_content() -> None:
     """OpenAI 兼容端返回数组 content 时，legacy complete 也应拼接文本。"""
     fake = AsyncMock()

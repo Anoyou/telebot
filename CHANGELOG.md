@@ -20,6 +20,13 @@
 
 ## [Unreleased]
 
+## [0.73.0-beta.12] - 2026-07-25 · patch（补丁版本预发布） · DeepSeek Agent 工具探测与思考回传
+
+### Fixed
+
+- System Agent 工具能力探测：DeepSeek 默认 `thinking=enabled` 时探测显式 `thinking: disabled`，并在思考模式拒绝强制 `tool_choice` 时降级 `auto` 重试；探测版本 bump 使旧缓存失效。
+- DeepSeek 思考+工具多轮：Chat/Anthropic 保留并回传 `reasoning_content` / thinking 块，避免工具后续轮 400。
+
 ## [0.73.0-beta.11] - 2026-07-25 · patch（补丁版本预发布） · Bot 修复、定时轨迹、收件箱与模型兼容
 
 ### Fixed
