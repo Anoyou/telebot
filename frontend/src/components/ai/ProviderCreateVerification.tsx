@@ -10,6 +10,7 @@ import type {
   LLMClientIdentityProfile,
   LLMProtocolProfile,
   LLMProviderKind,
+  LLMRequestHeaderInput,
   ProviderModel,
   QuickVerifyProviderResult,
   QuickVerifyProviderStreamEvent,
@@ -56,6 +57,7 @@ export function ProviderCreateVerification({
   apiKey,
   proxyId,
   models,
+  requestHeaders,
   onModelsChange,
   onReset,
   onVerified,
@@ -70,6 +72,7 @@ export function ProviderCreateVerification({
   apiKey: string;
   proxyId: string;
   models: ProviderModel[];
+  requestHeaders: LLMRequestHeaderInput[];
   onModelsChange: (models: ProviderModel[]) => void;
   onReset: () => void;
   onVerified: (model: string, models: ProviderModel[]) => void;
@@ -96,6 +99,7 @@ export function ProviderCreateVerification({
     baseUrl.trim(),
     apiKey,
     proxyId,
+    JSON.stringify(requestHeaders),
   ].join("\u0000");
   const previousFingerprint = useRef(fingerprint);
 
@@ -137,6 +141,10 @@ export function ProviderCreateVerification({
     () => models.find((model) => model.id === selectedModel),
     [models, selectedModel],
   );
+  const enabledModelCount = useMemo(
+    () => models.filter((model) => model.enabled).length,
+    [models],
+  );
   const visibleModels = useMemo(() => {
     const query = modelFilter.trim().toLowerCase();
     if (!query) return models;
@@ -171,6 +179,7 @@ export function ProviderCreateVerification({
         api_key: apiKey.trim() || null,
         proxy_id: proxyId ? Number(proxyId) : null,
         pid: null,
+        request_headers: requestHeaders,
       });
       const existing = new Map(models.map((model) => [model.id, model]));
       const discovered = response.ids.slice(0, 200).map((id) =>
@@ -214,13 +223,28 @@ export function ProviderCreateVerification({
     }
     const next = [
       ...models,
-      { id, enabled: false, custom: true, label: null },
+      { id, enabled: true, custom: true, label: null },
     ].slice(0, 200);
     onModelsChange(next);
     setSelectedModel(id);
     setManualModel("");
     setReasoningEffort("");
     resetVerification();
+  };
+
+  const setModelEnabled = (id: string, enabled: boolean) => {
+    onModelsChange(
+      models.map((model) => (model.id === id ? { ...model, enabled } : model)),
+    );
+  };
+
+  const setVisibleModelsEnabled = (enabled: boolean) => {
+    const visibleIds = new Set(visibleModels.map((model) => model.id));
+    onModelsChange(
+      models.map((model) =>
+        visibleIds.has(model.id) ? { ...model, enabled } : model,
+      ),
+    );
   };
 
   const runVerify = async () => {
@@ -253,6 +277,7 @@ export function ProviderCreateVerification({
           message: message.trim(),
           max_tokens: 400,
           timeout_seconds: 90,
+          request_headers: requestHeaders,
         },
         (event: QuickVerifyProviderStreamEvent) => {
           if (event.type === "delta") {
@@ -311,7 +336,7 @@ export function ProviderCreateVerification({
         <div className="min-w-0">
           <h2 className="text-base font-semibold">模型与真实验证</h2>
           <p className="mt-1 text-xs leading-5 text-muted-foreground">
-            先获取模型，手动选择验证目标和推理强度；验证失败时仍可保存，但会在提交前提醒风险。
+            先多选要启用的模型，再单独指定一个模型做真实验证并设为默认；验证失败时仍可保存，但会在提交前提醒风险。
           </p>
         </div>
         <Button type="button" size="sm" variant="outline" loading={fetching} disabled={status === "running"} onClick={() => void fetchModels()}>
@@ -348,9 +373,11 @@ export function ProviderCreateVerification({
       {models.length > 0 ? (
         <div className="space-y-2">
           <div className="flex flex-wrap items-end justify-between gap-2">
-            <div>
-              <Label htmlFor="create-model-filter">选择验证模型</Label>
-              <p className="mt-1 text-xs text-muted-foreground">验证通过后，所选模型将被启用并设为默认模型。</p>
+            <div className="min-w-0">
+              <Label htmlFor="create-model-filter">启用模型</Label>
+              <p className="mt-1 text-xs text-muted-foreground">
+                已启用 {enabledModelCount} / {models.length} 个。复选框控制启用，右侧单选用于指定验证目标。
+              </p>
             </div>
             <Input
               id="create-model-filter"
@@ -361,31 +388,77 @@ export function ProviderCreateVerification({
               onChange={(event) => setModelFilter(event.target.value)}
             />
           </div>
+          <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border bg-muted/20 px-3 py-2">
+            <span className="text-xs text-muted-foreground">
+              当前显示 {visibleModels.length} 个模型
+            </span>
+            <div className="flex flex-wrap gap-1.5">
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                className="h-8 px-2 text-xs"
+                disabled={status === "running" || visibleModels.length === 0}
+                onClick={() => setVisibleModelsEnabled(true)}
+              >
+                全选当前结果
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                className="h-8 px-2 text-xs"
+                disabled={status === "running" || visibleModels.length === 0}
+                onClick={() => setVisibleModelsEnabled(false)}
+              >
+                清空当前结果
+              </Button>
+            </div>
+          </div>
           <div className="max-h-72 overflow-y-auto rounded-lg border bg-background">
             {visibleModels.length > 0 ? visibleModels.map((model) => {
               const selected = model.id === selectedModel;
               return (
-                <button
+                <div
                   key={model.id}
-                  type="button"
                   className={cn(
                     "flex min-h-12 w-full min-w-0 items-center gap-3 border-b px-3 py-2.5 text-left text-sm transition-colors last:border-b-0 hover:bg-muted/60",
                     selected && "bg-primary/[0.08] ring-1 ring-inset ring-primary/25",
                   )}
-                  aria-pressed={selected}
-                  disabled={status === "running"}
-                  onClick={() => {
-                    setSelectedModel(model.id);
-                    setReasoningEffort("");
-                    resetVerification();
-                  }}
                 >
-                  <span className={cn("grid h-4 w-4 shrink-0 place-items-center rounded-full border", selected && "border-primary")}>
-                    {selected ? <span className="h-2 w-2 rounded-full bg-primary" /> : null}
-                  </span>
+                  <label className="grid h-8 w-8 shrink-0 cursor-pointer place-items-center" title={model.enabled ? "停用此模型" : "启用此模型"}>
+                    <input
+                      type="checkbox"
+                      className="h-4 w-4 accent-primary"
+                      checked={model.enabled}
+                      disabled={status === "running"}
+                      aria-label={`${model.enabled ? "停用" : "启用"}模型 ${model.id}`}
+                      onChange={(event) => setModelEnabled(model.id, event.target.checked)}
+                    />
+                  </label>
                   <span className="min-w-0 flex-1 break-all font-mono text-xs">{model.id}</span>
-                  {model.enabled ? <MetaBadge tone="success">已启用</MetaBadge> : <MetaBadge tone="outline">候选</MetaBadge>}
-                </button>
+                  <button
+                    type="button"
+                    className={cn(
+                      "inline-flex h-8 shrink-0 items-center gap-1.5 rounded-md border px-2 text-xs transition-colors",
+                      selected
+                        ? "border-primary bg-primary/10 text-foreground"
+                        : "border-border bg-background text-muted-foreground hover:bg-muted",
+                    )}
+                    aria-pressed={selected}
+                    disabled={status === "running"}
+                    onClick={() => {
+                      setSelectedModel(model.id);
+                      setReasoningEffort("");
+                      resetVerification();
+                    }}
+                  >
+                    <span className={cn("grid h-3.5 w-3.5 shrink-0 place-items-center rounded-full border", selected && "border-primary")}>
+                      {selected ? <span className="h-1.5 w-1.5 rounded-full bg-primary" /> : null}
+                    </span>
+                    {selected ? "验证目标" : "选为验证目标"}
+                  </button>
+                </div>
               );
             }) : (
               <p className="px-3 py-6 text-center text-xs text-muted-foreground">没有匹配的模型。</p>
@@ -484,7 +557,7 @@ export function ProviderCreateVerification({
 
       {status === "success" ? (
         <p className="inline-flex items-center gap-1.5 text-xs text-success">
-          <CheckCircle2 className="h-4 w-4" /> 当前模型和档位已通过真实对话验证，将作为默认模型保存。
+          <CheckCircle2 className="h-4 w-4" /> 当前模型和档位已通过真实对话验证，将启用并作为默认模型保存；其它模型的启用状态保持不变。
         </p>
       ) : null}
     </section>

@@ -5,30 +5,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
 import changelogUrl from "../../../../CHANGELOG.md?url";
-
-function extractRecentChangelogSections(
-  md: string,
-  limit: number,
-): Array<{ title: string; body: string }> {
-  const lines = md.split(/\r?\n/);
-  const starts: Array<{ idx: number; title: string }> = [];
-  for (let i = 0; i < lines.length; i += 1) {
-    const m = lines[i].match(/^##\s+\[(.+?)\].*$/);
-    if (!m) continue;
-    const title = lines[i].replace(/^##\s+/, "").trim();
-    if (m[1].toLowerCase() === "unreleased") continue;
-    starts.push({ idx: i, title });
-  }
-  const out: Array<{ title: string; body: string }> = [];
-  for (let i = 0; i < starts.length && out.length < limit; i += 1) {
-    const begin = starts[i].idx + 1;
-    const end = i + 1 < starts.length ? starts[i + 1].idx : lines.length;
-    const body = lines.slice(begin, end).join("\n").trim();
-    if (!body) continue;
-    out.push({ title: starts[i].title, body });
-  }
-  return out;
-}
+import { extractRecentChangelogSections } from "@/lib/changelog";
 
 export default function ChangelogMenu() {
   const [changelogRaw, setChangelogRaw] = useState("");
@@ -62,7 +39,14 @@ export default function ChangelogMenu() {
         {sections.length > 0 ? (
           sections.map((sec) => (
             <div key={sec.title}>
-              <div className="text-sm font-semibold">{sec.title}</div>
+              <div className="flex flex-wrap items-center gap-2 text-sm font-semibold">
+                {sec.title}
+                {sec.unreleased ? (
+                  <span className="rounded border border-primary/30 bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium text-primary">
+                    开发中
+                  </span>
+                ) : null}
+              </div>
               <article className="prose prose-sm mt-2 max-w-none text-sm text-muted-foreground dark:prose-invert">
                 <ReactMarkdown remarkPlugins={[remarkGfm]}>{sec.body}</ReactMarkdown>
               </article>

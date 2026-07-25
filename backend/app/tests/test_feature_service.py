@@ -41,6 +41,7 @@ def test_account_schema_allows_direct_passthrough_only_when_declared() -> None:
     assert extended["properties"]["direct_passthrough"]["properties"]["enabled"] == {
         "type": "boolean",
         "default": False,
+        "description": "账号二次开关：开启即直通，且调用成功后独占消费",
     }
 
 

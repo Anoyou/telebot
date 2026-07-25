@@ -19,8 +19,7 @@
 - 只发送可复核的 UA 和安全辅助头；不复制 OAuth token、账户 ID、设备证明、
   客户端签名或浏览器 Cookie。
 - ``minimal`` 不附加任何产品模拟头，仅保留协议必需头。
-- 无法用真实捕获 / 上游开源实现验证的档案（Codex Desktop / Claude Desktop）
-  保持 ``verified=False`` 且 ``selectable=False``，前端不可选，探测也不使用。
+- 历史 Desktop 档案不再单独模拟，统一兼容映射到对应 CLI 身份。
 
 证据来源
 --------
@@ -146,6 +145,7 @@ class ClientIdentity:
 # UA 组装辅助
 # ────────────────────────────────────────────────────────────
 
+
 def _os_slug() -> str:
     """返回 Codex UA os 段的 OS 名。
 
@@ -170,17 +170,50 @@ def _arch_slug() -> str:
     return machine or "unknown"
 
 
+def _stainless_os_slug() -> str:
+    system = platform.system().lower()
+    if system == "darwin":
+        return "MacOS"
+    if system == "windows":
+        return "Windows"
+    if system == "linux":
+        return "Linux"
+    return platform.system() or "Unknown"
+
+
+def _stainless_arch_slug() -> str:
+    machine = platform.machine().lower()
+    if machine in {"arm64", "aarch64"}:
+        return "arm64"
+    if machine == "x86_64":
+        return "x64"
+    if machine in {"i386", "i686", "x86"}:
+        return "x32"
+    return machine or "unknown"
+
+
+def _grok_os_slug() -> str:
+    system = platform.system().lower()
+    return "macos" if system == "darwin" else (system or "unknown")
+
+
+def _grok_arch_slug() -> str:
+    machine = platform.machine().lower()
+    return "aarch64" if machine in {"arm64", "aarch64"} else (machine or "unknown")
+
+
 def _codex_user_agent(client_version: str) -> str:
-    """复刻 Codex CLI 的 UA 结构。
+    """复刻本机 ``codex exec`` 的 UA 结构。
 
     上游 ``codex-rs/login/src/auth/default_client.rs::get_codex_user_agent``：
         ``"{originator}/{version} ({os} {os_version}; {arch}) {terminal}"``
-    我们没有真实终端字符串，用稳定占位 ``unknown`` 收尾，其余段落如实反映
-    运行主机，避免伪造。
+    TelePilot 与非交互 ``codex exec`` 一样没有交互终端，使用本机抓包中 headless
+    调用的 ``dumb`` 终端段，并保留入口与版本后缀。
     """
     return (
-        f"codex_cli_rs/{client_version} "
-        f"({_os_slug()} {_os_version()}; {_arch_slug()}) unknown"
+        f"codex_exec/{client_version} "
+        f"({_os_slug()} {_os_version()}; {_arch_slug()}) dumb "
+        f"(codex_exec; {client_version})"
     )
 
 
@@ -216,18 +249,15 @@ def _codex_desktop_user_agent(core_version: str, app_build: str) -> str:
 # 自动变化。运维可通过 ``GET {npm/PyPI}`` 查询最新版本号并手动刷新（见
 # ``apply_version_overrides``），但结构变更仍需重新核对证据。
 #
-# Codex CLI 采集自本机 codex-cli 0.143.0（/opt/homebrew 安装）与上游
-# openai/codex 源码（codex-rs/login/src/auth/default_client.rs：
-# DEFAULT_ORIGINATOR="codex_cli_rs"、get_codex_user_agent 结构；
-# 请求头 "originator" + "User-Agent"）。
+# Codex CLI 采集自本机 codex-cli 0.145.0。TelePilot 与非交互的 ``codex exec``
+# 调用方式一致，因此固定使用 ``originator=codex_exec``，并为每个客户端实例生成
+# 抓包观察到的 session-id / thread-id / x-client-request-id 请求链路 ID。
 #
-# Claude Code 采集自本机 @anthropic-ai/claude-code 2.1.205 原生二进制：
+# Claude Code 采集自本机 @anthropic-ai/claude-code 2.1.220 原生二进制：
 # UA 模板 ``claude-cli/<version> (external, <entrypoint>[, agent-sdk/<v>...])``。
 # 二进制内真实构造为
 # ``claude-cli/${version} (external, ${CLAUDE_CODE_ENTRYPOINT ?? "cli"}...)``：
-# ``entrypoint`` 是运行时环境变量，裸终端默认 ``cli``（本档案即取此默认值），
-# 经 agent SDK / desktop-3p 入口启动时才会拼上 ``claude-desktop-3p`` /
-# ``agent-sdk/<ver>`` 等动态段——那些属于单次运行态，不是固定身份，故不写死。
+# TelePilot 的非交互调用对应本机 ``--print`` 抓包中的 ``sdk-cli`` 入口。
 # 请求头 ``x-app: cli``（后台任务时上游发 ``cli-bg``，此处取前台默认 ``cli``）；
 # ``anthropic-version: 2023-06-01`` 由 Anthropic Client 统一装配。
 #
@@ -236,15 +266,10 @@ def _codex_desktop_user_agent(core_version: str, app_build: str) -> str:
 
 # 采集时核对过 UA 结构的真实版本（DB 覆盖缺失时回落这些）。
 _DEFAULT_CLIENT_VERSIONS: dict[str, str] = {
-    "codex_cli": "0.143.0",
-    "claude_code": "2.1.205",
+    "codex_cli": "0.145.0",
+    "claude_code": "2.1.220",
     "openai_sdk": "2.45.0",
-    # 本机官方 Grok CLI ``--version`` 与二进制字符串表核对（2026-07-14）。
-    "grok_cli": "0.2.93",
-    # Codex Desktop 需两段版本：codex 核心版本（可含 -alpha.N 预发布后缀）与
-    # 桌面 app 构建号。均来自本机 Surge 抓包（2026-07-12）。
-    "codex_desktop_core": "0.144.0-alpha.4",
-    "codex_desktop_build": "26.707.51957",
+    "grok_cli": "0.2.112",
 }
 
 # 当前生效版本；``apply_version_overrides`` 可用系统设置里的值覆盖（只改版本号）。
@@ -261,8 +286,6 @@ _VERSION_KEY_META: dict[str, dict[str, str | None]] = {
     "claude_code": {"label": "Claude Code", "registry": "npm:@anthropic-ai/claude-code"},
     "openai_sdk": {"label": "OpenAI Python SDK", "registry": "pypi:openai"},
     "grok_cli": {"label": "Grok CLI", "registry": "cli:grok-update-check"},
-    "codex_desktop_core": {"label": "Codex Desktop · 核心版本", "registry": None},
-    "codex_desktop_build": {"label": "Codex Desktop · app 构建号", "registry": None},
 }
 
 
@@ -293,13 +316,19 @@ def _build_catalog() -> dict[str, ClientIdentity]:
 
     catalog[CLIENT_IDENTITY_OPENAI_SDK] = ClientIdentity(
         profile=CLIENT_IDENTITY_OPENAI_SDK,
-        api_formats=frozenset(
-            {LLM_API_FORMAT_CHAT_COMPLETIONS, LLM_API_FORMAT_RESPONSES}
-        ),
-        user_agent=f"OpenAI/Python {_CLIENT_VERSIONS['openai_sdk']}",
-        extra_headers={"X-Stainless-Lang": "python"},
-        source="openai-python _base_client.py user_agent",
-        captured_at="2026-07-12",
+        api_formats=frozenset({LLM_API_FORMAT_CHAT_COMPLETIONS, LLM_API_FORMAT_RESPONSES}),
+        user_agent=f"AsyncOpenAI/Python {_CLIENT_VERSIONS['openai_sdk']}",
+        extra_headers={
+            "X-Stainless-Lang": "python",
+            "X-Stainless-Package-Version": _CLIENT_VERSIONS["openai_sdk"],
+            "X-Stainless-OS": _stainless_os_slug(),
+            "X-Stainless-Arch": _stainless_arch_slug(),
+            "X-Stainless-Runtime": platform.python_implementation() or "unknown",
+            "X-Stainless-Runtime-Version": platform.python_version() or "unknown",
+            "X-Stainless-Async": "async:asyncio",
+        },
+        source="Surge 本机抓包：openai-python 2.45.0 AsyncOpenAI",
+        captured_at="2026-07-26",
         client_version=_CLIENT_VERSIONS["openai_sdk"],
         verified=True,
     )
@@ -308,11 +337,14 @@ def _build_catalog() -> dict[str, ClientIdentity]:
         profile=CLIENT_IDENTITY_CODEX_CLI,
         api_formats=frozenset({LLM_API_FORMAT_RESPONSES}),
         user_agent=_codex_user_agent(_CLIENT_VERSIONS["codex_cli"]),
-        # 上游对每个 Responses 请求发送 "originator" 头；session-id 等元数据是
-        # 单次会话动态值，属于身份无关的运行态信息，这里不伪造固定值。
-        extra_headers={"originator": "codex_cli_rs"},
-        source="codex-cli 0.143.0 本机二进制 + codex-rs default_client.rs",
-        captured_at="2026-07-12",
+        # 动态请求链路 ID 由 ResponsesClient 在实例化时生成，不写入固定目录。
+        extra_headers={"originator": "codex_exec"},
+        source=(
+            "Surge 本机抓包：standalone codex exec 0.145.0 Responses；"
+            "Codex Desktop 宿主会把同名 originator / User-Agent 覆盖为 Desktop 变体，"
+            "TelePilot 固定采用无宿主的 standalone 形态"
+        ),
+        captured_at="2026-07-26",
         client_version=_CLIENT_VERSIONS["codex_cli"],
         verified=True,
     )
@@ -320,70 +352,31 @@ def _build_catalog() -> dict[str, ClientIdentity]:
     catalog[CLIENT_IDENTITY_CLAUDE_CODE] = ClientIdentity(
         profile=CLIENT_IDENTITY_CLAUDE_CODE,
         api_formats=frozenset({LLM_API_FORMAT_ANTHROPIC_MESSAGES}),
-        user_agent=f"claude-cli/{_CLIENT_VERSIONS['claude_code']} (external, cli)",
+        user_agent=f"claude-cli/{_CLIENT_VERSIONS['claude_code']} (external, sdk-cli)",
         # 上游 Claude Code 请求发送 ``x-app: cli``。anthropic-version 由
         # Anthropic Client 统一装配（本身就是协议必需头，不算身份模拟）。
         extra_headers={"x-app": "cli"},
-        source="@anthropic-ai/claude-code 2.1.205 本机二进制",
-        captured_at="2026-07-12",
+        source="Surge 本机抓包：Claude Code 2.1.220 --print / sdk-cli",
+        captured_at="2026-07-26",
         client_version=_CLIENT_VERSIONS["claude_code"],
         verified=True,
     )
 
-    # Grok CLI：只保留官方二进制中可复核、且不改变认证语义的身份字段。
-    # 证据来自本机官方 grok 0.2.93 ``--version`` 与二进制字符串表，后者包含
-    # ``x-grok-client-version``；UA 结构同时由 Cockpit Tools v1.3.0 的
-    # ``grok_account.rs`` 交叉核对。明确排除 Authorization、x-xai-token-auth、
-    # x-grok-conv-id、账号 ID、设备字段，以及第三方自己的 client identifier。
+    # Grok CLI：只保留真实抓包中不改变认证语义的稳定身份字段。
+    # x-xai-token-auth / x-authenticateresponse 属于 CLI 认证语义，不复制。
     catalog[CLIENT_IDENTITY_GROK_CLI] = ClientIdentity(
         profile=CLIENT_IDENTITY_GROK_CLI,
         api_formats=frozenset({LLM_API_FORMAT_RESPONSES}),
-        user_agent=f"grok-cli/{_CLIENT_VERSIONS['grok_cli']}",
-        extra_headers={"x-grok-client-version": _CLIENT_VERSIONS["grok_cli"]},
-        source=(
-            "本机官方 Grok CLI 0.2.93 --version + 二进制字符串表；"
-            "Cockpit Tools v1.3.0 grok_account.rs 交叉核对 UA 结构"
-        ),
-        captured_at="2026-07-14",
+        user_agent=(f"grok-shell/{_CLIENT_VERSIONS['grok_cli']} ({_grok_os_slug()}; {_grok_arch_slug()})"),
+        extra_headers={
+            "x-grok-client-mode": "headless",
+            "x-grok-client-version": _CLIENT_VERSIONS["grok_cli"],
+            "x-grok-client-identifier": "grok-shell",
+        },
+        source="Surge 本机抓包：官方 Grok CLI 0.2.112 headless Responses",
+        captured_at="2026-07-26",
         client_version=_CLIENT_VERSIONS["grok_cli"],
         verified=True,
-    )
-
-    # ── Codex Desktop：本机 Surge 抓包实证（0.144.0-alpha.4 / build 26.707.51957）──
-    # 抓包实测请求头只提取两项身份字段：
-    #   originator: Codex Desktop
-    #   user-agent: Codex Desktop/{core} ({os} {osver}; {arch}) unknown (Codex Desktop; {build})
-    # 明确排除的抓包内容（阶段 F / 安全边界）：Authorization Bearer、session-id、
-    # thread-id、x-client-request-id、x-codex-window-id、installation_id、
-    # x-codex-turn-metadata（含仓库路径 / git commit / 设备指纹）等运行态与机密；
-    # 以及 x-codex-beta-features、x-openai-internal-codex-responses-lite 等会改变
-    # 上游语义 / 开 beta 的头——身份切换不得改语义，一律不带。
-    catalog[CLIENT_IDENTITY_CODEX_DESKTOP] = ClientIdentity(
-        profile=CLIENT_IDENTITY_CODEX_DESKTOP,
-        api_formats=frozenset({LLM_API_FORMAT_RESPONSES}),
-        user_agent=_codex_desktop_user_agent(
-            _CLIENT_VERSIONS["codex_desktop_core"],
-            _CLIENT_VERSIONS["codex_desktop_build"],
-        ),
-        extra_headers={"originator": "Codex Desktop"},
-        source=(
-            "本机 Surge 抓包 Codex Desktop 0.144.0-alpha.4（app build 26.707.51957，"
-            "该构建号在 responses UA 与 sentry-release 两处独立印证）；此 originator "
-            "面向 ChatGPT 后端（codex 订阅），对标准 OpenAI API 端点可能不适用；"
-            "证据来自单台机器的 alpha 预发布版，stable 版 UA 可能变，需再核对"
-        ),
-        captured_at="2026-07-13",
-        client_version=_CLIENT_VERSIONS["codex_desktop_core"],
-        verified=True,
-    )
-    catalog[CLIENT_IDENTITY_CLAUDE_DESKTOP] = ClientIdentity(
-        profile=CLIENT_IDENTITY_CLAUDE_DESKTOP,
-        api_formats=frozenset({LLM_API_FORMAT_ANTHROPIC_MESSAGES}),
-        user_agent=None,
-        extra_headers={},
-        source="未获得可复核的 Claude Desktop 请求头证据（按用户决定暂不落地）",
-        verified=False,
-        experimental=True,
     )
 
     return catalog
@@ -459,8 +452,12 @@ async def load_version_overrides_from_db() -> dict[str, str]:
 
 
 def normalize_identity_profile(value: str | None) -> str:
-    """把任意输入规范化为合法档案名；未知值降级为 auto。"""
+    """把任意输入规范化；Desktop 历史档案统一映射到对应 CLI。"""
     candidate = (value or "").strip().lower()
+    if candidate == CLIENT_IDENTITY_CODEX_DESKTOP:
+        return CLIENT_IDENTITY_CODEX_CLI
+    if candidate == CLIENT_IDENTITY_CLAUDE_DESKTOP:
+        return CLIENT_IDENTITY_CLAUDE_CODE
     if candidate in ALL_CLIENT_IDENTITY_PROFILES:
         return candidate
     return DEFAULT_CLIENT_IDENTITY_PROFILE
@@ -575,9 +572,7 @@ def selectable_identities() -> list[dict[str, Any]]:
         CLIENT_IDENTITY_MINIMAL,
         CLIENT_IDENTITY_OPENAI_SDK,
         CLIENT_IDENTITY_CODEX_CLI,
-        CLIENT_IDENTITY_CODEX_DESKTOP,
         CLIENT_IDENTITY_CLAUDE_CODE,
-        CLIENT_IDENTITY_CLAUDE_DESKTOP,
         CLIENT_IDENTITY_GROK_CLI,
     ):
         identity = _CATALOG[profile]
@@ -586,6 +581,228 @@ def selectable_identities() -> list[dict[str, Any]]:
         item["api_formats"] = sorted(identity.api_formats)
         items.append(item)
     return items
+
+
+_REQUEST_PROFILE_META: dict[str, dict[str, Any]] = {
+    CLIENT_IDENTITY_OPENAI_SDK: {
+        "label": "OpenAI SDK（标准 API）",
+        "description": "标准 OpenAI API / Chat Completions 身份；普通兼容站也可改用最小身份。",
+        "version_keys": ["openai_sdk"],
+    },
+    CLIENT_IDENTITY_CODEX_CLI: {
+        "label": "Codex CLI",
+        "description": "OpenAI Responses / Codex 兼容代理身份，不模拟 Codex Desktop。",
+        "version_keys": ["codex_cli"],
+    },
+    CLIENT_IDENTITY_CLAUDE_CODE: {
+        "label": "Claude Code CLI",
+        "description": "Anthropic Messages / Claude Code 兼容代理身份，不模拟 Claude Desktop。",
+        "version_keys": ["claude_code"],
+    },
+    CLIENT_IDENTITY_GROK_CLI: {
+        "label": "Grok CLI",
+        "description": "xAI Responses 兼容身份，只保留已复核且不改变鉴权语义的字段。",
+        "version_keys": ["grok_cli"],
+    },
+}
+
+_IDENTITY_HEADER_DESCRIPTIONS = {
+    "user-agent": "声明请求所模拟的客户端及版本；由系统按档案生成。",
+    "x-stainless-lang": "OpenAI SDK 生成器使用的语言标识。",
+    "x-stainless-package-version": "OpenAI SDK 包版本，与可配置版本号同步。",
+    "x-stainless-os": "运行 TelePilot 的操作系统类型，按 Stainless 规范生成。",
+    "x-stainless-arch": "运行 TelePilot 的 CPU 架构，按 Stainless 规范生成。",
+    "x-stainless-runtime": "运行 TelePilot 的 Python 实现。",
+    "x-stainless-runtime-version": "运行 TelePilot 的 Python 版本。",
+    "x-stainless-async": "声明使用 asyncio 异步请求路径。",
+    "originator": "standalone codex exec 的来源标识；Codex Desktop 宿主内会覆盖为 Desktop，本档案不复制宿主覆盖。",
+    "x-app": "Anthropic 上游用于区分 Claude Code 前台 CLI 的固定标识。",
+    "x-grok-client-version": "xAI 上游使用的 Grok CLI 版本标识。",
+    "x-grok-client-mode": "声明当前为无界面、单次调用的 headless 模式。",
+    "x-grok-client-identifier": "Grok CLI 的稳定客户端标识。",
+}
+
+
+def request_configuration_profiles() -> list[dict[str, Any]]:
+    """返回请求配置弹窗使用的完整抓包头清单与处理方式。"""
+
+    output: list[dict[str, Any]] = []
+    for profile in (
+        CLIENT_IDENTITY_OPENAI_SDK,
+        CLIENT_IDENTITY_CODEX_CLI,
+        CLIENT_IDENTITY_CLAUDE_CODE,
+        CLIENT_IDENTITY_GROK_CLI,
+    ):
+        identity = _CATALOG[profile]
+        meta = _REQUEST_PROFILE_META[profile]
+        runtime_headers: list[dict[str, Any]] = []
+        if profile == CLIENT_IDENTITY_CODEX_CLI:
+            runtime_headers = [
+                {
+                    "name": name,
+                    "value": "每个请求会话随机生成；三者使用同一 UUID",
+                    "description": "Codex Responses 的临时请求链路标识，不使用 Telegram、账号或用户 ID。",
+                    "configurable": False,
+                    "management": "runtime",
+                }
+                for name in ("session-id", "thread-id", "x-client-request-id")
+            ]
+        elif profile == CLIENT_IDENTITY_CLAUDE_CODE:
+            runtime_headers = [
+                {
+                    "name": "X-Claude-Code-Session-Id",
+                    "value": "每个客户端实例随机生成 UUID",
+                    "description": "Claude Code 的临时会话标识，不复用系统内业务 ID。",
+                    "configurable": False,
+                    "management": "runtime",
+                }
+            ]
+        elif profile == CLIENT_IDENTITY_GROK_CLI:
+            runtime_headers = [
+                {
+                    "name": name,
+                    "value": value,
+                    "description": description,
+                    "configurable": False,
+                    "management": "runtime",
+                }
+                for name, value, description in (
+                    ("x-grok-conv-id", "随机 UUID", "Grok 临时会话标识。"),
+                    ("x-grok-session-id", "与 conv-id 一致", "Grok 临时会话标识。"),
+                    ("x-grok-req-id", "随机 UUID", "Grok 单次请求标识。"),
+                    ("x-grok-agent-id", "随机 UUID", "Grok 临时 Agent 标识。"),
+                    ("x-grok-turn-idx", "1", "单次 headless 调用的轮次编号。"),
+                    ("x-grok-model-override", "当前模型 ID", "Grok 本次请求的模型覆盖值。"),
+                )
+            ]
+
+        auth_header = "x-api-key" if profile == CLIENT_IDENTITY_CLAUDE_CODE else "Authorization"
+        protocol_headers = [
+            {
+                "name": auth_header,
+                "value": "<由 Provider API Key 生成，界面不回显>",
+                "description": "请求鉴权头；值来自加密保存的 Provider API Key，不能在客户端档案中覆盖。",
+                "configurable": False,
+                "management": "protocol",
+            },
+            {
+                "name": "Accept",
+                "value": "text/event-stream 或 application/json",
+                "description": "按流式或完整响应模式自动选择。",
+                "configurable": False,
+                "management": "protocol",
+            },
+            {
+                "name": "Content-Type",
+                "value": "application/json",
+                "description": "JSON 推理请求的协议内容类型。",
+                "configurable": False,
+                "management": "protocol",
+            },
+        ]
+        if profile == CLIENT_IDENTITY_CLAUDE_CODE:
+            protocol_headers.extend(
+                [
+                    {
+                        "name": "anthropic-version",
+                        "value": "2023-06-01",
+                        "description": "Anthropic Messages 协议版本，由协议客户端固定发送。",
+                        "configurable": False,
+                        "management": "protocol",
+                    },
+                    {
+                        "name": "anthropic-beta",
+                        "value": "按模型能力与兼容模式条件生成",
+                        "description": "会改变 Anthropic API 语义，只能由协议能力映射生成，不能作为身份头手填。",
+                        "configurable": False,
+                        "management": "protocol",
+                    },
+                ]
+            )
+
+        transport_headers = [
+            {
+                "name": "Host",
+                "value": "由 Base URL 解析",
+                "description": "HTTP 客户端根据目标地址自动生成。",
+                "configurable": False,
+                "management": "transport",
+            },
+            {
+                "name": "Content-Length",
+                "value": "按请求体字节数生成",
+                "description": "HTTP 客户端在发送时自动计算。",
+                "configurable": False,
+                "management": "transport",
+            },
+        ]
+
+        excluded_headers: list[dict[str, Any]] = []
+        if profile == CLIENT_IDENTITY_CODEX_CLI:
+            excluded_headers = [
+                {
+                    "name": "x-codex-beta-features",
+                    "value": "<不复制>",
+                    "description": "Codex 内部实验开关，会改变上游能力与接口语义。",
+                    "configurable": False,
+                    "management": "excluded",
+                },
+                {
+                    "name": "x-codex-window-id",
+                    "value": "<不复制>",
+                    "description": "Codex 宿主窗口的运行时标识，TelePilot 没有对应窗口语义。",
+                    "configurable": False,
+                    "management": "excluded",
+                },
+                {
+                    "name": "x-codex-turn-metadata",
+                    "value": "<不复制，包含 installation/session/thread/turn/window 等元数据>",
+                    "description": "包含设备安装 ID、会话链路和本地运行环境信息，不外发也不允许配置。",
+                    "configurable": False,
+                    "management": "excluded",
+                },
+            ]
+        elif profile == CLIENT_IDENTITY_GROK_CLI:
+            excluded_headers = [
+                {
+                    "name": name,
+                    "value": "<不复制>",
+                    "description": description,
+                    "configurable": False,
+                    "management": "excluded",
+                }
+                for name, description in (
+                    ("x-xai-token-auth", "Grok CLI 的专用 Token 鉴权字段，不能由普通 Provider API Key 模拟。"),
+                    ("x-authenticateresponse", "Grok CLI 登录挑战响应，属于账号与设备鉴权语义。"),
+                )
+            ]
+        output.append(
+            {
+                "profile": profile,
+                "label": meta["label"],
+                "description": meta["description"],
+                "api_formats": sorted(identity.api_formats),
+                "version_keys": list(meta["version_keys"]),
+                "source": identity.source,
+                "headers": [
+                    {
+                        "name": name,
+                        "value": value,
+                        "description": _IDENTITY_HEADER_DESCRIPTIONS.get(
+                            name.casefold(), "客户端身份档案固定请求头。"
+                        ),
+                        "configurable": False,
+                        "management": "fixed",
+                    }
+                    for name, value in identity.headers().items()
+                ]
+                + runtime_headers
+                + protocol_headers
+                + transport_headers
+                + excluded_headers,
+            }
+        )
+    return output
 
 
 __all__ = [
@@ -613,6 +830,7 @@ __all__ = [
     "load_version_overrides_from_db",
     "normalize_identity_profile",
     "resolve_identity",
+    "request_configuration_profiles",
     "selectable_identities",
     "validate_identity_for_save",
 ]

@@ -397,7 +397,7 @@ function MobileAssistantButton() {
       <span className="relative grid place-items-center">
         <AssistantRobot compact streaming={streaming} active={!collapsed} celebrating={notice === "complete"} />
       </span>
-      <span className="mt-0.5 text-[10px] font-semibold leading-none">助手</span>
+      <span className="mt-0.5 text-[10px] font-semibold leading-none text-foreground">助手</span>
     </button>
   );
 }

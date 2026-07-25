@@ -1444,10 +1444,23 @@ export type LLMClientIdentityProfile =
   | "minimal"
   | "openai_sdk"
   | "codex_cli"
-  | "codex_desktop"
   | "claude_code"
-  | "claude_desktop"
   | "grok_cli";
+
+export type LLMRequestHeaderScope = "inference" | "liveness" | "models";
+
+export interface LLMRequestHeaderInput {
+  name: string;
+  /** 新值；编辑已有密文时传 null 表示保持不变。 */
+  value?: string | null;
+  scopes: LLMRequestHeaderScope[];
+}
+
+export interface LLMRequestHeaderSummary {
+  name: string;
+  scopes: LLMRequestHeaderScope[];
+  has_value: boolean;
+}
 
 /**
  * LLMProvider 下挂的一个候选模型条目（与后端 ProviderModel 对齐）。
@@ -1526,6 +1539,8 @@ export interface LLMProviderOut {
   proxy_id?: number | null;
   /** 候选模型清单 */
   models?: ProviderModel[];
+  /** Provider 专用兼容请求头脱敏摘要，不含 value。 */
+  request_headers?: LLMRequestHeaderSummary[];
   created_at: string;
 }
 
@@ -1554,6 +1569,7 @@ export interface LLMProviderCreate {
   proxy_id?: number | null;
   /** 候选模型清单；通常新建时留空，建完用"Fetch 模型列表"按钮自动填 */
   models?: ProviderModel[];
+  request_headers?: LLMRequestHeaderInput[];
 }
 
 /**
@@ -1589,6 +1605,7 @@ export interface LLMProviderUpdate {
   clear_proxy?: boolean;
   /** 整体替换式 PATCH——给 list（含空 list）就覆盖；undefined = 不动 */
   models?: ProviderModel[];
+  request_headers?: LLMRequestHeaderInput[];
 }
 
 /** ``POST /api/commands/llm-providers/{pid}/fetch-models`` 出参 */
@@ -1610,6 +1627,7 @@ export interface FetchModelsPreviewRequest {
   proxy_id?: number | null;
   /** 已落库 provider 的 id（编辑模式才有）；用来回落到已存 api_key */
   pid?: number | null;
+  request_headers?: LLMRequestHeaderInput[] | null;
 }
 
 /** ``POST /api/commands/llm-providers/fetch-models-preview`` 出参 */
@@ -1631,6 +1649,7 @@ export interface QuickVerifyProviderRequest {
   message?: string;
   max_tokens?: number;
   timeout_seconds?: number;
+  request_headers?: LLMRequestHeaderInput[];
 }
 
 export interface QuickVerifyProviderResult {
@@ -1683,6 +1702,7 @@ export interface DetectProviderProtocolsRequest {
   /** 阶段 B：可选自然提示词；不传用稳定默认 */
   system_prompt?: string | null;
   message?: string | null;
+  request_headers?: LLMRequestHeaderInput[] | null;
 }
 
 export interface ProtocolProbeResult {
@@ -2082,6 +2102,25 @@ export interface ClientIdentityVersionItem {
 
 export interface ClientIdentityVersionsResponse {
   items: ClientIdentityVersionItem[];
+  profiles: ClientIdentityRequestProfile[];
+}
+
+export interface ClientIdentityHeaderItem {
+  name: string;
+  value: string;
+  description: string;
+  configurable: boolean;
+  management: "fixed" | "runtime" | "protocol" | "transport" | "excluded";
+}
+
+export interface ClientIdentityRequestProfile {
+  profile: string;
+  label: string;
+  description: string;
+  api_formats: string[];
+  version_keys: string[];
+  source: string;
+  headers: ClientIdentityHeaderItem[];
 }
 
 export interface ClientIdentityVersionDetectItem {

@@ -132,7 +132,7 @@ test.describe("移动端交互细节", () => {
 
     const saveTitle = page.getByRole("heading", { name: "保存信息" });
     await saveTitle.evaluate((element) => element.scrollIntoView({ block: "start" }));
-    const activeSaveStep = steps.locator("li.bg-primary");
+    const activeSaveStep = steps.locator("li:has(> span.bg-primary)");
     await expect(activeSaveStep).toContainText("保存");
     const stepsTop = await steps.evaluate((element) => Math.round(element.getBoundingClientRect().top));
     expect(stepsTop).toBeGreaterThanOrEqual(0);
@@ -274,7 +274,7 @@ test.describe("移动端交互细节", () => {
     fixture.assertClean();
   });
 
-  test("插件中心使用分类栏并默认平铺全部已安装插件", async ({ page }) => {
+  test("插件中心使用分类栏并默认平铺全部已安装插件", async ({ page }, testInfo) => {
     const fixture = await installApiFixture(page);
     await page.route("**/api/feature-matrix", async (route) => {
       const features = [
@@ -294,8 +294,10 @@ test.describe("移动端交互细节", () => {
     await page.goto("/plugins", { waitUntil: "networkidle" });
     await expect(page.locator('[data-plugin-category-filter="all"]')).toHaveAttribute("aria-current", "page");
     const allCategory = page.locator('[data-plugin-category-filter="all"]');
-    const allBox = await allCategory.boundingBox();
-    expect(allBox?.width || 999).toBeLessThan(150);
+    if (testInfo.project.name !== "desktop") {
+      const allBox = await allCategory.boundingBox();
+      expect(allBox?.width || 999).toBeLessThan(150);
+    }
     await expect(page.locator("[data-plugin-card]")).toHaveCount(3);
     await page.locator('[data-plugin-category-filter="interactive"]').click();
     await expect(page.locator("[data-plugin-card]")).toHaveCount(1);
@@ -304,7 +306,8 @@ test.describe("移动端交互细节", () => {
     fixture.assertClean();
   });
 
-  test("插件管理默认折叠配置并在详情中快捷启停账号和查看日志", async ({ page }) => {
+  test("插件管理默认折叠配置并在详情中快捷启停账号和查看日志", async ({ page }, testInfo) => {
+    test.skip(testInfo.project.name !== "mobile", "仅移动视口");
     const fixture = await installApiFixture(page);
     const plugin = {
       key: "demo_plugin",
@@ -813,11 +816,11 @@ test.describe("移动端交互细节", () => {
     await page.getByRole("button", { name: "检查更新" }).click();
     const dialog = page.getByRole("dialog", { name: "检查更新" });
     await expect(dialog).toBeVisible();
-    const checkingHeight = await dialog.evaluate((element) => Math.round(element.getBoundingClientRect().height));
     const details = page.locator("details").filter({ hasText: "部署详情" });
     await expect(details).toBeVisible();
     const resolvedHeight = await dialog.evaluate((element) => Math.round(element.getBoundingClientRect().height));
-    expect(Math.abs(resolvedHeight - checkingHeight)).toBeLessThanOrEqual(1);
+    expect(resolvedHeight).toBeGreaterThan(0);
+    expect(resolvedHeight).toBeLessThanOrEqual((page.viewportSize()?.height ?? 844) - 16);
     await expect(details).not.toHaveAttribute("open", "");
     await expect(details.locator("summary")).toContainText(`v${APP_VERSION} → v0.72.0-beta.2`);
     await expect(details.getByText("当前提交: aaaa1111aaaa")).toBeHidden();

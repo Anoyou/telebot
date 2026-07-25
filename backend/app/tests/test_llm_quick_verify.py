@@ -50,7 +50,7 @@ async def test_quick_verify_discovers_model_and_streams_without_leaking_key(
             yield LLMStreamChunk(delta="可以", model="gpt-5-mini-2026")
             yield LLMStreamChunk(delta="继续。", input_tokens=7, output_tokens=3, done=True)
 
-    def build_client(dto):
+    def build_client(dto, **_kwargs):
         captured["dto"] = dto
         return FakeClient()
 
@@ -84,7 +84,7 @@ async def test_quick_verify_explicit_model_skips_discovery(monkeypatch) -> None:
     monkeypatch.setattr(
         llm_quick_verify,
         "build_client_from_dto",
-        lambda _dto: FakeClient(),
+        lambda _dto, **_kwargs: FakeClient(),
     )
     events = await _collect_events(model="manual-model")
 
@@ -109,7 +109,7 @@ async def test_quick_verify_passes_connection_identity_and_reasoning_to_real_req
             yield LLMStreamChunk(delta="已回复", model="grok-reasoning")
             yield LLMStreamChunk(done=True, model="grok-reasoning")
 
-    def build_client(dto):
+    def build_client(dto, **_kwargs):
         captured["identity"] = dto.client_identity_profile
         captured["protocol"] = dto.protocol_profile
         captured["proxy"] = dto.proxy_url
@@ -187,7 +187,7 @@ async def test_quick_verify_auth_failure_is_not_misreported_as_model_problem(
     monkeypatch.setattr(
         llm_quick_verify,
         "build_client_from_dto",
-        lambda _dto: FakeClient(),
+        lambda _dto, **_kwargs: FakeClient(),
     )
     events = await _collect_events()
 
@@ -216,7 +216,7 @@ async def test_quick_verify_auto_model_not_found_requests_manual_model(
     monkeypatch.setattr(
         llm_quick_verify,
         "build_client_from_dto",
-        lambda _dto: FakeClient(),
+        lambda _dto, **_kwargs: FakeClient(),
     )
     events = await _collect_events()
 
@@ -246,7 +246,7 @@ async def test_quick_verify_endpoint_404_does_not_request_manual_model(
     monkeypatch.setattr(
         llm_quick_verify,
         "build_client_from_dto",
-        lambda _dto: FakeClient(),
+        lambda _dto, **_kwargs: FakeClient(),
     )
     events = await _collect_events()
 
@@ -275,7 +275,7 @@ async def test_quick_verify_falls_back_when_streaming_is_unsupported(
     monkeypatch.setattr(
         llm_quick_verify,
         "build_client_from_dto",
-        lambda _dto: FakeClient(),
+        lambda _dto, **_kwargs: FakeClient(),
     )
     events = await _collect_events(model="legacy-model")
 
@@ -317,7 +317,7 @@ async def test_quick_verify_does_not_repeat_completed_json_stream_fallback(
     monkeypatch.setattr(
         llm_quick_verify,
         "build_client_from_dto",
-        lambda _dto: client,
+        lambda _dto, **_kwargs: client,
     )
 
     events = await _collect_events(model="json-model")
@@ -341,7 +341,7 @@ async def test_quick_verify_rejects_stream_without_done(monkeypatch) -> None:
     monkeypatch.setattr(
         llm_quick_verify,
         "build_client_from_dto",
-        lambda _dto: FakeClient(),
+        lambda _dto, **_kwargs: FakeClient(),
     )
 
     events = await _collect_events(model="broken")

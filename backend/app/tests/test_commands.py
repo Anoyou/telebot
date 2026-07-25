@@ -2252,9 +2252,10 @@ async def test_chat_test_models_endpoint_success(monkeypatch) -> None:
     assert captured["build_kwargs"] == {
         "override_model": "model-a",
         "proxy_url": "socks5://127.0.0.1:1080",
-        "api_format_override": "anthropic_messages",
-        "identity_override": "claude_code",
-    }
+            "api_format_override": "anthropic_messages",
+            "identity_override": "claude_code",
+            "request_scope": "liveness",
+        }
     assert captured["kwargs"] == {"max_tokens": 1234, "timeout_seconds": 77}
     assert len(emitted) == 1
     assert emitted[0].source == "diagnostic:chat-test"
@@ -3338,21 +3339,46 @@ class _IdentityValidationDB:
 
 
 @pytest.mark.asyncio
-async def test_create_provider_rejects_unverified_identity() -> None:
-    """未验证档案（claude_desktop）不能作为固定身份保存。"""
-    with pytest.raises(HTTPException) as ei:
-        await command_service.create_provider(
-            _IdentityValidationDB(),
-            LLMProviderCreate(
-                name="idv-unverified",
-                provider="anthropic",
-                default_model="claude-3-5-sonnet",
-                api_format="anthropic_messages",
-                client_identity_profile="claude_desktop",
-            ),
-        )
-    assert ei.value.status_code == 422
-    assert ei.value.detail["code"] == "LLM_PROVIDER_IDENTITY_INVALID"
+async def test_create_provider_normalizes_legacy_desktop_identity() -> None:
+    """旧 claude_desktop 配置保存时无感归一到 Claude Code CLI。"""
+    db = _IdentityValidationDB()
+    out = await command_service.create_provider(
+        db,
+        LLMProviderCreate(
+            name="idv-desktop-legacy",
+            provider="anthropic",
+            default_model="claude-3-5-sonnet",
+            api_format="anthropic_messages",
+            client_identity_profile="claude_desktop",
+        ),
+    )
+    assert out.client_identity_profile == "claude_code"
+    assert db.row.client_identity_profile == "claude_code"
+
+
+def test_provider_update_audit_never_contains_request_header_values() -> None:
+    """Provider 更新审计只能记录兼容请求头变更摘要，不能落明文值。"""
+
+    from app.api import commands as commands_api
+
+    payload = LLMProviderUpdate(
+        name="tenant-provider",
+        request_headers=[
+            {
+                "name": "X-Tenant-ID",
+                "value": "tenant-secret",
+                "scopes": ["inference"],
+            }
+        ],
+    )
+    audit_detail = commands_api._provider_update_audit_detail(payload)
+
+    assert audit_detail == {
+        "name": "tenant-provider",
+        "request_headers_changed": True,
+        "request_headers_count": 1,
+    }
+    assert "tenant-secret" not in repr(audit_detail)
 
 
 @pytest.mark.asyncio

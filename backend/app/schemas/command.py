@@ -331,6 +331,24 @@ class ProviderModel(BaseModel):
         return v2
 
 
+class LLMRequestHeaderInput(BaseModel):
+    """Provider 专用兼容请求头；value=None 在更新时表示保留已有密文值。"""
+
+    name: str
+    value: str | None = None
+    scopes: list[Literal["inference", "liveness", "models"]] = Field(
+        default_factory=lambda: ["inference", "liveness", "models"]
+    )
+
+
+class LLMRequestHeaderSummary(BaseModel):
+    """兼容请求头脱敏摘要；API 永不返回 value。"""
+
+    name: str
+    scopes: list[str] = Field(default_factory=list)
+    has_value: bool = True
+
+
 class LLMProviderCreate(BaseModel):
     """新建 LLM provider 入参；``api_key`` 可空（如本地 Ollama）。"""
 
@@ -389,6 +407,9 @@ class LLMProviderCreate(BaseModel):
     models: list[ProviderModel] = Field(default_factory=list, max_length=200)
     """该 provider 下挂的候选模型清单。新建时通常留空；建完 provider 后用前端的
     ``Fetch 模型列表`` 按钮自动拉取，再 toggle 启用要用的几个。"""
+
+    request_headers: list[LLMRequestHeaderInput] = Field(default_factory=list)
+    """Provider 专用兼容请求头；服务层校验名称、作用域、大小与系统保留字段。"""
 
     @field_validator("provider")
     @classmethod
@@ -467,6 +488,7 @@ class LLMProviderUpdate(BaseModel):
     models: list[ProviderModel] | None = Field(default=None, max_length=200)
     """整体替换式的 PATCH——None 表示不动；给 list（含空 list）则覆盖。
     fetch-models / test-model 等独立 endpoint 不通过这条字段，那些直接改 DB。"""
+    request_headers: list[LLMRequestHeaderInput] | None = None
 
     @field_validator("tags")
     @classmethod
@@ -499,6 +521,7 @@ class LLMProviderOut(BaseModel):
     proxy_id: int | None = None
     # 候选模型清单（带启用状态）
     models: list[ProviderModel] = Field(default_factory=list)
+    request_headers: list[LLMRequestHeaderSummary] = Field(default_factory=list)
     created_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
@@ -539,6 +562,7 @@ class FetchModelsPreviewRequest(BaseModel):
     api_key: str | None = Field(default=None, max_length=512)
     proxy_id: int | None = Field(default=None, ge=1)
     pid: int | None = Field(default=None, ge=1)
+    request_headers: list[LLMRequestHeaderInput] | None = None
 
 
 class FetchModelsPreviewResponse(BaseModel):
@@ -580,6 +604,7 @@ class QuickVerifyProviderRequest(BaseModel):
         "minimal", "low", "medium", "high", "xhigh", "max"
     ] | None = None
     proxy_id: int | None = Field(default=None, ge=1)
+    request_headers: list[LLMRequestHeaderInput] = Field(default_factory=list)
     system_prompt: str = Field(
         default="你是一个自然、简洁的中文聊天助手。请像真实聊天一样直接回复用户，不要只返回 ping/pong。",
         min_length=1,
@@ -619,6 +644,7 @@ class DetectProviderProtocolsRequest(BaseModel):
     # 阶段 B：可选自然提示词；不传则用稳定默认。探测使用自然语言而非字面量 ping。
     system_prompt: str | None = Field(default=None, max_length=2000)
     message: str | None = Field(default=None, max_length=2000)
+    request_headers: list[LLMRequestHeaderInput] | None = None
 
 
 class ProtocolProbeResult(BaseModel):
@@ -975,10 +1001,30 @@ class ClientIdentityVersionItem(BaseModel):
     """是否支持"检测最新版本"按钮（有公共 registry 才为 True）。"""
 
 
+class ClientIdentityHeaderItem(BaseModel):
+    name: str
+    value: str
+    description: str
+    configurable: bool = False
+    management: Literal["fixed", "runtime", "protocol", "transport", "excluded"] = "fixed"
+    """该头在 TelePilot 中的处理方式，而不是假装抓包里不存在。"""
+
+
+class ClientIdentityRequestProfile(BaseModel):
+    profile: str
+    label: str
+    description: str
+    api_formats: list[str] = Field(default_factory=list)
+    version_keys: list[str] = Field(default_factory=list)
+    source: str = ""
+    headers: list[ClientIdentityHeaderItem] = Field(default_factory=list)
+
+
 class ClientIdentityVersionsResponse(BaseModel):
-    """客户端身份 UA 版本配置总览。"""
+    """AI 供应商请求配置总览。"""
 
     items: list[ClientIdentityVersionItem] = Field(default_factory=list)
+    profiles: list[ClientIdentityRequestProfile] = Field(default_factory=list)
 
 
 class ClientIdentityVersionDetectItem(BaseModel):

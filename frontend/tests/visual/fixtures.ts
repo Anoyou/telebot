@@ -154,6 +154,7 @@ function jsonResponse(pathname: string): unknown | undefined {
   };
   if (pathname === "/api/system-agent/sessions") return [];
   if (pathname === "/api/system-agent/runs") return [];
+  if (pathname === "/api/system-agent/actions") return [];
   if (pathname === "/api/system-agent/memory") return [];
   if (pathname === "/api/system/capabilities") return platformCapabilitiesFixture;
   if (pathname === "/api/feature-matrix") return { features: [] };

@@ -1026,17 +1026,28 @@ function ContractSummaryBlock({
   variant?: "secondary" | "destructive";
 }) {
   return (
-    <div className="rounded-md border bg-muted/20 p-3">
+    <div className="min-w-0 overflow-hidden rounded-md border bg-muted/20 p-3">
       <div className="mb-2 text-xs font-medium text-muted-foreground">{title}</div>
       {items.length > 0 ? (
-        <div className="flex flex-wrap gap-1.5">
-          {items.slice(0, 8).map((item) => (
-            <Badge key={item} variant={variant} className="max-w-full break-all">
-              {item}
-            </Badge>
-          ))}
-          {items.length > 8 ? <Badge variant="outline">+{items.length - 8}</Badge> : null}
-        </div>
+        variant === "destructive" ? (
+          <div className="space-y-1.5">
+            {items.slice(0, 8).map((item) => (
+              <div key={item} className="max-w-full whitespace-normal break-words rounded-md border border-destructive/30 bg-destructive/10 px-2.5 py-2 text-xs leading-5 text-destructive">
+                {item}
+              </div>
+            ))}
+            {items.length > 8 ? <Badge variant="outline">+{items.length - 8}</Badge> : null}
+          </div>
+        ) : (
+          <div className="flex flex-wrap gap-1.5">
+            {items.slice(0, 8).map((item) => (
+              <Badge key={item} variant={variant} className="max-w-full">
+                {item}
+              </Badge>
+            ))}
+            {items.length > 8 ? <Badge variant="outline">+{items.length - 8}</Badge> : null}
+          </div>
+        )
       ) : (
         <div className="text-xs text-muted-foreground">{empty}</div>
       )}

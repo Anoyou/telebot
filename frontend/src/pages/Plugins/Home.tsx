@@ -580,7 +580,7 @@ export function PluginsHome() {
                     className={cn(
                       "flex min-w-0 shrink-0 items-center gap-1.5 rounded-lg border px-2.5 py-2 text-left transition-colors lg:w-full",
                       active
-                        ? "border-primary/35 bg-primary/10 text-primary"
+                        ? "border-primary/35 bg-primary/10 text-foreground"
                         : "border-border/70 bg-background hover:bg-muted/40",
                     )}
                     aria-current={active ? "page" : undefined}

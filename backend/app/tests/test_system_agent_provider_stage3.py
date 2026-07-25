@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -187,3 +188,66 @@ async def test_run_quick_verify_maps_error(monkeypatch) -> None:
         )
     assert "验证失败" in ei.value.message
     assert "sk-secret" not in ei.value.message
+
+
+@pytest.mark.asyncio
+async def test_existing_provider_verify_uses_encrypted_compatibility_headers(monkeypatch) -> None:
+    from app.services.system_agent import provider_verify
+
+    row = SimpleNamespace(
+        provider="openai",
+        base_url="https://api.example/v1",
+        default_model="model",
+        api_format="responses",
+        api_key_enc="encrypted-key",
+        request_headers_enc="encrypted-headers",
+        protocol_profile="standard",
+        client_identity_profile="codex_cli",
+    )
+
+    class _Db:
+        async def get(self, _model, _provider_id):  # noqa: ANN001
+            return row
+
+    monkeypatch.setattr(provider_verify, "decrypt_str", lambda _token: "sk-secret")
+    monkeypatch.setattr(
+        provider_verify,
+        "decrypt_request_headers",
+        lambda _token: [{"name": "X-Tenant-ID", "value": "tenant", "scopes": ["liveness"]}],
+    )
+
+    resolved = await provider_verify.resolve_provider_verify_args(_Db(), {"id": 7})
+
+    assert resolved["api_key"] == "sk-secret"
+    assert resolved["request_headers"] == [{"name": "X-Tenant-ID", "value": "tenant", "scopes": ["liveness"]}]
+
+
+@pytest.mark.asyncio
+async def test_run_quick_verify_forwards_compatibility_headers(monkeypatch) -> None:
+    from app.services.system_agent import provider_verify
+
+    captured: dict[str, object] = {}
+
+    async def fake_events(**kwargs):  # noqa: ANN003
+        captured.update(kwargs)
+        yield {"type": "done", "ok": True, "model": "model", "response": "ok"}
+
+    monkeypatch.setattr(provider_verify.llm_quick_verify, "quick_verify_events", fake_events)
+    monkeypatch.setattr(
+        provider_verify.llm_quick_verify,
+        "normalize_quick_verify_base_url",
+        lambda value: value,
+    )
+    headers = [{"name": "X-Tenant-ID", "value": "tenant", "scopes": ["liveness"]}]
+
+    result = await provider_verify.run_quick_verify(
+        base_url="https://api.example/v1",
+        api_key="sk-secret",
+        api_format="responses",
+        default_model="model",
+        provider="openai",
+        request_headers=headers,
+    )
+
+    assert result["ok"] is True
+    assert captured["request_headers"] == headers

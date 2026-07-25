@@ -134,6 +134,7 @@ async def save_precheck(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any
         provider=resolved.get("provider"),
         protocol_profile=str(resolved.get("protocol_profile") or "standard"),
         client_identity_profile=str(resolved.get("client_identity_profile") or "auto"),
+        request_headers=resolved.get("request_headers"),
     )
 
 
@@ -239,6 +240,7 @@ async def verify_precheck(ctx: ToolContext, args: dict[str, Any]) -> dict[str, A
         provider=resolved.get("provider"),
         protocol_profile=str(resolved.get("protocol_profile") or "standard"),
         client_identity_profile=str(resolved.get("client_identity_profile") or "auto"),
+        request_headers=resolved.get("request_headers"),
     )
     return result
 

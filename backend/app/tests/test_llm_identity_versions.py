@@ -62,8 +62,8 @@ def test_apply_overrides_changes_only_version_segment() -> None:
         ident = get_identity(CLIENT_IDENTITY_CLAUDE_CODE)
         # 版本号变了
         assert "2.1.207" in ident.user_agent
-        # UA 结构未变（仍是 claude-cli/<ver> (external, cli)）
-        assert ident.user_agent == "claude-cli/2.1.207 (external, cli)"
+        # UA 结构未变（仍是非交互 sdk-cli 入口）
+        assert ident.user_agent == "claude-cli/2.1.207 (external, sdk-cli)"
         # 请求头字段名/值未变
         assert dict(ident.extra_headers) == before_headers
         assert ident.extra_headers.get("x-app") == "cli"
@@ -99,9 +99,9 @@ def test_codex_cli_ua_reflects_override() -> None:
     try:
         apply_version_overrides({"codex_cli": "0.199.0"})
         ident = get_identity(CLIENT_IDENTITY_CODEX_CLI)
-        assert ident.user_agent.startswith("codex_cli_rs/0.199.0 (")
+        assert ident.user_agent.startswith("codex_exec/0.199.0 (")
         # originator 头不随版本变化
-        assert ident.extra_headers.get("originator") == "codex_cli_rs"
+        assert ident.extra_headers.get("originator") == "codex_exec"
     finally:
         _reset()
 
@@ -113,18 +113,20 @@ def test_version_key_metadata_detectability() -> None:
     assert meta["claude_code"]["registry"] == "npm:@anthropic-ai/claude-code"
     assert meta["openai_sdk"]["registry"] == "pypi:openai"
     assert meta["grok_cli"]["registry"] == "cli:grok-update-check"
-    # Codex Desktop 两段无公共 registry（仅手动）
-    assert meta["codex_desktop_core"]["registry"] is None
-    assert meta["codex_desktop_build"]["registry"] is None
+    assert "codex_desktop_core" not in meta
+    assert "codex_desktop_build" not in meta
 
 
 def test_parse_grok_update_check_prefers_remote_version() -> None:
     output = "A new version of Grok Build is available: 0.2.101 -> 0.2.102 [stable]"
     assert commands._parse_grok_update_check(output) == "0.2.102"
     assert commands._parse_grok_update_check("Grok Build is up to date: 0.2.102") == "0.2.102"
-    assert commands._parse_grok_update_check(
-        '{"currentVersion":"0.2.101","latestVersion":"0.2.102","updateAvailable":true}'
-    ) == "0.2.102"
+    assert (
+        commands._parse_grok_update_check(
+            '{"currentVersion":"0.2.101","latestVersion":"0.2.102","updateAvailable":true}'
+        )
+        == "0.2.102"
+    )
 
 
 @pytest.mark.asyncio

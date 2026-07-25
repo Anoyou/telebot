@@ -46,33 +46,62 @@ log = logging.getLogger(__name__)
 # 设计：保守命中——只要消息里能找到任意一个关键词就视为命中类别。
 # 避免误命中：每个类别选 ≤ 12 个高特征 token。
 _VISION_KEYWORDS = (
-    "识别图", "这张图", "看图", "图片里", "截图", "ocr",
-    "describe the image", "what's in this image", "what is in this image",
-    "图中", "图里",
+    "识别图",
+    "这张图",
+    "看图",
+    "图片里",
+    "截图",
+    "ocr",
+    "describe the image",
+    "what's in this image",
+    "what is in this image",
+    "图中",
+    "图里",
 )
 
 _TRANSLATE_KEYWORDS = (
-    "翻译为", "翻译成", "翻成", "译为", "translate to", "translate into",
-    "translate this", "翻译一下", "中译英", "英译中", "japanese to chinese",
+    "翻译为",
+    "翻译成",
+    "翻成",
+    "译为",
+    "translate to",
+    "translate into",
+    "translate this",
+    "翻译一下",
+    "中译英",
+    "英译中",
+    "japanese to chinese",
 )
 
 _REASON_KEYWORDS = (
-    "为什么", "分析一下", "推理", "推导", "为何", "原因是", "比较一下",
-    "对比", "解释清楚", "step by step", "step-by-step", "reason about",
-    "why does", "why is", "explain why",
+    "为什么",
+    "分析一下",
+    "推理",
+    "推导",
+    "为何",
+    "原因是",
+    "比较一下",
+    "对比",
+    "解释清楚",
+    "step by step",
+    "step-by-step",
+    "reason about",
+    "why does",
+    "why is",
+    "explain why",
 )
 
 # 代码 token：行内 / 块内任一命中即认为含代码
 _CODE_TOKEN_RE = re.compile(
-    r"```|"                            # 围栏代码块
-    r"\bdef\s+\w+\s*\(|"               # python 函数
-    r"\bfunction\s+\w+\s*\(|"          # js 函数
-    r"\bclass\s+\w+\s*[:({]|"          # 类
-    r"\bimport\s+[a-zA-Z_]|"           # import
-    r"#include\s+<|"                   # C/C++
-    r"\bconsole\.log\(|"               # js
-    r"\bprint\(|"                      # python/js print
-    r"=>\s*\{",                        # arrow function body
+    r"```|"  # 围栏代码块
+    r"\bdef\s+\w+\s*\(|"  # python 函数
+    r"\bfunction\s+\w+\s*\(|"  # js 函数
+    r"\bclass\s+\w+\s*[:({]|"  # 类
+    r"\bimport\s+[a-zA-Z_]|"  # import
+    r"#include\s+<|"  # C/C++
+    r"\bconsole\.log\(|"  # js
+    r"\bprint\(|"  # python/js print
+    r"=>\s*\{",  # arrow function body
     re.IGNORECASE,
 )
 
@@ -186,7 +215,9 @@ def _enabled_models_of(p: dict[str, Any]) -> list[str]:
 
 def _has_model_list(p: dict[str, Any]) -> bool:
     """provider 是否声明了显式 models 清单（哪怕只有一条）。"""
-    return bool([m for m in (p.get("models") or []) if isinstance(m, dict) and str(m.get("id") or "").strip()])
+    return bool(
+        [m for m in (p.get("models") or []) if isinstance(m, dict) and str(m.get("id") or "").strip()]
+    )
 
 
 def _pick_model_for(p: dict[str, Any]) -> str | None:
@@ -312,10 +343,7 @@ def _rule_route(
 
     # 1) 视觉：必须有 modality∈{vision,multimodal} 才匹配；没有就跳过此条规则
     if _looks_like_vision_request(user_q, replied_text, has_replied_photo):
-        vis = [
-            p for p in candidates
-            if _provider_modality(p) in (_MOD_VISION, _MOD_MULTIMODAL)
-        ]
+        vis = [p for p in candidates if _provider_modality(p) in (_MOD_VISION, _MOD_MULTIMODAL)]
         if vis:
             # 视觉里也按 cost_tier 升序选便宜的
             vis.sort(key=_cost_tier)
@@ -394,16 +422,7 @@ async def _ask_classifier(
     from .llm_dto import LLMProviderDTO
     from .llm_invoke import invoke as invoke_llm
 
-    dto = LLMProviderDTO(
-        id=int(classifier_provider.get("id") or 0),
-        name=str(classifier_provider.get("name", "")),
-        provider=str(classifier_provider.get("provider", "")),
-        api_format=classifier_provider.get("api_format"),  # 修复：补充 api_format
-        base_url=classifier_provider.get("base_url"),
-        default_model=str(classifier_provider.get("default_model", "")),
-        api_key_enc=classifier_provider.get("api_key_enc"),
-        proxy_url=classifier_provider.get("proxy_url"),  # 修复：补充 proxy_url
-    )
+    dto = LLMProviderDTO.from_dict(classifier_provider)
 
     # 把"原文 + 问题"压成短摘要送进去；max_tokens=8 防滥调
     blob = (replied_text or "")[:300] + "\n---\n" + (user_q or "")[:200]
@@ -428,6 +447,7 @@ async def _ask_classifier(
     if label in _CLASSIFIER_LABELS:
         return label
     return None
+
 
 # ════════════════════════════════════════════════════════════
 # 公共入口
@@ -516,8 +536,9 @@ async def _pick_provider_impl(
                 source="router",
             )
             if label:
-                p = _select_by_tag(candidates, label, prefer_cheap=(label != "reason"),
-                                   prefer_premium=(label == "reason"))
+                p = _select_by_tag(
+                    candidates, label, prefer_cheap=(label != "reason"), prefer_premium=(label == "reason")
+                )
                 if p:
                     return RoutingDecision(
                         int(p["id"]),

@@ -254,7 +254,7 @@ async def test_detect_retries_identity_only_on_client_rejection(monkeypatch) -> 
         if url.endswith("/responses"):
             responses_uas.append(request.headers.get("User-Agent", ""))
             ua = request.headers.get("User-Agent", "")
-            if ua.startswith("codex_cli_rs/"):
+            if ua.startswith("codex_exec/"):
                 return httpx.Response(200, json={"output_text": "ok"})
             return httpx.Response(403, text="this API requires the Codex CLI client")
         if url.endswith("/chat/completions"):

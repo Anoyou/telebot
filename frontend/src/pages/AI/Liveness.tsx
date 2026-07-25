@@ -155,11 +155,11 @@ function writeConversation(state: PersistedConversation): boolean {
 const IDENTITY_LABELS: Record<string, string> = {
   auto: "自动选择",
   minimal: "最小身份",
-  openai_sdk: "OpenAI SDK",
+  openai_sdk: "OpenAI SDK（标准 API）",
   codex_cli: "Codex CLI",
-  codex_desktop: "Codex Desktop",
-  claude_code: "Claude Code",
-  claude_desktop: "Claude Desktop",
+  codex_desktop: "Codex CLI（旧 Desktop 配置）",
+  claude_code: "Claude Code CLI",
+  claude_desktop: "Claude Code CLI（旧 Desktop 配置）",
   grok_cli: "Grok CLI",
 };
 
@@ -223,11 +223,9 @@ const API_FORMAT_OPTIONS: Array<{ value: LLMApiFormat; label: string }> = [
 const IDENTITY_OPTIONS: Array<{ value: LLMClientIdentityProfile; label: string }> = [
   { value: "auto", label: "自动选择" },
   { value: "minimal", label: "最小身份" },
-  { value: "openai_sdk", label: "OpenAI SDK" },
+  { value: "openai_sdk", label: "OpenAI SDK（标准 API）" },
   { value: "codex_cli", label: "Codex CLI" },
-  { value: "codex_desktop", label: "Codex Desktop" },
-  { value: "claude_code", label: "Claude Code" },
-  { value: "claude_desktop", label: "Claude Desktop" },
+  { value: "claude_code", label: "Claude Code CLI" },
   { value: "grok_cli", label: "Grok CLI" },
 ];
 

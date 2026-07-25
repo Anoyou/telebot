@@ -30,13 +30,38 @@ def _os_seg() -> str:
     return f"{os_slug} {platform.release() or 'unknown'}; {platform.machine().lower() or 'unknown'}"
 
 
+def _stainless_os() -> str:
+    return {"Darwin": "MacOS", "Windows": "Windows", "Linux": "Linux"}.get(
+        platform.system(), platform.system() or "Unknown"
+    )
+
+
+def _stainless_arch() -> str:
+    machine = platform.machine().lower()
+    return {"arm64": "arm64", "aarch64": "arm64", "x86_64": "x64"}.get(machine, machine or "unknown")
+
+
+def _grok_platform() -> str:
+    system = platform.system().lower()
+    os_slug = "macos" if system == "darwin" else (system or "unknown")
+    machine = platform.machine().lower()
+    arch = "aarch64" if machine in {"arm64", "aarch64"} else (machine or "unknown")
+    return f"{os_slug}; {arch}"
+
+
 def test_golden_openai_sdk_headers() -> None:
     ident = get_identity("openai_sdk")
     assert ident is not None
     assert ident.verified is True
     assert ident.headers() == {
-        "User-Agent": "OpenAI/Python 2.45.0",
+        "User-Agent": "AsyncOpenAI/Python 2.45.0",
         "X-Stainless-Lang": "python",
+        "X-Stainless-Package-Version": "2.45.0",
+        "X-Stainless-OS": _stainless_os(),
+        "X-Stainless-Arch": _stainless_arch(),
+        "X-Stainless-Runtime": platform.python_implementation(),
+        "X-Stainless-Runtime-Version": platform.python_version(),
+        "X-Stainless-Async": "async:asyncio",
     }
 
 
@@ -44,8 +69,8 @@ def test_golden_codex_cli_headers() -> None:
     ident = get_identity("codex_cli")
     assert ident is not None
     assert ident.headers() == {
-        "User-Agent": f"codex_cli_rs/0.143.0 ({_os_seg()}) unknown",
-        "originator": "codex_cli_rs",
+        "User-Agent": f"codex_exec/0.145.0 ({_os_seg()}) dumb (codex_exec; 0.145.0)",
+        "originator": "codex_exec",
     }
 
 
@@ -53,20 +78,17 @@ def test_golden_claude_code_headers() -> None:
     ident = get_identity("claude_code")
     assert ident is not None
     assert ident.headers() == {
-        "User-Agent": "claude-cli/2.1.205 (external, cli)",
+        "User-Agent": "claude-cli/2.1.220 (external, sdk-cli)",
         "x-app": "cli",
     }
 
 
-def test_golden_codex_desktop_headers() -> None:
+def test_legacy_codex_desktop_uses_codex_cli_headers() -> None:
     ident = get_identity("codex_desktop")
     assert ident is not None
     assert ident.headers() == {
-        "User-Agent": (
-            f"Codex Desktop/0.144.0-alpha.4 ({_os_seg()}) unknown "
-            "(Codex Desktop; 26.707.51957)"
-        ),
-        "originator": "Codex Desktop",
+        "User-Agent": f"codex_exec/0.145.0 ({_os_seg()}) dumb (codex_exec; 0.145.0)",
+        "originator": "codex_exec",
     }
 
 
@@ -75,8 +97,10 @@ def test_golden_grok_cli_headers() -> None:
     assert ident is not None
     assert ident.verified is True
     assert ident.headers() == {
-        "User-Agent": "grok-cli/0.2.93",
-        "x-grok-client-version": "0.2.93",
+        "User-Agent": f"grok-shell/0.2.112 ({_grok_platform()})",
+        "x-grok-client-mode": "headless",
+        "x-grok-client-version": "0.2.112",
+        "x-grok-client-identifier": "grok-shell",
     }
 
 
@@ -85,15 +109,6 @@ def test_golden_minimal_emits_no_product_headers() -> None:
     assert ident is not None
     assert ident.user_agent is None
     assert ident.headers() == {}
-
-
-def test_golden_codex_desktop_headers_no_credentials() -> None:
-    """codex_desktop 只发 UA + originator，绝不含 session/turn/installation/账户头。"""
-    ident = get_identity("codex_desktop")
-    assert ident is not None
-    banned = ("session", "turn", "installation", "account", "authorization", "beta", "cookie")
-    for key in ident.headers():
-        assert not any(b in key.lower() for b in banned)
 
 
 @pytest.mark.parametrize(
@@ -145,10 +160,8 @@ async def test_minimal_transport_headers_carry_no_fabricated_product_ua() -> Non
 def test_default_client_versions_locked() -> None:
     """默认版本号 golden：漂移时必须显式更新证据。"""
     assert llm_identity.default_client_versions() == {
-        "codex_cli": "0.143.0",
-        "claude_code": "2.1.205",
+        "codex_cli": "0.145.0",
+        "claude_code": "2.1.220",
         "openai_sdk": "2.45.0",
-        "grok_cli": "0.2.93",
-        "codex_desktop_core": "0.144.0-alpha.4",
-        "codex_desktop_build": "26.707.51957",
+        "grok_cli": "0.2.112",
     }

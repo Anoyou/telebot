@@ -2263,7 +2263,7 @@ _EXPORT_DEFS: dict[str, dict[str, Any]] = {
     },
     "llm_providers": {
         "model": "LLMProvider",
-        "exclude_fields": {"api_key_enc"},
+        "exclude_fields": {"api_key_enc", "request_headers_enc"},
         "id_fields": ("name",),
         "pk_field": "id",
         "dependencies": ("proxies",),
@@ -2377,6 +2377,7 @@ _IMPORT_TOPOLOGY = (
 _ALL_SENSITIVE = {
     "session_enc",
     "api_key_enc",
+    "request_headers_enc",
     "api_id_enc",
     "api_hash_enc",
     "phone",

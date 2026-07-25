@@ -18,6 +18,7 @@ from __future__ import annotations
 import base64
 import json
 import re
+import uuid
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, field, replace
@@ -65,6 +66,11 @@ from .llm_protocol import (
     to_wire_tool_name,
     wire_tool_name_map,
 )
+from .llm_request_headers import (
+    REQUEST_SCOPE_INFERENCE,
+    plan_request_headers,
+    request_headers_for_scope,
+)
 
 # 默认调用超时；prompt 较长 / TG 端用户体验角度都不宜过长
 _HTTP_TIMEOUT = httpx.Timeout(30.0, connect=10.0)
@@ -84,6 +90,8 @@ def _llm_headers(
     identity: ClientIdentity | None = None,
     content_type: str | None = "application/json",
     accept: str | None = None,
+    compatibility_headers: Mapping[str, str] | None = None,
+    runtime_headers: Mapping[str, str] | None = None,
 ) -> dict[str, str]:
     """构造 LLM 请求头。
 
@@ -96,10 +104,12 @@ def _llm_headers(
         headers["Content-Type"] = content_type
     if accept:
         headers["Accept"] = accept
-    if identity is not None:
-        # 身份头覆盖（含 UA）；minimal 档案 headers() 为空，不注入产品模拟头。
-        headers.update(identity.headers())
-    return headers
+    return plan_request_headers(
+        system_headers=headers,
+        identity_headers=identity.headers() if identity is not None else None,
+        runtime_headers=runtime_headers,
+        compatibility_headers=compatibility_headers,
+    )
 
 
 def _timeout_for_call(base_url: str, timeout_seconds: int | None) -> httpx.Timeout:
@@ -203,11 +213,7 @@ def _completed_json_as_stream_result(
             choices = data.get("choices") or []
             choice = choices[0] if isinstance(choices, list) and choices else {}
             message = choice.get("message") if isinstance(choice, dict) else {}
-            text = (
-                _openai_message_visible_text(message)
-                if isinstance(message, dict)
-                else ""
-            )
+            text = _openai_message_visible_text(message) if isinstance(message, dict) else ""
             refusal = message.get("refusal") if isinstance(message, dict) else None
             finish_reason = choice.get("finish_reason") if isinstance(choice, dict) else None
             stop_reason = (
@@ -640,8 +646,7 @@ def _openai_reasoning_text(value: object) -> str:
     return "".join(
         str(item.get("text") or item.get("thinking") or "")
         for item in value
-        if isinstance(item, dict)
-        and item.get("type") in {"text", "output_text", "thinking", "reasoning"}
+        if isinstance(item, dict) and item.get("type") in {"text", "output_text", "thinking", "reasoning"}
     )
 
 
@@ -1566,12 +1571,14 @@ class OpenAIClient(LLMClient):
         model: str,
         proxy_url: str | None = None,
         identity: ClientIdentity | None = None,
+        compatibility_headers: Mapping[str, str] | None = None,
     ):
         self._api_key = api_key
         self._base_url = normalize_base_url(base_url or "https://api.openai.com/v1")
         self._model = model
         self._proxy_url = proxy_url
         self._identity = identity
+        self._compatibility_headers = dict(compatibility_headers or {})
 
     async def complete(
         self,
@@ -1592,7 +1599,7 @@ class OpenAIClient(LLMClient):
             )
         url = provider_endpoint(self._base_url, LLM_API_FORMAT_CHAT_COMPLETIONS)
         # Ollama 部署可能不需要 api_key；为空时不下发 Authorization 头
-        headers = _llm_headers(identity=self._identity)
+        headers = _llm_headers(identity=self._identity, compatibility_headers=self._compatibility_headers)
         if self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"
         # 视觉路径：content 改成数组，先 text 再 image_url（OpenAI / mimo / GLM-4V 均如此）
@@ -1742,7 +1749,11 @@ class OpenAIClient(LLMClient):
                 scope=LLMErrorScope.CAPABILITY_MISMATCH,
             )
         url = provider_endpoint(self._base_url, LLM_API_FORMAT_CHAT_COMPLETIONS)
-        headers = _llm_headers(identity=self._identity, accept="text/event-stream")
+        headers = _llm_headers(
+            identity=self._identity,
+            accept="text/event-stream",
+            compatibility_headers=self._compatibility_headers,
+        )
         if self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"
         if images:
@@ -1913,7 +1924,7 @@ class OpenAIClient(LLMClient):
         )
         tool_names = _request_tool_name_map(request)
         url = provider_endpoint(self._base_url, LLM_API_FORMAT_CHAT_COMPLETIONS)
-        headers = _llm_headers(identity=self._identity)
+        headers = _llm_headers(identity=self._identity, compatibility_headers=self._compatibility_headers)
         if self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"
         body: dict[str, Any] = {
@@ -1971,7 +1982,11 @@ class OpenAIClient(LLMClient):
         )
         tool_names = _request_tool_name_map(request)
         url = provider_endpoint(self._base_url, LLM_API_FORMAT_CHAT_COMPLETIONS)
-        headers = _llm_headers(identity=self._identity, accept="text/event-stream")
+        headers = _llm_headers(
+            identity=self._identity,
+            accept="text/event-stream",
+            compatibility_headers=self._compatibility_headers,
+        )
         if self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"
         body: dict[str, Any] = {
@@ -2183,7 +2198,9 @@ class OpenAIClient(LLMClient):
         if not model:
             raise LLMError("transcribe() 必须指定 model（如 'whisper-1'）")
         url = f"{self._base_url}/audio/transcriptions"
-        headers = _llm_headers(identity=self._identity, content_type=None)
+        headers = _llm_headers(
+            identity=self._identity, content_type=None, compatibility_headers=self._compatibility_headers
+        )
         if self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"
         # 文件名给个通用后缀，让上游按二进制 audio 流处理
@@ -2253,7 +2270,7 @@ class OpenAIClient(LLMClient):
             )
 
         url = f"{self._base_url}/images/generations"
-        headers = _llm_headers(identity=self._identity)
+        headers = _llm_headers(identity=self._identity, compatibility_headers=self._compatibility_headers)
         if self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"
 
@@ -2341,6 +2358,7 @@ class AnthropicClient(LLMClient):
         proxy_url: str | None = None,
         protocol_profile: str = LLM_PROTOCOL_PROFILE_STANDARD,
         identity: ClientIdentity | None = None,
+        compatibility_headers: Mapping[str, str] | None = None,
     ):
         self._api_key = api_key
         self._base_url = normalize_base_url(base_url or "https://api.anthropic.com/v1")
@@ -2348,31 +2366,40 @@ class AnthropicClient(LLMClient):
         self._proxy_url = proxy_url
         self._protocol_profile = protocol_profile
         self._identity = identity
+        self._compatibility_headers = dict(compatibility_headers or {})
+        self._runtime_headers = (
+            {"X-Claude-Code-Session-Id": str(uuid.uuid4())}
+            if identity is not None and identity.profile == "claude_code"
+            else {}
+        )
 
     def _headers(self) -> dict[str, str]:
         # 协议必需头：x-api-key / anthropic-version / Content-Type。
         # 身份头（UA、x-app 等）由集中身份目录提供，不再发送 TelePilot 产品 UA；
         # minimal 身份不注入任何产品模拟头。
-        headers = {
+        system_headers = {
             "x-api-key": self._api_key,
             "anthropic-version": self._ANTHROPIC_VERSION,
             "Content-Type": "application/json",
         }
-        if self._identity is not None:
-            headers.update(self._identity.headers())
         # protocol_profile 只控制协议语义 / beta 头，与身份相互独立：
         # 切换身份不会打开 beta，配置 claude_code_proxy 才发送 beta 头。
         if self._protocol_profile == LLM_PROTOCOL_PROFILE_CLAUDE_CODE_PROXY:
             # claude_code_proxy 历史上就绑定这组兼容头（含 x-app: cli），
             # 反代依赖它分发；保留以兼容既有 Provider，与身份档案是否提供 x-app 无关。
-            headers.update(
+            system_headers.update(
                 {
                     "anthropic-beta": "claude-code-20250219,context-1m-2025-08-07,interleaved-thinking-2025-05-14,effort-2025-11-24",
                     "anthropic-dangerous-direct-browser-access": "true",
                     "x-app": "cli",
                 }
             )
-        return headers
+        return plan_request_headers(
+            system_headers=system_headers,
+            identity_headers=self._identity.headers() if self._identity is not None else None,
+            runtime_headers=self._runtime_headers,
+            compatibility_headers=self._compatibility_headers,
+        )
 
     async def complete(
         self,
@@ -2839,7 +2866,9 @@ class AnthropicClient(LLMClient):
                                     block_kinds[index] = "thinking"
                                     value = block.get("thinking")
                                     if not isinstance(value, str) or not value:
-                                        value = block.get("text") if isinstance(block.get("text"), str) else ""
+                                        value = (
+                                            block.get("text") if isinstance(block.get("text"), str) else ""
+                                        )
                                     if value:
                                         thinking_parts.append(value)
                                         yield ModelStreamEvent(delta=value)
@@ -3133,12 +3162,32 @@ class ResponsesClient(LLMClient):
         model: str,
         proxy_url: str | None = None,
         identity: ClientIdentity | None = None,
+        compatibility_headers: Mapping[str, str] | None = None,
     ):
         self._api_key = api_key
         self._base_url = normalize_base_url(base_url or "https://api.openai.com/v1")
         self._model = model
         self._proxy_url = proxy_url
         self._identity = identity
+        self._compatibility_headers = dict(compatibility_headers or {})
+        request_session_id = str(uuid.uuid4())
+        if identity is not None and identity.profile == "codex_cli":
+            self._runtime_headers = {
+                "session-id": request_session_id,
+                "thread-id": request_session_id,
+                "x-client-request-id": request_session_id,
+            }
+        elif identity is not None and identity.profile == "grok_cli":
+            self._runtime_headers = {
+                "x-grok-conv-id": request_session_id,
+                "x-grok-session-id": request_session_id,
+                "x-grok-req-id": str(uuid.uuid4()),
+                "x-grok-agent-id": str(uuid.uuid4()),
+                "x-grok-turn-idx": "1",
+                "x-grok-model-override": model,
+            }
+        else:
+            self._runtime_headers = {}
 
     async def complete(
         self,
@@ -3153,7 +3202,12 @@ class ResponsesClient(LLMClient):
         timeout_seconds: int | None = None,
     ) -> LLMResult:
         url = provider_endpoint(self._base_url, LLM_API_FORMAT_RESPONSES)
-        headers = _llm_headers(identity=self._identity, accept="application/json")
+        headers = _llm_headers(
+            identity=self._identity,
+            accept="application/json",
+            compatibility_headers=self._compatibility_headers,
+            runtime_headers=self._runtime_headers,
+        )
         if self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"
         # 视觉路径：Responses API 的 content 是 [{"type":"input_text"}, {"type":"input_image"}]
@@ -3251,7 +3305,12 @@ class ResponsesClient(LLMClient):
         )
         tool_names = _request_tool_name_map(request)
         url = provider_endpoint(self._base_url, LLM_API_FORMAT_RESPONSES)
-        headers = _llm_headers(identity=self._identity, accept="application/json")
+        headers = _llm_headers(
+            identity=self._identity,
+            accept="application/json",
+            compatibility_headers=self._compatibility_headers,
+            runtime_headers=self._runtime_headers,
+        )
         if self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"
         body: dict[str, Any] = {
@@ -3326,7 +3385,12 @@ class ResponsesClient(LLMClient):
         )
         tool_names = _request_tool_name_map(request)
         url = provider_endpoint(self._base_url, LLM_API_FORMAT_RESPONSES)
-        headers = _llm_headers(identity=self._identity, accept="text/event-stream")
+        headers = _llm_headers(
+            identity=self._identity,
+            accept="text/event-stream",
+            compatibility_headers=self._compatibility_headers,
+            runtime_headers=self._runtime_headers,
+        )
         if self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"
         body: dict[str, Any] = {
@@ -3599,7 +3663,12 @@ class ResponsesClient(LLMClient):
         timeout_seconds: int | None = None,
     ) -> AsyncIterator[LLMStreamChunk]:
         url = provider_endpoint(self._base_url, LLM_API_FORMAT_RESPONSES)
-        headers = _llm_headers(identity=self._identity, accept="text/event-stream")
+        headers = _llm_headers(
+            identity=self._identity,
+            accept="text/event-stream",
+            compatibility_headers=self._compatibility_headers,
+            runtime_headers=self._runtime_headers,
+        )
         if self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"
         if images:
@@ -3789,7 +3858,12 @@ class ResponsesClient(LLMClient):
         if web_search:
             raise LLMError("图片生成不支持联网搜索，请关闭 web_search")
         url = provider_endpoint(self._base_url, LLM_API_FORMAT_RESPONSES)
-        headers = _llm_headers(identity=self._identity, accept="application/json")
+        headers = _llm_headers(
+            identity=self._identity,
+            accept="application/json",
+            compatibility_headers=self._compatibility_headers,
+            runtime_headers=self._runtime_headers,
+        )
         if self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"
 
@@ -4067,6 +4141,7 @@ def build_client(
     proxy_url: str | None = None,
     api_format_override: str | None = None,
     identity_override: str | None = None,
+    request_scope: str = REQUEST_SCOPE_INFERENCE,
 ) -> LLMClient:
     """根据 ORM 行装配具体 LLMClient。
 
@@ -4097,6 +4172,10 @@ def build_client(
     )
     configured_identity = identity_override or getattr(provider_row, "client_identity_profile", None)
     identity = resolve_identity(configured_identity, fmt)
+    compatibility_headers = request_headers_for_scope(
+        getattr(provider_row, "request_headers_enc", None),
+        request_scope,
+    )
 
     if fmt == LLM_API_FORMAT_CHAT_COMPLETIONS:
         # ollama 兜底 base_url（chat_completions 也兼容）
@@ -4109,6 +4188,7 @@ def build_client(
             model=model,
             proxy_url=proxy_url,
             identity=identity,
+            compatibility_headers=compatibility_headers,
         )
     if fmt == LLM_API_FORMAT_RESPONSES:
         return ResponsesClient(
@@ -4117,6 +4197,7 @@ def build_client(
             model=model,
             proxy_url=proxy_url,
             identity=identity,
+            compatibility_headers=compatibility_headers,
         )
     if fmt == LLM_API_FORMAT_ANTHROPIC_MESSAGES:
         return AnthropicClient(
@@ -4130,6 +4211,7 @@ def build_client(
                 LLM_PROTOCOL_PROFILE_STANDARD,
             ),
             identity=identity,
+            compatibility_headers=compatibility_headers,
         )
     raise ValueError(f"未知 api_format: {fmt}")
 
@@ -4140,6 +4222,7 @@ def build_client_from_dto(
     proxy_url: str | None = None,
     api_format_override: str | None = None,
     identity_override: str | None = None,
+    request_scope: str = REQUEST_SCOPE_INFERENCE,
 ) -> LLMClient:
     """根据 LLMProviderDTO 装配具体 LLMClient。
 
@@ -4167,6 +4250,10 @@ def build_client_from_dto(
     # 身份依据本次实际协议解析（override 生效后）。
     configured_identity = identity_override or dto.client_identity_profile
     identity = resolve_identity(configured_identity, fmt)
+    compatibility_headers = request_headers_for_scope(
+        dto.request_headers_enc,
+        request_scope,
+    )
 
     if fmt == LLM_API_FORMAT_CHAT_COMPLETIONS:
         base = dto.base_url
@@ -4178,6 +4265,7 @@ def build_client_from_dto(
             model=model,
             proxy_url=final_proxy,
             identity=identity,
+            compatibility_headers=compatibility_headers,
         )
     if fmt == LLM_API_FORMAT_RESPONSES:
         return ResponsesClient(
@@ -4186,6 +4274,7 @@ def build_client_from_dto(
             model=model,
             proxy_url=final_proxy,
             identity=identity,
+            compatibility_headers=compatibility_headers,
         )
     if fmt == LLM_API_FORMAT_ANTHROPIC_MESSAGES:
         return AnthropicClient(
@@ -4195,6 +4284,7 @@ def build_client_from_dto(
             proxy_url=final_proxy,
             protocol_profile=dto.protocol_profile,
             identity=identity,
+            compatibility_headers=compatibility_headers,
         )
     raise ValueError(f"未知 api_format: {fmt}")
 

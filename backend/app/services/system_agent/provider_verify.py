@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ...crypto import decrypt_str
 from ...db.models.command import LLMProvider
 from ...services import llm_quick_verify
+from ...services.llm_request_headers import decrypt_request_headers
 from .registry import ActionKeepPendingError
 
 
@@ -21,6 +22,7 @@ async def run_quick_verify(
     provider: str | None = None,
     protocol_profile: str = "standard",
     client_identity_profile: str = "auto",
+    request_headers: list[object] | None = None,
     timeout_seconds: int = 45,
 ) -> dict[str, Any]:
     """执行一次真实上游验证，返回摘要；失败抛 ActionKeepPendingError。"""
@@ -56,6 +58,7 @@ async def run_quick_verify(
         api_format=fmt,
         protocol_profile=protocol_profile or "standard",
         client_identity_profile=client_identity_profile or "auto",
+        request_headers=request_headers,
         proxy_url=None,
         model=model,
         reasoning_effort=None,
@@ -110,6 +113,7 @@ async def resolve_provider_verify_args(
         "api_key": args.get("api_key"),
         "protocol_profile": args.get("protocol_profile") or "standard",
         "client_identity_profile": args.get("client_identity_profile") or "auto",
+        "request_headers": None,
     }
     if provider_id in (None, ""):
         return base
@@ -136,6 +140,13 @@ async def resolve_provider_verify_args(
         base["protocol_profile"] = getattr(row, "protocol_profile", None) or "standard"
     if not base.get("client_identity_profile"):
         base["client_identity_profile"] = getattr(row, "client_identity_profile", None) or "auto"
+    try:
+        base["request_headers"] = decrypt_request_headers(getattr(row, "request_headers_enc", None))
+    except Exception:  # noqa: BLE001
+        raise ActionKeepPendingError(
+            "已保存的 Provider 兼容请求头无法解密，请在 Web 配置中重新保存。",
+            code="REQUEST_HEADERS_DECRYPT_FAILED",
+        ) from None
     return base
 
 

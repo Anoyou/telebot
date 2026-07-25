@@ -22,6 +22,13 @@ from .llm_client import (
 )
 from .llm_dto import LLMProviderDTO
 from .llm_protocol import normalize_base_url, provider_models_endpoint
+from .llm_request_headers import (
+    REQUEST_SCOPE_LIVENESS,
+    REQUEST_SCOPE_MODELS,
+    encrypt_request_headers,
+    plan_request_headers,
+    request_headers_for_scope,
+)
 
 _MODEL_EXCLUDES = (
     "embedding",
@@ -143,6 +150,7 @@ async def discover_models(
     api_format: str,
     proxy_url: str | None = None,
     timeout_seconds: int,
+    request_headers: list[object] | None = None,
 ) -> list[str]:
     timeout = httpx.Timeout(
         min(float(timeout_seconds), 20.0),
@@ -157,7 +165,13 @@ async def discover_models(
         async with httpx.AsyncClient(**client_kwargs) as client:
             response = await client.get(
                 provider_models_endpoint(base_url, api_format),
-                headers=_discovery_headers(api_format, api_key),
+                headers=plan_request_headers(
+                    system_headers=_discovery_headers(api_format, api_key),
+                    compatibility_headers=request_headers_for_scope(
+                        request_headers,
+                        REQUEST_SCOPE_MODELS,
+                    ),
+                ),
             )
     except httpx.HTTPError as exc:
         raise LLMError(
@@ -235,6 +249,7 @@ async def quick_verify_events(
     message: str,
     max_tokens: int,
     timeout_seconds: int,
+    request_headers: list[object] | None = None,
 ) -> AsyncIterator[dict[str, object]]:
     """生成单次快速验证 NDJSON 事件，不产生持久化副作用。"""
 
@@ -249,6 +264,7 @@ async def quick_verify_events(
                 api_format=api_format,
                 proxy_url=proxy_url,
                 timeout_seconds=timeout_seconds,
+                request_headers=request_headers,
             )
         except LLMError as exc:
             requires_model = _discovery_requires_manual_model(exc)
@@ -314,11 +330,12 @@ async def quick_verify_events(
         base_url=base_url,
         default_model=selected_model,
         api_key_enc=encrypt_str(api_key) if api_key else None,
+        request_headers_enc=encrypt_request_headers(request_headers),
         proxy_url=proxy_url,
     )
 
     try:
-        client = build_client_from_dto(dto)
+        client = build_client_from_dto(dto, request_scope=REQUEST_SCOPE_LIVENESS)
         try:
             async with asyncio.timeout(timeout_seconds):
                 try:
