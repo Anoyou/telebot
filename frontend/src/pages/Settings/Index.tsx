@@ -811,44 +811,32 @@ export function SettingsIndex() {
                 </div>
               </div>
               <div className="mt-4 grid gap-3 md:grid-cols-3">
-                <div className="space-y-1.5 rounded-md border border-border/70 bg-muted/20 p-3">
-                  <Label>写入 Trace</Label>
-                  <div className="flex h-10 items-center">
-                    <Switch
-                      checked={logRetention.trace_enabled}
-                      onCheckedChange={(checked) =>
-                        setLogRetention((v) => ({ ...v, trace_enabled: checked }))
-                      }
-                    />
-                  </div>
-                  <p className="text-xs text-muted-foreground">关闭后保留旧运行日志；仅用于排查 Trace 存储异常。</p>
-                </div>
-                <div className="space-y-1.5 rounded-md border border-border/70 bg-muted/20 p-3">
-                  <Label>Event Bus 投递</Label>
-                  <div className="flex h-10 items-center">
-                    <Switch
-                      checked={logRetention.event_bus_delivery_enabled}
-                      onCheckedChange={(checked) =>
-                        setLogRetention((v) => ({ ...v, event_bus_delivery_enabled: checked }))
-                      }
-                    />
-                  </div>
-                  <p className="text-xs text-muted-foreground">关闭后回退旧交互规则链路，适合部署回滚观察。</p>
-                </div>
-                <div className="space-y-1.5 rounded-md border border-border/70 bg-muted/20 p-3">
-                  <Label>Inline 更新</Label>
-                  <div className="flex h-10 items-center">
-                    <Switch
-                      checked={logRetention.inline_updates_enabled}
-                      onCheckedChange={(checked) =>
-                        setLogRetention((v) => ({ ...v, inline_updates_enabled: checked }))
-                      }
-                    />
-                  </div>
-                  <p className="text-xs text-muted-foreground">关闭后不拉取 inline_query / chosen_inline_result。</p>
-                </div>
+                <LogToggleCard
+                  label="写入 Trace"
+                  description="关闭后保留旧运行日志；仅用于排查 Trace 存储异常。"
+                  checked={logRetention.trace_enabled}
+                  onCheckedChange={(checked) =>
+                    setLogRetention((v) => ({ ...v, trace_enabled: checked }))
+                  }
+                />
+                <LogToggleCard
+                  label="Event Bus 投递"
+                  description="关闭后回退旧交互规则链路，适合部署回滚观察。"
+                  checked={logRetention.event_bus_delivery_enabled}
+                  onCheckedChange={(checked) =>
+                    setLogRetention((v) => ({ ...v, event_bus_delivery_enabled: checked }))
+                  }
+                />
+                <LogToggleCard
+                  label="Inline 更新"
+                  description="关闭后不拉取 inline_query / chosen_inline_result。"
+                  checked={logRetention.inline_updates_enabled}
+                  onCheckedChange={(checked) =>
+                    setLogRetention((v) => ({ ...v, inline_updates_enabled: checked }))
+                  }
+                />
               </div>
-              <div className="mt-4 grid gap-3 md:grid-cols-4">
+              <div className="mt-4 grid grid-cols-2 gap-3 md:grid-cols-4">
                 <div className="space-y-1.5">
                   <Label>Trace 保留天数</Label>
                   <Input
@@ -877,9 +865,10 @@ export function SettingsIndex() {
                   />
                   <p className="text-xs text-muted-foreground">默认 7；到期只清空快照，保留主链路</p>
                 </div>
-                <div className="space-y-1.5">
+                <div className="flex min-w-0 flex-col gap-1.5">
                   <Label>保存完整 native_raw</Label>
-                  <div className="flex h-10 items-center">
+                  <p className="text-xs leading-5 text-muted-foreground">默认关闭；仅用于短期深度排障</p>
+                  <div className="mt-auto flex min-h-10 items-end justify-end pt-2">
                     <Switch
                       checked={logRetention.native_raw_persist_enabled}
                       onCheckedChange={(checked) =>
@@ -887,7 +876,6 @@ export function SettingsIndex() {
                       }
                     />
                   </div>
-                  <p className="text-xs text-muted-foreground">默认关闭；仅用于短期深度排障</p>
                 </div>
                 <div className="space-y-1.5">
                   <Label>native_raw 保留天数</Label>
@@ -904,7 +892,7 @@ export function SettingsIndex() {
                   <p className="text-xs text-muted-foreground">默认 1；当前默认不持久化完整内容</p>
                 </div>
               </div>
-              <div className="mt-3">
+              <div className="mt-3 flex justify-end">
                 <Button onClick={() => saveLogRetention.mutate()} loading={saveLogRetention.isPending}>
                   {!saveLogRetention.isPending ? <Save className="mr-2 h-4 w-4" /> : null}
                   保存
@@ -933,7 +921,7 @@ export function SettingsIndex() {
                   </div>
                   <SignalPill tone="primary" label="建议" value="先小额启用" />
                 </div>
-                <div className="grid gap-3 md:grid-cols-2">
+                <div className="grid grid-cols-2 gap-3">
                   <RiskLimitField
                     label="单笔上限"
                     value={payoutLimits.single_max}
@@ -959,7 +947,7 @@ export function SettingsIndex() {
                   </div>
                   <SignalPill tone="primary" label="范围" value="每账号" />
                 </div>
-                <div className="grid gap-3 md:grid-cols-4">
+                <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
                   <RiskLimitField
                     label="每分钟调用"
                     value={llmLimits.per_minute}
@@ -987,10 +975,12 @@ export function SettingsIndex() {
                 </div>
               </div>
 
-              <Button onClick={() => saveRiskBudget.mutate()} loading={saveRiskBudget.isPending}>
-                {!saveRiskBudget.isPending ? <Save className="mr-2 h-4 w-4" /> : null}
-                保存风控与预算
-              </Button>
+              <div className="flex justify-end">
+                <Button onClick={() => saveRiskBudget.mutate()} loading={saveRiskBudget.isPending}>
+                  {!saveRiskBudget.isPending ? <Save className="mr-2 h-4 w-4" /> : null}
+                  保存风控与预算
+                </Button>
+              </div>
             </CardContent>
           </Card>
         </TabsContent>
@@ -1005,6 +995,32 @@ export function SettingsIndex() {
 
 function normalizeLimitInput(value: string): string {
   return value.replace(/[^0-9]/g, "");
+}
+
+function LogToggleCard({
+  label,
+  description,
+  checked,
+  onCheckedChange,
+}: {
+  label: string;
+  description: string;
+  checked: boolean;
+  onCheckedChange: (checked: boolean) => void;
+}) {
+  return (
+    <div className="flex min-h-36 flex-col rounded-md border border-border/70 bg-muted/20 p-3">
+      <Label>{label}</Label>
+      <p className="mt-2 text-xs leading-5 text-muted-foreground">{description}</p>
+      <div className="mt-auto flex justify-end pt-4">
+        <Switch
+          checked={checked}
+          aria-label={label}
+          onCheckedChange={onCheckedChange}
+        />
+      </div>
+    </div>
+  );
 }
 
 function limitStatus(value: string): string {

@@ -9,7 +9,7 @@ from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import delete, desc, select, update
+from sqlalchemy import delete, desc, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...db.models.system_agent import (
@@ -213,6 +213,7 @@ class SystemAgentService:
         account_id: int | None = None,
         status: str | None = SESSION_STATUS_ACTIVE,
         origin: str | None = None,
+        include_bot_sessions: bool = False,
         limit: int = 50,
     ) -> list[SystemAgentSession]:
         q = (
@@ -221,7 +222,15 @@ class SystemAgentService:
             .limit(max(1, min(limit, 200)))
         )
         if web_user_id is not None:
-            q = q.where(SystemAgentSession.web_user_id == web_user_id)
+            if include_bot_sessions:
+                q = q.where(
+                    or_(
+                        SystemAgentSession.web_user_id == web_user_id,
+                        SystemAgentSession.channel == CHANNEL_BOT,
+                    )
+                )
+            else:
+                q = q.where(SystemAgentSession.web_user_id == web_user_id)
         if bot_tg_user_id is not None:
             q = q.where(SystemAgentSession.bot_tg_user_id == bot_tg_user_id)
         if account_id is not None:
@@ -240,12 +249,14 @@ class SystemAgentService:
         *,
         web_user_id: int | None = None,
         bot_tg_user_id: int | None = None,
+        allow_bot_session: bool = False,
     ) -> SystemAgentSession | None:
         session = await db.get(SystemAgentSession, session_id)
         if session is None:
             return None
         if web_user_id is not None and session.web_user_id != web_user_id:
-            return None
+            if not (allow_bot_session and session.channel == CHANNEL_BOT):
+                return None
         if bot_tg_user_id is not None and session.bot_tg_user_id != bot_tg_user_id:
             return None
         return session

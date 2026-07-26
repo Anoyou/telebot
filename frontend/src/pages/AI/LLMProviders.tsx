@@ -2519,6 +2519,22 @@ function IdentityVersionsDialog({
     }
   };
 
+  const detectedUpdates = items.filter((item) => {
+    const result = detected[item.key];
+    return Boolean(result?.latest && !result.error && result.latest !== (drafts[item.key] ?? "").trim());
+  });
+
+  const applyDetectedUpdates = () => {
+    setDrafts((previous) => {
+      const next = { ...previous };
+      for (const item of detectedUpdates) {
+        const latest = detected[item.key]?.latest;
+        if (latest) next[item.key] = latest;
+      }
+      return next;
+    });
+  };
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-h-[90vh] max-w-3xl overflow-y-auto">
@@ -2538,10 +2554,89 @@ function IdentityVersionsDialog({
               <Spinner className="mr-1" /> 加载中…
             </p>
           ) : (
-            <div className="divide-y rounded-md border">
-              {profiles.map((profile) => {
-                const versionItems = items.filter((item) => profile.version_keys.includes(item.key));
-                return (
+            <>
+              <section className="overflow-hidden rounded-md border bg-background" aria-label="客户端版本配置">
+                <div className="flex min-w-0 items-start justify-between gap-3 border-b bg-muted/20 px-3 py-2.5">
+                  <div className="min-w-0">
+                    <div className="text-sm font-semibold">客户端版本</div>
+                    <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                      当前发送版本与检测结果始终可见；采用后点击底部保存才会生效。
+                    </p>
+                  </div>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    className="shrink-0"
+                    disabled={detectedUpdates.length === 0}
+                    onClick={applyDetectedUpdates}
+                  >
+                    <Download className="mr-1 h-4 w-4" />
+                    填入全部更新
+                  </Button>
+                </div>
+                <div className="divide-y">
+                  {items.map((item) => {
+                    const result = detected[item.key];
+                    const canApply = Boolean(
+                      result?.latest &&
+                      !result.error &&
+                      result.latest !== (drafts[item.key] ?? "").trim(),
+                    );
+                    return (
+                      <div key={item.key} className="grid grid-cols-2 gap-2 px-3 py-3 sm:grid-cols-[minmax(0,1fr)_150px_150px_auto] sm:items-end">
+                        <div className="col-span-2 min-w-0 sm:col-span-1">
+                          <div className="text-sm font-medium">{item.label}</div>
+                          <p className="mt-1 break-words text-xs leading-5 text-muted-foreground">
+                            内置基线 {item.default} · {item.registry ? `检测源 ${item.registry === "cli:grok-update-check" ? "Grok CLI / xAI stable" : item.registry}` : "仅手动填写"}
+                          </p>
+                        </div>
+                        <label className="min-w-0 space-y-1">
+                          <span className="block text-[11px] text-muted-foreground">当前版本</span>
+                          <Input
+                            className="font-mono text-xs"
+                            value={drafts[item.key] ?? ""}
+                            onChange={(event) => setDrafts((previous) => ({ ...previous, [item.key]: event.target.value }))}
+                          />
+                        </label>
+                        <label className="min-w-0 space-y-1">
+                          <span className="block text-[11px] text-muted-foreground">检测到的版本</span>
+                          <Input
+                            readOnly
+                            className="font-mono text-xs"
+                            value={result?.latest ?? ""}
+                            placeholder={result?.error ? "检测失败" : "待检测"}
+                            title={result?.error || result?.latest || "尚未检测"}
+                          />
+                        </label>
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          className="col-span-2 w-full sm:col-span-1 sm:w-auto"
+                          disabled={!canApply}
+                          onClick={() => {
+                            const latest = detected[item.key]?.latest;
+                            if (latest) {
+                              setDrafts((previous) => ({ ...previous, [item.key]: latest }));
+                            }
+                          }}
+                        >
+                          采用
+                        </Button>
+                        {result?.error ? (
+                          <p className="col-span-2 break-words text-xs text-destructive sm:col-start-2 sm:col-end-5">
+                            检测失败：{result.error}
+                          </p>
+                        ) : null}
+                      </div>
+                    );
+                  })}
+                </div>
+              </section>
+
+              <div className="divide-y rounded-md border">
+                {profiles.map((profile) => (
                   <details key={profile.profile} className="group">
                     <summary className="flex cursor-pointer list-none items-start gap-3 px-3 py-3 [&::-webkit-details-marker]:hidden">
                       <ChevronRight className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground transition-transform group-open:rotate-90" />
@@ -2553,38 +2648,10 @@ function IdentityVersionsDialog({
                         <p className="mt-1 text-xs leading-5 text-muted-foreground">{profile.description}</p>
                       </div>
                       <span className="shrink-0 text-xs text-muted-foreground">
-                        {versionItems.length} 项可配置 · {profile.headers.length} 项请求头
+                        {profile.version_keys.length} 项版本 · {profile.headers.length} 项请求头
                       </span>
                     </summary>
                     <div className="space-y-4 border-t bg-muted/15 px-4 py-4">
-                      {versionItems.length > 0 ? (
-                        <div className="space-y-2">
-                          <div className="text-xs font-semibold text-muted-foreground">可配置版本</div>
-                          {versionItems.map((item) => {
-                            const det = detected[item.key];
-                            return (
-                              <div key={item.key} className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_160px] sm:items-center">
-                                <div className="min-w-0">
-                                  <div className="text-sm font-medium">{item.label}</div>
-                                  <p className="mt-0.5 break-words text-xs text-muted-foreground">
-                                    内置基线 {item.default} · {item.registry ? `检测源 ${item.registry === "cli:grok-update-check" ? "Grok CLI / xAI stable" : item.registry}` : "仅手动填写"}
-                                  </p>
-                                  {det ? (
-                                    <p className="mt-1 text-xs text-muted-foreground">
-                                      {det.error ? `检测失败：${det.error}` : det.latest ? (det.up_to_date ? `已是最新（${det.latest}）` : `最新 ${det.latest}`) : "无检测结果"}
-                                      {det.latest && !det.up_to_date && !det.error ? (
-                                        <button type="button" className="ml-2 underline" onClick={() => setDrafts((previous) => ({ ...previous, [item.key]: det.latest ?? previous[item.key] }))}>填入</button>
-                                      ) : null}
-                                    </p>
-                                  ) : null}
-                                </div>
-                                <Input className="font-mono text-xs" value={drafts[item.key] ?? ""} onChange={(event) => setDrafts((previous) => ({ ...previous, [item.key]: event.target.value }))} />
-                              </div>
-                            );
-                          })}
-                        </div>
-                      ) : null}
-
                       <div className="space-y-3">
                         <div>
                           <div className="text-xs font-semibold text-muted-foreground">抓包请求头清单</div>
@@ -2617,9 +2684,9 @@ function IdentityVersionsDialog({
                       <p className="border-t pt-3 text-xs leading-5 text-muted-foreground">证据：{profile.source}</p>
                     </div>
                   </details>
-                );
-              })}
-            </div>
+                ))}
+              </div>
+            </>
           )}
         </div>
         <DialogFooter className="!grid grid-cols-2 gap-2 sm:!flex">

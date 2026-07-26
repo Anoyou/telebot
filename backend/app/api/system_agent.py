@@ -264,6 +264,7 @@ async def list_sessions(
     user: CurrentUser,
     status: str | None = Query(default=SESSION_STATUS_ACTIVE),
     origin: str | None = Query(default=None, description="interactive | scheduled；缺省返回全部"),
+    include_bot: bool = Query(default=False, description="管理员会话列表是否包含 Telegram Bot 会话"),
     limit: int = Query(default=50, ge=1, le=200),
 ) -> list[SystemAgentSessionOut]:
     svc = get_system_agent_service()
@@ -272,6 +273,7 @@ async def list_sessions(
         web_user_id=user.id,
         status=status,
         origin=origin,
+        include_bot_sessions=include_bot,
         limit=limit,
     )
     return [_session_out(r) for r in rows]
@@ -284,7 +286,12 @@ async def get_session(
     user: CurrentUser,
 ) -> SystemAgentSessionOut:
     svc = get_system_agent_service()
-    session = await svc.get_session(db, session_id, web_user_id=user.id)
+    session = await svc.get_session(
+        db,
+        session_id,
+        web_user_id=user.id,
+        allow_bot_session=True,
+    )
     if session is None:
         raise _err("SESSION_NOT_FOUND", "会话不存在", 404)
     return _session_out(session)
@@ -349,7 +356,12 @@ async def list_messages(
     before_id: int | None = Query(default=None),
 ) -> list[SystemAgentMessageOut]:
     svc = get_system_agent_service()
-    session = await svc.get_session(db, session_id, web_user_id=user.id)
+    session = await svc.get_session(
+        db,
+        session_id,
+        web_user_id=user.id,
+        allow_bot_session=True,
+    )
     if session is None:
         raise _err("SESSION_NOT_FOUND", "会话不存在", 404)
     if await svc.reconcile_stale_messages(db, session_id):

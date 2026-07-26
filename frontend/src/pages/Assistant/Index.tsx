@@ -185,7 +185,7 @@ export function AssistantIndex() {
   });
   const sessionsQ = useQuery({
     queryKey: ["system-agent", "sessions"],
-    queryFn: () => listSystemAgentSessions({ status: "active", limit: 50 }),
+    queryFn: () => listSystemAgentSessions({ status: "active", include_bot: true, limit: 100 }),
     refetchInterval: assistantCollapsed ? false : 3_000,
     refetchOnWindowFocus: "always",
   });
@@ -203,6 +203,8 @@ export function AssistantIndex() {
     refetchOnMount: "always",
   });
   const accountOptions = Array.isArray(accountsQ.data) ? accountsQ.data : [];
+  const activeSession = sessionOptions.find((session) => session.id === activeId) ?? null;
+  const viewingBotSession = activeSession?.channel === "bot";
   const memoryQ = useQuery({
     queryKey: ["system-agent", "user-memory"],
     queryFn: listSystemAgentUserMemory,
@@ -220,7 +222,7 @@ export function AssistantIndex() {
     queryKey: ["system-agent", "actions", activeId, "pending"],
     queryFn: () =>
       listSystemAgentActions({ session_id: activeId!, status: "pending", limit: 50 }),
-    enabled: !!activeId,
+    enabled: !!activeId && !viewingBotSession,
     refetchInterval: assistantCollapsed && !streaming ? false : 15_000,
   });
 
@@ -1393,9 +1395,9 @@ export function AssistantIndex() {
               <Conversation
                 messages={messages}
                 live={conversationLive}
-                onRetryMessage={onRetryMessage}
-                onEditMessage={onEditMessage}
-                onRegenerateMessage={onRegenerateMessage}
+                onRetryMessage={viewingBotSession ? undefined : onRetryMessage}
+                onEditMessage={viewingBotSession ? undefined : onEditMessage}
+                onRegenerateMessage={viewingBotSession ? undefined : onRegenerateMessage}
                 retryingMessageId={retryingMessageId}
                 busy={streaming}
                 expectedSelection={
@@ -1426,13 +1428,14 @@ export function AssistantIndex() {
                 </div>
               ) : null}
               <Composer
-                disabled={configQ.isLoading}
+                disabled={configQ.isLoading || viewingBotSession}
                 streaming={streaming}
                 onSend={onSend}
                 value={composerValue}
                 onValueChange={setComposerValue}
                 focusRequestKey={composerFocusKey}
                 onStop={onStop}
+                placeholder={viewingBotSession ? "Telegram 会话仅供查看" : undefined}
                 modelItems={modelPickerItems}
                 modelSelection={pickerValue}
                 onModelSelectionChange={onSessionModelChange}

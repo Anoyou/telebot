@@ -266,14 +266,14 @@ export function PluginsHome() {
   const cmdPrefix = settingsQ.data?.command_prefix || ",";
   const accountFeatureByKey = useMemo(() => {
     const map = new Map<string, AccountFeatureItem>();
-    for (const item of accountFeaturesQ.data ?? []) {
+    for (const item of Array.isArray(accountFeaturesQ.data) ? accountFeaturesQ.data : []) {
       map.set(item.feature_key, item);
     }
     return map;
   }, [accountFeaturesQ.data]);
   const installByKey = useMemo(() => {
     const map = new Map<string, PluginInstallOut>();
-    for (const item of installedQ.data ?? []) {
+    for (const item of Array.isArray(installedQ.data) ? installedQ.data : []) {
       map.set(item.key, item);
     }
     return map;
@@ -503,14 +503,6 @@ export function PluginsHome() {
             icon={Package2}
             title="账号插件启用详情与配置"
             description="先选择账号，再像软件商店一样按分类浏览当前已安装插件。"
-            meta={(
-              <SignalPill
-                tone="neutral"
-                label="分类"
-                value={(Object.keys(CATEGORY_META) as ModuleCategory[]).length}
-                className="h-8"
-              />
-            )}
           />
         </CardHeader>
         <CardContent className="space-y-4">
@@ -886,9 +878,8 @@ function FeatureZone({
                   data-plugin-card
                   data-plugin-key={f.key}
                   className={cn(
-                    "relative rounded-md border p-3",
+                    "relative min-h-[7.25rem] rounded-md border p-3 sm:min-h-0",
                     status === "failed" ? "border-destructive/40 bg-destructive/5" : "",
-                    canConfigure ? "pr-12 sm:pr-3" : "",
                   )}
                 >
                   <MetaBadge
@@ -901,8 +892,8 @@ function FeatureZone({
                     {moduleVersionLabel(f.version)}
                   </MetaBadge>
                   <div className="min-w-0">
-                    <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
-                      <div className="min-w-0 pr-16">
+                    <div className="grid grid-rows-[2.5rem_2rem] gap-1 sm:flex sm:grid-rows-none sm:flex-row sm:items-start sm:justify-between sm:gap-2">
+                      <div className="min-w-0 pr-16 sm:pr-0">
                         <div className="flex min-w-0 items-center gap-1.5">
                           <button
                             type="button"
@@ -915,7 +906,7 @@ function FeatureZone({
                               return next;
                             })}
                           >
-                            <span className="break-words text-sm font-medium leading-5" title={f.display_name}>
+                            <span className="line-clamp-2 break-words text-sm font-medium leading-5" title={f.display_name}>
                               {f.display_name}
                             </span>
                             <ChevronDown className={cn("h-4 w-4 shrink-0 text-muted-foreground transition-transform sm:hidden", mobileExpanded && "rotate-180")} />
@@ -923,7 +914,7 @@ function FeatureZone({
                         </div>
                         <div className="hidden break-all font-mono text-xs leading-5 text-muted-foreground sm:block">{f.key}</div>
                       </div>
-                      <div className="flex min-w-0 flex-wrap gap-1.5 pr-8 sm:justify-end sm:pr-14">
+                      <div className="horizontal-scroll-touch flex h-8 min-w-0 flex-nowrap items-center gap-1.5 overflow-x-auto pr-10 sm:h-auto sm:flex-wrap sm:justify-end sm:overflow-visible sm:pr-14">
                         <FeatureCapabilityBadge show={Boolean(f.interaction_entries?.length)} tone="info">
                           可交互
                         </FeatureCapabilityBadge>

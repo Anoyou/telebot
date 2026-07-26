@@ -191,15 +191,36 @@ async def test_session_crud_and_ownership(agent_db) -> None:
     async with agent_db() as db:
         s1 = await svc.create_session(db, channel=CHANNEL_WEB, web_user_id=1, title="t1")
         s2 = await svc.create_session(db, channel=CHANNEL_WEB, web_user_id=2, title="t2")
+        bot = await svc.create_session(
+            db,
+            channel=CHANNEL_BOT,
+            bot_tg_user_id=1682400007,
+            account_id=3,
+            title="Telegram",
+        )
         await db.commit()
 
         rows = await svc.list_sessions(db, web_user_id=1)
         assert [r.id for r in rows] == [s1.id]
 
+        visible_to_admin = await svc.list_sessions(
+            db,
+            web_user_id=1,
+            include_bot_sessions=True,
+        )
+        assert {row.id for row in visible_to_admin} == {s1.id, bot.id}
+
         owned = await svc.get_session(db, s1.id, web_user_id=1)
         assert owned is not None
         foreign = await svc.get_session(db, s2.id, web_user_id=1)
         assert foreign is None
+        visible_bot = await svc.get_session(
+            db,
+            bot.id,
+            web_user_id=1,
+            allow_bot_session=True,
+        )
+        assert visible_bot is bot
 
         await svc.update_session(db, s1, status=SESSION_STATUS_ARCHIVED, title="archived")
         await db.commit()

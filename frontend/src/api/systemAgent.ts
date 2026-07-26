@@ -270,7 +270,7 @@ export async function deleteSystemAgentUserMemory(id: number): Promise<void> {
 }
 
 export async function listSystemAgentSessions(
-  params?: { status?: string; origin?: string; limit?: number },
+  params?: { status?: string; origin?: string; include_bot?: boolean; limit?: number },
 ): Promise<SystemAgentSession[]> {
   const { data } = await api.get<SystemAgentSession[]>("/api/system-agent/sessions", { params });
   return data;

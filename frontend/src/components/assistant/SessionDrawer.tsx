@@ -1,4 +1,4 @@
-import { MessageSquarePlus, PanelLeftClose, Trash2 } from "lucide-react";
+import { Bot, MessageSquarePlus, PanelLeftClose, Trash2 } from "lucide-react";
 
 import type { SystemAgentSession } from "@/api/systemAgent";
 import { Button } from "@/components/ui/button";
@@ -35,6 +35,55 @@ export function SessionDrawer({
     originFilter === "all"
       ? sessions
       : sessions.filter((s) => (s.origin || "interactive") === originFilter);
+  const webSessions = filtered.filter((session) => session.channel !== "bot");
+  const botSessions = filtered.filter((session) => session.channel === "bot");
+
+  const renderSession = (session: SystemAgentSession) => {
+    const isBotSession = session.channel === "bot";
+    return (
+      <div
+        key={session.id}
+        className={cn(
+          "group flex items-center gap-1 rounded-lg px-2 py-2 text-sm hover:bg-muted/60",
+          activeId === session.id && "bg-muted",
+        )}
+      >
+        <button
+          type="button"
+          className="min-w-0 flex-1 text-left"
+          onClick={() => {
+            onSelect(session.id);
+            onClose?.();
+          }}
+        >
+          <span className="flex min-w-0 items-center gap-1">
+            <span className="truncate">{session.title || (isBotSession ? "Telegram 会话" : "未命名对话")}</span>
+            {session.origin === "scheduled" ? (
+              <span className="inline-block shrink-0 rounded bg-amber-500/15 px-1 text-[10px] text-amber-700 dark:text-amber-300">
+                定时
+              </span>
+            ) : null}
+          </span>
+          {isBotSession ? (
+            <span className="mt-0.5 block truncate text-[10px] text-muted-foreground">
+              TG {session.bot_tg_user_id ?? "未知用户"}
+              {session.account_id != null ? ` · 账号 #${session.account_id}` : ""}
+            </span>
+          ) : null}
+        </button>
+        {!isBotSession ? (
+          <button
+            type="button"
+            className="shrink-0 rounded p-1 text-muted-foreground opacity-0 hover:text-destructive group-hover:opacity-100"
+            title="删除会话"
+            onClick={() => onDelete(session.id)}
+          >
+            <Trash2 className="h-3.5 w-3.5" />
+          </button>
+        ) : null}
+      </div>
+    );
+  };
 
   const body = (
     <div className="flex h-full flex-col">
@@ -89,39 +138,21 @@ export function SessionDrawer({
         {filtered.length === 0 ? (
           <p className="px-2 py-6 text-center text-sm text-muted-foreground">暂无会话</p>
         ) : (
-          filtered.map((s) => (
-            <div
-              key={s.id}
-              className={cn(
-                "group flex items-center gap-1 rounded-lg px-2 py-2 text-sm hover:bg-muted/60",
-                activeId === s.id && "bg-muted",
-              )}
-            >
-              <button
-                type="button"
-                className="min-w-0 flex-1 truncate text-left"
-                onClick={() => {
-                  onSelect(s.id);
-                  onClose?.();
-                }}
-              >
-                <span className="truncate">{s.title || "未命名对话"}</span>
-                {s.origin === "scheduled" ? (
-                  <span className="ml-1 inline-block shrink-0 rounded bg-amber-500/15 px-1 text-[10px] text-amber-700 dark:text-amber-300">
-                    定时
+          <>
+            {webSessions.map(renderSession)}
+            {botSessions.length > 0 ? (
+              <>
+                <div role="separator" className="flex items-center gap-2 px-2 pb-1 pt-3 text-[10px] font-medium text-muted-foreground">
+                  <span className="h-px flex-1 bg-border" />
+                  <span className="inline-flex items-center gap-1 whitespace-nowrap">
+                    <Bot className="h-3 w-3" /> Telegram 会话 {botSessions.length}
                   </span>
-                ) : null}
-              </button>
-              <button
-                type="button"
-                className="shrink-0 rounded p-1 text-muted-foreground opacity-0 hover:text-destructive group-hover:opacity-100"
-                title="删除会话"
-                onClick={() => onDelete(s.id)}
-              >
-                <Trash2 className="h-3.5 w-3.5" />
-              </button>
-            </div>
-          ))
+                  <span className="h-px flex-1 bg-border" />
+                </div>
+                {botSessions.map(renderSession)}
+              </>
+            ) : null}
+          </>
         )}
       </div>
     </div>

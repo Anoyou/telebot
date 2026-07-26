@@ -65,14 +65,20 @@ class _FakeSvc:
 
     async def list_sessions(self, _db, **kwargs):
         uid = kwargs.get("web_user_id")
-        return [s for s in self.sessions.values() if s.web_user_id == uid]
+        include_bot = bool(kwargs.get("include_bot_sessions"))
+        return [
+            session
+            for session in self.sessions.values()
+            if session.web_user_id == uid or (include_bot and session.channel == "bot")
+        ]
 
     async def get_session(self, _db, session_id, **kwargs):
         s = self.sessions.get(session_id)
         if s is None:
             return None
         if kwargs.get("web_user_id") is not None and s.web_user_id != kwargs["web_user_id"]:
-            return None
+            if not (kwargs.get("allow_bot_session") and s.channel == "bot"):
+                return None
         return s
 
     async def update_session(self, _db, session, **kwargs):
@@ -195,6 +201,80 @@ async def test_create_and_list_sessions(fake_svc) -> None:
     rows = await api.list_sessions(db, user)
     assert len(rows) == 1
     assert rows[0].web_user_id == 7
+
+
+@pytest.mark.asyncio
+async def test_admin_can_read_but_not_mutate_bot_sessions(fake_svc) -> None:
+    db = AsyncMock()
+    user = SimpleNamespace(id=7)
+    bot_session = SimpleNamespace(
+        id="bot-s1",
+        web_user_id=None,
+        bot_tg_user_id=1682400007,
+        account_id=3,
+        channel="bot",
+        title="Telegram 排障",
+        origin="interactive",
+        status="active",
+        memory_summary="",
+        memory_state={},
+        created_at=None,
+        updated_at=None,
+    )
+    fake_svc.sessions[bot_session.id] = bot_session
+    fake_svc.messages[bot_session.id] = [
+        SimpleNamespace(
+            id=9,
+            session_id=bot_session.id,
+            role="user",
+            content={"text": "检查日志"},
+            usage=None,
+            run_status="completed",
+            error_code=None,
+            error_message=None,
+            retry_count=0,
+            created_at=None,
+        )
+    ]
+
+    web_only = await api.list_sessions(
+        db,
+        user,
+        status="active",
+        origin=None,
+        include_bot=False,
+        limit=50,
+    )
+    assert web_only == []
+
+    sessions = await api.list_sessions(
+        db,
+        user,
+        status="active",
+        origin=None,
+        include_bot=True,
+        limit=50,
+    )
+    assert [session.id for session in sessions] == ["bot-s1"]
+    assert sessions[0].bot_tg_user_id == 1682400007
+
+    session = await api.get_session("bot-s1", db, user)
+    assert session.channel == "bot"
+    messages = await api.list_messages("bot-s1", db, user, limit=100, before_id=None)
+    assert [message.content["text"] for message in messages] == ["检查日志"]
+
+    with pytest.raises(HTTPException) as update_error:
+        await api.update_session(
+            "bot-s1",
+            api.SystemAgentSessionUpdate(title="不应修改"),
+            db,
+            user,
+        )
+    assert update_error.value.status_code == 404
+
+    with pytest.raises(HTTPException) as delete_error:
+        await api.delete_session("bot-s1", db, user)
+    assert delete_error.value.status_code == 404
 
 
 @pytest.mark.asyncio
