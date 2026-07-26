@@ -209,10 +209,11 @@ export async function getSystemAgentCapabilities(): Promise<SystemAgentCapabilit
 export async function listSystemAgentRunEvents(
   runId: string,
   afterSeq = 0,
+  limit = 500,
 ): Promise<SystemAgentStreamEvent[]> {
   const { data } = await api.get<Array<{ run_id: string; seq: number; event: Record<string, unknown>; created_at?: string | null }>>(
     `/api/system-agent/runs/${runId}/events`,
-    { params: { after_seq: afterSeq } },
+    { params: { after_seq: afterSeq, limit } },
   );
   return (data || []).map((row) => ({
     ...(row.event || {}),

@@ -1,47 +1,56 @@
-import { useEffect, useMemo, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ChevronDown, ChevronRight } from "lucide-react";
 
 import { listSystemAgentRunEvents, type SystemAgentStreamEvent } from "@/api/systemAgent";
+import { AgentRunPerspective } from "@/components/assistant/AgentRunPerspective";
 import {
   filterTraceEvents,
+  isPerspectiveNoiseEvent,
   summarizeTraceEvents,
   type TraceEvent,
 } from "@/components/assistant/runTraceState";
 import { Skeleton } from "@/components/ui/misc";
 import { systemAgentToolLabel } from "@/lib/systemAgentLabels";
-import { cn, formatDateTime } from "@/lib/utils";
+import { cn } from "@/lib/utils";
 
-function diagnosticFacts(event: TraceEvent): string[] {
-  const facts: string[] = [];
-  const add = (label: string, value: unknown) => {
-    if (value === undefined || value === null || value === "") return;
-    facts.push(`${label}=${typeof value === "object" ? JSON.stringify(value) : String(value)}`);
-  };
-  add("Provider", event.provider_name);
-  add("model", event.model);
-  add("attempt", event.attempt);
-  add("retry", event.retry_number);
-  add("tool", event.tool_name);
-  add("call_id", event.call_id);
-  add("code", event.code);
-  add("usage", event.usage);
-  const timings =
-    event.stage_timings && typeof event.stage_timings === "object"
-      ? (event.stage_timings as Record<string, unknown>)
-      : event.usage &&
-          typeof event.usage === "object" &&
-          (event.usage as Record<string, unknown>).stage_timings &&
-          typeof (event.usage as Record<string, unknown>).stage_timings === "object"
-        ? ((event.usage as Record<string, unknown>).stage_timings as Record<string, unknown>)
-        : null;
-  if (timings) {
-    for (const key of ["verify_ms", "route_ms", "first_token_ms", "total_ms"] as const) {
-      const value = timings[key];
-      if (value != null && value !== "") add(key, value);
+const RUN_EVENT_PAGE_SIZE = 1_000;
+
+type RunEventLoadResult = {
+  events: SystemAgentStreamEvent[];
+  foldedCount: number;
+  lastScannedSeq: number;
+};
+
+async function loadRunEvents(
+  runId: string,
+  lastSeq?: number,
+  previous?: RunEventLoadResult,
+): Promise<RunEventLoadResult> {
+  const bySeq = new Map<number, SystemAgentStreamEvent>(
+    (previous?.events || []).map((event) => [Number(event.seq || 0), event]),
+  );
+  let cursor = previous?.lastScannedSeq || 0;
+  let foldedCount = previous?.foldedCount || 0;
+  const knownLastSeq = typeof lastSeq === "number" && lastSeq > 0 ? lastSeq : null;
+
+  while (knownLastSeq == null || cursor < knownLastSeq) {
+    const pageStartCursor = cursor;
+    const page = await listSystemAgentRunEvents(runId, cursor, RUN_EVENT_PAGE_SIZE);
+    for (const event of page) {
+      if (isPerspectiveNoiseEvent(event)) foldedCount += 1;
+      else bySeq.set(Number(event.seq || 0), event);
     }
+    cursor = Number(page.at(-1)?.seq || pageStartCursor);
+    if (page.length < RUN_EVENT_PAGE_SIZE || cursor <= pageStartCursor) break;
   }
-  return facts;
+
+  const events = [...bySeq.values()].sort((left, right) => Number(left.seq || 0) - Number(right.seq || 0));
+  return {
+    events,
+    foldedCount,
+    lastScannedSeq: cursor,
+  };
 }
 
 function labelEvent(event: TraceEvent): string {
@@ -106,6 +115,8 @@ export function RunTrace({
   liveEvents,
   running,
   failed,
+  runStatus,
+  lastSeq,
   className,
   defaultOpen,
   mode = "compact",
@@ -116,12 +127,16 @@ export function RunTrace({
   liveEvents?: SystemAgentStreamEvent[];
   running?: boolean;
   failed?: boolean;
+  runStatus?: string;
+  lastSeq?: number;
   className?: string;
   defaultOpen?: boolean;
   mode?: "compact" | "diagnostic";
   timezone?: string;
 }) {
   const [open, setOpen] = useState(Boolean(defaultOpen ?? (running || failed)));
+  const queryClient = useQueryClient();
+  const requestedTargetRef = useRef<{ runId: string; lastSeq: number } | null>(null);
 
   useEffect(() => {
     if (running) setOpen(true);
@@ -129,16 +144,30 @@ export function RunTrace({
     else if (!running && !failed && liveEvents?.length) setOpen(false);
   }, [running, failed, liveEvents?.length]);
 
+  const queryKey = ["system-agent", "run-events", runId] as const;
   const q = useQuery({
-    queryKey: ["system-agent", "run-events", runId],
-    queryFn: () => listSystemAgentRunEvents(runId!),
+    queryKey,
+    queryFn: () => loadRunEvents(
+      runId!,
+      lastSeq,
+      queryClient.getQueryData<RunEventLoadResult>(queryKey),
+    ),
     enabled: Boolean(runId) && open && !liveEvents?.length,
     staleTime: 30_000,
   });
 
+  useEffect(() => {
+    if (!runId || !open || liveEvents?.length || q.isFetching || typeof lastSeq !== "number") return;
+    if (lastSeq <= (q.data?.lastScannedSeq || 0)) return;
+    const requested = requestedTargetRef.current;
+    if (requested?.runId === runId && requested.lastSeq >= lastSeq) return;
+    requestedTargetRef.current = { runId, lastSeq };
+    void q.refetch();
+  }, [lastSeq, liveEvents?.length, open, q.data?.lastScannedSeq, q.isFetching, q.refetch, runId]);
+
   const events: TraceEvent[] = useMemo(() => {
     if (liveEvents?.length) return liveEvents as TraceEvent[];
-    return (q.data || []) as TraceEvent[];
+    return (q.data?.events || []) as TraceEvent[];
   }, [liveEvents, q.data]);
 
   const visible = useMemo(
@@ -181,36 +210,30 @@ export function RunTrace({
           <div className="rounded-md border bg-muted/20 px-2 py-1.5 text-muted-foreground">
             暂无轨迹事件
           </div>
+        ) : mode === "diagnostic" ? (
+          <AgentRunPerspective
+            events={events}
+            running={running}
+            failed={failed || summary.failed}
+            runStatus={runStatus}
+            traceNotice={q.data?.foldedCount
+              ? `已折叠 ${new Intl.NumberFormat("zh-CN").format(q.data.foldedCount)} 条心跳与流式事件。`
+              : undefined}
+            timezone={timezone}
+          />
         ) : (
           <ol className={cn(
             "space-y-1 overflow-y-auto rounded-md border bg-muted/20 px-2 py-1.5",
-            mode === "diagnostic" ? "max-h-[32rem]" : "max-h-48",
+            "max-h-48",
           )}>
             {visible.map((event, index) => (
-              <li key={`${event.seq ?? index}-${event.type}`} className={cn("text-[11px] leading-4", mode === "diagnostic" && "border-b border-border/50 py-1.5 last:border-0")}>
+              <li key={`${event.seq ?? index}-${event.type}`} className="text-[11px] leading-4">
                 <div className="flex min-w-0 flex-wrap items-baseline gap-x-1.5">
-                  {mode === "diagnostic" && event.created_at ? (
-                    <span className="shrink-0 tabular-nums text-muted-foreground/80">
-                      {formatDateTime(String(event.created_at), timezone)}
-                    </span>
-                  ) : null}
                   <span className="tabular-nums text-muted-foreground/80">
                     {typeof event.seq === "number" ? `#${event.seq}` : ""}
                   </span>
-                  {mode === "diagnostic" ? <code className="text-[10px] text-info">{String(event.type || "event")}</code> : null}
                   <span>{labelEvent(event)}</span>
                 </div>
-                {mode === "diagnostic" && diagnosticFacts(event).length ? (
-                  <div className="mt-1 break-all font-mono text-[10px] text-muted-foreground">
-                    {diagnosticFacts(event).join(" · ")}
-                  </div>
-                ) : null}
-                {mode === "diagnostic" ? (
-                  <details className="mt-1 text-muted-foreground">
-                    <summary className="cursor-pointer select-none text-[10px] hover:text-foreground">原始事件 JSON</summary>
-                    <pre className="mt-1 max-h-56 overflow-auto whitespace-pre-wrap break-all rounded bg-background/80 p-2 text-[10px] leading-4 text-foreground">{JSON.stringify(event, null, 2)}</pre>
-                  </details>
-                ) : null}
               </li>
             ))}
           </ol>

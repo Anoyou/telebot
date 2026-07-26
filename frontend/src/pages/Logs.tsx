@@ -1123,7 +1123,16 @@ function AgentRunStream({
                     {run.error_message ? <div className="mt-0.5 break-words">{run.error_message}</div> : null}
                   </div>
                 ) : null}
-                <RunTrace runId={run.id} running={run.status === "running"} defaultOpen={false} mode="diagnostic" timezone={timezone} className="mt-2" />
+                <RunTrace
+                  runId={run.id}
+                  runStatus={run.status}
+                  lastSeq={run.last_seq}
+                  running={run.status === "running"}
+                  defaultOpen={false}
+                  mode="diagnostic"
+                  timezone={timezone}
+                  className="mt-2"
+                />
               </div>
             );
           })

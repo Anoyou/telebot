@@ -451,8 +451,19 @@ test.describe("移动端交互细节", () => {
     const assistantPet = page.locator("[data-assistant-desktop-pet]");
     await expect(assistantPet).toBeVisible();
     await expect(assistantPet).toHaveAttribute("data-docked", "right");
-    const sprite = assistantPet.locator('[data-assistant-pet-intent="idle"]');
+    const sprite = assistantPet.locator('[data-assistant-pet-intent="waving"][data-assistant-pet-peeking="true"]');
     await expect(sprite.locator("canvas")).toBeVisible();
+    await expect(sprite.locator("canvas")).toHaveAttribute("height", "208");
+    const peekingBox = await sprite.boundingBox();
+    expect(Math.round(peekingBox?.width || 0)).toBe(102);
+    expect(Math.round(peekingBox?.height || 0)).toBe(114);
+    const wall = await sprite.evaluate((element) => {
+      const style = getComputedStyle(element, "::after");
+      return { content: style.content, top: style.top, width: style.width };
+    });
+    expect(wall.content).not.toBe("none");
+    expect(wall.top).toBe("70px");
+    expect(wall.width).toBe("1px");
     const petBox = await assistantPet.boundingBox();
     expect(petBox).not.toBeNull();
     expect(Math.round(petBox?.width || 0)).toBe(102);
@@ -664,8 +675,31 @@ test.describe("移动端交互细节", () => {
       await expect(compactPet).toBeVisible();
       await expect(compactPet.locator("canvas")).toHaveAttribute("height", "150");
       const compactPetBox = await compactPet.boundingBox();
-      expect(Math.round(compactPetBox?.width || 0)).toBe(54);
-      expect(Math.round(compactPetBox?.height || 0)).toBe(42);
+      expect(Math.round(compactPetBox?.width || 0)).toBe(65);
+      expect(Math.round(compactPetBox?.height || 0)).toBe(50);
+      const compactFrameSignatures: Array<{ full: number; fixedTorso: number }> = [];
+      for (let index = 0; index < 6; index += 1) {
+        await page.waitForTimeout(150);
+        compactFrameSignatures.push(await compactPet.locator("canvas").evaluate((element) => {
+          const canvas = element as HTMLCanvasElement;
+          const context = canvas.getContext("2d");
+          if (!context) return { full: 0, fixedTorso: 0 };
+          const hash = (data: Uint8ClampedArray) => {
+            let value = 2166136261;
+            for (let offset = 0; offset < data.length; offset += 1) {
+              value ^= data[offset];
+              value = Math.imul(value, 16777619);
+            }
+            return value >>> 0;
+          };
+          return {
+            full: hash(context.getImageData(0, 0, canvas.width, canvas.height).data),
+            fixedTorso: hash(context.getImageData(64, 82, 66, 68).data),
+          };
+        }));
+      }
+      expect(new Set(compactFrameSignatures.map((sample) => sample.full)).size).toBeGreaterThan(1);
+      expect(new Set(compactFrameSignatures.map((sample) => sample.fixedTorso)).size).toBe(1);
       await expect(trigger).not.toContainText("助手");
       await expect(trigger).toHaveAttribute("aria-expanded", "true");
       await expect(trigger).toHaveAttribute("aria-controls", "telepilot-assistant-surface");

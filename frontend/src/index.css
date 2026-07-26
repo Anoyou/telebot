@@ -921,12 +921,59 @@
   }
 
   .assistant-pet-sprite-frame-compact {
-    width: 54px;
-    height: 42px;
+    width: 65px;
+    height: 50px;
     overflow: hidden;
   }
 
+  .assistant-pet-sprite-frame-peeking {
+    width: 102px;
+    height: 114px;
+    overflow: visible;
+    isolation: isolate;
+  }
+
+  .assistant-pet-sprite-frame-peeking::after {
+    content: "";
+    position: absolute;
+    top: 70px;
+    bottom: 0;
+    z-index: 2;
+    width: 1px;
+    background: hsl(var(--border) / 0.72);
+    box-shadow: 0 0 8px hsl(0 0% 0% / 0.12);
+    pointer-events: none;
+  }
+
+  .assistant-pet[data-side="right"] .assistant-pet-sprite-frame-peeking::after {
+    right: 27px;
+  }
+
+  .assistant-pet[data-side="left"] .assistant-pet-sprite-frame-peeking::after {
+    left: 27px;
+  }
+
+  .assistant-pet[data-side="right"] .assistant-pet-sprite-frame-peeking .assistant-pet-sprite-canvas {
+    -webkit-mask-image:
+      linear-gradient(to bottom, #000 0%, #000 67%, transparent 67%),
+      linear-gradient(to right, transparent 0%, transparent 68%, #000 68%, #000 100%);
+    mask-image:
+      linear-gradient(to bottom, #000 0%, #000 67%, transparent 67%),
+      linear-gradient(to right, transparent 0%, transparent 68%, #000 68%, #000 100%);
+  }
+
+  .assistant-pet[data-side="left"] .assistant-pet-sprite-frame-peeking .assistant-pet-sprite-canvas {
+    -webkit-mask-image:
+      linear-gradient(to bottom, #000 0%, #000 67%, transparent 67%),
+      linear-gradient(to left, transparent 0%, transparent 68%, #000 68%, #000 100%);
+    mask-image:
+      linear-gradient(to bottom, #000 0%, #000 67%, transparent 67%),
+      linear-gradient(to left, transparent 0%, transparent 68%, #000 68%, #000 100%);
+  }
+
   .assistant-pet-sprite-canvas {
+    position: relative;
+    z-index: 1;
     display: block;
     width: 100%;
     height: 100%;
