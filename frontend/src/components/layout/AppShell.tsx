@@ -16,7 +16,7 @@ import {
 import { TopBar } from "./TopBar";
 import { GlobalAlertBar } from "./GlobalAlertBar";
 import { AssistantDockProvider, useAssistantDock } from "@/components/assistant/AssistantDock";
-import { AssistantPet, AssistantRobot } from "@/components/assistant/AssistantPet";
+import { AssistantPet, AssistantPetSprite } from "@/components/assistant/AssistantPet";
 import { fetchMe } from "@/lib/auth";
 import { getPlatformCapabilities, getSystemSettings } from "@/api/system";
 import { capabilityEnabledMap } from "@/lib/navigation";
@@ -375,6 +375,8 @@ function MobileAssistantButton() {
     return () => window.clearTimeout(timer);
   }, [notice]);
 
+  if (!mobileVisible) return null;
+
   return (
     <button
       type="button"
@@ -395,7 +397,7 @@ function MobileAssistantButton() {
         </span>
       ) : null}
       <span className="relative grid place-items-center">
-        <AssistantRobot compact streaming={streaming} active={!collapsed} celebrating={notice === "complete"} />
+        <AssistantPetSprite compact streaming={streaming} active={!collapsed} celebrating={notice === "complete"} />
       </span>
       <span className="mt-0.5 text-[10px] font-semibold leading-none text-foreground">助手</span>
     </button>

@@ -6,10 +6,15 @@ import {
   type CSSProperties,
   type PointerEvent as ReactPointerEvent,
 } from "react";
-import { Send } from "lucide-react";
 
 import { useAssistantDock } from "@/components/assistant/AssistantDock";
+import petSpritesheetUrl from "@/assets/agent-pet-spritesheet.webp";
 import { cn } from "@/lib/utils";
+import {
+  assistantPetCell,
+  assistantPetLookDirection,
+  type AssistantPetIntent,
+} from "./assistantPetAnimation";
 
 type DockSide = "left" | "right";
 
@@ -38,6 +43,8 @@ const PET_STORAGE_KEY = "telepilot:assistant-pet:v1";
 const IDLE_BUBBLE_MIN_DELAY = 24_000;
 const IDLE_BUBBLE_DELAY_RANGE = 18_000;
 const IDLE_BUBBLE_VISIBLE_MS = 3_800;
+const PET_CELL_WIDTH = 192;
+const PET_CELL_HEIGHT = 208;
 
 type PetNotice = {
   text: string;
@@ -75,49 +82,94 @@ function initialPosition(): PetPosition {
   }
 }
 
-export function AssistantRobot({
+export function AssistantPetSprite({
   compact = false,
   streaming = false,
   active = false,
   celebrating = false,
+  lookDirection = null,
 }: {
   compact?: boolean;
   streaming?: boolean;
   active?: boolean;
   celebrating?: boolean;
+  lookDirection?: number | null;
 }) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const intent: AssistantPetIntent = celebrating ? "complete" : streaming ? "working" : active ? "awake" : "idle";
+  const intentRef = useRef(intent);
+  const lookDirectionRef = useRef(lookDirection);
+  const animationStartedAtRef = useRef(0);
+
+  useEffect(() => {
+    intentRef.current = intent;
+    animationStartedAtRef.current = performance.now();
+  }, [intent]);
+
+  useEffect(() => {
+    lookDirectionRef.current = lookDirection;
+  }, [lookDirection]);
+
+  useEffect(() => {
+    const atlas = new Image();
+    const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+    let animationFrame = 0;
+    let loaded = false;
+
+    const render = (now: number) => {
+      const canvas = canvasRef.current;
+      if (loaded && canvas) {
+        const context = canvas.getContext("2d");
+        if (context) {
+          const cell = assistantPetCell(
+            intentRef.current,
+            now - animationStartedAtRef.current,
+            lookDirectionRef.current,
+            reduceMotion.matches,
+          );
+          context.clearRect(0, 0, PET_CELL_WIDTH, PET_CELL_HEIGHT);
+          context.imageSmoothingEnabled = true;
+          context.imageSmoothingQuality = "high";
+          context.drawImage(
+            atlas,
+            cell.column * PET_CELL_WIDTH,
+            cell.row * PET_CELL_HEIGHT,
+            PET_CELL_WIDTH,
+            PET_CELL_HEIGHT,
+            0,
+            0,
+            PET_CELL_WIDTH,
+            PET_CELL_HEIGHT,
+          );
+        }
+      }
+      animationFrame = window.requestAnimationFrame(render);
+    };
+
+    const handleLoad = () => {
+      if (atlas.naturalWidth !== 1536 || atlas.naturalHeight !== 2288) return;
+      loaded = true;
+      animationStartedAtRef.current = performance.now();
+    };
+
+    atlas.addEventListener("load", handleLoad);
+    atlas.src = petSpritesheetUrl;
+    animationFrame = window.requestAnimationFrame(render);
+    return () => {
+      loaded = false;
+      window.cancelAnimationFrame(animationFrame);
+      atlas.removeEventListener("load", handleLoad);
+    };
+  }, []);
+
   return (
-    <span className={cn("assistant-pet-robot-frame", compact && "assistant-pet-robot-frame-compact")} aria-hidden="true">
-      <span
-        className="assistant-pet-robot"
-        data-agent-pet-intent={celebrating ? "complete" : streaming ? "working" : active ? "awake" : "idle"}
-      >
-        <span className="assistant-pet-shadow" />
-        <span className="assistant-pet-antenna"><span /></span>
-        <span className="assistant-pet-head">
-          <span className="assistant-pet-ear assistant-pet-ear-left" />
-          <span className="assistant-pet-ear assistant-pet-ear-right" />
-          <span className="assistant-pet-face">
-            <span className="assistant-pet-eye assistant-pet-eye-left" />
-            <span className="assistant-pet-eye assistant-pet-eye-right" />
-            <span className="assistant-pet-mouth" />
-          </span>
-        </span>
-        <span className="assistant-pet-neck" />
-        <span className="assistant-pet-body">
-          <span className={cn("assistant-pet-core", streaming && "assistant-pet-core-streaming")}>
-            <Send />
-          </span>
-        </span>
-        <span className="assistant-pet-arm assistant-pet-arm-left" />
-        <span className="assistant-pet-arm assistant-pet-arm-right" />
-        <span className="assistant-pet-foot assistant-pet-foot-left">
-          <span className="assistant-pet-plume" />
-        </span>
-        <span className="assistant-pet-foot assistant-pet-foot-right">
-          <span className="assistant-pet-plume" />
-        </span>
-      </span>
+    <span className={cn("assistant-pet-sprite-frame", compact && "assistant-pet-sprite-frame-compact")} aria-hidden="true">
+      <canvas
+        ref={canvasRef}
+        className="assistant-pet-sprite-canvas"
+        width={PET_CELL_WIDTH}
+        height={PET_CELL_HEIGHT}
+      />
     </span>
   );
 }
@@ -131,6 +183,7 @@ export function AssistantPet() {
   const [dragging, setDragging] = useState(false);
   const [docked, setDocked] = useState(true);
   const [notice, setNotice] = useState<PetNotice | null>(null);
+  const [lookDirection, setLookDirection] = useState<number | null>(null);
   const buttonRef = useRef<HTMLButtonElement>(null);
   const dragRef = useRef<DragState | null>(null);
   const snapTimerRef = useRef<number | null>(null);
@@ -291,11 +344,8 @@ export function AssistantPet() {
       frame = window.requestAnimationFrame(() => {
         const rect = buttonRef.current?.getBoundingClientRect();
         if (!rect || !buttonRef.current) return;
-        const dx = clamp((event.clientX - (rect.left + rect.width / 2)) / 28, -1, 1);
-        const dy = clamp((event.clientY - (rect.top + rect.height / 2)) / 24, -1, 1);
-        buttonRef.current.style.setProperty("--assistant-pet-eye-x", `${(dx * 1.8).toFixed(2)}px`);
-        buttonRef.current.style.setProperty("--assistant-pet-eye-y", `${(dy * 1.35).toFixed(2)}px`);
-        buttonRef.current.style.setProperty("--assistant-pet-tilt", `${(dx * 2.4).toFixed(2)}deg`);
+        const nextDirection = assistantPetLookDirection(event.clientX, event.clientY, rect);
+        setLookDirection((current) => current === nextDirection ? current : nextDirection);
       });
     };
     window.addEventListener("pointermove", handlePointer, { passive: true });
@@ -308,6 +358,7 @@ export function AssistantPet() {
   const onPointerDown = (event: ReactPointerEvent<HTMLButtonElement>) => {
     if (event.button !== 0 || !position) return;
     clearSnapTimer();
+    setLookDirection(null);
     event.currentTarget.setPointerCapture(event.pointerId);
     dragRef.current = {
       pointerId: event.pointerId,
@@ -358,7 +409,7 @@ export function AssistantPet() {
     if (collapsed) scheduleSnap(240);
   };
 
-  if (!position) return null;
+  if (!position || !desktopVisible) return null;
 
   return (
     <button
@@ -402,7 +453,12 @@ export function AssistantPet() {
           {notice.text}
         </span>
       ) : null}
-      <AssistantRobot streaming={streaming} active={!collapsed} celebrating={notice?.tone === "complete"} />
+      <AssistantPetSprite
+        streaming={streaming}
+        active={!collapsed}
+        celebrating={notice?.tone === "complete"}
+        lookDirection={lookDirection}
+      />
     </button>
   );
 }
