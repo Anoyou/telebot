@@ -99,7 +99,8 @@ export default defineConfig({
     port: 5173,
     strictPort: true,
     proxy: {
-      "/api": "http://localhost:8000",
+      // 后端绑定 0.0.0.0（IPv4）；固定 IPv4 回环，避免 localhost 优先解析为 ::1 时代理返回 500。
+      "/api": "http://127.0.0.1:8000",
     },
   },
   preview: {

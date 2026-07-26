@@ -25,6 +25,13 @@
 
 ## [Unreleased]
 
+## [0.83.0-beta.2] - 2026-07-26 · minor（次版本预发布） · 开发代理与应用图标修复
+
+### Fixed
+
+- 修复 iOS 主屏幕 Web App 长期复用固定 `apple-touch-icon.png` URL、即使线上素材已更新仍显示旧黑边图标的问题；Apple Touch 图标现在进入 Vite 内容哈希管线，每次素材变化都会生成新的资源 URL。
+- 修复部分 IPv6 优先环境把开发代理目标 `localhost` 解析为 `::1`、但后端仅监听 IPv4 而导致登录请求返回 500 的问题；前端代理与 OpenAPI codegen 现在固定使用 `127.0.0.1`。
+
 ## [0.83.0-beta.1] - 2026-07-26 · minor（次版本预发布） · 银翼 Agent 桌宠实装
 
 ### Added
