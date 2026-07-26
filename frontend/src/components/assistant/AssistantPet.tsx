@@ -17,14 +17,11 @@ import {
   assistantPetDrawPlan,
   assistantPetFrameAt,
   assistantPetIntentForState,
-  assistantPetLookRegistration,
-  assistantPetLookDirection,
+  assistantPetLookPhase,
   ASSISTANT_PET_CANVAS_HEIGHT,
   ASSISTANT_PET_CANVAS_WIDTH,
   ASSISTANT_PET_COMPACT_CANVAS_HEIGHT,
-  type AssistantPetDrawRegistration,
   type AssistantPetIntent,
-  type AssistantPetVisualMetrics,
 } from "./assistantPetAnimation";
 
 type DockSide = "left" | "right";
@@ -62,66 +59,6 @@ type PetNotice = {
 };
 
 const IDLE_NOTICES = ["我在这儿", "随时可以叫我", "需要我帮忙吗？"] as const;
-
-function measureLookRegistrations(
-  atlas: HTMLImageElement,
-  sourceCellWidth: number,
-  sourceCellHeight: number,
-) {
-  const measurementCanvas = document.createElement("canvas");
-  measurementCanvas.width = ASSISTANT_PET_CANVAS_WIDTH;
-  measurementCanvas.height = ASSISTANT_PET_CANVAS_HEIGHT;
-  const context = measurementCanvas.getContext("2d", { willReadFrequently: true });
-  const metrics = new Map<string, AssistantPetVisualMetrics>();
-  if (!context) return new Map<string, AssistantPetDrawRegistration>();
-
-  for (const row of [9, 10]) {
-    for (let column = 0; column < 8; column += 1) {
-      context.clearRect(0, 0, measurementCanvas.width, measurementCanvas.height);
-      context.drawImage(
-        atlas,
-        column * sourceCellWidth,
-        row * sourceCellHeight,
-        sourceCellWidth,
-        sourceCellHeight,
-        0,
-        0,
-        ASSISTANT_PET_CANVAS_WIDTH,
-        ASSISTANT_PET_CANVAS_HEIGHT,
-      );
-      const pixels = context.getImageData(0, 0, measurementCanvas.width, measurementCanvas.height).data;
-      let alphaMass = 0;
-      let weightedX = 0;
-      let baselineY = 0;
-      for (let y = 0; y < ASSISTANT_PET_CANVAS_HEIGHT; y += 1) {
-        for (let x = 0; x < ASSISTANT_PET_CANVAS_WIDTH; x += 1) {
-          const alpha = pixels[(y * ASSISTANT_PET_CANVAS_WIDTH + x) * 4 + 3] / 255;
-          if (alpha <= 0) continue;
-          alphaMass += alpha;
-          weightedX += x * alpha;
-          baselineY = Math.max(baselineY, y + 1);
-        }
-      }
-      metrics.set(`${row}:${column}`, {
-        alphaMass,
-        centerX: alphaMass > 0 ? weightedX / alphaMass : ASSISTANT_PET_CANVAS_WIDTH / 2,
-        baselineY,
-      });
-    }
-  }
-
-  const masses = [...metrics.values()].map((value) => value.alphaMass).sort((a, b) => a - b);
-  const middle = Math.floor(masses.length / 2);
-  const targetAlphaMass = masses.length % 2 === 0
-    ? ((masses[middle - 1] ?? 0) + (masses[middle] ?? 0)) / 2
-    : (masses[middle] ?? 0);
-  return new Map(
-    [...metrics.entries()].map(([key, value]) => [
-      key,
-      assistantPetLookRegistration(value, targetAlphaMass),
-    ]),
-  );
-}
 
 function clamp(value: number, min: number, max: number) {
   return Math.min(Math.max(value, min), max);
@@ -198,22 +135,38 @@ export function AssistantPetSprite({
     const canvas = canvasRef.current;
     const context = canvas?.getContext("2d");
     if (!canvas || !context) return;
+    const buffer = document.createElement("canvas");
+    buffer.width = canvas.width;
+    buffer.height = canvas.height;
+    const bufferContext = buffer.getContext("2d");
+    if (!bufferContext) return;
 
     let animationFrame = 0;
     let loaded = false;
     let sourceCellWidth = 0;
     let sourceCellHeight = 0;
     let lastFrameKey = "";
-    let lookRegistrations = new Map<string, AssistantPetDrawRegistration>();
 
     context.imageSmoothingEnabled = true;
     context.imageSmoothingQuality = "high";
+    bufferContext.imageSmoothingEnabled = true;
+    bufferContext.imageSmoothingQuality = "high";
 
-    const drawPlan = (plan: ReturnType<typeof assistantPetDrawPlan>, opacity: number) => {
-      context.globalAlpha = opacity;
+    const tracePath = (path: readonly { x: number; y: number }[]) => {
+      if (path.length === 0) return;
+      bufferContext.beginPath();
+      bufferContext.moveTo(path[0].x, path[0].y);
+      for (const point of path.slice(1)) {
+        bufferContext.lineTo(point.x, point.y);
+      }
+      bufferContext.closePath();
+    };
+
+    const drawPlan = (plan: ReturnType<typeof assistantPetDrawPlan>, opacity = 1) => {
+      bufferContext.globalAlpha = opacity;
       for (const layer of plan.layers) {
         if (layer.clearBeforeDraw) {
-          context.clearRect(
+          bufferContext.clearRect(
             layer.destinationX,
             layer.destinationY,
             layer.destinationWidth,
@@ -226,11 +179,16 @@ export function AssistantPetSprite({
           + layer.sourceY / ASSISTANT_PET_CANVAS_HEIGHT * sourceCellHeight;
         const sourceWidth = layer.sourceWidth / ASSISTANT_PET_CANVAS_WIDTH * sourceCellWidth;
         const sourceHeight = layer.sourceHeight / ASSISTANT_PET_CANVAS_HEIGHT * sourceCellHeight;
+        if (layer.clipPath) {
+          bufferContext.save();
+          tracePath(layer.clipPath);
+          bufferContext.clip();
+        }
         if (layer.flipX) {
-          context.save();
-          context.translate(layer.destinationX + layer.destinationWidth, layer.destinationY);
-          context.scale(-1, 1);
-          context.drawImage(
+          bufferContext.save();
+          bufferContext.translate(layer.destinationX + layer.destinationWidth, layer.destinationY);
+          bufferContext.scale(-1, 1);
+          bufferContext.drawImage(
             atlas,
             sourceX,
             sourceY,
@@ -241,9 +199,9 @@ export function AssistantPetSprite({
             layer.destinationWidth,
             layer.destinationHeight,
           );
-          context.restore();
+          bufferContext.restore();
         } else {
-          context.drawImage(
+          bufferContext.drawImage(
             atlas,
             sourceX,
             sourceY,
@@ -255,22 +213,27 @@ export function AssistantPetSprite({
             layer.destinationHeight,
           );
         }
+        if (layer.clipPath) {
+          bufferContext.restore();
+        }
       }
-      context.globalAlpha = 1;
+      bufferContext.globalAlpha = 1;
     };
 
     const drawFrame = (frame: ReturnType<typeof assistantPetFrameAt>) => {
-      const registration = lookRegistrations.get(`${frame.cell.row}:${frame.cell.column}`);
-      const plan = assistantPetDrawPlan(frame.cell, compact, registration);
-      context.clearRect(0, 0, ASSISTANT_PET_CANVAS_WIDTH, plan.viewportHeight);
-      if (!frame.nextCell || frame.blend <= 0) {
-        drawPlan(plan, 1);
-        return;
+      const plan = assistantPetDrawPlan(frame.cell, compact || peeking);
+      bufferContext.clearRect(0, 0, buffer.width, buffer.height);
+      drawPlan(plan, frame.nextCell ? 1 - frame.blend : 1);
+      if (frame.nextCell) {
+        bufferContext.globalCompositeOperation = "lighter";
+        drawPlan(assistantPetDrawPlan(frame.nextCell, compact || peeking), frame.blend);
+        bufferContext.globalCompositeOperation = "source-over";
       }
-      const nextRegistration = lookRegistrations.get(`${frame.nextCell.row}:${frame.nextCell.column}`);
-      const nextPlan = assistantPetDrawPlan(frame.nextCell, compact, nextRegistration);
-      drawPlan(plan, 1 - frame.blend);
-      drawPlan(nextPlan, frame.blend);
+
+      context.save();
+      context.globalCompositeOperation = "copy";
+      context.drawImage(buffer, 0, 0);
+      context.restore();
     };
 
     const render = (now: number) => {
@@ -281,11 +244,11 @@ export function AssistantPetSprite({
           lookDirectionRef.current,
           reduceMotion.matches,
         );
-        const blendStep = frame.nextCell ? Math.round(frame.blend * 24) : 0;
+        const blendStep = frame.nextCell ? Math.round(frame.blend * 16) : 0;
         const frameKey = `${frame.cell.row}:${frame.cell.column}:${frame.nextCell?.row ?? ""}:${frame.nextCell?.column ?? ""}:${blendStep}`;
         if (frameKey !== lastFrameKey) {
           lastFrameKey = frameKey;
-          drawFrame({ ...frame, blend: blendStep / 24 });
+          drawFrame({ ...frame, blend: blendStep / 16 });
         }
       }
       animationFrame = window.requestAnimationFrame(render);
@@ -301,7 +264,6 @@ export function AssistantPetSprite({
       }
       sourceCellWidth = atlas.naturalWidth / 8;
       sourceCellHeight = atlas.naturalHeight / 11;
-      lookRegistrations = measureLookRegistrations(atlas, sourceCellWidth, sourceCellHeight);
       if (atlas.naturalWidth !== 1536 || atlas.naturalHeight !== 2288) {
         console.warn("Agent 桌宠图集使用非标准尺寸，将按 8x11 动态推导单元格", {
           width: atlas.naturalWidth,
@@ -321,7 +283,7 @@ export function AssistantPetSprite({
       window.cancelAnimationFrame(animationFrame);
       atlas.removeEventListener("load", handleLoad);
     };
-  }, [compact]);
+  }, [compact, peeking]);
 
   return (
     <span
@@ -339,7 +301,7 @@ export function AssistantPetSprite({
         ref={canvasRef}
         className="assistant-pet-sprite-canvas"
         width={ASSISTANT_PET_CANVAS_WIDTH}
-        height={compact ? ASSISTANT_PET_COMPACT_CANVAS_HEIGHT : ASSISTANT_PET_CANVAS_HEIGHT}
+        height={compact || peeking ? ASSISTANT_PET_COMPACT_CANVAS_HEIGHT : ASSISTANT_PET_CANVAS_HEIGHT}
       />
     </span>
   );
@@ -522,7 +484,7 @@ export function AssistantPet() {
       frame = window.requestAnimationFrame(() => {
         const rect = buttonRef.current?.getBoundingClientRect();
         if (!rect || !buttonRef.current) return;
-        const nextDirection = assistantPetLookDirection(event.clientX, event.clientY, rect);
+        const nextDirection = assistantPetLookPhase(event.clientX, event.clientY, rect);
         setLookDirection((current) => current === nextDirection ? current : nextDirection);
       });
     };

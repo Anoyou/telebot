@@ -7,8 +7,8 @@ import {
   assistantPetDrawPlan,
   assistantPetFrameAt,
   assistantPetIntentForState,
-  assistantPetLookRegistration,
   assistantPetLookDirection,
+  assistantPetLookPhase,
 } from "./assistantPetAnimation.ts";
 
 const bounds = { left: 100, top: 100, width: 68, height: 76 };
@@ -45,10 +45,39 @@ test("鼠标角度以桌宠实际位置为中心并保留中心死区", () => {
   assert.equal(assistantPetLookDirection(centerX - 100, centerY, bounds), 12);
 });
 
+test("注视角度保持连续，并跨两处半圈边界平滑衔接", () => {
+  const radius = 100;
+  const radians = 168.75 * Math.PI / 180;
+  const phase = assistantPetLookPhase(
+    centerX + Math.sin(radians) * radius,
+    centerY - Math.cos(radians) * radius,
+    bounds,
+  );
+  assert.ok(phase != null && Math.abs(phase - 7.5) < 0.001);
+
+  const lowerBoundary = assistantPetFrameAt("idle", 0, 7.5);
+  assert.deepEqual(lowerBoundary.cell, { row: 9, column: 7 });
+  assert.deepEqual(lowerBoundary.nextCell, { row: 10, column: 0 });
+  assert.equal(lowerBoundary.blend, 0.5);
+
+  const upperBoundary = assistantPetFrameAt("idle", 0, 15.5);
+  assert.deepEqual(upperBoundary.cell, { row: 10, column: 7 });
+  assert.deepEqual(upperBoundary.nextCell, { row: 9, column: 0 });
+  assert.equal(upperBoundary.blend, 0.5);
+});
+
 test("工作和完成状态优先于鼠标注视", () => {
   assert.deepEqual(assistantPetCell("review", 0, 12), { row: 8, column: 0 });
   assert.deepEqual(assistantPetCell("jumping", 0, 12), { row: 4, column: 0 });
   assert.deepEqual(assistantPetCell("failed", 0, 12), { row: 5, column: 0 });
+});
+
+test("待机循环跳过头部轮廓偏大的前两格", () => {
+  const sampledColumns = new Set<number>();
+  for (let elapsed = 0; elapsed < 1_200; elapsed += 20) {
+    sampledColumns.add(assistantPetFrameAt("idle", elapsed, null).cell.column);
+  }
+  assert.deepEqual([...sampledColumns].sort(), [2, 3, 4, 5]);
 });
 
 test("产品状态映射使用新工作和完成动作", () => {
@@ -71,86 +100,127 @@ test("产品状态映射使用新工作和完成动作", () => {
 test("拖拽方向使用左右奔跑行", () => {
   assert.deepEqual(assistantPetCell("running-right", 0, null), { row: 1, column: 0 });
   assert.deepEqual(assistantPetCell("running-left", 0, null), { row: 2, column: 0 });
-  assert.deepEqual(assistantPetCell("running-right", 120, null), { row: 1, column: 1 });
-  assert.deepEqual(assistantPetCell("running-left", 840, null), { row: 2, column: 7 });
-  assert.deepEqual(assistantPetCell("running-right", 960, null), { row: 1, column: 0 });
+  assert.deepEqual(assistantPetCell("running-right", 84, null), { row: 1, column: 1 });
+  assert.deepEqual(assistantPetCell("running-left", 588, null), { row: 2, column: 7 });
+  assert.deepEqual(assistantPetCell("running-right", 672, null), { row: 1, column: 0 });
 
   const leftPlan = assistantPetDrawPlan({ row: 2, column: 5 });
-  assert.equal(leftPlan.layers[0]?.row, 1);
+  assert.equal(leftPlan.layers[0]?.row, 2);
   assert.equal(leftPlan.layers[0]?.column, 5);
-  assert.equal(leftPlan.layers[0]?.flipX, true);
+  assert.equal(leftPlan.layers[0]?.flipX, false);
+  const rightPlan = assistantPetDrawPlan({ row: 1, column: 5 });
+  assert.equal(rightPlan.layers[0]?.row, 2);
+  assert.equal(rightPlan.layers[0]?.flipX, true);
 });
 
-test("跑动在相邻帧和循环边界都使用缓动过渡", () => {
-  const middle = assistantPetFrameAt("running-right", 96, null);
-  assert.deepEqual(middle.cell, { row: 1, column: 0 });
-  assert.deepEqual(middle.nextCell, { row: 1, column: 1 });
-  assert.ok(middle.blend > 0 && middle.blend < 1);
-
-  const wrap = assistantPetFrameAt("running-right", 936, null);
-  assert.deepEqual(wrap.cell, { row: 1, column: 7 });
-  assert.deepEqual(wrap.nextCell, { row: 1, column: 0 });
-  assert.ok(wrap.blend > 0 && wrap.blend < 1);
+test("跑动以稳定 12fps 逐格播放，不叠化两个姿势", () => {
+  const cells = Array.from({ length: 8 }, (_, index) => (
+    assistantPetFrameAt("running-right", index * 84, null).cell
+  ));
+  assert.deepEqual(cells, Array.from({ length: 8 }, (_, column) => ({ row: 1, column })));
+  assert.deepEqual(assistantPetFrameAt("running-right", 672, null).cell, { row: 1, column: 0 });
 });
 
-test("跳跃使用同一动作行的完整阶段并回到站姿", () => {
-  const plans = [0, 1, 2, 3, 4, 5, 6].map((column) => assistantPetDrawPlan({ row: 4, column }));
-  assert.deepEqual(plans.map((plan) => plan.layers[0]?.destinationY), [0, -30, -25, -6, -27, -30, 0]);
-  assert.deepEqual(plans.map((plan) => plan.layers[0]?.row), [0, 4, 4, 4, 4, 4, 0]);
-  assert.deepEqual(plans.map((plan) => plan.layers[0]?.column), [3, 0, 1, 2, 3, 4, 3]);
+test("跳跃只使用同一动作行的五个阶段，单次播放后站稳", () => {
+  const plans = [0, 1, 2, 3, 4].map((column) => assistantPetDrawPlan({ row: 4, column }));
+  assert.deepEqual(plans.map((plan) => plan.layers[0]?.destinationY), [-56, -21, -6, -25, -58]);
+  assert.deepEqual(plans.map((plan) => plan.layers[0]?.row), [4, 4, 4, 4, 4]);
+  assert.deepEqual(plans.map((plan) => plan.layers[0]?.column), [0, 1, 2, 3, 4]);
   assert.equal(plans.every((plan) => plan.layers.length === 1), true);
-  assert.ok((plans[1]?.layers[0]?.destinationWidth ?? 0) > 192);
+  assert.ok((plans[0]?.layers[0]?.destinationWidth ?? 0) > 192);
 
-  const liftoff = assistantPetFrameAt("jumping", 172, null);
+  const liftoff = assistantPetFrameAt("jumping", 100, null);
   assert.deepEqual(liftoff.cell, { row: 4, column: 1 });
-  assert.deepEqual(liftoff.nextCell, { row: 4, column: 2 });
-  assert.ok(liftoff.blend > 0 && liftoff.blend < 1);
+  assert.deepEqual(assistantPetFrameAt("jumping", 190, null).cell, { row: 4, column: 2 });
+  assert.deepEqual(assistantPetFrameAt("jumping", 580, null).cell, { row: 0, column: 5 });
+  assert.deepEqual(assistantPetFrameAt("jumping", 0, null, true).cell, { row: 0, column: 5 });
 });
 
-test("注视帧按可见面积和重心统一注册", () => {
-  const right = { alphaMass: 10_316, centerX: 89, baselineY: 202 };
-  const left = { alphaMass: 9_728, centerX: 102, baselineY: 202 };
-  const target = 10_000;
-  const rightRegistration = assistantPetLookRegistration(right, target);
-  const leftRegistration = assistantPetLookRegistration(left, target);
-  assert.ok(Math.abs(right.alphaMass * rightRegistration.scale ** 2 - target) < 1);
-  assert.ok(Math.abs(left.alphaMass * leftRegistration.scale ** 2 - target) < 1);
-  assert.ok(Math.abs(rightRegistration.destinationX + right.centerX * rightRegistration.scale - 96) < 0.001);
-  assert.ok(Math.abs(leftRegistration.destinationX + left.centerX * leftRegistration.scale - 96) < 0.001);
+test("注视帧统一人物高度、基线和下半身锚点", () => {
+  const sourceMetrics = [
+    [196, 95.099], [196, 94.052], [196, 94.23], [195, 94.749],
+    [194, 94.02], [190, 94.001], [186, 93.618], [183, 94.552],
+    [190, 95.057], [191, 94.538], [191, 94.791], [189, 94.842],
+    [186, 94.502], [185, 95.287], [185, 95.002], [186, 94.727],
+  ] as const;
 
-  const plan = assistantPetDrawPlan({ row: 9, column: 4 }, false, rightRegistration);
-  assert.equal(plan.layers[0]?.destinationX, rightRegistration.destinationX);
-  assert.equal(plan.layers[0]?.destinationY, rightRegistration.destinationY);
-  assert.equal(plan.layers[0]?.destinationWidth, 192 * rightRegistration.scale);
+  sourceMetrics.forEach(([height, lowerCenterX], direction) => {
+    const layer = assistantPetDrawPlan({
+      row: direction < 8 ? 9 : 10,
+      column: direction % 8,
+    }).layers[0];
+    const scale = (layer?.destinationHeight ?? 0) / 208;
+    assert.ok(Math.abs(height * scale - 190) < 0.001);
+    assert.ok(Math.abs((layer?.destinationY ?? 0) + 202 * scale - 202) < 0.001);
+    assert.ok(Math.abs((layer?.destinationX ?? 0) + lowerCenterX * scale - 95) < 0.001);
+  });
 });
 
-test("摆手只替换上半身并固定下半身基准帧", () => {
+test("摆手固定头身基准，只清除旧手臂并按肩部锚点绘制新手臂", () => {
   const plan = assistantPetDrawPlan({ row: 3, column: 2 });
-  assert.equal(plan.layers.length, 4);
+  assert.equal(plan.layers.length, 3);
   assert.deepEqual(plan.layers[0], {
+    row: 3,
+    column: 0,
+    sourceX: 0,
+    sourceY: 0,
+    sourceWidth: 192,
+    sourceHeight: 208,
+    destinationX: 0,
+    destinationY: 0,
+    destinationWidth: 192,
+    destinationHeight: 208,
+  });
+  assert.deepEqual(plan.layers[1], {
+    row: 3,
+    column: 1,
+    sourceX: 57,
+    sourceY: 108,
+    sourceWidth: 30,
+    sourceHeight: 42,
+    destinationX: 55,
+    destinationY: 108,
+    destinationWidth: 30,
+    destinationHeight: 42,
+    clearBeforeDraw: true,
+  });
+  const movingArm = plan.layers[2];
+  assert.deepEqual({
+    row: movingArm?.row,
+    column: movingArm?.column,
+    sourceX: movingArm?.sourceX,
+    sourceY: movingArm?.sourceY,
+    sourceWidth: movingArm?.sourceWidth,
+    sourceHeight: movingArm?.sourceHeight,
+    destinationX: movingArm?.destinationX,
+    destinationY: movingArm?.destinationY,
+    destinationWidth: movingArm?.destinationWidth,
+    destinationHeight: movingArm?.destinationHeight,
+  }, {
     row: 3,
     column: 2,
     sourceX: 0,
     sourceY: 0,
     sourceWidth: 192,
     sourceHeight: 208,
-    destinationX: 10,
-    destinationY: 0,
+    destinationX: 8,
+    destinationY: -4,
     destinationWidth: 192,
     destinationHeight: 208,
   });
-  assert.deepEqual(plan.layers.slice(1).map((layer) => ({
-    column: layer.column,
-    sourceX: layer.sourceX,
-    sourceY: layer.sourceY,
-    sourceWidth: layer.sourceWidth,
-    sourceHeight: layer.sourceHeight,
-  })), [
-    { column: 0, sourceX: 35, sourceY: 0, sourceWidth: 125, sourceHeight: 100 },
-    { column: 0, sourceX: 64, sourceY: 82, sourceWidth: 66, sourceHeight: 68 },
-    { column: 0, sourceX: 0, sourceY: 150, sourceWidth: 192, sourceHeight: 58 },
+  assert.ok((movingArm?.clipPath?.length ?? 0) >= 10);
+  assert.equal(Math.max(...(movingArm?.clipPath ?? []).map((point) => point.x)), 82);
+
+  const registrations = [1, 2].map((column) => {
+    const layer = assistantPetDrawPlan({ row: 3, column }).layers[2];
+    return [layer?.destinationX, layer?.destinationY];
+  });
+  assert.deepEqual(registrations, [
+    [-2, 0],
+    [8, -4],
   ]);
-  assert.equal(plan.layers.slice(1).every((layer) => layer.clearBeforeDraw), true);
+  assert.equal(assistantPetDrawPlan({ row: 3, column: 3 }).layers.length, 1);
+  assert.deepEqual(assistantPetFrameAt("waving", 420, null).cell, { row: 3, column: 0 });
 });
 
 test("PWA 紧凑视图只绘制上半身", () => {
@@ -161,15 +231,21 @@ test("PWA 紧凑视图只绘制上半身", () => {
   assert.equal(plan.layers[0]?.sourceHeight, ASSISTANT_PET_COMPACT_CANVAS_HEIGHT);
 });
 
-test("PWA 摆手沿用固定头部和躯干的新版合成", () => {
+test("PWA 摆手保留完整可见的手臂动作", () => {
   const plan = assistantPetDrawPlan({ row: 3, column: 2 }, true);
   assert.equal(plan.viewportHeight, ASSISTANT_PET_COMPACT_CANVAS_HEIGHT);
   assert.equal(plan.layers.length, 3);
-  assert.equal(plan.layers[0]?.destinationX, 10);
+  assert.equal(plan.layers[0]?.destinationX, 0);
   assert.equal(plan.layers[0]?.sourceHeight, ASSISTANT_PET_COMPACT_CANVAS_HEIGHT);
-  assert.deepEqual(plan.layers.slice(1).map((layer) => [layer.sourceX, layer.sourceY, layer.sourceWidth, layer.sourceHeight]), [
-    [35, 0, 125, 100],
-    [64, 82, 66, 68],
-  ]);
-  assert.equal(plan.layers.slice(1).every((layer) => layer.clearBeforeDraw), true);
+  assert.equal(plan.layers[1]?.clearBeforeDraw, true);
+  assert.deepEqual([
+    plan.layers[2]?.sourceX,
+    plan.layers[2]?.sourceY,
+    plan.layers[2]?.sourceWidth,
+    plan.layers[2]?.sourceHeight,
+    plan.layers[2]?.destinationX,
+    plan.layers[2]?.destinationY,
+    plan.layers[2]?.destinationHeight,
+  ], [0, 0, 192, ASSISTANT_PET_COMPACT_CANVAS_HEIGHT, 8, -4, ASSISTANT_PET_COMPACT_CANVAS_HEIGHT]);
+  assert.equal(Math.max(...(plan.layers[2]?.clipPath ?? []).map((point) => point.x)), 82);
 });

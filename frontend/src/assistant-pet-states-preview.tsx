@@ -18,7 +18,7 @@ import {
 } from "lucide-react";
 
 import { AssistantPetSprite } from "@/components/assistant/AssistantPet";
-import { assistantPetLookDirection } from "@/components/assistant/assistantPetAnimation";
+import { assistantPetLookPhase } from "@/components/assistant/assistantPetAnimation";
 import "@/index.css";
 
 type PreviewState =
@@ -149,7 +149,7 @@ function PreviewApp() {
   const handlePointerMove = (event: PointerEvent<HTMLDivElement>) => {
     if (state !== "look" || !petShellRef.current) return;
     const rect = petShellRef.current.getBoundingClientRect();
-    setLookDirection(assistantPetLookDirection(event.clientX, event.clientY, rect));
+    setLookDirection(assistantPetLookPhase(event.clientX, event.clientY, rect));
   };
 
   return (
