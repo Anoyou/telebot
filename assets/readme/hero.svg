@@ -1,0 +1,70 @@
+<svg xmlns="http://www.w3.org/2000/svg"
+     width="1200" height="420" viewBox="0 0 1200 420"
+     role="img" aria-labelledby="title desc">
+  <title id="title">TelePilot</title>
+  <desc id="desc">TelePilot 是自托管的 Telegram 多账号控制台，每个用户账号由独立 Worker 运行，通过 Telethon 连接 Telegram，并统一接入插件、交互 Bot、AI 路由和资金台账。</desc>
+
+  <rect width="1200" height="420" rx="18" fill="#191918"/>
+  <path d="M650 48V372" stroke="#343330" stroke-width="1"/>
+
+  <g font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', sans-serif">
+    <rect x="64" y="54" width="28" height="4" rx="2" fill="#F97316"/>
+    <text x="104" y="65" fill="#A7A49E" font-size="17" font-weight="650">SELF-HOSTED · TELEGRAM · CONTROL PLANE</text>
+
+    <text x="60" y="158" fill="#F7F4EF" font-size="78" font-weight="760">TelePilot</text>
+    <text x="64" y="209" fill="#F7F4EF" font-size="30" font-weight="650">自托管的 Telegram 多账号控制台</text>
+    <text x="64" y="262" fill="#B7B4AE" font-size="21">账号、插件、交互 Bot、AI 路由与运维，</text>
+    <text x="64" y="296" fill="#B7B4AE" font-size="21">在一处管理，数据和密钥留在自己的基础设施。</text>
+
+    <circle cx="72" cy="352" r="5" fill="#35C985"/>
+    <text x="88" y="359" fill="#E8E4DD" font-size="18" font-weight="600">每账号独立 Worker</text>
+    <text x="280" y="359" fill="#65635F" font-size="18">/</text>
+    <text x="304" y="359" fill="#E8E4DD" font-size="18" font-weight="600">Web + PWA</text>
+    <text x="430" y="359" fill="#65635F" font-size="18">/</text>
+    <text x="454" y="359" fill="#E8E4DD" font-size="18" font-weight="600">MIT</text>
+
+    <text x="700" y="65" fill="#A7A49E" font-size="16" font-weight="650">RUNTIME MAP</text>
+
+    <g font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="17">
+      <rect x="700" y="92" width="160" height="50" rx="8" fill="#242321" stroke="#45423D"/>
+      <circle cx="722" cy="117" r="5" fill="#35C985"/>
+      <text x="738" y="123" fill="#E8E4DD">ACCOUNT A</text>
+
+      <rect x="700" y="160" width="160" height="50" rx="8" fill="#242321" stroke="#45423D"/>
+      <circle cx="722" cy="185" r="5" fill="#35C985"/>
+      <text x="738" y="191" fill="#E8E4DD">ACCOUNT B</text>
+
+      <rect x="700" y="228" width="160" height="50" rx="8" fill="#242321" stroke="#45423D"/>
+      <circle cx="722" cy="253" r="5" fill="#35C985"/>
+      <text x="738" y="259" fill="#E8E4DD">ACCOUNT C</text>
+    </g>
+
+    <path d="M860 117H874M860 185H882M860 253H874M874 117V253" fill="none" stroke="#77736C" stroke-width="2"/>
+    <path d="M874 185H888" fill="none" stroke="#F97316" stroke-width="3"/>
+
+    <rect x="888" y="132" width="148" height="106" rx="10" fill="#F97316"/>
+    <text x="962" y="174" fill="#211E1A" font-size="16" font-weight="750" text-anchor="middle">ACCOUNT</text>
+    <text x="962" y="201" fill="#211E1A" font-size="19" font-weight="780" text-anchor="middle">WORKERS</text>
+    <text x="962" y="222" fill="#5A2B0C" font-size="14" font-weight="650" text-anchor="middle">ISOLATED · RETRY</text>
+
+    <path d="M1036 185H1047M1047 100V286" fill="none" stroke="#77736C" stroke-width="2"/>
+    <path d="M1047 100H1060M1047 162H1060M1047 224H1060M1047 286H1060" fill="none" stroke="#77736C" stroke-width="2"/>
+
+    <g font-size="17" font-weight="650">
+      <rect x="1060" y="78" width="112" height="44" rx="8" fill="#242321" stroke="#F97316"/>
+      <text x="1116" y="106" fill="#F7F4EF" text-anchor="middle">Telethon</text>
+
+      <rect x="1060" y="140" width="112" height="44" rx="8" fill="#242321" stroke="#35C985"/>
+      <text x="1116" y="168" fill="#F7F4EF" text-anchor="middle">插件运行</text>
+
+      <rect x="1060" y="202" width="112" height="44" rx="8" fill="#242321" stroke="#4F8BFF"/>
+      <text x="1116" y="230" fill="#F7F4EF" text-anchor="middle">AI facade</text>
+
+      <rect x="1060" y="264" width="112" height="44" rx="8" fill="#242321" stroke="#D8A93D"/>
+      <text x="1116" y="292" fill="#F7F4EF" text-anchor="middle">Action / Trace</text>
+    </g>
+
+    <path d="M700 340H1172" stroke="#343330" stroke-width="1"/>
+    <text x="700" y="370" fill="#8D8A84" font-size="16" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">WEB / PWA  →  API  →  SUPERVISOR  →  WORKERS</text>
+  </g>
+</svg>
