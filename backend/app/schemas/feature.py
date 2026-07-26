@@ -229,7 +229,7 @@ class AccountFeatureConfigUpdate(BaseModel):
 class AccountFeatureDirectPassthroughUpdate(BaseModel):
     """仅更新平台拥有的账号级裸直通配置（二次开关 / 优先级）。
 
-    二次开关开启 = 直通能力 + 调用成功后独占消费；不再单独提供 exclusive。
+    二次开关只决定插件是否加入直通调度；是否消费由插件返回三态结果决定。
     """
 
     enabled: bool | None = None

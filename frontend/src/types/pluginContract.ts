@@ -225,7 +225,7 @@ export function formatDirectPassthroughRankTitle(
     return "已开启直通，可在配置页「调整优先级」设定调用顺序";
   }
   if (rank === 1) return "本账号已开直通插件中最先调用";
-  return `本账号已开直通插件中第 ${rank} 个调用；更前的插件成功后不会轮到本插件`;
+  return `本账号已开直通插件中第 ${rank} 个调用；更前的插件明确返回 consumed 后才会停止调度`;
 }
 
 export function pluginContractRiskWarnings(input: {

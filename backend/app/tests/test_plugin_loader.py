@@ -148,6 +148,27 @@ def test_direct_passthrough_account_opt_in_requires_strict_true(value: object, e
     assert loader_mod._plugin_direct_passthrough_enabled(ctx) is expected  # noqa: SLF001
 
 
+@pytest.mark.parametrize(
+    ("result", "expected"),
+    [
+        ({"status": "consumed"}, ("consumed", None)),
+        ({"status": "ignored"}, ("ignored", None)),
+        ({"status": "failed", "error": "boom"}, ("failed", "boom")),
+        ({"consume": True}, ("consumed", None)),
+        ({"consume": False}, ("ignored", None)),
+        (True, ("consumed", None)),
+        (False, ("ignored", None)),
+        (None, ("ignored", None)),
+        ({"unknown": True}, ("ignored", None)),
+    ],
+)
+def test_direct_passthrough_outcome_contract(
+    result: object,
+    expected: tuple[str, str | None],
+) -> None:
+    assert loader_mod._coerce_direct_passthrough_outcome(result) == expected  # noqa: SLF001
+
+
 # ─────────────────────────────────────────────────────
 # Fake ORM 行（避免连真 PG）
 # ─────────────────────────────────────────────────────
@@ -3800,7 +3821,7 @@ async def test_direct_passthrough_broadcasts_before_incoming_guards(monkeypatch)
         owner_only = False
 
         async def on_direct_message(self, ctx: PluginContext, event: Any) -> None:
-            # 二次开关开启 = 成功即独占；返回 None 也会截断
+            # 未声明 consumed：只观察，继续下一个直通与普通链路。
             calls.append((self.key, str(getattr(event, "raw_text", ""))))
             return None
 
@@ -3898,17 +3919,18 @@ async def test_direct_passthrough_broadcasts_before_incoming_guards(monkeypatch)
         incoming_dispatch = captured[-1]
         await incoming_dispatch(_Event())
 
-        # 二次开关 = 独占：高优先（key 序 a 先于 b）成功后截断，不再调 b / 普通链路
+        # 两个插件都忽略：按稳定顺序调用全部直通，然后继续普通 incoming 门禁。
         assert calls == [
             ("_test_direct_broadcast_a", "keyword owned by interaction bot"),
+            ("_test_direct_broadcast_b", "keyword owned by interaction bot"),
         ]
-        loader_mod._record_recent_peer.assert_not_awaited()
+        loader_mod._record_recent_peer.assert_awaited_once()
         interaction_owned.assert_not_awaited()
         loader_mod.start_trace.assert_awaited()
-        assert sum(1 for call in record_span.await_args_list if call.args[1] == "route") == 1
-        assert sum(1 for call in record_span.await_args_list if call.args[1] == "plugin_invoke") == 1
-        assert loader_mod.finish_trace.await_args.kwargs.get("consumed") is True
-        assert loader_mod.finish_trace.await_args.kwargs["invoked_count"] == 1
+        assert sum(1 for call in record_span.await_args_list if call.args[1] == "route") == 2
+        assert sum(1 for call in record_span.await_args_list if call.args[1] == "plugin_invoke") == 2
+        assert loader_mod.finish_trace.await_args.kwargs.get("consumed") is False
+        assert loader_mod.finish_trace.await_args.kwargs["invoked_count"] == 2
     finally:
         loader_mod._STATES.pop(15, None)
         _REGISTRY.pop("_test_direct_broadcast_a", None)
@@ -3916,8 +3938,21 @@ async def test_direct_passthrough_broadcasts_before_incoming_guards(monkeypatch)
 
 
 @pytest.mark.asyncio
-async def test_direct_passthrough_records_failed_trace(monkeypatch) -> None:
+@pytest.mark.parametrize(
+    ("failure_mode", "reason_code"),
+    [
+        ("declared", "plugin_declared_failed"),
+        ("exception", "plugin_runtime_error"),
+    ],
+)
+async def test_direct_passthrough_records_failed_trace(
+    monkeypatch,
+    failure_mode: str,
+    reason_code: str,
+) -> None:
     from app.worker.plugins.base import _REGISTRY, register
+
+    legacy: list[str] = []
 
     @register
     class _DirectFailingPlugin(Plugin):
@@ -3925,8 +3960,13 @@ async def test_direct_passthrough_records_failed_trace(monkeypatch) -> None:
         display_name = "直通失败 trace 测试"
         owner_only = False
 
-        async def on_direct_message(self, ctx: PluginContext, event: Any) -> None:
-            raise RuntimeError("boom")
+        async def on_direct_message(self, ctx: PluginContext, event: Any) -> dict[str, str] | None:
+            if failure_mode == "exception":
+                raise RuntimeError("boom")
+            return {"status": "failed", "error": "boom"}
+
+        async def on_message(self, ctx: PluginContext, event: Any) -> None:
+            legacy.append("legacy")
 
     _DirectFailingPlugin._manifest = Manifest(
         key="_test_direct_failing",
@@ -4004,9 +4044,10 @@ async def test_direct_passthrough_records_failed_trace(monkeypatch) -> None:
         assert any(
             call.args[1] == "plugin_invoke"
             and call.args[2] == loader_mod.TRACE_STATUS_FAILED
-            and call.kwargs.get("reason_code") == "plugin_runtime_error"
+            and call.kwargs.get("reason_code") == reason_code
             for call in record_span.await_args_list
         )
+        assert legacy == ["legacy"]
         # 失败可回退：直通 trace 标记未消费
         assert any(
             call.args[:2] == (trace, loader_mod.TRACE_STATUS_FAILED)
@@ -4026,7 +4067,7 @@ async def test_direct_passthrough_records_failed_trace(monkeypatch) -> None:
 
 @pytest.mark.asyncio
 async def test_direct_passthrough_priority_and_declarative_consume(monkeypatch) -> None:
-    """优先级低的先调用；声明消费后截断，更低优先级不再调用。"""
+    """高优先插件忽略后继续调用；低优先插件明确消费才截断普通链路。"""
     from app.worker.plugins.base import _REGISTRY, register
 
     order: list[str] = []
@@ -4038,9 +4079,9 @@ async def test_direct_passthrough_priority_and_declarative_consume(monkeypatch) 
         display_name = "高优先"
         owner_only = False
 
-        async def on_direct_message(self, ctx: PluginContext, event: Any) -> bool:
+        async def on_direct_message(self, ctx: PluginContext, event: Any) -> dict[str, str]:
             order.append(self.key)
-            return True
+            return {"status": "ignored"}
 
         async def on_message(self, ctx: PluginContext, event: Any) -> None:
             legacy.append(self.key)
@@ -4051,9 +4092,9 @@ async def test_direct_passthrough_priority_and_declarative_consume(monkeypatch) 
         display_name = "低优先"
         owner_only = False
 
-        async def on_direct_message(self, ctx: PluginContext, event: Any) -> bool:
+        async def on_direct_message(self, ctx: PluginContext, event: Any) -> dict[str, str]:
             order.append(self.key)
-            return True
+            return {"status": "consumed"}
 
         async def on_message(self, ctx: PluginContext, event: Any) -> None:
             legacy.append(self.key)
@@ -4133,10 +4174,10 @@ async def test_direct_passthrough_priority_and_declarative_consume(monkeypatch) 
     try:
         await load_plugins_for_account(client, account_id=17, paused=paused, redis=_FakeRedis())
         await captured[-1](_Event())
-        assert order == ["_test_direct_prio_high"]  # 高优先声明消费后不再调低优先
+        assert order == ["_test_direct_prio_high", "_test_direct_prio_low"]
         assert legacy == []
         assert finish_trace.await_args.kwargs.get("consumed") is True
-        assert finish_trace.await_args.kwargs.get("consumer_plugin_key") == "_test_direct_prio_high"
+        assert finish_trace.await_args.kwargs.get("consumer_plugin_key") == "_test_direct_prio_low"
     finally:
         loader_mod._STATES.pop(17, None)
         _REGISTRY.pop("_test_direct_prio_high", None)
@@ -4144,16 +4185,16 @@ async def test_direct_passthrough_priority_and_declarative_consume(monkeypatch) 
 
 
 @pytest.mark.asyncio
-async def test_direct_passthrough_secondary_switch_consumes_without_return(monkeypatch) -> None:
-    """二次开关开启 = 成功调用即独占截断，即使 handler 返回 None。"""
+async def test_direct_passthrough_secondary_switch_only_enables_dispatch(monkeypatch) -> None:
+    """二次开关只启用直通；handler 返回 None 时必须回退普通链路。"""
     from app.worker.plugins.base import _REGISTRY, register
 
     legacy: list[str] = []
 
     @register
-    class _Exclusive(Plugin):
-        key = "_test_direct_exclusive"
-        display_name = "独占"
+    class _EnabledOnly(Plugin):
+        key = "_test_direct_enabled_only"
+        display_name = "仅开启直通"
         owner_only = False
 
         async def on_direct_message(self, ctx: PluginContext, event: Any) -> None:
@@ -4162,13 +4203,13 @@ async def test_direct_passthrough_secondary_switch_consumes_without_return(monke
         async def on_message(self, ctx: PluginContext, event: Any) -> None:
             legacy.append("legacy")
 
-    _Exclusive._manifest = Manifest(
-        key="_test_direct_exclusive",
-        display_name="独占",
+    _EnabledOnly._manifest = Manifest(
+        key="_test_direct_enabled_only",
+        display_name="仅开启直通",
         capabilities={
             "telegram_direct_passthrough": {
                 "enabled": True,
-                "reason": "secondary switch exclusive test",
+                "reason": "secondary switch only enables dispatch",
                 "sources": ["userbot"],
                 "directions": ["incoming"],
             }
@@ -4194,9 +4235,8 @@ async def test_direct_passthrough_secondary_switch_consumes_without_return(monke
         afs=[
             _FakeAF(
                 account_id=18,
-                feature_key="_test_direct_exclusive",
+                feature_key="_test_direct_enabled_only",
                 enabled=True,
-                # 仅 enabled，无 exclusive 字段
                 config={"direct_passthrough": {"enabled": True}},
             )
         ],
@@ -4231,11 +4271,15 @@ async def test_direct_passthrough_secondary_switch_consumes_without_return(monke
     try:
         await load_plugins_for_account(client, account_id=18, paused=paused, redis=_FakeRedis())
         await captured[-1](_Event())
-        assert legacy == []
-        assert finish_trace.await_args.kwargs.get("consumed") is True
+        assert legacy == ["legacy"]
+        assert any(
+            call.kwargs.get("consumed") is False
+            and call.kwargs.get("invoked_count") == 1
+            for call in finish_trace.await_args_list
+        )
     finally:
         loader_mod._STATES.pop(18, None)
-        _REGISTRY.pop("_test_direct_exclusive", None)
+        _REGISTRY.pop("_test_direct_enabled_only", None)
 
 
 def test_userbot_native_raw_boolean_true_is_not_explicit_capability() -> None:

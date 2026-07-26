@@ -942,11 +942,14 @@ class Plugin:
         白名单/暂停检查后、Trace/Event Bus/legacy 包装前，把原始 Telethon event
         按 ``direct_passthrough.priority`` 顺序交给插件。
 
-        **消费语义**（与账号二次开关合并）：
-        - 账号 ``direct_passthrough.enabled=true`` 且本 hook **成功返回**（含
-          ``None`` / ``True``）：视为独占消费，截断普通链路与更低优先级直通
-        - 抛异常：视为失败，**不消费**，可回退普通链路或其它直通插件
-        - 返回 ``True`` 仍推荐用于可读性，但不再是截断的必要条件
+        账号二次开关只决定插件是否加入直通调度，消费由本 hook 明确声明：
+
+        - ``{"status": "consumed"}`` 或兼容返回 ``True``：已处理，停止后续直通与普通链路
+        - ``{"status": "ignored"}``、``False``、``None`` 或不返回：未处理，继续后续链路
+        - ``{"status": "failed", "error": "..."}`` 或抛异常：处理失败，继续后续链路
+
+        ``{"consume": True/False}`` 继续作为旧声明式返回值兼容；新插件应使用
+        ``status`` 三态。失败不会独占消费，避免消息在处理失败后丢失。
         """
         return None
 

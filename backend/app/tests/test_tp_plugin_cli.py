@@ -71,6 +71,19 @@ def test_new_scaffold_passes_check(profile: str, tmp_path: Path) -> None:
     assert not report.unknown_filter_keys
 
 
+def test_passthrough_scaffold_uses_explicit_outcomes(tmp_path: Path) -> None:
+    plugin_dir = tmp_path / "demo_passthrough_outcomes"
+    tp.scaffold_plugin("demo_passthrough_outcomes", "passthrough", plugin_dir)
+
+    plugin_source = (plugin_dir / "plugin.py").read_text(encoding="utf-8")
+    test_source = (plugin_dir / "test_plugin.py").read_text(encoding="utf-8")
+    assert 'return {"status": "consumed"}' in plugin_source
+    assert 'return {"status": "ignored"}' in plugin_source
+    assert 'return {"status": "failed"' in plugin_source
+    assert 'assert result == {"status": "consumed"}' in test_source
+    assert 'assert ignored == {"status": "ignored"}' in test_source
+
+
 @pytest.mark.parametrize("profile", ["session_game", "command"])
 def test_command_scaffolds_use_system_prefix_contract(profile: str, tmp_path: Path) -> None:
     name = f"prefix_{profile}"

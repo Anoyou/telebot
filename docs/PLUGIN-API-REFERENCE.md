@@ -41,10 +41,18 @@ async def on_interaction(self, ctx, entry_key, payload):
 
 ```python
 async def on_direct_message(self, ctx, event):
-    ...
+    if not match(event):
+        return {"status": "ignored"}
+    try:
+        await handle(event)
+    except Exception as exc:
+        return {"status": "failed", "error": str(exc)}
+    return {"status": "consumed"}
 ```
 
-这里的 `event` 是 live Telethon event，不是 `payload`，也不会自动生成 `ctx.messages` action、Trace 或 MessageOps 记录。它不接 interaction bot 事件；需要按钮、Inline、付款确认、规则会话或审计回放时，改用标准会话链路。
+这里的 `event` 是 live Telethon event，不是 `payload`，也不会自动生成标准事件信封或 `ctx.messages` action。平台只记录直通路由与调用 Trace，不提供标准 MessageOps 审计等价物。它不接 interaction bot 事件；需要按钮、Inline、付款确认、规则会话或审计回放时，改用标准会话链路。
+
+账号二次开关只决定插件是否加入直通调度，优先级只决定尝试顺序。只有 `consumed` 会停止后续直通与普通链路；`ignored`、`failed`、异常和未返回结果都会继续调度并最终回退。兼容返回值为 `True → consumed`、`False/None → ignored`、`{"consume": true/false} → consumed/ignored`。
 
 ## 2. 标准会话链路与单入口模型
 

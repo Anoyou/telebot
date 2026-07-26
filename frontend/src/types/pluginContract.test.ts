@@ -31,7 +31,7 @@ test("直通优先级说明与开关和名次一致", () => {
   );
   assert.equal(
     formatDirectPassthroughRankTitle(3, { secondaryEnabled: true }),
-    "本账号已开直通插件中第 3 个调用；更前的插件成功后不会轮到本插件",
+    "本账号已开直通插件中第 3 个调用；更前的插件明确返回 consumed 后才会停止调度",
   );
   assert.match(
     formatDirectPassthroughRankTitle(null, { secondaryEnabled: false }),

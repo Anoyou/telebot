@@ -1233,7 +1233,6 @@ def _evaluate_direct_passthrough_stage(
                     "matched": True,
                     "reason_code": "matched",
                     "priority": _plugin_direct_passthrough_priority(ctx),
-                    "exclusive": _plugin_direct_passthrough_exclusive(ctx),
                 }
             )
         candidates.append(detail)
@@ -1637,32 +1636,27 @@ def _plugin_direct_passthrough_priority(ctx: PluginContext | None) -> int:
     return max(0, value)
 
 
-def _plugin_direct_passthrough_exclusive(ctx: PluginContext | None) -> bool:
-    """二次开关开启即独占消费。
+def _coerce_direct_passthrough_outcome(result: Any) -> tuple[str, str | None]:
+    """把新三态与旧布尔返回值统一为 consumed / ignored / failed。"""
 
-    账号级 ``direct_passthrough.enabled=true`` 表示本插件走直通通道；
-    成功调用后默认截断普通链路（与「独占消费」语义合并，不再单独开关）。
-    历史配置里的 ``exclusive`` 字段忽略，避免双开关语义分裂。
-    """
-
-    return _plugin_direct_passthrough_enabled(ctx)
-
-
-def _coerce_direct_passthrough_consume(result: Any, *, exclusive: bool) -> bool:
-    """直通是否消费本条消息。
-
-    - 二次开关开启（exclusive=True）：成功调用即截断（不依赖返回值）
-    - 否则（理论上不会走到，仅保留兼容）：须 True / {"consume": true}
-    - 异常不会进入本函数 → 失败可回退普通链路
-    """
-
-    if exclusive:
-        return True
     if result is True:
-        return True
-    if isinstance(result, dict) and result.get("consume") is True:
-        return True
-    return False
+        return "consumed", None
+    if result is False or result is None:
+        return "ignored", None
+    if isinstance(result, dict):
+        status = str(result.get("status") or "").strip().lower()
+        if status in {"consumed", "ignored", "failed"}:
+            error = None
+            if status == "failed":
+                error = str(
+                    result.get("error") or result.get("message") or "plugin_declared_failed"
+                )[:500]
+            return status, error
+        if result.get("consume") is True:
+            return "consumed", None
+        if result.get("consume") is False:
+            return "ignored", None
+    return "ignored", None
 
 
 def _plugin_dev_mode_dry_run_enabled(ctx: PluginContext | None) -> bool:
@@ -1779,10 +1773,10 @@ async def _dispatch_userbot_direct_passthrough(
     event_label: str,
     redis: Any,
 ) -> bool:
-    """按优先级调用直通插件；仅声明消费（或独占策略）时截断普通链路。
+    """按优先级调用直通插件；仅明确返回 consumed 时截断普通链路。
 
     返回 True 表示本条消息已被直通消费，调用方应跳过 Event Bus / legacy。
-    返回 False 表示未消费，应继续普通链路（含失败可回退）。
+    返回 False 表示所有插件均 ignored / failed，应继续普通链路。
     """
 
     handler_name = "on_direct_message"
@@ -1829,7 +1823,6 @@ async def _dispatch_userbot_direct_passthrough(
             )
             trace_started = True
         invoked_count += 1
-        exclusive = _plugin_direct_passthrough_exclusive(ctx)
         await record_span(
             trace,
             "route",
@@ -1837,13 +1830,9 @@ async def _dispatch_userbot_direct_passthrough(
             component="userbot_direct_passthrough",
             plugin_key=plugin_key,
             reason_code="matched",
-            message=(
-                f"直通插件匹配（priority={priority}"
-                f"{', exclusive' if exclusive else ''}），调用 on_direct_message。"
-            ),
+            message=f"直通插件匹配（priority={priority}），调用 on_direct_message。",
             direction=event_label,
             priority=priority,
-            exclusive=exclusive,
         )
         started = time.monotonic()
         # 直通也做调用级 ctx 隔离：复制一个独立 messages facade，避免并发直通事件
@@ -1891,7 +1880,48 @@ async def _dispatch_userbot_direct_passthrough(
                 plugin_key,
                 lambda _handler=handler, _ctx=call_ctx, _event=event: _handler(_ctx, _event),
             )
-            should_consume = _coerce_direct_passthrough_consume(result, exclusive=exclusive)
+            outcome, declared_error = _coerce_direct_passthrough_outcome(result)
+            if outcome == "failed":
+                failed_count += 1
+                await record_span(
+                    trace,
+                    "plugin_invoke",
+                    TRACE_STATUS_FAILED,
+                    component="userbot_direct_passthrough",
+                    plugin_key=plugin_key,
+                    direction=event_label,
+                    reason_code="plugin_declared_failed",
+                    error=declared_error,
+                    duration_ms=int((time.monotonic() - started) * 1000),
+                    outcome=outcome,
+                    consume=False,
+                )
+                await update_plugin_runtime_status(
+                    account_id=state.account_id,
+                    plugin_key=plugin_key,
+                    last_invocation_status=TRACE_STATUS_FAILED,
+                    last_trace_id=getattr(trace, "trace_id", None),
+                )
+                await _log(
+                    redis,
+                    state.account_id,
+                    "error",
+                    (
+                        f"插件 {plugin_key} 声明直通 {event_label} 处理失败："
+                        f"{declared_error}。本条消息将继续尝试其它直通插件或回退普通链路。"
+                    ),
+                    source="plugin",
+                    plugin_key=plugin_key,
+                    direction=event_label,
+                    chat_id=getattr(event, "chat_id", None),
+                    sender_id=getattr(event, "sender_id", None),
+                    message_preview=(getattr(event, "raw_text", "") or "")[:200],
+                    duration_ms=int((time.monotonic() - started) * 1000),
+                    **trace_log_context(trace),
+                )
+                continue
+
+            should_consume = outcome == "consumed"
             await record_span(
                 trace,
                 "plugin_invoke",
@@ -1900,8 +1930,8 @@ async def _dispatch_userbot_direct_passthrough(
                 plugin_key=plugin_key,
                 direction=event_label,
                 duration_ms=int((time.monotonic() - started) * 1000),
+                outcome=outcome,
                 consume=should_consume,
-                exclusive=exclusive,
             )
             await update_plugin_runtime_status(
                 account_id=state.account_id,
@@ -1926,6 +1956,7 @@ async def _dispatch_userbot_direct_passthrough(
                 reason_code="plugin_runtime_error",
                 error=f"{type(exc).__name__}: {exc}",
                 duration_ms=int((time.monotonic() - started) * 1000),
+                outcome="failed",
                 consume=False,
             )
             await update_plugin_runtime_status(
@@ -1941,7 +1972,7 @@ async def _dispatch_userbot_direct_passthrough(
                 (
                     f"插件 {plugin_key} 处理直通 {event_label} 消息时出错："
                     f"{type(exc).__name__}: {exc}。"
-                    "未声明消费，本条消息将继续尝试其它直通插件或回退普通链路。"
+                    "本条消息将继续尝试其它直通插件或回退普通链路。"
                 ),
                 source="plugin",
                 plugin_key=plugin_key,
@@ -1955,7 +1986,7 @@ async def _dispatch_userbot_direct_passthrough(
             )
 
     if trace_started:
-        # 已声明消费 → 成功；未消费但有失败 → 失败态（消息仍可回退普通链路）
+        # 明确 consumed → 成功；全程 ignored → 成功；存在失败且未消费 → 失败态。
         status = TRACE_STATUS_OK if consumed or not failed_count else TRACE_STATUS_FAILED
         await finish_trace(
             trace,

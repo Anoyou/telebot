@@ -923,7 +923,7 @@ function FeatureZone({
                           tone="warn"
                           title={
                             directPassthroughOn
-                              ? "账号已二次开启裸直通；调用成功后独占消费"
+                              ? "账号已二次开启裸直通；仅插件明确返回 consumed 才截断后续链路"
                               : "低延时能力，安装后还需在账号配置中二次开启才会生效"
                           }
                         >

@@ -109,7 +109,12 @@ function sameConfig(a: Record<string, unknown>, b: Record<string, unknown>): boo
 }
 
 function directPassthroughConfig(config: Record<string, unknown>): Record<string, unknown> {
-  return accountDirectPassthroughConfig(config);
+  const raw = accountDirectPassthroughConfig(config);
+  const normalized: Record<string, unknown> = {};
+  if (typeof raw.enabled === "boolean") normalized.enabled = raw.enabled;
+  const priority = Number(raw.priority);
+  if (Number.isFinite(priority) && priority >= 0) normalized.priority = Math.floor(priority);
+  return normalized;
 }
 
 function directPassthroughPriority(config: Record<string, unknown>): number {
@@ -367,7 +372,7 @@ export function GenericPluginConfigPage() {
       if (payload.enabled !== undefined) {
         toast.success(
           payload.enabled
-            ? "裸直通已开启：成功处理后将截断普通链路"
+            ? "裸直通已开启：插件已加入直通调度"
             : "裸直通已关闭",
         );
       }
@@ -706,9 +711,9 @@ export function GenericPluginConfigPage() {
                   </Badge>
                 </div>
                 <p className="mt-1 text-xs leading-5 text-muted-foreground">
-                  开启后，该插件可在标准 Event Bus 之前接收原始消息；
-                  <strong className="font-medium text-foreground">调用成功即独占消费</strong>
-                  （截断普通链路与更后调用的直通）。调用失败可回退。
+                  开启后，该插件可在标准 Event Bus 之前接收原始消息；二次开关只决定是否加入直通调度。
+                  插件明确返回 <strong className="font-medium text-foreground">consumed</strong> 才会截断后续链路；
+                  ignored、failed、异常或未返回结果都会继续其它直通，最终回退普通链路。
                   关闭只停用低延时直通，不影响标准 Event Bus、指令或交互入口。
                   多个直通同时开启时，用下方「调整调用顺序」决定谁先处理。
                 </p>
@@ -753,7 +758,7 @@ export function GenericPluginConfigPage() {
           <DialogHeader>
             <DialogTitle>直通调用顺序</DialogTitle>
             <DialogDescription>
-              自上而下依次尝试。越靠上越先调用；某个成功后不会再调下面的插件，也不会进普通链路。
+              自上而下依次尝试。只有插件明确返回 consumed 才停止；ignored 或 failed 会继续后续插件，最终回退普通链路。
             </DialogDescription>
           </DialogHeader>
           {priorityDraft.length === 0 ? (

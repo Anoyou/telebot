@@ -126,6 +126,7 @@ EVENT_REASON_CODES = {
     "synthetic_callback",
     "target_message_id_missing",
     "telegram_api_error",
+    "plugin_declared_failed",
     "plugin_runtime_error",
     "trace_write_failed",
     "transfer_rule_not_matched",

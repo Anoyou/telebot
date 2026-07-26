@@ -91,7 +91,7 @@ def _allow_account_direct_passthrough_config(
                     "enabled": {
                         "type": "boolean",
                         "default": False,
-                        "description": "账号二次开关：开启即直通，且调用成功后独占消费",
+                        "description": "账号二次开关：仅决定插件是否加入直通调度",
                     },
                     "priority": {
                         "type": "integer",
@@ -122,8 +122,10 @@ def _merge_direct_passthrough_config(
         block["priority"] = max(0, int(priority))
     if "enabled" not in block:
         block["enabled"] = False
-    # 独占已与二次开关合并；清理历史 exclusive 字段避免双语义
+    # 消费只由插件三态结果决定；清理历史独占/失败截断字段避免旧语义复活。
     block.pop("exclusive", None)
+    block.pop("failure_policy", None)
+    block.pop("consume_on_failure", None)
     merged["direct_passthrough"] = block
     return merged
 
