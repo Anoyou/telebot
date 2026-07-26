@@ -114,6 +114,91 @@ async def test_agent_streams_real_deltas_and_reconciles_final_text() -> None:
 
 
 @pytest.mark.asyncio
+async def test_agent_repairs_textual_tool_protocol_once_when_opted_in() -> None:
+    requests: list[ModelRequest] = []
+    events: list[str] = []
+
+    async def model_call(_request: ModelRequest) -> ModelResponse:
+        raise AssertionError("configured stream path must be used")
+
+    async def stream_model_call(request: ModelRequest):
+        requests.append(request)
+        if len(requests) == 1:
+            leaked = (
+                '<search_tool><tool_calls><tool_call name="source.search">'
+                "<query>妙蛙种子</query></tool_call></tool_calls></search_tool>"
+            )
+            yield ModelStreamEvent(delta=leaked)
+            yield ModelStreamEvent(
+                response=ModelResponse(
+                    model="m",
+                    content=(TextContent(leaked),),
+                    stop_reason=StopReason.COMPLETED,
+                )
+            )
+            return
+        assert "本轮没有提供任何工具" in request.messages[-1].text_content()
+        yield ModelStreamEvent(delta="妙蛙种子是宝可梦。")
+        yield ModelStreamEvent(
+            response=ModelResponse(
+                model="m",
+                content=(TextContent("妙蛙种子是宝可梦。"),),
+                stop_reason=StopReason.COMPLETED,
+            )
+        )
+
+    async def on_text_delta(delta: str) -> None:
+        events.append(f"delta:{delta}")
+
+    async def on_text_reset() -> None:
+        events.append("reset")
+
+    request = ModelRequest(
+        model="m",
+        messages=(ModelMessage.text(MessageRole.USER, "妙蛙种子是啥"),),
+        metadata={"repair_text_tool_protocol": True},
+    )
+    result = await run_agent(
+        model_call,
+        request,
+        {},
+        callbacks=AgentCallbacks(on_text_delta=on_text_delta, on_text_reset=on_text_reset),
+        stream_model_call=stream_model_call,
+    )
+
+    assert result.text == "妙蛙种子是宝可梦。"
+    assert len(requests) == 2
+    assert events[1:] == ["reset", "delta:妙蛙种子是宝可梦。"]
+    assert events[0].startswith("delta:<search_tool>")
+
+
+@pytest.mark.asyncio
+async def test_agent_rejects_repeated_textual_tool_protocol() -> None:
+    resets: list[str] = []
+
+    async def model_call(_request: ModelRequest) -> ModelResponse:
+        return ModelResponse(
+            model="m",
+            content=(TextContent("<tool_calls><tool_call name=\"lookup\" /></tool_calls>"),),
+            stop_reason=StopReason.COMPLETED,
+        )
+
+    request = ModelRequest(
+        model="m",
+        messages=(ModelMessage.text(MessageRole.USER, "question"),),
+        metadata={"repair_text_tool_protocol": True},
+    )
+    with pytest.raises(RuntimeError, match="连续返回文本伪工具调用"):
+        await run_agent(
+            model_call,
+            request,
+            {},
+            callbacks=AgentCallbacks(on_text_reset=lambda: _append(resets, "reset")),
+        )
+    assert resets == ["reset", "reset"]
+
+
+@pytest.mark.asyncio
 async def test_agent_resets_tool_preface_before_streaming_final_answer() -> None:
     spec = ToolSpec("lookup", "lookup", {"type": "object", "properties": {}})
     events: list[str] = []

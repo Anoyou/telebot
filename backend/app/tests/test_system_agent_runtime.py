@@ -305,10 +305,15 @@ async def test_stream_runtime_does_not_reuse_upstream_model_alias(monkeypatch) -
 async def test_runtime_general_help_sends_zero_tool_definitions(monkeypatch) -> None:
     primary, fallback = _providers()
     await _patch_runtime_config(monkeypatch, primary, fallback)
+    run_called = False
 
     async def run(_model_call, request, tools, **_kwargs):  # noqa: ANN001
+        nonlocal run_called
+        run_called = True
         assert request.tools == ()
         assert tools == {}
+        assert request.metadata["repair_text_tool_protocol"] is True
+        assert "本轮未提供任何工具" in request.messages[0].text_content()
         return AgentResult(
             text="帮助",
             model=request.model,
@@ -334,6 +339,8 @@ async def test_runtime_general_help_sends_zero_tool_definitions(monkeypatch) -> 
 
     route = next(event for event in events if event["type"] == "route_selected")
     assert route["tool_count"] == 0
+    assert run_called is True
+    assert any(event["type"] == "assistant_message" for event in events)
     capability = next(event for event in events if event["type"] == "model_capability_check")
     assert capability["provider_name"] == primary.name
     assert capability["model"] == primary.default_model

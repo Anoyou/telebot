@@ -107,6 +107,8 @@ def test_system_prompt_includes_bot_identity_context() -> None:
     assert "account_id=1" in prompt
     assert "Telegram 管理 Bot 触发者 ID：1682400007" in prompt
     assert "直接回答" in prompt
+    assert "source.search" not in prompt
+    assert "web.search" not in prompt
 
 
 def test_tools_model_for_dto_requires_tools_support() -> None:

@@ -85,6 +85,17 @@ class AgentLimitError(RuntimeError):
 
 
 _TOOL_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+_TEXT_TOOL_PROTOCOL_RE = re.compile(
+    r"^\s*<(?:search_tool|tool_calls?|tool_call)\b[\s\S]*"
+    r"<tool_call\b[\s\S]*</(?:search_tool|tool_calls?|tool_call)>\s*$",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_text_tool_protocol(text: str) -> bool:
+    """识别模型把工具调用协议作为整段普通文本输出的情况。"""
+
+    return bool(_TEXT_TOOL_PROTOCOL_RE.fullmatch(str(text or "").strip()))
 
 
 def tools_from_manifest(
@@ -237,6 +248,7 @@ async def run_agent(
     previous_step_input: int | None = None
     fingerprints: dict[str, int] = {}
     tool_call_count = 0
+    text_protocol_repairs = 0
     reasoning_parts: list[str] = []
     started = time.monotonic()
 
@@ -300,6 +312,34 @@ async def run_agent(
         if not response.tool_calls:
             if not response.text:
                 raise RuntimeError("模型既未返回文本，也未调用工具")
+            if (
+                request.metadata.get("repair_text_tool_protocol") is True
+                and _looks_like_text_tool_protocol(response.text)
+            ):
+                if text_protocol_repairs >= 1 or step >= limits.max_steps:
+                    await _notify(callbacks.on_text_reset)
+                    raise RuntimeError("模型连续返回文本伪工具调用，已拒绝作为最终答案")
+                text_protocol_repairs += 1
+                await _notify(callbacks.on_text_reset)
+                messages.append(
+                    ModelMessage(
+                        role=MessageRole.ASSISTANT,
+                        content=response.content,
+                        reasoning_content=response.reasoning_content,
+                    )
+                )
+                correction = (
+                    "你刚才把工具调用协议作为普通文本输出了。"
+                    + (
+                        "本轮没有提供任何工具；不要输出 XML、tool_call、search_tool "
+                        "或其它伪工具标签，请直接回答最初的用户问题。"
+                        if not request.tools
+                        else "需要调用工具时只能使用 API 提供的结构化工具调用；"
+                        "不要输出 XML、tool_call 或 search_tool 标签。请重新完成最初请求。"
+                    )
+                )
+                messages.append(ModelMessage.text(MessageRole.USER, correction))
+                continue
             messages.append(
                 ModelMessage(
                     role=MessageRole.ASSISTANT,
@@ -388,6 +428,12 @@ async def run_agent(
         raise AgentLimitError("Agent 最终总结轮仍尝试调用工具")
     if not final_response.text:
         raise RuntimeError("Agent 最终总结轮未返回文本")
+    if (
+        request.metadata.get("repair_text_tool_protocol") is True
+        and _looks_like_text_tool_protocol(final_response.text)
+    ):
+        await _notify(callbacks.on_text_reset)
+        raise RuntimeError("Agent 最终总结轮返回文本伪工具调用")
     return AgentResult(
         text=final_response.text,
         model=final_response.model,

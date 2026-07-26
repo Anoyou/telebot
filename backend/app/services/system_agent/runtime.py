@@ -401,6 +401,12 @@ class SystemAgentRuntime:
             skill_prompt = self.skill_registry.render_prompt(selected_skills)
             if skill_prompt:
                 system_prompt = f"{system_prompt}\n\n{skill_prompt}"
+        if not tool_specs:
+            system_prompt = (
+                f"{system_prompt}\n\n## 本轮工具状态\n"
+                "本轮未提供任何工具。请直接回答用户问题；不得输出 XML、tool_call、"
+                "search_tool 或其它伪工具调用标签，也不得声称已经调用工具。"
+            )
         approved_tool_names = {str(name) for name in (approved_tools or []) if str(name)}
         tool_specs_by_name = {spec.name: spec for spec in tool_specs}
 
@@ -508,6 +514,7 @@ class SystemAgentRuntime:
                 ),
                 "max_retries_per_model": 5,
                 "retry_delay_seconds": 3.0,
+                "repair_text_tool_protocol": True,
             },
         )
         limits = AgentLimits(
