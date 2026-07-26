@@ -8,9 +8,9 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
 import {
   Boxes,
-  Bot,
   Bug,
   Cog,
+  GitFork,
   Github,
   GripVertical,
   Home,
@@ -57,7 +57,7 @@ export const NAV: NavItem[] = [
   { to: "/plugins", label: "插件", icon: Boxes },
   { to: "/ai", label: "AI", icon: Sparkles },
   { to: "/assistant/inbox", label: "待确认", icon: Inbox, badgeKey: "pending-actions" },
-  { to: "/interaction", label: "交互", icon: Bot },
+  { to: "/interaction", label: "交互", icon: GitFork },
   { to: "/operations", label: "指令与任务", icon: ListTodo },
   { to: "/overview", label: "概览", icon: Home },
   { to: "/ledger", label: "资金台账", icon: WalletCards },

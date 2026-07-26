@@ -128,7 +128,7 @@ export function AssistantIndex() {
   const {
     collapsed: assistantCollapsed,
     setStreaming: setDockStreaming,
-    notifyCompletion,
+    notifyOutcome,
   } = useAssistantDock();
   const [activeId, setActiveId] = useState<string | null>(null);
   const [originFilter, setOriginFilter] = useState<SessionOriginFilter>("all");
@@ -806,7 +806,7 @@ export function AssistantIndex() {
       forgetRun(sessionId, runId);
       setActiveRun((current) => (current?.runId === runId ? null : current));
       await refreshRunData(sessionId);
-      if (doneOk) notifyCompletion();
+      notifyOutcome(doneOk ? "complete" : "failed");
       if (abortRef.current === controller) {
         streamingBubbleCreatedRef.current = false;
         clearLiveStreamingState();

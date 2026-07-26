@@ -9,17 +9,24 @@ import {
   type ReactNode,
 } from "react";
 import { useLocation } from "react-router-dom";
-import { shouldOpenAssistantDock } from "./assistantDockState";
+import {
+  nextAssistantOutcomeSignal,
+  shouldOpenAssistantDock,
+  type AssistantOutcomeSignal,
+  type AssistantOutcomeStatus,
+} from "./assistantDockState";
 
 type AssistantDockValue = {
   collapsed: boolean;
   mounted: boolean;
   streaming: boolean;
-  completionSignal: number;
+  outcomeSignal: AssistantOutcomeSignal | null;
   setCollapsed: (collapsed: boolean) => void;
   setStreaming: (streaming: boolean) => void;
-  notifyCompletion: () => void;
+  notifyOutcome: (status: AssistantOutcomeStatus) => void;
 };
+
+export const ASSISTANT_SURFACE_ID = "telepilot-assistant-surface";
 
 const AssistantDockContext = createContext<AssistantDockValue | null>(null);
 
@@ -29,7 +36,7 @@ export function AssistantDockProvider({ children }: { children: ReactNode }) {
   const [collapsed, setCollapsedState] = useState(!initiallyOpen);
   const [mounted, setMounted] = useState(initiallyOpen);
   const [streaming, setStreaming] = useState(false);
-  const [completionSignal, setCompletionSignal] = useState(0);
+  const [outcomeSignal, setOutcomeSignal] = useState<AssistantDockValue["outcomeSignal"]>(null);
   const locationKeyRef = useRef(`${location.pathname}${location.search}${location.hash}`);
   const setCollapsed = useCallback((next: boolean) => {
     if (!next) {
@@ -45,8 +52,8 @@ export function AssistantDockProvider({ children }: { children: ReactNode }) {
       });
     }
   }, []);
-  const notifyCompletion = useCallback(() => {
-    setCompletionSignal((value) => value + 1);
+  const notifyOutcome = useCallback((status: AssistantOutcomeStatus) => {
+    setOutcomeSignal((current) => nextAssistantOutcomeSignal(current, status));
   }, []);
 
   useEffect(() => {
@@ -67,12 +74,12 @@ export function AssistantDockProvider({ children }: { children: ReactNode }) {
       collapsed,
       mounted,
       streaming,
-      completionSignal,
+      outcomeSignal,
       setCollapsed,
       setStreaming,
-      notifyCompletion,
+      notifyOutcome,
     }),
-    [collapsed, completionSignal, mounted, notifyCompletion, setCollapsed, streaming],
+    [collapsed, mounted, notifyOutcome, outcomeSignal, setCollapsed, streaming],
   );
 
   return (

@@ -15,7 +15,11 @@ import {
 } from "./Sidebar";
 import { TopBar } from "./TopBar";
 import { GlobalAlertBar } from "./GlobalAlertBar";
-import { AssistantDockProvider, useAssistantDock } from "@/components/assistant/AssistantDock";
+import {
+  ASSISTANT_SURFACE_ID,
+  AssistantDockProvider,
+  useAssistantDock,
+} from "@/components/assistant/AssistantDock";
 import { AssistantPet, AssistantPetSprite } from "@/components/assistant/AssistantPet";
 import { fetchMe } from "@/lib/auth";
 import { getPlatformCapabilities, getSystemSettings } from "@/api/system";
@@ -157,7 +161,7 @@ export function AppShell() {
           <Skeleton className="h-4 w-28" />
           <Skeleton className="ml-auto h-8 w-20 rounded-md" />
         </div>
-        <div className="flex min-h-0 flex-1 gap-4 p-4 sm:p-6">
+        <div className="flex min-h-0 flex-1 gap-3 p-3 sm:gap-4 sm:p-6">
           <div className="hidden w-56 space-y-3 md:block"><Skeleton className="h-10 w-full rounded-md" />{[0, 1, 2, 3, 4].map((item) => <Skeleton key={item} className="h-9 w-full rounded-md" />)}</div>
           <div className="min-w-0 flex-1 space-y-4"><Skeleton className="h-36 w-full rounded-lg" /><div className="grid gap-4 md:grid-cols-3">{[0, 1, 2].map((item) => <Skeleton key={item} className="h-28 rounded-lg" />)}</div></div>
         </div>
@@ -197,11 +201,11 @@ export function AppShell() {
               className="
                 app-main
                 relative flex-1 overflow-auto
-                px-4 py-4 md:px-8 md:py-7 xl:px-10
+                px-3 py-3 sm:px-4 sm:py-4 md:px-8 md:py-7 xl:px-10
                 pb-[calc(5.25rem+env(safe-area-inset-bottom))]
                 sm:pb-[max(1rem,env(safe-area-inset-bottom))]
-                pl-[max(1rem,env(safe-area-inset-left))]
-                pr-[max(1rem,env(safe-area-inset-right))]
+                pl-[max(0.75rem,env(safe-area-inset-left))]
+                pr-[max(0.75rem,env(safe-area-inset-right))]
                 md:pl-8 md:pr-8 xl:pl-10 xl:pr-10
               "
             >
@@ -337,12 +341,12 @@ export function AppShell() {
 }
 
 function MobileAssistantButton() {
-  const { collapsed, setCollapsed, streaming, completionSignal } = useAssistantDock();
+  const { collapsed, setCollapsed, streaming, outcomeSignal } = useAssistantDock();
   const [mobileVisible, setMobileVisible] = useState(() => (
     typeof window !== "undefined" && window.matchMedia("(max-width: 639px)").matches
   ));
-  const [notice, setNotice] = useState<"idle" | "complete" | null>(null);
-  const completionRef = useRef(completionSignal);
+  const [notice, setNotice] = useState<"idle" | "complete" | "failed" | null>(null);
+  const outcomeRef = useRef(outcomeSignal?.id ?? 0);
 
   useEffect(() => {
     const media = window.matchMedia("(max-width: 639px)");
@@ -353,13 +357,15 @@ function MobileAssistantButton() {
   }, []);
 
   useEffect(() => {
-    if (completionSignal === completionRef.current) return;
-    completionRef.current = completionSignal;
+    const outcomeId = outcomeSignal?.id ?? 0;
+    if (outcomeId === outcomeRef.current) return;
+    outcomeRef.current = outcomeId;
+    if (!outcomeSignal) return;
     if (!mobileVisible) return;
-    setNotice("complete");
+    setNotice(outcomeSignal.status);
     const timer = window.setTimeout(() => setNotice(null), 3_600);
     return () => window.clearTimeout(timer);
-  }, [completionSignal, mobileVisible]);
+  }, [mobileVisible, outcomeSignal]);
 
   useEffect(() => {
     if (!mobileVisible || !collapsed || streaming || notice) return;
@@ -382,24 +388,31 @@ function MobileAssistantButton() {
       type="button"
       data-assistant-mobile-button
       aria-label={collapsed ? "打开系统助手" : "关闭系统助手"}
-      aria-pressed={!collapsed}
+      aria-expanded={!collapsed}
+      aria-controls={ASSISTANT_SURFACE_ID}
       onClick={() => setCollapsed(!collapsed)}
       className={cn(
         "assistant-nav-orb liquid-bottom-nav relative grid h-[3.75rem] w-[3.75rem] shrink-0 content-center place-items-center rounded-full text-primary active:scale-95 motion-reduce:transform-none",
         !collapsed && "assistant-nav-orb-active border-primary/60 bg-primary/15 text-primary",
         notice === "idle" && "assistant-nav-orb-idle-nudge",
         notice === "complete" && "assistant-nav-orb-complete",
+        notice === "failed" && "assistant-nav-orb-failed",
       )}
     >
       {notice ? (
         <span aria-hidden="true" data-assistant-mobile-notice={notice} className="assistant-nav-orb-notice">
-          {notice === "complete" ? "完成啦" : "我在"}
+          {notice === "complete" ? "完成啦" : notice === "failed" ? "出错了" : "我在"}
         </span>
       ) : null}
       <span className="relative grid place-items-center">
-        <AssistantPetSprite compact streaming={streaming} active={!collapsed} celebrating={notice === "complete"} />
+        <AssistantPetSprite
+          compact
+          streaming={streaming}
+          active={!collapsed}
+          celebrating={notice === "complete"}
+          failed={notice === "failed"}
+        />
       </span>
-      <span className="mt-0.5 text-[10px] font-semibold leading-none text-foreground">助手</span>
     </button>
   );
 }
@@ -430,12 +443,13 @@ function AssistantSurface() {
   return (
     <section
       ref={surfaceRef}
+      id={ASSISTANT_SURFACE_ID}
       tabIndex={-1}
       data-assistant-surface
       aria-label="系统助手"
       aria-hidden={collapsed}
       className={cn(
-        "absolute inset-0 z-30 origin-bottom overflow-hidden bg-background px-4 py-4 transition-[opacity,transform,visibility] duration-200 ease-out will-change-[opacity,transform] motion-reduce:transform-none motion-reduce:transition-none sm:pb-7 md:px-8 md:py-7 xl:px-10",
+        "absolute inset-0 z-30 origin-bottom overflow-hidden bg-background px-3 py-3 transition-[opacity,transform,visibility] duration-200 ease-out will-change-[opacity,transform] motion-reduce:transform-none motion-reduce:transition-none sm:px-4 sm:py-4 sm:pb-7 md:px-8 md:py-7 xl:px-10",
         collapsed
           ? "pb-[calc(5.25rem+env(safe-area-inset-bottom))]"
           : "pb-[max(1rem,env(safe-area-inset-bottom))]",

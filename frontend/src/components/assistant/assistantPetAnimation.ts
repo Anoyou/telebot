@@ -1,4 +1,13 @@
-export type AssistantPetIntent = "idle" | "awake" | "working" | "complete";
+export type AssistantPetIntent =
+  | "idle"
+  | "running-right"
+  | "running-left"
+  | "waving"
+  | "jumping"
+  | "failed"
+  | "waiting"
+  | "running"
+  | "review";
 
 export type AssistantPetCell = {
   row: number;
@@ -12,12 +21,36 @@ export type AssistantPetBounds = {
   height: number;
 };
 
+export type AssistantPetDrawLayer = AssistantPetCell & {
+  sourceHeightRatio: number;
+  destinationX: number;
+  destinationHeight: number;
+  clearTopBeforeDraw?: boolean;
+};
+
+export type AssistantPetDrawPlan = {
+  viewportHeight: number;
+  layers: AssistantPetDrawLayer[];
+};
+
+export const ASSISTANT_PET_CANVAS_WIDTH = 192;
+export const ASSISTANT_PET_CANVAS_HEIGHT = 208;
+export const ASSISTANT_PET_COMPACT_CANVAS_HEIGHT = 150;
+
 const ANIMATIONS: Record<AssistantPetIntent, { row: number; durations: readonly number[] }> = {
   idle: { row: 0, durations: [280, 110, 110, 140, 140, 320] },
-  awake: { row: 3, durations: [140, 140, 140, 280] },
-  working: { row: 7, durations: [120, 120, 120, 120, 120, 220] },
-  complete: { row: 8, durations: [180, 160, 160, 180, 160, 260] },
+  "running-right": { row: 1, durations: [120, 120, 120, 120, 120, 120, 120, 220] },
+  "running-left": { row: 2, durations: [120, 120, 120, 120, 120, 120, 120, 220] },
+  waving: { row: 3, durations: [140, 140, 140, 280] },
+  jumping: { row: 4, durations: [140, 140, 140, 140, 280] },
+  failed: { row: 5, durations: [140, 140, 140, 140, 140, 140, 140, 240] },
+  waiting: { row: 6, durations: [150, 150, 150, 150, 150, 260] },
+  running: { row: 7, durations: [120, 120, 120, 120, 120, 220] },
+  review: { row: 8, durations: [150, 150, 150, 150, 150, 280] },
 };
+
+const WAVE_DYNAMIC_HEIGHT = 150;
+const WAVE_FRAME_OFFSETS = [0, -3, 10, -1] as const;
 
 function frameForElapsed(durations: readonly number[], elapsed: number): number {
   const loopDuration = durations.reduce((sum, duration) => sum + duration, 0);
@@ -49,7 +82,7 @@ export function assistantPetCell(
   lookDirection: number | null,
   reduceMotion = false,
 ): AssistantPetCell {
-  if ((intent === "idle" || intent === "awake") && lookDirection != null) {
+  if ((intent === "idle" || intent === "waving") && lookDirection != null) {
     const normalized = ((lookDirection % 16) + 16) % 16;
     return {
       row: normalized < 8 ? 9 : 10,
@@ -61,5 +94,54 @@ export function assistantPetCell(
   return {
     row: animation.row,
     column: reduceMotion ? 0 : frameForElapsed(animation.durations, elapsed),
+  };
+}
+
+export function assistantPetDrawPlan(
+  cell: AssistantPetCell,
+  compact = false,
+): AssistantPetDrawPlan {
+  if (compact) {
+    return {
+      viewportHeight: ASSISTANT_PET_COMPACT_CANVAS_HEIGHT,
+      layers: [{
+        ...cell,
+        sourceHeightRatio: ASSISTANT_PET_COMPACT_CANVAS_HEIGHT / ASSISTANT_PET_CANVAS_HEIGHT,
+        destinationX: 0,
+        destinationHeight: ASSISTANT_PET_COMPACT_CANVAS_HEIGHT,
+      }],
+    };
+  }
+
+  if (cell.row === ANIMATIONS.waving.row && cell.column > 0) {
+    return {
+      viewportHeight: ASSISTANT_PET_CANVAS_HEIGHT,
+      layers: [
+        {
+          row: ANIMATIONS.waving.row,
+          column: 0,
+          sourceHeightRatio: 1,
+          destinationX: 0,
+          destinationHeight: ASSISTANT_PET_CANVAS_HEIGHT,
+        },
+        {
+          ...cell,
+          sourceHeightRatio: WAVE_DYNAMIC_HEIGHT / ASSISTANT_PET_CANVAS_HEIGHT,
+          destinationX: WAVE_FRAME_OFFSETS[cell.column] ?? 0,
+          destinationHeight: WAVE_DYNAMIC_HEIGHT,
+          clearTopBeforeDraw: true,
+        },
+      ],
+    };
+  }
+
+  return {
+    viewportHeight: ASSISTANT_PET_CANVAS_HEIGHT,
+    layers: [{
+      ...cell,
+      sourceHeightRatio: 1,
+      destinationX: 0,
+      destinationHeight: ASSISTANT_PET_CANVAS_HEIGHT,
+    }],
   };
 }

@@ -7,12 +7,19 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from "react";
 
-import { useAssistantDock } from "@/components/assistant/AssistantDock";
+import {
+  ASSISTANT_SURFACE_ID,
+  useAssistantDock,
+} from "@/components/assistant/AssistantDock";
 import petSpritesheetUrl from "@/assets/agent-pet-spritesheet.webp";
 import { cn } from "@/lib/utils";
 import {
   assistantPetCell,
+  assistantPetDrawPlan,
   assistantPetLookDirection,
+  ASSISTANT_PET_CANVAS_HEIGHT,
+  ASSISTANT_PET_CANVAS_WIDTH,
+  ASSISTANT_PET_COMPACT_CANVAS_HEIGHT,
   type AssistantPetIntent,
 } from "./assistantPetAnimation";
 
@@ -30,12 +37,13 @@ type DragState = {
   startY: number;
   originX: number;
   originY: number;
+  lastX: number;
   moved: boolean;
 };
 
-const PET_WIDTH = 68;
-const PET_HEIGHT = 76;
-const PET_PEEK = 34;
+const PET_WIDTH = 102;
+const PET_HEIGHT = 114;
+const PET_PEEK = 51;
 const PET_TOP_GUTTER = 92;
 const PET_BOTTOM_GUTTER = 24;
 const PET_SNAP_DELAY = 1_800;
@@ -43,12 +51,10 @@ const PET_STORAGE_KEY = "telepilot:assistant-pet:v1";
 const IDLE_BUBBLE_MIN_DELAY = 24_000;
 const IDLE_BUBBLE_DELAY_RANGE = 18_000;
 const IDLE_BUBBLE_VISIBLE_MS = 3_800;
-const PET_CELL_WIDTH = 192;
-const PET_CELL_HEIGHT = 208;
 
 type PetNotice = {
   text: string;
-  tone: "idle" | "complete";
+  tone: "idle" | "complete" | "failed";
 };
 
 const IDLE_NOTICES = ["我在这儿", "随时可以叫我", "需要我帮忙吗？"] as const;
@@ -87,16 +93,32 @@ export function AssistantPetSprite({
   streaming = false,
   active = false,
   celebrating = false,
+  failed = false,
+  dragDirection = null,
   lookDirection = null,
 }: {
   compact?: boolean;
   streaming?: boolean;
   active?: boolean;
   celebrating?: boolean;
+  failed?: boolean;
+  dragDirection?: DockSide | null;
   lookDirection?: number | null;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const intent: AssistantPetIntent = celebrating ? "complete" : streaming ? "working" : active ? "awake" : "idle";
+  const intent: AssistantPetIntent = failed
+    ? "failed"
+    : celebrating
+      ? "review"
+      : dragDirection === "left"
+        ? "running-left"
+        : dragDirection === "right"
+          ? "running-right"
+          : streaming
+            ? "running"
+            : active
+              ? "waving"
+              : "idle";
   const intentRef = useRef(intent);
   const lookDirectionRef = useRef(lookDirection);
   const animationStartedAtRef = useRef(0);
@@ -113,42 +135,76 @@ export function AssistantPetSprite({
   useEffect(() => {
     const atlas = new Image();
     const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+    const canvas = canvasRef.current;
+    const context = canvas?.getContext("2d");
+    if (!canvas || !context) return;
+
     let animationFrame = 0;
     let loaded = false;
+    let sourceCellWidth = 0;
+    let sourceCellHeight = 0;
+    let lastCellKey = "";
+
+    context.imageSmoothingEnabled = true;
+    context.imageSmoothingQuality = "high";
+
+    const drawCell = (cell: ReturnType<typeof assistantPetCell>) => {
+      const plan = assistantPetDrawPlan(cell, compact);
+      context.clearRect(0, 0, ASSISTANT_PET_CANVAS_WIDTH, plan.viewportHeight);
+
+      for (const layer of plan.layers) {
+        if (layer.clearTopBeforeDraw) {
+          context.clearRect(0, 0, ASSISTANT_PET_CANVAS_WIDTH, layer.destinationHeight);
+        }
+        context.drawImage(
+          atlas,
+          layer.column * sourceCellWidth,
+          layer.row * sourceCellHeight,
+          sourceCellWidth,
+          sourceCellHeight * layer.sourceHeightRatio,
+          layer.destinationX,
+          0,
+          ASSISTANT_PET_CANVAS_WIDTH,
+          layer.destinationHeight,
+        );
+      }
+    };
 
     const render = (now: number) => {
-      const canvas = canvasRef.current;
-      if (loaded && canvas) {
-        const context = canvas.getContext("2d");
-        if (context) {
-          const cell = assistantPetCell(
-            intentRef.current,
-            now - animationStartedAtRef.current,
-            lookDirectionRef.current,
-            reduceMotion.matches,
-          );
-          context.clearRect(0, 0, PET_CELL_WIDTH, PET_CELL_HEIGHT);
-          context.imageSmoothingEnabled = true;
-          context.imageSmoothingQuality = "high";
-          context.drawImage(
-            atlas,
-            cell.column * PET_CELL_WIDTH,
-            cell.row * PET_CELL_HEIGHT,
-            PET_CELL_WIDTH,
-            PET_CELL_HEIGHT,
-            0,
-            0,
-            PET_CELL_WIDTH,
-            PET_CELL_HEIGHT,
-          );
+      if (loaded) {
+        const cell = assistantPetCell(
+          intentRef.current,
+          now - animationStartedAtRef.current,
+          lookDirectionRef.current,
+          reduceMotion.matches,
+        );
+        const cellKey = `${cell.row}:${cell.column}`;
+        if (cellKey !== lastCellKey) {
+          lastCellKey = cellKey;
+          drawCell(cell);
         }
       }
       animationFrame = window.requestAnimationFrame(render);
     };
 
     const handleLoad = () => {
-      if (atlas.naturalWidth !== 1536 || atlas.naturalHeight !== 2288) return;
+      if (atlas.naturalWidth % 8 !== 0 || atlas.naturalHeight % 11 !== 0) {
+        console.warn("Agent 桌宠图集不是可整除的 8x11 网格", {
+          width: atlas.naturalWidth,
+          height: atlas.naturalHeight,
+        });
+        return;
+      }
+      sourceCellWidth = atlas.naturalWidth / 8;
+      sourceCellHeight = atlas.naturalHeight / 11;
+      if (atlas.naturalWidth !== 1536 || atlas.naturalHeight !== 2288) {
+        console.warn("Agent 桌宠图集使用非标准尺寸，将按 8x11 动态推导单元格", {
+          width: atlas.naturalWidth,
+          height: atlas.naturalHeight,
+        });
+      }
       loaded = true;
+      lastCellKey = "";
       animationStartedAtRef.current = performance.now();
     };
 
@@ -160,22 +216,27 @@ export function AssistantPetSprite({
       window.cancelAnimationFrame(animationFrame);
       atlas.removeEventListener("load", handleLoad);
     };
-  }, []);
+  }, [compact]);
 
   return (
-    <span className={cn("assistant-pet-sprite-frame", compact && "assistant-pet-sprite-frame-compact")} aria-hidden="true">
+    <span
+      className={cn("assistant-pet-sprite-frame", compact && "assistant-pet-sprite-frame-compact")}
+      data-assistant-pet-intent={intent}
+      data-assistant-pet-compact={compact ? "true" : undefined}
+      aria-hidden="true"
+    >
       <canvas
         ref={canvasRef}
         className="assistant-pet-sprite-canvas"
-        width={PET_CELL_WIDTH}
-        height={PET_CELL_HEIGHT}
+        width={ASSISTANT_PET_CANVAS_WIDTH}
+        height={compact ? ASSISTANT_PET_COMPACT_CANVAS_HEIGHT : ASSISTANT_PET_CANVAS_HEIGHT}
       />
     </span>
   );
 }
 
 export function AssistantPet() {
-  const { collapsed, setCollapsed, streaming, completionSignal } = useAssistantDock();
+  const { collapsed, setCollapsed, streaming, outcomeSignal } = useAssistantDock();
   const [desktopVisible, setDesktopVisible] = useState(() => (
     typeof window !== "undefined" && window.matchMedia("(min-width: 640px)").matches
   ));
@@ -184,11 +245,12 @@ export function AssistantPet() {
   const [docked, setDocked] = useState(true);
   const [notice, setNotice] = useState<PetNotice | null>(null);
   const [lookDirection, setLookDirection] = useState<number | null>(null);
+  const [dragDirection, setDragDirection] = useState<DockSide | null>(null);
   const buttonRef = useRef<HTMLButtonElement>(null);
   const dragRef = useRef<DragState | null>(null);
   const snapTimerRef = useRef<number | null>(null);
-  const completionTimerRef = useRef<number | null>(null);
-  const completionSignalRef = useRef(completionSignal);
+  const outcomeTimerRef = useRef<number | null>(null);
+  const outcomeSignalRef = useRef(outcomeSignal?.id ?? 0);
   const suppressClickRef = useRef(false);
 
   const clearSnapTimer = useCallback(() => {
@@ -226,10 +288,10 @@ export function AssistantPet() {
     snapTimerRef.current = window.setTimeout(() => snapToNearestEdge(), delay);
   }, [clearSnapTimer, snapToNearestEdge]);
 
-  const clearCompletionTimer = useCallback(() => {
-    if (completionTimerRef.current != null) {
-      window.clearTimeout(completionTimerRef.current);
-      completionTimerRef.current = null;
+  const clearOutcomeTimer = useCallback(() => {
+    if (outcomeTimerRef.current != null) {
+      window.clearTimeout(outcomeTimerRef.current);
+      outcomeTimerRef.current = null;
     }
   }, []);
 
@@ -237,9 +299,9 @@ export function AssistantPet() {
     setPosition(initialPosition());
     return () => {
       clearSnapTimer();
-      clearCompletionTimer();
+      clearOutcomeTimer();
     };
-  }, [clearCompletionTimer, clearSnapTimer]);
+  }, [clearOutcomeTimer, clearSnapTimer]);
 
   useEffect(() => {
     const media = window.matchMedia("(min-width: 640px)");
@@ -250,6 +312,7 @@ export function AssistantPet() {
   }, []);
 
   useEffect(() => {
+    if (!desktopVisible) return;
     const handleResize = () => {
       setPosition((current) => {
         if (!current) return current;
@@ -263,7 +326,7 @@ export function AssistantPet() {
     };
     window.addEventListener("resize", handleResize);
     return () => window.removeEventListener("resize", handleResize);
-  }, [docked]);
+  }, [desktopVisible, docked]);
 
   useEffect(() => {
     if (!position || !desktopVisible) return;
@@ -272,6 +335,7 @@ export function AssistantPet() {
       setNotice(null);
       setDocked(false);
       const moveToSessionList = () => {
+        if (dragRef.current) return;
         const anchor = document.querySelector<HTMLElement>("[data-assistant-session-anchor]");
         const rect = anchor?.getBoundingClientRect();
         setPosition((current) => {
@@ -320,23 +384,27 @@ export function AssistantPet() {
   }, [collapsed, desktopVisible, docked, dragging, streaming]);
 
   useEffect(() => {
-    if (completionSignal === completionSignalRef.current) return;
-    completionSignalRef.current = completionSignal;
+    const outcomeId = outcomeSignal?.id ?? 0;
+    if (outcomeId === outcomeSignalRef.current) return;
+    outcomeSignalRef.current = outcomeId;
+    if (!outcomeSignal) return;
     if (!desktopVisible || !collapsed || !position) return;
 
-    clearCompletionTimer();
+    const tone = outcomeSignal.status;
+    clearOutcomeTimer();
     clearSnapTimer();
     setDocked(false);
-    setNotice({ text: "任务完成啦", tone: "complete" });
+    setNotice({ text: tone === "failed" ? "出错了" : "任务完成啦", tone });
     setPosition((current) => current ? { ...current, x: emergedX(current.side) } : current);
-    completionTimerRef.current = window.setTimeout(() => {
-      setNotice((current) => current?.tone === "complete" ? null : current);
+    outcomeTimerRef.current = window.setTimeout(() => {
+      setNotice((current) => current?.tone === tone ? null : current);
       snapToNearestEdge();
-      completionTimerRef.current = null;
+      outcomeTimerRef.current = null;
     }, 3_600);
-  }, [clearCompletionTimer, clearSnapTimer, collapsed, completionSignal, desktopVisible, position, snapToNearestEdge]);
+  }, [clearOutcomeTimer, clearSnapTimer, collapsed, desktopVisible, outcomeSignal, position, snapToNearestEdge]);
 
   useEffect(() => {
+    if (!desktopVisible) return;
     let frame = 0;
     const handlePointer = (event: PointerEvent) => {
       if (dragging || !buttonRef.current) return;
@@ -353,7 +421,7 @@ export function AssistantPet() {
       window.cancelAnimationFrame(frame);
       window.removeEventListener("pointermove", handlePointer);
     };
-  }, [dragging]);
+  }, [desktopVisible, dragging]);
 
   const onPointerDown = (event: ReactPointerEvent<HTMLButtonElement>) => {
     if (event.button !== 0 || !position) return;
@@ -366,6 +434,7 @@ export function AssistantPet() {
       startY: event.clientY,
       originX: position.x,
       originY: position.y,
+      lastX: event.clientX,
       moved: false,
     };
     setDocked(false);
@@ -377,7 +446,10 @@ export function AssistantPet() {
     if (!drag || drag.pointerId !== event.pointerId) return;
     const dx = event.clientX - drag.startX;
     const dy = event.clientY - drag.startY;
+    const stepX = event.clientX - drag.lastX;
+    drag.lastX = event.clientX;
     if (Math.hypot(dx, dy) > 5) drag.moved = true;
+    if (Math.abs(stepX) >= 1) setDragDirection(stepX < 0 ? "left" : "right");
     setPosition((current) => current ? {
       ...current,
       x: clamp(drag.originX + dx, 8, window.innerWidth - PET_WIDTH - 8),
@@ -393,6 +465,7 @@ export function AssistantPet() {
     }
     suppressClickRef.current = drag.moved;
     dragRef.current = null;
+    setDragDirection(null);
     setDragging(false);
     if (drag.moved && collapsed) scheduleSnap();
   };
@@ -405,6 +478,7 @@ export function AssistantPet() {
     }
     suppressClickRef.current = false;
     dragRef.current = null;
+    setDragDirection(null);
     setDragging(false);
     if (collapsed) scheduleSnap(240);
   };
@@ -420,7 +494,8 @@ export function AssistantPet() {
       data-side={position.side}
       data-dragging={dragging ? "true" : undefined}
       aria-label={collapsed ? "打开系统助手" : "关闭系统助手"}
-      aria-pressed={!collapsed}
+      aria-expanded={!collapsed}
+      aria-controls={ASSISTANT_SURFACE_ID}
       title={collapsed ? "拖动小助手，点击打开" : "关闭系统助手"}
       onClick={() => {
         if (suppressClickRef.current) {
@@ -434,11 +509,12 @@ export function AssistantPet() {
       onPointerUp={finishDrag}
       onPointerCancel={cancelDrag}
       className={cn(
-        "assistant-pet fixed left-0 top-0 z-40 hidden h-[76px] w-[68px] select-none touch-none sm:block",
+        "assistant-pet fixed left-0 top-0 z-40 hidden h-[114px] w-[102px] select-none touch-none sm:block",
         dragging && "assistant-pet-dragging",
         !collapsed && "assistant-pet-awake",
         streaming && "assistant-pet-streaming",
         notice?.tone === "complete" && "assistant-pet-complete",
+        notice?.tone === "failed" && "assistant-pet-failed",
       )}
       style={{
         transform: `translate3d(${position.x}px, ${position.y}px, 0)`,
@@ -457,6 +533,8 @@ export function AssistantPet() {
         streaming={streaming}
         active={!collapsed}
         celebrating={notice?.tone === "complete"}
+        failed={notice?.tone === "failed"}
+        dragDirection={dragDirection}
         lookDirection={lookDirection}
       />
     </button>

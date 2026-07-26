@@ -26,6 +26,41 @@ test.describe("移动端交互细节", () => {
     fixture.assertClean();
   });
 
+  test("PWA 页面与卡片使用紧凑间距", async ({ page }, testInfo) => {
+    test.skip(testInfo.project.name !== "mobile", "仅 PWA 视口");
+    const fixture = await installApiFixture(page);
+    await page.goto("/overview", { waitUntil: "networkidle" });
+    const spacing = await page.locator("[data-app-main]").evaluate((main) => {
+      const pageShell = main.querySelector<HTMLElement>("[data-page-shell]");
+      const pageHeader = main.querySelector<HTMLElement>("[data-page-header]");
+      const resourceCard = main.querySelector<HTMLElement>("[data-resource-usage-card]");
+      const resourceHeader = resourceCard?.firstElementChild as HTMLElement | null;
+      const mobileNav = document.querySelector<HTMLElement>("[data-mobile-navigation-dock]");
+      const shellChildren = pageShell ? Array.from(pageShell.children) as HTMLElement[] : [];
+      return {
+        viewportWidth: document.documentElement.clientWidth,
+        documentWidth: document.documentElement.scrollWidth,
+        mainPaddingLeft: getComputedStyle(main).paddingLeft,
+        mainPaddingTop: getComputedStyle(main).paddingTop,
+        mainPaddingBottom: Number.parseFloat(getComputedStyle(main).paddingBottom),
+        mobileNavHeight: mobileNav?.getBoundingClientRect().height ?? 0,
+        pageHeaderPaddingLeft: pageHeader ? getComputedStyle(pageHeader).paddingLeft : "",
+        sectionGap: shellChildren[1] ? getComputedStyle(shellChildren[1]).marginTop : "",
+        cardHeaderPaddingLeft: resourceHeader ? getComputedStyle(resourceHeader).paddingLeft : "",
+      };
+    });
+    expect(spacing).toMatchObject({
+      mainPaddingLeft: "12px",
+      mainPaddingTop: "12px",
+      pageHeaderPaddingLeft: "12px",
+      sectionGap: "16px",
+      cardHeaderPaddingLeft: "16px",
+    });
+    expect(spacing.documentWidth).toBeLessThanOrEqual(spacing.viewportWidth);
+    expect(spacing.mainPaddingBottom).toBeGreaterThan(spacing.mobileNavHeight);
+    fixture.assertClean();
+  });
+
   test("侧栏明确展示更新日志入口并可打开内容", async ({ page }, testInfo) => {
     test.skip(testInfo.project.name !== "mobile", "仅移动视口");
     const fixture = await installApiFixture(page);
@@ -219,7 +254,8 @@ test.describe("移动端交互细节", () => {
       return { width: Math.round(rect.width), height: Math.round(rect.height) };
     });
     expect(shape.width).toBe(shape.height);
-    await expect(assistantButton).toContainText("助手");
+    await expect(assistantButton).not.toContainText("助手");
+    await expect(assistantButton.locator('[data-assistant-pet-compact="true"]')).toBeVisible();
     await expect(page.locator("[data-assistant-tip]")).toBeHidden();
     await assistantButton.click();
     const assistantSurface = page.locator("[data-assistant-surface]");
@@ -275,30 +311,49 @@ test.describe("移动端交互细节", () => {
   });
 
   test("插件中心使用分类栏并默认平铺全部已安装插件", async ({ page }, testInfo) => {
+    await page.emulateMedia({ reducedMotion: "no-preference" });
     const fixture = await installApiFixture(page);
     await page.route("**/api/feature-matrix", async (route) => {
       const features = [
         { key: "game_demo", display_name: "互动示例", is_builtin: false, source_type: "remote", version: "1.0.0", usage: "互动插件", category: "interactive", experimental: false },
         { key: "auto_demo", display_name: "自动化示例", is_builtin: false, source_type: "remote", version: "1.0.0", usage: "自动化插件", category: "automation", experimental: false },
-        { key: "tool_demo", display_name: "工具示例", is_builtin: false, source_type: "remote", version: "1.0.0", usage: "工具插件", category: "utility", experimental: false },
+        { key: "tool_demo", display_name: "工具示例", is_builtin: false, source_type: "remote", version: "1.0.0", usage: "工具插件", category: "utility", capabilities: { telegram_direct_passthrough: true }, experimental: false },
       ];
       await route.fulfill({
         status: 200,
         contentType: "application/json",
         body: JSON.stringify({
-          accounts: [{ id: 1, name: "视觉测试账号", features: { game_demo: "active", auto_demo: "active", tool_demo: "active" }, feature_enabled: { game_demo: true, auto_demo: true, tool_demo: true } }],
+          accounts: [{ id: 1, name: "视觉测试账号", features: { game_demo: "active", auto_demo: "disabled", tool_demo: "active" }, feature_enabled: { game_demo: true, auto_demo: false, tool_demo: true } }],
           features,
         }),
       });
     });
     await page.goto("/plugins", { waitUntil: "networkidle" });
+    await expect(page.getByText("0.13 安全变更提醒", { exact: true })).toHaveCount(0);
     await expect(page.locator('[data-plugin-category-filter="all"]')).toHaveAttribute("aria-current", "page");
     const allCategory = page.locator('[data-plugin-category-filter="all"]');
-    if (testInfo.project.name !== "desktop") {
+    if (testInfo.project.name === "desktop") {
+      const categoryNavBox = await page.locator("[data-plugin-category-nav]").boundingBox();
+      expect(categoryNavBox?.width || 999).toBeLessThanOrEqual(140);
+    } else {
       const allBox = await allCategory.boundingBox();
       expect(allBox?.width || 999).toBeLessThan(150);
     }
     await expect(page.locator("[data-plugin-card]")).toHaveCount(3);
+    const gameCard = page.locator('[data-plugin-key="game_demo"]');
+    const gameCardStyle = await gameCard.evaluate((element) => {
+      const style = getComputedStyle(element);
+      return { backgroundColor: style.backgroundColor, paddingTop: Number.parseFloat(style.paddingTop) };
+    });
+    expect(gameCardStyle.backgroundColor).not.toBe("rgba(0, 0, 0, 0)");
+    expect(gameCardStyle.paddingTop).toBeLessThanOrEqual(10);
+    await expect(gameCard.locator('[data-plugin-state-rail="success"]')).toBeVisible();
+    const disabledRail = page.locator('[data-plugin-key="auto_demo"] [data-plugin-state-rail="warn"]');
+    await expect(disabledRail).toBeVisible();
+    await expect(disabledRail).toHaveCSS("background-color", "rgb(250, 204, 21)");
+    await expect(page.locator('[data-plugin-key="tool_demo"] [data-plugin-state-rail="danger"]')).toBeVisible();
+    await gameCard.hover();
+    await expect(gameCard).not.toHaveCSS("transform", "none");
     await page.locator('[data-plugin-category-filter="interactive"]').click();
     await expect(page.locator("[data-plugin-card]")).toHaveCount(1);
     await expect(page.locator('[data-plugin-key="game_demo"]')).toBeVisible();
@@ -390,31 +445,65 @@ test.describe("移动端交互细节", () => {
 
   test("桌面端使用可拖动贴边机器人入口", async ({ page }, testInfo) => {
     test.skip(testInfo.project.name !== "desktop", "仅桌面视口");
+    await page.emulateMedia({ reducedMotion: "no-preference" });
     const fixture = await installApiFixture(page);
     await page.goto("/overview", { waitUntil: "networkidle" });
     const assistantPet = page.locator("[data-assistant-desktop-pet]");
     await expect(assistantPet).toBeVisible();
     await expect(assistantPet).toHaveAttribute("data-docked", "right");
-    await expect(assistantPet.locator(".assistant-pet-head")).toBeVisible();
+    const sprite = assistantPet.locator('[data-assistant-pet-intent="idle"]');
+    await expect(sprite.locator("canvas")).toBeVisible();
     const petBox = await assistantPet.boundingBox();
     expect(petBox).not.toBeNull();
+    expect(Math.round(petBox?.width || 0)).toBe(102);
+    expect(Math.round(petBox?.height || 0)).toBe(114);
     await page.mouse.move((petBox?.x || 0) + 10, (petBox?.y || 0) + 24);
     await page.mouse.down();
     await page.mouse.move(1040, 360, { steps: 8 });
+    await expect(assistantPet.locator('[data-assistant-pet-intent="running-left"]')).toBeVisible();
     await page.mouse.up();
     await expect(assistantPet).toHaveAttribute("data-docked", "false");
     await expect(assistantPet).toHaveAttribute("data-docked", "right", { timeout: 3_000 });
-    await expect(assistantPet.locator(".assistant-pet-arm-left")).toHaveCSS("animation-name", "assistant-pet-arm-left");
-    await expect(assistantPet.locator(".assistant-pet-foot-right")).toHaveCSS("animation-name", "assistant-pet-foot-right");
     await assistantPet.click();
     const sessionAnchor = page.locator("[data-assistant-session-anchor]");
     await expect(sessionAnchor).toBeVisible();
+    await expect(assistantPet).toHaveAttribute("aria-expanded", "true");
+    await expect(assistantPet).toHaveAttribute("aria-controls", "telepilot-assistant-surface");
     await expect(assistantPet).toHaveAttribute("data-docked", "false");
+    const wavingCanvas = assistantPet.locator('[data-assistant-pet-intent="waving"] canvas');
+    await expect(wavingCanvas).toBeVisible();
+    const frameSignatures: Array<{ full: number; fixedLowerBody: number; alphaPixels: number }> = [];
+    for (let index = 0; index < 6; index += 1) {
+      await page.waitForTimeout(150);
+      frameSignatures.push(await wavingCanvas.evaluate((element) => {
+        const canvas = element as HTMLCanvasElement;
+        const context = canvas.getContext("2d");
+        if (!context) return { full: 0, fixedLowerBody: 0, alphaPixels: 0 };
+        const hash = (data: Uint8ClampedArray) => {
+          let value = 2166136261;
+          for (let offset = 0; offset < data.length; offset += 1) {
+            value ^= data[offset];
+            value = Math.imul(value, 16777619);
+          }
+          return value >>> 0;
+        };
+        const full = context.getImageData(0, 0, canvas.width, canvas.height).data;
+        const fixedLowerBody = context.getImageData(0, 150, canvas.width, canvas.height - 150).data;
+        let alphaPixels = 0;
+        for (let offset = 3; offset < full.length; offset += 4) {
+          if (full[offset] > 0) alphaPixels += 1;
+        }
+        return { full: hash(full), fixedLowerBody: hash(fixedLowerBody), alphaPixels };
+      }));
+    }
+    expect(frameSignatures.every((sample) => sample.alphaPixels > 500)).toBe(true);
+    expect(new Set(frameSignatures.map((sample) => sample.full)).size).toBeGreaterThan(1);
+    expect(new Set(frameSignatures.map((sample) => sample.fixedLowerBody)).size).toBe(1);
     await page.waitForTimeout(2_100);
     await expect(assistantPet).toHaveAttribute("data-docked", "false");
     const activePetBox = await assistantPet.boundingBox();
     const sessionAnchorBox = await sessionAnchor.boundingBox();
-    expect(Math.abs((activePetBox?.x || 0) - ((sessionAnchorBox?.x || 0) + (sessionAnchorBox?.width || 0) - 34))).toBeLessThanOrEqual(3);
+    expect(Math.abs((activePetBox?.x || 0) - ((sessionAnchorBox?.x || 0) + (sessionAnchorBox?.width || 0) - 51))).toBeLessThanOrEqual(3);
     await expect(page.locator("[data-assistant-mobile-button]")).toBeHidden();
     await expect(page.locator("[data-assistant-tip]")).toHaveCount(0);
     fixture.assertClean();
@@ -571,7 +660,15 @@ test.describe("移动端交互细节", () => {
       await expect(mobileSummary).toHaveAttribute("aria-expanded", "false");
       await expect(mobileSettings).toBeHidden();
       await expect(page.locator("[data-mobile-navigation-dock]")).toBeHidden();
-      await expect(trigger.locator('[data-agent-pet-intent="awake"]')).toBeVisible();
+      const compactPet = trigger.locator('[data-assistant-pet-intent="waving"]');
+      await expect(compactPet).toBeVisible();
+      await expect(compactPet.locator("canvas")).toHaveAttribute("height", "150");
+      const compactPetBox = await compactPet.boundingBox();
+      expect(Math.round(compactPetBox?.width || 0)).toBe(54);
+      expect(Math.round(compactPetBox?.height || 0)).toBe(42);
+      await expect(trigger).not.toContainText("助手");
+      await expect(trigger).toHaveAttribute("aria-expanded", "true");
+      await expect(trigger).toHaveAttribute("aria-controls", "telepilot-assistant-surface");
       await expect(composer).toBeVisible();
       const triggerBox = await trigger.boundingBox();
       const initialComposerBox = await composer.boundingBox();
@@ -727,6 +824,37 @@ test.describe("移动端交互细节", () => {
     fixture.assertClean();
   });
 
+  test("交互规则总开关在 iPad 宽度内完整收缩", async ({ page }, testInfo) => {
+    test.skip(testInfo.project.name !== "tablet", "仅 iPad 视口");
+    const fixture = await installApiFixture(page);
+    await page.goto("/interaction?aid=1", { waitUntil: "networkidle" });
+    await expect(page.locator("[data-app-main] .lucide-git-fork")).toBeVisible();
+    const actions = page.locator("[data-interaction-rule-actions]");
+    const masterToggle = page.locator("[data-interaction-master-toggle]");
+    const addRule = actions.getByRole("button", { name: "新增规则" });
+    await expect(actions).toBeVisible();
+    const geometry = await actions.evaluate((element) => {
+      const toggle = element.querySelector<HTMLElement>("[data-interaction-master-toggle]");
+      const button = element.querySelector<HTMLElement>("button");
+      const actionsRect = element.getBoundingClientRect();
+      const toggleRect = toggle?.getBoundingClientRect();
+      const buttonRect = button?.getBoundingClientRect();
+      return {
+        viewportWidth: document.documentElement.clientWidth,
+        documentWidth: document.documentElement.scrollWidth,
+        actionsRight: actionsRect.right,
+        toggleRight: toggleRect?.right ?? 0,
+        buttonRight: buttonRect?.right ?? 0,
+      };
+    });
+    await expect(masterToggle).toBeVisible();
+    await expect(addRule).toBeVisible();
+    expect(geometry.documentWidth).toBeLessThanOrEqual(geometry.viewportWidth);
+    expect(geometry.toggleRight).toBeLessThanOrEqual(geometry.actionsRight + 1);
+    expect(geometry.buttonRight).toBeLessThanOrEqual(geometry.actionsRight + 1);
+    fixture.assertClean();
+  });
+
   test("主滚动区预留滚动条槽位避免子页面切换跳动", async ({ page }, testInfo) => {
     test.skip(testInfo.project.name !== "mobile", "仅移动视口");
     const fixture = await installApiFixture(page);
@@ -753,6 +881,7 @@ test.describe("移动端交互细节", () => {
       });
     });
     await page.goto("/overview", { waitUntil: "networkidle" });
+    await expect(page.locator('[data-sidebar-sort-path="/interaction"] .lucide-git-fork')).toBeVisible();
     const overview = page.locator('[data-sidebar-sort-path="/overview"]');
     const plugins = page.locator('[data-sidebar-sort-path="/plugins"]');
     await overview.dragTo(plugins);
@@ -771,8 +900,9 @@ test.describe("移动端交互细节", () => {
     const gap = await sampling.evaluate((element) => {
       const card = element.closest("[data-resource-usage-card]");
       const header = card?.querySelector(":scope > div:first-child");
-      if (!header) return -1;
-      return Math.round(element.getBoundingClientRect().top - header.getBoundingClientRect().bottom);
+      const headerContent = header?.firstElementChild;
+      if (!headerContent) return -1;
+      return Math.round(element.getBoundingClientRect().top - headerContent.getBoundingClientRect().bottom);
     });
     expect(gap).toBeGreaterThanOrEqual(16);
     fixture.assertClean();

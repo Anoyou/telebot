@@ -3054,8 +3054,14 @@ export function BotTab({
                   先在左侧挑规则，再到右侧按触发、启动内容、奖励限制配置当前规则。
                 </div>
               </div>
-              <div className="flex w-full items-stretch gap-2 sm:w-auto sm:justify-end">
-                <label className="nested-surface-item flex min-w-0 flex-1 items-center justify-between gap-2 border bg-background px-3 py-1.5 sm:flex-none sm:py-2">
+              <div
+                data-interaction-rule-actions
+                className="grid w-full min-w-0 grid-cols-[minmax(0,1fr)_auto] items-stretch gap-2"
+              >
+                <label
+                  data-interaction-master-toggle
+                  className="nested-surface-item flex min-w-0 items-center justify-between gap-2 border bg-background px-3 py-1.5 sm:py-2"
+                >
                   <span className="min-w-0">
                     <span className="flex min-w-0 items-center gap-2 text-sm font-medium">
                       <span className="truncate sm:hidden">交互总开关</span>

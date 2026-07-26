@@ -26,7 +26,6 @@ import { getSystemSettings } from "@/api/system";
 import type { AccountFeatureItem, FeatureInfo } from "@/api/types";
 import type { PluginInstallOut } from "@/api/plugins";
 import type { PluginLLMUsageSummaryItem } from "@/api/llmUsage";
-import { CommandBadge } from "@/components/CommandBadge";
 import { PageShell } from "@/components/layout/PageScaffold";
 import { Spinner } from "@/components/ui/misc";
 import { Button } from "@/components/ui/button";
@@ -88,7 +87,6 @@ const CATEGORY_META: Record<ModuleCategory, { title: string; hint: string; icon:
     icon: Package2,
   },
 };
-const DANGEROUS_CMD_BANNER_KEY = "telebot.plugins_home.banner.v0_13_dangerous_cmds_closed";
 const OFFICIAL_RECOMMENDED_INSTALL_BANNER_KEY = "telebot.plugins_home.official_recommended_install_closed.v0_35";
 const OFFICIAL_RECOMMENDED_KEYS = ["auto_reply", "autorepeat"] as const;
 
@@ -205,10 +203,6 @@ export function PluginsHome() {
   const [aiPanelExpanded, setAiPanelExpanded] = useState(false);
   const [selectedCategory, setSelectedCategory] = useState<ModuleCategoryFilter>("all");
   const guideActive = searchParams.get("guide") === "1";
-  const [bannerVisible, setBannerVisible] = useState(() => {
-    if (typeof window === "undefined") return false;
-    return localStorage.getItem(DANGEROUS_CMD_BANNER_KEY) !== "1";
-  });
   const [officialInstallBannerVisible, setOfficialInstallBannerVisible] = useState(() => {
     if (typeof window === "undefined") return false;
     return localStorage.getItem(OFFICIAL_RECOMMENDED_INSTALL_BANNER_KEY) !== "1";
@@ -263,7 +257,6 @@ export function PluginsHome() {
   });
   const codexImageFeature = pluginFeatures.find((f) => f.key === "codex_image");
   const codexImageState = selectedAccount?.features?.codex_image ?? "disabled";
-  const cmdPrefix = settingsQ.data?.command_prefix || ",";
   const accountFeatureByKey = useMemo(() => {
     const map = new Map<string, AccountFeatureItem>();
     for (const item of Array.isArray(accountFeaturesQ.data) ? accountFeaturesQ.data : []) {
@@ -336,38 +329,6 @@ export function PluginsHome() {
 
   return (
     <PageShell>
-      {bannerVisible ? (
-        <Card className="border-warning/40 bg-warning/10">
-          <CardHeader className="pb-2">
-            <CardTitle className="text-base">0.13 安全变更提醒</CardTitle>
-            <CardDescription className="text-warning">
-              Telegram 内高危指令（如 <CommandBadge>{cmdPrefix}reboot</CommandBadge>、<CommandBadge>{cmdPrefix}plugin install</CommandBadge>）已移除，请改为在 Web 控制台或账号 Bot 内执行。
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="flex flex-wrap items-center gap-2">
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() => nav(selectedAid ? `/accounts/${selectedAid}?tab=bot-management` : "/accounts")}
-            >
-              前往管理 Bot
-            </Button>
-            <Button size="sm" variant="outline" onClick={() => nav("/plugins/manage?tab=plugins")}>
-              前往插件管理
-            </Button>
-            <Button
-              size="sm"
-              onClick={() => {
-                localStorage.setItem(DANGEROUS_CMD_BANNER_KEY, "1");
-                setBannerVisible(false);
-              }}
-            >
-              我知道了，不再提示
-            </Button>
-          </CardContent>
-        </Card>
-      ) : null}
-
       {showOfficialInstallBanner ? (
         <Card className="border-primary/30 bg-primary/5">
           <CardHeader className="pb-2">
@@ -552,9 +513,13 @@ export function PluginsHome() {
               </Button>
             </div>
           ) : null}
-          <div className="grid min-w-0 gap-4 lg:grid-cols-[13rem_minmax(0,1fr)] lg:items-start">
+          <div
+            data-plugin-category-layout
+            className="grid min-w-0 gap-4 lg:grid-cols-[8.5rem_minmax(0,1fr)] lg:items-start"
+          >
             <nav
               aria-label="插件分类"
+              data-plugin-category-nav
               className="horizontal-scroll-touch flex gap-2 overflow-x-auto pb-1 lg:sticky lg:top-3 lg:flex-col lg:overflow-visible lg:pb-0"
             >
               {(["all", ...Object.keys(CATEGORY_META)] as ModuleCategoryFilter[]).map((category) => {
@@ -829,7 +794,7 @@ function FeatureZone({
         {features.length === 0 ? (
           <p className="text-sm text-muted-foreground">暂无内容</p>
         ) : (
-          <div className="grid gap-3 xl:grid-cols-2">
+          <div className="grid gap-2 xl:grid-cols-2">
             {features.map((f) => {
               const directPassthrough = pluginSupportsDirectPassthrough(f.capabilities);
               const status = selectedFeatures[f.key] ?? "disabled";
@@ -872,27 +837,46 @@ function FeatureZone({
               });
               const canConfigure = Boolean(path);
               const mobileExpanded = mobileExpandedKeys.has(f.key);
+              const stateRailTone = directPassthrough || status === "failed"
+                ? "danger"
+                : enabled
+                  ? "success"
+                  : "warn";
               return (
                 <div
                   key={f.key}
                   data-plugin-card
                   data-plugin-key={f.key}
                   className={cn(
-                    "relative min-h-[7.25rem] rounded-md border p-3 sm:min-h-0",
-                    status === "failed" ? "border-destructive/40 bg-destructive/5" : "",
+                    "relative min-h-[7rem] overflow-hidden rounded-md border p-2.5 shadow-sm transition duration-200 ease-out hover:-translate-y-0.5 hover:shadow-md motion-reduce:transform-none sm:min-h-0",
+                    status === "failed"
+                      ? "border-destructive/40 bg-destructive/5"
+                      : "border-border/70 bg-muted/20 hover:bg-muted/30",
                   )}
                 >
+                  <span
+                    aria-hidden="true"
+                    data-plugin-state-rail={stateRailTone}
+                    className={cn(
+                      "absolute inset-x-0 top-0 h-1",
+                      stateRailTone === "danger"
+                        ? "bg-destructive"
+                        : stateRailTone === "success"
+                          ? "bg-success"
+                          : "bg-yellow-400",
+                    )}
+                  />
                   <MetaBadge
                     mono
                     tone="outline"
-                    className="absolute right-3 top-3 h-6 max-w-20 justify-center px-1.5 text-[10px]"
+                    className="absolute right-2.5 top-2.5 h-6 max-w-20 justify-center px-1.5 text-[10px]"
                     title={moduleVersionLabel(f.version)}
                     data-plugin-version
                   >
                     {moduleVersionLabel(f.version)}
                   </MetaBadge>
                   <div className="min-w-0">
-                    <div className="grid grid-rows-[2.5rem_2rem] gap-1 sm:flex sm:grid-rows-none sm:flex-row sm:items-start sm:justify-between sm:gap-2">
+                    <div className="grid grid-rows-[2.25rem_1.75rem] gap-0.5 sm:flex sm:grid-rows-none sm:flex-row sm:items-start sm:justify-between sm:gap-2">
                       <div className="min-w-0 pr-16 sm:pr-0">
                         <div className="flex min-w-0 items-center gap-1.5">
                           <button
@@ -988,11 +972,11 @@ function FeatureZone({
                         </Button>
                       </div>
                     ) : null}
-                    <div className="mt-2 text-xs leading-5 text-muted-foreground">
+                    <div className="mt-1.5 line-clamp-2 text-xs leading-4 text-muted-foreground">
                       {compactUsageText(f.usage)}
                     </div>
-                    <div className="mt-3 grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
-                      <div className="flex min-w-0 flex-wrap items-center gap-2">
+                    <div className="mt-2 grid gap-1.5 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
+                      <div className="flex min-w-0 flex-wrap items-center gap-1.5">
                         {pluginUsage ? (
                           <>
                             <span className="shrink-0 rounded-full border bg-muted/40 px-2 py-0.5 text-[11px] text-muted-foreground">
@@ -1058,7 +1042,7 @@ function FeatureZone({
                         <Button
                           size="sm"
                           variant="outline"
-                          className="hidden justify-self-end sm:inline-flex"
+                          className="hidden h-8 justify-self-end px-2.5 sm:inline-flex"
                           onClick={() => {
                             if (path) {
                               nav(path);
