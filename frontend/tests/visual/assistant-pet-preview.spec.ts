@@ -85,12 +85,13 @@ test("实装 Agent 的注视、跑动、贴边和跳跃保持连续", async ({ p
   await page.getByRole("tab", { name: "待机", exact: true }).click();
   await expectCanvasReady(canvas);
   const idleMetrics: CanvasMetrics[] = [];
-  for (let sample = 0; sample < 14; sample += 1) {
+  for (let sample = 0; sample < 26; sample += 1) {
     await page.waitForTimeout(90);
     idleMetrics.push(await canvasMetrics(canvas));
   }
   const idleMasses = idleMetrics.map((sample) => sample.alphaMass);
   const idleWidths = idleMetrics.map((sample) => sample.right - sample.left);
+  expect(new Set(idleMetrics.map((sample) => sample.hash)).size).toBe(2);
   expect(Math.max(...idleMasses) / Math.min(...idleMasses)).toBeLessThan(1.02);
   expect(Math.max(...idleWidths) / Math.min(...idleWidths)).toBeLessThan(1.01);
 
@@ -151,13 +152,14 @@ test("实装 Agent 的注视、跑动、贴边和跳跃保持连续", async ({ p
   expect(Math.min(...runningSamples.map((sample) => sample.alphaMass))).toBeGreaterThan(9_000);
 
   await page.getByRole("tab", { name: "贴边", exact: true }).click();
-  await expect(canvas).toHaveAttribute("height", "150");
-  const peekingFrame = pet.locator("[data-assistant-pet-peeking='true']");
-  const peekingBox = await peekingFrame.boundingBox();
-  expect(Math.round(peekingBox?.width || 0)).toBe(102);
-  expect(Math.round(peekingBox?.height || 0)).toBe(80);
-  const peekingTransform = await canvas.evaluate((element) => getComputedStyle(element).transform);
-  expect(peekingTransform).not.toBe("none");
+  await expect(pet.locator('[data-assistant-pet-intent="idle"]')).toBeVisible();
+  await expect(canvas).toHaveAttribute("height", "208");
+  const dockedBox = await pet.boundingBox();
+  expect(Math.round(dockedBox?.width || 0)).toBe(102);
+  expect(Math.round(dockedBox?.height || 0)).toBe(114);
+  expect(Math.round((dockedBox?.x || 0) + (dockedBox?.width || 0))).toBe(page.viewportSize()?.width);
+  const dockedTransform = await canvas.evaluate((element) => getComputedStyle(element).transform);
+  expect(dockedTransform).toBe("none");
 
   await page.getByRole("tab", { name: "已完成", exact: true }).click();
   await expect(pet.locator('[data-assistant-pet-intent="jumping"]')).toBeVisible();
@@ -170,9 +172,46 @@ test("实装 Agent 的注视、跑动、贴边和跳跃保持连续", async ({ p
     jumpSamples.push(await canvasMetrics(canvas));
   }
   const jumpHashes = new Set(jumpSamples.map((sample) => sample.hash));
-  expect(jumpHashes.size).toBeGreaterThanOrEqual(5);
-  expect(jumpHashes.size).toBeLessThanOrEqual(6);
+  expect(jumpHashes.size).toBe(5);
   expect(Math.min(...jumpSamples.map((sample) => sample.alphaMass))).toBeGreaterThan(8_000);
   expect(Math.min(...jumpSamples.map((sample) => sample.top))).toBeLessThan(8);
   expect(Math.max(...jumpSamples.map((sample) => sample.bottom))).toBeGreaterThan(195);
+});
+
+test("PWA 待机居中且完整动作自动切换全身模式", async ({ page }) => {
+  for (const mode of ["idle", "complete", "failed"] as const) {
+    await page.goto(`/assistant-pet-states-preview.html?state=pwa&pwa=${mode}`);
+    const button = page.locator("[data-assistant-mobile-button]");
+    const sprite = button.locator("[data-assistant-pet-compact='true']");
+    const canvas = sprite.locator("canvas");
+    await expect(button).toBeVisible();
+    await expectCanvasReady(canvas);
+
+    const buttonBox = await button.boundingBox();
+    const spriteBox = await sprite.boundingBox();
+    expect(Math.abs(
+      ((buttonBox?.x || 0) + (buttonBox?.width || 0) / 2)
+      - ((spriteBox?.x || 0) + (spriteBox?.width || 0) / 2)
+    )).toBeLessThanOrEqual(0.5);
+
+    if (mode === "idle") {
+      await expect(sprite).toHaveAttribute("data-assistant-pet-intent", "idle");
+      await expect(sprite).toHaveAttribute("data-assistant-pet-compact-mode", "upper");
+      await expect(canvas).toHaveAttribute("height", "150");
+      continue;
+    }
+
+    await expect(sprite).toHaveAttribute("data-assistant-pet-compact-mode", "full");
+    await expect(canvas).toHaveAttribute("height", "208");
+    const metrics = await canvasMetrics(canvas);
+    expect(metrics.bottom - metrics.top).toBeGreaterThan(185);
+    if (mode === "complete") {
+      const hashes = new Set<number>();
+      for (let sample = 0; sample < 80; sample += 1) {
+        await page.waitForTimeout(24);
+        hashes.add((await canvasMetrics(canvas)).hash);
+      }
+      expect(hashes.size).toBe(6);
+    }
+  }
 });

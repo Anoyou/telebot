@@ -926,21 +926,10 @@
     overflow: hidden;
   }
 
-  .assistant-pet-sprite-frame-peeking {
-    width: 102px;
-    height: 80px;
+  .assistant-pet-sprite-frame-compact-full {
+    width: 54px;
+    height: 58px;
     overflow: visible;
-    isolation: isolate;
-  }
-
-  .assistant-pet[data-side="right"] .assistant-pet-sprite-frame-peeking .assistant-pet-sprite-canvas {
-    transform: translateX(20px) rotate(-12deg);
-    transform-origin: 51px 80px;
-  }
-
-  .assistant-pet[data-side="left"] .assistant-pet-sprite-frame-peeking .assistant-pet-sprite-canvas {
-    transform: translateX(-20px) rotate(12deg);
-    transform-origin: 51px 80px;
   }
 
   .assistant-pet-sprite-canvas {
@@ -958,13 +947,6 @@
       transform: translateY(-2px);
     }
 
-    .assistant-pet[data-side="right"]:hover .assistant-pet-sprite-frame-peeking .assistant-pet-sprite-canvas {
-      transform: translate(20px, -2px) rotate(-12deg);
-    }
-
-    .assistant-pet[data-side="left"]:hover .assistant-pet-sprite-frame-peeking .assistant-pet-sprite-canvas {
-      transform: translate(-20px, -2px) rotate(12deg);
-    }
   }
 
   @keyframes assistant-pet-notice-in {

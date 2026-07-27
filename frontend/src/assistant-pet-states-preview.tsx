@@ -32,9 +32,11 @@ type PreviewState =
   | "failed"
   | "pwa";
 
+type PwaPreviewMode = "idle" | "working" | "complete" | "failed";
+
 const PREVIEW_STATES = [
-  { id: "docked", label: "贴边", detail: "上半身招手", icon: PanelRightClose },
-  { id: "idle", label: "待机", detail: "完整静止", icon: Pause },
+  { id: "docked", label: "贴边", detail: "完整人物边沿待机", icon: PanelRightClose },
+  { id: "idle", label: "待机", detail: "自然眨眼", icon: Pause },
   { id: "look", label: "注视", detail: "跟随鼠标", icon: Eye },
   { id: "running-right", label: "右拖", detail: "8 帧右跑", icon: ArrowRight },
   { id: "running-left", label: "左拖", detail: "镜像左跑", icon: ArrowLeft },
@@ -79,7 +81,7 @@ function DesktopPet({
       data-side={leftSide ? "left" : "right"}
       className={[
         "assistant-pet absolute z-20 h-[114px] w-[102px] select-none",
-        docked ? "right-[-28px] top-[44%]" : leftSide ? "left-[14%] top-[46%]" : "right-8 top-[46%]",
+        docked ? "right-0 top-[44%]" : leftSide ? "left-[14%] top-[46%]" : "right-8 top-[46%]",
         complete ? "assistant-pet-complete" : "",
         failed ? "assistant-pet-failed" : "",
       ].join(" ")}
@@ -94,10 +96,8 @@ function DesktopPet({
         </span>
       ) : null}
       <AssistantPetSprite
-        active={docked}
         celebrating={complete}
         failed={failed}
-        peeking={docked}
         streaming={state === "working"}
         dragDirection={runningLeft ? "left" : runningRight ? "right" : null}
         lookDirection={state === "look" ? lookDirection : null}
@@ -106,7 +106,9 @@ function DesktopPet({
   );
 }
 
-function PwaPet() {
+function PwaPet({ mode }: { mode: PwaPreviewMode }) {
+  const complete = mode === "complete";
+  const failed = mode === "failed";
   return (
     <div className="absolute inset-x-0 bottom-5 z-20 flex justify-center px-3">
       <div className="flex w-full max-w-[23rem] items-center justify-between rounded-full bg-card/95 p-2 shadow-lg ring-1 ring-border">
@@ -117,12 +119,31 @@ function PwaPet() {
         <button
           type="button"
           data-assistant-mobile-button
+          data-preview-pwa-mode={mode}
           aria-label="打开系统助手"
           aria-expanded="false"
-          className="assistant-nav-orb liquid-bottom-nav relative grid h-[3.75rem] w-[3.75rem] shrink-0 content-center place-items-center rounded-full text-primary active:scale-95 motion-reduce:transform-none"
+          className={[
+            "assistant-nav-orb liquid-bottom-nav relative grid h-[3.75rem] w-[3.75rem] shrink-0 place-content-center place-items-center rounded-full text-primary active:scale-95 motion-reduce:transform-none",
+            complete ? "assistant-nav-orb-complete" : "",
+            failed ? "assistant-nav-orb-failed" : "",
+          ].join(" ")}
         >
+          {complete || failed ? (
+            <span
+              aria-hidden="true"
+              data-assistant-mobile-notice={mode}
+              className="assistant-nav-orb-notice"
+            >
+              {failed ? "出错了" : "完成啦"}
+            </span>
+          ) : null}
           <span className="relative grid place-items-center">
-            <AssistantPetSprite compact active />
+            <AssistantPetSprite
+              compact
+              streaming={mode === "working"}
+              celebrating={complete}
+              failed={failed}
+            />
           </span>
         </button>
         <span className="h-8 w-px bg-border" aria-hidden="true" />
@@ -135,7 +156,18 @@ function PwaPet() {
 }
 
 function PreviewApp() {
-  const [state, setState] = useState<PreviewState>("complete");
+  const query = useMemo(() => new URLSearchParams(window.location.search), []);
+  const requestedState = query.get("state");
+  const requestedPwaMode = query.get("pwa");
+  const initialState = PREVIEW_STATES.some((item) => item.id === requestedState)
+    ? requestedState as PreviewState
+    : "complete";
+  const pwaMode: PwaPreviewMode = (
+    requestedPwaMode === "working"
+    || requestedPwaMode === "complete"
+    || requestedPwaMode === "failed"
+  ) ? requestedPwaMode : "idle";
+  const [state, setState] = useState<PreviewState>(initialState);
   const [lookDirection, setLookDirection] = useState<number | null>(4);
   const [dark, setDark] = useState(false);
   const petShellRef = useRef<HTMLDivElement>(null);
@@ -258,7 +290,7 @@ function PreviewApp() {
               </div>
 
               {state === "pwa" ? (
-                <PwaPet />
+                <PwaPet mode={pwaMode} />
               ) : (
                 <DesktopPet
                   state={state}

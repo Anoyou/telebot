@@ -69,17 +69,22 @@ const ANIMATIONS: Record<AssistantPetIntent, {
 }> = {
   idle: {
     row: 0,
-    durations: [520, 140, 110, 110, 110, 140],
-    frames: [5, 4, 3, 2, 3, 4],
+    durations: [1_800, 90, 90],
+    frames: [4, 2, 4],
   },
   "running-right": { row: 1, durations: [84, 84, 84, 84, 84, 84, 84, 84] },
   "running-left": { row: 2, durations: [84, 84, 84, 84, 84, 84, 84, 84] },
   waving: { row: 3, durations: [140, 140, 140, 280], frames: [0, 1, 2, 0] },
   jumping: { row: 4, durations: [100, 90, 120, 90, 180] },
-  failed: { row: 5, durations: [140, 140, 140, 140, 140, 140, 140, 240] },
+  failed: {
+    row: 5,
+    durations: [140, 140, 140, 140, 140, 240],
+    frames: [7, 0, 1, 4, 2, 3],
+  },
   waiting: { row: 6, durations: [150, 150, 150, 150, 150, 260] },
   review: { row: 8, durations: [150, 150, 150, 150, 150, 280] },
 };
+const JUMP_LOOP_COUNT = 3;
 
 const JUMP_FRAME_SCALE = 1.25;
 const JUMP_FRAME_X = (ASSISTANT_PET_CANVAS_WIDTH - ASSISTANT_PET_CANVAS_WIDTH * JUMP_FRAME_SCALE) / 2;
@@ -90,6 +95,32 @@ const JUMP_FRAME_SOURCES = [
   { row: ANIMATIONS.jumping.row, column: 3, scale: JUMP_FRAME_SCALE, destinationX: JUMP_FRAME_X, destinationY: -25 },
   { row: ANIMATIONS.jumping.row, column: 4, scale: JUMP_FRAME_SCALE, destinationX: JUMP_FRAME_X, destinationY: -58 },
 ] as const;
+const COMPACT_FULL_TARGET_WIDTH = 176;
+const COMPACT_FULL_TARGET_HEIGHT = 194;
+const COMPACT_FULL_FRAME_BOUNDS: Partial<Record<number, readonly {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+}[]>> = {
+  4: [
+    { left: 56, top: 69, width: 80, height: 134 },
+    { left: 56, top: 25, width: 80, height: 145 },
+    { left: 56, top: 5, width: 80, height: 133 },
+    { left: 56, top: 24, width: 80, height: 154 },
+    { left: 56, top: 71, width: 80, height: 132 },
+  ],
+  5: [
+    { left: 44, top: 5, width: 103, height: 198 },
+    { left: 44, top: 12, width: 103, height: 191 },
+    { left: 45, top: 33, width: 101, height: 166 },
+    { left: 46, top: 55, width: 98, height: 142 },
+    { left: 44, top: 16, width: 103, height: 184 },
+    { left: 47, top: 51, width: 97, height: 149 },
+    { left: 46, top: 50, width: 99, height: 151 },
+    { left: 45, top: 5, width: 101, height: 198 },
+  ],
+};
 const LOOK_TARGET_HEIGHT = 190;
 const LOOK_TARGET_LOWER_CENTER_X = 95;
 const LOOK_BASELINE_Y = 202;
@@ -247,7 +278,7 @@ export function assistantPetFrameAt(
   const animation = ANIMATIONS[intent];
   if (intent === "jumping") {
     const duration = animation.durations.reduce((sum, value) => sum + value, 0);
-    if (reduceMotion || elapsed >= duration) {
+    if (reduceMotion || elapsed >= duration * JUMP_LOOP_COUNT) {
       return {
         cell: { row: ANIMATIONS.idle.row, column: ANIMATIONS.idle.frames?.[0] ?? 0 },
         nextCell: null,
@@ -271,10 +302,51 @@ export function assistantPetFrameAt(
 export function assistantPetDrawPlan(
   cell: AssistantPetCell,
   compact = false,
+  fitFullCell = false,
 ): AssistantPetDrawPlan {
   const viewportHeight = compact
     ? ASSISTANT_PET_COMPACT_CANVAS_HEIGHT
     : ASSISTANT_PET_CANVAS_HEIGHT;
+
+  if (fitFullCell) {
+    const bounds = COMPACT_FULL_FRAME_BOUNDS[cell.row]?.[cell.column];
+    if (bounds) {
+      const scale = Math.min(
+        COMPACT_FULL_TARGET_WIDTH / bounds.width,
+        COMPACT_FULL_TARGET_HEIGHT / bounds.height,
+      );
+      const destinationWidth = bounds.width * scale;
+      const destinationHeight = bounds.height * scale;
+      return {
+        viewportHeight,
+        layers: [{
+          ...cell,
+          sourceX: bounds.left,
+          sourceY: bounds.top,
+          sourceWidth: bounds.width,
+          sourceHeight: bounds.height,
+          destinationX: (ASSISTANT_PET_CANVAS_WIDTH - destinationWidth) / 2,
+          destinationY: (ASSISTANT_PET_CANVAS_HEIGHT - destinationHeight) / 2,
+          destinationWidth,
+          destinationHeight,
+        }],
+      };
+    }
+    return {
+      viewportHeight,
+      layers: [{
+        ...cell,
+        sourceX: 0,
+        sourceY: 0,
+        sourceWidth: ASSISTANT_PET_CANVAS_WIDTH,
+        sourceHeight: ASSISTANT_PET_CANVAS_HEIGHT,
+        destinationX: 0,
+        destinationY: 0,
+        destinationWidth: ASSISTANT_PET_CANVAS_WIDTH,
+        destinationHeight: ASSISTANT_PET_CANVAS_HEIGHT,
+      }],
+    };
+  }
 
   if (!compact && (cell.row === 9 || cell.row === 10)) {
     const direction = (cell.row - 9) * 8 + cell.column;

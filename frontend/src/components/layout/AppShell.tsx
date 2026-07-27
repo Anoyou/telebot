@@ -392,7 +392,7 @@ function MobileAssistantButton() {
       aria-controls={ASSISTANT_SURFACE_ID}
       onClick={() => setCollapsed(!collapsed)}
       className={cn(
-        "assistant-nav-orb liquid-bottom-nav relative grid h-[3.75rem] w-[3.75rem] shrink-0 content-center place-items-center rounded-full text-primary active:scale-95 motion-reduce:transform-none",
+        "assistant-nav-orb liquid-bottom-nav relative grid h-[3.75rem] w-[3.75rem] shrink-0 place-content-center place-items-center rounded-full text-primary active:scale-95 motion-reduce:transform-none",
         !collapsed && "assistant-nav-orb-active border-primary/60 bg-primary/15 text-primary",
         notice === "idle" && "assistant-nav-orb-idle-nudge",
         notice === "complete" && "assistant-nav-orb-complete",
@@ -408,7 +408,6 @@ function MobileAssistantButton() {
         <AssistantPetSprite
           compact
           streaming={streaming}
-          active={!collapsed}
           celebrating={notice === "complete"}
           failed={notice === "failed"}
         />

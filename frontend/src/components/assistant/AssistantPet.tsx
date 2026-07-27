@@ -44,7 +44,6 @@ type DragState = {
 
 const PET_WIDTH = 102;
 const PET_HEIGHT = 114;
-const PET_PEEK = 74;
 const PET_TOP_GUTTER = 92;
 const PET_BOTTOM_GUTTER = 24;
 const PET_SNAP_DELAY = 1_800;
@@ -65,7 +64,7 @@ function clamp(value: number, min: number, max: number) {
 }
 
 function dockedX(side: DockSide) {
-  return side === "left" ? PET_PEEK - PET_WIDTH : window.innerWidth - PET_PEEK;
+  return side === "left" ? 0 : window.innerWidth - PET_WIDTH;
 }
 
 function emergedX(side: DockSide) {
@@ -95,7 +94,6 @@ export function AssistantPetSprite({
   active = false,
   celebrating = false,
   failed = false,
-  peeking = false,
   dragDirection = null,
   lookDirection = null,
 }: {
@@ -104,7 +102,6 @@ export function AssistantPetSprite({
   active?: boolean;
   celebrating?: boolean;
   failed?: boolean;
-  peeking?: boolean;
   dragDirection?: DockSide | null;
   lookDirection?: number | null;
 }) {
@@ -116,6 +113,11 @@ export function AssistantPetSprite({
     streaming,
     active,
   });
+  const compactFullBody = compact && (
+    intent === "jumping"
+    || intent === "failed"
+  );
+  const compactUpperBody = compact && !compactFullBody;
   const intentRef = useRef(intent);
   const lookDirectionRef = useRef(lookDirection);
   const animationStartedAtRef = useRef(0);
@@ -221,12 +223,12 @@ export function AssistantPetSprite({
     };
 
     const drawFrame = (frame: ReturnType<typeof assistantPetFrameAt>) => {
-      const plan = assistantPetDrawPlan(frame.cell, compact || peeking);
+      const plan = assistantPetDrawPlan(frame.cell, compactUpperBody, compactFullBody);
       bufferContext.clearRect(0, 0, buffer.width, buffer.height);
       drawPlan(plan, frame.nextCell ? 1 - frame.blend : 1);
       if (frame.nextCell) {
         bufferContext.globalCompositeOperation = "lighter";
-        drawPlan(assistantPetDrawPlan(frame.nextCell, compact || peeking), frame.blend);
+        drawPlan(assistantPetDrawPlan(frame.nextCell, compactUpperBody, compactFullBody), frame.blend);
         bufferContext.globalCompositeOperation = "source-over";
       }
 
@@ -283,25 +285,25 @@ export function AssistantPetSprite({
       window.cancelAnimationFrame(animationFrame);
       atlas.removeEventListener("load", handleLoad);
     };
-  }, [compact, peeking]);
+  }, [compactFullBody, compactUpperBody]);
 
   return (
     <span
       className={cn(
         "assistant-pet-sprite-frame",
         compact && "assistant-pet-sprite-frame-compact",
-        peeking && "assistant-pet-sprite-frame-peeking",
+        compactFullBody && "assistant-pet-sprite-frame-compact-full",
       )}
       data-assistant-pet-intent={intent}
       data-assistant-pet-compact={compact ? "true" : undefined}
-      data-assistant-pet-peeking={peeking ? "true" : undefined}
+      data-assistant-pet-compact-mode={compact ? compactFullBody ? "full" : "upper" : undefined}
       aria-hidden="true"
     >
       <canvas
         ref={canvasRef}
         className="assistant-pet-sprite-canvas"
         width={ASSISTANT_PET_CANVAS_WIDTH}
-        height={compact || peeking ? ASSISTANT_PET_COMPACT_CANVAS_HEIGHT : ASSISTANT_PET_CANVAS_HEIGHT}
+        height={compactUpperBody ? ASSISTANT_PET_COMPACT_CANVAS_HEIGHT : ASSISTANT_PET_CANVAS_HEIGHT}
       />
     </span>
   );
@@ -556,8 +558,6 @@ export function AssistantPet() {
   };
 
   if (!position || !desktopVisible) return null;
-  const peeking = docked && collapsed;
-
   return (
     <button
       ref={buttonRef}
@@ -604,12 +604,11 @@ export function AssistantPet() {
       ) : null}
       <AssistantPetSprite
         streaming={streaming}
-        active={!collapsed || peeking}
+        active={!collapsed}
         celebrating={notice?.tone === "complete"}
         failed={notice?.tone === "failed"}
-        peeking={peeking}
         dragDirection={dragDirection}
-        lookDirection={peeking ? null : lookDirection}
+        lookDirection={docked && collapsed ? null : lookDirection}
       />
     </button>
   );

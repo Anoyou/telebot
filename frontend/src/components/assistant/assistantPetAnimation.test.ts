@@ -69,15 +69,23 @@ test("注视角度保持连续，并跨两处半圈边界平滑衔接", () => {
 test("工作和完成状态优先于鼠标注视", () => {
   assert.deepEqual(assistantPetCell("review", 0, 12), { row: 8, column: 0 });
   assert.deepEqual(assistantPetCell("jumping", 0, 12), { row: 4, column: 0 });
-  assert.deepEqual(assistantPetCell("failed", 0, 12), { row: 5, column: 0 });
+  assert.deepEqual(assistantPetCell("failed", 0, 12), { row: 5, column: 7 });
 });
 
-test("待机循环跳过头部轮廓偏大的前两格", () => {
-  const sampledColumns = new Set<number>();
-  for (let elapsed = 0; elapsed < 1_200; elapsed += 20) {
-    sampledColumns.add(assistantPetFrameAt("idle", elapsed, null).cell.column);
-  }
-  assert.deepEqual([...sampledColumns].sort(), [2, 3, 4, 5]);
+test("待机只在同一站姿中短暂眨眼", () => {
+  assert.deepEqual(assistantPetFrameAt("idle", 0, null).cell, { row: 0, column: 4 });
+  assert.deepEqual(assistantPetFrameAt("idle", 1_799, null).cell, { row: 0, column: 4 });
+  assert.deepEqual(assistantPetFrameAt("idle", 1_800, null).cell, { row: 0, column: 2 });
+  assert.deepEqual(assistantPetFrameAt("idle", 1_890, null).cell, { row: 0, column: 4 });
+  assert.deepEqual(assistantPetFrameAt("idle", 1_980, null).cell, { row: 0, column: 4 });
+});
+
+test("失败动作剔除第六和第七格并按指定顺序播放", () => {
+  const durations = [0, 140, 280, 420, 560, 700];
+  assert.deepEqual(
+    durations.map((elapsed) => assistantPetFrameAt("failed", elapsed, null).cell.column),
+    [7, 0, 1, 4, 2, 3],
+  );
 });
 
 test("产品状态映射使用新工作和完成动作", () => {
@@ -121,7 +129,7 @@ test("跑动以稳定 12fps 逐格播放，不叠化两个姿势", () => {
   assert.deepEqual(assistantPetFrameAt("running-right", 672, null).cell, { row: 1, column: 0 });
 });
 
-test("跳跃只使用同一动作行的五个阶段，单次播放后站稳", () => {
+test("跳跃使用同一动作行的五个阶段播放三次后站稳", () => {
   const plans = [0, 1, 2, 3, 4].map((column) => assistantPetDrawPlan({ row: 4, column }));
   assert.deepEqual(plans.map((plan) => plan.layers[0]?.destinationY), [-56, -21, -6, -25, -58]);
   assert.deepEqual(plans.map((plan) => plan.layers[0]?.row), [4, 4, 4, 4, 4]);
@@ -132,8 +140,13 @@ test("跳跃只使用同一动作行的五个阶段，单次播放后站稳", ()
   const liftoff = assistantPetFrameAt("jumping", 100, null);
   assert.deepEqual(liftoff.cell, { row: 4, column: 1 });
   assert.deepEqual(assistantPetFrameAt("jumping", 190, null).cell, { row: 4, column: 2 });
-  assert.deepEqual(assistantPetFrameAt("jumping", 580, null).cell, { row: 0, column: 5 });
-  assert.deepEqual(assistantPetFrameAt("jumping", 0, null, true).cell, { row: 0, column: 5 });
+  assert.deepEqual(assistantPetFrameAt("jumping", 579, null).cell, { row: 4, column: 4 });
+  assert.deepEqual(assistantPetFrameAt("jumping", 580, null).cell, { row: 4, column: 0 });
+  assert.deepEqual(assistantPetFrameAt("jumping", 680, null).cell, { row: 4, column: 1 });
+  assert.deepEqual(assistantPetFrameAt("jumping", 1_160, null).cell, { row: 4, column: 0 });
+  assert.deepEqual(assistantPetFrameAt("jumping", 1_739, null).cell, { row: 4, column: 4 });
+  assert.deepEqual(assistantPetFrameAt("jumping", 1_740, null).cell, { row: 0, column: 4 });
+  assert.deepEqual(assistantPetFrameAt("jumping", 0, null, true).cell, { row: 0, column: 4 });
 });
 
 test("注视帧统一人物高度、基线和下半身锚点", () => {
@@ -248,4 +261,22 @@ test("PWA 摆手保留完整可见的手臂动作", () => {
     plan.layers[2]?.destinationHeight,
   ], [0, 0, 192, ASSISTANT_PET_COMPACT_CANVAS_HEIGHT, 8, -4, ASSISTANT_PET_COMPACT_CANVAS_HEIGHT]);
   assert.equal(Math.max(...(plan.layers[2]?.clipPath ?? []).map((point) => point.x)), 82);
+});
+
+test("PWA 跳跃和失败使用完整单元格，不沿用上半身裁切和桌面放大", () => {
+  for (const cell of [{ row: 4, column: 2 }, { row: 5, column: 3 }]) {
+    const plan = assistantPetDrawPlan(cell, false, true);
+    assert.equal(plan.viewportHeight, 208);
+    const layer = plan.layers[0];
+    assert.equal(layer?.row, cell.row);
+    assert.equal(layer?.column, cell.column);
+    assert.ok((layer?.sourceWidth ?? 192) < 192);
+    assert.ok((layer?.sourceHeight ?? 208) < 208);
+    assert.ok((layer?.destinationWidth ?? 193) <= 176);
+    assert.ok((layer?.destinationHeight ?? 195) <= 194);
+    assert.ok((layer?.destinationX ?? -1) >= 0);
+    assert.ok((layer?.destinationY ?? -1) >= 0);
+    assert.ok((layer?.destinationX ?? 0) + (layer?.destinationWidth ?? 193) <= 192);
+    assert.ok((layer?.destinationY ?? 0) + (layer?.destinationHeight ?? 209) <= 208);
+  }
 });
