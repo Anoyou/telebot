@@ -870,6 +870,7 @@ class Incoming:
     trace_id: str | None = None
     native_raw: dict[str, Any] | None = None
     callback_already_acked: bool = False
+    management_rich_html_required: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -2367,6 +2368,7 @@ async def _handle_update(aid: int, token: str, update: dict[str, Any]) -> None:
     incoming = _extract_incoming(aid, token, update)
     if incoming is None:
         return
+    incoming.management_rich_html_required = True
     flags = await _event_framework_flags()
     if (incoming.inline_query_id or incoming.chosen_inline_result_id) and not flags.get("inline_updates_enabled", True):
         return
@@ -9614,6 +9616,19 @@ async def _check_remote_plugin_permission(account_id: int, role: str, action: st
     return True, ""
 
 
+_RICH_HTML_BLOCK_TAG_RE = re.compile(
+    r"</?(?:h[1-6]|p|ul|ol|li|table|tr|th|td|details|summary|pre|blockquote)(?:\s|>)",
+    re.IGNORECASE,
+)
+
+
+def _management_rich_html(text: str) -> str:
+    value = str(text or "").strip()
+    if _RICH_HTML_BLOCK_TAG_RE.search(value):
+        return value
+    return f"<p>{value.replace(chr(10), '<br>')}</p>"
+
+
 async def _send(
     incoming: Incoming,
     text: str,
@@ -9627,10 +9642,14 @@ async def _send(
 ) -> dict[str, Any] | None:
     if incoming.chat_id is None:
         return None
-    if rich_html and rich_markdown:
+    management_rich_html_required = incoming.management_rich_html_required
+    if management_rich_html_required:
+        rich_message = {"html": rich_html or _management_rich_html(text)}
+    elif rich_html and rich_markdown:
         raise ValueError("rich_html 与 rich_markdown 不能同时提供")
+    else:
+        rich_message = {"markdown": rich_markdown} if rich_markdown else ({"html": rich_html} if rich_html else None)
     target_message_id = edit_message_id if edit_message_id is not None else incoming.message_id
-    rich_message = {"markdown": rich_markdown} if rich_markdown else ({"html": rich_html} if rich_html else None)
     action = {
         "type": "edit_message" if edit and target_message_id is not None else "send_message",
         "send_via": "interaction_bot",
@@ -9700,48 +9719,50 @@ async def _send(
                     error_code="telegram_api_error",
                     error=f"rich edit fallback: {type(exc).__name__}",
                 )
-                log.debug("edit rich account bot message failed, fallback HTML edit", exc_info=True)
-        try:
-            result = await account_bot_service.edit_message(
-                incoming.token,
-                incoming.chat_id,
-                target_message_id,
-                text,
-                reply_markup=reply_markup,
-            )
-            await record_action(
-                trace_log_context(incoming.trace_id),
-                action,
-                TRACE_STATUS_OK,
-                actual_send_via="interaction_bot",
-                result=result,
-            )
-            await _emit_account_bot_action_tap(
-                incoming,
-                action,
-                ACTION_EVENT_STATUS_OK,
-                channel="interaction_bot",
-                result=result,
-            )
-            return result
-        except Exception:
-            log.debug("edit account bot message failed, fallback send", exc_info=True)
-            await record_action(
-                trace_log_context(incoming.trace_id),
-                action,
-                TRACE_STATUS_FAILED,
-                actual_send_via="interaction_bot",
-                error_code="telegram_api_error",
-                error="edit account bot message failed, fallback send",
-            )
-            await _emit_account_bot_action_tap(
-                incoming,
-                action,
-                ACTION_EVENT_STATUS_FAILED,
-                channel="interaction_bot",
-                error_code="telegram_api_error",
-                error="edit account bot message failed, fallback send",
-            )
+                fallback = "Rich HTML send" if management_rich_html_required else "HTML edit"
+                log.debug("edit rich account bot message failed, fallback %s", fallback, exc_info=True)
+        if not management_rich_html_required:
+            try:
+                result = await account_bot_service.edit_message(
+                    incoming.token,
+                    incoming.chat_id,
+                    target_message_id,
+                    text,
+                    reply_markup=reply_markup,
+                )
+                await record_action(
+                    trace_log_context(incoming.trace_id),
+                    action,
+                    TRACE_STATUS_OK,
+                    actual_send_via="interaction_bot",
+                    result=result,
+                )
+                await _emit_account_bot_action_tap(
+                    incoming,
+                    action,
+                    ACTION_EVENT_STATUS_OK,
+                    channel="interaction_bot",
+                    result=result,
+                )
+                return result
+            except Exception:
+                log.debug("edit account bot message failed, fallback send", exc_info=True)
+                await record_action(
+                    trace_log_context(incoming.trace_id),
+                    action,
+                    TRACE_STATUS_FAILED,
+                    actual_send_via="interaction_bot",
+                    error_code="telegram_api_error",
+                    error="edit account bot message failed, fallback send",
+                )
+                await _emit_account_bot_action_tap(
+                    incoming,
+                    action,
+                    ACTION_EVENT_STATUS_FAILED,
+                    channel="interaction_bot",
+                    error_code="telegram_api_error",
+                    error="edit account bot message failed, fallback send",
+                )
     send_action = {
         "type": "send_message",
         "send_via": "interaction_bot",
@@ -9797,6 +9818,9 @@ async def _send(
                 error_code="telegram_api_error",
                 error=f"rich send fallback: {type(exc).__name__}",
             )
+            if management_rich_html_required:
+                log.debug("send rich management bot message failed", exc_info=True)
+                raise
             log.debug("send rich account bot message failed, fallback sendMessage", exc_info=True)
     try:
         result = await account_bot_service.send_message(

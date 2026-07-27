@@ -25,6 +25,20 @@
 
 ## [Unreleased]
 
+## [0.85.0-beta.3] - 2026-07-28 · minor（次版本预发布） · 管理 Bot 全面启用 Rich HTML
+
+### Changed
+
+- 管理 Bot 的命令、回调页面、确认提示与 System Agent 回复统一通过 Rich HTML 发送；普通文本会自动保留换行，Agent 的 HTML 后备正文不再切换成 Rich Markdown。
+
+### Fixed
+
+- 移除管理 Bot 在富文本编辑或发送失败后降级为普通 HTML 的路径，避免同一状态页面因回退链路不同而出现两套排版；编辑失败时改为另发 Rich HTML，发送失败则保留真实错误。
+
+### Tests
+
+- 补充管理 Bot 普通正文转换、Agent 回复、编辑失败重发、发送失败不降级及管理入口标记的回归测试。
+
 ## [0.85.0-beta.2] - 2026-07-28 · minor（次版本预发布） · 桌宠状态与 PWA 动画修复
 
 ### Changed

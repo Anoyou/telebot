@@ -16502,6 +16502,7 @@ async def test_management_bot_command_creates_trace_when_router_debug_enabled(mo
     account_bot_runtime.start_trace.assert_awaited_once()
     handle_command.assert_awaited_once()
     assert handle_command.await_args.args[0].trace_id == "evt_management"
+    assert handle_command.await_args.args[0].management_rich_html_required is True
     assert any(call.args[1] == "receive" for call in record_span.await_args_list)
     assert any(call.kwargs.get("component") == "account_bot_command" for call in record_span.await_args_list)
     finish_trace.assert_awaited_once_with(trace, "ok")
@@ -16940,6 +16941,130 @@ async def test_account_bot_agent_send_uses_rich_markdown(monkeypatch) -> None:
         reply_markup=None,
         reply_to_message_id=None,
     )
+    send_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_management_bot_plain_message_always_uses_rich_html(monkeypatch) -> None:
+    incoming = account_bot_runtime.Incoming(
+        account_id=7,
+        token="bot-token",
+        update_id=1,
+        user_id=2,
+        chat_id=12345,
+        message_id=99,
+        text="/pause",
+        management_rich_html_required=True,
+    )
+    send_rich = AsyncMock(return_value={"message_id": 188})
+    send_message = AsyncMock()
+    monkeypatch.setattr(account_bot_service, "send_rich_message", send_rich)
+    monkeypatch.setattr(account_bot_service, "send_message", send_message)
+    monkeypatch.setattr(account_bot_runtime, "record_action", AsyncMock())
+    monkeypatch.setattr(account_bot_runtime, "_emit_account_bot_action_tap", AsyncMock())
+
+    result = await account_bot_runtime._send(incoming, "第一行\n第二行")
+
+    assert result == {"message_id": 188}
+    send_rich.assert_awaited_once_with(
+        "bot-token",
+        12345,
+        {"html": "<p>第一行<br>第二行</p>"},
+        reply_markup=None,
+        reply_to_message_id=None,
+    )
+    send_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_management_bot_agent_message_converts_markdown_to_rich_html(monkeypatch) -> None:
+    incoming = account_bot_runtime.Incoming(
+        account_id=7,
+        token="bot-token",
+        update_id=1,
+        user_id=2,
+        chat_id=12345,
+        message_id=99,
+        text="今日收入",
+        management_rich_html_required=True,
+    )
+    send_rich = AsyncMock(return_value={"message_id": 188})
+    monkeypatch.setattr(account_bot_service, "send_rich_message", send_rich)
+    monkeypatch.setattr(account_bot_service, "send_message", AsyncMock())
+    monkeypatch.setattr(account_bot_runtime, "record_action", AsyncMock())
+    monkeypatch.setattr(account_bot_runtime, "_emit_account_bot_action_tap", AsyncMock())
+
+    await account_bot_runtime._send(
+        incoming,
+        "<b>今日台账</b>\n<pre>类型  金额</pre>",
+        rich_markdown="## 今日台账\n\n| 类型 | 金额 |",
+    )
+
+    send_rich.assert_awaited_once_with(
+        "bot-token",
+        12345,
+        {"html": "<b>今日台账</b>\n<pre>类型  金额</pre>"},
+        reply_markup=None,
+        reply_to_message_id=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_management_bot_rich_edit_failure_sends_new_rich_message(monkeypatch) -> None:
+    incoming = account_bot_runtime.Incoming(
+        account_id=7,
+        token="bot-token",
+        update_id=1,
+        user_id=2,
+        chat_id=12345,
+        message_id=99,
+        text="/status",
+        management_rich_html_required=True,
+    )
+    edit_rich = AsyncMock(side_effect=RuntimeError("message cannot be edited"))
+    edit_message = AsyncMock()
+    send_rich = AsyncMock(return_value={"message_id": 188})
+    monkeypatch.setattr(account_bot_service, "edit_rich_message", edit_rich)
+    monkeypatch.setattr(account_bot_service, "edit_message", edit_message)
+    monkeypatch.setattr(account_bot_service, "send_rich_message", send_rich)
+    monkeypatch.setattr(account_bot_runtime, "record_action", AsyncMock())
+    monkeypatch.setattr(account_bot_runtime, "_emit_account_bot_action_tap", AsyncMock())
+
+    result = await account_bot_runtime._send(incoming, "状态正常", edit=True)
+
+    assert result == {"message_id": 188}
+    edit_message.assert_not_awaited()
+    send_rich.assert_awaited_once_with(
+        "bot-token",
+        12345,
+        {"html": "<p>状态正常</p>"},
+        reply_markup=None,
+        reply_to_message_id=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_management_bot_rich_send_failure_does_not_fallback(monkeypatch) -> None:
+    incoming = account_bot_runtime.Incoming(
+        account_id=7,
+        token="bot-token",
+        update_id=1,
+        user_id=2,
+        chat_id=12345,
+        message_id=99,
+        text="/status",
+        management_rich_html_required=True,
+    )
+    send_rich = AsyncMock(side_effect=RuntimeError("method unavailable"))
+    send_message = AsyncMock()
+    monkeypatch.setattr(account_bot_service, "send_rich_message", send_rich)
+    monkeypatch.setattr(account_bot_service, "send_message", send_message)
+    monkeypatch.setattr(account_bot_runtime, "record_action", AsyncMock())
+    monkeypatch.setattr(account_bot_runtime, "_emit_account_bot_action_tap", AsyncMock())
+
+    with pytest.raises(RuntimeError, match="method unavailable"):
+        await account_bot_runtime._send(incoming, "状态正常")
+
     send_message.assert_not_awaited()
 
 
