@@ -44,6 +44,7 @@ import {
 
 import {
   createLLMProvider,
+  chatTestProviderModels,
   deleteLLMProvider,
   detectClientIdentityVersions,
   detectProviderProtocols,
@@ -52,12 +53,11 @@ import {
   listLLMProviders,
   patchLLMProvider,
   revealLLMProviderApiKey,
-  testProviderModel,
   updateClientIdentityVersions,
 } from "@/api/commands";
 import { listProxies } from "@/api/proxies";
 import { getSystemSettings, patchSystemSettings } from "@/api/system";
-import type { ClientIdentityHeaderItem, ClientIdentityRequestProfile, ClientIdentityVersionDetectItem, ClientIdentityVersionItem, DetectProviderProtocolsResponse, LLMApiFormat, LLMClientIdentityProfile, LLMModality, LLMProtocolProfile, LLMProviderKind, LLMProviderOut, LLMRequestHeaderInput, LLMRequestHeaderScope, LLMTag, LLMWebSearchApiFormat, ProviderModel, ProtocolProbeResult, ProxyOut } from "@/api/types";
+import type { ChatTestModelResult, ClientIdentityHeaderItem, ClientIdentityRequestProfile, ClientIdentityVersionDetectItem, ClientIdentityVersionItem, DetectProviderProtocolsResponse, LLMApiFormat, LLMClientIdentityProfile, LLMModality, LLMProtocolProfile, LLMProviderKind, LLMProviderOut, LLMRequestHeaderInput, LLMRequestHeaderScope, LLMTag, LLMWebSearchApiFormat, ProviderModel, ProtocolProbeResult, ProxyOut } from "@/api/types";
 import { getErrMsg } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { confirmDiscardChanges, useUnsavedChanges } from "@/lib/unsavedChanges";
@@ -1203,12 +1203,20 @@ export function LLMProviders({
                         )}
                       </TableCell>
                       <TableCell className="space-x-2 text-right">
-                        <Button variant="ghost" size="sm" onClick={() => onEdit(p)}>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          aria-label={`编辑 ${p.name}`}
+                          title={`编辑 ${p.name}`}
+                          onClick={() => onEdit(p)}
+                        >
                           <Edit3 className="h-4 w-4" />
                         </Button>
                         <Button
                           variant="ghost"
                           size="sm"
+                          aria-label={`删除 ${p.name}`}
+                          title={`删除 ${p.name}`}
                           disabled={deleteMut.isPending}
                           onClick={() => {
                             if (confirm(`确认删除模型提供商「${p.name}」？引用此模型提供商的 AI 指令将失败`)) {
@@ -2062,15 +2070,15 @@ function ProbeRow({ label, probe }: { label: string; probe: ProtocolProbeResult 
 }
 
 // ═══════════════════════════════════════════════════════════
-// ProviderModelsSection：候选模型清单 + Fetch + 自定义添加 + 测试
+// ProviderModelsSection：候选模型清单 + Fetch + 自定义添加 + 对话测活
 // ═══════════════════════════════════════════════════════════
 //
 // 设计：
 // - models 是 form 的本地状态；toggle / 删除 / 自定义添加都改本地，最终随"保存"PATCH 落库
 // - "Fetch 模型列表"现在直接读编辑表单当前值（provider/base_url/api_key/api_format/proxy_id）
 //   走 ``/fetch-models-preview`` 预览端点，不需要先保存；新增模型 merge 到 form.models 本地。
-// - "测试连通性"仍需 provider 已落库（要解密 api_key 用 LLMClient 走正常路径），
-//   未保存的 provider（form.id 为空）按钮置灰 + 提示"先保存"。
+// - 单模型测活在后台复用真实对话接口并原地返回结果；未保存的 provider
+//   （form.id 为空）按钮置灰 + 提示"先保存"。
 // - 模型按 enabled 拆两段：启用的常驻显示；未启用的默认折叠隐藏，点击展开。
 function ProviderModelsSection({
   providerId,
@@ -2098,21 +2106,16 @@ function ProviderModelsSection({
   requestHeaders: FormRequestHeader[];
 }) {
   const [customId, setCustomId] = useState("");
-  // 测试某条模型时，记当前正在测的 id（用来禁用按钮 + 显示 spinner）
   const [testingId, setTestingId] = useState<string | null>(null);
-  // 测试结果按 id 缓存：{[id]: {ok, latency_ms, error?}}
-  const [testResults, setTestResults] = useState<
-    Record<string, { ok: boolean; latency_ms: number; error?: string | null; preview?: string | null; model?: string | null }>
-  >({});
-  // 在途 test-model 请求的 AbortController：组件卸载 / 关编辑弹窗时中断，中断后不再回写状态。
-  const abortRef = useRef<AbortController | null>(null);
+  const [testResults, setTestResults] = useState<Record<string, ChatTestModelResult>>({});
+  const testAbortRef = useRef<AbortController | null>(null);
   const mountedRef = useRef(true);
   useEffect(() => {
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
-      abortRef.current?.abort();
-      abortRef.current = null;
+      testAbortRef.current?.abort();
+      testAbortRef.current = null;
     };
   }, []);
   // 未启用模型组：默认折叠（仅当存在已启用模型时；如果一条都没启用，
@@ -2179,36 +2182,54 @@ function ProviderModelsSection({
 
   const onTest = async (modelId: string) => {
     const controller = new AbortController();
-    abortRef.current = controller;
+    const startedAt = performance.now();
+    testAbortRef.current = controller;
     setTestingId(modelId);
     try {
-      const r = await testProviderModel(
+      const response = await chatTestProviderModels(
         providerId!,
-        { model: modelId },
+        {
+          models: [modelId],
+          message: "请用一句简短中文回复：模型测活正常。",
+          system_prompt: "你正在执行模型可用性检查。请直接、简短地回复用户，不要调用工具。",
+          max_tokens: 128,
+          timeout_seconds: 90,
+        },
         { signal: controller.signal },
       );
       if (controller.signal.aborted) return;
-      setTestResults((prev) => ({
-        ...prev,
+      const result = response.results[0];
+      if (!result) throw new Error("测活接口没有返回模型结果");
+      setTestResults((current) => ({ ...current, [modelId]: result }));
+      if (result.ok) {
+        const reply = (result.response || result.preview || "模型已正常回复").trim();
+        toast.success(`${modelId} 正常 · ${result.latency_ms} ms`, {
+          description: reply.slice(0, 160),
+        });
+      } else {
+        toast.error(`${modelId} 测活失败 · ${result.latency_ms} ms`, {
+          description: result.error || "上游未返回有效文本",
+        });
+      }
+    } catch (error) {
+      if (controller.signal.aborted) return;
+      const message = getErrMsg(error);
+      setTestResults((current) => ({
+        ...current,
         [modelId]: {
-          ok: r.ok,
-          latency_ms: r.latency_ms,
-          error: r.error,
-          preview: r.preview,
-          model: r.model,
+          ok: false,
+          requested_model: modelId,
+          latency_ms: Math.max(0, Math.round(performance.now() - startedAt)),
+          input_tokens: 0,
+          output_tokens: 0,
+          empty_response: false,
+          error: message,
         },
       }));
-      if (r.ok) {
-        toast.success(`${modelId} 通：${r.latency_ms} ms`);
-      } else {
-        toast.error(`${modelId} 失败（${r.latency_ms} ms）：${r.error || "未知"}`);
-      }
-    } catch (e) {
-      if (controller.signal.aborted) return; // 被中断：静默
-      toast.error(getErrMsg(e));
+      toast.error(`${modelId} 测活失败`, { description: message });
     } finally {
-      if (abortRef.current === controller) {
-        abortRef.current = null;
+      if (testAbortRef.current === controller) {
+        testAbortRef.current = null;
         if (mountedRef.current) setTestingId(null);
       }
     }
@@ -2244,15 +2265,19 @@ function ProviderModelsSection({
         : null;
 
   // 渲染单行模型；按用户要求保持**固定顺序**：
-  //   [⭐(设默认) 或 默认徽章] / 测试 / 删除
+  //   [⭐(设默认) 或 默认徽章] / 测活 / 删除
   // 即第一个槽位永远是"设默认动作"——非默认显示 ⭐ 按钮、默认显示徽章占位；
-  // 后两位永远是 测试 + 删除，避免列错位。
+  // 后两位永远是 测活 + 删除，避免列错位。
   const renderModelRow = (m: ProviderModel, idx: number) => {
     const isDefault = m.id === defaultModel;
     const result = testResults[m.id];
+    const resultDetail = result?.ok
+      ? (result.response || result.preview || "模型已正常回复")
+      : result?.error;
     return (
       <div
         key={m.id}
+        data-provider-model-id={m.id}
         className="flex items-center gap-2 border-b px-2 py-1.5 last:border-b-0 text-sm"
       >
         <Switch
@@ -2267,16 +2292,12 @@ function ProviderModelsSection({
         ) : null}
         {result ? (
           result.ok ? (
-            <MetaBadge tone="success" className="text-[10px] leading-4">
+            <MetaBadge tone="success" className="text-[10px] leading-4" title={resultDetail || ""}>
               <CheckCircle2 className="h-3 w-3" />
               {result.latency_ms} ms
             </MetaBadge>
           ) : (
-            <MetaBadge
-              tone="danger"
-              className="text-[10px] leading-4"
-              title={result.error || ""}
-            >
+            <MetaBadge tone="danger" className="text-[10px] leading-4" title={resultDetail || ""}>
               <XCircle className="h-3 w-3" />
               失败
             </MetaBadge>
@@ -2296,31 +2317,19 @@ function ProviderModelsSection({
             <Star className="h-3.5 w-3.5" />
           </Button>
         )}
-        {/* 槽位 2：连通性测试 + 模型测活深链 */}
+        {/* 槽位 2：真实单模型对话测活 */}
         <Button
           type="button"
           size="sm"
           variant="ghost"
           loading={testingId === m.id}
           disabled={!persisted || (testingId !== null && testingId !== m.id)}
+          title={persisted ? "后台发起一次真实单模型对话测活" : "先保存 Provider 再测活"}
           onClick={() => onTest(m.id)}
-          title={persisted ? "测试连通性 + 延时" : "先保存 provider 再测"}
         >
-          测试
+          {testingId !== m.id ? <Activity className="h-3.5 w-3.5" /> : null}
+          测活
         </Button>
-        {persisted && providerId != null ? (
-          <Button
-            type="button"
-            size="sm"
-            variant="ghost"
-            asChild
-            title="打开模型测活并预选此模型"
-          >
-            <Link to={`/ai/liveness?provider=${providerId}&model=${encodeURIComponent(m.id)}`}>
-              对话
-            </Link>
-          </Button>
-        ) : null}
         {/* 槽位 3：删除 */}
         <Button
           type="button"

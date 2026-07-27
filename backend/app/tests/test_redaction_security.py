@@ -65,6 +65,25 @@ def test_redactor_masks_common_provider_api_keys() -> None:
         assert value not in redact_text(f"provider key: {value}")
 
 
+def test_redactor_masks_quoted_env_repr_and_cookie_values() -> None:
+    secret = "0123456789abcdef0123456789abcdef"
+    samples = (
+        f"TELEPILOT_UPDATER_TOKEN='{secret}'",
+        f"{{'authorization': '{secret}'}}",
+        f'cookie="sessionid={secret}"',
+        f'config={{"api_key": "{secret}"}}',
+        f"custom_service_refresh_token={secret}",
+        f"Authorization: Token {secret}",
+        f"Authorization: ApiKey {secret}",
+        f"Authorization: Digest {secret}",
+    )
+
+    for sample in samples:
+        redacted = redact_text(sample)
+        assert secret not in redacted
+        assert "***" in redacted
+
+
 def test_log_filter_redacts_telegram_bot_url_args() -> None:
     record = logging.LogRecord(
         name="httpx",

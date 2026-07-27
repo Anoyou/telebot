@@ -3443,3 +3443,33 @@ async def test_update_provider_rejects_incompatible_identity() -> None:
         )
     assert ei.value.status_code == 422
     assert ei.value.detail["code"] == "LLM_PROVIDER_IDENTITY_INVALID"
+
+
+@pytest.mark.asyncio
+async def test_update_provider_normalizes_persisted_codex_cli_identity() -> None:
+    """旧 Codex CLI Provider 修改普通字段时也会迁移为数据库允许的 TUI 值。"""
+    row = LLMProvider(
+        id=89,
+        name="legacy-codex",
+        provider="openai",
+        api_key_enc=None,
+        base_url="https://proxy.example/v1",
+        default_model="gpt-5-codex",
+        api_format="responses",
+        client_identity_profile="codex_cli",
+        created_at=datetime.now(UTC),
+    )
+
+    class _DB:
+        async def get(self, _model, _pk):
+            return row
+
+        async def flush(self):
+            return None
+
+    out = await command_service.update_provider(
+        _DB(), 89, LLMProviderUpdate(notes="rename-safe")
+    )
+
+    assert row.client_identity_profile == "codex_tui"
+    assert out.client_identity_profile == "codex_tui"

@@ -25,6 +25,22 @@
 
 ## [Unreleased]
 
+## [0.85.0-beta.1] - 2026-07-27 · minor（次版本预发布） · Provider 测活与 Agent 诊断增强
+
+### Changed
+
+- Provider 模型列表将原“测试”与“对话”入口合并为单一“测活”操作，在当前页面后台发起一次真实单模型对话并原地返回正常状态、延时、回复摘要或错误，不再跳转测活页，也不再使用轻量 ping 作为模型可用性结论。
+- System Agent 新增管理员只读的 Web/容器控制台日志能力，管理界面 4xx/5xx、保存失败等问题会先读取脱敏且有体积上限的系统日志，再结合部署源码、Provider 状态和数据库迁移版本定位根因；不授予 shell、Docker socket、任意 SQL 或项目代码写权限。
+
+### Fixed
+
+- 新增数据库迁移，将旧 `codex_cli` / `codex_exec` Provider 身份迁移为 `codex_tui` 并同步检查约束，修复修改 Codex Responses Provider 时触发 `ck_llm_provider_client_identity_profile`、返回“服务器内部错误”的问题。
+- 补齐引号包裹环境变量、字典 repr、Authorization 与 Cookie 等常见日志格式的凭据脱敏，避免系统日志进入 Agent 模型上下文时泄露敏感值。
+
+### Tests
+
+- 新增系统控制台日志脱敏、Agent 管理员权限与外部数据标记、Provider 500 诊断路由、迁移升级/降级顺序及旧 Codex Provider 保存回归测试。
+
 ## [0.84.0-beta.4] - 2026-07-27 · patch（补丁版本预发布） · Provider 客户端身份与 Agent 自查修复
 
 ### Changed

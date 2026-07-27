@@ -54,6 +54,7 @@ async def test_registry_includes_read_and_write_tools() -> None:
     expected_read = {
         "system.get_context",
         "system.get_health",
+        "logs.system_console",
         "accounts.list",
         "accounts.get",
         "interaction.list_rules",

@@ -43,9 +43,21 @@ async def get_health(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
     # DB
     try:
         await ctx.db.execute(text("SELECT 1"))
-        checks["db"] = {"ok": True}
+        db_check: dict[str, Any] = {"ok": True, "migration_revision": None}
+        try:
+            # SAVEPOINT 隔离缺表等错误，避免诊断查询把当前只读事务整体置为 failed。
+            async with ctx.db.begin_nested():
+                result = await ctx.db.execute(
+                    text("SELECT version_num FROM alembic_version LIMIT 1")
+                )
+                db_check["migration_revision"] = result.scalar_one_or_none()
+            if db_check["migration_revision"] is None:
+                db_check["migration_warning"] = "未找到数据库迁移版本记录"
+        except Exception as exc:  # noqa: BLE001
+            db_check["migration_warning"] = f"无法读取数据库迁移版本：{str(exc)[:160]}"
+        checks["db"] = db_check
     except Exception as exc:  # noqa: BLE001
-        checks["db"] = {"ok": False, "error": str(exc)[:200]}
+        checks["db"] = {"ok": False, "migration_revision": None, "error": str(exc)[:200]}
     # Redis
     try:
         r = get_redis()
@@ -96,7 +108,7 @@ def register(registry: ToolRegistry) -> None:
     registry.register(
         ToolSpec(
             name="system.get_health",
-            description="获取系统健康状态：数据库、Redis、账号分布、Provider 数量等组件就绪信息。",
+            description="获取系统健康状态：数据库及迁移版本、Redis、账号分布、Provider 数量等组件就绪信息。",
             input_schema={"type": "object", "properties": {}, "additionalProperties": False},
             read_only=True,
             min_role="viewer",

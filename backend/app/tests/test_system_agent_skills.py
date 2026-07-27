@@ -19,7 +19,26 @@ async def _read_handler(_ctx, _args):  # noqa: ANN001
     return {"ok": True}
 
 
-def _spec(name: str) -> ToolSpec:
+async def _write_handler(_ctx, _args):  # noqa: ANN001
+    return {"ok": True}
+
+
+def _spec(
+    name: str,
+    *,
+    read_only: bool = True,
+    diagnostic_safe: bool = False,
+) -> ToolSpec:
+    if not read_only:
+        return ToolSpec(
+            name=name,
+            description=name,
+            input_schema={"type": "object", "properties": {}},
+            read_only=False,
+            diagnostic_safe=diagnostic_safe,
+            preview_handler=_write_handler,
+            execute_handler=_write_handler,
+        )
     return ToolSpec(
         name=name,
         description=name,
@@ -149,6 +168,7 @@ def test_two_skills_receive_stable_key_tools() -> None:
             "scheduler.set_enabled",
             "scheduler.execute_now",
             "scheduler.delete",
+            "logs.system_console",
             "logs.recent",
             "logs.search_errors",
             "logs.get_event_detail",
@@ -164,10 +184,48 @@ def test_two_skills_receive_stable_key_tools() -> None:
     assert len(names) == 8
     assert names[:4] == [
         "scheduler.list",
-        "logs.recent",
+        "logs.system_console",
         "scheduler.save",
-        "logs.search_errors",
+        "logs.recent",
     ]
+
+
+def test_provider_500_diagnostics_keeps_console_source_and_provider_tools() -> None:
+    registry = _skill_registry()
+    specs = [
+        _spec(name)
+        for name in (
+            "logs.system_console",
+            "logs.recent",
+            "source.search",
+            "source.read",
+            "system.get_health",
+            "providers.list",
+            "providers.verify",
+            "providers.save",
+        )
+    ]
+    specs[-2] = _spec("providers.verify", read_only=False, diagnostic_safe=True)
+    specs[-1] = _spec("providers.save", read_only=False)
+    route = route_locally(
+        "排查 Provider 保存时报服务器内部错误",
+        available={"logs", "source", "system", "providers"},
+    )
+
+    assert route is not None
+    selected = registry.select(route)
+    narrowed = registry.narrow_tools(select_tool_specs(specs, route), selected)
+    names = {spec.name for spec in narrowed}
+
+    assert {
+        "logs.system_console",
+        "source.search",
+        "source.read",
+        "providers.list",
+        "providers.verify",
+    } <= names
+    assert "providers.save" not in names
+    assert "providers.delete" not in names
 
 
 @pytest.mark.asyncio

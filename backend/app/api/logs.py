@@ -10,17 +10,8 @@
 
 from __future__ import annotations
 
-import asyncio
-import json
-import os
-import re
-from collections import deque
 from datetime import datetime
-from pathlib import Path
 from typing import Any
-from urllib import error as urllib_error
-from urllib import parse as urllib_parse
-from urllib import request as urllib_request
 
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field
@@ -31,16 +22,17 @@ from ..deps import CurrentUser, DBSession
 from ..services.event_probe import build_event_probe_report
 from ..services.log_funel import MessageFunel, build_message_funel
 from ..services.redactor import redact_text, redact_value
-from ..settings import PROJECT_ROOT
+from ..services.system_console_logs import (
+    LOCAL_CONSOLE_FILES,
+    fetch_updater_console_logs,
+    filter_console_payload,
+    read_system_console_logs,
+)
 
 router = APIRouter(tags=["logs"])
-
-_SYSTEM_CONSOLE_SERVICES = {"all", "web", "frontend", "postgres", "redis", "updater"}
-_LOCAL_CONSOLE_FILES = {
-    "web": PROJECT_ROOT / "logs" / "backend.log",
-    "frontend": PROJECT_ROOT / "logs" / "frontend.log",
-}
-
+_LOCAL_CONSOLE_FILES = LOCAL_CONSOLE_FILES
+_fetch_updater_console_logs = fetch_updater_console_logs
+_filter_console_payload = filter_console_payload
 
 # ── 出参 ─────────────────────────────────────────────────────────
 class AuditLogItem(BaseModel):
@@ -299,136 +291,6 @@ def _inline_trace_summary(row: EventTrace) -> tuple[str | None, str | None, str 
         row.text_preview if event_type == "chosen_inline_result" else None,
     )
     return inline_query, chosen_inline_result_id, chosen_inline_query
-
-
-def _updater_token() -> str:
-    return (os.getenv("TELEPILOT_UPDATER_TOKEN") or "").strip()
-
-
-def _fetch_updater_console_logs(service: str, tail: int) -> dict[str, Any]:
-    raw_url = (os.getenv("TELEPILOT_UPDATER_URL") or "").strip().rstrip("/")
-    if not raw_url:
-        raise RuntimeError("内部 updater 未配置")
-    params = urllib_parse.urlencode(
-        {
-            "service": service,
-            "tail": str(tail),
-        }
-    )
-    headers: dict[str, str] = {}
-    token = _updater_token()
-    if token:
-        headers["X-TelePilot-Updater-Token"] = token
-    req = urllib_request.Request(f"{raw_url}/console-logs?{params}", headers=headers, method="GET")
-    try:
-        with urllib_request.urlopen(req, timeout=12) as resp:  # noqa: S310 - internal configured URL
-            text = resp.read().decode("utf-8", errors="ignore")
-    except urllib_error.HTTPError as exc:
-        text = exc.read().decode("utf-8", errors="ignore")
-        try:
-            parsed = json.loads(text)
-        except Exception:
-            parsed = {"ok": False, "error": text or str(exc)}
-        return parsed if isinstance(parsed, dict) else {"ok": False, "error": str(exc)}
-    parsed = json.loads(text) if text else {}
-    return parsed if isinstance(parsed, dict) else {}
-
-
-def _is_console_noise_line(line: str) -> bool:
-    lowered = line.lower()
-    is_alembic_info = ("info:" in lowered or "info  [" in lowered) and "alembic.runtime." in lowered
-    if is_alembic_info and any(
-        marker in lowered
-        for marker in (
-            "context impl postgresqlimpl",
-            "will assume transactional ddl",
-            "setup plugin alembic.autogenerate",
-        )
-    ):
-        return True
-    if re.search(r"\[worker:\d+\]\s+info\s+got difference for channel \d+ updates", lowered):
-        return True
-    if "info:httpx:http request:" in lowered:
-        return bool(re.search(r'"http/[^\"]+\s+2\d\d(?:\s+[^\"]+)?"', lowered))
-    is_updater_poll = "[updater]" in lowered and (
-        '"get /health http/' in lowered
-        or '"get /console-logs?' in lowered
-        or bool(re.search(r'"get /jobs/[^ ]+ http/', lowered))
-    )
-    is_internal_healthz = "127.0.0.1" in lowered and '"get /healthz http/' in lowered
-    if not (is_updater_poll or is_internal_healthz):
-        return False
-    return any(f" {status} " in lowered for status in range(200, 300))
-
-
-def _filter_console_payload(payload: dict[str, Any], keyword: str | None) -> dict[str, Any]:
-    raw_lines = payload.get("lines")
-    if not isinstance(raw_lines, list):
-        return payload
-    lines = [line for line in raw_lines if not _is_console_noise_line(str(line))]
-    q = (keyword or "").strip().lower()
-    if q:
-        lines = [line for line in lines if q in str(line).lower()]
-    return {**payload, "lines": lines}
-
-
-def _tail_file(path: Path, max_lines: int) -> list[str]:
-    if not path.exists() or not path.is_file():
-        return []
-    with path.open("r", encoding="utf-8", errors="replace") as fh:
-        return [line.rstrip("\n") for line in deque(fh, maxlen=max_lines)]
-
-
-def _read_local_console_logs(service: str, tail: int, keyword: str | None) -> SystemConsoleLogsResponse:
-    services = ["web", "frontend"] if service == "all" else [service]
-    lines: list[str] = []
-    for name in services:
-        path = _LOCAL_CONSOLE_FILES.get(name)
-        if path is None:
-            continue
-        prefix = f"{name}  | "
-        lines.extend(f"{prefix}{line}" for line in _tail_file(path, tail))
-    q = (keyword or "").strip().lower()
-    if q:
-        lines = [line for line in lines if q in line.lower()]
-    redacted = [redact_text(line) for line in lines[-tail:]]
-    if redacted:
-        return SystemConsoleLogsResponse(
-            ok=True,
-            source="local_files",
-            services=[name for name in services if name in _LOCAL_CONSOLE_FILES],
-            tail=tail,
-            lines=redacted,
-        )
-    return SystemConsoleLogsResponse(
-        ok=False,
-        source="unavailable",
-        services=services,
-        tail=tail,
-        lines=[],
-        error="当前运行环境没有可读取的系统控制台日志源。生产环境需要内部 updater，开发环境需要 logs/backend.log 或 logs/frontend.log。",
-    )
-
-
-def _system_console_response(
-    payload: dict[str, Any], *, service: str, tail: int
-) -> SystemConsoleLogsResponse:
-    raw_lines = payload.get("lines")
-    lines = [redact_text(str(line)) for line in raw_lines] if isinstance(raw_lines, list) else []
-    raw_services = payload.get("services")
-    services = (
-        [str(item) for item in raw_services]
-        if isinstance(raw_services, list)
-        else ([service] if service != "all" else [])
-    )
-    return SystemConsoleLogsResponse(
-        ok=bool(payload.get("ok")),
-        source=str(payload.get("source") or "updater"),
-        services=services,
-        tail=int(payload.get("tail") or tail),
-        lines=lines,
-        error=str(payload.get("error")) if payload.get("error") else None,
-    )
 
 
 class EventTraceDetail(EventTraceSummary):
@@ -985,20 +847,14 @@ async def list_system_console_logs(
     容器直接持有 Docker socket。开发环境没有 updater 时，回退读取本地
     ``logs/backend.log`` / ``logs/frontend.log``。
     """
-    normalized_service = body.service.strip().lower() or "all"
-    if normalized_service not in _SYSTEM_CONSOLE_SERVICES:
-        raise HTTPException(status_code=400, detail="不支持的系统日志服务")
-
     try:
-        payload = await asyncio.to_thread(
-            _fetch_updater_console_logs,
-            normalized_service,
+        payload = await read_system_console_logs(
+            body.service,
             body.tail,
+            body.keyword,
+            fetcher=_fetch_updater_console_logs,
+            local_files=_LOCAL_CONSOLE_FILES,
         )
-    except Exception:
-        return _read_local_console_logs(normalized_service, body.tail, body.keyword)
-
-    payload = _filter_console_payload(payload, body.keyword)
-    if payload.get("ok") or payload.get("error"):
-        return _system_console_response(payload, service=normalized_service, tail=body.tail)
-    return _read_local_console_logs(normalized_service, body.tail, body.keyword)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return SystemConsoleLogsResponse(**payload)

@@ -47,6 +47,7 @@ class ToolSpec:
     precheck_handler: PrecheckHandler | None = None
     secret_argument_names: tuple[str, ...] = ()
     runtime_effects: tuple[str, ...] = ()
+    diagnostic_safe: bool = False
     available: bool = True
     unavailable_reason: str | None = None
 

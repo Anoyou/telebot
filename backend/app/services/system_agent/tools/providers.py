@@ -342,6 +342,7 @@ def register(registry: ToolRegistry) -> None:
             read_only=False,
             min_role="admin",
             risk="normal",
+            diagnostic_safe=True,
             secret_argument_names=("api_key",),
             preview_handler=verify_preview,
             precheck_handler=verify_precheck,

@@ -63,6 +63,7 @@ class SkillRegistry:
         routed_by_name = {spec.name: spec for spec in routed_specs}
         selected_domains = {domain for skill in selected for domain in skill.domains}
         catalog_domains = {domain for skill in self._skills for domain in skill.domains}
+        diagnostic_turn = any(skill.name == "diagnostics" for skill in selected)
 
         buckets: list[list[ToolSpec]] = []
         for skill in selected:
@@ -71,6 +72,11 @@ class SkillRegistry:
                 for name in skill.allowed_tools
                 if name in routed_by_name
                 and tool_domain(routed_by_name[name]) in selected_domains
+                and (
+                    not diagnostic_turn
+                    or routed_by_name[name].read_only
+                    or routed_by_name[name].diagnostic_safe
+                )
             ]
             if bucket:
                 buckets.append(bucket)

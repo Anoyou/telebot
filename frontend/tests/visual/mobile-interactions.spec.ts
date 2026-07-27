@@ -215,6 +215,65 @@ test.describe("移动端交互细节", () => {
     fixture.assertClean();
   });
 
+  test("Provider 模型行只保留真实单模型测活入口", async ({ page }, testInfo) => {
+    test.skip(testInfo.project.name === "tablet", "手机与桌面视口已覆盖");
+    const fixture = await installApiFixture(page);
+    await installProviderFixture(page);
+    let requestedPayload: unknown = null;
+    await page.route("**/api/commands/llm-providers/1/chat-test-models", async (route) => {
+      requestedPayload = route.request().postDataJSON();
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          provider_id: 1,
+          provider_name: "猫羽",
+          results: [{
+            ok: true,
+            requested_model: "deepseek-chat",
+            model: "deepseek-chat",
+            latency_ms: 842,
+            response: "模型测活正常。",
+            preview: "模型测活正常。",
+            input_tokens: 18,
+            output_tokens: 7,
+            empty_response: false,
+          }],
+        }),
+      });
+    });
+    await page.goto("/ai?tab=providers", { waitUntil: "networkidle" });
+
+    const providerSurface = testInfo.project.name === "mobile"
+      ? page.locator("[data-provider-card]").filter({ hasText: "猫羽" })
+      : page.locator("tr").filter({ hasText: "猫羽" });
+    await expect(providerSurface).toHaveCount(1);
+    await providerSurface.getByRole("button", { name: "编辑" }).click();
+
+    await expect(page.getByRole("heading", { name: "编辑模型提供商" })).toBeVisible();
+    await page.getByRole("button", { name: "未启用模型（2） · 点击展开" }).click();
+    await expect(page.getByRole("button", { name: "测活", exact: true })).toHaveCount(4);
+    await expect(page.getByRole("button", { name: "测试", exact: true })).toHaveCount(0);
+    await expect(page.getByRole("link", { name: "对话", exact: true })).toHaveCount(0);
+    const modelRow = page.locator('[data-provider-model-id="deepseek-chat"]');
+    await expect(modelRow).toHaveCount(1);
+    await modelRow.getByRole("button", { name: "测活", exact: true }).click();
+    await expect(modelRow).toContainText("842 ms");
+    await expect(modelRow.getByTitle("模型测活正常。")).toBeVisible();
+    const rowWidth = await modelRow.evaluate((element) => ({
+      client: element.clientWidth,
+      scroll: element.scrollWidth,
+    }));
+    expect(rowWidth.scroll).toBeLessThanOrEqual(rowWidth.client);
+    await expect(page).toHaveURL(/\/ai\?tab=providers$/);
+    expect(requestedPayload).toMatchObject({
+      models: ["deepseek-chat"],
+      max_tokens: 128,
+      timeout_seconds: 90,
+    });
+    fixture.assertClean();
+  });
+
   test("全量巡检在移动端使用范围按钮并可展开 Provider 选择模型", async ({ page }, testInfo) => {
     test.skip(testInfo.project.name !== "mobile", "仅移动视口");
     const fixture = await installApiFixture(page);
