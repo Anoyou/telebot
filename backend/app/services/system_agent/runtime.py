@@ -95,6 +95,7 @@ class SystemAgentRuntime:
         approved_tool_calls: list[dict[str, Any]] | None = None,
         model_selection: dict[str, Any] | None = None,
         read_only_only: bool = False,
+        exclude_latest_session_memory: bool = False,
     ) -> AsyncIterator[dict[str, Any]]:
         """执行一轮对话，逐条 yield NDJSON 事件。
 
@@ -258,7 +259,10 @@ class SystemAgentRuntime:
         except Exception:  # noqa: BLE001
             log.debug("load long-term memory failed", exc_info=True)
 
-        memory_block = memory_context(session)
+        memory_block = memory_context(
+            session,
+            exclude_latest_turn=exclude_latest_session_memory,
+        )
         if memory_block:
             system_prompt = f"{system_prompt}\n\n{memory_block}"
 

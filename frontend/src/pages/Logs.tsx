@@ -1103,7 +1103,11 @@ function AgentRunStream({
                     <div className="flex flex-wrap items-center gap-1.5">
                       <Badge variant={agentRunBadgeVariant(run.status)}>{agentRunStatusLabel(run.status)}</Badge>
                       <span className="text-xs text-muted-foreground">
-                        {run.kind === "retry" ? "重试" : "问答"}
+                        {run.kind === "retry"
+                          ? "重试"
+                          : run.kind === "regenerate"
+                            ? "重新生成"
+                            : "问答"}
                       </span>
                       {run.user_message_id != null ? (
                         <span className="text-xs text-muted-foreground">消息 #{run.user_message_id}</span>

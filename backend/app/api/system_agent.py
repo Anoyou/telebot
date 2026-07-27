@@ -14,6 +14,7 @@ from sqlalchemy import select
 
 from ..db.models.system_agent import (
     CHANNEL_WEB,
+    MESSAGE_ROLE_ASSISTANT,
     MESSAGE_ROLE_USER,
     MESSAGE_RUN_FAILED,
     SESSION_STATUS_ACTIVE,
@@ -30,6 +31,7 @@ from ..schemas.system_agent import (
     SystemAgentMessageCreate,
     SystemAgentMessageOut,
     SystemAgentMessageRetry,
+    SystemAgentRegenerateRunCreate,
     SystemAgentRetryRunCreate,
     SystemAgentRunCreate,
     SystemAgentRunEventOut,
@@ -535,6 +537,67 @@ async def start_system_agent_retry_run(
         )
     except RunConflictError as exc:
         raise _err("RUN_CONFLICT", str(exc), 409) from None
+    return _run_out(row)
+
+
+@router.post(
+    "/sessions/{session_id}/messages/{message_id}/regenerate/runs",
+    response_model=SystemAgentRunOut,
+    status_code=202,
+)
+async def start_system_agent_regenerate_run(
+    session_id: str,
+    message_id: int,
+    payload: SystemAgentRegenerateRunCreate,
+    db: DBSession,
+    user: CurrentUser,
+) -> SystemAgentRunOut:
+    svc = get_system_agent_service()
+    session = await svc.get_session(db, session_id, web_user_id=user.id)
+    if session is None:
+        raise _err("SESSION_NOT_FOUND", "会话不存在", 404)
+    message = await svc.get_message(db, message_id, session_id=session_id)
+    assistant_message = await svc.get_message(
+        db,
+        payload.assistant_message_id,
+        session_id=session_id,
+    )
+    if message is None or message.role != MESSAGE_ROLE_USER:
+        raise _err("MESSAGE_NOT_FOUND", "用户消息不存在", 404)
+    if assistant_message is None or assistant_message.role != MESSAGE_ROLE_ASSISTANT:
+        raise _err("MESSAGE_NOT_FOUND", "助手回答不存在", 404)
+    if not await svc.is_latest_completed_pair(
+        db,
+        session_id=session_id,
+        user_message_id=message.id,
+        assistant_message_id=assistant_message.id,
+    ):
+        raise _err(
+            "MESSAGE_NOT_REGENERATABLE",
+            "只能编辑或重新生成当前会话最新完成的一轮",
+            409,
+        )
+    edited_content = payload.content.strip() if payload.content is not None else None
+    if payload.content is not None and not edited_content:
+        raise _err("EMPTY_MESSAGE", "消息不能为空", 422)
+    await db.commit()
+    try:
+        row = await get_system_agent_run_manager().start_run(
+            session_id=session_id,
+            web_user_id=user.id,
+            client_request_id=payload.client_request_id,
+            text=edited_content or "",
+            account_id=payload.account_id,
+            regenerate_message_id=message.id,
+            regenerate_assistant_message_id=assistant_message.id,
+            fallback_provider_id=payload.fallback_provider_id,
+            approved_tools=payload.approved_tools,
+            model_selection=(
+                payload.model_selection.model_dump() if payload.model_selection else None
+            ),
+        )
+    except RunConflictError as exc:
+        raise _err("MESSAGE_NOT_REGENERATABLE", str(exc), 409) from None
     return _run_out(row)
 
 

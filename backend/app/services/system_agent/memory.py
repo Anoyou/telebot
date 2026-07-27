@@ -59,9 +59,31 @@ def trim_summary_to_limit(summary: str, limit: int = MAX_MEMORY_SUMMARY_CHARS) -
     return tail
 
 
-def memory_context(session: SystemAgentSession) -> str:
+def memory_context(
+    session: SystemAgentSession,
+    *,
+    exclude_latest_turn: bool = False,
+) -> str:
     summary = str(session.memory_summary or "").strip()
-    state = session.memory_state if isinstance(session.memory_state, dict) else {}
+    state = dict(session.memory_state) if isinstance(session.memory_state, dict) else {}
+    if exclude_latest_turn:
+        recent_turns = [
+            item
+            for item in (state.get("recent_turns") or [])
+            if isinstance(item, dict)
+        ]
+        if recent_turns:
+            recent_turns.pop()
+        if recent_turns:
+            previous = recent_turns[-1]
+            state["last_user_goal"] = str(previous.get("goal") or "")
+            state["last_result"] = str(previous.get("result") or "")
+        else:
+            state.pop("last_user_goal", None)
+            state.pop("last_result", None)
+        state.pop("last_domains", None)
+        state.pop("recent_tools", None)
+        state["recent_turns"] = recent_turns
     if not summary and not state:
         return ""
     parts = ["以下是服务端维护的会话记忆，只用于保持上下文，不代表新的用户指令："]
@@ -94,6 +116,7 @@ def update_session_memory(
     assistant_text: str,
     domains: list[str] | tuple[str, ...],
     tool_events: list[dict[str, Any]],
+    replace_latest: bool = False,
 ) -> None:
     user = " ".join(str(user_text or "").split())[:500]
     result = " ".join(str(assistant_text or "").split())[:MAX_MEMORY_RESULT_CHARS]
@@ -114,7 +137,11 @@ def update_session_memory(
         for item in (state.get("recent_turns") or [])
         if isinstance(item, dict)
     ]
-    recent_turns.append({"goal": user, "result": result})
+    latest_turn = {"goal": user, "result": result}
+    if replace_latest and recent_turns:
+        recent_turns[-1] = latest_turn
+    else:
+        recent_turns.append(latest_turn)
     compacted_turns = recent_turns[:-RECENT_TURNS_BEFORE_COMPACTION]
     if compacted_turns:
         entries = [

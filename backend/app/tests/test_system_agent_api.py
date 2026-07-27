@@ -112,6 +112,35 @@ class _FakeSvc:
             None,
         )
 
+    async def is_latest_completed_pair(
+        self,
+        _db,
+        *,
+        session_id,
+        user_message_id,
+        assistant_message_id,
+    ):
+        rows = self.messages.get(session_id, [])
+        users = [message for message in rows if message.role == "user"]
+        if not users:
+            return False
+        latest_user = max(users, key=lambda message: message.id)
+        assistants = sorted(
+            (
+                message
+                for message in rows
+                if message.role == "assistant" and message.id > latest_user.id
+            ),
+            key=lambda message: message.id,
+        )
+        return bool(
+            latest_user.id == user_message_id
+            and latest_user.run_status == "succeeded"
+            and assistants
+            and assistants[0].id == assistant_message_id
+            and assistants[0].run_status == "completed"
+        )
+
     async def stream_message(self, _db, **kwargs):
         self.last_stream_kwargs = dict(kwargs)
         yield {
@@ -141,9 +170,19 @@ class _FakeRunManager:
             id="durable-r1",
             session_id=kwargs["session_id"],
             web_user_id=kwargs["web_user_id"],
-            user_message_id=kwargs.get("retry_message_id") or 101,
+            user_message_id=(
+                kwargs.get("regenerate_message_id")
+                or kwargs.get("retry_message_id")
+                or 101
+            ),
             client_request_id=kwargs["client_request_id"],
-            kind="retry" if kwargs.get("retry_message_id") else "message",
+            kind=(
+                "regenerate"
+                if kwargs.get("regenerate_message_id")
+                else "retry"
+                if kwargs.get("retry_message_id")
+                else "message"
+            ),
             status="running",
             last_seq=0,
             cancel_requested=False,
@@ -458,6 +497,68 @@ async def test_retry_rejects_non_failed_message(fake_svc) -> None:
         )
 
     assert exc_info.value.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_regenerate_run_passes_original_pair_ids(fake_svc, fake_run_manager) -> None:
+    db = AsyncMock()
+    user = SimpleNamespace(id=7)
+    await api.create_session(api.SystemAgentSessionCreate(), db, user)
+    fake_svc.messages["s1"] = [
+        SimpleNamespace(id=21, session_id="s1", role="user", run_status="succeeded"),
+        SimpleNamespace(id=22, session_id="s1", role="assistant", run_status="completed"),
+    ]
+
+    out = await api.start_system_agent_regenerate_run(
+        "s1",
+        21,
+        api.SystemAgentRegenerateRunCreate(
+            assistant_message_id=22,
+            content="编辑后的问题",
+            client_request_id="request-regenerate-api",
+        ),
+        db,
+        user,
+    )
+
+    assert out.kind == "regenerate"
+    assert out.user_message_id == 21
+    assert fake_run_manager.last_start_kwargs["text"] == "编辑后的问题"
+    assert fake_run_manager.last_start_kwargs["regenerate_message_id"] == 21
+    assert fake_run_manager.last_start_kwargs["regenerate_assistant_message_id"] == 22
+
+
+@pytest.mark.asyncio
+async def test_regenerate_rejects_old_pair_before_updating_account(
+    fake_svc,
+    fake_run_manager,
+) -> None:
+    db = AsyncMock()
+    user = SimpleNamespace(id=7)
+    session = await api.create_session(api.SystemAgentSessionCreate(), db, user)
+    fake_svc.messages["s1"] = [
+        SimpleNamespace(id=21, session_id="s1", role="user", run_status="succeeded"),
+        SimpleNamespace(id=22, session_id="s1", role="assistant", run_status="completed"),
+        SimpleNamespace(id=23, session_id="s1", role="user", run_status="succeeded"),
+        SimpleNamespace(id=24, session_id="s1", role="assistant", run_status="completed"),
+    ]
+
+    with pytest.raises(HTTPException) as exc_info:
+        await api.start_system_agent_regenerate_run(
+            "s1",
+            21,
+            api.SystemAgentRegenerateRunCreate(
+                assistant_message_id=22,
+                account_id=3,
+                client_request_id="request-regenerate-old",
+            ),
+            db,
+            user,
+        )
+
+    assert exc_info.value.status_code == 409
+    assert session.account_id is None
+    assert fake_run_manager.last_start_kwargs == {}
 
 
 @pytest.mark.asyncio

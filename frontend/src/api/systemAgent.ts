@@ -355,6 +355,26 @@ export async function startSystemAgentRetryRun(
   return data;
 }
 
+export async function startSystemAgentRegenerateRun(
+  sessionId: string,
+  messageId: number,
+  payload: {
+    assistant_message_id: number;
+    content?: string | null;
+    account_id?: number | null;
+    fallback_provider_id?: number | null;
+    approved_tools?: string[];
+    client_request_id: string;
+    model_selection?: SystemAgentModelSelection | null;
+  },
+): Promise<SystemAgentRun> {
+  const { data } = await api.post<SystemAgentRun>(
+    `/api/system-agent/sessions/${sessionId}/messages/${messageId}/regenerate/runs`,
+    payload,
+  );
+  return data;
+}
+
 export async function getSystemAgentRun(runId: string): Promise<SystemAgentRun> {
   const { data } = await api.get<SystemAgentRun>(`/api/system-agent/runs/${runId}`);
   return data;

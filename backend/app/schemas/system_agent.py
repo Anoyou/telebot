@@ -146,6 +146,12 @@ class SystemAgentRetryRunCreate(SystemAgentMessageRetry):
     client_request_id: str = Field(min_length=8, max_length=64)
 
 
+class SystemAgentRegenerateRunCreate(SystemAgentMessageRetry):
+    client_request_id: str = Field(min_length=8, max_length=64)
+    assistant_message_id: int = Field(ge=1)
+    content: str | None = Field(default=None, min_length=1, max_length=32_000)
+
+
 class SystemAgentRunOut(BaseModel):
     id: str
     run_id: str = Field(validation_alias="id")

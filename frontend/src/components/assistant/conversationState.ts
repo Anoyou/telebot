@@ -14,6 +14,28 @@ export function visibleConversationMessages(
   return messages.filter((message) => message.role !== "tool");
 }
 
+/** 带消息 ID 的实时气泡原位覆盖历史项，其余实时状态继续追加显示。 */
+export function mergeConversationItems<T extends { messageId?: number }>(
+  persisted: T[],
+  live: T[],
+): T[] {
+  const replacements = new Map<number, T>();
+  for (const item of live) {
+    if (item.messageId != null) replacements.set(item.messageId, item);
+  }
+  const persistedIds = new Set(
+    persisted
+      .map((item) => item.messageId)
+      .filter((messageId): messageId is number => messageId != null),
+  );
+  return [
+    ...persisted.map((item) =>
+      item.messageId != null ? replacements.get(item.messageId) || item : item,
+    ),
+    ...live.filter((item) => item.messageId == null || !persistedIds.has(item.messageId)),
+  ];
+}
+
 /** 命名色 → class；十六进制 / rgb 走安全 style=color。 */
 export const SAFE_TEXT_COLORS: Record<string, string> = {
   red: "assistant-html-text-red",

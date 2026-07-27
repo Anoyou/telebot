@@ -67,6 +67,30 @@ def test_clear_session_memory_resets_summary_and_state() -> None:
     assert memory_context(session) == ""
 
 
+def test_regenerate_context_excludes_the_latest_turn() -> None:
+    session = SimpleNamespace(
+        memory_summary="",
+        memory_state={
+            "last_domains": ["logs"],
+            "last_user_goal": "最新问题",
+            "last_result": "旧回答",
+            "recent_tools": [{"name": "logs.list"}],
+            "recent_turns": [
+                {"goal": "较早问题", "result": "较早回答"},
+                {"goal": "最新问题", "result": "旧回答"},
+            ],
+        },
+    )
+
+    context = memory_context(session, exclude_latest_turn=True)
+
+    assert "最新问题" not in context
+    assert "旧回答" not in context
+    assert "较早问题" in context
+    assert "较早回答" in context
+    assert "logs.list" not in context
+
+
 def test_trim_summary_drops_oldest_entries_not_half_lines() -> None:
     pad = "详" * 200
     entries = [

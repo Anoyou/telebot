@@ -19,6 +19,7 @@ import {
   listSystemAgentUserMemory,
   patchSystemAgentConfig,
   patchSystemAgentUserMemory,
+  startSystemAgentRegenerateRun,
   startSystemAgentRetryRun,
   startSystemAgentRun,
   streamSystemAgentRun,
@@ -60,7 +61,13 @@ import {
 
 const ACTIVE_RUNS_KEY = "telepilot.system-agent.active-runs.v1";
 
-type StoredRun = { runId: string; lastSeq: number };
+type StoredRun = {
+  runId: string;
+  lastSeq: number;
+  targetUserMessageId?: number;
+  targetAssistantMessageId?: number;
+  editedUserText?: string;
+};
 
 function readStoredRuns(): Record<string, StoredRun> {
   try {
@@ -75,7 +82,18 @@ function readStoredRuns(): Record<string, StoredRun> {
 function storedRun(sessionId: string): StoredRun | null {
   const value = readStoredRuns()[sessionId];
   if (!value || typeof value.runId !== "string") return null;
-  return { runId: value.runId, lastSeq: Math.max(0, Number(value.lastSeq) || 0) };
+  return {
+    runId: value.runId,
+    lastSeq: Math.max(0, Number(value.lastSeq) || 0),
+    targetUserMessageId:
+      Number(value.targetUserMessageId) > 0 ? Number(value.targetUserMessageId) : undefined,
+    targetAssistantMessageId:
+      Number(value.targetAssistantMessageId) > 0
+        ? Number(value.targetAssistantMessageId)
+        : undefined,
+    editedUserText:
+      typeof value.editedUserText === "string" ? value.editedUserText : undefined,
+  };
 }
 
 function rememberRun(sessionId: string, value: StoredRun): void {
@@ -148,11 +166,11 @@ export function AssistantIndex() {
   } | null>(null);
   const [streamNotice, setStreamNotice] = useState("");
   const [composerValue, setComposerValue] = useState("");
-  const [composerFocusKey, setComposerFocusKey] = useState(0);
   /** 本轮模型选择：仅会话本地，默认自动路由 */
   const [sessionModel, setSessionModel] = useState<SessionModelSelection>({ mode: "auto" });
   const abortRef = useRef<AbortController | null>(null);
   const streamingBubbleCreatedRef = useRef(false);
+  const liveAssistantMessageIdRef = useRef<number | null>(null);
   const liveText = useStreamingText();
   const liveReasoning = useStreamingText();
 
@@ -476,12 +494,21 @@ export function AssistantIndex() {
     );
   };
 
+  const liveAssistantIdentity = () => {
+    const messageId = liveAssistantMessageIdRef.current;
+    return {
+      id: messageId == null ? "live-assistant-stream" : `m-${messageId}`,
+      messageId: messageId ?? undefined,
+    };
+  };
+
   const showStreamingReply = (value: string, options?: { fallback?: boolean }) => {
     setLive((prev) => {
       const pending = prev.find((bubble) => bubble.role === "assistant" && bubble.pending);
-      const assistant = prev.find((bubble) => bubble.id === "live-assistant-stream");
+      const identity = liveAssistantIdentity();
+      const assistant = prev.find((bubble) => bubble.id === identity.id);
       const nextBubble: LiveBubble = {
-        id: "live-assistant-stream",
+        ...identity,
         role: "assistant",
         text: value,
         reasoning: liveReasoning.textRef.current,
@@ -489,7 +516,7 @@ export function AssistantIndex() {
         streamFallback: options?.fallback,
       };
       const rest = prev.filter(
-        (bubble) => bubble.id !== "live-assistant-stream" && bubble !== pending,
+        (bubble) => bubble.id !== identity.id && bubble !== pending,
       );
       return [...rest, assistant ? { ...assistant, ...nextBubble } : nextBubble];
     });
@@ -524,7 +551,7 @@ export function AssistantIndex() {
     streamingBubbleCreatedRef.current = false;
     setLive((prev) =>
       prev.map((bubble) =>
-        bubble.id === "live-assistant-stream"
+        bubble.id === liveAssistantIdentity().id
           ? { ...bubble, text: "", streaming: true, streamFallback: false }
           : bubble,
       ),
@@ -536,7 +563,7 @@ export function AssistantIndex() {
     if (!current || !streamingBubbleCreatedRef.current) return;
     setLive((prev) =>
       prev.map((bubble) =>
-        bubble.id === "live-assistant-stream" ? { ...bubble, text: current } : bubble,
+        bubble.id === liveAssistantIdentity().id ? { ...bubble, text: current } : bubble,
       ),
     );
   }, [liveText.text]);
@@ -546,7 +573,7 @@ export function AssistantIndex() {
     if (!current || !streamingBubbleCreatedRef.current) return;
     setLive((prev) =>
       prev.map((bubble) =>
-        bubble.id === "live-assistant-stream" ? { ...bubble, reasoning: current } : bubble,
+        bubble.id === liveAssistantIdentity().id ? { ...bubble, reasoning: current } : bubble,
       ),
     );
   }, [liveReasoning.text]);
@@ -668,11 +695,12 @@ export function AssistantIndex() {
           : null;
       // 同 id 翻转 streaming，避免 remount 闪动
       setLive((prev) => {
+        const identity = liveAssistantIdentity();
         const withoutPending = prev.filter((bubble) => !bubble.pending);
-        const hasStream = withoutPending.some((b) => b.id === "live-assistant-stream");
+        const hasStream = withoutPending.some((b) => b.id === identity.id);
         if (hasStream) {
           return withoutPending.map((bubble) =>
-            bubble.id === "live-assistant-stream"
+            bubble.id === identity.id
               ? {
                   ...bubble,
                   text: finalText,
@@ -688,7 +716,7 @@ export function AssistantIndex() {
         return [
           ...withoutPending,
           {
-            id: "live-assistant-stream",
+            ...identity,
             role: "assistant" as const,
             text: finalText,
             reasoning: finalReasoning,
@@ -738,11 +766,11 @@ export function AssistantIndex() {
 
   const followRun = async (
     sessionId: string,
-    runId: string,
-    initialSeq: number,
+    stored: StoredRun,
     controller: AbortController,
   ) => {
-    let cursor = Math.max(0, initialSeq);
+    const runId = stored.runId;
+    let cursor = Math.max(0, stored.lastSeq);
     let doneReceived = false;
     let doneOk = false;
     let reconnectAttempt = 0;
@@ -758,7 +786,7 @@ export function AssistantIndex() {
               // durable stream 重连时可能重放游标边界事件，不重复追加文本。
               if (seq > 0 && seq <= cursor) return;
               if (seq > cursor) cursor = seq;
-              const next = { runId, lastSeq: cursor };
+              const next = { ...stored, runId, lastSeq: cursor };
               rememberRun(sessionId, next);
               setActiveRun(next);
               handleRunEvent(event);
@@ -811,6 +839,7 @@ export function AssistantIndex() {
         streamingBubbleCreatedRef.current = false;
         clearLiveStreamingState();
         setLive([]);
+        liveAssistantMessageIdRef.current = null;
       }
     } finally {
       if (abortRef.current === controller) {
@@ -825,11 +854,17 @@ export function AssistantIndex() {
   const runTurn = async ({
     text,
     retryMessageId,
+    regenerate,
     fallbackProviderId,
     approvedTools,
   }: {
     text?: string;
     retryMessageId?: number;
+    regenerate?: {
+      userMessageId: number;
+      assistantMessageId: number;
+      editedText?: string;
+    };
     fallbackProviderId?: number;
     approvedTools?: string[];
   }) => {
@@ -840,14 +875,31 @@ export function AssistantIndex() {
       return;
     }
     setStreaming(true);
-    setRetryingMessageId(retryMessageId ?? null);
+    setRetryingMessageId(retryMessageId ?? regenerate?.userMessageId ?? null);
     const controller = new AbortController();
     abortRef.current = controller;
-    const userBubble: LiveBubble | null = text
-      ? { id: `live-user-${Date.now()}`, role: "user", text, createdAt: new Date().toISOString() }
-      : null;
+    liveAssistantMessageIdRef.current = regenerate?.assistantMessageId ?? null;
+    const userBubble: LiveBubble | null = regenerate?.editedText
+      ? {
+          id: `m-${regenerate.userMessageId}`,
+          messageId: regenerate.userMessageId,
+          role: "user",
+          text: regenerate.editedText,
+          createdAt: new Date().toISOString(),
+        }
+      : text
+        ? {
+            id: `live-user-${Date.now()}`,
+            role: "user",
+            text,
+            createdAt: new Date().toISOString(),
+          }
+        : null;
     const pending: LiveBubble = {
-      id: `live-assistant-${Date.now()}`,
+      id: regenerate
+        ? `m-${regenerate.assistantMessageId}`
+        : `live-assistant-${Date.now()}`,
+      messageId: regenerate?.assistantMessageId,
       role: "assistant",
       text: "正在理解你的需求…",
       pending: true,
@@ -863,7 +915,15 @@ export function AssistantIndex() {
       }
       const accountPayload = { account_id: accountId === "" ? null : Number(accountId) };
       const model_selection = toApiModelSelection(sessionModel);
-      const run = retryMessageId != null
+      const run = regenerate
+        ? await startSystemAgentRegenerateRun(sessionId, regenerate.userMessageId, {
+            assistant_message_id: regenerate.assistantMessageId,
+            content: regenerate.editedText,
+            ...accountPayload,
+            client_request_id: requestId(),
+            model_selection,
+          })
+        : retryMessageId != null
         ? await startSystemAgentRetryRun(sessionId, retryMessageId, {
             ...accountPayload,
             fallback_provider_id: fallbackProviderId ?? null,
@@ -877,15 +937,29 @@ export function AssistantIndex() {
             client_request_id: requestId(),
             model_selection,
           });
-      const saved = { runId: run.id, lastSeq: 0 };
+      const saved: StoredRun = {
+        runId: run.id,
+        lastSeq: 0,
+        targetUserMessageId: regenerate?.userMessageId,
+        targetAssistantMessageId: regenerate?.assistantMessageId,
+        editedUserText: regenerate?.editedText,
+      };
       rememberRun(sessionId, saved);
       setActiveRun(saved);
-      await followRun(sessionId, run.id, 0, controller);
+      await followRun(sessionId, saved, controller);
     } catch (error) {
       if (!controller.signal.aborted) {
         toast.error(getErrMsg(error));
         clearLiveStreamingState();
-        setLive((prev) => prev.filter((bubble) => bubble.role === "user" || bubble.role === "action"));
+        if (regenerate) {
+          if (activeId) await refreshRunData(activeId).catch(() => undefined);
+          setLive([]);
+          liveAssistantMessageIdRef.current = null;
+        } else {
+          setLive((prev) =>
+            prev.filter((bubble) => bubble.role === "user" || bubble.role === "action"),
+          );
+        }
       }
       if (abortRef.current === controller) {
         abortRef.current = null;
@@ -897,13 +971,16 @@ export function AssistantIndex() {
 
   const onSend = async (text: string) => runTurn({ text });
 
-  const onEditMessage = (text: string) => {
-    setComposerValue(text);
-    setComposerFocusKey((value) => value + 1);
-    toast.message("原消息已回填，修改后发送会创建一条新消息");
-  };
+  const onEditMessage = async (
+    userMessageId: number,
+    assistantMessageId: number,
+    editedText: string,
+  ) => runTurn({ regenerate: { userMessageId, assistantMessageId, editedText } });
 
-  const onRegenerateMessage = async (text: string) => runTurn({ text });
+  const onRegenerateMessage = async (
+    userMessageId: number,
+    assistantMessageId: number,
+  ) => runTurn({ regenerate: { userMessageId, assistantMessageId } });
 
   const onRetryMessage = async (
     messageId: number,
@@ -929,16 +1006,28 @@ export function AssistantIndex() {
     abortRef.current = controller;
     setActiveRun(saved);
     setStreaming(true);
-    setLive([
-      {
-        id: `live-resume-${saved.runId}`,
-        role: "assistant",
-        text: "正在恢复本轮进度…",
-        pending: true,
-      },
-    ]);
+    liveAssistantMessageIdRef.current = saved.targetAssistantMessageId ?? null;
+    const resumed: LiveBubble[] = [];
+    if (saved.targetUserMessageId && saved.editedUserText) {
+      resumed.push({
+        id: `m-${saved.targetUserMessageId}`,
+        messageId: saved.targetUserMessageId,
+        role: "user",
+        text: saved.editedUserText,
+      });
+    }
+    resumed.push({
+      id: saved.targetAssistantMessageId
+        ? `m-${saved.targetAssistantMessageId}`
+        : `live-resume-${saved.runId}`,
+      messageId: saved.targetAssistantMessageId,
+      role: "assistant",
+      text: "正在恢复本轮进度…",
+      pending: true,
+    });
+    setLive(resumed);
     clearLiveStreamingState();
-    void followRun(activeId, saved.runId, 0, controller).catch(
+    void followRun(activeId, saved, controller).catch(
       (error) => {
         if (!controller.signal.aborted) toast.error(getErrMsg(error));
       },
@@ -1433,7 +1522,6 @@ export function AssistantIndex() {
                 onSend={onSend}
                 value={composerValue}
                 onValueChange={setComposerValue}
-                focusRequestKey={composerFocusKey}
                 onStop={onStop}
                 placeholder={viewingBotSession ? "Telegram 会话仅供查看" : undefined}
                 modelItems={modelPickerItems}

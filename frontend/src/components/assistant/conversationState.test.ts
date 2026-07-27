@@ -3,10 +3,25 @@ import test from "node:test";
 
 import {
   extractStyleColor,
+  mergeConversationItems,
   resolveAssistantTextColor,
   stabilizeStreamingMarkdown,
   visibleConversationMessages,
 } from "./conversationState.ts";
+
+test("重新生成用原消息 ID 覆盖气泡而不是追加一轮", () => {
+  const persisted = [
+    { messageId: 11, role: "user", text: "原问题" },
+    { messageId: 12, role: "assistant", text: "原回答" },
+  ];
+  const live = [
+    { messageId: 11, role: "user", text: "编辑后的问题" },
+    { messageId: 12, role: "assistant", text: "正在重新生成" },
+  ];
+
+  assert.deepEqual(mergeConversationItems(persisted, live), live);
+  assert.equal(mergeConversationItems(persisted, live).length, 2);
+});
 
 test("历史工具结果不作为第二条聊天消息渲染", () => {
   const messages = [

@@ -1,14 +1,16 @@
-import { memo, useEffect, useRef } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import {
   AlertCircle,
   Bot,
   BrainCircuit,
+  Check,
   Copy,
   Pencil,
   RotateCcw,
   ShieldCheck,
   User,
   Wrench,
+  X,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import rehypeRaw from "rehype-raw";
@@ -27,11 +29,13 @@ import { ModelRunMeta } from "@/components/ai/ModelRunMeta";
 import { RunTrace } from "@/components/assistant/RunTrace";
 import { StreamingText } from "@/components/ai/StreamingText";
 import { Button } from "@/components/ui/button";
+import { Textarea } from "@/components/ui/textarea";
 import { systemAgentToolLabel } from "@/lib/systemAgentLabels";
 import { cn, formatDateTime } from "@/lib/utils";
 import {
   ASSISTANT_HTML_CLASSES,
   extractStyleColor,
+  mergeConversationItems,
   resolveAssistantTextColor,
   SAFE_LABELS,
   stabilizeStreamingMarkdown,
@@ -257,8 +261,8 @@ export function Conversation({
     fallbackProviderId?: number,
     approvedTools?: string[],
   ) => void;
-  onEditMessage?: (text: string) => void;
-  onRegenerateMessage?: (text: string) => void;
+  onEditMessage?: (messageId: number, assistantMessageId: number, text: string) => void;
+  onRegenerateMessage?: (messageId: number, assistantMessageId: number) => void;
   retryingMessageId?: number | null;
   busy?: boolean;
   /** 本轮希望使用的模型（与实际 meta 对照） */
@@ -267,8 +271,9 @@ export function Conversation({
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const followStreamRef = useRef(true);
   const lastLiveUserIdRef = useRef<string | null>(null);
-  const items: LiveBubble[] = [
-    ...visibleConversationMessages(messages).map(
+  const [editingMessageId, setEditingMessageId] = useState<number | null>(null);
+  const [editingText, setEditingText] = useState("");
+  const persistedItems = visibleConversationMessages(messages).map(
       (m): LiveBubble => ({
         id: `m-${m.id}`,
         role: (m.role === "user" || m.role === "assistant" || m.role === "tool"
@@ -293,9 +298,21 @@ export function Conversation({
         streamFallback: Boolean(m.usage?.stream_fallback),
         usage: (m.usage as Record<string, unknown> | null | undefined) ?? null,
       }),
-    ),
-    ...(live || []),
-  ].filter((item) => item.text || item.pending || item.usage);
+    );
+  const items: LiveBubble[] = mergeConversationItems(persistedItems, live || []).filter(
+    (item) => item.text || item.pending || item.usage,
+  );
+  const latestUserMessage = [...messages].reverse().find((message) => message.role === "user");
+  const latestAssistantMessage = latestUserMessage
+    ? messages.find(
+        (message) =>
+          message.role === "assistant" && message.id > latestUserMessage.id,
+      )
+    : undefined;
+  const latestPairEditable = Boolean(
+    latestUserMessage?.run_status === "succeeded" &&
+      latestAssistantMessage?.run_status === "completed",
+  );
   const liveTail = (live || []).at(-1);
   const latestLiveUserId = [...(live || [])].reverse().find((item) => item.role === "user")?.id;
 
@@ -311,6 +328,17 @@ export function Conversation({
     if (!node || !followStreamRef.current) return;
     node.scrollTop = node.scrollHeight;
   }, [items.length, liveTail?.text]);
+
+  useEffect(() => {
+    if (
+      editingMessageId !== null &&
+      (busy ||
+        !latestPairEditable ||
+        editingMessageId !== latestUserMessage?.id)
+    ) {
+      setEditingMessageId(null);
+    }
+  }, [busy, editingMessageId, latestPairEditable, latestUserMessage?.id]);
 
   if (items.length === 0) {
     return (
@@ -335,7 +363,7 @@ export function Conversation({
         followStreamRef.current = node.scrollHeight - node.scrollTop - node.clientHeight < 72;
       }}
     >
-      {items.map((item, itemIndex) => {
+      {items.map((item) => {
         const isUser = item.role === "user";
         const isTool = item.role === "tool";
         const isAction = item.role === "action" && item.action;
@@ -345,9 +373,11 @@ export function Conversation({
           isFailedUser && typeof item.usage?.run_id === "string" ? item.usage.run_id : null;
         const switchCandidate = item.providerSwitch?.candidates?.[0];
         const approvalTools = item.toolApproval?.tools || [];
-        const sourceUser = [...items.slice(0, itemIndex)]
-          .reverse()
-          .find((candidate) => candidate.role === "user" && candidate.text.trim());
+        const isLatestEditableUser =
+          latestPairEditable && item.messageId === latestUserMessage?.id;
+        const isLatestEditableAssistant =
+          latestPairEditable && item.messageId === latestAssistantMessage?.id;
+        const isEditing = isLatestEditableUser && editingMessageId === item.messageId;
         const visibleReasoning =
           item.reasoning?.trim() && item.reasoning.trim() !== item.text.trim()
             ? item.reasoning.trim()
@@ -403,7 +433,8 @@ export function Conversation({
                 <div
                   className={cn(
                     "max-w-full break-words text-sm leading-relaxed",
-                    isUser && "rounded-2xl bg-primary px-3 py-2 text-primary-foreground",
+                    isUser && !isEditing && "rounded-2xl bg-primary px-3 py-2 text-primary-foreground",
+                    isEditing && "w-[min(36rem,78vw)] rounded-lg border border-border bg-card p-2 text-foreground shadow-sm",
                     // 助手回答：无气泡正文（DEEIX / restyle）
                     !isUser && !isTool && "min-w-0 max-w-[min(75ch,100%)] border-l-2 border-primary/35 py-0.5 pl-3 text-foreground xl:max-w-[min(96ch,100%)] 2xl:max-w-[min(112ch,100%)]",
                     isTool && "rounded-2xl border border-dashed bg-background px-3 py-2 text-xs text-muted-foreground",
@@ -411,7 +442,62 @@ export function Conversation({
                     item.pending && "opacity-70",
                   )}
                 >
-                  {!isUser && !isTool ? (
+                  {isEditing ? (
+                    <form
+                      className="flex flex-col gap-2"
+                      onSubmit={(event) => {
+                        event.preventDefault();
+                        const nextText = editingText.trim();
+                        if (!nextText || item.messageId == null || latestAssistantMessage == null) {
+                          return;
+                        }
+                        onEditMessage?.(item.messageId, latestAssistantMessage.id, nextText);
+                        setEditingMessageId(null);
+                      }}
+                    >
+                      <Textarea
+                        autoFocus
+                        rows={3}
+                        maxLength={32_000}
+                        value={editingText}
+                        className="min-h-24 resize-y text-sm leading-relaxed"
+                        aria-label="编辑消息"
+                        onChange={(event) => setEditingText(event.target.value)}
+                        onKeyDown={(event) => {
+                          if (event.key === "Escape") {
+                            event.preventDefault();
+                            setEditingMessageId(null);
+                          } else if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+                            event.preventDefault();
+                            event.currentTarget.form?.requestSubmit();
+                          }
+                        }}
+                      />
+                      <div className="flex justify-end gap-1">
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon"
+                          className="h-8 w-8 text-muted-foreground"
+                          title="取消编辑"
+                          aria-label="取消编辑"
+                          onClick={() => setEditingMessageId(null)}
+                        >
+                          <X className="h-3.5 w-3.5" />
+                        </Button>
+                        <Button
+                          type="submit"
+                          size="icon"
+                          className="h-8 w-8"
+                          title="保存并重新生成"
+                          aria-label="保存并重新生成"
+                          disabled={!editingText.trim()}
+                        >
+                          <Check className="h-3.5 w-3.5" />
+                        </Button>
+                      </div>
+                    </form>
+                  ) : !isUser && !isTool ? (
                     item.text.trim() ? (
                       <>
                         {item.streamFallback ? (
@@ -450,7 +536,7 @@ export function Conversation({
                   />
                 ) : null}
                 {!isUser && !isTool && !item.streaming && !item.pending && item.text.trim() ? (
-                  <div className="flex min-h-8 w-full max-w-[min(75ch,100%)] items-center gap-1 border-t border-border/45 pt-1 text-[10px] text-muted-foreground xl:max-w-[min(96ch,100%)] 2xl:max-w-[min(112ch,100%)]">
+                  <div className="flex min-h-8 w-full max-w-[min(75ch,100%)] items-center gap-1 border-t border-border/45 pr-14 pt-1 text-[10px] text-muted-foreground sm:pr-0 xl:max-w-[min(96ch,100%)] 2xl:max-w-[min(112ch,100%)]">
                     {timestamp ? <time dateTime={item.createdAt || undefined} className="mr-auto tabular-nums">{timestamp}</time> : <span className="mr-auto" />}
                     <Button
                       type="button"
@@ -463,30 +549,39 @@ export function Conversation({
                     >
                       <Copy className="h-3.5 w-3.5" />
                     </Button>
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="icon"
-                      className="h-8 w-8 text-muted-foreground"
-                      title="使用当前选择的模型重新生成"
-                      aria-label="使用当前选择的模型重新生成"
-                      disabled={busy || !sourceUser || !onRegenerateMessage}
-                      onClick={() => sourceUser && onRegenerateMessage?.(sourceUser.text)}
-                    >
-                      <RotateCcw className="h-3.5 w-3.5" />
-                    </Button>
+                    {isLatestEditableAssistant && onRegenerateMessage ? (
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon"
+                        className="h-8 w-8 text-muted-foreground"
+                        title="使用当前选择的模型重新生成"
+                        aria-label="使用当前选择的模型重新生成"
+                        disabled={busy}
+                        onClick={() => {
+                          if (latestUserMessage && latestAssistantMessage) {
+                            onRegenerateMessage(latestUserMessage.id, latestAssistantMessage.id);
+                          }
+                        }}
+                      >
+                        <RotateCcw className="h-3.5 w-3.5" />
+                      </Button>
+                    ) : null}
                   </div>
                 ) : null}
-                {isUser && item.messageId != null && item.text.trim() && onEditMessage ? (
+                {isLatestEditableUser && !isEditing && item.text.trim() && onEditMessage ? (
                   <Button
                     type="button"
                     variant="ghost"
                     size="icon"
                     className="h-8 w-8 text-muted-foreground"
-                    title="编辑后作为新消息发送"
-                    aria-label="编辑后作为新消息发送"
+                    title="编辑并重新生成"
+                    aria-label="编辑并重新生成"
                     disabled={busy}
-                    onClick={() => onEditMessage(item.text)}
+                    onClick={() => {
+                      setEditingText(item.text);
+                      setEditingMessageId(item.messageId!);
+                    }}
                   >
                     <Pencil className="h-3.5 w-3.5" />
                   </Button>

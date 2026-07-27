@@ -86,6 +86,48 @@ def _approved_tool_calls_from_retry(
     return calls
 
 
+async def is_latest_completed_pair(
+    db: AsyncSession,
+    *,
+    session_id: str,
+    user_message_id: int,
+    assistant_message_id: int,
+) -> bool:
+    latest_user_result = await db.execute(
+        select(SystemAgentMessage)
+        .where(
+            SystemAgentMessage.session_id == session_id,
+            SystemAgentMessage.role == MESSAGE_ROLE_USER,
+        )
+        .order_by(desc(SystemAgentMessage.id))
+        .limit(1)
+    )
+    user_message = latest_user_result.scalar_one_or_none()
+    assistant_message = await db.get(SystemAgentMessage, assistant_message_id)
+    if (
+        user_message is None
+        or user_message.id != user_message_id
+        or user_message.run_status != MESSAGE_RUN_SUCCEEDED
+        or assistant_message is None
+        or assistant_message.session_id != session_id
+        or assistant_message.role != MESSAGE_ROLE_ASSISTANT
+        or assistant_message.run_status != MESSAGE_RUN_COMPLETED
+        or assistant_message.id <= user_message.id
+    ):
+        return False
+    paired_assistant_result = await db.execute(
+        select(SystemAgentMessage.id)
+        .where(
+            SystemAgentMessage.session_id == session_id,
+            SystemAgentMessage.role == MESSAGE_ROLE_ASSISTANT,
+            SystemAgentMessage.id > user_message.id,
+        )
+        .order_by(SystemAgentMessage.id)
+        .limit(1)
+    )
+    return paired_assistant_result.scalar_one_or_none() == assistant_message_id
+
+
 class SystemAgentService:
     def __init__(self) -> None:
         self.runtime = SystemAgentRuntime()
@@ -399,6 +441,21 @@ class SystemAgentService:
             return None
         return row
 
+    async def is_latest_completed_pair(
+        self,
+        db: AsyncSession,
+        *,
+        session_id: str,
+        user_message_id: int,
+        assistant_message_id: int,
+    ) -> bool:
+        return await is_latest_completed_pair(
+            db,
+            session_id=session_id,
+            user_message_id=user_message_id,
+            assistant_message_id=assistant_message_id,
+        )
+
     async def get_or_create_active_session(
         self,
         db: AsyncSession,
@@ -441,6 +498,8 @@ class SystemAgentService:
         web_user_id: int | None = None,
         bot_tg_user_id: int | None = None,
         retry_message: SystemAgentMessage | None = None,
+        regenerate_message: SystemAgentMessage | None = None,
+        regenerate_assistant_message: SystemAgentMessage | None = None,
         fallback_provider_id: int | None = None,
         approved_tools: list[str] | None = None,
         run_id: str | None = None,
@@ -449,10 +508,39 @@ class SystemAgentService:
     ) -> AsyncIterator[dict[str, Any]]:
         await self.reconcile_stale_messages(db, session.id)
         incoming_text = str(text or "").strip()
-        if retry_message is None and is_retry_reference(incoming_text):
+        regenerating = (
+            regenerate_message is not None
+            or regenerate_assistant_message is not None
+        )
+        if regenerating and (
+            regenerate_message is None or regenerate_assistant_message is None
+        ):
+            raise ValueError("原位重新生成需要同时指定用户消息和助手消息")
+        if regenerating and retry_message is not None:
+            raise ValueError("失败重试与原位重新生成不能同时执行")
+        if not regenerating and retry_message is None and is_retry_reference(incoming_text):
             retry_message = await self._resolve_failed_retry_message(db, session)
         run_started_at = datetime.now(UTC).isoformat()
-        if retry_message is not None:
+        if regenerating:
+            assert regenerate_message is not None
+            assert regenerate_assistant_message is not None
+            if (
+                regenerate_message.session_id != session.id
+                or regenerate_message.role != MESSAGE_ROLE_USER
+                or regenerate_message.run_status != MESSAGE_RUN_SUCCEEDED
+                or regenerate_assistant_message.session_id != session.id
+                or regenerate_assistant_message.role != MESSAGE_ROLE_ASSISTANT
+                or regenerate_assistant_message.run_status != MESSAGE_RUN_COMPLETED
+                or regenerate_assistant_message.id <= regenerate_message.id
+            ):
+                raise ValueError("只能编辑或重新生成当前会话最新完成的一轮")
+            content = (
+                regenerate_message.content
+                if isinstance(regenerate_message.content, dict)
+                else {}
+            )
+            raw_text = incoming_text or str(content.get("text") or "").strip()
+        elif retry_message is not None:
             if retry_message.role != MESSAGE_ROLE_USER:
                 raise ValueError("只能重试用户消息")
             if retry_message.run_status != MESSAGE_RUN_FAILED:
@@ -475,7 +563,11 @@ class SystemAgentService:
         except Exception:  # noqa: BLE001
             log.debug("clear expired action secrets failed", exc_info=True)
 
-        chat_secrets = [] if retry_message is not None else extract_plaintext_secrets(raw_text)
+        chat_secrets = (
+            []
+            if retry_message is not None and not regenerating
+            else extract_plaintext_secrets(raw_text)
+        )
         if not session.title:
             session.title = session_title_from_message(redact_known_secrets(raw_text, chat_secrets))
         session.updated_at = datetime.now(UTC)
@@ -486,7 +578,14 @@ class SystemAgentService:
         }
         effective_approved_tools: set[str] = set()
         # 新消息先落库；重试则复用原消息，避免重复污染历史。
-        if retry_message is None:
+        if regenerating:
+            assert regenerate_message is not None
+            user_msg = regenerate_message
+            if incoming_text:
+                user_msg.content = {
+                    "text": redact_known_secrets(raw_text, chat_secrets),
+                }
+        elif retry_message is None:
             redacted_user = redact_known_secrets(raw_text, chat_secrets)
             user_msg = SystemAgentMessage(
                 session_id=session.id,
@@ -540,14 +639,27 @@ class SystemAgentService:
             await db.refresh(user_msg)
         await db.flush()
 
-        history = await self.list_messages(db, session.id, limit=32)
         # 历史最后一条是刚写入的打码用户消息；模型当次请求使用原始文本，
         # 因此从 history 去掉最后一条 user，由 runtime 追加 raw_text。
-        history_for_model = [
-            message
-            for message in history
-            if message.id != user_msg.id and _message_available_to_context(message)
-        ][-8:]
+        if regenerating:
+            history = await self.list_messages(
+                db,
+                session.id,
+                limit=32,
+                before_id=user_msg.id,
+            )
+            history_for_model = [
+                message
+                for message in history
+                if _message_available_to_context(message)
+            ][-8:]
+        else:
+            history = await self.list_messages(db, session.id, limit=32)
+            history_for_model = [
+                message
+                for message in history
+                if message.id != user_msg.id and _message_available_to_context(message)
+            ][-8:]
 
         # 用户消息先独立落库。即使浏览器断线或上游模型超时，刷新后仍能看到本轮输入。
         await db.commit()
@@ -582,6 +694,7 @@ class SystemAgentService:
                 approved_tool_calls=approved_tool_calls,
                 model_selection=model_selection,
                 read_only_only=read_only_only,
+                exclude_latest_session_memory=regenerating,
             ):
                 et = event.get("type")
                 if et == "assistant_message":
@@ -686,8 +799,8 @@ class SystemAgentService:
             # 关联 Durable Run + 耗时（零迁移，写进既有 usage JSON）
             if run_id:
                 usage_payload["run_id"] = str(run_id)
-            started_raw = None
-            if isinstance(user_msg.usage, dict):
+            started_raw = run_started_at if regenerating else None
+            if not regenerating and isinstance(user_msg.usage, dict):
                 started_raw = user_msg.usage.get("run_started_at")
             if started_raw:
                 try:
@@ -708,18 +821,32 @@ class SystemAgentService:
                     event["usage"] = usage_payload
                     if usage_payload.get("stream_fallback"):
                         event["stream_fallback"] = True
-            db.add(
-                SystemAgentMessage(
+            assistant_content = {
+                "text": redact_known_secrets(assistant_text, chat_secrets),
+                **({"reasoning": assistant_reasoning} if assistant_reasoning else {}),
+            }
+            if regenerating:
+                assert regenerate_assistant_message is not None
+                regenerate_assistant_message.content = assistant_content
+                regenerate_assistant_message.usage = usage_payload
+                regenerate_assistant_message.run_status = MESSAGE_RUN_COMPLETED
+                regenerate_assistant_message.error_code = None
+                regenerate_assistant_message.error_message = None
+                await db.execute(
+                    delete(SystemAgentMessage).where(
+                        SystemAgentMessage.session_id == session.id,
+                        SystemAgentMessage.role == MESSAGE_ROLE_TOOL,
+                        SystemAgentMessage.id > user_msg.id,
+                    )
+                )
+            else:
+                db.add(SystemAgentMessage(
                     session_id=session.id,
                     role=MESSAGE_ROLE_ASSISTANT,
-                    content={
-                        "text": redact_known_secrets(assistant_text, chat_secrets),
-                        **({"reasoning": assistant_reasoning} if assistant_reasoning else {}),
-                    },
+                    content=assistant_content,
                     usage=usage_payload,
                     run_status=MESSAGE_RUN_COMPLETED,
-                )
-            )
+                ))
         for tev in tool_events:
             if tev.get("type") != "tool_finished":
                 continue
@@ -736,8 +863,8 @@ class SystemAgentService:
                     summary = json.loads(red) if red.startswith("{") else {"preview": red}
                 except Exception:  # noqa: BLE001
                     summary = {"preview": redact_known_secrets(str(summary), chat_secrets)}
-            db.add(
-                SystemAgentMessage(
+            if not regenerating or done_ok:
+                db.add(SystemAgentMessage(
                     session_id=session.id,
                     role=MESSAGE_ROLE_TOOL,
                     content={
@@ -747,8 +874,7 @@ class SystemAgentService:
                         "result_summary": summary,
                     },
                     run_status=MESSAGE_RUN_COMPLETED if done_ok else MESSAGE_RUN_FAILED,
-                )
-            )
+                ))
             memory_event = dict(tev)
             memory_event["result_summary"] = summary
             memory_tool_events.append(memory_event)
@@ -763,6 +889,7 @@ class SystemAgentService:
                 assistant_text=redact_known_secrets(assistant_text, chat_secrets),
                 domains=route_domains,
                 tool_events=memory_tool_events,
+                replace_latest=regenerating,
             )
             # 主链路不阻塞：摘要过长时后台 LLM 压缩（失败静默降级为条目裁剪结果）
             try:
@@ -774,7 +901,7 @@ class SystemAgentService:
                 log.debug("schedule summary compression failed", exc_info=True)
             if retry_message is not None:
                 clear_failed_turn(session, message_id=user_msg.id)
-        else:
+        elif not regenerating:
             user_msg.run_status = MESSAGE_RUN_FAILED
             user_msg.error_code = error_code or "AGENT_RUN_FAILED"
             user_msg.error_message = redact_known_secrets(
@@ -860,4 +987,8 @@ def get_system_agent_service() -> SystemAgentService:
     return _SERVICE
 
 
-__all__ = ["SystemAgentService", "get_system_agent_service"]
+__all__ = [
+    "SystemAgentService",
+    "get_system_agent_service",
+    "is_latest_completed_pair",
+]

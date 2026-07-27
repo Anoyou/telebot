@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.db.models.system_agent import (
@@ -41,7 +41,7 @@ class _ControlledService:
     async def stream_message(self, db, **kwargs):
         self.calls += 1
         session = kwargs["session"]
-        message = kwargs.get("retry_message")
+        message = kwargs.get("retry_message") or kwargs.get("regenerate_message")
         if message is None:
             message = SystemAgentMessage(
                 session_id=session.id,
@@ -55,14 +55,16 @@ class _ControlledService:
         yield {"type": "run_started", "session_id": session.id}
         await self.release.wait()
         message.run_status = MESSAGE_RUN_SUCCEEDED
-        db.add(
-            SystemAgentMessage(
+        assistant = kwargs.get("regenerate_assistant_message")
+        if assistant is not None:
+            assistant.content = {"text": self.response}
+        else:
+            db.add(SystemAgentMessage(
                 session_id=session.id,
                 role=MESSAGE_ROLE_ASSISTANT,
                 content={"text": self.response},
                 run_status=MESSAGE_RUN_COMPLETED,
-            )
-        )
+            ))
         await db.commit()
         yield {"type": "assistant_message", "content": self.response}
         yield {"type": "done", "ok": True}
@@ -232,6 +234,102 @@ async def test_different_request_is_rejected_while_session_run_is_active(run_db)
 
     await manager.cancel_run(first.id)
     await _wait_for_status(manager, first.id, AGENT_RUN_CANCELLED)
+
+
+@pytest.mark.asyncio
+async def test_regenerate_run_reuses_latest_message_pair(run_db) -> None:
+    async with run_db() as db:
+        user_message = SystemAgentMessage(
+            session_id="session-1",
+            role=MESSAGE_ROLE_USER,
+            content={"text": "原问题"},
+            run_status=MESSAGE_RUN_SUCCEEDED,
+        )
+        assistant_message = SystemAgentMessage(
+            session_id="session-1",
+            role=MESSAGE_ROLE_ASSISTANT,
+            content={"text": "原回答"},
+            run_status=MESSAGE_RUN_COMPLETED,
+        )
+        db.add_all([user_message, assistant_message])
+        await db.commit()
+        await db.refresh(user_message)
+        await db.refresh(assistant_message)
+        user_message_id = user_message.id
+        assistant_message_id = assistant_message.id
+
+    service = _ControlledService(response="新回答")
+    manager = SystemAgentRunManager(
+        session_factory=run_db,
+        service_factory=lambda: service,
+        poll_interval=0.01,
+    )
+    run = await manager.start_run(
+        session_id="session-1",
+        web_user_id=7,
+        client_request_id="request-regenerate",
+        text="编辑后的问题",
+        regenerate_message_id=user_message_id,
+        regenerate_assistant_message_id=assistant_message_id,
+    )
+    assert run.kind == "regenerate"
+    assert run.user_message_id == user_message_id
+
+    service.release.set()
+    await _wait_for_status(manager, run.id, AGENT_RUN_SUCCEEDED)
+    async with run_db() as db:
+        rows = list(
+            (
+                await db.execute(
+                    select(SystemAgentMessage).order_by(SystemAgentMessage.id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+    assert [message.id for message in rows] == [user_message_id, assistant_message_id]
+    assert rows[1].content["text"] == "新回答"
+
+
+@pytest.mark.asyncio
+async def test_regenerate_rejects_an_older_pair(run_db) -> None:
+    async with run_db() as db:
+        messages = [
+            SystemAgentMessage(
+                session_id="session-1",
+                role=role,
+                content={"text": text_value},
+                run_status=status,
+            )
+            for role, text_value, status in [
+                (MESSAGE_ROLE_USER, "旧问题", MESSAGE_RUN_SUCCEEDED),
+                (MESSAGE_ROLE_ASSISTANT, "旧回答", MESSAGE_RUN_COMPLETED),
+                (MESSAGE_ROLE_USER, "新问题", MESSAGE_RUN_SUCCEEDED),
+                (MESSAGE_ROLE_ASSISTANT, "新回答", MESSAGE_RUN_COMPLETED),
+            ]
+        ]
+        db.add_all(messages)
+        await db.commit()
+        for message in messages:
+            await db.refresh(message)
+
+    manager = SystemAgentRunManager(session_factory=run_db, poll_interval=0.01)
+    with pytest.raises(RunConflictError, match="最新完成的一轮"):
+        await manager.start_run(
+            session_id="session-1",
+            web_user_id=7,
+            client_request_id="request-regenerate-old",
+            text="",
+            account_id=3,
+            regenerate_message_id=messages[0].id,
+            regenerate_assistant_message_id=messages[1].id,
+        )
+
+    async with run_db() as db:
+        session = await db.get(SystemAgentSession, "session-1")
+        assert session is not None
+        assert session.account_id is None
 
 
 @pytest.mark.asyncio
