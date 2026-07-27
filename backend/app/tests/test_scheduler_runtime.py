@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, call
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -384,6 +384,7 @@ async def test_scheduler_send_message_reports_username_resolution_failure(monkey
         ),
         client=SimpleNamespace(
             get_input_entity=AsyncMock(side_effect=ValueError("not found")),
+            get_entity=AsyncMock(side_effect=ValueError("not found")),
             send_message=AsyncMock(),
         ),
         log=AsyncMock(),
@@ -401,7 +402,7 @@ async def test_scheduler_send_message_reports_username_resolution_failure(monkey
 
 
 @pytest.mark.asyncio
-async def test_scheduler_pins_resolved_username_to_stable_peer_id(monkeypatch) -> None:
+async def test_scheduler_resolves_username_each_time_with_full_entity(monkeypatch) -> None:
     executor = SchedulerRuleExecutor()
     monkeypatch.setattr(scheduler_runtime, "_record_scheduler_action", AsyncMock())
     entity = InputPeerUser(user_id=8395686237, access_hash=123456)
@@ -428,9 +429,13 @@ async def test_scheduler_pins_resolved_username_to_stable_peer_id(monkeypatch) -
     await executor.action_send_message(ctx, action)
     await executor.action_send_message(ctx, action)
 
-    ctx.client.get_input_entity.assert_awaited_once_with("@qingbaobu")
+    assert ctx.client.get_input_entity.await_count == 2
+    assert ctx.client.get_input_entity.await_args_list == [
+        call("@qingbaobu"),
+        call("@qingbaobu"),
+    ]
     assert ctx.client.send_message.await_args_list[0].args[0] == entity
-    assert ctx.client.send_message.await_args_list[1].args[0] == 8395686237
+    assert ctx.client.send_message.await_args_list[1].args[0] == entity
     assert action["target_chat_id_resolved"] == 8395686237
     assert action["target_chat_resolved_ref"] == "@qingbaobu"
 
@@ -521,6 +526,7 @@ async def test_scheduler_call_llm_resolves_target_before_model_cost(monkeypatch)
         ),
         client=SimpleNamespace(
             get_input_entity=AsyncMock(side_effect=ValueError("not found")),
+            get_entity=AsyncMock(side_effect=ValueError("not found")),
             send_message=AsyncMock(),
         ),
         log=AsyncMock(),

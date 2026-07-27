@@ -849,25 +849,23 @@ class SchedulerRuleExecutor:
         if isinstance(target, int):
             return target, target, None
 
-        if config_action is not None:
-            pinned_ref = config_action.get(RESOLVED_TARGET_REF_KEY)
-            pinned_id = config_action.get(RESOLVED_TARGET_ID_KEY)
-            if (
-                pinned_ref == target
-                and isinstance(pinned_id, int)
-                and not isinstance(pinned_id, bool)
-                and pinned_id != 0
-            ):
-                return pinned_id, pinned_id, target
-
         try:
             entity = await ctx.client.get_input_entity(target)
         except FloodWaitError as exc:
             raise SchedulerTargetFloodWaitError(target, exc) from exc
-        except (UsernameInvalidError, UsernameNotOccupiedError, TypeError, ValueError) as exc:
-            raise SchedulerTargetNotFoundError(
-                f"无法解析目标 {target}；请检查用户名是否正确，以及当前 Telegram 账号是否可访问该用户或机器人"
-            ) from exc
+        except (UsernameInvalidError, UsernameNotOccupiedError, TypeError, ValueError):
+            # get_input_entity 主要依赖 session 缓存；缓存缺失时主动调用
+            # get_entity，通过 Telegram 的 ResolveUsername 获取完整实体和 access_hash。
+            try:
+                entity = await ctx.client.get_entity(target)
+            except FloodWaitError as resolve_exc:
+                raise SchedulerTargetFloodWaitError(target, resolve_exc) from resolve_exc
+            except (UsernameInvalidError, UsernameNotOccupiedError, TypeError, ValueError) as resolve_exc:
+                raise SchedulerTargetNotFoundError(
+                    f"无法解析目标 {target}；请检查用户名是否正确，以及当前 Telegram 账号是否可访问该用户或机器人"
+                ) from resolve_exc
+            except Exception as resolve_exc:  # noqa: BLE001
+                raise SchedulerTargetResolutionError(f"Telegram 暂时无法解析目标 {target}") from resolve_exc
         except Exception as exc:  # noqa: BLE001
             raise SchedulerTargetResolutionError(f"Telegram 暂时无法解析目标 {target}") from exc
 
