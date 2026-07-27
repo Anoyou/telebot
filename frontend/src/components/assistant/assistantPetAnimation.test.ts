@@ -8,6 +8,7 @@ import {
   assistantPetFrameAt,
   assistantPetIntentForState,
   assistantPetLookDirection,
+  assistantPetLookDirectionWithHysteresis,
   assistantPetLookPhase,
 } from "./assistantPetAnimation.ts";
 
@@ -45,7 +46,7 @@ test("鼠标角度以桌宠实际位置为中心并保留中心死区", () => {
   assert.equal(assistantPetLookDirection(centerX - 100, centerY, bounds), 12);
 });
 
-test("注视角度保持连续，并跨两处半圈边界平滑衔接", () => {
+test("注视方向使用单帧并在相邻方向间保留迟滞", () => {
   const radius = 100;
   const radians = 168.75 * Math.PI / 180;
   const phase = assistantPetLookPhase(
@@ -55,15 +56,22 @@ test("注视角度保持连续，并跨两处半圈边界平滑衔接", () => {
   );
   assert.ok(phase != null && Math.abs(phase - 7.5) < 0.001);
 
-  const lowerBoundary = assistantPetFrameAt("idle", 0, 7.5);
-  assert.deepEqual(lowerBoundary.cell, { row: 9, column: 7 });
-  assert.deepEqual(lowerBoundary.nextCell, { row: 10, column: 0 });
-  assert.equal(lowerBoundary.blend, 0.5);
+  assert.equal(assistantPetLookDirectionWithHysteresis(4.55, 4), 4);
+  assert.equal(assistantPetLookDirectionWithHysteresis(4.7, 4), 5);
+  assert.equal(assistantPetLookDirectionWithHysteresis(3.45, 4), 4);
+  assert.equal(assistantPetLookDirectionWithHysteresis(3.3, 4), 3);
 
-  const upperBoundary = assistantPetFrameAt("idle", 0, 15.5);
-  assert.deepEqual(upperBoundary.cell, { row: 10, column: 7 });
-  assert.deepEqual(upperBoundary.nextCell, { row: 9, column: 0 });
-  assert.equal(upperBoundary.blend, 0.5);
+  assert.equal(assistantPetLookDirectionWithHysteresis(15.55, 15), 15);
+  assert.equal(assistantPetLookDirectionWithHysteresis(15.7, 15), 0);
+  assert.equal(assistantPetLookDirectionWithHysteresis(0.45, 0), 0);
+  assert.equal(assistantPetLookDirectionWithHysteresis(15.3, 0), 15);
+
+  assert.deepEqual(assistantPetFrameAt("idle", 0, 7.5), {
+    cell: { row: 10, column: 0 },
+  });
+  assert.deepEqual(assistantPetFrameAt("idle", 0, 15.5), {
+    cell: { row: 9, column: 0 },
+  });
 });
 
 test("工作和完成状态优先于鼠标注视", () => {

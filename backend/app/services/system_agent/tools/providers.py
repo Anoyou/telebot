@@ -54,15 +54,6 @@ def _provider_view(row: LLMProvider) -> dict[str, Any]:
 async def list_providers(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
     limit = clamp_limit(args.get("limit"), default=50, maximum=200)
     q = select(LLMProvider).order_by(LLMProvider.id.asc()).limit(limit)
-    try:
-        provider_id = int(args.get("id") or 0)
-    except (TypeError, ValueError):
-        provider_id = 0
-    if provider_id > 0:
-        q = q.where(LLMProvider.id == provider_id)
-    name = str(args.get("name") or "").strip()
-    if name:
-        q = q.where(LLMProvider.name.ilike(f"%{name}%"))
     result = await ctx.db.execute(q)
     rows = list(result.scalars().all())
     return {
@@ -136,6 +127,7 @@ async def save_precheck(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any
         protocol_profile=str(resolved.get("protocol_profile") or "standard"),
         client_identity_profile=str(resolved.get("client_identity_profile") or "auto"),
         request_headers=resolved.get("request_headers"),
+        using_saved_key=bool(provider_id not in (None, "") and not touching_key),
     )
 
 
@@ -242,6 +234,10 @@ async def verify_precheck(ctx: ToolContext, args: dict[str, Any]) -> dict[str, A
         protocol_profile=str(resolved.get("protocol_profile") or "standard"),
         client_identity_profile=str(resolved.get("client_identity_profile") or "auto"),
         request_headers=resolved.get("request_headers"),
+        using_saved_key=bool(
+            (args.get("id") or args.get("provider_id")) not in (None, "")
+            and not args.get("api_key")
+        ),
     )
     return result
 
@@ -262,12 +258,10 @@ def register(registry: ToolRegistry) -> None:
     registry.register(
         ToolSpec(
             name="providers.list",
-            description="列出模型提供商（脱敏）：ID/名称/模型清单/has_api_key/tools 支持情况。",
+            description="列出全部模型提供商（脱敏）：ID/名称/模型清单/has_api_key/tools 支持情况。无需 ID 或名称筛选。",
             input_schema={
                 "type": "object",
                 "properties": {
-                    "id": {"type": "integer", "minimum": 1},
-                    "name": {"type": "string"},
                     "limit": {"type": "integer"},
                 },
                 "additionalProperties": False,

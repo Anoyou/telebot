@@ -15,8 +15,6 @@ export type AssistantPetCell = {
 
 export type AssistantPetFrame = {
   cell: AssistantPetCell;
-  nextCell: AssistantPetCell | null;
-  blend: number;
 };
 
 export type AssistantPetBounds = {
@@ -243,6 +241,23 @@ export function assistantPetLookPhase(
   return clockwiseDegrees / 22.5;
 }
 
+export function assistantPetLookDirectionWithHysteresis(
+  phase: number | null,
+  current: number | null,
+  hysteresis = 0.12,
+): number | null {
+  if (phase == null) return null;
+
+  const normalizedPhase = ((phase % 16) + 16) % 16;
+  const nearest = Math.round(normalizedPhase) % 16;
+  if (current == null) return nearest;
+
+  const normalizedCurrent = ((Math.round(current) % 16) + 16) % 16;
+  const signedDistance = ((normalizedPhase - normalizedCurrent + 24) % 16) - 8;
+  const holdDistance = 0.5 + Math.max(0, hysteresis);
+  return Math.abs(signedDistance) <= holdDistance ? normalizedCurrent : nearest;
+}
+
 export function assistantPetCell(
   intent: AssistantPetIntent,
   elapsed: number,
@@ -259,19 +274,12 @@ export function assistantPetFrameAt(
   reduceMotion = false,
 ): AssistantPetFrame {
   if ((intent === "idle" || intent === "waving") && lookDirection != null) {
-    const normalized = ((lookDirection % 16) + 16) % 16;
-    const index = Math.floor(normalized);
-    const blend = normalized - index;
-    const nextIndex = (index + 1) % 16;
+    const index = Math.round(((lookDirection % 16) + 16) % 16) % 16;
     return {
       cell: {
         row: index < 8 ? 9 : 10,
         column: index % 8,
       },
-      nextCell: blend > 0.001
-        ? { row: nextIndex < 8 ? 9 : 10, column: nextIndex % 8 }
-        : null,
-      blend,
     };
   }
 
@@ -281,8 +289,6 @@ export function assistantPetFrameAt(
     if (reduceMotion || elapsed >= duration * JUMP_LOOP_COUNT) {
       return {
         cell: { row: ANIMATIONS.idle.row, column: ANIMATIONS.idle.frames?.[0] ?? 0 },
-        nextCell: null,
-        blend: 0,
       };
     }
   }
@@ -294,8 +300,6 @@ export function assistantPetFrameAt(
       row: animation.row,
       column: animation.frames?.[frame.index] ?? frame.index,
     },
-    nextCell: null,
-    blend: 0,
   };
 }
 

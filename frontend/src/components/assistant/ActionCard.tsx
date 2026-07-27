@@ -26,6 +26,21 @@ export function ActionCard({
   const pending = action.status === "pending";
   const dangerous = action.risk === "dangerous";
   const syncFailed = action.runtime_sync_status === "failed";
+  const previewMode = String(action.preview?.mode || "");
+  const currentProvider = action.preview?.current as { has_api_key?: boolean } | undefined;
+  const needsSecretInput = Boolean(
+    action.secret_fields?.length
+      || action.error_code === "API_KEY_REQUIRED"
+      || action.error_code === "API_KEY_DECRYPT_FAILED"
+      || action.error_code === "API_KEY_REJECTED"
+      || (action.tool_name === "providers.verify" && previewMode === "draft")
+      || (action.tool_name === "providers.save" && previewMode === "create")
+      || (
+        action.tool_name === "providers.save"
+        && previewMode === "update"
+        && currentProvider?.has_api_key === false
+      ),
+  );
 
   const apply = (next: SystemAgentAction) => {
     setAction(next);
@@ -112,16 +127,10 @@ export function ActionCard({
         </div>
       ) : null}
 
-      {pending && (action.secret_fields?.length || action.tool_name?.startsWith("providers.")) ? (
+      {pending && needsSecretInput ? (
         <SecretInput
           actionId={action.id}
-          fieldNames={
-            action.secret_fields?.length
-              ? action.secret_fields
-              : action.tool_name?.startsWith("providers.")
-                ? ["api_key"]
-                : undefined
-          }
+          fieldNames={action.secret_fields?.length ? action.secret_fields : ["api_key"]}
           onDone={() => {
             // 与后端 secret-input 一致：补 Key 后清旧预检错误
             const next = {

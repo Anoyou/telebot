@@ -828,6 +828,77 @@ test.describe("移动端交互细节", () => {
     fixture.assertClean();
   });
 
+  test("已有 Provider 测活只在鉴权失败时显示密钥输入", async ({ page }, testInfo) => {
+    test.skip(testInfo.project.name !== "desktop", "Action 卡片回归只需桌面项目执行一次");
+    const fixture = await installApiFixture(page);
+    const session = {
+      id: "provider-action-session",
+      web_user_id: 1,
+      bot_tg_user_id: null,
+      account_id: null,
+      channel: "web",
+      title: "Provider 测活",
+      status: "active",
+      created_at: "2026-07-28T00:00:00Z",
+      updated_at: "2026-07-28T00:00:00Z",
+    };
+    const baseAction = {
+      session_id: session.id,
+      account_id: null,
+      channel: "web",
+      tool_name: "providers.verify",
+      arguments: { id: 4, provider_id: 4 },
+      secret_fields: [],
+      has_secret: false,
+      risk: "normal",
+      status: "pending",
+      result: null,
+      runtime_sync_status: "not_required",
+      runtime_sync_error: null,
+      expires_at: "2026-07-28T01:00:00Z",
+      created_at: "2026-07-28T00:00:00Z",
+      updated_at: "2026-07-28T00:00:00Z",
+      executed_at: null,
+    };
+    const actions = [
+      {
+        ...baseAction,
+        id: "provider-upstream-error",
+        summary: "验证 Provider #4 猫羽",
+        preview: { mode: "existing", provider: { id: 4, has_api_key: true } },
+        error_code: "PROVIDER_VERIFY_FAILED",
+        error_message: "上游 503，已保存配置未修改，无需重新输入 API Key。",
+      },
+      {
+        ...baseAction,
+        id: "provider-auth-error",
+        summary: "验证 Provider #5 鉴权失败",
+        preview: { mode: "existing", provider: { id: 5, has_api_key: true } },
+        error_code: "API_KEY_REJECTED",
+        error_message: "上游返回 401，请检查 API Key。",
+      },
+    ];
+    await page.route("**/api/system-agent/sessions?**", async (route) => {
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify([session]) });
+    });
+    await page.route("**/api/system-agent/sessions/provider-action-session/messages?**", async (route) => {
+      await route.fulfill({ status: 200, contentType: "application/json", body: "[]" });
+    });
+    await page.route("**/api/system-agent/actions?**", async (route) => {
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(actions) });
+    });
+
+    await page.goto("/ai", { waitUntil: "networkidle" });
+    await page.locator("[data-assistant-desktop-pet]").click();
+    const surface = page.locator("[data-assistant-surface]");
+    const secretInputs = surface.getByPlaceholder("api_key");
+    await expect(secretInputs).toHaveCount(1);
+    await expect(
+      secretInputs.locator("xpath=ancestor::div[contains(@class, 'rounded-xl')][1]"),
+    ).toContainText("验证 Provider #5 鉴权失败");
+    fixture.assertClean();
+  });
+
   test("指令与任务使用独立一级页面且旧插件路径已移除", async ({ page }) => {
     const fixture = await installApiFixture(page);
     await page.goto("/operations/templates", { waitUntil: "networkidle" });

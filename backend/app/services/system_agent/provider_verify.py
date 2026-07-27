@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -11,6 +12,30 @@ from ...db.models.command import LLMProvider
 from ...services import llm_quick_verify
 from ...services.llm_request_headers import decrypt_request_headers
 from .registry import ActionKeepPendingError
+
+_HTTP_STATUS_RE = re.compile(r"接口返回\s+(\d{3})\b")
+
+
+def _verification_failure(
+    message: str,
+    *,
+    using_saved_key: bool,
+) -> ActionKeepPendingError:
+    match = _HTTP_STATUS_RE.search(message)
+    status_code = int(match.group(1)) if match else None
+    if status_code in {401, 403}:
+        return ActionKeepPendingError(
+            f"Provider 验证失败：{message}。鉴权失败；如需更换密钥，请重新输入后再确认。已保存的 Provider 配置未修改。",
+            code="API_KEY_REJECTED",
+        )
+    if using_saved_key:
+        suffix = "已保存的 Provider 配置未修改，无需重新输入 API Key；请根据上游错误调整模型或协议，或稍后重试。"
+    else:
+        suffix = "本操作的临时密钥已按安全策略清除；上游错误不代表密钥无效，重试时需重新输入。"
+    return ActionKeepPendingError(
+        f"Provider 验证失败：{message}。{suffix}",
+        code="PROVIDER_VERIFY_FAILED",
+    )
 
 
 async def run_quick_verify(
@@ -24,6 +49,7 @@ async def run_quick_verify(
     client_identity_profile: str = "auto",
     request_headers: list[object] | None = None,
     timeout_seconds: int = 45,
+    using_saved_key: bool = False,
 ) -> dict[str, Any]:
     """执行一次真实上游验证，返回摘要；失败抛 ActionKeepPendingError。"""
 
@@ -75,10 +101,7 @@ async def run_quick_verify(
             # 确保错误里不带回 key
             if key and key in last_error:
                 last_error = last_error.replace(key, "[REDACTED]")
-            raise ActionKeepPendingError(
-                f"Provider 验证失败：{last_error}。密钥已清除，请重新输入后再确认。",
-                code="PROVIDER_VERIFY_FAILED",
-            )
+            raise _verification_failure(last_error, using_saved_key=using_saved_key)
         if et == "done" and event.get("ok"):
             final = {
                 "ok": True,
@@ -91,10 +114,7 @@ async def run_quick_verify(
                 "business_changed": False,
             }
     if final is None:
-        raise ActionKeepPendingError(
-            f"Provider 验证失败：{last_error}。密钥已清除，请重新输入后再确认。",
-            code="PROVIDER_VERIFY_FAILED",
-        )
+        raise _verification_failure(last_error, using_saved_key=using_saved_key)
     return final
 
 

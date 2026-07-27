@@ -5,6 +5,7 @@ test.use({ reducedMotion: "no-preference" });
 type CanvasMetrics = {
   hash: number;
   alphaMass: number;
+  translucentPixels: number;
   centerX: number;
   lowerCenterX: number;
   left: number;
@@ -21,6 +22,7 @@ async function canvasMetrics(canvas: Locator): Promise<CanvasMetrics> {
     const pixels = context.getImageData(0, 0, target.width, target.height).data;
     let hash = 2166136261;
     let alphaMass = 0;
+    let translucentPixels = 0;
     let weightedX = 0;
     let lowerAlphaMass = 0;
     let lowerWeightedX = 0;
@@ -39,6 +41,7 @@ async function canvasMetrics(canvas: Locator): Promise<CanvasMetrics> {
       hash ^= pixels[offset + 3];
       hash = Math.imul(hash, 16777619);
       if (alpha <= 0) continue;
+      if (pixels[offset + 3] < 255) translucentPixels += 1;
       const pixel = offset / 4;
       const x = pixel % target.width;
       const y = Math.floor(pixel / target.width);
@@ -56,6 +59,7 @@ async function canvasMetrics(canvas: Locator): Promise<CanvasMetrics> {
     return {
       hash: hash >>> 0,
       alphaMass,
+      translucentPixels,
       centerX: weightedX / alphaMass,
       lowerCenterX: lowerWeightedX / lowerAlphaMass,
       left,
@@ -69,6 +73,37 @@ async function canvasMetrics(canvas: Locator): Promise<CanvasMetrics> {
 async function expectCanvasReady(canvas: Locator) {
   await expect.poll(async () => (await canvasMetrics(canvas)).alphaMass).toBeGreaterThan(500);
 }
+
+test("注视中间角度保持单帧清晰，不叠加半透明人物", async ({ page }) => {
+  await page.goto("/assistant-pet-states-preview.html?state=look");
+  const pet = page.locator("[data-preview-production-pet]");
+  const canvas = pet.locator("canvas");
+  await expectCanvasReady(canvas);
+  const petBox = await pet.boundingBox();
+  expect(petBox).not.toBeNull();
+  const centerX = (petBox?.x ?? 0) + (petBox?.width ?? 0) / 2;
+  const centerY = (petBox?.y ?? 0) + (petBox?.height ?? 0) / 2;
+
+  await page.mouse.move(centerX, centerY - 42);
+  await page.waitForTimeout(40);
+  const exactDirection = await canvasMetrics(canvas);
+  await page.mouse.move(
+    centerX + Math.sin(11.25 * Math.PI / 180) * 42,
+    centerY - Math.cos(11.25 * Math.PI / 180) * 42,
+  );
+  await page.waitForTimeout(40);
+  const heldDirection = await canvasMetrics(canvas);
+  expect(heldDirection.hash).toBe(exactDirection.hash);
+  expect(heldDirection.translucentPixels).toBe(exactDirection.translucentPixels);
+
+  await page.mouse.move(
+    centerX + Math.sin(15.75 * Math.PI / 180) * 42,
+    centerY - Math.cos(15.75 * Math.PI / 180) * 42,
+  );
+  await page.waitForTimeout(40);
+  const switchedDirection = await canvasMetrics(canvas);
+  expect(switchedDirection.hash).not.toBe(exactDirection.hash);
+});
 
 test("实装 Agent 的注视、跑动、贴边和跳跃保持连续", async ({ page }) => {
   test.setTimeout(45_000);

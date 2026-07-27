@@ -18,6 +18,7 @@ import {
   assistantPetFrameAt,
   assistantPetIntentForState,
   assistantPetLookPhase,
+  assistantPetLookDirectionWithHysteresis,
   ASSISTANT_PET_CANVAS_HEIGHT,
   ASSISTANT_PET_CANVAS_WIDTH,
   ASSISTANT_PET_COMPACT_CANVAS_HEIGHT,
@@ -225,12 +226,7 @@ export function AssistantPetSprite({
     const drawFrame = (frame: ReturnType<typeof assistantPetFrameAt>) => {
       const plan = assistantPetDrawPlan(frame.cell, compactUpperBody, compactFullBody);
       bufferContext.clearRect(0, 0, buffer.width, buffer.height);
-      drawPlan(plan, frame.nextCell ? 1 - frame.blend : 1);
-      if (frame.nextCell) {
-        bufferContext.globalCompositeOperation = "lighter";
-        drawPlan(assistantPetDrawPlan(frame.nextCell, compactUpperBody, compactFullBody), frame.blend);
-        bufferContext.globalCompositeOperation = "source-over";
-      }
+      drawPlan(plan, 1);
 
       context.save();
       context.globalCompositeOperation = "copy";
@@ -246,11 +242,10 @@ export function AssistantPetSprite({
           lookDirectionRef.current,
           reduceMotion.matches,
         );
-        const blendStep = frame.nextCell ? Math.round(frame.blend * 16) : 0;
-        const frameKey = `${frame.cell.row}:${frame.cell.column}:${frame.nextCell?.row ?? ""}:${frame.nextCell?.column ?? ""}:${blendStep}`;
+        const frameKey = `${frame.cell.row}:${frame.cell.column}`;
         if (frameKey !== lastFrameKey) {
           lastFrameKey = frameKey;
-          drawFrame({ ...frame, blend: blendStep / 16 });
+          drawFrame(frame);
         }
       }
       animationFrame = window.requestAnimationFrame(render);
@@ -486,8 +481,8 @@ export function AssistantPet() {
       frame = window.requestAnimationFrame(() => {
         const rect = buttonRef.current?.getBoundingClientRect();
         if (!rect || !buttonRef.current) return;
-        const nextDirection = assistantPetLookPhase(event.clientX, event.clientY, rect);
-        setLookDirection((current) => current === nextDirection ? current : nextDirection);
+        const phase = assistantPetLookPhase(event.clientX, event.clientY, rect);
+        setLookDirection((current) => assistantPetLookDirectionWithHysteresis(phase, current));
       });
     };
     window.addEventListener("pointermove", handlePointer, { passive: true });
