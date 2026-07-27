@@ -1443,7 +1443,8 @@ export type LLMClientIdentityProfile =
   | "auto"
   | "minimal"
   | "openai_sdk"
-  | "codex_cli"
+  | "codex_tui"
+  | "codex_desktop"
   | "claude_code"
   | "grok_cli";
 

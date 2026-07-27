@@ -162,6 +162,17 @@ _ACTION_HINTS = (
     "restart",
 )
 _REFERENCE_HINTS = ("它", "这个", "这条", "刚才", "上一个", "那个", "继续", "it", "that", "again")
+_CORRECTION_HINTS = (
+    "排查错",
+    "查错",
+    "不对",
+    "你肯定",
+    "重新查",
+    "wrong place",
+    "not right",
+    "incorrect",
+    "check again",
+)
 _GENERAL_HELP_HINTS = (
     "怎么使用agent",
     "怎么用agent",
@@ -310,6 +321,10 @@ def route_locally(
         for item in (state.get("last_domains") or [])
         if str(item) in available
     ]
+    if previous and any(
+        re.sub(r"\s+", "", hint.lower()) in normalized for hint in _CORRECTION_HINTS
+    ):
+        return ToolRoute(tuple(previous[:3]), "memory", "correction_to_previous_domain")
     if previous and any(hint in normalized for hint in _REFERENCE_HINTS):
         return ToolRoute(tuple(previous[:3]), "memory", "reference_to_previous_domain")
 

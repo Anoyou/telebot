@@ -25,6 +25,22 @@
 
 ## [Unreleased]
 
+## [0.84.0-beta.4] - 2026-07-27 · patch（补丁版本预发布） · Provider 客户端身份与 Agent 自查修复
+
+### Changed
+
+- Codex Responses 身份拆分为可选的 `codex_tui` 与 `codex_desktop`，按真实抓包分别生成 UA、`originator` 和随机会话链路头；旧 `codex_cli` / `codex_exec` 配置兼容迁移到 TUI，不再向新请求发送被上游拒绝的 `codex_exec` 身份。
+- Claude Code 模型身份改用真实 CLI 入口与 Anthropic JS SDK Stainless 头；Grok 身份同步为真实 `grok-pager` / `grok-shell` 组合 UA 和 `grok-pager` 标识。内部 beta、设备、工作区、遥测与鉴权字段仍明确排除。
+
+### Fixed
+
+- 修复 System Agent 调用 `providers.list` 时把模型生成的 `id: 0` 当作真实主键过滤，导致已配置 Provider 被错误报告为不存在的问题；非正数 ID 现在按未指定处理，并由工具 schema 限制合法 ID 从 1 开始。
+- 修复用户质疑上一次排查结果时路由器清空 Provider 等历史工具域、导致 Agent 无法重新读取真实配置并自我纠正的问题。
+
+### Tests
+
+- 新增 Codex TUI / Desktop、Claude Code、Grok 请求头 golden 测试，覆盖旧身份迁移、动态会话 ID、版本覆盖与协议探测；新增 Provider `id: 0` 和 Agent 纠错续查回归测试。
+
 ## [0.84.0-beta.3] - 2026-07-27 · patch（补丁版本预发布） · 项目文档与视觉基线更新
 
 ### Changed

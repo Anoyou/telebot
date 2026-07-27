@@ -243,7 +243,7 @@ async def test_detect_stops_after_standard_identity_success(monkeypatch) -> None
 
 @pytest.mark.asyncio
 async def test_detect_retries_identity_only_on_client_rejection(monkeypatch) -> None:
-    """Responses 上游用 openai/minimal 均 client_rejected 时，会按顺序尝试 codex_cli。"""
+    """Responses 上游用 openai/minimal 均 client_rejected 时，会按顺序尝试 codex_tui。"""
     from app.api import commands
     from app.schemas.command import DetectProviderProtocolsRequest
 
@@ -254,7 +254,7 @@ async def test_detect_retries_identity_only_on_client_rejection(monkeypatch) -> 
         if url.endswith("/responses"):
             responses_uas.append(request.headers.get("User-Agent", ""))
             ua = request.headers.get("User-Agent", "")
-            if ua.startswith("codex_exec/"):
+            if ua.startswith("codex-tui/"):
                 return httpx.Response(200, json={"output_text": "ok"})
             return httpx.Response(403, text="this API requires the Codex CLI client")
         if url.endswith("/chat/completions"):
@@ -292,11 +292,11 @@ async def test_detect_retries_identity_only_on_client_rejection(monkeypatch) -> 
     responses_attempts = [
         a for a in resp.identity_attempts if a.api_format == "responses"
     ]
-    # codex_cli 身份成功 → 推荐 responses + codex_cli。
+    # codex_tui 身份成功 → 推荐 responses + codex_tui。
     assert resp.responses.ok is True
-    assert resp.recommended_client_identity_profile == "codex_cli"
+    assert resp.recommended_client_identity_profile == "codex_tui"
     profiles = [a.client_identity_profile for a in responses_attempts]
-    assert "codex_cli" in profiles
+    assert "codex_tui" in profiles
 
 
 @pytest.mark.asyncio

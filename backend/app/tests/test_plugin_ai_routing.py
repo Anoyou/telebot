@@ -246,7 +246,7 @@ def test_routing_summary_is_sanitized() -> None:
     assert summary["matched_tag"] == "chat"
     assert summary["model"] == "gpt-test"
     assert summary["api_format"] == "responses"
-    assert summary["client_identity_profile"] == "codex_cli"
+    assert summary["client_identity_profile"] == "codex_tui"
     assert summary["used_fallback"] is False
     # 绝不泄露敏感字段。
     blob = repr(summary)

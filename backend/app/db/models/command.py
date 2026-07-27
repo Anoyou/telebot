@@ -108,7 +108,7 @@ ALL_LLM_CLIENT_IDENTITY_PROFILES = {
     "auto",
     "minimal",
     "openai_sdk",
-    "codex_cli",
+    "codex_tui",
     "codex_desktop",
     "claude_code",
     "claude_desktop",
@@ -117,10 +117,10 @@ ALL_LLM_CLIENT_IDENTITY_PROFILES = {
 
 
 def normalize_client_identity_profile(value: str | None) -> str:
-    """规范化客户端身份档案；Desktop 历史值统一迁移到对应 CLI。"""
+    """规范化客户端身份档案；Codex 旧 CLI/exec 值迁移到 TUI。"""
     candidate = (value or "").strip().lower()
-    if candidate == "codex_desktop":
-        return "codex_cli"
+    if candidate in {"codex_cli", "codex_exec"}:
+        return "codex_tui"
     if candidate == "claude_desktop":
         return "claude_code"
     if candidate in ALL_LLM_CLIENT_IDENTITY_PROFILES:

@@ -3169,10 +3169,15 @@ class ResponsesClient(LLMClient):
         self._identity = identity
         self._compatibility_headers = dict(compatibility_headers or {})
         request_session_id = str(uuid.uuid4())
-        if identity is not None and identity.profile == "codex_cli":
+        if identity is not None and identity.profile == "codex_tui":
             self._runtime_headers = {
                 "session-id": request_session_id,
                 "thread-id": request_session_id,
+                "x-client-request-id": request_session_id,
+            }
+        elif identity is not None and identity.profile == "codex_desktop":
+            self._runtime_headers = {
+                "session_id": request_session_id,
                 "x-client-request-id": request_session_id,
             }
         elif identity is not None and identity.profile == "grok_cli":

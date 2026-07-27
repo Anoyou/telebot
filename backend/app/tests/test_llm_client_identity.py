@@ -1,7 +1,7 @@
 """阶段 A：客户端身份基础层测试。
 
 覆盖：
-- 三协议 auto 身份映射（chat→openai_sdk / responses→codex_cli / anthropic→claude_code）。
+- 三协议 auto 身份映射（chat→openai_sdk / responses→codex_tui / anthropic→claude_code）。
 - 身份依据"本次实际协议"解析：api_format_override / 联网搜索切协议后身份重算。
 - minimal 不附加任何产品模拟头。
 - 全局断言所有 LLM 请求不再发送 TelePilot 产品 UA。
@@ -34,7 +34,8 @@ from app.services.llm_client import (
 from app.services.llm_dto import LLMProviderDTO
 from app.services.llm_identity import (
     CLIENT_IDENTITY_CLAUDE_CODE,
-    CLIENT_IDENTITY_CODEX_CLI,
+    CLIENT_IDENTITY_CODEX_DESKTOP,
+    CLIENT_IDENTITY_CODEX_TUI,
     CLIENT_IDENTITY_GROK_CLI,
     CLIENT_IDENTITY_MINIMAL,
     CLIENT_IDENTITY_OPENAI_SDK,
@@ -89,14 +90,14 @@ def _responses_response() -> _Response:
 
 def test_auto_identity_maps_by_effective_format() -> None:
     assert default_identity_for_format(LLM_API_FORMAT_CHAT_COMPLETIONS) == CLIENT_IDENTITY_OPENAI_SDK
-    assert default_identity_for_format(LLM_API_FORMAT_RESPONSES) == CLIENT_IDENTITY_CODEX_CLI
+    assert default_identity_for_format(LLM_API_FORMAT_RESPONSES) == CLIENT_IDENTITY_CODEX_TUI
     assert default_identity_for_format(LLM_API_FORMAT_ANTHROPIC_MESSAGES) == CLIENT_IDENTITY_CLAUDE_CODE
 
 
 def test_resolve_auto_uses_effective_format_not_provider_default() -> None:
     # Provider 默认 chat_completions，但本次实际协议是 responses（联网搜索切协议）。
     identity = resolve_identity("auto", LLM_API_FORMAT_RESPONSES)
-    assert identity.profile == CLIENT_IDENTITY_CODEX_CLI
+    assert identity.profile == CLIENT_IDENTITY_CODEX_TUI
 
 
 def test_fixed_identity_incompatible_falls_back_to_auto_for_format() -> None:
@@ -111,13 +112,16 @@ def test_minimal_identity_has_no_product_headers() -> None:
     assert identity.headers() == {}
 
 
-def test_legacy_desktop_profiles_are_hidden_and_normalized_to_cli() -> None:
+def test_codex_desktop_is_selectable_and_legacy_cli_maps_to_tui() -> None:
     items = {item["profile"]: item for item in selectable_identities()}
-    assert "codex_desktop" not in items
+    assert "codex_tui" in items
+    assert "codex_desktop" in items
     assert "claude_desktop" not in items
-    assert resolve_identity("codex_desktop", LLM_API_FORMAT_RESPONSES).profile == CLIENT_IDENTITY_CODEX_CLI
+    assert resolve_identity("codex_desktop", LLM_API_FORMAT_RESPONSES).profile == CLIENT_IDENTITY_CODEX_DESKTOP
     assert resolve_identity("claude_desktop", LLM_API_FORMAT_ANTHROPIC_MESSAGES).profile == CLIENT_IDENTITY_CLAUDE_CODE
-    assert normalize_client_identity_profile("codex_desktop") == CLIENT_IDENTITY_CODEX_CLI
+    assert normalize_client_identity_profile("codex_cli") == CLIENT_IDENTITY_CODEX_TUI
+    assert normalize_client_identity_profile("codex_exec") == CLIENT_IDENTITY_CODEX_TUI
+    assert normalize_client_identity_profile("codex_desktop") == CLIENT_IDENTITY_CODEX_DESKTOP
     assert normalize_client_identity_profile("claude_desktop") == CLIENT_IDENTITY_CLAUDE_CODE
 
 
@@ -135,7 +139,7 @@ def test_identity_compat_matrix() -> None:
 def test_normalize_unknown_identity_degrades_to_auto() -> None:
     assert normalize_client_identity_profile("bogus") == "auto"
     assert normalize_client_identity_profile(None) == "auto"
-    assert normalize_client_identity_profile("codex_cli") == "codex_cli"
+    assert normalize_client_identity_profile("codex_cli") == "codex_tui"
 
 
 def test_identity_summary_has_no_secrets() -> None:
@@ -192,13 +196,32 @@ async def test_responses_client_sends_codex_identity() -> None:
         )
     headers = fake.post.await_args.kwargs["headers"]
     assert "TelePilot" not in headers.get("User-Agent", "")
-    assert headers.get("User-Agent", "").startswith("codex_exec/")
-    assert headers.get("originator") == "codex_exec"
+    assert headers.get("User-Agent", "").startswith("codex-tui/")
+    assert headers.get("originator") == "codex-tui"
     assert headers.get("session-id")
     assert headers.get("thread-id") == headers["session-id"]
     assert headers.get("x-client-request-id") == headers["session-id"]
     assert "session_id" not in headers
     assert "conversation_id" not in headers
+
+
+@pytest.mark.asyncio
+async def test_responses_client_sends_codex_desktop_identity() -> None:
+    fake = AsyncMock()
+    fake.__aenter__.return_value = fake
+    fake.post = AsyncMock(return_value=_responses_response())
+    identity = resolve_identity("codex_desktop", LLM_API_FORMAT_RESPONSES)
+    with patch("app.services.llm_client.httpx.AsyncClient", return_value=fake):
+        await ResponsesClient("sk", "https://api.example/v1", "model", identity=identity).complete(
+            "system", "hello"
+        )
+    headers = fake.post.await_args.kwargs["headers"]
+    assert headers.get("User-Agent", "").startswith("Codex Desktop/")
+    assert headers.get("originator") == "Codex Desktop"
+    assert headers.get("session_id")
+    assert headers.get("x-client-request-id") == headers["session_id"]
+    assert "session-id" not in headers
+    assert "thread-id" not in headers
 
 
 @pytest.mark.asyncio
@@ -212,10 +235,9 @@ async def test_responses_client_sends_minimal_grok_cli_identity() -> None:
             "system", "hello"
         )
     headers = fake.post.await_args.kwargs["headers"]
-    assert headers.get("User-Agent", "").startswith("grok-shell/0.2.112 (")
-    assert headers.get("x-grok-client-mode") == "headless"
+    assert headers.get("User-Agent", "").startswith("grok-pager/0.2.112 grok-shell/0.2.112 (")
     assert headers.get("x-grok-client-version") == "0.2.112"
-    assert headers.get("x-grok-client-identifier") == "grok-shell"
+    assert headers.get("x-grok-client-identifier") == "grok-pager"
     assert headers.get("x-grok-conv-id")
     assert headers.get("x-grok-session-id") == headers["x-grok-conv-id"]
     assert headers.get("x-grok-req-id")
@@ -342,7 +364,7 @@ def test_build_client_recomputes_identity_after_api_format_override() -> None:
     dto = _dto(client_identity_profile="auto")
     client = build_client_from_dto(dto, api_format_override=LLM_API_FORMAT_RESPONSES)
     assert isinstance(client, ResponsesClient)
-    assert client._identity.profile == CLIENT_IDENTITY_CODEX_CLI
+    assert client._identity.profile == CLIENT_IDENTITY_CODEX_TUI
 
 
 def test_build_client_uses_provider_default_format_identity() -> None:
@@ -358,11 +380,11 @@ def test_dto_normalizes_unknown_identity() -> None:
 
 
 def test_catalog_source_documents_evidence() -> None:
-    codex = llm_identity.get_identity(CLIENT_IDENTITY_CODEX_CLI)
+    codex = llm_identity.get_identity(CLIENT_IDENTITY_CODEX_TUI)
     assert codex is not None
     assert codex.verified is True
     assert "codex" in codex.source.lower()
-    assert codex.user_agent and codex.user_agent.startswith("codex_exec/")
+    assert codex.user_agent and codex.user_agent.startswith("codex-tui/")
 
 
 def test_no_telepilot_user_agent_constant_exists() -> None:

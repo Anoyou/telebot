@@ -377,7 +377,7 @@ class LLMProviderCreate(BaseModel):
         "auto",
         "minimal",
         "openai_sdk",
-        "codex_cli",
+        "codex_tui",
         "codex_desktop",
         "claude_code",
         "claude_desktop",
@@ -463,7 +463,7 @@ class LLMProviderUpdate(BaseModel):
             "auto",
             "minimal",
             "openai_sdk",
-            "codex_cli",
+            "codex_tui",
             "codex_desktop",
             "claude_code",
             "claude_desktop",
@@ -593,7 +593,7 @@ class QuickVerifyProviderRequest(BaseModel):
         "auto",
         "minimal",
         "openai_sdk",
-        "codex_cli",
+        "codex_tui",
         "codex_desktop",
         "claude_code",
         "claude_desktop",
@@ -657,7 +657,7 @@ class ProtocolProbeResult(BaseModel):
     status_code: int | None = None
     latency_ms: int
     error: str | None = None
-    # 阶段 B：本次探测使用的客户端身份档案（openai_sdk / codex_cli / claude_code / minimal ...）。
+    # 阶段 B：本次探测使用的客户端身份档案（openai_sdk / codex_tui / claude_code / minimal ...）。
     client_identity_profile: str | None = None
     # 探测阶段：network / credentials / protocol / identity。
     stage: str | None = None
@@ -754,7 +754,7 @@ class ChatTestModelsRequest(BaseModel):
         "auto",
         "minimal",
         "openai_sdk",
-        "codex_cli",
+        "codex_tui",
         "codex_desktop",
         "claude_code",
         "claude_desktop",
@@ -983,7 +983,7 @@ class ClientIdentityVersionItem(BaseModel):
     """单个客户端身份档案的版本信息（用于 UA 版本段）。"""
 
     key: str
-    """版本键，如 codex_cli / claude_code / openai_sdk / codex_desktop_core。"""
+    """版本键，如 codex_tui / claude_code / openai_sdk / codex_desktop_core。"""
 
     label: str
     """前端展示名。"""

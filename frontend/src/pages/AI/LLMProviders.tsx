@@ -116,7 +116,6 @@ const WEB_SEARCH_API_FORMAT_OPTIONS: { value: LLMWebSearchApiFormat; label: stri
 ];
 
 // 客户端身份档案选项（与后端 services.llm_identity 对齐）。
-// Desktop 档案暂无可复核证据，标记 disabled，前端不可选。
 const CLIENT_IDENTITY_OPTIONS: {
   value: LLMClientIdentityProfile;
   label: string;
@@ -126,7 +125,7 @@ const CLIENT_IDENTITY_OPTIONS: {
   {
     value: "auto",
     label: "自动（推荐）",
-    hint: "按本次实际协议解析：chat_completions→OpenAI SDK / responses→Codex CLI / anthropic_messages→Claude Code CLI。",
+    hint: "按本次实际协议解析：chat_completions→OpenAI SDK / responses→Codex TUI / anthropic_messages→Claude Code CLI。",
   },
   {
     value: "minimal",
@@ -139,9 +138,14 @@ const CLIENT_IDENTITY_OPTIONS: {
     hint: "OpenAI 官方 Python SDK 身份，用于标准 Chat Completions / Responses API。",
   },
   {
-    value: "codex_cli",
-    label: "Codex CLI",
-    hint: "Codex exec 身份（originator=codex_exec），用于 Responses。",
+    value: "codex_tui",
+    label: "Codex TUI",
+    hint: "Codex 终端交互身份（originator=codex-tui），用于 Responses。",
+  },
+  {
+    value: "codex_desktop",
+    label: "Codex Desktop",
+    hint: "Codex 桌面端身份（originator=Codex Desktop），用于 Responses。",
   },
   {
     value: "claude_code",
@@ -265,7 +269,7 @@ const EMPTY_FORM: FormState = {
   api_format: "responses",
   protocol_profile: "standard",
   web_search_api_format: "auto",
-  client_identity_profile: "codex_cli",
+  client_identity_profile: "codex_tui",
   clearKey: false,
   modality: "text",
   tags: ["chat"],
@@ -1440,7 +1444,7 @@ function ProviderCreateWorkspace({
       protocol_profile: apiFormat === "anthropic_messages" ? form.protocol_profile : "standard",
       client_identity_profile:
         apiFormat === "responses"
-          ? "codex_cli"
+          ? "codex_tui"
           : apiFormat === "anthropic_messages"
             ? "claude_code"
             : "openai_sdk",

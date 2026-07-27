@@ -67,6 +67,35 @@ def test_reference_reuses_last_memory_domain() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    "text",
+    (
+        "你肯定排查错地方了",
+        "这个结果不对，重新查",
+        "you checked the wrong place, check again",
+    ),
+)
+def test_correction_reuses_last_memory_domain(text: str) -> None:
+    route = route_locally(
+        text,
+        available={"providers", "logs"},
+        memory_state={"last_domains": ["providers"]},
+    )
+
+    assert route == ToolRoute(
+        ("providers",),
+        "memory",
+        "correction_to_previous_domain",
+    )
+
+
+def test_generic_disagreement_without_memory_does_not_expose_tools() -> None:
+    route = route_locally("不对", available={"providers", "logs"})
+
+    assert route is not None
+    assert route.domains == ()
+
+
 def test_model_route_parses_json_and_limits_to_three_domains() -> None:
     route = parse_model_route(
         '说明文字 {"needs_tools":true,"domains":["logs","ledger","system","rules","logs"],"reason":"query"}',

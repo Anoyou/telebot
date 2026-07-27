@@ -223,7 +223,7 @@ def test_worker_provider_projection_keeps_encrypted_request_headers() -> None:
 
     assert payload["api_key_enc"] == "encrypted-key"
     assert payload["request_headers_enc"] == "encrypted-headers"
-    assert payload["client_identity_profile"] == "codex_cli"
+    assert payload["client_identity_profile"] == "codex_tui"
     assert payload["proxy_url"] == "http://proxy.example:8080"
 
 
@@ -1629,7 +1629,7 @@ def test_usage_identity_resolves_auto_from_effective_protocol() -> None:
             provider,
             effective_api_format="responses",
         )
-        == "codex_cli"
+        == "codex_tui"
     )
 
 
@@ -1671,7 +1671,7 @@ async def test_web_search_usage_records_identity_for_overridden_protocol(monkeyp
     )
 
     assert len(captured) == 1
-    assert captured[0].client_identity_profile == "codex_cli"
+    assert captured[0].client_identity_profile == "codex_tui"
 
 
 __all__ = []

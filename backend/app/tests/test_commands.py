@@ -111,7 +111,7 @@ def test_liveness_transport_metadata_resolves_effective_identity() -> None:
 
     assert commands_api._liveness_transport_metadata(row) == {
         "effective_api_format": "responses",
-        "client_identity_profile": "codex_cli",
+        "client_identity_profile": "codex_tui",
     }
     assert commands_api._liveness_transport_metadata(
         row,
@@ -3439,7 +3439,7 @@ async def test_update_provider_rejects_incompatible_identity() -> None:
 
     with pytest.raises(HTTPException) as ei:
         await command_service.update_provider(
-            _DB(), 88, LLMProviderUpdate(client_identity_profile="codex_cli")
+            _DB(), 88, LLMProviderUpdate(client_identity_profile="codex_tui")
         )
     assert ei.value.status_code == 422
     assert ei.value.detail["code"] == "LLM_PROVIDER_IDENTITY_INVALID"

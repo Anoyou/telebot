@@ -54,11 +54,12 @@ def _provider_view(row: LLMProvider) -> dict[str, Any]:
 async def list_providers(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
     limit = clamp_limit(args.get("limit"), default=50, maximum=200)
     q = select(LLMProvider).order_by(LLMProvider.id.asc()).limit(limit)
-    if args.get("id") not in (None, ""):
-        try:
-            q = q.where(LLMProvider.id == int(args["id"]))
-        except (TypeError, ValueError):
-            pass
+    try:
+        provider_id = int(args.get("id") or 0)
+    except (TypeError, ValueError):
+        provider_id = 0
+    if provider_id > 0:
+        q = q.where(LLMProvider.id == provider_id)
     name = str(args.get("name") or "").strip()
     if name:
         q = q.where(LLMProvider.name.ilike(f"%{name}%"))
@@ -265,7 +266,7 @@ def register(registry: ToolRegistry) -> None:
             input_schema={
                 "type": "object",
                 "properties": {
-                    "id": {"type": "integer"},
+                    "id": {"type": "integer", "minimum": 1},
                     "name": {"type": "string"},
                     "limit": {"type": "integer"},
                 },
