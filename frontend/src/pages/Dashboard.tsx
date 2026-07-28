@@ -715,6 +715,77 @@ function ProcessMemoryCard({ data }: { data: ResourceDashboard }) {
       : undefined;
   const rows = buildProcessMemoryRows(data);
   const compactOverlay = useCompactOverlay();
+  const [open, setOpen] = useState(false);
+  const detailDescription =
+    data.project_total_basis === "compose_containers"
+      ? "项目总量来自全部 Compose 容器；进程行用于内部归因，不再重复相加。"
+      : "主进程和 worker 优先显示 USS；外部项目容器来自 Docker stats。";
+
+  const detailBody = (
+    <>
+      {data.container_probe_error ? (
+        <div className="rounded-xl border px-3 py-2 text-xs text-muted-foreground">
+          {data.container_probe_error}
+        </div>
+      ) : null}
+      {rows.map((row) => (
+        <div
+          key={row.key}
+          className="flex items-center justify-between gap-3 rounded-xl border border-border/70 bg-muted/35 p-3"
+        >
+          <div className="min-w-0">
+            <div className="truncate text-sm font-medium">{row.label}</div>
+            <div className="mt-0.5 font-mono text-xs text-muted-foreground">
+              {row.meta} · CPU {percent(row.cpu)}
+            </div>
+          </div>
+          <div className="shrink-0 text-right">
+            <div className="text-sm font-semibold">{formatMb(row.memoryMb)}</div>
+            <div className="text-[11px] text-muted-foreground">{row.basis}</div>
+          </div>
+        </div>
+      ))}
+      {rows.length === 0 ? (
+        <div className="rounded-xl border border-dashed p-6 text-center text-sm text-muted-foreground">
+          暂无可展示的进程明细。
+        </div>
+      ) : null}
+    </>
+  );
+
+  // 窄屏 / PWA 用居中 Dialog，避免 Dropdown 在底部导航与安全区附近被裁切或滚动困难。
+  if (compactOverlay) {
+    return (
+      <Dialog open={open} onOpenChange={setOpen}>
+        <MetricCard
+          icon={Activity}
+          label="应用总内存"
+          value={formatMb(memoryMb)}
+          hint={projectMemoryHint(memoryMb, totalMb, data)}
+          meterValue={memoryPercent}
+          tone={resourceTone(memoryPercent)}
+          action={(
+            <DialogTrigger asChild>
+              <Button type="button" variant="outline" size="sm" className="h-7 px-2 text-xs">
+                详情
+              </Button>
+            </DialogTrigger>
+          )}
+        />
+        <DialogContent className="dialog-center flex max-h-[min(82dvh,34rem)] w-[calc(100vw-1rem)] max-w-[34rem] flex-col gap-0 overflow-hidden rounded-2xl border-border/80 bg-card p-0 shadow-2xl">
+          <DialogHeader className="shrink-0 border-b px-4 py-3 pr-12 text-left">
+            <DialogTitle className="text-base">应用内存明细</DialogTitle>
+            <DialogDescription className="mt-1 text-sm text-muted-foreground">
+              {detailDescription}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="min-h-0 flex-1 space-y-2 overflow-y-auto overscroll-contain p-4">
+            {detailBody}
+          </div>
+        </DialogContent>
+      </Dialog>
+    );
+  }
 
   return (
     <DropdownMenu modal={false}>
@@ -734,49 +805,17 @@ function ProcessMemoryCard({ data }: { data: ResourceDashboard }) {
         )}
       />
       <DropdownMenuContent
-        align={compactOverlay ? "center" : "end"}
+        align="end"
         collisionPadding={12}
         sideOffset={8}
-        className="max-h-[min(72vh,34rem)] w-[min(34rem,calc(100vw-1rem))] p-0 data-[state=open]:animate-none sm:w-[min(34rem,calc(100vw-2rem))]"
+        className="max-h-[min(72vh,34rem)] w-[min(34rem,calc(100vw-2rem))] p-0 data-[state=open]:animate-none"
         style={{ overflowY: "auto" }}
       >
         <div className="border-b px-4 py-3">
           <div className="text-base font-semibold">应用内存明细</div>
-          <div className="mt-1 text-sm text-muted-foreground">
-            {data.project_total_basis === "compose_containers"
-              ? "项目总量来自全部 Compose 容器；进程行用于内部归因，不再重复相加。"
-              : "主进程和 worker 优先显示 USS；外部项目容器来自 Docker stats。"}
-          </div>
+          <div className="mt-1 text-sm text-muted-foreground">{detailDescription}</div>
         </div>
-        <div className="space-y-2 p-4">
-          {data.container_probe_error ? (
-            <div className="rounded-xl border px-3 py-2 text-xs text-muted-foreground">
-              {data.container_probe_error}
-            </div>
-          ) : null}
-          {rows.map((row) => (
-            <div
-              key={row.key}
-              className="flex items-center justify-between gap-3 rounded-xl border border-border/70 bg-muted/35 p-3"
-            >
-              <div className="min-w-0">
-                <div className="truncate text-sm font-medium">{row.label}</div>
-                <div className="mt-0.5 font-mono text-xs text-muted-foreground">
-                  {row.meta} · CPU {percent(row.cpu)}
-                </div>
-              </div>
-              <div className="shrink-0 text-right">
-                <div className="text-sm font-semibold">{formatMb(row.memoryMb)}</div>
-                <div className="text-[11px] text-muted-foreground">{row.basis}</div>
-              </div>
-            </div>
-          ))}
-          {rows.length === 0 ? (
-            <div className="rounded-xl border border-dashed p-6 text-center text-sm text-muted-foreground">
-              暂无可展示的进程明细。
-            </div>
-          ) : null}
-        </div>
+        <div className="space-y-2 p-4">{detailBody}</div>
       </DropdownMenuContent>
     </DropdownMenu>
   );
