@@ -628,6 +628,7 @@ class SchedulerRuleExecutor:
             SESSION_ORIGIN_SCHEDULED,
         )
         from app.db.models.user import WebUser
+        from app.services.rule_service import SCHEDULER_AGENT_WEB_USER_ID_KEY
         from app.services.system_agent.run_manager import get_system_agent_run_manager
         from app.services.system_agent.service import SystemAgentService
 
@@ -658,11 +659,16 @@ class SchedulerRuleExecutor:
         web_user_id: int | None = None
 
         async with AsyncSessionLocal() as db:
-            web_user = (
-                await db.execute(select(WebUser).order_by(WebUser.id.asc()).limit(1))
-            ).scalar_one_or_none()
+            owner_id = _to_positive_int(action.get(SCHEDULER_AGENT_WEB_USER_ID_KEY))
+            if owner_id <= 0:
+                raise ValueError(
+                    "agent_prompt 缺少可信创建者；请由当前 Web 管理员重新保存该任务"
+                )
+            web_user = await db.get(WebUser, owner_id)
             if web_user is None:
-                raise ValueError("agent_prompt 需要至少一个 Web 用户以落会话轨迹")
+                raise ValueError(
+                    "agent_prompt 创建者已不存在；请由当前 Web 管理员重新保存该任务"
+                )
             web_user_id = int(web_user.id)
             session = await svc.create_session(
                 db,

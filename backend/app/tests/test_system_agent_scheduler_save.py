@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from app.db.models.system_agent import SESSION_ORIGIN_INTERACTIVE, SESSION_ORIGIN_SCHEDULED
+from app.services import rule_service
 from app.services.system_agent.context import ToolContext
 from app.services.system_agent.tools import scheduler as scheduler_tools
 
@@ -55,6 +56,23 @@ def test_agent_prompt_preview_summary() -> None:
     assert "将创建定时 Agent 任务" in summary
     assert "每天 09:00" in summary
     assert "巡检异常日志" in summary
+
+
+def test_agent_prompt_owner_is_server_bound_and_cannot_be_spoofed() -> None:
+    config = rule_service.bind_scheduler_agent_owner(
+        {
+            "action": {
+                "type": "agent_prompt",
+                "prompt": "巡检",
+                "_agent_web_user_id": 999,
+            }
+        },
+        7,
+    )
+
+    assert config["action"]["_agent_web_user_id"] == 7
+    with pytest.raises(rule_service.RuleServiceError, match="Web 管理员"):
+        rule_service.bind_scheduler_agent_owner(config, None)
 
 
 @pytest.mark.asyncio

@@ -282,6 +282,38 @@ def _reject_nested_agent_prompt(ctx: ToolContext, config: dict[str, Any]) -> Non
         )
 
 
+def _reject_bot_agent_prompt(ctx: ToolContext, config: dict[str, Any]) -> None:
+    action = config.get("action") if isinstance(config.get("action"), dict) else {}
+    if ctx.channel == "bot" and str(action.get("type") or "").strip().lower() == "agent_prompt":
+        raise PermissionError(
+            "Bot 渠道不能创建、修改、启用或立即执行 agent_prompt 定时任务；"
+            "请由 Web 管理员创建，避免账号级角色升级为全局 Web Agent。"
+        )
+
+
+def _require_agent_prompt_owner(config: dict[str, Any]) -> None:
+    action = config.get("action") if isinstance(config.get("action"), dict) else {}
+    if str(action.get("type") or "").strip().lower() != "agent_prompt":
+        return
+    try:
+        owner_id = int(action.get("_agent_web_user_id") or 0)
+    except (TypeError, ValueError):
+        owner_id = 0
+    if owner_id <= 0:
+        raise ValueError(
+            "该 agent_prompt 定时任务缺少可信创建者；请由当前 Web 管理员重新保存后再启用或执行"
+        )
+
+
+def _require_bot_rule_scope(ctx: ToolContext, row: Rule) -> None:
+    if (
+        ctx.channel == "bot"
+        and ctx.account_id is not None
+        and int(row.account_id) != int(ctx.account_id)
+    ):
+        raise PermissionError("无权操作其他账号定时任务")
+
+
 def _agent_prompt_preview_summary(*, name: str, config: dict[str, Any], mode: str) -> str:
     action = config.get("action") if isinstance(config.get("action"), dict) else {}
     prompt = str(action.get("prompt") or "").strip()
@@ -318,6 +350,8 @@ async def save_preview(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]
             raise ValueError(f"Scheduler 规则 {rule_id} 不存在")
         if ctx.channel == "bot" and ctx.account_id is not None and row.account_id != ctx.account_id:
             raise PermissionError("无权修改其他账号定时任务")
+        effective_config = config or (row.config if isinstance(row.config, dict) else {})
+        _reject_bot_agent_prompt(ctx, effective_config)
         fields = {k: args[k] for k in ("name", "enabled", "priority", "config") if k in args}
         if is_agent_prompt:
             summary = _agent_prompt_preview_summary(
@@ -336,6 +370,7 @@ async def save_preview(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]
         }
     if account_id is None:
         raise ValueError("创建定时任务需要 account_id")
+    _reject_bot_agent_prompt(ctx, config)
     name = str(args.get("name") or ("定时 Agent 巡检" if is_agent_prompt else "定时任务"))
     if is_agent_prompt:
         if not str(action.get("prompt") or "").strip():
@@ -362,11 +397,23 @@ async def save_execute(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]
     args = _normalize_scheduler_save_args(args)
     config = args.get("config") if isinstance(args.get("config"), dict) else {}
     _reject_nested_agent_prompt(ctx, config)
+    _reject_bot_agent_prompt(ctx, config)
+    config = rule_service.bind_scheduler_agent_owner(config, ctx.web_user_id)
 
     tz = await get_timezone_name(ctx.db)
     rule_id = args.get("id") or args.get("rule_id")
     if rule_id not in (None, ""):
-        fields = {k: args[k] for k in ("name", "enabled", "priority", "config") if k in args}
+        current = await ctx.db.get(Rule, int(rule_id))
+        if current is None or current.feature_key != "scheduler":
+            raise ValueError(f"Scheduler 规则 {rule_id} 不存在")
+        _require_bot_rule_scope(ctx, current)
+        effective_config = config or (
+            current.config if current is not None and isinstance(current.config, dict) else {}
+        )
+        _reject_bot_agent_prompt(ctx, effective_config)
+        fields = {k: args[k] for k in ("name", "enabled", "priority") if k in args}
+        if "config" in args:
+            fields["config"] = config
         row = await rule_service.update_rule(ctx.db, int(rule_id), fields=fields)
         return {"mode": "update", "item": _scheduler_view(row, tz), "business_changed": True}
 
@@ -377,6 +424,7 @@ async def save_execute(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]
     )
     if account_id is None:
         raise ValueError("创建定时任务需要 account_id")
+    _reject_bot_agent_prompt(ctx, config)
     action = config.get("action") if isinstance(config.get("action"), dict) else {}
     is_agent_prompt = str(action.get("type") or "").lower() == "agent_prompt"
     default_name = "定时 Agent 巡检" if is_agent_prompt else "定时任务"
@@ -400,6 +448,9 @@ async def set_enabled_preview(ctx: ToolContext, args: dict[str, Any]) -> dict[st
         raise ValueError(f"Scheduler 规则 {rule_id} 不存在")
     if ctx.channel == "bot" and ctx.account_id is not None and row.account_id != ctx.account_id:
         raise PermissionError("无权修改其他账号定时任务")
+    if enabled:
+        _reject_bot_agent_prompt(ctx, row.config if isinstance(row.config, dict) else {})
+        _require_agent_prompt_owner(row.config if isinstance(row.config, dict) else {})
     return {
         "summary": f"{'启用' if enabled else '禁用'}定时任务 #{rule_id} {row.name}",
         "rule_id": rule_id,
@@ -416,6 +467,18 @@ async def set_enabled_execute(ctx: ToolContext, args: dict[str, Any]) -> dict[st
     tz = await get_timezone_name(ctx.db)
     rule_id = int(args.get("rule_id") or args.get("id"))
     enabled = bool(args.get("enabled"))
+    current = await ctx.db.get(Rule, rule_id)
+    if current is None:
+        raise ValueError(f"Scheduler 规则 {rule_id} 不存在")
+    _require_bot_rule_scope(ctx, current)
+    if enabled:
+        _reject_bot_agent_prompt(
+            ctx,
+            current.config if isinstance(current.config, dict) else {},
+        )
+        _require_agent_prompt_owner(
+            current.config if isinstance(current.config, dict) else {}
+        )
     row = await rule_service.set_enabled(ctx.db, rule_id, enabled)
     return {"item": _scheduler_view(row, tz), "business_changed": True}
 
@@ -439,6 +502,10 @@ async def delete_execute(ctx: ToolContext, args: dict[str, Any]) -> dict[str, An
     from ....services import rule_service
 
     rule_id = int(args.get("rule_id") or args.get("id"))
+    current = await ctx.db.get(Rule, rule_id)
+    if current is None or current.feature_key != "scheduler":
+        raise ValueError(f"Scheduler 规则 {rule_id} 不存在")
+    _require_bot_rule_scope(ctx, current)
     info = await rule_service.delete_rule(ctx.db, rule_id)
     return {**info, "business_changed": True}
 
@@ -449,8 +516,11 @@ async def execute_now_preview(ctx: ToolContext, args: dict[str, Any]) -> dict[st
     row = await ctx.db.get(Rule, rule_id)
     if row is None or row.feature_key != "scheduler":
         raise ValueError(f"Scheduler 规则 {rule_id} 不存在")
+    _require_bot_rule_scope(ctx, row)
     if ctx.channel == "bot" and ctx.account_id is not None and row.account_id != ctx.account_id:
         raise PermissionError("无权执行其他账号定时任务")
+    _reject_bot_agent_prompt(ctx, row.config if isinstance(row.config, dict) else {})
+    _require_agent_prompt_owner(row.config if isinstance(row.config, dict) else {})
     return {
         "summary": f"立即执行定时任务 #{rule_id} {row.name}",
         "account_id": row.account_id,
@@ -466,6 +536,9 @@ async def execute_now_execute(ctx: ToolContext, args: dict[str, Any]) -> dict[st
     row = await ctx.db.get(Rule, rule_id)
     if row is None or row.feature_key != "scheduler":
         raise ValueError(f"Scheduler 规则 {rule_id} 不存在")
+    _require_bot_rule_scope(ctx, row)
+    _reject_bot_agent_prompt(ctx, row.config if isinstance(row.config, dict) else {})
+    _require_agent_prompt_owner(row.config if isinstance(row.config, dict) else {})
     return {
         "rule_id": rule_id,
         "account_id": row.account_id,
@@ -621,5 +694,6 @@ def register(registry: ToolRegistry) -> None:
             preview_handler=execute_now_preview,
             execute_handler=execute_now_execute,
             runtime_effects=("scheduler_execute_now",),
+            runtime_retryable=False,
         )
     )

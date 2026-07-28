@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ...db.models.feature import AccountFeature
 from ...db.models.plugin import InstalledPlugin
 from ...redis_client import get_redis
+from ...services.redactor import redact_value
 from ...worker.ipc import CMD_AGENT_PLUGIN_TOOL, IPCMessage, cmd_channel, make_cmd
 from .context import ToolContext
 from .registry import ToolRegistry, ToolSpec, get_registry
@@ -95,6 +96,12 @@ def parse_exposed_tools(
                 f"{plugin_key}.{name}: 声明写语义，第一期拒绝暴露给 system_agent"
             )
             continue
+        min_role = str(raw.get("min_role") or "viewer").strip().lower()
+        if min_role not in {"viewer", "operator", "admin"}:
+            warn.append(
+                f"{plugin_key}.{name}: min_role 必须是 viewer/operator/admin，静默跳过"
+            )
+            continue
         if len(out) >= _MAX_TOOLS_PER_PLUGIN:
             warn.append(f"{plugin_key}: 超过每插件暴露上限 {_MAX_TOOLS_PER_PLUGIN}，其余跳过")
             break
@@ -105,6 +112,7 @@ def parse_exposed_tools(
                 "full_name": exposed_tool_name(plugin_key, name),
                 "description": str(raw.get("description") or name).strip()[:500],
                 "parameters": dict(parameters),
+                "min_role": min_role,
                 "plugin_description": description[:200],
                 "agent_keywords": keywords,
             }
@@ -174,7 +182,13 @@ def _make_read_handler(plugin_key: str, tool_name: str):
 
 
 def _sanitize_plugin_result(value: Any) -> Any:
-    """结果过 mark_external_text，防注入。"""
+    """先统一脱敏，再把插件文本标记为不可信外部内容。"""
+
+    return _mark_external_plugin_result(redact_value(value))
+
+
+def _mark_external_plugin_result(value: Any) -> Any:
+    """递归标记插件文本，避免插件结果中的提示注入被当作宿主指令。"""
 
     if isinstance(value, str):
         return mark_external_text(value)
@@ -184,13 +198,13 @@ def _sanitize_plugin_result(value: Any) -> Any:
             if isinstance(v, str):
                 out[str(k)] = mark_external_text(v)
             elif isinstance(v, (dict, list)):
-                out[str(k)] = _sanitize_plugin_result(v)
+                out[str(k)] = _mark_external_plugin_result(v)
             else:
                 out[str(k)] = v
         out.setdefault("business_changed", False)
         return out
     if isinstance(value, list):
-        return [_sanitize_plugin_result(item) for item in value]
+        return [_mark_external_plugin_result(item) for item in value]
     return value
 
 
@@ -263,7 +277,7 @@ async def invoke_plugin_tool_via_ipc(
             if not bool(payload.get("ok")):
                 return {
                     "error": str(payload.get("error") or "plugin_tool_failed"),
-                    "message": str(payload.get("message") or "插件工具执行失败")[:500],
+                    "message": "插件工具执行失败（详情已脱敏）",
                     "business_changed": False,
                 }
             result = payload.get("result")
@@ -272,14 +286,14 @@ async def invoke_plugin_tool_via_ipc(
             return {"result": result, "business_changed": False}
     except Exception as exc:  # noqa: BLE001
         log.warning(
-            "invoke plugin tool failed plugin=%s tool=%s",
+            "invoke plugin tool failed plugin=%s tool=%s error_type=%s",
             plugin_key,
             tool_name,
-            exc_info=True,
+            type(exc).__name__,
         )
         return {
             "error": type(exc).__name__,
-            "message": str(exc)[:500],
+            "message": "插件工具调用失败（详情已脱敏）",
             "business_changed": False,
         }
     finally:
@@ -331,7 +345,7 @@ def apply_exposed_tools_to_registry(
                     description=f"[插件 {plugin_key}] {item['description']}",
                     input_schema=dict(item["parameters"]),
                     read_only=True,
-                    min_role="viewer",
+                    min_role=str(item.get("min_role") or "viewer"),
                     channels=("web", "bot"),
                     read_handler=_make_read_handler(plugin_key, tool_name),
                 )

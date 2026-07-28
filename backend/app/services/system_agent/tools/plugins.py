@@ -231,6 +231,7 @@ def register(registry: ToolRegistry) -> None:
     registry.register(
         ToolSpec(
             name="plugins.list_installed",
+            channels=("web",),
             description="列出已安装的远程/本地导入插件包（全局状态，非账号级启停）。",
             input_schema={
                 "type": "object",
@@ -245,6 +246,7 @@ def register(registry: ToolRegistry) -> None:
     registry.register(
         ToolSpec(
             name="plugins.get",
+            channels=("web",),
             description="获取单个已安装插件包详情。",
             input_schema={
                 "type": "object",
@@ -262,6 +264,7 @@ def register(registry: ToolRegistry) -> None:
     registry.register(
         ToolSpec(
             name="plugins.check_updates",
+            channels=("web",),
             description="检查已安装远程插件是否有更新。",
             input_schema={"type": "object", "properties": {}, "additionalProperties": False},
             read_only=True,
@@ -272,6 +275,7 @@ def register(registry: ToolRegistry) -> None:
     registry.register(
         ToolSpec(
             name="plugins.install",
+            channels=("web",),
             description="从 Git URL 安装远程插件包。",
             input_schema={
                 "type": "object",
@@ -294,6 +298,7 @@ def register(registry: ToolRegistry) -> None:
     registry.register(
         ToolSpec(
             name="plugins.update",
+            channels=("web",),
             description="更新已安装远程插件到最新版本。",
             input_schema={
                 "type": "object",
@@ -314,6 +319,7 @@ def register(registry: ToolRegistry) -> None:
     registry.register(
         ToolSpec(
             name="plugins.uninstall",
+            channels=("web",),
             description="卸载远程插件包（危险，不可恢复）。",
             input_schema={
                 "type": "object",
@@ -334,6 +340,7 @@ def register(registry: ToolRegistry) -> None:
     registry.register(
         ToolSpec(
             name="plugins.set_package_enabled",
+            channels=("web",),
             description="启停插件安装包全局开关（InstalledPlugin.enabled）。",
             input_schema={
                 "type": "object",

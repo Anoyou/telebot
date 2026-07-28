@@ -136,9 +136,16 @@ async def test_uninstall_execute_raises_when_not_deleted(monkeypatch) -> None:
 async def test_delete_repo_raises_when_not_found(monkeypatch) -> None:
     from app.services.system_agent.tools import plugin_repos
 
-    async def fake_delete(db, repo_id):  # noqa: ANN001
+    async def fake_get(db, repo_id):  # noqa: ANN001
+        return type("Repo", (), {"url": "https://github.com/example/repo"})()
+
+    async def fake_delete(db, repo_id, *, remove_cache=True):  # noqa: ANN001
         return False
 
+    monkeypatch.setattr(
+        "app.services.plugin_repo_service.get_repo",
+        fake_get,
+    )
     monkeypatch.setattr(
         "app.services.plugin_repo_service.delete_repo",
         fake_delete,

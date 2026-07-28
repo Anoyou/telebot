@@ -226,7 +226,7 @@ async def resume(db: AsyncSession, aid: int) -> None:
     if not acc:
         raise _not_found()
     try:
-        _ensure_account_secrets_decryptable(acc)
+        ensure_account_secrets_decryptable(acc)
     except ValueError as exc:
         acc.status = ACCOUNT_STATUS_LOGIN_REQUIRED
         await db.commit()
@@ -259,7 +259,7 @@ async def _kill_switch_enabled(db: AsyncSession) -> bool:
     return bool(value)
 
 
-def _ensure_account_secrets_decryptable(acc: Account) -> None:
+def ensure_account_secrets_decryptable(acc: Account) -> None:
     """恢复前先验证账号核心密钥，避免 worker 启动后立刻 down。"""
 
     decrypt_bytes(acc.session_enc)
@@ -341,6 +341,10 @@ async def clone_config(
     src_aid: int,
     dst_aid: int,
     features: Iterable[str] | None = None,
+    *,
+    notify: bool = True,
+    commit: bool = True,
+    web_user_id: int | None = None,
 ) -> dict[str, int]:
     """把源账号的 ``account_feature`` 与对应 ``rule`` 复制到目标账号。
 
@@ -401,6 +405,13 @@ async def clone_config(
     src_rules = (await db.execute(rule_q)).scalars().all()
     rule_n = 0
     for r in src_rules:
+        copied_rule_config = dict(r.config or {})
+        if r.feature_key == "scheduler":
+            from .rule_service import bind_scheduler_agent_owner
+
+            copied_rule_config = bind_scheduler_agent_owner(
+                copied_rule_config, web_user_id
+            )
         db.add(
             Rule(
                 account_id=dst_aid,
@@ -408,15 +419,19 @@ async def clone_config(
                 name=r.name,
                 enabled=r.enabled,
                 priority=r.priority,
-                config=dict(r.config or {}),
+                config=copied_rule_config,
             )
         )
         rule_n += 1
 
-    await db.commit()
+    if commit:
+        await db.commit()
+    else:
+        await db.flush()
 
     # 通知目标 worker 重新加载配置（若在跑）
-    await _publish(cmd_channel(dst_aid), make_cmd("reload_config"))
+    if notify:
+        await _publish(cmd_channel(dst_aid), make_cmd("reload_config"))
 
     return {"features": feat_n, "rules": rule_n}
 

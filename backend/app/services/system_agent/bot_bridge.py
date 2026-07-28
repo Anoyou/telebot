@@ -452,6 +452,7 @@ async def handle_agent_confirm_callback(
         role=role or "viewer",
         channel=CHANNEL_BOT,
         bot_tg_user_id=tg_user_id,
+        bot_account_id=account_id,
     )
     action = result.get("action") if isinstance(result.get("action"), dict) else None
     if result.get("ok"):
@@ -553,6 +554,8 @@ async def try_attach_secrets_to_pending_action(
                 continue
             spec = registry.get(row.tool_name)
             if spec is None or not spec.secret_argument_names:
+                continue
+            if not getattr(spec, "allow_secret_input", True):
                 continue
             # 优先：已报缺 Key / 验证失败，或当前无密文
             if (

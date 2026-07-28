@@ -65,7 +65,7 @@ TelePilot 面向需要自托管 Telegram 自动化的个人用户和小团队。
 
 ### System Agent 当前链路
 
-System Agent 不直接获得数据库、Shell 或任意文件访问权。它先按请求选择领域和 Skill，每轮最多加载两个领域 Skill、暴露八个工具；只读工具直接执行，写工具先生成待确认 Action，再由统一执行器提交。日志中心的 Agent 视角会保留 Provider、模型、路由、Skill、工具、重试、Token 和阶段耗时，刷新后仍能按持久 Run 恢复。
+System Agent 不直接获得数据库、Shell 或任意文件访问权。它先按请求选择领域和 Skill，每轮最多加载两个领域 Skill、暴露十六个工具；只读工具直接执行，写工具先生成待确认 Action，再由统一执行器提交。日志中心的 Agent 视角会保留 Provider、模型、路由、Skill、工具、重试、Token 和阶段耗时，刷新后仍能按持久 Run 恢复。
 
 联网搜索与 URL 读取使用独立工具，不依赖聊天 Provider 的原生搜索能力。源码诊断只允许读取当前部署包中的后端、前端和已安装插件白名单，拒绝 `.env`、日志、session、数据目录、依赖、构建产物、路径穿越、源码写入和任意命令执行。
 

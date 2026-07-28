@@ -8,16 +8,84 @@ from typing import Any
 from .actions import encrypt_secret_payload, split_secret_arguments
 from .redactor import redact_message_text
 
-# 常见 API Key / Token 形态（保守匹配，避免吞掉普通短词）
+# Provider 粘贴路由和持久化前密钥抽取必须共用这些模式。
+_URL_RE = re.compile(r"https?://[^\s\"'<>()]+", re.I)
+_KNOWN_KEY_RE = re.compile(
+    r"\b(?:sk-ant-|sk-proj-|sk-or-|sk-|xai-|gsk_|AIza|ghp_|hf_)[A-Za-z0-9_\-]{8,}"
+)
+_GENERIC_KEY_RE = re.compile(
+    r"\b(?=[A-Za-z0-9_\-]*\d)(?=[A-Za-z0-9_\-]*[A-Za-z])[A-Za-z0-9_\-]{24,}\b"
+)
+_DOTTED_KEY_RE = re.compile(r"\b[A-Za-z0-9]{12,}\.[A-Za-z0-9]{12,}\b")
+_LABELED_SECRET_RE = re.compile(
+    r'''(?ix)
+    (?:["']?)
+    (?:api[_-]?key|apikey|token|authorization|password|secret)
+    (?:["']?)\s*[:=]\s*
+    (?P<value>"[^"\r\n]{8,}"|'[^'\r\n]{8,}'|[^\s,;}\]]{8,})
+    '''
+)
+_BOT_TOKEN_RE = re.compile(r"\b\d{6,12}:[A-Za-z0-9_-]{20,}\b")
+_URL_PASSWORD_RE = re.compile(
+    r"\b[a-z][a-z0-9+.-]*://[^\s:/@]+:([^\s@/]+)@",
+    re.I,
+)
+_NON_PROVIDER_URL_HINTS = (
+    "github.com",
+    "gitlab.com",
+    "gitee.com",
+    ".git",
+    "插件",
+    "仓库",
+    "plugin",
+    "repo",
+)
 _KEY_PATTERNS: tuple[re.Pattern[str], ...] = (
-    re.compile(r"\b(sk-[A-Za-z0-9_\-]{16,})\b"),
-    re.compile(r"\b(sk-ant-[A-Za-z0-9_\-]{16,})\b"),
-    re.compile(r"\b(sk-or-[A-Za-z0-9_\-]{16,})\b"),
-    re.compile(r"\b(xai-[A-Za-z0-9_\-]{16,})\b"),
-    re.compile(r"\b(gsk_[A-Za-z0-9_\-]{16,})\b"),
-    re.compile(r"\b(AIza[0-9A-Za-z_\-]{20,})\b"),
+    _KNOWN_KEY_RE,
+    _BOT_TOKEN_RE,
     re.compile(r"(?i)\b(api[_-]?key|token|authorization|password)\s*[:=]\s*([^\s,;]{12,})"),
 )
+
+_SECRET_PLACEHOLDERS = {
+    "***",
+    "[redacted]",
+    "<redacted>",
+    "redacted",
+    "[masked]",
+    "masked",
+}
+
+
+def _is_secret_placeholder(value: Any) -> bool:
+    normalized = str(value or "").strip().lower()
+    if normalized in _SECRET_PLACEHOLDERS:
+        return True
+    return bool(normalized) and "***" in normalized
+
+
+def _provider_credential_remainder(text: str) -> str | None:
+    raw = str(text or "")
+    lowered = raw.lower()
+    urls = _URL_RE.findall(raw)
+    if not urls and "base_url" not in lowered and "baseurl" not in lowered:
+        return None
+    if any(hint in lowered for hint in _NON_PROVIDER_URL_HINTS):
+        return None
+    return _URL_RE.sub(" ", raw)
+
+
+def looks_like_provider_credential_paste(text: str) -> bool:
+    """判断 Base URL 与 Provider Key 是否同现。"""
+
+    remainder = _provider_credential_remainder(text)
+    if remainder is None:
+        return False
+    return bool(
+        _KNOWN_KEY_RE.search(remainder)
+        or _DOTTED_KEY_RE.search(remainder)
+        or _GENERIC_KEY_RE.search(remainder)
+        or _LABELED_SECRET_RE.search(remainder)
+    )
 
 
 def extract_plaintext_secrets(text: str) -> list[str]:
@@ -26,6 +94,11 @@ def extract_plaintext_secrets(text: str) -> list[str]:
     found: list[str] = []
     seen: set[str] = set()
     raw = str(text or "")
+    for match in _LABELED_SECRET_RE.finditer(raw):
+        value = str(match.group("value") or "").strip().strip("\"'`")
+        if len(value) >= 8 and value not in seen:
+            seen.add(value)
+            found.append(value)
     for pat in _KEY_PATTERNS:
         for match in pat.finditer(raw):
             # 带捕获组的模式取最后一组
@@ -39,6 +112,19 @@ def extract_plaintext_secrets(text: str) -> list[str]:
                 continue
             seen.add(value)
             found.append(value)
+    for match in _URL_PASSWORD_RE.finditer(raw):
+        value = match.group(1)
+        if value and value not in seen:
+            seen.add(value)
+            found.append(value)
+    remainder = _provider_credential_remainder(raw)
+    if remainder is not None and looks_like_provider_credential_paste(raw):
+        for pat in (_DOTTED_KEY_RE, _GENERIC_KEY_RE):
+            for match in pat.finditer(remainder):
+                value = match.group(0)
+                if value not in seen:
+                    seen.add(value)
+                    found.append(value)
     return found
 
 
@@ -60,14 +146,14 @@ def merge_secret_into_arguments(
 ) -> tuple[dict[str, Any], dict[str, Any], list[str]]:
     """合并工具参数中的密钥与聊天提取的密钥。
 
-    若 arguments 缺少 secret 字段且聊天里恰好有一个密钥，填入第一个 secret_names。
+    若 arguments 缺少 secret 字段或只有掩码占位符，使用当前聊天提取到的真实密钥。
     """
 
     args = dict(arguments or {})
     secrets_list = list(chat_secrets or [])
     if secrets_list and secret_names:
         for name in secret_names:
-            if args.get(name) in (None, ""):
+            if args.get(name) in (None, "") or _is_secret_placeholder(args.get(name)):
                 args[name] = secrets_list[0]
                 break
     return split_secret_arguments(args, secret_names)
@@ -80,6 +166,7 @@ def encrypt_secrets_dict(secrets: dict[str, Any]) -> str | None:
 __all__ = [
     "encrypt_secrets_dict",
     "extract_plaintext_secrets",
+    "looks_like_provider_credential_paste",
     "merge_secret_into_arguments",
     "redact_known_secrets",
 ]

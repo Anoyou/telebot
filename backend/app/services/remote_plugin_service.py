@@ -270,6 +270,14 @@ class PluginMetadataSchema(BaseModel):
                 raise ValueError(f"agent_tools[{index}].read_only 必须是布尔值")
             if "strict" in raw and not isinstance(raw.get("strict"), bool):
                 raise ValueError(f"agent_tools[{index}].strict 必须是布尔值")
+            if "min_role" in raw and str(raw.get("min_role") or "").strip().lower() not in {
+                "viewer",
+                "operator",
+                "admin",
+            }:
+                raise ValueError(
+                    f"agent_tools[{index}].min_role 必须是 viewer / operator / admin"
+                )
         return value
 
     @model_validator(mode="after")

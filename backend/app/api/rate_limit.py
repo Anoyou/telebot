@@ -57,7 +57,7 @@ from ..services import platform_capabilities as platform_caps
 from ..services import rate_limit_service as svc
 from ..services.ai_feature import AI_ENABLED_SETTING_KEY, normalize_ai_enabled
 from ..util.update_target import normalize_update_branch, normalize_update_remote
-from ..worker.ipc import GCMD_KILL_SWITCH, GCMD_RELOAD_GLOBAL, GLOBAL_CHANNEL, make_cmd
+from ..worker.ipc import GCMD_RELOAD_GLOBAL, GLOBAL_CHANNEL, make_cmd
 from ..worker.ratelimit.buckets import TokenBuckets
 from ..worker.ratelimit.overrides import add_override, drop_override, list_active
 
@@ -550,8 +550,10 @@ async def get_kill_switch(db: DBSession, _user: CurrentUser) -> dict[str, bool]:
 
 @router.post("/api/system/kill-switch")
 async def post_kill_switch(payload: KillSwitchRequest, db: DBSession, user: CurrentUser) -> dict[str, bool]:
+    from ..services import kill_switch_service
+
     enabled = bool(payload.enabled)
-    await _set_setting(db, "kill_switch", {"enabled": enabled})
+    await kill_switch_service.set_enabled(db, enabled)
     await _audit(
         db,
         user.id,
@@ -559,52 +561,18 @@ async def post_kill_switch(payload: KillSwitchRequest, db: DBSession, user: Curr
         target="system",
         detail={"enabled": enabled},
     )
-    from ..services import account_bot_runtime, interaction_bot_runtime
-    from ..worker import supervisor
-
-    if enabled:
-        operations = (
-            supervisor.stop_running_workers(),
-            account_bot_runtime.stop_account_bot_manager(),
-            interaction_bot_runtime.stop_interaction_bot_manager(),
-        )
-    else:
-        # 总闸恢复时仍尊重平台能力：Interaction 模块关闭则不重启交互 manager。
-        interaction_ops: list[Any] = []
-        try:
-            if not platform_caps.get_snapshot().cache_ready:
-                await platform_caps.refresh_cache_from_db(db)
-            if platform_caps.is_module_enabled_cached("interaction_bot", fail_closed=True):
-                interaction_ops.append(interaction_bot_runtime.start_interaction_bot_manager())
-        except Exception:  # noqa: BLE001
-            # 能力状态未知时不启动受控 manager，等待下一次显式恢复/重试。
-            pass
-        operations = (
-            supervisor.start_active_workers(),
-            account_bot_runtime.start_account_bot_manager(),
-            *interaction_ops,
-        )
-    results = await asyncio.gather(*operations, return_exceptions=True)
-    failures = [
-        f"{type(result).__name__}: {result}" for result in results if isinstance(result, BaseException)
-    ]
-
-    # 全局广播给其它监听者 / 多进程场景；失败也必须反馈，不能伪装成全局已收敛。
     try:
-        redis = get_redis()
-        await redis.publish(GLOBAL_CHANNEL, make_cmd(GCMD_KILL_SWITCH, enabled=enabled))
-    except Exception as exc:  # noqa: BLE001
-        failures.append(f"Redis broadcast {type(exc).__name__}: {exc}")
-    if failures:
+        await kill_switch_service.converge_runtime(db, enabled)
+    except kill_switch_service.KillSwitchConvergenceError as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail={
                 "code": "KILL_SWITCH_PARTIAL_FAILURE",
                 "message": "总闸目标状态已保存，但运行时未完全收敛。",
                 "enabled": enabled,
-                "errors": failures,
+                "errors": exc.errors,
             },
-        )
+        ) from exc
     return {"enabled": enabled}
 
 

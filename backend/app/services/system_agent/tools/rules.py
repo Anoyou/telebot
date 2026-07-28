@@ -9,7 +9,7 @@ from sqlalchemy import select
 from ....db.models.rule import Rule
 from ..context import ToolContext
 from ..registry import ToolRegistry, ToolSpec
-from ._helpers import account_scope_filter, clamp_limit
+from ._helpers import account_scope_filter, clamp_limit, mark_external_text
 
 
 def _rule_view(row: Rule) -> dict[str, Any]:
@@ -24,6 +24,13 @@ def _rule_view(row: Rule) -> dict[str, Any]:
         "created_at": row.created_at.isoformat() if row.created_at else None,
         "updated_at": row.updated_at.isoformat() if getattr(row, "updated_at", None) else None,
     }
+
+
+def _require_bot_rule_scope(ctx: ToolContext, row: Rule) -> None:
+    if ctx.channel == "bot" and (
+        ctx.account_id is None or int(row.account_id) != int(ctx.account_id)
+    ):
+        raise PermissionError("无权操作其他账号规则")
 
 
 async def list_rules(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
@@ -70,6 +77,87 @@ async def get_rule(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
     return {"rule": _rule_view(row)}
 
 
+async def dry_run(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
+    from ....services.rule_dry_run_service import dry_run_rule
+
+    rule_id = int(args.get("rule_id") or args.get("id"))
+    row = await ctx.db.get(Rule, rule_id)
+    if row is None or row.feature_key == "interaction":
+        return {"error": "not_found", "message": f"通用规则 {rule_id} 不存在"}
+    if ctx.channel == "bot" and (
+        ctx.account_id is None or int(row.account_id) != int(ctx.account_id)
+    ):
+        return {"error": "forbidden", "message": "无权试运行其他账号规则"}
+    result = await dry_run_rule(
+        ctx.db,
+        row,
+        sample_message=str(args.get("sample_message") or ""),
+        sample_chat_type=str(args.get("sample_chat_type") or "private"),
+        sample_chat_id=(
+            int(args["sample_chat_id"])
+            if args.get("sample_chat_id") not in (None, "")
+            else None
+        ),
+    )
+    if isinstance(result.get("output"), str):
+        result["output"] = mark_external_text(result["output"])
+    return result
+
+
+async def copy_preview(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
+    source_account_id = int(args.get("source_account_id") or args.get("account_id"))
+    rule_ids = sorted({int(value) for value in (args.get("rule_ids") or [])})
+    targets = sorted(
+        {
+            int(value)
+            for value in (args.get("target_account_ids") or [])
+            if int(value) != source_account_id
+        }
+    )
+    rows = list(
+        (
+            await ctx.db.execute(
+                select(Rule)
+                .where(Rule.account_id == source_account_id, Rule.id.in_(rule_ids))
+                .order_by(Rule.id.asc())
+            )
+        )
+        .scalars()
+        .all()
+    )
+    if len(rows) != len(rule_ids):
+        raise ValueError("部分源规则不存在或不属于源账号")
+    if any(row.feature_key == "interaction" for row in rows):
+        raise ValueError("交互规则不能通过通用 Rule 复制工具复制")
+    return {
+        "summary": f"从账号 #{source_account_id} 复制 {len(rows)} 条规则到 {len(targets)} 个账号",
+        "source_account_id": source_account_id,
+        "target_account_ids": targets,
+        "rules": [_rule_view(row) for row in rows],
+        "warning": "目标账号会新增独立规则；同名规则不会自动覆盖。",
+    }
+
+
+async def copy_execute(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
+    from ....services import rule_service
+
+    source_account_id = int(args.get("source_account_id") or args.get("account_id"))
+    result = await rule_service.copy_rules(
+        ctx.db,
+        source_account_id=source_account_id,
+        rule_ids=[int(value) for value in (args.get("rule_ids") or [])],
+        target_account_ids=[
+            int(value) for value in (args.get("target_account_ids") or [])
+        ],
+        web_user_id=ctx.web_user_id,
+    )
+    if ctx.action is not None:
+        stored = dict(ctx.action.arguments or {})
+        stored["reload_account_ids"] = result["targets"]
+        ctx.action.arguments = stored
+    return {**result, "business_changed": bool(result["copied"])}
+
+
 async def save_preview(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
     from ....services import rule_service
 
@@ -86,6 +174,8 @@ async def save_preview(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]
             raise ValueError(f"规则 {rule_id} 不存在")
         if ctx.channel == "bot" and ctx.account_id is not None and row.account_id != ctx.account_id:
             raise PermissionError("无权修改其他账号规则")
+        if row.feature_key == "scheduler":
+            raise PermissionError("修改 Scheduler 规则必须使用 scheduler 工具")
         fields = {k: args[k] for k in ("name", "enabled", "priority", "config") if k in args}
         return {
             "summary": f"更新规则 #{row.id} {row.name}",
@@ -96,8 +186,12 @@ async def save_preview(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]
         }
     if account_id is None:
         raise ValueError("创建规则需要 account_id")
+    if str(args.get("feature_key") or "") == "scheduler":
+        raise PermissionError("创建 Scheduler 规则必须使用 scheduler 工具")
     if not feature_key or feature_key == "interaction":
         raise ValueError("创建通用规则需要 feature_key，且不能为 interaction")
+    if feature_key == "scheduler":
+        raise PermissionError("创建 Scheduler 规则必须使用 scheduler 工具")
     await rule_service.ensure_account(ctx.db, account_id)
     await rule_service.ensure_feature(ctx.db, feature_key)
     return {
@@ -117,6 +211,12 @@ async def save_execute(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]
 
     rule_id = args.get("id") or args.get("rule_id")
     if rule_id not in (None, ""):
+        current = await ctx.db.get(Rule, int(rule_id))
+        if current is None:
+            raise ValueError(f"规则 {rule_id} 不存在")
+        _require_bot_rule_scope(ctx, current)
+        if current is not None and current.feature_key == "scheduler":
+            raise PermissionError("修改 Scheduler 规则必须使用 scheduler 工具")
         fields = {k: args[k] for k in ("name", "enabled", "priority", "config") if k in args}
         row = await rule_service.update_rule(ctx.db, int(rule_id), fields=fields)
         return {"mode": "update", "rule": _rule_view(row), "business_changed": True}
@@ -148,6 +248,8 @@ async def set_enabled_preview(ctx: ToolContext, args: dict[str, Any]) -> dict[st
         raise ValueError(f"规则 {rule_id} 不存在")
     if ctx.channel == "bot" and ctx.account_id is not None and row.account_id != ctx.account_id:
         raise PermissionError("无权修改其他账号规则")
+    if ctx.channel == "bot" and row.feature_key == "scheduler" and enabled:
+        raise PermissionError("Bot 渠道启用 Scheduler 规则必须使用 scheduler 工具")
     return {
         "summary": f"{'启用' if enabled else '禁用'}规则 #{rule_id} {row.name}",
         "rule_id": rule_id,
@@ -163,6 +265,17 @@ async def set_enabled_execute(ctx: ToolContext, args: dict[str, Any]) -> dict[st
 
     rule_id = int(args.get("rule_id") or args.get("id"))
     enabled = bool(args.get("enabled"))
+    current = await ctx.db.get(Rule, rule_id)
+    if current is None:
+        raise ValueError(f"规则 {rule_id} 不存在")
+    _require_bot_rule_scope(ctx, current)
+    if (
+        ctx.channel == "bot"
+        and enabled
+        and current is not None
+        and current.feature_key == "scheduler"
+    ):
+        raise PermissionError("Bot 渠道启用 Scheduler 规则必须使用 scheduler 工具")
     row = await rule_service.set_enabled(ctx.db, rule_id, enabled)
     return {"rule": _rule_view(row), "business_changed": True}
 
@@ -185,6 +298,10 @@ async def delete_execute(ctx: ToolContext, args: dict[str, Any]) -> dict[str, An
     from ....services import rule_service
 
     rule_id = int(args.get("rule_id") or args.get("id"))
+    current = await ctx.db.get(Rule, rule_id)
+    if current is None:
+        raise ValueError(f"规则 {rule_id} 不存在")
+    _require_bot_rule_scope(ctx, current)
     info = await rule_service.delete_rule(ctx.db, rule_id)
     return {**info, "business_changed": True}
 
@@ -222,6 +339,54 @@ def register(registry: ToolRegistry) -> None:
             read_only=True,
             min_role="viewer",
             read_handler=get_rule,
+        )
+    )
+    registry.register(
+        ToolSpec(
+            name="rules.dry_run",
+            description="用模拟消息试运行一条通用 Rule，不发送消息、不修改业务数据。",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "rule_id": {"type": "integer"},
+                    "id": {"type": "integer"},
+                    "sample_message": {"type": "string"},
+                    "sample_chat_type": {"type": "string"},
+                    "sample_chat_id": {"type": "integer"},
+                },
+                "required": ["sample_message"],
+                "additionalProperties": False,
+            },
+            read_only=True,
+            min_role="viewer",
+            read_handler=dry_run,
+        )
+    )
+    registry.register(
+        ToolSpec(
+            name="rules.copy",
+            channels=("web",),
+            description="把明确的通用 Rule 复制到一个或多个目标账号。",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "source_account_id": {"type": "integer"},
+                    "account_id": {"type": "integer"},
+                    "rule_ids": {"type": "array", "items": {"type": "integer"}},
+                    "target_account_ids": {
+                        "type": "array",
+                        "items": {"type": "integer"},
+                    },
+                },
+                "required": ["rule_ids", "target_account_ids"],
+                "additionalProperties": False,
+            },
+            read_only=False,
+            min_role="admin",
+            risk="dangerous",
+            preview_handler=copy_preview,
+            execute_handler=copy_execute,
+            runtime_effects=("reload_config",),
         )
     )
     registry.register(

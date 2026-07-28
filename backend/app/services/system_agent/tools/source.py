@@ -11,7 +11,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from ....services.redactor import redact_text
-from ....settings import PROJECT_ROOT
+from ....settings import settings
 from ..context import ToolContext
 from ..registry import ToolRegistry, ToolSpec
 from ._helpers import clamp_limit, mark_external_text
@@ -61,6 +61,7 @@ _MAX_FILE_BYTES = 256 * 1024
 _MAX_READ_LINES = 400
 _MAX_SEARCH_FILES = 4_000
 _MAX_MATCH_TEXT = 600
+_BACKEND_SOURCE_ROOT = Path(__file__).resolve().parents[4]
 
 
 def _source_roots() -> dict[str, Path]:
@@ -71,22 +72,19 @@ def _source_roots() -> dict[str, Path]:
     """
 
     roots: dict[str, Path] = {}
-    backend = PROJECT_ROOT.resolve()
-    if (backend / "app").is_dir():
+    backend = _BACKEND_SOURCE_ROOT.resolve()
+    if (backend / "app" / "__init__.py").is_file() and (backend / "pyproject.toml").is_file():
         roots["backend"] = backend
 
     frontend_candidates = (
-        PROJECT_ROOT / "source" / "frontend",
-        PROJECT_ROOT.parent / "frontend",
+        backend / "source" / "frontend",
+        backend.parent / "frontend",
     )
     frontend = next((path.resolve() for path in frontend_candidates if path.is_dir()), None)
     if frontend is not None:
         roots["frontend"] = frontend
 
-    plugin_candidates = (
-        PROJECT_ROOT / "plugins" / "installed",
-        PROJECT_ROOT.parent / "plugins" / "installed",
-    )
+    plugin_candidates = (settings.plugins_installed_path,)
     plugins = next((path.resolve() for path in plugin_candidates if path.is_dir()), None)
     if plugins is not None:
         roots["plugins"] = plugins
@@ -309,6 +307,7 @@ def register(registry: ToolRegistry) -> None:
     registry.register(
         ToolSpec(
             name="source.search",
+            channels=("web",),
             description=(
                 "只读搜索当前部署的 backend、frontend 与已安装插件源码。"
                 "用于从日志堆栈定位实现，不执行命令、不读取敏感目录。"
@@ -332,6 +331,7 @@ def register(registry: ToolRegistry) -> None:
     registry.register(
         ToolSpec(
             name="source.read",
+            channels=("web",),
             description=(
                 "按行只读当前部署的源码文件。只允许源码白名单路径，单次最多 400 行；"
                 "不提供修改、执行或写入能力。"

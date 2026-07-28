@@ -560,7 +560,21 @@ async def update_repo_credential(
     return row
 
 
-async def delete_repo(db: AsyncSession, repo_id: int) -> bool:
+async def cleanup_repo_cache(url: str) -> None:
+    """在业务事务提交后清理仓库缓存；可安全重复。"""
+
+    cache = _cache_dir_for(url)
+    async with _repo_cache_lock(url):
+        if cache.exists():
+            shutil.rmtree(cache)
+
+
+async def delete_repo(
+    db: AsyncSession,
+    repo_id: int,
+    *,
+    remove_cache: bool = True,
+) -> bool:
     """删除仓库行；同时清理本地缓存目录。
 
     ``False`` 表示行不存在。**不**联动卸载已安装的插件——仓库只是“目录”，
@@ -570,17 +584,16 @@ async def delete_repo(db: AsyncSession, repo_id: int) -> bool:
     if row is None:
         return False
 
-    cache = _cache_dir_for(row.url)
+    repo_url = row.url
     await db.delete(row)
     await db.flush()
 
-    # DB 已提交逻辑由调用方负责；这里只清理缓存目录
-    try:
-        async with _repo_cache_lock(row.url):
-            if cache.exists():
-                shutil.rmtree(cache, ignore_errors=True)
-    except Exception:  # noqa: BLE001
-        log.exception("清理仓库缓存目录失败: %s", cache)
+    # 兼容旧调用方；新事务边界应传 remove_cache=False，提交后再清理。
+    if remove_cache:
+        try:
+            await cleanup_repo_cache(repo_url)
+        except Exception:  # noqa: BLE001
+            log.exception("清理仓库缓存目录失败: %s", _cache_dir_for(repo_url))
     return True
 
 
@@ -1578,6 +1591,7 @@ __all__ = [
     "PluginRepoError",
     "PluginRepoNotFound",
     "create_repo",
+    "cleanup_repo_cache",
     "delete_repo",
     "get_repo",
     "install_official_plugin",

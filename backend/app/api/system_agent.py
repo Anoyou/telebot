@@ -793,6 +793,12 @@ async def secret_input_action(
     allowed = set(spec.secret_argument_names) if spec else set()
     if not allowed:
         raise _err("NO_SECRET_FIELDS", "该操作不接受密钥补填", 400)
+    if spec is not None and not getattr(spec, "allow_secret_input", True):
+        raise _err(
+            "SECRET_INPUT_LOCKED",
+            "该操作已绑定测活时使用的临时密钥；如需更换，请拒绝后重新发起测活",
+            409,
+        )
 
     incoming = payload.fields or {}
     secrets: dict[str, Any] = decrypt_secret_payload(row.secret_payload_enc)

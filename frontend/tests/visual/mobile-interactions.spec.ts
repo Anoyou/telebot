@@ -828,8 +828,8 @@ test.describe("移动端交互细节", () => {
     fixture.assertClean();
   });
 
-  test("已有 Provider 测活只在鉴权失败时显示密钥输入", async ({ page }, testInfo) => {
-    test.skip(testInfo.project.name !== "desktop", "Action 卡片回归只需桌面项目执行一次");
+  test("Provider Action 仅在确实缺少密钥时显示输入", async ({ page }, testInfo) => {
+    test.skip(testInfo.project.name === "tablet", "桌面和手机视口已覆盖");
     const fixture = await installApiFixture(page);
     const session = {
       id: "provider-action-session",
@@ -863,6 +863,34 @@ test.describe("移动端交互细节", () => {
     const actions = [
       {
         ...baseAction,
+        id: "provider-verified-create",
+        tool_name: "providers.probe_and_add",
+        arguments: {
+          name: "api.example",
+          provider: "openai",
+          base_url: "https://api.example/v1",
+          default_model: "chat-model",
+          api_format: "chat_completions",
+          has_api_key: true,
+        },
+        secret_fields: ["api_key"],
+        has_secret: true,
+        summary: "测活成功，是否添加 Provider「api.example」？",
+        preview: {
+          mode: "verified_create",
+          provider: {
+            name: "api.example",
+            base_url: "https://api.example/v1",
+            default_model: "chat-model",
+          },
+          liveness: { ok: true, model: "chat-model", latency_ms: 321 },
+          note: "测活已通过，尚未保存。确认后才会添加 Provider。",
+        },
+        error_code: null,
+        error_message: null,
+      },
+      {
+        ...baseAction,
         id: "provider-upstream-error",
         summary: "验证 Provider #4 猫羽",
         preview: { mode: "existing", provider: { id: 4, has_api_key: true } },
@@ -872,6 +900,8 @@ test.describe("移动端交互细节", () => {
       {
         ...baseAction,
         id: "provider-auth-error",
+        secret_fields: ["request_headers"],
+        has_secret: true,
         summary: "验证 Provider #5 鉴权失败",
         preview: { mode: "existing", provider: { id: 5, has_api_key: true } },
         error_code: "API_KEY_REJECTED",
@@ -889,13 +919,34 @@ test.describe("移动端交互细节", () => {
     });
 
     await page.goto("/ai", { waitUntil: "networkidle" });
-    await page.locator("[data-assistant-desktop-pet]").click();
+    const assistantTrigger = testInfo.project.name === "mobile"
+      ? page.locator("[data-assistant-mobile-button]")
+      : page.locator("[data-assistant-desktop-pet]");
+    await assistantTrigger.click();
     const surface = page.locator("[data-assistant-surface]");
     const secretInputs = surface.getByPlaceholder("api_key");
     await expect(secretInputs).toHaveCount(1);
     await expect(
       secretInputs.locator("xpath=ancestor::div[contains(@class, 'rounded-xl')][1]"),
     ).toContainText("验证 Provider #5 鉴权失败");
+    const verifiedCard = surface.getByText(
+      "测活成功，是否添加 Provider「api.example」？",
+      { exact: true },
+    ).locator("xpath=ancestor::div[contains(@class, 'rounded-xl')][1]");
+    await expect(verifiedCard).toHaveCount(1);
+    await expect(verifiedCard).toContainText("测活已通过，尚未保存");
+    await expect(verifiedCard).toContainText("https://api.example/v1");
+    await expect(verifiedCard).toContainText("chat-model");
+    await expect(verifiedCard).toContainText("321 ms");
+    await expect(verifiedCard.getByPlaceholder("api_key")).toHaveCount(0);
+    await expect(verifiedCard.getByRole("button", { name: "确认执行" })).toBeVisible();
+    const geometry = await verifiedCard.evaluate((element) => ({
+      cardRight: element.getBoundingClientRect().right,
+      viewportWidth: document.documentElement.clientWidth,
+      documentWidth: document.documentElement.scrollWidth,
+    }));
+    expect(geometry.cardRight).toBeLessThanOrEqual(geometry.viewportWidth);
+    expect(geometry.documentWidth).toBeLessThanOrEqual(geometry.viewportWidth);
     fixture.assertClean();
   });
 

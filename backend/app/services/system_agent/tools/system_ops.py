@@ -91,6 +91,7 @@ def register(registry: ToolRegistry) -> None:
             },
             read_only=True,
             min_role="admin",
+            channels=("web",),
             read_handler=check_update,
         )
     )
@@ -110,10 +111,12 @@ def register(registry: ToolRegistry) -> None:
             },
             read_only=False,
             min_role="admin",
+            channels=("web",),
             risk="dangerous",
             preview_handler=apply_update_preview,
             execute_handler=apply_update_execute,
             runtime_effects=("system_apply_update",),
+            runtime_retryable=False,
         )
     )
     registry.register(
@@ -123,9 +126,11 @@ def register(registry: ToolRegistry) -> None:
             input_schema={"type": "object", "properties": {}, "additionalProperties": False},
             read_only=False,
             min_role="admin",
+            channels=("web",),
             risk="dangerous",
             preview_handler=restart_preview,
             execute_handler=restart_execute,
             runtime_effects=("system_restart",),
+            runtime_retryable=False,
         )
     )

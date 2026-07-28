@@ -101,6 +101,82 @@ def mask_config_secrets(
     return _transform_config(dict(config or {}), schema=schema, mode="mask")
 
 
+def preserve_masked_config_secrets(
+    existing: dict[str, Any] | None,
+    incoming: dict[str, Any] | None,
+    *,
+    schema: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """把敏感字段的 UI 掩码替换为现有值，避免 ``***`` 覆盖真实凭据。"""
+
+    return _preserve_masked_walk(
+        dict(existing or {}),
+        dict(incoming or {}),
+        schema=schema,
+    )
+
+
+def _preserve_masked_walk(existing: Any, incoming: Any, *, schema: dict[str, Any] | None) -> Any:
+    return _preserve_masked_value(
+        existing,
+        incoming,
+        schema=schema,
+        force_sensitive=False,
+    )
+
+
+def _preserve_masked_value(
+    existing: Any,
+    incoming: Any,
+    *,
+    schema: dict[str, Any] | None,
+    force_sensitive: bool,
+) -> Any:
+    if isinstance(incoming, dict):
+        old = existing if isinstance(existing, dict) else {}
+        properties = schema.get("properties") if isinstance(schema, dict) else None
+        out: dict[str, Any] = {}
+        for raw_key, value in incoming.items():
+            key = str(raw_key)
+            prop = properties.get(key) if isinstance(properties, dict) else None
+            prop_dict = prop if isinstance(prop, dict) else None
+            child_schema = _child_schema_for_value(prop_dict, value)
+            old_value = old.get(key)
+            field_sensitive = force_sensitive or _path_is_sensitive(key, prop_dict)
+            if (
+                field_sensitive
+                and (value is None or (isinstance(value, str) and value in _MASK_PLACEHOLDERS))
+                and key in old
+            ):
+                out[key] = old_value
+            else:
+                out[key] = _preserve_masked_value(
+                    old_value,
+                    value,
+                    schema=child_schema,
+                    force_sensitive=field_sensitive,
+                )
+        return out
+    if isinstance(incoming, list):
+        old_items = existing if isinstance(existing, list) else []
+        item_schema = schema.get("items") if isinstance(schema, dict) else None
+        return [
+            _preserve_masked_value(
+                old_items[index] if index < len(old_items) else None,
+                value,
+                schema=item_schema if isinstance(item_schema, dict) else None,
+                force_sensitive=force_sensitive,
+            )
+            for index, value in enumerate(incoming)
+        ]
+    if force_sensitive and (
+        incoming is None
+        or (isinstance(incoming, str) and incoming in _MASK_PLACEHOLDERS)
+    ):
+        return existing
+    return incoming
+
+
 def count_encryptable_secrets(
     config: dict[str, Any] | None,
     *,
@@ -111,6 +187,86 @@ def count_encryptable_secrets(
     counters = {"plain": 0, "envelope": 0, "empty": 0}
     _count_walk(dict(config or {}), schema=schema, counters=counters)
     return counters
+
+
+def config_secret_values(
+    config: dict[str, Any] | None,
+    *,
+    schema: dict[str, Any] | None = None,
+) -> list[str]:
+    """提取配置中 schema/字段名标记的敏感字符串，仅供精确脱敏。"""
+
+    found: list[str] = []
+    _collect_secret_values(dict(config or {}), schema=schema, out=found)
+    return list(dict.fromkeys(value for value in found if value))
+
+
+def _collect_secret_values(
+    value: Any,
+    *,
+    schema: dict[str, Any] | None,
+    out: list[str],
+    parent_key: str | None = None,
+    parent_prop: dict[str, Any] | None = None,
+) -> None:
+    if isinstance(value, dict):
+        properties = schema.get("properties") if isinstance(schema, dict) else None
+        for raw_key, item in value.items():
+            key = str(raw_key)
+            prop = properties.get(key) if isinstance(properties, dict) else None
+            prop_dict = prop if isinstance(prop, dict) else None
+            _collect_secret_values(
+                item,
+                schema=_child_schema_for_value(prop_dict, item),
+                out=out,
+                parent_key=key,
+                parent_prop=prop_dict,
+            )
+        return
+    if isinstance(value, list):
+        item_schema = schema.get("items") if isinstance(schema, dict) else None
+        for item in value:
+            _collect_secret_values(
+                item,
+                schema=item_schema if isinstance(item_schema, dict) else None,
+                out=out,
+                parent_key=None if isinstance(item, dict) else parent_key,
+                parent_prop=None if isinstance(item, dict) else parent_prop,
+            )
+        return
+    if (
+        parent_key is None
+        or not _path_is_sensitive(parent_key, parent_prop)
+        or not isinstance(value, str)
+        or value in _MASK_PLACEHOLDERS
+    ):
+        return
+    try:
+        out.append(unwrap_secret(value))
+    except Exception:  # noqa: BLE001
+        return
+
+
+def redact_exact_secrets(value: Any, secrets: list[str] | tuple[str, ...]) -> Any:
+    """递归替换已知敏感值，再套通用结构化脱敏。"""
+
+    from .redactor import redact_text, redact_value
+
+    if isinstance(value, dict):
+        return redact_value(
+            {str(key): redact_exact_secrets(item, secrets) for key, item in value.items()}
+        )
+    if isinstance(value, list):
+        return [redact_exact_secrets(item, secrets) for item in value]
+    if isinstance(value, tuple):
+        return [redact_exact_secrets(item, secrets) for item in value]
+    if isinstance(value, str):
+        out = value
+        for secret in secrets:
+            if secret:
+                out = out.replace(secret, REDACTED)
+        return redact_text(out)
+    return value
 
 
 def _child_schema_for_value(prop: dict[str, Any] | None, value: Any) -> dict[str, Any] | None:
@@ -268,10 +424,13 @@ __all__ = [
     "PluginConfigDecryptionError",
     "SECRET_ENVELOPE_PREFIX",
     "count_encryptable_secrets",
+    "config_secret_values",
     "decrypt_config_secrets",
     "encrypt_config_secrets",
     "is_secret_envelope",
     "mask_config_secrets",
+    "preserve_masked_config_secrets",
+    "redact_exact_secrets",
     "unwrap_secret",
     "wrap_secret",
 ]

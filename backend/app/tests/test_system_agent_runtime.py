@@ -16,6 +16,7 @@ from app.services.llm_protocol import (
 )
 from app.services.system_agent import runtime as runtime_module
 from app.services.system_agent.config import ResolvedAgentProviders
+from app.services.system_agent.context import ToolContext
 from app.services.system_agent.registry import ToolRegistry, ToolSpec
 from app.services.system_agent.runtime import SystemAgentRuntime
 
@@ -522,9 +523,8 @@ async def test_runtime_requires_and_accepts_web_tool_approval(monkeypatch) -> No
     assert [tool["name"] for tool in error["tool_approval"]["tools"]] == ["scheduler.list"]
     assert error["tool_approval"]["tools"][0]["description"] == "列出定时任务。"
     assert error["tool_approval"]["tools"][0]["call_id"] == "call-1"
-    assert error["tool_approval"]["tools"][0]["arguments"] == {"limit": 5}
     assert error["tool_approval"]["calls"] == [
-        {"call_id": "call-1", "name": "scheduler.list", "arguments": {"limit": 5}}
+        {"call_id": "call-1", "name": "scheduler.list"}
     ]
     assert run_calls == 1
 
@@ -694,3 +694,52 @@ async def test_model_router_timeout_keeps_explicit_web_intent(monkeypatch) -> No
         "fallback",
         "router_failed_explicit_web_intent",
     )
+
+
+@pytest.mark.asyncio
+async def test_read_tool_result_is_redacted_before_model_context() -> None:
+    async def read_handler(_ctx, _args):  # noqa: ANN001
+        return {"api_key": "plain-tool-secret", "value": "ok"}
+
+    spec = ToolSpec(
+        name="demo.read",
+        description="demo",
+        input_schema={"type": "object"},
+        read_handler=read_handler,
+    )
+    ctx = ToolContext(
+        db=None,  # type: ignore[arg-type]
+        channel="web",
+        role="admin",
+    )
+
+    result = await SystemAgentRuntime()._bind_read_handler(spec, ctx)({})  # noqa: SLF001
+
+    assert result["api_key"] == "***"
+    assert "plain-tool-secret" not in str(result)
+
+
+@pytest.mark.asyncio
+async def test_tool_exception_redacts_opaque_chat_secret() -> None:
+    secret = "opaque-secret-from-chat"
+
+    async def read_handler(_ctx, _args):  # noqa: ANN001
+        raise RuntimeError(f"upstream echoed {secret}")
+
+    spec = ToolSpec(
+        name="demo.read",
+        description="demo",
+        input_schema={"type": "object"},
+        read_handler=read_handler,
+    )
+    ctx = ToolContext(
+        db=None,  # type: ignore[arg-type]
+        channel="web",
+        role="admin",
+        chat_secrets=[secret],
+    )
+
+    result = await SystemAgentRuntime()._bind_read_handler(spec, ctx)({})  # noqa: SLF001
+
+    assert secret not in str(result)
+    assert "[REDACTED]" in result["message"]

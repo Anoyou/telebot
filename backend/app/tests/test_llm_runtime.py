@@ -434,6 +434,25 @@ def test_usage_preview_redacts_and_limits_text() -> None:
     assert response_preview == "response ***"
 
 
+@pytest.mark.parametrize(
+    "secret",
+    [
+        "AbcdEFGHijklMNOPqrstUVWX12345678",
+        "AbcdEFGHijkl1234.MNOPqrstUVWX5678",
+    ],
+)
+def test_usage_preview_redacts_turn_known_opaque_provider_keys(secret: str) -> None:
+    preview = request_preview_for_usage(
+        "system",
+        f"https://provider.example/v1\n{secret}",
+        known_secrets=[secret],
+    )
+
+    assert preview is not None
+    assert secret not in preview
+    assert "[REDACTED]" in preview
+
+
 @pytest.mark.asyncio
 async def test_llm_usage_persist_writes_triggered_by_account_id(monkeypatch) -> None:
     """UsageRecord 持久化时写入 triggered_by_account_id。"""

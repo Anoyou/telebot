@@ -132,6 +132,7 @@ export interface SystemAgentAction {
   error_message?: string | null;
   runtime_sync_status?: string;
   runtime_sync_error?: string | null;
+  runtime_retryable?: boolean;
   expires_at?: string | null;
   created_at?: string | null;
   updated_at?: string | null;

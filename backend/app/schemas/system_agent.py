@@ -200,6 +200,7 @@ class SystemAgentActionOut(BaseModel):
     error_message: str | None = None
     runtime_sync_status: str = "not_required"
     runtime_sync_error: str | None = None
+    runtime_retryable: bool = True
     expires_at: datetime | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None

@@ -855,6 +855,9 @@ async def set_plugin_global_config(
     db: AsyncSession,
     plugin_key: str,
     config: dict[str, Any],
+    *,
+    notify: bool = True,
+    commit: bool = True,
 ) -> dict[str, Any]:
     """设置插件的 global config。
 
@@ -909,10 +912,14 @@ async def set_plugin_global_config(
         manifest.pop("global_config", None)
         feature.manifest = manifest
         flag_modified(feature, "manifest")
-    await db.commit()
+    if commit:
+        await db.commit()
+    else:
+        await db.flush()
 
     # 通知所有使用该插件的账号的 worker reload
-    await _notify_all_accounts_using_feature(db, plugin_key)
+    if notify:
+        await _notify_all_accounts_using_feature(db, plugin_key)
 
     return global_config
 

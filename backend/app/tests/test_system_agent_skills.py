@@ -12,7 +12,12 @@ from app.services.system_agent.config import ResolvedAgentProviders
 from app.services.system_agent.registry import ToolRegistry, ToolSpec, get_registry
 from app.services.system_agent.runtime import SystemAgentRuntime
 from app.services.system_agent.skills import BUILTIN_SKILLS, SkillRegistry
-from app.services.system_agent.tool_routing import ToolRoute, route_locally, select_tool_specs
+from app.services.system_agent.tool_routing import (
+    ToolRoute,
+    route_locally,
+    select_tool_specs,
+    tool_domain,
+)
 
 
 async def _read_handler(_ctx, _args):  # noqa: ANN001
@@ -56,25 +61,35 @@ async def _accept_provider_capabilities(_db, resolved, **_kwargs):  # noqa: ANN0
 
 
 @pytest.mark.parametrize(
-    ("text", "available", "expected_skill"),
+    ("text", "available", "expected_skills"),
     [
-        ("交互里有哪些规则", {"interaction", "rules"}, "interaction"),
-        ("看看今晚的定时任务", {"scheduler", "logs"}, "scheduler"),
-        ("列出 Provider 和自定义指令", {"providers", "commands"}, "ai-config"),
-        ("检查已安装插件更新", {"plugins", "plugin_repos"}, "plugins"),
-        ("看看最近错误日志", {"logs", "system"}, "diagnostics"),
-        ("联网查一下官方文档", {"web", "logs"}, "web-research"),
+        ("交互里有哪些规则", {"interaction", "rules"}, ("interaction",)),
+        ("列出所有账号", {"accounts", "logs"}, ("accounts",)),
+        ("给账号启用这个插件", {"accounts", "features", "plugins"}, ("features",)),
+        ("列出通用 Rule", {"rules", "interaction"}, ("rules",)),
+        ("看看今晚的定时任务", {"scheduler", "logs"}, ("scheduler",)),
+        ("今天收入多少", {"ledger", "logs"}, ("ledger",)),
+        ("你记住了我什么", {"memory", "system"}, ("memory",)),
+        (
+            "列出 Provider 和自定义指令",
+            {"providers", "commands"},
+            ("commands", "ai-config"),
+        ),
+        ("检查已安装插件更新", {"plugins", "plugin_repos"}, ("plugins",)),
+        ("浏览官方插件仓库", {"plugins", "plugin_repos"}, ("plugin-catalog",)),
+        ("看看最近错误日志", {"logs", "system"}, ("diagnostics",)),
+        ("联网查一下官方文档", {"web", "logs"}, ("web-research",)),
     ],
 )
 def test_builtin_skill_selected_for_domain_request(
     text: str,
     available: set[str],
-    expected_skill: str,
+    expected_skills: tuple[str, ...],
 ) -> None:
     route = route_locally(text, available=available)
 
     assert route is not None
-    assert [skill.name for skill in _skill_registry().select(route)] == [expected_skill]
+    assert tuple(skill.name for skill in _skill_registry().select(route)) == expected_skills
 
 
 def test_builtin_skill_metadata_and_tools_stay_concise() -> None:
@@ -82,11 +97,33 @@ def test_builtin_skill_metadata_and_tools_stay_concise() -> None:
 
     assert {skill.name for skill in registry.list_all()} >= {
         "interaction",
+        "accounts",
+        "account-bots",
+        "platform-capabilities",
+        "system-settings",
+        "access-control",
+        "connectivity",
+        "device-profiles",
+        "features",
+        "safety-controls",
+        "rules",
         "scheduler",
+        "ledger",
+        "memory",
+        "message-templates",
+        "notifications",
         "ai-config",
+        "llm-usage",
+        "commands",
+        "config-bundles",
+        "routing",
+        "dispatch-debug",
         "plugins",
+        "plugin-catalog",
+        "system-operations",
         "diagnostics",
         "web-research",
+        "webhooks",
     }
     for skill in registry.list_all():
         assert skill.description
@@ -103,6 +140,62 @@ def test_builtin_skills_only_reference_registered_tools() -> None:
 
     for skill in BUILTIN_SKILLS:
         assert set(skill.allowed_tools).issubset(registered)
+
+
+def test_plugin_install_and_account_enable_starts_with_install_only() -> None:
+    route = route_locally(
+        "从官方库安装这个插件并给账号启用",
+        available={"accounts", "features", "plugins", "plugin_repos"},
+    )
+
+    assert route is not None
+    assert route.domains[0] == "plugin_repos"
+    assert [skill.name for skill in _skill_registry().select(route)] == ["plugin-catalog"]
+
+    specs = get_registry().list_all()
+    narrowed = _skill_registry().narrow_tools(select_tool_specs(specs, route), _skill_registry().select(route))
+    names = {spec.name for spec in narrowed}
+    assert "features.set_enabled" not in names
+    assert "plugin_repos.install_plugin" in names
+
+
+def test_saved_plugin_repo_install_and_account_enable_keeps_both_workflows() -> None:
+    route = route_locally(
+        "从插件仓库安装这个插件并给账号启用",
+        available={"accounts", "features", "plugins", "plugin_repos"},
+    )
+
+    assert route is not None
+    assert route.domains == ("plugin_repos",)
+    assert [skill.name for skill in _skill_registry().select(route)] == ["plugin-catalog"]
+
+
+def test_plugin_debug_gets_state_logs_and_source_but_no_write_tools() -> None:
+    route = route_locally(
+        "Debug payment-helper 插件为什么报错，并报告修复方式",
+        available={"plugins", "logs", "source"},
+    )
+
+    assert route == ToolRoute(("plugins", "logs", "source"), "local", "keyword_match")
+    registry = _skill_registry()
+    selected = registry.select(route)
+    assert [skill.name for skill in selected] == ["plugins", "diagnostics"]
+
+    narrowed = registry.narrow_tools(
+        select_tool_specs(get_registry().list_all(), route),
+        selected,
+    )
+    names = {spec.name for spec in narrowed}
+    assert {
+        "plugins.list_installed",
+        "plugins.get",
+        "logs.system_console",
+        "logs.recent",
+        "logs.search_errors",
+        "source.search",
+        "source.read",
+    }.issubset(names)
+    assert not {"plugins.install", "plugins.update", "plugins.uninstall"}.intersection(names)
 
 
 def test_composite_route_loads_at_most_two_skills() -> None:
@@ -124,12 +217,13 @@ def test_general_question_loads_no_skill_and_no_tool() -> None:
     assert registry.render_prompt(()) == ""
 
 
-def test_skill_tools_never_exceed_route_permission_or_eight() -> None:
+def test_skill_tools_never_exceed_route_permission_or_sixteen() -> None:
     registry = _skill_registry()
     all_specs = [
         _spec(name)
         for name in (
             "providers.list",
+            "providers.probe_and_add",
             "providers.save",
             "providers.verify",
             "providers.delete",
@@ -148,13 +242,16 @@ def test_skill_tools_never_exceed_route_permission_or_eight() -> None:
     selected = registry.select(route)
     narrowed = registry.narrow_tools(routed, selected)
 
-    assert len(narrowed) == 8
+    assert len(narrowed) == 9
     assert {spec.name for spec in narrowed}.issubset({spec.name for spec in routed})
     assert "plugins.install" not in {spec.name for spec in narrowed}
     assert "providers.list" in {spec.name for spec in narrowed}
+    assert "providers.probe_and_add" in {spec.name for spec in narrowed}
     assert "providers.save" in {spec.name for spec in narrowed}
+    assert "providers.delete" in {spec.name for spec in narrowed}
     assert "commands.list" in {spec.name for spec in narrowed}
     assert "commands.save" in {spec.name for spec in narrowed}
+    assert "commands.delete" in {spec.name for spec in narrowed}
 
 
 def test_two_skills_receive_stable_key_tools() -> None:
@@ -181,13 +278,41 @@ def test_two_skills_receive_stable_key_tools() -> None:
     narrowed = registry.narrow_tools(select_tool_specs(specs, route), selected)
     names = [spec.name for spec in narrowed]
 
-    assert len(names) == 8
+    assert len(names) == 12
     assert names[:4] == [
         "scheduler.list",
         "logs.system_console",
         "scheduler.save",
         "logs.recent",
     ]
+
+
+@pytest.mark.parametrize(
+    ("text", "expected_tool"),
+    [
+        ("临时调严账号 1 的风控", "rate_limits.set_strict"),
+        ("重启账号1的管理bot", "account_bots.restart"),
+        ("运行插件配置动作", "features.run_config_action"),
+        ("添加忽略用户123", "ignored.add"),
+        ("忽略账号1里的用户123", "ignored.add"),
+        ("检查系统更新", "system.check_update"),
+        ("重启系统", "system.restart"),
+    ],
+)
+def test_advertised_workflow_keeps_target_tool_reachable(
+    text: str,
+    expected_tool: str,
+) -> None:
+    specs = get_registry().list_all()
+    available = {tool_domain(spec) for spec in specs}
+    route = route_locally(text, available=available)
+
+    assert route is not None
+    selected = _skill_registry().select(route)
+    narrowed = _skill_registry().narrow_tools(
+        select_tool_specs(specs, route), selected
+    )
+    assert expected_tool in {spec.name for spec in narrowed}
 
 
 def test_provider_500_diagnostics_keeps_console_source_and_provider_tools() -> None:

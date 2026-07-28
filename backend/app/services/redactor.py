@@ -124,6 +124,11 @@ def redact_value(value: Any, *, drop_sensitive_keys: bool = False) -> Any:
         out: dict[str, Any] = {}
         for key, item in value.items():
             k = str(key)
+            # has_api_key / has_token 等仅表示凭据是否存在。只放行严格布尔值，
+            # 字符串仍按敏感字段处理，避免借字段名前缀绕过脱敏。
+            if k.lower().startswith("has_") and isinstance(item, bool):
+                out[k] = item
+                continue
             if is_sensitive_key(k):
                 if drop_sensitive_keys:
                     continue

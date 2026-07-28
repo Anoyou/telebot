@@ -599,7 +599,7 @@ export function Conversation({
                     <div className="min-w-0 flex-1">
                       <p className="break-words">
                         {isApprovalRequired
-                          ? "已暂停，批准后将从当前工具步骤继续。"
+                          ? "已暂停；批准后会重新生成调用，并仅执行已批准的只读工具。"
                           : item.errorMessage || "本轮执行失败"}
                       </p>
                       {approvalTools.length ? (

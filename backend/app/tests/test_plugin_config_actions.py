@@ -718,6 +718,12 @@ async def test_config_action_job_applies_account_patch_without_revalidating_lega
         async def commit(self):
             self.commits += 1
 
+        async def flush(self):
+            return None
+
+        async def refresh(self, _row):
+            return None
+
     notified: list[int] = []
 
     async def _notify_reload(aid: int) -> None:

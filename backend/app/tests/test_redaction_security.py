@@ -54,6 +54,21 @@ def test_redactor_preserves_non_secret_token_counters() -> None:
     assert out["accessToken"] == "***"
 
 
+def test_redactor_preserves_boolean_secret_presence_flags_only() -> None:
+    out = redact_value(
+        {
+            "has_api_key": True,
+            "has_token": False,
+            "has_password": "yes",
+            "api_key": "sk-secret-value",
+        }
+    )
+    assert out["has_api_key"] is True
+    assert out["has_token"] is False
+    assert out["has_password"] == "***"
+    assert out["api_key"] == "***"
+
+
 def test_redactor_masks_common_provider_api_keys() -> None:
     values = (
         "xai-abcdefghijklmnopqrstuvwxyz123456",

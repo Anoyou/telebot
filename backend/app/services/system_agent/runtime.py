@@ -40,7 +40,7 @@ from .memory import memory_context
 from .model_capability import verify_resolved_agent_providers
 from .prompts import build_system_prompt, provider_setup_hint
 from .redactor import StreamingMessageRedactor, summarize_tool_result
-from .registry import ToolRegistry, get_registry
+from .registry import PreparedAction, ToolRegistry, get_registry
 from .skills import SkillRegistry, get_skill_registry
 from .tool_routing import (
     ToolRoute,
@@ -301,6 +301,7 @@ class SystemAgentRuntime:
                     account_id=session.account_id,
                     fallback_provider_id=fallback_provider_id,
                     progress_callback=emit_model_progress,
+                    known_secrets=list(chat_secrets or []),
                 )
             finally:
                 stage_timings["route_ms"] = max(
@@ -428,7 +429,6 @@ class SystemAgentRuntime:
                     {
                         "call_id": call.id,
                         "name": call.name,
-                        "arguments": call.arguments,
                     }
                     for call in tool_calls
                     if call.name in tool_specs_by_name
@@ -442,7 +442,6 @@ class SystemAgentRuntime:
                         **(
                             {
                                 "call_id": calls_by_name[spec.name].id,
-                                "arguments": calls_by_name[spec.name].arguments,
                             }
                             if spec.name in calls_by_name
                             else {}
@@ -519,6 +518,8 @@ class SystemAgentRuntime:
                 "max_retries_per_model": 5,
                 "retry_delay_seconds": 3.0,
                 "repair_text_tool_protocol": True,
+                # 仅供本地 usage preview 脱敏；Provider adapter 不发送 metadata。
+                "known_secrets": list(chat_secrets or []),
             },
         )
         limits = AgentLimits(
@@ -536,7 +537,14 @@ class SystemAgentRuntime:
             if channel != "web" or not bool(cfg.get("require_tool_approval")):
                 return
             requested_names = tuple(
-                dict.fromkeys(call.name for call in calls if call.name in tool_specs_by_name)
+                dict.fromkeys(
+                    call.name
+                    for call in calls
+                    if call.name in tool_specs_by_name
+                    # 写工具只生成独立待确认 Action；再次审批工具调用既重复，
+                    # 还会迫使系统暂存其敏感参数。这里只审批即时执行的只读工具。
+                    and tool_specs_by_name[call.name].read_only
+                )
             )
             if set(requested_names).issubset(approved_tool_names):
                 return
@@ -838,14 +846,23 @@ class SystemAgentRuntime:
             if spec.read_handler is None:
                 return {"error": "handler_missing", "message": f"工具 {spec.name} 未实现"}
             try:
-                return await spec.read_handler(tool_ctx, arguments or {})
+                result = await spec.read_handler(tool_ctx, arguments or {})
+                # 所有只读工具统一经过脱敏与体积门禁后才进入模型上下文。
+                return summarize_tool_result(result, max_chars=8000)
             except PermissionError as exc:
-                return {"error": "permission_denied", "message": str(exc)}
+                return {
+                    "error": "permission_denied",
+                    "message": self._safe_tool_error(exc, tool_ctx.chat_secrets),
+                }
             except Exception as exc:  # noqa: BLE001
-                log.exception("tool %s failed", spec.name)
+                log.warning(
+                    "tool %s failed error_type=%s",
+                    spec.name,
+                    type(exc).__name__,
+                )
                 return {
                     "error": type(exc).__name__,
-                    "message": str(exc)[:500],
+                    "message": self._safe_tool_error(exc, tool_ctx.chat_secrets),
                     "business_changed": False,
                 }
 
@@ -863,6 +880,7 @@ class SystemAgentRuntime:
         account_id: int | None,
         fallback_provider_id: int | None = None,
         progress_callback: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None,
+        known_secrets: list[str] | None = None,
     ) -> ToolRoute:
         domains = available_domains(all_tool_specs)
         local = route_locally(user_text, available=domains, memory_state=memory_state)
@@ -902,6 +920,7 @@ class SystemAgentRuntime:
                             ),
                             "max_retries_per_model": 1,
                             "retry_delay_seconds": 0.0,
+                            "known_secrets": list(known_secrets or []),
                         },
                     ),
                     account_id=account_id,
@@ -949,6 +968,15 @@ class SystemAgentRuntime:
                 }
             try:
                 args = dict(arguments or {})
+                if tool_ctx.channel == "bot":
+                    if tool_ctx.account_id is None:
+                        raise PermissionError("Bot 渠道缺少绑定账号上下文")
+                    requested_account = args.get("account_id")
+                    if requested_account not in (None, "") and int(requested_account) != int(
+                        tool_ctx.account_id
+                    ):
+                        raise PermissionError("Bot 渠道不能操作其他账号")
+                    args["account_id"] = int(tool_ctx.account_id)
                 # 阶段 3：把聊天中提取的密钥注入工具参数（仅内存）
                 chat_secrets = getattr(tool_ctx, "chat_secrets", None) or []
                 if spec.secret_argument_names and chat_secrets:
@@ -958,12 +986,19 @@ class SystemAgentRuntime:
                         chat_secrets=list(chat_secrets),
                     )
                     args = {**public, **secrets}
-                preview = await spec.preview_handler(tool_ctx, args)
-                if not isinstance(preview, dict):
-                    preview = {"value": preview}
+                prepared = await spec.preview_handler(tool_ctx, args)
+                if isinstance(prepared, PreparedAction):
+                    args = dict(prepared.arguments)
+                    preview = dict(prepared.preview)
+                else:
+                    preview = prepared
+                    if not isinstance(preview, dict):
+                        preview = {"value": preview}
                 # 把 preview 中的 account_id 回填，便于运行时同步
                 if preview.get("account_id") is not None and args.get("account_id") is None:
                     args["account_id"] = preview["account_id"]
+                if tool_ctx.channel == "bot":
+                    args["account_id"] = int(tool_ctx.account_id)
                 summary = str(preview.get("summary") or spec.description)
                 action = await create_pending_action(
                     tool_ctx.db,
@@ -999,18 +1034,32 @@ class SystemAgentRuntime:
             except PermissionError as exc:
                 return {
                     "error": "permission_denied",
-                    "message": str(exc),
+                    "message": self._safe_tool_error(exc, tool_ctx.chat_secrets),
                     "business_changed": False,
                 }
             except Exception as exc:  # noqa: BLE001
-                log.exception("write tool preview %s failed", spec.name)
+                log.warning(
+                    "write tool preview %s failed error_type=%s",
+                    spec.name,
+                    type(exc).__name__,
+                )
                 return {
                     "error": type(exc).__name__,
-                    "message": str(exc)[:500],
+                    "message": self._safe_tool_error(exc, tool_ctx.chat_secrets),
                     "business_changed": False,
                 }
 
         return _handler
+
+    @staticmethod
+    def _safe_tool_error(exc: Exception, known_secrets: list[str] | None) -> str:
+        from ..redactor import redact_text
+
+        message = str(exc)
+        for secret in known_secrets or []:
+            if secret:
+                message = message.replace(secret, "[REDACTED]")
+        return (redact_text(message) or type(exc).__name__)[:500]
 
     def _build_messages(
         self,

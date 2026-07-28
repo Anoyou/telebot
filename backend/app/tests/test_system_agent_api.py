@@ -341,7 +341,11 @@ async def test_patch_config(fake_svc) -> None:
 
 
 @pytest.mark.asyncio
-async def test_capabilities_stage1(fake_svc) -> None:
+async def test_capabilities_stage1(fake_svc, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "app.services.system_agent.plugin_tools.refresh_plugin_system_agent_tools",
+        AsyncMock(return_value=[]),
+    )
     db = AsyncMock()
     user = SimpleNamespace(id=1)
     caps = await api.get_capabilities(db, user)
@@ -599,3 +603,43 @@ async def test_secret_input_locks_action_before_writing(monkeypatch) -> None:
     assert row.secret_payload_enc == "encrypted"
     assert row.error_code is None
     db.commit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_secret_input_rejects_replacing_verified_probe_key(monkeypatch) -> None:
+    row = SimpleNamespace(
+        id="act-probe",
+        actor_user_id=7,
+        tool_name="providers.probe_and_add",
+        status="pending",
+        expires_at=None,
+        secret_payload_enc="encrypted-verified-key",
+        secret_fields=["api_key"],
+        arguments={"has_api_key": True},
+        error_code=None,
+        error_message=None,
+    )
+    monkeypatch.setattr(api, "lock_action", AsyncMock(return_value=row))
+    monkeypatch.setattr(
+        api,
+        "get_registry",
+        lambda: SimpleNamespace(
+            get=lambda _name: SimpleNamespace(
+                secret_argument_names=("api_key",),
+                allow_secret_input=False,
+            )
+        ),
+    )
+    db = AsyncMock()
+
+    with pytest.raises(HTTPException) as exc_info:
+        await api.secret_input_action(
+            "act-probe",
+            api.SystemAgentSecretInput(fields={"api_key": "sk-unverified-replacement"}),
+            db,
+            SimpleNamespace(id=7),
+        )
+
+    assert getattr(exc_info.value, "status_code", None) == 409
+    assert row.secret_payload_enc == "encrypted-verified-key"
+    db.commit.assert_not_awaited()

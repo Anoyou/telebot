@@ -180,26 +180,40 @@ def resolve_usage_client_identity_profile(
     return resolve_identity(configured, api_format).profile
 
 
-def preview_text_for_usage(value: Any, *, limit: int = _USAGE_PREVIEW_CHARS) -> str | None:
+def preview_text_for_usage(
+    value: Any,
+    *,
+    limit: int = _USAGE_PREVIEW_CHARS,
+    known_secrets: list[str] | tuple[str, ...] | None = None,
+) -> str | None:
     """Return a redacted, bounded preview suitable for the usage table."""
     text = str(value or "").strip()
     if not text:
         return None
-    redacted = redact_text(text)
+    redacted = text
+    for secret in known_secrets or ():
+        if secret:
+            redacted = redacted.replace(str(secret), "[REDACTED]")
+    redacted = redact_text(redacted)
     if len(redacted) <= limit:
         return redacted
     return f"{redacted[:limit]}...[truncated]"
 
 
-def request_preview_for_usage(system: str, user: str) -> str | None:
+def request_preview_for_usage(
+    system: str,
+    user: str,
+    *,
+    known_secrets: list[str] | tuple[str, ...] | None = None,
+) -> str | None:
     parts: list[str] = []
-    system_preview = preview_text_for_usage(system, limit=900)
-    user_preview = preview_text_for_usage(user, limit=1400)
+    system_preview = preview_text_for_usage(system, limit=900, known_secrets=known_secrets)
+    user_preview = preview_text_for_usage(user, limit=1400, known_secrets=known_secrets)
     if system_preview:
         parts.append(f"system:\n{system_preview}")
     if user_preview:
         parts.append(f"user:\n{user_preview}")
-    return preview_text_for_usage("\n\n".join(parts))
+    return preview_text_for_usage("\n\n".join(parts), known_secrets=known_secrets)
 
 
 # ── Retry 计算 ──────────────────────────────────────────────
@@ -1404,7 +1418,13 @@ def _structured_request_preview(request: ModelRequest) -> str | None:
         message.text_content() for message in request.messages if message.role.value == "system"
     )
     user = "\n".join(message.text_content() for message in request.messages if message.role.value == "user")
-    return request_preview_for_usage(system, user)
+    raw_secrets = request.metadata.get("known_secrets")
+    known_secrets = (
+        [str(value) for value in raw_secrets if str(value)]
+        if isinstance(raw_secrets, (list, tuple))
+        else []
+    )
+    return request_preview_for_usage(system, user, known_secrets=known_secrets)
 
 
 def _apply_output_token_cap(max_tokens: int) -> int:

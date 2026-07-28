@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 
 class CommandAliasCreate(BaseModel):
@@ -26,5 +26,4 @@ class CommandAliasResponse(BaseModel):
     account_id: int | None = None
     created_at: str
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)

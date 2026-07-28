@@ -7,8 +7,12 @@ import pytest
 
 from app.services.system_agent import provider_verify
 from app.services.system_agent.context import ToolContext
-from app.services.system_agent.registry import ActionKeepPendingError, ToolRegistry
-from app.services.system_agent.tools.providers import list_providers, register
+from app.services.system_agent.registry import ActionKeepPendingError, PreparedAction, ToolRegistry
+from app.services.system_agent.tools.providers import (
+    list_providers,
+    probe_and_add_preview,
+    register,
+)
 
 
 def _empty_result() -> SimpleNamespace:
@@ -37,6 +41,123 @@ def test_provider_list_schema_only_accepts_optional_limit() -> None:
     assert spec.input_schema["properties"] == {"limit": {"type": "integer"}}
     assert "required" not in spec.input_schema
     assert "全部模型提供商" in spec.description
+
+
+def test_probe_and_add_tool_is_a_confirmed_write_with_encrypted_secret() -> None:
+    registry = ToolRegistry()
+    register(registry)
+
+    spec = next(item for item in registry.list_all() if item.name == "providers.probe_and_add")
+    assert spec.read_only is False
+    assert spec.secret_argument_names == ("api_key", "request_headers")
+    assert spec.allow_secret_input is False
+    assert spec.preview_handler is probe_and_add_preview
+    assert spec.execute_handler is not None
+    assert "测活成功" in spec.description
+    assert spec.input_schema["required"] == ["base_url"]
+
+
+@pytest.mark.asyncio
+async def test_probe_and_add_discovers_model_and_prepares_confirmation(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    async def fake_verify(**kwargs):  # noqa: ANN003
+        captured.update(kwargs)
+        return {
+            "ok": True,
+            "model": "upstream-model-alias",
+            "requested_model": "chat-model",
+            "latency_ms": 123,
+            "api_format": "chat_completions",
+            "base_url": "https://api.example/v1",
+            "provider": "openai",
+            "suggested_name": "api.example",
+            "response_preview": "sk-secret-value",
+        }
+
+    monkeypatch.setattr(provider_verify, "run_quick_verify", fake_verify)
+    args = {
+        "base_url": "https://api.example/v1",
+        "api_key": "sk-secret-value",
+    }
+
+    prepared = await probe_and_add_preview(
+        ToolContext(db=AsyncMock(), channel="web", role="admin"),
+        args,
+    )
+
+    assert captured["api_key"] == "sk-secret-value"
+    assert captured["default_model"] is None
+    assert args == {
+        "base_url": "https://api.example/v1",
+        "api_key": "sk-secret-value",
+    }
+    assert isinstance(prepared, PreparedAction)
+    assert prepared.arguments == {
+        "base_url": "https://api.example/v1",
+        "api_key": "sk-secret-value",
+        "name": "api.example",
+        "provider": "openai",
+        "default_model": "chat-model",
+            "api_format": "chat_completions",
+            "models": [{"id": "chat-model", "enabled": True, "custom": False}],
+        }
+    preview = prepared.preview
+    assert preview["mode"] == "verified_create"
+    assert preview["provider"]["default_model"] == "chat-model"
+    assert preview["liveness"]["ok"] is True
+    assert "尚未保存" in preview["note"]
+    assert "sk-secret-value" not in str(preview)
+
+
+@pytest.mark.asyncio
+async def test_probe_and_add_failure_does_not_prepare_confirmation(monkeypatch) -> None:
+    async def fake_verify(**_kwargs):  # noqa: ANN003
+        raise ActionKeepPendingError(
+            "Provider 验证失败：上游不可用。临时密钥仍安全暂存。",
+            code="PROVIDER_VERIFY_FAILED",
+        )
+
+    monkeypatch.setattr(provider_verify, "run_quick_verify", fake_verify)
+    args = {
+        "base_url": "https://api.example/v1",
+        "api_key": "sk-secret-value",
+    }
+
+    with pytest.raises(ActionKeepPendingError):
+        await probe_and_add_preview(
+            ToolContext(db=AsyncMock(), channel="web", role="admin"),
+            args,
+        )
+
+    assert "name" not in args
+    assert "default_model" not in args
+
+
+@pytest.mark.asyncio
+async def test_probe_and_add_rejects_upstream_model_field_that_echoes_key(monkeypatch) -> None:
+    key = "AbCdEfGhIjKlMnOpQrStUvWxYz123456"
+
+    async def fake_verify(**_kwargs):  # noqa: ANN003
+        return {
+            "ok": True,
+            "model": key,
+            "requested_model": key,
+            "latency_ms": 10,
+            "api_format": "chat_completions",
+            "base_url": "https://api.example/v1",
+            "provider": "openai",
+            "suggested_name": "api.example",
+            "response_preview": key,
+        }
+
+    monkeypatch.setattr(provider_verify, "run_quick_verify", fake_verify)
+
+    with pytest.raises(ValueError, match="公开配置字段包含当前凭据"):
+        await probe_and_add_preview(
+            ToolContext(db=AsyncMock(), channel="web", role="admin"),
+            {"base_url": "https://api.example/v1", "api_key": key},
+        )
 
 
 @pytest.mark.asyncio
@@ -82,5 +203,9 @@ async def test_saved_provider_verify_distinguishes_auth_from_upstream_failure(
         )
 
     assert ei.value.code == expected_code
+    if expected_code == "API_KEY_REJECTED":
+        assert ei.value.clear_secret_names == ("api_key",)
+    else:
+        assert ei.value.clear_secret_names == ()
     assert expected_message in ei.value.message
     assert "已保存的 Provider 配置未修改" in ei.value.message

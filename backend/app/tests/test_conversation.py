@@ -59,6 +59,8 @@ async def test_get_response_respects_custom_timeout():
 async def test_context_manager_calls_close():
     """conversation() context manager 退出时应调用 close()。"""
     client = AsyncMock()
+    client.add_event_handler = MagicMock()
+    client.remove_event_handler = MagicMock()
     # mock get_entity 返回一个有 id 的对象
     entity = MagicMock()
     entity.id = 12345
@@ -134,6 +136,8 @@ async def test_click_button_index_out_of_range():
 async def test_setup_registers_handler():
     """_setup 应该注册 NewMessage handler。"""
     client = AsyncMock()
+    client.add_event_handler = MagicMock()
+    client.remove_event_handler = MagicMock()
     entity = MagicMock()
     entity.id = 999
     client.get_entity.return_value = entity

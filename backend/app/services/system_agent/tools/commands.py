@@ -28,6 +28,26 @@ def _template_view(row: CommandTemplate, account_ids: list[int] | None = None) -
     }
 
 
+async def _store_reload_accounts(
+    ctx: ToolContext,
+    template_id: int,
+    extra: list[int] | None = None,
+) -> list[int]:
+    rows = (
+        await ctx.db.execute(
+            select(AccountCommandLink.account_id).where(
+                AccountCommandLink.template_id == int(template_id)
+            )
+        )
+    ).scalars().all()
+    account_ids = sorted({int(value) for value in [*rows, *(extra or [])]})
+    if ctx.action is not None:
+        stored = dict(ctx.action.arguments or {})
+        stored["reload_account_ids"] = account_ids
+        ctx.action.arguments = stored
+    return account_ids
+
+
 async def list_commands(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
     limit = clamp_limit(args.get("limit"), default=50, maximum=200)
     q = select(CommandTemplate).order_by(CommandTemplate.id.asc()).limit(limit)
@@ -131,10 +151,12 @@ async def save_execute(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]
             row = await command_service.update_template(ctx.db, int(cmd_id), payload)
             for aid in account_ids:
                 await command_service.enable_for_account(ctx.db, aid, row.id)
+            reload_ids = await _store_reload_accounts(ctx, row.id, account_ids)
             return {
                 "mode": "update",
                 "command": _template_view(row, account_ids),
                 "enabled_account_ids": account_ids,
+                "reload_account_ids": reload_ids,
                 "business_changed": True,
             }
 
@@ -148,10 +170,12 @@ async def save_execute(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]
         row = await command_service.create_template(ctx.db, create)
         for aid in account_ids:
             await command_service.enable_for_account(ctx.db, aid, row.id)
+        reload_ids = await _store_reload_accounts(ctx, row.id, account_ids)
         return {
             "mode": "create",
             "command": _template_view(row, account_ids),
             "enabled_account_ids": account_ids,
+            "reload_account_ids": reload_ids,
             "business_changed": True,
         }
     except (HTTPException, ValidationError) as exc:
@@ -173,10 +197,15 @@ async def delete_preview(ctx: ToolContext, args: dict[str, Any]) -> dict[str, An
 async def delete_execute(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
     cmd_id = int(args.get("id") or args.get("template_id"))
     affected = await command_service.delete_template(ctx.db, cmd_id)
+    reload_ids = sorted(int(value) for value in (affected or []))
+    if ctx.action is not None:
+        stored = dict(ctx.action.arguments or {})
+        stored["reload_account_ids"] = reload_ids
+        ctx.action.arguments = stored
     return {
         "id": cmd_id,
         "deleted": True,
-        "affected_account_ids": sorted(affected) if affected else [],
+        "affected_account_ids": reload_ids,
         "business_changed": True,
     }
 
@@ -216,6 +245,7 @@ async def set_enabled_execute(ctx: ToolContext, args: dict[str, Any]) -> dict[st
     else:
         for aid in aids:
             await command_service.disable_for_account(ctx.db, aid, cmd_id)
+    await _store_reload_accounts(ctx, cmd_id, aids)
     return {
         "template_id": cmd_id,
         "account_ids": aids,
@@ -228,6 +258,7 @@ def register(registry: ToolRegistry) -> None:
     registry.register(
         ToolSpec(
             name="commands.list",
+            channels=("web",),
             description="列出自定义指令模板，可按 ID/名称/类型筛选，并返回已启用账号。",
             input_schema={
                 "type": "object",
@@ -247,6 +278,7 @@ def register(registry: ToolRegistry) -> None:
     registry.register(
         ToolSpec(
             name="commands.save",
+            channels=("web",),
             description="创建或更新自定义指令；可选 enable_account_ids 同事务启用到账号。",
             input_schema={
                 "type": "object",
@@ -268,11 +300,13 @@ def register(registry: ToolRegistry) -> None:
             risk="normal",
             preview_handler=save_preview,
             execute_handler=save_execute,
+            runtime_effects=("reload_commands",),
         )
     )
     registry.register(
         ToolSpec(
             name="commands.delete",
+            channels=("web",),
             description="删除自定义指令（危险）。",
             input_schema={
                 "type": "object",
@@ -287,11 +321,13 @@ def register(registry: ToolRegistry) -> None:
             risk="dangerous",
             preview_handler=delete_preview,
             execute_handler=delete_execute,
+            runtime_effects=("reload_commands",),
         )
     )
     registry.register(
         ToolSpec(
             name="commands.set_enabled_for_accounts",
+            channels=("web",),
             description="为若干账号启用或停用某条自定义指令。",
             input_schema={
                 "type": "object",
@@ -310,5 +346,6 @@ def register(registry: ToolRegistry) -> None:
             risk="normal",
             preview_handler=set_enabled_preview,
             execute_handler=set_enabled_execute,
+            runtime_effects=("reload_commands",),
         )
     )

@@ -120,10 +120,10 @@ test("实装 Agent 的注视、跑动、贴边和跳跃保持连续", async ({ p
   await page.getByRole("tab", { name: "待机", exact: true }).click();
   await expectCanvasReady(canvas);
   const idleMetrics: CanvasMetrics[] = [];
-  for (let sample = 0; sample < 26; sample += 1) {
-    await page.waitForTimeout(90);
+  await expect.poll(async () => {
     idleMetrics.push(await canvasMetrics(canvas));
-  }
+    return new Set(idleMetrics.map((sample) => sample.hash)).size;
+  }, { timeout: 3_000, intervals: [40] }).toBe(2);
   const idleMasses = idleMetrics.map((sample) => sample.alphaMass);
   const idleWidths = idleMetrics.map((sample) => sample.right - sample.left);
   expect(new Set(idleMetrics.map((sample) => sample.hash)).size).toBe(2);
@@ -168,7 +168,7 @@ test("实装 Agent 的注视、跑动、贴边和跳跃保持连续", async ({ p
       const previous = samples[index - 1];
       const current = samples[index];
       expect(Math.max(previous.alphaMass, current.alphaMass) / Math.min(previous.alphaMass, current.alphaMass)).toBeLessThan(1.04);
-      expect(Math.abs(previous.centerX - current.centerX)).toBeLessThan(3.5);
+      expect(Math.abs(previous.lowerCenterX - current.lowerCenterX)).toBeLessThan(2.5);
     }
   }
 
@@ -192,7 +192,10 @@ test("实装 Agent 的注视、跑动、贴边和跳跃保持连续", async ({ p
   const dockedBox = await pet.boundingBox();
   expect(Math.round(dockedBox?.width || 0)).toBe(102);
   expect(Math.round(dockedBox?.height || 0)).toBe(114);
-  expect(Math.round((dockedBox?.x || 0) + (dockedBox?.width || 0))).toBe(page.viewportSize()?.width);
+  const stageBox = await page.locator("[data-preview-stage]").boundingBox();
+  expect(Math.round((dockedBox?.x || 0) + (dockedBox?.width || 0))).toBe(
+    Math.round((stageBox?.x || 0) + (stageBox?.width || 0)),
+  );
   const dockedTransform = await canvas.evaluate((element) => getComputedStyle(element).transform);
   expect(dockedTransform).toBe("none");
 

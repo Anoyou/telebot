@@ -537,10 +537,19 @@ async def test_tool_approval_failure_is_persisted_for_retry(agent_db, monkeypatc
                 "domains": ["scheduler"],
                 "tools": [
                     {
+                        "call_id": "call-secret",
                         "name": "scheduler.list",
                         "description": "查看定时任务",
                         "read_only": True,
                         "risk": "normal",
+                        "arguments": {"api_key": "opaque-secret-value"},
+                    }
+                ],
+                "calls": [
+                    {
+                        "call_id": "call-secret",
+                        "name": "scheduler.list",
+                        "arguments": {"api_key": "opaque-secret-value"},
                     }
                 ],
             },
@@ -565,6 +574,9 @@ async def test_tool_approval_failure_is_persisted_for_retry(agent_db, monkeypatc
         assert message.error_code == "AGENT_TOOL_APPROVAL_REQUIRED"
         assert message.usage is not None
         assert message.usage["tool_approval"]["tools"][0]["name"] == "scheduler.list"
+        assert "arguments" not in message.usage["tool_approval"]["tools"][0]
+        assert "arguments" not in message.usage["tool_approval"]["calls"][0]
+        assert "opaque-secret-value" not in str(message.usage)
 
 
 @pytest.mark.asyncio

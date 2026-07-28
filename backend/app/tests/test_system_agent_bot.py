@@ -788,6 +788,60 @@ async def test_attach_secrets_to_pending_action_short_circuits() -> None:
     assert handled is True
     assert action.secret_payload_enc == "enc"
     assert action.arguments.get("has_api_key") is True
+
+
+@pytest.mark.asyncio
+async def test_attach_secrets_skips_verified_probe_action(monkeypatch) -> None:
+    class _Action:
+        id = "act-probe"
+        account_id = 1
+        actor_bot_user_id = 2
+        tool_name = "providers.probe_and_add"
+        status = "pending"
+        expires_at = None
+        secret_payload_enc = "encrypted-verified-key"
+        secret_fields = ["api_key"]
+        arguments = {"has_api_key": True}
+        error_code = None
+        error_message = None
+        risk = "normal"
+        summary = "测活成功"
+
+    action = _Action()
+    db = AsyncMock()
+    db.commit = AsyncMock()
+
+    class _DBContext:
+        async def __aenter__(self):
+            return db
+
+        async def __aexit__(self, *_args):
+            return False
+
+    monkeypatch.setattr(bot_bridge, "AsyncSessionLocal", lambda: _DBContext())
+    monkeypatch.setattr(bot_bridge, "list_actions", AsyncMock(return_value=[action]))
+    monkeypatch.setattr(
+        bot_bridge,
+        "get_registry",
+        lambda: SimpleNamespace(
+            get=lambda _name: SimpleNamespace(
+                secret_argument_names=("api_key",),
+                allow_secret_input=False,
+            )
+        ),
+    )
+    send = AsyncMock()
+
+    handled = await bot_bridge.try_attach_secrets_to_pending_action(
+        account_id=1,
+        tg_user_id=2,
+        text="sk-abcdefghijklmnopqrstuvwxyz123456",
+        send=send,
+    )
+
+    assert handled is False
+    assert action.secret_payload_enc == "encrypted-verified-key"
+    send.assert_not_awaited()
     assert send.calls
     assert send.calls[-1]["reply_markup"] is not None
 

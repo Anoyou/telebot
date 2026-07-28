@@ -276,6 +276,54 @@ async def test_executor_rollback_on_handler_error(action_db, monkeypatch) -> Non
 
 
 @pytest.mark.asyncio
+async def test_runtime_retry_rejects_non_idempotent_effect(action_db, monkeypatch) -> None:
+    reg = ToolRegistry()
+    reg.register(
+        ToolSpec(
+            name="account_bots.test",
+            description="send test",
+            input_schema={"type": "object"},
+            read_only=False,
+            preview_handler=AsyncMock(return_value={"summary": "send"}),
+            execute_handler=AsyncMock(return_value={"business_changed": True}),
+            runtime_effects=("account_bot_test_send",),
+            runtime_retryable=False,
+        )
+    )
+    monkeypatch.setattr("app.services.system_agent.executor.get_registry", lambda: reg)
+    monkeypatch.setattr("app.services.system_agent.executor.AsyncSessionLocal", action_db)
+
+    async with action_db() as db:
+        db.add(
+            SystemAgentAction(
+                id="act-non-idempotent",
+                channel=CHANNEL_WEB,
+                tool_name="account_bots.test",
+                arguments={"account_id": 1, "text": "hello"},
+                summary="send",
+                preview={},
+                status=ACTION_STATUS_EXECUTED,
+                actor_user_id=1,
+                account_id=1,
+                runtime_sync_status="failed",
+                runtime_sync_error="result store unavailable",
+                expires_at=datetime.now(UTC) + timedelta(minutes=5),
+            )
+        )
+        await db.commit()
+
+    apply_effect = AsyncMock()
+    monkeypatch.setattr(ActionExecutor, "_run_runtime_sync", apply_effect)
+
+    result = await ActionExecutor().retry_runtime_sync("act-non-idempotent")
+
+    assert result["ok"] is False
+    assert result["error_code"] == "RUNTIME_RETRY_UNSAFE"
+    assert result["action"]["runtime_retryable"] is False
+    apply_effect.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_scheduler_execute_now_runtime_effect_uses_worker_rpc(monkeypatch) -> None:
     execute_now = AsyncMock(return_value={"ok": True})
     monkeypatch.setattr(
@@ -438,3 +486,14 @@ async def test_precheck_does_not_execute_secret_changed_during_verification(
     assert result["action"]["status"] == ACTION_STATUS_PENDING
     assert result["action"]["has_secret"] is True
     execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_unknown_runtime_effect_fails_closed() -> None:
+    with pytest.raises(RuntimeError, match="未知运行时副作用"):
+        await ActionExecutor()._apply_effect(  # noqa: SLF001
+            "typo_effect",
+            account_id=None,
+            action_id="action-1",
+            arguments={},
+        )

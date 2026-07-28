@@ -56,34 +56,40 @@ log = logging.getLogger(__name__)
 STALE_PENDING_AFTER = timedelta(minutes=15)
 
 
+def _public_tool_approval(value: dict[str, Any]) -> dict[str, Any]:
+    """审批记录只保留调用身份与工具元数据，绝不持久化参数。"""
+
+    out: dict[str, Any] = {}
+    domains = value.get("domains")
+    if isinstance(domains, list):
+        out["domains"] = [str(item) for item in domains[:3]]
+    for field in ("calls", "tools"):
+        raw_items = value.get(field)
+        if not isinstance(raw_items, list):
+            continue
+        items: list[dict[str, Any]] = []
+        for raw in raw_items[:64]:
+            if not isinstance(raw, dict):
+                continue
+            item = {
+                key: raw[key]
+                for key in ("call_id", "name", "description", "read_only", "risk")
+                if key in raw
+            }
+            if item:
+                items.append(item)
+        out[field] = items
+    return out
+
+
 def _approved_tool_calls_from_retry(
     retry_message: SystemAgentMessage | None,
     approved_tools: list[str] | None,
 ) -> list[dict[str, Any]]:
-    if retry_message is None or not approved_tools:
-        return []
-    usage = retry_message.usage if isinstance(retry_message.usage, dict) else {}
-    approval = usage.get("tool_approval") if isinstance(usage, dict) else None
-    if not isinstance(approval, dict):
-        return []
-    approved = {str(name) for name in approved_tools if str(name)}
-    calls: list[dict[str, Any]] = []
-    raw_calls = approval.get("calls") or approval.get("tools") or []
-    for item in raw_calls:
-        if not isinstance(item, dict):
-            continue
-        name = str(item.get("name") or "")
-        if name not in approved or not item.get("call_id"):
-            continue
-        args = item.get("arguments")
-        calls.append(
-            {
-                "call_id": str(item.get("call_id")),
-                "name": name,
-                "arguments": args if isinstance(args, dict) else {},
-            }
-        )
-    return calls
+    # 审批记录只持久化工具名，不保存参数。批准后让模型根据原问题重新生成
+    # 只读调用；写工具另有 Action 确认，不走这层审批。
+    del retry_message, approved_tools
+    return []
 
 
 async def is_latest_completed_pair(
@@ -723,6 +729,8 @@ class SystemAgentService:
                         }
                     tool_approval = event.get("tool_approval")
                     if isinstance(tool_approval, dict):
+                        tool_approval = _public_tool_approval(tool_approval)
+                        event["tool_approval"] = tool_approval
                         failure_context = {
                             **(failure_context or {}),
                             "tool_approval": tool_approval,

@@ -9,7 +9,7 @@ from ..tool_routing import ToolRoute, tool_domain
 from .spec import SkillSpec
 
 MAX_SKILLS_PER_TURN = 2
-MAX_TOOLS_PER_TURN = 8
+MAX_TOOLS_PER_TURN = 16
 
 
 class SkillRegistry:

@@ -21,6 +21,24 @@ def _set_root(monkeypatch: pytest.MonkeyPatch, root) -> None:  # noqa: ANN001
     )
 
 
+def test_source_roots_never_promotes_filesystem_root_to_backend(monkeypatch, tmp_path) -> None:
+    fake_root = tmp_path / "runtime"
+    (fake_root / "app").mkdir(parents=True)
+    (fake_root / "app" / "__init__.py").write_text("", encoding="utf-8")
+    (fake_root / "pyproject.toml").write_text("[project]\nname='x'\n", encoding="utf-8")
+    monkeypatch.setattr(source_tools, "_BACKEND_SOURCE_ROOT", fake_root)
+    monkeypatch.setattr(
+        source_tools.settings,
+        "plugins_installed_dir",
+        str(tmp_path / "plugins"),
+    )
+
+    roots = source_tools._source_roots()  # noqa: SLF001
+
+    assert roots["backend"] == fake_root.resolve()
+    assert roots["backend"] != fake_root.anchor
+
+
 @pytest.mark.asyncio
 async def test_source_search_and_read_are_marked(monkeypatch, tmp_path) -> None:  # noqa: ANN001
     root = tmp_path / "backend"

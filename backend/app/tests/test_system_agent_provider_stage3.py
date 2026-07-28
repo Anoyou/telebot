@@ -17,13 +17,16 @@ from app.db.models.system_agent import (
     SystemAgentMessage,
     SystemAgentSession,
 )
-from app.services.system_agent.actions import encrypt_secret_payload
+from app.services.system_agent.actions import decrypt_secret_payload, encrypt_secret_payload
+from app.services.system_agent.context import ToolContext
 from app.services.system_agent.executor import ActionExecutor
 from app.services.system_agent.registry import (
     ActionKeepPendingError,
+    PreparedAction,
     ToolRegistry,
     ToolSpec,
 )
+from app.services.system_agent.runtime import SystemAgentRuntime
 
 
 @pytest.fixture
@@ -51,7 +54,11 @@ async def test_precheck_failure_keeps_pending_and_clears_secret(action_db, monke
 
     async def precheck(ctx, args):  # noqa: ANN001
         assert args.get("api_key") == "sk-bad-key-value-here"
-        raise ActionKeepPendingError("Provider 验证失败：401", code="PROVIDER_VERIFY_FAILED")
+        raise ActionKeepPendingError(
+            "Provider 验证失败：401",
+            code="API_KEY_REJECTED",
+            clear_secret_names=("api_key",),
+        )
 
     async def execute(ctx, args):  # noqa: ANN001
         executed["n"] += 1
@@ -111,6 +118,67 @@ async def test_precheck_failure_keeps_pending_and_clears_secret(action_db, monke
 
 
 @pytest.mark.asyncio
+async def test_upstream_precheck_failure_keeps_encrypted_secret(action_db, monkeypatch) -> None:
+    async def precheck(_ctx, _args):  # noqa: ANN001
+        raise ActionKeepPendingError(
+            "Responses streaming 接口返回 503: model_not_found",
+            code="PROVIDER_VERIFY_FAILED",
+        )
+
+    reg = ToolRegistry()
+    reg.register(
+        ToolSpec(
+            name="providers.save",
+            description="save",
+            input_schema={"type": "object"},
+            read_only=False,
+            min_role="admin",
+            secret_argument_names=("api_key", "request_headers"),
+            precheck_clear_secret_argument_names=("api_key",),
+            preview_handler=AsyncMock(return_value={"summary": "save"}),
+            precheck_handler=precheck,
+            execute_handler=AsyncMock(),
+        )
+    )
+    monkeypatch.setattr("app.services.system_agent.executor.get_registry", lambda: reg)
+    monkeypatch.setattr("app.services.system_agent.executor.AsyncSessionLocal", action_db)
+
+    async with action_db() as db:
+        db.add(
+            SystemAgentAction(
+                id="act-upstream-fail",
+                channel=CHANNEL_WEB,
+                tool_name="providers.save",
+                arguments={"name": "p1", "has_api_key": True},
+                secret_fields=["api_key", "request_headers"],
+                secret_payload_enc=encrypt_secret_payload(
+                    {
+                        "api_key": "sk-still-valid",
+                        "request_headers": [{"name": "x-client", "value": "desktop"}],
+                    }
+                ),
+                summary="创建 Provider",
+                preview={},
+                status=ACTION_STATUS_PENDING,
+                actor_user_id=1,
+                expires_at=datetime.now(UTC) + timedelta(minutes=5),
+            )
+        )
+        await db.commit()
+
+    result = await ActionExecutor().confirm(
+        action_id="act-upstream-fail", role="admin", web_user_id=1
+    )
+
+    assert result["error_code"] == "PROVIDER_VERIFY_FAILED"
+    assert result["action"]["has_secret"] is True
+    async with action_db() as db:
+        row = await db.get(SystemAgentAction, "act-upstream-fail")
+        assert row is not None
+        assert decrypt_secret_payload(row.secret_payload_enc)["api_key"] == "sk-still-valid"
+
+
+@pytest.mark.asyncio
 async def test_precheck_success_then_execute(action_db, monkeypatch) -> None:
     calls = {"pre": 0, "exec": 0}
 
@@ -161,6 +229,72 @@ async def test_precheck_success_then_execute(action_db, monkeypatch) -> None:
     result = await ActionExecutor().confirm(action_id="act-ok", role="admin", web_user_id=1)
     assert result["ok"] is True
     assert calls == {"pre": 1, "exec": 1}
+
+
+@pytest.mark.asyncio
+async def test_probe_action_pipeline_replaces_mask_and_encrypts_chat_secret(action_db) -> None:
+    async def preview(_ctx, args):  # noqa: ANN001
+        assert args["api_key"] == "sk-real-secret-value-from-chat"
+        return PreparedAction(
+            arguments={
+                **args,
+                "name": "api.example",
+                "provider": "openai",
+                "default_model": "chat-model",
+                "api_format": "chat_completions",
+            },
+            preview={
+                "summary": "测活成功，是否添加 Provider「api.example」？",
+                "mode": "verified_create",
+            },
+        )
+
+    async def execute(_ctx, _args):  # noqa: ANN001
+        return {"ok": True}
+
+    spec = ToolSpec(
+        name="providers.probe_and_add",
+        description="probe",
+        input_schema={"type": "object"},
+        read_only=False,
+        min_role="admin",
+        secret_argument_names=("api_key",),
+        preview_handler=preview,
+        execute_handler=execute,
+    )
+
+    async with action_db() as db:
+        ctx = ToolContext(
+            db=db,
+            channel=CHANNEL_WEB,
+            role="admin",
+            web_user_id=1,
+            chat_secrets=["sk-real-secret-value-from-chat"],
+        )
+        events: list[dict] = []
+        handler = SystemAgentRuntime()._bind_write_handler(  # noqa: SLF001
+            spec,
+            ctx,
+            events,
+            lambda event_type, **payload: {"type": event_type, **payload},
+        )
+        result = await handler(
+            {
+                "base_url": "https://api.example/v1",
+                "api_key": "[REDACTED]",
+            }
+        )
+
+        action = await db.get(SystemAgentAction, result["action_id"])
+        assert action is not None
+        assert action.arguments["has_api_key"] is True
+        assert "api_key" not in action.arguments
+        assert "sk-real-secret-value-from-chat" not in str(action.arguments)
+        assert decrypt_secret_payload(action.secret_payload_enc) == {
+            "api_key": "sk-real-secret-value-from-chat"
+        }
+        assert events[0]["type"] == "action_proposed"
+        assert events[0]["action"]["has_secret"] is True
 
 
 @pytest.mark.asyncio

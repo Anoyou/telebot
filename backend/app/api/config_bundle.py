@@ -9,11 +9,7 @@ from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import Response
 from sqlalchemy import select
 
-from ..db.models.account import Account
-from ..db.models.command import AccountCommandLink, CommandTemplate
-from ..db.models.feature import AccountFeature, Feature
-from ..db.models.ignored_peer import IgnoredPeer
-from ..db.models.rule import Rule
+from ..db.models.feature import Feature
 from ..deps import CurrentUser, DBSession
 from ..redis_client import get_redis
 from ..schemas.config_bundle import (
@@ -27,10 +23,11 @@ from ..services.config_bundle_service import (
     BundleTooLarge,
     apply_bundle_confirm,
     assert_bundle_size,
-    build_config_bundle,
+    available_command_templates,
     build_preview_context_digest,
     build_preview_signature,
     compare_bundles,
+    load_config_bundle,
 )
 from ..worker.ipc import (
     CMD_RELOAD_COMMANDS,
@@ -48,31 +45,10 @@ def _bad(code: str, message: str, status: int = 400) -> HTTPException:
 
 
 async def _load_bundle(db, aid: int) -> ConfigBundleExport:
-    account = await db.get(Account, aid)
-    if account is None:
-        raise _bad("ACCOUNT_NOT_FOUND", "账号不存在", 404)
-
-    feature_rows = (
-        await db.execute(select(AccountFeature).where(AccountFeature.account_id == aid))
-    ).scalars().all()
-    rule_rows = (await db.execute(select(Rule).where(Rule.account_id == aid))).scalars().all()
-    ignored_peer_rows = (
-        await db.execute(select(IgnoredPeer).where(IgnoredPeer.account_id == aid))
-    ).scalars().all()
-    command_link_rows = (
-        await db.execute(
-            select(AccountCommandLink, CommandTemplate)
-            .join(CommandTemplate, CommandTemplate.id == AccountCommandLink.template_id)
-            .where(AccountCommandLink.account_id == aid, AccountCommandLink.enabled.is_(True))
-        )
-    ).all()
-    return build_config_bundle(
-        account,
-        feature_rows,
-        rule_rows,
-        command_link_rows,
-        ignored_peer_rows,
-    )
+    try:
+        return await load_config_bundle(db, aid)
+    except BundleConfirmError as exc:
+        raise _bad(exc.code, exc.message, 404) from exc
 
 
 async def _available_feature_map(db) -> dict[str, str]:
@@ -81,15 +57,7 @@ async def _available_feature_map(db) -> dict[str, str]:
 
 
 async def _available_command_templates(db) -> dict[str, dict[str, object]]:
-    rows = (await db.execute(select(CommandTemplate))).scalars().all()
-    return {
-        row.name: {
-            "template_name": row.name,
-            "aliases": list(row.aliases or []),
-            "type": row.type,
-        }
-        for row in rows
-    }
+    return await available_command_templates(db)
 
 
 @router.get("/api/accounts/{aid}/config-bundle/export")
@@ -250,6 +218,7 @@ async def confirm_config_bundle(
             available_command_templates=available_templates,
             apply_conflicts=apply_conflicts,
             confirm_chat_id_conflicts=confirm_chat_id_conflicts,
+            web_user_id=int(user.id),
         )
     except BundleConfirmError as exc:
         raise _bad(exc.code, exc.message) from exc

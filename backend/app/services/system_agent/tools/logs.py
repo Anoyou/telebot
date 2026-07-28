@@ -218,6 +218,7 @@ def register(registry: ToolRegistry) -> None:
     registry.register(
         ToolSpec(
             name="logs.system_console",
+            channels=("web",),
             description=(
                 "读取 Web/API、前端、数据库等容器控制台日志。用于管理界面 4xx/5xx、"
                 "保存失败和系统异常；默认读取 Web 最近 300 行，返回脱敏内容。"

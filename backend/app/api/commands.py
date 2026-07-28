@@ -535,52 +535,9 @@ async def _resolve_proxy_url(db, proxy_id: int | None) -> str | None:
     与 ``worker/runtime._build_proxy_url`` 同一逻辑；这里独立实现是因为本模块跑在
     主进程内（不能 import worker.runtime——后者持有 telethon 等重依赖）。
     """
-    if proxy_id is None:
-        return None
-    from urllib.parse import quote
+    from ..services.llm_proxy_service import resolve_proxy_url
 
-    from ..crypto import decrypt_str
-    from ..db.models.account import Proxy
-
-    p = await db.get(Proxy, proxy_id)
-    if p is None:
-        return None
-    if "://" in p.host:
-        from ..util.proxy import parse_proxy_url
-        parsed = parse_proxy_url(p.host)
-        if parsed is not None:
-            ptype, host, port, _rdns, parsed_user, parsed_password = parsed
-            if ptype not in ("socks5", "http"):
-                return None
-            user = p.username or parsed_user
-            pwd = decrypt_str(p.password_enc) if p.password_enc else (parsed_password or "")
-            auth = ""
-            if user:
-                auth = quote(user, safe="")
-                if pwd:
-                    auth = f"{auth}:{quote(pwd, safe='')}"
-                auth = f"{auth}@"
-            return f"{ptype}://{auth}{host}:{int(port)}"
-    t = (p.type or "").lower()
-    if t == "socks5":
-        scheme = "socks5"
-    elif t in ("http", "https"):
-        scheme = "http"
-    else:
-        return None  # mtproxy / 不支持的类型
-    pwd = ""
-    if p.password_enc:
-        try:
-            pwd = decrypt_str(p.password_enc)
-        except Exception:  # noqa: BLE001
-            pwd = ""
-    auth = ""
-    if p.username:
-        auth = quote(p.username, safe="")
-        if pwd:
-            auth = f"{auth}:{quote(pwd, safe='')}"
-        auth = f"{auth}@"
-    return f"{scheme}://{auth}{p.host}:{int(p.port)}"
+    return await resolve_proxy_url(db, proxy_id)
 
 
 @router.post(

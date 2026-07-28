@@ -2,15 +2,56 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from ....db.models.account import Account
 from ....redis_client import get_redis
+from ....schemas.account_bot import AccountBotInteractionConfig
 from ....services import account_bot_service
 from ....services.interaction import session_index
 from ..context import ToolContext
-from ..registry import ToolRegistry, ToolSpec
+from ..registry import PreparedAction, ToolRegistry, ToolSpec
 from ._helpers import account_scope_filter, clamp_limit
+
+_INTERACTION_SERVER_FIELDS = {
+    "has_interaction_bot_token",
+    "interaction_bot_username",
+    "interaction_bot_id",
+    "interaction_running",
+    "interaction_runtime_status",
+    "interaction_last_update_id",
+    "interaction_last_error",
+    "interaction_chat_memberships",
+    "polling_dlq_count",
+    "interaction_debug",
+    "transfer_bot_id",
+    "has_transfer_bot_token",
+    "transfer_test_chat_memberships",
+}
+
+
+def _parse_config_json(args: dict[str, Any]) -> dict[str, Any]:
+    raw = args.get("config_json")
+    if not isinstance(raw, str) or not raw.strip():
+        raise ValueError("需要 config_json（JSON 对象字符串）")
+    if len(raw) > 65_536:
+        raise ValueError("config_json 不能超过 64 KiB")
+    try:
+        value = json.loads(raw)
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ValueError("config_json 必须是合法 JSON 对象字符串") from exc
+    if not isinstance(value, dict):
+        raise ValueError("config_json 顶层必须是 JSON 对象")
+    blocked = sorted(set(value) & _INTERACTION_SERVER_FIELDS)
+    if blocked:
+        raise ValueError(f"不能修改服务端状态字段：{', '.join(blocked)}")
+    if "rules" in value:
+        raise ValueError("交互规则请使用 interaction.save_rule 等专用工具维护")
+    unknown = sorted(set(value) - set(AccountBotInteractionConfig.model_fields))
+    if unknown:
+        raise ValueError(f"未知交互配置字段：{', '.join(unknown)}")
+    return value
 
 
 def _rule_public_view(rule: dict[str, Any]) -> dict[str, Any]:
@@ -342,7 +383,199 @@ async def delete_rule_execute(ctx: ToolContext, args: dict[str, Any]) -> dict[st
     return {**info, "business_changed": True}
 
 
+def _interaction_config_view(data: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: value
+        for key, value in data.items()
+        if key
+        not in {
+            "interaction_bot_token",
+            "transfer_bot_token",
+            "interaction_debug",
+        }
+    }
+
+
+async def get_config(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
+    account_id = account_scope_filter(
+        args.get("account_id"),
+        context_account_id=ctx.account_id,
+        channel=ctx.channel,
+    )
+    if account_id is None:
+        raise ValueError("需要 account_id")
+    if await ctx.db.get(Account, account_id) is None:
+        raise ValueError(f"账号 #{account_id} 不存在")
+    data = await account_bot_service.get_interaction_bot_config(ctx.db, account_id)
+    module_meta = await _interaction_module_note(ctx)
+    return {
+        "account_id": account_id,
+        "config": _interaction_config_view(data),
+        "note": "Bot Token 永不返回明文；规则请使用 interaction.list_rules 单独读取。",
+        **module_meta,
+    }
+
+
+async def _prepare_config(
+    ctx: ToolContext, args: dict[str, Any]
+) -> tuple[int, dict[str, Any], dict[str, Any]]:
+    account_id = account_scope_filter(
+        args.get("account_id"),
+        context_account_id=ctx.account_id,
+        channel=ctx.channel,
+    )
+    if account_id is None:
+        raise ValueError("需要 account_id")
+    if await ctx.db.get(Account, account_id) is None:
+        raise ValueError(f"账号 #{account_id} 不存在")
+    patch = _parse_config_json(args)
+    current = await account_bot_service.get_interaction_bot_config(ctx.db, account_id)
+    candidate = {**current, **patch}
+    # 用正式 Schema 做边界校验，但只把用户补丁交给 service，保留未提供字段。
+    AccountBotInteractionConfig(**candidate)
+
+    enabled = bool(candidate.get("enabled"))
+    rules = account_bot_service.normalize_interaction_rules(candidate.get("rules"))
+    needs_interaction_token = enabled and any(
+        bool(rule.get("enabled", True))
+        and (
+            str(rule.get("trigger_mode") or "payment") in {"keyword", "both"}
+            or bool(rule.get("module_start_keywords"))
+        )
+        for rule in rules
+    )
+    has_token = bool(str(patch.get("interaction_bot_token") or "").strip()) or (
+        bool(current.get("has_interaction_bot_token"))
+        and not bool(patch.get("clear_interaction_bot_token"))
+    )
+    if needs_interaction_token and not has_token:
+        raise ValueError("启用关键词触发规则前必须配置独立的交互 Bot Token")
+    return account_id, patch, current
+
+
+async def save_config_preview(ctx: ToolContext, args: dict[str, Any]) -> PreparedAction:
+    account_id, patch, current = await _prepare_config(ctx, args)
+    interaction_identity: dict[str, Any] | None = None
+    transfer_identity: dict[str, Any] | None = None
+    interaction_token = str(patch.get("interaction_bot_token") or "").strip()
+    transfer_token = str(patch.get("transfer_bot_token") or "").strip()
+    if interaction_token:
+        try:
+            me = await account_bot_service.get_me(interaction_token)
+        except Exception as exc:  # noqa: BLE001
+            raise ValueError(
+                "交互 Bot Token 验证失败："
+                + account_bot_service.sanitize_bot_error(exc, token=interaction_token)
+            ) from exc
+        interaction_identity = {
+            "id": me.get("id"),
+            "username": me.get("username"),
+            "can_read_all_group_messages": me.get("can_read_all_group_messages"),
+        }
+    if transfer_token:
+        try:
+            me = await account_bot_service.get_me(transfer_token)
+        except Exception as exc:  # noqa: BLE001
+            raise ValueError(
+                "转账通知 Bot Token 验证失败："
+                + account_bot_service.sanitize_bot_error(exc, token=transfer_token)
+            ) from exc
+        transfer_identity = {"id": me.get("id"), "username": me.get("username")}
+    preview = {
+        "summary": f"更新账号 #{account_id} 的交互 Bot 基础配置",
+        "account_id": account_id,
+        "changed_keys": sorted(str(key) for key in patch),
+        "current": _interaction_config_view(current),
+        "interaction_token_changed": bool(
+            patch.get("interaction_bot_token") or patch.get("clear_interaction_bot_token")
+        ),
+        "transfer_token_changed": bool(
+            patch.get("transfer_bot_token") or patch.get("clear_transfer_bot_token")
+        ),
+        "warning": "确认后会保存配置、热加载 Worker 并重启交互 Bot polling；Token 不会显示。",
+    }
+    return PreparedAction(
+        arguments={
+            **args,
+            "account_id": account_id,
+            "_interaction_identity": interaction_identity,
+            "_transfer_identity": transfer_identity,
+            "_interaction_token_preverified": bool(interaction_token),
+            "_transfer_token_preverified": bool(transfer_token),
+        },
+        preview=preview,
+    )
+
+
+async def save_config_execute(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
+    account_id, patch, current = await _prepare_config(ctx, args)
+    # service 的兼容更新路径把未提交 rules 视为旧客户端清空；Agent 的补丁语义
+    # 必须显式带回现有规则，避免维护 Token/模板时误删规则。
+    patch_to_save = {**patch, "rules": current.get("rules") or []}
+    if patch.get("interaction_bot_token") and not args.get(
+        "_interaction_token_preverified"
+    ):
+        raise ValueError("交互 Bot Token 尚未通过验证，请重新发起操作")
+    if patch.get("transfer_bot_token") and not args.get("_transfer_token_preverified"):
+        raise ValueError("转账通知 Bot Token 尚未通过验证，请重新发起操作")
+    data = await account_bot_service.update_interaction_bot_config(
+        ctx.db,
+        account_id,
+        patch_to_save,
+        verify_tokens=False,
+        interaction_identity=args.get("_interaction_identity"),
+        transfer_identity=args.get("_transfer_identity"),
+    )
+    return {
+        "account_id": account_id,
+        "changed_keys": sorted(str(key) for key in patch),
+        "config": _interaction_config_view(data),
+        "business_changed": True,
+    }
+
+
 def register(registry: ToolRegistry) -> None:
+    registry.register(
+        ToolSpec(
+            name="interaction.get_config",
+            description="读取交互 Bot、可信通知 Bot、群范围与通知模板等基础配置；Token 仅返回是否已配置。",
+            input_schema={
+                "type": "object",
+                "properties": {"account_id": {"type": "integer"}},
+                "additionalProperties": False,
+            },
+            read_only=True,
+            min_role="viewer",
+            read_handler=get_config,
+        )
+    )
+    registry.register(
+        ToolSpec(
+            name="interaction.save_config",
+            description=(
+                "以 JSON 对象补丁维护交互 Bot Token、可信 Bot、群范围、查询命令与通知模板；规则使用专用工具。"
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "account_id": {"type": "integer"},
+                    "config_json": {
+                        "type": "string",
+                        "description": "配置补丁 JSON 对象字符串，整体加密存入待确认 Action。",
+                    },
+                },
+                "required": ["config_json"],
+                "additionalProperties": False,
+            },
+            read_only=False,
+            min_role="admin",
+            risk="dangerous",
+            preview_handler=save_config_preview,
+            execute_handler=save_config_execute,
+            secret_argument_names=("config_json",),
+            runtime_effects=("reload_config", "interaction_bot_restart"),
+        )
+    )
     registry.register(
         ToolSpec(
             name="interaction.list_rules",

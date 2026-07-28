@@ -55,7 +55,7 @@
 Web 悬浮助手 → Durable Run / 可续接事件 ──┐
                                             ├→ Turn Resolver → Skill Router
 管理 Bot /agent → SystemAgentService ───────┘                 │
-                                                   Runtime（最多 8 个工具）
+                                                   Runtime（最多 16 个工具）
                                                               │
                           原生 LLM SSE → assistant_delta ─────┤
                                                    ToolRegistry → 现有业务 service
@@ -69,7 +69,7 @@ Web 悬浮助手 → Durable Run / 可续接事件 ──┐
 - 业务 service 不依赖 System Agent。
 - 查询必须走工具，禁止根据聊天记忆编造状态。
 - 确认、拒绝和密钥补填共享 Action 行锁；预检期间密钥变化时保持 pending，必须再次确认。
-- 会触发文件、Worker 或系统进程的操作在 Action 提交后执行，失败记录为 `runtime_sync_status=failed` 并允许重试。
+- 会触发文件、Worker 或系统进程的操作在 Action 提交后执行，失败记录为 `runtime_sync_status=failed`；只有幂等副作用允许“重新同步”，测试发送、立即执行、系统更新/重启和插件批量更新等外部副作用必须重新发起并确认。
 
 ### 上下文与记忆
 
@@ -96,7 +96,7 @@ System Agent 使用四层上下文，避免每轮回放全部原始消息：
 - 本地无法判断且存在操作意图时，使用轻量模型路由器，最多选择 3 个领域。
 - 模型路由失败时优先复用结构化记忆中的最近领域，否则安全降级为不带工具的直接回答。
 - 主 Agent 只接收所选领域的工具 Schema，不再每轮固定携带全部已注册工具。
-- 内置领域技能为 `interaction`、`scheduler`、`ai-config`、`plugins`、`diagnostics`、`web-research`。每轮最多加载 2 个技能、暴露 8 个工具；技能只补充处理流程和澄清规则，不能扩大 ToolRoute 权限，也不复制工具 Schema 或业务校验。
+- 内置领域技能覆盖账号、管理 Bot、访问控制、功能/插件配置、风控、规则、定时任务、Provider、指令、插件仓库、系统设置、系统运维、诊断和联网检索等管理面。每轮最多加载 2 个技能、暴露 16 个工具；技能只补充处理流程和澄清规则，不能扩大 ToolRoute 权限，也不复制工具 Schema 或业务校验。
 
 ## 数据表
 
@@ -107,15 +107,16 @@ System Agent 使用四层上下文，避免每轮回放全部原始消息：
 - `system_agent_action`：写操作预览与确认（pending → executing → executed/failed/rejected/expired）
 - `system_agent_user_memory`：跨会话长期偏好（scope_type/scope_id、content、source、enabled）
 
-## 已注册只读工具
+## 代表性已注册工具
 
 | 工具 | 说明 |
 | --- | --- |
 | `system.get_context` | 时区、前缀、开关、版本、会话上下文 |
 | `system.get_health` | DB/Redis/账号/Provider 就绪 |
+| `system.get_resources` | 主机与 TelePilot 进程树的 CPU、内存和磁盘快照 |
 | `accounts.list` / `accounts.get` | 账号列表与详情 |
 | `interaction.list_rules` / `get_rule` / `list_active_sessions` | 交互规则与活跃会话（账号 JSON，非 Rule 表） |
-| `rules.list` / `rules.get` | 通用 Rule（拒绝 `feature_key=interaction`） |
+| `rules.list` / `rules.get` / `rules.dry_run` | 通用 Rule 查询与无副作用试运行（拒绝 `feature_key=interaction`） |
 | `scheduler.list` / `scheduler.get` | 定时任务与 `next_run_at` |
 | `providers.list` | 脱敏 Provider 与 tools 模型 |
 | `commands.list` | 自定义指令与启用账号 |
@@ -126,6 +127,7 @@ System Agent 使用四层上下文，避免每轮回放全部原始消息：
 | `ledger.summary` / `ledger.list` | 台账汇总与明细；「今日」按系统时区日界线 |
 | `accounts.set_paused` / `restart_worker` | 暂停恢复 / 重启 Worker（危险） |
 | `rules.save` / `set_enabled` / `delete` | 通用 Rule 写操作 |
+| `rules.copy` | 把明确规则复制到其它账号并刷新目标 Worker |
 | `interaction.save_rule` / `set_enabled` / `delete_rule` | 交互规则写操作 |
 | `scheduler.save` / `set_enabled` / `delete` / `execute_now` | 定时任务写操作 |
 | `features.set_enabled` | 账号功能/插件启停 |
@@ -133,8 +135,8 @@ System Agent 使用四层上下文，避免每轮回放全部原始消息：
 | `commands.save` / `delete` / `set_enabled_for_accounts` | 自定义指令与账号启用 |
 | `plugins.list_installed` / `get` / `check_updates` | 远程插件包查询 |
 | `plugins.install` / `update` / `uninstall` / `set_package_enabled` | 安装包装卸更新与全局启停（危险项需确认） |
-| `plugin_repos.list` / `list_plugins` / `list_official` | 远程/官方仓库浏览 |
-| `plugin_repos.create` / `delete` / `install_plugin` | 仓库维护与从仓库安装 |
+| `plugin_repos.list` / `list_plugins` / `refresh` / `list_official` | 远程/官方仓库浏览与强制刷新 |
+| `plugin_repos.create` / `update_credential` / `delete` / `install_plugin` / `update_installed` | 仓库凭据维护、安装和批量更新 |
 | `system.check_update` / `apply_update` / `restart` | 系统更新检查/应用/重启 |
 | `routing.list_ai_commands` / `preview` / `set_command_mode` | AI 指令 fixed/auto 路由 |
 
@@ -151,6 +153,17 @@ Web 用内联卡片确认；Bot 用 Inline 按钮（`ab:{aid}:confirm|cancel:age
 `web.read` 可读取用户指定的公开 HTTP/HTTPS URL；每次请求与重定向都会校验域名解析，并把实际连接固定到已验证的公网 IP，拒绝本机、内网、保留地址、用户凭据、非文本内容和超过 1 MiB 的响应。
 在透明代理返回 `198.18.0.0/15` Fake-IP 时，只通过固定 DoH bootstrap IP 并保留正确 Host/SNI 复核真实公网地址，不会直接放行保留网段，也不依赖本机 DNS 先解析 DoH 域名。
 Agent 回答时必须给出来源，并区分搜索摘要、已读取正文、推断与已验证事实。
+
+### Provider 临时凭据与定时 Agent
+
+- 新 Provider 的 Base URL 与 API Key 同轮出现时，只路由到 `providers.probe_and_add`。工具会真实测活并发现模型，成功后才生成“是否添加”的 Action；密钥只在请求内存和 Action 密文中存在。
+- 401/403 才判定 API Key 失效并清除该字段；503、模型不存在、限流或网络故障不会再清 Key，Action 有效期内可直接再次确认。兼容请求头与 API Key 独立保存和补填。
+- `agent_prompt` 定时任务只允许 Web 管理员创建，保存时由服务端写入真实 Web 用户 ID；运行时只按该 ID 创建只读会话，不再选择“第一个用户”。Bot 不能创建、启用或立即执行此类任务。
+
+### 明确安全边界
+
+- Agent 没有项目/插件源码写工具，也没有 Shell、任意 SQL 或任意文件写入能力；插件 Debug 只读取安装状态、脱敏日志和白名单源码，并报告根因、修复文件/行号与验证步骤。
+- Telegram 登录绑定、需要 OTP/二维码的交互向导，以及包含账号 Session 或可复用密钥的敏感整机备份继续在专用 Web 页面完成。Agent 可处理脱敏账号 Config Bundle，但不会把这些交互式凭据流程伪装成普通聊天 Action。
 
 ## NDJSON 事件
 

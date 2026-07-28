@@ -55,6 +55,7 @@ from ..services.interaction.delivery import namespaced_action_save_message_id_ke
 from ..services.llm_dto import LLMProviderDTO
 from ..services.payout_limit import PayoutLimitExceeded
 from ..services.payout_limit import check_and_consume as _check_payout_limit
+from ..services.redactor import redact_value
 from ..settings import settings as app_settings
 from .command import (
     CommandContext,
@@ -1357,18 +1358,20 @@ async def _handle_agent_plugin_tool_command(
             arguments=arguments,
             plugin_context=None,
         )
+        # Worker 是第一道边界：插件结果绝不能以原文进入 IPC。
+        result_body = redact_value(result_body)
         result_ok = True
-    except LookupError as exc:
+    except LookupError:
         result_error = "not_found"
-        result_message = str(exc)
+        result_message = "插件工具未注册"
     except Exception as exc:  # noqa: BLE001
         result_error = type(exc).__name__
-        result_message = str(exc)[:500]
+        result_message = "插件工具执行失败（详情已脱敏）"
         await _log(
             redis,
             account_id,
             "warn",
-            f"agent_plugin_tool 失败 plugin={plugin_key} tool={tool_name}: {result_error}: {result_message}",
+            f"agent_plugin_tool 失败 plugin={plugin_key} tool={tool_name}: {result_error}",
         )
     try:
         await _publish_rpc_payload(

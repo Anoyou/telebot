@@ -80,6 +80,7 @@ async def test_registry_includes_read_and_write_tools() -> None:
         "scheduler.delete",
         "scheduler.execute_now",
         "features.set_enabled",
+        "providers.probe_and_add",
         "providers.save",
         "providers.delete",
         "providers.verify",
@@ -149,3 +150,11 @@ def test_capabilities_marks_unavailable() -> None:
     assert len(caps) == 1
     assert caps[0]["available"] is False
     assert caps[0]["unavailable_reason"]
+
+
+def test_builtin_plugin_repos_capability_is_not_mislabeled_dynamic_plugin() -> None:
+    caps = get_registry().capabilities(channel="web", role="admin")
+    item = next(value for value in caps if value["name"] == "plugin_repos.list")
+
+    assert item["source"] == "builtin"
+    assert item["plugin_key"] is None

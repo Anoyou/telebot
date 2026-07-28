@@ -44,6 +44,7 @@ from .services import (
     remote_plugin_service,
 )
 from .services.login_service import cleanup_expired_loop
+from .services.system_agent.actions import cleanup_expired_action_secrets_loop
 from .settings import settings
 
 logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO))
@@ -234,6 +235,10 @@ async def lifespan(app: FastAPI):
 
     # 1) 启动登录会话清理后台任务（每 60s 扫一次）
     cleanup_task = asyncio.create_task(cleanup_expired_loop())
+    agent_secret_cleanup_task = asyncio.create_task(
+        cleanup_expired_action_secrets_loop(),
+        name="system-agent-secret-cleanup",
+    )
     remote_plugin_update_task = asyncio.create_task(remote_plugin_service.auto_update_check_loop())
 
     retry_tasks: list[asyncio.Task[None]] = []
@@ -322,9 +327,14 @@ async def lifespan(app: FastAPI):
         except Exception:  # noqa: BLE001
             logging.exception("停止 account bot manager 失败")
         cleanup_task.cancel()
+        agent_secret_cleanup_task.cancel()
         remote_plugin_update_task.cancel()
         try:
             await cleanup_task
+        except (asyncio.CancelledError, Exception):  # noqa: BLE001
+            pass
+        try:
+            await agent_secret_cleanup_task
         except (asyncio.CancelledError, Exception):  # noqa: BLE001
             pass
         try:

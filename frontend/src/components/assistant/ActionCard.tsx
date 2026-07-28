@@ -8,6 +8,11 @@ import {
   retrySystemAgentRuntimeSync,
   type SystemAgentAction,
 } from "@/api/systemAgent";
+import {
+  actionSecretInputFields,
+  shouldShowActionSecretInput,
+  shouldShowRuntimeRetry,
+} from "@/components/assistant/actionCardState";
 import { SecretInput } from "@/components/assistant/SecretInput";
 import { Button } from "@/components/ui/button";
 import { getErrMsg } from "@/lib/api";
@@ -26,21 +31,19 @@ export function ActionCard({
   const pending = action.status === "pending";
   const dangerous = action.risk === "dangerous";
   const syncFailed = action.runtime_sync_status === "failed";
+  const syncRetryable = action.runtime_retryable !== false;
+  const showSyncRetry = shouldShowRuntimeRetry(action);
+  const needsSecretInput = shouldShowActionSecretInput(action);
   const previewMode = String(action.preview?.mode || "");
-  const currentProvider = action.preview?.current as { has_api_key?: boolean } | undefined;
-  const needsSecretInput = Boolean(
-    action.secret_fields?.length
-      || action.error_code === "API_KEY_REQUIRED"
-      || action.error_code === "API_KEY_DECRYPT_FAILED"
-      || action.error_code === "API_KEY_REJECTED"
-      || (action.tool_name === "providers.verify" && previewMode === "draft")
-      || (action.tool_name === "providers.save" && previewMode === "create")
-      || (
-        action.tool_name === "providers.save"
-        && previewMode === "update"
-        && currentProvider?.has_api_key === false
-      ),
-  );
+  const verifiedProvider = previewMode === "verified_create"
+    ? action.preview?.provider as {
+        base_url?: string;
+        default_model?: string;
+      } | undefined
+    : undefined;
+  const liveness = previewMode === "verified_create"
+    ? action.preview?.liveness as { latency_ms?: number } | undefined
+    : undefined;
 
   const apply = (next: SystemAgentAction) => {
     setAction(next);
@@ -116,6 +119,25 @@ export function ActionCard({
         <p className="mb-2 text-xs text-muted-foreground">{String(action.preview.note)}</p>
       ) : null}
 
+      {verifiedProvider ? (
+        <dl className="mb-2 grid gap-1 rounded-md border bg-background/70 px-2 py-1.5 text-xs">
+          <div className="flex min-w-0 gap-2">
+            <dt className="shrink-0 text-muted-foreground">Base URL</dt>
+            <dd className="min-w-0 break-all font-mono">{verifiedProvider.base_url || "未提供"}</dd>
+          </div>
+          <div className="flex min-w-0 gap-2">
+            <dt className="shrink-0 text-muted-foreground">模型</dt>
+            <dd className="min-w-0 break-all font-mono">{verifiedProvider.default_model || "未提供"}</dd>
+          </div>
+          {typeof liveness?.latency_ms === "number" ? (
+            <div className="flex gap-2">
+              <dt className="text-muted-foreground">测活延迟</dt>
+              <dd>{liveness.latency_ms} ms</dd>
+            </div>
+          ) : null}
+        </dl>
+      ) : null}
+
       {action.error_message ? (
         <p className="mb-2 text-xs text-destructive">{action.error_message}</p>
       ) : null}
@@ -124,13 +146,14 @@ export function ActionCard({
         <div className="mb-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-2 py-1.5 text-xs">
           配置已保存，运行时同步失败
           {action.runtime_sync_error ? `：${action.runtime_sync_error}` : ""}
+          {!syncRetryable ? "。该操作可能已产生外部副作用，请先检查实际状态；如需再次执行，请重新发起操作。" : ""}
         </div>
       ) : null}
 
       {pending && needsSecretInput ? (
         <SecretInput
           actionId={action.id}
-          fieldNames={action.secret_fields?.length ? action.secret_fields : ["api_key"]}
+          fieldNames={actionSecretInputFields(action)}
           onDone={() => {
             // 与后端 secret-input 一致：补 Key 后清旧预检错误
             const next = {
@@ -165,7 +188,7 @@ export function ActionCard({
             </Button>
           </>
         ) : null}
-        {syncFailed ? (
+        {showSyncRetry ? (
           <Button type="button" size="sm" variant="outline" loading={busyAction === "retry"} disabled={busy} onClick={() => void onRetrySync()}>
             {busyAction !== "retry" ? <RefreshCw className="h-3.5 w-3.5" /> : null}
             重新同步

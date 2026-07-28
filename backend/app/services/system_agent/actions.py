@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import uuid
@@ -12,6 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...crypto import decrypt_str, encrypt_str
+from ...db.base import AsyncSessionLocal
 from ...db.models.system_agent import (
     ACTION_STATUS_EXPIRED,
     ACTION_STATUS_PENDING,
@@ -34,6 +36,11 @@ def _now() -> datetime:
 
 
 def action_to_dict(row: SystemAgentAction) -> dict[str, Any]:
+    # ToolSpec 是运行时事实来源，不把可重试性冗余持久化到 Action；
+    # 老 Action 在工具升级后也会立即获得最新的安全策略。
+    from .registry import get_registry
+
+    spec = get_registry().get(row.tool_name)
     return {
         "id": row.id,
         "session_id": row.session_id,
@@ -54,6 +61,7 @@ def action_to_dict(row: SystemAgentAction) -> dict[str, Any]:
         "error_message": row.error_message,
         "runtime_sync_status": row.runtime_sync_status,
         "runtime_sync_error": row.runtime_sync_error,
+        "runtime_retryable": bool(spec.runtime_retryable) if spec is not None else False,
         "expires_at": row.expires_at.isoformat() if row.expires_at else None,
         "created_at": row.created_at.isoformat() if row.created_at else None,
         "updated_at": row.updated_at.isoformat() if row.updated_at else None,
@@ -123,9 +131,13 @@ async def create_pending_action(
 
     summary_text = (summary or str(safe_preview.get("summary") or spec.description))[:512]
     account_id = (
-        public_args.get("account_id")
-        if public_args.get("account_id") is not None
-        else ctx.account_id
+        ctx.account_id
+        if ctx.channel == "bot"
+        else (
+            public_args.get("account_id")
+            if public_args.get("account_id") is not None
+            else ctx.account_id
+        )
     )
     try:
         account_id_int = int(account_id) if account_id is not None else None
@@ -194,15 +206,23 @@ def bot_owns_action(action: SystemAgentAction, bot_tg_user_id: int | None) -> bo
 def clear_action_secrets(action: SystemAgentAction, secret_names: tuple[str, ...] = ()) -> None:
     """清除密文与 has_* 标记（验证失败 / 过期 / 拒绝共用）。"""
 
-    action.secret_payload_enc = None
-    names = tuple(secret_names or ()) or tuple(action.secret_fields or ())
-    action.secret_fields = None
+    all_names = tuple(action.secret_fields or ())
+    names = tuple(secret_names or ()) or all_names
+    remaining_names = tuple(name for name in all_names if name not in set(names))
+    if remaining_names:
+        payload = decrypt_secret_payload(action.secret_payload_enc)
+        remaining = {name: payload[name] for name in remaining_names if name in payload}
+        action.secret_payload_enc = encrypt_secret_payload(remaining)
+        action.secret_fields = list(remaining_names) if remaining else None
+    else:
+        action.secret_payload_enc = None
+        action.secret_fields = None
     args = dict(action.arguments or {})
     for name in names:
         args.pop(name, None)
         args.pop(f"has_{name}", None)
     for key in list(args.keys()):
-        if str(key).startswith("has_"):
+        if str(key).startswith("has_") and str(key)[4:] not in remaining_names:
             args.pop(key, None)
     action.arguments = args
 
@@ -282,12 +302,29 @@ async def clear_expired_secrets(db: AsyncSession, *, limit: int = 100) -> int:
     return len(rows)
 
 
+async def cleanup_expired_action_secrets_loop() -> None:
+    """独立守护任务：即使无人继续对话，也按 TTL 清除 Action 密文。"""
+
+    while True:
+        try:
+            async with AsyncSessionLocal() as db:
+                while await clear_expired_secrets(db, limit=200):
+                    await db.commit()
+                await db.commit()
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001
+            log.warning("cleanup expired System Agent action secrets failed", exc_info=True)
+        await asyncio.sleep(60)
+
+
 __all__ = [
     "DEFAULT_ACTION_TTL",
     "action_to_dict",
     "bot_owns_action",
     "clear_action_secrets",
     "clear_expired_secrets",
+    "cleanup_expired_action_secrets_loop",
     "create_pending_action",
     "decrypt_secret_payload",
     "encrypt_secret_payload",
