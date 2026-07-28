@@ -28,6 +28,7 @@ TOKEN = os.getenv("UPDATER_TOKEN", "").strip()
 MAX_LOG_LINES = 240
 MAX_CONSOLE_LOG_LINES = 1000
 CONSOLE_LOG_COMMAND_TIMEOUT_SECONDS = 5
+RESOURCE_COMMAND_TIMEOUT_SECONDS = 5
 CONSOLE_LOG_SERVICES = ("web", "frontend", "postgres", "redis", "updater")
 PROGRESS_PREFIX = "@@TELEPILOT_PROGRESS@@"
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
@@ -307,31 +308,35 @@ def _console_lines(out: str, keyword: str | None) -> list[str]:
     return lines
 
 
-def _tail_labeled_container_logs(
-    services: list[str], tail: int, keyword: str | None
-) -> dict[str, Any]:
+def _discover_project_containers(
+    *,
+    include_stopped: bool,
+) -> tuple[str | None, list[dict[str, str]], str | None]:
+    """Discover this TelePilot Compose project's labeled containers.
+
+    The updater talks to the host Docker daemon, so Compose's working directory
+    can differ from ``WORKSPACE``. Prefer the exact host path, then the inferred
+    project name, then the only Compose project containing a ``web`` service.
+    """
+
     format_arg = (
         '{{.ID}}|{{.Names}}|{{.Label "com.docker.compose.project"}}|'
         '{{.Label "com.docker.compose.service"}}|{{.Label "com.docker.compose.project.working_dir"}}'
     )
-    out, err, rc = _run(
+    args = ["docker", "ps"]
+    if include_stopped:
+        args.append("-a")
+    args.extend(
         [
-            "docker",
-            "ps",
-            "-a",
             "--filter",
             "label=com.docker.compose.service",
             "--format",
             format_arg,
-        ],
-        timeout=CONSOLE_LOG_COMMAND_TIMEOUT_SECONDS,
+        ]
     )
+    out, err, rc = _run(args, timeout=RESOURCE_COMMAND_TIMEOUT_SECONDS)
     if rc != 0:
-        return {
-            "ok": False,
-            "error": err or out or "无法枚举 Compose 容器",
-            "lines": [],
-        }
+        return None, [], err or out or "无法枚举 Compose 容器"
 
     containers: list[dict[str, str]] = []
     for line in out.splitlines():
@@ -341,7 +346,7 @@ def _tail_labeled_container_logs(
         container_id, name, project, service, working_dir = (
             part.strip() for part in parts
         )
-        if container_id and project and service in CONSOLE_LOG_SERVICES:
+        if container_id and project and service:
             containers.append(
                 {
                     "id": container_id,
@@ -352,11 +357,7 @@ def _tail_labeled_container_logs(
                 }
             )
     if not containers:
-        return {
-            "ok": False,
-            "error": "未发现带 Compose 服务标签的 TelePilot 容器",
-            "lines": [],
-        }
+        return None, [], "未发现带 Compose 服务标签的 TelePilot 容器"
 
     projects: dict[str, list[dict[str, str]]] = {}
     for item in containers:
@@ -380,16 +381,23 @@ def _tail_labeled_container_logs(
         }
         if len(web_projects) != 1:
             names = ", ".join(sorted(web_projects or projects))
-            return {
-                "ok": False,
-                "error": f"无法唯一识别 TelePilot Compose 项目，候选：{names}",
-                "lines": [],
-            }
+            return None, [], f"无法唯一识别 TelePilot Compose 项目，候选：{names}"
         selected_project = next(iter(web_projects))
+    return selected_project, projects[selected_project], None
+
+
+def _tail_labeled_container_logs(
+    services: list[str], tail: int, keyword: str | None
+) -> dict[str, Any]:
+    selected_project, project_containers, discovery_error = _discover_project_containers(
+        include_stopped=True
+    )
+    if not selected_project or not project_containers:
+        return {"ok": False, "error": discovery_error or "未发现项目容器", "lines": []}
 
     requested = set(services or CONSOLE_LOG_SERVICES)
     selected = [
-        item for item in projects[selected_project] if item["service"] in requested
+        item for item in project_containers if item["service"] in requested
     ]
     collected: list[str] = []
     failed: list[str] = []
@@ -415,6 +423,89 @@ def _tail_labeled_container_logs(
         "tail": tail,
         "lines": lines[-MAX_CONSOLE_LOG_LINES:],
         "error": "; ".join(failed) if failed else None,
+    }
+
+
+def _resource_snapshot() -> dict[str, Any]:
+    """Return Docker stats for every running service in this Compose project."""
+
+    project, containers, discovery_error = _discover_project_containers(
+        include_stopped=False
+    )
+    if not project or not containers:
+        return {
+            "ok": False,
+            "source": "docker_stats",
+            "project": project,
+            "containers": [],
+            "error": discovery_error or "未发现运行中的 TelePilot 容器",
+        }
+
+    ids = [item["id"] for item in containers]
+    out, err, rc = _run(
+        ["docker", "stats", "--no-stream", "--format", "{{json .}}", *ids],
+        timeout=RESOURCE_COMMAND_TIMEOUT_SECONDS,
+    )
+    if rc != 0:
+        return {
+            "ok": False,
+            "source": "docker_stats",
+            "project": project,
+            "containers": [],
+            "error": err or out or f"docker stats 退出码 {rc}",
+        }
+
+    by_key: dict[str, dict[str, Any]] = {}
+    for line in out.splitlines():
+        try:
+            row = json.loads(line)
+        except Exception:
+            continue
+        if not isinstance(row, dict):
+            continue
+        for key in (row.get("ID"), row.get("Container"), row.get("Name")):
+            normalized = str(key or "").strip()
+            if normalized:
+                by_key[normalized] = row
+
+    resources: list[dict[str, Any]] = []
+    for item in containers:
+        keys = (item["id"], item["id"][:12], item["name"])
+        row = next((by_key[key] for key in keys if key in by_key), None)
+        if row is None:
+            continue
+        try:
+            pids = max(0, int(str(row.get("PIDs") or "0").strip()))
+        except ValueError:
+            pids = 0
+        resources.append(
+            {
+                "id": item["id"],
+                "name": item["name"],
+                "service": item["service"],
+                "cpu_percent": row.get("CPUPerc"),
+                "memory_usage": row.get("MemUsage"),
+                "memory_percent": row.get("MemPerc"),
+                "pids": pids,
+            }
+        )
+
+    if len(resources) != len(containers):
+        return {
+            "ok": False,
+            "source": "docker_stats",
+            "project": project,
+            "containers": [],
+            "error": "部分 TelePilot 容器缺少 Docker stats，已拒绝返回不完整总量",
+        }
+    order = {service: index for index, service in enumerate(CONSOLE_LOG_SERVICES)}
+    resources.sort(key=lambda item: order.get(str(item.get("service")), len(order)))
+    return {
+        "ok": True,
+        "source": "docker_stats",
+        "project": project,
+        "sampled_at": int(time.time()),
+        "containers": resources,
     }
 
 
@@ -812,6 +903,13 @@ class Handler(BaseHTTPRequestHandler):
             result = _tail_console_logs(service, tail, keyword)
             _json_response(self, 200 if result.get("ok") else 400, result)
             return
+        if path == "/resources":
+            if not self._authorized():
+                _json_response(self, 403, {"ok": False, "error": "forbidden"})
+                return
+            result = _resource_snapshot()
+            _json_response(self, 200 if result.get("ok") else 400, result)
+            return
         if path.startswith("/jobs/"):
             if not self._authorized():
                 _json_response(self, 403, {"ok": False, "error": "forbidden"})
@@ -883,7 +981,8 @@ class Handler(BaseHTTPRequestHandler):
         status_match = re.search(r'HTTP/[^\"]+"\s+(\d{3})\b', message)
         status = int(status_match.group(1)) if status_match else 0
         internal_poll = (
-            path == "/health" or path == "/console-logs" or path.startswith("/jobs/")
+            path in {"/health", "/console-logs", "/resources"}
+            or path.startswith("/jobs/")
         )
         if internal_poll and message.startswith('"GET ') and 200 <= status < 300:
             return

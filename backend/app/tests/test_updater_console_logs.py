@@ -58,6 +58,49 @@ def test_console_logs_respects_explicit_compose_project_name(monkeypatch) -> Non
     assert commands[0][:4] == ["docker", "compose", "-p", "custom_stack"]
 
 
+def test_resource_snapshot_includes_all_running_project_services(monkeypatch) -> None:
+    updater = _load_updater_module()
+    monkeypatch.setattr(updater, "HOST_PROJECT_DIR", Path("/TelePilot"))
+
+    services = ("postgres", "redis", "web", "updater", "frontend", "plugin-runner")
+    ps_rows = "\n".join(
+        f"id-{service}|telepilot-{service}-1|telepilot|{service}|/TelePilot"
+        for service in services
+    )
+    stats_rows = "\n".join(
+        "{" + (
+            f'"ID":"id-{service}","Name":"telepilot-{service}-1",'
+            f'"CPUPerc":"{index + 1}.0%","MemUsage":"{(index + 1) * 10}MiB / 512MiB",'
+            f'"MemPerc":"{index + 1}.5%","PIDs":"{index + 2}"'
+        ) + "}"
+        for index, service in enumerate(services)
+    )
+
+    def fake_run(args, **_kwargs):  # noqa: ANN001
+        if args[:2] == ["docker", "ps"]:
+            return ps_rows, "", 0
+        if args[:3] == ["docker", "stats", "--no-stream"]:
+            return stats_rows, "", 0
+        raise AssertionError(args)
+
+    monkeypatch.setattr(updater, "_run", fake_run)
+
+    result = updater._resource_snapshot()
+
+    assert result["ok"] is True
+    assert result["project"] == "telepilot"
+    assert {item["service"] for item in result["containers"]} == set(services)
+    assert next(item for item in result["containers"] if item["service"] == "web") == {
+        "id": "id-web",
+        "name": "telepilot-web-1",
+        "service": "web",
+        "cpu_percent": "3.0%",
+        "memory_usage": "30MiB / 512MiB",
+        "memory_percent": "3.5%",
+        "pids": 4,
+    }
+
+
 def test_apply_job_env_uses_host_compose_project_name(monkeypatch) -> None:
     updater = _load_updater_module()
     monkeypatch.setattr(updater, "HOST_PROJECT_DIR", Path("/opt/TelePilot"))
@@ -316,6 +359,8 @@ def test_updater_handler_silences_successful_internal_polling() -> None:
         updater.Handler.log_message(handler, '"GET /jobs/890e65215801 HTTP/1.1" %s -', "200")
         handler.path = "/console-logs?service=all&tail=300"
         updater.Handler.log_message(handler, '"GET /console-logs?service=all&tail=300 HTTP/1.1" %s -', "200")
+        handler.path = "/resources"
+        updater.Handler.log_message(handler, '"GET /resources HTTP/1.1" %s -', "200")
         mocked_print.assert_not_called()
 
         handler.path = "/jobs/890e65215801"

@@ -568,7 +568,7 @@ function ResourceUsageCard({
         <SectionHeader
           icon={Activity}
           title="资源占用"
-          description="上方是 TelePilot 应用占用；下方是宿主机/服务器整体资源。"
+          description="上方归集 TelePilot 全部进程与项目容器；下方是宿主机/服务器整体资源。"
           meta={data?.host.sampled_at ? (
             <span className="shrink-0 text-xs text-muted-foreground">
               自动每 30 秒刷新
@@ -641,10 +641,15 @@ function ResourceSamplingPanel({ data }: { data: ResourceDashboard }) {
   const appUptimeLabel = formatUptime(data.app_uptime_seconds) ?? "-";
 
   return (
-    <div className="grid gap-3 md:grid-cols-3" data-resource-sampling-panel>
+    <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4" data-resource-sampling-panel>
       <ResourceMeta label="资源采样" value={sampledLabel} hint="自动每 30 秒刷新" />
       <ResourceMeta label="宿主机运行时间" value={hostUptimeLabel} hint="服务器开机后累计" />
       <ResourceMeta label="项目运行时间" value={appUptimeLabel} hint="当前 TelePilot 后端进程" />
+      <ResourceMeta
+        label="采集范围"
+        value={resourceCoverageLabel(data)}
+        hint={resourceCoverageHint(data)}
+      />
     </div>
   );
 }
@@ -738,7 +743,9 @@ function ProcessMemoryCard({ data }: { data: ResourceDashboard }) {
         <div className="border-b px-4 py-3">
           <div className="text-base font-semibold">应用内存明细</div>
           <div className="mt-1 text-sm text-muted-foreground">
-            主进程和 worker 优先显示 USS；数据库、Redis、前端来自 Docker stats。
+            {data.project_total_basis === "compose_containers"
+              ? "项目总量来自全部 Compose 容器；进程行用于内部归因，不再重复相加。"
+              : "主进程和 worker 优先显示 USS；外部项目容器来自 Docker stats。"}
           </div>
         </div>
         <div className="space-y-2 p-4">
@@ -869,8 +876,8 @@ function buildProcessMemoryRows(data: ResourceDashboard): ProcessMemoryRow[] {
     })),
     ...(data.other_processes ?? []).map((proc, index) => ({
       key: `child-${proc.pid ?? index}`,
-      label: "子进程",
-      meta: `pid=${proc.pid ?? "-"}`,
+      label: proc.role || "后台任务子进程",
+      meta: [proc.name, `pid=${proc.pid ?? "-"}`].filter(Boolean).join(" · "),
       cpu: proc.cpu_percent,
       memoryMb: processMemoryMb(proc),
       basis: processMemoryBasis(proc),
@@ -878,7 +885,9 @@ function buildProcessMemoryRows(data: ResourceDashboard): ProcessMemoryRow[] {
     ...(data.containers ?? []).map((container, index) => ({
       key: `container-${container.id ?? container.name ?? index}`,
       label: containerLabel(container),
-      meta: container.name,
+      meta: [container.name, typeof container.pids === "number" ? `${container.pids} PID` : null]
+        .filter(Boolean)
+        .join(" · "),
       cpu: container.cpu_percent,
       memoryMb: container.memory_mb,
       basis:
@@ -894,11 +903,15 @@ function buildProcessMemoryRows(data: ResourceDashboard): ProcessMemoryRow[] {
 
 function containerLabel(container: ContainerResource) {
   const service = (container.service || "").toLowerCase();
+  if (service === "web" || service === "backend") return "Web 后端容器";
   if (service === "postgres") return "PostgreSQL 容器";
   if (service === "redis") return "Redis 容器";
+  if (service === "updater") return "Updater 更新器容器";
   if (service === "frontend") return "前端容器";
+  if (container.name.toLowerCase().includes("web")) return "Web 后端容器";
   if (container.name.toLowerCase().includes("postgres")) return "PostgreSQL 容器";
   if (container.name.toLowerCase().includes("redis")) return "Redis 容器";
+  if (container.name.toLowerCase().includes("updater")) return "Updater 更新器容器";
   if (container.name.toLowerCase().includes("frontend")) return "前端容器";
   return "项目容器";
 }
@@ -906,6 +919,9 @@ function containerLabel(container: ContainerResource) {
 function processScopeHint(data: ResourceDashboard) {
   const extra = data.other_processes?.length ?? 0;
   const containers = data.containers?.length ?? 0;
+  if (data.project_total_basis === "compose_containers" && containers > 0) {
+    return `${containers} 个运行中的 TelePilot 容器；进程明细仅用于内部归因`;
+  }
   const parts = ["Web 主进程", "账号 worker"];
   if (extra > 0) parts.push(`${extra} 个子进程`);
   if (containers > 0) parts.push(`${containers} 个项目容器`);
@@ -930,13 +946,26 @@ function projectMemoryHint(
       ? "含项目容器，服务器总内存占比未知"
       : "服务器总内存占比未知";
   }
-  const basis =
-    containerCount > 0
-      ? "进程独占内存 + 项目容器内存"
+  const basis = data.project_total_basis === "compose_containers"
+    ? "完整项目容器内存"
+    : data.project_total_basis === "processes_plus_containers"
+      ? "进程独占内存 + 外部项目容器内存"
       : data.project_total.uss_mb != null
-        ? "独占内存"
-        : "RSS";
+        ? "进程独占内存"
+        : "进程 RSS";
   return `${basis}，约占服务器总内存 ${((memoryMb / totalMb) * 100).toFixed(1)}%`;
+}
+
+function resourceCoverageLabel(data: ResourceDashboard): string {
+  if (data.project_total_basis === "compose_containers") return "全项目容器";
+  if (data.project_total_basis === "processes_plus_containers") return "进程 + 外部容器";
+  return "仅应用进程";
+}
+
+function resourceCoverageHint(data: ResourceDashboard): string {
+  if (data.container_source === "updater") return "由内部 updater 安全读取 Docker stats";
+  if (data.container_source === "local_docker") return "由当前主机 Docker stats 读取";
+  return data.container_probe_error || "当前运行形态没有项目容器";
 }
 
 function saneMemoryTotalMb(totalMb: number | null | undefined): number | null {

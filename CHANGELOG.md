@@ -25,6 +25,26 @@
 
 ## [Unreleased]
 
+## [0.86.0-beta.2] - 2026-07-29 · patch（补丁版本预发布） · 资源监控完整化、Trace 清理与模型品牌标识
+
+### Added
+
+- 插件卡片在移动端编辑按钮左侧常驻展示已启用/未启用标签，折叠态也能一眼看到开关状态。
+- 插件列表栅格改为移动端每行 2 卡，桌面端按约 320px 最小宽度自适应列数。
+- 系统助手本轮模型选择器与运行元信息按模型所属公司自适应展示 logo（DeepSeek / OpenAI / Anthropic / Google 等），原生 select 改为可显示图标的下拉。
+
+### Fixed
+
+- 修复概览页“应用总内存”在生产容器中因 Web 无 Docker CLI 而漏掉 PostgreSQL、Redis、前端和 updater 的问题；现在由持有 Docker socket 的内部 updater 安全采集全部 TelePilot Compose 容器，完整容器快照直接作为项目总量，避免 Web 进程重复计算，本地开发仍保留进程与外部容器合并口径。
+- 资源详情为派生进程补充不含命令行参数的安全用途标签，并明确展示当前采集范围、容器来源、全部账号 worker、全部项目容器和 PID 数量，不再只显示含义不明的“子进程”或截断前八项。
+- 修复 event_trace 保留清理会把超期 `payload_snapshot` 全表 ORM 装进 Web 主进程、触发接近 1GiB cgroup 高水位的问题：清理改为 keyset 分批 SQL/小批量处理，并与 runtime_log 消费路径解耦为独立周期任务；`runtime_log_retention_days=0` 时不再误跳过 trace 清理。
+
+### Tests
+
+- 补充模型品牌识别（DeepSeek / OpenAI / Anthropic / Qwen 等）与 Provider 名回退的回归测试。
+- 补充 updater 五服务资源快照、容器总量去重、生产环境 updater 优先、子进程命令行脱敏，以及桌面/移动端完整资源明细回归测试。
+- 补充 event_trace 分批清理编排、native_raw/payload 批大小上限，以及 supervisor 在关闭 runtime_log 保留时仍执行 trace 清理的回归测试。
+
 ## [0.86.0-beta.1] - 2026-07-28 · minor（次版本预发布） · Agent 全域工作流与安全执行
 
 ### Added

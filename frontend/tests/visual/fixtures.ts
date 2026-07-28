@@ -18,6 +18,8 @@ const emptyResourceDashboard = {
   containers: [],
   container_total: { cpu_percent: 0, rss_mb: 0, uss_mb: 0 },
   container_probe_error: null,
+  container_source: null,
+  project_total_basis: "processes",
   workers: [],
   worker_alive: 0,
   worker_desired_running: 0,

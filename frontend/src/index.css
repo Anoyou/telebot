@@ -543,18 +543,71 @@
     box-shadow: var(--shadow-sm);
   }
 
-  /* iOS 26 悬浮胶囊 Tab Bar：半透明液态玻璃material（背景模糊 + 提饱和），
-     发丝描边 + 柔和投影，比旧版更高更松，触控目标更大。 */
+  /* 移动端悬浮胶囊 Tab Bar：液态玻璃。
+     Apple 平台优先真实 backdrop material；非 Apple 用多层渐变模拟折射与高光。 */
   .liquid-bottom-nav {
-    border: 1px solid hsl(var(--foreground) / 0.08);
+    position: relative;
+    isolation: isolate;
+    overflow: hidden;
+    border: 1px solid hsl(var(--foreground) / 0.1);
     border-radius: 999px;
-    background: hsl(var(--card) / 0.32);
-    -webkit-backdrop-filter: blur(28px) saturate(1.7);
-    backdrop-filter: blur(28px) saturate(1.7);
+    background:
+      linear-gradient(180deg, hsl(0 0% 100% / 0.16), transparent 46%),
+      linear-gradient(135deg, hsl(var(--primary) / 0.08), transparent 55%),
+      hsl(var(--card) / 0.34);
+    -webkit-backdrop-filter: blur(32px) saturate(1.75);
+    backdrop-filter: blur(32px) saturate(1.75);
     box-shadow:
-      0 12px 30px hsl(0 0% 0% / 0.16),
-      0 2px 9px hsl(0 0% 0% / 0.09),
-      inset 0 1px 0 hsl(0 0% 100% / 0.18);
+      0 14px 34px hsl(0 0% 0% / 0.18),
+      0 2px 10px hsl(0 0% 0% / 0.1),
+      inset 0 1px 0 hsl(0 0% 100% / 0.22),
+      inset 0 -1px 0 hsl(0 0% 100% / 0.06);
+  }
+
+  .liquid-bottom-nav::before {
+    content: "";
+    pointer-events: none;
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    background:
+      radial-gradient(120% 80% at 18% -10%, hsl(0 0% 100% / 0.28), transparent 42%),
+      radial-gradient(90% 60% at 88% 120%, hsl(var(--primary) / 0.12), transparent 50%);
+    opacity: 0.9;
+  }
+
+  .liquid-bottom-nav > * {
+    position: relative;
+    z-index: 1;
+  }
+
+  /* iOS / iPadOS Safari：更透、更糊，贴近系统 Liquid Glass material */
+  @supports (-webkit-touch-callout: none) {
+    .liquid-bottom-nav {
+      background:
+        linear-gradient(180deg, hsl(0 0% 100% / 0.2), transparent 40%),
+        hsl(var(--card) / 0.2);
+      -webkit-backdrop-filter: blur(42px) saturate(2.05) brightness(1.04);
+      backdrop-filter: blur(42px) saturate(2.05) brightness(1.04);
+      border-color: hsl(var(--foreground) / 0.08);
+      box-shadow:
+        0 16px 36px hsl(0 0% 0% / 0.2),
+        0 1px 0 hsl(0 0% 100% / 0.14) inset,
+        0 -1px 0 hsl(0 0% 0% / 0.08) inset;
+    }
+  }
+
+  /* 非 Apple 或弱 backdrop：加厚模拟玻璃层，避免发灰发脏 */
+  @supports not (-webkit-touch-callout: none) {
+    .liquid-bottom-nav {
+      background:
+        linear-gradient(165deg, hsl(0 0% 100% / 0.18), transparent 36%),
+        linear-gradient(20deg, hsl(var(--primary) / 0.1), transparent 48%),
+        linear-gradient(180deg, hsl(var(--card) / 0.62), hsl(var(--card) / 0.42)),
+        hsl(var(--muted) / 0.28);
+      -webkit-backdrop-filter: blur(28px) saturate(1.55);
+      backdrop-filter: blur(28px) saturate(1.55);
+    }
   }
 
   .mobile-scroll-edge {
@@ -628,7 +681,9 @@
   /* 玻璃模糊不可用时（旧 WebView）退回近实心，避免文字透底看不清 */
   @supports not ((-webkit-backdrop-filter: blur(1px)) or (backdrop-filter: blur(1px))) {
     .liquid-bottom-nav {
-      background: hsl(var(--card) / 0.98);
+      background:
+        linear-gradient(180deg, hsl(0 0% 100% / 0.1), transparent 40%),
+        hsl(var(--card) / 0.96);
     }
 
     @media (max-width: 767px) {

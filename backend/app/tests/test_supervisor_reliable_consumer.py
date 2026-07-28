@@ -359,3 +359,106 @@ async def test_runtime_log_row_normalizes_numeric_level_to_debug(monkeypatch: py
     row = await supervisor._build_runtime_log_row_with_retention(payload)
     assert row is not None
     assert row.level == "debug"
+
+
+@pytest.mark.asyncio
+async def test_run_retention_cleanup_still_cleans_traces_when_runtime_log_retention_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """runtime_log_retention_days=0 must not skip event_trace cleanup."""
+
+    calls: dict[str, object] = {"runtime_deleted": False, "trace_kwargs": None}
+
+    class _Result:
+        rowcount = 3
+
+    class _Session:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def execute(self, *_args, **_kwargs):
+            calls["runtime_deleted"] = True
+            return _Result()
+
+        async def commit(self):
+            return None
+
+    async def _fake_cfg():
+        return {
+            "runtime_log_retention_days": 0,
+            "trace_retention_days": 30,
+            "trace_payload_snapshot_retention_days": 7,
+            "native_raw_retention_days": 1,
+        }
+
+    async def _fake_cleanup_event_traces(**kwargs):
+        calls["trace_kwargs"] = kwargs
+        return {
+            "deleted_traces": 4,
+            "cleared_payload_snapshots": 9,
+            "cleared_native_raw": 2,
+        }
+
+    monkeypatch.setattr(supervisor, "_get_log_retention_config", _fake_cfg)
+    monkeypatch.setattr(supervisor, "AsyncSessionLocal", lambda: _Session())
+    monkeypatch.setattr(supervisor, "cleanup_event_traces", _fake_cleanup_event_traces)
+
+    stats = await supervisor._run_retention_cleanup_once()
+
+    assert calls["runtime_deleted"] is False
+    assert calls["trace_kwargs"] == {
+        "trace_retention_days": 30,
+        "payload_snapshot_retention_days": 7,
+        "native_raw_retention_days": 1,
+    }
+    assert stats["deleted_runtime_logs"] == 0
+    assert stats["deleted_traces"] == 4
+    assert stats["cleared_payload_snapshots"] == 9
+    assert stats["cleared_native_raw"] == 2
+
+
+@pytest.mark.asyncio
+async def test_run_retention_cleanup_deletes_runtime_logs_when_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Result:
+        rowcount = 5
+
+    class _Session:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def execute(self, *_args, **_kwargs):
+            return _Result()
+
+        async def commit(self):
+            return None
+
+    async def _fake_cfg():
+        return {
+            "runtime_log_retention_days": 30,
+            "trace_retention_days": 30,
+            "trace_payload_snapshot_retention_days": 7,
+            "native_raw_retention_days": 1,
+        }
+
+    async def _fake_cleanup_event_traces(**_kwargs):
+        return {
+            "deleted_traces": 0,
+            "cleared_payload_snapshots": 0,
+            "cleared_native_raw": 0,
+        }
+
+    monkeypatch.setattr(supervisor, "_get_log_retention_config", _fake_cfg)
+    monkeypatch.setattr(supervisor, "AsyncSessionLocal", lambda: _Session())
+    monkeypatch.setattr(supervisor, "cleanup_event_traces", _fake_cleanup_event_traces)
+
+    stats = await supervisor._run_retention_cleanup_once()
+    assert stats["deleted_runtime_logs"] == 5
+

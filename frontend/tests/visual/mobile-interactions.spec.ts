@@ -1125,6 +1125,81 @@ test.describe("移动端交互细节", () => {
     fixture.assertClean();
   });
 
+  test("资源详情归集完整项目容器并解释后台子进程", async ({ page }, testInfo) => {
+    test.skip(testInfo.project.name === "tablet", "覆盖桌面和移动端视口");
+    const fixture = await installApiFixture(page);
+    await page.route("**/api/system/resource-dashboard", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          host: {
+            cpu_percent: 12,
+            memory_used_percent: 40,
+            memory_total_mb: 1024,
+            disk_used_percent: 25,
+            disk_free_gb: 20,
+            sampled_at: 1_784_635_200,
+            uptime_seconds: 3_600,
+          },
+          main_process: { pid: 10, cpu_percent: 2, rss_mb: 128, uss_mb: 96 },
+          project_total: { cpu_percent: 5.8, rss_mb: 320, uss_mb: 320 },
+          app_uptime_seconds: 600,
+          other_processes: [{
+            pid: 12,
+            name: "python3",
+            role: "多进程资源跟踪器",
+            cpu_percent: 0,
+            rss_mb: 4,
+            uss_mb: 2,
+          }],
+          workers: [{
+            account_id: 1,
+            pid: 11,
+            alive: true,
+            desired: "running",
+            fail_count: 0,
+            cpu_percent: 1,
+            rss_mb: 64,
+            uss_mb: 48,
+          }],
+          containers: [
+            { id: "web", name: "telepilot-web-1", service: "web", cpu_percent: 4, memory_mb: 200, memory_limit_mb: 512, memory_percent: 39, pids: 4 },
+            { id: "postgres", name: "telepilot-postgres-1", service: "postgres", cpu_percent: 1, memory_mb: 80, memory_limit_mb: 160, memory_percent: 50, pids: 7 },
+            { id: "redis", name: "telepilot-redis-1", service: "redis", cpu_percent: 0.5, memory_mb: 20, memory_limit_mb: 48, memory_percent: 42, pids: 1 },
+            { id: "updater", name: "telepilot-updater-1", service: "updater", cpu_percent: 0.1, memory_mb: 12, memory_limit_mb: 128, memory_percent: 9.4, pids: 1 },
+            { id: "frontend", name: "telepilot-frontend-1", service: "frontend", cpu_percent: 0.2, memory_mb: 8, memory_limit_mb: 32, memory_percent: 25, pids: 2 },
+          ],
+          container_total: { cpu_percent: 5.8, rss_mb: 320, uss_mb: null },
+          container_probe_error: null,
+          container_source: "updater",
+          project_total_basis: "compose_containers",
+          worker_alive: 1,
+          worker_desired_running: 1,
+          logs: { last_5m_total: 0, last_5m_error: 0, last_5m_warn: 0 },
+        }),
+      });
+    });
+
+    await page.goto("/overview", { waitUntil: "networkidle" });
+    const card = page.locator("[data-resource-usage-card]");
+    await expect(card.getByText("全项目容器", { exact: true })).toBeVisible();
+    await expect(card.getByText(/完整项目容器内存/)).toBeVisible();
+    await card.getByRole("button", { name: "详情" }).click();
+    for (const label of [
+      "Web 后端容器",
+      "PostgreSQL 容器",
+      "Redis 容器",
+      "Updater 更新器容器",
+      "前端容器",
+      "多进程资源跟踪器",
+    ]) {
+      await expect(page.getByText(label, { exact: true })).toBeVisible();
+    }
+    await expect(page.getByText(/^telepilot-web-1 · 4 PID · CPU/)).toBeVisible();
+    fixture.assertClean();
+  });
+
   test("近期调用成功与失败指标可以筛选记录", async ({ page }, testInfo) => {
     test.skip(testInfo.project.name !== "mobile", "仅移动视口");
     const fixture = await installApiFixture(page);

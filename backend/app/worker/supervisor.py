@@ -74,7 +74,6 @@ log = logging.getLogger(__name__)
 _WORKER_STRIPPED_ENV_KEYS = ("TELEPILOT_UPDATER_TOKEN", "UPDATER_TOKEN")
 
 _LOG_RETENTION_CACHE: tuple[float, dict[str, int]] = (0.0, {})
-_LAST_RUNTIME_LOG_CLEANUP_AT = 0.0
 _RUNTIME_LOG_CLEANUP_INTERVAL = 3600.0
 
 
@@ -222,26 +221,37 @@ def _runtime_log_level_allowed(level: str, min_level: str) -> bool:
 
 
 async def _cleanup_runtime_logs_if_due() -> None:
-    """按 log_retention 定期清理过期运行日志和 Trace；0 天表示不自动删除。"""
+    """兼容入口：执行一次保留清理（由独立周期任务调用）。"""
 
-    global _LAST_RUNTIME_LOG_CLEANUP_AT
-    now = time.monotonic()
-    if now - _LAST_RUNTIME_LOG_CLEANUP_AT < _RUNTIME_LOG_CLEANUP_INTERVAL:
-        return
-    _LAST_RUNTIME_LOG_CLEANUP_AT = now
+    await _run_retention_cleanup_once()
+
+
+async def _run_retention_cleanup_once() -> dict[str, int]:
+    """按 log_retention 清理过期 runtime_log 与 event_trace。
+
+    - runtime_log / trace 保留天数互相独立；任一为 0 只跳过对应清理。
+    - 不再挂在 runtime_log 消费成功路径上，避免“没日志就不清理 / 有日志就尖峰”。
+    """
+
     cfg = await _get_log_retention_config()
-    days = int(cfg.get("runtime_log_retention_days", 30) or 0)
-    if days <= 0:
-        return
-    cutoff = datetime.now(UTC) - timedelta(days=days)
+    deleted_runtime_logs = 0
+    runtime_days = int(cfg.get("runtime_log_retention_days", 30) or 0)
+    if runtime_days > 0:
+        cutoff = datetime.now(UTC) - timedelta(days=runtime_days)
+        try:
+            async with AsyncSessionLocal() as db:
+                result = await db.execute(delete(RuntimeLog).where(RuntimeLog.ts < cutoff))
+                await db.commit()
+                deleted_runtime_logs = int(result.rowcount or 0)
+        except Exception:
+            log.exception("清理过期 runtime_log 失败")
+    trace_stats = {
+        "deleted_traces": 0,
+        "cleared_payload_snapshots": 0,
+        "cleared_native_raw": 0,
+    }
     try:
-        async with AsyncSessionLocal() as db:
-            await db.execute(delete(RuntimeLog).where(RuntimeLog.ts < cutoff))
-            await db.commit()
-    except Exception:
-        log.debug("清理过期 runtime_log 失败", exc_info=True)
-    try:
-        await cleanup_event_traces(
+        trace_stats = await cleanup_event_traces(
             trace_retention_days=int(cfg.get("trace_retention_days", 30) or 0),
             payload_snapshot_retention_days=int(
                 cfg.get("trace_payload_snapshot_retention_days", 7) or 0
@@ -249,7 +259,38 @@ async def _cleanup_runtime_logs_if_due() -> None:
             native_raw_retention_days=int(cfg.get("native_raw_retention_days", 1) or 0),
         )
     except Exception:
-        log.debug("清理过期 event_trace 失败", exc_info=True)
+        log.exception("清理过期 event_trace 失败")
+    stats = {
+        "deleted_runtime_logs": deleted_runtime_logs,
+        **trace_stats,
+    }
+    log.info(
+        "retention cleanup finished deleted_runtime_logs=%s deleted_traces=%s "
+        "cleared_payload_snapshots=%s cleared_native_raw=%s",
+        stats.get("deleted_runtime_logs", 0),
+        stats.get("deleted_traces", 0),
+        stats.get("cleared_payload_snapshots", 0),
+        stats.get("cleared_native_raw", 0),
+    )
+    return stats
+
+
+async def _retention_cleanup_loop() -> None:
+    """独立周期清理：与 runtime_log 流量解耦。"""
+
+    # 启动后稍等，避免和 alembic/supervisor 冷启动抢同一波连接。
+    await asyncio.sleep(30)
+    while True:
+        try:
+            await _run_retention_cleanup_once()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("retention cleanup loop iteration failed")
+        try:
+            await asyncio.sleep(_RUNTIME_LOG_CLEANUP_INTERVAL)
+        except asyncio.CancelledError:
+            raise
 
 # ⚠ 强制 spawn 启动方式（不要 fork）
 #
@@ -523,6 +564,7 @@ async def start_supervisor() -> None:
     _BG_TASKS.append(asyncio.create_task(_monitor_loop()))
     _BG_TASKS.append(asyncio.create_task(_consume_runtime_log()))
     _BG_TASKS.append(asyncio.create_task(_consume_ratelimit_event()))
+    _BG_TASKS.append(asyncio.create_task(_retention_cleanup_loop()))
 
     # 3. 注册退出/信号 hook，避免 uvicorn 被暴力杀时遗留孤儿 worker
     _install_kill_hooks()
@@ -1017,8 +1059,6 @@ async def _consume_stream_reliable(
                 async with AsyncSessionLocal() as db:
                     db.add_all(rows)
                     await db.commit()
-                if consumer_name == "runtime_log":
-                    await _cleanup_runtime_logs_if_due()
                 if consumer_name == "runtime_log":
                     try:
                         await _enqueue_runtime_log_notifies(

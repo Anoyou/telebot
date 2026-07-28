@@ -177,6 +177,8 @@ class HostResource(BaseModel):
 
 class ProcessResource(BaseModel):
     pid: int | None = None
+    name: str | None = None
+    role: str | None = None
     cpu_percent: float | None = None
     rss_mb: float | None = None
     uss_mb: float | None = None
@@ -201,6 +203,7 @@ class ContainerResource(BaseModel):
     memory_mb: float | None = None
     memory_limit_mb: float | None = None
     memory_percent: float | None = None
+    pids: int | None = None
 
 
 class RuntimeLogStats(BaseModel):
@@ -218,6 +221,8 @@ class ResourceDashboard(BaseModel):
     containers: list[ContainerResource] = Field(default_factory=list)
     container_total: ProcessResource = Field(default_factory=ProcessResource)
     container_probe_error: str | None = None
+    container_source: str | None = None
+    project_total_basis: str = "processes"
     workers: list[WorkerRuntimeResource] = Field(default_factory=list)
     worker_alive: int = 0
     worker_desired_running: int = 0
@@ -703,10 +708,14 @@ def _sum_project_resource(
     )
 
 
-_DOCKER_RESOURCE_CACHE: tuple[float, list[ContainerResource], str | None] = (0.0, [], None)
+_DOCKER_RESOURCE_CACHE: tuple[
+    float,
+    list[ContainerResource],
+    str | None,
+    str | None,
+] = (0.0, [], None, None)
 _DOCKER_RESOURCE_TTL = 12.0
-_PROJECT_CONTAINER_SERVICES = {"postgres", "redis", "frontend"}
-_WEB_CONTAINER_SERVICES = {"web", "backend"}
+_PROJECT_CONTAINER_SERVICES = {"postgres", "redis", "web", "backend", "updater", "frontend"}
 
 
 def _repo_root_for_container_match() -> Path:
@@ -744,8 +753,6 @@ def _looks_like_project_container(
     root = str(_repo_root_for_container_match())
     working_dir = labels.get("com.docker.compose.project.working_dir")
     config_files = labels.get("com.docker.compose.project.config_files", "")
-    if service_l in _WEB_CONTAINER_SERVICES:
-        return False
     if service_l in _PROJECT_CONTAINER_SERVICES and (working_dir == root or root in config_files):
         return True
     project = (labels.get("com.docker.compose.project") or "").lower()
@@ -775,9 +782,9 @@ def _docker_container_meta() -> tuple[dict[str, dict[str, str | None]], str | No
             timeout=1.5,
         )
     except FileNotFoundError:
-        return {}, "Docker CLI 不可用，未计入数据库/Redis/前端容器"
+        return {}, "Docker CLI 不可用"
     except Exception:
-        return {}, "Docker 不可用或无权限，未计入数据库/Redis/前端容器"
+        return {}, "Docker 不可用或无权限"
 
     meta: dict[str, dict[str, str | None]] = {}
     for line in out.splitlines():
@@ -841,23 +848,78 @@ def _parse_docker_memory_usage(raw: str | None) -> tuple[float | None, float | N
     return _parse_size_to_mb(used_raw), _parse_size_to_mb(limit_raw)
 
 
-def _snapshot_project_containers() -> tuple[list[ContainerResource], str | None]:
-    """读取数据库、Redis、前端等项目容器的资源占用。
+def _containers_from_updater_payload(payload: dict[str, Any]) -> list[ContainerResource]:
+    containers: list[ContainerResource] = []
+    raw_containers = payload.get("containers")
+    if not isinstance(raw_containers, list):
+        return containers
+    for raw in raw_containers:
+        if not isinstance(raw, dict):
+            continue
+        name = str(raw.get("name") or "").strip()
+        service = str(raw.get("service") or "").strip().lower()
+        if not name or not re.fullmatch(r"[a-z0-9][a-z0-9_.-]{0,63}", service):
+            continue
+        memory_mb, memory_limit_mb = _parse_docker_memory_usage(raw.get("memory_usage"))
+        try:
+            pids = max(0, int(raw.get("pids"))) if raw.get("pids") is not None else None
+        except (TypeError, ValueError):
+            pids = None
+        containers.append(
+            ContainerResource(
+                id=str(raw.get("id") or "").strip() or None,
+                name=name,
+                service=service,
+                cpu_percent=_parse_percent_value(raw.get("cpu_percent")),
+                memory_mb=memory_mb,
+                memory_limit_mb=memory_limit_mb,
+                memory_percent=_parse_percent_value(raw.get("memory_percent")),
+                pids=pids,
+            )
+        )
+    containers.sort(key=lambda c: c.memory_mb or 0.0, reverse=True)
+    return containers
 
-    Web 容器内的主进程和 worker 已由进程明细覆盖，这里刻意不把 web 容器计入，
-    避免把同一份 Python 进程内存重复统计。
-    """
+
+def _snapshot_project_containers() -> tuple[
+    list[ContainerResource],
+    str | None,
+    str | None,
+]:
+    """读取全部 TelePilot 容器资源；生产环境优先委托内部 updater。"""
 
     global _DOCKER_RESOURCE_CACHE
     now = time.monotonic()
-    cached_at, cached, cached_error = _DOCKER_RESOURCE_CACHE
+    cached_at, cached, cached_error, cached_source = _DOCKER_RESOURCE_CACHE
     if now - cached_at < _DOCKER_RESOURCE_TTL:
-        return cached, cached_error
+        return cached, cached_error, cached_source
+
+    updater_configured = bool((os.getenv("TELEPILOT_UPDATER_URL") or "").strip())
+    if updater_configured:
+        try:
+            payload = _updater_get("/resources", timeout=6)
+        except Exception:
+            payload = {"ok": False}
+        if payload.get("ok") is True:
+            containers = _containers_from_updater_payload(payload)
+            if containers:
+                _DOCKER_RESOURCE_CACHE = (now, containers, None, "updater")
+                return containers, None, "updater"
 
     meta, meta_error = _docker_container_meta()
     if not meta:
-        _DOCKER_RESOURCE_CACHE = (now, [], meta_error)
-        return [], meta_error
+        if updater_configured:
+            error = (
+                "完整容器指标不可用：内部 updater 未返回资源快照，且 Web 容器内 "
+                f"{meta_error or 'Docker 不可用'}；当前仅统计 Web/账号 worker/任务子进程"
+            )
+        else:
+            error = (
+                f"完整容器指标不可用：{meta_error or 'Docker 不可用'}；"
+                "当前仅统计 Web/账号 worker/任务子进程"
+            )
+        _DOCKER_RESOURCE_CACHE = (now, [], error, None)
+        return [], error, None
 
     try:
         out = subprocess.check_output(
@@ -867,9 +929,9 @@ def _snapshot_project_containers() -> tuple[list[ContainerResource], str | None]
             timeout=2.5,
         )
     except Exception:
-        error = "Docker stats 不可用或超时，未计入数据库/Redis/前端容器"
-        _DOCKER_RESOURCE_CACHE = (now, [], error)
-        return [], error
+        error = "Docker stats 不可用或超时；当前仅统计 Web/账号 worker/任务子进程"
+        _DOCKER_RESOURCE_CACHE = (now, [], error, None)
+        return [], error, None
 
     containers: list[ContainerResource] = []
     seen: set[str] = set()
@@ -900,12 +962,13 @@ def _snapshot_project_containers() -> tuple[list[ContainerResource], str | None]
                 memory_mb=memory_mb,
                 memory_limit_mb=memory_limit_mb,
                 memory_percent=_parse_percent_value(row.get("MemPerc")),
+                pids=None,
             )
         )
 
     containers.sort(key=lambda c: c.memory_mb or 0.0, reverse=True)
-    _DOCKER_RESOURCE_CACHE = (now, containers, None)
-    return containers, None
+    _DOCKER_RESOURCE_CACHE = (now, containers, None, "local_docker")
+    return containers, None, "local_docker"
 
 
 def _sum_container_resource(containers: list[ContainerResource]) -> ProcessResource:
@@ -930,6 +993,33 @@ def _merge_project_and_container_resource(
     )
 
 
+def _project_total_resource(
+    process_total: ProcessResource,
+    containers: list[ContainerResource],
+) -> tuple[ProcessResource, str]:
+    """选择不会重复计数的项目总量口径。"""
+
+    if not containers:
+        return process_total, "processes"
+    container_total = _sum_container_resource(containers)
+    services = {(item.service or "").lower() for item in containers}
+    if services & {"web", "backend"}:
+        memory = container_total.rss_mb
+        return (
+            ProcessResource(
+                pid=None,
+                cpu_percent=container_total.cpu_percent,
+                rss_mb=memory,
+                uss_mb=memory,
+            ),
+            "compose_containers",
+        )
+    return (
+        _merge_project_and_container_resource(process_total, container_total),
+        "processes_plus_containers",
+    )
+
+
 def _discover_descendant_pids(root_pids: list[int]) -> list[int]:
     """发现 Web/worker 派生的额外子进程 PID，覆盖短期插件/安装任务等。"""
 
@@ -950,6 +1040,34 @@ def _discover_descendant_pids(root_pids: list[int]) -> list[int]:
         except Exception:
             continue
     return sorted(found)
+
+
+def _describe_child_process(pid: int) -> tuple[str | None, str]:
+    """Return a safe process name and purpose without exposing its command line."""
+
+    try:
+        import psutil  # type: ignore[import-not-found]
+
+        proc = psutil.Process(pid)
+        raw_name = str(proc.name() or "").strip()
+        name = re.sub(r"[\x00-\x1f\x7f]+", " ", raw_name).strip()[:64] or None
+        command = " ".join(str(part) for part in proc.cmdline()).lower()
+    except Exception:
+        return None, "后台任务子进程"
+
+    if "multiprocessing.resource_tracker" in command:
+        return name, "多进程资源跟踪器"
+    if "multiprocessing.spawn" in command or "spawn_main" in command:
+        return name, "Python 后台任务子进程"
+    if "plugin" in command and ("install" in command or "pip" in command):
+        return name, "插件安装子进程"
+    if "plugin" in command:
+        return name, "插件任务子进程"
+    if "alembic" in command:
+        return name, "数据库迁移子进程"
+    if name:
+        return name, f"{name} 子进程"
+    return None, "后台任务子进程"
 
 
 async def _snapshot_dashboard_workers() -> tuple[
@@ -1004,7 +1122,17 @@ async def _snapshot_dashboard_workers() -> tuple[
     other_processes: list[ProcessResource] = []
     for pid in other_pids:
         cpu, rss, uss = stats.get(pid, (None, None, None))
-        other_processes.append(ProcessResource(pid=pid, cpu_percent=cpu, rss_mb=rss, uss_mb=uss))
+        name, role = _describe_child_process(pid)
+        other_processes.append(
+            ProcessResource(
+                pid=pid,
+                name=name,
+                role=role,
+                cpu_percent=cpu,
+                rss_mb=rss,
+                uss_mb=uss,
+            )
+        )
     return workers, main, _sum_project_resource(main, workers, other_processes), other_processes
 
 
@@ -1084,24 +1212,28 @@ async def get_health_overview(_user: CurrentUser) -> HealthOverview:
 
 @router.get("/resource-dashboard", response_model=ResourceDashboard)
 async def get_resource_dashboard(_user: CurrentUser) -> ResourceDashboard:
-    """V1 资源占用概览：主机 + Web 主进程 + worker + 项目容器 + 5 分钟日志量。"""
+    """资源占用概览：主机、项目进程、完整 Compose 容器与 5 分钟日志量。"""
 
     host = _snapshot_dashboard_host()
     workers, main, process_total, other_processes = await _snapshot_dashboard_workers()
-    containers, container_probe_error = _snapshot_project_containers()
+    containers, container_probe_error, container_source = await asyncio.to_thread(
+        _snapshot_project_containers
+    )
     container_total = _sum_container_resource(containers)
-    project_total = _merge_project_and_container_resource(process_total, container_total)
+    project_total, project_total_basis = _project_total_resource(process_total, containers)
     logs = await _snapshot_runtime_log_stats()
     return ResourceDashboard(
         host=host,
         main_process=main,
         project_total=project_total,
         app_uptime_seconds=_read_app_uptime_seconds(),
-        other_processes=other_processes[:8],
-        containers=containers[:8],
+        other_processes=other_processes,
+        containers=containers,
         container_total=container_total,
         container_probe_error=container_probe_error,
-        workers=workers[:8],
+        container_source=container_source,
+        project_total_basis=project_total_basis,
+        workers=workers,
         worker_alive=sum(1 for w in workers if w.alive),
         worker_desired_running=sum(1 for w in workers if w.desired == "running"),
         logs=logs,

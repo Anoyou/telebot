@@ -1,3 +1,13 @@
+import { Check, ChevronDown } from "lucide-react";
+
+import { ModelBrandLogo } from "@/components/ai/ModelBrandLogo";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { cn } from "@/lib/utils";
 
 export type ModelPickerItem = {
@@ -59,9 +69,28 @@ function itemBadges(item: ModelPickerItem): { label: string; className: string }
   return out;
 }
 
+function currentLabel(
+  value: ModelPickerValue,
+  items: ModelPickerItem[],
+): { text: string; model?: string; providerName?: string; auto: boolean } {
+  if (value.mode === "auto") {
+    return { text: "自动路由", auto: true };
+  }
+  const hit = items.find(
+    (item) => item.providerId === value.providerId && item.model === value.model,
+  );
+  return {
+    text: value.model,
+    model: value.model,
+    providerName: hit?.providerName,
+    auto: false,
+  };
+}
+
 /**
  * 按 Provider 分组的模型选择器。
  * 默认「自动路由」；选具体模型仅影响本轮（由父组件写会话本地）。
+ * 模型名前展示所属公司 logo（按模型 ID / Provider 名自适应识别）。
  */
 export function ModelPicker({
   items,
@@ -92,67 +121,121 @@ export function ModelPicker({
     groups.set(key, list);
   }
 
-  const selectValue =
-    value.mode === "auto"
-      ? "auto"
-      : `${value.providerId}::${value.model}`;
+  const current = currentLabel(value, items);
+  const logoSize = compact ? 13 : 14;
 
   return (
     <div
       className={cn(
         "flex min-w-0 items-center gap-1.5",
-        // 紧凑工具栏禁止换行，避免「设为默认」把选择框挤到上一行
         compact ? "flex-nowrap" : "flex-wrap",
         className,
       )}
     >
-      <select
-        aria-label="本轮模型"
-        disabled={disabled}
-        value={selectValue}
-        onChange={(event) => {
-          const raw = event.target.value;
-          if (raw === "auto") {
-            onChange({ mode: "auto" });
-            return;
-          }
-          const [pid, ...rest] = raw.split("::");
-          const model = rest.join("::");
-          onChange({ mode: "pinned", providerId: Number(pid), model });
-        }}
-        className={cn(
-          "h-8 min-w-0 max-w-full rounded-md border border-border/60 bg-background/80 text-xs",
-          compact
-            ? // 再收一档：给「设为默认」和发送按钮留位，避免窄屏换行上顶
-              "w-[min(8.75rem,34vw)] flex-none px-1.5 sm:w-[10rem] sm:px-2"
-            : "w-full flex-1 px-2 sm:w-[min(18rem,72vw)] sm:flex-none",
-          "disabled:opacity-50",
-        )}
-      >
-        <option value="auto">自动路由</option>
-        {[...groups.entries()].map(([key, list]) => {
-          const name = list[0]?.providerName || key;
-          return (
-            <optgroup key={key} label={name}>
-              {list.map((item) => {
-                const badges = itemBadges(item)
-                  .map((b) => b.label)
-                  .join(" · ");
-                const disabledOpt = item.agentEligible === false;
-                return (
-                  <option
-                    key={`${item.providerId}-${item.model}`}
-                    value={`${item.providerId}::${item.model}`}
-                    disabled={disabledOpt}
-                  >
-                    {badges ? `${item.model} · ${badges}` : item.model}
-                  </option>
-                );
-              })}
-            </optgroup>
-          );
-        })}
-      </select>
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild disabled={disabled}>
+          <button
+            type="button"
+            aria-label="本轮模型"
+            disabled={disabled}
+            className={cn(
+              "inline-flex h-8 min-w-0 max-w-full items-center gap-1.5 rounded-md border border-border/60 bg-background/80 text-left text-xs outline-none transition-colors",
+              "hover:bg-muted/30 focus-visible:ring-[3px] focus-visible:ring-ring/40",
+              "disabled:cursor-not-allowed disabled:opacity-50",
+              compact
+                ? "w-[min(9.5rem,38vw)] flex-none px-1.5 sm:w-[11rem] sm:px-2"
+                : "w-full flex-1 px-2 sm:w-[min(18rem,72vw)] sm:flex-none",
+            )}
+          >
+            <ModelBrandLogo
+              auto={current.auto}
+              model={current.model}
+              providerName={current.providerName}
+              size={logoSize}
+              className="shrink-0 opacity-95"
+            />
+            <span className="min-w-0 flex-1 truncate">{current.text}</span>
+            <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+          </button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent
+          align="end"
+          className={cn(
+            "max-h-[min(24rem,70vh)] w-[min(22rem,calc(100vw-1.5rem))] overflow-y-auto p-1",
+            compact && "w-[min(20rem,calc(100vw-1.5rem))]",
+          )}
+        >
+          <DropdownMenuItem
+            className="gap-2 py-2"
+            onSelect={() => onChange({ mode: "auto" })}
+          >
+            <ModelBrandLogo auto size={15} className="shrink-0" />
+            <span className="min-w-0 flex-1 truncate font-medium">自动路由</span>
+            {value.mode === "auto" ? <Check className="h-3.5 w-3.5 shrink-0 text-primary" /> : null}
+          </DropdownMenuItem>
+
+          {[...groups.entries()].map(([key, list], groupIndex) => {
+            const name = list[0]?.providerName || key;
+            return (
+              <div key={key}>
+                <DropdownMenuSeparator className={groupIndex === 0 ? "my-1" : "my-1.5"} />
+                <div className="px-2 py-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground/80">
+                  {name}
+                </div>
+                {list.map((item) => {
+                  const badges = itemBadges(item);
+                  const selected =
+                    value.mode === "pinned" &&
+                    value.providerId === item.providerId &&
+                    value.model === item.model;
+                  const disabledOpt = item.agentEligible === false;
+                  return (
+                    <DropdownMenuItem
+                      key={`${item.providerId}-${item.model}`}
+                      disabled={disabledOpt}
+                      className="items-start gap-2 py-2"
+                      onSelect={() =>
+                        onChange({
+                          mode: "pinned",
+                          providerId: item.providerId,
+                          model: item.model,
+                        })
+                      }
+                    >
+                      <ModelBrandLogo
+                        model={item.model}
+                        providerName={item.providerName}
+                        size={15}
+                        className="mt-0.5 shrink-0"
+                      />
+                      <div className="min-w-0 flex-1">
+                        <div className="truncate text-sm leading-5">{item.model}</div>
+                        {badges.length > 0 ? (
+                          <div className="mt-0.5 flex flex-wrap gap-1">
+                            {badges.map((b) => (
+                              <span
+                                key={b.label}
+                                className={cn(
+                                  "rounded border px-1 py-px text-[10px] leading-3",
+                                  b.className,
+                                )}
+                              >
+                                {b.label}
+                              </span>
+                            ))}
+                          </div>
+                        ) : null}
+                      </div>
+                      {selected ? <Check className="mt-0.5 h-3.5 w-3.5 shrink-0 text-primary" /> : null}
+                    </DropdownMenuItem>
+                  );
+                })}
+              </div>
+            );
+          })}
+        </DropdownMenuContent>
+      </DropdownMenu>
+
       {showSetDefault && value.mode === "pinned" && onSetDefault ? (
         <button
           type="button"

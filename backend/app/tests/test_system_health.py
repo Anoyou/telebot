@@ -692,6 +692,153 @@ def test_merge_project_resource_includes_infra_containers() -> None:
     assert out.uss_mb == 200.0
 
 
+def test_project_total_uses_complete_compose_snapshot_without_double_counting() -> None:
+    """完整 Compose 快照已包含 Web 进程，应用总量不能再叠加进程明细。"""
+
+    process_total = sh.ProcessResource(cpu_percent=5.0, rss_mb=180.0, uss_mb=130.0)
+    containers = [
+        sh.ContainerResource(name="telepilot-web-1", service="web", cpu_percent=4.0, memory_mb=200.0),
+        sh.ContainerResource(name="telepilot-postgres-1", service="postgres", cpu_percent=1.0, memory_mb=80.0),
+        sh.ContainerResource(name="telepilot-redis-1", service="redis", cpu_percent=0.5, memory_mb=20.0),
+        sh.ContainerResource(name="telepilot-updater-1", service="updater", cpu_percent=0.1, memory_mb=12.0),
+        sh.ContainerResource(name="telepilot-frontend-1", service="frontend", cpu_percent=0.2, memory_mb=8.0),
+    ]
+
+    total, basis = sh._project_total_resource(process_total, containers)
+
+    assert basis == "compose_containers"
+    assert total.cpu_percent == 5.8
+    assert total.rss_mb == 320.0
+    assert total.uss_mb == 320.0
+
+
+def test_snapshot_project_containers_prefers_internal_updater(monkeypatch) -> None:
+    """生产 Web 无 Docker CLI 时应通过已有 updater sidecar 读取全项目容器。"""
+
+    sh._DOCKER_RESOURCE_CACHE = (0.0, [], None, None)
+    monkeypatch.setenv("TELEPILOT_UPDATER_URL", "http://updater:8765")
+    monkeypatch.setattr(
+        sh,
+        "_updater_get",
+        lambda path, **_kwargs: {
+            "ok": True,
+            "source": "docker_stats",
+            "containers": [
+                {
+                    "id": "web-id",
+                    "name": "telepilot-web-1",
+                    "service": "web",
+                    "cpu_percent": "2.5%",
+                    "memory_usage": "128MiB / 512MiB",
+                    "memory_percent": "25%",
+                    "pids": 4,
+                },
+                {
+                    "id": "updater-id",
+                    "name": "telepilot-updater-1",
+                    "service": "updater",
+                    "cpu_percent": "0.1%",
+                    "memory_usage": "12MiB / 128MiB",
+                    "memory_percent": "9.4%",
+                    "pids": 1,
+                },
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        sh,
+        "_docker_container_meta",
+        lambda: (_ for _ in ()).throw(AssertionError("不应回退到 Web 内 Docker CLI")),
+    )
+
+    containers, error, source = sh._snapshot_project_containers()
+
+    assert error is None
+    assert source == "updater"
+    assert [(item.service, item.memory_mb, item.pids) for item in containers] == [
+        ("web", 128.0, 4),
+        ("updater", 12.0, 1),
+    ]
+
+
+def test_describe_child_process_does_not_expose_command_line_secrets(monkeypatch) -> None:
+    """子进程只返回安全用途标签，不把带 Token 的完整命令行交给前端。"""
+
+    class _FakeProcess:
+        def name(self):
+            return "python3"
+
+        def cmdline(self):
+            return ["python3", "-c", "from multiprocessing.resource_tracker import main", "secret-token"]
+
+    monkeypatch.setitem(sys.modules, "psutil", SimpleNamespace(Process=lambda _pid: _FakeProcess()))
+
+    name, role = sh._describe_child_process(123)
+
+    assert name == "python3"
+    assert role == "多进程资源跟踪器"
+    assert "secret-token" not in name
+    assert "secret-token" not in role
+
+
+@pytest.mark.asyncio
+async def test_resource_dashboard_does_not_truncate_project_details(monkeypatch) -> None:
+    """账号或项目服务超过八个时，概览明细仍应返回全部资源项。"""
+
+    workers = [
+        sh.WorkerRuntimeResource(
+            account_id=index,
+            pid=100 + index,
+            alive=True,
+            desired="running",
+            fail_count=0,
+            rss_mb=10.0,
+            uss_mb=8.0,
+        )
+        for index in range(10)
+    ]
+    children = [
+        sh.ProcessResource(pid=200 + index, name="python3", role="后台任务子进程", rss_mb=2.0)
+        for index in range(10)
+    ]
+    containers = [
+        sh.ContainerResource(
+            name=f"telepilot-service-{index}",
+            service="web" if index == 0 else f"service-{index}",
+            memory_mb=5.0,
+        )
+        for index in range(10)
+    ]
+
+    async def fake_workers():
+        main = sh.ProcessResource(pid=1, rss_mb=20.0, uss_mb=15.0)
+        process_total = sh._sum_project_resource(main, workers, children)
+        return workers, main, process_total, children
+
+    async def fake_logs():
+        return sh.RuntimeLogStats()
+
+    monkeypatch.setattr(
+        sh,
+        "_snapshot_dashboard_host",
+        lambda: sh.HostResource(sampled_at=1, memory_total_mb=1024),
+    )
+    monkeypatch.setattr(sh, "_snapshot_dashboard_workers", fake_workers)
+    monkeypatch.setattr(
+        sh,
+        "_snapshot_project_containers",
+        lambda: (containers, None, "updater"),
+    )
+    monkeypatch.setattr(sh, "_snapshot_runtime_log_stats", fake_logs)
+
+    result = await sh.get_resource_dashboard(None)  # type: ignore[arg-type]
+
+    assert len(result.workers) == 10
+    assert len(result.other_processes) == 10
+    assert len(result.containers) == 10
+    assert result.project_total_basis == "compose_containers"
+
+
 def test_parse_docker_memory_usage() -> None:
     """Docker stats 的 MiB/GiB 字符串要转成 MB，供前端统一展示。"""
 

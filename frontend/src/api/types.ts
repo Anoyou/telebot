@@ -1172,6 +1172,8 @@ export interface HostResourceStatus {
 
 export interface ProcessResourceStatus {
   pid?: number | null;
+  name?: string | null;
+  role?: string | null;
   cpu_percent?: number | null;
   rss_mb?: number | null;
   uss_mb?: number | null;
@@ -1192,6 +1194,7 @@ export interface ContainerResourceStatus {
   memory_mb?: number | null;
   memory_limit_mb?: number | null;
   memory_percent?: number | null;
+  pids?: number | null;
 }
 
 export interface RuntimeLogStatsStatus {
@@ -1209,6 +1212,8 @@ export interface ResourceDashboard {
   containers: ContainerResourceStatus[];
   container_total: ProcessResourceStatus;
   container_probe_error?: string | null;
+  container_source?: "updater" | "local_docker" | null;
+  project_total_basis?: "processes" | "processes_plus_containers" | "compose_containers";
   workers: WorkerRuntimeResourceStatus[];
   worker_alive: number;
   worker_desired_running: number;

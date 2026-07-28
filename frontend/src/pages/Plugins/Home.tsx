@@ -794,7 +794,7 @@ function FeatureZone({
         {features.length === 0 ? (
           <p className="text-sm text-muted-foreground">暂无内容</p>
         ) : (
-          <div className="grid gap-2 xl:grid-cols-2">
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-[repeat(auto-fill,minmax(20rem,1fr))]">
             {features.map((f) => {
               const directPassthrough = pluginSupportsDirectPassthrough(f.capabilities);
               const status = selectedFeatures[f.key] ?? "disabled";
@@ -848,7 +848,7 @@ function FeatureZone({
                   data-plugin-card
                   data-plugin-key={f.key}
                   className={cn(
-                    "relative min-h-[7rem] overflow-hidden rounded-md border p-2.5 shadow-sm transition duration-200 ease-out hover:-translate-y-0.5 hover:shadow-md motion-reduce:transform-none sm:min-h-0",
+                    "relative min-h-[6.5rem] overflow-hidden rounded-md border p-2.5 shadow-sm transition duration-200 ease-out hover:-translate-y-0.5 hover:shadow-md motion-reduce:transform-none sm:min-h-0",
                     status === "failed"
                       ? "border-destructive/40 bg-destructive/5"
                       : "border-border/70 bg-muted/20 hover:bg-muted/30",
@@ -898,7 +898,7 @@ function FeatureZone({
                         </div>
                         <div className="hidden break-all font-mono text-xs leading-5 text-muted-foreground sm:block">{f.key}</div>
                       </div>
-                      <div className="horizontal-scroll-touch flex h-8 min-w-0 flex-nowrap items-center gap-1.5 overflow-x-auto pr-10 sm:h-auto sm:flex-wrap sm:justify-end sm:overflow-visible sm:pr-14">
+                      <div className="horizontal-scroll-touch flex h-8 min-w-0 flex-nowrap items-center gap-1.5 overflow-x-auto pr-12 sm:h-auto sm:flex-wrap sm:justify-end sm:overflow-visible sm:pr-14">
                         <FeatureCapabilityBadge show={Boolean(f.interaction_entries?.length)} tone="info">
                           可交互
                         </FeatureCapabilityBadge>
@@ -1055,23 +1055,32 @@ function FeatureZone({
                     </div>
                     </div>
                   </div>
-                  {canConfigure ? (
-                    <Button
-                      type="button"
-                      size="icon"
-                      variant="outline"
-                      className="absolute bottom-2.5 right-2.5 h-8 w-8 sm:hidden"
-                      aria-label={`配置 ${f.display_name}`}
-                      title="配置"
-                      onClick={() => {
-                        if (path) {
-                          nav(path);
-                        }
-                      }}
+                  <div className="absolute bottom-2.5 right-2.5 flex items-center gap-1 sm:hidden">
+                    <MetaBadge
+                      tone={!enabled ? "neutral" : status === "failed" ? "danger" : "success"}
+                      className="h-7 max-w-[4.5rem] shrink-0 justify-center px-1.5 text-[10px]"
+                      title={`开关：${enabled ? "已启用" : "未启用"}；运行状态：${runtimeLabel}${lastError ? `；最近错误：${lastError}` : ""}`}
                     >
-                      <Pencil className="h-3.5 w-3.5" />
-                    </Button>
-                  ) : null}
+                      {enabled ? "已启用" : "未启用"}
+                    </MetaBadge>
+                    {canConfigure ? (
+                      <Button
+                        type="button"
+                        size="icon"
+                        variant="outline"
+                        className="h-8 w-8 shrink-0"
+                        aria-label={`配置 ${f.display_name}`}
+                        title="配置"
+                        onClick={() => {
+                          if (path) {
+                            nav(path);
+                          }
+                        }}
+                      >
+                        <Pencil className="h-3.5 w-3.5" />
+                      </Button>
+                    ) : null}
+                  </div>
                   <div className={cn(mobileExpanded ? "block" : "hidden", "sm:block")}><ModuleLintWarnings warnings={lintWarnings} /></div>
                 </div>
               );

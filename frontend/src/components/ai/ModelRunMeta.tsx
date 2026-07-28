@@ -1,3 +1,4 @@
+import { ModelBrandLogo } from "@/components/ai/ModelBrandLogo";
 import { cn } from "@/lib/utils";
 
 export type ModelRunMetaUsage = Record<string, unknown> | null | undefined;
@@ -108,7 +109,13 @@ export function ModelRunMeta({
     return (
       <div className={cn("text-[11px] leading-4 text-muted-foreground tabular-nums", className)}>
         <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
-          {bits.map((bit) => <span key={bit}>{bit}</span>)}
+          {summary ? (
+            <span className="inline-flex min-w-0 items-center gap-1.5">
+              <ModelBrandLogo model={summaryModel || model || reqModel} providerName={provider || reqProvider} size={12} />
+              <span className="min-w-0 break-all">{summary}</span>
+            </span>
+          ) : null}
+          {bits.filter((bit) => bit !== summary).map((bit) => <span key={bit}>{bit}</span>)}
           {usedFallback ? <span className="rounded border border-warning/40 px-1 text-warning">fallback</span> : null}
           {streamFallback ? <span className="rounded border px-1">完整响应</span> : null}
           {selectionMode === "pinned" ? <span className="rounded border px-1">本轮固定</span> : null}
@@ -131,8 +138,9 @@ export function ModelRunMeta({
     >
       <div className="flex min-w-0 flex-wrap items-center gap-1.5">
         {summary ? (
-          <span className={cn("min-w-0 break-all font-medium text-foreground/80", usedFallback && mismatch && "text-warning")}>
-            {summary}
+          <span className={cn("inline-flex min-w-0 items-center gap-1.5 font-medium text-foreground/80", usedFallback && mismatch && "text-warning")}>
+            <ModelBrandLogo model={summaryModel || model || reqModel} providerName={provider || reqProvider} size={13} />
+            <span className="min-w-0 break-all">{summary}</span>
           </span>
         ) : null}
         {apiFormat ? <span className="rounded bg-muted px-1.5 py-0.5">{apiFormat}</span> : null}
