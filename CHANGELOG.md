@@ -25,6 +25,16 @@
 
 ## [Unreleased]
 
+## [0.86.0-beta.3] - 2026-07-29 · patch（补丁版本预发布） · 真实模型品牌图标与插件卡片布局
+
+### Added
+
+- 模型品牌 logo 改为接入 lobe-icons / simple-icons 的真实 monochrome 图标资源，覆盖 DeepSeek / OpenAI / 智谱 / Qwen / Claude 等主流厂商。
+
+### Fixed
+
+- 插件卡片窄屏两列布局改为更稳的标题/徽标分层，并预留底部状态与编辑区空间，避免名称与状态标签互相挤压变形。
+
 ## [0.86.0-beta.2] - 2026-07-29 · patch（补丁版本预发布） · 资源监控完整化、Trace 清理与模型品牌标识
 
 ### Added

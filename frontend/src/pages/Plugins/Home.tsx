@@ -794,7 +794,7 @@ function FeatureZone({
         {features.length === 0 ? (
           <p className="text-sm text-muted-foreground">暂无内容</p>
         ) : (
-          <div className="grid grid-cols-2 gap-2 sm:grid-cols-[repeat(auto-fill,minmax(20rem,1fr))]">
+          <div className="grid grid-cols-1 gap-2 min-[380px]:grid-cols-2 sm:grid-cols-[repeat(auto-fill,minmax(18rem,1fr))] xl:grid-cols-[repeat(auto-fill,minmax(20rem,1fr))]">
             {features.map((f) => {
               const directPassthrough = pluginSupportsDirectPassthrough(f.capabilities);
               const status = selectedFeatures[f.key] ?? "disabled";
@@ -848,7 +848,7 @@ function FeatureZone({
                   data-plugin-card
                   data-plugin-key={f.key}
                   className={cn(
-                    "relative min-h-[6.5rem] overflow-hidden rounded-md border p-2.5 shadow-sm transition duration-200 ease-out hover:-translate-y-0.5 hover:shadow-md motion-reduce:transform-none sm:min-h-0",
+                    "relative min-h-[7.25rem] overflow-hidden rounded-md border p-2.5 pb-11 shadow-sm transition duration-200 ease-out hover:-translate-y-0.5 hover:shadow-md motion-reduce:transform-none sm:min-h-0 sm:pb-2.5",
                     status === "failed"
                       ? "border-destructive/40 bg-destructive/5"
                       : "border-border/70 bg-muted/20 hover:bg-muted/30",
@@ -869,19 +869,19 @@ function FeatureZone({
                   <MetaBadge
                     mono
                     tone="outline"
-                    className="absolute right-2.5 top-2.5 h-6 max-w-20 justify-center px-1.5 text-[10px]"
+                    className="absolute right-2 top-2 h-5 max-w-[3.75rem] justify-center px-1 text-[10px] sm:right-2.5 sm:top-2.5 sm:h-6 sm:max-w-20 sm:px-1.5"
                     title={moduleVersionLabel(f.version)}
                     data-plugin-version
                   >
                     {moduleVersionLabel(f.version)}
                   </MetaBadge>
                   <div className="min-w-0">
-                    <div className="grid grid-rows-[2.25rem_1.75rem] gap-0.5 sm:flex sm:grid-rows-none sm:flex-row sm:items-start sm:justify-between sm:gap-2">
-                      <div className="min-w-0 pr-16 sm:pr-0">
-                        <div className="flex min-w-0 items-center gap-1.5">
+                    <div className="flex min-w-0 flex-col gap-1.5 sm:flex-row sm:items-start sm:justify-between sm:gap-2">
+                      <div className="min-w-0 pr-14 sm:pr-0">
+                        <div className="flex min-w-0 items-start gap-1">
                           <button
                             type="button"
-                            className="flex min-w-0 items-center gap-1.5 text-left sm:pointer-events-none"
+                            className="flex min-w-0 flex-1 items-start gap-1 text-left sm:pointer-events-none"
                             aria-expanded={mobileExpanded}
                             onClick={() => setMobileExpandedKeys((current) => {
                               const next = new Set(current);
@@ -890,15 +890,15 @@ function FeatureZone({
                               return next;
                             })}
                           >
-                            <span className="line-clamp-2 break-words text-sm font-medium leading-5" title={f.display_name}>
+                            <span className="line-clamp-2 min-w-0 break-words text-[13px] font-medium leading-5 sm:text-sm" title={f.display_name}>
                               {f.display_name}
                             </span>
-                            <ChevronDown className={cn("h-4 w-4 shrink-0 text-muted-foreground transition-transform sm:hidden", mobileExpanded && "rotate-180")} />
+                            <ChevronDown className={cn("mt-0.5 h-3.5 w-3.5 shrink-0 text-muted-foreground transition-transform sm:hidden", mobileExpanded && "rotate-180")} />
                           </button>
                         </div>
                         <div className="hidden break-all font-mono text-xs leading-5 text-muted-foreground sm:block">{f.key}</div>
                       </div>
-                      <div className="horizontal-scroll-touch flex h-8 min-w-0 flex-nowrap items-center gap-1.5 overflow-x-auto pr-12 sm:h-auto sm:flex-wrap sm:justify-end sm:overflow-visible sm:pr-14">
+                      <div className="horizontal-scroll-touch flex min-h-7 min-w-0 flex-nowrap items-center gap-1 overflow-x-auto pr-1 sm:h-auto sm:max-w-[55%] sm:flex-wrap sm:justify-end sm:overflow-visible sm:pr-14">
                         <FeatureCapabilityBadge show={Boolean(f.interaction_entries?.length)} tone="info">
                           可交互
                         </FeatureCapabilityBadge>
@@ -1055,10 +1055,10 @@ function FeatureZone({
                     </div>
                     </div>
                   </div>
-                  <div className="absolute bottom-2.5 right-2.5 flex items-center gap-1 sm:hidden">
+                  <div className="absolute bottom-2 right-2 flex max-w-[calc(100%-1rem)] items-center gap-1 sm:hidden">
                     <MetaBadge
                       tone={!enabled ? "neutral" : status === "failed" ? "danger" : "success"}
-                      className="h-7 max-w-[4.5rem] shrink-0 justify-center px-1.5 text-[10px]"
+                      className="h-6 max-w-[4rem] shrink-0 justify-center px-1.5 text-[10px]"
                       title={`开关：${enabled ? "已启用" : "未启用"}；运行状态：${runtimeLabel}${lastError ? `；最近错误：${lastError}` : ""}`}
                     >
                       {enabled ? "已启用" : "未启用"}
@@ -1068,7 +1068,7 @@ function FeatureZone({
                         type="button"
                         size="icon"
                         variant="outline"
-                        className="h-8 w-8 shrink-0"
+                        className="h-7 w-7 shrink-0"
                         aria-label={`配置 ${f.display_name}`}
                         title="配置"
                         onClick={() => {
