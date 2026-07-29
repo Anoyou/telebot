@@ -36,6 +36,7 @@ test.describe("移动端交互细节", () => {
       const resourceCard = main.querySelector<HTMLElement>("[data-resource-usage-card]");
       const resourceHeader = resourceCard?.firstElementChild as HTMLElement | null;
       const mobileNav = document.querySelector<HTMLElement>("[data-mobile-navigation-dock]");
+      const mobileNavBefore = mobileNav ? getComputedStyle(mobileNav, "::before") : null;
       const shellChildren = pageShell ? Array.from(pageShell.children) as HTMLElement[] : [];
       return {
         viewportWidth: document.documentElement.clientWidth,
@@ -44,6 +45,10 @@ test.describe("移动端交互细节", () => {
         mainPaddingTop: getComputedStyle(main).paddingTop,
         mainPaddingBottom: Number.parseFloat(getComputedStyle(main).paddingBottom),
         mobileNavHeight: mobileNav?.getBoundingClientRect().height ?? 0,
+        mobileNavTransform: mobileNav ? getComputedStyle(mobileNav).transform : "",
+        mobileNavBackdropFilter: mobileNavBefore?.backdropFilter ?? "",
+        mobileNavBackgroundImage: mobileNavBefore?.backgroundImage ?? "",
+        usesAppleWebKitMaterialTuning: CSS.supports("-webkit-touch-callout", "none"),
         pageHeaderPaddingLeft: pageHeader ? getComputedStyle(pageHeader).paddingLeft : "",
         sectionGap: shellChildren[1] ? getComputedStyle(shellChildren[1]).marginTop : "",
         cardHeaderPaddingLeft: resourceHeader ? getComputedStyle(resourceHeader).paddingLeft : "",
@@ -58,6 +63,10 @@ test.describe("移动端交互细节", () => {
     });
     expect(spacing.documentWidth).toBeLessThanOrEqual(spacing.viewportWidth);
     expect(spacing.mainPaddingBottom).toBeGreaterThan(spacing.mobileNavHeight);
+    expect(spacing.mobileNavTransform).toBe("none");
+    expect(spacing.usesAppleWebKitMaterialTuning).toBe(false);
+    expect(spacing.mobileNavBackdropFilter).toContain("blur(");
+    expect(spacing.mobileNavBackgroundImage).toContain("linear-gradient");
     fixture.assertClean();
   });
 
@@ -1218,9 +1227,34 @@ test.describe("移动端交互细节", () => {
       });
     });
     await page.goto("/ai?tab=usage", { waitUntil: "networkidle" });
-    const failedMetric = page.locator('button[aria-pressed="false"]').filter({ hasText: "失败" });
+    const failedMetric = page.locator('[data-usage-status-filter="failed"]');
     await expect(failedMetric).toHaveCount(1);
     await failedMetric.click();
+    await expect(failedMetric).toHaveAttribute("aria-pressed", "true");
+    const metricBox = await failedMetric.boundingBox();
+    const pillBox = await failedMetric.locator(":scope > div").boundingBox();
+    expect(metricBox).not.toBeNull();
+    expect(pillBox).not.toBeNull();
+    expect(Math.abs((metricBox?.width ?? 0) - (pillBox?.width ?? 0))).toBeLessThan(1);
+    for (const viewport of [
+      { width: 375, height: 812 },
+      { width: 430, height: 932 },
+    ]) {
+      await page.setViewportSize(viewport);
+      const navigationDock = page.locator("[data-mobile-navigation-dock]");
+      await expect(navigationDock).toBeVisible();
+      const responsiveMetricBox = await failedMetric.boundingBox();
+      const responsivePillBox = await failedMetric.locator(":scope > div").boundingBox();
+      const dockBox = await navigationDock.evaluate((element) => {
+        const rect = element.getBoundingClientRect();
+        return { left: rect.left, right: rect.right };
+      });
+      expect(Math.abs(
+        (responsiveMetricBox?.width ?? 0) - (responsivePillBox?.width ?? 0),
+      )).toBeLessThan(1);
+      expect(dockBox.left).toBeGreaterThanOrEqual(0);
+      expect(dockBox.right).toBeLessThanOrEqual(viewport.width);
+    }
     await expect(page.getByText("当前仅显示失败记录，再点一次指标可取消筛选。")).toBeVisible();
     await expect(page.locator("[data-assistant-surface]")).toBeHidden();
     const visibleRecords = page.locator("[data-usage-record]");

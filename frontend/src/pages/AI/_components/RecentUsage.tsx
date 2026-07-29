@@ -147,19 +147,39 @@ export function RecentUsageContent() {
               <SignalPill tone="primary" label="请求数" value={summary.request_count} />
               <button
                 type="button"
+                data-usage-status-filter="success"
                 aria-pressed={statusFilter === "success"}
                 onClick={() => toggleStatusFilter("success")}
-                className={cn("rounded-full text-left active:scale-95 motion-reduce:transform-none", statusFilter === "success" && "ring-2 ring-success ring-offset-2 ring-offset-background")}
+                className="inline-flex w-fit max-w-full justify-self-start rounded-full text-left outline-none active:scale-95 focus-visible:ring-2 focus-visible:ring-success/70 focus-visible:ring-offset-1 focus-visible:ring-offset-background motion-reduce:transform-none"
               >
-                <SignalPill tone="success" label="成功" value={summary.success_count} />
+                <SignalPill
+                  tone="success"
+                  label="成功"
+                  value={summary.success_count}
+                  className={cn(
+                    "transition-[border-color,background-color,box-shadow]",
+                    statusFilter === "success" &&
+                      "border-success/75 bg-success/15",
+                  )}
+                />
               </button>
               <button
                 type="button"
+                data-usage-status-filter="failed"
                 aria-pressed={statusFilter === "failed"}
                 onClick={() => toggleStatusFilter("failed")}
-                className={cn("rounded-full text-left active:scale-95 motion-reduce:transform-none", statusFilter === "failed" && "ring-2 ring-warning ring-offset-2 ring-offset-background")}
+                className="inline-flex w-fit max-w-full justify-self-start rounded-full text-left outline-none active:scale-95 focus-visible:ring-2 focus-visible:ring-warning/70 focus-visible:ring-offset-1 focus-visible:ring-offset-background motion-reduce:transform-none"
               >
-                <SignalPill tone={summary.failed_count > 0 ? "warn" : "neutral"} label="失败" value={summary.failed_count} />
+                <SignalPill
+                  tone={summary.failed_count > 0 ? "warn" : "neutral"}
+                  label="失败"
+                  value={summary.failed_count}
+                  className={cn(
+                    "transition-[border-color,background-color,box-shadow]",
+                    statusFilter === "failed" &&
+                      "border-warning/80 bg-warning/15",
+                  )}
+                />
               </button>
             </div>
             <div className="grid gap-2 sm:grid-cols-2">

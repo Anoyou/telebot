@@ -152,7 +152,25 @@ class SystemAgentRuntime:
 
         flags = await load_system_context_flags(db)
         cfg = flags["agent_config"]
-        resolved = await resolve_agent_providers(db, cfg)
+        if not cfg.get("enabled"):
+            resolved = await resolve_agent_providers(db, cfg)
+        elif selection_mode == "pinned":
+            # 本轮明确选择优先于全局默认。全局 Provider / 模型即使已经失效，
+            # 也不能阻断用户刚刚选中的有效目标。
+            pin_result = await _apply_pinned_selection(db, None, selection)
+            if isinstance(pin_result, str):
+                yield next_event(
+                    "error",
+                    code="MODEL_SELECTION_INVALID",
+                    message=pin_result,
+                    hint="请选择有 Key 且支持 Tools 的模型，或改回自动路由。",
+                )
+                yield next_event("done", ok=False)
+                return
+            resolved = pin_result
+        else:
+            resolved = await resolve_agent_providers(db, cfg)
+
         if isinstance(resolved, str):
             err = resolved
             hint = provider_setup_hint()
@@ -164,20 +182,6 @@ class SystemAgentRuntime:
             )
             yield next_event("done", ok=False)
             return
-
-        # pinned：覆盖主选（校验失败直接拒绝，不入静默换模型）
-        if selection_mode == "pinned":
-            pin_result = await _apply_pinned_selection(db, resolved, selection)
-            if isinstance(pin_result, str):
-                yield next_event(
-                    "error",
-                    code="MODEL_SELECTION_INVALID",
-                    message=pin_result,
-                    hint="请选择有 Key 且支持 Tools 的模型，或改回自动路由。",
-                )
-                yield next_event("done", ok=False)
-                return
-            resolved = pin_result
 
         yield next_event(
             "model_capability_check",
@@ -1200,7 +1204,7 @@ def _normalize_model_selection(raw: dict[str, Any] | None) -> dict[str, Any]:
 
 async def _apply_pinned_selection(
     db: AsyncSession,
-    resolved: Any,
+    resolved: Any | None,
     selection: dict[str, Any],
 ) -> Any | str:
     """将 pinned 选择应用到 ResolvedAgentProviders；失败返回错误文案。"""

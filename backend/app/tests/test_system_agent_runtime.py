@@ -348,6 +348,109 @@ async def test_runtime_general_help_sends_zero_tool_definitions(monkeypatch) -> 
 
 
 @pytest.mark.asyncio
+async def test_pinned_selection_bypasses_stale_global_provider_config(monkeypatch) -> None:
+    selected, _fallback = _providers()
+    resolve_calls = 0
+    pinned_calls: list[dict[str, object]] = []
+
+    async def load_flags(_db):  # noqa: ANN001
+        return {
+            "timezone": "UTC",
+            "command_prefix": "/",
+            "ai_enabled": True,
+            "agent_config": {
+                "enabled": True,
+                "provider_id": 999,
+                "model": "stale-global-model",
+                "max_steps": 8,
+                "max_tool_calls": 24,
+                "session_token_limit": 16_384,
+                "require_tool_approval": False,
+            },
+        }
+
+    async def resolve(_db, _cfg):  # noqa: ANN001
+        nonlocal resolve_calls
+        resolve_calls += 1
+        return "全局默认模型已经失效"
+
+    async def apply_pinned(_db, resolved, selection):  # noqa: ANN001
+        assert resolved is None
+        pinned_calls.append(dict(selection))
+        return ResolvedAgentProviders(
+            primary=selected,
+            model=selected.default_model,
+            providers={selected.id: selected},
+        )
+
+    async def verify(_db, resolved, **_kwargs):  # noqa: ANN001
+        return resolved
+
+    async def run(_model_call, request, _tools, **_kwargs):  # noqa: ANN001
+        return AgentResult(
+            text="帮助",
+            model=request.model,
+            messages=request.messages,
+            usage=ModelUsage(input_tokens=1, output_tokens=1),
+            steps=1,
+            tool_calls=0,
+            stop_reason=StopReason.COMPLETED,
+        )
+
+    monkeypatch.setattr(runtime_module, "load_system_context_flags", load_flags)
+    monkeypatch.setattr(runtime_module, "resolve_agent_providers", resolve)
+    monkeypatch.setattr(runtime_module, "_apply_pinned_selection", apply_pinned)
+    monkeypatch.setattr(runtime_module, "verify_resolved_agent_providers", verify)
+    monkeypatch.setattr(runtime_module, "run_agent", run)
+
+    pinned_events = [
+        event
+        async for event in SystemAgentRuntime(_registry()).stream_turn(
+            None,  # type: ignore[arg-type]
+            session=_session(),  # type: ignore[arg-type]
+            user_text="你能做什么？",
+            role="admin",
+            channel="web",
+            model_selection={
+                "mode": "pinned",
+                "provider_id": selected.id,
+                "model": selected.default_model,
+            },
+        )
+    ]
+
+    assert resolve_calls == 0
+    assert pinned_calls == [
+        {
+            "mode": "pinned",
+            "provider_id": selected.id,
+            "model": selected.default_model,
+        }
+    ]
+    provider_event = next(event for event in pinned_events if event["type"] == "provider_selected")
+    assert provider_event["provider_id"] == selected.id
+    assert provider_event["model"] == selected.default_model
+    assert provider_event["selection_mode"] == "pinned"
+    assert pinned_events[-1]["type"] == "done"
+    assert pinned_events[-1]["ok"] is True
+
+    auto_events = [
+        event
+        async for event in SystemAgentRuntime(_registry()).stream_turn(
+            None,  # type: ignore[arg-type]
+            session=_session(),  # type: ignore[arg-type]
+            user_text="你能做什么？",
+            role="admin",
+            channel="web",
+        )
+    ]
+    assert resolve_calls == 1
+    auto_error = next(event for event in auto_events if event["type"] == "error")
+    assert auto_error["code"] == "PROVIDER_UNAVAILABLE"
+    assert auto_error["message"] == "全局默认模型已经失效"
+
+
+@pytest.mark.asyncio
 async def test_runtime_emits_provider_switch_confirmation(monkeypatch) -> None:
     primary, fallback = _providers()
     await _patch_runtime_config(monkeypatch, primary, fallback)
