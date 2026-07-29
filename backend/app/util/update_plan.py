@@ -12,10 +12,14 @@ import json
 import os
 import subprocess
 import tempfile
-import tomllib
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10 生产宿主没有 tomllib
+    tomllib = None  # type: ignore[assignment]
 
 _DOC_SUFFIXES = (".md", ".rst", ".txt")
 _BACKEND_TEST_PREFIXES = ("backend/app/tests/", "backend/tests/")
@@ -274,6 +278,10 @@ def _git_show(root: Path, revision: str, path: str) -> str:
 
 
 def _backend_dependencies_changed(root: Path, old_revision: str, new_revision: str) -> bool:
+    if tomllib is None:
+        # 宿主只负责生成更新计划，未必安装后端要求的 Python 3.12。
+        # 缺少 TOML 解析器时按依赖已变化处理，宁可重建 web，也不能让更新器崩溃。
+        return True
     try:
         old_data = tomllib.loads(_git_show(root, old_revision, "backend/pyproject.toml"))
         new_data = tomllib.loads(_git_show(root, new_revision, "backend/pyproject.toml"))

@@ -461,4 +461,3 @@ async def test_run_retention_cleanup_deletes_runtime_logs_when_enabled(
 
     stats = await supervisor._run_retention_cleanup_once()
     assert stats["deleted_runtime_logs"] == 5
-

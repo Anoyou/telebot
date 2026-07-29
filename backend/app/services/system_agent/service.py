@@ -41,7 +41,12 @@ from .memory_compress import schedule_summary_compression
 from .prompts import session_title_from_message
 from .registry import get_registry
 from .runtime import SystemAgentRuntime
-from .secrets import extract_plaintext_secrets, redact_known_secrets
+from .secrets import (
+    contains_request_header_context,
+    extract_plaintext_secrets,
+    redact_known_secrets,
+    redact_user_message,
+)
 from .turn_context import (
     clear_failed_turn,
     failed_turn_state,
@@ -574,8 +579,14 @@ class SystemAgentService:
             if retry_message is not None and not regenerating
             else extract_plaintext_secrets(raw_text)
         )
+        persisted_user_text = redact_user_message(raw_text, chat_secrets)
+        model_user_text = (
+            persisted_user_text
+            if contains_request_header_context(raw_text)
+            else raw_text
+        )
         if not session.title:
-            session.title = session_title_from_message(redact_known_secrets(raw_text, chat_secrets))
+            session.title = session_title_from_message(persisted_user_text)
         session.updated_at = datetime.now(UTC)
 
         approved_tool_calls: list[dict[str, Any]] = []
@@ -589,14 +600,13 @@ class SystemAgentService:
             user_msg = regenerate_message
             if incoming_text:
                 user_msg.content = {
-                    "text": redact_known_secrets(raw_text, chat_secrets),
+                    "text": persisted_user_text,
                 }
         elif retry_message is None:
-            redacted_user = redact_known_secrets(raw_text, chat_secrets)
             user_msg = SystemAgentMessage(
                 session_id=session.id,
                 role=MESSAGE_ROLE_USER,
-                content={"text": redacted_user},
+                content={"text": persisted_user_text},
                 usage={"run_started_at": run_started_at},
                 run_status=MESSAGE_RUN_PENDING,
             )
@@ -645,8 +655,8 @@ class SystemAgentService:
             await db.refresh(user_msg)
         await db.flush()
 
-        # 历史最后一条是刚写入的打码用户消息；模型当次请求使用原始文本，
-        # 因此从 history 去掉最后一条 user，由 runtime 追加 raw_text。
+        # 历史最后一条是刚写入的打码用户消息；模型当次请求通常使用原始文本，
+        # 自定义请求头配置则只追加安全提示，强制密钥改走 Provider 设置页。
         if regenerating:
             history = await self.list_messages(
                 db,
@@ -688,7 +698,7 @@ class SystemAgentService:
             async for event in self.runtime.stream_turn(
                 db,
                 session=session,
-                user_text=raw_text,
+                user_text=model_user_text,
                 role=role,
                 channel=channel,
                 web_user_id=web_user_id,
@@ -893,7 +903,7 @@ class SystemAgentService:
             user_msg.usage = None
             update_session_memory(
                 session,
-                user_text=redact_known_secrets(raw_text, chat_secrets),
+                user_text=persisted_user_text,
                 assistant_text=redact_known_secrets(assistant_text, chat_secrets),
                 domains=route_domains,
                 tool_events=memory_tool_events,

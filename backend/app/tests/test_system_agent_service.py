@@ -340,6 +340,51 @@ async def test_stream_message_persists_redacted_user_and_assistant(agent_db, mon
         assert session.title == "系统版本是多少？"
 
 
+@pytest.mark.parametrize(
+    "request_text",
+    (
+        "请设置兼容请求头 X-Tenant-ID 为 opaque-header-secret",
+        "Please set HTTP header X-Tenant-ID to opaque-header-secret",
+        "Set custom header X-Tenant-ID=opaque-header-secret",
+    ),
+)
+@pytest.mark.asyncio
+async def test_request_header_configuration_never_reaches_model_or_history(
+    agent_db,
+    monkeypatch,
+    request_text: str,
+) -> None:
+    svc = SystemAgentService()
+    secret = "opaque-header-secret"
+    model_inputs: list[str] = []
+
+    async def fake_stream(*_args, **kwargs):
+        model_inputs.append(str(kwargs["user_text"]))
+        yield {"type": "assistant_message", "content": "请使用 Provider 设置页", "usage": {}}
+        yield {"type": "done", "ok": True}
+
+    monkeypatch.setattr(svc.runtime, "stream_turn", fake_stream)
+
+    async with agent_db() as db:
+        session = await svc.create_session(db, channel=CHANNEL_WEB, web_user_id=1)
+        async for _event in svc.stream_message(
+            db,
+            session=session,
+            text=request_text,
+            role="admin",
+            channel=CHANNEL_WEB,
+            web_user_id=1,
+        ):
+            pass
+
+        messages = await svc.list_messages(db, session.id)
+        assert model_inputs and secret not in model_inputs[0]
+        assert "Provider 设置" in model_inputs[0]
+        assert secret not in str(session.title)
+        assert secret not in str(session.memory_state)
+        assert secret not in str([message.content for message in messages])
+
+
 @pytest.mark.asyncio
 async def test_successful_turn_redacts_secret_from_persistent_memory(agent_db, monkeypatch) -> None:
     svc = SystemAgentService()

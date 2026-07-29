@@ -798,7 +798,7 @@ test.describe("移动端交互细节", () => {
     }
     if (testInfo.project.name === "mobile") {
       const sessionButton = composer.getByRole("button", { name: "打开会话列表" });
-      const modelPicker = composer.getByRole("combobox", { name: "本轮模型" });
+      const modelPicker = composer.getByRole("button", { name: "本轮模型" });
       await expect(sessionButton).toBeVisible();
       await expect(modelPicker).toBeVisible();
       const sessionButtonBox = await sessionButton.boundingBox();

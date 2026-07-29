@@ -3,6 +3,7 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+from app.util import update_plan
 from app.util.update_plan import build_update_plan, classify_changed_files
 
 
@@ -115,6 +116,12 @@ def test_backend_dependency_change_still_rebuilds_web_image() -> None:
     assert plan.services == ["web"]
     assert plan.file_sync_services == []
     assert plan.rebuild_services == ["web"]
+
+
+def test_missing_tomllib_fails_closed_to_dependency_rebuild(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(update_plan, "tomllib", None)
+
+    assert update_plan._backend_dependencies_changed(tmp_path, "old", "new") is True
 
 
 def test_build_plan_treats_version_only_pyproject_change_as_file_sync(tmp_path: Path) -> None:

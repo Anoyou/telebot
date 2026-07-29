@@ -97,6 +97,17 @@ python -m app.scripts.rekey --old "$OLD_MASTER_KEY" --new "$NEW_MASTER_KEY"
 **风险范围**：中低。计划内轮换可平滑完成；若确认 `MASTER_KEY` 与数据库备份同时泄露，
 攻击者可能已解开旧密文，仍需按 §3.3 评估是否强制重绑账号与轮换第三方 token。
 
+#### 0.86 beta 兼容请求头轮换
+
+`0.86.0-beta.1` 至 `0.86.0-beta.8` 允许在 System Agent 聊天中描述 Provider
+兼容请求头，部分非 Token 形态的 header value 可能进入助手会话或 AI 近期调用预览。
+从 `0.86.0-beta.9` 起，聊天中的自定义请求头配置会整段替换为安全提示，值只能在
+「AI → Provider 设置」中填写；上游错误回显也会按当前调用的全部 header value 脱敏。
+
+曾使用上述 beta 且在聊天里粘贴过请求头值时，升级前后必须在上游服务重新生成并轮换
+这些值，并删除对应 System Agent 会话。旧数据库与备份应继续按敏感材料保存；轮换后其中
+残留的旧值已经失效，但不应公开或交给不受信任的第三方。
+
 ### 2.3 TOTP 绑定密钥暂存
 
 **现状**：`auth:pending_totp:{user_id}` 只用于绑定新的 TOTP 密钥。调用

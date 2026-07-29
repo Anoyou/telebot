@@ -25,6 +25,9 @@ _LABELED_SECRET_RE = re.compile(
     (?P<value>"[^"\r\n]{8,}"|'[^'\r\n]{8,}'|[^\s,;}\]]{8,})
     '''
 )
+_REQUEST_HEADERS_CONTEXT_RE = re.compile(
+    r"(?i)(?:\b(?:request|http|custom|compatibility)[\s_-]*headers?\b|请求头|兼容请求头)"
+)
 _BOT_TOKEN_RE = re.compile(r"\b\d{6,12}:[A-Za-z0-9_-]{20,}\b")
 _URL_PASSWORD_RE = re.compile(
     r"\b[a-z][a-z0-9+.-]*://[^\s:/@]+:([^\s@/]+)@",
@@ -138,6 +141,20 @@ def redact_known_secrets(text: str, secrets: list[str] | None = None) -> str:
     return redact_message_text(out)
 
 
+def contains_request_header_context(text: str) -> bool:
+    """自定义请求头值禁止经聊天传递；其自然语言形态无法可靠逐值抽取。"""
+
+    return bool(_REQUEST_HEADERS_CONTEXT_RE.search(str(text or "")))
+
+
+def redact_user_message(text: str, secrets: list[str] | None = None) -> str:
+    """生成可持久化的用户消息；请求头配置整段替换为安全提示。"""
+
+    if contains_request_header_context(text):
+        return "[安全提示：自定义请求头不能通过聊天传入，请在 AI Provider 设置中填写并轮换密钥。]"
+    return redact_known_secrets(text, secrets)
+
+
 def merge_secret_into_arguments(
     arguments: dict[str, Any],
     *,
@@ -164,9 +181,11 @@ def encrypt_secrets_dict(secrets: dict[str, Any]) -> str | None:
 
 
 __all__ = [
+    "contains_request_header_context",
     "encrypt_secrets_dict",
     "extract_plaintext_secrets",
     "looks_like_provider_credential_paste",
     "merge_secret_into_arguments",
     "redact_known_secrets",
+    "redact_user_message",
 ]
