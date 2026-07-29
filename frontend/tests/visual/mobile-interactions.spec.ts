@@ -480,6 +480,7 @@ test.describe("移动端交互细节", () => {
     await expect(page.getByRole("button", { name: "展开配置" })).toHaveCount(0);
     await installToolsTrigger.click();
     await expect(page.getByRole("button", { name: "展开配置" })).toHaveAttribute("aria-expanded", "false");
+    await expect(page.getByText("推荐插件", { exact: true })).toHaveCount(0);
     await expect(page.getByRole("button", { name: "展开添加仓库" })).toHaveAttribute("aria-expanded", "false");
     const savedRepo = page.getByText("telebot-plugins", { exact: true });
     await expect(savedRepo).toHaveCount(1);
@@ -505,6 +506,43 @@ test.describe("移动端交互细节", () => {
       return Math.round(box?.y || 0);
     }));
     expect(new Set(tops).size).toBe(1);
+    fixture.assertClean();
+  });
+
+  test("AI 概览成功率与近期调用使用统一指标卡结构", async ({ page }) => {
+    const fixture = await installApiFixture(page);
+    await installProviderFixture(page);
+    await page.route("**/api/llm/usage/recent**", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          items: [
+            { id: 1, account_id: 1, provider_id: 1, model: "deepseek-chat", input_tokens: 10, output_tokens: 20, success: true, created_at: "2026-07-24T00:00:00Z" },
+            { id: 2, account_id: 1, provider_id: 2, model: "grok-4.20-fast", input_tokens: 12, output_tokens: 0, success: false, created_at: "2026-07-24T00:01:00Z" },
+          ],
+          summary: { request_count: 2, success_count: 1, failed_count: 1, fallback_count: 0, total_tokens: 42, avg_latency_ms: 150 },
+        }),
+      });
+    });
+
+    await page.goto("/ai", { waitUntil: "networkidle" });
+    const metricCard = (title: string) => page
+      .getByText(title, { exact: true })
+      .locator("xpath=ancestor::*[contains(concat(' ', normalize-space(@class), ' '), ' group ')][1]");
+    const recentCard = metricCard("近期调用情况");
+    const successCard = metricCard("调用成功率");
+    await expect(recentCard).toHaveCount(1);
+    await expect(successCard).toHaveCount(1);
+    await expect(successCard.locator(":scope > div.absolute.inset-x-0.top-0.h-1")).toBeVisible();
+    await expect(successCard.getByText("50%", { exact: true })).toBeVisible();
+    await expect(successCard.getByText("1 次成功 / 2 次请求", { exact: true })).toBeVisible();
+
+    const recentBox = await recentCard.boundingBox();
+    const successBox = await successCard.boundingBox();
+    expect(recentBox).not.toBeNull();
+    expect(successBox).not.toBeNull();
+    expect(Math.abs((recentBox?.height ?? 0) - (successBox?.height ?? 0))).toBeLessThanOrEqual(1);
     fixture.assertClean();
   });
 
