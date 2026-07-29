@@ -985,17 +985,6 @@ class SchedulerRuleExecutor:
         if isinstance(target, int):
             return target, target, None
 
-        if config_action is not None:
-            pinned_ref = config_action.get(RESOLVED_TARGET_REF_KEY)
-            pinned_id = config_action.get(RESOLVED_TARGET_ID_KEY)
-            if (
-                pinned_ref == target
-                and isinstance(pinned_id, int)
-                and not isinstance(pinned_id, bool)
-                and pinned_id != 0
-            ):
-                return pinned_id, pinned_id, target
-
         try:
             entity = await ctx.client.get_input_entity(target)
         except FloodWaitError as exc:
