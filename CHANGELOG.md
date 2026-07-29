@@ -25,6 +25,16 @@
 
 ## [Unreleased]
 
+## [0.86.0-beta.10] - 2026-07-30 · patch（补丁版本预发布） · 跨环境视觉门禁修复
+
+### Fixed
+
+- 视觉回归在 GitHub macOS Runner 上不再拿开发机生成的截图做跨系统像素比对，避免字体与 Chromium 栅格化差异让全部页面产生误报；CI 继续检查基线文件存在、页面行为正常，以及同一 Runner 内两次渲染结果稳定。
+
+### Tests
+
+- 保留本机黄金截图回归，并支持通过 `VERIFY_STORED_VISUAL_BASELINES=1` 在 CI 中显式强制核对仓库截图。
+
 ## [0.86.0-beta.9] - 2026-07-30 · patch（补丁版本预发布） · 发布门禁与敏感请求头收口
 
 ### Changed
