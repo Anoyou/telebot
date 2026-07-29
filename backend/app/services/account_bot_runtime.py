@@ -4263,6 +4263,19 @@ def _interaction_participant_block_message(
     return "这不是你的玩法，请由付款或开局本人操作。"
 
 
+def _interaction_actions_require_participant_gate(actions: list[dict[str, Any]]) -> bool:
+    """普通消息只有在插件确认产生业务动作后，才应用参与者门禁。
+
+    ``no_session`` / ``end_session`` 只是会话生命周期信号，不代表当前文本是牌桌操作。
+    """
+
+    return any(
+        str(action.get("type") or "").strip() not in {"no_session", "end_session"}
+        for action in actions
+        if isinstance(action, dict)
+    )
+
+
 async def _interaction_session_keys_for_rule(account_id: int, rule: dict[str, Any], chat_id: int | None) -> list[str]:
     if str(rule.get("module_session_scope") or rule.get("concurrency") or "chat") != "user":
         return [_interaction_session_key(account_id, rule, chat_id)]
@@ -6231,16 +6244,19 @@ async def _try_handle_interaction_module_message(
         session = await _load_interaction_session(incoming, rule)
         if session is None:
             continue
-        participant_block = _interaction_participant_block_message(incoming, rule, session)
+        # callback 明确指向牌桌按钮，可在执行插件前做参与者门禁。
+        # 普通消息可能只是群聊，必须等插件确认产生业务动作后再拦截。
+        participant_block = (
+            _interaction_participant_block_message(incoming, rule, session)
+            if is_callback
+            else None
+        )
         if participant_block:
-            if is_callback:
-                await _answer_callback(
-                    incoming,
-                    text=participant_block,
-                    show_alert=True,
-                )
-            else:
-                await _send(incoming, participant_block, reply_to_message_id=incoming.message_id)
+            await _answer_callback(
+                incoming,
+                text=participant_block,
+                show_alert=True,
+            )
             return True
         if not is_callback:
             if _message_equals_any(text, _rule_keyword_list(rule, "open_commands")):
@@ -6372,6 +6388,11 @@ async def _try_handle_interaction_module_message(
                 await _answer_callback(incoming)
                 return True
             continue
+        if not is_callback and _interaction_actions_require_participant_gate(actions):
+            participant_block = _interaction_participant_block_message(incoming, rule, session)
+            if participant_block:
+                await _send(incoming, participant_block, reply_to_message_id=incoming.message_id)
+                return True
         raw_actions = [dict(action) for action in actions]
         actions = await _guard_interaction_actions(incoming, rule, actions)
         _schedule_interaction_debug_state(

@@ -398,6 +398,27 @@ def _version_tuple(raw: str | None) -> tuple[int, ...]:
     return tuple(int(p) for p in re.findall(r"\d+", str(raw or ""))[:3])
 
 
+def _same_repo_source(left: str | None, right: str | None) -> bool:
+    """比较仓库来源，同时兼容 ``.git``、尾斜杠和 GitHub tree 分支链接。"""
+
+    if not left or not right:
+        return False
+    try:
+        left_source = normalize_git_source_url(left)
+        right_source = normalize_git_source_url(right)
+    except RemotePluginError:
+        return left.rstrip("/") == right.rstrip("/")
+
+    def _clone_identity(value: str) -> str:
+        normalized = value.rstrip("/")
+        return normalized[:-4] if normalized.endswith(".git") else normalized
+
+    return (
+        _clone_identity(left_source.clone_url) == _clone_identity(right_source.clone_url)
+        and left_source.ref == right_source.ref
+    )
+
+
 async def list_plugins_in_repo(
     db: AsyncSession,
     repo_id: int,
@@ -430,8 +451,24 @@ async def _list_plugins_in_cached_repo(
 ) -> list[PluginRepoPlugin]:
     raw = _scan_plugins(repo_dir)
 
-    installed_rows = (await db.execute(select(InstalledPlugin.key, InstalledPlugin.version))).all()
-    installed_versions = {str(name): str(version or "") for name, version in installed_rows}
+    installed_rows = (
+        await db.execute(
+            select(
+                InstalledPlugin.key,
+                InstalledPlugin.version,
+                InstalledPlugin.source,
+                InstalledPlugin.source_url,
+            )
+        )
+    ).all()
+    installed_by_name = {
+        str(name): {
+            "version": str(version or ""),
+            "source": str(source or ""),
+            "source_url": str(source_url or ""),
+        }
+        for name, version, source, source_url in installed_rows
+    }
 
     out: list[PluginRepoPlugin] = []
     for default_name, plugin_dir in raw:
@@ -441,7 +478,12 @@ async def _list_plugins_in_cached_repo(
             log.warning("跳过仓库 %s 内非法插件目录: %s", row.url, plugin_dir)
             continue
         subdir = "" if plugin_dir == repo_dir else str(plugin_dir.relative_to(repo_dir))
-        installed_version = installed_versions.get(meta.name)
+        installed = installed_by_name.get(meta.name)
+        installed_version = installed["version"] if installed else None
+        installed_source_url = installed["source_url"] if installed else None
+        source_matches = bool(
+            installed and _same_repo_source(installed_source_url, row.url)
+        )
         out.append(
             PluginRepoPlugin(
                 name=meta.name,
@@ -452,8 +494,12 @@ async def _list_plugins_in_cached_repo(
                 version=meta.version,
                 installed=installed_version is not None,
                 installed_version=installed_version,
+                installed_source=installed["source"] if installed else None,
+                installed_source_url=installed_source_url,
+                source_matches=source_matches,
                 update_available=(
-                    installed_version is not None
+                    source_matches
+                    and installed_version is not None
                     and _version_tuple(meta.version) > _version_tuple(installed_version)
                 ),
                 event_subscriptions=[item for item in meta.event_subscriptions if isinstance(item, dict)],
@@ -606,13 +652,14 @@ async def install_plugin_from_repo(
     plugin_name: str,
     *,
     default_enabled: bool = False,
+    replace_existing: bool = False,
 ) -> RemotePluginView:
     """从仓库中安装指定名字的插件。
 
     步骤：
       1. 取仓库行 → 确保缓存最新（git clone / pull）
       2. 在缓存里定位含 plugin.json 的插件目录
-      3. 校验目标安装目录 ``plugins/installed/<plugin_name>/`` 不存在且 DB 无同名行
+      3. 默认拒绝重名；``replace_existing=True`` 时安全替换同名插件并迁移来源
       4. ``copytree`` 把插件目录拷过去（不含 .git）
       5. 写 ``installed_plugin`` 行（source_url 用仓库 URL，便于追溯）
       6. 注册到 ``feature`` 表 + 按 ``default_enabled`` 批量启用账号
@@ -627,6 +674,7 @@ async def install_plugin_from_repo(
             repo_dir,
             plugin_name,
             default_enabled=default_enabled,
+            replace_existing=replace_existing,
         )
 
 
@@ -637,6 +685,7 @@ async def _install_plugin_from_cached_repo(
     plugin_name: str,
     *,
     default_enabled: bool,
+    replace_existing: bool,
 ) -> RemotePluginView:
 
     # 扫描定位插件子目录
@@ -665,10 +714,23 @@ async def _install_plugin_from_cached_repo(
     install_path = _plugin_dir(final_name)
     staging = install_path.parent / f"{install_path.name}.installing"
 
-    # 重名检查：DB 行 + 目录都不能存在
+    # 同名插件只有在用户明确确认后才能迁移来源；该路径不会删除账号或全局配置。
     existing = await db.get(InstalledPlugin, final_name)
     if existing is not None:
-        raise DuplicatePluginName("PLUGIN_EXISTS", f"插件 {final_name!r} 已安装")
+        if not replace_existing:
+            raise DuplicatePluginName("PLUGIN_EXISTS", f"插件 {final_name!r} 已安装")
+        if existing.source == "builtin":
+            raise DuplicatePluginName(
+                "BUILTIN_PLUGIN_CONFLICT",
+                f"插件 {final_name!r} 是平台内置能力，不能由远程仓库覆盖",
+            )
+        return await _replace_installed_plugin_from_repo_dir(
+            db,
+            repo_url=row.url,
+            plugin_dir=target_dir,
+            meta=meta,
+            installed=existing,
+        )
     if install_path.exists():
         raise DuplicatePluginName(
             "DIR_EXISTS",
@@ -834,55 +896,60 @@ async def _replace_installed_plugin_from_repo_dir(
     finally:
         if staging.exists():
             shutil.rmtree(staging, ignore_errors=True)
-        if backup.exists():
-            if swapped:
-                shutil.rmtree(backup, ignore_errors=True)
-            elif not install_path.exists():
-                backup.rename(install_path)
 
     old_enabled = bool(installed.enabled)
     old_default_enabled = remote_plugin_view_from_installed(installed).default_enabled
-
-    feat = (await db.execute(select(Feature).where(Feature.key == final_name))).scalar_one_or_none()
-    if feat is None:
-        db.add(
-            Feature(
-                key=final_name,
-                display_name=meta.display_name or final_name,
-                is_builtin=False,
-                version=meta.version,
-                manifest=_feature_manifest_from_meta(meta),
+    try:
+        feat = (await db.execute(select(Feature).where(Feature.key == final_name))).scalar_one_or_none()
+        if feat is None:
+            db.add(
+                Feature(
+                    key=final_name,
+                    display_name=meta.display_name or final_name,
+                    is_builtin=False,
+                    version=meta.version,
+                    manifest=_feature_manifest_from_meta(meta),
+                )
             )
-        )
-    else:
-        feat.display_name = meta.display_name or final_name
-        feat.version = meta.version
-        feat.is_builtin = False
-        feat.manifest = _merge_feature_manifest_preserving_global_config(feat.manifest, meta)
+        else:
+            feat.display_name = meta.display_name or final_name
+            feat.version = meta.version
+            feat.is_builtin = False
+            feat.manifest = _merge_feature_manifest_preserving_global_config(feat.manifest, meta)
 
-    manifest_json = _with_remote_info(
-        _manifest_json_from_remote_meta(meta),
-        default_enabled=old_default_enabled,
-        latest_version=meta.version,
-        update_available=False,
-        runtime_revision_at=datetime.now(UTC),
-    )
-    row = await upsert_installed_plugin(
-        db,
-        key=final_name,
-        source=PLUGIN_SOURCE_REPO,
-        source_url=repo_url,
-        installed_path=str(install_path),
-        version=meta.version,
-        manifest_json=manifest_json,
-        enabled=old_enabled,
-        signature_ok=None,
-        trust_tier=PLUGIN_TRUST_COMMUNITY,
-        source_label="Plugin Repo",
-        last_install_error=None,
-        lint_warnings=lint_warnings,
-    )
-    await db.flush()
+        manifest_json = _with_remote_info(
+            _manifest_json_from_remote_meta(meta),
+            default_enabled=old_default_enabled,
+            latest_version=meta.version,
+            update_available=False,
+            runtime_revision_at=datetime.now(UTC),
+        )
+        row = await upsert_installed_plugin(
+            db,
+            key=final_name,
+            source=PLUGIN_SOURCE_REPO,
+            source_url=repo_url,
+            installed_path=str(install_path),
+            version=meta.version,
+            manifest_json=manifest_json,
+            enabled=old_enabled,
+            signature_ok=None,
+            trust_tier=PLUGIN_TRUST_COMMUNITY,
+            source_label="Plugin Repo",
+            last_install_error=None,
+            lint_warnings=lint_warnings,
+        )
+        await db.flush()
+    except Exception:
+        clear_plugin_update(install_path.parent, final_name)
+        if install_path.exists():
+            shutil.rmtree(install_path, ignore_errors=True)
+        if backup.exists():
+            backup.rename(install_path)
+        raise
+
+    if backup.exists():
+        shutil.rmtree(backup, ignore_errors=True)
     return remote_plugin_view_from_installed(row)
 
 
@@ -941,6 +1008,10 @@ async def _update_installed_plugins_from_cached_repo(
 
         installed = await db.get(InstalledPlugin, meta.name)
         if installed is None:
+            continue
+        if not _same_repo_source(installed.source_url, row.url):
+            # 仓库中碰巧存在同名插件时不能由批量操作静默迁移来源。
+            # 跨仓库接管必须通过单插件“迁移来源”确认入口完成。
             continue
         result.checked += 1
         old_version = str(installed.version or "")

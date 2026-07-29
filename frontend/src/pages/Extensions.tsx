@@ -1145,6 +1145,11 @@ function RemoteInstallCard() {
     repoName: string;
     plugins: PluginRepoPlugin[];
   } | null>(null);
+  const [pendingSourceMigration, setPendingSourceMigration] = useState<{
+    repoId: number;
+    repoUrl: string;
+    plugin: PluginRepoPlugin;
+  } | null>(null);
 
   // 已保存仓库列表（后端）
   const reposQ = useQuery({ queryKey: PLUGIN_REPOS_QK, queryFn: fetchPluginRepos });
@@ -1244,10 +1249,18 @@ function RemoteInstallCard() {
 
   // 从仓库安装插件
   const installFromRepoMut = useMutation({
-    mutationFn: ({ repoId, name }: { repoId: number; name: string }) =>
-      installFromRepo(repoId, name),
-    onSuccess: (row) => {
-      toast.success(`已安装 ${row.name} v${row.version}`);
+    mutationFn: ({ repoId, name, replaceExisting = false }: {
+      repoId: number;
+      name: string;
+      replaceExisting?: boolean;
+    }) => installFromRepo(repoId, name, { replace_existing: replaceExisting }),
+    onSuccess: (row, variables) => {
+      toast.success(
+        variables.replaceExisting
+          ? `已迁移 ${row.name} 的更新来源，并保留原有配置`
+          : `已安装 ${row.name} v${row.version}`,
+      );
+      setPendingSourceMigration(null);
       toastPluginLintWarnings(row);
       qc.invalidateQueries({ queryKey: REMOTE_QK });
       qc.invalidateQueries({ queryKey: PLUGINS_QK });
@@ -1504,6 +1517,7 @@ function RemoteInstallCard() {
                       <div className="space-y-1">
                         {(pluginsQ.data ?? []).map((p) => {
                           const canUpdate = !!p.installed && !!p.update_available;
+                          const canMigrateSource = !!p.installed && !p.source_matches;
                           const events = pluginEventSubscriptionLabels(p.event_subscriptions);
                           const capabilities = pluginOperationalCapabilityLabels({
                             capabilities: p.capabilities,
@@ -1561,22 +1575,34 @@ function RemoteInstallCard() {
                               variant={canUpdate ? "default" : p.installed ? "outline" : "default"}
                               className="h-7 shrink-0"
                               disabled={
-                                (p.installed && !canUpdate)
+                                (p.installed && !canUpdate && !canMigrateSource)
                                 || installFromRepoMut.isPending
                                 || updateFromRepoMut.isPending
                               }
-                              onClick={() =>
-                                canUpdate
-                                  ? updateFromRepoMut.mutate(p.name)
-                                  : installFromRepoMut.mutate({ repoId: repo.id, name: p.name })
-                              }
+                              onClick={() => {
+                                if (canUpdate) {
+                                  updateFromRepoMut.mutate(p.name);
+                                  return;
+                                }
+                                if (canMigrateSource) {
+                                  setPendingSourceMigration({
+                                    repoId: repo.id,
+                                    repoUrl: repo.url,
+                                    plugin: p,
+                                  });
+                                  return;
+                                }
+                                installFromRepoMut.mutate({ repoId: repo.id, name: p.name });
+                              }}
                             >
                               {canUpdate ? (
                                 <RefreshCw className="mr-1 h-3.5 w-3.5" />
+                              ) : canMigrateSource ? (
+                                <GitFork className="mr-1 h-3.5 w-3.5" />
                               ) : p.installed ? null : (
                                 <Download className="mr-1 h-3.5 w-3.5" />
                               )}
-                              {canUpdate ? "更新" : p.installed ? "已安装" : "安装"}
+                              {canUpdate ? "更新" : canMigrateSource ? "迁移来源" : p.installed ? "已安装" : "安装"}
                             </Button>
                           </div>
                         );
@@ -1590,6 +1616,66 @@ function RemoteInstallCard() {
             })}
           </div>
         )}
+        <Dialog
+          open={pendingSourceMigration !== null}
+          onOpenChange={(open) => !open && setPendingSourceMigration(null)}
+        >
+          <DialogContent className="dialog-center max-w-lg">
+            <DialogHeader>
+              <DialogTitle>迁移插件更新来源</DialogTitle>
+              <DialogDescription>
+                将用所选仓库中的同名插件覆盖当前安装包，并把后续更新来源切换到该仓库。
+              </DialogDescription>
+            </DialogHeader>
+            <div className="space-y-3 text-sm">
+              <div className="rounded-md border border-border/70 bg-muted/20 p-3">
+                <div className="font-medium">
+                  {pendingSourceMigration?.plugin.display_name || pendingSourceMigration?.plugin.name}
+                </div>
+                <div className="mt-1 font-mono text-xs text-muted-foreground">
+                  {formatPluginVersion(pendingSourceMigration?.plugin.installed_version)} → {formatPluginVersion(pendingSourceMigration?.plugin.version)}
+                </div>
+              </div>
+              <div className="grid gap-2 text-xs text-muted-foreground">
+                <div>
+                  <span className="font-medium text-foreground">当前来源：</span>
+                  <span className="break-all font-mono">{pendingSourceMigration?.plugin.installed_source_url || "未知来源"}</span>
+                </div>
+                <div>
+                  <span className="font-medium text-foreground">新来源：</span>
+                  <span className="break-all font-mono">{pendingSourceMigration?.repoUrl}</span>
+                </div>
+              </div>
+              <div className="rounded-md border border-primary/25 bg-primary/5 p-3 text-xs leading-5 text-muted-foreground">
+                账号启停、账号配置、插件全局配置和持久化数据都会保留。仅替换插件代码、元数据和更新来源。安装或校验失败时保留当前版本。
+              </div>
+            </div>
+            <DialogFooter>
+              <Button
+                variant="outline"
+                onClick={() => setPendingSourceMigration(null)}
+                disabled={installFromRepoMut.isPending}
+              >
+                取消
+              </Button>
+              <Button
+                loading={installFromRepoMut.isPending}
+                loadingText="迁移中…"
+                onClick={() => {
+                  if (!pendingSourceMigration) return;
+                  installFromRepoMut.mutate({
+                    repoId: pendingSourceMigration.repoId,
+                    name: pendingSourceMigration.plugin.name,
+                    replaceExisting: true,
+                  });
+                }}
+              >
+                <GitFork className="mr-2 h-4 w-4" />
+                确认迁移来源
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
         <Dialog open={pendingBulkUpdate !== null} onOpenChange={(open) => !open && setPendingBulkUpdate(null)}>
           <DialogContent className="dialog-center !flex max-h-[85dvh] max-w-2xl flex-col gap-0 overflow-hidden p-0">
             <DialogHeader className="shrink-0 border-b border-border/70 px-4 py-4 sm:px-6">

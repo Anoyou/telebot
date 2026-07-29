@@ -72,6 +72,9 @@ class PluginRepoPlugin(BaseModel):
     version: str = "0.0.0"
     installed: bool = False
     installed_version: str | None = None
+    installed_source: str | None = None
+    installed_source_url: str | None = None
+    source_matches: bool = False
     update_available: bool = False
     event_subscriptions: list[dict[str, Any]] = Field(default_factory=list)
     capabilities: dict[str, Any] = Field(default_factory=dict)

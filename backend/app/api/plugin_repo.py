@@ -124,6 +124,7 @@ class InstallFromRepoBody(BaseModel):
     """``POST /{id}/plugins/{name}/install`` 的可选 body。"""
 
     default_enabled: bool = False
+    replace_existing: bool = False
 
 
 @router.get("/local/plugins", response_model=list[PluginRepoPlugin])
@@ -281,9 +282,14 @@ async def install_plugin_from_repo(
     若想一次性给所有账号启用，传 ``default_enabled=true``。
     """
     default_enabled = bool(body.default_enabled) if body else False
+    replace_existing = bool(body.replace_existing) if body else False
     try:
         row = await svc.install_plugin_from_repo(
-            db, repo_id, plugin_name, default_enabled=default_enabled,
+            db,
+            repo_id,
+            plugin_name,
+            default_enabled=default_enabled,
+            replace_existing=replace_existing,
         )
         await db.commit()
         await trigger_reload(db, row.name)

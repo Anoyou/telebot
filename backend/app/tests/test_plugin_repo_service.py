@@ -237,6 +237,48 @@ async def test_repo_lock_covers_cache_consumer_until_scan_finishes(tmp_path, mon
 
 
 @pytest.mark.asyncio
+async def test_repo_listing_marks_same_name_from_other_source_for_migration(tmp_path) -> None:
+    repo = tmp_path / "repo"
+    _write_repo_plugin(repo, "ai_chat", version="2.0.0")
+    row = SimpleNamespace(url="https://github.com/example/new-plugins.git")
+
+    class _InstalledRows:
+        def all(self):
+            return [
+                (
+                    "ai_chat",
+                    "1.0.0",
+                    "repo",
+                    "https://github.com/example/deleted-plugins/tree/0.33.x",
+                )
+            ]
+
+    class _DB:
+        async def execute(self, _stmt):
+            return _InstalledRows()
+
+    plugins = await svc._list_plugins_in_cached_repo(_DB(), row, repo)
+
+    assert len(plugins) == 1
+    assert plugins[0].installed is True
+    assert plugins[0].installed_version == "1.0.0"
+    assert plugins[0].installed_source == "repo"
+    assert plugins[0].source_matches is False
+    assert plugins[0].update_available is False
+
+
+def test_same_repo_source_compares_branch_as_part_of_source() -> None:
+    assert svc._same_repo_source(
+        "https://github.com/example/plugins/tree/main",
+        "https://github.com/example/plugins.git/tree/main",
+    )
+    assert not svc._same_repo_source(
+        "https://github.com/example/plugins/tree/0.33.x",
+        "https://github.com/example/plugins.git",
+    )
+
+
+@pytest.mark.asyncio
 async def test_remote_official_sources_only_include_official_tag(tmp_path, monkeypatch) -> None:
     repo = tmp_path / "official-repo"
     _write_repo_plugin(repo, "codex_image", version="1.1.0", tags=["official", "image"])

@@ -1449,6 +1449,8 @@ identity = await ctx.identities.resolve_userbot(
 | `paid_pool` | 只有已确认付费的玩家池可参与，适合多人付费入场 |
 | `notify_only` | 只做通知或一次性动作，不建立玩家操作边界 |
 
+`solo_owner` / `paid_pool` 的按钮回调明确指向牌桌操作，平台会在调用插件前完成参与者校验。普通群消息具有歧义，平台会先让插件判断是否属于当前会话；插件返回业务动作后才应用参与者门禁，返回零动作或仅返回 `no_session` / `end_session` 时静默放行。插件仍必须在修改内部状态前校验消息发送者是否属于自己的玩家集合，不能把平台门禁当成业务状态校验的唯一依据。
+
 `interaction_entries` 中的 `session_scope` 是插件会话作用域，必须按插件业务形态声明。它和交互规则里的 `concurrency` 不是一回事：
 
 | 字段 | 归属 | 含义 | 示例 |

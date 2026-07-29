@@ -10849,7 +10849,7 @@ async def test_solo_owner_session_blocks_other_user_callback(monkeypatch) -> Non
 
 
 @pytest.mark.asyncio
-async def test_paid_pool_session_blocks_plain_message_before_plugin(monkeypatch) -> None:
+async def test_paid_pool_session_ignores_unrelated_plain_message_after_plugin_declines(monkeypatch) -> None:
     class _DB:
         async def __aenter__(self):
             return self
@@ -10892,6 +10892,8 @@ async def test_paid_pool_session_blocks_plain_message_before_plugin(monkeypatch)
     monkeypatch.setattr(account_bot_runtime, "AsyncSessionLocal", lambda: _DB())
     monkeypatch.setattr(account_bot_runtime, "get_redis", lambda: redis)
     monkeypatch.setattr(account_bot_runtime, "_run_worker_interaction_entry", run_entry)
+    monkeypatch.setattr(account_bot_runtime, "claim_interaction_message", AsyncMock(return_value=True))
+    monkeypatch.setattr(account_bot_runtime, "record_span", AsyncMock())
     monkeypatch.setattr(account_bot_service, "send_message", send)
     monkeypatch.setattr(
         account_bot_service,
@@ -10906,16 +10908,87 @@ async def test_paid_pool_session_blocks_plain_message_before_plugin(monkeypatch)
             "update_id": 16,
             "message": {
                 "message_id": 123,
-                "text": "1",
+                "text": "今晚吃什么",
                 "from": {"id": 222, "first_name": "路过"},
                 "chat": {"id": -100123, "type": "supergroup"},
             },
         },
     )
 
-    run_entry.assert_not_awaited()
-    send.assert_awaited_once()
-    assert send.await_args.args[:3] == ("bbot-token", -100123, "请先加入本局，再操作牌桌按钮。")
+    run_entry.assert_awaited_once()
+    send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_paid_pool_session_blocks_relevant_plain_action_after_plugin_accepts(monkeypatch) -> None:
+    class _DB:
+        async def get(self, *_args):  # noqa: ANN002
+            return None
+
+    incoming = account_bot_runtime.Incoming(
+        account_id=1,
+        token="bbot-token",
+        update_id=17,
+        user_id=222,
+        chat_id=-100123,
+        chat_type="supergroup",
+        message_id=124,
+        text="牌桌操作",
+        display_name="路过",
+        trace_id="evt_paid_pool_relevant_plain_action",
+    )
+    rule = {
+        "id": "ten-half-paid",
+        "enabled": True,
+        "chat_ids": [-100123],
+        "action": "module",
+        "module_key": "ten_half",
+        "module_action": "start_ten_half",
+        "module_session_scope": "chat",
+        "participant_policy": "paid_pool",
+    }
+    session = {
+        "rule_id": "ten-half-paid",
+        "started_by_user_id": 111,
+        "participant_user_ids": [111],
+        "paid_user_ids": [111],
+    }
+    run_entry = AsyncMock(
+        return_value=(True, None, [{"type": "send_message", "text": "插件已接受操作"}])
+    )
+    send = AsyncMock()
+    apply_actions = AsyncMock()
+    monkeypatch.setattr(account_bot_runtime, "_load_interaction_session", AsyncMock(return_value=session))
+    monkeypatch.setattr(account_bot_runtime, "_run_worker_interaction_entry", run_entry)
+    monkeypatch.setattr(account_bot_runtime, "claim_interaction_message", AsyncMock(return_value=True))
+    monkeypatch.setattr(account_bot_runtime, "record_span", AsyncMock())
+    monkeypatch.setattr(account_bot_runtime, "_send", send)
+    monkeypatch.setattr(account_bot_runtime, "_apply_interaction_actions", apply_actions)
+
+    handled = await account_bot_runtime._try_handle_interaction_module_message(
+        _DB(),
+        incoming,
+        {"enabled": True, "rules": [rule]},
+    )
+
+    assert handled is True
+    run_entry.assert_awaited_once()
+    send.assert_awaited_once_with(
+        incoming,
+        "请先加入本局，再操作牌桌按钮。",
+        reply_to_message_id=124,
+    )
+    apply_actions.assert_not_awaited()
+
+
+def test_participant_gate_ignores_session_lifecycle_only_actions() -> None:
+    assert account_bot_runtime._interaction_actions_require_participant_gate([]) is False
+    assert account_bot_runtime._interaction_actions_require_participant_gate(
+        [{"type": "no_session"}, {"type": "end_session"}]
+    ) is False
+    assert account_bot_runtime._interaction_actions_require_participant_gate(
+        [{"type": "send_message", "text": "牌桌操作"}]
+    ) is True
 
 
 @pytest.mark.asyncio
