@@ -25,7 +25,7 @@ from .rate_limit import RateLimitEvent, RateLimitOverride, RateLimitRule, RateLi
 from .remote_plugin import RemotePlugin
 from .rule import Rule
 from .system import NotificationChannel, SystemSetting
-from .system_agent import SystemAgentAction, SystemAgentMessage, SystemAgentSession
+from .system_agent import SystemAgentAction, SystemAgentMessage, SystemAgentSession, SystemAgentUserMemory
 from .user import WebUser
 
 __all__ = [
@@ -65,6 +65,7 @@ __all__ = [
     "SystemAgentAction",
     "SystemAgentMessage",
     "SystemAgentSession",
+    "SystemAgentUserMemory",
     "SystemSetting",
     "WebUser",
 ]

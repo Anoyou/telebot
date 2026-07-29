@@ -19,7 +19,7 @@ from app.db.models.account import Account
 from app.db.models.account_bot import AccountBot
 from app.db.models.log import RuntimeLog
 from app.schemas.account_bot import AccountBotConfigUpdate, AccountBotInteractionConfig, AccountBotTestRequest
-from app.services import account_bot_runtime, account_bot_service, audit
+from app.services import account_bot_runtime, account_bot_service, audit, platform_capabilities
 from app.services.interaction import contracts as interaction_contracts
 from app.services.interaction import userbot_actions
 from app.services.interaction.delivery import (
@@ -154,6 +154,16 @@ def _allow_transfer_notice_trigger_claims(request, monkeypatch) -> None:
             "_claim_interaction_trigger",
             AsyncMock(return_value=True),
         )
+
+
+@pytest.fixture(autouse=True)
+def _enable_platform_capabilities_for_interaction_tests() -> None:
+    """账号 Bot 历史用例默认模拟已成功完成主进程能力缓存 bootstrap。"""
+
+    platform_capabilities._reset_for_tests()
+    platform_capabilities._CACHE_READY = True
+    yield
+    platform_capabilities._reset_for_tests()
 
 
 @pytest.mark.asyncio
@@ -9266,6 +9276,56 @@ def test_paid_pool_callback_allows_session_starter_as_controller(monkeypatch) ->
     assert account_bot_runtime._interaction_participant_block_message(stranger_callback, rule, session) == "请先加入本局，再操作牌桌按钮。"
 
 
+def test_paid_pool_empty_participant_list_allows_session_starter_to_pick_stake(monkeypatch) -> None:
+    monkeypatch.setattr(
+        account_bot_service,
+        "declared_module_entry_manifest",
+        lambda module_key, entry_key: {"participant_policy": "paid_pool"}
+        if (module_key, entry_key) == ("ten_half", "start_ten_half")
+        else None,
+    )
+    rule = {
+        "id": "ten-half-paid",
+        "action": "module",
+        "module_key": "ten_half",
+        "module_action": "start_ten_half",
+        "module_session_scope": "chat",
+    }
+    session = {
+        "started_by_user_id": 999,
+        "paid_user_ids": [],
+        "participant_user_ids": [],
+    }
+
+    starter_callback = account_bot_runtime.Incoming(
+        account_id=1,
+        token="bbot-token",
+        update_id=1,
+        user_id=999,
+        chat_id=-100123,
+        message_id=90,
+        text="",
+        callback_id="cb-stake-owner",
+        callback_data="th:stake:1000",
+        display_name="Owner",
+    )
+    stranger_callback = account_bot_runtime.Incoming(
+        account_id=1,
+        token="bbot-token",
+        update_id=2,
+        user_id=333,
+        chat_id=-100123,
+        message_id=91,
+        text="",
+        callback_id="cb-stake-stranger",
+        callback_data="th:stake:1000",
+        display_name="Stranger",
+    )
+
+    assert account_bot_runtime._interaction_participant_block_message(starter_callback, rule, session) is None
+    assert account_bot_runtime._interaction_participant_block_message(stranger_callback, rule, session) == "请先加入本局，再操作牌桌按钮。"
+
+
 @pytest.mark.asyncio
 async def test_live_message_start_session_action_writes_interaction_session(monkeypatch) -> None:
     class _DB:
@@ -10789,7 +10849,7 @@ async def test_solo_owner_session_blocks_other_user_callback(monkeypatch) -> Non
 
 
 @pytest.mark.asyncio
-async def test_paid_pool_session_blocks_plain_message_before_plugin(monkeypatch) -> None:
+async def test_paid_pool_session_ignores_unrelated_plain_message_after_plugin_declines(monkeypatch) -> None:
     class _DB:
         async def __aenter__(self):
             return self
@@ -10832,6 +10892,8 @@ async def test_paid_pool_session_blocks_plain_message_before_plugin(monkeypatch)
     monkeypatch.setattr(account_bot_runtime, "AsyncSessionLocal", lambda: _DB())
     monkeypatch.setattr(account_bot_runtime, "get_redis", lambda: redis)
     monkeypatch.setattr(account_bot_runtime, "_run_worker_interaction_entry", run_entry)
+    monkeypatch.setattr(account_bot_runtime, "claim_interaction_message", AsyncMock(return_value=True))
+    monkeypatch.setattr(account_bot_runtime, "record_span", AsyncMock())
     monkeypatch.setattr(account_bot_service, "send_message", send)
     monkeypatch.setattr(
         account_bot_service,
@@ -10846,16 +10908,87 @@ async def test_paid_pool_session_blocks_plain_message_before_plugin(monkeypatch)
             "update_id": 16,
             "message": {
                 "message_id": 123,
-                "text": "1",
+                "text": "今晚吃什么",
                 "from": {"id": 222, "first_name": "路过"},
                 "chat": {"id": -100123, "type": "supergroup"},
             },
         },
     )
 
-    run_entry.assert_not_awaited()
-    send.assert_awaited_once()
-    assert send.await_args.args[:3] == ("bbot-token", -100123, "请先加入本局，再操作牌桌按钮。")
+    run_entry.assert_awaited_once()
+    send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_paid_pool_session_blocks_relevant_plain_action_after_plugin_accepts(monkeypatch) -> None:
+    class _DB:
+        async def get(self, *_args):  # noqa: ANN002
+            return None
+
+    incoming = account_bot_runtime.Incoming(
+        account_id=1,
+        token="bbot-token",
+        update_id=17,
+        user_id=222,
+        chat_id=-100123,
+        chat_type="supergroup",
+        message_id=124,
+        text="牌桌操作",
+        display_name="路过",
+        trace_id="evt_paid_pool_relevant_plain_action",
+    )
+    rule = {
+        "id": "ten-half-paid",
+        "enabled": True,
+        "chat_ids": [-100123],
+        "action": "module",
+        "module_key": "ten_half",
+        "module_action": "start_ten_half",
+        "module_session_scope": "chat",
+        "participant_policy": "paid_pool",
+    }
+    session = {
+        "rule_id": "ten-half-paid",
+        "started_by_user_id": 111,
+        "participant_user_ids": [111],
+        "paid_user_ids": [111],
+    }
+    run_entry = AsyncMock(
+        return_value=(True, None, [{"type": "send_message", "text": "插件已接受操作"}])
+    )
+    send = AsyncMock()
+    apply_actions = AsyncMock()
+    monkeypatch.setattr(account_bot_runtime, "_load_interaction_session", AsyncMock(return_value=session))
+    monkeypatch.setattr(account_bot_runtime, "_run_worker_interaction_entry", run_entry)
+    monkeypatch.setattr(account_bot_runtime, "claim_interaction_message", AsyncMock(return_value=True))
+    monkeypatch.setattr(account_bot_runtime, "record_span", AsyncMock())
+    monkeypatch.setattr(account_bot_runtime, "_send", send)
+    monkeypatch.setattr(account_bot_runtime, "_apply_interaction_actions", apply_actions)
+
+    handled = await account_bot_runtime._try_handle_interaction_module_message(
+        _DB(),
+        incoming,
+        {"enabled": True, "rules": [rule]},
+    )
+
+    assert handled is True
+    run_entry.assert_awaited_once()
+    send.assert_awaited_once_with(
+        incoming,
+        "请先加入本局，再操作牌桌按钮。",
+        reply_to_message_id=124,
+    )
+    apply_actions.assert_not_awaited()
+
+
+def test_participant_gate_ignores_session_lifecycle_only_actions() -> None:
+    assert account_bot_runtime._interaction_actions_require_participant_gate([]) is False
+    assert account_bot_runtime._interaction_actions_require_participant_gate(
+        [{"type": "no_session"}, {"type": "end_session"}]
+    ) is False
+    assert account_bot_runtime._interaction_actions_require_participant_gate(
+        [{"type": "send_message", "text": "牌桌操作"}]
+    ) is True
 
 
 @pytest.mark.asyncio
@@ -16492,6 +16625,7 @@ async def test_management_bot_command_creates_trace_when_router_debug_enabled(mo
     account_bot_runtime.start_trace.assert_awaited_once()
     handle_command.assert_awaited_once()
     assert handle_command.await_args.args[0].trace_id == "evt_management"
+    assert handle_command.await_args.args[0].management_rich_html_required is True
     assert any(call.args[1] == "receive" for call in record_span.await_args_list)
     assert any(call.kwargs.get("component") == "account_bot_command" for call in record_span.await_args_list)
     finish_trace.assert_awaited_once_with(trace, "ok")
@@ -16930,6 +17064,130 @@ async def test_account_bot_agent_send_uses_rich_markdown(monkeypatch) -> None:
         reply_markup=None,
         reply_to_message_id=None,
     )
+    send_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_management_bot_plain_message_always_uses_rich_html(monkeypatch) -> None:
+    incoming = account_bot_runtime.Incoming(
+        account_id=7,
+        token="bot-token",
+        update_id=1,
+        user_id=2,
+        chat_id=12345,
+        message_id=99,
+        text="/pause",
+        management_rich_html_required=True,
+    )
+    send_rich = AsyncMock(return_value={"message_id": 188})
+    send_message = AsyncMock()
+    monkeypatch.setattr(account_bot_service, "send_rich_message", send_rich)
+    monkeypatch.setattr(account_bot_service, "send_message", send_message)
+    monkeypatch.setattr(account_bot_runtime, "record_action", AsyncMock())
+    monkeypatch.setattr(account_bot_runtime, "_emit_account_bot_action_tap", AsyncMock())
+
+    result = await account_bot_runtime._send(incoming, "第一行\n第二行")
+
+    assert result == {"message_id": 188}
+    send_rich.assert_awaited_once_with(
+        "bot-token",
+        12345,
+        {"html": "<p>第一行<br>第二行</p>"},
+        reply_markup=None,
+        reply_to_message_id=None,
+    )
+    send_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_management_bot_agent_message_converts_markdown_to_rich_html(monkeypatch) -> None:
+    incoming = account_bot_runtime.Incoming(
+        account_id=7,
+        token="bot-token",
+        update_id=1,
+        user_id=2,
+        chat_id=12345,
+        message_id=99,
+        text="今日收入",
+        management_rich_html_required=True,
+    )
+    send_rich = AsyncMock(return_value={"message_id": 188})
+    monkeypatch.setattr(account_bot_service, "send_rich_message", send_rich)
+    monkeypatch.setattr(account_bot_service, "send_message", AsyncMock())
+    monkeypatch.setattr(account_bot_runtime, "record_action", AsyncMock())
+    monkeypatch.setattr(account_bot_runtime, "_emit_account_bot_action_tap", AsyncMock())
+
+    await account_bot_runtime._send(
+        incoming,
+        "<b>今日台账</b>\n<pre>类型  金额</pre>",
+        rich_markdown="## 今日台账\n\n| 类型 | 金额 |",
+    )
+
+    send_rich.assert_awaited_once_with(
+        "bot-token",
+        12345,
+        {"html": "<b>今日台账</b>\n<pre>类型  金额</pre>"},
+        reply_markup=None,
+        reply_to_message_id=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_management_bot_rich_edit_failure_sends_new_rich_message(monkeypatch) -> None:
+    incoming = account_bot_runtime.Incoming(
+        account_id=7,
+        token="bot-token",
+        update_id=1,
+        user_id=2,
+        chat_id=12345,
+        message_id=99,
+        text="/status",
+        management_rich_html_required=True,
+    )
+    edit_rich = AsyncMock(side_effect=RuntimeError("message cannot be edited"))
+    edit_message = AsyncMock()
+    send_rich = AsyncMock(return_value={"message_id": 188})
+    monkeypatch.setattr(account_bot_service, "edit_rich_message", edit_rich)
+    monkeypatch.setattr(account_bot_service, "edit_message", edit_message)
+    monkeypatch.setattr(account_bot_service, "send_rich_message", send_rich)
+    monkeypatch.setattr(account_bot_runtime, "record_action", AsyncMock())
+    monkeypatch.setattr(account_bot_runtime, "_emit_account_bot_action_tap", AsyncMock())
+
+    result = await account_bot_runtime._send(incoming, "状态正常", edit=True)
+
+    assert result == {"message_id": 188}
+    edit_message.assert_not_awaited()
+    send_rich.assert_awaited_once_with(
+        "bot-token",
+        12345,
+        {"html": "<p>状态正常</p>"},
+        reply_markup=None,
+        reply_to_message_id=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_management_bot_rich_send_failure_does_not_fallback(monkeypatch) -> None:
+    incoming = account_bot_runtime.Incoming(
+        account_id=7,
+        token="bot-token",
+        update_id=1,
+        user_id=2,
+        chat_id=12345,
+        message_id=99,
+        text="/status",
+        management_rich_html_required=True,
+    )
+    send_rich = AsyncMock(side_effect=RuntimeError("method unavailable"))
+    send_message = AsyncMock()
+    monkeypatch.setattr(account_bot_service, "send_rich_message", send_rich)
+    monkeypatch.setattr(account_bot_service, "send_message", send_message)
+    monkeypatch.setattr(account_bot_runtime, "record_action", AsyncMock())
+    monkeypatch.setattr(account_bot_runtime, "_emit_account_bot_action_tap", AsyncMock())
+
+    with pytest.raises(RuntimeError, match="method unavailable"):
+        await account_bot_runtime._send(incoming, "状态正常")
+
     send_message.assert_not_awaited()
 
 

@@ -42,6 +42,13 @@ _MARKDOWN_TABLE_SEPARATOR_RE = re.compile(
     r"^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$"
 )
 _MARKDOWN_LINK_RE = re.compile(r"\[([^\]\n]+)\]\((https?://[^\s)]+)\)")
+# 用户文本命中写意图时，若角色过滤掉了写工具且本轮无 proposed_actions，追加有声提示
+_WRITE_INTENT_RE = re.compile(
+    r"(停用|启用|暂停|恢复|删除|移除|创建|新建|修改|更新|设置|保存|取消|添加|绑定|解绑|"
+    r"配置|写入|执行|确认|驳回|拒绝|通过|审批|重启|关闭|打开|切换|迁移|导入|导出|"
+    r"pause|resume|delete|create|update|set|save|disable|enable|bind|reject|approve)",
+    re.IGNORECASE,
+)
 
 
 def _mode_key(account_id: int, tg_user_id: int) -> str:
@@ -255,6 +262,56 @@ def _agent_progress_text(event: dict[str, Any]) -> str:
     return ""
 
 
+def _tool_visibility(*, channel: str, role: str) -> dict[str, Any]:
+    """比对角色过滤前后的工具可见性（bot_bridge 侧有声提示 / 状态输出用）。"""
+
+    registry = get_registry()
+    visible = registry.list_for(channel=channel, role=role or "viewer")
+    full = registry.list_for(channel=channel, role="admin")
+    write_visible = [t for t in visible if not t.read_only]
+    write_full = [t for t in full if not t.read_only]
+    read_visible = [t for t in visible if t.read_only]
+    write_hidden = [t for t in write_full if t.name not in {s.name for s in write_visible}]
+    return {
+        "role": str(role or "viewer"),
+        "read_count": len(read_visible),
+        "write_count": len(write_visible),
+        "write_tools_visible": len(write_visible) > 0,
+        "write_tools_hidden_by_role": len(write_hidden) > 0,
+        "total_visible": len(visible),
+    }
+
+
+def _write_intent_hint(*, role: str, text: str, proposed_actions: list[dict[str, Any]]) -> str:
+    """角色过滤导致写工具不可见时，把无声失败改成有声提示（纯文本，交由 markdown→HTML 统一转义）。"""
+
+    if proposed_actions:
+        return ""
+    if not _WRITE_INTENT_RE.search(str(text or "")):
+        return ""
+    vis = _tool_visibility(channel=CHANNEL_BOT, role=role)
+    if not vis["write_tools_hidden_by_role"]:
+        return ""
+    role_label = str(vis["role"])
+    return (
+        f"\n\nℹ️ 当前角色 {role_label} 无权发起写操作（需 operator 及以上），"
+        "请在管理 Bot 用户绑定中调整。"
+    )
+
+
+async def _redis_nonce_available() -> bool:
+    """探测 Redis 是否可用于 Inline 确认 nonce。"""
+
+    try:
+        redis = get_redis()
+        probe_key = AGENT_CONFIRM_PREFIX + "probe"
+        await redis.set(probe_key, "1", ex=5)
+        await redis.delete(probe_key)
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _agent_button(text: str, action: str, aid: int, nonce: str) -> dict[str, str]:
     """复用 account_bot 的 ab: 回调协议：ab:{aid}:{action}:agent:{nonce}。"""
 
@@ -395,6 +452,7 @@ async def handle_agent_confirm_callback(
         role=role or "viewer",
         channel=CHANNEL_BOT,
         bot_tg_user_id=tg_user_id,
+        bot_account_id=account_id,
     )
     action = result.get("action") if isinstance(result.get("action"), dict) else None
     if result.get("ok"):
@@ -497,6 +555,8 @@ async def try_attach_secrets_to_pending_action(
             spec = registry.get(row.tool_name)
             if spec is None or not spec.secret_argument_names:
                 continue
+            if not getattr(spec, "allow_secret_input", True):
+                continue
             # 优先：已报缺 Key / 验证失败，或当前无密文
             if (
                 not row.secret_payload_enc
@@ -579,6 +639,64 @@ async def try_attach_secrets_to_pending_action(
     return True
 
 
+async def _send_pending_actions(
+    *,
+    account_id: int,
+    tg_user_id: int,
+    send: Any,
+    edit: bool = False,
+) -> None:
+    """列出当前 Bot 用户的待确认 Action，并附 Inline 确认按钮。"""
+
+    async with AsyncSessionLocal() as db:
+        rows = await list_actions(
+            db,
+            bot_tg_user_id=tg_user_id,
+            status=ACTION_STATUS_PENDING,
+            limit=15,
+        )
+        # 过期标记
+        kept: list[Any] = []
+        for row in rows:
+            # 仅本账号相关或未绑定账号的
+            if row.account_id is not None and int(row.account_id) != int(account_id):
+                continue
+            row = await mark_expired_if_needed(db, row)
+            if row.status == ACTION_STATUS_PENDING:
+                kept.append(row)
+        await db.commit()
+
+    if not kept:
+        await send("当前没有待确认操作。", edit=edit)
+        return
+
+    await send(
+        f"🧾 待确认操作 <b>{len(kept)}</b> 条（最多展示 15 条）：",
+        edit=edit,
+    )
+    for action in kept:
+        danger = str(action.risk or "") == "dangerous"
+        summary = _html_escape(str(action.summary or action.tool_name or "操作"))
+        expires = ""
+        if action.expires_at is not None:
+            try:
+                expires = f"\n⏳ 过期：{_html_escape(action.expires_at.isoformat())}"
+            except Exception:  # noqa: BLE001
+                expires = ""
+        nonce = await store_agent_confirm_nonce(
+            account_id=account_id,
+            tg_user_id=tg_user_id,
+            action_id=str(action.id),
+        )
+        markup = _agent_confirm_keyboard(account_id, nonce, dangerous=danger) if nonce else None
+        extra = "" if nonce else "\n（Redis 不可用，请到 Web 收件箱处理）"
+        await send(
+            f"🧾 <b>待确认</b>\n{summary}{expires}{extra}",
+            edit=False,
+            reply_markup=markup,
+        )
+
+
 async def handle_agent_command(
     *,
     account_id: int,
@@ -602,18 +720,31 @@ async def handle_agent_command(
     if not tail or tail.lower() in {"help", "status", "?"}:
         active = await is_agent_mode(account_id, tg_user_id)
         ok = await enter_agent_mode(account_id, tg_user_id)
+        vis = _tool_visibility(channel=CHANNEL_BOT, role=role)
+        redis_ok = await _redis_nonce_available()
+        role_label = _html_escape(str(vis["role"]))
         msg = (
             "🤖 <b>系统助手</b>\n"
             f"账号：<code>{account_id}</code>\n"
+            f"当前角色：<code>{role_label}</code>\n"
+            f"可用工具：读 {vis['read_count']} / 写 {vis['write_count']}"
+            f"（合计 {vis['total_visible']}）\n"
+            f"Redis 确认票据：{'可用' if redis_ok else '不可用（写操作无 Inline 按钮）'}\n"
             f"助手模式：{'已开启' if ok or active else 'Redis 不可用，仅 /agent 单次任务可用'}\n\n"
             "用法：\n"
             "/agent &lt;问题&gt; — 直接提问\n"
+            "/agent pending — 列出待确认操作\n"
             "/agent new — 新建会话\n"
             "/agent clear — 删除当前会话\n"
             "/agent exit — 退出助手模式\n\n"
             "助手模式下可直接发送自然语言（既有斜杠命令仍优先）。\n"
             "写操作会弹出 Inline 确认按钮，确认后才会落库。"
         )
+        if not vis["write_tools_visible"]:
+            msg += (
+                f"\n\nℹ️ 当前角色 {role_label} 看不到写工具；"
+                "需要 operator 及以上才能发起写操作确认。"
+            )
         await send(msg, edit=edit)
         return
 
@@ -623,6 +754,16 @@ async def handle_agent_command(
     if verb == "exit":
         await exit_agent_mode(account_id, tg_user_id)
         await send("已退出系统助手模式。历史会话仍保留。", edit=edit)
+        return
+
+    if verb == "pending":
+        await enter_agent_mode(account_id, tg_user_id)
+        await _send_pending_actions(
+            account_id=account_id,
+            tg_user_id=tg_user_id,
+            send=send,
+            edit=edit,
+        )
         return
 
     if verb == "new":
@@ -710,6 +851,7 @@ async def run_agent_query(
     last_draft_text = ""
 
     async def update_draft(value: str) -> None:
+        """进度/流式片段更新 draft；空串被守卫拦住，清空请走 clear_draft。"""
         nonlocal last_draft_text
         if not draft_active or draft is None or not value or value == last_draft_text:
             return
@@ -718,6 +860,17 @@ async def run_agent_query(
             last_draft_text = value
         except Exception:  # noqa: BLE001
             log.debug("system agent bot draft update failed", exc_info=True)
+
+    async def clear_draft() -> None:
+        """最终消息发出前清空 ephemeral draft，避免与真实消息并存。"""
+        nonlocal last_draft_text
+        if not draft_active or draft is None:
+            return
+        try:
+            await draft("")
+            last_draft_text = ""
+        except Exception:  # noqa: BLE001
+            log.debug("system agent bot draft clear failed", exc_info=True)
 
     if draft is not None:
         try:
@@ -733,6 +886,7 @@ async def run_agent_query(
             placeholder_message_id = int(placeholder["message_id"])
 
     assistant_text = ""
+    streamed_assistant_text = ""
     error_text = ""
     proposed_actions: list[dict[str, Any]] = []
 
@@ -757,9 +911,15 @@ async def run_agent_query(
                 bot_tg_user_id=tg_user_id,
             ):
                 et = event.get("type")
-                if et == "assistant_message":
+                if et == "assistant_delta_reset":
+                    streamed_assistant_text = ""
+                elif et == "assistant_delta":
+                    # 流式过程只推进 draft；最终正文只走真实消息，避免 draft 与 final 双气泡
+                    streamed_assistant_text += str(event.get("delta") or "")
+                    await update_draft(_markdown_to_telegram_html(streamed_assistant_text))
+                elif et == "assistant_message":
+                    # 完整正文不进 draft：随后会 send 真实消息，若再 update_draft 会与 final 并存
                     assistant_text = str(event.get("content") or "")
-                    await update_draft(_markdown_to_telegram_html(assistant_text))
                 elif et == "error":
                     error_text = str(event.get("message") or "助手运行失败")
                 elif et == "action_proposed":
@@ -775,6 +935,7 @@ async def run_agent_query(
             error_text = str(exc)[:400]
 
     if error_text and not assistant_text and not proposed_actions:
+        await clear_draft()
         await send(
             f"❌ {_html_escape(error_text)}",
             edit=not draft_active and placeholder_message_id is not None,
@@ -782,11 +943,25 @@ async def run_agent_query(
         )
         return
 
+    vis = _tool_visibility(channel=CHANNEL_BOT, role=role)
+    log.info(
+        "bot agent query done account=%s tg_user=%s role=%s write_tools_visible=%s proposed_actions=%s",
+        account_id,
+        tg_user_id,
+        vis["role"],
+        vis["write_tools_visible"],
+        len(proposed_actions),
+    )
+
     body = assistant_text or ""
     if proposed_actions and not body:
         body = "已生成待确认操作，请点击下方按钮确认或取消。"
     elif proposed_actions:
         body = body.rstrip() + "\n\n——\n已生成待确认操作，请点击下方按钮。"
+
+    role_hint = _write_intent_hint(role=role, text=text, proposed_actions=proposed_actions)
+    if role_hint:
+        body = (body.rstrip() if body else "") + role_hint
 
     if len(body) > 3500:
         body = body[:3400] + "\n\n…（已截断，完整内容请到 Web 悬浮助手查看）"
@@ -819,6 +994,7 @@ async def run_agent_query(
         if not nonce:
             card += "\n（Redis 不可用，请稍后重试，或到 Web 悬浮助手重新发起）"
             rich_card += "\n（Redis 不可用，请稍后重试，或到 Web 悬浮助手重新发起）"
+        await clear_draft()
         await send(
             safe + card,
             edit=not draft_active and placeholder_message_id is not None,
@@ -828,6 +1004,7 @@ async def run_agent_query(
         )
         return
 
+    await clear_draft()
     await send(
         safe,
         edit=not draft_active and placeholder_message_id is not None,

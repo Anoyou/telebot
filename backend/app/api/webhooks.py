@@ -423,6 +423,16 @@ async def deliver_webhook(
     x_telepilot_webhook_token: str | None = Header(default=None, alias=TOKEN_HEADER),
     token: str | None = Query(default=None),
 ) -> WebhookDeliverOut:
+    # 最前层 fail-closed：只读进程内缓存。关闭/未初始化时不访问 DB、不读 body、
+    # 不查账号、不校验 Token、不限流、不向 worker 投递。
+    from ..services import platform_capabilities as platform_caps
+
+    if not platform_caps.is_module_enabled_cached("webhooks", fail_closed=True):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "WEBHOOK_MODULE_DISABLED", "message": "Not Found"},
+        )
+
     redis = get_redis()
     await _enforce_webhook_ingress_rate_limit(request, redis)
     account = await db.get(Account, account_id)

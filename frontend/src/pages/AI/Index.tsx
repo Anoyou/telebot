@@ -1,4 +1,4 @@
-import { type ReactNode, useEffect, useState } from "react";
+import { type ReactNode, lazy, Suspense, useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import {
@@ -11,7 +11,6 @@ import {
   FileText,
   History,
   LayoutDashboard,
-  MessageCircle,
   Package,
   Pencil,
   Power,
@@ -41,8 +40,19 @@ import { Glossary } from "@/components/ai/Glossary";
 import { HowItWorks } from "@/components/ai/HowItWorks";
 import { RecommendedSetup } from "@/components/ai/RecommendedSetup";
 import { PageHeader, PageShell } from "@/components/layout/PageScaffold";
-import { useAssistantDock } from "@/components/assistant/AssistantDock";
-import { LLMProviders } from "@/pages/AI/LLMProviders";
+const LLMProviders = lazy(() =>
+  import("@/pages/AI/LLMProviders").then((module) => ({ default: module.LLMProviders })),
+);
+
+function LLMProvidersFallback() {
+  return (
+    <div role="status" aria-label="模型提供商加载中" className="space-y-3">
+      <Skeleton className="h-10 w-full rounded-md" />
+      <Skeleton className="h-32 w-full rounded-lg" />
+      <Skeleton className="h-48 w-full rounded-lg" />
+    </div>
+  );
+}
 import { RecentUsageContent } from "@/pages/AI/_components/RecentUsage";
 
 type AITab = "overview" | "providers" | "usage";
@@ -70,7 +80,6 @@ function commandModeLabel(template: CommandTemplateOut) {
 }
 
 export function AIIndex() {
-  const { setCollapsed: setAssistantCollapsed } = useAssistantDock();
   const [searchParams, setSearchParams] = useSearchParams();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
@@ -239,7 +248,9 @@ export function AIIndex() {
   if (activeTab === "providers" && searchParams.get("newProvider") === "1") {
     return (
       <PageShell>
-        <LLMProviders openCreateOnMount />
+        <Suspense fallback={<LLMProvidersFallback />}>
+          <LLMProviders openCreateOnMount />
+        </Suspense>
       </PageShell>
     );
   }
@@ -253,12 +264,13 @@ export function AIIndex() {
           helpOpen={helpOpen}
           onHelpOpenChange={setHelpMenuOpen}
           cmdPrefix={cmdPrefix}
-          onOpenAssistant={() => setAssistantCollapsed(false)}
         />
         <div className="rounded-md border bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
           已配置 {providerCount} 个模型提供商，其中 {readyCount} 个可调用。联网搜索需要 api_format=responses 的 OpenAI provider。
         </div>
-        <LLMProviders />
+        <Suspense fallback={<LLMProvidersFallback />}>
+          <LLMProviders />
+        </Suspense>
       </PageShell>
     );
   }
@@ -272,7 +284,6 @@ export function AIIndex() {
           helpOpen={helpOpen}
           onHelpOpenChange={setHelpMenuOpen}
           cmdPrefix={cmdPrefix}
-          onOpenAssistant={() => setAssistantCollapsed(false)}
         />
         <RecentUsageContent />
       </PageShell>
@@ -287,21 +298,7 @@ export function AIIndex() {
         helpOpen={helpOpen}
         onHelpOpenChange={setHelpMenuOpen}
         cmdPrefix={cmdPrefix}
-        onOpenAssistant={() => setAssistantCollapsed(false)}
       />
-      <div className="flex justify-end">
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          className="border-destructive/40 text-destructive hover:bg-destructive/10 hover:text-destructive"
-          disabled={resetUsageMut.isPending || !usageSummary || usageSummary.request_count === 0}
-          onClick={handleResetUsage}
-        >
-          <Trash2 className="mr-1 h-4 w-4" />
-          清空调用统计
-        </Button>
-      </div>
       <div className="grid grid-cols-2 gap-3 xl:grid-cols-4">
         <ToneRailCard
           icon={Package}
@@ -321,21 +318,36 @@ export function AIIndex() {
           titleClassName="gap-1.5 text-sm sm:gap-2 sm:text-base"
           valueClassName="truncate text-xl font-bold tracking-tight sm:text-2xl"
         />
-        <button
-          type="button"
-          className="block h-full min-w-0 appearance-none rounded-lg border-0 bg-transparent p-0 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
-          onClick={() => navigate("/ai?tab=usage")}
-        >
+        <div className="min-w-0">
           <ToneRailCard
             icon={History}
-            title="近期调用情况"
+            title={(
+              <Link className="hover:text-primary hover:underline" to="/ai?tab=usage">
+                近期调用情况
+              </Link>
+            )}
             value={usageSummary ? `${usageSummary.request_count} 次 / 失败 ${usageSummary.failed_count}` : "暂无"}
-            description={usageSummary ? `Fallback ${usageSummary.fallback_count} 次 · 点开查看详情` : "触发调用后展示摘要"}
+            description={usageSummary ? `总 Token ${usageSummary.total_tokens} · 点开查看详情` : "触发调用后展示摘要"}
             tone={(usageSummary?.failed_count ?? 0) > 0 ? "warn" : "neutral"}
             className="h-full border-primary/50 bg-primary/5 shadow-sm transition-colors hover:border-primary hover:bg-primary/10"
             valueClassName="break-words text-xl font-bold tracking-tight sm:text-2xl"
+            actionsPlacement="footer"
+            actions={(
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                className="h-8 w-8 text-destructive hover:bg-destructive/10 hover:text-destructive"
+                disabled={resetUsageMut.isPending || !usageSummary || usageSummary.request_count === 0}
+                aria-label="清空调用统计"
+                title="清空调用统计"
+                onClick={handleResetUsage}
+              >
+                <Trash2 className="h-4 w-4" />
+              </Button>
+            )}
           />
-        </button>
+        </div>
         <Card className="border-t-4 border-t-emerald-500/90">
           <CardContent className="space-y-2 p-4">
             <div className="text-sm font-medium">调用成功率</div>
@@ -354,7 +366,7 @@ export function AIIndex() {
             />
             <div className="text-xs text-muted-foreground">
               {usageSummary
-                ? `平均耗时 ${usageSummary.avg_latency_ms}ms`
+                ? `${usageSummary.success_count} 次成功 / ${usageSummary.request_count} 次请求`
                 : usageQ.isError
                   ? "调用摘要暂不可用"
                   : "触发调用后展示摘要"}
@@ -364,12 +376,13 @@ export function AIIndex() {
       </div>
 
       <Card>
-        <div className="px-4 pb-1 pt-3">
-          <SectionHeader
-            icon={Sparkles}
-            title="快速上手"
-            description="按顺序完成后，你的 Telegram 账号就能用 AI 指令回复消息。"
-            actions={
+        <div className="flex min-h-12 items-center gap-2 px-4 py-2.5">
+          <Sparkles className="h-4 w-4 shrink-0 text-primary" />
+          <div className="min-w-0 flex-1 truncate text-sm">
+            <span className="font-semibold">快速上手</span>
+            <span className="ml-2 text-xs text-muted-foreground">完成 3 步即可使用 AI 指令</span>
+          </div>
+          <div className="shrink-0">
               <Button
                 type="button"
                 variant="ghost"
@@ -386,8 +399,7 @@ export function AIIndex() {
                   <ChevronRight className="h-4 w-4 text-muted-foreground" />
                 )}
               </Button>
-            }
-          />
+          </div>
         </div>
         {quickStartOpen ? (
           <CardContent className="grid gap-3 pt-0 lg:grid-cols-3">
@@ -405,7 +417,7 @@ export function AIIndex() {
               desc={<>建议先建 <CommandBadge>{cmdPrefix}ai</CommandBadge>，绑定默认模型或开启 auto 路由。</>}
               done={aiTemplates.length > 0}
               action="去创建"
-              href="/plugins/templates?new=ai&returnTo=/ai"
+              href="/operations/templates?new=ai&returnTo=/ai"
             />
             <SetupStep
               no="3"
@@ -413,7 +425,7 @@ export function AIIndex() {
               desc={
                 totalAccountCount > 0
                   ? `已有 ${enabledAccountCount}/${totalAccountCount} 个账号启用了至少一条 AI 指令。`
-                  : "还没有账号；创建账号后到账号详情的指令 tab 勾选模板。"
+                  : "还没有账号；创建账号后到账号详情的指令 Tab 开启模板。"
               }
               done={enabledAccountCount > 0}
               action="去启用"
@@ -429,7 +441,7 @@ export function AIIndex() {
           <DialogHeader>
             <DialogTitle>选择要启用 AI 指令的账号</DialogTitle>
             <DialogDescription>
-              将跳转到账号详情的指令 Tab，你可以在那里勾选要启用的 AI 指令模板。
+              将跳转到账号详情的指令 Tab，你可以在那里开启需要的 AI 指令模板。
             </DialogDescription>
           </DialogHeader>
           <div className="grid gap-2">
@@ -465,7 +477,7 @@ export function AIIndex() {
             <div className="rounded-md border border-dashed py-8 text-center">
               <p className="text-sm text-muted-foreground">还没有 AI 指令模板。</p>
               <Button asChild className="mt-3" size="sm">
-                <Link to="/plugins/templates?new=ai&returnTo=/ai">
+                <Link to="/operations/templates?new=ai&returnTo=/ai">
                   <PlusCircle className="mr-1 h-4 w-4" />
                   创建 AI 指令
                 </Link>
@@ -505,7 +517,7 @@ export function AIIndex() {
                         </TableCell>
                         <TableCell>
                           <Button asChild variant="outline" size="sm">
-                            <Link to={`/plugins/templates?edit=${template.id}&returnTo=${encodeURIComponent("/ai")}`}>
+                            <Link to={`/operations/templates?edit=${template.id}&returnTo=${encodeURIComponent("/ai")}`}>
                               编辑
                             </Link>
                           </Button>
@@ -556,13 +568,11 @@ function Subnav({
   helpOpen,
   onHelpOpenChange,
   cmdPrefix,
-  onOpenAssistant,
 }: {
   activeTab: AITab;
   helpOpen: boolean;
   onHelpOpenChange: (open: boolean) => void;
   cmdPrefix: string;
-  onOpenAssistant: () => void;
 }) {
   const navigate = useNavigate();
   return (
@@ -590,16 +600,11 @@ function Subnav({
         </TabsList>
       </Tabs>
       <div className="-mx-1 px-1 pb-1">
-        <div className="grid grid-cols-3 gap-1.5 sm:inline-flex sm:flex-wrap sm:gap-2">
+        <div className="grid grid-cols-2 gap-1.5 sm:inline-flex sm:flex-wrap sm:gap-2">
           <AIActionCard
             icon={FileText}
             title="查看指令"
-            to="/plugins/templates"
-          />
-          <AIActionCard
-            icon={MessageCircle}
-            title="配置系统助手"
-            onClick={onOpenAssistant}
+            to="/operations/templates"
           />
           <AIHelpMenu
             open={helpOpen}
@@ -725,7 +730,7 @@ function AICommandCard({
         </div>
         <Button asChild variant="ghost" size="icon" className="h-10 w-10 shrink-0">
           <Link
-            to={`/plugins/templates?edit=${template.id}&returnTo=${encodeURIComponent("/ai")}`}
+            to={`/operations/templates?edit=${template.id}&returnTo=${encodeURIComponent("/ai")}`}
             aria-label={`编辑 ${cmdPrefix}${template.name}`}
             title="编辑指令"
           >

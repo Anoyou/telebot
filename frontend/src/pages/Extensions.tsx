@@ -91,6 +91,7 @@ import { PluginWorkspaceHeader } from "@/pages/Plugins/WorkspaceHeader";
 import { getFeatureMatrix } from "@/api/features";
 import {
   listInstalledOverview,
+  getInstalledPluginChangelog,
   enableInstall,
   disableInstall,
   uninstallPlugin,
@@ -710,12 +711,55 @@ function PluginInstallGuide({
 function PluginsManagementTab() {
   return (
     <div className="space-y-6">
-      <RemoteUpdateSettingsCard />
-      <LocalPluginImportCard />
-      <OfficialPluginsCard />
+      <InstallToolsGroup />
       <RemoteInstallCard />
       <InstalledPluginsSection />
     </div>
+  );
+}
+
+function InstallToolsGroup() {
+  const [mobileExpanded, setMobileExpanded] = useState(false);
+
+  return (
+    <>
+      <Card className="sm:hidden" data-install-tools-group>
+        <CardHeader className="pb-3">
+          <SectionHeader
+            icon={Puzzle}
+            title="安装与检查"
+            description="远程更新检查、本地导入与推荐插件默认折叠；展开后可配置。"
+            meta={<SignalPill tone="neutral" label="工具" value={3} className="h-8" />}
+            actions={(
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                className="h-8 gap-1.5"
+                onClick={() => setMobileExpanded((value) => !value)}
+                aria-expanded={mobileExpanded}
+                aria-controls="install-tools-group-content"
+              >
+                <ChevronDown className={cn("h-4 w-4 transition-transform", mobileExpanded && "rotate-180")} />
+                {mobileExpanded ? "收起" : "展开可配置"}
+              </Button>
+            )}
+          />
+        </CardHeader>
+        {mobileExpanded ? (
+          <CardContent id="install-tools-group-content" className="space-y-4">
+            <RemoteUpdateSettingsCard />
+            <LocalPluginImportCard />
+            <OfficialPluginsCard />
+          </CardContent>
+        ) : null}
+      </Card>
+      <div className="hidden space-y-6 sm:block">
+        <RemoteUpdateSettingsCard />
+        <LocalPluginImportCard />
+        <OfficialPluginsCard />
+      </div>
+    </>
   );
 }
 
@@ -873,6 +917,7 @@ function LocalPluginImportCard() {
 
 function RemoteUpdateSettingsCard() {
   const qc = useQueryClient();
+  const [expanded, setExpanded] = useState(false);
   const settingsQ = useQuery({ queryKey: ["system", "settings"], queryFn: getSystemSettings });
   const cfg = settingsQ.data?.remote_plugin_update_check ?? { enabled: true, interval_minutes: 360 };
   const [enabled, setEnabled] = useState(cfg.enabled);
@@ -915,10 +960,16 @@ function RemoteUpdateSettingsCard() {
         <SectionHeader
           icon={RefreshCw}
           title="远程插件更新检查"
-          description="后台只检查是否有新版本，不会自动安装；发现更新后会在插件中心和已安装插件里提示。"
+          description="后台只检查是否有新版本，不会自动安装；展开后可配置自动检查和检查间隔。"
+          actions={(
+            <Button type="button" size="sm" variant="outline" onClick={() => setExpanded((value) => !value)} aria-expanded={expanded}>
+              <ChevronDown className={cn("mr-1 h-4 w-4 transition-transform", expanded && "rotate-180")} />
+              {expanded ? "收起" : "展开配置"}
+            </Button>
+          )}
         />
       </CardHeader>
-      <CardContent className="grid gap-3 md:grid-cols-2 md:items-end xl:grid-cols-[minmax(140px,180px)_minmax(180px,1fr)_auto]">
+      {expanded ? <CardContent className="grid gap-3 md:grid-cols-2 md:items-end xl:grid-cols-[minmax(140px,180px)_minmax(180px,1fr)_auto]">
         <div className="flex min-w-0 items-center gap-3 rounded-md border px-3 py-2">
           <Switch aria-label="自动检查" checked={enabled} onCheckedChange={setEnabled} />
           <div className="min-w-0">
@@ -947,7 +998,7 @@ function RemoteUpdateSettingsCard() {
             立即检查
           </Button>
         </div>
-      </CardContent>
+      </CardContent> : null}
     </Card>
   );
 }
@@ -1081,6 +1132,7 @@ function OfficialPluginsCard() {
 // ── 远程安装：仓库管理 + 浏览插件 ────────────────────────────────
 function RemoteInstallCard() {
   const qc = useQueryClient();
+  const [addFormExpanded, setAddFormExpanded] = useState(false);
   const [addUrl, setAddUrl] = useState("");
   const [addName, setAddName] = useState("");
   const [addToken, setAddToken] = useState("");
@@ -1092,6 +1144,11 @@ function RemoteInstallCard() {
     repoId: number;
     repoName: string;
     plugins: PluginRepoPlugin[];
+  } | null>(null);
+  const [pendingSourceMigration, setPendingSourceMigration] = useState<{
+    repoId: number;
+    repoUrl: string;
+    plugin: PluginRepoPlugin;
   } | null>(null);
 
   // 已保存仓库列表（后端）
@@ -1192,10 +1249,18 @@ function RemoteInstallCard() {
 
   // 从仓库安装插件
   const installFromRepoMut = useMutation({
-    mutationFn: ({ repoId, name }: { repoId: number; name: string }) =>
-      installFromRepo(repoId, name),
-    onSuccess: (row) => {
-      toast.success(`已安装 ${row.name} v${row.version}`);
+    mutationFn: ({ repoId, name, replaceExisting = false }: {
+      repoId: number;
+      name: string;
+      replaceExisting?: boolean;
+    }) => installFromRepo(repoId, name, { replace_existing: replaceExisting }),
+    onSuccess: (row, variables) => {
+      toast.success(
+        variables.replaceExisting
+          ? `已迁移 ${row.name} 的更新来源，并保留原有配置`
+          : `已安装 ${row.name} v${row.version}`,
+      );
+      setPendingSourceMigration(null);
       toastPluginLintWarnings(row);
       qc.invalidateQueries({ queryKey: REMOTE_QK });
       qc.invalidateQueries({ queryKey: PLUGINS_QK });
@@ -1250,12 +1315,18 @@ function RemoteInstallCard() {
         <SectionHeader
           icon={GitFork}
           title="插件仓库"
-          description="添加 Git 仓库后浏览并安装插件"
+          description="已添加的仓库始终显示；展开配置后可添加新的 Git 仓库。"
+          actions={(
+            <Button type="button" size="sm" variant="outline" onClick={() => setAddFormExpanded((value) => !value)} aria-expanded={addFormExpanded}>
+              <ChevronDown className={cn("mr-1 h-4 w-4 transition-transform", addFormExpanded && "rotate-180")} />
+              {addFormExpanded ? "收起配置" : "展开添加仓库"}
+            </Button>
+          )}
         />
       </CardHeader>
       <CardContent className="space-y-4">
         {/* 添加仓库 */}
-        <div className="grid min-w-0 gap-2 md:grid-cols-2 xl:grid-cols-[160px_minmax(0,1fr)_minmax(0,280px)_auto]">
+        {addFormExpanded ? <div className="grid min-w-0 gap-2 rounded-lg border border-border/70 bg-muted/20 p-3 md:grid-cols-2 xl:grid-cols-[160px_minmax(0,1fr)_minmax(0,280px)_auto]">
           <Input
             className="h-9 min-w-0 rounded-md bg-background"
             placeholder="仓库名（可选）"
@@ -1295,7 +1366,7 @@ function RemoteInstallCard() {
           <p className="text-xs text-muted-foreground md:col-span-2 xl:col-span-4">
             私有 GitHub 仓库请填写 fine-grained token，至少授予对应仓库 Contents 读取权限。Token 会加密保存且不会回显。
           </p>
-        </div>
+        </div> : null}
 
         {/* 仓库列表 */}
         {repos.length === 0 ? (
@@ -1446,6 +1517,7 @@ function RemoteInstallCard() {
                       <div className="space-y-1">
                         {(pluginsQ.data ?? []).map((p) => {
                           const canUpdate = !!p.installed && !!p.update_available;
+                          const canMigrateSource = !!p.installed && !p.source_matches;
                           const events = pluginEventSubscriptionLabels(p.event_subscriptions);
                           const capabilities = pluginOperationalCapabilityLabels({
                             capabilities: p.capabilities,
@@ -1503,22 +1575,34 @@ function RemoteInstallCard() {
                               variant={canUpdate ? "default" : p.installed ? "outline" : "default"}
                               className="h-7 shrink-0"
                               disabled={
-                                (p.installed && !canUpdate)
+                                (p.installed && !canUpdate && !canMigrateSource)
                                 || installFromRepoMut.isPending
                                 || updateFromRepoMut.isPending
                               }
-                              onClick={() =>
-                                canUpdate
-                                  ? updateFromRepoMut.mutate(p.name)
-                                  : installFromRepoMut.mutate({ repoId: repo.id, name: p.name })
-                              }
+                              onClick={() => {
+                                if (canUpdate) {
+                                  updateFromRepoMut.mutate(p.name);
+                                  return;
+                                }
+                                if (canMigrateSource) {
+                                  setPendingSourceMigration({
+                                    repoId: repo.id,
+                                    repoUrl: repo.url,
+                                    plugin: p,
+                                  });
+                                  return;
+                                }
+                                installFromRepoMut.mutate({ repoId: repo.id, name: p.name });
+                              }}
                             >
                               {canUpdate ? (
                                 <RefreshCw className="mr-1 h-3.5 w-3.5" />
+                              ) : canMigrateSource ? (
+                                <GitFork className="mr-1 h-3.5 w-3.5" />
                               ) : p.installed ? null : (
                                 <Download className="mr-1 h-3.5 w-3.5" />
                               )}
-                              {canUpdate ? "更新" : p.installed ? "已安装" : "安装"}
+                              {canUpdate ? "更新" : canMigrateSource ? "迁移来源" : p.installed ? "已安装" : "安装"}
                             </Button>
                           </div>
                         );
@@ -1532,6 +1616,66 @@ function RemoteInstallCard() {
             })}
           </div>
         )}
+        <Dialog
+          open={pendingSourceMigration !== null}
+          onOpenChange={(open) => !open && setPendingSourceMigration(null)}
+        >
+          <DialogContent className="dialog-center max-w-lg">
+            <DialogHeader>
+              <DialogTitle>迁移插件更新来源</DialogTitle>
+              <DialogDescription>
+                将用所选仓库中的同名插件覆盖当前安装包，并把后续更新来源切换到该仓库。
+              </DialogDescription>
+            </DialogHeader>
+            <div className="space-y-3 text-sm">
+              <div className="rounded-md border border-border/70 bg-muted/20 p-3">
+                <div className="font-medium">
+                  {pendingSourceMigration?.plugin.display_name || pendingSourceMigration?.plugin.name}
+                </div>
+                <div className="mt-1 font-mono text-xs text-muted-foreground">
+                  {formatPluginVersion(pendingSourceMigration?.plugin.installed_version)} → {formatPluginVersion(pendingSourceMigration?.plugin.version)}
+                </div>
+              </div>
+              <div className="grid gap-2 text-xs text-muted-foreground">
+                <div>
+                  <span className="font-medium text-foreground">当前来源：</span>
+                  <span className="break-all font-mono">{pendingSourceMigration?.plugin.installed_source_url || "未知来源"}</span>
+                </div>
+                <div>
+                  <span className="font-medium text-foreground">新来源：</span>
+                  <span className="break-all font-mono">{pendingSourceMigration?.repoUrl}</span>
+                </div>
+              </div>
+              <div className="rounded-md border border-primary/25 bg-primary/5 p-3 text-xs leading-5 text-muted-foreground">
+                账号启停、账号配置、插件全局配置和持久化数据都会保留。仅替换插件代码、元数据和更新来源。安装或校验失败时保留当前版本。
+              </div>
+            </div>
+            <DialogFooter>
+              <Button
+                variant="outline"
+                onClick={() => setPendingSourceMigration(null)}
+                disabled={installFromRepoMut.isPending}
+              >
+                取消
+              </Button>
+              <Button
+                loading={installFromRepoMut.isPending}
+                loadingText="迁移中…"
+                onClick={() => {
+                  if (!pendingSourceMigration) return;
+                  installFromRepoMut.mutate({
+                    repoId: pendingSourceMigration.repoId,
+                    name: pendingSourceMigration.plugin.name,
+                    replaceExisting: true,
+                  });
+                }}
+              >
+                <GitFork className="mr-2 h-4 w-4" />
+                确认迁移来源
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
         <Dialog open={pendingBulkUpdate !== null} onOpenChange={(open) => !open && setPendingBulkUpdate(null)}>
           <DialogContent className="dialog-center !flex max-h-[85dvh] max-w-2xl flex-col gap-0 overflow-hidden p-0">
             <DialogHeader className="shrink-0 border-b border-border/70 px-4 py-4 sm:px-6">
@@ -1613,6 +1757,7 @@ function RemoteInstallCard() {
 function InstalledPluginsSection() {
   const nav = useNavigate();
   const qc = useQueryClient();
+  const [expanded, setExpanded] = useState(false);
   const [expandedAccountPlugin, setExpandedAccountPlugin] = useState<string | null>(null);
   const [selectedDetailKey, setSelectedDetailKey] = useState<string | null>(null);
   const matrixQ = useQuery({ queryKey: queryKeys.featureMatrix, queryFn: getFeatureMatrix });
@@ -1744,7 +1889,7 @@ function InstalledPluginsSection() {
         <SectionHeader
           icon={Puzzle}
           title="已安装插件"
-          description="管理插件包本身，也可以展开查看每个账号是否启用该插件。"
+          description="这里显示全局已安装的插件。展开详情可按账号启停；列表中的“禁用”会全局禁用该插件。"
           meta={(
             <SignalPill
               tone="neutral"
@@ -1753,9 +1898,15 @@ function InstalledPluginsSection() {
               className="h-8"
             />
           )}
+          actions={(
+            <Button type="button" size="sm" variant="outline" onClick={() => setExpanded((value) => !value)} aria-expanded={expanded}>
+              <ChevronDown className={cn("mr-1 h-4 w-4 transition-transform", expanded && "rotate-180")} />
+              {expanded ? "收起" : "展开已安装插件"}
+            </Button>
+          )}
         />
       </CardHeader>
-      <CardContent className="space-y-3">
+      {expanded ? <CardContent className="space-y-3">
         {errorMessages.length > 0 ? (
           <div className="space-y-2">
             {errorMessages.map((message) => (
@@ -2190,8 +2341,13 @@ function InstalledPluginsSection() {
             setSelectedDetailKey(null);
             nav("/plugins");
           }}
+          accountTogglePending={accountToggleMut.isPending}
+          onToggleAccount={(accountId, enabled) => {
+            if (!selectedDetail) return;
+            accountToggleMut.mutate({ accountId, key: selectedDetail.key, enabled });
+          }}
         />
-      </CardContent>
+      </CardContent> : null}
     </Card>
   );
 }
@@ -2293,6 +2449,8 @@ function PluginOverviewDetailDialog({
   onOpenChange,
   onOpenTrace,
   onOpenPluginCenter,
+  accountTogglePending,
+  onToggleAccount,
 }: {
   plugin: InstalledPluginOverviewItem | null;
   repos: PluginRepo[];
@@ -2300,7 +2458,21 @@ function PluginOverviewDetailDialog({
   onOpenChange: (open: boolean) => void;
   onOpenTrace: (traceId: string) => void;
   onOpenPluginCenter: () => void;
+  accountTogglePending: boolean;
+  onToggleAccount: (accountId: number, enabled: boolean) => void;
 }) {
+  const [changelogExpanded, setChangelogExpanded] = useState(false);
+  const changelogQ = useQuery({
+    queryKey: ["plugin-changelog", plugin?.key],
+    queryFn: () => getInstalledPluginChangelog(plugin!.key),
+    enabled: Boolean(plugin && changelogExpanded),
+    retry: false,
+  });
+
+  useEffect(() => {
+    setChangelogExpanded(false);
+  }, [plugin?.key]);
+
   if (!plugin) return null;
 
   const summary = summarizeOverviewAccounts(plugin.accounts);
@@ -2327,50 +2499,47 @@ function PluginOverviewDetailDialog({
         <div className="safe-scrollbar min-h-0 flex-1 touch-pan-y space-y-5 overflow-y-auto overscroll-contain px-5 py-4 sm:px-6">
           <section className="grid gap-3 lg:grid-cols-[minmax(0,1.2fr)_minmax(0,0.8fr)]">
             <div className="rounded-md border border-border/70 bg-background/80 p-4">
-              <div className="mb-3 text-sm font-medium">来源与版本</div>
-              <dl className="grid gap-x-4 gap-y-3 sm:grid-cols-2">
-                <PluginOverviewField label="来源库" value={installSourceLibraryLabel(plugin.source, plugin.source_url, plugin.source_label, repos)} />
+              <div className="mb-3 flex items-center justify-between gap-2">
+                <div className="text-sm font-medium">来源与版本</div>
+                <Button type="button" size="sm" variant="outline" className="h-8 px-2 text-xs" onClick={() => setChangelogExpanded((value) => !value)}>
+                  <FileText className="mr-1 h-3.5 w-3.5" />
+                  更新日志
+                </Button>
+              </div>
+              <dl className="grid grid-cols-3 gap-2">
                 <PluginOverviewField
-                  label="来源地址"
-                  value={
-                    plugin.source_url ? (
-                      <span className="break-all font-mono text-xs text-muted-foreground">{plugin.source_url}</span>
-                    ) : (
-                      plugin.source_label || "-"
-                    )
-                  }
+                  label="来源库"
+                  value={<span className="block truncate" title={installSourceLibraryLabel(plugin.source, plugin.source_url, plugin.source_label, repos)}>{installSourceLibraryLabel(plugin.source, plugin.source_url, plugin.source_label, repos)}</span>}
                 />
                 <PluginOverviewField label="当前版本" value={formatPluginVersion(plugin.version)} />
                 <PluginOverviewField
                   label="更新状态"
-                  value={
-                    <div className="space-y-1">
-                      <MetaBadge tone={installedOverviewVersionTone(plugin)}>
-                        {installedOverviewVersionLabel(plugin)}
-                      </MetaBadge>
-                      <div className="line-clamp-3 break-all text-xs text-muted-foreground">
-                        {describeInstalledOverviewUpdate(plugin)}
-                      </div>
-                    </div>
-                  }
-                />
-                <PluginOverviewField
-                  label="最近 trace"
-                  value={
-                    plugin.recent_trace ? (
-                      <button
-                        type="button"
-                        className="break-all font-mono text-xs text-primary underline decoration-primary/30 underline-offset-4 hover:text-primary/80"
-                        onClick={() => onOpenTrace(plugin.recent_trace!.trace_id)}
-                      >
-                        {plugin.recent_trace.trace_id}
-                      </button>
-                    ) : (
-                      "-"
-                    )
-                  }
+                  value={<MetaBadge tone={installedOverviewVersionTone(plugin)}>{installedOverviewVersionLabel(plugin)}</MetaBadge>}
                 />
               </dl>
+              <div className="mt-3 min-w-0 rounded-md bg-muted/30 px-3 py-2">
+                <div className="text-[11px] text-muted-foreground">来源地址</div>
+                <div className="mt-1 truncate font-mono text-xs text-muted-foreground" title={plugin.source_url || plugin.source_label || "-"}>
+                  {plugin.source_url || plugin.source_label || "-"}
+                </div>
+              </div>
+              <div className="mt-2 text-xs text-muted-foreground">{describeInstalledOverviewUpdate(plugin)}</div>
+              {changelogExpanded ? (
+                <div className="mt-3 max-h-64 overflow-y-auto rounded-md border bg-muted/20 p-3">
+                  {changelogQ.isLoading ? (
+                    <div className="flex h-20 items-center justify-center"><Spinner className="text-primary" /></div>
+                  ) : changelogQ.isError ? (
+                    <div className="text-sm text-destructive">更新日志读取失败：{getErrMsg(changelogQ.error)}</div>
+                  ) : changelogQ.data?.available ? (
+                    <div className="prose prose-sm max-w-none break-words dark:prose-invert">
+                      <ReactMarkdown remarkPlugins={[remarkGfm]}>{changelogQ.data.content}</ReactMarkdown>
+                      {changelogQ.data.message ? <p className="text-xs text-warning">{changelogQ.data.message}</p> : null}
+                    </div>
+                  ) : (
+                    <div className="text-sm text-muted-foreground">{changelogQ.data?.message || "该插件没有提供更新日志。"}</div>
+                  )}
+                </div>
+              ) : null}
             </div>
 
             <div className="rounded-md border border-border/70 bg-muted/20 p-4">
@@ -2439,6 +2608,8 @@ function PluginOverviewDetailDialog({
                     key={`${plugin.key}-detail-${account.account_id}`}
                     account={account}
                     onOpenTrace={onOpenTrace}
+                    pending={accountTogglePending}
+                    onToggle={(enabled) => onToggleAccount(account.account_id, enabled)}
                   />
                 ))}
               </div>
@@ -2446,12 +2617,14 @@ function PluginOverviewDetailDialog({
           </section>
         </div>
 
-        <DialogFooter className="shrink-0 border-t border-border/70 px-5 py-4 sm:px-6">
-          {plugin.recent_trace ? (
-            <Button variant="outline" onClick={() => onOpenTrace(plugin.recent_trace!.trace_id)}>
-              查看最近 trace
-            </Button>
-          ) : null}
+        <DialogFooter data-plugin-detail-footer className="!grid shrink-0 grid-cols-3 gap-2 border-t border-border/70 px-5 py-4 sm:px-6 [&>*]:min-w-0 [&>*]:px-2 [&>*]:text-xs sm:[&>*]:text-sm">
+          <Button
+            variant="outline"
+            disabled={!plugin.recent_trace}
+            onClick={() => plugin.recent_trace && onOpenTrace(plugin.recent_trace.trace_id)}
+          >
+            查看最近 trace
+          </Button>
           <Button variant="outline" onClick={onOpenPluginCenter}>
             去插件中心
           </Button>
@@ -2465,9 +2638,13 @@ function PluginOverviewDetailDialog({
 function InstalledOverviewAccountCard({
   account,
   onOpenTrace,
+  pending,
+  onToggle,
 }: {
   account: InstalledPluginOverviewAccountItem;
   onOpenTrace: (traceId: string) => void;
+  pending: boolean;
+  onToggle: (enabled: boolean) => void;
 }) {
   const hasCurrentError = hasActiveOverviewAccountError(account);
 
@@ -2509,24 +2686,28 @@ function InstalledOverviewAccountCard({
         </div>
       ) : null}
 
-      <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-        {account.last_trace ? (
-          <>
-            <span>{account.last_trace.status ? `最近 trace · ${account.last_trace.status}` : "最近 trace"}</span>
-            <button
-              type="button"
-              className="break-all font-mono text-primary underline decoration-primary/30 underline-offset-4 hover:text-primary/80"
-              onClick={() => onOpenTrace(account.last_trace!.trace_id)}
-            >
-              {account.last_trace.trace_id}
-            </button>
-            {account.last_trace.started_at ? (
-              <span>{formatDateTime(account.last_trace.started_at)}</span>
-            ) : null}
-          </>
-        ) : (
-          <span>最近 trace：-</span>
-        )}
+      <div className="mt-3 flex items-end justify-between gap-3">
+        <div className="min-w-0 flex-1 text-xs text-muted-foreground">
+          {account.last_trace ? (
+            <div className="flex min-w-0 flex-wrap items-center gap-2">
+              <span>{account.last_trace.status ? `最近 trace · ${account.last_trace.status}` : "最近 trace"}</span>
+              <button
+                type="button"
+                className="max-w-full truncate font-mono text-primary underline decoration-primary/30 underline-offset-4 hover:text-primary/80"
+                onClick={() => onOpenTrace(account.last_trace!.trace_id)}
+              >
+                {account.last_trace.trace_id}
+              </button>
+              {account.last_trace.started_at ? <span>{formatDateTime(account.last_trace.started_at)}</span> : null}
+            </div>
+          ) : <span>最近 trace：-</span>}
+        </div>
+        <Switch
+          checked={account.enabled}
+          disabled={pending}
+          aria-label={`${account.account_name || `账号 ${account.account_id}`}启用当前插件`}
+          onCheckedChange={onToggle}
+        />
       </div>
     </div>
   );

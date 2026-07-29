@@ -11,3 +11,5 @@
 - `payment_confirmed`：返回 `settlement`，普通 Bot 不执行转账。
 
 `capabilities.telegram_native_raw` 只用于排障。插件必须先处理 `native_raw_meta.enabled=false` 的降级场景，不能把原生对象当业务主路径。
+
+多通道订阅时，平台能力（如 Interaction Bot / Webhook）关闭只会裁剪对应来源；userbot 来源可继续工作。详见 `docs/PLATFORM-CAPABILITIES.md`。

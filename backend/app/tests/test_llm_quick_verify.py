@@ -50,7 +50,7 @@ async def test_quick_verify_discovers_model_and_streams_without_leaking_key(
             yield LLMStreamChunk(delta="可以", model="gpt-5-mini-2026")
             yield LLMStreamChunk(delta="继续。", input_tokens=7, output_tokens=3, done=True)
 
-    def build_client(dto):
+    def build_client(dto, **_kwargs):
         captured["dto"] = dto
         return FakeClient()
 
@@ -78,12 +78,13 @@ async def test_quick_verify_explicit_model_skips_discovery(monkeypatch) -> None:
     class FakeClient:
         async def stream_complete(self, _system, _message, **_kwargs):
             yield LLMStreamChunk(delta="已回复", model="manual-model")
+            yield LLMStreamChunk(done=True, model="manual-model")
 
     monkeypatch.setattr(llm_quick_verify, "discover_models", fail_discovery)
     monkeypatch.setattr(
         llm_quick_verify,
         "build_client_from_dto",
-        lambda _dto: FakeClient(),
+        lambda _dto, **_kwargs: FakeClient(),
     )
     events = await _collect_events(model="manual-model")
 
@@ -106,8 +107,9 @@ async def test_quick_verify_passes_connection_identity_and_reasoning_to_real_req
         async def stream_complete(self, _system, _message, **kwargs):
             captured["kwargs"] = kwargs
             yield LLMStreamChunk(delta="已回复", model="grok-reasoning")
+            yield LLMStreamChunk(done=True, model="grok-reasoning")
 
-    def build_client(dto):
+    def build_client(dto, **_kwargs):
         captured["identity"] = dto.client_identity_profile
         captured["protocol"] = dto.protocol_profile
         captured["proxy"] = dto.proxy_url
@@ -185,7 +187,7 @@ async def test_quick_verify_auth_failure_is_not_misreported_as_model_problem(
     monkeypatch.setattr(
         llm_quick_verify,
         "build_client_from_dto",
-        lambda _dto: FakeClient(),
+        lambda _dto, **_kwargs: FakeClient(),
     )
     events = await _collect_events()
 
@@ -214,7 +216,7 @@ async def test_quick_verify_auto_model_not_found_requests_manual_model(
     monkeypatch.setattr(
         llm_quick_verify,
         "build_client_from_dto",
-        lambda _dto: FakeClient(),
+        lambda _dto, **_kwargs: FakeClient(),
     )
     events = await _collect_events()
 
@@ -244,7 +246,7 @@ async def test_quick_verify_endpoint_404_does_not_request_manual_model(
     monkeypatch.setattr(
         llm_quick_verify,
         "build_client_from_dto",
-        lambda _dto: FakeClient(),
+        lambda _dto, **_kwargs: FakeClient(),
     )
     events = await _collect_events()
 
@@ -273,7 +275,7 @@ async def test_quick_verify_falls_back_when_streaming_is_unsupported(
     monkeypatch.setattr(
         llm_quick_verify,
         "build_client_from_dto",
-        lambda _dto: FakeClient(),
+        lambda _dto, **_kwargs: FakeClient(),
     )
     events = await _collect_events(model="legacy-model")
 
@@ -282,6 +284,70 @@ async def test_quick_verify_falls_back_when_streaming_is_unsupported(
     assert done["response"] == "完整回复"
     assert done["streaming"] is False
     assert done["stream_fallback"] is True
+
+
+@pytest.mark.asyncio
+async def test_quick_verify_does_not_repeat_completed_json_stream_fallback(
+    monkeypatch,
+) -> None:
+    """同一流式请求已返回完整 JSON 时，不得再调用 complete 造成重复计费。"""
+
+    class FakeClient:
+        complete_calls = 0
+
+        async def stream_complete(self, *_args, **_kwargs):
+            yield LLMStreamChunk(
+                delta="同一次请求的完整回复",
+                model="json-real",
+                stream_fallback=True,
+            )
+            yield LLMStreamChunk(
+                model="json-real",
+                input_tokens=5,
+                output_tokens=2,
+                done=True,
+                stream_fallback=True,
+            )
+
+        async def complete(self, *_args, **_kwargs):
+            self.complete_calls += 1
+            raise AssertionError("普通 JSON 已在同一请求中消费，不应再次请求上游")
+
+    client = FakeClient()
+    monkeypatch.setattr(
+        llm_quick_verify,
+        "build_client_from_dto",
+        lambda _dto, **_kwargs: client,
+    )
+
+    events = await _collect_events(model="json-model")
+
+    delta = next(event for event in events if event["type"] == "delta")
+    assert delta["stream_fallback"] is True
+    done = events[-1]
+    assert done["type"] == "done"
+    assert done["response"] == "同一次请求的完整回复"
+    assert done["streaming"] is False
+    assert done["stream_fallback"] is True
+    assert client.complete_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_quick_verify_rejects_stream_without_done(monkeypatch) -> None:
+    class FakeClient:
+        async def stream_complete(self, *_args, **_kwargs):
+            yield LLMStreamChunk(delta="partial", model="broken")
+
+    monkeypatch.setattr(
+        llm_quick_verify,
+        "build_client_from_dto",
+        lambda _dto, **_kwargs: FakeClient(),
+    )
+
+    events = await _collect_events(model="broken")
+
+    assert events[-1]["type"] == "error"
+    assert "最终状态" in str(events[-1]["error"])
 
 
 def test_quick_verify_request_strips_values_and_rejects_blank_required_fields() -> None:

@@ -6,7 +6,7 @@
 #   - 安装基础依赖与 Docker Compose v2
 #   - 拉取 TelePilot 仓库
 #   - 生成生产可用 .env（强随机 MASTER_KEY / JWT_SECRET / UPDATER_TOKEN / POSTGRES_PASSWORD）
-#   - 调用 make prod-up 启动 postgres / redis / web / frontend
+#   - 调用 make prod-up 启动 postgres / redis / web / updater / frontend
 #
 # 可选环境变量：
 #   TELEPILOT_REPO=https://github.com/Anoyou/telebot.git

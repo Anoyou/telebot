@@ -146,8 +146,17 @@ async def test_dispatch_debug_simulate_returns_no_match_trace(monkeypatch) -> No
 
 
 @pytest.mark.asyncio
-async def test_dispatch_debug_router_delivery_stats_reads_light_summary() -> None:
+async def test_dispatch_debug_router_delivery_stats_reads_light_summary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services import platform_capabilities as platform_caps
+
     account_bot_runtime._ROUTER_DELIVERY_STATS.clear()
+    monkeypatch.setattr(
+        platform_caps,
+        "require_module_enabled",
+        AsyncMock(return_value=None),
+    )
     try:
         account_bot_runtime._record_router_delivery_light(
             909,
@@ -156,6 +165,7 @@ async def test_dispatch_debug_router_delivery_stats_reads_light_summary() -> Non
         )
 
         summary = await dispatch_debug.get_router_delivery_stats(
+            object(),
             object(),
             account_id=909,
             channel="account_bot",

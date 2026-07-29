@@ -1,10 +1,12 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { isAxiosError } from "axios";
 import { toast } from "sonner";
 import {
   AlertTriangle,
+  ArrowDown,
+  Bot,
   CheckCircle2,
   ChevronDown,
   Circle,
@@ -24,6 +26,7 @@ import {
 
 import { listAccounts } from "@/api/accounts";
 import { getFeatureMatrix } from "@/api/features";
+import { listSystemAgentRuns, type SystemAgentRun } from "@/api/systemAgent";
 import { getEventTrace, getMessageFunel, getSystemSettings, listRuntimeLogs, listSystemConsoleLogs } from "@/api/system";
 import type {
   EventActionItem,
@@ -40,6 +43,7 @@ import type {
   SystemConsoleLogsResponse,
 } from "@/api/types";
 import { PageHeader, PageShell } from "@/components/layout/PageScaffold";
+import { RunTrace } from "@/components/assistant/RunTrace";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -59,11 +63,14 @@ import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn, formatDateTime } from "@/lib/utils";
 
-type LogView = "messages" | "console" | "runtime";
+type LogView = "messages" | "agent" | "console" | "runtime";
 type TimeRange = "15m" | "1h" | "6h" | "24h" | "custom";
 type VerdictFilter = "" | MessageVerdict;
 type RuntimeLevelFilter = "" | "debug" | "info" | "warn" | "warning" | "error";
 type RuntimeSourceFilter = "" | "system" | "event" | "plugin";
+type AgentStatusFilter = "" | "queued" | "running" | "succeeded" | "failed" | "cancelled";
+type ConsoleLogLevel = "debug" | "info" | "warn" | "error";
+type ConsoleLevelFilter = "all" | ConsoleLogLevel;
 type TimelineItem =
   | { kind: "span"; ts: string; span: EventSpanItem }
   | { kind: "action"; ts: string; action: EventActionItem };
@@ -79,7 +86,7 @@ const TIME_RANGE_LABELS: Record<TimeRange, string> = {
 const STAGE_LABELS: Record<"received" | "routed" | "ran" | "sent", string> = {
   received: "收到",
   routed: "路由",
-  ran: "执行",
+  ran: "处理",
   sent: "发送",
 };
 
@@ -146,7 +153,8 @@ export function Logs() {
   const [customSince, setCustomSince] = useState(() => searchParams.get("since") || "");
   const [customUntil, setCustomUntil] = useState(() => searchParams.get("until") || "");
   const [showFilters, setShowFilters] = useState(false);
-  const [autoRefresh, setAutoRefresh] = useState(true);
+  // 默认关闭自动刷新：进入日志页不再每 5 秒打一轮请求
+  const [autoRefresh, setAutoRefresh] = useState(false);
   const [pluginKey, setPluginKey] = useState(() => searchParams.get("plugin_key") || "");
   const [eventType, setEventType] = useState(() => searchParams.get("event_type") || "");
   const [sourceChannel, setSourceChannel] = useState(() => searchParams.get("source_channel") || "");
@@ -160,6 +168,7 @@ export function Logs() {
   const [runtimeLevel, setRuntimeLevel] = useState<RuntimeLevelFilter>(() => parseRuntimeLevel(searchParams.get("level")));
   const [runtimeSource, setRuntimeSource] = useState<RuntimeSourceFilter>(() => parseRuntimeSource(searchParams.get("source")));
   const [runtimeLimit, setRuntimeLimit] = useState(() => parseRuntimeLimit(searchParams.get("limit")));
+  const [agentStatus, setAgentStatus] = useState<AgentStatusFilter>(() => parseAgentStatus(searchParams.get("agent_status")));
   const [consoleService, setConsoleService] = useState(() => parseConsoleService(searchParams.get("service")));
   const debouncedKeyword = useDebouncedValue(keyword.trim(), 350);
   const debouncedTraceId = useDebouncedValue(traceId.trim(), 350);
@@ -195,8 +204,9 @@ export function Logs() {
     setValue("source", runtimeSource);
     setValue("limit", runtimeLimit === 300 ? undefined : runtimeLimit);
     setValue("service", consoleService === "all" ? undefined : consoleService);
+    setValue("agent_status", agentStatus);
     if (next.toString() !== searchParams.toString()) setSearchParams(next, { replace: true });
-  }, [accountId, chatId, consoleService, customSince, customUntil, eventType, keyword, messageId, pluginKey, reasonCode, runtimeLevel, runtimeLimit, runtimeSource, searchParams, selectedTraceId, senderUserId, setSearchParams, sourceChannel, status, timeRange, traceId, verdict, view]);
+  }, [accountId, agentStatus, chatId, consoleService, customSince, customUntil, eventType, keyword, messageId, pluginKey, reasonCode, runtimeLevel, runtimeLimit, runtimeSource, searchParams, selectedTraceId, senderUserId, setSearchParams, sourceChannel, status, timeRange, traceId, verdict, view]);
 
   const settingsQ = useQuery({ queryKey: ["system", "settings"], queryFn: getSystemSettings });
   const accountsQ = useQuery({ queryKey: ["accounts"], queryFn: listAccounts });
@@ -236,6 +246,12 @@ export function Logs() {
     keyword: debouncedKeyword || undefined,
     tail: runtimeLimit,
   };
+  const agentQuery = {
+    status: agentStatus || undefined,
+    since: range.since,
+    until: range.until,
+    limit: runtimeLimit,
+  };
 
   const messagesQ = useQuery({
     queryKey: ["logs", "messages", commonQuery],
@@ -255,6 +271,12 @@ export function Logs() {
     refetchInterval: autoRefresh ? 5_000 : false,
     enabled: view === "console",
   });
+  const agentRunsQ = useQuery({
+    queryKey: ["logs", "system-agent-runs", agentQuery],
+    queryFn: () => listSystemAgentRuns(agentQuery),
+    refetchInterval: autoRefresh ? 5_000 : false,
+    enabled: view === "agent",
+  });
   const traceDetailQ = useQuery({
     queryKey: ["logs", "trace", "detail", selectedTraceId],
     queryFn: () => getEventTrace(selectedTraceId),
@@ -264,10 +286,19 @@ export function Logs() {
   const selectedMessage = (messagesQ.data ?? []).find((item) => item.trace_id === selectedTraceId);
   const counts = countVerdicts(messagesQ.data ?? []);
   const runtimeStats = countRuntimeLogs(runtimeLogsQ.data ?? []);
+  const agentStats = countAgentRuns(agentRunsQ.data ?? []);
   const pluginOptions = matrixQ.data?.features.map((item) => item.key) ?? [];
-  const activeTitle = view === "messages" ? "日志 · 消息流" : view === "console" ? "日志 · 系统控制台" : "日志 · 运行事件";
+  const activeTitle = view === "messages"
+    ? "日志 · 消息流"
+    : view === "agent"
+      ? "日志 · Agent 运行"
+      : view === "console"
+        ? "日志 · 系统控制台"
+        : "日志 · 运行事件";
   const activeDescription = view === "messages"
     ? "按消息追踪收到、路由、执行、发送四段状态，直接定位卡点、失败和正常跳过。"
+    : view === "agent"
+      ? "查看系统助手每一轮的状态、错误代码与完整执行轨迹。"
     : view === "console"
       ? "查看 Docker / stdout / stderr 级别的原始系统日志，适合排查服务启动、异常堆栈和部署输出。"
       : "查看 TelePilot 写入数据库的结构化运行事件，适合按插件、账号、等级和 JSON 详情排查。";
@@ -277,13 +308,15 @@ export function Logs() {
       <PageHeader
         title={activeTitle}
         description={activeDescription}
-        icon={view === "messages" ? ScrollText : Terminal}
+        icon={view === "messages" ? ScrollText : view === "agent" ? Bot : Terminal}
         signals={(
           <>
             <SignalPill tone="neutral" label={view === "console" ? "行数" : "窗口"} value={view === "console" ? `${runtimeLimit} 行` : TIME_RANGE_LABELS[timeRange]} />
             <SignalPill tone={autoRefresh ? "success" : "neutral"} label="刷新" value={autoRefresh ? "5 秒" : "暂停"} />
             {view === "messages" ? (
               <SignalPill tone={counts.failed || counts.stuck ? "warn" : "success"} label="消息" value={`${messagesQ.data?.length ?? 0} 条`} />
+            ) : view === "agent" ? (
+              <SignalPill tone={agentStats.failed ? "warn" : "success"} label="Agent" value={`${agentRunsQ.data?.length ?? 0} 轮`} />
             ) : view === "console" ? (
               <SignalPill tone={systemConsoleQ.data?.ok === false ? "warn" : "success"} label="控制台" value={`${systemConsoleQ.data?.lines.length ?? 0} 行`} />
             ) : (
@@ -298,6 +331,7 @@ export function Logs() {
             size="sm"
             onClick={() => {
               if (view === "messages") messagesQ.refetch();
+              else if (view === "agent") agentRunsQ.refetch();
               else if (view === "console") systemConsoleQ.refetch();
               else runtimeLogsQ.refetch();
             }}
@@ -326,7 +360,7 @@ export function Logs() {
           />
         </CardHeader>
         <CardContent className="space-y-4">
-          <div className="grid grid-cols-1 gap-3 md:grid-cols-[minmax(0,1fr)_140px] xl:grid-cols-[180px_140px_minmax(0,1fr)] 2xl:grid-cols-[180px_140px_minmax(340px,1fr)_minmax(260px,0.8fr)]">
+          <div className="grid grid-cols-2 gap-3 md:grid-cols-[minmax(0,1fr)_140px] xl:grid-cols-[180px_140px_minmax(0,1fr)] 2xl:grid-cols-[180px_140px_minmax(340px,1fr)_minmax(260px,0.8fr)]">
             <Field label="账号" controlId="message-log-account-filter">
               <Select id="message-log-account-filter" value={accountId} onChange={(event) => setAccountId(event.target.value)}>
                 <option value="">全部账号</option>
@@ -344,10 +378,10 @@ export function Logs() {
                 ))}
               </Select>
             </Field>
-            <Field label="结果" className="md:col-span-2 xl:col-span-1">
+            <Field label="结果" className="col-span-2 md:col-span-2 xl:col-span-1">
               <VerdictSegment value={verdict} onChange={setVerdict} />
             </Field>
-            <Field label="搜索" className="md:col-span-2 xl:col-span-3 2xl:col-span-1">
+            <Field label="搜索" className="col-span-2 md:col-span-2 xl:col-span-3 2xl:col-span-1">
               <SearchBox value={keyword} onChange={setKeyword} />
             </Field>
           </div>
@@ -364,7 +398,7 @@ export function Logs() {
           ) : null}
 
           {showFilters ? (
-            <div className="grid grid-cols-1 gap-3 border-t pt-4 sm:grid-cols-2 xl:grid-cols-4">
+            <div className="grid grid-cols-2 gap-3 border-t pt-4 min-[560px]:grid-cols-3 xl:grid-cols-4">
               <Field label="插件">
                 <PluginSelect value={pluginKey} onChange={setPluginKey} options={pluginOptions} />
               </Field>
@@ -424,7 +458,61 @@ export function Logs() {
             </div>
           ) : null}
         </CardContent>
-      </Card> : view === "console" ? (
+      </Card> : view === "agent" ? (
+        <Card>
+          <CardHeader>
+            <SectionHeader
+              icon={Bot}
+              title="Agent 运行筛选"
+              description="按状态和时间查看系统助手的持久运行记录，失败轮次可直接展开轨迹。"
+            />
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="grid grid-cols-2 gap-3 min-[560px]:grid-cols-3 xl:grid-cols-4">
+              <Field label="状态">
+                <Select value={agentStatus} onChange={(event) => setAgentStatus(parseAgentStatus(event.target.value))}>
+                  <option value="">全部状态</option>
+                  <option value="queued">排队中</option>
+                  <option value="running">运行中</option>
+                  <option value="succeeded">已完成</option>
+                  <option value="failed">失败</option>
+                  <option value="cancelled">已取消</option>
+                </Select>
+              </Field>
+              <Field label="时间">
+                <Select value={timeRange} onChange={(event) => setTimeRange(event.target.value as TimeRange)}>
+                  {Object.entries(TIME_RANGE_LABELS).map(([value, label]) => (
+                    <option key={value} value={value}>{label}</option>
+                  ))}
+                </Select>
+              </Field>
+              <Field label="条数">
+                <Select value={String(runtimeLimit)} onChange={(event) => setRuntimeLimit(parseRuntimeLimit(event.target.value))}>
+                  <option value="100">最近 100 轮</option>
+                  <option value="300">最近 300 轮</option>
+                  <option value="500">最近 500 轮</option>
+                </Select>
+              </Field>
+              <Field label="自动刷新">
+                <div className="flex h-10 items-center gap-2">
+                  <Switch checked={autoRefresh} onCheckedChange={setAutoRefresh} />
+                  <span className="text-sm text-muted-foreground">{autoRefresh ? "开启" : "关闭"}</span>
+                </div>
+              </Field>
+            </div>
+            {timeRange === "custom" ? (
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <Field label="开始时间">
+                  <Input type="datetime-local" value={customSince} onChange={(event) => setCustomSince(event.target.value)} />
+                </Field>
+                <Field label="结束时间">
+                  <Input type="datetime-local" value={customUntil} onChange={(event) => setCustomUntil(event.target.value)} />
+                </Field>
+              </div>
+            ) : null}
+          </CardContent>
+        </Card>
+      ) : view === "console" ? (
         <Card>
           <CardHeader>
             <SectionHeader
@@ -434,7 +522,7 @@ export function Logs() {
             />
           </CardHeader>
           <CardContent className="space-y-4">
-            <div className="grid grid-cols-1 gap-3 md:grid-cols-[220px_160px_minmax(240px,1fr)_160px_180px]">
+            <div className="grid grid-cols-2 gap-3 min-[560px]:grid-cols-3 md:grid-cols-[220px_160px_minmax(240px,1fr)_160px_180px]">
               <Field label="服务">
                 <Select value={consoleService} onChange={(event) => setConsoleService(parseConsoleService(event.target.value))}>
                   {SYSTEM_CONSOLE_SERVICE_OPTIONS.map((item) => (
@@ -463,10 +551,10 @@ export function Logs() {
                   type="button"
                   variant="outline"
                   className="w-full justify-start"
-                  onClick={() => copySystemConsoleLogs(systemConsoleQ.data)}
+                  onClick={() => copySystemConsoleLogs(systemConsoleQ.data, timezone)}
                 >
                   <Copy className="mr-1.5 h-4 w-4" />
-                  复制当前结果
+                  复制已加载日志
                 </Button>
               </Field>
             </div>
@@ -492,7 +580,7 @@ export function Logs() {
             />
           </CardHeader>
           <CardContent className="space-y-4">
-            <div className="grid grid-cols-1 gap-3 md:grid-cols-[minmax(0,1fr)_160px_160px_minmax(240px,1fr)]">
+            <div className="grid grid-cols-2 gap-3 min-[560px]:grid-cols-3 md:grid-cols-[minmax(0,1fr)_160px_160px_minmax(240px,1fr)]">
               <Field label="账号">
                 <Select value={accountId} onChange={(event) => setAccountId(event.target.value)}>
                   <option value="">全部账号</option>
@@ -524,7 +612,7 @@ export function Logs() {
               </Field>
             </div>
 
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
+            <div className="grid grid-cols-2 gap-3 min-[560px]:grid-cols-3 xl:grid-cols-4">
               <Field label="时间">
                 <Select value={timeRange} onChange={(event) => setTimeRange(event.target.value as TimeRange)}>
                   {Object.entries(TIME_RANGE_LABELS).map(([value, label]) => (
@@ -570,7 +658,7 @@ export function Logs() {
             ) : null}
 
             {showFilters ? (
-              <div className="grid grid-cols-1 gap-3 border-t pt-4 sm:grid-cols-2 xl:grid-cols-4">
+              <div className="grid grid-cols-2 gap-3 border-t pt-4 min-[560px]:grid-cols-3 xl:grid-cols-4">
                 <Field label="插件">
                   <PluginSelect value={pluginKey} onChange={setPluginKey} options={pluginOptions} />
                 </Field>
@@ -597,6 +685,14 @@ export function Logs() {
             setTraceId("");
           }}
         />
+      ) : view === "agent" ? (
+        <AgentRunStream
+          runs={agentRunsQ.data ?? []}
+          loading={agentRunsQ.isLoading}
+          error={agentRunsQ.error}
+          timezone={timezone}
+          stats={agentStats}
+        />
       ) : view === "console" ? (
         <SystemConsoleStream
           data={systemConsoleQ.data}
@@ -604,6 +700,7 @@ export function Logs() {
           error={systemConsoleQ.error}
           service={consoleService}
           keyword={keyword}
+          timezone={timezone}
         />
       ) : (
         <RuntimeEventStream
@@ -622,19 +719,20 @@ export function Logs() {
 function LogViewSegment({ value, onChange }: { value: LogView; onChange: (value: LogView) => void }) {
   const items: { value: LogView; label: string; icon: typeof ScrollText }[] = [
     { value: "messages", label: "消息流", icon: ScrollText },
+    { value: "agent", label: "Agent 运行", icon: Bot },
     { value: "console", label: "系统控制台", icon: Terminal },
     { value: "runtime", label: "运行事件", icon: Workflow },
   ];
   return (
-    <Tabs value={value} onValueChange={(next) => onChange(next as LogView)}>
-      <TabsList>
+    <Tabs className="min-w-0" value={value} onValueChange={(next) => onChange(next as LogView)}>
+      <TabsList className="grid w-full grid-cols-2 sm:grid-cols-4">
         {items.map((item) => {
           const Icon = item.icon;
           return (
             <TabsTrigger
               key={item.value}
               value={item.value}
-              className="gap-2"
+              className="min-w-0 gap-1.5 px-2 sm:gap-2"
             >
               <Icon className="h-4 w-4 shrink-0" />
               <span className="truncate">{item.label}</span>
@@ -745,15 +843,48 @@ function SystemConsoleStream({
   error,
   service,
   keyword,
+  timezone,
 }: {
   data?: SystemConsoleLogsResponse;
   loading: boolean;
   error?: unknown;
   service: string;
   keyword: string;
+  timezone?: string;
 }) {
   const lines = data?.lines ?? [];
   const services = data?.services?.length ? data.services.map(systemConsoleServiceLabel) : [systemConsoleServiceLabel(service)];
+  const [levelFilter, setLevelFilter] = useState<ConsoleLevelFilter>("all");
+  const [followLatest, setFollowLatest] = useState(true);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const parsedLines = useMemo(
+    () => lines.map((line) => parseSystemConsoleLine(line, timezone)),
+    [lines, timezone],
+  );
+  const levelCounts = useMemo(
+    () => parsedLines.reduce(
+      (counts, line) => ({ ...counts, [line.level]: counts[line.level] + 1 }),
+      { debug: 0, info: 0, warn: 0, error: 0 },
+    ),
+    [parsedLines],
+  );
+  const records = useMemo(
+    () => groupSystemConsoleLines(
+      levelFilter === "all" ? parsedLines : parsedLines.filter((line) => line.level === levelFilter),
+    ),
+    [levelFilter, parsedLines],
+  );
+  const visibleLineCount = records.reduce((count, record) => count + record.lines.length, 0);
+
+  useEffect(() => {
+    if (!followLatest) return;
+    const frame = window.requestAnimationFrame(() => {
+      const node = scrollRef.current;
+      if (node) node.scrollTop = node.scrollHeight;
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [followLatest, lines.length, levelFilter]);
+
   return (
     <Card>
       <CardHeader>
@@ -785,15 +916,67 @@ function SystemConsoleStream({
           <ErrorHint text="系统控制台暂不可用" error={data.error || "当前环境没有暴露系统级日志源"} />
         ) : lines.length ? (
           <div className="overflow-hidden rounded-lg border border-zinc-800 bg-zinc-950 text-zinc-100 shadow-inner">
-            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-white/10 px-3 py-2 text-xs text-zinc-400">
-              <span className="min-w-0 break-all font-mono">$ docker compose logs --tail={data?.tail ?? 300} {service === "all" ? "" : service}</span>
-              <span>{lines.length} 行</span>
+            <div className="space-y-2 border-b border-white/10 px-3 py-2.5">
+              <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-zinc-400">
+                <span className="min-w-0 break-all font-mono">$ docker compose logs --tail={data?.tail ?? 300} {service === "all" ? "" : service}</span>
+                <span>{visibleLineCount}/{lines.length} 行</span>
+              </div>
+              <div className="flex max-w-full gap-1 overflow-x-auto pb-0.5" role="group" aria-label="控制台日志等级">
+                {([
+                  ["all", "全部", lines.length],
+                  ["debug", "DEBUG", levelCounts.debug],
+                  ["info", "INFO", levelCounts.info],
+                  ["warn", "WARNING", levelCounts.warn],
+                  ["error", "ERROR", levelCounts.error],
+                ] as const).map(([value, label, count]) => (
+                  <button
+                    key={value}
+                    type="button"
+                    aria-pressed={levelFilter === value}
+                    onClick={() => setLevelFilter(value)}
+                    className={cn(
+                      "shrink-0 rounded-md border border-white/10 px-2 py-1 font-mono text-[10px] text-zinc-400 transition-colors hover:bg-white/10 hover:text-zinc-100",
+                      levelFilter === value && "border-white/20 bg-white/10 text-zinc-100",
+                      value === "info" && levelFilter === value && "text-lime-300",
+                      value === "warn" && levelFilter === value && "text-amber-300",
+                      value === "error" && levelFilter === value && "text-red-300",
+                      value === "debug" && levelFilter === value && "text-violet-300",
+                    )}
+                  >
+                    {label} <span className="opacity-60">{count}</span>
+                  </button>
+                ))}
+              </div>
             </div>
-            <pre className="max-h-[640px] overflow-auto p-3 font-mono text-[11px] leading-5 whitespace-pre-wrap break-words">
-              {lines.map((line, index) => (
-                <SystemConsoleLine key={`${index}-${line.slice(0, 32)}`} line={line} keyword={keyword} />
-              ))}
-            </pre>
+            <div className="relative">
+              <div
+                ref={scrollRef}
+                className="max-h-[640px] space-y-2 overflow-auto p-3 font-mono text-[11px] leading-5"
+                onScroll={(event) => {
+                  const node = event.currentTarget;
+                  setFollowLatest(node.scrollHeight - node.scrollTop - node.clientHeight < 40);
+                }}
+              >
+                {records.map((record, index) => (
+                  <SystemConsoleRecord key={`${record.key}-${index}`} record={record} keyword={keyword} />
+                ))}
+              </div>
+              {!followLatest ? (
+                <Button
+                  type="button"
+                  size="sm"
+                  className="absolute bottom-3 right-3 h-8 rounded-full px-3 text-xs shadow-lg"
+                  onClick={() => {
+                    const node = scrollRef.current;
+                    if (node) node.scrollTo({ top: node.scrollHeight, behavior: "smooth" });
+                    setFollowLatest(true);
+                  }}
+                >
+                  <ArrowDown className="mr-1 h-3.5 w-3.5" />
+                  查看最新
+                </Button>
+              ) : null}
+            </div>
           </div>
         ) : (
           <EmptyHint text="当前条件下没有系统控制台日志" />
@@ -803,12 +986,165 @@ function SystemConsoleStream({
   );
 }
 
-function SystemConsoleLine({ line, keyword }: { line: string; keyword: string }) {
-  const tone = consoleLineTone(line);
+type ParsedSystemConsoleLine = {
+  raw: string;
+  service: string;
+  timestamp: string;
+  timeKey: string;
+  inlineTime: string;
+  level: ConsoleLogLevel;
+  body: string;
+};
+
+type SystemConsoleRecordData = {
+  key: string;
+  service: string;
+  timestamp: string;
+  level: ConsoleLogLevel;
+  lines: ParsedSystemConsoleLine[];
+};
+
+function SystemConsoleRecord({ record, keyword }: { record: SystemConsoleRecordData; keyword: string }) {
+  const levelLabel = consoleLevelLabel(record.level);
   return (
-    <span className={cn("block min-h-5", tone)}>
-      <HighlightedMessage text={line || " "} keyword={keyword} />
-    </span>
+    <div className="grid min-w-0 gap-1.5 sm:grid-cols-[9.5rem_minmax(0,1fr)] sm:gap-3">
+      <div className="hidden pt-2 tabular-nums text-violet-300 sm:block">{record.timestamp || "无时间"}</div>
+      <div
+        className={cn(
+          "relative min-w-0 overflow-hidden rounded-xl border border-white/10 bg-zinc-900/55 py-2 pl-4 pr-3",
+          record.level === "error" && "border-red-400/25 bg-red-500/5",
+          record.level === "warn" && "border-amber-400/20 bg-amber-500/5",
+        )}
+        data-console-level={record.level}
+      >
+        <span className={cn(
+          "absolute inset-y-2 left-2 w-1 rounded-full bg-zinc-500",
+          record.level === "debug" && "bg-violet-400",
+          record.level === "info" && "bg-lime-500",
+          record.level === "warn" && "bg-amber-400",
+          record.level === "error" && "bg-red-400",
+        )} />
+        <div className="mb-1 flex flex-wrap items-center gap-2 pl-1 text-[10px] sm:hidden">
+          <span className="tabular-nums text-violet-300">{record.timestamp || "无时间"}</span>
+          {record.service ? <span className="text-zinc-500">{record.service}</span> : null}
+        </div>
+        <div className="space-y-0.5 pl-1">
+          {record.lines.map((line, index) => (
+            <div key={`${index}-${line.raw.slice(0, 24)}`} className="grid min-w-0 grid-cols-[4.6rem_minmax(0,1fr)] gap-2" title={`原始日志：${line.raw}`}>
+              <span className={cn(
+                "font-semibold",
+                line.level === "debug" && "text-violet-300",
+                line.level === "info" && "text-lime-400",
+                line.level === "warn" && "text-amber-300",
+                line.level === "error" && "text-red-300",
+              )}>
+                {levelLabel}:
+              </span>
+              <span className="min-w-0 whitespace-pre-wrap break-words text-zinc-300">
+                <span className="mr-2 tabular-nums text-zinc-500">{line.inlineTime}</span>
+                <HighlightedMessage text={line.body || " "} keyword={keyword} />
+              </span>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function AgentRunStream({
+  runs,
+  loading,
+  error,
+  timezone,
+  stats,
+}: {
+  runs: SystemAgentRun[];
+  loading: boolean;
+  error?: unknown;
+  timezone?: string;
+  stats: ReturnType<typeof countAgentRuns>;
+}) {
+  return (
+    <Card>
+      <CardHeader>
+        <SectionHeader
+          icon={Bot}
+          title="Agent 运行"
+          description="每一轮系统助手请求都会保留状态与事件轨迹，失败时优先查看错误代码和最后几步。"
+          meta={(
+            <div className="flex flex-wrap gap-1.5">
+              <SignalPill tone="neutral" label="运行中" value={String(stats.running)} />
+              <SignalPill tone="success" label="完成" value={String(stats.succeeded)} />
+              <SignalPill tone={stats.failed ? "warn" : "neutral"} label="失败" value={String(stats.failed)} />
+            </div>
+          )}
+        />
+      </CardHeader>
+      <CardContent className="space-y-2">
+        {loading ? (
+          <InlineLoading />
+        ) : error ? (
+          <ErrorHint text="Agent 运行记录加载失败" error={error} />
+        ) : runs.length ? (
+          runs.map((run) => {
+            const failed = run.status === "failed" || Boolean(run.error_code || run.error_message);
+            return (
+              <div
+                key={run.id}
+                className={cn(
+                  "rounded-lg border bg-background p-3",
+                  failed && "border-destructive/30 bg-destructive/5",
+                  run.status === "running" && "border-info/30 bg-info/5",
+                )}
+              >
+                <div className="flex min-w-0 flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+                  <div className="min-w-0">
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <Badge variant={agentRunBadgeVariant(run.status)}>{agentRunStatusLabel(run.status)}</Badge>
+                      <span className="text-xs text-muted-foreground">
+                        {run.kind === "retry"
+                          ? "重试"
+                          : run.kind === "regenerate"
+                            ? "重新生成"
+                            : "问答"}
+                      </span>
+                      {run.user_message_id != null ? (
+                        <span className="text-xs text-muted-foreground">消息 #{run.user_message_id}</span>
+                      ) : null}
+                    </div>
+                    <p className="mt-1 break-all font-mono text-[11px] text-muted-foreground">{run.id}</p>
+                    <p className="mt-0.5 break-all text-xs text-muted-foreground">会话 {run.session_id}</p>
+                  </div>
+                  <div className="shrink-0 text-left text-xs text-muted-foreground sm:text-right">
+                    <div>{formatDateTime(run.created_at || run.started_at, timezone)}</div>
+                    <div className="mt-0.5">{agentRunElapsed(run)}</div>
+                  </div>
+                </div>
+                {run.error_message || run.error_code ? (
+                  <div className="mt-2 rounded-md border border-destructive/20 bg-background/70 px-2.5 py-2 text-xs text-destructive">
+                    {run.error_code ? <div className="font-mono text-[11px]">{run.error_code}</div> : null}
+                    {run.error_message ? <div className="mt-0.5 break-words">{run.error_message}</div> : null}
+                  </div>
+                ) : null}
+                <RunTrace
+                  runId={run.id}
+                  runStatus={run.status}
+                  lastSeq={run.last_seq}
+                  running={run.status === "running"}
+                  defaultOpen={false}
+                  mode="diagnostic"
+                  timezone={timezone}
+                  className="mt-2"
+                />
+              </div>
+            );
+          })
+        ) : (
+          <EmptyHint text="当前条件下没有 Agent 运行记录" />
+        )}
+      </CardContent>
+    </Card>
   );
 }
 
@@ -1075,7 +1411,9 @@ function FunelStrip({ message }: { message: MessageFunelItem }) {
             <StageIcon status={stage.value} />
             <span className="truncate text-xs font-medium">{stage.label}</span>
           </div>
-          <div className="mt-0.5 truncate text-center text-[11px] opacity-80">{stageLabel(stage.value)}</div>
+          <div className="mt-0.5 truncate text-center text-[11px] opacity-80">
+            {funnelStageLabel(stage.key, stage.value)}
+          </div>
         </div>
       ))}
     </div>
@@ -1632,8 +1970,19 @@ function safeIntegerFilter(value: string, allowNegative = true): string | undefi
 }
 
 function parseLogView(value: string | null): LogView {
-  if (value === "console" || value === "runtime") return value;
+  if (value === "agent" || value === "console" || value === "runtime") return value;
   return "messages";
+}
+
+function parseAgentStatus(value: string | null): AgentStatusFilter {
+  if (
+    value === "queued" ||
+    value === "running" ||
+    value === "succeeded" ||
+    value === "failed" ||
+    value === "cancelled"
+  ) return value;
+  return "";
 }
 
 function parseRuntimeLevel(value: string | null): RuntimeLevelFilter {
@@ -1702,6 +2051,42 @@ function countRuntimeLogs(logs: RuntimeLogItem[]) {
   );
 }
 
+function countAgentRuns(runs: SystemAgentRun[]) {
+  return runs.reduce(
+    (acc, run) => {
+      if (run.status === "running" || run.status === "queued") acc.running += 1;
+      else if (run.status === "succeeded") acc.succeeded += 1;
+      else if (run.status === "failed" || run.status === "cancelled") acc.failed += 1;
+      return acc;
+    },
+    { running: 0, succeeded: 0, failed: 0 },
+  );
+}
+
+function agentRunStatusLabel(status: string): string {
+  if (status === "queued") return "排队中";
+  if (status === "running") return "运行中";
+  if (status === "succeeded") return "已完成";
+  if (status === "failed") return "失败";
+  if (status === "cancelled") return "已取消";
+  return status || "未知";
+}
+
+function agentRunBadgeVariant(status: string): "secondary" | "success" | "destructive" | "warn" {
+  if (status === "succeeded") return "success";
+  if (status === "failed") return "destructive";
+  if (status === "cancelled") return "warn";
+  return "secondary";
+}
+
+function agentRunElapsed(run: SystemAgentRun): string {
+  const started = Date.parse(run.started_at || run.created_at || "");
+  const ended = Date.parse(run.finished_at || run.updated_at || "");
+  if (!Number.isFinite(started) || !Number.isFinite(ended) || ended < started) return "耗时 -";
+  const ms = ended - started;
+  return `耗时 ${ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${ms}ms`}`;
+}
+
 function normalizeRuntimeLevel(level?: string | null): "debug" | "info" | "warn" | "error" {
   const value = (level || "info").toLowerCase();
   if (value === "debug") return "debug";
@@ -1748,13 +2133,85 @@ async function copyRuntimeLog(log: RuntimeLogItem, timezone?: string) {
   await copyText(formatRuntimeLog(log, timezone), "已复制该条日志");
 }
 
-async function copySystemConsoleLogs(data?: SystemConsoleLogsResponse) {
+async function copySystemConsoleLogs(data?: SystemConsoleLogsResponse, timezone?: string) {
   const lines = data?.lines ?? [];
   if (!lines.length) {
     toast.info("当前没有可复制的系统控制台日志");
     return;
   }
-  await copyText(lines.join("\n"), `已复制 ${lines.length} 行系统控制台日志`);
+  await copyText(lines.map((line) => formatSystemConsoleLine(line, timezone)).join("\n"), `已复制 ${lines.length} 行系统控制台日志`);
+}
+
+const DOCKER_ISO_TIMESTAMP_RE = /\b(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d+))?Z\b/;
+
+function formatSystemConsoleTimestamp(rawTimestamp: string, timezone?: string): string {
+  const match = DOCKER_ISO_TIMESTAMP_RE.exec(rawTimestamp);
+  if (!match) return rawTimestamp;
+  const millis = (match[2] || "").slice(0, 3).padEnd(3, "0");
+  const normalized = `${match[1]}.${millis}Z`;
+  const date = new Date(normalized);
+  if (Number.isNaN(date.getTime())) return rawTimestamp;
+  try {
+    const local = date.toLocaleString("zh-CN", {
+      timeZone: timezone || "Asia/Shanghai",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: false,
+    }).replaceAll("/", "-");
+    return `${local}.${millis}`;
+  } catch {
+    return rawTimestamp;
+  }
+}
+
+function formatSystemConsoleLine(line: string, timezone?: string): string {
+  const match = DOCKER_ISO_TIMESTAMP_RE.exec(line);
+  return match ? line.replace(match[0], formatSystemConsoleTimestamp(match[0], timezone)) : line;
+}
+
+function parseSystemConsoleLine(line: string, timezone?: string): ParsedSystemConsoleLine {
+  const level = consoleLineLevel(line);
+  const serviceMatch = /^([^|]+?)\s*\|\s*/.exec(line);
+  const service = serviceMatch?.[1]?.trim() || "";
+  const withoutService = serviceMatch ? line.slice(serviceMatch[0].length) : line;
+  const timestampMatch = DOCKER_ISO_TIMESTAMP_RE.exec(withoutService);
+  const timestamp = timestampMatch ? formatSystemConsoleTimestamp(timestampMatch[0], timezone) : "";
+  const bodyWithLevel = (timestampMatch
+    ? withoutService.replace(timestampMatch[0], "")
+    : withoutService).trim();
+  const body = bodyWithLevel.replace(/^(DEBUG|INFO|WARNING|WARN|ERROR|CRITICAL|FATAL)\s*:\s*/i, "");
+  return {
+    raw: line,
+    service,
+    timestamp,
+    timeKey: timestamp.replace(/\.\d{3}$/, ""),
+    inlineTime: timestamp.split(" ").at(-1) || "--:--:--",
+    level,
+    body,
+  };
+}
+
+function groupSystemConsoleLines(lines: ParsedSystemConsoleLine[]): SystemConsoleRecordData[] {
+  const records: SystemConsoleRecordData[] = [];
+  for (const line of lines) {
+    const previous = records.at(-1);
+    if (previous && previous.level === line.level && previous.service === line.service && previous.key === `${line.timeKey}|${line.service}|${line.level}`) {
+      previous.lines.push(line);
+      continue;
+    }
+    records.push({
+      key: `${line.timeKey}|${line.service}|${line.level}`,
+      service: line.service,
+      timestamp: line.timeKey,
+      level: line.level,
+      lines: [line],
+    });
+  }
+  return records;
 }
 
 async function copyText(text: string, message: string) {
@@ -1792,12 +2249,17 @@ function systemConsoleSourceLabel(source?: string | null): string {
   return source || "系统";
 }
 
-function consoleLineTone(line: string): string {
+function consoleLineLevel(line: string): "debug" | "info" | "warn" | "error" {
   const lowered = line.toLowerCase();
-  if (/(error|exception|traceback|failed|fatal|\bpanic\b)/i.test(lowered)) return "text-destructive";
-  if (/(warn|warning|retry|timeout)/i.test(lowered)) return "text-warning";
-  if (/(debug|verbose)/i.test(lowered)) return "text-info";
-  return "text-zinc-100";
+  if (/(error|exception|traceback|failed|fatal|\bpanic\b)/i.test(lowered)) return "error";
+  if (/(warn|warning|retry|timeout)/i.test(lowered)) return "warn";
+  if (/(debug|verbose)/i.test(lowered)) return "debug";
+  return "info";
+}
+
+function consoleLevelLabel(level: ConsoleLogLevel): string {
+  if (level === "warn") return "WARNING";
+  return level.toUpperCase();
 }
 
 function verdictMeta(verdict: MessageVerdict) {
@@ -1844,6 +2306,19 @@ function stageLabel(status: MessageFunelStage): string {
   if (status === "stuck") return "卡住";
   if (status === "skip") return "跳过";
   return "未到达";
+}
+
+function funnelStageLabel(
+  stage: keyof MessageFunelItem["funel"],
+  status: MessageFunelStage,
+): string {
+  if (status !== "pass" && status !== "none") return stageLabel(status);
+  if (stage === "received" && status === "pass") return "已接收";
+  if (stage === "routed" && status === "pass") return "已匹配";
+  if (stage === "ran" && status === "pass") return "已处理";
+  if (stage === "sent" && status === "pass") return "已发送";
+  if (stage === "sent" && status === "none") return "无动作";
+  return stageLabel(status);
 }
 
 function channelLabel(channel?: string | null): string {

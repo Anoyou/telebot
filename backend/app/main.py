@@ -27,25 +27,29 @@ from .api import logs as logs_api
 from .api import message_templates as message_templates_api
 from .api import network as network_api
 from .api import notify_bots as notify_bots_api
+from .api import platform_capabilities as platform_capabilities_api
 from .api import proxies as proxies_api
 from .api import rate_limit as rate_limit_api
 from .api import sudo as sudo_api
 from .api import system_agent as system_agent_api
 from .api import webhooks as webhooks_api
-from .logging_redaction import install_sensitive_log_filter
+from .logging_redaction import configure_dependency_log_levels, install_sensitive_log_filter
 from .services import (
     account_bot_runtime,
     event_trace,
     interaction_bot_runtime,
     notify_service,
+    platform_capabilities,
     plugin_config_action_jobs,
     remote_plugin_service,
 )
 from .services.login_service import cleanup_expired_loop
+from .services.system_agent.actions import cleanup_expired_action_secrets_loop
 from .settings import settings
 
 logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO))
 install_sensitive_log_filter()
+configure_dependency_log_levels()
 
 # Postgres advisory lock key（固定值，避免不同进程 key 漂移）
 _MIGRATION_ADVISORY_LOCK_KEY = 730140129
@@ -94,6 +98,26 @@ async def _retry_runtime_component(
             logging.info("关键组件 %s 已自动恢复", name)
             return
         delay = min(delay * 2, 30.0)
+
+
+async def _start_interaction_bot_component() -> object:
+    """缓存就绪后才允许启动 Interaction Bot；DB 恢复后可由重试器收敛。"""
+
+    snapshot = platform_capabilities.get_snapshot()
+    if not snapshot.cache_ready:
+        await platform_capabilities.bootstrap_from_db()
+        snapshot = platform_capabilities.get_snapshot()
+    if not snapshot.cache_ready:
+        raise RuntimeError("平台能力缓存未就绪")
+    if not platform_capabilities.is_module_enabled_cached(
+        "interaction_bot",
+        fail_closed=True,
+    ):
+        await platform_capabilities.mark_runtime_ready_if_starting("interaction_bot")
+        return 0
+    result = await interaction_bot_runtime.start_interaction_bot_manager()
+    await platform_capabilities.mark_runtime_ready_if_starting("interaction_bot")
+    return result
 
 
 def _is_container_env() -> bool:
@@ -188,6 +212,12 @@ async def lifespan(app: FastAPI):
     except Exception:  # noqa: BLE001
         logging.exception("刷新 Trace 写入配置失败，使用默认配置继续启动")
 
+    # 启动期预加载平台能力缓存。Webhook 等公开入口只读缓存，失败按 fail-closed。
+    try:
+        await platform_capabilities.bootstrap_from_db()
+    except Exception:  # noqa: BLE001
+        logging.exception("预加载平台能力缓存失败；公开入口将 fail-closed 直至缓存就绪")
+
     # 启动期加载客户端身份 UA 版本覆盖（system_setting）。失败不阻塞启动。
     try:
         from .services import llm_identity
@@ -205,6 +235,10 @@ async def lifespan(app: FastAPI):
 
     # 1) 启动登录会话清理后台任务（每 60s 扫一次）
     cleanup_task = asyncio.create_task(cleanup_expired_loop())
+    agent_secret_cleanup_task = asyncio.create_task(
+        cleanup_expired_action_secrets_loop(),
+        name="system-agent-secret-cleanup",
+    )
     remote_plugin_update_task = asyncio.create_task(remote_plugin_service.auto_update_check_loop())
 
     retry_tasks: list[asyncio.Task[None]] = []
@@ -252,19 +286,25 @@ async def lifespan(app: FastAPI):
         )
 
     # 2-F: 高频群互动使用独立交互 Bot runtime，避免和管理 Bot 生命周期混在一起。
+    # Interaction Bot 模块关闭时不启动 manager（管理 Bot 仍由 account_bot_manager 负责）。
     if not await _start_runtime_component(
         "interaction_bot_manager",
-        interaction_bot_runtime.start_interaction_bot_manager,
+        _start_interaction_bot_component,
     ):
         retry_tasks.append(
             asyncio.create_task(
                 _retry_runtime_component(
                     "interaction_bot_manager",
-                    interaction_bot_runtime.start_interaction_bot_manager,
+                    _start_interaction_bot_component,
                 ),
                 name="retry-interaction-bot-manager",
             )
         )
+
+    try:
+        await platform_capabilities.reconcile_runtime_after_startup()
+    except Exception:  # noqa: BLE001
+        logging.exception("平台能力 runtime 启动收敛失败")
 
     try:
         yield
@@ -287,9 +327,14 @@ async def lifespan(app: FastAPI):
         except Exception:  # noqa: BLE001
             logging.exception("停止 account bot manager 失败")
         cleanup_task.cancel()
+        agent_secret_cleanup_task.cancel()
         remote_plugin_update_task.cancel()
         try:
             await cleanup_task
+        except (asyncio.CancelledError, Exception):  # noqa: BLE001
+            pass
+        try:
+            await agent_secret_cleanup_task
         except (asyncio.CancelledError, Exception):  # noqa: BLE001
             pass
         try:
@@ -452,6 +497,7 @@ app.include_router(dispatch_debug_api.router)  # WP4：命中调试器接口空�
 app.include_router(ledger_api.router)  # WP5：资金台账接口空桩
 app.include_router(webhooks_api.router)  # WP7：入站 Webhook 接口空桩
 app.include_router(system_agent_api.router)  # System Agent：自然语言系统助手
+app.include_router(platform_capabilities_api.router)  # 平台能力热插拔
 
 
 # ── 健康检查 ─────────────────────────────────────────────────────

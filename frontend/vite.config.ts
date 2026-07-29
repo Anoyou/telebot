@@ -9,7 +9,7 @@ export default defineConfig({
   plugins: [
     react(),
     ...(process.env.ANALYZE === "1"
-      ? [visualizer({ filename: "../docs/frontend/baseline/build-report.html", template: "treemap", gzipSize: true, brotliSize: true, open: false })]
+      ? [visualizer({ filename: "dist/build-report.html", template: "treemap", gzipSize: true, brotliSize: true, open: false })]
       : []),
     VitePWA({
       // 自动更新：新 SW 安装好后下次启动自动激活；前端再监听 needRefresh 提示用户刷新
@@ -66,7 +66,7 @@ export default defineConfig({
         // 继续提供过期的首帧主题和状态栏配置。注意：这只能保证页面拿到最新配置，不能
         // 改写 iOS 已经固化在现有主屏 Web App 里的安装元数据。
         navigateFallback: null,
-        globPatterns: ["**/*.{js,css,ico,png,svg,webp,woff,woff2}"],
+        globPatterns: ["**/*.{js,css,md,ico,png,svg,webp,woff,woff2}"],
         runtimeCaching: [
           {
             // HTML 导航：NetworkFirst，拿最新 index.html；断网回退最近一次缓存。
@@ -99,7 +99,8 @@ export default defineConfig({
     port: 5173,
     strictPort: true,
     proxy: {
-      "/api": "http://localhost:8000",
+      // 后端绑定 0.0.0.0（IPv4）；固定 IPv4 回环，避免 localhost 优先解析为 ::1 时代理返回 500。
+      "/api": "http://127.0.0.1:8000",
     },
   },
   preview: {

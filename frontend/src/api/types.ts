@@ -515,12 +515,18 @@ export interface FeatureInfo {
   event_subscriptions?: PluginEventSubscription[];
   capabilities?: PluginCapabilities;
   permissions?: string[];
+  requires_platform_capabilities?: string[];
   experimental: boolean;
   update_available?: boolean;
   latest_version?: string | null;
   last_update_check_at?: string | null;
   last_update_check_error?: string | null;
   lint_warnings?: string[];
+  /** 平台能力热插拔：ready | partial | paused | transitioning */
+  runtime_availability?: "ready" | "partial" | "paused" | "transitioning" | string | null;
+  available_channels?: string[];
+  blocked_entries?: Array<Record<string, unknown>>;
+  blocked_reason_code?: string | null;
 }
 export interface AccountFeatureItem {
   feature_key: string;
@@ -965,6 +971,67 @@ export interface MessageFunelItem extends EventTraceSummary {
   next_step: string;
 }
 
+// ===================== 平台能力热插拔 =====================
+export type PlatformModuleKey =
+  | "ai"
+  | "interaction_bot"
+  | "webhooks"
+  | "ledger"
+  | "dispatch_debug";
+
+export type PlatformRuntimeState =
+  | "starting"
+  | "ready"
+  | "quiescing"
+  | "stopped"
+  | "failed";
+
+export interface PlatformCapabilityModule {
+  key: PlatformModuleKey | string;
+  label: string;
+  desired_enabled: boolean;
+  generation: number;
+  runtime_state: PlatformRuntimeState | string;
+  last_error?: string | null;
+  last_transition_at?: string | null;
+  resource_summary?: Record<string, unknown>;
+}
+
+export interface PlatformCapabilityChannel {
+  key: string;
+  label: string;
+  fixed: boolean;
+  managed_by?: PlatformModuleKey | string | null;
+  available: boolean;
+  reason_code?: string | null;
+  reason_text?: string | null;
+}
+
+export interface PlatformWorkerConvergence {
+  total_accounts: number;
+  notified: number;
+  acked: number;
+  pending: number;
+  offline_or_timeout: number;
+  last_broadcast_at?: string | null;
+  notes?: string[];
+}
+
+export interface PlatformCapabilities {
+  modules: PlatformCapabilityModule[];
+  channels: PlatformCapabilityChannel[];
+  worker_convergence: PlatformWorkerConvergence;
+  cache_ready: boolean;
+  updated_at?: string | null;
+}
+
+export interface PlatformCapabilityPatchResult {
+  module: PlatformCapabilityModule;
+  worker_convergence: PlatformWorkerConvergence;
+  ok: boolean;
+  message?: string | null;
+}
+
 // ===================== 系统设置 =====================
 export interface SystemSettings {
   command_prefix: string;
@@ -1019,6 +1086,12 @@ export interface SystemSettings {
     trace_payload_snapshot_retention_days: number;
     native_raw_persist_enabled: boolean;
     native_raw_retention_days: number;
+  };
+  /** 控制台界面偏好；保存在服务端，PWA/浏览器间共享。 */
+  ui_preferences?: {
+    sidebar_order: string[];
+    mobile_nav_order: string[];
+    provider_order: number[];
   };
 }
 
@@ -1099,6 +1172,8 @@ export interface HostResourceStatus {
 
 export interface ProcessResourceStatus {
   pid?: number | null;
+  name?: string | null;
+  role?: string | null;
   cpu_percent?: number | null;
   rss_mb?: number | null;
   uss_mb?: number | null;
@@ -1119,6 +1194,7 @@ export interface ContainerResourceStatus {
   memory_mb?: number | null;
   memory_limit_mb?: number | null;
   memory_percent?: number | null;
+  pids?: number | null;
 }
 
 export interface RuntimeLogStatsStatus {
@@ -1136,6 +1212,8 @@ export interface ResourceDashboard {
   containers: ContainerResourceStatus[];
   container_total: ProcessResourceStatus;
   container_probe_error?: string | null;
+  container_source?: "updater" | "local_docker" | null;
+  project_total_basis?: "processes" | "processes_plus_containers" | "compose_containers";
   workers: WorkerRuntimeResourceStatus[];
   worker_alive: number;
   worker_desired_running: number;
@@ -1370,11 +1448,25 @@ export type LLMClientIdentityProfile =
   | "auto"
   | "minimal"
   | "openai_sdk"
-  | "codex_cli"
+  | "codex_tui"
   | "codex_desktop"
   | "claude_code"
-  | "claude_desktop"
   | "grok_cli";
+
+export type LLMRequestHeaderScope = "inference" | "liveness" | "models";
+
+export interface LLMRequestHeaderInput {
+  name: string;
+  /** 新值；编辑已有密文时传 null 表示保持不变。 */
+  value?: string | null;
+  scopes: LLMRequestHeaderScope[];
+}
+
+export interface LLMRequestHeaderSummary {
+  name: string;
+  scopes: LLMRequestHeaderScope[];
+  has_value: boolean;
+}
 
 /**
  * LLMProvider 下挂的一个候选模型条目（与后端 ProviderModel 对齐）。
@@ -1453,6 +1545,8 @@ export interface LLMProviderOut {
   proxy_id?: number | null;
   /** 候选模型清单 */
   models?: ProviderModel[];
+  /** Provider 专用兼容请求头脱敏摘要，不含 value。 */
+  request_headers?: LLMRequestHeaderSummary[];
   created_at: string;
 }
 
@@ -1481,6 +1575,7 @@ export interface LLMProviderCreate {
   proxy_id?: number | null;
   /** 候选模型清单；通常新建时留空，建完用"Fetch 模型列表"按钮自动填 */
   models?: ProviderModel[];
+  request_headers?: LLMRequestHeaderInput[];
 }
 
 /**
@@ -1516,6 +1611,7 @@ export interface LLMProviderUpdate {
   clear_proxy?: boolean;
   /** 整体替换式 PATCH——给 list（含空 list）就覆盖；undefined = 不动 */
   models?: ProviderModel[];
+  request_headers?: LLMRequestHeaderInput[];
 }
 
 /** ``POST /api/commands/llm-providers/{pid}/fetch-models`` 出参 */
@@ -1537,6 +1633,7 @@ export interface FetchModelsPreviewRequest {
   proxy_id?: number | null;
   /** 已落库 provider 的 id（编辑模式才有）；用来回落到已存 api_key */
   pid?: number | null;
+  request_headers?: LLMRequestHeaderInput[] | null;
 }
 
 /** ``POST /api/commands/llm-providers/fetch-models-preview`` 出参 */
@@ -1558,6 +1655,7 @@ export interface QuickVerifyProviderRequest {
   message?: string;
   max_tokens?: number;
   timeout_seconds?: number;
+  request_headers?: LLMRequestHeaderInput[];
 }
 
 export interface QuickVerifyProviderResult {
@@ -1596,6 +1694,7 @@ export type QuickVerifyProviderStreamEvent =
       type: "delta";
       model: string;
       delta: string;
+      stream_fallback?: boolean;
     }
   | ({ type: "done" | "error" } & QuickVerifyProviderResult);
 
@@ -1609,6 +1708,7 @@ export interface DetectProviderProtocolsRequest {
   /** 阶段 B：可选自然提示词；不传用稳定默认 */
   system_prompt?: string | null;
   message?: string | null;
+  request_headers?: LLMRequestHeaderInput[] | null;
 }
 
 export interface ProtocolProbeResult {
@@ -1698,6 +1798,7 @@ export interface ChatTestModelResult {
   output_tokens: number;
   empty_response: boolean;
   error?: string | null;
+  status_code?: number | null;
   client_identity_profile?: string | null;
   effective_api_format?: string | null;
   streaming?: boolean;
@@ -1715,6 +1816,7 @@ export interface FullLivenessPreviewRequest {
   max_tokens?: number;
   global_concurrency?: number;
   only_provider_ids?: number[] | null;
+  models_by_provider?: Record<number, string[]> | null;
 }
 
 export interface LivenessProviderPlan {
@@ -1747,6 +1849,7 @@ export interface FullLivenessRunRequest {
   confirm_large_run?: boolean;
   only_provider_ids?: number[] | null;
   only_models?: string[] | null;
+  models_by_provider?: Record<number, string[]> | null;
 }
 
 export interface LivenessResultItem {
@@ -1759,6 +1862,7 @@ export interface LivenessResultItem {
   output_tokens: number;
   preview?: string | null;
   error?: string | null;
+  status_code?: number | null;
   error_category?: string | null;
   suggestion?: string | null;
   client_identity_profile?: string | null;
@@ -1787,7 +1891,11 @@ export interface FullLivenessRunStartResponse {
 
 // ===== Sprint4 #2C =====
 export type SchedulerKind = "cron" | "once" | "interval";
-export type SchedulerActionType = "send_message" | "run_command" | "call_llm";
+export type SchedulerActionType =
+  | "send_message"
+  | "run_command"
+  | "call_llm"
+  | "agent_prompt";
 
 export interface SchedulerActionConfig {
   type: SchedulerActionType;
@@ -1801,6 +1909,8 @@ export interface SchedulerActionConfig {
   prompt?: string;
   system_prompt?: string;
   max_tokens?: number;
+  /** agent_prompt：可选覆盖账号上下文；缺省用规则所属账号 */
+  account_id?: number | null;
   /** 触发后多少秒自动删除发送的消息，0 或留空 = 不删除，上限 3600 */
   delete_after?: number | null;
 }
@@ -1882,10 +1992,13 @@ export interface CheckUpdateResult {
   can_check?: boolean | null;
   current_commit: string | null;
   remote_commit: string | null;
+  current_version?: string | null;
+  target_version?: string | null;
   ahead: number;
   remote?: string | null;
   branch?: string | null;
   changed_files: string[];
+  commit_titles?: string[];
   runtime_mode?: string | null;
   update_executor?: string | null;
   action_required?:
@@ -1904,6 +2017,8 @@ export interface CheckUpdateResult {
   plan_detail?: string | null;
   components?: string[] | null;
   services?: string[] | null;
+  file_sync_services?: string[] | null;
+  rebuild_services?: string[] | null;
   requires_full_update?: boolean | null;
   requires_backup?: boolean | null;
   requires_migration?: boolean | null;
@@ -1937,6 +2052,8 @@ export interface PullUpdateResult {
   plan_detail?: string | null;
   components?: string[] | null;
   services?: string[] | null;
+  file_sync_services?: string[] | null;
+  rebuild_services?: string[] | null;
   requires_full_update?: boolean | null;
   requires_backup?: boolean | null;
   requires_migration?: boolean | null;
@@ -1967,6 +2084,8 @@ export interface UpdateJobStatus {
   detail?: string | null;
   logs: string[];
   plan?: Record<string, unknown> | null;
+  /** 更新各阶段耗时（WP-U1） */
+  step_timings?: Array<{ phase?: string; duration_ms?: number; detail?: string }> | null;
 }
 
 export interface UpdateTargetOptions {
@@ -1989,6 +2108,25 @@ export interface ClientIdentityVersionItem {
 
 export interface ClientIdentityVersionsResponse {
   items: ClientIdentityVersionItem[];
+  profiles: ClientIdentityRequestProfile[];
+}
+
+export interface ClientIdentityHeaderItem {
+  name: string;
+  value: string;
+  description: string;
+  configurable: boolean;
+  management: "fixed" | "runtime" | "protocol" | "transport" | "excluded";
+}
+
+export interface ClientIdentityRequestProfile {
+  profile: string;
+  label: string;
+  description: string;
+  api_formats: string[];
+  version_keys: string[];
+  source: string;
+  headers: ClientIdentityHeaderItem[];
 }
 
 export interface ClientIdentityVersionDetectItem {

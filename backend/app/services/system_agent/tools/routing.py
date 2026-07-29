@@ -95,6 +95,10 @@ async def set_routing_mode_execute(ctx: ToolContext, args: dict[str, Any]) -> di
             raise ValueError(str(detail.get("message") or detail.get("code") or exc)) from None
         raise ValueError(str(detail or exc)) from None
     out_cfg = dict(updated.config or {})
+    if ctx.action is not None:
+        stored = dict(ctx.action.arguments or {})
+        stored["reload_ai_command_accounts"] = True
+        ctx.action.arguments = stored
     return {
         "template_id": updated.id,
         "name": updated.name,
@@ -130,6 +134,7 @@ def register(registry: ToolRegistry) -> None:
     registry.register(
         ToolSpec(
             name="routing.list_ai_commands",
+            channels=("web",),
             description="列出 AI 指令及其 routing_mode（fixed/auto）。",
             input_schema={"type": "object", "properties": {}, "additionalProperties": False},
             read_only=True,
@@ -140,6 +145,7 @@ def register(registry: ToolRegistry) -> None:
     registry.register(
         ToolSpec(
             name="routing.preview",
+            channels=("web",),
             description="预览一段文本在 auto 路由下会选哪个 Provider/模型（不改配置）。",
             input_schema={
                 "type": "object",
@@ -159,6 +165,7 @@ def register(registry: ToolRegistry) -> None:
     registry.register(
         ToolSpec(
             name="routing.set_command_mode",
+            channels=("web",),
             description="设置某条 AI 指令的 routing_mode 为 fixed 或 auto。",
             input_schema={
                 "type": "object",
@@ -177,5 +184,6 @@ def register(registry: ToolRegistry) -> None:
             risk="normal",
             preview_handler=set_routing_mode_preview,
             execute_handler=set_routing_mode_execute,
+            runtime_effects=("reload_commands",),
         )
     )

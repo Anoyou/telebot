@@ -31,6 +31,31 @@ class RuleServiceError(ValueError):
         self.message = message
 
 
+SCHEDULER_AGENT_WEB_USER_ID_KEY = "_agent_web_user_id"
+
+
+def bind_scheduler_agent_owner(
+    config: dict[str, Any],
+    web_user_id: int | None,
+) -> dict[str, Any]:
+    """用服务端可信身份固化 agent_prompt 的 Web 会话所有者。"""
+
+    cfg = dict(config or {})
+    action = dict(cfg.get("action") or {}) if isinstance(cfg.get("action"), dict) else {}
+    if str(action.get("type") or "").strip().lower() == "agent_prompt":
+        if web_user_id is None:
+            raise RuleServiceError(
+                "AGENT_PROMPT_OWNER_REQUIRED",
+                "agent_prompt 定时任务必须由已登录 Web 管理员保存",
+            )
+        action[SCHEDULER_AGENT_WEB_USER_ID_KEY] = int(web_user_id)
+        cfg["action"] = action
+    elif action:
+        action.pop(SCHEDULER_AGENT_WEB_USER_ID_KEY, None)
+        cfg["action"] = action
+    return cfg
+
+
 async def ensure_account(db: AsyncSession, account_id: int) -> Account:
     acc = await db.get(Account, int(account_id))
     if acc is None:
@@ -227,6 +252,67 @@ async def delete_rule(db: AsyncSession, rule_id: int) -> dict[str, Any]:
     return info
 
 
+async def copy_rules(
+    db: AsyncSession,
+    *,
+    source_account_id: int,
+    rule_ids: list[int],
+    target_account_ids: list[int],
+    web_user_id: int | None = None,
+) -> dict[str, Any]:
+    """把明确的规则集合复制到其它账号，仅 flush。"""
+
+    targets = sorted(
+        {
+            int(value)
+            for value in target_account_ids
+            if int(value) != int(source_account_id)
+        }
+    )
+    if not targets or not rule_ids:
+        return {"copied": 0, "targets": targets, "rule_ids": []}
+    for target in targets:
+        await ensure_account(db, target)
+    rows = list(
+        (
+            await db.execute(
+                select(Rule)
+                .where(
+                    Rule.account_id == int(source_account_id),
+                    Rule.id.in_([int(value) for value in rule_ids]),
+                    Rule.feature_key != "interaction",
+                )
+                .order_by(Rule.id.asc())
+            )
+        )
+        .scalars()
+        .all()
+    )
+    copied = 0
+    for target in targets:
+        for source in rows:
+            config = dict(source.config or {})
+            if source.feature_key == FEATURE_SCHEDULER:
+                config = bind_scheduler_agent_owner(config, web_user_id)
+            db.add(
+                Rule(
+                    account_id=target,
+                    feature_key=source.feature_key,
+                    name=source.name,
+                    enabled=source.enabled,
+                    priority=source.priority,
+                    config=config,
+                )
+            )
+            copied += 1
+    await db.flush()
+    return {
+        "copied": copied,
+        "targets": targets,
+        "rule_ids": [int(row.id) for row in rows],
+    }
+
+
 async def execute_scheduler_rule_now(
     account_id: int,
     rule_id: int,
@@ -308,8 +394,11 @@ async def execute_scheduler_rule_now(
 
 
 __all__ = [
+    "SCHEDULER_AGENT_WEB_USER_ID_KEY",
+    "bind_scheduler_agent_owner",
     "RuleServiceError",
     "create_rule",
+    "copy_rules",
     "delete_rule",
     "execute_scheduler_rule_now",
     "ensure_account",

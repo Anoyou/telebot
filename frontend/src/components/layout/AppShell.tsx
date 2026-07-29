@@ -1,23 +1,29 @@
 // 应用主框架：左侧 Sidebar（桌面）/ MobileSidebar（移动）+ 顶部 TopBar + 内容 outlet
 // 高度用 100dvh：iOS Safari 浏览器模式下避免 100vh 把内容塞到地址栏后面；
 //                PWA 全屏模式下行为与 100vh 一致。
-import { lazy, Suspense, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import { Outlet, useLocation, useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { MoreHorizontal } from "lucide-react";
+import { History, MoreHorizontal } from "lucide-react";
 
 import {
   MobileSidebar,
   Sidebar,
-  mobileMoreNavForAIState,
-  mobilePrimaryNavForAIState,
+  mobileMoreNavForCapabilities,
+  mobilePrimaryNavForCapabilities,
 } from "./Sidebar";
 import { TopBar } from "./TopBar";
 import { GlobalAlertBar } from "./GlobalAlertBar";
-import { AssistantDockProvider, useAssistantDock } from "@/components/assistant/AssistantDock";
+import {
+  ASSISTANT_SURFACE_ID,
+  AssistantDockProvider,
+  useAssistantDock,
+} from "@/components/assistant/AssistantDock";
+import { AssistantPet, AssistantPetSprite } from "@/components/assistant/AssistantPet";
 import { fetchMe } from "@/lib/auth";
-import { getSystemSettings } from "@/api/system";
+import { getPlatformCapabilities, getSystemSettings } from "@/api/system";
+import { capabilityEnabledMap } from "@/lib/navigation";
 import { Skeleton } from "@/components/ui/misc";
 import {
   DropdownMenu,
@@ -25,30 +31,42 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
 import { APP_VERSION_LABEL } from "@/lib/version";
 
 const AssistantIndex = lazy(() => import("@/pages/Assistant/Index").then((module) => ({ default: module.AssistantIndex })));
+const ChangelogMenu = lazy(() => import("./ChangelogMenu"));
 
 type MobileScrollEdge = "top" | "bottom" | null;
 
 export function AppShell() {
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  const [mobileChangelogOpen, setMobileChangelogOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [mobileScrollEdge, setMobileScrollEdge] = useState<MobileScrollEdge>(null);
   const mainRef = useRef<HTMLElement>(null);
   const hasScrolledMainRef = useRef(false);
+  const mobileScrollEdgeRef = useRef<MobileScrollEdge>(null);
+  const mobileScrollEdgeTimerRef = useRef<number | null>(null);
   const location = useLocation();
   const navigate = useNavigate();
   const [mobileActivePath, setMobileActivePath] = useState(location.pathname);
   const pageTransitionKey = location.pathname === "/plugins" || location.pathname.startsWith("/plugins/")
     ? "/plugins"
-    : location.pathname;
+    : location.pathname === "/operations" || location.pathname.startsWith("/operations/")
+      ? "/operations"
+      : location.pathname;
 
   useEffect(() => {
     setMobileActivePath(location.pathname);
     setMobileScrollEdge(null);
+    mobileScrollEdgeRef.current = null;
     hasScrolledMainRef.current = false;
+    if (mobileScrollEdgeTimerRef.current != null) {
+      window.clearTimeout(mobileScrollEdgeTimerRef.current);
+      mobileScrollEdgeTimerRef.current = null;
+    }
   }, [location.pathname]);
 
   // 主体框架内顺手取一次当前用户用于顶栏展示
@@ -61,10 +79,28 @@ export function AppShell() {
     queryFn: getSystemSettings,
     staleTime: 30_000,
   });
+  const capsQ = useQuery({
+    queryKey: ["system", "capabilities"],
+    queryFn: getPlatformCapabilities,
+    staleTime: 15_000,
+  });
 
   useEffect(() => {
     const main = mainRef.current;
     if (isLoading || !main) return;
+
+    const revealMobileScrollEdge = (edge: Exclude<MobileScrollEdge, null>) => {
+      mobileScrollEdgeRef.current = edge;
+      setMobileScrollEdge(edge);
+      if (mobileScrollEdgeTimerRef.current != null) {
+        window.clearTimeout(mobileScrollEdgeTimerRef.current);
+      }
+      mobileScrollEdgeTimerRef.current = window.setTimeout(() => {
+        mobileScrollEdgeRef.current = null;
+        setMobileScrollEdge(null);
+        mobileScrollEdgeTimerRef.current = null;
+      }, 900);
+    };
 
     const updateMobileScrollEdge = () => {
       if (!window.matchMedia("(max-width: 639px)").matches) {
@@ -87,10 +123,11 @@ export function AppShell() {
       }
 
       if (main.scrollTop <= 2) {
-        setMobileScrollEdge("top");
+        if (mobileScrollEdgeRef.current !== "top") revealMobileScrollEdge("top");
       } else if (main.scrollTop >= maxScrollTop - 2) {
-        setMobileScrollEdge("bottom");
+        if (mobileScrollEdgeRef.current !== "bottom") revealMobileScrollEdge("bottom");
       } else {
+        mobileScrollEdgeRef.current = null;
         setMobileScrollEdge(null);
       }
     };
@@ -101,12 +138,17 @@ export function AppShell() {
     return () => {
       main.removeEventListener("scroll", updateMobileScrollEdge);
       window.removeEventListener("resize", updateMobileScrollEdge);
+      if (mobileScrollEdgeTimerRef.current != null) {
+        window.clearTimeout(mobileScrollEdgeTimerRef.current);
+        mobileScrollEdgeTimerRef.current = null;
+      }
     };
   }, [isLoading]);
 
-  const aiEnabled = settingsQ.data?.ai_enabled ?? true;
-  const mobileNavItems = mobilePrimaryNavForAIState(aiEnabled);
-  const mobileMoreNavItems = mobileMoreNavForAIState(aiEnabled);
+  const enabled = capabilityEnabledMap(capsQ.data, settingsQ.data?.ai_enabled ?? true);
+  const mobilePreferredOrder = settingsQ.data?.ui_preferences?.mobile_nav_order;
+  const mobileNavItems = mobilePrimaryNavForCapabilities(enabled, mobilePreferredOrder);
+  const mobileMoreNavItems = mobileMoreNavForCapabilities(enabled, mobilePreferredOrder);
   const mobileMoreActive = mobileMoreNavItems.some((item) =>
     isMobileNavActive(item.to, item.end, mobileActivePath),
   );
@@ -114,12 +156,12 @@ export function AppShell() {
   if (isLoading) {
     return (
       <div role="status" aria-label="工作台加载中" className="flex h-[100dvh] flex-col bg-background">
-        <div className="flex h-14 items-center gap-3 border-b px-4 sm:px-6">
+        <div className="flex h-12 items-center gap-3 border-b px-4 sm:px-6">
           <Skeleton className="h-8 w-8 rounded-lg" />
           <Skeleton className="h-4 w-28" />
           <Skeleton className="ml-auto h-8 w-20 rounded-md" />
         </div>
-        <div className="flex min-h-0 flex-1 gap-4 p-4 sm:p-6">
+        <div className="flex min-h-0 flex-1 gap-3 p-3 sm:gap-4 sm:p-6">
           <div className="hidden w-56 space-y-3 md:block"><Skeleton className="h-10 w-full rounded-md" />{[0, 1, 2, 3, 4].map((item) => <Skeleton key={item} className="h-9 w-full rounded-md" />)}</div>
           <div className="min-w-0 flex-1 space-y-4"><Skeleton className="h-36 w-full rounded-lg" /><div className="grid gap-4 md:grid-cols-3">{[0, 1, 2].map((item) => <Skeleton key={item} className="h-28 rounded-lg" />)}</div></div>
         </div>
@@ -127,20 +169,31 @@ export function AppShell() {
     );
   }
 
+  const scrollMainToTop = useCallback(() => {
+    const main = mainRef.current;
+    if (!main) return;
+    const reduceMotion =
+      typeof window !== "undefined" &&
+      window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+    main.scrollTo({ top: 0, behavior: reduceMotion ? "auto" : "smooth" });
+  }, []);
+
   return (
+    <AssistantDockProvider>
     <div className="app-frame flex h-[100dvh] w-full overflow-hidden bg-background">
       <Sidebar collapsed={sidebarCollapsed} />
       <MobileSidebar open={mobileNavOpen} onOpenChange={setMobileNavOpen} />
+      <AssistantPet />
       <div className="app-workspace flex min-w-0 flex-1 flex-col overflow-hidden">
         <TopBar
           username={data?.username ?? "未知用户"}
           onMenuClick={() => setMobileNavOpen(true)}
           onSidebarToggle={() => setSidebarCollapsed((value) => !value)}
           sidebarCollapsed={sidebarCollapsed}
+          onScrollToTop={scrollMainToTop}
         />
         {/* kill switch 开启时显示全局红色横幅；关闭时不渲染 */}
         <GlobalAlertBar />
-        <AssistantDockProvider>
           <div className="relative flex min-h-0 flex-1 flex-col">
             <main
               ref={mainRef}
@@ -148,17 +201,19 @@ export function AppShell() {
               className="
                 app-main
                 relative flex-1 overflow-auto
-                px-4 py-4 md:px-8 md:py-7 xl:px-10
+                px-3 py-3 sm:px-4 sm:py-4 md:px-8 md:py-7 xl:px-10
                 pb-[calc(5.25rem+env(safe-area-inset-bottom))]
                 sm:pb-[max(1rem,env(safe-area-inset-bottom))]
-                pl-[max(1rem,env(safe-area-inset-left))]
-                pr-[max(1rem,env(safe-area-inset-right))]
+                pl-[max(0.75rem,env(safe-area-inset-left))]
+                pr-[max(0.75rem,env(safe-area-inset-right))]
                 md:pl-8 md:pr-8 xl:pl-10 xl:pr-10
               "
             >
               <MobileScrollEdgeLabel edge="top" visible={mobileScrollEdge === "top"} />
               <div
                 key={pageTransitionKey}
+                data-page-transition-shell
+                data-page-transition-key={pageTransitionKey}
                 className="min-h-full w-full animate-page-enter"
               >
                 <Outlet />
@@ -168,16 +223,19 @@ export function AppShell() {
             <AssistantSurface />
           </div>
           <nav
+            data-mobile-bottom-dock
             className="
-              pointer-events-none fixed inset-x-0 z-40 sm:hidden
+              mobile-bottom-dock pointer-events-none fixed inset-x-0 z-40 sm:hidden
               bottom-[env(safe-area-inset-bottom)]
               px-[max(0.75rem,env(safe-area-inset-left))]
             "
           >
-            <div
-              className="liquid-bottom-nav pointer-events-auto mx-auto grid h-[3.75rem] w-full max-w-sm gap-1 px-2 py-2"
-              style={{ gridTemplateColumns: `repeat(${mobileNavItems.length + 1}, minmax(0, 1fr))` }}
-            >
+            <div className="pointer-events-auto mx-auto flex h-[3.75rem] w-full max-w-[23rem] gap-2">
+              <div
+                data-mobile-navigation-dock
+                className="liquid-bottom-nav grid min-w-0 flex-1 gap-0.5 px-1.5 py-2"
+                style={{ gridTemplateColumns: `repeat(${mobileNavItems.length + 1}, minmax(0, 1fr))` }}
+              >
               {mobileNavItems.map((item) => {
               const active = isMobileNavActive(item.to, item.end, mobileActivePath);
               const activate = () => {
@@ -254,13 +312,107 @@ export function AppShell() {
                     </DropdownMenuItem>
                   );
                 })}
+                <DropdownMenuItem
+                  onSelect={() => setMobileChangelogOpen(true)}
+                  className="min-h-11 gap-3 rounded-lg px-3 text-sm"
+                >
+                  <History className="h-4 w-4 shrink-0" />
+                  <span className="min-w-0 flex-1 truncate">更新日志</span>
+                  <span className="text-xs text-muted-foreground">{APP_VERSION_LABEL}</span>
+                </DropdownMenuItem>
               </DropdownMenuContent>
               </DropdownMenu>
+              </div>
+              <MobileAssistantButton />
             </div>
           </nav>
-        </AssistantDockProvider>
+          <Dialog open={mobileChangelogOpen} onOpenChange={setMobileChangelogOpen}>
+            <DialogContent className="max-h-[calc(100dvh-2rem-env(safe-area-inset-top)-env(safe-area-inset-bottom))] w-[calc(100vw-1.5rem)] max-w-lg overflow-y-auto p-0">
+              <DialogTitle className="sr-only">更新日志</DialogTitle>
+              <Suspense fallback={<div className="p-4 text-sm text-muted-foreground">正在加载更新日志…</div>}>
+                <ChangelogMenu />
+              </Suspense>
+            </DialogContent>
+          </Dialog>
       </div>
     </div>
+    </AssistantDockProvider>
+  );
+}
+
+function MobileAssistantButton() {
+  const { collapsed, setCollapsed, streaming, outcomeSignal } = useAssistantDock();
+  const [mobileVisible, setMobileVisible] = useState(() => (
+    typeof window !== "undefined" && window.matchMedia("(max-width: 639px)").matches
+  ));
+  const [notice, setNotice] = useState<"idle" | "complete" | "failed" | null>(null);
+  const outcomeRef = useRef(outcomeSignal?.id ?? 0);
+
+  useEffect(() => {
+    const media = window.matchMedia("(max-width: 639px)");
+    const update = () => setMobileVisible(media.matches);
+    update();
+    media.addEventListener("change", update);
+    return () => media.removeEventListener("change", update);
+  }, []);
+
+  useEffect(() => {
+    const outcomeId = outcomeSignal?.id ?? 0;
+    if (outcomeId === outcomeRef.current) return;
+    outcomeRef.current = outcomeId;
+    if (!outcomeSignal) return;
+    if (!mobileVisible) return;
+    setNotice(outcomeSignal.status);
+    const timer = window.setTimeout(() => setNotice(null), 3_600);
+    return () => window.clearTimeout(timer);
+  }, [mobileVisible, outcomeSignal]);
+
+  useEffect(() => {
+    if (!mobileVisible || !collapsed || streaming || notice) return;
+    const timer = window.setTimeout(() => {
+      setNotice("idle");
+    }, 24_000 + Math.random() * 18_000);
+    return () => window.clearTimeout(timer);
+  }, [collapsed, mobileVisible, notice, streaming]);
+
+  useEffect(() => {
+    if (notice !== "idle") return;
+    const timer = window.setTimeout(() => setNotice(null), 3_800);
+    return () => window.clearTimeout(timer);
+  }, [notice]);
+
+  if (!mobileVisible) return null;
+
+  return (
+    <button
+      type="button"
+      data-assistant-mobile-button
+      aria-label={collapsed ? "打开系统助手" : "关闭系统助手"}
+      aria-expanded={!collapsed}
+      aria-controls={ASSISTANT_SURFACE_ID}
+      onClick={() => setCollapsed(!collapsed)}
+      className={cn(
+        "assistant-nav-orb liquid-bottom-nav relative grid h-[3.75rem] w-[3.75rem] shrink-0 place-content-center place-items-center rounded-full text-primary active:scale-95 motion-reduce:transform-none",
+        !collapsed && "assistant-nav-orb-active border-primary/60 bg-primary/15 text-primary",
+        notice === "idle" && "assistant-nav-orb-idle-nudge",
+        notice === "complete" && "assistant-nav-orb-complete",
+        notice === "failed" && "assistant-nav-orb-failed",
+      )}
+    >
+      {notice ? (
+        <span aria-hidden="true" data-assistant-mobile-notice={notice} className="assistant-nav-orb-notice">
+          {notice === "complete" ? "完成啦" : notice === "failed" ? "出错了" : "我在"}
+        </span>
+      ) : null}
+      <span className="relative grid place-items-center">
+        <AssistantPetSprite
+          compact
+          streaming={streaming}
+          celebrating={notice === "complete"}
+          failed={notice === "failed"}
+        />
+      </span>
+    </button>
   );
 }
 
@@ -290,13 +442,19 @@ function AssistantSurface() {
   return (
     <section
       ref={surfaceRef}
+      id={ASSISTANT_SURFACE_ID}
       tabIndex={-1}
       data-assistant-surface
       aria-label="系统助手"
       aria-hidden={collapsed}
       className={cn(
-        "absolute inset-0 z-30 overflow-y-auto bg-background px-4 py-4 pb-[calc(5.25rem+env(safe-area-inset-bottom))] transition-[opacity,visibility] duration-150 md:px-8 md:py-7 xl:px-10",
-        collapsed ? "invisible pointer-events-none opacity-0" : "visible opacity-100",
+        "absolute inset-0 z-30 origin-bottom overflow-hidden bg-background px-3 py-3 transition-[opacity,transform,visibility] duration-200 ease-out will-change-[opacity,transform] motion-reduce:transform-none motion-reduce:transition-none sm:px-4 sm:py-4 sm:pb-7 md:px-8 md:py-7 xl:px-10",
+        collapsed
+          ? "pb-[calc(5.25rem+env(safe-area-inset-bottom))]"
+          : "pb-[max(1rem,env(safe-area-inset-bottom))]",
+        collapsed
+          ? "invisible pointer-events-none translate-y-2 scale-[0.99] opacity-0"
+          : "visible translate-y-0 scale-100 opacity-100",
       )}
     >
       <Suspense fallback={<AssistantSurfaceSkeleton />}>

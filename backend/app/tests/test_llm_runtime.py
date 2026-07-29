@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -170,6 +171,7 @@ def test_dto_from_dict() -> None:
         "base_url": "https://api.example.com/v1",
         "default_model": "gpt-4o",
         "api_key_enc": "encrypted-key",
+        "request_headers_enc": "encrypted-headers",
         "proxy_url": "socks5://127.0.0.1:1080",
         "modality": "text",
         "tags": ["chat", "code"],
@@ -184,10 +186,45 @@ def test_dto_from_dict() -> None:
     assert dto.base_url == "https://api.example.com/v1"
     assert dto.default_model == "gpt-4o"
     assert dto.api_key_enc == "encrypted-key"
+    assert dto.request_headers_enc == "encrypted-headers"
     assert dto.proxy_url == "socks5://127.0.0.1:1080"
     assert dto.modality == "text"
     assert dto.tags == ["chat", "code"]
     assert dto.cost_tier == 2
+    assert "api_key_enc" not in dto.to_dict()
+    assert "request_headers_enc" not in dto.to_dict()
+    assert dto.to_runtime_dict()["api_key_enc"] == "encrypted-key"
+    assert dto.to_runtime_dict()["request_headers_enc"] == "encrypted-headers"
+
+
+def test_worker_provider_projection_keeps_encrypted_request_headers() -> None:
+    from app.worker.runtime import _provider_runtime_payload
+
+    row = SimpleNamespace(
+        id=7,
+        name="tenant-provider",
+        provider="openai",
+        api_format="responses",
+        protocol_profile="standard",
+        client_identity_profile="codex_cli",
+        web_search_api_format="auto",
+        base_url="https://api.example/v1",
+        default_model="model",
+        api_key_enc="encrypted-key",
+        request_headers_enc="encrypted-headers",
+        modality="text",
+        tags=["chat"],
+        cost_tier=2,
+        models=[],
+        notes="runtime",
+    )
+
+    payload = _provider_runtime_payload(row, "http://proxy.example:8080")
+
+    assert payload["api_key_enc"] == "encrypted-key"
+    assert payload["request_headers_enc"] == "encrypted-headers"
+    assert payload["client_identity_profile"] == "codex_tui"
+    assert payload["proxy_url"] == "http://proxy.example:8080"
 
 
 def test_native_image_openai_chat_provider_uses_responses_for_text_model() -> None:
@@ -395,6 +432,25 @@ def test_usage_preview_redacts_and_limits_text() -> None:
     assert "abc12345" not in request_preview
     assert len(request_preview) <= 2014
     assert response_preview == "response ***"
+
+
+@pytest.mark.parametrize(
+    "secret",
+    [
+        "AbcdEFGHijklMNOPqrstUVWX12345678",
+        "AbcdEFGHijkl1234.MNOPqrstUVWX5678",
+    ],
+)
+def test_usage_preview_redacts_turn_known_opaque_provider_keys(secret: str) -> None:
+    preview = request_preview_for_usage(
+        "system",
+        f"https://provider.example/v1\n{secret}",
+        known_secrets=[secret],
+    )
+
+    assert preview is not None
+    assert secret not in preview
+    assert "[REDACTED]" in preview
 
 
 @pytest.mark.asyncio
@@ -1215,10 +1271,7 @@ def test_upstream_failed_400_is_provider_local() -> None:
 def test_error_classifier_prefers_http_status_code() -> None:
     from app.services import llm_runtime as _rt
 
-    assert (
-        _rt._classify_error(LLMError("upstream unavailable", status_code=503))
-        == "server_error"
-    )
+    assert _rt._classify_error(LLMError("upstream unavailable", status_code=503)) == "server_error"
     assert _rt._classify_error(LLMError("busy", status_code=429)) == "rate_limit"
 
 
@@ -1595,7 +1648,7 @@ def test_usage_identity_resolves_auto_from_effective_protocol() -> None:
             provider,
             effective_api_format="responses",
         )
-        == "codex_cli"
+        == "codex_tui"
     )
 
 
@@ -1637,7 +1690,7 @@ async def test_web_search_usage_records_identity_for_overridden_protocol(monkeyp
     )
 
     assert len(captured) == 1
-    assert captured[0].client_identity_profile == "codex_cli"
+    assert captured[0].client_identity_profile == "codex_tui"
 
 
 __all__ = []

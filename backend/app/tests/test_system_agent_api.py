@@ -65,14 +65,20 @@ class _FakeSvc:
 
     async def list_sessions(self, _db, **kwargs):
         uid = kwargs.get("web_user_id")
-        return [s for s in self.sessions.values() if s.web_user_id == uid]
+        include_bot = bool(kwargs.get("include_bot_sessions"))
+        return [
+            session
+            for session in self.sessions.values()
+            if session.web_user_id == uid or (include_bot and session.channel == "bot")
+        ]
 
     async def get_session(self, _db, session_id, **kwargs):
         s = self.sessions.get(session_id)
         if s is None:
             return None
         if kwargs.get("web_user_id") is not None and s.web_user_id != kwargs["web_user_id"]:
-            return None
+            if not (kwargs.get("allow_bot_session") and s.channel == "bot"):
+                return None
         return s
 
     async def update_session(self, _db, session, **kwargs):
@@ -106,6 +112,35 @@ class _FakeSvc:
             None,
         )
 
+    async def is_latest_completed_pair(
+        self,
+        _db,
+        *,
+        session_id,
+        user_message_id,
+        assistant_message_id,
+    ):
+        rows = self.messages.get(session_id, [])
+        users = [message for message in rows if message.role == "user"]
+        if not users:
+            return False
+        latest_user = max(users, key=lambda message: message.id)
+        assistants = sorted(
+            (
+                message
+                for message in rows
+                if message.role == "assistant" and message.id > latest_user.id
+            ),
+            key=lambda message: message.id,
+        )
+        return bool(
+            latest_user.id == user_message_id
+            and latest_user.run_status == "succeeded"
+            and assistants
+            and assistants[0].id == assistant_message_id
+            and assistants[0].run_status == "completed"
+        )
+
     async def stream_message(self, _db, **kwargs):
         self.last_stream_kwargs = dict(kwargs)
         yield {
@@ -135,9 +170,19 @@ class _FakeRunManager:
             id="durable-r1",
             session_id=kwargs["session_id"],
             web_user_id=kwargs["web_user_id"],
-            user_message_id=kwargs.get("retry_message_id") or 101,
+            user_message_id=(
+                kwargs.get("regenerate_message_id")
+                or kwargs.get("retry_message_id")
+                or 101
+            ),
             client_request_id=kwargs["client_request_id"],
-            kind="retry" if kwargs.get("retry_message_id") else "message",
+            kind=(
+                "regenerate"
+                if kwargs.get("regenerate_message_id")
+                else "retry"
+                if kwargs.get("retry_message_id")
+                else "message"
+            ),
             status="running",
             last_seq=0,
             cancel_requested=False,
@@ -155,6 +200,16 @@ class _FakeRunManager:
         yield {"type": "run_started", "run_id": run_id, "session_id": "s1", "seq": after_seq + 1}
         yield {"type": "assistant_message", "content": "ok", "run_id": run_id, "session_id": "s1", "seq": after_seq + 2}
         yield {"type": "done", "ok": True, "run_id": run_id, "session_id": "s1", "seq": after_seq + 3}
+
+    async def list_runs(self, **kwargs):
+        self.last_list_kwargs = dict(kwargs)
+        return [
+            await self.start_run(
+                session_id="s1",
+                web_user_id=kwargs["web_user_id"],
+                client_request_id="request-listed-1",
+            )
+        ]
 
 
 @pytest.fixture
@@ -188,6 +243,80 @@ async def test_create_and_list_sessions(fake_svc) -> None:
 
 
 @pytest.mark.asyncio
+async def test_admin_can_read_but_not_mutate_bot_sessions(fake_svc) -> None:
+    db = AsyncMock()
+    user = SimpleNamespace(id=7)
+    bot_session = SimpleNamespace(
+        id="bot-s1",
+        web_user_id=None,
+        bot_tg_user_id=1682400007,
+        account_id=3,
+        channel="bot",
+        title="Telegram 排障",
+        origin="interactive",
+        status="active",
+        memory_summary="",
+        memory_state={},
+        created_at=None,
+        updated_at=None,
+    )
+    fake_svc.sessions[bot_session.id] = bot_session
+    fake_svc.messages[bot_session.id] = [
+        SimpleNamespace(
+            id=9,
+            session_id=bot_session.id,
+            role="user",
+            content={"text": "检查日志"},
+            usage=None,
+            run_status="completed",
+            error_code=None,
+            error_message=None,
+            retry_count=0,
+            created_at=None,
+        )
+    ]
+
+    web_only = await api.list_sessions(
+        db,
+        user,
+        status="active",
+        origin=None,
+        include_bot=False,
+        limit=50,
+    )
+    assert web_only == []
+
+    sessions = await api.list_sessions(
+        db,
+        user,
+        status="active",
+        origin=None,
+        include_bot=True,
+        limit=50,
+    )
+    assert [session.id for session in sessions] == ["bot-s1"]
+    assert sessions[0].bot_tg_user_id == 1682400007
+
+    session = await api.get_session("bot-s1", db, user)
+    assert session.channel == "bot"
+    messages = await api.list_messages("bot-s1", db, user, limit=100, before_id=None)
+    assert [message.content["text"] for message in messages] == ["检查日志"]
+
+    with pytest.raises(HTTPException) as update_error:
+        await api.update_session(
+            "bot-s1",
+            api.SystemAgentSessionUpdate(title="不应修改"),
+            db,
+            user,
+        )
+    assert update_error.value.status_code == 404
+
+    with pytest.raises(HTTPException) as delete_error:
+        await api.delete_session("bot-s1", db, user)
+    assert delete_error.value.status_code == 404
+
+
+@pytest.mark.asyncio
 async def test_get_session_not_found(fake_svc) -> None:
     db = AsyncMock()
     user = SimpleNamespace(id=1)
@@ -212,7 +341,11 @@ async def test_patch_config(fake_svc) -> None:
 
 
 @pytest.mark.asyncio
-async def test_capabilities_stage1(fake_svc) -> None:
+async def test_capabilities_stage1(fake_svc, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "app.services.system_agent.plugin_tools.refresh_plugin_system_agent_tools",
+        AsyncMock(return_value=[]),
+    )
     db = AsyncMock()
     user = SimpleNamespace(id=1)
     caps = await api.get_capabilities(db, user)
@@ -270,6 +403,28 @@ async def test_start_durable_run_returns_run_and_message_identity(
     assert out.run_id == "durable-r1"
     assert out.user_message_id == 101
     assert fake_run_manager.last_start_kwargs["text"] == "交互里有哪些规则？"
+
+
+@pytest.mark.asyncio
+async def test_list_durable_runs_is_scoped_to_current_user(fake_run_manager) -> None:
+    user = SimpleNamespace(id=7)
+
+    rows = await api.list_system_agent_runs(
+        user,
+        status="failed",
+        since=None,
+        until=None,
+        limit=25,
+    )
+
+    assert [row.run_id for row in rows] == ["durable-r1"]
+    assert fake_run_manager.last_list_kwargs == {
+        "web_user_id": 7,
+        "status": "failed",
+        "since": None,
+        "until": None,
+        "limit": 25,
+    }
 
 
 @pytest.mark.asyncio
@@ -349,6 +504,68 @@ async def test_retry_rejects_non_failed_message(fake_svc) -> None:
 
 
 @pytest.mark.asyncio
+async def test_regenerate_run_passes_original_pair_ids(fake_svc, fake_run_manager) -> None:
+    db = AsyncMock()
+    user = SimpleNamespace(id=7)
+    await api.create_session(api.SystemAgentSessionCreate(), db, user)
+    fake_svc.messages["s1"] = [
+        SimpleNamespace(id=21, session_id="s1", role="user", run_status="succeeded"),
+        SimpleNamespace(id=22, session_id="s1", role="assistant", run_status="completed"),
+    ]
+
+    out = await api.start_system_agent_regenerate_run(
+        "s1",
+        21,
+        api.SystemAgentRegenerateRunCreate(
+            assistant_message_id=22,
+            content="编辑后的问题",
+            client_request_id="request-regenerate-api",
+        ),
+        db,
+        user,
+    )
+
+    assert out.kind == "regenerate"
+    assert out.user_message_id == 21
+    assert fake_run_manager.last_start_kwargs["text"] == "编辑后的问题"
+    assert fake_run_manager.last_start_kwargs["regenerate_message_id"] == 21
+    assert fake_run_manager.last_start_kwargs["regenerate_assistant_message_id"] == 22
+
+
+@pytest.mark.asyncio
+async def test_regenerate_rejects_old_pair_before_updating_account(
+    fake_svc,
+    fake_run_manager,
+) -> None:
+    db = AsyncMock()
+    user = SimpleNamespace(id=7)
+    session = await api.create_session(api.SystemAgentSessionCreate(), db, user)
+    fake_svc.messages["s1"] = [
+        SimpleNamespace(id=21, session_id="s1", role="user", run_status="succeeded"),
+        SimpleNamespace(id=22, session_id="s1", role="assistant", run_status="completed"),
+        SimpleNamespace(id=23, session_id="s1", role="user", run_status="succeeded"),
+        SimpleNamespace(id=24, session_id="s1", role="assistant", run_status="completed"),
+    ]
+
+    with pytest.raises(HTTPException) as exc_info:
+        await api.start_system_agent_regenerate_run(
+            "s1",
+            21,
+            api.SystemAgentRegenerateRunCreate(
+                assistant_message_id=22,
+                account_id=3,
+                client_request_id="request-regenerate-old",
+            ),
+            db,
+            user,
+        )
+
+    assert exc_info.value.status_code == 409
+    assert session.account_id is None
+    assert fake_run_manager.last_start_kwargs == {}
+
+
+@pytest.mark.asyncio
 async def test_secret_input_locks_action_before_writing(monkeypatch) -> None:
     row = SimpleNamespace(
         id="act-secret",
@@ -386,3 +603,43 @@ async def test_secret_input_locks_action_before_writing(monkeypatch) -> None:
     assert row.secret_payload_enc == "encrypted"
     assert row.error_code is None
     db.commit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_secret_input_rejects_replacing_verified_probe_key(monkeypatch) -> None:
+    row = SimpleNamespace(
+        id="act-probe",
+        actor_user_id=7,
+        tool_name="providers.probe_and_add",
+        status="pending",
+        expires_at=None,
+        secret_payload_enc="encrypted-verified-key",
+        secret_fields=["api_key"],
+        arguments={"has_api_key": True},
+        error_code=None,
+        error_message=None,
+    )
+    monkeypatch.setattr(api, "lock_action", AsyncMock(return_value=row))
+    monkeypatch.setattr(
+        api,
+        "get_registry",
+        lambda: SimpleNamespace(
+            get=lambda _name: SimpleNamespace(
+                secret_argument_names=("api_key",),
+                allow_secret_input=False,
+            )
+        ),
+    )
+    db = AsyncMock()
+
+    with pytest.raises(HTTPException) as exc_info:
+        await api.secret_input_action(
+            "act-probe",
+            api.SystemAgentSecretInput(fields={"api_key": "sk-unverified-replacement"}),
+            db,
+            SimpleNamespace(id=7),
+        )
+
+    assert getattr(exc_info.value, "status_code", None) == 409
+    assert row.secret_payload_enc == "encrypted-verified-key"
+    db.commit.assert_not_awaited()

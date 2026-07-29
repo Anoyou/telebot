@@ -15,10 +15,15 @@ from app.db.models.system import SystemSetting
 from app.db.models.system_agent import (
     CHANNEL_BOT,
     CHANNEL_WEB,
+    MESSAGE_ROLE_ASSISTANT,
+    MESSAGE_ROLE_TOOL,
     MESSAGE_ROLE_USER,
+    MESSAGE_RUN_COMPLETED,
     MESSAGE_RUN_FAILED,
     MESSAGE_RUN_PENDING,
     MESSAGE_RUN_SUCCEEDED,
+    SESSION_ORIGIN_INTERACTIVE,
+    SESSION_ORIGIN_SCHEDULED,
     SESSION_STATUS_ACTIVE,
     SESSION_STATUS_ARCHIVED,
     SystemAgentMessage,
@@ -80,6 +85,9 @@ def test_normalize_config_defaults_and_clamps() -> None:
     assert over["max_tool_calls"] == 64
     assert over["session_token_limit"] == 1024
 
+    unlimited = normalize_config({"session_token_limit": 0})
+    assert unlimited["session_token_limit"] == 0
+
 
 def test_session_title_from_message() -> None:
     assert session_title_from_message("  交互里\n有哪些规则？  ") == "交互里 有哪些规则？"
@@ -102,6 +110,8 @@ def test_system_prompt_includes_bot_identity_context() -> None:
     assert "account_id=1" in prompt
     assert "Telegram 管理 Bot 触发者 ID：1682400007" in prompt
     assert "直接回答" in prompt
+    assert "source.search" not in prompt
+    assert "web.search" not in prompt
 
 
 def test_tools_model_for_dto_requires_tools_support() -> None:
@@ -186,15 +196,36 @@ async def test_session_crud_and_ownership(agent_db) -> None:
     async with agent_db() as db:
         s1 = await svc.create_session(db, channel=CHANNEL_WEB, web_user_id=1, title="t1")
         s2 = await svc.create_session(db, channel=CHANNEL_WEB, web_user_id=2, title="t2")
+        bot = await svc.create_session(
+            db,
+            channel=CHANNEL_BOT,
+            bot_tg_user_id=1682400007,
+            account_id=3,
+            title="Telegram",
+        )
         await db.commit()
 
         rows = await svc.list_sessions(db, web_user_id=1)
         assert [r.id for r in rows] == [s1.id]
 
+        visible_to_admin = await svc.list_sessions(
+            db,
+            web_user_id=1,
+            include_bot_sessions=True,
+        )
+        assert {row.id for row in visible_to_admin} == {s1.id, bot.id}
+
         owned = await svc.get_session(db, s1.id, web_user_id=1)
         assert owned is not None
         foreign = await svc.get_session(db, s2.id, web_user_id=1)
         assert foreign is None
+        visible_bot = await svc.get_session(
+            db,
+            bot.id,
+            web_user_id=1,
+            allow_bot_session=True,
+        )
+        assert visible_bot is bot
 
         await svc.update_session(db, s1, status=SESSION_STATUS_ARCHIVED, title="archived")
         await db.commit()
@@ -214,15 +245,36 @@ async def test_bot_session_requires_account(agent_db) -> None:
 
 
 @pytest.mark.asyncio
+async def test_scheduled_session_not_reused_by_get_or_create(agent_db) -> None:
+    """定时会话不进入 get_or_create_active_session 复用池。"""
+    svc = SystemAgentService()
+    async with agent_db() as db:
+        scheduled = await svc.create_session(
+            db,
+            channel=CHANNEL_WEB,
+            web_user_id=9,
+            title="定时 · 巡检 · 07-25 09:00",
+            origin=SESSION_ORIGIN_SCHEDULED,
+        )
+        await db.commit()
+        assert scheduled.origin == SESSION_ORIGIN_SCHEDULED
+
+        listed = await svc.list_sessions(db, web_user_id=9, origin=SESSION_ORIGIN_SCHEDULED)
+        assert [r.id for r in listed] == [scheduled.id]
+
+        interactive = await svc.get_or_create_active_session(
+            db, channel=CHANNEL_WEB, web_user_id=9
+        )
+        assert interactive.id != scheduled.id
+        assert interactive.origin == SESSION_ORIGIN_INTERACTIVE
+
+
+@pytest.mark.asyncio
 async def test_get_or_create_and_clear_messages(agent_db) -> None:
     svc = SystemAgentService()
     async with agent_db() as db:
-        session = await svc.get_or_create_active_session(
-            db, channel=CHANNEL_WEB, web_user_id=7
-        )
-        again = await svc.get_or_create_active_session(
-            db, channel=CHANNEL_WEB, web_user_id=7
-        )
+        session = await svc.get_or_create_active_session(db, channel=CHANNEL_WEB, web_user_id=7)
+        again = await svc.get_or_create_active_session(db, channel=CHANNEL_WEB, web_user_id=7)
         assert session.id == again.id
 
         db.add(
@@ -245,9 +297,7 @@ async def test_get_or_create_and_clear_messages(agent_db) -> None:
 
 
 @pytest.mark.asyncio
-async def test_stream_message_persists_redacted_user_and_assistant(
-    agent_db, monkeypatch
-) -> None:
+async def test_stream_message_persists_redacted_user_and_assistant(agent_db, monkeypatch) -> None:
     svc = SystemAgentService()
 
     async def fake_stream(*_a, **_k):
@@ -256,7 +306,13 @@ async def test_stream_message_persists_redacted_user_and_assistant(
             "content": "查询完成",
             "usage": {"total_tokens": 3},
         }
-        yield {"type": "tool_finished", "tool_name": "system.get_context", "call_id": "c1", "is_error": False, "result_summary": {"ok": True}}
+        yield {
+            "type": "tool_finished",
+            "tool_name": "system.get_context",
+            "call_id": "c1",
+            "is_error": False,
+            "result_summary": {"ok": True},
+        }
         yield {"type": "done", "ok": True}
 
     monkeypatch.setattr(svc.runtime, "stream_turn", fake_stream)
@@ -284,10 +340,53 @@ async def test_stream_message_persists_redacted_user_and_assistant(
         assert session.title == "系统版本是多少？"
 
 
+@pytest.mark.parametrize(
+    "request_text",
+    (
+        "请设置兼容请求头 X-Tenant-ID 为 opaque-header-secret",
+        "Please set HTTP header X-Tenant-ID to opaque-header-secret",
+        "Set custom header X-Tenant-ID=opaque-header-secret",
+    ),
+)
 @pytest.mark.asyncio
-async def test_successful_turn_redacts_secret_from_persistent_memory(
-    agent_db, monkeypatch
+async def test_request_header_configuration_never_reaches_model_or_history(
+    agent_db,
+    monkeypatch,
+    request_text: str,
 ) -> None:
+    svc = SystemAgentService()
+    secret = "opaque-header-secret"
+    model_inputs: list[str] = []
+
+    async def fake_stream(*_args, **kwargs):
+        model_inputs.append(str(kwargs["user_text"]))
+        yield {"type": "assistant_message", "content": "请使用 Provider 设置页", "usage": {}}
+        yield {"type": "done", "ok": True}
+
+    monkeypatch.setattr(svc.runtime, "stream_turn", fake_stream)
+
+    async with agent_db() as db:
+        session = await svc.create_session(db, channel=CHANNEL_WEB, web_user_id=1)
+        async for _event in svc.stream_message(
+            db,
+            session=session,
+            text=request_text,
+            role="admin",
+            channel=CHANNEL_WEB,
+            web_user_id=1,
+        ):
+            pass
+
+        messages = await svc.list_messages(db, session.id)
+        assert model_inputs and secret not in model_inputs[0]
+        assert "Provider 设置" in model_inputs[0]
+        assert secret not in str(session.title)
+        assert secret not in str(session.memory_state)
+        assert secret not in str([message.content for message in messages])
+
+
+@pytest.mark.asyncio
+async def test_successful_turn_redacts_secret_from_persistent_memory(agent_db, monkeypatch) -> None:
     svc = SystemAgentService()
     secret = "sk-abcdefghijklmnopqrstuvwxyz123456"
 
@@ -311,31 +410,39 @@ async def test_successful_turn_redacts_secret_from_persistent_memory(
 
     async with agent_db() as db:
         session = await svc.create_session(db, channel=CHANNEL_WEB, web_user_id=1)
-        async for _event in svc.stream_message(
-            db,
-            session=session,
-            text=f"添加 Provider，key={secret}",
-            role="admin",
-            channel=CHANNEL_WEB,
-            web_user_id=1,
-        ):
-            pass
+        events = [
+            event
+            async for event in svc.stream_message(
+                db,
+                session=session,
+                text=f"添加 Provider，key={secret}",
+                role="admin",
+                channel=CHANNEL_WEB,
+                web_user_id=1,
+            )
+        ]
 
         assert secret not in session.memory_summary
         assert secret not in str(session.memory_state)
         assert "REDACTED" in str(session.memory_state)
         assert secret not in str(session.title)
+        assistant = next(event for event in events if event.get("type") == "assistant_message")
+        assert secret not in assistant["content"]
+        assert "REDACTED" in assistant["content"]
 
 
 @pytest.mark.asyncio
-async def test_stream_message_commits_history_before_terminal_events(
-    agent_db, monkeypatch
-) -> None:
+async def test_stream_message_commits_history_before_terminal_events(agent_db, monkeypatch) -> None:
     svc = SystemAgentService()
 
     async def fake_stream(*_a, **_k):
         yield {"type": "run_started", "run_id": "r1"}
-        yield {"type": "assistant_message", "content": "已完成", "usage": {}}
+        yield {
+            "type": "assistant_message",
+            "content": "已完成",
+            "reasoning": "先检查状态再汇总",
+            "usage": {},
+        }
         yield {"type": "done", "ok": True}
 
     monkeypatch.setattr(svc.runtime, "stream_turn", fake_stream)
@@ -361,16 +468,16 @@ async def test_stream_message_commits_history_before_terminal_events(
         second = await anext(stream)
         assert second["type"] == "assistant_message"
         async with agent_db() as observer:
-            roles = [m.role for m in await svc.list_messages(observer, session.id)]
+            saved_messages = await svc.list_messages(observer, session.id)
+            roles = [m.role for m in saved_messages]
             assert roles == [MESSAGE_ROLE_USER, "assistant"]
+            assert saved_messages[-1].content["reasoning"] == "先检查状态再汇总"
 
         await stream.aclose()
 
 
 @pytest.mark.asyncio
-async def test_failed_turn_is_marked_and_excluded_from_next_history(
-    agent_db, monkeypatch
-) -> None:
+async def test_failed_turn_is_marked_and_excluded_from_next_history(agent_db, monkeypatch) -> None:
     svc = SystemAgentService()
     histories: list[list[SystemAgentMessage]] = []
     call_count = 0
@@ -422,9 +529,7 @@ async def test_failed_turn_is_marked_and_excluded_from_next_history(
 
 
 @pytest.mark.asyncio
-async def test_provider_switch_failure_is_persisted_for_confirmation(
-    agent_db, monkeypatch
-) -> None:
+async def test_provider_switch_failure_is_persisted_for_confirmation(agent_db, monkeypatch) -> None:
     svc = SystemAgentService()
 
     async def fake_stream(*_args, **_kwargs):
@@ -434,9 +539,7 @@ async def test_provider_switch_failure_is_persisted_for_confirmation(
             "message": "是否切换 Provider？",
             "provider_switch": {
                 "from_provider_name": "primary",
-                "candidates": [
-                    {"provider_id": 2, "provider_name": "fallback", "model": "model-b"}
-                ],
+                "candidates": [{"provider_id": 2, "provider_name": "fallback", "model": "model-b"}],
             },
         }
         yield {"type": "done", "ok": False}
@@ -461,17 +564,13 @@ async def test_provider_switch_failure_is_persisted_for_confirmation(
         assert message.usage == {
             "provider_switch": {
                 "from_provider_name": "primary",
-                "candidates": [
-                    {"provider_id": 2, "provider_name": "fallback", "model": "model-b"}
-                ],
+                "candidates": [{"provider_id": 2, "provider_name": "fallback", "model": "model-b"}],
             }
         }
 
 
 @pytest.mark.asyncio
-async def test_tool_approval_failure_is_persisted_for_retry(
-    agent_db, monkeypatch
-) -> None:
+async def test_tool_approval_failure_is_persisted_for_retry(agent_db, monkeypatch) -> None:
     svc = SystemAgentService()
 
     async def fake_stream(*_args, **_kwargs):
@@ -483,10 +582,19 @@ async def test_tool_approval_failure_is_persisted_for_retry(
                 "domains": ["scheduler"],
                 "tools": [
                     {
+                        "call_id": "call-secret",
                         "name": "scheduler.list",
                         "description": "查看定时任务",
                         "read_only": True,
                         "risk": "normal",
+                        "arguments": {"api_key": "opaque-secret-value"},
+                    }
+                ],
+                "calls": [
+                    {
+                        "call_id": "call-secret",
+                        "name": "scheduler.list",
+                        "arguments": {"api_key": "opaque-secret-value"},
                     }
                 ],
             },
@@ -511,6 +619,165 @@ async def test_tool_approval_failure_is_persisted_for_retry(
         assert message.error_code == "AGENT_TOOL_APPROVAL_REQUIRED"
         assert message.usage is not None
         assert message.usage["tool_approval"]["tools"][0]["name"] == "scheduler.list"
+        assert "arguments" not in message.usage["tool_approval"]["tools"][0]
+        assert "arguments" not in message.usage["tool_approval"]["calls"][0]
+        assert "opaque-secret-value" not in str(message.usage)
+
+
+@pytest.mark.asyncio
+async def test_tool_approvals_accumulate_across_retries(agent_db, monkeypatch) -> None:
+    svc = SystemAgentService()
+    attempts: list[list[str]] = []
+
+    async def fake_stream(*_args, **kwargs):
+        approved = sorted(kwargs.get("approved_tools") or [])
+        attempts.append(approved)
+        if not approved:
+            yield {
+                "type": "error",
+                "code": "AGENT_TOOL_APPROVAL_REQUIRED",
+                "message": "请批准读取日志",
+                "tool_approval": {
+                    "domains": ["logs"],
+                    "calls": [{"call_id": "call-1", "name": "logs.recent", "arguments": {}}],
+                    "tools": [{"call_id": "call-1", "name": "logs.recent", "arguments": {}}],
+                },
+            }
+            yield {"type": "done", "ok": False}
+            return
+        if approved == ["logs.recent"]:
+            yield {
+                "type": "error",
+                "code": "AGENT_TOOL_APPROVAL_REQUIRED",
+                "message": "请批准搜索日志",
+                "tool_approval": {
+                    "domains": ["logs"],
+                    "calls": [{"call_id": "call-2", "name": "logs.search_errors", "arguments": {}}],
+                    "tools": [{"call_id": "call-2", "name": "logs.search_errors", "arguments": {}}],
+                },
+            }
+            yield {"type": "done", "ok": False}
+            return
+        yield {"type": "assistant_message", "content": "处理完成", "usage": {}}
+        yield {"type": "done", "ok": True}
+
+    monkeypatch.setattr(svc.runtime, "stream_turn", fake_stream)
+
+    async with agent_db() as db:
+        session = await svc.create_session(db, channel=CHANNEL_WEB, web_user_id=1)
+        async for _event in svc.stream_message(
+            db,
+            session=session,
+            text="排查日志",
+            role="admin",
+            channel=CHANNEL_WEB,
+            web_user_id=1,
+        ):
+            pass
+
+        message = (await svc.list_messages(db, session.id))[0]
+        async for _event in svc.stream_message(
+            db,
+            session=session,
+            text="",
+            role="admin",
+            channel=CHANNEL_WEB,
+            web_user_id=1,
+            retry_message=message,
+            approved_tools=["logs.recent"],
+        ):
+            pass
+
+        message = (await svc.list_messages(db, session.id))[0]
+        assert message.usage["approved_tools"] == ["logs.recent"]
+        async for _event in svc.stream_message(
+            db,
+            session=session,
+            text="",
+            role="admin",
+            channel=CHANNEL_WEB,
+            web_user_id=1,
+            retry_message=message,
+            approved_tools=["logs.search_errors"],
+        ):
+            pass
+
+        message = (await svc.list_messages(db, session.id))[0]
+        assert message.run_status == MESSAGE_RUN_SUCCEEDED
+        assert attempts == [[], ["logs.recent"], ["logs.recent", "logs.search_errors"]]
+
+
+@pytest.mark.asyncio
+async def test_tool_approval_retry_rejects_tools_outside_pending_set(agent_db, monkeypatch) -> None:
+    svc = SystemAgentService()
+
+    async def fake_stream(*_args, **_kwargs):
+        yield {
+            "type": "error",
+            "code": "AGENT_TOOL_APPROVAL_REQUIRED",
+            "message": "请批准读取日志",
+            "tool_approval": {
+                "domains": ["logs"],
+                "tools": [{"name": "logs.recent", "description": "读取日志"}],
+            },
+        }
+        yield {"type": "done", "ok": False}
+
+    monkeypatch.setattr(svc.runtime, "stream_turn", fake_stream)
+
+    async with agent_db() as db:
+        session = await svc.create_session(db, channel=CHANNEL_WEB, web_user_id=1)
+        async for _event in svc.stream_message(
+            db,
+            session=session,
+            text="读取日志",
+            role="admin",
+            channel=CHANNEL_WEB,
+            web_user_id=1,
+        ):
+            pass
+
+        message = (await svc.list_messages(db, session.id))[0]
+        with pytest.raises(ValueError, match="批准工具不在当前待确认列表"):
+            async for _event in svc.stream_message(
+                db,
+                session=session,
+                text="",
+                role="admin",
+                channel=CHANNEL_WEB,
+                web_user_id=1,
+                retry_message=message,
+                approved_tools=["settings.update"],
+            ):
+                pass
+
+
+@pytest.mark.asyncio
+async def test_failed_turn_persists_durable_run_id(agent_db, monkeypatch) -> None:
+    svc = SystemAgentService()
+
+    async def fake_stream(*_args, **_kwargs):
+        yield {"type": "error", "code": "UPSTREAM_FAILED", "message": "上游失败"}
+        yield {"type": "done", "ok": False}
+
+    monkeypatch.setattr(svc.runtime, "stream_turn", fake_stream)
+
+    async with agent_db() as db:
+        session = await svc.create_session(db, channel=CHANNEL_WEB, web_user_id=1)
+        async for _event in svc.stream_message(
+            db,
+            session=session,
+            text="测试失败轨迹",
+            role="admin",
+            channel=CHANNEL_WEB,
+            web_user_id=1,
+            run_id="durable-failed-run",
+        ):
+            pass
+
+        message = (await svc.list_messages(db, session.id))[0]
+        assert message.run_status == MESSAGE_RUN_FAILED
+        assert message.usage == {"run_id": "durable-failed-run"}
 
 
 @pytest.mark.asyncio
@@ -526,9 +793,7 @@ async def test_provider_switch_and_tool_approval_context_are_persisted_together(
             "message": "是否切换 Provider？",
             "provider_switch": {
                 "from_provider_name": "primary",
-                "candidates": [
-                    {"provider_id": 2, "provider_name": "fallback", "model": "model-b"}
-                ],
+                "candidates": [{"provider_id": 2, "provider_name": "fallback", "model": "model-b"}],
             },
             "tool_approval": {
                 "domains": ["scheduler"],
@@ -697,9 +962,7 @@ async def test_retry_reuses_failed_user_message(agent_db, monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_retry_reference_reuses_latest_failed_goal_and_clears_anchor(
-    agent_db, monkeypatch
-) -> None:
+async def test_retry_reference_reuses_latest_failed_goal_and_clears_anchor(agent_db, monkeypatch) -> None:
     svc = SystemAgentService()
     runtime_goals: list[str] = []
     call_count = 0
@@ -759,9 +1022,7 @@ async def test_retry_reference_reuses_latest_failed_goal_and_clears_anchor(
 
 
 @pytest.mark.asyncio
-async def test_retry_reference_without_failure_is_a_normal_message(
-    agent_db, monkeypatch
-) -> None:
+async def test_retry_reference_without_failure_is_a_normal_message(agent_db, monkeypatch) -> None:
     svc = SystemAgentService()
     runtime_goals: list[str] = []
 
@@ -784,20 +1045,14 @@ async def test_retry_reference_without_failure_is_a_normal_message(
         ):
             pass
 
-        users = [
-            row
-            for row in await svc.list_messages(db, session.id)
-            if row.role == MESSAGE_ROLE_USER
-        ]
+        users = [row for row in await svc.list_messages(db, session.id) if row.role == MESSAGE_ROLE_USER]
         assert runtime_goals == ["重试"]
         assert len(users) == 1
         assert users[0].retry_count == 0
 
 
 @pytest.mark.asyncio
-async def test_failed_secret_goal_anchor_and_retry_stay_redacted(
-    agent_db, monkeypatch
-) -> None:
+async def test_failed_secret_goal_anchor_and_retry_stay_redacted(agent_db, monkeypatch) -> None:
     svc = SystemAgentService()
     secret = "sk-abcdefghijklmnopqrstuvwxyz123456"
     runtime_goals: list[str] = []
@@ -898,9 +1153,7 @@ async def test_stale_concurrent_retry_cannot_execute_twice(agent_db, monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_unexpected_stream_crash_becomes_retryable_failed_turn(
-    agent_db, monkeypatch
-) -> None:
+async def test_unexpected_stream_crash_becomes_retryable_failed_turn(agent_db, monkeypatch) -> None:
     svc = SystemAgentService()
 
     async def crash_stream(*_args, **_kwargs):
@@ -931,6 +1184,172 @@ async def test_unexpected_stream_crash_becomes_retryable_failed_turn(
         row = (await svc.list_messages(db, session.id))[0]
         assert row.run_status == MESSAGE_RUN_FAILED
         assert row.error_code == "AGENT_STREAM_FAILED"
+
+
+@pytest.mark.asyncio
+async def test_regenerate_updates_latest_pair_in_place(agent_db, monkeypatch) -> None:
+    svc = SystemAgentService()
+    calls: list[dict[str, Any]] = []
+    responses = iter(["原回答", "编辑后的回答", "再次生成的回答"])
+
+    async def fake_stream(*_args, **kwargs):
+        calls.append(
+            {
+                "user_text": kwargs["user_text"],
+                "history_ids": [message.id for message in kwargs["history_messages"]],
+            }
+        )
+        yield {
+            "type": "assistant_message",
+            "content": next(responses),
+            "usage": {"model": "test-model"},
+        }
+        yield {"type": "done", "ok": True}
+
+    monkeypatch.setattr(svc.runtime, "stream_turn", fake_stream)
+
+    async with agent_db() as db:
+        session = await svc.create_session(db, channel=CHANNEL_WEB, web_user_id=1)
+        async for _event in svc.stream_message(
+            db,
+            session=session,
+            text="原问题",
+            role="admin",
+            channel=CHANNEL_WEB,
+            web_user_id=1,
+        ):
+            pass
+
+        original = await svc.list_messages(db, session.id)
+        user_message = original[0]
+        assistant_message = original[1]
+        original_ids = [message.id for message in original]
+
+        async for _event in svc.stream_message(
+            db,
+            session=session,
+            text="编辑后的问题",
+            role="admin",
+            channel=CHANNEL_WEB,
+            web_user_id=1,
+            regenerate_message=user_message,
+            regenerate_assistant_message=assistant_message,
+        ):
+            pass
+
+        edited = await svc.list_messages(db, session.id)
+        assert [message.id for message in edited] == original_ids
+        assert [message.role for message in edited] == [
+            MESSAGE_ROLE_USER,
+            MESSAGE_ROLE_ASSISTANT,
+        ]
+        assert edited[0].content["text"] == "编辑后的问题"
+        assert edited[1].content["text"] == "编辑后的回答"
+        assert edited[0].run_status == MESSAGE_RUN_SUCCEEDED
+        assert edited[1].run_status == MESSAGE_RUN_COMPLETED
+        assert calls[1] == {"user_text": "编辑后的问题", "history_ids": []}
+        assert len(session.memory_state["recent_turns"]) == 1
+        assert session.memory_state["recent_turns"][0] == {
+            "goal": "编辑后的问题",
+            "result": "编辑后的回答",
+        }
+
+        async for _event in svc.stream_message(
+            db,
+            session=session,
+            text="",
+            role="admin",
+            channel=CHANNEL_WEB,
+            web_user_id=1,
+            regenerate_message=edited[0],
+            regenerate_assistant_message=edited[1],
+        ):
+            pass
+
+        retried = await svc.list_messages(db, session.id)
+        assert [message.id for message in retried] == original_ids
+        assert retried[0].content["text"] == "编辑后的问题"
+        assert retried[1].content["text"] == "再次生成的回答"
+        assert calls[2]["user_text"] == "编辑后的问题"
+        assert len(session.memory_state["recent_turns"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_regenerate_history_is_not_crowded_out_by_current_tool_rows(
+    agent_db,
+    monkeypatch,
+) -> None:
+    svc = SystemAgentService()
+    captured_history: list[int] = []
+
+    async def fake_stream(*_args, **kwargs):
+        captured_history.extend(message.id for message in kwargs["history_messages"])
+        yield {"type": "assistant_message", "content": "新回答", "usage": {}}
+        yield {"type": "done", "ok": True}
+
+    monkeypatch.setattr(svc.runtime, "stream_turn", fake_stream)
+
+    async with agent_db() as db:
+        session = await svc.create_session(db, channel=CHANNEL_WEB, web_user_id=1)
+        older_user = SystemAgentMessage(
+            session_id=session.id,
+            role=MESSAGE_ROLE_USER,
+            content={"text": "较早问题"},
+            run_status=MESSAGE_RUN_SUCCEEDED,
+        )
+        older_assistant = SystemAgentMessage(
+            session_id=session.id,
+            role=MESSAGE_ROLE_ASSISTANT,
+            content={"text": "较早回答"},
+            run_status=MESSAGE_RUN_COMPLETED,
+        )
+        current_user = SystemAgentMessage(
+            session_id=session.id,
+            role=MESSAGE_ROLE_USER,
+            content={"text": "当前问题"},
+            run_status=MESSAGE_RUN_SUCCEEDED,
+        )
+        current_assistant = SystemAgentMessage(
+            session_id=session.id,
+            role=MESSAGE_ROLE_ASSISTANT,
+            content={"text": "旧回答"},
+            run_status=MESSAGE_RUN_COMPLETED,
+        )
+        db.add_all([older_user, older_assistant, current_user, current_assistant])
+        await db.flush()
+        db.add_all(
+            [
+                SystemAgentMessage(
+                    session_id=session.id,
+                    role=MESSAGE_ROLE_TOOL,
+                    content={"tool_name": "logs.recent", "result_summary": index},
+                    run_status=MESSAGE_RUN_COMPLETED,
+                )
+                for index in range(40)
+            ]
+        )
+        await db.commit()
+
+        async for _event in svc.stream_message(
+            db,
+            session=session,
+            text="",
+            role="admin",
+            channel=CHANNEL_WEB,
+            web_user_id=1,
+            regenerate_message=current_user,
+            regenerate_assistant_message=current_assistant,
+        ):
+            pass
+
+        assert captured_history == [older_user.id, older_assistant.id]
+        rows = await svc.list_messages(db, session.id, limit=100)
+        assert [message.id for message in rows] == [
+            older_user.id,
+            older_assistant.id,
+            current_user.id,
+            current_assistant.id,
+        ]
 
 
 @pytest.mark.asyncio

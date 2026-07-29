@@ -6,6 +6,7 @@ import pytest
 
 from app.crypto import generate_master_key
 from app.services import plugin_config_secrets as secrets
+from app.services.plugin_config_action_jobs import _exception_detail
 from app.settings import settings
 
 
@@ -145,3 +146,53 @@ def test_envelope_decrypts_even_when_legacy_schema_does_not_mark_key_sensitive()
     plain = secrets.decrypt_config_secrets({"cookie": envelope}, strict=True)
 
     assert plain["cookie"] == "legacy-cookie"
+
+
+def test_preserve_schema_sensitive_masked_scalar_and_array_values() -> None:
+    schema = {
+        "type": "object",
+        "properties": {
+            "clientValue": {"type": "string", "x-sensitive": True},
+            "clientValues": {
+                "type": "array",
+                "x-sensitive": True,
+                "items": {"type": "string"},
+            },
+        },
+    }
+
+    merged = secrets.preserve_masked_config_secrets(
+        {"clientValue": "secret-a", "clientValues": ["secret-b", "secret-c"]},
+        {"clientValue": "***", "clientValues": ["***", "***"]},
+        schema=schema,
+    )
+
+    assert merged == {
+        "clientValue": "secret-a",
+        "clientValues": ["secret-b", "secret-c"],
+    }
+
+
+def test_redact_exact_schema_secret_values_in_untrusted_plugin_output() -> None:
+    schema = {
+        "type": "object",
+        "properties": {"clientValue": {"type": "string", "x-sensitive": True}},
+    }
+    values = secrets.config_secret_values({"clientValue": "opaque-value-123"}, schema=schema)
+
+    redacted = secrets.redact_exact_secrets(
+        {"message": "failed with opaque-value-123"},
+        values,
+    )
+
+    assert redacted == {"message": "failed with ***"}
+
+
+def test_plugin_config_job_exception_detail_never_persists_exception_text() -> None:
+    secret = "opaque-plugin-config-secret"
+
+    code, message, _level = _exception_detail(RuntimeError(f"token={secret}"))
+
+    assert code == "CONFIG_ACTION_FAILED"
+    assert secret not in message
+    assert "详情已脱敏" in message

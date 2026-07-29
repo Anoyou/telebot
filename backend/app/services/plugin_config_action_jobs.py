@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db.base import AsyncSessionLocal
 from ..db.models.account import Account
-from ..db.models.feature import FEATURE_STATE_DISABLED, AccountFeature, Feature
+from ..db.models.feature import AccountFeature, Feature
 from ..db.models.log import (
     LEVEL_ERROR,
     LEVEL_INFO,
@@ -37,6 +37,13 @@ from .plugin_config_actions import (
     declared_config_actions,
     run_plugin_config_action,
 )
+from .plugin_config_secrets import (
+    config_secret_values,
+    decrypt_config_secrets,
+    mask_config_secrets,
+    preserve_masked_config_secrets,
+    redact_exact_secrets,
+)
 
 log = logging.getLogger(__name__)
 
@@ -51,6 +58,17 @@ INTERRUPTED_ERROR_CODE = "CONFIG_ACTION_INTERRUPTED"
 _ACTIVE_TASKS: set[asyncio.Task[Any]] = set()
 _ACTIVE_TASKS_BY_JOB_ID: dict[str, asyncio.Task[Any]] = {}
 _CREATE_LOCKS_BY_ACTION: dict[tuple[int, str, str], asyncio.Lock] = {}
+_MASKED_PATCH_MARKER = "__telepilot_schema_masked_v1__"
+
+
+def _string_candidates(value: Any) -> list[str]:
+    if isinstance(value, dict):
+        return [item for child in value.values() for item in _string_candidates(child)]
+    if isinstance(value, (list, tuple)):
+        return [item for child in value for item in _string_candidates(child)]
+    if isinstance(value, str) and len(value) >= 8:
+        return [value]
+    return []
 
 
 async def startup_plugin_config_action_jobs() -> int:
@@ -312,6 +330,13 @@ def job_response(
 ) -> PluginConfigActionJobResponse:
     """Convert a job row to API response."""
 
+    stored_patch = dict(job.config_patch or {})
+    schema_masked = stored_patch.pop(_MASKED_PATCH_MARKER, False) is True
+    public_patch = (
+        redact_value(stored_patch)
+        if schema_masked
+        else {str(key): "***" for key in stored_patch}
+    )
     return PluginConfigActionJobResponse(
         job_id=job.job_id,
         account_id=job.account_id,
@@ -322,7 +347,8 @@ def job_response(
         error_code=job.error_code,
         error_message=redact_text(job.error_message or "") or None,
         result=redact_value(job.result or {}),
-        config_patch=redact_value(job.config_patch or {}),
+        # 新行落库前已按 schema 遮罩；旧行无法证明安全，只返回键。
+        config_patch=public_patch,
         created_at=job.created_at,
         started_at=job.started_at,
         ended_at=job.ended_at,
@@ -362,11 +388,36 @@ async def _run_plugin_config_action_job(
                 message="账号或插件不存在，无法执行配置动作",
             )
             return
+        raw_schema = (
+            feature.manifest.get("config_schema")
+            if isinstance(feature.manifest, dict)
+            and isinstance(feature.manifest.get("config_schema"), dict)
+            else None
+        )
+        known_secrets = list(
+            dict.fromkeys(
+                [
+                    *config_secret_values(effective_config, schema=raw_schema),
+                    *config_secret_values(current_config, schema=raw_schema),
+                    # action_input 整体来自加密 Action payload；其插件级 input schema
+                    # 不一定声明 sensitive，保守按值脱敏长字符串。
+                    *_string_candidates(action_input),
+                ]
+            )
+        )
 
         async def write_progress(level: str = LEVEL_INFO, message: str = "", **detail: Any) -> None:
             normalized = _normalize_level(level)
-            await _write_runtime_log(db, job, normalized, str(message or ""), **detail)
-            job.message = str(message or "")[:1000] or job.message
+            safe_message = str(redact_exact_secrets(str(message or ""), known_secrets) or "")
+            safe_detail = redact_exact_secrets(detail, known_secrets)
+            await _write_runtime_log(
+                db,
+                job,
+                normalized,
+                safe_message,
+                **(safe_detail if isinstance(safe_detail, dict) else {}),
+            )
+            job.message = safe_message[:1000] or job.message
             job.updated_at = _utcnow()
             await db.commit()
 
@@ -398,14 +449,28 @@ async def _run_plugin_config_action_job(
                 return
         now = _utcnow()
         job.status = STATUS_SUCCEEDED
-        job.message = _success_message(
+        success_text = redact_exact_secrets(
             str(result.get("toast") or result.get("message") or "配置动作已完成"),
+            known_secrets,
+        )
+        job.message = _success_message(
+            str(success_text),
             auto_saved=bool(applied_patch_keys),
         )
         job.error_code = None
         job.error_message = None
-        job.result = dict(result.get("result") or {})
-        job.config_patch = dict(patch or {})
+        safe_result = redact_exact_secrets(result.get("result") or {}, known_secrets)
+        job.result = redact_value(safe_result) if isinstance(safe_result, dict) else {}
+        raw_schema = (
+            feature.manifest.get("config_schema")
+            if isinstance(feature.manifest, dict)
+            and isinstance(feature.manifest.get("config_schema"), dict)
+            else None
+        )
+        job.config_patch = {
+            _MASKED_PATCH_MARKER: True,
+            **mask_config_secrets(dict(patch or {}), schema=raw_schema),
+        }
         job.ended_at = now
         job.updated_at = now
         await _write_runtime_log(
@@ -414,7 +479,7 @@ async def _run_plugin_config_action_job(
             LEVEL_INFO,
             job.message or "配置动作已完成",
             step="finish",
-            config_patch_keys=sorted(job.config_patch.keys()),
+            config_patch_keys=sorted(str(key) for key in patch),
             applied_config_keys=applied_patch_keys,
         )
         await db.commit()
@@ -468,6 +533,12 @@ async def _apply_config_patch(
     patch: Mapping[str, Any],
 ) -> list[str]:
     account_patch, global_patch = _split_config_patch(feature, patch)
+    raw_schema = (
+        feature.manifest.get("config_schema")
+        if isinstance(feature.manifest, dict)
+        and isinstance(feature.manifest.get("config_schema"), dict)
+        else None
+    )
     applied_keys: list[str] = []
     if account_patch:
         _validate_config_patch(feature, account_patch, "account")
@@ -479,25 +550,49 @@ async def _apply_config_patch(
                 )
             )
         ).scalar_one_or_none()
-        if existing is None:
-            existing = AccountFeature(
-                account_id=job.account_id,
-                feature_key=job.plugin_key,
-                enabled=True,
-                config={},
-                state=FEATURE_STATE_DISABLED,
-            )
-            db.add(existing)
-        existing.config = {**dict(existing.config or {}), **account_patch}
+        current = decrypt_config_secrets(
+            dict(existing.config or {}) if existing is not None else {},
+            schema=raw_schema,
+            strict=True,
+        )
+        safe_patch = preserve_masked_config_secrets(
+            current,
+            account_patch,
+            schema=raw_schema,
+        )
+        merged = {**current, **safe_patch}
+        await feature_service.set_account_feature(
+            db,
+            job.account_id,
+            job.plugin_key,
+            enabled=bool(existing.enabled) if existing is not None else True,
+            config=merged,
+            notify=False,
+            commit=False,
+        )
         applied_keys.extend(sorted(account_patch.keys()))
 
     if global_patch:
         _validate_config_patch(feature, global_patch, "global")
         row = await db.get(PluginGlobalConfig, job.plugin_key)
-        if row is None:
-            row = PluginGlobalConfig(plugin_key=job.plugin_key, config={})
-            db.add(row)
-        row.config = {**dict(row.config or {}), **global_patch}
+        current = decrypt_config_secrets(
+            dict(row.config or {}) if row is not None else {},
+            schema=raw_schema,
+            strict=True,
+        )
+        safe_patch = preserve_masked_config_secrets(
+            current,
+            global_patch,
+            schema=raw_schema,
+        )
+        merged = {**current, **safe_patch}
+        await feature_service.set_plugin_global_config(
+            db,
+            job.plugin_key,
+            merged,
+            notify=False,
+            commit=False,
+        )
         applied_keys.extend(sorted(global_patch.keys()))
 
     if applied_keys:
@@ -606,18 +701,22 @@ async def _write_runtime_log(
 
 def _exception_detail(exc: Exception) -> tuple[str, str, str]:
     if isinstance(exc, PluginConfigActionNotFound):
-        return "CONFIG_ACTION_NOT_FOUND", str(exc), LEVEL_WARN
+        return "CONFIG_ACTION_NOT_FOUND", "插件配置动作不存在", LEVEL_WARN
     if isinstance(exc, PluginConfigActionUnavailable):
-        return "CONFIG_ACTION_UNAVAILABLE", str(exc), LEVEL_WARN
+        return "CONFIG_ACTION_UNAVAILABLE", "插件配置动作当前不可用", LEVEL_WARN
     if isinstance(exc, PluginHTTPError):
-        return "CONFIG_ACTION_HTTP_REJECTED", str(exc), LEVEL_WARN
+        return "CONFIG_ACTION_HTTP_REJECTED", "插件配置动作的 HTTP 请求失败（详情已脱敏）", LEVEL_WARN
     if isinstance(exc, AIQuotaError):
-        return "CONFIG_ACTION_AI_QUOTA", str(exc), LEVEL_WARN
+        return "CONFIG_ACTION_AI_QUOTA", "插件配置动作的 AI 配额不足", LEVEL_WARN
     if isinstance(exc, AIUnavailableError):
-        return "CONFIG_ACTION_AI_UNAVAILABLE", str(exc), LEVEL_ERROR
+        return "CONFIG_ACTION_AI_UNAVAILABLE", "插件配置动作的 AI 服务不可用", LEVEL_ERROR
     if isinstance(exc, PluginConfigActionError):
-        return "CONFIG_ACTION_FAILED", str(exc), LEVEL_WARN
-    return "CONFIG_ACTION_FAILED", str(exc), LEVEL_ERROR
+        return "CONFIG_ACTION_FAILED", "插件配置动作执行失败（详情已脱敏）", LEVEL_WARN
+    return (
+        "CONFIG_ACTION_FAILED",
+        f"插件配置动作执行异常（{type(exc).__name__}，详情已脱敏）",
+        LEVEL_ERROR,
+    )
 
 
 def _log_item(row: RuntimeLog) -> PluginConfigActionJobLogItem:

@@ -670,7 +670,9 @@ def _plugin_py_passthrough(name: str) -> str:
 演示高风险的"低延时直通"入口 ``on_direct_message``。只有 manifest 声明
 ``capabilities.telegram_direct_passthrough.enabled=true``，且账号侧
 ``AccountFeature.config.direct_passthrough.enabled=true`` 时才会启用。
-命中直通后本条消息不再进入普通消息链路，务必谨慎使用。
+
+返回 ``consumed / ignored / failed`` 三态。只有 consumed 会截断后续链路；
+ignored、failed 和异常都会让其它直通插件或普通链路继续处理。
 
 回复仍走平台受控投递 ``ctx.messages``，不直接调用 Telethon，以便统一限流与审计。
 """
@@ -699,18 +701,19 @@ class {cls}(Plugin):
         self._keyword = str(cfg.get("keyword") or "ping").strip() or "ping"
         self._reply = str(cfg.get("reply") or "pong").strip() or "pong"
 
-    async def on_direct_message(self, ctx: PluginContext, event: Any) -> None:
+    async def on_direct_message(self, ctx: PluginContext, event: Any) -> dict[str, str]:
         text = str(getattr(event, "raw_text", "") or "").strip()
         if self._keyword not in text:
-            return
+            return {{"status": "ignored"}}
         chat_id = getattr(event, "chat_id", None)
         if chat_id is None or ctx.messages is None:
-            return
+            return {{"status": "failed", "error": "missing_chat_or_message_ops"}}
         await ctx.messages.send(
             chat_id=chat_id,
             text=self._reply,
             reply_to_message_id=getattr(event, "id", None),
         )
+        return {{"status": "consumed"}}
 
 
 PLUGIN_CLASS = {cls}
@@ -849,8 +852,14 @@ async def test_direct_message_replies_on_keyword() -> None:
     messages = _RecordingMessages()
     ctx = SimpleNamespace(messages=messages, log=None, config={{}})
     event = SimpleNamespace(raw_text="ping", chat_id=-100123, id=9)
-    await plugin.on_direct_message(ctx, event)
+    result = await plugin.on_direct_message(ctx, event)
+    ignored = await plugin.on_direct_message(
+        ctx,
+        SimpleNamespace(raw_text="other", chat_id=-100123, id=10),
+    )
     assert messages.sent and messages.sent[0]["text"] == "pong"
+    assert result == {{"status": "consumed"}}
+    assert ignored == {{"status": "ignored"}}
 '''
 
 

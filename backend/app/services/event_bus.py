@@ -126,6 +126,7 @@ EVENT_REASON_CODES = {
     "synthetic_callback",
     "target_message_id_missing",
     "telegram_api_error",
+    "plugin_declared_failed",
     "plugin_runtime_error",
     "trace_write_failed",
     "transfer_rule_not_matched",
@@ -133,6 +134,11 @@ EVENT_REASON_CODES = {
     "usage_limited",
     "usage_pending",
     "userbot_command_message",
+    # Platform capability gates use the same reason-code contract as event
+    # decisions so API/UI diagnostics can be validated by one registry.
+    "platform_module_disabled",
+    "channel_disabled",
+    "capability_unavailable",
 }
 EVENT_MATCHED_REASON_CODE = "matched"
 

@@ -1,9 +1,15 @@
-import { useState, type FormEvent, type KeyboardEvent } from "react";
-import { Send, Square } from "lucide-react";
+import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
+import { Menu, Send, Square } from "lucide-react";
 
+import {
+  ModelPicker,
+  type ModelPickerItem,
+  type ModelPickerValue,
+} from "@/components/ai/ModelPicker";
 import { Button } from "@/components/ui/button";
-import { Select } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
+import { cn } from "@/lib/utils";
+import { composerEnterAction } from "./composerState";
 
 export function Composer({
   disabled,
@@ -11,23 +17,64 @@ export function Composer({
   streaming,
   onStop,
   placeholder,
-  modelOptions = [],
-  modelValue = "",
-  onModelChange,
+  modelItems = [],
+  modelSelection,
+  onModelSelectionChange,
+  onSetDefaultModel,
   modelDisabled,
+  expectedLabel,
+  onOpenSessions,
+  showSessionButtonOnDesktop = false,
+  value: controlledValue,
+  onValueChange,
+  focusRequestKey = 0,
 }: {
   disabled?: boolean;
   onSend: (text: string) => void | Promise<void>;
   streaming?: boolean;
   onStop?: () => void;
   placeholder?: string;
-  modelOptions?: string[];
-  modelValue?: string;
-  onModelChange?: (model: string) => void;
+  /** 全量可选模型（按 Provider 分组） */
+  modelItems?: ModelPickerItem[];
+  modelSelection?: ModelPickerValue;
+  onModelSelectionChange?: (next: ModelPickerValue) => void;
+  onSetDefaultModel?: (providerId: number, model: string) => void;
   modelDisabled?: boolean;
+  /** 本轮希望使用说明 */
+  expectedLabel?: string;
+  onOpenSessions?: () => void;
+  showSessionButtonOnDesktop?: boolean;
+  value?: string;
+  onValueChange?: (value: string) => void;
+  focusRequestKey?: number;
 }) {
-  const [value, setValue] = useState("");
+  const [internalValue, setInternalValue] = useState("");
   const [sending, setSending] = useState(false);
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const composingRef = useRef(false);
+  const suppressNextEnterRef = useRef(false);
+  const suppressTimerRef = useRef<number | null>(null);
+  const value = controlledValue ?? internalValue;
+
+  const updateValue = (next: string) => {
+    if (controlledValue === undefined) setInternalValue(next);
+    onValueChange?.(next);
+  };
+
+  useEffect(() => {
+    if (!focusRequestKey) return;
+    const node = textareaRef.current;
+    if (!node) return;
+    node.focus();
+    node.setSelectionRange(node.value.length, node.value.length);
+  }, [focusRequestKey]);
+
+  useEffect(
+    () => () => {
+      if (suppressTimerRef.current != null) window.clearTimeout(suppressTimerRef.current);
+    },
+    [],
+  );
 
   const submit = async () => {
     const text = value.trim();
@@ -35,7 +82,7 @@ export function Composer({
     setSending(true);
     try {
       await onSend(text);
-      setValue("");
+      updateValue("");
     } finally {
       setSending(false);
     }
@@ -47,39 +94,87 @@ export function Composer({
   };
 
   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === "Enter" && !e.shiftKey) {
+    const action = composerEnterAction({
+      key: e.key,
+      shiftKey: e.shiftKey,
+      nativeComposing: e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229,
+      compositionActive: composingRef.current,
+      suppressAfterComposition: suppressNextEnterRef.current,
+    });
+    if (action === "suppress") {
+      suppressNextEnterRef.current = false;
+      e.preventDefault();
+      return;
+    }
+    if (action === "submit") {
       e.preventDefault();
       void submit();
     }
   };
 
   return (
-    <form onSubmit={onSubmit} className="border-t bg-background/80 p-2 backdrop-blur sm:p-3">
-      <div className="relative mx-auto max-w-3xl rounded-xl border border-border/80 bg-input-bg/70 p-2 shadow-sm focus-within:border-primary/50 focus-within:ring-2 focus-within:ring-ring/15">
+    <form
+      data-assistant-composer
+      onSubmit={onSubmit}
+      className="shrink-0 border-t bg-background/90 p-2 backdrop-blur sm:p-3"
+    >
+      <div className="mx-auto max-w-3xl rounded-xl border border-border/80 bg-input-bg/70 p-2 shadow-sm focus-within:border-primary/50 focus-within:ring-2 focus-within:ring-ring/15 xl:max-w-5xl 2xl:max-w-6xl">
         <Textarea
+          ref={textareaRef}
           value={value}
-          onChange={(e) => setValue(e.target.value)}
+          onChange={(e) => updateValue(e.target.value)}
           onKeyDown={onKeyDown}
+          onCompositionStart={() => {
+            composingRef.current = true;
+            suppressNextEnterRef.current = false;
+          }}
+          onCompositionEnd={() => {
+            composingRef.current = false;
+            suppressNextEnterRef.current = true;
+            if (suppressTimerRef.current != null) window.clearTimeout(suppressTimerRef.current);
+            suppressTimerRef.current = window.setTimeout(() => {
+              suppressNextEnterRef.current = false;
+              suppressTimerRef.current = null;
+            }, 0);
+          }}
           disabled={disabled || sending || streaming}
           placeholder={placeholder || "用自然语言查询系统状态…（Enter 发送，Shift+Enter 换行）"}
           rows={2}
-          className="min-h-[4.5rem] resize-none border-0 bg-transparent px-1 pb-10 pt-1 shadow-none focus-visible:border-transparent focus-visible:ring-0"
+          className="min-h-[4.5rem] resize-none border-0 bg-transparent px-1 py-1 shadow-none focus-visible:border-transparent focus-visible:ring-0"
         />
-        <div className="absolute inset-x-2 bottom-2 flex items-center justify-end gap-1.5">
-          {modelOptions.length > 0 ? (
-            <Select
-              aria-label="切换 Agent 模型"
-              value={modelValue || modelOptions[0] || ""}
-              disabled={modelDisabled || streaming}
-              onChange={(event) => onModelChange?.(event.target.value)}
-              className="h-8 min-w-0 w-[min(14rem,62%)] border-border/60 bg-background/80 px-2 text-xs"
+        <div className="mt-1 flex min-w-0 items-end justify-end gap-1.5 border-t border-border/40 pt-2">
+          {onOpenSessions ? (
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className={cn(
+                "mr-auto h-8 shrink-0 gap-1 px-2 text-xs",
+                showSessionButtonOnDesktop ? "inline-flex" : "md:hidden",
+              )}
+              onClick={onOpenSessions}
+              aria-label="打开会话列表"
             >
-              {modelOptions.map((model) => (
-                <option key={model} value={model}>
-                  {model}
-                </option>
-              ))}
-            </Select>
+              <Menu className="h-3.5 w-3.5" />
+              会话
+            </Button>
+          ) : null}
+          {expectedLabel ? (
+            <span className={cn("hidden max-w-[32%] truncate self-center text-[10px] text-muted-foreground md:inline", onOpenSessions ? "md:mr-auto" : "mr-auto")}>
+              本轮：{expectedLabel}
+            </span>
+          ) : null}
+          {modelItems.length > 0 && modelSelection && onModelSelectionChange ? (
+            <ModelPicker
+              items={modelItems}
+              value={modelSelection}
+              onChange={onModelSelectionChange}
+              onSetDefault={onSetDefaultModel}
+              showSetDefault={Boolean(onSetDefaultModel)}
+              disabled={modelDisabled || streaming}
+              compact
+              className="min-w-0 justify-end"
+            />
           ) : null}
           {streaming ? (
             <Button

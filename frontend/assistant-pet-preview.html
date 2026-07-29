@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>TelePilot 助手机器人预览</title>
+    <script type="module" src="/src/index.css"></script>
+    <style>
+      body { min-height: 100dvh; margin: 0; background: hsl(var(--background)); color: hsl(var(--foreground)); font-family: ui-sans-serif, system-ui, sans-serif; }
+      .preview-shell { width: min(960px, calc(100% - 32px)); margin: 0 auto; padding: 40px 0 64px; }
+      .preview-head { display: flex; align-items: end; justify-content: space-between; gap: 16px; margin-bottom: 24px; }
+      .preview-head h1 { margin: 0; font-size: 28px; }
+      .preview-head p { margin: 6px 0 0; color: hsl(var(--muted-foreground)); }
+      .preview-controls { display: flex; flex-wrap: wrap; gap: 8px; }
+      .preview-controls button { border: 1px solid hsl(var(--border)); border-radius: 999px; background: hsl(var(--card)); padding: 8px 14px; color: inherit; cursor: pointer; }
+      .preview-controls button[data-active="true"] { border-color: hsl(var(--primary) / .5); background: hsl(var(--primary) / .12); color: hsl(var(--primary)); }
+      .preview-grid { display: grid; grid-template-columns: 1.2fr .8fr; gap: 20px; }
+      .preview-card { position: relative; min-height: 420px; overflow: hidden; border: 1px solid hsl(var(--border)); border-radius: 24px; background: hsl(var(--card)); box-shadow: var(--shadow-sm); }
+      .preview-card-title { position: absolute; left: 20px; top: 18px; z-index: 2; font-weight: 700; }
+      .preview-card-note { position: absolute; left: 20px; top: 44px; z-index: 2; color: hsl(var(--muted-foreground)); font-size: 13px; }
+      .preview-stage { position: absolute; inset: 80px 0 0; display: grid; place-items: center; background: radial-gradient(circle at 50% 45%, hsl(var(--primary) / .1), transparent 48%); }
+      .preview-assistant-pet { position: relative; width: 68px; height: 76px; transform: scale(2.15); filter: drop-shadow(0 12px 18px hsl(0 0% 0% / .2)); }
+      .preview-phone { position: relative; width: 300px; height: 540px; margin: 76px auto 28px; overflow: hidden; border: 8px solid hsl(var(--foreground) / .82); border-radius: 40px; background: hsl(var(--background)); box-shadow: 0 24px 50px hsl(0 0% 0% / .2); }
+      .preview-phone-chat { position: absolute; inset: 18px 14px 110px; border: 1px solid hsl(var(--border)); border-radius: 20px; background: hsl(var(--card)); }
+      .preview-phone-input { position: absolute; inset: auto 14px 14px; height: 82px; border: 1px solid hsl(var(--border)); border-radius: 18px; background: hsl(var(--card)); box-shadow: var(--shadow-sm); }
+      .preview-phone-input::before { content: "用自然语言查询系统状态…"; position: absolute; left: 16px; top: 14px; color: hsl(var(--muted-foreground)); font-size: 12px; }
+      .preview-orb { position: absolute; right: 18px; bottom: 108px; display: grid; width: 60px; height: 60px; place-items: center; align-content: center; border-radius: 999px; color: hsl(var(--primary)); }
+      .preview-orb-label { margin-top: 1px; font-size: 10px; font-weight: 700; line-height: 1; }
+      @media (max-width: 760px) { .preview-head { align-items: start; flex-direction: column; } .preview-grid { grid-template-columns: 1fr; } .preview-card { min-height: 460px; } }
+    </style>
+  </head>
+  <body>
+    <main class="preview-shell">
+      <header class="preview-head">
+        <div>
+          <h1>TelePilot 助手机器人</h1>
+          <p>本地实时预览，切换状态观察身体和四肢的动作节奏。</p>
+        </div>
+        <div class="preview-controls" aria-label="机器人状态">
+          <button type="button" data-intent="idle">待机</button>
+          <button type="button" data-intent="awake" data-active="true">唤醒</button>
+          <button type="button" data-intent="working">工作中</button>
+        </div>
+      </header>
+
+      <div class="preview-grid">
+        <section class="preview-card">
+          <div class="preview-card-title">放大动作预览</div>
+          <div class="preview-card-note">脸部、天线、手臂与脚部使用独立动画层</div>
+          <div class="preview-stage">
+            <div class="assistant-pet preview-assistant-pet">
+              <span class="assistant-pet-robot-frame" aria-hidden="true">
+                <span class="assistant-pet-robot" data-preview-robot data-agent-pet-intent="awake">
+                  <span class="assistant-pet-shadow"></span>
+                  <span class="assistant-pet-antenna"><span></span></span>
+                  <span class="assistant-pet-head">
+                    <span class="assistant-pet-ear assistant-pet-ear-left"></span>
+                    <span class="assistant-pet-ear assistant-pet-ear-right"></span>
+                    <span class="assistant-pet-face">
+                      <span class="assistant-pet-eye assistant-pet-eye-left"></span>
+                      <span class="assistant-pet-eye assistant-pet-eye-right"></span>
+                      <span class="assistant-pet-mouth"></span>
+                    </span>
+                  </span>
+                  <span class="assistant-pet-neck"></span>
+                  <span class="assistant-pet-body">
+                    <span class="assistant-pet-core">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="m22 2-7 20-4-9-9-4Z"></path><path d="M22 2 11 13"></path></svg>
+                    </span>
+                  </span>
+                  <span class="assistant-pet-arm assistant-pet-arm-left"></span>
+                  <span class="assistant-pet-arm assistant-pet-arm-right"></span>
+                  <span class="assistant-pet-foot assistant-pet-foot-left"><span class="assistant-pet-plume"></span></span>
+                  <span class="assistant-pet-foot assistant-pet-foot-right"><span class="assistant-pet-plume"></span></span>
+                </span>
+              </span>
+            </div>
+          </div>
+        </section>
+
+        <section class="preview-card">
+          <div class="preview-card-title">PWA 实际尺寸</div>
+          <div class="preview-card-note">打开助手后隐藏底栏，入口移动到输入框上方</div>
+          <div class="preview-phone">
+            <div class="preview-phone-chat"></div>
+            <div class="preview-phone-input"></div>
+            <button class="preview-orb liquid-bottom-nav assistant-nav-orb assistant-nav-orb-active" type="button">
+              <span class="assistant-pet-robot-frame assistant-pet-robot-frame-compact" aria-hidden="true">
+                <span class="assistant-pet-robot" data-preview-robot data-agent-pet-intent="awake">
+                  <span class="assistant-pet-shadow"></span>
+                  <span class="assistant-pet-antenna"><span></span></span>
+                  <span class="assistant-pet-head">
+                    <span class="assistant-pet-ear assistant-pet-ear-left"></span><span class="assistant-pet-ear assistant-pet-ear-right"></span>
+                    <span class="assistant-pet-face"><span class="assistant-pet-eye assistant-pet-eye-left"></span><span class="assistant-pet-eye assistant-pet-eye-right"></span><span class="assistant-pet-mouth"></span></span>
+                  </span>
+                  <span class="assistant-pet-neck"></span>
+                  <span class="assistant-pet-body"><span class="assistant-pet-core"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="m22 2-7 20-4-9-9-4Z"></path><path d="M22 2 11 13"></path></svg></span></span>
+                  <span class="assistant-pet-arm assistant-pet-arm-left"></span><span class="assistant-pet-arm assistant-pet-arm-right"></span>
+                  <span class="assistant-pet-foot assistant-pet-foot-left"><span class="assistant-pet-plume"></span></span>
+                  <span class="assistant-pet-foot assistant-pet-foot-right"><span class="assistant-pet-plume"></span></span>
+                </span>
+              </span>
+              <span class="preview-orb-label">助手</span>
+            </button>
+          </div>
+        </section>
+      </div>
+    </main>
+    <script>
+      const controls = [...document.querySelectorAll("[data-intent]")];
+      const robots = [...document.querySelectorAll("[data-preview-robot]")];
+      controls.forEach((control) => control.addEventListener("click", () => {
+        const intent = control.dataset.intent;
+        controls.forEach((item) => item.dataset.active = String(item === control));
+        robots.forEach((robot) => robot.dataset.agentPetIntent = intent);
+        document.querySelectorAll(".assistant-pet-core").forEach((core) => core.classList.toggle("assistant-pet-core-streaming", intent === "working"));
+      }));
+    </script>
+  </body>
+</html>

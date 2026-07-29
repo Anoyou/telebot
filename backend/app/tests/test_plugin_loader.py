@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, call
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from telethon.tl.types import PeerUser
@@ -146,6 +146,27 @@ def test_direct_passthrough_account_opt_in_requires_strict_true(value: object, e
     )
 
     assert loader_mod._plugin_direct_passthrough_enabled(ctx) is expected  # noqa: SLF001
+
+
+@pytest.mark.parametrize(
+    ("result", "expected"),
+    [
+        ({"status": "consumed"}, ("consumed", None)),
+        ({"status": "ignored"}, ("ignored", None)),
+        ({"status": "failed", "error": "boom"}, ("failed", "boom")),
+        ({"consume": True}, ("consumed", None)),
+        ({"consume": False}, ("ignored", None)),
+        (True, ("consumed", None)),
+        (False, ("ignored", None)),
+        (None, ("ignored", None)),
+        ({"unknown": True}, ("ignored", None)),
+    ],
+)
+def test_direct_passthrough_outcome_contract(
+    result: object,
+    expected: tuple[str, str | None],
+) -> None:
+    assert loader_mod._coerce_direct_passthrough_outcome(result) == expected  # noqa: SLF001
 
 
 # ─────────────────────────────────────────────────────
@@ -3663,9 +3684,10 @@ async def test_direct_passthrough_consumes_raw_event_before_event_bus(monkeypatc
         display_name = "直通启用测试"
         owner_only = False
 
-        async def on_direct_message(self, ctx: PluginContext, event: Any) -> None:
+        async def on_direct_message(self, ctx: PluginContext, event: Any) -> bool:
             direct_events.append(event)
             await ctx.client.send_message(event.chat_id, "direct reply")
+            return True  # 声明消费
 
         async def on_message(self, ctx: PluginContext, event: Any) -> None:
             legacy_calls.append(str(getattr(event, "raw_text", "")))
@@ -3799,7 +3821,9 @@ async def test_direct_passthrough_broadcasts_before_incoming_guards(monkeypatch)
         owner_only = False
 
         async def on_direct_message(self, ctx: PluginContext, event: Any) -> None:
+            # 未声明 consumed：只观察，继续下一个直通与普通链路。
             calls.append((self.key, str(getattr(event, "raw_text", ""))))
+            return None
 
     @register
     class _DirectBroadcastB(Plugin):
@@ -3809,6 +3833,7 @@ async def test_direct_passthrough_broadcasts_before_incoming_guards(monkeypatch)
 
         async def on_direct_message(self, ctx: PluginContext, event: Any) -> None:
             calls.append((self.key, str(getattr(event, "raw_text", ""))))
+            return None
 
     for cls in (_DirectBroadcastA, _DirectBroadcastB):
         cls._manifest = Manifest(
@@ -3894,17 +3919,17 @@ async def test_direct_passthrough_broadcasts_before_incoming_guards(monkeypatch)
         incoming_dispatch = captured[-1]
         await incoming_dispatch(_Event())
 
+        # 两个插件都忽略：按稳定顺序调用全部直通，然后继续普通 incoming 门禁。
         assert calls == [
             ("_test_direct_broadcast_a", "keyword owned by interaction bot"),
             ("_test_direct_broadcast_b", "keyword owned by interaction bot"),
         ]
-        loader_mod._record_recent_peer.assert_not_awaited()
+        loader_mod._record_recent_peer.assert_awaited_once()
         interaction_owned.assert_not_awaited()
-        loader_mod.start_trace.assert_awaited_once()
+        loader_mod.start_trace.assert_awaited()
         assert sum(1 for call in record_span.await_args_list if call.args[1] == "route") == 2
         assert sum(1 for call in record_span.await_args_list if call.args[1] == "plugin_invoke") == 2
-        loader_mod.finish_trace.assert_awaited_once()
-        assert loader_mod.finish_trace.await_args.args[:2] == (trace, loader_mod.TRACE_STATUS_OK)
+        assert loader_mod.finish_trace.await_args.kwargs.get("consumed") is False
         assert loader_mod.finish_trace.await_args.kwargs["invoked_count"] == 2
     finally:
         loader_mod._STATES.pop(15, None)
@@ -3913,8 +3938,21 @@ async def test_direct_passthrough_broadcasts_before_incoming_guards(monkeypatch)
 
 
 @pytest.mark.asyncio
-async def test_direct_passthrough_records_failed_trace(monkeypatch) -> None:
+@pytest.mark.parametrize(
+    ("failure_mode", "reason_code"),
+    [
+        ("declared", "plugin_declared_failed"),
+        ("exception", "plugin_runtime_error"),
+    ],
+)
+async def test_direct_passthrough_records_failed_trace(
+    monkeypatch,
+    failure_mode: str,
+    reason_code: str,
+) -> None:
     from app.worker.plugins.base import _REGISTRY, register
+
+    legacy: list[str] = []
 
     @register
     class _DirectFailingPlugin(Plugin):
@@ -3922,8 +3960,13 @@ async def test_direct_passthrough_records_failed_trace(monkeypatch) -> None:
         display_name = "直通失败 trace 测试"
         owner_only = False
 
-        async def on_direct_message(self, ctx: PluginContext, event: Any) -> None:
-            raise RuntimeError("boom")
+        async def on_direct_message(self, ctx: PluginContext, event: Any) -> dict[str, str] | None:
+            if failure_mode == "exception":
+                raise RuntimeError("boom")
+            return {"status": "failed", "error": "boom"}
+
+        async def on_message(self, ctx: PluginContext, event: Any) -> None:
+            legacy.append("legacy")
 
     _DirectFailingPlugin._manifest = Manifest(
         key="_test_direct_failing",
@@ -4001,12 +4044,16 @@ async def test_direct_passthrough_records_failed_trace(monkeypatch) -> None:
         assert any(
             call.args[1] == "plugin_invoke"
             and call.args[2] == loader_mod.TRACE_STATUS_FAILED
-            and call.kwargs.get("reason_code") == "plugin_runtime_error"
+            and call.kwargs.get("reason_code") == reason_code
             for call in record_span.await_args_list
         )
-        finish_trace.assert_awaited_once()
-        assert finish_trace.await_args.args[:2] == (trace, loader_mod.TRACE_STATUS_FAILED)
-        assert finish_trace.await_args.kwargs["consumed"] is True
+        assert legacy == ["legacy"]
+        # 失败可回退：直通 trace 标记未消费
+        assert any(
+            call.args[:2] == (trace, loader_mod.TRACE_STATUS_FAILED)
+            and call.kwargs.get("consumed") is False
+            for call in finish_trace.await_args_list
+        )
         assert any(
             call.kwargs.get("plugin_key") == "_test_direct_failing"
             and call.kwargs.get("last_invocation_status") == loader_mod.TRACE_STATUS_FAILED
@@ -4016,6 +4063,223 @@ async def test_direct_passthrough_records_failed_trace(monkeypatch) -> None:
     finally:
         loader_mod._STATES.pop(16, None)
         _REGISTRY.pop("_test_direct_failing", None)
+
+
+@pytest.mark.asyncio
+async def test_direct_passthrough_priority_and_declarative_consume(monkeypatch) -> None:
+    """高优先插件忽略后继续调用；低优先插件明确消费才截断普通链路。"""
+    from app.worker.plugins.base import _REGISTRY, register
+
+    order: list[str] = []
+    legacy: list[str] = []
+
+    @register
+    class _High(Plugin):
+        key = "_test_direct_prio_high"
+        display_name = "高优先"
+        owner_only = False
+
+        async def on_direct_message(self, ctx: PluginContext, event: Any) -> dict[str, str]:
+            order.append(self.key)
+            return {"status": "ignored"}
+
+        async def on_message(self, ctx: PluginContext, event: Any) -> None:
+            legacy.append(self.key)
+
+    @register
+    class _Low(Plugin):
+        key = "_test_direct_prio_low"
+        display_name = "低优先"
+        owner_only = False
+
+        async def on_direct_message(self, ctx: PluginContext, event: Any) -> dict[str, str]:
+            order.append(self.key)
+            return {"status": "consumed"}
+
+        async def on_message(self, ctx: PluginContext, event: Any) -> None:
+            legacy.append(self.key)
+
+    for cls in (_High, _Low):
+        cls._manifest = Manifest(
+            key=cls.key,
+            display_name=cls.display_name,
+            capabilities={
+                "telegram_direct_passthrough": {
+                    "enabled": True,
+                    "reason": "priority test",
+                    "sources": ["userbot"],
+                    "directions": ["incoming"],
+                }
+            },
+        )
+
+    class _Event:
+        raw_text = "prio"
+        text = "prio"
+        chat_id = -4004
+        sender_id = 7
+        id = 1
+        is_private = False
+        is_group = True
+        is_channel = False
+
+        async def get_chat(self):
+            return None
+
+    fake_db = _FakeDB(
+        accounts={17: _FakeAcc(id=17)},
+        humanize={17: None},
+        afs=[
+            _FakeAF(
+                account_id=17,
+                feature_key="_test_direct_prio_low",
+                enabled=True,
+                config={"direct_passthrough": {"enabled": True, "priority": 50}},
+            ),
+            _FakeAF(
+                account_id=17,
+                feature_key="_test_direct_prio_high",
+                enabled=True,
+                config={"direct_passthrough": {"enabled": True, "priority": 0}},
+            ),
+        ],
+        rules=[],
+    )
+    monkeypatch.setattr(loader_mod, "AsyncSessionLocal", lambda: _fake_session_factory(fake_db))
+    monkeypatch.setattr(loader_mod, "_load_log_incoming_messages_setting", AsyncMock(return_value=False))
+    monkeypatch.setattr(
+        loader_mod,
+        "_load_event_framework_flags",
+        AsyncMock(return_value={"trace_enabled": True, "event_bus_delivery_enabled": True}),
+    )
+    monkeypatch.setattr(loader_mod, "start_trace", AsyncMock(return_value=SimpleNamespace(trace_id="t17")))
+    monkeypatch.setattr(loader_mod, "record_span", AsyncMock())
+    finish_trace = AsyncMock()
+    monkeypatch.setattr(loader_mod, "finish_trace", finish_trace)
+    monkeypatch.setattr(loader_mod, "update_plugin_runtime_status", AsyncMock())
+
+    captured: list[Any] = []
+
+    def _on(_filter):
+        def _wrap(fn):
+            captured.append(fn)
+            return fn
+
+        return _wrap
+
+    client = MagicMock()
+    client.on = _on
+    paused = asyncio.Event()
+    paused.set()
+    try:
+        await load_plugins_for_account(client, account_id=17, paused=paused, redis=_FakeRedis())
+        await captured[-1](_Event())
+        assert order == ["_test_direct_prio_high", "_test_direct_prio_low"]
+        assert legacy == []
+        assert finish_trace.await_args.kwargs.get("consumed") is True
+        assert finish_trace.await_args.kwargs.get("consumer_plugin_key") == "_test_direct_prio_low"
+    finally:
+        loader_mod._STATES.pop(17, None)
+        _REGISTRY.pop("_test_direct_prio_high", None)
+        _REGISTRY.pop("_test_direct_prio_low", None)
+
+
+@pytest.mark.asyncio
+async def test_direct_passthrough_secondary_switch_only_enables_dispatch(monkeypatch) -> None:
+    """二次开关只启用直通；handler 返回 None 时必须回退普通链路。"""
+    from app.worker.plugins.base import _REGISTRY, register
+
+    legacy: list[str] = []
+
+    @register
+    class _EnabledOnly(Plugin):
+        key = "_test_direct_enabled_only"
+        display_name = "仅开启直通"
+        owner_only = False
+
+        async def on_direct_message(self, ctx: PluginContext, event: Any) -> None:
+            return None
+
+        async def on_message(self, ctx: PluginContext, event: Any) -> None:
+            legacy.append("legacy")
+
+    _EnabledOnly._manifest = Manifest(
+        key="_test_direct_enabled_only",
+        display_name="仅开启直通",
+        capabilities={
+            "telegram_direct_passthrough": {
+                "enabled": True,
+                "reason": "secondary switch only enables dispatch",
+                "sources": ["userbot"],
+                "directions": ["incoming"],
+            }
+        },
+    )
+
+    class _Event:
+        raw_text = "x"
+        text = "x"
+        chat_id = -5005
+        sender_id = 1
+        id = 2
+        is_private = False
+        is_group = True
+        is_channel = False
+
+        async def get_chat(self):
+            return None
+
+    fake_db = _FakeDB(
+        accounts={18: _FakeAcc(id=18)},
+        humanize={18: None},
+        afs=[
+            _FakeAF(
+                account_id=18,
+                feature_key="_test_direct_enabled_only",
+                enabled=True,
+                config={"direct_passthrough": {"enabled": True}},
+            )
+        ],
+        rules=[],
+    )
+    monkeypatch.setattr(loader_mod, "AsyncSessionLocal", lambda: _fake_session_factory(fake_db))
+    monkeypatch.setattr(loader_mod, "_load_log_incoming_messages_setting", AsyncMock(return_value=False))
+    monkeypatch.setattr(
+        loader_mod,
+        "_load_event_framework_flags",
+        AsyncMock(return_value={"trace_enabled": True, "event_bus_delivery_enabled": True}),
+    )
+    monkeypatch.setattr(loader_mod, "start_trace", AsyncMock(return_value=SimpleNamespace(trace_id="t18")))
+    monkeypatch.setattr(loader_mod, "record_span", AsyncMock())
+    finish_trace = AsyncMock()
+    monkeypatch.setattr(loader_mod, "finish_trace", finish_trace)
+    monkeypatch.setattr(loader_mod, "update_plugin_runtime_status", AsyncMock())
+
+    captured: list[Any] = []
+
+    def _on(_filter):
+        def _wrap(fn):
+            captured.append(fn)
+            return fn
+
+        return _wrap
+
+    client = MagicMock()
+    client.on = _on
+    paused = asyncio.Event()
+    paused.set()
+    try:
+        await load_plugins_for_account(client, account_id=18, paused=paused, redis=_FakeRedis())
+        await captured[-1](_Event())
+        assert legacy == ["legacy"]
+        assert any(
+            call.kwargs.get("consumed") is False
+            and call.kwargs.get("invoked_count") == 1
+            for call in finish_trace.await_args_list
+        )
+    finally:
+        loader_mod._STATES.pop(18, None)
+        _REGISTRY.pop("_test_direct_enabled_only", None)
 
 
 def test_userbot_native_raw_boolean_true_is_not_explicit_capability() -> None:
@@ -5268,26 +5532,21 @@ async def test_userbot_entity_retry_recovers_from_recent_message_anchor() -> Non
     )
 
     assert resolved is entity
-    assert client.get_messages.await_args_list == [call(-1001, ids=88), call(-1001, ids=88)]
+    client.get_messages.assert_awaited_once_with(-1001, ids=88)
 
 
 @pytest.mark.asyncio
-async def test_userbot_entity_retry_scans_recent_history_without_cache() -> None:
-    entity = SimpleNamespace(id=42, first_name="公开姓名")
+async def test_userbot_entity_retry_does_not_scan_history_without_cache() -> None:
     calls: list[dict[str, int]] = []
 
     class Client:
         get_entity = AsyncMock(side_effect=ValueError("input entity is not cached"))
-        get_messages = AsyncMock(
-            return_value=SimpleNamespace(sender_id=42, from_id=PeerUser(42), sender=entity)
-        )
+        get_messages = AsyncMock()
 
         def iter_messages(self, _chat_id, **kwargs):  # noqa: ANN001, ANN003
             calls.append(dict(kwargs))
 
             async def messages():
-                if kwargs.get("from_user") is not None:
-                    raise ValueError("input entity is not cached")
                 yield SimpleNamespace(id=88, from_id=PeerUser(42))
 
             return messages()
@@ -5301,9 +5560,9 @@ async def test_userbot_entity_retry_scans_recent_history_without_cache() -> None
         42,
     )
 
-    assert resolved is entity
-    assert calls == [{"from_user": 42, "limit": 2000}, {"limit": 2000}]
-    client.get_messages.assert_awaited_once_with(-1001, ids=88)
+    assert resolved is None
+    assert calls == []
+    client.get_messages.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -5379,6 +5638,10 @@ async def test_ai_facade_requires_ai_text_or_ai_agent_permission(monkeypatch) ->
         assert state.contexts["_test_ai_agent"].ai._allow_agent is True
         assert all(
             isinstance(state.contexts[key].identities, PluginIdentityFacade)
+            for key in ("_test_ai_allowed", "_test_ai_denied", "_test_ai_agent")
+        )
+        assert all(
+            object.__getattribute__(state.contexts[key].identities, "_bot_member_resolver") is None
             for key in ("_test_ai_allowed", "_test_ai_denied", "_test_ai_agent")
         )
     finally:

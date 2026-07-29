@@ -9,8 +9,9 @@ from typing import Any
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ..db.models.account import Account
 from ..db.models.command import AccountCommandLink, CommandTemplate
-from ..db.models.feature import AccountFeature
+from ..db.models.feature import AccountFeature, Feature
 from ..db.models.ignored_peer import IgnoredPeer
 from ..db.models.rule import Rule
 from ..schemas.config_bundle import (
@@ -24,10 +25,12 @@ from ..schemas.config_bundle import (
     ConfigBundleRuleItem,
     ConfigBundleSourceAccount,
 )
+from . import rule_service
 from .redactor import redact_value
 from .scheduler_target import SchedulerTargetError, normalize_scheduler_action_target
 
 MAX_BUNDLE_BYTES = 1_048_576
+
 
 class BundleTooLarge(ValueError):
     """导出 / 上传 bundle 超过 1MB。"""
@@ -65,6 +68,62 @@ def assert_bundle_size(bundle: ConfigBundleExport) -> bytes:
     return data
 
 
+async def load_config_bundle(db: AsyncSession, account_id: int) -> ConfigBundleExport:
+    """从账号当前配置构建已脱敏的 Config Bundle。"""
+
+    account = await db.get(Account, account_id)
+    if account is None:
+        raise BundleConfirmError("ACCOUNT_NOT_FOUND", "账号不存在")
+    feature_rows = (
+        (await db.execute(select(AccountFeature).where(AccountFeature.account_id == account_id)))
+        .scalars()
+        .all()
+    )
+    rule_rows = (await db.execute(select(Rule).where(Rule.account_id == account_id))).scalars().all()
+    ignored_peer_rows = (
+        (await db.execute(select(IgnoredPeer).where(IgnoredPeer.account_id == account_id))).scalars().all()
+    )
+    command_link_rows = (
+        await db.execute(
+            select(AccountCommandLink, CommandTemplate)
+            .join(
+                CommandTemplate,
+                CommandTemplate.id == AccountCommandLink.template_id,
+            )
+            .where(
+                AccountCommandLink.account_id == account_id,
+                AccountCommandLink.enabled.is_(True),
+            )
+        )
+    ).all()
+    return build_config_bundle(
+        account,
+        feature_rows,
+        rule_rows,
+        command_link_rows,
+        ignored_peer_rows,
+    )
+
+
+async def available_feature_map(db: AsyncSession) -> dict[str, str]:
+    rows = (await db.execute(select(Feature))).scalars().all()
+    return {row.key: row.display_name for row in rows}
+
+
+async def available_command_templates(
+    db: AsyncSession,
+) -> dict[str, dict[str, object]]:
+    rows = (await db.execute(select(CommandTemplate))).scalars().all()
+    return {
+        row.name: {
+            "template_name": row.name,
+            "aliases": list(row.aliases or []),
+            "type": row.type,
+        }
+        for row in rows
+    }
+
+
 def _config_diff_fields(source_cfg: dict[str, Any], target_cfg: dict[str, Any]) -> list[str]:
     keys = sorted(set(source_cfg) | set(target_cfg))
     return [key for key in keys if source_cfg.get(key) != target_cfg.get(key)]
@@ -91,7 +150,11 @@ def _contains_chat_id_signal(path: str, key: str, value: Any) -> bool:
         return True
     if lowered_key in _CHAT_ID_HINT_KEYS and isinstance(value, (list, tuple, dict, int, str)):
         return True
-    if lowered_key.endswith("_chat_id") or lowered_key.endswith("_peer_id") or lowered_key.endswith("_group_id"):
+    if (
+        lowered_key.endswith("_chat_id")
+        or lowered_key.endswith("_peer_id")
+        or lowered_key.endswith("_group_id")
+    ):
         return True
     if any(part in lowered_key for part in _CHAT_ID_HINT_PARTS) and lowered_key.endswith("_id"):
         return True
@@ -198,9 +261,7 @@ def build_preview_context_digest(
 
 def _build_source_account(account) -> ConfigBundleSourceAccount:
     label = (
-        getattr(account, "display_name", None)
-        or getattr(account, "phone", None)
-        or f"account-{account.id}"
+        getattr(account, "display_name", None) or getattr(account, "phone", None) or f"account-{account.id}"
     )
     return ConfigBundleSourceAccount(id=int(account.id), label=str(label))
 
@@ -266,10 +327,7 @@ def build_config_bundle(
 
 def _index_bundle(bundle: ConfigBundleExport) -> dict[str, dict[str, Any]]:
     features = {k: v.model_dump(mode="json") for k, v in bundle.features.items()}
-    rules = {
-        f"{item.feature_key}:{item.name}": item.model_dump(mode="json")
-        for item in bundle.rules
-    }
+    rules = {f"{item.feature_key}:{item.name}": item.model_dump(mode="json") for item in bundle.rules}
     commands = {item.template_name: item.model_dump(mode="json") for item in bundle.command_links}
     ignored_peers = {str(item.peer_id): item.model_dump(mode="json") for item in bundle.ignored_peers}
     return {
@@ -409,14 +467,10 @@ def compare_bundles(
             continue
         current = dst["command_links"].get(template_name)
         if current is None:
-            items.append(
-                ConfigBundleDiffItem(entity="command_link", key=template_name, action="add")
-            )
+            items.append(ConfigBundleDiffItem(entity="command_link", key=template_name, action="add"))
             counts.add += 1
         else:
-            items.append(
-                ConfigBundleDiffItem(entity="command_link", key=template_name, action="skip")
-            )
+            items.append(ConfigBundleDiffItem(entity="command_link", key=template_name, action="skip"))
             counts.skip += 1
 
     for peer_key, item in src["ignored_peers"].items():
@@ -463,6 +517,7 @@ async def apply_bundle_confirm(
     available_command_templates: dict[str, dict[str, Any]],
     apply_conflicts: bool,
     confirm_chat_id_conflicts: bool,
+    web_user_id: int | None = None,
 ) -> tuple[int, int, int, list[str]]:
     """按 dry-run 结果把 bundle 写入目标账号。"""
     imported = 0
@@ -534,9 +589,16 @@ async def apply_bundle_confirm(
             if src_rule.feature_key == "scheduler":
                 try:
                     rule_config = normalize_scheduler_action_target(rule_config)
+                    rule_config = rule_service.bind_scheduler_agent_owner(
+                        rule_config, web_user_id
+                    )
                 except SchedulerTargetError as exc:
                     conflicts += 1
                     warnings.append(f"invalid scheduler target in {key}: {exc}")
+                    continue
+                except rule_service.RuleServiceError as exc:
+                    conflicts += 1
+                    warnings.append(f"invalid scheduler owner in {key}: {exc.message}")
                     continue
             await db.execute(
                 delete(Rule).where(

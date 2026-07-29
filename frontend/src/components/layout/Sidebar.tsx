@@ -2,50 +2,64 @@
 //  - <Sidebar> 桌面端（≥md）常驻显示
 //  - <MobileSidebar> 移动端通过抽屉模式呈现（Radix Dialog 实现，左侧滑入）
 // 两者共享 NavList，移动端点击导航后自动关闭抽屉。
-import { useState } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
 import { NavLink } from "react-router-dom";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
 import {
   Boxes,
-  Bot,
   Bug,
   Cog,
+  GitFork,
   Github,
+  GripVertical,
   Home,
+  History,
+  Inbox,
+  ListTodo,
   ScrollText,
   Sparkles,
   WalletCards,
   Webhook,
   X,
 } from "lucide-react";
+import { toast } from "sonner";
 import { BrandLogo } from "@/components/BrandLogo";
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+// DropdownMenuContent kept for Suspense fallback shell
 import { cn } from "@/lib/utils";
 import { APP_VERSION_LABEL } from "@/lib/version";
-import { getSystemSettings } from "@/api/system";
-import changelogRaw from "../../../../CHANGELOG.md?raw";
+import { getPlatformCapabilities, getSystemSettings, patchSystemSettings } from "@/api/system";
+import { listSystemAgentActions } from "@/api/systemAgent";
+import { getErrMsg } from "@/lib/api";
+import {
+  capabilityEnabledMap,
+  filterNavByCapabilities,
+  type CapabilityEnabledMap,
+} from "@/lib/navigation";
+const ChangelogMenu = lazy(() => import("./ChangelogMenu"));
 
-interface NavItem {
+export interface NavItem {
   to: string;
   label: string;
   icon: React.ComponentType<{ className?: string }>;
   end?: boolean;
+  /** 角标查询 key；由 NavList 拉取 pending 数 */
+  badgeKey?: "pending-actions";
 }
 
-// 顶层导航条目；
-// 首页承载概览 + 账号操作，AI 能力收敛到插件中心。
-const NAV: NavItem[] = [
-  { to: "/", label: "概览", icon: Home, end: true },
+// 顶层导航条目。默认落地页是插件中心；概览降权到 /overview。
+export const NAV: NavItem[] = [
   { to: "/plugins", label: "插件", icon: Boxes },
   { to: "/ai", label: "AI", icon: Sparkles },
-  { to: "/interaction", label: "交互", icon: Bot },
+  { to: "/assistant/inbox", label: "待确认", icon: Inbox, badgeKey: "pending-actions" },
+  { to: "/interaction", label: "交互", icon: GitFork },
+  { to: "/operations", label: "指令与任务", icon: ListTodo },
+  { to: "/overview", label: "概览", icon: Home },
   { to: "/ledger", label: "资金台账", icon: WalletCards },
   { to: "/webhooks", label: "入站 Webhook", icon: Webhook },
   { to: "/dispatch-debug", label: "命中调试", icon: Bug },
@@ -53,59 +67,183 @@ const NAV: NavItem[] = [
   { to: "/settings", label: "系统", icon: Cog },
 ];
 
+/** @deprecated 使用 navForCapabilities；保留兼容导出 */
 function navForAIState(aiEnabled: boolean): NavItem[] {
-  return NAV.filter((item) => aiEnabled || item.to !== "/ai");
+  return filterNavByCapabilities(NAV, { ai: aiEnabled });
 }
 
-export function mobilePrimaryNavForAIState(aiEnabled: boolean): NavItem[] {
-  return navForAIState(aiEnabled).filter((item) =>
-    item.to === "/" ||
+export function navForCapabilities(enabled: CapabilityEnabledMap): NavItem[] {
+  return filterNavByCapabilities(NAV, enabled);
+}
+
+export function orderNavItems(items: NavItem[], preferredOrder?: string[]): NavItem[] {
+  if (!preferredOrder?.length) return items;
+  const positions = new Map(preferredOrder.map((path, index) => [path, index]));
+  return [...items].sort((left, right) => {
+    const leftIndex = positions.get(left.to);
+    const rightIndex = positions.get(right.to);
+    if (leftIndex == null && rightIndex == null) return 0;
+    if (leftIndex == null) return 1;
+    if (rightIndex == null) return -1;
+    return leftIndex - rightIndex;
+  });
+}
+
+export function mobilePrimaryNavForCapabilities(enabled: CapabilityEnabledMap, preferredOrder?: string[]): NavItem[] {
+  return orderNavItems(navForCapabilities(enabled).filter((item) =>
     item.to === "/plugins" ||
     item.to === "/interaction" ||
-    item.to === "/ai",
-  );
+    item.to === "/ai" ||
+    item.to === "/overview",
+  ), preferredOrder);
 }
 
-export function mobileMoreNavForAIState(aiEnabled: boolean): NavItem[] {
-  const primary = new Set(mobilePrimaryNavForAIState(aiEnabled).map((item) => item.to));
-  return navForAIState(aiEnabled).filter((item) => !primary.has(item.to));
+export function mobileMoreNavForCapabilities(enabled: CapabilityEnabledMap, preferredOrder?: string[]): NavItem[] {
+  const primary = new Set(mobilePrimaryNavForCapabilities(enabled, preferredOrder).map((item) => item.to));
+  return orderNavItems(navForCapabilities(enabled).filter((item) => !primary.has(item.to)), preferredOrder);
 }
+
+/** @deprecated 兼容旧调用 */
+export function mobilePrimaryNavForAIState(aiEnabled: boolean): NavItem[] {
+  return mobilePrimaryNavForCapabilities({ ai: aiEnabled });
+}
+
+/** @deprecated 兼容旧调用 */
+export function mobileMoreNavForAIState(aiEnabled: boolean): NavItem[] {
+  return mobileMoreNavForCapabilities({ ai: aiEnabled });
+}
+
+// 避免 unused 警告：仍可能被外部测试引用
+void navForAIState;
 
 function NavList({
   collapsed = false,
   onNavigate,
+  reorderable = false,
 }: {
   collapsed?: boolean;
   onNavigate?: () => void;
+  reorderable?: boolean;
 }) {
+  const queryClient = useQueryClient();
+  const [draggedPath, setDraggedPath] = useState<string | null>(null);
+  const [draftOrder, setDraftOrder] = useState<string[] | null>(null);
   const settingsQ = useQuery({
     queryKey: ["system", "settings"],
     queryFn: getSystemSettings,
     staleTime: 30_000,
   });
-  const navItems = navForAIState(settingsQ.data?.ai_enabled ?? true);
+  const capsQ = useQuery({
+    queryKey: ["system", "capabilities"],
+    queryFn: getPlatformCapabilities,
+    staleTime: 15_000,
+  });
+  const pendingActionsQ = useQuery({
+    queryKey: ["system-agent", "actions", "pending-badge"],
+    queryFn: () => listSystemAgentActions({ status: "pending", limit: 50 }),
+    refetchInterval: 30_000,
+    staleTime: 10_000,
+  });
+  const pendingCount = pendingActionsQ.data?.length ?? 0;
+  const enabled = capabilityEnabledMap(capsQ.data, settingsQ.data?.ai_enabled ?? true);
+  const savedOrder = settingsQ.data?.ui_preferences?.sidebar_order;
+  const preferredOrder = draftOrder ?? savedOrder;
+  const fullNavItems = orderNavItems(NAV, preferredOrder);
+  const navItems = orderNavItems(
+    navForCapabilities(enabled),
+    preferredOrder,
+  );
+  const saveOrder = useMutation({
+    scope: { id: "sidebar-order" },
+    mutationFn: (next: string[]) => patchSystemSettings({
+      ui_preferences: { sidebar_order: next },
+    }),
+    onSuccess: (_settings, savedOrder) => {
+      setDraftOrder((current) => current?.join("|") === savedOrder.join("|") ? null : current);
+      void queryClient.invalidateQueries({ queryKey: ["system", "settings"] });
+    },
+    onError: (error, failedOrder) => {
+      setDraftOrder((current) => current?.join("|") === failedOrder.join("|") ? null : current);
+      toast.error(`侧边栏顺序保存失败：${getErrMsg(error)}`);
+    },
+  });
+
+  useEffect(() => {
+    setDraftOrder(null);
+  }, [savedOrder?.join("|")]);
+
+  const placeBefore = (path: string, targetPath: string) => {
+    if (path === targetPath) return;
+    const current = fullNavItems.map((item) => item.to);
+    const next = current.filter((item) => item !== path);
+    const targetIndex = next.indexOf(targetPath);
+    next.splice(targetIndex < 0 ? next.length : targetIndex, 0, path);
+    setDraftOrder(next);
+    saveOrder.mutate(next);
+  };
 
   return (
     <nav className="flex-1 space-y-1.5 overflow-y-auto px-4 py-3 text-sm">
       {navItems.map((item) => (
-        <NavLink
+        <div
           key={item.to}
-          to={item.to}
-          end={item.end}
-          onClick={onNavigate}
-          aria-label={collapsed ? item.label : undefined}
-          title={collapsed ? item.label : undefined}
-          className={({ isActive }) =>
-            cn(
-              "liquid-sidebar-link flex h-11 items-center gap-3 rounded-lg px-3 text-muted-foreground transition-all hover:text-accent-foreground",
-              collapsed && "justify-center px-0",
-              isActive && "liquid-sidebar-link-active text-accent-foreground",
-            )
-          }
+          className={cn("relative", draggedPath === item.to && "opacity-45")}
+          draggable={reorderable && !collapsed}
+          data-sidebar-sort-path={item.to}
+          onDragStart={(event) => {
+            setDraggedPath(item.to);
+            event.dataTransfer.effectAllowed = "move";
+            event.dataTransfer.setData("text/plain", item.to);
+          }}
+          onDragEnd={() => setDraggedPath(null)}
+          onDragOver={(event) => {
+            if (reorderable && draggedPath) event.preventDefault();
+          }}
+          onDrop={(event) => {
+            event.preventDefault();
+            const source = draggedPath || event.dataTransfer.getData("text/plain");
+            if (source) placeBefore(source, item.to);
+            setDraggedPath(null);
+          }}
         >
-          <item.icon className="h-5 w-5 shrink-0" />
-          <span className={cn("truncate", collapsed && "sr-only")}>{item.label}</span>
-        </NavLink>
+          {reorderable && !collapsed ? (
+            <GripVertical className="pointer-events-none absolute left-1.5 top-1/2 z-10 h-4 w-4 -translate-y-1/2 text-muted-foreground/55" />
+          ) : null}
+          <NavLink
+            to={item.to}
+            end={item.end}
+            onClick={onNavigate}
+            aria-label={
+              collapsed
+                ? item.badgeKey === "pending-actions" && pendingCount > 0
+                  ? `${item.label}（${pendingCount}）`
+                  : item.label
+                : undefined
+            }
+            title={collapsed ? item.label : undefined}
+            className={({ isActive }) =>
+              cn(
+                "liquid-sidebar-link relative flex h-11 items-center gap-3 rounded-lg px-3 text-muted-foreground transition-all hover:text-accent-foreground",
+                reorderable && !collapsed && "pl-7",
+                collapsed && "justify-center px-0",
+                isActive && "liquid-sidebar-link-active text-accent-foreground",
+              )
+            }
+          >
+            <item.icon className="h-5 w-5 shrink-0" />
+            <span className={cn("truncate", collapsed && "sr-only")}>{item.label}</span>
+            {item.badgeKey === "pending-actions" && pendingCount > 0 ? (
+              <span
+                className={cn(
+                  "inline-flex min-w-[1.15rem] items-center justify-center rounded-full bg-destructive px-1 text-[10px] font-medium leading-4 text-destructive-foreground",
+                  collapsed ? "absolute right-1 top-1" : "ml-auto",
+                )}
+              >
+                {pendingCount > 99 ? "99+" : pendingCount}
+              </span>
+            ) : null}
+          </NavLink>
+        </div>
       ))}
     </nav>
   );
@@ -113,9 +251,11 @@ function NavList({
 
 function SidebarBody({
   collapsed = false,
+  mobile = false,
   onNavigate,
 }: {
   collapsed?: boolean;
+  mobile?: boolean;
   onNavigate?: () => void;
 }) {
   const [changelogOpen, setChangelogOpen] = useState(false);
@@ -142,7 +282,7 @@ function SidebarBody({
           </div>
         </div>
       </div>
-      <NavList collapsed={collapsed} onNavigate={onNavigate} />
+      <NavList collapsed={collapsed} onNavigate={onNavigate} reorderable={!mobile} />
       <div
         className={cn(
           "liquid-sidebar-footer shrink-0 space-y-2 px-4 py-5 text-sm text-muted-foreground",
@@ -168,73 +308,43 @@ function SidebarBody({
             <button
               type="button"
               className={cn(
-                "truncate rounded-lg px-3 py-2 text-left text-xs font-medium text-muted-foreground transition hover:bg-accent hover:text-foreground",
-                collapsed && "px-0 text-center",
+                "liquid-sidebar-link flex h-11 w-full items-center gap-3 rounded-lg px-3 text-left text-muted-foreground transition hover:text-accent-foreground",
+                collapsed && "justify-center px-0",
               )}
+              aria-label="更新日志"
+              title="更新日志"
             >
-              {collapsed ? APP_VERSION_LABEL.replace(/^v/i, "") : APP_VERSION_LABEL}
+              <History className="h-5 w-5 shrink-0" />
+              <span className={cn("min-w-0 flex-1 truncate text-sm", collapsed && "sr-only")}>
+                更新日志
+              </span>
+              <span className={cn("shrink-0 text-xs font-medium", collapsed && "sr-only")}>
+                {APP_VERSION_LABEL}
+              </span>
             </button>
           </DropdownMenuTrigger>
-          <ChangelogMenu />
+          {changelogOpen ? (
+            <DropdownMenuContent
+              side={mobile ? "top" : "right"}
+              align={mobile ? "start" : "end"}
+              sideOffset={10}
+              collisionPadding={16}
+              className="max-h-[min(72vh,34rem)] w-[min(28rem,calc(100vw-2rem))] p-0"
+              style={{ overflowY: "auto" }}
+            >
+              <Suspense
+                fallback={
+                  <div className="p-4 text-sm text-muted-foreground">正在加载更新日志…</div>
+                }
+              >
+                <ChangelogMenu />
+              </Suspense>
+            </DropdownMenuContent>
+          ) : null}
         </DropdownMenu>
       </div>
     </>
   );
-}
-
-function ChangelogMenu() {
-  const sections = extractRecentChangelogSections(changelogRaw, 4);
-  return (
-    <DropdownMenuContent
-      side="right"
-      align="end"
-      sideOffset={10}
-      className="max-h-[min(72vh,34rem)] w-[min(28rem,calc(100vw-2rem))] p-0"
-      style={{ overflowY: "auto" }}
-    >
-      <div className="border-b px-4 py-3">
-        <div className="text-base font-semibold">更新日志</div>
-        <div className="mt-1 text-sm text-muted-foreground">
-          最近版本的主要变化，完整记录见仓库 CHANGELOG.md。
-        </div>
-      </div>
-      <div className="space-y-5 p-4">
-        {sections.length > 0 ? (
-          sections.map((sec) => (
-            <div key={sec.title}>
-              <div className="text-sm font-semibold">{sec.title}</div>
-              <article className="prose prose-sm mt-2 max-w-none text-sm text-muted-foreground dark:prose-invert">
-                <ReactMarkdown remarkPlugins={[remarkGfm]}>{sec.body}</ReactMarkdown>
-              </article>
-            </div>
-          ))
-        ) : (
-          <p className="text-sm text-muted-foreground">未解析到更新日志内容，请检查 CHANGELOG.md。</p>
-        )}
-      </div>
-    </DropdownMenuContent>
-  );
-}
-
-function extractRecentChangelogSections(md: string, limit: number): Array<{ title: string; body: string }> {
-  const lines = md.split(/\r?\n/);
-  const starts: Array<{ idx: number; title: string }> = [];
-  for (let i = 0; i < lines.length; i += 1) {
-    const m = lines[i].match(/^##\s+\[(.+?)\].*$/);
-    if (!m) continue;
-    const title = lines[i].replace(/^##\s+/, "").trim();
-    if (m[1].toLowerCase() === "unreleased") continue;
-    starts.push({ idx: i, title });
-  }
-  const out: Array<{ title: string; body: string }> = [];
-  for (let i = 0; i < starts.length && out.length < limit; i += 1) {
-    const begin = starts[i].idx + 1;
-    const end = i + 1 < starts.length ? starts[i + 1].idx : lines.length;
-    const body = lines.slice(begin, end).join("\n").trim();
-    if (!body) continue;
-    out.push({ title: starts[i].title, body });
-  }
-  return out;
 }
 
 // 桌面常驻侧栏：< md 隐藏，由 MobileSidebar 接管
@@ -285,7 +395,7 @@ export function MobileSidebar({ open, onOpenChange }: MobileSidebarProps) {
           >
             <X className="h-4 w-4" />
           </DialogPrimitive.Close>
-          <SidebarBody onNavigate={() => onOpenChange(false)} />
+          <SidebarBody mobile onNavigate={() => onOpenChange(false)} />
         </DialogPrimitive.Content>
       </DialogPrimitive.Portal>
     </DialogPrimitive.Root>

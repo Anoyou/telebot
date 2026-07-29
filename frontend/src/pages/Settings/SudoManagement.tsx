@@ -390,19 +390,19 @@ export function SudoManagement() {
             <div className="space-y-1.5">
               <div className="flex items-center justify-between gap-3">
                 <Label>允许的对话 ID（逗号分隔）</Label>
-                <label className="flex items-center gap-2 text-xs text-muted-foreground">
-                  <input
-                    type="checkbox"
+                <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                  <Switch
                     checked={form.allow_all_chats}
-                    onChange={(e) =>
+                    onCheckedChange={(checked) =>
                       setForm((f) => ({
                         ...f,
-                        allow_all_chats: e.target.checked,
+                        allow_all_chats: checked,
                       }))
                     }
+                    aria-label="允许所有对话"
                   />
                   允许所有对话
-                </label>
+                </div>
               </div>
               <Input
                 value={form.allowed_chat_ids}
@@ -425,19 +425,19 @@ export function SudoManagement() {
                     在下方指令卡片里点击即可启用/取消；已启用的卡片会高亮。
                   </p>
                 </div>
-                <label className="flex items-center gap-2 text-xs text-muted-foreground">
-                  <input
-                    type="checkbox"
+                <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                  <Switch
                     checked={form.allow_all_commands}
-                    onChange={(e) =>
+                    onCheckedChange={(checked) =>
                       setForm((f) => ({
                         ...f,
-                        allow_all_commands: e.target.checked,
+                        allow_all_commands: checked,
                       }))
                     }
+                    aria-label="允许所有指令"
                   />
                   允许所有指令
-                </label>
+                </div>
               </div>
             </div>
           </div>
@@ -503,7 +503,7 @@ export function SudoManagement() {
           </div>
 
           <p className="text-xs text-muted-foreground">
-            需要同时配置对话范围和指令范围；勾选“允许所有”才会授予全部权限。
+            需要同时配置对话范围和指令范围；开启“允许所有”才会授予全部权限。
           </p>
 
           <div className="flex gap-2">

@@ -9,19 +9,38 @@ from typing import Any
 from .context import ToolContext
 
 ReadHandler = Callable[[ToolContext, dict[str, Any]], Awaitable[Any]]
-PreviewHandler = Callable[[ToolContext, dict[str, Any]], Awaitable[dict[str, Any]]]
+
+
+@dataclass(frozen=True)
+class PreparedAction:
+    """Preview 可显式返回规范化后的 Action 参数，避免依赖原地修改入参。"""
+
+    arguments: dict[str, Any]
+    preview: dict[str, Any]
+
+
+PreviewHandler = Callable[
+    [ToolContext, dict[str, Any]], Awaitable[dict[str, Any] | PreparedAction]
+]
 ExecuteHandler = Callable[[ToolContext, dict[str, Any]], Awaitable[Any]]
 # 事务外预检（如 Provider 上游验证）；失败可保持 Action pending
 PrecheckHandler = Callable[[ToolContext, dict[str, Any]], Awaitable[Any]]
 
 
 class ActionKeepPendingError(Exception):
-    """预检失败：清除无效密文、Action 保持 pending，允许重新输入。"""
+    """预检失败：Action 保持 pending；只按明确声明清除已判无效的密文。"""
 
-    def __init__(self, message: str, *, code: str = "PRECHECK_FAILED") -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str = "PRECHECK_FAILED",
+        clear_secret_names: tuple[str, ...] = (),
+    ) -> None:
         super().__init__(message)
         self.code = code
         self.message = message
+        self.clear_secret_names = tuple(clear_secret_names)
 
 ROLE_ORDER = {"viewer": 0, "operator": 1, "admin": 2}
 
@@ -46,7 +65,14 @@ class ToolSpec:
     execute_handler: ExecuteHandler | None = None
     precheck_handler: PrecheckHandler | None = None
     secret_argument_names: tuple[str, ...] = ()
+    precheck_clear_secret_argument_names: tuple[str, ...] | None = None
+    allow_secret_input: bool = True
     runtime_effects: tuple[str, ...] = ()
+    # 仅当所有提交后副作用都可安全重复时才允许用户手动重试。
+    # 真实消息发送、规则立即执行、插件动作等非幂等操作必须关闭，
+    # 避免“副作用已成功、结果落库失败”时再次执行。
+    runtime_retryable: bool = True
+    diagnostic_safe: bool = False
     available: bool = True
     unavailable_reason: str | None = None
 
@@ -76,6 +102,11 @@ class ToolRegistry:
 
     def get(self, name: str) -> ToolSpec | None:
         return self._tools.get(name)
+
+    def unregister(self, name: str) -> bool:
+        """移除动态工具；不存在时返回 False。"""
+
+        return self._tools.pop(str(name), None) is not None
 
     def list_all(self) -> list[ToolSpec]:
         return list(self._tools.values())
@@ -113,6 +144,17 @@ class ToolRegistry:
                 and role_at_least(role, spec.min_role)
                 and spec.available
             )
+            source = "builtin"
+            plugin_key: str | None = None
+            if (
+                spec.name.startswith("plugin_")
+                and not spec.name.startswith("plugin_repos.")
+                and "." in spec.name
+            ):
+                source = "plugin"
+                # plugin_{key}.{tool}
+                rest = spec.name[len("plugin_") :]
+                plugin_key = rest.split(".", 1)[0]
             items.append(
                 {
                     "name": spec.name,
@@ -122,6 +164,8 @@ class ToolRegistry:
                     "risk": spec.risk,
                     "channels": list(spec.channels),
                     "available": allowed,
+                    "source": source,
+                    "plugin_key": plugin_key,
                     "unavailable_reason": None
                     if allowed
                     else (
@@ -158,6 +202,7 @@ def reset_registry_for_tests() -> None:
 
 __all__ = [
     "ActionKeepPendingError",
+    "PreparedAction",
     "ToolRegistry",
     "ToolSpec",
     "get_registry",

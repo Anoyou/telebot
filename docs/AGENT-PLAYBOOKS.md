@@ -38,14 +38,18 @@
    - `MINOR（次版本）`：用户可感知的新能力、主入口重组、新插件或重要工作流变化。
    - `PATCH（补丁版本）`：修复、文案、小 UI、测试、兼容性补丁。
    - 0.x 阶段：`0.X.0` 是阶段性能力版本，`0.X.Y` 是同阶段补丁，不把第三位当流水号。
-3. 同步更新四处版本号：
+3. 按分支选择版本线：
+   - 开发分支发布 beta 检查点，使用目标正式版本的 prerelease 版本，例如 `0.81.0-beta.1`；同一候选版本继续收口只递增 `beta.N`。
+   - beta 期间加入新的 minor 或 major 级变化时，提升基础版本并从 `-beta.1` 重新开始；补丁候选则提升 PATCH 后从 `-beta.1` 开始。
+   - `main` 只发布稳定版；beta 验证稳定并合入 `main` 后，去掉后缀发布相同基础版本，例如 `0.81.0-beta.3` 对应 `0.81.0`。
+4. 同步更新四处版本号：
    - `backend/app/__init__.py`
    - `backend/pyproject.toml`
    - `frontend/package.json`
    - `frontend/src/lib/version.ts`
-4. 用中文把 `CHANGELOG.md` 的 `Unreleased` 移到正式版本段落，只记录实际落地内容。
-5. Commit、PR、release 标题和正文使用中文。
-6. 发 tag 或 release 前，确认 tag 指向正确提交，不能指向旧 HEAD。
+5. 用中文把 `CHANGELOG.md` 的 `Unreleased` 移到 beta 或稳定版本段落，只记录实际落地内容。
+6. Commit、PR、release 标题和正文使用中文。
+7. 发 tag 或 release 前，确认 tag 指向正确提交，不能指向旧 HEAD。
 
 推荐验证：
 
@@ -128,8 +132,15 @@ git diff --check
 
 ```bash
 make status
+# 源码开发模式
 curl -fsS http://127.0.0.1:8000/healthz
 curl -fsS http://127.0.0.1:8000/readyz
+
+# Docker Compose 生产模式：web:8000 不暴露到宿主机
+PUBLISH_PORT="$(sed -n 's/^WEB_PORT_PUBLISH=//p' .env | tail -n1 | tr -d '"')"
+PUBLISH_PORT="${PUBLISH_PORT##*:}"
+curl -fsS "http://127.0.0.1:${PUBLISH_PORT:-80}/healthz"
+docker compose exec -T web python -c "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8000/readyz', timeout=5).read().decode())"
 docker compose ps
 docker compose logs --tail=100 web
 ```

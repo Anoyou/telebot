@@ -14,7 +14,7 @@
 
 | 变量 | 生产值 | 说明 |
 | --- | --- | --- |
-| `MASTER_KEY` | 32 字符强随机（`Fernet.generate_key()`） | 加密 session / api_hash / totp_secret，**丢了 = 所有 TG 账号要重登** |
+| `MASTER_KEY` | `Fernet.generate_key()` 生成的 URL-safe Base64 key（解码后 32 字节，文本通常 44 字符） | 加密 session / api_hash / totp_secret，**丢了 = 所有 TG 账号要重登** |
 | `JWT_SECRET` | 至少 64 字符强随机（`secrets.token_urlsafe(64)`） | 一旦泄露，攻击者可签发任意用户 token |
 | `COOKIE_SECURE` | `true` | 必须，前端走 HTTPS；不开则浏览器不带 Secure 标 |
 | `TRUST_FORWARDED_FOR` | `true` 仅当部署在 nginx/traefik 后；否则 `false` | 错配会让攻击者通过伪造头绕过登录限速 |
@@ -87,27 +87,42 @@ python -m app.scripts.rekey --old "$OLD_MASTER_KEY" --new "$NEW_MASTER_KEY" --dr
 python -m app.scripts.rekey --old "$OLD_MASTER_KEY" --new "$NEW_MASTER_KEY"
 ```
 
-覆盖字段：账号 API ID/API Hash/session、代理密码、LLM API Key、通知 Bot Token、账号 Bot Token、
-Web TOTP secret，以及 `account_bot_transfer_notice:*` 内的交互/转账 Bot Token和
-`account_webhooks:*` 内的 Webhook Token。旧版 `account_webhooks:*` 明文 `token` 会在重钥时直接迁移为新密钥加密的 `token_enc`。
+覆盖字段：账号 API ID/API Hash/session、代理密码、LLM API Key 与兼容请求头、通知 Bot Token、
+账号 Bot Token、Web TOTP secret、插件仓库凭据、System Agent 待确认 Action 的敏感参数，
+以及 `account_bot_transfer_notice:*` 内的交互/转账 Bot Token和
+`account_webhooks:*` 内的 Webhook Token。脚本还会递归重加密账号插件配置和全局插件配置中的
+`secret:v1:` 密文。历史 `account_webhooks:*` 明文 `token` 会在重钥时直接迁移为新密钥加密的
+`token_enc`。
 
 **风险范围**：中低。计划内轮换可平滑完成；若确认 `MASTER_KEY` 与数据库备份同时泄露，
 攻击者可能已解开旧密文，仍需按 §3.3 评估是否强制重绑账号与轮换第三方 token。
 
-### 2.3 pending_totp 已迁到 Redis
+#### 0.86 beta 兼容请求头轮换
 
-**现状**：登录第一步通过后，后端在 Redis 中写入 5 分钟 TTL 的 `auth:pending_totp:*`
-挂起状态，cookie 只保存随机 token；第二步用 token 换正式 JWT。旧实现残留的 `pending_totp`
-cookie 会在新流程中主动清理。
+`0.86.0-beta.1` 至 `0.86.0-beta.8` 允许在 System Agent 聊天中描述 Provider
+兼容请求头，部分非 Token 形态的 header value 可能进入助手会话或 AI 近期调用预览。
+从 `0.86.0-beta.9` 起，聊天中的自定义请求头配置会整段替换为安全提示，值只能在
+「AI → Provider 设置」中填写；上游错误回显也会按当前调用的全部 header value 脱敏。
 
-**风险**：5 分钟窗口内若用户机器被劫持（恶意浏览器扩展 / 物理接触），攻击者仍可能复用该
-token，但服务端 TTL 和 Redis 删除让窗口更短，也便于主动作废。
+曾使用上述 beta 且在聊天里粘贴过请求头值时，升级前后必须在上游服务重新生成并轮换
+这些值，并删除对应 System Agent 会话。旧数据库与备份应继续按敏感材料保存；轮换后其中
+残留的旧值已经失效，但不应公开或交给不受信任的第三方。
 
-**缓解**：
-- HttpOnly：JS 偷不到（要绕需要更深层的浏览器漏洞）。
-- SameSite=Lax：阻断 CSRF。
-- 5 分钟 TTL：远小于一次正常登录耗时。
-- Redis 端保存状态：cookie 不再承载用户名和已通过密码标志。
+### 2.3 TOTP 绑定密钥暂存
+
+**现状**：`auth:pending_totp:{user_id}` 只用于绑定新的 TOTP 密钥。调用
+`/api/auth/totp/enable` 后，待验证 secret 在 Redis 中保存 5 分钟；调用
+`/api/auth/totp/verify` 验证成功后才加密写入 `web_user.totp_secret_enc`，随后删除 Redis
+记录。浏览器不会保存待绑定 secret 的状态 token，旧实现残留的 `pending_totp` cookie 会被主动清理。
+
+登录时没有“第一步 token 换 JWT”流程。需要 TOTP 时，前端会再次提交用户名、密码和
+`totp_code`；只有通知 Bot 登录验证码使用独立的 `otp_token`。因此排查登录问题时，不要把
+`auth:pending_totp:*` 当成登录会话或全局会话撤销入口。
+
+**风险与缓解**：
+- 待绑定 secret 只在 Redis 保存 5 分钟，验证成功或过期后失效。
+- TOTP 绑定、验证和登录写请求仍受登录态、CSRF header gate 与 double-submit token 保护。
+- Redis 不可用时绑定流程失败，不会把未验证 secret 写入数据库。
 
 ### 2.4 登录安全套件：通知 Bot OTP、TOTP 与服务器恢复码
 
@@ -140,7 +155,7 @@ docker compose exec web python -m app.scripts.auth_recovery --username admin --t
 
 「系统设置 → 配置备份」勾选敏感字段后，后端会重新验证当前密码；账号已绑定 TOTP 时，还必须提供有效动态验证码。普通非敏感导出不要求二次验证。导出文件可能包含 Telegram session、API Hash、Bot Token、LLM Key 和代理密码，下载后应立即移入受控存储，不要留在浏览器默认下载目录或聊天软件中。
 
-入站 Webhook Token 使用 `MASTER_KEY` 加密保存在 `account_webhooks:*` 系统设置中；0.60.3 及更早版本留下的明文会在认证后的管理访问、成功鉴权的投递请求或 `rekey` 时迁移。接口默认只从 `X-TelePilot-Webhook-Token` 请求头读取账号 token。`?token=` 查询参数只有在 `WEBHOOK_ALLOW_QUERY_TOKEN=true` 时才兼容，生产环境应保持关闭。迁移旧调用方时，先改客户端发送请求头，再关闭兼容开关并检查反代访问日志中是否残留旧 token。
+入站 Webhook Token 使用 `MASTER_KEY` 加密保存在 `account_webhooks:*` 系统设置中；历史明文记录会在认证后的管理访问、成功鉴权的投递请求或 `rekey` 时迁移。接口默认只从 `X-TelePilot-Webhook-Token` 请求头读取账号 token。`?token=` 查询参数只有在 `WEBHOOK_ALLOW_QUERY_TOKEN=true` 时才兼容，生产环境应保持关闭。迁移旧调用方时，先改客户端发送请求头，再关闭兼容开关并检查反代访问日志中是否残留旧 token。
 
 公开投递在查询账号和配置前先按可信客户端 IP 执行独立 Redis 限流；超过入口阈值返回 `WEBHOOK_INGRESS_RATE_LIMITED`，Redis 不可用时返回 `WEBHOOK_RATE_LIMIT_UNAVAILABLE` 并 fail-closed。Token 通过后仍会继续执行账号级 `webhook_deliver` 风控，两个限流层不能互相替代。
 
@@ -163,35 +178,43 @@ docker compose exec web python -m app.scripts.auth_recovery --username admin --t
 ### 3.1 怀疑某管理员账号被攻陷
 
 ```bash
-# 1. 让对方立刻下线
-curl -X POST https://<host>/api/auth/logout -H "Cookie: ..."   # 当前 session
+# 1. 停止公网入口或把站点切到维护模式，避免攻击者继续操作
 
-# 2. 强制改 password_hash 让现有 JWT 失效（等到 JWT 过期或重启服务）
-psql "$DATABASE_URL" <<SQL
-UPDATE web_user SET password_hash = '!INVALIDATED' WHERE username = '<目标>';
+# 2. 在同一事务中使密码失效并递增 pwd_version，让该用户已签发的 JWT 立即失效
+docker compose exec -T postgres sh -lc \
+  'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"' <<'SQL'
+BEGIN;
+UPDATE web_user
+SET password_hash = '!INVALIDATED',
+    pwd_version = pwd_version + 1
+WHERE username = '<目标>';
+COMMIT;
 SQL
 
 # 3. 翻审计日志看异常操作
-psql "$DATABASE_URL" -c "
+docker compose exec -T postgres sh -lc \
+  'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"' <<'SQL'
   SELECT ts, action, target, detail FROM audit_log
   WHERE user_id = (SELECT id FROM web_user WHERE username='<目标>')
-  ORDER BY ts DESC LIMIT 200;"
+  ORDER BY ts DESC LIMIT 200;
+SQL
 
 # 4. 若该账号曾绑定 TOTP，建议同时让管理员重新生成 secret
+# 5. 若无法确认受影响用户范围，轮换 JWT_SECRET 并重启 web，使全部 Web JWT 失效
 ```
+
+`POST /api/auth/logout` 只清除发起请求的浏览器 Cookie，而且受 CSRF header gate 和
+double-submit token 保护，不能用来撤销攻击者持有的其它 JWT。单纯修改 `password_hash` 或重启
+服务也不会让已有 JWT 失效；必须递增对应用户的 `pwd_version`，或紧急轮换 `JWT_SECRET`。
 
 ### 3.2 怀疑某 TG 账号 session 被盗
 
-```bash
-# 1. UI：账号详情 → 暂停（防止机器人继续主动发消息）
-curl -X POST https://<host>/api/accounts/<aid>/pause
-
-# 2. 让 worker 在 TG 端撤销这个 session
-#    最稳的做法是删账号；删的过程会调用 client.log_out()
-curl -X DELETE https://<host>/api/accounts/<aid>
-
-# 3. 用户重新走 /accounts/new 绑定向导，会签发一个新 session 字符串
-```
+1. 在 Web「账号详情」立即暂停账号，阻止 Worker 继续执行主动消息和插件副作用。
+2. 确认需要撤销当前 Telegram session 后，在 Web 删除该账号；删除流程会尽力调用
+   `client.log_out()` 撤销当前 session。不要直接复制不带认证和 CSRF token 的 `curl` 写请求，
+   它们会被后端拒绝。
+3. 在 Telegram 官方客户端检查并终止未知活动会话，避免只依赖 TelePilot 的 best-effort 注销。
+4. 用户重新走账号绑定向导，生成新的 session。
 
 ### 3.3 .env 泄露 / MASTER_KEY 泄露
 
@@ -222,30 +245,46 @@ docker compose run --rm web python -m app.scripts.rekey \
   --old '<旧 MASTER_KEY>' \
   --new '<新 MASTER_KEY>'
 
-# 6. 编辑 .env：用新值覆盖 MASTER_KEY、JWT_SECRET、POSTGRES_PASSWORD
+# 6. 若 .env 泄露，同时在数据库内轮换 PostgreSQL 角色密码。
+#    把角色名和新密码替换为当前 .env 的实际值；密码含单引号时先按 PostgreSQL 规则转义。
+docker compose exec -T postgres sh -lc \
+  'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"' <<'SQL'
+ALTER USER telebot WITH PASSWORD '<新 POSTGRES_PASSWORD>';
+SQL
+
+# 7. 编辑 .env：覆盖 MASTER_KEY、JWT_SECRET、UPDATER_TOKEN、POSTGRES_PASSWORD，
+#    并同步更新 DATABASE_URL 中 URL 编码后的数据库密码
 vi .env
 chmod 600 .env
 
-# 7. 如果确认 DB + MASTER_KEY 已同时泄露，重钥后还要让所有 TG 账号重新走绑定向导。
+# 8. 如果确认 DB + MASTER_KEY 已同时泄露，重钥后还要让所有 TG 账号重新走绑定向导。
 #    否则可跳过这一步。两条路径任选：
 #
 #    A) 全清重来（推荐，最干净）：
-psql "$DATABASE_URL" -c "TRUNCATE account, audit_log, runtime_log, rate_limit_event CASCADE;"
+docker compose exec -T postgres sh -lc \
+  'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"' <<'SQL'
+TRUNCATE account, audit_log, runtime_log, rate_limit_event CASCADE;
+SQL
 #
 #    B) 保留账号元信息，只清 session：
-psql "$DATABASE_URL" -c "UPDATE account
-  SET session_enc='', api_id_enc='', api_hash_enc='', status='login_required';"
+docker compose exec -T postgres sh -lc \
+  'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"' <<'SQL'
+UPDATE account
+SET session_enc='', api_id_enc='', api_hash_enc='', status='login_required';
+SQL
 
-# 8. JWT_SECRET 已换 → 所有 web 用户的 cookie 自动失效，下次登录强制重输密码
+# 9. JWT_SECRET 已换 → 所有 web 用户的 cookie 自动失效，下次登录强制重输密码
 
-# 9. 写一条入侵审计
-psql "$DATABASE_URL" -c "
+# 10. 写一条入侵审计
+docker compose exec -T postgres sh -lc \
+  'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"' <<'SQL'
   INSERT INTO audit_log (ts, user_id, action, target, detail)
   VALUES (now(), NULL, 'security.master_key_rotated', 'system',
-          '{\"reason\":\"<事件说明>\"}'::jsonb);"
+          '{"reason":"<事件说明>"}'::jsonb);
+SQL
 
-# 10. 启服
-docker compose start
+# 11. 重建容器以重新读取 .env；docker compose start/restart 不会刷新容器环境变量
+docker compose up -d --force-recreate
 ```
 
 ### 3.4 数据库泄露但 MASTER_KEY 没泄露
@@ -253,12 +292,17 @@ docker compose start
 DB 里 session/api_hash/totp_secret 都是 Fernet 密文，**只要 MASTER_KEY 没一起泄**就还能用。
 
 ```bash
-# 1. 把所有管理员账号强制重置（防止密码哈希被离线撞）
-psql "$DATABASE_URL" -c "UPDATE web_user SET password_hash='!INVALIDATED';"
+# 1. 把所有管理员账号强制重置，并递增 pwd_version 撤销现有 JWT
+docker compose exec -T postgres sh -lc \
+  'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"' <<'SQL'
+UPDATE web_user
+SET password_hash = '!INVALIDATED',
+    pwd_version = pwd_version + 1;
+SQL
 
 # 2. 紧急轮换 JWT_SECRET（让现存 cookie 全失效）
 sed -i.bak 's/^JWT_SECRET=.*/JWT_SECRET=<新值>/' .env
-docker compose restart web
+docker compose up -d --no-deps --force-recreate web
 
 # 3. 立刻确认 MASTER_KEY 没在同一个泄露包里；若同泄 → 走 §3.3
 ```
@@ -281,7 +325,7 @@ Web 顶部总闸和 `POST /api/system/kill-switch` 会先保存目标状态，�
 ```bash
 docker compose ps
 docker compose logs --tail=200 web
-curl -fsS https://<host>/readyz
+docker compose exec -T web python -c "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8000/readyz', timeout=5).read().decode())"
 ```
 
 Redis 或数据库异常时，Worker 和 Bot runtime 的关键副作用路径按 fail-closed 处理；仍应确认异常子进程已经退出。恢复总闸前先修复依赖，确认 `/readyz` 正常，再重新启用。
@@ -292,12 +336,26 @@ Redis 或数据库异常时，Worker 和 Bot runtime 的关键副作用路径按
 
 | 频率 | 检查项 | 命令 / 位置 |
 | --- | --- | --- |
-| 每天 | `audit_log` 是否有异常 action（login fail 集中、`account.delete`、`humanize.update` 异常） | `psql -c "SELECT ... FROM audit_log WHERE ts > now()-interval '1 day' AND action LIKE '%fail%';"` |
+| 每天 | `audit_log` 是否有异常 action（login fail 集中、`account.delete`、`humanize.update` 异常） | 使用下方容器内查询，按实际异常 action 调整过滤条件 |
 | 每周 | 备份还原演练（在隔离机器） | `bash deploy/backup.sh && bash deploy/restore.sh` |
 | 按需 | 插件 lint 规则升级后或完成批量插件迁移后，跑一次存量回填 | `python -m app.scripts.lint_existing_plugins --dry-run`（确认 diff）→ `python -m app.scripts.lint_existing_plugins` |
-| 每天 | 有 `payout` 玩法时，看是否出现放弃（abandoned）的补偿单：收款成功但发奖失败，需人工补发（见 §7.2） | `psql -c "SELECT id, account_id, chat_id, amount, error_code_last, updated_at FROM payout_compensation WHERE status='abandoned' ORDER BY updated_at DESC LIMIT 50;"` |
+| 每天 | 有 `payout` 玩法时，看是否出现放弃（abandoned）的补偿单：收款成功但发奖失败，需人工补发（见 §7.2） | 使用 §7.2 的容器内查询，检查 `status='abandoned'` 的记录 |
 | 每月 | 跑一次 `bash deploy/backup-keys.sh`，更新异地 .gpg | 把旧 .gpg 销毁前确认新 .gpg 能成功解密 |
-| 每季 | 复盘是否仍接受 §2 中三项风险；V1.5 来了就按计划修 | 在本文件末尾加 changelog |
+| 每季 | 复盘 §2 的已知风险、默认开关与应急命令是否仍和当前代码一致 | 对照认证、加密、Webhook、插件安装和资金链路代码更新本文 |
+
+常用审计查询：
+
+```bash
+docker compose exec -T postgres sh -lc \
+  'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"' <<'SQL'
+SELECT ts, action, target, detail
+FROM audit_log
+WHERE ts > now() - interval '1 day'
+  AND (action LIKE '%fail%' OR action IN ('account.delete', 'humanize.update'))
+ORDER BY ts DESC
+LIMIT 200;
+SQL
+```
 
 ---
 
@@ -387,20 +445,13 @@ YYYY-MM-DD HH:MM UTC
 **巡检**：定期查放弃的补偿单，这些是“对方钱已到 / 群里已确认，但发奖没发出去”需人工补发的场景：
 
 ```bash
-psql "$DATABASE_URL" -c "
+docker compose exec -T postgres sh -lc \
+  'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"' <<'SQL'
   SELECT id, account_id, chat_id, amount, error_code_last, retry_count, updated_at
   FROM payout_compensation
   WHERE status='abandoned'
-  ORDER BY updated_at DESC LIMIT 50;"
+  ORDER BY updated_at DESC LIMIT 50;
+SQL
 ```
 
 插件作者视角的对应约定见 [PLUGIN-API-REFERENCE](./PLUGIN-API-REFERENCE.md) 的 `payout` 语义段。
-
----
-
-## Changelog
-
-- **2026-07-13**：同步敏感导出二次验证、Webhook 请求头 token、ZIP 插件双开关、全局总闸收敛，以及 payout fail-closed 和 ambiguous 核对语义。
-- **2026-07-09** —— 新增 §7 收付款风控与补偿：payout 限额（风控与预算卡片 `payout_limits`，默认 0 不限）与失败自动补偿（`payout_compensation` 重放 + abandoned 放弃告警）运维说明，§4 巡检加放弃补偿单查询。
-- **2026-05-06** —— Sprint 4 Wave 3：开源向润色，新增应急响应工单模板。
-- **2026-05-03** —— Sprint 2 #1：初稿，覆盖一次性配置、三项已知接受风险、五条应急 SOP。

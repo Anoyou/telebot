@@ -62,7 +62,11 @@ async def list_repo_plugins(ctx: ToolContext, args: dict[str, Any]) -> dict[str,
     if repo_id in (None, ""):
         return {"error": "repo_id_required", "message": "需要 repo_id"}
     try:
-        plugins = await svc.list_plugins_in_repo(ctx.db, int(repo_id))
+        plugins = await svc.list_plugins_in_repo(
+            ctx.db,
+            int(repo_id),
+            force_refresh=bool(args.get("force_refresh")),
+        )
     except Exception as exc:  # noqa: BLE001
         return {"error": "list_failed", "message": _err(exc)}
     return {
@@ -70,6 +74,13 @@ async def list_repo_plugins(ctx: ToolContext, args: dict[str, Any]) -> dict[str,
         "count": len(plugins),
         "plugins": [_plugin_in_repo_view(p) for p in plugins],
     }
+
+
+async def refresh_repo_plugins(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
+    result = await list_repo_plugins(ctx, {**args, "force_refresh": True})
+    if "error" not in result:
+        result["refreshed"] = True
+    return result
 
 
 async def list_official(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
@@ -121,6 +132,76 @@ async def create_repo_execute(ctx: ToolContext, args: dict[str, Any]) -> dict[st
     return {"repo": _repo_view(row), "business_changed": True}
 
 
+async def credential_preview(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
+    from ....services import plugin_repo_service as svc
+
+    repo_id = int(args.get("repo_id") or args.get("id"))
+    row = await svc.get_repo(ctx.db, repo_id)
+    clear = bool(args.get("clear")) or str(args.get("auth_type") or "").lower() in {
+        "none",
+        "public",
+    }
+    return {
+        "summary": f"{'清除' if clear else '更新'}插件仓库 #{repo_id} 的访问凭据",
+        "repo": _repo_view(row),
+        "target_auth_type": "none" if clear else (args.get("auth_type") or "github_token"),
+        "has_new_token": bool(args.get("token") or args.get("credential")),
+        "warning": "新凭据只会加密保存，不会在结果中回显。",
+    }
+
+
+async def credential_execute(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
+    from ....services import plugin_repo_service as svc
+
+    repo_id = int(args.get("repo_id") or args.get("id"))
+    clear = bool(args.get("clear")) or str(args.get("auth_type") or "").lower() in {
+        "none",
+        "public",
+    }
+    token = None if clear else (args.get("token") or args.get("credential"))
+    if not clear and not str(token or "").strip():
+        raise ValueError("更新私有仓库凭据需要 token；清除凭据请传 clear=true")
+    try:
+        row = await svc.update_repo_credential(
+            ctx.db,
+            repo_id,
+            auth_type="none" if clear else str(args.get("auth_type") or "github_token"),
+            token=None if clear else str(token),
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise ValueError(_err(exc)) from None
+    return {"repo": _repo_view(row), "business_changed": True}
+
+
+async def bulk_update_preview(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
+    from ....services import plugin_repo_service as svc
+
+    repo_id = int(args.get("repo_id") or args.get("id"))
+    row = await svc.get_repo(ctx.db, repo_id)
+    plugins = await svc.list_plugins_in_repo(ctx.db, repo_id, force_refresh=True)
+    updates = [item for item in plugins if bool(getattr(item, "update_available", False))]
+    return {
+        "summary": f"更新仓库 #{repo_id} 中 {len(updates)} 个已安装插件",
+        "repo": _repo_view(row),
+        "updates": [_plugin_in_repo_view(item) for item in updates],
+        "warning": "危险：会替换本机已安装插件文件，并让 Worker 重新加载；不会自动修改插件配置。",
+    }
+
+
+async def bulk_update_execute(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
+    from ....services import plugin_repo_service as svc
+
+    repo_id = int(args.get("repo_id") or args.get("id"))
+    row = await svc.get_repo(ctx.db, repo_id)
+    return {
+        "repo_id": repo_id,
+        "repo_name": row.name,
+        "requested": True,
+        "business_changed": False,
+        "note": "Action 提交后执行批量更新并记录逐插件结果。",
+    }
+
+
 async def delete_repo_preview(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
     from ....services import plugin_repo_service as svc
 
@@ -138,12 +219,23 @@ async def delete_repo_execute(ctx: ToolContext, args: dict[str, Any]) -> dict[st
 
     repo_id = int(args.get("repo_id") or args.get("id"))
     try:
-        ok = await svc.delete_repo(ctx.db, repo_id)
+        row = await svc.get_repo(ctx.db, repo_id)
+        repo_url = str(row.url)
+        ok = await svc.delete_repo(ctx.db, repo_id, remove_cache=False)
     except Exception as exc:  # noqa: BLE001
         raise ValueError(_err(exc)) from None
     if not ok:
         raise ValueError(f"插件仓库 #{repo_id} 不存在或已删除")
-    return {"id": repo_id, "deleted": True, "business_changed": True}
+    if ctx.action is not None:
+        stored = dict(ctx.action.arguments or {})
+        stored["repo_url"] = repo_url
+        ctx.action.arguments = stored
+    return {
+        "id": repo_id,
+        "repo_url": repo_url,
+        "deleted": True,
+        "business_changed": True,
+    }
 
 
 async def install_from_repo_preview(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
@@ -205,7 +297,26 @@ async def install_from_repo_execute(ctx: ToolContext, args: dict[str, Any]) -> d
 def register(registry: ToolRegistry) -> None:
     registry.register(
         ToolSpec(
+            name="plugin_repos.refresh",
+            channels=("web",),
+            description="强制刷新插件仓库缓存并返回最新插件目录。",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "repo_id": {"type": "integer"},
+                    "id": {"type": "integer"},
+                },
+                "additionalProperties": False,
+            },
+            read_only=True,
+            min_role="viewer",
+            read_handler=refresh_repo_plugins,
+        )
+    )
+    registry.register(
+        ToolSpec(
             name="plugin_repos.list",
+            channels=("web",),
             description="列出已保存的插件远程仓库（不含凭据明文）。",
             input_schema={"type": "object", "properties": {}, "additionalProperties": False},
             read_only=True,
@@ -216,10 +327,15 @@ def register(registry: ToolRegistry) -> None:
     registry.register(
         ToolSpec(
             name="plugin_repos.list_plugins",
+            channels=("web",),
             description="浏览某个仓库内的插件列表。",
             input_schema={
                 "type": "object",
-                "properties": {"repo_id": {"type": "integer"}, "id": {"type": "integer"}},
+                "properties": {
+                    "repo_id": {"type": "integer"},
+                    "id": {"type": "integer"},
+                    "force_refresh": {"type": "boolean"},
+                },
                 "additionalProperties": False,
             },
             read_only=True,
@@ -229,7 +345,33 @@ def register(registry: ToolRegistry) -> None:
     )
     registry.register(
         ToolSpec(
+            name="plugin_repos.update_credential",
+            channels=("web",),
+            description="更新或清除已保存插件仓库的加密访问凭据。",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "repo_id": {"type": "integer"},
+                    "id": {"type": "integer"},
+                    "auth_type": {"type": "string"},
+                    "token": {"type": "string"},
+                    "credential": {"type": "string"},
+                    "clear": {"type": "boolean"},
+                },
+                "additionalProperties": False,
+            },
+            read_only=False,
+            min_role="admin",
+            risk="normal",
+            secret_argument_names=("token", "credential"),
+            preview_handler=credential_preview,
+            execute_handler=credential_execute,
+        )
+    )
+    registry.register(
+        ToolSpec(
             name="plugin_repos.list_official",
+            channels=("web",),
             description="列出官方/推荐插件目录。",
             input_schema={"type": "object", "properties": {}, "additionalProperties": False},
             read_only=True,
@@ -239,7 +381,30 @@ def register(registry: ToolRegistry) -> None:
     )
     registry.register(
         ToolSpec(
+            name="plugin_repos.update_installed",
+            channels=("web",),
+            description="批量更新指定仓库中已有新版本的已安装插件。",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "repo_id": {"type": "integer"},
+                    "id": {"type": "integer"},
+                },
+                "additionalProperties": False,
+            },
+            read_only=False,
+            min_role="admin",
+            risk="dangerous",
+            preview_handler=bulk_update_preview,
+            execute_handler=bulk_update_execute,
+            runtime_effects=("plugin_repo_bulk_update",),
+            runtime_retryable=False,
+        )
+    )
+    registry.register(
+        ToolSpec(
             name="plugin_repos.create",
+            channels=("web",),
             description="添加插件远程仓库。私有仓库可带 credential/token（会加密保存）。",
             input_schema={
                 "type": "object",
@@ -265,6 +430,7 @@ def register(registry: ToolRegistry) -> None:
     registry.register(
         ToolSpec(
             name="plugin_repos.delete",
+            channels=("web",),
             description="删除已保存的插件仓库索引（不卸载已安装插件）。",
             input_schema={
                 "type": "object",
@@ -276,11 +442,13 @@ def register(registry: ToolRegistry) -> None:
             risk="dangerous",
             preview_handler=delete_repo_preview,
             execute_handler=delete_repo_execute,
+            runtime_effects=("plugin_repo_cache_cleanup",),
         )
     )
     registry.register(
         ToolSpec(
             name="plugin_repos.install_plugin",
+            channels=("web",),
             description="从已保存仓库或官方库安装插件。official=true 时走官方目录。",
             input_schema={
                 "type": "object",

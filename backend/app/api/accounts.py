@@ -192,7 +192,11 @@ async def clone_config(
 ) -> dict[str, int | bool]:
     """从 ``req.from_account_id`` 复制 features+rules 到 aid。"""
     stats = await account_service.clone_config(
-        db, src_aid=req.from_account_id, dst_aid=aid, features=req.features or None
+        db,
+        src_aid=req.from_account_id,
+        dst_aid=aid,
+        features=req.features or None,
+        web_user_id=int(user.id),
     )
     await audit.write(
         db,

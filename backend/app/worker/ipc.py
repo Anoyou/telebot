@@ -63,6 +63,8 @@ CMD_RUN_INTERACTION_ENTRY = "run_interaction_entry"
 CMD_RUN_INTERACTION_ACTION = "run_interaction_action"
 CMD_DISPATCH_SIMULATE = "dispatch_simulate"  # WP4：命中调试模拟预埋
 CMD_WEBHOOK_DELIVER = "webhook_deliver"      # WP7：入站 Webhook 投递预埋
+# RPC：System Agent 调用插件暴露的只读 agent_tools
+CMD_AGENT_PLUGIN_TOOL = "agent_plugin_tool"
 
 # ── 事件类型（worker→主） ──────────────────────────────────────
 EVT_STATUS = "status"                      # payload: {status: active|paused|...}
@@ -117,6 +119,7 @@ async def publish_cmd_with_ack(
     type_: str,
     *,
     timeout: float = 2.0,
+    ack_validator: Any | None = None,
     **payload: Any,
 ) -> bool:
     """发布 worker 指令并等待可选 ACK。
@@ -144,7 +147,9 @@ async def publish_cmd_with_ack(
                 continue
             ack = IPCMessage.decode(msg["data"])
             if ack.type == EVT_ACK and ack.payload.get("cmd_id") == cmd_id:
-                return bool(ack.payload.get("ok", False))
+                if not bool(ack.payload.get("ok", False)):
+                    return False
+                return bool(ack_validator(ack.payload)) if ack_validator is not None else True
         return False
     except TimeoutError:
         return False

@@ -40,6 +40,11 @@ from ..schemas.command import (
     LLMProviderUpdate,
 )
 from ..services.llm_identity import validate_identity_for_save
+from ..services.llm_request_headers import (
+    RequestHeaderConfigError,
+    encrypt_request_headers,
+    request_header_summaries,
+)
 from ..worker.ipc import CMD_RELOAD_COMMANDS, publish_cmd_with_ack
 
 log = logging.getLogger(__name__)
@@ -319,6 +324,9 @@ def _provider_to_out(row: LLMProvider) -> LLMProviderOut:
         proxy_id=getattr(row, "proxy_id", None),
         # 候选模型清单
         models=list(getattr(row, "models", None) or []),
+        request_headers=request_header_summaries(
+            getattr(row, "request_headers_enc", None)
+        ),
         created_at=row.created_at,
     )
 
@@ -385,11 +393,17 @@ async def create_provider(
     if identity_error:
         raise _err("LLM_PROVIDER_IDENTITY_INVALID", identity_error, 422)
 
+    try:
+        request_headers_enc = encrypt_request_headers(payload.request_headers)
+    except RequestHeaderConfigError as exc:
+        raise _err("LLM_PROVIDER_REQUEST_HEADERS_INVALID", str(exc), 422) from None
+
     row = LLMProvider(
         name=payload.name,
         provider=payload.provider,
         # 空字符串视同未设置（避免存空 token 让 fernet 误判）
         api_key_enc=encrypt_str(payload.api_key) if payload.api_key else None,
+        request_headers_enc=request_headers_enc,
         base_url=payload.base_url,
         default_model=payload.default_model,
         api_format=payload.api_format,
@@ -501,6 +515,15 @@ async def update_provider(
             row.api_key_enc = None
         else:
             row.api_key_enc = encrypt_str(v)
+
+    if "request_headers" in data and data["request_headers"] is not None:
+        try:
+            row.request_headers_enc = encrypt_request_headers(
+                data["request_headers"],
+                existing_token=getattr(row, "request_headers_enc", None),
+            )
+        except RequestHeaderConfigError as exc:
+            raise _err("LLM_PROVIDER_REQUEST_HEADERS_INVALID", str(exc), 422) from None
 
     await db.flush()
     return _provider_to_out(row)

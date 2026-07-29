@@ -22,6 +22,13 @@ _RETRY_REFERENCES = frozenset(
         "重新试",
         "重新试试",
         "重新尝试",
+        "再来一次",
+        "重跑",
+        "再执行一次",
+        "重试刚才的",
+        "retry",
+        "tryagain",
+        "continue",
     }
 )
 

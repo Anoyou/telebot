@@ -113,21 +113,21 @@ export function HealthDot({ compact = false }: { compact?: boolean }) {
           variant="outline"
           size="sm"
           className={cn(
-            "h-10 rounded-full bg-card text-xs shadow-sm hover:bg-card hover:shadow-md",
-            compact ? "w-10 px-0" : "w-10 px-0 sm:w-auto sm:gap-2 sm:px-3",
+            "rounded-full bg-card text-[11px] shadow-sm hover:bg-card hover:shadow-md active:scale-95 motion-reduce:transform-none",
+            compact ? "h-9 w-9 px-0" : "h-7 w-7 px-0 sm:w-auto sm:gap-1.5 sm:px-2.5",
           )}
           title={`系统状态：${label}`}
           aria-label={`系统状态：${label}`}
         >
           {tone === "loading" ? (
-            <Spinner className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
+            <Spinner className="h-3 w-3 animate-spin text-muted-foreground" />
           ) : (
             <span
-              className={cn("inline-block h-2.5 w-2.5 rounded-full", cls)}
+              className={cn("inline-block h-2 w-2 rounded-full", cls)}
               aria-label={label}
             />
           )}
-          {compact ? null : <span className="hidden text-xs sm:inline">{label}</span>}
+          {compact ? null : <span className="hidden text-[11px] sm:inline">{label}</span>}
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent

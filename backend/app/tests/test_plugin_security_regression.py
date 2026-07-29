@@ -21,6 +21,7 @@ import pytest
 
 from app.db.models.feature import FEATURE_STATE_DISABLED, AccountFeature, Feature
 from app.db.models.plugin import InstalledPlugin
+from app.db.models.plugin_global_config import PluginGlobalConfig
 from app.db.models.plugin_repo import PluginRepo
 from app.db.models.remote_plugin import RemotePlugin
 from app.services import plugin_repo_service as repo_svc
@@ -501,6 +502,39 @@ class TestSandboxClientSecurity:
         sandbox = SandboxClient(FakeClient(), ["forward_message"], plugin_key="demo")
         assert callable(sandbox.forward_messages)
 
+    @pytest.mark.asyncio
+    async def test_sandbox_unpin_message_requires_delete_permission_and_records_trace(self, monkeypatch):
+        """取消置顶属于消息清理能力，并且必须留下 event_action。"""
+        from app.worker.plugins import loader as plugin_loader
+        from app.worker.plugins.sandbox import SandboxClient
+
+        class FakeClient:
+            async def unpin_message(self, entity, message, **kwargs):
+                return SimpleNamespace(id=message, chat_id=entity)
+
+        denied = SandboxClient(FakeClient(), [], plugin_key="demo")
+        with pytest.raises(PermissionError):
+            _ = denied.unpin_message
+
+        record_action = AsyncMock()
+        monkeypatch.setattr(plugin_loader, "record_action", record_action)
+        allowed = SandboxClient(FakeClient(), ["delete_message"], plugin_key="demo")
+        traced = plugin_loader._trace_plugin_client(
+            allowed,
+            "evt_unpin",
+            plugin_key="demo",
+            component="sandbox_unpin_test",
+        )
+
+        await traced.unpin_message(-100123, 456)
+
+        record_action.assert_awaited_once()
+        assert record_action.await_args.args[1]["type"] == "unpin_message"
+        assert record_action.await_args.args[1]["chat_id"] == -100123
+        assert record_action.await_args.args[1]["message_id"] == 456
+        assert record_action.await_args.args[2] == plugin_loader.TRACE_STATUS_OK
+        assert record_action.await_args.kwargs["actual_send_via"] == "userbot_reply"
+
     def test_sandbox_blocks_undelared_attrs(self):
         """未声明的属性访问必须被拒绝。"""
         sandbox = self._make_sandbox()
@@ -909,11 +943,17 @@ class _FakePluginRepoDB:
         self.remote_rows: dict[str, RemotePlugin] = {}
         self.installed_rows: dict[str, InstalledPlugin] = {}
         self.features: dict[str, Feature] = {}
+        self.account_features: list[AccountFeature] = []
+        self.global_configs: dict[str, PluginGlobalConfig] = {}
         self.flush_count = 0
 
     async def get(self, model, pk):  # noqa: ANN001
         if model is InstalledPlugin:
             return self.installed_rows.get(pk)
+        if model is Feature:
+            return self.features.get(pk)
+        if model is PluginGlobalConfig:
+            return self.global_configs.get(pk)
         return None
 
     async def execute(self, stmt):  # noqa: ANN001
@@ -924,7 +964,9 @@ class _FakePluginRepoDB:
             return _FakeResult(list(self.remote_rows.values()))
         if "feature" in text and "account_feature" not in text:
             return _FakeResult(list(self.features.values()))
-        if "account_feature" in text or "from account" in text:
+        if "account_feature" in text:
+            return _FakeResult(self.account_features)
+        if "from account" in text:
             return _FakeResult([])
         return _FakeResult([])
 
@@ -935,6 +977,10 @@ class _FakePluginRepoDB:
             self.installed_rows[row.key] = row
         elif isinstance(row, Feature):
             self.features[row.key] = row
+        elif isinstance(row, AccountFeature):
+            self.account_features.append(row)
+        elif isinstance(row, PluginGlobalConfig):
+            self.global_configs[row.plugin_key] = row
 
     async def flush(self):
         self.flush_count += 1
@@ -1251,7 +1297,7 @@ class TestPluginRepoInstallFlow:
         async def _cached(_url: str, **_kwargs):
             return repo_dir
 
-        monkeypatch.setattr(repo_svc, "_ensure_repo_cached", _cached)
+        monkeypatch.setattr(repo_svc, "_ensure_repo_cached_unlocked", _cached)
         db = _FakePluginRepoDB(PluginRepo(id=1, url="https://example.com/repo.git", name="Repo"))
 
         row = await repo_svc.install_plugin_from_repo(db, 1, "repo_demo", default_enabled=True)
@@ -1292,12 +1338,12 @@ class TestPluginRepoInstallFlow:
         async def _cached(_url: str, **_kwargs):
             return repo_dir
 
-        monkeypatch.setattr(repo_svc, "_ensure_repo_cached", _cached)
+        monkeypatch.setattr(repo_svc, "_ensure_repo_cached_unlocked", _cached)
         db = _FakePluginRepoDB(PluginRepo(id=1, url="https://example.com/repo.git", name="Repo"))
         db.installed_rows["update_demo"] = InstalledPlugin(
             key="update_demo",
             source="repo",
-            source_url="https://example.com/old.git",
+            source_url="https://example.com/repo.git",
             installed_path=str(tmp_path / "installed" / "update_demo"),
             version="1.0.0",
             enabled=True,
@@ -1355,6 +1401,125 @@ class TestPluginRepoInstallFlow:
         assert not (tmp_path / "installed" / "update_demo.bak-update").exists()
 
     @pytest.mark.asyncio
+    async def test_replace_installed_plugin_from_new_repo_preserves_config_and_other_plugins(
+        self,
+        monkeypatch,
+        tmp_path,
+    ):
+        monkeypatch.setattr(repo_svc.settings, "plugins_installed_dir", str(tmp_path / "installed"))
+        repo_dir = tmp_path / "new-repo"
+        _write_runtime_plugin(repo_dir / "ai_chat", key="ai_chat", version="2.0.0")
+        install_dir = tmp_path / "installed" / "ai_chat"
+        _write_runtime_plugin(install_dir, key="ai_chat", version="1.0.0")
+
+        async def _cached(_url: str, **_kwargs):
+            return repo_dir
+
+        monkeypatch.setattr(repo_svc, "_ensure_repo_cached_unlocked", _cached)
+        db = _FakePluginRepoDB(
+            PluginRepo(id=2, url="https://example.com/new-plugins.git", name="New Repo")
+        )
+        db.installed_rows["ai_chat"] = InstalledPlugin(
+            key="ai_chat",
+            source="repo",
+            source_url="https://example.com/deleted-plugins/tree/0.33.x",
+            installed_path=str(install_dir),
+            version="1.0.0",
+            enabled=True,
+            manifest_json={
+                "name": "ai_chat",
+                "_telepilot_remote": {"default_enabled": True},
+            },
+        )
+        db.installed_rows["other_plugin"] = InstalledPlugin(
+            key="other_plugin",
+            source="repo",
+            source_url="https://example.com/deleted-plugins/tree/0.33.x",
+            installed_path=str(tmp_path / "installed" / "other_plugin"),
+            version="9.9.9",
+            enabled=False,
+            manifest_json={"name": "other_plugin"},
+        )
+        db.features["ai_chat"] = Feature(
+            key="ai_chat",
+            display_name="AI Chat",
+            is_builtin=False,
+            version="1.0.0",
+            manifest={"global_config": {"legacy": True}},
+        )
+        account_config = {"provider": "primary", "prompt": "保留"}
+        account_feature = AccountFeature(
+            account_id=1,
+            feature_key="ai_chat",
+            enabled=True,
+            config=account_config,
+            state="active",
+            last_error=None,
+        )
+        global_config = PluginGlobalConfig(
+            plugin_key="ai_chat",
+            config={"model": "selected-model"},
+        )
+        db.account_features.append(account_feature)
+        db.global_configs["ai_chat"] = global_config
+
+        row = await repo_svc.install_plugin_from_repo(
+            db,
+            2,
+            "ai_chat",
+            replace_existing=True,
+        )
+
+        assert row.version == "2.0.0"
+        assert db.installed_rows["ai_chat"].source_url == "https://example.com/new-plugins.git"
+        assert db.installed_rows["ai_chat"].enabled is True
+        assert db.installed_rows["ai_chat"].manifest_json["_telepilot_remote"]["default_enabled"] is True
+        assert db.account_features == [account_feature]
+        assert db.account_features[0].config == account_config
+        assert db.global_configs["ai_chat"] is global_config
+        assert db.global_configs["ai_chat"].config == {"model": "selected-model"}
+        assert db.features["ai_chat"].manifest["global_config"] == {"legacy": True}
+        assert db.installed_rows["other_plugin"].version == "9.9.9"
+        assert db.installed_rows["other_plugin"].source_url.endswith("/0.33.x")
+        assert '"2.0.0"' in (install_dir / "plugin.json").read_text(encoding="utf-8")
+
+    @pytest.mark.asyncio
+    async def test_bulk_repo_update_does_not_take_over_same_name_from_another_repo(
+        self,
+        monkeypatch,
+        tmp_path,
+    ):
+        monkeypatch.setattr(repo_svc.settings, "plugins_installed_dir", str(tmp_path / "installed"))
+        repo_dir = tmp_path / "new-repo"
+        _write_runtime_plugin(repo_dir / "ai_chat", key="ai_chat", version="2.0.0")
+        install_dir = tmp_path / "installed" / "ai_chat"
+        _write_runtime_plugin(install_dir, key="ai_chat", version="1.0.0")
+
+        async def _cached(_url: str, **_kwargs):
+            return repo_dir
+
+        monkeypatch.setattr(repo_svc, "_ensure_repo_cached_unlocked", _cached)
+        db = _FakePluginRepoDB(
+            PluginRepo(id=2, url="https://example.com/new-plugins.git", name="New Repo")
+        )
+        db.installed_rows["ai_chat"] = InstalledPlugin(
+            key="ai_chat",
+            source="repo",
+            source_url="https://example.com/deleted-plugins/tree/0.33.x",
+            installed_path=str(install_dir),
+            version="1.0.0",
+            enabled=True,
+            manifest_json={"name": "ai_chat"},
+        )
+
+        result = await repo_svc.update_installed_plugins_from_repo(db, 2)
+
+        assert result.checked == 0
+        assert result.updated == 0
+        assert db.installed_rows["ai_chat"].source_url.endswith("/0.33.x")
+        assert '"1.0.0"' in (install_dir / "plugin.json").read_text(encoding="utf-8")
+
+    @pytest.mark.asyncio
     async def test_update_installed_plugins_from_repo_refreshes_stale_same_version_manifest(
         self,
         monkeypatch,
@@ -1368,7 +1533,7 @@ class TestPluginRepoInstallFlow:
         async def _cached(_url: str, **_kwargs):
             return repo_dir
 
-        monkeypatch.setattr(repo_svc, "_ensure_repo_cached", _cached)
+        monkeypatch.setattr(repo_svc, "_ensure_repo_cached_unlocked", _cached)
         db = _FakePluginRepoDB(PluginRepo(id=1, url="https://example.com/repo.git", name="Repo"))
         db.installed_rows["ten_half"] = InstalledPlugin(
             key="ten_half",
@@ -1422,7 +1587,7 @@ class TestPluginRepoInstallFlow:
         async def _cached(_url: str, **_kwargs):
             return repo_dir
 
-        monkeypatch.setattr(repo_svc, "_ensure_repo_cached", _cached)
+        monkeypatch.setattr(repo_svc, "_ensure_repo_cached_unlocked", _cached)
         db = _FakePluginRepoDB(PluginRepo(id=1, url="https://example.com/repo.git", name="Repo"))
         db.installed_rows["retry_demo"] = InstalledPlugin(
             key="retry_demo",

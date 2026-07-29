@@ -13,7 +13,7 @@ from app.api.features import (
     _sanitize_config,
 )
 from app.api.logs import RuntimeLogItem, list_audit_logs
-from app.logging_redaction import SensitiveDataLogFilter
+from app.logging_redaction import SensitiveDataLogFilter, configure_dependency_log_levels
 from app.services import audit
 from app.services.redactor import redact_text, redact_value
 
@@ -54,6 +54,51 @@ def test_redactor_preserves_non_secret_token_counters() -> None:
     assert out["accessToken"] == "***"
 
 
+def test_redactor_preserves_boolean_secret_presence_flags_only() -> None:
+    out = redact_value(
+        {
+            "has_api_key": True,
+            "has_token": False,
+            "has_password": "yes",
+            "api_key": "sk-secret-value",
+        }
+    )
+    assert out["has_api_key"] is True
+    assert out["has_token"] is False
+    assert out["has_password"] == "***"
+    assert out["api_key"] == "***"
+
+
+def test_redactor_masks_common_provider_api_keys() -> None:
+    values = (
+        "xai-abcdefghijklmnopqrstuvwxyz123456",
+        "gsk_abcdefghijklmnopqrstuvwxyz123456",
+        "AIzaabcdefghijklmnopqrstuvwxyz123456",
+    )
+
+    for value in values:
+        assert value not in redact_text(f"provider key: {value}")
+
+
+def test_redactor_masks_quoted_env_repr_and_cookie_values() -> None:
+    secret = "0123456789abcdef0123456789abcdef"
+    samples = (
+        f"TELEPILOT_UPDATER_TOKEN='{secret}'",
+        f"{{'authorization': '{secret}'}}",
+        f'cookie="sessionid={secret}"',
+        f'config={{"api_key": "{secret}"}}',
+        f"custom_service_refresh_token={secret}",
+        f"Authorization: Token {secret}",
+        f"Authorization: ApiKey {secret}",
+        f"Authorization: Digest {secret}",
+    )
+
+    for sample in samples:
+        redacted = redact_text(sample)
+        assert secret not in redacted
+        assert "***" in redacted
+
+
 def test_log_filter_redacts_telegram_bot_url_args() -> None:
     record = logging.LogRecord(
         name="httpx",
@@ -68,6 +113,18 @@ def test_log_filter_redacts_telegram_bot_url_args() -> None:
     rendered = record.getMessage()
     assert "123456:secret-token" not in rendered
     assert "https://api.telegram.org/bot***/getUpdates" in rendered
+
+
+def test_dependency_http_request_logs_default_to_warning() -> None:
+    previous_httpx = logging.getLogger("httpx").level
+    previous_httpcore = logging.getLogger("httpcore").level
+    try:
+        configure_dependency_log_levels()
+        assert logging.getLogger("httpx").level == logging.WARNING
+        assert logging.getLogger("httpcore").level == logging.WARNING
+    finally:
+        logging.getLogger("httpx").setLevel(previous_httpx)
+        logging.getLogger("httpcore").setLevel(previous_httpcore)
 
 
 @pytest.mark.asyncio

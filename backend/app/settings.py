@@ -6,7 +6,15 @@ from pathlib import Path
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+_BACKEND_ROOT = Path(__file__).resolve().parents[1]
+# 本地源码树的配置/插件目录位于仓库根；生产镜像把 backend 直接复制到 /app。
+# 不能固定 parents[2]，否则容器中会错误提升为文件系统根目录 `/`。
+PROJECT_ROOT = (
+    _BACKEND_ROOT.parent
+    if (_BACKEND_ROOT.parent / "frontend").is_dir()
+    and (_BACKEND_ROOT.parent / "plugins").is_dir()
+    else _BACKEND_ROOT
+)
 
 
 class Settings(BaseSettings):

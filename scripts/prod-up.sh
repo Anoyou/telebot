@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 一键生产部署：纯 docker compose
 #   - 检查 .env（密钥必须就位）
-#   - 构建并启动全部 4 个容器（postgres / redis / web / frontend）
+#   - 构建并启动全部 5 个容器（postgres / redis / web / updater / frontend）
 #   - 等待 web 健康检查通过
 #   - 打印访问地址
 #

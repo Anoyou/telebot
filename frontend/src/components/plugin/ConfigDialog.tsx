@@ -1394,17 +1394,17 @@ function MultiSelectField({
           const key = String(option);
           const checked = selected.has(key);
           return (
-            <label
+            <div
               key={key}
               className="flex min-h-10 cursor-pointer items-start gap-2 rounded-md border bg-background px-3 py-2 text-sm"
             >
-              <input
-                type="checkbox"
-                className="mt-1 h-4 w-4"
+              <Switch
+                className="mt-0.5 scale-90"
                 checked={checked}
-                onChange={(event) => {
+                aria-label={`${labels[index] || key} 已选择`}
+                onCheckedChange={(nextChecked) => {
                   const next = new Set(selected);
-                  if (event.target.checked) next.add(key);
+                  if (nextChecked) next.add(key);
                   else next.delete(key);
                   onChange(options.filter((candidate) => next.has(String(candidate))));
                 }}
@@ -1415,7 +1415,7 @@ function MultiSelectField({
                   <span className="mt-0.5 block break-words text-xs text-muted-foreground">{descriptions[index]}</span>
                 ) : null}
               </span>
-            </label>
+            </div>
           );
         })}
       </div>

@@ -13,10 +13,22 @@ from app.services.llm_protocol import (
     ModelMessage,
     ModelRequest,
     ModelResponse,
+    ModelStreamEvent,
     ModelUsage,
     TextContent,
     ToolSpec,
 )
+
+
+def _budget_test_provider(provider_id: int, name: str, *, cost_tier: int) -> LLMProviderDTO:
+    return LLMProviderDTO(
+        id=provider_id,
+        name=name,
+        provider="openai",
+        api_format="responses",
+        default_model=f"{name}-model",
+        cost_tier=cost_tier,
+    )
 
 
 @pytest.mark.asyncio
@@ -79,6 +91,272 @@ async def test_structured_invoke_uses_budget_usage_and_provider_runtime(monkeypa
     )
     assert usage_records[0].source == "agent:test"
     assert usage_records[0].input_tokens == 5
+
+
+@pytest.mark.asyncio
+async def test_structured_stream_settles_once_and_records_terminal_usage(monkeypatch) -> None:
+    provider = LLMProviderDTO(
+        id=1,
+        name="primary",
+        provider="openai",
+        api_format="responses",
+        default_model="model",
+    )
+    ticket = llm_account_budget.LLMAccountBudgetTicket(7, 1, 20)
+    settle = AsyncMock()
+    records = []
+
+    class _Client:
+        async def stream_invoke(self, request: ModelRequest):
+            yield ModelStreamEvent(delta="o")
+            yield ModelStreamEvent(delta="k")
+            yield ModelStreamEvent(
+                response=ModelResponse(
+                    model=request.model,
+                    content=(TextContent("ok"),),
+                    usage=ModelUsage(input_tokens=5, output_tokens=3),
+                )
+            )
+
+    monkeypatch.setattr(
+        llm_runtime,
+        "_check_budget",
+        AsyncMock(return_value=llm_runtime.BudgetCheck(ticket=ticket)),
+    )
+    monkeypatch.setattr(llm_account_budget, "settle", settle)
+
+    async def emit(record) -> None:
+        records.append(record)
+
+    monkeypatch.setattr(llm_runtime, "_emit_usage", emit)
+    events = [
+        item
+        async for item in llm_runtime.stream_model_with_fallback(
+            llm_runtime.FallbackChain(provider, []),
+            ModelRequest(
+                model="model",
+                messages=(ModelMessage.text(MessageRole.USER, "question"),),
+                max_output_tokens=20,
+            ),
+            account_id=7,
+            source="agent:test",
+            client_factory=lambda *_args, **_kwargs: _Client(),
+        )
+    ]
+
+    assert [event.delta for event, _used, _fallback in events if event.delta] == ["o", "k"]
+    assert events[-1][0].response is not None
+    settle.assert_awaited_once_with(
+        ticket,
+        actual_tokens=8,
+        actual_provider=provider,
+        success=True,
+    )
+    assert len(records) == 1
+    assert records[0].success is True
+    assert records[0].response_preview == "ok"
+
+
+@pytest.mark.asyncio
+async def test_structured_invoke_premium_budget_falls_back_to_cheaper_provider(monkeypatch) -> None:
+    premium = _budget_test_provider(1, "premium", cost_tier=3)
+    cheaper = _budget_test_provider(2, "cheaper", cost_tier=1)
+    checks: list[int] = []
+
+    async def check(_account_id, provider, _estimate):  # noqa: ANN001
+        checks.append(provider.id)
+        if provider.id == premium.id:
+            return llm_runtime.BudgetCheck(
+                error="高价 LLM 今日调用次数已达上限。",
+                scope="premium_daily",
+            )
+        return llm_runtime.BudgetCheck()
+
+    async def invoke(provider, request, **_kwargs):  # noqa: ANN001
+        assert provider.id == cheaper.id
+        return ModelResponse(
+            model=request.model,
+            content=(TextContent("ok"),),
+            usage=ModelUsage(input_tokens=1, output_tokens=1),
+        )
+
+    monkeypatch.setattr(llm_runtime, "_check_budget", check)
+    monkeypatch.setattr(llm_runtime, "_invoke_model_with_retry", invoke)
+    monkeypatch.setattr(llm_runtime, "_emit_usage", AsyncMock())
+    monkeypatch.setattr(llm_account_budget, "settle", AsyncMock())
+
+    response, provider, used_fallback = await llm_runtime.invoke_model_with_fallback(
+        llm_runtime.FallbackChain(premium, [cheaper]),
+        ModelRequest(
+            model=premium.default_model,
+            messages=(ModelMessage.text(MessageRole.USER, "question"),),
+            metadata={"model_pinned": False},
+        ),
+    )
+
+    assert response.text == "ok"
+    assert provider.id == cheaper.id
+    assert used_fallback is True
+    assert checks == [premium.id, cheaper.id]
+
+
+@pytest.mark.asyncio
+async def test_structured_stream_premium_budget_falls_back_to_cheaper_provider(monkeypatch) -> None:
+    premium = _budget_test_provider(1, "premium", cost_tier=3)
+    cheaper = _budget_test_provider(2, "cheaper", cost_tier=1)
+    checks: list[int] = []
+
+    async def check(_account_id, provider, _estimate):  # noqa: ANN001
+        checks.append(provider.id)
+        if provider.id == premium.id:
+            return llm_runtime.BudgetCheck(
+                error="高价 LLM 今日调用次数已达上限。",
+                scope="premium_daily",
+            )
+        return llm_runtime.BudgetCheck()
+
+    class _Client:
+        async def stream_invoke(self, request: ModelRequest):
+            yield ModelStreamEvent(delta="ok")
+            yield ModelStreamEvent(
+                response=ModelResponse(
+                    model=request.model,
+                    content=(TextContent("ok"),),
+                    usage=ModelUsage(input_tokens=1, output_tokens=1),
+                )
+            )
+
+    monkeypatch.setattr(llm_runtime, "_check_budget", check)
+    monkeypatch.setattr(llm_runtime, "_emit_usage", AsyncMock())
+    monkeypatch.setattr(llm_account_budget, "settle", AsyncMock())
+
+    events = [
+        item
+        async for item in llm_runtime.stream_model_with_fallback(
+            llm_runtime.FallbackChain(premium, [cheaper]),
+            ModelRequest(
+                model=premium.default_model,
+                messages=(ModelMessage.text(MessageRole.USER, "question"),),
+                metadata={"model_pinned": False},
+            ),
+            client_factory=lambda provider, **_kwargs: (
+                _Client()
+                if provider.id == cheaper.id
+                else pytest.fail("premium provider should be blocked before network call")
+            ),
+        )
+    ]
+
+    assert [event.delta for event, _provider, _fallback in events if event.delta] == ["ok"]
+    assert events[-1][1].id == cheaper.id
+    assert events[-1][2] is True
+    assert checks == [premium.id, cheaper.id]
+
+
+@pytest.mark.asyncio
+async def test_structured_stream_does_not_retry_after_partial_delta(monkeypatch) -> None:
+    from app.services.llm_client import LLMCallFailed, LLMError
+
+    provider = LLMProviderDTO(
+        id=1,
+        name="primary",
+        provider="openai",
+        api_format="responses",
+        default_model="model",
+    )
+    ticket = llm_account_budget.LLMAccountBudgetTicket(7, 1, 20)
+    settle = AsyncMock()
+    attempts = 0
+
+    class _Client:
+        async def stream_invoke(self, _request: ModelRequest):
+            nonlocal attempts
+            attempts += 1
+            yield ModelStreamEvent(delta="partial")
+            raise LLMError("upstream reset", retryable=True)
+
+    monkeypatch.setattr(
+        llm_runtime,
+        "_check_budget",
+        AsyncMock(return_value=llm_runtime.BudgetCheck(ticket=ticket)),
+    )
+    monkeypatch.setattr(llm_account_budget, "settle", settle)
+    monkeypatch.setattr(llm_runtime, "_emit_usage", AsyncMock())
+
+    seen = []
+    with pytest.raises(LLMCallFailed, match="已返回部分文本后中断"):
+        async for item in llm_runtime.stream_model_with_fallback(
+            llm_runtime.FallbackChain(provider, []),
+            ModelRequest(
+                model="model",
+                messages=(ModelMessage.text(MessageRole.USER, "question"),),
+                max_output_tokens=20,
+                metadata={"max_retries_per_model": 2, "retry_delay_seconds": 0},
+            ),
+            account_id=7,
+            client_factory=lambda *_args, **_kwargs: _Client(),
+        ):
+            seen.append(item[0].delta)
+
+    assert seen == ["partial"]
+    assert attempts == 1
+    settle.assert_awaited_once()
+    kwargs = settle.await_args.kwargs
+    assert kwargs["success"] is False
+    assert kwargs["charge"] is True
+    assert kwargs["actual_provider"] is provider
+    assert kwargs["actual_tokens"] > 0
+
+
+@pytest.mark.asyncio
+async def test_structured_stream_aclose_settles_budget_once(monkeypatch) -> None:
+    provider = LLMProviderDTO(
+        id=1,
+        name="primary",
+        provider="openai",
+        api_format="responses",
+        default_model="model",
+    )
+    ticket = llm_account_budget.LLMAccountBudgetTicket(7, 1, 20)
+    settle = AsyncMock()
+    records = []
+
+    class _Client:
+        async def stream_invoke(self, _request: ModelRequest):
+            yield ModelStreamEvent(delta="partial")
+            await asyncio.Event().wait()
+
+    monkeypatch.setattr(
+        llm_runtime,
+        "_check_budget",
+        AsyncMock(return_value=llm_runtime.BudgetCheck(ticket=ticket)),
+    )
+    monkeypatch.setattr(llm_account_budget, "settle", settle)
+
+    async def emit(record) -> None:
+        records.append(record)
+
+    monkeypatch.setattr(llm_runtime, "_emit_usage", emit)
+    stream = llm_runtime.stream_model_with_fallback(
+        llm_runtime.FallbackChain(provider, []),
+        ModelRequest(
+            model="model",
+            messages=(ModelMessage.text(MessageRole.USER, "question"),),
+            max_output_tokens=20,
+        ),
+        account_id=7,
+        client_factory=lambda *_args, **_kwargs: _Client(),
+    )
+
+    first = await anext(stream)
+    assert first[0].delta == "partial"
+    await stream.aclose()
+
+    settle.assert_awaited_once()
+    assert settle.await_args.kwargs["success"] is False
+    assert settle.await_args.kwargs["charge"] is True
+    assert settle.await_args.kwargs["actual_provider"] is provider
+    assert [record.error_type for record in records] == ["consumer_closed"]
 
 
 @pytest.mark.asyncio

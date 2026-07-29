@@ -248,7 +248,7 @@ export function AutoReplyConfig() {
         <CardContent>
           <Button
             variant="outline"
-            onClick={() => nav(`/plugins/auto-command-whitelist?aid=${aid}`)}
+            onClick={() => nav(`/operations/auto-command-whitelist?aid=${aid}`)}
           >
             配置自动指令白名单
           </Button>

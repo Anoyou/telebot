@@ -84,18 +84,20 @@ async def add_ignored(
     if existing is not None:
         return existing
 
-    row = IgnoredPeer(
-        account_id=aid,
-        peer_id=payload.peer_id,
-        peer_kind=payload.normalized_kind(),
-        peer_label=payload.peer_label,
-    )
-    db.add(row)
     try:
-        await db.flush()
+        # 用 SAVEPOINT 隔离并发唯一键冲突，不能 rollback 调用方（System Agent
+        # Action 等复合事务）的整个事务。
+        async with db.begin_nested():
+            row = IgnoredPeer(
+                account_id=aid,
+                peer_id=payload.peer_id,
+                peer_kind=payload.normalized_kind(),
+                peer_label=payload.peer_label,
+            )
+            db.add(row)
+            await db.flush()
     except IntegrityError:
-        # 并发情况下 UNIQUE 约束兜底：回滚后再次查询返回那一行
-        await db.rollback()
+        # 并发情况下 UNIQUE 约束兜底：SAVEPOINT 已回滚，只查询已存在行。
         row = (
             await db.execute(
                 select(IgnoredPeer).where(

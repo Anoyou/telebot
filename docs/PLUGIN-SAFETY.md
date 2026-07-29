@@ -16,6 +16,10 @@
 
 固定路由例外有两类：`payout`、收付款、发奖永远由 userbot 执行；`send_rich_message` 默认由 interaction bot 执行，只有显式选择 `userbot_reply` 才进入 Layer 228 Userbot 路径。Event Bus、Trace、MessageOps 只是标准会话链路的内部契约，不是第四种模式。
 
+### 平台能力开关
+
+AI、Interaction Bot、入站 Webhook 等是可选平台模块，可热关闭。关闭 Interaction 时只停交互 Bot manager，**不**停止管理 Bot、userbot 与资金结算补偿。关闭台账只冻结查询操作面，ActionEvent 继续写入。详情见 [平台能力热插拔](./PLATFORM-CAPABILITIES.md)。
+
 ### 指令前缀（command_prefix）
 
 - 所有 Telegram 指令必须有明确前缀（如 `,` 或自定义）
@@ -33,7 +37,7 @@ Manifest 中的 `permissions` 字段声明插件需要的能力：
 | `resolve_entity` | `get_entity` | 解析用户名、频道、群等实体 |
 | `send_file` | `send_file` | 发送图片或文件 |
 | `join_chat` | `join_chat` | 加入聊天 |
-| `delete_message` | `delete_messages` | 删除消息；高风险，必须有明确用户开关 |
+| `delete_message` | `delete_messages` / `unpin_message` | 删除消息或取消指定消息置顶；高风险，必须有明确用户开关 |
 | `moderate_chat` | `ban_user` / `kick_user` / `mute_user` / `unban_user` | 受控成员管理；高危权限，不开放 raw MTProto |
 | `external_http` | `ctx.http.get` / `ctx.http.post` | 安全 HTTP facade；必须同时声明 `allowed_hosts` |
 | `external_http_bypass_proxy` | direct 网络出口 | 预留高危权限；当前直连还必须通过 Manifest `http.allow_direct` 和账号配置共同开启 |

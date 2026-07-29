@@ -15,7 +15,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # 先拷贝依赖清单并安装 runtime 依赖。不要在这一层拷贝 app/，否则任意后端
 # 代码变更都会打穿依赖安装缓存，生产增量更新会被迫重装 Telethon / cryptg 等包。
-COPY pyproject.toml /app/
+COPY backend/pyproject.toml /app/
 RUN --mount=type=cache,target=/root/.cache/pip pip install --upgrade pip
 RUN --mount=type=cache,target=/root/.cache/pip \
     python -c 'import tomllib; from pathlib import Path; data = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8")); print("\n".join(data["project"]["dependencies"]))' \
@@ -39,8 +39,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=builder /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
 COPY --from=builder /usr/local/bin /usr/local/bin
 
-# 拷贝完整源码（含 alembic 迁移脚本、app/ 等）
-COPY . /app
+# 拷贝完整后端源码（含 alembic 迁移脚本、app/ 等）及 Agent 读取的发布日志。
+COPY backend/ /app
+COPY CHANGELOG.md /app/CHANGELOG.md
+# System Agent 只读源码诊断使用。仅复制前端源码与构建配置，不复制依赖和产物。
+COPY frontend/src /app/source/frontend/src
+COPY frontend/package.json frontend/tsconfig.json frontend/tsconfig.app.json frontend/vite.config.ts /app/source/frontend/
 
 # 关闭 pyc 写盘 + 立即刷新 stdout，便于 docker logs 实时查看
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1

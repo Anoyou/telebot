@@ -10,7 +10,7 @@ from fastapi import HTTPException
 
 from app.api import rate_limit
 from app.schemas.rate_limit import KillSwitchRequest
-from app.services import account_bot_runtime, interaction_bot_runtime
+from app.services import account_bot_runtime, interaction_bot_runtime, kill_switch_service
 from app.worker import supervisor
 
 
@@ -26,7 +26,7 @@ async def test_kill_switch_enabled_stops_running_workers(monkeypatch: pytest.Mon
     start_interaction = AsyncMock()
     stop_account_bot = AsyncMock()
     start_account_bot = AsyncMock()
-    monkeypatch.setattr(rate_limit, "_set_setting", set_setting)
+    monkeypatch.setattr(kill_switch_service, "set_enabled", set_setting)
     monkeypatch.setattr(rate_limit, "_audit", audit)
     monkeypatch.setattr(supervisor, "stop_running_workers", stop_running_workers)
     monkeypatch.setattr(supervisor, "start_active_workers", start_active_workers)
@@ -34,7 +34,9 @@ async def test_kill_switch_enabled_stops_running_workers(monkeypatch: pytest.Mon
     monkeypatch.setattr(interaction_bot_runtime, "start_interaction_bot_manager", start_interaction)
     monkeypatch.setattr(account_bot_runtime, "stop_account_bot_manager", stop_account_bot)
     monkeypatch.setattr(account_bot_runtime, "start_account_bot_manager", start_account_bot)
-    monkeypatch.setattr(rate_limit, "get_redis", lambda: SimpleNamespace(publish=publish))
+    monkeypatch.setattr(
+        kill_switch_service, "get_redis", lambda: SimpleNamespace(publish=publish)
+    )
 
     result = await rate_limit.post_kill_switch(
         KillSwitchRequest(enabled=True),
@@ -66,7 +68,7 @@ async def test_kill_switch_disabled_starts_active_workers(monkeypatch: pytest.Mo
     start_interaction = AsyncMock(return_value=0)
     stop_account_bot = AsyncMock()
     start_account_bot = AsyncMock()
-    monkeypatch.setattr(rate_limit, "_set_setting", set_setting)
+    monkeypatch.setattr(kill_switch_service, "set_enabled", set_setting)
     monkeypatch.setattr(rate_limit, "_audit", audit)
     monkeypatch.setattr(supervisor, "stop_running_workers", stop_running_workers)
     monkeypatch.setattr(supervisor, "start_active_workers", start_active_workers)
@@ -74,7 +76,19 @@ async def test_kill_switch_disabled_starts_active_workers(monkeypatch: pytest.Mo
     monkeypatch.setattr(interaction_bot_runtime, "start_interaction_bot_manager", start_interaction)
     monkeypatch.setattr(account_bot_runtime, "stop_account_bot_manager", stop_account_bot)
     monkeypatch.setattr(account_bot_runtime, "start_account_bot_manager", start_account_bot)
-    monkeypatch.setattr(rate_limit, "get_redis", lambda: SimpleNamespace(publish=publish))
+    monkeypatch.setattr(
+        kill_switch_service, "get_redis", lambda: SimpleNamespace(publish=publish)
+    )
+    monkeypatch.setattr(
+        kill_switch_service.platform_caps,
+        "get_snapshot",
+        lambda: SimpleNamespace(cache_ready=True),
+    )
+    monkeypatch.setattr(
+        kill_switch_service.platform_caps,
+        "is_module_enabled_cached",
+        lambda *_args, **_kwargs: True,
+    )
 
     result = await rate_limit.post_kill_switch(
         KillSwitchRequest(enabled=False),
@@ -96,7 +110,7 @@ async def test_kill_switch_disabled_starts_active_workers(monkeypatch: pytest.Mo
 
 @pytest.mark.asyncio
 async def test_kill_switch_reports_partial_failure(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(rate_limit, "_set_setting", AsyncMock())
+    monkeypatch.setattr(kill_switch_service, "set_enabled", AsyncMock())
     monkeypatch.setattr(rate_limit, "_audit", AsyncMock())
     monkeypatch.setattr(
         supervisor,
@@ -106,7 +120,9 @@ async def test_kill_switch_reports_partial_failure(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(interaction_bot_runtime, "stop_interaction_bot_manager", AsyncMock())
     monkeypatch.setattr(account_bot_runtime, "stop_account_bot_manager", AsyncMock())
     publish = AsyncMock()
-    monkeypatch.setattr(rate_limit, "get_redis", lambda: SimpleNamespace(publish=publish))
+    monkeypatch.setattr(
+        kill_switch_service, "get_redis", lambda: SimpleNamespace(publish=publish)
+    )
 
     with pytest.raises(HTTPException) as exc_info:
         await rate_limit.post_kill_switch(

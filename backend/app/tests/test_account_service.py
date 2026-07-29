@@ -118,7 +118,7 @@ async def test_resume_starts_supervisor_worker_when_kill_switch_off(monkeypatch:
     start_worker = AsyncMock()
     monkeypatch.setattr(supervisor, "start_worker", start_worker)
     monkeypatch.setattr(account_service, "_kill_switch_enabled", AsyncMock(return_value=False))
-    monkeypatch.setattr(account_service, "_ensure_account_secrets_decryptable", lambda _acc: None)
+    monkeypatch.setattr(account_service, "ensure_account_secrets_decryptable", lambda _acc: None)
 
     await account_service.resume(db, 4)
 
@@ -138,7 +138,7 @@ async def test_resume_does_not_start_worker_when_kill_switch_on(monkeypatch: pyt
     start_worker = AsyncMock()
     monkeypatch.setattr(supervisor, "start_worker", start_worker)
     monkeypatch.setattr(account_service, "_kill_switch_enabled", AsyncMock(return_value=True))
-    monkeypatch.setattr(account_service, "_ensure_account_secrets_decryptable", lambda _acc: None)
+    monkeypatch.setattr(account_service, "ensure_account_secrets_decryptable", lambda _acc: None)
 
     await account_service.resume(db, 5)
 

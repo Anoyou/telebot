@@ -52,6 +52,7 @@ from ..worker.ipc import CMD_RELOAD_CONFIG, publish_cmd_with_ack
 from .account_bot_service import normalize_interaction_entry_manifest
 
 log = logging.getLogger(__name__)
+_WARNED_ORPHAN_PLUGIN_KEYS: set[str] = set()
 _OPTIONAL_OFFICIAL_PLUGIN_KEYS: frozenset[str] = frozenset(
     {
         "auto_reply",
@@ -355,6 +356,7 @@ async def _migrate_optional_builtin_features(
                 key,
             )
             continue
+        official_source_url = official_source.source_url
 
         target = plugin_repo_service._plugin_dir(key)
         installed = await db.get(InstalledPlugin, key)
@@ -364,10 +366,9 @@ async def _migrate_optional_builtin_features(
                 if staging.exists():
                     shutil.rmtree(staging, ignore_errors=True)
                 target.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copytree(
-                    official_source.plugin_dir,
+                official_source_url = await plugin_repo_service.copy_official_plugin_source(
+                    key,
                     staging,
-                    ignore=shutil.ignore_patterns(".git", ".gitignore", "__pycache__"),
                 )
                 staging.rename(target)
             except Exception:  # noqa: BLE001
@@ -377,7 +378,7 @@ async def _migrate_optional_builtin_features(
         try:
             meta = plugin_repo_service._read_plugin_metadata(target, fallback_name=key)
             base_manifest = plugin_repo_service._manifest_json_from_remote_meta(meta)
-            base_manifest["source_url"] = official_source.source_url
+            base_manifest["source_url"] = official_source_url
             current_info = remote_plugin_service._remote_info_from_manifest(
                 installed.manifest_json if installed is not None else None
             )
@@ -554,10 +555,15 @@ async def _seed_local_installed_features(
                     changed = True
                 except Exception:  # noqa: BLE001
                     log.warning("清理孤立 installed 模块 feature 行失败: %s", key, exc_info=True)
-            log.warning(
-                "跳过孤立 installed 模块 %s：磁盘存在 plugin.json，但没有安装记录",
-                key,
-            )
+            if key not in _WARNED_ORPHAN_PLUGIN_KEYS:
+                _WARNED_ORPHAN_PLUGIN_KEYS.add(key)
+                log.warning(
+                    "跳过孤立 installed 模块 %s：磁盘存在 plugin.json，但没有安装记录；"
+                    "该目录不会被加载，请在确认无用后手动清理或重新安装插件",
+                    key,
+                )
+            else:
+                log.debug("继续跳过孤立 installed 模块 %s", key)
             continue
         manifest: dict[str, Any] = {}
         if cfg_schema:
@@ -849,6 +855,9 @@ async def set_plugin_global_config(
     db: AsyncSession,
     plugin_key: str,
     config: dict[str, Any],
+    *,
+    notify: bool = True,
+    commit: bool = True,
 ) -> dict[str, Any]:
     """设置插件的 global config。
 
@@ -903,10 +912,14 @@ async def set_plugin_global_config(
         manifest.pop("global_config", None)
         feature.manifest = manifest
         flag_modified(feature, "manifest")
-    await db.commit()
+    if commit:
+        await db.commit()
+    else:
+        await db.flush()
 
     # 通知所有使用该插件的账号的 worker reload
-    await _notify_all_accounts_using_feature(db, plugin_key)
+    if notify:
+        await _notify_all_accounts_using_feature(db, plugin_key)
 
     return global_config
 

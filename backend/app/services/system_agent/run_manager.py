@@ -22,6 +22,7 @@ from ...db.models.system_agent import (
     AGENT_RUN_CANCELLED,
     AGENT_RUN_FAILED,
     AGENT_RUN_KIND_MESSAGE,
+    AGENT_RUN_KIND_REGENERATE,
     AGENT_RUN_KIND_RETRY,
     AGENT_RUN_QUEUED,
     AGENT_RUN_RUNNING,
@@ -35,7 +36,7 @@ from ...db.models.system_agent import (
 )
 from .redactor import redact_content
 from .secrets import extract_plaintext_secrets, redact_known_secrets
-from .service import get_system_agent_service
+from .service import get_system_agent_service, is_latest_completed_pair
 
 log = logging.getLogger(__name__)
 
@@ -55,10 +56,14 @@ class _RunRequest:
     text: str
     kind: str
     retry_message_id: int | None = None
+    regenerate_message_id: int | None = None
+    regenerate_assistant_message_id: int | None = None
     fallback_provider_id: int | None = None
     approved_tools: tuple[str, ...] = ()
     chat_secrets: tuple[str, ...] = ()
     after_message_id: int = 0
+    model_selection: dict | None = None
+    read_only_only: bool = False
 
 
 class _RunCancelled(Exception):
@@ -110,29 +115,56 @@ class SystemAgentRunManager:
         web_user_id: int,
         client_request_id: str,
         text: str,
+        account_id: int | None = None,
         retry_message_id: int | None = None,
+        regenerate_message_id: int | None = None,
+        regenerate_assistant_message_id: int | None = None,
         fallback_provider_id: int | None = None,
         approved_tools: list[str] | None = None,
+        model_selection: dict | None = None,
+        read_only_only: bool = False,
     ) -> SystemAgentRun:
         await self.ensure_ready()
-        kind = AGENT_RUN_KIND_RETRY if retry_message_id is not None else AGENT_RUN_KIND_MESSAGE
+        regenerating = (
+            regenerate_message_id is not None
+            or regenerate_assistant_message_id is not None
+        )
+        if regenerating and (
+            regenerate_message_id is None or regenerate_assistant_message_id is None
+        ):
+            raise RunConflictError("原位重新生成需要同时指定用户消息和助手消息")
+        if regenerating and retry_message_id is not None:
+            raise RunConflictError("失败重试与原位重新生成不能同时执行")
+        kind = (
+            AGENT_RUN_KIND_REGENERATE
+            if regenerating
+            else AGENT_RUN_KIND_RETRY
+            if retry_message_id is not None
+            else AGENT_RUN_KIND_MESSAGE
+        )
         approved = tuple(str(item) for item in (approved_tools or []))
         after_message_id = 0
+        selection = dict(model_selection) if isinstance(model_selection, dict) else None
         request_hash = _request_hash(
             kind=kind,
             text=text,
+            account_id=account_id,
             retry_message_id=retry_message_id,
+            regenerate_message_id=regenerate_message_id,
+            regenerate_assistant_message_id=regenerate_assistant_message_id,
             fallback_provider_id=fallback_provider_id,
             approved_tools=approved,
+            model_selection=selection,
         )
 
         async with self._session_factory() as db:
             session_result = await db.execute(
-                select(SystemAgentSession.id)
+                select(SystemAgentSession)
                 .where(SystemAgentSession.id == session_id)
                 .with_for_update()
             )
-            if session_result.scalar_one_or_none() is None:
+            session = session_result.scalar_one_or_none()
+            if session is None:
                 raise RunNotFoundError(f"session:{session_id}")
             existing = await self._find_by_request(
                 db,
@@ -163,7 +195,18 @@ class SystemAgentRunManager:
                     return await self._wait_for_user_message(active_id)
                 raise RunConflictError("当前会话已有一轮助手请求正在执行")
 
-            if retry_message_id is None:
+            if regenerating:
+                pair_is_valid = await is_latest_completed_pair(
+                    db,
+                    session_id=session_id,
+                    user_message_id=int(regenerate_message_id),
+                    assistant_message_id=int(regenerate_assistant_message_id),
+                )
+                if not pair_is_valid:
+                    raise RunConflictError(
+                        "只能编辑或重新生成当前会话最新完成的一轮"
+                    )
+            elif retry_message_id is None:
                 latest_message_result = await db.execute(
                     select(SystemAgentMessage.id)
                     .where(
@@ -175,11 +218,14 @@ class SystemAgentRunManager:
                 )
                 after_message_id = latest_message_result.scalar_one_or_none() or 0
 
+            if account_id is not None and session.account_id != account_id:
+                session.account_id = account_id
+
             row = SystemAgentRun(
                 id=str(uuid.uuid4()),
                 session_id=session_id,
                 web_user_id=web_user_id,
-                user_message_id=retry_message_id,
+                user_message_id=regenerate_message_id or retry_message_id,
                 client_request_id=client_request_id,
                 request_hash=request_hash,
                 kind=kind,
@@ -208,10 +254,14 @@ class SystemAgentRunManager:
             text=text,
             kind=kind,
             retry_message_id=retry_message_id,
+            regenerate_message_id=regenerate_message_id,
+            regenerate_assistant_message_id=regenerate_assistant_message_id,
             fallback_provider_id=fallback_provider_id,
             approved_tools=approved,
             chat_secrets=tuple(extract_plaintext_secrets(text)),
             after_message_id=after_message_id,
+            model_selection=selection,
+            read_only_only=bool(read_only_only),
         )
         cancel_event = asyncio.Event()
         self._cancel_events[row.id] = cancel_event
@@ -238,6 +288,34 @@ class SystemAgentRunManager:
             if row is None:
                 raise RunNotFoundError(run_id)
             return row
+
+    async def list_runs(
+        self,
+        *,
+        web_user_id: int,
+        status: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
+        limit: int = 100,
+    ) -> list[SystemAgentRun]:
+        """List one web user's durable Agent runs, newest first."""
+
+        await self.ensure_ready()
+        conditions = [SystemAgentRun.web_user_id == web_user_id]
+        if status:
+            conditions.append(SystemAgentRun.status == status)
+        if since is not None:
+            conditions.append(SystemAgentRun.created_at >= since)
+        if until is not None:
+            conditions.append(SystemAgentRun.created_at <= until)
+        async with self._session_factory() as db:
+            result = await db.execute(
+                select(SystemAgentRun)
+                .where(*conditions)
+                .order_by(desc(SystemAgentRun.created_at), desc(SystemAgentRun.id))
+                .limit(max(1, min(int(limit), 500)))
+            )
+            return list(result.scalars())
 
     async def list_events(
         self,
@@ -333,6 +411,26 @@ class SystemAgentRunManager:
                     retry_message = await db.get(SystemAgentMessage, request.retry_message_id)
                     if retry_message is None or retry_message.session_id != request.session_id:
                         raise RunNotFoundError(f"message:{request.retry_message_id}")
+                regenerate_message = None
+                regenerate_assistant_message = None
+                if request.regenerate_message_id is not None:
+                    regenerate_message = await db.get(
+                        SystemAgentMessage,
+                        request.regenerate_message_id,
+                    )
+                    regenerate_assistant_message = await db.get(
+                        SystemAgentMessage,
+                        request.regenerate_assistant_message_id,
+                    )
+                    if (
+                        regenerate_message is None
+                        or regenerate_assistant_message is None
+                        or regenerate_message.session_id != request.session_id
+                        or regenerate_assistant_message.session_id != request.session_id
+                    ):
+                        raise RunNotFoundError(
+                            f"message:{request.regenerate_message_id}"
+                        )
 
                 stream = self._service_factory().stream_message(
                     db,
@@ -342,8 +440,13 @@ class SystemAgentRunManager:
                     channel="web",
                     web_user_id=request.web_user_id,
                     retry_message=retry_message,
+                    regenerate_message=regenerate_message,
+                    regenerate_assistant_message=regenerate_assistant_message,
                     fallback_provider_id=request.fallback_provider_id,
                     approved_tools=list(request.approved_tools),
+                    run_id=run_id,
+                    model_selection=request.model_selection,
+                    read_only_only=request.read_only_only,
                 )
                 while True:
                     try:
@@ -465,8 +568,8 @@ class SystemAgentRunManager:
             run = await db.get(SystemAgentRun, run_id)
             if run is None or run.user_message_id is not None:
                 return
-            if request.retry_message_id is not None:
-                run.user_message_id = request.retry_message_id
+            if request.retry_message_id is not None or request.regenerate_message_id is not None:
+                run.user_message_id = request.retry_message_id or request.regenerate_message_id
             else:
                 result = await db.execute(
                     select(SystemAgentMessage)
@@ -610,17 +713,25 @@ def _request_hash(
     *,
     kind: str,
     text: str,
+    account_id: int | None = None,
     retry_message_id: int | None,
+    regenerate_message_id: int | None = None,
+    regenerate_assistant_message_id: int | None = None,
     fallback_provider_id: int | None,
     approved_tools: tuple[str, ...],
+    model_selection: dict | None = None,
 ) -> str:
     payload = json.dumps(
         {
             "kind": kind,
             "text": text,
+            "account_id": account_id,
             "retry_message_id": retry_message_id,
+            "regenerate_message_id": regenerate_message_id,
+            "regenerate_assistant_message_id": regenerate_assistant_message_id,
             "fallback_provider_id": fallback_provider_id,
             "approved_tools": sorted(approved_tools),
+            "model_selection": model_selection or {"mode": "auto"},
         },
         ensure_ascii=False,
         sort_keys=True,
@@ -638,7 +749,10 @@ def _redact_event(source: dict[str, Any], known_secrets: tuple[str, ...]) -> dic
         if isinstance(item, list):
             return [replace_known(child) for child in item]
         if isinstance(item, str):
-            return redact_known_secrets(item, list(known_secrets))
+            return redact_known_secrets(item, list(known_secrets)).replace(
+                "***",
+                "[REDACTED]",
+            )
         return item
 
     redacted = replace_known(value)

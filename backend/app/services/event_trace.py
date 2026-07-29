@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import delete, select, update
+from sqlalchemy import String, cast, delete, or_, select, update
 from sqlalchemy.orm.attributes import flag_modified
 
 from ..db.base import AsyncSessionLocal
@@ -37,6 +37,8 @@ TRACE_WRITE_QUEUE_MAX_SIZE = 5000
 TRACE_WRITE_BATCH_SIZE = 200
 TRACE_WRITE_BATCH_INTERVAL_SECONDS = 0.2
 TRACE_WRITE_DRAIN_TIMEOUT_SECONDS = 5.0
+TRACE_CLEANUP_BATCH_SIZE = 200
+TRACE_CLEANUP_ID_BATCH_SIZE = 500
 
 TRACE_STATUS_RUNNING = "running"
 TRACE_STATUS_OK = "ok"
@@ -394,56 +396,56 @@ async def cleanup_event_traces(
     trace_retention_days: int = 30,
     payload_snapshot_retention_days: int = 7,
     native_raw_retention_days: int = 1,
+    batch_size: int | None = None,
 ) -> dict[str, int]:
     """Prune old trace rows and clear expired heavy snapshots.
 
     ``native_raw`` is not persisted by default; this cleanup keeps the main trace
     row for the shorter payload-retention window and deletes full trace/span/action
     rows only after the longer trace retention window.
+
+    Implementation notes:
+    - Never load the full ``event_trace`` table into the ORM session.
+    - Process native_raw / payload / row deletes in bounded keyset batches so a
+      single cleanup pass cannot spike the web main process toward the cgroup cap.
     """
 
     trace_days = max(0, int(trace_retention_days or 0))
     payload_days = max(0, int(payload_snapshot_retention_days or 0))
     native_raw_days = max(0, int(native_raw_retention_days or 0))
+    orm_batch = max(1, int(batch_size or TRACE_CLEANUP_BATCH_SIZE))
+    id_batch = max(orm_batch, TRACE_CLEANUP_ID_BATCH_SIZE)
     deleted_traces = 0
     cleared_payloads = 0
     cleared_native_raw = 0
     now = datetime.now(UTC)
+    started = time.monotonic()
     try:
-        async with AsyncSessionLocal() as db:
-            if native_raw_days > 0:
-                native_raw_cutoff = now - timedelta(days=native_raw_days)
-                rows = (
-                    await db.execute(
-                        select(EventTrace).where(
-                            EventTrace.started_at < native_raw_cutoff,
-                            EventTrace.payload_snapshot.is_not(None),
-                        )
-                    )
-                ).scalars().all()
-                for row in rows:
-                    if _clear_native_raw_snapshot(row):
-                        cleared_native_raw += 1
-                        flag_modified(row, "payload_snapshot")
-                        flag_modified(row, "native_raw_meta")
-            if payload_days > 0:
-                payload_cutoff = now - timedelta(days=payload_days)
-                result = await db.execute(
-                    update(EventTrace)
-                    .where(
-                        EventTrace.started_at < payload_cutoff,
-                        EventTrace.payload_snapshot.is_not(None),
-                    )
-                    .values(payload_snapshot=None)
-                )
-                cleared_payloads = int(result.rowcount or 0)
-            if trace_days > 0:
-                trace_cutoff = now - timedelta(days=trace_days)
-                result = await db.execute(delete(EventTrace).where(EventTrace.started_at < trace_cutoff))
-                deleted_traces = int(result.rowcount or 0)
-            await db.commit()
+        if native_raw_days > 0:
+            cleared_native_raw = await _cleanup_native_raw_snapshots_batched(
+                cutoff=now - timedelta(days=native_raw_days),
+                batch_size=orm_batch,
+            )
+        if payload_days > 0:
+            cleared_payloads = await _cleanup_payload_snapshots_batched(
+                cutoff=now - timedelta(days=payload_days),
+                batch_size=id_batch,
+            )
+        if trace_days > 0:
+            deleted_traces = await _cleanup_old_traces_batched(
+                cutoff=now - timedelta(days=trace_days),
+                batch_size=id_batch,
+            )
+        log.info(
+            "event trace cleanup finished deleted_traces=%s cleared_payload_snapshots=%s "
+            "cleared_native_raw=%s elapsed_ms=%s",
+            deleted_traces,
+            cleared_payloads,
+            cleared_native_raw,
+            int((time.monotonic() - started) * 1000),
+        )
     except Exception:  # noqa: BLE001
-        log.debug("event trace cleanup failed", exc_info=True)
+        log.exception("event trace cleanup failed")
         await _write_trace_runtime_error(
             "event trace cleanup failed",
             trace_id=None,
@@ -455,6 +457,130 @@ async def cleanup_event_traces(
         "cleared_payload_snapshots": cleared_payloads,
         "cleared_native_raw": cleared_native_raw,
     }
+
+
+def _payload_has_clearable_native_raw(snapshot: Any) -> bool:
+    if not isinstance(snapshot, dict) or "native_raw" not in snapshot:
+        return False
+    value = snapshot.get("native_raw")
+    return value is not None and value not in ("[omitted]", "[expired]")
+
+
+async def _cleanup_native_raw_snapshots_batched(*, cutoff: datetime, batch_size: int) -> int:
+    """Expire stored native_raw blobs in small ORM batches.
+
+    Prefers rows whose JSON text still mentions native_raw so we do not pull every
+    historical payload into Python just to no-op.
+    """
+
+    cleared = 0
+    last_id = 0
+    snapshot_text = cast(EventTrace.payload_snapshot, String)
+    while True:
+        async with AsyncSessionLocal() as db:
+            rows = (
+                (
+                    await db.execute(
+                        select(EventTrace)
+                        .where(
+                            EventTrace.id > last_id,
+                            EventTrace.started_at < cutoff,
+                            EventTrace.payload_snapshot.is_not(None),
+                            or_(
+                                snapshot_text.like('%"native_raw"%'),
+                                snapshot_text.like("%'native_raw'%"),
+                            ),
+                        )
+                        .order_by(EventTrace.id.asc())
+                        .limit(batch_size)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            if not rows:
+                break
+            batch_cleared = 0
+            for row in rows:
+                if _clear_native_raw_snapshot(row):
+                    batch_cleared += 1
+                    flag_modified(row, "payload_snapshot")
+                    flag_modified(row, "native_raw_meta")
+            last_id = int(rows[-1].id)
+            if batch_cleared:
+                await db.commit()
+                cleared += batch_cleared
+            else:
+                await db.rollback()
+        if len(rows) < batch_size:
+            break
+    return cleared
+
+
+async def _cleanup_payload_snapshots_batched(*, cutoff: datetime, batch_size: int) -> int:
+    """Null out expired payload snapshots by id batches (no full-table ORM load)."""
+
+    cleared = 0
+    last_id = 0
+    while True:
+        async with AsyncSessionLocal() as db:
+            ids = (
+                await db.execute(
+                    select(EventTrace.id)
+                    .where(
+                        EventTrace.id > last_id,
+                        EventTrace.started_at < cutoff,
+                        EventTrace.payload_snapshot.is_not(None),
+                    )
+                    .order_by(EventTrace.id.asc())
+                    .limit(batch_size)
+                )
+            ).scalars().all()
+            if not ids:
+                break
+            result = await db.execute(
+                update(EventTrace)
+                .where(EventTrace.id.in_(list(ids)))
+                .values(payload_snapshot=None)
+            )
+            await db.commit()
+            cleared += int(result.rowcount or 0)
+            last_id = int(ids[-1])
+        if len(ids) < batch_size:
+            break
+    return cleared
+
+
+async def _cleanup_old_traces_batched(*, cutoff: datetime, batch_size: int) -> int:
+    """Delete expired traces (and cascaded spans/actions) in id batches."""
+
+    deleted = 0
+    while True:
+        async with AsyncSessionLocal() as db:
+            ids = (
+                await db.execute(
+                    select(EventTrace.id)
+                    .where(EventTrace.started_at < cutoff)
+                    .order_by(EventTrace.id.asc())
+                    .limit(batch_size)
+                )
+            ).scalars().all()
+            if not ids:
+                break
+            result = await db.execute(delete(EventTrace).where(EventTrace.id.in_(list(ids))))
+            await db.commit()
+            deleted += int(result.rowcount or 0)
+        if len(ids) < batch_size:
+            break
+    return deleted
+
+
+def estimate_cleanup_candidate_memory(row_count: int, *, avg_row_bytes: int = 1600) -> int:
+    """Rough upper bound used by tests to keep cleanup candidates memory-bounded."""
+
+    # ORM instances + JSON materialization dominate over raw DB bytes.
+    per_row = max(2048, int(avg_row_bytes) * 2)
+    return max(0, int(row_count)) * per_row
 
 
 async def _native_raw_trace_policy(db: Any) -> dict[str, Any]:
@@ -824,6 +950,7 @@ __all__ = [
     "redact_payload_snapshot",
     "refresh_trace_settings",
     "cleanup_event_traces",
+    "estimate_cleanup_candidate_memory",
     "start_trace",
     "stop_trace_writer",
     "trace_log_context",

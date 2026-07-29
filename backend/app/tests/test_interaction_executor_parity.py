@@ -5,7 +5,7 @@
 - E2 = bot delivery：``services/interaction/delivery.py::InteractionDeliveryExecutor.apply``
 - E3 = worker RPC 动作面：``worker/runtime.py::_run_interaction_userbot_action``（E2 userbot_reply 的真正落点）
 
-快照口径（见 agent-plans/2026-07-09-dedup-sessiongrab-executor-audit.md 子题 3）：
+快照口径：执行器与插件 facade 必须保持相同的会话抓取与去重语义：
 - 快照拍“当前代码现状”。已知有意差异与漂移都直接编码成 ``expect_worker`` / ``expect_bot``
   两列不同期望——**快照即规格**；任一侧行为变化会以表格 diff 显式暴露。
 - 断言归一：从两侧 ``record_action`` 的 ``await_args_list`` 抽

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import uuid
+from datetime import datetime
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
@@ -13,10 +14,12 @@ from sqlalchemy import select
 
 from ..db.models.system_agent import (
     CHANNEL_WEB,
+    MESSAGE_ROLE_ASSISTANT,
     MESSAGE_ROLE_USER,
     MESSAGE_RUN_FAILED,
     SESSION_STATUS_ACTIVE,
     SystemAgentRun,
+    SystemAgentSession,
 )
 from ..deps import CurrentUser, DBSession
 from ..schemas.system_agent import (
@@ -28,6 +31,7 @@ from ..schemas.system_agent import (
     SystemAgentMessageCreate,
     SystemAgentMessageOut,
     SystemAgentMessageRetry,
+    SystemAgentRegenerateRunCreate,
     SystemAgentRetryRunCreate,
     SystemAgentRunCreate,
     SystemAgentRunEventOut,
@@ -37,6 +41,9 @@ from ..schemas.system_agent import (
     SystemAgentSessionCreate,
     SystemAgentSessionOut,
     SystemAgentSessionUpdate,
+    SystemAgentUserMemoryCreate,
+    SystemAgentUserMemoryOut,
+    SystemAgentUserMemoryPatch,
 )
 from ..services.system_agent import get_system_agent_service
 from ..services.system_agent.actions import (
@@ -140,9 +147,97 @@ async def patch_config(
 
 @router.get("/capabilities", response_model=SystemAgentCapabilitiesOut)
 async def get_capabilities(db: DBSession, _user: CurrentUser) -> SystemAgentCapabilitiesOut:
+    # 刷新插件工具插槽（安装/启停后能力矩阵立即可见）
+    try:
+        from ..services.system_agent.plugin_tools import refresh_plugin_system_agent_tools
+
+        await refresh_plugin_system_agent_tools(db)
+    except Exception:  # noqa: BLE001
+        log.debug("refresh plugin system_agent tools failed", exc_info=True)
     svc = get_system_agent_service()
     data = await svc.get_capabilities(db, channel=CHANNEL_WEB, role="admin")
     return SystemAgentCapabilitiesOut(**data)
+
+
+# ── 长期记忆 ─────────────────────────────────────────────────────
+@router.get("/memory", response_model=list[SystemAgentUserMemoryOut])
+async def list_user_memory(db: DBSession, user: CurrentUser) -> list[SystemAgentUserMemoryOut]:
+    from ..services.system_agent.user_memory import list_memories, memory_to_dict
+
+    rows = await list_memories(db, scope_type="web_user", scope_id=int(user.id))
+    return [SystemAgentUserMemoryOut(**memory_to_dict(r)) for r in rows]
+
+
+@router.post("/memory", response_model=SystemAgentUserMemoryOut)
+async def create_user_memory(
+    payload: SystemAgentUserMemoryCreate,
+    db: DBSession,
+    user: CurrentUser,
+) -> SystemAgentUserMemoryOut:
+    from ..services.system_agent.user_memory import create_memory, memory_to_dict
+
+    try:
+        row = await create_memory(
+            db,
+            scope_type="web_user",
+            scope_id=int(user.id),
+            content=payload.content,
+            source="user_set",
+            enabled=payload.enabled,
+        )
+    except ValueError as exc:
+        raise _err("MEMORY_INVALID", str(exc)) from exc
+    await db.commit()
+    await db.refresh(row)
+    return SystemAgentUserMemoryOut(**memory_to_dict(row))
+
+
+@router.patch("/memory/{memory_id}", response_model=SystemAgentUserMemoryOut)
+async def patch_user_memory(
+    memory_id: int,
+    payload: SystemAgentUserMemoryPatch,
+    db: DBSession,
+    user: CurrentUser,
+) -> SystemAgentUserMemoryOut:
+    from ..services.system_agent.user_memory import memory_to_dict, update_memory
+
+    try:
+        row = await update_memory(
+            db,
+            memory_id=memory_id,
+            scope_type="web_user",
+            scope_id=int(user.id),
+            content=payload.content,
+            enabled=payload.enabled,
+        )
+    except LookupError as exc:
+        raise _err("MEMORY_NOT_FOUND", str(exc), status=404) from exc
+    except ValueError as exc:
+        raise _err("MEMORY_INVALID", str(exc)) from exc
+    await db.commit()
+    await db.refresh(row)
+    return SystemAgentUserMemoryOut(**memory_to_dict(row))
+
+
+@router.delete("/memory/{memory_id}")
+async def delete_user_memory(
+    memory_id: int,
+    db: DBSession,
+    user: CurrentUser,
+) -> dict[str, Any]:
+    from ..services.system_agent.user_memory import delete_memory
+
+    try:
+        await delete_memory(
+            db,
+            memory_id=memory_id,
+            scope_type="web_user",
+            scope_id=int(user.id),
+        )
+    except LookupError as exc:
+        raise _err("MEMORY_NOT_FOUND", str(exc), status=404) from exc
+    await db.commit()
+    return {"ok": True, "id": memory_id}
 
 
 # ── 会话 ─────────────────────────────────────────────────────────
@@ -170,10 +265,19 @@ async def list_sessions(
     db: DBSession,
     user: CurrentUser,
     status: str | None = Query(default=SESSION_STATUS_ACTIVE),
+    origin: str | None = Query(default=None, description="interactive | scheduled；缺省返回全部"),
+    include_bot: bool = Query(default=False, description="管理员会话列表是否包含 Telegram Bot 会话"),
     limit: int = Query(default=50, ge=1, le=200),
 ) -> list[SystemAgentSessionOut]:
     svc = get_system_agent_service()
-    rows = await svc.list_sessions(db, web_user_id=user.id, status=status, limit=limit)
+    rows = await svc.list_sessions(
+        db,
+        web_user_id=user.id,
+        status=status,
+        origin=origin,
+        include_bot_sessions=include_bot,
+        limit=limit,
+    )
     return [_session_out(r) for r in rows]
 
 
@@ -184,7 +288,12 @@ async def get_session(
     user: CurrentUser,
 ) -> SystemAgentSessionOut:
     svc = get_system_agent_service()
-    session = await svc.get_session(db, session_id, web_user_id=user.id)
+    session = await svc.get_session(
+        db,
+        session_id,
+        web_user_id=user.id,
+        allow_bot_session=True,
+    )
     if session is None:
         raise _err("SESSION_NOT_FOUND", "会话不存在", 404)
     return _session_out(session)
@@ -249,7 +358,12 @@ async def list_messages(
     before_id: int | None = Query(default=None),
 ) -> list[SystemAgentMessageOut]:
     svc = get_system_agent_service()
-    session = await svc.get_session(db, session_id, web_user_id=user.id)
+    session = await svc.get_session(
+        db,
+        session_id,
+        web_user_id=user.id,
+        allow_bot_session=True,
+    )
     if session is None:
         raise _err("SESSION_NOT_FOUND", "会话不存在", 404)
     if await svc.reconcile_stale_messages(db, session_id):
@@ -281,6 +395,9 @@ async def stream_message(
             web_user_id=user.id,
             client_request_id=str(uuid.uuid4()),
             text=payload.content,
+            model_selection=(
+                payload.model_selection.model_dump() if payload.model_selection else None
+            ),
         )
     except RunConflictError as exc:
         raise _err("RUN_CONFLICT", str(exc), 409) from None
@@ -317,6 +434,9 @@ async def retry_message(
             retry_message_id=message.id,
             fallback_provider_id=payload.fallback_provider_id,
             approved_tools=payload.approved_tools,
+            model_selection=(
+                payload.model_selection.model_dump() if payload.model_selection else None
+            ),
         )
     except RunConflictError as exc:
         raise _err("RUN_CONFLICT", str(exc), 409) from None
@@ -324,6 +444,27 @@ async def retry_message(
 
 
 # ── Durable Run ──────────────────────────────────────────────────
+@router.get("/runs", response_model=list[SystemAgentRunOut])
+async def list_system_agent_runs(
+    user: CurrentUser,
+    status: str | None = Query(
+        default=None,
+        pattern="^(queued|running|succeeded|failed|cancelled)$",
+    ),
+    since: datetime | None = Query(default=None),
+    until: datetime | None = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=500),
+) -> list[SystemAgentRunOut]:
+    rows = await get_system_agent_run_manager().list_runs(
+        web_user_id=user.id,
+        status=status,
+        since=since,
+        until=until,
+        limit=limit,
+    )
+    return [_run_out(row) for row in rows]
+
+
 @router.post(
     "/sessions/{session_id}/runs",
     response_model=SystemAgentRunOut,
@@ -348,6 +489,9 @@ async def start_system_agent_run(
             web_user_id=user.id,
             client_request_id=payload.client_request_id,
             text=payload.content,
+            model_selection=(
+                payload.model_selection.model_dump() if payload.model_selection else None
+            ),
         )
     except RunConflictError as exc:
         raise _err("RUN_CONFLICT", str(exc), 409) from None
@@ -387,9 +531,73 @@ async def start_system_agent_retry_run(
             retry_message_id=message.id,
             fallback_provider_id=payload.fallback_provider_id,
             approved_tools=payload.approved_tools,
+            model_selection=(
+                payload.model_selection.model_dump() if payload.model_selection else None
+            ),
         )
     except RunConflictError as exc:
         raise _err("RUN_CONFLICT", str(exc), 409) from None
+    return _run_out(row)
+
+
+@router.post(
+    "/sessions/{session_id}/messages/{message_id}/regenerate/runs",
+    response_model=SystemAgentRunOut,
+    status_code=202,
+)
+async def start_system_agent_regenerate_run(
+    session_id: str,
+    message_id: int,
+    payload: SystemAgentRegenerateRunCreate,
+    db: DBSession,
+    user: CurrentUser,
+) -> SystemAgentRunOut:
+    svc = get_system_agent_service()
+    session = await svc.get_session(db, session_id, web_user_id=user.id)
+    if session is None:
+        raise _err("SESSION_NOT_FOUND", "会话不存在", 404)
+    message = await svc.get_message(db, message_id, session_id=session_id)
+    assistant_message = await svc.get_message(
+        db,
+        payload.assistant_message_id,
+        session_id=session_id,
+    )
+    if message is None or message.role != MESSAGE_ROLE_USER:
+        raise _err("MESSAGE_NOT_FOUND", "用户消息不存在", 404)
+    if assistant_message is None or assistant_message.role != MESSAGE_ROLE_ASSISTANT:
+        raise _err("MESSAGE_NOT_FOUND", "助手回答不存在", 404)
+    if not await svc.is_latest_completed_pair(
+        db,
+        session_id=session_id,
+        user_message_id=message.id,
+        assistant_message_id=assistant_message.id,
+    ):
+        raise _err(
+            "MESSAGE_NOT_REGENERATABLE",
+            "只能编辑或重新生成当前会话最新完成的一轮",
+            409,
+        )
+    edited_content = payload.content.strip() if payload.content is not None else None
+    if payload.content is not None and not edited_content:
+        raise _err("EMPTY_MESSAGE", "消息不能为空", 422)
+    await db.commit()
+    try:
+        row = await get_system_agent_run_manager().start_run(
+            session_id=session_id,
+            web_user_id=user.id,
+            client_request_id=payload.client_request_id,
+            text=edited_content or "",
+            account_id=payload.account_id,
+            regenerate_message_id=message.id,
+            regenerate_assistant_message_id=assistant_message.id,
+            fallback_provider_id=payload.fallback_provider_id,
+            approved_tools=payload.approved_tools,
+            model_selection=(
+                payload.model_selection.model_dump() if payload.model_selection else None
+            ),
+        )
+    except RunConflictError as exc:
+        raise _err("MESSAGE_NOT_REGENERATABLE", str(exc), 409) from None
     return _run_out(row)
 
 
@@ -473,7 +681,24 @@ async def list_system_agent_actions(
         status=status,
         limit=limit,
     )
-    return [SystemAgentActionOut(**action_to_dict(r)) for r in rows]
+    session_ids = {r.session_id for r in rows if r.session_id}
+    session_meta: dict[str, Any] = {}
+    if session_ids:
+        result = await db.execute(
+            select(SystemAgentSession).where(SystemAgentSession.id.in_(session_ids))
+        )
+        for sess in result.scalars().all():
+            session_meta[sess.id] = {
+                "session_title": sess.title,
+                "session_origin": getattr(sess, "origin", None) or "interactive",
+            }
+    out: list[SystemAgentActionOut] = []
+    for row in rows:
+        payload = action_to_dict(row)
+        meta = session_meta.get(str(row.session_id or ""), {})
+        payload.update(meta)
+        out.append(SystemAgentActionOut(**payload))
+    return out
 
 
 @router.get("/actions/{action_id}", response_model=SystemAgentActionOut)
@@ -568,6 +793,12 @@ async def secret_input_action(
     allowed = set(spec.secret_argument_names) if spec else set()
     if not allowed:
         raise _err("NO_SECRET_FIELDS", "该操作不接受密钥补填", 400)
+    if spec is not None and not getattr(spec, "allow_secret_input", True):
+        raise _err(
+            "SECRET_INPUT_LOCKED",
+            "该操作已绑定测活时使用的临时密钥；如需更换，请拒绝后重新发起测活",
+            409,
+        )
 
     incoming = payload.fields or {}
     secrets: dict[str, Any] = decrypt_secret_payload(row.secret_payload_enc)

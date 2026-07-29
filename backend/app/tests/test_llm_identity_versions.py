@@ -19,7 +19,7 @@ from app.schemas.command import ClientIdentityVersionsUpdateRequest
 from app.services import llm_identity
 from app.services.llm_identity import (
     CLIENT_IDENTITY_CLAUDE_CODE,
-    CLIENT_IDENTITY_CODEX_CLI,
+    CLIENT_IDENTITY_CODEX_TUI,
     apply_version_overrides,
     current_client_versions,
     default_client_versions,
@@ -38,6 +38,7 @@ def test_valid_version_accepts_semver_and_prerelease() -> None:
     assert is_valid_version("2.1.205") is True
     assert is_valid_version("0.143.0") is True
     assert is_valid_version("0.144.0-alpha.4") is True
+    assert is_valid_version("0.146.0-alpha.3.1") is True
     assert is_valid_version("26.707.51957") is True
 
 
@@ -62,7 +63,7 @@ def test_apply_overrides_changes_only_version_segment() -> None:
         ident = get_identity(CLIENT_IDENTITY_CLAUDE_CODE)
         # 版本号变了
         assert "2.1.207" in ident.user_agent
-        # UA 结构未变（仍是 claude-cli/<ver> (external, cli)）
+        # UA 结构未变（仍是 CLI 入口）
         assert ident.user_agent == "claude-cli/2.1.207 (external, cli)"
         # 请求头字段名/值未变
         assert dict(ident.extra_headers) == before_headers
@@ -77,31 +78,31 @@ def test_apply_overrides_ignores_invalid_and_unknown_keys() -> None:
             {
                 "claude_code": "evil; DROP",  # 非法值 → 忽略，回落默认
                 "unknown_key": "1.2.3",  # 未知键 → 忽略
-                "codex_cli": "0.199.0",  # 合法 → 生效
+                "codex_tui": "0.199.0",  # 合法 → 生效
             }
         )
         defaults = default_client_versions()
         assert result["claude_code"] == defaults["claude_code"]
-        assert result["codex_cli"] == "0.199.0"
+        assert result["codex_tui"] == "0.199.0"
         assert "unknown_key" not in result
     finally:
         _reset()
 
 
 def test_apply_empty_overrides_restores_defaults() -> None:
-    apply_version_overrides({"codex_cli": "0.199.0"})
-    assert current_client_versions()["codex_cli"] == "0.199.0"
+    apply_version_overrides({"codex_tui": "0.199.0"})
+    assert current_client_versions()["codex_tui"] == "0.199.0"
     apply_version_overrides({})
     assert current_client_versions() == default_client_versions()
 
 
-def test_codex_cli_ua_reflects_override() -> None:
+def test_codex_tui_ua_reflects_override() -> None:
     try:
-        apply_version_overrides({"codex_cli": "0.199.0"})
-        ident = get_identity(CLIENT_IDENTITY_CODEX_CLI)
-        assert ident.user_agent.startswith("codex_cli_rs/0.199.0 (")
+        apply_version_overrides({"codex_tui": "0.199.0"})
+        ident = get_identity(CLIENT_IDENTITY_CODEX_TUI)
+        assert ident.user_agent.startswith("codex-tui/0.199.0 (")
         # originator 头不随版本变化
-        assert ident.extra_headers.get("originator") == "codex_cli_rs"
+        assert ident.extra_headers.get("originator") == "codex-tui"
     finally:
         _reset()
 
@@ -109,11 +110,11 @@ def test_codex_cli_ua_reflects_override() -> None:
 def test_version_key_metadata_detectability() -> None:
     meta = version_key_metadata()
     # npm / PyPI / 固定只读 CLI 检测源均可检测
-    assert meta["codex_cli"]["registry"] == "npm:@openai/codex"
+    assert meta["codex_tui"]["registry"] == "npm:@openai/codex"
     assert meta["claude_code"]["registry"] == "npm:@anthropic-ai/claude-code"
+    assert meta["claude_sdk"]["registry"] == "npm:@anthropic-ai/sdk"
     assert meta["openai_sdk"]["registry"] == "pypi:openai"
     assert meta["grok_cli"]["registry"] == "cli:grok-update-check"
-    # Codex Desktop 两段无公共 registry（仅手动）
     assert meta["codex_desktop_core"]["registry"] is None
     assert meta["codex_desktop_build"]["registry"] is None
 
@@ -122,9 +123,12 @@ def test_parse_grok_update_check_prefers_remote_version() -> None:
     output = "A new version of Grok Build is available: 0.2.101 -> 0.2.102 [stable]"
     assert commands._parse_grok_update_check(output) == "0.2.102"
     assert commands._parse_grok_update_check("Grok Build is up to date: 0.2.102") == "0.2.102"
-    assert commands._parse_grok_update_check(
-        '{"currentVersion":"0.2.101","latestVersion":"0.2.102","updateAvailable":true}'
-    ) == "0.2.102"
+    assert (
+        commands._parse_grok_update_check(
+            '{"currentVersion":"0.2.101","latestVersion":"0.2.102","updateAvailable":true}'
+        )
+        == "0.2.102"
+    )
 
 
 @pytest.mark.asyncio
@@ -263,13 +267,13 @@ async def test_identity_version_save_notifies_all_spawn_workers(monkeypatch) -> 
 
     try:
         response = await commands.update_client_identity_versions(
-            ClientIdentityVersionsUpdateRequest(overrides={"codex_cli": "0.199.0"}),
+            ClientIdentityVersionsUpdateRequest(overrides={"codex_tui": "0.199.0"}),
             None,
             _DB(),
         )
-        assert row.value == {"codex_cli": "0.199.0"}
+        assert row.value == {"codex_tui": "0.199.0"}
         assert events == ["commit", "list_accounts", ("notify_reload", [7, 9])]
-        assert next(item for item in response.items if item.key == "codex_cli").current == "0.199.0"
+        assert next(item for item in response.items if item.key == "codex_tui").current == "0.199.0"
     finally:
         _reset()
 

@@ -66,6 +66,14 @@ export interface InstalledPluginOverviewItem {
   recent_trace?: InstalledPluginOverviewTraceRef | null;
 }
 
+export interface PluginChangelogResponse {
+  key: string;
+  available: boolean;
+  content: string;
+  truncated: boolean;
+  message?: string | null;
+}
+
 export async function listInstalledPackages(): Promise<PluginInstallOut[]> {
   const { data } = await api.get<PluginInstallOut[]>(
     "/api/plugins/installed-packages",
@@ -76,6 +84,13 @@ export async function listInstalledPackages(): Promise<PluginInstallOut[]> {
 export async function listInstalledOverview(): Promise<InstalledPluginOverviewItem[]> {
   const { data } = await api.get<InstalledPluginOverviewItem[]>(
     "/api/plugins/installed-overview",
+  );
+  return data;
+}
+
+export async function getInstalledPluginChangelog(key: string): Promise<PluginChangelogResponse> {
+  const { data } = await api.get<PluginChangelogResponse>(
+    `/api/plugins/install/${encodeURIComponent(key)}/changelog`,
   );
   return data;
 }

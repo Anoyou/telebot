@@ -4,6 +4,7 @@ import asyncio
 from datetime import UTC, datetime
 
 import pytest
+from sqlalchemy.dialects import postgresql
 
 from app.services import plugin_ai_quota
 
@@ -152,3 +153,40 @@ async def test_acquire_allows_when_quota_disabled(monkeypatch) -> None:
     assert ticket.limited is False
     assert ticket.backend == "disabled"
     assert ticket.minute_key is None
+
+
+@pytest.mark.asyncio
+async def test_db_fallback_counts_plugin_agent_usage_source(monkeypatch) -> None:
+    statements = []
+
+    class _DB:
+        async def scalar(self, statement):  # noqa: ANN001
+            statements.append(statement)
+            return 0
+
+    class _Session:
+        async def __aenter__(self):
+            return _DB()
+
+        async def __aexit__(self, exc_type, exc, tb) -> bool:  # noqa: ANN001
+            return False
+
+    monkeypatch.setattr(plugin_ai_quota, "AsyncSessionLocal", lambda: _Session())
+
+    await plugin_ai_quota._check_db_usage(
+        "demo",
+        account_id=7,
+        estimate=10,
+        per_minute=100,
+        daily=1000,
+    )
+
+    assert len(statements) == 2
+    sql = str(
+        statements[0].compile(
+            dialect=postgresql.dialect(),
+            compile_kwargs={"literal_binds": True},
+        )
+    )
+    assert "llm_usage.source = 'plugin:demo'" in sql
+    assert "llm_usage.source LIKE 'plugin:demo:' || '%%'" in sql

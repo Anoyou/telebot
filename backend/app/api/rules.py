@@ -40,7 +40,7 @@ from ..schemas.rule import (
     RuleOut,
     RuleUpdate,
 )
-from ..services import audit
+from ..services import audit, rule_service
 from ..services.redactor import redact_value
 from ..services.scheduler_target import (
     SchedulerTargetError,
@@ -272,6 +272,7 @@ async def create_rule(
     config = dict(payload.config or {})
     if key == FEATURE_SCHEDULER:
         config = await _normalize_scheduler_config_for_save(db, config)
+        config = rule_service.bind_scheduler_agent_owner(config, int(user.id))
     rule = Rule(
         account_id=aid,
         feature_key=key,
@@ -337,6 +338,9 @@ async def patch_rule(
     data = payload.model_dump(exclude_unset=True)
     if key == FEATURE_SCHEDULER and data.get("config") is not None:
         data["config"] = await _normalize_scheduler_config_for_save(db, dict(data["config"]))
+        data["config"] = rule_service.bind_scheduler_agent_owner(
+            data["config"], int(user.id)
+        )
     for k, v in data.items():
         setattr(rule, k, dict(v) if k == "config" and v is not None else v)
     await db.commit()
@@ -734,6 +738,11 @@ async def copy_rules(
     copied = 0
     for tgt in targets:
         for r in src_rules:
+            copied_config = dict(r.config or {})
+            if key == FEATURE_SCHEDULER:
+                copied_config = rule_service.bind_scheduler_agent_owner(
+                    copied_config, int(user.id)
+                )
             db.add(
                 Rule(
                     account_id=tgt,
@@ -741,7 +750,7 @@ async def copy_rules(
                     name=r.name,
                     enabled=r.enabled,
                     priority=r.priority,
-                    config=dict(r.config or {}),
+                    config=copied_config,
                 )
             )
             copied += 1

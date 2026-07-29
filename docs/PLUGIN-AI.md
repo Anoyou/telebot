@@ -2,6 +2,8 @@
 
 `ctx.ai` 是第三方插件可用的受控 AI facade。普通文本调用声明 `permissions=["ai_text"]`；需要模型自主选择工具时必须额外声明独立的 `ai_agent` 权限。两种入口都复用平台 Provider、fallback、账号预算、插件 quota、usage 和密钥隔离。
 
+当系统设置中 **AI 平台能力**关闭时，worker 不加载 Provider，也不会注入 `ctx.ai`；旧插件若仍调用会收到结构化不可用错误。新插件可声明 `requires_platform_capabilities=["ai"]` 以便路由层提前裁剪入口。详见 [平台能力热插拔](PLATFORM-CAPABILITIES.md)。
+
 ## Event Bus 主路径写法
 
 ```python
@@ -49,6 +51,25 @@ async def on_event(self, ctx, payload):
 - `tag` / `tags`：兼容别名，已 deprecated；新插件请使用 `provider_tag`。
 
 `complete()` / `run_agent()` 返回值带 `routing` 脱敏摘要（`mode` / `provider_id` / `provider_name` / `matched_tag` / `model` / `api_format` / `client_identity_profile` / `used_fallback`）。插件**不能**指定 UA、客户端身份、API Key、Base URL、代理、内部分类器或全局 fallback 策略——这些由平台统一决定，路由摘要也绝不含密钥 / Base URL / 代理。`run_agent()` 会预先排除没有已启用模型的 provider（无法支撑 tools 调用）。
+
+## 原生文本流
+
+需要边生成边处理时使用 `ctx.ai.stream_complete()`；每次迭代只会返回 Provider 原生流中真实抵达的文本 delta，不会把完整结果拆字模拟：
+
+```python
+parts = []
+async for delta in ctx.ai.stream_complete(
+    system="你是一个简洁助手。",
+    user="总结这段内容",
+    provider_tag="chat",
+    max_tokens=512,
+    timeout_seconds=30,
+):
+    parts.append(delta)
+answer = "".join(parts)
+```
+
+该窄接口支持 Chat Completions、Responses 与 Anthropic Messages。流开始后不会中途切 Provider；消费者取消、超时或上游中断会按已发起的请求保守结算预算和插件 quota。若上游接受了 `stream=true` 却返回普通 JSON，迭代器会把真实完整文本作为一个块交给插件，不会拆字，也不会再发起第二次请求。消费者必须遍历到自然结束，提前 `break` 或关闭迭代器会按中断调用结算。
 
 ## 有界 Agent 与工具调用
 
@@ -132,6 +153,7 @@ result = await ctx.ai.run_agent(
 - 任一限制设为 `0` 表示不限制。
 - 超限时，插件会收到 `AIQuotaError`；平台同时写入一条 `LLMUsage(success=False, error_type="plugin_quota_exceeded")`，可在 Usage 页排查。
 - Redis 不可用时会降级为 DB 检查，但并发预扣保护会暂时关闭；生产环境建议保留 Redis 可用性监控。
+- DB 降级统计会同时聚合 `plugin:{key}` 与 `plugin:{key}:*` usage，因此 `run_agent()` 和普通文本调用共享同一插件额度，不会因 source 子类型漏计。
 - token 估算是软上限：当前按 UTF-8 字节数 `// 4` 粗估，中文场景通常会偏低 1.5-2x，并发尖峰也可能瞬时越限。
 - 跨午夜的请求按 acquire 当时所属的自然日记账，软上限场景误差可接受。
 

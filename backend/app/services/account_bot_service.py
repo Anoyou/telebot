@@ -1380,6 +1380,10 @@ async def update_transfer_notice_config(
     db: AsyncSession,
     aid: int,
     payload: Any,
+    *,
+    verify_tokens: bool = True,
+    interaction_identity: dict[str, Any] | None = None,
+    transfer_identity: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     await ensure_account(db, aid)
     setting_key = transfer_notice_setting_key(aid)
@@ -1407,7 +1411,11 @@ async def update_transfer_notice_config(
         current["interaction_last_update_id"] = None
         current["interaction_last_error"] = None
         try:
-            me = await get_me(interaction_token)
+            me = (
+                await get_me(interaction_token)
+                if verify_tokens
+                else dict(interaction_identity or {})
+            )
             username = me.get("username")
             bot_id = me.get("id")
             current["interaction_bot_username"] = username if isinstance(username, str) else None
@@ -1422,7 +1430,7 @@ async def update_transfer_notice_config(
     if token:
         current["transfer_bot_token_enc"] = encrypt_str(token)
         try:
-            me = await get_me(token)
+            me = await get_me(token) if verify_tokens else dict(transfer_identity or {})
             bot_id = me.get("id")
             current["transfer_bot_id"] = int(bot_id) if bot_id is not None else None
         except Exception:
@@ -1475,8 +1483,9 @@ async def update_interaction_bot_config(
     db: AsyncSession,
     aid: int,
     payload: Any,
+    **kwargs: Any,
 ) -> dict[str, Any]:
-    return await update_transfer_notice_config(db, aid, payload)
+    return await update_transfer_notice_config(db, aid, payload, **kwargs)
 
 
 async def get_interaction_bot_token(db: AsyncSession, aid: int) -> str | None:
@@ -1553,6 +1562,9 @@ async def update_bot_config(
     db: AsyncSession,
     aid: int,
     payload: AccountBotConfigUpdate,
+    *,
+    verify_token: bool = True,
+    verified_username: str | None = None,
 ) -> AccountBot:
     row = await get_bot_config(db, aid, create=True)
     if payload.clear_token:
@@ -1569,14 +1581,17 @@ async def update_bot_config(
             )
         row.bot_token_enc = encrypt_str(payload.bot_token)
         row.last_error = None
-        try:
-            me = await get_me(payload.bot_token)
-            username = me.get("username")
-            if isinstance(username, str):
-                row.username = username
-        except Exception as exc:  # noqa: BLE001
-            row.status = ACCOUNT_BOT_STATUS_ERROR
-            row.last_error = sanitize_bot_error(exc, token=payload.bot_token)
+        if verify_token:
+            try:
+                me = await get_me(payload.bot_token)
+                username = me.get("username")
+                if isinstance(username, str):
+                    row.username = username
+            except Exception as exc:  # noqa: BLE001
+                row.status = ACCOUNT_BOT_STATUS_ERROR
+                row.last_error = sanitize_bot_error(exc, token=payload.bot_token)
+        elif verified_username is not None:
+            row.username = verified_username
     if payload.enabled is not None:
         row.enabled = bool(payload.enabled)
         if not row.enabled:

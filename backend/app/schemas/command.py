@@ -331,6 +331,24 @@ class ProviderModel(BaseModel):
         return v2
 
 
+class LLMRequestHeaderInput(BaseModel):
+    """Provider 专用兼容请求头；value=None 在更新时表示保留已有密文值。"""
+
+    name: str
+    value: str | None = None
+    scopes: list[Literal["inference", "liveness", "models"]] = Field(
+        default_factory=lambda: ["inference", "liveness", "models"]
+    )
+
+
+class LLMRequestHeaderSummary(BaseModel):
+    """兼容请求头脱敏摘要；API 永不返回 value。"""
+
+    name: str
+    scopes: list[str] = Field(default_factory=list)
+    has_value: bool = True
+
+
 class LLMProviderCreate(BaseModel):
     """新建 LLM provider 入参；``api_key`` 可空（如本地 Ollama）。"""
 
@@ -359,7 +377,7 @@ class LLMProviderCreate(BaseModel):
         "auto",
         "minimal",
         "openai_sdk",
-        "codex_cli",
+        "codex_tui",
         "codex_desktop",
         "claude_code",
         "claude_desktop",
@@ -389,6 +407,9 @@ class LLMProviderCreate(BaseModel):
     models: list[ProviderModel] = Field(default_factory=list, max_length=200)
     """该 provider 下挂的候选模型清单。新建时通常留空；建完 provider 后用前端的
     ``Fetch 模型列表`` 按钮自动拉取，再 toggle 启用要用的几个。"""
+
+    request_headers: list[LLMRequestHeaderInput] = Field(default_factory=list)
+    """Provider 专用兼容请求头；服务层校验名称、作用域、大小与系统保留字段。"""
 
     @field_validator("provider")
     @classmethod
@@ -442,7 +463,7 @@ class LLMProviderUpdate(BaseModel):
             "auto",
             "minimal",
             "openai_sdk",
-            "codex_cli",
+            "codex_tui",
             "codex_desktop",
             "claude_code",
             "claude_desktop",
@@ -467,6 +488,7 @@ class LLMProviderUpdate(BaseModel):
     models: list[ProviderModel] | None = Field(default=None, max_length=200)
     """整体替换式的 PATCH——None 表示不动；给 list（含空 list）则覆盖。
     fetch-models / test-model 等独立 endpoint 不通过这条字段，那些直接改 DB。"""
+    request_headers: list[LLMRequestHeaderInput] | None = None
 
     @field_validator("tags")
     @classmethod
@@ -499,6 +521,7 @@ class LLMProviderOut(BaseModel):
     proxy_id: int | None = None
     # 候选模型清单（带启用状态）
     models: list[ProviderModel] = Field(default_factory=list)
+    request_headers: list[LLMRequestHeaderSummary] = Field(default_factory=list)
     created_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
@@ -539,6 +562,7 @@ class FetchModelsPreviewRequest(BaseModel):
     api_key: str | None = Field(default=None, max_length=512)
     proxy_id: int | None = Field(default=None, ge=1)
     pid: int | None = Field(default=None, ge=1)
+    request_headers: list[LLMRequestHeaderInput] | None = None
 
 
 class FetchModelsPreviewResponse(BaseModel):
@@ -569,7 +593,7 @@ class QuickVerifyProviderRequest(BaseModel):
         "auto",
         "minimal",
         "openai_sdk",
-        "codex_cli",
+        "codex_tui",
         "codex_desktop",
         "claude_code",
         "claude_desktop",
@@ -580,6 +604,7 @@ class QuickVerifyProviderRequest(BaseModel):
         "minimal", "low", "medium", "high", "xhigh", "max"
     ] | None = None
     proxy_id: int | None = Field(default=None, ge=1)
+    request_headers: list[LLMRequestHeaderInput] = Field(default_factory=list)
     system_prompt: str = Field(
         default="你是一个自然、简洁的中文聊天助手。请像真实聊天一样直接回复用户，不要只返回 ping/pong。",
         min_length=1,
@@ -619,6 +644,7 @@ class DetectProviderProtocolsRequest(BaseModel):
     # 阶段 B：可选自然提示词；不传则用稳定默认。探测使用自然语言而非字面量 ping。
     system_prompt: str | None = Field(default=None, max_length=2000)
     message: str | None = Field(default=None, max_length=2000)
+    request_headers: list[LLMRequestHeaderInput] | None = None
 
 
 class ProtocolProbeResult(BaseModel):
@@ -631,7 +657,7 @@ class ProtocolProbeResult(BaseModel):
     status_code: int | None = None
     latency_ms: int
     error: str | None = None
-    # 阶段 B：本次探测使用的客户端身份档案（openai_sdk / codex_cli / claude_code / minimal ...）。
+    # 阶段 B：本次探测使用的客户端身份档案（openai_sdk / codex_tui / claude_code / minimal ...）。
     client_identity_profile: str | None = None
     # 探测阶段：network / credentials / protocol / identity。
     stage: str | None = None
@@ -728,7 +754,7 @@ class ChatTestModelsRequest(BaseModel):
         "auto",
         "minimal",
         "openai_sdk",
-        "codex_cli",
+        "codex_tui",
         "codex_desktop",
         "claude_code",
         "claude_desktop",
@@ -782,6 +808,7 @@ class ChatTestModelResult(BaseModel):
     output_tokens: int = 0
     empty_response: bool = False
     error: str | None = None
+    status_code: int | None = None
     client_identity_profile: str | None = None
     effective_api_format: str | None = None
     streaming: bool = False
@@ -799,12 +826,49 @@ class ChatTestModelsResponse(BaseModel):
 
 
 # ── 阶段 C：全量已启用模型测活 ────────────────────────────────
+def _normalize_liveness_model_scope(
+    value: dict[int, list[str]] | None,
+) -> dict[int, list[str]] | None:
+    if value is None:
+        return None
+    normalized: dict[int, list[str]] = {}
+    total = 0
+    for raw_provider_id, raw_models in value.items():
+        provider_id = int(raw_provider_id)
+        if provider_id <= 0:
+            raise ValueError("Provider ID 必须为正整数")
+        if len(raw_models) > 500:
+            raise ValueError("单个 Provider 最多选择 500 个模型")
+        models: list[str] = []
+        seen: set[str] = set()
+        for raw_model in raw_models:
+            model = str(raw_model or "").strip()
+            if not model or len(model) > 256 or model in seen:
+                continue
+            seen.add(model)
+            models.append(model)
+        total += len(models)
+        if total > 2_000:
+            raise ValueError("单次巡检最多选择 2000 个模型")
+        normalized[provider_id] = models
+    return normalized
+
+
 class FullLivenessPreviewRequest(BaseModel):
     """``POST /api/commands/llm-providers/liveness/preview`` 入参。"""
 
     max_tokens: int = Field(default=256, ge=64, le=8000)
     global_concurrency: int = Field(default=8)
     only_provider_ids: list[int] | None = Field(default=None, max_length=200)
+    models_by_provider: dict[int, list[str]] | None = Field(default=None, max_length=200)
+
+    @field_validator("models_by_provider")
+    @classmethod
+    def _validate_models_by_provider(
+        cls,
+        value: dict[int, list[str]] | None,
+    ) -> dict[int, list[str]] | None:
+        return _normalize_liveness_model_scope(value)
 
 
 class LivenessProviderPlan(BaseModel):
@@ -857,7 +921,15 @@ class FullLivenessRunRequest(BaseModel):
     # 范围过滤（失败重测 / 只测某 Provider / 只测新启用模型）。
     only_provider_ids: list[int] | None = Field(default=None, max_length=200)
     only_models: list[str] | None = Field(default=None, max_length=500)
+    models_by_provider: dict[int, list[str]] | None = Field(default=None, max_length=200)
 
+    @field_validator("models_by_provider")
+    @classmethod
+    def _validate_models_by_provider(
+        cls,
+        value: dict[int, list[str]] | None,
+    ) -> dict[int, list[str]] | None:
+        return _normalize_liveness_model_scope(value)
 
 class LivenessResultItem(BaseModel):
     """单个测活任务结果（已脱敏）。"""
@@ -871,6 +943,7 @@ class LivenessResultItem(BaseModel):
     output_tokens: int = 0
     preview: str | None = None
     error: str | None = None
+    status_code: int | None = None
     error_category: str | None = None
     suggestion: str | None = None
     client_identity_profile: str | None = None
@@ -910,7 +983,7 @@ class ClientIdentityVersionItem(BaseModel):
     """单个客户端身份档案的版本信息（用于 UA 版本段）。"""
 
     key: str
-    """版本键，如 codex_cli / claude_code / openai_sdk / codex_desktop_core。"""
+    """版本键，如 codex_tui / claude_code / openai_sdk / codex_desktop_core。"""
 
     label: str
     """前端展示名。"""
@@ -928,10 +1001,30 @@ class ClientIdentityVersionItem(BaseModel):
     """是否支持"检测最新版本"按钮（有公共 registry 才为 True）。"""
 
 
+class ClientIdentityHeaderItem(BaseModel):
+    name: str
+    value: str
+    description: str
+    configurable: bool = False
+    management: Literal["fixed", "runtime", "protocol", "transport", "excluded"] = "fixed"
+    """该头在 TelePilot 中的处理方式，而不是假装抓包里不存在。"""
+
+
+class ClientIdentityRequestProfile(BaseModel):
+    profile: str
+    label: str
+    description: str
+    api_formats: list[str] = Field(default_factory=list)
+    version_keys: list[str] = Field(default_factory=list)
+    source: str = ""
+    headers: list[ClientIdentityHeaderItem] = Field(default_factory=list)
+
+
 class ClientIdentityVersionsResponse(BaseModel):
-    """客户端身份 UA 版本配置总览。"""
+    """AI 供应商请求配置总览。"""
 
     items: list[ClientIdentityVersionItem] = Field(default_factory=list)
+    profiles: list[ClientIdentityRequestProfile] = Field(default_factory=list)
 
 
 class ClientIdentityVersionDetectItem(BaseModel):

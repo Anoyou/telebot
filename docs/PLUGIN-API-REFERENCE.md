@@ -14,13 +14,15 @@
 
 唯一例外：`payout`、收付款、发奖永远由 userbot 执行，不随会话通道切到 interaction bot。
 
+可选字段 `requires_platform_capabilities` 可写在 Manifest、interaction entry 或 event subscription 上，声明对 `ai` / `interaction_bot` / `webhooks` 等平台模块的依赖。旧插件未声明时继续加载；平台在路由层裁剪不可用入口，并在 `FeatureInfo.runtime_availability` 中返回 `ready` / `partial` / `paused` / `transitioning`。详见 [平台能力热插拔](./PLATFORM-CAPABILITIES.md)。
+
 Event Bus、Trace、MessageOps 是标准链路内部契约，不是第四种模式。userbot 命令会话和 interaction bot 规则会话都使用标准事件信封，并通过 `ctx.messages` / 标准 action 输出：
 
 ```python
 from app.worker.plugins.events import event_from_interaction_payload
 
 
-async def on_interaction(self, ctx, entry_key, payload):
+async def on_event(self, ctx, payload):
     event = payload["tp_event"] if "tp_event" in payload else event_from_interaction_payload(payload)
     text = event.message.text or ""
     if "ping" not in text:
@@ -39,10 +41,18 @@ async def on_interaction(self, ctx, entry_key, payload):
 
 ```python
 async def on_direct_message(self, ctx, event):
-    ...
+    if not match(event):
+        return {"status": "ignored"}
+    try:
+        await handle(event)
+    except Exception as exc:
+        return {"status": "failed", "error": str(exc)}
+    return {"status": "consumed"}
 ```
 
-这里的 `event` 是 live Telethon event，不是 `payload`，也不会自动生成 `ctx.messages` action、Trace 或 MessageOps 记录。它不接 interaction bot 事件；需要按钮、Inline、付款确认、规则会话或审计回放时，改用标准会话链路。
+这里的 `event` 是 live Telethon event，不是 `payload`，也不会自动生成标准事件信封或 `ctx.messages` action。平台只记录直通路由与调用 Trace，不提供标准 MessageOps 审计等价物。它不接 interaction bot 事件；需要按钮、Inline、付款确认、规则会话或审计回放时，改用标准会话链路。
+
+账号二次开关只决定插件是否加入直通调度，优先级只决定尝试顺序。只有 `consumed` 会停止后续直通与普通链路；`ignored`、`failed`、异常和未返回结果都会继续调度并最终回退。兼容返回值为 `True → consumed`、`False/None → ignored`、`{"consume": true/false} → consumed/ignored`。
 
 ## 2. 标准会话链路与单入口模型
 
@@ -56,7 +66,7 @@ async def on_direct_message(self, ctx, event):
 
 推荐写法：
 
-1. 用一个 `on_interaction(ctx, entry_key, payload)` 覆盖 `command`、`keyword`、`payment_confirmed`、`message`、`callback_query`、`session_expired`。
+1. 用一个 `on_event(ctx, payload)` 覆盖 `command`、`keyword`、`payment_confirmed`、`message`、`callback_query`、`session_expired`。
 2. 读取 `payload["tp_event"]` 或 `event_from_interaction_payload(payload)`，不要再围绕旧平铺字段写分支。
 3. 单局状态保存在 `session.data`，变更后返回 `update_session`；不要再依赖进程内全局状态才能继续游戏。
 4. 普通发送类动作不要写 `send_via`，平台会继承 `session.channel`；只有跨通道公告、特殊管理消息或迁移桥兼容这类高级场景才显式覆盖。
@@ -87,8 +97,16 @@ class Plugin:
         """插件关停前调用一次。必须幂等。"""
 
     # === 事件处理 ===
+    async def on_event(self, ctx: PluginContext, payload: dict) -> list[dict] | None:
+        """Event Bus 主入口；新插件优先实现。"""
+
+    async def on_interaction(
+        self, ctx: PluginContext, entry_key: str, payload: dict
+    ) -> list[dict] | None:
+        """历史交互入口兼容桥。"""
+
     async def on_message(self, ctx: PluginContext, event) -> None:
-        """消息事件回调。"""
+        """历史消息事件回调。"""
 
     async def on_command(self, ctx: PluginContext, cmd: str, args: list[str], event) -> bool:
         """指令派发回调。返回 True 表示已处理。"""
@@ -122,6 +140,7 @@ class PluginContext:
     rules: list            # 规则列表
     client: Any | None     # 受控客户端 facade；新插件不要作为主动发送主路径
     messages: Any | None   # MessageOps facade；发送/编辑/删除/按钮/Inline 主路径
+    identities: Any | None # 群内安全公开身份 facade
     http: Any | None       # HTTP facade；需要 external_http + allowed_hosts
     ai: Any | None         # AI facade；需要 ai_text
     engine: Any | None     # RateLimitEngine；安装型插件通常为 None
@@ -131,6 +150,12 @@ class PluginContext:
     log: Callable          # 日志函数
     scheduler: Any         # 平台调度器 facade
     generation: int        # generation guard 计数
+    account_proxy_url: str | None  # 账号代理 URL；只供平台 facade 组装，不应写入日志
+
+    # 简单模式命令运行字段
+    event: Any | None
+    args: list[str]
+    command: str
 
     # 工具方法
     async def conversation(self, peer, timeout=30) -> Conversation:
@@ -150,6 +175,7 @@ class PluginContext:
 - `ctx.http`：声明 `permissions=["external_http"]` 且填写 `allowed_hosts` 后注入。它限制协议、域名、超时、响应大小，并在发起请求前阻断 localhost/内网/链路本地地址。默认走账号代理；只有 Manifest 的 `http={"allow_direct": true}` 且账号配置请求 direct 时才允许直连。
 - `ctx.ai`：声明 `permissions=["ai_text"]` 后注入。它复用 TelePilot 的 LLM Provider 池、fallback 链、账号级预算和 usage 记录；插件只能拿到脱敏 provider 元数据，不能读取 `api_key_enc`、`base_url` 或代理 URL。
 - `ctx.ai.complete()` 推荐用 `provider_tag` 按用途选择 provider；`tag` / `tags` 是兼容别名且已 deprecated，新插件不要依赖它们作为主要入口。可选 `route="fixed"|"tag"|"auto"` 显式声明路由模式（留空时按旧参数推断，向后兼容）；返回结果的 `routing` 字段是脱敏路由摘要（模式 / provider / 生效模型 / 命中 tag / 协议 / 身份 / 是否 fallback），不含 key、base_url、代理或内部分类器细节。插件不能指定 UA、身份、密钥、代理、内部分类器或全局 fallback。
+- `ctx.ai.stream_complete()` 返回 Provider 原生文本 delta 的异步迭代器，支持 Chat Completions、Responses 与 Anthropic Messages；不拆分完整响应、不在已输出部分文本后切 Provider。上游忽略 `stream=true` 而返回普通 JSON 时，同一次请求的完整文本作为一个块产出，不会再次调用模型。调用方必须消费到迭代器自然结束；取消、提前关闭、超时或异常按已发起调用保守结算。需要跨 Provider 的完整响应 fallback 时使用 `complete()`。
 - `ctx.ai.run_agent()` 需要独立 `ai_agent` 权限，并同时要求 `capabilities.agent_tools.enabled=true`、manifest `agent_tools[]` 声明和调用方传入同名 handler。平台限制轮数、工具数、重复调用、token 与总超时；只读工具可并行，副作用工具串行。同样支持 `route="fixed"|"tag"|"auto"`，且 Agent 路由会预先排除没有已启用模型的 provider（无法支撑 tools 调用）。
 - `ctx.ai.list_providers()` 可用于展示当前账号可见的脱敏 provider 摘要；更完整的 AI facade 说明见 `docs/PLUGIN-AI.md`。
 
@@ -288,7 +314,30 @@ if attempts is not None and attempts > 5:
 | `event_subscriptions` | list | 标准链路订阅声明，描述插件想从 Event Bus 接收哪些事件 |
 | `capabilities` | dict | 高风险能力声明，例如 `telegram_native_raw` |
 | `agent_tools` | list | Agent 工具名、说明、object JSON Schema、`read_only` 与 `strict`；必须配合 `ai_agent` 权限和 `capabilities.agent_tools` |
+| `agent_keywords` | list | 可选；暴露给系统助手时的路由关键词（最多 6 个） |
 | `strict_trace` | bool | 是否要求路由投递层常驻全链路 trace；默认 `false`，资金类 / `payout` 插件建议开启 |
+
+### 暴露工具给系统助手（System Agent）
+
+插件自用的 `ctx.ai.run_agent()` 与系统助手工具注册表是两套路径。若希望**系统助手**也能调用插件工具，在对应 `agent_tools[]` 条目上增加：
+
+```json
+"expose": ["system_agent"]
+```
+
+约束（第一期）：
+
+1. **只读**：`read_only` 必须为 `true`（或缺省）。写语义条目会被拒绝暴露，并在安装/刷新时写警告日志。
+2. **命名**：系统助手侧工具名为 `plugin_{plugin_key}.{tool_name}`，例如 `plugin_lottery_plus.list_recent_rounds`。
+3. **数量**：每个插件最多暴露 5 个工具。
+4. **执行**：主进程经 worker IPC 调用；worker 侧需提供 handler：
+   - 插件实例方法 `system_agent_{tool_name}(arguments, ctx)`，或
+   - `system_agent_tool(name, arguments, ctx)`，或
+   - `register_system_agent_tool_handler(plugin_key, name, handler)` 显式注册。
+5. **安全**：调用前校验账号已启用该插件（`AccountFeature`）；结果文本经 `mark_external_text` 防注入；超时 10s 返回结构化错误且 `business_changed=false`。
+6. **权限**：仍需 `permissions` 含 `ai_agent`，且 `capabilities.agent_tools.enabled=true`。
+
+参考实现：`lottery_plus` 的只读工具 `list_recent_rounds`（近期开奖轮次摘要）。
 
 ### 完整示例
 
@@ -1358,13 +1407,13 @@ identity = await resolve_public_sender_identity(
 safe_label = sanitize_public_display_name(raw_label, limit=10)
 ```
 
-结算、排行榜等多人名单使用 `resolve_public_sender_identities(ctx, chat_id=..., senders={user_id: name})` 批量解析；平台通过 `ctx.identities` 先使用不受插件沙箱影响的内部 UserBot 读取管理员目录和成员权限。Telegram 会把开启匿名模式的管理员从成员目录隐藏，此时平台会再使用 Interaction Bot 的官方 `getChatMember` 查询 `is_anonymous` 与 `custom_title`。Interaction Bot 必须是目标群管理员，Telegram 才保证能查询其他成员；未满足该前提或查询失败时平台会隐藏姓名，而不会回退按钮回调中的真实姓名。平台不会把 Bot Token、原始客户端或成员列表交给插件。
+结算、排行榜等多人名单使用 `resolve_public_sender_identities(ctx, chat_id=..., senders={user_id: name})` 批量解析；平台通过 `ctx.identities` 使用不受插件沙箱影响的内部 UserBot 读取管理员目录和成员权限，不依赖 Interaction Bot 的 `getChatMember`。身份无法由 UserBot 确认时平台会隐藏姓名，而不会回退按钮回调中的真实姓名。平台不会把 Bot Token、原始客户端或成员列表交给插件。
 
-身份解析结果不做应用层缓存：每次调用都会重新读取当前群管理员目录和成员权限，需要 Interaction Bot 兜底时也会实时请求 `getChatMember`。近期消息锚点只缓存可重新校验的 `message_id`，不会缓存姓名、username、管理员状态或标签。
+身份解析结果不做应用层缓存：每次调用都会重新读取当前群管理员目录和成员权限。UserBot 实体恢复只使用本地实体缓存或 Redis 中可重新校验的近期消息 `message_id`；缓存未命中时不会在按钮 callback 内扫描群历史。近期消息锚点不会缓存姓名、username、管理员状态或标签。
 
-身份解析返回的名称已统一调用 `sanitize_public_display_name()`：移除 Unicode 控制符、零宽格式符、各类空白与不可见填充字符，并限制为最多 10 个字符；清洗后为空时使用“匿名用户”。普通成员的 `display_name` 优先读取 Interaction Bot `getChatMember.user` 中的当前公开姓名，不会把 UserBot 的本地联系人备注当成公开姓名。这只解决公开姓名安全，不是 HTML/Markdown 转义，插件仍须按实际 `parse_mode` 转义后再发送。精确读取当前公开姓名和匿名管理员标签的部署前提是：账号已配置 Interaction Bot，且该 Bot 已加入对应群并提升为管理员；其他管理权限可按业务需要最小化授予。
+身份解析返回的名称已统一调用 `sanitize_public_display_name()`：移除 Unicode 控制符、零宽格式符、各类空白与不可见填充字符，并限制为最多 10 个字符；清洗后为空时使用“匿名用户”。这只解决公开姓名安全，不是 HTML/Markdown 转义，插件仍须按实际 `parse_mode` 转义后再发送。匿名管理员若无法由 UserBot 安全确认，会按 fail-closed 结果隐藏姓名。
 
-仅需账号 UserBot 自身视角、并要求覆盖 UserBot 已加入的所有群时，可直接调用 facade：
+明确要求锁定账号 UserBot 自身视角时，可直接调用专用 facade：
 
 ```python
 identity = await ctx.identities.resolve_userbot(
@@ -1374,7 +1423,7 @@ identity = await ctx.identities.resolve_userbot(
 )
 ```
 
-`resolve_userbot()` 不调用 Interaction Bot；姓名以 UserBot 实体和传入的 UserBot 消息姓名为准，因此会保留该账号保存的联系人姓名。它仍会读取 UserBot 群权限并隐藏匿名管理员。需要 Telegram 跨账号一致的当前公开姓名时，继续使用 `resolve_public_sender_identity()`，不要混用两种口径。
+`resolve_userbot()` 不调用 Interaction Bot；姓名以 UserBot 实体和传入的 UserBot 消息姓名为准，因此会保留该账号保存的联系人姓名。它仍会读取 UserBot 群权限并隐藏匿名管理员。
 
 返回对象字段：
 
@@ -1383,7 +1432,7 @@ identity = await ctx.identities.resolve_userbot(
 | `user_id` | 真实 Telegram User ID，只用于业务校验，不等于可公开姓名 |
 | `display_name` | 可安全写入群消息的名称；已过滤不可见字符并限制为 10 个字符，匿名管理员为清洗后的标签，无标签时为“匿名管理员” |
 | `is_anonymous_admin` | 当前成员是否开启匿名管理员身份 |
-| `is_admin` | 当前成员是否为本群管理员；由成员权限、管理员目录或 Interaction Bot 状态确认，不能通过是否存在标签推断 |
+| `is_admin` | 当前成员是否为本群管理员；由 UserBot 成员权限或管理员目录确认，不能通过是否存在标签推断 |
 | `tag` | Telegram 成员标签或管理员自定义头衔；普通成员存在标签时也不会覆盖 `display_name` |
 | `resolved` | 是否成功读取群成员权限；为 `false` 时 `display_name` 固定使用隐藏身份的回退值 |
 
@@ -1399,6 +1448,8 @@ identity = await ctx.identities.resolve_userbot(
 | `solo_owner` | 只有开局付款人/触发人可继续操作，适合 21 点、个人按钮流程 |
 | `paid_pool` | 只有已确认付费的玩家池可参与，适合多人付费入场 |
 | `notify_only` | 只做通知或一次性动作，不建立玩家操作边界 |
+
+`solo_owner` / `paid_pool` 的按钮回调明确指向牌桌操作，平台会在调用插件前完成参与者校验。普通群消息具有歧义，平台会先让插件判断是否属于当前会话；插件返回业务动作后才应用参与者门禁，返回零动作或仅返回 `no_session` / `end_session` 时静默放行。插件仍必须在修改内部状态前校验消息发送者是否属于自己的玩家集合，不能把平台门禁当成业务状态校验的唯一依据。
 
 `interaction_entries` 中的 `session_scope` 是插件会话作用域，必须按插件业务形态声明。它和交互规则里的 `concurrency` 不是一回事：
 

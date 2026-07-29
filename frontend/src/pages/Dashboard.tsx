@@ -48,7 +48,7 @@ import { PageHeader, PageShell } from "@/components/layout/PageScaffold";
 import { Spinner } from "@/components/ui/misc";
 import { listAccounts } from "@/api/accounts";
 import { listLLMProviders } from "@/api/commands";
-import { getResourceDashboard } from "@/api/system";
+import { getResourceDashboard, getSystemSettings } from "@/api/system";
 import type { ResourceDashboard } from "@/api/types";
 import { cn } from "@/lib/utils";
 
@@ -57,6 +57,12 @@ export function Dashboard() {
   const [searchParams, setSearchParams] = useSearchParams();
   const accountsOpen = searchParams.get("accounts") === "1";
   const guideActive = searchParams.get("guide") === "1";
+  const settingsQ = useQuery({
+    queryKey: ["system", "settings"],
+    queryFn: getSystemSettings,
+    staleTime: 30_000,
+  });
+  const aiEnabled = settingsQ.data?.ai_enabled ?? true;
   const accountsQ = useQuery({
     queryKey: ["accounts"],
     queryFn: listAccounts,
@@ -64,11 +70,13 @@ export function Dashboard() {
   const providersQ = useQuery({
     queryKey: ["llm-providers"],
     queryFn: listLLMProviders,
+    enabled: !settingsQ.isLoading && aiEnabled,
+    retry: false,
   });
   const resourceQ = useQuery({
     queryKey: ["system", "resource-dashboard"],
     queryFn: getResourceDashboard,
-    refetchInterval: 15_000,
+    refetchInterval: 30_000,
     refetchIntervalInBackground: false,
     refetchOnWindowFocus: true,
   });
@@ -87,7 +95,13 @@ export function Dashboard() {
     (provider) => provider.has_api_key || provider.provider === "ollama",
   ).length;
   const workerValue = accountsQ.isError ? "读取失败" : accountsQ.isLoading ? "-" : `${activeAccounts}/${accounts.length}`;
-  const providerValue = providersQ.isError ? "读取失败" : providersQ.isLoading ? "-" : `${readyProviders}/${providers.length}`;
+  const providerValue = !aiEnabled
+    ? "已关闭"
+    : providersQ.isError
+      ? "读取失败"
+      : providersQ.isLoading
+        ? "-"
+        : `${readyProviders}/${providers.length}`;
   const logValue = resourceQ.data
     ? `${resourceQ.data.logs.last_5m_total}`
     : resourceQ.isError
@@ -153,10 +167,22 @@ export function Dashboard() {
           icon={Sparkles}
           title="AI"
           value={providerValue}
-          description={providersQ.isError ? "模型提供商读取失败，点击后重试" : "可调用模型 / 已配置模型"}
-          tone={providersQ.isError ? "danger" : overviewTone(readyProviders, providers.length, providersQ.isLoading)}
+          description={
+            !aiEnabled
+              ? "平台 AI 能力已关闭"
+              : providersQ.isError
+                ? "模型提供商读取失败，点击后重试"
+                : "可调用模型 / 已配置模型"
+          }
+          tone={
+            !aiEnabled
+              ? "neutral"
+              : providersQ.isError
+                ? "danger"
+                : overviewTone(readyProviders, providers.length, providersQ.isLoading)
+          }
           railTone="info"
-          to="/ai?tab=providers"
+          to={aiEnabled ? "/ai?tab=providers" : "/settings?tab=platform"}
         />
         <OverviewTile
           icon={Boxes}
@@ -537,20 +563,20 @@ function ResourceUsageCard({
   error: unknown;
 }) {
   return (
-    <Card>
+    <Card data-resource-usage-card>
       <CardHeader className="border-b border-border/70 pb-4">
         <SectionHeader
           icon={Activity}
           title="资源占用"
-          description="上方是 TelePilot 应用占用；下方是宿主机/服务器整体资源。"
+          description="上方归集 TelePilot 全部进程与项目容器；下方是宿主机/服务器整体资源。"
           meta={data?.host.sampled_at ? (
             <span className="shrink-0 text-xs text-muted-foreground">
-              自动每 15 秒刷新
+              自动每 30 秒刷新
             </span>
           ) : null}
         />
       </CardHeader>
-      <CardContent className="space-y-4">
+      <CardContent className="space-y-4 pt-5">
         {isLoading ? (
           <div className="flex h-24 items-center justify-center">
             <Spinner className="text-primary" />
@@ -615,10 +641,15 @@ function ResourceSamplingPanel({ data }: { data: ResourceDashboard }) {
   const appUptimeLabel = formatUptime(data.app_uptime_seconds) ?? "-";
 
   return (
-    <div className="grid gap-3 md:grid-cols-3">
-      <ResourceMeta label="资源采样" value={sampledLabel} hint="自动每 15 秒刷新" />
+    <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4" data-resource-sampling-panel>
+      <ResourceMeta label="资源采样" value={sampledLabel} hint="自动每 30 秒刷新" />
       <ResourceMeta label="宿主机运行时间" value={hostUptimeLabel} hint="服务器开机后累计" />
       <ResourceMeta label="项目运行时间" value={appUptimeLabel} hint="当前 TelePilot 后端进程" />
+      <ResourceMeta
+        label="采集范围"
+        value={resourceCoverageLabel(data)}
+        hint={resourceCoverageHint(data)}
+      />
     </div>
   );
 }
@@ -684,6 +715,77 @@ function ProcessMemoryCard({ data }: { data: ResourceDashboard }) {
       : undefined;
   const rows = buildProcessMemoryRows(data);
   const compactOverlay = useCompactOverlay();
+  const [open, setOpen] = useState(false);
+  const detailDescription =
+    data.project_total_basis === "compose_containers"
+      ? "项目总量来自全部 Compose 容器；进程行用于内部归因，不再重复相加。"
+      : "主进程和 worker 优先显示 USS；外部项目容器来自 Docker stats。";
+
+  const detailBody = (
+    <>
+      {data.container_probe_error ? (
+        <div className="rounded-xl border px-3 py-2 text-xs text-muted-foreground">
+          {data.container_probe_error}
+        </div>
+      ) : null}
+      {rows.map((row) => (
+        <div
+          key={row.key}
+          className="flex items-center justify-between gap-3 rounded-xl border border-border/70 bg-muted/35 p-3"
+        >
+          <div className="min-w-0">
+            <div className="truncate text-sm font-medium">{row.label}</div>
+            <div className="mt-0.5 font-mono text-xs text-muted-foreground">
+              {row.meta} · CPU {percent(row.cpu)}
+            </div>
+          </div>
+          <div className="shrink-0 text-right">
+            <div className="text-sm font-semibold">{formatMb(row.memoryMb)}</div>
+            <div className="text-[11px] text-muted-foreground">{row.basis}</div>
+          </div>
+        </div>
+      ))}
+      {rows.length === 0 ? (
+        <div className="rounded-xl border border-dashed p-6 text-center text-sm text-muted-foreground">
+          暂无可展示的进程明细。
+        </div>
+      ) : null}
+    </>
+  );
+
+  // 窄屏 / PWA 用居中 Dialog，避免 Dropdown 在底部导航与安全区附近被裁切或滚动困难。
+  if (compactOverlay) {
+    return (
+      <Dialog open={open} onOpenChange={setOpen}>
+        <MetricCard
+          icon={Activity}
+          label="应用总内存"
+          value={formatMb(memoryMb)}
+          hint={projectMemoryHint(memoryMb, totalMb, data)}
+          meterValue={memoryPercent}
+          tone={resourceTone(memoryPercent)}
+          action={(
+            <DialogTrigger asChild>
+              <Button type="button" variant="outline" size="sm" className="h-7 px-2 text-xs">
+                详情
+              </Button>
+            </DialogTrigger>
+          )}
+        />
+        <DialogContent className="dialog-center flex max-h-[min(82dvh,34rem)] w-[calc(100vw-1rem)] max-w-[34rem] flex-col gap-0 overflow-hidden rounded-2xl border-border/80 bg-card p-0 shadow-2xl">
+          <DialogHeader className="shrink-0 border-b px-4 py-3 pr-12 text-left">
+            <DialogTitle className="text-base">应用内存明细</DialogTitle>
+            <DialogDescription className="mt-1 text-sm text-muted-foreground">
+              {detailDescription}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="min-h-0 flex-1 space-y-2 overflow-y-auto overscroll-contain p-4">
+            {detailBody}
+          </div>
+        </DialogContent>
+      </Dialog>
+    );
+  }
 
   return (
     <DropdownMenu modal={false}>
@@ -703,47 +805,17 @@ function ProcessMemoryCard({ data }: { data: ResourceDashboard }) {
         )}
       />
       <DropdownMenuContent
-        align={compactOverlay ? "center" : "end"}
+        align="end"
         collisionPadding={12}
         sideOffset={8}
-        className="max-h-[min(72vh,34rem)] w-[min(34rem,calc(100vw-1rem))] p-0 data-[state=open]:animate-none sm:w-[min(34rem,calc(100vw-2rem))]"
+        className="max-h-[min(72vh,34rem)] w-[min(34rem,calc(100vw-2rem))] p-0 data-[state=open]:animate-none"
         style={{ overflowY: "auto" }}
       >
         <div className="border-b px-4 py-3">
           <div className="text-base font-semibold">应用内存明细</div>
-          <div className="mt-1 text-sm text-muted-foreground">
-            主进程和 worker 优先显示 USS；数据库、Redis、前端来自 Docker stats。
-          </div>
+          <div className="mt-1 text-sm text-muted-foreground">{detailDescription}</div>
         </div>
-        <div className="space-y-2 p-4">
-          {data.container_probe_error ? (
-            <div className="rounded-xl border px-3 py-2 text-xs text-muted-foreground">
-              {data.container_probe_error}
-            </div>
-          ) : null}
-          {rows.map((row) => (
-            <div
-              key={row.key}
-              className="flex items-center justify-between gap-3 rounded-xl border border-border/70 bg-muted/35 p-3"
-            >
-              <div className="min-w-0">
-                <div className="truncate text-sm font-medium">{row.label}</div>
-                <div className="mt-0.5 font-mono text-xs text-muted-foreground">
-                  {row.meta} · CPU {percent(row.cpu)}
-                </div>
-              </div>
-              <div className="shrink-0 text-right">
-                <div className="text-sm font-semibold">{formatMb(row.memoryMb)}</div>
-                <div className="text-[11px] text-muted-foreground">{row.basis}</div>
-              </div>
-            </div>
-          ))}
-          {rows.length === 0 ? (
-            <div className="rounded-xl border border-dashed p-6 text-center text-sm text-muted-foreground">
-              暂无可展示的进程明细。
-            </div>
-          ) : null}
-        </div>
+        <div className="space-y-2 p-4">{detailBody}</div>
       </DropdownMenuContent>
     </DropdownMenu>
   );
@@ -843,8 +915,8 @@ function buildProcessMemoryRows(data: ResourceDashboard): ProcessMemoryRow[] {
     })),
     ...(data.other_processes ?? []).map((proc, index) => ({
       key: `child-${proc.pid ?? index}`,
-      label: "子进程",
-      meta: `pid=${proc.pid ?? "-"}`,
+      label: proc.role || "后台任务子进程",
+      meta: [proc.name, `pid=${proc.pid ?? "-"}`].filter(Boolean).join(" · "),
       cpu: proc.cpu_percent,
       memoryMb: processMemoryMb(proc),
       basis: processMemoryBasis(proc),
@@ -852,7 +924,9 @@ function buildProcessMemoryRows(data: ResourceDashboard): ProcessMemoryRow[] {
     ...(data.containers ?? []).map((container, index) => ({
       key: `container-${container.id ?? container.name ?? index}`,
       label: containerLabel(container),
-      meta: container.name,
+      meta: [container.name, typeof container.pids === "number" ? `${container.pids} PID` : null]
+        .filter(Boolean)
+        .join(" · "),
       cpu: container.cpu_percent,
       memoryMb: container.memory_mb,
       basis:
@@ -868,11 +942,15 @@ function buildProcessMemoryRows(data: ResourceDashboard): ProcessMemoryRow[] {
 
 function containerLabel(container: ContainerResource) {
   const service = (container.service || "").toLowerCase();
+  if (service === "web" || service === "backend") return "Web 后端容器";
   if (service === "postgres") return "PostgreSQL 容器";
   if (service === "redis") return "Redis 容器";
+  if (service === "updater") return "Updater 更新器容器";
   if (service === "frontend") return "前端容器";
+  if (container.name.toLowerCase().includes("web")) return "Web 后端容器";
   if (container.name.toLowerCase().includes("postgres")) return "PostgreSQL 容器";
   if (container.name.toLowerCase().includes("redis")) return "Redis 容器";
+  if (container.name.toLowerCase().includes("updater")) return "Updater 更新器容器";
   if (container.name.toLowerCase().includes("frontend")) return "前端容器";
   return "项目容器";
 }
@@ -880,6 +958,9 @@ function containerLabel(container: ContainerResource) {
 function processScopeHint(data: ResourceDashboard) {
   const extra = data.other_processes?.length ?? 0;
   const containers = data.containers?.length ?? 0;
+  if (data.project_total_basis === "compose_containers" && containers > 0) {
+    return `${containers} 个运行中的 TelePilot 容器；进程明细仅用于内部归因`;
+  }
   const parts = ["Web 主进程", "账号 worker"];
   if (extra > 0) parts.push(`${extra} 个子进程`);
   if (containers > 0) parts.push(`${containers} 个项目容器`);
@@ -904,13 +985,26 @@ function projectMemoryHint(
       ? "含项目容器，服务器总内存占比未知"
       : "服务器总内存占比未知";
   }
-  const basis =
-    containerCount > 0
-      ? "进程独占内存 + 项目容器内存"
+  const basis = data.project_total_basis === "compose_containers"
+    ? "完整项目容器内存"
+    : data.project_total_basis === "processes_plus_containers"
+      ? "进程独占内存 + 外部项目容器内存"
       : data.project_total.uss_mb != null
-        ? "独占内存"
-        : "RSS";
+        ? "进程独占内存"
+        : "进程 RSS";
   return `${basis}，约占服务器总内存 ${((memoryMb / totalMb) * 100).toFixed(1)}%`;
+}
+
+function resourceCoverageLabel(data: ResourceDashboard): string {
+  if (data.project_total_basis === "compose_containers") return "全项目容器";
+  if (data.project_total_basis === "processes_plus_containers") return "进程 + 外部容器";
+  return "仅应用进程";
+}
+
+function resourceCoverageHint(data: ResourceDashboard): string {
+  if (data.container_source === "updater") return "由内部 updater 安全读取 Docker stats";
+  if (data.container_source === "local_docker") return "由当前主机 Docker stats 读取";
+  return data.container_probe_error || "当前运行形态没有项目容器";
 }
 
 function saneMemoryTotalMb(totalMb: number | null | undefined): number | null {

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { RefreshCw, RotateCcw, CheckCircle2, AlertCircle, Copy } from "lucide-react";
+import { RefreshCw, RotateCcw, CheckCircle2, AlertCircle, Copy, ChevronDown } from "lucide-react";
 import { Spinner } from "@/components/ui/misc";
 
 import {
@@ -28,7 +28,7 @@ import type {
   PullUpdateResult,
   UpdateJobStatus,
 } from "@/api/types";
-import { APP_VERSION_LABEL } from "@/lib/version";
+import { APP_VERSION, APP_VERSION_LABEL } from "@/lib/version";
 import {
   clearActiveUpdateJob,
   getUpdateJobRetryDelay,
@@ -55,6 +55,8 @@ interface UpdatePlanMeta {
   planDetail: string | null;
   components: string[];
   services: string[];
+  fileSyncServices: string[];
+  rebuildServices: string[];
   requiresFullUpdate: boolean;
   requiresBackup: boolean;
   requiresMigration: boolean;
@@ -69,9 +71,19 @@ type Step =
   | { kind: "checking" }
   | { kind: "up_to_date"; commit: string }
   | { kind: "cannot_check"; plan: UpdatePlanMeta }
-  | { kind: "has_update"; current: string; remote: string; ahead: number; changedFiles: string[]; plan: UpdatePlanMeta }
+  | { kind: "has_update"; current: string; remote: string; currentVersion: string; targetVersion: string; ahead: number; changedFiles: string[]; commitTitles: string[]; plan: UpdatePlanMeta }
   | { kind: "pulling" }
-  | { kind: "job_running"; jobId: string; status: string; logs: string[]; plan: UpdatePlanMeta; progress: number; phase: string; detail: string | null }
+  | {
+      kind: "job_running";
+      jobId: string;
+      status: string;
+      logs: string[];
+      plan: UpdatePlanMeta;
+      progress: number;
+      phase: string;
+      detail: string | null;
+      stepTimings?: Array<{ phase?: string; duration_ms?: number; detail?: string }>;
+    }
   | { kind: "pulled"; newCommit: string | null; summary: string | null; plan: UpdatePlanMeta }
   | { kind: "pull_failed"; error: string; progress?: number; phase?: string; detail?: string | null }
   | { kind: "check_failed"; error: string }
@@ -135,6 +147,8 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
   const [targetsLoading, setTargetsLoading] = useState(false);
   const [targetSaving, setTargetSaving] = useState(false);
   const [errorCopied, setErrorCopied] = useState(false);
+  const [planExpanded, setPlanExpanded] = useState(false);
+  const [releaseNotesExpanded, setReleaseNotesExpanded] = useState(false);
   const timerRef = useRef<ReturnType<typeof setInterval>>();
   const jobPollTokenRef = useRef(0);
   const checkTokenRef = useRef(0);
@@ -152,6 +166,8 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
     planDetail: res.plan_detail ?? null,
     components: res.components ?? [],
     services: res.services ?? [],
+    fileSyncServices: res.file_sync_services ?? [],
+    rebuildServices: res.rebuild_services ?? [],
     requiresFullUpdate: Boolean(res.requires_full_update),
     requiresBackup: Boolean(res.requires_backup),
     requiresMigration: Boolean(res.requires_migration),
@@ -177,6 +193,9 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
         return "重启使更新生效";
       case "backend":
         if (plan.runtimeMode === "local_source") return "拉取并重启使更新生效";
+        if (plan.fileSyncServices.includes("web") && !plan.rebuildServices.includes("web")) {
+          return "同步文件并重启后端";
+        }
         return "增量重建并重启后端";
       case "frontend":
         if (plan.runtimeMode === "local_source") return "拉取并重启使更新生效";
@@ -186,7 +205,9 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
         return "执行完整更新";
       case "mixed":
         if (plan.runtimeMode === "local_source") return "拉取并重启使更新生效";
-        return "执行增量更新";
+        return plan.fileSyncServices.length > 0 && plan.rebuildServices.length > 0
+          ? "执行混合增量更新"
+          : "执行增量更新";
       case "updater":
         return "更新在线更新器";
       case "docs_only":
@@ -286,6 +307,7 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
           progress: job.progress ?? 0,
           phase: job.phase || "更新中",
           detail: job.detail ?? null,
+          stepTimings: Array.isArray(job.step_timings) ? job.step_timings : [],
         });
       } catch {
         failures += 1;
@@ -311,7 +333,7 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
   const doCheck = useCallback(async (target: AppUpdateTarget) => {
     const checkToken = checkTokenRef.current + 1;
     checkTokenRef.current = checkToken;
-    setStep({ kind: "checking" });
+    setStep((current) => current ?? { kind: "checking" });
     try {
       const res: CheckUpdateResult = await checkUpdate(target);
       if (checkTokenRef.current !== checkToken) return;
@@ -326,8 +348,11 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
           kind: "has_update",
           current: res.current_commit || "?",
           remote: res.remote_commit || "?",
+          currentVersion: res.current_version || APP_VERSION,
+          targetVersion: res.target_version || "未知",
           ahead: res.ahead,
           changedFiles: res.changed_files ?? [],
+          commitTitles: res.commit_titles ?? [],
           plan: parsePlanMeta(res),
         });
       }
@@ -381,6 +406,8 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
     } else {
       dialogGenerationRef.current += 1;
       setStep(null);
+      setPlanExpanded(false);
+      setReleaseNotesExpanded(false);
       setErrorCopied(false);
       jobPollTokenRef.current += 1;
       checkTokenRef.current += 1;
@@ -452,6 +479,8 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
       return;
     }
     setTargetSaving(true);
+    setPlanExpanded(false);
+    setReleaseNotesExpanded(false);
     try {
       const settings = await patchSystemSettings({ app_update_target: { remote, branch } });
       const saved = settings.app_update_target ?? { remote, branch };
@@ -526,7 +555,7 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
     step?.kind === "check_failed";
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="dialog-center siri-glow-soft !flex max-h-[calc(100dvh-1.5rem)] w-[calc(100vw-1.5rem)] max-w-md flex-col overflow-hidden border-primary/45 shadow-2xl shadow-primary/10 ring-1 ring-primary/35">
+      <DialogContent className="dialog-center siri-glow-soft !flex h-[min(34rem,calc(100dvh-1.5rem))] w-[calc(100vw-1.5rem)] max-w-md flex-col overflow-hidden border-primary/45 shadow-2xl shadow-primary/10 ring-1 ring-primary/35">
         <DialogHeader className="shrink-0 pr-6">
           <DialogTitle>检查更新</DialogTitle>
           <DialogDescription>
@@ -545,7 +574,7 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
         </DialogHeader>
 
         {/* 内容区 */}
-        <div className="min-h-0 flex-1 overflow-y-auto pr-1">
+        <div className="update-dialog-body min-h-0 flex-1 overflow-y-scroll pr-1">
           <div className="mb-3 flex items-center justify-between gap-3 rounded-md border border-primary/20 bg-primary/5 px-3 py-2 text-xs">
             <span className="text-muted-foreground">当前应用版本</span>
             <code className="rounded bg-background px-2 py-1 font-mono text-foreground">{APP_VERSION_LABEL}</code>
@@ -648,23 +677,40 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
                   {step.plan.planLabel}
                 </p>
               )}
-              {step.plan.planDetail && (
-                <p className="text-muted-foreground">{step.plan.planDetail}</p>
-              )}
-              <div className="rounded-md bg-muted px-3 py-2 font-mono text-xs space-y-1">
-                {(step.current !== "?" || step.remote !== "?") ? (
-                  <>
-                    <p>当前: {step.current}</p>
-                    <p>远程: {step.remote}</p>
-                  </>
-                ) : (
-                  <p>代码版本: 请在宿主机查看</p>
-                )}
-                {step.plan.runtimeMode && <p>运行模式: {step.plan.runtimeMode}</p>}
-                {step.plan.branch && <p>目标分支: {(step.plan.remote || "origin")}/{step.plan.branch}</p>}
-                {step.plan.updateExecutor && <p>执行器: {step.plan.updateExecutor}</p>}
-              </div>
-              {step.plan.components.length > 0 && (
+              <details
+                className="group rounded-md border bg-background"
+                open={planExpanded}
+                onToggle={(event) => setPlanExpanded(event.currentTarget.open)}
+              >
+                <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-3 px-3 py-2 [&::-webkit-details-marker]:hidden">
+                  <span className="min-w-0">
+                    <span className="block text-xs font-semibold text-foreground">部署详情</span>
+                    <span className="mt-0.5 block text-[11px] text-muted-foreground">
+                      v{step.currentVersion} → v{step.targetVersion} · {step.ahead > 0 ? `${step.ahead} 个新 commit` : "部署待完成"}
+                    </span>
+                  </span>
+                  <ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground transition-transform group-open:rotate-180" />
+                </summary>
+                <div className="space-y-2 border-t px-3 py-3">
+                  {step.plan.planDetail && (
+                    <p className="text-muted-foreground">{step.plan.planDetail}</p>
+                  )}
+                  <div className="rounded-md bg-muted px-3 py-2 font-mono text-xs space-y-1">
+                    {(step.current !== "?" || step.remote !== "?") ? (
+                      <>
+                        <p>当前提交: {step.current}</p>
+                        <p>远程提交: {step.remote}</p>
+                      </>
+                    ) : (
+                      <p>代码版本: 请在宿主机查看</p>
+                    )}
+                    {step.plan.runtimeMode && <p>运行模式: {step.plan.runtimeMode}</p>}
+                    {step.plan.branch && <p>目标分支: {(step.plan.remote || "origin")}/{step.plan.branch}</p>}
+                    {step.plan.updateExecutor && <p>执行器: {step.plan.updateExecutor}</p>}
+                  </div>
+                </div>
+              </details>
+              {step.plan.components.length > 0 && planExpanded && (
                 <div className="rounded-md border bg-background px-3 py-2">
                   <p className="mb-1 text-xs text-muted-foreground">
                     {step.changedFiles.length > 0 ? "变更组件" : "建议更新方式"}
@@ -676,25 +722,31 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
                   </div>
                 </div>
               )}
-              {step.plan.services.length > 0 && (
+              {step.plan.services.length > 0 && planExpanded && (
                 <div className="rounded-md border border-success/30 bg-success/10 px-3 py-2 text-xs space-y-1">
                   <p>本次仅切换：{step.plan.services.join("、")}</p>
+                  {step.plan.fileSyncServices.length > 0 && (
+                    <p>直接同步文件并重启：{step.plan.fileSyncServices.join("、")}</p>
+                  )}
+                  {step.plan.rebuildServices.length > 0 && (
+                    <p>需要编译或镜像构建：{step.plan.rebuildServices.join("、")}</p>
+                  )}
                   {!step.plan.requiresMigration && <p>PostgreSQL / Redis 保持运行，不备份、不迁移。</p>}
                 </div>
               )}
-              {(step.plan.requiresBackup || step.plan.requiresFullUpdate) && (
+              {(step.plan.requiresBackup || step.plan.requiresFullUpdate) && planExpanded && (
                 <div className="rounded-md border border-warning/30 bg-warning/10 px-3 py-2 text-xs space-y-1">
                   {step.plan.requiresBackup && <p>检测到数据库迁移，将自动备份后再切换后端。</p>}
                   {step.plan.requiresFullUpdate && <p>该更新需要完整更新流程，耗时会更长。</p>}
                 </div>
               )}
-              {step.plan.manualCommand && (
+              {step.plan.manualCommand && planExpanded && (
                 <div className="rounded-md border bg-background px-3 py-2">
                   <p className="mb-1 text-xs text-muted-foreground">服务器命令</p>
                   <pre className="text-xs overflow-x-auto font-mono">{step.plan.manualCommand}</pre>
                 </div>
               )}
-              {step.changedFiles.length > 0 && (
+              {step.changedFiles.length > 0 && planExpanded && (
                 <div className="rounded-md border bg-background px-3 py-2">
                   <p className="mb-1 text-xs text-muted-foreground">
                     本次可能变更 {step.changedFiles.length} 个文件
@@ -709,6 +761,39 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
                   </div>
                 </div>
               )}
+              <details
+                className="group rounded-md border border-primary/20 bg-primary/[0.035]"
+                open={releaseNotesExpanded}
+                onToggle={(event) => setReleaseNotesExpanded(event.currentTarget.open)}
+              >
+                <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-3 px-3 py-2 [&::-webkit-details-marker]:hidden">
+                  <span className="min-w-0">
+                    <span className="block text-xs font-semibold text-foreground">查看更新内容</span>
+                    <span className="mt-0.5 block text-[11px] text-muted-foreground">
+                      v{step.currentVersion} → v{step.targetVersion}
+                    </span>
+                  </span>
+                  <ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground transition-transform group-open:rotate-180" />
+                </summary>
+                <div className="border-t border-primary/15 px-3 py-3">
+                  {step.commitTitles.length > 0 ? (
+                    <ol className="space-y-2">
+                      {step.commitTitles.map((title, index) => (
+                        <li key={`${index}-${title}`} className="grid grid-cols-[1.25rem_minmax(0,1fr)] gap-1.5 text-xs leading-relaxed">
+                          <span className="font-mono tabular-nums text-muted-foreground">{index + 1}.</span>
+                          <span className="text-foreground">{title}</span>
+                        </li>
+                      ))}
+                    </ol>
+                  ) : step.changedFiles.length > 0 ? (
+                    <div className="space-y-1 font-mono text-xs text-muted-foreground">
+                      {step.changedFiles.slice(0, 20).map((file) => <p key={file} className="break-all">{file}</p>)}
+                    </div>
+                  ) : (
+                    <p className="text-xs text-muted-foreground">远程版本未提供更新摘要，可展开部署详情查看版本信息。</p>
+                  )}
+                </div>
+              </details>
             </div>
           )}
 
@@ -729,6 +814,29 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
                 <span>任务 {step.jobId} · {step.status}</span>
               </div>
               <UpdateProgress progress={step.progress} phase={step.phase} detail={step.detail} />
+              {step.stepTimings && step.stepTimings.length > 0 ? (
+                <div className="rounded-md border bg-background px-3 py-2">
+                  <p className="mb-1.5 text-xs text-muted-foreground">各步耗时</p>
+                  <ul className="space-y-1 text-xs tabular-nums">
+                    {step.stepTimings.map((item, index) => {
+                      const ms = Number(item.duration_ms || 0);
+                      const label =
+                        ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${ms}ms`;
+                      return (
+                        <li
+                          key={`${item.phase || "step"}-${index}`}
+                          className="flex items-center justify-between gap-3"
+                        >
+                          <span className="min-w-0 truncate text-foreground/85">
+                            {item.phase || "步骤"}
+                          </span>
+                          <span className="shrink-0 text-muted-foreground">{label}</span>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                </div>
+              ) : null}
               <div className="rounded-md border bg-background px-3 py-2">
                 <p className="mb-1 text-xs text-muted-foreground">
                   {(step.plan.remote || "origin")}/{step.plan.branch || "main"} · 最近日志

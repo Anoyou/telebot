@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class PluginRepoCredentialUpdate(BaseModel):
@@ -54,8 +54,7 @@ class PluginRepoOut(BaseModel):
     added_at: datetime | None = None
     updated_at: datetime | None = None
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class PluginRepoPlugin(BaseModel):
@@ -73,6 +72,9 @@ class PluginRepoPlugin(BaseModel):
     version: str = "0.0.0"
     installed: bool = False
     installed_version: str | None = None
+    installed_source: str | None = None
+    installed_source_url: str | None = None
+    source_matches: bool = False
     update_available: bool = False
     event_subscriptions: list[dict[str, Any]] = Field(default_factory=list)
     capabilities: dict[str, Any] = Field(default_factory=dict)

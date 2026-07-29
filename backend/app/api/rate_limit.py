@@ -22,7 +22,7 @@ from datetime import time as dtime
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 
 from ..db.models.account import Account
@@ -53,10 +53,11 @@ from ..schemas.rate_limit import (
 )
 from ..services import audit as audit_svc
 from ..services import auth_login_security, event_trace
+from ..services import platform_capabilities as platform_caps
 from ..services import rate_limit_service as svc
 from ..services.ai_feature import AI_ENABLED_SETTING_KEY, normalize_ai_enabled
 from ..util.update_target import normalize_update_branch, normalize_update_remote
-from ..worker.ipc import GCMD_KILL_SWITCH, GCMD_RELOAD_GLOBAL, GLOBAL_CHANNEL, make_cmd
+from ..worker.ipc import GCMD_RELOAD_GLOBAL, GLOBAL_CHANNEL, make_cmd
 from ..worker.ratelimit.buckets import TokenBuckets
 from ..worker.ratelimit.overrides import add_override, drop_override, list_active
 
@@ -125,7 +126,9 @@ async def create_template(payload: TemplateCreate, db: DBSession, user: CurrentU
 
 
 @router.patch("/api/rate-templates/{tpl_id}", response_model=TemplateOut)
-async def patch_template(tpl_id: int, payload: TemplateCreate, db: DBSession, user: CurrentUser) -> TemplateOut:
+async def patch_template(
+    tpl_id: int, payload: TemplateCreate, db: DBSession, user: CurrentUser
+) -> TemplateOut:
     tpl = await svc.update_template(db, tpl_id, name=payload.name, is_default=payload.is_default)
     if tpl is None:
         raise _bad("not_found", "模板不存在", 404)
@@ -314,7 +317,9 @@ async def get_usage(
         limit = getattr(eff, bucket_field, None)
         used = await buckets.usage(aid, action, win_key)
         pct = (used / limit * 100) if limit else 0.0
-        out.append(UsageBucket(action=action, used=float(used), limit=limit, pct=round(pct, 2), warn=pct >= 80))
+        out.append(
+            UsageBucket(action=action, used=float(used), limit=limit, pct=round(pct, 2), warn=pct >= 80)
+        )
 
     actives = await list_active(db, aid)
     overrides = [
@@ -545,8 +550,10 @@ async def get_kill_switch(db: DBSession, _user: CurrentUser) -> dict[str, bool]:
 
 @router.post("/api/system/kill-switch")
 async def post_kill_switch(payload: KillSwitchRequest, db: DBSession, user: CurrentUser) -> dict[str, bool]:
+    from ..services import kill_switch_service
+
     enabled = bool(payload.enabled)
-    await _set_setting(db, "kill_switch", {"enabled": enabled})
+    await kill_switch_service.set_enabled(db, enabled)
     await _audit(
         db,
         user.id,
@@ -554,45 +561,18 @@ async def post_kill_switch(payload: KillSwitchRequest, db: DBSession, user: Curr
         target="system",
         detail={"enabled": enabled},
     )
-    from ..services import account_bot_runtime, interaction_bot_runtime
-    from ..worker import supervisor
-
-    operations = (
-        (
-            supervisor.stop_running_workers(),
-            account_bot_runtime.stop_account_bot_manager(),
-            interaction_bot_runtime.stop_interaction_bot_manager(),
-        )
-        if enabled
-        else (
-            supervisor.start_active_workers(),
-            account_bot_runtime.start_account_bot_manager(),
-            interaction_bot_runtime.start_interaction_bot_manager(),
-        )
-    )
-    results = await asyncio.gather(*operations, return_exceptions=True)
-    failures = [
-        f"{type(result).__name__}: {result}"
-        for result in results
-        if isinstance(result, BaseException)
-    ]
-
-    # 全局广播给其它监听者 / 多进程场景；失败也必须反馈，不能伪装成全局已收敛。
     try:
-        redis = get_redis()
-        await redis.publish(GLOBAL_CHANNEL, make_cmd(GCMD_KILL_SWITCH, enabled=enabled))
-    except Exception as exc:  # noqa: BLE001
-        failures.append(f"Redis broadcast {type(exc).__name__}: {exc}")
-    if failures:
+        await kill_switch_service.converge_runtime(db, enabled)
+    except kill_switch_service.KillSwitchConvergenceError as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail={
                 "code": "KILL_SWITCH_PARTIAL_FAILURE",
                 "message": "总闸目标状态已保存，但运行时未完全收敛。",
                 "enabled": enabled,
-                "errors": failures,
+                "errors": exc.errors,
             },
-        )
+        ) from exc
     return {"enabled": enabled}
 
 
@@ -609,6 +589,7 @@ async def get_system_settings(db: DBSession, _user: CurrentUser) -> dict[str, An
     elif prefix_val is None:
         # 回落到 .env 默认
         from ..settings import settings as app_settings
+
         prefix = app_settings.command_prefix
     else:
         prefix = str(prefix_val)
@@ -627,11 +608,19 @@ async def get_system_settings(db: DBSession, _user: CurrentUser) -> dict[str, An
             "branch": os.getenv("TELEPILOT_UPDATE_BRANCH", "main"),
         },
     )
-    ai_enabled_val = await _get_setting(db, AI_ENABLED_SETTING_KEY, {"enabled": True})
+    # AI 开关委托平台能力服务（保留 settings 兼容字段）。
+    try:
+        if not platform_caps.get_snapshot().cache_ready:
+            await platform_caps.refresh_cache_from_db(db)
+        ai_enabled = platform_caps.is_ai_enabled_cached(fail_closed=True)
+    except Exception:  # noqa: BLE001
+        ai_enabled_val = await _get_setting(db, AI_ENABLED_SETTING_KEY, {"enabled": True})
+        ai_enabled = normalize_ai_enabled(ai_enabled_val)
     llm_val = await _get_setting(db, "llm_limits", {})
     payout_val = await _get_setting(db, "payout_limits", {})
     log_val = await _get_setting(db, "log_retention", {})
     login_security_val = await _get_setting(db, "login_security", {})
+    ui_preferences_val = await _get_setting(db, "ui_preferences", {})
     sudo_val = await _get_setting(db, "sudo_enabled", {"enabled": False})
     prefix_required_val = await _get_setting(db, "command_prefix_required", {"enabled": True})
     echo_guard_val = await _get_setting(db, "command_echo_guard_previous_messages", None)
@@ -650,6 +639,7 @@ async def get_system_settings(db: DBSession, _user: CurrentUser) -> dict[str, An
     login_security = auth_login_security.normalize_login_security_config(
         login_security_val if isinstance(login_security_val, dict) else {}
     )
+    ui_preferences = ui_preferences_val if isinstance(ui_preferences_val, dict) else {}
     remote_update = remote_update_val if isinstance(remote_update_val, dict) else {}
     app_update_target = app_update_target_val if isinstance(app_update_target_val, dict) else {}
     try:
@@ -668,13 +658,15 @@ async def get_system_settings(db: DBSession, _user: CurrentUser) -> dict[str, An
             "remote": str(app_update_target.get("remote") or "origin"),
             "branch": str(app_update_target.get("branch") or "main"),
         },
-        "sudo_enabled": bool(sudo_val.get("enabled", False)) if isinstance(sudo_val, dict) else bool(sudo_val),
+        "sudo_enabled": bool(sudo_val.get("enabled", False))
+        if isinstance(sudo_val, dict)
+        else bool(sudo_val),
         "command_prefix_required": (
             bool(prefix_required_val.get("enabled", True))
             if isinstance(prefix_required_val, dict)
             else bool(prefix_required_val)
         ),
-        "ai_enabled": normalize_ai_enabled(ai_enabled_val),
+        "ai_enabled": ai_enabled,
         "command_echo_guard_previous_messages": _normalize_command_echo_guard_limit(echo_guard_source),
         "login_security": auth_login_security.login_security_config_to_dict(login_security),
         "llm_limits": {
@@ -706,16 +698,25 @@ async def get_system_settings(db: DBSession, _user: CurrentUser) -> dict[str, An
                 in {"debug", "info", "warn", "error"}
                 else "info"
             ),
-            "trace_retention_days": max(
-                0, int(log_retention.get("trace_retention_days", 30) or 0)
-            ),
+            "trace_retention_days": max(0, int(log_retention.get("trace_retention_days", 30) or 0)),
             "trace_payload_snapshot_retention_days": max(
                 0, int(log_retention.get("trace_payload_snapshot_retention_days", 7) or 0)
             ),
             "native_raw_persist_enabled": bool(log_retention.get("native_raw_persist_enabled", False)),
-            "native_raw_retention_days": max(
-                0, int(log_retention.get("native_raw_retention_days", 1) or 0)
-            ),
+            "native_raw_retention_days": max(0, int(log_retention.get("native_raw_retention_days", 1) or 0)),
+        },
+        "ui_preferences": {
+            "sidebar_order": [
+                str(item) for item in ui_preferences.get("sidebar_order", []) if isinstance(item, str)
+            ],
+            "mobile_nav_order": [
+                str(item) for item in ui_preferences.get("mobile_nav_order", []) if isinstance(item, str)
+            ],
+            "provider_order": [
+                int(item)
+                for item in ui_preferences.get("provider_order", [])
+                if isinstance(item, int) and not isinstance(item, bool) and item > 0
+            ],
         },
     }
 
@@ -768,6 +769,12 @@ class _LoginSecurityPatch(BaseModel):
     recovery_code_ttl_seconds: int | None = None
 
 
+class _UIPreferencesPatch(BaseModel):
+    sidebar_order: list[str] | None = Field(default=None, max_length=10)
+    mobile_nav_order: list[str] | None = Field(default=None, max_length=4)
+    provider_order: list[int] | None = Field(default=None, max_length=2048)
+
+
 class _SettingsPatch(BaseModel):
     """前端只会传子集；未传字段保持不变。"""
 
@@ -783,12 +790,11 @@ class _SettingsPatch(BaseModel):
     llm_limits: _LLMLimitsPatch | None = None
     payout_limits: _PayoutLimitsPatch | None = None
     log_retention: _LogRetentionPatch | None = None
+    ui_preferences: _UIPreferencesPatch | None = None
 
 
 @router.patch("/api/system/settings")
-async def patch_system_settings(
-    payload: _SettingsPatch, db: DBSession, user: CurrentUser
-) -> dict[str, Any]:
+async def patch_system_settings(payload: _SettingsPatch, db: DBSession, user: CurrentUser) -> dict[str, Any]:
     if payload.command_prefix is not None:
         prefix = payload.command_prefix.strip()
         if not prefix:
@@ -799,6 +805,42 @@ async def patch_system_settings(
         await _audit(db, user.id, "set_command_prefix", target="system", detail={"value": prefix})
         # 让所有 worker 热加载新前缀
         await _broadcast_reload()
+    if payload.ui_preferences is not None:
+        allowed_routes = {
+            "/plugins",
+            "/ai",
+            "/interaction",
+            "/operations",
+            "/overview",
+            "/ledger",
+            "/webhooks",
+            "/dispatch-debug",
+            "/logs",
+            "/settings",
+        }
+        current_raw = await _get_setting(db, "ui_preferences", {})
+        next_preferences = current_raw.copy() if isinstance(current_raw, dict) else {}
+        data = payload.ui_preferences.model_dump(exclude_unset=True)
+        for key in ("sidebar_order", "mobile_nav_order"):
+            if key not in data or data[key] is None:
+                continue
+            values = [str(item) for item in data[key]]
+            if len(values) != len(set(values)) or any(item not in allowed_routes for item in values):
+                raise _bad("invalid_ui_preferences", f"{key} 包含重复或未知页面")
+            next_preferences[key] = values
+        if data.get("provider_order") is not None:
+            values = [int(item) for item in data["provider_order"]]
+            if any(item <= 0 for item in values) or len(values) != len(set(values)):
+                raise _bad("invalid_ui_preferences", "provider_order 包含重复或无效 ID")
+            next_preferences["provider_order"] = values
+        await _set_setting(db, "ui_preferences", next_preferences)
+        await _audit(
+            db,
+            user.id,
+            "set_ui_preferences",
+            target="system",
+            detail={"fields": sorted(data)},
+        )
     if payload.timezone is not None:
         tz = payload.timezone.strip()
         # 校验：空字符串会回到默认上海时区，非空必须是合法 IANA 时区。
@@ -806,10 +848,12 @@ async def patch_system_settings(
             raise _bad("invalid_timezone", f"无效时区：{tz}")
         await _set_setting(db, "timezone", {"value": tz or "Asia/Shanghai"})
     if payload.ai_enabled is not None:
-        enabled = bool(payload.ai_enabled)
-        await _set_setting(db, AI_ENABLED_SETTING_KEY, {"enabled": enabled})
-        await _audit(db, user.id, "set_ai_enabled", target="system", detail={"enabled": enabled})
-        await _broadcast_reload()
+        # 兼容委托：写入 generation、本地状态机与 CMD_RELOAD_CONFIG 均由平台能力服务处理。
+        await platform_caps.set_ai_enabled_compat(
+            db,
+            bool(payload.ai_enabled),
+            user_id=user.id,
+        )
     if payload.sudo_enabled is not None:
         enabled = bool(payload.sudo_enabled)
         await _set_setting(db, "sudo_enabled", {"enabled": enabled})
@@ -874,9 +918,7 @@ async def patch_system_settings(
         current = current if isinstance(current, dict) else {}
         enabled = bool(current.get("enabled", True)) if raw.enabled is None else bool(raw.enabled)
         interval_source = (
-            current.get("interval_minutes", 360)
-            if raw.interval_minutes is None
-            else raw.interval_minutes
+            current.get("interval_minutes", 360) if raw.interval_minutes is None else raw.interval_minutes
         )
         interval = max(30, min(10080, int(interval_source or 360)))
         await _set_setting(
@@ -974,9 +1016,7 @@ async def patch_system_settings(
             "trace_enabled": bool(current.get("trace_enabled", True)),
             "event_bus_delivery_enabled": bool(current.get("event_bus_delivery_enabled", True)),
             "inline_updates_enabled": bool(current.get("inline_updates_enabled", True)),
-            "runtime_log_retention_days": max(
-                0, int(current.get("runtime_log_retention_days", 30) or 0)
-            ),
+            "runtime_log_retention_days": max(0, int(current.get("runtime_log_retention_days", 30) or 0)),
             "runtime_log_max_message_chars": max(
                 200, int(current.get("runtime_log_max_message_chars", 2000) or 2000)
             ),
@@ -989,18 +1029,19 @@ async def patch_system_settings(
                 in {"debug", "info", "warn", "error"}
                 else "info"
             ),
-            "trace_retention_days": max(
-                0, int(current.get("trace_retention_days", 30) or 0)
-            ),
+            "trace_retention_days": max(0, int(current.get("trace_retention_days", 30) or 0)),
             "trace_payload_snapshot_retention_days": max(
                 0, int(current.get("trace_payload_snapshot_retention_days", 7) or 0)
             ),
             "native_raw_persist_enabled": bool(current.get("native_raw_persist_enabled", False)),
-            "native_raw_retention_days": max(
-                0, int(current.get("native_raw_retention_days", 1) or 0)
-            ),
+            "native_raw_retention_days": max(0, int(current.get("native_raw_retention_days", 1) or 0)),
         }
-        bool_keys = {"trace_enabled", "event_bus_delivery_enabled", "inline_updates_enabled", "native_raw_persist_enabled"}
+        bool_keys = {
+            "trace_enabled",
+            "event_bus_delivery_enabled",
+            "inline_updates_enabled",
+            "native_raw_persist_enabled",
+        }
         bounds = {
             "runtime_log_retention_days": (0, 3650),
             "runtime_log_max_message_chars": (200, 20000),

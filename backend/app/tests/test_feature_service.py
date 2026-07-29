@@ -38,10 +38,14 @@ def test_account_schema_allows_direct_passthrough_only_when_declared() -> None:
 
     extended = features_api._allow_account_direct_passthrough_config(schema, manifest)
 
-    assert extended["properties"]["direct_passthrough"]["properties"]["enabled"] == {
+    direct_properties = extended["properties"]["direct_passthrough"]["properties"]
+    assert direct_properties["enabled"] == {
         "type": "boolean",
         "default": False,
+        "description": "账号二次开关：仅决定插件是否加入直通调度",
     }
+    assert "exclusive" not in direct_properties
+    assert "failure_policy" not in direct_properties
 
 
 def test_account_schema_does_not_expose_direct_passthrough_without_capability() -> None:

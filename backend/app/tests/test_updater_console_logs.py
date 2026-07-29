@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
+from unittest.mock import patch
 
 
 def _load_updater_module():
@@ -47,7 +48,7 @@ def test_console_logs_respects_explicit_compose_project_name(monkeypatch) -> Non
     monkeypatch.setattr(
         updater,
         "_run",
-        lambda args, **_kw: (commands.append(args) or ("custom-web-1 | ready", "", 0)),
+        lambda args, **_kw: commands.append(args) or ("custom-web-1 | ready", "", 0),
     )
 
     result = updater._tail_console_logs("all", 20, None)
@@ -55,6 +56,49 @@ def test_console_logs_respects_explicit_compose_project_name(monkeypatch) -> Non
     assert result["ok"] is True
     assert result["project"] == "custom_stack"
     assert commands[0][:4] == ["docker", "compose", "-p", "custom_stack"]
+
+
+def test_resource_snapshot_includes_all_running_project_services(monkeypatch) -> None:
+    updater = _load_updater_module()
+    monkeypatch.setattr(updater, "HOST_PROJECT_DIR", Path("/TelePilot"))
+
+    services = ("postgres", "redis", "web", "updater", "frontend", "plugin-runner")
+    ps_rows = "\n".join(
+        f"id-{service}|telepilot-{service}-1|telepilot|{service}|/TelePilot"
+        for service in services
+    )
+    stats_rows = "\n".join(
+        "{" + (
+            f'"ID":"id-{service}","Name":"telepilot-{service}-1",'
+            f'"CPUPerc":"{index + 1}.0%","MemUsage":"{(index + 1) * 10}MiB / 512MiB",'
+            f'"MemPerc":"{index + 1}.5%","PIDs":"{index + 2}"'
+        ) + "}"
+        for index, service in enumerate(services)
+    )
+
+    def fake_run(args, **_kwargs):  # noqa: ANN001
+        if args[:2] == ["docker", "ps"]:
+            return ps_rows, "", 0
+        if args[:3] == ["docker", "stats", "--no-stream"]:
+            return stats_rows, "", 0
+        raise AssertionError(args)
+
+    monkeypatch.setattr(updater, "_run", fake_run)
+
+    result = updater._resource_snapshot()
+
+    assert result["ok"] is True
+    assert result["project"] == "telepilot"
+    assert {item["service"] for item in result["containers"]} == set(services)
+    assert next(item for item in result["containers"] if item["service"] == "web") == {
+        "id": "id-web",
+        "name": "telepilot-web-1",
+        "service": "web",
+        "cpu_percent": "3.0%",
+        "memory_usage": "30MiB / 512MiB",
+        "memory_percent": "3.5%",
+        "pids": 4,
+    }
 
 
 def test_apply_job_env_uses_host_compose_project_name(monkeypatch) -> None:
@@ -81,9 +125,7 @@ def test_apply_job_env_recovers_absolute_host_dir_from_container_label(monkeypat
         updater,
         "_run",
         lambda args, **_kw: (
-            ("/TelePilot", "", 0)
-            if args[:3] == ["docker", "inspect", "--format"]
-            else ("", "", 1)
+            ("/TelePilot", "", 0) if args[:3] == ["docker", "inspect", "--format"] else ("", "", 1)
         ),
     )
 
@@ -132,7 +174,7 @@ def test_incremental_script_never_recreates_web_with_updater() -> None:
     assert '-e COMPOSE_PROJECT_NAME="$project"' in script
     assert '-e TELEPILOT_HOST_PROJECT_DIR="$TELEPILOT_HOST_PROJECT_DIR"' in script
     assert "telepilot-updater-handoff.log" in script
-    assert 'com.docker.compose.project' in script
+    assert "com.docker.compose.project" in script
 
 
 def test_incremental_script_uses_compose_health_without_localhost_frontend_probe() -> None:
@@ -143,6 +185,21 @@ def test_incremental_script_uses_compose_health_without_localhost_frontend_probe
     assert 'wait_http "$(frontend_url)"' not in script
     assert "wait_compose_healthy docker-compose.yml frontend" in script
     assert "@@TELEPILOT_PROGRESS@@" in script
+
+
+def test_incremental_script_syncs_backend_files_with_image_rollback() -> None:
+    repo_root = Path(__file__).resolve().parents[3]
+    script = (repo_root / "scripts" / "prod-update.sh").read_text(encoding="utf-8")
+
+    assert 'git archive "$NEW_COMMIT"' in script
+    assert 'python -m compileall -q "$stage/backend/app"' in script
+    assert "new_image_id=\"$(docker commit" in script
+    assert '--message "TelePilot 文件同步' in script
+    assert '--change "CMD $image_cmd"' in script
+    assert "自定义 ENTRYPOINT" in script
+    assert "rollback_web_runtime_image" in script
+    assert 'docker image tag "$WEB_SYNC_OLD_IMAGE_ID" "$WEB_SYNC_IMAGE_REF"' in script
+    assert "文件级同步服务：web（无需执行 docker build）" in script
 
 
 def test_runtime_dockerfiles_preserve_incremental_build_caches() -> None:
@@ -176,8 +233,7 @@ def test_update_target_options_come_from_git(monkeypatch, tmp_path) -> None:
             return "origin\nbackup", "", 0
         if args == ["git", "ls-remote", "--heads", "origin"]:
             return (
-                "a\trefs/heads/main\n"
-                "b\trefs/heads/codex/0.33-interaction-framework\n",
+                "a\trefs/heads/main\nb\trefs/heads/codex/0.33-interaction-framework\n",
                 "",
                 0,
             )
@@ -231,6 +287,8 @@ def test_console_logs_filters_internal_health_checks(monkeypatch) -> None:
             "\n".join(
                 [
                     'updater-1  | 2026-07-08T13:57:45.254520371Z [updater] 127.0.0.1 "GET /health HTTP/1.1" 200 -',
+                    'updater-1  | 2026-07-24T06:32:46Z [updater] 172.18.0.4 "GET /jobs/890e65215801 HTTP/1.1" 200 -',
+                    'updater-1  | 2026-07-24T06:32:47Z [updater] 172.18.0.4 "GET /console-logs?service=all&tail=300 HTTP/1.1" 200 -',
                     'frontend-1 | 127.0.0.1 - - [08/Jul/2026:13:57:45 +0000] "GET / HTTP/1.1" 200 2662 "-" "Wget" "-"',
                     "web-1      | INFO:app.worker:真实业务日志",
                 ]
@@ -244,6 +302,70 @@ def test_console_logs_filters_internal_health_checks(monkeypatch) -> None:
 
     assert result["ok"] is True
     assert result["lines"] == ["web-1      | INFO:app.worker:真实业务日志"]
+
+
+def test_console_logs_filters_routine_info_noise_but_keeps_http_failures(monkeypatch) -> None:
+    updater = _load_updater_module()
+    monkeypatch.setattr(updater, "HOST_PROJECT_DIR", Path("/TelePilot"))
+    monkeypatch.setattr(
+        updater,
+        "_run",
+        lambda _args, **_kw: (
+            "\n".join(
+                [
+                    "web-1 | INFO:alembic.runtime.migration:Context impl PostgresqlImpl.",
+                    "web-1 | INFO:alembic.runtime.migration:Running upgrade 0040 -> 0041",
+                    "web-1 | 2026-07-23 22:45:28,309 [worker:1] INFO Got difference for channel 2304101980 updates",
+                    'web-1 | INFO:httpx:HTTP Request: GET https://example.test/models "HTTP/1.1 204 No Content"',
+                    'web-1 | INFO:httpx:HTTP Request: GET https://example.test/models "HTTP/1.1 503 Service Unavailable"',
+                    "web-1 | WARNING:app.services.feature_service:配置异常",
+                ]
+            ),
+            "",
+            0,
+        ),
+    )
+
+    result = updater._tail_console_logs("all", 20, None)
+
+    assert result["lines"] == [
+        "web-1 | INFO:alembic.runtime.migration:Running upgrade 0040 -> 0041",
+        'web-1 | INFO:httpx:HTTP Request: GET https://example.test/models "HTTP/1.1 503 Service Unavailable"',
+        "web-1 | WARNING:app.services.feature_service:配置异常",
+    ]
+
+
+def test_updater_handler_silences_only_successful_health_requests() -> None:
+    updater = _load_updater_module()
+    handler = object.__new__(updater.Handler)
+    handler.path = "/health"
+    handler.client_address = ("127.0.0.1", 8765)
+
+    with patch("builtins.print") as mocked_print:
+        updater.Handler.log_message(handler, '"GET /health HTTP/1.1" %s -', "200")
+        mocked_print.assert_not_called()
+
+        updater.Handler.log_message(handler, '"GET /health HTTP/1.1" %s -', "503")
+        mocked_print.assert_called_once()
+
+
+def test_updater_handler_silences_successful_internal_polling() -> None:
+    updater = _load_updater_module()
+    handler = object.__new__(updater.Handler)
+    handler.client_address = ("172.18.0.4", 8765)
+
+    with patch("builtins.print") as mocked_print:
+        handler.path = "/jobs/890e65215801"
+        updater.Handler.log_message(handler, '"GET /jobs/890e65215801 HTTP/1.1" %s -', "200")
+        handler.path = "/console-logs?service=all&tail=300"
+        updater.Handler.log_message(handler, '"GET /console-logs?service=all&tail=300 HTTP/1.1" %s -', "200")
+        handler.path = "/resources"
+        updater.Handler.log_message(handler, '"GET /resources HTTP/1.1" %s -', "200")
+        mocked_print.assert_not_called()
+
+        handler.path = "/jobs/890e65215801"
+        updater.Handler.log_message(handler, '"GET /jobs/890e65215801 HTTP/1.1" %s -', "500")
+        mocked_print.assert_called_once()
 
 
 def test_console_logs_falls_back_to_labeled_containers_when_project_is_wrong(monkeypatch) -> None:
@@ -279,12 +401,16 @@ def test_console_logs_reports_ambiguous_compose_projects(monkeypatch) -> None:
         if args[:2] == ["docker", "compose"]:
             return "", "", 0
         if args[:3] == ["docker", "ps", "-a"]:
-            return "\n".join(
-                [
-                    "abc|one-web-1|one|web|/srv/one",
-                    "def|two-web-1|two|web|/srv/two",
-                ]
-            ), "", 0
+            return (
+                "\n".join(
+                    [
+                        "abc|one-web-1|one|web|/srv/one",
+                        "def|two-web-1|two|web|/srv/two",
+                    ]
+                ),
+                "",
+                0,
+            )
         raise AssertionError(args)
 
     monkeypatch.setattr(updater, "_run", fake_run)
@@ -341,8 +467,13 @@ def test_update_plan_retries_commit_with_pending_deployment(monkeypatch, tmp_pat
             return "targetcommit", "", 0
         if args == ["git", "rev-parse", "--git-path", "telepilot-deploy-pending"]:
             return ".git/telepilot-deploy-pending", "", 0
+        if args == ["git", "show", "targetcommit:backend/app/__init__.py"]:
+            return '__version__ = "0.72.0-beta.2"', "", 0
         if args[:3] == ["git", "rev-list", "--count"]:
             return "0", "", 0
+        if args[:2] == ["git", "log"]:
+            assert args[-1] == "oldcommit..targetcommit"
+            return "改进在线更新弹窗\n修复控制台噪声", "", 0
         if args[:2] == ["python", "backend/app/util/update_plan.py"]:
             assert args[-4:] == ["--old", "oldcommit", "--new", "targetcommit"]
             return (
@@ -362,3 +493,6 @@ def test_update_plan_retries_commit_with_pending_deployment(monkeypatch, tmp_pat
     assert result["has_update"] is True
     assert result["deployment_pending"] is True
     assert result["deploy_from_commit"] == "oldcommit"
+    assert result["current_version"] == "0.72.0-beta.2"
+    assert result["target_version"] == "0.72.0-beta.2"
+    assert result["commit_titles"] == ["改进在线更新弹窗", "修复控制台噪声"]

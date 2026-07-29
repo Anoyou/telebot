@@ -452,6 +452,41 @@ class _TracePluginClient:
             )
             raise
 
+    async def unpin_message(self, entity: Any, message: Any, *args: Any, **kwargs: Any) -> Any:
+        action = self._action("unpin_message", chat_id=entity, message_id=message)
+        if self._dry_run_enabled():
+            result = {
+                "dry_run": True,
+                "chat_id": _int_or_none(entity),
+                "message_id": _int_or_none(message),
+            }
+            await self._record(
+                action,
+                TRACE_STATUS_OK,
+                actual_send_via="userbot_reply",
+                result=result,
+                _tap_status=ACTION_EVENT_STATUS_DRY_RUN,
+            )
+            return self._dry_run_object(action)
+        try:
+            result = await self._client.unpin_message(entity, message, *args, **kwargs)
+            await self._record(
+                action,
+                TRACE_STATUS_OK,
+                actual_send_via="userbot_reply",
+                result=_trace_client_result(result),
+            )
+            return result
+        except Exception as exc:  # noqa: BLE001
+            await self._record(
+                action,
+                TRACE_STATUS_FAILED,
+                actual_send_via="userbot_reply",
+                error_code="telegram_api_error",
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            raise
+
     def _action(
         self,
         action_type: str,
@@ -620,6 +655,25 @@ def _event_bus_subscriptions_from_state(state: _AccountState) -> list[Any]:
         raw_subscriptions = getattr(manifest, "event_subscriptions", None)
         if not isinstance(raw_subscriptions, list):
             continue
+        # 插件级硬依赖：requires_platform_capabilities 未满足则整插件订阅不投递
+        plugin_requires = list(getattr(manifest, "requires_platform_capabilities", None) or [])
+        if plugin_requires:
+            try:
+                from ...services.platform_capabilities import is_module_enabled_cached
+
+                blocked = False
+                for req in plugin_requires:
+                    key = str(req or "").strip()
+                    if not key:
+                        continue
+                    if not is_module_enabled_cached(key, fail_closed=True):  # type: ignore[arg-type]
+                        blocked = True
+                        break
+                if blocked:
+                    continue
+            except Exception:  # noqa: BLE001
+                # 能力状态无法确认时，声明硬依赖的插件不得进入订阅集合。
+                continue
         for raw in raw_subscriptions:
             if isinstance(raw, dict):
                 subscriptions.append(
@@ -628,7 +682,15 @@ def _event_bus_subscriptions_from_state(state: _AccountState) -> list[Any]:
                         plugin_key=plugin_key,
                     )
                 )
-    return subscriptions
+    # 按通道/入口级 requires 与模块开关裁剪
+    try:
+        from ...services.platform_capabilities import filter_runtime_event_subscriptions
+
+        return filter_runtime_event_subscriptions(subscriptions)
+    except Exception:  # noqa: BLE001
+        # 过滤器本身依赖平台能力快照。未知状态不能回退为全部订阅，
+        # 否则关闭的 Interaction/Webhook 入口会在异常窗口重新放行。
+        return []
 
 
 def _event_bus_state_for_userbot_dispatch(state: _AccountState) -> dict[str, Any]:
@@ -900,6 +962,25 @@ async def dispatch_webhook_event(
 ) -> dict[str, Any]:
     """Deliver a normalized inbound webhook to plugins that subscribe to webhook events."""
 
+    # 副作用前再次检查：关闭瞬间竞态或旧 generation 命令不得继续投递。
+    try:
+        from ...services.platform_capabilities import (
+            is_module_enabled_cached,
+            refresh_cache_from_db,
+        )
+
+        if not is_module_enabled_cached("webhooks", fail_closed=True):
+            try:
+                await refresh_cache_from_db()
+            except Exception:  # noqa: BLE001
+                pass
+        if not is_module_enabled_cached("webhooks", fail_closed=True):
+            raise RuntimeError("webhooks module disabled")
+    except RuntimeError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError("webhooks module disabled") from exc
+
     state = _STATES.get(account_id)
     if state is None:
         raise RuntimeError("账号 worker state 不存在")
@@ -1135,7 +1216,7 @@ def _evaluate_direct_passthrough_stage(
         )
     for plugin_key, inst in list(state.instances.items()):
         ctx = state.contexts.get(plugin_key)
-        detail = {"plugin_key": plugin_key}
+        detail: dict[str, Any] = {"plugin_key": plugin_key}
         if ctx is None or ctx.generation != state.generation:
             detail.update({"matched": False, "reason_code": "plugin_load_failed"})
         elif not _plugin_direct_passthrough_enabled(ctx):
@@ -1147,14 +1228,23 @@ def _evaluate_direct_passthrough_stage(
         elif getattr(inst, "owner_only", True) and not _owner_gate_allows(state, direction=direction, sender_id=sender_id):
             detail.update({"matched": False, "reason_code": "permission_denied"})
         else:
-            detail.update({"matched": True, "reason_code": "matched"})
+            detail.update(
+                {
+                    "matched": True,
+                    "reason_code": "matched",
+                    "priority": _plugin_direct_passthrough_priority(ctx),
+                }
+            )
         candidates.append(detail)
-    matches = [item for item in candidates if item.get("matched")]
+    matches = sorted(
+        [item for item in candidates if item.get("matched")],
+        key=lambda item: (int(item.get("priority") or 1000), str(item.get("plugin_key") or "")),
+    )
     return _dispatch_stage(
         "direct_passthrough",
         bool(matches),
         "matched" if matches else "filter_not_matched",
-        "直通插件命中。" if matches else "没有插件通过直通声明、账号配置和权限检查。",
+        "直通插件命中（按 priority 升序）。" if matches else "没有插件通过直通声明、账号配置和权限检查。",
         matches=matches,
         candidates=candidates,
     )
@@ -1525,14 +1615,48 @@ def _plugin_declares_direct_passthrough(
     return True
 
 
-def _plugin_direct_passthrough_enabled(ctx: PluginContext | None) -> bool:
+def _direct_passthrough_account_cfg(ctx: PluginContext | None) -> dict[str, Any]:
     if ctx is None or ctx.generation <= 0:
-        return False
+        return {}
     cfg = ctx.account_config if isinstance(ctx.account_config, dict) else {}
     raw = cfg.get("direct_passthrough")
-    if isinstance(raw, dict):
-        return raw.get("enabled") is True
-    return False
+    return dict(raw) if isinstance(raw, dict) else {}
+
+
+def _plugin_direct_passthrough_enabled(ctx: PluginContext | None) -> bool:
+    return _direct_passthrough_account_cfg(ctx).get("enabled") is True
+
+
+def _plugin_direct_passthrough_priority(ctx: PluginContext | None) -> int:
+    raw = _direct_passthrough_account_cfg(ctx).get("priority")
+    try:
+        value = int(raw)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 1000
+    return max(0, value)
+
+
+def _coerce_direct_passthrough_outcome(result: Any) -> tuple[str, str | None]:
+    """把新三态与旧布尔返回值统一为 consumed / ignored / failed。"""
+
+    if result is True:
+        return "consumed", None
+    if result is False or result is None:
+        return "ignored", None
+    if isinstance(result, dict):
+        status = str(result.get("status") or "").strip().lower()
+        if status in {"consumed", "ignored", "failed"}:
+            error = None
+            if status == "failed":
+                error = str(
+                    result.get("error") or result.get("message") or "plugin_declared_failed"
+                )[:500]
+            return status, error
+        if result.get("consume") is True:
+            return "consumed", None
+        if result.get("consume") is False:
+            return "ignored", None
+    return "ignored", None
 
 
 def _plugin_dev_mode_dry_run_enabled(ctx: PluginContext | None) -> bool:
@@ -1649,14 +1773,14 @@ async def _dispatch_userbot_direct_passthrough(
     event_label: str,
     redis: Any,
 ) -> bool:
-    """Dispatch raw Telethon events to explicitly opted-in low-latency plugins."""
+    """按优先级调用直通插件；仅明确返回 consumed 时截断普通链路。
 
-    invoked = False
-    invoked_count = 0
-    failed_count = 0
-    trace = None
-    trace_started = False
+    返回 True 表示本条消息已被直通消费，调用方应跳过 Event Bus / legacy。
+    返回 False 表示所有插件均 ignored / failed，应继续普通链路。
+    """
+
     handler_name = "on_direct_message"
+    candidates: list[tuple[int, str, Plugin, PluginContext, Any]] = []
     for plugin_key, inst in list(state.instances.items()):
         ctx = state.contexts.get(plugin_key)
         if ctx is None or ctx.generation != state.generation:
@@ -1677,8 +1801,20 @@ async def _dispatch_userbot_direct_passthrough(
             allowed = await _event_allowed_for_owner_only(state, event)
             if not allowed:
                 continue
-        invoked = True
-        invoked_count += 1
+        priority = _plugin_direct_passthrough_priority(ctx)
+        candidates.append((priority, plugin_key, inst, ctx, handler))
+
+    # 数值越小越优先；同优先级按 plugin_key 稳定排序
+    candidates.sort(key=lambda item: (item[0], item[1]))
+
+    invoked_count = 0
+    failed_count = 0
+    consumed = False
+    consumer_key: str | None = None
+    trace = None
+    trace_started = False
+
+    for priority, plugin_key, _inst, ctx, handler in candidates:
         if not trace_started:
             trace = await _start_userbot_direct_passthrough_trace(
                 state,
@@ -1686,6 +1822,7 @@ async def _dispatch_userbot_direct_passthrough(
                 event_label=event_label,
             )
             trace_started = True
+        invoked_count += 1
         await record_span(
             trace,
             "route",
@@ -1693,8 +1830,9 @@ async def _dispatch_userbot_direct_passthrough(
             component="userbot_direct_passthrough",
             plugin_key=plugin_key,
             reason_code="matched",
-            message="插件启用直通模式，原始 Telethon event 将直接下放给 on_direct_message。",
+            message=f"直通插件匹配（priority={priority}），调用 on_direct_message。",
             direction=event_label,
+            priority=priority,
         )
         started = time.monotonic()
         # 直通也做调用级 ctx 隔离：复制一个独立 messages facade，避免并发直通事件
@@ -1737,11 +1875,53 @@ async def _dispatch_userbot_direct_passthrough(
         else:
             call_ctx = replace(ctx, client=call_client, log=call_log)
         try:
-            await _invoke_plugin_with_resilience(
+            result = await _invoke_plugin_with_resilience(
                 state,
                 plugin_key,
                 lambda _handler=handler, _ctx=call_ctx, _event=event: _handler(_ctx, _event),
             )
+            outcome, declared_error = _coerce_direct_passthrough_outcome(result)
+            if outcome == "failed":
+                failed_count += 1
+                await record_span(
+                    trace,
+                    "plugin_invoke",
+                    TRACE_STATUS_FAILED,
+                    component="userbot_direct_passthrough",
+                    plugin_key=plugin_key,
+                    direction=event_label,
+                    reason_code="plugin_declared_failed",
+                    error=declared_error,
+                    duration_ms=int((time.monotonic() - started) * 1000),
+                    outcome=outcome,
+                    consume=False,
+                )
+                await update_plugin_runtime_status(
+                    account_id=state.account_id,
+                    plugin_key=plugin_key,
+                    last_invocation_status=TRACE_STATUS_FAILED,
+                    last_trace_id=getattr(trace, "trace_id", None),
+                )
+                await _log(
+                    redis,
+                    state.account_id,
+                    "error",
+                    (
+                        f"插件 {plugin_key} 声明直通 {event_label} 处理失败："
+                        f"{declared_error}。本条消息将继续尝试其它直通插件或回退普通链路。"
+                    ),
+                    source="plugin",
+                    plugin_key=plugin_key,
+                    direction=event_label,
+                    chat_id=getattr(event, "chat_id", None),
+                    sender_id=getattr(event, "sender_id", None),
+                    message_preview=(getattr(event, "raw_text", "") or "")[:200],
+                    duration_ms=int((time.monotonic() - started) * 1000),
+                    **trace_log_context(trace),
+                )
+                continue
+
+            should_consume = outcome == "consumed"
             await record_span(
                 trace,
                 "plugin_invoke",
@@ -1750,6 +1930,8 @@ async def _dispatch_userbot_direct_passthrough(
                 plugin_key=plugin_key,
                 direction=event_label,
                 duration_ms=int((time.monotonic() - started) * 1000),
+                outcome=outcome,
+                consume=should_consume,
             )
             await update_plugin_runtime_status(
                 account_id=state.account_id,
@@ -1757,7 +1939,12 @@ async def _dispatch_userbot_direct_passthrough(
                 last_invocation_status=TRACE_STATUS_OK,
                 last_trace_id=getattr(trace, "trace_id", None),
             )
+            if should_consume:
+                consumed = True
+                consumer_key = plugin_key
+                break
         except Exception as exc:  # noqa: BLE001
+            # 失败可回退：本插件不消费，继续尝试更低优先级直通，最终可进普通链路
             failed_count += 1
             await record_span(
                 trace,
@@ -1769,6 +1956,8 @@ async def _dispatch_userbot_direct_passthrough(
                 reason_code="plugin_runtime_error",
                 error=f"{type(exc).__name__}: {exc}",
                 duration_ms=int((time.monotonic() - started) * 1000),
+                outcome="failed",
+                consume=False,
             )
             await update_plugin_runtime_status(
                 account_id=state.account_id,
@@ -1782,7 +1971,8 @@ async def _dispatch_userbot_direct_passthrough(
                 "error",
                 (
                     f"插件 {plugin_key} 处理直通 {event_label} 消息时出错："
-                    f"{type(exc).__name__}: {exc}。本条消息不会继续进入普通消息链路。"
+                    f"{type(exc).__name__}: {exc}。"
+                    "本条消息将继续尝试其它直通插件或回退普通链路。"
                 ),
                 source="plugin",
                 plugin_key=plugin_key,
@@ -1794,16 +1984,20 @@ async def _dispatch_userbot_direct_passthrough(
                 traceback=traceback.format_exc(limit=8),
                 **trace_log_context(trace),
             )
-    if invoked:
+
+    if trace_started:
+        # 明确 consumed → 成功；全程 ignored → 成功；存在失败且未消费 → 失败态。
+        status = TRACE_STATUS_OK if consumed or not failed_count else TRACE_STATUS_FAILED
         await finish_trace(
             trace,
-            TRACE_STATUS_FAILED if failed_count else TRACE_STATUS_OK,
+            status,
             invoked_count=invoked_count,
             failed_count=failed_count,
             direction=event_label,
-            consumed=True,
+            consumed=consumed,
+            consumer_plugin_key=consumer_key,
         )
-    return invoked
+    return consumed
 
 
 def _userbot_native_raw_meta(native_raw: Any, *, enabled: bool) -> dict[str, Any]:
@@ -4215,31 +4409,6 @@ async def _interaction_bot_token_for_account(account_id: int) -> str | None:
         return None
 
 
-async def _interaction_bot_chat_member_for_account(
-    account_id: int,
-    chat_id: int,
-    user_id: int,
-) -> dict[str, Any] | None:
-    token = await _interaction_bot_token_for_account(account_id)
-    if not token:
-        return None
-    try:
-        return await account_bot_service.call_bot_api(
-            token,
-            "getChatMember",
-            {"chat_id": chat_id, "user_id": user_id},
-        )
-    except Exception:  # noqa: BLE001
-        log.debug(
-            "interaction bot member lookup failed account=%s chat_id=%s user_id=%s",
-            account_id,
-            chat_id,
-            user_id,
-            exc_info=True,
-        )
-        return None
-
-
 async def _userbot_entity_for_account(
     client: Any,
     redis: Any | None,
@@ -4267,13 +4436,11 @@ async def _userbot_entity_for_account(
     get_messages = getattr(client, "get_messages", None)
     if not callable(get_messages):
         return None
-    message_id = await recent_message_anchor.find_recent_message_id_for_user(
-        client,
+    message_id = await recent_message_anchor.read_cached_message_id(
+        redis,
+        account_id,
         chat_id,
         user_id,
-        limit=recent_message_anchor.DEFAULT_SEARCH_LIMIT,
-        redis=redis,
-        account_id=account_id,
     )
     if message_id is None:
         return None
@@ -7063,11 +7230,6 @@ async def _activate(db, state: _AccountState, af: AccountFeature, redis: Any) ->
         identities=(
             PluginIdentityFacade(
                 state.client,
-                bot_member_resolver=lambda chat_id, user_id: _interaction_bot_chat_member_for_account(
-                    state.account_id,
-                    chat_id,
-                    user_id,
-                ),
                 user_entity_resolver=lambda chat_id, user_id: _userbot_entity_for_account(
                     state.client,
                     state.redis,
@@ -7091,6 +7253,12 @@ async def _activate(db, state: _AccountState, af: AccountFeature, redis: Any) ->
 
     try:
         await inst.on_startup(ctx)
+        try:
+            from .system_agent_tools import bind_plugin_instance
+
+            bind_plugin_instance(af.feature_key, inst)
+        except Exception:  # noqa: BLE001
+            log.debug("bind system_agent tools failed feature=%s", af.feature_key, exc_info=True)
     except Exception as exc:  # noqa: BLE001
         if state.scheduler is not None:
             state.scheduler.unregister_owner(af.feature_key)
@@ -7605,14 +7773,52 @@ async def reload_account_config(account_id: int, payload: dict | None = None) ->
     - builtin / installed 插件都在 ``_activate`` 中按需加载，避免每次热更新导入全部实现
     - 已实例化的 feature：刷新 ``ctx.config`` / ``ctx.rules``；若该 feature 已被禁用则 shutdown
     - 数据库新增的 enabled feature：调 ``_activate`` 加载
+    - 平台能力切换（``source=platform_capabilities``）复用本路径刷新能力快照与插件入口
 
-    任何异常都吞掉，热更新失败不应让 worker 崩溃。
+    普通热更新尽量局部降级；平台能力控制面刷新失败或 generation 不一致时必须
+    向调用方抛错，让 IPC 返回失败 ACK，不能把未收敛状态报告为成功。
     """
     state = _STATES.get(account_id)
     if state is None:
+        if isinstance(payload, dict) and payload.get("source") == "platform_capabilities":
+            raise RuntimeError("账号插件运行态未就绪，平台能力 reload 未收敛")
         return
     next_generation = state.generation + 1
     redis = state.redis or get_redis()
+
+    # 刷新平台能力进程内快照（AI / interaction / webhook 等）。
+    # 周期 reconcile 与 platform_capabilities 热切换都走这里最终收敛。
+    try:
+        from ...services import platform_capabilities as platform_caps
+
+        capability_snapshot = await platform_caps.refresh_cache_from_db()
+    except Exception as exc:  # noqa: BLE001
+        log.debug("reload_account_config 刷新平台能力缓存失败 account=%s", account_id, exc_info=True)
+        if isinstance(payload, dict) and payload.get("source") == "platform_capabilities":
+            raise RuntimeError("平台能力缓存刷新失败") from exc
+    else:
+        if isinstance(payload, dict) and payload.get("source") == "platform_capabilities":
+            module_key = payload.get("module_key")
+            expected_generation = payload.get("generation")
+            expected_enabled = payload.get("enabled")
+            if not isinstance(module_key, str) or module_key not in platform_caps.MODULE_DEFS:
+                raise RuntimeError("平台能力 reload 缺少有效 module_key")
+            if isinstance(expected_generation, bool) or not isinstance(expected_generation, int):
+                raise RuntimeError("平台能力 reload 缺少有效 generation")
+            if not isinstance(expected_enabled, bool):
+                raise RuntimeError("平台能力 reload 缺少有效 enabled")
+            actual_generation = capability_snapshot.generation(module_key)
+            actual_enabled = capability_snapshot.is_enabled(module_key)
+            if (
+                not capability_snapshot.cache_ready
+                or actual_generation < expected_generation
+                or actual_enabled != expected_enabled
+            ):
+                raise RuntimeError(
+                    "平台能力 reload 未收敛："
+                    f"module={module_key} expected_generation={expected_generation} "
+                    f"actual_generation={actual_generation}"
+                )
 
     # 同步全局开关：让 reload_config 也能让 incoming-message 可见性日志即时生效
     state.log_incoming_messages = await _load_log_incoming_messages_setting()
@@ -7710,6 +7916,12 @@ async def reload_account_config(account_id: int, payload: dict | None = None) ->
                     except Exception:  # noqa: BLE001
                         log.exception("on_shutdown 失败 feature=%s", fkey)
 
+                try:
+                    from .system_agent_tools import unbind_plugin_instance
+
+                    unbind_plugin_instance(fkey)
+                except Exception:  # noqa: BLE001
+                    pass
                 state.instances.pop(fkey, None)
                 state.contexts.pop(fkey, None)
                 if af is not None and not af.enabled:
@@ -7778,6 +7990,12 @@ async def reload_account_config(account_id: int, payload: dict | None = None) ->
                     await inst.on_shutdown(ctx)
                 except Exception:  # noqa: BLE001
                     log.exception("配置解密失败后 on_shutdown 失败 feature=%s", fkey)
+                try:
+                    from .system_agent_tools import unbind_plugin_instance
+
+                    unbind_plugin_instance(fkey)
+                except Exception:  # noqa: BLE001
+                    pass
                 state.instances.pop(fkey, None)
                 state.contexts.pop(fkey, None)
                 await _record_plugin_config_decryption_failure(
@@ -7800,6 +8018,12 @@ async def reload_account_config(account_id: int, payload: dict | None = None) ->
                     await inst.on_shutdown(ctx)
                 except Exception:  # noqa: BLE001
                     log.exception("命令配置变化后 on_shutdown 失败 feature=%s", fkey)
+                try:
+                    from .system_agent_tools import unbind_plugin_instance
+
+                    unbind_plugin_instance(fkey)
+                except Exception:  # noqa: BLE001
+                    pass
                 state.instances.pop(fkey, None)
                 state.contexts.pop(fkey, None)
                 await _activate(db, state, af, redis)
@@ -7813,6 +8037,35 @@ async def reload_account_config(account_id: int, payload: dict | None = None) ->
                 state.scheduler.for_plugin(fkey, state.generation)
                 if state.scheduler is not None else None
             )
+            # 平台 AI 能力热切换：关闭时卸载 ctx.ai，开启时按权限补回。
+            try:
+                from ...services.platform_capabilities import get_snapshot, is_ai_enabled_cached
+
+                snap = get_snapshot()
+                ai_on = (
+                    is_ai_enabled_cached(fail_closed=True)
+                    if snap.cache_ready
+                    else False
+                )
+                manifest = getattr(cls, "_manifest", None)
+                perms = set(getattr(manifest, "permissions", None) or [])
+                if not ai_on:
+                    ctx.ai = None
+                elif ctx.ai is None and perms & {"ai_text", "ai_agent"}:
+                    from .ai_facade import PluginAI
+
+                    ctx.ai = PluginAI(
+                        account_id=state.account_id,
+                        plugin_key=fkey,
+                        allow_agent="ai_agent" in perms,
+                        manifest=(
+                            manifest.to_dict()
+                            if manifest is not None and hasattr(manifest, "to_dict")
+                            else {}
+                        ),
+                    )
+            except Exception:  # noqa: BLE001
+                log.debug("同步 ctx.ai 能力状态失败 feature=%s", fkey, exc_info=True)
 
         # 2) 处理新增的 enabled feature
         afs = (

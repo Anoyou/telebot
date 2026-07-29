@@ -45,6 +45,7 @@ class LLMProviderDTO:
     - cost_tier: 成本档（1=便宜/3=旗舰）
     - models: 候选模型清单（用于把模型 ID 映射为展示名）
     """
+
     id: int
     name: str
     provider: str
@@ -55,6 +56,7 @@ class LLMProviderDTO:
     base_url: str | None = None
     default_model: str = ""
     api_key_enc: str | None = None
+    request_headers_enc: str | None = None
     proxy_url: str | None = None
     modality: str = "text"
     tags: list[str] = field(default_factory=list)
@@ -69,9 +71,7 @@ class LLMProviderDTO:
             self.api_format,
             self.protocol_profile,
         )
-        self.client_identity_profile = normalize_client_identity_profile(
-            self.client_identity_profile
-        )
+        self.client_identity_profile = normalize_client_identity_profile(self.client_identity_profile)
         if self.tags is None:
             self.tags = []
         if self.models is None:
@@ -86,13 +86,12 @@ class LLMProviderDTO:
             provider=str(d.get("provider", "")),
             api_format=d.get("api_format"),
             protocol_profile=str(d.get("protocol_profile", "standard") or "standard"),
-            client_identity_profile=str(
-                d.get("client_identity_profile", "auto") or "auto"
-            ),
+            client_identity_profile=str(d.get("client_identity_profile", "auto") or "auto"),
             web_search_api_format=d.get("web_search_api_format"),
             base_url=d.get("base_url"),
             default_model=str(d.get("default_model", "") or ""),
             api_key_enc=d.get("api_key_enc"),
+            request_headers_enc=d.get("request_headers_enc"),
             proxy_url=d.get("proxy_url"),
             modality=str(d.get("modality", "text") or "text"),
             tags=list(d.get("tags") or []),
@@ -109,13 +108,12 @@ class LLMProviderDTO:
             provider=str(row.provider or ""),
             api_format=getattr(row, "api_format", None),
             protocol_profile=str(getattr(row, "protocol_profile", "standard") or "standard"),
-            client_identity_profile=str(
-                getattr(row, "client_identity_profile", "auto") or "auto"
-            ),
+            client_identity_profile=str(getattr(row, "client_identity_profile", "auto") or "auto"),
             web_search_api_format=getattr(row, "web_search_api_format", None),
             base_url=row.base_url,
             default_model=str(row.default_model or ""),
             api_key_enc=row.api_key_enc,
+            request_headers_enc=getattr(row, "request_headers_enc", None),
             proxy_url=getattr(row, "proxy_url", None),
             modality=str(getattr(row, "modality", "text") or "text"),
             tags=list(getattr(row, "tags", []) or []),
@@ -124,7 +122,7 @@ class LLMProviderDTO:
         )
 
     def to_dict(self) -> dict[str, Any]:
-        """转回 dict（用于日志/调试，不含 api_key 明文）。"""
+        """转为脱敏展示 dict，不含任何加密凭据。"""
         return {
             "id": self.id,
             "name": self.name,
@@ -141,6 +139,15 @@ class LLMProviderDTO:
             "cost_tier": self.cost_tier,
             "models": self.models,
             # 注意：不含 api_key_enc 明文
+        }
+
+    def to_runtime_dict(self) -> dict[str, Any]:
+        """转为进程内运行时 dict，保留装配上游请求所需的加密字段。"""
+
+        return {
+            **self.to_dict(),
+            "api_key_enc": self.api_key_enc,
+            "request_headers_enc": self.request_headers_enc,
         }
 
     @property
@@ -170,10 +177,7 @@ class LLMProviderDTO:
 
     def has_model_list(self) -> bool:
         """是否声明了显式 models 清单（至少一条带 id）。"""
-        return any(
-            isinstance(m, dict) and str(m.get("id") or "").strip()
-            for m in (self.models or [])
-        )
+        return any(isinstance(m, dict) and str(m.get("id") or "").strip() for m in (self.models or []))
 
     def pick_enabled_model(self) -> str | None:
         """为该 provider 选一个可用模型（fallback 重选模型时用）。
@@ -208,11 +212,7 @@ class LLMProviderDTO:
                 reasoning_efforts=frozenset(default_efforts),
             )
         metadata = next(
-            (
-                item
-                for item in self.models
-                if str(item.get("id") or "").strip() == str(model or "").strip()
-            ),
+            (item for item in self.models if str(item.get("id") or "").strip() == str(model or "").strip()),
             None,
         )
         if not metadata:
@@ -230,8 +230,7 @@ class LLMProviderDTO:
             normalized = frozenset(
                 str(item)
                 for item in efforts
-                if str(item)
-                in {"minimal", "low", "medium", "high", "xhigh", "max"}
+                if str(item) in {"minimal", "low", "medium", "high", "xhigh", "max"}
             )
             overrides["reasoning"] = bool(normalized)
             overrides["reasoning_efforts"] = normalized

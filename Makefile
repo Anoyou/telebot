@@ -5,7 +5,7 @@
 #   make logs        实时跟踪后端 + 前端日志
 #   make status      四组件状态总览
 #   make prod-up     一键生产部署（纯 docker compose）
-#   make prod-update 增量更新生产栈（按变更重建必要服务）
+#   make prod-update 增量更新生产栈（文件同步优先，必要时构建服务）
 #   make nuke        彻底清理（删数据 + venv + node_modules + .env）
 #   make help        全部命令清单
 
@@ -28,7 +28,7 @@ help:
 	@echo "  make status        四组件状态总览"
 	@echo "  make prod-up       一键生产部署（纯 docker compose 4 容器）"
 	@echo "  make init-prod-env 生成生产 .env（随机密钥 + 数据库密码）"
-	@echo "  make prod-update   增量更新生产栈（按变更重建必要服务）"
+	@echo "  make prod-update   增量更新生产栈（文件同步优先，必要时构建服务）"
 	@echo "  make prod-down     停止生产栈"
 	@echo "  make auth-recovery 生成 Web 登录一次性恢复码（需本机/服务器执行）"
 	@echo "  make nuke          ⚠ 彻底清理（含数据库）"

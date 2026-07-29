@@ -50,7 +50,7 @@ export function SecretInput({
     <div className="mt-2 space-y-2 rounded-md border border-dashed p-2">
       <div className="flex items-center gap-1 text-xs text-muted-foreground">
         <KeyRound className="h-3.5 w-3.5" />
-        可选：补填密钥（仅加密暂存，确认后使用）
+        补填密钥（仅加密暂存，确认后使用）
       </div>
       {fields.map((name) => (
         <input

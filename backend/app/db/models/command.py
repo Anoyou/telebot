@@ -108,7 +108,7 @@ ALL_LLM_CLIENT_IDENTITY_PROFILES = {
     "auto",
     "minimal",
     "openai_sdk",
-    "codex_cli",
+    "codex_tui",
     "codex_desktop",
     "claude_code",
     "claude_desktop",
@@ -117,8 +117,12 @@ ALL_LLM_CLIENT_IDENTITY_PROFILES = {
 
 
 def normalize_client_identity_profile(value: str | None) -> str:
-    """规范化客户端身份档案；未知值降级为 auto（不拒绝）。"""
+    """规范化客户端身份档案；Codex 旧 CLI/exec 值迁移到 TUI。"""
     candidate = (value or "").strip().lower()
+    if candidate in {"codex_cli", "codex_exec"}:
+        return "codex_tui"
+    if candidate == "claude_desktop":
+        return "claude_code"
     if candidate in ALL_LLM_CLIENT_IDENTITY_PROFILES:
         return candidate
     return LLM_CLIENT_IDENTITY_AUTO
@@ -250,6 +254,8 @@ class LLMProvider(Base):
     provider: Mapped[str] = mapped_column(String(16), nullable=False)
     # Fernet 加密 token；可空（如 ollama 本地部署可不填）
     api_key_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Provider 专用兼容请求头，整组 JSON 经 MASTER_KEY 加密；API 只返回脱敏摘要。
+    request_headers_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
     # 自定义 base_url；OpenAI 兼容代理 / 自托管 Ollama 都靠它
     base_url: Mapped[str | None] = mapped_column(String(255), nullable=True)
     # 默认模型 ID（命令 config 里允许覆盖单条调用的 model）

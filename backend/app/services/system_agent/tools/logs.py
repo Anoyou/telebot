@@ -9,9 +9,14 @@ from sqlalchemy import desc, select
 
 from ....db.models.log import RuntimeLog
 from ....services.redactor import redact_text, redact_value
+from ....services.system_console_logs import read_system_console_logs
 from ..context import ToolContext
 from ..registry import ToolRegistry, ToolSpec
-from ._helpers import account_scope_filter, clamp_limit
+from ._helpers import account_scope_filter, clamp_limit, mark_external_fields, mark_external_text
+
+_MAX_CONSOLE_LINE_CHARS = 2_000
+_MAX_CONSOLE_TOTAL_CHARS = 32_000
+_MAX_CONSOLE_ERROR_CHARS = 2_000
 
 
 def _parse_dt(value: Any) -> datetime | None:
@@ -28,14 +33,20 @@ def _parse_dt(value: Any) -> datetime | None:
 
 
 def _runtime_view(row: RuntimeLog) -> dict[str, Any]:
+    message = redact_text(row.message or "")
+    detail = redact_value(row.detail) if row.detail else None
+    if isinstance(detail, str):
+        detail = mark_external_text(detail)
+    elif isinstance(detail, dict):
+        detail = mark_external_fields(detail, {"message", "detail", "text", "body", "error"})
     return {
         "id": row.id,
         "ts": row.ts.isoformat() if row.ts else None,
         "account_id": row.account_id,
         "level": row.level,
         "source": row.source,
-        "message": redact_text(row.message or ""),
-        "detail": redact_value(row.detail) if row.detail else None,
+        "message": mark_external_text(message),
+        "detail": detail,
     }
 
 
@@ -102,6 +113,55 @@ async def search_errors(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any
     return out
 
 
+async def system_console(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
+    """读取 Web/容器控制台日志；仅管理员可用，结果始终按外部数据标记。"""
+
+    ctx.require_role("admin")
+    service = str(args.get("service") or "web").strip().lower() or "web"
+    tail = max(20, clamp_limit(args.get("tail"), default=300, maximum=1000))
+    keyword = str(args.get("keyword") or "").strip()[:500] or None
+    try:
+        payload = await read_system_console_logs(service, tail, keyword)
+    except ValueError as exc:
+        return {"error": "invalid_service", "message": str(exc)}
+
+    raw_lines = payload.get("lines")
+    lines = [str(line) for line in raw_lines] if isinstance(raw_lines, list) else []
+    raw_error = str(payload.get("error") or "")
+    error_truncated = len(raw_error) > _MAX_CONSOLE_ERROR_CHARS
+    if error_truncated:
+        raw_error = f"{raw_error[:_MAX_CONSOLE_ERROR_CHARS]}...[错误信息已截断]"
+    safe_error = mark_external_text(raw_error) if raw_error else None
+    selected_reversed: list[str] = []
+    total_chars = len(safe_error or "")
+    line_truncated = False
+    for raw_line in reversed(lines):
+        line = raw_line
+        if len(line) > _MAX_CONSOLE_LINE_CHARS:
+            line = f"{line[:_MAX_CONSOLE_LINE_CHARS]}...[单行已截断]"
+            line_truncated = True
+        safe_line = mark_external_text(line)
+        if total_chars + len(safe_line) > _MAX_CONSOLE_TOTAL_CHARS:
+            break
+        selected_reversed.append(safe_line)
+        total_chars += len(safe_line)
+    selected = list(reversed(selected_reversed))
+    omitted_lines = len(lines) - len(selected)
+    return {
+        **payload,
+        "lines": selected,
+        "error": safe_error,
+        "truncated": (
+            bool(payload.get("truncated"))
+            or line_truncated
+            or error_truncated
+            or omitted_lines > 0
+        ),
+        "omitted_lines": int(payload.get("omitted_lines") or 0) + omitted_lines,
+        "result_char_limit": _MAX_CONSOLE_TOTAL_CHARS,
+    }
+
+
 async def get_event_detail(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
     """优先查 RuntimeLog；若提供 action_event_id 则查 ActionEvent。"""
 
@@ -128,7 +188,11 @@ async def get_event_detail(ctx: ToolContext, args: dict[str, Any]) -> dict[str, 
                     "action_type": row.action_type,
                     "status": row.status,
                     "error_code": row.error_code,
-                    "error_summary": redact_text(row.error_summary or "") if row.error_summary else None,
+                    "error_summary": (
+                        mark_external_text(redact_text(row.error_summary or ""))
+                        if row.error_summary
+                        else None
+                    ),
                     "params_summary": redact_value(row.params_summary or {}),
                     "created_at": row.created_at.isoformat() if row.created_at else None,
                 },
@@ -151,6 +215,31 @@ async def get_event_detail(ctx: ToolContext, args: dict[str, Any]) -> dict[str, 
 
 
 def register(registry: ToolRegistry) -> None:
+    registry.register(
+        ToolSpec(
+            name="logs.system_console",
+            channels=("web",),
+            description=(
+                "读取 Web/API、前端、数据库等容器控制台日志。用于管理界面 4xx/5xx、"
+                "保存失败和系统异常；默认读取 Web 最近 300 行，返回脱敏内容。"
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "service": {
+                        "type": "string",
+                        "enum": ["all", "web", "frontend", "postgres", "redis", "updater"],
+                    },
+                    "keyword": {"type": "string", "maxLength": 500},
+                    "tail": {"type": "integer", "minimum": 20, "maximum": 1000},
+                },
+                "additionalProperties": False,
+            },
+            read_only=True,
+            min_role="admin",
+            read_handler=system_console,
+        )
+    )
     registry.register(
         ToolSpec(
             name="logs.recent",

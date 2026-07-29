@@ -273,7 +273,12 @@ async def _check_db_usage(
     async with AsyncSessionLocal() as db:
         # 失败/取消流也可能已经产生上游费用；只要 usage 记录了保守 token，
         # DB 降级检查就必须计入，不能让主动 aclose 绕过 quota。
-        filters = [LLMUsage.source == source]
+        # Agent calls use ``plugin:{key}:agent`` while text calls use the base
+        # source.  The DB fallback must count both, otherwise a Redis outage
+        # lets agent usage bypass the plugin quota.
+        filters = [
+            (LLMUsage.source == source) | LLMUsage.source.startswith(f"{source}:")
+        ]
         if account_id is None:
             filters.append(LLMUsage.account_id.is_(None))
         else:

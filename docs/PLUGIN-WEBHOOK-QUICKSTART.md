@@ -2,6 +2,8 @@
 
 入站 Webhook 把外部 HTTP 事件交给指定账号的插件。外部系统向 TelePilot 发送 JSON，账号 Worker 完成鉴权和事件归一化，再按插件的 `event_subscriptions` 匹配 `hook_key`。
 
+当系统设置中 **入站 Webhook 平台能力**关闭时，公开投递 URL 最前层返回 `404`（不访问 DB、不校验 Token），配置与 Token 仍保留；重新开启后即可继续投递。详见 [平台能力热插拔](./PLATFORM-CAPABILITIES.md)。
+
 如果你想直接运行一个完整示例，复制 [webhook_receiver](../examples/plugins/webhook_receiver/README.md)。它订阅页面默认提供的 `default`，读取订单 JSON，并把摘要发送到配置的 Telegram Chat ID。
 
 ## 1. 声明 Hook

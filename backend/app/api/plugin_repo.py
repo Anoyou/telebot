@@ -91,13 +91,32 @@ async def update_plugin_repo_credential(
 @router.delete("/{repo_id}")
 async def delete_plugin_repo(repo_id: int, db: DBSession, _user: CurrentUser):
     """删除仓库（**不**联动卸载已安装的插件，只是从“目录索引”里摘掉）。"""
-    found = await svc.delete_repo(db, repo_id)
+    try:
+        row = await svc.get_repo(db, repo_id)
+    except PluginRepoNotFound as e:
+        raise HTTPException(
+            404,
+            detail={"code": e.code, "message": e.message},
+        ) from e
+    repo_url = row.url
+    found = await svc.delete_repo(db, repo_id, remove_cache=False)
     if not found:
         raise HTTPException(
             404,
             detail={"code": "REPO_NOT_FOUND", "message": f"仓库不存在: id={repo_id}"},
         )
     await db.commit()
+    try:
+        await svc.cleanup_repo_cache(repo_url)
+    except Exception:  # noqa: BLE001
+        # 缓存可在后续刷新时重建/清理，不把已提交的删除误报成失败。
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "清理已删除插件仓库缓存失败 repo_id=%s",
+            repo_id,
+            exc_info=True,
+        )
     return {"ok": True, "id": repo_id}
 
 
@@ -105,6 +124,7 @@ class InstallFromRepoBody(BaseModel):
     """``POST /{id}/plugins/{name}/install`` 的可选 body。"""
 
     default_enabled: bool = False
+    replace_existing: bool = False
 
 
 @router.get("/local/plugins", response_model=list[PluginRepoPlugin])
@@ -262,9 +282,14 @@ async def install_plugin_from_repo(
     若想一次性给所有账号启用，传 ``default_enabled=true``。
     """
     default_enabled = bool(body.default_enabled) if body else False
+    replace_existing = bool(body.replace_existing) if body else False
     try:
         row = await svc.install_plugin_from_repo(
-            db, repo_id, plugin_name, default_enabled=default_enabled,
+            db,
+            repo_id,
+            plugin_name,
+            default_enabled=default_enabled,
+            replace_existing=replace_existing,
         )
         await db.commit()
         await trigger_reload(db, row.name)

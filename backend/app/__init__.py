@@ -11,5 +11,5 @@ worker 的 ``,version`` 命令均读这里。版本号只在准备发布、推�
 的 ``APP_STAGE`` 必须保持一致。设为 ``None`` 可以摘掉（达到 1.0.0 通常就摘）。
 ``GET /api/system/version`` 会返回它，前端启动时拉一次做版本一致性检测。
 """
-__version__ = "0.72.0"
+__version__ = "0.86.0"
 APP_STAGE: str | None = None

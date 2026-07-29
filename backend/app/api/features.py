@@ -21,6 +21,7 @@ from ..db.models.feature import AccountFeature, Feature
 from ..db.models.plugin import InstalledPlugin
 from ..deps import CurrentUser, DBSession
 from ..schemas.feature import (
+    AccountDirectPassthroughOrderUpdate,
     AccountFeatureConfigUpdate,
     AccountFeatureDirectPassthroughUpdate,
     AccountFeatureItem,
@@ -87,22 +88,55 @@ def _allow_account_direct_passthrough_config(
                 "type": "object",
                 "additionalProperties": False,
                 "properties": {
-                    "enabled": {"type": "boolean", "default": False},
+                    "enabled": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "账号二次开关：仅决定插件是否加入直通调度",
+                    },
+                    "priority": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "default": 1000,
+                        "description": "数值越小优先级越高；同值按插件 key 稳定排序",
+                    },
                 },
             },
         )
     return schema
 
 
+def _merge_direct_passthrough_config(
+    config: dict[str, object] | None,
+    *,
+    enabled: bool | None = None,
+    priority: int | None = None,
+) -> dict[str, object]:
+    """合并平台直通字段，保留插件其它历史配置与未改动的直通子字段。"""
+
+    merged = dict(config or {})
+    current = merged.get("direct_passthrough")
+    block: dict[str, object] = dict(current) if isinstance(current, dict) else {}
+    if enabled is not None:
+        block["enabled"] = bool(enabled)
+    if priority is not None:
+        block["priority"] = max(0, int(priority))
+    if "enabled" not in block:
+        block["enabled"] = False
+    # 消费只由插件三态结果决定；清理历史独占/失败截断字段避免旧语义复活。
+    block.pop("exclusive", None)
+    block.pop("failure_policy", None)
+    block.pop("consume_on_failure", None)
+    merged["direct_passthrough"] = block
+    return merged
+
+
 def _with_direct_passthrough_enabled(
     config: dict[str, object] | None,
     enabled: bool,
 ) -> dict[str, object]:
-    """只替换平台开关，保留插件自身可能仍待迁移的历史配置。"""
+    """兼容旧调用：只改 enabled，保留 priority。"""
 
-    merged = dict(config or {})
-    merged["direct_passthrough"] = {"enabled": enabled}
-    return merged
+    return _merge_direct_passthrough_config(config, enabled=enabled)
 
 
 def _account_config_schema(
@@ -487,7 +521,7 @@ async def update_account_feature_direct_passthrough(
     db: DBSession,
     user: CurrentUser,
 ) -> AccountFeatureItem:
-    """独立更新裸直通开关，避免插件历史配置失效时无法紧急关闭。"""
+    """独立更新裸直通配置，避免插件历史配置失效时无法紧急关闭。"""
 
     if await db.get(Account, aid) is None:
         raise _bad("ACCOUNT_NOT_FOUND", "账号不存在", 404)
@@ -502,9 +536,10 @@ async def update_account_feature_direct_passthrough(
         )
 
     existing = await db.get(AccountFeature, (aid, key))
-    config = _with_direct_passthrough_enabled(
+    config = _merge_direct_passthrough_config(
         dict(existing.config or {}) if existing is not None else None,
-        payload.enabled,
+        enabled=payload.enabled,
+        priority=payload.priority,
     )
     af = await feature_service.set_account_feature(
         db,
@@ -518,7 +553,10 @@ async def update_account_feature_direct_passthrough(
         user.id,
         "feature.direct_passthrough.update",
         target=f"account:{aid}/feature:{key}",
-        detail={"enabled": payload.enabled},
+        detail={
+            "enabled": payload.enabled,
+            "priority": payload.priority,
+        },
     )
     await db.commit()
     return AccountFeatureItem(
@@ -528,6 +566,82 @@ async def update_account_feature_direct_passthrough(
         last_error=af.last_error,
         config=_sanitize_config(dict(af.config or {}), key),
     )
+
+
+@router.put(
+    "/api/accounts/{aid}/direct-passthrough/order",
+    response_model=list[AccountFeatureItem],
+)
+async def reorder_account_direct_passthrough(
+    aid: int,
+    payload: AccountDirectPassthroughOrderUpdate,
+    db: DBSession,
+    user: CurrentUser,
+) -> list[AccountFeatureItem]:
+    """按列表顺序写入 priority（0, 10, 20…），仅影响已开启直通的声明插件。"""
+
+    if await db.get(Account, aid) is None:
+        raise _bad("ACCOUNT_NOT_FOUND", "账号不存在", 404)
+    await feature_service.seed_builtin_features(db)
+
+    order = [str(item or "").strip() for item in payload.order if str(item or "").strip()]
+    if not order:
+        raise _bad("VALIDATION_ERROR", "order 不能为空")
+    if len(order) != len(set(order)):
+        raise _bad("VALIDATION_ERROR", "order 中存在重复的插件 key")
+
+    results: list[AccountFeatureItem] = []
+    for index, key in enumerate(order):
+        feature = await db.get(Feature, key)
+        if feature is None:
+            raise _bad("FEATURE_NOT_FOUND", f"未注册的 feature: {key}", 404)
+        if not _declares_direct_passthrough(feature.manifest):
+            raise _bad(
+                "CONFIG_VALIDATION_ERROR",
+                f"配置验证失败: {key} 未声明 telegram_direct_passthrough",
+            )
+        existing = await db.get(AccountFeature, (aid, key))
+        if existing is None or not bool(existing.enabled):
+            raise _bad(
+                "VALIDATION_ERROR",
+                f"插件 {key} 未在本账号启用，无法参与直通排序",
+            )
+        block = existing.config.get("direct_passthrough") if isinstance(existing.config, dict) else None
+        if not (isinstance(block, dict) and block.get("enabled") is True):
+            raise _bad(
+                "VALIDATION_ERROR",
+                f"插件 {key} 未开启账号级裸直通，无法参与排序",
+            )
+        config = _merge_direct_passthrough_config(
+            dict(existing.config or {}),
+            priority=index * 10,
+        )
+        af = await feature_service.set_account_feature(
+            db,
+            aid,
+            key,
+            enabled=True,
+            config=config,
+        )
+        results.append(
+            AccountFeatureItem(
+                feature_key=af.feature_key,
+                enabled=af.enabled,
+                state=af.state,
+                last_error=af.last_error,
+                config=_sanitize_config(dict(af.config or {}), key),
+            )
+        )
+
+    await audit.write(
+        db,
+        user.id,
+        "feature.direct_passthrough.reorder",
+        target=f"account:{aid}",
+        detail={"order": order},
+    )
+    await db.commit()
+    return results
 
 
 @router.post(

@@ -6,9 +6,17 @@ import pytest
 
 from app.services.llm_agent import AgentResult
 from app.services.llm_dto import LLMProviderDTO
-from app.services.llm_protocol import ModelResponse, ModelUsage, StopReason, TextContent, ToolCall
+from app.services.llm_protocol import (
+    ModelResponse,
+    ModelStreamEvent,
+    ModelUsage,
+    StopReason,
+    TextContent,
+    ToolCall,
+)
 from app.services.system_agent import runtime as runtime_module
 from app.services.system_agent.config import ResolvedAgentProviders
+from app.services.system_agent.context import ToolContext
 from app.services.system_agent.registry import ToolRegistry, ToolSpec
 from app.services.system_agent.runtime import SystemAgentRuntime
 
@@ -22,11 +30,7 @@ def _registry() -> ToolRegistry:
         registry.register(
             ToolSpec(
                 name=name,
-                description=(
-                    "读取最近运行日志。"
-                    if name == "logs.recent"
-                    else "列出定时任务。"
-                ),
+                description=("读取最近运行日志。" if name == "logs.recent" else "列出定时任务。"),
                 input_schema={"type": "object", "properties": {}},
                 read_handler=read_handler,
             )
@@ -93,7 +97,8 @@ async def _patch_runtime_config(  # noqa: ANN001
 
     monkeypatch.setattr(runtime_module, "load_system_context_flags", load_flags)
     monkeypatch.setattr(runtime_module, "resolve_agent_providers", resolve)
-    async def verify(_db, resolved):  # noqa: ANN001
+
+    async def verify(_db, resolved, **_kwargs):  # noqa: ANN001
         return resolved
 
     monkeypatch.setattr(runtime_module, "verify_resolved_agent_providers", verify)
@@ -165,13 +170,151 @@ async def test_runtime_exposes_only_routed_domain_and_sticks_to_fallback(monkeyp
 
 
 @pytest.mark.asyncio
+async def test_runtime_does_not_reuse_upstream_model_alias(monkeypatch) -> None:
+    primary, fallback = _providers()
+    await _patch_runtime_config(monkeypatch, primary, fallback)
+    calls: list[str] = []
+
+    async def invoke(provider, _providers, request, **kwargs):  # noqa: ANN001
+        calls.append(request.model)
+        progress = kwargs["progress_callback"]
+        await progress(
+            {
+                "type": "model_attempt",
+                "provider_id": provider.id,
+                "provider_name": provider.name,
+                "model": request.model,
+                "attempt": 1,
+                "max_retries": 5,
+            }
+        )
+        return (
+            ModelResponse(
+                model="upstream-backend-alias",
+                content=(TextContent("done"),),
+                usage=ModelUsage(input_tokens=1, output_tokens=1),
+            ),
+            provider,
+            False,
+        )
+
+    async def run(model_call, request, _tools, **_kwargs):  # noqa: ANN001
+        await model_call(request)
+        second = await model_call(request)
+        return AgentResult(
+            text=second.text,
+            model=second.model,
+            messages=request.messages,
+            usage=ModelUsage(input_tokens=2, output_tokens=2),
+            steps=2,
+            tool_calls=1,
+            stop_reason=StopReason.COMPLETED,
+        )
+
+    monkeypatch.setattr(runtime_module, "invoke_structured", invoke)
+    monkeypatch.setattr(runtime_module, "run_agent", run)
+
+    events = [
+        event
+        async for event in SystemAgentRuntime(_registry()).stream_turn(
+            None,  # type: ignore[arg-type]
+            session=_session(),  # type: ignore[arg-type]
+            user_text="帮我看看定时任务",
+            role="admin",
+            channel="web",
+        )
+    ]
+
+    assert calls == [primary.default_model, primary.default_model]
+    usage = next(event for event in events if event["type"] == "assistant_message")["usage"]
+    assert usage["requested_model"] == primary.default_model
+    assert usage["model"] == "upstream-backend-alias"
+    assert not any(
+        event.get("type") == "provider_selected" and event.get("reason") == "model_fallback"
+        for event in events
+    )
+
+
+@pytest.mark.asyncio
+async def test_stream_runtime_does_not_reuse_upstream_model_alias(monkeypatch) -> None:
+    primary, fallback = _providers()
+    await _patch_runtime_config(monkeypatch, primary, fallback)
+    calls: list[str] = []
+
+    async def stream(provider, _providers, request, **kwargs):  # noqa: ANN001
+        calls.append(request.model)
+        await kwargs["progress_callback"](
+            {
+                "type": "model_attempt",
+                "provider_id": provider.id,
+                "provider_name": provider.name,
+                "model": request.model,
+                "attempt": 1,
+                "max_retries": 5,
+            }
+        )
+        yield (
+            ModelStreamEvent(
+                response=ModelResponse(
+                    model="upstream-stream-alias",
+                    content=(TextContent("done"),),
+                    usage=ModelUsage(input_tokens=1, output_tokens=1),
+                )
+            ),
+            provider,
+            False,
+        )
+
+    async def run(_model_call, request, _tools, *, stream_model_call, **_kwargs):  # noqa: ANN001
+        responses = []
+        for _ in range(2):
+            async for event in stream_model_call(request):
+                if event.response is not None:
+                    responses.append(event.response)
+        second = responses[-1]
+        return AgentResult(
+            text=second.text,
+            model=second.model,
+            messages=request.messages,
+            usage=ModelUsage(input_tokens=2, output_tokens=2),
+            steps=2,
+            tool_calls=1,
+            stop_reason=StopReason.COMPLETED,
+        )
+
+    monkeypatch.setattr(runtime_module, "stream_structured", stream)
+    monkeypatch.setattr(runtime_module, "run_agent", run)
+
+    events = [
+        event
+        async for event in SystemAgentRuntime(_registry()).stream_turn(
+            None,  # type: ignore[arg-type]
+            session=_session(),  # type: ignore[arg-type]
+            user_text="帮我看看定时任务",
+            role="admin",
+            channel="web",
+        )
+    ]
+
+    assert calls == [primary.default_model, primary.default_model]
+    usage = next(event for event in events if event["type"] == "assistant_message")["usage"]
+    assert usage["requested_model"] == primary.default_model
+    assert usage["model"] == "upstream-stream-alias"
+
+
+@pytest.mark.asyncio
 async def test_runtime_general_help_sends_zero_tool_definitions(monkeypatch) -> None:
     primary, fallback = _providers()
     await _patch_runtime_config(monkeypatch, primary, fallback)
+    run_called = False
 
     async def run(_model_call, request, tools, **_kwargs):  # noqa: ANN001
+        nonlocal run_called
+        run_called = True
         assert request.tools == ()
         assert tools == {}
+        assert request.metadata["repair_text_tool_protocol"] is True
+        assert "本轮未提供任何工具" in request.messages[0].text_content()
         return AgentResult(
             text="帮助",
             model=request.model,
@@ -197,9 +340,114 @@ async def test_runtime_general_help_sends_zero_tool_definitions(monkeypatch) -> 
 
     route = next(event for event in events if event["type"] == "route_selected")
     assert route["tool_count"] == 0
+    assert run_called is True
+    assert any(event["type"] == "assistant_message" for event in events)
     capability = next(event for event in events if event["type"] == "model_capability_check")
     assert capability["provider_name"] == primary.name
     assert capability["model"] == primary.default_model
+
+
+@pytest.mark.asyncio
+async def test_pinned_selection_bypasses_stale_global_provider_config(monkeypatch) -> None:
+    selected, _fallback = _providers()
+    resolve_calls = 0
+    pinned_calls: list[dict[str, object]] = []
+
+    async def load_flags(_db):  # noqa: ANN001
+        return {
+            "timezone": "UTC",
+            "command_prefix": "/",
+            "ai_enabled": True,
+            "agent_config": {
+                "enabled": True,
+                "provider_id": 999,
+                "model": "stale-global-model",
+                "max_steps": 8,
+                "max_tool_calls": 24,
+                "session_token_limit": 16_384,
+                "require_tool_approval": False,
+            },
+        }
+
+    async def resolve(_db, _cfg):  # noqa: ANN001
+        nonlocal resolve_calls
+        resolve_calls += 1
+        return "全局默认模型已经失效"
+
+    async def apply_pinned(_db, resolved, selection):  # noqa: ANN001
+        assert resolved is None
+        pinned_calls.append(dict(selection))
+        return ResolvedAgentProviders(
+            primary=selected,
+            model=selected.default_model,
+            providers={selected.id: selected},
+        )
+
+    async def verify(_db, resolved, **_kwargs):  # noqa: ANN001
+        return resolved
+
+    async def run(_model_call, request, _tools, **_kwargs):  # noqa: ANN001
+        return AgentResult(
+            text="帮助",
+            model=request.model,
+            messages=request.messages,
+            usage=ModelUsage(input_tokens=1, output_tokens=1),
+            steps=1,
+            tool_calls=0,
+            stop_reason=StopReason.COMPLETED,
+        )
+
+    monkeypatch.setattr(runtime_module, "load_system_context_flags", load_flags)
+    monkeypatch.setattr(runtime_module, "resolve_agent_providers", resolve)
+    monkeypatch.setattr(runtime_module, "_apply_pinned_selection", apply_pinned)
+    monkeypatch.setattr(runtime_module, "verify_resolved_agent_providers", verify)
+    monkeypatch.setattr(runtime_module, "run_agent", run)
+
+    pinned_events = [
+        event
+        async for event in SystemAgentRuntime(_registry()).stream_turn(
+            None,  # type: ignore[arg-type]
+            session=_session(),  # type: ignore[arg-type]
+            user_text="你能做什么？",
+            role="admin",
+            channel="web",
+            model_selection={
+                "mode": "pinned",
+                "provider_id": selected.id,
+                "model": selected.default_model,
+            },
+        )
+    ]
+
+    assert resolve_calls == 0
+    assert pinned_calls == [
+        {
+            "mode": "pinned",
+            "provider_id": selected.id,
+            "model": selected.default_model,
+        }
+    ]
+    provider_event = next(event for event in pinned_events if event["type"] == "provider_selected")
+    assert provider_event["provider_id"] == selected.id
+    assert provider_event["model"] == selected.default_model
+    assert provider_event["selection_mode"] == "pinned"
+    assert pinned_events[-1]["type"] == "done"
+    assert pinned_events[-1]["ok"] is True
+
+    auto_events = [
+        event
+        async for event in SystemAgentRuntime(_registry()).stream_turn(
+            None,  # type: ignore[arg-type]
+            session=_session(),  # type: ignore[arg-type]
+            user_text="你能做什么？",
+            role="admin",
+            channel="web",
+        )
+    ]
+    assert resolve_calls == 1
+    auto_error = next(event for event in auto_events if event["type"] == "error")
+    assert auto_error["code"] == "PROVIDER_UNAVAILABLE"
+    assert auto_error["message"] == "全局默认模型已经失效"
 
 
 @pytest.mark.asyncio
@@ -350,9 +598,7 @@ async def test_runtime_requires_and_accepts_web_tool_approval(monkeypatch) -> No
         assert request.metadata["max_retries_per_model"] == 5
         assert request.metadata["retry_delay_seconds"] == 3.0
         assert callbacks.on_tool_batch is not None
-        await callbacks.on_tool_batch(
-            (ToolCall(id="call-1", name="scheduler.list", arguments={}),)
-        )
+        await callbacks.on_tool_batch((ToolCall(id="call-1", name="scheduler.list", arguments={"limit": 5}),))
         return AgentResult(
             text="ok",
             model=request.model,
@@ -377,10 +623,12 @@ async def test_runtime_requires_and_accepts_web_tool_approval(monkeypatch) -> No
 
     error = next(event for event in blocked if event["type"] == "error")
     assert error["code"] == "AGENT_TOOL_APPROVAL_REQUIRED"
-    assert [tool["name"] for tool in error["tool_approval"]["tools"]] == [
-        "scheduler.list"
-    ]
+    assert [tool["name"] for tool in error["tool_approval"]["tools"]] == ["scheduler.list"]
     assert error["tool_approval"]["tools"][0]["description"] == "列出定时任务。"
+    assert error["tool_approval"]["tools"][0]["call_id"] == "call-1"
+    assert error["tool_approval"]["calls"] == [
+        {"call_id": "call-1", "name": "scheduler.list"}
+    ]
     assert run_calls == 1
 
     approved = [
@@ -407,9 +655,7 @@ async def test_runtime_streams_tool_started_before_agent_finishes(monkeypatch) -
 
     async def run(_model_call, request, _tools, *, callbacks, **_kwargs):  # noqa: ANN001
         assert callbacks.on_tool_start is not None
-        await callbacks.on_tool_start(
-            ToolCall(id="call-1", name="scheduler.list", arguments={})
-        )
+        await callbacks.on_tool_start(ToolCall(id="call-1", name="scheduler.list", arguments={}))
         await release.wait()
         return AgentResult(
             text="ok",
@@ -492,11 +738,7 @@ async def test_model_router_only_allows_confirmed_cross_provider(monkeypatch) ->
         return (
             ModelResponse(
                 model=request.model,
-                content=(
-                    TextContent(
-                        '{"needs_tools":true,"domains":["scheduler"],"reason":"lookup"}'
-                    ),
-                ),
+                content=(TextContent('{"needs_tools":true,"domains":["scheduler"],"reason":"lookup"}'),),
                 usage=ModelUsage(input_tokens=1, output_tokens=1),
             ),
             primary,
@@ -519,3 +761,88 @@ async def test_model_router_only_allows_confirmed_cross_provider(monkeypatch) ->
     assert route.domains == ("scheduler",)
     assert captured_metadata[0]["confirm_provider_switch"] is True
     assert captured_metadata[0]["allowed_cross_provider_ids"] == [fallback.id]
+
+
+@pytest.mark.asyncio
+async def test_model_router_timeout_keeps_explicit_web_intent(monkeypatch) -> None:
+    primary, fallback = _providers()
+
+    async def invoke(*_args, **_kwargs):  # noqa: ANN001
+        raise TimeoutError("router timeout")
+
+    async def read_handler(_ctx, _args):  # noqa: ANN001
+        return {}
+
+    monkeypatch.setattr(runtime_module, "invoke_structured", invoke)
+    web_spec = ToolSpec(
+        name="web.search",
+        description="搜索公开互联网。",
+        input_schema={"type": "object", "properties": {}},
+        read_handler=read_handler,
+    )
+
+    route = await SystemAgentRuntime()._resolve_tool_route(
+        provider_dto=primary,
+        providers={primary.id: primary, fallback.id: fallback},
+        model=primary.default_model,
+        user_text="查一下 Sam Altman 最近说了什么",
+        memory_state={},
+        all_tool_specs=[web_spec],
+        account_id=None,
+        fallback_provider_id=fallback.id,
+    )
+
+    assert route == runtime_module.ToolRoute(
+        ("web",),
+        "fallback",
+        "router_failed_explicit_web_intent",
+    )
+
+
+@pytest.mark.asyncio
+async def test_read_tool_result_is_redacted_before_model_context() -> None:
+    async def read_handler(_ctx, _args):  # noqa: ANN001
+        return {"api_key": "plain-tool-secret", "value": "ok"}
+
+    spec = ToolSpec(
+        name="demo.read",
+        description="demo",
+        input_schema={"type": "object"},
+        read_handler=read_handler,
+    )
+    ctx = ToolContext(
+        db=None,  # type: ignore[arg-type]
+        channel="web",
+        role="admin",
+    )
+
+    result = await SystemAgentRuntime()._bind_read_handler(spec, ctx)({})  # noqa: SLF001
+
+    assert result["api_key"] == "***"
+    assert "plain-tool-secret" not in str(result)
+
+
+@pytest.mark.asyncio
+async def test_tool_exception_redacts_opaque_chat_secret() -> None:
+    secret = "opaque-secret-from-chat"
+
+    async def read_handler(_ctx, _args):  # noqa: ANN001
+        raise RuntimeError(f"upstream echoed {secret}")
+
+    spec = ToolSpec(
+        name="demo.read",
+        description="demo",
+        input_schema={"type": "object"},
+        read_handler=read_handler,
+    )
+    ctx = ToolContext(
+        db=None,  # type: ignore[arg-type]
+        channel="web",
+        role="admin",
+        chat_secrets=[secret],
+    )
+
+    result = await SystemAgentRuntime()._bind_read_handler(spec, ctx)({})  # noqa: SLF001
+
+    assert secret not in str(result)
+    assert "[REDACTED]" in result["message"]

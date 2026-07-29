@@ -83,6 +83,7 @@ def test_event_bus_exports_stable_status_and_reason_code_dictionary() -> None:
         "subscription_not_matched",
         "synthetic_callback",
         "telegram_api_error",
+        "plugin_declared_failed",
         "plugin_runtime_error",
         "trace_write_failed",
         "unsupported_send_via",

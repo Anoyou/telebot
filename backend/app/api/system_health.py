@@ -35,6 +35,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import func, select, text
 
+from .. import __version__
 from ..crypto import decrypt_str
 from ..db.base import AsyncSessionLocal
 from ..db.models.account import Account, Proxy
@@ -80,7 +81,7 @@ class VersionInfo(BaseModel):
 @router.get("/version", response_model=VersionInfo)
 async def get_version() -> VersionInfo:
     """返回后端版本号（无鉴权）。"""
-    from .. import APP_STAGE, __version__
+    from .. import APP_STAGE
 
     return VersionInfo(version=__version__, stage=APP_STAGE)
 
@@ -176,6 +177,8 @@ class HostResource(BaseModel):
 
 class ProcessResource(BaseModel):
     pid: int | None = None
+    name: str | None = None
+    role: str | None = None
     cpu_percent: float | None = None
     rss_mb: float | None = None
     uss_mb: float | None = None
@@ -200,6 +203,7 @@ class ContainerResource(BaseModel):
     memory_mb: float | None = None
     memory_limit_mb: float | None = None
     memory_percent: float | None = None
+    pids: int | None = None
 
 
 class RuntimeLogStats(BaseModel):
@@ -217,6 +221,8 @@ class ResourceDashboard(BaseModel):
     containers: list[ContainerResource] = Field(default_factory=list)
     container_total: ProcessResource = Field(default_factory=ProcessResource)
     container_probe_error: str | None = None
+    container_source: str | None = None
+    project_total_basis: str = "processes"
     workers: list[WorkerRuntimeResource] = Field(default_factory=list)
     worker_alive: int = 0
     worker_desired_running: int = 0
@@ -297,9 +303,7 @@ def _probe_alembic() -> AlembicStatus:
                 pending.reverse()  # walk_revisions 默认 head→base，反过来变 base→head
             except Exception:
                 pending = []
-        return AlembicStatus(
-            ok=in_sync, current=current or None, head=head_rev or None, pending=pending
-        )
+        return AlembicStatus(ok=in_sync, current=current or None, head=head_rev or None, pending=pending)
     except Exception as e:  # noqa: BLE001
         return AlembicStatus(ok=False, error=f"{type(e).__name__}: {str(e)[:200]}")
 
@@ -309,17 +313,10 @@ async def _probe_providers() -> ProvidersStatus:
         async with AsyncSessionLocal() as db:
             rows = (await db.execute(select(LLMProvider))).scalars().all()
         total = len(rows)
-        with_key = sum(
-            1 for r in rows
-            if r.api_key_enc or (r.provider or "").lower() == "ollama"
-        )
+        with_key = sum(1 for r in rows if r.api_key_enc or (r.provider or "").lower() == "ollama")
         with_proxy = sum(1 for r in rows if r.proxy_id is not None)
-        by_modality: Counter[str] = Counter(
-            (getattr(r, "modality", None) or "text") for r in rows
-        )
-        by_cost_tier: Counter[str] = Counter(
-            str(int(getattr(r, "cost_tier", None) or 2)) for r in rows
-        )
+        by_modality: Counter[str] = Counter((getattr(r, "modality", None) or "text") for r in rows)
+        by_cost_tier: Counter[str] = Counter(str(int(getattr(r, "cost_tier", None) or 2)) for r in rows)
         return ProvidersStatus(
             total=total,
             with_api_key=with_key,
@@ -338,10 +335,10 @@ async def _probe_proxies() -> ProxiesStatus:
             rows = (await db.execute(select(Proxy))).scalars().all()
             # 被 LLMProvider 引用的 proxy id 集合
             used_ids = (
-                await db.execute(
-                    select(LLMProvider.proxy_id).where(LLMProvider.proxy_id.is_not(None))
-                )
-            ).scalars().all()
+                (await db.execute(select(LLMProvider.proxy_id).where(LLMProvider.proxy_id.is_not(None))))
+                .scalars()
+                .all()
+            )
         used_set = {x for x in used_ids if x is not None}
         by_type: Counter[str] = Counter((p.type or "?").lower() for p in rows)
         return ProxiesStatus(
@@ -358,9 +355,7 @@ async def _probe_workers() -> WorkersStatus:
     try:
         async with AsyncSessionLocal() as db:
             rows = (
-                await db.execute(
-                    select(Account.status, func.count(Account.id)).group_by(Account.status)
-                )
+                await db.execute(select(Account.status, func.count(Account.id)).group_by(Account.status))
             ).all()
         total = sum(int(c) for _, c in rows)
         by_status = {str(s): int(c) for s, c in rows}
@@ -627,7 +622,7 @@ def _snapshot_dashboard_host() -> HostResource:
     mem_percent, mem_total_mb = _read_memory_percent()
     du = shutil.disk_usage("/")
     disk_used_percent = round((du.used / du.total) * 100.0, 2) if du.total > 0 else None
-    disk_free_gb = round(du.free / (1024 ** 3), 2)
+    disk_free_gb = round(du.free / (1024**3), 2)
 
     return HostResource(
         cpu_percent=_read_host_cpu_percent(),
@@ -708,19 +703,19 @@ def _sum_project_resource(
                 *(p.cpu_percent for p in extras),
             ]
         ),
-        rss_mb=_sum_resource_values(
-            [main.rss_mb, *(w.rss_mb for w in workers), *(p.rss_mb for p in extras)]
-        ),
-        uss_mb=_sum_resource_values(
-            [main.uss_mb, *(w.uss_mb for w in workers), *(p.uss_mb for p in extras)]
-        ),
+        rss_mb=_sum_resource_values([main.rss_mb, *(w.rss_mb for w in workers), *(p.rss_mb for p in extras)]),
+        uss_mb=_sum_resource_values([main.uss_mb, *(w.uss_mb for w in workers), *(p.uss_mb for p in extras)]),
     )
 
 
-_DOCKER_RESOURCE_CACHE: tuple[float, list[ContainerResource], str | None] = (0.0, [], None)
+_DOCKER_RESOURCE_CACHE: tuple[
+    float,
+    list[ContainerResource],
+    str | None,
+    str | None,
+] = (0.0, [], None, None)
 _DOCKER_RESOURCE_TTL = 12.0
-_PROJECT_CONTAINER_SERVICES = {"postgres", "redis", "frontend"}
-_WEB_CONTAINER_SERVICES = {"web", "backend"}
+_PROJECT_CONTAINER_SERVICES = {"postgres", "redis", "web", "backend", "updater", "frontend"}
 
 
 def _repo_root_for_container_match() -> Path:
@@ -758,11 +753,7 @@ def _looks_like_project_container(
     root = str(_repo_root_for_container_match())
     working_dir = labels.get("com.docker.compose.project.working_dir")
     config_files = labels.get("com.docker.compose.project.config_files", "")
-    if service_l in _WEB_CONTAINER_SERVICES:
-        return False
-    if service_l in _PROJECT_CONTAINER_SERVICES and (
-        working_dir == root or root in config_files
-    ):
+    if service_l in _PROJECT_CONTAINER_SERVICES and (working_dir == root or root in config_files):
         return True
     project = (labels.get("com.docker.compose.project") or "").lower()
     if service_l in _PROJECT_CONTAINER_SERVICES and project in _project_container_names():
@@ -791,9 +782,9 @@ def _docker_container_meta() -> tuple[dict[str, dict[str, str | None]], str | No
             timeout=1.5,
         )
     except FileNotFoundError:
-        return {}, "Docker CLI 不可用，未计入数据库/Redis/前端容器"
+        return {}, "Docker CLI 不可用"
     except Exception:
-        return {}, "Docker 不可用或无权限，未计入数据库/Redis/前端容器"
+        return {}, "Docker 不可用或无权限"
 
     meta: dict[str, dict[str, str | None]] = {}
     for line in out.splitlines():
@@ -857,23 +848,78 @@ def _parse_docker_memory_usage(raw: str | None) -> tuple[float | None, float | N
     return _parse_size_to_mb(used_raw), _parse_size_to_mb(limit_raw)
 
 
-def _snapshot_project_containers() -> tuple[list[ContainerResource], str | None]:
-    """读取数据库、Redis、前端等项目容器的资源占用。
+def _containers_from_updater_payload(payload: dict[str, Any]) -> list[ContainerResource]:
+    containers: list[ContainerResource] = []
+    raw_containers = payload.get("containers")
+    if not isinstance(raw_containers, list):
+        return containers
+    for raw in raw_containers:
+        if not isinstance(raw, dict):
+            continue
+        name = str(raw.get("name") or "").strip()
+        service = str(raw.get("service") or "").strip().lower()
+        if not name or not re.fullmatch(r"[a-z0-9][a-z0-9_.-]{0,63}", service):
+            continue
+        memory_mb, memory_limit_mb = _parse_docker_memory_usage(raw.get("memory_usage"))
+        try:
+            pids = max(0, int(raw.get("pids"))) if raw.get("pids") is not None else None
+        except (TypeError, ValueError):
+            pids = None
+        containers.append(
+            ContainerResource(
+                id=str(raw.get("id") or "").strip() or None,
+                name=name,
+                service=service,
+                cpu_percent=_parse_percent_value(raw.get("cpu_percent")),
+                memory_mb=memory_mb,
+                memory_limit_mb=memory_limit_mb,
+                memory_percent=_parse_percent_value(raw.get("memory_percent")),
+                pids=pids,
+            )
+        )
+    containers.sort(key=lambda c: c.memory_mb or 0.0, reverse=True)
+    return containers
 
-    Web 容器内的主进程和 worker 已由进程明细覆盖，这里刻意不把 web 容器计入，
-    避免把同一份 Python 进程内存重复统计。
-    """
+
+def _snapshot_project_containers() -> tuple[
+    list[ContainerResource],
+    str | None,
+    str | None,
+]:
+    """读取全部 TelePilot 容器资源；生产环境优先委托内部 updater。"""
 
     global _DOCKER_RESOURCE_CACHE
     now = time.monotonic()
-    cached_at, cached, cached_error = _DOCKER_RESOURCE_CACHE
+    cached_at, cached, cached_error, cached_source = _DOCKER_RESOURCE_CACHE
     if now - cached_at < _DOCKER_RESOURCE_TTL:
-        return cached, cached_error
+        return cached, cached_error, cached_source
+
+    updater_configured = bool((os.getenv("TELEPILOT_UPDATER_URL") or "").strip())
+    if updater_configured:
+        try:
+            payload = _updater_get("/resources", timeout=6)
+        except Exception:
+            payload = {"ok": False}
+        if payload.get("ok") is True:
+            containers = _containers_from_updater_payload(payload)
+            if containers:
+                _DOCKER_RESOURCE_CACHE = (now, containers, None, "updater")
+                return containers, None, "updater"
 
     meta, meta_error = _docker_container_meta()
     if not meta:
-        _DOCKER_RESOURCE_CACHE = (now, [], meta_error)
-        return [], meta_error
+        if updater_configured:
+            error = (
+                "完整容器指标不可用：内部 updater 未返回资源快照，且 Web 容器内 "
+                f"{meta_error or 'Docker 不可用'}；当前仅统计 Web/账号 worker/任务子进程"
+            )
+        else:
+            error = (
+                f"完整容器指标不可用：{meta_error or 'Docker 不可用'}；"
+                "当前仅统计 Web/账号 worker/任务子进程"
+            )
+        _DOCKER_RESOURCE_CACHE = (now, [], error, None)
+        return [], error, None
 
     try:
         out = subprocess.check_output(
@@ -883,9 +929,9 @@ def _snapshot_project_containers() -> tuple[list[ContainerResource], str | None]
             timeout=2.5,
         )
     except Exception:
-        error = "Docker stats 不可用或超时，未计入数据库/Redis/前端容器"
-        _DOCKER_RESOURCE_CACHE = (now, [], error)
-        return [], error
+        error = "Docker stats 不可用或超时；当前仅统计 Web/账号 worker/任务子进程"
+        _DOCKER_RESOURCE_CACHE = (now, [], error, None)
+        return [], error, None
 
     containers: list[ContainerResource] = []
     seen: set[str] = set()
@@ -916,12 +962,13 @@ def _snapshot_project_containers() -> tuple[list[ContainerResource], str | None]
                 memory_mb=memory_mb,
                 memory_limit_mb=memory_limit_mb,
                 memory_percent=_parse_percent_value(row.get("MemPerc")),
+                pids=None,
             )
         )
 
     containers.sort(key=lambda c: c.memory_mb or 0.0, reverse=True)
-    _DOCKER_RESOURCE_CACHE = (now, containers, None)
-    return containers, None
+    _DOCKER_RESOURCE_CACHE = (now, containers, None, "local_docker")
+    return containers, None, "local_docker"
 
 
 def _sum_container_resource(containers: list[ContainerResource]) -> ProcessResource:
@@ -940,11 +987,36 @@ def _merge_project_and_container_resource(
     container_memory = container_total.rss_mb
     return ProcessResource(
         pid=None,
-        cpu_percent=_sum_resource_values(
-            [process_total.cpu_percent, container_total.cpu_percent]
-        ),
+        cpu_percent=_sum_resource_values([process_total.cpu_percent, container_total.cpu_percent]),
         rss_mb=_sum_resource_values([process_total.rss_mb, container_memory]),
         uss_mb=_sum_resource_values([process_total.uss_mb, container_memory]),
+    )
+
+
+def _project_total_resource(
+    process_total: ProcessResource,
+    containers: list[ContainerResource],
+) -> tuple[ProcessResource, str]:
+    """选择不会重复计数的项目总量口径。"""
+
+    if not containers:
+        return process_total, "processes"
+    container_total = _sum_container_resource(containers)
+    services = {(item.service or "").lower() for item in containers}
+    if services & {"web", "backend"}:
+        memory = container_total.rss_mb
+        return (
+            ProcessResource(
+                pid=None,
+                cpu_percent=container_total.cpu_percent,
+                rss_mb=memory,
+                uss_mb=memory,
+            ),
+            "compose_containers",
+        )
+    return (
+        _merge_project_and_container_resource(process_total, container_total),
+        "processes_plus_containers",
     )
 
 
@@ -968,6 +1040,34 @@ def _discover_descendant_pids(root_pids: list[int]) -> list[int]:
         except Exception:
             continue
     return sorted(found)
+
+
+def _describe_child_process(pid: int) -> tuple[str | None, str]:
+    """Return a safe process name and purpose without exposing its command line."""
+
+    try:
+        import psutil  # type: ignore[import-not-found]
+
+        proc = psutil.Process(pid)
+        raw_name = str(proc.name() or "").strip()
+        name = re.sub(r"[\x00-\x1f\x7f]+", " ", raw_name).strip()[:64] or None
+        command = " ".join(str(part) for part in proc.cmdline()).lower()
+    except Exception:
+        return None, "后台任务子进程"
+
+    if "multiprocessing.resource_tracker" in command:
+        return name, "多进程资源跟踪器"
+    if "multiprocessing.spawn" in command or "spawn_main" in command:
+        return name, "Python 后台任务子进程"
+    if "plugin" in command and ("install" in command or "pip" in command):
+        return name, "插件安装子进程"
+    if "plugin" in command:
+        return name, "插件任务子进程"
+    if "alembic" in command:
+        return name, "数据库迁移子进程"
+    if name:
+        return name, f"{name} 子进程"
+    return None, "后台任务子进程"
 
 
 async def _snapshot_dashboard_workers() -> tuple[
@@ -1001,11 +1101,7 @@ async def _snapshot_dashboard_workers() -> tuple[
     workers: list[WorkerRuntimeResource] = []
     for row in runtime:
         pid = int(row["pid"]) if isinstance(row.get("pid"), int) else None
-        cpu, rss, uss = (
-            stats.get(pid, (None, None, None))
-            if pid is not None
-            else (None, None, None)
-        )
+        cpu, rss, uss = stats.get(pid, (None, None, None)) if pid is not None else (None, None, None)
         workers.append(
             WorkerRuntimeResource(
                 account_id=int(row.get("account_id") or 0),
@@ -1020,14 +1116,22 @@ async def _snapshot_dashboard_workers() -> tuple[
         )
 
     workers.sort(
-        key=lambda w: (0.0 if w.rss_mb is None else w.rss_mb),
+        key=lambda w: 0.0 if w.rss_mb is None else w.rss_mb,
         reverse=True,
     )
     other_processes: list[ProcessResource] = []
     for pid in other_pids:
         cpu, rss, uss = stats.get(pid, (None, None, None))
+        name, role = _describe_child_process(pid)
         other_processes.append(
-            ProcessResource(pid=pid, cpu_percent=cpu, rss_mb=rss, uss_mb=uss)
+            ProcessResource(
+                pid=pid,
+                name=name,
+                role=role,
+                cpu_percent=cpu,
+                rss_mb=rss,
+                uss_mb=uss,
+            )
         )
     return workers, main, _sum_project_resource(main, workers, other_processes), other_processes
 
@@ -1108,24 +1212,28 @@ async def get_health_overview(_user: CurrentUser) -> HealthOverview:
 
 @router.get("/resource-dashboard", response_model=ResourceDashboard)
 async def get_resource_dashboard(_user: CurrentUser) -> ResourceDashboard:
-    """V1 资源占用概览：主机 + Web 主进程 + worker + 项目容器 + 5 分钟日志量。"""
+    """资源占用概览：主机、项目进程、完整 Compose 容器与 5 分钟日志量。"""
 
     host = _snapshot_dashboard_host()
     workers, main, process_total, other_processes = await _snapshot_dashboard_workers()
-    containers, container_probe_error = _snapshot_project_containers()
+    containers, container_probe_error, container_source = await asyncio.to_thread(
+        _snapshot_project_containers
+    )
     container_total = _sum_container_resource(containers)
-    project_total = _merge_project_and_container_resource(process_total, container_total)
+    project_total, project_total_basis = _project_total_resource(process_total, containers)
     logs = await _snapshot_runtime_log_stats()
     return ResourceDashboard(
         host=host,
         main_process=main,
         project_total=project_total,
         app_uptime_seconds=_read_app_uptime_seconds(),
-        other_processes=other_processes[:8],
-        containers=containers[:8],
+        other_processes=other_processes,
+        containers=containers,
         container_total=container_total,
         container_probe_error=container_probe_error,
-        workers=workers[:8],
+        container_source=container_source,
+        project_total_basis=project_total_basis,
+        workers=workers,
         worker_alive=sum(1 for w in workers if w.alive),
         worker_desired_running=sum(1 for w in workers if w.desired == "running"),
         logs=logs,
@@ -1159,6 +1267,7 @@ RUNTIME_PROD_CONTAINER_WITH_UPDATER = "prod_container_with_updater"
 RUNTIME_PROD_CONTAINER_MANUAL = "prod_container_manual"
 RUNTIME_UNSUPPORTED = "unsupported"
 
+
 def _run_git(*args: str, timeout: int = 30) -> tuple[str, str, int]:
     """同步执行 git 命令，返回 (stdout, stderr, returncode)。"""
     root = _git_root()
@@ -1179,12 +1288,23 @@ def _run_git(*args: str, timeout: int = 30) -> tuple[str, str, int]:
         return "", str(e), 1
 
 
+def _version_at_git_ref(ref: str) -> str | None:
+    """从指定 Git ref 的后端版本源读取应用版本。"""
+    out, _, rc = _run_git("show", f"{ref}:backend/app/__init__.py", timeout=10)
+    if rc != 0:
+        return None
+    match = re.search(r'^__version__\s*=\s*["\']([^"\']+)["\']', out, re.MULTILINE)
+    return match.group(1).strip() if match else None
+
+
 def _default_update_remote_branch() -> tuple[str, str]:
     remote = (os.getenv("TELEPILOT_UPDATE_REMOTE") or "origin").strip() or "origin"
     env_branch = (os.getenv("TELEPILOT_UPDATE_BRANCH") or "").strip()
     if env_branch:
         return remote, env_branch
-    upstream_out, _, upstream_rc = _run_git("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}", timeout=5)
+    upstream_out, _, upstream_rc = _run_git(
+        "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}", timeout=5
+    )
     if upstream_rc == 0 and "/" in upstream_out:
         upstream_remote, upstream_branch = upstream_out.split("/", 1)
         return upstream_remote or remote, upstream_branch or "main"
@@ -1242,7 +1362,9 @@ def _updater_token() -> str:
     return (os.getenv("TELEPILOT_UPDATER_TOKEN") or "").strip()
 
 
-def _updater_request(path: str, payload: dict[str, Any] | None = None, *, timeout: int = 30) -> dict[str, Any]:
+def _updater_request(
+    path: str, payload: dict[str, Any] | None = None, *, timeout: int = 30
+) -> dict[str, Any]:
     url = _resolve_http_updater()
     if not url:
         raise RuntimeError("内部 updater 不可用")
@@ -1355,6 +1477,8 @@ def _plan_text(
     has_update: bool,
     components: list[str],
     services: list[str],
+    file_sync_services: list[str],
+    rebuild_services: list[str],
     requires_full_update: bool,
     requires_backup: bool,
     requires_migration: bool,
@@ -1367,7 +1491,14 @@ def _plan_text(
     detail_parts: list[str] = []
     if components and components != ["none"]:
         detail_parts.append(f"变更分类：{', '.join(components)}")
-    if services:
+    if file_sync_services:
+        detail_parts.append(
+            f"直接同步目标 commit 文件并重启：{', '.join(file_sync_services)}。"
+        )
+    if rebuild_services:
+        detail_parts.append(f"需要编译或镜像构建：{', '.join(rebuild_services)}。")
+    if services and not file_sync_services and not rebuild_services:
+        # 兼容尚未提供动作分类的旧 updater。
         detail_parts.append(f"仅切换服务：{', '.join(services)}；其余容器保持运行。")
     elif components == ["docs_only"]:
         detail_parts.append("不需要重建或重启运行服务。")
@@ -1389,7 +1520,9 @@ def _plan_text(
         detail_parts.append("当前运行于容器，需调用宿主机更新器。")
         label = "需调用宿主机更新器"
     elif runtime_mode == RUNTIME_PROD_CONTAINER_MANUAL:
-        detail_parts.append("当前运行于容器且无更新器，无法在容器内直接检查 Git 远程差异；需人工在宿主机执行更新。")
+        detail_parts.append(
+            "当前运行于容器且无更新器，无法在容器内直接检查 Git 远程差异；需人工在宿主机执行更新。"
+        )
         label = "需在宿主机更新"
     else:
         detail_parts.append("当前运行环境不支持自动更新。")
@@ -1422,8 +1555,15 @@ def _check_response_from_plan(
         )
     has_update = bool(plan.get("has_update"))
     changed_files = [str(item) for item in plan.get("changed_files") or []]
+    commit_titles = [
+        str(item).strip()[:240]
+        for item in plan.get("commit_titles") or []
+        if str(item).strip()
+    ][:30]
     components = [str(item) for item in plan.get("components") or ["none"]]
     services = [str(item) for item in plan.get("services") or []]
+    file_sync_services = [str(item) for item in plan.get("file_sync_services") or []]
+    rebuild_services = [str(item) for item in plan.get("rebuild_services") or []]
     requires_full_update = bool(plan.get("requires_full_update"))
     requires_backup = bool(plan.get("requires_backup"))
     requires_migration = bool(plan.get("requires_migration"))
@@ -1438,6 +1578,8 @@ def _check_response_from_plan(
         has_update=has_update,
         components=components,
         services=services,
+        file_sync_services=file_sync_services,
+        rebuild_services=rebuild_services,
         requires_full_update=requires_full_update,
         requires_backup=requires_backup,
         requires_migration=requires_migration,
@@ -1445,12 +1587,15 @@ def _check_response_from_plan(
     )
     return CheckUpdateResponse(
         has_update=has_update,
+        current_version=str(plan.get("current_version") or "") or None,
+        target_version=str(plan.get("target_version") or "") or None,
         current_commit=str(plan.get("current_commit") or "") or None,
         remote_commit=str(plan.get("remote_commit") or "") or None,
         ahead=int(plan.get("ahead") or 0),
         remote=remote,
         branch=branch,
         changed_files=changed_files,
+        commit_titles=commit_titles,
         runtime_mode=runtime_mode,
         update_executor=updater,
         action_required=action_required,
@@ -1458,6 +1603,8 @@ def _check_response_from_plan(
         plan_detail=plan_detail,
         components=components,
         services=services,
+        file_sync_services=file_sync_services,
+        rebuild_services=rebuild_services,
         requires_full_update=requires_full_update,
         requires_backup=requires_backup,
         requires_migration=requires_migration,
@@ -1473,6 +1620,8 @@ class CheckUpdateResponse(BaseModel):
     此时 ``has_update`` 不代表真实结论，前端应展示"无法自动检查"而不是"有更新/已最新"。"""
     current_commit: str | None = None
     remote_commit: str | None = None
+    current_version: str | None = None
+    target_version: str | None = None
     ahead: int = 0
     remote: str = "origin"
     branch: str = "main"
@@ -1482,8 +1631,11 @@ class CheckUpdateResponse(BaseModel):
     plan_label: str = ""
     plan_detail: str = ""
     changed_files: list[str] = Field(default_factory=list)
+    commit_titles: list[str] = Field(default_factory=list)
     components: list[str] = Field(default_factory=lambda: ["none"])
     services: list[str] = Field(default_factory=list)
+    file_sync_services: list[str] = Field(default_factory=list)
+    rebuild_services: list[str] = Field(default_factory=list)
     requires_full_update: bool = False
     requires_backup: bool = False
     requires_migration: bool = False
@@ -1508,6 +1660,8 @@ class PullUpdateResponse(BaseModel):
     changed_files: list[str] = Field(default_factory=list)
     components: list[str] = Field(default_factory=lambda: ["none"])
     services: list[str] = Field(default_factory=list)
+    file_sync_services: list[str] = Field(default_factory=list)
+    rebuild_services: list[str] = Field(default_factory=list)
     requires_full_update: bool = False
     requires_backup: bool = False
     requires_migration: bool = False
@@ -1559,6 +1713,8 @@ class UpdateJobStatusResponse(BaseModel):
     detail: str | None = None
     logs: list[str] = Field(default_factory=list)
     plan: dict[str, Any] | None = None
+    # WP-U1：各阶段耗时（phase + duration_ms）
+    step_timings: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class UpdateTargetOptionsResponse(BaseModel):
@@ -1574,9 +1730,7 @@ async def _resolve_update_request(payload: UpdateRequest | None) -> tuple[str, s
         payload = None
     default_remote, default_branch = _default_update_remote_branch()
     try:
-        defaults = normalize_update_target(
-            {"remote": default_remote, "branch": default_branch}
-        )
+        defaults = normalize_update_target({"remote": default_remote, "branch": default_branch})
     except ValueError:
         log.warning("忽略环境或 Git upstream 中的非法更新目标，回退 origin/main")
         defaults = {"remote": "origin", "branch": "main"}
@@ -1641,6 +1795,7 @@ async def get_update_target_options(
         )
 
     if runtime_mode == RUNTIME_LOCAL_SOURCE and root is not None:
+
         def read_local_targets() -> UpdateTargetOptionsResponse:
             remotes_proc = subprocess.run(
                 ["git", "remote"],
@@ -1651,7 +1806,11 @@ async def get_update_target_options(
                 check=False,
             )
             remotes = [item.strip() for item in remotes_proc.stdout.splitlines() if item.strip()]
-            selected = selected_remote if selected_remote in remotes else (remotes[0] if remotes else selected_remote)
+            selected = (
+                selected_remote
+                if selected_remote in remotes
+                else (remotes[0] if remotes else selected_remote)
+            )
             heads_proc = subprocess.run(
                 ["git", "ls-remote", "--heads", selected],
                 cwd=root,
@@ -1706,7 +1865,11 @@ async def check_update(
     remote, branch, _force_full = await _resolve_update_request(payload)
 
     try:
-        if runtime_mode == RUNTIME_PROD_CONTAINER_WITH_UPDATER and updater and updater.startswith(("http://", "https://")):
+        if (
+            runtime_mode == RUNTIME_PROD_CONTAINER_WITH_UPDATER
+            and updater
+            and updater.startswith(("http://", "https://"))
+        ):
             plan = await asyncio.to_thread(
                 _updater_request,
                 "/check",
@@ -1754,9 +1917,7 @@ async def check_update(
                     error=f"git fetch 失败: {fetch_err or fetch_out}",
                 )
 
-            head_out, _, head_rc = await asyncio.to_thread(
-                _run_git, "rev-parse", "HEAD", timeout=10
-            )
+            head_out, _, head_rc = await asyncio.to_thread(_run_git, "rev-parse", "HEAD", timeout=10)
             if head_rc != 0:
                 return CheckUpdateResponse(
                     remote=remote,
@@ -1770,9 +1931,7 @@ async def check_update(
                     error="无法获取当前 commit",
                 )
 
-            remote_out, _, remote_rc = await asyncio.to_thread(
-                _run_git, "rev-parse", remote_ref, timeout=10
-            )
+            remote_out, _, remote_rc = await asyncio.to_thread(_run_git, "rev-parse", remote_ref, timeout=10)
             if remote_rc != 0:
                 return CheckUpdateResponse(
                     remote=remote,
@@ -1793,8 +1952,25 @@ async def check_update(
             behind = int(behind_out) if not behind_rc else 0
             update_plan = await asyncio.to_thread(build_update_plan, root, head_out, remote_out)
             changed_files = update_plan.changed_files[:80]
+            titles_out, _, titles_rc = await asyncio.to_thread(
+                _run_git,
+                "log",
+                "--format=%<(240,trunc)%s",
+                "--no-merges",
+                "-n",
+                "30",
+                f"{head_out}..{remote_out}",
+                timeout=10,
+            )
+            commit_titles = (
+                [line.strip()[:240] for line in titles_out.splitlines() if line.strip()][:30]
+                if titles_rc == 0
+                else []
+            )
             components = update_plan.components
             services = update_plan.services
+            file_sync_services = update_plan.file_sync_services
+            rebuild_services = update_plan.rebuild_services
             requires_full_update = update_plan.requires_full_update
             requires_backup = update_plan.requires_backup
             has_update = has_update and behind > 0
@@ -1804,12 +1980,16 @@ async def check_update(
                     f"cd {shlex.quote(str(root))} && "
                     f"git pull --ff-only {shlex.quote(remote)} {shlex.quote(branch)} && make install && make restart"
                 )
-            action_required = _action_required_for_plan(runtime_mode, has_update, components, requires_full_update)
+            action_required = _action_required_for_plan(
+                runtime_mode, has_update, components, requires_full_update
+            )
             plan_label, plan_detail = _plan_text(
                 runtime_mode=runtime_mode,
                 has_update=has_update,
                 components=components,
                 services=services,
+                file_sync_services=file_sync_services,
+                rebuild_services=rebuild_services,
                 requires_full_update=requires_full_update,
                 requires_backup=requires_backup,
                 requires_migration=update_plan.requires_migration,
@@ -1817,12 +1997,15 @@ async def check_update(
             )
             return CheckUpdateResponse(
                 has_update=has_update,
+                current_version=_version_at_git_ref(head_out) or __version__,
+                target_version=_version_at_git_ref(remote_out),
                 current_commit=head_out[:12],
                 remote_commit=remote_out[:12],
                 ahead=behind,
                 remote=remote,
                 branch=branch,
                 changed_files=changed_files,
+                commit_titles=commit_titles,
                 runtime_mode=runtime_mode,
                 update_executor=updater,
                 action_required=action_required,
@@ -1830,6 +2013,8 @@ async def check_update(
                 plan_detail=plan_detail,
                 components=components,
                 services=services,
+                file_sync_services=file_sync_services,
+                rebuild_services=rebuild_services,
                 requires_full_update=requires_full_update,
                 requires_backup=requires_backup,
                 requires_migration=update_plan.requires_migration,
@@ -1898,7 +2083,11 @@ async def pull_update(
     remote, branch, force_full = await _resolve_update_request(payload)
 
     try:
-        if runtime_mode == RUNTIME_PROD_CONTAINER_WITH_UPDATER and updater and updater.startswith(("http://", "https://")):
+        if (
+            runtime_mode == RUNTIME_PROD_CONTAINER_WITH_UPDATER
+            and updater
+            and updater.startswith(("http://", "https://"))
+        ):
             result = await asyncio.to_thread(
                 _updater_request,
                 "/jobs",
@@ -1949,9 +2138,7 @@ async def pull_update(
                     error=GIT_WORKTREE_UNAVAILABLE_MESSAGE,
                 )
 
-            out, err, rc = await asyncio.to_thread(
-                _run_git, "pull", "--ff-only", remote, branch, timeout=60
-            )
+            out, err, rc = await asyncio.to_thread(_run_git, "pull", "--ff-only", remote, branch, timeout=60)
             if rc != 0:
                 return PullUpdateResponse(
                     remote=remote,
@@ -1966,13 +2153,9 @@ async def pull_update(
                 )
 
             # 获取最新 commit
-            head_out, _, _ = await asyncio.to_thread(
-                _run_git, "rev-parse", "HEAD", timeout=10
-            )
+            head_out, _, _ = await asyncio.to_thread(_run_git, "rev-parse", "HEAD", timeout=10)
             # 获取简短 summary
-            summary_out, _, _ = await asyncio.to_thread(
-                _run_git, "log", "-1", "--oneline", timeout=10
-            )
+            summary_out, _, _ = await asyncio.to_thread(_run_git, "log", "-1", "--oneline", timeout=10)
             root = _git_root()
             if root and (root / "Makefile").exists():
                 subprocess.Popen(
@@ -2077,12 +2260,20 @@ async def pull_update(
 async def get_update_job(job_id: str, _user: CurrentUser) -> UpdateJobStatusResponse:
     """读取内部 updater 任务状态。"""
     runtime_mode, updater, _root = await asyncio.to_thread(_detect_runtime_mode)
-    if runtime_mode != RUNTIME_PROD_CONTAINER_WITH_UPDATER or not updater or not updater.startswith(("http://", "https://")):
-        return UpdateJobStatusResponse(ok=False, job_id=job_id, status="unsupported", error="内部 updater 不可用")
+    if (
+        runtime_mode != RUNTIME_PROD_CONTAINER_WITH_UPDATER
+        or not updater
+        or not updater.startswith(("http://", "https://"))
+    ):
+        return UpdateJobStatusResponse(
+            ok=False, job_id=job_id, status="unsupported", error="内部 updater 不可用"
+        )
     try:
         result = await asyncio.to_thread(_updater_get, f"/jobs/{job_id}", timeout=10)
     except Exception as exc:  # noqa: BLE001
-        return UpdateJobStatusResponse(ok=False, job_id=job_id, status="unknown", error=f"{type(exc).__name__}: {exc}")
+        return UpdateJobStatusResponse(
+            ok=False, job_id=job_id, status="unknown", error=f"{type(exc).__name__}: {exc}"
+        )
     if not result.get("ok"):
         return UpdateJobStatusResponse(
             ok=False,
@@ -2108,6 +2299,11 @@ async def get_update_job(job_id: str, _user: CurrentUser) -> UpdateJobStatusResp
         detail=str(result.get("detail") or "") or None,
         logs=[str(line) for line in result.get("logs") or []],
         plan=result.get("plan") if isinstance(result.get("plan"), dict) else None,
+        step_timings=[
+            item
+            for item in (result.get("step_timings") or [])
+            if isinstance(item, dict)
+        ],
     )
 
 
@@ -2199,7 +2395,7 @@ _EXPORT_DEFS: dict[str, dict[str, Any]] = {
     },
     "llm_providers": {
         "model": "LLMProvider",
-        "exclude_fields": {"api_key_enc"},
+        "exclude_fields": {"api_key_enc", "request_headers_enc"},
         "id_fields": ("name",),
         "pk_field": "id",
         "dependencies": ("proxies",),
@@ -2310,7 +2506,16 @@ _IMPORT_TOPOLOGY = (
 )
 
 # 敏感字段的完整集合（include_sensitive=true 时不排除）
-_ALL_SENSITIVE = {"session_enc", "api_key_enc", "api_id_enc", "api_hash_enc", "phone", "bot_token_enc", "password_enc"}
+_ALL_SENSITIVE = {
+    "session_enc",
+    "api_key_enc",
+    "request_headers_enc",
+    "api_id_enc",
+    "api_hash_enc",
+    "phone",
+    "bot_token_enc",
+    "password_enc",
+}
 _SENSITIVE_SYSTEM_SETTING_KEYS = {"auth_login_recovery_code"}
 _SENSITIVE_SYSTEM_SETTING_PREFIXES = (
     "account_webhooks:",
@@ -2443,15 +2648,9 @@ async def _build_export_payload(
                 query = query.where(getattr(model_cls, key) == value)
             rows = (await db.execute(query)).scalars().all()
             if model_cls.__name__ == "SystemSetting" and not include_sensitive:
-                rows = [
-                    row
-                    for row in rows
-                    if _system_setting_safe_for_export(getattr(row, "key", ""))
-                ]
+                rows = [row for row in rows if _system_setting_safe_for_export(getattr(row, "key", ""))]
             exclude = set() if include_sensitive else definition["exclude_fields"]
-            result[category] = [
-                _row_to_dict(row, exclude, include_sensitive) for row in rows
-            ]
+            result[category] = [_row_to_dict(row, exclude, include_sensitive) for row in rows]
     return result
 
 
@@ -2533,9 +2732,7 @@ def _lookup_mapping(
 ) -> Any:
     mapped = mappings.get(category, {}).get(_mapping_key(source_value))
     if mapped is None:
-        raise ConfigImportError(
-            f"缺少依赖映射：{category} 的旧 ID {source_value}；请使用完整的 V2 配置包"
-        )
+        raise ConfigImportError(f"缺少依赖映射：{category} 的旧 ID {source_value}；请使用完整的 V2 配置包")
     return mapped
 
 
@@ -2548,14 +2745,11 @@ def _remap_command_config(
     remapped = dict(config)
     provider_id = remapped.get("provider_id")
     if provider_id is not None:
-        remapped["provider_id"] = _lookup_mapping(
-            mappings, "llm_providers", provider_id
-        )
+        remapped["provider_id"] = _lookup_mapping(mappings, "llm_providers", provider_id)
     fallback_ids = remapped.get("fallback_provider_ids")
     if isinstance(fallback_ids, list):
         remapped["fallback_provider_ids"] = [
-            _lookup_mapping(mappings, "llm_providers", value)
-            for value in fallback_ids
+            _lookup_mapping(mappings, "llm_providers", value) for value in fallback_ids
         ]
     return remapped
 
@@ -2579,9 +2773,7 @@ def _remap_import_row(
             "rule": "rules",
         }.get(scope)
         if dependency and remapped.get("scope_id") is not None:
-            remapped["scope_id"] = _lookup_mapping(
-                mappings, dependency, remapped["scope_id"]
-            )
+            remapped["scope_id"] = _lookup_mapping(mappings, dependency, remapped["scope_id"])
     if category == "command_templates" and "config" in remapped:
         remapped["config"] = _remap_command_config(remapped["config"], mappings)
     return remapped
@@ -2616,13 +2808,9 @@ async def _import_config_payload(
         raise ConfigImportError("配置包不包含任何可恢复类别")
     declared_categories = meta.get("included_categories")
     if isinstance(declared_categories, list):
-        missing_categories = sorted(
-            {str(value) for value in declared_categories} - payload_categories
-        )
+        missing_categories = sorted({str(value) for value in declared_categories} - payload_categories)
         if missing_categories:
-            raise ConfigImportError(
-                f"配置包内容不完整，缺少声明类别：{', '.join(missing_categories)}"
-            )
+            raise ConfigImportError(f"配置包内容不完整，缺少声明类别：{', '.join(missing_categories)}")
 
     models = model_map or _config_model_map()
     factory = session_factory or AsyncSessionLocal
@@ -2657,11 +2845,7 @@ async def _import_config_payload(
                     source_pk = source.get(definition.get("pk_field", ""))
                     remapped = _remap_import_row(category, source, mappings)
                     filtered: dict[str, Any] = {}
-                    exclude = (
-                        set()
-                        if bool(meta.get("include_sensitive"))
-                        else definition["exclude_fields"]
-                    )
+                    exclude = set() if bool(meta.get("include_sensitive")) else definition["exclude_fields"]
                     for key, value in remapped.items():
                         if key not in table_columns or key in exclude:
                             continue
@@ -2680,10 +2864,7 @@ async def _import_config_payload(
                             ) from exc
 
                     # 导入旧 / 跨版本备份时，未知的客户端身份档案降级为 auto（不拒绝整份备份）。
-                    if (
-                        category == "llm_providers"
-                        and "client_identity_profile" in filtered
-                    ):
+                    if category == "llm_providers" and "client_identity_profile" in filtered:
                         from ..db.models.command import (
                             normalize_client_identity_profile,
                         )
@@ -2697,27 +2878,19 @@ async def _import_config_payload(
                         filtered["client_identity_profile"] = normalized_identity
 
                     identity: dict[str, Any] | None = None
-                    candidates = definition.get(
-                        "identity_candidates", (definition["id_fields"],)
-                    )
-                    nullable_identity_fields = definition.get(
-                        "nullable_identity_fields", set()
-                    )
+                    candidates = definition.get("identity_candidates", (definition["id_fields"],))
+                    nullable_identity_fields = definition.get("nullable_identity_fields", set())
                     for candidate in candidates:
                         if all(
                             field in filtered
-                            and (
-                                filtered[field] is not None
-                                or field in nullable_identity_fields
-                            )
+                            and (filtered[field] is not None or field in nullable_identity_fields)
                             for field in candidate
                         ):
                             identity = {field: filtered[field] for field in candidate}
                             break
                     if identity is None:
                         raise ConfigImportError(
-                            f"[{category}] 缺少稳定标识字段："
-                            f"{', '.join(definition['id_fields'])}"
+                            f"[{category}] 缺少稳定标识字段：{', '.join(definition['id_fields'])}"
                         )
                     query = select(model_cls)
                     for field, value in identity.items():
@@ -2774,18 +2947,14 @@ async def _import_config_payload(
         raise ConfigImportError(f"配置导入事务失败：{type(exc).__name__}: {exc}", imported=0) from exc
 
     public_mappings = {
-        category: values
-        for category, values in mappings.items()
-        if category in _EXPORT_DEFS and values
+        category: values for category, values in mappings.items() if category in _EXPORT_DEFS and values
     }
     return ImportConfigResponse(
         imported=imported,
         skipped=skipped,
         warnings=warnings,
         bundle_version=bundle_version,
-        affected_categories=[
-            category for category in _IMPORT_TOPOLOGY if category in affected_categories
-        ],
+        affected_categories=[category for category in _IMPORT_TOPOLOGY if category in affected_categories],
         affected_accounts=sorted(affected_accounts),
         id_mappings=public_mappings,
     )
@@ -2813,9 +2982,7 @@ async def _reload_imported_runtime(account_ids: list[int]) -> tuple[list[int], b
                     CMD_RELOAD_COMMANDS,
                     CMD_RELOAD_IGNORED,
                 ):
-                    confirmed = bool(
-                        await publish_cmd_with_ack(redis, account_id, command)
-                    ) and confirmed
+                    confirmed = bool(await publish_cmd_with_ack(redis, account_id, command)) and confirmed
             return account_id, confirmed
 
         results = await asyncio.gather(*(reload_one(value) for value in account_ids))
@@ -2847,19 +3014,13 @@ async def import_config(
     except ConfigImportError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
-    reloaded, restart_required = await _reload_imported_runtime(
-        outcome.affected_accounts
-    )
+    reloaded, restart_required = await _reload_imported_runtime(outcome.affected_accounts)
     return outcome.model_copy(
         update={
             "reloaded_accounts": reloaded,
             "restart_required": restart_required,
             "warnings": outcome.warnings
-            + (
-                ["部分 Worker 未确认配置热重载，请重启应用后再继续操作"]
-                if restart_required
-                else []
-            ),
+            + (["部分 Worker 未确认配置热重载，请重启应用后再继续操作"] if restart_required else []),
         }
     )
 

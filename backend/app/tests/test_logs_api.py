@@ -15,6 +15,50 @@ from app.api.logs import (
 )
 
 
+def test_system_console_filter_removes_only_successful_internal_health_noise() -> None:
+    payload = {
+        "ok": True,
+        "lines": [
+            'updater-1 | 2026-07-23T21:42:58Z [updater] 127.0.0.1 "GET /health HTTP/1.1" 200 -',
+            'updater-1 | 2026-07-24T06:32:46Z [updater] 172.18.0.4 "GET /jobs/890e65215801 HTTP/1.1" 200 -',
+            'updater-1 | 2026-07-24T06:32:47Z [updater] 172.18.0.4 "GET /console-logs?service=all&tail=300 HTTP/1.1" 200 -',
+            'updater-1 | 2026-07-23T21:43:13Z [updater] 127.0.0.1 "GET /health HTTP/1.1" 503 -',
+            "web-1 | ERROR:app.services.system_agent.runtime:真实错误",
+        ],
+    }
+
+    result = logs_api._filter_console_payload(payload, None)
+
+    assert result["lines"] == [
+        'updater-1 | 2026-07-23T21:43:13Z [updater] 127.0.0.1 "GET /health HTTP/1.1" 503 -',
+        "web-1 | ERROR:app.services.system_agent.runtime:真实错误",
+    ]
+
+
+def test_system_console_filter_removes_routine_info_noise_but_keeps_failures() -> None:
+    payload = {
+        "lines": [
+            "web-1 | INFO:alembic.runtime.migration:Context impl PostgresqlImpl.",
+            "web-1 | INFO:alembic.runtime.migration:Will assume transactional DDL.",
+            "web-1 | INFO:alembic.runtime.migration:Running upgrade 0040 -> 0041",
+            "web-1 | 2026-07-23 22:45:28,309 [worker:1] INFO Got difference for channel 2304101980 updates",
+            'web-1 | INFO:httpx:HTTP Request: POST https://example.test/v1/responses "HTTP/1.1 200 OK"',
+            'web-1 | INFO:httpx:HTTP Request: POST https://example.test/v1/responses "HTTP/1.1 429 Too Many Requests"',
+            "web-1 | WARNING:alembic.runtime.migration:数据库迁移状态异常",
+            "web-1 | ERROR:app.worker.runtime:频道差异同步失败",
+        ]
+    }
+
+    result = logs_api._filter_console_payload(payload, None)
+
+    assert result["lines"] == [
+        "web-1 | INFO:alembic.runtime.migration:Running upgrade 0040 -> 0041",
+        'web-1 | INFO:httpx:HTTP Request: POST https://example.test/v1/responses "HTTP/1.1 429 Too Many Requests"',
+        "web-1 | WARNING:alembic.runtime.migration:数据库迁移状态异常",
+        "web-1 | ERROR:app.worker.runtime:频道差异同步失败",
+    ]
+
+
 def _trace_row(**overrides):
     data = {
         "id": 1,
@@ -232,7 +276,9 @@ async def test_system_console_keyword_is_filtered_without_forwarding_to_updater(
 
 
 @pytest.mark.asyncio
-async def test_system_console_logs_falls_back_to_local_files(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+async def test_system_console_logs_falls_back_to_local_files(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
     backend_log = tmp_path / "backend.log"
     backend_log.write_text("line one\nline two\n", encoding="utf-8")
 
@@ -378,7 +424,9 @@ class _PagedMessageDB(_MessageDB):
 @pytest.mark.asyncio
 async def test_list_log_messages_verdict_scans_later_pages_until_match() -> None:
     first_page = [
-        _trace_row(id=index, trace_id=f"evt_noise_{index}", status="ok", ended_at=datetime(2026, 6, 29, tzinfo=UTC))
+        _trace_row(
+            id=index, trace_id=f"evt_noise_{index}", status="ok", ended_at=datetime(2026, 6, 29, tzinfo=UTC)
+        )
         for index in range(1, 4)
     ]
     target = _trace_row(

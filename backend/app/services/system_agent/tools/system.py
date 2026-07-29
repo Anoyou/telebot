@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 from sqlalchemy import select, text
@@ -43,9 +44,21 @@ async def get_health(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
     # DB
     try:
         await ctx.db.execute(text("SELECT 1"))
-        checks["db"] = {"ok": True}
+        db_check: dict[str, Any] = {"ok": True, "migration_revision": None}
+        try:
+            # SAVEPOINT 隔离缺表等错误，避免诊断查询把当前只读事务整体置为 failed。
+            async with ctx.db.begin_nested():
+                result = await ctx.db.execute(
+                    text("SELECT version_num FROM alembic_version LIMIT 1")
+                )
+                db_check["migration_revision"] = result.scalar_one_or_none()
+            if db_check["migration_revision"] is None:
+                db_check["migration_warning"] = "未找到数据库迁移版本记录"
+        except Exception as exc:  # noqa: BLE001
+            db_check["migration_warning"] = f"无法读取数据库迁移版本：{str(exc)[:160]}"
+        checks["db"] = db_check
     except Exception as exc:  # noqa: BLE001
-        checks["db"] = {"ok": False, "error": str(exc)[:200]}
+        checks["db"] = {"ok": False, "migration_revision": None, "error": str(exc)[:200]}
     # Redis
     try:
         r = get_redis()
@@ -82,10 +95,72 @@ async def get_health(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+async def get_resources(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
+    """读取当前主机与 TelePilot 进程树的资源快照。"""
+
+    try:
+        import psutil
+
+        process = psutil.Process(os.getpid())
+        children = process.children(recursive=True)
+
+        def process_view(item: Any) -> dict[str, Any]:
+            try:
+                memory = item.memory_info()
+                return {
+                    "pid": int(item.pid),
+                    "name": str(item.name()),
+                    "cpu_percent": float(item.cpu_percent(interval=None)),
+                    "rss_mb": round(float(memory.rss) / 1024 / 1024, 2),
+                    "status": str(item.status()),
+                }
+            except Exception as exc:  # noqa: BLE001
+                return {"pid": int(item.pid), "error": type(exc).__name__}
+
+        vm = psutil.virtual_memory()
+        disk = psutil.disk_usage("/")
+        rows = [process_view(process), *(process_view(item) for item in children)]
+        rows.sort(key=lambda item: float(item.get("rss_mb") or 0), reverse=True)
+        return {
+            "host": {
+                "cpu_percent": float(psutil.cpu_percent(interval=None)),
+                "memory_percent": float(vm.percent),
+                "memory_available_mb": round(float(vm.available) / 1024 / 1024, 2),
+                "disk_percent": float(disk.percent),
+                "disk_free_gb": round(float(disk.free) / 1024 / 1024 / 1024, 2),
+                "load_average": list(os.getloadavg()) if hasattr(os, "getloadavg") else [],
+            },
+            "process_count": len(rows),
+            "project_rss_mb": round(
+                sum(float(item.get("rss_mb") or 0) for item in rows), 2
+            ),
+            "processes": rows[:20],
+            "business_changed": False,
+        }
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "error": "resource_probe_failed",
+            "message": f"资源探测失败：{type(exc).__name__}",
+            "business_changed": False,
+        }
+
+
 def register(registry: ToolRegistry) -> None:
     registry.register(
         ToolSpec(
+            name="system.get_resources",
+            channels=("web",),
+            description="获取主机 CPU/内存/磁盘与 TelePilot 主进程、Worker 进程资源快照。",
+            input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+            read_only=True,
+            min_role="viewer",
+            read_handler=get_resources,
+        )
+    )
+    registry.register(
+        ToolSpec(
             name="system.get_context",
+            channels=("web",),
             description="获取系统上下文：时区、指令前缀、AI/Agent 开关、版本与当前会话上下文。",
             input_schema={"type": "object", "properties": {}, "additionalProperties": False},
             read_only=True,
@@ -96,7 +171,8 @@ def register(registry: ToolRegistry) -> None:
     registry.register(
         ToolSpec(
             name="system.get_health",
-            description="获取系统健康状态：数据库、Redis、账号分布、Provider 数量等组件就绪信息。",
+            channels=("web",),
+            description="获取系统健康状态：数据库及迁移版本、Redis、账号分布、Provider 数量等组件就绪信息。",
             input_schema={"type": "object", "properties": {}, "additionalProperties": False},
             read_only=True,
             min_role="viewer",

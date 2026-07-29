@@ -1,6 +1,6 @@
 // 顶栏：移动端汉堡按钮 + 副标题（仅 sm+ 显示）+ 系统健康灯 + 更新检查 + 紧急停用 + 登出
-// iOS PWA：背景色延伸到 safe-area-inset-top，并随主题同步系统状态栏底色，
-// 内容区高度仍维持 56px。
+// iOS PWA：背景色延伸到 safe-area-inset-top，并随主题同步系统状态栏底色。
+// 内容区高度约 3.25rem（相对旧版 5rem 收约 1/3）。
 import { Component, lazy, Suspense, useEffect, useState, type ErrorInfo, type ReactNode } from "react";
 import {
   Check,
@@ -41,6 +41,15 @@ interface TopBarProps {
   onMenuClick: () => void;
   onSidebarToggle: () => void;
   sidebarCollapsed: boolean;
+  /** 点顶栏空白/品牌区时滚回主内容顶部（替代 iOS 状态栏回顶） */
+  onScrollToTop?: () => void;
+}
+
+function isTopbarInteractiveTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof Element)) return false;
+  return Boolean(
+    target.closest("button, a, input, select, textarea, [role='button'], [data-no-scroll-top]"),
+  );
 }
 
 export function TopBar({
@@ -48,6 +57,7 @@ export function TopBar({
   onMenuClick,
   onSidebarToggle,
   sidebarCollapsed,
+  onScrollToTop,
 }: TopBarProps) {
   const [updateOpen, setUpdateOpen] = useState(false);
   const isStandalone = useStandaloneDisplayMode();
@@ -56,32 +66,48 @@ export function TopBar({
     <header
       className="
         app-topbar flex shrink-0 items-center justify-between
-        h-[calc(5rem+env(safe-area-inset-top))]
+        h-[calc(3.25rem+env(safe-area-inset-top))]
         pt-[env(safe-area-inset-top)]
-        pl-[max(1rem,env(safe-area-inset-left))]
-        pr-[max(1rem,env(safe-area-inset-right))]
-        md:px-8 xl:px-10
+        pl-[max(0.75rem,env(safe-area-inset-left))]
+        pr-[max(0.75rem,env(safe-area-inset-right))]
+        md:px-6 xl:px-8
       "
+      onClick={(event) => {
+        // 点顶栏非按钮区域（含安全区/标题旁空白）回顶；按钮自己处理点击
+        if (!onScrollToTop || isTopbarInteractiveTarget(event.target)) return;
+        onScrollToTop();
+      }}
     >
-      <div className="flex min-w-0 items-center gap-2">
-        <div className="flex min-w-0 items-center gap-2 md:hidden">
-          <BrandLogo className="h-9 w-9 shrink-0 rounded-xl" />
-          <div className="min-w-0">
-            <div className="truncate text-base font-semibold leading-none">TelePilot</div>
-            <div className="mt-0.5 truncate text-[11px] leading-none text-muted-foreground">
-              管理控制台
+      <div className="flex min-w-0 items-center gap-1.5">
+        <div className="flex min-w-0 items-center gap-1.5 md:hidden">
+          <button
+            type="button"
+            className="flex min-w-0 max-w-full items-center gap-1.5 rounded-md text-left outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            onClick={(event) => {
+              event.stopPropagation();
+              onScrollToTop?.();
+            }}
+            aria-label="回到页面顶部"
+            title="回到顶部"
+          >
+            <BrandLogo className="h-6 w-6 shrink-0" />
+            <div className="min-w-0">
+              <div className="truncate text-sm font-semibold leading-none">TelePilot</div>
+              <div className="mt-0.5 truncate text-[10px] leading-none text-muted-foreground">
+                管理控制台
+              </div>
             </div>
-          </div>
+          </button>
           {!isStandalone ? (
             <Button
               variant="outline"
               size="sm"
-              className={cn(topbarActionClass(false), "h-9 w-9 shrink-0 px-0")}
+              className={cn(topbarActionClass(false), "h-7 w-7 shrink-0 px-0")}
               onClick={onMenuClick}
               aria-label="打开导航菜单"
               title="打开导航菜单"
             >
-              <Menu className="h-4 w-4" />
+              <Menu className="h-3.5 w-3.5" />
             </Button>
           ) : null}
         </div>
@@ -94,11 +120,11 @@ export function TopBar({
           aria-pressed={sidebarCollapsed}
           title={sidebarCollapsed ? "展开侧边栏" : "收起侧边栏"}
         >
-          <PanelLeft className="h-4 w-4" />
+          <PanelLeft className="h-3.5 w-3.5" />
           <span className="sr-only">{sidebarCollapsed ? "展开侧栏" : "收起侧栏"}</span>
         </Button>
       </div>
-      <div className="flex shrink-0 items-center gap-1.5 sm:gap-2">
+      <div className={cn("flex shrink-0 items-center", isStandalone ? "gap-2" : "gap-1 sm:gap-1.5")}>
         <HealthDot compact={isStandalone} />
         <Button
           variant="outline"
@@ -108,8 +134,8 @@ export function TopBar({
           aria-label="检查更新"
           title="检查更新"
         >
-          <RefreshCw className="h-4 w-4" />
-          {isStandalone ? null : <span className="hidden text-xs sm:inline">检查更新</span>}
+          <RefreshCw className="h-3.5 w-3.5" />
+          {isStandalone ? null : <span className="hidden text-[11px] sm:inline">检查更新</span>}
         </Button>
         {updateOpen ? (
           <UpdateDialogErrorBoundary onClose={() => setUpdateOpen(false)}>
@@ -163,7 +189,7 @@ class UpdateDialogErrorBoundary extends Component<
 function UpdateDialogFallback({ onClose }: { onClose: () => void }) {
   return (
     <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}>
-      <DialogContent className="dialog-center !flex max-h-[calc(100dvh-1.5rem)] w-[calc(100vw-1.5rem)] max-w-md flex-col overflow-hidden">
+      <DialogContent className="dialog-center !flex h-[min(34rem,calc(100dvh-1.5rem))] w-[calc(100vw-1.5rem)] max-w-md flex-col overflow-hidden">
         <DialogHeader className="shrink-0 pr-6">
           <DialogTitle>检查更新</DialogTitle>
           <DialogDescription>正在载入更新信息。</DialogDescription>
@@ -183,8 +209,8 @@ function UpdateDialogFallback({ onClose }: { onClose: () => void }) {
 
 function topbarActionClass(compact: boolean) {
   return cn(
-    "h-10 rounded-full border-0 bg-secondary text-xs shadow-none hover:bg-secondary-hover",
-    compact ? "w-10 px-0" : "w-10 px-0 sm:w-auto sm:gap-2 sm:px-3",
+    "rounded-full border-0 bg-secondary text-[11px] shadow-none hover:bg-secondary-hover active:scale-95 motion-reduce:transform-none",
+    compact ? "h-9 w-9 px-0" : "h-7 w-7 px-0 sm:w-auto sm:gap-1.5 sm:px-2.5",
   );
 }
 
@@ -240,8 +266,8 @@ function ThemeSwitcher({ compact = false }: { compact?: boolean }) {
           aria-label="切换主题"
           title="切换主题"
         >
-          <Icon className="h-4 w-4" />
-          {compact ? null : <span className="hidden text-xs sm:inline">{currentLabel}</span>}
+          <Icon className="h-3.5 w-3.5" />
+          {compact ? null : <span className="hidden text-[11px] sm:inline">{currentLabel}</span>}
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="w-36">
@@ -251,10 +277,10 @@ function ThemeSwitcher({ compact = false }: { compact?: boolean }) {
             onSelect={() => setTheme(item.value)}
             className="gap-2"
           >
-            <item.icon className="h-4 w-4" />
+            <item.icon className="h-3.5 w-3.5" />
             <span className="flex-1">{item.label}</span>
             <Check
-              className={theme === item.value ? "h-4 w-4" : "h-4 w-4 opacity-0"}
+              className={theme === item.value ? "h-3.5 w-3.5" : "h-3.5 w-3.5 opacity-0"}
             />
           </DropdownMenuItem>
         ))}

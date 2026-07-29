@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import inspect
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any
 
 from ..db.models.command import (
@@ -15,14 +15,17 @@ from ..db.models.command import (
 from . import llm_account_budget, llm_client, llm_runtime
 from .llm_client import LLMCallFailed, LLMResult
 from .llm_dto import LLMProviderDTO
-from .llm_protocol import ModelRequest, ModelResponse
+from .llm_protocol import ModelRequest, ModelResponse, ModelStreamEvent
 from .llm_runtime import (
     UsageRecord,
     build_fallback_chain,
     call_with_fallback,
     invoke_model_with_fallback,
     preview_text_for_usage,
+    stream_model_with_fallback,
 )
+
+__all__ = ["invoke", "invoke_structured", "stream_structured", "transcribe"]
 
 
 async def invoke(
@@ -157,6 +160,39 @@ async def invoke_structured(
         client_factory=client_factory,
         progress_callback=progress_callback,
     )
+
+
+async def stream_structured(
+    primary_provider: LLMProviderDTO,
+    providers: dict[int, LLMProviderDTO],
+    request: ModelRequest,
+    *,
+    account_id: int | None = None,
+    triggered_by_account_id: int | None = None,
+    source: str | None = None,
+    fallback_provider_id: int | None = None,
+    matched_tag: str | None = None,
+    client_factory: Callable[..., Any | Awaitable[Any]] | None = None,
+    progress_callback: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None,
+) -> AsyncIterator[tuple[ModelStreamEvent, LLMProviderDTO, bool]]:
+    """Structured native streaming through shared fallback, budget and usage gates."""
+
+    chain = build_fallback_chain(
+        primary_provider,
+        providers=providers,
+        fallback_provider_id=fallback_provider_id,
+        matched_tag=matched_tag,
+    )
+    async for item in stream_model_with_fallback(
+        chain,
+        request,
+        account_id=account_id,
+        triggered_by_account_id=triggered_by_account_id,
+        source=source,
+        client_factory=client_factory,
+        progress_callback=progress_callback,
+    ):
+        yield item
 
 
 async def transcribe(

@@ -870,6 +870,7 @@ class Incoming:
     trace_id: str | None = None
     native_raw: dict[str, Any] | None = None
     callback_already_acked: bool = False
+    management_rich_html_required: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -1188,6 +1189,10 @@ async def sync_account_bot(aid: int) -> None:
 async def start_interaction_bot_manager() -> int:
     """启动所有已启用的交互 Bot polling task。"""
 
+    if not await _interaction_bot_capability_enabled():
+        log.info("interaction_bot 平台模块关闭或缓存未就绪，跳过 interaction bot manager 启动")
+        return 0
+
     async with AsyncSessionLocal() as db:
         kill_row = await db.get(SystemSetting, "kill_switch")
         kill_value = kill_row.value if kill_row is not None else None
@@ -1219,18 +1224,38 @@ async def start_interaction_bot_manager() -> int:
     return count
 
 
+async def _interaction_bot_capability_enabled() -> bool:
+    """受控 Interaction 入口统一门禁；缓存失败或未就绪均 fail-closed。"""
+
+    try:
+        from . import platform_capabilities as platform_caps
+
+        snapshot = platform_caps.get_snapshot()
+        if not snapshot.cache_ready:
+            snapshot = await platform_caps.bootstrap_from_db()
+        return bool(
+            snapshot.cache_ready
+            and platform_caps.is_module_enabled_cached("interaction_bot", fail_closed=True)
+        )
+    except Exception:  # noqa: BLE001
+        log.exception("检查 interaction_bot 平台能力失败，按 fail-closed 拒绝入口")
+        return False
+
+
 async def stop_interaction_bot_manager() -> None:
-    """停止所有交互 Bot polling task。"""
+    """停止交互 Bot / 测试 Bot polling。
+
+    冻结边界：
+    - 只停交互 polling 与测试 Bot，**不**停止管理 Bot（account_bot_manager）。
+    - **保留**会话过期任务：已有会话按原始过期时间处理，不因模块关闭而中断 expire drain。
+    - 不触碰 payout / 补偿 / ActionEvent（这些在 userbot worker 与独立补偿链路）。
+    """
 
     async with _TASK_LOCK:
-        tasks = (
-            list(_INTERACTION_TASKS.values())
-            + list(_TRANSFER_TEST_TASKS.values())
-            + list(_INTERACTION_SESSION_EXPIRE_TASKS.values())
-        )
+        tasks = list(_INTERACTION_TASKS.values()) + list(_TRANSFER_TEST_TASKS.values())
         _INTERACTION_TASKS.clear()
         _TRANSFER_TEST_TASKS.clear()
-        _INTERACTION_SESSION_EXPIRE_TASKS.clear()
+        # 有意保留 _INTERACTION_SESSION_EXPIRE_TASKS
     for task in tasks:
         task.cancel()
     if tasks:
@@ -1244,8 +1269,35 @@ def is_interaction_bot_running(aid: int) -> bool:
     return bool(task and not task.done())
 
 
+def count_interaction_bot_tasks() -> int:
+    """当前交互 Bot / 测试 Bot / 会话过期任务数量（资源摘要用）。"""
+
+    return (
+        len(_INTERACTION_TASKS)
+        + len(_TRANSFER_TEST_TASKS)
+        + len(_INTERACTION_SESSION_EXPIRE_TASKS)
+    )
+
+
+def is_interaction_bot_manager_running() -> bool:
+    """是否有任一交互相关 polling / expire task。"""
+
+    return count_interaction_bot_tasks() > 0
+
+
 async def restart_interaction_bot(aid: int) -> None:
     """重启单个交互 Bot polling task。"""
+
+    if not await _interaction_bot_capability_enabled():
+        # 模块关闭、缓存未就绪或检查失败时确保旧 task 被停掉，不再重新拉起。
+        async with _TASK_LOCK:
+            old = _INTERACTION_TASKS.pop(aid, None)
+            old_transfer = _TRANSFER_TEST_TASKS.pop(aid, None)
+            old_expire = _INTERACTION_SESSION_EXPIRE_TASKS.pop(aid, None)
+        for task in (old, old_transfer, old_expire):
+            if task is not None:
+                task.cancel()
+        return
 
     async with _TASK_LOCK:
         old = _INTERACTION_TASKS.pop(aid, None)
@@ -2316,6 +2368,7 @@ async def _handle_update(aid: int, token: str, update: dict[str, Any]) -> None:
     incoming = _extract_incoming(aid, token, update)
     if incoming is None:
         return
+    incoming.management_rich_html_required = True
     flags = await _event_framework_flags()
     if (incoming.inline_query_id or incoming.chosen_inline_result_id) and not flags.get("inline_updates_enabled", True):
         return
@@ -2466,6 +2519,10 @@ async def _handle_update(aid: int, token: str, update: dict[str, Any]) -> None:
 
 
 async def _handle_interaction_update(aid: int, token: str, update: dict[str, Any]) -> None:
+    # 平台能力关闭后，即使遗留 polling task 仍在，也不再处理新更新。
+    if not await _interaction_bot_capability_enabled():
+        return
+
     incoming = _extract_incoming(aid, token, update)
     if incoming is None:
         return
@@ -4190,6 +4247,10 @@ def _interaction_participant_block_message(
         return "请用真实 Telegram 用户身份操作该玩法。"
     if policy == "paid_pool" and incoming.callback_id and _paid_pool_callback_allows_unjoined_user(incoming):
         return None
+    if policy == "paid_pool":
+        started_by_user_id = _int_or_none(session.get("started_by_user_id")) if isinstance(session, dict) else None
+        if started_by_user_id is not None and int(incoming.user_id) == started_by_user_id:
+            return None
     participant_ids = _interaction_session_participant_ids(session, policy=policy)
     if not participant_ids:
         if policy == "paid_pool" and _interaction_session_has_explicit_participant_list(session):
@@ -4198,12 +4259,21 @@ def _interaction_participant_block_message(
     if int(incoming.user_id) in participant_ids:
         return None
     if policy == "paid_pool":
-        started_by_user_id = _int_or_none(session.get("started_by_user_id")) if isinstance(session, dict) else None
-        if started_by_user_id is not None and int(incoming.user_id) == started_by_user_id:
-            return None
-    if policy == "paid_pool":
         return "请先加入本局，再操作牌桌按钮。"
     return "这不是你的玩法，请由付款或开局本人操作。"
+
+
+def _interaction_actions_require_participant_gate(actions: list[dict[str, Any]]) -> bool:
+    """普通消息只有在插件确认产生业务动作后，才应用参与者门禁。
+
+    ``no_session`` / ``end_session`` 只是会话生命周期信号，不代表当前文本是牌桌操作。
+    """
+
+    return any(
+        str(action.get("type") or "").strip() not in {"no_session", "end_session"}
+        for action in actions
+        if isinstance(action, dict)
+    )
 
 
 async def _interaction_session_keys_for_rule(account_id: int, rule: dict[str, Any], chat_id: int | None) -> list[str]:
@@ -6174,16 +6244,19 @@ async def _try_handle_interaction_module_message(
         session = await _load_interaction_session(incoming, rule)
         if session is None:
             continue
-        participant_block = _interaction_participant_block_message(incoming, rule, session)
+        # callback 明确指向牌桌按钮，可在执行插件前做参与者门禁。
+        # 普通消息可能只是群聊，必须等插件确认产生业务动作后再拦截。
+        participant_block = (
+            _interaction_participant_block_message(incoming, rule, session)
+            if is_callback
+            else None
+        )
         if participant_block:
-            if is_callback:
-                await _answer_callback(
-                    incoming,
-                    text=participant_block,
-                    show_alert=True,
-                )
-            else:
-                await _send(incoming, participant_block, reply_to_message_id=incoming.message_id)
+            await _answer_callback(
+                incoming,
+                text=participant_block,
+                show_alert=True,
+            )
             return True
         if not is_callback:
             if _message_equals_any(text, _rule_keyword_list(rule, "open_commands")):
@@ -6315,6 +6388,11 @@ async def _try_handle_interaction_module_message(
                 await _answer_callback(incoming)
                 return True
             continue
+        if not is_callback and _interaction_actions_require_participant_gate(actions):
+            participant_block = _interaction_participant_block_message(incoming, rule, session)
+            if participant_block:
+                await _send(incoming, participant_block, reply_to_message_id=incoming.message_id)
+                return True
         raw_actions = [dict(action) for action in actions]
         actions = await _guard_interaction_actions(incoming, rule, actions)
         _schedule_interaction_debug_state(
@@ -9559,6 +9637,19 @@ async def _check_remote_plugin_permission(account_id: int, role: str, action: st
     return True, ""
 
 
+_RICH_HTML_BLOCK_TAG_RE = re.compile(
+    r"</?(?:h[1-6]|p|ul|ol|li|table|tr|th|td|details|summary|pre|blockquote)(?:\s|>)",
+    re.IGNORECASE,
+)
+
+
+def _management_rich_html(text: str) -> str:
+    value = str(text or "").strip()
+    if _RICH_HTML_BLOCK_TAG_RE.search(value):
+        return value
+    return f"<p>{value.replace(chr(10), '<br>')}</p>"
+
+
 async def _send(
     incoming: Incoming,
     text: str,
@@ -9572,10 +9663,14 @@ async def _send(
 ) -> dict[str, Any] | None:
     if incoming.chat_id is None:
         return None
-    if rich_html and rich_markdown:
+    management_rich_html_required = incoming.management_rich_html_required
+    if management_rich_html_required:
+        rich_message = {"html": rich_html or _management_rich_html(text)}
+    elif rich_html and rich_markdown:
         raise ValueError("rich_html 与 rich_markdown 不能同时提供")
+    else:
+        rich_message = {"markdown": rich_markdown} if rich_markdown else ({"html": rich_html} if rich_html else None)
     target_message_id = edit_message_id if edit_message_id is not None else incoming.message_id
-    rich_message = {"markdown": rich_markdown} if rich_markdown else ({"html": rich_html} if rich_html else None)
     action = {
         "type": "edit_message" if edit and target_message_id is not None else "send_message",
         "send_via": "interaction_bot",
@@ -9645,48 +9740,50 @@ async def _send(
                     error_code="telegram_api_error",
                     error=f"rich edit fallback: {type(exc).__name__}",
                 )
-                log.debug("edit rich account bot message failed, fallback HTML edit", exc_info=True)
-        try:
-            result = await account_bot_service.edit_message(
-                incoming.token,
-                incoming.chat_id,
-                target_message_id,
-                text,
-                reply_markup=reply_markup,
-            )
-            await record_action(
-                trace_log_context(incoming.trace_id),
-                action,
-                TRACE_STATUS_OK,
-                actual_send_via="interaction_bot",
-                result=result,
-            )
-            await _emit_account_bot_action_tap(
-                incoming,
-                action,
-                ACTION_EVENT_STATUS_OK,
-                channel="interaction_bot",
-                result=result,
-            )
-            return result
-        except Exception:
-            log.debug("edit account bot message failed, fallback send", exc_info=True)
-            await record_action(
-                trace_log_context(incoming.trace_id),
-                action,
-                TRACE_STATUS_FAILED,
-                actual_send_via="interaction_bot",
-                error_code="telegram_api_error",
-                error="edit account bot message failed, fallback send",
-            )
-            await _emit_account_bot_action_tap(
-                incoming,
-                action,
-                ACTION_EVENT_STATUS_FAILED,
-                channel="interaction_bot",
-                error_code="telegram_api_error",
-                error="edit account bot message failed, fallback send",
-            )
+                fallback = "Rich HTML send" if management_rich_html_required else "HTML edit"
+                log.debug("edit rich account bot message failed, fallback %s", fallback, exc_info=True)
+        if not management_rich_html_required:
+            try:
+                result = await account_bot_service.edit_message(
+                    incoming.token,
+                    incoming.chat_id,
+                    target_message_id,
+                    text,
+                    reply_markup=reply_markup,
+                )
+                await record_action(
+                    trace_log_context(incoming.trace_id),
+                    action,
+                    TRACE_STATUS_OK,
+                    actual_send_via="interaction_bot",
+                    result=result,
+                )
+                await _emit_account_bot_action_tap(
+                    incoming,
+                    action,
+                    ACTION_EVENT_STATUS_OK,
+                    channel="interaction_bot",
+                    result=result,
+                )
+                return result
+            except Exception:
+                log.debug("edit account bot message failed, fallback send", exc_info=True)
+                await record_action(
+                    trace_log_context(incoming.trace_id),
+                    action,
+                    TRACE_STATUS_FAILED,
+                    actual_send_via="interaction_bot",
+                    error_code="telegram_api_error",
+                    error="edit account bot message failed, fallback send",
+                )
+                await _emit_account_bot_action_tap(
+                    incoming,
+                    action,
+                    ACTION_EVENT_STATUS_FAILED,
+                    channel="interaction_bot",
+                    error_code="telegram_api_error",
+                    error="edit account bot message failed, fallback send",
+                )
     send_action = {
         "type": "send_message",
         "send_via": "interaction_bot",
@@ -9742,6 +9839,9 @@ async def _send(
                 error_code="telegram_api_error",
                 error=f"rich send fallback: {type(exc).__name__}",
             )
+            if management_rich_html_required:
+                log.debug("send rich management bot message failed", exc_info=True)
+                raise
             log.debug("send rich account bot message failed, fallback sendMessage", exc_info=True)
     try:
         result = await account_bot_service.send_message(

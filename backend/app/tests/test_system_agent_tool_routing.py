@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from app.services.system_agent.registry import ToolSpec
 from app.services.system_agent.tool_routing import (
     ToolRoute,
@@ -30,6 +32,15 @@ def test_general_question_uses_no_tools() -> None:
     assert route == ToolRoute((), "local", "general_help")
 
 
+def test_changelog_request_uses_product_domain() -> None:
+    route = route_locally(
+        "看看更新日志",
+        available={"logs", "system", "product"},
+    )
+
+    assert route == ToolRoute(("product",), "local", "product_changelog")
+
+
 def test_scheduler_request_only_exposes_scheduler_tools() -> None:
     specs = [_spec("scheduler.list"), _spec("logs.recent"), _spec("rules.list")]
     route = route_locally(
@@ -54,6 +65,35 @@ def test_reference_reuses_last_memory_domain() -> None:
         "memory",
         "reference_to_previous_domain",
     )
+
+
+@pytest.mark.parametrize(
+    "text",
+    (
+        "你肯定排查错地方了",
+        "这个结果不对，重新查",
+        "you checked the wrong place, check again",
+    ),
+)
+def test_correction_reuses_last_memory_domain(text: str) -> None:
+    route = route_locally(
+        text,
+        available={"providers", "logs"},
+        memory_state={"last_domains": ["providers"]},
+    )
+
+    assert route == ToolRoute(
+        ("providers",),
+        "memory",
+        "correction_to_previous_domain",
+    )
+
+
+def test_generic_disagreement_without_memory_does_not_expose_tools() -> None:
+    route = route_locally("不对", available={"providers", "logs"})
+
+    assert route is not None
+    assert route.domains == ()
 
 
 def test_model_route_parses_json_and_limits_to_three_domains() -> None:
@@ -99,3 +139,32 @@ def test_log_diagnostics_does_not_expose_unrelated_tools() -> None:
 
     assert route is not None
     assert [item.name for item in select_tool_specs(specs, route)] == ["logs.recent"]
+
+
+def test_log_root_cause_route_adds_source_domain() -> None:
+    route = route_locally(
+        "查一下错误日志，定位为什么调用失败",
+        available={"logs", "source", "providers"},
+    )
+
+    assert route is not None
+    assert route.domains == ("logs", "source")
+
+
+@pytest.mark.parametrize(
+    "text",
+    (
+        "联网查一下 DeepSeek 官方文档",
+        "总结这个链接 https://example.com/docs",
+        "read url https://example.com/docs",
+        "查一下 Sam Altman 最近发文",
+        "看看 OpenAI 官推最新推文",
+        "搜索 Anthropic 最近的 X 动态",
+        "find the latest tweets from DeepSeek",
+    ),
+)
+def test_web_requests_route_to_web_domain(text: str) -> None:
+    route = route_locally(text, available={"web", "logs", "source"})
+
+    assert route is not None
+    assert route.domains == ("web",)

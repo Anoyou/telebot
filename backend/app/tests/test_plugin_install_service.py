@@ -324,6 +324,86 @@ def test_verify_signature_valid_and_invalid() -> None:
     assert pis.verify_signature(payload + b"x", sig, pub_pem) is False
 
 
+@pytest.mark.asyncio
+async def test_installed_plugin_changelog_api_reads_file_and_reports_missing(tmp_path, monkeypatch) -> None:
+    installed_root = tmp_path / "installed"
+    plugin_root = installed_root / "with_log"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "CHANGELOG.md").write_text("# 更新日志\n\n## 1.0.0\n- 首次发布\n", encoding="utf-8")
+    missing_root = installed_root / "without_log"
+    missing_root.mkdir()
+    large_root = installed_root / "large_log"
+    large_root.mkdir()
+    (large_root / "CHANGELOG.md").write_bytes(b"x" * (256 * 1024 + 32))
+
+    monkeypatch.setattr(plugins_install_api.settings, "plugins_installed_dir", str(installed_root))
+    db = _FakeDB()
+    db.installed_rows["with_log"] = InstalledPlugin(
+        key="with_log",
+        source="repo",
+        installed_path=str(plugin_root),
+        version="1.0.0",
+        enabled=True,
+        signature_ok=True,
+        trust_tier="community",
+        lint_warnings=[],
+    )
+    db.installed_rows["without_log"] = InstalledPlugin(
+        key="without_log",
+        source="repo",
+        installed_path=str(missing_root),
+        version="1.0.0",
+        enabled=True,
+        signature_ok=True,
+        trust_tier="community",
+        lint_warnings=[],
+    )
+    db.installed_rows["large_log"] = InstalledPlugin(
+        key="large_log",
+        source="repo",
+        installed_path=str(large_root),
+        version="1.0.0",
+        enabled=True,
+        signature_ok=True,
+        trust_tier="community",
+        lint_warnings=[],
+    )
+    _events, previous_overrides = _install_api_overrides(db, monkeypatch)
+    try:
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            available = await client.get(
+                "/api/plugins/install/with_log/changelog",
+                headers=_csrf_headers(),
+            )
+            missing = await client.get(
+                "/api/plugins/install/without_log/changelog",
+                headers=_csrf_headers(),
+            )
+            large = await client.get(
+                "/api/plugins/install/large_log/changelog",
+                headers=_csrf_headers(),
+            )
+    finally:
+        _restore_api_overrides(previous_overrides)
+
+    assert available.status_code == 200
+    assert available.json()["available"] is True
+    assert "首次发布" in available.json()["content"]
+    assert missing.status_code == 200
+    assert missing.json() == {
+        "key": "without_log",
+        "available": False,
+        "content": "",
+        "truncated": False,
+        "message": "该插件未提供 CHANGELOG.md。",
+    }
+    assert large.status_code == 200
+    assert large.json()["available"] is True
+    assert large.json()["truncated"] is True
+    assert len(large.json()["content"].encode("utf-8")) == 256 * 1024
+
+
 # ─────────────────────────────────────────────────────
 # upload API
 # ─────────────────────────────────────────────────────

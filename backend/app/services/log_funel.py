@@ -92,6 +92,7 @@ REASON_LABELS: dict[str, str] = {
     "plugin_disabled": "插件未启用",
     "plugin_load_failed": "插件加载失败",
     "plugin_not_installed": "插件未安装",
+    "plugin_declared_failed": "插件声明处理失败",
     "plugin_runtime_error": "插件运行异常",
     "rate_limited": "触发频控",
     "scope_not_matched": "范围不匹配",

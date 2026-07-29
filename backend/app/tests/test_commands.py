@@ -111,7 +111,7 @@ def test_liveness_transport_metadata_resolves_effective_identity() -> None:
 
     assert commands_api._liveness_transport_metadata(row) == {
         "effective_api_format": "responses",
-        "client_identity_profile": "codex_cli",
+        "client_identity_profile": "codex_tui",
     }
     assert commands_api._liveness_transport_metadata(
         row,
@@ -154,7 +154,10 @@ async def test_full_liveness_preview_forwards_provider_scope(monkeypatch) -> Non
     monkeypatch.setattr(commands_api.llm_liveness, "build_preview", lambda *_a, **_k: _Preview())
 
     out = await commands_api.full_liveness_preview(
-        payload=FullLivenessPreviewRequest(only_provider_ids=[7, 11]),
+        payload=FullLivenessPreviewRequest(
+            only_provider_ids=[7, 11],
+            models_by_provider={7: ["model-a"]},
+        ),
         db=AsyncMock(),
         _user=AsyncMock(),
     )
@@ -951,6 +954,9 @@ async def test_anthropic_proxy_profile_adds_only_explicit_compatibility_headers(
                 "event: message_delta",
                 'data: {"delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}',
                 "",
+                "event: message_stop",
+                'data: {"type":"message_stop"}',
+                "",
             )
             yield ("\n".join(lines) + "\n").encode()
 
@@ -1419,7 +1425,7 @@ async def test_responses_client_parses_sse_completed_response() -> None:
 
 @pytest.mark.asyncio
 async def test_responses_client_parses_sse_text_delta_without_completed_body() -> None:
-    """半兼容反代如果只给文本增量，也应折叠成 output_text。"""
+    """Responses 文本增量必须由 response.completed 正式收尾。"""
     from app.services.llm_client import ResponsesClient
 
     cli = ResponsesClient(api_key="sk", base_url="https://codex.example.com/v1", model="gpt-5.5")
@@ -1437,6 +1443,9 @@ async def test_responses_client_parses_sse_text_delta_without_completed_body() -
             "event: response.output_text.done\n"
             'data: {"type":"response.output_text.done","text":"hello world"}\n'
             "\n"
+            "event: response.completed\n"
+            'data: {"type":"response.completed","response":{"model":"gpt-5.5","status":"completed"}}\n'
+            "\n"
         )
 
         @staticmethod
@@ -1453,6 +1462,37 @@ async def test_responses_client_parses_sse_text_delta_without_completed_body() -
     assert result.model == "gpt-5.5"
     assert result.input_tokens == 0
     assert result.output_tokens == 0
+
+
+@pytest.mark.asyncio
+async def test_responses_client_rejects_sse_without_completed_terminal() -> None:
+    """Responses SSE 自然 EOF 不能因 output_text.done 或 status=completed 被接受。"""
+    from app.services.llm_client import LLMError, ResponsesClient
+
+    class _Resp:
+        status_code = 200
+        headers = {"content-type": "text/event-stream"}
+        text = (
+            "event: response.created\n"
+            'data: {"type":"response.created","response":{"status":"completed"}}\n'
+            "\n"
+            "event: response.output_text.done\n"
+            'data: {"type":"response.output_text.done","text":"截断"}\n'
+            "\n"
+        )
+
+        @staticmethod
+        def json():
+            raise json.JSONDecodeError("Expecting value", "", 0)
+
+    fake = AsyncMock()
+    fake.__aenter__.return_value = fake
+    fake.post = AsyncMock(return_value=_Resp())
+    with patch("app.services.llm_client.httpx.AsyncClient", return_value=fake):
+        with pytest.raises(LLMError, match="缺少 response.completed"):
+            await ResponsesClient(
+                api_key="sk", base_url="https://codex.example.com/v1", model="gpt-5.5"
+            ).complete("sys", "user")
 
 
 @pytest.mark.asyncio
@@ -2212,9 +2252,10 @@ async def test_chat_test_models_endpoint_success(monkeypatch) -> None:
     assert captured["build_kwargs"] == {
         "override_model": "model-a",
         "proxy_url": "socks5://127.0.0.1:1080",
-        "api_format_override": "anthropic_messages",
-        "identity_override": "claude_code",
-    }
+            "api_format_override": "anthropic_messages",
+            "identity_override": "claude_code",
+            "request_scope": "liveness",
+        }
     assert captured["kwargs"] == {"max_tokens": 1234, "timeout_seconds": 77}
     assert len(emitted) == 1
     assert emitted[0].source == "diagnostic:chat-test"
@@ -2297,7 +2338,7 @@ async def test_chat_test_models_endpoint_llm_error(monkeypatch) -> None:
 
         async def complete(self, *_args, **_kwargs):
             if self.model == "bad-model":
-                raise LLMError("OpenAI 接口返回 404: Model not found")
+                raise LLMError("OpenAI 接口返回 404: Model not found", status_code=404)
             return LLMResult(text="好的", model=self.model, input_tokens=1, output_tokens=1)
 
     def _build_client(_provider, **kwargs):
@@ -2318,6 +2359,7 @@ async def test_chat_test_models_endpoint_llm_error(monkeypatch) -> None:
     assert by_model["ok-model"].ok is True
     assert by_model["bad-model"].ok is False
     assert "404" in (by_model["bad-model"].error or "")
+    assert by_model["bad-model"].status_code == 404
     assert by_model["ok-model"].effective_api_format == "responses"
     assert by_model["ok-model"].client_identity_profile == "grok_cli"
     assert by_model["bad-model"].effective_api_format == "responses"
@@ -2455,6 +2497,125 @@ async def test_stream_chat_test_models_falls_back_to_complete(monkeypatch) -> No
     assert result["response"] == "完整回复"
     assert result["streaming"] is False
     assert result["stream_fallback"] is True
+
+
+@pytest.mark.asyncio
+async def test_stream_chat_test_models_does_not_repeat_completed_json_fallback(
+    monkeypatch,
+) -> None:
+    """上游在流式请求中直接返回完整 JSON 时，测活不能再发第二次请求。"""
+    from app.api import commands as cmds_api
+    from app.services import llm_client
+    from app.services.llm_client import LLMStreamChunk
+
+    row = LLMProvider(
+        id=1,
+        name="JSON fallback",
+        provider="openai",
+        api_key_enc=None,
+        base_url="https://api.example.com/v1",
+        default_model="json-model",
+        api_format="responses",
+        created_at=datetime.now(UTC),
+    )
+
+    class _FakeClient:
+        complete_calls = 0
+
+        async def stream_complete(self, *_args, **_kwargs):
+            yield LLMStreamChunk(
+                delta="同一次请求的完整回复",
+                model="json-real",
+                stream_fallback=True,
+            )
+            yield LLMStreamChunk(
+                model="json-real",
+                input_tokens=5,
+                output_tokens=2,
+                done=True,
+                stream_fallback=True,
+            )
+
+        async def complete(self, *_args, **_kwargs):
+            self.complete_calls += 1
+            raise AssertionError("完整 JSON 已消费，不应再次请求上游")
+
+    client = _FakeClient()
+    monkeypatch.setattr(
+        cmds_api.command_service,
+        "get_provider_row",
+        AsyncMock(return_value=row),
+    )
+    monkeypatch.setattr(cmds_api, "_resolve_proxy_url", AsyncMock(return_value=None))
+    monkeypatch.setattr(llm_client, "build_client", lambda *_args, **_kwargs: client)
+    _capture_llm_usage(monkeypatch)
+
+    response = await cmds_api.stream_chat_test_models(
+        pid=1,
+        payload=ChatTestModelsRequest(models=["json-model"], message="测一下"),
+        db=AsyncMock(),
+        _user=AsyncMock(),
+    )
+    body = ""
+    async for chunk in response.body_iterator:
+        body += chunk.decode() if isinstance(chunk, bytes) else chunk
+    events = [json.loads(line) for line in body.splitlines() if line]
+    delta = next(event for event in events if event["type"] == "delta")
+    assert delta["stream_fallback"] is True
+    result = next(event["result"] for event in events if event["type"] == "done")
+
+    assert result["response"] == "同一次请求的完整回复"
+    assert result["streaming"] is False
+    assert result["stream_fallback"] is True
+    assert client.complete_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_stream_chat_test_models_rejects_stream_without_done(monkeypatch) -> None:
+    from app.api import commands as cmds_api
+    from app.services import llm_client
+    from app.services.llm_client import LLMStreamChunk
+
+    row = LLMProvider(
+        id=1,
+        name="Broken stream",
+        provider="openai",
+        api_key_enc=None,
+        base_url="https://api.example.com/v1",
+        default_model="broken",
+        api_format="responses",
+        created_at=datetime.now(UTC),
+    )
+
+    class _FakeClient:
+        async def stream_complete(self, *_args, **_kwargs):
+            yield LLMStreamChunk(delta="partial", model="broken")
+
+    monkeypatch.setattr(
+        cmds_api.command_service,
+        "get_provider_row",
+        AsyncMock(return_value=row),
+    )
+    monkeypatch.setattr(cmds_api, "_resolve_proxy_url", AsyncMock(return_value=None))
+    monkeypatch.setattr(llm_client, "build_client", lambda *_args, **_kwargs: _FakeClient())
+    _capture_llm_usage(monkeypatch)
+
+    response = await cmds_api.stream_chat_test_models(
+        pid=1,
+        payload=ChatTestModelsRequest(models=["broken"], message="测一下"),
+        db=AsyncMock(),
+        _user=AsyncMock(),
+    )
+    body = ""
+    async for chunk in response.body_iterator:
+        body += chunk.decode() if isinstance(chunk, bytes) else chunk
+    result = next(
+        event["result"]
+        for event in (json.loads(line) for line in body.splitlines() if line)
+        if event["type"] == "error"
+    )
+
+    assert "最终状态" in result["error"]
 
 
 @pytest.mark.asyncio
@@ -3178,21 +3339,46 @@ class _IdentityValidationDB:
 
 
 @pytest.mark.asyncio
-async def test_create_provider_rejects_unverified_identity() -> None:
-    """未验证档案（claude_desktop）不能作为固定身份保存。"""
-    with pytest.raises(HTTPException) as ei:
-        await command_service.create_provider(
-            _IdentityValidationDB(),
-            LLMProviderCreate(
-                name="idv-unverified",
-                provider="anthropic",
-                default_model="claude-3-5-sonnet",
-                api_format="anthropic_messages",
-                client_identity_profile="claude_desktop",
-            ),
-        )
-    assert ei.value.status_code == 422
-    assert ei.value.detail["code"] == "LLM_PROVIDER_IDENTITY_INVALID"
+async def test_create_provider_normalizes_legacy_desktop_identity() -> None:
+    """旧 claude_desktop 配置保存时无感归一到 Claude Code CLI。"""
+    db = _IdentityValidationDB()
+    out = await command_service.create_provider(
+        db,
+        LLMProviderCreate(
+            name="idv-desktop-legacy",
+            provider="anthropic",
+            default_model="claude-3-5-sonnet",
+            api_format="anthropic_messages",
+            client_identity_profile="claude_desktop",
+        ),
+    )
+    assert out.client_identity_profile == "claude_code"
+    assert db.row.client_identity_profile == "claude_code"
+
+
+def test_provider_update_audit_never_contains_request_header_values() -> None:
+    """Provider 更新审计只能记录兼容请求头变更摘要，不能落明文值。"""
+
+    from app.api import commands as commands_api
+
+    payload = LLMProviderUpdate(
+        name="tenant-provider",
+        request_headers=[
+            {
+                "name": "X-Tenant-ID",
+                "value": "tenant-secret",
+                "scopes": ["inference"],
+            }
+        ],
+    )
+    audit_detail = commands_api._provider_update_audit_detail(payload)
+
+    assert audit_detail == {
+        "name": "tenant-provider",
+        "request_headers_changed": True,
+        "request_headers_count": 1,
+    }
+    assert "tenant-secret" not in repr(audit_detail)
 
 
 @pytest.mark.asyncio
@@ -3253,7 +3439,37 @@ async def test_update_provider_rejects_incompatible_identity() -> None:
 
     with pytest.raises(HTTPException) as ei:
         await command_service.update_provider(
-            _DB(), 88, LLMProviderUpdate(client_identity_profile="codex_cli")
+            _DB(), 88, LLMProviderUpdate(client_identity_profile="codex_tui")
         )
     assert ei.value.status_code == 422
     assert ei.value.detail["code"] == "LLM_PROVIDER_IDENTITY_INVALID"
+
+
+@pytest.mark.asyncio
+async def test_update_provider_normalizes_persisted_codex_cli_identity() -> None:
+    """旧 Codex CLI Provider 修改普通字段时也会迁移为数据库允许的 TUI 值。"""
+    row = LLMProvider(
+        id=89,
+        name="legacy-codex",
+        provider="openai",
+        api_key_enc=None,
+        base_url="https://proxy.example/v1",
+        default_model="gpt-5-codex",
+        api_format="responses",
+        client_identity_profile="codex_cli",
+        created_at=datetime.now(UTC),
+    )
+
+    class _DB:
+        async def get(self, _model, _pk):
+            return row
+
+        async def flush(self):
+            return None
+
+    out = await command_service.update_provider(
+        _DB(), 89, LLMProviderUpdate(notes="rename-safe")
+    )
+
+    assert row.client_identity_profile == "codex_tui"
+    assert out.client_identity_profile == "codex_tui"

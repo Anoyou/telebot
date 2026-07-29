@@ -28,6 +28,7 @@ TOKEN = os.getenv("UPDATER_TOKEN", "").strip()
 MAX_LOG_LINES = 240
 MAX_CONSOLE_LOG_LINES = 1000
 CONSOLE_LOG_COMMAND_TIMEOUT_SECONDS = 5
+RESOURCE_COMMAND_TIMEOUT_SECONDS = 5
 CONSOLE_LOG_SERVICES = ("web", "frontend", "postgres", "redis", "updater")
 PROGRESS_PREFIX = "@@TELEPILOT_PROGRESS@@"
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
@@ -62,29 +63,53 @@ def _update_target_options(remote: str | None = None) -> dict[str, Any]:
         return {"ok": False, "remotes": [], "branches": [], "error": "更新工作树不可用"}
     remotes_out, remotes_err, remotes_rc = _run(["git", "remote"], timeout=10)
     if remotes_rc != 0:
-        return {"ok": False, "remotes": [], "branches": [], "error": remotes_err or remotes_out}
+        return {
+            "ok": False,
+            "remotes": [],
+            "branches": [],
+            "error": remotes_err or remotes_out,
+        }
     remotes = [item.strip() for item in remotes_out.splitlines() if item.strip()]
     selected = (remote or DEFAULT_REMOTE).strip()
     if selected not in remotes:
-        selected = DEFAULT_REMOTE if DEFAULT_REMOTE in remotes else (remotes[0] if remotes else "")
+        selected = (
+            DEFAULT_REMOTE
+            if DEFAULT_REMOTE in remotes
+            else (remotes[0] if remotes else "")
+        )
     branches: list[str] = []
     if selected:
-        heads_out, heads_err, heads_rc = _run(["git", "ls-remote", "--heads", selected], timeout=45)
+        heads_out, heads_err, heads_rc = _run(
+            ["git", "ls-remote", "--heads", selected], timeout=45
+        )
         if heads_rc == 0:
             for line in heads_out.splitlines():
                 ref = line.split("\t", 1)[-1].strip()
                 if ref.startswith("refs/heads/"):
                     branches.append(ref.removeprefix("refs/heads/"))
         elif not branches:
-            return {"ok": False, "remotes": remotes, "branches": [], "remote": selected, "error": heads_err or heads_out}
-    branches = sorted(set(branches), key=lambda item: (item not in {"main", DEFAULT_BRANCH}, item))
-    return {"ok": bool(remotes and selected), "remotes": remotes, "branches": branches, "remote": selected}
+            return {
+                "ok": False,
+                "remotes": remotes,
+                "branches": [],
+                "remote": selected,
+                "error": heads_err or heads_out,
+            }
+    branches = sorted(
+        set(branches), key=lambda item: (item not in {"main", DEFAULT_BRANCH}, item)
+    )
+    return {
+        "ok": bool(remotes and selected),
+        "remotes": remotes,
+        "branches": branches,
+        "remote": selected,
+    }
 
 
 def _parse_progress(line: str) -> tuple[int, str, str] | None:
     if not line.startswith(PROGRESS_PREFIX):
         return None
-    parts = line[len(PROGRESS_PREFIX):].rstrip("\r\n").split("|", 2)
+    parts = line[len(PROGRESS_PREFIX) :].rstrip("\r\n").split("|", 2)
     if len(parts) != 3:
         return None
     try:
@@ -94,7 +119,9 @@ def _parse_progress(line: str) -> tuple[int, str, str] | None:
     return percent, parts[1] or "更新中", parts[2]
 
 
-def _json_response(handler: BaseHTTPRequestHandler, status: int, payload: dict[str, Any]) -> None:
+def _json_response(
+    handler: BaseHTTPRequestHandler, status: int, payload: dict[str, Any]
+) -> None:
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     handler.send_response(status)
     handler.send_header("Content-Type", "application/json; charset=utf-8")
@@ -111,7 +138,9 @@ def _timeout_text(value: str | bytes | None) -> str:
     return value
 
 
-def _run(args: list[str], *, timeout: int = 60, env: dict[str, str] | None = None) -> tuple[str, str, int]:
+def _run(
+    args: list[str], *, timeout: int = 60, env: dict[str, str] | None = None
+) -> tuple[str, str, int]:
     try:
         result = subprocess.run(
             args,
@@ -128,6 +157,14 @@ def _run(args: list[str], *, timeout: int = 60, env: dict[str, str] | None = Non
         return stdout.strip(), (stderr.strip() or "command timed out"), 124
     except Exception as exc:  # noqa: BLE001
         return "", f"{type(exc).__name__}: {exc}", 1
+
+
+def _version_at_ref(ref: str) -> str | None:
+    out, _, rc = _run(["git", "show", f"{ref}:backend/app/__init__.py"], timeout=10)
+    if rc != 0:
+        return None
+    match = re.search(r'^__version__\s*=\s*["\']([^"\']+)["\']', out, re.MULTILINE)
+    return match.group(1).strip() if match else None
 
 
 def _int_query(value: str | None, default: int, minimum: int, maximum: int) -> int:
@@ -162,7 +199,11 @@ def _compose_project_name(host_project_dir: Path | None = None) -> str | None:
         os.getenv("TELEPILOT_COMPOSE_PROJECT_NAME")
         or os.getenv("COMPOSE_PROJECT_NAME")
         or (host_project_dir.name if host_project_dir and host_project_dir.name else "")
-        or (HOST_PROJECT_DIR.name if str(HOST_PROJECT_DIR) and HOST_PROJECT_DIR.name not in {"", "."} else "")
+        or (
+            HOST_PROJECT_DIR.name
+            if str(HOST_PROJECT_DIR) and HOST_PROJECT_DIR.name not in {"", "."}
+            else ""
+        )
         or WORKSPACE.name
     )
     normalized = re.sub(r"[^a-z0-9_-]", "", raw.lower())
@@ -227,10 +268,32 @@ def _apply_job_env(remote: str, branch: str) -> dict[str, str]:
 
 def _is_console_noise_line(line: str) -> bool:
     lowered = line.lower()
+    is_alembic_info = (
+        "info:" in lowered or "info  [" in lowered
+    ) and "alembic.runtime." in lowered
+    if is_alembic_info and any(
+        marker in lowered
+        for marker in (
+            "context impl postgresqlimpl",
+            "will assume transactional ddl",
+            "setup plugin alembic.autogenerate",
+        )
+    ):
+        return True
+    if re.search(
+        r"\[worker:\d+\]\s+info\s+got difference for channel \d+ updates", lowered
+    ):
+        return True
+    if "info:httpx:http request:" in lowered:
+        return bool(re.search(r'"http/[^\"]+\s+2\d\d(?:\s+[^\"]+)?"', lowered))
+    if "[updater]" in lowered and (
+        '"get /health http/1.1" 200' in lowered
+        or ('"get /console-logs?' in lowered and ' http/1.1" 200' in lowered)
+        or (re.search(r'"get /jobs/[^ ]+ http/1\.1" 2\d\d', lowered) is not None)
+    ):
+        return True
     if "127.0.0.1" not in lowered:
         return False
-    if "[updater]" in lowered and '"get /health http/1.1" 200' in lowered:
-        return True
     if '"get /healthz http/1.1" 200' in lowered:
         return True
     return "wget" in lowered and '"get / http/1.1" 200' in lowered
@@ -245,33 +308,45 @@ def _console_lines(out: str, keyword: str | None) -> list[str]:
     return lines
 
 
-def _tail_labeled_container_logs(services: list[str], tail: int, keyword: str | None) -> dict[str, Any]:
+def _discover_project_containers(
+    *,
+    include_stopped: bool,
+) -> tuple[str | None, list[dict[str, str]], str | None]:
+    """Discover this TelePilot Compose project's labeled containers.
+
+    The updater talks to the host Docker daemon, so Compose's working directory
+    can differ from ``WORKSPACE``. Prefer the exact host path, then the inferred
+    project name, then the only Compose project containing a ``web`` service.
+    """
+
     format_arg = (
         '{{.ID}}|{{.Names}}|{{.Label "com.docker.compose.project"}}|'
         '{{.Label "com.docker.compose.service"}}|{{.Label "com.docker.compose.project.working_dir"}}'
     )
-    out, err, rc = _run(
+    args = ["docker", "ps"]
+    if include_stopped:
+        args.append("-a")
+    args.extend(
         [
-            "docker",
-            "ps",
-            "-a",
             "--filter",
             "label=com.docker.compose.service",
             "--format",
             format_arg,
-        ],
-        timeout=CONSOLE_LOG_COMMAND_TIMEOUT_SECONDS,
+        ]
     )
+    out, err, rc = _run(args, timeout=RESOURCE_COMMAND_TIMEOUT_SECONDS)
     if rc != 0:
-        return {"ok": False, "error": err or out or "无法枚举 Compose 容器", "lines": []}
+        return None, [], err or out or "无法枚举 Compose 容器"
 
     containers: list[dict[str, str]] = []
     for line in out.splitlines():
         parts = line.split("|", 4)
         if len(parts) != 5:
             continue
-        container_id, name, project, service, working_dir = (part.strip() for part in parts)
-        if container_id and project and service in CONSOLE_LOG_SERVICES:
+        container_id, name, project, service, working_dir = (
+            part.strip() for part in parts
+        )
+        if container_id and project and service:
             containers.append(
                 {
                     "id": container_id,
@@ -282,7 +357,7 @@ def _tail_labeled_container_logs(services: list[str], tail: int, keyword: str | 
                 }
             )
     if not containers:
-        return {"ok": False, "error": "未发现带 Compose 服务标签的 TelePilot 容器", "lines": []}
+        return None, [], "未发现带 Compose 服务标签的 TelePilot 容器"
 
     projects: dict[str, list[dict[str, str]]] = {}
     for item in containers:
@@ -306,18 +381,23 @@ def _tail_labeled_container_logs(services: list[str], tail: int, keyword: str | 
         }
         if len(web_projects) != 1:
             names = ", ".join(sorted(web_projects or projects))
-            return {
-                "ok": False,
-                "error": f"无法唯一识别 TelePilot Compose 项目，候选：{names}",
-                "lines": [],
-            }
+            return None, [], f"无法唯一识别 TelePilot Compose 项目，候选：{names}"
         selected_project = next(iter(web_projects))
+    return selected_project, projects[selected_project], None
+
+
+def _tail_labeled_container_logs(
+    services: list[str], tail: int, keyword: str | None
+) -> dict[str, Any]:
+    selected_project, project_containers, discovery_error = _discover_project_containers(
+        include_stopped=True
+    )
+    if not selected_project or not project_containers:
+        return {"ok": False, "error": discovery_error or "未发现项目容器", "lines": []}
 
     requested = set(services or CONSOLE_LOG_SERVICES)
     selected = [
-        item
-        for item in projects[selected_project]
-        if item["service"] in requested
+        item for item in project_containers if item["service"] in requested
     ]
     collected: list[str] = []
     failed: list[str] = []
@@ -327,7 +407,9 @@ def _tail_labeled_container_logs(services: list[str], tail: int, keyword: str | 
             timeout=CONSOLE_LOG_COMMAND_TIMEOUT_SECONDS,
         )
         if log_rc != 0:
-            failed.append(f"{item['service']}: {log_err or log_out or f'退出码 {log_rc}'}")
+            failed.append(
+                f"{item['service']}: {log_err or log_out or f'退出码 {log_rc}'}"
+            )
             continue
         raw = "\n".join(part for part in (log_out, log_err) if part)
         prefix = f"{item['service']}  | "
@@ -344,11 +426,101 @@ def _tail_labeled_container_logs(services: list[str], tail: int, keyword: str | 
     }
 
 
-def _tail_console_logs(service: str | None, tail: int, keyword: str | None) -> dict[str, Any]:
+def _resource_snapshot() -> dict[str, Any]:
+    """Return Docker stats for every running service in this Compose project."""
+
+    project, containers, discovery_error = _discover_project_containers(
+        include_stopped=False
+    )
+    if not project or not containers:
+        return {
+            "ok": False,
+            "source": "docker_stats",
+            "project": project,
+            "containers": [],
+            "error": discovery_error or "未发现运行中的 TelePilot 容器",
+        }
+
+    ids = [item["id"] for item in containers]
+    out, err, rc = _run(
+        ["docker", "stats", "--no-stream", "--format", "{{json .}}", *ids],
+        timeout=RESOURCE_COMMAND_TIMEOUT_SECONDS,
+    )
+    if rc != 0:
+        return {
+            "ok": False,
+            "source": "docker_stats",
+            "project": project,
+            "containers": [],
+            "error": err or out or f"docker stats 退出码 {rc}",
+        }
+
+    by_key: dict[str, dict[str, Any]] = {}
+    for line in out.splitlines():
+        try:
+            row = json.loads(line)
+        except Exception:
+            continue
+        if not isinstance(row, dict):
+            continue
+        for key in (row.get("ID"), row.get("Container"), row.get("Name")):
+            normalized = str(key or "").strip()
+            if normalized:
+                by_key[normalized] = row
+
+    resources: list[dict[str, Any]] = []
+    for item in containers:
+        keys = (item["id"], item["id"][:12], item["name"])
+        row = next((by_key[key] for key in keys if key in by_key), None)
+        if row is None:
+            continue
+        try:
+            pids = max(0, int(str(row.get("PIDs") or "0").strip()))
+        except ValueError:
+            pids = 0
+        resources.append(
+            {
+                "id": item["id"],
+                "name": item["name"],
+                "service": item["service"],
+                "cpu_percent": row.get("CPUPerc"),
+                "memory_usage": row.get("MemUsage"),
+                "memory_percent": row.get("MemPerc"),
+                "pids": pids,
+            }
+        )
+
+    if len(resources) != len(containers):
+        return {
+            "ok": False,
+            "source": "docker_stats",
+            "project": project,
+            "containers": [],
+            "error": "部分 TelePilot 容器缺少 Docker stats，已拒绝返回不完整总量",
+        }
+    order = {service: index for index, service in enumerate(CONSOLE_LOG_SERVICES)}
+    resources.sort(key=lambda item: order.get(str(item.get("service")), len(order)))
+    return {
+        "ok": True,
+        "source": "docker_stats",
+        "project": project,
+        "sampled_at": int(time.time()),
+        "containers": resources,
+    }
+
+
+def _tail_console_logs(
+    service: str | None, tail: int, keyword: str | None
+) -> dict[str, Any]:
     try:
         services = _console_services(service)
     except ValueError as exc:
-        return {"ok": False, "error": str(exc), "services": list(CONSOLE_LOG_SERVICES), "lines": []}
+        return {
+            "ok": False,
+            "error": str(exc),
+            "services": list(CONSOLE_LOG_SERVICES),
+            "lines": [],
+        }
 
     project = _compose_project_name()
     cmd = ["docker", "compose"]
@@ -371,7 +543,9 @@ def _tail_console_logs(service: str | None, tail: int, keyword: str | None) -> d
         fallback = _tail_labeled_container_logs(services, tail, keyword)
         if fallback.get("ok") or fallback.get("lines"):
             return fallback
-        fallback["error"] = fallback.get("error") or err or out or f"docker compose logs 退出码 {rc}"
+        fallback["error"] = (
+            fallback.get("error") or err or out or f"docker compose logs 退出码 {rc}"
+        )
         return fallback
     if not out.strip():
         fallback = _tail_labeled_container_logs(services, tail, keyword)
@@ -395,7 +569,9 @@ def _check_plan(remote: str, branch: str) -> dict[str, Any]:
             "runtime_mode": "prod_container_with_updater",
         }
     remote_ref = f"refs/remotes/{remote}/{branch}"
-    out, err, rc = _run(["git", "fetch", remote, f"+{branch}:{remote_ref}"], timeout=120)
+    out, err, rc = _run(
+        ["git", "fetch", remote, f"+{branch}:{remote_ref}"], timeout=120
+    )
     if rc != 0:
         return {"ok": False, "error": f"git fetch 失败: {err or out}"}
     current_out, err, rc = _run(["git", "rev-parse", "HEAD"], timeout=10)
@@ -422,7 +598,9 @@ def _check_plan(remote: str, branch: str) -> dict[str, Any]:
             diff_base = pending_old
             deployment_pending = True
 
-    behind_out, _, behind_rc = _run(["git", "rev-list", "--count", f"{current_out}..{target_out}"], timeout=10)
+    behind_out, _, behind_rc = _run(
+        ["git", "rev-list", "--count", f"{current_out}..{target_out}"], timeout=10
+    )
     behind = int(behind_out) if behind_rc == 0 and behind_out.isdigit() else 0
     plan_out, plan_err, plan_rc = _run(
         [
@@ -444,10 +622,29 @@ def _check_plan(remote: str, branch: str) -> dict[str, Any]:
     except json.JSONDecodeError:
         return {"ok": False, "error": "生成更新计划失败: 返回内容不是 JSON"}
     changed_files = [str(item) for item in update_plan.get("changed_files") or []][:120]
+    titles_out, _, titles_rc = _run(
+        [
+            "git",
+            "log",
+            "--format=%<(240,trunc)%s",
+            "--no-merges",
+            "-n",
+            "30",
+            f"{diff_base}..{target_out}",
+        ],
+        timeout=10,
+    )
+    commit_titles = (
+        [line.strip()[:240] for line in titles_out.splitlines() if line.strip()][:30]
+        if titles_rc == 0
+        else []
+    )
     return {
         "ok": True,
         "remote": remote,
         "branch": branch,
+        "current_version": _version_at_ref(current_out),
+        "target_version": _version_at_ref(target_out),
         "current_commit": current_out[:12],
         "remote_commit": target_out[:12],
         "has_update": (current_out != target_out and behind > 0) or deployment_pending,
@@ -455,8 +652,11 @@ def _check_plan(remote: str, branch: str) -> dict[str, Any]:
         "deployment_pending": deployment_pending,
         "deploy_from_commit": diff_base[:12],
         "changed_files": changed_files,
+        "commit_titles": commit_titles,
         "components": update_plan.get("components") or ["none"],
         "services": update_plan.get("services") or [],
+        "file_sync_services": update_plan.get("file_sync_services") or [],
+        "rebuild_services": update_plan.get("rebuild_services") or [],
         "requires_full_update": bool(update_plan.get("requires_full_update")),
         "requires_backup": bool(update_plan.get("requires_backup")),
         "requires_migration": bool(update_plan.get("requires_migration")),
@@ -497,9 +697,65 @@ def _persist_job(job_id: str, job: dict[str, Any]) -> None:
 def _set_job(job_id: str, **updates: Any) -> None:
     with _jobs_lock:
         job = _jobs.setdefault(job_id, {"job_id": job_id, "logs": []})
+        # WP-U1：阶段切换时累计各步耗时，供前端进度展示
+        now = time.time()
+        new_phase = updates.get("phase")
+        old_phase = job.get("phase")
+        if (
+            new_phase is not None
+            and str(new_phase) != str(old_phase or "")
+        ):
+            phase_started = float(
+                job.get("_phase_started_at") or job.get("started_at") or now
+            )
+            steps = list(job.get("step_timings") or [])
+            if old_phase:
+                duration_ms = max(0, int((now - phase_started) * 1000))
+                steps.append(
+                    {
+                        "phase": str(old_phase),
+                        "duration_ms": duration_ms,
+                        "detail": str(job.get("detail") or ""),
+                    }
+                )
+                job["step_timings"] = steps[-40:]
+                _append_job_log_unlocked(
+                    job,
+                    f"[step] {old_phase} 用时 {duration_ms}ms",
+                )
+            job["_phase_started_at"] = now
         job.update(updates)
+        if updates.get("status") in {"succeeded", "failed"} and job.get("phase"):
+            # 收尾最后一步
+            phase_started = float(
+                job.get("_phase_started_at") or job.get("started_at") or now
+            )
+            steps = list(job.get("step_timings") or [])
+            last_phase = str(job.get("phase") or "")
+            if last_phase and (
+                not steps or str(steps[-1].get("phase") or "") != last_phase
+            ):
+                duration_ms = max(0, int((now - phase_started) * 1000))
+                steps.append(
+                    {
+                        "phase": last_phase,
+                        "duration_ms": duration_ms,
+                        "detail": str(job.get("detail") or ""),
+                    }
+                )
+                job["step_timings"] = steps[-40:]
+                _append_job_log_unlocked(
+                    job,
+                    f"[step] {last_phase} 用时 {duration_ms}ms",
+                )
         snapshot = dict(job)
     _persist_job(job_id, snapshot)
+
+
+def _append_job_log_unlocked(job: dict[str, Any], line: str) -> None:
+    logs = list(job.get("logs") or [])
+    logs.append(line.rstrip())
+    job["logs"] = logs[-MAX_LOG_LINES:]
 
 
 def _append_job_log(job_id: str, line: str) -> None:
@@ -514,7 +770,12 @@ def _append_job_log(job_id: str, line: str) -> None:
 
 def _run_apply_job(job_id: str, remote: str, branch: str, force_full: bool) -> None:
     if not _apply_lock.acquire(blocking=False):
-        _set_job(job_id, status="failed", finished_at=int(time.time()), error="已有更新任务正在执行。")
+        _set_job(
+            job_id,
+            status="failed",
+            finished_at=int(time.time()),
+            error="已有更新任务正在执行。",
+        )
         return
     try:
         _set_job(
@@ -634,10 +895,19 @@ class Handler(BaseHTTPRequestHandler):
                 _json_response(self, 403, {"ok": False, "error": "forbidden"})
                 return
             qs = parse_qs(parsed.query)
-            tail = _int_query((qs.get("tail") or [None])[0], 300, 20, MAX_CONSOLE_LOG_LINES)
+            tail = _int_query(
+                (qs.get("tail") or [None])[0], 300, 20, MAX_CONSOLE_LOG_LINES
+            )
             service = (qs.get("service") or [None])[0]
             keyword = (qs.get("keyword") or [None])[0]
             result = _tail_console_logs(service, tail, keyword)
+            _json_response(self, 200 if result.get("ok") else 400, result)
+            return
+        if path == "/resources":
+            if not self._authorized():
+                _json_response(self, 403, {"ok": False, "error": "forbidden"})
+                return
+            result = _resource_snapshot()
             _json_response(self, 200 if result.get("ok") else 400, result)
             return
         if path.startswith("/jobs/"):
@@ -697,12 +967,26 @@ class Handler(BaseHTTPRequestHandler):
                 daemon=True,
             )
             thread.start()
-            _json_response(self, 202, {"ok": True, "job_id": job_id, "status": "queued"})
+            _json_response(
+                self, 202, {"ok": True, "job_id": job_id, "status": "queued"}
+            )
             return
         _json_response(self, 404, {"ok": False, "error": "not found"})
 
     def log_message(self, fmt: str, *args: Any) -> None:
-        print(f"[updater] {self.address_string()} {fmt % args}", flush=True)
+        message = fmt % args
+        # 成功的健康探测、任务状态轮询和控制台自身拉取都不是可行动日志。
+        # 失败状态继续保留，避免把 updater 故障一起静默掉。
+        path = self.path.split("?", 1)[0]
+        status_match = re.search(r'HTTP/[^\"]+"\s+(\d{3})\b', message)
+        status = int(status_match.group(1)) if status_match else 0
+        internal_poll = (
+            path in {"/health", "/console-logs", "/resources"}
+            or path.startswith("/jobs/")
+        )
+        if internal_poll and message.startswith('"GET ') and 200 <= status < 300:
+            return
+        print(f"[updater] {self.address_string()} {message}", flush=True)
 
 
 def main() -> None:
@@ -711,7 +995,10 @@ def main() -> None:
     host = os.getenv("UPDATER_HOST", "0.0.0.0")
     port = int(os.getenv("UPDATER_PORT", "8765"))
     server = ThreadingHTTPServer((host, port), Handler)
-    print(f"TelePilot updater listening on {host}:{port}, workspace={WORKSPACE}", flush=True)
+    print(
+        f"TelePilot updater listening on {host}:{port}, workspace={WORKSPACE}",
+        flush=True,
+    )
     server.serve_forever()
 
 

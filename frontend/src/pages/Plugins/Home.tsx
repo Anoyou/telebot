@@ -12,6 +12,7 @@ import {
   Package2,
   Package,
   PackagePlus,
+  Pencil,
   Settings2,
   Sparkles,
   Zap,
@@ -25,7 +26,6 @@ import { getSystemSettings } from "@/api/system";
 import type { AccountFeatureItem, FeatureInfo } from "@/api/types";
 import type { PluginInstallOut } from "@/api/plugins";
 import type { PluginLLMUsageSummaryItem } from "@/api/llmUsage";
-import { CommandBadge } from "@/components/CommandBadge";
 import { PageShell } from "@/components/layout/PageScaffold";
 import { Spinner } from "@/components/ui/misc";
 import { Button } from "@/components/ui/button";
@@ -45,12 +45,17 @@ import {
 import { Select } from "@/components/ui/select";
 import { pluginUsageGuideWarning, splitPluginWarnings } from "@/lib/plugin-config-contract";
 import { isPlatformFeature } from "@/lib/plugin-modes";
+import { cn } from "@/lib/utils";
 import {
   compactUsageText,
   pluginContractRiskWarnings,
   pluginEventSubscriptionLabels,
   pluginHasHighRiskContract,
   pluginOperationalCapabilityLabels,
+  accountDirectPassthroughEnabled,
+  formatDirectPassthroughRankLabel,
+  formatDirectPassthroughRankTitle,
+  rankAccountDirectPassthroughPlugins,
   pluginSupportsDirectPassthrough,
   pluginUsesAI,
 } from "@/types/pluginContract";
@@ -59,6 +64,7 @@ import { featureConfigPath } from "./_shared/featureConfig";
 import { PluginWorkspaceHeader } from "./WorkspaceHeader";
 
 type ModuleCategory = "direct_passthrough" | "interactive" | "automation" | "utility";
+type ModuleCategoryFilter = "all" | ModuleCategory;
 const CATEGORY_META: Record<ModuleCategory, { title: string; hint: string; icon: ComponentType<{ className?: string }> }> = {
   direct_passthrough: {
     title: "裸直通",
@@ -81,7 +87,6 @@ const CATEGORY_META: Record<ModuleCategory, { title: string; hint: string; icon:
     icon: Package2,
   },
 };
-const DANGEROUS_CMD_BANNER_KEY = "telebot.plugins_home.banner.v0_13_dangerous_cmds_closed";
 const OFFICIAL_RECOMMENDED_INSTALL_BANNER_KEY = "telebot.plugins_home.official_recommended_install_closed.v0_35";
 const OFFICIAL_RECOMMENDED_KEYS = ["auto_reply", "autorepeat"] as const;
 
@@ -196,11 +201,8 @@ export function PluginsHome() {
   const [selectedAid, setSelectedAid] = useState<number | null>(null);
   const [guideExpanded, setGuideExpanded] = useState(false);
   const [aiPanelExpanded, setAiPanelExpanded] = useState(false);
+  const [selectedCategory, setSelectedCategory] = useState<ModuleCategoryFilter>("all");
   const guideActive = searchParams.get("guide") === "1";
-  const [bannerVisible, setBannerVisible] = useState(() => {
-    if (typeof window === "undefined") return false;
-    return localStorage.getItem(DANGEROUS_CMD_BANNER_KEY) !== "1";
-  });
   const [officialInstallBannerVisible, setOfficialInstallBannerVisible] = useState(() => {
     if (typeof window === "undefined") return false;
     return localStorage.getItem(OFFICIAL_RECOMMENDED_INSTALL_BANNER_KEY) !== "1";
@@ -255,17 +257,16 @@ export function PluginsHome() {
   });
   const codexImageFeature = pluginFeatures.find((f) => f.key === "codex_image");
   const codexImageState = selectedAccount?.features?.codex_image ?? "disabled";
-  const cmdPrefix = settingsQ.data?.command_prefix || ",";
   const accountFeatureByKey = useMemo(() => {
     const map = new Map<string, AccountFeatureItem>();
-    for (const item of accountFeaturesQ.data ?? []) {
+    for (const item of Array.isArray(accountFeaturesQ.data) ? accountFeaturesQ.data : []) {
       map.set(item.feature_key, item);
     }
     return map;
   }, [accountFeaturesQ.data]);
   const installByKey = useMemo(() => {
     const map = new Map<string, PluginInstallOut>();
-    for (const item of installedQ.data ?? []) {
+    for (const item of Array.isArray(installedQ.data) ? installedQ.data : []) {
       map.set(item.key, item);
     }
     return map;
@@ -308,11 +309,17 @@ export function PluginsHome() {
 
     return zones;
   }, [pluginFeatures]);
+  const visibleCategoryFeatures = selectedCategory === "all"
+    ? pluginFeatures
+    : grouped[selectedCategory];
+  const visibleCategoryMeta = selectedCategory === "all"
+    ? { title: "全部已安装插件", hint: "默认展示当前已安装的全部插件，可从分类栏进一步筛选。", icon: Package2 }
+    : CATEGORY_META[selectedCategory];
 
   if (matrixQ.isLoading) {
     return (
       <PageShell>
-        <PluginWorkspaceHeader activeTab="home" selectedAid={selectedAid} guideActive={guideActive} />
+        <PluginWorkspaceHeader activeTab="home" guideActive={guideActive} />
         <div className="flex h-[40vh] items-center justify-center">
           <Spinner className="text-primary" />
         </div>
@@ -322,38 +329,6 @@ export function PluginsHome() {
 
   return (
     <PageShell>
-      {bannerVisible ? (
-        <Card className="border-warning/40 bg-warning/10">
-          <CardHeader className="pb-2">
-            <CardTitle className="text-base">0.13 安全变更提醒</CardTitle>
-            <CardDescription className="text-warning">
-              Telegram 内高危指令（如 <CommandBadge>{cmdPrefix}reboot</CommandBadge>、<CommandBadge>{cmdPrefix}plugin install</CommandBadge>）已移除，请改为在 Web 控制台或账号 Bot 内执行。
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="flex flex-wrap items-center gap-2">
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() => nav(selectedAid ? `/accounts/${selectedAid}?tab=bot-management` : "/accounts")}
-            >
-              前往管理 Bot
-            </Button>
-            <Button size="sm" variant="outline" onClick={() => nav("/plugins/manage?tab=plugins")}>
-              前往插件管理
-            </Button>
-            <Button
-              size="sm"
-              onClick={() => {
-                localStorage.setItem(DANGEROUS_CMD_BANNER_KEY, "1");
-                setBannerVisible(false);
-              }}
-            >
-              我知道了，不再提示
-            </Button>
-          </CardContent>
-        </Card>
-      ) : null}
-
       {showOfficialInstallBanner ? (
         <Card className="border-primary/30 bg-primary/5">
           <CardHeader className="pb-2">
@@ -384,9 +359,9 @@ export function PluginsHome() {
         </Card>
       ) : null}
 
-      <PluginWorkspaceHeader activeTab="home" selectedAid={selectedAid} guideActive={guideActive} />
+      <PluginWorkspaceHeader activeTab="home" guideActive={guideActive} />
 
-      <Card>
+      <Card className="hidden md:block">
         <CardContent className="space-y-4 !pt-5">
           {(settingsQ.data?.ai_enabled ?? false) ? (
             <div className="rounded-lg border px-4 py-3">
@@ -488,15 +463,7 @@ export function PluginsHome() {
           <SectionHeader
             icon={Package2}
             title="账号插件启用详情与配置"
-            description="先选择要配置的账号，再查看每类插件在该账号上的启用状态与配置入口。"
-            meta={(
-              <SignalPill
-                tone="neutral"
-                label="分类"
-                value={(Object.keys(CATEGORY_META) as ModuleCategory[]).length}
-                className="h-8"
-              />
-            )}
+            description="先选择账号，再像软件商店一样按分类浏览当前已安装插件。"
           />
         </CardHeader>
         <CardContent className="space-y-4">
@@ -546,22 +513,55 @@ export function PluginsHome() {
               </Button>
             </div>
           ) : null}
-          <div className="grid gap-4 lg:grid-cols-2">
-            {(Object.keys(CATEGORY_META) as ModuleCategory[]).map((category) => (
-              <FeatureZone
-                key={category}
-                icon={CATEGORY_META[category].icon}
-                title={CATEGORY_META[category].title}
-                hint={CATEGORY_META[category].hint}
-                features={grouped[category]}
-                selectedAccountId={selectedAccount?.id}
-                selectedFeatures={selectedAccount?.features ?? {}}
-                selectedFeatureEnabled={selectedAccount?.feature_enabled ?? {}}
-                accountFeatureByKey={accountFeatureByKey}
-                installByKey={installByKey}
-                pluginUsageByKey={pluginUsageByKey}
-              />
-            ))}
+          <div
+            data-plugin-category-layout
+            className="grid min-w-0 gap-4 lg:grid-cols-[8.5rem_minmax(0,1fr)] lg:items-start"
+          >
+            <nav
+              aria-label="插件分类"
+              data-plugin-category-nav
+              className="horizontal-scroll-touch flex gap-2 overflow-x-auto pb-1 lg:sticky lg:top-3 lg:flex-col lg:overflow-visible lg:pb-0"
+            >
+              {(["all", ...Object.keys(CATEGORY_META)] as ModuleCategoryFilter[]).map((category) => {
+                const meta = category === "all"
+                  ? { title: "全部", hint: "所有已安装插件", icon: Package2 }
+                  : CATEGORY_META[category];
+                const Icon = meta.icon;
+                const count = category === "all" ? pluginFeatures.length : grouped[category].length;
+                const active = selectedCategory === category;
+                return (
+                  <button
+                    key={category}
+                    type="button"
+                    data-plugin-category-filter={category}
+                    className={cn(
+                      "flex min-w-0 shrink-0 items-center gap-1.5 rounded-lg border px-2.5 py-2 text-left transition-colors lg:w-full",
+                      active
+                        ? "border-primary/35 bg-primary/10 text-foreground"
+                        : "border-border/70 bg-background hover:bg-muted/40",
+                    )}
+                    aria-current={active ? "page" : undefined}
+                    onClick={() => setSelectedCategory(category)}
+                  >
+                    <Icon className="h-4 w-4 shrink-0" />
+                    <span className="min-w-0 flex-1 truncate text-sm font-medium">{meta.title}</span>
+                    <span className="shrink-0 rounded-full bg-muted px-1.5 py-0.5 text-[10px] tabular-nums text-muted-foreground">{count}</span>
+                  </button>
+                );
+              })}
+            </nav>
+            <FeatureZone
+              icon={visibleCategoryMeta.icon}
+              title={visibleCategoryMeta.title}
+              hint={visibleCategoryMeta.hint}
+              features={visibleCategoryFeatures}
+              selectedAccountId={selectedAccount?.id}
+              selectedFeatures={selectedAccount?.features ?? {}}
+              selectedFeatureEnabled={selectedAccount?.feature_enabled ?? {}}
+              accountFeatureByKey={accountFeatureByKey}
+              installByKey={installByKey}
+              pluginUsageByKey={pluginUsageByKey}
+            />
           </div>
         </CardContent>
       </Card>
@@ -762,6 +762,19 @@ function FeatureZone({
   pluginUsageByKey: Map<string, PluginLLMUsageSummaryItem>;
 }) {
   const nav = useNavigate();
+  const [mobileExpandedKeys, setMobileExpandedKeys] = useState<Set<string>>(() => new Set());
+  // 账号级直通名次：相对「本账号所有已开二次开关」的插件，而非裸数字 0/1000
+  const directRankByKey = useMemo(
+    () =>
+      rankAccountDirectPassthroughPlugins(
+        Array.from(accountFeatureByKey.entries()).map(([key, item]) => ({
+          key,
+          config: (item.config ?? {}) as Record<string, unknown>,
+        })),
+      ),
+    [accountFeatureByKey],
+  );
+  const directRankTotal = directRankByKey.size;
 
   return (
     <Card>
@@ -781,13 +794,16 @@ function FeatureZone({
         {features.length === 0 ? (
           <p className="text-sm text-muted-foreground">暂无内容</p>
         ) : (
-          <div className="space-y-2">
+          <div className="grid grid-cols-1 gap-2 min-[380px]:grid-cols-2 sm:grid-cols-[repeat(auto-fill,minmax(18rem,1fr))] xl:grid-cols-[repeat(auto-fill,minmax(20rem,1fr))]">
             {features.map((f) => {
               const directPassthrough = pluginSupportsDirectPassthrough(f.capabilities);
               const status = selectedFeatures[f.key] ?? "disabled";
               const enabled = selectedFeatureEnabled[f.key] ?? status !== "disabled";
               const runtimeLabel = moduleRuntimeLabel(status, enabled);
               const accountFeature = accountFeatureByKey.get(f.key);
+              const accountConfig = (accountFeature?.config ?? {}) as Record<string, unknown>;
+              const directPassthroughOn = directPassthrough && accountDirectPassthroughEnabled(accountConfig);
+              const directRank = directPassthroughOn ? (directRankByKey.get(f.key) ?? null) : null;
               const pluginUsage = pluginUsageByKey.get(f.key);
               const lastError = accountFeature?.last_error?.trim();
               const usageWarning = pluginUsageGuideWarning(f);
@@ -820,42 +836,124 @@ function FeatureZone({
                 source: "plugins",
               });
               const canConfigure = Boolean(path);
+              const mobileExpanded = mobileExpandedKeys.has(f.key);
+              const stateRailTone = directPassthrough || status === "failed"
+                ? "danger"
+                : enabled
+                  ? "success"
+                  : "warn";
               return (
                 <div
                   key={f.key}
-                  className={`rounded-md border p-3 ${
-                    status === "failed" ? "border-destructive/40 bg-destructive/5" : ""
-                  }`}
+                  data-plugin-card
+                  data-plugin-key={f.key}
+                  className={cn(
+                    "relative min-h-[7.25rem] overflow-hidden rounded-md border p-2.5 pb-11 shadow-sm transition duration-200 ease-out hover:-translate-y-0.5 hover:shadow-md motion-reduce:transform-none sm:min-h-0 sm:pb-2.5",
+                    status === "failed"
+                      ? "border-destructive/40 bg-destructive/5"
+                      : "border-border/70 bg-muted/20 hover:bg-muted/30",
+                  )}
                 >
+                  <span
+                    aria-hidden="true"
+                    data-plugin-state-rail={stateRailTone}
+                    className={cn(
+                      "absolute inset-x-0 top-0 h-1",
+                      stateRailTone === "danger"
+                        ? "bg-destructive"
+                        : stateRailTone === "success"
+                          ? "bg-success"
+                          : "bg-yellow-400",
+                    )}
+                  />
+                  <MetaBadge
+                    mono
+                    tone="outline"
+                    className="absolute right-2 top-2 h-5 max-w-[3.75rem] justify-center px-1 text-[10px] sm:right-2.5 sm:top-2.5 sm:h-6 sm:max-w-20 sm:px-1.5"
+                    title={moduleVersionLabel(f.version)}
+                    data-plugin-version
+                  >
+                    {moduleVersionLabel(f.version)}
+                  </MetaBadge>
                   <div className="min-w-0">
-                    <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
-                      <div className="min-w-0">
-                        <div className="break-words text-sm font-medium leading-5" title={f.display_name}>
-                          {f.display_name}
+                    <div className="flex min-w-0 flex-col gap-1.5 sm:flex-row sm:items-start sm:justify-between sm:gap-2">
+                      <div className="min-w-0 pr-14 sm:pr-0">
+                        <div className="flex min-w-0 items-start gap-1">
+                          <button
+                            type="button"
+                            className="flex min-w-0 flex-1 items-start gap-1 text-left sm:pointer-events-none"
+                            aria-expanded={mobileExpanded}
+                            onClick={() => setMobileExpandedKeys((current) => {
+                              const next = new Set(current);
+                              if (next.has(f.key)) next.delete(f.key);
+                              else next.add(f.key);
+                              return next;
+                            })}
+                          >
+                            <span className="line-clamp-2 min-w-0 break-words text-[13px] font-medium leading-5 sm:text-sm" title={f.display_name}>
+                              {f.display_name}
+                            </span>
+                            <ChevronDown className={cn("mt-0.5 h-3.5 w-3.5 shrink-0 text-muted-foreground transition-transform sm:hidden", mobileExpanded && "rotate-180")} />
+                          </button>
                         </div>
-                        <div className="break-all font-mono text-xs leading-5 text-muted-foreground">{f.key}</div>
+                        <div className="hidden break-all font-mono text-xs leading-5 text-muted-foreground sm:block">{f.key}</div>
                       </div>
-                      <div className="flex shrink-0 flex-wrap gap-1.5 sm:justify-end">
+                      <div className="horizontal-scroll-touch flex min-h-7 min-w-0 flex-nowrap items-center gap-1 overflow-x-auto pr-1 sm:h-auto sm:max-w-[55%] sm:flex-wrap sm:justify-end sm:overflow-visible sm:pr-14">
                         <FeatureCapabilityBadge show={Boolean(f.interaction_entries?.length)} tone="info">
                           可交互
                         </FeatureCapabilityBadge>
                         <FeatureCapabilityBadge
                           show={directPassthrough}
                           tone="warn"
-                          title="低延时能力，安装后还需在账号配置中二次开启才会生效"
+                          title={
+                            directPassthroughOn
+                              ? "账号已二次开启裸直通；仅插件明确返回 consumed 才截断后续链路"
+                              : "低延时能力，安装后还需在账号配置中二次开启才会生效"
+                          }
                         >
-                          裸直通 · 二次开启
+                          {directPassthroughOn ? "裸直通 · 已开启" : "裸直通 · 二次开启"}
+                        </FeatureCapabilityBadge>
+                        <FeatureCapabilityBadge
+                          show={directPassthrough}
+                          tone={directPassthroughOn ? "info" : "outline"}
+                          title={formatDirectPassthroughRankTitle(directRank, {
+                            secondaryEnabled: Boolean(directPassthroughOn),
+                          })}
+                        >
+                          {formatDirectPassthroughRankLabel(directRank, {
+                            secondaryEnabled: Boolean(directPassthroughOn),
+                            totalEnabled: directPassthroughOn ? directRankTotal : undefined,
+                          })}
                         </FeatureCapabilityBadge>
                         <FeatureCapabilityBadge show={usesAI} tone="warn" title="插件会调用 TelePilot 的 AI 能力">
                           AI 调用
                         </FeatureCapabilityBadge>
+                        <FeatureCapabilityBadge
+                          show={Boolean(f.runtime_availability && f.runtime_availability !== "ready")}
+                          tone={f.runtime_availability === "paused" ? "danger" : "warn"}
+                          title={
+                            f.runtime_availability === "partial" &&
+                            (f.available_channels || []).includes("userbot")
+                              ? "部分平台能力已关闭；userbot 入口仍可用"
+                              : f.blocked_reason_code || "平台能力限制"
+                          }
+                        >
+                          {f.runtime_availability === "partial"
+                            ? "部分可用"
+                            : f.runtime_availability === "paused"
+                              ? "已暂停"
+                              : f.runtime_availability === "transitioning"
+                                ? "等待热加载"
+                                : "能力受限"}
+                        </FeatureCapabilityBadge>
                       </div>
                     </div>
                     {f.last_update_check_error ? (
-                      <div className="mt-1 text-xs text-destructive">
+                      <div className={cn("mt-1 text-xs text-destructive", mobileExpanded ? "block" : "hidden", "sm:block")}>
                         更新检查失败：{f.last_update_check_error}
                       </div>
                     ) : null}
+                    <div className={cn(mobileExpanded ? "block" : "hidden", "sm:block")}>
                     {status === "failed" ? (
                       <div className="mt-1 rounded-md border border-destructive/30 bg-destructive/10 px-2 py-1 text-xs leading-5 text-destructive">
                         <div>加载异常{lastError ? `：${lastError}` : "：后端未返回错误详情"}</div>
@@ -874,11 +972,11 @@ function FeatureZone({
                         </Button>
                       </div>
                     ) : null}
-                    <div className="mt-2 text-xs leading-5 text-muted-foreground">
+                    <div className="mt-1.5 line-clamp-2 text-xs leading-4 text-muted-foreground">
                       {compactUsageText(f.usage)}
                     </div>
-                    <div className="mt-3 grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
-                      <div className="flex min-w-0 flex-wrap items-center gap-2">
+                    <div className="mt-2 grid gap-1.5 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
+                      <div className="flex min-w-0 flex-wrap items-center gap-1.5">
                         {pluginUsage ? (
                           <>
                             <span className="shrink-0 rounded-full border bg-muted/40 px-2 py-0.5 text-[11px] text-muted-foreground">
@@ -933,14 +1031,6 @@ function FeatureZone({
                           {trustBadge.label}
                         </MetaBadge>
                         <MetaBadge
-                          mono
-                          tone="outline"
-                          className="h-7 shrink-0 justify-center px-2 text-[10px]"
-                          title={moduleVersionLabel(f.version)}
-                        >
-                          {moduleVersionLabel(f.version)}
-                        </MetaBadge>
-                        <MetaBadge
                           tone={!enabled ? "neutral" : status === "failed" ? "danger" : "success"}
                           className="h-7 shrink-0 justify-center px-2 text-[10px]"
                           title={`开关：${enabled ? "已启用" : "未启用"}；运行状态：${runtimeLabel}${lastError ? `；最近错误：${lastError}` : ""}`}
@@ -952,7 +1042,7 @@ function FeatureZone({
                         <Button
                           size="sm"
                           variant="outline"
-                          className="justify-self-end"
+                          className="hidden h-8 justify-self-end px-2.5 sm:inline-flex"
                           onClick={() => {
                             if (path) {
                               nav(path);
@@ -963,8 +1053,35 @@ function FeatureZone({
                         </Button>
                       ) : null}
                     </div>
+                    </div>
                   </div>
-                  <ModuleLintWarnings warnings={lintWarnings} />
+                  <div className="absolute bottom-2 right-2 flex max-w-[calc(100%-1rem)] items-center gap-1 sm:hidden">
+                    <MetaBadge
+                      tone={!enabled ? "neutral" : status === "failed" ? "danger" : "success"}
+                      className="h-6 max-w-[4rem] shrink-0 justify-center px-1.5 text-[10px]"
+                      title={`开关：${enabled ? "已启用" : "未启用"}；运行状态：${runtimeLabel}${lastError ? `；最近错误：${lastError}` : ""}`}
+                    >
+                      {enabled ? "已启用" : "未启用"}
+                    </MetaBadge>
+                    {canConfigure ? (
+                      <Button
+                        type="button"
+                        size="icon"
+                        variant="outline"
+                        className="h-7 w-7 shrink-0"
+                        aria-label={`配置 ${f.display_name}`}
+                        title="配置"
+                        onClick={() => {
+                          if (path) {
+                            nav(path);
+                          }
+                        }}
+                      >
+                        <Pencil className="h-3.5 w-3.5" />
+                      </Button>
+                    ) : null}
+                  </div>
+                  <div className={cn(mobileExpanded ? "block" : "hidden", "sm:block")}><ModuleLintWarnings warnings={lintWarnings} /></div>
                 </div>
               );
             })}

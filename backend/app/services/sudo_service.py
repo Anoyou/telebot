@@ -27,7 +27,12 @@ async def get_sudo_user(db: AsyncSession, sudo_id: int) -> SudoUser | None:
     return result.scalar_one_or_none()
 
 
-async def create_sudo_user(db: AsyncSession, data: SudoUserCreate) -> SudoUser:
+async def create_sudo_user(
+    db: AsyncSession,
+    data: SudoUserCreate,
+    *,
+    commit: bool = True,
+) -> SudoUser:
     """创建 Sudo 用户。"""
     sudo_user = SudoUser(
         account_id=data.account_id,
@@ -43,13 +48,20 @@ async def create_sudo_user(db: AsyncSession, data: SudoUserCreate) -> SudoUser:
         ),
     )
     db.add(sudo_user)
-    await db.commit()
+    if commit:
+        await db.commit()
+    else:
+        await db.flush()
     await db.refresh(sudo_user)
     return sudo_user
 
 
 async def update_sudo_user(
-    db: AsyncSession, sudo_id: int, data: SudoUserUpdate
+    db: AsyncSession,
+    sudo_id: int,
+    data: SudoUserUpdate,
+    *,
+    commit: bool = True,
 ) -> SudoUser | None:
     """更新 Sudo 用户。"""
     sudo_user = await get_sudo_user(db, sudo_id)
@@ -78,17 +90,28 @@ async def update_sudo_user(
             allow_all=bool(data.allow_all_commands),
         )
 
-    await db.commit()
+    if commit:
+        await db.commit()
+    else:
+        await db.flush()
     await db.refresh(sudo_user)
     return sudo_user
 
 
-async def delete_sudo_user(db: AsyncSession, sudo_id: int) -> bool:
+async def delete_sudo_user(
+    db: AsyncSession,
+    sudo_id: int,
+    *,
+    commit: bool = True,
+) -> bool:
     """删除 Sudo 用户。"""
     sudo_user = await get_sudo_user(db, sudo_id)
     if not sudo_user:
         return False
 
     await db.delete(sudo_user)
-    await db.commit()
+    if commit:
+        await db.commit()
+    else:
+        await db.flush()
     return True

@@ -9,7 +9,7 @@ type PageShellProps = {
 
 export function PageShell({ children, className }: PageShellProps) {
   return (
-    <div className={cn("w-full min-w-0 space-y-6", className)}>
+    <div data-page-shell className={cn("w-full min-w-0 space-y-4 sm:space-y-6", className)}>
       {children}
     </div>
   );
@@ -36,8 +36,8 @@ export function PageHeader({
 }: PageHeaderProps) {
   const hero = size === "hero";
   return (
-    <section className="rounded-lg border border-border/80 bg-card px-4 py-4 shadow-sm md:px-5">
-      <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+    <section data-page-header className="rounded-lg border border-border/80 bg-card px-3 py-3 shadow-sm sm:px-4 sm:py-4 md:px-5">
+      <div className="flex flex-col gap-3 sm:gap-4 lg:flex-row lg:items-end lg:justify-between">
         <div className="min-w-0">
           <div className="flex min-w-0 items-start gap-3">
             <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border border-primary/20 bg-primary/10 text-primary">

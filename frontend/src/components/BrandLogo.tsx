@@ -6,7 +6,7 @@ export function BrandLogo({ className }: { className?: string }) {
       src="/brand-logo.png"
       alt=""
       aria-hidden="true"
-      className={cn("h-10 w-10 rounded-xl object-cover", className)}
+      className={cn("h-10 w-10 rounded-[22%] object-cover", className)}
       draggable={false}
     />
   );

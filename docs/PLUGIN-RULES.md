@@ -5,7 +5,7 @@
 ## 必须
 
 1. 新 Telegram 插件必须走 Event Bus + MessageOps：读取标准事件信封，输出 `ctx.messages` 操作或标准 action。
-2. 新互动玩法优先实现一个 `on_interaction(ctx, entry_key, payload)`，在同一个入口里处理 `command`、`keyword`、`payment_confirmed`、`message`、`callback_query`、`session_expired`。
+2. 新互动玩法优先实现一个 `on_event(ctx, payload)`，在同一个入口里处理 `command`、`keyword`、`payment_confirmed`、`message`、`callback_query`、`session_expired`。
 3. 会话状态优先写进 `session.data`，并通过 `update_session` 持久化；不要再把单局状态只放在进程内 dict/lock 里。
 4. 插件必须声明 `usage`、`event_subscriptions`、`capabilities`；没有高风险能力也要写 `capabilities={}`。
 5. `plugin.json.name`、`MANIFEST.key`、插件类 `key` 必须一致。
@@ -18,6 +18,7 @@
 12. AI 能力必须声明 `permissions=["ai_text"]`，并通过 `ctx.ai` 使用平台 Provider、fallback 和预算。
 13. 插件启停、禁用、热重载、超时和卸载时，必须清理 handler、session、scheduler job、asyncio task、临时消息、临时文件和游戏状态。
 14. 日志必须脱敏，不得写入 token、session、完整原生 payload、隐私消息或完整敏感文件路径。
+15. 可选：声明 `requires_platform_capabilities`（如 `ai` / `interaction_bot` / `webhooks`）。平台能力关闭时只裁剪依赖入口，不得把 Interaction 专属能力静默降级成错误的 userbot 行为。见 [平台能力](./PLATFORM-CAPABILITIES.md)。
 
 ## 禁止
 
@@ -32,6 +33,7 @@
 9. 禁止在普通会话消息里把 `send_via` 当必填样板；大多数动作应该继承 `session.channel`。
 10. 禁止在需要 `show_alert` 晚提示的按钮入口上开启 `callback_fast_ack`。
 11. `send_rich_message` 默认走 Interaction Bot；只有明确接受 Premium/能力门禁和 HTML/Markdown 限制时才显式选择 UserBot，任何失败都禁止静默降级成普通 HTML/纯文本。
+12. 禁止把 `tp_plugin session_game|command` 当前生成的 `interaction_entries + on_interaction` 兼容桥直接当成新插件最终架构；新插件应补齐 `event_subscriptions` 并迁到 `on_event`。
 
 ## 推荐
 

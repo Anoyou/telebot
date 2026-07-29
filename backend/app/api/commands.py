@@ -69,6 +69,13 @@ from ..services.llm_identity import (
     resolve_identity,
 )
 from ..services.llm_protocol import normalize_base_url, provider_endpoint, provider_models_endpoint
+from ..services.llm_request_headers import (
+    REQUEST_SCOPE_LIVENESS,
+    REQUEST_SCOPE_MODELS,
+    RequestHeaderConfigError,
+    plan_request_headers,
+    request_headers_for_scope,
+)
 
 router = APIRouter(tags=["commands"])
 
@@ -371,6 +378,22 @@ async def create_provider(
     return out
 
 
+def _provider_update_audit_detail(payload: LLMProviderUpdate) -> dict[str, object]:
+    """构造 Provider 更新审计摘要，排除所有可复用凭据。"""
+
+    submitted = payload.model_dump(exclude_unset=True)
+    detail = payload.model_dump(
+        exclude_unset=True,
+        exclude={"api_key", "request_headers"},
+    )
+    if "api_key" in submitted:
+        detail["api_key_changed"] = True
+    if "request_headers" in submitted:
+        detail["request_headers_changed"] = True
+        detail["request_headers_count"] = len(submitted["request_headers"] or [])
+    return detail
+
+
 @router.patch(
     "/api/commands/llm-providers/{pid}", response_model=LLMProviderOut
 )
@@ -383,18 +406,14 @@ async def update_provider(
     """更新 LLM provider。
 
     api_key 行为约定：``""`` 清空、非空替换、None / 缺省不动。
-    audit detail 中**绝不写** api_key 字段。
+    audit detail 中**绝不写** api_key 或兼容请求头值。
 
     通知 worker reload：所有启用了 type=ai 模板的账号都会被通知，
     避免 api_key / base_url / tags 改动后"TG 里没生效"。
     """
     await _require_ai_enabled(db)
     out = await command_service.update_provider(db, pid, payload)
-    audit_detail = payload.model_dump(
-        exclude_unset=True, exclude={"api_key"}
-    )
-    if "api_key" in payload.model_dump(exclude_unset=True):
-        audit_detail["api_key_changed"] = True
+    audit_detail = _provider_update_audit_detail(payload)
     await audit.write(
         db,
         user.id,
@@ -516,52 +535,9 @@ async def _resolve_proxy_url(db, proxy_id: int | None) -> str | None:
     与 ``worker/runtime._build_proxy_url`` 同一逻辑；这里独立实现是因为本模块跑在
     主进程内（不能 import worker.runtime——后者持有 telethon 等重依赖）。
     """
-    if proxy_id is None:
-        return None
-    from urllib.parse import quote
+    from ..services.llm_proxy_service import resolve_proxy_url
 
-    from ..crypto import decrypt_str
-    from ..db.models.account import Proxy
-
-    p = await db.get(Proxy, proxy_id)
-    if p is None:
-        return None
-    if "://" in p.host:
-        from ..util.proxy import parse_proxy_url
-        parsed = parse_proxy_url(p.host)
-        if parsed is not None:
-            ptype, host, port, _rdns, parsed_user, parsed_password = parsed
-            if ptype not in ("socks5", "http"):
-                return None
-            user = p.username or parsed_user
-            pwd = decrypt_str(p.password_enc) if p.password_enc else (parsed_password or "")
-            auth = ""
-            if user:
-                auth = quote(user, safe="")
-                if pwd:
-                    auth = f"{auth}:{quote(pwd, safe='')}"
-                auth = f"{auth}@"
-            return f"{ptype}://{auth}{host}:{int(port)}"
-    t = (p.type or "").lower()
-    if t == "socks5":
-        scheme = "socks5"
-    elif t in ("http", "https"):
-        scheme = "http"
-    else:
-        return None  # mtproxy / 不支持的类型
-    pwd = ""
-    if p.password_enc:
-        try:
-            pwd = decrypt_str(p.password_enc)
-        except Exception:  # noqa: BLE001
-            pwd = ""
-    auth = ""
-    if p.username:
-        auth = quote(p.username, safe="")
-        if pwd:
-            auth = f"{auth}:{quote(pwd, safe='')}"
-        auth = f"{auth}@"
-    return f"{scheme}://{auth}{p.host}:{int(p.port)}"
+    return await resolve_proxy_url(db, proxy_id)
 
 
 @router.post(
@@ -589,11 +565,13 @@ async def fetch_models_preview(
 
     # api_key：优先入参，否则回落到 DB 里已存的
     api_key = (payload.api_key or "").strip()
-    if not api_key and payload.pid is not None:
+    stored_request_headers_token: str | None = None
+    if payload.pid is not None:
         try:
             row = await command_service.get_provider_row(db, payload.pid)
-            if row.api_key_enc:
+            if not api_key and row.api_key_enc:
                 api_key = decrypt_str(row.api_key_enc) or ""
+            stored_request_headers_token = getattr(row, "request_headers_enc", None)
         except Exception:  # noqa: BLE001
             # pid 错也无所谓，继续走"无 key"路径让用户看到具体的 401
             api_key = ""
@@ -614,6 +592,21 @@ async def fetch_models_preview(
         headers["anthropic-version"] = "2023-06-01"
     elif api_key:
         headers["Authorization"] = f"Bearer {api_key}"
+
+    try:
+        compatibility_headers = request_headers_for_scope(
+            payload.request_headers
+            if payload.request_headers is not None
+            else stored_request_headers_token,
+            REQUEST_SCOPE_MODELS,
+            existing_token=stored_request_headers_token,
+        )
+        headers = plan_request_headers(
+            system_headers=headers,
+            compatibility_headers=compatibility_headers,
+        )
+    except RequestHeaderConfigError as exc:
+        raise _llm_err("FETCH_REQUEST_HEADERS_INVALID", str(exc), 422) from None
 
     client_kwargs: dict[str, object] = {"timeout": httpx.Timeout(15.0, connect=8.0)}
     if proxy_url:
@@ -698,6 +691,10 @@ async def stream_quick_verify_provider(
     except ValueError as exc:
         raise _llm_err("QUICK_VERIFY_BASE_URL", str(exc), 422) from None
     proxy_url = await _resolve_proxy_url(db, payload.proxy_id)
+    try:
+        request_headers_for_scope(payload.request_headers, REQUEST_SCOPE_LIVENESS)
+    except RequestHeaderConfigError as exc:
+        raise _llm_err("QUICK_VERIFY_REQUEST_HEADERS", str(exc), 422) from None
 
     async def event_source():
         async with llm_liveness.diagnostic_slot():
@@ -714,6 +711,7 @@ async def stream_quick_verify_provider(
                 message=payload.message,
                 max_tokens=payload.max_tokens,
                 timeout_seconds=payload.timeout_seconds,
+                request_headers=payload.request_headers,
             ):
                 yield json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n"
 
@@ -740,11 +738,13 @@ async def detect_provider_protocols(
     from ..crypto import decrypt_str
 
     api_key = (payload.api_key or "").strip()
-    if not api_key and payload.pid is not None:
+    stored_request_headers_token: str | None = None
+    if payload.pid is not None:
         try:
             row = await command_service.get_provider_row(db, payload.pid)
-            if row.api_key_enc:
+            if not api_key and row.api_key_enc:
                 api_key = decrypt_str(row.api_key_enc) or ""
+            stored_request_headers_token = getattr(row, "request_headers_enc", None)
         except Exception:  # noqa: BLE001
             api_key = ""
 
@@ -759,6 +759,24 @@ async def detect_provider_protocols(
         base_url = normalize_base_url(payload.base_url or "https://api.openai.com/v1")
         model = (payload.model or "gpt-4o-mini").strip()
     proxy_url = await _resolve_proxy_url(db, payload.proxy_id)
+    try:
+        header_source = (
+            payload.request_headers
+            if payload.request_headers is not None
+            else stored_request_headers_token
+        )
+        liveness_headers = request_headers_for_scope(
+            header_source,
+            REQUEST_SCOPE_LIVENESS,
+            existing_token=stored_request_headers_token,
+        )
+        model_headers = request_headers_for_scope(
+            header_source,
+            REQUEST_SCOPE_MODELS,
+            existing_token=stored_request_headers_token,
+        )
+    except RequestHeaderConfigError as exc:
+        raise _llm_err("PROTOCOL_REQUEST_HEADERS_INVALID", str(exc), 422) from None
 
     client_kwargs: dict[str, object] = {"timeout": httpx.Timeout(12.0, connect=6.0)}
     if proxy_url:
@@ -829,7 +847,10 @@ async def detect_provider_protocols(
                 headers["x-api-key"] = api_key
         elif api_key:
             headers["Authorization"] = f"Bearer {api_key}"
-        return headers
+        return plan_request_headers(
+            system_headers=headers,
+            compatibility_headers=liveness_headers,
+        )
 
     async def probe_models(cli: httpx.AsyncClient) -> ProtocolProbeResult:
         headers = {"Accept": "application/json"}
@@ -839,6 +860,10 @@ async def detect_provider_protocols(
                 headers["x-api-key"] = api_key
         elif api_key:
             headers["Authorization"] = f"Bearer {api_key}"
+        headers = plan_request_headers(
+            system_headers=headers,
+            compatibility_headers=model_headers,
+        )
         started = _time.monotonic()
         try:
             resp = await cli.get(
@@ -1192,6 +1217,16 @@ async def fetch_models(
     headers = {"Accept": "application/json"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
+    try:
+        headers = plan_request_headers(
+            system_headers=headers,
+            compatibility_headers=request_headers_for_scope(
+                getattr(row, "request_headers_enc", None),
+                REQUEST_SCOPE_MODELS,
+            ),
+        )
+    except RequestHeaderConfigError as exc:
+        raise _llm_err("FETCH_REQUEST_HEADERS_INVALID", str(exc), 422) from None
 
     client_kwargs: dict[str, object] = {"timeout": httpx.Timeout(15.0, connect=8.0)}
     if proxy_url:
@@ -1310,7 +1345,12 @@ async def test_model(
 
     started = _time.monotonic()
     try:
-        cli = build_client(row, override_model=payload.model.strip(), proxy_url=proxy_url)
+        cli = build_client(
+            row,
+            override_model=payload.model.strip(),
+            proxy_url=proxy_url,
+            request_scope=REQUEST_SCOPE_LIVENESS,
+        )
         result = await cli.complete("ping", "ping", max_tokens=4, timeout_seconds=90)
     except LLMError as e:
         elapsed_ms = int((_time.monotonic() - started) * 1000)
@@ -1416,6 +1456,7 @@ async def chat_test_models(
                 proxy_url=proxy_url,
                 api_format_override=payload.api_format_override,
                 identity_override=payload.client_identity_profile_override,
+                request_scope=REQUEST_SCOPE_LIVENESS,
             )
             result = await cli.complete(
                 payload.system_prompt,
@@ -1486,6 +1527,7 @@ async def chat_test_models(
                 requested_model=model_id,
                 latency_ms=elapsed_ms,
                 error=str(exc),
+                status_code=exc.status_code,
                 **transport_metadata,
             )
         except Exception as exc:  # noqa: BLE001
@@ -1579,6 +1621,8 @@ async def stream_chat_test_models(
             output_tokens = 0
             streaming = True
             stream_fallback = False
+            fallback_response_consumed = False
+            stream_terminal_received = False
             await emit(
                 {
                     "type": "start",
@@ -1594,6 +1638,7 @@ async def stream_chat_test_models(
                     proxy_url=proxy_url,
                     api_format_override=payload.api_format_override,
                     identity_override=payload.client_identity_profile_override,
+                    request_scope=REQUEST_SCOPE_LIVENESS,
                 )
                 try:
                     async with asyncio.timeout(payload.timeout_seconds):
@@ -1610,6 +1655,12 @@ async def stream_chat_test_models(
                                     input_tokens = int(chunk.input_tokens)
                                 if chunk.output_tokens is not None:
                                     output_tokens = int(chunk.output_tokens)
+                                if chunk.done:
+                                    stream_terminal_received = True
+                                if getattr(chunk, "stream_fallback", False):
+                                    streaming = False
+                                    stream_fallback = True
+                                    fallback_response_consumed = True
                                 if chunk.delta:
                                     response_chars += len(chunk.delta)
                                     if response_chars > max_response_chars:
@@ -1621,6 +1672,9 @@ async def stream_chat_test_models(
                                             "requested_model": model_id,
                                             "delta": chunk.delta,
                                             "model": actual_model,
+                                            "stream_fallback": bool(
+                                                getattr(chunk, "stream_fallback", False)
+                                            ),
                                         }
                                     )
                         except (LLMError, NotImplementedError) as exc:
@@ -1628,7 +1682,7 @@ async def stream_chat_test_models(
                                 raise
                             stream_fallback = True
 
-                        if stream_fallback:
+                        if stream_fallback and not fallback_response_consumed:
                             streaming = False
                             elapsed_seconds = _time.monotonic() - started
                             remaining_seconds = max(
@@ -1647,6 +1701,11 @@ async def stream_chat_test_models(
                             actual_model = completed.model or actual_model
                             input_tokens = int(completed.input_tokens or 0)
                             output_tokens = int(completed.output_tokens or 0)
+                        elif not stream_terminal_received:
+                            raise LLMError(
+                                "模型流式响应提前结束，没有返回最终状态。",
+                                retryable=True,
+                            )
                 except TimeoutError:
                     raise LLMError("模型测活超过总超时时间。", retryable=True) from None
 
@@ -1737,6 +1796,7 @@ async def stream_chat_test_models(
                     latency_ms=elapsed_ms,
                     response="".join(text_parts).strip() or None,
                     error=str(exc),
+                    status_code=exc.status_code,
                     streaming=streaming,
                     stream_fallback=stream_fallback,
                     **transport_metadata,
@@ -1827,6 +1887,17 @@ async def _load_liveness_provider_rows(
     return list((await db.execute(query)).scalars().all())
 
 
+@router.get("/api/commands/llm-providers/runtime-health")
+async def list_provider_runtime_health(_user: CurrentUser) -> list[dict[str, Any]]:
+    """运行时健康只读视图（进程内存真相源；测活不写入）。
+
+    供测活页只读栏展示 degraded/冷却，不改变任何生产状态。
+    """
+    from ..services.provider_health import list_health
+
+    return list_health()
+
+
 @router.post(
     "/api/commands/llm-providers/liveness/preview",
     response_model=FullLivenessPreviewResponse,
@@ -1845,6 +1916,7 @@ async def full_liveness_preview(
         rows,
         max_tokens=payload.max_tokens,
         global_concurrency=payload.global_concurrency,
+        models_by_provider=payload.models_by_provider,
     )
     data = preview.to_dict()
     return FullLivenessPreviewResponse(**data)
@@ -1862,6 +1934,7 @@ def _liveness_result_items(raw: list[dict[str, Any]]) -> list[LivenessResultItem
             output_tokens=int(r.get("output_tokens") or 0),
             preview=r.get("preview"),
             error=r.get("error"),
+            status_code=r.get("status_code"),
             error_category=r.get("error_category"),
             suggestion=r.get("suggestion"),
             client_identity_profile=r.get("client_identity_profile"),
@@ -1936,6 +2009,7 @@ async def full_liveness_run(
         rows,
         max_tokens=payload.max_tokens,
         global_concurrency=payload.global_concurrency,
+        models_by_provider=payload.models_by_provider,
     )
     tasks = llm_liveness.build_task_pool(preview)
     if payload.only_models:
@@ -1988,7 +2062,12 @@ async def full_liveness_run(
         proxy_url = proxy_by_id.get(task.provider_id)
         transport_metadata = _liveness_transport_metadata(row)
         try:
-            cli = build_client(row, override_model=task.model_id, proxy_url=proxy_url)
+            cli = build_client(
+                row,
+                override_model=task.model_id,
+                proxy_url=proxy_url,
+                request_scope=REQUEST_SCOPE_LIVENESS,
+            )
             result = await cli.complete(
                 system_prompt,
                 message,
@@ -2055,6 +2134,7 @@ async def full_liveness_run(
                 {
                     "latency_ms": elapsed_ms,
                     "error": llm_liveness.diag.redact(str(exc)),
+                    "status_code": exc.status_code,
                     "error_category": status,
                     "suggestion": llm_liveness.diag.suggestion_for(status),
                     **transport_metadata,
@@ -2193,7 +2273,10 @@ def _client_identity_version_items() -> list[ClientIdentityVersionItem]:
 )
 async def get_client_identity_versions(_user: CurrentUser) -> ClientIdentityVersionsResponse:
     """读取客户端身份 UA 版本配置（生效值 + 默认值 + 检测源）。"""
-    return ClientIdentityVersionsResponse(items=_client_identity_version_items())
+    return ClientIdentityVersionsResponse(
+        items=_client_identity_version_items(),
+        profiles=llm_identity.request_configuration_profiles(),
+    )
 
 
 async def _detect_registry_latest(registry: str) -> tuple[str | None, str | None]:
@@ -2387,7 +2470,10 @@ async def update_client_identity_versions(
     # 消息未确认时仍会由 worker 的周期 reconcile 最终收敛。
     aids = await command_service.list_all_account_ids(db)
     await command_service.notify_reload(aids)
-    return ClientIdentityVersionsResponse(items=_client_identity_version_items())
+    return ClientIdentityVersionsResponse(
+        items=_client_identity_version_items(),
+        profiles=llm_identity.request_configuration_profiles(),
+    )
 
 
 __all__ = ["router"]

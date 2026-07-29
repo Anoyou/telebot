@@ -188,19 +188,42 @@ if not native_raw_meta.get("enabled"):
 ```json
 {
   "direct_passthrough": {
-    "enabled": true
+    "enabled": true,
+    "priority": 0
   }
 }
 ```
 
-仅声明能力不会启用直通；账号只启用插件本身也不会启用直通。运行时仍保留账号启用、installed 插件授权和 worker 暂停急停；通过这些外层检查后，worker 会在 userbot 标准链路、incoming 白名单、Trace、Event Bus 订阅匹配、legacy `on_message` 包装之前广播调用：
+- `enabled`（账号二次开关）：只决定插件是否加入直通调度，不决定是否消费消息。
+- `priority`：数值越小越优先；账号配置页可打开「调整优先级」对已开启直通的插件排序（自上而下 = 高优先）。
+
+仅声明能力不会启用直通；账号只启用插件本身也不会启用直通。运行时仍保留账号启用、installed 插件授权和 worker 暂停急停；通过这些外层检查后，worker 会在 userbot 标准链路、incoming 白名单、Trace、Event Bus 订阅匹配、legacy `on_message` 包装之前，按优先级顺序调用：
 
 ```python
-async def on_direct_message(self, ctx, event):
-    ...
+async def on_direct_message(self, ctx, event) -> dict[str, str]:
+    if not match(event):
+        return {"status": "ignored"}  # 不属于本插件，继续后续链路
+    try:
+        await handle(event)
+    except Exception as exc:
+        return {"status": "failed", "error": str(exc)}  # 失败也会回退
+    return {"status": "consumed"}  # 已处理，停止后续链路
 ```
 
-`event` 是 live Telethon event，不是标准事件信封。所有开启直通模式且匹配 source/direction 的插件都会收到同一条原始 userbot 事件；只要至少一个直通插件被调用，本条消息就会被直通链路消费，不再进入 incoming 白名单、Event Bus 或 legacy `on_message`，避免低延时插件和普通链路重复处理同一条消息。直通 hook 的发送、编辑、点击等行为不会自动生成标准 action、Trace 或 MessageOps 记录；插件作者必须自行承担幂等、异常、限流和审计缺失的风险。
+`event` 是 live Telethon event，不是标准事件信封。
+
+**二次开关只启用直通，三态结果决定后续链路**：
+
+| 返回 / 结果 | 后续行为 |
+| --- | --- |
+| `{"status": "consumed"}` 或兼容返回 `True` / `{"consume": true}` | 停止更低优先级直通并截断普通链路 |
+| `{"status": "ignored"}`、`False`、`None`、不返回或 `{"consume": false}` | 继续其它直通，最终进入普通链路 |
+| `{"status": "failed", "error": "..."}` 或抛异常 | 记录失败，继续其它直通，最终回退普通链路 |
+| 二次开关关闭 | 不进入直通调度 |
+
+平台不提供“独占消费”或“失败仍截断”开关。插件只有在确认已经承担并完成本条消息处理后才能返回 `consumed`；失败永远回退，避免消息丢失。
+
+直通 hook 的发送、编辑、点击等行为不会自动生成标准 MessageOps 审计等价物；插件作者必须自行承担幂等、异常、限流和审计缺失的风险。
 
 ## 标准事件信封
 
@@ -406,6 +429,15 @@ async def on_event(self, ctx: PluginContext, payload: dict[str, Any]) -> list[di
 迁移桥示例见 `examples/plugins/with_interaction`。该示例保留旧入口声明，但已经补齐 `usage`、`event_subscriptions`、`capabilities`，并修正了历史配置字段 `message` 与标准信封 `payload["message"]` 的冲突。
 
 ## 安装与验证
+
+已安装插件会记录实际更新来源。仓库被删除、分支被移除或插件迁入新仓库后，不要先卸载再重装，因为卸载会清理账号级和全局配置。应在“插件管理 > 插件仓库”展开新仓库，对同名插件执行“迁移来源”：
+
+- 只替换所选插件的代码、静态元数据和更新来源，不批量接管其它同名插件。
+- 保留全局启停、账号级启停、账号配置、插件全局配置和受管持久化数据。
+- 新插件包必须先通过静态元数据与运行结构校验，失败时继续保留当前安装。
+- 仓库级“一键更新”只更新原本来自该仓库的插件；跨仓库迁移必须逐个确认。
+
+对应管理接口为 `POST /api/plugin-repos/{repo_id}/plugins/{plugin_name}/install`，请求体显式传入 `{"replace_existing": true}` 才允许覆盖同名已安装插件。默认仍拒绝重名，避免仓库中碰巧出现同名插件时静默改写来源。
 
 发布前至少运行：
 

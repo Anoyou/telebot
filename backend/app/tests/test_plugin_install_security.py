@@ -45,6 +45,7 @@ def test_agent_tools_require_permission_capability_and_object_schema() -> None:
         "description": "Lookup",
         "parameters": {"type": "object", "properties": {}},
         "read_only": True,
+        "min_role": "admin",
     }
     valid = PluginMetadataSchema(
         name="agent-demo",
@@ -53,6 +54,15 @@ def test_agent_tools_require_permission_capability_and_object_schema() -> None:
         agent_tools=[tool],
     )
     assert valid.agent_tools[0]["name"] == "lookup"
+    assert valid.agent_tools[0]["min_role"] == "admin"
+
+    with pytest.raises(ValidationError):
+        PluginMetadataSchema(
+            name="invalid-role-agent-demo",
+            permissions=["ai_agent"],
+            capabilities={"agent_tools": {"enabled": True}},
+            agent_tools=[{**tool, "min_role": "root"}],
+        )
 
     for payload in (
         {"permissions": [], "capabilities": {"agent_tools": {"enabled": True}}, "agent_tools": [tool]},

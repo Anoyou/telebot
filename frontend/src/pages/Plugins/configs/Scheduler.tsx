@@ -95,7 +95,7 @@ function configForSave(config: SchedulerRuleConfig): Record<string, unknown> {
   delete rest._cron_timezone;
   delete rest._config_dirty;
   const action = { ...config.action };
-  const targetRequired = ["send_message", "call_llm"].includes(action.type);
+  const targetRequired = ["send_message", "call_llm", "agent_prompt"].includes(action.type);
   const target = normalizeSchedulerTarget(action.target_chat_id, targetRequired);
   if (target === undefined) {
     delete action.target_chat_id;
@@ -221,6 +221,16 @@ export function SchedulerConfig() {
         return;
       }
     }
+    if (cfg.action.type === "agent_prompt") {
+      if (!(cfg.action.prompt || "").trim()) {
+        toast.error("agent_prompt 的 prompt 必填");
+        return;
+      }
+      if (!(cfg.action.target_chat_id || "").toString().trim()) {
+        toast.error("agent_prompt 需要汇报目标聊天（管理 Bot / Chat ID）");
+        return;
+      }
+    }
     if (cfg.action.delete_after != null && cfg.action.delete_after > 3600) {
       toast.error("delete_after 上限为 3600 秒");
       return;
@@ -241,6 +251,40 @@ export function SchedulerConfig() {
   const [dryOpen, setDryOpen] = useState(false);
   const [dryRule, setDryRule] = useState<RuleOut | null>(null);
   const [dryResult, setDryResult] = useState<RuleDryRunResponse | null>(null);
+
+  const accountSelector = (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-base">选择账号</CardTitle>
+        <CardDescription className="space-y-1">
+          <span className="block font-medium text-foreground">作用：定义何时执行</span>
+          <span className="block">定时任务按账号隔离运行，每个账号独立维护规则。</span>
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        {accountsQ.isLoading ? (
+          <div className="flex h-20 items-center justify-center">
+            <Spinner className="text-primary" />
+          </div>
+        ) : accountsQ.data && accountsQ.data.length > 0 ? (
+          <Select
+            value={aid ? String(aid) : ""}
+            onChange={(event) => setSearchParams({ aid: event.target.value })}
+            className="w-full sm:w-80"
+          >
+            <option value="" disabled>请选择账号</option>
+            {accountsQ.data.map((account) => (
+              <option key={account.id} value={account.id}>
+                {account.display_name || account.phone || `账号 #${account.id}`}
+              </option>
+            ))}
+          </Select>
+        ) : (
+          <p className="text-sm text-muted-foreground">暂无可用账号，请先绑定账号。</p>
+        )}
+      </CardContent>
+    </Card>
+  );
 
   function openDryRun(rule: RuleOut) {
     setDryRule(rule);
@@ -285,59 +329,27 @@ export function SchedulerConfig() {
   if (!aid) {
     return (
       <div className="space-y-6">
-        <div>
-          <h1 className="text-2xl font-semibold tracking-tight">定时任务</h1>
-          <p className="text-sm text-muted-foreground">
-            选择账号后管理该账号的定时任务规则。
-          </p>
-        </div>
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-base">选择账号</CardTitle>
-            <CardDescription>
-              定时任务按账号隔离运行，每个账号独立维护规则。
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
-            {accountsQ.isLoading ? (
-              <div className="flex h-20 items-center justify-center">
-                <Spinner className="text-primary" />
-              </div>
-            ) : accountsQ.data && accountsQ.data.length > 0 ? (
-              <div className="flex flex-wrap gap-2">
-                {accountsQ.data.map((a) => (
-                  <Button
-                    key={a.id}
-                    variant="outline"
-                    onClick={() => setSearchParams({ aid: String(a.id) })}
-                  >
-                    {a.display_name || a.phone || `账号 #${a.id}`}
-                  </Button>
-                ))}
-              </div>
-            ) : (
-              <p className="text-sm text-muted-foreground">
-                暂无可用账号，请先绑定账号。
-              </p>
-            )}
-          </CardContent>
-        </Card>
+        {accountSelector}
       </div>
     );
   }
 
   return (
     <div className="space-y-6">
-      <RulePageHeader
-        title={`定时任务 · 账号 #${aid}`}
-        backLabel={fromAccountRoute ? accountBackTarget.backLabel : "返回定时任务"}
-        backHref={fromAccountRoute ? accountBackTarget.backHref : "/plugins/scheduler"}
-      />
+      {fromAccountRoute ? (
+        <RulePageHeader
+          title={`定时任务 · 账号 #${aid}`}
+          backLabel={accountBackTarget.backLabel}
+          backHref={accountBackTarget.backHref}
+        />
+      ) : accountSelector}
 
       <RuleInfoBox>
         <li>定时任务按账号隔离运行，每个账号独立维护规则。</li>
         <li>支持 cron 定时、once 单次和 interval 间隔触发。</li>
-        <li>动作可以发送消息、执行指令或调用 AI 模型；是否执行由每条规则自己的启用状态控制。</li>
+        <li>
+          动作：发送消息 / 执行指令 / 调用 LLM / 系统助手巡检（只读）。助手巡检不会自动写配置或改代码。
+        </li>
       </RuleInfoBox>
 
       <Card>
@@ -362,10 +374,39 @@ export function SchedulerConfig() {
             <div>
               <CardTitle className="text-base">规则</CardTitle>
               <CardDescription>
-                支持 cron 定时 / once 单次 / interval 间隔，触发动作：发送消息 / 执行指令 / 调用 LLM
+                支持 cron / once / interval；动作含消息、指令、LLM 与只读助手巡检
               </CardDescription>
             </div>
             <div className="flex shrink-0 items-center gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => {
+                  setEditing(null);
+                  setForm({
+                    name: "每日异常日志巡检",
+                    enabled: true,
+                    priority: 100,
+                    config: {
+                      ...defaultConfig(cmdPrefix),
+                      kind: "cron",
+                      cron: "0 9 * * *",
+                      action: {
+                        ...defaultConfig(cmdPrefix).action,
+                        type: "agent_prompt",
+                        target_chat_id: "",
+                        prompt:
+                          "请检查近 24 小时内的运行异常与错误日志，汇总最重要的问题，并给出可操作的修复建议（文本方案即可；不要尝试修改配置或代码）。",
+                      },
+                    },
+                  });
+                  setEditOpen(true);
+                  toast.message("已填入「每日 09:00 异常日志巡检」模板，请补全汇报目标后保存");
+                }}
+              >
+                巡检模板
+              </Button>
               <Button
                 variant="outline"
                 onClick={() => nav(`/logs?view=messages&source_channel=scheduler&event_type=scheduler_fire&account_id=${aid}`)}
@@ -589,11 +630,13 @@ export function SchedulerConfig() {
               <option value="send_message">发送消息</option>
               <option value="run_command">执行指令</option>
               <option value="call_llm">调用 LLM</option>
+              <option value="agent_prompt">系统助手巡检（只读）</option>
             </Select>
           </Field>
 
           {form.config.action.type === "send_message" ||
-          form.config.action.type === "call_llm" ? (
+          form.config.action.type === "call_llm" ||
+          form.config.action.type === "agent_prompt" ? (
             <Field label="目标聊天（数字 ID 或 @username）">
               <Input
                 type="text"
@@ -777,6 +820,31 @@ export function SchedulerConfig() {
               </div>
             </>
           ) : null}
+
+          {form.config.action.type === "agent_prompt" ? (
+            <>
+              <Field label="巡检提示词">
+                <Textarea
+                  value={form.config.action.prompt || ""}
+                  onChange={(e) =>
+                    setForm((s) => ({
+                      ...s,
+                      config: {
+                        ...s.config,
+                        action: { ...s.config.action, prompt: e.target.value },
+                      },
+                    }))
+                  }
+                  rows={5}
+                  placeholder="用自然语言描述只读巡检目标，例如：检查近 24 小时异常日志并给出修复建议"
+                />
+              </Field>
+              <div className="rounded-md border border-warning/30 bg-warning/5 px-3 py-2 text-xs text-muted-foreground space-y-1">
+                <p>无人值守轮只开放只读工具；若模型需要写操作，只会留下待确认 Action，不会自动执行。</p>
+                <p>修复建议是文本方案；涉及源码的修改必须由人执行，Agent 不会也不能改项目代码。</p>
+              </div>
+            </>
+          ) : null}
         </div>
       </RuleEditDialogShell>
 
@@ -916,6 +984,7 @@ const ACTION_TYPE_LABELS: Record<string, string> = {
   send_message: "发送消息",
   run_command: "执行指令",
   call_llm: "调用 LLM",
+  agent_prompt: "助手巡检",
 };
 
 function buildCronPreview(expr: string, timezone: string): CronPreviewResult {

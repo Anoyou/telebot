@@ -103,3 +103,35 @@ async def send(channel_name: str | None, text: str, *, parse_mode: str = "HTML")
     except Exception:
         log.exception("notify send 异常: name=%s", bot.name)
         return False
+
+
+async def send_to_bot_snapshot(
+    bot_id: int,
+    target_chat_id: int,
+    text: str,
+    *,
+    parse_mode: str = "HTML",
+) -> bool:
+    """使用确认时固化的 Chat ID 发送，不重新读取默认目标。"""
+
+    async with AsyncSessionLocal() as db:
+        bot = await db.get(NotifyBot, int(bot_id))
+    if bot is None or not bot.enabled:
+        return False
+    token = await _resolve_token(bot)
+    if token is None:
+        return False
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as cli:
+            response = await cli.post(
+                f"https://api.telegram.org/bot{token}/sendMessage",
+                json={
+                    "chat_id": int(target_chat_id),
+                    "text": text,
+                    "parse_mode": parse_mode,
+                },
+            )
+        return response.is_success
+    except Exception:  # noqa: BLE001
+        log.warning("notify snapshot send failed bot_id=%s", bot_id, exc_info=True)
+        return False

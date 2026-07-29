@@ -20,6 +20,9 @@ import type {
   StrictRequest,
   RuntimeLogItem,
   SystemConsoleLogsResponse,
+  PlatformCapabilities,
+  PlatformCapabilityPatchResult,
+  PlatformModuleKey,
   SystemSettings,
   TemplateOut,
 } from "@/api/types";
@@ -161,8 +164,9 @@ export async function getSystemSettings(): Promise<SystemSettings> {
   const { data } = await api.get<SystemSettings>("/api/system/settings");
   return data;
 }
-export type SystemSettingsPatch = Partial<Omit<SystemSettings, "login_security">> & {
+export type SystemSettingsPatch = Partial<Omit<SystemSettings, "login_security" | "ui_preferences">> & {
   login_security?: Partial<NonNullable<SystemSettings["login_security"]>>;
+  ui_preferences?: Partial<NonNullable<SystemSettings["ui_preferences"]>>;
 };
 
 export async function patchSystemSettings(
@@ -171,6 +175,23 @@ export async function patchSystemSettings(
   const { data } = await api.patch<SystemSettings>(
     "/api/system/settings",
     payload,
+  );
+  return data;
+}
+
+// ===================== 平台能力热插拔 =====================
+export async function getPlatformCapabilities(): Promise<PlatformCapabilities> {
+  const { data } = await api.get<PlatformCapabilities>("/api/system/capabilities");
+  return data;
+}
+
+export async function patchPlatformCapability(
+  moduleKey: PlatformModuleKey | string,
+  enabled: boolean,
+): Promise<PlatformCapabilityPatchResult> {
+  const { data } = await api.patch<PlatformCapabilityPatchResult>(
+    `/api/system/capabilities/${moduleKey}`,
+    { enabled },
   );
   return data;
 }

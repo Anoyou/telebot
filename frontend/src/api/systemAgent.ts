@@ -1,5 +1,6 @@
 /** System Agent API client. */
 import { api, apiFetch } from "@/lib/api";
+import { NdjsonDecoder } from "@/lib/ndjsonStream";
 
 export interface SystemAgentConfig {
   enabled: boolean;
@@ -21,6 +22,27 @@ export interface SystemAgentCapability {
   channels: string[];
   available: boolean;
   unavailable_reason?: string | null;
+  /** builtin | plugin */
+  source?: string | null;
+  plugin_key?: string | null;
+}
+
+export interface SystemAgentModelMatrixItem {
+  provider_id: number;
+  provider_name: string;
+  model: string;
+  enabled?: boolean;
+  declared_supports_tools?: boolean | null;
+  declared_supports_images?: boolean | null;
+  declared_reasoning_efforts?: unknown;
+  probed_supports_tools?: boolean | null;
+  probed_status?: string | null;
+  health?: {
+    state?: string;
+    cooldown_remaining_seconds?: number;
+    last_error_class?: string | null;
+    last_error_message?: string | null;
+  };
 }
 
 export interface SystemAgentCapabilities {
@@ -34,6 +56,7 @@ export interface SystemAgentCapabilities {
   tools: SystemAgentCapability[];
   stage: number;
   write_tools_available: boolean;
+  model_matrix?: SystemAgentModelMatrixItem[];
 }
 
 export interface SystemAgentSession {
@@ -43,6 +66,8 @@ export interface SystemAgentSession {
   account_id: number | null;
   channel: string;
   title: string | null;
+  /** interactive = 对话；scheduled = 定时任务落轨迹 */
+  origin?: "interactive" | "scheduled" | string;
   status: string;
   memory_summary?: string;
   memory_state?: Record<string, unknown>;
@@ -79,10 +104,13 @@ export interface SystemAgentToolApprovalItem {
   description: string;
   read_only: boolean;
   risk: string;
+  call_id?: string;
+  arguments?: Record<string, unknown>;
 }
 
 export interface SystemAgentToolApproval {
   domains?: string[];
+  calls?: Array<{ call_id: string; name: string; arguments?: Record<string, unknown> }>;
   tools: SystemAgentToolApprovalItem[];
 }
 
@@ -104,10 +132,13 @@ export interface SystemAgentAction {
   error_message?: string | null;
   runtime_sync_status?: string;
   runtime_sync_error?: string | null;
+  runtime_retryable?: boolean;
   expires_at?: string | null;
   created_at?: string | null;
   updated_at?: string | null;
   executed_at?: string | null;
+  session_title?: string | null;
+  session_origin?: string | null;
 }
 
 export type SystemAgentStreamEvent = {
@@ -117,6 +148,8 @@ export type SystemAgentStreamEvent = {
   seq?: number;
   ts?: string;
   content?: string;
+  reasoning?: string;
+  delta?: string;
   message?: string;
   code?: string;
   tool_name?: string;
@@ -134,6 +167,7 @@ export type SystemAgentStreamEvent = {
   provider_switch?: SystemAgentProviderSwitch;
   tool_approval?: SystemAgentToolApproval;
   action?: SystemAgentAction;
+  stream_fallback?: boolean;
   [key: string]: unknown;
 };
 
@@ -173,8 +207,72 @@ export async function getSystemAgentCapabilities(): Promise<SystemAgentCapabilit
   return data;
 }
 
+export async function listSystemAgentRunEvents(
+  runId: string,
+  afterSeq = 0,
+  limit = 500,
+): Promise<SystemAgentStreamEvent[]> {
+  const { data } = await api.get<Array<{ run_id: string; seq: number; event: Record<string, unknown>; created_at?: string | null }>>(
+    `/api/system-agent/runs/${runId}/events`,
+    { params: { after_seq: afterSeq, limit } },
+  );
+  return (data || []).map((row) => ({
+    ...(row.event || {}),
+    type: String(row.event?.type || ""),
+    run_id: row.run_id,
+    seq: row.seq,
+    created_at: row.created_at ?? null,
+  })) as SystemAgentStreamEvent[];
+}
+
+export async function listSystemAgentRuns(params?: {
+  status?: string;
+  since?: string;
+  until?: string;
+  limit?: number;
+}): Promise<SystemAgentRun[]> {
+  const { data } = await api.get<SystemAgentRun[]>("/api/system-agent/runs", { params });
+  return data;
+}
+
+export interface SystemAgentUserMemory {
+  id: number;
+  scope_type: string;
+  scope_id: number;
+  content: string;
+  source: string;
+  enabled: boolean;
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
+export async function listSystemAgentUserMemory(): Promise<SystemAgentUserMemory[]> {
+  const { data } = await api.get<SystemAgentUserMemory[]>("/api/system-agent/memory");
+  return data;
+}
+
+export async function createSystemAgentUserMemory(payload: {
+  content: string;
+  enabled?: boolean;
+}): Promise<SystemAgentUserMemory> {
+  const { data } = await api.post<SystemAgentUserMemory>("/api/system-agent/memory", payload);
+  return data;
+}
+
+export async function patchSystemAgentUserMemory(
+  id: number,
+  payload: { content?: string; enabled?: boolean },
+): Promise<SystemAgentUserMemory> {
+  const { data } = await api.patch<SystemAgentUserMemory>(`/api/system-agent/memory/${id}`, payload);
+  return data;
+}
+
+export async function deleteSystemAgentUserMemory(id: number): Promise<void> {
+  await api.delete(`/api/system-agent/memory/${id}`);
+}
+
 export async function listSystemAgentSessions(
-  params?: { status?: string; limit?: number },
+  params?: { status?: string; origin?: string; include_bot?: boolean; limit?: number },
 ): Promise<SystemAgentSession[]> {
   const { data } = await api.get<SystemAgentSession[]>("/api/system-agent/sessions", { params });
   return data;
@@ -219,12 +317,18 @@ export async function listSystemAgentMessages(
   return data;
 }
 
+/** 本轮模型选择：auto 走全局配置；pinned 固定 provider+model（不改全局） */
+export type SystemAgentModelSelection =
+  | { mode: "auto" }
+  | { mode: "pinned"; provider_id: number; model: string };
+
 export async function startSystemAgentRun(
   sessionId: string,
   payload: {
     content: string;
     account_id?: number | null;
     client_request_id: string;
+    model_selection?: SystemAgentModelSelection | null;
   },
 ): Promise<SystemAgentRun> {
   const { data } = await api.post<SystemAgentRun>(
@@ -242,10 +346,31 @@ export async function startSystemAgentRetryRun(
     fallback_provider_id?: number | null;
     approved_tools?: string[];
     client_request_id: string;
+    model_selection?: SystemAgentModelSelection | null;
   },
 ): Promise<SystemAgentRun> {
   const { data } = await api.post<SystemAgentRun>(
     `/api/system-agent/sessions/${sessionId}/messages/${messageId}/retry/runs`,
+    payload,
+  );
+  return data;
+}
+
+export async function startSystemAgentRegenerateRun(
+  sessionId: string,
+  messageId: number,
+  payload: {
+    assistant_message_id: number;
+    content?: string | null;
+    account_id?: number | null;
+    fallback_provider_id?: number | null;
+    approved_tools?: string[];
+    client_request_id: string;
+    model_selection?: SystemAgentModelSelection | null;
+  },
+): Promise<SystemAgentRun> {
+  const { data } = await api.post<SystemAgentRun>(
+    `/api/system-agent/sessions/${sessionId}/messages/${messageId}/regenerate/runs`,
     payload,
   );
   return data;
@@ -394,27 +519,20 @@ async function consumeSystemAgentStream(
   if (!response.body) throw new Error("浏览器没有提供可读取的流式响应。");
 
   const reader = response.body.getReader();
-  const decoder = new TextDecoder();
+  const decoder = new NdjsonDecoder<SystemAgentStreamEvent>();
   let doneReceived = false;
   let streamFinished = false;
-  let buffer = "";
-  const consumeLine = (line: string) => {
-    const trimmed = line.trim();
-    if (!trimmed) return;
-    const event = JSON.parse(trimmed) as SystemAgentStreamEvent;
+  const consumeEvent = (event: SystemAgentStreamEvent) => {
     if (event.type === "done") doneReceived = true;
     onEvent(event);
   };
   try {
     while (true) {
       const { done, value } = await reader.read();
-      buffer += decoder.decode(value, { stream: !done });
-      const lines = buffer.split("\n");
-      buffer = lines.pop() || "";
-      lines.forEach(consumeLine);
+      decoder.push(value).forEach(consumeEvent);
       if (done) break;
     }
-    if (buffer.trim()) consumeLine(buffer);
+    decoder.finish().forEach(consumeEvent);
     if (!doneReceived) throw new Error("流式响应提前结束，没有返回最终状态。");
     streamFinished = true;
   } finally {

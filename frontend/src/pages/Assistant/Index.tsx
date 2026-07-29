@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link } from "react-router-dom";
-import { Menu, MessageCircle, Minimize2, Server, Settings2 } from "lucide-react";
+import { Link, useSearchParams } from "react-router-dom";
+import { ChevronDown, MessageCircle, Server, Settings2, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
 import {
@@ -14,7 +14,12 @@ import {
   listSystemAgentActions,
   listSystemAgentMessages,
   listSystemAgentSessions,
+  createSystemAgentUserMemory,
+  deleteSystemAgentUserMemory,
+  listSystemAgentUserMemory,
   patchSystemAgentConfig,
+  patchSystemAgentUserMemory,
+  startSystemAgentRegenerateRun,
   startSystemAgentRetryRun,
   startSystemAgentRun,
   streamSystemAgentRun,
@@ -23,25 +28,46 @@ import {
   type SystemAgentRun,
   type SystemAgentSession,
   type SystemAgentStreamEvent,
+  type SystemAgentUserMemory,
 } from "@/api/systemAgent";
 import { listLLMProviders } from "@/api/commands";
 import { listAccounts } from "@/api/accounts";
 import type { LLMProviderOut } from "@/api/types";
+import { matrixToPickerItems, type ModelPickerValue } from "@/components/ai/ModelPicker";
 import { Composer } from "@/components/assistant/Composer";
+import { AgentMark } from "@/components/assistant/AgentMark";
 import { useAssistantDock } from "@/components/assistant/AssistantDock";
 import { Conversation, type LiveBubble } from "@/components/assistant/Conversation";
-import { SessionDrawer } from "@/components/assistant/SessionDrawer";
+import {
+  SessionDrawer,
+  type SessionOriginFilter,
+} from "@/components/assistant/SessionDrawer";
 import { PageHeader, PageShell } from "@/components/layout/PageScaffold";
 import { Button } from "@/components/ui/button";
 import { Select } from "@/components/ui/select";
+import { Input } from "@/components/ui/input";
+import { Switch } from "@/components/ui/switch";
 import { Skeleton } from "@/components/ui/misc";
+import { useStreamingText } from "@/hooks/useStreamingText";
 import { getErrMsg } from "@/lib/api";
 import { systemAgentToolLabel } from "@/lib/systemAgentLabels";
 import { removeSessionAndChooseNext } from "./sessionState";
+import {
+  loadSessionModelSelection,
+  saveSessionModelSelection,
+  toApiModelSelection,
+  type SessionModelSelection,
+} from "./sessionModelSelection";
 
 const ACTIVE_RUNS_KEY = "telepilot.system-agent.active-runs.v1";
 
-type StoredRun = { runId: string; lastSeq: number };
+type StoredRun = {
+  runId: string;
+  lastSeq: number;
+  targetUserMessageId?: number;
+  targetAssistantMessageId?: number;
+  editedUserText?: string;
+};
 
 function readStoredRuns(): Record<string, StoredRun> {
   try {
@@ -56,7 +82,18 @@ function readStoredRuns(): Record<string, StoredRun> {
 function storedRun(sessionId: string): StoredRun | null {
   const value = readStoredRuns()[sessionId];
   if (!value || typeof value.runId !== "string") return null;
-  return { runId: value.runId, lastSeq: Math.max(0, Number(value.lastSeq) || 0) };
+  return {
+    runId: value.runId,
+    lastSeq: Math.max(0, Number(value.lastSeq) || 0),
+    targetUserMessageId:
+      Number(value.targetUserMessageId) > 0 ? Number(value.targetUserMessageId) : undefined,
+    targetAssistantMessageId:
+      Number(value.targetAssistantMessageId) > 0
+        ? Number(value.targetAssistantMessageId)
+        : undefined,
+    editedUserText:
+      typeof value.editedUserText === "string" ? value.editedUserText : undefined,
+  };
 }
 
 function rememberRun(sessionId: string, value: StoredRun): void {
@@ -105,24 +142,44 @@ function toolsModels(provider?: LLMProviderOut): string[] {
 
 export function AssistantIndex() {
   const qc = useQueryClient();
+  const [searchParams, setSearchParams] = useSearchParams();
   const {
     collapsed: assistantCollapsed,
-    setCollapsed: setAssistantCollapsed,
     setStreaming: setDockStreaming,
+    notifyOutcome,
   } = useAssistantDock();
   const [activeId, setActiveId] = useState<string | null>(null);
+  const [originFilter, setOriginFilter] = useState<SessionOriginFilter>("all");
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const [sessionSidebarCollapsed, setSessionSidebarCollapsed] = useState(false);
   const [accountId, setAccountId] = useState<number | "">("");
   const [live, setLive] = useState<LiveBubble[]>([]);
   const [streaming, setStreaming] = useState(false);
   const [retryingMessageId, setRetryingMessageId] = useState<number | null>(null);
   const [activeRun, setActiveRun] = useState<StoredRun | null>(null);
   const [configOpen, setConfigOpen] = useState(false);
+  const [mobileHeaderExpanded, setMobileHeaderExpanded] = useState(false);
+  const [memoryDraft, setMemoryDraft] = useState("");
   const [runtimeSelection, setRuntimeSelection] = useState<{
     providerName: string;
     model: string;
   } | null>(null);
+  const [streamNotice, setStreamNotice] = useState("");
+  const [composerValue, setComposerValue] = useState("");
+  /** 本轮模型选择：仅会话本地，默认自动路由 */
+  const [sessionModel, setSessionModel] = useState<SessionModelSelection>({ mode: "auto" });
   const abortRef = useRef<AbortController | null>(null);
+  const streamingBubbleCreatedRef = useRef(false);
+  const liveAssistantMessageIdRef = useRef<number | null>(null);
+  const liveText = useStreamingText();
+  const liveReasoning = useStreamingText();
+
+  const clearLiveStreamingState = useCallback(() => {
+    streamingBubbleCreatedRef.current = false;
+    liveText.clear();
+    liveReasoning.clear();
+    setStreamNotice("");
+  }, [liveReasoning.clear, liveText.clear]);
 
   useEffect(() => {
     setDockStreaming(streaming);
@@ -142,11 +199,18 @@ export function AssistantIndex() {
   const capsQ = useQuery({
     queryKey: ["system-agent", "capabilities"],
     queryFn: getSystemAgentCapabilities,
+    refetchOnMount: "always",
   });
   const sessionsQ = useQuery({
     queryKey: ["system-agent", "sessions"],
-    queryFn: () => listSystemAgentSessions({ status: "active", limit: 50 }),
+    queryFn: () => listSystemAgentSessions({ status: "active", include_bot: true, limit: 100 }),
+    refetchInterval: assistantCollapsed ? false : 3_000,
+    refetchOnWindowFocus: "always",
   });
+  const sessionOptions = useMemo(
+    () => (Array.isArray(sessionsQ.data) ? sessionsQ.data : []),
+    [sessionsQ.data],
+  );
   const accountsQ = useQuery({
     queryKey: ["accounts"],
     queryFn: listAccounts,
@@ -154,32 +218,68 @@ export function AssistantIndex() {
   const providersQ = useQuery({
     queryKey: ["llm-providers"],
     queryFn: listLLMProviders,
+    refetchOnMount: "always",
+  });
+  const accountOptions = Array.isArray(accountsQ.data) ? accountsQ.data : [];
+  const activeSession = sessionOptions.find((session) => session.id === activeId) ?? null;
+  const viewingBotSession = activeSession?.channel === "bot";
+  const memoryQ = useQuery({
+    queryKey: ["system-agent", "user-memory"],
+    queryFn: listSystemAgentUserMemory,
+    enabled: configOpen,
   });
 
   const messagesQ = useQuery({
     queryKey: ["system-agent", "messages", activeId],
     queryFn: () => listSystemAgentMessages(activeId!, { limit: 100 }),
     enabled: !!activeId,
+    refetchInterval: assistantCollapsed || streaming ? false : 3_000,
+    refetchOnWindowFocus: "always",
   });
   const pendingActionsQ = useQuery({
     queryKey: ["system-agent", "actions", activeId, "pending"],
     queryFn: () =>
       listSystemAgentActions({ session_id: activeId!, status: "pending", limit: 50 }),
-    enabled: !!activeId,
+    enabled: !!activeId && !viewingBotSession,
     refetchInterval: assistantCollapsed && !streaming ? false : 15_000,
   });
 
+  // 深链 /assistant?session=… 优先打开指定会话
+  useEffect(() => {
+    const deepSession = searchParams.get("session");
+    if (!deepSession) return;
+    setActiveId(deepSession);
+    // 消费一次 query，避免刷新后反复抢焦点；保留 path 便于分享
+    const next = new URLSearchParams(searchParams);
+    next.delete("session");
+    setSearchParams(next, { replace: true });
+  }, [searchParams, setSearchParams]);
+
+  // 深链/选中会话后同步账号与 origin 筛选
+  useEffect(() => {
+    if (!activeId || !sessionOptions.length) return;
+    const match = sessionOptions.find((s) => s.id === activeId);
+    if (!match) return;
+    if (match.account_id != null) {
+      setAccountId(match.account_id);
+    }
+    if (match.origin === "scheduled") {
+      setOriginFilter((prev) => (prev === "all" ? "scheduled" : prev));
+    }
+  }, [activeId, sessionOptions]);
+
   // 恢复最后一个 active 会话
   useEffect(() => {
-    if (activeId || !sessionsQ.data?.length) return;
-    setActiveId(sessionsQ.data[0].id);
-    if (sessionsQ.data[0].account_id != null) {
-      setAccountId(sessionsQ.data[0].account_id);
+    if (activeId || !sessionOptions.length) return;
+    setActiveId(sessionOptions[0].id);
+    if (sessionOptions[0].account_id != null) {
+      setAccountId(sessionOptions[0].account_id);
     }
-  }, [sessionsQ.data, activeId]);
+  }, [sessionOptions, activeId]);
 
   useEffect(() => {
     setRuntimeSelection(null);
+    clearLiveStreamingState();
   }, [activeId, configQ.data?.provider_id, configQ.data?.model]);
 
   const createMut = useMutation({
@@ -191,6 +291,7 @@ export function AssistantIndex() {
       void qc.invalidateQueries({ queryKey: ["system-agent", "sessions"] });
       abortRef.current?.abort();
       abortRef.current = null;
+      clearLiveStreamingState();
       setStreaming(false);
       setActiveId(session.id);
       setLive([]);
@@ -217,6 +318,7 @@ export function AssistantIndex() {
       if (activeId === id) {
         abortRef.current?.abort();
         abortRef.current = null;
+        clearLiveStreamingState();
         setStreaming(false);
         setActiveId(nextState.activeId);
         const nextSession = nextState.sessions.find((session) => session.id === nextState.activeId);
@@ -236,6 +338,32 @@ export function AssistantIndex() {
       toast.success("助手配置已保存");
     },
     onError: (e) => toast.error(getErrMsg(e)),
+  });
+
+  const createMemoryMut = useMutation({
+    mutationFn: (content: string) => createSystemAgentUserMemory({ content }),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["system-agent", "user-memory"] });
+      setMemoryDraft("");
+      toast.success("已添加长期记忆");
+    },
+    onError: (err) => toast.error(getErrMsg(err)),
+  });
+  const patchMemoryMut = useMutation({
+    mutationFn: (vars: { id: number; content?: string; enabled?: boolean }) =>
+      patchSystemAgentUserMemory(vars.id, { content: vars.content, enabled: vars.enabled }),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["system-agent", "user-memory"] });
+    },
+    onError: (err) => toast.error(getErrMsg(err)),
+  });
+  const deleteMemoryMut = useMutation({
+    mutationFn: (id: number) => deleteSystemAgentUserMemory(id),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["system-agent", "user-memory"] });
+      toast.success("已删除记忆");
+    },
+    onError: (err) => toast.error(getErrMsg(err)),
   });
 
   const enabled = configQ.data?.enabled ?? false;
@@ -290,9 +418,57 @@ export function AssistantIndex() {
         displayedSelection.model !== configuredModel),
   );
 
+  const modelPickerItems = useMemo(
+    () => matrixToPickerItems(capsQ.data?.model_matrix || [], { requireTools: true }),
+    [capsQ.data?.model_matrix],
+  );
+
+  const pickerValue: ModelPickerValue =
+    sessionModel.mode === "pinned"
+      ? { mode: "pinned", providerId: sessionModel.providerId, model: sessionModel.model }
+      : { mode: "auto" };
+
+  const expectedSelectionLabel = useMemo(() => {
+    if (sessionModel.mode === "pinned") {
+      const name =
+        modelPickerItems.find(
+          (item) =>
+            item.providerId === sessionModel.providerId && item.model === sessionModel.model,
+        )?.providerName || `Provider #${sessionModel.providerId}`;
+      return `${name} · ${sessionModel.model}`;
+    }
+    if (configuredProvider) {
+      return `自动 · ${configuredProvider.name} · ${configuredModel || "未选模型"}`;
+    }
+    return "自动路由";
+  }, [sessionModel, modelPickerItems, configuredProvider, configuredModel]);
+
+  // 切换会话时恢复 localStorage 中的本轮选择
+  useEffect(() => {
+    setSessionModel(loadSessionModelSelection(activeId));
+  }, [activeId]);
+
+  const onSessionModelChange = (next: ModelPickerValue) => {
+    const selection: SessionModelSelection =
+      next.mode === "pinned"
+        ? { mode: "pinned", providerId: next.providerId, model: next.model }
+        : { mode: "auto" };
+    setSessionModel(selection);
+    if (activeId) saveSessionModelSelection(activeId, selection);
+  };
+
+  const onSetDefaultModel = (providerId: number, model: string) => {
+    saveConfigMut.mutate({
+      provider_id: providerId,
+      model: model || null,
+      enabled: true,
+    });
+  };
+
   const selectProvider = (providerId: string) => {
     const provider = (providersQ.data || []).find((item) => item.id === Number(providerId));
     if (!provider) return;
+    // 顶部配置区：显式改全局默认 Provider
     saveConfigMut.mutate({
       provider_id: provider.id,
       model: toolsModels(provider)[0] || null,
@@ -317,6 +493,90 @@ export function AssistantIndex() {
       ),
     );
   };
+
+  const liveAssistantIdentity = () => {
+    const messageId = liveAssistantMessageIdRef.current;
+    return {
+      id: messageId == null ? "live-assistant-stream" : `m-${messageId}`,
+      messageId: messageId ?? undefined,
+    };
+  };
+
+  const showStreamingReply = (value: string, options?: { fallback?: boolean }) => {
+    setLive((prev) => {
+      const pending = prev.find((bubble) => bubble.role === "assistant" && bubble.pending);
+      const identity = liveAssistantIdentity();
+      const assistant = prev.find((bubble) => bubble.id === identity.id);
+      const nextBubble: LiveBubble = {
+        ...identity,
+        role: "assistant",
+        text: value,
+        reasoning: liveReasoning.textRef.current,
+        streaming: true,
+        streamFallback: options?.fallback,
+      };
+      const rest = prev.filter(
+        (bubble) => bubble.id !== identity.id && bubble !== pending,
+      );
+      return [...rest, assistant ? { ...assistant, ...nextBubble } : nextBubble];
+    });
+  };
+
+  const appendStreamingDelta = (delta: string) => {
+    liveText.append(delta);
+    if (!streamingBubbleCreatedRef.current) {
+      streamingBubbleCreatedRef.current = true;
+      showStreamingReply(liveText.textRef.current);
+    }
+  };
+
+  const appendReasoningDelta = (delta: string) => {
+    liveReasoning.append(delta);
+    if (!streamingBubbleCreatedRef.current) {
+      streamingBubbleCreatedRef.current = true;
+      showStreamingReply(liveText.textRef.current);
+    }
+  };
+
+  const resetStreamingReply = () => {
+    // 过渡语不整泡删除：截断并入状态行，流式气泡清空复用
+    const preview = liveText.textRef.current.trim().slice(0, 60);
+    if (preview) {
+      updatePendingText(`已理解：${preview}${liveText.textRef.current.trim().length > 60 ? "…" : ""}，正在调用工具`);
+    } else {
+      updatePendingText("已理解你的需求，正在调用工具…");
+    }
+    liveText.clear();
+    setStreamNotice("");
+    streamingBubbleCreatedRef.current = false;
+    setLive((prev) =>
+      prev.map((bubble) =>
+        bubble.id === liveAssistantIdentity().id
+          ? { ...bubble, text: "", streaming: true, streamFallback: false }
+          : bubble,
+      ),
+    );
+  };
+
+  useEffect(() => {
+    const current = liveText.text;
+    if (!current || !streamingBubbleCreatedRef.current) return;
+    setLive((prev) =>
+      prev.map((bubble) =>
+        bubble.id === liveAssistantIdentity().id ? { ...bubble, text: current } : bubble,
+      ),
+    );
+  }, [liveText.text]);
+
+  useEffect(() => {
+    const current = liveReasoning.text;
+    if (!current || !streamingBubbleCreatedRef.current) return;
+    setLive((prev) =>
+      prev.map((bubble) =>
+        bubble.id === liveAssistantIdentity().id ? { ...bubble, reasoning: current } : bubble,
+      ),
+    );
+  }, [liveReasoning.text]);
 
   const upsertToolProgress = (event: SystemAgentStreamEvent, finished: boolean) => {
     const id = `tool-${event.call_id || event.seq}`;
@@ -395,6 +655,17 @@ export function AssistantIndex() {
       updatePendingText(`正在等待 ${toolLabel} 返回…`);
     }
     if (event.type === "tool_finished") upsertToolProgress(event, true);
+    if (event.type === "assistant_delta_reset") {
+      resetStreamingReply();
+    }
+    if (event.type === "assistant_delta") {
+      setStreamNotice("");
+      appendStreamingDelta(String(event.delta || ""));
+    }
+    if (event.type === "assistant_reasoning_delta") {
+      setStreamNotice("");
+      appendReasoningDelta(String(event.delta || ""));
+    }
     if (event.type === "action_proposed" && event.action) {
       const action = event.action as SystemAgentAction;
       setLive((prev) => [
@@ -413,17 +684,53 @@ export function AssistantIndex() {
       if (typeof providerName === "string" && typeof model === "string") {
         setRuntimeSelection({ providerName, model });
       }
-      setLive((prev) => [
-        ...prev.filter((bubble) => !bubble.pending),
-        {
-          id: "live-assistant-final",
-          role: "assistant",
-          text: String(event.content || ""),
-        },
-      ]);
+      const finalText = String(event.content || "");
+      const finalReasoning = String(event.reasoning || "");
+      liveText.syncSnapshot(finalText);
+      liveReasoning.syncSnapshot(finalReasoning);
+      streamingBubbleCreatedRef.current = false;
+      const usage =
+        event.usage && typeof event.usage === "object"
+          ? (event.usage as Record<string, unknown>)
+          : null;
+      // 同 id 翻转 streaming，避免 remount 闪动
+      setLive((prev) => {
+        const identity = liveAssistantIdentity();
+        const withoutPending = prev.filter((bubble) => !bubble.pending);
+        const hasStream = withoutPending.some((b) => b.id === identity.id);
+        if (hasStream) {
+          return withoutPending.map((bubble) =>
+            bubble.id === identity.id
+              ? {
+                  ...bubble,
+                  text: finalText,
+                  reasoning: finalReasoning,
+                  createdAt: typeof event.ts === "string" ? event.ts : new Date().toISOString(),
+                  streaming: false,
+                  streamFallback: Boolean(event.stream_fallback || usage?.stream_fallback),
+                  usage,
+                }
+              : bubble,
+          );
+        }
+        return [
+          ...withoutPending,
+          {
+            ...identity,
+            role: "assistant" as const,
+            text: finalText,
+            reasoning: finalReasoning,
+            createdAt: typeof event.ts === "string" ? event.ts : new Date().toISOString(),
+            streaming: false,
+            streamFallback: Boolean(event.stream_fallback || usage?.stream_fallback),
+            usage,
+          },
+        ];
+      });
     }
     if (event.type === "error") {
       if (event.code === "RUN_STREAM_FAILED") {
+        setStreamNotice("进度连接中断，正在恢复…");
         updatePendingText("进度连接中断，正在恢复…");
       } else if (
         event.code === "AGENT_PROVIDER_SWITCH_REQUIRED" ||
@@ -444,6 +751,9 @@ export function AssistantIndex() {
         });
       }
     }
+    if (event.type === "done") {
+      setStreamNotice("");
+    }
   };
 
   const refreshRunData = async (sessionId: string) => {
@@ -456,12 +766,13 @@ export function AssistantIndex() {
 
   const followRun = async (
     sessionId: string,
-    runId: string,
-    initialSeq: number,
+    stored: StoredRun,
     controller: AbortController,
   ) => {
-    let cursor = Math.max(0, initialSeq);
+    const runId = stored.runId;
+    let cursor = Math.max(0, stored.lastSeq);
     let doneReceived = false;
+    let doneOk = false;
     let reconnectAttempt = 0;
     try {
       while (!controller.signal.aborted && !doneReceived) {
@@ -472,17 +783,20 @@ export function AssistantIndex() {
             cursor,
             (event) => {
               const seq = Number(event.seq || 0);
-              if (seq > cursor) {
-                cursor = seq;
-                const next = { runId, lastSeq: cursor };
-                rememberRun(sessionId, next);
-                setActiveRun(next);
-              }
+              // durable stream 重连时可能重放游标边界事件，不重复追加文本。
+              if (seq > 0 && seq <= cursor) return;
+              if (seq > cursor) cursor = seq;
+              const next = { ...stored, runId, lastSeq: cursor };
+              rememberRun(sessionId, next);
+              setActiveRun(next);
               handleRunEvent(event);
               if (event.type === "error" && event.code === "RUN_STREAM_FAILED") {
                 streamFailed = true;
               }
-              if (event.type === "done") doneReceived = true;
+              if (event.type === "done") {
+                doneReceived = true;
+                doneOk = event.ok === true;
+              }
             },
             { signal: controller.signal },
           );
@@ -497,11 +811,19 @@ export function AssistantIndex() {
         } catch (error) {
           if (controller.signal.aborted) throw error;
           const snapshot = await getSystemAgentRun(runId).catch(() => null);
+          if (!snapshot) {
+            forgetRun(sessionId, runId);
+            setActiveRun((current) => (current?.runId === runId ? null : current));
+            setStreamNotice("本轮进度已失效，请重新发送消息。");
+            setStreaming(false);
+            return;
+          }
           if (snapshot && terminalRun(snapshot)) {
             // 终态事件也在同一事件表中；继续按游标读取，直到真正收到 done。
             cursor = Math.min(cursor, Math.max(0, snapshot.last_seq - 1));
           }
           reconnectAttempt += 1;
+          setStreamNotice("进度连接中断，正在恢复…");
           updatePendingText("进度连接中断，正在恢复…");
           await new Promise((resolve) =>
             window.setTimeout(resolve, Math.min(2000, 250 * reconnectAttempt)),
@@ -511,13 +833,20 @@ export function AssistantIndex() {
       if (!doneReceived) return;
       forgetRun(sessionId, runId);
       setActiveRun((current) => (current?.runId === runId ? null : current));
-      if (abortRef.current === controller) setLive([]);
       await refreshRunData(sessionId);
+      notifyOutcome(doneOk ? "complete" : "failed");
+      if (abortRef.current === controller) {
+        streamingBubbleCreatedRef.current = false;
+        clearLiveStreamingState();
+        setLive([]);
+        liveAssistantMessageIdRef.current = null;
+      }
     } finally {
       if (abortRef.current === controller) {
         abortRef.current = null;
         setStreaming(false);
         setRetryingMessageId(null);
+        setStreamNotice("");
       }
     }
   };
@@ -525,56 +854,112 @@ export function AssistantIndex() {
   const runTurn = async ({
     text,
     retryMessageId,
+    regenerate,
     fallbackProviderId,
     approvedTools,
   }: {
     text?: string;
     retryMessageId?: number;
+    regenerate?: {
+      userMessageId: number;
+      assistantMessageId: number;
+      editedText?: string;
+    };
     fallbackProviderId?: number;
     approvedTools?: string[];
   }) => {
+    if (streaming || abortRef.current) return;
     if (!enabled) {
       toast.error("请先在右上角开启系统助手并选择支持 tools 的 Provider");
       setConfigOpen(true);
       return;
     }
     setStreaming(true);
-    setRetryingMessageId(retryMessageId ?? null);
+    setRetryingMessageId(retryMessageId ?? regenerate?.userMessageId ?? null);
     const controller = new AbortController();
     abortRef.current = controller;
-    const userBubble: LiveBubble | null = text
-      ? { id: `live-user-${Date.now()}`, role: "user", text }
-      : null;
+    liveAssistantMessageIdRef.current = regenerate?.assistantMessageId ?? null;
+    const userBubble: LiveBubble | null = regenerate?.editedText
+      ? {
+          id: `m-${regenerate.userMessageId}`,
+          messageId: regenerate.userMessageId,
+          role: "user",
+          text: regenerate.editedText,
+          createdAt: new Date().toISOString(),
+        }
+      : text
+        ? {
+            id: `live-user-${Date.now()}`,
+            role: "user",
+            text,
+            createdAt: new Date().toISOString(),
+          }
+        : null;
     const pending: LiveBubble = {
-      id: `live-assistant-${Date.now()}`,
+      id: regenerate
+        ? `m-${regenerate.assistantMessageId}`
+        : `live-assistant-${Date.now()}`,
+      messageId: regenerate?.assistantMessageId,
       role: "assistant",
       text: "正在理解你的需求…",
       pending: true,
+      createdAt: new Date().toISOString(),
     };
+    clearLiveStreamingState();
     setLive(userBubble ? [userBubble, pending] : [pending]);
     try {
       const sessionId = await ensureSession();
+      if (activeId !== sessionId) {
+        // 新建会话：把当前选择绑到新 session key
+        saveSessionModelSelection(sessionId, sessionModel);
+      }
       const accountPayload = { account_id: accountId === "" ? null : Number(accountId) };
-      const run = retryMessageId != null
+      const model_selection = toApiModelSelection(sessionModel);
+      const run = regenerate
+        ? await startSystemAgentRegenerateRun(sessionId, regenerate.userMessageId, {
+            assistant_message_id: regenerate.assistantMessageId,
+            content: regenerate.editedText,
+            ...accountPayload,
+            client_request_id: requestId(),
+            model_selection,
+          })
+        : retryMessageId != null
         ? await startSystemAgentRetryRun(sessionId, retryMessageId, {
             ...accountPayload,
             fallback_provider_id: fallbackProviderId ?? null,
             approved_tools: approvedTools || [],
             client_request_id: requestId(),
+            model_selection,
           })
         : await startSystemAgentRun(sessionId, {
             content: text || "",
             ...accountPayload,
             client_request_id: requestId(),
+            model_selection,
           });
-      const saved = { runId: run.id, lastSeq: 0 };
+      const saved: StoredRun = {
+        runId: run.id,
+        lastSeq: 0,
+        targetUserMessageId: regenerate?.userMessageId,
+        targetAssistantMessageId: regenerate?.assistantMessageId,
+        editedUserText: regenerate?.editedText,
+      };
       rememberRun(sessionId, saved);
       setActiveRun(saved);
-      await followRun(sessionId, run.id, 0, controller);
+      await followRun(sessionId, saved, controller);
     } catch (error) {
       if (!controller.signal.aborted) {
         toast.error(getErrMsg(error));
-        setLive((prev) => prev.filter((bubble) => bubble.role === "user" || bubble.role === "action"));
+        clearLiveStreamingState();
+        if (regenerate) {
+          if (activeId) await refreshRunData(activeId).catch(() => undefined);
+          setLive([]);
+          liveAssistantMessageIdRef.current = null;
+        } else {
+          setLive((prev) =>
+            prev.filter((bubble) => bubble.role === "user" || bubble.role === "action"),
+          );
+        }
       }
       if (abortRef.current === controller) {
         abortRef.current = null;
@@ -585,6 +970,17 @@ export function AssistantIndex() {
   };
 
   const onSend = async (text: string) => runTurn({ text });
+
+  const onEditMessage = async (
+    userMessageId: number,
+    assistantMessageId: number,
+    editedText: string,
+  ) => runTurn({ regenerate: { userMessageId, assistantMessageId, editedText } });
+
+  const onRegenerateMessage = async (
+    userMessageId: number,
+    assistantMessageId: number,
+  ) => runTurn({ regenerate: { userMessageId, assistantMessageId } });
 
   const onRetryMessage = async (
     messageId: number,
@@ -610,15 +1006,28 @@ export function AssistantIndex() {
     abortRef.current = controller;
     setActiveRun(saved);
     setStreaming(true);
-    setLive([
-      {
-        id: `live-resume-${saved.runId}`,
-        role: "assistant",
-        text: "正在恢复本轮进度…",
-        pending: true,
-      },
-    ]);
-    void followRun(activeId, saved.runId, Math.max(0, saved.lastSeq - 1), controller).catch(
+    liveAssistantMessageIdRef.current = saved.targetAssistantMessageId ?? null;
+    const resumed: LiveBubble[] = [];
+    if (saved.targetUserMessageId && saved.editedUserText) {
+      resumed.push({
+        id: `m-${saved.targetUserMessageId}`,
+        messageId: saved.targetUserMessageId,
+        role: "user",
+        text: saved.editedUserText,
+      });
+    }
+    resumed.push({
+      id: saved.targetAssistantMessageId
+        ? `m-${saved.targetAssistantMessageId}`
+        : `live-resume-${saved.runId}`,
+      messageId: saved.targetAssistantMessageId,
+      role: "assistant",
+      text: "正在恢复本轮进度…",
+      pending: true,
+    });
+    setLive(resumed);
+    clearLiveStreamingState();
+    void followRun(activeId, saved, controller).catch(
       (error) => {
         if (!controller.signal.aborted) toast.error(getErrMsg(error));
       },
@@ -653,27 +1062,34 @@ export function AssistantIndex() {
   );
 
   return (
-    <PageShell>
-      <PageHeader
-        title="系统助手"
-        description="用自然语言查询并操作系统能力；写操作需内联确认。"
-        icon={MessageCircle}
-        actions={(
-          <Button
-            type="button"
-            variant="outline"
-            size="icon"
-            className="h-9 w-9"
-            onClick={() => setAssistantCollapsed(true)}
-            aria-label="收起到悬浮助手"
-            title="收起到悬浮助手"
-          >
-            <Minimize2 className="h-4 w-4" />
-          </Button>
-        )}
-      />
+    <PageShell className="flex h-full min-h-0 flex-col gap-3 space-y-0">
+      <div className="hidden shrink-0 sm:block">
+        <PageHeader
+          title="系统助手"
+          description="用自然语言查询并操作系统能力；写操作需内联确认。"
+          icon={AgentMark}
+        />
+      </div>
 
-      <div className="mb-3 rounded-lg border border-border/70 bg-muted/20 p-2.5">
+      <div className="shrink-0 overflow-hidden rounded-lg border border-border/70 bg-muted/20 sm:overflow-visible sm:p-2.5">
+        <button
+          type="button"
+          data-assistant-mobile-summary
+          className="flex h-12 w-full items-center gap-2 px-3 text-left sm:hidden"
+          aria-expanded={mobileHeaderExpanded}
+          onClick={() => setMobileHeaderExpanded((value) => !value)}
+        >
+          <span className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-primary/10 text-primary">
+            <AgentMark className="h-4 w-4" />
+          </span>
+          <span className="shrink-0 text-sm font-semibold">系统助手</span>
+          <span className="min-w-0 truncate text-[11px] text-muted-foreground">
+            {configQ.isLoading ? "加载中" : enabled ? (streaming ? "调用中" : "已启用") : "未启用"}
+          </span>
+          <span className="ml-auto shrink-0 text-[11px] text-primary">展开后可配置</span>
+          <ChevronDown className={`h-4 w-4 shrink-0 text-muted-foreground transition-transform ${mobileHeaderExpanded ? "rotate-180" : ""}`} />
+        </button>
+        <div data-assistant-mobile-settings className={`${mobileHeaderExpanded && !configOpen ? "block" : "hidden"} border-t p-2.5 sm:block sm:border-t-0 sm:p-0`}>
         <div className="flex items-center justify-between gap-2">
           <div className="flex min-w-0 items-center gap-2">
             <span className="min-w-0 truncate text-xs text-muted-foreground">
@@ -687,16 +1103,6 @@ export function AssistantIndex() {
             </Link>
           </div>
           <div className="flex shrink-0 items-center gap-1.5">
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              className="h-8 px-2.5 md:hidden"
-              onClick={() => setDrawerOpen(true)}
-            >
-              <Menu className="h-4 w-4" />
-              会话
-            </Button>
             <Button
               type="button"
               variant="outline"
@@ -745,7 +1151,7 @@ export function AssistantIndex() {
             className="h-8 w-full min-w-0 text-xs sm:w-44"
           >
             <option value="">系统级</option>
-            {(accountsQ.data || []).map((a) => (
+            {accountOptions.map((a) => (
               <option key={a.id} value={a.id}>
                 #{a.id} {a.display_name || a.phone || a.tg_username || ""}
               </option>
@@ -758,33 +1164,46 @@ export function AssistantIndex() {
             </span>
           ) : null}
         </div>
+        </div>
       </div>
 
       {configOpen ? (
-        <div className="mb-3 rounded-lg border bg-card p-4 text-sm">
-          <div className="mb-3 font-medium">系统助手模型</div>
+        <>
+        <button
+          type="button"
+          className="fixed inset-0 z-[69] bg-black/20 animate-in fade-in duration-200 sm:hidden"
+          aria-label="关闭助手配置"
+          onClick={() => setConfigOpen(false)}
+        />
+        <div
+          data-assistant-config-panel
+          className="fixed bottom-[calc(4.75rem+env(safe-area-inset-bottom))] right-0 top-[calc(5rem+env(safe-area-inset-top))] z-[70] w-[min(320px,88vw)] animate-in overflow-y-auto overscroll-contain rounded-l-2xl border-l border-border/70 bg-card p-4 text-sm shadow-[0_6px_18px_rgba(15,23,42,0.10)] slide-in-from-right-3 duration-200 sm:static sm:z-auto sm:mt-0 sm:max-h-96 sm:w-auto sm:shrink sm:rounded-lg sm:border sm:shadow-none sm:animate-none"
+        >
+          <div className="mb-3 flex items-center justify-between gap-3">
+            <div className="font-medium">系统助手模型</div>
+            <Button type="button" size="sm" variant="ghost" className="h-7 px-2 text-xs sm:hidden" onClick={() => setConfigOpen(false)}>
+              收起配置
+            </Button>
+          </div>
           <div className="grid gap-3 sm:grid-cols-2">
-            <label className="flex items-center gap-2">
-              <input
-                type="checkbox"
+            <div className="flex min-h-11 items-center justify-between gap-3 rounded-md border px-3 py-2">
+              <span>启用系统助手</span>
+              <Switch
                 checked={!!configQ.data?.enabled}
-                onChange={(e) =>
-                  saveConfigMut.mutate({ enabled: e.target.checked })
-                }
+                disabled={saveConfigMut.isPending}
+                onCheckedChange={(checked) => saveConfigMut.mutate({ enabled: checked })}
+                aria-label="启用系统助手"
               />
-              启用系统助手
-            </label>
-            <label className="flex items-center gap-2">
-              <input
-                type="checkbox"
+            </div>
+            <div className="flex min-h-11 items-center justify-between gap-3 rounded-md border px-3 py-2">
+              <span>调用工具前需要批准</span>
+              <Switch
                 checked={!!configQ.data?.require_tool_approval}
                 disabled={saveConfigMut.isPending}
-                onChange={(e) =>
-                  saveConfigMut.mutate({ require_tool_approval: e.target.checked })
-                }
+                onCheckedChange={(checked) => saveConfigMut.mutate({ require_tool_approval: checked })}
+                aria-label="调用工具前需要批准"
               />
-              调用工具前需要批准
-            </label>
+            </div>
             <label className="flex flex-col gap-1">
               <span className="text-muted-foreground">固定 Provider</span>
               <Select
@@ -839,6 +1258,28 @@ export function AssistantIndex() {
                 )}
               </Select>
             </label>
+            <label className="flex flex-col gap-1 sm:col-span-2">
+              <span className="text-muted-foreground">本轮 token 预算</span>
+              <Input
+                key={configQ.data?.session_token_limit ?? 16_384}
+                type="number"
+                min={0}
+                step={1024}
+                defaultValue={configQ.data?.session_token_limit ?? 16_384}
+                placeholder="0 表示无上限"
+                disabled={saveConfigMut.isPending}
+                onBlur={(event) => {
+                  const raw = Number(event.target.value);
+                  const next = raw <= 0 || Number.isNaN(raw) ? 0 : Math.max(1024, Math.floor(raw));
+                  if (next !== configQ.data?.session_token_limit) {
+                    saveConfigMut.mutate({ session_token_limit: next });
+                  }
+                }}
+              />
+              <span className="text-xs text-muted-foreground">
+                填 0 表示无上限；非 0 时只限制本轮新增输出和工具结果增长。
+              </span>
+            </label>
           </div>
           <div className="mt-4 border-t pt-3">
             <div className="font-medium">跨 Provider fallback 范围</div>
@@ -855,30 +1296,29 @@ export function AssistantIndex() {
                     provider.id,
                   );
                   return (
-                    <label
+                    <div
                       key={provider.id}
-                      className="flex min-w-0 items-start gap-2 rounded-md border px-3 py-2"
+                      className="flex min-w-0 items-center justify-between gap-3 rounded-md border px-3 py-2"
                     >
-                      <input
-                        type="checkbox"
-                        className="mt-0.5"
-                        checked={checked}
-                        disabled={!eligible || saveConfigMut.isPending}
-                        onChange={(event) => {
-                          const current = configQ.data?.fallback_provider_ids || [];
-                          const next = event.target.checked
-                            ? [...current, provider.id]
-                            : current.filter((id) => id !== provider.id);
-                          saveConfigMut.mutate({ fallback_provider_ids: next });
-                        }}
-                      />
                       <span className="min-w-0">
                         <span className="block truncate text-foreground">{provider.name}</span>
                         <span className="block truncate text-xs text-muted-foreground">
                           {eligible ? `${models.length} 个 Tools 模型` : "不可用于 Agent fallback"}
                         </span>
                       </span>
-                    </label>
+                      <Switch
+                        checked={checked}
+                        disabled={!eligible || saveConfigMut.isPending}
+                        onCheckedChange={(nextChecked) => {
+                          const current = configQ.data?.fallback_provider_ids || [];
+                          const next = nextChecked
+                            ? [...current, provider.id]
+                            : current.filter((id) => id !== provider.id);
+                          saveConfigMut.mutate({ fallback_provider_ids: next });
+                        }}
+                        aria-label={`${provider.name} fallback`}
+                      />
+                    </div>
                   );
                 })}
             </div>
@@ -887,16 +1327,125 @@ export function AssistantIndex() {
             仅允许声明支持 tools 的模型。写操作会生成待确认卡片；未配置时助手会给出 AI 中心入口。
             {capsQ.data ? ` · 已注册 ${capsQ.data.tools.filter((t) => t.available).length} 个可用工具` : null}
           </p>
+          {capsQ.data?.tools?.length ? (
+            <div className="mt-4 border-t pt-3">
+              <div className="font-medium">能力矩阵 · 工具来源</div>
+              <p className="mt-1 text-xs text-muted-foreground">
+                插件贡献的工具带「插件」徽标；第一期仅只读暴露。
+              </p>
+              <ul className="mt-2 max-h-48 space-y-1 overflow-y-auto text-xs">
+                {capsQ.data.tools
+                  .filter((t) => t.available)
+                  .slice(0, 80)
+                  .map((tool) => (
+                    <li
+                      key={tool.name}
+                      className="flex flex-wrap items-center gap-1.5 rounded border border-border/60 px-2 py-1"
+                    >
+                      {tool.source === "plugin" ? (
+                        <span className="rounded bg-violet-500/15 px-1 py-0.5 text-[10px] text-violet-700 dark:text-violet-300">
+                          插件{tool.plugin_key ? ` · ${tool.plugin_key}` : ""}
+                        </span>
+                      ) : (
+                        <span className="rounded bg-muted px-1 py-0.5 text-[10px] text-muted-foreground">
+                          内置
+                        </span>
+                      )}
+                      <code className="text-[11px]">{tool.name}</code>
+                      {tool.read_only ? (
+                        <span className="text-[10px] text-muted-foreground">只读</span>
+                      ) : (
+                        <span className="text-[10px] text-amber-700 dark:text-amber-300">写</span>
+                      )}
+                    </li>
+                  ))}
+              </ul>
+            </div>
+          ) : null}
+          <div className="mt-4 border-t pt-3">
+            <div className="font-medium">长期记忆</div>
+            <p className="mt-1 text-xs text-muted-foreground">
+              跨会话保留的偏好（最多 20 条）。也可对助手说「记住…」经确认后写入。
+            </p>
+            <div className="mt-2 flex flex-col gap-2 sm:flex-row">
+              <input
+                className="min-w-0 flex-1 rounded-md border bg-background px-3 py-2 text-sm"
+                placeholder="例如：回复请尽量简短"
+                value={memoryDraft}
+                maxLength={200}
+                onChange={(e) => setMemoryDraft(e.target.value)}
+              />
+              <Button
+                type="button"
+                size="sm"
+                disabled={!memoryDraft.trim() || createMemoryMut.isPending}
+                onClick={() => createMemoryMut.mutate(memoryDraft.trim())}
+              >
+                添加
+              </Button>
+            </div>
+            <div className="mt-3 space-y-2">
+              {memoryQ.isLoading ? (
+                <Skeleton className="h-10 w-full" />
+              ) : (memoryQ.data || []).length === 0 ? (
+                <p className="text-xs text-muted-foreground">暂无长期记忆</p>
+              ) : (
+                (memoryQ.data as SystemAgentUserMemory[]).map((item) => (
+                  <div
+                    key={item.id}
+                    className="rounded-md border border-border/70 bg-background/45 px-3 py-2.5"
+                  >
+                    <p className="whitespace-pre-wrap break-words text-sm leading-6 text-foreground">
+                      {item.content}
+                    </p>
+                    <div className="mt-2 flex min-h-8 items-center justify-between gap-3 border-t border-border/45 pt-2">
+                      <div className="flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
+                        <Switch
+                          className="scale-90"
+                          checked={item.enabled}
+                          disabled={patchMemoryMut.isPending}
+                          onCheckedChange={(checked) => patchMemoryMut.mutate({ id: item.id, enabled: checked })}
+                          aria-label={`切换记忆：${item.content}`}
+                        />
+                        <span>{item.enabled ? "已启用" : "已停用"}</span>
+                        <span className="truncate text-[10px] text-muted-foreground/65">
+                          {item.source === "agent_learned" ? "助手记录" : "手动添加"}
+                        </span>
+                      </div>
+                      <Button
+                        type="button"
+                        size="icon"
+                        variant="ghost"
+                        className="h-7 w-7 shrink-0 text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
+                        disabled={deleteMemoryMut.isPending}
+                        onClick={() => {
+                          if (confirm("确认删除这条记忆？")) deleteMemoryMut.mutate(item.id);
+                        }}
+                        aria-label="删除长期记忆"
+                        title="删除长期记忆"
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </Button>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
         </div>
+        </>
       ) : null}
 
-      <div className="flex min-h-[60vh] overflow-hidden rounded-xl border bg-card">
+      <div data-assistant-chat-window className="flex min-h-[min(20rem,40dvh)] flex-1 overflow-hidden rounded-xl border bg-card sm:min-h-[min(22rem,48dvh)]">
         <SessionDrawer
-          sessions={sessionsQ.data || []}
+          sessions={sessionOptions}
           activeId={activeId}
+          originFilter={originFilter}
+          onOriginFilterChange={setOriginFilter}
           onSelect={(id) => {
             abortRef.current?.abort();
             abortRef.current = null;
+            clearLiveStreamingState();
             setStreaming(false);
             setRetryingMessageId(null);
             setLive([]);
@@ -906,6 +1455,8 @@ export function AssistantIndex() {
           onDelete={(id) => deleteMut.mutate(id)}
           open={drawerOpen}
           onClose={() => setDrawerOpen(false)}
+          desktopCollapsed={sessionSidebarCollapsed}
+          onDesktopCollapse={() => setSessionSidebarCollapsed(true)}
         />
         <div className="flex min-w-0 flex-1 flex-col">
           {!activeId ? (
@@ -933,21 +1484,60 @@ export function AssistantIndex() {
               <Conversation
                 messages={messages}
                 live={conversationLive}
-                onRetryMessage={onRetryMessage}
+                onRetryMessage={viewingBotSession ? undefined : onRetryMessage}
+                onEditMessage={viewingBotSession ? undefined : onEditMessage}
+                onRegenerateMessage={viewingBotSession ? undefined : onRegenerateMessage}
                 retryingMessageId={retryingMessageId}
+                busy={streaming}
+                expectedSelection={
+                  sessionModel.mode === "pinned"
+                    ? {
+                        providerName:
+                          modelPickerItems.find(
+                            (item) =>
+                              item.providerId === sessionModel.providerId &&
+                              item.model === sessionModel.model,
+                          )?.providerName || undefined,
+                        model: sessionModel.model,
+                      }
+                    : configuredProvider
+                      ? {
+                          providerName: configuredProvider.name,
+                          model: configuredModel || undefined,
+                        }
+                      : null
+                }
                 onActionUpdated={() => {
                   void qc.invalidateQueries({ queryKey: ["system-agent", "actions", activeId] });
                 }}
               />
+              {streamNotice ? (
+                <div role="status" aria-live="polite" className="mx-auto w-full max-w-3xl px-4 pb-2 text-xs text-muted-foreground xl:max-w-5xl 2xl:max-w-6xl">
+                  {streamNotice}
+                </div>
+              ) : null}
               <Composer
-                disabled={configQ.isLoading}
+                disabled={configQ.isLoading || viewingBotSession}
                 streaming={streaming}
                 onSend={onSend}
+                value={composerValue}
+                onValueChange={setComposerValue}
                 onStop={onStop}
-                modelOptions={configuredToolsModels}
-                modelValue={configQ.data?.model || configuredToolsModels[0] || ""}
-                onModelChange={(model) => saveConfigMut.mutate({ model: model || null })}
-                modelDisabled={selectorDisabled || configuredToolsModels.length === 0}
+                placeholder={viewingBotSession ? "Telegram 会话仅供查看" : undefined}
+                modelItems={modelPickerItems}
+                modelSelection={pickerValue}
+                onModelSelectionChange={onSessionModelChange}
+                onSetDefaultModel={onSetDefaultModel}
+                modelDisabled={selectorDisabled || modelPickerItems.length === 0}
+                expectedLabel={expectedSelectionLabel}
+                onOpenSessions={() => {
+                  if (window.matchMedia("(min-width: 768px)").matches) {
+                    setSessionSidebarCollapsed(false);
+                    return;
+                  }
+                  setDrawerOpen(true);
+                }}
+                showSessionButtonOnDesktop={sessionSidebarCollapsed}
               />
             </>
           )}

@@ -440,6 +440,14 @@ class SchedulerRuleExecutor:
                 await self.action_run_command(ctx, action)
             elif action_type == "call_llm":
                 await self.action_call_llm(ctx, action)
+            elif action_type == "agent_prompt":
+                enriched = dict(action)
+                enriched["_rule_id"] = rule_id
+                async with AsyncSessionLocal() as db:
+                    rule_row = await db.get(Rule, rule_id)
+                    if rule_row is not None and rule_row.name:
+                        enriched["_rule_name"] = str(rule_row.name)
+                await self.action_agent_prompt(ctx, enriched)
             else:
                 raise ValueError(f"unknown action.type={action_type}")
             if trace is not None:
@@ -598,6 +606,134 @@ class SchedulerRuleExecutor:
         delete_after = _to_positive_int(action.get("delete_after"))
         if delete_after > 0 and msg is not None:
             asyncio.create_task(self.delete_message_after(ctx, msg, delete_after, action_context=_scheduler_trace_context(ctx)))
+
+    async def action_agent_prompt(self, ctx: PluginContext, action: dict[str, Any]) -> None:
+        """无人值守跑一轮只读 System Agent，落完整会话/Run 轨迹并推送到目标会话。
+
+        写工具不暴露；失败只报告不重试。限额沿用 system_agent_config。
+        """
+
+        import uuid
+
+        prompt = str(action.get("prompt") or "").strip()
+        if not prompt:
+            raise ValueError("agent_prompt requires prompt")
+
+        target = action.get("target_chat_id")
+        if target is None or target == "":
+            raise ValueError("agent_prompt requires target_chat_id（管理 Bot / 汇报会话）")
+
+        from app.db.models.system_agent import (
+            CHANNEL_WEB,
+            SESSION_ORIGIN_SCHEDULED,
+        )
+        from app.db.models.user import WebUser
+        from app.services.rule_service import SCHEDULER_AGENT_WEB_USER_ID_KEY
+        from app.services.system_agent.run_manager import get_system_agent_run_manager
+        from app.services.system_agent.service import SystemAgentService
+
+        trace_action = {
+            "type": "agent_prompt",
+            "send_via": "userbot_reply",
+            "chat_id": target if isinstance(target, int) else None,
+        }
+        prepared_peer = await self.reserve_send_peer(
+            ctx,
+            target,
+            trace_action=trace_action,
+            config_action=action,
+        )
+        if prepared_peer is None:
+            return
+
+        account_id = _to_positive_int(action.get("account_id")) or int(ctx.account_id)
+        task_name = str(action.get("_rule_name") or action.get("name") or "定时巡检").strip() or "定时巡检"
+        task_name = task_name[:28]
+        now_label = datetime.now(UTC).strftime("%m-%d %H:%M")
+        title = f"定时 · {task_name} · {now_label}"[:64]
+
+        svc = SystemAgentService()
+        answer = ""
+        error_message = ""
+        session_id = ""
+        web_user_id: int | None = None
+
+        async with AsyncSessionLocal() as db:
+            owner_id = _to_positive_int(action.get(SCHEDULER_AGENT_WEB_USER_ID_KEY))
+            if owner_id <= 0:
+                raise ValueError(
+                    "agent_prompt 缺少可信创建者；请由当前 Web 管理员重新保存该任务"
+                )
+            web_user = await db.get(WebUser, owner_id)
+            if web_user is None:
+                raise ValueError(
+                    "agent_prompt 创建者已不存在；请由当前 Web 管理员重新保存该任务"
+                )
+            web_user_id = int(web_user.id)
+            session = await svc.create_session(
+                db,
+                channel=CHANNEL_WEB,
+                web_user_id=web_user_id,
+                account_id=account_id,
+                title=title,
+                origin=SESSION_ORIGIN_SCHEDULED,
+            )
+            await db.commit()
+            session_id = session.id
+
+        manager = get_system_agent_run_manager()
+        try:
+            run = await manager.start_run(
+                session_id=session_id,
+                web_user_id=web_user_id,
+                client_request_id=f"scheduler:{account_id}:{action.get('_rule_id') or 0}:{uuid.uuid4().hex[:12]}",
+                text=prompt,
+                read_only_only=True,
+            )
+            async for event in manager.stream_events(run.id):
+                et = str(event.get("type") or "")
+                if et == "assistant_message":
+                    answer = str(event.get("content") or "").strip()
+                elif et == "error":
+                    error_message = str(
+                        event.get("message") or event.get("code") or "agent failed"
+                    )
+        except Exception as exc:  # noqa: BLE001
+            error_message = f"{type(exc).__name__}: {exc}"
+
+        deep_link = f"/assistant?session={session_id}"
+        if error_message and not answer:
+            text = (
+                f"【定时 Agent 失败】\n{error_message}\n\n查看执行轨迹：{deep_link}"
+            )[:_MAX_MESSAGE_LEN]
+        else:
+            header = "【定时 Agent 报告】\n"
+            footer = f"\n\n查看执行轨迹：{deep_link}"
+            body = answer or "(empty)"
+            budget = _MAX_MESSAGE_LEN - len(header) - len(footer)
+            if budget < 40:
+                text = (header + body)[:_MAX_MESSAGE_LEN]
+            else:
+                text = header + body[:budget] + footer
+        trace_action["text"] = text
+        trace_action["session_id"] = session_id
+        msg = await self.send_with_ratelimit(
+            ctx,
+            target,
+            text,
+            action=trace_action,
+            config_action=action,
+            prepared_peer=prepared_peer,
+        )
+        delete_after = _to_positive_int(action.get("delete_after"))
+        if delete_after > 0 and msg is not None:
+            asyncio.create_task(
+                self.delete_message_after(
+                    ctx, msg, delete_after, action_context=_scheduler_trace_context(ctx)
+                )
+            )
+        if error_message and not answer:
+            raise RuntimeError(error_message)
 
     async def delete_message_after(
         self,

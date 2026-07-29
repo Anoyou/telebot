@@ -32,6 +32,9 @@ export interface PluginRepoPlugin {
   version: string;
   installed: boolean;
   installed_version?: string | null;
+  installed_source?: string | null;
+  installed_source_url?: string | null;
+  source_matches?: boolean;
   update_available?: boolean;
   event_subscriptions?: PluginEventSubscription[];
   capabilities?: PluginCapabilities;
@@ -42,6 +45,7 @@ export interface PluginRepoPlugin {
 
 export interface InstallFromRepoBody {
   default_enabled?: boolean;
+  replace_existing?: boolean;
 }
 
 export interface PluginRepoBulkUpdateItem {

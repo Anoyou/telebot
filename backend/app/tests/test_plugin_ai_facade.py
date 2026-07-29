@@ -644,6 +644,26 @@ async def test_stream_complete_partial_output_then_error_keeps_conservative_char
 
 
 @pytest.mark.asyncio
+async def test_stream_complete_rejects_natural_eof_without_done(monkeypatch) -> None:
+    class _Client:
+        async def stream_complete(self, *_args, **_kwargs):
+            yield LLMStreamChunk(delta="partial", model="gpt-stream")
+
+    facade, quota_release, budget_settle, usage_records = _install_stream_test_doubles(
+        monkeypatch,
+        _Client(),
+    )
+
+    with pytest.raises(AIUnavailableError, match="最终状态"):
+        async for _ in facade.stream_complete("sys", "hello", max_tokens=8):
+            pass
+
+    assert quota_release.calls[-1][0][1] == 10
+    assert budget_settle.calls[-1][1]["charge"] is True
+    assert usage_records[-1].success is False
+
+
+@pytest.mark.asyncio
 async def test_stream_complete_timeout_has_actionable_message(monkeypatch) -> None:
     class _Client:
         async def stream_complete(self, *_args, **_kwargs):

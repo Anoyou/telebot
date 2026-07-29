@@ -1,9 +1,9 @@
-import { useEffect, useMemo } from "react";
+import { lazy, Suspense, useEffect, useMemo } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AlertTriangle,
-  Bot,
+  GitFork,
   MessageSquare,
   RefreshCw,
   Route,
@@ -25,7 +25,9 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/misc";
 import { Select } from "@/components/ui/select";
 import { SignalPill } from "@/components/ui/status";
-import { BotTab } from "@/pages/Accounts/BotTab";
+const BotTab = lazy(() =>
+  import("@/pages/Accounts/BotTab").then((module) => ({ default: module.BotTab })),
+);
 
 function accountOptionLabel(account: AccountSummary): string {
   const name = account.display_name?.trim();
@@ -108,7 +110,7 @@ export function InteractionIndex() {
     return (
       <PageShell>
         <PageHeader
-          icon={Bot}
+          icon={GitFork}
           title="交互中心"
           description="正在读取账号与交互 Bot 配置。"
         />
@@ -131,7 +133,7 @@ export function InteractionIndex() {
   if (accountsQ.isError) {
     return (
       <PageShell>
-        <PageHeader icon={Bot} title="交互中心" description="账号列表加载失败。" />
+        <PageHeader icon={GitFork} title="交互中心" description="账号列表加载失败。" />
         <Card>
           <CardHeader><CardTitle className="flex items-center gap-2 text-base"><AlertTriangle className="h-4 w-4 text-destructive" />无法读取账号</CardTitle></CardHeader>
           <CardContent className="flex flex-wrap items-center justify-between gap-3 text-sm text-muted-foreground">
@@ -146,7 +148,7 @@ export function InteractionIndex() {
   return (
     <PageShell>
       <PageHeader
-        icon={Bot}
+        icon={GitFork}
         title="交互中心"
         description="按账号管理交互 Bot、关键词规则、玩法入口和会话运行状态。"
         actions={
@@ -277,7 +279,19 @@ export function InteractionIndex() {
               </div>
             </CardHeader>
             <CardContent className="p-3 sm:p-4">
-              {selectedAid !== null ? <BotTab aid={selectedAid} mode="interaction" /> : null}
+              {selectedAid !== null ? (
+                <Suspense
+                  fallback={
+                    <div role="status" aria-label="交互配置加载中" className="space-y-3">
+                      <Skeleton className="h-10 w-full rounded-md" />
+                      <Skeleton className="h-28 w-full rounded-lg" />
+                      <Skeleton className="h-40 w-full rounded-lg" />
+                    </div>
+                  }
+                >
+                  <BotTab aid={selectedAid} mode="interaction" />
+                </Suspense>
+              ) : null}
             </CardContent>
           </Card>}
         </>

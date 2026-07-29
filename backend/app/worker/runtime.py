@@ -6,6 +6,7 @@
 - worker 负责连 TG / 注册事件 / 监听 IPC / 把日志和限速事件写回 Redis stream。
 - 所有 DB 写操作由主进程统一处理（消费 Redis stream）；worker 只读 DB（启动时拉一次配置）。
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -39,7 +40,7 @@ from ..db.models.payout_compensation import (
     PayoutCompensation,
 )
 from ..db.models.system import SystemSetting
-from ..logging_redaction import install_sensitive_log_filter
+from ..logging_redaction import configure_dependency_log_levels, install_sensitive_log_filter
 from ..redis_client import get_redis
 from ..services import payout_compensation, recent_message_anchor
 from ..services.action_tap import emit_compensated_payout_event
@@ -51,8 +52,10 @@ from ..services.event_trace import (
     stop_trace_writer,
 )
 from ..services.interaction.delivery import namespaced_action_save_message_id_key
+from ..services.llm_dto import LLMProviderDTO
 from ..services.payout_limit import PayoutLimitExceeded
 from ..services.payout_limit import check_and_consume as _check_payout_limit
+from ..services.redactor import redact_value
 from ..settings import settings as app_settings
 from .command import (
     CommandContext,
@@ -62,6 +65,7 @@ from .command import (
     set_command_context,
 )
 from .ipc import (
+    CMD_AGENT_PLUGIN_TOOL,
     CMD_DISPATCH_SIMULATE,
     CMD_EXECUTE_RULE,
     CMD_FETCH_AVATAR,
@@ -113,6 +117,7 @@ _BACKGROUND_RPC_COMMAND_TYPES = {
     CMD_EXECUTE_RULE,
     CMD_RUN_INTERACTION_ENTRY,
     CMD_RUN_INTERACTION_ACTION,
+    CMD_AGENT_PLUGIN_TOOL,
 }
 _RPC_MAX_CONCURRENCY = 4
 _RPC_QUEUE_CAPACITY = 32
@@ -144,6 +149,7 @@ async def _acquire_interaction_userbot_rate_limit(
     if account_id is None:
         return
     limit_action = _interaction_userbot_rate_limit_action(action_type, chat_id)
+
     # 与 command.acquire_userbot_action_rate_limit 对齐：引擎缺失/异常时不无限放行。
     # 降级路径上的 Redis 告警必须 best-effort，绝不能反向击穿限流决策。
     async def _best_effort_rate_limit_log(message: str, **detail: Any) -> None:
@@ -166,7 +172,9 @@ async def _acquire_interaction_userbot_rate_limit(
             chat_id=chat_id,
         )
         if not allowed:
-            raise RuntimeError(f"rate_limited: {detail.get('reason') or detail.get('outcome') or 'local_fallback'}")
+            raise RuntimeError(
+                f"rate_limited: {detail.get('reason') or detail.get('outcome') or 'local_fallback'}"
+            )
         return
     try:
         decision = await engine.acquire(account_id, limit_action, peer_id=chat_id)
@@ -182,7 +190,9 @@ async def _acquire_interaction_userbot_rate_limit(
             chat_id=chat_id,
         )
         if not allowed:
-            raise RuntimeError(f"rate_limited: {detail.get('reason') or detail.get('outcome') or 'local_fallback'}") from exc
+            raise RuntimeError(
+                f"rate_limited: {detail.get('reason') or detail.get('outcome') or 'local_fallback'}"
+            ) from exc
         return
     if not bool(getattr(decision, "allowed", False)):
         outcome = str(getattr(decision, "outcome", "") or "rate_limited")
@@ -440,6 +450,26 @@ def _is_message_not_modified_error(exc: BaseException) -> bool:
     return "message is not modified" in str(exc).lower()
 
 
+async def _bootstrap_platform_capabilities(account_id: int, redis: Any) -> bool:
+    """Worker 冷启动能力门禁；失败时禁止注册任何受控运行时入口。"""
+
+    try:
+        from ..services import platform_capabilities
+
+        snapshot = await platform_capabilities.bootstrap_from_db()
+        if not snapshot.cache_ready:
+            raise RuntimeError("平台能力缓存未就绪")
+    except Exception as exc:  # noqa: BLE001
+        await _log(
+            redis,
+            account_id,
+            "error",
+            f"平台能力缓存初始化失败，worker 已按 fail-closed 停止启动: {type(exc).__name__}: {exc}",
+        )
+        return False
+    return True
+
+
 async def run_worker(account_id: int) -> None:
     """worker 主协程；返回即代表退出（supervisor 决定是否重启）。"""
     redis = get_redis()
@@ -463,9 +493,7 @@ async def run_worker(account_id: int) -> None:
 
     # 启动时一次性读取账号 + 代理 + 设备伪装 profile
     async with AsyncSessionLocal() as db:
-        account = (
-            await db.execute(select(Account).where(Account.id == account_id))
-        ).scalar_one_or_none()
+        account = (await db.execute(select(Account).where(Account.id == account_id))).scalar_one_or_none()
         if not account:
             await _log(redis, account_id, "error", f"账号 {account_id} 不存在")
             return
@@ -473,7 +501,13 @@ async def run_worker(account_id: int) -> None:
         account_proxy_url = _httpx_proxy_url_from_proxy(proxy)
         # 解析设备伪装：账号绑定 → 系统默认 → 硬编码兜底
         from ..services.device_profile import resolve_for_account
+
         device_profile = await resolve_for_account(db, account)
+
+    # 所有插件、命令 handler 与 scheduler 都依赖平台能力快照。冷启动读取失败时
+    # 直接退出并交给 supervisor 重试，避免任何受控入口以默认值 fail-open。
+    if not await _bootstrap_platform_capabilities(account_id, redis):
+        return
 
     # paused.is_set() == True  → 正常运行
     # paused.is_set() == False → 主动动作被暂停（被动接收照常）
@@ -571,9 +605,7 @@ async def run_worker(account_id: int) -> None:
         await _publish(redis, account_id, EVT_STATUS, status="active")
 
         # 后台协程：监听 IPC 指令通道与全局通道
-        ipc_task = asyncio.create_task(
-            _listen_cmd(redis, client, account_id, paused, platform_scheduler)
-        )
+        ipc_task = asyncio.create_task(_listen_cmd(redis, client, account_id, paused, platform_scheduler))
         global_task = asyncio.create_task(_listen_global(redis, account_id, paused))
         reconcile_task = asyncio.create_task(_periodic_config_reconcile(redis, account_id))
         session_expire_task = asyncio.create_task(_periodic_userbot_session_expire_scan(redis, account_id))
@@ -611,9 +643,7 @@ async def run_worker(account_id: int) -> None:
         await _handle_login_required(redis, account_id, reason=type(e).__name__)
         await _log(redis, account_id, "error", f"session 失效: {type(e).__name__}")
     except Exception as e:
-        await _log(
-            redis, account_id, "error", f"worker 异常退出: {type(e).__name__}: {e}"
-        )
+        await _log(redis, account_id, "error", f"worker 异常退出: {type(e).__name__}: {e}")
     finally:
         # ── 安全：调用所有已加载插件的 on_shutdown（幂等设计）──
         try:
@@ -750,7 +780,14 @@ async def _listen_cmd(
                         except Exception as e:  # noqa: BLE001
                             ack_ok = False
                             ack_error = f"{type(e).__name__}: {e}"
-                        await _log(redis, account_id, "info", "reload_config 完成")
+                            await _log(
+                                redis,
+                                account_id,
+                                "error",
+                                f"reload_config 失败: {type(e).__name__}: {e}",
+                            )
+                        else:
+                            await _log(redis, account_id, "info", "reload_config 完成")
                     elif cmd.type == CMD_RELOAD_PLUGIN:
                         try:
                             from .plugins.loader import reload_plugin  # type: ignore
@@ -768,7 +805,9 @@ async def _listen_cmd(
                             ack_ok = False
                             ack_error = f"{type(e).__name__}: {e}"
                             await _log(
-                                redis, account_id, "warn",
+                                redis,
+                                account_id,
+                                "warn",
                                 f"reload_commands 失败: {type(e).__name__}: {e}",
                             )
                         else:
@@ -828,9 +867,24 @@ async def _listen_cmd(
                             ack_error = "kill switch / account pause is active"
                         else:
                             try:
-                                from .plugins.loader import dispatch_webhook_event  # type: ignore
+                                from ..services.platform_capabilities import (  # type: ignore
+                                    is_module_enabled_cached,
+                                    refresh_cache_from_db,
+                                )
 
-                                await dispatch_webhook_event(account_id, cmd.payload, redis=redis)
+                                # 关闭瞬间竞态：worker 侧再次检查能力缓存。
+                                if not is_module_enabled_cached("webhooks", fail_closed=True):
+                                    try:
+                                        await refresh_cache_from_db()
+                                    except Exception:  # noqa: BLE001
+                                        pass
+                                if not is_module_enabled_cached("webhooks", fail_closed=True):
+                                    ack_ok = False
+                                    ack_error = "webhooks module disabled"
+                                else:
+                                    from .plugins.loader import dispatch_webhook_event  # type: ignore
+
+                                    await dispatch_webhook_event(account_id, cmd.payload, redis=redis)
                             except Exception as e:  # noqa: BLE001
                                 ack_ok = False
                                 ack_error = f"{type(e).__name__}: {e}"
@@ -844,7 +898,32 @@ async def _listen_cmd(
                         )
                         if not handled:
                             continue
-                    await _ack_cmd(redis, cmd, ok=ack_ok, error=ack_error)
+                    ack_payload: dict[str, Any] | None = None
+                    if (
+                        ack_ok
+                        and cmd.type == CMD_RELOAD_CONFIG
+                        and cmd.payload.get("source") == "platform_capabilities"
+                    ):
+                        try:
+                            from ..services import platform_capabilities as platform_caps
+
+                            module_key = cmd.payload.get("module_key")
+                            if isinstance(module_key, str) and module_key in platform_caps.MODULE_DEFS:
+                                snapshot = platform_caps.get_snapshot()
+                                ack_payload = {
+                                    "module_key": module_key,
+                                    "loaded_generation": snapshot.generation(module_key),
+                                    "loaded_enabled": snapshot.is_enabled(module_key),
+                                }
+                        except Exception:  # noqa: BLE001
+                            ack_payload = None
+                    await _ack_cmd(
+                        redis,
+                        cmd,
+                        ok=ack_ok,
+                        error=ack_error,
+                        payload=ack_payload,
+                    )
             finally:
                 try:
                     await pubsub.unsubscribe(cmd_channel(account_id))
@@ -1133,6 +1212,12 @@ async def _handle_rpc_command(
             return False, True, None
         await _handle_run_interaction_action_command(redis, client, account_id, cmd, reply_to)
         return True, True, None
+    if cmd.type == CMD_AGENT_PLUGIN_TOOL:
+        reply_to = _valid_reply_to(cmd)
+        if reply_to is None:
+            return False, True, None
+        await _handle_agent_plugin_tool_command(redis, account_id, cmd, reply_to)
+        return True, True, None
     return False, True, None
 
 
@@ -1208,7 +1293,9 @@ async def _handle_get_recent_peers_command(
         items = get_recent_peers(account_id)
     except Exception as e:  # noqa: BLE001
         await _log(
-            redis, account_id, "warn",
+            redis,
+            account_id,
+            "warn",
             f"get_recent_peers 失败: {type(e).__name__}: {e}",
         )
     try:
@@ -1240,6 +1327,63 @@ async def _handle_execute_rule_command(
         await _log(redis, account_id, "warn", f"execute_rule 失败: {result_error}")
     try:
         await _publish_rpc_payload(redis, cmd, {"ok": result_ok, "error": result_error})
+    except Exception:  # noqa: BLE001
+        pass
+
+
+async def _handle_agent_plugin_tool_command(
+    redis: Any,
+    account_id: int,
+    cmd: IPCMessage,
+    reply_to: str,
+) -> None:
+    """System Agent 调用插件只读 agent_tools。"""
+
+    cmd.payload.setdefault("reply_to", reply_to)
+    plugin_key = str(cmd.payload.get("plugin_key") or "").strip()
+    tool_name = str(cmd.payload.get("tool_name") or "").strip()
+    arguments = cmd.payload.get("arguments")
+    if not isinstance(arguments, dict):
+        arguments = {}
+    result_ok = False
+    result_error: str | None = None
+    result_message: str | None = None
+    result_body: Any = None
+    try:
+        from .plugins.system_agent_tools import invoke_system_agent_tool
+
+        result_body = await invoke_system_agent_tool(
+            plugin_key=plugin_key,
+            tool_name=tool_name,
+            arguments=arguments,
+            plugin_context=None,
+        )
+        # Worker 是第一道边界：插件结果绝不能以原文进入 IPC。
+        result_body = redact_value(result_body)
+        result_ok = True
+    except LookupError:
+        result_error = "not_found"
+        result_message = "插件工具未注册"
+    except Exception as exc:  # noqa: BLE001
+        result_error = type(exc).__name__
+        result_message = "插件工具执行失败（详情已脱敏）"
+        await _log(
+            redis,
+            account_id,
+            "warn",
+            f"agent_plugin_tool 失败 plugin={plugin_key} tool={tool_name}: {result_error}",
+        )
+    try:
+        await _publish_rpc_payload(
+            redis,
+            cmd,
+            {
+                "ok": result_ok,
+                "error": result_error,
+                "message": result_message,
+                "result": result_body,
+            },
+        )
     except Exception:  # noqa: BLE001
         pass
 
@@ -1319,7 +1463,9 @@ async def _handle_run_interaction_action_command(
             error_code = "payout_limit_exceeded"
         else:
             error_code = _interaction_action_error_code(result_error)
-        result_payload = _interaction_action_failure_result(payload, error=result_error, error_code=error_code)
+        result_payload = _interaction_action_failure_result(
+            payload, error=result_error, error_code=error_code
+        )
         # FloodWait/PeerFlood：喂给限速引擎自动降级（engine 可能为 None），detail 带上 wait 秒数。
         # 引擎钩子内部虽有 try/except，这里再兜一层以免打断下方 IPC 回包。
         if isinstance(e, FloodWaitError):
@@ -1481,8 +1627,7 @@ async def _periodic_payout_compensation_scan(
         except Exception as exc:  # noqa: BLE001
             await _log(redis, account_id, "warn", f"payout 补偿扫描失败: {type(exc).__name__}: {exc}")
         scan_interval = int(
-            config.get("scan_interval_seconds")
-            or payout_compensation.DEFAULT_CONFIG["scan_interval_seconds"]
+            config.get("scan_interval_seconds") or payout_compensation.DEFAULT_CONFIG["scan_interval_seconds"]
         )
         await asyncio.sleep(scan_interval)
 
@@ -1640,7 +1785,9 @@ async def _replay_payout_compensation_row(
             )
             return
         if probe_message_id is not None:
-            await payout_compensation.mark_payout_sent_marker(redis, row.account_id, row.payout_key, probe_message_id)
+            await payout_compensation.mark_payout_sent_marker(
+                redis, row.account_id, row.payout_key, probe_message_id
+            )
             recovered = {
                 "message_id": probe_message_id,
                 "chat_id": row.chat_id,
@@ -1958,7 +2105,9 @@ async def _apply_payout_replay_failure(
     config: dict[str, Any],
     now: datetime,
 ) -> None:
-    if error_code == payout_compensation.ERROR_PAYOUT_LIMIT_EXCEEDED and _is_daily_payout_limit_error(error_text):
+    if error_code == payout_compensation.ERROR_PAYOUT_LIMIT_EXCEEDED and _is_daily_payout_limit_error(
+        error_text
+    ):
         should_notify = await _defer_payout_compensation_to_next_day(row.id, error_code, error_text, now)
         if should_notify:
             await _log_payout_compensation_error(
@@ -2121,15 +2270,14 @@ def _next_utc_day_retry_at(now: datetime, row_id: int) -> datetime:
     now_utc = _as_utc(now) or _utc_now()
     next_day = (now_utc + timedelta(days=1)).date()
     jitter_seconds = int(row_id) % 300
-    return datetime(next_day.year, next_day.month, next_day.day, tzinfo=UTC) + timedelta(seconds=jitter_seconds)
+    return datetime(next_day.year, next_day.month, next_day.day, tzinfo=UTC) + timedelta(
+        seconds=jitter_seconds
+    )
 
 
 def _telegram_message_text(msg: Any) -> str:
     return str(
-        getattr(msg, "raw_text", None)
-        or getattr(msg, "message", None)
-        or getattr(msg, "text", None)
-        or ""
+        getattr(msg, "raw_text", None) or getattr(msg, "message", None) or getattr(msg, "text", None) or ""
     )
 
 
@@ -2155,7 +2303,14 @@ def _interaction_userbot_engine(account_id: int) -> Any | None:
         return None
 
 
-async def _ack_cmd(redis, cmd: IPCMessage, *, ok: bool, error: str | None = None) -> None:
+async def _ack_cmd(
+    redis,
+    cmd: IPCMessage,
+    *,
+    ok: bool,
+    error: str | None = None,
+    payload: dict[str, Any] | None = None,
+) -> None:
     """向主进程回 ACK；没有 reply_to 的旧调用保持 fire-and-forget。"""
     reply_to = cmd.payload.get("reply_to")
     cmd_id = cmd.payload.get("cmd_id")
@@ -2164,7 +2319,14 @@ async def _ack_cmd(redis, cmd: IPCMessage, *, ok: bool, error: str | None = None
     try:
         await redis.publish(
             reply_to,
-            make_event(EVT_ACK, cmd_id=cmd_id, cmd_type=cmd.type, ok=ok, error=error),
+            make_event(
+                EVT_ACK,
+                cmd_id=cmd_id,
+                cmd_type=cmd.type,
+                ok=ok,
+                error=error,
+                **dict(payload or {}),
+            ),
         )
     except Exception:  # noqa: BLE001
         pass
@@ -2199,7 +2361,9 @@ async def _periodic_userbot_session_expire_scan(redis, account_id: int) -> None:
 
             await scan_userbot_expired_sessions_once(account_id)
         except Exception as e:  # noqa: BLE001
-            await _log(redis, account_id, "warn", f"userbot session_expired 扫描失败: {type(e).__name__}: {e}")
+            await _log(
+                redis, account_id, "warn", f"userbot session_expired 扫描失败: {type(e).__name__}: {e}"
+            )
 
 
 async def _listen_global(redis, account_id: int, paused: asyncio.Event) -> None:
@@ -2236,7 +2400,9 @@ async def _listen_global(redis, account_id: int, paused: asyncio.Event) -> None:
                             await refresh_trace_settings()
                         except Exception as e:  # noqa: BLE001
                             await _log(
-                                redis, account_id, "warn",
+                                redis,
+                                account_id,
+                                "warn",
                                 f"reload_global 失败: {type(e).__name__}: {e}",
                             )
                         else:
@@ -2288,9 +2454,7 @@ async def _handle_login_required(redis, account_id: int, **payload) -> None:  # 
         )
 
 
-def _build_proxy_url(
-    ptype: str, host: str, port: int, username: str | None, password: str
-) -> str | None:
+def _build_proxy_url(ptype: str, host: str, port: int, username: str | None, password: str) -> str | None:
     """把 Proxy ORM 字段拼成 httpx 接受的 URL。
 
     支持的类型映射（与 ``app.util.proxy._VALID_TYPES`` 对齐 + httpx 实际支持）：
@@ -2318,6 +2482,16 @@ def _build_proxy_url(
             auth = f"{auth}:{quote(password, safe='')}"
         auth = f"{auth}@"
     return f"{scheme}://{auth}{host}:{int(port)}"
+
+
+def _provider_runtime_payload(row: LLMProvider, proxy_url: str | None) -> dict[str, Any]:
+    """构造 worker 进程内 Provider 投影，保留加密凭据但不解密。"""
+
+    provider_dto = LLMProviderDTO.from_orm_row(row)
+    provider_dto.proxy_url = proxy_url
+    payload = provider_dto.to_runtime_dict()
+    payload["notes"] = getattr(row, "notes", None)
+    return payload
 
 
 async def _refresh_command_context(account_id: int) -> None:
@@ -2379,7 +2553,7 @@ async def _refresh_command_context(account_id: int) -> None:
                 command_prefix_required = bool(raw_prefix_required)
         except Exception:  # noqa: BLE001
             command_prefix_required = True
-        
+
         # 0.5) Sudo 前缀（系统设置）
         try:
             row_sudo = await db.get(SystemSetting, "sudo_prefix")
@@ -2427,19 +2601,23 @@ async def _refresh_command_context(account_id: int) -> None:
 
         # 1) 该账号启用中的命令模板
         rows = (
-            await db.execute(
-                select(CommandTemplate)
-                .join(
-                    AccountCommandLink,
-                    AccountCommandLink.template_id == CommandTemplate.id,
+            (
+                await db.execute(
+                    select(CommandTemplate)
+                    .join(
+                        AccountCommandLink,
+                        AccountCommandLink.template_id == CommandTemplate.id,
+                    )
+                    .where(
+                        AccountCommandLink.account_id == account_id,
+                        AccountCommandLink.enabled.is_(True),
+                    )
+                    .order_by(CommandTemplate.id.asc())
                 )
-                .where(
-                    AccountCommandLink.account_id == account_id,
-                    AccountCommandLink.enabled.is_(True),
-                )
-                .order_by(CommandTemplate.id.asc())
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         for r in rows:
             payload = {
                 "id": r.id,
@@ -2450,23 +2628,19 @@ async def _refresh_command_context(account_id: int) -> None:
                 "description": r.description,
             }
             templates[r.name] = payload
-            for alias in (r.aliases or []):
+            for alias in r.aliases or []:
                 templates[alias] = payload
 
         if ai_enabled:
             # 2) 全部 LLM provider（AI 命令在调用时按 provider_id 索引；不预解密 key）
             #    顺带把 proxy 信息一起拉出来，让 worker 端调 LLM 时也能走代理
-            prov_rows = (
-                await db.execute(select(LLMProvider))
-            ).scalars().all()
+            prov_rows = (await db.execute(select(LLMProvider))).scalars().all()
 
             # 收集所有用到的 proxy_id 一次性查出
             proxy_ids = {p.proxy_id for p in prov_rows if p.proxy_id is not None}
             proxy_rows: dict[int, Proxy] = {}
             if proxy_ids:
-                rows2 = (
-                    await db.execute(select(Proxy).where(Proxy.id.in_(proxy_ids)))
-                ).scalars().all()
+                rows2 = (await db.execute(select(Proxy).where(Proxy.id.in_(proxy_ids)))).scalars().all()
                 proxy_rows = {r.id: r for r in rows2}
 
             for p in prov_rows:
@@ -2484,39 +2658,21 @@ async def _refresh_command_context(account_id: int) -> None:
                             except Exception:  # noqa: BLE001
                                 # 密码解密失败时退化为无认证连接，避免一条坏 proxy 把所有 ai 命令打死
                                 pwd = ""
-                        proxy_url = _build_proxy_url(
-                            pr.type, pr.host, pr.port, pr.username, pwd
-                        )
-                providers[p.id] = {
-                    "id": p.id,
-                    "name": p.name,
-                    "provider": p.provider,
-                    "api_key_enc": p.api_key_enc,
-                    "base_url": p.base_url,
-                    "default_model": p.default_model,
-                    # API 协议格式：build_client 据此决定走哪条 client 实现
-                    "api_format": getattr(p, "api_format", None),
-                    "web_search_api_format": getattr(p, "web_search_api_format", None),
-                    # 路由元数据：worker 选 provider 时要看
-                    "modality": getattr(p, "modality", None) or "text",
-                    "tags": list(getattr(p, "tags", None) or []),
-                    "cost_tier": int(getattr(p, "cost_tier", None) or 2),
-                    "notes": getattr(p, "notes", None),
-                    # 出口代理 URL；None = 直连（DIRECT）
-                    "proxy_url": proxy_url,
-                    # 候选模型清单（worker 通常不直接读，但保持一致）
-                    "models": list(getattr(p, "models", None) or []),
-                }
+                        proxy_url = _build_proxy_url(pr.type, pr.host, pr.port, pr.username, pwd)
+                providers[p.id] = _provider_runtime_payload(p, proxy_url)
 
         # 3) 命令别名
         alias_rows = (
-            await db.execute(
-                select(CommandAlias).where(
-                    (CommandAlias.account_id == account_id)
-                    | (CommandAlias.account_id.is_(None))
+            (
+                await db.execute(
+                    select(CommandAlias).where(
+                        (CommandAlias.account_id == account_id) | (CommandAlias.account_id.is_(None))
+                    )
                 )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         aliases: dict[str, str] = {r.alias: r.target for r in alias_rows}
 
         account_row = await db.get(Account, account_id)
@@ -2525,10 +2681,8 @@ async def _refresh_command_context(account_id: int) -> None:
 
         # 4) Sudo users
         sudo_rows = (
-            await db.execute(
-                select(SudoUser).where(SudoUser.account_id == account_id)
-            )
-        ).scalars().all()
+            (await db.execute(select(SudoUser).where(SudoUser.account_id == account_id))).scalars().all()
+        )
         sudo_users: dict[int, dict[str, Any]] = {}
         for r in sudo_rows:
             sudo_users[r.tg_user_id] = {
@@ -2569,9 +2723,7 @@ async def _refresh_command_context(account_id: int) -> None:
     )
 
 
-async def _log(
-    redis, account_id: int | None, level: str, message: str, *, source: str = "system", **detail
-):
+async def _log(redis, account_id: int | None, level: str, message: str, *, source: str = "system", **detail):
     """写运行日志到 Redis stream，主进程批量消费落库。
 
     source 语义（前端 Logs 页 tab 区分）：
@@ -2617,4 +2769,5 @@ def worker_main(account_id: int) -> None:
         format=f"%(asctime)s [worker:{account_id}] %(levelname)s %(message)s",
     )
     install_sensitive_log_filter()
+    configure_dependency_log_levels()
     asyncio.run(run_worker(account_id))

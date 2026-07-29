@@ -30,7 +30,7 @@ curl -fsSL https://raw.githubusercontent.com/Anoyou/telebot/main/scripts/install
 - 安装 Git、Make、Docker 和 Docker Compose v2。
 - 拉取 TelePilot 到 `/opt/telepilot`。
 - 生成生产用 `.env`。
-- 启动数据库、Redis、后端和前端。
+- 启动数据库、Redis、后端、内网 Updater 和前端。
 
 如果 80 端口被占用，可以指定别的端口：
 
@@ -64,7 +64,7 @@ curl -fsSL https://raw.githubusercontent.com/Anoyou/telebot/main/scripts/install
   | env WEB_PORT_PUBLISH=127.0.0.1:8080 COOKIE_SECURE=true bash
 ```
 
-这条命令会安装基础依赖与 Docker Compose v2、拉取仓库到 `/opt/telepilot`、生成生产 `.env`，并执行 `make prod-up` 启动 `postgres` / `redis` / `web` / `frontend`。如果 `WEB_PORT_PUBLISH` 指定的端口已被占用，脚本会保留 host 绑定并自动递增到可用端口，例如从 `127.0.0.1:8080` 改到 `127.0.0.1:8081`。
+这条命令会安装基础依赖与 Docker Compose v2、拉取仓库到 `/opt/telepilot`、生成生产 `.env`，并执行 `make prod-up` 启动 `postgres` / `redis` / `web` / `updater` / `frontend`。如果 `WEB_PORT_PUBLISH` 指定的端口已被占用，脚本会保留 host 绑定并自动递增到可用端口，例如从 `127.0.0.1:8080` 改到 `127.0.0.1:8081`。
 
 如果已经克隆仓库，也可以在仓库目录内手动配置：
 
@@ -167,12 +167,18 @@ cp docker-compose.yml "/var/backups/telepilot/docker-compose-$(date +%Y%m%d-%H%M
 TELEPILOT_UPDATE_BRANCH=main make prod-update
 ```
 
-`make prod-update` 会先检查远程变更，再生成服务级更新计划：仅后端变化时只切换
-`web`，仅前端变化时只切换 `frontend`，updater 在业务服务健康后最后独立切换，纯文档
-变化不重启服务。Dockerfile、依赖文件与 Compose 变化也会映射到具体服务；只有
-PostgreSQL / Redis 配置、卷结构或无法识别的基础设施变化才进入完整更新。没有 Alembic
-迁移时不会创建备份或处理数据库。更新前如果工作区存在未提交改动会拒绝执行，避免
-覆盖服务器上的本地修改。
+`make prod-update` 会先比较当前部署 commit 与目标 commit 的文件差异，再为每个服务生成
+具体动作：纯后端源码、迁移脚本和 System Agent 只读源码快照会归档目标 commit 的受控
+目录，在临时容器内通过 Python 编译校验后生成轻量补丁镜像，只重启 `web`，不执行
+`docker build`；前端 TypeScript 必须先由 `tsc + vite` 编译，因此仍只构建并切换
+`frontend`；Dockerfile、真实依赖变化、Compose 或 updater 自身变化才重建对应镜像。
+PostgreSQL / Redis 配置、卷结构或无法识别的基础设施变化才进入完整更新。仅
+`backend/pyproject.toml` 版本号变化不会被误判为依赖变化；只有 `project.dependencies`
+实际改变才重建 web 依赖层。没有 Alembic 迁移时不会创建备份或处理数据库。
+
+文件同步生成新 web 镜像后才切换容器，健康检查失败会把镜像标签和容器恢复到更新前
+状态；Git 工作区保留目标 commit 和 pending 标记，修复后可直接重试。更新前如果工作区
+存在未提交改动会拒绝执行，避免覆盖服务器上的本地修改。
 
 发布候选分支不要覆盖 `main`，用环境变量显式指定：
 
@@ -195,7 +201,7 @@ TELEPILOT_UPDATE_BRANCH=<release-candidate-branch> make prod-update PROD_UPDATE_
 由于 updater 能控制宿主机 Docker，`UPDATER_TOKEN` 必须使用独立随机值，不能与 `JWT_SECRET` 复用；缺失时服务会直接拒绝启动。
 
 - 检查更新：读取当前分支或 `TELEPILOT_UPDATE_BRANCH`，执行 `git fetch` 并展示具体受影响服务、数据库迁移和备份要求。
-- 应用更新：后台执行 `scripts/prod-update.sh`，使用 `--no-deps` 只切换计划内的 `web` / `frontend` / `updater`；PostgreSQL / Redis 默认保持运行。
+- 应用更新：后台执行 `scripts/prod-update.sh`；纯后端源码直接同步目标 commit 文件并重启 `web`，前端先编译再切换 `frontend`，依赖或镜像配置变化才构建对应镜像；PostgreSQL / Redis 默认保持运行。
 - 任务日志：Web 面板轮询持久化的 updater job；updater 自更新时页面可能短暂无法轮询，但新进程启动后可继续读取任务结果。
 
 首次把 `updater` 服务部署到服务器仍需要一次宿主机操作；之后常规补丁不再依赖 SSH 登录。若部署目录不是当前 shell 的工作目录，可显式指定：
@@ -234,10 +240,10 @@ make prod-up
 ## 8. 验收清单
 
 1. `git rev-parse HEAD` 是本次目标 commit，`grep` 四处版本号一致。
-2. `docker compose ps` 中 `postgres` / `redis` / `web` / `frontend` 均为 running 或 healthy。
-3. `curl -fsS http://127.0.0.1:8000/healthz` 返回健康结果，确认 FastAPI 进程存活。
-4. `curl -fsS http://127.0.0.1:8000/readyz` 返回 `ok=true`，并确认 DB、Redis、Worker Supervisor、账号 Bot manager 和交互 Bot manager 均正常；生产流量与更新完成判定以此为准。
-5. `curl -I http://127.0.0.1:8080` 能返回前端响应。
+2. `docker compose ps` 中 `postgres` / `redis` / `web` / `updater` / `frontend` 均为 running 或 healthy。
+3. 运行 `PUBLISH_PORT="$(sed -n 's/^WEB_PORT_PUBLISH=//p' .env | tail -n1 | tr -d '\"')"; PUBLISH_PORT="${PUBLISH_PORT##*:}"; curl -fsS "http://127.0.0.1:${PUBLISH_PORT:-80}/healthz"`，确认 FastAPI 进程存活。生产 Compose 不把 `web:8000` 暴露到宿主机。
+4. 在 Web 容器内执行 `docker compose exec -T web python -c "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8000/readyz', timeout=5).read().decode())"`，确认返回 `ok=true`，并确认 DB、Redis、Worker Supervisor、账号 Bot manager 和交互 Bot manager 均正常；生产流量与更新完成判定以此为准。
+5. 使用上一步得到的 `PUBLISH_PORT` 执行 `curl -I "http://127.0.0.1:${PUBLISH_PORT:-80}"`，确认前端能够响应。
 6. `docker compose logs --tail=100 web` 没有迁移、导入、路由或关键组件反复重试错误。
 7. `https://telepilot.example.com` 可打开登录页。
 8. 浏览器 Cookie 带 `Secure`，确认 `COOKIE_SECURE=true` 生效。

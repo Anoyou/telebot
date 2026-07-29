@@ -10,12 +10,15 @@ import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AlertTriangle,
+  ArrowDown,
   ArrowLeft,
+  ArrowUp,
   Bot,
   ChevronRight,
   CheckCircle2,
   Clock3,
-    MessageSquare,
+  ListOrdered,
+  MessageSquare,
   Minus,
   Pause,
   RotateCcw,
@@ -35,6 +38,7 @@ import {
   getFeatureMatrix,
   getPluginGlobalConfig,
   listPluginConfigActionJobs,
+  reorderAccountDirectPassthrough,
   setPluginGlobalConfig,
   startPluginConfigActionJob,
   updateAccountFeatureConfig,
@@ -61,12 +65,25 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Spinner } from "@/components/ui/misc";
 import { Switch } from "@/components/ui/switch";
 import { getErrMsg } from "@/lib/api";
 import { confirmDiscardChanges, useUnsavedChanges } from "@/lib/unsavedChanges";
 import { pluginUsageGuideWarning } from "@/lib/plugin-config-contract";
 import {
+  accountDirectPassthroughConfig,
+  accountDirectPassthroughPriority,
+  formatDirectPassthroughRankLabel,
+  formatDirectPassthroughRankTitle,
+  rankAccountDirectPassthroughPlugins,
   pluginContractRiskWarnings,
   pluginEventSubscriptionLabels,
   pluginOperationalCapabilityLabels,
@@ -92,10 +109,16 @@ function sameConfig(a: Record<string, unknown>, b: Record<string, unknown>): boo
 }
 
 function directPassthroughConfig(config: Record<string, unknown>): Record<string, unknown> {
-  const raw = config.direct_passthrough;
-  return raw && typeof raw === "object" && !Array.isArray(raw)
-    ? raw as Record<string, unknown>
-    : {};
+  const raw = accountDirectPassthroughConfig(config);
+  const normalized: Record<string, unknown> = {};
+  if (typeof raw.enabled === "boolean") normalized.enabled = raw.enabled;
+  const priority = Number(raw.priority);
+  if (Number.isFinite(priority) && priority >= 0) normalized.priority = Math.floor(priority);
+  return normalized;
+}
+
+function directPassthroughPriority(config: Record<string, unknown>): number {
+  return accountDirectPassthroughPriority(config);
 }
 
 const EMPTY_CONFIG: Record<string, unknown> = {};
@@ -176,7 +199,29 @@ export function GenericPluginConfigPage() {
   const globalConfig = globalConfigQ.data ?? EMPTY_CONFIG;
   const accountConfig = accountFeature?.config ?? EMPTY_CONFIG;
   const supportsDirectPassthrough = pluginSupportsDirectPassthrough(feature?.capabilities);
-  const directPassthroughEnabled = directPassthroughConfig(accountConfig).enabled === true;
+  const directPassthroughCfg = directPassthroughConfig(accountConfig);
+  const directPassthroughEnabled = directPassthroughCfg.enabled === true;
+  const directRankByKey = useMemo(() => {
+    if (!supportsDirectPassthrough || !featuresQ.data) return new Map<string, number>();
+    return rankAccountDirectPassthroughPlugins(
+      featuresQ.data.map((item) => ({
+        key: item.feature_key,
+        config: (item.config ?? {}) as Record<string, unknown>,
+      })),
+    );
+  }, [featuresQ.data, supportsDirectPassthrough]);
+  // supportsDirectPassthrough 依赖 feature；下面变量在 feature 加载后才稳定
+  const directRank = directPassthroughEnabled
+    ? (directRankByKey.get(featureKey) ?? null)
+    : null;
+  const directRankTotal = directRankByKey.size;
+  const directRankLabel = formatDirectPassthroughRankLabel(directRank, {
+    secondaryEnabled: directPassthroughEnabled,
+    totalEnabled: directPassthroughEnabled ? directRankTotal : undefined,
+  });
+  const directRankTitle = formatDirectPassthroughRankTitle(directRank, {
+    secondaryEnabled: directPassthroughEnabled,
+  });
   const commandPrefix = settingsQ.data?.command_prefix || ",";
   const llmProvidersQ = useQuery({
     queryKey: ["llm-providers"],
@@ -321,10 +366,70 @@ export function GenericPluginConfigPage() {
   });
 
   const directPassthroughMut = useMutation({
-    mutationFn: (enabled: boolean) =>
-      updateAccountFeatureDirectPassthrough(aid, featureKey, enabled),
-    onSuccess: (_data, enabled) => {
-      toast.success(enabled ? "裸直通已为当前账号开启" : "裸直通已为当前账号关闭");
+    mutationFn: (payload: { enabled?: boolean }) =>
+      updateAccountFeatureDirectPassthrough(aid, featureKey, payload),
+    onSuccess: (_data, payload) => {
+      if (payload.enabled !== undefined) {
+        toast.success(
+          payload.enabled
+            ? "裸直通已开启：插件已加入直通调度"
+            : "裸直通已关闭",
+        );
+      }
+      qc.invalidateQueries({ queryKey: ["account", aid, "features"] });
+      qc.invalidateQueries({ queryKey: ["matrix"] });
+    },
+    onError: (err) => toast.error(getErrMsg(err)),
+  });
+
+  const [priorityOpen, setPriorityOpen] = useState(false);
+  const [priorityDraft, setPriorityDraft] = useState<Array<{ key: string; name: string; priority: number }>>([]);
+
+  const openPriorityDialog = () => {
+    const matrixFeatures = matrixQ.data?.features ?? [];
+    const accountFeatures = featuresQ.data ?? [];
+    const rows = accountFeatures
+      .filter((item) => {
+        if (!item.enabled) return false;
+        if (directPassthroughConfig(item.config ?? {}).enabled !== true) return false;
+        const meta = matrixFeatures.find((f) => f.key === item.feature_key);
+        return pluginSupportsDirectPassthrough(meta?.capabilities);
+      })
+      .map((item) => {
+        const meta = matrixFeatures.find((f) => f.key === item.feature_key);
+        return {
+          key: item.feature_key,
+          name: meta?.display_name || item.feature_key,
+          priority: directPassthroughPriority(item.config ?? {}),
+        };
+      })
+      .sort((a, b) => a.priority - b.priority || a.key.localeCompare(b.key));
+    setPriorityDraft(rows);
+    setPriorityOpen(true);
+  };
+
+  const reorderPriorityDraft = (index: number, direction: -1 | 1) => {
+    setPriorityDraft((prev) => {
+      const next = [...prev];
+      const target = index + direction;
+      if (target < 0 || target >= next.length) return prev;
+      const tmp = next[index];
+      next[index] = next[target];
+      next[target] = tmp;
+      return next;
+    });
+  };
+
+  const savePriorityMut = useMutation({
+    mutationFn: async () => {
+      await reorderAccountDirectPassthrough(
+        aid,
+        priorityDraft.map((row) => row.key),
+      );
+    },
+    onSuccess: () => {
+      toast.success("直通调用顺序已保存");
+      setPriorityOpen(false);
       qc.invalidateQueries({ queryKey: ["account", aid, "features"] });
       qc.invalidateQueries({ queryKey: ["matrix"] });
     },
@@ -473,6 +578,14 @@ export function GenericPluginConfigPage() {
                 当前版本 {formatFeatureVersion(feature.version)}
               </span>
             ) : null}
+            {supportsDirectPassthrough ? (
+              <Badge
+                variant={directPassthroughEnabled ? "default" : "outline"}
+                title={directRankTitle}
+              >
+                {directRankLabel}
+              </Badge>
+            ) : null}
           </div>
         </div>
       </div>
@@ -496,9 +609,7 @@ export function GenericPluginConfigPage() {
           ) : (
             <CollapsibleUsageContent resetKey={`${featureKey}:${usageGuide.customText}`}>
               <div className="space-y-3 rounded-md border bg-muted/20 p-3 text-xs text-muted-foreground">
-                <div className="whitespace-pre-wrap leading-relaxed text-foreground">
-                  {usageGuide.customText}
-                </div>
+                <UsageGuideBody text={usageGuide.customText} />
                 {usageGuide.commandExamples.length > 0 ? (
                   <div>
                     <div className="mb-1 font-medium text-foreground">插件声明的指令参考</div>
@@ -553,6 +664,14 @@ export function GenericPluginConfigPage() {
                 <Badge variant={accountFeature?.enabled ? "default" : "outline"}>
                   {featureSwitchText(accountFeature)}
                 </Badge>
+                {supportsDirectPassthrough ? (
+                  <Badge
+                    variant={directPassthroughEnabled ? "secondary" : "outline"}
+                    title={directRankTitle}
+                  >
+                    {directRankLabel}
+                  </Badge>
+                ) : null}
                 <span>运行状态：{featureRuntimeText(accountFeature)}</span>
                 {accountFeature?.last_error ? (
                   <span className="text-destructive">最近错误：{accountFeature.last_error}</span>
@@ -578,32 +697,131 @@ export function GenericPluginConfigPage() {
           </div>
         </CardHeader>
         {supportsDirectPassthrough ? (
-          <CardContent>
+          <CardContent className="space-y-3">
             <div className="flex flex-col gap-3 rounded-md border border-info/25 bg-info/5 px-3 py-3 sm:flex-row sm:items-center sm:justify-between">
               <div className="min-w-0">
                 <div className="flex flex-wrap items-center gap-2">
                   <div className="text-sm font-medium">账号级裸直通</div>
                   <Badge variant="outline">二次开关</Badge>
+                  <Badge
+                    variant={directPassthroughEnabled ? "secondary" : "outline"}
+                    title={directRankTitle}
+                  >
+                    {directRankLabel}
+                  </Badge>
                 </div>
                 <p className="mt-1 text-xs leading-5 text-muted-foreground">
-                  开启后，该插件可在标准 Event Bus 之前接收当前账号的原始消息。关闭只停用低延时直通，不影响插件的标准 Event Bus、指令或交互入口。
+                  开启后，该插件可在标准 Event Bus 之前接收原始消息；二次开关只决定是否加入直通调度。
+                  插件明确返回 <strong className="font-medium text-foreground">consumed</strong> 才会截断后续链路；
+                  ignored、failed、异常或未返回结果都会继续其它直通，最终回退普通链路。
+                  关闭只停用低延时直通，不影响标准 Event Bus、指令或交互入口。
+                  多个直通同时开启时，用下方「调整调用顺序」决定谁先处理。
                 </p>
                 {!accountFeature?.enabled ? (
                   <p className="mt-1 text-xs text-warning">请先开启上方功能总开关。</p>
                 ) : null}
               </div>
               <Switch
-                checked={directPassthroughMut.isPending
-                  ? Boolean(directPassthroughMut.variables)
-                  : directPassthroughEnabled}
+                checked={
+                  directPassthroughMut.isPending && directPassthroughMut.variables?.enabled !== undefined
+                    ? Boolean(directPassthroughMut.variables.enabled)
+                    : directPassthroughEnabled
+                }
                 disabled={!accountFeature?.enabled || directPassthroughMut.isPending}
-                onCheckedChange={(enabled) => directPassthroughMut.mutate(enabled)}
+                onCheckedChange={(enabled) => directPassthroughMut.mutate({ enabled })}
                 aria-label="账号级裸直通"
               />
             </div>
+            {directPassthroughEnabled ? (
+              <div className="flex flex-wrap items-center gap-2 rounded-md border border-border/70 bg-muted/20 px-3 py-3">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="h-8 gap-1.5"
+                  onClick={openPriorityDialog}
+                >
+                  <ListOrdered className="h-3.5 w-3.5" />
+                  调整调用顺序
+                </Button>
+                <span className="text-xs text-muted-foreground">
+                  对当前账号所有已开启直通的插件排序；越靠上越先调用
+                </span>
+              </div>
+            ) : null}
           </CardContent>
         ) : null}
       </Card>
+
+      <Dialog open={priorityOpen} onOpenChange={setPriorityOpen}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>直通调用顺序</DialogTitle>
+            <DialogDescription>
+              自上而下依次尝试。只有插件明确返回 consumed 才停止；ignored 或 failed 会继续后续插件，最终回退普通链路。
+            </DialogDescription>
+          </DialogHeader>
+          {priorityDraft.length === 0 ? (
+            <p className="text-sm text-muted-foreground">当前账号没有已开启的直通插件。</p>
+          ) : (
+            <ul className="max-h-72 space-y-2 overflow-y-auto">
+              {priorityDraft.map((row, index) => (
+                <li
+                  key={row.key}
+                  className="flex items-center gap-2 rounded-md border border-border/70 bg-card px-2 py-2"
+                >
+                  <span className="w-14 shrink-0 text-center text-xs font-medium text-muted-foreground">
+                    第{index + 1}优先
+                  </span>
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate text-sm font-medium">{row.name}</div>
+                    <div className="truncate text-xs text-muted-foreground">{row.key}</div>
+                  </div>
+                  {row.key === featureKey ? (
+                    <Badge variant="secondary" className="shrink-0">当前</Badge>
+                  ) : null}
+                  <div className="flex shrink-0 gap-1">
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      className="h-7 w-7"
+                      disabled={index === 0}
+                      onClick={() => reorderPriorityDraft(index, -1)}
+                      aria-label="上移"
+                    >
+                      <ArrowUp className="h-3.5 w-3.5" />
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      className="h-7 w-7"
+                      disabled={index === priorityDraft.length - 1}
+                      onClick={() => reorderPriorityDraft(index, 1)}
+                      aria-label="下移"
+                    >
+                      <ArrowDown className="h-3.5 w-3.5" />
+                    </Button>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={() => setPriorityOpen(false)}>
+              取消
+            </Button>
+            <Button
+              type="button"
+              disabled={priorityDraft.length === 0 || savePriorityMut.isPending}
+              onClick={() => savePriorityMut.mutate()}
+            >
+              {savePriorityMut.isPending ? "保存中…" : "保存调用顺序"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {latestActionJob ? (
         <RecentConfigActionJobCard
@@ -813,17 +1031,28 @@ function ContractSummaryBlock({
   variant?: "secondary" | "destructive";
 }) {
   return (
-    <div className="rounded-md border bg-muted/20 p-3">
+    <div className="min-w-0 overflow-hidden rounded-md border bg-muted/20 p-3">
       <div className="mb-2 text-xs font-medium text-muted-foreground">{title}</div>
       {items.length > 0 ? (
-        <div className="flex flex-wrap gap-1.5">
-          {items.slice(0, 8).map((item) => (
-            <Badge key={item} variant={variant} className="max-w-full break-all">
-              {item}
-            </Badge>
-          ))}
-          {items.length > 8 ? <Badge variant="outline">+{items.length - 8}</Badge> : null}
-        </div>
+        variant === "destructive" ? (
+          <div className="space-y-1.5">
+            {items.slice(0, 8).map((item) => (
+              <div key={item} className="max-w-full whitespace-normal break-words rounded-md border border-destructive/30 bg-destructive/10 px-2.5 py-2 text-xs leading-5 text-destructive">
+                {item}
+              </div>
+            ))}
+            {items.length > 8 ? <Badge variant="outline">+{items.length - 8}</Badge> : null}
+          </div>
+        ) : (
+          <div className="flex flex-wrap gap-1.5">
+            {items.slice(0, 8).map((item) => (
+              <Badge key={item} variant={variant} className="max-w-full">
+                {item}
+              </Badge>
+            ))}
+            {items.length > 8 ? <Badge variant="outline">+{items.length - 8}</Badge> : null}
+          </div>
+        )
       ) : (
         <div className="text-xs text-muted-foreground">{empty}</div>
       )}
@@ -1458,6 +1687,30 @@ interface UsageGuide {
   notes: string[];
   missing: boolean;
   warning: string;
+}
+
+function UsageGuideBody({ text }: { text: string }) {
+  const blocks = text
+    .replace(/\s+(命令[：:])/g, "\n$1")
+    .split(/\n+|(?<=[。；])\s*/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+  return (
+    <div className="space-y-2 text-foreground">
+      {blocks.map((block, index) => {
+        const commandLike = /^命令[：:]|^[。，,.!！/][a-z\d_-]+/i.test(block);
+        return commandLike ? (
+          <div key={`${index}-${block}`} className="overflow-x-auto rounded-md border border-border/70 bg-background px-3 py-2 font-mono text-[11px] leading-5">
+            {block}
+          </div>
+        ) : (
+          <p key={`${index}-${block}`} className="leading-6 text-foreground/90">
+            {block}
+          </p>
+        );
+      })}
+    </div>
+  );
 }
 
 function buildUsageGuide({
