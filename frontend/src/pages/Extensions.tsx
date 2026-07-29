@@ -1,6 +1,6 @@
 // 插件安装与管理：插件包安装/更新/卸载 + 开发指南
 //
-// Tab 1：安装与更新 — 推荐插件 + 远程插件（安装/卸载/更新）
+// Tab 1：安装与更新 — 本地导入 + 远程插件（安装/卸载/更新）
 // Tab 2：开发指南 — 完整插件开发文档工作台
 //
 // 账号级启停与配置统一回 /plugins 首页，避免“安装页”和“插件中心”双入口重复。
@@ -103,11 +103,9 @@ import {
   deletePluginRepo,
   fetchPluginRepos,
   fetchLocalPlugins,
-  fetchOfficialPlugins,
   fetchRepoPlugins,
   refreshRepoPlugins,
   installLocalPlugin,
-  installOfficialPlugin,
   installFromRepo,
   updateInstalledPluginsFromRepo,
   updatePluginRepoCredential,
@@ -161,9 +159,7 @@ const PLUGINS_QK = ["installed-packages"] as const;
 const INSTALLED_OVERVIEW_QK = ["installed-overview"] as const;
 const REMOTE_QK = ["remote-plugins"] as const;
 const PLUGIN_REPOS_QK = ["plugin-repos"] as const;
-const OFFICIAL_PLUGINS_QK = ["official-plugins"] as const;
 const NEW_ACCOUNT_GUIDE_SEEN_KEY = "telebot.accounts.new_account_guide_seen.v4";
-const FIRST_RECOMMENDED_PLUGIN_KEYS = new Set(["auto_reply", "autorepeat"]);
 const DANGER_OUTLINE_BUTTON_CLASS = "border-destructive/40 text-destructive hover:bg-destructive/10 hover:text-destructive";
 const DEV_DOCS: DevDoc[] = [
   {
@@ -747,8 +743,8 @@ function InstallToolsGroup() {
           <SectionHeader
             icon={Puzzle}
             title="安装与检查"
-            description="远程更新检查、本地导入与推荐插件默认折叠；展开后可配置。"
-            meta={<SignalPill tone="neutral" label="工具" value={3} className="h-8" />}
+            description="远程更新检查与本地导入默认折叠；展开后可配置。"
+            meta={<SignalPill tone="neutral" label="工具" value={2} className="h-8" />}
             actions={(
               <Button
                 type="button"
@@ -769,14 +765,12 @@ function InstallToolsGroup() {
           <CardContent id="install-tools-group-content" className="space-y-4">
             <RemoteUpdateSettingsCard />
             <LocalPluginImportCard />
-            <OfficialPluginsCard />
           </CardContent>
         ) : null}
       </Card>
       <div className="hidden space-y-6 sm:block">
         <RemoteUpdateSettingsCard />
         <LocalPluginImportCard />
-        <OfficialPluginsCard />
       </div>
     </>
   );
@@ -815,7 +809,6 @@ function LocalPluginImportCard() {
       setSignatureFile(null);
       qc.invalidateQueries({ queryKey: PLUGINS_QK });
       qc.invalidateQueries({ queryKey: INSTALLED_OVERVIEW_QK });
-      qc.invalidateQueries({ queryKey: OFFICIAL_PLUGINS_QK });
       qc.invalidateQueries({ queryKey: REMOTE_QK });
       qc.invalidateQueries({ queryKey: queryKeys.featureMatrix });
     },
@@ -1018,132 +1011,6 @@ function RemoteUpdateSettingsCard() {
           </Button>
         </div>
       </CardContent> : null}
-    </Card>
-  );
-}
-
-function OfficialPluginsCard() {
-  const qc = useQueryClient();
-  const [expanded, setExpanded] = useState(false);
-  const officialQ = useQuery({ queryKey: OFFICIAL_PLUGINS_QK, queryFn: fetchOfficialPlugins });
-  const installOfficialMut = useMutation({
-    mutationFn: (name: string) => installOfficialPlugin(name),
-    onSuccess: (row) => {
-      toast.success(`已安装/更新推荐插件 ${row.display_name || row.name} v${row.version}`);
-      toastPluginLintWarnings(row);
-      qc.invalidateQueries({ queryKey: OFFICIAL_PLUGINS_QK });
-      qc.invalidateQueries({ queryKey: PLUGINS_QK });
-      qc.invalidateQueries({ queryKey: INSTALLED_OVERVIEW_QK });
-      qc.invalidateQueries({ queryKey: REMOTE_QK });
-      qc.invalidateQueries({ queryKey: queryKeys.featureMatrix });
-    },
-    onError: (err) => toast.error(getErrMsg(err)),
-  });
-  const uninstallOfficialMut = useMutation({
-    mutationFn: (key: string) => uninstallPlugin(key),
-    onSuccess: (_row, key) => {
-      toast.success(`已卸载 ${key}`);
-      qc.invalidateQueries({ queryKey: OFFICIAL_PLUGINS_QK });
-      qc.invalidateQueries({ queryKey: PLUGINS_QK });
-      qc.invalidateQueries({ queryKey: INSTALLED_OVERVIEW_QK });
-      qc.invalidateQueries({ queryKey: REMOTE_QK });
-      qc.invalidateQueries({ queryKey: queryKeys.featureMatrix });
-    },
-    onError: (err) => toast.error(getErrMsg(err)),
-  });
-
-  const allItems = officialQ.data ?? [];
-  const items = allItems.filter((plugin) => FIRST_RECOMMENDED_PLUGIN_KEYS.has(plugin.name));
-
-  return (
-    <Card>
-      <CardHeader className="pb-3">
-        <SectionHeader
-          icon={Sparkles}
-          title="推荐插件"
-          description="这些条目来自你的插件库快捷入口，只保留首次部署建议安装的自动回复和自动复读；更多插件请添加自己的 Git 插件仓库。"
-          meta={<SignalPill tone="neutral" label="推荐项" value={items.length} className="h-8" />}
-          actions={(
-            <Button
-              type="button"
-              size="sm"
-              variant="outline"
-              className="h-8 gap-1.5"
-              onClick={() => setExpanded((value) => !value)}
-              aria-expanded={expanded}
-              aria-controls="official-recommended-plugins"
-            >
-              <ChevronDown className={cn("h-4 w-4 transition-transform", expanded && "rotate-180")} />
-              {expanded ? "收起" : "展开"}
-            </Button>
-          )}
-        />
-      </CardHeader>
-      {expanded ? (
-      <CardContent id="official-recommended-plugins">
-        {officialQ.isLoading ? (
-          <div className="flex h-16 items-center justify-center">
-            <Spinner className="text-primary" />
-          </div>
-        ) : officialQ.isError ? (
-          <p className="py-3 text-sm text-destructive">推荐插件源加载失败：{getErrMsg(officialQ.error)}</p>
-        ) : items.length === 0 ? (
-          <p className="py-3 text-sm text-muted-foreground">当前插件库没有发现自动回复或自动复读。</p>
-        ) : (
-          <div className="grid gap-2 lg:grid-cols-2">
-            {items.map((plugin) => {
-              return (
-                <div key={plugin.name} className="flex flex-col gap-3 rounded-md border px-3 py-3 sm:flex-row sm:items-center">
-                  <div className="min-w-0 flex-1">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <span className="font-medium">{plugin.display_name || plugin.name}</span>
-                      <span className="font-mono text-xs text-muted-foreground">v{plugin.version}</span>
-                      <MetaBadge tone="success">首次推荐</MetaBadge>
-                      {plugin.installed ? <MetaBadge>已安装</MetaBadge> : null}
-                      {plugin.update_available ? <MetaBadge tone="warn">有更新</MetaBadge> : null}
-                    </div>
-                    <div className="mt-1 font-mono text-xs text-muted-foreground">{plugin.name}</div>
-                    {plugin.description ? (
-                      <p className="mt-1 text-xs leading-5 text-muted-foreground">{plugin.description}</p>
-                    ) : null}
-                  </div>
-                  <div className="flex shrink-0 flex-wrap justify-end gap-2">
-                    {plugin.installed ? (
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        className={DANGER_OUTLINE_BUTTON_CLASS}
-                        disabled={uninstallOfficialMut.isPending}
-                        onClick={() => {
-                          if (confirm(`确认卸载「${plugin.name}」？`)) uninstallOfficialMut.mutate(plugin.name);
-                        }}
-                      >
-                        <Trash2 className="mr-1 h-3 w-3" />
-                        卸载
-                      </Button>
-                    ) : null}
-                    {!plugin.installed || plugin.update_available ? (
-                      <Button
-                        size="sm"
-                        className="shrink-0"
-                        variant={plugin.installed ? "outline" : "default"}
-                        loading={installOfficialMut.isPending}
-                        onClick={() => installOfficialMut.mutate(plugin.name)}
-                      >
-                        {!installOfficialMut.isPending ? (
-                          <Download className="mr-2 h-4 w-4" />
-                        ) : null}
-                        {plugin.installed ? "更新" : "安装"}
-                      </Button>
-                    ) : null}
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        )}
-      </CardContent>
-      ) : null}
     </Card>
   );
 }
@@ -1805,7 +1672,6 @@ function InstalledPluginsSection() {
       toast.success("已启用");
       qc.invalidateQueries({ queryKey: PLUGINS_QK });
       qc.invalidateQueries({ queryKey: INSTALLED_OVERVIEW_QK });
-      qc.invalidateQueries({ queryKey: OFFICIAL_PLUGINS_QK });
       qc.invalidateQueries({ queryKey: queryKeys.featureMatrix });
     },
     onError: (err) => toast.error(getErrMsg(err)),
@@ -1816,7 +1682,6 @@ function InstalledPluginsSection() {
       toast.success("已禁用");
       qc.invalidateQueries({ queryKey: PLUGINS_QK });
       qc.invalidateQueries({ queryKey: INSTALLED_OVERVIEW_QK });
-      qc.invalidateQueries({ queryKey: OFFICIAL_PLUGINS_QK });
       qc.invalidateQueries({ queryKey: queryKeys.featureMatrix });
     },
     onError: (err) => toast.error(getErrMsg(err)),
@@ -1827,7 +1692,6 @@ function InstalledPluginsSection() {
       toast.success(`已卸载 ${key}`);
       qc.invalidateQueries({ queryKey: PLUGINS_QK });
       qc.invalidateQueries({ queryKey: INSTALLED_OVERVIEW_QK });
-      qc.invalidateQueries({ queryKey: OFFICIAL_PLUGINS_QK });
       qc.invalidateQueries({ queryKey: queryKeys.featureMatrix });
     },
     onError: (err) => toast.error(getErrMsg(err)),

@@ -222,6 +222,11 @@ export function AIIndex() {
   const providerCount = providers.length;
   const readyCount = providers.filter((p) => p.has_api_key || p.provider === "ollama").length;
   const usageSummary = usageQ.data?.summary;
+  const successRateTone = !usageSummary || usageSummary.request_count === 0
+    ? "neutral"
+    : usageSummary.failed_count > 0
+      ? "warn"
+      : "success";
   const enablementSummary = enablementQ.data;
   const enabledAccountCount = enablementSummary?.enabled_accounts ?? 0;
   const totalAccountCount = enablementSummary?.total_accounts ?? 0;
@@ -348,31 +353,38 @@ export function AIIndex() {
             )}
           />
         </div>
-        <Card className="border-t-4 border-t-emerald-500/90">
-          <CardContent className="space-y-2 p-4">
-            <div className="text-sm font-medium">调用成功率</div>
-            <div className="text-xl font-semibold sm:text-2xl">
-              {usageSummary && usageSummary.request_count > 0
-                ? `${Math.round((usageSummary.success_count / usageSummary.request_count) * 100)}%`
-                : "暂无"}
+        <ToneRailCard
+          icon={CheckCircle2}
+          title="调用成功率"
+          description={usageSummary ? "成功请求占比" : "触发调用后展示摘要"}
+          tone={successRateTone}
+          titleClassName="gap-1.5 text-sm sm:gap-2 sm:text-base"
+          valueClassName="w-full"
+          value={(
+            <div className="w-full space-y-2">
+              <div className="truncate text-xl font-bold tabular-nums tracking-tight sm:text-2xl">
+                {usageSummary && usageSummary.request_count > 0
+                  ? `${Math.round((usageSummary.success_count / usageSummary.request_count) * 100)}%`
+                  : "暂无"}
+              </div>
+              <MeterBar
+                tone={successRateTone}
+                value={
+                  usageSummary && usageSummary.request_count > 0
+                    ? (usageSummary.success_count / usageSummary.request_count) * 100
+                    : null
+                }
+              />
+              <div className="text-xs font-normal tabular-nums text-muted-foreground">
+                {usageSummary
+                  ? `${usageSummary.success_count} 次成功 / ${usageSummary.request_count} 次请求`
+                  : usageQ.isError
+                    ? "调用摘要暂不可用"
+                    : "暂无调用记录"}
+              </div>
             </div>
-            <MeterBar
-              tone={(usageSummary?.failed_count ?? 0) > 0 ? "warn" : "success"}
-              value={
-                usageSummary && usageSummary.request_count > 0
-                  ? (usageSummary.success_count / usageSummary.request_count) * 100
-                  : null
-              }
-            />
-            <div className="text-xs text-muted-foreground">
-              {usageSummary
-                ? `${usageSummary.success_count} 次成功 / ${usageSummary.request_count} 次请求`
-                : usageQ.isError
-                  ? "调用摘要暂不可用"
-                  : "触发调用后展示摘要"}
-            </div>
-          </CardContent>
-        </Card>
+          )}
+        />
       </div>
 
       <Card>
