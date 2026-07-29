@@ -277,7 +277,7 @@ jobs:
   publish-images:
     name: 发布预构建镜像
     needs: ci-gate
-    if: github.event_name == 'push' && needs.ci-gate.result == 'success'
+    if: always() && github.event_name == 'push' && needs.ci-gate.result == 'success'
     uses: ./.github/workflows/publish-images.yml
     with:
       revision: ${{ github.sha }}

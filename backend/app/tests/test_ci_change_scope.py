@@ -100,6 +100,15 @@ def test_workflow_or_scope_script_change_fails_open_to_full_gate() -> None:
     assert workflow.contract and classifier.contract
 
 
+def test_image_publish_job_evaluates_after_conditional_jobs_are_skipped() -> None:
+    workflow = (REPO_ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+
+    assert (
+        "if: always() && github.event_name == 'push' "
+        "&& needs.ci-gate.result == 'success'"
+    ) in workflow
+
+
 def test_release_metadata_is_identified_without_forcing_browser() -> None:
     scope = classify_paths(
         [
