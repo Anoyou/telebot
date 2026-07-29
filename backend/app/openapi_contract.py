@@ -2,12 +2,21 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator, Sequence
 from typing import Any
 
 from fastapi import FastAPI
 from fastapi.openapi.utils import get_openapi
 from fastapi.routing import APIRoute
 from pydantic import BaseModel
+from starlette.routing import BaseRoute
+
+try:
+    from fastapi.routing import iter_route_contexts as _iter_route_contexts
+except ImportError:
+
+    def _iter_route_contexts(routes: Sequence[BaseRoute]) -> Iterator[BaseRoute]:
+        yield from routes
 
 from .deps import get_current_user
 
@@ -34,7 +43,14 @@ class ErrorEnvelope(BaseModel):
     error: ErrorDetail
 
 
-def route_requires_auth(route: APIRoute) -> bool:
+def _iter_contract_routes(app: FastAPI) -> Iterator[Any]:
+    for route in _iter_route_contexts(app.routes):
+        original_route = getattr(route, "original_route", route)
+        if isinstance(original_route, APIRoute):
+            yield route
+
+
+def route_requires_auth(route: Any) -> bool:
     pending = [route.dependant]
     seen: set[int] = set()
     while pending:
@@ -49,7 +65,7 @@ def route_requires_auth(route: APIRoute) -> bool:
     return False
 
 
-def operation_security(route: APIRoute, method: str) -> list[dict[str, list[str]]]:
+def operation_security(route: Any, method: str) -> list[dict[str, list[str]]]:
     method = method.upper()
     if method == "POST" and route.path == "/api/webhooks/{account_id}/{hook_key}":
         return [{"WebhookToken": []}]
@@ -132,9 +148,7 @@ def build_openapi_schema(app: FastAPI) -> dict[str, Any]:
         },
     }
 
-    for route in app.routes:
-        if not isinstance(route, APIRoute):
-            continue
+    for route in _iter_contract_routes(app):
         path_item = schema.get("paths", {}).get(route.path_format, {})
         for method in route.methods or set():
             operation = path_item.get(method.lower())
@@ -161,11 +175,9 @@ def install_openapi_contract(app: FastAPI) -> None:
     app.openapi = custom_openapi  # type: ignore[method-assign]
 
 
-def iter_api_operations(app: FastAPI) -> list[tuple[APIRoute, str]]:
-    operations: list[tuple[APIRoute, str]] = []
-    for route in app.routes:
-        if not isinstance(route, APIRoute):
-            continue
+def iter_api_operations(app: FastAPI) -> list[tuple[Any, str]]:
+    operations: list[tuple[Any, str]] = []
+    for route in _iter_contract_routes(app):
         for method in sorted(route.methods or set()):
             if method.lower() in OPENAPI_METHODS:
                 operations.append((route, method))

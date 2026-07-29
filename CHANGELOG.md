@@ -25,6 +25,16 @@
 
 ## [Unreleased]
 
+## [0.87.0-beta.2] - 2026-07-29 · patch（补丁版本预发布） · OpenAPI 新版路由兼容
+
+### Fixed
+
+- 兼容 FastAPI 0.141 对 `include_router()` 路由引入的惰性容器，OpenAPI 契约增强现在会递归处理全部有效路由，不再在全新 CI 环境中丢失 Cookie 鉴权、CSRF、Webhook Token 与统一错误响应声明。
+
+### Tests
+
+- 补充惰性路由上下文遍历回归，并使用全新 Python 3.12 依赖环境验证生成结果与仓库契约快照一致。
+
 ## [0.87.0-beta.1] - 2026-07-29 · minor（次版本预发布） · 增量更新、镜像发布与 API 契约治理
 
 ### Added

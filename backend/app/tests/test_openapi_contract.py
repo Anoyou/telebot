@@ -5,8 +5,10 @@ from pathlib import Path
 
 import pytest
 from fastapi import HTTPException
+from fastapi.routing import APIRoute
 from starlette.requests import Request
 
+from app import openapi_contract
 from app.main import app, http_exc_handler
 from app.openapi_contract import (
     PUBLIC_OPERATIONS,
@@ -81,6 +83,26 @@ def test_security_schemes_and_operation_matrix_match_runtime_dependencies() -> N
             assert "401" in responses
         if method not in {"GET", "HEAD", "OPTIONS"} and "WebhookToken" not in security_names:
             assert "403" in responses
+
+
+def test_contract_iterator_supports_lazy_included_route_contexts(monkeypatch) -> None:
+    route = next(route for route in app.routes if isinstance(route, APIRoute))
+
+    class RouteContext:
+        def __init__(self, original_route: APIRoute) -> None:
+            self.original_route = original_route
+
+        def __getattr__(self, name: str):
+            return getattr(self.original_route, name)
+
+    context = RouteContext(route)
+    monkeypatch.setattr(
+        openapi_contract,
+        "_iter_route_contexts",
+        lambda routes: iter([context]),
+    )
+
+    assert openapi_contract.iter_api_operations(app) == [(context, "GET")]
 
 
 def test_unauthenticated_operation_allowlist_is_explicit() -> None:
