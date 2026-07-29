@@ -25,6 +25,15 @@
 
 ## [Unreleased]
 
+## [0.86.0-beta.7] - 2026-07-29 · patch（补丁版本预发布） · 开发文档与运维指引校准
+
+### Changed
+
+- 重写生产安全 SOP 中的 TOTP 绑定、管理员 JWT 撤销和 TG session 处置流程，修正 `MASTER_KEY` 格式与 `rekey` 实际覆盖范围，并移除旧 pending Cookie 登录模型和文档内的历史迭代记录。
+- 更新 Docker Compose 部署与验收说明，补齐内网 Updater 服务，区分源码开发端口和生产容器内 `/readyz` 检查，删除旧发布候选分支示例。
+- 统一插件开发文档的新主路径为 `event_subscriptions + on_event + MessageOps`，明确当前 `tp_plugin session_game|command` 仍是兼容桥骨架，并把 `PluginContext` 完整字段表收口到 API 参考。
+- 校准 README 的 Python CI 基线与截图说明，在架构文档补充 Private Updater，并在项目 Agent 规则中增加目录地图、热点边界和对应验证入口。
+
 ## [0.86.0-beta.6] - 2026-07-29 · patch（补丁版本预发布） · 十点半底注选择修复
 
 ### Fixed

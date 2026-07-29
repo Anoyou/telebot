@@ -26,7 +26,7 @@
 消息链路统一后，互动插件默认按这一套模型理解：
 
 - 触发方式决定普通会话通道。带前缀命令开局，整段普通收发走 `userbot`；关键词、付款确认、按钮回调开局，整段普通收发走 `interaction_bot`。固定能力例外：`payout` 走 UserBot，`send_rich_message` 默认走 Interaction Bot，显式 `userbot_reply` 才使用 Layer 228。
-- 新玩法优先写成一个 `on_interaction(ctx, entry_key, payload)` 入口，在同一个入口里按 `tp_event.type` 或 `payload["source"]["type"]` 处理 `command`、`keyword`、`payment_confirmed`、`message`、`callback_query`、`session_expired`。
+- 新玩法优先实现一个 `on_event(ctx, payload)` 入口，在同一个入口里按 `tp_event.type` 或 `payload["source"]["type"]` 处理 `command`、`keyword`、`payment_confirmed`、`message`、`callback_query`、`session_expired`。
 - 单局状态优先写进 `session.data`，通过 `update_session` 持久化；不要再把游戏状态放进进程内全局字典、锁和自建超时任务。
 - 普通 JSON 状态优先使用 `ctx.storage`；确需 SQLite、缓存文件或索引文件时写入 `ctx.data_dir`。禁止把运行数据写到插件代码目录或 `Path(__file__).parent`，因为安装和更新会整体替换该目录。
 - 免费参与、按钮加入、互动游戏可按自身玩法保存完整业务状态；仅从后续发奖锚点角度，保存玩家 `tgid` 并通过 `payout.reply_to_user_id` 交给平台即可。平台优先读取 UserBot 按账号、群、真实消息发送者保存的近期锚点，缓存缺失时再精确搜索并最多扫描 2000 条历史消息。发奖同时传公开名时，`payout.reply_to_display_name` 必须来自安全身份 facade，匿名管理员不得传 `reply_to_username`。匿名管理员和频道身份不会建立真实用户锚点；找不到锚点时平台默认提示，并允许插件用 `reply_anchor_missing_text` 自定义失败提示。
@@ -53,7 +53,7 @@
 
 工具链说明统一收口到 [开发者工具链](./PLUGIN-DEVTOOLS.md)。推荐顺序是：
 
-1. 用 `tp_plugin new <name> --profile session_game|command|passthrough` 生成骨架。
+1. 新标准插件优先复制 `examples/plugins/hello_ping` 或 `examples/plugins/event_bus_demo`。`tp_plugin new <name> --profile session_game|command` 当前生成的是 `interaction_entries + on_interaction` 兼容桥骨架，适合迁移和理解旧会话入口；`passthrough` 只用于明确需要原始 UserBot 事件的高级场景。
 2. 写 `plugin.py`、`plugin.json` / `manifest.py` 的入口、权限、事件订阅和配置。
 3. 用 `tp_plugin check <dir>` 做 manifest、事件订阅和权限推导审计；它只报告问题，不自动改文件。
 4. 用 `tp_plugin register <dir>` 登记本地插件目录；外部目录与 `plugins/local_imports` 旧副本冲突时，确认后再加 `--force`。

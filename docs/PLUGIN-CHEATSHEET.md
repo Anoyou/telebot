@@ -5,8 +5,8 @@
 - 必须理解 TelePilot 插件按个人可信插件模式运行：管理员安装并启用后，视为信任插件业务逻辑；平台负责事件信封、MessageOps 代发、Trace、风险提示、急停和审计。
 - 最快命令插件可用简单模式 SDK：`from telepilot import plugin`，再写 `@plugin.command("ping")` 的单函数 `async def ping(ctx): await ctx.reply("pong")`；插件目录只需要 `__init__.py`，目录名就是插件 key。
 - 简单模式不写 `PLUGIN_CLASS` / `MANIFEST` 时，loader 会从装饰器合成隐式插件类和 Manifest；当前隐式权限是 `read_event` + `send_message`，命令默认是 owner-only 的账号命令。
-- 简单模式适合快速账号命令、小工具和内部玩法；需要 `plugin.json` 展示字段、`event_subscriptions`、`interaction_entries`、配置 schema、HTTP/AI 权限、按钮、Inline、付款或会话时，用显式 Manifest 模式。
-- 当前 `tp_plugin new` 没有 `--profile simple`；可选 profile 只有 `session_game`、`command`、`passthrough`。
+- 简单模式适合快速账号命令、小工具和内部玩法；需要 `plugin.json` 展示字段、`event_subscriptions`、配置 schema、HTTP/AI 权限、按钮、Inline、付款或会话时，用显式 Manifest 模式。
+- 当前 `tp_plugin new` 没有 `--profile simple`；可选 profile 只有 `session_game`、`command`、`passthrough`。其中 `session_game` / `command` 仍生成 `interaction_entries + on_interaction` 兼容桥，只用于迁移或作为包结构起点，新标准插件应改成 `event_subscriptions + on_event`。
 - 必须把新 Telegram 插件写成 Event Bus + Trace + MessageOps：`plugin.json` 写 `usage`、`event_subscriptions`、`capabilities`，插件只读标准事件信封，动作只通过 `ctx.messages` 或标准 action 返回。
 - 禁止把 `interaction_entries`、旧交互规则、旧平铺 payload、`notice` / `bbot_notice` / `notice_bot` 作为新插件模板；这些只用于迁移说明。
 - 显式 Manifest 模式必须保留最小目录：`plugin.json`、`manifest.py`、`plugin.py`、`__init__.py`。`plugin.json.name`、`MANIFEST.key`、插件类 `key` 必须一致。
@@ -21,7 +21,7 @@
 - `capabilities.telegram_native_raw` 是高风险能力声明；需要原生 Telegram 字段时写 `enabled=true`、`reason`、`sources`，并处理 `native_raw_meta.enabled=false` 的降级。
 - 标准事件信封优先读：`source`、`message`、`chat`、`sender`、`actor`、`source_actor`、`player`、`payment`、`reply_to`、`trigger`、`session`、`native_raw_meta`。
 - 新插件读取文本优先用 `payload["tp_event"]` 或 `event_from_interaction_payload(payload)`；不要用 `payload["text"]` / `payload["chat_id"]` / `payload.get("message")` 当主路径。
-- 互动玩法优先写成一个 `on_interaction(ctx, entry_key, payload)`，在同一个入口里处理 `command`、`keyword`、`payment_confirmed`、`message`、`callback_query`、`session_expired`。
+- 互动玩法优先写成一个 `on_event(ctx, payload)`，在同一个入口里处理 `command`、`keyword`、`payment_confirmed`、`message`、`callback_query`、`session_expired`。
 - 会话状态放进 `session.data`，状态变更返回 `update_session`；不要再靠进程内 dict/lock 才能续局。
 - `source` 描述事件类型和来源通道；`actor` 是当前行为主体；`sender` 是发出消息的人或 Bot；`source_actor` 可表示可信外部通知 Bot；`player` 是付款绑定玩家；`payment.status=confirmed` 才能作为到账依据。
 - `session.channel` 表示当前整段会话默认收发通道；普通发送动作不用手写 `send_via`，平台会继承会话通道。
@@ -42,7 +42,7 @@
 - `ctx.client` 只保留给管理员命令和高级兼容场景；远程插件仍不能直接拿 token、session、Bot API client 或 live event。
 - `command` 只保存裸指令名，不保存前缀；schema/usage 模板用 `{prefix}`，运行时帮助与错误示例必须调用 `from app.worker.command import current_command_prefix`，使用 `current_command_prefix(fallback=",")`。不要从 `ctx.account_config` 读取系统前缀，也不要硬编码逗号。
 - `on_command(ctx, cmd, args, event) -> bool` 保留给账号主人/授权管理员命令；群友公开触发走 Event Bus 订阅。
-- `on_message` 是旧消息监听兼容 hook；新增 Telegram 交互优先写标准事件入口或 `on_interaction` 迁移桥。
+- `on_message` 是旧消息监听兼容 hook；新增 Telegram 交互优先写 `on_event` 标准事件入口，`on_interaction` 只作为迁移桥。
 - 已有 `interaction_entries` 插件迁移时，要把入口事件映射到 `event_subscriptions`，把 `payload_contract/result_contract/settlement` 转成标准信封和标准 action。
 - `interaction_entries[].session_scope` 的迁移含义：群局映射为 `session.scope=chat`，个人流程映射为 `session.scope=user`，一次性动作映射为无持久 session。
 - 规则 `concurrency=user` 只是触发频控粒度，不等于插件会话 key。
@@ -83,7 +83,7 @@ async def ping(ctx):
 显式 Event Bus 单入口模板：
 
 ```python
-async def on_interaction(self, ctx, entry_key, payload):
+async def on_event(self, ctx, payload):
     event = payload["tp_event"]
 
     if event.type == "command":

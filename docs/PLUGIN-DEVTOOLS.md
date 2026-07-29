@@ -29,7 +29,7 @@ python scripts/tp_plugin.py register ../plugins/local_imports/my_game
 
 ### `new`
 
-`new` 生成一个可运行插件骨架，支持 `--profile session_game|command|passthrough`，默认生成到 `plugins/local_imports/<name>`，也可以用 `--dir <父目录>` 指定父目录。
+`new` 生成一个可运行插件骨架，支持 `--profile session_game|command|passthrough`，默认生成到 `plugins/local_imports/<name>`，也可以用 `--dir <父目录>` 指定父目录。当前 `session_game` 和 `command` 模板保留 `interaction_entries + on_interaction` 兼容桥，适合迁移旧玩法或快速生成包结构；新标准插件应参考 `examples/plugins/hello_ping` / `event_bus_demo`，使用 `event_subscriptions + on_event`。
 
 常用命令：
 
@@ -205,15 +205,19 @@ POST /api/dispatch/router-debug-trace
 
 ## 7. 从零开发一个玩法插件的推荐流程
 
-1. 生成骨架：
+1. 复制标准 Event Bus 模板：
 
 ```bash
-tp_plugin new guess_number --profile session_game
+cp -R examples/plugins/event_bus_demo plugins/local_imports/guess_number
 ```
+
+如果需要先生成完整包结构，也可以运行 `tp_plugin new guess_number --profile session_game`，但要把生成的
+`interaction_entries + on_interaction` 兼容入口迁成 `event_subscriptions + on_event` 后再继续。
 
 2. 写玩法逻辑：
 
-- 在 `plugin.py` 里优先实现 `on_interaction(ctx, entry_key, payload)`。
+- 把 `plugin.json.name`、`MANIFEST.key`、插件类 `key` 和展示信息统一改为新插件值。
+- 在 `plugin.py` 里实现 `on_event(ctx, payload)`。
 - 用 `start_session`、`update_session`、`end_session` 管单局状态。
 - 发送用 `send_message` / `edit_message` / `edit_caption` / `payout` 等标准 action 或 `ctx.messages` facade。
 - 涉及派奖时，在 `permissions` 里显式声明 `payout`，并考虑加 `strict_trace: true`。

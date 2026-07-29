@@ -52,13 +52,16 @@ usage = "发送 {prefix}guess 100 开始游戏。"
 
 `ctx.account_config` 是当前插件的账号级原始配置，不包含系统 `command_prefix`。把它当成系统设置读取会长期回退成 `,`，这是插件帮助文案前缀错误的常见根因。
 
-简单模式和显式 Manifest 模式可以共存：同一个系统里可以同时加载只有 `@plugin.command` 的简单插件，也可以加载带 `PLUGIN_CLASS` / `MANIFEST` 的完整插件。简单模式适合快速玩法、账号命令、小工具和内部自动化；显式 Manifest 适合需要 `plugin.json` 展示字段、`event_subscriptions`、`interaction_entries`、配置 schema、HTTP/AI 权限、按钮回调、Inline、付款、会话状态或完整 Trace 的插件。
+简单模式和显式 Manifest 模式可以共存：同一个系统里可以同时加载只有 `@plugin.command` 的简单插件，也可以加载带 `PLUGIN_CLASS` / `MANIFEST` 的完整插件。简单模式适合快速玩法、账号命令、小工具和内部自动化；显式 Manifest 适合需要 `plugin.json` 展示字段、`event_subscriptions`、配置 schema、HTTP/AI 权限、按钮回调、Inline、付款、会话状态或完整 Trace 的插件。
 
 > 当前 `tp_plugin new` 只提供 `session_game` / `command` / `passthrough` 三种 profile，代码里没有 `--profile simple`。所以简单模式先按上面的单文件方式手写；不要在文档或脚本里使用不存在的 `tp_plugin new --profile simple`。
 
-## 1. 显式 Manifest 脚手架（tp_plugin）
+## 1. 显式 Manifest 兼容桥脚手架（tp_plugin）
 
-不想手写显式 Manifest 的四个文件，可以用脚手架一键生成一个「已经能跑、且能通过校验」的骨架，再改成自己的玩法。三条命令：
+`tp_plugin new` 可以生成一套已经能跑、且能通过校验的四文件骨架。当前 `session_game` 和
+`command` profile 仍保留 `interaction_entries + on_interaction` 兼容桥，适合迁移旧玩法或先生成包结构；
+新标准插件应继续阅读第 2 至 5 节，改成 `event_subscriptions + on_event`，也可以直接复制
+`examples/plugins/hello_ping` 或 `examples/plugins/event_bus_demo`。三条命令：
 
 ```bash
 # 1) 生成骨架（profile 可选 session_game / command / passthrough）
@@ -78,18 +81,18 @@ make plugin-check dir=plugins/local_imports/my_game    # 校验
 make plugin-register dir=plugins/local_imports/my_game # 登记
 ```
 
-三种 profile 各自演示一类主路径写法：
+三种 profile 当前演示的入口：
 
 | profile | 场景 | 骨架演示的入口 |
 | --- | --- | --- |
-| `session_game` | 群局抢答/对战，有平台会话 | `on_interaction`：开局 `start_session → send_message → update_session`，命中 `payout + result + end_session` |
-| `command` | 一次性命令动作，不建会话 | `on_command`（UserBot 原命令兼容）+ `on_interaction` 处理 `command` 事件 |
+| `session_game` | 旧群局抢答/对战迁移，有平台会话 | `on_interaction` 兼容桥：开局 `start_session → send_message → update_session`，命中 `payout + result + end_session` |
+| `command` | 旧一次性命令动作迁移，不建会话 | `on_command`（UserBot 原命令兼容）+ `on_interaction` 兼容桥处理 `command` 事件 |
 | `passthrough` | 抢红包/秒杀等低延时直通 | `capabilities.telegram_direct_passthrough` + `on_direct_message` |
 
 一个完整流程（以 `session_game` 为例）：
 
 1. `tp_plugin new my_game --profile session_game`，默认落到 `plugins/local_imports/my_game`。
-2. 打开 `plugin.py` 把口令抢答改成你的玩法；`plugin.json` 与 `manifest.py` 的字段要一起改并保持一致。
+2. 打开 `plugin.py` 把口令抢答改成你的玩法，并把兼容入口迁成 `on_event`；在 `plugin.json` 与 `manifest.py` 同步声明 `event_subscriptions`。
 3. `tp_plugin check plugins/local_imports/my_game` 看有没有报错或 `unknown_events` 警告。
 4. `tp_plugin register plugins/local_imports/my_game` 登记；重复登记会给出「已登记，无需重复」的友好提示。
 5. 回到 Web「插件中心」，选择账号启用 `my_game`；在交互 Bot 上用命令或群内关键词开局。
@@ -97,7 +100,7 @@ make plugin-register dir=plugins/local_imports/my_game # 登记
 
 > 关于 `session_game` 开局动作序列：骨架把 `start_session` 放在 `send_message`、`update_session` 之前。这是当前所有通道（命令/关键词/付款）都安全的写法——平台会先单独处理 `start_session` 建会话，随后的 `update_session` 才不会因会话不存在而悬空。骨架注释里也写了这一点。
 
-骨架自带一份 `test_plugin.py` pytest 样板（直调 `on_interaction` / `on_direct_message` 断言动作序列），可作为你玩法回归测试的起点。下面第 2–7 节讲的是同样四个文件的手写细节，想理解内部结构再往下读。
+骨架自带一份 `test_plugin.py` pytest 样板（直调兼容 `on_interaction` / `on_direct_message` 断言动作序列），可作为迁移测试起点。迁到 `on_event` 后应同步修改测试入口。下面第 2 至 7 节讲的是标准四文件写法。
 
 ## 2. 显式 Manifest 目录结构
 

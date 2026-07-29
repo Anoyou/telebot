@@ -132,8 +132,15 @@ git diff --check
 
 ```bash
 make status
+# 源码开发模式
 curl -fsS http://127.0.0.1:8000/healthz
 curl -fsS http://127.0.0.1:8000/readyz
+
+# Docker Compose 生产模式：web:8000 不暴露到宿主机
+PUBLISH_PORT="$(sed -n 's/^WEB_PORT_PUBLISH=//p' .env | tail -n1 | tr -d '"')"
+PUBLISH_PORT="${PUBLISH_PORT##*:}"
+curl -fsS "http://127.0.0.1:${PUBLISH_PORT:-80}/healthz"
+docker compose exec -T web python -c "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8000/readyz', timeout=5).read().decode())"
 docker compose ps
 docker compose logs --tail=100 web
 ```

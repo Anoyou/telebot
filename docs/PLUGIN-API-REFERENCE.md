@@ -22,7 +22,7 @@ Event Bus、Trace、MessageOps 是标准链路内部契约，不是第四种模�
 from app.worker.plugins.events import event_from_interaction_payload
 
 
-async def on_interaction(self, ctx, entry_key, payload):
+async def on_event(self, ctx, payload):
     event = payload["tp_event"] if "tp_event" in payload else event_from_interaction_payload(payload)
     text = event.message.text or ""
     if "ping" not in text:
@@ -66,7 +66,7 @@ async def on_direct_message(self, ctx, event):
 
 推荐写法：
 
-1. 用一个 `on_interaction(ctx, entry_key, payload)` 覆盖 `command`、`keyword`、`payment_confirmed`、`message`、`callback_query`、`session_expired`。
+1. 用一个 `on_event(ctx, payload)` 覆盖 `command`、`keyword`、`payment_confirmed`、`message`、`callback_query`、`session_expired`。
 2. 读取 `payload["tp_event"]` 或 `event_from_interaction_payload(payload)`，不要再围绕旧平铺字段写分支。
 3. 单局状态保存在 `session.data`，变更后返回 `update_session`；不要再依赖进程内全局状态才能继续游戏。
 4. 普通发送类动作不要写 `send_via`，平台会继承 `session.channel`；只有跨通道公告、特殊管理消息或迁移桥兼容这类高级场景才显式覆盖。
@@ -97,8 +97,16 @@ class Plugin:
         """插件关停前调用一次。必须幂等。"""
 
     # === 事件处理 ===
+    async def on_event(self, ctx: PluginContext, payload: dict) -> list[dict] | None:
+        """Event Bus 主入口；新插件优先实现。"""
+
+    async def on_interaction(
+        self, ctx: PluginContext, entry_key: str, payload: dict
+    ) -> list[dict] | None:
+        """历史交互入口兼容桥。"""
+
     async def on_message(self, ctx: PluginContext, event) -> None:
-        """消息事件回调。"""
+        """历史消息事件回调。"""
 
     async def on_command(self, ctx: PluginContext, cmd: str, args: list[str], event) -> bool:
         """指令派发回调。返回 True 表示已处理。"""
@@ -132,6 +140,7 @@ class PluginContext:
     rules: list            # 规则列表
     client: Any | None     # 受控客户端 facade；新插件不要作为主动发送主路径
     messages: Any | None   # MessageOps facade；发送/编辑/删除/按钮/Inline 主路径
+    identities: Any | None # 群内安全公开身份 facade
     http: Any | None       # HTTP facade；需要 external_http + allowed_hosts
     ai: Any | None         # AI facade；需要 ai_text
     engine: Any | None     # RateLimitEngine；安装型插件通常为 None
@@ -141,6 +150,12 @@ class PluginContext:
     log: Callable          # 日志函数
     scheduler: Any         # 平台调度器 facade
     generation: int        # generation guard 计数
+    account_proxy_url: str | None  # 账号代理 URL；只供平台 facade 组装，不应写入日志
+
+    # 简单模式命令运行字段
+    event: Any | None
+    args: list[str]
+    command: str
 
     # 工具方法
     async def conversation(self, peer, timeout=30) -> Conversation:

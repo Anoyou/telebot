@@ -15,6 +15,7 @@
 - `System Agent Runtime`：全局悬浮助手与管理 Bot 共用的受限 Agent 循环；通过 Durable Run 持久化运行事件并调用现有业务 service。
 - `Account Bot Manager`：管理每账号可选的控制 Bot polling runtime，用于授权用户的远程运维入口。
 - `Interaction Bot Manager`：管理群消息、关键词、按钮、付款确认和交互会话使用的 Bot polling runtime。
+- `Private Updater`：仅在 Docker 内网提供在线更新执行能力，挂载部署目录和 Docker socket；Web 通过共享 token 创建和查询更新任务，公网不直接访问该服务。
 
 ## 2. 关键数据流
 
@@ -25,6 +26,7 @@
 - 交互 Bot runtime 接收群消息、callback 和外部付款证据，完成规则匹配与会话路由；插件业务通过 Event Bus、标准事件信封和 MessageOps 执行。
 - `payout` 不随会话通道切换，固定交给账号 Worker 的 userbot 执行，并进入限额、持久化幂等、补偿和 ActionEvent 链路。
 - 系统助手的 Web 请求先创建 Durable Run，后台任务从 Provider 原生 SSE 接收真实文本 delta，并按单调 `seq` 写入 `system_agent_run_event`；浏览器断线后从游标补收。工具调用前草稿用 reset 事件撤销，最终全文落入消息表作为权威结果。
+- Web 在线更新先由控制面生成更新计划，再把任务交给 Private Updater 执行；Updater 自更新放在业务服务健康检查之后，通过独立 handoff 完成，避免更新器重建自身时中断任务。
 
 ### 2.1 AI 流式链路
 

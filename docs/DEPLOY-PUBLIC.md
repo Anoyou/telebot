@@ -30,7 +30,7 @@ curl -fsSL https://raw.githubusercontent.com/Anoyou/telebot/main/scripts/install
 - 安装 Git、Make、Docker 和 Docker Compose v2。
 - 拉取 TelePilot 到 `/opt/telepilot`。
 - 生成生产用 `.env`。
-- 启动数据库、Redis、后端和前端。
+- 启动数据库、Redis、后端、内网 Updater 和前端。
 
 如果 80 端口被占用，可以指定别的端口：
 
@@ -64,7 +64,7 @@ curl -fsSL https://raw.githubusercontent.com/Anoyou/telebot/main/scripts/install
   | env WEB_PORT_PUBLISH=127.0.0.1:8080 COOKIE_SECURE=true bash
 ```
 
-这条命令会安装基础依赖与 Docker Compose v2、拉取仓库到 `/opt/telepilot`、生成生产 `.env`，并执行 `make prod-up` 启动 `postgres` / `redis` / `web` / `frontend`。如果 `WEB_PORT_PUBLISH` 指定的端口已被占用，脚本会保留 host 绑定并自动递增到可用端口，例如从 `127.0.0.1:8080` 改到 `127.0.0.1:8081`。
+这条命令会安装基础依赖与 Docker Compose v2、拉取仓库到 `/opt/telepilot`、生成生产 `.env`，并执行 `make prod-up` 启动 `postgres` / `redis` / `web` / `updater` / `frontend`。如果 `WEB_PORT_PUBLISH` 指定的端口已被占用，脚本会保留 host 绑定并自动递增到可用端口，例如从 `127.0.0.1:8080` 改到 `127.0.0.1:8081`。
 
 如果已经克隆仓库，也可以在仓库目录内手动配置：
 
@@ -240,10 +240,10 @@ make prod-up
 ## 8. 验收清单
 
 1. `git rev-parse HEAD` 是本次目标 commit，`grep` 四处版本号一致。
-2. `docker compose ps` 中 `postgres` / `redis` / `web` / `frontend` 均为 running 或 healthy。
-3. `curl -fsS http://127.0.0.1:8000/healthz` 返回健康结果，确认 FastAPI 进程存活。
-4. `curl -fsS http://127.0.0.1:8000/readyz` 返回 `ok=true`，并确认 DB、Redis、Worker Supervisor、账号 Bot manager 和交互 Bot manager 均正常；生产流量与更新完成判定以此为准。
-5. `curl -I http://127.0.0.1:8080` 能返回前端响应。
+2. `docker compose ps` 中 `postgres` / `redis` / `web` / `updater` / `frontend` 均为 running 或 healthy。
+3. 运行 `PUBLISH_PORT="$(sed -n 's/^WEB_PORT_PUBLISH=//p' .env | tail -n1 | tr -d '\"')"; PUBLISH_PORT="${PUBLISH_PORT##*:}"; curl -fsS "http://127.0.0.1:${PUBLISH_PORT:-80}/healthz"`，确认 FastAPI 进程存活。生产 Compose 不把 `web:8000` 暴露到宿主机。
+4. 在 Web 容器内执行 `docker compose exec -T web python -c "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8000/readyz', timeout=5).read().decode())"`，确认返回 `ok=true`，并确认 DB、Redis、Worker Supervisor、账号 Bot manager 和交互 Bot manager 均正常；生产流量与更新完成判定以此为准。
+5. 使用上一步得到的 `PUBLISH_PORT` 执行 `curl -I "http://127.0.0.1:${PUBLISH_PORT:-80}"`，确认前端能够响应。
 6. `docker compose logs --tail=100 web` 没有迁移、导入、路由或关键组件反复重试错误。
 7. `https://telepilot.example.com` 可打开登录页。
 8. 浏览器 Cookie 带 `Secure`，确认 `COOKIE_SECURE=true` 生效。

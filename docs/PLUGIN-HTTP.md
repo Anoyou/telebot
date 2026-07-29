@@ -4,31 +4,13 @@
 
 ## 4. PluginContext
 
-```python
-@dataclass
-class PluginContext:
-    account_id: int
-    feature_key: str
-    config: dict           # 当前账号的插件配置
-    account_config: dict   # 原始账号级配置（不含 schema/global 合并值）
-    rules: list            # 规则列表
-    client: Any | None     # 受控客户端 facade；新插件不要作为主动发送主路径
-    messages: Any | None   # MessageOps facade；发送/编辑/删除/按钮/Inline 主路径
-    http: Any | None       # HTTP facade；需要 external_http + allowed_hosts
-    ai: Any | None         # AI facade；需要 ai_text
-    engine: Any | None     # RateLimitEngine；安装型插件通常为 None
-    redis: Any | None      # redis.asyncio.Redis；低层兼容入口
-    storage: Any | None    # PluginStorage；按账号和插件隔离的持久化 KV facade
-    log: Callable          # 日志函数
-    scheduler: Any         # 平台调度器 facade
-    generation: int        # generation guard 计数
+完整字段表以 [PLUGIN-API-REFERENCE.md](./PLUGIN-API-REFERENCE.md#4-plugincontext) 为唯一来源。
+HTTP 插件通常会用到 `ctx.http`、`ctx.storage`、`ctx.data_dir`、`ctx.log` 和 `ctx.account_id`；
+需要安全展示群成员身份时使用 `ctx.identities`。不要在本页复制完整 dataclass，避免字段随运行时扩展后产生两份不同的参考。
 
-    # 工具方法
-    async def conversation(self, peer, timeout=30) -> Conversation:
-        """创建与 bot 的对话会话。"""
-```
-
-注意：核心平台兼容代码可能拿到完整运行时能力；远程/本地/插件库安装型插件拿到的是受控上下文：`ctx.client` 是平台提供的客户端 facade，指令 handler 中传入的 `client` 参数与 `ctx.client` 同源。当前 worker 加载路径会向插件上下文注入低层 `ctx.redis`，并基于同一个 Redis 后端构造 `ctx.storage`；新插件需要持久化状态时应优先使用 `ctx.storage`，不要自行拼 Redis key。`ctx.engine` 仍只供核心 builtin 兼容代码直接依赖，安装型插件通常为 `None`。受控上下文用于收口常用操作和审计，不是公共插件市场式强沙箱。
+核心平台兼容代码可能拿到完整运行时能力；远程、本地和插件库安装型插件拿到的是受控上下文。
+`ctx.client` 是平台提供的客户端 facade，`ctx.redis` 是低层兼容入口。新插件需要持久化普通状态时优先使用
+`ctx.storage`，文件型数据写入 `ctx.data_dir`，不要自行拼 Redis key，也不要把运行数据写进插件代码目录。
 
 ### 4.0 受控 facade：ctx.http 与 ctx.ai
 

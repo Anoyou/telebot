@@ -46,6 +46,7 @@ make prod-up
 - `postgres`：主数据存储
 - `redis`：IPC、限速和任务状态；生产默认 AOF everysec + noeviction，磁盘不足时应先扩容或清理，不能依赖逐出关键键
 - `web`：FastAPI + worker supervisor
+- `updater`：仅 Docker 内网可访问的在线更新执行器
 - `frontend`：nginx 静态前端 + 后端反代
 
 常用命令：
@@ -84,7 +85,7 @@ TELEPILOT_UPDATE_BRANCH=main make prod-update
 
 ```bash
 cd /opt/telepilot
-TELEPILOT_UPDATE_BRANCH=codex/0.33-interaction-framework make prod-update
+TELEPILOT_UPDATE_BRANCH=codex/your-release-branch make prod-update
 ```
 
 ### Web 面板自更新
@@ -112,9 +113,15 @@ TELEPILOT_HOST_PROJECT_DIR=/opt/telepilot make prod-up
 ```bash
 git rev-parse HEAD
 docker compose ps
-curl -fsS http://127.0.0.1:8000/healthz
+PUBLISH_PORT="$(sed -n 's/^WEB_PORT_PUBLISH=//p' .env | tail -n1 | tr -d '"')"
+PUBLISH_PORT="${PUBLISH_PORT##*:}"
+curl -fsS "http://127.0.0.1:${PUBLISH_PORT:-80}/healthz"
+docker compose exec -T web python -c "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8000/readyz', timeout=5).read().decode())"
 docker compose logs --tail=100 web
 ```
+
+生产 Compose 不把 `web:8000` 发布到宿主机。`/healthz` 可经 frontend 的实际发布端口检查；
+`/readyz` 当前应在 Web 容器内请求。
 
 仅代码且不含迁移时可回滚：
 

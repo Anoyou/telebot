@@ -4,7 +4,7 @@
 
 <p align="center">
   <a href="#快速开始"><img src="https://img.shields.io/badge/deploy-self--hosted-f97316?style=flat-square" alt="自托管部署"></a>
-  <a href="./backend/pyproject.toml"><img src="https://img.shields.io/badge/Python-3.12%20%7C%203.13-3776ab?style=flat-square" alt="Python 3.12 或 3.13"></a>
+  <a href="./backend/pyproject.toml"><img src="https://img.shields.io/badge/Python-3.12-3776ab?style=flat-square" alt="Python 3.12"></a>
   <a href="./frontend/package.json"><img src="https://img.shields.io/badge/PWA-Web%20%2B%20Mobile-171717?style=flat-square" alt="Web 与 PWA"></a>
   <a href="./LICENSE"><img src="https://img.shields.io/github/license/Anoyou/Telebot?style=flat-square&amp;color=171717" alt="MIT License"></a>
 </p>
@@ -23,7 +23,7 @@ TelePilot 面向需要自托管 Telegram 自动化的个人用户和小团队。
 插件中心是当前默认入口。先沉淀可复用的指令、消息和 AI 模板，再按账号启用，新账号不需要重复配置。
 
 <p align="center">
-  <img src="./assets/readme/plugin-center.png" width="100%" alt="TelePilot 0.84 插件中心，包含首次部署推荐、插件分类和账号插件配置">
+  <img src="./assets/readme/plugin-center.png" width="100%" alt="TelePilot 插件中心，包含首次部署推荐、插件分类和账号插件配置">
 </p>
 
 <p align="center">
@@ -117,7 +117,7 @@ flowchart LR
 
 ### 本机试用
 
-需要 Python 3.12 或 3.13、Node.js 22、pnpm 10.23、Docker Desktop 或 Docker Engine、Docker Compose v2、curl 和 `make`。
+需要 Python 3.12、Node.js 22、pnpm 10.23、Docker Desktop 或 Docker Engine、Docker Compose v2、curl 和 `make`。后端包声明为 Python `>=3.12`，但当前 CI 基线只验证 3.12；使用更高版本前请先跑完整后端测试。
 
 ```bash
 git clone https://github.com/Anoyou/Telebot telepilot

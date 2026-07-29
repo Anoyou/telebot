@@ -1,4 +1,4 @@
-# 生产部署：postgres + redis + web (FastAPI + supervisor) + frontend (nginx)
+# 生产部署：postgres + redis + web (FastAPI + supervisor) + updater + frontend (nginx)
 # 使用方式：
 #   1. cp .env.example .env  并填入 MASTER_KEY / JWT_SECRET 等
 #   2. docker compose up -d --build

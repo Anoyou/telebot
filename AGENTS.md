@@ -35,3 +35,13 @@
 - 处理代码、文档、排障、UI、部署或发布任务时，先阅读并按需使用 `docs/AGENT-PLAYBOOKS.md`。
 - 复杂需求先走基础进入流程；Bug/异常优先使用 Plugin Hunt 的根因定位口径；UI 改动使用 UI Check；部署/远端操作使用 Deploy Check；推版、PR、release 使用 Release Check。
 - Playbook 只用于约束执行和验收，不得覆盖用户当前指令、版本发布规则或工作区安全规则。
+
+## 项目地图与验证
+
+- `backend/app/api/`：FastAPI 路由与请求 schema 边界；接口事实以运行中的 OpenAPI 和 Pydantic schema 为准。
+- `backend/app/services/`：控制面业务服务。`account_bot_runtime.py` 是 Bot runtime 热点，改动后至少运行 `pytest app/tests/test_account_bot.py`。
+- `backend/app/worker/plugins/`：插件加载、Event Bus、MessageOps、权限和兼容桥。`loader.py` 是插件运行时热点，改动后至少运行 `pytest app/tests/test_plugin_loader.py` 与插件示例校验。
+- `backend/app/services/system_agent/`：System Agent 路由、工具、Skill、Action 与 Durable Run；改动后运行对应 `test_system_agent_*.py`，不要只做单文件语法检查。
+- `frontend/src/pages/` 与 `frontend/src/components/`：Web/PWA 页面和共享组件；前端改动至少运行 `pnpm --dir frontend typecheck`，涉及交互或构建入口时再运行 `pnpm --dir frontend build`。
+- `docs/PLUGIN-API-REFERENCE.md` 是插件字段与兼容语义的完整参考；短文档只保留入口和特有内容，避免复制完整字段表。
+- 默认全量验证入口：`cd backend && . .venv/bin/activate && ruff check app && pytest`，随后在仓库根目录运行 `backend/.venv/bin/python scripts/validate-plugin-examples.py`、`pnpm --dir frontend test`、`pnpm --dir frontend build` 和 `git diff --check`。
