@@ -9276,6 +9276,56 @@ def test_paid_pool_callback_allows_session_starter_as_controller(monkeypatch) ->
     assert account_bot_runtime._interaction_participant_block_message(stranger_callback, rule, session) == "请先加入本局，再操作牌桌按钮。"
 
 
+def test_paid_pool_empty_participant_list_allows_session_starter_to_pick_stake(monkeypatch) -> None:
+    monkeypatch.setattr(
+        account_bot_service,
+        "declared_module_entry_manifest",
+        lambda module_key, entry_key: {"participant_policy": "paid_pool"}
+        if (module_key, entry_key) == ("ten_half", "start_ten_half")
+        else None,
+    )
+    rule = {
+        "id": "ten-half-paid",
+        "action": "module",
+        "module_key": "ten_half",
+        "module_action": "start_ten_half",
+        "module_session_scope": "chat",
+    }
+    session = {
+        "started_by_user_id": 999,
+        "paid_user_ids": [],
+        "participant_user_ids": [],
+    }
+
+    starter_callback = account_bot_runtime.Incoming(
+        account_id=1,
+        token="bbot-token",
+        update_id=1,
+        user_id=999,
+        chat_id=-100123,
+        message_id=90,
+        text="",
+        callback_id="cb-stake-owner",
+        callback_data="th:stake:1000",
+        display_name="Owner",
+    )
+    stranger_callback = account_bot_runtime.Incoming(
+        account_id=1,
+        token="bbot-token",
+        update_id=2,
+        user_id=333,
+        chat_id=-100123,
+        message_id=91,
+        text="",
+        callback_id="cb-stake-stranger",
+        callback_data="th:stake:1000",
+        display_name="Stranger",
+    )
+
+    assert account_bot_runtime._interaction_participant_block_message(starter_callback, rule, session) is None
+    assert account_bot_runtime._interaction_participant_block_message(stranger_callback, rule, session) == "请先加入本局，再操作牌桌按钮。"
+
+
 @pytest.mark.asyncio
 async def test_live_message_start_session_action_writes_interaction_session(monkeypatch) -> None:
     class _DB:

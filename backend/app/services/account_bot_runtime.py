@@ -4247,6 +4247,10 @@ def _interaction_participant_block_message(
         return "请用真实 Telegram 用户身份操作该玩法。"
     if policy == "paid_pool" and incoming.callback_id and _paid_pool_callback_allows_unjoined_user(incoming):
         return None
+    if policy == "paid_pool":
+        started_by_user_id = _int_or_none(session.get("started_by_user_id")) if isinstance(session, dict) else None
+        if started_by_user_id is not None and int(incoming.user_id) == started_by_user_id:
+            return None
     participant_ids = _interaction_session_participant_ids(session, policy=policy)
     if not participant_ids:
         if policy == "paid_pool" and _interaction_session_has_explicit_participant_list(session):
@@ -4254,10 +4258,6 @@ def _interaction_participant_block_message(
         return None
     if int(incoming.user_id) in participant_ids:
         return None
-    if policy == "paid_pool":
-        started_by_user_id = _int_or_none(session.get("started_by_user_id")) if isinstance(session, dict) else None
-        if started_by_user_id is not None and int(incoming.user_id) == started_by_user_id:
-            return None
     if policy == "paid_pool":
         return "请先加入本局，再操作牌桌按钮。"
     return "这不是你的玩法，请由付款或开局本人操作。"
