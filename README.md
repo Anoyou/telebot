@@ -145,7 +145,7 @@ make down     # 停止服务，保留数据和依赖
 curl -fsSL https://raw.githubusercontent.com/Anoyou/telebot/main/scripts/install-server.sh | bash
 ```
 
-脚本默认安装到 `/opt/telepilot`，生成生产密钥并启动 PostgreSQL、Redis、FastAPI/Worker、前端 Nginx 和内网 Updater。公网使用前还要配置 HTTPS、反向代理和备份，详见 [公网部署指南](./docs/DEPLOY-PUBLIC.md)。
+脚本默认安装到 `/opt/telepilot`，生成生产密钥，从 GHCR 拉取预构建的 AMD64/ARM64 应用镜像，并启动 PostgreSQL、Redis、FastAPI/Worker、前端 Nginx 和内网 Updater。服务器不需要编译前端或应用镜像。公网使用前还要配置 HTTPS、反向代理和备份，详见 [公网部署指南](./docs/DEPLOY-PUBLIC.md)。
 
 已克隆仓库可以手动初始化生产配置：
 
@@ -203,6 +203,7 @@ make plugin-register dir=plugins/local_imports/my_game
 | 组件、数据流和生命周期 | [架构说明](./docs/TELEPILOT-ARCHITECTURE.md) |
 | 平台模块热关闭与恢复 | [平台能力](./docs/PLATFORM-CAPABILITIES.md) |
 | System Agent、Durable Run 与 Action | [系统助手](./docs/SYSTEM-AGENT.md) |
+| 内部 HTTP API、认证、错误与类型生成 | [API 契约](./docs/API-CONTRACT.md) |
 | 插件开发入口 | [插件开发指南](./docs/PLUGIN-DEV-GUIDE.md) |
 | 插件字段、事件、action 和生命周期 | [插件 API 参考](./docs/PLUGIN-API-REFERENCE.md) |
 | 外部系统触发插件 | [Webhook Quickstart](./docs/PLUGIN-WEBHOOK-QUICKSTART.md) |

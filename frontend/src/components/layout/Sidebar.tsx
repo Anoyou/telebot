@@ -32,8 +32,8 @@ import {
 } from "@/components/ui/dropdown-menu";
 // DropdownMenuContent kept for Suspense fallback shell
 import { cn } from "@/lib/utils";
-import { APP_VERSION_LABEL } from "@/lib/version";
-import { getPlatformCapabilities, getSystemSettings, patchSystemSettings } from "@/api/system";
+import { formatRuntimeVersionLabel } from "@/lib/runtime-version";
+import { getBackendVersion, getPlatformCapabilities, getSystemSettings, patchSystemSettings } from "@/api/system";
 import { listSystemAgentActions } from "@/api/systemAgent";
 import { getErrMsg } from "@/lib/api";
 import {
@@ -259,6 +259,17 @@ function SidebarBody({
   onNavigate?: () => void;
 }) {
   const [changelogOpen, setChangelogOpen] = useState(false);
+  const versionQ = useQuery({
+    queryKey: ["system", "version"],
+    queryFn: getBackendVersion,
+    staleTime: 30_000,
+    refetchInterval: 60_000,
+    refetchIntervalInBackground: false,
+  });
+  const runtimeVersionLabel = formatRuntimeVersionLabel(
+    versionQ.data,
+    versionQ.isError ? "版本读取失败" : "正在读取…",
+  );
 
   return (
     <>
@@ -318,8 +329,11 @@ function SidebarBody({
               <span className={cn("min-w-0 flex-1 truncate text-sm", collapsed && "sr-only")}>
                 更新日志
               </span>
-              <span className={cn("shrink-0 text-xs font-medium", collapsed && "sr-only")}>
-                {APP_VERSION_LABEL}
+              <span
+                className={cn("max-w-28 truncate text-xs font-medium", collapsed && "sr-only")}
+                title={runtimeVersionLabel}
+              >
+                {runtimeVersionLabel}
               </span>
             </button>
           </DropdownMenuTrigger>

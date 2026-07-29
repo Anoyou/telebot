@@ -23,12 +23,28 @@ FORCE_FULL=0
 OLD_COMMIT=""
 HEAD_ALREADY_UPDATED=0
 HANDOFF_SCHEDULED=0
+NEEDS_UPDATER_HANDOFF=0
 PATCH_CONTAINER=""
-WEB_SYNC_OLD_IMAGE_ID=""
+WEB_SYNC_OLD_IMAGE_REF=""
 WEB_SYNC_IMAGE_REF=""
 WEB_SYNC_ACTIVE=0
+REQUIRES_MIGRATION=0
 RUNNING_UPDATER_TOKEN="${UPDATER_TOKEN:-}"
+TOKEN_ROTATION_REQUIRED=0
+TOKEN_ROTATION_HOST_RECREATE=0
 PROGRESS_PREFIX="@@TELEPILOT_PROGRESS@@"
+TARGET_IMAGE_COMMIT=""
+TARGET_WEB_IMAGE=""
+TARGET_FRONTEND_IMAGE=""
+TARGET_UPDATER_IMAGE=""
+NEEDS_PLUGIN_SYNC=0
+VERIFIED_IMAGE_REF=""
+PLUGIN_SYNC_ACTIVE=0
+PLUGIN_ROLLBACK_STAGE=""
+SWITCHED_SERVICES=()
+SWITCHED_OLD_IMAGES=()
+SWITCHED_ENV_KEYS=()
+SWITCHED_TIMEOUTS=()
 
 emit_progress() {
   local percent="$1" phase="$2" detail="${3:-}"
@@ -67,6 +83,69 @@ while [[ $# -gt 0 ]]; do
   shift
 done
 
+if [[ "${TELEPILOT_SKIP_UPDATER_RECREATE:-0}" == "1" ]] \
+  && [[ ! "${TELEPILOT_UPDATE_JOB_ID:-}" =~ ^[0-9a-f]{12}$ ]]; then
+  die "内部 updater 更新缺少合法任务 ID，拒绝在无法可靠收尾的状态下开始"
+fi
+
+rollback_switched_services() {
+  local index service old_image env_key timeout
+  for (( index=${#SWITCHED_SERVICES[@]} - 1; index >= 0; index-- )); do
+    service="${SWITCHED_SERVICES[$index]}"
+    old_image="${SWITCHED_OLD_IMAGES[$index]}"
+    env_key="${SWITCHED_ENV_KEYS[$index]}"
+    timeout="${SWITCHED_TIMEOUTS[$index]}"
+    if (( REQUIRES_MIGRATION == 1 )) && [[ "$service" == "web" ]]; then
+      warn "本次已进入数据库迁移边界，不自动把 web 回退到旧代码；请按备份恢复流程处理"
+      continue
+    fi
+    warn "恢复 $service 更新前镜像：$old_image"
+    if ! env "$env_key=$old_image" \
+      docker compose up -d --no-build --no-deps --force-recreate "$service"; then
+      err "$service 旧镜像重建失败"
+      continue
+    fi
+    wait_compose_healthy docker-compose.yml "$service" "$timeout" \
+      || err "$service 回滚后仍未恢复健康"
+    set_env_value .env "$env_key" "$old_image" || true
+  done
+  SWITCHED_SERVICES=()
+  SWITCHED_OLD_IMAGES=()
+  SWITCHED_ENV_KEYS=()
+  SWITCHED_TIMEOUTS=()
+}
+
+rollback_tracked_plugins() {
+  local path target old_list new_list old_tree
+  (( PLUGIN_SYNC_ACTIVE == 1 )) || return 0
+  old_list="$PLUGIN_ROLLBACK_STAGE/old-files"
+  new_list="$PLUGIN_ROLLBACK_STAGE/new-files"
+  old_tree="$PLUGIN_ROLLBACK_STAGE/old-tree"
+  warn "恢复更新前的 Git 跟踪插件文件"
+  while IFS= read -r path; do
+    [[ "$path" == plugins/installed/* && "$path" != *".."* ]] || continue
+    if ! grep -Fxq "$path" "$old_list"; then
+      target="/app/$path"
+      docker compose exec -T web python -c \
+        'from pathlib import Path; import sys; Path(sys.argv[1]).unlink(missing_ok=True)' \
+        "$target" || true
+    fi
+  done < "$new_list"
+  while IFS= read -r path; do
+    [[ "$path" == plugins/installed/* && "$path" != *".."* ]] || continue
+    target="/app/$path"
+    docker compose exec -T web python -c \
+      'from pathlib import Path; import sys; Path(sys.argv[1]).parent.mkdir(parents=True, exist_ok=True)' \
+      "$target" || true
+    docker compose cp "$old_tree/$path" "web:$target" || true
+  done < "$old_list"
+  docker compose restart web >/dev/null 2>&1 || true
+  wait_compose_healthy docker-compose.yml web 120 || true
+  rm -rf "$PLUGIN_ROLLBACK_STAGE"
+  PLUGIN_SYNC_ACTIVE=0
+  PLUGIN_ROLLBACK_STAGE=""
+}
+
 on_error() {
   if [[ -n "$PATCH_CONTAINER" ]]; then
     docker rm -f "$PATCH_CONTAINER" >/dev/null 2>&1 || true
@@ -75,6 +154,8 @@ on_error() {
   if (( WEB_SYNC_ACTIVE == 1 )); then
     rollback_web_runtime_image || true
   fi
+  rollback_tracked_plugins || true
+  rollback_switched_services || true
   err "增量更新失败"
   if [[ -n "$OLD_COMMIT" ]]; then
     warn "当前更新前 commit：$OLD_COMMIT"
@@ -89,6 +170,10 @@ docker info >/dev/null 2>&1 || die "docker 守护进程未启动"
 docker compose version >/dev/null 2>&1 || die "缺 docker compose v2 插件"
 
 git rev-parse --is-inside-work-tree >/dev/null 2>&1 || die "当前目录不是 Git 工作树"
+git remote | grep -Fxq -- "$REMOTE" \
+  || die "未知 Git 远程：$REMOTE"
+git check-ref-format --branch "$BRANCH" >/dev/null 2>&1 \
+  || die "非法 Git 分支名：$BRANCH"
 PENDING_FILE="$(git rev-parse --git-path telepilot-deploy-pending)"
 
 REMOTE_REF="refs/remotes/${REMOTE}/${BRANCH}"
@@ -179,6 +264,9 @@ for service in "${PLAN_REBUILD_SERVICES[@]}"; do
   [[ "$service" == "frontend" ]] && NEEDS_FRONTEND_REBUILD=1
   [[ "$service" == "updater" ]] && NEEDS_UPDATER_REBUILD=1
 done
+for file in "${CHANGED_FILES[@]}"; do
+  [[ "$file" == plugins/installed/* ]] && NEEDS_PLUGIN_SYNC=1
+done
 # 兼容旧更新计划：新脚本若读取到尚未提供动作字段的 JSON，保守地按原方式重建。
 if (( ${#PLAN_SERVICES[@]} > 0 && ${#PLAN_FILE_SYNC_SERVICES[@]} == 0 && ${#PLAN_REBUILD_SERVICES[@]} == 0 )); then
   NEEDS_BACKEND_REBUILD=$NEEDS_BACKEND
@@ -215,7 +303,7 @@ else
     log "文件同步后重启：${PLAN_FILE_SYNC_SERVICES[*]}"
   fi
   if (( ${#PLAN_REBUILD_SERVICES[@]} > 0 )); then
-    log "需要镜像构建：${PLAN_REBUILD_SERVICES[*]}"
+    log "需要预构建镜像：${PLAN_REBUILD_SERVICES[*]}"
   fi
   if (( ${#PLAN_COMPONENTS[@]} > 0 )); then
     log "影响组件：${PLAN_COMPONENTS[*]}"
@@ -235,12 +323,104 @@ if [[ -n "$(git status --porcelain)" ]]; then
   die "工作区存在未提交改动，拒绝自动更新。请先提交、stash 或清理后重试。"
 fi
 
+image_checkpoint_commit() {
+  git log -1 --format=%H "$TARGET_COMMIT" -- . \
+    ':(exclude)docs/**' \
+    ':(exclude,glob)**/*.md' \
+    ':(exclude,glob)**/*.rst' \
+    ':(exclude,glob)**/*.txt' \
+    ':(exclude)LICENSE'
+}
+
+prepare_target_images() {
+  local prefix="${TELEPILOT_IMAGE_PREFIX:-ghcr.io/anoyou/telepilot}"
+  TARGET_IMAGE_COMMIT="$(image_checkpoint_commit)"
+  [[ -n "$TARGET_IMAGE_COMMIT" ]] || die "无法确定目标提交对应的镜像检查点"
+  TARGET_WEB_IMAGE="${prefix}-web:sha-${TARGET_IMAGE_COMMIT}"
+  TARGET_FRONTEND_IMAGE="${prefix}-frontend:sha-${TARGET_IMAGE_COMMIT}"
+  TARGET_UPDATER_IMAGE="${prefix}-updater:sha-${TARGET_IMAGE_COMMIT}"
+}
+
+pull_verified_image() {
+  local service="$1" image_ref="$2" revision="$3" image_revision image_source digest_ref
+  local expected_source="${TELEPILOT_IMAGE_SOURCE:-https://github.com/Anoyou/Telebot}"
+  log "预拉取 $service 镜像：$image_ref"
+  docker pull "$image_ref" >/dev/null || die "目标 $service 镜像尚未就绪；请等待 GitHub Actions 完成后重试"
+  image_revision="$(docker image inspect \
+    --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' \
+    "$image_ref" 2>/dev/null || true)"
+  [[ "$image_revision" == "$revision" ]] \
+    || die "$service 镜像 revision 校验失败：期望 $revision，实际 ${image_revision:-missing}"
+  image_source="$(docker image inspect \
+    --format '{{ index .Config.Labels "org.opencontainers.image.source" }}' \
+    "$image_ref" 2>/dev/null || true)"
+  [[ "$image_source" == "$expected_source" ]] \
+    || die "$service 镜像 source 校验失败：${image_source:-missing}"
+  digest_ref="$(docker image inspect --format '{{ index .RepoDigests 0 }}' "$image_ref" 2>/dev/null || true)"
+  [[ "$digest_ref" == *@sha256:* ]] || die "$service 镜像缺少可固定的 registry digest"
+  verify_image_attestation "$digest_ref" "$revision" \
+    || die "$service 镜像缺少受信 GitHub Actions 构建来源证明"
+  VERIFIED_IMAGE_REF="$digest_ref"
+}
+
+# 在移动 Git HEAD 前先确认所有必需镜像都真实存在。缺失时保持当前代码和服务不动。
+if (( NEEDS_FULL == 1 || NEEDS_BACKEND_REBUILD == 1 || NEEDS_FRONTEND_REBUILD == 1 || NEEDS_UPDATER_REBUILD == 1 )); then
+  prepare_target_images
+  if (( NEEDS_FULL == 1 || NEEDS_BACKEND_REBUILD == 1 )); then
+    pull_verified_image web "$TARGET_WEB_IMAGE" "$TARGET_IMAGE_COMMIT"
+    TARGET_WEB_IMAGE="$VERIFIED_IMAGE_REF"
+  fi
+  if (( NEEDS_FULL == 1 || NEEDS_FRONTEND_REBUILD == 1 )); then
+    pull_verified_image frontend "$TARGET_FRONTEND_IMAGE" "$TARGET_IMAGE_COMMIT"
+    TARGET_FRONTEND_IMAGE="$VERIFIED_IMAGE_REF"
+  fi
+  if (( NEEDS_FULL == 1 || NEEDS_UPDATER_REBUILD == 1 )); then
+    pull_verified_image updater "$TARGET_UPDATER_IMAGE" "$TARGET_IMAGE_COMMIT"
+    TARGET_UPDATER_IMAGE="$VERIFIED_IMAGE_REF"
+  fi
+fi
+
+record_previous_deployment() {
+  local state_file web_id frontend_id updater_id web_image frontend_image updater_image
+  state_file="$(git rev-parse --git-path telepilot-deploy-previous.json)"
+  web_id="$(docker compose ps -q web 2>/dev/null || true)"
+  frontend_id="$(docker compose ps -q frontend 2>/dev/null || true)"
+  updater_id="$(docker compose ps -q updater 2>/dev/null || true)"
+  web_image="$(docker inspect --format '{{.Config.Image}}' "$web_id" 2>/dev/null || true)"
+  frontend_image="$(docker inspect --format '{{.Config.Image}}' "$frontend_id" 2>/dev/null || true)"
+  updater_image="$(docker inspect --format '{{.Config.Image}}' "$updater_id" 2>/dev/null || true)"
+  python3 - "$state_file" "$CURRENT_COMMIT" "$web_image" "$frontend_image" "$updater_image" <<'PY'
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+payload = {
+    "commit": sys.argv[2],
+    "images": {
+        "web": sys.argv[3] or None,
+        "frontend": sys.argv[4] or None,
+        "updater": sys.argv[5] or None,
+    },
+}
+path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+PY
+}
+
+if (( DOCS_ONLY == 0 && HEAD_ALREADY_UPDATED == 0 )); then
+  record_previous_deployment
+fi
+
 if (( HEAD_ALREADY_UPDATED == 0 )); then
+  pending_tmp="${PENDING_FILE}.tmp.$$"
+  printf '%s %s\n' "$OLD_COMMIT" "$TARGET_COMMIT" > "$pending_tmp"
+  mv "$pending_tmp" "$PENDING_FILE"
   emit_progress 18 "拉取代码" "Fast-forward 到目标 commit"
   log "执行 fast-forward 更新"
   git pull --ff-only "$REMOTE" "$BRANCH"
   NEW_COMMIT="$(git rev-parse HEAD)"
-  printf '%s %s\n' "$OLD_COMMIT" "$NEW_COMMIT" > "$PENDING_FILE"
+  [[ "$NEW_COMMIT" == "$TARGET_COMMIT" ]] \
+    || die "fast-forward 后 HEAD 与已校验目标不一致"
   ok "代码已更新到 ${NEW_COMMIT:0:12}"
 else
   NEW_COMMIT="$(git rev-parse HEAD)"
@@ -248,8 +428,35 @@ fi
 
 # 新版 compose 在解析任何服务前都要求 UPDATER_TOKEN。先补齐并与 JWT
 # 解耦，保证从旧部署升级时备份和后续 compose 命令都能执行。
+if [[ -z "$RUNNING_UPDATER_TOKEN" ]]; then
+  running_updater_id="$(docker compose ps -q updater 2>/dev/null || true)"
+  if [[ -n "$running_updater_id" ]]; then
+    RUNNING_UPDATER_TOKEN="$(
+      docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$running_updater_id" 2>/dev/null \
+        | awk -F= '$1 == "UPDATER_TOKEN" {sub(/^[^=]*=/, ""); print; exit}'
+    )"
+  fi
+fi
 ensure_updater_token_env .env
 PERSISTED_UPDATER_TOKEN="$(grep -E '^UPDATER_TOKEN=' .env | head -n1 | cut -d= -f2- | tr -d ' "')"
+if [[ -n "$RUNNING_UPDATER_TOKEN" && "$RUNNING_UPDATER_TOKEN" != "$PERSISTED_UPDATER_TOKEN" ]]; then
+  TOKEN_ROTATION_REQUIRED=1
+  # 在最终协同 recreate 之前，所有 Compose 操作继续显式使用运行中旧 token，
+  # 避免只重建 web 或失败回滚时提前与旧 updater 失联。最终切换用 env -u
+  # 一次性让 web/updater 读取 .env 中的新 token。
+  export UPDATER_TOKEN="$RUNNING_UPDATER_TOKEN"
+  if [[ "${TELEPILOT_SKIP_UPDATER_RECREATE:-0}" == "1" ]]; then
+    if [[ -z "$TARGET_UPDATER_IMAGE" ]]; then
+      current_updater_id="$(docker compose ps -q updater 2>/dev/null || true)"
+      [[ -n "$current_updater_id" ]] || die "token 轮换需要运行中的 updater 容器"
+      TARGET_UPDATER_IMAGE="$(docker inspect --format '{{.Config.Image}}' "$current_updater_id")"
+      [[ -n "$TARGET_UPDATER_IMAGE" ]] || die "无法读取 token 轮换使用的 updater 镜像"
+    fi
+    NEEDS_UPDATER_HANDOFF=1
+  else
+    TOKEN_ROTATION_HOST_RECREATE=1
+  fi
+fi
 
 if (( REQUIRES_BACKUP == 1 )); then
   emit_progress 24 "备份数据" "迁移前创建恢复点"
@@ -278,12 +485,14 @@ rollback_web_runtime_image() {
   if (( WEB_SYNC_ACTIVE == 0 )); then
     return 0
   fi
-  warn "web 文件同步未完成，恢复更新前镜像"
-  if ! docker image tag "$WEB_SYNC_OLD_IMAGE_ID" "$WEB_SYNC_IMAGE_REF"; then
-    err "无法恢复旧 web 镜像标签：$WEB_SYNC_IMAGE_REF"
-    return 1
+  if (( REQUIRES_MIGRATION == 1 )); then
+    warn "数据库迁移可能已经执行，不自动把 web 回退到旧代码；保留新镜像等待人工恢复"
+    WEB_SYNC_ACTIVE=0
+    return 0
   fi
-  if ! docker compose up -d --no-deps --force-recreate web; then
+  warn "web 文件同步未完成，恢复更新前镜像"
+  if ! env TELEPILOT_WEB_IMAGE="$WEB_SYNC_OLD_IMAGE_REF" \
+    docker compose up -d --no-build --no-deps --force-recreate web; then
     err "旧 web 镜像已恢复，但容器重建失败"
     return 1
   fi
@@ -293,20 +502,20 @@ rollback_web_runtime_image() {
     err "恢复后的 web 未通过健康检查"
     return 1
   fi
+  set_env_value .env TELEPILOT_WEB_IMAGE "$WEB_SYNC_OLD_IMAGE_REF" || true
   warn "web 已回到更新前镜像；仓库保留在目标 commit，后续可直接重试"
 }
 
 sync_web_runtime_image() {
-  local web_id image_ref old_image_id image_cmd image_entrypoint project stage new_image_id
+  local web_id image_ref image_cmd image_entrypoint project stage new_image_id runtime_ref
   web_id="$(docker compose ps -q web 2>/dev/null || true)"
   [[ -n "$web_id" ]] || {
     err "web 容器不存在，不能执行文件同步快速更新"
     return 1
   }
   image_ref="$(docker inspect --format '{{.Config.Image}}' "$web_id")"
-  old_image_id="$(docker inspect --format '{{.Image}}' "$web_id")"
-  if [[ -z "$image_ref" || "$image_ref" == sha256:* || "$image_ref" == *@* ]]; then
-    err "web 当前镜像没有可安全覆盖的本地标签，拒绝文件同步：${image_ref:-unknown}"
+  if [[ -z "$image_ref" || "$image_ref" == sha256:* ]]; then
+    err "web 当前镜像引用不可用于安全回滚：${image_ref:-unknown}"
     return 1
   fi
   docker image inspect "$image_ref" >/dev/null
@@ -350,50 +559,257 @@ sync_web_runtime_image() {
   printf '%s\n' "$NEW_COMMIT" \
     | docker exec -i "$PATCH_CONTAINER" sh -c 'cat > /app/.telepilot-runtime-commit'
 
-  WEB_SYNC_OLD_IMAGE_ID="$old_image_id"
-  WEB_SYNC_IMAGE_REF="$image_ref"
+  WEB_SYNC_OLD_IMAGE_REF="$image_ref"
+  runtime_ref="telepilot-web-runtime:${NEW_COMMIT}"
+  WEB_SYNC_IMAGE_REF="$runtime_ref"
   new_image_id="$(docker commit \
     --message "TelePilot 文件同步 ${OLD_COMMIT:0:12} -> ${NEW_COMMIT:0:12}" \
     --change "CMD $image_cmd" \
-    "$PATCH_CONTAINER" "$image_ref")"
+    "$PATCH_CONTAINER" "$runtime_ref")"
   WEB_SYNC_ACTIVE=1
   docker rm -f "$PATCH_CONTAINER" >/dev/null
   PATCH_CONTAINER=""
   log "web 运行文件已生成补丁镜像：${new_image_id:0:19}"
-  if ! docker compose up -d --no-deps --force-recreate web; then
+  if ! env TELEPILOT_WEB_IMAGE="$runtime_ref" \
+    docker compose up -d --no-build --no-deps --force-recreate web; then
     rollback_web_runtime_image || true
     return 1
   fi
 }
 
+switch_prebuilt_service() {
+  local service="$1" target_image="$2" env_key="$3" timeout="$4"
+  local container_id old_image rollback_safe=1
+  container_id="$(docker compose ps -q "$service" 2>/dev/null || true)"
+  [[ -n "$container_id" ]] || {
+    err "$service 容器不存在，不能执行预构建镜像切换"
+    return 1
+  }
+  old_image="$(docker inspect --format '{{.Config.Image}}' "$container_id")"
+  [[ -n "$old_image" ]] || {
+    err "无法读取 $service 当前镜像引用"
+    return 1
+  }
+  if (( REQUIRES_MIGRATION == 1 )) && [[ "$service" == "web" ]]; then
+    rollback_safe=0
+  fi
+
+  log "切换 $service：$old_image -> $target_image"
+  if ! env "$env_key=$target_image" \
+    docker compose up -d --no-build --no-deps --force-recreate "$service"; then
+    if (( rollback_safe == 1 )); then
+      env "$env_key=$old_image" \
+        docker compose up -d --no-build --no-deps --force-recreate "$service" >/dev/null 2>&1 || true
+      err "$service 镜像切换失败，已尝试恢复旧镜像"
+    else
+      err "$service 镜像切换失败；迁移边界内禁止自动恢复旧代码"
+    fi
+    return 1
+  fi
+  if ! wait_compose_healthy docker-compose.yml "$service" "$timeout"; then
+    docker compose logs --tail=80 "$service" >&2 || true
+    if (( rollback_safe == 1 )); then
+      warn "$service 新镜像未通过健康检查，恢复 $old_image"
+      env "$env_key=$old_image" \
+        docker compose up -d --no-build --no-deps --force-recreate "$service"
+      wait_compose_healthy docker-compose.yml "$service" "$timeout" \
+        || err "$service 回滚后仍未恢复健康"
+      err "$service 新镜像健康检查失败，已恢复旧镜像"
+    else
+      err "$service 新镜像健康检查失败；schema 可能已升级，保留新代码等待人工恢复"
+    fi
+    return 1
+  fi
+  SWITCHED_SERVICES+=("$service")
+  SWITCHED_OLD_IMAGES+=("$old_image")
+  SWITCHED_ENV_KEYS+=("$env_key")
+  SWITCHED_TIMEOUTS+=("$timeout")
+}
+
+persist_switched_services() {
+  local index
+  for (( index=0; index < ${#SWITCHED_SERVICES[@]}; index++ )); do
+    case "${SWITCHED_ENV_KEYS[$index]}" in
+      TELEPILOT_WEB_IMAGE)
+        set_env_value .env TELEPILOT_WEB_IMAGE "$TARGET_WEB_IMAGE"
+        ;;
+      TELEPILOT_FRONTEND_IMAGE)
+        set_env_value .env TELEPILOT_FRONTEND_IMAGE "$TARGET_FRONTEND_IMAGE"
+        ;;
+      TELEPILOT_UPDATER_IMAGE)
+        set_env_value .env TELEPILOT_UPDATER_IMAGE "$TARGET_UPDATER_IMAGE"
+        ;;
+    esac
+  done
+}
+
+sync_tracked_plugins() {
+  local stage old_list new_list old_tree path target
+  stage="$(mktemp -d "${TMPDIR:-/tmp}/telepilot-plugins.XXXXXX")"
+  old_list="$stage/old-files"
+  new_list="$stage/new-files"
+  old_tree="$stage/old-tree"
+  mkdir -p "$old_tree"
+  git ls-tree -r --name-only "$OLD_COMMIT" -- plugins/installed > "$old_list"
+  git ls-tree -r --name-only "$NEW_COMMIT" -- plugins/installed > "$new_list"
+  if [[ -s "$old_list" ]]; then
+    git archive "$OLD_COMMIT" plugins/installed | tar -x -C "$old_tree"
+  fi
+  if [[ -s "$new_list" ]]; then
+    git archive "$NEW_COMMIT" plugins/installed | tar -x -C "$stage"
+  fi
+  PLUGIN_ROLLBACK_STAGE="$stage"
+  PLUGIN_SYNC_ACTIVE=1
+
+  while IFS= read -r path; do
+    [[ "$path" == plugins/installed/* && "$path" != *".."* ]] || continue
+    if ! grep -Fxq "$path" "$new_list"; then
+      target="/app/$path"
+      docker compose exec -T web python -c \
+        'from pathlib import Path; import sys; Path(sys.argv[1]).unlink(missing_ok=True)' \
+        "$target"
+    fi
+  done < "$old_list"
+
+  while IFS= read -r path; do
+    [[ "$path" == plugins/installed/* && "$path" != *".."* ]] || continue
+    target="/app/$path"
+    docker compose exec -T web python -c \
+      'from pathlib import Path; import sys; Path(sys.argv[1]).parent.mkdir(parents=True, exist_ok=True)' \
+      "$target"
+    docker compose cp "$stage/$path" "web:$target"
+  done < "$new_list"
+  ok "Git 跟踪插件已同步到持久卷；运行期配置与其它已安装插件保持不动"
+}
+
 schedule_updater_handoff() {
-  local project handoff_log
+  local target_image="$1" project handoff_log handoff_active handoff_active_tmp
+  local updater_id old_image job_id web_id handoff_web_image
+  job_id="${TELEPILOT_UPDATE_JOB_ID:-}"
+  [[ "$job_id" =~ ^[0-9a-f]{12}$ ]] || {
+    err "内部 updater handoff 缺少合法任务 ID"
+    return 1
+  }
   project="$(compose_project_name)"
   handoff_log="$(git rev-parse --git-path telepilot-updater-handoff.log)"
+  handoff_active="$(git rev-parse --git-path telepilot-updater-handoff-active)"
   rm -f "$handoff_log"
-  docker compose build updater
-  env -u UPDATER_TOKEN docker compose run -d --rm --no-deps \
+  updater_id="$(docker compose ps -q updater 2>/dev/null || true)"
+  [[ -n "$updater_id" ]] || {
+    err "updater 容器不存在，无法安排自更新 handoff"
+    return 1
+  }
+  old_image="$(docker inspect --format '{{.Config.Image}}' "$updater_id")"
+  [[ -n "$old_image" ]] || {
+    err "无法读取 updater 当前镜像引用"
+    return 1
+  }
+  web_id="$(docker compose ps -q web 2>/dev/null || true)"
+  [[ -n "$web_id" ]] || {
+    err "web 容器不存在，无法完成 updater token 交接"
+    return 1
+  }
+  handoff_web_image="$(docker inspect --format '{{.Config.Image}}' "$web_id")"
+  [[ -n "$handoff_web_image" ]] || {
+    err "无法读取 handoff 时的 web 镜像引用"
+    return 1
+  }
+
+  handoff_active_tmp="${handoff_active}.tmp.$$"
+  printf '%s %s\n' "$job_id" "$(date +%s)" > "$handoff_active_tmp"
+  mv "$handoff_active_tmp" "$handoff_active"
+
+  if ! env -u UPDATER_TOKEN TELEPILOT_UPDATER_IMAGE="$target_image" \
+    docker compose run -d --rm --no-deps \
     -e COMPOSE_PROJECT_NAME="$project" \
     -e TELEPILOT_HOST_PROJECT_DIR="$TELEPILOT_HOST_PROJECT_DIR" \
-    --entrypoint sh updater -c \
-    'sleep 3; log="$(git rev-parse --git-path telepilot-updater-handoff.log)"; if env -u UPDATER_TOKEN docker compose up -d --no-deps --force-recreate updater >"$log" 2>&1; then printf "handoff succeeded\n" >>"$log"; rm -f "$(git rev-parse --git-path telepilot-deploy-pending)"; else rc=$?; printf "handoff failed: exit %s\n" "$rc" >>"$log"; exit "$rc"; fi' \
-    >/dev/null
+    -e TELEPILOT_TARGET_UPDATER_IMAGE="$target_image" \
+    -e TELEPILOT_OLD_UPDATER_IMAGE="$old_image" \
+    -e TELEPILOT_UPDATE_JOB_ID="$job_id" \
+    -e TELEPILOT_TARGET_COMMIT="$NEW_COMMIT" \
+    -e TELEPILOT_HANDOFF_WEB_IMAGE="$handoff_web_image" \
+    -e TELEPILOT_TOKEN_ROTATION_REQUIRED="$TOKEN_ROTATION_REQUIRED" \
+    --entrypoint bash updater -lc \
+    'set -euo pipefail
+     sleep 8
+     source scripts/_lib.sh
+     log_file="$(git rev-parse --git-path telepilot-updater-handoff.log)"
+     pending_file="$(git rev-parse --git-path telepilot-deploy-pending)"
+     active_file="$(git rev-parse --git-path telepilot-updater-handoff-active)"
+     finalize() {
+       python3 scripts/finalize-update-job.py \
+         --root . \
+         --job-id "$TELEPILOT_UPDATE_JOB_ID" \
+         --status "$1" \
+         --detail "$2" \
+         --commit "$TELEPILOT_TARGET_COMMIT" >>"$log_file" 2>&1
+     }
+     rollback() {
+       printf "handoff rollback -> %s\n" "$TELEPILOT_OLD_UPDATER_IMAGE" >>"$log_file"
+       env -u UPDATER_TOKEN TELEPILOT_UPDATER_IMAGE="$TELEPILOT_OLD_UPDATER_IMAGE" \
+         docker compose up -d --no-build --no-deps --force-recreate updater >>"$log_file" 2>&1 || true
+       wait_compose_healthy docker-compose.yml updater 60 >>"$log_file" 2>&1 || true
+       if [[ "$TELEPILOT_TOKEN_ROTATION_REQUIRED" == "1" ]]; then
+         env -u UPDATER_TOKEN TELEPILOT_WEB_IMAGE="$TELEPILOT_HANDOFF_WEB_IMAGE" \
+           docker compose up -d --no-build --no-deps --force-recreate web >>"$log_file" 2>&1 || true
+         wait_compose_healthy docker-compose.yml web 120 >>"$log_file" 2>&1 || true
+       fi
+       finalize failed "updater handoff 失败，已尝试恢复旧镜像" || true
+       rm -f "$active_file"
+     }
+     if ! env -u UPDATER_TOKEN TELEPILOT_UPDATER_IMAGE="$TELEPILOT_TARGET_UPDATER_IMAGE" \
+       docker compose up -d --no-build --no-deps --force-recreate updater >"$log_file" 2>&1; then
+       rollback
+       exit 1
+     fi
+     if ! wait_compose_healthy docker-compose.yml updater 60 >>"$log_file" 2>&1; then
+       rollback
+       exit 1
+     fi
+     if [[ "$TELEPILOT_TOKEN_ROTATION_REQUIRED" == "1" ]]; then
+       if ! env -u UPDATER_TOKEN TELEPILOT_WEB_IMAGE="$TELEPILOT_HANDOFF_WEB_IMAGE" \
+         docker compose up -d --no-build --no-deps --force-recreate web >>"$log_file" 2>&1; then
+         rollback
+         exit 1
+       fi
+       if ! wait_compose_healthy docker-compose.yml web 120 >>"$log_file" 2>&1; then
+         rollback
+         exit 1
+       fi
+     fi
+     if ! set_env_value .env TELEPILOT_UPDATER_IMAGE "$TELEPILOT_TARGET_UPDATER_IMAGE"; then
+       rollback
+       exit 1
+     fi
+     printf "handoff succeeded\n" >>"$log_file"
+     finalized=0
+     for _ in 1 2 3; do
+       if finalize succeeded "所有计划步骤与 updater handoff 已完成"; then
+         finalized=1
+         break
+       fi
+       sleep 1
+     done
+     if [[ "$finalized" != "1" ]]; then
+       printf "handoff job finalize failed; pending preserved\n" >>"$log_file"
+       exit 1
+     fi
+     rm -f "$pending_file"
+     rm -f "$active_file"' \
+    >/dev/null; then
+    rm -f "$handoff_active"
+    err "无法启动独立 updater handoff 容器"
+    return 1
+  fi
   HANDOFF_SCHEDULED=1
 }
 
 if (( NEEDS_FULL == 1 )); then
   if [[ "${TELEPILOT_SKIP_UPDATER_RECREATE:-0}" == "1" ]]; then
     warn "当前由内部 updater 执行完整更新，业务服务完成后由临时 handoff 容器重建 updater。"
-    log "构建 + 启动业务容器（仅显式指定 postgres / redis / web / frontend）"
-    emit_progress 30 "构建镜像" "构建并切换业务服务"
-    if [[ -n "$RUNNING_UPDATER_TOKEN" && "$RUNNING_UPDATER_TOKEN" != "$PERSISTED_UPDATER_TOKEN" ]]; then
-      # 过渡阶段先让新 web 与仍在运行的旧 updater 使用同一 token；handoff
-      # 随后会用 .env 中的新 token 一起重建两者。
-      UPDATER_TOKEN="$RUNNING_UPDATER_TOKEN" docker compose up -d --build --no-deps postgres redis web frontend
-    else
-      docker compose up -d --build --no-deps postgres redis web frontend
-    fi
-    emit_progress 78 "健康检查" "等待业务服务 ready"
+    log "切换预构建业务镜像（仅显式指定 postgres / redis / web / frontend）"
+    emit_progress 30 "切换镜像" "切换预构建业务服务"
+    docker compose up -d --no-build --no-deps postgres redis
     wait_compose_healthy docker-compose.yml postgres 60 || {
       docker compose logs --tail=80 postgres >&2
       exit 1
@@ -402,40 +818,44 @@ if (( NEEDS_FULL == 1 )); then
       docker compose logs --tail=80 redis >&2
       exit 1
     }
-    wait_compose_healthy docker-compose.yml web 120 || {
-      docker compose logs --tail=80 web >&2
-      exit 1
-    }
-    wait_compose_healthy docker-compose.yml frontend 60 || {
-      docker compose logs --tail=80 frontend >&2
-      exit 1
-    }
+    if [[ -n "$RUNNING_UPDATER_TOKEN" && "$RUNNING_UPDATER_TOKEN" != "$PERSISTED_UPDATER_TOKEN" ]]; then
+      # 过渡阶段先让新 web 与仍在运行的旧 updater 使用同一 token；handoff
+      # 随后会用 .env 中的新 token 一起切换两者。
+      export UPDATER_TOKEN="$RUNNING_UPDATER_TOKEN"
+    fi
+    switch_prebuilt_service web "$TARGET_WEB_IMAGE" TELEPILOT_WEB_IMAGE 120
+    switch_prebuilt_service frontend "$TARGET_FRONTEND_IMAGE" TELEPILOT_FRONTEND_IMAGE 60
+    emit_progress 78 "健康检查" "业务服务已完成镜像切换"
     emit_progress 92 "服务就绪" "业务服务已通过健康检查"
-    log "构建新版 updater 并安排 token/镜像原子切换"
-    emit_progress 96 "更新更新器" "安排 updater handoff"
-    schedule_updater_handoff
-    ok "完整业务更新完成；updater handoff 已安排"
+    log "业务服务已完成，待运行时内容同步后再交接 updater"
+    NEEDS_UPDATER_HANDOFF=1
+    ok "完整业务更新完成；updater handoff 待安排"
   else
-    log "执行完整生产更新"
-    "$SCRIPT_DIR/prod-up.sh"
+    log "从宿主机执行完整服务级镜像切换"
+    docker compose up -d --no-build --no-deps postgres redis
+    wait_compose_healthy docker-compose.yml postgres 60
+    wait_compose_healthy docker-compose.yml redis 30
+    switch_prebuilt_service web "$TARGET_WEB_IMAGE" TELEPILOT_WEB_IMAGE 120
+    switch_prebuilt_service frontend "$TARGET_FRONTEND_IMAGE" TELEPILOT_FRONTEND_IMAGE 60
+    switch_prebuilt_service updater "$TARGET_UPDATER_IMAGE" TELEPILOT_UPDATER_IMAGE 60
   fi
 elif (( DOCS_ONLY == 1 )); then
   ok "无需重建服务，更新完成"
 else
-  rebuild_services=()
-  (( NEEDS_BACKEND_REBUILD == 1 )) && rebuild_services+=("web")
-  (( NEEDS_FRONTEND_REBUILD == 1 )) && rebuild_services+=("frontend")
-
-  if (( ${#rebuild_services[@]} > 0 )); then
-    if (( NEEDS_FRONTEND_REBUILD == 1 && NEEDS_BACKEND_REBUILD == 0 )); then
-      emit_progress 30 "编译前端" "编译并切换 frontend"
-    else
-      emit_progress 30 "构建镜像" "增量重建 ${rebuild_services[*]}"
-    fi
-    log "增量重建服务：${rebuild_services[*]}"
-    # WP-U2：确认按 classify_changed_files 裁剪后的服务列表重建，不整栈 up
+  if (( NEEDS_BACKEND_REBUILD == 1 || NEEDS_FRONTEND_REBUILD == 1 )); then
+    emit_progress 30 "切换镜像" "拉取结果已校验，切换受影响服务"
     log "更新计划服务集合：${PLAN_SERVICES[*]:-none}"
-    docker compose up -d --build --no-deps "${rebuild_services[@]}"
+  fi
+  if (( NEEDS_BACKEND_REBUILD == 1 )); then
+    switch_prebuilt_service web "$TARGET_WEB_IMAGE" TELEPILOT_WEB_IMAGE 120
+  fi
+  if (( NEEDS_FRONTEND_REBUILD == 1 )); then
+    switch_prebuilt_service frontend "$TARGET_FRONTEND_IMAGE" TELEPILOT_FRONTEND_IMAGE 60
+  fi
+
+  if (( NEEDS_PLUGIN_SYNC == 1 )); then
+    emit_progress 52 "同步插件" "只覆盖 Git 跟踪的插件文件"
+    sync_tracked_plugins
   fi
 
   if (( NEEDS_BACKEND_SYNC == 1 )); then
@@ -485,17 +905,63 @@ else
 
   if (( NEEDS_UPDATER == 1 )); then
     emit_progress 96 "更新更新器" "安排 updater handoff"
-    log "构建新版 updater 并安排独立 handoff"
-    schedule_updater_handoff
+    if [[ "${TELEPILOT_SKIP_UPDATER_RECREATE:-0}" == "1" ]]; then
+      log "由独立 handoff 容器接管 updater 自更新"
+      NEEDS_UPDATER_HANDOFF=1
+    else
+      log "从宿主机直接切换 updater 预构建镜像"
+      switch_prebuilt_service updater "$TARGET_UPDATER_IMAGE" TELEPILOT_UPDATER_IMAGE 60
+    fi
   fi
 
   ok "增量更新完成"
 fi
 
-WEB_SYNC_ACTIVE=0
-if (( HANDOFF_SCHEDULED == 0 )); then
-  rm -f "$PENDING_FILE"
+# 文档和 CHANGELOG 只同步公开文件，不重建或重启任何服务。放在业务服务
+# 健康检查之后，避免失败部署把运行时说明提前切到未成功上线的 commit。
+"$SCRIPT_DIR/sync-runtime-content.sh"
+
+if (( WEB_SYNC_IMAGE_REF != "" )); then
+  set_env_value .env TELEPILOT_WEB_IMAGE "$WEB_SYNC_IMAGE_REF"
 fi
+persist_switched_services
+
+if (( TOKEN_ROTATION_HOST_RECREATE == 1 )); then
+  token_web_id="$(docker compose ps -q web 2>/dev/null || true)"
+  token_updater_id="$(docker compose ps -q updater 2>/dev/null || true)"
+  [[ -n "$token_web_id" && -n "$token_updater_id" ]] \
+    || die "token 轮换需要运行中的 web 与 updater 容器"
+  token_web_image="$(docker inspect --format '{{.Config.Image}}' "$token_web_id")"
+  token_updater_image="$(docker inspect --format '{{.Config.Image}}' "$token_updater_id")"
+  env -u UPDATER_TOKEN \
+    TELEPILOT_WEB_IMAGE="$token_web_image" \
+    TELEPILOT_UPDATER_IMAGE="$token_updater_image" \
+    docker compose up -d --no-build --no-deps --force-recreate updater web
+  wait_compose_healthy docker-compose.yml updater 60
+  wait_compose_healthy docker-compose.yml web 120
+fi
+
+if (( NEEDS_UPDATER_HANDOFF == 1 )); then
+  emit_progress 96 "更新更新器" "启动独立 updater handoff"
+  schedule_updater_handoff "$TARGET_UPDATER_IMAGE"
+fi
+
+if (( PLUGIN_SYNC_ACTIVE == 1 )); then
+  rm -rf "$PLUGIN_ROLLBACK_STAGE"
+  PLUGIN_SYNC_ACTIVE=0
+  PLUGIN_ROLLBACK_STAGE=""
+fi
+
+if (( HANDOFF_SCHEDULED == 1 )); then
+  emit_progress 98 "等待交接" "新 updater 将在健康后收尾当前任务"
+  ok "业务服务与运行时内容已就绪，等待独立 updater handoff 给出最终结果"
+  while :; do
+    sleep 30
+  done
+fi
+
+WEB_SYNC_ACTIVE=0
+rm -f "$PENDING_FILE"
 
 echo
 emit_progress 100 "更新完成" "所有计划步骤已完成"

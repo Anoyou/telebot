@@ -18,10 +18,8 @@ COPY frontend/package.json ./
 RUN --mount=type=cache,id=telepilot-pnpm,target=/pnpm/store \
     pnpm config set store-dir /pnpm/store && pnpm install --offline --frozen-lockfile
 
-# 拷贝其余源码、docs 与根更新日志（更新日志菜单会通过 ?url 读取独立静态资源）
+# 拷贝前端源码。docs 与根更新日志由生产运行时目录提供，不参与 bundle。
 COPY frontend/ .
-COPY docs/ /docs/
-COPY CHANGELOG.md /CHANGELOG.md
 RUN --mount=type=cache,id=telepilot-tsbuild,target=/app/node_modules/.cache/tsbuild \
     pnpm build
 

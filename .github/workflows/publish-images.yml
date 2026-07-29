@@ -1,0 +1,150 @@
+name: 发布容器镜像
+
+on:
+  workflow_call:
+    inputs:
+      revision:
+        required: true
+        type: string
+      base_revision:
+        required: false
+        default: ""
+        type: string
+      ref_name:
+        required: true
+        type: string
+      ref_type:
+        required: false
+        default: branch
+        type: string
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-images-${{ inputs.ref_name || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  scope:
+    name: 发布范围
+    runs-on: ubuntu-latest
+    outputs:
+      publish: ${{ steps.scope.outputs.publish }}
+      revision: ${{ steps.scope.outputs.revision }}
+      ref_name: ${{ steps.scope.outputs.ref_name }}
+      ref_type: ${{ steps.scope.outputs.ref_type }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.revision || github.sha }}
+
+      - name: 跳过纯文档提交
+        id: scope
+        env:
+          REVISION: ${{ inputs.revision || github.sha }}
+          BASE_REVISION: ${{ inputs.base_revision }}
+          REF_NAME: ${{ inputs.ref_name || github.ref_name }}
+          REF_TYPE: ${{ inputs.ref_type || github.ref_type }}
+        run: |
+          python scripts/ci_change_scope.py \
+            --root . \
+            --base "$BASE_REVISION" \
+            --head "$REVISION" \
+            --github-output "$GITHUB_OUTPUT"
+          {
+            printf 'revision=%s\n' "$REVISION"
+            printf 'ref_name=%s\n' "$REF_NAME"
+            printf 'ref_type=%s\n' "$REF_TYPE"
+          } >> "$GITHUB_OUTPUT"
+
+  publish:
+    name: ${{ matrix.service }} 镜像
+    needs: scope
+    if: needs.scope.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - service: web
+            dockerfile: backend/Dockerfile
+          - service: frontend
+            dockerfile: frontend/Dockerfile
+          - service: updater
+            dockerfile: deploy/updater/Dockerfile
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.scope.outputs.revision }}
+
+      - name: 计算镜像名称与标签
+        id: meta
+        env:
+          OWNER: ${{ github.repository_owner }}
+          REF_NAME: ${{ needs.scope.outputs.ref_name }}
+          REF_TYPE: ${{ needs.scope.outputs.ref_type }}
+          REVISION: ${{ needs.scope.outputs.revision }}
+          SERVICE: ${{ matrix.service }}
+        run: |
+          owner="$(printf '%s' "$OWNER" | tr '[:upper:]' '[:lower:]')"
+          image="ghcr.io/${owner}/telepilot-${SERVICE}"
+          {
+            echo "image=$image"
+            echo "tags<<EOF"
+            echo "${image}:sha-${REVISION}"
+            if [[ "$REF_TYPE" == "tag" ]]; then
+              echo "${image}:${REF_NAME#v}"
+              if [[ "$REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+                echo "${image}:stable"
+              elif [[ "$REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-beta\.[0-9]+$ ]]; then
+                echo "${image}:beta"
+              fi
+            elif [[ "$REF_NAME" == "main" ]]; then
+              echo "${image}:stable"
+            elif [[ "$REF_NAME" == "Beta" ]]; then
+              echo "${image}:beta"
+            fi
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: 登录 GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 启用 QEMU
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+
+      - name: 启用 Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: 构建并推送多架构镜像
+        id: push
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          platforms: linux/amd64,linux/arm64
+          push: true
+          pull: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ needs.scope.outputs.revision }}
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
+
+      - name: 签发并推送 SLSA 构建来源证明
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4
+        with:
+          subject-name: ${{ steps.meta.outputs.image }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true

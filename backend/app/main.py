@@ -462,10 +462,15 @@ async def csrf_header_middleware(request: Request, call_next):
 async def http_exc_handler(request: Request, exc: HTTPException):
     detail = exc.detail
     if isinstance(detail, dict) and "code" in detail:
-        return JSONResponse(status_code=exc.status_code, content={"error": detail})
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={"error": detail},
+            headers=exc.headers,
+        )
     return JSONResponse(
         status_code=exc.status_code,
         content={"error": {"code": "HTTP", "message": str(detail)}},
+        headers=exc.headers,
     )
 
 
@@ -610,3 +615,8 @@ app.include_router(remote_plugin_api.router)
 from .api import plugin_repo as plugin_repo_api  # noqa: E402
 
 app.include_router(plugin_repo_api.router)
+
+# 所有路由注册完成后再安装内部契约，确保 OpenAPI 快照覆盖完整 API。
+from .openapi_contract import install_openapi_contract  # noqa: E402
+
+install_openapi_contract(app)

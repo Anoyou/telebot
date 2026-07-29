@@ -31,7 +31,7 @@ test("更新任务可在页面重载后恢复", () => {
   const savedAt = 1_000_000;
   const job = {
     jobId: "job-large-update",
-    plan: { remote: "origin", branch: "Agent-beta", requiresMigration: true },
+    plan: { remote: "origin", branch: "Beta", requiresMigration: true },
     savedAt,
   };
 
@@ -59,7 +59,7 @@ test("任务进入终态后可清除恢复记录", () => {
   const storage = new MemoryStorage();
   saveActiveUpdateJob(storage, {
     jobId: "job-complete",
-    plan: { remote: "origin", branch: "Agent-beta" },
+    plan: { remote: "origin", branch: "Beta" },
     savedAt: Date.now(),
   });
 

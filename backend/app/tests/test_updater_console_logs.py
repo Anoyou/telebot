@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import importlib.util
+import json
+import subprocess
+import sys
 from pathlib import Path
 from unittest.mock import patch
 
@@ -117,6 +120,15 @@ def test_apply_job_env_uses_host_compose_project_name(monkeypatch) -> None:
     assert env["COMPOSE_DOCKER_CLI_BUILD"] == "1"
 
 
+def test_apply_job_env_passes_job_id_to_updater_handoff(monkeypatch) -> None:
+    updater = _load_updater_module()
+    monkeypatch.setattr(updater, "HOST_PROJECT_DIR", Path("/opt/TelePilot"))
+
+    env = updater._apply_job_env("origin", "main", "0123456789ab")
+
+    assert env["TELEPILOT_UPDATE_JOB_ID"] == "0123456789ab"
+
+
 def test_apply_job_env_recovers_absolute_host_dir_from_container_label(monkeypatch) -> None:
     updater = _load_updater_module()
     monkeypatch.setattr(updater, "HOST_PROJECT_DIR", Path("."))
@@ -165,16 +177,40 @@ def test_update_job_survives_updater_restart(monkeypatch, tmp_path) -> None:
     }
 
 
+def test_handoff_marker_blocks_until_explicitly_removed(monkeypatch, tmp_path) -> None:
+    updater = _load_updater_module()
+    workspace = tmp_path / "repo"
+    git_dir = workspace / ".git"
+    git_dir.mkdir(parents=True)
+    marker = git_dir / "telepilot-updater-handoff-active"
+    marker.write_text("job 1\n", encoding="utf-8")
+    monkeypatch.setattr(updater, "WORKSPACE", workspace)
+
+    assert updater._handoff_active() is True
+
+    marker.unlink()
+    assert updater._handoff_active() is False
+
+
 def test_incremental_script_never_recreates_web_with_updater() -> None:
     repo_root = Path(__file__).resolve().parents[3]
     script = (repo_root / "scripts" / "prod-update.sh").read_text(encoding="utf-8")
 
-    assert "--force-recreate updater web" not in script
-    assert "docker compose up -d --build --no-deps" in script
+    assert "docker compose up -d --build --no-deps --force-recreate updater web" not in script
+    assert "docker compose up -d --build --no-deps" not in script
+    assert "pull_verified_image" in script
+    assert "switch_prebuilt_service" in script
+    assert "org.opencontainers.image.revision" in script
     assert '-e COMPOSE_PROJECT_NAME="$project"' in script
     assert '-e TELEPILOT_HOST_PROJECT_DIR="$TELEPILOT_HOST_PROJECT_DIR"' in script
     assert "telepilot-updater-handoff.log" in script
     assert "com.docker.compose.project" in script
+    assert script.index('mv "$pending_tmp" "$PENDING_FILE"') < script.index(
+        'git pull --ff-only "$REMOTE" "$BRANCH"'
+    )
+    assert "persist_switched_services" in script
+    assert "rollback_switched_services" in script
+    assert "迁移边界内禁止自动恢复旧代码" in script
 
 
 def test_incremental_script_uses_compose_health_without_localhost_frontend_probe() -> None:
@@ -198,8 +234,92 @@ def test_incremental_script_syncs_backend_files_with_image_rollback() -> None:
     assert '--change "CMD $image_cmd"' in script
     assert "自定义 ENTRYPOINT" in script
     assert "rollback_web_runtime_image" in script
-    assert 'docker image tag "$WEB_SYNC_OLD_IMAGE_ID" "$WEB_SYNC_IMAGE_REF"' in script
+    assert 'runtime_ref="telepilot-web-runtime:${NEW_COMMIT}"' in script
+    assert 'TELEPILOT_WEB_IMAGE="$WEB_SYNC_OLD_IMAGE_REF"' in script
     assert "文件级同步服务：web（无需执行 docker build）" in script
+
+
+def test_production_defaults_to_prebuilt_images_with_explicit_source_fallback() -> None:
+    repo_root = Path(__file__).resolve().parents[3]
+    compose = (repo_root / "docker-compose.yml").read_text(encoding="utf-8")
+    prod_up = (repo_root / "scripts" / "prod-up.sh").read_text(encoding="utf-8")
+    workflow = (repo_root / ".github" / "workflows" / "publish-images.yml").read_text(
+        encoding="utf-8"
+    )
+    ci_workflow = (repo_root / ".github" / "workflows" / "ci.yml").read_text(
+        encoding="utf-8"
+    )
+
+    assert "TELEPILOT_WEB_IMAGE" in compose
+    assert "TELEPILOT_FRONTEND_IMAGE" in compose
+    assert "TELEPILOT_UPDATER_IMAGE" in compose
+    assert 'docker pull "$image_ref"' in prod_up
+    assert "docker compose up -d --no-build" in prod_up
+    assert "--source-build" in prod_up
+    assert "org.opencontainers.image.revision" in prod_up
+    assert "org.opencontainers.image.source" in prod_up
+    assert "RepoDigests" in prod_up
+    assert "verify_image_attestation" in prod_up
+    assert "linux/amd64,linux/arm64" in workflow
+    assert "packages: write" in workflow
+    assert "sha-${REVISION}" in workflow
+    assert "workflow_call:" in workflow
+    assert "actions/attest@" in workflow
+    assert "attestations: write" in workflow
+    assert "org.opencontainers.image.revision=${{ needs.scope.outputs.revision }}" in workflow
+    assert "uses: ./.github/workflows/publish-images.yml" in ci_workflow
+    assert "github.event_name == 'push'" in ci_workflow
+
+
+def test_updater_handoff_waits_for_health_and_rolls_back_image() -> None:
+    repo_root = Path(__file__).resolve().parents[3]
+    script = (repo_root / "scripts" / "prod-update.sh").read_text(encoding="utf-8")
+
+    assert "TELEPILOT_TARGET_UPDATER_IMAGE" in script
+    assert "TELEPILOT_OLD_UPDATER_IMAGE" in script
+    assert "handoff rollback" in script
+    assert "wait_compose_healthy docker-compose.yml updater 60" in script
+    assert "finalize-update-job.py" in script
+    assert 'emit_progress 98 "等待交接"' in script
+    assert "while :; do" in script
+    assert script.index('finalize succeeded "所有计划步骤与 updater handoff 已完成"') < script.index(
+        '     rm -f "$pending_file"'
+    )
+
+
+def test_handoff_finalizer_atomically_marks_persisted_job(tmp_path: Path) -> None:
+    repo_root = Path(__file__).resolve().parents[3]
+    jobs = tmp_path / ".git" / "telepilot-update-jobs"
+    jobs.mkdir(parents=True)
+    job_path = jobs / "0123456789ab.json"
+    job_path.write_text(
+        json.dumps({"job_id": "0123456789ab", "status": "running", "progress": 96}),
+        encoding="utf-8",
+    )
+
+    subprocess.run(
+        [
+            sys.executable,
+            str(repo_root / "scripts" / "finalize-update-job.py"),
+            "--root",
+            str(tmp_path),
+            "--job-id",
+            "0123456789ab",
+            "--status",
+            "succeeded",
+            "--detail",
+            "handoff 完成",
+            "--commit",
+            "a" * 40,
+        ],
+        check=True,
+    )
+
+    payload = json.loads(job_path.read_text(encoding="utf-8"))
+    assert payload["status"] == "succeeded"
+    assert payload["progress"] == 100
+    assert payload["new_commit"] == "a" * 12
+    assert payload["error"] is None
 
 
 def test_runtime_dockerfiles_preserve_incremental_build_caches() -> None:

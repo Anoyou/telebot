@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import tempfile
 import tomllib
@@ -19,6 +20,11 @@ from typing import Any
 
 _DOC_SUFFIXES = (".md", ".rst", ".txt")
 _BACKEND_TEST_PREFIXES = ("backend/app/tests/", "backend/tests/")
+_FRONTEND_TEST_PREFIXES = (
+    "frontend/e2e/",
+    "frontend/test-results/",
+    "frontend/tests/",
+)
 _NO_RUNTIME_PREFIXES = (
     ".github/",
     "docs/",
@@ -36,7 +42,6 @@ _NO_RUNTIME_FILES = {
     "scripts/install-server.sh",
     "scripts/prod-up.sh",
 }
-_FRONTEND_BUNDLED_FILES = {"CHANGELOG.md", "docs/PLUGIN-DEV-GUIDE.md"}
 _FRONTEND_SOURCE_MIRROR_FILES = {
     "frontend/package.json",
     "frontend/tsconfig.app.json",
@@ -44,11 +49,8 @@ _FRONTEND_SOURCE_MIRROR_FILES = {
     "frontend/vite.config.ts",
 }
 _UPDATER_FILES = {
-    "backend/app/util/update_plan.py",
     "deploy/updater/Dockerfile",
     "deploy/updater/server.py",
-    "scripts/_lib.sh",
-    "scripts/prod-update.sh",
 }
 _KNOWN_SERVICES = {"postgres", "redis", "web", "frontend", "updater"}
 _INFRA_SERVICES = {"postgres", "redis"}
@@ -81,8 +83,6 @@ def _normalize(path: str) -> str:
 def _is_docs_file(path: str) -> bool:
     normalized = _normalize(path)
     lowered = normalized.lower()
-    if normalized in _FRONTEND_BUNDLED_FILES:
-        return False
     return (
         normalized in _NO_RUNTIME_FILES
         or normalized.startswith(_NO_RUNTIME_PREFIXES)
@@ -100,6 +100,8 @@ def classify_changed_files(
     compose_changed_services: set[str] | None = None,
     compose_inspection_failed: bool = False,
     backend_dependencies_changed: bool | None = None,
+    frontend_package_runtime_changed: bool | None = None,
+    frontend_version_runtime_changed: bool | None = None,
 ) -> UpdatePlan:
     files = [_normalize(path) for path in changed_files if path.strip()]
     if not files:
@@ -138,6 +140,7 @@ def classify_changed_files(
             unknown = compose_changed_services - _KNOWN_SERVICES
             if unknown or compose_changed_services & _INFRA_SERVICES:
                 requires_full_update = True
+                requires_backup = True
                 components.add("full_update")
                 components.add("infrastructure")
                 reasons.append("PostgreSQL、Redis 或未知 Compose 服务配置发生变化")
@@ -147,9 +150,8 @@ def classify_changed_files(
             continue
 
         if path == "backend/app/util/update_plan.py":
-            components.update({"backend", "updater"})
+            components.add("backend")
             require_file_sync("web")
-            require_rebuild("updater")
             continue
         if path in _UPDATER_FILES:
             components.add("updater")
@@ -157,17 +159,13 @@ def classify_changed_files(
             continue
 
         if path == ".dockerignore":
-            components.update({"frontend", "updater"})
+            components.update({"backend", "frontend", "updater"})
+            require_rebuild("web")
             require_rebuild("frontend")
             require_rebuild("updater")
             continue
-        if path == "backend/.dockerignore":
-            components.add("backend")
-            require_rebuild("web")
-            continue
-        if path == "frontend/.dockerignore":
-            components.add("frontend")
-            require_rebuild("frontend")
+        if path in {"backend/.dockerignore", "frontend/.dockerignore"}:
+            # Compose 三个应用镜像均以仓库根为 context，子目录 ignore 不生效。
             continue
 
         if path == "backend/pyproject.toml":
@@ -180,24 +178,36 @@ def classify_changed_files(
                 require_rebuild("web")
             continue
 
+        if path == "frontend/src/lib/version.ts" and frontend_version_runtime_changed is False:
+            # 只有 APP_VERSION / APP_STAGE 值变化时才是纯发布元数据；无法读取
+            # 新旧内容或文件还有其他改动时，继续保守地重建前端。
+            continue
+
+        if path == "frontend/package.json" and frontend_package_runtime_changed is False:
+            # package.json 只有 version 字段变化时无需重新编译前端。
+            continue
+
         if path.startswith("deploy/") or path.startswith("scripts/"):
             # 备份、恢复、安装和人工部署脚本由挂载工作区直接读取，不改变运行容器。
             continue
 
-        if path in _FRONTEND_BUNDLED_FILES or path.startswith("frontend/"):
+        if path.startswith(_FRONTEND_TEST_PREFIXES) or path in {
+            "frontend/playwright.config.ts",
+            "frontend/vitest.config.ts",
+        }:
+            continue
+
+        if path.startswith("frontend/"):
             components.add("frontend")
             require_rebuild("frontend")
             if (
-                path == "CHANGELOG.md"
-                or path in _FRONTEND_SOURCE_MIRROR_FILES
+                path in _FRONTEND_SOURCE_MIRROR_FILES
                 or path.startswith("frontend/src/")
             ):
                 # System Agent 的只读源码镜像位于 web 镜像中，前端源码变化时
                 # 同步该快照，避免线上诊断读取到上一版代码。
                 components.add("backend")
                 require_file_sync("web")
-            if path == "CHANGELOG.md":
-                components.add("backend")
             continue
 
         if path.startswith(_BACKEND_TEST_PREFIXES):
@@ -210,7 +220,13 @@ def classify_changed_files(
             components.add("backend")
             require_file_sync("web")
             continue
-        if path.startswith("backend/") or path.startswith("plugins/"):
+        if path.startswith("plugins/"):
+            # Git 跟踪的插件文件会定向同步到持久卷，随后重启 web/worker；
+            # backend 镜像本身不 COPY 根 plugins，重建 web 无法部署这些改动。
+            components.add("backend")
+            require_file_sync("web")
+            continue
+        if path.startswith("backend/"):
             components.add("backend")
             require_rebuild("web")
             continue
@@ -285,6 +301,42 @@ def _backend_dependencies_changed(root: Path, old_revision: str, new_revision: s
         return True
 
 
+def _frontend_package_runtime_changed(root: Path, old_revision: str, new_revision: str) -> bool:
+    try:
+        old_data = json.loads(_git_show(root, old_revision, "frontend/package.json"))
+        new_data = json.loads(_git_show(root, new_revision, "frontend/package.json"))
+        if not isinstance(old_data, dict) or not isinstance(new_data, dict):
+            return True
+        old_data.pop("version", None)
+        new_data.pop("version", None)
+        return old_data != new_data
+    except (RuntimeError, json.JSONDecodeError):
+        return True
+
+
+def _frontend_version_runtime_changed(root: Path, old_revision: str, new_revision: str) -> bool:
+    def without_release_values(source: str) -> str:
+        source = re.sub(
+            r'^(export const APP_VERSION\s*=\s*)["\'][^"\']*["\']\s*;',
+            r'\1"<release-version>";',
+            source,
+            flags=re.MULTILINE,
+        )
+        return re.sub(
+            r'^(export const APP_STAGE[^=]*=\s*).+?\s*;',
+            r'\1null;',
+            source,
+            flags=re.MULTILINE,
+        )
+
+    try:
+        old_source = _git_show(root, old_revision, "frontend/src/lib/version.ts")
+        new_source = _git_show(root, new_revision, "frontend/src/lib/version.ts")
+        return without_release_values(old_source) != without_release_values(new_source)
+    except RuntimeError:
+        return True
+
+
 def _compose_config(root: Path, revision: str) -> dict[str, Any]:
     content = _git_show(root, revision, "docker-compose.yml")
     with tempfile.NamedTemporaryFile("w", suffix=".yml", encoding="utf-8", delete=False) as handle:
@@ -355,11 +407,25 @@ def build_update_plan(root: Path, old_revision: str, new_revision: str) -> Updat
             root, old_revision, new_revision
         )
 
+    frontend_package_runtime_changed: bool | None = None
+    if "frontend/package.json" in changed_files:
+        frontend_package_runtime_changed = _frontend_package_runtime_changed(
+            root, old_revision, new_revision
+        )
+
+    frontend_version_runtime_changed: bool | None = None
+    if "frontend/src/lib/version.ts" in changed_files:
+        frontend_version_runtime_changed = _frontend_version_runtime_changed(
+            root, old_revision, new_revision
+        )
+
     return classify_changed_files(
         changed_files,
         compose_changed_services=compose_services,
         compose_inspection_failed=compose_failed,
         backend_dependencies_changed=backend_dependencies_changed,
+        frontend_package_runtime_changed=frontend_package_runtime_changed,
+        frontend_version_runtime_changed=frontend_version_runtime_changed,
     )
 
 

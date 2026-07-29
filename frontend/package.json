@@ -1,7 +1,7 @@
 {
   "name": "telepilot-frontend",
   "private": true,
-  "version": "0.86.0-beta.8",
+  "version": "0.87.0-beta.1",
   "packageManager": "pnpm@10.23.0",
   "type": "module",
   "license": "MIT",
@@ -14,7 +14,7 @@
     "test:visual": "START_SERVER=1 playwright test tests/visual --workers=1",
     "test:visual:update": "START_SERVER=1 UPDATE_VISUAL_BASELINES=1 playwright test tests/visual --workers=1",
     "test:a11y": "START_SERVER=1 playwright test tests/a11y",
-    "codegen": "openapi-typescript http://127.0.0.1:8000/openapi.json -o src/api/schema.ts"
+    "codegen": "openapi-typescript ../openapi/telepilot.openapi.json -o src/api/schema.ts"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.9.0",

@@ -40,16 +40,6 @@ import ReactMarkdown from "react-markdown";
 import type { Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import "highlight.js/styles/github.css";
-import aiGuideMd from "../../../docs/PLUGIN-AI.md?raw";
-import apiReferenceMd from "../../../docs/PLUGIN-API-REFERENCE.md?raw";
-import cheatsheetMd from "../../../docs/PLUGIN-CHEATSHEET.md?raw";
-import devGuideMd from "../../../docs/PLUGIN-DEV-GUIDE.md?raw";
-import httpGuideMd from "../../../docs/PLUGIN-HTTP.md?raw";
-import overviewMd from "../../../docs/PLUGIN-OVERVIEW.md?raw";
-import quickstartMd from "../../../docs/PLUGIN-QUICKSTART.md?raw";
-import remoteGuideMd from "../../../docs/PLUGIN-REMOTE.md?raw";
-import rulesMd from "../../../docs/PLUGIN-RULES.md?raw";
-import safetyGuideMd from "../../../docs/PLUGIN-SAFETY.md?raw";
 
 import { Button } from "@/components/ui/button";
 import { PageShell } from "@/components/layout/PageScaffold";
@@ -141,20 +131,23 @@ type DevDocId =
   | "quickstart"
   | "rules"
   | "dev-guide"
+  | "devtools"
   | "overview"
   | "api-reference"
   | "http"
   | "safety"
   | "remote"
   | "cheatsheet"
-  | "ai";
+  | "ai"
+  | "webhook-quickstart"
+  | "platform-capabilities"
+  | "security-ops";
 
 type DevDoc = {
   id: DevDocId;
   title: string;
   description: string;
   path: string;
-  markdown: string;
   icon: LucideIcon;
 };
 type PluginAccountRow = {
@@ -178,7 +171,6 @@ const DEV_DOCS: DevDoc[] = [
     title: "5 分钟 Quickstart",
     description: "复制最小 hello_ping 插件，跑通 Event Bus + MessageOps。",
     path: "docs/PLUGIN-QUICKSTART.md",
-    markdown: quickstartMd,
     icon: Sparkles,
   },
   {
@@ -186,7 +178,6 @@ const DEV_DOCS: DevDoc[] = [
     title: "插件开发铁律",
     description: "先确认必须、禁止、推荐的硬边界，避免后续返工。",
     path: "docs/PLUGIN-RULES.md",
-    markdown: rulesMd,
     icon: ShieldCheck,
   },
   {
@@ -194,7 +185,6 @@ const DEV_DOCS: DevDoc[] = [
     title: "完整 API 参考",
     description: "查字段、facade、事件信封、MessageOps、Trace 和前端集成。",
     path: "docs/PLUGIN-API-REFERENCE.md",
-    markdown: apiReferenceMd,
     icon: Code2,
   },
   {
@@ -202,15 +192,20 @@ const DEV_DOCS: DevDoc[] = [
     title: "索引与路线",
     description: "插件市场路线、文档分篇和 0.x 安全策略入口。",
     path: "docs/PLUGIN-DEV-GUIDE.md",
-    markdown: devGuideMd,
     icon: BookOpen,
+  },
+  {
+    id: "devtools",
+    title: "开发工具",
+    description: "使用项目脚手架、校验器和本地调试工具。",
+    path: "docs/PLUGIN-DEVTOOLS.md",
+    icon: Code2,
   },
   {
     id: "overview",
     title: "插件概览",
     description: "快速开始、插件结构、个人可信插件标准模式与交互入口边界。",
     path: "docs/PLUGIN-OVERVIEW.md",
-    markdown: overviewMd,
     icon: FileText,
   },
   {
@@ -218,7 +213,6 @@ const DEV_DOCS: DevDoc[] = [
     title: "HTTP facade",
     description: "第三方插件访问外部 HTTP 的权限、配额和调用约束。",
     path: "docs/PLUGIN-HTTP.md",
-    markdown: httpGuideMd,
     icon: Network,
   },
   {
@@ -226,7 +220,6 @@ const DEV_DOCS: DevDoc[] = [
     title: "安全边界",
     description: "权限声明、交互 Bot、工程规范和安全合规要求。",
     path: "docs/PLUGIN-SAFETY.md",
-    markdown: safetyGuideMd,
     icon: ShieldCheck,
   },
   {
@@ -234,7 +227,6 @@ const DEV_DOCS: DevDoc[] = [
     title: "远程插件",
     description: "远程安装、manifest 读取、worker loader 与更新回滚。",
     path: "docs/PLUGIN-REMOTE.md",
-    markdown: remoteGuideMd,
     icon: Globe2,
   },
   {
@@ -242,7 +234,6 @@ const DEV_DOCS: DevDoc[] = [
     title: "速查表",
     description: "最常用契约、文件结构、权限和验证命令的短清单。",
     path: "docs/PLUGIN-CHEATSHEET.md",
-    markdown: cheatsheetMd,
     icon: ListChecks,
   },
   {
@@ -250,8 +241,28 @@ const DEV_DOCS: DevDoc[] = [
     title: "AI facade",
     description: "ctx.ai 文本能力、权限声明、降级路径和运行时约束。",
     path: "docs/PLUGIN-AI.md",
-    markdown: aiGuideMd,
     icon: Brain,
+  },
+  {
+    id: "webhook-quickstart",
+    title: "Webhook Quickstart",
+    description: "快速接入账号级 Webhook 投递与鉴权。",
+    path: "docs/PLUGIN-WEBHOOK-QUICKSTART.md",
+    icon: Network,
+  },
+  {
+    id: "platform-capabilities",
+    title: "平台能力",
+    description: "查看 Web、Bot、插件与运行环境的能力边界。",
+    path: "docs/PLATFORM-CAPABILITIES.md",
+    icon: Puzzle,
+  },
+  {
+    id: "security-ops",
+    title: "安全运维",
+    description: "部署凭据、恢复与安全处置的操作基线。",
+    path: "docs/SECURITY-OPS.md",
+    icon: ShieldCheck,
   },
 ];
 
@@ -549,11 +560,19 @@ function stripFirstHeading(markdown: string) {
   return markdown.replace(/^#\s+.*(?:\r?\n)+/, "").trim();
 }
 
-function buildCompleteDevGuide() {
+function buildCompleteDevGuide(contents: Map<DevDocId, string>) {
   return DEV_DOCS.map((doc, index) => {
     const level = index === 0 ? "#" : "##";
-    return `${level} ${doc.title}\n\n> 源文件：\`${doc.path}\`\n\n${stripFirstHeading(doc.markdown)}`;
+    return `${level} ${doc.title}\n\n> 源文件：\`${doc.path}\`\n\n${stripFirstHeading(contents.get(doc.id) ?? "")}`;
   }).join("\n\n---\n\n");
+}
+
+async function fetchDevDoc(doc: DevDoc): Promise<string> {
+  const response = await fetch(`/runtime-content/${doc.path}`, { cache: "no-store" });
+  if (!response.ok) {
+    throw new Error(`${doc.path} 加载失败（HTTP ${response.status}）`);
+  }
+  return response.text();
 }
 
 function normalizeDocHref(href?: string) {
@@ -2816,7 +2835,6 @@ function DevGuideTab() {
       title: "完整文档",
       description: "把 Quickstart、铁律、索引、概览、API、HTTP、AI、安全、远程和速查合并为一份可滚动正文。",
       path: "docs/PLUGIN-*.md",
-      markdown: buildCompleteDevGuide(),
       icon: Sparkles,
     }),
     [],
@@ -2827,6 +2845,22 @@ function DevGuideTab() {
   const contentRef = useRef<HTMLDivElement | null>(null);
   const activeDoc = docs.find((doc) => doc.id === activeDocId) ?? completeDoc;
   const ActiveIcon = activeDoc.icon;
+  const documentQ = useQuery({
+    queryKey: ["runtime-content", "plugin-doc", activeDocId],
+    queryFn: async () => {
+      if (activeDocId !== "all") {
+        const doc = DEV_DOCS.find((item) => item.id === activeDocId);
+        if (!doc) throw new Error("未知插件文档");
+        return fetchDevDoc(doc);
+      }
+      const entries = await Promise.all(
+        DEV_DOCS.map(async (doc) => [doc.id, await fetchDevDoc(doc)] as const),
+      );
+      return buildCompleteDevGuide(new Map(entries));
+    },
+    staleTime: 0,
+    refetchOnWindowFocus: true,
+  });
   const markdownComponents = useMemo<Components>(
     () => ({
       a({ href, children, ...props }) {
@@ -2844,19 +2878,25 @@ function DevGuideTab() {
           );
         }
         const external = href?.startsWith("http://") || href?.startsWith("https://");
+        const repositoryHref = href && !external && !href.startsWith("#")
+          ? new URL(
+              href,
+              `https://github.com/Anoyou/Telebot/blob/main/${activeDoc.path}`,
+            ).toString()
+          : href;
         return (
           <a
             {...props}
-            href={href}
-            target={external ? "_blank" : undefined}
-            rel={external ? "noreferrer" : undefined}
+            href={repositoryHref}
+            target={external || repositoryHref !== href ? "_blank" : undefined}
+            rel={external || repositoryHref !== href ? "noreferrer" : undefined}
           >
             {children}
           </a>
         );
       },
     }),
-    [],
+    [activeDoc.path],
   );
 
   useEffect(() => {
@@ -2993,15 +3033,33 @@ function DevGuideTab() {
               </p>
             </div>
             <div ref={contentRef} className="max-h-[72vh] min-h-[560px] overflow-auto px-5 py-5 md:px-7">
-              <article className="prose prose-sm prose-pwa-safe max-w-none dark:prose-invert">
-                <ReactMarkdown
-                  remarkPlugins={[remarkGfm]}
-                  rehypePlugins={highlightPlugin ? [highlightPlugin] : []}
-                  components={markdownComponents}
-                >
-                  {activeDoc.markdown}
-                </ReactMarkdown>
-              </article>
+              {documentQ.isPending ? (
+                <div className="flex min-h-64 items-center justify-center gap-2 text-sm text-muted-foreground">
+                  <Spinner />
+                  正在读取最新文档…
+                </div>
+              ) : documentQ.isError ? (
+                <div className="mx-auto flex min-h-64 max-w-lg flex-col items-center justify-center gap-3 text-center">
+                  <AlertTriangle className="h-6 w-6 text-destructive" />
+                  <p className="text-sm text-muted-foreground">
+                    {documentQ.error instanceof Error ? documentQ.error.message : "文档加载失败"}
+                  </p>
+                  <Button size="sm" variant="outline" onClick={() => void documentQ.refetch()}>
+                    <RefreshCw className="mr-1 h-3.5 w-3.5" />
+                    重新读取
+                  </Button>
+                </div>
+              ) : (
+                <article className="prose prose-sm prose-pwa-safe max-w-none dark:prose-invert">
+                  <ReactMarkdown
+                    remarkPlugins={[remarkGfm]}
+                    rehypePlugins={highlightPlugin ? [highlightPlugin] : []}
+                    components={markdownComponents}
+                  >
+                    {documentQ.data}
+                  </ReactMarkdown>
+                </article>
+              )}
             </div>
           </section>
         </div>

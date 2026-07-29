@@ -1,31 +1,30 @@
 // 更新日志面板：仅在用户打开版本号菜单时读取独立静态资源，避免把完整
 // CHANGELOG 作为 JavaScript 字符串参与 Rollup 解析和压缩。
-import { useEffect, useMemo, useState } from "react";
+import { useMemo } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { RefreshCw } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
-import changelogUrl from "../../../../CHANGELOG.md?url";
+import { Button } from "@/components/ui/button";
 import { extractRecentChangelogSections } from "@/lib/changelog";
 
+const CHANGELOG_URL = "/runtime-content/CHANGELOG.md";
+
 export default function ChangelogMenu() {
-  const [changelogRaw, setChangelogRaw] = useState("");
-  const [loadFailed, setLoadFailed] = useState(false);
-  useEffect(() => {
-    const controller = new AbortController();
-    fetch(changelogUrl, { signal: controller.signal })
-      .then((response) => {
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        return response.text();
-      })
-      .then(setChangelogRaw)
-      .catch((error: unknown) => {
-        if ((error as { name?: string })?.name !== "AbortError") setLoadFailed(true);
-      });
-    return () => controller.abort();
-  }, []);
+  const changelogQ = useQuery({
+    queryKey: ["runtime-content", "changelog"],
+    queryFn: async ({ signal }) => {
+      const response = await fetch(CHANGELOG_URL, { cache: "no-cache", signal });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      return response.text();
+    },
+    staleTime: 0,
+    refetchOnWindowFocus: true,
+  });
   const sections = useMemo(
-    () => extractRecentChangelogSections(changelogRaw, 4),
-    [changelogRaw],
+    () => extractRecentChangelogSections(changelogQ.data ?? "", 4),
+    [changelogQ.data],
   );
   return (
     <>
@@ -52,8 +51,14 @@ export default function ChangelogMenu() {
               </article>
             </div>
           ))
-        ) : loadFailed ? (
-          <p className="text-sm text-muted-foreground">未解析到更新日志内容，请检查 CHANGELOG.md。</p>
+        ) : changelogQ.isError ? (
+          <div className="space-y-3 text-sm text-muted-foreground">
+            <p>更新日志读取失败：{(changelogQ.error as Error)?.message || "网络错误"}</p>
+            <Button size="sm" variant="outline" onClick={() => void changelogQ.refetch()}>
+              <RefreshCw className="mr-1.5 h-4 w-4" />
+              重新读取
+            </Button>
+          </div>
         ) : (
           <p className="text-sm text-muted-foreground">正在读取更新日志…</p>
         )}

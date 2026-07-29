@@ -46,6 +46,23 @@ def test_auto_migrate_default_false() -> None:
     assert settings.auto_migrate_on_startup is False
 
 
+def test_runtime_revision_prefers_explicit_environment(monkeypatch) -> None:
+    monkeypatch.setenv("TELEPILOT_GIT_REVISION", "A" * 40)
+
+    assert sh._runtime_revision() == "a" * 40
+
+
+@pytest.mark.asyncio
+async def test_version_endpoint_exposes_revision_and_channel(monkeypatch) -> None:
+    monkeypatch.setattr(sh, "_runtime_revision", lambda: "b" * 40)
+
+    out = await sh.get_version()
+
+    assert out.revision == "b" * 40
+    assert out.channel == "beta"
+    assert out.version
+
+
 @pytest.mark.parametrize(
     "key",
     [
@@ -380,14 +397,14 @@ def test_classify_changed_files_docs_only() -> None:
     assert requires_backup is False
 
 
-def test_classify_changed_files_frontend_bundled_docs() -> None:
-    """前端打包读取的文档应触发 frontend 更新，而不是 docs_only。"""
+def test_classify_changed_files_runtime_docs() -> None:
+    """运行时读取的文档不应触发服务更新。"""
 
     components, requires_full_update, requires_backup = sh._classify_changed_files(
         ["docs/PLUGIN-DEV-GUIDE.md", "CHANGELOG.md"]
     )
 
-    assert components == ["backend", "frontend"]
+    assert components == ["docs_only"]
     assert requires_full_update is False
     assert requires_backup is False
 
@@ -666,6 +683,67 @@ def test_sum_project_resource_includes_main_workers_and_children() -> None:
     assert out.cpu_percent == 6.5
     assert out.rss_mb == 206.5
     assert out.uss_mb == 160.0
+
+
+def test_worker_memory_summary_prefers_uss_and_marks_mixed_fallback() -> None:
+    workers = [
+        sh.WorkerRuntimeResource(
+            account_id=1,
+            alive=True,
+            desired="running",
+            fail_count=0,
+            uss_mb=40.0,
+            rss_mb=60.0,
+        ),
+        sh.WorkerRuntimeResource(
+            account_id=2,
+            alive=True,
+            desired="running",
+            fail_count=0,
+            uss_mb=None,
+            rss_mb=80.0,
+        ),
+        sh.WorkerRuntimeResource(
+            account_id=3,
+            alive=False,
+            desired="stopped",
+            fail_count=0,
+            uss_mb=100.0,
+        ),
+    ]
+
+    summary = sh._worker_memory_summary(workers)
+
+    assert summary.sample_count == 2
+    assert summary.basis == "mixed"
+    assert summary.total_mb == 120.0
+    assert summary.average_mb == 60.0
+    assert summary.median_mb == 60.0
+    assert summary.max_mb == 80.0
+
+
+def test_capacity_alerts_use_memory_and_disk_thresholds() -> None:
+    host = sh.HostResource(
+        sampled_at=1,
+        memory_used_percent=96.0,
+        disk_used_percent=85.0,
+    )
+    containers = [
+        sh.ContainerResource(
+            name="telepilot-web-1",
+            service="web",
+            memory_mb=420.0,
+            memory_limit_mb=512.0,
+        )
+    ]
+
+    alerts = sh._capacity_alerts(host, containers)
+
+    assert [(item.key, item.level) for item in alerts] == [
+        ("host-memory", "critical"),
+        ("host-disk", "warning"),
+        ("container-web", "warning"),
+    ]
 
 
 def test_merge_project_resource_includes_infra_containers() -> None:

@@ -17,6 +17,7 @@ PYTHON := python3.12
 VENV := backend/.venv
 ACTIVATE := . $(VENV)/bin/activate
 PROD_UPDATE_ARGS ?=
+PROD_UP_ARGS ?=
 
 help:
 	@echo "════════════ 一键命令（推荐） ════════════"
@@ -78,7 +79,7 @@ init-prod-env:
 	@./scripts/init-prod-env.sh
 
 prod-up:
-	@./scripts/prod-up.sh
+	@./scripts/prod-up.sh $(PROD_UP_ARGS)
 
 prod-update:
 	@./scripts/prod-update.sh $(PROD_UPDATE_ARGS)
@@ -131,7 +132,12 @@ lint:
 	cd backend && $(ACTIVATE) && ruff check app
 
 codegen:
-	cd frontend && pnpm codegen
+	@if [ -x backend/.venv/bin/python ]; then \
+		backend/.venv/bin/python scripts/export-openapi.py; \
+	else \
+		python3 scripts/export-openapi.py; \
+	fi
+	pnpm --dir frontend codegen
 
 build:
 	docker compose build

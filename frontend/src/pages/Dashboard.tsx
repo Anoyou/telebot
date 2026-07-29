@@ -4,6 +4,7 @@ import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import {
   Activity,
+  AlertTriangle,
   ArrowRight,
   Boxes,
   Cpu,
@@ -588,7 +589,8 @@ function ResourceUsageCard({
         ) : (
           <>
             <ResourceSamplingPanel data={data} />
-            <div className="grid gap-3 sm:grid-cols-2">
+            <ResourceCapacityAlerts data={data} />
+            <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
               <MetricCard
                 icon={Cpu}
                 label="应用总 CPU"
@@ -598,6 +600,7 @@ function ResourceUsageCard({
                 tone={resourceTone(data.project_total.cpu_percent)}
               />
               <ProcessMemoryCard data={data} />
+              <WorkerMemoryCard data={data} />
             </div>
             <div className="grid grid-cols-2 gap-3 xl:grid-cols-4">
               <Metric
@@ -630,6 +633,52 @@ function ResourceUsageCard({
         )}
       </CardContent>
     </Card>
+  );
+}
+
+function ResourceCapacityAlerts({ data }: { data: ResourceDashboard }) {
+  const alerts = data.capacity_alerts ?? [];
+  if (alerts.length === 0) return null;
+  return (
+    <div className="space-y-2" role="status" aria-live="polite" aria-label="资源容量告警">
+      {alerts.map((alert) => (
+        <div
+          key={alert.key}
+          className={cn(
+            "flex items-start gap-2 rounded-xl border px-3 py-2 text-xs",
+            alert.level === "critical" ? "alert-danger" : "alert-warning",
+          )}
+        >
+          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+          <div className="min-w-0">
+            <div className="font-semibold">{alert.resource}</div>
+            <div className="mt-0.5 break-words">{alert.message}</div>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function WorkerMemoryCard({ data }: { data: ResourceDashboard }) {
+  const summary = data.worker_memory;
+  const basis = summary?.basis === "uss"
+    ? "USS 独占内存"
+    : summary?.basis === "rss"
+      ? "RSS 内存"
+      : summary?.basis === "mixed"
+        ? "USS/RSS 混合采样"
+        : "等待有效采样";
+  const hint = summary?.sample_count
+    ? `${summary.sample_count} 个存活 Worker · 平均 ${formatMb(summary.average_mb)} · 最大 ${formatMb(summary.max_mb)} · ${basis}`
+    : "尚无存活 Worker 的有效内存样本";
+  return (
+    <MetricCard
+      icon={Users}
+      label="单账号 Worker 中位内存"
+      value={formatMb(summary?.median_mb)}
+      hint={hint}
+    />
   );
 }
 

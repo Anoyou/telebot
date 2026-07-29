@@ -117,6 +117,13 @@ def test_backend_dependency_change_still_rebuilds_web_image() -> None:
     assert plan.rebuild_services == ["web"]
 
 
+def test_direct_frontend_version_classification_fails_closed() -> None:
+    plan = classify_changed_files(["frontend/src/lib/version.ts"])
+
+    assert plan.services == ["web", "frontend"]
+    assert plan.rebuild_services == ["frontend"]
+
+
 def test_build_plan_treats_version_only_pyproject_change_as_file_sync(tmp_path: Path) -> None:
     root = tmp_path / "repo"
     (root / "backend").mkdir(parents=True)
@@ -148,6 +155,112 @@ def test_build_plan_treats_version_only_pyproject_change_as_file_sync(tmp_path: 
 
     assert plan.file_sync_services == ["web"]
     assert plan.rebuild_services == []
+
+
+def test_build_plan_treats_release_metadata_as_backend_file_sync_only(tmp_path: Path) -> None:
+    root = tmp_path / "repo"
+    (root / "backend" / "app").mkdir(parents=True)
+    (root / "frontend" / "src" / "lib").mkdir(parents=True)
+    subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=root, check=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=root, check=True)
+    (root / "backend" / "app" / "__init__.py").write_text('__version__ = "1.0.0"\n')
+    (root / "backend" / "pyproject.toml").write_text(
+        '[project]\nversion = "1.0.0"\ndependencies = ["fastapi>=1"]\n'
+    )
+    (root / "frontend" / "package.json").write_text(
+        '{"name":"telepilot","version":"1.0.0","dependencies":{"react":"1"}}\n'
+    )
+    (root / "frontend" / "src" / "lib" / "version.ts").write_text(
+        'export const APP_VERSION = "1.0.0";\n'
+    )
+    subprocess.run(["git", "add", "."], cwd=root, check=True)
+    subprocess.run(["git", "commit", "-qm", "old"], cwd=root, check=True)
+    old = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=root, check=True, capture_output=True, text=True
+    ).stdout.strip()
+
+    for path in (
+        root / "backend" / "app" / "__init__.py",
+        root / "backend" / "pyproject.toml",
+        root / "frontend" / "package.json",
+        root / "frontend" / "src" / "lib" / "version.ts",
+    ):
+        path.write_text(path.read_text().replace("1.0.0", "1.0.1"))
+    subprocess.run(["git", "add", "."], cwd=root, check=True)
+    subprocess.run(["git", "commit", "-qm", "new"], cwd=root, check=True)
+    new = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=root, check=True, capture_output=True, text=True
+    ).stdout.strip()
+
+    plan = build_update_plan(root, old, new)
+
+    assert plan.components == ["backend"]
+    assert plan.services == ["web"]
+    assert plan.file_sync_services == ["web"]
+    assert plan.rebuild_services == []
+
+
+def test_all_runtime_plugin_docs_and_changelog_are_docs_only() -> None:
+    plan = classify_changed_files(
+        [
+            "CHANGELOG.md",
+            "docs/PLUGIN-AI.md",
+            "docs/PLUGIN-API-REFERENCE.md",
+            "docs/PLUGIN-CHEATSHEET.md",
+            "docs/PLUGIN-DEV-GUIDE.md",
+            "docs/PLUGIN-HTTP.md",
+            "docs/PLUGIN-OVERVIEW.md",
+            "docs/PLUGIN-QUICKSTART.md",
+            "docs/PLUGIN-REMOTE.md",
+            "docs/PLUGIN-RULES.md",
+            "docs/PLUGIN-SAFETY.md",
+        ]
+    )
+
+    assert plan.components == ["docs_only"]
+    assert plan.services == []
+    assert plan.rebuild_services == []
+
+
+def test_root_dockerignore_affects_all_application_images() -> None:
+    plan = classify_changed_files([".dockerignore"])
+
+    assert plan.services == ["web", "frontend", "updater"]
+    assert plan.rebuild_services == ["web", "frontend", "updater"]
+
+
+def test_subdirectory_dockerignore_files_do_not_affect_root_context() -> None:
+    plan = classify_changed_files(["backend/.dockerignore", "frontend/.dockerignore"])
+
+    assert plan.components == ["docs_only"]
+    assert plan.services == []
+
+
+def test_frontend_test_only_change_does_not_deploy_runtime() -> None:
+    plan = classify_changed_files(
+        ["frontend/e2e/app.spec.ts", "frontend/playwright.config.ts"]
+    )
+
+    assert plan.components == ["docs_only"]
+    assert plan.services == []
+
+
+def test_tracked_plugin_change_uses_volume_sync_not_web_rebuild() -> None:
+    plan = classify_changed_files(["plugins/installed/lottery_plus/plugin.py"])
+
+    assert plan.components == ["backend"]
+    assert plan.file_sync_services == ["web"]
+    assert plan.rebuild_services == []
+
+
+def test_infrastructure_compose_change_requires_backup() -> None:
+    plan = classify_changed_files(
+        ["docker-compose.yml"], compose_changed_services={"postgres"}
+    )
+
+    assert plan.requires_full_update is True
+    assert plan.requires_backup is True
 
 
 def test_frontend_source_rebuilds_frontend_and_refreshes_agent_source_snapshot() -> None:

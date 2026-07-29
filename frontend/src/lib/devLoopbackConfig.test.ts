@@ -12,7 +12,10 @@ test("开发代理固定使用 IPv4 回环地址", () => {
   assert.doesNotMatch(viteConfig, /"\/api":\s*"http:\/\/localhost:8000"/);
 });
 
-test("OpenAPI codegen 固定使用 IPv4 回环地址", () => {
-  assert.match(packageJson.scripts?.codegen ?? "", /http:\/\/127\.0\.0\.1:8000\/openapi\.json/);
-  assert.doesNotMatch(packageJson.scripts?.codegen ?? "", /http:\/\/localhost:8000/);
+test("OpenAPI codegen 使用仓库内固定契约快照", () => {
+  assert.match(
+    packageJson.scripts?.codegen ?? "",
+    /openapi-typescript \.\.\/openapi\/telepilot\.openapi\.json/,
+  );
+  assert.doesNotMatch(packageJson.scripts?.codegen ?? "", /https?:\/\//);
 });

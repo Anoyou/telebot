@@ -123,6 +123,23 @@ need_cmd() {
   command -v "$1" >/dev/null 2>&1 || die "缺少命令：$1（$2）"
 }
 
+# 校验 GHCR 镜像由本仓库受信 GitHub Actions workflow 为指定 commit 构建。
+# OCI source/revision 标签只做一致性检查；Sigstore/SLSA attestation 才提供
+# 不可由普通 package 写入者伪造的构建者身份与源码绑定。
+verify_image_attestation() {
+  local digest_ref="$1" revision="$2"
+  local repository="${TELEPILOT_ATTESTATION_REPO:-Anoyou/Telebot}"
+  local signer="${TELEPILOT_ATTESTATION_SIGNER:-github.com/Anoyou/Telebot/.github/workflows/publish-images.yml}"
+  need_cmd gh "验证 GHCR 镜像构建来源；请安装支持 attestation 的 GitHub CLI"
+  gh attestation verify "oci://$digest_ref" \
+    --repo "$repository" \
+    --signer-workflow "$signer" \
+    --source-digest "$revision" \
+    --deny-self-hosted-runners \
+    --bundle-from-oci \
+    >/dev/null
+}
+
 # 确保 updater 使用独立随机 token。参数为 env 文件路径，默认 .env。
 # 缺失、占位、过短或与 JWT_SECRET 相同时都会替换；不会改动其它密钥。
 ensure_updater_token_env() {
@@ -157,6 +174,36 @@ p.write_text(text)
 PY
   chmod 600 "$env_file" 2>/dev/null || true
   ok "$env_file 已生成独立 UPDATER_TOKEN"
+}
+
+# 精确写入一个 .env 键；不会重新格式化或打印其它配置（其中可能含敏感值）。
+set_env_value() {
+  local env_file="$1" key="$2" value="$3" py
+  if command -v python3 >/dev/null 2>&1; then
+    py=python3
+  elif [[ -x "$ROOT_DIR/backend/.venv/bin/python" ]]; then
+    py="$ROOT_DIR/backend/.venv/bin/python"
+  else
+    die "需要 Python 更新部署镜像引用"
+  fi
+  "$py" - "$env_file" "$key" "$value" <<'PY'
+import pathlib
+import re
+import sys
+
+path = pathlib.Path(sys.argv[1])
+key = sys.argv[2]
+value = sys.argv[3]
+text = path.read_text(encoding="utf-8")
+line = f"{key}={value}"
+pattern = rf"^{re.escape(key)}=.*$"
+if re.search(pattern, text, flags=re.MULTILINE):
+    text = re.sub(pattern, lambda _: line, text, flags=re.MULTILINE)
+else:
+    text = text.rstrip() + "\n" + line + "\n"
+path.write_text(text, encoding="utf-8")
+PY
+  chmod 600 "$env_file" 2>/dev/null || true
 }
 
 # ════════════════════════════════════════════════════════════

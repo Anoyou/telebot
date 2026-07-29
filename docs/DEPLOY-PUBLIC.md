@@ -64,7 +64,9 @@ curl -fsSL https://raw.githubusercontent.com/Anoyou/telebot/main/scripts/install
   | env WEB_PORT_PUBLISH=127.0.0.1:8080 COOKIE_SECURE=true bash
 ```
 
-这条命令会安装基础依赖与 Docker Compose v2、拉取仓库到 `/opt/telepilot`、生成生产 `.env`，并执行 `make prod-up` 启动 `postgres` / `redis` / `web` / `updater` / `frontend`。如果 `WEB_PORT_PUBLISH` 指定的端口已被占用，脚本会保留 host 绑定并自动递增到可用端口，例如从 `127.0.0.1:8080` 改到 `127.0.0.1:8081`。
+这条命令会安装基础依赖、Docker Compose v2 与支持 attestation 的 GitHub CLI，拉取仓库到 `/opt/telepilot`、生成生产 `.env`，从 GHCR 拉取预构建的 AMD64/ARM64 应用镜像，并启动 `postgres` / `redis` / `web` / `updater` / `frontend`。启动前会要求三个应用镜像的 OCI source 与当前 checkout 一致、revision 完全相同，再固定到 registry digest，并校验由本仓库 `publish-images.yml` 为该 commit 签发的 SLSA/Sigstore provenance；任一项不成立都会拒绝启动。服务器不运行 `pnpm build` 或正常路径的 Docker build。如果 `WEB_PORT_PUBLISH` 指定的端口已被占用，脚本会保留 host 绑定并自动递增到可用端口，例如从 `127.0.0.1:8080` 改到 `127.0.0.1:8081`。
+
+GHCR 的三个容器包首次发布后需要由仓库管理员在 GitHub Packages 设置中各自改为 Public。公开后服务器可匿名拉取镜像及其 OCI provenance，不需要保存 GitHub Token；如果仍是 Private，`make prod-up` 会在改动现有服务前直接失败。
 
 如果已经克隆仓库，也可以在仓库目录内手动配置：
 
@@ -168,30 +170,33 @@ TELEPILOT_UPDATE_BRANCH=main make prod-update
 ```
 
 `make prod-update` 会先比较当前部署 commit 与目标 commit 的文件差异，再为每个服务生成
-具体动作：纯后端源码、迁移脚本和 System Agent 只读源码快照会归档目标 commit 的受控
-目录，在临时容器内通过 Python 编译校验后生成轻量补丁镜像，只重启 `web`，不执行
-`docker build`；前端 TypeScript 必须先由 `tsc + vite` 编译，因此仍只构建并切换
-`frontend`；Dockerfile、真实依赖变化、Compose 或 updater 自身变化才重建对应镜像。
-PostgreSQL / Redis 配置、卷结构或无法识别的基础设施变化才进入完整更新。仅
+具体动作。文档与 CHANGELOG 只同步到运行时目录，刷新页面立即生效，不构建也不重启；
+纯后端源码、迁移脚本和 System Agent 只读源码快照会归档目标 commit 的受控目录，在临时
+容器内通过 Python 编译校验后生成轻量本地补丁镜像，只重启 `web`，不执行 Docker build；
+前端、依赖、Dockerfile、Compose 或 updater 变化会先拉取 GitHub Actions 已构建的不可变
+镜像 digest，核对镜像 revision，再切换对应服务。镜像缺失、下载失败或 revision 不符时，
+更新会在 `git pull` 前停止，当前服务保持不动。PostgreSQL / Redis 配置、卷结构或无法识别
+的基础设施变化才进入完整更新。仅
 `backend/pyproject.toml` 版本号变化不会被误判为依赖变化；只有 `project.dependencies`
-实际改变才重建 web 依赖层。没有 Alembic 迁移时不会创建备份或处理数据库。
+实际改变才切换 web 镜像。没有 Alembic 迁移或基础设施变化时不会创建备份或处理数据库。
 
-文件同步生成新 web 镜像后才切换容器，健康检查失败会把镜像标签和容器恢复到更新前
-状态；Git 工作区保留目标 commit 和 pending 标记，修复后可直接重试。更新前如果工作区
-存在未提交改动会拒绝执行，避免覆盖服务器上的本地修改。
+文件同步生成新 web 镜像后才切换容器；Web、Frontend 或 Updater 健康检查失败都会恢复
+更新前镜像。成功部署前的 commit 与三项镜像引用保存在
+`.git/telepilot-deploy-previous.json`，失败部署保留 pending 标记，修复后可直接重试。更新前
+如果工作区存在未提交改动会拒绝执行，避免覆盖服务器上的本地修改。
 
-发布候选分支不要覆盖 `main`，用环境变量显式指定：
+高频实测统一使用 `Beta`，不要覆盖 `main`：
 
 ```bash
 cd /opt/telepilot
-TELEPILOT_UPDATE_BRANCH=<release-candidate-branch> make prod-update
+TELEPILOT_UPDATE_BRANCH=Beta make prod-update
 ```
 
 想先看本次会走哪条路径，可以执行：
 
 ```bash
 cd /opt/telepilot
-TELEPILOT_UPDATE_BRANCH=<release-candidate-branch> make prod-update PROD_UPDATE_ARGS=--dry-run
+TELEPILOT_UPDATE_BRANCH=Beta make prod-update PROD_UPDATE_ARGS=--dry-run
 ```
 
 ### Web 面板自更新
@@ -201,7 +206,7 @@ TELEPILOT_UPDATE_BRANCH=<release-candidate-branch> make prod-update PROD_UPDATE_
 由于 updater 能控制宿主机 Docker，`UPDATER_TOKEN` 必须使用独立随机值，不能与 `JWT_SECRET` 复用；缺失时服务会直接拒绝启动。
 
 - 检查更新：读取当前分支或 `TELEPILOT_UPDATE_BRANCH`，执行 `git fetch` 并展示具体受影响服务、数据库迁移和备份要求。
-- 应用更新：后台执行 `scripts/prod-update.sh`；纯后端源码直接同步目标 commit 文件并重启 `web`，前端先编译再切换 `frontend`，依赖或镜像配置变化才构建对应镜像；PostgreSQL / Redis 默认保持运行。
+- 应用更新：后台执行 `scripts/prod-update.sh`；文档只同步文件，纯后端源码生成轻量补丁镜像并重启 `web`，前端和依赖变化只拉取 Actions 预构建镜像；PostgreSQL / Redis 默认保持运行。
 - 任务日志：Web 面板轮询持久化的 updater job；updater 自更新时页面可能短暂无法轮询，但新进程启动后可继续读取任务结果。
 
 首次把 `updater` 服务部署到服务器仍需要一次宿主机操作；之后常规补丁不再依赖 SSH 登录。若部署目录不是当前 shell 的工作目录，可显式指定：
@@ -219,7 +224,7 @@ git checkout <tag-or-commit>
 make prod-up
 ```
 
-`make prod-up` 会重新构建镜像、启动容器，并在 `web` 容器启动时执行 `alembic upgrade head`。包含迁移的更新会在拉取代码前自动运行备份；切回旧 commit 不会撤销 schema，必须用迁移前备份恢复数据库。恢复前确认 `.env` 中的 `MASTER_KEY` 与备份时一致，再按 `deploy/restore.sh` 恢复数据库、sessions 与插件卷。
+`make prod-up` 默认拉取 `.env` 指定的镜像并启动容器，在 `web` 容器启动时执行 `alembic upgrade head`。只有维护者救援时才使用 `make prod-up PROD_UP_ARGS=--source-build` 在服务器本地构建。包含迁移的更新会在拉取代码前自动运行备份；一旦新版 web 可能已经执行迁移，健康失败也不会自动切回旧代码，而会保留 pending 状态要求按恢复流程处理。切回旧 commit 不会撤销 schema，必须用迁移前备份恢复数据库。恢复前确认 `.env` 中的 `MASTER_KEY` 与备份时一致，再按 `deploy/restore.sh` 恢复数据库、sessions 与插件卷。
 
 ## 7. 备份
 

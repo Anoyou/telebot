@@ -1,5 +1,6 @@
 // 与后端 schema 对齐的关键类型（手写版）。OpenAPI 生成的 schema.ts 后续替换。
 
+import type { components as ApiComponents } from "@/api/schema";
 import type { PluginCapabilities, PluginEventSubscription } from "@/types/pluginContract";
 
 // ===================== 鉴权 =====================
@@ -1160,65 +1161,12 @@ export interface HealthOverview {
   workers: WorkersHealthStatus;
 }
 
-export interface HostResourceStatus {
-  cpu_percent?: number | null;
-  memory_used_percent?: number | null;
-  memory_total_mb?: number | null;
-  disk_used_percent?: number | null;
-  disk_free_gb?: number | null;
-  sampled_at: number;
-  uptime_seconds?: number | null;
-}
-
-export interface ProcessResourceStatus {
-  pid?: number | null;
-  name?: string | null;
-  role?: string | null;
-  cpu_percent?: number | null;
-  rss_mb?: number | null;
-  uss_mb?: number | null;
-}
-
-export interface WorkerRuntimeResourceStatus extends ProcessResourceStatus {
-  account_id: number;
-  alive: boolean;
-  desired: string;
-  fail_count: number;
-}
-
-export interface ContainerResourceStatus {
-  id?: string | null;
-  name: string;
-  service?: string | null;
-  cpu_percent?: number | null;
-  memory_mb?: number | null;
-  memory_limit_mb?: number | null;
-  memory_percent?: number | null;
-  pids?: number | null;
-}
-
-export interface RuntimeLogStatsStatus {
-  last_5m_total: number;
-  last_5m_warn: number;
-  last_5m_error: number;
-}
-
-export interface ResourceDashboard {
-  host: HostResourceStatus;
-  main_process: ProcessResourceStatus;
-  project_total: ProcessResourceStatus;
-  app_uptime_seconds?: number | null;
-  other_processes: ProcessResourceStatus[];
-  containers: ContainerResourceStatus[];
-  container_total: ProcessResourceStatus;
-  container_probe_error?: string | null;
-  container_source?: "updater" | "local_docker" | null;
-  project_total_basis?: "processes" | "processes_plus_containers" | "compose_containers";
-  workers: WorkerRuntimeResourceStatus[];
-  worker_alive: number;
-  worker_desired_running: number;
-  logs: RuntimeLogStatsStatus;
-}
+export type HostResourceStatus = ApiComponents["schemas"]["HostResource"];
+export type ProcessResourceStatus = ApiComponents["schemas"]["ProcessResource"];
+export type WorkerRuntimeResourceStatus = ApiComponents["schemas"]["WorkerRuntimeResource"];
+export type ContainerResourceStatus = ApiComponents["schemas"]["ContainerResource"];
+export type RuntimeLogStatsStatus = ApiComponents["schemas"]["RuntimeLogStats"];
+export type ResourceDashboard = ApiComponents["schemas"]["ResourceDashboard"];
 
 // 通用 list 包装（部分接口直接返数组，但为了后续兼容预留）
 export interface ListResponse<T> {
@@ -1977,12 +1925,9 @@ export interface BuiltinCommandItem {
 
 // ==================== Patch 0.4.2 ====================
 // GET /api/system/version 响应（public 端点，无鉴权）。
-// 前端启动 + 每 60s 拉一次，对比 lib/version.ts 的 APP_VERSION；
-// 不一致就在 GlobalAlertBar 弹红条提示「前后端版本不一致，请 make restart」。
-export interface BackendVersionInfo {
-  version: string;
-  stage: string | null;
-}
+// 前端从运行中的后端读取发布版本与实际部署 commit，避免频繁提交时为显示
+// 版本号而重新编译整个前端。
+export type BackendVersionInfo = ApiComponents["schemas"]["VersionInfo"];
 
 // ===================== 检查更新 =====================
 export interface CheckUpdateResult {

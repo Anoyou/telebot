@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { RefreshCw, RotateCcw, CheckCircle2, AlertCircle, Copy, ChevronDown } from "lucide-react";
 import { Spinner } from "@/components/ui/misc";
 
@@ -15,6 +16,7 @@ import { Label } from "@/components/ui/label";
 import { Select } from "@/components/ui/select";
 import {
   checkUpdate,
+  getBackendVersion,
   getSystemSettings,
   getUpdateJob,
   getUpdateTargetOptions,
@@ -28,7 +30,7 @@ import type {
   PullUpdateResult,
   UpdateJobStatus,
 } from "@/api/types";
-import { APP_VERSION, APP_VERSION_LABEL } from "@/lib/version";
+import { formatRuntimeVersionLabel } from "@/lib/runtime-version";
 import {
   clearActiveUpdateJob,
   getUpdateJobRetryDelay,
@@ -154,6 +156,12 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
   const checkTokenRef = useRef(0);
   const dialogGenerationRef = useRef(0);
   const targetOptionsTokenRef = useRef(0);
+  const runtimeVersionQ = useQuery({
+    queryKey: ["system", "version"],
+    queryFn: getBackendVersion,
+    enabled: open,
+    staleTime: 30_000,
+  });
 
   const normalizeAction = (raw: CheckUpdateResult["action_required"]): UpdateActionRequired => {
     return typeof raw === "string" ? raw : "none";
@@ -196,10 +204,10 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
         if (plan.fileSyncServices.includes("web") && !plan.rebuildServices.includes("web")) {
           return "同步文件并重启后端";
         }
-        return "增量重建并重启后端";
+        return "拉取镜像并重启后端";
       case "frontend":
         if (plan.runtimeMode === "local_source") return "拉取并重启使更新生效";
-        return "增量重建前端";
+        return "拉取并切换前端";
       case "full_update":
         if (plan.runtimeMode === "local_source") return "拉取并重启使更新生效";
         return "执行完整更新";
@@ -348,7 +356,7 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
           kind: "has_update",
           current: res.current_commit || "?",
           remote: res.remote_commit || "?",
-          currentVersion: res.current_version || APP_VERSION,
+          currentVersion: res.current_version || "未知",
           targetVersion: res.target_version || "未知",
           ahead: res.ahead,
           changedFiles: res.changed_files ?? [],
@@ -577,7 +585,12 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
         <div className="update-dialog-body min-h-0 flex-1 overflow-y-scroll pr-1">
           <div className="mb-3 flex items-center justify-between gap-3 rounded-md border border-primary/20 bg-primary/5 px-3 py-2 text-xs">
             <span className="text-muted-foreground">当前应用版本</span>
-            <code className="rounded bg-background px-2 py-1 font-mono text-foreground">{APP_VERSION_LABEL}</code>
+            <code className="rounded bg-background px-2 py-1 font-mono text-foreground">
+              {formatRuntimeVersionLabel(
+                runtimeVersionQ.data,
+                runtimeVersionQ.isError ? "版本读取失败" : "正在读取…",
+              )}
+            </code>
           </div>
 
           <div className="mb-4 rounded-md border bg-background px-3 py-3">
@@ -729,7 +742,7 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
                     <p>直接同步文件并重启：{step.plan.fileSyncServices.join("、")}</p>
                   )}
                   {step.plan.rebuildServices.length > 0 && (
-                    <p>需要编译或镜像构建：{step.plan.rebuildServices.join("、")}</p>
+                    <p>拉取预构建镜像：{step.plan.rebuildServices.join("、")}</p>
                   )}
                   {!step.plan.requiresMigration && <p>PostgreSQL / Redis 保持运行，不备份、不迁移。</p>}
                 </div>
