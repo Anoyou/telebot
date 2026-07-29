@@ -453,4 +453,3 @@ def test_estimate_cleanup_candidate_memory_scales_with_rows() -> None:
     large = event_trace.estimate_cleanup_candidate_memory(130_000)
     assert small < 2 * 1024 * 1024
     assert large > 200 * 1024 * 1024
-

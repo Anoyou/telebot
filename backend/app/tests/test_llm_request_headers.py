@@ -7,6 +7,7 @@ import pytest
 from cryptography.fernet import Fernet
 
 from app import crypto
+from app.services import llm_client
 from app.services.llm_client import AnthropicClient, ResponsesClient
 from app.services.llm_identity import resolve_identity
 from app.services.llm_request_headers import (
@@ -35,6 +36,19 @@ def test_request_headers_encrypt_values_and_only_expose_summaries() -> None:
     assert request_header_summaries(token) == [
         {"name": "X-Tenant-ID", "scopes": ["inference", "models"], "has_value": True}
     ]
+
+
+def test_compatibility_header_value_is_redacted_from_upstream_error() -> None:
+    secret = "opaque-header-secret"
+    llm_client._llm_headers(compatibility_headers={"X-Tenant-ID": secret})
+
+    safe = llm_client._safe_error_message(
+        f"OpenAI 接口返回 401: received X-Tenant-ID: {secret}",
+        "different-api-key",
+    )
+
+    assert secret not in safe
+    assert "<redacted>" in safe
 
 
 def test_request_headers_preserve_existing_value_by_case_insensitive_name() -> None:

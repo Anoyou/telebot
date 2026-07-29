@@ -5,10 +5,12 @@ from __future__ import annotations
 import pytest
 
 from app.services.system_agent.secrets import (
+    contains_request_header_context,
     extract_plaintext_secrets,
     looks_like_provider_credential_paste,
     merge_secret_into_arguments,
     redact_known_secrets,
+    redact_user_message,
 )
 
 
@@ -86,6 +88,28 @@ def test_telegram_bot_token_is_extracted_and_redacted() -> None:
 
     assert secrets == [token]
     assert token not in redact_known_secrets(text, secrets)
+
+
+@pytest.mark.parametrize(
+    "text",
+    (
+        'request_headers=[{"name":"X-Tenant-ID","value":"opaque-header-secret"}]',
+        "请求头 X-Tenant-ID 的 value 为 tenant",
+        "请设置兼容请求头 X-Tenant-ID 为 opaque-header-secret",
+        "request_headers: X-Tenant-ID=opaque-header-secret",
+        "兼容请求头：X-Tenant-ID: opaque-header-secret",
+        "Please set HTTP header X-Tenant-ID to opaque-header-secret",
+        "Set custom header X-Tenant-ID=opaque-header-secret",
+        "Set compatibility headers for this provider",
+    ),
+)
+def test_request_header_configuration_is_blocked_from_chat(text: str) -> None:
+    redacted = redact_user_message(text)
+
+    assert contains_request_header_context(text) is True
+    assert "opaque-header-secret" not in redacted
+    assert "tenant" not in redacted
+    assert "Provider 设置" in redacted
 
 
 def test_merge_secret_into_arguments_from_chat() -> None:

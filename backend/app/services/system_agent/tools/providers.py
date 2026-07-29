@@ -64,6 +64,11 @@ def _mark_reload_ai_commands(ctx: ToolContext) -> None:
     ctx.action.arguments = stored
 
 
+def _reject_request_headers(args: dict[str, Any]) -> None:
+    if "request_headers" in args:
+        raise ValueError("自定义请求头不能通过 System Agent 设置，请使用 AI Provider 设置页")
+
+
 async def list_providers(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
     limit = clamp_limit(args.get("limit"), default=50, maximum=200)
     q = select(LLMProvider).order_by(LLMProvider.id.asc()).limit(limit)
@@ -77,6 +82,7 @@ async def list_providers(ctx: ToolContext, args: dict[str, Any]) -> dict[str, An
 
 
 async def save_preview(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
+    _reject_request_headers(args)
     provider_id = args.get("id") or args.get("provider_id")
     if provider_id not in (None, ""):
         row = await ctx.db.get(LLMProvider, int(provider_id))
@@ -142,6 +148,7 @@ async def save_preview(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]
 async def save_precheck(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
     """保存前做真实上游验证；失败保持 pending，仅鉴权失败清除 Key。"""
 
+    _reject_request_headers(args)
     from ..provider_verify import resolve_provider_verify_args, run_quick_verify
 
     resolved = await resolve_provider_verify_args(ctx.db, args)
@@ -180,6 +187,7 @@ async def save_precheck(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any
 
 
 async def save_execute(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
+    _reject_request_headers(args)
     from fastapi import HTTPException
 
     provider_id = args.get("id") or args.get("provider_id")
@@ -248,6 +256,7 @@ async def save_execute(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]
 async def probe_and_add_preview(ctx: ToolContext, args: dict[str, Any]) -> PreparedAction:
     """用临时凭据立即测活；成功后把发现结果固化为待确认创建参数。"""
 
+    _reject_request_headers(args)
     from ..provider_verify import resolve_provider_verify_args, run_quick_verify
 
     if (args.get("id") or args.get("provider_id")) not in (None, ""):
@@ -345,6 +354,7 @@ async def delete_execute(ctx: ToolContext, args: dict[str, Any]) -> dict[str, An
 
 
 async def verify_preview(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
+    _reject_request_headers(args)
     provider_id = args.get("id") or args.get("provider_id")
     if provider_id not in (None, ""):
         row = await ctx.db.get(LLMProvider, int(provider_id))
@@ -369,6 +379,7 @@ async def verify_preview(ctx: ToolContext, args: dict[str, Any]) -> dict[str, An
 async def verify_precheck(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
     """真实验证放在 precheck：失败保持 pending，仅鉴权失败清 Key。"""
 
+    _reject_request_headers(args)
     from ..provider_verify import resolve_provider_verify_args, run_quick_verify
 
     resolved = await resolve_provider_verify_args(ctx.db, args)
@@ -394,6 +405,7 @@ async def verify_precheck(ctx: ToolContext, args: dict[str, Any]) -> dict[str, A
 async def verify_execute(ctx: ToolContext, args: dict[str, Any]) -> dict[str, Any]:
     """precheck 已完成上游验证；execute 仅返回成功摘要（不落库）。"""
 
+    _reject_request_headers(args)
     provider_id = args.get("id") or args.get("provider_id")
     return {
         "ok": True,
@@ -408,11 +420,6 @@ def register(registry: ToolRegistry) -> None:
         "protocol_profile": {"type": "string"},
         "web_search_api_format": {"type": "string"},
         "client_identity_profile": {"type": "string"},
-        "request_headers": {
-            "type": "array",
-            "items": {"type": "object"},
-            "description": "兼容请求头；value 会作为 Action 密文保存。",
-        },
     }
     routing_fields = {
         "modality": {"type": "string"},

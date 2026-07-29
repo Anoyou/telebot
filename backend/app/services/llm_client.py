@@ -20,7 +20,8 @@ import json
 import re
 import uuid
 from abc import ABC, abstractmethod
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Iterable, Mapping
+from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from typing import Any
@@ -83,6 +84,16 @@ _STREAM_SSE_TOTAL_LIMIT_BYTES = 8 * 1_048_576
 _RESPONSES_ALLOWED_INCOMPLETE_REASONS = frozenset(
     {"max_output_tokens", "max_tokens", "content_filter", "safety"}
 )
+_ERROR_SECRET_VALUES: ContextVar[tuple[str, ...]] = ContextVar(
+    "llm_error_secret_values",
+    default=(),
+)
+
+
+def _activate_error_secrets(values: Iterable[str]) -> None:
+    """把本次异步调用的请求头密钥放入错误脱敏上下文，不跨任务共享。"""
+
+    _ERROR_SECRET_VALUES.set(tuple(str(value) for value in values if str(value)))
 
 
 def _llm_headers(
@@ -99,6 +110,7 @@ def _llm_headers(
     ``identity`` 提供。``identity=None`` 或 ``minimal`` 档案时不注入任何身份 UA，
     仅保留协议必需头（Content-Type / Accept 与调用方自行装配的 Authorization）。
     """
+    _activate_error_secrets((compatibility_headers or {}).values())
     headers: dict[str, str] = {}
     if content_type:
         headers["Content-Type"] = content_type
@@ -2372,6 +2384,7 @@ class AnthropicClient(LLMClient):
         )
 
     def _headers(self) -> dict[str, str]:
+        _activate_error_secrets(self._compatibility_headers.values())
         # 协议必需头：x-api-key / anthropic-version / Content-Type。
         # 身份头（UA、x-app 等）由集中身份目录提供，不再发送 TelePilot 产品 UA；
         # minimal 身份不注入任何产品模拟头。
@@ -4050,7 +4063,11 @@ def _error_scope_for_http(status_code: int, body: str = "") -> LLMErrorScope:
     return LLMErrorScope.UNKNOWN
 
 
-def _safe_error_message(msg: str, api_key: str | None) -> str:
+def _safe_error_message(
+    msg: str,
+    api_key: str | None,
+    additional_secrets: Iterable[str] | None = None,
+) -> str:
     """把可能含敏感信息的错误文本脱敏。
 
     - 若 api_key 出现在 msg 中，整段替换为 ``<redacted>``
@@ -4062,8 +4079,11 @@ def _safe_error_message(msg: str, api_key: str | None) -> str:
     if not msg:
         return ""
     out = msg
-    if api_key:
-        out = out.replace(api_key, "<redacted>")
+    exact_secrets = [api_key] if api_key else []
+    exact_secrets.extend(_ERROR_SECRET_VALUES.get())
+    exact_secrets.extend(str(value) for value in (additional_secrets or ()) if str(value))
+    for secret in sorted(set(exact_secrets), key=len, reverse=True):
+        out = out.replace(secret, "<redacted>")
     # 统一截断，避免长串敏感数据透出
     if len(out) > 400:
         out = out[:400] + "..."

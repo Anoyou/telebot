@@ -12,6 +12,12 @@ from app.services.system_agent.tools.providers import (
     list_providers,
     probe_and_add_preview,
     register,
+    save_execute,
+    save_precheck,
+    save_preview,
+    verify_execute,
+    verify_precheck,
+    verify_preview,
 )
 
 
@@ -55,6 +61,36 @@ def test_probe_and_add_tool_is_a_confirmed_write_with_encrypted_secret() -> None
     assert spec.execute_handler is not None
     assert "测活成功" in spec.description
     assert spec.input_schema["required"] == ["base_url"]
+    assert "request_headers" not in spec.input_schema["properties"]
+
+
+@pytest.mark.parametrize(
+    "handler",
+    (
+        probe_and_add_preview,
+        save_preview,
+        save_precheck,
+        save_execute,
+        verify_preview,
+        verify_precheck,
+        verify_execute,
+    ),
+)
+@pytest.mark.asyncio
+async def test_provider_tools_reject_undeclared_request_headers_at_runtime(handler) -> None:
+    with pytest.raises(ValueError, match="不能通过 System Agent"):
+        await handler(
+            None,
+            {
+                "request_headers": [
+                    {
+                        "name": "X-Tenant-ID",
+                        "value": "opaque-header-secret",
+                        "scopes": ["inference"],
+                    }
+                ]
+            },
+        )
 
 
 @pytest.mark.asyncio
