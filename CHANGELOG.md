@@ -17,13 +17,23 @@
 
 > 不要为每个微小提交单独迭代版本号。开发过程中先把变更积累在 `Unreleased`；只有准备 beta 检查点、稳定发布、推送稳定检查点、创建 release/PR，或用户明确要求“推一版/发一版”时，才按本批改动的最高影响级别统一 bump 一次版本号。
 >
-> beta 检查点和稳定发布时，版本号在 4 处必须保持同步：`backend/app/__init__.py`、`backend/pyproject.toml`、`frontend/package.json`、`frontend/src/lib/version.ts`。同时把 `Unreleased` 内容移动到对应版本段落，并使用中文更新说明。`backend/app/main.py` 通过 `from . import __version__` 自动跟随，无需单独改。
+> beta 检查点和稳定发布时，四个源版本文件必须保持同步：`backend/app/__init__.py`、`backend/pyproject.toml`、`frontend/package.json`、`frontend/src/lib/version.ts`；随后运行 `make codegen`，确保 `openapi/telepilot.openapi.json` 的 `info.version` 作为第五处版本信息同步更新。同时把 `Unreleased` 内容移动到对应版本段落，并使用中文更新说明。`backend/app/main.py` 通过 `from . import __version__` 自动跟随，无需单独改。
 >
 > 2026-07-26 起，原 `0.73.0-beta.2` 至 `0.73.0-beta.15` 按阶段性能力回溯重整为 `0.74.0-beta.1` 至 `0.80.0-beta.3`；已存在的 Git 提交标题保留原始版本标记，不重写仓库历史。
 
 ---
 
 ## [Unreleased]
+
+## [0.88.0-beta.3] - 2026-07-30 · patch（补丁版本预发布） · 在线更新兼容修复
+
+### 修复
+
+- 修复旧版 Alpine updater 在线更新到启用 GHCR 构建证明校验的新版本时，因容器缺少 GitHub CLI 或未执行 `gh auth login` 而在镜像预拉取阶段退出的问题；旧容器会一次性补齐 attestation 能力，OCI 证明验证保持无人值守且失败关闭，新 updater 镜像则直接内置依赖。
+
+### 测试
+
+- 为旧 updater 自举、无 GitHub 登录的非交互证明校验、已有 token 透传和 OpenAPI 快照版本同步门禁补充回归覆盖。
 
 ## [0.88.0-beta.2] - 2026-07-30 · patch（补丁版本预发布） · System Agent 浏览器验收收口
 

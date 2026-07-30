@@ -208,6 +208,7 @@ jobs:
           backend_pyproject = Path("backend/pyproject.toml").read_text()
           frontend_version = Path("frontend/src/lib/version.ts").read_text()
           frontend_package = json.loads(Path("frontend/package.json").read_text())
+          openapi_snapshot = json.loads(Path("openapi/telepilot.openapi.json").read_text())
           changelog = Path("CHANGELOG.md").read_text()
 
           versions = {
@@ -215,6 +216,7 @@ jobs:
               "backend/pyproject.toml": re.search(r'version = "([^"]+)"', backend_pyproject).group(1),
               "frontend/src/lib/version.ts": re.search(r'APP_VERSION = "([^"]+)"', frontend_version).group(1),
               "frontend/package.json": frontend_package["version"],
+              "openapi/telepilot.openapi.json": openapi_snapshot["info"]["version"],
           }
           unique = set(versions.values())
           if len(unique) != 1:

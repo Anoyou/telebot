@@ -123,15 +123,40 @@ need_cmd() {
   command -v "$1" >/dev/null 2>&1 || die "缺少命令：$1（$2）"
 }
 
+# 兼容 0.87.0-beta.1 之前创建的 updater 容器：在线更新会在旧容器内
+# 执行新 checkout 的脚本，因此不能依赖目标 updater 镜像已经包含 gh。
+ensure_github_cli() {
+  if command -v gh >/dev/null 2>&1 \
+    && gh attestation verify --help >/dev/null 2>&1; then
+    return 0
+  fi
+
+  if command -v apk >/dev/null 2>&1 && [[ "$(id -u)" -eq 0 ]]; then
+    log "旧 updater 环境缺少 GitHub CLI，正在安装 attestation 验证能力"
+    apk add --no-cache github-cli >/dev/null \
+      || die "无法在 updater 容器内安装 GitHub CLI（github-cli）"
+  fi
+
+  command -v gh >/dev/null 2>&1 \
+    && gh attestation verify --help >/dev/null 2>&1 \
+    || die "缺少支持 attestation 的 GitHub CLI（gh）；请重新安装或更新 updater"
+}
+
 # 校验 GHCR 镜像由本仓库受信 GitHub Actions workflow 为指定 commit 构建。
 # OCI source/revision 标签只做一致性检查；Sigstore/SLSA attestation 才提供
 # 不可由普通 package 写入者伪造的构建者身份与源码绑定。
 verify_image_attestation() {
-  local digest_ref="$1" revision="$2"
+  local digest_ref="$1" revision="$2" cli_token
   local repository="${TELEPILOT_ATTESTATION_REPO:-Anoyou/Telebot}"
   local signer="${TELEPILOT_ATTESTATION_SIGNER:-github.com/Anoyou/Telebot/.github/workflows/publish-images.yml}"
-  need_cmd gh "验证 GHCR 镜像构建来源；请安装支持 attestation 的 GitHub CLI"
-  gh attestation verify "oci://$digest_ref" \
+  ensure_github_cli
+  # `--bundle-from-oci` 不访问 GitHub API，但 gh 仍会在命令启动时要求存在
+  # token 才能构造 HTTP client。生产 updater 不应要求人工 gh auth login；
+  # 有真实 token 时沿用，否则仅提供初始化占位值。若 gh 未来改为访问 API，
+  # 占位值会认证失败并保持 fail-closed。
+  cli_token="${GH_TOKEN:-${GITHUB_TOKEN:-telepilot-oci-attestation-verification}}"
+  GH_TOKEN="$cli_token" GH_PROMPT_DISABLED=1 \
+    gh attestation verify "oci://$digest_ref" \
     --repo "$repository" \
     --signer-workflow "$signer" \
     --source-digest "$revision" \

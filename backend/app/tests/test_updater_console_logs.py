@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -269,6 +270,163 @@ def test_production_defaults_to_prebuilt_images_with_explicit_source_fallback() 
     assert "org.opencontainers.image.revision=${{ needs.scope.outputs.revision }}" in workflow
     assert "uses: ./.github/workflows/publish-images.yml" in ci_workflow
     assert "github.event_name == 'push'" in ci_workflow
+
+
+def test_legacy_alpine_updater_bootstraps_github_cli(tmp_path: Path) -> None:
+    repo_root = Path(__file__).resolve().parents[3]
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    marker = tmp_path / "apk-called"
+    fake_id = fake_bin / "id"
+    fake_apk = fake_bin / "apk"
+    fake_id.write_text("#!/bin/sh\nprintf '0\\n'\n", encoding="utf-8")
+    fake_apk.write_text(
+        """#!/bin/sh
+set -eu
+touch "$FAKE_APK_MARKER"
+cat > "$FAKE_BIN/gh" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
+chmod +x "$FAKE_BIN/gh"
+""",
+        encoding="utf-8",
+    )
+    fake_id.chmod(0o755)
+    fake_apk.chmod(0o755)
+
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            'source scripts/_lib.sh; ensure_github_cli; command -v gh',
+        ],
+        cwd=repo_root,
+        env={
+            **os.environ,
+            "PATH": f"{fake_bin}:/usr/bin:/bin",
+            "FAKE_BIN": str(fake_bin),
+            "FAKE_APK_MARKER": str(marker),
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert marker.is_file()
+    assert str(fake_bin / "gh") in result.stdout
+
+
+def test_image_attestation_verification_is_noninteractive_without_github_login(
+    tmp_path: Path,
+) -> None:
+    repo_root = Path(__file__).resolve().parents[3]
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    capture = tmp_path / "gh-call"
+    fake_gh = fake_bin / "gh"
+    fake_gh.write_text(
+        """#!/bin/sh
+set -eu
+if [ "${1:-}" = "attestation" ] && [ "${2:-}" = "verify" ] && [ "${3:-}" = "--help" ]; then
+  exit 0
+fi
+{
+  printf 'GH_TOKEN=%s\\n' "${GH_TOKEN:-}"
+  printf 'GH_PROMPT_DISABLED=%s\\n' "${GH_PROMPT_DISABLED:-}"
+  printf 'args='
+  printf '%s ' "$@"
+  printf '\\n'
+} > "$FAKE_GH_CAPTURE"
+""",
+        encoding="utf-8",
+    )
+    fake_gh.chmod(0o755)
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if key not in {"GH_TOKEN", "GITHUB_TOKEN"}
+    }
+    env.update(
+        {
+            "PATH": f"{fake_bin}:/usr/bin:/bin",
+            "FAKE_GH_CAPTURE": str(capture),
+        }
+    )
+
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            (
+                "source scripts/_lib.sh; "
+                "verify_image_attestation "
+                "'ghcr.io/anoyou/telepilot-web@sha256:deadbeef' "
+                "'0123456789abcdef0123456789abcdef01234567'"
+            ),
+        ],
+        cwd=repo_root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    invocation = capture.read_text(encoding="utf-8")
+    assert "GH_TOKEN=telepilot-oci-attestation-verification" in invocation
+    assert "GH_PROMPT_DISABLED=1" in invocation
+    assert "--repo Anoyou/Telebot" in invocation
+    assert "--bundle-from-oci" in invocation
+    assert "--source-digest 0123456789abcdef0123456789abcdef01234567" in invocation
+
+
+def test_image_attestation_verification_preserves_configured_github_token(
+    tmp_path: Path,
+) -> None:
+    repo_root = Path(__file__).resolve().parents[3]
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    capture = tmp_path / "gh-token"
+    fake_gh = fake_bin / "gh"
+    fake_gh.write_text(
+        """#!/bin/sh
+set -eu
+if [ "${1:-}" = "attestation" ] && [ "${2:-}" = "verify" ] && [ "${3:-}" = "--help" ]; then
+  exit 0
+fi
+printf '%s\\n' "${GH_TOKEN:-}" > "$FAKE_GH_CAPTURE"
+""",
+        encoding="utf-8",
+    )
+    fake_gh.chmod(0o755)
+
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            (
+                "source scripts/_lib.sh; "
+                "verify_image_attestation "
+                "'ghcr.io/anoyou/telepilot-web@sha256:deadbeef' "
+                "'0123456789abcdef0123456789abcdef01234567'"
+            ),
+        ],
+        cwd=repo_root,
+        env={
+            **os.environ,
+            "PATH": f"{fake_bin}:/usr/bin:/bin",
+            "FAKE_GH_CAPTURE": str(capture),
+            "GH_TOKEN": "configured-github-token",
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert capture.read_text(encoding="utf-8").strip() == "configured-github-token"
 
 
 def test_updater_handoff_waits_for_health_and_rolls_back_image() -> None:

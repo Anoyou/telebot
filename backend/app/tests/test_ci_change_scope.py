@@ -124,3 +124,10 @@ def test_release_metadata_is_identified_without_forcing_browser() -> None:
     assert scope.backend is True
     assert scope.frontend is True
     assert scope.browser is False
+
+
+def test_version_sync_gate_includes_openapi_snapshot_version() -> None:
+    workflow = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+
+    assert 'openapi_snapshot = json.loads(Path("openapi/telepilot.openapi.json").read_text())' in workflow
+    assert '"openapi/telepilot.openapi.json": openapi_snapshot["info"]["version"]' in workflow

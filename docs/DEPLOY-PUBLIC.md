@@ -244,7 +244,7 @@ make prod-up
 
 ## 8. 验收清单
 
-1. `git rev-parse HEAD` 是本次目标 commit，`grep` 四处版本号一致。
+1. `git rev-parse HEAD` 是本次目标 commit，四个源版本文件与 `openapi/telepilot.openapi.json` 的 `info.version` 一致。
 2. `docker compose ps` 中 `postgres` / `redis` / `web` / `updater` / `frontend` 均为 running 或 healthy。
 3. 运行 `PUBLISH_PORT="$(sed -n 's/^WEB_PORT_PUBLISH=//p' .env | tail -n1 | tr -d '\"')"; PUBLISH_PORT="${PUBLISH_PORT##*:}"; curl -fsS "http://127.0.0.1:${PUBLISH_PORT:-80}/healthz"`，确认 FastAPI 进程存活。生产 Compose 不把 `web:8000` 暴露到宿主机。
 4. 在 Web 容器内执行 `docker compose exec -T web python -c "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8000/readyz', timeout=5).read().decode())"`，确认返回 `ok=true`，并确认 DB、Redis、Worker Supervisor、账号 Bot manager 和交互 Bot manager 均正常；生产流量与更新完成判定以此为准。
