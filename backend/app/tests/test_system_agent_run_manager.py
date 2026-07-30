@@ -188,6 +188,17 @@ async def _wait_for_status(manager: SystemAgentRunManager, run_id: str, status: 
     raise AssertionError(f"run {run_id} did not reach {status}")
 
 
+async def _wait_for_service_calls(service: Any, count: int = 1) -> None:
+    """Wait until the execution task has actually entered the test service."""
+    for _ in range(200):
+        if service.calls >= count:
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError(
+        f"service was called {service.calls} times; expected at least {count}"
+    )
+
+
 @pytest.mark.asyncio
 async def test_subscriber_disconnect_does_not_cancel_run_and_events_resume(run_db) -> None:
     service = _ControlledService()
@@ -248,6 +259,7 @@ async def test_start_is_idempotent_and_cancel_is_idempotent(run_db) -> None:
     )
     assert second.id == first.id
     await _wait_for_status(manager, first.id, "running")
+    await _wait_for_service_calls(service)
     assert service.calls == 1
 
     await manager.cancel_run(first.id)
@@ -1403,6 +1415,7 @@ async def test_expired_stop_replace_cancels_old_run_and_only_dispatches_replacem
         "expired-stop-replacement-run",
         AGENT_RUN_RUNNING,
     )
+    await _wait_for_service_calls(service)
     assert old.status == AGENT_RUN_CANCELLED
     assert old.paused_reason == "stop_replace"
     assert service.calls == 1
@@ -1543,11 +1556,7 @@ async def test_shutdown_requeues_owned_run_for_next_process(run_db) -> None:
     await recovery.ensure_ready()
     recovered = await _wait_for_status(recovery, run.id, AGENT_RUN_RUNNING)
     assert recovered.claimed_by == "next-worker"
-    for _ in range(100):
-        if recovery_service.kwargs:
-            break
-        await asyncio.sleep(0.01)
-    assert recovery_service.kwargs
+    await _wait_for_service_calls(recovery_service)
     assert recovery_service.kwargs[0]["retry_message"].id == run.user_message_id
     async with run_db() as db:
         messages = list(
@@ -1980,6 +1989,7 @@ async def test_reconcile_links_untracked_user_message_and_retries_in_place(run_d
         "unlinked-message-run",
         AGENT_RUN_RUNNING,
     )
+    await _wait_for_service_calls(service)
 
     assert recovered.user_message_id == user_message_id
     assert service.kwargs[0]["retry_message"].id == user_message_id
