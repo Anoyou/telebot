@@ -25,6 +25,17 @@
 
 ## [Unreleased]
 
+## [0.88.0-beta.6] - 2026-07-31 · patch（补丁版本预发布） · Durable Run 测试隔离修复
+
+### 修复
+
+- 修复用量脱敏回归测试意外启动真实 System Agent service 的隔离缺口；测试库只包含 Durable Run 表时，后台执行不再查询未创建的系统设置表并干扰运行取消。
+- 在写入模拟用量前显式等待可控 service 进入执行阶段，使脱敏与 `running → cancelled` 状态验证建立在确定同步点上，不再受本机或 Linux CI 调度差异影响。
+
+### 测试
+
+- 目标用例连续复跑二十轮，并在 macOS 与 Linux 容器中通过 Run Manager 全文件测试；同步扫描所有未注入 service 的启动用例，确认其余用例均在执行 service 前完成所有权或冲突校验。
+
 ## [0.88.0-beta.5] - 2026-07-31 · patch（补丁版本预发布） · Durable Run 测试竞态收口
 
 ### 修复

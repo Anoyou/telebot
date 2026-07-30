@@ -1728,8 +1728,10 @@ async def test_persisted_delta_events_redact_unknown_provider_secret(run_db) -> 
 
 @pytest.mark.asyncio
 async def test_persisted_run_usage_redacts_nested_credentials(run_db) -> None:
+    service = _ControlledService()
     manager = SystemAgentRunManager(
         session_factory=run_db,
+        service_factory=lambda: service,
         poll_interval=0.01,
         worker_id="usage-redaction-worker",
     )
@@ -1740,6 +1742,7 @@ async def test_persisted_run_usage_redacts_nested_credentials(run_db) -> None:
         text="检查用量脱敏",
     )
     await _wait_for_status(manager, run.id, AGENT_RUN_RUNNING)
+    await _wait_for_service_calls(service)
     await manager._update_usage(
         run.id,
         {
