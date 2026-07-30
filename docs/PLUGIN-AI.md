@@ -2,7 +2,7 @@
 
 `ctx.ai` 是第三方插件可用的受控 AI facade。普通文本调用声明 `permissions=["ai_text"]`；需要模型自主选择工具时必须额外声明独立的 `ai_agent` 权限。两种入口都复用平台 Provider、fallback、账号预算、插件 quota、usage 和密钥隔离。
 
-当系统设置中 **AI 平台能力**关闭时，worker 不加载 Provider，也不会注入 `ctx.ai`；旧插件若仍调用会收到结构化不可用错误。新插件可声明 `requires_platform_capabilities=["ai"]` 以便路由层提前裁剪入口。详见 [平台能力热插拔](PLATFORM-CAPABILITIES.md)。
+当系统设置中 **AI 平台能力**关闭时，worker 不加载 Provider；正常热切换会把现有插件上下文的 `ctx.ai` 置为 `None`，新上下文也不会注入该 facade，因此插件应在调用前先检查 `ctx.ai`。如果切换竞态中仍有旧代码持有先前取得的 `PluginAI` facade 并继续调用，facade 会抛出结构化 `AIUnavailableError`。新插件可声明 `requires_platform_capabilities=["ai"]`，让路由层提前裁剪依赖 AI 的入口。详见 [平台能力热插拔](PLATFORM-CAPABILITIES.md)。
 
 ## Event Bus 主路径写法
 

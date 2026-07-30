@@ -25,7 +25,7 @@
 
 消息链路统一后，互动插件默认按这一套模型理解：
 
-- 触发方式决定普通会话通道。带前缀命令开局，整段普通收发走 `userbot`；关键词、付款确认、按钮回调开局，整段普通收发走 `interaction_bot`。固定能力例外：`payout` 走 UserBot，`send_rich_message` 默认走 Interaction Bot，显式 `userbot_reply` 才使用 Layer 228。
+- 触发方式决定普通会话通道。带前缀命令开局，整段普通收发走 `userbot`；关键词、付款确认、按钮回调开局，整段普通收发走 `interaction_bot`。固定能力例外：`payout` 走 UserBot，且已安装插件必须在 `permissions` 中显式声明 `payout`，否则运行时拒绝执行；`send_rich_message` 默认走 Interaction Bot，显式 `userbot_reply` 才使用 Layer 228。
 - 新玩法优先实现一个 `on_event(ctx, payload)` 入口，在同一个入口里按 `tp_event.type` 或 `payload["source"]["type"]` 处理 `command`、`keyword`、`payment_confirmed`、`message`、`callback_query`、`session_expired`。
 - 单局状态优先写进 `session.data`，通过 `update_session` 持久化；不要再把游戏状态放进进程内全局字典、锁和自建超时任务。
 - 普通 JSON 状态优先使用 `ctx.storage`；确需 SQLite、缓存文件或索引文件时写入 `ctx.data_dir`。禁止把运行数据写到插件代码目录或 `Path(__file__).parent`，因为安装和更新会整体替换该目录。
