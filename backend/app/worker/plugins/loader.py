@@ -2139,6 +2139,31 @@ async def _apply_userbot_event_bus_actions(
         )
 
     async def _on_payout(action: dict[str, Any]) -> bool:
+        inst = state.instances.get(plugin_key)
+        plugin_source = getattr(type(inst), "_source", "builtin") if inst is not None else "builtin"
+        manifest = _loaded_plugin_manifest(type(inst), inst) if inst is not None else None
+        permissions = set(manifest.permissions or []) if manifest is not None else set()
+        if plugin_source == "installed" and "payout" not in permissions:
+            await record_action(
+                action.get("context"),
+                action,
+                TRACE_STATUS_FAILED,
+                error_code="permission_denied",
+                error="installed plugin must declare payout permission",
+            )
+            await _log(
+                redis,
+                state.account_id,
+                "warn",
+                "Event Bus payout action denied: manifest 未声明 payout 权限",
+                source="plugin",
+                plugin_key=plugin_key,
+                entry_key=entry_key,
+                reason_code="permission_denied",
+                action_type="payout",
+                **trace_log_context(trace),
+            )
+            return False
         return await _apply_userbot_payout_action(state, event, action)
 
     async def _on_deprecated(action: dict[str, Any]) -> bool:

@@ -2421,6 +2421,73 @@ async def test_userbot_payout_action_rejected_when_over_limit(monkeypatch) -> No
 
 
 @pytest.mark.asyncio
+async def test_installed_plugin_payout_action_requires_explicit_permission(monkeypatch) -> None:
+    class _InstalledPayoutPlugin(Plugin):
+        key = "_test_installed_payout_permission"
+        display_name = "installed payout permission"
+
+    _InstalledPayoutPlugin._source = "installed"
+    _InstalledPayoutPlugin._manifest = Manifest(
+        key=_InstalledPayoutPlugin.key,
+        display_name=_InstalledPayoutPlugin.display_name,
+        permissions=["send_message"],
+    )
+    state = loader_mod._AccountState(account_id=711)
+    state.redis = _FakeRedis()
+    state.client = SimpleNamespace(send_message=AsyncMock())
+    state.instances[_InstalledPayoutPlugin.key] = _InstalledPayoutPlugin()
+    record_action = AsyncMock()
+    monkeypatch.setattr(loader_mod, "record_action", record_action)
+    monkeypatch.setattr(loader_mod, "_log", AsyncMock())
+
+    failed = await loader_mod._apply_userbot_event_bus_actions(
+        state,
+        "evt_missing_payout_permission",
+        SimpleNamespace(chat_id=-100777),
+        plugin_key=_InstalledPayoutPlugin.key,
+        entry_key="main",
+        actions=[{"type": "payout", "amount": 8, "chat_id": -100777}],
+        redis=state.redis,
+    )
+
+    assert failed is True
+    state.client.send_message.assert_not_awaited()
+    assert record_action.await_args.kwargs["error_code"] == "permission_denied"
+
+
+@pytest.mark.asyncio
+async def test_installed_plugin_payout_action_accepts_explicit_permission(monkeypatch) -> None:
+    class _InstalledPayoutPlugin(Plugin):
+        key = "_test_installed_payout_permission_allowed"
+        display_name = "installed payout permission allowed"
+
+    _InstalledPayoutPlugin._source = "installed"
+    _InstalledPayoutPlugin._manifest = Manifest(
+        key=_InstalledPayoutPlugin.key,
+        display_name=_InstalledPayoutPlugin.display_name,
+        permissions=["payout"],
+    )
+    state = loader_mod._AccountState(account_id=712)
+    state.redis = _FakeRedis()
+    state.instances[_InstalledPayoutPlugin.key] = _InstalledPayoutPlugin()
+    apply_payout = AsyncMock(return_value=True)
+    monkeypatch.setattr(loader_mod, "_apply_userbot_payout_action", apply_payout)
+
+    failed = await loader_mod._apply_userbot_event_bus_actions(
+        state,
+        "evt_declared_payout_permission",
+        SimpleNamespace(chat_id=-100777),
+        plugin_key=_InstalledPayoutPlugin.key,
+        entry_key="main",
+        actions=[{"type": "payout", "amount": 8, "chat_id": -100777}],
+        redis=state.redis,
+    )
+
+    assert failed is False
+    apply_payout.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_userbot_payout_action_skips_humanize_when_sent(monkeypatch) -> None:
     state = loader_mod._AccountState(account_id=71)
     state.redis = _FakeRedis()

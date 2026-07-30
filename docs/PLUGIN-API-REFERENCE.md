@@ -833,7 +833,7 @@ return [{
 
 `reply_to_display_name` 必须来自上文的 `resolve_public_sender_identity()` / `resolve_public_sender_identities()`，不能直接复制按钮回调中的姓名；匿名管理员应同时把 `reply_to_username` 设为 `None`。平台会在 UserBot 发奖消息发送后先保存这组安全公开身份，再完成 payout 账本，供后续转账通知复用。历史动作未提供公开名、映射尚未写入或 Redis 暂时不可用时，平台会再用 Interaction Bot 的官方 `getChatMember` 核验；无法确认时隐藏为“匿名用户”，不会回退回复消息里的真实姓名。
 
-`payout` 永远经 userbot 执行，并进入限速与 trace。它适合“发奖文案本身就是协议”的玩法，普通 Bot 不会代替它执行转账样动作。找不到 `reply_to_user_id` 对应的近期发言时，`payout` 同样会失败、写入日志，并发送默认或自定义的 `reply_anchor_missing_text` 提示。
+`payout` 永远经 userbot 执行，并进入限速与 trace。已安装插件必须在 Manifest 的 `permissions` 中显式声明 `payout`，否则运行时以 `error_code=permission_denied` 拒绝动作；涉及资金的插件同时建议开启 `strict_trace=true`。它适合“发奖文案本身就是协议”的玩法，普通 Bot 不会代替它执行转账样动作。找不到 `reply_to_user_id` 对应的近期发言时，`payout` 同样会失败、写入日志，并发送默认或自定义的 `reply_anchor_missing_text` 提示。
 
 `payout` 的额度校验与失败补偿由平台负责，插件不用自己实现，但要理解它对 trace 的影响：
 

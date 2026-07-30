@@ -69,6 +69,7 @@ _NON_CLIENT_PERMISSIONS: frozenset[str] = frozenset(
         "ai_vision",
         "ai_image",
         "ai_stt",
+        "payout",
     }
 )
 

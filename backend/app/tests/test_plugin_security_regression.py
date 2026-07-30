@@ -395,6 +395,15 @@ class TestSandboxClientSecurity:
             _ = sandbox.session
         assert "禁止访问" in str(ex.value) or "session" in str(ex.value)
 
+    def test_sandbox_recognizes_payout_as_non_client_permission(self, caplog):
+        """payout 由 MessageOps 处理，不能被 SandboxClient 误报为未知权限。"""
+        from app.worker.plugins.sandbox import resolve_permissions
+
+        with caplog.at_level("WARNING"):
+            assert resolve_permissions(["payout"]) == frozenset()
+
+        assert "未知权限名" not in caplog.text
+
     def test_sandbox_blocks_class_reflection(self):
         """禁止通过 __class__ 反射获取真实类型。"""
         sandbox = self._make_sandbox()

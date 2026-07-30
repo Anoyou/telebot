@@ -147,7 +147,7 @@ Worker 在注册插件、命令 handler 或 scheduler 前必须先从 DB 初始�
 兼容：
 
 - 旧插件没有新字段时继续加载
-- 旧插件调用 `ctx.ai` 时由 AI facade 返回结构化关闭错误
+- 正常热切换会把现有插件上下文的 `ctx.ai` 置为 `None`；若竞态中的旧调用仍持有先前取得的 facade，则由 AI facade 返回结构化关闭错误
 - 只有显式声明全插件依赖时才整体暂停
 - Interaction Bot 专属能力不得静默降级成错误的 userbot 行为
 
