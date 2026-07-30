@@ -25,6 +25,17 @@
 
 ## [Unreleased]
 
+## [0.88.0-beta.4] - 2026-07-31 · patch（补丁版本预发布） · 发布流水线回归修复
+
+### 修复
+
+- 隔离 Ubuntu CI Runner 预装的系统 GitHub CLI，确保旧版 Alpine updater 的自举回归测试始终验证真实的“容器内缺少可用 `gh`”升级路径，不再因主机环境泄漏误报失败并阻断 GHCR 镜像发布。
+- 为 Durable Run 关闭恢复测试增加执行服务启动的确定同步点，消除 Run 已提交为 `running`、但后台服务尚未记录调用时抢先断言的竞态及其伴随的 SQLite teardown 锁冲突。
+
+### 测试
+
+- 在 macOS 与 Linux 容器中验证旧 updater 自举和 Durable Run 跨进程恢复回归，并通过后端全量测试、前端测试与生产构建及 updater Alpine 镜像构建。
+
 ## [0.88.0-beta.3] - 2026-07-30 · patch（补丁版本预发布） · 在线更新兼容修复
 
 ### 修复

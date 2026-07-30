@@ -279,7 +279,14 @@ def test_legacy_alpine_updater_bootstraps_github_cli(tmp_path: Path) -> None:
     marker = tmp_path / "apk-called"
     fake_id = fake_bin / "id"
     fake_apk = fake_bin / "apk"
+    fake_gh = fake_bin / "gh"
     fake_id.write_text("#!/bin/sh\nprintf '0\\n'\n", encoding="utf-8")
+    fake_gh.write_text(
+        """#!/bin/sh
+exit 1
+""",
+        encoding="utf-8",
+    )
     fake_apk.write_text(
         """#!/bin/sh
 set -eu
@@ -293,6 +300,7 @@ chmod +x "$FAKE_BIN/gh"
         encoding="utf-8",
     )
     fake_id.chmod(0o755)
+    fake_gh.chmod(0o755)
     fake_apk.chmod(0o755)
 
     result = subprocess.run(

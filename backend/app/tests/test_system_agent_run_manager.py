@@ -1543,6 +1543,11 @@ async def test_shutdown_requeues_owned_run_for_next_process(run_db) -> None:
     await recovery.ensure_ready()
     recovered = await _wait_for_status(recovery, run.id, AGENT_RUN_RUNNING)
     assert recovered.claimed_by == "next-worker"
+    for _ in range(100):
+        if recovery_service.kwargs:
+            break
+        await asyncio.sleep(0.01)
+    assert recovery_service.kwargs
     assert recovery_service.kwargs[0]["retry_message"].id == run.user_message_id
     async with run_db() as db:
         messages = list(
