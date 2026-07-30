@@ -224,6 +224,28 @@ def test_incremental_script_uses_compose_health_without_localhost_frontend_probe
     assert "@@TELEPILOT_PROGRESS@@" in script
 
 
+def test_incremental_script_reloads_target_logic_before_image_verification() -> None:
+    """旧 updater 必须先让目标脚本接管，不能继续执行启动时加载的旧验签函数。"""
+    repo_root = Path(__file__).resolve().parents[3]
+    script = (repo_root / "scripts" / "prod-update.sh").read_text(encoding="utf-8")
+
+    fast_forward = script.index('git pull --ff-only "$REMOTE" "$BRANCH"')
+    reload_target = script.index('exec bash scripts/prod-update.sh "${ORIGINAL_ARGS[@]}"')
+    prefetch_images = script.index(
+        "# 目标版本更新逻辑接管后再确认所有必需镜像。"
+    )
+    reload_guard = script.rfind(
+        "if (( HEAD_ALREADY_UPDATED == 0 )); then",
+        fast_forward,
+        reload_target,
+    )
+
+    assert 'ORIGINAL_ARGS=("$@")' in script
+    assert script.count('exec bash scripts/prod-update.sh "${ORIGINAL_ARGS[@]}"') == 1
+    assert fast_forward < reload_guard < reload_target < prefetch_images
+    assert script.index("pull_verified_image web", prefetch_images) > reload_target
+
+
 def test_incremental_script_syncs_backend_files_with_image_rollback() -> None:
     repo_root = Path(__file__).resolve().parents[3]
     script = (repo_root / "scripts" / "prod-update.sh").read_text(encoding="utf-8")

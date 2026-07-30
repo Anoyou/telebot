@@ -175,8 +175,10 @@ TELEPILOT_UPDATE_BRANCH=main make prod-update
 容器内通过 Python 编译校验后生成轻量本地补丁镜像，只重启 `web`，不执行 Docker build；
 前端、依赖、Dockerfile、Compose 或 updater 变化会先拉取 GitHub Actions 已构建的不可变
 镜像 digest，核对镜像 revision，再切换对应服务。镜像缺失、下载失败或 revision 不符时，
-更新会在 `git pull` 前停止，当前服务保持不动。PostgreSQL / Redis 配置、卷结构或无法识别
-的基础设施变化才进入完整更新。仅
+工作区会保留目标 commit 和 pending 标记，但当前服务仍保持旧镜像不动；镜像就绪后可直接
+重试。更新脚本自身发生变化时，fast-forward 后会立即重新执行目标版本脚本，再进入镜像
+校验和服务切换，避免旧 updater 继续使用启动时加载的过期逻辑。PostgreSQL / Redis 配置、
+卷结构或无法识别的基础设施变化才进入完整更新。仅
 `backend/pyproject.toml` 版本号变化不会被误判为依赖变化；只有 `project.dependencies`
 实际改变才切换 web 镜像。没有 Alembic 迁移或基础设施变化时不会创建备份或处理数据库。
 
@@ -215,6 +217,19 @@ TELEPILOT_UPDATE_BRANCH=Beta make prod-update PROD_UPDATE_ARGS=--dry-run
 cd /opt/telepilot
 TELEPILOT_HOST_PROJECT_DIR=/opt/telepilot make prod-up
 ```
+
+`v0.87.0-beta.5` 是例外：该版本在拉取目标脚本前就要求运行中的 updater 容器提供
+GitHub CLI，因此无法靠尚未加载的新代码自我修复。若面板日志出现
+`缺少命令：gh（验证 GHCR 镜像构建来源……）`，只需在宿主机执行一次：
+
+```bash
+cd /opt/telepilot
+docker compose exec -u 0 updater apk add --no-cache github-cli
+```
+
+随后回到 Web 面板重试更新即可；目标 updater 镜像已内置 GitHub CLI，后续版本也会在
+镜像校验前重新加载目标更新逻辑，不再需要重复执行该命令。此操作只给现有 updater 容器
+补齐验签工具，不会修改数据库、业务容器或跳过镜像来源验证。
 
 没有数据库迁移时，可回滚到指定版本：
 

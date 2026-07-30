@@ -9,6 +9,7 @@
 
 set -euo pipefail
 
+ORIGINAL_ARGS=("$@")
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/_lib.sh"
 cd "$ROOT_DIR"
@@ -363,23 +364,6 @@ pull_verified_image() {
   VERIFIED_IMAGE_REF="$digest_ref"
 }
 
-# 在移动 Git HEAD 前先确认所有必需镜像都真实存在。缺失时保持当前代码和服务不动。
-if (( NEEDS_FULL == 1 || NEEDS_BACKEND_REBUILD == 1 || NEEDS_FRONTEND_REBUILD == 1 || NEEDS_UPDATER_REBUILD == 1 )); then
-  prepare_target_images
-  if (( NEEDS_FULL == 1 || NEEDS_BACKEND_REBUILD == 1 )); then
-    pull_verified_image web "$TARGET_WEB_IMAGE" "$TARGET_IMAGE_COMMIT"
-    TARGET_WEB_IMAGE="$VERIFIED_IMAGE_REF"
-  fi
-  if (( NEEDS_FULL == 1 || NEEDS_FRONTEND_REBUILD == 1 )); then
-    pull_verified_image frontend "$TARGET_FRONTEND_IMAGE" "$TARGET_IMAGE_COMMIT"
-    TARGET_FRONTEND_IMAGE="$VERIFIED_IMAGE_REF"
-  fi
-  if (( NEEDS_FULL == 1 || NEEDS_UPDATER_REBUILD == 1 )); then
-    pull_verified_image updater "$TARGET_UPDATER_IMAGE" "$TARGET_IMAGE_COMMIT"
-    TARGET_UPDATER_IMAGE="$VERIFIED_IMAGE_REF"
-  fi
-fi
-
 record_previous_deployment() {
   local state_file web_id frontend_id updater_id web_image frontend_image updater_image
   state_file="$(git rev-parse --git-path telepilot-deploy-previous.json)"
@@ -424,6 +408,34 @@ if (( HEAD_ALREADY_UPDATED == 0 )); then
   ok "代码已更新到 ${NEW_COMMIT:0:12}"
 else
   NEW_COMMIT="$(git rev-parse HEAD)"
+fi
+
+# 更新脚本和它在启动时 source 的 _lib.sh 也可能属于本次更新。首次 fast-forward
+# 后必须立即重新执行目标版本脚本，让新的兼容、自举和安全逻辑在预拉取镜像前接管。
+# pending 标记会让第二次执行继续使用 OLD_COMMIT..TARGET_COMMIT 生成完整计划，
+# 且 HEAD_ALREADY_UPDATED=1 会阻止再次 pull/re-exec。
+if (( HEAD_ALREADY_UPDATED == 0 )); then
+  emit_progress 20 "接管更新" "重新加载目标版本更新逻辑"
+  log "重新加载目标 commit 的更新逻辑"
+  exec bash scripts/prod-update.sh "${ORIGINAL_ARGS[@]}"
+fi
+
+# 目标版本更新逻辑接管后再确认所有必需镜像。镜像缺失或验签失败时，运行中的
+# 服务仍保持旧镜像；pending 标记保留，镜像就绪或环境修复后可直接在线重试。
+if (( NEEDS_FULL == 1 || NEEDS_BACKEND_REBUILD == 1 || NEEDS_FRONTEND_REBUILD == 1 || NEEDS_UPDATER_REBUILD == 1 )); then
+  prepare_target_images
+  if (( NEEDS_FULL == 1 || NEEDS_BACKEND_REBUILD == 1 )); then
+    pull_verified_image web "$TARGET_WEB_IMAGE" "$TARGET_IMAGE_COMMIT"
+    TARGET_WEB_IMAGE="$VERIFIED_IMAGE_REF"
+  fi
+  if (( NEEDS_FULL == 1 || NEEDS_FRONTEND_REBUILD == 1 )); then
+    pull_verified_image frontend "$TARGET_FRONTEND_IMAGE" "$TARGET_IMAGE_COMMIT"
+    TARGET_FRONTEND_IMAGE="$VERIFIED_IMAGE_REF"
+  fi
+  if (( NEEDS_FULL == 1 || NEEDS_UPDATER_REBUILD == 1 )); then
+    pull_verified_image updater "$TARGET_UPDATER_IMAGE" "$TARGET_IMAGE_COMMIT"
+    TARGET_UPDATER_IMAGE="$VERIFIED_IMAGE_REF"
+  fi
 fi
 
 # 新版 compose 在解析任何服务前都要求 UPDATER_TOKEN。先补齐并与 JWT
