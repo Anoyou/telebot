@@ -1,30 +1,52 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useSearchParams } from "react-router-dom";
-import { ChevronDown, MessageCircle, Server, Settings2, Trash2 } from "lucide-react";
+import {
+  Bell,
+  BellOff,
+  BellRing,
+  ChevronDown,
+  MessageCircle,
+  Server,
+  Settings2,
+  Trash2,
+} from "lucide-react";
 import { toast } from "sonner";
 
 import {
+  approveSystemAgentRun,
   cancelSystemAgentRun,
+  clearSystemAgentQueue,
   createSystemAgentSession,
+  deleteSystemAgentQueueItem,
   deleteSystemAgentSession,
   getSystemAgentRun,
   getSystemAgentCapabilities,
   getSystemAgentConfig,
   listSystemAgentActions,
   listSystemAgentMessages,
+  listSystemAgentQueue,
+  listSystemAgentRunEvents,
+  listSystemAgentRuns,
   listSystemAgentSessions,
   createSystemAgentUserMemory,
   deleteSystemAgentUserMemory,
   listSystemAgentUserMemory,
   patchSystemAgentConfig,
   patchSystemAgentUserMemory,
+  reorderSystemAgentQueue,
+  resumeSystemAgentQueue,
   startSystemAgentRegenerateRun,
   startSystemAgentRetryRun,
   startSystemAgentRun,
+  steerSystemAgentRun,
+  stopAndReplaceSystemAgentRun,
   streamSystemAgentRun,
+  submitSystemAgentRunInput,
+  updateSystemAgentQueueItem,
   type SystemAgentAction,
   type SystemAgentMessage,
+  type SystemAgentQueueItem,
   type SystemAgentRun,
   type SystemAgentSession,
   type SystemAgentStreamEvent,
@@ -34,10 +56,16 @@ import { listLLMProviders } from "@/api/commands";
 import { listAccounts } from "@/api/accounts";
 import type { LLMProviderOut } from "@/api/types";
 import { matrixToPickerItems, type ModelPickerValue } from "@/components/ai/ModelPicker";
-import { Composer } from "@/components/assistant/Composer";
+import { Composer, type ComposerAction } from "@/components/assistant/Composer";
 import { AgentMark } from "@/components/assistant/AgentMark";
 import { useAssistantDock } from "@/components/assistant/AssistantDock";
 import { Conversation, type LiveBubble } from "@/components/assistant/Conversation";
+import { TaskCenter } from "@/components/assistant/TaskCenter";
+import {
+  classifySystemAgentRunSettlement,
+  sortSystemAgentQueue,
+  sortSystemAgentRuns,
+} from "@/components/assistant/taskCenterState";
 import {
   SessionDrawer,
   type SessionOriginFilter,
@@ -50,6 +78,7 @@ import { Switch } from "@/components/ui/switch";
 import { Skeleton } from "@/components/ui/misc";
 import { useStreamingText } from "@/hooks/useStreamingText";
 import { getErrMsg } from "@/lib/api";
+import { fetchMe } from "@/lib/auth";
 import { systemAgentToolLabel } from "@/lib/systemAgentLabels";
 import { removeSessionAndChooseNext } from "./sessionState";
 import {
@@ -60,6 +89,7 @@ import {
 } from "./sessionModelSelection";
 
 const ACTIVE_RUNS_KEY = "telepilot.system-agent.active-runs.v1";
+const DRAFTS_KEY = "telepilot.system-agent.drafts.v1";
 
 type StoredRun = {
   runId: string;
@@ -118,6 +148,46 @@ function forgetRun(sessionId: string, runId?: string): void {
   }
 }
 
+function readDrafts(): Record<string, string> {
+  try {
+    const value = JSON.parse(window.localStorage.getItem(DRAFTS_KEY) || "{}") as unknown;
+    if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+    return value as Record<string, string>;
+  } catch {
+    return {};
+  }
+}
+
+function draftKey(userId: number | null | undefined, sessionId: string | null): string {
+  return `${userId ?? "anonymous"}:${sessionId || "__new__"}`;
+}
+
+function readDraft(
+  userId: number | null | undefined,
+  sessionId: string | null,
+): string {
+  const drafts = readDrafts();
+  const scoped = drafts[draftKey(userId, sessionId)];
+  return scoped || "";
+}
+
+function writeDraft(
+  userId: number | null | undefined,
+  sessionId: string | null,
+  value: string,
+): void {
+  try {
+    const key = draftKey(userId, sessionId);
+    const drafts = readDrafts();
+    if (value) drafts[key] = value;
+    else delete drafts[key];
+    delete drafts[sessionId || "__new__"];
+    window.localStorage.setItem(DRAFTS_KEY, JSON.stringify(drafts));
+  } catch {
+    // localStorage 不可用时仅保留当前页面草稿。
+  }
+}
+
 function requestId(): string {
   return typeof crypto.randomUUID === "function"
     ? crypto.randomUUID()
@@ -126,6 +196,10 @@ function requestId(): string {
 
 function terminalRun(run: SystemAgentRun): boolean {
   return ["succeeded", "failed", "cancelled"].includes(run.status);
+}
+
+function openRun(run: SystemAgentRun): boolean {
+  return ["queued", "running", "waiting_input", "waiting_approval"].includes(run.status);
 }
 
 function toolsModels(provider?: LLMProviderOut): string[] {
@@ -166,11 +240,20 @@ export function AssistantIndex() {
   } | null>(null);
   const [streamNotice, setStreamNotice] = useState("");
   const [composerValue, setComposerValue] = useState("");
+  const [composerAction, setComposerAction] = useState<ComposerAction>("queue");
+  const [waitingInput, setWaitingInput] = useState("");
+  const [activeRunSnapshot, setActiveRunSnapshot] = useState<SystemAgentRun | null>(null);
+  const [notificationPermission, setNotificationPermission] = useState<
+    NotificationPermission | "unsupported"
+  >(() =>
+    "Notification" in window ? Notification.permission : "unsupported"
+  );
   /** 本轮模型选择：仅会话本地，默认自动路由 */
   const [sessionModel, setSessionModel] = useState<SessionModelSelection>({ mode: "auto" });
   const abortRef = useRef<AbortController | null>(null);
   const streamingBubbleCreatedRef = useRef(false);
   const liveAssistantMessageIdRef = useRef<number | null>(null);
+  const skipNextDraftWriteRef = useRef(false);
   const liveText = useStreamingText();
   const liveReasoning = useStreamingText();
 
@@ -207,6 +290,23 @@ export function AssistantIndex() {
     refetchInterval: assistantCollapsed ? false : 3_000,
     refetchOnWindowFocus: "always",
   });
+  const meQ = useQuery({
+    queryKey: ["auth", "me"],
+    queryFn: fetchMe,
+    staleTime: 60_000,
+  });
+  const runsQ = useQuery({
+    queryKey: ["system-agent", "runs", "task-center"],
+    queryFn: () => listSystemAgentRuns({ limit: 100, include_bot: true }),
+    refetchInterval: assistantCollapsed ? 5_000 : 2_000,
+    refetchOnWindowFocus: "always",
+  });
+  const queueQ = useQuery({
+    queryKey: ["system-agent", "queue"],
+    queryFn: () => listSystemAgentQueue({ include_bot: true }),
+    refetchInterval: assistantCollapsed ? 5_000 : 2_000,
+    refetchOnWindowFocus: "always",
+  });
   const sessionOptions = useMemo(
     () => (Array.isArray(sessionsQ.data) ? sessionsQ.data : []),
     [sessionsQ.data],
@@ -223,6 +323,52 @@ export function AssistantIndex() {
   const accountOptions = Array.isArray(accountsQ.data) ? accountsQ.data : [];
   const activeSession = sessionOptions.find((session) => session.id === activeId) ?? null;
   const viewingBotSession = activeSession?.channel === "bot";
+  const allRuns = useMemo(
+    () => sortSystemAgentRuns(Array.isArray(runsQ.data) ? runsQ.data : []),
+    [runsQ.data],
+  );
+  const allQueue = useMemo(
+    () => sortSystemAgentQueue(Array.isArray(queueQ.data) ? queueQ.data : []),
+    [queueQ.data],
+  );
+  const runStatusBySession = useMemo(() => {
+    const statuses: Record<string, string> = {};
+    for (const run of allRuns) {
+      if (
+        statuses[run.session_id] === undefined &&
+        ["queued", "running", "waiting_input", "waiting_approval", "failed"].includes(
+          run.status,
+        )
+      ) {
+        statuses[run.session_id] = run.status;
+      }
+    }
+    return statuses;
+  }, [allRuns]);
+  const queueCountBySession = useMemo(() => {
+    const counts: Record<string, number> = {};
+    for (const item of allQueue) {
+      counts[item.session_id] = (counts[item.session_id] || 0) + 1;
+    }
+    return counts;
+  }, [allQueue]);
+  const sessionRuns = useMemo(
+    () => allRuns.filter((run) => run.session_id === activeId),
+    [activeId, allRuns],
+  );
+  const currentRun = useMemo(
+    () =>
+      sessionRuns.find((run) => openRun(run)) ||
+      (activeRunSnapshot?.session_id === activeId && openRun(activeRunSnapshot)
+        ? activeRunSnapshot
+        : null),
+    [activeId, activeRunSnapshot, sessionRuns],
+  );
+  const currentQueue = useMemo(
+    () => allQueue.filter((item) => item.session_id === activeId),
+    [activeId, allQueue],
+  );
+  const hasOpenRun = Boolean(currentRun || streaming);
   const memoryQ = useQuery({
     queryKey: ["system-agent", "user-memory"],
     queryFn: listSystemAgentUserMemory,
@@ -243,6 +389,20 @@ export function AssistantIndex() {
     enabled: !!activeId && !viewingBotSession,
     refetchInterval: assistantCollapsed && !streaming ? false : 15_000,
   });
+  const waitingEventsQ = useQuery({
+    queryKey: ["system-agent", "run-events", currentRun?.id],
+    queryFn: () => listSystemAgentRunEvents(currentRun!.id, 0, 500),
+    enabled: currentRun?.status === "waiting_approval",
+    refetchOnMount: "always",
+  });
+  const waitingApproval = useMemo(() => {
+    const events = waitingEventsQ.data || [];
+    for (let index = events.length - 1; index >= 0; index -= 1) {
+      const approval = events[index].tool_approval;
+      if (approval?.tools?.length) return approval;
+    }
+    return null;
+  }, [waitingEventsQ.data]);
 
   // 深链 /assistant?session=… 优先打开指定会话
   useEffect(() => {
@@ -281,6 +441,31 @@ export function AssistantIndex() {
     setRuntimeSelection(null);
     clearLiveStreamingState();
   }, [activeId, configQ.data?.provider_id, configQ.data?.model]);
+
+  useEffect(() => {
+    if (!meQ.data?.id) return;
+    skipNextDraftWriteRef.current = true;
+    setComposerValue(readDraft(meQ.data.id, activeId));
+    setWaitingInput("");
+    setComposerAction("queue");
+    setActiveRunSnapshot(null);
+  }, [activeId, meQ.data?.id]);
+
+  useEffect(() => {
+    if (!meQ.data?.id) return;
+    if (skipNextDraftWriteRef.current) {
+      skipNextDraftWriteRef.current = false;
+      return;
+    }
+    writeDraft(meQ.data.id, activeId, composerValue);
+  }, [activeId, composerValue, meQ.data?.id]);
+
+  useEffect(() => {
+    if (currentRun) setActiveRunSnapshot(currentRun);
+    else if (activeRunSnapshot?.session_id === activeId && terminalRun(activeRunSnapshot)) {
+      setActiveRunSnapshot(null);
+    }
+  }, [activeId, activeRunSnapshot, currentRun]);
 
   const createMut = useMutation({
     mutationFn: () =>
@@ -410,7 +595,7 @@ export function AssistantIndex() {
     () => (providersQ.data || []).filter((provider) => provider.has_api_key && toolsModels(provider).length > 0),
     [providersQ.data],
   );
-  const selectorDisabled = streaming || saveConfigMut.isPending || providersQ.isLoading;
+  const selectorDisabled = saveConfigMut.isPending || providersQ.isLoading;
   const configuredModel = configQ.data?.model || configuredToolsModels[0] || "";
   const actualSelectionDiffers = Boolean(
     displayedSelection &&
@@ -761,6 +946,8 @@ export function AssistantIndex() {
       qc.invalidateQueries({ queryKey: ["system-agent", "messages", sessionId] }),
       qc.invalidateQueries({ queryKey: ["system-agent", "sessions"] }),
       qc.invalidateQueries({ queryKey: ["system-agent", "actions", sessionId] }),
+      qc.invalidateQueries({ queryKey: ["system-agent", "runs", "task-center"] }),
+      qc.invalidateQueries({ queryKey: ["system-agent", "queue"] }),
     ]);
   };
 
@@ -774,6 +961,7 @@ export function AssistantIndex() {
     let doneReceived = false;
     let doneOk = false;
     let reconnectAttempt = 0;
+    let pausedForInput = false;
     try {
       while (!controller.signal.aborted && !doneReceived) {
         let streamFailed = false;
@@ -818,6 +1006,17 @@ export function AssistantIndex() {
             setStreaming(false);
             return;
           }
+          setActiveRunSnapshot(snapshot);
+          if (snapshot.status === "waiting_input" || snapshot.status === "waiting_approval") {
+            pausedForInput = true;
+            setStreamNotice(
+              snapshot.status === "waiting_input"
+                ? "任务正在等待补充信息；填写后会从持久队列继续。"
+                : "任务正在等待工具审批；处理后会从持久队列继续。",
+            );
+            await refreshRunData(sessionId);
+            return;
+          }
           if (snapshot && terminalRun(snapshot)) {
             // 终态事件也在同一事件表中；继续按游标读取，直到真正收到 done。
             cursor = Math.min(cursor, Math.max(0, snapshot.last_seq - 1));
@@ -831,10 +1030,46 @@ export function AssistantIndex() {
         }
       }
       if (!doneReceived) return;
+      const finalSnapshot = await getSystemAgentRun(runId).catch(() => null);
+      if (finalSnapshot) {
+        setActiveRunSnapshot(finalSnapshot);
+        const settlement = classifySystemAgentRunSettlement(finalSnapshot.status);
+        if (settlement === "waiting") {
+          pausedForInput = true;
+          setStreamNotice(
+            finalSnapshot.status === "waiting_input"
+              ? "任务正在等待补充信息；填写后会从持久队列继续。"
+              : "任务正在等待工具审批；处理后会从持久队列继续。",
+          );
+          await refreshRunData(sessionId);
+          return;
+        }
+      }
       forgetRun(sessionId, runId);
       setActiveRun((current) => (current?.runId === runId ? null : current));
+      setActiveRunSnapshot(null);
       await refreshRunData(sessionId);
-      notifyOutcome(doneOk ? "complete" : "failed");
+      const settlement = finalSnapshot
+        ? classifySystemAgentRunSettlement(finalSnapshot.status)
+        : doneOk
+          ? "complete"
+          : "failed";
+      if (settlement === "complete" || settlement === "failed") {
+        notifyOutcome(settlement);
+      }
+      if (
+        (settlement === "complete" || settlement === "failed") &&
+        document.hidden &&
+        "Notification" in window &&
+        Notification.permission === "granted"
+      ) {
+        new Notification(settlement === "complete" ? "系统助手任务已完成" : "系统助手任务失败", {
+          body:
+            settlement === "complete"
+              ? "点击返回查看结果。"
+              : "点击返回查看错误和重试选项。",
+        });
+      }
       if (abortRef.current === controller) {
         streamingBubbleCreatedRef.current = false;
         clearLiveStreamingState();
@@ -846,7 +1081,7 @@ export function AssistantIndex() {
         abortRef.current = null;
         setStreaming(false);
         setRetryingMessageId(null);
-        setStreamNotice("");
+        if (!pausedForInput) setStreamNotice("");
       }
     }
   };
@@ -969,7 +1204,88 @@ export function AssistantIndex() {
     }
   };
 
-  const onSend = async (text: string) => runTurn({ text });
+  const onSend = async (text: string) => {
+    try {
+      if (!hasOpenRun) {
+        await runTurn({ text });
+        return;
+      }
+      if (!enabled) {
+        toast.error("请先开启系统助手");
+        return;
+      }
+      const sessionId = await ensureSession();
+      const target = currentRun || activeRunSnapshot;
+      if (!target) {
+        await runTurn({ text });
+        return;
+      }
+      if (composerAction === "steer") {
+        if (target.status !== "running") {
+          toast.error("只有正在运行的任务可以调整；等待态请使用下方补充或审批操作");
+          return;
+        }
+        await steerSystemAgentRun(target.id, {
+          content: text,
+          client_request_id: requestId(),
+        });
+        toast.success("已提交调整，会在下一个安全边界应用");
+        return;
+      }
+      if (composerAction === "replace") {
+        if (!["running", "waiting_input", "waiting_approval"].includes(target.status)) {
+          toast.error("当前任务尚未进入可替换状态");
+          return;
+        }
+        const replacement = await stopAndReplaceSystemAgentRun(target.id, {
+          content: text,
+          client_request_id: requestId(),
+          model_selection: toApiModelSelection(sessionModel),
+        });
+        abortRef.current?.abort();
+        const controller = new AbortController();
+        abortRef.current = controller;
+        const saved: StoredRun = { runId: replacement.id, lastSeq: 0 };
+        rememberRun(sessionId, saved);
+        setActiveRun(saved);
+        setActiveRunSnapshot(replacement);
+        setStreaming(true);
+        clearLiveStreamingState();
+        setLive([
+          {
+            id: `live-user-${Date.now()}`,
+            role: "user",
+            text,
+            createdAt: new Date().toISOString(),
+          },
+          {
+            id: `live-assistant-${Date.now()}`,
+            role: "assistant",
+            text: "正在停止上一任务并切换…",
+            pending: true,
+          },
+        ]);
+        void refreshRunData(sessionId);
+        await followRun(sessionId, saved, controller);
+        return;
+      }
+      const queued = await startSystemAgentRun(sessionId, {
+        content: text,
+        account_id: accountId === "" ? null : Number(accountId),
+        client_request_id: requestId(),
+        model_selection: toApiModelSelection(sessionModel),
+      });
+      await refreshRunData(sessionId);
+      const pendingAhead = currentQueue.filter((item) => item.status === "pending").length;
+      toast.success(
+        queued.status === "running"
+          ? "已开始执行"
+          : `已加入队列${pendingAhead ? `，前面有 ${pendingAhead} 条` : ""}`,
+      );
+    } catch (error) {
+      toast.error(getErrMsg(error));
+    }
+  };
 
   const onEditMessage = async (
     userMessageId: number,
@@ -989,10 +1305,60 @@ export function AssistantIndex() {
   ) => runTurn({ retryMessageId: messageId, fallbackProviderId, approvedTools });
 
   const onStop = () => {
-    const run = activeRun || (activeId ? storedRun(activeId) : null);
-    if (!run) return;
+    const stored = activeRun || (activeId ? storedRun(activeId) : null);
+    const runId = currentRun?.id || stored?.runId;
+    if (!runId) return;
     updatePendingText("正在停止本轮请求…");
-    void cancelSystemAgentRun(run.runId).catch((error) => toast.error(getErrMsg(error)));
+    void cancelSystemAgentRun(runId)
+      .then((run) => {
+        if (activeId && terminalRun(run)) {
+          forgetRun(activeId, run.id);
+          setActiveRun((current) => (current?.runId === run.id ? null : current));
+          setActiveRunSnapshot(null);
+        }
+        if (activeId) void refreshRunData(activeId);
+      })
+      .catch((error) => toast.error(getErrMsg(error)));
+  };
+
+  const submitWaitingInput = async () => {
+    if (!currentRun || currentRun.status !== "waiting_input") return;
+    const content = waitingInput.trim();
+    if (!content) return;
+    try {
+      await submitSystemAgentRunInput(currentRun.id, {
+        content,
+        client_request_id: requestId(),
+      });
+      setWaitingInput("");
+      setStreamNotice("补充信息已提交，任务即将继续…");
+      await refreshRunData(currentRun.session_id);
+    } catch (error) {
+      toast.error(getErrMsg(error));
+    }
+  };
+
+  const decideApproval = async (approved: boolean) => {
+    if (!currentRun || currentRun.status !== "waiting_approval") return;
+    const approvedTools = (waitingApproval?.tools || []).map((tool) => tool.name);
+    try {
+      await approveSystemAgentRun(currentRun.id, {
+        approved,
+        approved_tools: approved ? approvedTools : [],
+        client_request_id: requestId(),
+      });
+      if (!approved) {
+        forgetRun(currentRun.session_id, currentRun.id);
+        setActiveRun((current) =>
+          current?.runId === currentRun.id ? null : current,
+        );
+        setActiveRunSnapshot(null);
+      }
+      setStreamNotice(approved ? "审批已通过，任务即将继续…" : "已拒绝工具调用并结束本任务。");
+      await refreshRunData(currentRun.session_id);
+    } catch (error) {
+      toast.error(getErrMsg(error));
+    }
   };
 
   useEffect(() => {
@@ -1039,6 +1405,127 @@ export function AssistantIndex() {
     // followRun 只读取本轮 activeId 对应的持久游标；切换会话时重新建立订阅。
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeId]);
+
+  useEffect(() => {
+    if (
+      !activeId ||
+      abortRef.current ||
+      !currentRun ||
+      !["queued", "running"].includes(currentRun.status)
+    ) {
+      return;
+    }
+    const existing = storedRun(activeId);
+    const saved =
+      existing?.runId === currentRun.id
+        ? existing
+        : { runId: currentRun.id, lastSeq: 0 };
+    rememberRun(activeId, saved);
+    setActiveRun(saved);
+    setActiveRunSnapshot(currentRun);
+    setStreaming(true);
+    const controller = new AbortController();
+    abortRef.current = controller;
+    if (live.length === 0) {
+      setLive([
+        {
+          id: `live-resume-${currentRun.id}`,
+          role: "assistant",
+          text: currentRun.status === "queued" ? "任务正在排队…" : "正在恢复任务进度…",
+          pending: true,
+        },
+      ]);
+    }
+    void followRun(activeId, saved, controller).catch((error) => {
+      if (!controller.signal.aborted) toast.error(getErrMsg(error));
+    });
+    return () => {
+      controller.abort();
+      if (abortRef.current === controller) abortRef.current = null;
+    };
+    // currentRun 的状态由任务中心轮询推进；只在 queued/running 时重新订阅。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeId, currentRun?.id, currentRun?.status]);
+
+  const editQueueItem = async (item: SystemAgentQueueItem, content: string) => {
+    try {
+      await updateSystemAgentQueueItem(item.id, { content });
+      await qc.invalidateQueries({ queryKey: ["system-agent", "queue"] });
+      toast.success("排队消息已更新");
+    } catch (error) {
+      toast.error(getErrMsg(error));
+    }
+  };
+
+  const deleteQueueItem = async (item: SystemAgentQueueItem) => {
+    try {
+      await deleteSystemAgentQueueItem(item.id);
+      await refreshRunData(item.session_id);
+      toast.success("已移出队列");
+    } catch (error) {
+      toast.error(getErrMsg(error));
+    }
+  };
+
+  const moveQueueItem = async (item: SystemAgentQueueItem, direction: -1 | 1) => {
+    const rows = allQueue
+      .filter(
+        (row) =>
+          row.session_id === item.session_id &&
+          ["pending", "paused"].includes(row.status),
+      )
+      .sort((left, right) => left.position - right.position);
+    const index = rows.findIndex((row) => row.id === item.id);
+    const target = index + direction;
+    if (index < 0 || target < 0 || target >= rows.length) return;
+    const ids = rows.map((row) => row.id);
+    [ids[index], ids[target]] = [ids[target], ids[index]];
+    try {
+      await reorderSystemAgentQueue(item.session_id, ids);
+      await qc.invalidateQueries({ queryKey: ["system-agent", "queue"] });
+    } catch (error) {
+      toast.error(getErrMsg(error));
+    }
+  };
+
+  const clearQueue = async (sessionId: string) => {
+    try {
+      const count = await clearSystemAgentQueue(sessionId);
+      await refreshRunData(sessionId);
+      toast.success(`已清空 ${count} 条排队消息`);
+    } catch (error) {
+      toast.error(getErrMsg(error));
+    }
+  };
+
+  const resumeQueue = async (sessionId: string) => {
+    try {
+      const count = await resumeSystemAgentQueue(sessionId);
+      await refreshRunData(sessionId);
+      toast.success(`已恢复 ${count} 条排队消息`);
+    } catch (error) {
+      toast.error(getErrMsg(error));
+    }
+  };
+
+  const enableTaskNotifications = async () => {
+    if (!("Notification" in window)) {
+      setNotificationPermission("unsupported");
+      toast.error("当前浏览器不支持系统通知");
+      return;
+    }
+    try {
+      const permission = await Notification.requestPermission();
+      setNotificationPermission(permission);
+      if (permission === "granted") {
+        toast.success("任务完成通知已开启");
+      } else if (permission === "denied") {
+        toast.error("浏览器已拒绝通知，请在站点权限中重新开启");
+      }
+    } catch (error) {
+      toast.error(getErrMsg(error));
+    }
+  };
 
   const pendingActionBubbles: LiveBubble[] = useMemo(() => {
     const rows = pendingActionsQ.data || [];
@@ -1203,6 +1690,40 @@ export function AssistantIndex() {
                 onCheckedChange={(checked) => saveConfigMut.mutate({ require_tool_approval: checked })}
                 aria-label="调用工具前需要批准"
               />
+            </div>
+            <div className="flex min-h-11 items-center justify-between gap-3 rounded-md border px-3 py-2 sm:col-span-2">
+              <span className="min-w-0">
+                <span className="flex items-center gap-1.5">
+                  {notificationPermission === "granted" ? (
+                    <BellRing className="h-4 w-4 text-emerald-600" />
+                  ) : notificationPermission === "denied" ? (
+                    <BellOff className="h-4 w-4 text-destructive" />
+                  ) : (
+                    <Bell className="h-4 w-4 text-muted-foreground" />
+                  )}
+                  <span>任务完成通知</span>
+                </span>
+                <span className="mt-0.5 block text-xs text-muted-foreground">
+                  {notificationPermission === "granted"
+                    ? "页面在后台时，完成或失败会发送系统通知。"
+                    : notificationPermission === "denied"
+                      ? "浏览器已拒绝通知，请在站点权限中重新开启。"
+                      : notificationPermission === "unsupported"
+                        ? "当前浏览器不支持系统通知。"
+                        : "仅在你主动开启后请求浏览器通知权限。"}
+                </span>
+              </span>
+              {notificationPermission === "default" ? (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  className="min-h-9 shrink-0 active:scale-95"
+                  onClick={() => void enableTaskNotifications()}
+                >
+                  开启
+                </Button>
+              ) : null}
             </div>
             <label className="flex flex-col gap-1">
               <span className="text-muted-foreground">固定 Provider</span>
@@ -1440,6 +1961,8 @@ export function AssistantIndex() {
         <SessionDrawer
           sessions={sessionOptions}
           activeId={activeId}
+          runStatusBySession={runStatusBySession}
+          queueCountBySession={queueCountBySession}
           originFilter={originFilter}
           onOriginFilterChange={setOriginFilter}
           onSelect={(id) => {
@@ -1459,6 +1982,27 @@ export function AssistantIndex() {
           onDesktopCollapse={() => setSessionSidebarCollapsed(true)}
         />
         <div className="flex min-w-0 flex-1 flex-col">
+          <TaskCenter
+            sessions={sessionOptions}
+            runs={allRuns}
+            queue={allQueue}
+            activeSessionId={activeId}
+            onSelectSession={(id) => {
+              if (id === activeId) return;
+              abortRef.current?.abort();
+              abortRef.current = null;
+              clearLiveStreamingState();
+              setStreaming(false);
+              setRetryingMessageId(null);
+              setLive([]);
+              setActiveId(id);
+            }}
+            onEditQueueItem={(item, content) => void editQueueItem(item, content)}
+            onDeleteQueueItem={(item) => void deleteQueueItem(item)}
+            onMoveQueueItem={(item, direction) => void moveQueueItem(item, direction)}
+            onClearQueue={(sessionId) => void clearQueue(sessionId)}
+            onResumeQueue={(sessionId) => void resumeQueue(sessionId)}
+          />
           {!activeId ? (
             <div className="flex flex-1 items-center justify-center p-6">
               <div className="max-w-sm text-center">
@@ -1516,13 +2060,100 @@ export function AssistantIndex() {
                   {streamNotice}
                 </div>
               ) : null}
+              {currentRun?.status === "waiting_input" ? (
+                <div className="shrink-0 border-t border-amber-500/20 bg-amber-500/5 px-2 py-2.5 sm:px-3">
+                  <div className="mx-auto flex max-w-3xl flex-col gap-2 rounded-lg border border-amber-500/25 bg-background/85 p-3 pr-[4.75rem] sm:flex-row sm:items-end sm:pr-3 xl:max-w-5xl 2xl:max-w-6xl">
+                    <label className="min-w-0 flex-1">
+                      <span className="mb-1 block text-xs font-medium text-amber-800 dark:text-amber-200">
+                        当前任务需要补充信息
+                      </span>
+                      <Input
+                        value={waitingInput}
+                        onChange={(event) => setWaitingInput(event.target.value)}
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter" && !event.nativeEvent.isComposing) {
+                            event.preventDefault();
+                            void submitWaitingInput();
+                          }
+                        }}
+                        placeholder="输入补充信息后继续执行"
+                        maxLength={10_000}
+                      />
+                    </label>
+                    <Button
+                      type="button"
+                      className="min-h-9 shrink-0"
+                      disabled={!waitingInput.trim()}
+                      onClick={() => void submitWaitingInput()}
+                    >
+                      提交并继续
+                    </Button>
+                  </div>
+                </div>
+              ) : null}
+              {currentRun?.status === "waiting_approval" ? (
+                <div className="shrink-0 border-t border-amber-500/20 bg-amber-500/5 px-2 py-2.5 sm:px-3">
+                  <div className="mx-auto max-w-3xl rounded-lg border border-amber-500/25 bg-background/85 p-3 pr-[4.75rem] sm:pr-3 xl:max-w-5xl 2xl:max-w-6xl">
+                    <div className="text-xs font-medium text-amber-800 dark:text-amber-200">
+                      当前任务等待工具调用审批
+                    </div>
+                    <div className="mt-2 space-y-1.5">
+                      {(waitingApproval?.tools || []).map((tool) => (
+                        <div
+                          key={`${tool.call_id || ""}-${tool.name}`}
+                          className="flex min-w-0 items-start justify-between gap-3 rounded-md border border-border/70 bg-muted/20 px-2.5 py-2"
+                        >
+                          <span className="min-w-0">
+                            <span className="block break-all text-xs font-medium">
+                              {systemAgentToolLabel(tool.name)}
+                            </span>
+                            <span className="mt-0.5 block text-[10px] leading-4 text-muted-foreground">
+                              {tool.description || tool.name}
+                            </span>
+                          </span>
+                          <span className="shrink-0 rounded border border-amber-500/25 bg-amber-500/10 px-1.5 py-0.5 text-[10px] text-amber-700 dark:text-amber-300">
+                            {tool.risk || "需确认"}
+                          </span>
+                        </div>
+                      ))}
+                      {!waitingApproval?.tools?.length ? (
+                        <p className="text-xs text-muted-foreground">
+                          审批详情正在同步；你仍可拒绝并结束本任务。
+                        </p>
+                      ) : null}
+                    </div>
+                    <div className="mt-3 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+                      <Button
+                        type="button"
+                        variant="outline"
+                        className="min-h-9"
+                        onClick={() => void decideApproval(false)}
+                      >
+                        拒绝并结束
+                      </Button>
+                      <Button
+                        type="button"
+                        className="min-h-9"
+                        disabled={!waitingApproval?.tools?.length}
+                        onClick={() => void decideApproval(true)}
+                      >
+                        批准并继续
+                      </Button>
+                    </div>
+                  </div>
+                </div>
+              ) : null}
               <Composer
                 disabled={configQ.isLoading || viewingBotSession}
-                streaming={streaming}
+                streaming={hasOpenRun}
                 onSend={onSend}
                 value={composerValue}
                 onValueChange={setComposerValue}
                 onStop={onStop}
+                actionMode={composerAction}
+                onActionModeChange={setComposerAction}
+                queueCount={currentQueue.length}
+                runStatus={currentRun?.status}
                 placeholder={viewingBotSession ? "Telegram 会话仅供查看" : undefined}
                 modelItems={modelPickerItems}
                 modelSelection={pickerValue}

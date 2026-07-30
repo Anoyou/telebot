@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
-import { Menu, Send, Square } from "lucide-react";
+import { ListPlus, Menu, Route, Send, Square, StepForward } from "lucide-react";
 
 import {
   ModelPicker,
@@ -8,8 +8,11 @@ import {
 } from "@/components/ai/ModelPicker";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
+import { Select } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
 import { composerEnterAction } from "./composerState";
+
+export type ComposerAction = "queue" | "steer" | "replace";
 
 export function Composer({
   disabled,
@@ -28,6 +31,10 @@ export function Composer({
   value: controlledValue,
   onValueChange,
   focusRequestKey = 0,
+  actionMode = "queue",
+  onActionModeChange,
+  queueCount = 0,
+  runStatus,
 }: {
   disabled?: boolean;
   onSend: (text: string) => void | Promise<void>;
@@ -47,6 +54,10 @@ export function Composer({
   value?: string;
   onValueChange?: (value: string) => void;
   focusRequestKey?: number;
+  actionMode?: ComposerAction;
+  onActionModeChange?: (value: ComposerAction) => void;
+  queueCount?: number;
+  runStatus?: string | null;
 }) {
   const [internalValue, setInternalValue] = useState("");
   const [sending, setSending] = useState(false);
@@ -78,7 +89,7 @@ export function Composer({
 
   const submit = async () => {
     const text = value.trim();
-    if (!text || disabled || sending || streaming) return;
+    if (!text || disabled || sending) return;
     setSending(true);
     try {
       await onSend(text);
@@ -137,7 +148,7 @@ export function Composer({
               suppressTimerRef.current = null;
             }, 0);
           }}
-          disabled={disabled || sending || streaming}
+          disabled={disabled || sending}
           placeholder={placeholder || "用自然语言查询系统状态…（Enter 发送，Shift+Enter 换行）"}
           rows={2}
           className="min-h-[4.5rem] resize-none border-0 bg-transparent px-1 py-1 shadow-none focus-visible:border-transparent focus-visible:ring-0"
@@ -171,29 +182,82 @@ export function Composer({
               onChange={onModelSelectionChange}
               onSetDefault={onSetDefaultModel}
               showSetDefault={Boolean(onSetDefaultModel)}
-              disabled={modelDisabled || streaming}
+              disabled={modelDisabled}
               compact
               className="min-w-0 justify-end"
             />
           ) : null}
           {streaming ? (
-            <Button
-              type="button"
-              variant="outline"
-              size="icon"
-              className="h-8 w-8 shrink-0"
-              onClick={onStop}
-              title="停止本轮请求"
-            >
-              <Square className="h-4 w-4 fill-current" />
-              <span className="sr-only">停止</span>
-            </Button>
+            <>
+              <label className="min-w-0">
+                <span className="sr-only">运行中消息操作</span>
+                <Select
+                  aria-label="运行中消息操作"
+                  value={actionMode}
+                  onChange={(event) =>
+                    onActionModeChange?.(event.target.value as ComposerAction)
+                  }
+                  className="h-9 min-w-[7.5rem] py-0 text-xs"
+                >
+                  <option value="queue">加入队列{queueCount ? ` · ${queueCount}` : ""}</option>
+                  <option value="steer" disabled={runStatus !== "running"}>
+                    调整当前任务
+                  </option>
+                  <option
+                    value="replace"
+                    disabled={
+                      !runStatus ||
+                      !["running", "waiting_input", "waiting_approval"].includes(runStatus)
+                    }
+                  >
+                    停止并替换
+                  </option>
+                </Select>
+              </label>
+              <Button
+                type="submit"
+                size="sm"
+                disabled={disabled || sending || !value.trim()}
+                className="h-9 shrink-0 gap-1.5 px-3 text-xs"
+                title={
+                  actionMode === "steer"
+                    ? "将说明注入当前任务"
+                    : actionMode === "replace"
+                      ? "停止当前任务并立即执行这条消息"
+                      : "将消息加入当前会话队列"
+                }
+              >
+                {actionMode === "steer" ? (
+                  <Route className="h-4 w-4" />
+                ) : actionMode === "replace" ? (
+                  <StepForward className="h-4 w-4" />
+                ) : (
+                  <ListPlus className="h-4 w-4" />
+                )}
+                {actionMode === "steer"
+                  ? "调整"
+                  : actionMode === "replace"
+                    ? "替换"
+                    : "排队"}
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                size="icon"
+                className="h-9 w-9 shrink-0"
+                onClick={onStop}
+                title={`停止当前任务${runStatus ? `（${runStatus}）` : ""}`}
+              >
+                <Square className="h-4 w-4 fill-current" />
+                <span className="sr-only">停止</span>
+              </Button>
+            </>
           ) : (
             <Button
               type="submit"
               size="icon"
               disabled={disabled || sending || !value.trim()}
-              className="h-8 w-8 shrink-0"
+              className="h-9 w-9 shrink-0"
               title="发送消息"
             >
               <Send className="h-4 w-4" />

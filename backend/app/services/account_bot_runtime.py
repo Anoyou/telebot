@@ -2476,6 +2476,10 @@ async def _handle_update(aid: int, token: str, update: dict[str, Any]) -> None:
                     text=text_body,
                     send=_agent_send,
                     draft=_agent_draft,
+                    client_request_id=(
+                        f"tg:{incoming.account_id}:{incoming.user_id}:"
+                        f"{incoming.message_id or incoming.update_id}"
+                    ),
                 )
                 final_status = TRACE_STATUS_OK
                 return
@@ -8592,6 +8596,10 @@ async def _handle_command(incoming: Incoming, role: str) -> None:
             text=incoming.text or "",
             send=_agent_send,
             draft=_agent_draft,
+            client_request_id=(
+                f"tg:{incoming.account_id}:{incoming.user_id}:"
+                f"{incoming.message_id or incoming.update_id}"
+            ),
         )
     elif command_base.startswith("/pause"):
         await _pause_account(incoming, role)

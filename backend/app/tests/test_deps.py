@@ -18,9 +18,13 @@ class _FakeResult:
 class _FakeDB:
     def __init__(self, user):
         self._user = user
+        self.committed = False
 
     async def execute(self, _stmt):
         return _FakeResult(self._user)
+
+    async def commit(self):
+        self.committed = True
 
 
 @pytest.mark.asyncio
@@ -48,6 +52,7 @@ async def test_get_current_user_rejects_pwd_version_mismatch(monkeypatch):
         await deps.get_current_user(db, "token")
     assert exc_info.value.status_code == 401
     assert exc_info.value.detail["code"] == "AUTH_INVALIDATED"
+    assert db.committed is False
 
 
 @pytest.mark.asyncio
@@ -57,3 +62,4 @@ async def test_get_current_user_success(monkeypatch):
     db = _FakeDB(user)
     got = await deps.get_current_user(db, "token")
     assert got is user
+    assert db.committed is True

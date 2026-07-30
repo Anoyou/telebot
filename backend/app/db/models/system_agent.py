@@ -61,6 +61,8 @@ MESSAGE_RUN_STATUSES = {
 
 AGENT_RUN_QUEUED = "queued"
 AGENT_RUN_RUNNING = "running"
+AGENT_RUN_WAITING_INPUT = "waiting_input"
+AGENT_RUN_WAITING_APPROVAL = "waiting_approval"
 AGENT_RUN_SUCCEEDED = "succeeded"
 AGENT_RUN_FAILED = "failed"
 AGENT_RUN_CANCELLED = "cancelled"
@@ -70,10 +72,36 @@ AGENT_RUN_TERMINAL_STATUSES = {
     AGENT_RUN_CANCELLED,
 }
 AGENT_RUN_ACTIVE_STATUSES = {AGENT_RUN_QUEUED, AGENT_RUN_RUNNING}
+AGENT_RUN_WAITING_STATUSES = {
+    AGENT_RUN_WAITING_INPUT,
+    AGENT_RUN_WAITING_APPROVAL,
+}
+AGENT_RUN_OPEN_STATUSES = AGENT_RUN_ACTIVE_STATUSES | AGENT_RUN_WAITING_STATUSES
+AGENT_RUN_STREAM_FINAL_STATUSES = AGENT_RUN_TERMINAL_STATUSES | AGENT_RUN_WAITING_STATUSES
 
 AGENT_RUN_KIND_MESSAGE = "message"
 AGENT_RUN_KIND_RETRY = "retry"
 AGENT_RUN_KIND_REGENERATE = "regenerate"
+
+PENDING_TURN_PENDING = "pending"
+PENDING_TURN_DISPATCHING = "dispatching"
+PENDING_TURN_PAUSED = "paused"
+PENDING_TURN_DISPATCHED = "dispatched"
+PENDING_TURN_CANCELLED = "cancelled"
+PENDING_TURN_STATUSES = {
+    PENDING_TURN_PENDING,
+    PENDING_TURN_DISPATCHING,
+    PENDING_TURN_PAUSED,
+    PENDING_TURN_DISPATCHED,
+    PENDING_TURN_CANCELLED,
+}
+
+RUN_INPUT_STEER = "steer"
+RUN_INPUT_USER = "user_input"
+RUN_INPUT_APPROVAL = "approval"
+RUN_INPUT_PENDING = "pending"
+RUN_INPUT_APPLIED = "applied"
+RUN_INPUT_CANCELLED = "cancelled"
 
 ACTION_STATUS_PENDING = "pending"
 ACTION_STATUS_EXECUTING = "executing"
@@ -207,7 +235,7 @@ class SystemAgentMessage(Base):
 
 
 class SystemAgentRun(Base):
-    """Web Agent 的持久运行句柄；原始输入仍只由消息服务负责脱敏落库。"""
+    """跨渠道 Durable Run；原始输入保存在关联的加密 PendingTurn 中。"""
 
     __tablename__ = "system_agent_run"
 
@@ -220,6 +248,18 @@ class SystemAgentRun(Base):
     web_user_id: Mapped[int | None] = mapped_column(
         BigInteger,
         ForeignKey("web_user.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    bot_tg_user_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    channel: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default=CHANNEL_WEB,
+        server_default=CHANNEL_WEB,
+    )
+    pending_turn_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("system_agent_pending_turn.id", ondelete="SET NULL"),
         nullable=True,
     )
     user_message_id: Mapped[int | None] = mapped_column(
@@ -248,6 +288,24 @@ class SystemAgentRun(Base):
         default=False,
         server_default="0",
     )
+    phase: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default="queued",
+        server_default="queued",
+    )
+    paused_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    claimed_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    heartbeat_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    usage: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    elapsed_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
     error_message: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -272,7 +330,121 @@ class SystemAgentRun(Base):
         ),
         Index("ix_system_agent_run_session_created", "session_id", "created_at"),
         Index("ix_system_agent_run_user_status", "web_user_id", "status"),
+        Index("ix_system_agent_run_bot_status", "bot_tg_user_id", "status"),
         Index("ix_system_agent_run_status_updated", "status", "updated_at"),
+        Index("ix_system_agent_run_lease", "status", "lease_expires_at"),
+        Index("ix_system_agent_run_pending_turn", "pending_turn_id"),
+    )
+
+
+class SystemAgentPendingTurn(Base):
+    """会话级持久消息队列；正文和可复用凭据始终经 MASTER_KEY 加密。"""
+
+    __tablename__ = "system_agent_pending_turn"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    session_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("system_agent_session.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    web_user_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        ForeignKey("web_user.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    bot_tg_user_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    account_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        ForeignKey("account.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    channel: Mapped[str] = mapped_column(String(16), nullable=False)
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    position: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default=PENDING_TURN_PENDING,
+        server_default=PENDING_TURN_PENDING,
+    )
+    blocked_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    client_request_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    request_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    content_enc: Mapped[str] = mapped_column(Text, nullable=False)
+    request_payload: Mapped[dict[str, Any]] = mapped_column(
+        JSON,
+        nullable=False,
+        default=dict,
+        server_default="{}",
+    )
+    dispatch_run_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "session_id",
+            "client_request_id",
+            name="uq_system_agent_pending_turn_session_request",
+        ),
+        Index(
+            "ix_system_agent_pending_turn_session_status_position",
+            "session_id",
+            "status",
+            "position",
+        ),
+        Index("ix_system_agent_pending_turn_owner", "web_user_id", "status"),
+    )
+
+
+class SystemAgentRunInput(Base):
+    """运行中的 steer、补充输入与审批结果收件箱。"""
+
+    __tablename__ = "system_agent_run_input"
+
+    id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        primary_key=True,
+        autoincrement=True,
+    )
+    run_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("system_agent_run.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    payload_enc: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default=RUN_INPUT_PENDING,
+        server_default=RUN_INPUT_PENDING,
+    )
+    client_request_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+    applied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "run_id",
+            "client_request_id",
+            name="uq_system_agent_run_input_request",
+        ),
+        Index("ix_system_agent_run_input_pending", "run_id", "status", "id"),
     )
 
 
@@ -408,10 +580,15 @@ __all__ = [
     "AGENT_RUN_KIND_MESSAGE",
     "AGENT_RUN_KIND_REGENERATE",
     "AGENT_RUN_KIND_RETRY",
+    "AGENT_RUN_OPEN_STATUSES",
     "AGENT_RUN_QUEUED",
     "AGENT_RUN_RUNNING",
+    "AGENT_RUN_STREAM_FINAL_STATUSES",
     "AGENT_RUN_SUCCEEDED",
     "AGENT_RUN_TERMINAL_STATUSES",
+    "AGENT_RUN_WAITING_APPROVAL",
+    "AGENT_RUN_WAITING_INPUT",
+    "AGENT_RUN_WAITING_STATUSES",
     "ACTION_STATUS_EXECUTED",
     "ACTION_STATUS_EXECUTING",
     "ACTION_STATUS_EXPIRED",
@@ -432,6 +609,12 @@ __all__ = [
     "MESSAGE_RUN_PENDING",
     "MESSAGE_RUN_STATUSES",
     "MESSAGE_RUN_SUCCEEDED",
+    "PENDING_TURN_CANCELLED",
+    "PENDING_TURN_DISPATCHED",
+    "PENDING_TURN_DISPATCHING",
+    "PENDING_TURN_PAUSED",
+    "PENDING_TURN_PENDING",
+    "PENDING_TURN_STATUSES",
     "RISK_DANGEROUS",
     "RISK_NORMAL",
     "RUNTIME_SYNC_FAILED",
@@ -446,8 +629,16 @@ __all__ = [
     "SESSION_STATUSES",
     "SystemAgentAction",
     "SystemAgentMessage",
+    "SystemAgentPendingTurn",
     "SystemAgentRun",
     "SystemAgentRunEvent",
+    "SystemAgentRunInput",
     "SystemAgentSession",
     "SystemAgentUserMemory",
+    "RUN_INPUT_APPLIED",
+    "RUN_INPUT_APPROVAL",
+    "RUN_INPUT_CANCELLED",
+    "RUN_INPUT_PENDING",
+    "RUN_INPUT_STEER",
+    "RUN_INPUT_USER",
 ]

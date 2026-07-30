@@ -45,6 +45,7 @@ from .services import (
 )
 from .services.login_service import cleanup_expired_loop
 from .services.system_agent.actions import cleanup_expired_action_secrets_loop
+from .services.system_agent.run_manager import get_system_agent_run_manager
 from .settings import settings
 
 logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO))
@@ -98,6 +99,14 @@ async def _retry_runtime_component(
             logging.info("关键组件 %s 已自动恢复", name)
             return
         delay = min(delay * 2, 30.0)
+
+
+async def _restore_system_agent_runs(manager=None):
+    """启动期主动恢复持久化 Agent 队列，并返回本进程 Manager。"""
+
+    manager = manager or get_system_agent_run_manager()
+    await manager.ensure_ready()
+    return manager
 
 
 async def _start_interaction_bot_component() -> object:
@@ -200,6 +209,7 @@ def _run_alembic_upgrade() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期：启动 supervisor + login 清理任务，退出时优雅关停。"""
+    system_agent_run_manager = None
     _warn_if_forwarded_for_misconfigured()
     # 0) 启动期自动 alembic upgrade head
     #    解决"代码加了新字段、DB 还没跑迁移 → 前端列表 500"那类问题。
@@ -232,6 +242,13 @@ async def lifespan(app: FastAPI):
             logging.warning("已收敛 %d 个上次进程遗留的插件配置任务", interrupted_jobs)
     except Exception:  # noqa: BLE001
         logging.exception("收敛遗留插件配置任务失败")
+
+    # 主动恢复持久化 Agent 队列，避免必须等到首次 Web/Bot 调用才继续遗留任务。
+    system_agent_run_manager = get_system_agent_run_manager()
+    try:
+        await _restore_system_agent_runs(system_agent_run_manager)
+    except Exception:  # noqa: BLE001
+        logging.exception("恢复 System Agent 持久任务失败；后续调用将继续自动重试")
 
     # 1) 启动登录会话清理后台任务（每 60s 扫一次）
     cleanup_task = asyncio.create_task(cleanup_expired_loop())
@@ -314,6 +331,11 @@ async def lifespan(app: FastAPI):
             task.cancel()
         if retry_tasks:
             await asyncio.gather(*retry_tasks, return_exceptions=True)
+        if system_agent_run_manager is not None:
+            try:
+                await system_agent_run_manager.shutdown()
+            except Exception:  # noqa: BLE001
+                logging.exception("停止 System Agent 持久任务失败")
         try:
             await plugin_config_action_jobs.shutdown_plugin_config_action_jobs()
         except Exception:  # noqa: BLE001

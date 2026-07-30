@@ -36,6 +36,71 @@ class _SendCapture:
         return {"message_id": 100 + len(self.calls)}
 
 
+class _FakeRunManager:
+    def __init__(self) -> None:
+        self.start_kwargs: dict[str, Any] | None = None
+        self.queue_position: int | None = None
+        self.final_status = "succeeded"
+        self.active_run: Any | None = None
+        self.resumed = 0
+        self.cancelled_run_id: str | None = None
+        self.run_inputs: list[dict[str, Any]] = []
+        self.events: list[dict[str, Any]] = []
+
+    async def start_run(self, **kwargs: Any) -> SimpleNamespace:
+        self.start_kwargs = kwargs
+        return SimpleNamespace(id="run-1", status="queued")
+
+    async def get_queue_position(self, run_id: str) -> int | None:
+        assert run_id == "run-1"
+        return self.queue_position
+
+    async def stream_events(self, run_id: str, after_seq: int = 0):  # noqa: ANN201
+        assert run_id == "run-1"
+        assert self.start_kwargs is not None
+        svc = bot_bridge.get_system_agent_service()
+        async for event in svc.stream_message(
+            None,
+            session=SimpleNamespace(id=self.start_kwargs["session_id"]),
+            text=self.start_kwargs["text"],
+            role=self.start_kwargs["role"],
+            channel=self.start_kwargs["channel"],
+            bot_tg_user_id=self.start_kwargs["bot_tg_user_id"],
+        ):
+            yield event
+
+    async def get_run(self, run_id: str) -> SimpleNamespace:
+        return SimpleNamespace(id=run_id, status=self.final_status)
+
+    async def add_run_input(self, run_id: str, **kwargs: Any) -> SimpleNamespace:
+        self.run_inputs.append({"run_id": run_id, **kwargs})
+        return SimpleNamespace(id=1, status="applied")
+
+    async def list_events(self, run_id: str, after_seq: int = 0) -> list[Any]:
+        return [
+            SimpleNamespace(event=event)
+            for event in self.events
+            if int(event.get("seq") or 0) > after_seq
+        ]
+
+    async def get_active_run_for_bot(self, **kwargs: Any) -> Any | None:
+        return self.active_run
+
+    async def cancel_run(self, run_id: str) -> SimpleNamespace:
+        self.cancelled_run_id = run_id
+        return SimpleNamespace(id=run_id, status="cancelled")
+
+    async def resume_bot_queue(self, **kwargs: Any) -> int:
+        return self.resumed
+
+
+@pytest.fixture(autouse=True)
+def fake_run_manager(monkeypatch) -> _FakeRunManager:
+    manager = _FakeRunManager()
+    monkeypatch.setattr(bot_bridge, "get_system_agent_run_manager", lambda: manager)
+    return manager
+
+
 @pytest.mark.asyncio
 async def test_agent_help_enters_mode_and_shows_usage() -> None:
     send = _SendCapture()
@@ -71,6 +136,8 @@ async def test_agent_help_enters_mode_and_shows_usage() -> None:
     assert "当前角色" in body
     assert "可用工具" in body
     assert "Redis 确认票据" in body
+    assert "/agent stop" in body
+    assert "/agent resume" in body
 
 
 @pytest.mark.asyncio
@@ -197,6 +264,319 @@ async def test_agent_natural_language_runs_query() -> None:
     assert kwargs["tg_user_id"] == 9
     assert kwargs["text"] == "今天收入多少"
     assert kwargs["role"] == "operator"
+
+
+@pytest.mark.asyncio
+async def test_run_agent_query_passes_identity_role_and_idempotency(
+    monkeypatch,
+    fake_run_manager: _FakeRunManager,
+) -> None:
+    send = _SendCapture()
+
+    class _Svc:
+        async def get_or_create_active_session(self, *a, **k):  # noqa: ANN001
+            return SimpleNamespace(id="sess-role")
+
+        async def stream_message(self, *a, **k):  # noqa: ANN001
+            yield {"type": "assistant_message", "content": "只读结果"}
+            yield {"type": "done", "ok": True}
+
+    class _DB:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def commit(self) -> None:
+            return None
+
+    monkeypatch.setattr(bot_bridge, "AsyncSessionLocal", lambda: _DB())
+    monkeypatch.setattr(bot_bridge, "get_system_agent_service", lambda: _Svc())
+    monkeypatch.setattr(bot_bridge, "refresh_agent_mode", AsyncMock())
+
+    await bot_bridge.run_agent_query(
+        account_id=7,
+        tg_user_id=99,
+        role="viewer",
+        text="查看状态",
+        send=send,
+        client_request_id="tg:7:99:1234",
+    )
+
+    assert fake_run_manager.start_kwargs == {
+        "session_id": "sess-role",
+        "web_user_id": None,
+        "bot_tg_user_id": 99,
+        "account_id": 7,
+        "channel": "bot",
+        "role": "viewer",
+        "client_request_id": "tg:7:99:1234",
+        "text": "查看状态",
+    }
+
+
+@pytest.mark.asyncio
+async def test_run_agent_query_reports_queue_position(
+    monkeypatch,
+    fake_run_manager: _FakeRunManager,
+) -> None:
+    send = _SendCapture()
+    fake_run_manager.queue_position = 3
+
+    class _Svc:
+        async def get_or_create_active_session(self, *a, **k):  # noqa: ANN001
+            return SimpleNamespace(id="sess-queued")
+
+        async def stream_message(self, *a, **k):  # noqa: ANN001
+            yield {"type": "assistant_message", "content": "已完成"}
+            yield {"type": "done", "ok": True}
+
+    class _DB:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def commit(self) -> None:
+            return None
+
+    monkeypatch.setattr(bot_bridge, "AsyncSessionLocal", lambda: _DB())
+    monkeypatch.setattr(bot_bridge, "get_system_agent_service", lambda: _Svc())
+    monkeypatch.setattr(bot_bridge, "refresh_agent_mode", AsyncMock())
+
+    await bot_bridge.run_agent_query(
+        account_id=1,
+        tg_user_id=2,
+        role="operator",
+        text="排队任务",
+        send=send,
+    )
+
+    assert any("当前第 <b>3</b> 位" in call["msg"] for call in send.calls)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "message"),
+    [
+        ("waiting_input", "需要补充输入"),
+        ("waiting_approval", "等待审批"),
+    ],
+)
+async def test_run_agent_query_reports_waiting_state(
+    monkeypatch,
+    fake_run_manager: _FakeRunManager,
+    status: str,
+    message: str,
+) -> None:
+    send = _SendCapture()
+    fake_run_manager.final_status = status
+
+    class _Svc:
+        async def get_or_create_active_session(self, *a, **k):  # noqa: ANN001
+            return SimpleNamespace(id="sess-waiting")
+
+        async def stream_message(self, *a, **k):  # noqa: ANN001
+            yield {"type": "error", "message": "需要人工处理"}
+            yield {"type": "done", "ok": False}
+
+    class _DB:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def commit(self) -> None:
+            return None
+
+    monkeypatch.setattr(bot_bridge, "AsyncSessionLocal", lambda: _DB())
+    monkeypatch.setattr(bot_bridge, "get_system_agent_service", lambda: _Svc())
+    monkeypatch.setattr(bot_bridge, "refresh_agent_mode", AsyncMock())
+
+    await bot_bridge.run_agent_query(
+        account_id=1,
+        tg_user_id=2,
+        role="operator",
+        text="等待态",
+        send=send,
+    )
+
+    assert message in send.calls[-1]["msg"]
+    assert "后续队列已暂停" in send.calls[-1]["msg"]
+    if status == "waiting_input":
+        assert "直接发送补充说明" in send.calls[-1]["msg"]
+    else:
+        assert "/agent approve" in send.calls[-1]["msg"]
+
+
+@pytest.mark.asyncio
+async def test_bot_followup_resumes_waiting_input_run(
+    monkeypatch,
+    fake_run_manager: _FakeRunManager,
+) -> None:
+    send = _SendCapture()
+    fake_run_manager.active_run = SimpleNamespace(
+        id="run-1",
+        status="waiting_input",
+        last_seq=4,
+    )
+
+    class _Svc:
+        async def get_or_create_active_session(self, *a, **k):  # noqa: ANN001
+            return SimpleNamespace(id="sess-waiting")
+
+        async def stream_message(self, *a, **k):  # noqa: ANN001
+            yield {"type": "assistant_message", "content": "续跑完成"}
+            yield {"type": "done", "ok": True}
+
+    class _DB:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def commit(self) -> None:
+            return None
+
+    fake_run_manager.start_kwargs = {
+        "session_id": "sess-waiting",
+        "text": "原始任务",
+        "role": "operator",
+        "channel": "bot",
+        "bot_tg_user_id": 2,
+    }
+    monkeypatch.setattr(bot_bridge, "AsyncSessionLocal", lambda: _DB())
+    monkeypatch.setattr(bot_bridge, "get_system_agent_service", lambda: _Svc())
+    monkeypatch.setattr(bot_bridge, "refresh_agent_mode", AsyncMock())
+
+    await bot_bridge.run_agent_query(
+        account_id=1,
+        tg_user_id=2,
+        role="operator",
+        text="改用备用模型",
+        send=send,
+        client_request_id="tg:1:2:followup",
+    )
+
+    assert fake_run_manager.run_inputs == [
+        {
+            "run_id": "run-1",
+            "kind": "user_input",
+            "client_request_id": "tg:1:2:followup",
+            "payload": {"content": "改用备用模型"},
+        }
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("verb", "approved"), [("approve", True), ("reject", False)])
+async def test_agent_approval_commands_resume_or_reject_waiting_run(
+    monkeypatch,
+    fake_run_manager: _FakeRunManager,
+    verb: str,
+    approved: bool,
+) -> None:
+    send = _SendCapture()
+    fake_run_manager.active_run = SimpleNamespace(
+        id="run-active",
+        status="waiting_approval",
+    )
+    fake_run_manager.events = [
+        {
+            "seq": 2,
+            "type": "error",
+            "tool_approval": {
+                "tools": [
+                    {"name": "scheduler.list"},
+                    {"name": "logs.recent"},
+                ]
+            },
+        }
+    ]
+
+    class _Svc:
+        async def list_sessions(self, *a, **k):  # noqa: ANN001
+            return [SimpleNamespace(id="sess-bot")]
+
+    class _DB:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+    monkeypatch.setattr(bot_bridge, "AsyncSessionLocal", lambda: _DB())
+    monkeypatch.setattr(bot_bridge, "get_system_agent_service", lambda: _Svc())
+    monkeypatch.setattr(bot_bridge, "enter_agent_mode", AsyncMock(return_value=True))
+
+    await bot_bridge.handle_agent_command(
+        account_id=1,
+        tg_user_id=42,
+        role="operator",
+        text=f"/agent {verb}",
+        send=send,
+        client_request_id=f"tg:1:42:{verb}",
+    )
+
+    assert fake_run_manager.run_inputs == [
+        {
+            "run_id": "run-active",
+            "kind": "approval",
+            "client_request_id": f"tg:1:42:{verb}",
+            "payload": {
+                "approved": approved,
+                "approved_tools": (
+                    ["scheduler.list", "logs.recent"] if approved else []
+                ),
+            },
+        }
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("verb", ["stop", "resume"])
+async def test_agent_stop_and_resume(
+    monkeypatch,
+    fake_run_manager: _FakeRunManager,
+    verb: str,
+) -> None:
+    send = _SendCapture()
+    fake_run_manager.active_run = SimpleNamespace(id="run-active")
+    fake_run_manager.resumed = 2
+
+    class _Svc:
+        async def list_sessions(self, *a, **k):  # noqa: ANN001
+            return [SimpleNamespace(id="sess-bot")]
+
+    class _DB:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+    monkeypatch.setattr(bot_bridge, "AsyncSessionLocal", lambda: _DB())
+    monkeypatch.setattr(bot_bridge, "get_system_agent_service", lambda: _Svc())
+    monkeypatch.setattr(bot_bridge, "enter_agent_mode", AsyncMock(return_value=True))
+
+    await bot_bridge.handle_agent_command(
+        account_id=1,
+        tg_user_id=42,
+        role="operator",
+        text=f"/agent {verb}",
+        send=send,
+    )
+
+    if verb == "stop":
+        assert fake_run_manager.cancelled_run_id == "run-active"
+        assert "已请求停止" in send.calls[-1]["msg"]
+        assert "/agent resume" in send.calls[-1]["msg"]
+    else:
+        assert "已恢复 <b>2</b> 条" in send.calls[-1]["msg"]
 
 
 @pytest.mark.asyncio

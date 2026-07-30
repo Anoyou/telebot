@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -13,6 +14,7 @@ from app.services.llm_protocol import (
     StopReason,
     TextContent,
     ToolCall,
+    ToolResult,
 )
 from app.services.system_agent import runtime as runtime_module
 from app.services.system_agent.config import ResolvedAgentProviders
@@ -150,10 +152,11 @@ async def test_runtime_exposes_only_routed_domain_and_sticks_to_fallback(monkeyp
     monkeypatch.setattr(runtime_module, "invoke_structured", invoke)
     monkeypatch.setattr(runtime_module, "run_agent", run)
 
+    db = AsyncMock()
     events = [
         event
         async for event in SystemAgentRuntime(_registry()).stream_turn(
-            None,  # type: ignore[arg-type]
+            db,
             session=_session(),  # type: ignore[arg-type]
             user_text="帮我看看定时任务",
             role="admin",
@@ -161,6 +164,7 @@ async def test_runtime_exposes_only_routed_domain_and_sticks_to_fallback(monkeyp
         )
     ]
 
+    db.commit.assert_awaited_once_with()
     assert calls == [(primary.id, primary.default_model), (fallback.id, fallback.default_model)]
     route = next(event for event in events if event["type"] == "route_selected")
     assert route["domains"] == ["scheduler"]
@@ -690,6 +694,75 @@ async def test_runtime_streams_tool_started_before_agent_finishes(monkeypatch) -
 
 
 @pytest.mark.asyncio
+async def test_runtime_redacts_secret_added_by_steer_from_all_events(monkeypatch) -> None:
+    primary, fallback = _providers()
+    await _patch_runtime_config(monkeypatch, primary, fallback)
+    secret = "sk-proj-steer-secret-1234567890"
+    provider_calls = 0
+
+    async def run(_model_call, request, _tools, *, callbacks, **_kwargs):  # noqa: ANN001
+        steering = await callbacks.on_safe_boundary()
+        assert len(steering) == 1
+        assert secret in steering[0].text_content()
+        await callbacks.on_tool_start(
+            ToolCall(
+                id="call-steer-secret",
+                name="scheduler.list",
+                arguments={"api_key": secret},
+            )
+        )
+        await callbacks.on_tool_finish(
+            ToolCall(
+                id="call-steer-secret",
+                name="scheduler.list",
+                arguments={"api_key": secret},
+            ),
+            ToolResult(
+                call_id="call-steer-secret",
+                name="scheduler.list",
+                content={"echo": secret},
+            ),
+        )
+        await callbacks.on_text_delta(f"流式回显 {secret}")
+        return AgentResult(
+            text=f"最终回显 {secret}",
+            reasoning_content=f"思考回显 {secret}",
+            model=request.model,
+            messages=request.messages,
+            usage=ModelUsage(input_tokens=1, output_tokens=1),
+            steps=1,
+            tool_calls=1,
+            stop_reason=StopReason.COMPLETED,
+        )
+
+    async def provide_steer() -> list[str]:
+        nonlocal provider_calls
+        provider_calls += 1
+        return [f"改用备用配置，token={secret}"] if provider_calls == 1 else []
+
+    monkeypatch.setattr(runtime_module, "run_agent", run)
+    events = [
+        event
+        async for event in SystemAgentRuntime(_registry()).stream_turn(
+            None,  # type: ignore[arg-type]
+            session=_session(),  # type: ignore[arg-type]
+            user_text="帮我看看定时任务",
+            role="admin",
+            channel="web",
+            run_input_provider=provide_steer,
+        )
+    ]
+
+    assert secret not in repr(events)
+    assert "[REDACTED]" in repr(events)
+    steer_event = next(event for event in events if event["type"] == "steer_applied")
+    assert steer_event["summary"] == "改用备用配置，token=[REDACTED]"
+    assistant = next(event for event in events if event["type"] == "assistant_message")
+    assert assistant["content"] == "最终回显 [REDACTED]"
+    assert assistant["reasoning"] == "思考回显 [REDACTED]"
+
+
+@pytest.mark.asyncio
 async def test_runtime_registers_usage_callback_at_agent_entry(monkeypatch) -> None:
     primary, fallback = _providers()
     await _patch_runtime_config(monkeypatch, primary, fallback)
@@ -801,7 +874,11 @@ async def test_model_router_timeout_keeps_explicit_web_intent(monkeypatch) -> No
 
 @pytest.mark.asyncio
 async def test_read_tool_result_is_redacted_before_model_context() -> None:
-    async def read_handler(_ctx, _args):  # noqa: ANN001
+    seen_db = None
+
+    async def read_handler(handler_ctx, _args):  # noqa: ANN001
+        nonlocal seen_db
+        seen_db = handler_ctx.db
         return {"api_key": "plain-tool-secret", "value": "ok"}
 
     spec = ToolSpec(
@@ -810,16 +887,25 @@ async def test_read_tool_result_is_redacted_before_model_context() -> None:
         input_schema={"type": "object"},
         read_handler=read_handler,
     )
+    owner_db = AsyncMock()
+    tool_db = AsyncMock()
+    tool_db.__aenter__.return_value = tool_db
+    tool_db.__aexit__.return_value = False
     ctx = ToolContext(
-        db=None,  # type: ignore[arg-type]
+        db=owner_db,
         channel="web",
         role="admin",
     )
 
-    result = await SystemAgentRuntime()._bind_read_handler(spec, ctx)({})  # noqa: SLF001
+    runtime = SystemAgentRuntime(tool_session_factory=lambda: tool_db)  # type: ignore[arg-type]
+    result = await runtime._bind_read_handler(spec, ctx)({})  # noqa: SLF001
 
     assert result["api_key"] == "***"
     assert "plain-tool-secret" not in str(result)
+    assert seen_db is tool_db
+    tool_db.commit.assert_awaited_once_with()
+    tool_db.rollback.assert_not_awaited()
+    owner_db.commit.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -835,14 +921,22 @@ async def test_tool_exception_redacts_opaque_chat_secret() -> None:
         input_schema={"type": "object"},
         read_handler=read_handler,
     )
+    owner_db = AsyncMock()
+    tool_db = AsyncMock()
+    tool_db.__aenter__.return_value = tool_db
+    tool_db.__aexit__.return_value = False
     ctx = ToolContext(
-        db=None,  # type: ignore[arg-type]
+        db=owner_db,
         channel="web",
         role="admin",
         chat_secrets=[secret],
     )
 
-    result = await SystemAgentRuntime()._bind_read_handler(spec, ctx)({})  # noqa: SLF001
+    runtime = SystemAgentRuntime(tool_session_factory=lambda: tool_db)  # type: ignore[arg-type]
+    result = await runtime._bind_read_handler(spec, ctx)({})  # noqa: SLF001
 
     assert secret not in str(result)
     assert "[REDACTED]" in result["message"]
+    tool_db.rollback.assert_awaited_once_with()
+    tool_db.commit.assert_not_awaited()
+    owner_db.rollback.assert_not_awaited()

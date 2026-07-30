@@ -3393,6 +3393,41 @@ export interface paths {
         patch: operations["patch_user_memory_api_system_agent_memory__memory_id__patch"];
         trace?: never;
     };
+    "/api/system-agent/queue": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List System Agent Queue */
+        get: operations["list_system_agent_queue_api_system_agent_queue_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/system-agent/queue/{turn_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Delete System Agent Queue Item */
+        delete: operations["delete_system_agent_queue_item_api_system_agent_queue__turn_id__delete"];
+        options?: never;
+        head?: never;
+        /** Update System Agent Queue Item */
+        patch: operations["update_system_agent_queue_item_api_system_agent_queue__turn_id__patch"];
+        trace?: never;
+    };
     "/api/system-agent/runs": {
         parameters: {
             query?: never;
@@ -3427,6 +3462,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/system-agent/runs/{run_id}/approval": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Approve System Agent Run */
+        post: operations["approve_system_agent_run_api_system_agent_runs__run_id__approval_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/system-agent/runs/{run_id}/cancel": {
         parameters: {
             query?: never;
@@ -3455,6 +3507,57 @@ export interface paths {
         get: operations["list_system_agent_run_events_api_system_agent_runs__run_id__events_get"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/system-agent/runs/{run_id}/input": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Resume System Agent Run With Input */
+        post: operations["resume_system_agent_run_with_input_api_system_agent_runs__run_id__input_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/system-agent/runs/{run_id}/steer": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Steer System Agent Run */
+        post: operations["steer_system_agent_run_api_system_agent_runs__run_id__steer_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/system-agent/runs/{run_id}/stop-and-replace": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Stop And Replace System Agent Run */
+        post: operations["stop_and_replace_system_agent_run_api_system_agent_runs__run_id__stop_and_replace_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -3595,6 +3698,57 @@ export interface paths {
         put?: never;
         /** Retry Message */
         post: operations["retry_message_api_system_agent_sessions__session_id__messages__message_id__retry_stream_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/system-agent/sessions/{session_id}/queue": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Clear System Agent Queue */
+        delete: operations["clear_system_agent_queue_api_system_agent_sessions__session_id__queue_delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/system-agent/sessions/{session_id}/queue/reorder": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Reorder System Agent Queue */
+        post: operations["reorder_system_agent_queue_api_system_agent_sessions__session_id__queue_reorder_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/system-agent/sessions/{session_id}/queue/resume": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Resume System Agent Queue */
+        post: operations["resume_system_agent_queue_api_system_agent_sessions__session_id__queue_resume_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -9277,6 +9431,55 @@ export interface components {
             /** Provider Id */
             provider_id?: number | null;
         };
+        /** SystemAgentQueueItemOut */
+        SystemAgentQueueItemOut: {
+            /** Blocked Reason */
+            blocked_reason?: string | null;
+            /** Bot Tg User Id */
+            bot_tg_user_id?: number | null;
+            /** Channel */
+            channel: string;
+            /** Content */
+            content: string;
+            /** Created At */
+            created_at?: string | null;
+            /** Id */
+            id: string;
+            /** Kind */
+            kind: string;
+            /** Position */
+            position: number;
+            /** Run Id */
+            run_id?: string | null;
+            /** Session Id */
+            session_id: string;
+            /** Status */
+            status: string;
+            /** Updated At */
+            updated_at?: string | null;
+            /** Web User Id */
+            web_user_id?: number | null;
+        };
+        /** SystemAgentQueueItemPatch */
+        SystemAgentQueueItemPatch: {
+            /** Content */
+            content?: string | null;
+            /** Pinned */
+            pinned?: boolean | null;
+        };
+        /** SystemAgentQueueMutationOut */
+        SystemAgentQueueMutationOut: {
+            /**
+             * Count
+             * @default 0
+             */
+            count: number;
+        };
+        /** SystemAgentQueueReorder */
+        SystemAgentQueueReorder: {
+            /** Turn Ids */
+            turn_ids?: string[];
+        };
         /** SystemAgentRegenerateRunCreate */
         SystemAgentRegenerateRunCreate: {
             /** Account Id */
@@ -9328,17 +9531,56 @@ export interface components {
             /** Seq */
             seq: number;
         };
+        /** SystemAgentRunInputCreate */
+        SystemAgentRunInputCreate: {
+            /** Approved */
+            approved?: boolean | null;
+            /** Approved Tools */
+            approved_tools?: string[];
+            /** Client Request Id */
+            client_request_id: string;
+            /** Content */
+            content?: string | null;
+            /** Fallback Provider Id */
+            fallback_provider_id?: number | null;
+        };
+        /** SystemAgentRunInputOut */
+        SystemAgentRunInputOut: {
+            /** Applied At */
+            applied_at?: string | null;
+            /** Client Request Id */
+            client_request_id: string;
+            /** Created At */
+            created_at?: string | null;
+            /** Id */
+            id: number;
+            /** Kind */
+            kind: string;
+            /** Run Id */
+            run_id: string;
+            /** Status */
+            status: string;
+        };
         /** SystemAgentRunOut */
         SystemAgentRunOut: {
+            /** Bot Tg User Id */
+            bot_tg_user_id?: number | null;
             /**
              * Cancel Requested
              * @default false
              */
             cancel_requested: boolean;
+            /**
+             * Channel
+             * @default web
+             */
+            channel: string;
             /** Client Request Id */
             client_request_id: string;
             /** Created At */
             created_at?: string | null;
+            /** Elapsed Ms */
+            elapsed_ms?: number | null;
             /** Error Code */
             error_code?: string | null;
             /** Error Message */
@@ -9354,6 +9596,15 @@ export interface components {
              * @default 0
              */
             last_seq: number;
+            /** Paused Reason */
+            paused_reason?: string | null;
+            /** Pending Turn Id */
+            pending_turn_id?: string | null;
+            /**
+             * Phase
+             * @default queued
+             */
+            phase: string;
             /** Run Id */
             run_id: string;
             /** Session Id */
@@ -9364,6 +9615,10 @@ export interface components {
             status: string;
             /** Updated At */
             updated_at?: string | null;
+            /** Usage */
+            usage?: {
+                [key: string]: unknown;
+            } | null;
             /** User Message Id */
             user_message_id?: number | null;
             /** Web User Id */
@@ -9441,6 +9696,14 @@ export interface components {
             status?: string | null;
             /** Title */
             title?: string | null;
+        };
+        /** SystemAgentStopReplaceCreate */
+        SystemAgentStopReplaceCreate: {
+            /** Client Request Id */
+            client_request_id: string;
+            /** Content */
+            content: string;
+            model_selection?: components["schemas"]["SystemAgentModelSelection"] | null;
         };
         /** SystemAgentUserMemoryCreate */
         SystemAgentUserMemoryCreate: {
@@ -22323,6 +22586,182 @@ export interface operations {
             };
         };
     };
+    list_system_agent_queue_api_system_agent_queue_get: {
+        parameters: {
+            query?: {
+                session_id?: string | null;
+                include_bot?: boolean;
+            };
+            header?: never;
+            path?: never;
+            cookie?: {
+                auth_token?: string | null;
+            };
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SystemAgentQueueItemOut"][];
+                };
+            };
+            /** @description 认证失败 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+            /** @description 服务器内部错误 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    delete_system_agent_queue_item_api_system_agent_queue__turn_id__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                turn_id: string;
+            };
+            cookie?: {
+                auth_token?: string | null;
+            };
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SystemAgentRunOut"];
+                };
+            };
+            /** @description 认证失败 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description CSRF 校验失败或权限不足 */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+            /** @description 服务器内部错误 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    update_system_agent_queue_item_api_system_agent_queue__turn_id__patch: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                turn_id: string;
+            };
+            cookie?: {
+                auth_token?: string | null;
+            };
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SystemAgentQueueItemPatch"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SystemAgentQueueItemOut"];
+                };
+            };
+            /** @description 认证失败 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description CSRF 校验失败或权限不足 */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+            /** @description 服务器内部错误 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
     list_system_agent_runs_api_system_agent_runs_get: {
         parameters: {
             query?: {
@@ -22330,6 +22769,7 @@ export interface operations {
                 since?: string | null;
                 until?: string | null;
                 limit?: number;
+                include_bot?: boolean;
             };
             header?: never;
             path?: never;
@@ -22401,6 +22841,70 @@ export interface operations {
             };
             /** @description 认证失败 */
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+            /** @description 服务器内部错误 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    approve_system_agent_run_api_system_agent_runs__run_id__approval_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                run_id: string;
+            };
+            cookie?: {
+                auth_token?: string | null;
+            };
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SystemAgentRunInputCreate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SystemAgentRunInputOut"];
+                };
+            };
+            /** @description 认证失败 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description CSRF 校验失败或权限不足 */
+            403: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -22515,6 +23019,198 @@ export interface operations {
             };
             /** @description 认证失败 */
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+            /** @description 服务器内部错误 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    resume_system_agent_run_with_input_api_system_agent_runs__run_id__input_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                run_id: string;
+            };
+            cookie?: {
+                auth_token?: string | null;
+            };
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SystemAgentRunInputCreate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SystemAgentRunInputOut"];
+                };
+            };
+            /** @description 认证失败 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description CSRF 校验失败或权限不足 */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+            /** @description 服务器内部错误 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    steer_system_agent_run_api_system_agent_runs__run_id__steer_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                run_id: string;
+            };
+            cookie?: {
+                auth_token?: string | null;
+            };
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SystemAgentRunInputCreate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SystemAgentRunInputOut"];
+                };
+            };
+            /** @description 认证失败 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description CSRF 校验失败或权限不足 */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+            /** @description 服务器内部错误 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    stop_and_replace_system_agent_run_api_system_agent_runs__run_id__stop_and_replace_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                run_id: string;
+            };
+            cookie?: {
+                auth_token?: string | null;
+            };
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SystemAgentStopReplaceCreate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SystemAgentRunOut"];
+                };
+            };
+            /** @description 认证失败 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description CSRF 校验失败或权限不足 */
+            403: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -23223,6 +23919,190 @@ export interface operations {
                 };
                 content: {
                     "application/json": unknown;
+                };
+            };
+            /** @description 认证失败 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description CSRF 校验失败或权限不足 */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+            /** @description 服务器内部错误 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    clear_system_agent_queue_api_system_agent_sessions__session_id__queue_delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                session_id: string;
+            };
+            cookie?: {
+                auth_token?: string | null;
+            };
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SystemAgentQueueMutationOut"];
+                };
+            };
+            /** @description 认证失败 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description CSRF 校验失败或权限不足 */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+            /** @description 服务器内部错误 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    reorder_system_agent_queue_api_system_agent_sessions__session_id__queue_reorder_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                session_id: string;
+            };
+            cookie?: {
+                auth_token?: string | null;
+            };
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SystemAgentQueueReorder"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SystemAgentQueueItemOut"][];
+                };
+            };
+            /** @description 认证失败 */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description CSRF 校验失败或权限不足 */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+            /** @description 服务器内部错误 */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    resume_system_agent_queue_api_system_agent_sessions__session_id__queue_resume_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                session_id: string;
+            };
+            cookie?: {
+                auth_token?: string | null;
+            };
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SystemAgentQueueMutationOut"];
                 };
             };
             /** @description 认证失败 */

@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -514,11 +514,13 @@ class SystemAgentService:
         fallback_provider_id: int | None = None,
         approved_tools: list[str] | None = None,
         run_id: str | None = None,
+        run_input_provider: Callable[[], Awaitable[list[str]]] | None = None,
         model_selection: dict[str, Any] | None = None,
         read_only_only: bool = False,
     ) -> AsyncIterator[dict[str, Any]]:
         await self.reconcile_stale_messages(db, session.id)
         incoming_text = str(text or "").strip()
+        explicit_retry_message = retry_message is not None
         regenerating = (
             regenerate_message is not None
             or regenerate_assistant_message is not None
@@ -557,7 +559,11 @@ class SystemAgentService:
             if retry_message.run_status != MESSAGE_RUN_FAILED:
                 raise ValueError("只有失败消息可以重试")
             content = retry_message.content if isinstance(retry_message.content, dict) else {}
-            raw_text = str(content.get("text") or "").strip()
+            raw_text = (
+                incoming_text
+                if explicit_retry_message and incoming_text
+                else str(content.get("text") or "").strip()
+            )
         else:
             raw_text = incoming_text
         if not raw_text:
@@ -576,7 +582,11 @@ class SystemAgentService:
 
         chat_secrets = (
             []
-            if retry_message is not None and not regenerating
+            if (
+                retry_message is not None
+                and not regenerating
+                and not (explicit_retry_message and incoming_text)
+            )
             else extract_plaintext_secrets(raw_text)
         )
         persisted_user_text = redact_user_message(raw_text, chat_secrets)
@@ -613,6 +623,10 @@ class SystemAgentService:
             db.add(user_msg)
         else:
             user_msg = retry_message
+            if explicit_retry_message and incoming_text:
+                user_msg.content = {
+                    "text": persisted_user_text,
+                }
             previous_usage = user_msg.usage if isinstance(user_msg.usage, dict) else {}
             previous_approved = previous_usage.get("approved_tools")
             if isinstance(previous_approved, list):
@@ -711,6 +725,7 @@ class SystemAgentService:
                 model_selection=model_selection,
                 read_only_only=read_only_only,
                 exclude_latest_session_memory=regenerating,
+                run_input_provider=run_input_provider,
             ):
                 et = event.get("type")
                 if et == "assistant_message":

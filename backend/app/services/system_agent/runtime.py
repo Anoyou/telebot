@@ -12,8 +12,9 @@ from contextlib import suppress
 from dataclasses import replace
 from typing import Any
 
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from ...db.base import AsyncSessionLocal
 from ...db.models.system_agent import (
     MESSAGE_ROLE_ASSISTANT,
     MESSAGE_ROLE_TOOL,
@@ -41,6 +42,7 @@ from .model_capability import verify_resolved_agent_providers
 from .prompts import build_system_prompt, provider_setup_hint
 from .redactor import StreamingMessageRedactor, summarize_tool_result
 from .registry import PreparedAction, ToolRegistry, get_registry
+from .secrets import extract_plaintext_secrets, redact_known_secrets
 from .skills import SkillRegistry, get_skill_registry
 from .tool_routing import (
     ToolRoute,
@@ -74,9 +76,11 @@ class SystemAgentRuntime:
         self,
         registry: ToolRegistry | None = None,
         skill_registry: SkillRegistry | None = None,
+        tool_session_factory: async_sessionmaker[AsyncSession] = AsyncSessionLocal,
     ) -> None:
         self.registry = registry or get_registry()
         self.skill_registry = skill_registry or get_skill_registry()
+        self._tool_session_factory = tool_session_factory
 
     async def stream_turn(
         self,
@@ -96,6 +100,7 @@ class SystemAgentRuntime:
         model_selection: dict[str, Any] | None = None,
         read_only_only: bool = False,
         exclude_latest_session_memory: bool = False,
+        run_input_provider: Callable[[], Awaitable[list[str]]] | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
         """执行一轮对话，逐条 yield NDJSON 事件。
 
@@ -191,9 +196,26 @@ class SystemAgentRuntime:
         )
 
         progress_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
-        streaming_redactor = StreamingMessageRedactor(secrets=list(chat_secrets or []))
-        reasoning_redactor = StreamingMessageRedactor(secrets=list(chat_secrets or []))
+        turn_secrets = list(dict.fromkeys(chat_secrets or []))
+        streaming_redactor = StreamingMessageRedactor(secrets=turn_secrets)
+        reasoning_redactor = StreamingMessageRedactor(secrets=turn_secrets)
         attempted_models: dict[int, str] = {}
+
+        def redact_turn_text(value: str) -> str:
+            redacted = redact_known_secrets(value, turn_secrets)
+            return redacted.replace("***]", "[REDACTED]").replace(
+                "***",
+                "[REDACTED]",
+            )
+
+        def redact_turn_value(value: Any) -> Any:
+            if isinstance(value, dict):
+                return {str(key): redact_turn_value(item) for key, item in value.items()}
+            if isinstance(value, list):
+                return [redact_turn_value(item) for item in value]
+            if isinstance(value, str):
+                return redact_turn_text(value)
+            return value
 
         async def emit_model_progress(progress: dict[str, Any]) -> None:
             payload = dict(progress)
@@ -206,7 +228,13 @@ class SystemAgentRuntime:
                 attempted_model = str(payload.get("model") or "").strip()
                 if attempted_provider_id > 0 and attempted_model:
                     attempted_models[attempted_provider_id] = attempted_model
-            await progress_queue.put(next_event(event_type, **payload))
+            safe_payload = redact_turn_value(payload)
+            await progress_queue.put(
+                next_event(
+                    event_type,
+                    **(safe_payload if isinstance(safe_payload, dict) else {}),
+                )
+            )
 
         async def wait_for_progress(task: asyncio.Task[Any]) -> tuple[str, Any]:
             progress_task = asyncio.create_task(progress_queue.get())
@@ -305,7 +333,7 @@ class SystemAgentRuntime:
                     account_id=session.account_id,
                     fallback_provider_id=fallback_provider_id,
                     progress_callback=emit_model_progress,
-                    known_secrets=list(chat_secrets or []),
+                    known_secrets=turn_secrets,
                 )
             finally:
                 stage_timings["route_ms"] = max(
@@ -473,7 +501,7 @@ class SystemAgentRuntime:
             account_id=session.account_id,
             web_user_id=web_user_id,
             bot_tg_user_id=bot_tg_user_id,
-            chat_secrets=list(chat_secrets or []),
+            chat_secrets=turn_secrets,
         )
 
         deferred_events: list[dict[str, Any]] = []
@@ -523,7 +551,7 @@ class SystemAgentRuntime:
                 "retry_delay_seconds": 3.0,
                 "repair_text_tool_protocol": True,
                 # 仅供本地 usage preview 脱敏；Provider adapter 不发送 metadata。
-                "known_secrets": list(chat_secrets or []),
+                "known_secrets": turn_secrets,
             },
         )
         limits = AgentLimits(
@@ -556,18 +584,20 @@ class SystemAgentRuntime:
 
         async def on_tool_start(call: ToolCall) -> None:
             spec = tool_specs_by_name.get(call.name)
+            arguments_summary = summarize_tool_result(call.arguments, max_chars=800)
             await progress_queue.put(
                 next_event(
                     "tool_started",
                     tool_name=call.name,
                     tool_description=spec.description if spec else call.name,
                     call_id=call.id,
-                    arguments_summary=summarize_tool_result(call.arguments, max_chars=800),
+                    arguments_summary=redact_turn_value(arguments_summary),
                 )
             )
 
         async def on_tool_finish(call: ToolCall, result: ToolResult) -> None:
             spec = tool_specs_by_name.get(call.name)
+            result_summary = summarize_tool_result(result.content, max_chars=1200)
             await progress_queue.put(
                 next_event(
                     "tool_finished",
@@ -575,7 +605,7 @@ class SystemAgentRuntime:
                     tool_description=spec.description if spec else call.name,
                     call_id=call.id,
                     is_error=bool(result.is_error),
-                    result_summary=summarize_tool_result(result.content, max_chars=1200),
+                    result_summary=redact_turn_value(result_summary),
                 )
             )
 
@@ -610,7 +640,33 @@ class SystemAgentRuntime:
             streaming_redactor.reset()
             await progress_queue.put(next_event("assistant_delta_reset"))
 
+        async def on_safe_boundary() -> tuple[ModelMessage, ...]:
+            if run_input_provider is None:
+                return ()
+            values = [str(item).strip() for item in await run_input_provider()]
+            values = [item for item in values if item]
+            if not values:
+                return ()
+            for secret in extract_plaintext_secrets("\n".join(values)):
+                if secret not in turn_secrets:
+                    turn_secrets.append(secret)
+            for value in values:
+                await progress_queue.put(
+                    next_event(
+                        "steer_applied",
+                        summary=redact_turn_text(value)[:500],
+                    )
+                )
+            return tuple(
+                ModelMessage.text(
+                    MessageRole.USER,
+                    "用户在运行中补充了新指令，请从当前安全边界起优先遵循：\n" + value,
+                )
+                for value in values
+            )
+
         callbacks = AgentCallbacks(
+            on_safe_boundary=on_safe_boundary,
             on_tool_batch=on_tool_batch,
             on_tool_start=on_tool_start,
             on_tool_finish=on_tool_finish,
@@ -618,6 +674,11 @@ class SystemAgentRuntime:
             on_reasoning_delta=on_reasoning_delta,
             on_text_reset=on_text_reset,
         )
+
+        # 模型请求可能持续数分钟，不能让初始化阶段的只读事务在网络等待期间
+        # 长期占用连接；工具处理器需要数据库时会由同一 session 按需重新获取。
+        if db is not None:
+            await db.commit()
 
         active_provider = provider_dto
         active_model = model
@@ -786,7 +847,7 @@ class SystemAgentRuntime:
             yield next_event(
                 "error",
                 code="AGENT_RUN_FAILED",
-                message=str(exc)[:500],
+                message=redact_turn_text(str(exc))[:500],
             )
             yield next_event("done", ok=False, stage_timings=timings)
             return
@@ -809,7 +870,8 @@ class SystemAgentRuntime:
         for ev in deferred_events:
             yield ev
 
-        assistant_text = result.text or ""
+        assistant_text = redact_turn_text(result.text or "")
+        assistant_reasoning = redact_turn_text(result.reasoning_content or "")
         timings = finalize_stage_timings(ok=True)
         usage_payload = _usage_payload(
             result.usage,
@@ -830,7 +892,7 @@ class SystemAgentRuntime:
         yield next_event(
             "assistant_message",
             content=assistant_text,
-            reasoning=result.reasoning_content or "",
+            reasoning=assistant_reasoning,
             usage=usage_payload,
         )
         yield next_event(
@@ -849,26 +911,32 @@ class SystemAgentRuntime:
         async def _handler(arguments: dict[str, Any]) -> Any:
             if spec.read_handler is None:
                 return {"error": "handler_missing", "message": f"工具 {spec.name} 未实现"}
-            try:
-                result = await spec.read_handler(tool_ctx, arguments or {})
-                # 所有只读工具统一经过脱敏与体积门禁后才进入模型上下文。
-                return summarize_tool_result(result, max_chars=8000)
-            except PermissionError as exc:
-                return {
-                    "error": "permission_denied",
-                    "message": self._safe_tool_error(exc, tool_ctx.chat_secrets),
-                }
-            except Exception as exc:  # noqa: BLE001
-                log.warning(
-                    "tool %s failed error_type=%s",
-                    spec.name,
-                    type(exc).__name__,
-                )
-                return {
-                    "error": type(exc).__name__,
-                    "message": self._safe_tool_error(exc, tool_ctx.chat_secrets),
-                    "business_changed": False,
-                }
+            async with self._tool_session_factory() as tool_db:
+                isolated_ctx = replace(tool_ctx, db=tool_db)
+                try:
+                    result = await spec.read_handler(isolated_ctx, arguments or {})
+                    # 所有只读工具统一经过脱敏与体积门禁后才进入模型上下文。
+                    safe_result = summarize_tool_result(result, max_chars=8000)
+                    await tool_db.commit()
+                    return safe_result
+                except PermissionError as exc:
+                    await tool_db.rollback()
+                    return {
+                        "error": "permission_denied",
+                        "message": self._safe_tool_error(exc, tool_ctx.chat_secrets),
+                    }
+                except Exception as exc:  # noqa: BLE001
+                    await tool_db.rollback()
+                    log.warning(
+                        "tool %s failed error_type=%s",
+                        spec.name,
+                        type(exc).__name__,
+                    )
+                    return {
+                        "error": type(exc).__name__,
+                        "message": self._safe_tool_error(exc, tool_ctx.chat_secrets),
+                        "business_changed": False,
+                    }
 
         return _handler
 
@@ -1036,12 +1104,14 @@ class SystemAgentRuntime:
                 )
                 return payload
             except PermissionError as exc:
+                await tool_ctx.db.rollback()
                 return {
                     "error": "permission_denied",
                     "message": self._safe_tool_error(exc, tool_ctx.chat_secrets),
                     "business_changed": False,
                 }
             except Exception as exc:  # noqa: BLE001
+                await tool_ctx.db.rollback()
                 log.warning(
                     "write tool preview %s failed error_type=%s",
                     spec.name,
