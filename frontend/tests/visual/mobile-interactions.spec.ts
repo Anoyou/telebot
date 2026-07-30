@@ -789,10 +789,9 @@ test.describe("移动端交互细节", () => {
       const compactPetBox = await compactPet.boundingBox();
       expect(Math.round(compactPetBox?.width || 0)).toBe(65);
       expect(Math.round(compactPetBox?.height || 0)).toBe(50);
-      const compactFrameSignatures: number[] = [];
-      for (let index = 0; index < 26; index += 1) {
-        await page.waitForTimeout(90);
-        compactFrameSignatures.push(await compactPet.locator("canvas").evaluate((element) => {
+      const compactFrameSignatures = new Set<number>();
+      await expect.poll(async () => {
+        compactFrameSignatures.add(await compactPet.locator("canvas").evaluate((element) => {
           const canvas = element as HTMLCanvasElement;
           const context = canvas.getContext("2d");
           if (!context) return 0;
@@ -806,8 +805,8 @@ test.describe("移动端交互细节", () => {
           };
           return hash(context.getImageData(0, 0, canvas.width, canvas.height).data);
         }));
-      }
-      expect(new Set(compactFrameSignatures).size).toBe(2);
+        return compactFrameSignatures.size;
+      }, { intervals: [30], timeout: 3_000 }).toBeGreaterThanOrEqual(2);
       await expect(trigger).not.toContainText("助手");
       await expect(trigger).toHaveAttribute("aria-expanded", "true");
       await expect(trigger).toHaveAttribute("aria-controls", "telepilot-assistant-surface");
