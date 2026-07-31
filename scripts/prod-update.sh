@@ -944,7 +944,7 @@ fi
 # 健康检查之后，避免失败部署把运行时说明提前切到未成功上线的 commit。
 "$SCRIPT_DIR/sync-runtime-content.sh"
 
-if (( WEB_SYNC_IMAGE_REF != "" )); then
+if [[ -n "$WEB_SYNC_IMAGE_REF" ]]; then
   set_env_value .env TELEPILOT_WEB_IMAGE "$WEB_SYNC_IMAGE_REF"
 fi
 persist_switched_services

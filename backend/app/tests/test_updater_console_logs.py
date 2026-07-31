@@ -280,6 +280,8 @@ def test_incremental_script_syncs_backend_files_with_image_rollback() -> None:
     assert 'runtime_ref="telepilot-web-runtime:${NEW_COMMIT}"' in script
     assert 'TELEPILOT_WEB_IMAGE="$WEB_SYNC_OLD_IMAGE_REF"' in script
     assert "文件级同步服务：web（无需执行 docker build）" in script
+    assert 'if [[ -n "$WEB_SYNC_IMAGE_REF" ]]; then' in script
+    assert 'if (( WEB_SYNC_IMAGE_REF != "" )); then' not in script
 
 
 def test_production_defaults_to_prebuilt_images_with_explicit_source_fallback() -> None:
