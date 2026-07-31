@@ -13,6 +13,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/_lib.sh"
 cd "$ROOT_DIR"
 export TELEPILOT_HOST_PROJECT_DIR="${TELEPILOT_HOST_PROJECT_DIR:-$ROOT_DIR}"
+[[ "$TELEPILOT_HOST_PROJECT_DIR" == /* ]] \
+  || die "TELEPILOT_HOST_PROJECT_DIR 必须是宿主机绝对路径，拒绝解析相对挂载目录"
 
 SOURCE_BUILD="${TELEPILOT_SOURCE_BUILD:-0}"
 

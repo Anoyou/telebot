@@ -149,7 +149,7 @@ export function Composer({
             }, 0);
           }}
           disabled={disabled || sending}
-          placeholder={placeholder || "用自然语言查询系统状态…（Enter 发送，Shift+Enter 换行）"}
+          placeholder={placeholder || "想让 Agent 怎么帮你？直接用自然语言问她吧！"}
           rows={2}
           className="min-h-[4.5rem] resize-none border-0 bg-transparent px-1 py-1 shadow-none focus-visible:border-transparent focus-visible:ring-0"
         />

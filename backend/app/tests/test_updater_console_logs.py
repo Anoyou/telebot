@@ -214,6 +214,22 @@ def test_incremental_script_never_recreates_web_with_updater() -> None:
     assert "迁移边界内禁止自动恢复旧代码" in script
 
 
+def test_runtime_content_bind_mount_uses_the_host_project_path() -> None:
+    repo_root = Path(__file__).resolve().parents[3]
+    compose = (repo_root / "docker-compose.yml").read_text(encoding="utf-8")
+    prod_up = (repo_root / "scripts" / "prod-up.sh").read_text(encoding="utf-8")
+    prod_update = (repo_root / "scripts" / "prod-update.sh").read_text(encoding="utf-8")
+
+    mount = "${TELEPILOT_HOST_PROJECT_DIR:-.}/.run/runtime-content:"
+    assert compose.count(mount) == 2
+    assert "${TELEPILOT_RUNTIME_CONTENT_DIR:-./.run/runtime-content}:" not in compose
+    expected_export = (
+        'export TELEPILOT_HOST_PROJECT_DIR="${TELEPILOT_HOST_PROJECT_DIR:-$ROOT_DIR}"'
+    )
+    assert expected_export in prod_up
+    assert expected_export in prod_update
+
+
 def test_incremental_script_uses_compose_health_without_localhost_frontend_probe() -> None:
     repo_root = Path(__file__).resolve().parents[3]
     script = (repo_root / "scripts" / "prod-update.sh").read_text(encoding="utf-8")

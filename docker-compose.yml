@@ -116,7 +116,7 @@ services:
       - plugins_installed:/app/plugins/installed
       - plugin_repos:/app/data/plugin_repos
       # 更新日志由宿主机增量同步；System Agent 无需随文档更新重启 web。
-      - ${TELEPILOT_RUNTIME_CONTENT_DIR:-./.run/runtime-content}:/app/runtime-content:ro
+      - ${TELEPILOT_HOST_PROJECT_DIR:-.}/.run/runtime-content:/app/runtime-content:ro
     healthcheck:
       # 用 /readyz 做真实探活：DB + Redis 任一异常即视为 unhealthy
       # urlopen 显式 timeout=4：让应用层超时先于 docker 的 5s 触发，错误更清晰
@@ -171,7 +171,7 @@ services:
       - web
     volumes:
       # 公开文档与 CHANGELOG 独立于前端镜像，文件同步后刷新页面即可生效。
-      - ${TELEPILOT_RUNTIME_CONTENT_DIR:-./.run/runtime-content}:/usr/share/nginx/html/runtime-content:ro
+      - ${TELEPILOT_HOST_PROJECT_DIR:-.}/.run/runtime-content:/usr/share/nginx/html/runtime-content:ro
     ports:
       # 对外发布端口，可在 .env 中通过 WEB_PORT_PUBLISH 覆盖（默认 80）
       - "${WEB_PORT_PUBLISH:-80}:80"

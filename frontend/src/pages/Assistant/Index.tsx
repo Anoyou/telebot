@@ -1548,6 +1548,62 @@ export function AssistantIndex() {
     [live, pendingActionBubbles],
   );
 
+  const renderAgentContextControls = () => {
+    return (
+      <div
+        data-assistant-context-controls="header"
+        className="hidden min-w-0 flex-wrap items-center justify-end gap-2 sm:flex"
+      >
+        <label className="flex min-w-0 items-center gap-1.5">
+          <span className="flex shrink-0 items-center gap-1 text-sm text-muted-foreground">
+            <Server className="h-3.5 w-3.5 shrink-0" />
+            Provider
+          </span>
+          <Select
+            aria-label="切换 Agent Provider"
+            value={configQ.data?.provider_id == null ? "" : String(configQ.data.provider_id)}
+            disabled={selectorDisabled}
+            onChange={(event) => selectProvider(event.target.value)}
+            className="h-8 w-44 min-w-0 text-xs"
+          >
+            <option value="">未配置</option>
+            {(providersQ.data || []).map((provider) => {
+              const eligible = selectableProviders.some((item) => item.id === provider.id);
+              const unavailableLabel = !provider.has_api_key
+                ? "（缺少 Key）"
+                : "（无可用 Tools 模型）";
+              return (
+                <option key={provider.id} value={provider.id} disabled={!eligible}>
+                  {provider.name}{!eligible ? unavailableLabel : ""}
+                </option>
+              );
+            })}
+          </Select>
+        </label>
+        <label className="flex min-w-0 items-center gap-1.5">
+          <span className="shrink-0 text-sm text-muted-foreground">账号上下文</span>
+          <Select
+            value={accountId === "" ? "" : String(accountId)}
+            onChange={(event) => setAccountId(event.target.value ? Number(event.target.value) : "")}
+            className="h-8 w-44 min-w-0 text-xs"
+          >
+            <option value="">系统级</option>
+            {accountOptions.map((account) => (
+              <option key={account.id} value={account.id}>
+                #{account.id} {account.display_name || account.phone || account.tg_username || ""}
+              </option>
+            ))}
+          </Select>
+        </label>
+        {(streaming || actualSelectionDiffers) && displayedSelection ? (
+          <span className="min-w-0 max-w-56 truncate text-xs text-muted-foreground">
+            实际调用：{displayedSelection.providerName} · {displayedSelection.model}
+          </span>
+        ) : null}
+      </div>
+    );
+  };
+
   return (
     <PageShell className="flex h-full min-h-0 flex-col gap-3 space-y-0">
       <div className="hidden shrink-0 sm:block">
@@ -1555,6 +1611,7 @@ export function AssistantIndex() {
           title="系统助手"
           description="用自然语言查询并操作系统能力；写操作需内联确认。"
           icon={AgentMark}
+          actions={renderAgentContextControls()}
         />
       </div>
 
@@ -1602,54 +1659,6 @@ export function AssistantIndex() {
               配置
             </Button>
           </div>
-        </div>
-        <div className="mt-2 grid grid-cols-2 gap-2 sm:flex sm:flex-wrap sm:items-center">
-          <label className="min-w-0 sm:flex sm:items-center sm:gap-1.5">
-            <span className="mb-1 flex items-center gap-1 text-[11px] text-muted-foreground sm:mb-0 sm:shrink-0 sm:text-sm">
-              <Server className="h-3.5 w-3.5 shrink-0" />
-              Provider
-            </span>
-          <Select
-            aria-label="切换 Agent Provider"
-            value={configQ.data?.provider_id == null ? "" : String(configQ.data.provider_id)}
-            disabled={selectorDisabled}
-            onChange={(event) => selectProvider(event.target.value)}
-            className="h-8 w-full min-w-0 text-xs sm:w-44"
-          >
-            <option value="">未配置</option>
-            {(providersQ.data || []).map((provider) => {
-              const eligible = selectableProviders.some((item) => item.id === provider.id);
-              const unavailableLabel = !provider.has_api_key
-                ? "（缺少 Key）"
-                : "（无可用 Tools 模型）";
-              return (
-                <option key={provider.id} value={provider.id} disabled={!eligible}>
-                  {provider.name}{!eligible ? unavailableLabel : ""}
-                </option>
-              );
-            })}
-          </Select>
-          </label>
-          <label className="min-w-0 sm:flex sm:items-center sm:gap-1.5">
-            <span className="mb-1 block text-[11px] text-muted-foreground sm:mb-0 sm:shrink-0 sm:text-sm">账号上下文</span>
-          <Select
-            value={accountId === "" ? "" : String(accountId)}
-            onChange={(e) => setAccountId(e.target.value ? Number(e.target.value) : "")}
-            className="h-8 w-full min-w-0 text-xs sm:w-44"
-          >
-            <option value="">系统级</option>
-            {accountOptions.map((a) => (
-              <option key={a.id} value={a.id}>
-                #{a.id} {a.display_name || a.phone || a.tg_username || ""}
-              </option>
-            ))}
-          </Select>
-          </label>
-          {(streaming || actualSelectionDiffers) && displayedSelection ? (
-            <span className="col-span-2 min-w-0 truncate text-xs text-muted-foreground sm:col-span-1">
-              实际调用：{displayedSelection.providerName} · {displayedSelection.model}
-            </span>
-          ) : null}
         </div>
         </div>
       </div>
