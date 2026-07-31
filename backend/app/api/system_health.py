@@ -1627,6 +1627,7 @@ def _plan_text(
     services: list[str],
     file_sync_services: list[str],
     rebuild_services: list[str],
+    reasons: list[str],
     requires_full_update: bool,
     requires_backup: bool,
     requires_migration: bool,
@@ -1656,6 +1657,8 @@ def _plan_text(
         detail_parts.append("不执行数据库备份或迁移。")
     if requires_full_update:
         detail_parts.append("涉及部署/依赖关键文件，建议完整更新流程。")
+    if reasons:
+        detail_parts.append(f"分类依据：{'；'.join(reasons)}。")
 
     if runtime_mode == RUNTIME_LOCAL_SOURCE:
         if can_apply:
@@ -1712,6 +1715,7 @@ def _check_response_from_plan(
     services = [str(item) for item in plan.get("services") or []]
     file_sync_services = [str(item) for item in plan.get("file_sync_services") or []]
     rebuild_services = [str(item) for item in plan.get("rebuild_services") or []]
+    reasons = [str(item) for item in plan.get("reasons") or []]
     requires_full_update = bool(plan.get("requires_full_update"))
     requires_backup = bool(plan.get("requires_backup"))
     requires_migration = bool(plan.get("requires_migration"))
@@ -1728,6 +1732,7 @@ def _check_response_from_plan(
         services=services,
         file_sync_services=file_sync_services,
         rebuild_services=rebuild_services,
+        reasons=reasons,
         requires_full_update=requires_full_update,
         requires_backup=requires_backup,
         requires_migration=requires_migration,
@@ -1753,6 +1758,7 @@ def _check_response_from_plan(
         services=services,
         file_sync_services=file_sync_services,
         rebuild_services=rebuild_services,
+        reasons=reasons,
         requires_full_update=requires_full_update,
         requires_backup=requires_backup,
         requires_migration=requires_migration,
@@ -1784,6 +1790,7 @@ class CheckUpdateResponse(BaseModel):
     services: list[str] = Field(default_factory=list)
     file_sync_services: list[str] = Field(default_factory=list)
     rebuild_services: list[str] = Field(default_factory=list)
+    reasons: list[str] = Field(default_factory=list)
     requires_full_update: bool = False
     requires_backup: bool = False
     requires_migration: bool = False
@@ -1810,6 +1817,7 @@ class PullUpdateResponse(BaseModel):
     services: list[str] = Field(default_factory=list)
     file_sync_services: list[str] = Field(default_factory=list)
     rebuild_services: list[str] = Field(default_factory=list)
+    reasons: list[str] = Field(default_factory=list)
     requires_full_update: bool = False
     requires_backup: bool = False
     requires_migration: bool = False
@@ -2119,6 +2127,7 @@ async def check_update(
             services = update_plan.services
             file_sync_services = update_plan.file_sync_services
             rebuild_services = update_plan.rebuild_services
+            reasons = update_plan.reasons
             requires_full_update = update_plan.requires_full_update
             requires_backup = update_plan.requires_backup
             has_update = has_update and behind > 0
@@ -2138,6 +2147,7 @@ async def check_update(
                 services=services,
                 file_sync_services=file_sync_services,
                 rebuild_services=rebuild_services,
+                reasons=reasons,
                 requires_full_update=requires_full_update,
                 requires_backup=requires_backup,
                 requires_migration=update_plan.requires_migration,
@@ -2163,6 +2173,7 @@ async def check_update(
                 services=services,
                 file_sync_services=file_sync_services,
                 rebuild_services=rebuild_services,
+                reasons=reasons,
                 requires_full_update=requires_full_update,
                 requires_backup=requires_backup,
                 requires_migration=update_plan.requires_migration,

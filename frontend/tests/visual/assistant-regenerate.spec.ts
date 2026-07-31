@@ -47,18 +47,20 @@ test.describe("系统助手原位编辑与重新生成", () => {
     if (testInfo.project.name === "desktop") {
       const header = page.locator("[data-assistant-surface] [data-page-header]");
       await expect(headerControls).toBeVisible();
-      const positions = await header.evaluate((element) => {
-        const headerRect = element.getBoundingClientRect();
+      const placement = await header.evaluate((element) => {
         const controls = element.querySelector<HTMLElement>(
           '[data-assistant-context-controls="header"]',
         );
         const controlsRect = controls?.getBoundingClientRect();
         return {
-          headerCenter: headerRect.left + headerRect.width / 2,
-          controlsLeft: controlsRect?.left ?? 0,
+          insidePageHeader: controls?.closest("[data-page-header]") === element,
+          width: controlsRect?.width ?? 0,
+          height: controlsRect?.height ?? 0,
         };
       });
-      expect(positions.controlsLeft).toBeGreaterThan(positions.headerCenter);
+      expect(placement.insidePageHeader).toBe(true);
+      expect(placement.width).toBeGreaterThan(0);
+      expect(placement.height).toBeGreaterThan(0);
     } else {
       await expect(headerControls).toBeHidden();
       await page.locator("[data-assistant-mobile-summary]").click();

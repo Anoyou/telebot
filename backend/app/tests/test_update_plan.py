@@ -95,6 +95,15 @@ def test_unknown_runtime_file_fails_closed() -> None:
     assert plan.reasons == ["无法确定运行影响范围：runtime-new-format.toml"]
 
 
+def test_generated_openapi_snapshot_has_no_independent_runtime_impact() -> None:
+    plan = classify_changed_files(["openapi/telepilot.openapi.json"])
+
+    assert plan.components == ["docs_only"]
+    assert plan.services == []
+    assert plan.requires_full_update is False
+    assert plan.reasons == []
+
+
 def test_backend_source_change_uses_file_sync_without_image_rebuild() -> None:
     plan = classify_changed_files(
         [
@@ -168,6 +177,7 @@ def test_build_plan_treats_release_metadata_as_backend_file_sync_only(tmp_path: 
     root = tmp_path / "repo"
     (root / "backend" / "app").mkdir(parents=True)
     (root / "frontend" / "src" / "lib").mkdir(parents=True)
+    (root / "openapi").mkdir(parents=True)
     subprocess.run(["git", "init", "-q"], cwd=root, check=True)
     subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=root, check=True)
     subprocess.run(["git", "config", "user.name", "Test"], cwd=root, check=True)
@@ -181,6 +191,9 @@ def test_build_plan_treats_release_metadata_as_backend_file_sync_only(tmp_path: 
     (root / "frontend" / "src" / "lib" / "version.ts").write_text(
         'export const APP_VERSION = "1.0.0";\n'
     )
+    (root / "openapi" / "telepilot.openapi.json").write_text(
+        '{"info":{"version":"1.0.0"}}\n'
+    )
     subprocess.run(["git", "add", "."], cwd=root, check=True)
     subprocess.run(["git", "commit", "-qm", "old"], cwd=root, check=True)
     old = subprocess.run(
@@ -192,6 +205,7 @@ def test_build_plan_treats_release_metadata_as_backend_file_sync_only(tmp_path: 
         root / "backend" / "pyproject.toml",
         root / "frontend" / "package.json",
         root / "frontend" / "src" / "lib" / "version.ts",
+        root / "openapi" / "telepilot.openapi.json",
     ):
         path.write_text(path.read_text().replace("1.0.0", "1.0.1"))
     subprocess.run(["git", "add", "."], cwd=root, check=True)

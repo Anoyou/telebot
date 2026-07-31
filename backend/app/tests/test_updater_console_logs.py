@@ -212,6 +212,10 @@ def test_incremental_script_never_recreates_web_with_updater() -> None:
     assert "persist_switched_services" in script
     assert "rollback_switched_services" in script
     assert "迁移边界内禁止自动恢复旧代码" in script
+    assert 'pending_target:-}" == "$CHECKED_OUT_COMMIT"' in script
+    assert 'git merge-base --is-ancestor "$pending_target" "$TARGET_COMMIT"' in script
+    assert 'warn "分类依据：$reason"' in script
+    assert "镜像不存在或构建未成功" in script
 
 
 def test_runtime_content_bind_mount_uses_the_host_project_path() -> None:
@@ -1080,6 +1084,10 @@ def test_update_plan_retries_commit_with_pending_deployment(monkeypatch, tmp_pat
             return "targetcommit", "", 0
         if args == ["git", "rev-parse", "--git-path", "telepilot-deploy-pending"]:
             return ".git/telepilot-deploy-pending", "", 0
+        if args[:3] == ["git", "cat-file", "-e"]:
+            return "", "", 0
+        if args[:3] == ["git", "merge-base", "--is-ancestor"]:
+            return "", "", 0
         if args == ["git", "show", "targetcommit:backend/app/__init__.py"]:
             return '__version__ = "0.72.0-beta.2"', "", 0
         if args[:3] == ["git", "rev-list", "--count"]:
@@ -1109,3 +1117,73 @@ def test_update_plan_retries_commit_with_pending_deployment(monkeypatch, tmp_pat
     assert result["current_version"] == "0.72.0-beta.2"
     assert result["target_version"] == "0.72.0-beta.2"
     assert result["commit_titles"] == ["改进在线更新弹窗", "修复控制台噪声"]
+
+
+def test_update_plan_carries_pending_deployment_into_newer_target(
+    monkeypatch, tmp_path
+) -> None:
+    updater = _load_updater_module()
+    workspace = tmp_path / "repo"
+    git_dir = workspace / ".git"
+    git_dir.mkdir(parents=True)
+    (git_dir / "telepilot-deploy-pending").write_text(
+        "beta8commit beta9commit\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(updater, "WORKSPACE", workspace)
+
+    def fake_run(args, **_kwargs):  # noqa: ANN001
+        if args[:2] == ["git", "fetch"]:
+            return "", "", 0
+        if args == ["git", "rev-parse", "HEAD"]:
+            return "beta9commit", "", 0
+        if args == ["git", "rev-parse", "refs/remotes/origin/Beta"]:
+            return "beta10commit", "", 0
+        if args == ["git", "rev-parse", "--git-path", "telepilot-deploy-pending"]:
+            return ".git/telepilot-deploy-pending", "", 0
+        if args[:3] == ["git", "cat-file", "-e"]:
+            return "", "", 0
+        if args == [
+            "git",
+            "merge-base",
+            "--is-ancestor",
+            "beta9commit",
+            "beta10commit",
+        ]:
+            return "", "", 0
+        if args == ["git", "show", "beta9commit:backend/app/__init__.py"]:
+            return '__version__ = "0.88.0-beta.9"', "", 0
+        if args == ["git", "show", "beta10commit:backend/app/__init__.py"]:
+            return '__version__ = "0.88.0-beta.10"', "", 0
+        if args[:3] == ["git", "rev-list", "--count"]:
+            return "1", "", 0
+        if args[:2] == ["git", "log"]:
+            assert args[-1] == "beta8commit..beta10commit"
+            return "修复累计在线更新\n", "", 0
+        if args[:2] == ["python", "backend/app/util/update_plan.py"]:
+            assert args[-4:] == [
+                "--old",
+                "beta8commit",
+                "--new",
+                "beta10commit",
+            ]
+            return (
+                '{"changed_files":["docker-compose.yml","frontend/src/App.tsx"],'
+                '"components":["frontend"],"services":["frontend"],'
+                '"requires_full_update":false,"requires_backup":false,'
+                '"requires_migration":false}',
+                "",
+                0,
+            )
+        raise AssertionError(args)
+
+    monkeypatch.setattr(updater, "_run", fake_run)
+
+    result = updater._check_plan("origin", "Beta")
+
+    assert result["has_update"] is True
+    assert result["deployment_pending"] is True
+    assert result["deploy_from_commit"] == "beta8commit"
+    assert result["changed_files"] == [
+        "docker-compose.yml",
+        "frontend/src/App.tsx",
+    ]

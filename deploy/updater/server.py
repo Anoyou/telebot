@@ -596,9 +596,21 @@ def _check_plan(remote: str, branch: str) -> dict[str, Any]:
             pending_old, pending_target = pending_path.read_text().split()[:2]
         except (OSError, ValueError, IndexError):
             pending_old = pending_target = ""
-        if current_out == target_out and pending_target == target_out and pending_old:
-            diff_base = pending_old
-            deployment_pending = True
+        if pending_old and pending_target == current_out:
+            pending_commits_valid = all(
+                _run(["git", "cat-file", "-e", f"{revision}^{{commit}}"], timeout=10)[2]
+                == 0
+                for revision in (pending_old, pending_target)
+            )
+            _, _, pending_is_ancestor_rc = _run(
+                ["git", "merge-base", "--is-ancestor", pending_target, target_out],
+                timeout=10,
+            )
+            if pending_commits_valid and pending_is_ancestor_rc == 0:
+                # Git 已前进、容器尚未完成切换时，后续版本必须从最初未部署的
+                # commit 累计计算；否则会静默跳过中间版本的 Compose/前端变化。
+                diff_base = pending_old
+                deployment_pending = True
 
     behind_out, _, behind_rc = _run(
         ["git", "rev-list", "--count", f"{current_out}..{target_out}"], timeout=10

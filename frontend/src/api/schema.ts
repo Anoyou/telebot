@@ -5436,6 +5436,8 @@ export interface components {
              * @default
              */
             plan_label: string;
+            /** Reasons */
+            reasons?: string[];
             /** Rebuild Services */
             rebuild_services?: string[];
             /**
@@ -8607,6 +8609,8 @@ export interface components {
              * @default
              */
             plan_label: string;
+            /** Reasons */
+            reasons?: string[];
             /** Rebuild Services */
             rebuild_services?: string[];
             /**

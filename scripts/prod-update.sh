@@ -187,24 +187,30 @@ else
   git fetch "$REMOTE" "${BRANCH}:${REMOTE_REF}" >/dev/null
 fi
 
-CURRENT_COMMIT="$(git rev-parse HEAD)"
+CHECKED_OUT_COMMIT="$(git rev-parse HEAD)"
+CURRENT_COMMIT="$CHECKED_OUT_COMMIT"
 TARGET_COMMIT="$(git rev-parse "$REMOTE_REF")"
 OLD_COMMIT="$CURRENT_COMMIT"
 
-if [[ "$CURRENT_COMMIT" == "$TARGET_COMMIT" ]]; then
-  if [[ -f "$PENDING_FILE" ]]; then
-    read -r pending_old pending_target < "$PENDING_FILE" || true
-    if [[ -n "${pending_old:-}" && "${pending_target:-}" == "$TARGET_COMMIT" ]] \
-      && git cat-file -e "${pending_old}^{commit}" 2>/dev/null; then
-      warn "检测到 commit 已拉取但部署未完成，继续重试 ${pending_old:0:12}..${TARGET_COMMIT:0:12}"
-      CURRENT_COMMIT="$pending_old"
-      OLD_COMMIT="$pending_old"
+if [[ -f "$PENDING_FILE" ]]; then
+  read -r pending_old pending_target < "$PENDING_FILE" || true
+  if [[ -n "${pending_old:-}" && "${pending_target:-}" == "$CHECKED_OUT_COMMIT" ]] \
+    && git cat-file -e "${pending_old}^{commit}" 2>/dev/null \
+    && git cat-file -e "${pending_target}^{commit}" 2>/dev/null \
+    && git merge-base --is-ancestor "$pending_target" "$TARGET_COMMIT"; then
+    warn "检测到尚未完成的部署，累计更新 ${pending_old:0:12}..${TARGET_COMMIT:0:12}"
+    CURRENT_COMMIT="$pending_old"
+    OLD_COMMIT="$pending_old"
+    if [[ "$CHECKED_OUT_COMMIT" == "$TARGET_COMMIT" ]]; then
       HEAD_ALREADY_UPDATED=1
-    else
-      warn "忽略与当前 HEAD 不匹配的旧部署 pending 标记"
-      rm -f "$PENDING_FILE"
     fi
+  elif [[ "$CHECKED_OUT_COMMIT" == "$TARGET_COMMIT" ]]; then
+    warn "忽略与当前更新链不匹配的旧部署 pending 标记"
+    rm -f "$PENDING_FILE"
   fi
+fi
+
+if [[ "$CHECKED_OUT_COMMIT" == "$TARGET_COMMIT" ]]; then
   if (( HEAD_ALREADY_UPDATED == 0 )); then
     ok "当前已是最新 commit：${TARGET_COMMIT:0:12}"
     exit 0
@@ -241,6 +247,7 @@ mapfile -t PLAN_COMPONENTS < <(plan_value components)
 mapfile -t PLAN_SERVICES < <(plan_value services)
 mapfile -t PLAN_FILE_SYNC_SERVICES < <(plan_value file_sync_services)
 mapfile -t PLAN_REBUILD_SERVICES < <(plan_value rebuild_services)
+mapfile -t PLAN_REASONS < <(plan_value reasons)
 NEEDS_BACKEND=0
 NEEDS_FRONTEND=0
 NEEDS_UPDATER=0
@@ -310,6 +317,9 @@ else
     log "影响组件：${PLAN_COMPONENTS[*]}"
   fi
 fi
+for reason in "${PLAN_REASONS[@]}"; do
+  warn "分类依据：$reason"
+done
 
 if (( REQUIRES_BACKUP == 1 )); then
   warn "本次包含数据库迁移；应用代码回滚不能撤销已执行的数据库变更。"
@@ -346,7 +356,8 @@ pull_verified_image() {
   local service="$1" image_ref="$2" revision="$3" image_revision image_source digest_ref
   local expected_source="${TELEPILOT_IMAGE_SOURCE:-https://github.com/Anoyou/Telebot}"
   log "预拉取 $service 镜像：$image_ref"
-  docker pull "$image_ref" >/dev/null || die "目标 $service 镜像尚未就绪；请等待 GitHub Actions 完成后重试"
+  docker pull "$image_ref" >/dev/null || die \
+    "目标 $service 镜像不存在或构建未成功（commit ${revision:0:12}）；请检查 https://github.com/Anoyou/Telebot/actions 后重试"
   image_revision="$(docker image inspect \
     --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' \
     "$image_ref" 2>/dev/null || true)"

@@ -42,6 +42,9 @@ _NO_RUNTIME_FILES = {
     "Makefile",
     "README.md",
     "docker-compose.dev.yml",
+    # OpenAPI JSON 是由后端 schema 生成的发布快照，不会进入运行容器。
+    # 真正的运行影响由后端源码和生成的前端 API 类型各自触发。
+    "openapi/telepilot.openapi.json",
     "scripts/bootstrap.sh",
     "scripts/install-server.sh",
     "scripts/prod-up.sh",

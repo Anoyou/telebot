@@ -475,6 +475,7 @@ async def test_check_update_uses_internal_updater(monkeypatch) -> None:
             "services": ["web"],
             "file_sync_services": ["web"],
             "rebuild_services": [],
+            "reasons": ["后端运行文件发生变化"],
             "requires_full_update": False,
             "requires_backup": False,
         },
@@ -493,7 +494,15 @@ async def test_check_update_uses_internal_updater(monkeypatch) -> None:
     assert out.commit_titles == ["修复更新检查"]
     assert out.file_sync_services == ["web"]
     assert out.rebuild_services == []
+    assert out.reasons == ["后端运行文件发生变化"]
+    assert "分类依据：后端运行文件发生变化" in out.plan_detail
     assert "直接同步目标 commit 文件并重启：web" in out.plan_detail
+
+
+def test_pull_update_response_exposes_classification_reasons() -> None:
+    response = sh.PullUpdateResponse(reasons=["未知运行文件触发安全兜底"])
+
+    assert response.model_dump()["reasons"] == ["未知运行文件触发安全兜底"]
 
 
 @pytest.mark.asyncio

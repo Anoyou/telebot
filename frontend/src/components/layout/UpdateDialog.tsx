@@ -59,6 +59,7 @@ interface UpdatePlanMeta {
   services: string[];
   fileSyncServices: string[];
   rebuildServices: string[];
+  reasons: string[];
   requiresFullUpdate: boolean;
   requiresBackup: boolean;
   requiresMigration: boolean;
@@ -176,6 +177,7 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
     services: res.services ?? [],
     fileSyncServices: res.file_sync_services ?? [],
     rebuildServices: res.rebuild_services ?? [],
+    reasons: res.reasons ?? [],
     requiresFullUpdate: Boolean(res.requires_full_update),
     requiresBackup: Boolean(res.requires_backup),
     requiresMigration: Boolean(res.requires_migration),
@@ -447,7 +449,9 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
       });
       if (res.success) {
         const responsePlan = parsePlanMeta(res);
-        const plan = activePlan && responsePlan.components.length === 0 ? activePlan : responsePlan;
+        // 执行接口只负责创建任务，通常不会重复返回检查阶段的完整分类。
+        // 保留已确认的计划，避免默认 components=["none"] 覆盖分类依据。
+        const plan = activePlan ?? responsePlan;
         if (res.job_id) {
           saveActiveUpdateJob(getUpdateJobStorage(), {
             jobId: res.job_id,
@@ -467,7 +471,7 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
           pollUpdateJob(res.job_id, plan);
           return;
         }
-        setStep({ kind: "pulled", newCommit: res.new_commit, summary: res.summary, plan: parsePlanMeta(res) });
+        setStep({ kind: "pulled", newCommit: res.new_commit, summary: res.summary, plan });
       } else {
         setStep({ kind: "pull_failed", error: res.error || "未知错误" });
       }
@@ -751,6 +755,9 @@ export function UpdateDialog({ open, onOpenChange }: UpdateDialogProps) {
                 <div className="rounded-md border border-warning/30 bg-warning/10 px-3 py-2 text-xs space-y-1">
                   {step.plan.requiresBackup && <p>检测到数据库迁移，将自动备份后再切换后端。</p>}
                   {step.plan.requiresFullUpdate && <p>该更新需要完整更新流程，耗时会更长。</p>}
+                  {step.plan.reasons.map((reason) => (
+                    <p key={reason}>分类依据：{reason}</p>
+                  ))}
                 </div>
               )}
               {step.plan.manualCommand && planExpanded && (

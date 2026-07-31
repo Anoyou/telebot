@@ -1964,6 +1964,7 @@ export interface CheckUpdateResult {
   services?: string[] | null;
   file_sync_services?: string[] | null;
   rebuild_services?: string[] | null;
+  reasons?: string[] | null;
   requires_full_update?: boolean | null;
   requires_backup?: boolean | null;
   requires_migration?: boolean | null;
@@ -1999,6 +2000,7 @@ export interface PullUpdateResult {
   services?: string[] | null;
   file_sync_services?: string[] | null;
   rebuild_services?: string[] | null;
+  reasons?: string[] | null;
   requires_full_update?: boolean | null;
   requires_backup?: boolean | null;
   requires_migration?: boolean | null;

@@ -3216,6 +3216,13 @@
             "title": "Plan Label",
             "type": "string"
           },
+          "reasons": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Reasons",
+            "type": "array"
+          },
           "rebuild_services": {
             "items": {
               "type": "string"
@@ -11981,6 +11988,13 @@
             "title": "Plan Label",
             "type": "string"
           },
+          "reasons": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Reasons",
+            "type": "array"
+          },
           "rebuild_services": {
             "items": {
               "type": "string"
@@ -16733,7 +16747,7 @@
   },
   "info": {
     "title": "TelePilot",
-    "version": "0.88.0-beta.9"
+    "version": "0.88.0-beta.10"
   },
   "openapi": "3.1.0",
   "paths": {
