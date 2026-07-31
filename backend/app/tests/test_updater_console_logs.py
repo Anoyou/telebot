@@ -459,6 +459,295 @@ printf '%s\\n' "${GH_TOKEN:-}" > "$FAKE_GH_CAPTURE"
     assert capture.read_text(encoding="utf-8").strip() == "configured-github-token"
 
 
+def _install_legacy_updater_repair(
+    tmp_path: Path,
+    *,
+    existing_wrapper: str | None = None,
+) -> tuple[subprocess.CompletedProcess[str], dict[str, str], Path, Path, Path]:
+    repo_root = Path(__file__).resolve().parents[3]
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    real_gh = tmp_path / "usr" / "bin" / "gh"
+    real_gh.parent.mkdir(parents=True)
+    wrapper_gh = fake_bin / "gh"
+    apk_marker = tmp_path / "apk-calls"
+    gh_capture = tmp_path / "gh-call"
+    if existing_wrapper is not None:
+        wrapper_gh.write_text(existing_wrapper, encoding="utf-8")
+        wrapper_gh.chmod(0o755)
+
+    (fake_bin / "id").write_text("#!/bin/sh\nprintf '0\\n'\n", encoding="utf-8")
+    (fake_bin / "sha256sum").write_text(
+        "#!/bin/sh\nprintf 'fake-wrapper-sha256  %s\\n' \"$1\"\n",
+        encoding="utf-8",
+    )
+    (fake_bin / "apk").write_text(
+        """#!/bin/sh
+set -eu
+printf '%s\\n' "$*" >> "$FAKE_APK_MARKER"
+cat > "$TELEPILOT_GH_REAL_PATH" <<'EOF'
+#!/bin/sh
+set -eu
+if [ "${1:-}" = "--version" ]; then
+  printf 'gh version test\\n'
+  exit 0
+fi
+{
+  printf 'GH_TOKEN=%s\\n' "${GH_TOKEN:-}"
+  printf 'GH_PROMPT_DISABLED=%s\\n' "${GH_PROMPT_DISABLED:-}"
+  printf 'args='
+  printf '|%s' "$@"
+  printf '\\n'
+} > "$FAKE_GH_CAPTURE"
+EOF
+chmod 0755 "$TELEPILOT_GH_REAL_PATH"
+""",
+        encoding="utf-8",
+    )
+    for executable in ("id", "sha256sum", "apk"):
+        (fake_bin / executable).chmod(0o755)
+
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if key not in {"GH_TOKEN", "GITHUB_TOKEN", "GH_PROMPT_DISABLED"}
+    }
+    env.update(
+        {
+            "PATH": f"{fake_bin}:/usr/bin:/bin",
+            "FAKE_APK_MARKER": str(apk_marker),
+            "FAKE_GH_CAPTURE": str(gh_capture),
+            "TELEPILOT_APK_BIN": str(fake_bin / "apk"),
+            "TELEPILOT_GH_REAL_PATH": str(real_gh),
+            "TELEPILOT_GH_WRAPPER_PATH": str(wrapper_gh),
+        }
+    )
+    result = subprocess.run(
+        ["sh", str(repo_root / "scripts" / "repair-legacy-updater.sh")],
+        cwd=repo_root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return result, env, wrapper_gh, apk_marker, gh_capture
+
+
+def test_legacy_updater_repair_script_installs_auditable_wrapper(
+    tmp_path: Path,
+) -> None:
+    repo_root = Path(__file__).resolve().parents[3]
+    script = repo_root / "scripts" / "repair-legacy-updater.sh"
+    result, _env, wrapper_gh, apk_marker, _gh_capture = (
+        _install_legacy_updater_repair(tmp_path)
+    )
+
+    assert script.stat().st_mode & 0o111
+    assert result.returncode == 0, result.stderr
+    assert apk_marker.read_text(encoding="utf-8").strip() == (
+        "add --no-cache github-cli"
+    )
+    wrapper = wrapper_gh.read_text(encoding="utf-8")
+    assert "TelePilot legacy updater OCI attestation compatibility wrapper" in wrapper
+    assert "无需执行 gh auth login" in result.stdout
+    assert "包装器 SHA256：fake-wrapper-sha256" in result.stdout
+
+
+def test_legacy_updater_repair_is_idempotent(tmp_path: Path) -> None:
+    first, env, wrapper_gh, apk_marker, _gh_capture = (
+        _install_legacy_updater_repair(tmp_path)
+    )
+    assert first.returncode == 0, first.stderr
+    first_wrapper = wrapper_gh.read_text(encoding="utf-8")
+
+    repo_root = Path(__file__).resolve().parents[3]
+    second = subprocess.run(
+        ["sh", str(repo_root / "scripts" / "repair-legacy-updater.sh")],
+        cwd=repo_root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert second.returncode == 0, second.stderr
+    assert wrapper_gh.read_text(encoding="utf-8") == first_wrapper
+    assert apk_marker.read_text(encoding="utf-8").splitlines() == [
+        "add --no-cache github-cli"
+    ]
+
+
+def test_legacy_updater_repair_refuses_to_replace_foreign_wrapper(
+    tmp_path: Path,
+) -> None:
+    result, _env, wrapper_gh, apk_marker, _gh_capture = (
+        _install_legacy_updater_repair(
+            tmp_path,
+            existing_wrapper="#!/bin/sh\nexec /custom/gh \"$@\"\n",
+        )
+    )
+
+    assert result.returncode == 1
+    assert "不是 TelePilot 兼容包装器，拒绝覆盖" in result.stderr
+    assert wrapper_gh.read_text(encoding="utf-8") == (
+        "#!/bin/sh\nexec /custom/gh \"$@\"\n"
+    )
+    assert not apk_marker.exists()
+
+
+def test_legacy_updater_repair_rejects_unsafe_paths(tmp_path: Path) -> None:
+    _first, env, _wrapper_gh, _apk_marker, _gh_capture = (
+        _install_legacy_updater_repair(tmp_path)
+    )
+    env["TELEPILOT_GH_REAL_PATH"] = "/usr/bin/gh;touch"
+    repo_root = Path(__file__).resolve().parents[3]
+    result = subprocess.run(
+        ["sh", str(repo_root / "scripts" / "repair-legacy-updater.sh")],
+        cwd=repo_root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 1
+    assert "路径包含不安全字符" in result.stderr
+
+
+def test_legacy_updater_repair_forces_noninteractive_oci_attestation(
+    tmp_path: Path,
+) -> None:
+    result, env, wrapper_gh, _apk_marker, gh_capture = (
+        _install_legacy_updater_repair(tmp_path)
+    )
+    assert result.returncode == 0, result.stderr
+
+    invocation = subprocess.run(
+        [
+            str(wrapper_gh),
+            "attestation",
+            "verify",
+            "oci://ghcr.io/anoyou/telepilot-web@sha256:deadbeef",
+            "--repo",
+            "Anoyou/Telebot",
+            "--signer-workflow",
+            "github.com/Anoyou/Telebot/.github/workflows/publish-images.yml",
+            "--source-digest",
+            "0123456789abcdef0123456789abcdef01234567",
+            "--deny-self-hosted-runners",
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert invocation.returncode == 0, invocation.stderr
+    capture = gh_capture.read_text(encoding="utf-8")
+    assert "GH_TOKEN=telepilot-oci-attestation-verification" in capture
+    assert "GH_PROMPT_DISABLED=1" in capture
+    assert "|--repo|Anoyou/Telebot" in capture
+    assert "|--deny-self-hosted-runners" in capture
+    assert capture.count("|--bundle-from-oci") == 1
+
+
+def test_legacy_updater_repair_does_not_duplicate_oci_bundle_flag(
+    tmp_path: Path,
+) -> None:
+    result, env, wrapper_gh, _apk_marker, gh_capture = (
+        _install_legacy_updater_repair(tmp_path)
+    )
+    assert result.returncode == 0, result.stderr
+
+    invocation = subprocess.run(
+        [
+            str(wrapper_gh),
+            "attestation",
+            "verify",
+            "oci://ghcr.io/anoyou/telepilot-web@sha256:deadbeef",
+            "--bundle-from-oci",
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert invocation.returncode == 0, invocation.stderr
+    assert (
+        gh_capture.read_text(encoding="utf-8").count("|--bundle-from-oci") == 1
+    )
+
+
+def test_legacy_updater_repair_preserves_real_token(
+    tmp_path: Path,
+) -> None:
+    result, env, wrapper_gh, _apk_marker, gh_capture = (
+        _install_legacy_updater_repair(tmp_path)
+    )
+    assert result.returncode == 0, result.stderr
+    env["GH_TOKEN"] = "configured-github-token"
+
+    invocation = subprocess.run(
+        [str(wrapper_gh), "attestation", "verify", "oci://example.invalid/image"],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert invocation.returncode == 0, invocation.stderr
+    assert "GH_TOKEN=configured-github-token" in gh_capture.read_text(
+        encoding="utf-8"
+    )
+
+
+def test_legacy_updater_repair_maps_github_token_to_gh_token(
+    tmp_path: Path,
+) -> None:
+    result, env, wrapper_gh, _apk_marker, gh_capture = (
+        _install_legacy_updater_repair(tmp_path)
+    )
+    assert result.returncode == 0, result.stderr
+    env["GITHUB_TOKEN"] = "configured-github-token"
+
+    invocation = subprocess.run(
+        [str(wrapper_gh), "attestation", "verify", "oci://example.invalid/image"],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert invocation.returncode == 0, invocation.stderr
+    capture = gh_capture.read_text(encoding="utf-8")
+    assert "GH_TOKEN=configured-github-token" in capture
+
+
+def test_legacy_updater_repair_passes_other_gh_commands_through(
+    tmp_path: Path,
+) -> None:
+    result, env, wrapper_gh, _apk_marker, gh_capture = (
+        _install_legacy_updater_repair(tmp_path)
+    )
+    assert result.returncode == 0, result.stderr
+
+    invocation = subprocess.run(
+        [str(wrapper_gh), "api", "user"],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert invocation.returncode == 0, invocation.stderr
+    capture = gh_capture.read_text(encoding="utf-8")
+    assert "GH_TOKEN=\n" in capture
+    assert "GH_PROMPT_DISABLED=\n" in capture
+    assert "args=|api|user" in capture
+    assert "--bundle-from-oci" not in capture
+
+
 def test_updater_handoff_waits_for_health_and_rolls_back_image() -> None:
     repo_root = Path(__file__).resolve().parents[3]
     script = (repo_root / "scripts" / "prod-update.sh").read_text(encoding="utf-8")

@@ -220,16 +220,33 @@ TELEPILOT_HOST_PROJECT_DIR=/opt/telepilot make prod-up
 
 `v0.87.0-beta.5` 是例外：该版本在拉取目标脚本前就要求运行中的 updater 容器提供
 GitHub CLI，因此无法靠尚未加载的新代码自我修复。若面板日志出现
-`缺少命令：gh（验证 GHCR 镜像构建来源……）`，只需在宿主机执行一次：
+`缺少命令：gh（验证 GHCR 镜像构建来源……）`，或者安装 `gh` 后仍要求
+`gh auth login`，需要在宿主机执行一次兼容修复。先从已经 fetch 到本机的目标
+Git 提交中导出脚本，查看来源提交、SHA-256 和完整内容，确认后再送入旧 updater
+容器：
 
 ```bash
 cd /opt/telepilot
-docker compose exec -u 0 updater apk add --no-cache github-cli
+git fetch origin Beta
+REPAIR_COMMIT="$(git rev-parse --verify origin/Beta)"
+git show "${REPAIR_COMMIT}:scripts/repair-legacy-updater.sh" \
+  > /tmp/telepilot-repair-legacy-updater.sh
+printf '修复脚本来源提交：%s\n' "$REPAIR_COMMIT"
+sha256sum /tmp/telepilot-repair-legacy-updater.sh
+sed -n '1,240p' /tmp/telepilot-repair-legacy-updater.sh
+docker compose exec -T -u 0 updater sh \
+  < /tmp/telepilot-repair-legacy-updater.sh
 ```
 
-随后回到 Web 面板重试更新即可；目标 updater 镜像已内置 GitHub CLI，后续版本也会在
-镜像校验前重新加载目标更新逻辑，不再需要重复执行该命令。此操作只给现有 updater 容器
-补齐验签工具，不会修改数据库、业务容器或跳过镜像来源验证。
+脚本成功时会打印 `旧 updater 验签环境已修复`、GitHub CLI 版本、包装器路径和
+SHA-256。随后回到 Web 面板重试即可，不需要执行 `gh auth login`、配置 PAT 或关闭
+验签。该脚本会为旧验签命令补上 `--bundle-from-oci`，让 GitHub CLI 直接从 GHCR
+读取 OCI 证明，同时保留仓库、workflow、source commit 和自托管 runner 等原有
+限制；任何证明缺失或不匹配仍会让更新失败关闭。
+
+该操作只修改当前 updater 容器，安装 GitHub CLI 和一个可审计的兼容包装器；不会修改
+数据库、业务容器或 Git 工作树。目标 updater 镜像接管后会替换旧容器，后续常规版本会
+在镜像校验前重新加载目标更新逻辑，可继续直接使用 Web 面板更新，无需重复执行修复。
 
 没有数据库迁移时，可回滚到指定版本：
 
